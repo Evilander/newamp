@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type {
   SavedPlaylist,
   SmartPlaylistMood,
@@ -41,6 +41,8 @@ export function PlaylistView(): JSX.Element {
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
   const [selectedPlaylist, setSelectedPlaylist] = useState<SavedPlaylist | null>(null);
   const [selectedPlaylistTracks, setSelectedPlaylistTracks] = useState<Track[]>([]);
+  const [playlistListFilter, setPlaylistListFilter] = useState('');
+  const [playlistTrackFilter, setPlaylistTrackFilter] = useState('');
   const [smartRules, setSmartRules] = useState<SmartPlaylistRule[]>([]);
   const [selectedSmartRule, setSelectedSmartRule] = useState<SmartPlaylistRule | null>(null);
   const [playlistName, setPlaylistName] = useState('Newamp Set');
@@ -61,6 +63,30 @@ export function PlaylistView(): JSX.Element {
   const [draggedPlaylistTrackIndex, setDraggedPlaylistTrackIndex] = useState<number | null>(null);
   const autoDjSourceMissing =
     autoDjSmartRuleId !== null && !smartRules.some((rule) => rule.id === autoDjSmartRuleId);
+  const filteredPlaylists = useMemo(
+    () =>
+      playlists.filter((playlist) =>
+        playlistTextMatches(playlistListFilter, [playlist.name, String(playlist.trackCount)]),
+      ),
+    [playlistListFilter, playlists],
+  );
+  const visibleSelectedPlaylistTracks = useMemo(
+    () =>
+      selectedPlaylistTracks
+        .map((track, index) => ({ track, index }))
+        .filter(({ track, index }) =>
+          playlistTextMatches(playlistTrackFilter, [
+            String(index + 1),
+            track.title,
+            track.artist,
+            track.album,
+            track.albumArtist,
+            track.genre ?? '',
+            track.year == null ? '' : String(track.year),
+          ]),
+        ),
+    [playlistTrackFilter, selectedPlaylistTracks],
+  );
 
   useEffect(() => {
     void refreshPlaylists();
@@ -276,6 +302,7 @@ export function PlaylistView(): JSX.Element {
       const tracks = await api.getPlaylistTracks(playlist.id);
       setSelectedPlaylist(playlist);
       setSelectedPlaylistTracks(tracks);
+      setPlaylistTrackFilter('');
       setPlaylistName(playlist.name);
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
@@ -322,6 +349,7 @@ export function PlaylistView(): JSX.Element {
       setStatus(`Deleted ${selectedPlaylist.name}.`);
       setSelectedPlaylist(null);
       setSelectedPlaylistTracks([]);
+      setPlaylistTrackFilter('');
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
       await refreshPlaylists();
@@ -366,6 +394,7 @@ export function PlaylistView(): JSX.Element {
       const tracks = await api.getPlaylistTracks(result.playlist.id).catch(() => []);
       setSelectedPlaylist(result.playlist);
       setSelectedPlaylistTracks(tracks);
+      setPlaylistTrackFilter('');
       setPlaylistName(result.playlist.name);
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
@@ -404,6 +433,7 @@ export function PlaylistView(): JSX.Element {
   function startNewPlaylist(): void {
     setSelectedPlaylist(null);
     setSelectedPlaylistTracks([]);
+    setPlaylistTrackFilter('');
     setPlaylistName('Newamp Set');
     setPlaylistCoverPath(null);
     setClearPlaylistCover(false);
@@ -649,15 +679,29 @@ export function PlaylistView(): JSX.Element {
             style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
           >
             <span>Saved Playlists</span>
-            <span>{playlists.length}</span>
+            <span>{filteredPlaylists.length}/{playlists.length}</span>
+          </div>
+          <div className="border-b p-2" style={{ borderColor: 'var(--line)' }}>
+            <input
+              value={playlistListFilter}
+              onChange={(event) => setPlaylistListFilter(event.currentTarget.value)}
+              placeholder="Filter playlists"
+              className="bevel-in w-full px-2 py-1 text-[11px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              aria-label="Filter playlists"
+            />
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             {playlists.length === 0 ? (
               <div className="px-3 py-4 text-[11px] leading-5" style={{ color: 'var(--muted)' }}>
                 Create a named playlist, attach an icon, save the queue, or import an M3U/PLS file.
               </div>
+            ) : filteredPlaylists.length === 0 ? (
+              <div className="px-3 py-4 text-[11px] leading-5" style={{ color: 'var(--muted)' }}>
+                No saved playlists match this filter.
+              </div>
             ) : (
-              playlists.map((playlist) => (
+              filteredPlaylists.map((playlist) => (
                 <button
                   key={playlist.id}
                   type="button"
@@ -774,82 +818,106 @@ export function PlaylistView(): JSX.Element {
                 {selectedPlaylist.name} is empty. Add tracks from Library, Albums, Artists, or Loved.
               </div>
             ) : (
-              <ol className="m-0 list-none p-0" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                {selectedPlaylistTracks.map((t, i) => (
-                  <li
-                    key={`${selectedPlaylist.id}-${t.id}-${i}`}
-                    className="flex cursor-pointer items-center gap-2 border-b px-3 py-1.5"
-                    style={{
-                      borderColor: 'var(--line)',
-                      color: current?.id === t.id ? 'var(--accent)' : 'var(--ink)',
-                      opacity: draggedPlaylistTrackIndex === i ? 0.55 : 1,
-                    }}
-                    draggable={true}
-                    aria-grabbed={draggedPlaylistTrackIndex === i}
-                    onDragStart={(event) => {
-                      setDraggedPlaylistTrackIndex(i);
-                      event.dataTransfer.effectAllowed = 'move';
-                      event.dataTransfer.setData('text/plain', String(i));
-                    }}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = 'move';
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      const transferIndex = Number(event.dataTransfer.getData('text/plain'));
-                      const fromIndex = draggedPlaylistTrackIndex
-                        ?? (Number.isInteger(transferIndex) ? transferIndex : null);
-                      if (fromIndex !== null && fromIndex !== i) moveSelectedPlaylistTrack(fromIndex, i);
-                      setDraggedPlaylistTrackIndex(null);
-                    }}
-                    onDragEnd={() => setDraggedPlaylistTrackIndex(null)}
-                    onDoubleClick={() => void playQueue(selectedPlaylistTracks, i)}
-                  >
-                    <span className="w-[28px] shrink-0" style={{ color: 'var(--muted)' }}>
-                      {(i + 1).toString().padStart(2, '0')}
-                    </span>
-                    <span className="flex-1 truncate">
-                      {t.artist} - {t.title}
-                    </span>
-                    <span style={{ color: 'var(--muted)' }}>{formatTime(t.duration ?? 0)}</span>
-                    <span className="flex shrink-0 items-center gap-1">
-                      <button
-                        className="pxbtn"
-                        title="Move up"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          moveSelectedPlaylistTrack(i, i - 1);
+              <>
+                <div
+                  className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b px-3 py-2 text-[11px]"
+                  style={{ borderColor: 'var(--line)', background: 'var(--panel)', color: 'var(--ink-2)' }}
+                >
+                  <input
+                    value={playlistTrackFilter}
+                    onChange={(event) => setPlaylistTrackFilter(event.currentTarget.value)}
+                    placeholder="Filter playlist tracks"
+                    className="bevel-in min-w-[220px] flex-1 px-2 py-1 text-[11px] outline-none"
+                    style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+                    aria-label="Filter playlist tracks"
+                  />
+                  <span className="tabular-nums">
+                    {visibleSelectedPlaylistTracks.length.toLocaleString()} of {selectedPlaylistTracks.length.toLocaleString()}
+                  </span>
+                </div>
+                {visibleSelectedPlaylistTracks.length === 0 ? (
+                  <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
+                    No tracks in {selectedPlaylist.name} match this filter.
+                  </div>
+                ) : (
+                  <ol className="m-0 list-none p-0" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                    {visibleSelectedPlaylistTracks.map(({ track: t, index: i }) => (
+                      <li
+                        key={`${selectedPlaylist.id}-${t.id}-${i}`}
+                        className="flex cursor-pointer items-center gap-2 border-b px-3 py-1.5"
+                        style={{
+                          borderColor: 'var(--line)',
+                          color: current?.id === t.id ? 'var(--accent)' : 'var(--ink)',
+                          opacity: draggedPlaylistTrackIndex === i ? 0.55 : 1,
                         }}
-                        disabled={i === 0}
-                      >
-                        UP
-                      </button>
-                      <button
-                        className="pxbtn"
-                        title="Move down"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          moveSelectedPlaylistTrack(i, i + 1);
+                        draggable={true}
+                        aria-grabbed={draggedPlaylistTrackIndex === i}
+                        onDragStart={(event) => {
+                          setDraggedPlaylistTrackIndex(i);
+                          event.dataTransfer.effectAllowed = 'move';
+                          event.dataTransfer.setData('text/plain', String(i));
                         }}
-                        disabled={i === selectedPlaylistTracks.length - 1}
-                      >
-                        DOWN
-                      </button>
-                      <button
-                        className="pxbtn"
-                        title="Remove from playlist"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          removeSelectedPlaylistTrack(i);
+                        onDragOver={(event) => {
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = 'move';
                         }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          const transferIndex = Number(event.dataTransfer.getData('text/plain'));
+                          const fromIndex = draggedPlaylistTrackIndex
+                            ?? (Number.isInteger(transferIndex) ? transferIndex : null);
+                          if (fromIndex !== null && fromIndex !== i) moveSelectedPlaylistTrack(fromIndex, i);
+                          setDraggedPlaylistTrackIndex(null);
+                        }}
+                        onDragEnd={() => setDraggedPlaylistTrackIndex(null)}
+                        onDoubleClick={() => void playQueue(selectedPlaylistTracks, i)}
                       >
-                        X
-                      </button>
-                    </span>
-                  </li>
-                ))}
-              </ol>
+                        <span className="w-[28px] shrink-0" style={{ color: 'var(--muted)' }}>
+                          {(i + 1).toString().padStart(2, '0')}
+                        </span>
+                        <span className="flex-1 truncate">
+                          {t.artist} - {t.title}
+                        </span>
+                        <span style={{ color: 'var(--muted)' }}>{formatTime(t.duration ?? 0)}</span>
+                        <span className="flex shrink-0 items-center gap-1">
+                          <button
+                            className="pxbtn"
+                            title="Move up"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              moveSelectedPlaylistTrack(i, i - 1);
+                            }}
+                            disabled={i === 0}
+                          >
+                            UP
+                          </button>
+                          <button
+                            className="pxbtn"
+                            title="Move down"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              moveSelectedPlaylistTrack(i, i + 1);
+                            }}
+                            disabled={i === selectedPlaylistTracks.length - 1}
+                          >
+                            DOWN
+                          </button>
+                          <button
+                            className="pxbtn"
+                            title="Remove from playlist"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              removeSelectedPlaylistTrack(i);
+                            }}
+                          >
+                            X
+                          </button>
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </>
             )
           ) : queue.length === 0 ? (
             <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
@@ -948,6 +1016,12 @@ function parseOptionalNumber(value: string): number | null {
   if (!value.trim()) return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function playlistTextMatches(query: string, values: Array<string | null | undefined>): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return values.some((value) => (value ?? '').toLowerCase().includes(needle));
 }
 
 function formatSleepRemaining(endsAt: number, now: number): string {
