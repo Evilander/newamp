@@ -44,45 +44,71 @@ export function buildGithubPublishPlan({
 
   const gitDir = resolveGitDir(root, env);
   const commands = [];
+  const originUrl = `https://github.com/${repo}.git`;
   if (gitDir) {
     const gitDirExists = existsSync(gitDir);
+    const hasHead = gitDirExists && hasGitHead(root, gitDir);
+    const needsCommit = !gitDirExists || !hasHead || isGitDirty(root, gitDir);
     if (!gitDirExists) {
       commands.push(command('git-init-external', 'git', ['init', '--bare', gitDir]));
-      commands.push(command('git-main-branch', 'git', ['--git-dir', gitDir, 'symbolic-ref', 'HEAD', 'refs/heads/main']));
     }
-    if (!gitDirExists || !hasGitHead(root, gitDir) || isGitDirty(root, gitDir)) {
+    if (!gitDirExists || !hasHead) {
+      commands.push(gitCommand('git-main-branch', root, gitDir, ['symbolic-ref', 'HEAD', 'refs/heads/main']));
+    }
+    if (needsCommit) {
       commands.push(gitCommand('stage', root, gitDir, ['add', '.']));
       commands.push(gitCommand('commit', root, gitDir, ['-c', 'user.name=evilander', '-c', 'user.email=evilander@users.noreply.github.com', 'commit', '-m', `Release Newamp ${version}`]));
     }
-    commands.push(command('create-repo', 'gh', ['repo', 'create', repo, '--public']));
-    commands.push(gitCommand('add-origin', root, gitDir, ['remote', 'add', 'origin', `https://github.com/${repo}.git`]));
-    commands.push(gitCommand('push-main', root, gitDir, ['push', '-u', 'origin', 'main']));
-    commands.push(gitCommand('tag', root, gitDir, ['tag', tag]));
+    commands.push(ensureGithubRepoCommand(repo));
+    commands.push(originCommand(root, gitDir, originUrl));
+    commands.push(gitCommand('push-main', root, gitDir, ['push', '-u', 'origin', 'HEAD:main']));
+    const tagState = gitTagState(root, gitDir, tag);
+    if (tagState === 'different' || (tagState === 'current' && needsCommit)) {
+      return failedPlan(root, env, `local tag ${tag} already exists and does not match the planned release HEAD`, {
+        repo,
+        tag,
+        installer,
+        portable,
+        version,
+      });
+    }
+    if (tagState !== 'current') {
+      commands.push(gitCommand('tag', root, gitDir, ['tag', tag]));
+    }
     commands.push(gitCommand('push-tag', root, gitDir, ['push', 'origin', tag]));
   } else {
     const gitRootExists = existsSync(resolve(root, '.git'));
+    const hasHead = gitRootExists && hasGitHead(root, null);
+    const needsCommit = !gitRootExists || !hasHead || isGitDirty(root, null);
     if (!gitRootExists) {
       commands.push(command('git-init', 'git', ['init']));
     }
-    if (!gitRootExists || !hasGitHead(root, null) || isGitDirty(root, null)) {
+    if (!gitRootExists || !hasHead) {
+      commands.push(command('git-main-branch', 'git', ['symbolic-ref', 'HEAD', 'refs/heads/main']));
+    }
+    if (needsCommit) {
       commands.push(command('stage', 'git', ['add', '.']));
       commands.push(command('commit', 'git', ['commit', '-m', `Release Newamp ${version}`]));
     }
-    commands.push(command('create-repo', 'gh', ['repo', 'create', repo, '--source', '.', '--public', '--push']));
-    commands.push(command('tag', 'git', ['tag', tag]));
+    commands.push(ensureGithubRepoCommand(repo));
+    commands.push(originCommand(root, null, originUrl));
+    commands.push(command('push-main', 'git', ['push', '-u', 'origin', 'HEAD:main']));
+    const tagState = gitTagState(root, null, tag);
+    if (tagState === 'different' || (tagState === 'current' && needsCommit)) {
+      return failedPlan(root, env, `local tag ${tag} already exists and does not match the planned release HEAD`, {
+        repo,
+        tag,
+        installer,
+        portable,
+        version,
+      });
+    }
+    if (tagState !== 'current') {
+      commands.push(command('tag', 'git', ['tag', tag]));
+    }
     commands.push(command('push-tag', 'git', ['push', 'origin', tag]));
   }
-  commands.push(command('create-release', 'gh', [
-    'release',
-    'create',
-    tag,
-    installer,
-    portable,
-    '--title',
-    `Newamp ${version}`,
-    '--notes-file',
-    readmePath,
-  ]));
+  commands.push(publishReleaseCommand({ repo, tag, version, installer, portable, readmePath }));
 
   return {
     name: 'github-publication',
@@ -137,20 +163,9 @@ export function publishGithubRelease({
 
   const results = [];
   for (const item of plan.commands) {
-    const result = spawnSync(item.command, item.args, {
-      cwd: root,
-      encoding: 'utf8',
-      windowsHide: true,
-    });
-    results.push({
-      label: item.label,
-      ok: result.status === 0 && !result.error,
-      exitCode: result.status,
-      error: result.error?.message ?? null,
-      stdout: tail(result.stdout),
-      stderr: tail(result.stderr),
-    });
-    if (result.status !== 0 || result.error) {
+    const result = runPublishStep(item, root);
+    results.push({ label: item.label, ...result });
+    if (!result.ok) {
       return { ...plan, ok: false, executed: true, results, reason: `${item.label} failed` };
     }
   }
@@ -165,7 +180,7 @@ function failedPlan(root, env, reason, extra = {}) {
     root,
     repo: (extra.repo ?? text(env.NEWAMP_GITHUB_REPO)) || 'evilander/newamp',
     tag: extra.tag ?? null,
-    version: null,
+    version: extra.version ?? null,
     artifacts: {
       installer: extra.installer ?? null,
       portable: extra.portable ?? null,
@@ -176,16 +191,73 @@ function failedPlan(root, env, reason, extra = {}) {
 }
 
 function command(label, commandName, args) {
+  const commandLine = displayCommand(commandName, args);
   return {
     label,
     command: commandName,
     args,
-    commandLine: [commandName, ...args].map(quoteForDisplay).join(' '),
+    commandLine,
   };
 }
 
 function gitCommand(label, root, gitDir, args) {
   return command(label, 'git', ['--git-dir', gitDir, '--work-tree', root, ...args]);
+}
+
+function ensureGithubRepoCommand(repo) {
+  const args = ['repo', 'view', repo];
+  const create = command('create-repo', 'gh', ['repo', 'create', repo, '--public']);
+  return {
+    ...command('ensure-repo', 'gh', args),
+    repo,
+    create,
+    commandLine: `${displayCommand('gh', args)} || ${create.commandLine}`,
+  };
+}
+
+function originCommand(root, gitDir, originUrl) {
+  const currentOrigin = getGitRemoteUrl(root, gitDir, 'origin');
+  const args = currentOrigin
+    ? ['remote', 'set-url', 'origin', originUrl]
+    : ['remote', 'add', 'origin', originUrl];
+  const label = currentOrigin ? 'set-origin' : 'add-origin';
+  return gitDir ? gitCommand(label, root, gitDir, args) : command(label, 'git', args);
+}
+
+function publishReleaseCommand({ repo, tag, version, installer, portable, readmePath }) {
+  const viewArgs = ['release', 'view', tag, '--repo', repo];
+  const editArgs = ['release', 'edit', tag, '--repo', repo, '--title', `Newamp ${version}`, '--notes-file', readmePath];
+  const uploadArgs = ['release', 'upload', tag, installer, portable, '--repo', repo, '--clobber'];
+  const createArgs = [
+    'release',
+    'create',
+    tag,
+    installer,
+    portable,
+    '--repo',
+    repo,
+    '--title',
+    `Newamp ${version}`,
+    '--notes-file',
+    readmePath,
+  ];
+  return {
+    ...command('publish-release', 'gh', viewArgs),
+    repo,
+    tag,
+    editArgs,
+    uploadArgs,
+    createArgs,
+    commandLine: [
+      displayCommand('gh', viewArgs),
+      '&&',
+      displayCommand('gh', editArgs),
+      '&&',
+      displayCommand('gh', uploadArgs),
+      '||',
+      displayCommand('gh', createArgs),
+    ].join(' '),
+  };
 }
 
 function hasGitHead(root, gitDir) {
@@ -207,6 +279,90 @@ function runGit(root, gitDir, args) {
   });
 }
 
+function getGitRemoteUrl(root, gitDir, remote) {
+  const result = runGit(root, gitDir, ['remote', 'get-url', remote]);
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+function gitTagState(root, gitDir, tag) {
+  const tagResult = runGit(root, gitDir, ['rev-parse', '--verify', `${tag}^{}`]);
+  if (tagResult.status !== 0) return 'missing';
+  const headResult = runGit(root, gitDir, ['rev-parse', '--verify', 'HEAD']);
+  if (headResult.status !== 0) return 'different';
+  return tagResult.stdout.trim() === headResult.stdout.trim() ? 'current' : 'different';
+}
+
+function runPublishStep(item, root) {
+  if (item.label === 'ensure-repo') return runEnsureRepoStep(item, root);
+  if (item.label === 'publish-release') return runPublishReleaseStep(item, root);
+  return resultFromSpawn(spawnPublishCommand(item.command, item.args, root));
+}
+
+function runEnsureRepoStep(item, root) {
+  const view = spawnPublishCommand(item.command, item.args, root);
+  if (view.status === 0 && !view.error) {
+    return { ...resultFromSpawn(view), action: 'repo-exists' };
+  }
+  const create = spawnPublishCommand(item.create.command, item.create.args, root);
+  return {
+    ...resultFromSpawn(create),
+    action: 'repo-created',
+    viewExitCode: view.status,
+    viewError: view.error?.message ?? null,
+    viewStderr: tail(view.stderr),
+  };
+}
+
+function runPublishReleaseStep(item, root) {
+  const view = spawnPublishCommand(item.command, item.args, root);
+  if (view.status === 0 && !view.error) {
+    const edit = spawnPublishCommand('gh', item.editArgs, root);
+    if (edit.status !== 0 || edit.error) {
+      return {
+        ...resultFromSpawn(edit),
+        action: 'release-edit-failed',
+        viewExitCode: view.status,
+      };
+    }
+    const upload = spawnPublishCommand('gh', item.uploadArgs, root);
+    return {
+      ...resultFromSpawn(upload),
+      action: 'release-updated',
+      viewExitCode: view.status,
+      editExitCode: edit.status,
+      editStdout: tail(edit.stdout),
+      editStderr: tail(edit.stderr),
+    };
+  }
+
+  const create = spawnPublishCommand('gh', item.createArgs, root);
+  return {
+    ...resultFromSpawn(create),
+    action: 'release-created',
+    viewExitCode: view.status,
+    viewError: view.error?.message ?? null,
+    viewStderr: tail(view.stderr),
+  };
+}
+
+function spawnPublishCommand(commandName, args, root) {
+  return spawnSync(commandName, args, {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+}
+
+function resultFromSpawn(result) {
+  return {
+    ok: result.status === 0 && !result.error,
+    exitCode: result.status,
+    error: result.error?.message ?? null,
+    stdout: tail(result.stdout),
+    stderr: tail(result.stderr),
+  };
+}
+
 function resolveGitDir(root, env) {
   const configured = text(env.NEWAMP_GIT_DIR);
   if (configured) return resolve(configured);
@@ -220,6 +376,10 @@ function resolveGitDir(root, env) {
 function quoteForDisplay(value) {
   if (/^[A-Za-z0-9_./:\\=+-]+$/.test(value)) return value;
   return `"${String(value).replace(/"/g, '\\"')}"`;
+}
+
+function displayCommand(commandName, args) {
+  return [commandName, ...args].map(quoteForDisplay).join(' ');
 }
 
 function text(value) {

@@ -37,8 +37,8 @@ const plan = buildGithubPublishPlan({
 assert.equal(plan.ok, true, plan.reason);
 assert.equal(plan.repo, 'evilander/newamp');
 assert.equal(plan.tag, 'v1.0.0');
-assert.ok(plan.commands.some((command) => command.label === 'create-repo'));
-assert.ok(plan.commands.some((command) => command.args.includes('release') && command.args.includes('create')));
+assert.ok(plan.commands.some((command) => command.label === 'ensure-repo'));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.includes('--repo')));
 assert.ok(plan.commands.every((command) => !command.commandLine.includes('\n')));
 assert.match(JSON.stringify(plan), /Newamp Setup 1\.0\.0\.exe/);
 assert.match(JSON.stringify(plan), /Newamp Portable 1\.0\.0\.exe/);
@@ -101,6 +101,33 @@ const cleanExistingPlan = buildGithubPublishPlan({
 assert.equal(cleanExistingPlan.ok, true, cleanExistingPlan.reason);
 assert.ok(!cleanExistingPlan.commands.some((command) => command.label === 'stage'));
 assert.ok(!cleanExistingPlan.commands.some((command) => command.label === 'commit'));
+assert.ok(cleanExistingPlan.commands.some((command) => command.label === 'add-origin'));
+
+run('git', [
+  '--git-dir',
+  cleanExternalGitDir,
+  '--work-tree',
+  smokeRoot,
+  'remote',
+  'add',
+  'origin',
+  'https://github.com/evilander/old-newamp.git',
+], repoRoot);
+const retargetOriginPlan = buildGithubPublishPlan({
+  root: smokeRoot,
+  env: { NEWAMP_GIT_DIR: cleanExternalGitDir },
+});
+assert.equal(retargetOriginPlan.ok, true, retargetOriginPlan.reason);
+assert.ok(retargetOriginPlan.commands.some((command) => command.label === 'set-origin'));
+assert.ok(!retargetOriginPlan.commands.some((command) => command.label === 'add-origin'));
+
+run('git', ['--git-dir', cleanExternalGitDir, '--work-tree', smokeRoot, 'tag', 'v1.0.0'], repoRoot);
+const existingTagPlan = buildGithubPublishPlan({
+  root: smokeRoot,
+  env: { NEWAMP_GIT_DIR: cleanExternalGitDir },
+});
+assert.equal(existingTagPlan.ok, true, existingTagPlan.reason);
+assert.ok(!existingTagPlan.commands.some((command) => command.label === 'tag'));
 
 const missingReadme = buildGithubPublishPlan({
   root: join(smokeRoot, 'missing-root'),
