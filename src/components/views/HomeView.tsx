@@ -1,0 +1,705 @@
+import { useEffect, useMemo, useState } from 'react';
+import type { LibraryHealth, ListeningHistoryItem, SavedPlaylist, SmartPlaylistRule, SmartPlaylistSuggestion, Track } from '@shared/types';
+import { api } from '../../lib/api';
+import { formatDuration, formatNumber, formatTime } from '../../lib/format';
+import { usePlayerStore } from '../../store/usePlayerStore';
+
+interface HomeData {
+  stats: { tracks: number; albums: number; artists: number; duration: number };
+  health: LibraryHealth | null;
+  fresh: Track[];
+  loved: Track[];
+  history: ListeningHistoryItem[];
+  heavy: Track[];
+  harmonic: Track[];
+  taste: Track[];
+  playlists: SavedPlaylist[];
+  smartRules: SmartPlaylistRule[];
+  suggestedStations: SmartPlaylistSuggestion[];
+}
+
+const EMPTY_DATA: HomeData = {
+  stats: { tracks: 0, albums: 0, artists: 0, duration: 0 },
+  health: null,
+  fresh: [],
+  loved: [],
+  history: [],
+  heavy: [],
+  harmonic: [],
+  taste: [],
+  playlists: [],
+  smartRules: [],
+  suggestedStations: [],
+};
+
+const HOME_LIMIT = 12;
+
+export function HomeView(): JSX.Element {
+  const [data, setData] = useState<HomeData>(EMPTY_DATA);
+  const [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const current = usePlayerStore((s) => s.current);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const duration = usePlayerStore((s) => s.duration);
+  const queue = usePlayerStore((s) => s.queue);
+  const index = usePlayerStore((s) => s.index);
+  const autoDjEnabled = usePlayerStore((s) => s.autoDjEnabled);
+  const autoDjTarget = usePlayerStore((s) => s.autoDjTarget);
+  const autoDjSmartRuleId = usePlayerStore((s) => s.autoDjSmartRuleId);
+  const togglePlay = usePlayerStore((s) => s.togglePlay);
+  const playQueue = usePlayerStore((s) => s.playQueue);
+  const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
+  const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
+  const setAutoDjEnabled = usePlayerStore((s) => s.setAutoDjEnabled);
+  const setAutoDjSmartRuleId = usePlayerStore((s) => s.setAutoDjSmartRuleId);
+  const setView = usePlayerStore((s) => s.setView);
+
+  useEffect(() => {
+    void refreshHome();
+  }, [current?.id]);
+
+  const recentTracks = useMemo(() => {
+    const seen = new Set<number>();
+    return data.history
+      .map((item) => item.track)
+      .filter((track) => {
+        if (seen.has(track.id)) return false;
+        seen.add(track.id);
+        return true;
+      });
+  }, [data.history]);
+
+  const missingTotal = data.health
+    ? data.health.missing.artist +
+      data.health.missing.album +
+      data.health.missing.year +
+      data.health.missing.art +
+      data.health.missing.duration
+    : 0;
+  const activeStationName = autoDjEnabled
+    ? autoDjSmartRuleId
+      ? data.smartRules.find((rule) => rule.id === autoDjSmartRuleId)?.name ?? `Smart Rule #${autoDjSmartRuleId}`
+      : 'Harmonic Mix'
+    : null;
+
+  async function refreshHome(): Promise<void> {
+    setLoading(true);
+    setStatus(null);
+    try {
+      const [stats, health, fresh, loved, history, heavy, harmonic, taste, playlists, smartRules, suggestedStations] = await Promise.all([
+        api.getStats(),
+        api.getLibraryHealth(),
+        api.getTracks({ sort: 'added', limit: HOME_LIMIT, offset: 0 }),
+        api.getTracks({ sort: 'loved', limit: HOME_LIMIT, offset: 0 }),
+        api.getListeningHistory({ limit: 30, offset: 0 }),
+        api.getTracks({ sort: 'plays', limit: HOME_LIMIT, offset: 0 }),
+        api.buildHarmonicMix({ seedTrackId: current?.id ?? null, count: HOME_LIMIT }),
+        api.buildTasteMix({ seedTrackId: current?.id ?? null, count: HOME_LIMIT }),
+        api.getPlaylists(),
+        api.getSmartPlaylistRules(),
+        api.getSuggestedSmartPlaylistRules(),
+      ]);
+      setData({
+        stats,
+        health,
+        fresh,
+        loved,
+        history,
+        heavy,
+        harmonic,
+        taste,
+        playlists: playlists.slice(0, 8),
+        smartRules: smartRules.slice(0, 6),
+        suggestedStations: suggestedStations.slice(0, 6),
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveSet(name: string, tracks: Track[]): Promise<void> {
+    if (!tracks.length) return;
+    const date = new Date().toISOString().slice(0, 10);
+    const playlist = await api.savePlaylist({
+      name: `${name} ${date}`,
+      trackIds: tracks.map((track) => track.id),
+    });
+    setStatus(`Saved ${playlist.name} with ${playlist.trackCount.toLocaleString()} tracks.`);
+    void refreshHome();
+  }
+
+  async function playSavedPlaylist(playlist: SavedPlaylist): Promise<void> {
+    const tracks = await api.getPlaylistTracks(playlist.id);
+    if (!tracks.length) {
+      setStatus(`${playlist.name} has no playable tracks.`);
+      return;
+    }
+    await playQueue(tracks, 0);
+  }
+
+  async function playSmartRule(rule: SmartPlaylistRule): Promise<void> {
+    const tracks = await api.runSmartPlaylistRule(rule.id);
+    if (!tracks.length) {
+      setStatus(`${rule.name} generated no playable tracks.`);
+      return;
+    }
+    await playQueue(tracks, 0);
+  }
+
+  async function startSmartRuleRadio(rule: SmartPlaylistRule): Promise<void> {
+    const tracks = await api.runSmartPlaylistRule(rule.id);
+    if (!tracks.length) {
+      setStatus(`${rule.name} generated no playable tracks.`);
+      return;
+    }
+    await playQueue(tracks, 0);
+    await setAutoDjSmartRuleId(rule.id);
+    await setAutoDjEnabled(true);
+    setStatus(`Smart Rule Radio started from ${rule.name}.`);
+  }
+
+  async function startSuggestedStation(suggestion: SmartPlaylistSuggestion): Promise<void> {
+    const existing = data.smartRules.find((rule) => sameSmartRule(rule, suggestion.rule));
+    const rule = existing ?? await api.saveSmartPlaylistRule(suggestion.rule);
+    const tracks = await api.runSmartPlaylistRule(rule.id);
+    if (!tracks.length) {
+      setStatus(`${suggestion.title} generated no playable tracks.`);
+      return;
+    }
+    await playQueue(tracks, 0);
+    await setAutoDjSmartRuleId(rule.id);
+    await setAutoDjEnabled(true);
+    setStatus(`Station started: ${rule.name}.`);
+    if (!existing) void refreshHome();
+  }
+
+  async function stopStation(): Promise<void> {
+    await setAutoDjEnabled(false);
+    await setAutoDjSmartRuleId(null);
+    setStatus('Station stopped. Current queue stays loaded.');
+  }
+
+  return (
+    <div className="flex h-full flex-col" style={{ fontFamily: 'var(--font-mono)' }}>
+      <div className="flex items-center gap-3 border-b px-3 py-2" style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}>
+        <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: 'var(--accent)' }}>
+          Home
+        </div>
+        <div className="text-[11px] tabular-nums" style={{ color: 'var(--ink-2)' }}>
+          {formatNumber(data.stats.tracks)} tracks / {formatNumber(data.stats.albums)} albums / {formatNumber(data.stats.artists)} artists
+        </div>
+        {status && <div className="truncate text-[11px]" style={{ color: 'var(--ink-2)' }}>{status}</div>}
+        <button className="pxbtn ml-auto" onClick={() => void refreshHome()} disabled={loading}>
+          {loading ? 'Refreshing...' : 'Refresh'}
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto p-3">
+        {data.stats.tracks === 0 && !loading ? (
+          <div className="bevel-in flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+            <div className="text-[14px] font-bold">No library scanned yet.</div>
+            <div className="max-w-[520px] text-[12px]" style={{ color: 'var(--ink-2)' }}>
+              Scan your music folder, then Home becomes the command center for fresh imports, mixes, history, playlists, and library health.
+            </div>
+            <div className="flex gap-2">
+              <button className="pxbtn is-active" onClick={() => void api.scanLibrary()}>
+                SCAN DEFAULT LIBRARY
+              </button>
+              <button className="pxbtn" onClick={() => setView('settings')}>
+                SETTINGS
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-3 xl:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.7fr)]">
+            <div className="flex min-w-0 flex-col gap-3">
+              <NowPanel
+                current={current}
+                currentTime={currentTime}
+                duration={duration}
+                isPlaying={isPlaying}
+                queueLength={queue.length}
+                queueRemaining={Math.max(0, queue.length - Math.max(index, 0) - 1)}
+                stationName={activeStationName}
+                stationTarget={autoDjTarget}
+                onTogglePlay={togglePlay}
+                onNowPlaying={() => setView('now-playing')}
+                onQueue={() => setView('playlist')}
+                onStopStation={() => void stopStation()}
+              />
+
+              <HomeRail
+                title={current ? 'Harmonic From Now' : 'Harmonic Library Mix'}
+                subtitle={current ? `Seeded by ${current.artist} - ${current.title}` : 'BPM/key-aware sequence from the catalog'}
+                tracks={data.harmonic}
+                actionLabel="SAVE MIX"
+                onPlay={(start) => void playQueue(data.harmonic, start)}
+                onNext={() => queueTracksNext(data.harmonic)}
+                onQueue={() => addTracksToQueue(data.harmonic)}
+                onAction={() => void saveSet('Home Harmonic Mix', data.harmonic)}
+              />
+
+              <HomeRail
+                title="Taste Match"
+                subtitle="Learns from plays, loves, ratings, and skips"
+                tracks={data.taste}
+                actionLabel="SAVE TASTE"
+                onPlay={(start) => void playQueue(data.taste, start)}
+                onNext={() => queueTracksNext(data.taste)}
+                onQueue={() => addTracksToQueue(data.taste)}
+                onAction={() => void saveSet('Taste Match', data.taste)}
+              />
+
+              <HomeRail
+                title="Fresh Imports"
+                subtitle="Newest files Newamp has seen on disk"
+                tracks={data.fresh}
+                actionLabel="SAVE FRESH"
+                onPlay={(start) => void playQueue(data.fresh, start)}
+                onNext={() => queueTracksNext(data.fresh)}
+                onQueue={() => addTracksToQueue(data.fresh)}
+                onAction={() => void saveSet('Fresh Imports', data.fresh)}
+              />
+
+              <div className="grid gap-3 lg:grid-cols-2">
+                <HomeRail
+                  title="Recently Played"
+                  subtitle={recentTracks.length ? 'Pick up a listening thread' : 'Appears after playback history exists'}
+                  tracks={recentTracks}
+                  compact
+                  onPlay={(start) => void playQueue(recentTracks, start)}
+                  onNext={() => queueTracksNext(recentTracks)}
+                  onQueue={() => addTracksToQueue(recentTracks)}
+                />
+                <HomeRail
+                  title="Heavy Rotation"
+                  subtitle={data.heavy.length ? 'Tracks with the most Newamp plays' : 'Appears after Newamp records plays'}
+                  tracks={data.heavy}
+                  compact
+                  onPlay={(start) => void playQueue(data.heavy, start)}
+                  onNext={() => queueTracksNext(data.heavy)}
+                  onQueue={() => addTracksToQueue(data.heavy)}
+                />
+              </div>
+            </div>
+
+            <div className="flex min-w-0 flex-col gap-3">
+              <HealthPanel
+                missingTotal={missingTotal}
+                duplicateCount={data.health?.duplicateGroups.length ?? 0}
+                legacyCount={data.health?.legacyFormats.reduce((sum, item) => sum + item.count, 0) ?? 0}
+                onOpenLibrary={() => setView('library')}
+              />
+
+              <HomeRail
+                title="Loved Signal"
+                subtitle="Your strongest manual taste signal"
+                tracks={data.loved}
+                compact
+                actionLabel="SAVE LOVED"
+                onPlay={(start) => void playQueue(data.loved, start)}
+                onNext={() => queueTracksNext(data.loved)}
+                onQueue={() => addTracksToQueue(data.loved)}
+                onAction={() => void saveSet('Loved Signal', data.loved)}
+              />
+
+              <SuggestedStationsPanel
+                suggestions={data.suggestedStations}
+                onRadio={(suggestion) => void startSuggestedStation(suggestion)}
+              />
+
+              <PlaylistPanel
+                playlists={data.playlists}
+                smartRules={data.smartRules}
+                onPlay={(playlist) => void playSavedPlaylist(playlist)}
+                onPlaySmartRule={(rule) => void playSmartRule(rule)}
+                onSmartRuleRadio={(rule) => void startSmartRuleRadio(rule)}
+                onOpen={() => setView('playlist')}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SuggestedStationsPanel({
+  suggestions,
+  onRadio,
+}: {
+  suggestions: SmartPlaylistSuggestion[];
+  onRadio: (suggestion: SmartPlaylistSuggestion) => void;
+}): JSX.Element {
+  return (
+    <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
+      <div className="mb-2 flex items-center gap-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
+          Suggested Stations
+        </div>
+        <span className="ml-auto text-[10px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
+          Library-built
+        </span>
+      </div>
+      {suggestions.length ? (
+        <div className="flex flex-col gap-1">
+          {suggestions.map((suggestion) => (
+            <button
+              key={suggestion.id}
+              type="button"
+              className="bevel-in grid grid-cols-[minmax(0,1fr)_auto] gap-2 px-2 py-2 text-left text-[11px]"
+              onClick={() => onRadio(suggestion)}
+              title={suggestion.reason}
+            >
+              <span className="min-w-0">
+                <span className="block truncate">{suggestion.title}</span>
+                <span className="block truncate text-[10px]" style={{ color: 'var(--muted)' }}>
+                  {suggestion.subtitle} / {suggestion.sampleCount.toLocaleString()} ready
+                </span>
+              </span>
+              <span className="self-center tabular-nums" style={{ color: 'var(--accent)' }}>
+                RADIO
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
+          Suggested stations appear after Newamp sees genre, year, loved, rating, or play-count signals.
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NowPanel({
+  current,
+  currentTime,
+  duration,
+  isPlaying,
+  queueLength,
+  queueRemaining,
+  stationName,
+  stationTarget,
+  onTogglePlay,
+  onNowPlaying,
+  onQueue,
+  onStopStation,
+}: {
+  current: Track | null;
+  currentTime: number;
+  duration: number;
+  isPlaying: boolean;
+  queueLength: number;
+  queueRemaining: number;
+  stationName: string | null;
+  stationTarget: number;
+  onTogglePlay: () => void;
+  onNowPlaying: () => void;
+  onQueue: () => void;
+  onStopStation: () => void;
+}): JSX.Element {
+  const progress = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
+  return (
+    <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] uppercase tracking-[0.14em]" style={{ color: 'var(--muted)' }}>
+            Continue
+          </div>
+          <div className="truncate text-[18px] font-bold">{current ? current.title : 'Nothing loaded'}</div>
+          <div className="truncate text-[12px]" style={{ color: 'var(--ink-2)' }}>
+            {current ? `${current.artist} / ${current.album || 'Unknown album'}` : 'Start from a mix, playlist, folder, or search.'}
+          </div>
+          <div className="mt-3 h-2 overflow-hidden bevel-in" style={{ background: 'var(--display-bg)' }}>
+            <div className="h-full" style={{ width: `${progress}%`, background: 'var(--accent)' }} />
+          </div>
+          <div className="mt-1 flex text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
+            <span>{formatTime(currentTime)}</span>
+            <span className="ml-auto">{formatTime(duration)}</span>
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-col gap-2">
+          <button className="pxbtn is-active" onClick={onTogglePlay} disabled={!current}>
+            {isPlaying ? 'PAUSE' : 'PLAY'}
+          </button>
+          <button className="pxbtn" onClick={onNowPlaying} disabled={!current}>
+            NOW PLAYING
+          </button>
+          <button className="pxbtn" onClick={onQueue} disabled={!queueLength}>
+            QUEUE {queueLength ? `(${queueRemaining})` : ''}
+          </button>
+        </div>
+      </div>
+      {stationName ? (
+        <div
+          className="mt-3 flex items-center gap-2 border-t pt-2 text-[11px]"
+          style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
+        >
+          <span className="font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+            Station Active
+          </span>
+          <span className="min-w-0 flex-1 truncate">{stationName} / target {stationTarget}</span>
+          <button className="pxbtn px-2 py-[2px] text-[10px]" onClick={onStopStation}>
+            STOP RADIO
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function HealthPanel({
+  missingTotal,
+  duplicateCount,
+  legacyCount,
+  onOpenLibrary,
+}: {
+  missingTotal: number;
+  duplicateCount: number;
+  legacyCount: number;
+  onOpenLibrary: () => void;
+}): JSX.Element {
+  return (
+    <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
+      <div className="mb-2 flex items-center gap-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
+          Library Health
+        </div>
+        <button className="pxbtn ml-auto" onClick={onOpenLibrary}>
+          OPEN
+        </button>
+      </div>
+      <div className="grid grid-cols-3 gap-2 text-center">
+        <Metric label="Missing" value={missingTotal} />
+        <Metric label="Duplicates" value={duplicateCount} />
+        <Metric label="Legacy" value={legacyCount} />
+      </div>
+    </section>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: number }): JSX.Element {
+  return (
+    <div className="bevel-in px-2 py-2">
+      <div className="lcd-text text-[18px] leading-none" style={{ color: value ? 'var(--warn)' : 'var(--accent)' }}>
+        {value.toLocaleString()}
+      </div>
+      <div className="mt-1 text-[9px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
+function HomeRail({
+  title,
+  subtitle,
+  tracks,
+  actionLabel,
+  compact = false,
+  onPlay,
+  onNext,
+  onQueue,
+  onAction,
+}: {
+  title: string;
+  subtitle: string;
+  tracks: Track[];
+  actionLabel?: string;
+  compact?: boolean;
+  onPlay: (startIndex: number) => void;
+  onNext: () => void;
+  onQueue: () => void;
+  onAction?: () => void;
+}): JSX.Element {
+  const totalDuration = tracks.reduce((sum, track) => sum + (track.duration ?? 0), 0);
+  const rows = tracks.slice(0, compact ? 5 : 7);
+  return (
+    <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
+      <div className="mb-2 flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] font-bold">{title}</div>
+          <div className="truncate text-[10px]" style={{ color: 'var(--ink-2)' }}>
+            {subtitle}
+          </div>
+        </div>
+        <div className="text-right text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
+          <div>{tracks.length.toLocaleString()} tracks</div>
+          <div>{formatDuration(totalDuration)}</div>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-1 pb-2">
+        <button className="pxbtn is-active" onClick={() => onPlay(0)} disabled={!tracks.length}>
+          PLAY
+        </button>
+        <button className="pxbtn" onClick={onNext} disabled={!tracks.length}>
+          NEXT
+        </button>
+        <button className="pxbtn" onClick={onQueue} disabled={!tracks.length}>
+          QUEUE
+        </button>
+        {actionLabel && (
+          <button className="pxbtn" onClick={onAction} disabled={!tracks.length}>
+            {actionLabel}
+          </button>
+        )}
+      </div>
+      {rows.length ? (
+        <div className="divide-y" style={{ borderColor: 'var(--line)' }}>
+          {rows.map((track, index) => (
+            <button
+              key={`${track.id}-${index}`}
+              className="grid w-full grid-cols-[minmax(0,1fr)_46px] gap-2 px-1 py-[5px] text-left text-[11px]"
+              style={{ color: 'var(--ink)' }}
+              onClick={() => onPlay(index)}
+              title={`${track.artist} - ${track.title}`}
+            >
+              <span className="min-w-0">
+                <span className="block truncate">{track.title}</span>
+                <span className="block truncate text-[10px]" style={{ color: 'var(--muted)' }}>
+                  {track.artist}
+                </span>
+              </span>
+              <span className="self-center text-right tabular-nums" style={{ color: 'var(--ink-2)' }}>
+                {formatTime(track.duration ?? 0)}
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
+          No tracks available yet.
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PlaylistPanel({
+  playlists,
+  smartRules,
+  onPlay,
+  onPlaySmartRule,
+  onSmartRuleRadio,
+  onOpen,
+}: {
+  playlists: SavedPlaylist[];
+  smartRules: SmartPlaylistRule[];
+  onPlay: (playlist: SavedPlaylist) => void;
+  onPlaySmartRule: (rule: SmartPlaylistRule) => void;
+  onSmartRuleRadio: (rule: SmartPlaylistRule) => void;
+  onOpen: () => void;
+}): JSX.Element {
+  return (
+    <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
+      <div className="mb-2 flex items-center gap-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
+          Playlists
+        </div>
+        <button className="pxbtn ml-auto" onClick={onOpen}>
+          OPEN
+        </button>
+      </div>
+      {playlists.length || smartRules.length ? (
+        <div className="flex flex-col gap-1">
+          {playlists.map((playlist) => (
+            <button
+              key={playlist.id}
+              className="bevel-in grid grid-cols-[36px_minmax(0,1fr)_auto] gap-2 px-2 py-2 text-left text-[11px]"
+              onClick={() => onPlay(playlist)}
+              title={playlist.trackCount ? `Play ${playlist.name}` : `${playlist.name} is empty`}
+            >
+              <span
+                className="flex h-9 w-9 items-center justify-center overflow-hidden border text-[10px] font-bold"
+                style={{ borderColor: 'var(--line)', background: 'var(--panel-2)', color: 'var(--muted)' }}
+              >
+                {playlist.hasCoverArt ? (
+                  <img
+                    src={api.getPlaylistCoverUrl(playlist.id, playlist.coverArtUpdatedAt)}
+                    alt=""
+                    className="h-full w-full object-cover"
+                    draggable={false}
+                  />
+                ) : (
+                  'PL'
+                )}
+              </span>
+              <span className="min-w-0 self-center">
+                <span className="block truncate">{playlist.name}</span>
+                <span className="block truncate text-[10px]" style={{ color: 'var(--muted)' }}>
+                  {playlist.trackCount.toLocaleString()} tracks / {formatDuration(playlist.duration)}
+                </span>
+              </span>
+              <span className="self-center tabular-nums" style={{ color: playlist.trackCount ? 'var(--accent)' : 'var(--muted)' }}>
+                {playlist.trackCount ? 'PLAY' : 'EMPTY'}
+              </span>
+            </button>
+          ))}
+          {smartRules.map((rule) => (
+            <div
+              key={rule.id}
+              className="bevel-in grid grid-cols-[36px_minmax(0,1fr)_auto] gap-2 px-2 py-2 text-left text-[11px]"
+            >
+              <span
+                className="flex h-9 w-9 items-center justify-center overflow-hidden border text-[9px] font-bold"
+                style={{ borderColor: 'var(--line)', background: 'var(--panel-2)', color: 'var(--accent)' }}
+              >
+                AUTO
+              </span>
+              <button
+                type="button"
+                className="min-w-0 self-center text-left"
+                onClick={() => onPlaySmartRule(rule)}
+                title={`Generate ${rule.name}`}
+              >
+                <span className="block truncate">{rule.name}</span>
+                <span className="block truncate text-[10px]" style={{ color: 'var(--muted)' }}>
+                  {smartRuleSummary(rule)}
+                </span>
+              </button>
+              <span className="flex items-center gap-1 self-center">
+                <button className="pxbtn px-1.5 py-[2px] text-[10px]" onClick={() => onPlaySmartRule(rule)}>
+                  SMART
+                </button>
+                <button className="pxbtn is-active px-1.5 py-[2px] text-[10px]" onClick={() => onSmartRuleRadio(rule)}>
+                  RADIO
+                </button>
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
+          Saved mixes, smart rules, and custom playlists appear here.
+        </div>
+      )}
+    </section>
+  );
+}
+
+function smartRuleSummary(rule: SmartPlaylistRule): string {
+  const parts = [`${rule.count.toLocaleString()} dynamic`, rule.mood === 'deep-cuts' ? 'deep cuts' : rule.mood];
+  if (rule.genreQuery) parts.push(rule.genreQuery);
+  if (rule.searchQuery) parts.push(rule.searchQuery);
+  if (rule.minYear || rule.maxYear) parts.push(`${rule.minYear ?? 'any'}-${rule.maxYear ?? 'any'}`);
+  if (rule.minRating) parts.push(`${rule.minRating}+ stars`);
+  if (rule.lovedOnly) parts.push('loved');
+  if (rule.unplayedOnly) parts.push('fresh');
+  return parts.join(' / ');
+}
+
+function sameSmartRule(rule: SmartPlaylistRule, input: SmartPlaylistSuggestion['rule']): boolean {
+  return rule.name === input.name &&
+    rule.mood === input.mood &&
+    rule.genreQuery === (input.genreQuery ?? null) &&
+    rule.searchQuery === (input.searchQuery ?? null) &&
+    rule.minYear === (input.minYear ?? null) &&
+    rule.maxYear === (input.maxYear ?? null) &&
+    rule.minBpm === (input.minBpm ?? null) &&
+    rule.maxBpm === (input.maxBpm ?? null) &&
+    rule.minRating === (input.minRating ?? null) &&
+    rule.lovedOnly === !!input.lovedOnly &&
+    rule.unplayedOnly === !!input.unplayedOnly;
+}

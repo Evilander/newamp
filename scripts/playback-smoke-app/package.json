@@ -1,0 +1,5 @@
+{
+  "name": "newamp-playback-smoke",
+  "type": "module",
+  "main": "../playback-smoke.mjs"
+}

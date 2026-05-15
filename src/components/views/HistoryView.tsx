@@ -1,0 +1,291 @@
+import { useEffect, useMemo, useState } from 'react';
+import type { ListeningHistoryItem, ListeningInsights } from '@shared/types';
+import { api } from '../../lib/api';
+import { formatDuration, formatTime } from '../../lib/format';
+import { usePlayerStore } from '../../store/usePlayerStore';
+
+export function HistoryView(): JSX.Element {
+  const [items, setItems] = useState<ListeningHistoryItem[]>([]);
+  const [insights, setInsights] = useState<ListeningInsights | null>(null);
+  const [loading, setLoading] = useState(false);
+  const playQueue = usePlayerStore((s) => s.playQueue);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    Promise.all([
+      api.getListeningHistory({ limit: 500 }),
+      api.getListeningInsights(),
+    ])
+      .then(([rows, nextInsights]) => {
+        if (!cancelled) {
+          setItems(rows);
+          setInsights(nextInsights);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const tracks = useMemo(() => items.map((item) => item.track), [items]);
+
+  async function clearHistory(): Promise<void> {
+    await api.clearListeningHistory();
+    setItems([]);
+    setInsights(emptyListeningInsights());
+  }
+
+  return (
+    <div className="flex h-full flex-col" style={{ fontFamily: 'var(--font-mono)' }}>
+      <div
+        className="flex items-center gap-3 border-b px-3 py-2"
+        style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}
+      >
+        <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
+          Listening History
+        </div>
+        <div className="flex-1 text-[11px] tabular-nums" style={{ color: 'var(--ink-2)' }}>
+          {items.length.toLocaleString()} play{items.length === 1 ? '' : 's'}
+        </div>
+        <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)} disabled={!tracks.length}>
+          PLAY FROM TOP
+        </button>
+        <button className="pxbtn" onClick={() => void clearHistory()} disabled={!items.length}>
+          CLEAR
+        </button>
+      </div>
+      {insights && insights.total.plays > 0 && <HistoryInsights insights={insights} />}
+      <div className="flex-1 overflow-auto">
+        {loading ? (
+          <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
+            Loading...
+          </div>
+        ) : items.length ? (
+          <HistoryTable
+            items={items}
+            onPlay={(index) => void playQueue(tracks, index)}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
+            No listening history yet.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function HistoryInsights({ insights }: { insights: ListeningInsights }): JSX.Element {
+  return (
+    <div
+      data-newamp-history-insights
+      className="grid gap-3 border-b px-3 py-2 text-[11px]"
+      style={{
+        borderColor: 'var(--line)',
+        background: 'var(--panel)',
+        gridTemplateColumns: 'minmax(180px,0.8fr) minmax(180px,1fr) minmax(180px,1fr) minmax(170px,0.9fr)',
+      }}
+    >
+      <div className="min-w-0">
+        <div className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+          Listening Insights
+        </div>
+        <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums" style={{ color: 'var(--ink-2)' }}>
+          <span>All time</span><span className="text-right">{formatPlays(insights.total.plays)}</span>
+          <span>Skips</span><span className="text-right">{formatSkips(insights.total.skips)}</span>
+          <span>Unique</span><span className="text-right">{insights.total.uniqueTracks.toLocaleString()}</span>
+          <span>Skipped tracks</span><span className="text-right">{insights.total.uniqueSkippedTracks.toLocaleString()}</span>
+          <span>Today</span><span className="text-right">{formatPlays(insights.today.plays)}</span>
+          <span>7 days</span><span className="text-right">{formatPlays(insights.week.plays)}</span>
+        </div>
+        <div className="mt-2 flex justify-between gap-2 tabular-nums" style={{ color: 'var(--muted)' }}>
+          <span>{formatDuration(insights.today.duration)} / {formatSkips(insights.today.skips)} today</span>
+          <span>{formatDuration(insights.week.duration)} / {formatSkips(insights.week.skips)} week</span>
+        </div>
+      </div>
+      <InsightList
+        title="Top Artists"
+        emptyLabel="No artist data."
+        items={insights.topArtists.slice(0, 4).map((item) => ({
+          key: item.artist,
+          primary: item.artist,
+          secondary: formatDuration(item.duration),
+          plays: item.plays,
+          skips: item.skips,
+        }))}
+      />
+      <InsightList
+        title="Top Albums"
+        emptyLabel="No album data."
+        items={insights.topAlbums.slice(0, 4).map((item) => ({
+          key: `${item.albumArtist}:${item.album}`,
+          primary: item.album,
+          secondary: item.albumArtist,
+          plays: item.plays,
+          skips: item.skips,
+        }))}
+      />
+      <InsightList
+        title="Recent Days"
+        emptyLabel="No recent activity."
+        items={insights.recentDays.slice(0, 4).map((item) => ({
+          key: item.date,
+          primary: formatHistoryDay(item.date),
+          secondary: formatDuration(item.duration),
+          plays: item.plays,
+          skips: item.skips,
+        }))}
+      />
+    </div>
+  );
+}
+
+function InsightList({
+  title,
+  emptyLabel,
+  items,
+}: {
+  title: string;
+  emptyLabel: string;
+  items: Array<{ key: string; primary: string; secondary: string; plays: number; skips: number }>;
+}): JSX.Element {
+  return (
+    <div className="min-w-0">
+      <div className="text-[9px] uppercase tracking-[0.12em]" style={{ color: 'var(--ink-2)' }}>
+        {title}
+      </div>
+      {items.length ? (
+        <div className="mt-1 grid gap-[2px]">
+          {items.map((item) => (
+            <div key={item.key} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2">
+              <div className="min-w-0">
+                <div className="truncate" title={item.primary}>
+                  {item.primary}
+                </div>
+                <div className="truncate text-[10px]" title={item.secondary} style={{ color: 'var(--muted)' }}>
+                  {item.secondary}
+                </div>
+              </div>
+              <div className="text-right tabular-nums" style={{ color: 'var(--accent)' }}>
+                <div>{formatPlays(item.plays)}</div>
+                {item.skips > 0 && (
+                  <div className="text-[10px]" style={{ color: 'var(--muted)' }}>{formatSkips(item.skips)}</div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-1" style={{ color: 'var(--muted)' }}>{emptyLabel}</div>
+      )}
+    </div>
+  );
+}
+
+function HistoryTable({
+  items,
+  onPlay,
+}: {
+  items: ListeningHistoryItem[];
+  onPlay: (index: number) => void;
+}): JSX.Element {
+  return (
+    <table
+      className="w-full table-fixed text-[12px]"
+      style={{ fontFamily: 'var(--font-mono)', borderCollapse: 'separate', borderSpacing: 0 }}
+    >
+      <thead className="sticky top-0 z-10" style={{ background: 'var(--panel)', color: 'var(--ink-2)' }}>
+        <tr className="text-left text-[9px] uppercase tracking-[0.12em]">
+          <th className="w-[150px] px-2 py-[6px]">Played</th>
+          <th className="px-2 py-[6px]">Title</th>
+          <th className="w-[22%] px-2 py-[6px]">Artist</th>
+          <th className="w-[22%] px-2 py-[6px]">Album</th>
+          <th className="w-[62px] px-2 py-[6px] text-right tabular-nums">Time</th>
+          <th className="w-[56px] px-2 py-[6px] text-right tabular-nums">Plays</th>
+        </tr>
+      </thead>
+      <tbody>
+        {items.map((item, index) => {
+          const track = item.track;
+          const zebra = index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)';
+          return (
+            <tr
+              key={item.id}
+              className="cursor-pointer transition-colors"
+              style={{ background: zebra, color: 'var(--ink)' }}
+              onDoubleClick={() => onPlay(index)}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--panel-2)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = zebra)}
+            >
+              <td className="px-2 py-[5px] tabular-nums" style={{ color: 'var(--muted)' }}>
+                {formatPlayedAt(item.playedAt)}
+              </td>
+              <td className="truncate px-2 py-[5px]" title={track.title}>{track.title}</td>
+              <td className="truncate px-2 py-[5px]" title={track.artist} style={{ color: 'var(--ink-2)' }}>
+                {track.artist}
+              </td>
+              <td className="truncate px-2 py-[5px]" title={track.album} style={{ color: 'var(--ink-2)' }}>
+                {track.album}
+              </td>
+              <td className="px-2 py-[5px] text-right tabular-nums" style={{ color: 'var(--ink-2)' }}>
+                {formatTime(track.duration ?? 0)}
+              </td>
+              <td className="px-2 py-[5px] text-right tabular-nums" style={{ color: 'var(--muted)' }}>
+                {track.playCount ? track.playCount.toLocaleString() : ''}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function formatPlayedAt(value: number): string {
+  return new Date(value).toLocaleString(undefined, {
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatHistoryDay(value: string): string {
+  return new Date(`${value}T12:00:00`).toLocaleDateString(undefined, {
+    month: 'short',
+    day: '2-digit',
+  });
+}
+
+function formatPlays(value: number): string {
+  return `${value.toLocaleString()} play${value === 1 ? '' : 's'}`;
+}
+
+function formatSkips(value: number): string {
+  return `${value.toLocaleString()} skip${value === 1 ? '' : 's'}`;
+}
+
+function emptyListeningInsights(): ListeningInsights {
+  return {
+    generatedAt: Date.now(),
+    total: {
+      plays: 0,
+      duration: 0,
+      skips: 0,
+      uniqueTracks: 0,
+      uniqueSkippedTracks: 0,
+      firstPlayedAt: null,
+      lastPlayedAt: null,
+      lastSkippedAt: null,
+    },
+    today: { plays: 0, duration: 0, skips: 0 },
+    week: { plays: 0, duration: 0, skips: 0 },
+    topArtists: [],
+    topAlbums: [],
+    recentDays: [],
+  };
+}

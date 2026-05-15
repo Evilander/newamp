@@ -1,0 +1,957 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; script-src 'nonce-N6PP8s18D7Y2z_n2UBQ71g'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src 'self' data: https://images.unsplash.com https://picsum.photos https://fastly.picsum.photos https://placehold.co; connect-src 'none'">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Newamp — Next-Pass UI Direction</title>
+<meta name="description" content="Newamp desktop music player: compact deck, library console, skin workshop, AI set builder, and EQ — early-2000s skinnable energy with modern readability.">
+<meta name="generator" content="claude-design-mcp">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg:       #0a0a0c;
+  --bg2:      #111117;
+  --bg3:      #18181f;
+  --panel:    #1c1c25;
+  --border:   #2a2a38;
+  --accent:   #00e5a0;
+  --accent2:  #7b5cff;
+  --warn:     #ff6b35;
+  --fg:       #e8e8f0;
+  --fg2:      #8888aa;
+  --fg3:      #444460;
+  --mono:     'IBM Plex Mono', monospace;
+  --sans:     'Inter', system-ui, sans-serif;
+  --r:        3px;
+  --r2:       6px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow: hidden;
+}
+
+/* ── APP SHELL ─────────────────────────────────────── */
+.app {
+  display: grid;
+  grid-template-columns: 220px 1fr 280px;
+  grid-template-rows: 28px 1fr 180px 36px;
+  height: 100vh;
+  min-height: 600px;
+}
+
+/* ── TITLE BAR ─────────────────────────────────────── */
+.titlebar {
+  grid-column: 1 / -1;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  gap: 8px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+.tb-dots { display: flex; gap: 5px; -webkit-app-region: no-drag; }
+.tb-dot { width: 10px; height: 10px; border-radius: 50%; cursor: pointer; }
+.tb-dot.close  { background: #ff5f57; }
+.tb-dot.min    { background: #febc2e; }
+.tb-dot.max    { background: #28c840; }
+.tb-logo {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .12em;
+  color: var(--accent);
+  margin-left: 8px;
+  text-transform: uppercase;
+}
+.tb-logo span { color: var(--fg3); }
+.tb-nav {
+  display: flex;
+  gap: 1px;
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+}
+.tb-tab {
+  padding: 3px 10px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--fg3);
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  transition: color .15s, border-color .15s;
+}
+.tb-tab.active { color: var(--accent); border-color: var(--border); background: var(--bg3); }
+.tb-tab:hover:not(.active) { color: var(--fg2); }
+
+/* ── SIDEBAR ───────────────────────────────────────── */
+.sidebar {
+  grid-row: 2 / 4;
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar-section { padding: 10px 0 6px; }
+.sidebar-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--fg3);
+  padding: 0 14px;
+  margin-bottom: 4px;
+}
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  cursor: pointer;
+  color: var(--fg2);
+  font-size: 12px;
+  border-left: 2px solid transparent;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.sidebar-item:hover { color: var(--fg); background: var(--bg3); }
+.sidebar-item.active { color: var(--accent); border-left-color: var(--accent); background: rgba(0,229,160,.05); }
+.sidebar-icon { font-size: 13px; width: 16px; text-align: center; }
+.sidebar-count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--fg3);
+  background: var(--bg3);
+  padding: 1px 5px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.sidebar hr { border: none; border-top: 1px solid var(--border); margin: 4px 10px; }
+.sidebar-playlists { flex: 1; overflow-y: auto; }
+.sidebar-playlists::-webkit-scrollbar { width: 3px; }
+.sidebar-playlists::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* ── MAIN AREA ─────────────────────────────────────── */
+.main {
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* ── LIBRARY CONSOLE ───────────────────────────────── */
+.library-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+}
+.lib-title { font-weight: 600; font-size: 12px; color: var(--fg); }
+.lib-count { font-family: var(--mono); font-size: 10px; color: var(--fg3); }
+.lib-search {
+  margin-left: auto;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  padding: 4px 10px 4px 28px;
+  color: var(--fg);
+  font-size: 11px;
+  font-family: var(--sans);
+  width: 180px;
+  outline: none;
+  position: relative;
+}
+.lib-search:focus { border-color: var(--accent); }
+.search-wrap { position: relative; }
+.search-wrap::before {
+  content: '⌕';
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--fg3);
+  font-size: 13px;
+  pointer-events: none;
+}
+.lib-sort {
+  display: flex;
+  gap: 1px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  overflow: hidden;
+}
+.lib-sort-btn {
+  padding: 4px 9px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg3);
+  cursor: pointer;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  transition: color .12s, background .12s;
+}
+.lib-sort-btn.on { color: var(--fg); background: var(--panel); }
+.lib-sort-btn:hover:not(.on) { color: var(--fg2); }
+
+/* ── TRACK TABLE ───────────────────────────────────── */
+.track-table { flex: 1; overflow-y: auto; }
+.track-table::-webkit-scrollbar { width: 4px; }
+.track-table::-webkit-scrollbar-thumb { background: var(--border); }
+
+.track-cols {
+  display: grid;
+  grid-template-columns: 28px 36px 1fr 160px 80px 56px 60px;
+  padding: 0 14px;
+  gap: 0;
+  position: sticky;
+  top: 0;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  z-index: 1;
+}
+.tc { padding: 5px 6px; font-family: var(--mono); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--fg3); cursor: pointer; }
+.tc:hover { color: var(--fg2); }
+.tc.sort-active { color: var(--accent); }
+
+.track-row {
+  display: grid;
+  grid-template-columns: 28px 36px 1fr 160px 80px 56px 60px;
+  padding: 0 14px;
+  align-items: center;
+  border-bottom: 1px solid rgba(255,255,255,.03);
+  cursor: pointer;
+  transition: background .1s;
+}
+.track-row:hover { background: var(--bg3); }
+.track-row.playing { background: rgba(0,229,160,.06); }
+.track-row.playing .t-title { color: var(--accent); }
+
+.t-num { font-family: var(--mono); font-size: 10px; color: var(--fg3); padding: 7px 6px; }
+.t-art { width: 24px; height: 24px; border-radius: 2px; object-fit: cover; background: var(--bg3); margin: 4px 6px 4px 0; flex-shrink: 0; display: block; }
+.t-info { min-width: 0; padding: 7px 6px 7px 0; }
+.t-title { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.t-artist { font-size: 10px; color: var(--fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.t-album, .t-bpm, .t-dur, .t-key {
+  font-size: 10px;
+  color: var(--fg2);
+  padding: 7px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+}
+.t-key { color: var(--fg3); font-size: 9px; letter-spacing: .06em; }
+.play-indicator {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+/* ── RIGHT PANEL ───────────────────────────────────── */
+.right-panel {
+  grid-row: 2 / 4;
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── NOW PLAYING / DECK ────────────────────────────── */
+.deck {
+  position: relative;
+  flex-shrink: 0;
+}
+.deck-art {
+  width: 100%;
+  aspect-ratio: 1;
+  display: block;
+  object-fit: cover;
+  background: linear-gradient(135deg, #1a1028 0%, #0d1a2a 100%);
+}
+.deck-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to top, rgba(10,10,12,.95) 0%, rgba(10,10,12,.3) 50%, transparent 100%);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding: 12px;
+}
+.deck-track { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.deck-sub { font-size: 11px; color: var(--fg2); margin-top: 2px; }
+.deck-tags { display: flex; gap: 4px; margin-top: 6px; }
+.deck-tag {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 2px;
+  border: 1px solid;
+}
+.deck-tag.bpm { color: var(--accent); border-color: rgba(0,229,160,.3); background: rgba(0,229,160,.08); }
+.deck-tag.key { color: var(--accent2); border-color: rgba(123,92,255,.3); background: rgba(123,92,255,.08); }
+.deck-tag.genre { color: var(--warn); border-color: rgba(255,107,53,.3); background: rgba(255,107,53,.08); }
+
+/* ── VIZ BAR ───────────────────────────────────────── */
+.viz {
+  height: 32px;
+  background: var(--bg3);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  padding: 2px 4px;
+  overflow: hidden;
+}
+.viz-bar {
+  flex: 1;
+  background: var(--accent);
+  border-radius: 1px 1px 0 0;
+  opacity: .7;
+  transform-origin: bottom;
+}
+
+/* ── ARTIST FACTS ──────────────────────────────────── */
+.artist-facts {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.artist-facts::-webkit-scrollbar { width: 3px; }
+.artist-facts::-webkit-scrollbar-thumb { background: var(--border); }
+.facts-head {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--fg3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.facts-head::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.fact-card {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  padding: 8px 10px;
+}
+.fact-label { font-size: 9px; text-transform: uppercase; letter-spacing: .1em; color: var(--fg3); font-family: var(--mono); margin-bottom: 3px; }
+.fact-val { font-size: 12px; color: var(--fg); line-height: 1.5; }
+.fact-val.small { font-size: 11px; color: var(--fg2); }
+.fact-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+
+/* ── BOTTOM TRANSPORT ──────────────────────────────── */
+.transport {
+  grid-column: 1 / -1;
+  background: var(--bg2);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  height: 36px;
+  flex-shrink: 0;
+}
+.t-ctrl { display: flex; align-items: center; gap: 2px; }
+.ctrl-btn {
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: 13px;
+  transition: color .1s, border-color .1s, background .1s;
+}
+.ctrl-btn:hover { color: var(--fg); border-color: var(--border); background: var(--bg3); }
+.ctrl-btn.play {
+  width: 32px; height: 32px;
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+  font-size: 15px;
+}
+.ctrl-btn.play:hover { filter: brightness(1.1); }
+
+.prog-wrap { flex: 1; display: flex; align-items: center; gap: 8px; }
+.prog-time { font-family: var(--mono); font-size: 10px; color: var(--fg3); white-space: nowrap; }
+.prog-bar {
+  flex: 1;
+  height: 3px;
+  background: var(--bg3);
+  border-radius: 2px;
+  position: relative;
+  cursor: pointer;
+}
+.prog-fill {
+  height: 100%;
+  width: 34%;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--accent2) 100%);
+  border-radius: 2px;
+  position: relative;
+}
+.prog-fill::after {
+  content: '';
+  position: absolute;
+  right: -4px; top: -3px;
+  width: 8px; height: 8px;
+  background: var(--fg);
+  border-radius: 50%;
+  box-shadow: 0 0 4px rgba(0,0,0,.8);
+}
+.vol-wrap { display: flex; align-items: center; gap: 6px; }
+.vol-label { font-size: 10px; color: var(--fg3); }
+.vol-bar { width: 64px; height: 3px; background: var(--bg3); border-radius: 2px; cursor: pointer; }
+.vol-fill { height: 100%; width: 75%; background: var(--fg2); border-radius: 2px; }
+.t-modes { display: flex; gap: 2px; }
+.mode-btn {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--fg3);
+  cursor: pointer;
+  background: none;
+  transition: all .1s;
+}
+.mode-btn.on { color: var(--accent); border-color: rgba(0,229,160,.4); background: rgba(0,229,160,.07); }
+
+/* ── EQ STRIP (in transport footer) ───────────────── */
+.eq-strip { display: flex; align-items: flex-end; gap: 2px; height: 24px; margin-left: 6px; }
+.eq-band {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+.eq-band label { font-family: var(--mono); font-size: 7px; color: var(--fg3); }
+.eq-fader { width: 3px; border-radius: 2px; background: var(--accent2); cursor: ns-resize; }
+
+/* ── AI SET BUILDER ────────────────────────────────── */
+.setbuilder {
+  grid-row: 3;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.set-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex-shrink: 0;
+}
+.set-badge {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  background: linear-gradient(90deg, var(--accent2), var(--accent));
+  color: var(--bg);
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-weight: 500;
+}
+.set-title { font-size: 12px; font-weight: 500; }
+.set-prompt-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.set-prompt {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  padding: 4px 10px;
+  color: var(--fg);
+  font-size: 11px;
+  font-family: var(--sans);
+  width: 240px;
+  outline: none;
+}
+.set-prompt:focus { border-color: var(--accent2); }
+.set-go {
+  background: var(--accent2);
+  color: var(--fg);
+  border: none;
+  border-radius: var(--r2);
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.set-go:hover { filter: brightness(1.12); }
+.set-list {
+  display: flex;
+  gap: 0;
+  overflow-x: auto;
+  padding: 8px 14px;
+  align-items: stretch;
+  flex: 1;
+}
+.set-list::-webkit-scrollbar { height: 3px; }
+.set-list::-webkit-scrollbar-thumb { background: var(--border); }
+.set-card {
+  flex-shrink: 0;
+  width: 120px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  overflow: hidden;
+  cursor: grab;
+  transition: border-color .15s;
+  margin-right: 6px;
+  position: relative;
+}
+.set-card:hover { border-color: var(--accent2); }
+.set-card.drop-zone { border-color: var(--accent); border-style: dashed; background: rgba(0,229,160,.04); }
+.set-card-art { width: 100%; aspect-ratio: 1; object-fit: cover; background: var(--bg3); display: block; }
+.set-card-info { padding: 5px 7px; }
+.set-card-title { font-size: 10px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.set-card-sub { font-size: 9px; color: var(--fg3); font-family: var(--mono); }
+.set-card-num {
+  position: absolute;
+  top: 4px; left: 4px;
+  background: rgba(0,0,0,.8);
+  color: var(--fg3);
+  font-family: var(--mono);
+  font-size: 8px;
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+.set-add-card {
+  flex-shrink: 0;
+  width: 60px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--fg3);
+  cursor: pointer;
+  font-size: 18px;
+  transition: border-color .15s, color .15s;
+}
+.set-add-card:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── CROSSFADE ROW ─────────────────────────────────── */
+.xfade-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 14px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.xfade-label { font-family: var(--mono); font-size: 9px; color: var(--fg3); letter-spacing: .1em; text-transform: uppercase; }
+.xfade-bar { flex: 1; height: 4px; background: var(--bg3); border-radius: 2px; position: relative; cursor: pointer; }
+.xfade-fill { height: 100%; width: 30%; background: linear-gradient(90deg, var(--accent2), var(--warn)); border-radius: 2px; }
+.xfade-knob {
+  position: absolute;
+  left: 30%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px; height: 10px;
+  background: var(--fg);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg2);
+}
+.xfade-val { font-family: var(--mono); font-size: 9px; color: var(--accent2); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- TITLE BAR -->
+  <header class="titlebar">
+    <div class="tb-dots">
+      <div class="tb-dot close"></div>
+      <div class="tb-dot min"></div>
+      <div class="tb-dot max"></div>
+    </div>
+    <div class="tb-logo">NEW<span>AMP</span> <span style="color:var(--fg3);font-size:9px">v3.0-beta</span></div>
+    <nav class="tb-nav">
+      <div class="tb-tab active">Library</div>
+      <div class="tb-tab">Skins</div>
+      <div class="tb-tab">EQ</div>
+      <div class="tb-tab">Lyrics</div>
+      <div class="tb-tab">Visualizer</div>
+    </nav>
+  </header>
+
+  <!-- SIDEBAR -->
+  <nav class="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Library</div>
+      <div class="sidebar-item active"><span class="sidebar-icon">◈</span> All Tracks <span class="sidebar-count">4,218</span></div>
+      <div class="sidebar-item"><span class="sidebar-icon">◉</span> Artists <span class="sidebar-count">312</span></div>
+      <div class="sidebar-item"><span class="sidebar-icon">◫</span> Albums <span class="sidebar-count">587</span></div>
+      <div class="sidebar-item"><span class="sidebar-icon">◌</span> Genres <span class="sidebar-count">44</span></div>
+    </div>
+    <hr>
+    <div class="sidebar-section">
+      <div class="sidebar-label">Playlists</div>
+      <div class="sidebar-playlists">
+        <div class="sidebar-item"><span class="sidebar-icon">▸</span> Morning Drift <span class="sidebar-count">34</span></div>
+        <div class="sidebar-item"><span class="sidebar-icon">▸</span> Late Work Sessions <span class="sidebar-count">61</span></div>
+        <div class="sidebar-item"><span class="sidebar-icon">▸</span> Club Prep — May <span class="sidebar-count">22</span></div>
+        <div class="sidebar-item"><span class="sidebar-icon">▸</span> Study: Lo-Fi Focus <span class="sidebar-count">88</span></div>
+        <div class="sidebar-item"><span class="sidebar-icon">▸</span> Workout 140bpm+ <span class="sidebar-count">47</span></div>
+        <div class="sidebar-item" style="margin-top:4px;color:var(--fg3);font-size:11px;"><span class="sidebar-icon">+</span> New Playlist</div>
+      </div>
+    </div>
+    <hr>
+    <div class="sidebar-section">
+      <div class="sidebar-label">Import</div>
+      <div class="sidebar-item" style="color:var(--fg3);">
+        <span class="sidebar-icon" style="font-size:11px;">⇩</span>
+        <span>Drop files here</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- MAIN LIBRARY CONSOLE -->
+  <main class="main">
+    <div class="library-header">
+      <span class="lib-title">All Tracks</span>
+      <span class="lib-count">4,218 tracks · 12.4 days</span>
+      <div class="lib-sort">
+        <div class="lib-sort-btn on">Added</div>
+        <div class="lib-sort-btn">Artist</div>
+        <div class="lib-sort-btn">BPM</div>
+        <div class="lib-sort-btn">Key</div>
+      </div>
+      <div class="search-wrap">
+        <input class="lib-search" type="text" placeholder="Filter library…" value="">
+      </div>
+    </div>
+    <div class="track-table">
+      <div class="track-cols">
+        <div class="tc">#</div>
+        <div class="tc"></div>
+        <div class="tc sort-active">Title ↓</div>
+        <div class="tc">Album</div>
+        <div class="tc">BPM</div>
+        <div class="tc">Dur</div>
+        <div class="tc">Key</div>
+      </div>
+      <!-- Row 1 (playing) -->
+      <div class="track-row playing">
+        <div class="t-num"><div class="play-indicator"></div></div>
+        <div style="display:flex;align-items:center;padding:4px 6px 4px 0;">
+          <div style="width:24px;height:24px;border-radius:2px;background:linear-gradient(135deg,#1a2a4a,#3a1a4a);flex-shrink:0;"></div>
+        </div>
+        <div class="t-info">
+          <div class="t-title">Midnight Frequency</div>
+          <div class="t-artist">Bicep</div>
+        </div>
+        <div class="t-album">Isles</div>
+        <div class="t-bpm">128</div>
+        <div class="t-dur">6:14</div>
+        <div class="t-key">Am</div>
+      </div>
+      <!-- Row 2 -->
+      <div class="track-row">
+        <div class="t-num" style="font-family:var(--mono);font-size:10px;color:var(--fg3);padding:7px 6px;">2</div>
+        <div style="display:flex;align-items:center;padding:4px 6px 4px 0;"><div style="width:24px;height:24px;border-radius:2px;background:linear-gradient(135deg,#2a1a1a,#4a2a1a);flex-shrink:0;"></div></div>
+        <div class="t-info"><div class="t-title">ARIEL</div><div class="t-artist">Four Tet</div></div>
+        <div class="t-album">Three</div>
+        <div class="t-bpm">112</div>
+        <div class="t-dur">5:38</div>
+        <div class="t-key">F♯m</div>
+      </div>
+      <!-- Row 3 -->
+      <div class="track-row">
+        <div class="t-num" style="font-family:var(--mono);font-size:10px;color:var(--fg3);padding:7px 6px;">3</div>
+        <div style="display:flex;align-items:center;padding:4px 6px 4px 0;"><div style="width:24px;height:24px;border-radius:2px;background:linear-gradient(135deg,#1a3a2a,#1a2a3a);flex-shrink:0;"></div></div>
+        <div class="t-info"><div class="t-title">Glue</div><div class="t-artist">Bicep</div></div>
+        <div class="t-album">Bicep</div>
+        <div class="t-bpm">134</div>
+        <div class="t-dur">7:03</div>
+        <div class="t-key">G♭m</div>
+      </div>
+      <!-- Row 4 -->
+      <div class="track-row">
+        <div class="t-num" style="font-family:var(--mono);font-size:10px;color:var(--fg3);padding:7px 6px;">4</div>
+        <div style="display:flex;align-items:center;padding:4px 6px 4px 0;"><div style="width:24px;height:24px;border-radius:2px;background:linear-gradient(135deg,#2a2a1a,#1a1a3a);flex-shrink:0;"></div></div>
+        <div class="t-info"><div class="t-title">XR2</div><div class="t-artist">Burial</div></div>
+        <div class="t-album">Truant/Rough Sleeper</div>
+        <div class="t-bpm">—</div>
+        <div class="t-dur">9:44</div>
+        <div class="t-key">Dm</div>
+      </div>
+      <!-- Row 5 -->
+      <div class="track-row">
+        <div class="t-num" style="font-family:var(--mono);font-size:10px;color:var(--fg3);padding:7px 6px;">5</div>
+        <div style="display:flex;align-items:center;padding:4px 6px 4px 0;"><div style="width:24px;height:24px;border-radius:2px;background:linear-gradient(135deg,#3a1a2a,#1a3a3a);flex-shrink:0;"></div></div>
+        <div class="t-info"><div class="t-title">Nacht 004</div><div class="t-artist">Aphex Twin</div></div>
+        <div class="t-album">Syro</div>
+        <div class="t-bpm">138</div>
+        <div class="t-dur">4:27</div>
+        <div class="t-key">C♯m</div>
+      </div>
+      <!-- Row 6 -->
+      <div class="track-row">
+        <div class="t-num" style="font-family:var(--mono);font-size:10px;color:var(--fg3);padding:7px 6px;">6</div>
+        <div style="display:flex;align-items:center;padding:4px 6px 4px 0;"><div style="width:24px;height:24px;border-radius:2px;background:linear-gradient(135deg,#0a2a1a,#2a0a3a);flex-shrink:0;"></div></div>
+        <div class="t-info"><div class="t-title">Pastell</div><div class="t-artist">Jan Jelinek</div></div>
+        <div class="t-album">Loop-Finding-Jazz-Records</div>
+        <div class="t-bpm">96</div>
+        <div class="t-dur">4:51</div>
+        <div class="t-key">Em</div>
+      </div>
+      <!-- Row 7 -->
+      <div class="track-row">
+        <div class="t-num" style="font-family:var(--mono);font-size:10px;color:var(--fg3);padding:7px 6px;">7</div>
+        <div style="display:flex;align-items:center;padding:4px 6px 4px 0;"><div style="width:24px;height:24px;border-radius:2px;background:linear-gradient(135deg,#3a2a0a,#0a1a3a);flex-shrink:0;"></div></div>
+        <div class="t-info"><div class="t-title">Petra</div><div class="t-artist">Floating Points</div></div>
+        <div class="t-album">Promises</div>
+        <div class="t-bpm">110</div>
+        <div class="t-dur">46:39</div>
+        <div class="t-key">A</div>
+      </div>
+      <!-- Row 8 -->
+      <div class="track-row">
+        <div class="t-num" style="font-family:var(--mono);font-size:10px;color:var(--fg3);padding:7px 6px;">8</div>
+        <div style="display:flex;align-items:center;padding:4px 6px 4px 0;"><div style="width:24px;height:24px;border-radius:2px;background:linear-gradient(135deg,#1a1a3a,#3a1a1a);flex-shrink:0;"></div></div>
+        <div class="t-info"><div class="t-title">Go</div><div class="t-artist">Moby</div></div>
+        <div class="t-album">Go — The Very Best of Moby</div>
+        <div class="t-bpm">122</div>
+        <div class="t-dur">5:12</div>
+        <div class="t-key">Bm</div>
+      </div>
+    </div>
+  </main>
+
+  <!-- RIGHT PANEL: DECK + ARTIST FACTS -->
+  <aside class="right-panel">
+    <div class="deck">
+      <div style="width:100%;aspect-ratio:1;background:linear-gradient(145deg,#1a1028 0%,#0d1a2a 40%,#1a2a1a 70%,#2a1a28 100%);position:relative;">
+        <!-- Faux album art CSS painting -->
+        <div style="position:absolute;inset:0;background:radial-gradient(ellipse at 60% 40%,rgba(123,92,255,.3) 0%,transparent 60%),radial-gradient(ellipse at 30% 70%,rgba(0,229,160,.2) 0%,transparent 50%);"></div>
+        <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:60px;height:60px;border-radius:50%;border:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;font-size:22px;color:rgba(255,255,255,.2);">◉</div>
+      </div>
+      <div class="deck-overlay">
+        <div class="deck-track">Midnight Frequency</div>
+        <div class="deck-sub">Bicep · Isles · 2021</div>
+        <div class="deck-tags">
+          <div class="deck-tag bpm">128 BPM</div>
+          <div class="deck-tag key">Am</div>
+          <div class="deck-tag genre">Electronic</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Mini visualizer -->
+    <div class="viz" id="viz"></div>
+
+    <!-- Artist Facts -->
+    <div class="artist-facts">
+      <div class="facts-head">Artist Intel</div>
+      <div class="fact-grid">
+        <div class="fact-card">
+          <div class="fact-label">Origin</div>
+          <div class="fact-val">Belfast, Northern Ireland</div>
+        </div>
+        <div class="fact-card">
+          <div class="fact-label">Active Since</div>
+          <div class="fact-val">2009</div>
+        </div>
+      </div>
+      <div class="fact-card">
+        <div class="fact-label">Sound Profile</div>
+        <div class="fact-val small">Euphoric techno with rave nostalgia, melodic breakdowns, and meticulous sound design. Known for Boiler Room sets and emotive dancefloor builds.</div>
+      </div>
+      <div class="fact-grid">
+        <div class="fact-card">
+          <div class="fact-label">In Your Library</div>
+          <div class="fact-val">14 tracks</div>
+        </div>
+        <div class="fact-card">
+          <div class="fact-label">Play Count</div>
+          <div class="fact-val">347</div>
+        </div>
+      </div>
+      <div class="fact-card">
+        <div class="fact-label">Related Artists in Library</div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">
+          <span style="background:var(--bg2);border:1px solid var(--border);border-radius:2px;padding:2px 7px;font-size:10px;color:var(--fg2);">Objekt</span>
+          <span style="background:var(--bg2);border:1px solid var(--border);border-radius:2px;padding:2px 7px;font-size:10px;color:var(--fg2);">Lone</span>
+          <span style="background:var(--bg2);border:1px solid var(--border);border-radius:2px;padding:2px 7px;font-size:10px;color:var(--fg2);">Caribou</span>
+          <span style="background:var(--bg2);border:1px solid var(--border);border-radius:2px;padding:2px 7px;font-size:10px;color:var(--fg2);">Mount Kimbie</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- AI SET BUILDER -->
+  <section class="setbuilder">
+    <div class="set-header">
+      <span class="set-badge">AI Set Builder</span>
+      <span class="set-title">Club Prep — May 2026</span>
+      <div class="set-prompt-wrap">
+        <input class="set-prompt" type="text" placeholder="e.g. "120–130bpm deep, start dark, peak euphoric"">
+        <button class="set-go">Build Set →</button>
+      </div>
+    </div>
+    <div class="set-list">
+      <div class="set-card">
+        <div class="set-card-num">1</div>
+        <div style="width:100%;aspect-ratio:1;background:linear-gradient(135deg,#1a1028,#0d1a2a);"></div>
+        <div class="set-card-info">
+          <div class="set-card-title">XR2</div>
+          <div class="set-card-sub">Burial · —bpm</div>
+        </div>
+      </div>
+      <div class="set-card">
+        <div class="set-card-num">2</div>
+        <div style="width:100%;aspect-ratio:1;background:linear-gradient(135deg,#1a2a1a,#0a1a3a);"></div>
+        <div class="set-card-info">
+          <div class="set-card-title">Glue</div>
+          <div class="set-card-sub">Bicep · 134bpm</div>
+        </div>
+      </div>
+      <div class="set-card">
+        <div class="set-card-num">3</div>
+        <div style="width:100%;aspect-ratio:1;background:linear-gradient(135deg,#2a1a2a,#1a2a3a);"></div>
+        <div class="set-card-info">
+          <div class="set-card-title">Midnight Frequency</div>
+          <div class="set-card-sub">Bicep · 128bpm</div>
+        </div>
+      </div>
+      <div class="set-card">
+        <div class="set-card-num">4</div>
+        <div style="width:100%;aspect-ratio:1;background:linear-gradient(135deg,#3a1a0a,#1a3a2a);"></div>
+        <div class="set-card-info">
+          <div class="set-card-title">ARIEL</div>
+          <div class="set-card-sub">Four Tet · 112bpm</div>
+        </div>
+      </div>
+      <div class="set-card">
+        <div class="set-card-num">5</div>
+        <div style="width:100%;aspect-ratio:1;background:linear-gradient(135deg,#0a3a2a,#2a0a3a);"></div>
+        <div class="set-card-info">
+          <div class="set-card-title">Nacht 004</div>
+          <div class="set-card-sub">Aphex Twin · 138bpm</div>
+        </div>
+      </div>
+      <div class="set-add-card">＋</div>
+    </div>
+    <div class="xfade-row">
+      <span class="xfade-label">Crossfade</span>
+      <div class="xfade-bar">
+        <div class="xfade-fill"></div>
+        <div class="xfade-knob"></div>
+      </div>
+      <span class="xfade-val">3.0s</span>
+      <span style="margin-left:12px;" class="xfade-label">Smart mix</span>
+      <div style="display:flex;gap:3px;margin-left:4px;">
+        <div class="mode-btn on">Auto Key</div>
+        <div class="mode-btn on">Beat Match</div>
+        <div class="mode-btn">Fade Only</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- TRANSPORT BAR -->
+  <footer class="transport">
+    <div class="t-ctrl">
+      <button class="ctrl-btn">⇄</button>
+      <button class="ctrl-btn">⏮</button>
+      <button class="ctrl-btn play">▶</button>
+      <button class="ctrl-btn">⏭</button>
+      <button class="ctrl-btn">⇌</button>
+    </div>
+    <div class="prog-wrap">
+      <span class="prog-time">2:07</span>
+      <div class="prog-bar"><div class="prog-fill"></div></div>
+      <span class="prog-time">6:14</span>
+    </div>
+    <!-- Compact EQ -->
+    <div class="eq-strip" id="eq-strip"></div>
+    <div class="vol-wrap">
+      <span class="vol-label">VOL</span>
+      <div class="vol-bar"><div class="vol-fill"></div></div>
+    </div>
+    <div class="t-modes">
+      <button class="mode-btn on">Compact</button>
+      <button class="mode-btn">Shade</button>
+      <button class="mode-btn">EQ</button>
+    </div>
+  </footer>
+</div>
+
+<script nonce="N6PP8s18D7Y2z_n2UBQ71g">
+// Visualizer bars
+(function(){
+  const viz = document.getElementById('viz');
+  const heights = [18,28,22,35,30,25,40,32,20,38,28,15,42,36,22,30,18,25,35,28,20,38,30,24,16,32,26,38,22,28,35,20,30,25,18,42,28,22,35,30];
+  heights.forEach(h => {
+    const bar = document.createElement('div');
+    bar.className = 'viz-bar';
+    bar.style.height = h + 'px';
+    bar.style.animationDelay = (Math.random()*1.4) + 's';
+    bar.style.animationDuration = (1.1 + Math.random()*.6) + 's';
+    viz.appendChild(bar);
+  });
+  // EQ bands
+  const eq = document.getElementById('eq-strip');
+  const bands = ['32','64','125','250','500','1k','2k','4k','8k','16k'];
+  const vals = [60,75,80,65,55,70,68,72,60,50];
+  bands.forEach((b,i) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'eq-band';
+    const fader = document.createElement('div');
+    fader.className = 'eq-fader';
+    fader.style.height = vals[i]*.18 + 'px';
+    const lbl = document.createElement('label');
+    lbl.textContent = b;
+    wrap.appendChild(fader);
+    wrap.appendChild(lbl);
+    eq.appendChild(wrap);
+  });
+})();
+</script>
+</body>
+</html>
