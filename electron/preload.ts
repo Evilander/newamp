@@ -9,6 +9,7 @@ import type {
   CachedGuitarTab,
   CustomLyricsInput,
   CustomSkin,
+  ExportTracksFolderInput,
   GuitarTabDocument,
   GuitarTabSearchQuery,
   GuitarTabSearchResult,
@@ -95,6 +96,8 @@ const api: NewampAPI = {
     ipcRenderer.invoke('playlist:export-pls', id) as Promise<string | null>,
   exportPlaylistFolder: (id: number) =>
     ipcRenderer.invoke('playlist:export-folder', id) as Promise<PlaylistFolderExportResult | null>,
+  exportTracksFolder: (input: ExportTracksFolderInput) =>
+    ipcRenderer.invoke('playlist:export-tracks-folder', input) as Promise<PlaylistFolderExportResult | null>,
   importPlaylistM3u: () =>
     ipcRenderer.invoke('playlist:import-m3u') as Promise<PlaylistM3uImportResult | null>,
   exportTrackWav: (id: number) =>

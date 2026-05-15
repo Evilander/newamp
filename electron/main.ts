@@ -43,6 +43,7 @@ import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from '.
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import type {
   CustomSkin,
+  ExportTracksFolderInput,
   AlbumArtLookupInput,
   AlbumArtLookupResult,
   LastfmTrackPayload,
@@ -606,6 +607,28 @@ function registerIpc(): void {
       tracks: library.getPlaylistTracks(playlist.id),
       destinationRoot,
     });
+  });
+  ipcMain.handle('playlist:export-tracks-folder', async (_e, input: ExportTracksFolderInput) => {
+    const trackIds = Array.isArray(input?.trackIds) ? input.trackIds : [];
+    const tracks = trackIds
+      .map((id) => library.getTrack(Math.trunc(Number(id))))
+      .filter((track): track is Track => !!track);
+    if (!tracks.length) return null;
+    const now = Date.now();
+    const playlist: SavedPlaylist = {
+      id: 0,
+      name: normalizeExportFolderName(input?.name, now),
+      trackCount: tracks.length,
+      duration: tracks.reduce((sum, track) => sum + (track.duration ?? 0), 0),
+      hasCoverArt: 0,
+      coverArtUpdatedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const result = await choosePlaylistFolderExportRoot(playlist);
+    const destinationRoot = result.filePaths[0];
+    if (result.canceled || !destinationRoot) return null;
+    return exportPlaylistFolder({ playlist, tracks, destinationRoot });
   });
   ipcMain.handle('playlist:import-m3u', async () => {
     if (mainWin) {
@@ -1762,6 +1785,11 @@ async function choosePlaylistFolderExportRoot(
     properties: ['openDirectory', 'createDirectory'],
   };
   return mainWin ? dialog.showOpenDialog(mainWin, options) : dialog.showOpenDialog(options);
+}
+
+function normalizeExportFolderName(name: unknown, now = Date.now()): string {
+  const value = typeof name === 'string' ? name.trim() : '';
+  return value || `Newamp Queue ${new Date(now).toISOString().slice(0, 10)}`;
 }
 
 async function chooseTrackWavExportPath(track: Track): Promise<Electron.SaveDialogReturnValue> {

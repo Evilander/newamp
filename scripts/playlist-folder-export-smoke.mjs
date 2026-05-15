@@ -76,11 +76,20 @@ const [typesSource, mainSource, preloadSource, apiSource, playlistViewSource, pa
 
 assert.match(typesSource, /PlaylistFolderExportResult/, 'shared API should expose folder export results');
 assert.match(typesSource, /exportPlaylistFolder/, 'shared API should expose playlist folder export');
+assert.match(typesSource, /ExportTracksFolderInput/, 'shared API should expose queue folder export input');
+assert.match(typesSource, /exportTracksFolder/, 'shared API should expose arbitrary track folder export');
 assert.match(mainSource, /playlist:export-folder/, 'main process should register playlist folder export IPC');
+assert.match(mainSource, /playlist:export-tracks-folder/, 'main process should register queue folder export IPC');
+assert.match(mainSource, /normalizeExportFolderName/, 'main process should normalize ad-hoc export folder names');
 assert.match(mainSource, /choosePlaylistFolderExportRoot/, 'main process should use a native folder picker');
 assert.match(preloadSource, /exportPlaylistFolder/, 'preload should expose playlist folder export');
+assert.match(preloadSource, /exportTracksFolder/, 'preload should expose queue folder export');
 assert.match(apiSource, /exportPlaylistFolder/, 'browser-safe API should include playlist folder export');
+assert.match(apiSource, /exportTracksFolder/, 'browser-safe API should include queue folder export');
 assert.match(playlistViewSource, /EXPORT FOLDER/, 'Playlists view should expose portable folder export');
+assert.match(playlistViewSource, /EXPORT QUEUE FOLDER/, 'Playlists view should export the active queue as a folder');
+assert.match(playlistViewSource, /api\.exportTracksFolder/, 'Playlists view should use the queue folder export API');
+assert.match(playlistViewSource, /queueExportName/, 'Playlists view should name ad-hoc queue folder exports');
 assert.match(packageSource, /smoke:playlist-folder-export/, 'package scripts should expose folder export smoke');
 assert.match(releaseGateSource, /smoke:playlist-folder-export/, 'release gate should cover folder export smoke');
 

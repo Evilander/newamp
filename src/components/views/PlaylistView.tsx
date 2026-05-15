@@ -417,6 +417,26 @@ export function PlaylistView(): JSX.Element {
     }
   }
 
+  async function exportQueueFolder(): Promise<void> {
+    if (!queue.length) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const result = await api.exportTracksFolder({
+        name: queueExportName(playlistName),
+        trackIds: queue.map((track) => track.id),
+      });
+      if (!result) {
+        setStatus('Export canceled.');
+        return;
+      }
+      const skipped = result.skipped.length ? `, ${result.skipped.length} skipped` : '';
+      setStatus(`Exported queue folder with ${result.copied} tracks${skipped} to ${result.path}.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function importM3u(): Promise<void> {
     setBusy(true);
     setStatus(null);
@@ -713,6 +733,13 @@ export function PlaylistView(): JSX.Element {
         </button>
         <button className="pxbtn" onClick={clearQueue} disabled={busy || queue.length === 0}>
           CLEAR
+        </button>
+        <button
+          className="pxbtn"
+          onClick={() => void exportQueueFolder()}
+          disabled={busy || queue.length === 0}
+        >
+          EXPORT QUEUE FOLDER
         </button>
         <button className="pxbtn" onClick={() => void saveSmartRule()} disabled={busy}>
           SAVE SMART
@@ -1112,6 +1139,12 @@ function playlistTextMatches(query: string, values: Array<string | null | undefi
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
   return values.some((value) => (value ?? '').toLowerCase().includes(needle));
+}
+
+function queueExportName(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed && trimmed !== 'Newamp Set') return trimmed;
+  return `Newamp Queue ${new Date().toISOString().slice(0, 10)}`;
 }
 
 function formatSleepRemaining(endsAt: number, now: number): string {
