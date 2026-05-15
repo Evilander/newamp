@@ -6,7 +6,9 @@ export function TitleBar(): JSX.Element {
   const [maximized, setMaximized] = useState(false);
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const alwaysOnTop = usePlayerStore((s) => s.alwaysOnTop);
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
+  const setAlwaysOnTop = usePlayerStore((s) => s.setAlwaysOnTop);
 
   useEffect(() => winctl.onState((s) => setMaximized(s.maximized)), []);
 
@@ -48,6 +50,14 @@ export function TitleBar(): JSX.Element {
       </div>
 
       <div className="titlebar-nodrag flex items-center gap-1">
+        <button
+          className={`pxbtn !min-w-[36px] ${alwaysOnTop ? 'is-active' : ''}`}
+          onClick={() => setAlwaysOnTop(!alwaysOnTop)}
+          aria-label="Pin window on top"
+          title={alwaysOnTop ? 'Unpin window' : 'Pin window on top'}
+        >
+          PIN
+        </button>
         <button
           className="pxbtn !min-w-[48px]"
           onClick={() => setCompactMode(true)}

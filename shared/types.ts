@@ -440,6 +440,7 @@ export interface AppSettings {
   preampDb: number;
   resumeState: PlaybackResumeState | null;
   compactMode: boolean;
+  alwaysOnTop: boolean;
   visualizerPreset: VisualizerPreset;
   volume: number;
   playbackRate: number;

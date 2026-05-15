@@ -11,6 +11,7 @@ export function CompactPlayer(): JSX.Element {
   const duration = usePlayerStore((s) => s.duration);
   const volume = usePlayerStore((s) => s.volume);
   const mode = usePlayerStore((s) => s.mode);
+  const alwaysOnTop = usePlayerStore((s) => s.alwaysOnTop);
   const setMode = usePlayerStore((s) => s.setMode);
   const setVolume = usePlayerStore((s) => s.setVolume);
   const seek = usePlayerStore((s) => s.seek);
@@ -18,6 +19,7 @@ export function CompactPlayer(): JSX.Element {
   const next = usePlayerStore((s) => s.next);
   const prev = usePlayerStore((s) => s.prev);
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
+  const setAlwaysOnTop = usePlayerStore((s) => s.setAlwaysOnTop);
   const setFullscreenViz = usePlayerStore((s) => s.setFullscreenViz);
   const stop = () => usePlayerStore.getState().engine.stop();
 
@@ -50,6 +52,13 @@ export function CompactPlayer(): JSX.Element {
             </div>
             <div className="compact-window titlebar-nodrag">
               <button onClick={() => void winctl.minimize()} title="Minimize">_</button>
+              <button
+                className={alwaysOnTop ? 'active' : ''}
+                onClick={() => setAlwaysOnTop(!alwaysOnTop)}
+                title={alwaysOnTop ? 'Unpin window' : 'Pin window on top'}
+              >
+                PIN
+              </button>
               <button onClick={() => setCompactMode(false)} title="Full library">FULL</button>
               <button onClick={() => void winctl.close()} title="Close">x</button>
             </div>

@@ -32,6 +32,7 @@ export default function App(): JSX.Element {
   const showEq = usePlayerStore((s) => s.showEq);
   const fullscreen = usePlayerStore((s) => s.fullscreenViz);
   const compact = usePlayerStore((s) => s.compactMode);
+  const alwaysOnTop = usePlayerStore((s) => s.alwaysOnTop);
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTime = usePlayerStore((s) => s.currentTime);
@@ -159,6 +160,10 @@ export default function App(): JSX.Element {
   useEffect(() => {
     void winctl.setCompact(compact);
   }, [compact]);
+
+  useEffect(() => {
+    void winctl.setAlwaysOnTop(compact || alwaysOnTop);
+  }, [compact, alwaysOnTop]);
 
   useEffect(() => {
     syncMediaSession({

@@ -25,6 +25,7 @@ const DEFAULTS: AppSettings = {
   preampDb: 0,
   resumeState: null,
   compactMode: false,
+  alwaysOnTop: false,
   visualizerPreset: 'spectrum',
   volume: 0.75,
   playbackRate: 1,
@@ -69,6 +70,7 @@ export class SettingsStore {
           limiterEnabled: normalizeLimiterEnabled(parsed.limiterEnabled),
           preampDb: normalizePreampDb(parsed.preampDb),
           compactMode: parsed.compactMode === true,
+          alwaysOnTop: parsed.alwaysOnTop === true,
           visualizerPreset: normalizeVisualizerPreset(parsed.visualizerPreset),
           autoDjEnabled: !!parsed.autoDjEnabled,
           autoDjTarget: normalizeAutoDjTarget(parsed.autoDjTarget ?? DEFAULTS.autoDjTarget),
@@ -113,6 +115,9 @@ export class SettingsStore {
       compactMode: patch.compactMode === undefined
         ? this.state.compactMode
         : patch.compactMode === true,
+      alwaysOnTop: patch.alwaysOnTop === undefined
+        ? this.state.alwaysOnTop
+        : patch.alwaysOnTop === true,
       visualizerPreset: patch.visualizerPreset === undefined
         ? this.state.visualizerPreset
         : normalizeVisualizerPreset(patch.visualizerPreset),

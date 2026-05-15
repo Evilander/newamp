@@ -663,6 +663,7 @@ input[type='range'].nslider.eq-slider {
     inset 0 -1px 0 var(--bevel-dark);
 }
 .compact-window button:hover,
+.compact-window button.active,
 .compact-controls button:hover,
 .compact-controls button.active {
   color: var(--accent);

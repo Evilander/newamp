@@ -32,6 +32,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   preampDb: 0,
   resumeState: null,
   compactMode: false,
+  alwaysOnTop: false,
   visualizerPreset: 'spectrum',
   volume: 0.75,
   playbackRate: 1,
@@ -324,6 +325,7 @@ export const winctl = {
   minimize: () => window.winctl?.minimize() ?? Promise.resolve(),
   toggleMax: () => window.winctl?.toggleMax() ?? Promise.resolve(),
   setCompact: (on: boolean) => window.winctl?.setCompact(on) ?? Promise.resolve(),
+  setAlwaysOnTop: (on: boolean) => window.winctl?.setAlwaysOnTop(on) ?? Promise.resolve(),
   close: () => window.winctl?.close() ?? Promise.resolve(),
   onState: (cb: (s: { maximized: boolean }) => void) =>
     window.winctl?.onState(cb) ?? (() => undefined),
