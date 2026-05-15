@@ -1,38 +1,17 @@
-import { useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { EQ_BAND_FREQS } from '../audio/engine';
-
-interface Preset {
-  name: string;
-  values: number[];
-}
-
-const PRESETS: Preset[] = [
-  { name: 'Flat', values: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
-  { name: 'Rock', values: [4, 3, -1, -2, -1, 1, 3, 4, 5, 5] },
-  { name: 'Jazz', values: [3, 2, 1, 2, -1, -1, 0, 1, 2, 3] },
-  { name: 'Classical', values: [4, 3, 2, 1, 0, 0, -1, -1, -2, -2] },
-  { name: 'Electronic', values: [4, 3, 0, -2, -2, 0, 1, 2, 4, 5] },
-  { name: 'Hip-Hop', values: [5, 4, 2, 1, -1, -1, 1, 2, 3, 3] },
-  { name: 'Vocal', values: [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1] },
-  { name: 'Bass+', values: [6, 5, 3, 1, 0, 0, 0, 0, 0, 0] },
-  { name: 'Treble+', values: [0, 0, 0, 0, 0, 1, 3, 5, 6, 6] },
-];
+import { EQ_PRESETS, findEqPresetName } from '@shared/eq-presets';
 
 export function EqPanel(): JSX.Element {
   const settings = usePlayerStore((s) => s.settings);
   const setEqBand = usePlayerStore((s) => s.setEqBand);
+  const setEqPreset = usePlayerStore((s) => s.setEqPreset);
   const setEqEnabled = usePlayerStore((s) => s.setEqEnabled);
-  const [presetName, setPresetName] = useState<string>('Flat');
 
   if (!settings) return <div />;
   const values = settings.equalizer;
   const enabled = settings.eqEnabled;
-
-  function applyPreset(p: Preset) {
-    setPresetName(p.name);
-    p.values.forEach((v, i) => void setEqBand(i, v));
-  }
+  const presetName = findEqPresetName(values);
 
   return (
     <div
@@ -50,11 +29,11 @@ export function EqPanel(): JSX.Element {
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-1">
-          {PRESETS.map((p) => (
+          {EQ_PRESETS.map((p) => (
             <button
               key={p.name}
               className={`pxbtn ${presetName === p.name ? 'is-active' : ''}`}
-              onClick={() => applyPreset(p)}
+              onClick={() => void setEqPreset(p.values)}
             >
               {p.name}
             </button>

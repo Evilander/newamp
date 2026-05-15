@@ -61,6 +61,7 @@
     "smoke:audio-output": "npm run build:electron && node scripts/audio-output-smoke.mjs",
     "smoke:audio-hardware": "node scripts/audio-hardware-readiness-smoke.mjs",
     "smoke:manual-listening-proof": "node scripts/manual-listening-proof-smoke.mjs",
+    "smoke:eq": "npm run build:electron && node scripts/eq-smoke.mjs",
     "smoke:audio-limiter": "npm run build:electron && node scripts/audio-limiter-smoke.mjs",
     "smoke:rating": "npm run build:electron && node scripts/rating-smoke.mjs",
     "smoke:library-watch": "npm run build:electron && node scripts/library-watch-smoke.mjs",

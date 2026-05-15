@@ -14,6 +14,7 @@ import { applyTheme } from '../lib/skins';
 import { normalizePlaybackRate } from '@shared/tempo-trainer';
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
 import { normalizePreampDb } from '@shared/audio-limiter';
+import { normalizeEqValues } from '@shared/eq-presets';
 import {
   autoDjSmartRuleCandidateCount,
   normalizeAutoDjTarget,
@@ -121,6 +122,7 @@ interface PlayerState {
   refillAutoDjQueue: (force?: boolean) => Promise<Track[]>;
   setMode: (m: PlaybackMode) => void;
   setEqBand: (i: number, dB: number) => Promise<void>;
+  setEqPreset: (values: number[]) => Promise<void>;
   setEqEnabled: (on: boolean) => Promise<void>;
   toggleLove: (id: number) => Promise<void>;
   setTrackRating: (id: number, rating: number) => Promise<Track | null>;
@@ -832,19 +834,27 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     setEqBand: async (i, dB) => {
-      engine.setEqBand(i, dB);
       const cur = get().settings;
       if (!cur) return;
       const next = [...cur.equalizer];
       next[i] = dB;
-      const settings = await api.setSettings({ equalizer: next });
+      const normalized = normalizeEqValues(next);
+      engine.setEqBand(i, normalized[i] ?? 0);
+      const settings = await api.setSettings({ equalizer: normalized });
+      set({ settings });
+    },
+
+    setEqPreset: async (values) => {
+      const next = normalizeEqValues(values);
+      engine.setEqBands(next);
+      const settings = await api.setSettings({ equalizer: next, eqEnabled: true });
       set({ settings });
     },
 
     setEqEnabled: async (on) => {
       const cur = get().settings;
       if (!cur) return;
-      if (on) cur.equalizer.forEach((v, i) => engine.setEqBand(i, v));
+      if (on) engine.setEqBands(cur.equalizer);
       else engine.setEqEnabled(false);
       const settings = await api.setSettings({ eqEnabled: on });
       set({ settings });
