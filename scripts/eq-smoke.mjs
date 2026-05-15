@@ -21,10 +21,11 @@ assert.deepEqual(
 );
 assert.deepEqual(presets.normalizeEqValues([1, 2, 3]), flat.values);
 
-const [settingsSource, storeSource, panelSource, packageSource, gateSource] = await Promise.all([
+const [settingsSource, storeSource, panelSource, stylesSource, packageSource, gateSource] = await Promise.all([
   readFile(new URL('../electron/settings.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/store/usePlayerStore.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/EqPanel.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8'),
   readFile(new URL('../package.json', import.meta.url), 'utf8'),
   readFile(new URL('../scripts/release-gate.mjs', import.meta.url), 'utf8'),
 ]);
@@ -35,6 +36,11 @@ assert.match(storeSource, /engine\.setEqBands/, 'player store should apply prese
 assert.match(panelSource, /EQ_PRESETS/, 'EQ panel should render shared presets');
 assert.match(panelSource, /findEqPresetName/, 'EQ panel should derive active preset from current settings');
 assert.doesNotMatch(panelSource, /useState/, 'EQ panel should not keep stale local preset state');
+assert.match(panelSource, /eq-slider-frame/, 'EQ panel should use a stable CSS frame for vertical sliders');
+assert.doesNotMatch(panelSource, /orient:\s*['"]vertical['"]/, 'EQ panel should not rely on the legacy orient attribute');
+assert.doesNotMatch(panelSource, /slider-vertical/, 'EQ panel should not rely on WebKit-only vertical slider appearance');
+assert.match(stylesSource, /\.eq-slider-frame/, 'styles should define the vertical EQ slider frame');
+assert.match(stylesSource, /transform:\s*rotate\(-90deg\)/, 'vertical EQ sliders should be CSS-rotated standard range inputs');
 assert.match(packageSource, /"smoke:eq"/, 'package.json should expose the EQ smoke');
 assert.match(gateSource, /smoke:eq/, 'release gate should include the EQ smoke');
 

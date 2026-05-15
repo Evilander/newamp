@@ -399,6 +399,19 @@ input[type='range'].nslider::-webkit-slider-thumb {
   margin-top: -4px;
   box-shadow: 0 0 8px var(--accent-glow);
 }
+.eq-slider-frame {
+  display: flex;
+  width: 18px;
+  height: 84px;
+  align-items: center;
+  justify-content: center;
+}
+input[type='range'].nslider.eq-slider {
+  width: 80px;
+  height: 18px;
+  transform: rotate(-90deg);
+  transform-origin: center;
+}
 
 .titlebar-drag {
   -webkit-app-region: drag;

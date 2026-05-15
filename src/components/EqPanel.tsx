@@ -46,22 +46,18 @@ export function EqPanel(): JSX.Element {
             <div className="lcd-text text-[10px]">
               {values[i] > 0 ? `+${values[i]}` : values[i]}
             </div>
-            <input
-              type="range"
-              min={-12}
-              max={12}
-              step={1}
-              value={values[i]}
-              onChange={(e) => void setEqBand(i, parseFloat(e.target.value))}
-              className="nslider"
-              style={{
-                writingMode: 'vertical-lr' as React.CSSProperties['writingMode'],
-                WebkitAppearance: 'slider-vertical',
-                width: 16,
-                height: 80,
-              } as React.CSSProperties}
-              {...({ orient: 'vertical' } as Record<string, string>)}
-            />
+            <div className="eq-slider-frame">
+              <input
+                type="range"
+                min={-12}
+                max={12}
+                step={1}
+                value={values[i]}
+                onChange={(e) => void setEqBand(i, parseFloat(e.target.value))}
+                className="nslider eq-slider"
+                aria-label={`EQ ${freq < 1000 ? freq : `${freq / 1000}k`} band`}
+              />
+            </div>
             <div className="lcd-text">{freq < 1000 ? `${freq}` : `${freq / 1000}k`}</div>
           </div>
         ))}
