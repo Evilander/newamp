@@ -104,7 +104,17 @@ Both commands are non-mutating by default. Readiness checks the README, package 
 
 ```bash
 npm run smoke:library
+npm run smoke:incremental-scan
+npm run smoke:scanner-queue
+npm run smoke:library-paging
 npm run smoke:artist
+npm run smoke:folders
+npm run smoke:search
+npm run smoke:smart
+npm run smoke:harmonic
+npm run smoke:auto-dj
+npm run smoke:metadata
+npm run smoke:health
 npm run smoke:podcast
 npm run smoke:podcast-progress
 npm run smoke:podcast-download
