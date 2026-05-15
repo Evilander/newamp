@@ -21,7 +21,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - **Local library scanner.** Recursively indexes real music folders into a local `sql.js` catalog with tag parsing through `music-metadata`.
 - **Broad playback support.** Handles MP3, FLAC, OGG/Opus, WAV, M4A/AAC/ALAC, WMA, AIFF, APE, WV, MPC, TTA, MKA, AC3, DTS, DSF, playlists, and ffmpeg fallback formats.
 - **Home command center.** Opens to a useful dashboard with continue playback, library stats, health signals, fresh imports, heavy rotation, loved tracks, harmonic mixes, and saved playlists.
-- **Custom playlists.** Create named playlists, append tracks in bulk, add folders, set playlist artwork, and launch playlists directly from Home.
+- **Custom playlists.** Create named playlists, filter large playlist lists/tracks, append tracks in bulk, add folders, set playlist artwork, and launch playlists directly from Home.
 - **Smart rules and stations.** Build dynamic rules from genre, artist, album, year/era, rating, love state, play count, date added, BPM, key, and search filters; launch rule-driven radio stations.
 - **Podcasts.** Add podcast feeds, keep episode progress, mark completions, and download episodes for local playback.
 - **Milkdrop visualizer.** Butterchurn-powered fullscreen Milkdrop plus lighter built-in analyzer modes.

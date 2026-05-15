@@ -232,6 +232,10 @@ assert.match(playlistViewSource, /loadSelectedPlaylistToQueue/, 'saved playlists
 assert.match(playlistViewSource, /playSelectedPlaylist/, 'saved playlists should require an explicit play action');
 assert.match(playlistViewSource, /loadQueue\(selectedPlaylistTracks\)/, 'explicit load-to-queue should use the selected playlist editor tracks');
 assert.match(playlistViewSource, /playQueue\(selectedPlaylistTracks, 0\)/, 'explicit playlist play should use the selected playlist editor tracks');
+assert.match(playlistViewSource, /playlistListFilter/, 'saved playlists should be filterable by name');
+assert.match(playlistViewSource, /playlistTrackFilter/, 'selected playlist tracks should be filterable inside the editor');
+assert.match(playlistViewSource, /visibleSelectedPlaylistTracks/, 'playlist editor should render a filtered playlist-track view');
+assert.match(playlistViewSource, /Filter playlist tracks/, 'playlist editor should expose a track filter input');
 assert.match(playlistViewSource, /EXPORT PLS/, 'Now Queue should expose PLS export for Winamp playlist compatibility');
 assert.match(mainSource, /newplaylistart/, 'main process should register a playlist art protocol');
 assert.match(mainSource, /\.pls/, 'main process should import and open PLS playlists');
