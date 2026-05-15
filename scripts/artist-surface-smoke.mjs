@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { fetchArtistFacts } from '../src/api/artistFacts.ts';
 
 const [artistFactsSource, artistsViewSource, nowPlayingSource] = await Promise.all([
   readFile(new URL('../src/api/artistFacts.ts', import.meta.url), 'utf8'),
@@ -18,37 +19,114 @@ assert.match(artistFactsSource, /writeCachedArtistFact/, 'artist facts should pe
 assert.match(artistsViewSource, /ArtistSpotlight/, 'Artists view should show an artist image/facts spotlight');
 assert.match(nowPlayingSource, /ArtistImageStage/, 'Now Playing should render an image-first artist facts stage');
 
-const params = new URLSearchParams({
-  origin: '*',
-  action: 'query',
-  redirects: '1',
-  titles: 'Radiohead',
-  prop: 'extracts|pageimages|info|description',
-  exintro: '1',
-  explaintext: '1',
-  inprop: 'url',
-  piprop: 'thumbnail|original',
-  pithumbsize: '900',
-  format: 'json',
+const originalFetch = globalThis.fetch;
+const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+const storage = new Map();
+const requestedUrls = [];
+
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  value: {
+    getItem: (key) => storage.get(key) ?? null,
+    setItem: (key, value) => storage.set(key, String(value)),
+    removeItem: (key) => storage.delete(key),
+  },
 });
 
-const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`);
-assert.equal(res.ok, true, `Wikipedia artist image probe failed: ${res.status}`);
-const data = await res.json();
-const page = Object.values(data.query?.pages ?? {})[0];
-assert.ok(page?.thumbnail?.source || page?.original?.source, 'Radiohead artist image probe returned no image');
-assert.ok(page?.extract, 'Radiohead artist image probe returned no extract');
+try {
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(String(url));
+    return jsonResponse({
+      query: {
+        pages: {
+          1: {
+            title: 'Radiohead',
+            description: 'English rock band',
+            extract: 'Radiohead are an English rock band formed in Abingdon, Oxfordshire.',
+            fullurl: 'https://en.wikipedia.org/wiki/Radiohead',
+            thumbnail: { source: 'https://images.example/radiohead-900.jpg' },
+            original: { source: 'https://images.example/radiohead-original.jpg' },
+          },
+        },
+      },
+    });
+  };
 
-console.log(
-  JSON.stringify(
-    {
-      ok: true,
-      title: page.title,
-      hasThumbnail: !!page.thumbnail?.source,
-      hasOriginal: !!page.original?.source,
-      extractChars: page.extract.length,
-    },
-    null,
-    2,
-  ),
-);
+  const fact = await fetchArtistFacts('Radiohead');
+  assert.ok(fact, 'artist facts should be produced from a valid wiki page');
+  assert.equal(fact.title, 'Radiohead');
+  assert.equal(fact.description, 'English rock band');
+  assert.equal(fact.thumbnailUrl, 'https://images.example/radiohead-900.jpg');
+  assert.equal(fact.originalImageUrl, 'https://images.example/radiohead-original.jpg');
+  assert.match(fact.summary, /English rock band/);
+
+  const directUrl = new URL(requestedUrls[0]);
+  assert.equal(directUrl.searchParams.get('titles'), 'Radiohead');
+  assert.equal(directUrl.searchParams.get('piprop'), 'thumbnail|original');
+  assert.equal(directUrl.searchParams.get('pithumbsize'), '900');
+  assert.equal(storage.size, 1, 'successful artist facts should be cached locally');
+
+  globalThis.fetch = async () => {
+    throw new Error('cache should avoid a second network fetch');
+  };
+  assert.deepEqual(await fetchArtistFacts('Radiohead'), fact, 'second lookup should read cached artist facts');
+
+  storage.clear();
+  requestedUrls.length = 0;
+  let fallbackCall = 0;
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(String(url));
+    fallbackCall += 1;
+    if (fallbackCall === 1) {
+      return jsonResponse({ query: { pages: { '-1': { title: 'Missing' } } } });
+    }
+    return jsonResponse({
+      query: {
+        pages: {
+          2: {
+            title: 'The National',
+            description: 'American rock band',
+            extract: 'The National are an American rock band formed in Cincinnati, Ohio.',
+            fullurl: 'https://en.wikipedia.org/wiki/The_National_(band)',
+            thumbnail: { source: 'https://images.example/national-900.jpg' },
+          },
+        },
+      },
+    });
+  };
+
+  const fallback = await fetchArtistFacts('The National');
+  assert.ok(fallback, 'artist facts should fall back to a musician-oriented search');
+  assert.equal(fallback.title, 'The National');
+  const fallbackUrl = new URL(requestedUrls[1]);
+  assert.equal(fallbackUrl.searchParams.get('generator'), 'search');
+  assert.match(fallbackUrl.searchParams.get('gsrsearch') ?? '', /band OR singer OR musician/);
+
+  console.log(
+    JSON.stringify(
+      {
+        ok: true,
+        directTitle: fact.title,
+        fallbackTitle: fallback.title,
+        cachedEntries: storage.size,
+        requests: requestedUrls.length,
+      },
+      null,
+      2,
+    ),
+  );
+} finally {
+  globalThis.fetch = originalFetch;
+  if (originalLocalStorage) {
+    Object.defineProperty(globalThis, 'localStorage', originalLocalStorage);
+  } else {
+    delete globalThis.localStorage;
+  }
+}
+
+function jsonResponse(data) {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}

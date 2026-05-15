@@ -31,6 +31,7 @@ if (!skipSmokes) {
   for (const script of [
     'smoke:library',
     'smoke:album-art',
+    'smoke:artist',
     'smoke:home',
     'smoke:quick-play',
     'smoke:suggested-stations',
