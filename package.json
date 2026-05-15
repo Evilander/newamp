@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "A Winamp-inspired modern music player. Your local library, your rules, no streaming required.",
   "main": "dist-electron/electron/main.js",
   "type": "module",

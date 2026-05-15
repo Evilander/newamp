@@ -229,7 +229,7 @@ function readAppInfo(): { platform: string; appVersion: string } {
   } catch {
     /* ignore */
   }
-  return { platform: process.platform || 'unknown', appVersion: '0.1.0' };
+  return { platform: process.platform || 'unknown', appVersion: '1.0.0' };
 }
 
 contextBridge.exposeInMainWorld('newamp', api);

@@ -15,7 +15,7 @@ function pickHost(): string {
 }
 
 const COMMON: RequestInit = {
-  headers: { 'User-Agent': 'Newamp/0.1.0' },
+  headers: { 'User-Agent': 'Newamp/1.0.0' },
 };
 
 export async function searchStations(opts: {

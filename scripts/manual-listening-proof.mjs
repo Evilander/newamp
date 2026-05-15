@@ -18,9 +18,10 @@ export function defaultManualListeningProofPath(root = repoRoot) {
 }
 
 export function defaultManualListeningArtifacts(root = repoRoot) {
+  const version = appVersion(root);
   return [
-    { name: 'installer', path: resolve(root, 'release', 'Newamp Setup 0.1.0.exe') },
-    { name: 'portable', path: resolve(root, 'release', 'Newamp Portable 0.1.0.exe') },
+    { name: 'installer', path: resolve(root, 'release', `Newamp Setup ${version}.exe`) },
+    { name: 'portable', path: resolve(root, 'release', `Newamp Portable ${version}.exe`) },
     { name: 'exe', path: resolve(root, 'release', 'win-unpacked', 'Newamp.exe') },
   ];
 }
@@ -144,6 +145,15 @@ function manualProofReason({ missingConfirmations, mismatchedArtifacts, createdA
 
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex').toUpperCase();
+}
+
+function appVersion(root) {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
+    return String(pkg.version ?? '').trim() || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
 }
 
 function parseCliArgs(argv) {

@@ -17,8 +17,10 @@ const skipSmokes = args.has('--skip-smokes');
 const skipPackage = args.has('--skip-package');
 
 const realLibraryRoot = process.env.NEWAMP_REAL_LIBRARY_ROOT || 'K:/music';
-const installerPath = resolve(repoRoot, 'release', 'Newamp Setup 0.1.0.exe');
-const portablePath = resolve(repoRoot, 'release', 'Newamp Portable 0.1.0.exe');
+const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
+const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
+const installerPath = resolve(repoRoot, 'release', `Newamp Setup ${releaseVersion}.exe`);
+const portablePath = resolve(repoRoot, 'release', `Newamp Portable ${releaseVersion}.exe`);
 const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'Newamp.exe');
 
 const checks = [];
@@ -221,7 +223,6 @@ function artifact(path, minimumBytes) {
 }
 
 function checkFileAssociations() {
-  const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
   const associations = pkg.build?.fileAssociations ?? [];
   const extGroups = associations.map((item) => item.ext ?? []).flat();
   const required = ['mp3', 'flac', 'wav', 'm4a', 'wma', 'm3u', 'm3u8', 'pls'];

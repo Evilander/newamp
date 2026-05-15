@@ -7,13 +7,14 @@ const repoRoot = resolve('.');
 const packagePath = resolve(repoRoot, 'package.json');
 const readmePath = resolve(repoRoot, 'README.md');
 const gitDir = resolveGitDir(repoRoot, process.env);
+const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
+const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
 const artifacts = [
-  { name: 'installer', path: resolve(repoRoot, 'release', 'Newamp Setup 0.1.0.exe') },
-  { name: 'portable', path: resolve(repoRoot, 'release', 'Newamp Portable 0.1.0.exe') },
+  { name: 'installer', path: resolve(repoRoot, 'release', `Newamp Setup ${releaseVersion}.exe`) },
+  { name: 'portable', path: resolve(repoRoot, 'release', `Newamp Portable ${releaseVersion}.exe`) },
   { name: 'exe', path: resolve(repoRoot, 'release', 'win-unpacked', 'Newamp.exe') },
 ];
 
-const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
 const checks = [
   packageVersionCheck(),
   readmeCheck(),
@@ -49,7 +50,7 @@ const report = {
     'complete speaker/headphone checks, then run npm run release:record-listening-proof -- --confirm-playback --confirm-output-switching --confirm-crossfade --confirm-gapless',
     'npm run release:gate',
     gitDir
-      ? `git init --bare ${gitDir} && git --git-dir ${gitDir} --work-tree . add . && git --git-dir ${gitDir} --work-tree . commit -m "Release Newamp 1.0.0"`
+      ? `${existsSync(gitDir) ? '' : `git init --bare ${gitDir} && `}git --git-dir ${gitDir} --work-tree . add . && git --git-dir ${gitDir} --work-tree . commit -m "Release Newamp 1.0.0"`
       : 'git init && git add . && git commit -m "Release Newamp 1.0.0"',
     'gh auth login',
     'npm run release:publication-readiness',
