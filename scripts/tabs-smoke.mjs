@@ -157,6 +157,23 @@ assert.equal(
   tabs.buildUltimateGuitarSearchUrl({ artist: 'Radiohead', title: 'Creep' }).toString(),
   'https://www.ultimate-guitar.com/search.php?search_type=title&value=Radiohead+Creep',
 );
+const noisySearchValues = tabs
+  .buildUltimateGuitarSearchCandidates({
+    artist: 'Radiohead',
+    title: 'Paranoid Android - Remastered 2020 (Live)',
+    limit: 5,
+  })
+  .map((url) => url.searchParams.get('value'));
+assert.equal(
+  noisySearchValues[0],
+  'Radiohead Paranoid Android - Remastered 2020 (Live)',
+  'current-song tab search should try the exact library title first',
+);
+assert.ok(
+  noisySearchValues.includes('Radiohead Paranoid Android'),
+  'current-song tab search should retry with remaster/live descriptors stripped',
+);
+assert.ok(noisySearchValues.length <= 4, 'current-song tab search retries should stay bounded');
 assert.deepEqual(tabs.buildUltimateGuitarTabUrlCandidates('https://tabs.ultimate-guitar.com/tab/radiohead/creep-chords-4169'), [
   'https://tabs.ultimate-guitar.com/tab/radiohead/creep-chords-4169',
   'https://www.ultimate-guitar.com/tab/radiohead/creep-chords-4169',
