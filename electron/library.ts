@@ -35,6 +35,7 @@ import type {
   SmartPlaylistRuleInput,
   SmartPlaylistSuggestion,
   TasteMixInput,
+  TrackQueryOptions,
   TrackMetadataPatchInput,
   TrackBookmark,
   Track,
@@ -676,29 +677,28 @@ export class LibraryStore {
     };
   }
 
-  getTracks(opts: { search?: string; limit?: number; offset?: number; sort?: string }): Track[] {
-    const sortKey = (() => {
-      switch (opts.sort) {
-        case 'recent':
-          return 'last_played DESC, mtime DESC';
-        case 'plays':
-          return 'play_count DESC, title COLLATE NOCASE';
-        case 'loved':
-          return 'loved DESC, artist COLLATE NOCASE, album COLLATE NOCASE';
-        case 'added':
-          return 'mtime DESC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no';
-        case 'rating':
-          return 'rating DESC, loved DESC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no';
-        case 'album':
-          return 'album_artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no';
-        case 'artist':
-        default:
-          return 'artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no';
-      }
-    })();
+  getTrackCount(opts: Pick<TrackQueryOptions, 'search' | 'sort'> = {}): number {
+    const { whereSql, params } = this.buildTrackQuery(opts);
+    const row = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks ${whereSql}`, params);
+    return row?.n ?? 0;
+  }
 
+  getTracks(opts: TrackQueryOptions = {}): Track[] {
+    const sortKey = trackSortOrder(opts.sort);
     const limit = Math.max(1, Math.min(opts.limit ?? 1000, 100000));
     const offset = Math.max(0, opts.offset ?? 0);
+    const { whereSql, params } = this.buildTrackQuery(opts);
+
+    return this.many(
+      `SELECT * FROM tracks ${whereSql} ORDER BY ${sortKey} LIMIT ? OFFSET ?`,
+      [...params, limit, offset],
+    ).map(rowToTrack);
+  }
+
+  private buildTrackQuery(opts: Pick<TrackQueryOptions, 'search' | 'sort'>): {
+    whereSql: string;
+    params: unknown[];
+  } {
     const where: string[] = [];
     const params: unknown[] = [];
 
@@ -712,10 +712,7 @@ export class LibraryStore {
     params.push(...searchWhere.params);
 
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    return this.many(
-      `SELECT * FROM tracks ${whereSql} ORDER BY ${sortKey} LIMIT ? OFFSET ?`,
-      [...params, limit, offset],
-    ).map(rowToTrack);
+    return { whereSql, params };
   }
 
   getTrack(id: number): Track | null {
@@ -2078,6 +2075,34 @@ function playlistCoverMime(path: string): string | null {
 function normalizePlaylistName(name: string): string {
   const trimmed = name.replace(/\s+/g, ' ').trim();
   return trimmed || `Playlist ${new Date().toLocaleString()}`;
+}
+
+function trackSortOrder(sort: string | undefined): string {
+  switch (sort) {
+    case 'recent':
+      return 'last_played DESC, mtime DESC, artist COLLATE NOCASE, title COLLATE NOCASE';
+    case 'plays':
+      return 'play_count DESC, title COLLATE NOCASE, artist COLLATE NOCASE';
+    case 'loved':
+      return 'loved DESC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE';
+    case 'added':
+      return 'mtime DESC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE';
+    case 'rating':
+      return 'rating DESC, loved DESC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE';
+    case 'title':
+      return 'title COLLATE NOCASE, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no';
+    case 'year':
+      return 'year IS NULL, year DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE';
+    case 'genre':
+      return 'genre IS NULL, genre COLLATE NOCASE, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE';
+    case 'duration':
+      return 'duration IS NULL, duration DESC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE';
+    case 'album':
+      return 'album_artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE';
+    case 'artist':
+    default:
+      return 'artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE';
+  }
 }
 
 function parseTrackSearchQuery(input: string): ParsedTrackSearch {

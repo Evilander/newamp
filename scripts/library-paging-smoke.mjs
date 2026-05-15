@@ -39,9 +39,17 @@ try {
 
   const firstPage = library.getTracks({ sort: 'album', limit: 5000, offset: 0 });
   const secondPage = library.getTracks({ sort: 'album', limit: 5000, offset: firstPage.length });
+  const exactTotal = library.getTrackCount({ search: 'Paging Smoke', sort: 'artist' });
+  const titleSorted = library.getTracks({ sort: 'title', limit: 3, offset: 0 });
+  const newest = library.getTracks({ sort: 'added', limit: 1, offset: 0 })[0];
+  const longest = library.getTracks({ sort: 'duration', limit: 1, offset: 0 })[0];
   assert.equal(firstPage.length, 5000, 'first large-library page should respect the UI page size');
   assert.equal(secondPage.length, 12, 'second large-library page should expose tracks beyond the first 5000');
   assert.equal(new Set([...firstPage, ...secondPage].map((track) => track.id)).size, total, 'paged results should not duplicate tracks');
+  assert.equal(exactTotal, total, 'large-library search should expose an exact filtered total');
+  assert.equal(titleSorted[0]?.title, 'Paging Track 00001', 'title sort should be available for direct track lookup');
+  assert.equal(newest?.title, 'Paging Track 05012', 'added sort should expose newest imports first');
+  assert.equal(longest?.title, 'Paging Track 00001', 'duration sort should be deterministic when durations match');
 
   const [libraryViewSource, packageSource] = await Promise.all([
     readText('../src/components/views/LibraryView.tsx'),
@@ -51,9 +59,19 @@ try {
   assert.match(libraryViewSource, /offset: tracks\.length/, 'LibraryView should request subsequent pages by loaded row count');
   assert.match(libraryViewSource, /Load more/, 'LibraryView should expose a load-more control');
   assert.match(libraryViewSource, /hasMoreTracks/, 'LibraryView should track whether more catalog rows are available');
+  assert.match(libraryViewSource, /getTrackCount/, 'LibraryView should fetch exact filtered totals');
+  for (const sortId of ['title', 'added', 'year', 'genre', 'duration']) {
+    assert.match(libraryViewSource, new RegExp(`id: '${sortId}'`), `LibraryView should expose ${sortId} sort`);
+  }
   assert.match(packageSource, /smoke:library-paging/, 'package scripts should expose library paging smoke');
 
-  console.log(JSON.stringify({ ok: true, firstPage: firstPage.length, secondPage: secondPage.length }, null, 2));
+  console.log(
+    JSON.stringify(
+      { ok: true, firstPage: firstPage.length, secondPage: secondPage.length, exactTotal },
+      null,
+      2,
+    ),
+  );
 } finally {
   library.close();
 }

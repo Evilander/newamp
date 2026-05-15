@@ -55,6 +55,7 @@ const api: NewampAPI = {
     return () => ipcRenderer.off('library:scan-progress', handler);
   },
   getTracks: (opts) => ipcRenderer.invoke('library:get-tracks', opts) as Promise<Track[]>,
+  getTrackCount: (opts) => ipcRenderer.invoke('library:get-track-count', opts) as Promise<number>,
   getAlbums: () => ipcRenderer.invoke('library:get-albums'),
   lookupAlbumArt: (input: AlbumArtLookupInput) =>
     ipcRenderer.invoke('album-art:lookup', input) as Promise<AlbumArtLookupResult[]>,

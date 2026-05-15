@@ -82,6 +82,7 @@ const stub: NewampAPI = {
   cancelScan: async () => undefined,
   onScanProgress: () => () => undefined,
   getTracks: async () => [],
+  getTrackCount: async () => 0,
   getAlbums: async () => [],
   lookupAlbumArt: async () => [],
   applyAlbumArt: async (input, candidate) => ({
