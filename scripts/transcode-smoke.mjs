@@ -4,7 +4,12 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { playbackMode, transcodeToWavResponse, transcodeTrackToWavFile } from '../dist-electron/electron/transcode.js';
+import {
+  playbackMode,
+  transcodeToWavResponse,
+  transcodeTrackToWavFile,
+  transcodeTracksToWavFolder,
+} from '../dist-electron/electron/transcode.js';
 
 const target = process.argv[2] ?? generateFixture();
 
@@ -51,19 +56,37 @@ const ok = res.ok && playbackMode(filePath) === 'ffmpeg' && magic === 'RIFF' && 
 const exportPath = resolve('tmp', 'transcode-smoke', 'exported-track.wav');
 const exported = await transcodeTrackToWavFile(filePath, exportPath);
 const exportedMagic = (await readFile(exportPath)).subarray(0, 4).toString('ascii');
+const batch = await transcodeTracksToWavFolder(
+  [
+    fixtureTrack(filePath, 1, 'Batch One'),
+    fixtureTrack(filePath, 2, 'Batch One'),
+  ],
+  resolve('tmp', 'transcode-smoke', 'batch'),
+);
+const batchMagics = await Promise.all(
+  batch.files.map(async (file) => (await readFile(file.path)).subarray(0, 4).toString('ascii')),
+);
 
-const [typesSource, mainSource, preloadSource, apiSource, nowPlayingSource] = await Promise.all([
+const [typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource] = await Promise.all([
   readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
+  readFile(new URL('../electron/transcode.ts', import.meta.url), 'utf8'),
   readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
   readFile(new URL('../electron/preload.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/lib/api.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../src/components/views/LibraryView.tsx', import.meta.url), 'utf8'),
 ]);
 
-assertExportWiring(typesSource, mainSource, preloadSource, apiSource, nowPlayingSource);
+assertExportWiring(typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource);
+
+assert.equal(batch.exported, 2, 'batch export should transcode every selected fixture');
+assert.equal(batch.skipped.length, 0, 'batch export should not skip valid fixtures');
+assert.ok(batch.bytes > exported.bytes, 'batch export should report aggregate bytes');
+assert.equal(new Set(batch.files.map((file) => file.path)).size, 2, 'batch export should create unique output paths');
+assert.deepEqual(batchMagics, ['RIFF', 'RIFF'], 'batch export files should be WAV files');
 
 console.log(JSON.stringify({
-  ok: ok && exportedMagic === 'RIFF' && exported.bytes > 44,
+  ok: ok && exportedMagic === 'RIFF' && exported.bytes > 44 && batchMagics.every((magic) => magic === 'RIFF'),
   fixture: filePath,
   mode: playbackMode(filePath),
   status: res.status,
@@ -73,9 +96,11 @@ console.log(JSON.stringify({
   magic,
   exported,
   exportedMagic,
+  batch,
+  batchMagics,
 }, null, 2));
 
-process.exit(ok && exportedMagic === 'RIFF' && exported.bytes > 44 ? 0 : 1);
+process.exit(ok && exportedMagic === 'RIFF' && exported.bytes > 44 && batchMagics.every((magic) => magic === 'RIFF') ? 0 : 1);
 
 function generateFixture() {
   if (!ffmpeg) {
@@ -111,14 +136,56 @@ function generateFixture() {
   return out;
 }
 
-function assertExportWiring(typesSource, mainSource, preloadSource, apiSource, nowPlayingSource) {
+function fixtureTrack(path, id, title) {
+  return {
+    id,
+    path,
+    title,
+    artist: 'Batch Fixture',
+    album: 'Transcode Smoke',
+    albumArtist: 'Batch Fixture',
+    trackNo: id,
+    discNo: null,
+    year: 2026,
+    genre: 'Fixture',
+    duration: 1.2,
+    bitrate: null,
+    sampleRate: 44100,
+    size: null,
+    mtime: Date.now(),
+    hasArt: 0,
+    loved: 0,
+    rating: 0,
+    avoidAutoPlay: 0,
+    playCount: 0,
+    lastPlayed: null,
+    skipCount: 0,
+    lastSkipped: null,
+    bpm: null,
+    key: null,
+    replayGainTrackDb: null,
+    replayGainAlbumDb: null,
+  };
+}
+
+function assertExportWiring(typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource) {
   assert.match(typesSource, /TrackWavExportResult/, 'shared API should expose WAV export result');
+  assert.match(typesSource, /TrackWavBatchExportResult/, 'shared API should expose batch WAV export result');
   assert.match(typesSource, /exportTrackWav/, 'shared API should expose track WAV export');
+  assert.match(typesSource, /exportTracksWav/, 'shared API should expose batch track WAV export');
+  assert.match(transcodeSource, /transcodeTracksToWavFolder/, 'transcode module should expose batch WAV folder export');
   assert.match(mainSource, /track:export-wav/, 'main process should register track WAV export IPC');
+  assert.match(mainSource, /tracks:export-wav-folder/, 'main process should register batch track WAV export IPC');
   assert.match(mainSource, /chooseTrackWavExportPath/, 'main process should use a native save dialog for WAV export');
+  assert.match(mainSource, /chooseTracksWavExportFolder/, 'main process should use a native folder picker for batch WAV export');
   assert.match(mainSource, /transcodeTrackToWavFile\(track\.path/, 'main process should reuse ffmpeg file export');
+  assert.match(mainSource, /transcodeTracksToWavFolder\(tracks, destinationRoot\)/, 'main process should reuse ffmpeg batch export');
   assert.match(preloadSource, /exportTrackWav/, 'preload should expose track WAV export');
+  assert.match(preloadSource, /exportTracksWav/, 'preload should expose batch track WAV export');
   assert.match(apiSource, /exportTrackWav/, 'browser-safe API should include track WAV export');
+  assert.match(apiSource, /exportTracksWav/, 'browser-safe API should include batch track WAV export');
   assert.match(nowPlayingSource, /data-export-track-wav/, 'Now Playing should expose current-track WAV export');
   assert.match(nowPlayingSource, /api\.exportTrackWav\(current\.id\)/, 'Now Playing WAV export should target the current track');
+  assert.match(libraryViewSource, /data-export-selected-wav/, 'Library selected toolbar should expose batch WAV export');
+  assert.match(libraryViewSource, /api\.exportTracksWav/, 'Library selected toolbar should call batch WAV export');
 }
