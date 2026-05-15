@@ -922,7 +922,12 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
 if (typeof window !== 'undefined') {
   const params = new URLSearchParams(window.location.search);
   if (params.get('newamp-smoke') === '1') {
-    (window as unknown as { __newampSmoke?: { seek: (seconds: number) => void } }).__newampSmoke = {
+    (window as unknown as {
+      __newampSmoke?: {
+        seek: (seconds: number) => void;
+        setFullscreenVisualizer: (on: boolean) => void;
+      };
+    }).__newampSmoke = {
       seek: (seconds: number) => {
         const trackId = usePlayerStore.getState().current?.id ?? null;
         usePlayerStore.getState().seek(seconds);
@@ -936,6 +941,9 @@ if (typeof window !== 'undefined') {
           ticks += 1;
           if (ticks >= 20) window.clearInterval(holdClock);
         }, 50);
+      },
+      setFullscreenVisualizer: (on: boolean) => {
+        usePlayerStore.getState().setFullscreenViz(on);
       },
     };
   }

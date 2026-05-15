@@ -66,6 +66,7 @@ const uiHandoffSmoke = process.env.NEWAMP_UI_HANDOFF_SMOKE === '1';
 const uiGaplessSmoke = process.env.NEWAMP_UI_GAPLESS_SMOKE === '1';
 const uiLyricsSmoke = process.env.NEWAMP_UI_LYRICS_SMOKE === '1';
 const uiOpenFileSmoke = process.env.NEWAMP_UI_OPEN_FILE_SMOKE === '1';
+const uiVisualizerSmoke = process.env.NEWAMP_UI_VISUALIZER_SMOKE === '1';
 const smokeMode =
   startupSmoke ||
   uiPlaybackSmoke ||
@@ -73,7 +74,8 @@ const smokeMode =
   uiHandoffSmoke ||
   uiGaplessSmoke ||
   uiLyricsSmoke ||
-  uiOpenFileSmoke;
+  uiOpenFileSmoke ||
+  uiVisualizerSmoke;
 const OPEN_AUDIO_EXTS = new Set([
   '.mp3',
   '.flac',
@@ -110,25 +112,24 @@ if (smokeMode) {
   app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,UseSkiaRenderer,VizDisplayCompositor');
   app.commandLine.appendSwitch('in-process-gpu');
   app.commandLine.appendSwitch('no-sandbox');
-  const smokeUserData = process.env.NEWAMP_SMOKE_USER_DATA
-    ? resolve(process.env.NEWAMP_SMOKE_USER_DATA)
-    : join(
-        appRoot,
-        'tmp',
-        startupSmoke
-          ? 'startup-smoke-user-data'
-          : uiQuickPlaySmoke
-            ? 'ui-quick-play-smoke-user-data'
-            : uiHandoffSmoke
-            ? 'ui-handoff-smoke-user-data'
-          : uiGaplessSmoke
-              ? 'ui-gapless-smoke-user-data'
+  const smokeUserDataName = startupSmoke
+    ? 'startup-smoke-user-data'
+    : uiQuickPlaySmoke
+      ? 'ui-quick-play-smoke-user-data'
+      : uiHandoffSmoke
+        ? 'ui-handoff-smoke-user-data'
+        : uiGaplessSmoke
+          ? 'ui-gapless-smoke-user-data'
           : uiLyricsSmoke
             ? 'ui-lyrics-smoke-user-data'
             : uiOpenFileSmoke
               ? 'ui-open-file-smoke-user-data'
-            : 'ui-playback-smoke-user-data',
-      );
+              : uiVisualizerSmoke
+                ? 'ui-visualizer-smoke-user-data'
+                : 'ui-playback-smoke-user-data';
+  const smokeUserData = process.env.NEWAMP_SMOKE_USER_DATA
+    ? resolve(process.env.NEWAMP_SMOKE_USER_DATA)
+    : join(appRoot, 'tmp', smokeUserDataName);
   mkdirSync(smokeUserData, { recursive: true });
   app.setPath('userData', smokeUserData);
 }
@@ -1044,6 +1045,30 @@ async function runUiLyricsSmoke(win: BrowserWindow, scanPromise: Promise<void>):
   }
 }
 
+async function runUiVisualizerSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
+  try {
+    await Promise.race([
+      scanPromise,
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for UI visualizer smoke scan')), 15000),
+      ),
+    ]);
+    await reloadForSmoke(win);
+    const result = await Promise.race([
+      win.webContents.executeJavaScript(uiVisualizerProbeSource(), true),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for UI visualizer probe')), 20000),
+      ),
+    ]);
+    console.log(`[newamp-ui-visualizer-smoke] ${JSON.stringify(result)}`);
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    console.error('[newamp-ui-visualizer-smoke] failed:', err);
+    app.exit(1);
+  }
+}
+
 function reloadForSmoke(win: BrowserWindow): Promise<void> {
   return new Promise((resolveReload, rejectReload) => {
     const cleanup = (): void => {
@@ -1109,6 +1134,91 @@ function uiPlaybackProbeSource(): string {
         currentTitle,
         currentTime,
         rowText: (row.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 180),
+      };
+    })()
+  `;
+}
+
+function uiVisualizerProbeSource(): string {
+  return `
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (label, fn, timeout = 10000) => {
+        const start = performance.now();
+        while (performance.now() - start < timeout) {
+          const value = fn();
+          if (value) return value;
+          await sleep(75);
+        }
+        throw new Error('Timed out waiting for ' + label);
+      };
+      const libraryButton = await waitFor('Library navigation', () =>
+        Array.from(document.querySelectorAll('button'))
+          .find((item) => (item.textContent || '').includes('Library')),
+      );
+      libraryButton.click();
+      const row = await waitFor('visualizer library track row', () =>
+        Array.from(document.querySelectorAll('[data-newamp-track-row]'))
+          .find((item) => /Visualizer Smoke/.test(item.textContent || '')),
+      );
+      row.scrollIntoView({ block: 'center' });
+      row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window }));
+      await waitFor('visualizer smoke playback', () => {
+        const transport = document.querySelector('[data-newamp-transport][data-newamp-playing="true"]');
+        const title = document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
+        return transport && /Visualizer Smoke/.test(title) ? transport : null;
+      });
+      const timeEl = await waitFor('visualizer smoke time advancement', () => {
+        const el = document.querySelector('[data-newamp-current-time]');
+        const value = Number(el?.getAttribute('data-newamp-current-time') || '0');
+        return value > 0.25 ? el : null;
+      }, 8000);
+      if (window.__newampSmoke?.setFullscreenVisualizer) {
+        window.__newampSmoke.setFullscreenVisualizer(true);
+      } else {
+        window.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'f',
+          code: 'KeyF',
+          bubbles: true,
+          cancelable: true,
+        }));
+      }
+      const stage = await waitFor('fullscreen visualizer stage', () =>
+        document.querySelector('[data-newamp-fullscreen-visualizer]'),
+      );
+      const spectrumButton = await waitFor('Spectrum visualizer preset button', () =>
+        Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
+          .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'spectrum'),
+      );
+      spectrumButton.click();
+      const canvas = await waitFor('fullscreen visualizer canvas', () =>
+        stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="spectrum"]'),
+      );
+      const render = await waitFor('nonblank visualizer frame', () => {
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        if (!context || canvas.width < 120 || canvas.height < 80) return null;
+        const width = canvas.width;
+        const height = canvas.height;
+        const data = context.getImageData(0, 0, width, height).data;
+        let litSamples = 0;
+        let totalSamples = 0;
+        for (let index = 0; index < data.length; index += 16) {
+          const alpha = data[index + 3] || 0;
+          const luminance = (data[index] || 0) + (data[index + 1] || 0) + (data[index + 2] || 0);
+          if (alpha > 0 && luminance > 30) litSamples += 1;
+          totalSamples += 1;
+        }
+        return litSamples > 0 ? { width, height, litSamples, totalSamples } : null;
+      }, 8000);
+      const currentTitle =
+        document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
+      const currentTime = Number(timeEl.getAttribute('data-newamp-current-time') || '0');
+      return {
+        ok: true,
+        currentTitle,
+        currentTime,
+        preset: stage.getAttribute('data-newamp-visualizer-preset'),
+        render,
       };
     })()
   `;
@@ -1776,6 +1886,8 @@ async function bootstrap(): Promise<void> {
       void runUiGaplessSmoke(mainWin, scanPromise);
     } else if (uiLyricsSmoke && mainWin) {
       void runUiLyricsSmoke(mainWin, scanPromise);
+    } else if (uiVisualizerSmoke && mainWin) {
+      void runUiVisualizerSmoke(mainWin, scanPromise);
     }
   });
 }

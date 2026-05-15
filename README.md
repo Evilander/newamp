@@ -151,6 +151,7 @@ npm run smoke:session
 npm run smoke:audio-output
 npm run smoke:audio-limiter
 npm run smoke:ui-playback
+npm run smoke:ui-visualizer
 ```
 
 After doing the real speaker/headphone pass against the current package, record the manual proof artifact with:

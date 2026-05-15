@@ -85,6 +85,7 @@ export function QuickPlayPalette(): JSX.Element | null {
       __newampSmoke?: {
         seek?: (seconds: number) => void;
         openQuickPlay?: () => void;
+        setFullscreenVisualizer?: (on: boolean) => void;
       };
     };
     const previous = target.__newampSmoke;

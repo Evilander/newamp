@@ -76,6 +76,7 @@
     "smoke:support-restore": "npm run build:electron && node scripts/support-restore-smoke.mjs",
     "smoke:ui-playback": "npm run build && node scripts/ui-playback-smoke.mjs",
     "smoke:ui-quick-play": "npm run build && node scripts/ui-quick-play-smoke.mjs",
+    "smoke:ui-visualizer": "npm run build && node scripts/ui-visualizer-smoke.mjs",
     "smoke:installer-artifact": "node scripts/installer-artifact-smoke.mjs",
     "smoke:installed-associations": "node scripts/installed-associations-smoke.mjs",
     "smoke:installed-app": "node scripts/installed-app-smoke.mjs",
