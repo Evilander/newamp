@@ -197,6 +197,15 @@ export function LibraryView(): JSX.Element {
     api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
+  function applyBulkMetadataResults(updated: Track[]): void {
+    if (!updated.length) return;
+    const byId = new Map(updated.map((track) => [track.id, track]));
+    setTracks((rows) => rows.map((track) => byId.get(track.id) ?? track));
+    api.getStats().then(setStats).catch(() => undefined);
+    api.getLibraryHealth().then(setHealth).catch(() => undefined);
+    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
+  }
+
   async function cleanMissingFiles(): Promise<void> {
     setCleanupStatus('Checking file paths...');
     const result = await api.pruneMissingTracks();
@@ -384,6 +393,7 @@ export function LibraryView(): JSX.Element {
               onToggleLove={toggleLove}
               onSetRating={rateTrack}
               onMetadataLookup={(track) => void lookupMetadata(track)}
+              onBulkMetadataSaved={applyBulkMetadataResults}
             />
             <LibraryPagingFooter
               shown={tracks.length}
@@ -678,6 +688,7 @@ export function TrackTable({
   onToggleLove,
   onSetRating,
   onMetadataLookup,
+  onBulkMetadataSaved,
 }: {
   tracks: Track[];
   currentId: number | null;
@@ -691,6 +702,7 @@ export function TrackTable({
   onToggleLove?: (id: number) => Promise<void>;
   onSetRating?: (id: number, rating: number) => Promise<void>;
   onMetadataLookup?: (track: Track) => void;
+  onBulkMetadataSaved?: (tracks: Track[]) => void;
 }): JSX.Element {
   const visible = useMemo(() => tracks, [tracks]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
@@ -699,6 +711,11 @@ export function TrackTable({
   const [playlistTargets, setPlaylistTargets] = useState<SavedPlaylist[]>([]);
   const [playlistStatus, setPlaylistStatus] = useState<string | null>(null);
   const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [bulkAlbumArtist, setBulkAlbumArtist] = useState('');
+  const [bulkAlbum, setBulkAlbum] = useState('');
+  const [bulkGenre, setBulkGenre] = useState('');
+  const [bulkYear, setBulkYear] = useState('');
+  const [bulkBusy, setBulkBusy] = useState(false);
   const selectedTracks = useMemo(
     () => visible.filter((track) => selectedIds.has(track.id)),
     [visible, selectedIds],
@@ -770,6 +787,42 @@ export function TrackTable({
     setSelectedIds(new Set());
   }
 
+  async function applyBulkMetadataEdit(): Promise<void> {
+    if (!selectedTracks.length || bulkBusy) return;
+    const patchResult = readBulkMetadataPatch({
+      albumArtist: bulkAlbumArtist,
+      album: bulkAlbum,
+      genre: bulkGenre,
+      year: bulkYear,
+    });
+    if (patchResult.error) {
+      setPlaylistStatus(patchResult.error);
+      return;
+    }
+    if (!patchResult.value) {
+      setPlaylistStatus('Enter album artist, album, genre, or year before bulk tagging.');
+      return;
+    }
+    const patch = patchResult.value;
+
+    setBulkBusy(true);
+    try {
+      const updated: Track[] = [];
+      for (const track of selectedTracks) {
+        const next = await api.applyTrackMetadataEdit(track.id, patch);
+        if (next) updated.push(next);
+      }
+      onBulkMetadataSaved?.(updated);
+      setPlaylistStatus(`Updated metadata for ${updated.length.toLocaleString()} selected track${updated.length === 1 ? '' : 's'}.`);
+      setBulkAlbumArtist('');
+      setBulkAlbum('');
+      setBulkGenre('');
+      setBulkYear('');
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   return (
     <>
       {playlistStatus && (
@@ -815,6 +868,44 @@ export function TrackTable({
             SAVE SELECTED AS PLAYLIST
           </button>
           <PlaylistAppendPicker tracks={selectedTracks} label="ADD SELECTED TO PLAYLIST" />
+          <div className="flex flex-wrap items-center gap-1" data-bulk-metadata-edit>
+            <input
+              value={bulkAlbumArtist}
+              onChange={(event) => setBulkAlbumArtist(event.currentTarget.value)}
+              placeholder="Album artist"
+              className="bevel-in w-[118px] px-2 py-1 text-[11px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              aria-label="Bulk album artist"
+            />
+            <input
+              value={bulkAlbum}
+              onChange={(event) => setBulkAlbum(event.currentTarget.value)}
+              placeholder="Album"
+              className="bevel-in w-[118px] px-2 py-1 text-[11px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              aria-label="Bulk album"
+            />
+            <input
+              value={bulkGenre}
+              onChange={(event) => setBulkGenre(event.currentTarget.value)}
+              placeholder="Genre"
+              className="bevel-in w-[96px] px-2 py-1 text-[11px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              aria-label="Bulk genre"
+            />
+            <input
+              value={bulkYear}
+              onChange={(event) => setBulkYear(event.currentTarget.value)}
+              placeholder="Year"
+              inputMode="numeric"
+              className="bevel-in w-[64px] px-2 py-1 text-[11px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              aria-label="Bulk year"
+            />
+            <button className="pxbtn" onClick={() => void applyBulkMetadataEdit()} disabled={bulkBusy}>
+              {bulkBusy ? 'TAGGING' : 'BULK TAG SELECTED'}
+            </button>
+          </div>
           <button className="pxbtn ml-auto" onClick={() => setSelectedIds(new Set())}>
             Clear
           </button>
@@ -1289,6 +1380,30 @@ function metadataOptionalInteger(value: string): number | null {
   if (!value.trim()) return null;
   const n = Number(value);
   return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+function readBulkMetadataPatch(input: {
+  albumArtist: string;
+  album: string;
+  genre: string;
+  year: string;
+}): { value: TrackMetadataPatchInput | null; error: string | null } {
+  const patch: TrackMetadataPatchInput = {};
+  const albumArtist = input.albumArtist.trim();
+  const album = input.album.trim();
+  const genre = input.genre.trim();
+  const year = input.year.trim();
+
+  if (albumArtist) patch.albumArtist = albumArtist;
+  if (album) patch.album = album;
+  if (genre) patch.genre = genre;
+  if (year) {
+    const parsed = Number(year);
+    if (!Number.isFinite(parsed)) return { value: null, error: 'Bulk year must be a number.' };
+    patch.year = Math.trunc(parsed);
+  }
+
+  return Object.keys(patch).length ? { value: patch, error: null } : { value: null, error: null };
 }
 
 function selectedPlaylistDefaultName(tracks: Track[]): string {

@@ -28,7 +28,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - **Milkdrop visualizer.** Butterchurn-powered fullscreen Milkdrop plus lighter built-in analyzer modes.
 - **Skins.** Built-in skins, custom CSS-variable skins, import/export of `.newampskin.json`, and Winamp classic `.wsz` / `.zip` palette import.
 - **Album art rescue.** Search MusicBrainz release groups, preview Cover Art Archive covers, and cache selected artwork locally without rewriting source audio files.
-- **Metadata rescue.** Review MusicBrainz candidates and patch Newamp's catalog metadata without touching original tags.
+- **Metadata rescue.** Review MusicBrainz candidates, manually correct one track, or bulk-tag selected tracks in Newamp's catalog without touching original files.
 - **Library health.** Surface missing tags/art/duration, legacy formats, recent imports, duplicate clusters, and exact-looking duplicate rips for safe review.
 - **Artist facts and images.** Wikipedia-powered artist spotlights with large images, short descriptions, summaries, source links, and local cache reuse.
 - **Lyrics.** LRCLIB lookup, local sidecar lyrics, and saved custom plain/LRC lyrics per track.

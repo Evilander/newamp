@@ -144,6 +144,10 @@ assert.match(apiSource, /applyTrackMetadataEdit/, 'renderer API should expose ma
 assert.match(libraryViewSource, /Metadata Rescue/, 'Library view should expose the metadata rescue UI');
 assert.match(libraryViewSource, /Manual edit/, 'Library view should expose manual metadata editing');
 assert.match(libraryViewSource, /applyManualMetadataEdit/, 'Library view should save manual metadata edits');
+assert.match(libraryViewSource, /data-bulk-metadata-edit/, 'selected-track toolbar should expose bulk metadata editing');
+assert.match(libraryViewSource, /applyBulkMetadataEdit/, 'selected-track toolbar should apply bulk metadata edits');
+assert.match(libraryViewSource, /BULK TAG SELECTED/, 'selected-track toolbar should label the bulk metadata action');
+assert.match(libraryViewSource, /applyTrackMetadataEdit\(track\.id, patch\)/, 'bulk metadata edits should reuse the existing metadata edit API');
 assert.match(
   libraryViewSource,
   /applyMetadataCandidate[\s\S]+api\.getStats\(\)\.then\(setStats\)/,
