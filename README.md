@@ -34,6 +34,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - **Practice tools.** A/B loop panel, tempo trainer with pitch preservation, track bookmarks, ratings, sleep timer, stop-after-current, and smart shuffle.
 - **Last.fm.** Desktop auth, Now Playing updates, threshold scrobbling, retry outbox, saved app credentials, and a Settings proof action.
 - **Audio controls.** 10-band EQ, presets, ReplayGain, limiter, preamp, crossfade/gapless handoff, output-device selection, and in-app left/right speaker test.
+- **Native desktop behavior.** Tray residency, global media keys, open-with file association handling, and OS media-session metadata/actions with album art.
 - **Reliability tools.** Corrupt settings/library recovery, support backup/restore, security smoke, installed association proof, and release gates.
 
 ## Installable Builds
@@ -139,6 +140,7 @@ npm run smoke:lastfm
 npm run smoke:tabs
 npm run smoke:playback-start
 npm run smoke:playback-controls
+npm run smoke:media-session
 npm run smoke:smart-shuffle
 npm run smoke:queue-insert
 npm run smoke:queue-edit

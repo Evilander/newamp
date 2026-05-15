@@ -49,6 +49,7 @@
     "smoke:handoff": "npm run build:electron && node scripts/playback-handoff-smoke.mjs",
     "smoke:playback-start": "npm run build:electron && node scripts/playback-start-smoke.mjs",
     "smoke:playback-controls": "npm run build:electron && node scripts/playback-controls-smoke.mjs",
+    "smoke:media-session": "npm run build:electron && node scripts/media-session-smoke.mjs",
     "smoke:smart-shuffle": "npm run build:electron && node scripts/smart-shuffle-smoke.mjs",
     "smoke:metadata": "npm run build:electron && node scripts/metadata-rescue-smoke.mjs",
     "smoke:open-files": "npm run build:electron && node scripts/open-files-smoke.mjs",

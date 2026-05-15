@@ -23,6 +23,7 @@ import { CompactPlayer } from './components/CompactPlayer';
 import { QuickPlayPalette } from './components/QuickPlayPalette';
 import { usePlayerStore } from './store/usePlayerStore';
 import { api, winctl } from './lib/api';
+import { syncMediaSession } from './lib/mediaSession';
 
 export default function App(): JSX.Element {
   const init = usePlayerStore((s) => s.init);
@@ -30,6 +31,11 @@ export default function App(): JSX.Element {
   const showEq = usePlayerStore((s) => s.showEq);
   const fullscreen = usePlayerStore((s) => s.fullscreenViz);
   const compact = usePlayerStore((s) => s.compactMode);
+  const current = usePlayerStore((s) => s.current);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const duration = usePlayerStore((s) => s.duration);
+  const playbackRate = usePlayerStore((s) => s.playbackRate);
   const [dropActive, setDropActive] = useState(false);
   const [dropMessage, setDropMessage] = useState<string | null>(null);
 
@@ -154,6 +160,24 @@ export default function App(): JSX.Element {
   useEffect(() => {
     void winctl.setCompact(compact);
   }, [compact]);
+
+  useEffect(() => {
+    syncMediaSession({
+      current,
+      isPlaying,
+      currentTime,
+      duration,
+      playbackRate,
+      actions: {
+        play: () => usePlayerStore.getState().togglePlay(),
+        pause: () => usePlayerStore.getState().engine.pause(),
+        previous: () => void usePlayerStore.getState().prev(),
+        next: () => void usePlayerStore.getState().next(),
+        stop: () => usePlayerStore.getState().engine.stop(),
+        seek: (position) => usePlayerStore.getState().seek(position),
+      },
+    });
+  }, [current, isPlaying, currentTime, duration, playbackRate]);
 
   if (compact) {
     return (
