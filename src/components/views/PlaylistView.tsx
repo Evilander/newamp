@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type DragEvent } from 'react';
 import type {
   SavedPlaylist,
   SmartPlaylistMood,
@@ -430,6 +430,25 @@ export function PlaylistView(): JSX.Element {
     setStatus('Playlist icon will be cleared on save.');
   }
 
+  function handlePlaylistIconDragOver(event: DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }
+
+  function handlePlaylistIconDrop(event: DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const paths = api.getDroppedFilePaths(Array.from(event.dataTransfer.files));
+    const imagePath = paths.find(isPlaylistImagePath);
+    if (!imagePath) {
+      setStatus('Drop a PNG, JPG, WEBP, GIF, or BMP image for the playlist icon.');
+      return;
+    }
+    setPlaylistCoverPath(imagePath);
+    setClearPlaylistCover(false);
+    setStatus('Dropped playlist icon selected. Create or update the playlist to apply it.');
+  }
+
   function startNewPlaylist(): void {
     setSelectedPlaylist(null);
     setSelectedPlaylistTracks([]);
@@ -631,8 +650,12 @@ export function PlaylistView(): JSX.Element {
             Playlist icon
           </span>
           <div
+            data-playlist-icon-dropzone
             className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden border text-[10px] font-bold"
             style={{ borderColor: 'var(--line)', background: 'var(--panel-2)', color: 'var(--muted)' }}
+            title="Drop a playlist image here"
+            onDragOver={handlePlaylistIconDragOver}
+            onDrop={handlePlaylistIconDrop}
           >
             {playlistIconSrc && !clearPlaylistCover ? (
               <img src={playlistIconSrc} alt="" className="h-full w-full object-cover" draggable={false} />
@@ -1035,4 +1058,8 @@ function filePathToImageUrl(path: string): string {
   const normalized = path.replace(/\\/g, '/');
   const prefix = /^[A-Za-z]:/.test(normalized) ? '/' : '';
   return `file://${prefix}${encodeURI(normalized).replace(/#/g, '%23')}`;
+}
+
+function isPlaylistImagePath(path: string): boolean {
+  return /\.(png|jpe?g|webp|gif|bmp)$/i.test(path);
 }
