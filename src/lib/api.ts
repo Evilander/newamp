@@ -9,6 +9,7 @@ import type {
   ListeningInsights,
   NewampAPI,
   SupportDiagnostics,
+  TrackMetadataPatchInput,
 } from '@shared/types';
 import { NEWAMP_VERSION } from '@shared/app-version';
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
@@ -101,6 +102,7 @@ const stub: NewampAPI = {
   getTrack: async () => null,
   lookupTrackMetadata: async () => [],
   applyTrackMetadataPatch: async () => null,
+  applyTrackMetadataEdit: async (_id: number, _patch: TrackMetadataPatchInput) => null,
   getPlaylists: async () => [],
   savePlaylist: async (input) => ({
     id: input.id ?? 0,

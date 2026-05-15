@@ -43,6 +43,7 @@ import type {
   SupportRestoreResult,
   TrackBookmark,
   Track,
+  TrackMetadataPatchInput,
 } from '../shared/types.js';
 
 const api: NewampAPI = {
@@ -71,6 +72,8 @@ const api: NewampAPI = {
     ipcRenderer.invoke('metadata:lookup', id) as Promise<MetadataLookupCandidate[]>,
   applyTrackMetadataPatch: (id: number, candidate: MetadataLookupCandidate) =>
     ipcRenderer.invoke('metadata:apply', id, candidate) as Promise<Track | null>,
+  applyTrackMetadataEdit: (id: number, patch: TrackMetadataPatchInput) =>
+    ipcRenderer.invoke('metadata:edit', id, patch) as Promise<Track | null>,
   getPlaylists: () => ipcRenderer.invoke('playlist:list') as Promise<SavedPlaylist[]>,
   savePlaylist: (input: SavePlaylistInput) =>
     ipcRenderer.invoke('playlist:save', input) as Promise<SavedPlaylist>,

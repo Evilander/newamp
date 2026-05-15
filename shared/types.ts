@@ -45,6 +45,17 @@ export interface MetadataLookupCandidate {
   confidence: 'high' | 'medium' | 'low';
 }
 
+export interface TrackMetadataPatchInput {
+  title?: string | null;
+  artist?: string | null;
+  album?: string | null;
+  albumArtist?: string | null;
+  genre?: string | null;
+  year?: number | null;
+  trackNo?: number | null;
+  discNo?: number | null;
+}
+
 export interface AlbumSummary {
   album: string;
   albumArtist: string;
@@ -549,6 +560,7 @@ export interface NewampAPI {
   getTrack: (id: number) => Promise<Track | null>;
   lookupTrackMetadata: (id: number) => Promise<MetadataLookupCandidate[]>;
   applyTrackMetadataPatch: (id: number, candidate: MetadataLookupCandidate) => Promise<Track | null>;
+  applyTrackMetadataEdit: (id: number, patch: TrackMetadataPatchInput) => Promise<Track | null>;
   getPlaylists: () => Promise<SavedPlaylist[]>;
   savePlaylist: (input: SavePlaylistInput) => Promise<SavedPlaylist>;
   addTracksToPlaylist: (input: AddTracksToPlaylistInput) => Promise<SavedPlaylist | null>;
