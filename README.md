@@ -27,6 +27,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - **Skins.** Built-in skins, custom CSS-variable skins, import/export of `.newampskin.json`, and Winamp classic `.wsz` / `.zip` palette import.
 - **Album art rescue.** Search MusicBrainz release groups, preview Cover Art Archive covers, and cache selected artwork locally without rewriting source audio files.
 - **Metadata rescue.** Review MusicBrainz candidates and patch Newamp's catalog metadata without touching original tags.
+- **Artist facts and images.** Wikipedia-powered artist spotlights with large images, short descriptions, summaries, source links, and local cache reuse.
 - **Lyrics.** LRCLIB lookup, local sidecar lyrics, and saved custom plain/LRC lyrics per track.
 - **Play Along.** Search Ultimate Guitar when reachable, paste UG URLs or raw tabs, save local tab text, parse ChordPro, auto-discover sidecar tab files, transpose chords, autoscroll, and pop out a native tab window.
 - **Practice tools.** A/B loop panel, tempo trainer with pitch preservation, track bookmarks, ratings, sleep timer, stop-after-current, and smart shuffle.
@@ -102,6 +103,7 @@ Both commands are non-mutating by default. Readiness checks the README, package 
 
 ```bash
 npm run smoke:library
+npm run smoke:artist
 npm run smoke:full-library -- <music-root>
 npm run smoke:audio-proof
 npm run smoke:installer-artifact
