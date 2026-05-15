@@ -651,12 +651,19 @@ export class LibraryStore {
           artist: first.artist,
           title: first.title,
           count: group.length,
+          exactMatchCount: duplicateExactMatchCount(group),
           tracks: group
             .sort((a, b) => (a.album || '').localeCompare(b.album || '') || a.path.localeCompare(b.path))
             .slice(0, 8),
         };
       })
-      .sort((a, b) => b.count - a.count || a.artist.localeCompare(b.artist) || a.title.localeCompare(b.title))
+      .sort(
+        (a, b) =>
+          b.exactMatchCount - a.exactMatchCount ||
+          b.count - a.count ||
+          a.artist.localeCompare(b.artist) ||
+          a.title.localeCompare(b.title),
+      )
       .slice(0, 12);
 
     const legacyFormats = [...legacyMap.entries()]
@@ -2536,6 +2543,19 @@ function normalizeDuplicateText(value: string): string {
     .replace(/\s+/g, ' ')
     .replace(/\s+-\s+remaster(?:ed)?(?:\s+\d{4})?/g, '')
     .trim();
+}
+
+function duplicateExactMatchCount(tracks: Track[]): number {
+  const buckets = new Map<string, number>();
+  for (const track of tracks) {
+    const duration = track.duration == null || track.duration <= 0 ? null : Math.round(track.duration);
+    const size = track.size == null || track.size <= 0 ? null : Math.round(track.size);
+    if (duration == null || size == null) continue;
+    const key = `${duration}:${size}`;
+    buckets.set(key, (buckets.get(key) ?? 0) + 1);
+  }
+  const max = Math.max(0, ...buckets.values());
+  return max >= 2 ? max : 0;
 }
 
 function parsePlaylistPaths(content: string, baseDir?: string): string[] {

@@ -157,6 +157,7 @@ export interface LibraryDuplicateGroup {
   artist: string;
   title: string;
   count: number;
+  exactMatchCount: number;
   tracks: Track[];
 }
 

@@ -563,6 +563,7 @@ function LibraryHealthPanel({
         <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums" style={{ color: 'var(--ink-2)' }}>
           <span>Missing tags</span><span className="text-right">{missingTotal.toLocaleString()}</span>
           <span>Duplicates</span><span className="text-right">{health.duplicateGroups.length.toLocaleString()}</span>
+          <span>Exact matches</span><span className="text-right">{duplicateExactMatchTotal(health).toLocaleString()}</span>
           <span>Legacy</span><span className="truncate text-right" title={legacySummary}>{legacySummary}</span>
         </div>
         <div className="mt-2 flex items-center gap-2">
@@ -595,6 +596,11 @@ function LibraryHealthPanel({
                 <span className="truncate" title={`${group.artist} - ${group.title}`}>
                   {group.artist} - {group.title}
                 </span>
+                {group.exactMatchCount >= 2 && (
+                  <span className="shrink-0 tabular-nums" style={{ color: 'var(--accent)' }}>
+                    {group.exactMatchCount} exact matches
+                  </span>
+                )}
               </div>
             ))}
           </div>
@@ -624,6 +630,10 @@ function formatRuntime(seconds: number): string {
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function duplicateExactMatchTotal(health: LibraryHealth): number {
+  return health.duplicateGroups.reduce((sum, group) => sum + Math.max(0, group.exactMatchCount), 0);
 }
 
 function SortPicker({ value, onChange }: { value: Sort; onChange: (s: Sort) => void }): JSX.Element {

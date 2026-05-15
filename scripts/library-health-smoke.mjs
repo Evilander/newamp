@@ -21,6 +21,7 @@ const fixtures = [
     year: 2001,
     hasArt: true,
     duration: 201,
+    size: 2048,
     mtime: 1000,
   },
   {
@@ -30,7 +31,8 @@ const fixtures = [
     album: 'B',
     year: 2002,
     hasArt: false,
-    duration: 202,
+    duration: 201.2,
+    size: 2048,
     mtime: 2000,
   },
   {
@@ -41,6 +43,7 @@ const fixtures = [
     year: null,
     hasArt: false,
     duration: null,
+    size: 512,
     mtime: 3000,
   },
   {
@@ -51,6 +54,7 @@ const fixtures = [
     year: 2026,
     hasArt: true,
     duration: 180,
+    size: 1024,
     mtime: 4000,
   },
 ];
@@ -80,7 +84,7 @@ library.upsertTracks(fixtures.map((fixture, index) => ({
   key: null,
   replayGainTrackDb: null,
   replayGainAlbumDb: null,
-  size: 0,
+  size: fixture.size,
   mtime: fixture.mtime,
   art: fixture.hasArt ? art : null,
 })));
@@ -97,6 +101,7 @@ assert.equal(health.duplicateGroups.length, 1);
 assert.equal(health.duplicateGroups[0].artist, 'Twin');
 assert.equal(health.duplicateGroups[0].title, 'Same Song');
 assert.equal(health.duplicateGroups[0].tracks.length, 2);
+assert.equal(health.duplicateGroups[0].exactMatchCount, 2, 'same artist/title plus matching duration/size should be an exact duplicate signal');
 assert.deepEqual(health.recentlyAdded.map((track) => track.title).slice(0, 2), ['Fresh Import', 'Mystery File']);
 const duplicatePlaylist = library.savePlaylist({
   name: 'Duplicate Review',
@@ -119,6 +124,8 @@ assert.match(preloadSource, /getLibraryHealth/, 'preload should expose getLibrar
 assert.match(apiSource, /getLibraryHealth/, 'renderer API should expose getLibraryHealth');
 assert.match(libraryViewSource, /Library Health/, 'Library view should render a health panel');
 assert.match(libraryViewSource, /duplicateGroups/, 'Library view should surface duplicate clusters');
+assert.match(libraryViewSource, /exactMatchCount/, 'Library view should surface exact duplicate strength');
+assert.match(libraryViewSource, /exact matches/, 'Library Health should distinguish exact-looking duplicate files');
 assert.match(libraryViewSource, /Save duplicate review/, 'Library view should make duplicate clusters actionable');
 assert.match(libraryViewSource, /Duplicate Review/, 'Library view should create a named duplicate-review playlist');
 
