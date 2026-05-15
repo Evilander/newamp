@@ -114,6 +114,10 @@ npm run smoke:installer-artifact
 npm run smoke:installed-app
 npm run smoke:portable-app
 npm run smoke:packaged-open-files
+npm run smoke:library-watch
+npm run smoke:library-prune
+npm run smoke:support-backup
+npm run smoke:support-restore
 npm run smoke:signing-readiness
 npm run smoke:signing-workflow
 npm run smoke:publish-github
