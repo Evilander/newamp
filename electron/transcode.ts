@@ -6,6 +6,8 @@ import { basename, extname, join } from 'node:path';
 import { Readable } from 'node:stream';
 import type { Track, TrackWavBatchExportResult } from '../shared/types.js';
 
+const REPLAYGAIN_TARGET_LUFS = -18;
+
 const CHROMIUM_NATIVE_EXTS = new Set([
   '.mp3',
   '.m4a',
@@ -163,6 +165,25 @@ export async function transcodeTracksToWavFolder(
   };
 }
 
+export async function analyzeTrackReplayGain(inputPath: string): Promise<{ replayGainTrackDb: number; integratedLufs: number }> {
+  if (!inputPath) throw new Error('Input path is required.');
+  const ffmpeg = resolveFfmpegPath();
+  const stderr = await runFfmpegCapture([
+    '-hide_banner',
+    '-nostdin',
+    '-i',
+    inputPath,
+    '-filter:a',
+    'ebur128=peak=true',
+    '-f',
+    'null',
+    '-',
+  ], ffmpeg);
+  const integratedLufs = parseEbur128IntegratedLufs(stderr);
+  const replayGainTrackDb = normalizeReplayGainDb(REPLAYGAIN_TARGET_LUFS - integratedLufs);
+  return { replayGainTrackDb, integratedLufs };
+}
+
 function resolveFfmpegPath(): string {
   const candidate = process.env.NEWAMP_FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
   return candidate.includes('app.asar')
@@ -185,6 +206,36 @@ function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
       else reject(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
     });
   });
+}
+
+function runFfmpegCapture(args: string[], ffmpeg: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > 30000) stderr = stderr.slice(-30000);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(stderr);
+      else reject(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
+    });
+  });
+}
+
+function parseEbur128IntegratedLufs(stderr: string): number {
+  const matches = [...stderr.matchAll(/I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/g)];
+  const last = matches[matches.length - 1];
+  const value = last ? Number(last[1]) : NaN;
+  if (!Number.isFinite(value)) throw new Error('ffmpeg did not report integrated loudness.');
+  return value;
+}
+
+function normalizeReplayGainDb(value: number): number {
+  if (!Number.isFinite(value)) throw new Error('ReplayGain analysis did not produce a finite value.');
+  return Math.max(-30, Math.min(30, Number(value.toFixed(2))));
 }
 
 function batchWavFileName(track: Track, position: number, width: number): string {

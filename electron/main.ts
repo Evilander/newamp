@@ -38,6 +38,7 @@ import {
 } from './lastfm.js';
 import {
   playbackMode,
+  analyzeTrackReplayGain,
   transcodeToWavResponse,
   transcodeTrackToWavFile,
   transcodeTracksToWavFolder,
@@ -673,6 +674,7 @@ function registerIpc(): void {
     if (result.canceled || !destinationRoot) return null;
     return transcodeTracksToWavFolder(tracks, destinationRoot);
   });
+  ipcMain.handle('tracks:analyze-replaygain', async (_e, ids: number[]) => analyzeReplayGain(ids));
   ipcMain.handle('open:consume-pending-files', async () => {
     const files = pendingOpenFiles;
     pendingOpenFiles = [];
@@ -1847,6 +1849,23 @@ function resolveExportTracks(ids: number[]): Track[] {
     if (track) tracks.push(track);
   }
   return tracks;
+}
+
+async function analyzeReplayGain(ids: number[]) {
+  const tracks = resolveExportTracks(ids);
+  const updated: Track[] = [];
+  const skipped: string[] = [];
+  for (const track of tracks) {
+    try {
+      const analysis = await analyzeTrackReplayGain(track.path);
+      const next = library.setTrackReplayGain(track.id, analysis.replayGainTrackDb);
+      if (next) updated.push(next);
+      else skipped.push(`${track.artist} - ${track.title}: track was not updated`);
+    } catch (err) {
+      skipped.push(`${track.artist} - ${track.title}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return { analyzed: updated.length, skipped, tracks: updated };
 }
 
 async function openFiles(paths: string[]): Promise<OpenFilesResult> {

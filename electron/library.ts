@@ -1579,6 +1579,17 @@ export class LibraryStore {
     return this.getTrack(trackId);
   }
 
+  setTrackReplayGain(id: number, replayGainTrackDb: number): Track | null {
+    const trackId = Math.trunc(Number(id));
+    if (!Number.isFinite(trackId) || trackId <= 0) return null;
+    const gain = normalizeReplayGainDb(replayGainTrackDb);
+    if (gain == null) return null;
+    this.db.run(`UPDATE tracks SET replaygain_track_db = ? WHERE id = ?`, [gain, trackId]);
+    if (this.db.getRowsModified() <= 0) return null;
+    this.scheduleFlush();
+    return this.getTrack(trackId);
+  }
+
   toggleAvoidAutoPlay(id: number): Track | null {
     const trackId = Math.trunc(Number(id));
     if (!Number.isFinite(trackId) || trackId <= 0) return null;
@@ -2350,6 +2361,12 @@ function normalizeTrackRating(value: unknown): number {
   const rating = Math.round(Number(value));
   if (!Number.isFinite(rating)) return 0;
   return Math.max(0, Math.min(5, rating));
+}
+
+function normalizeReplayGainDb(value: unknown): number | null {
+  const db = Number(value);
+  if (!Number.isFinite(db)) return null;
+  return Math.max(-30, Math.min(30, Number(db.toFixed(2))));
 }
 
 function normalizeFileStatePath(path: string): string {
