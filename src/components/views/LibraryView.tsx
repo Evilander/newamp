@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { LibraryHealth, MetadataLookupCandidate, SavedPlaylist, Track } from '@shared/types';
+import type {
+  LibraryHealth,
+  MetadataLookupCandidate,
+  SavedPlaylist,
+  Track,
+  TrackMetadataPatchInput,
+} from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime, highlight } from '../../lib/format';
 import { api } from '../../lib/api';
@@ -156,6 +162,21 @@ export function LibraryView(): JSX.Element {
     });
   }
 
+  async function applyManualMetadataEdit(patch: TrackMetadataPatchInput): Promise<void> {
+    if (!metadataPanel) return;
+    const updated = await api.applyTrackMetadataEdit(metadataPanel.track.id, patch);
+    if (!updated) return;
+    setTracks((rows) => rows.map((track) => (track.id === updated.id ? updated : track)));
+    api.getStats().then(setStats).catch(() => undefined);
+    api.getLibraryHealth().then(setHealth).catch(() => undefined);
+    setMetadataPanel({
+      track: updated,
+      candidates: metadataPanel.candidates,
+      loading: false,
+      status: `Saved manual edits for ${updated.artist} - ${updated.title}.`,
+    });
+  }
+
   async function cleanMissingFiles(): Promise<void> {
     setCleanupStatus('Checking file paths...');
     const result = await api.pruneMissingTracks();
@@ -296,9 +317,11 @@ export function LibraryView(): JSX.Element {
       )}
       {metadataPanel && (
         <MetadataRescuePanel
+          key={metadataPanel.track.id}
           panel={metadataPanel}
           onClose={() => setMetadataPanel(null)}
           onApply={(candidate) => void applyMetadataCandidate(candidate)}
+          onManualSave={(patch) => void applyManualMetadataEdit(patch)}
         />
       )}
       <div className="flex-1 overflow-auto">
@@ -1081,6 +1104,7 @@ function MetadataRescuePanel({
   panel,
   onClose,
   onApply,
+  onManualSave,
 }: {
   panel: {
     track: Track;
@@ -1090,7 +1114,30 @@ function MetadataRescuePanel({
   };
   onClose: () => void;
   onApply: (candidate: MetadataLookupCandidate) => void;
+  onManualSave: (patch: TrackMetadataPatchInput) => void;
 }): JSX.Element {
+  const [title, setTitle] = useState(panel.track.title);
+  const [artist, setArtist] = useState(panel.track.artist);
+  const [album, setAlbum] = useState(panel.track.album);
+  const [albumArtist, setAlbumArtist] = useState(panel.track.albumArtist);
+  const [genre, setGenre] = useState(panel.track.genre ?? '');
+  const [year, setYear] = useState(panel.track.year == null ? '' : String(panel.track.year));
+  const [trackNo, setTrackNo] = useState(panel.track.trackNo == null ? '' : String(panel.track.trackNo));
+  const [discNo, setDiscNo] = useState(panel.track.discNo == null ? '' : String(panel.track.discNo));
+
+  function saveManualEdit(): void {
+    onManualSave({
+      title,
+      artist,
+      album,
+      albumArtist,
+      genre,
+      year: metadataOptionalInteger(year),
+      trackNo: metadataOptionalInteger(trackNo),
+      discNo: metadataOptionalInteger(discNo),
+    });
+  }
+
   return (
     <div
       className="border-b px-3 py-2"
@@ -1111,6 +1158,26 @@ function MetadataRescuePanel({
         <button className="pxbtn" onClick={onClose}>
           CLOSE
         </button>
+      </div>
+      <div className="mb-2 grid gap-2">
+        <div className="text-[10px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--ink-2)' }}>
+          Manual edit
+        </div>
+        <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(136px, 1fr))' }}>
+          <MetadataInput label="Title" value={title} onChange={setTitle} />
+          <MetadataInput label="Artist" value={artist} onChange={setArtist} />
+          <MetadataInput label="Album" value={album} onChange={setAlbum} />
+          <MetadataInput label="Album artist" value={albumArtist} onChange={setAlbumArtist} />
+          <MetadataInput label="Genre" value={genre} onChange={setGenre} />
+          <MetadataInput label="Year" value={year} onChange={setYear} inputMode="numeric" />
+          <MetadataInput label="Track" value={trackNo} onChange={setTrackNo} inputMode="numeric" />
+          <MetadataInput label="Disc" value={discNo} onChange={setDiscNo} inputMode="numeric" />
+        </div>
+        <div className="flex justify-end">
+          <button className="pxbtn is-active" onClick={saveManualEdit} disabled={!title.trim() || !artist.trim()}>
+            SAVE EDITS
+          </button>
+        </div>
       </div>
       {panel.loading ? (
         <div className="text-[11px]" style={{ color: 'var(--muted)' }}>Searching...</div>
@@ -1143,8 +1210,39 @@ function MetadataRescuePanel({
   );
 }
 
+function MetadataInput({
+  label,
+  value,
+  onChange,
+  inputMode,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  inputMode?: 'numeric';
+}): JSX.Element {
+  return (
+    <label className="grid gap-1 text-[10px] uppercase tracking-[0.08em]" style={{ color: 'var(--muted)' }}>
+      <span>{label}</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        inputMode={inputMode}
+        className="bevel-in px-2 py-1 text-[11px] normal-case tracking-[0] outline-none"
+        style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+      />
+    </label>
+  );
+}
+
 function needsMetadataRescue(track: Track): boolean {
   return !track.album.trim() || !track.year || !track.artist.trim() || /^unknown artist$/i.test(track.artist);
+}
+
+function metadataOptionalInteger(value: string): number | null {
+  if (!value.trim()) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
 function selectedPlaylistDefaultName(tracks: Track[]): string {

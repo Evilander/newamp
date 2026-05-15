@@ -95,6 +95,34 @@ assert.equal(patched.album, 'In Rainbows');
 assert.equal(patched.albumArtist, 'Radiohead');
 assert.equal(patched.year, 2007);
 assert.equal(patched.duration, 318, 'local duration should be preserved when already known');
+
+const manual = library.applyManualMetadataPatch(patched.id, {
+  title: 'Weird Fishes',
+  artist: 'Radiohead',
+  album: 'In Rainbows',
+  albumArtist: 'Radiohead',
+  genre: 'Art Rock',
+  year: 2007,
+  trackNo: 3,
+  discNo: 1,
+});
+assert.ok(manual, 'manual metadata patch should return the updated track');
+assert.equal(manual.title, 'Weird Fishes');
+assert.equal(manual.genre, 'Art Rock');
+assert.equal(manual.trackNo, 3);
+assert.equal(manual.discNo, 1);
+
+const cleared = library.applyManualMetadataPatch(manual.id, {
+  genre: '',
+  year: null,
+  trackNo: null,
+  discNo: null,
+});
+assert.ok(cleared, 'manual metadata patch should support clearing optional fields');
+assert.equal(cleared.genre, null);
+assert.equal(cleared.year, null);
+assert.equal(cleared.trackNo, null);
+assert.equal(cleared.discNo, null);
 library.close();
 
 const [sharedTypes, mainSource, preloadSource, apiSource, libraryViewSource] = await Promise.all([
@@ -106,10 +134,16 @@ const [sharedTypes, mainSource, preloadSource, apiSource, libraryViewSource] = a
 ]);
 
 assert.match(sharedTypes, /MetadataLookupCandidate/, 'shared types should expose MusicBrainz candidates');
+assert.match(sharedTypes, /TrackMetadataPatchInput/, 'shared types should expose manual metadata patch input');
 assert.match(mainSource, /metadata:lookup/, 'main process should register metadata lookup IPC');
+assert.match(mainSource, /metadata:edit/, 'main process should register manual metadata edit IPC');
 assert.match(preloadSource, /lookupTrackMetadata/, 'preload should expose lookupTrackMetadata');
+assert.match(preloadSource, /applyTrackMetadataEdit/, 'preload should expose manual metadata edits');
 assert.match(apiSource, /applyTrackMetadataPatch/, 'renderer API should expose metadata patching');
+assert.match(apiSource, /applyTrackMetadataEdit/, 'renderer API should expose manual metadata editing');
 assert.match(libraryViewSource, /Metadata Rescue/, 'Library view should expose the metadata rescue UI');
+assert.match(libraryViewSource, /Manual edit/, 'Library view should expose manual metadata editing');
+assert.match(libraryViewSource, /applyManualMetadataEdit/, 'Library view should save manual metadata edits');
 assert.match(
   libraryViewSource,
   /applyMetadataCandidate[\s\S]+api\.getStats\(\)\.then\(setStats\)/,

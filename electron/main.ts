@@ -53,6 +53,7 @@ import type {
   ScanProgress,
   SupportDiagnostics,
   Track,
+  TrackMetadataPatchInput,
 } from '../shared/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -634,6 +635,9 @@ function registerIpc(): void {
   });
   ipcMain.handle('metadata:apply', async (_e, id: number, candidate: MetadataLookupCandidate) =>
     library.applyMetadataPatch(id, candidate),
+  );
+  ipcMain.handle('metadata:edit', async (_e, id: number, patch: TrackMetadataPatchInput) =>
+    library.applyManualMetadataPatch(id, patch),
   );
   ipcMain.handle('library:get-stats', async () => library.getStats());
   ipcMain.handle('library:get-health', async () => library.getLibraryHealth());

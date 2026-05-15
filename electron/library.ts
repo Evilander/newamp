@@ -35,6 +35,7 @@ import type {
   SmartPlaylistRuleInput,
   SmartPlaylistSuggestion,
   TasteMixInput,
+  TrackMetadataPatchInput,
   TrackBookmark,
   Track,
   RecoveryEvent,
@@ -868,6 +869,35 @@ export class LibraryStore {
               track_no = ?, disc_no = ?, year = ?, duration = ?
         WHERE id = ?`,
       [title, artist, album, albumArtist, trackNo, discNo, year, duration, id],
+    );
+    this.scheduleFlush();
+    return this.getTrack(id);
+  }
+
+  applyManualMetadataPatch(trackId: number, patch: TrackMetadataPatchInput): Track | null {
+    const id = Math.trunc(trackId);
+    const current = this.getTrack(id);
+    if (!current) return null;
+
+    const title = patch.title === undefined ? current.title : cleanMetadataText(patch.title, current.title);
+    const artist = patch.artist === undefined
+      ? current.artist
+      : cleanMetadataText(patch.artist, current.artist || 'Unknown Artist');
+    const album = patch.album === undefined ? current.album : cleanOptionalMetadataText(patch.album) ?? '';
+    const albumArtist = patch.albumArtist === undefined
+      ? current.albumArtist
+      : cleanMetadataText(patch.albumArtist, artist);
+    const genre = patch.genre === undefined ? current.genre : cleanOptionalMetadataText(patch.genre);
+    const year = patch.year === undefined ? current.year : finiteYear(patch.year);
+    const trackNo = patch.trackNo === undefined ? current.trackNo : finitePositiveInteger(patch.trackNo);
+    const discNo = patch.discNo === undefined ? current.discNo : finitePositiveInteger(patch.discNo);
+
+    this.db.run(
+      `UPDATE tracks
+          SET title = ?, artist = ?, album = ?, album_artist = ?,
+              track_no = ?, disc_no = ?, year = ?, genre = ?
+        WHERE id = ?`,
+      [title, artist, album, albumArtist, trackNo, discNo, year, genre, id],
     );
     this.scheduleFlush();
     return this.getTrack(id);
@@ -2783,6 +2813,11 @@ function finiteNumber(value: number | null | undefined): number | null {
 function cleanMetadataText(value: unknown, fallback: string): string {
   const cleaned = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
   return cleaned.slice(0, 500) || fallback;
+}
+
+function cleanOptionalMetadataText(value: unknown): string | null {
+  const cleaned = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  return cleaned ? cleaned.slice(0, 500) : null;
 }
 
 function normalizeLyricsText(value: unknown): string | null {
