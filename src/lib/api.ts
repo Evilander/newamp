@@ -30,6 +30,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   limiterEnabled: true,
   preampDb: 0,
   resumeState: null,
+  compactMode: false,
   volume: 0.75,
   playbackRate: 1,
   audioOutputDeviceId: null,

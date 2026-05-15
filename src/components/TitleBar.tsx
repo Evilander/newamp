@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
-import { winctl } from '../lib/api';
+import { api, winctl } from '../lib/api';
 
 export function TitleBar(): JSX.Element {
   const [maximized, setMaximized] = useState(false);
@@ -24,7 +24,7 @@ export function TitleBar(): JSX.Element {
           NEWAMP
         </span>
         <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-          v0.1
+          v{api.appVersion}
         </span>
       </div>
 
@@ -39,10 +39,10 @@ export function TitleBar(): JSX.Element {
         )}
         <span
           className="lcd-text max-w-[460px] truncate text-center text-[14px]"
-          title={current ? `${current.artist} — ${current.title}` : ''}
+          title={current ? `${current.artist} - ${current.title}` : ''}
         >
           {current
-            ? `${current.artist} — ${current.title}`
+            ? `${current.artist} - ${current.title}`
             : 'Ready. Load your library.'}
         </span>
       </div>
@@ -62,7 +62,7 @@ export function TitleBar(): JSX.Element {
           aria-label="Minimize"
           title="Minimize"
         >
-          –
+          _
         </button>
         <button
           className="pxbtn !min-w-[32px]"
@@ -70,7 +70,7 @@ export function TitleBar(): JSX.Element {
           aria-label="Toggle maximize"
           title={maximized ? 'Restore' : 'Maximize'}
         >
-          {maximized ? '▭' : '☐'}
+          {maximized ? 'RST' : 'MAX'}
         </button>
         <button
           className="pxbtn !min-w-[32px]"
@@ -79,7 +79,7 @@ export function TitleBar(): JSX.Element {
           title="Close"
           style={{ color: 'var(--error)' }}
         >
-          ×
+          X
         </button>
       </div>
     </header>

@@ -37,6 +37,7 @@
     "smoke:lastfm": "npm run build:electron && node scripts/lastfm-smoke.mjs",
     "smoke:replaygain": "npm run build:electron && node scripts/replaygain-smoke.mjs",
     "smoke:session": "npm run build:electron && node scripts/session-smoke.mjs",
+    "smoke:chrome-state": "npm run build:electron && node scripts/chrome-state-smoke.mjs",
     "smoke:skin": "npm run build:electron && node scripts/skin-smoke.mjs",
     "smoke:smart": "npm run build:electron && node scripts/smart-rules-smoke.mjs",
     "smoke:suggested-stations": "npm run build:electron && node scripts/suggested-stations-smoke.mjs",
