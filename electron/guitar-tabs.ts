@@ -61,14 +61,35 @@ export function buildUltimateGuitarSearchUrl(query: GuitarTabSearchQuery): URL {
   return url;
 }
 
+export function buildUltimateGuitarSearchCandidates(query: GuitarTabSearchQuery): URL[] {
+  const titles = buildTitleSearchCandidates(query.title);
+  const urls = titles.map((title) => buildUltimateGuitarSearchUrl({ ...query, title }));
+  return uniqueUrls(urls).slice(0, 4);
+}
+
 export async function searchUltimateGuitarTabs(
   query: GuitarTabSearchQuery,
 ): Promise<GuitarTabSearchResult[]> {
-  const url = buildUltimateGuitarSearchUrl(query);
-  const html = await requestUltimateGuitarText(url.toString());
-  const parsed = parseUltimateGuitarSearchHtml(html);
   const limit = Math.max(1, Math.min(20, query.limit ?? 8));
-  return rankSearchResults(parsed, query).slice(0, limit);
+  const collected: GuitarTabSearchResult[] = [];
+  let sawResponse = false;
+  let lastError: unknown = null;
+
+  for (const url of buildUltimateGuitarSearchCandidates(query)) {
+    try {
+      const html = await requestUltimateGuitarText(url.toString());
+      sawResponse = true;
+      const parsed = parseUltimateGuitarSearchHtml(html);
+      collected.push(...parsed);
+      if (parsed.length) break;
+    } catch (err) {
+      lastError = err;
+      if (err instanceof Error && /blocked|Cloudflare|challenge/i.test(err.message)) throw err;
+    }
+  }
+
+  if (!sawResponse && lastError instanceof Error) throw lastError;
+  return rankSearchResults(dedupeSearchResults(collected), query).slice(0, limit);
 }
 
 export async function fetchUltimateGuitarTab(url: string): Promise<GuitarTabDocument> {
@@ -385,6 +406,42 @@ function rankSearchResults(
 
 function normalizeSearchText(value: string): string {
   return value.toLowerCase().replace(/\([^)]*\)/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function buildTitleSearchCandidates(title: string): string[] {
+  const original = cleanTitleSearchValue(title);
+  const noFeaturing = stripFeaturing(original);
+  const noBrackets = stripBracketedDescriptors(noFeaturing);
+  const noVersion = stripVersionDescriptors(noBrackets);
+  const plain = stripBracketedDescriptors(stripVersionDescriptors(noFeaturing));
+  return uniqueNonEmpty([original, noFeaturing, noBrackets, noVersion, plain].map(cleanTitleSearchValue));
+}
+
+function stripFeaturing(value: string): string {
+  return value.replace(/\s+(?:feat\.?|ft\.?|featuring)\s+.+$/i, '');
+}
+
+function stripBracketedDescriptors(value: string): string {
+  return value.replace(/\s*[\[(][^\])]+[\])]/g, ' ');
+}
+
+function stripVersionDescriptors(value: string): string {
+  return value
+    .replace(
+      /\s+[-\u2013\u2014:]\s*(?:(?:\d{2,4}\s*)?(?:remaster(?:ed)?|live|acoustic|demo|mono|stereo|radio edit|single version|album version|bonus track|anniversary|deluxe|explicit|clean|version|edit|mix|remix).*)$/i,
+      '',
+    )
+    .replace(
+      /\s+(?:\d{2,4}\s*)?(?:remaster(?:ed)?|radio edit|single version|album version|bonus track|anniversary|deluxe|explicit|clean)\s*$/i,
+      '',
+    );
+}
+
+function cleanTitleSearchValue(value: string): string {
+  return value
+    .replace(/[_"\u201c\u201d\u2018\u2019]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function dedupeSearchResults(results: GuitarTabSearchResult[]): GuitarTabSearchResult[] {
@@ -759,6 +816,18 @@ function uniquePaths(paths: string[]): string[] {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(path);
+  }
+  return out;
+}
+
+function uniqueUrls(urls: URL[]): URL[] {
+  const seen = new Set<string>();
+  const out: URL[] = [];
+  for (const url of urls) {
+    const key = url.toString();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(url);
   }
   return out;
 }

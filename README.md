@@ -32,7 +32,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - **Library health.** Surface missing tags/art/duration, legacy formats, recent imports, duplicate clusters, and exact-looking duplicate rips for safe review.
 - **Artist facts and images.** Wikipedia-powered artist spotlights with large images, short descriptions, summaries, source links, and local cache reuse.
 - **Lyrics.** LRCLIB lookup, local sidecar lyrics, and saved custom plain/LRC lyrics per track.
-- **Play Along.** Search Ultimate Guitar when reachable, paste UG URLs or raw tabs, save local tab text, parse ChordPro, auto-discover sidecar tab files, transpose chords, autoscroll, and pop out a native tab window.
+- **Play Along.** Search Ultimate Guitar when reachable with noisy library-title cleanup, paste UG URLs or raw tabs, save local tab text, parse ChordPro, auto-discover sidecar tab files, transpose chords, autoscroll, and pop out a native tab window.
 - **Practice tools.** A/B loop panel, tempo trainer with pitch preservation, track bookmarks, ratings, sleep timer, stop-after-current, and smart shuffle.
 - **Last.fm.** Desktop auth, Now Playing updates, threshold scrobbling, retry outbox, saved app credentials, and a Settings proof action.
 - **Audio controls.** 10-band EQ, presets, ReplayGain, limiter, preamp, crossfade/gapless handoff, output-device selection, and in-app left/right speaker test.
