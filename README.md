@@ -43,6 +43,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - `release/Newamp Setup <version>.exe` - NSIS installer
 - `release/Newamp Portable <version>.exe` - no-install portable launcher
 - `release/win-unpacked/Newamp.exe` - unpacked app
+- `release/SHA256SUMS.txt` - SHA256 checksums for the installer, portable EXE, and unpacked EXE
 
 The current artifacts are unsigned. Windows may warn until a real code-signing certificate is added.
 
@@ -131,6 +132,7 @@ npm run smoke:support-backup
 npm run smoke:support-restore
 npm run smoke:signing-readiness
 npm run smoke:signing-workflow
+npm run smoke:release-checksums
 npm run smoke:publish-github
 npm run smoke:live-services
 npm run smoke:lastfm

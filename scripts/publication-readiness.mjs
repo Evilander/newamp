@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { checkManualListeningProof, summarizeManualListeningProof } from './manual-listening-proof.mjs';
+import { checkReleaseChecksums } from './release-checksums.mjs';
 
 const repoRoot = resolve('.');
 const packagePath = resolve(repoRoot, 'package.json');
@@ -25,6 +26,7 @@ const checks = [
   githubAuthCheck(),
   signingWorkflowCheck(),
   githubPublishWorkflowCheck(),
+  releaseChecksumsCheck(),
   artifactSignatureCheck(),
   manualProofCheck(),
 ];
@@ -44,6 +46,7 @@ const report = {
   nextStepsWhenReady: [
     'npm version 1.0.0 --no-git-tag-version',
     'npm run package',
+    'npm run release:checksums',
     'npm run release:sign -- --dry-run',
     'npm run release:sign',
     'complete Last.fm live-account proof and any required Ultimate Guitar release decision',
@@ -165,6 +168,17 @@ function githubPublishWorkflowCheck() {
     name: 'github-publish-workflow',
     ok,
     reason: ok ? null : 'release:publish-github script is missing or not wired to scripts/publish-github-release.mjs',
+  };
+}
+
+function releaseChecksumsCheck() {
+  const report = checkReleaseChecksums({ root: repoRoot, version: releaseVersion });
+  return {
+    name: 'release-checksums',
+    ok: report.ok,
+    path: report.path,
+    exists: report.exists,
+    reason: report.reason,
   };
 }
 

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkReleaseChecksums, releaseChecksumsPath } from './release-checksums.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repoRoot = resolve('.');
@@ -29,6 +30,7 @@ export function buildGithubPublishPlan({
   const tag = `v${version}`;
   const installer = resolve(root, 'release', `Newamp Setup ${version}.exe`);
   const portable = resolve(root, 'release', `Newamp Portable ${version}.exe`);
+  const checksums = releaseChecksumsPath({ root });
   const missingArtifacts = [
     ['installer', installer],
     ['portable', portable],
@@ -39,6 +41,18 @@ export function buildGithubPublishPlan({
       tag,
       installer,
       portable,
+      checksums,
+    });
+  }
+  const checksumReport = checkReleaseChecksums({ root, version });
+  if (!checksumReport.ok) {
+    return failedPlan(root, env, checksumReport.reason ?? 'release checksum manifest is not current', {
+      repo,
+      tag,
+      installer,
+      portable,
+      checksums,
+      version,
     });
   }
 
@@ -69,6 +83,7 @@ export function buildGithubPublishPlan({
         tag,
         installer,
         portable,
+        checksums,
         version,
       });
     }
@@ -100,6 +115,7 @@ export function buildGithubPublishPlan({
         tag,
         installer,
         portable,
+        checksums,
         version,
       });
     }
@@ -108,7 +124,7 @@ export function buildGithubPublishPlan({
     }
     commands.push(command('push-tag', 'git', ['push', 'origin', tag]));
   }
-  commands.push(publishReleaseCommand({ repo, tag, version, installer, portable, readmePath }));
+  commands.push(publishReleaseCommand({ repo, tag, version, installer, portable, checksums, readmePath }));
 
   return {
     name: 'github-publication',
@@ -117,7 +133,7 @@ export function buildGithubPublishPlan({
     repo,
     tag,
     version,
-    artifacts: { installer, portable },
+    artifacts: { installer, portable, checksums },
     git: {
       mode: gitDir ? 'external' : 'worktree',
       gitDir,
@@ -184,6 +200,7 @@ function failedPlan(root, env, reason, extra = {}) {
     artifacts: {
       installer: extra.installer ?? null,
       portable: extra.portable ?? null,
+      checksums: extra.checksums ?? null,
     },
     commands: [],
     reason,
@@ -224,16 +241,16 @@ function originCommand(root, gitDir, originUrl) {
   return gitDir ? gitCommand(label, root, gitDir, args) : command(label, 'git', args);
 }
 
-function publishReleaseCommand({ repo, tag, version, installer, portable, readmePath }) {
+function publishReleaseCommand({ repo, tag, version, installer, portable, checksums, readmePath }) {
   const viewArgs = ['release', 'view', tag, '--repo', repo];
   const editArgs = ['release', 'edit', tag, '--repo', repo, '--title', `Newamp ${version}`, '--notes-file', readmePath];
-  const uploadArgs = ['release', 'upload', tag, installer, portable, '--repo', repo, '--clobber'];
+  const releaseAssets = [installer, portable, checksums];
+  const uploadArgs = ['release', 'upload', tag, ...releaseAssets, '--repo', repo, '--clobber'];
   const createArgs = [
     'release',
     'create',
     tag,
-    installer,
-    portable,
+    ...releaseAssets,
     '--repo',
     repo,
     '--title',

@@ -19,16 +19,19 @@ const {
   buildGithubPublishPlan,
   publishGithubRelease,
 } = await import('./publish-github-release.mjs');
+const { writeReleaseChecksums } = await import('./release-checksums.mjs');
 
 const smokeRoot = join(repoRoot, 'tmp', 'publish-github-smoke');
 const cleanExternalGitDir = join(repoRoot, 'tmp', 'publish-github-smoke-clean.git');
 await rm(smokeRoot, { recursive: true, force: true });
 await rm(cleanExternalGitDir, { recursive: true, force: true });
-await mkdir(join(smokeRoot, 'release'), { recursive: true });
+await mkdir(join(smokeRoot, 'release', 'win-unpacked'), { recursive: true });
 await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
 await writeFile(join(smokeRoot, 'README.md'), '# Newamp\n', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'Newamp Setup 1.0.0.exe'), 'installer', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'Newamp Portable 1.0.0.exe'), 'portable', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'win-unpacked', 'Newamp.exe'), 'exe', 'utf8');
+writeReleaseChecksums({ root: smokeRoot, version: '1.0.0' });
 
 const plan = buildGithubPublishPlan({
   root: smokeRoot,
@@ -39,9 +42,11 @@ assert.equal(plan.repo, 'evilander/newamp');
 assert.equal(plan.tag, 'v1.0.0');
 assert.ok(plan.commands.some((command) => command.label === 'ensure-repo'));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.includes('--repo')));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /SHA256SUMS\.txt$/.test(arg))));
 assert.ok(plan.commands.every((command) => !command.commandLine.includes('\n')));
 assert.match(JSON.stringify(plan), /Newamp Setup 1\.0\.0\.exe/);
 assert.match(JSON.stringify(plan), /Newamp Portable 1\.0\.0\.exe/);
+assert.match(JSON.stringify(plan), /SHA256SUMS\.txt/);
 
 const dryRun = publishGithubRelease({
   root: smokeRoot,

@@ -7,6 +7,7 @@ import { checkAudioHardwareReadiness, summarizeAudioHardware } from './audio-har
 import { checkInstalledAssociations, summarizeInstalledAssociations } from './installed-associations-smoke.mjs';
 import { checkLiveServicesReadiness, summarizeLiveServices } from './live-services-readiness-smoke.mjs';
 import { checkManualListeningProof, summarizeManualListeningProof } from './manual-listening-proof.mjs';
+import { checkReleaseChecksums } from './release-checksums.mjs';
 
 const repoRoot = resolve('.');
 const args = new Set(process.argv.slice(2));
@@ -76,6 +77,7 @@ if (!skipSmokes) {
     'smoke:eq',
     'smoke:security',
     'smoke:signing-workflow',
+    'smoke:release-checksums',
     'smoke:publish-github',
     'smoke:reliability',
     'smoke:support-backup',
@@ -114,6 +116,10 @@ if (!skipPackage) {
 
 const artifactCheck = checkArtifacts();
 checks.push(artifactCheck);
+
+const releaseChecksumsCheck = checkReleaseChecksums({ root: repoRoot, version: releaseVersion });
+checks.push(releaseChecksumsCheck);
+if (!releaseChecksumsCheck.ok) blockers.push(`Release checksum manifest is not current: ${releaseChecksumsCheck.reason}`);
 
 const associationCheck = checkFileAssociations();
 checks.push(associationCheck);
