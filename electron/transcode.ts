@@ -1,8 +1,10 @@
 import ffmpegStaticImport from 'ffmpeg-static';
 import { spawn } from 'node:child_process';
-import { stat } from 'node:fs/promises';
-import { extname } from 'node:path';
+import { existsSync } from 'node:fs';
+import { mkdir, stat } from 'node:fs/promises';
+import { basename, extname, join } from 'node:path';
 import { Readable } from 'node:stream';
+import type { Track, TrackWavBatchExportResult } from '../shared/types.js';
 
 const CHROMIUM_NATIVE_EXTS = new Set([
   '.mp3',
@@ -128,6 +130,39 @@ export async function transcodeTrackToWavFile(inputPath: string, outputPath: str
   return { path: outputPath, bytes: info.size };
 }
 
+export async function transcodeTracksToWavFolder(
+  tracks: Track[],
+  outputDir: string,
+): Promise<TrackWavBatchExportResult> {
+  if (!outputDir) throw new Error('Output folder is required.');
+  await mkdir(outputDir, { recursive: true });
+
+  const width = Math.max(2, String(Math.max(1, tracks.length)).length);
+  const usedNames = new Set<string>();
+  const files: TrackWavBatchExportResult['files'] = [];
+  const skipped: string[] = [];
+  let bytes = 0;
+
+  for (const [index, track] of tracks.entries()) {
+    try {
+      const fileName = uniqueWavFileName(outputDir, batchWavFileName(track, index + 1, width), usedNames);
+      const result = await transcodeTrackToWavFile(track.path, join(outputDir, fileName));
+      files.push(result);
+      bytes += result.bytes;
+    } catch (err) {
+      skipped.push(`${trackLabel(track)}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return {
+    path: outputDir,
+    exported: files.length,
+    skipped,
+    bytes,
+    files,
+  };
+}
+
 function resolveFfmpegPath(): string {
   const candidate = process.env.NEWAMP_FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
   return candidate.includes('app.asar')
@@ -150,4 +185,31 @@ function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
       else reject(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
     });
   });
+}
+
+function batchWavFileName(track: Track, position: number, width: number): string {
+  return `${String(position).padStart(width, '0')} - ${safeFileStem(trackLabel(track))}.wav`;
+}
+
+function trackLabel(track: Track): string {
+  const title = track.title || basename(track.path, extname(track.path));
+  const artist = track.artist && track.artist !== 'Unknown Artist' ? track.artist : 'Newamp';
+  return `${artist} - ${title}`;
+}
+
+function uniqueWavFileName(outputDir: string, fileName: string, usedNames: Set<string>): string {
+  const ext = '.wav';
+  const stem = fileName.toLowerCase().endsWith(ext) ? fileName.slice(0, -ext.length) : fileName;
+  let candidate = `${stem}${ext}`;
+  let suffix = 2;
+  while (usedNames.has(candidate.toLowerCase()) || existsSync(join(outputDir, candidate))) {
+    candidate = `${stem} (${suffix})${ext}`;
+    suffix += 1;
+  }
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
+}
+
+function safeFileStem(name: string): string {
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim() || 'Newamp Track';
 }

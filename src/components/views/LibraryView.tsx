@@ -934,6 +934,22 @@ export function TrackTable({
     }
   }
 
+  async function exportSelectedWavs(): Promise<void> {
+    if (!selectedTracks.length || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const result = await api.exportTracksWav(selectedTracks.map((track) => track.id));
+      if (!result) {
+        setPlaylistStatus('WAV export canceled.');
+        return;
+      }
+      const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
+      setPlaylistStatus(`Exported ${result.exported.toLocaleString()} WAV file${result.exported === 1 ? '' : 's'}${skipped} to ${result.path}.`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   return (
     <>
       {playlistStatus && (
@@ -979,6 +995,15 @@ export function TrackTable({
             SAVE SELECTED AS PLAYLIST
           </button>
           <PlaylistAppendPicker tracks={selectedTracks} label="ADD SELECTED TO PLAYLIST" />
+          <button
+            className="pxbtn"
+            data-export-selected-wav
+            onClick={() => void exportSelectedWavs()}
+            disabled={bulkBusy}
+            title="Transcode selected tracks to WAV files in a folder"
+          >
+            EXPORT SELECTED WAV
+          </button>
           <div className="flex flex-wrap items-center gap-1" data-bulk-metadata-edit>
             <input
               value={bulkAlbumArtist}

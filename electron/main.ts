@@ -36,7 +36,12 @@ import {
   startLastfmAuth,
   updateLastfmNowPlaying,
 } from './lastfm.js';
-import { playbackMode, transcodeToWavResponse, transcodeTrackToWavFile } from './transcode.js';
+import {
+  playbackMode,
+  transcodeToWavResponse,
+  transcodeTrackToWavFile,
+  transcodeTracksToWavFolder,
+} from './transcode.js';
 import { exportPlaylistFolder } from './playlist-export.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
 import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from './winamp-skin-import.js';
@@ -659,6 +664,14 @@ function registerIpc(): void {
     const result = await chooseTrackWavExportPath(track);
     if (result.canceled || !result.filePath) return null;
     return transcodeTrackToWavFile(track.path, result.filePath);
+  });
+  ipcMain.handle('tracks:export-wav-folder', async (_e, ids: number[]) => {
+    const tracks = resolveExportTracks(ids);
+    if (!tracks.length) return null;
+    const result = await chooseTracksWavExportFolder(tracks.length);
+    const destinationRoot = result.filePaths[0];
+    if (result.canceled || !destinationRoot) return null;
+    return transcodeTracksToWavFolder(tracks, destinationRoot);
   });
   ipcMain.handle('open:consume-pending-files', async () => {
     const files = pendingOpenFiles;
@@ -1809,6 +1822,31 @@ async function chooseTrackWavExportPath(track: Track): Promise<Electron.SaveDial
     filters: [{ name: 'WAV audio', extensions: ['wav'] }],
   };
   return mainWin ? dialog.showSaveDialog(mainWin, options) : dialog.showSaveDialog(options);
+}
+
+async function chooseTracksWavExportFolder(trackCount: number): Promise<Electron.OpenDialogReturnValue> {
+  if (mainWin) {
+    if (mainWin.isMinimized()) mainWin.restore();
+    mainWin.show();
+    mainWin.focus();
+  }
+  const options: Electron.OpenDialogOptions = {
+    title: `Choose folder for ${trackCount.toLocaleString()} WAV export${trackCount === 1 ? '' : 's'}`,
+    buttonLabel: 'Export WAVs here',
+    properties: ['openDirectory', 'createDirectory'],
+  };
+  return mainWin ? dialog.showOpenDialog(mainWin, options) : dialog.showOpenDialog(options);
+}
+
+function resolveExportTracks(ids: number[]): Track[] {
+  const tracks: Track[] = [];
+  for (const rawId of Array.isArray(ids) ? ids : []) {
+    const id = Math.trunc(Number(rawId));
+    if (!Number.isFinite(id) || id <= 0) continue;
+    const track = library.getTrack(id);
+    if (track) tracks.push(track);
+  }
+  return tracks;
 }
 
 async function openFiles(paths: string[]): Promise<OpenFilesResult> {
