@@ -59,6 +59,7 @@ export function LibraryView(): JSX.Element {
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
   const setTrackRating = usePlayerStore((s) => s.setTrackRating);
+  const toggleAvoidAutoPlay = usePlayerStore((s) => s.toggleAvoidAutoPlay);
   const current = usePlayerStore((s) => s.current);
 
   useEffect(() => {
@@ -138,6 +139,13 @@ export function LibraryView(): JSX.Element {
 
   async function rateTrack(id: number, rating: number): Promise<void> {
     const updated = await setTrackRating(id, rating);
+    if (!updated) return;
+    setTracks((rows) => rows.map((track) => (track.id === id ? updated : track)));
+    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
+  }
+
+  async function toggleAvoid(id: number): Promise<void> {
+    const updated = await toggleAvoidAutoPlay(id);
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === id ? updated : track)));
     api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
@@ -458,6 +466,7 @@ export function LibraryView(): JSX.Element {
               onAddTracksToQueue={addTracksToQueue}
               onToggleLove={toggleLove}
               onSetRating={rateTrack}
+              onToggleAvoidAutoPlay={toggleAvoid}
               onMetadataLookup={(track) => void lookupMetadata(track)}
               onBulkMetadataSaved={applyBulkMetadataResults}
             />
@@ -771,6 +780,7 @@ export function TrackTable({
   onAddTracksToQueue,
   onToggleLove,
   onSetRating,
+  onToggleAvoidAutoPlay,
   onMetadataLookup,
   onBulkMetadataSaved,
 }: {
@@ -785,6 +795,7 @@ export function TrackTable({
   onAddTracksToQueue?: (tracks: Track[]) => void;
   onToggleLove?: (id: number) => Promise<void>;
   onSetRating?: (id: number, rating: number) => Promise<void>;
+  onToggleAvoidAutoPlay?: (id: number) => Promise<void>;
   onMetadataLookup?: (track: Track) => void;
   onBulkMetadataSaved?: (tracks: Track[]) => void;
 }): JSX.Element {
@@ -1051,6 +1062,7 @@ export function TrackTable({
           <th className="w-[58px] px-2 py-[6px] text-right tabular-nums">Time</th>
           <th className="w-[50px] px-2 py-[6px] text-right tabular-nums">Plays</th>
           <th className="w-[86px] px-2 py-[6px] text-right">Rating</th>
+          <th className="w-[54px] px-2 py-[6px] text-right">Auto</th>
           {showMetadataLookup && <th className="w-[48px] px-2 py-[6px] text-right">Tag</th>}
           <th className="w-[36px] px-2 py-[6px] text-right">★</th>
         </tr>
@@ -1220,6 +1232,30 @@ export function TrackTable({
                     await onSetRating?.(t.id, rating);
                   }}
                 />
+              </td>
+              <td className="px-2 py-[5px] text-right">
+                <button
+                  className="pxbtn px-1.5 py-[1px] text-[9px]"
+                  data-avoid-autoplay
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    const updated = onToggleAvoidAutoPlay
+                      ? await onToggleAvoidAutoPlay(t.id).then(() => null)
+                      : await api.toggleAvoidAutoPlay(t.id);
+                    const avoid = updated ? !!updated.avoidAutoPlay : !t.avoidAutoPlay;
+                    (t as Track).avoidAutoPlay = avoid ? 1 : 0;
+                    e.currentTarget.innerText = avoid ? 'AVOID' : 'AUTO';
+                    e.currentTarget.style.color = avoid ? 'var(--warn)' : 'var(--muted)';
+                    e.currentTarget.style.borderColor = avoid ? 'var(--warn)' : 'var(--line)';
+                  }}
+                  style={{
+                    color: t.avoidAutoPlay ? 'var(--warn)' : 'var(--muted)',
+                    borderColor: t.avoidAutoPlay ? 'var(--warn)' : 'var(--line)',
+                  }}
+                  title={t.avoidAutoPlay ? 'Excluded from Auto DJ and generated mixes' : 'Allowed in Auto DJ and generated mixes'}
+                >
+                  {t.avoidAutoPlay ? 'AVOID' : 'AUTO'}
+                </button>
               </td>
               {showMetadataLookup && (
                 <td className="px-2 py-[5px] text-right">

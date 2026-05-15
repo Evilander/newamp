@@ -40,6 +40,7 @@ export function NowPlayingView(): JSX.Element {
   const currentTime = usePlayerStore((s) => s.currentTime);
   const toggleLove = usePlayerStore((s) => s.toggleLove);
   const setTrackRating = usePlayerStore((s) => s.setTrackRating);
+  const toggleAvoidAutoPlay = usePlayerStore((s) => s.toggleAvoidAutoPlay);
   const setFs = usePlayerStore((s) => s.setFullscreenViz);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const seek = usePlayerStore((s) => s.seek);
@@ -461,6 +462,7 @@ export function NowPlayingView(): JSX.Element {
             current={current}
             onLove={() => toggleLove(current.id)}
             onSetRating={(rating) => void setTrackRating(current.id, rating)}
+            onToggleAvoid={() => void toggleAvoidAutoPlay(current.id)}
             onShowInFolder={() => void api.showInFolder(current.path)}
             onExportWav={() => void exportCurrentWav()}
             exportBusy={exportBusy}
@@ -579,6 +581,7 @@ function TrackInfoHeader({
   current,
   onLove,
   onSetRating,
+  onToggleAvoid,
   onShowInFolder,
   onExportWav,
   exportBusy,
@@ -588,6 +591,7 @@ function TrackInfoHeader({
   current: Track;
   onLove: () => void;
   onSetRating: (rating: number) => void;
+  onToggleAvoid: () => void;
   onShowInFolder: () => void;
   onExportWav: () => void;
   exportBusy: boolean;
@@ -639,6 +643,19 @@ function TrackInfoHeader({
             }}
           >
             {current.loved ? '★ loved' : '☆ love'}
+          </button>
+          <button
+            type="button"
+            data-now-playing-avoid-autoplay
+            onClick={onToggleAvoid}
+            className="border px-[6px] text-[9px] uppercase tracking-[0.1em]"
+            style={{
+              borderColor: current.avoidAutoPlay ? 'var(--warn)' : 'var(--line)',
+              color: current.avoidAutoPlay ? 'var(--warn)' : 'var(--ink-2)',
+            }}
+            title={current.avoidAutoPlay ? 'Excluded from Auto DJ and generated mixes' : 'Allow in Auto DJ and generated mixes'}
+          >
+            {current.avoidAutoPlay ? 'avoid Auto DJ' : 'Auto DJ ok'}
           </button>
           <TrackRating value={current.rating} onChange={onSetRating} />
           <button

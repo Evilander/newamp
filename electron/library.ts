@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   has_art      INTEGER NOT NULL DEFAULT 0,
   loved        INTEGER NOT NULL DEFAULT 0,
   rating       INTEGER NOT NULL DEFAULT 0,
+  avoid_auto_play INTEGER NOT NULL DEFAULT 0,
   play_count   INTEGER NOT NULL DEFAULT 0,
   last_played  INTEGER,
   skip_count   INTEGER NOT NULL DEFAULT 0,
@@ -100,6 +101,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album);
 CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album_artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_loved  ON tracks(loved);
 CREATE INDEX IF NOT EXISTS idx_tracks_rating ON tracks(rating DESC);
+CREATE INDEX IF NOT EXISTS idx_tracks_avoid_auto_play ON tracks(avoid_auto_play);
 CREATE INDEX IF NOT EXISTS idx_tracks_play   ON tracks(play_count DESC);
 
 CREATE TABLE IF NOT EXISTS play_history (
@@ -213,6 +215,7 @@ interface RawRow {
   has_art: number;
   loved: number;
   rating: number;
+  avoid_auto_play: number;
   play_count: number;
   last_played: number | null;
   skip_count: number;
@@ -315,6 +318,7 @@ function rowToTrack(r: RawRow): Track {
     hasArt: r.has_art ? 1 : 0,
     loved: r.loved ? 1 : 0,
     rating: normalizeTrackRating(r.rating),
+    avoidAutoPlay: r.avoid_auto_play ? 1 : 0,
     playCount: r.play_count,
     lastPlayed: r.last_played,
     skipCount: Math.max(0, Math.trunc(Number(r.skip_count) || 0)),
@@ -463,6 +467,7 @@ export class LibraryStore {
     const applySchema = () => {
       this.db.exec(SCHEMA);
       this.ensureColumn('tracks', 'rating', 'INTEGER NOT NULL DEFAULT 0');
+      this.ensureColumn('tracks', 'avoid_auto_play', 'INTEGER NOT NULL DEFAULT 0');
       this.ensureColumn('tracks', 'skip_count', 'INTEGER NOT NULL DEFAULT 0');
       this.ensureColumn('tracks', 'last_skipped', 'INTEGER');
       this.ensureColumn('tracks', 'replaygain_track_db', 'REAL');
@@ -1493,7 +1498,7 @@ export class LibraryStore {
   }
 
   buildHarmonicMix(input: HarmonicMixInput = {}): Track[] {
-    const where: string[] = ['path IS NOT NULL'];
+    const where: string[] = ['path IS NOT NULL', 'avoid_auto_play = 0'];
     const params: unknown[] = [];
     const genreQuery = input.genreQuery?.trim();
     if (genreQuery) {
@@ -1515,7 +1520,7 @@ export class LibraryStore {
 
     if (input.seedTrackId && !candidates.some((track) => track.id === input.seedTrackId)) {
       const seed = this.getTrack(input.seedTrackId);
-      if (seed) candidates.unshift(seed);
+      if (seed && !seed.avoidAutoPlay) candidates.unshift(seed);
     }
 
     return buildHarmonicMixSequence(candidates, input);
@@ -1526,6 +1531,7 @@ export class LibraryStore {
     const candidates = this.many<RawRow>(
       `SELECT * FROM tracks
         WHERE path IS NOT NULL
+          AND avoid_auto_play = 0
         ORDER BY loved DESC, rating DESC, play_count DESC, last_played DESC, title COLLATE NOCASE
         LIMIT 10000`,
     ).map(rowToTrack);
@@ -1569,6 +1575,20 @@ export class LibraryStore {
     const next = normalizeTrackRating(rating);
     this.db.run(`UPDATE tracks SET rating = ? WHERE id = ?`, [next, trackId]);
     if (this.db.getRowsModified() <= 0) return null;
+    this.scheduleFlush();
+    return this.getTrack(trackId);
+  }
+
+  toggleAvoidAutoPlay(id: number): Track | null {
+    const trackId = Math.trunc(Number(id));
+    if (!Number.isFinite(trackId) || trackId <= 0) return null;
+    const row = this.one<{ avoid_auto_play: number }>(
+      `SELECT avoid_auto_play FROM tracks WHERE id = ?`,
+      [trackId],
+    );
+    if (!row) return null;
+    const next = row.avoid_auto_play ? 0 : 1;
+    this.db.run(`UPDATE tracks SET avoid_auto_play = ? WHERE id = ?`, [next, trackId]);
     this.scheduleFlush();
     return this.getTrack(trackId);
   }
@@ -2125,6 +2145,9 @@ function parseTrackSearchQuery(input: string): ParsedTrackSearch {
     'missing',
     'has',
     'loved',
+    'avoid',
+    'autoplay',
+    'auto',
     'rating',
     'stars',
     'path',
@@ -2253,6 +2276,10 @@ function applyTrackSearchFilter(
   if (field === 'year') return pushYearFilter(where, params, value);
   if (field === 'loved') {
     where.push(truthySearchValue(value) ? 'loved = 1' : 'loved = 0');
+    return;
+  }
+  if (field === 'avoid' || field === 'autoplay' || field === 'auto') {
+    where.push(truthySearchValue(value) ? 'avoid_auto_play = 1' : 'avoid_auto_play = 0');
     return;
   }
   if (field === 'rating' || field === 'stars') return pushRatingFilter(where, params, value);
@@ -2662,7 +2689,7 @@ function smartRuleParams(rule: Omit<SmartPlaylistRule, 'id' | 'createdAt' | 'upd
 }
 
 function smartRuleWhere(rule: SmartPlaylistRule): { where: string; params: unknown[] } {
-  const where: string[] = [];
+  const where: string[] = ['avoid_auto_play = 0'];
   const params: unknown[] = [];
   const genreWords = (rule.genreQuery ?? '')
     .split(/[,\s]+/)
@@ -2782,7 +2809,7 @@ function uniqueTracksById(tracks: Track[]): Track[] {
 }
 
 function isTasteMixCandidate(track: Track): boolean {
-  return !!track.path && (track.duration == null || track.duration > 20);
+  return !track.avoidAutoPlay && !!track.path && (track.duration == null || track.duration > 20);
 }
 
 function normalizeMixCount(value: number | null | undefined): number {

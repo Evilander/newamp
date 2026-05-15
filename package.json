@@ -46,6 +46,7 @@
     "smoke:harmonic": "npm run build:electron && node scripts/harmonic-mix-smoke.mjs",
     "smoke:mixes": "npm run build:electron && node scripts/mixes-smoke.mjs",
     "smoke:auto-dj": "npm run build:electron && node scripts/auto-dj-smoke.mjs",
+    "smoke:avoid-autoplay": "npm run build:electron && node scripts/avoid-autoplay-smoke.mjs",
     "smoke:queue-edit": "npm run build:electron && node scripts/queue-edit-smoke.mjs",
     "smoke:queue-insert": "npm run build:electron && node scripts/queue-insert-smoke.mjs",
     "smoke:handoff": "npm run build:electron && node scripts/playback-handoff-smoke.mjs",

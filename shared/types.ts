@@ -19,6 +19,7 @@ export interface Track {
   hasArt: 0 | 1;
   loved: 0 | 1;
   rating: number;
+  avoidAutoPlay: 0 | 1;
   playCount: number;
   lastPlayed: number | null;
   skipCount: number;
@@ -640,6 +641,7 @@ export interface NewampAPI {
   deleteTrackBookmark: (id: number) => Promise<void>;
   toggleLove: (id: number) => Promise<boolean>;
   setTrackRating: (id: number, rating: number) => Promise<Track | null>;
+  toggleAvoidAutoPlay: (id: number) => Promise<Track | null>;
   recordPlay: (id: number) => Promise<void>;
   recordSkip: (id: number, position?: number) => Promise<void>;
   getArtUrl: (trackId: number) => string;

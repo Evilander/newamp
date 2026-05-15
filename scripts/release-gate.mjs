@@ -46,6 +46,7 @@ if (!skipSmokes) {
     'smoke:suggested-stations',
     'smoke:harmonic',
     'smoke:auto-dj',
+    'smoke:avoid-autoplay',
     'smoke:podcast',
     'smoke:podcast-progress',
     'smoke:podcast-download',
