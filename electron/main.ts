@@ -36,7 +36,7 @@ import {
   startLastfmAuth,
   updateLastfmNowPlaying,
 } from './lastfm.js';
-import { playbackMode, transcodeToWavResponse } from './transcode.js';
+import { playbackMode, transcodeToWavResponse, transcodeTrackToWavFile } from './transcode.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
 import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from './winamp-skin-import.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
@@ -615,6 +615,13 @@ function registerIpc(): void {
     const content = await readFile(filePath, 'utf8');
     const name = basename(filePath).replace(/\.(m3u8?|pls|txt)$/i, '');
     return library.importPlaylistM3u({ name, content, baseDir: dirname(filePath) });
+  });
+  ipcMain.handle('track:export-wav', async (_e, id: number) => {
+    const track = library.getTrack(id);
+    if (!track) return null;
+    const result = await chooseTrackWavExportPath(track);
+    if (result.canceled || !result.filePath) return null;
+    return transcodeTrackToWavFile(track.path, result.filePath);
   });
   ipcMain.handle('open:consume-pending-files', async () => {
     const files = pendingOpenFiles;
@@ -1723,6 +1730,22 @@ async function choosePlaylistExportPath(
     title: 'Export Newamp playlist',
     defaultPath: `${safeFileStem(playlist.name)}.${extension}`,
     filters,
+  };
+  return mainWin ? dialog.showSaveDialog(mainWin, options) : dialog.showSaveDialog(options);
+}
+
+async function chooseTrackWavExportPath(track: Track): Promise<Electron.SaveDialogReturnValue> {
+  if (mainWin) {
+    if (mainWin.isMinimized()) mainWin.restore();
+    mainWin.show();
+    mainWin.focus();
+  }
+  const artist = track.artist && track.artist !== 'Unknown Artist' ? track.artist : 'Newamp';
+  const title = track.title || basename(track.path, extname(track.path));
+  const options: Electron.SaveDialogOptions = {
+    title: 'Export track as WAV',
+    defaultPath: `${safeFileStem(`${artist} - ${title}`)}.wav`,
+    filters: [{ name: 'WAV audio', extensions: ['wav'] }],
   };
   return mainWin ? dialog.showSaveDialog(mainWin, options) : dialog.showSaveDialog(options);
 }

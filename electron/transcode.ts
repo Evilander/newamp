@@ -1,5 +1,6 @@
 import ffmpegStaticImport from 'ffmpeg-static';
 import { spawn } from 'node:child_process';
+import { stat } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { Readable } from 'node:stream';
 
@@ -99,9 +100,54 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
   });
 }
 
+export async function transcodeTrackToWavFile(inputPath: string, outputPath: string): Promise<{ path: string; bytes: number }> {
+  if (!inputPath || !outputPath) throw new Error('Input and output paths are required.');
+  const ffmpeg = resolveFfmpegPath();
+  await runFfmpeg([
+    '-hide_banner',
+    '-nostdin',
+    '-loglevel',
+    'error',
+    '-i',
+    inputPath,
+    '-map',
+    '0:a:0',
+    '-vn',
+    '-f',
+    'wav',
+    '-acodec',
+    'pcm_s16le',
+    '-ar',
+    '48000',
+    '-ac',
+    '2',
+    '-y',
+    outputPath,
+  ], ffmpeg);
+  const info = await stat(outputPath);
+  return { path: outputPath, bytes: info.size };
+}
+
 function resolveFfmpegPath(): string {
   const candidate = process.env.NEWAMP_FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
   return candidate.includes('app.asar')
     ? candidate.replace('app.asar', 'app.asar.unpacked')
     : candidate;
+}
+
+function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > 6000) stderr = stderr.slice(-6000);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
+    });
+  });
 }

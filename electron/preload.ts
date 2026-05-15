@@ -44,6 +44,7 @@ import type {
   TrackBookmark,
   Track,
   TrackMetadataPatchInput,
+  TrackWavExportResult,
 } from '../shared/types.js';
 
 const api: NewampAPI = {
@@ -93,6 +94,8 @@ const api: NewampAPI = {
     ipcRenderer.invoke('playlist:export-pls', id) as Promise<string | null>,
   importPlaylistM3u: () =>
     ipcRenderer.invoke('playlist:import-m3u') as Promise<PlaylistM3uImportResult | null>,
+  exportTrackWav: (id: number) =>
+    ipcRenderer.invoke('track:export-wav', id) as Promise<TrackWavExportResult | null>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,
   getDroppedFilePaths: (files: unknown[]) => {
