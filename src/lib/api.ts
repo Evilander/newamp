@@ -235,6 +235,7 @@ const stub: NewampAPI = {
   deleteTrackBookmark: async () => undefined,
   toggleLove: async () => false,
   setTrackRating: async () => null,
+  toggleAvoidAutoPlay: async () => null,
   recordPlay: async () => undefined,
   recordSkip: async () => undefined,
   getArtUrl: () => '',

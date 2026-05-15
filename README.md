@@ -23,7 +23,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - **Home command center.** Opens to a useful dashboard with continue playback, library stats, health signals, fresh imports, heavy rotation, loved tracks, harmonic mixes, and saved playlists.
 - **Quick Play command palette.** Ctrl+K/Ctrl+J searches tracks, albums, artists, playlists, views, and commands; Enter plays, Ctrl+Enter plays next, Shift+Enter queues, Ctrl+L loves, and Ctrl+R starts Smart Rule Radio.
 - **Custom playlists and queue.** Create named playlists, filter large playlist lists/tracks and the active queue, append tracks in bulk, add folders, pick or drop playlist artwork, export saved playlists or the live queue as portable copied folders, and launch playlists directly from Home.
-- **Smart rules and stations.** Build dynamic rules from genre, artist, album, year/era, rating, love state, play count, date added, BPM, key, and search filters; launch rule-driven radio stations.
+- **Smart rules and stations.** Build dynamic rules from genre, artist, album, year/era, rating, love state, play count, date added, BPM, key, and search filters; launch rule-driven radio stations; explicitly exclude individual tracks from Auto DJ and generated mixes without removing them from the library.
 - **Podcasts.** Add podcast feeds, keep episode progress, mark completions, and download episodes for local playback.
 - **Milkdrop visualizer.** Butterchurn-powered fullscreen Milkdrop plus lighter built-in analyzer modes.
 - **Skins.** Built-in skins, custom CSS-variable skins, import/export of `.newampskin.json`, and Winamp classic `.wsz` / `.zip` palette import.

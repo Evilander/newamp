@@ -47,6 +47,7 @@ export function selectAutoDjAdditions(
   const seen = new Set(queue.map((track) => track.id));
   const additions: Track[] = [];
   for (const candidate of candidates) {
+    if (candidate.avoidAutoPlay) continue;
     if (seen.has(candidate.id)) continue;
     seen.add(candidate.id);
     additions.push(candidate);

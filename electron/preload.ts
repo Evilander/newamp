@@ -183,6 +183,8 @@ const api: NewampAPI = {
   toggleLove: (id) => ipcRenderer.invoke('library:toggle-love', id),
   setTrackRating: (id: number, rating: number) =>
     ipcRenderer.invoke('library:set-rating', id, rating) as Promise<Track | null>,
+  toggleAvoidAutoPlay: (id: number) =>
+    ipcRenderer.invoke('library:toggle-avoid-autoplay', id) as Promise<Track | null>,
   recordPlay: (id) => ipcRenderer.invoke('library:record-play', id),
   recordSkip: (id, position) => ipcRenderer.invoke('library:record-skip', id, position),
   getArtUrl: (trackId: number) => `newart://${trackId}/art`,

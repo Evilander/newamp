@@ -699,6 +699,9 @@ function registerIpc(): void {
   ipcMain.handle('library:set-rating', async (_e, id: number, rating: number) =>
     library.setTrackRating(id, rating),
   );
+  ipcMain.handle('library:toggle-avoid-autoplay', async (_e, id: number) =>
+    library.toggleAvoidAutoPlay(id),
+  );
   ipcMain.handle('library:record-play', async (_e, id: number) => library.recordPlay(id));
   ipcMain.handle('library:record-skip', async (_e, id: number, position?: number) =>
     library.recordSkip(id, Date.now(), position ?? 0),
