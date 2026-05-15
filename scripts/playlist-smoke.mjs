@@ -223,6 +223,9 @@ assert.match(sidebarSource, /label: 'Playlists'/, 'sidebar should make Playlists
 assert.match(quickPlaySource, /title: 'Playlists'/, 'Quick Play should open the Playlists view by name');
 assert.match(playlistViewSource, /Playlist icon/, 'Now Queue should expose playlist icon controls');
 assert.match(playlistViewSource, /Insert image/, 'Now Queue should let users insert a playlist image');
+assert.match(playlistViewSource, /data-playlist-icon-dropzone/, 'playlist icon well should accept dragged image files');
+assert.match(playlistViewSource, /handlePlaylistIconDrop/, 'playlist icon drop zone should route dropped images into the playlist draft');
+assert.match(playlistViewSource, /isPlaylistImagePath/, 'playlist icon drop zone should reject non-image drops');
 assert.match(playlistViewSource, /CREATE EMPTY PLAYLIST/, 'Playlists view should allow creating an empty named playlist');
 assert.match(playlistViewSource, /SAVE QUEUE AS PLAYLIST/, 'Playlists view should frame queue saves as playlist creation');
 assert.match(playlistViewSource, /UPDATE PLAYLIST/, 'Now Queue should frame selected saves as playlist edits');
