@@ -31,6 +31,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   preampDb: 0,
   resumeState: null,
   compactMode: false,
+  visualizerPreset: 'spectrum',
   volume: 0.75,
   playbackRate: 1,
   audioOutputDeviceId: null,

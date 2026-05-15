@@ -44,12 +44,11 @@ export function FullscreenVisualizer(): JSX.Element {
     >
       <div className="absolute inset-0">
         <Visualizer
-          mode={activePreset as (typeof PRESETS)[number]['id']}
+          mode={activePreset}
           className="absolute inset-0 h-full w-full"
         />
       </div>
 
-      {/* Album art bloom */}
       {artUrl && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div className="relative">
@@ -67,7 +66,6 @@ export function FullscreenVisualizer(): JSX.Element {
         </div>
       )}
 
-      {/* Top right hint */}
       <div
         className={`pointer-events-auto absolute right-4 top-4 flex items-center gap-2 transition-opacity duration-300 ${
           showChrome ? 'opacity-100' : 'opacity-0'
@@ -86,11 +84,10 @@ export function FullscreenVisualizer(): JSX.Element {
           ))}
         </div>
         <button className="pxbtn" onClick={() => setFs(false)} title="Exit visualizer (Esc)">
-          ESC ✕
+          ESC X
         </button>
       </div>
 
-      {/* Bottom overlay */}
       <div
         className={`pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16 transition-opacity duration-300 ${
           showChrome ? 'opacity-100' : 'opacity-0'
@@ -105,13 +102,15 @@ export function FullscreenVisualizer(): JSX.Element {
               {current ? current.title : 'No track loaded'}
             </div>
             <div className="text-base" style={{ color: 'rgba(255,255,255,0.7)' }}>
-              {current ? `${current.artist}${current.album ? ` — ${current.album}` : ''}` : ''}
+              {current ? `${current.artist}${current.album ? ` - ${current.album}` : ''}` : ''}
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button className="pxbtn" onClick={() => void prev()}>⏮</button>
-            <button className="pxbtn !min-w-[44px]" onClick={togglePlay}>{isPlaying ? '⏸' : '▶'}</button>
-            <button className="pxbtn" onClick={() => void next()}>⏭</button>
+            <button className="pxbtn" onClick={() => void prev()} title="Previous">PREV</button>
+            <button className="pxbtn !min-w-[58px]" onClick={togglePlay} title="Play / Pause">
+              {isPlaying ? 'PAUSE' : 'PLAY'}
+            </button>
+            <button className="pxbtn" onClick={() => void next()} title="Next">NEXT</button>
           </div>
         </div>
         <div className="flex items-center gap-3 text-xs" style={{ color: 'rgba(255,255,255,0.6)' }}>

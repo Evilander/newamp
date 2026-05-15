@@ -25,6 +25,7 @@ const DEFAULTS: AppSettings = {
   preampDb: 0,
   resumeState: null,
   compactMode: false,
+  visualizerPreset: 'spectrum',
   volume: 0.75,
   playbackRate: 1,
   audioOutputDeviceId: null,
@@ -38,6 +39,13 @@ const DEFAULTS: AppSettings = {
 function normalizeAutoDjSmartRuleId(value: unknown): number | null {
   const id = Math.trunc(Number(value));
   return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function normalizeVisualizerPreset(value: unknown): AppSettings['visualizerPreset'] {
+  const preset = String(value);
+  return ['butterchurn', 'galaxy', 'aurora', 'spectrum', 'oscilloscope'].includes(preset)
+    ? (preset as AppSettings['visualizerPreset'])
+    : DEFAULTS.visualizerPreset;
 }
 
 export class SettingsStore {
@@ -61,6 +69,7 @@ export class SettingsStore {
           limiterEnabled: normalizeLimiterEnabled(parsed.limiterEnabled),
           preampDb: normalizePreampDb(parsed.preampDb),
           compactMode: parsed.compactMode === true,
+          visualizerPreset: normalizeVisualizerPreset(parsed.visualizerPreset),
           autoDjEnabled: !!parsed.autoDjEnabled,
           autoDjTarget: normalizeAutoDjTarget(parsed.autoDjTarget ?? DEFAULTS.autoDjTarget),
           autoDjSmartRuleId: normalizeAutoDjSmartRuleId(parsed.autoDjSmartRuleId),
@@ -104,6 +113,9 @@ export class SettingsStore {
       compactMode: patch.compactMode === undefined
         ? this.state.compactMode
         : patch.compactMode === true,
+      visualizerPreset: patch.visualizerPreset === undefined
+        ? this.state.visualizerPreset
+        : normalizeVisualizerPreset(patch.visualizerPreset),
       autoDjEnabled: patch.autoDjEnabled === undefined
         ? this.state.autoDjEnabled
         : !!patch.autoDjEnabled,
