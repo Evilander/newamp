@@ -31,6 +31,8 @@ const AUDIO_EXTS = new Set([
 ]);
 
 const METADATA_OPTIONS: IOptions = { duration: true, skipCovers: false, skipPostHeaders: true };
+const DISCOVERY_CONCURRENCY = 4;
+const DISCOVERY_PROGRESS_INTERVAL = 200;
 
 patchTokenizerNegativeIgnore();
 
@@ -288,13 +290,12 @@ export class Scanner {
     let skipped = 0;
 
     try {
-      // Phase 1: discover all audio file paths (fast).
       const discovered: Array<{ full: string; size: number; mtime: number }> = [];
-      for (const root of roots) {
+      await pMap(roots, DISCOVERY_CONCURRENCY, async (root) => {
         for await (const f of walk(root)) {
-          if (this.cancelled) return;
+          if (this.cancelled) break;
           discovered.push(f);
-          if (discovered.length % 200 === 0) {
+          if (discovered.length % DISCOVERY_PROGRESS_INTERVAL === 0) {
             this.onProgress({
               scanned: 0,
               total: discovered.length,
@@ -306,7 +307,8 @@ export class Scanner {
             });
           }
         }
-      }
+      });
+      if (this.cancelled) return;
 
       const total = discovered.length;
       let scanned = 0;
