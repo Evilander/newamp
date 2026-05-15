@@ -44,6 +44,7 @@ if (!skipSmokes) {
     'smoke:open-files',
     'smoke:audio-proof',
     'smoke:manual-listening-proof',
+    'smoke:eq',
     'smoke:security',
     'smoke:signing-workflow',
     'smoke:publish-github',

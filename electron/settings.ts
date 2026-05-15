@@ -5,6 +5,7 @@ import { normalizePlaybackRate } from '../shared/tempo-trainer.js';
 import { normalizeAutoDjTarget } from '../shared/auto-dj.js';
 import { normalizeAudioOutputDeviceId } from '../shared/audio-output.js';
 import { normalizeLimiterEnabled, normalizePreampDb } from '../shared/audio-limiter.js';
+import { FLAT_EQ_VALUES, normalizeEqValues } from '../shared/eq-presets.js';
 import { quarantineCorruptFile, recoveryReason } from './recovery.js';
 
 const DEFAULTS: AppSettings = {
@@ -29,7 +30,7 @@ const DEFAULTS: AppSettings = {
   autoDjEnabled: false,
   autoDjTarget: 24,
   autoDjSmartRuleId: null,
-  equalizer: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  equalizer: [...FLAT_EQ_VALUES],
   eqEnabled: false,
 };
 
@@ -52,7 +53,7 @@ export class SettingsStore {
           ...DEFAULTS,
           ...parsed,
           libraryAutoWatch: parsed.libraryAutoWatch !== false,
-          equalizer: this.normalizeEq(parsed.equalizer),
+          equalizer: normalizeEqValues(parsed.equalizer),
           resumeState: this.normalizeResume(parsed.resumeState),
           playbackRate: normalizePlaybackRate(parsed.playbackRate ?? DEFAULTS.playbackRate),
           audioOutputDeviceId: normalizeAudioOutputDeviceId(parsed.audioOutputDeviceId),
@@ -74,11 +75,6 @@ export class SettingsStore {
     }
   }
 
-  private normalizeEq(arr: number[] | undefined): number[] {
-    if (!Array.isArray(arr) || arr.length !== 10) return [...DEFAULTS.equalizer];
-    return arr.map((v) => Math.max(-12, Math.min(12, Number(v) || 0)));
-  }
-
   get(): AppSettings {
     return { ...this.state, equalizer: [...this.state.equalizer] };
   }
@@ -90,7 +86,7 @@ export class SettingsStore {
       libraryAutoWatch: patch.libraryAutoWatch === undefined
         ? this.state.libraryAutoWatch
         : patch.libraryAutoWatch !== false,
-      equalizer: patch.equalizer ? this.normalizeEq(patch.equalizer) : this.state.equalizer,
+      equalizer: patch.equalizer ? normalizeEqValues(patch.equalizer) : this.state.equalizer,
       playbackRate: patch.playbackRate === undefined
         ? this.state.playbackRate
         : normalizePlaybackRate(patch.playbackRate),
