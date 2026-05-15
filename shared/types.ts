@@ -153,6 +153,11 @@ export interface OpenFilesResult {
   skipped: string[];
 }
 
+export interface TrackWavExportResult {
+  path: string;
+  bytes: number;
+}
+
 export interface LibraryDuplicateGroup {
   artist: string;
   title: string;
@@ -581,6 +586,7 @@ export interface NewampAPI {
   exportPlaylistM3u: (id: number) => Promise<string | null>;
   exportPlaylistPls: (id: number) => Promise<string | null>;
   importPlaylistM3u: () => Promise<PlaylistM3uImportResult | null>;
+  exportTrackWav: (id: number) => Promise<TrackWavExportResult | null>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;
   getDroppedFilePaths: (files: unknown[]) => string[];

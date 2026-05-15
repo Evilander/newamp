@@ -35,7 +35,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - **Play Along.** Search Ultimate Guitar when reachable with noisy library-title cleanup, paste UG URLs or raw tabs, save local tab text, parse ChordPro, auto-discover sidecar tab files, transpose chords, autoscroll, and pop out a native tab window.
 - **Practice tools.** A/B loop panel, tempo trainer with pitch preservation, track bookmarks, ratings, sleep timer, stop-after-current, and smart shuffle.
 - **Last.fm.** Desktop auth, Now Playing updates, threshold scrobbling, retry outbox, saved app credentials, and a Settings proof action.
-- **Audio controls.** 10-band EQ, presets, ReplayGain, limiter, preamp, crossfade/gapless handoff, output-device selection, and in-app left/right speaker test.
+- **Audio controls.** 10-band EQ, presets, ReplayGain, limiter, preamp, crossfade/gapless handoff, output-device selection, in-app left/right speaker test, and current-track WAV export.
 - **Native desktop behavior.** Tray residency, global media keys, open-with file association handling, Explorer reveal actions, persisted pin-on-top/compact-window controls, and OS media-session metadata/actions with album art.
 - **Winamp-style keyboard controls.** Z/X/C/V/B transport, arrow seek/volume nudges, L love, 0-5 ratings, fullscreen visualizer toggle, and input-safe shortcut handling.
 - **Reliability tools.** Corrupt settings/library recovery, support backup/restore, security smoke, installed association proof, and release gates.

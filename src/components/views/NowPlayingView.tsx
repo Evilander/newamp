@@ -64,6 +64,8 @@ export function NowPlayingView(): JSX.Element {
   const [lyricsMessage, setLyricsMessage] = useState<string | null>(null);
   const [bookmarks, setBookmarks] = useState<TrackBookmark[]>([]);
   const [stationRule, setStationRule] = useState<SmartPlaylistRule | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
   const [practiceLoop, setPracticeLoop] = useState<PracticeLoop>({
     start: null,
     end: null,
@@ -284,6 +286,20 @@ export function NowPlayingView(): JSX.Element {
     await setAutoDjSmartRuleId(null);
   }
 
+  async function exportCurrentWav(): Promise<void> {
+    if (!current || exportBusy) return;
+    setExportBusy(true);
+    setExportMessage(null);
+    try {
+      const result = await api.exportTrackWav(current.id);
+      setExportMessage(result ? `Exported WAV (${formatBytes(result.bytes)}).` : 'Export canceled.');
+    } catch (err) {
+      setExportMessage(err instanceof Error ? err.message : 'WAV export failed.');
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
   const activeStationName = autoDjEnabled
     ? autoDjSmartRuleId
       ? stationRule?.name ?? `Smart Rule #${autoDjSmartRuleId}`
@@ -446,6 +462,9 @@ export function NowPlayingView(): JSX.Element {
             onLove={() => toggleLove(current.id)}
             onSetRating={(rating) => void setTrackRating(current.id, rating)}
             onShowInFolder={() => void api.showInFolder(current.path)}
+            onExportWav={() => void exportCurrentWav()}
+            exportBusy={exportBusy}
+            exportMessage={exportMessage}
             codecHint={codecHint}
           />
 
@@ -561,12 +580,18 @@ function TrackInfoHeader({
   onLove,
   onSetRating,
   onShowInFolder,
+  onExportWav,
+  exportBusy,
+  exportMessage,
   codecHint,
 }: {
   current: Track;
   onLove: () => void;
   onSetRating: (rating: number) => void;
   onShowInFolder: () => void;
+  onExportWav: () => void;
+  exportBusy: boolean;
+  exportMessage: string | null;
   codecHint: string;
 }): JSX.Element {
   return (
@@ -626,6 +651,22 @@ function TrackInfoHeader({
           >
             Show in folder
           </button>
+          <button
+            type="button"
+            data-export-track-wav
+            onClick={onExportWav}
+            disabled={exportBusy}
+            className="border px-[6px] text-[9px] uppercase tracking-[0.1em] disabled:opacity-50"
+            style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
+            title="Export current track as WAV"
+          >
+            {exportBusy ? 'Exporting WAV' : 'Export WAV'}
+          </button>
+          {exportMessage ? (
+            <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+              {exportMessage}
+            </span>
+          ) : null}
         </div>
       </div>
 
@@ -672,6 +713,18 @@ function TrackRating({
       ))}
     </div>
   );
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
 function Tag({
