@@ -2,6 +2,7 @@
 // stations. Round-robin DNS gives multiple mirrors; we pick one at runtime.
 
 import type { RadioStation } from '@shared/types';
+import { NEWAMP_USER_AGENT } from '@shared/app-version';
 
 const HOSTS = [
   'https://de1.api.radio-browser.info',
@@ -15,7 +16,7 @@ function pickHost(): string {
 }
 
 const COMMON: RequestInit = {
-  headers: { 'User-Agent': 'Newamp/1.0.0' },
+  headers: { 'User-Agent': NEWAMP_USER_AGENT },
 };
 
 export async function searchStations(opts: {

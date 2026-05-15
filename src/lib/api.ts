@@ -10,6 +10,7 @@ import type {
   NewampAPI,
   SupportDiagnostics,
 } from '@shared/types';
+import { NEWAMP_VERSION } from '@shared/app-version';
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
 import { normalizeLimiterEnabled, normalizePreampDb } from '@shared/audio-limiter';
 
@@ -40,7 +41,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {
-  appVersion: '1.0.0',
+  appVersion: NEWAMP_VERSION,
   platform: 'browser',
   electronVersion: 'n/a',
   userDataPath: '',
@@ -301,7 +302,7 @@ const stub: NewampAPI = {
   findLocalGuitarTab: async () => null,
   openGuitarTabWindow: async () => undefined,
   platform: 'browser',
-  appVersion: '1.0.0',
+  appVersion: NEWAMP_VERSION,
 };
 
 export const inElectron = typeof window !== 'undefined' && !!window.newamp;
