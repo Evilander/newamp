@@ -49,9 +49,7 @@ const report = {
     'complete Last.fm live-account proof and any required Ultimate Guitar release decision',
     'complete speaker/headphone checks, then run npm run release:record-listening-proof -- --confirm-playback --confirm-output-switching --confirm-crossfade --confirm-gapless',
     'npm run release:gate',
-    gitDir
-      ? `${existsSync(gitDir) ? '' : `git init --bare ${gitDir} && `}git --git-dir ${gitDir} --work-tree . add . && git --git-dir ${gitDir} --work-tree . commit -m "Release Newamp 1.0.0"`
-      : 'git init && git add . && git commit -m "Release Newamp 1.0.0"',
+    'commit any final source changes if git-clean fails',
     'gh auth login',
     'npm run release:publication-readiness',
     'npm run release:publish-github -- --execute',
