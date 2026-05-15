@@ -45,23 +45,29 @@ export function buildGithubPublishPlan({
   const gitDir = resolveGitDir(root, env);
   const commands = [];
   if (gitDir) {
-    if (!existsSync(gitDir)) {
+    const gitDirExists = existsSync(gitDir);
+    if (!gitDirExists) {
       commands.push(command('git-init-external', 'git', ['init', '--bare', gitDir]));
       commands.push(command('git-main-branch', 'git', ['--git-dir', gitDir, 'symbolic-ref', 'HEAD', 'refs/heads/main']));
     }
-    commands.push(gitCommand('stage', root, gitDir, ['add', '.']));
-    commands.push(gitCommand('commit', root, gitDir, ['-c', 'user.name=evilander', '-c', 'user.email=evilander@users.noreply.github.com', 'commit', '-m', `Release Newamp ${version}`]));
+    if (!gitDirExists || !hasGitHead(root, gitDir) || isGitDirty(root, gitDir)) {
+      commands.push(gitCommand('stage', root, gitDir, ['add', '.']));
+      commands.push(gitCommand('commit', root, gitDir, ['-c', 'user.name=evilander', '-c', 'user.email=evilander@users.noreply.github.com', 'commit', '-m', `Release Newamp ${version}`]));
+    }
     commands.push(command('create-repo', 'gh', ['repo', 'create', repo, '--public']));
     commands.push(gitCommand('add-origin', root, gitDir, ['remote', 'add', 'origin', `https://github.com/${repo}.git`]));
     commands.push(gitCommand('push-main', root, gitDir, ['push', '-u', 'origin', 'main']));
     commands.push(gitCommand('tag', root, gitDir, ['tag', tag]));
     commands.push(gitCommand('push-tag', root, gitDir, ['push', 'origin', tag]));
   } else {
-    if (!existsSync(resolve(root, '.git'))) {
+    const gitRootExists = existsSync(resolve(root, '.git'));
+    if (!gitRootExists) {
       commands.push(command('git-init', 'git', ['init']));
     }
-    commands.push(command('stage', 'git', ['add', '.']));
-    commands.push(command('commit', 'git', ['commit', '-m', `Release Newamp ${version}`]));
+    if (!gitRootExists || !hasGitHead(root, null) || isGitDirty(root, null)) {
+      commands.push(command('stage', 'git', ['add', '.']));
+      commands.push(command('commit', 'git', ['commit', '-m', `Release Newamp ${version}`]));
+    }
     commands.push(command('create-repo', 'gh', ['repo', 'create', repo, '--source', '.', '--public', '--push']));
     commands.push(command('tag', 'git', ['tag', tag]));
     commands.push(command('push-tag', 'git', ['push', 'origin', tag]));
@@ -180,6 +186,25 @@ function command(label, commandName, args) {
 
 function gitCommand(label, root, gitDir, args) {
   return command(label, 'git', ['--git-dir', gitDir, '--work-tree', root, ...args]);
+}
+
+function hasGitHead(root, gitDir) {
+  const result = runGit(root, gitDir, ['rev-parse', '--verify', 'HEAD']);
+  return result.status === 0;
+}
+
+function isGitDirty(root, gitDir) {
+  const result = runGit(root, gitDir, ['status', '--porcelain']);
+  return result.status !== 0 || (result.stdout ?? '').trim().length > 0;
+}
+
+function runGit(root, gitDir, args) {
+  const commandArgs = gitDir ? ['--git-dir', gitDir, '--work-tree', root, ...args] : args;
+  return spawnSync('git', commandArgs, {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
 }
 
 function resolveGitDir(root, env) {

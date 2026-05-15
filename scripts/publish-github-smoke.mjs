@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -20,7 +21,9 @@ const {
 } = await import('./publish-github-release.mjs');
 
 const smokeRoot = join(repoRoot, 'tmp', 'publish-github-smoke');
+const cleanExternalGitDir = join(repoRoot, 'tmp', 'publish-github-smoke-clean.git');
 await rm(smokeRoot, { recursive: true, force: true });
+await rm(cleanExternalGitDir, { recursive: true, force: true });
 await mkdir(join(smokeRoot, 'release'), { recursive: true });
 await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
 await writeFile(join(smokeRoot, 'README.md'), '# Newamp\n', 'utf8');
@@ -75,6 +78,30 @@ assert.ok(
   'external git plan should route git commands through NEWAMP_GIT_DIR',
 );
 
+run('git', ['init', '--bare', cleanExternalGitDir], repoRoot);
+run('git', ['--git-dir', cleanExternalGitDir, 'symbolic-ref', 'HEAD', 'refs/heads/main'], repoRoot);
+run('git', ['--git-dir', cleanExternalGitDir, '--work-tree', smokeRoot, 'add', '.'], repoRoot);
+run('git', [
+  '--git-dir',
+  cleanExternalGitDir,
+  '--work-tree',
+  smokeRoot,
+  '-c',
+  'user.name=evilander',
+  '-c',
+  'user.email=evilander@users.noreply.github.com',
+  'commit',
+  '-m',
+  'Existing release base',
+], repoRoot);
+const cleanExistingPlan = buildGithubPublishPlan({
+  root: smokeRoot,
+  env: { NEWAMP_GIT_DIR: cleanExternalGitDir },
+});
+assert.equal(cleanExistingPlan.ok, true, cleanExistingPlan.reason);
+assert.ok(!cleanExistingPlan.commands.some((command) => command.label === 'stage'));
+assert.ok(!cleanExistingPlan.commands.some((command) => command.label === 'commit'));
+
 const missingReadme = buildGithubPublishPlan({
   root: join(smokeRoot, 'missing-root'),
   env: {},
@@ -91,4 +118,15 @@ console.log(JSON.stringify({
 
 async function readText(path) {
   return await import('node:fs/promises').then((fs) => fs.readFile(path, 'utf8'));
+}
+
+function run(command, args, cwd) {
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0 || result.error) {
+    throw new Error(`${command} ${args.join(' ')} failed\n${result.stderr || result.stdout || result.error?.message || ''}`);
+  }
 }
