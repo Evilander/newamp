@@ -132,6 +132,7 @@ const stub: NewampAPI = {
   pickPlaylistCoverImage: async () => null,
   exportPlaylistM3u: async () => null,
   exportPlaylistPls: async () => null,
+  exportPlaylistFolder: async () => null,
   importPlaylistM3u: async () => null,
   exportTrackWav: async () => null,
   openFiles: async () => ({ tracks: [], importedPlaylists: [], skipped: [] }),

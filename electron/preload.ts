@@ -25,6 +25,7 @@ import type {
   ListeningInsights,
   MetadataLookupCandidate,
   NewampAPI,
+  PlaylistFolderExportResult,
   PlaylistM3uImportResult,
   PodcastEpisode,
   PodcastProgressInput,
@@ -92,6 +93,8 @@ const api: NewampAPI = {
     ipcRenderer.invoke('playlist:export-m3u', id) as Promise<string | null>,
   exportPlaylistPls: (id: number) =>
     ipcRenderer.invoke('playlist:export-pls', id) as Promise<string | null>,
+  exportPlaylistFolder: (id: number) =>
+    ipcRenderer.invoke('playlist:export-folder', id) as Promise<PlaylistFolderExportResult | null>,
   importPlaylistM3u: () =>
     ipcRenderer.invoke('playlist:import-m3u') as Promise<PlaylistM3uImportResult | null>,
   exportTrackWav: (id: number) =>

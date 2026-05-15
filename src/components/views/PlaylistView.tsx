@@ -382,6 +382,23 @@ export function PlaylistView(): JSX.Element {
     }
   }
 
+  async function exportSelectedFolder(): Promise<void> {
+    if (!selectedPlaylist) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const result = await api.exportPlaylistFolder(selectedPlaylist.id);
+      if (!result) {
+        setStatus('Export canceled.');
+        return;
+      }
+      const skipped = result.skipped.length ? `, ${result.skipped.length} skipped` : '';
+      setStatus(`Exported ${result.copied} tracks${skipped} to ${result.path}.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function importM3u(): Promise<void> {
     setBusy(true);
     setStatus(null);
@@ -822,6 +839,13 @@ export function PlaylistView(): JSX.Element {
             </button>
             <button className="pxbtn" onClick={() => void exportSelectedPls()} disabled={busy || !selectedPlaylist}>
               EXPORT PLS
+            </button>
+            <button
+              className="pxbtn col-span-2"
+              onClick={() => void exportSelectedFolder()}
+              disabled={busy || !selectedPlaylist || !selectedPlaylistTracks.length}
+            >
+              EXPORT FOLDER
             </button>
             <button className="pxbtn" onClick={() => void deleteSelected()} disabled={busy || !selectedPlaylist}>
               DELETE
