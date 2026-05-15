@@ -421,6 +421,7 @@ export interface AppSettings {
   preampDb: number;
   resumeState: PlaybackResumeState | null;
   compactMode: boolean;
+  visualizerPreset: VisualizerPreset;
   volume: number;
   playbackRate: number;
   audioOutputDeviceId: string | null;
@@ -432,6 +433,7 @@ export interface AppSettings {
 }
 
 export type PlayerCommand = 'toggle-play' | 'next' | 'previous' | 'stop';
+export type VisualizerPreset = 'butterchurn' | 'galaxy' | 'aurora' | 'spectrum' | 'oscilloscope';
 export type GuitarTabLineType = 'chords' | 'lyrics' | 'blank' | 'section' | 'tab';
 export type GuitarTabSource = 'ultimate-guitar' | 'local';
 

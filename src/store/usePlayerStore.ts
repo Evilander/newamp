@@ -83,7 +83,7 @@ interface PlayerState {
   view: ViewMode;
   fullscreenViz: boolean;
   compactMode: boolean;
-  vizPreset: string;
+  vizPreset: AppSettings['visualizerPreset'];
   searchQuery: string;
   showEq: boolean;
   init: () => Promise<void>;
@@ -92,7 +92,7 @@ interface PlayerState {
   toggleEq: () => void;
   setFullscreenViz: (on: boolean) => void;
   setCompactMode: (on: boolean) => void;
-  setVizPreset: (name: string) => void;
+  setVizPreset: (name: AppSettings['visualizerPreset']) => void;
   setSearchQuery: (q: string) => void;
   playTrack: (track: Track, queue?: Track[]) => Promise<void>;
   playPodcastEpisode: (episode: PodcastEpisode) => Promise<void>;
@@ -449,6 +449,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         autoDjTarget: normalizeAutoDjTarget(settings.autoDjTarget),
         autoDjSmartRuleId: settings.autoDjSmartRuleId ?? null,
         compactMode: settings.compactMode,
+        vizPreset: settings.visualizerPreset,
       });
       applyReplayGain(get().current, settings);
       applyTheme(settings.theme, settings.customSkin);
@@ -467,7 +468,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         .then((settings) => set({ settings, compactMode: settings.compactMode }))
         .catch(() => undefined);
     },
-    setVizPreset: (name) => set({ vizPreset: name }),
+    setVizPreset: (name) => {
+      set({ vizPreset: name });
+      void api
+        .setSettings({ visualizerPreset: name })
+        .then((settings) => set({ settings, vizPreset: settings.visualizerPreset }))
+        .catch(() => undefined);
+    },
     setSearchQuery: (q) => set({ searchQuery: q }),
 
     playTrack: async (track, queue) => {
