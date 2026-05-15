@@ -241,15 +241,28 @@ export function QuickPlayPalette(): JSX.Element | null {
   }
 
   function onPaletteKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
+    const key = event.key.toLowerCase();
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       setSelectedIndex((index) => Math.min(results.length - 1, index + 1));
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();
       setSelectedIndex((index) => Math.max(0, index - 1));
+    } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      void playNext();
+    } else if (event.key === 'Enter' && event.shiftKey) {
+      event.preventDefault();
+      void queue();
     } else if (event.key === 'Enter') {
       event.preventDefault();
       void executeSelected();
+    } else if (key === 'l' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      void toggleLove();
+    } else if (key === 'r' && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      void startSmartRuleRadio();
     } else if (event.key === 'Escape') {
       event.preventDefault();
       setOpen(false);
@@ -292,6 +305,10 @@ export function QuickPlayPalette(): JSX.Element | null {
         <div className="flex items-center gap-2 border-b px-3 py-2 text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}>
           <span>Ctrl+K / Ctrl+J opens</span>
           <span>Enter runs</span>
+          <span>Ctrl+Enter plays next</span>
+          <span>Shift+Enter queues</span>
+          <span>Ctrl+L loves</span>
+          <span>Ctrl+R starts radio</span>
           <span>Arrow keys move</span>
           {status && <span className="ml-auto" style={{ color: 'var(--accent)' }}>{status}</span>}
         </div>
