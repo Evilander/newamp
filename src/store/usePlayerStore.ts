@@ -875,7 +875,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     toggleLove: async (id) => {
-      await api.toggleLove(id);
+      const loved = await api.toggleLove(id);
+      const nextLoved: 0 | 1 = loved ? 1 : 0;
+      set((state) => ({
+        current: state.current?.id === id ? { ...state.current, loved: nextLoved } : state.current,
+        queue: state.queue.map((track) => (track.id === id ? { ...track, loved: nextLoved } : track)),
+      }));
     },
 
     setTrackRating: async (id, rating) => {

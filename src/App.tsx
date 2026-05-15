@@ -24,6 +24,7 @@ import { QuickPlayPalette } from './components/QuickPlayPalette';
 import { usePlayerStore } from './store/usePlayerStore';
 import { api, winctl } from './lib/api';
 import { syncMediaSession } from './lib/mediaSession';
+import { resolvePlayerShortcut, type PlayerShortcutCommand } from '@shared/keyboard-shortcuts';
 
 export default function App(): JSX.Element {
   const init = usePlayerStore((s) => s.init);
@@ -118,23 +119,21 @@ export default function App(): JSX.Element {
       })
       .catch((err) => console.error('init failed', err));
 
-    // Global keyboard shortcuts
     function onKey(e: KeyboardEvent): void {
-      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
       const store = usePlayerStore.getState();
-      if (e.code === 'Space') {
-        e.preventDefault();
-        store.togglePlay();
-      } else if (e.code === 'ArrowRight' && e.ctrlKey) {
-        void store.next();
-      } else if (e.code === 'ArrowLeft' && e.ctrlKey) {
-        void store.prev();
-      } else if (e.key === 'f' || e.key === 'F') {
-        if (e.target && (e.target as HTMLElement).closest('input,textarea')) return;
-        store.setFullscreenViz(!store.fullscreenViz);
-      } else if (e.key === 'Escape' && store.fullscreenViz) {
-        store.setFullscreenViz(false);
-      }
+      const command = resolvePlayerShortcut({
+        key: e.key,
+        code: e.code,
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        metaKey: e.metaKey,
+        repeat: e.repeat,
+        targetEditable: isEditableShortcutTarget(e.target),
+        fullscreenVisualizer: store.fullscreenViz,
+      });
+      if (!command) return;
+      e.preventDefault();
+      runPlayerShortcut(command, store);
     }
     window.addEventListener('keydown', onKey);
     const offPlayerCommand = api.onPlayerCommand((command) => {
@@ -252,6 +251,51 @@ function hasDraggedFiles(dataTransfer: DataTransfer): boolean {
 
 function isDroppedSkinFile(path: string): boolean {
   return /\.(newampskin\.json|wsz|zip)$/i.test(path);
+}
+
+type PlayerStoreSnapshot = ReturnType<typeof usePlayerStore.getState>;
+
+function runPlayerShortcut(command: PlayerShortcutCommand, store: PlayerStoreSnapshot): void {
+  if (command === 'toggle-play') {
+    store.togglePlay();
+  } else if (command === 'play') {
+    if (!store.isPlaying) store.togglePlay();
+  } else if (command === 'pause') {
+    store.engine.pause();
+  } else if (command === 'stop') {
+    store.engine.stop();
+  } else if (command === 'previous') {
+    void store.prev();
+  } else if (command === 'next') {
+    void store.next();
+  } else if (command === 'seek-backward') {
+    store.seek(clampShortcutNumber(store.currentTime - 5, 0, store.duration || 0));
+  } else if (command === 'seek-forward') {
+    store.seek(clampShortcutNumber(store.currentTime + 5, 0, store.duration || store.currentTime + 5));
+  } else if (command === 'volume-up') {
+    void store.setVolume(clampShortcutNumber(store.volume + 0.05, 0, 1));
+  } else if (command === 'volume-down') {
+    void store.setVolume(clampShortcutNumber(store.volume - 0.05, 0, 1));
+  } else if (command === 'toggle-love') {
+    if (store.current?.id && store.current.id > 0) void store.toggleLove(store.current.id);
+  } else if (command.startsWith('rate-')) {
+    if (store.current?.id && store.current.id > 0) {
+      void store.setTrackRating(store.current.id, Number(command.slice('rate-'.length)));
+    }
+  } else if (command === 'toggle-fullscreen-visualizer') {
+    store.setFullscreenViz(!store.fullscreenViz);
+  } else if (command === 'exit-fullscreen-visualizer') {
+    store.setFullscreenViz(false);
+  }
+}
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return !!target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="textbox"]');
+}
+
+function clampShortcutNumber(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 function AppDropOverlay({ active, message }: { active: boolean; message: string | null }): JSX.Element {

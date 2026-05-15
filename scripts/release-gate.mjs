@@ -61,6 +61,7 @@ if (!skipSmokes) {
     'smoke:open-files',
     'smoke:playback-start',
     'smoke:playback-controls',
+    'smoke:keyboard',
     'smoke:media-session',
     'smoke:smart-shuffle',
     'smoke:queue-insert',
