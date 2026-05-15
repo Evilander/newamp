@@ -29,6 +29,7 @@
     "smoke:podcast-progress": "npm run build:electron && node scripts/podcast-progress-smoke.mjs",
     "smoke:podcast-download": "npm run build:electron && node scripts/podcast-download-smoke.mjs",
     "smoke:playlist": "npm run build:electron && node scripts/playlist-smoke.mjs",
+    "smoke:playlist-folder-export": "npm run build:electron && node scripts/playlist-folder-export-smoke.mjs",
     "smoke:incremental-scan": "npm run build:electron && node scripts/incremental-scan-smoke.mjs",
     "smoke:scanner-queue": "npm run build:electron && node scripts/scanner-queue-smoke.mjs",
     "smoke:library-paging": "npm run build:electron && node scripts/library-paging-smoke.mjs",

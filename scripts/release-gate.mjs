@@ -52,6 +52,7 @@ if (!skipSmokes) {
     'smoke:mixes',
     'smoke:history',
     'smoke:playlist',
+    'smoke:playlist-folder-export',
     'smoke:metadata',
     'smoke:health',
     'smoke:skin',

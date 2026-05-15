@@ -37,6 +37,7 @@ import {
   updateLastfmNowPlaying,
 } from './lastfm.js';
 import { playbackMode, transcodeToWavResponse, transcodeTrackToWavFile } from './transcode.js';
+import { exportPlaylistFolder } from './playlist-export.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
 import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from './winamp-skin-import.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
@@ -50,6 +51,7 @@ import type {
   MetadataLookupCandidate,
   OpenFilesResult,
   PlayerCommand,
+  SavedPlaylist,
   ScanProgress,
   SupportDiagnostics,
   Track,
@@ -592,6 +594,18 @@ function registerIpc(): void {
     if (result.canceled || !result.filePath) return null;
     await writeFile(result.filePath, library.exportPlaylistPls(id), 'utf8');
     return result.filePath;
+  });
+  ipcMain.handle('playlist:export-folder', async (_e, id: number) => {
+    const playlist = library.getPlaylists().find((item) => item.id === Math.trunc(id));
+    if (!playlist) return null;
+    const result = await choosePlaylistFolderExportRoot(playlist);
+    const destinationRoot = result.filePaths[0];
+    if (result.canceled || !destinationRoot) return null;
+    return exportPlaylistFolder({
+      playlist,
+      tracks: library.getPlaylistTracks(playlist.id),
+      destinationRoot,
+    });
   });
   ipcMain.handle('playlist:import-m3u', async () => {
     if (mainWin) {
@@ -1732,6 +1746,22 @@ async function choosePlaylistExportPath(
     filters,
   };
   return mainWin ? dialog.showSaveDialog(mainWin, options) : dialog.showSaveDialog(options);
+}
+
+async function choosePlaylistFolderExportRoot(
+  playlist: SavedPlaylist,
+): Promise<Electron.OpenDialogReturnValue> {
+  if (mainWin) {
+    if (mainWin.isMinimized()) mainWin.restore();
+    mainWin.show();
+    mainWin.focus();
+  }
+  const options: Electron.OpenDialogOptions = {
+    title: `Choose folder for ${playlist.name}`,
+    defaultPath: app.getPath('music'),
+    properties: ['openDirectory', 'createDirectory'],
+  };
+  return mainWin ? dialog.showOpenDialog(mainWin, options) : dialog.showOpenDialog(options);
 }
 
 async function chooseTrackWavExportPath(track: Track): Promise<Electron.SaveDialogReturnValue> {

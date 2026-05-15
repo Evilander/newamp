@@ -147,6 +147,14 @@ export interface PlaylistM3uImportResult {
   skipped: number;
 }
 
+export interface PlaylistFolderExportResult {
+  path: string;
+  playlistPath: string;
+  copied: number;
+  skipped: string[];
+  bytes: number;
+}
+
 export interface OpenFilesResult {
   tracks: Track[];
   importedPlaylists: PlaylistM3uImportResult[];
@@ -585,6 +593,7 @@ export interface NewampAPI {
   pickPlaylistCoverImage: () => Promise<string | null>;
   exportPlaylistM3u: (id: number) => Promise<string | null>;
   exportPlaylistPls: (id: number) => Promise<string | null>;
+  exportPlaylistFolder: (id: number) => Promise<PlaylistFolderExportResult | null>;
   importPlaylistM3u: () => Promise<PlaylistM3uImportResult | null>;
   exportTrackWav: (id: number) => Promise<TrackWavExportResult | null>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
