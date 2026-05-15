@@ -43,6 +43,7 @@ export function PlaylistView(): JSX.Element {
   const [selectedPlaylistTracks, setSelectedPlaylistTracks] = useState<Track[]>([]);
   const [playlistListFilter, setPlaylistListFilter] = useState('');
   const [playlistTrackFilter, setPlaylistTrackFilter] = useState('');
+  const [queueFilter, setQueueFilter] = useState('');
   const [smartRules, setSmartRules] = useState<SmartPlaylistRule[]>([]);
   const [selectedSmartRule, setSelectedSmartRule] = useState<SmartPlaylistRule | null>(null);
   const [playlistName, setPlaylistName] = useState('Newamp Set');
@@ -86,6 +87,23 @@ export function PlaylistView(): JSX.Element {
           ]),
         ),
     [playlistTrackFilter, selectedPlaylistTracks],
+  );
+  const visibleQueueTracks = useMemo(
+    () =>
+      queue
+        .map((track, index) => ({ track, index }))
+        .filter(({ track, index }) =>
+          playlistTextMatches(queueFilter, [
+            String(index + 1),
+            track.title,
+            track.artist,
+            track.album,
+            track.albumArtist,
+            track.genre ?? '',
+            track.year == null ? '' : String(track.year),
+          ]),
+        ),
+    [queue, queueFilter],
   );
 
   useEffect(() => {
@@ -971,82 +989,107 @@ export function PlaylistView(): JSX.Element {
               Queue is empty. Play something from Library, Albums, Artists, load a saved playlist, or build a Smart Set.
             </div>
           ) : (
-            <ol className="m-0 list-none p-0" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-              {queue.map((t, i) => (
-                <li
-                  key={`${t.id}-${i}`}
-                  className="flex cursor-pointer items-center gap-2 border-b px-3 py-1.5"
-                  style={{
-                    borderColor: 'var(--line)',
-                    background: current?.id === t.id ? 'var(--panel-2)' : 'transparent',
-                    color: current?.id === t.id ? 'var(--accent)' : 'var(--ink)',
-                    opacity: draggedQueueIndex === i ? 0.55 : 1,
-                  }}
-                  draggable={true}
-                  aria-grabbed={draggedQueueIndex === i}
-                  onDragStart={(event) => {
-                    setDraggedQueueIndex(i);
-                    event.dataTransfer.effectAllowed = 'move';
-                    event.dataTransfer.setData('text/plain', String(i));
-                  }}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = 'move';
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    const transferIndex = Number(event.dataTransfer.getData('text/plain'));
-                    const fromIndex = draggedQueueIndex ?? (Number.isInteger(transferIndex) ? transferIndex : null);
-                    if (fromIndex !== null && fromIndex !== i) moveQueuedTrack(fromIndex, i);
-                    setDraggedQueueIndex(null);
-                  }}
-                  onDragEnd={() => setDraggedQueueIndex(null)}
-                  onDoubleClick={() => void playQueue(queue, i)}
-                >
-                  <span className="w-[28px] shrink-0" style={{ color: 'var(--muted)' }}>
-                    {(i + 1).toString().padStart(2, '0')}
-                  </span>
-                  <span className="flex-1 truncate">
-                    {t.artist} - {t.title}
-                  </span>
-                  <span style={{ color: 'var(--muted)' }}>{formatTime(t.duration ?? 0)}</span>
-                  <span className="flex shrink-0 items-center gap-1">
-                    <button
-                      className="pxbtn"
-                      title="Move up"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        moveQueuedTrack(i, i - 1);
+            <>
+              <div
+                className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b px-3 py-2 text-[11px]"
+                style={{ borderColor: 'var(--line)', background: 'var(--panel)', color: 'var(--ink-2)' }}
+              >
+                <input
+                  value={queueFilter}
+                  onChange={(event) => setQueueFilter(event.currentTarget.value)}
+                  placeholder="Filter queue"
+                  className="bevel-in min-w-[220px] flex-1 px-2 py-1 text-[11px] outline-none"
+                  style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+                  aria-label="Filter active queue"
+                  data-queue-filter
+                />
+                <span className="tabular-nums">
+                  {visibleQueueTracks.length.toLocaleString()} of {queue.length.toLocaleString()}
+                </span>
+              </div>
+              {visibleQueueTracks.length === 0 ? (
+                <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
+                  No queued tracks match this filter.
+                </div>
+              ) : (
+                <ol className="m-0 list-none p-0" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                  {visibleQueueTracks.map(({ track: t, index: i }) => (
+                    <li
+                      key={`${t.id}-${i}`}
+                      className="flex cursor-pointer items-center gap-2 border-b px-3 py-1.5"
+                      style={{
+                        borderColor: 'var(--line)',
+                        background: current?.id === t.id ? 'var(--panel-2)' : 'transparent',
+                        color: current?.id === t.id ? 'var(--accent)' : 'var(--ink)',
+                        opacity: draggedQueueIndex === i ? 0.55 : 1,
                       }}
-                      disabled={i === 0}
-                    >
-                      UP
-                    </button>
-                    <button
-                      className="pxbtn"
-                      title="Move down"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        moveQueuedTrack(i, i + 1);
+                      draggable={true}
+                      aria-grabbed={draggedQueueIndex === i}
+                      onDragStart={(event) => {
+                        setDraggedQueueIndex(i);
+                        event.dataTransfer.effectAllowed = 'move';
+                        event.dataTransfer.setData('text/plain', String(i));
                       }}
-                      disabled={i === queue.length - 1}
-                    >
-                      DOWN
-                    </button>
-                    <button
-                      className="pxbtn"
-                      title="Remove from queue"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void removeQueuedTrack(i);
+                      onDragOver={(event) => {
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = 'move';
                       }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const transferIndex = Number(event.dataTransfer.getData('text/plain'));
+                        const fromIndex = draggedQueueIndex ?? (Number.isInteger(transferIndex) ? transferIndex : null);
+                        if (fromIndex !== null && fromIndex !== i) moveQueuedTrack(fromIndex, i);
+                        setDraggedQueueIndex(null);
+                      }}
+                      onDragEnd={() => setDraggedQueueIndex(null)}
+                      onDoubleClick={() => void playQueue(queue, i)}
                     >
-                      X
-                    </button>
-                  </span>
-                </li>
-              ))}
-            </ol>
+                      <span className="w-[28px] shrink-0" style={{ color: 'var(--muted)' }}>
+                        {(i + 1).toString().padStart(2, '0')}
+                      </span>
+                      <span className="flex-1 truncate">
+                        {t.artist} - {t.title}
+                      </span>
+                      <span style={{ color: 'var(--muted)' }}>{formatTime(t.duration ?? 0)}</span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        <button
+                          className="pxbtn"
+                          title="Move up"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            moveQueuedTrack(i, i - 1);
+                          }}
+                          disabled={i === 0}
+                        >
+                          UP
+                        </button>
+                        <button
+                          className="pxbtn"
+                          title="Move down"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            moveQueuedTrack(i, i + 1);
+                          }}
+                          disabled={i === queue.length - 1}
+                        >
+                          DOWN
+                        </button>
+                        <button
+                          className="pxbtn"
+                          title="Remove from queue"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void removeQueuedTrack(i);
+                          }}
+                        >
+                          X
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </>
           )}
         </div>
       </div>

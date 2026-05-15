@@ -50,6 +50,11 @@ assert.match(playlistViewSource, /onDragStart/, 'Now Queue rows should expose dr
 assert.match(playlistViewSource, /onDrop/, 'Now Queue rows should expose drop handling');
 assert.match(playlistViewSource, /dataTransfer\.getData\('text\/plain'\)/, 'queue drop should keep a drag payload fallback');
 assert.match(playlistViewSource, /moveQueuedTrack\(fromIndex, i\)/, 'dropping a queue row should reuse the queue move action');
+assert.match(playlistViewSource, /queueFilter/, 'Now Queue should keep a live filter string');
+assert.match(playlistViewSource, /visibleQueueTracks/, 'Now Queue should render filtered queue rows against original queue indexes');
+assert.match(playlistViewSource, /data-queue-filter/, 'Now Queue should expose a stable queue filter input');
+assert.match(playlistViewSource, /Filter queue/, 'Now Queue should let users filter long queues');
+assert.match(playlistViewSource, /No queued tracks match this filter/, 'Now Queue should explain an empty filtered queue');
 assert.doesNotMatch(playlistViewSource, /[\u00c3\u00e2\ufffd]/, 'Now Queue controls should not contain mojibake glyphs');
 assert.match(packageSource, /"smoke:queue-edit"/, 'package.json should expose queue edit smoke');
 
