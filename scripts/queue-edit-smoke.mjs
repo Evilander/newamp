@@ -44,6 +44,13 @@ assert.match(storeSource, /removeQueuedTrack/, 'player store should expose queue
 assert.match(storeSource, /clearQueue/, 'player store should expose queue clear action');
 assert.match(playlistViewSource, /Move up/, 'Now Queue should expose move up controls');
 assert.match(playlistViewSource, /Remove from queue/, 'Now Queue should expose remove controls');
+assert.match(playlistViewSource, /draggedQueueIndex/, 'Now Queue should track the dragged queue row');
+assert.match(playlistViewSource, /draggable=\{true\}/, 'Now Queue rows should be draggable for reorder');
+assert.match(playlistViewSource, /onDragStart/, 'Now Queue rows should expose drag start handling');
+assert.match(playlistViewSource, /onDrop/, 'Now Queue rows should expose drop handling');
+assert.match(playlistViewSource, /dataTransfer\.getData\('text\/plain'\)/, 'queue drop should keep a drag payload fallback');
+assert.match(playlistViewSource, /moveQueuedTrack\(fromIndex, i\)/, 'dropping a queue row should reuse the queue move action');
+assert.doesNotMatch(playlistViewSource, /[\u00c3\u00e2\ufffd]/, 'Now Queue controls should not contain mojibake glyphs');
 assert.match(packageSource, /"smoke:queue-edit"/, 'package.json should expose queue edit smoke');
 
 console.log(JSON.stringify({ ok: true }, null, 2));
