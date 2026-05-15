@@ -950,6 +950,19 @@ export function TrackTable({
     }
   }
 
+  async function analyzeSelectedReplayGain(): Promise<void> {
+    if (!selectedTracks.length || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const result = await api.analyzeReplayGain(selectedTracks.map((track) => track.id));
+      onBulkMetadataSaved?.(result.tracks);
+      const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
+      setPlaylistStatus(`Analyzed ReplayGain for ${result.analyzed.toLocaleString()} selected track${result.analyzed === 1 ? '' : 's'}${skipped}.`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   return (
     <>
       {playlistStatus && (
@@ -1003,6 +1016,15 @@ export function TrackTable({
             title="Transcode selected tracks to WAV files in a folder"
           >
             EXPORT SELECTED WAV
+          </button>
+          <button
+            className="pxbtn"
+            data-analyze-selected-replaygain
+            onClick={() => void analyzeSelectedReplayGain()}
+            disabled={bulkBusy}
+            title="Analyze selected tracks and store ReplayGain in the Newamp catalog"
+          >
+            ANALYZE REPLAYGAIN
           </button>
           <div className="flex flex-wrap items-center gap-1" data-bulk-metadata-edit>
             <input

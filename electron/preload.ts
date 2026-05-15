@@ -32,6 +32,7 @@ import type {
   PodcastProgressInput,
   PodcastSubscription,
   PlayerCommand,
+  ReplayGainAnalysisResult,
   SavedPlaylist,
   SavePlaylistInput,
   SaveTrackBookmarkInput,
@@ -105,6 +106,8 @@ const api: NewampAPI = {
     ipcRenderer.invoke('track:export-wav', id) as Promise<TrackWavExportResult | null>,
   exportTracksWav: (ids: number[]) =>
     ipcRenderer.invoke('tracks:export-wav-folder', ids) as Promise<TrackWavBatchExportResult | null>,
+  analyzeReplayGain: (ids: number[]) =>
+    ipcRenderer.invoke('tracks:analyze-replaygain', ids) as Promise<ReplayGainAnalysisResult>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,
   getDroppedFilePaths: (files: unknown[]) => {

@@ -137,6 +137,7 @@ const stub: NewampAPI = {
   importPlaylistM3u: async () => null,
   exportTrackWav: async () => null,
   exportTracksWav: async () => null,
+  analyzeReplayGain: async () => ({ analyzed: 0, skipped: [], tracks: [] }),
   openFiles: async () => ({ tracks: [], importedPlaylists: [], skipped: [] }),
   consumePendingOpenFiles: async () => [],
   getDroppedFilePaths: (files) => {

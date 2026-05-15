@@ -180,6 +180,12 @@ export interface TrackWavBatchExportResult {
   files: TrackWavExportResult[];
 }
 
+export interface ReplayGainAnalysisResult {
+  analyzed: number;
+  skipped: string[];
+  tracks: Track[];
+}
+
 export interface LibraryDuplicateGroup {
   artist: string;
   title: string;
@@ -612,6 +618,7 @@ export interface NewampAPI {
   importPlaylistM3u: () => Promise<PlaylistM3uImportResult | null>;
   exportTrackWav: (id: number) => Promise<TrackWavExportResult | null>;
   exportTracksWav: (ids: number[]) => Promise<TrackWavBatchExportResult | null>;
+  analyzeReplayGain: (ids: number[]) => Promise<ReplayGainAnalysisResult>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;
   getDroppedFilePaths: (files: unknown[]) => string[];
