@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { copyFile, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeReleaseChecksums } from './release-checksums.mjs';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const packageTemp = join(repoRoot, 'tmp', 'package-temp');
@@ -31,6 +32,12 @@ for (const args of electronBuilderTargetArgs(process.argv.slice(2))) {
   if (args.includes('--win=nsis')) {
     await copyFile(builderDebugPath, nsisBuilderDebugPath);
   }
+}
+
+const shouldWriteChecksums = !process.argv.includes('--installer') && !process.argv.includes('--nsis') && !process.argv.includes('--portable');
+if (shouldWriteChecksums) {
+  const checksums = writeReleaseChecksums({ root: repoRoot });
+  console.log(`release checksums: ${checksums.path}`);
 }
 
 function electronBuilderTargetArgs(args) {

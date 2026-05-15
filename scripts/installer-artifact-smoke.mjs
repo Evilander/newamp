@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { checkReleaseChecksums } from './release-checksums.mjs';
 
 const repoRoot = resolve('.');
 const packagePath = resolve(repoRoot, 'package.json');
@@ -55,6 +56,11 @@ assert.match(
 );
 assert.match(
   JSON.stringify(pkg.scripts ?? {}),
+  /release:checksums/,
+  'package.json should expose release checksum generation',
+);
+assert.match(
+  JSON.stringify(pkg.scripts ?? {}),
   /smoke:installed-associations/,
   'package.json should expose installed association registry proof',
 );
@@ -90,6 +96,8 @@ assert.match(builderDebug, /RequestExecutionLevel user/, 'installer should suppo
 const installer = artifact(installerPath, 100_000_000);
 const portable = artifact(portablePath, 100_000_000);
 const exe = artifact(exePath, 200_000_000);
+const releaseChecksums = checkReleaseChecksums({ root: repoRoot, version: releaseVersion });
+assert.equal(releaseChecksums.ok, true, releaseChecksums.reason);
 const blockmap = parseBlockmap(blockmapPath);
 const appAsar = artifact(appAsarPath, 25_000_000);
 const distIndex = artifact(extraDistIndex, 1_000);
@@ -133,6 +141,7 @@ const report = {
       checksums: blockmap.files.reduce((total, file) => total + (file.checksums?.length ?? 0), 0),
     },
     exe,
+    checksums: releaseChecksums,
     appAsar,
     distIndex,
     ffmpeg,
