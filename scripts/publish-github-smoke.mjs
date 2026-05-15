@@ -1,0 +1,87 @@
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+
+const repoRoot = resolve('.');
+const pkg = JSON.parse(await readText(join(repoRoot, 'package.json')));
+const publishScriptPath = join(repoRoot, 'scripts', 'publish-github-release.mjs');
+
+assert.equal(
+  pkg.scripts?.['release:publish-github'],
+  'node scripts/publish-github-release.mjs',
+  'package.json should expose release:publish-github',
+);
+assert.ok(existsSync(publishScriptPath), 'scripts/publish-github-release.mjs should exist');
+
+const {
+  buildGithubPublishPlan,
+  publishGithubRelease,
+} = await import('./publish-github-release.mjs');
+
+const smokeRoot = join(repoRoot, 'tmp', 'publish-github-smoke');
+await rm(smokeRoot, { recursive: true, force: true });
+await mkdir(join(smokeRoot, 'release'), { recursive: true });
+await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
+await writeFile(join(smokeRoot, 'README.md'), '# Newamp\n', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'Newamp Setup 1.0.0.exe'), 'installer', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'Newamp Portable 1.0.0.exe'), 'portable', 'utf8');
+
+const plan = buildGithubPublishPlan({
+  root: smokeRoot,
+  env: { NEWAMP_GITHUB_REPO: 'evilander/newamp-test' },
+});
+assert.equal(plan.ok, true, plan.reason);
+assert.equal(plan.repo, 'evilander/newamp-test');
+assert.equal(plan.tag, 'v1.0.0');
+assert.ok(plan.commands.some((command) => command.label === 'create-repo'));
+assert.ok(plan.commands.some((command) => command.args.includes('release') && command.args.includes('create')));
+assert.ok(plan.commands.every((command) => !command.commandLine.includes('\n')));
+assert.match(JSON.stringify(plan), /Newamp Setup 1\.0\.0\.exe/);
+assert.match(JSON.stringify(plan), /Newamp Portable 1\.0\.0\.exe/);
+
+const dryRun = publishGithubRelease({
+  root: smokeRoot,
+  env: { NEWAMP_GITHUB_REPO: 'evilander/newamp-test' },
+  execute: false,
+  skipReadiness: true,
+});
+assert.equal(dryRun.ok, true);
+assert.equal(dryRun.executed, false);
+assert.equal(dryRun.commands.length, plan.commands.length);
+
+const externalGitDir = join(smokeRoot, 'external.git');
+const externalPlan = buildGithubPublishPlan({
+  root: smokeRoot,
+  env: {
+    NEWAMP_GITHUB_REPO: 'evilander/newamp-test',
+    NEWAMP_GIT_DIR: externalGitDir,
+  },
+});
+assert.equal(externalPlan.ok, true, externalPlan.reason);
+assert.ok(
+  externalPlan.commands.some((command) => command.label === 'git-init-external'),
+  'external git plan should initialize the configured git dir',
+);
+assert.ok(
+  externalPlan.commands.filter((command) => command.command === 'git').every((command) => command.args.includes(externalGitDir)),
+  'external git plan should route git commands through NEWAMP_GIT_DIR',
+);
+
+const missingReadme = buildGithubPublishPlan({
+  root: join(smokeRoot, 'missing-root'),
+  env: { NEWAMP_GITHUB_REPO: 'evilander/newamp-test' },
+});
+assert.equal(missingReadme.ok, false);
+assert.match(missingReadme.reason, /package\.json/i);
+
+console.log(JSON.stringify({
+  ok: true,
+  repo: plan.repo,
+  tag: plan.tag,
+  commands: plan.commands.map((command) => command.label),
+}, null, 2));
+
+async function readText(path) {
+  return await import('node:fs/promises').then((fs) => fs.readFile(path, 'utf8'));
+}
