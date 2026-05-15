@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
-import type { SavedPlaylist, SmartPlaylistMood, SmartPlaylistRule, SmartPlaylistRuleInput } from '@shared/types';
+import type {
+  SavedPlaylist,
+  SmartPlaylistMood,
+  SmartPlaylistRule,
+  SmartPlaylistRuleInput,
+  Track,
+} from '@shared/types';
+import { moveQueueItem, removeQueueItem } from '@shared/queue-edit';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime } from '../../lib/format';
 import { api } from '../../lib/api';
@@ -33,6 +40,7 @@ export function PlaylistView(): JSX.Element {
   const [status, setStatus] = useState<string | null>(null);
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
   const [selectedPlaylist, setSelectedPlaylist] = useState<SavedPlaylist | null>(null);
+  const [selectedPlaylistTracks, setSelectedPlaylistTracks] = useState<Track[]>([]);
   const [smartRules, setSmartRules] = useState<SmartPlaylistRule[]>([]);
   const [selectedSmartRule, setSelectedSmartRule] = useState<SmartPlaylistRule | null>(null);
   const [playlistName, setPlaylistName] = useState('Newamp Set');
@@ -50,6 +58,7 @@ export function PlaylistView(): JSX.Element {
   const [unplayedOnly, setUnplayedOnly] = useState(false);
   const [timerNow, setTimerNow] = useState(Date.now());
   const [draggedQueueIndex, setDraggedQueueIndex] = useState<number | null>(null);
+  const [draggedPlaylistTrackIndex, setDraggedPlaylistTrackIndex] = useState<number | null>(null);
   const autoDjSourceMissing =
     autoDjSmartRuleId !== null && !smartRules.some((rule) => rule.id === autoDjSmartRuleId);
 
@@ -238,14 +247,18 @@ export function PlaylistView(): JSX.Element {
     setStatus(null);
     try {
       const wasNew = !selectedPlaylist;
+      const trackIds = selectedPlaylist
+        ? selectedPlaylistTracks.map((track) => track.id)
+        : queue.map((track) => track.id);
       const saved = await api.savePlaylist({
         id: selectedPlaylist?.id,
         name: playlistName,
-        trackIds: queue.map((track) => track.id),
+        trackIds,
         coverImagePath: playlistCoverPath,
         clearCoverImage: clearPlaylistCover,
       });
       setSelectedPlaylist(saved);
+      if (wasNew) setSelectedPlaylistTracks(queue);
       setPlaylistName(saved.name);
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
@@ -262,18 +275,42 @@ export function PlaylistView(): JSX.Element {
     try {
       const tracks = await api.getPlaylistTracks(playlist.id);
       setSelectedPlaylist(playlist);
+      setSelectedPlaylistTracks(tracks);
       setPlaylistName(playlist.name);
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
       if (play && tracks.length) {
         await playQueue(tracks, 0);
       } else {
-        loadQueue(tracks);
+        setStatus(`Selected ${playlist.name} with ${tracks.length} tracks. Queue unchanged.`);
+        return;
       }
-      setStatus(`Loaded ${tracks.length} tracks from ${playlist.name}.`);
+      setStatus(`Playing ${tracks.length} tracks from ${playlist.name}.`);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function playSelectedPlaylist(): Promise<void> {
+    if (!selectedPlaylist || !selectedPlaylistTracks.length) return;
+    await playQueue(selectedPlaylistTracks, 0);
+    setStatus(`Playing ${selectedPlaylist.name}.`);
+  }
+
+  function loadSelectedPlaylistToQueue(): void {
+    if (!selectedPlaylist || !selectedPlaylistTracks.length) return;
+    loadQueue(selectedPlaylistTracks);
+    setStatus(`Loaded ${selectedPlaylist.name} into the active queue.`);
+  }
+
+  function moveSelectedPlaylistTrack(fromIndex: number, toIndex: number): void {
+    const result = moveQueueItem(selectedPlaylistTracks, -1, fromIndex, toIndex);
+    setSelectedPlaylistTracks(result.queue);
+  }
+
+  function removeSelectedPlaylistTrack(index: number): void {
+    const result = removeQueueItem(selectedPlaylistTracks, -1, index);
+    setSelectedPlaylistTracks(result.queue);
   }
 
   async function deleteSelected(): Promise<void> {
@@ -284,6 +321,7 @@ export function PlaylistView(): JSX.Element {
       await api.deletePlaylist(selectedPlaylist.id);
       setStatus(`Deleted ${selectedPlaylist.name}.`);
       setSelectedPlaylist(null);
+      setSelectedPlaylistTracks([]);
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
       await refreshPlaylists();
@@ -325,7 +363,9 @@ export function PlaylistView(): JSX.Element {
         setStatus('Import canceled.');
         return;
       }
+      const tracks = await api.getPlaylistTracks(result.playlist.id).catch(() => []);
       setSelectedPlaylist(result.playlist);
+      setSelectedPlaylistTracks(tracks);
       setPlaylistName(result.playlist.name);
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
@@ -363,6 +403,7 @@ export function PlaylistView(): JSX.Element {
 
   function startNewPlaylist(): void {
     setSelectedPlaylist(null);
+    setSelectedPlaylistTracks([]);
     setPlaylistName('Newamp Set');
     setPlaylistCoverPath(null);
     setClearPlaylistCover(false);
@@ -593,7 +634,9 @@ export function PlaylistView(): JSX.Element {
         </button>
         {status && <span className="text-[11px]" style={{ color: 'var(--ink-2)' }}>{status}</span>}
         <span className="ml-auto text-[11px]" style={{ color: 'var(--muted)' }}>
-          {queue.length} tracks{queue.length > 0 && index >= 0 ? ` - playing ${index + 1}` : ''}
+          {selectedPlaylist
+            ? `${selectedPlaylistTracks.length} playlist tracks - queue ${queue.length}`
+            : `${queue.length} tracks${queue.length > 0 && index >= 0 ? ` - playing ${index + 1}` : ''}`}
         </span>
       </div>
       <div className="grid min-h-0 flex-1" style={{ gridTemplateColumns: '286px 1fr' }}>
@@ -693,6 +736,20 @@ export function PlaylistView(): JSX.Element {
             )}
           </div>
           <div className="grid grid-cols-2 gap-2 border-t p-2" style={{ borderColor: 'var(--line)' }}>
+            <button
+              className="pxbtn is-active"
+              onClick={() => void playSelectedPlaylist()}
+              disabled={busy || !selectedPlaylist || !selectedPlaylistTracks.length}
+            >
+              PLAY SELECTED
+            </button>
+            <button
+              className="pxbtn"
+              onClick={loadSelectedPlaylistToQueue}
+              disabled={busy || !selectedPlaylist || !selectedPlaylistTracks.length}
+            >
+              LOAD TO QUEUE
+            </button>
             <button className="pxbtn" onClick={() => void exportSelected()} disabled={busy || !selectedPlaylist}>
               EXPORT M3U
             </button>
@@ -711,7 +768,90 @@ export function PlaylistView(): JSX.Element {
           </div>
         </aside>
         <div className="min-h-0 overflow-auto">
-          {queue.length === 0 ? (
+          {selectedPlaylist ? (
+            selectedPlaylistTracks.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
+                {selectedPlaylist.name} is empty. Add tracks from Library, Albums, Artists, or Loved.
+              </div>
+            ) : (
+              <ol className="m-0 list-none p-0" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                {selectedPlaylistTracks.map((t, i) => (
+                  <li
+                    key={`${selectedPlaylist.id}-${t.id}-${i}`}
+                    className="flex cursor-pointer items-center gap-2 border-b px-3 py-1.5"
+                    style={{
+                      borderColor: 'var(--line)',
+                      color: current?.id === t.id ? 'var(--accent)' : 'var(--ink)',
+                      opacity: draggedPlaylistTrackIndex === i ? 0.55 : 1,
+                    }}
+                    draggable={true}
+                    aria-grabbed={draggedPlaylistTrackIndex === i}
+                    onDragStart={(event) => {
+                      setDraggedPlaylistTrackIndex(i);
+                      event.dataTransfer.effectAllowed = 'move';
+                      event.dataTransfer.setData('text/plain', String(i));
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'move';
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const transferIndex = Number(event.dataTransfer.getData('text/plain'));
+                      const fromIndex = draggedPlaylistTrackIndex
+                        ?? (Number.isInteger(transferIndex) ? transferIndex : null);
+                      if (fromIndex !== null && fromIndex !== i) moveSelectedPlaylistTrack(fromIndex, i);
+                      setDraggedPlaylistTrackIndex(null);
+                    }}
+                    onDragEnd={() => setDraggedPlaylistTrackIndex(null)}
+                    onDoubleClick={() => void playQueue(selectedPlaylistTracks, i)}
+                  >
+                    <span className="w-[28px] shrink-0" style={{ color: 'var(--muted)' }}>
+                      {(i + 1).toString().padStart(2, '0')}
+                    </span>
+                    <span className="flex-1 truncate">
+                      {t.artist} - {t.title}
+                    </span>
+                    <span style={{ color: 'var(--muted)' }}>{formatTime(t.duration ?? 0)}</span>
+                    <span className="flex shrink-0 items-center gap-1">
+                      <button
+                        className="pxbtn"
+                        title="Move up"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          moveSelectedPlaylistTrack(i, i - 1);
+                        }}
+                        disabled={i === 0}
+                      >
+                        UP
+                      </button>
+                      <button
+                        className="pxbtn"
+                        title="Move down"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          moveSelectedPlaylistTrack(i, i + 1);
+                        }}
+                        disabled={i === selectedPlaylistTracks.length - 1}
+                      >
+                        DOWN
+                      </button>
+                      <button
+                        className="pxbtn"
+                        title="Remove from playlist"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          removeSelectedPlaylistTrack(i);
+                        }}
+                      >
+                        X
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            )
+          ) : queue.length === 0 ? (
             <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
               Queue is empty. Play something from Library, Albums, Artists, load a saved playlist, or build a Smart Set.
             </div>

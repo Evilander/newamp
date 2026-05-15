@@ -226,6 +226,12 @@ assert.match(playlistViewSource, /Insert image/, 'Now Queue should let users ins
 assert.match(playlistViewSource, /CREATE EMPTY PLAYLIST/, 'Playlists view should allow creating an empty named playlist');
 assert.match(playlistViewSource, /SAVE QUEUE AS PLAYLIST/, 'Playlists view should frame queue saves as playlist creation');
 assert.match(playlistViewSource, /UPDATE PLAYLIST/, 'Now Queue should frame selected saves as playlist edits');
+assert.match(playlistViewSource, /selectedPlaylistTracks/, 'Playlists view should keep saved playlist tracks separate from the active queue');
+assert.match(playlistViewSource, /setSelectedPlaylistTracks\(tracks\)/, 'selecting a saved playlist should load editor tracks without replacing the queue');
+assert.match(playlistViewSource, /loadSelectedPlaylistToQueue/, 'saved playlists should require an explicit load-to-queue action');
+assert.match(playlistViewSource, /playSelectedPlaylist/, 'saved playlists should require an explicit play action');
+assert.match(playlistViewSource, /loadQueue\(selectedPlaylistTracks\)/, 'explicit load-to-queue should use the selected playlist editor tracks');
+assert.match(playlistViewSource, /playQueue\(selectedPlaylistTracks, 0\)/, 'explicit playlist play should use the selected playlist editor tracks');
 assert.match(playlistViewSource, /EXPORT PLS/, 'Now Queue should expose PLS export for Winamp playlist compatibility');
 assert.match(mainSource, /newplaylistart/, 'main process should register a playlist art protocol');
 assert.match(mainSource, /\.pls/, 'main process should import and open PLS playlists');
