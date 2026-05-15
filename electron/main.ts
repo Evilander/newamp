@@ -910,6 +910,9 @@ function registerIpc(): void {
     if (normalBounds) mainWin.setBounds(normalBounds, true);
     normalBounds = null;
   });
+  ipcMain.handle('win:set-always-on-top', (_e, on: boolean) => {
+    mainWin?.setAlwaysOnTop(!!on, 'floating');
+  });
   ipcMain.handle('win:close', () => mainWin?.close());
 }
 

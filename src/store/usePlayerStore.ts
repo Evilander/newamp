@@ -83,6 +83,7 @@ interface PlayerState {
   view: ViewMode;
   fullscreenViz: boolean;
   compactMode: boolean;
+  alwaysOnTop: boolean;
   vizPreset: AppSettings['visualizerPreset'];
   searchQuery: string;
   showEq: boolean;
@@ -92,6 +93,7 @@ interface PlayerState {
   toggleEq: () => void;
   setFullscreenViz: (on: boolean) => void;
   setCompactMode: (on: boolean) => void;
+  setAlwaysOnTop: (on: boolean) => void;
   setVizPreset: (name: AppSettings['visualizerPreset']) => void;
   setSearchQuery: (q: string) => void;
   playTrack: (track: Track, queue?: Track[]) => Promise<void>;
@@ -418,6 +420,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     view: 'home',
     fullscreenViz: false,
     compactMode: false,
+    alwaysOnTop: false,
     vizPreset: 'spectrum',
     searchQuery: '',
     showEq: false,
@@ -449,6 +452,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         autoDjTarget: normalizeAutoDjTarget(settings.autoDjTarget),
         autoDjSmartRuleId: settings.autoDjSmartRuleId ?? null,
         compactMode: settings.compactMode,
+        alwaysOnTop: settings.alwaysOnTop,
         vizPreset: settings.visualizerPreset,
       });
       applyReplayGain(get().current, settings);
@@ -466,6 +470,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       void api
         .setSettings({ compactMode: on })
         .then((settings) => set({ settings, compactMode: settings.compactMode }))
+        .catch(() => undefined);
+    },
+    setAlwaysOnTop: (on) => {
+      set({ alwaysOnTop: on });
+      void api
+        .setSettings({ alwaysOnTop: on })
+        .then((settings) => set({ settings, alwaysOnTop: settings.alwaysOnTop }))
         .catch(() => undefined);
     },
     setVizPreset: (name) => {

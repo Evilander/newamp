@@ -244,6 +244,7 @@ contextBridge.exposeInMainWorld('winctl', {
   minimize: () => ipcRenderer.invoke('win:minimize'),
   toggleMax: () => ipcRenderer.invoke('win:toggle-max'),
   setCompact: (on: boolean) => ipcRenderer.invoke('win:set-compact', on),
+  setAlwaysOnTop: (on: boolean) => ipcRenderer.invoke('win:set-always-on-top', on),
   close: () => ipcRenderer.invoke('win:close'),
   onState: (cb: (s: { maximized: boolean }) => void) => {
     const handler = (_e: unknown, s: { maximized: boolean }) => cb(s);
