@@ -11,7 +11,18 @@ import { formatTime, highlight } from '../../lib/format';
 import { api } from '../../lib/api';
 import { EmptyLibrary } from './EmptyLibrary';
 
-type Sort = 'artist' | 'album' | 'recent' | 'plays' | 'loved' | 'rating';
+type Sort =
+  | 'artist'
+  | 'album'
+  | 'title'
+  | 'added'
+  | 'year'
+  | 'genre'
+  | 'duration'
+  | 'recent'
+  | 'plays'
+  | 'loved'
+  | 'rating';
 
 const LIBRARY_PAGE_SIZE = 5000;
 
@@ -20,6 +31,7 @@ export function LibraryView(): JSX.Element {
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMoreTracks, setHasMoreTracks] = useState(false);
+  const [matchingTrackCount, setMatchingTrackCount] = useState(0);
   const [sort, setSort] = useState<Sort>('artist');
   const [dropActive, setDropActive] = useState(false);
   const [dropMessage, setDropMessage] = useState<string | null>(null);
@@ -52,17 +64,21 @@ export function LibraryView(): JSX.Element {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    api
-      .getTracks({ search, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 })
-      .then((rows) => {
+    Promise.all([
+      api.getTracks({ search, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
+      api.getTrackCount({ search, sort }),
+    ])
+      .then(([rows, total]) => {
         if (!cancelled) {
           setTracks(rows);
-          setHasMoreTracks(rows.length === LIBRARY_PAGE_SIZE);
+          setMatchingTrackCount(total);
+          setHasMoreTracks(rows.length < total);
           setLoading(false);
         }
       })
       .catch(() => {
         if (!cancelled) {
+          setMatchingTrackCount(0);
           setHasMoreTracks(false);
           setLoading(false);
         }
@@ -103,7 +119,7 @@ export function LibraryView(): JSX.Element {
         const seen = new Set(current.map((track) => track.id));
         return [...current, ...rows.filter((track) => !seen.has(track.id))];
       });
-      setHasMoreTracks(rows.length === LIBRARY_PAGE_SIZE);
+      setHasMoreTracks(tracks.length + rows.length < matchingTrackCount);
     } finally {
       setLoadingMore(false);
     }
@@ -117,12 +133,14 @@ export function LibraryView(): JSX.Element {
         .map((t) => (t.id === id ? { ...t, loved: nextLoved } : t))
         .filter((t) => sort !== 'loved' || t.loved),
     );
+    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function rateTrack(id: number, rating: number): Promise<void> {
     const updated = await setTrackRating(id, rating);
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === id ? updated : track)));
+    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function lookupMetadata(track: Track): Promise<void> {
@@ -160,6 +178,7 @@ export function LibraryView(): JSX.Element {
       loading: false,
       status: `Applied ${updated.artist} - ${updated.title}.`,
     });
+    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function applyManualMetadataEdit(patch: TrackMetadataPatchInput): Promise<void> {
@@ -175,18 +194,21 @@ export function LibraryView(): JSX.Element {
       loading: false,
       status: `Saved manual edits for ${updated.artist} - ${updated.title}.`,
     });
+    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function cleanMissingFiles(): Promise<void> {
     setCleanupStatus('Checking file paths...');
     const result = await api.pruneMissingTracks();
-    const [nextTracks, nextStats, nextHealth] = await Promise.all([
+    const [nextTracks, nextCount, nextStats, nextHealth] = await Promise.all([
       api.getTracks({ search, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
+      api.getTrackCount({ search, sort }),
       api.getStats(),
       api.getLibraryHealth(),
     ]);
     setTracks(nextTracks);
-    setHasMoreTracks(nextTracks.length === LIBRARY_PAGE_SIZE);
+    setMatchingTrackCount(nextCount);
+    setHasMoreTracks(nextTracks.length < nextCount);
     setStats(nextStats);
     setHealth(nextHealth);
     setCleanupStatus(
@@ -269,14 +291,14 @@ export function LibraryView(): JSX.Element {
         />
       )}
       <div
-        className="flex items-center gap-2 border-b px-3 py-2"
+        className="flex flex-wrap items-center gap-2 border-b px-3 py-2"
         style={{ borderColor: 'var(--line)' }}
       >
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder='Search: artist:radiohead album:"in rainbows" year:2007 format:wma missing:art'
-          className="bevel-in lcd-text flex-1 px-3 py-1.5 text-[14px] outline-none"
+          className="bevel-in lcd-text min-w-[260px] flex-1 px-3 py-1.5 text-[14px] outline-none"
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
           autoFocus
         />
@@ -296,7 +318,7 @@ export function LibraryView(): JSX.Element {
           className="text-[10px] uppercase tracking-[0.1em] tabular-nums"
           style={{ color: 'var(--ink-2)' }}
         >
-          {libraryCountLabel(tracks.length, stats.tracks, hasMoreTracks, !!search)}
+          {libraryCountLabel(tracks.length, matchingTrackCount, hasMoreTracks, !!search)}
         </span>
       </div>
       {dropMessage && (
@@ -329,13 +351,20 @@ export function LibraryView(): JSX.Element {
           <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
             Loading…
           </div>
-        ) : tracks.length === 0 ? (
+          ) : tracks.length === 0 ? (
           search ? (
             <div
               className="flex h-full items-center justify-center text-[12px]"
               style={{ color: 'var(--muted)' }}
             >
               No matches for &ldquo;{search}&rdquo;.
+            </div>
+          ) : hasLibrary ? (
+            <div
+              className="flex h-full items-center justify-center text-[12px]"
+              style={{ color: 'var(--muted)' }}
+            >
+              No tracks in this view.
             </div>
           ) : (
             <EmptyLibrary />
@@ -358,7 +387,7 @@ export function LibraryView(): JSX.Element {
             />
             <LibraryPagingFooter
               shown={tracks.length}
-              total={search ? null : stats.tracks}
+              total={matchingTrackCount}
               hasMore={hasMoreTracks}
               loading={loadingMore}
               onLoadMore={() => void loadMoreTracks()}
@@ -381,13 +410,15 @@ function libraryCountLabel(
   hasMore: boolean,
   searching: boolean,
 ): string {
-  if (searching || !total) {
-    return `${shown.toLocaleString()} ${shown === 1 ? 'match' : 'matches'}${hasMore ? ' shown' : ''}`;
+  const noun = searching ? 'match' : 'track';
+  const plural = searching ? 'matches' : 'tracks';
+  if (total <= 0) {
+    return `0 ${plural}`;
   }
   if (hasMore || shown < total) {
-    return `${shown.toLocaleString()} of ${total.toLocaleString()} tracks`;
+    return `${shown.toLocaleString()} of ${total.toLocaleString()} ${plural}`;
   }
-  return `${shown.toLocaleString()} ${shown === 1 ? 'track' : 'tracks'}`;
+  return `${total.toLocaleString()} ${total === 1 ? noun : plural}`;
 }
 
 function LibraryPagingFooter({
@@ -599,13 +630,18 @@ function SortPicker({ value, onChange }: { value: Sort; onChange: (s: Sort) => v
   const opts: Array<{ id: Sort; label: string }> = [
     { id: 'artist', label: 'Artist' },
     { id: 'album', label: 'Album' },
+    { id: 'title', label: 'Title' },
+    { id: 'added', label: 'Added' },
+    { id: 'year', label: 'Year' },
+    { id: 'genre', label: 'Genre' },
+    { id: 'duration', label: 'Time' },
     { id: 'recent', label: 'Recent' },
     { id: 'plays', label: 'Most Played' },
     { id: 'loved', label: 'Loved' },
     { id: 'rating', label: 'Rating' },
   ];
   return (
-    <div className="flex gap-1">
+    <div className="flex flex-wrap gap-1">
       {opts.map((o) => (
         <button
           key={o.id}

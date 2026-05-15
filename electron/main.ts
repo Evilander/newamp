@@ -537,6 +537,7 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('library:get-tracks', async (_e, opts) => library.getTracks(opts ?? {}));
+  ipcMain.handle('library:get-track-count', async (_e, opts) => library.getTrackCount(opts ?? {}));
   ipcMain.handle('library:get-albums', async () => library.getAlbums());
   ipcMain.handle('album-art:lookup', async (_e, input: AlbumArtLookupInput) =>
     searchAlbumArt(input),

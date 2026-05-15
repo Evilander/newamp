@@ -56,6 +56,13 @@ export interface TrackMetadataPatchInput {
   discNo?: number | null;
 }
 
+export interface TrackQueryOptions {
+  search?: string;
+  limit?: number;
+  offset?: number;
+  sort?: string;
+}
+
 export interface AlbumSummary {
   album: string;
   albumArtist: string;
@@ -545,7 +552,8 @@ export interface NewampAPI {
   scanLibrary: (roots?: string[]) => Promise<void>;
   cancelScan: () => Promise<void>;
   onScanProgress: (cb: (p: ScanProgress) => void) => () => void;
-  getTracks: (opts?: { search?: string; limit?: number; offset?: number; sort?: string }) => Promise<Track[]>;
+  getTracks: (opts?: TrackQueryOptions) => Promise<Track[]>;
+  getTrackCount: (opts?: Pick<TrackQueryOptions, 'search' | 'sort'>) => Promise<number>;
   getAlbums: () => Promise<AlbumSummary[]>;
   lookupAlbumArt: (input: AlbumArtLookupInput) => Promise<AlbumArtLookupResult[]>;
   applyAlbumArt: (input: AlbumArtLookupInput, candidate: AlbumArtLookupResult) => Promise<AlbumArtApplyResult | null>;
