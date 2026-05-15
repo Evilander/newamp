@@ -31,6 +31,22 @@ const fullscreenSource = await readFile(
   'utf8',
 );
 assert.match(fullscreenSource, /id: 'butterchurn'/, 'Fullscreen visualizer must expose a Butterchurn preset');
+assert.match(
+  fullscreenSource,
+  /data-newamp-fullscreen-visualizer/,
+  'Fullscreen visualizer must expose a stable UI smoke selector',
+);
+assert.match(
+  visualizerSource,
+  /data-newamp-visualizer-canvas/,
+  'Visualizer canvas must expose a stable UI smoke selector',
+);
+
+const packageSource = await readFile(new URL('../package.json', import.meta.url), 'utf8');
+assert.match(packageSource, /"smoke:ui-visualizer"/, 'package.json must expose the UI visualizer smoke');
+
+const releaseGateSource = await readFile(new URL('./release-gate.mjs', import.meta.url), 'utf8');
+assert.match(releaseGateSource, /'smoke:ui-visualizer'/, 'release gate must run the UI visualizer smoke');
 
 console.log(
   JSON.stringify(
@@ -38,6 +54,7 @@ console.log(
       butterchurn: true,
       presetCount,
       fullscreenMode: true,
+      uiSmoke: true,
     },
     null,
     2,

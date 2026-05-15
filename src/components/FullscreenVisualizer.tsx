@@ -35,6 +35,8 @@ export function FullscreenVisualizer(): JSX.Element {
 
   return (
     <div
+      data-newamp-fullscreen-visualizer
+      data-newamp-visualizer-preset={activePreset}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black"
       onMouseMove={() => setShowChrome(true)}
       onMouseLeave={() => setShowChrome(false)}
@@ -75,6 +77,7 @@ export function FullscreenVisualizer(): JSX.Element {
           {PRESETS.map((p) => (
             <button
               key={p.id}
+              data-newamp-viz-preset-button={p.id}
               className={`pxbtn ${preset === p.id ? 'is-active' : ''}`}
               onClick={() => setPreset(p.id)}
             >

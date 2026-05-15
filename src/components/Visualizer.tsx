@@ -288,6 +288,8 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
   return (
     <canvas
       ref={canvasRef}
+      data-newamp-visualizer-canvas
+      data-newamp-visualizer-mode={mode}
       className={className ?? 'h-full w-full'}
       style={{ display: 'block', borderRadius: 'var(--radius)', ...style }}
     />

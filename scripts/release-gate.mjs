@@ -55,6 +55,7 @@ if (!skipSmokes) {
     'smoke:health',
     'smoke:skin',
     'smoke:visualizer',
+    'smoke:ui-visualizer',
     'smoke:tabs',
     'smoke:lastfm',
     'smoke:open-files',
