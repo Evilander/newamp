@@ -4,10 +4,11 @@ import { basename, resolve } from 'node:path';
 
 const repoRoot = resolve('.');
 const packagePath = resolve(repoRoot, 'package.json');
-const installerPath = resolve(repoRoot, 'release', 'Newamp Setup 0.1.0.exe');
-const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'Newamp.exe');
 
 const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
+const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
+const installerPath = resolve(repoRoot, 'release', `Newamp Setup ${releaseVersion}.exe`);
+const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'Newamp.exe');
 const artifacts = [
   { name: 'installer', path: installerPath },
   { name: 'exe', path: exePath },

@@ -10,7 +10,7 @@ const defaultTimestampUrl = 'http://timestamp.digicert.com';
 
 export function defaultSigningArtifacts(root = repoRoot) {
   const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
-  const version = pkg.version ?? '0.1.0';
+  const version = String(pkg.version ?? '').trim() || '0.0.0';
   return [
     { name: 'installer', path: resolve(root, 'release', `Newamp Setup ${version}.exe`) },
     { name: 'portable', path: resolve(root, 'release', `Newamp Portable ${version}.exe`) },

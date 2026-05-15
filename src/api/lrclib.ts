@@ -37,7 +37,7 @@ export async function fetchLyrics(opts: {
   try {
     const res = await fetch(`${BASE}/get?${q.toString()}`, {
       signal: opts.signal,
-      headers: { 'User-Agent': 'Newamp/0.1.0 (https://github.com/evilander)' },
+      headers: { 'User-Agent': 'Newamp/1.0.0 (https://github.com/evilander)' },
     });
     if (res.ok) {
       const json = (await res.json()) as LrclibResult;

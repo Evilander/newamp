@@ -6,7 +6,9 @@ import { dirname, resolve } from 'node:path';
 
 const repoRoot = resolve('.');
 const releaseRoot = resolve(repoRoot, 'release');
-const portablePath = resolve(releaseRoot, 'Newamp Portable 0.1.0.exe');
+const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
+const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
+const portablePath = resolve(releaseRoot, `Newamp Portable ${releaseVersion}.exe`);
 const smokeRoot = resolve(repoRoot, 'tmp', 'portable-app-smoke');
 const markerPath = resolve(smokeRoot, `startup-${process.pid}-${Date.now()}.json`);
 const wrapperTemp = resolve(smokeRoot, `wrapper-temp-${process.pid}-${Date.now()}`);

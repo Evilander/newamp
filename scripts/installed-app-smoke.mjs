@@ -1,6 +1,6 @@
 import ffmpeg from 'ffmpeg-static';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,9 @@ import { checkInstalledAssociations, summarizeInstalledAssociations } from './in
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const args = process.argv.slice(2);
-const installerPath = resolve(repoRoot, 'release', 'Newamp Setup 0.1.0.exe');
+const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
+const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
+const installerPath = resolve(repoRoot, 'release', `Newamp Setup ${releaseVersion}.exe`);
 const smokeRoot = resolve(repoRoot, 'tmp', 'installed-app-smoke');
 const installerTemp = join(smokeRoot, 'installer-temp');
 const userData = join(smokeRoot, 'user-data');

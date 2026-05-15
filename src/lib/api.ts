@@ -40,7 +40,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {
-  appVersion: '0.1.0',
+  appVersion: '1.0.0',
   platform: 'browser',
   electronVersion: 'n/a',
   userDataPath: '',
@@ -301,7 +301,7 @@ const stub: NewampAPI = {
   findLocalGuitarTab: async () => null,
   openGuitarTabWindow: async () => undefined,
   platform: 'browser',
-  appVersion: '0.1.0',
+  appVersion: '1.0.0',
 };
 
 export const inElectron = typeof window !== 'undefined' && !!window.newamp;

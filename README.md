@@ -38,8 +38,8 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 
 `npm run package` creates:
 
-- `release/Newamp Setup 0.1.0.exe` - NSIS installer
-- `release/Newamp Portable 0.1.0.exe` - no-install portable launcher
+- `release/Newamp Setup <version>.exe` - NSIS installer
+- `release/Newamp Portable <version>.exe` - no-install portable launcher
 - `release/win-unpacked/Newamp.exe` - unpacked app
 
 The current artifacts are unsigned. Windows may warn until a real code-signing certificate is added.
