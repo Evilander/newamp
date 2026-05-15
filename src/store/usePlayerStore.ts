@@ -448,6 +448,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         autoDjEnabled: settings.autoDjEnabled,
         autoDjTarget: normalizeAutoDjTarget(settings.autoDjTarget),
         autoDjSmartRuleId: settings.autoDjSmartRuleId ?? null,
+        compactMode: settings.compactMode,
       });
       applyReplayGain(get().current, settings);
       applyTheme(settings.theme, settings.customSkin);
@@ -459,7 +460,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     setView: (v) => set({ view: v }),
     toggleEq: () => set({ showEq: !get().showEq }),
     setFullscreenViz: (on) => set({ fullscreenViz: on }),
-    setCompactMode: (on) => set({ compactMode: on }),
+    setCompactMode: (on) => {
+      set({ compactMode: on });
+      void api
+        .setSettings({ compactMode: on })
+        .then((settings) => set({ settings, compactMode: settings.compactMode }))
+        .catch(() => undefined);
+    },
     setVizPreset: (name) => set({ vizPreset: name }),
     setSearchQuery: (q) => set({ searchQuery: q }),
 

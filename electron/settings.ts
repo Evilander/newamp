@@ -24,6 +24,7 @@ const DEFAULTS: AppSettings = {
   limiterEnabled: true,
   preampDb: 0,
   resumeState: null,
+  compactMode: false,
   volume: 0.75,
   playbackRate: 1,
   audioOutputDeviceId: null,
@@ -59,6 +60,7 @@ export class SettingsStore {
           audioOutputDeviceId: normalizeAudioOutputDeviceId(parsed.audioOutputDeviceId),
           limiterEnabled: normalizeLimiterEnabled(parsed.limiterEnabled),
           preampDb: normalizePreampDb(parsed.preampDb),
+          compactMode: parsed.compactMode === true,
           autoDjEnabled: !!parsed.autoDjEnabled,
           autoDjTarget: normalizeAutoDjTarget(parsed.autoDjTarget ?? DEFAULTS.autoDjTarget),
           autoDjSmartRuleId: normalizeAutoDjSmartRuleId(parsed.autoDjSmartRuleId),
@@ -99,6 +101,9 @@ export class SettingsStore {
       preampDb: patch.preampDb === undefined
         ? this.state.preampDb
         : normalizePreampDb(patch.preampDb),
+      compactMode: patch.compactMode === undefined
+        ? this.state.compactMode
+        : patch.compactMode === true,
       autoDjEnabled: patch.autoDjEnabled === undefined
         ? this.state.autoDjEnabled
         : !!patch.autoDjEnabled,

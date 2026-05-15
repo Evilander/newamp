@@ -420,6 +420,7 @@ export interface AppSettings {
   limiterEnabled: boolean;
   preampDb: number;
   resumeState: PlaybackResumeState | null;
+  compactMode: boolean;
   volume: number;
   playbackRate: number;
   audioOutputDeviceId: string | null;

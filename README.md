@@ -148,6 +148,7 @@ npm run smoke:practice-loop
 npm run smoke:tempo
 npm run smoke:replaygain
 npm run smoke:session
+npm run smoke:chrome-state
 npm run smoke:audio-output
 npm run smoke:audio-limiter
 npm run smoke:ui-playback

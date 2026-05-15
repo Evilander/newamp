@@ -70,6 +70,7 @@ if (!skipSmokes) {
     'smoke:tempo',
     'smoke:replaygain',
     'smoke:session',
+    'smoke:chrome-state',
     'smoke:audio-output',
     'smoke:audio-limiter',
     'smoke:ui-playback',
