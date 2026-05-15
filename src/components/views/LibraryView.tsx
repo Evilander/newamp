@@ -823,6 +823,22 @@ export function TrackTable({
     }
   }
 
+  async function autoNumberSelectedTracks(): Promise<void> {
+    if (!selectedTracks.length || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const updated: Track[] = [];
+      for (const [index, track] of selectedTracks.entries()) {
+        const next = await api.applyTrackMetadataEdit(track.id, { trackNo: index + 1 });
+        if (next) updated.push(next);
+      }
+      onBulkMetadataSaved?.(updated);
+      setPlaylistStatus(`Numbered ${updated.length.toLocaleString()} selected track${updated.length === 1 ? '' : 's'} in visible order.`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   return (
     <>
       {playlistStatus && (
@@ -904,6 +920,15 @@ export function TrackTable({
             />
             <button className="pxbtn" onClick={() => void applyBulkMetadataEdit()} disabled={bulkBusy}>
               {bulkBusy ? 'TAGGING' : 'BULK TAG SELECTED'}
+            </button>
+            <button
+              className="pxbtn"
+              data-auto-number-selected
+              onClick={() => void autoNumberSelectedTracks()}
+              disabled={bulkBusy}
+              title="Assign track numbers in visible selected order"
+            >
+              AUTO NUMBER SELECTED
             </button>
           </div>
           <button className="pxbtn ml-auto" onClick={() => setSelectedIds(new Set())}>

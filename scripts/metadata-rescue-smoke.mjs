@@ -148,6 +148,10 @@ assert.match(libraryViewSource, /data-bulk-metadata-edit/, 'selected-track toolb
 assert.match(libraryViewSource, /applyBulkMetadataEdit/, 'selected-track toolbar should apply bulk metadata edits');
 assert.match(libraryViewSource, /BULK TAG SELECTED/, 'selected-track toolbar should label the bulk metadata action');
 assert.match(libraryViewSource, /applyTrackMetadataEdit\(track\.id, patch\)/, 'bulk metadata edits should reuse the existing metadata edit API');
+assert.match(libraryViewSource, /data-auto-number-selected/, 'selected-track toolbar should expose auto-numbering');
+assert.match(libraryViewSource, /autoNumberSelectedTracks/, 'selected-track toolbar should auto-number selected tracks');
+assert.match(libraryViewSource, /AUTO NUMBER SELECTED/, 'selected-track toolbar should label the auto-number action');
+assert.match(libraryViewSource, /trackNo: index \+ 1/, 'auto-numbering should assign track numbers from visible selection order');
 assert.match(
   libraryViewSource,
   /applyMetadataCandidate[\s\S]+api\.getStats\(\)\.then\(setStats\)/,
