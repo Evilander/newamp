@@ -23,6 +23,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - **Home command center.** Opens to a useful dashboard with continue playback, library stats, health signals, fresh imports, heavy rotation, loved tracks, harmonic mixes, and saved playlists.
 - **Custom playlists.** Create named playlists, append tracks in bulk, add folders, set playlist artwork, and launch playlists directly from Home.
 - **Smart rules and stations.** Build dynamic rules from genre, artist, album, year/era, rating, love state, play count, date added, BPM, key, and search filters; launch rule-driven radio stations.
+- **Podcasts.** Add podcast feeds, keep episode progress, mark completions, and download episodes for local playback.
 - **Milkdrop visualizer.** Butterchurn-powered fullscreen Milkdrop plus lighter built-in analyzer modes.
 - **Skins.** Built-in skins, custom CSS-variable skins, import/export of `.newampskin.json`, and Winamp classic `.wsz` / `.zip` palette import.
 - **Album art rescue.** Search MusicBrainz release groups, preview Cover Art Archive covers, and cache selected artwork locally without rewriting source audio files.
@@ -104,6 +105,9 @@ Both commands are non-mutating by default. Readiness checks the README, package 
 ```bash
 npm run smoke:library
 npm run smoke:artist
+npm run smoke:podcast
+npm run smoke:podcast-progress
+npm run smoke:podcast-download
 npm run smoke:full-library -- <music-root>
 npm run smoke:audio-proof
 npm run smoke:installer-artifact
