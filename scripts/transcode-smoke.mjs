@@ -1,11 +1,14 @@
-import { resolve } from 'node:path';
+import ffmpeg from 'ffmpeg-static';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, rmSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { playbackMode, transcodeToWavResponse } from '../dist-electron/electron/transcode.js';
 
-const target = process.argv[2];
+const target = process.argv[2] ?? generateFixture();
 
 if (!target) {
-  console.error('usage: node scripts/transcode-smoke.mjs <audio-file>');
-  process.exit(2);
+  console.error('transcode smoke could not create or resolve an audio fixture');
+  process.exit(1);
 }
 
 const filePath = resolve(target);
@@ -46,6 +49,7 @@ const ok = res.ok && playbackMode(filePath) === 'ffmpeg' && magic === 'RIFF' && 
 
 console.log(JSON.stringify({
   ok,
+  fixture: filePath,
   mode: playbackMode(filePath),
   status: res.status,
   contentType: res.headers.get('content-type'),
@@ -55,3 +59,37 @@ console.log(JSON.stringify({
 }, null, 2));
 
 process.exit(ok ? 0 : 1);
+
+function generateFixture() {
+  if (!ffmpeg) {
+    console.error('ffmpeg-static did not resolve a binary for this platform');
+    process.exit(1);
+  }
+  const out = resolve('tmp', 'transcode-smoke', 'legacy-fallback.aiff');
+  rmSync(dirname(out), { recursive: true, force: true });
+  mkdirSync(dirname(out), { recursive: true });
+  const result = spawnSync(
+    ffmpeg,
+    [
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'error',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=493.88:duration=1.2',
+      '-ac',
+      '2',
+      '-ar',
+      '44100',
+      '-y',
+      out,
+    ],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  if (result.status !== 0) {
+    throw new Error(`ffmpeg fixture generation failed (${result.status})\n${result.stderr || result.stdout}`);
+  }
+  return out;
+}
