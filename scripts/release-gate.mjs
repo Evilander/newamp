@@ -31,6 +31,7 @@ const acceptedBlockers = [];
 if (!skipSmokes) {
   for (const script of [
     'smoke:library',
+    'smoke:build-lock',
     'smoke:transcode',
     'smoke:incremental-scan',
     'smoke:scanner-queue',
