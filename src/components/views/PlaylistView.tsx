@@ -49,6 +49,7 @@ export function PlaylistView(): JSX.Element {
   const [lovedOnly, setLovedOnly] = useState(false);
   const [unplayedOnly, setUnplayedOnly] = useState(false);
   const [timerNow, setTimerNow] = useState(Date.now());
+  const [draggedQueueIndex, setDraggedQueueIndex] = useState<number | null>(null);
   const autoDjSourceMissing =
     autoDjSmartRuleId !== null && !smartRules.some((rule) => rule.id === autoDjSmartRuleId);
 
@@ -724,7 +725,27 @@ export function PlaylistView(): JSX.Element {
                     borderColor: 'var(--line)',
                     background: current?.id === t.id ? 'var(--panel-2)' : 'transparent',
                     color: current?.id === t.id ? 'var(--accent)' : 'var(--ink)',
+                    opacity: draggedQueueIndex === i ? 0.55 : 1,
                   }}
+                  draggable={true}
+                  aria-grabbed={draggedQueueIndex === i}
+                  onDragStart={(event) => {
+                    setDraggedQueueIndex(i);
+                    event.dataTransfer.effectAllowed = 'move';
+                    event.dataTransfer.setData('text/plain', String(i));
+                  }}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'move';
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const transferIndex = Number(event.dataTransfer.getData('text/plain'));
+                    const fromIndex = draggedQueueIndex ?? (Number.isInteger(transferIndex) ? transferIndex : null);
+                    if (fromIndex !== null && fromIndex !== i) moveQueuedTrack(fromIndex, i);
+                    setDraggedQueueIndex(null);
+                  }}
+                  onDragEnd={() => setDraggedQueueIndex(null)}
                   onDoubleClick={() => void playQueue(queue, i)}
                 >
                   <span className="w-[28px] shrink-0" style={{ color: 'var(--muted)' }}>
@@ -744,7 +765,7 @@ export function PlaylistView(): JSX.Element {
                       }}
                       disabled={i === 0}
                     >
-                      ↑
+                      UP
                     </button>
                     <button
                       className="pxbtn"
@@ -755,7 +776,7 @@ export function PlaylistView(): JSX.Element {
                       }}
                       disabled={i === queue.length - 1}
                     >
-                      ↓
+                      DOWN
                     </button>
                     <button
                       className="pxbtn"
@@ -765,7 +786,7 @@ export function PlaylistView(): JSX.Element {
                         void removeQueuedTrack(i);
                       }}
                     >
-                      ×
+                      X
                     </button>
                   </span>
                 </li>
