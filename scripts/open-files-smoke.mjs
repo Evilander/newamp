@@ -99,7 +99,7 @@ assert.deepEqual(
 );
 library.close();
 
-const [pkg, sharedTypes, mainSource, preloadSource, apiSource, appSource, libraryViewSource, releaseGateSource] = await Promise.all([
+const [pkg, sharedTypes, mainSource, preloadSource, apiSource, appSource, libraryViewSource, nowPlayingSource, releaseGateSource] = await Promise.all([
   readFile(new URL('../package.json', import.meta.url), 'utf8').then(JSON.parse),
   readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
   readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
@@ -107,6 +107,7 @@ const [pkg, sharedTypes, mainSource, preloadSource, apiSource, appSource, librar
   readFile(new URL('../src/lib/api.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/LibraryView.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../scripts/release-gate.mjs', import.meta.url), 'utf8'),
 ]);
 
@@ -132,16 +133,22 @@ assert.match(mainSource, /getFolderTracks\(folderPath/, 'main process should res
 assert.match(mainSource, /app:open-files/, 'main process should push second-instance files to the renderer');
 assert.match(mainSource, /NEWAMP_UI_OPEN_FILE_SMOKE/, 'main process should support packaged open-file UI proof');
 assert.match(mainSource, /newamp-ui-open-file-smoke/, 'main process should emit packaged open-file smoke results');
+assert.match(mainSource, /os:show-in-folder/, 'main process should register Explorer reveal IPC');
 assert.match(preloadSource, /consumePendingOpenFiles/, 'preload should expose pending file consumption');
 assert.match(preloadSource, /webUtils\.getPathForFile/, 'preload should use Electron webUtils for dropped file paths');
 assert.match(preloadSource, /getDroppedFilePaths/, 'preload should expose dropped path resolution');
 assert.match(apiSource, /openFiles/, 'renderer API should expose openFiles');
+assert.match(apiSource, /showInFolder/, 'renderer API should expose Explorer reveal actions');
 assert.match(apiSource, /getDroppedFilePaths/, 'browser-safe API should include dropped path fallback');
 assert.match(appSource, /handleOpenFiles/, 'App should consume open-with paths');
 assert.match(appSource, /data-newamp-drop-zone/, 'App should expose an app-wide drop zone');
 assert.match(appSource, /data-newamp-app-drop-overlay/, 'App should render a visible drop overlay');
 assert.match(appSource, /setView\('now-playing'\)/, 'App should switch to Now Playing after opening playable files');
 assert.match(libraryViewSource, /getDroppedFilePaths/, 'Library drag-drop should use preload path resolution');
+assert.match(libraryViewSource, /data-show-in-folder/, 'Library rows should expose a file reveal control');
+assert.match(libraryViewSource, /api\.showInFolder\(t\.path\)/, 'Library file reveal should open the selected track path');
+assert.match(nowPlayingSource, /data-now-playing-show-in-folder/, 'Now Playing should expose a current-track file reveal control');
+assert.match(nowPlayingSource, /api\.showInFolder\(current\.path\)/, 'Now Playing file reveal should open the current track path');
 assert.match(JSON.stringify(pkg.scripts ?? {}), /smoke:packaged-open-files/, 'package scripts should expose packaged open-file proof');
 assert.match(releaseGateSource, /smoke:open-files/, 'release gate should include open/drop file wiring smoke');
 

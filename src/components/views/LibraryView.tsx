@@ -1079,8 +1079,23 @@ export function TrackTable({
               >
                 {t.trackNo ?? i + 1}
               </td>
-              <td className="truncate px-2 py-[5px]" title={t.title}>
-                {search ? highlight(t.title, search) : t.title}
+              <td className="px-2 py-[5px]">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate" title={t.title}>
+                    {search ? highlight(t.title, search) : t.title}
+                  </span>
+                  <button
+                    className="pxbtn px-1.5 py-[1px] text-[9px]"
+                    data-show-in-folder
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void api.showInFolder(t.path);
+                    }}
+                    title="Show in folder"
+                  >
+                    FILE
+                  </button>
+                </div>
               </td>
               <td
                 className="truncate px-2 py-[5px]"
