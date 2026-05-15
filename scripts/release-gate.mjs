@@ -30,6 +30,7 @@ const acceptedBlockers = [];
 if (!skipSmokes) {
   for (const script of [
     'smoke:library',
+    'smoke:transcode',
     'smoke:incremental-scan',
     'smoke:scanner-queue',
     'smoke:library-paging',
