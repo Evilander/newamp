@@ -135,6 +135,7 @@ npm run smoke:publish-github
 npm run smoke:live-services
 npm run smoke:lastfm
 npm run smoke:tabs
+npm run smoke:playback-start
 npm run smoke:playback-controls
 npm run smoke:smart-shuffle
 npm run smoke:queue-insert
@@ -143,6 +144,11 @@ npm run smoke:rating
 npm run smoke:bookmarks
 npm run smoke:practice-loop
 npm run smoke:tempo
+npm run smoke:replaygain
+npm run smoke:session
+npm run smoke:audio-output
+npm run smoke:audio-limiter
+npm run smoke:ui-playback
 ```
 
 After doing the real speaker/headphone pass against the current package, record the manual proof artifact with:

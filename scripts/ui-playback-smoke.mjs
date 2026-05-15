@@ -66,6 +66,7 @@ async function writeSmokeSettings() {
     JSON.stringify(
       {
         libraryRoots: [mediaDir],
+        libraryAutoWatch: false,
         theme: 'classic',
         customSkin: null,
         lastfmEnabled: false,
@@ -76,8 +77,11 @@ async function writeSmokeSettings() {
         lastfmAuthToken: null,
         crossfadeMs: 0,
         replayGain: 'off',
+        limiterEnabled: true,
+        preampDb: 0,
         resumeState: null,
         volume: 0,
+        playbackRate: 1,
         equalizer: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         eqEnabled: false,
       },

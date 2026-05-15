@@ -29,10 +29,10 @@ await writeFile(join(smokeRoot, 'release', 'Newamp Portable 1.0.0.exe'), 'portab
 
 const plan = buildGithubPublishPlan({
   root: smokeRoot,
-  env: { NEWAMP_GITHUB_REPO: 'evilander/newamp-test' },
+  env: {},
 });
 assert.equal(plan.ok, true, plan.reason);
-assert.equal(plan.repo, 'evilander/newamp-test');
+assert.equal(plan.repo, 'evilander/newamp');
 assert.equal(plan.tag, 'v1.0.0');
 assert.ok(plan.commands.some((command) => command.label === 'create-repo'));
 assert.ok(plan.commands.some((command) => command.args.includes('release') && command.args.includes('create')));
@@ -42,7 +42,7 @@ assert.match(JSON.stringify(plan), /Newamp Portable 1\.0\.0\.exe/);
 
 const dryRun = publishGithubRelease({
   root: smokeRoot,
-  env: { NEWAMP_GITHUB_REPO: 'evilander/newamp-test' },
+  env: {},
   execute: false,
   skipReadiness: true,
 });
@@ -50,15 +50,22 @@ assert.equal(dryRun.ok, true);
 assert.equal(dryRun.executed, false);
 assert.equal(dryRun.commands.length, plan.commands.length);
 
+const overridePlan = buildGithubPublishPlan({
+  root: smokeRoot,
+  env: { NEWAMP_GITHUB_REPO: 'evilander/newamp-test' },
+});
+assert.equal(overridePlan.ok, true, overridePlan.reason);
+assert.equal(overridePlan.repo, 'evilander/newamp-test');
+
 const externalGitDir = join(smokeRoot, 'external.git');
 const externalPlan = buildGithubPublishPlan({
   root: smokeRoot,
   env: {
-    NEWAMP_GITHUB_REPO: 'evilander/newamp-test',
     NEWAMP_GIT_DIR: externalGitDir,
   },
 });
 assert.equal(externalPlan.ok, true, externalPlan.reason);
+assert.equal(externalPlan.repo, 'evilander/newamp');
 assert.ok(
   externalPlan.commands.some((command) => command.label === 'git-init-external'),
   'external git plan should initialize the configured git dir',
@@ -70,7 +77,7 @@ assert.ok(
 
 const missingReadme = buildGithubPublishPlan({
   root: join(smokeRoot, 'missing-root'),
-  env: { NEWAMP_GITHUB_REPO: 'evilander/newamp-test' },
+  env: {},
 });
 assert.equal(missingReadme.ok, false);
 assert.match(missingReadme.reason, /package\.json/i);

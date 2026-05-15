@@ -1082,6 +1082,11 @@ function uiPlaybackProbeSource(): string {
         }
         throw new Error('Timed out waiting for ' + label);
       };
+      const libraryButton = await waitFor('Library navigation', () =>
+        Array.from(document.querySelectorAll('button'))
+          .find((item) => (item.textContent || '').includes('Library')),
+      );
+      libraryButton.click();
       const row = await waitFor('library track row', () =>
         Array.from(document.querySelectorAll('[data-newamp-track-row]'))
           .find((item) => /UI Playback Smoke/.test(item.textContent || '')),
