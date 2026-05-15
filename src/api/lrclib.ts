@@ -1,6 +1,8 @@
 // LRCLIB.net — free, no-auth lyrics API with synced LRC support.
 // Docs: https://lrclib.net/docs
 
+import { NEWAMP_REPO_USER_AGENT } from '@shared/app-version';
+
 const BASE = 'https://lrclib.net/api';
 const CACHE_PREFIX = 'newamp:lyrics:v1:';
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 30;
@@ -37,7 +39,7 @@ export async function fetchLyrics(opts: {
   try {
     const res = await fetch(`${BASE}/get?${q.toString()}`, {
       signal: opts.signal,
-      headers: { 'User-Agent': 'Newamp/1.0.0 (https://github.com/evilander)' },
+      headers: { 'User-Agent': NEWAMP_REPO_USER_AGENT },
     });
     if (res.ok) {
       const json = (await res.json()) as LrclibResult;

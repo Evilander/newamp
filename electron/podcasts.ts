@@ -3,6 +3,7 @@ import { mkdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { PodcastEpisode, PodcastFeed, PodcastProgressInput, PodcastSubscription } from '../shared/types.js';
+import { NEWAMP_USER_AGENT } from '../shared/app-version.js';
 
 export interface ParsedPodcastFeed {
   feed: PodcastFeed;
@@ -162,7 +163,7 @@ export async function fetchPodcastSubscription(url: string): Promise<PodcastSubs
   const response = await fetch(normalized, {
     headers: {
       Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1',
-      'User-Agent': 'Newamp/0.1 podcast client',
+      'User-Agent': `${NEWAMP_USER_AGENT} podcast client`,
     },
   });
   if (!response.ok) throw new Error(`Podcast feed request failed: HTTP ${response.status}`);
@@ -188,7 +189,7 @@ export async function downloadPodcastEpisode(
   if (!episode) return null;
 
   const response = await fetch(episode.audioUrl, {
-    headers: { 'User-Agent': 'Newamp/0.1 podcast downloader' },
+    headers: { 'User-Agent': `${NEWAMP_USER_AGENT} podcast downloader` },
   });
   if (!response.ok) throw new Error(`Podcast episode download failed: HTTP ${response.status}`);
   const contentLength = Number(response.headers.get('content-length') ?? 0);

@@ -9,6 +9,8 @@ const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const smokeRoot = join(repoRoot, 'tmp', 'album-art-smoke');
 const musicRoot = join(smokeRoot, 'music');
 const dbPath = join(smokeRoot, 'library.db');
+const packageMeta = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+const expectedNewampUserAgent = new RegExp(`Newamp/${escapeRegExp(String(packageMeta.version))}`);
 
 await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(musicRoot, { recursive: true });
@@ -78,7 +80,7 @@ assert.equal(musicBrainzUrl.pathname, '/ws/2/release-group');
 assert.match(musicBrainzQuery, /releasegroup:"Kid A"/);
 assert.match(musicBrainzQuery, /artist:"Radiohead"/);
 assert.match(musicBrainzQuery, /primarytype:album/);
-assert.match(String(requests[0].headers['User-Agent']), /Newamp\/0\.1\.0/);
+assert.match(String(requests[0].headers['User-Agent']), expectedNewampUserAgent);
 
 const image = await fetchAlbumArtImage(candidates[0], {
   fetchImpl: async (url) => {
@@ -198,4 +200,8 @@ function jsonResponse(body) {
     json: async () => body,
     text: async () => JSON.stringify(body),
   };
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

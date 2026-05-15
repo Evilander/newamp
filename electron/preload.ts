@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
+import { NEWAMP_VERSION } from '../shared/app-version.js';
 import type {
   AddTracksToPlaylistInput,
   AlbumArtApplyResult,
@@ -229,7 +230,7 @@ function readAppInfo(): { platform: string; appVersion: string } {
   } catch {
     /* ignore */
   }
-  return { platform: process.platform || 'unknown', appVersion: '1.0.0' };
+  return { platform: process.platform || 'unknown', appVersion: NEWAMP_VERSION };
 }
 
 contextBridge.exposeInMainWorld('newamp', api);

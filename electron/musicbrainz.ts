@@ -4,11 +4,12 @@ import type {
   MetadataLookupCandidate,
   Track,
 } from '../shared/types.js';
+import { NEWAMP_REPO_USER_AGENT } from '../shared/app-version.js';
 
 const MUSICBRAINZ_ROOT = 'https://musicbrainz.org/ws/2/recording';
 const MUSICBRAINZ_RELEASE_GROUP_ROOT = 'https://musicbrainz.org/ws/2/release-group';
 const COVER_ART_RELEASE_GROUP_ROOT = 'https://coverartarchive.org/release-group';
-const MUSICBRAINZ_USER_AGENT = 'Newamp/1.0.0 (https://github.com/evilander/newamp)';
+const MUSICBRAINZ_USER_AGENT = NEWAMP_REPO_USER_AGENT;
 const MIN_REQUEST_SPACING_MS = 1100;
 const COVER_ART_ALLOWED_HOSTS = ['coverartarchive.org', 'archive.org'];
 const COVER_ART_ALLOWED_SUFFIXES = ['.coverartarchive.org', '.archive.org'];

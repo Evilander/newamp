@@ -5,6 +5,8 @@ import { join, resolve } from 'node:path';
 const repoRoot = resolve('.');
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultTimeoutMs = Math.max(2000, Number(process.env.NEWAMP_LIVE_SERVICE_TIMEOUT_MS ?? 12000));
+const packageVersion = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version;
+const newampUserAgent = `Newamp/${packageVersion}`;
 
 export async function checkLiveServicesReadiness({ timeoutMs = defaultTimeoutMs } = {}) {
   const [ultimateGuitar, lastfm] = await Promise.all([
@@ -40,7 +42,7 @@ async function checkUltimateGuitar({ timeoutMs }) {
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'accept-language': 'en-US,en;q=0.9',
         'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Newamp/0.1 Safari/537.36',
+          `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ${newampUserAgent} Safari/537.36`,
       },
     });
     const body = await response.text();

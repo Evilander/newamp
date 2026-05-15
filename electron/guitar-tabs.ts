@@ -7,6 +7,7 @@ import type {
   LocalGuitarTabInput,
   Track,
 } from '../shared/types.js';
+import { NEWAMP_USER_AGENT } from '../shared/app-version.js';
 import { createHash } from 'node:crypto';
 import { stat, readFile } from 'node:fs/promises';
 import { join, parse } from 'node:path';
@@ -518,7 +519,7 @@ async function requestUltimateGuitarText(url: string): Promise<string> {
       accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'accept-language': 'en-US,en;q=0.9',
       'user-agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Newamp/0.1 Safari/537.36',
+        `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ${NEWAMP_USER_AGENT} Safari/537.36`,
     },
   });
   const body = await response.text();

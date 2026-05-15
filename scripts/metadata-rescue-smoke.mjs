@@ -9,6 +9,8 @@ const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const smokeRoot = join(repoRoot, 'tmp', 'metadata-rescue-smoke');
 const musicRoot = join(smokeRoot, 'music');
 const dbPath = join(smokeRoot, 'library.db');
+const packageMeta = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+const expectedNewampUserAgent = new RegExp(`Newamp/${escapeRegExp(String(packageMeta.version))}`);
 
 await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(musicRoot, { recursive: true });
@@ -83,7 +85,7 @@ assert.equal(candidates[0].duration, 318);
 assert.ok(requests[0].url.startsWith('https://musicbrainz.org/ws/2/recording?'));
 assert.match(requests[0].url, /fmt=json/);
 assert.match(requests[0].url, /limit=5/);
-assert.match(String(requests[0].headers['User-Agent']), /Newamp\/0\.1\.0/);
+assert.match(String(requests[0].headers['User-Agent']), expectedNewampUserAgent);
 assert.doesNotMatch(decodeURIComponent(requests[0].url), /artistname:"Unknown Artist"/);
 
 const patched = library.applyMetadataPatch(bareTrack.id, candidates[0]);
@@ -133,4 +135,8 @@ function jsonResponse(body) {
     json: async () => body,
     text: async () => JSON.stringify(body),
   };
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
