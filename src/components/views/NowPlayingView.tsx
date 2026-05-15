@@ -445,6 +445,7 @@ export function NowPlayingView(): JSX.Element {
             current={current}
             onLove={() => toggleLove(current.id)}
             onSetRating={(rating) => void setTrackRating(current.id, rating)}
+            onShowInFolder={() => void api.showInFolder(current.path)}
             codecHint={codecHint}
           />
 
@@ -559,11 +560,13 @@ function TrackInfoHeader({
   current,
   onLove,
   onSetRating,
+  onShowInFolder,
   codecHint,
 }: {
   current: Track;
   onLove: () => void;
   onSetRating: (rating: number) => void;
+  onShowInFolder: () => void;
   codecHint: string;
 }): JSX.Element {
   return (
@@ -613,6 +616,16 @@ function TrackInfoHeader({
             {current.loved ? '★ loved' : '☆ love'}
           </button>
           <TrackRating value={current.rating} onChange={onSetRating} />
+          <button
+            type="button"
+            data-now-playing-show-in-folder
+            onClick={onShowInFolder}
+            className="border px-[6px] text-[9px] uppercase tracking-[0.1em]"
+            style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
+            title={current.path}
+          >
+            Show in folder
+          </button>
         </div>
       </div>
 
