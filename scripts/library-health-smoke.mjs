@@ -108,6 +108,23 @@ const duplicatePlaylist = library.savePlaylist({
   trackIds: health.duplicateGroups.flatMap((group) => group.tracks.map((track) => track.id)),
 });
 assert.equal(duplicatePlaylist.trackCount, 2, 'duplicate review playlist should contain all duplicate candidates');
+const missingReviewIds = uniqueTrackIds([
+  ...library.getTracks({ search: 'missing:artist', limit: 100 }),
+  ...library.getTracks({ search: 'missing:album', limit: 100 }),
+  ...library.getTracks({ search: 'missing:year', limit: 100 }),
+  ...library.getTracks({ search: 'missing:art', limit: 100 }),
+  ...library.getTracks({ search: 'missing:duration', limit: 100 }),
+]);
+const missingReviewPlaylist = library.savePlaylist({
+  name: 'Missing Metadata Review',
+  trackIds: missingReviewIds,
+});
+assert.equal(missingReviewPlaylist.trackCount, 2, 'missing review playlist should dedupe missing metadata/art candidates');
+const legacyReviewPlaylist = library.savePlaylist({
+  name: 'Legacy Format Review',
+  trackIds: uniqueTrackIds(library.getTracks({ search: 'format:wma', limit: 100 })),
+});
+assert.equal(legacyReviewPlaylist.trackCount, 1, 'legacy review playlist should contain legacy-format tracks');
 library.close();
 
 const [sharedTypes, mainSource, preloadSource, apiSource, libraryViewSource] = await Promise.all([
@@ -128,11 +145,22 @@ assert.match(libraryViewSource, /exactMatchCount/, 'Library view should surface 
 assert.match(libraryViewSource, /exact matches/, 'Library Health should distinguish exact-looking duplicate files');
 assert.match(libraryViewSource, /Save duplicate review/, 'Library view should make duplicate clusters actionable');
 assert.match(libraryViewSource, /Duplicate Review/, 'Library view should create a named duplicate-review playlist');
+assert.match(libraryViewSource, /Save missing review/, 'Library view should make missing metadata/art actionable');
+assert.match(libraryViewSource, /Missing Metadata Review/, 'Library view should create a named missing-metadata review playlist');
+assert.match(libraryViewSource, /Save legacy review/, 'Library view should make legacy formats actionable');
+assert.match(libraryViewSource, /Legacy Format Review/, 'Library view should create a named legacy-format review playlist');
+assert.match(libraryViewSource, /collectTracksByQueries/, 'Library view should collect review playlists from power-search queries');
 
 console.log(JSON.stringify({
   ok: true,
   missing: health.missing,
   duplicates: health.duplicateGroups.map((group) => `${group.artist} - ${group.title}`),
   duplicatePlaylist: duplicatePlaylist.trackCount,
+  missingReviewPlaylist: missingReviewPlaylist.trackCount,
+  legacyReviewPlaylist: legacyReviewPlaylist.trackCount,
   legacyFormats: health.legacyFormats,
 }, null, 2));
+
+function uniqueTrackIds(tracks) {
+  return [...new Set(tracks.map((track) => track.id))];
+}

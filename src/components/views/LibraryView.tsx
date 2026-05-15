@@ -249,6 +249,70 @@ export function LibraryView(): JSX.Element {
     );
   }
 
+  async function createMissingReviewPlaylist(): Promise<void> {
+    if (!health) return;
+    const missingTotal =
+      health.missing.artist +
+      health.missing.album +
+      health.missing.year +
+      health.missing.art +
+      health.missing.duration;
+    if (!missingTotal) {
+      setCleanupStatus('No missing metadata/art candidates to review.');
+      return;
+    }
+    setCleanupStatus('Building missing metadata review...');
+    const tracks = await collectTracksByQueries([
+      'missing:artist',
+      'missing:album',
+      'missing:year',
+      'missing:art',
+      'missing:duration',
+    ]);
+    await saveHealthReviewPlaylist('Missing Metadata Review', tracks, 'missing metadata/art candidate');
+  }
+
+  async function createLegacyReviewPlaylist(): Promise<void> {
+    if (!health?.legacyFormats.length) {
+      setCleanupStatus('No legacy-format tracks to review.');
+      return;
+    }
+    setCleanupStatus('Building legacy format review...');
+    const tracks = await collectTracksByQueries(
+      health.legacyFormats.map((item) => `format:${item.ext.replace(/^\./, '')}`),
+    );
+    await saveHealthReviewPlaylist('Legacy Format Review', tracks, 'legacy-format track');
+  }
+
+  async function collectTracksByQueries(queries: string[]): Promise<Track[]> {
+    const rows = await Promise.all(
+      queries.map((query) => api.getTracks({ search: query, sort: 'artist', limit: 100000 })),
+    );
+    const byId = new Map<number, Track>();
+    for (const track of rows.flat()) byId.set(track.id, track);
+    return [...byId.values()];
+  }
+
+  async function saveHealthReviewPlaylist(
+    baseName: string,
+    tracks: Track[],
+    label: string,
+  ): Promise<void> {
+    const trackIds = tracks.map((track) => track.id);
+    if (!trackIds.length) {
+      setCleanupStatus(`No ${label}s were available.`);
+      return;
+    }
+    const date = new Date().toISOString().slice(0, 10);
+    const playlist = await api.savePlaylist({
+      name: `${baseName} ${date}`,
+      trackIds,
+    });
+    setCleanupStatus(
+      `Saved ${playlist.name} with ${playlist.trackCount.toLocaleString()} ${label}${playlist.trackCount === 1 ? '' : 's'}.`,
+    );
+  }
+
   async function saveSearchAsSmartRule(): Promise<void> {
     const query = search.trim();
     if (!query) {
@@ -297,6 +361,8 @@ export function LibraryView(): JSX.Element {
           cleanupStatus={cleanupStatus}
           onCleanMissingFiles={() => void cleanMissingFiles()}
           onCreateDuplicateReviewPlaylist={() => void createDuplicateReviewPlaylist()}
+          onCreateMissingReviewPlaylist={() => void createMissingReviewPlaylist()}
+          onCreateLegacyReviewPlaylist={() => void createLegacyReviewPlaylist()}
         />
       )}
       <div
@@ -540,11 +606,15 @@ function LibraryHealthPanel({
   cleanupStatus,
   onCleanMissingFiles,
   onCreateDuplicateReviewPlaylist,
+  onCreateMissingReviewPlaylist,
+  onCreateLegacyReviewPlaylist,
 }: {
   health: LibraryHealth;
   cleanupStatus: string | null;
   onCleanMissingFiles: () => void;
   onCreateDuplicateReviewPlaylist: () => void;
+  onCreateMissingReviewPlaylist: () => void;
+  onCreateLegacyReviewPlaylist: () => void;
 }): JSX.Element {
   const missingTotal =
     health.missing.artist +
@@ -576,9 +646,16 @@ function LibraryHealthPanel({
           <span>Exact matches</span><span className="text-right">{duplicateExactMatchTotal(health).toLocaleString()}</span>
           <span>Legacy</span><span className="truncate text-right" title={legacySummary}>{legacySummary}</span>
         </div>
-        <div className="mt-2 flex items-center gap-2">
+        <div className="mt-2 flex flex-wrap items-center gap-2">
           <button className="pxbtn" onClick={onCleanMissingFiles}>
             Clean missing files
+          </button>
+          <button
+            className="pxbtn"
+            onClick={onCreateMissingReviewPlaylist}
+            disabled={!missingTotal}
+          >
+            Save missing review
           </button>
           <button
             className="pxbtn"
@@ -586,6 +663,13 @@ function LibraryHealthPanel({
             disabled={!health.duplicateGroups.length}
           >
             Save duplicate review
+          </button>
+          <button
+            className="pxbtn"
+            onClick={onCreateLegacyReviewPlaylist}
+            disabled={!health.legacyFormats.length}
+          >
+            Save legacy review
           </button>
           {cleanupStatus && (
             <span className="truncate" style={{ color: 'var(--muted)' }}>
