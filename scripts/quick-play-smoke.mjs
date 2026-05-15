@@ -76,6 +76,14 @@ try {
   assert.match(paletteSource, /queueTracksNext/, 'Quick Play should support play-next for result sets');
   assert.match(paletteSource, /addTracksToQueue/, 'Quick Play should support queue append for result sets');
   assert.match(paletteSource, /api\.toggleLove/, 'Quick Play should support love toggling');
+  assert.match(paletteSource, /Ctrl\+Enter plays next/, 'Quick Play should expose a play-next keyboard chord');
+  assert.match(paletteSource, /Shift\+Enter queues/, 'Quick Play should expose a queue keyboard chord');
+  assert.match(paletteSource, /Ctrl\+L loves/, 'Quick Play should expose a love keyboard chord');
+  assert.match(paletteSource, /Ctrl\+R starts radio/, 'Quick Play should expose a smart-rule radio keyboard chord');
+  assert.match(paletteSource, /event\.key === 'Enter' && \(event\.ctrlKey \|\| event\.metaKey\)/, 'Quick Play should route Ctrl+Enter to play-next');
+  assert.match(paletteSource, /event\.key === 'Enter' && event\.shiftKey/, 'Quick Play should route Shift+Enter to queue');
+  assert.match(paletteSource, /key === 'l' && \(event\.ctrlKey \|\| event\.metaKey\)/, 'Quick Play should route Ctrl+L to love');
+  assert.match(paletteSource, /key === 'r' && \(event\.ctrlKey \|\| event\.metaKey\)/, 'Quick Play should route Ctrl+R to smart-rule radio');
   assert.match(paletteSource, /setView\('now-playing'\)/, 'Quick Play should jump to Now Playing after play');
   assert.match(paletteSource, /VIEW_ITEMS/, 'Quick Play should include app views');
   assert.match(paletteSource, /COMMAND_ITEMS/, 'Quick Play should include app commands');
