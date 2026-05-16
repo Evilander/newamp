@@ -63,6 +63,7 @@
     "smoke:open-files": "npm run build:electron && node scripts/open-files-smoke.mjs",
     "smoke:health": "npm run build:electron && node scripts/library-health-smoke.mjs",
     "smoke:history": "npm run build:electron && node scripts/history-smoke.mjs",
+    "smoke:crash-diagnostics": "npm run build && node scripts/crash-diagnostics-smoke.mjs",
     "smoke:search": "npm run build:electron && node scripts/power-search-smoke.mjs",
     "smoke:bookmarks": "npm run build:electron && node scripts/bookmarks-smoke.mjs",
     "smoke:practice-loop": "npm run build:electron && node scripts/practice-loop-smoke.mjs",

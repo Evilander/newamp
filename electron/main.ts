@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  crashReporter,
   globalShortcut,
   ipcMain,
   Menu,
@@ -14,7 +15,7 @@ import {
 } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { LibraryStore } from './library.js';
 import { LibraryWatcher } from './library-watcher.js';
@@ -134,6 +135,18 @@ mkdirSync(sessionData, { recursive: true });
 app.setPath('sessionData', sessionData);
 app.commandLine.appendSwitch('disk-cache-dir', join(sessionData, 'Cache'));
 
+const diagnosticsDir = join(app.getPath('userData'), 'diagnostics');
+const crashDumpsDir = join(diagnosticsDir, 'crash-dumps');
+
+try {
+  mkdirSync(crashDumpsDir, { recursive: true });
+  app.setPath('crashDumps', crashDumpsDir);
+  crashReporter.start({ uploadToServer: false });
+  writeDiagnosticEvent('crash-reporter-started', { crashDumpsDir });
+} catch (err) {
+  console.error('[newamp] crash reporter failed to start', err);
+}
+
 if (forceSoftwareRendering) {
   applySoftwareRenderingSwitches('normal');
 }
@@ -195,6 +208,59 @@ function writeStartupSmokeMarker(payload: Record<string, unknown>): void {
   } catch (err) {
     console.error('[newamp] startup smoke marker failed', err);
   }
+}
+
+function writeDiagnosticEvent(kind: string, payload: Record<string, unknown> = {}): void {
+  try {
+    mkdirSync(diagnosticsDir, { recursive: true });
+    const event = {
+      schemaVersion: 1,
+      at: new Date().toISOString(),
+      kind,
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      pid: process.pid,
+      paths: {
+        userData: app.getPath('userData'),
+        sessionData: app.getPath('sessionData'),
+        crashDumps: app.getPath('crashDumps'),
+      },
+      payload: normalizeDiagnosticValue(payload),
+    };
+    const line = `${JSON.stringify(event)}\n`;
+    appendFileSync(join(diagnosticsDir, 'events.jsonl'), line, 'utf8');
+    if (/crash|gone|exception|rejection|unresponsive/i.test(kind)) {
+      writeFileSync(join(diagnosticsDir, 'latest-crash.json'), `${JSON.stringify(event, null, 2)}\n`, 'utf8');
+    }
+  } catch (err) {
+    console.error('[newamp] diagnostic event failed', err);
+  }
+}
+
+function normalizeDiagnosticValue(value: unknown): unknown {
+  if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack ?? null };
+  if (Array.isArray(value)) return value.map((item) => normalizeDiagnosticValue(item));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, normalizeDiagnosticValue(item)]),
+  );
+}
+
+function attachWindowDiagnostics(win: BrowserWindow, label: string): void {
+  win.webContents.on('render-process-gone', (_event, details) => {
+    writeDiagnosticEvent('window-render-process-gone', {
+      label,
+      title: win.getTitle(),
+      url: win.webContents.getURL(),
+      details,
+    });
+  });
+  win.on('unresponsive', () => {
+    writeDiagnosticEvent('window-unresponsive', { label, title: win.getTitle(), url: win.webContents.getURL() });
+  });
+  win.on('responsive', () => {
+    writeDiagnosticEvent('window-responsive', { label, title: win.getTitle(), url: win.webContents.getURL() });
+  });
 }
 
 // Register custom protocol as standard + streaming before app ready, so it
@@ -277,6 +343,7 @@ function createWindow(): BrowserWindow {
       backgroundThrottling: !smokeMode,
     },
   });
+  attachWindowDiagnostics(win, 'main');
 
   if (smokeMode) {
     win.webContents.on('console-message', (details) => {
@@ -1681,6 +1748,7 @@ function openGuitarTabWindow(document: GuitarTabDocument, startAutoscroll: boole
       webSecurity: true,
     },
   });
+  attachWindowDiagnostics(win, 'guitar-tab');
   tabWindows.add(win);
   win.once('ready-to-show', () => win.show());
   win.on('closed', () => tabWindows.delete(win));
@@ -2206,6 +2274,28 @@ async function bootstrap(): Promise<void> {
 }
 
 const singleInstanceLock = app.requestSingleInstanceLock();
+
+process.on('uncaughtException', (err, origin) => {
+  writeDiagnosticEvent('main-uncaught-exception', { origin, error: err });
+  console.error('[newamp] uncaught exception', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  writeDiagnosticEvent('main-unhandled-rejection', { reason });
+  console.error('[newamp] unhandled rejection', reason);
+});
+
+app.on('child-process-gone', (_event, details) => {
+  writeDiagnosticEvent('child-process-gone', details as unknown as Record<string, unknown>);
+});
+
+app.on('render-process-gone', (_event, webContents, details) => {
+  writeDiagnosticEvent('app-render-process-gone', {
+    url: webContents.getURL(),
+    details,
+  });
+});
 
 if (!singleInstanceLock) {
   app.quit();

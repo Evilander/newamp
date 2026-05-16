@@ -59,6 +59,7 @@ if (!skipSmokes) {
     'smoke:cue',
     'smoke:metadata',
     'smoke:health',
+    'smoke:crash-diagnostics',
     'smoke:skin',
     'smoke:visualizer',
     'smoke:ui-visualizer',
