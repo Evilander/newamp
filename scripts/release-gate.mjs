@@ -140,6 +140,8 @@ if (!skipPackage) {
   checks.push({ name: 'smoke:packaged-open-files', ok: true });
   run('npm', ['run', 'smoke:portable-app'], 'npm run smoke:portable-app');
   checks.push({ name: 'smoke:portable-app', ok: true });
+  run('npm', ['run', 'release:bundle'], 'npm run release:bundle');
+  checks.push({ name: 'release:bundle', ok: true });
 }
 
 const artifactCheck = checkArtifacts();
