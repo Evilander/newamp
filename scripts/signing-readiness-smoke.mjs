@@ -8,9 +8,11 @@ const packagePath = resolve(repoRoot, 'package.json');
 const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
 const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
 const installerPath = resolve(repoRoot, 'release', `Newamp Setup ${releaseVersion}.exe`);
+const portablePath = resolve(repoRoot, 'release', `Newamp Portable ${releaseVersion}.exe`);
 const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'Newamp.exe');
 const artifacts = [
   { name: 'installer', path: installerPath },
+  { name: 'portable', path: portablePath },
   { name: 'exe', path: exePath },
 ].map((item) => ({ ...item, exists: existsSync(item.path), signature: signatureStatus(item.path) }));
 const env = signingEnvStatus();
