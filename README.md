@@ -49,6 +49,8 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - `release/win-unpacked/Newamp.exe` - unpacked app
 - `release/SHA256SUMS.txt` - SHA256 checksums for the installer, portable EXE, and unpacked EXE
 
+`npm run release:bundle` also creates `release/Newamp-<version>-source.zip`, `release/RELEASE-MANIFEST.json`, and `release/Newamp-<version>-release-bundle.zip` for offline handoff or manual upload.
+
 The current artifacts are unsigned. Windows may warn until a real code-signing certificate is added.
 
 Signing dry-run:
@@ -105,10 +107,11 @@ Publication readiness:
 npm run release:completion-audit
 npm run release:completion-audit:local
 npm run release:publication-readiness
+npm run release:bundle
 npm run release:publish-github
 ```
 
-The completion audit restates the objective as concrete deliverables, maps each one to source/artifact/test evidence, and optionally reruns the real `K:/music` proof. Readiness checks the README, package version, git/GitHub CLI state, signed artifacts, Last.fm live proof, and manual listening proof. `release:publish-github` dry-runs the exact git/GitHub command sequence and only executes with `-- --execute` after readiness passes.
+The completion audit restates the objective as concrete deliverables, maps each one to source/artifact/test evidence, and optionally reruns the real `K:/music` proof. Readiness checks the README, package version, git/GitHub CLI state, signed artifacts, Last.fm live proof, and manual listening proof. `release:bundle` creates a self-verifying local bundle. `release:publish-github` dry-runs the exact git/GitHub command sequence and only executes with `-- --execute` after readiness passes.
 
 ## Important Smoke Tests
 
@@ -145,6 +148,7 @@ npm run smoke:support-restore
 npm run smoke:signing-readiness
 npm run smoke:signing-workflow
 npm run smoke:release-checksums
+npm run smoke:release-bundle
 npm run smoke:publish-github
 npm run smoke:live-services
 npm run smoke:lastfm
