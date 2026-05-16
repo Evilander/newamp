@@ -360,13 +360,6 @@ async function runPackagedNormalLaunchSmoke() {
   const minAliveMs = 4000;
   const launchArgs = [
     `--newamp-user-data-dir=${smokeUserData}`,
-    '--disable-gpu',
-    '--disable-gpu-compositing',
-    '--disable-software-rasterizer',
-    '--disable-accelerated-2d-canvas',
-    '--disable-features=CalculateNativeWinOcclusion,UseSkiaRenderer,VizDisplayCompositor',
-    '--in-process-gpu',
-    '--no-sandbox',
   ];
   const child = spawn(exePath, launchArgs, {
     cwd: dirname(exePath),
@@ -408,11 +401,14 @@ async function runPackagedNormalLaunchSmoke() {
   const ok = !spawnError && exitCode === null && elapsedMs >= minAliveMs;
   if (exitCode === null) {
     cleanupProcessTree(child.pid);
-    await sleep(500);
-    if (exitCode === null) cleanupPackagedSmokeProcess();
-    await sleep(500);
+    await waitForChildExit(child, () => exitCode !== null, 2000);
+    if (exitCode === null) {
+      child.kill('SIGKILL');
+      await waitForChildExit(child, () => exitCode !== null, 1000);
+    }
     child.stdout.destroy();
     child.stderr.destroy();
+    child.unref();
   }
   return {
     name: 'packaged-normal-launch-smoke',
@@ -487,6 +483,17 @@ function cleanupProcessTree(pid) {
     cwd: repoRoot,
     stdio: 'ignore',
     windowsHide: true,
+  });
+}
+
+function waitForChildExit(child, isExited, ms) {
+  if (isExited()) return Promise.resolve();
+  return new Promise((resolveWait) => {
+    const timer = setTimeout(resolveWait, ms);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolveWait();
+    });
   });
 }
 
