@@ -48,6 +48,7 @@ import {
 import { exportPlaylistFolder } from './playlist-export.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
 import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from './winamp-skin-import.js';
+import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import type {
   CustomSkin,
@@ -110,7 +111,7 @@ const OPEN_AUDIO_EXTS = new Set([
   '.dts',
   '.dsf',
 ]);
-const OPEN_PLAYLIST_EXTS = new Set(['.m3u', '.m3u8', '.pls']);
+const OPEN_PLAYLIST_EXTS = new Set(['.m3u', '.m3u8', '.pls', '.cue']);
 
 if (smokeMode) {
   app.disableHardwareAcceleration();
@@ -247,7 +248,8 @@ function createWindow(): BrowserWindow {
 
   if (smokeMode) {
     win.webContents.on('console-message', (details) => {
-      console.error(`[newamp-smoke-renderer] ${details.message}`);
+      const source = details.sourceId ? ` ${details.sourceId}:${details.lineNumber}` : '';
+      console.error(`[newamp-smoke-renderer] ${details.message}${source}`);
     });
   }
 
@@ -1964,6 +1966,7 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
   const targets = normalizeOpenTargets(paths);
   const audioPaths: string[] = [];
   const playlistPaths: string[] = [];
+  const cuePaths: string[] = [];
   const folderPaths: string[] = [];
   const skipped: string[] = [];
 
@@ -1974,11 +1977,28 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
     }
     const ext = extname(path).toLowerCase();
     if (OPEN_AUDIO_EXTS.has(ext)) audioPaths.push(path);
+    else if (ext === '.cue') cuePaths.push(path);
     else if (OPEN_PLAYLIST_EXTS.has(ext)) playlistPaths.push(path);
     else skipped.push(path);
   }
 
-  const scanTargets = [...folderPaths, ...audioPaths];
+  const cueSheets: Array<{ path: string; entries: CueSheetEntry[] }> = [];
+  for (const path of cuePaths) {
+    try {
+      const content = await readFile(path, 'utf8');
+      const entries = parseCueSheet(content, path);
+      if (!entries.length) {
+        skipped.push(`${path}: no playable CUE audio tracks found`);
+        continue;
+      }
+      cueSheets.push({ path, entries });
+    } catch (err) {
+      skipped.push(`${path}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const cueAudio = cueSheets.flatMap((sheet) => cueAudioPaths(sheet.entries));
+  const scanTargets = [...folderPaths, ...audioPaths, ...cueAudio];
   if (scanTargets.length) await scanner.start(scanTargets);
 
   const importedPlaylists = [];
@@ -2006,6 +2026,20 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
       }
     } catch {
       skipped.push(path);
+    }
+  }
+
+  for (const sheet of cueSheets) {
+    const sourceTracks = library.getTracksByPaths(cueAudioPaths(sheet.entries));
+    const cueTracks = cueEntriesToTracks(sheet.entries, sourceTracks);
+    if (!cueTracks.length) {
+      skipped.push(`${sheet.path}: CUE source audio was not cataloged`);
+      continue;
+    }
+    for (const track of cueTracks) {
+      if (seenTrackIds.has(track.id)) continue;
+      seenTrackIds.add(track.id);
+      tracks.push(track);
     }
   }
 

@@ -27,7 +27,7 @@ const unpackedFfmpeg = resolve(resourcesRoot, 'app.asar.unpacked', 'node_modules
 const unpackedSqlWasm = resolve(resourcesRoot, 'app.asar.unpacked', 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
 
 const requiredAudioExtensions = ['mp3', 'flac', 'wav', 'm4a', 'wma'];
-const requiredPlaylistExtensions = ['m3u', 'm3u8', 'pls'];
+const requiredPlaylistExtensions = ['m3u', 'm3u8', 'pls', 'cue'];
 const requiredExtensions = [...requiredAudioExtensions, ...requiredPlaylistExtensions];
 
 const gateSource = readFileSync(gatePath, 'utf8');
@@ -89,6 +89,7 @@ for (const extension of requiredExtensions) {
 }
 assert.match(builderDebug, /APP_ASSOCIATE "mp3" "Newamp\.AudioFile"/, 'NSIS script should register audio files under Newamp.AudioFile');
 assert.match(builderDebug, /APP_ASSOCIATE "m3u" "Newamp\.PlaylistFile"/, 'NSIS script should register playlists under Newamp.PlaylistFile');
+assert.match(builderDebug, /APP_ASSOCIATE "cue" "Newamp\.PlaylistFile"/, 'NSIS script should register CUE sheets under Newamp.PlaylistFile');
 assert.match(builderDebug, /FileAssociation\.nsh/, 'NSIS script should include electron-builder file-association helpers');
 assert.match(builderDebug, /\$appExe \$\\"%1\$\\"/, 'NSIS file-open command should pass the selected file path to Newamp.exe');
 assert.match(builderDebug, /RequestExecutionLevel user/, 'installer should support current-user install mode');

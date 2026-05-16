@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const scriptPath = fileURLToPath(import.meta.url);
-const coreExtensions = ['mp3', 'flac', 'wav', 'm4a', 'wma', 'm3u', 'm3u8', 'pls'];
+const coreExtensions = ['mp3', 'flac', 'wav', 'm4a', 'wma', 'm3u', 'm3u8', 'pls', 'cue'];
 
 export function checkInstalledAssociations({
   root = repoRoot,
