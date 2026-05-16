@@ -59,6 +59,18 @@ const aliveLongEnough = !spawnError && exitCode === null && elapsedMs >= minAliv
 if (exitCode === null && Date.now() - started < timeoutMs) await cleanupLaunchedProcess(child.pid);
 
 assert.ok(aliveLongEnough, diagnostic('packaged app should remain alive in normal launch mode'));
+const launchDiagnostics = readLaunchDiagnostics(userData);
+assert.ok(
+  launchDiagnostics.events > 0,
+  diagnostic('packaged app should write launch diagnostics during normal launch') +
+    `\ndiagnostics=${JSON.stringify(launchDiagnostics, null, 2)}`,
+);
+assert.equal(
+  launchDiagnostics.crashedChildren,
+  0,
+  diagnostic('packaged app should not crash child processes during idle normal launch') +
+    `\ndiagnostics=${JSON.stringify(launchDiagnostics, null, 2)}`,
+);
 
 const artifactStat = statSync(exePath);
 const report = {
@@ -73,6 +85,7 @@ const report = {
   userData,
   exitCode,
   exitSignal,
+  diagnostics: launchDiagnostics,
   stdout: stdout.trim().slice(-600),
   stderr: stderr.trim().slice(-1200),
 };
@@ -126,4 +139,37 @@ function diagnostic(message) {
     `stdout=${stdout.trim().slice(-300)}`,
     `stderr=${stderr.trim().slice(-900)}`,
   ].join('\n');
+}
+
+function readLaunchDiagnostics(path) {
+  const eventsPath = resolve(path, 'diagnostics', 'events.jsonl');
+  if (!existsSync(eventsPath)) {
+    return { eventsPath, events: 0, crashedChildren: 0, crashedChildSamples: [] };
+  }
+
+  const events = readFileSync(eventsPath, 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  const crashed = events.filter((event) => {
+    return (
+      event.kind === 'child-process-gone' &&
+      event.payload?.reason === 'crashed' &&
+      ['Audio Service', 'GPU'].includes(String(event.payload?.name ?? event.payload?.serviceName ?? ''))
+    );
+  });
+
+  return {
+    eventsPath,
+    events: events.length,
+    crashedChildren: crashed.length,
+    crashedChildSamples: crashed.slice(0, 5),
+  };
 }

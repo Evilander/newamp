@@ -106,8 +106,8 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     let raf = 0;
     let ctx: CanvasRenderingContext2D | null = null;
-    const freq = new Uint8Array(new ArrayBuffer(engine.analyser.frequencyBinCount));
-    const wave = new Uint8Array(new ArrayBuffer(engine.analyser.fftSize));
+    const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+    const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
 
     function ensureSize() {
       const node = canvasRef.current;

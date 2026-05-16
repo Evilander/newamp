@@ -126,10 +126,33 @@ if (userDataOverride) {
   app.setPath('userData', userData);
 }
 
+if (smokeMode && !userDataOverride) {
+  const smokeUserDataName = startupSmoke
+    ? 'startup-smoke-user-data'
+    : uiQuickPlaySmoke
+      ? 'ui-quick-play-smoke-user-data'
+      : uiHandoffSmoke
+        ? 'ui-handoff-smoke-user-data'
+        : uiGaplessSmoke
+          ? 'ui-gapless-smoke-user-data'
+          : uiLyricsSmoke
+            ? 'ui-lyrics-smoke-user-data'
+            : uiOpenFileSmoke
+              ? 'ui-open-file-smoke-user-data'
+              : uiVisualizerSmoke
+                ? 'ui-visualizer-smoke-user-data'
+                : 'ui-playback-smoke-user-data';
+  const smokeUserData = process.env.NEWAMP_SMOKE_USER_DATA
+    ? resolve(process.env.NEWAMP_SMOKE_USER_DATA)
+    : join(appRoot, 'tmp', smokeUserDataName);
+  mkdirSync(smokeUserData, { recursive: true });
+  app.setPath('userData', smokeUserData);
+}
+
 const sessionData = sessionDataOverride
   ? resolve(sessionDataOverride)
-  : userDataOverride
-    ? resolve(userDataOverride, 'session-data')
+  : userDataOverride || smokeMode
+    ? resolve(app.getPath('userData'), 'session-data')
     : resolve(process.env.LOCALAPPDATA || process.env.APPDATA || appRoot, 'Newamp', 'session-data');
 mkdirSync(sessionData, { recursive: true });
 app.setPath('sessionData', sessionData);
@@ -154,28 +177,6 @@ if (forceSoftwareRendering) {
 if (smokeMode) {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
   applySoftwareRenderingSwitches('smoke');
-  const smokeUserDataName = startupSmoke
-    ? 'startup-smoke-user-data'
-    : uiQuickPlaySmoke
-      ? 'ui-quick-play-smoke-user-data'
-      : uiHandoffSmoke
-        ? 'ui-handoff-smoke-user-data'
-        : uiGaplessSmoke
-          ? 'ui-gapless-smoke-user-data'
-          : uiLyricsSmoke
-            ? 'ui-lyrics-smoke-user-data'
-            : uiOpenFileSmoke
-              ? 'ui-open-file-smoke-user-data'
-              : uiVisualizerSmoke
-                ? 'ui-visualizer-smoke-user-data'
-                : 'ui-playback-smoke-user-data';
-  if (!userDataOverride) {
-    const smokeUserData = process.env.NEWAMP_SMOKE_USER_DATA
-      ? resolve(process.env.NEWAMP_SMOKE_USER_DATA)
-      : join(appRoot, 'tmp', smokeUserDataName);
-    mkdirSync(smokeUserData, { recursive: true });
-    app.setPath('userData', smokeUserData);
-  }
 }
 
 function commandLineValue(name: string): string | null {
