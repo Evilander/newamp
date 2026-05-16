@@ -1,7 +1,7 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { checkLastfmLiveProof, summarizeLastfmLiveProof } from './lastfm-live-proof.mjs';
+import { checkLastfmLiveProof, lastfmLiveProofTrack, summarizeLastfmLiveProof } from './lastfm-live-proof.mjs';
 
 const repoRoot = resolve('.');
 const scriptPath = fileURLToPath(import.meta.url);
@@ -136,14 +136,7 @@ async function checkLastfm({ timeoutMs }) {
       await withTimeout(
         lastfm.updateLastfmNowPlaying(
           lastfmSettings({ apiKey, sharedSecret, sessionKey, username }),
-          {
-            artist: 'Newamp QA',
-            title: 'Live Service Readiness Probe',
-            album: 'Newamp Release Gate',
-            albumArtist: 'Newamp QA',
-            duration: 181,
-            trackNumber: 1,
-          },
+          lastfmLiveProofTrack,
         ),
         timeoutMs,
         'Last.fm account write probe timed out',

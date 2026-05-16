@@ -44,6 +44,20 @@ export interface LastfmOutboxFlushResult {
   remaining: number;
 }
 
+export class LastfmApiError extends Error {
+  readonly code: number | null;
+  readonly status: number;
+  readonly retryable: boolean;
+
+  constructor(message: string, { code, status }: { code: number | null; status: number }) {
+    super(code ? `Last.fm ${code}: ${message}` : message);
+    this.name = 'LastfmApiError';
+    this.code = code;
+    this.status = status;
+    this.retryable = isRetryableLastfmFailure(code, status);
+  }
+}
+
 export function signLastfmParams(params: LastfmParams, sharedSecret: string): string {
   const payload = Object.entries(params)
     .filter(([key, value]) =>
@@ -141,6 +155,7 @@ export class LastfmScrobbleOutbox {
         await send(item);
         sent += 1;
       } catch (err) {
+        if (!shouldRetryLastfmError(err)) continue;
         remaining.push({
           ...item,
           attempts: item.attempts + 1,
@@ -251,16 +266,42 @@ async function lastfmPost<T>(params: LastfmParams): Promise<T> {
     body,
   });
   const text = await response.text();
-  let data: { error?: number; message?: string };
+  let data: { error?: number | string; message?: string };
   try {
     data = text ? JSON.parse(text) : {};
   } catch {
-    throw new Error(`Last.fm returned a non-JSON response (${response.status}).`);
+    throw new LastfmApiError(`Last.fm returned a non-JSON response (${response.status}).`, {
+      code: null,
+      status: response.status,
+    });
   }
-  if (!response.ok || data.error) {
-    throw new Error(data.message || `Last.fm request failed (${response.status}).`);
+  const code = normalizeLastfmErrorCode(data.error);
+  if (!response.ok || code) {
+    throw new LastfmApiError(data.message || `Last.fm request failed (${response.status}).`, {
+      code,
+      status: response.status,
+    });
   }
   return data as T;
+}
+
+export function shouldRetryLastfmError(err: unknown): boolean {
+  if (err instanceof LastfmApiError) return err.retryable;
+  return true;
+}
+
+function isRetryableLastfmFailure(code: number | null, status: number): boolean {
+  if (code !== null) return code === 9 || code === 11 || code === 16 || code === 29;
+  return status === 200 || status === 408 || status === 429 || status >= 500;
+}
+
+function normalizeLastfmErrorCode(value: number | string | null | undefined): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+  }
+  return null;
 }
 
 function isLastfmReady(settings: AppSettings): boolean {
