@@ -19,6 +19,12 @@ export interface Track {
   hasArt: 0 | 1;
   loved: 0 | 1;
   rating: number;
+  /**
+   * Fine-grained score 0..100 with decimals (e.g. 88.3). Optional companion to
+   * the integer `rating` (0..5). When set, `rating` is kept in sync as
+   * round(ratingScore / 20) so existing star UI/sorts keep working.
+   */
+  ratingScore: number | null;
   avoidAutoPlay: 0 | 1;
   playCount: number;
   lastPlayed: number | null;
@@ -466,6 +472,11 @@ export type BuiltInTheme =
   | 'amber'
   | 'ops'
   | 'oxide'
+  | 'steel'
+  | 'walnut'
+  | 'jukebox'
+  | 'terminal'
+  | 'ice'
   | 'miami'
   | 'mono';
 export type Theme = BuiltInTheme | 'custom';
@@ -690,6 +701,7 @@ export interface NewampAPI {
   deleteTrackBookmark: (id: number) => Promise<void>;
   toggleLove: (id: number) => Promise<boolean>;
   setTrackRating: (id: number, rating: number) => Promise<Track | null>;
+  setTrackRatingScore: (id: number, score: number | null) => Promise<Track | null>;
   toggleAvoidAutoPlay: (id: number) => Promise<Track | null>;
   recordPlay: (id: number) => Promise<void>;
   recordSkip: (id: number, position?: number) => Promise<void>;

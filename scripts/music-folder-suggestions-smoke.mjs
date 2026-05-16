@@ -9,22 +9,22 @@ function key(path) {
 
 const existing = new Set([
   'k:/music',
-  'c:/users/tyler/music',
-  'c:/users/tyler/onedrive/music',
+  'c:/users/user/music',
+  'c:/users/user/onedrive/music',
 ].map(key));
 
 const suggestions = suggestMusicFolders({
-  homeDir: 'C:/Users/Tyler',
+  homeDir: 'C:/Users/User',
   env: {
     NEWAMP_REAL_LIBRARY_ROOT: 'K:/music',
-    OneDrive: 'C:/Users/Tyler/OneDrive',
+    OneDrive: 'C:/Users/User/OneDrive',
   },
   exists: (path) => existing.has(key(path)),
 });
 
 assert.deepEqual(
   suggestions.map((suggestion) => suggestion.path),
-  ['K:/music', 'C:/Users/Tyler/Music', 'C:/Users/Tyler/OneDrive/Music'],
+  ['K:/music', 'C:/Users/User/Music', 'C:/Users/User/OneDrive/Music'],
   'suggestions should prioritize the configured real library, then profile and OneDrive music folders',
 );
 assert.equal(new Set(suggestions.map((suggestion) => key(suggestion.path))).size, suggestions.length, 'suggestions should be unique');

@@ -550,8 +550,9 @@ export function PlaylistView(): JSX.Element {
           className={`pxbtn ${autoDjEnabled ? 'is-active' : ''}`}
           onClick={() => void setAutoDjEnabled(!autoDjEnabled)}
           disabled={busy}
+          title="Continuous mix keeps the queue topped up from the selected source"
         >
-          AUTO DJ
+          {autoDjEnabled ? 'MIX ON' : 'MIX OFF'}
         </button>
         <input
           value={autoDjTarget}
@@ -561,16 +562,16 @@ export function PlaylistView(): JSX.Element {
           max={80}
           className="bevel-in w-[58px] px-2 py-1 text-[11px] outline-none"
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          aria-label="Auto DJ target queue length"
-          title="Auto DJ target queue length"
+          aria-label="Continuous mix target queue length"
+          title="Continuous mix target queue length"
         />
         <select
           value={autoDjSmartRuleId ?? ''}
           onChange={(e) => void setAutoDjSmartRuleId(e.target.value ? Number(e.target.value) : null)}
           className="bevel-in max-w-[180px] px-2 py-1 text-[11px]"
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          aria-label="Auto DJ source"
-          title="Auto DJ source"
+          aria-label="Continuous mix source"
+          title="Continuous mix source"
         >
           <option value="">Harmonic Mix</option>
           {autoDjSourceMissing ? (

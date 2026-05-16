@@ -1,246 +1,174 @@
-# Newamp
+<div align="center">
 
-Newamp is a local-first Windows music player with Winamp DNA and a modern library brain. It is built for people who own music files, keep deep libraries, and want a player that feels fast, personal, and alive without turning their collection into a streaming-service sidebar.
+<img src="build/logo.png" alt="NewAmp" width="200">
 
-It scans your folders, builds a private local catalog, plays modern and legacy audio formats, renders Milkdrop-style visuals, rescues album art and metadata, manages custom playlists, supports smart stations, tracks listening history, and adds musician tools like lyrics, bookmarks, tempo practice, A/B loops, and guitar-tab play-along.
+# NewAmp
 
-## Current Status
+**A Winamp-inspired modern desktop music player for Windows.**
+**Your local library. Your rules. No streaming. No cloud. No telemetry.**
 
-Newamp is in internal Windows release-candidate shape. The app builds, packages, installs, opens associated audio files, launches as a portable EXE, and has been smoke-tested against a large local music library:
+[![Release](https://img.shields.io/github/v/release/evilander/newamp?style=flat-square&color=39ff14)](https://github.com/evilander/newamp/releases)
+[![License](https://img.shields.io/github/license/evilander/newamp?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows-blue?style=flat-square)](https://github.com/evilander/newamp/releases)
+[![Made with Electron](https://img.shields.io/badge/electron-42-9cf?style=flat-square)](https://www.electronjs.org/)
 
-- 62,949 tracks
-- 5,932 albums
-- 3,794 artists
-- 62,434 native playback candidates
-- 515 ffmpeg fallback candidates
+</div>
 
-Public `v1.0.0` is intentionally held until the remaining release blockers are closed: Authenticode signing, final human speaker/headphone listening proof, and final live-service/account proof.
+---
 
-## Highlights
+## What it is
 
-- **Local library scanner.** Recursively indexes real music folders into a local `sql.js` catalog with tag parsing through `music-metadata`, plus one-click music folder suggestions for common Windows and external-drive libraries.
-- **Broad playback support.** Handles MP3, FLAC, OGG/Opus, WAV, M4A/AAC/ALAC, WMA, AIFF, APE, WV, MPC, TTA, MKA, AC3, DTS, DSF, playlists, CUE sheets, and ffmpeg fallback formats, with broken-track auto-skip so one bad file does not stall a queue.
-- **Home command center.** Opens to a useful dashboard with continue playback, library stats, health signals, fresh imports, heavy rotation, loved tracks, harmonic mixes, and saved playlists.
-- **Quick Play command palette.** Ctrl+K/Ctrl+J searches tracks, albums, artists, playlists, views, and commands; Enter plays, Ctrl+Enter plays next, Shift+Enter queues, Ctrl+L loves, and Ctrl+R starts Smart Rule Radio.
-- **Custom playlists and queue.** Create named playlists, filter large playlist lists/tracks and the active queue, append tracks in bulk, add folders, pick or drop playlist artwork, export saved playlists or the live queue as portable copied folders, and launch playlists directly from Home.
-- **Smart rules and stations.** Build dynamic rules from genre, artist, album, year/era, rating, love state, play count, date added, BPM, key, and search filters; launch rule-driven radio stations; explicitly exclude individual tracks from Auto DJ and generated mixes without removing them from the library.
-- **Podcasts.** Add podcast feeds, keep episode progress, mark completions, and download episodes for local playback.
-- **Milkdrop visualizer.** Butterchurn-powered fullscreen Milkdrop plus lighter built-in analyzer modes.
-- **Skins.** Built-in skins, custom CSS-variable skins, import/export of `.newampskin.json`, and Winamp classic `.wsz` / `.zip` palette import.
-- **Album art rescue.** Search MusicBrainz release groups, preview Cover Art Archive covers, and cache selected artwork locally without rewriting source audio files.
-- **Metadata rescue.** Review MusicBrainz candidates, manually correct one track, bulk-tag selected tracks, or auto-number selections in Newamp's catalog without touching original files.
-- **Library health.** Surface missing tags/art/duration, legacy formats, recent imports, duplicate clusters, exact-looking duplicate rips, and one-click cleanup review playlists.
-- **Artist facts and images.** Wikipedia-powered artist spotlights with large images, short descriptions, summaries, source links, and local cache reuse.
-- **Lyrics.** LRCLIB lookup, local sidecar lyrics, and saved custom plain/LRC lyrics per track.
-- **Play Along.** Search Ultimate Guitar when reachable with noisy library-title cleanup, paste UG URLs or raw tabs, save local tab text, parse ChordPro, auto-discover sidecar tab files, transpose chords, autoscroll, and pop out a native tab window.
-- **Practice tools.** A/B loop panel, tempo trainer with pitch preservation, track bookmarks, ratings, sleep timer, stop-after-current, and smart shuffle.
-- **Last.fm.** Desktop auth, Now Playing updates, threshold scrobbling, retry outbox for temporary failures, saved app credentials, and a Settings proof action. Local/private recordings can play and stay in the library even when Last.fm has no matching catalog entry.
-- **Audio controls and conversion.** 10-band EQ, presets, ReplayGain playback plus selected-track and album loudness analysis, limiter, preamp, crossfade/gapless handoff, output-device selection, in-app left/right speaker test, current-track WAV export, and selected-track batch export to WAV, MP3, FLAC, or Opus.
-- **Native desktop behavior.** Tray residency, global media keys, open-with file association handling, Explorer reveal actions, persisted pin-on-top/compact-window controls, and OS media-session metadata/actions with album art.
-- **Winamp-style keyboard controls.** Z/X/C/V/B transport, arrow seek/volume nudges, L love, 0-5 ratings, fullscreen visualizer toggle, and input-safe shortcut handling.
-- **Reliability tools.** Corrupt settings/library recovery, support backup/restore, security smoke, installed association proof, and release gates.
+NewAmp is a desktop music player for people who actually own their music. It indexes a local folder of MP3 / FLAC / OGG / Opus / WAV / M4A / AAC / WMA / AIFF / APE / WV / MPC and gives you a player that feels like a piece of hardware — not a subscription dashboard.
 
-## Installable Builds
+It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on your machine, and never phones home.
 
-`npm run package` creates:
+## 30-second pitch
 
-- `release/Newamp Setup <version>.exe` - NSIS installer
-- `release/Newamp Portable <version>.exe` - no-install portable launcher
-- `release/win-unpacked/Newamp.exe` - unpacked app
-- `release/SHA256SUMS.txt` - SHA256 checksums for the installer, portable EXE, and unpacked EXE
+- **Four UI shells** — Retro (Bloomberg-density Winamp 2 homage), Modern (rounded, content-forward), Liquid Glass (translucent stacked panes with backdrop-filter), Concourse (operator-console split-cells)
+- **Four deck (compact-window) skins** — Classic Bento, Record Player (spinning vinyl, swinging tonearm), Jukebox (Wurlitzer arch, bubble tubes), Cassette Deck (twin spinning reels). Each declares its own native window size — no letterbox
+- **13 color skins** — Classic, Ops, Midnight, Neon, Amber, Oxide, Steel, Walnut, Jukebox, Terminal, Ice, Miami, Mono. Plus full Winamp 2.x `.wsz` skin import
+- **Themed logo** — A real per-pixel canvas tint of the brand badge follows whichever skin you pick. Switch from Mono to Neon and the medallion re-tints in real-time
+- **0–100 decimal track scoring** — Drag, scroll-wheel, keyboard-nudge, or double-click to type `88.3`. Stars stay in sync for legacy sorts and smart rules
+- **0–200% volume** with a red-zone past unity — VLC-style amp boost, full `0 dB / +6 dB` tick labels, runs after the master limiter so it amplifies without clipping
+- **Magazine-style Home** — greeting hero with blurred album backdrop, Today's Pick (high-rated track you haven't played in 6+ weeks, with a reason chip), Your Highest Rated rail, NewAmp News editorial card, Listening Stats This Week, plus the classic Harmonic / Taste / Loved / Heavy Rotation / Fresh Imports rails
+- **Bloomberg-density Now Playing** with a tabbed side panel (On Air / Studio / Lyrics), draggable spectrum-split, spectrum + VU + waveform overview, LRCLIB-synced lyrics, optional karaoke mode, custom-lyrics editor, tempo trainer, practice A/B loop, track bookmarks
+- **Auto DJ + smart playlists** — BPM/key-aware harmonic mixes, taste-learning from plays/loves/ratings/skips, smart rules with min-rating filters
+- **Audiophile chain** — WASAPI output, ReplayGain (per-track + per-album), software limiter, 10-band EQ, lossless WAV export of any track, output-device picker with test tone
+- **Last.fm** — full scrobbling + now-playing + offline outbox queue
+- **Local-first** — SQLite library, sql.js, no account, no telemetry, no required network
 
-`npm run release:bundle` also creates `release/Newamp-<version>-source.zip`, `release/RELEASE-MANIFEST.json`, and `release/Newamp-<version>-release-bundle.zip` for offline handoff or manual upload.
+## Install
 
-The current artifacts are unsigned. Windows may warn until a real code-signing certificate is added.
+Grab the latest from [**Releases**](https://github.com/evilander/newamp/releases):
 
-Signing dry-run:
+- **`Newamp Setup 1.1.0.exe`** — NSIS installer, registers file associations for 16 audio formats + 4 playlist formats
+- **`Newamp Portable 1.1.0.exe`** — single-file portable, no install, no registry writes
 
-```bash
-npm run release:sign -- --dry-run
-```
+All artifacts are listed with SHA256 hashes in `SHA256SUMS.txt`.
 
-Actual signing supports either a local PFX file (`NEWAMP_SIGN_CERT_PATH` or `CSC_LINK` plus password env) or an installed certificate (`NEWAMP_SIGN_SHA1` or `NEWAMP_SIGN_SUBJECT`). The JSON report redacts certificate passwords.
+> Windows SmartScreen may warn on first launch because NewAmp ships without a $200/yr code-signing certificate. Click "More info" → "Run anyway", or verify against the checksum file before launching.
 
-## Development
+## First run
 
-Requirements:
+1. Open NewAmp.
+2. Empty Library view will offer to scan your default Music folder, or pick any folder. NewAmp will also surface one-click music folder suggestions for places it finds in standard locations (`Music`, `OneDrive/Music`, etc.).
+3. Wait for the initial scan to finish (~10s per thousand tracks for tag + cover-art extraction).
+4. Drop a `.wsz` Winamp 2.x skin file onto the window to install it. Or open Settings → Shell · Layout to switch the chrome shell, or Settings → Skin for the color palette.
+5. Press **Ctrl+K** anywhere to open the command palette (search anything: tracks, albums, artists, commands).
 
-- Windows 11 for the primary desktop target
-- Node 22.12+; developed against Node 25.5
-- No Python or Visual Studio Build Tools required
+## Theming
 
-Install and run:
+NewAmp has two independent style axes:
 
-```bash
+| Axis      | What it controls                                  | Where to change it      |
+| --------- | ------------------------------------------------- | ----------------------- |
+| **Shell** | Layout, sidebar, transport, glass effects         | Settings → Shell        |
+| **Skin**  | Colors — accent, ink, panel, glow, scanlines, LCD | Settings → Skin         |
+| **Deck**  | Compact-window shape (record / jukebox / etc.)    | Picker in the deck view |
+
+Custom skins:
+
+- Drop a Winamp 2.x `.wsz` file onto the window — extracted via `winamp-skin-import.ts` (palette derived from the bitmap)
+- Or use the Skin Workshop inside Settings to author and export a `.newampskin.json`
+
+## Audio
+
+- Outputs through Web Audio's `AudioContext` to the selected WASAPI device. Sample rate / bit depth shown live in Settings → Audio.
+- ReplayGain: tracks parsed for `replaygain_track_gain` / `replaygain_album_gain` tags. Per-track or per-album mode selectable.
+- Software peak limiter sits in the chain by default and can be toggled with a single preamp dB control.
+- Volume slider goes to 200% with a red-zone past unity (`+6 dB`) — like VLC. The amp runs after the limiter so over-100% boost stays clean.
+- 10-band EQ with `eqEnabled` gate. Custom presets persist via settings.
+- Export any track as 16-bit WAV from the Now Playing header.
+
+## Build from source
+
+Requires Node 20+ and Windows.
+
+```powershell
+git clone https://github.com/evilander/newamp.git
+cd newamp
 npm install
-npm run dev
+npm run dev                  # development with hot reload
 ```
 
-Production build:
+Build a production installer:
 
-```bash
-npm run build
-npm start
-npm run package
+```powershell
+npm run package              # produces release/Newamp Setup *.exe + Newamp Portable *.exe + SHA256SUMS.txt
+npm run package:installer    # NSIS only
+npm run package:portable     # portable .exe only
 ```
 
-Local release gate:
+Run the full smoke suite (~80 smokes, several minutes):
 
-```bash
+```powershell
 npm run release:gate:local
-npm run release:gate:local -- --real-library
 ```
 
-The optional real-library gate uses `NEWAMP_REAL_LIBRARY_ROOT` or `K:/music`, then runs a second full-library pass that must take the incremental skip path.
+## Keyboard shortcuts
 
-Strict release gate:
-
-```bash
-npm run release:gate
-```
-
-Strict mode is expected to fail until signing, live-service/account proof, and manual speaker/headphone proof are complete.
-
-Publication readiness:
-
-```bash
-npm run release:completion-audit
-npm run release:completion-audit:local
-npm run release:publication-readiness
-npm run release:bundle
-npm run release:publish-github
-```
-
-The completion audit restates the objective as concrete deliverables, maps each one to source/artifact/test evidence, and optionally reruns the real `K:/music` proof. Readiness checks the README, package version, git/GitHub CLI state, signed artifacts, Last.fm live proof, and manual listening proof. `release:bundle` creates a self-verifying local bundle. `release:publish-github` dry-runs the exact git/GitHub command sequence and uploads the installer, portable EXE, checksums, source archive, release manifest, and bundle only with `-- --execute` after readiness passes.
-
-## Important Smoke Tests
-
-```bash
-npm run smoke:library
-npm run smoke:build-lock
-npm run smoke:transcode
-npm run smoke:incremental-scan
-npm run smoke:scanner-queue
-npm run smoke:music-folders
-npm run smoke:library-paging
-npm run smoke:artist
-npm run smoke:folders
-npm run smoke:search
-npm run smoke:smart
-npm run smoke:harmonic
-npm run smoke:auto-dj
-npm run smoke:metadata
-npm run smoke:health
-npm run smoke:podcast
-npm run smoke:podcast-progress
-npm run smoke:podcast-download
-npm run smoke:cue
-npm run smoke:full-library -- <music-root>
-npm run smoke:audio-proof
-npm run smoke:installer-artifact
-npm run smoke:installed-app
-npm run smoke:portable-app
-npm run smoke:packaged-open-files
-npm run smoke:library-watch
-npm run smoke:library-prune
-npm run smoke:support-backup
-npm run smoke:support-restore
-npm run smoke:signing-readiness
-npm run smoke:signing-workflow
-npm run smoke:release-checksums
-npm run smoke:release-bundle
-npm run smoke:publish-github
-npm run smoke:live-services
-npm run smoke:lastfm
-npm run smoke:tabs
-npm run smoke:playback-start
-npm run smoke:playback-controls
-npm run smoke:keyboard
-npm run smoke:media-session
-npm run smoke:smart-shuffle
-npm run smoke:queue-insert
-npm run smoke:queue-edit
-npm run smoke:rating
-npm run smoke:bookmarks
-npm run smoke:practice-loop
-npm run smoke:tempo
-npm run smoke:replaygain
-npm run smoke:session
-npm run smoke:chrome-state
-npm run smoke:audio-output
-npm run smoke:audio-limiter
-npm run smoke:ui-playback
-npm run smoke:ui-visualizer
-```
-
-After doing the real speaker/headphone pass against the current package, record the manual proof artifact with:
-
-```bash
-npm run release:start-listening-proof
-npm run release:record-listening-proof -- --confirm-playback --confirm-output-switching --confirm-crossfade --confirm-gapless
-```
-
-`release:start-listening-proof` launches the packaged app with the generated center/left/right speaker proof file and prints the checklist plus the record command.
-
-That writes `release/manual-listening-proof.json` with the current installer, portable EXE, unpacked EXE, checksums, source archive, release manifest, and release bundle hashes. The strict release gate rejects stale proof if the artifacts change.
-
-Check it later with:
-
-```bash
-npm run release:check-listening-proof
-```
-
-Record Last.fm live-account proof without saving API secrets into the repo:
-
-```bash
-set NEWAMP_LASTFM_API_KEY=<api-key>
-set NEWAMP_LASTFM_SHARED_SECRET=<shared-secret>
-npm run release:start-lastfm-proof
-# Open the printed authUrl in Last.fm, approve Newamp, then use the printed token:
-npm run release:record-lastfm-proof -- --token=<token> --confirm-live-write
-npm run release:check-lastfm-proof
-```
-
-That writes `release/lastfm-live-proof.json` with the current release artifact hashes, the authorized username, and hashed Last.fm token/session identifiers only. It does not store the shared secret or raw session key. The live proof uses a known public catalog track so Tyler's private recordings are not treated as Last.fm release blockers.
+| Shortcut          | Action                              |
+| ----------------- | ----------------------------------- |
+| Space             | Play / Pause                        |
+| ← / →             | Seek ±5 s                           |
+| ↑ / ↓             | Volume ±5% (clamps at 200%)         |
+| Ctrl+→ / Ctrl+←   | Next / Previous track               |
+| L                 | Love / unlove current track         |
+| 0–5               | Set star rating                     |
+| F                 | Fullscreen visualizer               |
+| Ctrl+K            | Command palette                     |
+| Ctrl+F            | Search                              |
+| Ctrl+M            | Toggle compact deck mode            |
+| Esc               | Exit fullscreen / close overlay     |
 
 ## Architecture
 
 ```text
 newamp/
-  electron/              Main-process TypeScript, IPC, protocols, library store
-  shared/                Shared app types and pure helpers
-  src/                   React renderer, audio engine, views, components, stores
-  scripts/               Smoke tests, release gates, packaging helpers
-  build/                 Generated app icons
-  release/               Generated installer, portable EXE, unpacked app
+  electron/        Main process: IPC, protocols, library store (sql.js), scanner,
+                   metadata, music-folder suggestions, ReplayGain, EQ, exports
+  shared/          Types, audio limiter math, keyboard shortcut tables
+  src/             Renderer (React + Zustand)
+    audio/         Web Audio chain: input → eq → replayGain → limiter → master → analyser
+    components/
+      decks/       Compact-window skin variants (record player, jukebox, cassette)
+      views/       Home, Library, Albums, Artists, NowPlaying, Playlist, Settings, ...
+    store/         Zustand state + engine bridge
+    styles/        index.css — 13 skins + 4 shells + magazine Home + Liquid Glass etc.
+    lib/           api wrapper, skins, format, mediaSession
+  scripts/         80+ smoke tests, packaging, release gate, security checks
+  build/           App icon, logo, NSIS bits
 ```
 
-Newamp uses Electron for the desktop shell, React for the renderer, Zustand for playback/UI state, `sql.js` for the local catalog, `music-metadata` for tags, `ffmpeg-static` for fallback playback/transcoding, and Butterchurn for Milkdrop visualizations.
+## Stack
 
-The renderer does not read arbitrary files directly. The main process exposes controlled IPC and custom app protocols for library scans, playback streams, artwork, lyrics, tabs, backups, and support actions.
+- [Electron](https://www.electronjs.org/) 42 + [Vite](https://vite.dev/) 6 + [React](https://react.dev/) 18 + [Zustand](https://zustand.docs.pmnd.rs/) 5
+- [sql.js](https://sql.js.org/) 1.12 (SQLite compiled to WASM, no native deps)
+- [music-metadata](https://github.com/Borewit/music-metadata) for tag + ReplayGain extraction
+- [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) for WAV export
+- [butterchurn](https://github.com/jberg/butterchurn) for MilkDrop-style fullscreen visualizer presets
+- [LRCLIB](https://lrclib.net/) for synced lyrics (with custom-lyrics override)
+- [Last.fm](https://www.last.fm/api) (optional, fully offline-queueable)
 
 ## Privacy
 
-Newamp is local-first:
+- No telemetry. No analytics. No crash reporters that phone home.
+- Library, settings, ratings, bookmarks, and history live in your OS user profile under `%APPDATA%/Newamp`.
+- Last.fm scrobbling is opt-in and uses your own API credentials; tokens are stored hashed in the release proof manifest.
+- Synced lyrics fetched from LRCLIB are anonymous lookups by artist + title + duration.
 
-- No telemetry
-- No cloud library sync
-- No required account
-- No streaming subscription
-- Last.fm is optional and user-configured; catalog misses for local/private recordings are not app failures
-- Network features are explicit: Last.fm, LRCLIB, MusicBrainz/Cover Art Archive, Radio Browser, podcast feeds, and Ultimate Guitar search when reachable
+## Contributing
 
-## Release Plan
+Pull requests welcome. Before opening one:
 
-The `v1.0.0` release should include:
-
-- Signed installer
-- Signed portable EXE
-- Clean strict `npm run release:gate`
-- Human listening proof for playback, output switching, crossfade, and gapless behavior
-- Live Last.fm account proof
-- Clear note that Ultimate Guitar access may be blocked by Cloudflare and that local/pasted/sidecar tabs remain supported
+1. `npm run smoke:rating && npm run smoke:home && npm run smoke:skin && npm run smoke:audio-limiter && npm run smoke:audio-output` — at minimum
+2. `npx tsc -p tsconfig.json --noEmit && npx tsc -p electron/tsconfig.json --noEmit`
+3. For UI work, run `npm run package` and try the produced installer end-to-end
 
 ## License
 
-MIT
+[MIT](LICENSE). The "NewAmp" name and the New Heidecker badge artwork are project-specific; everything else is yours to fork.
+
+## Acknowledgements
+
+NewAmp stands on the shoulders of Winamp (1997–2013), the open-source audio community, and decades of bedroom DJs who refused to give up local files.

@@ -90,6 +90,10 @@ export class AudioEngine {
     return this.ensureGraph().ctx;
   }
 
+  get context(): AudioContext {
+    return this.ensureGraph().ctx;
+  }
+
   get masterGain(): GainNode {
     return this.ensureGraph().masterGain;
   }
@@ -616,7 +620,10 @@ export class AudioEngine {
   }
 
   setVolume(v: number): void {
-    this.volume = Math.max(0, Math.min(1, v));
+    // Volume range extends to 2.0 (VLC-style boost). Past 1.0 amplifies post-limiter.
+    // The limiter still catches inter-sample peaks; values approaching 2.0 will be
+    // clipped, which is the expected behavior — we let users push and warn visually.
+    this.volume = Math.max(0, Math.min(2, v));
     if (!this.graph) return;
     this.graph.masterGain.gain.setTargetAtTime(this.volume, this.graph.ctx.currentTime, 0.01);
   }

@@ -317,13 +317,27 @@ export class Scanner {
       const existing = options.force
         ? new Map<string, TrackFileState>()
         : this.library.getTrackFileStates(discovered.map((f) => f.full));
+      const folderArtCache = new Map<string, Promise<boolean>>();
+      const hasFolderArt = (filePath: string): Promise<boolean> => {
+        const dir = dirname(filePath);
+        let cached = folderArtCache.get(dir);
+        if (!cached) {
+          cached = pickFolderArtFile(dir).then(Boolean);
+          folderArtCache.set(dir, cached);
+        }
+        return cached;
+      };
 
       for (let i = 0; i < discovered.length; i += BATCH) {
         if (this.cancelled) return;
         const slice = discovered.slice(i, i + BATCH);
         const changed = options.force
           ? slice
-          : slice.filter((f) => !sameFileState(f, existing.get(f.full)));
+          : await pMap(slice, CONC, async (f) =>
+              (await needsMetadataRefresh(f, existing.get(f.full), hasFolderArt)) ? f : null,
+            ).then((rows) =>
+              rows.filter((row): row is { full: string; size: number; mtime: number } => !!row),
+            );
         skipped += slice.length - changed.length;
 
         const incoming = await pMap(changed, CONC, async (f) => {
@@ -360,6 +374,18 @@ function sameFileState(
   existing: TrackFileState | undefined,
 ): boolean {
   return !!existing && existing.size === discovered.size && existing.mtime === Math.round(discovered.mtime);
+}
+
+async function needsMetadataRefresh(
+  discovered: { full: string; size: number; mtime: number },
+  existing: TrackFileState | undefined,
+  hasFolderArt: (filePath: string) => Promise<boolean>,
+): Promise<boolean> {
+  if (!existing) return true;
+  if (!sameFileState(discovered, existing)) return true;
+  if (existing.hasArt && !existing.artExists) return true;
+  if (!existing.hasArt) return hasFolderArt(discovered.full);
+  return false;
 }
 
 function errorMessage(err: unknown): string {

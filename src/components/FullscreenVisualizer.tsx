@@ -5,11 +5,11 @@ import { formatTime } from '../lib/format';
 import { api } from '../lib/api';
 
 const PRESETS = [
-  { id: 'butterchurn', label: 'Milkdrop' },
+  { id: 'spectrum', label: 'Spectrum' },
   { id: 'galaxy', label: 'Galaxy' },
   { id: 'aurora', label: 'Aurora' },
-  { id: 'spectrum', label: 'Spectrum' },
   { id: 'oscilloscope', label: 'Oscilloscope' },
+  { id: 'butterchurn', label: 'Milkdrop' },
 ] as const;
 
 export function FullscreenVisualizer(): JSX.Element {
@@ -26,7 +26,7 @@ export function FullscreenVisualizer(): JSX.Element {
   const setPreset = usePlayerStore((s) => s.setVizPreset);
 
   const [showChrome, setShowChrome] = useState(true);
-  const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'butterchurn';
+  const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'spectrum';
 
   const artUrl = useMemo(
     () => (current?.hasArt ? api.getArtUrl(current.id) : null),
@@ -56,6 +56,9 @@ export function FullscreenVisualizer(): JSX.Element {
               src={artUrl}
               alt=""
               className="pulse-soft h-[420px] w-[420px] object-cover"
+              onError={(event) => {
+                event.currentTarget.style.display = 'none';
+              }}
               style={{
                 borderRadius: '12px',
                 boxShadow: '0 0 80px var(--accent-glow), 0 0 200px var(--accent-glow)',

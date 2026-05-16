@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
+import type { AudioEngine } from '../audio/engine';
 
 export type VizMode = 'mini' | 'spectrum' | 'oscilloscope' | 'galaxy' | 'aurora' | 'butterchurn';
 
@@ -85,7 +86,13 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
           };
           raf = requestAnimationFrame(frame);
         } catch (err) {
-          if (!cancelled) paintButterchurnFallback(butterCanvas, err);
+          if (!cancelled) {
+            const frameFallback = () => {
+              paintButterchurnFallback(butterCanvas, err, engine);
+              raf = requestAnimationFrame(frameFallback);
+            };
+            raf = requestAnimationFrame(frameFallback);
+          }
         }
       }
 
@@ -321,9 +328,11 @@ function unwrapDefault<T>(module: unknown): T {
   return ((first as { default?: unknown }).default ?? first) as T;
 }
 
-function paintButterchurnFallback(canvas: HTMLCanvasElement, err: unknown): void {
+function paintButterchurnFallback(canvas: HTMLCanvasElement, err: unknown, engine: AudioEngine): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
+  const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+  engine.getFreqData(freq);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cssW = canvas.clientWidth || 640;
   const cssH = canvas.clientHeight || 360;
@@ -332,14 +341,27 @@ function paintButterchurnFallback(canvas: HTMLCanvasElement, err: unknown): void
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#050505';
   ctx.fillRect(0, 0, cssW, cssH);
-  ctx.strokeStyle = 'rgba(57, 255, 20, 0.55)';
+  const energy = avg(freq, 0, Math.min(96, freq.length)) / 255;
+  ctx.strokeStyle = `rgba(57, 255, 20, ${0.28 + energy * 0.52})`;
   ctx.lineWidth = 2;
   for (let i = 0; i < 18; i++) {
     const y = (cssH / 18) * i;
     ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.bezierCurveTo(cssW * 0.25, y + 40, cssW * 0.65, y - 40, cssW, y + 18);
+    const bend = 22 + energy * 70;
+    ctx.moveTo(0, y + Math.sin(Date.now() / 500 + i) * 4);
+    ctx.bezierCurveTo(cssW * 0.25, y + bend, cssW * 0.65, y - bend, cssW, y + 18);
     ctx.stroke();
+  }
+  const bars = 42;
+  const step = Math.max(1, Math.floor(freq.length / 2 / bars));
+  const gap = 2;
+  const bw = (cssW - gap * (bars - 1)) / bars;
+  for (let i = 0; i < bars; i++) {
+    let sum = 0;
+    for (let j = 0; j < step; j++) sum += freq[i * step + j] ?? 0;
+    const v = sum / step / 255;
+    ctx.fillStyle = `rgba(57,255,20,${0.18 + v * 0.65})`;
+    ctx.fillRect(i * (bw + gap), cssH - Math.max(2, v * cssH * 0.42), bw, Math.max(2, v * cssH * 0.42));
   }
   ctx.fillStyle = '#39ff14';
   ctx.font = '600 16px Inter, system-ui, sans-serif';

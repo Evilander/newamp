@@ -21,10 +21,12 @@ import { ScanBanner } from './components/ScanBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { CompactPlayer } from './components/CompactPlayer';
 import { QuickPlayPalette } from './components/QuickPlayPalette';
+import { FirstRunHints } from './components/FirstRunHints';
 import { usePlayerStore } from './store/usePlayerStore';
 import { api, winctl } from './lib/api';
 import { syncMediaSession } from './lib/mediaSession';
 import { resolvePlayerShortcut, type PlayerShortcutCommand } from '@shared/keyboard-shortcuts';
+import { applyShell, loadInitialShell } from './components/ShellPicker';
 
 export default function App(): JSX.Element {
   const init = usePlayerStore((s) => s.init);
@@ -105,6 +107,12 @@ export default function App(): JSX.Element {
     }
     window.setTimeout(() => setDropMessage(null), 3600);
   }
+
+  useEffect(() => {
+    // Apply the persisted shell on mount so CSS data-shell attribute is set
+    // before the first paint. Subsequent changes happen via ShellPicker.
+    applyShell(loadInitialShell());
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -246,6 +254,7 @@ export default function App(): JSX.Element {
       {fullscreen && <FullscreenVisualizer />}
       {(dropActive || dropMessage) && <AppDropOverlay message={dropMessage} active={dropActive} />}
       <QuickPlayPalette />
+      <FirstRunHints />
     </div>
   );
 }
@@ -278,9 +287,9 @@ function runPlayerShortcut(command: PlayerShortcutCommand, store: PlayerStoreSna
   } else if (command === 'seek-forward') {
     store.seek(clampShortcutNumber(store.currentTime + 5, 0, store.duration || store.currentTime + 5));
   } else if (command === 'volume-up') {
-    void store.setVolume(clampShortcutNumber(store.volume + 0.05, 0, 1));
+    void store.setVolume(clampShortcutNumber(store.volume + 0.05, 0, 2));
   } else if (command === 'volume-down') {
-    void store.setVolume(clampShortcutNumber(store.volume - 0.05, 0, 1));
+    void store.setVolume(clampShortcutNumber(store.volume - 0.05, 0, 2));
   } else if (command === 'toggle-love') {
     if (store.current?.id && store.current.id > 0) void store.toggleLove(store.current.id);
   } else if (command.startsWith('rate-')) {

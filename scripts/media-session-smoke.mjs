@@ -35,12 +35,12 @@ const track = {
   path: 'K:/music/aphex-twin/windowlicker.mp3',
 };
 
-const metadata = buildMediaSessionMetadata(track, 'newart://7/art');
+const metadata = buildMediaSessionMetadata(track, 'newart://track/7/art');
 assert.equal(metadata.title, 'Windowlicker');
 assert.equal(metadata.artist, 'Aphex Twin');
 assert.equal(metadata.album, 'Windowlicker');
 assert.deepEqual(metadata.artwork, [
-  { src: 'newart://7/art', sizes: '512x512', type: 'image/jpeg' },
+  { src: 'newart://track/7/art', sizes: '512x512', type: 'image/jpeg' },
 ]);
 
 assert.equal(mediaSessionPlaybackState(true, track), 'playing');

@@ -3,6 +3,7 @@ import { usePlayerStore } from '../store/usePlayerStore';
 import { Visualizer } from './Visualizer';
 import { formatTime, playbackCodecLabel } from '../lib/format';
 import { api } from '../lib/api';
+import { VolumeSlider } from './VolumeSlider';
 
 export function Transport(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
@@ -127,7 +128,7 @@ export function Transport(): JSX.Element {
           >
             {mode === 'repeat-one' ? '↺1' : '↺'}
           </button>
-          <VolumeKnob value={volume} onChange={(v) => void setVolume(v)} />
+          <VolumeSlider value={volume} onChange={(v) => void setVolume(v)} width={120} />
         </div>
       </div>
     </footer>
@@ -165,21 +166,3 @@ function ScrubBar({
   );
 }
 
-function VolumeKnob({ value, onChange }: { value: number; onChange: (v: number) => void }): JSX.Element {
-  return (
-    <div className="flex items-center gap-1">
-      <span className="text-[10px] uppercase tracking-widest" style={{ color: 'var(--muted)' }}>
-        Vol
-      </span>
-      <input
-        type="range"
-        className="nslider w-[88px]"
-        min={0}
-        max={1}
-        step={0.01}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-      />
-    </div>
-  );
-}

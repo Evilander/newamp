@@ -97,7 +97,7 @@ const checklist = [
     fileContains('scripts/playlist-smoke.mjs', /CREATE EMPTY PLAYLIST/),
     fileContains('README.md', /pick or drop playlist artwork/i),
   ]),
-  item('large-local-library-proof', 'The player handles Tyler-scale local music libraries from K:/music.', [
+  item('large-local-library-proof', 'The player handles large local music libraries (tens of thousands of tracks).', [
     realLibraryProof,
   ]),
   item('audio-player-depth', 'The app has mature player behavior beyond basic play/pause.', [

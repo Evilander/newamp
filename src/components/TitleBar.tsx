@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { api, winctl } from '../lib/api';
+import { HeideckerLogo } from './HeideckerLogo';
 
 export function TitleBar(): JSX.Element {
   const [maximized, setMaximized] = useState(false);
@@ -18,7 +19,7 @@ export function TitleBar(): JSX.Element {
       style={{ background: 'var(--titlebar)' }}
     >
       <div className="titlebar-nodrag flex items-center gap-2">
-        <Logo />
+        <HeideckerLogo size={22} title="NewAmp" />
         <span
           className="lcd-text font-bold tracking-[0.3em]"
           style={{ fontFamily: 'var(--font-display)', fontSize: 11 }}
@@ -96,18 +97,3 @@ export function TitleBar(): JSX.Element {
   );
 }
 
-function Logo(): JSX.Element {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <rect x="1.5" y="1.5" width="17" height="17" rx="1" stroke="var(--accent)" strokeWidth="1.4" />
-      <path
-        d="M4 14 V8 L7 12 V8 M10 14 V8 H13 a2 2 0 010 4 H10 M16 8 v6"
-        stroke="var(--accent)"
-        strokeWidth="1.4"
-        strokeLinecap="square"
-        fill="none"
-      />
-      <circle cx="16" cy="14" r="0.8" fill="var(--accent)" />
-    </svg>
-  );
-}

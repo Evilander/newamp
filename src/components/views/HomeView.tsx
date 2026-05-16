@@ -1,32 +1,56 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { LibraryHealth, ListeningHistoryItem, SavedPlaylist, SmartPlaylistRule, SmartPlaylistSuggestion, Track } from '@shared/types';
+import type { LibraryHealth, ListeningHistoryItem, ListeningInsights, SavedPlaylist, SmartPlaylistRule, SmartPlaylistSuggestion, Track } from '@shared/types';
 import { api } from '../../lib/api';
 import { formatDuration, formatNumber, formatTime } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
+import { HeideckerLogo } from '../HeideckerLogo';
 
 interface HomeData {
   stats: { tracks: number; albums: number; artists: number; duration: number };
   health: LibraryHealth | null;
+  insights: ListeningInsights;
   fresh: Track[];
   loved: Track[];
   history: ListeningHistoryItem[];
   heavy: Track[];
   harmonic: Track[];
   taste: Track[];
+  rated: Track[];
   playlists: SavedPlaylist[];
   smartRules: SmartPlaylistRule[];
   suggestedStations: SmartPlaylistSuggestion[];
 }
 
+const EMPTY_INSIGHTS: ListeningInsights = {
+  generatedAt: 0,
+  total: {
+    plays: 0,
+    duration: 0,
+    skips: 0,
+    uniqueTracks: 0,
+    uniqueSkippedTracks: 0,
+    firstPlayedAt: null,
+    lastPlayedAt: null,
+    lastSkippedAt: null,
+  },
+  today: { plays: 0, duration: 0, skips: 0 },
+  week: { plays: 0, duration: 0, skips: 0 },
+  topArtists: [],
+  topAlbums: [],
+  recentDays: [],
+};
+
 const EMPTY_DATA: HomeData = {
   stats: { tracks: 0, albums: 0, artists: 0, duration: 0 },
   health: null,
+  insights: EMPTY_INSIGHTS,
   fresh: [],
   loved: [],
   history: [],
   heavy: [],
   harmonic: [],
   taste: [],
+  rated: [],
   playlists: [],
   smartRules: [],
   suggestedStations: [],
@@ -82,20 +106,27 @@ export function HomeView(): JSX.Element {
       ? data.smartRules.find((rule) => rule.id === autoDjSmartRuleId)?.name ?? `Smart Rule #${autoDjSmartRuleId}`
       : 'Harmonic Mix'
     : null;
+  const todayPick = useMemo(
+    () => pickToday(data.rated, recentTracks, current?.id ?? null),
+    [current?.id, data.rated, recentTracks],
+  );
+  const newestFreshDate = data.fresh[0]?.mtime ? formatYmd(data.fresh[0].mtime) : null;
 
   async function refreshHome(): Promise<void> {
     setLoading(true);
     setStatus(null);
     try {
-      const [stats, health, fresh, loved, history, heavy, harmonic, taste, playlists, smartRules, suggestedStations] = await Promise.all([
+      const [stats, health, insights, fresh, loved, history, heavy, harmonic, taste, rated, playlists, smartRules, suggestedStations] = await Promise.all([
         api.getStats(),
         api.getLibraryHealth(),
+        api.getListeningInsights({}),
         api.getTracks({ sort: 'added', limit: HOME_LIMIT, offset: 0 }),
         api.getTracks({ sort: 'loved', limit: HOME_LIMIT, offset: 0 }),
         api.getListeningHistory({ limit: 30, offset: 0 }),
         api.getTracks({ sort: 'plays', limit: HOME_LIMIT, offset: 0 }),
         api.buildHarmonicMix({ seedTrackId: current?.id ?? null, count: HOME_LIMIT }),
         api.buildTasteMix({ seedTrackId: current?.id ?? null, count: HOME_LIMIT }),
+        api.getTracks({ sort: 'rating', limit: HOME_LIMIT, offset: 0 }),
         api.getPlaylists(),
         api.getSmartPlaylistRules(),
         api.getSuggestedSmartPlaylistRules(),
@@ -103,12 +134,14 @@ export function HomeView(): JSX.Element {
       setData({
         stats,
         health,
+        insights,
         fresh,
         loved,
         history,
         heavy,
         harmonic,
         taste,
+        rated,
         playlists: playlists.slice(0, 8),
         smartRules: smartRules.slice(0, 6),
         suggestedStations: suggestedStations.slice(0, 6),
@@ -212,111 +245,130 @@ export function HomeView(): JSX.Element {
             </div>
           </div>
         ) : (
-          <div className="grid gap-3 xl:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.7fr)]">
-            <div className="flex min-w-0 flex-col gap-3">
-              <NowPanel
-                current={current}
-                currentTime={currentTime}
-                duration={duration}
-                isPlaying={isPlaying}
-                queueLength={queue.length}
-                queueRemaining={Math.max(0, queue.length - Math.max(index, 0) - 1)}
-                stationName={activeStationName}
-                stationTarget={autoDjTarget}
-                onTogglePlay={togglePlay}
-                onNowPlaying={() => setView('now-playing')}
-                onQueue={() => setView('playlist')}
-                onStopStation={() => void stopStation()}
-              />
+          <div className="home-magazine flex flex-col gap-3">
+            <HomeHero
+              current={current}
+              currentTime={currentTime}
+              duration={duration}
+              isPlaying={isPlaying}
+              queueLength={queue.length}
+              queueRemaining={Math.max(0, queue.length - Math.max(index, 0) - 1)}
+              stationName={activeStationName}
+              stationTarget={autoDjTarget}
+              stats={data.stats}
+              todayPick={todayPick}
+              onTogglePlay={togglePlay}
+              onNowPlaying={() => setView('now-playing')}
+              onQueue={() => setView('playlist')}
+              onStopStation={() => void stopStation()}
+              onPlayPick={(track) => void playQueue([track], 0)}
+            />
 
-              <HomeRail
-                title={current ? 'Harmonic From Now' : 'Harmonic Library Mix'}
-                subtitle={current ? `Seeded by ${current.artist} - ${current.title}` : 'BPM/key-aware sequence from the catalog'}
-                tracks={data.harmonic}
-                actionLabel="SAVE MIX"
-                onPlay={(start) => void playQueue(data.harmonic, start)}
-                onNext={() => queueTracksNext(data.harmonic)}
-                onQueue={() => addTracksToQueue(data.harmonic)}
-                onAction={() => void saveSet('Home Harmonic Mix', data.harmonic)}
+            <div className="grid gap-3 lg:grid-cols-[1.4fr_0.78fr_0.72fr]">
+              <RatedHighlightRail
+                tracks={data.rated}
+                onPlay={(start) => void playQueue(data.rated, start)}
+                onNext={() => queueTracksNext(data.rated)}
+                onQueue={() => addTracksToQueue(data.rated)}
+                onAction={() => void saveSet('Top Rated', data.rated)}
               />
-
-              <HomeRail
-                title="Taste Match"
-                subtitle="Learns from plays, loves, ratings, and skips"
-                tracks={data.taste}
-                actionLabel="SAVE TASTE"
-                onPlay={(start) => void playQueue(data.taste, start)}
-                onNext={() => queueTracksNext(data.taste)}
-                onQueue={() => addTracksToQueue(data.taste)}
-                onAction={() => void saveSet('Taste Match', data.taste)}
-              />
-
-              <HomeRail
-                title="Fresh Imports"
-                subtitle="Newest files Newamp has seen on disk"
-                tracks={data.fresh}
-                actionLabel="SAVE FRESH"
-                onPlay={(start) => void playQueue(data.fresh, start)}
-                onNext={() => queueTracksNext(data.fresh)}
-                onQueue={() => addTracksToQueue(data.fresh)}
-                onAction={() => void saveSet('Fresh Imports', data.fresh)}
-              />
-
-              <div className="grid gap-3 lg:grid-cols-2">
-                <HomeRail
-                  title="Recently Played"
-                  subtitle={recentTracks.length ? 'Pick up a listening thread' : 'Appears after playback history exists'}
-                  tracks={recentTracks}
-                  compact
-                  onPlay={(start) => void playQueue(recentTracks, start)}
-                  onNext={() => queueTracksNext(recentTracks)}
-                  onQueue={() => addTracksToQueue(recentTracks)}
-                />
-                <HomeRail
-                  title="Heavy Rotation"
-                  subtitle={data.heavy.length ? 'Tracks with the most Newamp plays' : 'Appears after Newamp records plays'}
-                  tracks={data.heavy}
-                  compact
-                  onPlay={(start) => void playQueue(data.heavy, start)}
-                  onNext={() => queueTracksNext(data.heavy)}
-                  onQueue={() => addTracksToQueue(data.heavy)}
-                />
-              </div>
+              <NewsCard fresh={data.fresh} loved={data.loved} top={data.rated[0] ?? null} />
+              <ListeningStatsPanel insights={data.insights} history={data.history} />
             </div>
 
-            <div className="flex min-w-0 flex-col gap-3">
-              <HealthPanel
-                missingTotal={missingTotal}
-                duplicateCount={data.health?.duplicateGroups.length ?? 0}
-                legacyCount={data.health?.legacyFormats.reduce((sum, item) => sum + item.count, 0) ?? 0}
-                onOpenLibrary={() => setView('library')}
-              />
+            <div className="grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.7fr)]">
+              <div className="flex min-w-0 flex-col gap-3">
+                <HomeRail
+                  title={current ? 'Harmonic From Now' : 'Harmonic Library Mix'}
+                  subtitle={current ? `Seeded by ${current.artist} — ${current.title}` : 'BPM/key-aware sequence from the catalog'}
+                  tracks={data.harmonic}
+                  actionLabel="SAVE MIX"
+                  onPlay={(start) => void playQueue(data.harmonic, start)}
+                  onNext={() => queueTracksNext(data.harmonic)}
+                  onQueue={() => addTracksToQueue(data.harmonic)}
+                  onAction={() => void saveSet('Home Harmonic Mix', data.harmonic)}
+                />
 
-              <HomeRail
-                title="Loved Signal"
-                subtitle="Your strongest manual taste signal"
-                tracks={data.loved}
-                compact
-                actionLabel="SAVE LOVED"
-                onPlay={(start) => void playQueue(data.loved, start)}
-                onNext={() => queueTracksNext(data.loved)}
-                onQueue={() => addTracksToQueue(data.loved)}
-                onAction={() => void saveSet('Loved Signal', data.loved)}
-              />
+                <HomeRail
+                  title="Taste Match"
+                  subtitle="Learns from plays, loves, ratings, and skips"
+                  tracks={data.taste}
+                  actionLabel="SAVE TASTE"
+                  onPlay={(start) => void playQueue(data.taste, start)}
+                  onNext={() => queueTracksNext(data.taste)}
+                  onQueue={() => addTracksToQueue(data.taste)}
+                  onAction={() => void saveSet('Taste Match', data.taste)}
+                />
 
-              <SuggestedStationsPanel
-                suggestions={data.suggestedStations}
-                onRadio={(suggestion) => void startSuggestedStation(suggestion)}
-              />
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <HomeRail
+                    title="Fresh Imports"
+                    subtitle={newestFreshDate ? `Newest: ${newestFreshDate}` : 'Newest files NewAmp has seen on disk'}
+                    tracks={data.fresh}
+                    compact
+                    actionLabel="SAVE FRESH"
+                    onPlay={(start) => void playQueue(data.fresh, start)}
+                    onNext={() => queueTracksNext(data.fresh)}
+                    onQueue={() => addTracksToQueue(data.fresh)}
+                    onAction={() => void saveSet('Fresh Imports', data.fresh)}
+                  />
+                  <HomeRail
+                    title="Heavy Rotation"
+                    subtitle={data.heavy.length ? 'Tracks with the most NewAmp plays' : 'Appears after NewAmp records plays'}
+                    tracks={data.heavy}
+                    compact
+                    onPlay={(start) => void playQueue(data.heavy, start)}
+                    onNext={() => queueTracksNext(data.heavy)}
+                    onQueue={() => addTracksToQueue(data.heavy)}
+                  />
+                </div>
 
-              <PlaylistPanel
-                playlists={data.playlists}
-                smartRules={data.smartRules}
-                onPlay={(playlist) => void playSavedPlaylist(playlist)}
-                onPlaySmartRule={(rule) => void playSmartRule(rule)}
-                onSmartRuleRadio={(rule) => void startSmartRuleRadio(rule)}
-                onOpen={() => setView('playlist')}
-              />
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <HomeRail
+                    title="Recently Played"
+                    subtitle={recentTracks.length ? 'Pick up a listening thread' : 'Appears after playback history exists'}
+                    tracks={recentTracks}
+                    compact
+                    onPlay={(start) => void playQueue(recentTracks, start)}
+                    onNext={() => queueTracksNext(recentTracks)}
+                    onQueue={() => addTracksToQueue(recentTracks)}
+                  />
+                  <HomeRail
+                    title="Loved Signal"
+                    subtitle="Your strongest manual taste signal"
+                    tracks={data.loved}
+                    compact
+                    actionLabel="SAVE LOVED"
+                    onPlay={(start) => void playQueue(data.loved, start)}
+                    onNext={() => queueTracksNext(data.loved)}
+                    onQueue={() => addTracksToQueue(data.loved)}
+                    onAction={() => void saveSet('Loved Signal', data.loved)}
+                  />
+                </div>
+              </div>
+
+              <div className="flex min-w-0 flex-col gap-3">
+                <HealthPanel
+                  missingTotal={missingTotal}
+                  duplicateCount={data.health?.duplicateGroups.length ?? 0}
+                  legacyCount={data.health?.legacyFormats.reduce((sum, item) => sum + item.count, 0) ?? 0}
+                  onOpenLibrary={() => setView('library')}
+                />
+
+                <SuggestedStationsPanel
+                  suggestions={data.suggestedStations}
+                  onRadio={(suggestion) => void startSuggestedStation(suggestion)}
+                />
+
+                <PlaylistPanel
+                  playlists={data.playlists}
+                  smartRules={data.smartRules}
+                  onPlay={(playlist) => void playSavedPlaylist(playlist)}
+                  onPlaySmartRule={(rule) => void playSmartRule(rule)}
+                  onSmartRuleRadio={(rule) => void startSmartRuleRadio(rule)}
+                  onOpen={() => setView('playlist')}
+                />
+              </div>
             </div>
           </div>
         )}
@@ -675,6 +727,326 @@ function PlaylistPanel({
           Saved mixes, smart rules, and custom playlists appear here.
         </div>
       )}
+    </section>
+  );
+}
+
+function HomeHero({
+  current,
+  currentTime,
+  duration,
+  isPlaying,
+  queueLength,
+  queueRemaining,
+  stationName,
+  stationTarget,
+  stats,
+  todayPick,
+  onTogglePlay,
+  onNowPlaying,
+  onQueue,
+  onStopStation,
+  onPlayPick,
+}: {
+  current: Track | null;
+  currentTime: number;
+  duration: number;
+  isPlaying: boolean;
+  queueLength: number;
+  queueRemaining: number;
+  stationName: string | null;
+  stationTarget: number;
+  stats: { tracks: number; albums: number; artists: number; duration: number };
+  todayPick: TodayPick | null;
+  onTogglePlay: () => void;
+  onNowPlaying: () => void;
+  onQueue: () => void;
+  onStopStation: () => void;
+  onPlayPick: (track: Track) => void;
+}): JSX.Element {
+  const progress = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
+  const heroArt = current?.hasArt ? api.getArtUrl(current.id) : null;
+  const topRatedSeed = todayPick?.track ?? null;
+  const pickArt = topRatedSeed?.hasArt ? api.getArtUrl(topRatedSeed.id) : null;
+  const greeting = useMemo(() => {
+    const hour = new Date().getHours();
+    if (hour < 5) return 'Late shift';
+    if (hour < 12) return 'Good morning';
+    if (hour < 17) return 'Afternoon set';
+    if (hour < 21) return 'Evening rotation';
+    return 'After hours';
+  }, []);
+  return (
+    <section className="home-hero" data-cell="HOME-01">
+      {heroArt ? (
+        <div
+          className="home-hero-bg"
+          style={{ backgroundImage: `linear-gradient(180deg, rgba(0,0,0,0.55), rgba(0,0,0,0.92)), url(${JSON.stringify(heroArt)})` }}
+          aria-hidden="true"
+        />
+      ) : (
+        <div className="home-hero-bg home-hero-bg-empty" aria-hidden="true" />
+      )}
+      <div className="home-hero-content">
+        <div className="home-hero-meta">
+          <HeideckerLogo size={38} withGlow={false} />
+          <div className="home-hero-meta-text">
+            <span className="home-hero-greet">{greeting}</span>
+            <span className="home-hero-sub">
+              {formatNumber(stats.tracks)} tracks · {formatNumber(stats.albums)} albums · {formatNumber(stats.artists)} artists
+            </span>
+          </div>
+          {stationName ? (
+            <div className="home-hero-station">
+              <span className="home-hero-station-tag">ON AIR</span>
+              <span className="home-hero-station-name">{stationName}</span>
+              <button className="pxbtn" onClick={onStopStation}>STOP</button>
+              <span className="home-hero-station-target">target {stationTarget}</span>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="home-hero-now">
+          <div className="home-hero-art">
+            {heroArt ? (
+              <img src={heroArt} alt={current?.album ?? ''} draggable={false} />
+            ) : (
+              <span className="home-hero-art-empty">{current ? '♪' : 'NEW'}</span>
+            )}
+          </div>
+          <div className="home-hero-track">
+            <span className="home-hero-eyebrow">{current ? 'Continue listening' : 'Nothing loaded'}</span>
+            <h1 className="home-hero-title">
+              {current ? current.title : 'NewAmp · ready when you are'}
+            </h1>
+            <p className="home-hero-credits">
+              {current ? `${current.artist} / ${current.album || 'Unknown album'}` : 'Drop a folder, pick a playlist, or pop into the Library.'}
+            </p>
+            <div className="home-hero-progress">
+              <div className="home-hero-progress-fill" style={{ width: `${progress}%` }} />
+            </div>
+            <div className="home-hero-progress-meta">
+              <span>{formatTime(currentTime)}</span>
+              <span className="home-hero-progress-stat">
+                {queueLength ? `${queueRemaining} left in queue` : 'no queue · build one from a rail below'}
+              </span>
+              <span>{formatTime(duration)}</span>
+            </div>
+            <div className="home-hero-actions">
+              <button className="pxbtn is-active" onClick={onTogglePlay} disabled={!current}>
+                {isPlaying ? 'PAUSE' : 'PLAY'}
+              </button>
+              <button className="pxbtn" onClick={onNowPlaying} disabled={!current}>
+                NOW PLAYING
+              </button>
+              <button className="pxbtn" onClick={onQueue} disabled={!queueLength}>
+                QUEUE
+              </button>
+            </div>
+          </div>
+
+          {topRatedSeed ? (
+            <button
+              type="button"
+              className="home-hero-pick"
+              onClick={() => onPlayPick(topRatedSeed)}
+              title={`Today's pick: ${topRatedSeed.artist} — ${topRatedSeed.title}`}
+            >
+              <span className="home-hero-pick-tag">Today&rsquo;s Pick</span>
+              <div className="home-hero-pick-art">
+                {pickArt ? (
+                  <img src={pickArt} alt={topRatedSeed.album ?? ''} draggable={false} />
+                ) : (
+                  <span>♪</span>
+                )}
+              </div>
+              <span className="home-hero-pick-title">{topRatedSeed.title}</span>
+              <span className="home-hero-pick-artist">{topRatedSeed.artist}</span>
+              <span className="home-hero-pick-score">
+                {topRatedSeed.ratingScore != null
+                  ? `${topRatedSeed.ratingScore.toFixed(1)} / 100`
+                  : `${topRatedSeed.rating}/5`}
+              </span>
+              <span className="home-hero-pick-reason">Why this pick? {todayPick?.reason}</span>
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function RatedHighlightRail({
+  tracks,
+  onPlay,
+  onNext,
+  onQueue,
+  onAction,
+}: {
+  tracks: Track[];
+  onPlay: (startIndex: number) => void;
+  onNext: () => void;
+  onQueue: () => void;
+  onAction: () => void;
+}): JSX.Element {
+  const visible = tracks.slice(0, 8);
+  return (
+    <section className="bevel-out home-rated p-3" data-cell="RATE-02" style={{ background: 'var(--panel)' }}>
+      <div className="mb-3 flex items-baseline gap-2">
+        <div className="text-[11px] font-bold uppercase tracking-[0.16em]" style={{ color: 'var(--accent)' }}>
+          Your Highest Rated
+        </div>
+        <div className="text-[10px]" style={{ color: 'var(--ink-2)' }}>
+          Sorted by score · top-of-library
+        </div>
+        <div className="ml-auto flex gap-1">
+          <button className="pxbtn is-active" onClick={() => onPlay(0)} disabled={!visible.length}>PLAY</button>
+          <button className="pxbtn" onClick={onNext} disabled={!visible.length}>NEXT</button>
+          <button className="pxbtn" onClick={onQueue} disabled={!visible.length}>QUEUE</button>
+          <button className="pxbtn" onClick={onAction} disabled={!visible.length}>SAVE</button>
+        </div>
+      </div>
+      {visible.length ? (
+        <div className="home-rated-grid">
+          {visible.map((track, idx) => {
+            const art = track.hasArt ? api.getArtUrl(track.id) : null;
+            const score = track.ratingScore != null ? track.ratingScore.toFixed(1) : `${track.rating}/5`;
+            const scoreStrong = (track.ratingScore ?? track.rating * 20) >= 85;
+            return (
+              <button
+                key={track.id}
+                type="button"
+                className="home-rated-card"
+                onClick={() => onPlay(idx)}
+                title={`Play ${track.artist} — ${track.title}`}
+              >
+                <div className="home-rated-card-art">
+                  {art ? <img src={art} alt={track.album ?? ''} draggable={false} loading="lazy" decoding="async" /> : <span>♪</span>}
+                  <span className={`home-rated-card-score ${scoreStrong ? 'is-strong' : ''}`}>{score}</span>
+                </div>
+                <div className="home-rated-card-meta">
+                  <span className="home-rated-card-title" title={track.title}>{track.title}</span>
+                  <span className="home-rated-card-artist" title={track.artist}>{track.artist}</span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
+          Rate tracks 0–100 and your top picks land here. Cmd/Ctrl-click the score in Now Playing for fine adjustment.
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NewsCard({ fresh, loved, top }: { fresh: Track[]; loved: Track[]; top: Track | null }): JSX.Element {
+  const newestImport = fresh[0] ?? null;
+  const featured = top ?? loved[0] ?? newestImport ?? null;
+  const headline = featured
+    ? `${featured.artist} — “${featured.title}”`
+    : 'NewAmp · field report from the desk';
+  const blurb = featured
+    ? `New Heidecker writes: a strong entry from ${featured.artist}. ${featured.year ? `Vintage ${featured.year}. ` : ''}${featured.bpm ? `Sits at ${featured.bpm.toFixed(0)} BPM, ` : ''}${featured.genre ? `${featured.genre} territory, ` : ''}and it would slot nicely between bagels.`
+    : 'When the library has tracks, this column comes alive with reviews, comparisons, and bagel ratings from New Heidecker.';
+  return (
+    <section className="bevel-out home-news p-3" data-cell="NEWS-03" style={{ background: 'var(--panel)' }}>
+      <div className="mb-2 flex items-center gap-2">
+        <div className="text-[11px] font-bold uppercase tracking-[0.16em]" style={{ color: 'var(--accent)' }}>
+          NewAmp News
+        </div>
+        <span className="text-[10px]" style={{ color: 'var(--ink-2)' }}>
+          Field report · {new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+        </span>
+      </div>
+      <div className="home-news-headline" title={headline}>{headline}</div>
+      <p className="home-news-body">{blurb}</p>
+      {newestImport ? (
+        <div className="home-news-foot">
+          <span className="home-news-foot-eyebrow">Most recent import</span>
+          <span className="home-news-foot-title">{newestImport.artist} — {newestImport.title}</span>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+interface TodayPick {
+  track: Track;
+  reason: string;
+}
+
+function pickToday(rated: Track[], recent: Track[], currentId: number | null): TodayPick | null {
+  const now = Date.now();
+  const thirtyDays = 30 * 24 * 60 * 60 * 1000;
+  const recentIds = new Set(recent.map((track) => track.id));
+  const scored = rated.filter((track) => (track.ratingScore ?? track.rating * 20) >= 80);
+  const qualified = scored.find((track) =>
+    track.id !== currentId &&
+    (track.lastPlayed == null || now - track.lastPlayed > thirtyDays),
+  );
+  const fallback = rated[0] ?? null;
+  const track = qualified ?? fallback;
+  if (!track) return null;
+  const scoreLabel = 'Top-rated';
+  if (track.lastPlayed == null) return { track, reason: `${scoreLabel} · never played` };
+  const weeks = Math.max(1, Math.round((now - track.lastPlayed) / (7 * 24 * 60 * 60 * 1000)));
+  if (qualified) return { track, reason: `${scoreLabel} · hasn't played in ${weeks} ${weeks === 1 ? 'week' : 'weeks'}` };
+  if (track.id === currentId) return { track, reason: `${scoreLabel} · currently loaded` };
+  if (recentIds.has(track.id)) return { track, reason: `${scoreLabel} · recent favorite` };
+  return { track, reason: `${scoreLabel} · highest score available` };
+}
+
+function topGenreFromTracks(tracks: Track[]): string {
+  const counts = new Map<string, number>();
+  for (const track of tracks) {
+    const genre = track.genre?.trim();
+    if (!genre) continue;
+    counts.set(genre, (counts.get(genre) ?? 0) + 1);
+  }
+  const [top] = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return top?.[0] ?? '—';
+}
+
+function formatYmd(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function ListeningStatsPanel({
+  insights,
+  history,
+}: {
+  insights: ListeningInsights;
+  history: ListeningHistoryItem[];
+}): JSX.Element {
+  const weekStart = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const weekTracks = history.filter((item) => item.playedAt >= weekStart).map((item) => item.track);
+  const distinctArtists = new Set(weekTracks.map((track) => track.artist).filter(Boolean));
+  const topGenre = topGenreFromTracks(weekTracks);
+  const minutes = Math.round((insights.week.duration ?? 0) / 60);
+  return (
+    <section className="bevel-out home-listening-stats p-3" style={{ background: 'var(--panel)' }}>
+      <div className="mb-3 flex items-baseline gap-2">
+        <div className="text-[11px] font-bold uppercase tracking-[0.16em]" style={{ color: 'var(--accent)' }}>
+          Listening Stats This Week
+        </div>
+        <div className="ml-auto text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
+          {insights.week.plays.toLocaleString()} plays
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <Metric label="Minutes" value={minutes} />
+        <Metric label="Artists" value={distinctArtists.size} />
+        <div className="bevel-in px-2 py-2">
+          <div className="lcd-text truncate text-[18px] leading-none" title={topGenre} style={{ color: 'var(--accent)' }}>
+            {topGenre}
+          </div>
+          <div className="mt-1 text-[9px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
+            Top genre
+          </div>
+        </div>
+      </div>
     </section>
   );
 }

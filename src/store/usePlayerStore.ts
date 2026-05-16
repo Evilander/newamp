@@ -130,6 +130,7 @@ interface PlayerState {
   setEqEnabled: (on: boolean) => Promise<void>;
   toggleLove: (id: number) => Promise<void>;
   setTrackRating: (id: number, rating: number) => Promise<Track | null>;
+  setTrackRatingScore: (id: number, score: number | null) => Promise<Track | null>;
   toggleAvoidAutoPlay: (id: number) => Promise<Track | null>;
   setTheme: (theme: AppSettings['theme']) => Promise<void>;
   setCrossfadeMs: (ms: number) => Promise<void>;
@@ -371,6 +372,7 @@ function podcastEpisodeToTrack(episode: PodcastEpisode): Track {
     hasArt: 0,
     loved: 0,
     rating: 0,
+    ratingScore: null,
     avoidAutoPlay: 0,
     playCount: 0,
     lastPlayed: null,
@@ -1074,6 +1076,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     setTrackRating: async (id, rating) => {
       const updated = await api.setTrackRating(id, rating);
+      if (!updated) return null;
+      set((state) => ({
+        current: state.current?.id === updated.id ? updated : state.current,
+        queue: state.queue.map((track) => (track.id === updated.id ? updated : track)),
+      }));
+      return updated;
+    },
+
+    setTrackRatingScore: async (id, score) => {
+      const updated = await api.setTrackRatingScore(id, score);
       if (!updated) return null;
       set((state) => ({
         current: state.current?.id === updated.id ? updated : state.current,

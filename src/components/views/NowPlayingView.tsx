@@ -9,6 +9,10 @@ import { fetchLyrics, parseLrc, type LrcLine } from '../../api/lrclib';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
 import { formatTime, playbackCodecLabel } from '../../lib/format';
 import { api } from '../../lib/api';
+import { ScoreRating } from '../ScoreRating';
+import { LinerNotesPanel } from '../LinerNotesPanel';
+
+type SideTab = 'on-air' | 'studio' | 'lyrics';
 import type { LocalLyricsResult, SmartPlaylistRule, Track, TrackBookmark } from '@shared/types';
 import {
   canEnablePracticeLoop,
@@ -23,7 +27,6 @@ import {
   nudgePlaybackRate,
   playbackRateLabel,
 } from '@shared/tempo-trainer';
-import { GuitarTabCompanion } from '../GuitarTabCompanion';
 
 type LyricPayload = Partial<Pick<LocalLyricsResult, 'plainLyrics' | 'syncedLyrics'>> & {
   instrumental?: boolean;
@@ -40,6 +43,7 @@ export function NowPlayingView(): JSX.Element {
   const currentTime = usePlayerStore((s) => s.currentTime);
   const toggleLove = usePlayerStore((s) => s.toggleLove);
   const setTrackRating = usePlayerStore((s) => s.setTrackRating);
+  const setTrackRatingScore = usePlayerStore((s) => s.setTrackRatingScore);
   const toggleAvoidAutoPlay = usePlayerStore((s) => s.toggleAvoidAutoPlay);
   const setFs = usePlayerStore((s) => s.setFullscreenViz);
   const playQueue = usePlayerStore((s) => s.playQueue);
@@ -52,6 +56,7 @@ export function NowPlayingView(): JSX.Element {
   const setAutoDjEnabled = usePlayerStore((s) => s.setAutoDjEnabled);
   const setAutoDjSmartRuleId = usePlayerStore((s) => s.setAutoDjSmartRuleId);
   const setView = usePlayerStore((s) => s.setView);
+  const settings = usePlayerStore((s) => s.settings);
 
   const [lyrics, setLyrics] = useState<{ plain?: string | null; lines: LrcLine[] | null }>(
     { lines: null, plain: null },
@@ -67,10 +72,19 @@ export function NowPlayingView(): JSX.Element {
   const [stationRule, setStationRule] = useState<SmartPlaylistRule | null>(null);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
+  const [lyricsKaraokeMode, setLyricsKaraokeMode] = useState(false);
   const [practiceLoop, setPracticeLoop] = useState<PracticeLoop>({
     start: null,
     end: null,
     enabled: false,
+  });
+  const [sideTab, setSideTab] = useState<SideTab>('on-air');
+  // Persisted spectrum/side split width. 0..1 fraction of the right pane.
+  const [spectrumFrac, setSpectrumFrac] = useState<number>(() => {
+    if (typeof window === 'undefined') return 0.42;
+    const raw = window.localStorage.getItem('newamp:np:spectrumFrac');
+    const parsed = raw ? Number.parseFloat(raw) : NaN;
+    return Number.isFinite(parsed) ? Math.min(0.7, Math.max(0.2, parsed)) : 0.42;
   });
 
   useEffect(() => {
@@ -332,7 +346,8 @@ export function NowPlayingView(): JSX.Element {
             NEWAMP
           </span>
           <StatusPill on={isPlaying} text={isPlaying ? 'PLAYING' : 'PAUSED'} />
-          {activeStationName ? <StatusPill on text="RADIO" /> : null}
+          {activeStationName ? <StatusPill on text="MIX" /> : null}
+          {settings?.replayGain !== 'off' ? <StatusPill on text="RG" /> : null}
           <span style={{ color: 'var(--muted)' }}>
             OUTPUT · WASAPI · {fmtKbps} · {fmtRate}
           </span>
@@ -341,10 +356,10 @@ export function NowPlayingView(): JSX.Element {
           {activeStationName ? (
             <>
               <button className="pxbtn px-2 py-[2px] text-[10px]" onClick={() => setView('playlist')} title={activeStationName}>
-                {activeStationName} / {Math.max(0, queue.length - Math.max(queueIndex, 0) - 1)} left / target {autoDjTarget}
+                {activeStationName} / {Math.max(0, queue.length - Math.max(queueIndex, 0) - 1)} left / goal {autoDjTarget}
               </button>
               <button className="pxbtn px-2 py-[2px] text-[10px]" onClick={() => void stopStation()}>
-                STOP RADIO
+                STOP MIX
               </button>
             </>
           ) : null}
@@ -355,8 +370,7 @@ export function NowPlayingView(): JSX.Element {
 
       {/* --- Main (album+queue / right side) --- */}
       <div
-        className="grid flex-1 overflow-hidden"
-        style={{ gridTemplateColumns: '420px 1fr' }}
+        className="newamp-now-grid grid flex-1 overflow-hidden"
       >
         {/* --- Album side --- */}
         <div
@@ -366,22 +380,26 @@ export function NowPlayingView(): JSX.Element {
           <button
             type="button"
             onClick={() => setFs(true)}
-            className="relative shrink-0"
+            className="newamp-now-art relative shrink-0"
             style={{
-              width: 420,
-              height: 420,
               background: 'var(--panel-2)',
               borderBottom: '1px solid var(--line)',
               overflow: 'hidden',
             }}
             title="Open fullscreen visualizer"
           >
+            <AlbumArtPlaceholder label={current.album || current.title} />
             {artUrl ? (
               <img
                 src={artUrl}
                 alt={current.album}
                 className={isPlaying ? 'pulse-soft' : ''}
+                onError={(event) => {
+                  event.currentTarget.style.display = 'none';
+                }}
                 style={{
+                  position: 'absolute',
+                  inset: 0,
                   width: '100%',
                   height: '100%',
                   objectFit: 'cover',
@@ -462,6 +480,7 @@ export function NowPlayingView(): JSX.Element {
             current={current}
             onLove={() => toggleLove(current.id)}
             onSetRating={(rating) => void setTrackRating(current.id, rating)}
+            onSetRatingScore={(score) => void setTrackRatingScore(current.id, score)}
             onToggleAvoid={() => void toggleAvoidAutoPlay(current.id)}
             onShowInFolder={() => void api.showInFolder(current.path)}
             onExportWav={() => void exportCurrentWav()}
@@ -471,52 +490,91 @@ export function NowPlayingView(): JSX.Element {
           />
 
           <div
-            className="grid overflow-hidden"
-            style={{ gridTemplateColumns: '280px 1fr', borderTop: '1px solid var(--line)' }}
+            className="newamp-right-grid grid overflow-hidden"
+            style={{
+              borderTop: '1px solid var(--line)',
+              gridTemplateColumns: `${(spectrumFrac * 100).toFixed(2)}% 6px 1fr`,
+            }}
           >
             <SpectrumPanel currentTime={currentTime} duration={current.duration ?? 0} />
-            <div className="grid min-h-0 overflow-hidden" style={{ gridTemplateRows: '188px 152px 104px 124px 132px 1fr' }}>
+            <SplitHandle
+              orientation="vertical"
+              onDrag={(frac) => {
+                const next = Math.min(0.7, Math.max(0.2, frac));
+                setSpectrumFrac(next);
+                window.localStorage.setItem('newamp:np:spectrumFrac', String(next));
+              }}
+            />
+            <div className="newamp-side-stack flex min-h-0 flex-col overflow-hidden">
               <ArtistImageStage artist={current.artist} />
-              <GuitarTabCompanion current={current} isPlaying={isPlaying} />
-              <TempoTrainerPanel
-                playbackRate={playbackRate}
-                onChange={(rate) => void setPlaybackRate(rate)}
-              />
-              <PracticeLoopPanel
-                loop={practiceLoop}
-                currentTime={currentTime}
-                duration={current.duration ?? null}
-                onSetStart={() => setLoopPoint('start')}
-                onSetEnd={() => setLoopPoint('end')}
-                onToggle={togglePracticeLoop}
-                onClear={clearPracticeLoop}
-                onJumpStart={() => {
-                  if (practiceLoop.start != null) seek(practiceLoop.start);
-                }}
-              />
-              <BookmarkPanel
-                bookmarks={bookmarks}
-                currentTime={currentTime}
-                onSave={() => void saveBookmark()}
-                onDelete={(id) => void deleteBookmark(id)}
-                onJump={(bookmark) => seek(bookmark.position)}
-              />
-              <LyricsPanel
-                lyrics={lyrics}
-                activeIdx={activeIdx}
-                status={lyricStatus}
-                source={lyricSource}
-                editorOpen={lyricsEditorOpen}
-                draft={lyricsDraft}
-                draftMode={lyricsDraftMode}
-                message={lyricsMessage}
-                onOpenEditor={openLyricsEditor}
-                onDraftChange={setLyricsDraft}
-                onDraftModeChange={setLyricsDraftMode}
-                onSaveCustom={() => void saveCustomLyrics()}
-                onClearCustom={() => void clearCustomLyrics()}
-                onCancelEditor={() => setLyricsEditorOpen(false)}
-              />
+              <div
+                className="side-tab-bar"
+                role="tablist"
+                aria-label="Now Playing side panel"
+              >
+                <SideTabButton active={sideTab === 'on-air'} onClick={() => setSideTab('on-air')}>
+                  On Air
+                </SideTabButton>
+                <SideTabButton active={sideTab === 'studio'} onClick={() => setSideTab('studio')}>
+                  Studio
+                </SideTabButton>
+                <SideTabButton active={sideTab === 'lyrics'} onClick={() => setSideTab('lyrics')}>
+                  Lyrics
+                </SideTabButton>
+              </div>
+              <div className="side-tab-body flex min-h-0 flex-1 flex-col overflow-hidden">
+                {sideTab === 'on-air' ? (
+                  <LinerNotesPanel
+                    track={current}
+                    lyrics={{ lines: lyrics.lines, plain: lyrics.plain }}
+                  />
+                ) : sideTab === 'studio' ? (
+                  <div className="flex min-h-0 flex-col overflow-y-auto">
+                    <TempoTrainerPanel
+                      playbackRate={playbackRate}
+                      onChange={(rate) => void setPlaybackRate(rate)}
+                    />
+                    <PracticeLoopPanel
+                      loop={practiceLoop}
+                      currentTime={currentTime}
+                      duration={current.duration ?? null}
+                      onSetStart={() => setLoopPoint('start')}
+                      onSetEnd={() => setLoopPoint('end')}
+                      onToggle={togglePracticeLoop}
+                      onClear={clearPracticeLoop}
+                      onJumpStart={() => {
+                        if (practiceLoop.start != null) seek(practiceLoop.start);
+                      }}
+                    />
+                    <BookmarkPanel
+                      bookmarks={bookmarks}
+                      currentTime={currentTime}
+                      onSave={() => void saveBookmark()}
+                      onDelete={(id) => void deleteBookmark(id)}
+                      onJump={(bookmark) => seek(bookmark.position)}
+                    />
+                  </div>
+                ) : (
+                  <LyricsPanel
+                    lyrics={lyrics}
+                    activeIdx={activeIdx}
+                    status={lyricStatus}
+                    source={lyricSource}
+                    editorOpen={lyricsEditorOpen}
+                    draft={lyricsDraft}
+                    draftMode={lyricsDraftMode}
+                    message={lyricsMessage}
+                    karaokeMode={lyricsKaraokeMode}
+                    onToggleKaraoke={() => setLyricsKaraokeMode((value) => !value)}
+                    onOpenEditor={openLyricsEditor}
+                    onDraftChange={setLyricsDraft}
+                    onDraftModeChange={setLyricsDraftMode}
+                    onSaveCustom={() => void saveCustomLyrics()}
+                    onClearCustom={() => void clearCustomLyrics()}
+                    onCancelEditor={() => setLyricsEditorOpen(false)}
+                  />
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -528,6 +586,21 @@ export function NowPlayingView(): JSX.Element {
 /* ============================================================ */
 /*  Sub-components                                                */
 /* ============================================================ */
+
+function AlbumArtPlaceholder({ label }: { label: string }): JSX.Element {
+  const initials = label
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? '')
+    .join('') || 'NP';
+
+  return (
+    <div className="album-art-placeholder flex h-full w-full items-center justify-center">
+      <span>{initials}</span>
+    </div>
+  );
+}
 
 function StatusPill({ on, text }: { on: boolean; text: string }): JSX.Element {
   return (
@@ -581,6 +654,7 @@ function TrackInfoHeader({
   current,
   onLove,
   onSetRating,
+  onSetRatingScore,
   onToggleAvoid,
   onShowInFolder,
   onExportWav,
@@ -591,6 +665,7 @@ function TrackInfoHeader({
   current: Track;
   onLove: () => void;
   onSetRating: (rating: number) => void;
+  onSetRatingScore: (score: number | null) => void;
   onToggleAvoid: () => void;
   onShowInFolder: () => void;
   onExportWav: () => void;
@@ -658,6 +733,14 @@ function TrackInfoHeader({
             {current.avoidAutoPlay ? 'avoid Auto DJ' : 'Auto DJ ok'}
           </button>
           <TrackRating value={current.rating} onChange={onSetRating} />
+          <div className="score-rating-shell">
+            <span className="score-rating-shell-label">Score</span>
+            <ScoreRating
+              value={current.ratingScore}
+              stars={current.rating}
+              onChange={onSetRatingScore}
+            />
+          </div>
           <button
             type="button"
             data-now-playing-show-in-folder
@@ -1373,6 +1456,8 @@ function LyricsPanel({
   draft,
   draftMode,
   message,
+  karaokeMode,
+  onToggleKaraoke,
   onOpenEditor,
   onDraftChange,
   onDraftModeChange,
@@ -1388,6 +1473,8 @@ function LyricsPanel({
   draft: string;
   draftMode: LyricsDraftMode;
   message: string | null;
+  karaokeMode: boolean;
+  onToggleKaraoke: () => void;
   onOpenEditor: () => void;
   onDraftChange: (value: string) => void;
   onDraftModeChange: (mode: LyricsDraftMode) => void;
@@ -1408,6 +1495,7 @@ function LyricsPanel({
       data-newamp-lyrics-status={status}
       data-newamp-lyrics-source={source ?? ''}
       data-newamp-lyrics-mode={lyrics.lines ? 'synced' : lyrics.plain ? 'plain' : 'empty'}
+      data-newamp-lyrics-karaoke={karaokeMode ? 'true' : 'false'}
       data-newamp-lyrics-line-count={lyrics.lines?.length ?? 0}
       data-newamp-lyrics-plain-length={lyrics.plain?.length ?? 0}
       className="flex flex-col overflow-hidden"
@@ -1435,9 +1523,16 @@ function LyricsPanel({
         </span>
       </div>
       <div
-        className="flex items-center gap-2 border-b px-4 py-2 text-[10px]"
+        className="flex flex-wrap items-center gap-2 border-b px-4 py-2 text-[10px]"
         style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
       >
+        <button
+          className={`pxbtn ${karaokeMode ? 'is-active' : ''}`}
+          onClick={onToggleKaraoke}
+          title="Center the current lyric line for sing-along playback"
+        >
+          Karaoke
+        </button>
         <button className="pxbtn" onClick={onOpenEditor}>
           {source === 'custom' ? 'EDIT SAVED LYRICS' : 'SAVE / EDIT LYRICS'}
         </button>
@@ -1488,7 +1583,7 @@ function LyricsPanel({
           />
         </div>
       )}
-      <div ref={ref} className="flex-1 overflow-y-auto">
+      <div ref={ref} className={`flex-1 overflow-y-auto ${karaokeMode ? 'lyrics-karaoke' : ''}`}>
         {lyrics.lines ? (
           lyrics.lines.map((l, i) => {
             const state =
@@ -1500,7 +1595,7 @@ function LyricsPanel({
                 data-newamp-lyric-line
                 data-newamp-lyric-time={l.time}
                 data-newamp-lyric-state={state}
-                className="grid items-baseline gap-[10px] px-4 py-[8px] text-[12px] transition-colors"
+                className="lyric-line grid items-baseline gap-[10px] px-4 py-[8px] text-[12px] transition-colors"
                 style={{
                   gridTemplateColumns: '52px 1fr',
                   background:
@@ -1554,6 +1649,72 @@ function LyricsPanel({
         )}
       </div>
     </div>
+  );
+}
+
+function SideTabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`side-tab-btn ${active ? 'is-active' : ''}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SplitHandle({
+  orientation,
+  onDrag,
+}: {
+  orientation: 'vertical' | 'horizontal';
+  /** Emits the parent-relative fraction (0..1) for the pointer position at each move. */
+  onDrag: (frac: number) => void;
+}): JSX.Element {
+  return (
+    <div
+      role="separator"
+      aria-orientation={orientation}
+      tabIndex={0}
+      className={`np-split-handle ${orientation === 'vertical' ? 'is-vertical' : 'is-horizontal'}`}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        const target = event.currentTarget;
+        const parent = target.parentElement;
+        if (!parent) return;
+        target.setPointerCapture(event.pointerId);
+        const emit = (moveEvent: { clientX: number; clientY: number }): void => {
+          const rect = parent.getBoundingClientRect();
+          if (orientation === 'vertical') {
+            if (!rect.width) return;
+            onDrag((moveEvent.clientX - rect.left) / rect.width);
+          } else {
+            if (!rect.height) return;
+            onDrag((moveEvent.clientY - rect.top) / rect.height);
+          }
+        };
+        emit(event);
+        const move = (moveEvent: PointerEvent): void => emit(moveEvent);
+        const up = (upEvent: PointerEvent): void => {
+          target.releasePointerCapture(upEvent.pointerId);
+          window.removeEventListener('pointermove', move);
+          window.removeEventListener('pointerup', up);
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+      }}
+    />
   );
 }
 

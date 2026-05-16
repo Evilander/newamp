@@ -40,6 +40,13 @@ try {
   assert.equal(secondDone?.skipped, 2, 'unchanged rescan should skip both existing tracks');
   assert.equal(library.getStats().tracks, 2, 'unchanged rescan should preserve catalog rows');
 
+  await writeFile(join(musicRoot, 'cover.jpg'), Buffer.from([0xff, 0xd8, 0xff, 0xe0, ...Buffer.from('folder cover'), 0xff, 0xd9]));
+  const artProgress = [];
+  await new Scanner(library, (event) => artProgress.push(event)).start([musicRoot]);
+  const artDone = artProgress.findLast((event) => event.done);
+  assert.equal(artDone?.parsed, 2, 'unchanged no-art tracks should refresh when folder cover art appears');
+  assert.equal(library.getLibraryHealth().missing.art, 0, 'folder cover art should backfill unchanged tracks');
+
   await writeFile(secondTrack, Buffer.from('second fixture touched'));
   const touchedAt = new Date(Date.now() + 2000);
   await utimes(secondTrack, touchedAt, touchedAt);
@@ -61,6 +68,7 @@ try {
   assert.match(typesSource, /skipped\?: number/, 'ScanProgress should expose skipped tracks');
   assert.match(typesSource, /parsed\?: number/, 'ScanProgress should expose parsed tracks');
   assert.match(scannerSource, /getTrackFileStates/, 'scanner should compare discovered files to catalog file state');
+  assert.match(scannerSource, /needsMetadataRefresh/, 'scanner should refresh unchanged rows when missing folder art becomes available');
   assert.match(librarySource, /getTrackFileStates/, 'library should expose catalog file state for scanner');
   assert.match(scanBannerSource, /skipped/, 'scan banner should surface skipped-file counts for large rescans');
   assert.match(packageSource, /smoke:incremental-scan/, 'package scripts should expose incremental scan smoke');

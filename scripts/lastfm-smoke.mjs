@@ -92,10 +92,10 @@ assert.equal(successfulFlush.remaining, 0);
 assert.deepEqual(await outbox.list(), [], 'successful flush should clear sent scrobbles');
 
 await outbox.enqueue({
-  artist: 'Tyler Local',
-  title: 'Private Demo',
-  album: 'Home Recordings',
-  albumArtist: 'Tyler Local',
+  artist: 'Local Demo',
+  title: 'Private Recording',
+  album: 'Home Demos',
+  albumArtist: 'Local Demo',
   duration: 193,
   trackNumber: 1,
 }, 1778800100, null);
