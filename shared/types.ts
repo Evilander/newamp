@@ -603,6 +603,12 @@ export interface SupportRestoreResult {
   restartRequired: boolean;
 }
 
+export interface MusicFolderSuggestion {
+  path: string;
+  label: string;
+  reason: string;
+}
+
 export interface NewampAPI {
   // library
   scanLibrary: (roots?: string[]) => Promise<void>;
@@ -685,6 +691,7 @@ export interface NewampAPI {
   recordSkip: (id: number, position?: number) => Promise<void>;
   getArtUrl: (trackId: number) => string;
   pickFolder: () => Promise<string | null>;
+  getSuggestedMusicFolders: () => Promise<MusicFolderSuggestion[]>;
 
   // settings
   getSettings: () => Promise<AppSettings>;
