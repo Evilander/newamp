@@ -180,6 +180,23 @@ export interface TrackWavBatchExportResult {
   files: TrackWavExportResult[];
 }
 
+export type AudioExportFormat = 'wav' | 'mp3' | 'flac' | 'opus';
+
+export interface TrackAudioExportResult {
+  path: string;
+  bytes: number;
+  format: AudioExportFormat;
+}
+
+export interface TrackAudioBatchExportResult {
+  path: string;
+  exported: number;
+  skipped: string[];
+  bytes: number;
+  format: AudioExportFormat;
+  files: TrackAudioExportResult[];
+}
+
 export interface ReplayGainAnalysisResult {
   analyzed: number;
   skipped: string[];
@@ -619,6 +636,7 @@ export interface NewampAPI {
   importPlaylistM3u: () => Promise<PlaylistM3uImportResult | null>;
   exportTrackWav: (id: number) => Promise<TrackWavExportResult | null>;
   exportTracksWav: (ids: number[]) => Promise<TrackWavBatchExportResult | null>;
+  exportTracksAudio: (ids: number[], format: AudioExportFormat) => Promise<TrackAudioBatchExportResult | null>;
   analyzeReplayGain: (ids: number[]) => Promise<ReplayGainAnalysisResult>;
   analyzeAlbumReplayGain: (ids: number[]) => Promise<ReplayGainAnalysisResult>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;

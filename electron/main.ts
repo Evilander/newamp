@@ -42,6 +42,7 @@ import {
   analyzeTrackReplayGain,
   transcodeToWavResponse,
   transcodeTrackToWavFile,
+  transcodeTracksToAudioFolder,
   transcodeTracksToWavFolder,
 } from './transcode.js';
 import { exportPlaylistFolder } from './playlist-export.js';
@@ -51,6 +52,7 @@ import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.
 import type {
   CustomSkin,
   ExportTracksFolderInput,
+  AudioExportFormat,
   AlbumArtLookupInput,
   AlbumArtLookupResult,
   LastfmTrackPayload,
@@ -674,6 +676,14 @@ function registerIpc(): void {
     const destinationRoot = result.filePaths[0];
     if (result.canceled || !destinationRoot) return null;
     return transcodeTracksToWavFolder(tracks, destinationRoot);
+  });
+  ipcMain.handle('tracks:export-audio-folder', async (_e, ids: number[], format: AudioExportFormat) => {
+    const tracks = resolveExportTracks(ids);
+    if (!tracks.length) return null;
+    const result = await chooseTracksAudioExportFolder(tracks.length, format);
+    const destinationRoot = result.filePaths[0];
+    if (result.canceled || !destinationRoot) return null;
+    return transcodeTracksToAudioFolder(tracks, destinationRoot, format);
   });
   ipcMain.handle('tracks:analyze-replaygain', async (_e, ids: number[]) => analyzeReplayGain(ids));
   ipcMain.handle('tracks:analyze-album-replaygain', async (_e, ids: number[]) => analyzeAlbumReplayGain(ids));
@@ -1837,6 +1847,24 @@ async function chooseTracksWavExportFolder(trackCount: number): Promise<Electron
   const options: Electron.OpenDialogOptions = {
     title: `Choose folder for ${trackCount.toLocaleString()} WAV export${trackCount === 1 ? '' : 's'}`,
     buttonLabel: 'Export WAVs here',
+    properties: ['openDirectory', 'createDirectory'],
+  };
+  return mainWin ? dialog.showOpenDialog(mainWin, options) : dialog.showOpenDialog(options);
+}
+
+async function chooseTracksAudioExportFolder(
+  trackCount: number,
+  format: AudioExportFormat,
+): Promise<Electron.OpenDialogReturnValue> {
+  if (mainWin) {
+    if (mainWin.isMinimized()) mainWin.restore();
+    mainWin.show();
+    mainWin.focus();
+  }
+  const label = format.toUpperCase();
+  const options: Electron.OpenDialogOptions = {
+    title: `Choose folder for ${trackCount.toLocaleString()} ${label} export${trackCount === 1 ? '' : 's'}`,
+    buttonLabel: `Export ${label}s here`,
     properties: ['openDirectory', 'createDirectory'],
   };
   return mainWin ? dialog.showOpenDialog(mainWin, options) : dialog.showOpenDialog(options);

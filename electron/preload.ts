@@ -6,6 +6,7 @@ import type {
   AlbumArtLookupInput,
   AlbumArtLookupResult,
   AppSettings,
+  AudioExportFormat,
   CachedGuitarTab,
   CustomLyricsInput,
   CustomSkin,
@@ -46,6 +47,7 @@ import type {
   SupportRestoreResult,
   TrackBookmark,
   Track,
+  TrackAudioBatchExportResult,
   TrackMetadataPatchInput,
   TrackWavBatchExportResult,
   TrackWavExportResult,
@@ -106,6 +108,8 @@ const api: NewampAPI = {
     ipcRenderer.invoke('track:export-wav', id) as Promise<TrackWavExportResult | null>,
   exportTracksWav: (ids: number[]) =>
     ipcRenderer.invoke('tracks:export-wav-folder', ids) as Promise<TrackWavBatchExportResult | null>,
+  exportTracksAudio: (ids: number[], format: AudioExportFormat) =>
+    ipcRenderer.invoke('tracks:export-audio-folder', ids, format) as Promise<TrackAudioBatchExportResult | null>,
   analyzeReplayGain: (ids: number[]) =>
     ipcRenderer.invoke('tracks:analyze-replaygain', ids) as Promise<ReplayGainAnalysisResult>,
   analyzeAlbumReplayGain: (ids: number[]) =>
