@@ -101,6 +101,10 @@ export function checkReleaseBundle({ root = defaultRoot, version = readPackageVe
   const bundle = fileProof({ name: 'bundle', path: paths.bundleZip, entryName: basename(paths.bundleZip) }, root);
   const manifest = readManifest(paths.manifest);
   const entries = bundle.ok ? listZipEntries(paths.bundleZip) : { ok: false, entries: [], reason: 'bundle zip is missing' };
+  const sourceFile = files.find((file) => file.name === 'source');
+  const sourceArchive = sourceFile?.ok
+    ? checkSourceArchiveHygiene(sourceFile.absolutePath)
+    : { ok: false, entryCount: 0, forbiddenEntries: [], reason: 'source archive is missing' };
   const expectedEntries = files.map((file) => file.entryName);
   const actualEntries = entries.entries.map((entry) => entry.fullName);
   const missingEntries = expectedEntries.filter((entry) => !actualEntries.includes(entry));
@@ -119,6 +123,7 @@ export function checkReleaseBundle({ root = defaultRoot, version = readPackageVe
     bundle.ok &&
     manifest.ok &&
     entries.ok &&
+    sourceArchive.ok &&
     missingEntries.length === 0 &&
     unexpectedEntries.length === 0 &&
     sizeMismatches.length === 0 &&
@@ -137,13 +142,24 @@ export function checkReleaseBundle({ root = defaultRoot, version = readPackageVe
     files: files.map(({ absolutePath, ...file }) => file),
     bundle: bundle.ok ? withoutAbsolutePath(bundle) : bundle,
     entries: entries.entries,
+    sourceArchive,
     missingEntries,
     unexpectedEntries,
     sizeMismatches,
     manifestMismatches,
     reason: ok
       ? null
-      : releaseBundleReason({ files, bundle, manifest, entries, missingEntries, unexpectedEntries, sizeMismatches, manifestMismatches }),
+      : releaseBundleReason({
+        files,
+        bundle,
+        manifest,
+        entries,
+        sourceArchive,
+        missingEntries,
+        unexpectedEntries,
+        sizeMismatches,
+        manifestMismatches,
+      }),
   };
 }
 
@@ -161,6 +177,42 @@ function createSourceZip({ root, outputPath }) {
     };
   }
   return { ok: true, path: outputPath };
+}
+
+export function checkSourceArchiveHygiene(path) {
+  const entries = listZipEntries(path);
+  if (!entries.ok) {
+    return {
+      ok: false,
+      entryCount: 0,
+      forbiddenEntries: [],
+      reason: `source archive could not be inspected: ${entries.reason}`,
+    };
+  }
+
+  const forbiddenEntries = entries.entries
+    .map((entry) => entry.fullName.replaceAll('\\', '/'))
+    .filter(isForbiddenSourceEntry);
+  return {
+    ok: forbiddenEntries.length === 0,
+    entryCount: entries.entries.length,
+    forbiddenEntries,
+    reason: forbiddenEntries.length
+      ? `source archive includes forbidden public entries: ${forbiddenEntries.slice(0, 10).join(', ')}`
+      : null,
+  };
+}
+
+function isForbiddenSourceEntry(entryName) {
+  const name = entryName.replaceAll('\\', '/');
+  return /^[^/]+\.png$/i.test(name) ||
+    /^(release|tmp|node_modules|dist|dist-electron|\.git|\.newamp-git)\//i.test(name) ||
+    /^studio\/renders\//i.test(name) ||
+    /^codex\.md$/i.test(name) ||
+    /(^|\/)library\.db$/i.test(name) ||
+    /(^|\/)(manual-listening-proof|lastfm-live-proof)\.json$/i.test(name) ||
+    /(^|\/)\.env(\.|$)/i.test(name) ||
+    /\.(pfx|p12|pem|key|cer|crt)$/i.test(name);
 }
 
 function gitBaseArgs(root) {
@@ -286,12 +338,23 @@ function compareManifestFiles(manifest, files) {
   });
 }
 
-function releaseBundleReason({ files, bundle, manifest, entries, missingEntries, unexpectedEntries, sizeMismatches, manifestMismatches }) {
+function releaseBundleReason({
+  files,
+  bundle,
+  manifest,
+  entries,
+  sourceArchive,
+  missingEntries,
+  unexpectedEntries,
+  sizeMismatches,
+  manifestMismatches,
+}) {
   const missingFiles = files.filter((file) => !file.ok).map((file) => `${file.name}: ${file.reason}`);
   if (missingFiles.length) return `release bundle inputs are not ready: ${missingFiles.join(', ')}`;
   if (!bundle.ok) return `release bundle zip is not ready: ${bundle.reason}`;
   if (!manifest.ok) return `release bundle manifest is not ready: ${manifest.reason}`;
   if (!entries.ok) return `release bundle entries could not be inspected: ${entries.reason}`;
+  if (!sourceArchive.ok) return sourceArchive.reason;
   if (missingEntries.length || unexpectedEntries.length) {
     return `release bundle entries are mismatched (${missingEntries.length} missing, ${unexpectedEntries.length} unexpected)`;
   }
