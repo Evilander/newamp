@@ -13,6 +13,8 @@ const root = resolve(process.argv[2] ?? 'K:/music');
 const minTracks = Number.parseInt(process.env.NEWAMP_FULL_SCAN_MIN_TRACKS ?? '5000', 10);
 const maxMs = Number.parseInt(process.env.NEWAMP_FULL_SCAN_MAX_MS ?? '300000', 10);
 const clean = process.env.NEWAMP_FULL_SCAN_CLEAN === '1';
+const expectIncremental = process.env.NEWAMP_FULL_SCAN_EXPECT_INCREMENTAL === '1';
+const minSkipped = Number.parseInt(process.env.NEWAMP_FULL_SCAN_MIN_SKIPPED ?? String(minTracks), 10);
 
 if (!existsSync(root)) {
   console.error(`library root does not exist: ${root}`);
@@ -66,6 +68,10 @@ try {
     durationPresent: stats.duration > 0,
     underTimeBudget: elapsedMs <= maxMs,
     nativePlaybackCandidate: !!nativeSample,
+    incrementalSkipPath: !expectIncremental || (
+      (doneEvent?.parsed ?? 0) === 0 &&
+      (doneEvent?.skipped ?? 0) >= Math.min(stats.tracks, minSkipped)
+    ),
   };
 
   const ok = Object.values(checks).every(Boolean);
@@ -77,6 +83,8 @@ try {
     thresholds: {
       minTracks,
       maxMs,
+      expectIncremental,
+      minSkipped,
     },
     checks,
     stats,

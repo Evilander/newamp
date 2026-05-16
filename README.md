@@ -86,7 +86,10 @@ Local release gate:
 
 ```bash
 npm run release:gate:local
+npm run release:gate:local -- --real-library
 ```
+
+The optional real-library gate uses `NEWAMP_REAL_LIBRARY_ROOT` or `K:/music`, then runs a second full-library pass that must take the incremental skip path.
 
 Strict release gate:
 

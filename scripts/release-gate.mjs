@@ -107,6 +107,17 @@ if (realLibrary) {
   } else {
     run('npm', ['run', 'smoke:full-library', '--', realLibraryRoot], `npm run smoke:full-library -- ${realLibraryRoot}`);
     checks.push({ name: `smoke:full-library ${realLibraryRoot}`, ok: true });
+    run(
+      'npm',
+      ['run', 'smoke:full-library', '--', realLibraryRoot],
+      `npm run smoke:full-library -- ${realLibraryRoot} (incremental proof)`,
+      {
+        NEWAMP_FULL_SCAN_EXPECT_INCREMENTAL: '1',
+        NEWAMP_FULL_SCAN_MAX_MS: process.env.NEWAMP_FULL_SCAN_INCREMENTAL_MAX_MS || '60000',
+        NEWAMP_FULL_SCAN_MIN_SKIPPED: process.env.NEWAMP_FULL_SCAN_MIN_SKIPPED || '5000',
+      },
+    );
+    checks.push({ name: `smoke:full-library ${realLibraryRoot} incremental`, ok: true });
     checks.push(await realLibraryProbe());
   }
 }
@@ -222,7 +233,7 @@ const report = {
 console.log(JSON.stringify(report, null, 2));
 process.exitCode = localOk ? 0 : 1;
 
-function run(command, commandArgs, label) {
+function run(command, commandArgs, label, extraEnv = {}) {
   console.error(`[release-gate] ${label}`);
   const isWindows = process.platform === 'win32';
   const result = spawnSync(
@@ -234,7 +245,7 @@ function run(command, commandArgs, label) {
       cwd: repoRoot,
       stdio: 'inherit',
       windowsHide: true,
-      env: process.env,
+      env: { ...process.env, ...extraEnv },
     },
   );
   if (result.status !== 0) {
