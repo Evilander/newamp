@@ -62,6 +62,7 @@ if (!skipSmokes) {
     'smoke:ui-visualizer',
     'smoke:tabs',
     'smoke:lastfm',
+    'smoke:lastfm-live-proof',
     'smoke:open-files',
     'smoke:playback-start',
     'smoke:playback-error',

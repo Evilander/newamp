@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { checkManualListeningProof, summarizeManualListeningProof } from './manual-listening-proof.mjs';
 import { checkReleaseChecksums } from './release-checksums.mjs';
+import { checkLastfmLiveProof, summarizeLastfmLiveProof } from './lastfm-live-proof.mjs';
 
 const repoRoot = resolve('.');
 const packagePath = resolve(repoRoot, 'package.json');
@@ -28,6 +29,7 @@ const checks = [
   githubPublishWorkflowCheck(),
   releaseChecksumsCheck(),
   artifactSignatureCheck(),
+  lastfmProofCheck(),
   manualProofCheck(),
 ];
 const blockers = checks.filter((check) => !check.ok).map((check) => `${check.name}: ${check.reason}`);
@@ -204,6 +206,17 @@ function manualProofCheck() {
     ok: report.ok,
     proofPath: report.proofPath,
     reason: report.ok ? null : summarizeManualListeningProof(report),
+  };
+}
+
+function lastfmProofCheck() {
+  const report = checkLastfmLiveProof();
+  return {
+    name: 'lastfm-live-proof',
+    ok: report.ok,
+    proofPath: report.proofPath,
+    username: report.username ?? null,
+    reason: report.ok ? null : summarizeLastfmLiveProof(report),
   };
 }
 

@@ -38,6 +38,7 @@
     "smoke:folders": "npm run build:electron && node scripts/folder-browser-smoke.mjs",
     "smoke:quick-play": "npm run build:electron && node scripts/quick-play-smoke.mjs",
     "smoke:lastfm": "npm run build:electron && node scripts/lastfm-smoke.mjs",
+    "smoke:lastfm-live-proof": "npm run build:electron && node scripts/lastfm-live-proof-smoke.mjs",
     "smoke:replaygain": "npm run build:electron && node scripts/replaygain-smoke.mjs",
     "smoke:session": "npm run build:electron && node scripts/session-smoke.mjs",
     "smoke:chrome-state": "npm run build:electron && node scripts/chrome-state-smoke.mjs",
@@ -110,6 +111,9 @@
     "release:check-listening-proof": "node scripts/manual-listening-proof.mjs --check",
     "release:start-listening-proof": "node scripts/listening-proof-session.mjs --launch",
     "release:record-listening-proof": "node scripts/manual-listening-proof.mjs --record",
+    "release:start-lastfm-proof": "node scripts/lastfm-live-proof.mjs --start",
+    "release:record-lastfm-proof": "node scripts/lastfm-live-proof.mjs --record",
+    "release:check-lastfm-proof": "node scripts/lastfm-live-proof.mjs --check",
     "release:gate": "node scripts/release-gate.mjs",
     "release:gate:local": "node scripts/release-gate.mjs --allow-unsigned --ack-manual --real-library"
   },
