@@ -44,8 +44,9 @@ const openFile = !installedExe
   : skipOpenFile
     ? { skipped: true }
     : await runInstalledOpenFileSmoke(installedExe);
+const diagnostics = readLaunchDiagnostics(userData);
 const report = {
-  ok: associationProof.ok && (skipOpenFile || openFile.ok),
+  ok: associationProof.ok && (skipOpenFile || openFile.ok) && diagnostics.events > 0 && diagnostics.crashedChildren === 0,
   installer: {
     path: installerPath,
     installDir: installDir || null,
@@ -54,6 +55,7 @@ const report = {
   associationProof,
   installedExe,
   openFile,
+  diagnostics,
 };
 
 console.log(JSON.stringify(report, null, 2));
@@ -252,4 +254,27 @@ function delay(ms) {
 
 function tail(text) {
   return text.split(/\r?\n/).slice(-40).join('\n');
+}
+
+function readLaunchDiagnostics(path) {
+  const eventsPath = join(path, 'diagnostics', 'events.jsonl');
+  if (!existsSync(eventsPath)) return { eventsPath, events: 0, crashedChildren: 0, crashedChildSamples: [] };
+  const events = readFileSync(eventsPath, 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  const crashed = events.filter((event) => event.kind === 'child-process-gone' && event.payload?.reason === 'crashed');
+  return {
+    eventsPath,
+    events: events.length,
+    crashedChildren: crashed.length,
+    crashedChildSamples: crashed.slice(0, 5),
+  };
 }

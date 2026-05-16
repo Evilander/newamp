@@ -1037,7 +1037,7 @@ function SpectrumPanel({
 
   useEffect(() => {
     const BARS = 24;
-    const freq = new Uint8Array(engine.analyser.frequencyBinCount);
+    const freq = new Uint8Array(engine.frequencyBinCount);
     const peaks = new Float32Array(BARS);
     let raf = 0;
     const tick = (): void => {
@@ -1145,7 +1145,7 @@ function SpectrumPanel({
 function VuMeter(): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const time = new Uint8Array(engine.analyser.fftSize);
+    const time = new Uint8Array(engine.fftSize);
     let l = 0,
       r = 0;
     let raf = 0;

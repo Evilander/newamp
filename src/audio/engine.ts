@@ -19,12 +19,25 @@ export interface EngineState {
 export type EngineListener = (e: EngineState) => void;
 
 const EQ_FREQS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
+const DEFAULT_FFT_SIZE = 2048;
+const DEFAULT_FREQUENCY_BIN_COUNT = DEFAULT_FFT_SIZE / 2;
 
 interface Deck {
   id: number;
   el: HTMLAudioElement;
   source: MediaElementAudioSourceNode;
   gain: GainNode;
+}
+
+interface AudioGraph {
+  ctx: AudioContext;
+  analyser: AnalyserNode;
+  masterGain: GainNode;
+  limiter: DynamicsCompressorNode;
+  eqBands: BiquadFilterNode[];
+  decks: [Deck, Deck];
+  inputGain: GainNode;
+  replayGain: GainNode;
 }
 
 interface PreparedNextDeck {
@@ -43,17 +56,16 @@ type SinkAudioElement = HTMLAudioElement & {
 };
 
 export class AudioEngine {
-  readonly ctx: AudioContext;
-  readonly analyser: AnalyserNode;
-  readonly masterGain: GainNode;
-  readonly limiter: DynamicsCompressorNode;
-  readonly eqBands: BiquadFilterNode[];
-  private readonly decks: [Deck, Deck];
-  private readonly inputGain: GainNode;
-  private readonly replayGain: GainNode;
+  private graph: AudioGraph | null = null;
   private activeDeckIndex = 0;
   private crossfadeMs = 0;
   private playbackRate = 1;
+  private volume = 0.75;
+  private replayGainLinear = 1;
+  private preampLinear = 1;
+  private limiterEnabled = true;
+  private eqEnabled = true;
+  private eqValues = EQ_FREQS.map(() => 0);
   private outputDeviceId: string | null = null;
   private preparedNext: PreparedNextDeck | null = null;
 
@@ -74,62 +86,99 @@ export class AudioEngine {
   private outputTestTimer: number | null = null;
   private outputTestCleanup: Array<() => void> = [];
 
-  constructor() {
-    this.ctx = new AudioContext({ latencyHint: 'playback' });
-    this.inputGain = this.ctx.createGain();
-    this.inputGain.gain.value = 1;
+  get ctx(): AudioContext {
+    return this.ensureGraph().ctx;
+  }
 
-    // Build a 10-band EQ.
-    this.eqBands = EQ_FREQS.map((freq) => {
-      const f = this.ctx.createBiquadFilter();
-      f.type = 'peaking';
-      f.frequency.value = freq;
-      f.Q.value = 1.0;
-      f.gain.value = 0;
-      return f;
+  get masterGain(): GainNode {
+    return this.ensureGraph().masterGain;
+  }
+
+  get frequencyBinCount(): number {
+    return this.graph?.analyser.frequencyBinCount ?? DEFAULT_FREQUENCY_BIN_COUNT;
+  }
+
+  get fftSize(): number {
+    return this.graph?.analyser.fftSize ?? DEFAULT_FFT_SIZE;
+  }
+
+  private get decks(): [Deck, Deck] {
+    return this.ensureGraph().decks;
+  }
+
+  private ensureGraph(): AudioGraph {
+    if (this.graph) return this.graph;
+
+    const ctx = new AudioContext({ latencyHint: 'playback' });
+    const inputGain = ctx.createGain();
+    inputGain.gain.value = this.preampLinear;
+
+    const eqBands = EQ_FREQS.map((freq, index) => {
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'peaking';
+      filter.frequency.value = freq;
+      filter.Q.value = 1.0;
+      filter.gain.value = this.eqEnabled ? (this.eqValues[index] ?? 0) : 0;
+      return filter;
     });
 
-    this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = 0.75;
-    this.replayGain = this.ctx.createGain();
-    this.replayGain.gain.value = 1;
-    this.limiter = this.ctx.createDynamicsCompressor();
-    this.configureLimiter(true);
+    const masterGain = ctx.createGain();
+    masterGain.gain.value = this.volume;
+    const replayGain = ctx.createGain();
+    replayGain.gain.value = this.replayGainLinear;
+    const limiter = ctx.createDynamicsCompressor();
 
-    this.analyser = this.ctx.createAnalyser();
-    this.analyser.fftSize = 2048;
-    this.analyser.smoothingTimeConstant = 0.78;
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = DEFAULT_FFT_SIZE;
+    analyser.smoothingTimeConstant = 0.78;
 
-    this.decks = [this.createDeck(0), this.createDeck(1)];
-    for (const deck of this.decks) {
+    const decks = [this.createDeck(0, ctx), this.createDeck(1, ctx)] as [Deck, Deck];
+    for (const deck of decks) {
       deck.source.connect(deck.gain);
-      deck.gain.connect(this.inputGain);
+      deck.gain.connect(inputGain);
     }
-    this.decks[0].gain.gain.value = 1;
-    this.decks[1].gain.gain.value = 0;
+    decks[0].gain.gain.value = 1;
+    decks[1].gain.gain.value = 0;
 
-    // Chain: decks -> inputGain/preamp -> EQ chain -> replayGain -> limiter -> masterGain -> analyser -> destination
-    let node: AudioNode = this.inputGain;
-    for (const band of this.eqBands) {
+    let node: AudioNode = inputGain;
+    for (const band of eqBands) {
       node.connect(band);
       node = band;
     }
-    node.connect(this.replayGain);
-    this.replayGain.connect(this.limiter);
-    this.limiter.connect(this.masterGain);
-    this.masterGain.connect(this.analyser);
-    this.analyser.connect(this.ctx.destination);
+    node.connect(replayGain);
+    replayGain.connect(limiter);
+    limiter.connect(masterGain);
+    masterGain.connect(analyser);
+    analyser.connect(ctx.destination);
 
-    this.tick();
+    const graph = {
+      ctx,
+      analyser,
+      masterGain,
+      limiter,
+      eqBands,
+      decks,
+      inputGain,
+      replayGain,
+    };
+    this.graph = graph;
+    this.applyLimiter(graph, this.limiterEnabled);
+    this.startTick();
+
+    if (this.outputDeviceId) {
+      void this.applyOutputDevice(this.outputDeviceId).catch(() => undefined);
+    }
+
+    return graph;
   }
 
-  private createDeck(id: number): Deck {
+  private createDeck(id: number, ctx: AudioContext): Deck {
     const el = new Audio();
     el.crossOrigin = 'anonymous';
     el.preload = 'auto';
     this.configurePlaybackRate(el);
-    const source = this.ctx.createMediaElementSource(el);
-    const gain = this.ctx.createGain();
+    const source = ctx.createMediaElementSource(el);
+    const gain = ctx.createGain();
     gain.gain.value = 0;
 
     this.attachElementListeners(el, id);
@@ -173,8 +222,14 @@ export class AudioEngine {
     for (const l of this.listeners) l(this.state);
   }
 
+  private startTick(): void {
+    if (this.rafId == null) this.rafId = requestAnimationFrame(this.tick);
+  }
+
   private tick = (): void => {
-    const el = this.activeDeck.el;
+    this.rafId = null;
+    if (!this.graph) return;
+    const el = this.graph.decks[this.activeDeckIndex]!.el;
     if (el.src) {
       this.state = {
         ...this.state,
@@ -197,9 +252,10 @@ export class AudioEngine {
   }
 
   async play(src: string, trackId: number | null, startAt = 0): Promise<void> {
-    if (this.ctx.state === 'suspended') {
+    const graph = this.ensureGraph();
+    if (graph.ctx.state === 'suspended') {
       try {
-        await this.ctx.resume();
+        await graph.ctx.resume();
       } catch {
         /* ignore */
       }
@@ -230,9 +286,9 @@ export class AudioEngine {
     }
 
     this.clearFadeTimer();
-    this.silenceDeck(this.decks[1 - this.activeDeckIndex]!, true);
-    current.gain.gain.cancelScheduledValues(this.ctx.currentTime);
-    current.gain.gain.setValueAtTime(1, this.ctx.currentTime);
+    this.silenceDeck(graph.decks[1 - this.activeDeckIndex]!, true);
+    current.gain.gain.cancelScheduledValues(graph.ctx.currentTime);
+    current.gain.gain.setValueAtTime(1, graph.ctx.currentTime);
     this.patch({ src, trackId, currentTime: 0, duration: 0, ended: false, error: null });
     current.el.src = src;
     this.applyStartPosition(current, startAt);
@@ -245,7 +301,8 @@ export class AudioEngine {
   }
 
   prepareNext(src: string, trackId: number | null, startAt = 0): void {
-    if (!src || this.activeDeck.el.src === src || this.activeDeck.el.currentSrc === src) return;
+    if (!src || !this.graph) return;
+    if (this.activeDeck.el.src === src || this.activeDeck.el.currentSrc === src) return;
     const normalizedStartAt = normalizeStartAt(startAt);
     const deck = this.decks[1 - this.activeDeckIndex]!;
     if (
@@ -258,8 +315,8 @@ export class AudioEngine {
     }
 
     this.silenceDeck(deck, true);
-    deck.gain.gain.cancelScheduledValues(this.ctx.currentTime);
-    deck.gain.gain.setValueAtTime(0, this.ctx.currentTime);
+    deck.gain.gain.cancelScheduledValues(this.graph.ctx.currentTime);
+    deck.gain.gain.setValueAtTime(0, this.graph.ctx.currentTime);
     deck.el.src = src;
     this.applyStartPosition(deck, normalizedStartAt);
     deck.el.load();
@@ -267,19 +324,20 @@ export class AudioEngine {
   }
 
   private findPreparedDeck(src: string): Deck | null {
-    if (!this.preparedNext || this.preparedNext.src !== src) return null;
-    const deck = this.decks.find((candidate) => candidate.id === this.preparedNext?.deckId) ?? null;
+    if (!this.graph || !this.preparedNext || this.preparedNext.src !== src) return null;
+    const deck = this.graph.decks.find((candidate) => candidate.id === this.preparedNext?.deckId) ?? null;
     if (!deck || deck.id === this.activeDeckIndex) return null;
     if (deck.el.src !== src && deck.el.currentSrc !== src) return null;
     return deck;
   }
 
   private async playPreparedDeck(deck: Deck, src: string, trackId: number | null): Promise<void> {
+    const graph = this.ensureGraph();
     const from = this.activeDeck;
     this.clearFadeTimer();
     this.silenceDeck(from, true);
-    deck.gain.gain.cancelScheduledValues(this.ctx.currentTime);
-    deck.gain.gain.setValueAtTime(1, this.ctx.currentTime);
+    deck.gain.gain.cancelScheduledValues(graph.ctx.currentTime);
+    deck.gain.gain.setValueAtTime(1, graph.ctx.currentTime);
     this.activeDeckIndex = deck.id;
     this.preparedNext = null;
     this.patch({ src, trackId, currentTime: 0, duration: 0, ended: false, error: null, buffering: true });
@@ -292,13 +350,14 @@ export class AudioEngine {
   }
 
   private async crossfadeTo(src: string, trackId: number | null, startAt = 0): Promise<void> {
+    const graph = this.ensureGraph();
     this.clearFadeTimer();
     this.preparedNext = null;
 
     const from = this.activeDeck;
     const toIndex = 1 - this.activeDeckIndex;
-    const to = this.decks[toIndex]!;
-    const now = this.ctx.currentTime;
+    const to = graph.decks[toIndex]!;
+    const now = graph.ctx.currentTime;
     const seconds = Math.max(0.08, this.crossfadeMs / 1000);
 
     this.silenceDeck(to, true);
@@ -337,6 +396,8 @@ export class AudioEngine {
   }
 
   private silenceDeck(deck: Deck, clearSrc: boolean): void {
+    const graph = this.graph;
+    if (!graph) return;
     try {
       deck.el.pause();
       deck.el.currentTime = 0;
@@ -344,8 +405,8 @@ export class AudioEngine {
         deck.el.removeAttribute('src');
         deck.el.load();
       }
-      deck.gain.gain.cancelScheduledValues(this.ctx.currentTime);
-      deck.gain.gain.setValueAtTime(0, this.ctx.currentTime);
+      deck.gain.gain.cancelScheduledValues(graph.ctx.currentTime);
+      deck.gain.gain.setValueAtTime(0, graph.ctx.currentTime);
     } catch {
       /* ignore */
     }
@@ -387,20 +448,28 @@ export class AudioEngine {
   setPlaybackRate(rate: number): void {
     if (!Number.isFinite(rate)) return;
     this.playbackRate = Math.max(0.5, Math.min(1.5, Math.round(rate * 20) / 20));
-    for (const deck of this.decks) this.configurePlaybackRate(deck.el);
+    if (!this.graph) return;
+    for (const deck of this.graph.decks) this.configurePlaybackRate(deck.el);
   }
 
   async setOutputDevice(deviceId: string | null): Promise<void> {
     const normalized = normalizeAudioOutputDeviceId(deviceId);
-    const sinkId = normalized ?? '';
+    this.outputDeviceId = normalized;
+    if (!this.graph) return;
+    await this.applyOutputDevice(normalized);
+  }
+
+  private async applyOutputDevice(deviceId: string | null): Promise<void> {
+    const graph = this.ensureGraph();
+    const sinkId = deviceId ?? '';
     const tasks: Array<() => Promise<void>> = [];
-    const ctx = this.ctx as SinkAudioContext;
+    const ctx = graph.ctx as SinkAudioContext;
 
     if (typeof ctx.setSinkId === 'function') {
       tasks.push(() => ctx.setSinkId!(sinkId));
     }
 
-    for (const deck of this.decks) {
+    for (const deck of graph.decks) {
       const el = deck.el as SinkAudioElement;
       if (typeof el.setSinkId === 'function') {
         tasks.push(() => el.setSinkId!(sinkId));
@@ -408,26 +477,21 @@ export class AudioEngine {
     }
 
     if (!tasks.length) {
-      if (normalized) {
-        throw new Error('Audio output device selection is not supported in this runtime.');
-      }
-      this.outputDeviceId = normalized;
+      if (deviceId) throw new Error('Audio output device selection is not supported in this runtime.');
       return;
     }
 
     const results = await Promise.allSettled(tasks.map((task) => task()));
-    if (results.some((result) => result.status === 'fulfilled')) {
-      this.outputDeviceId = normalized;
-      return;
-    }
+    if (results.some((result) => result.status === 'fulfilled')) return;
 
     const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     throw rejected?.reason ?? new Error('Audio output device switch failed.');
   }
 
   async playOutputTestTone(): Promise<void> {
-    if (this.ctx.state === 'suspended') {
-      await this.ctx.resume();
+    const graph = this.ensureGraph();
+    if (graph.ctx.state === 'suspended') {
+      await graph.ctx.resume();
     }
 
     this.clearOutputTestTone();
@@ -438,7 +502,7 @@ export class AudioEngine {
       { freq: 880, pan: 1 },
       { freq: 440, pan: 0 },
     ];
-    const now = this.ctx.currentTime + 0.04;
+    const now = graph.ctx.currentTime + 0.04;
     const stepSeconds = 0.65;
     const fadeSeconds = 0.035;
     const peak = 0.16;
@@ -446,9 +510,9 @@ export class AudioEngine {
     steps.forEach((step, index) => {
       const start = now + index * stepSeconds;
       const end = start + stepSeconds;
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
-      const panner = this.ctx.createStereoPanner();
+      const osc = graph.ctx.createOscillator();
+      const gain = graph.ctx.createGain();
+      const panner = graph.ctx.createStereoPanner();
 
       osc.type = 'sine';
       osc.frequency.setValueAtTime(step.freq, start);
@@ -460,7 +524,7 @@ export class AudioEngine {
 
       osc.connect(gain);
       gain.connect(panner);
-      panner.connect(this.inputGain);
+      panner.connect(graph.inputGain);
       osc.start(start);
       osc.stop(end + 0.02);
 
@@ -511,10 +575,15 @@ export class AudioEngine {
   }
 
   pause(): void {
-    for (const deck of this.decks) deck.el.pause();
+    if (!this.graph) {
+      this.patch({ playing: false });
+      return;
+    }
+    for (const deck of this.graph.decks) deck.el.pause();
   }
 
   togglePlayPause(): void {
+    if (!this.graph) return;
     const active = this.activeDeck.el;
     if (!active.src) return;
     if (active.paused) {
@@ -527,76 +596,103 @@ export class AudioEngine {
   stop(): void {
     this.clearFadeTimer();
     this.preparedNext = null;
-    for (const deck of this.decks) {
+    if (!this.graph) {
+      this.patch({ playing: false, currentTime: 0, ended: false, buffering: false, error: null });
+      return;
+    }
+    for (const deck of this.graph.decks) {
       deck.el.pause();
       deck.el.currentTime = 0;
-      deck.gain.gain.cancelScheduledValues(this.ctx.currentTime);
-      deck.gain.gain.setValueAtTime(deck.id === this.activeDeckIndex ? 1 : 0, this.ctx.currentTime);
+      deck.gain.gain.cancelScheduledValues(this.graph.ctx.currentTime);
+      deck.gain.gain.setValueAtTime(deck.id === this.activeDeckIndex ? 1 : 0, this.graph.ctx.currentTime);
     }
     this.patch({ playing: false, currentTime: 0, ended: false, buffering: false, error: null });
   }
 
   seek(seconds: number): void {
-    if (!Number.isFinite(seconds)) return;
+    if (!Number.isFinite(seconds) || !this.graph) return;
     const el = this.activeDeck.el;
     el.currentTime = Math.max(0, Math.min(el.duration || 0, seconds));
   }
 
   setVolume(v: number): void {
-    const clamped = Math.max(0, Math.min(1, v));
-    this.masterGain.gain.setTargetAtTime(clamped, this.ctx.currentTime, 0.01);
+    this.volume = Math.max(0, Math.min(1, v));
+    if (!this.graph) return;
+    this.graph.masterGain.gain.setTargetAtTime(this.volume, this.graph.ctx.currentTime, 0.01);
   }
 
   setReplayGainDb(db: number | null): void {
     const clampedDb = db == null || !Number.isFinite(db) ? 0 : Math.max(-18, Math.min(12, db));
-    const linear = Math.pow(10, clampedDb / 20);
-    this.replayGain.gain.setTargetAtTime(linear, this.ctx.currentTime, 0.02);
+    this.replayGainLinear = Math.pow(10, clampedDb / 20);
+    if (!this.graph) return;
+    this.graph.replayGain.gain.setTargetAtTime(this.replayGainLinear, this.graph.ctx.currentTime, 0.02);
   }
 
   setPreampDb(db: number): void {
-    this.inputGain.gain.setTargetAtTime(preampDbToLinear(db), this.ctx.currentTime, 0.02);
+    this.preampLinear = preampDbToLinear(db);
+    if (!this.graph) return;
+    this.graph.inputGain.gain.setTargetAtTime(this.preampLinear, this.graph.ctx.currentTime, 0.02);
   }
 
   setLimiterEnabled(enabled: boolean): void {
-    this.configureLimiter(normalizeLimiterEnabled(enabled));
+    this.limiterEnabled = normalizeLimiterEnabled(enabled);
+    if (this.graph) this.applyLimiter(this.graph, this.limiterEnabled);
   }
 
-  private configureLimiter(enabled: boolean): void {
-    const now = this.ctx.currentTime;
-    this.limiter.threshold.setTargetAtTime(enabled ? -1 : 0, now, 0.01);
-    this.limiter.knee.setTargetAtTime(0, now, 0.01);
-    this.limiter.ratio.setTargetAtTime(enabled ? 20 : 1, now, 0.01);
-    this.limiter.attack.setTargetAtTime(enabled ? 0.003 : 0, now, 0.01);
-    this.limiter.release.setTargetAtTime(enabled ? 0.12 : 0.01, now, 0.01);
+  private applyLimiter(graph: AudioGraph, enabled: boolean): void {
+    const now = graph.ctx.currentTime;
+    graph.limiter.threshold.setTargetAtTime(enabled ? -1 : 0, now, 0.01);
+    graph.limiter.knee.setTargetAtTime(0, now, 0.01);
+    graph.limiter.ratio.setTargetAtTime(enabled ? 20 : 1, now, 0.01);
+    graph.limiter.attack.setTargetAtTime(enabled ? 0.003 : 0, now, 0.01);
+    graph.limiter.release.setTargetAtTime(enabled ? 0.12 : 0.01, now, 0.01);
   }
 
   setEqBand(index: number, dB: number): void {
-    const band = this.eqBands[index];
+    if (index < 0 || index >= this.eqValues.length) return;
+    const value = Math.max(-12, Math.min(12, dB));
+    this.eqValues[index] = value;
+    if (!this.graph || !this.eqEnabled) return;
+    const band = this.graph.eqBands[index];
     if (!band) return;
-    band.gain.setTargetAtTime(Math.max(-12, Math.min(12, dB)), this.ctx.currentTime, 0.015);
+    band.gain.setTargetAtTime(value, this.graph.ctx.currentTime, 0.015);
   }
 
   setEqBands(values: number[]): void {
-    values.forEach((v, i) => this.setEqBand(i, v));
+    values.forEach((value, index) => this.setEqBand(index, value));
   }
 
   setEqEnabled(on: boolean): void {
-    // bypass by zeroing all bands when off; cheaper than rewiring graph
-    if (!on) for (const b of this.eqBands) b.gain.setTargetAtTime(0, this.ctx.currentTime, 0.02);
+    this.eqEnabled = on;
+    if (!this.graph) return;
+    this.graph.eqBands.forEach((band, index) => {
+      const value = this.eqEnabled ? (this.eqValues[index] ?? 0) : 0;
+      band.gain.setTargetAtTime(value, this.graph!.ctx.currentTime, 0.02);
+    });
   }
 
   getFreqData(buf: Uint8Array<ArrayBuffer>): void {
-    this.analyser.getByteFrequencyData(buf);
+    if (!this.graph) {
+      buf.fill(0);
+      return;
+    }
+    this.graph.analyser.getByteFrequencyData(buf);
   }
 
   getTimeData(buf: Uint8Array<ArrayBuffer>): void {
-    this.analyser.getByteTimeDomainData(buf);
+    if (!this.graph) {
+      buf.fill(128);
+      return;
+    }
+    this.graph.analyser.getByteTimeDomainData(buf);
   }
 
   dispose(): void {
     this.clearFadeTimer();
     if (this.rafId) cancelAnimationFrame(this.rafId);
-    for (const deck of this.decks) {
+    this.rafId = null;
+    if (!this.graph) return;
+    for (const deck of this.graph.decks) {
       try {
         deck.el.pause();
         deck.el.src = '';
@@ -604,7 +700,8 @@ export class AudioEngine {
         /* ignore */
       }
     }
-    this.ctx.close().catch(() => undefined);
+    this.graph.ctx.close().catch(() => undefined);
+    this.graph = null;
   }
 }
 
