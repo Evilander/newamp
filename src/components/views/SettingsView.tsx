@@ -636,6 +636,8 @@ export function SettingsView(): JSX.Element {
               </DiagnosticRow>
               <DiagnosticRow label="Settings file">{supportDiagnostics.settingsPath || 'n/a'}</DiagnosticRow>
               <DiagnosticRow label="Library DB">{supportDiagnostics.libraryPath || 'n/a'}</DiagnosticRow>
+              <DiagnosticRow label="Crash log">{supportDiagnostics.diagnosticEventsPath || 'n/a'}</DiagnosticRow>
+              <DiagnosticRow label="Crash dumps">{supportDiagnostics.crashDumpsPath || 'n/a'}</DiagnosticRow>
               <DiagnosticRow label="Recovery">
                 {supportDiagnostics.recoveryEvents.length
                   ? `${supportDiagnostics.recoveryEvents.length} quarantined file(s)`
@@ -664,6 +666,20 @@ export function SettingsView(): JSX.Element {
                   disabled={!supportDiagnostics.libraryPath}
                 >
                   Show library DB
+                </button>
+                <button
+                  className="pxbtn"
+                  onClick={() => void api.showInFolder(supportDiagnostics.diagnosticEventsPath)}
+                  disabled={!supportDiagnostics.diagnosticEventsPath}
+                >
+                  Show crash log
+                </button>
+                <button
+                  className="pxbtn"
+                  onClick={() => void api.showInFolder(supportDiagnostics.crashDumpsPath)}
+                  disabled={!supportDiagnostics.crashDumpsPath}
+                >
+                  Show crash dumps
                 </button>
                 <button className="pxbtn" onClick={() => void createBackup()}>
                   Create backup
