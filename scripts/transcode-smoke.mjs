@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path';
 import {
   playbackMode,
   transcodeToWavResponse,
+  transcodeTracksToAudioFolder,
   transcodeTrackToWavFile,
   transcodeTracksToWavFolder,
 } from '../dist-electron/electron/transcode.js';
@@ -66,6 +67,17 @@ const batch = await transcodeTracksToWavFolder(
 const batchMagics = await Promise.all(
   batch.files.map(async (file) => (await readFile(file.path)).subarray(0, 4).toString('ascii')),
 );
+const multiFormatExports = [];
+for (const format of ['mp3', 'flac', 'opus']) {
+  const result = await transcodeTracksToAudioFolder(
+    [fixtureTrack(filePath, 10 + multiFormatExports.length, `${format.toUpperCase()} Export`)],
+    resolve('tmp', 'transcode-smoke', `batch-${format}`),
+    format,
+  );
+  const file = result.files[0];
+  const magic = file ? await audioMagic(file.path, format) : '';
+  multiFormatExports.push({ format, result, magic });
+}
 
 const [typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource] = await Promise.all([
   readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
@@ -84,9 +96,22 @@ assert.equal(batch.skipped.length, 0, 'batch export should not skip valid fixtur
 assert.ok(batch.bytes > exported.bytes, 'batch export should report aggregate bytes');
 assert.equal(new Set(batch.files.map((file) => file.path)).size, 2, 'batch export should create unique output paths');
 assert.deepEqual(batchMagics, ['RIFF', 'RIFF'], 'batch export files should be WAV files');
+assert.deepEqual(
+  multiFormatExports.map((item) => ({ format: item.format, exported: item.result.exported, magic: item.magic })),
+  [
+    { format: 'mp3', exported: 1, magic: 'MP3' },
+    { format: 'flac', exported: 1, magic: 'fLaC' },
+    { format: 'opus', exported: 1, magic: 'OggS' },
+  ],
+  'multi-format export should produce MP3, FLAC, and Opus files',
+);
 
 console.log(JSON.stringify({
-  ok: ok && exportedMagic === 'RIFF' && exported.bytes > 44 && batchMagics.every((magic) => magic === 'RIFF'),
+  ok: ok
+    && exportedMagic === 'RIFF'
+    && exported.bytes > 44
+    && batchMagics.every((magic) => magic === 'RIFF')
+    && multiFormatExports.every((item) => item.result.exported === 1),
   fixture: filePath,
   mode: playbackMode(filePath),
   status: res.status,
@@ -98,9 +123,18 @@ console.log(JSON.stringify({
   exportedMagic,
   batch,
   batchMagics,
+  multiFormatExports,
 }, null, 2));
 
-process.exit(ok && exportedMagic === 'RIFF' && exported.bytes > 44 && batchMagics.every((magic) => magic === 'RIFF') ? 0 : 1);
+process.exit(
+  ok
+  && exportedMagic === 'RIFF'
+  && exported.bytes > 44
+  && batchMagics.every((magic) => magic === 'RIFF')
+  && multiFormatExports.every((item) => item.result.exported === 1)
+    ? 0
+    : 1,
+);
 
 function generateFixture() {
   if (!ffmpeg) {
@@ -171,21 +205,47 @@ function fixtureTrack(path, id, title) {
 function assertExportWiring(typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource) {
   assert.match(typesSource, /TrackWavExportResult/, 'shared API should expose WAV export result');
   assert.match(typesSource, /TrackWavBatchExportResult/, 'shared API should expose batch WAV export result');
+  assert.match(typesSource, /AudioExportFormat/, 'shared API should expose audio export formats');
+  assert.match(typesSource, /TrackAudioBatchExportResult/, 'shared API should expose multi-format audio export result');
   assert.match(typesSource, /exportTrackWav/, 'shared API should expose track WAV export');
   assert.match(typesSource, /exportTracksWav/, 'shared API should expose batch track WAV export');
+  assert.match(typesSource, /exportTracksAudio/, 'shared API should expose selected-track audio export');
   assert.match(transcodeSource, /transcodeTracksToWavFolder/, 'transcode module should expose batch WAV folder export');
+  assert.match(transcodeSource, /SUPPORTED_AUDIO_EXPORT_FORMATS/, 'transcode module should define supported audio export formats');
+  assert.match(transcodeSource, /transcodeTracksToAudioFolder/, 'transcode module should expose multi-format folder export');
+  assert.match(transcodeSource, /libmp3lame/, 'multi-format export should support MP3 encoding');
+  assert.match(transcodeSource, /libopus/, 'multi-format export should support Opus encoding');
   assert.match(mainSource, /track:export-wav/, 'main process should register track WAV export IPC');
   assert.match(mainSource, /tracks:export-wav-folder/, 'main process should register batch track WAV export IPC');
+  assert.match(mainSource, /tracks:export-audio-folder/, 'main process should register multi-format track export IPC');
   assert.match(mainSource, /chooseTrackWavExportPath/, 'main process should use a native save dialog for WAV export');
   assert.match(mainSource, /chooseTracksWavExportFolder/, 'main process should use a native folder picker for batch WAV export');
+  assert.match(mainSource, /chooseTracksAudioExportFolder/, 'main process should use a native folder picker for multi-format export');
   assert.match(mainSource, /transcodeTrackToWavFile\(track\.path/, 'main process should reuse ffmpeg file export');
   assert.match(mainSource, /transcodeTracksToWavFolder\(tracks, destinationRoot\)/, 'main process should reuse ffmpeg batch export');
+  assert.match(mainSource, /transcodeTracksToAudioFolder\(tracks, destinationRoot, format\)/, 'main process should reuse ffmpeg multi-format batch export');
   assert.match(preloadSource, /exportTrackWav/, 'preload should expose track WAV export');
   assert.match(preloadSource, /exportTracksWav/, 'preload should expose batch track WAV export');
+  assert.match(preloadSource, /exportTracksAudio/, 'preload should expose multi-format track export');
   assert.match(apiSource, /exportTrackWav/, 'browser-safe API should include track WAV export');
   assert.match(apiSource, /exportTracksWav/, 'browser-safe API should include batch track WAV export');
+  assert.match(apiSource, /exportTracksAudio/, 'browser-safe API should include multi-format track export');
   assert.match(nowPlayingSource, /data-export-track-wav/, 'Now Playing should expose current-track WAV export');
   assert.match(nowPlayingSource, /api\.exportTrackWav\(current\.id\)/, 'Now Playing WAV export should target the current track');
   assert.match(libraryViewSource, /data-export-selected-wav/, 'Library selected toolbar should expose batch WAV export');
+  assert.match(libraryViewSource, /data-export-selected-mp3/, 'Library selected toolbar should expose MP3 export');
+  assert.match(libraryViewSource, /data-export-selected-flac/, 'Library selected toolbar should expose FLAC export');
+  assert.match(libraryViewSource, /data-export-selected-opus/, 'Library selected toolbar should expose Opus export');
   assert.match(libraryViewSource, /api\.exportTracksWav/, 'Library selected toolbar should call batch WAV export');
+  assert.match(libraryViewSource, /api\.exportTracksAudio/, 'Library selected toolbar should call multi-format export');
+}
+
+async function audioMagic(path, format) {
+  const buffer = await readFile(path);
+  const magic = buffer.subarray(0, 4).toString('ascii');
+  if (format === 'mp3') {
+    if (magic.slice(0, 3) === 'ID3') return 'MP3';
+    if (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) return 'MP3';
+  }
+  return magic;
 }

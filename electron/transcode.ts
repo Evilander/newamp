@@ -4,9 +4,15 @@ import { existsSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { Readable } from 'node:stream';
-import type { Track, TrackWavBatchExportResult } from '../shared/types.js';
+import type {
+  AudioExportFormat,
+  Track,
+  TrackAudioBatchExportResult,
+  TrackWavBatchExportResult,
+} from '../shared/types.js';
 
 const REPLAYGAIN_TARGET_LUFS = -18;
+const SUPPORTED_AUDIO_EXPORT_FORMATS = new Set<AudioExportFormat>(['wav', 'mp3', 'flac', 'opus']);
 
 const CHROMIUM_NATIVE_EXTS = new Set([
   '.mp3',
@@ -105,31 +111,8 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
 }
 
 export async function transcodeTrackToWavFile(inputPath: string, outputPath: string): Promise<{ path: string; bytes: number }> {
-  if (!inputPath || !outputPath) throw new Error('Input and output paths are required.');
-  const ffmpeg = resolveFfmpegPath();
-  await runFfmpeg([
-    '-hide_banner',
-    '-nostdin',
-    '-loglevel',
-    'error',
-    '-i',
-    inputPath,
-    '-map',
-    '0:a:0',
-    '-vn',
-    '-f',
-    'wav',
-    '-acodec',
-    'pcm_s16le',
-    '-ar',
-    '48000',
-    '-ac',
-    '2',
-    '-y',
-    outputPath,
-  ], ffmpeg);
-  const info = await stat(outputPath);
-  return { path: outputPath, bytes: info.size };
+  const result = await transcodeTrackToAudioFile(inputPath, outputPath, 'wav');
+  return { path: result.path, bytes: result.bytes };
 }
 
 export async function transcodeTracksToWavFolder(
@@ -161,6 +144,77 @@ export async function transcodeTracksToWavFolder(
     exported: files.length,
     skipped,
     bytes,
+    files,
+  };
+}
+
+export async function transcodeTrackToAudioFile(
+  inputPath: string,
+  outputPath: string,
+  format: AudioExportFormat,
+): Promise<{ path: string; bytes: number; format: AudioExportFormat }> {
+  if (!inputPath || !outputPath) throw new Error('Input and output paths are required.');
+  const normalizedFormat = normalizeAudioExportFormat(format);
+  const ffmpeg = resolveFfmpegPath();
+  await runFfmpeg([
+    '-hide_banner',
+    '-nostdin',
+    '-loglevel',
+    'error',
+    '-i',
+    inputPath,
+    '-map',
+    '0:a:0',
+    '-vn',
+    ...audioExportArgs(normalizedFormat),
+    '-y',
+    outputPath,
+  ], ffmpeg);
+  const info = await stat(outputPath);
+  return { path: outputPath, bytes: info.size, format: normalizedFormat };
+}
+
+export async function transcodeTracksToAudioFolder(
+  tracks: Track[],
+  outputDir: string,
+  format: AudioExportFormat,
+): Promise<TrackAudioBatchExportResult> {
+  if (!outputDir) throw new Error('Output folder is required.');
+  const normalizedFormat = normalizeAudioExportFormat(format);
+  await mkdir(outputDir, { recursive: true });
+
+  const width = Math.max(2, String(Math.max(1, tracks.length)).length);
+  const usedNames = new Set<string>();
+  const files: TrackAudioBatchExportResult['files'] = [];
+  const skipped: string[] = [];
+  let bytes = 0;
+
+  for (const [index, track] of tracks.entries()) {
+    try {
+      const fileName = uniqueAudioFileName(
+        outputDir,
+        batchAudioFileName(track, index + 1, width, normalizedFormat),
+        normalizedFormat,
+        usedNames,
+      );
+      const result = await transcodeTrackToAudioFile(
+        track.path,
+        join(outputDir, fileName),
+        normalizedFormat,
+      );
+      files.push(result);
+      bytes += result.bytes;
+    } catch (err) {
+      skipped.push(`${trackLabel(track)}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  return {
+    path: outputDir,
+    exported: files.length,
+    skipped,
+    bytes,
+    format: normalizedFormat,
     files,
   };
 }
@@ -258,8 +312,35 @@ function normalizeReplayGainDb(value: number): number {
   return Math.max(-30, Math.min(30, Number(value.toFixed(2))));
 }
 
+function normalizeAudioExportFormat(format: AudioExportFormat): AudioExportFormat {
+  if (SUPPORTED_AUDIO_EXPORT_FORMATS.has(format)) return format;
+  throw new Error(`Unsupported audio export format: ${String(format)}`);
+}
+
+function audioExportArgs(format: AudioExportFormat): string[] {
+  if (format === 'wav') {
+    return ['-f', 'wav', '-acodec', 'pcm_s16le', '-ar', '48000', '-ac', '2'];
+  }
+  if (format === 'mp3') {
+    return ['-codec:a', 'libmp3lame', '-b:a', '320k', '-ar', '48000', '-ac', '2'];
+  }
+  if (format === 'flac') {
+    return ['-codec:a', 'flac', '-compression_level', '8'];
+  }
+  return ['-codec:a', 'libopus', '-b:a', '192k', '-vbr', 'on'];
+}
+
 function batchWavFileName(track: Track, position: number, width: number): string {
   return `${String(position).padStart(width, '0')} - ${safeFileStem(trackLabel(track))}.wav`;
+}
+
+function batchAudioFileName(
+  track: Track,
+  position: number,
+  width: number,
+  format: AudioExportFormat,
+): string {
+  return `${String(position).padStart(width, '0')} - ${safeFileStem(trackLabel(track))}.${format}`;
 }
 
 function trackLabel(track: Track): string {
@@ -270,6 +351,24 @@ function trackLabel(track: Track): string {
 
 function uniqueWavFileName(outputDir: string, fileName: string, usedNames: Set<string>): string {
   const ext = '.wav';
+  const stem = fileName.toLowerCase().endsWith(ext) ? fileName.slice(0, -ext.length) : fileName;
+  let candidate = `${stem}${ext}`;
+  let suffix = 2;
+  while (usedNames.has(candidate.toLowerCase()) || existsSync(join(outputDir, candidate))) {
+    candidate = `${stem} (${suffix})${ext}`;
+    suffix += 1;
+  }
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
+}
+
+function uniqueAudioFileName(
+  outputDir: string,
+  fileName: string,
+  format: AudioExportFormat,
+  usedNames: Set<string>,
+): string {
+  const ext = `.${format}`;
   const stem = fileName.toLowerCase().endsWith(ext) ? fileName.slice(0, -ext.length) : fileName;
   let candidate = `${stem}${ext}`;
   let suffix = 2;

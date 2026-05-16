@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type {
+  AudioExportFormat,
   LibraryHealth,
   MetadataLookupCandidate,
   SavedPlaylist,
@@ -950,6 +951,22 @@ export function TrackTable({
     }
   }
 
+  async function exportSelectedAudio(format: AudioExportFormat): Promise<void> {
+    if (!selectedTracks.length || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const result = await api.exportTracksAudio(selectedTracks.map((track) => track.id), format);
+      if (!result) {
+        setPlaylistStatus(`${format.toUpperCase()} export canceled.`);
+        return;
+      }
+      const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
+      setPlaylistStatus(`Exported ${result.exported.toLocaleString()} ${format.toUpperCase()} file${result.exported === 1 ? '' : 's'}${skipped} to ${result.path}.`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   async function analyzeSelectedReplayGain(): Promise<void> {
     if (!selectedTracks.length || bulkBusy) return;
     setBulkBusy(true);
@@ -1030,6 +1047,33 @@ export function TrackTable({
             title="Transcode selected tracks to WAV files in a folder"
           >
             EXPORT SELECTED WAV
+          </button>
+          <button
+            className="pxbtn"
+            data-export-selected-mp3
+            onClick={() => void exportSelectedAudio('mp3')}
+            disabled={bulkBusy}
+            title="Transcode selected tracks to 320 kbps MP3 files in a folder"
+          >
+            MP3
+          </button>
+          <button
+            className="pxbtn"
+            data-export-selected-flac
+            onClick={() => void exportSelectedAudio('flac')}
+            disabled={bulkBusy}
+            title="Transcode selected tracks to FLAC files in a folder"
+          >
+            FLAC
+          </button>
+          <button
+            className="pxbtn"
+            data-export-selected-opus
+            onClick={() => void exportSelectedAudio('opus')}
+            disabled={bulkBusy}
+            title="Transcode selected tracks to Opus files in a folder"
+          >
+            OPUS
           </button>
           <button
             className="pxbtn"
