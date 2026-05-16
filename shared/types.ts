@@ -184,6 +184,7 @@ export interface ReplayGainAnalysisResult {
   analyzed: number;
   skipped: string[];
   tracks: Track[];
+  albumGroups?: number;
 }
 
 export interface LibraryDuplicateGroup {
@@ -619,6 +620,7 @@ export interface NewampAPI {
   exportTrackWav: (id: number) => Promise<TrackWavExportResult | null>;
   exportTracksWav: (ids: number[]) => Promise<TrackWavBatchExportResult | null>;
   analyzeReplayGain: (ids: number[]) => Promise<ReplayGainAnalysisResult>;
+  analyzeAlbumReplayGain: (ids: number[]) => Promise<ReplayGainAnalysisResult>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;
   getDroppedFilePaths: (files: unknown[]) => string[];

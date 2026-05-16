@@ -1579,12 +1579,21 @@ export class LibraryStore {
     return this.getTrack(trackId);
   }
 
-  setTrackReplayGain(id: number, replayGainTrackDb: number): Track | null {
+  setTrackReplayGain(id: number, replayGainTrackDb: number, replayGainAlbumDb?: number | null): Track | null {
     const trackId = Math.trunc(Number(id));
     if (!Number.isFinite(trackId) || trackId <= 0) return null;
-    const gain = normalizeReplayGainDb(replayGainTrackDb);
-    if (gain == null) return null;
-    this.db.run(`UPDATE tracks SET replaygain_track_db = ? WHERE id = ?`, [gain, trackId]);
+    const trackGain = normalizeReplayGainDb(replayGainTrackDb);
+    if (trackGain == null) return null;
+    if (replayGainAlbumDb === undefined) {
+      this.db.run(`UPDATE tracks SET replaygain_track_db = ? WHERE id = ?`, [trackGain, trackId]);
+    } else {
+      const albumGain = normalizeReplayGainDb(replayGainAlbumDb);
+      this.db.run(`UPDATE tracks SET replaygain_track_db = ?, replaygain_album_db = ? WHERE id = ?`, [
+        trackGain,
+        albumGain,
+        trackId,
+      ]);
+    }
     if (this.db.getRowsModified() <= 0) return null;
     this.scheduleFlush();
     return this.getTrack(trackId);

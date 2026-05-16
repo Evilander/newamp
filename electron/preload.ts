@@ -108,6 +108,8 @@ const api: NewampAPI = {
     ipcRenderer.invoke('tracks:export-wav-folder', ids) as Promise<TrackWavBatchExportResult | null>,
   analyzeReplayGain: (ids: number[]) =>
     ipcRenderer.invoke('tracks:analyze-replaygain', ids) as Promise<ReplayGainAnalysisResult>,
+  analyzeAlbumReplayGain: (ids: number[]) =>
+    ipcRenderer.invoke('tracks:analyze-album-replaygain', ids) as Promise<ReplayGainAnalysisResult>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,
   getDroppedFilePaths: (files: unknown[]) => {

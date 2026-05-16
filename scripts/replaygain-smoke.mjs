@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LibraryStore } from '../dist-electron/electron/library.js';
 import { Scanner } from '../dist-electron/electron/scanner.js';
-import { analyzeTrackReplayGain } from '../dist-electron/electron/transcode.js';
+import { analyzeTrackReplayGain, calculateAlbumReplayGainDb } from '../dist-electron/electron/transcode.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const smokeRoot = join(repoRoot, 'tmp', 'replaygain-smoke');
@@ -69,7 +69,11 @@ const [track] = library.getTracks({ limit: 10, sort: 'album' });
 const quietTrack = library.getTracks({ search: 'title:02-needs-boost', limit: 10, sort: 'title' })[0];
 const analysis = await analyzeTrackReplayGain(quietFixturePath);
 assert.ok(analysis.replayGainTrackDb > 0, 'quiet fixture should need positive ReplayGain');
-const analyzedTrack = quietTrack ? library.setTrackReplayGain(quietTrack.id, analysis.replayGainTrackDb) : null;
+const albumReplayGainDb = calculateAlbumReplayGainDb([
+  { integratedLufs: analysis.integratedLufs, duration: quietTrack?.duration ?? 0.8 },
+  { integratedLufs: -18, duration: 0.8 },
+]);
+const analyzedTrack = quietTrack ? library.setTrackReplayGain(quietTrack.id, analysis.replayGainTrackDb, albumReplayGainDb) : null;
 library.close();
 
 assert.ok(track, 'ReplayGain fixture should scan');
@@ -79,6 +83,7 @@ assert.equal(track.title, 'Gain Staged');
 assert.equal(track.replayGainTrackDb, -7);
 assert.equal(track.replayGainAlbumDb, -5.5);
 assert.equal(analyzedTrack?.replayGainTrackDb, Number(analysis.replayGainTrackDb.toFixed(2)));
+assert.equal(analyzedTrack?.replayGainAlbumDb, albumReplayGainDb);
 
 const [typesSource, transcodeSource, librarySource, mainSource, preloadSource, apiSource, engineSource, storeSource, settingsSource, libraryViewSource] = await Promise.all([
   readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
@@ -95,17 +100,26 @@ const [typesSource, transcodeSource, librarySource, mainSource, preloadSource, a
 
 assert.match(typesSource, /ReplayGainAnalysisResult/, 'shared API should expose ReplayGain analysis result');
 assert.match(typesSource, /analyzeReplayGain/, 'shared API should expose ReplayGain analysis');
+assert.match(typesSource, /analyzeAlbumReplayGain/, 'shared API should expose album ReplayGain analysis');
 assert.match(transcodeSource, /analyzeTrackReplayGain/, 'transcode module should expose ffmpeg ReplayGain analysis');
+assert.match(transcodeSource, /calculateAlbumReplayGainDb/, 'transcode module should calculate album ReplayGain from analyzed tracks');
 assert.match(transcodeSource, /ebur128=peak=true/, 'ReplayGain analysis should use ffmpeg EBU R128 loudness');
 assert.match(librarySource, /setTrackReplayGain/, 'library should persist analyzed ReplayGain values');
+assert.match(librarySource, /replaygain_album_db/, 'library should persist analyzed album ReplayGain values');
 assert.match(mainSource, /tracks:analyze-replaygain/, 'main process should register ReplayGain analysis IPC');
+assert.match(mainSource, /tracks:analyze-album-replaygain/, 'main process should register album ReplayGain analysis IPC');
+assert.match(mainSource, /groupTracksForAlbumReplayGain/, 'main process should group selected tracks before album ReplayGain analysis');
 assert.match(preloadSource, /analyzeReplayGain/, 'preload should expose ReplayGain analysis');
+assert.match(preloadSource, /analyzeAlbumReplayGain/, 'preload should expose album ReplayGain analysis');
 assert.match(apiSource, /analyzeReplayGain/, 'browser-safe API should include ReplayGain analysis');
+assert.match(apiSource, /analyzeAlbumReplayGain/, 'browser-safe API should include album ReplayGain analysis');
 assert.match(engineSource, /setReplayGainDb/, 'audio engine should expose ReplayGain control');
 assert.match(storeSource, /applyReplayGain/, 'player store should apply ReplayGain per track');
 assert.match(settingsSource, /ReplayGain/, 'settings should expose ReplayGain mode');
 assert.match(libraryViewSource, /data-analyze-selected-replaygain/, 'Library selected toolbar should expose ReplayGain analysis');
+assert.match(libraryViewSource, /data-analyze-selected-album-replaygain/, 'Library selected toolbar should expose album ReplayGain analysis');
 assert.match(libraryViewSource, /api\.analyzeReplayGain/, 'Library selected toolbar should call ReplayGain analysis');
+assert.match(libraryViewSource, /api\.analyzeAlbumReplayGain/, 'Library selected toolbar should call album ReplayGain analysis');
 
 console.log(JSON.stringify({
   ok: true,
@@ -115,6 +129,7 @@ console.log(JSON.stringify({
   analyzed: {
     title: analyzedTrack?.title,
     replayGainTrackDb: analyzedTrack?.replayGainTrackDb,
+    replayGainAlbumDb: analyzedTrack?.replayGainAlbumDb,
     integratedLufs: analysis.integratedLufs,
   },
 }, null, 2));
