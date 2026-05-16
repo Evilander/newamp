@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { checkManualListeningProof, summarizeManualListeningProof } from './manual-listening-proof.mjs';
+import { checkReleaseBundle } from './release-bundle.mjs';
 import { checkReleaseChecksums } from './release-checksums.mjs';
 import { checkLastfmLiveProof, summarizeLastfmLiveProof } from './lastfm-live-proof.mjs';
 
@@ -28,6 +29,7 @@ const checks = [
   signingWorkflowCheck(),
   githubPublishWorkflowCheck(),
   releaseChecksumsCheck(),
+  releaseBundleCheck(),
   artifactSignatureCheck(),
   lastfmProofCheck(),
   manualProofCheck(),
@@ -49,6 +51,7 @@ const report = {
     'npm version 1.0.0 --no-git-tag-version',
     'npm run package',
     'npm run release:checksums',
+    'npm run release:bundle',
     'npm run release:sign -- --dry-run',
     'npm run release:sign',
     'complete Last.fm live-account proof and any required Ultimate Guitar release decision',
@@ -180,6 +183,17 @@ function releaseChecksumsCheck() {
     ok: report.ok,
     path: report.path,
     exists: report.exists,
+    reason: report.reason,
+  };
+}
+
+function releaseBundleCheck() {
+  const report = checkReleaseBundle({ root: repoRoot, version: releaseVersion });
+  return {
+    name: 'release-bundle',
+    ok: report.ok,
+    paths: report.paths,
+    bundle: report.bundle,
     reason: report.reason,
   };
 }
