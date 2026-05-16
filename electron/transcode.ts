@@ -184,6 +184,26 @@ export async function analyzeTrackReplayGain(inputPath: string): Promise<{ repla
   return { replayGainTrackDb, integratedLufs };
 }
 
+export function calculateAlbumReplayGainDb(
+  analyses: Array<{ integratedLufs: number; duration?: number | null }>,
+): number {
+  let weightedEnergy = 0;
+  let totalDuration = 0;
+  for (const analysis of analyses) {
+    if (!Number.isFinite(analysis.integratedLufs)) continue;
+    const duration = analysis.duration && Number.isFinite(analysis.duration) && analysis.duration > 0
+      ? analysis.duration
+      : 1;
+    weightedEnergy += duration * Math.pow(10, analysis.integratedLufs / 10);
+    totalDuration += duration;
+  }
+  if (weightedEnergy <= 0 || totalDuration <= 0) {
+    throw new Error('Album ReplayGain analysis did not produce finite loudness.');
+  }
+  const albumLufs = 10 * Math.log10(weightedEnergy / totalDuration);
+  return normalizeReplayGainDb(REPLAYGAIN_TARGET_LUFS - albumLufs);
+}
+
 function resolveFfmpegPath(): string {
   const candidate = process.env.NEWAMP_FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
   return candidate.includes('app.asar')

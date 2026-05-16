@@ -38,6 +38,7 @@ import {
 } from './lastfm.js';
 import {
   playbackMode,
+  calculateAlbumReplayGainDb,
   analyzeTrackReplayGain,
   transcodeToWavResponse,
   transcodeTrackToWavFile,
@@ -675,6 +676,7 @@ function registerIpc(): void {
     return transcodeTracksToWavFolder(tracks, destinationRoot);
   });
   ipcMain.handle('tracks:analyze-replaygain', async (_e, ids: number[]) => analyzeReplayGain(ids));
+  ipcMain.handle('tracks:analyze-album-replaygain', async (_e, ids: number[]) => analyzeAlbumReplayGain(ids));
   ipcMain.handle('open:consume-pending-files', async () => {
     const files = pendingOpenFiles;
     pendingOpenFiles = [];
@@ -1866,6 +1868,68 @@ async function analyzeReplayGain(ids: number[]) {
     }
   }
   return { analyzed: updated.length, skipped, tracks: updated };
+}
+
+async function analyzeAlbumReplayGain(ids: number[]) {
+  const groups = groupTracksForAlbumReplayGain(resolveExportTracks(ids));
+  const updated: Track[] = [];
+  const skipped: string[] = [];
+  let albumGroups = 0;
+
+  for (const tracks of groups.values()) {
+    const analyses: Array<{ track: Track; replayGainTrackDb: number; integratedLufs: number; duration: number | null }> = [];
+    for (const track of tracks) {
+      try {
+        const analysis = await analyzeTrackReplayGain(track.path);
+        analyses.push({
+          track,
+          replayGainTrackDb: analysis.replayGainTrackDb,
+          integratedLufs: analysis.integratedLufs,
+          duration: track.duration,
+        });
+      } catch (err) {
+        skipped.push(`${track.artist} - ${track.title}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (!analyses.length) continue;
+    const replayGainAlbumDb = calculateAlbumReplayGainDb(analyses);
+    albumGroups += 1;
+    for (const analysis of analyses) {
+      const next = library.setTrackReplayGain(analysis.track.id, analysis.replayGainTrackDb, replayGainAlbumDb);
+      if (next) updated.push(next);
+      else skipped.push(`${analysis.track.artist} - ${analysis.track.title}: track was not updated`);
+    }
+  }
+
+  return { analyzed: updated.length, skipped, tracks: updated, albumGroups };
+}
+
+function groupTracksForAlbumReplayGain(tracks: Track[]): Map<string, Track[]> {
+  const groups = new Map<string, Track[]>();
+  for (const track of tracks) {
+    const album = normalizeAlbumReplayGainKeyPart(track.album) || `track:${track.id}`;
+    const albumArtist = normalizeAlbumReplayGainKeyPart(track.albumArtist)
+      || normalizeAlbumReplayGainKeyPart(track.artist)
+      || 'unknown artist';
+    const key = `${albumArtist}\u0000${album}`;
+    const group = groups.get(key) ?? [];
+    group.push(track);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    group.sort((a, b) =>
+      (a.discNo ?? 0) - (b.discNo ?? 0)
+      || (a.trackNo ?? 0) - (b.trackNo ?? 0)
+      || a.title.localeCompare(b.title)
+      || a.path.localeCompare(b.path),
+    );
+  }
+  return groups;
+}
+
+function normalizeAlbumReplayGainKeyPart(value: string | null | undefined): string {
+  const text = String(value ?? '').trim().toLowerCase();
+  return text && !['unknown album', 'unknown artist'].includes(text) ? text : '';
 }
 
 async function openFiles(paths: string[]): Promise<OpenFilesResult> {

@@ -963,6 +963,20 @@ export function TrackTable({
     }
   }
 
+  async function analyzeSelectedAlbumReplayGain(): Promise<void> {
+    if (!selectedTracks.length || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const result = await api.analyzeAlbumReplayGain(selectedTracks.map((track) => track.id));
+      onBulkMetadataSaved?.(result.tracks);
+      const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
+      const groups = result.albumGroups == null ? '' : ` across ${result.albumGroups.toLocaleString()} album group${result.albumGroups === 1 ? '' : 's'}`;
+      setPlaylistStatus(`Analyzed album ReplayGain for ${result.analyzed.toLocaleString()} selected track${result.analyzed === 1 ? '' : 's'}${groups}${skipped}.`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   return (
     <>
       {playlistStatus && (
@@ -1025,6 +1039,15 @@ export function TrackTable({
             title="Analyze selected tracks and store ReplayGain in the Newamp catalog"
           >
             ANALYZE REPLAYGAIN
+          </button>
+          <button
+            className="pxbtn"
+            data-analyze-selected-album-replaygain
+            onClick={() => void analyzeSelectedAlbumReplayGain()}
+            disabled={bulkBusy}
+            title="Analyze selected tracks as albums and store track plus album ReplayGain"
+          >
+            ANALYZE ALBUM GAIN
           </button>
           <div className="flex flex-wrap items-center gap-1" data-bulk-metadata-edit>
             <input
