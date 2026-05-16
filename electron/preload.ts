@@ -201,6 +201,7 @@ const api: NewampAPI = {
   recordSkip: (id, position) => ipcRenderer.invoke('library:record-skip', id, position),
   getArtUrl: (trackId: number) => `newart://${trackId}/art`,
   pickFolder: () => ipcRenderer.invoke('os:pick-folder'),
+  getSuggestedMusicFolders: () => ipcRenderer.invoke('os:suggested-music-folders'),
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
   setSettings: (patch) => ipcRenderer.invoke('settings:set', patch) as Promise<AppSettings>,
   exportCustomSkin: (skin: CustomSkin) =>

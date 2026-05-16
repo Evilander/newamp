@@ -33,6 +33,7 @@
     "smoke:cue": "npm run build:electron && node scripts/cue-smoke.mjs",
     "smoke:incremental-scan": "npm run build:electron && node scripts/incremental-scan-smoke.mjs",
     "smoke:scanner-queue": "npm run build:electron && node scripts/scanner-queue-smoke.mjs",
+    "smoke:music-folders": "npm run build:electron && node scripts/music-folder-suggestions-smoke.mjs",
     "smoke:library-paging": "npm run build:electron && node scripts/library-paging-smoke.mjs",
     "smoke:home": "npm run build:electron && node scripts/home-smoke.mjs",
     "smoke:folders": "npm run build:electron && node scripts/folder-browser-smoke.mjs",

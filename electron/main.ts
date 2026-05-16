@@ -49,6 +49,7 @@ import { exportPlaylistFolder } from './playlist-export.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
 import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from './winamp-skin-import.js';
 import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
+import { suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import type {
   CustomSkin,
@@ -950,6 +951,8 @@ function registerIpc(): void {
       return null;
     }
   });
+
+  ipcMain.handle('os:suggested-music-folders', async () => suggestMusicFolders());
 
   ipcMain.handle('os:show-in-folder', async (_e, p: string) => {
     shell.showItemInFolder(p);

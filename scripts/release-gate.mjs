@@ -35,6 +35,7 @@ if (!skipSmokes) {
     'smoke:transcode',
     'smoke:incremental-scan',
     'smoke:scanner-queue',
+    'smoke:music-folders',
     'smoke:library-paging',
     'smoke:album-art',
     'smoke:artist',

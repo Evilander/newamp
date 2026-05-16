@@ -4,19 +4,33 @@
 // steps, big call-to-action.
 
 import { useEffect, useRef, useState } from 'react';
+import type { MusicFolderSuggestion } from '@shared/types';
 import { api, inElectron } from '../../lib/api';
 import { usePlayerStore } from '../../store/usePlayerStore';
 
 export function EmptyLibrary(): JSX.Element {
   const setView = usePlayerStore((s) => s.setView);
   const [folders, setFolders] = useState<string[]>([]);
+  const [suggestions, setSuggestions] = useState<MusicFolderSuggestion[]>([]);
   const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
-    api.getSettings()
-      .then((s) => setFolders(s.libraryRoots))
+    let cancelled = false;
+    Promise.all([api.getSettings(), api.getSuggestedMusicFolders()])
+      .then(([settings, detected]) => {
+        if (cancelled) return;
+        setFolders(settings.libraryRoots);
+        setSuggestions(detected);
+      })
       .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  const availableSuggestions = suggestions.filter((suggestion) =>
+    !folders.some((folder) => samePath(folder, suggestion.path)),
+  );
 
   async function chooseFolder(): Promise<void> {
     if (!inElectron) {
@@ -26,10 +40,25 @@ export function EmptyLibrary(): JSX.Element {
     }
     const dir = await api.pickFolder();
     if (!dir) return;
-    setFolders((f) => Array.from(new Set([...f, dir])));
-    await api.setSettings({ libraryRoots: Array.from(new Set([...folders, dir])) });
+    await addFolderAndScan(dir);
+  }
+
+  async function addFolderAndScan(dir: string): Promise<void> {
+    const next = mergeRoots(folders, dir);
+    setFolders(next);
+    const updated = await api.setSettings({ libraryRoots: next });
+    setFolders(updated.libraryRoots);
+    await scanFolders([dir]);
+  }
+
+  async function scanFolders(roots: string[]): Promise<void> {
+    if (!roots.length) return;
     setScanning(true);
-    await api.scanLibrary([dir]);
+    try {
+      await api.scanLibrary(roots);
+    } finally {
+      setScanning(false);
+    }
   }
 
   return (
@@ -71,7 +100,7 @@ export function EmptyLibrary(): JSX.Element {
           <Step
             n={1}
             title="Choose a music folder"
-            description="Point Newamp at any folder. K:/music is auto-picked if it exists. Subfolders are scanned recursively."
+            description="Point Newamp at any folder. K:/music appears below as a one-click scan target when it exists. Subfolders are scanned recursively."
             done={folders.length > 0}
           />
           <Step
@@ -88,9 +117,41 @@ export function EmptyLibrary(): JSX.Element {
           />
         </section>
 
+        {availableSuggestions.length > 0 && (
+          <section
+            className="flex flex-wrap items-center gap-2 px-4 py-3 text-[11px]"
+            style={{
+              background: 'var(--panel)',
+              border: '1px solid var(--line)',
+              borderRadius: 'var(--radius-card)',
+              color: 'var(--ink-2)',
+            }}
+          >
+            <span
+              className="uppercase tracking-[0.28em]"
+              style={{ color: 'var(--muted)' }}
+            >
+              Detected folders
+            </span>
+            {availableSuggestions.slice(0, 4).map((suggestion) => (
+              <button
+                key={suggestion.path}
+                data-music-folder-suggestion
+                className="pxbtn is-active max-w-[320px] truncate"
+                disabled={scanning}
+                title={`${suggestion.reason}: ${suggestion.path}`}
+                onClick={() => void addFolderAndScan(suggestion.path)}
+              >
+                {suggestion.label}: {suggestion.path}
+              </button>
+            ))}
+          </section>
+        )}
+
         <section className="flex items-stretch gap-3">
           <button
             onClick={() => void chooseFolder()}
+            disabled={scanning}
             className="group relative flex flex-1 items-center justify-between overflow-hidden px-6 py-4 transition-all"
             style={{
               background:
@@ -144,7 +205,8 @@ export function EmptyLibrary(): JSX.Element {
             <span className="font-mono">{folders.join('  ·  ')}</span>
             <button
               className="pxbtn ml-auto is-active"
-              onClick={() => void api.scanLibrary(folders)}
+              disabled={scanning}
+              onClick={() => void scanFolders(folders)}
             >
               ▶ Scan now
             </button>
@@ -159,6 +221,25 @@ export function EmptyLibrary(): JSX.Element {
       </div>
     </div>
   );
+}
+
+function mergeRoots(roots: string[], nextRoot: string): string[] {
+  const out: string[] = [];
+  for (const root of [...roots, nextRoot]) {
+    const trimmed = root.trim();
+    if (!trimmed) continue;
+    if (out.some((existing) => samePath(existing, trimmed))) continue;
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function samePath(a: string, b: string): boolean {
+  return normalizePathKey(a) === normalizePathKey(b);
+}
+
+function normalizePathKey(path: string): string {
+  return path.trim().replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
 }
 
 function HexBadge({ label, tone = 'accent' }: { label: string; tone?: 'accent' | 'warn' | 'error' }): JSX.Element {

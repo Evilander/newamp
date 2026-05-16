@@ -244,6 +244,7 @@ const stub: NewampAPI = {
   recordSkip: async () => undefined,
   getArtUrl: () => '',
   pickFolder: async () => null,
+  getSuggestedMusicFolders: async () => [],
   getSettings: async () => DEFAULT_SETTINGS,
   setSettings: async (patch) => ({
     ...DEFAULT_SETTINGS,

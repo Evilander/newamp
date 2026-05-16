@@ -18,7 +18,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 
 ## Highlights
 
-- **Local library scanner.** Recursively indexes real music folders into a local `sql.js` catalog with tag parsing through `music-metadata`.
+- **Local library scanner.** Recursively indexes real music folders into a local `sql.js` catalog with tag parsing through `music-metadata`, plus one-click music folder suggestions for common Windows and external-drive libraries.
 - **Broad playback support.** Handles MP3, FLAC, OGG/Opus, WAV, M4A/AAC/ALAC, WMA, AIFF, APE, WV, MPC, TTA, MKA, AC3, DTS, DSF, playlists, CUE sheets, and ffmpeg fallback formats, with broken-track auto-skip so one bad file does not stall a queue.
 - **Home command center.** Opens to a useful dashboard with continue playback, library stats, health signals, fresh imports, heavy rotation, loved tracks, harmonic mixes, and saved playlists.
 - **Quick Play command palette.** Ctrl+K/Ctrl+J searches tracks, albums, artists, playlists, views, and commands; Enter plays, Ctrl+Enter plays next, Shift+Enter queues, Ctrl+L loves, and Ctrl+R starts Smart Rule Radio.
@@ -118,6 +118,7 @@ npm run smoke:build-lock
 npm run smoke:transcode
 npm run smoke:incremental-scan
 npm run smoke:scanner-queue
+npm run smoke:music-folders
 npm run smoke:library-paging
 npm run smoke:artist
 npm run smoke:folders
