@@ -111,7 +111,7 @@ npm run release:bundle
 npm run release:publish-github
 ```
 
-The completion audit restates the objective as concrete deliverables, maps each one to source/artifact/test evidence, and optionally reruns the real `K:/music` proof. Readiness checks the README, package version, git/GitHub CLI state, signed artifacts, Last.fm live proof, and manual listening proof. `release:bundle` creates a self-verifying local bundle. `release:publish-github` dry-runs the exact git/GitHub command sequence and only executes with `-- --execute` after readiness passes.
+The completion audit restates the objective as concrete deliverables, maps each one to source/artifact/test evidence, and optionally reruns the real `K:/music` proof. Readiness checks the README, package version, git/GitHub CLI state, signed artifacts, Last.fm live proof, and manual listening proof. `release:bundle` creates a self-verifying local bundle. `release:publish-github` dry-runs the exact git/GitHub command sequence and uploads the installer, portable EXE, checksums, source archive, release manifest, and bundle only with `-- --execute` after readiness passes.
 
 ## Important Smoke Tests
 
