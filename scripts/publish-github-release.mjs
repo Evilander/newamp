@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkReleaseBundle, releaseBundlePaths } from './release-bundle.mjs';
 import { checkReleaseChecksums, releaseChecksumsPath } from './release-checksums.mjs';
@@ -306,6 +306,9 @@ function runGit(root, gitDir, args) {
   return spawnSync('git', commandArgs, {
     cwd: root,
     encoding: 'utf8',
+    env: gitDir
+      ? process.env
+      : { ...process.env, GIT_CEILING_DIRECTORIES: dirname(resolve(root)) },
     windowsHide: true,
   });
 }
@@ -400,7 +403,7 @@ function resolveGitDir(root, env) {
   const localExternal = resolve(root, '.newamp-git');
   if (existsSync(localExternal)) return localExternal;
   const tmpExternal = resolve('B:/tmp/newamp-publication.git');
-  if (process.platform === 'win32' && existsSync(tmpExternal)) return tmpExternal;
+  if (process.platform === 'win32' && resolve(root) === repoRoot && existsSync(tmpExternal)) return tmpExternal;
   return null;
 }
 

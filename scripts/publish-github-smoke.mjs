@@ -27,12 +27,17 @@ const cleanExternalGitDir = join(repoRoot, 'tmp', 'publish-github-smoke-clean.gi
 await rm(smokeRoot, { recursive: true, force: true });
 await rm(cleanExternalGitDir, { recursive: true, force: true });
 await mkdir(join(smokeRoot, 'release', 'win-unpacked'), { recursive: true });
+await mkdir(join(smokeRoot, 'source-fixture'), { recursive: true });
 await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
 await writeFile(join(smokeRoot, 'README.md'), '# Newamp\n', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'Newamp Setup 1.0.0.exe'), 'installer', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'Newamp Portable 1.0.0.exe'), 'portable', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'win-unpacked', 'Newamp.exe'), 'exe', 'utf8');
-await writeFile(join(smokeRoot, 'release', 'Newamp-1.0.0-source.zip'), 'source archive', 'utf8');
+await writeFile(join(smokeRoot, 'source-fixture', 'README.md'), '# Newamp source fixture\n', 'utf8');
+compressDirectoryToZip(
+  join(smokeRoot, 'source-fixture'),
+  join(smokeRoot, 'release', 'Newamp-1.0.0-source.zip'),
+);
 writeReleaseChecksums({ root: smokeRoot, version: '1.0.0' });
 const bundle = createReleaseBundle({
   root: smokeRoot,
@@ -175,4 +180,23 @@ function run(command, args, cwd) {
   if (result.status !== 0 || result.error) {
     throw new Error(`${command} ${args.join(' ')} failed\n${result.stderr || result.stdout || result.error?.message || ''}`);
   }
+}
+
+function compressDirectoryToZip(sourceDir, outputPath) {
+  if (process.platform !== 'win32') {
+    throw new Error('publish GitHub smoke currently uses Windows PowerShell zip support');
+  }
+  const command = [
+    'Compress-Archive',
+    '-Path',
+    quoteForPowerShell(join(sourceDir, '*')),
+    '-DestinationPath',
+    quoteForPowerShell(outputPath),
+    '-Force',
+  ].join(' ');
+  run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], repoRoot);
+}
+
+function quoteForPowerShell(value) {
+  return `'${value.replace(/'/g, "''")}'`;
 }
