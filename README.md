@@ -183,6 +183,19 @@ Check it later with:
 npm run release:check-listening-proof
 ```
 
+Record Last.fm live-account proof without saving API secrets into the repo:
+
+```bash
+set NEWAMP_LASTFM_API_KEY=<api-key>
+set NEWAMP_LASTFM_SHARED_SECRET=<shared-secret>
+npm run release:start-lastfm-proof
+# Open the printed authUrl in Last.fm, approve Newamp, then use the printed token:
+npm run release:record-lastfm-proof -- --token=<token> --confirm-live-write
+npm run release:check-lastfm-proof
+```
+
+That writes `release/lastfm-live-proof.json` with the current release artifact hashes, the authorized username, and hashed Last.fm token/session identifiers only. It does not store the shared secret or raw session key.
+
 ## Architecture
 
 ```text

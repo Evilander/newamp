@@ -1,6 +1,7 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { checkLastfmLiveProof, summarizeLastfmLiveProof } from './lastfm-live-proof.mjs';
 
 const repoRoot = resolve('.');
 const scriptPath = fileURLToPath(import.meta.url);
@@ -100,12 +101,25 @@ async function checkLastfm({ timeoutMs }) {
     checkedSettingsPaths: credentials.checkedSettingsPaths,
   };
   if (!apiKey || !sharedSecret) {
+    const liveProof = checkLastfmLiveProof();
+    if (liveProof.ok) {
+      return {
+        ok: true,
+        elapsedMs: Date.now() - started,
+        env,
+        authTokenProbe: null,
+        accountProbe: { ok: true, mode: 'recorded-proof', proofPath: liveProof.proofPath },
+        liveProof,
+        reason: null,
+      };
+    }
     return {
       ok: false,
       elapsedMs: Date.now() - started,
       env,
       authTokenProbe: null,
       accountProbe: null,
+      liveProof,
       reason: 'missing Last.fm API key/shared secret in env or saved app settings',
     };
   }
@@ -136,12 +150,26 @@ async function checkLastfm({ timeoutMs }) {
       );
       accountProbe = { ok: true, mode: 'track.updateNowPlaying' };
     } else {
+      const liveProof = checkLastfmLiveProof();
+      if (liveProof.ok) {
+        accountProbe = { ok: true, mode: 'recorded-proof', proofPath: liveProof.proofPath };
+        return {
+          ok: Boolean(authTokenProbe?.token),
+          elapsedMs: Date.now() - started,
+          env,
+          authTokenProbe: { ok: Boolean(authTokenProbe?.token), authUrlPresent: Boolean(authTokenProbe?.authUrl) },
+          accountProbe,
+          liveProof,
+          reason: null,
+        };
+      }
       accountProbe = {
         ok: false,
         mode: 'skipped',
         reason: sessionKey
           ? 'session key is present but NEWAMP_LASTFM_LIVE_WRITE=1 is required for the non-permanent now-playing write probe'
           : 'missing Last.fm session key in env or saved app settings',
+        liveProof: summarizeLastfmLiveProof(liveProof),
       };
     }
     return {
@@ -150,6 +178,7 @@ async function checkLastfm({ timeoutMs }) {
       env,
       authTokenProbe: { ok: Boolean(authTokenProbe?.token), authUrlPresent: Boolean(authTokenProbe?.authUrl) },
       accountProbe,
+      liveProof: checkLastfmLiveProof(),
       reason: accountProbe.ok ? null : accountProbe.reason,
     };
   } catch (err) {
