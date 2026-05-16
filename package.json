@@ -108,6 +108,8 @@
     "release:checksums": "node scripts/release-checksums.mjs",
     "release:publication-readiness": "node scripts/publication-readiness.mjs",
     "release:publish-github": "node scripts/publish-github-release.mjs",
+    "release:completion-audit": "node scripts/completion-audit.mjs",
+    "release:completion-audit:local": "node scripts/completion-audit.mjs --allow-incomplete --real-library",
     "release:check-listening-proof": "node scripts/manual-listening-proof.mjs --check",
     "release:start-listening-proof": "node scripts/listening-proof-session.mjs --launch",
     "release:record-listening-proof": "node scripts/manual-listening-proof.mjs --record",

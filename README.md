@@ -102,11 +102,13 @@ Strict mode is expected to fail until signing, live-service/account proof, and m
 Publication readiness:
 
 ```bash
+npm run release:completion-audit
+npm run release:completion-audit:local
 npm run release:publication-readiness
 npm run release:publish-github
 ```
 
-Both commands are non-mutating by default. Readiness checks the README, package version, git/GitHub CLI state, signed artifacts, and manual listening proof. `release:publish-github` dry-runs the exact git/GitHub command sequence and only executes with `-- --execute` after readiness passes.
+The completion audit restates the objective as concrete deliverables, maps each one to source/artifact/test evidence, and optionally reruns the real `K:/music` proof. Readiness checks the README, package version, git/GitHub CLI state, signed artifacts, Last.fm live proof, and manual listening proof. `release:publish-github` dry-runs the exact git/GitHub command sequence and only executes with `-- --execute` after readiness passes.
 
 ## Important Smoke Tests
 
