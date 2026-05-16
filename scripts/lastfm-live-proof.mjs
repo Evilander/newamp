@@ -8,13 +8,13 @@ import { releaseChecksumsPath } from './release-checksums.mjs';
 const scriptPath = fileURLToPath(import.meta.url);
 const repoRoot = resolve('.');
 
-const proofTrack = {
-  artist: 'Newamp QA',
-  title: 'Live Service Readiness Probe',
-  album: 'Newamp Release Gate',
-  albumArtist: 'Newamp QA',
-  duration: 181,
-  trackNumber: 1,
+export const lastfmLiveProofTrack = {
+  artist: 'Radiohead',
+  title: 'Creep',
+  album: 'Pablo Honey',
+  albumArtist: 'Radiohead',
+  duration: 238,
+  trackNumber: 2,
 };
 
 export function defaultLastfmLiveProofPath(root = repoRoot) {
@@ -89,7 +89,7 @@ export async function recordLastfmLiveProof({
     sharedSecret: credentials.sharedSecret,
     sessionKey: session.sessionKey,
     username: session.username,
-  }), proofTrack);
+  }), lastfmLiveProofTrack);
 
   const artifactProof = artifactFingerprints(artifacts);
   const missingArtifacts = artifactProof.filter((artifact) => !artifact.exists);
@@ -109,7 +109,7 @@ export async function recordLastfmLiveProof({
     nowPlaying: {
       ok: true,
       method: 'track.updateNowPlaying',
-      track: proofTrack,
+      track: lastfmLiveProofTrack,
     },
     artifacts: Object.fromEntries(artifactProof.map((artifact) => [artifact.name, artifact])),
   };

@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 const {
   checkLastfmLiveProof,
   defaultLastfmLiveProofArtifacts,
+  lastfmLiveProofTrack,
   resolveLastfmCredentials,
 } = await import('./lastfm-live-proof.mjs');
 
@@ -57,14 +58,7 @@ await writeFile(proofPath, JSON.stringify({
   nowPlaying: {
     ok: true,
     method: 'track.updateNowPlaying',
-    track: {
-      artist: 'Newamp QA',
-      title: 'Live Service Readiness Probe',
-      album: 'Newamp Release Gate',
-      albumArtist: 'Newamp QA',
-      duration: 181,
-      trackNumber: 1,
-    },
+    track: lastfmLiveProofTrack,
   },
   artifacts: proofArtifacts,
 }, null, 2), 'utf8');
@@ -72,6 +66,7 @@ await writeFile(proofPath, JSON.stringify({
 const valid = checkLastfmLiveProof({ proofPath, artifacts });
 assert.equal(valid.ok, true, valid.reason);
 assert.equal(valid.username, 'newamp-smoke-user');
+assert.equal(lastfmLiveProofTrack.artist, 'Radiohead');
 
 const credentials = resolveLastfmCredentials({
   env: {

@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 const {
   buildLastfmTrackParams,
+  LastfmApiError,
   LastfmScrobbleOutbox,
   shouldScrobble,
+  shouldRetryLastfmError,
   signLastfmParams,
 } = await import('../dist-electron/electron/lastfm.js');
 const { resolveLastfmCredentials } = await import('./live-services-readiness-smoke.mjs');
@@ -88,6 +90,23 @@ assert.deepEqual(sent, ['Radiohead - No Surprises']);
 assert.equal(successfulFlush.sent, 1);
 assert.equal(successfulFlush.remaining, 0);
 assert.deepEqual(await outbox.list(), [], 'successful flush should clear sent scrobbles');
+
+await outbox.enqueue({
+  artist: 'Tyler Local',
+  title: 'Private Demo',
+  album: 'Home Recordings',
+  albumArtist: 'Tyler Local',
+  duration: 193,
+  trackNumber: 1,
+}, 1778800100, null);
+const nonRetryableFlush = await outbox.flush(async () => {
+  throw new LastfmApiError('Invalid parameters - track metadata was filtered', { code: 6, status: 400 });
+});
+assert.equal(nonRetryableFlush.remaining, 0, 'permanent Last.fm metadata failures should not stay queued forever');
+assert.deepEqual(await outbox.list(), [], 'non-retryable Last.fm failures should be dropped from the retry outbox');
+assert.equal(shouldRetryLastfmError(new LastfmApiError('Service unavailable', { code: 16, status: 503 })), true);
+assert.equal(shouldRetryLastfmError(new LastfmApiError('Invalid parameters', { code: 6, status: 400 })), false);
+assert.equal(shouldRetryLastfmError(new Error('network offline')), true);
 
 const settingsRoot = join(repoRoot, 'tmp', 'lastfm-settings-smoke');
 const settingsPath = join(settingsRoot, 'settings.json');

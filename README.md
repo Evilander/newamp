@@ -34,7 +34,7 @@ Public `v1.0.0` is intentionally held until the remaining release blockers are c
 - **Lyrics.** LRCLIB lookup, local sidecar lyrics, and saved custom plain/LRC lyrics per track.
 - **Play Along.** Search Ultimate Guitar when reachable with noisy library-title cleanup, paste UG URLs or raw tabs, save local tab text, parse ChordPro, auto-discover sidecar tab files, transpose chords, autoscroll, and pop out a native tab window.
 - **Practice tools.** A/B loop panel, tempo trainer with pitch preservation, track bookmarks, ratings, sleep timer, stop-after-current, and smart shuffle.
-- **Last.fm.** Desktop auth, Now Playing updates, threshold scrobbling, retry outbox, saved app credentials, and a Settings proof action.
+- **Last.fm.** Desktop auth, Now Playing updates, threshold scrobbling, retry outbox for temporary failures, saved app credentials, and a Settings proof action. Local/private recordings can play and stay in the library even when Last.fm has no matching catalog entry.
 - **Audio controls and conversion.** 10-band EQ, presets, ReplayGain playback plus selected-track and album loudness analysis, limiter, preamp, crossfade/gapless handoff, output-device selection, in-app left/right speaker test, current-track WAV export, and selected-track batch export to WAV, MP3, FLAC, or Opus.
 - **Native desktop behavior.** Tray residency, global media keys, open-with file association handling, Explorer reveal actions, persisted pin-on-top/compact-window controls, and OS media-session metadata/actions with album art.
 - **Winamp-style keyboard controls.** Z/X/C/V/B transport, arrow seek/volume nudges, L love, 0-5 ratings, fullscreen visualizer toggle, and input-safe shortcut handling.
@@ -201,7 +201,7 @@ npm run release:record-lastfm-proof -- --token=<token> --confirm-live-write
 npm run release:check-lastfm-proof
 ```
 
-That writes `release/lastfm-live-proof.json` with the current release artifact hashes, the authorized username, and hashed Last.fm token/session identifiers only. It does not store the shared secret or raw session key.
+That writes `release/lastfm-live-proof.json` with the current release artifact hashes, the authorized username, and hashed Last.fm token/session identifiers only. It does not store the shared secret or raw session key. The live proof uses a known public catalog track so Tyler's private recordings are not treated as Last.fm release blockers.
 
 ## Architecture
 
@@ -227,7 +227,7 @@ Newamp is local-first:
 - No cloud library sync
 - No required account
 - No streaming subscription
-- Last.fm is optional and user-configured
+- Last.fm is optional and user-configured; catalog misses for local/private recordings are not app failures
 - Network features are explicit: Last.fm, LRCLIB, MusicBrainz/Cover Art Archive, Radio Browser, podcast feeds, and Ultimate Guitar search when reachable
 
 ## Release Plan

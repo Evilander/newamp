@@ -34,6 +34,7 @@ import {
   completeLastfmAuth,
   LastfmScrobbleOutbox,
   scrobbleLastfmTrack,
+  shouldRetryLastfmError,
   startLastfmAuth,
   updateLastfmNowPlaying,
 } from './lastfm.js';
@@ -961,7 +962,9 @@ function registerIpc(): void {
     try {
       await scrobbleLastfmTrack(settings.get(), track, timestamp);
     } catch (err) {
-      await lastfmOutbox.enqueue(track, timestamp, errorMessage(err));
+      if (shouldRetryLastfmError(err)) {
+        await lastfmOutbox.enqueue(track, timestamp, errorMessage(err));
+      }
     }
   });
   ipcMain.handle('lastfm:outbox-status', async () => lastfmOutbox.status());
