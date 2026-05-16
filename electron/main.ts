@@ -75,6 +75,8 @@ const appRoot = join(__dirname, '..', '..');
 const startupSmoke = process.env.NEWAMP_STARTUP_SMOKE === '1' || process.argv.includes('--newamp-startup-smoke');
 const startupSmokeMarker =
   process.env.NEWAMP_STARTUP_SMOKE_MARKER || commandLineValue('--newamp-startup-smoke-marker');
+const userDataOverride =
+  process.env.NEWAMP_USER_DATA_DIR || commandLineValue('--newamp-user-data-dir');
 const uiPlaybackSmoke = process.env.NEWAMP_UI_PLAYBACK_SMOKE === '1';
 const uiQuickPlaySmoke = process.env.NEWAMP_UI_QUICK_PLAY_SMOKE === '1';
 const uiHandoffSmoke = process.env.NEWAMP_UI_HANDOFF_SMOKE === '1';
@@ -114,6 +116,12 @@ const OPEN_AUDIO_EXTS = new Set([
 ]);
 const OPEN_PLAYLIST_EXTS = new Set(['.m3u', '.m3u8', '.pls', '.cue']);
 
+if (userDataOverride) {
+  const userData = resolve(userDataOverride);
+  mkdirSync(userData, { recursive: true });
+  app.setPath('userData', userData);
+}
+
 if (smokeMode) {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -142,11 +150,13 @@ if (smokeMode) {
               : uiVisualizerSmoke
                 ? 'ui-visualizer-smoke-user-data'
                 : 'ui-playback-smoke-user-data';
-  const smokeUserData = process.env.NEWAMP_SMOKE_USER_DATA
-    ? resolve(process.env.NEWAMP_SMOKE_USER_DATA)
-    : join(appRoot, 'tmp', smokeUserDataName);
-  mkdirSync(smokeUserData, { recursive: true });
-  app.setPath('userData', smokeUserData);
+  if (!userDataOverride) {
+    const smokeUserData = process.env.NEWAMP_SMOKE_USER_DATA
+      ? resolve(process.env.NEWAMP_SMOKE_USER_DATA)
+      : join(appRoot, 'tmp', smokeUserDataName);
+    mkdirSync(smokeUserData, { recursive: true });
+    app.setPath('userData', smokeUserData);
+  }
 }
 
 function commandLineValue(name: string): string | null {
@@ -359,15 +369,19 @@ function registerTray(): void {
 function registerMediaShortcuts(): void {
   if (smokeMode) return;
   const shortcuts: Array<[string, PlayerCommand]> = [
-    ['Media Play/Pause', 'toggle-play'],
-    ['Media Next Track', 'next'],
-    ['Media Previous Track', 'previous'],
-    ['Media Stop', 'stop'],
+    ['MediaPlayPause', 'toggle-play'],
+    ['MediaNextTrack', 'next'],
+    ['MediaPreviousTrack', 'previous'],
+    ['MediaStop', 'stop'],
   ];
 
   for (const [accelerator, command] of shortcuts) {
-    const ok = globalShortcut.register(accelerator, () => sendPlayerCommand(command));
-    if (!ok) console.warn(`[newamp] global media shortcut not registered: ${accelerator}`);
+    try {
+      const ok = globalShortcut.register(accelerator, () => sendPlayerCommand(command));
+      if (!ok) console.warn(`[newamp] global media shortcut not registered: ${accelerator}`);
+    } catch (err) {
+      console.warn(`[newamp] global media shortcut failed: ${accelerator}`, err);
+    }
   }
 }
 

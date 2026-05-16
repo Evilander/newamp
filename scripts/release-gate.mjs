@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -133,6 +133,8 @@ if (!skipPackage) {
   checks.push({ name: 'package', ok: true });
   run('npm', ['run', 'smoke:installer-artifact'], 'npm run smoke:installer-artifact');
   checks.push({ name: 'smoke:installer-artifact', ok: true });
+  run('npm', ['run', 'smoke:packaged-normal-launch'], 'npm run smoke:packaged-normal-launch');
+  checks.push({ name: 'smoke:packaged-normal-launch', ok: true });
   run('npm', ['run', 'smoke:packaged-open-files'], 'npm run smoke:packaged-open-files');
   checks.push({ name: 'smoke:packaged-open-files', ok: true });
   run('npm', ['run', 'smoke:portable-app'], 'npm run smoke:portable-app');
@@ -169,6 +171,9 @@ if (installedAssociationCheck.ok) {
 
 const startupCheck = runPackagedStartupSmoke();
 checks.push(startupCheck);
+const normalLaunchCheck = await runPackagedNormalLaunchSmoke();
+checks.push(normalLaunchCheck);
+if (!normalLaunchCheck.ok) blockers.push(`Packaged app does not stay open in normal launch mode: ${normalLaunchCheck.reason}`);
 
 let signatureCheck = checkSignatures();
 if (!signatureCheck.ok) {
@@ -346,6 +351,83 @@ function runPackagedStartupSmoke() {
   };
 }
 
+async function runPackagedNormalLaunchSmoke() {
+  if (!existsSync(exePath)) {
+    return { name: 'packaged-normal-launch-smoke', ok: false, reason: 'packaged exe missing' };
+  }
+  const smokeUserData = resolve(repoRoot, 'tmp', `release-gate-normal-launch-user-data-${process.pid}-${Date.now()}`);
+  mkdirSync(smokeUserData, { recursive: true });
+  const minAliveMs = 4000;
+  const launchArgs = [
+    `--newamp-user-data-dir=${smokeUserData}`,
+    '--disable-gpu',
+    '--disable-gpu-compositing',
+    '--disable-software-rasterizer',
+    '--disable-accelerated-2d-canvas',
+    '--disable-features=CalculateNativeWinOcclusion,UseSkiaRenderer,VizDisplayCompositor',
+    '--in-process-gpu',
+    '--no-sandbox',
+  ];
+  const child = spawn(exePath, launchArgs, {
+    cwd: dirname(exePath),
+    env: {
+      ...process.env,
+      NEWAMP_USER_DATA_DIR: smokeUserData,
+      ELECTRON_ENABLE_LOGGING: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  let stdout = '';
+  let stderr = '';
+  let exitCode = null;
+  let exitSignal = null;
+  let spawnError = null;
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  child.once('error', (err) => {
+    spawnError = err;
+  });
+  child.once('exit', (code, signal) => {
+    exitCode = code;
+    exitSignal = signal;
+  });
+
+  const started = Date.now();
+  while (Date.now() - started < minAliveMs) {
+    if (spawnError || exitCode !== null) break;
+    await sleep(250);
+  }
+
+  const elapsedMs = Date.now() - started;
+  const ok = !spawnError && exitCode === null && elapsedMs >= minAliveMs;
+  if (exitCode === null) {
+    cleanupProcessTree(child.pid);
+    await sleep(500);
+    if (exitCode === null) cleanupPackagedSmokeProcess();
+    await sleep(500);
+    child.stdout.destroy();
+    child.stderr.destroy();
+  }
+  return {
+    name: 'packaged-normal-launch-smoke',
+    ok,
+    minAliveMs,
+    elapsedMs,
+    exitCode,
+    exitSignal,
+    error: spawnError?.message ?? null,
+    stdout: stdout.trim().slice(-600),
+    stderr: stderr.trim().slice(-1200),
+    reason: ok ? null : `exited before ${minAliveMs}ms`,
+  };
+}
+
 function checkSignatures() {
   const statuses = [
     { name: 'installer', path: installerPath },
@@ -397,6 +479,19 @@ function cleanupPackagedSmokeProcess() {
     encoding: 'utf8',
     windowsHide: true,
   });
+}
+
+function cleanupProcessTree(pid) {
+  if (!pid || process.platform !== 'win32') return;
+  spawnSync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+    cwd: repoRoot,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
 async function realLibraryProbe() {
