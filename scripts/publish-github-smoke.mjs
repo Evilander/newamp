@@ -19,6 +19,7 @@ const {
   buildGithubPublishPlan,
   publishGithubRelease,
 } = await import('./publish-github-release.mjs');
+const { createReleaseBundle } = await import('./release-bundle.mjs');
 const { writeReleaseChecksums } = await import('./release-checksums.mjs');
 
 const smokeRoot = join(repoRoot, 'tmp', 'publish-github-smoke');
@@ -31,7 +32,15 @@ await writeFile(join(smokeRoot, 'README.md'), '# Newamp\n', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'Newamp Setup 1.0.0.exe'), 'installer', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'Newamp Portable 1.0.0.exe'), 'portable', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'win-unpacked', 'Newamp.exe'), 'exe', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'Newamp-1.0.0-source.zip'), 'source archive', 'utf8');
 writeReleaseChecksums({ root: smokeRoot, version: '1.0.0' });
+const bundle = createReleaseBundle({
+  root: smokeRoot,
+  version: '1.0.0',
+  createSourceArchive: false,
+  verifyChecksums: false,
+});
+assert.equal(bundle.ok, true, bundle.reason);
 
 const plan = buildGithubPublishPlan({
   root: smokeRoot,
@@ -43,10 +52,15 @@ assert.equal(plan.tag, 'v1.0.0');
 assert.ok(plan.commands.some((command) => command.label === 'ensure-repo'));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.includes('--repo')));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /SHA256SUMS\.txt$/.test(arg))));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /Newamp-1\.0\.0-source\.zip$/.test(arg))));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /RELEASE-MANIFEST\.json$/.test(arg))));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /Newamp-1\.0\.0-release-bundle\.zip$/.test(arg))));
 assert.ok(plan.commands.every((command) => !command.commandLine.includes('\n')));
 assert.match(JSON.stringify(plan), /Newamp Setup 1\.0\.0\.exe/);
 assert.match(JSON.stringify(plan), /Newamp Portable 1\.0\.0\.exe/);
 assert.match(JSON.stringify(plan), /SHA256SUMS\.txt/);
+assert.match(JSON.stringify(plan), /RELEASE-MANIFEST\.json/);
+assert.match(JSON.stringify(plan), /Newamp-1\.0\.0-release-bundle\.zip/);
 
 const dryRun = publishGithubRelease({
   root: smokeRoot,

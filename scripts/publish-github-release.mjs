@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkReleaseBundle, releaseBundlePaths } from './release-bundle.mjs';
 import { checkReleaseChecksums, releaseChecksumsPath } from './release-checksums.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
@@ -31,6 +32,15 @@ export function buildGithubPublishPlan({
   const installer = resolve(root, 'release', `Newamp Setup ${version}.exe`);
   const portable = resolve(root, 'release', `Newamp Portable ${version}.exe`);
   const checksums = releaseChecksumsPath({ root });
+  const bundlePaths = releaseBundlePaths({ root, version });
+  const artifacts = {
+    installer,
+    portable,
+    checksums,
+    source: bundlePaths.sourceZip,
+    manifest: bundlePaths.manifest,
+    bundle: bundlePaths.bundleZip,
+  };
   const missingArtifacts = [
     ['installer', installer],
     ['portable', portable],
@@ -39,9 +49,7 @@ export function buildGithubPublishPlan({
     return failedPlan(root, env, `missing release artifacts: ${missingArtifacts.map(([name]) => name).join(', ')}`, {
       repo,
       tag,
-      installer,
-      portable,
-      checksums,
+      ...artifacts,
     });
   }
   const checksumReport = checkReleaseChecksums({ root, version });
@@ -49,9 +57,16 @@ export function buildGithubPublishPlan({
     return failedPlan(root, env, checksumReport.reason ?? 'release checksum manifest is not current', {
       repo,
       tag,
-      installer,
-      portable,
-      checksums,
+      ...artifacts,
+      version,
+    });
+  }
+  const bundleReport = checkReleaseBundle({ root, version });
+  if (!bundleReport.ok) {
+    return failedPlan(root, env, bundleReport.reason ?? 'release bundle is not current', {
+      repo,
+      tag,
+      ...artifacts,
       version,
     });
   }
@@ -81,9 +96,7 @@ export function buildGithubPublishPlan({
       return failedPlan(root, env, `local tag ${tag} already exists and does not match the planned release HEAD`, {
         repo,
         tag,
-        installer,
-        portable,
-        checksums,
+        ...artifacts,
         version,
       });
     }
@@ -113,9 +126,7 @@ export function buildGithubPublishPlan({
       return failedPlan(root, env, `local tag ${tag} already exists and does not match the planned release HEAD`, {
         repo,
         tag,
-        installer,
-        portable,
-        checksums,
+        ...artifacts,
         version,
       });
     }
@@ -124,7 +135,7 @@ export function buildGithubPublishPlan({
     }
     commands.push(command('push-tag', 'git', ['push', 'origin', tag]));
   }
-  commands.push(publishReleaseCommand({ repo, tag, version, installer, portable, checksums, readmePath }));
+  commands.push(publishReleaseCommand({ repo, tag, version, readmePath, ...artifacts }));
 
   return {
     name: 'github-publication',
@@ -133,7 +144,7 @@ export function buildGithubPublishPlan({
     repo,
     tag,
     version,
-    artifacts: { installer, portable, checksums },
+    artifacts,
     git: {
       mode: gitDir ? 'external' : 'worktree',
       gitDir,
@@ -201,6 +212,9 @@ function failedPlan(root, env, reason, extra = {}) {
       installer: extra.installer ?? null,
       portable: extra.portable ?? null,
       checksums: extra.checksums ?? null,
+      source: extra.source ?? null,
+      manifest: extra.manifest ?? null,
+      bundle: extra.bundle ?? null,
     },
     commands: [],
     reason,
@@ -241,10 +255,10 @@ function originCommand(root, gitDir, originUrl) {
   return gitDir ? gitCommand(label, root, gitDir, args) : command(label, 'git', args);
 }
 
-function publishReleaseCommand({ repo, tag, version, installer, portable, checksums, readmePath }) {
+function publishReleaseCommand({ repo, tag, version, installer, portable, checksums, source, manifest, bundle, readmePath }) {
   const viewArgs = ['release', 'view', tag, '--repo', repo];
   const editArgs = ['release', 'edit', tag, '--repo', repo, '--title', `Newamp ${version}`, '--notes-file', readmePath];
-  const releaseAssets = [installer, portable, checksums];
+  const releaseAssets = [installer, portable, checksums, source, manifest, bundle];
   const uploadArgs = ['release', 'upload', tag, ...releaseAssets, '--repo', repo, '--clobber'];
   const createArgs = [
     'release',
