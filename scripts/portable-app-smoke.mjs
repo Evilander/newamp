@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 
 const repoRoot = resolve('.');
@@ -82,6 +83,12 @@ if (marker || timedOut || exitCode !== 0) cleanupProcessTree(child.pid);
 assert.ok(marker, diagnostic('portable startup marker should be written'));
 assert.equal(marker.ok, true, diagnostic('portable startup marker should report success'));
 
+const defaultTemp = checkDefaultTempUsable();
+const plainLaunch = defaultTemp.ok
+  ? await runPlainPortableLaunch()
+  : { ok: true, skipped: true, reason: 'default temp is not writable in this host session', defaultTemp };
+assert.equal(plainLaunch.ok, true, plainLaunchDiagnostic(plainLaunch));
+
 const artifactStat = statSync(portablePath);
 const report = {
   ok: true,
@@ -96,6 +103,7 @@ const report = {
   exitSignal,
   stdout: stdout.trim().slice(-600),
   stderr: stderr.trim().slice(-600),
+  plainLaunch,
 };
 
 console.log(JSON.stringify(report, null, 2));
@@ -122,6 +130,113 @@ function cleanupProcessTree(pid) {
   });
 }
 
+function checkDefaultTempUsable() {
+  const tempRoot = tmpdir();
+  let proofDir = null;
+  try {
+    proofDir = mkdtempSync(resolve(tempRoot, 'newamp-portable-temp-proof-'));
+    return { ok: true, tempRoot, proofDir };
+  } catch (err) {
+    return { ok: false, tempRoot, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    if (proofDir) rmSync(proofDir, { recursive: true, force: true });
+  }
+}
+
+async function runPlainPortableLaunch() {
+  const child = spawn(portablePath, [], {
+    cwd: dirname(portablePath),
+    env: {
+      ...process.env,
+      ELECTRON_ENABLE_LOGGING: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  let plainStdout = '';
+  let plainStderr = '';
+  let plainExitCode = null;
+  let plainExitSignal = null;
+  let plainSpawnError = null;
+  let snapshot = null;
+  child.stdout.on('data', (chunk) => {
+    plainStdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    plainStderr += chunk;
+  });
+  child.once('error', (err) => {
+    plainSpawnError = err;
+  });
+  child.once('exit', (code, signal) => {
+    plainExitCode = code;
+    plainExitSignal = signal;
+  });
+
+  const plainStarted = Date.now();
+  while (Date.now() - plainStarted < 25_000) {
+    snapshot = readPortableProcessSnapshot(child.pid);
+    if (hasNsisErrorWindow(snapshot) || hasNewampMainWindow(snapshot)) break;
+    if (plainSpawnError || plainExitCode !== null) break;
+    await sleep(500);
+  }
+
+  const elapsedMs = Date.now() - plainStarted;
+  const ok = !plainSpawnError && plainExitCode === null && hasNewampMainWindow(snapshot) && !hasNsisErrorWindow(snapshot);
+  cleanupProcessTree(child.pid);
+
+  return {
+    ok,
+    elapsedMs,
+    pid: child.pid,
+    exitCode: plainExitCode,
+    exitSignal: plainExitSignal,
+    spawnError: plainSpawnError?.message ?? null,
+    snapshot,
+    stdout: plainStdout.trim().slice(-600),
+    stderr: plainStderr.trim().slice(-600),
+  };
+}
+
+function readPortableProcessSnapshot(pid) {
+  if (!pid || process.platform !== 'win32') return { processes: [] };
+  const script = `
+$targetPid = ${Number(pid)}
+$items = @()
+try { $items += Get-Process -Id $targetPid -ErrorAction SilentlyContinue } catch {}
+try { $items += Get-Process -Name 'Newamp*' -ErrorAction SilentlyContinue } catch {}
+$items |
+  Sort-Object Id -Unique |
+  Select-Object Id, ProcessName, MainWindowTitle, Responding, @{ Name = 'Path'; Expression = { try { $_.Path } catch { $null } } } |
+  ConvertTo-Json -Compress
+`;
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0) {
+    return { processes: [], error: (result.stderr || result.stdout || '').trim().slice(-600) };
+  }
+  const raw = result.stdout.trim();
+  if (!raw) return { processes: [] };
+  try {
+    const parsed = JSON.parse(raw);
+    return { processes: Array.isArray(parsed) ? parsed : [parsed] };
+  } catch (err) {
+    return { processes: [], error: err instanceof Error ? err.message : String(err), raw: raw.slice(-600) };
+  }
+}
+
+function hasNsisErrorWindow(snapshot) {
+  return (snapshot?.processes ?? []).some((item) => /NSIS Error/i.test(String(item.MainWindowTitle ?? '')));
+}
+
+function hasNewampMainWindow(snapshot) {
+  return (snapshot?.processes ?? []).some((item) => String(item.MainWindowTitle ?? '') === 'Newamp');
+}
+
 function diagnostic(message) {
   return [
     message,
@@ -132,5 +247,20 @@ function diagnostic(message) {
     `exitSignal=${exitSignal ?? 'null'}`,
     `stdout=${stdout.trim().slice(-300)}`,
     `stderr=${stderr.trim().slice(-300)}`,
+  ].join('\n');
+}
+
+function plainLaunchDiagnostic(plainLaunch) {
+  return [
+    'portable artifact should open the Newamp window in plain double-click mode',
+    `ok=${plainLaunch.ok}`,
+    `elapsedMs=${plainLaunch.elapsedMs}`,
+    `pid=${plainLaunch.pid}`,
+    `spawnError=${plainLaunch.spawnError ?? 'null'}`,
+    `exitCode=${plainLaunch.exitCode ?? 'null'}`,
+    `exitSignal=${plainLaunch.exitSignal ?? 'null'}`,
+    `snapshot=${JSON.stringify(plainLaunch.snapshot)}`,
+    `stdout=${plainLaunch.stdout}`,
+    `stderr=${plainLaunch.stderr}`,
   ].join('\n');
 }

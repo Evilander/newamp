@@ -182,7 +182,8 @@
       ]
     },
     "portable": {
-      "artifactName": "Newamp Portable ${version}.${ext}"
+      "artifactName": "Newamp Portable ${version}.${ext}",
+      "unpackDirName": false
     },
     "fileAssociations": [
       {
