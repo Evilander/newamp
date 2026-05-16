@@ -168,8 +168,11 @@ npm run smoke:ui-visualizer
 After doing the real speaker/headphone pass against the current package, record the manual proof artifact with:
 
 ```bash
+npm run release:start-listening-proof
 npm run release:record-listening-proof -- --confirm-playback --confirm-output-switching --confirm-crossfade --confirm-gapless
 ```
+
+`release:start-listening-proof` launches the packaged app with the generated center/left/right speaker proof file and prints the checklist plus the record command.
 
 That writes `release/manual-listening-proof.json` with the current installer, portable EXE, and unpacked EXE hashes. The strict release gate rejects stale proof if the artifacts change.
 
