@@ -40,7 +40,9 @@ const [packageSource, preloadSource, settingsViewSource, mainSource] = await Pro
 assert.match(packageSource, /"smoke:reliability"/, 'package.json should expose the reliability smoke');
 assert.match(preloadSource, /getSupportDiagnostics/, 'preload should expose support diagnostics');
 assert.match(settingsViewSource, /Support Diagnostics/, 'Settings should expose support diagnostics');
+assert.match(settingsViewSource, /Show crash log/, 'Settings should expose local crash diagnostics');
 assert.match(mainSource, /OPEN_DEVTOOLS/, 'devtools should be opt-in so normal dev launches stay usable');
+assert.match(mainSource, /crashDumpsPath/, 'support diagnostics should include the local crash dump path');
 assert.match(mainSource, /openDevTools/, 'main window should still support explicit devtools opening');
 
 console.log(

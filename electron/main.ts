@@ -2199,11 +2199,16 @@ function errorMessage(err: unknown): string {
 
 async function buildSupportDiagnostics(): Promise<SupportDiagnostics> {
   const userData = app.getPath('userData');
+  const diagnosticsPath = join(userData, 'diagnostics');
   return {
     appVersion: app.getVersion(),
     platform: process.platform,
     electronVersion: process.versions.electron ?? 'unknown',
     userDataPath: userData,
+    diagnosticsPath,
+    diagnosticEventsPath: join(diagnosticsPath, 'events.jsonl'),
+    latestCrashPath: join(diagnosticsPath, 'latest-crash.json'),
+    crashDumpsPath: app.getPath('crashDumps'),
     settingsPath: join(userData, 'settings.json'),
     libraryPath: join(userData, 'library.db'),
     generatedAt: Date.now(),

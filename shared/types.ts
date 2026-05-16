@@ -580,6 +580,10 @@ export interface SupportDiagnostics {
   platform: string;
   electronVersion: string;
   userDataPath: string;
+  diagnosticsPath: string;
+  diagnosticEventsPath: string;
+  latestCrashPath: string;
+  crashDumpsPath: string;
   settingsPath: string;
   libraryPath: string;
   generatedAt: number;
