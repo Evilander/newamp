@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 
 const repoRoot = resolve('.');
 const packagePath = resolve(repoRoot, 'package.json');
@@ -29,7 +29,7 @@ if (env.hasCertificateSource && !env.hasPassword) {
   blockers.push('certificate source is present but CSC_KEY_PASSWORD/WIN_CSC_KEY_PASSWORD is missing');
 }
 if (!tools.signtoolAvailable && process.platform === 'win32') {
-  blockers.push('signtool.exe was not found on PATH');
+  blockers.push('signtool.exe was not found on PATH or in Windows Kits');
 }
 
 const signed = artifacts.every((artifact) => artifact.signature.status === 'Valid');
@@ -110,10 +110,52 @@ function toolStatus() {
     windowsHide: true,
   });
   const first = result.status === 0 ? result.stdout.split(/\r?\n/).find(Boolean) : null;
+  const discovered = first || findWindowsKitSigntool();
   return {
-    signtoolAvailable: Boolean(first),
-    signtoolPath: first ? `${basename(first)}` : null,
+    signtoolAvailable: Boolean(discovered),
+    signtoolPath: discovered ? `${basename(discovered)}` : null,
+    source: first ? 'PATH' : discovered ? 'Windows Kits' : null,
   };
+}
+
+function findWindowsKitSigntool() {
+  const roots = [
+    process.env.NEWAMP_WINDOWS_KITS_ROOT,
+    process.env['ProgramFiles(x86)'] ? join(process.env['ProgramFiles(x86)'], 'Windows Kits') : '',
+    process.env.ProgramFiles ? join(process.env.ProgramFiles, 'Windows Kits') : '',
+    'C:\\Program Files (x86)\\Windows Kits',
+    'C:\\Program Files\\Windows Kits',
+  ].filter(Boolean);
+
+  for (const root of roots) {
+    for (const candidate of windowsKitSigntoolCandidates(root)) {
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function windowsKitSigntoolCandidates(root) {
+  const candidates = [join(root, '10', 'App Certification Kit', 'signtool.exe')];
+  const binRoot = join(root, '10', 'bin');
+  let versionDirs = [];
+  try {
+    versionDirs = readdirSync(binRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  } catch {
+    versionDirs = [];
+  }
+
+  const preferredArch = process.arch === 'arm64' ? 'arm64' : process.arch === 'ia32' ? 'x86' : 'x64';
+  const arches = [preferredArch, 'x64', 'arm64', 'x86'].filter((arch, index, all) => all.indexOf(arch) === index);
+  for (const version of versionDirs) {
+    for (const arch of arches) {
+      candidates.push(join(binRoot, version, arch, 'signtool.exe'));
+    }
+  }
+  return candidates;
 }
 
 function certificateStoreStatus() {
