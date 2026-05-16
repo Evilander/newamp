@@ -194,6 +194,7 @@ function releaseBundleCheck() {
     ok: report.ok,
     paths: report.paths,
     bundle: report.bundle,
+    sourceArchive: report.sourceArchive,
     reason: report.reason,
   };
 }

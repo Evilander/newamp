@@ -120,6 +120,11 @@ const checklist = [
     check('release bundle current', bundleReport.ok, bundleReport.reason, {
       paths: bundleReport.paths,
       bundle: bundleReport.bundle ?? null,
+      sourceArchive: bundleReport.sourceArchive ?? null,
+    }),
+    check('public source archive hygiene', bundleReport.sourceArchive?.ok === true, bundleReport.sourceArchive?.reason ?? 'source archive hygiene was not checked', {
+      entryCount: bundleReport.sourceArchive?.entryCount ?? null,
+      forbiddenEntries: bundleReport.sourceArchive?.forbiddenEntries ?? null,
     }),
     check('GitHub publish dry-run plan', publishPlan.ok, publishPlan.reason, {
       repo: publishPlan.repo,
