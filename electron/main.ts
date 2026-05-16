@@ -77,6 +77,9 @@ const startupSmokeMarker =
   process.env.NEWAMP_STARTUP_SMOKE_MARKER || commandLineValue('--newamp-startup-smoke-marker');
 const userDataOverride =
   process.env.NEWAMP_USER_DATA_DIR || commandLineValue('--newamp-user-data-dir');
+const sessionDataOverride =
+  process.env.NEWAMP_SESSION_DATA_DIR || commandLineValue('--newamp-session-data-dir');
+const forceSoftwareRendering = process.env.NEWAMP_ENABLE_HARDWARE_ACCELERATION !== '1';
 const uiPlaybackSmoke = process.env.NEWAMP_UI_PLAYBACK_SMOKE === '1';
 const uiQuickPlaySmoke = process.env.NEWAMP_UI_QUICK_PLAY_SMOKE === '1';
 const uiHandoffSmoke = process.env.NEWAMP_UI_HANDOFF_SMOKE === '1';
@@ -122,19 +125,22 @@ if (userDataOverride) {
   app.setPath('userData', userData);
 }
 
+const sessionData = sessionDataOverride
+  ? resolve(sessionDataOverride)
+  : userDataOverride
+    ? resolve(userDataOverride, 'session-data')
+    : resolve(process.env.LOCALAPPDATA || process.env.APPDATA || appRoot, 'Newamp', 'session-data');
+mkdirSync(sessionData, { recursive: true });
+app.setPath('sessionData', sessionData);
+app.commandLine.appendSwitch('disk-cache-dir', join(sessionData, 'Cache'));
+
+if (forceSoftwareRendering) {
+  applySoftwareRenderingSwitches('normal');
+}
+
 if (smokeMode) {
-  app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-  app.commandLine.appendSwitch('disable-gpu');
-  app.commandLine.appendSwitch('disable-gpu-compositing');
-  app.commandLine.appendSwitch('disable-gpu-rasterization');
-  app.commandLine.appendSwitch('disable-gpu-sandbox');
-  app.commandLine.appendSwitch('disable-software-rasterizer');
-  app.commandLine.appendSwitch('disable-accelerated-2d-canvas');
-  app.commandLine.appendSwitch('disable-accelerated-video-decode');
-  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,UseSkiaRenderer,VizDisplayCompositor');
-  app.commandLine.appendSwitch('in-process-gpu');
-  app.commandLine.appendSwitch('no-sandbox');
+  applySoftwareRenderingSwitches('smoke');
   const smokeUserDataName = startupSmoke
     ? 'startup-smoke-user-data'
     : uiQuickPlaySmoke
@@ -163,6 +169,21 @@ function commandLineValue(name: string): string | null {
   const prefix = `${name}=`;
   const found = process.argv.find((arg) => arg.startsWith(prefix));
   return found ? found.slice(prefix.length) : null;
+}
+
+function applySoftwareRenderingSwitches(mode: 'normal' | 'smoke'): void {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+  app.commandLine.appendSwitch('disable-gpu-rasterization');
+  app.commandLine.appendSwitch('disable-accelerated-2d-canvas');
+  app.commandLine.appendSwitch('disable-accelerated-video-decode');
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,UseSkiaRenderer,VizDisplayCompositor');
+  app.commandLine.appendSwitch('in-process-gpu');
+  if (mode === 'smoke') {
+    app.commandLine.appendSwitch('disable-gpu-sandbox');
+    app.commandLine.appendSwitch('no-sandbox');
+  }
 }
 
 function writeStartupSmokeMarker(payload: Record<string, unknown>): void {
