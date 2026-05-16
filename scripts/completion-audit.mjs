@@ -4,6 +4,7 @@ import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkLastfmLiveProof, summarizeLastfmLiveProof } from './lastfm-live-proof.mjs';
 import { checkManualListeningProof, summarizeManualListeningProof } from './manual-listening-proof.mjs';
+import { checkReleaseBundle } from './release-bundle.mjs';
 import { checkReleaseChecksums } from './release-checksums.mjs';
 import { buildGithubPublishPlan } from './publish-github-release.mjs';
 
@@ -20,6 +21,7 @@ const objective =
   'make this project better than the original Winamp from the 2000s; be ambitious; create skins; create an installer/exe; create the full application';
 
 const checksumReport = checkReleaseChecksums({ root: repoRoot, version: pkg.version });
+const bundleReport = checkReleaseBundle({ root: repoRoot, version: pkg.version });
 const manualProof = checkManualListeningProof();
 const lastfmProof = checkLastfmLiveProof();
 const publishPlan = buildGithubPublishPlan({ root: repoRoot, env: process.env });
@@ -115,9 +117,14 @@ const checklist = [
     scriptCheck('release:publication-readiness'),
     scriptCheck('release:publish-github'),
     scriptCheck('release:sign'),
+    check('release bundle current', bundleReport.ok, bundleReport.reason, {
+      paths: bundleReport.paths,
+      bundle: bundleReport.bundle ?? null,
+    }),
     check('GitHub publish dry-run plan', publishPlan.ok, publishPlan.reason, {
       repo: publishPlan.repo,
       tag: publishPlan.tag,
+      artifacts: publishPlan.artifacts ?? null,
       commands: publishPlan.commands?.map((command) => command.label) ?? [],
       executed: false,
     }),
