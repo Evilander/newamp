@@ -29,6 +29,23 @@ await Promise.all(artifacts.map((artifact, index) => writeFile(artifact.path, `a
 
 assert.equal(defaultSigningArtifacts(repoRoot).length, 3, 'default signing artifacts should include installer, portable, and unpacked exe');
 
+if (process.platform === 'win32') {
+  const kitsRoot = join(smokeRoot, 'Windows Kits');
+  const kitToolDir = join(kitsRoot, '10', 'bin', '10.0.99999.0', 'x64');
+  await mkdir(kitToolDir, { recursive: true });
+  await writeFile(join(kitToolDir, 'signtool.exe'), 'fake signtool', 'utf8');
+  const kitPlan = buildSigningPlan({
+    artifacts,
+    env: {
+      NEWAMP_WINDOWS_KITS_ROOT: kitsRoot,
+      NEWAMP_SIGN_SUBJECT: 'Newamp Release',
+    },
+    requireExistingTool: true,
+  });
+  assert.equal(kitPlan.ok, true, kitPlan.reason);
+  assert.equal(kitPlan.signtool, 'signtool.exe');
+}
+
 const pfxPlan = buildSigningPlan({
   artifacts,
   env: {

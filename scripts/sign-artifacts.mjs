@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const scriptPath = fileURLToPath(import.meta.url);
@@ -134,8 +134,52 @@ function resolveSigntool(env, requireExistingTool) {
     windowsHide: true,
   });
   const found = result.status === 0 ? result.stdout.split(/\r?\n/).find(Boolean) : null;
-  if (!found) return { ok: false, path: null, displayPath: null, reason: 'signtool.exe was not found on PATH' };
-  return { ok: true, path: found, displayPath: basename(found) };
+  if (found) return { ok: true, path: found, displayPath: basename(found) };
+
+  const kitTool = findWindowsKitSigntool(env);
+  if (kitTool) return { ok: true, path: kitTool, displayPath: basename(kitTool) };
+
+  return { ok: false, path: null, displayPath: null, reason: 'signtool.exe was not found on PATH or in Windows Kits' };
+}
+
+function findWindowsKitSigntool(env) {
+  const roots = [
+    text(env.NEWAMP_WINDOWS_KITS_ROOT),
+    text(env['ProgramFiles(x86)']) ? join(text(env['ProgramFiles(x86)']), 'Windows Kits') : '',
+    text(env.ProgramFiles) ? join(text(env.ProgramFiles), 'Windows Kits') : '',
+    'C:\\Program Files (x86)\\Windows Kits',
+    'C:\\Program Files\\Windows Kits',
+  ].filter(Boolean);
+
+  for (const root of roots) {
+    for (const candidate of windowsKitSigntoolCandidates(root)) {
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function windowsKitSigntoolCandidates(root) {
+  const candidates = [join(root, '10', 'App Certification Kit', 'signtool.exe')];
+  const binRoot = join(root, '10', 'bin');
+  let versionDirs = [];
+  try {
+    versionDirs = readdirSync(binRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  } catch {
+    versionDirs = [];
+  }
+
+  const preferredArch = process.arch === 'arm64' ? 'arm64' : process.arch === 'ia32' ? 'x86' : 'x64';
+  const arches = [preferredArch, 'x64', 'arm64', 'x86'].filter((arch, index, all) => all.indexOf(arch) === index);
+  for (const version of versionDirs) {
+    for (const arch of arches) {
+      candidates.push(join(binRoot, version, arch, 'signtool.exe'));
+    }
+  }
+  return candidates;
 }
 
 function resolveSigningIdentity(env, requireExistingTool) {
