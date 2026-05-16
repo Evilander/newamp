@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { releaseBundlePaths } from './release-bundle.mjs';
+import { releaseChecksumsPath } from './release-checksums.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repoRoot = resolve('.');
@@ -19,10 +21,15 @@ export function defaultManualListeningProofPath(root = repoRoot) {
 
 export function defaultManualListeningArtifacts(root = repoRoot) {
   const version = appVersion(root);
+  const bundlePaths = releaseBundlePaths({ root, version });
   return [
     { name: 'installer', path: resolve(root, 'release', `Newamp Setup ${version}.exe`) },
     { name: 'portable', path: resolve(root, 'release', `Newamp Portable ${version}.exe`) },
     { name: 'exe', path: resolve(root, 'release', 'win-unpacked', 'Newamp.exe') },
+    { name: 'checksums', path: releaseChecksumsPath({ root }) },
+    { name: 'source', path: bundlePaths.sourceZip },
+    { name: 'manifest', path: bundlePaths.manifest },
+    { name: 'bundle', path: bundlePaths.bundleZip },
   ];
 }
 

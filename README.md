@@ -182,7 +182,7 @@ npm run release:record-listening-proof -- --confirm-playback --confirm-output-sw
 
 `release:start-listening-proof` launches the packaged app with the generated center/left/right speaker proof file and prints the checklist plus the record command.
 
-That writes `release/manual-listening-proof.json` with the current installer, portable EXE, and unpacked EXE hashes. The strict release gate rejects stale proof if the artifacts change.
+That writes `release/manual-listening-proof.json` with the current installer, portable EXE, unpacked EXE, checksums, source archive, release manifest, and release bundle hashes. The strict release gate rejects stale proof if the artifacts change.
 
 Check it later with:
 

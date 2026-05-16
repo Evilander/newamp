@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 
 const {
   checkLastfmLiveProof,
+  defaultLastfmLiveProofArtifacts,
   resolveLastfmCredentials,
 } = await import('./lastfm-live-proof.mjs');
 
@@ -13,6 +14,16 @@ await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(smokeRoot, { recursive: true });
 
 const proofPath = join(smokeRoot, 'lastfm-live-proof.json');
+assert.deepEqual(defaultLastfmLiveProofArtifacts(resolve('.')).map((artifact) => artifact.name), [
+  'installer',
+  'portable',
+  'exe',
+  'checksums',
+  'source',
+  'manifest',
+  'bundle',
+]);
+
 const artifacts = [
   { name: 'installer', path: join(smokeRoot, 'Newamp Setup 1.0.0.exe') },
   { name: 'portable', path: join(smokeRoot, 'Newamp Portable 1.0.0.exe') },
