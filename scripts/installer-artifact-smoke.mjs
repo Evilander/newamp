@@ -35,7 +35,7 @@ const mainSource = readFileSync(mainPath, 'utf8');
 const builderDebug = readRequiredText(builderDebugPath);
 
 assert.equal(pkg.build?.productName, 'Newamp', 'build productName should stay Newamp');
-assert.equal(pkg.build?.appId, 'com.eveland.newamp', 'build appId should be stable for upgrades/file associations');
+assert.equal(pkg.build?.appId, 'io.newamp.player', 'build appId should be stable for upgrades/file associations');
 assert.ok(pkg.build?.win?.target?.includes('nsis'), 'Windows build target should include NSIS installer output');
 assert.ok(pkg.build?.win?.target?.includes('portable'), 'Windows build target should include a no-install portable EXE');
 assert.equal(pkg.build?.portable?.artifactName, 'Newamp Portable ${version}.${ext}', 'portable artifact should have a stable human-readable file name');

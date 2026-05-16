@@ -91,7 +91,7 @@ const api: NewampAPI = {
   getPlaylistTracks: (id: number) =>
     ipcRenderer.invoke('playlist:get-tracks', id) as Promise<Track[]>,
   getPlaylistCoverUrl: (id: number, updatedAt?: number | null) =>
-    `newplaylistart://${id}/cover${updatedAt ? `?v=${updatedAt}` : ''}`,
+    `newplaylistart://playlist/${id}/cover${updatedAt ? `?v=${updatedAt}` : ''}`,
   pickPlaylistCoverImage: () =>
     ipcRenderer.invoke('playlist:pick-cover') as Promise<string | null>,
   exportPlaylistM3u: (id: number) =>
@@ -195,11 +195,13 @@ const api: NewampAPI = {
   toggleLove: (id) => ipcRenderer.invoke('library:toggle-love', id),
   setTrackRating: (id: number, rating: number) =>
     ipcRenderer.invoke('library:set-rating', id, rating) as Promise<Track | null>,
+  setTrackRatingScore: (id: number, score: number | null) =>
+    ipcRenderer.invoke('library:set-rating-score', id, score) as Promise<Track | null>,
   toggleAvoidAutoPlay: (id: number) =>
     ipcRenderer.invoke('library:toggle-avoid-autoplay', id) as Promise<Track | null>,
   recordPlay: (id) => ipcRenderer.invoke('library:record-play', id),
   recordSkip: (id, position) => ipcRenderer.invoke('library:record-skip', id, position),
-  getArtUrl: (trackId: number) => `newart://${trackId}/art`,
+  getArtUrl: (trackId: number) => `newart://track/${trackId}/art`,
   pickFolder: () => ipcRenderer.invoke('os:pick-folder'),
   getSuggestedMusicFolders: () => ipcRenderer.invoke('os:suggested-music-folders'),
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<AppSettings>,
@@ -267,7 +269,10 @@ contextBridge.exposeInMainWorld('newamp', api);
 contextBridge.exposeInMainWorld('winctl', {
   minimize: () => ipcRenderer.invoke('win:minimize'),
   toggleMax: () => ipcRenderer.invoke('win:toggle-max'),
-  setCompact: (on: boolean) => ipcRenderer.invoke('win:set-compact', on),
+  setCompact: (on: boolean, size?: { width?: number; height?: number }) =>
+    ipcRenderer.invoke('win:set-compact', on, size),
+  setCompactSize: (size: { width: number; height: number }) =>
+    ipcRenderer.invoke('win:set-compact-size', size),
   setAlwaysOnTop: (on: boolean) => ipcRenderer.invoke('win:set-always-on-top', on),
   close: () => ipcRenderer.invoke('win:close'),
   onState: (cb: (s: { maximized: boolean }) => void) => {

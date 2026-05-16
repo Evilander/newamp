@@ -8,12 +8,13 @@ import type {
   SupportDiagnostics,
   SupportRestoreResult,
 } from '@shared/types';
-import { usePlayerStore } from '../../store/usePlayerStore';
+import { engine, usePlayerStore } from '../../store/usePlayerStore';
 import { api, inElectron, DEFAULT_SETTINGS } from '../../lib/api';
 import { SKIN_VARIABLES, readCurrentSkinVariables } from '../../lib/skins';
 import { normalizeAudioOutputDeviceId, uniqueAudioOutputDevices } from '@shared/audio-output';
 import type { AudioOutputDeviceOption } from '@shared/audio-output';
 import { MAX_PREAMP_DB, MIN_PREAMP_DB, PREAMP_STEP_DB, normalizePreampDb } from '@shared/audio-limiter';
+import { ShellPicker } from '../ShellPicker';
 
 const THEMES: Array<{ id: BuiltInTheme; label: string; tag: string; palette: string[] }> = [
   { id: 'classic', label: 'Classic', tag: 'Vintage Winamp 2.x — cast-metal chrome, green LCD', palette: ['#2c3438', '#00ff66', '#c8d4d8'] },
@@ -25,6 +26,11 @@ const THEMES: Array<{ id: BuiltInTheme; label: string; tag: string; palette: str
 
 const EXTRA_THEMES: Array<{ id: BuiltInTheme; label: string; tag: string; palette: string[] }> = [
   { id: 'oxide', label: 'Oxide', tag: 'Industrial steel with cyan meters and rust warning lights', palette: ['#101419', '#51e6d8', '#f38d3c'] },
+  { id: 'steel', label: 'Steel', tag: 'Late-90s brushed metal deck with blue LCD', palette: ['#c5cad0', '#2357d8', '#101826'] },
+  { id: 'walnut', label: 'Record Deck', tag: 'Turntable plinth, round album platter, amber meters', palette: ['#21160f', '#f0a629', '#d7c0a0'] },
+  { id: 'jukebox', label: 'Jukebox', tag: 'Chrome arch, bubble controls, glowing title glass', palette: ['#2a1018', '#ffcf4a', '#52f0d0'] },
+  { id: 'terminal', label: 'Vintage Computer', tag: 'CRT shell, phosphor display, square hardware keys', palette: ['#101612', '#59ff85', '#cbd8c8'] },
+  { id: 'ice', label: 'Ice', tag: 'Frosted silver skin with cyan glass display', palette: ['#e8eef2', '#00a6d6', '#14212a'] },
   { id: 'miami', label: 'Miami', tag: 'Bright daylight deck with coral controls and teal LCD', palette: ['#f3f4ef', '#ff4f79', '#10282e'] },
   { id: 'mono', label: 'Mono', tag: 'High-contrast black, white, and red for long sessions', palette: ['#080808', '#f5f5f0', '#ff3d3d'] },
 ];
@@ -62,6 +68,7 @@ export function SettingsView(): JSX.Element {
   }, []);
 
   if (!settings) return <div />;
+  const outputEngine = getOutputEngineReadout();
 
   async function pickAndAddFolder(): Promise<void> {
     const dir = await api.pickFolder();
@@ -321,6 +328,17 @@ export function SettingsView(): JSX.Element {
           </Row>
         </section>
 
+        <section className="bevel-out flex flex-col gap-3 p-6">
+          <h2 className="text-[11px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
+            Shell · Layout
+          </h2>
+          <p className="text-[12px]" style={{ color: 'var(--ink-2)' }}>
+            The shell changes the chrome — sidebar, transport, glass effects. The skin (below) changes the
+            colors. Mix and match: Liquid Glass + Amber, Modern + Midnight, Concourse + Ops.
+          </p>
+          <ShellPicker />
+        </section>
+
         <section className="bevel-out flex flex-col gap-4 p-6">
           <h2 className="text-[11px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
             Skin
@@ -483,6 +501,12 @@ export function SettingsView(): JSX.Element {
               </span>
             </div>
           </Row>
+          <Row label="Output engine">
+            <div className="audio-engine-readout">
+              <span>{outputEngine.sampleRate}</span>
+              <span>32-bit float / Web Audio</span>
+            </div>
+          </Row>
           <Row label="Audio Output">
             <div className="flex max-w-[560px] flex-wrap items-center justify-end gap-2">
               <select
@@ -524,6 +548,20 @@ export function SettingsView(): JSX.Element {
           <h2 className="text-[11px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
             Last.fm
           </h2>
+          <div className="text-[12px] leading-relaxed" style={{ color: 'var(--ink-2)' }}>
+            Last.fm is optional. Newamp needs your own Last.fm API account because scrobbling is tied
+            to your Last.fm identity, not to a shared Newamp account. Create one at{' '}
+            <a
+              href="https://www.last.fm/api/account/create"
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: 'var(--accent)' }}
+            >
+              last.fm/api/account/create
+            </a>
+            , use <span style={{ color: 'var(--ink)' }}>Newamp</span> as the application name,
+            and leave callback URL blank for desktop auth.
+          </div>
           <Row label="API key">
             <input
               value={settings.lastfmApiKey ?? ''}
@@ -571,10 +609,10 @@ export function SettingsView(): JSX.Element {
               Save credentials
             </button>
             <button className="pxbtn" onClick={() => void lastfmStartAuth()}>
-              Open auth
+              Open Last.fm auth
             </button>
             <button className="pxbtn is-active" onClick={() => void completeLastfmAuth()}>
-              Complete
+              Complete auth
             </button>
             <button className="pxbtn" onClick={() => void disconnectLastfm()} disabled={!settings.lastfmSessionKey}>
               Disconnect
@@ -888,6 +926,14 @@ function DiagnosticRow({ label, children }: { label: string; children: React.Rea
       </span>
     </div>
   );
+}
+
+function getOutputEngineReadout(): { sampleRate: string } {
+  try {
+    return { sampleRate: `${(engine.context.sampleRate / 1000).toFixed(1)} kHz` };
+  } catch {
+    return { sampleRate: 'AudioContext unavailable' };
+  }
 }
 
 function formatHours(seconds: number): string {

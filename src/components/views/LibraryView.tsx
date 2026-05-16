@@ -1166,7 +1166,7 @@ export function TrackTable({
               onChange={(event) => setAllVisibleSelected(event.currentTarget.checked)}
             />
           </th>
-          {showQueueActions && <th className="w-[78px] px-2 py-[6px]">Queue</th>}
+          {showQueueActions && <th className="w-[66px] px-2 py-[6px]">Queue</th>}
           {playlistTargets.length > 0 && <th className="w-[138px] px-2 py-[6px]">Playlist</th>}
           <th className="w-[36px] px-2 py-[6px] text-right tabular-nums">#</th>
           <th className="px-2 py-[6px]">Title</th>
@@ -1176,7 +1176,7 @@ export function TrackTable({
           <th className="w-[58px] px-2 py-[6px] text-right tabular-nums">Time</th>
           <th className="w-[50px] px-2 py-[6px] text-right tabular-nums">Plays</th>
           <th className="w-[86px] px-2 py-[6px] text-right">Rating</th>
-          <th className="w-[54px] px-2 py-[6px] text-right">Auto</th>
+          <th className="w-[58px] px-2 py-[6px] text-right">Mix</th>
           {showMetadataLookup && <th className="w-[48px] px-2 py-[6px] text-right">Tag</th>}
           <th className="w-[36px] px-2 py-[6px] text-right">★</th>
         </tr>
@@ -1231,29 +1231,31 @@ export function TrackTable({
               </td>
               {showQueueActions && (
                 <td className="px-2 py-[5px]">
-                  <div className="flex gap-1">
+                  <div className="track-action-cluster">
                     {onPlayNext && (
                       <button
-                        className="pxbtn px-1.5 py-[1px] text-[9px]"
+                        className="track-icon-btn"
                         onClick={(e) => {
                           e.stopPropagation();
                           onPlayNext(t);
                         }}
+                        aria-label="Play next"
                         title="Play next"
                       >
-                        NEXT
+                        ⤴
                       </button>
                     )}
                     {onAddToQueue && (
                       <button
-                        className="pxbtn px-1.5 py-[1px] text-[10px]"
+                        className="track-icon-btn"
                         onClick={(e) => {
                           e.stopPropagation();
                           onAddToQueue(t);
                         }}
+                        aria-label="Add to queue"
                         title="Add to queue"
                       >
-                        +
+                        ≡
                       </button>
                     )}
                   </div>
@@ -1295,15 +1297,16 @@ export function TrackTable({
                     {search ? highlight(t.title, search) : t.title}
                   </span>
                   <button
-                    className="pxbtn px-1.5 py-[1px] text-[9px]"
+                    className="track-icon-btn track-folder-btn"
                     data-show-in-folder
                     onClick={(e) => {
                       e.stopPropagation();
                       void api.showInFolder(t.path);
                     }}
+                    aria-label="Show in folder"
                     title="Show in folder"
                   >
-                    FILE
+                    ⌕
                   </button>
                 </div>
               </td>
@@ -1358,7 +1361,7 @@ export function TrackTable({
                       : await api.toggleAvoidAutoPlay(t.id);
                     const avoid = updated ? !!updated.avoidAutoPlay : !t.avoidAutoPlay;
                     (t as Track).avoidAutoPlay = avoid ? 1 : 0;
-                    e.currentTarget.innerText = avoid ? 'AVOID' : 'AUTO';
+                    e.currentTarget.innerText = avoid ? 'NO DJ' : 'DJ OK';
                     e.currentTarget.style.color = avoid ? 'var(--warn)' : 'var(--muted)';
                     e.currentTarget.style.borderColor = avoid ? 'var(--warn)' : 'var(--line)';
                   }}
@@ -1366,9 +1369,9 @@ export function TrackTable({
                     color: t.avoidAutoPlay ? 'var(--warn)' : 'var(--muted)',
                     borderColor: t.avoidAutoPlay ? 'var(--warn)' : 'var(--line)',
                   }}
-                  title={t.avoidAutoPlay ? 'Excluded from Auto DJ and generated mixes' : 'Allowed in Auto DJ and generated mixes'}
+                  title={t.avoidAutoPlay ? 'Excluded from continuous mix and generated sets' : 'Allowed in continuous mix and generated sets'}
                 >
-                  {t.avoidAutoPlay ? 'AVOID' : 'AUTO'}
+                  {t.avoidAutoPlay ? 'NO DJ' : 'DJ OK'}
                 </button>
               </td>
               {showMetadataLookup && (

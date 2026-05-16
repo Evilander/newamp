@@ -243,6 +243,7 @@ const stub: NewampAPI = {
   deleteTrackBookmark: async () => undefined,
   toggleLove: async () => false,
   setTrackRating: async () => null,
+  setTrackRatingScore: async () => null,
   toggleAvoidAutoPlay: async () => null,
   recordPlay: async () => undefined,
   recordSkip: async () => undefined,
@@ -337,7 +338,10 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
 export const winctl = {
   minimize: () => window.winctl?.minimize() ?? Promise.resolve(),
   toggleMax: () => window.winctl?.toggleMax() ?? Promise.resolve(),
-  setCompact: (on: boolean) => window.winctl?.setCompact(on) ?? Promise.resolve(),
+  setCompact: (on: boolean, size?: { width?: number; height?: number }) =>
+    window.winctl?.setCompact(on, size) ?? Promise.resolve(),
+  setCompactSize: (size: { width: number; height: number }) =>
+    window.winctl?.setCompactSize?.(size) ?? Promise.resolve(),
   setAlwaysOnTop: (on: boolean) => window.winctl?.setAlwaysOnTop(on) ?? Promise.resolve(),
   close: () => window.winctl?.close() ?? Promise.resolve(),
   onState: (cb: (s: { maximized: boolean }) => void) =>

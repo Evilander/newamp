@@ -108,7 +108,7 @@ export function AlbumsView(): JSX.Element {
             ▶ Play album
           </button>
           <button className="pxbtn" onClick={() => queueTracksNext(tracks)} disabled={!tracks.length} title="Play album next">
-            NEXT ALBUM
+            PLAY NEXT
           </button>
           <button className="pxbtn" onClick={() => addTracksToQueue(tracks)} disabled={!tracks.length} title="Queue album">
             QUEUE ALBUM
@@ -116,8 +116,13 @@ export function AlbumsView(): JSX.Element {
           <button className="pxbtn" onClick={() => void findAlbumCover()} disabled={!selected.album}>
             FIND COVER
           </button>
-          <button className="pxbtn" onClick={openNextMissingCover} disabled={!missingArtAlbums.length}>
-            NEXT MISSING
+          <button
+            className="pxbtn"
+            onClick={openNextMissingCover}
+            disabled={!missingArtAlbums.length}
+            title="Open the next album that still needs cover art"
+          >
+            REVIEW COVER
           </button>
           <PlaylistAppendPicker
             tracks={tracks}
@@ -195,8 +200,13 @@ export function AlbumsView(): JSX.Element {
           className="bevel-in lcd-text flex-1 px-3 py-1.5 text-[14px] outline-none"
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
         />
-        <button className="pxbtn" onClick={openNextMissingCover} disabled={!missingArtAlbums.length}>
-          NEXT MISSING
+        <button
+          className="pxbtn"
+          onClick={openNextMissingCover}
+          disabled={!missingArtAlbums.length}
+          title="Open the next album that still needs cover art"
+        >
+          REVIEW COVER
         </button>
         <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
           {filtered.length.toLocaleString()} albums / {missingArtAlbums.length.toLocaleString()} missing art
@@ -237,26 +247,34 @@ function albumKey(album: AlbumSummary): string {
 }
 
 function AlbumArt({ album, size = 64 }: { album: AlbumSummary; size?: number }): JSX.Element {
-  if (album.artFromTrackId) {
+  const [failed, setFailed] = useState(false);
+  if (album.artFromTrackId && !failed) {
     return (
-      <img
-        src={api.getArtUrl(album.artFromTrackId)}
-        alt={album.album}
-        width={size}
-        height={size}
-        className="object-cover transition-transform group-hover:scale-[1.02]"
-        style={{ borderRadius: 'var(--radius-card)', boxShadow: 'var(--shadow-card)' }}
-      />
+      <div
+        className="album-art-tile relative overflow-hidden"
+        style={{ width: size, height: size, borderRadius: 'var(--radius-card)', boxShadow: 'var(--shadow-card)' }}
+      >
+        <div className="album-art-placeholder flex h-full w-full items-center justify-center">
+          <span>{album.album.slice(0, 2).toUpperCase() || 'LP'}</span>
+        </div>
+        <img
+          src={api.getArtUrl(album.artFromTrackId)}
+          alt={album.album}
+          width={size}
+          height={size}
+          className="relative h-full w-full object-cover transition-transform group-hover:scale-[1.02]"
+          style={{ zIndex: 1 }}
+          onError={() => setFailed(true)}
+        />
+      </div>
     );
   }
   return (
     <div
-      className="flex items-center justify-center text-[22px]"
+      className="album-art-tile album-art-placeholder flex items-center justify-center text-[22px]"
       style={{
         width: size,
         height: size,
-        background: 'var(--panel-2)',
-        color: 'var(--muted)',
         borderRadius: 'var(--radius-card)',
         boxShadow: 'var(--shadow-card)',
       }}

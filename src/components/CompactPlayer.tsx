@@ -1,8 +1,31 @@
-import { useMemo } from 'react';
+// Deck router. Reads the persisted deck-skin preference, resizes the window
+// to match the skin's natural aspect ratio, and renders the chosen skin
+// component. Each skin owns its own shape — resizing the window never adds
+// empty letterbox padding because the window matches the deck.
+
+import { useEffect, useMemo, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { api, winctl } from '../lib/api';
-import { formatTime } from '../lib/format';
-import { Visualizer } from './Visualizer';
+import { ClassicBentoDeck } from './decks/ClassicBentoDeck';
+import { RecordPlayerDeck } from './decks/RecordPlayerDeck';
+import { JukeboxDeck } from './decks/JukeboxDeck';
+import { CassetteDeck } from './decks/CassetteDeck';
+import { DECK_SKINS, findDeck, type DeckProps, type DeckSkin } from './decks/types';
+
+const DECK_SKIN_KEY = 'newamp:deck:skin';
+const VIZ_EXPANDED_KEY = 'newamp:deck:vizExpanded';
+
+function loadInitialSkin(): DeckSkin {
+  if (typeof window === 'undefined') return 'bento';
+  const raw = window.localStorage.getItem(DECK_SKIN_KEY);
+  if (raw && DECK_SKINS.some((skin) => skin.id === raw)) return raw as DeckSkin;
+  return 'bento';
+}
+
+function loadInitialVizExpanded(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.localStorage.getItem(VIZ_EXPANDED_KEY) === '1';
+}
 
 export function CompactPlayer(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
@@ -21,100 +44,71 @@ export function CompactPlayer(): JSX.Element {
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
   const setAlwaysOnTop = usePlayerStore((s) => s.setAlwaysOnTop);
   const setFullscreenViz = usePlayerStore((s) => s.setFullscreenViz);
-  const stop = () => usePlayerStore.getState().engine.stop();
+
+  const [deckSkin, setDeckSkin] = useState<DeckSkin>(() => loadInitialSkin());
+  const [vizExpanded, setVizExpanded] = useState<boolean>(() => loadInitialVizExpanded());
 
   const artUrl = useMemo(
     () => (current?.hasArt ? api.getArtUrl(current.id) : null),
     [current?.id, current?.hasArt],
   );
 
-  return (
-    <div className="compact-root">
-      <section className="compact-shell titlebar-drag">
-        <button
-          type="button"
-          className="compact-art titlebar-nodrag"
-          onClick={() => setFullscreenViz(true)}
-          title="Open visualizer"
-        >
-          {artUrl ? <img src={artUrl} alt={current?.album || 'cover'} draggable={false} /> : <span>NP</span>}
-        </button>
+  // Resize the OS window to match the chosen deck's natural size whenever the
+  // skin changes. setMinimumSize is dropped so the user is never letterboxed.
+  useEffect(() => {
+    const deck = findDeck(deckSkin);
+    void winctl.setCompactSize(deck.size);
+  }, [deckSkin]);
 
-        <div className="compact-main">
-          <div className="compact-topline">
-            <button className="compact-brand titlebar-nodrag" onClick={() => setCompactMode(false)}>
-              NEWAMP
-            </button>
-            <div className="compact-leds" aria-hidden="true">
-              <span className={isPlaying ? 'on' : ''} />
-              <span className={mode === 'shuffle' ? 'on' : ''} />
-              <span className={mode !== 'normal' ? 'on' : ''} />
-            </div>
-            <div className="compact-window titlebar-nodrag">
-              <button onClick={() => void winctl.minimize()} title="Minimize">_</button>
-              <button
-                className={alwaysOnTop ? 'active' : ''}
-                onClick={() => setAlwaysOnTop(!alwaysOnTop)}
-                title={alwaysOnTop ? 'Unpin window' : 'Pin window on top'}
-              >
-                PIN
-              </button>
-              <button onClick={() => setCompactMode(false)} title="Full library">FULL</button>
-              <button onClick={() => void winctl.close()} title="Close">x</button>
-            </div>
-          </div>
+  function handlePickSkin(skin: DeckSkin): void {
+    setDeckSkin(skin);
+    window.localStorage.setItem(DECK_SKIN_KEY, skin);
+  }
 
-          <button
-            type="button"
-            className="compact-display titlebar-nodrag"
-            onClick={() => setFullscreenViz(true)}
-            title="Open fullscreen visualizer"
-          >
-            <span className="compact-time">{formatTime(currentTime)}</span>
-            <span className="compact-title">
-              {current ? `${current.artist} - ${current.title}` : 'Drop in a library and press play'}
-            </span>
-            <span className="compact-total">{formatTime(duration)}</span>
-          </button>
+  function handleToggleVizExpanded(): void {
+    setVizExpanded((value) => {
+      const next = !value;
+      window.localStorage.setItem(VIZ_EXPANDED_KEY, next ? '1' : '0');
+      return next;
+    });
+  }
 
-          <div className="compact-controls titlebar-nodrag">
-            <button onClick={() => void prev()} title="Previous">&lt;&lt;</button>
-            <button onClick={togglePlay} title="Play / Pause">{isPlaying ? '||' : '>'}</button>
-            <button onClick={stop} title="Stop">[]</button>
-            <button onClick={() => void next()} title="Next">&gt;&gt;</button>
-            <input
-              type="range"
-              className="nslider compact-seek"
-              min={0}
-              max={duration || 1}
-              step={0.1}
-              value={currentTime}
-              onChange={(e) => seek(parseFloat(e.target.value))}
-            />
-            <button
-              className={mode === 'shuffle' ? 'active' : ''}
-              onClick={() => setMode(mode === 'shuffle' ? 'normal' : 'shuffle')}
-              title="Shuffle"
-            >
-              SHUF
-            </button>
-            <input
-              type="range"
-              className="nslider compact-volume"
-              min={0}
-              max={1}
-              step={0.01}
-              value={volume}
-              onChange={(e) => void setVolume(parseFloat(e.target.value))}
-              title="Volume"
-            />
-          </div>
-        </div>
+  const deckProps: DeckProps = {
+    track: current,
+    isPlaying,
+    currentTime,
+    duration,
+    volume,
+    mode,
+    alwaysOnTop,
+    artUrl,
+    deckSkin,
+    vizExpanded,
+    onTogglePlay: togglePlay,
+    onStop: () => usePlayerStore.getState().engine.stop(),
+    onNext: () => void next(),
+    onPrev: () => void prev(),
+    onSeek: seek,
+    onSetVolume: (v) => void setVolume(v),
+    onSetMode: setMode,
+    onSetAlwaysOnTop: setAlwaysOnTop,
+    onExitDeck: () => setCompactMode(false),
+    onMinimize: () => void winctl.minimize(),
+    onClose: () => void winctl.close(),
+    onPickSkin: handlePickSkin,
+    onToggleVizExpanded: handleToggleVizExpanded,
+    onOpenFullscreenViz: () => setFullscreenViz(true),
+  };
 
-        <div className="compact-viz">
-          <Visualizer mode="mini" width={118} height={96} />
-        </div>
-      </section>
-    </div>
-  );
+  switch (deckSkin) {
+    case 'record-player':
+      return <RecordPlayerDeck {...deckProps} />;
+    case 'jukebox':
+      return <JukeboxDeck {...deckProps} />;
+    case 'cassette':
+      return <CassetteDeck {...deckProps} />;
+    case 'bento':
+    default:
+      return <ClassicBentoDeck {...deckProps} />;
+  }
 }

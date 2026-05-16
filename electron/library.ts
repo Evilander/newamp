@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS tracks (
   has_art      INTEGER NOT NULL DEFAULT 0,
   loved        INTEGER NOT NULL DEFAULT 0,
   rating       INTEGER NOT NULL DEFAULT 0,
+  rating_score REAL,
   avoid_auto_play INTEGER NOT NULL DEFAULT 0,
   play_count   INTEGER NOT NULL DEFAULT 0,
   last_played  INTEGER,
@@ -215,6 +216,7 @@ interface RawRow {
   has_art: number;
   loved: number;
   rating: number;
+  rating_score: number | null;
   avoid_auto_play: number;
   play_count: number;
   last_played: number | null;
@@ -318,6 +320,7 @@ function rowToTrack(r: RawRow): Track {
     hasArt: r.has_art ? 1 : 0,
     loved: r.loved ? 1 : 0,
     rating: normalizeTrackRating(r.rating),
+    ratingScore: normalizeTrackRatingScore(r.rating_score),
     avoidAutoPlay: r.avoid_auto_play ? 1 : 0,
     playCount: r.play_count,
     lastPlayed: r.last_played,
@@ -401,6 +404,17 @@ export interface TrackFileState {
   path: string;
   size: number | null;
   mtime: number;
+  hasArt: number;
+  artHash: string | null;
+  artExists: boolean;
+}
+
+interface TrackFileStateRow {
+  path: string;
+  size: number | null;
+  mtime: number;
+  has_art: number;
+  art_hash: string | null;
 }
 
 export class LibraryStore {
@@ -467,6 +481,7 @@ export class LibraryStore {
     const applySchema = () => {
       this.db.exec(SCHEMA);
       this.ensureColumn('tracks', 'rating', 'INTEGER NOT NULL DEFAULT 0');
+      this.ensureColumn('tracks', 'rating_score', 'REAL');
       this.ensureColumn('tracks', 'avoid_auto_play', 'INTEGER NOT NULL DEFAULT 0');
       this.ensureColumn('tracks', 'skip_count', 'INTEGER NOT NULL DEFAULT 0');
       this.ensureColumn('tracks', 'last_skipped', 'INTEGER');
@@ -801,16 +816,16 @@ export class LibraryStore {
     for (let i = 0; i < unique.length; i += chunkSize) {
       const chunk = unique.slice(i, i + chunkSize);
       const placeholders = chunk.map(() => '?').join(',');
-      const rows = this.many<TrackFileState>(
-        `SELECT path, size, mtime FROM tracks WHERE path IN (${placeholders})`,
+      const rows = this.many<TrackFileStateRow>(
+        `SELECT path, size, mtime, has_art, art_hash FROM tracks WHERE path IN (${placeholders})`,
         chunk,
       );
-      for (const row of rows) out.set(row.path, row);
+      for (const row of rows) out.set(row.path, this.rowToTrackFileState(row));
     }
 
     if (out.size < unique.length) {
       const normalizedRows = new Map(
-        this.many<TrackFileState>(`SELECT path, size, mtime FROM tracks`).map((row) => [
+        this.many<TrackFileStateRow>(`SELECT path, size, mtime, has_art, art_hash FROM tracks`).map((row) => [
           normalizeFileStatePath(row.path),
           row,
         ]),
@@ -818,11 +833,26 @@ export class LibraryStore {
       for (const path of unique) {
         if (out.has(path)) continue;
         const row = normalizedRows.get(normalizeFileStatePath(path));
-        if (row) out.set(path, { ...row, path });
+        if (row) out.set(path, { ...this.rowToTrackFileState(row), path });
       }
     }
 
     return out;
+  }
+
+  private rowToTrackFileState(row: TrackFileStateRow): TrackFileState {
+    return {
+      path: row.path,
+      size: row.size,
+      mtime: row.mtime,
+      hasArt: row.has_art ? 1 : 0,
+      artHash: row.art_hash,
+      artExists: row.art_hash ? this.artFileExists(row.art_hash) : false,
+    };
+  }
+
+  private artFileExists(hash: string): boolean {
+    return ['.jpg', '.jpeg', '.png', '.webp'].some((ext) => existsSync(join(this.artDir, `${hash}${ext}`)));
   }
 
   pruneMissingTracks(targets?: string[]): LibraryPruneMissingResult {
@@ -1573,7 +1603,29 @@ export class LibraryStore {
     const trackId = Math.trunc(Number(id));
     if (!Number.isFinite(trackId) || trackId <= 0) return null;
     const next = normalizeTrackRating(rating);
-    this.db.run(`UPDATE tracks SET rating = ? WHERE id = ?`, [next, trackId]);
+    // Star changes also sync the fine score so the two stay coherent.
+    // 0 stars clears the score; otherwise score = stars * 20.
+    const nextScore = next === 0 ? null : next * 20;
+    this.db.run(
+      `UPDATE tracks SET rating = ?, rating_score = ? WHERE id = ?`,
+      [next, nextScore, trackId],
+    );
+    if (this.db.getRowsModified() <= 0) return null;
+    this.scheduleFlush();
+    return this.getTrack(trackId);
+  }
+
+  setTrackRatingScore(id: number, score: number | null): Track | null {
+    const trackId = Math.trunc(Number(id));
+    if (!Number.isFinite(trackId) || trackId <= 0) return null;
+    const nextScore = normalizeTrackRatingScore(score);
+    // Keep the integer rating column coherent so legacy sorts / smart rules
+    // / keyboard shortcuts continue working. round-half-up gives stable buckets.
+    const nextStars = nextScore == null ? 0 : Math.max(0, Math.min(5, Math.round(nextScore / 20)));
+    this.db.run(
+      `UPDATE tracks SET rating = ?, rating_score = ? WHERE id = ?`,
+      [nextStars, nextScore, trackId],
+    );
     if (this.db.getRowsModified() <= 0) return null;
     this.scheduleFlush();
     return this.getTrack(trackId);
@@ -2370,6 +2422,15 @@ function normalizeTrackRating(value: unknown): number {
   const rating = Math.round(Number(value));
   if (!Number.isFinite(rating)) return 0;
   return Math.max(0, Math.min(5, rating));
+}
+
+function normalizeTrackRatingScore(value: unknown): number | null {
+  if (value == null) return null;
+  const score = Number(value);
+  if (!Number.isFinite(score)) return null;
+  // Quantize to one decimal place so SQLite never persists noisy floats.
+  const clamped = Math.max(0, Math.min(100, score));
+  return Math.round(clamped * 10) / 10;
 }
 
 function normalizeReplayGainDb(value: unknown): number | null {

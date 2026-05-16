@@ -18,6 +18,9 @@ const {
 const { SettingsStore } = await import('../dist-electron/electron/settings.js');
 
 assert.ok(BUILT_IN_THEMES.includes('classic'));
+assert.ok(BUILT_IN_THEMES.includes('walnut'), 'record-player deck skin should be registered');
+assert.ok(BUILT_IN_THEMES.includes('jukebox'), 'jukebox deck skin should be registered');
+assert.ok(BUILT_IN_THEMES.includes('terminal'), 'vintage-computer deck skin should be registered');
 assert.ok(SKIN_VARIABLES.includes('--accent'));
 
 const skin = normalizeCustomSkin({
@@ -96,7 +99,7 @@ assert.equal(importedWinampSkin.variables['--display-bg'], '#101316');
 assert.ok(importedWinampSkin.variables['--bg'], 'Winamp BMP colors should produce a Newamp background variable');
 assert.ok(importedWinampSkin.variables['--panel'], 'Winamp BMP colors should produce a Newamp panel variable');
 
-const [typesSource, preloadSource, apiSource, mainSource, settingsViewSource, appSource, skinsSource, packageSource, gateSource] =
+const [typesSource, preloadSource, apiSource, mainSource, settingsViewSource, appSource, skinsSource, styleSource, packageSource, gateSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/preload.ts', import.meta.url), 'utf8'),
@@ -105,6 +108,7 @@ const [typesSource, preloadSource, apiSource, mainSource, settingsViewSource, ap
     readFile(new URL('../src/components/views/SettingsView.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/skins.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8'),
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../scripts/release-gate.mjs', import.meta.url), 'utf8'),
   ]);
@@ -125,10 +129,16 @@ assert.match(mainSource, /settings:skin-import-file/, 'main process should expos
 assert.match(mainSource, /extensions: \['json', 'wsz', 'zip'\]/, 'native import dialog should accept Newamp JSON and Winamp WSZ/ZIP skins');
 assert.match(settingsViewSource, /Import skin/, 'Settings Skin Workshop should expose import');
 assert.match(settingsViewSource, /Export skin/, 'Settings Skin Workshop should expose export');
+assert.match(settingsViewSource, /Record Deck/, 'Settings should expose the record-player deck body');
+assert.match(settingsViewSource, /Jukebox/, 'Settings should expose the jukebox deck body');
+assert.match(settingsViewSource, /Vintage Computer/, 'Settings should expose the vintage-computer deck body');
 assert.match(appSource, /isDroppedSkinFile/, 'app-wide drop handling should classify dropped skin files');
 assert.match(appSource, /importCustomSkinFile/, 'app-wide drop handling should import dropped skin files');
 assert.match(appSource, /Applied skin/, 'app-wide drop handling should report applied skins');
 assert.match(skinsSource, /@shared\/custom-skin/, 'renderer skin constants should come from shared validation');
+assert.match(styleSource, /\[data-theme='walnut'\] \.compact-art/, 'record deck should change compact player shape');
+assert.match(styleSource, /\[data-theme='jukebox'\] \.compact-shell/, 'jukebox should change compact player shape');
+assert.match(styleSource, /\[data-theme='terminal'\] \.compact-display/, 'vintage computer should change compact player shape');
 assert.match(packageSource, /"smoke:skin"/, 'package scripts should expose skin smoke');
 assert.match(gateSource, /smoke:skin/, 'release gate should include skin smoke');
 

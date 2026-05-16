@@ -89,6 +89,7 @@ const uiGaplessSmoke = process.env.NEWAMP_UI_GAPLESS_SMOKE === '1';
 const uiLyricsSmoke = process.env.NEWAMP_UI_LYRICS_SMOKE === '1';
 const uiOpenFileSmoke = process.env.NEWAMP_UI_OPEN_FILE_SMOKE === '1';
 const uiVisualizerSmoke = process.env.NEWAMP_UI_VISUALIZER_SMOKE === '1';
+const uiArtSmoke = process.env.NEWAMP_UI_ART_SMOKE === '1';
 const smokeMode =
   startupSmoke ||
   uiPlaybackSmoke ||
@@ -97,7 +98,8 @@ const smokeMode =
   uiGaplessSmoke ||
   uiLyricsSmoke ||
   uiOpenFileSmoke ||
-  uiVisualizerSmoke;
+  uiVisualizerSmoke ||
+  uiArtSmoke;
 const OPEN_AUDIO_EXTS = new Set([
   '.mp3',
   '.flac',
@@ -137,11 +139,13 @@ if (smokeMode && !userDataOverride) {
         : uiGaplessSmoke
           ? 'ui-gapless-smoke-user-data'
           : uiLyricsSmoke
-            ? 'ui-lyrics-smoke-user-data'
-            : uiOpenFileSmoke
-              ? 'ui-open-file-smoke-user-data'
-              : uiVisualizerSmoke
-                ? 'ui-visualizer-smoke-user-data'
+          ? 'ui-lyrics-smoke-user-data'
+          : uiOpenFileSmoke
+            ? 'ui-open-file-smoke-user-data'
+            : uiVisualizerSmoke
+              ? 'ui-visualizer-smoke-user-data'
+              : uiArtSmoke
+                ? 'ui-art-smoke-user-data'
                 : 'ui-playback-smoke-user-data';
   const smokeUserData = process.env.NEWAMP_SMOKE_USER_DATA
     ? resolve(process.env.NEWAMP_SMOKE_USER_DATA)
@@ -310,6 +314,10 @@ protocol.registerSchemesAsPrivileged([
 let mainWin: BrowserWindow | null = null;
 const tabWindows = new Set<BrowserWindow>();
 let normalBounds: Rectangle | null = null;
+// Remember whether the window was maximized when entering compact, so we can
+// restore that exact state when leaving compact mode. Fixes the prior bug
+// where toggling DECK while maximized stranded the window at the deck size.
+let normalWasMaximized = false;
 let tray: Tray | null = null;
 let isQuitting = false;
 let library: LibraryStore;
@@ -559,11 +567,10 @@ function registerAudioProtocol(): void {
     }
   });
 
-  // newart://<trackId>
+  // newart://track/<trackId>/art
   protocol.handle('newart', async (request) => {
     try {
-      const url = new URL(request.url);
-      const id = parseInt(url.host || url.pathname.replace(/[^0-9]/g, ''), 10);
+      const id = protocolNumericId(request.url);
       if (!id) return new Response('Bad request', { status: 400 });
       const art = library.getArt(id);
       if (!art) {
@@ -583,8 +590,7 @@ function registerAudioProtocol(): void {
 
   protocol.handle('newplaylistart', async (request) => {
     try {
-      const url = new URL(request.url);
-      const id = parseInt(url.host || url.pathname.replace(/[^0-9]/g, ''), 10);
+      const id = protocolNumericId(request.url);
       if (!id) return new Response('Bad request', { status: 400 });
       const art = library.getPlaylistCover(id);
       if (!art) return new Response('No art', { status: 404 });
@@ -599,6 +605,12 @@ function registerAudioProtocol(): void {
       return new Response('Server Error', { status: 500 });
     }
   });
+}
+
+function protocolNumericId(rawUrl: string): number {
+  const idText = rawUrl.match(/(?:^|[^\d])(\d+)(?=[^\d]|$)/)?.[1] || '';
+  const id = Number.parseInt(idText, 10);
+  return Number.isFinite(id) && id > 0 ? id : 0;
 }
 
 function rendererDistPath(): string {
@@ -832,6 +844,9 @@ function registerIpc(): void {
   ipcMain.handle('library:toggle-love', async (_e, id: number) => library.toggleLove(id));
   ipcMain.handle('library:set-rating', async (_e, id: number, rating: number) =>
     library.setTrackRating(id, rating),
+  );
+  ipcMain.handle('library:set-rating-score', async (_e, id: number, score: number | null) =>
+    library.setTrackRatingScore(id, score),
   );
   ipcMain.handle('library:toggle-avoid-autoplay', async (_e, id: number) =>
     library.toggleAvoidAutoPlay(id),
@@ -1080,20 +1095,55 @@ function registerIpc(): void {
     if (mainWin.isMaximized()) mainWin.unmaximize();
     else mainWin.maximize();
   });
-  ipcMain.handle('win:set-compact', (_e, on: boolean) => {
+  ipcMain.handle('win:set-compact', (_e, on: boolean, size?: { width?: number; height?: number }) => {
     if (!mainWin) return;
     if (on) {
-      if (!normalBounds && !mainWin.isMaximized()) normalBounds = mainWin.getBounds();
+      // Capture the previous shape once on the way into deck mode. Tracking
+      // the maximized state separately lets us correctly restore a maximized
+      // window — previously this was lost and the window got stuck small.
+      if (!normalBounds) {
+        normalWasMaximized = mainWin.isMaximized();
+        normalBounds = normalWasMaximized
+          ? mainWin.getNormalBounds?.() ?? mainWin.getBounds()
+          : mainWin.getBounds();
+      }
       if (mainWin.isMaximized()) mainWin.unmaximize();
-      mainWin.setMinimumSize(640, 142);
-      mainWin.setSize(720, 168, true);
+      const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 720)));
+      const height = Math.max(120, Math.min(1000, Math.trunc(Number(size?.height) || 168)));
+      // Allow shrinking the minimum to the deck's natural size so resize cannot
+      // pad the chrome with empty border. Each skin owns its aspect ratio.
+      mainWin.setMinimumSize(Math.min(280, width), Math.min(120, height));
+      mainWin.setSize(width, height, true);
       mainWin.setAlwaysOnTop(true, 'floating');
       return;
     }
     mainWin.setAlwaysOnTop(false);
     mainWin.setMinimumSize(980, 640);
-    if (normalBounds) mainWin.setBounds(normalBounds, true);
+    // Pull the window above the minimum first if it is currently smaller, then
+    // restore. Without this, Electron silently grows it to (980,640) on
+    // setMinimumSize and the subsequent setBounds can race with the resize.
+    if (normalBounds) {
+      const bounds = { ...normalBounds };
+      mainWin.setBounds(bounds, true);
+    } else {
+      // Fallback for the edge case where deck mode was entered without a saved
+      // pre-deck bounds (e.g. fresh app start in compactMode from settings).
+      const display = require('electron').screen.getDisplayMatching(mainWin.getBounds()).workArea;
+      const fallbackWidth = Math.min(1280, Math.max(980, display.width - 200));
+      const fallbackHeight = Math.min(820, Math.max(640, display.height - 200));
+      mainWin.setSize(fallbackWidth, fallbackHeight, true);
+      mainWin.center();
+    }
+    if (normalWasMaximized) mainWin.maximize();
     normalBounds = null;
+    normalWasMaximized = false;
+  });
+  ipcMain.handle('win:set-compact-size', (_e, size: { width: number; height: number }) => {
+    if (!mainWin) return;
+    const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 720)));
+    const height = Math.max(120, Math.min(1000, Math.trunc(Number(size?.height) || 168)));
+    mainWin.setMinimumSize(Math.min(280, width), Math.min(120, height));
+    mainWin.setSize(width, height, true);
   });
   ipcMain.handle('win:set-always-on-top', (_e, on: boolean) => {
     mainWin?.setAlwaysOnTop(!!on, 'floating');
@@ -1258,6 +1308,30 @@ async function runUiVisualizerSmoke(win: BrowserWindow, scanPromise: Promise<voi
     app.quit();
   } catch (err) {
     console.error('[newamp-ui-visualizer-smoke] failed:', err);
+    app.exit(1);
+  }
+}
+
+async function runUiArtSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
+  try {
+    await Promise.race([
+      scanPromise,
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for UI art smoke scan')), 15000),
+      ),
+    ]);
+    await reloadForSmoke(win);
+    const result = await Promise.race([
+      win.webContents.executeJavaScript(uiArtProbeSource(), true),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for UI art probe')), 15000),
+      ),
+    ]);
+    console.log(`[newamp-ui-art-smoke] ${JSON.stringify(result)}`);
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    console.error('[newamp-ui-art-smoke] failed:', err);
     app.exit(1);
   }
 }
@@ -1635,6 +1709,58 @@ function uiHandoffProbeSource(): string {
   `;
 }
 
+function uiArtProbeSource(): string {
+  return `
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (label, fn, timeout = 10000) => {
+        const start = performance.now();
+        while (performance.now() - start < timeout) {
+          const value = await fn();
+          if (value) return value;
+          await sleep(75);
+        }
+        throw new Error('Timed out waiting for ' + label);
+      };
+      if (!window.newamp?.getTracks || !window.newamp?.getArtUrl) {
+        throw new Error('Newamp preload API is unavailable');
+      }
+      const track = await waitFor('track with album art', async () => {
+        const rows = await window.newamp.getTracks({ limit: 250 });
+        return rows.find((item) => item.hasArt) || null;
+      });
+      const url = window.newamp.getArtUrl(track.id);
+      const response = await fetch(url);
+      if (!response.ok) throw new Error('Art fetch failed: ' + response.status + ' ' + url);
+      const contentType = response.headers.get('content-type') || '';
+      const bytes = (await response.arrayBuffer()).byteLength;
+      const image = await new Promise((resolve, reject) => {
+        const img = new Image();
+        const timer = setTimeout(() => reject(new Error('Timed out decoding art image ' + url)), 8000);
+        img.onload = () => {
+          clearTimeout(timer);
+          resolve({ naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, complete: img.complete });
+        };
+        img.onerror = () => {
+          clearTimeout(timer);
+          reject(new Error('Art image element failed to load ' + url));
+        };
+        img.src = url;
+      });
+      return {
+        ok: true,
+        trackId: track.id,
+        title: track.title,
+        album: track.album,
+        url,
+        contentType,
+        bytes,
+        image,
+      };
+    })()
+  `;
+}
+
 function uiLyricsProbeSource(): string {
   return `
     (async () => {
@@ -1669,6 +1795,14 @@ function uiLyricsProbeSource(): string {
       nowPlayingButton.click();
       const panel = await waitFor('lyrics panel', () =>
         document.querySelector('[data-newamp-lyrics-panel]'),
+      );
+      const karaokeButton = await waitFor('karaoke mode button', () =>
+        Array.from(panel.querySelectorAll('button'))
+          .find((item) => /karaoke/i.test(item.textContent || '')),
+      );
+      karaokeButton.click();
+      await waitFor('karaoke lyrics mode', () =>
+        panel.getAttribute('data-newamp-lyrics-karaoke') === 'true' ? panel : null,
       );
       const lyricReady = await waitFor('LRCLIB lyric content', () => {
         const status = panel.getAttribute('data-newamp-lyrics-status') || '';
@@ -1709,6 +1843,7 @@ function uiLyricsProbeSource(): string {
         currentTitle,
         lyricStatus: lyricReady.status,
         lyricMode: lyricReady.mode,
+        karaokeMode: panel.getAttribute('data-newamp-lyrics-karaoke') === 'true',
         lyricSource: lyricReady.source,
         lineCount: lyricReady.lineCount,
         plainLength: lyricReady.plainLength,
@@ -2278,6 +2413,8 @@ async function bootstrap(): Promise<void> {
       void runUiLyricsSmoke(mainWin, scanPromise);
     } else if (uiVisualizerSmoke && mainWin) {
       void runUiVisualizerSmoke(mainWin, scanPromise);
+    } else if (uiArtSmoke && mainWin) {
+      void runUiArtSmoke(mainWin, scanPromise);
     }
   });
 }
