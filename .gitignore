@@ -4,12 +4,17 @@ dist
 dist-electron
 release
 tmp
+studio/renders
 
 .serena
 .playwright-cli
 .playwright-mcp
 .newamp-git
 .vite
+
+# Local design captures and smoke screenshots are useful while iterating, but
+# they should not ship in the public source archive.
+/*.png
 
 .DS_Store
 *.log
