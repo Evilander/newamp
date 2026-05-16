@@ -9,6 +9,7 @@ export function Transport(): JSX.Element {
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTime = usePlayerStore((s) => s.currentTime);
   const duration = usePlayerStore((s) => s.duration);
+  const playbackError = usePlayerStore((s) => s.playbackError);
   const volume = usePlayerStore((s) => s.volume);
   const mode = usePlayerStore((s) => s.mode);
   const setMode = usePlayerStore((s) => s.setMode);
@@ -75,10 +76,18 @@ export function Transport(): JSX.Element {
                 : '— no track loaded — choose something from your library —'}
             </div>
             <div className="lcd-text text-[11px]" style={{ color: 'var(--ink-2)' }}>
-              {current ? playbackCodecLabel(current.path) : 'AUDIO'}
-              {current && current.bitrate ? `  ${Math.round(current.bitrate / 1000)} kbps` : '  --'}
-              {current && current.sampleRate ? `  ·  ${(current.sampleRate / 1000).toFixed(1)} kHz` : ''}
-              {current && current.year ? `  ·  ${current.year}` : ''}
+              {playbackError ? (
+                <span data-newamp-playback-error style={{ color: 'var(--error)' }}>
+                  {playbackError}
+                </span>
+              ) : (
+                <>
+                  {current ? playbackCodecLabel(current.path) : 'AUDIO'}
+                  {current && current.bitrate ? `  ${Math.round(current.bitrate / 1000)} kbps` : '  --'}
+                  {current && current.sampleRate ? `  ·  ${(current.sampleRate / 1000).toFixed(1)} kHz` : ''}
+                  {current && current.year ? `  ·  ${current.year}` : ''}
+                </>
+              )}
             </div>
           </div>
           <Visualizer mode="mini" width={120} height={36} />

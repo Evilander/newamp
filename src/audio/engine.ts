@@ -505,7 +505,7 @@ export class AudioEngine {
       deck.gain.gain.cancelScheduledValues(this.ctx.currentTime);
       deck.gain.gain.setValueAtTime(deck.id === this.activeDeckIndex ? 1 : 0, this.ctx.currentTime);
     }
-    this.patch({ playing: false, currentTime: 0, ended: false, buffering: false });
+    this.patch({ playing: false, currentTime: 0, ended: false, buffering: false, error: null });
   }
 
   seek(seconds: number): void {
