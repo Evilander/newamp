@@ -63,6 +63,7 @@ if (!skipSmokes) {
     'smoke:lastfm',
     'smoke:open-files',
     'smoke:playback-start',
+    'smoke:playback-error',
     'smoke:playback-controls',
     'smoke:keyboard',
     'smoke:media-session',

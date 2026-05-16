@@ -36,6 +36,7 @@ import {
   sleepTimerEndTime,
   stopAfterCurrentKey,
 } from '@shared/playback-controls';
+import { playbackErrorKey, resolvePlaybackErrorAdvance } from '@shared/playback-error';
 import {
   nextSmartShuffle,
   previousSmartShuffle,
@@ -68,6 +69,7 @@ interface PlayerState {
   currentTime: number;
   resumeAt: number | null;
   duration: number;
+  playbackError: string | null;
   volume: number;
   playbackRate: number;
   audioOutputDeviceId: string | null;
@@ -208,6 +210,8 @@ let lastPodcastProgressPersistAt = 0;
 let lastHandoffKey: string | null = null;
 let lastPreparedHandoffKey: string | null = null;
 let lastStopAfterCurrentKey: string | null = null;
+let lastPlaybackErrorKey: string | null = null;
+let playbackErrorAdvanceTimer: number | null = null;
 
 async function restorePlaybackSession(
   resumeState: PlaybackResumeState | null,
@@ -270,6 +274,82 @@ function persistPodcastProgress(state: PlayerState, force = false, completed = f
   }).catch(() => undefined);
 }
 
+function clearPlaybackErrorAdvanceTimer(): void {
+  if (playbackErrorAdvanceTimer != null) {
+    window.clearTimeout(playbackErrorAdvanceTimer);
+    playbackErrorAdvanceTimer = null;
+  }
+}
+
+function playbackFailureLabel(track: Track | null, error: string): string {
+  const name = track ? `${track.artist} - ${track.title}` : 'track';
+  return `Skipped ${name}: ${error}`;
+}
+
+async function advanceAfterPlaybackError(
+  getState: () => PlayerState,
+  setState: (partial: Partial<PlayerState>) => void,
+  failedKey: string,
+): Promise<void> {
+  const state = getState();
+  const current = state.current;
+  const key = playbackErrorKey({
+    error: state.playbackError,
+    currentTrackId: current?.id ?? null,
+    index: state.index,
+  });
+  if (!current || key !== failedKey || state.queue.length <= 1) {
+    engine.stop();
+    return;
+  }
+
+  let nextIndex = state.index + 1;
+  let nextShuffleHistory = state.shuffleHistory;
+  if (state.mode === 'shuffle') {
+    const decision = nextSmartShuffle({
+      queueLength: state.queue.length,
+      currentIndex: state.index,
+      history: state.shuffleHistory,
+    });
+    nextIndex = decision.index;
+    nextShuffleHistory = decision.history;
+  } else if (nextIndex >= state.queue.length && (state.mode === 'repeat-all' || state.mode === 'repeat-one')) {
+    nextIndex = 0;
+  }
+
+  if (nextIndex < 0 || nextIndex >= state.queue.length || nextIndex === state.index) {
+    engine.stop();
+    return;
+  }
+
+  const nextTrack = state.queue[nextIndex]!;
+  lastPreparedHandoffKey = null;
+  lastStopAfterCurrentKey = null;
+  setState({
+    index: nextIndex,
+    current: nextTrack,
+    currentTime: 0,
+    duration: nextTrack.duration ?? 0,
+    resumeAt: null,
+    activePodcastEpisode: null,
+    shuffleHistory: nextShuffleHistory,
+    playbackError: playbackFailureLabel(current, state.playbackError ?? 'Playback failed'),
+  });
+  applyReplayGain(nextTrack, state.settings);
+  schedulePersistPlaybackSession(getState(), true);
+  try {
+    await engine.play(toAudioUrl(nextTrack.path), nextTrack.id);
+    lastPlaybackErrorKey = null;
+    startLastfmNowPlaying(nextTrack);
+    void api.recordPlay(nextTrack.id).catch(() => undefined);
+    if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: nextIndex })) {
+      void getState().refillAutoDjQueue();
+    }
+  } catch {
+    // The engine publishes the next error; the subscription schedules the next skip.
+  }
+}
+
 function podcastEpisodeToTrack(episode: PodcastEpisode): Track {
   return {
     id: -Math.abs(hashEpisodeId(episode.id)),
@@ -316,11 +396,31 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       isPlaying: s.playing,
       currentTime: s.currentTime,
       duration: s.duration,
+      playbackError: s.error,
     });
     maybeScrobbleToLastfm(get(), s.currentTime, s.playing);
     schedulePersistPlaybackSession(get());
     persistPodcastProgress(get(), s.ended, s.ended);
     const state = get();
+    if (s.error) {
+      const decision = resolvePlaybackErrorAdvance({
+        error: s.error,
+        currentTrackId: state.current?.id ?? s.trackId,
+        index: state.index,
+        queueLength: state.queue.length,
+        mode: state.mode,
+        lastErrorKey: lastPlaybackErrorKey,
+      });
+      if (decision.key && (decision.shouldAdvance || decision.shouldStop)) lastPlaybackErrorKey = decision.key;
+      if (decision.shouldAdvance && decision.key) {
+        clearPlaybackErrorAdvanceTimer();
+        playbackErrorAdvanceTimer = window.setTimeout(() => {
+          playbackErrorAdvanceTimer = null;
+          void advanceAfterPlaybackError(get, set, decision.key!);
+        }, 350);
+      }
+      return;
+    }
     const queueLength = state.queue?.length ?? 0;
     if (
       shouldStopForSleepTimer({
@@ -407,6 +507,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     currentTime: 0,
     resumeAt: null,
     duration: 0,
+    playbackError: null,
     volume: 0.75,
     playbackRate: 1,
     audioOutputDeviceId: null,
@@ -491,9 +592,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     setSearchQuery: (q) => set({ searchQuery: q }),
 
     playTrack: async (track, queue) => {
+      clearPlaybackErrorAdvanceTimer();
       recordManualSkip(get());
       lastPreparedHandoffKey = null;
       lastStopAfterCurrentKey = null;
+      lastPlaybackErrorKey = null;
       const q = queue && queue.length ? queue : [track];
       const idx = q.findIndex((t) => t.id === track.id);
       const nextIndex = idx >= 0 ? idx : 0;
@@ -504,6 +607,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         currentTime: 0,
         duration: track.duration ?? 0,
         resumeAt: null,
+        playbackError: null,
         activePodcastEpisode: null,
         shuffleHistory: get().mode === 'shuffle' ? resetSmartShuffleHistory(q.length, nextIndex) : [],
       });
@@ -511,14 +615,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       schedulePersistPlaybackSession(get(), true);
       const url = toAudioUrl(track.path);
       await engine.play(url, track.id);
+      lastPlaybackErrorKey = null;
       startLastfmNowPlaying(track);
       void api.recordPlay(track.id).catch(() => undefined);
     },
 
     playPodcastEpisode: async (episode) => {
+      clearPlaybackErrorAdvanceTimer();
       const track = podcastEpisodeToTrack(episode);
       lastPreparedHandoffKey = null;
       lastStopAfterCurrentKey = null;
+      lastPlaybackErrorKey = null;
       lastPodcastProgressPersistAt = 0;
       set({
         queue: [track],
@@ -527,6 +634,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         currentTime: 0,
         duration: track.duration ?? 0,
         resumeAt: null,
+        playbackError: null,
         activePodcastEpisode: { feedUrl: episode.feedUrl, episodeId: episode.id },
         shuffleHistory: [],
       });
@@ -540,9 +648,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     playQueue: async (tracks, startIndex = 0) => {
       if (!tracks.length) return;
+      clearPlaybackErrorAdvanceTimer();
       recordManualSkip(get());
       lastPreparedHandoffKey = null;
       lastStopAfterCurrentKey = null;
+      lastPlaybackErrorKey = null;
       const q = [...tracks];
       const i = Math.max(0, Math.min(startIndex, q.length - 1));
       const t = q[i]!;
@@ -553,6 +663,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         currentTime: 0,
         duration: t.duration ?? 0,
         resumeAt: null,
+        playbackError: null,
         activePodcastEpisode: null,
         shuffleHistory: get().mode === 'shuffle' ? resetSmartShuffleHistory(q.length, i) : [],
       });
@@ -560,12 +671,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       schedulePersistPlaybackSession(get(), true);
       const url = toAudioUrl(t.path);
       await engine.play(url, t.id);
+      lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
       void api.recordPlay(t.id).catch(() => undefined);
     },
 
     loadQueue: (tracks) => {
-      set({ queue: [...tracks], index: -1, current: null, resumeAt: null, currentTime: 0, duration: 0, shuffleHistory: [], activePodcastEpisode: null });
+      clearPlaybackErrorAdvanceTimer();
+      set({ queue: [...tracks], index: -1, current: null, resumeAt: null, currentTime: 0, duration: 0, playbackError: null, shuffleHistory: [], activePodcastEpisode: null });
       schedulePersistPlaybackSession(get(), true);
       if (get().autoDjEnabled) void get().refillAutoDjQueue(true);
     },
@@ -635,9 +748,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     clearQueue: () => {
+      clearPlaybackErrorAdvanceTimer();
       recordManualSkip(get());
       lastPreparedHandoffKey = null;
       lastStopAfterCurrentKey = null;
+      lastPlaybackErrorKey = null;
       engine.stop();
       set({
         queue: [],
@@ -646,6 +761,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         currentTime: 0,
         duration: 0,
         resumeAt: null,
+        playbackError: null,
         stopAfterCurrent: false,
         sleepTimerEndsAt: null,
         shuffleHistory: [],
@@ -671,6 +787,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     next: async () => {
+      clearPlaybackErrorAdvanceTimer();
       const state = get();
       recordManualSkip(state);
       const { queue, index, mode, shuffleHistory } = state;
@@ -700,6 +817,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       schedulePersistPlaybackSession(get(), true);
       const url = toAudioUrl(t.path);
       await engine.play(url, t.id);
+      lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
       void api.recordPlay(t.id).catch(() => undefined);
       if (shouldAutoDjRefill({ enabled: get().autoDjEnabled, queueLength: get().queue.length, index: nextIdx })) {
@@ -708,6 +826,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     prev: async () => {
+      clearPlaybackErrorAdvanceTimer();
       const { queue, index, currentTime, mode, shuffleHistory } = get();
       if (!queue.length) return;
       // if more than 3 seconds into the track, restart it
@@ -733,6 +852,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       schedulePersistPlaybackSession(get(), true);
       const url = toAudioUrl(t.path);
       await engine.play(url, t.id);
+      lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
     },
 

@@ -51,6 +51,7 @@
     "smoke:queue-insert": "npm run build:electron && node scripts/queue-insert-smoke.mjs",
     "smoke:handoff": "npm run build:electron && node scripts/playback-handoff-smoke.mjs",
     "smoke:playback-start": "npm run build:electron && node scripts/playback-start-smoke.mjs",
+    "smoke:playback-error": "npm run build:electron && node scripts/playback-error-smoke.mjs",
     "smoke:playback-controls": "npm run build:electron && node scripts/playback-controls-smoke.mjs",
     "smoke:keyboard": "npm run build:electron && node scripts/keyboard-shortcuts-smoke.mjs",
     "smoke:media-session": "npm run build:electron && node scripts/media-session-smoke.mjs",
