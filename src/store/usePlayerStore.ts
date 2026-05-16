@@ -211,6 +211,7 @@ let lastHandoffKey: string | null = null;
 let lastPreparedHandoffKey: string | null = null;
 let lastStopAfterCurrentKey: string | null = null;
 let lastPlaybackErrorKey: string | null = null;
+let lastCueEndKey: string | null = null;
 let playbackErrorAdvanceTimer: number | null = null;
 
 async function restorePlaybackSession(
@@ -338,10 +339,10 @@ async function advanceAfterPlaybackError(
   applyReplayGain(nextTrack, state.settings);
   schedulePersistPlaybackSession(getState(), true);
   try {
-    await engine.play(toAudioUrl(nextTrack.path), nextTrack.id);
+    await playEngineTrack(nextTrack);
     lastPlaybackErrorKey = null;
     startLastfmNowPlaying(nextTrack);
-    void api.recordPlay(nextTrack.id).catch(() => undefined);
+    recordLibraryPlay(nextTrack);
     if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: nextIndex })) {
       void getState().refillAutoDjQueue();
     }
@@ -390,112 +391,171 @@ function hashEpisodeId(value: string): number {
   return hash || 1;
 }
 
+function cueStart(track: Track | null): number {
+  const value = track?.cueStart;
+  return Number.isFinite(value) && value != null && value > 0 ? value : 0;
+}
+
+function cueEnd(track: Track | null): number | null {
+  const value = track?.cueEnd;
+  return Number.isFinite(value) && value != null && value > cueStart(track) ? value : null;
+}
+
+function cueRelativeTime(track: Track | null, engineTime: number): number {
+  return Math.max(0, engineTime - cueStart(track));
+}
+
+function cueDuration(track: Track | null, engineDuration: number): number {
+  if (track?.duration && track.duration > 0) return track.duration;
+  const end = cueEnd(track);
+  const start = cueStart(track);
+  if (end && end > start) return end - start;
+  return engineDuration;
+}
+
+function cueEndKey(track: Track | null, index: number): string | null {
+  const end = cueEnd(track);
+  return track && end ? `${track.id}:${index}:${end}` : null;
+}
+
+async function playEngineTrack(track: Track): Promise<void> {
+  lastCueEndKey = null;
+  await engine.play(toAudioUrl(track.path), track.id, cueStart(track));
+}
+
+function prepareEngineTrack(track: Track): void {
+  engine.prepareNext(toAudioUrl(track.path), track.id, cueStart(track));
+}
+
+function recordLibraryPlay(track: Track): void {
+  if (track.id > 0) void api.recordPlay(track.id).catch(() => undefined);
+}
+
 export const usePlayerStore = create<PlayerState>((set, get) => {
-  engine.subscribe((s) => {
-    set({
-      isPlaying: s.playing,
-      currentTime: s.currentTime,
-      duration: s.duration,
-      playbackError: s.error,
-    });
-    maybeScrobbleToLastfm(get(), s.currentTime, s.playing);
-    schedulePersistPlaybackSession(get());
-    persistPodcastProgress(get(), s.ended, s.ended);
-    const state = get();
-    if (s.error) {
-      const decision = resolvePlaybackErrorAdvance({
-        error: s.error,
-        currentTrackId: state.current?.id ?? s.trackId,
-        index: state.index,
-        queueLength: state.queue.length,
-        mode: state.mode,
-        lastErrorKey: lastPlaybackErrorKey,
+  // AudioEngine.subscribe emits immediately; defer until Zustand has installed the initial state.
+  queueMicrotask(() => {
+    engine.subscribe((s) => {
+      const activeTrack = get().current;
+      const relativeTime = cueRelativeTime(activeTrack, s.currentTime);
+      const displayDuration = cueDuration(activeTrack, s.duration);
+      set({
+        isPlaying: s.playing,
+        currentTime: relativeTime,
+        duration: displayDuration,
+        playbackError: s.error,
       });
-      if (decision.key && (decision.shouldAdvance || decision.shouldStop)) lastPlaybackErrorKey = decision.key;
-      if (decision.shouldAdvance && decision.key) {
-        clearPlaybackErrorAdvanceTimer();
-        playbackErrorAdvanceTimer = window.setTimeout(() => {
-          playbackErrorAdvanceTimer = null;
-          void advanceAfterPlaybackError(get, set, decision.key!);
-        }, 350);
+      maybeScrobbleToLastfm(get(), relativeTime, s.playing);
+      schedulePersistPlaybackSession(get());
+      persistPodcastProgress(get(), s.ended, s.ended);
+      const state = get();
+      if (s.error) {
+        const decision = resolvePlaybackErrorAdvance({
+          error: s.error,
+          currentTrackId: state.current?.id ?? s.trackId,
+          index: state.index,
+          queueLength: state.queue.length,
+          mode: state.mode,
+          lastErrorKey: lastPlaybackErrorKey,
+        });
+        if (decision.key && (decision.shouldAdvance || decision.shouldStop)) lastPlaybackErrorKey = decision.key;
+        if (decision.shouldAdvance && decision.key) {
+          clearPlaybackErrorAdvanceTimer();
+          playbackErrorAdvanceTimer = window.setTimeout(() => {
+            playbackErrorAdvanceTimer = null;
+            void advanceAfterPlaybackError(get, set, decision.key!);
+          }, 350);
+        }
+        return;
       }
-      return;
-    }
-    const queueLength = state.queue?.length ?? 0;
-    if (
-      shouldStopForSleepTimer({
-        playing: s.playing,
-        sleepTimerEndsAt: state.sleepTimerEndsAt,
-      })
-    ) {
-      set({ sleepTimerEndsAt: null, stopAfterCurrent: false });
-      engine.stop();
-      return;
-    }
-    if (
-      !state.stopAfterCurrent &&
-      shouldPrepareTrackHandoff({
-        playing: s.playing,
-        duration: s.duration,
-        currentTime: s.currentTime,
-        crossfadeMs: state.settings?.crossfadeMs ?? 0,
-        queueLength,
-        index: state.index ?? -1,
-        mode: state.mode ?? 'normal',
-        currentTrackId: state.current?.id ?? null,
-        lastHandoffKey: lastPreparedHandoffKey,
-      }) &&
-      state.current
-    ) {
-      const nextIndex = state.mode === 'repeat-all' && state.index >= queueLength - 1 ? 0 : state.index + 1;
-      const nextTrack = state.queue[nextIndex] ?? null;
-      if (nextTrack) {
-        lastPreparedHandoffKey = handoffKey(state.current.id, state.index);
-        engine.prepareNext(toAudioUrl(nextTrack.path), nextTrack.id);
+      const queueLength = state.queue?.length ?? 0;
+      const segmentEndKey = cueEndKey(state.current, state.index);
+      const segmentEnd = cueEnd(state.current);
+      if (s.playing && segmentEndKey && segmentEnd && s.currentTime >= segmentEnd - 0.04 && lastCueEndKey !== segmentEndKey) {
+        lastCueEndKey = segmentEndKey;
+        if (state.stopAfterCurrent) {
+          set({ stopAfterCurrent: false });
+          engine.stop();
+        } else if (state.mode === 'repeat-one' && state.current) {
+          void playEngineTrack(state.current);
+        } else {
+          window.setTimeout(() => void get().next(), 0);
+        }
+        return;
       }
-    }
-    if (
-      !state.stopAfterCurrent &&
-      shouldStartTrackHandoff({
-        playing: s.playing,
-        duration: s.duration,
-        currentTime: s.currentTime,
-        crossfadeMs: state.settings?.crossfadeMs ?? 0,
-        queueLength,
-        index: state.index ?? -1,
-        mode: state.mode ?? 'normal',
-        currentTrackId: state.current?.id ?? null,
-        lastHandoffKey,
-      }) &&
-      state.current
-    ) {
-      lastHandoffKey = handoffKey(state.current.id, state.index);
-      void state.next();
-      return;
-    }
-    if (
-      shouldStopAfterCurrent({
-        ended: s.ended,
-        stopAfterCurrent: state.stopAfterCurrent,
-        currentTrackId: state.current?.id ?? null,
-        index: state.index,
-        lastStopKey: lastStopAfterCurrentKey,
-      })
-    ) {
-      lastStopAfterCurrentKey = stopAfterCurrentKey(state.current?.id ?? null, state.index);
-      set({ stopAfterCurrent: false });
-      engine.stop();
-      return;
-    }
-    // auto-advance on end
-    if (s.ended && get().mode !== 'repeat-one') {
-      // small delay to avoid re-entry
-      setTimeout(() => void get().next(), 0);
-    } else if (s.ended && get().mode === 'repeat-one' && get().current) {
-      const c = get().current!;
-      const url = toAudioUrl(c.path);
-      void engine.play(url, c.id);
-    }
+      if (
+        shouldStopForSleepTimer({
+          playing: s.playing,
+          sleepTimerEndsAt: state.sleepTimerEndsAt,
+        })
+      ) {
+        set({ sleepTimerEndsAt: null, stopAfterCurrent: false });
+        engine.stop();
+        return;
+      }
+      if (
+        !state.stopAfterCurrent &&
+        shouldPrepareTrackHandoff({
+          playing: s.playing,
+          duration: displayDuration,
+          currentTime: relativeTime,
+          crossfadeMs: state.settings?.crossfadeMs ?? 0,
+          queueLength,
+          index: state.index ?? -1,
+          mode: state.mode ?? 'normal',
+          currentTrackId: state.current?.id ?? null,
+          lastHandoffKey: lastPreparedHandoffKey,
+        }) &&
+        state.current
+      ) {
+        const nextIndex = state.mode === 'repeat-all' && state.index >= queueLength - 1 ? 0 : state.index + 1;
+        const nextTrack = state.queue[nextIndex] ?? null;
+        if (nextTrack) {
+          lastPreparedHandoffKey = handoffKey(state.current.id, state.index);
+          prepareEngineTrack(nextTrack);
+        }
+      }
+      if (
+        !state.stopAfterCurrent &&
+        shouldStartTrackHandoff({
+          playing: s.playing,
+          duration: displayDuration,
+          currentTime: relativeTime,
+          crossfadeMs: state.settings?.crossfadeMs ?? 0,
+          queueLength,
+          index: state.index ?? -1,
+          mode: state.mode ?? 'normal',
+          currentTrackId: state.current?.id ?? null,
+          lastHandoffKey,
+        }) &&
+        state.current
+      ) {
+        lastHandoffKey = handoffKey(state.current.id, state.index);
+        void state.next();
+        return;
+      }
+      if (
+        shouldStopAfterCurrent({
+          ended: s.ended,
+          stopAfterCurrent: state.stopAfterCurrent,
+          currentTrackId: state.current?.id ?? null,
+          index: state.index,
+          lastStopKey: lastStopAfterCurrentKey,
+        })
+      ) {
+        lastStopAfterCurrentKey = stopAfterCurrentKey(state.current?.id ?? null, state.index);
+        set({ stopAfterCurrent: false });
+        engine.stop();
+        return;
+      }
+      // auto-advance on end
+      if (s.ended && get().mode !== 'repeat-one') {
+        // small delay to avoid re-entry
+        setTimeout(() => void get().next(), 0);
+      } else if (s.ended && get().mode === 'repeat-one' && get().current) {
+        const c = get().current!;
+        void playEngineTrack(c);
+      }
+    });
   });
 
   return {
@@ -613,11 +673,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(track, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      const url = toAudioUrl(track.path);
-      await engine.play(url, track.id);
+      await playEngineTrack(track);
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(track);
-      void api.recordPlay(track.id).catch(() => undefined);
+      recordLibraryPlay(track);
     },
 
     playPodcastEpisode: async (episode) => {
@@ -640,7 +699,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(null, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      await engine.play(toAudioUrl(track.path), track.id);
+      await playEngineTrack(track);
       const resumeAt = episode.completed ? 0 : Math.max(0, episode.progressSeconds);
       if (resumeAt > 0) engine.seek(resumeAt);
       persistPodcastProgress(get(), true, false);
@@ -669,11 +728,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(t, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      const url = toAudioUrl(t.path);
-      await engine.play(url, t.id);
+      await playEngineTrack(t);
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
-      void api.recordPlay(t.id).catch(() => undefined);
+      recordLibraryPlay(t);
     },
 
     loadQueue: (tracks) => {
@@ -778,7 +836,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         const resumeAt = state.resumeAt;
         const playbackQueue = state.queue.length ? state.queue : state.current ? [state.current] : [];
         void state.playQueue(playbackQueue, startIndex).then(() => {
-          if (resumeAt && resumeAt > 0) engine.seek(resumeAt);
+          if (resumeAt && resumeAt > 0) get().seek(resumeAt);
           set({ resumeAt: null });
         });
         return;
@@ -815,11 +873,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       set({ index: nextIdx, current: t, currentTime: 0, duration: t.duration ?? 0, resumeAt: null, activePodcastEpisode: null, shuffleHistory: nextShuffleHistory });
       applyReplayGain(t, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      const url = toAudioUrl(t.path);
-      await engine.play(url, t.id);
+      await playEngineTrack(t);
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
-      void api.recordPlay(t.id).catch(() => undefined);
+      recordLibraryPlay(t);
       if (shouldAutoDjRefill({ enabled: get().autoDjEnabled, queueLength: get().queue.length, index: nextIdx })) {
         void get().refillAutoDjQueue();
       }
@@ -831,7 +888,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (!queue.length) return;
       // if more than 3 seconds into the track, restart it
       if (currentTime > 3) {
-        engine.seek(0);
+        get().seek(0);
         return;
       }
       const shuffleDecision = mode === 'shuffle'
@@ -850,13 +907,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(t, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      const url = toAudioUrl(t.path);
-      await engine.play(url, t.id);
+      await playEngineTrack(t);
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
     },
 
-    seek: (t) => engine.seek(t),
+    seek: (t) => engine.seek(cueStart(get().current) + Math.max(0, t)),
 
     setVolume: async (v) => {
       engine.setVolume(v);

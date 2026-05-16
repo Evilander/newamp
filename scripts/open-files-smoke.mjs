@@ -118,8 +118,8 @@ assert.ok(
   'installer should associate common audio formats',
 );
 assert.ok(
-  associations.some((item) => Array.isArray(item.ext) && item.ext.includes('m3u') && item.ext.includes('m3u8') && item.ext.includes('pls')),
-  'installer should associate M3U and PLS playlists',
+  associations.some((item) => Array.isArray(item.ext) && item.ext.includes('m3u') && item.ext.includes('m3u8') && item.ext.includes('pls') && item.ext.includes('cue')),
+  'installer should associate M3U, PLS, and CUE playlist-like files',
 );
 
 assert.match(sharedTypes, /OpenFilesResult/, 'shared API should expose open-file results');

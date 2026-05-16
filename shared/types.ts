@@ -28,6 +28,9 @@ export interface Track {
   key: string | null;
   replayGainTrackDb: number | null;
   replayGainAlbumDb: number | null;
+  cuePath?: string | null;
+  cueStart?: number | null;
+  cueEnd?: number | null;
 }
 
 export interface MetadataLookupCandidate {

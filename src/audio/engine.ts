@@ -31,6 +31,7 @@ interface PreparedNextDeck {
   deckId: number;
   src: string;
   trackId: number | null;
+  startAt: number;
 }
 
 type SinkAudioContext = AudioContext & {
@@ -195,7 +196,7 @@ export class AudioEngine {
     return this.state;
   }
 
-  async play(src: string, trackId: number | null): Promise<void> {
+  async play(src: string, trackId: number | null, startAt = 0): Promise<void> {
     if (this.ctx.state === 'suspended') {
       try {
         await this.ctx.resume();
@@ -207,6 +208,7 @@ export class AudioEngine {
     const current = this.activeDeck;
     if (current.el.src === src || current.el.currentSrc === src) {
       this.patch({ trackId, ended: false, error: null });
+      this.applyStartPosition(current, startAt);
       try {
         await current.el.play();
       } catch (err) {
@@ -223,7 +225,7 @@ export class AudioEngine {
     }
 
     if (this.crossfadeMs > 0 && current.el.src && !current.el.paused) {
-      await this.crossfadeTo(src, trackId);
+      await this.crossfadeTo(src, trackId, startAt);
       return;
     }
 
@@ -233,6 +235,7 @@ export class AudioEngine {
     current.gain.gain.setValueAtTime(1, this.ctx.currentTime);
     this.patch({ src, trackId, currentTime: 0, duration: 0, ended: false, error: null });
     current.el.src = src;
+    this.applyStartPosition(current, startAt);
     try {
       await current.el.play();
     } catch (err) {
@@ -241,13 +244,15 @@ export class AudioEngine {
     }
   }
 
-  prepareNext(src: string, trackId: number | null): void {
+  prepareNext(src: string, trackId: number | null, startAt = 0): void {
     if (!src || this.activeDeck.el.src === src || this.activeDeck.el.currentSrc === src) return;
+    const normalizedStartAt = normalizeStartAt(startAt);
     const deck = this.decks[1 - this.activeDeckIndex]!;
     if (
       this.preparedNext?.deckId === deck.id &&
       this.preparedNext.src === src &&
-      this.preparedNext.trackId === trackId
+      this.preparedNext.trackId === trackId &&
+      this.preparedNext.startAt === normalizedStartAt
     ) {
       return;
     }
@@ -256,8 +261,9 @@ export class AudioEngine {
     deck.gain.gain.cancelScheduledValues(this.ctx.currentTime);
     deck.gain.gain.setValueAtTime(0, this.ctx.currentTime);
     deck.el.src = src;
+    this.applyStartPosition(deck, normalizedStartAt);
     deck.el.load();
-    this.preparedNext = { deckId: deck.id, src, trackId };
+    this.preparedNext = { deckId: deck.id, src, trackId, startAt: normalizedStartAt };
   }
 
   private findPreparedDeck(src: string): Deck | null {
@@ -285,7 +291,7 @@ export class AudioEngine {
     }
   }
 
-  private async crossfadeTo(src: string, trackId: number | null): Promise<void> {
+  private async crossfadeTo(src: string, trackId: number | null, startAt = 0): Promise<void> {
     this.clearFadeTimer();
     this.preparedNext = null;
 
@@ -297,7 +303,7 @@ export class AudioEngine {
 
     this.silenceDeck(to, true);
     to.el.src = src;
-    to.el.currentTime = 0;
+    this.applyStartPosition(to, startAt);
     to.gain.gain.cancelScheduledValues(now);
     to.gain.gain.setValueAtTime(0, now);
     from.gain.gain.cancelScheduledValues(now);
@@ -343,6 +349,28 @@ export class AudioEngine {
     } catch {
       /* ignore */
     }
+  }
+
+  private applyStartPosition(deck: Deck, startAt: number): void {
+    const target = normalizeStartAt(startAt);
+    if (target <= 0) {
+      try {
+        deck.el.currentTime = 0;
+      } catch {
+        /* metadata may not be ready */
+      }
+      return;
+    }
+    const seek = () => {
+      try {
+        const max = Number.isFinite(deck.el.duration) && deck.el.duration > 0 ? deck.el.duration : target;
+        deck.el.currentTime = Math.max(0, Math.min(max, target));
+      } catch {
+        /* metadata may not be ready */
+      }
+    };
+    if (Number.isFinite(deck.el.duration) && deck.el.duration > 0) seek();
+    else deck.el.addEventListener('loadedmetadata', seek, { once: true });
   }
 
   private clearFadeTimer(): void {
@@ -581,3 +609,7 @@ export class AudioEngine {
 }
 
 export const EQ_BAND_FREQS = EQ_FREQS;
+
+function normalizeStartAt(value: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.max(0, value) : 0;
+}

@@ -54,6 +54,7 @@ if (!skipSmokes) {
     'smoke:history',
     'smoke:playlist',
     'smoke:playlist-folder-export',
+    'smoke:cue',
     'smoke:metadata',
     'smoke:health',
     'smoke:skin',
@@ -285,7 +286,7 @@ function artifact(path, minimumBytes) {
 function checkFileAssociations() {
   const associations = pkg.build?.fileAssociations ?? [];
   const extGroups = associations.map((item) => item.ext ?? []).flat();
-  const required = ['mp3', 'flac', 'wav', 'm4a', 'wma', 'm3u', 'm3u8', 'pls'];
+  const required = ['mp3', 'flac', 'wav', 'm4a', 'wma', 'm3u', 'm3u8', 'pls', 'cue'];
   const missing = required.filter((ext) => !extGroups.includes(ext));
   return {
     name: 'file-association-config',
