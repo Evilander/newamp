@@ -56,6 +56,11 @@ assert.match(
 );
 assert.match(
   JSON.stringify(pkg.scripts ?? {}),
+  /smoke:packaged-normal-launch/,
+  'package.json should expose a packaged normal launch smoke',
+);
+assert.match(
+  JSON.stringify(pkg.scripts ?? {}),
   /release:checksums/,
   'package.json should expose release checksum generation',
 );
@@ -70,11 +75,16 @@ assert.match(
   'package.json should expose installed app proof',
 );
 assert.match(gateSource, /smoke:installer-artifact/, 'release gate should run installer artifact smoke after packaging');
+assert.match(gateSource, /smoke:packaged-normal-launch/, 'release gate should run packaged normal launch smoke after packaging');
 assert.match(gateSource, /smoke:portable-app/, 'release gate should run portable app startup smoke after packaging');
 assert.match(gateSource, /portablePath/, 'release gate should include portable artifact checks');
 assert.match(gateSource, /checkInstalledAssociations/, 'release gate should include installed association registry proof');
 assert.match(mainSource, /--newamp-startup-smoke/, 'packaged app should accept a startup smoke command-line switch');
 assert.match(mainSource, /NEWAMP_STARTUP_SMOKE_MARKER/, 'packaged app should be able to write startup smoke marker files');
+assert.match(mainSource, /app\.setPath\('sessionData'/, 'packaged app should isolate Chromium session data from durable library/settings data');
+assert.match(mainSource, /disk-cache-dir/, 'packaged app should route Chromium disk cache to the isolated session data path');
+assert.match(mainSource, /NEWAMP_ENABLE_HARDWARE_ACCELERATION/, 'packaged app should keep hardware acceleration opt-in');
+assert.match(mainSource, /MediaPlayPause/, 'global media shortcuts should use Electron accelerator names that do not crash bootstrap');
 
 const configuredExtensions = (pkg.build?.fileAssociations ?? []).flatMap((association) => association.ext ?? []);
 const configuredProgIds = (pkg.build?.fileAssociations ?? []).map((association) => association.name ?? '');

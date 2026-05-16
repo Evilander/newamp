@@ -16,13 +16,6 @@ mkdirSync(userData, { recursive: true });
 
 const launchArgs = [
   `--newamp-user-data-dir=${userData}`,
-  '--disable-gpu',
-  '--disable-gpu-compositing',
-  '--disable-software-rasterizer',
-  '--disable-accelerated-2d-canvas',
-  '--disable-features=CalculateNativeWinOcclusion,UseSkiaRenderer,VizDisplayCompositor',
-  '--in-process-gpu',
-  '--no-sandbox',
 ];
 
 const child = spawn(exePath, launchArgs, {
@@ -101,29 +94,25 @@ function cleanupProcessTree(pid) {
 
 async function cleanupLaunchedProcess(pid) {
   cleanupProcessTree(pid);
-  await sleep(500);
-  if (exitCode === null) cleanupProcessByPath();
-  await sleep(500);
+  await waitForExit(2000);
+  if (exitCode === null) {
+    child.kill('SIGKILL');
+    await waitForExit(1000);
+  }
   child.stdout.destroy();
   child.stderr.destroy();
+  child.unref();
 }
 
-function cleanupProcessByPath() {
-  if (process.platform !== 'win32') return;
-  const command = [
-    'Get-Process Newamp -ErrorAction SilentlyContinue',
-    `| Where-Object { $_.Path -eq ${quoteForPowerShell(exePath)} }`,
-    '| Stop-Process -Force',
-  ].join(' ');
-  spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command], {
-    cwd: repoRoot,
-    stdio: 'ignore',
-    windowsHide: true,
+function waitForExit(ms) {
+  if (exitCode !== null) return Promise.resolve();
+  return new Promise((resolveWait) => {
+    const timer = setTimeout(resolveWait, ms);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolveWait();
+    });
   });
-}
-
-function quoteForPowerShell(value) {
-  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function diagnostic(message) {
