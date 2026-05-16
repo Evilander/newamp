@@ -92,6 +92,7 @@
     "smoke:installer-artifact": "node scripts/installer-artifact-smoke.mjs",
     "smoke:installed-associations": "node scripts/installed-associations-smoke.mjs",
     "smoke:installed-app": "node scripts/installed-app-smoke.mjs",
+    "smoke:packaged-normal-launch": "node scripts/packaged-normal-launch-smoke.mjs",
     "smoke:packaged-open-files": "node scripts/packaged-open-files-smoke.mjs",
     "smoke:portable-app": "node scripts/portable-app-smoke.mjs",
     "smoke:ui-handoff": "npm run build && node scripts/ui-handoff-smoke.mjs",
