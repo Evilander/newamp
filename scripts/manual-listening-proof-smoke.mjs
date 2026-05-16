@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 
 const {
   checkManualListeningProof,
+  defaultManualListeningArtifacts,
   recordManualListeningProof,
   summarizeManualListeningProof,
 } = await import('./manual-listening-proof.mjs');
@@ -11,6 +12,16 @@ const {
 const repoRoot = resolve('.');
 const smokeRoot = join(repoRoot, 'tmp', 'manual-listening-proof-smoke');
 const proofPath = join(smokeRoot, 'manual-listening-proof.json');
+assert.deepEqual(defaultManualListeningArtifacts(repoRoot).map((artifact) => artifact.name), [
+  'installer',
+  'portable',
+  'exe',
+  'checksums',
+  'source',
+  'manifest',
+  'bundle',
+]);
+
 const artifacts = [
   { name: 'installer', path: join(smokeRoot, 'Newamp Setup 0.1.0.exe') },
   { name: 'portable', path: join(smokeRoot, 'Newamp Portable 0.1.0.exe') },
