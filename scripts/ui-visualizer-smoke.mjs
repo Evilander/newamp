@@ -33,6 +33,7 @@ assert.ok(result.render.height >= 80, `visualizer canvas height is too small: ${
 assert.ok(result.render.litSamples > 0, 'visualizer canvas should contain nonblank pixels');
 assert.ok(result.xboxRender?.plasmaGrid?.litSamples > 0, 'Plasma Grid should render nonblank pixels');
 assert.ok(result.xboxRender?.neonRibbons?.litSamples > 0, 'Neon Ribbons should render nonblank pixels');
+assert.ok(result.xboxRender?.orbitalRings?.litSamples > 0, 'Orbital Rings should render nonblank pixels');
 assert.ok(result.auroraRender?.litSamples > 0, 'Aurora should render a nonblank reactive frame');
 assert.equal(result.qualityToggle, '4k', 'fullscreen visualizer should expose and apply 4K mode');
 assert.equal(result.artToggle, 'visible', 'fullscreen visualizer should expose an album-art overlay toggle');

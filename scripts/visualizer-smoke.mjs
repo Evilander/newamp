@@ -35,6 +35,8 @@ assert.match(fullscreenSource, /id: 'butterchurn'/, 'Fullscreen visualizer must 
 assert.match(fullscreenSource, /id: 'radial'/, 'Fullscreen visualizer must expose Radial preset');
 assert.match(fullscreenSource, /id: 'tunnel'/, 'Fullscreen visualizer must expose Tunnel preset');
 assert.match(fullscreenSource, /id: 'pulse'/, 'Fullscreen visualizer must expose Pulse preset');
+assert.match(fullscreenSource, /id: 'orbital-rings'/, 'Fullscreen visualizer must expose Orbital Rings preset');
+assert.match(visualizerSource, /mode === 'orbital-rings'/, 'Visualizer must implement the Orbital Rings preset');
 assert.match(fullscreenSource, /id: 'neon-waves'/, 'Fullscreen visualizer must expose Neon Waves preset');
 assert.match(fullscreenSource, /id: 'neon-ribbons'/, 'Fullscreen visualizer must expose Neon Ribbons preset');
 assert.match(fullscreenSource, /id: 'plasma-grid'/, 'Fullscreen visualizer must expose Plasma Grid preset');
