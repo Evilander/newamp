@@ -16,6 +16,13 @@ const allowIncomplete = flags.has('--allow-incomplete');
 const includeRealLibrary = flags.has('--real-library');
 const realLibraryRoot = optionValue('--library-root') || process.env.NEWAMP_REAL_LIBRARY_ROOT || 'K:/music';
 const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'));
+const externalPublicationChecks = new Set([
+  'remote-source',
+  'github-auth',
+  'signed-artifacts',
+  'lastfm-live-proof',
+  'manual-listening-proof',
+]);
 
 const objective =
   'make this project better than the original Winamp from the 2000s; be ambitious; create skins; create an installer/exe; create the full application';
@@ -134,35 +141,46 @@ const checklist = [
       executed: false,
     }),
     check('publication readiness', publicationReadiness.ok, publicationReadiness.reason, {
+      blockerClass: publicationReadinessBlockerClass(publicationReadiness.report?.blockers),
       exitCode: publicationReadiness.exitCode,
       blockers: publicationReadiness.report?.blockers ?? null,
     }),
   ]),
   item('manual-and-live-release-proofs', 'Human listening, Last.fm live account, and signing proofs are current for the exact artifacts.', [
     check('manual listening proof', manualProof.ok, summarizeManualListeningProof(manualProof), {
+      blockerClass: 'external',
       proofPath: relativePath(manualProof.proofPath),
     }),
     check('Last.fm live proof', lastfmProof.ok, summarizeLastfmLiveProof(lastfmProof), {
+      blockerClass: 'external',
       proofPath: relativePath(lastfmProof.proofPath),
       username: lastfmProof.username ?? null,
     }),
     check('signed public artifacts', publicationReadiness.report?.checks?.find((entry) => entry.name === 'signed-artifacts')?.ok === true, 'release artifacts are not Authenticode-signed yet', {
+      blockerClass: 'external',
       signatures: publicationReadiness.report?.checks?.find((entry) => entry.name === 'signed-artifacts')?.artifacts ?? null,
     }),
   ]),
 ];
 
-const blockers = checklist.flatMap((entry) =>
+const blockerDetails = checklist.flatMap((entry) =>
   entry.ok
     ? []
     : entry.checks
       .filter((evidence) => evidence.ok !== true)
-      .map((evidence) => `${entry.id}: ${evidence.label}: ${evidence.reason ?? evidence.status}`),
+      .flatMap((evidence) => evidenceBlockers(entry, evidence)),
 );
+const blockers = blockerDetails.map((entry) => entry.text);
+const localBlockers = blockerDetails.filter((entry) => entry.class !== 'external');
+const externalBlockers = blockerDetails.filter((entry) => entry.class === 'external');
+const localOk = localBlockers.length === 0;
+const publicReleaseOk = blockerDetails.length === 0;
 
 const report = {
   name: 'newamp-completion-audit',
-  ok: blockers.length === 0,
+  ok: publicReleaseOk,
+  localOk,
+  publicReleaseOk,
   objective,
   version: pkg.version,
   verificationMode: {
@@ -172,9 +190,15 @@ const report = {
   },
   checklist,
   blockers,
+  blockerGroups: {
+    local: localBlockers.map((entry) => entry.text),
+    external: externalBlockers.map((entry) => entry.text),
+  },
   conclusion: blockers.length === 0
     ? 'Objective achieved: all explicit deliverables and release requirements are backed by current evidence.'
-    : 'Objective not complete: remaining blockers still require evidence or human/external action.',
+    : localOk
+      ? 'Local product/readiness evidence is complete; public release is waiting on external credentials, signing, or human listening proof.'
+      : 'Objective not complete: remaining local blockers still require implementation or evidence.',
 };
 
 console.log(JSON.stringify(report, null, 2));
@@ -196,6 +220,52 @@ function check(label, ok, reason = null, details = {}) {
     status: ok ? 'pass' : 'fail',
     reason: ok ? null : reason,
     ...details,
+  };
+}
+
+function evidenceBlockers(entry, evidence) {
+  if (evidence.label === 'publication readiness' && Array.isArray(evidence.blockers) && evidence.blockers.length > 0) {
+    return evidence.blockers.map((blocker) => {
+      const parsed = parsePublicationBlocker(blocker);
+      return blockerDetail(entry, evidence, {
+        class: externalPublicationChecks.has(parsed.name) ? 'external' : 'local',
+        label: `${evidence.label}/${parsed.name}`,
+        reason: parsed.reason,
+      });
+    });
+  }
+
+  return [blockerDetail(entry, evidence, {
+    class: evidence.blockerClass ?? 'local',
+    label: evidence.label,
+    reason: evidence.reason ?? evidence.status,
+  })];
+}
+
+function blockerDetail(entry, evidence, override = {}) {
+  const label = override.label ?? evidence.label;
+  const reason = override.reason ?? evidence.reason ?? evidence.status;
+  return {
+    class: override.class ?? evidence.blockerClass ?? 'local',
+    id: entry.id,
+    label,
+    reason,
+    text: `${entry.id}: ${label}: ${reason}`,
+  };
+}
+
+function parsePublicationBlocker(blocker) {
+  const text = String(blocker ?? '').trim();
+  const separator = text.indexOf(':');
+  if (separator === -1) {
+    return {
+      name: text || 'unknown',
+      reason: text || 'publication readiness failed',
+    };
+  }
+  return {
+    name: text.slice(0, separator).trim() || 'unknown',
+    reason: text.slice(separator + 1).trim() || text,
   };
 }
 
@@ -311,6 +381,13 @@ function runNodeScript(script, scriptArgs) {
       : report?.blockers?.join('; ') || report?.reason || result.stderrTail || 'script failed',
     report,
   };
+}
+
+function publicationReadinessBlockerClass(blockers) {
+  if (!Array.isArray(blockers) || blockers.length === 0) return 'local';
+  return blockers.every((blocker) => externalPublicationChecks.has(String(blocker).split(':', 1)[0]))
+    ? 'external'
+    : 'local';
 }
 
 function run(command, commandArgs, options = {}) {
