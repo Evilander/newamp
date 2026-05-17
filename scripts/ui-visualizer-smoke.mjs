@@ -91,7 +91,7 @@ async function writeSmokeSettings() {
         lastfmUsername: null,
         lastfmAuthToken: null,
         openaiApiKey: null,
-        openaiModel: 'gpt-4.1-mini',
+        openaiModel: 'gpt-5.4-mini',
         firstLaunchTutorialSeen: true,
         crossfadeMs: 0,
         replayGain: 'off',

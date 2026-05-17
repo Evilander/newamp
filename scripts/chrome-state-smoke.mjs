@@ -40,7 +40,7 @@ assert.equal(new SettingsStore(settingsPath).get().firstLaunchTutorialSeen, true
 assert.equal(settings.set({ textScale: 1.25 }).textScale, 1.25, 'text scale should save');
 assert.equal(settings.set({ textScale: 9 }).textScale, 1.35, 'text scale should clamp oversized values');
 
-const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource, startupSource, firstLaunchSource, appVersionSource, customSkinSource, lastfmProofSource, liveServicesSource] =
+const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource, startupSource, firstLaunchSource, appVersionSource, customSkinSource, lastfmProofSource, liveServicesSource, openAiAssistSource, linerNotesSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/settings.ts', import.meta.url), 'utf8'),
@@ -61,6 +61,8 @@ const [typesSource, settingsSource, storeSource, appSource, titleBarSource, comp
     readFile(new URL('../shared/custom-skin.ts', import.meta.url), 'utf8'),
     readFile(new URL('./lastfm-live-proof.mjs', import.meta.url), 'utf8'),
     readFile(new URL('./live-services-readiness-smoke.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../electron/openai-assist.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/LinerNotesPanel.tsx', import.meta.url), 'utf8'),
   ]);
 
 assert.match(typesSource, /compactMode: boolean/, 'AppSettings should include compact deck persistence');
@@ -76,6 +78,7 @@ assert.match(settingsSource, /patch\.compactMode === true/, 'SettingsStore shoul
 assert.match(settingsSource, /patch\.alwaysOnTop === true/, 'SettingsStore should normalize patched always-on-top');
 assert.match(settingsSource, /normalizeVisualizerPreset/, 'SettingsStore should normalize visualizer presets');
 assert.match(settingsSource, /normalizeOpenAiModel/, 'SettingsStore should normalize ChatGPT assist model names');
+assert.match(settingsSource, /openaiModel: 'gpt-5\.4-mini'/, 'ChatGPT assist should default to a current cost-sensitive OpenAI model');
 assert.match(settingsSource, /firstLaunchTutorialSeen: false/, 'SettingsStore should default first-launch tutorial to visible');
 assert.match(settingsSource, /patch\.firstLaunchTutorialSeen === true/, 'SettingsStore should normalize patched first-launch tutorial state');
 assert.match(storeSource, /compactMode: settings\.compactMode/, 'player store should initialize compact mode from settings');
@@ -106,6 +109,13 @@ assert.match(appVersionSource, new RegExp(`NEWAMP_VERSION = '${escapeRegExp(pack
 assert.match(appVersionSource, /NewAmp\/\$\{NEWAMP_VERSION\}/, 'shared user agent should use current NewAmp casing');
 assert.match(firstLaunchSource, /data-newamp-first-launch-tutorial/, 'first-launch tutorial should expose a stable UI marker');
 assert.match(firstLaunchSource, /data-newamp-openai-key-prompt/, 'first-launch tutorial should prompt for a ChatGPT API key');
+assert.match(typesSource, /generateLinerNotes: \(input: AiLinerNotesInput\)/, 'shared API should expose native ChatGPT liner notes');
+assert.match(preloadSource, /ai:liner-notes/, 'preload should expose native ChatGPT liner notes IPC');
+assert.match(mainSource, /generateOpenAiLinerNotes/, 'main process should own ChatGPT assist calls');
+assert.match(openAiAssistSource, /https:\/\/api\.openai\.com\/v1\/responses/, 'ChatGPT assist should use the Responses API');
+assert.match(openAiAssistSource, /store: false/, 'ChatGPT assist should disable response storage');
+assert.match(openAiAssistSource, /type: 'json_schema'/, 'ChatGPT assist should request structured liner notes');
+assert.match(linerNotesSource, /data-newamp-ai-liner-notes/, 'On Air liner notes should render ChatGPT assist output');
 assert.match(storeSource, /fullscreenViz: on \? false : get\(\)\.fullscreenViz/, 'entering compact deck should clear fullscreen visualizer state');
 assert.match(mainSource, /setResizable\(false\)/, 'compact deck window should lock user resizing');
 assert.match(mainSource, /setResizable\(true\)/, 'full library window should restore resizing');

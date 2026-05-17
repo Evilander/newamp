@@ -20,7 +20,7 @@ const DEFAULTS: AppSettings = {
   lastfmUsername: null,
   lastfmAuthToken: null,
   openaiApiKey: null,
-  openaiModel: 'gpt-4.1-mini',
+  openaiModel: 'gpt-5.4-mini',
   firstLaunchTutorialSeen: false,
   textScale: 1,
   crossfadeMs: 0,
