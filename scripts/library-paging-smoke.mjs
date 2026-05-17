@@ -112,6 +112,8 @@ try {
   assert.match(artistsViewSource, /offset: artists\.length/, 'ArtistsView should request later artist pages by loaded row count');
   assert.match(artistsViewSource, /Load more artists/, 'ArtistsView should expose explicit artist pagination');
   assert.match(artistsViewSource, /data-newamp-artists-load-more/, 'ArtistsView should expose a stable load-more marker');
+  assert.match(artistsViewSource, /data-newamp-artists-scroll/, 'ArtistsView should expose a stable scroll container marker');
+  assert.match(artistsViewSource, /restoreArtistScrollTop/, 'ArtistsView should restore list scroll after artist drill-in');
   assert.doesNotMatch(artistsViewSource, /api\.getArtists\(\)\.then\(setArtists\)/, 'ArtistsView should not load every artist on mount');
   assert.match(lovedViewSource, /const LOVED_PAGE_SIZE = 600/, 'LovedView should centralize the loved-track page size');
   assert.match(lovedViewSource, /getTrackCount\(\{ sort: 'loved' \}\)/, 'LovedView should fetch exact favorite totals');

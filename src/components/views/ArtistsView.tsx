@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ArtistSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { PlaylistAppendPicker, TrackTable } from './LibraryView';
@@ -18,6 +18,8 @@ export function ArtistsView(): JSX.Element {
   const artistQuery = useDebouncedValue(filter, CATALOG_SEARCH_DEBOUNCE_MS);
   const [hasMoreArtists, setHasMoreArtists] = useState(false);
   const [loadingArtists, setLoadingArtists] = useState(false);
+  const artistListRef = useRef<HTMLDivElement>(null);
+  const [restoreArtistScrollTop, setRestoreArtistScrollTop] = useState(0);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
@@ -34,6 +36,7 @@ export function ArtistsView(): JSX.Element {
         if (cancelled) return;
         setArtists(rows.slice(0, ARTIST_PAGE_SIZE));
         setHasMoreArtists(rows.length > ARTIST_PAGE_SIZE);
+        setRestoreArtistScrollTop(0);
       })
       .catch(() => {
         if (!cancelled) {
@@ -77,6 +80,16 @@ export function ArtistsView(): JSX.Element {
     return () => ctrl.abort();
   }, [selected]);
 
+  useLayoutEffect(() => {
+    if (selected) return;
+    const list = artistListRef.current;
+    if (!list) return;
+    const frame = window.requestAnimationFrame(() => {
+      list.scrollTop = restoreArtistScrollTop;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selected, restoreArtistScrollTop, filter]);
+
   async function loadMoreArtists(): Promise<void> {
     if (loadingArtists || !hasMoreArtists) return;
     setLoadingArtists(true);
@@ -93,6 +106,15 @@ export function ArtistsView(): JSX.Element {
     }
   }
 
+  function openArtist(artist: string): void {
+    setRestoreArtistScrollTop(artistListRef.current?.scrollTop ?? 0);
+    setSelected(artist);
+  }
+
+  function closeArtist(): void {
+    setSelected(null);
+  }
+
   if (selected) {
     return (
       <div className="flex h-full flex-col">
@@ -100,7 +122,7 @@ export function ArtistsView(): JSX.Element {
           className="flex items-center gap-3 border-b px-4 py-3"
           style={{ borderColor: 'var(--line)' }}
         >
-          <button className="pxbtn" onClick={() => setSelected(null)}>
+          <button className="pxbtn" onClick={closeArtist}>
             All artists
           </button>
           <div className="min-w-0 flex-1">
@@ -161,7 +183,7 @@ export function ArtistsView(): JSX.Element {
           {loadingArtists ? ' / loading' : ''}
         </span>
       </div>
-      <div className="flex-1 overflow-auto">
+      <div ref={artistListRef} data-newamp-artists-scroll className="flex-1 overflow-auto">
         <div
           className="grid"
           style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}
@@ -169,7 +191,7 @@ export function ArtistsView(): JSX.Element {
           {artists.map((a) => (
             <button
               key={a.artist}
-              onClick={() => setSelected(a.artist)}
+              onClick={() => openArtist(a.artist)}
               className="flex items-center justify-between gap-2 border-b px-4 py-2 text-left transition-colors hover:bg-[var(--panel-2)]"
               style={{ borderColor: 'var(--line)' }}
             >
