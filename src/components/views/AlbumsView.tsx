@@ -255,6 +255,47 @@ export function AlbumsView(): JSX.Element {
     if (nextSort === 'random') setRandomSeed(Date.now());
   }
 
+  async function openCurrentAlbum(): Promise<void> {
+    if (!current?.album) {
+      setScanStatus('No current album loaded.');
+      return;
+    }
+    setScanStatus('Opening current album...');
+    try {
+      const rows = await api.getAlbums({
+        search: current.album,
+        sort: 'album',
+        limit: 80,
+        offset: 0,
+      });
+      const match =
+        rows.find((album) => sameText(album.album, current.album) && sameText(album.albumArtist, current.albumArtist)) ??
+        rows.find((album) => sameText(album.album, current.album)) ??
+        null;
+      if (!match) {
+        setScanStatus('Current album was not found in the library.');
+        return;
+      }
+      setScanStatus(null);
+      openAlbum(match);
+    } catch (err) {
+      setScanStatus(err instanceof Error ? err.message : 'Could not open current album.');
+    }
+  }
+
+  async function openSurpriseAlbum(): Promise<void> {
+    const visible = albums.filter((album) => album.trackCount > 0);
+    const pick = visible.length
+      ? visible[Math.floor(Math.random() * visible.length)]!
+      : (await api.getAlbums({ sort: 'random', randomSeed: Date.now(), limit: 1, offset: 0 }))[0] ?? null;
+    if (!pick) {
+      setScanStatus('No albums found yet.');
+      return;
+    }
+    setScanStatus(null);
+    openAlbum(pick);
+  }
+
   if (selected) {
     return (
       <div className="flex h-full flex-col">
@@ -347,6 +388,12 @@ export function AlbumsView(): JSX.Element {
             RESHUFFLE
           </button>
         )}
+        <button className="pxbtn" onClick={() => void openCurrentAlbum()} disabled={!current?.album} data-newamp-albums-now-lp>
+          NOW LP
+        </button>
+        <button className="pxbtn" onClick={() => void openSurpriseAlbum()} disabled={loadingAlbums} data-newamp-albums-surprise>
+          SURPRISE LP
+        </button>
         <button className="pxbtn is-active" onClick={() => void scanLibraryNow()} disabled={loadingAlbums}>
           SCAN NEW
         </button>
@@ -455,4 +502,8 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
   }, [delayMs, value]);
 
   return debounced;
+}
+
+function sameText(a: string, b: string): boolean {
+  return a.trim().toLocaleLowerCase() === b.trim().toLocaleLowerCase();
 }

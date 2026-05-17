@@ -245,6 +245,8 @@ assert.match(albumsViewSource, /albumScrollTopRef/, 'Albums view should return t
 assert.match(albumsViewSource, /SCAN NEW/, 'Albums view should expose a direct scan action for newly downloaded albums');
 assert.match(albumsViewSource, /addFolderAndScan/, 'Albums view should let users add and scan a new music folder in place');
 assert.match(albumsViewSource, /libraryAutoWatch: true/, 'Albums view folder import should keep the new root watched');
+assert.match(albumsViewSource, /data-newamp-albums-now-lp/, 'Albums view should jump directly to the currently playing album');
+assert.match(albumsViewSource, /data-newamp-albums-surprise/, 'Albums view should expose a one-click random album dig');
 assert.match(packageSource, /"smoke:album-art"/, 'package.json should expose album art smoke');
 assert.match(gateSource, /smoke:album-art/, 'release gate should include album art smoke');
 

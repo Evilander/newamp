@@ -1830,6 +1830,20 @@ function uiVisualizerProbeSource(): string {
       await waitFor('visualizer palette state', () =>
         stage.getAttribute('data-newamp-visualizer-palette') !== 'theme',
       );
+      const reactivityButton = await waitFor('visualizer reactivity toggle', () =>
+        document.querySelector('[data-newamp-viz-reactivity-button]'),
+      );
+      reactivityButton.click();
+      await waitFor('visualizer reactivity state', () =>
+        stage.getAttribute('data-newamp-visualizer-reactivity') !== 'punch',
+      );
+      const autoVjButton = await waitFor('auto VJ toggle', () =>
+        document.querySelector('[data-newamp-viz-auto-vj-button]'),
+      );
+      autoVjButton.click();
+      await waitFor('auto VJ enabled state', () =>
+        stage.getAttribute('data-newamp-visualizer-auto-vj') === 'on',
+      );
       const navButton = await waitFor('top navigation visualizer toggle', () =>
         document.querySelector('[data-newamp-viz-nav-button]'),
       );
@@ -1858,7 +1872,7 @@ function uiVisualizerProbeSource(): string {
       );
       window.__newampSmoke?.setCompactDeck?.(true);
       await waitFor('compact deck opens and clears fullscreen visualizer', () => {
-        const deck = document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-hotdog, .deck-retro-tv');
+        const deck = document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv');
         const fullscreen = document.querySelector('[data-newamp-fullscreen-visualizer]');
         return deck && !fullscreen ? deck : null;
       });
@@ -1884,6 +1898,8 @@ function uiVisualizerProbeSource(): string {
         screenToggle: true,
         chromeMode: stage.getAttribute('data-newamp-visualizer-chrome'),
         palette: stage.getAttribute('data-newamp-visualizer-palette'),
+        reactivityMode: stage.getAttribute('data-newamp-visualizer-reactivity'),
+        autoVjMode: stage.getAttribute('data-newamp-visualizer-auto-vj'),
         navMode: stage.getAttribute('data-newamp-visualizer-nav'),
         performanceMode: stage.getAttribute('data-newamp-visualizer-performance'),
       };
@@ -1907,8 +1923,8 @@ function uiDeckProbeSource(): string {
       const measure = () => ({
         width: window.innerWidth,
         height: window.innerHeight,
-        rootWidth: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-hotdog, .deck-retro-tv')?.getBoundingClientRect().width || 0)),
-        rootHeight: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-hotdog, .deck-retro-tv')?.getBoundingClientRect().height || 0)),
+        rootWidth: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv')?.getBoundingClientRect().width || 0)),
+        rootHeight: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv')?.getBoundingClientRect().height || 0)),
       });
       const deckButton = await waitFor('real DECK button', () =>
         Array.from(document.querySelectorAll('button'))
@@ -1936,6 +1952,12 @@ function uiDeckProbeSource(): string {
       const hotdog = await waitFor('hotdog size', () => {
         const box = measure();
         return Math.abs(box.width - 740) <= 12 && Math.abs(box.height - 240) <= 12 ? box : null;
+      });
+      await pickSkin('discman');
+      await waitFor('discman deck', () => document.querySelector('.deck-discman'));
+      const discman = await waitFor('discman size', () => {
+        const box = measure();
+        return Math.abs(box.width - 620) <= 12 && Math.abs(box.height - 460) <= 12 ? box : null;
       });
       await pickSkin('retro-tv');
       await waitFor('retro-tv deck', () => document.querySelector('.deck-retro-tv'));
@@ -1968,6 +1990,7 @@ function uiDeckProbeSource(): string {
         shade,
         record,
         hotdog,
+        discman,
         tv,
         winamp,
         shadeAgain,
