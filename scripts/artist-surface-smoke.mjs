@@ -28,7 +28,10 @@ assert.match(nowPlayingSource, /fetchAlbumFacts/, 'Album context should look up 
 assert.match(albumFactsSource, /bestAlbumFact/, 'Album context should rank multiple Wikipedia album candidates');
 assert.match(albumFactsSource, /ALBUM_FACT_CACHE_TTL_MS/, 'Album context should cache successful album facts briefly');
 assert.match(albumFactsSource, /ALBUM_FACT_SEARCH_LIMIT\s*=\s*'6'/, 'Album context should inspect multiple search candidates');
-assert.match(nowPlayingSource, /api\.getAlbums\(\{\s*year: albumYear,[\s\S]*yearWindow: 1,[\s\S]*limit: 5/, 'Album context should query only nearby release years');
+assert.match(nowPlayingSource, /api\.getAlbums\(\{\s*year: albumYear,[\s\S]*yearWindow: 0,[\s\S]*limit: 4/, 'Album context should only compare exact same-year local albums');
+assert.match(nowPlayingSource, /Release notes/, 'Album context should use source-derived release notes instead of presenting the local catalog as a release neighborhood');
+assert.match(nowPlayingSource, /Same-year in your library/, 'Album context should clearly label local era matches as library-only');
+assert.doesNotMatch(nowPlayingSource, /Release neighborhood/, 'Album context should not imply local library matches are global release peers');
 assert.doesNotMatch(nowPlayingSource, /api\.getAlbums\(\)\.catch/, 'Album context should not pull the full album catalog');
 
 const originalFetch = globalThis.fetch;

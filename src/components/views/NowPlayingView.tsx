@@ -3,7 +3,7 @@
 // LRC lyrics. Top status strip carries hex badge + track stats. Everything
 // pulls live state from the audio engine.
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { usePlayerStore, engine } from '../../store/usePlayerStore';
 import { fetchLyrics, parseLrc, type LrcLine } from '../../api/lrclib';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
@@ -214,8 +214,8 @@ export function NowPlayingView(): JSX.Element {
   }, [currentTime, isPlaying, practiceLoop, seek]);
 
   const artUrl = useMemo(
-    () => (current?.hasArt ? api.getArtUrl(current.id) : null),
-    [current?.id, current?.hasArt],
+    () => (current ? api.getArtUrl(current.id) : null),
+    [current?.id],
   );
 
   if (!current) {
@@ -513,8 +513,8 @@ export function NowPlayingView(): JSX.Element {
             className="newamp-right-grid grid overflow-hidden"
             style={{
               borderTop: '1px solid var(--line)',
-              gridTemplateColumns: `${(spectrumFrac * 100).toFixed(2)}% 6px 1fr`,
-            }}
+              '--newamp-spectrum-frac': `${(spectrumFrac * 100).toFixed(2)}%`,
+            } as CSSProperties}
           >
             <SpectrumPanel
               current={current}
@@ -1305,7 +1305,7 @@ function SpectrumPanel({
 function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
   const deferredTrack = useDeferredValue(track);
   const [albumTracks, setAlbumTracks] = useState<Track[]>([]);
-  const [relatedAlbums, setRelatedAlbums] = useState<{ album: string; albumArtist: string; year: number | null }[]>([]);
+  const [sameYearAlbums, setSameYearAlbums] = useState<{ album: string; albumArtist: string; year: number | null }[]>([]);
   const [fact, setFact] = useState<AlbumFact | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'none' | 'ok'>('idle');
 
@@ -1314,7 +1314,7 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
     const albumArtist = deferredTrack.albumArtist || deferredTrack.artist;
     if (!album || album === 'Unknown Album') {
       setAlbumTracks([]);
-      setRelatedAlbums([]);
+      setSameYearAlbums([]);
       setFact(null);
       setStatus('idle');
       return;
@@ -1333,21 +1333,21 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
         ? []
         : await api.getAlbums({
           year: albumYear,
-          yearWindow: 1,
+          yearWindow: 0,
           excludeAlbum: album,
           excludeAlbumArtist: albumArtist,
-          limit: 5,
+          limit: 4,
         }).catch(() => []);
       if (ctrl.signal.aborted) return;
       setAlbumTracks(tracks);
-      setRelatedAlbums(
+      setSameYearAlbums(
         albums
           .filter((item) =>
             item.album !== album &&
             item.year != null &&
             albumYear != null &&
-            Math.abs(item.year - albumYear) <= 1)
-          .slice(0, 5)
+            item.year === albumYear)
+          .slice(0, 4)
           .map((item) => ({ album: item.album, albumArtist: item.albumArtist, year: item.year })),
       );
       setFact(nextFact);
@@ -1362,6 +1362,7 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
     .flatMap((item) => [item.artist, item.albumArtist])
     .filter((value): value is string => Boolean(value && value !== 'Unknown Artist'));
   const creditNames = Array.from(new Set(knownCredits)).slice(0, 6);
+  const releaseNote = albumReleaseNote(fact, albumYear);
 
   return (
     <section className="album-context-panel" data-newamp-album-context-panel>
@@ -1400,11 +1401,15 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
           <strong>{creditNames.length ? creditNames.join(' / ') : deferredTrack.albumArtist || deferredTrack.artist}</strong>
         </div>
         <div>
-          <span>Release neighborhood</span>
+          <span>Release notes</span>
+          <strong>{releaseNote}</strong>
+        </div>
+        <div>
+          <span>Same-year in your library</span>
           <strong>
-            {relatedAlbums.length
-              ? relatedAlbums.map((item) => `${item.albumArtist} - ${item.album} (${item.year})`).join(' / ')
-              : albumYear ? `No other local albums found around ${albumYear}.` : 'Add release years to compare nearby albums.'}
+            {sameYearAlbums.length
+              ? sameYearAlbums.map((item) => `${item.albumArtist} - ${item.album} (${item.year})`).join(' / ')
+              : albumYear ? `No other local albums tagged ${albumYear}.` : 'Add release years to compare local era matches.'}
           </strong>
         </div>
       </div>
@@ -1422,6 +1427,16 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
       )}
     </section>
   );
+}
+
+function albumReleaseNote(fact: AlbumFact | null, albumYear: number | null): string {
+  const summary = fact?.summary?.trim() ?? '';
+  const releaseSentence = summary
+    .split(/(?<=[.!?])\s+/)
+    .find((sentence) => /\breleased\b/i.test(sentence) && sentence.length <= 260);
+  if (releaseSentence) return releaseSentence;
+  if (albumYear) return `Tagged release year: ${albumYear}.`;
+  return 'No reliable release date found yet.';
 }
 
 function TrackSignalPanel({

@@ -59,8 +59,8 @@ export function CompactPlayer(): JSX.Element {
   const [vizExpanded, setVizExpanded] = useState<boolean>(() => loadInitialVizExpanded());
 
   const artUrl = useMemo(
-    () => (current?.hasArt ? api.getArtUrl(current.id) : null),
-    [current?.id, current?.hasArt],
+    () => (current ? api.getArtUrl(current.id) : null),
+    [current?.id],
   );
 
   // Resize the OS window to match the chosen deck's natural size whenever the

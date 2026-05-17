@@ -48,9 +48,9 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engine = usePlayerStore((s) => s.engine);
   const isFullscreen = width == null && height == null && mode !== 'mini';
-  const frameIntervalMs = isFullscreen ? 1000 / 60 : 1000 / 30;
-  const dprCap = isFullscreen ? (quality === '4k' ? 1.5 : 1.25) : 2;
-  const maxPixels = isFullscreen ? (quality === '4k' ? 8_300_000 : 3_700_000) : 2_000_000;
+  const frameIntervalMs = isFullscreen ? (quality === '4k' ? 1000 / 30 : 1000 / 45) : 1000 / 30;
+  const dprCap = isFullscreen ? (quality === '4k' ? 1.25 : 1) : 2;
+  const maxPixels = isFullscreen ? (quality === '4k' ? 4_200_000 : 2_100_000) : 2_000_000;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -103,7 +103,7 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
             meshWidth: 48,
             meshHeight: 36,
           });
-          visualizer.connectAudio(engine.masterGain);
+          visualizer.connectAudio(engine.visualizerNode);
 
           const presets = Object.entries(presetApi.getPresets()).filter(
             (entry): entry is [string, Record<string, unknown>] =>
@@ -145,7 +145,7 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
         cancelAnimationFrame(raf);
         if (presetTimer != null) window.clearInterval(presetTimer);
         try {
-          visualizer?.disconnectAudio(engine.masterGain);
+          visualizer?.disconnectAudio(engine.visualizerNode);
         } catch {
           /* ignore */
         }

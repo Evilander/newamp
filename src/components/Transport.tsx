@@ -23,8 +23,8 @@ export function Transport(): JSX.Element {
   const setFs = usePlayerStore((s) => s.setFullscreenViz);
 
   const artUrl = useMemo(
-    () => (current?.hasArt ? api.getArtUrl(current.id) : null),
-    [current?.id, current?.hasArt],
+    () => (current ? api.getArtUrl(current.id) : null),
+    [current?.id],
   );
 
   return (
@@ -44,6 +44,9 @@ export function Transport(): JSX.Element {
             onClick={() => setFs(true)}
             title="Open visualizer"
             data-newamp-open-visualizer
+            onError={(event) => {
+              event.currentTarget.style.display = 'none';
+            }}
           />
         ) : (
           <div

@@ -88,6 +88,10 @@ try {
   assert.match(libraryViewSource, /hasMoreTracks/, 'LibraryView should track whether more catalog rows are available');
   assert.match(libraryViewSource, /getTrackCount/, 'LibraryView should fetch exact filtered totals');
   assert.match(libraryViewSource, /summaryRefreshKey/, 'LibraryView should refresh heavy library summary data explicitly');
+  assert.match(libraryViewSource, /TRACK_TABLE_COLUMN_WIDTH_KEY/, 'Track tables should persist user-resized column widths');
+  assert.match(libraryViewSource, /data-newamp-track-column-resizer/, 'Track tables should expose resize handles on headers');
+  assert.match(libraryViewSource, /headerCell\('title', 'Title'\)/, 'Track title column should be resizable');
+  assert.match(libraryViewSource, /activeColumnKeys\.map/, 'Track table column widths should stay aligned with optional album and queue columns');
   assert.doesNotMatch(libraryViewSource, /\[tracks\.length\]/, 'LibraryView should not recompute library health when loading more rows');
   for (const sortId of ['title', 'added', 'year', 'genre', 'duration']) {
     assert.match(libraryViewSource, new RegExp(`id: '${sortId}'`), `LibraryView should expose ${sortId} sort`);
