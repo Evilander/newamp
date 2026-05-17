@@ -66,8 +66,8 @@ assert.match(albumsSource, /Play album next/, 'album detail should expose play-n
 assert.match(albumsSource, /Queue album/, 'album detail should expose queue-all group control');
 assert.match(artistsSource, /Play artist next/, 'artist detail should expose play-next group control');
 assert.match(artistsSource, /Queue artist/, 'artist detail should expose queue-all group control');
-assert.match(lovedSource, /Play loved tracks next/, 'loved view should expose play-next group control');
-assert.match(lovedSource, /Queue loved tracks/, 'loved view should expose queue-all group control');
+assert.match(lovedSource, /Play loaded loved tracks next/, 'loved view should expose play-next group control for loaded favorites');
+assert.match(lovedSource, /Queue loaded loved tracks/, 'loved view should expose queue-all group control for loaded favorites');
 assert.match(packageSource, /"smoke:queue-insert"/, 'package.json should expose queue insert smoke');
 
 console.log(JSON.stringify({ ok: true }, null, 2));

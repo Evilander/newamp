@@ -77,6 +77,14 @@ assert.deepEqual(library.getListeningHistory({ limit: 4 }).map((item) => item.tr
   'Gamma',
   'Alpha',
 ]);
+assert.deepEqual(library.getListeningHistory({ limit: 2, offset: 0 }).map((item) => item.track.title), [
+  'Alpha',
+  'Beta',
+]);
+assert.deepEqual(library.getListeningHistory({ limit: 2, offset: 2 }).map((item) => item.track.title), [
+  'Gamma',
+  'Alpha',
+]);
 
 const insights = library.getListeningInsights({ now });
 assert.equal(insights.generatedAt, now);
@@ -165,6 +173,11 @@ assert.match(historyViewSource, /Top Artists/, 'History view should show top art
 assert.match(historyViewSource, /Recent Days/, 'History view should show recent-day activity');
 assert.match(historyViewSource, /skip/i, 'History insights should expose skip behavior');
 assert.match(historyViewSource, /playQueue/, 'History view should replay from a history row');
+assert.match(historyViewSource, /const HISTORY_PAGE_SIZE = 500/, 'History view should centralize its page size');
+assert.match(historyViewSource, /limit: HISTORY_PAGE_SIZE \+ 1/, 'History view should over-fetch to detect more history');
+assert.match(historyViewSource, /offset: items\.length/, 'History view should request later history pages by loaded row count');
+assert.match(historyViewSource, /hasMoreHistory/, 'History view should track whether more listening history exists');
+assert.match(historyViewSource, /Load more history/, 'History view should expose explicit history pagination');
 assert.match(storeSource, /recordManualSkip/, 'player store should record manual early skips');
 assert.match(storeSource, /api\.recordSkip/, 'player store should call the skip recording API');
 assert.match(releaseGateSource, /smoke:history/, 'release gate should include the history smoke');
