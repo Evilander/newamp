@@ -750,6 +750,18 @@ export class LibraryStore {
     ).map(rowToTrack);
   }
 
+  getTrackIds(opts: TrackQueryOptions = {}): number[] {
+    const sortKey = trackSortOrder(opts.sort);
+    const limit = Math.max(1, Math.min(opts.limit ?? 1000, 100000));
+    const offset = Math.max(0, opts.offset ?? 0);
+    const { whereSql, params } = this.buildTrackQuery(opts);
+
+    return this.many<{ id: number }>(
+      `SELECT id FROM tracks ${whereSql} ORDER BY ${sortKey} LIMIT ? OFFSET ?`,
+      [...params, limit, offset],
+    ).map((row) => row.id);
+  }
+
   private buildTrackQuery(opts: Pick<TrackQueryOptions, 'search' | 'sort'>): {
     whereSql: string;
     params: unknown[];
