@@ -4,6 +4,7 @@ import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
 import { api } from '../../lib/api';
 import { TrackTable } from './LibraryView';
+import { LoadMoreFooter } from './LoadMoreFooter';
 
 const FOLDER_TRACK_LIMIT = 5000;
 
@@ -12,6 +13,8 @@ export function FoldersView(): JSX.Element {
   const [folders, setFolders] = useState<FolderSummary[]>([]);
   const [tracks, setTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMoreTracks, setLoadingMoreTracks] = useState(false);
+  const [hasMoreDirectTracks, setHasMoreDirectTracks] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const selected = stack[stack.length - 1] ?? null;
   const playQueue = usePlayerStore((s) => s.playQueue);
@@ -44,21 +47,28 @@ export function FoldersView(): JSX.Element {
     let cancelled = false;
     if (!selected) {
       setTracks([]);
+      setHasMoreDirectTracks(false);
       return () => {
         cancelled = true;
       };
     }
     api.getFolderTracks(selected.path, { recursive: false, limit: FOLDER_TRACK_LIMIT })
       .then((next) => {
-        if (!cancelled) setTracks(next);
+        if (!cancelled) {
+          setTracks(next);
+          setHasMoreDirectTracks(next.length < selected.trackCount);
+        }
       })
       .catch(() => {
-        if (!cancelled) setTracks([]);
+        if (!cancelled) {
+          setTracks([]);
+          setHasMoreDirectTracks(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [selected?.path]);
+  }, [selected?.path, selected?.trackCount]);
 
   const totalTracks = useMemo(
     () => (selected ? selected.totalTrackCount : folders.reduce((sum, folder) => sum + folder.totalTrackCount, 0)),
@@ -85,6 +95,26 @@ export function FoldersView(): JSX.Element {
     }
     await action(nextTracks);
     setStatus(`${nextTracks.length.toLocaleString()} tracks loaded from ${folder.name}.`);
+  }
+
+  async function loadMoreDirectTracks(): Promise<void> {
+    if (!selected || loadingMoreTracks || !hasMoreDirectTracks) return;
+    const offset = tracks.length;
+    setLoadingMoreTracks(true);
+    try {
+      const next = await api.getFolderTracks(selected.path, {
+        recursive: false,
+        limit: FOLDER_TRACK_LIMIT,
+        offset,
+      });
+      setTracks((currentTracks) => {
+        const seen = new Set(currentTracks.map((track) => track.id));
+        return [...currentTracks, ...next.filter((track) => !seen.has(track.id))];
+      });
+      setHasMoreDirectTracks(offset + next.length < selected.trackCount);
+    } finally {
+      setLoadingMoreTracks(false);
+    }
   }
 
   return (
@@ -201,7 +231,7 @@ export function FoldersView(): JSX.Element {
             <>
               {selected.trackCount > tracks.length && (
                 <div className="border-b px-3 py-1 text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--muted)' }}>
-                  Showing first {tracks.length.toLocaleString()} direct tracks. Folder actions include subfolders.
+                  Showing first {tracks.length.toLocaleString()} direct tracks. Load more to browse the rest. Folder actions include subfolders.
                 </div>
               )}
               <TrackTable
@@ -213,6 +243,15 @@ export function FoldersView(): JSX.Element {
                 onAddToQueue={addTrackToQueue}
                 onPlayNextTracks={queueTracksNext}
                 onAddTracksToQueue={addTracksToQueue}
+              />
+              <LoadMoreFooter
+                shown={tracks.length}
+                total={selected.trackCount}
+                noun="direct tracks"
+                hasMore={hasMoreDirectTracks}
+                loading={loadingMoreTracks}
+                loadLabel="Load more direct tracks"
+                onLoadMore={() => void loadMoreDirectTracks()}
               />
             </>
           ) : (

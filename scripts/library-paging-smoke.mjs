@@ -61,10 +61,18 @@ try {
   assert.equal(newest?.title, 'Paging Track 05012', 'added sort should expose newest imports first');
   assert.equal(longest?.title, 'Paging Track 00001', 'duration sort should be deterministic when durations match');
 
-  const [libraryViewSource, albumsViewSource, artistsViewSource, typesSource, librarySource, packageSource] = await Promise.all([
+  for (const track of library.getTracks({ sort: 'album', limit: total, offset: 0 })) library.toggleLove(track.id);
+  const lovedFirstPage = library.getTracks({ sort: 'loved', limit: 600, offset: 0 });
+  const lovedSecondPage = library.getTracks({ sort: 'loved', limit: 600, offset: lovedFirstPage.length });
+  assert.equal(lovedFirstPage.length, 600, 'loved track view should be able to page large favorite sets');
+  assert.equal(lovedSecondPage.length, 600, 'loved track view should expose later favorite pages');
+  assert.equal(library.getTrackCount({ sort: 'loved' }), total, 'loved track view should expose an exact favorite count');
+
+  const [libraryViewSource, albumsViewSource, artistsViewSource, lovedViewSource, typesSource, librarySource, packageSource] = await Promise.all([
     readText('../src/components/views/LibraryView.tsx'),
     readText('../src/components/views/AlbumsView.tsx'),
     readText('../src/components/views/ArtistsView.tsx'),
+    readText('../src/components/views/LovedView.tsx'),
     readText('../shared/types.ts'),
     readText('../electron/library.ts'),
     readText('../package.json'),
@@ -105,6 +113,12 @@ try {
   assert.match(artistsViewSource, /Load more artists/, 'ArtistsView should expose explicit artist pagination');
   assert.match(artistsViewSource, /data-newamp-artists-load-more/, 'ArtistsView should expose a stable load-more marker');
   assert.doesNotMatch(artistsViewSource, /api\.getArtists\(\)\.then\(setArtists\)/, 'ArtistsView should not load every artist on mount');
+  assert.match(lovedViewSource, /const LOVED_PAGE_SIZE = 600/, 'LovedView should centralize the loved-track page size');
+  assert.match(lovedViewSource, /getTrackCount\(\{ sort: 'loved' \}\)/, 'LovedView should fetch exact favorite totals');
+  assert.match(lovedViewSource, /const offset = tracks\.length/, 'LovedView should page favorites by loaded row count');
+  assert.match(lovedViewSource, /Load more loved/, 'LovedView should expose explicit favorite pagination');
+  assert.match(lovedViewSource, /onToggleLove=\{toggleLove\}/, 'LovedView should remove rows when tracks are un-loved there');
+  assert.doesNotMatch(lovedViewSource, /limit: 5000/, 'LovedView should not cap favorites at one hard-coded 5000 row batch');
   assert.match(packageSource, /smoke:library-paging/, 'package scripts should expose library paging smoke');
 
   console.log(
@@ -117,6 +131,8 @@ try {
         albumSecondPage: albumSecondPage.length,
         artistFirstPage: artistFirstPage.length,
         artistSecondPage: artistSecondPage.length,
+        lovedFirstPage: lovedFirstPage.length,
+        lovedSecondPage: lovedSecondPage.length,
         exactTotal,
       },
       null,

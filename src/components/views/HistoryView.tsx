@@ -3,24 +3,37 @@ import type { ListeningHistoryItem, ListeningInsights } from '@shared/types';
 import { api } from '../../lib/api';
 import { formatDuration, formatTime } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
+import { LoadMoreFooter } from './LoadMoreFooter';
+
+const HISTORY_PAGE_SIZE = 500;
 
 export function HistoryView(): JSX.Element {
   const [items, setItems] = useState<ListeningHistoryItem[]>([]);
   const [insights, setInsights] = useState<ListeningInsights | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const playQueue = usePlayerStore((s) => s.playQueue);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     Promise.all([
-      api.getListeningHistory({ limit: 500 }),
+      api.getListeningHistory({ limit: HISTORY_PAGE_SIZE + 1, offset: 0 }),
       api.getListeningInsights(),
     ])
       .then(([rows, nextInsights]) => {
         if (!cancelled) {
-          setItems(rows);
+          setItems(rows.slice(0, HISTORY_PAGE_SIZE));
           setInsights(nextInsights);
+          setHasMoreHistory(rows.length > HISTORY_PAGE_SIZE);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setItems([]);
+          setInsights(emptyListeningInsights());
+          setHasMoreHistory(false);
         }
       })
       .finally(() => {
@@ -39,6 +52,25 @@ export function HistoryView(): JSX.Element {
     setInsights(emptyListeningInsights());
   }
 
+  async function loadMoreHistory(): Promise<void> {
+    if (loadingMore || !hasMoreHistory) return;
+    setLoadingMore(true);
+    try {
+      const rows = await api.getListeningHistory({
+        limit: HISTORY_PAGE_SIZE + 1,
+        offset: items.length,
+      });
+      const nextRows = rows.slice(0, HISTORY_PAGE_SIZE);
+      setItems((currentItems) => {
+        const seen = new Set(currentItems.map((item) => item.id));
+        return [...currentItems, ...nextRows.filter((item) => !seen.has(item.id))];
+      });
+      setHasMoreHistory(rows.length > HISTORY_PAGE_SIZE);
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
   return (
     <div className="flex h-full flex-col" style={{ fontFamily: 'var(--font-mono)' }}>
       <div
@@ -49,7 +81,7 @@ export function HistoryView(): JSX.Element {
           Listening History
         </div>
         <div className="flex-1 text-[11px] tabular-nums" style={{ color: 'var(--ink-2)' }}>
-          {items.length.toLocaleString()} play{items.length === 1 ? '' : 's'}
+          {items.length.toLocaleString()}{hasMoreHistory ? '+' : ''} play{items.length === 1 ? '' : 's'}
         </div>
         <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)} disabled={!tracks.length}>
           PLAY FROM TOP
@@ -65,10 +97,20 @@ export function HistoryView(): JSX.Element {
             Loading...
           </div>
         ) : items.length ? (
-          <HistoryTable
-            items={items}
-            onPlay={(index) => void playQueue(tracks, index)}
-          />
+          <>
+            <HistoryTable
+              items={items}
+              onPlay={(index) => void playQueue(tracks, index)}
+            />
+            <LoadMoreFooter
+              shown={items.length}
+              noun="recent plays"
+              hasMore={hasMoreHistory}
+              loading={loadingMore}
+              loadLabel="Load more history"
+              onLoadMore={() => void loadMoreHistory()}
+            />
+          </>
         ) : (
           <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
             No listening history yet.

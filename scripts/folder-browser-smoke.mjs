@@ -38,6 +38,11 @@ try {
 
   const albumTracks = library.getFolderTracks('K:/music/Artist A/Album A', { recursive: false });
   assert.deepEqual(albumTracks.map((track) => track.title), ['One', 'Two']);
+  assert.deepEqual(
+    library.getFolderTracks('K:/music/Artist A/Album A', { recursive: false, limit: 1, offset: 1 }).map((track) => track.title),
+    ['Two'],
+    'direct folder track paging should honor offsets',
+  );
 
   const recursiveArtistTracks = library.getFolderTracks('K:/music/Artist A', { recursive: true });
   assert.deepEqual(recursiveArtistTracks.map((track) => track.title), ['One', 'Two']);
@@ -77,6 +82,10 @@ try {
   assert.match(foldersViewSource, /PLAY FOLDER/, 'Folders view should play whole folders');
   assert.match(foldersViewSource, /ADD FOLDER TO PLAYLIST/, 'Folders view should append folders to saved playlists');
   assert.match(foldersViewSource, /api\.getFolderTrackIds/, 'Folders view should append large folders by id instead of full track rows');
+  assert.match(foldersViewSource, /FOLDER_TRACK_LIMIT/, 'Folders view should centralize direct-track page size');
+  assert.match(foldersViewSource, /hasMoreDirectTracks/, 'Folders view should track when direct folder tracks are paged');
+  assert.match(foldersViewSource, /const offset = tracks\.length/, 'Folders view should page direct folder tracks by loaded row count');
+  assert.match(foldersViewSource, /Load more direct tracks/, 'Folders view should expose explicit direct-track pagination');
   const librarySource = await readText('../electron/library.ts');
   assert.match(librarySource, /queryFolderTrackRows/, 'folder track lookup should share a bounded query path');
   assert.match(librarySource, /WHERE lower\(replace\(path, '\/', '\\\\'\)\) LIKE \?/, 'folder track lookup should prefilter by normalized path in SQL');
