@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checkAudioHardwareReadiness, summarizeAudioHardware } from './audio-hardware-readiness-smoke.mjs';
 import { checkInstalledAssociations, summarizeInstalledAssociations } from './installed-associations-smoke.mjs';
@@ -118,25 +118,28 @@ if (realLibrary) {
   if (!existsSync(realLibraryRoot)) {
     blockers.push(`${realLibraryRoot} is unavailable, so the real-library gate could not run.`);
   } else {
-    run('npm', ['run', 'smoke:full-library', '--', realLibraryRoot], `npm run smoke:full-library -- ${realLibraryRoot}`, {
-      NEWAMP_FULL_SCAN_CLEAN: '1',
-      NEWAMP_FULL_SCAN_SKIP_ART_STORAGE: '1',
-    });
-    checks.push({ name: `smoke:full-library ${realLibraryRoot}`, ok: true });
-    run(
-      'npm',
-      ['run', 'smoke:full-library', '--', realLibraryRoot],
-      `npm run smoke:full-library -- ${realLibraryRoot} (incremental proof)`,
-      {
-        NEWAMP_FULL_SCAN_EXPECT_INCREMENTAL: '1',
+    try {
+      run('npm', ['run', 'smoke:full-library', '--', realLibraryRoot], `npm run smoke:full-library -- ${realLibraryRoot}`, {
+        NEWAMP_FULL_SCAN_CLEAN: '1',
         NEWAMP_FULL_SCAN_SKIP_ART_STORAGE: '1',
-        NEWAMP_FULL_SCAN_CLEAN_AFTER: '1',
-        NEWAMP_FULL_SCAN_MAX_MS: process.env.NEWAMP_FULL_SCAN_INCREMENTAL_MAX_MS || '60000',
-        NEWAMP_FULL_SCAN_MIN_SKIPPED: process.env.NEWAMP_FULL_SCAN_MIN_SKIPPED || '5000',
-      },
-    );
-    checks.push({ name: `smoke:full-library ${realLibraryRoot} incremental`, ok: true });
-    checks.push(await realLibraryProbe());
+      });
+      checks.push({ name: `smoke:full-library ${realLibraryRoot}`, ok: true });
+      run(
+        'npm',
+        ['run', 'smoke:full-library', '--', realLibraryRoot],
+        `npm run smoke:full-library -- ${realLibraryRoot} (incremental proof)`,
+        {
+          NEWAMP_FULL_SCAN_EXPECT_INCREMENTAL: '1',
+          NEWAMP_FULL_SCAN_SKIP_ART_STORAGE: '1',
+          NEWAMP_FULL_SCAN_MAX_MS: process.env.NEWAMP_FULL_SCAN_INCREMENTAL_MAX_MS || '60000',
+          NEWAMP_FULL_SCAN_MIN_SKIPPED: process.env.NEWAMP_FULL_SCAN_MIN_SKIPPED || '5000',
+        },
+      );
+      checks.push({ name: `smoke:full-library ${realLibraryRoot} incremental`, ok: true });
+      checks.push(await realLibraryProbe());
+    } finally {
+      cleanFullLibrarySmokeRoot();
+    }
   }
 }
 
@@ -606,6 +609,15 @@ async function realLibraryProbe() {
   } finally {
     library.close();
   }
+}
+
+function cleanFullLibrarySmokeRoot() {
+  const smokeRoot = resolve(repoRoot, 'tmp', 'full-library-smoke');
+  const relativePath = relative(repoRoot, smokeRoot);
+  if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    throw new Error(`Refusing to remove outside repo: ${smokeRoot}`);
+  }
+  rmSync(smokeRoot, { recursive: true, force: true });
 }
 
 function sha256(path) {
