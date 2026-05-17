@@ -214,6 +214,9 @@
       "artifactName": "NewAmp Portable ${version}.${ext}",
       "unpackDirName": false
     },
+    "nsis": {
+      "include": "build/installer.nsh"
+    },
     "fileAssociations": [
       {
         "ext": [

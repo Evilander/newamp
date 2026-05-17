@@ -11,6 +11,7 @@ const packagePath = resolve(repoRoot, 'package.json');
 const packageScriptPath = resolve(repoRoot, 'scripts', 'package.mjs');
 const gatePath = resolve(repoRoot, 'scripts', 'release-gate.mjs');
 const mainPath = resolve(repoRoot, 'electron', 'main.ts');
+const installerIncludePath = resolve(repoRoot, 'build', 'installer.nsh');
 const releaseRoot = resolve(repoRoot, 'release');
 const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
 const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
@@ -35,6 +36,7 @@ const requiredExtensions = [...requiredAudioExtensions, ...requiredPlaylistExten
 const gateSource = readFileSync(gatePath, 'utf8');
 const mainSource = readFileSync(mainPath, 'utf8');
 const packageScriptSource = readFileSync(packageScriptPath, 'utf8');
+const installerIncludeSource = readRequiredText(installerIncludePath);
 const builderDebug = readRequiredText(builderDebugPath);
 
 assert.equal(pkg.build?.productName, 'NewAmp', 'build productName should stay NewAmp');
@@ -42,6 +44,7 @@ assert.equal(pkg.build?.appId, 'io.newamp.player', 'build appId should be stable
 assert.ok(pkg.build?.win?.target?.includes('nsis'), 'Windows build target should include NSIS installer output');
 assert.ok(pkg.build?.win?.target?.includes('portable'), 'Windows build target should include a no-install portable EXE');
 assert.equal(pkg.build?.portable?.artifactName, 'NewAmp Portable ${version}.${ext}', 'portable artifact should have a stable human-readable file name');
+assert.equal(pkg.build?.nsis?.include, 'build/installer.nsh', 'NSIS installer should include NewAmp repair customizations');
 assert.doesNotMatch(JSON.stringify(pkg.build?.files ?? []), /build\/logo\.png/, 'packaged files should not copy the full-size renderer source logo');
 assert.doesNotMatch(JSON.stringify(pkg.build?.extraResources ?? []), /logo\.png/, 'extra resources should not copy the full-size renderer source logo');
 assert.match(
@@ -117,6 +120,11 @@ assert.match(builderDebug, /APP_ASSOCIATE "cue" "NewAmp\.PlaylistFile"/, 'NSIS s
 assert.match(builderDebug, /FileAssociation\.nsh/, 'NSIS script should include electron-builder file-association helpers');
 assert.match(builderDebug, /\$appExe \$\\"%1\$\\"/, 'NSIS file-open command should pass the selected file path to NewAmp.exe');
 assert.match(builderDebug, /RequestExecutionLevel user/, 'installer should support current-user install mode');
+assert.match(installerIncludeSource, /NEWAMP_REFRESH_ASSOCIATION HKEY_CURRENT_USER/, 'installer include should refresh current-user associations during repair installs');
+assert.match(installerIncludeSource, /NewAmp audio file/, 'installer include should repair stale Newamp audio association casing');
+assert.match(installerIncludeSource, /NewAmp playlist or CUE sheet/, 'installer include should repair stale Newamp playlist association casing');
+assert.match(builderDebug, /build\\installer\.nsh/, 'packaged NSIS script should include the NewAmp installer customization file');
+assert.match(installerIncludeSource, /!insertmacro UPDATEFILEASSOC/, 'installer include should notify Explorer after association repair');
 
 const installer = artifact(installerPath, 100_000_000);
 const portable = artifact(portablePath, 100_000_000);
