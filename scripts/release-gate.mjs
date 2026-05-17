@@ -94,6 +94,7 @@ if (!skipSmokes) {
     'smoke:listening-proof-session',
     'smoke:eq',
     'smoke:security',
+    'smoke:release-secrets',
     'smoke:signing-workflow',
     'smoke:build-provenance',
     'smoke:release-checksums',

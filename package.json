@@ -93,6 +93,7 @@
     "smoke:library-watch": "npm run build:electron && node scripts/library-watch-smoke.mjs",
     "smoke:library-prune": "npm run build:electron && node scripts/library-prune-smoke.mjs",
     "smoke:security": "node scripts/security-smoke.mjs",
+    "smoke:release-secrets": "node scripts/release-secret-hygiene-smoke.mjs",
     "smoke:signing-readiness": "node scripts/signing-readiness-smoke.mjs",
     "smoke:signing-workflow": "node scripts/signing-workflow-smoke.mjs",
     "smoke:build-provenance": "node scripts/build-provenance-smoke.mjs",

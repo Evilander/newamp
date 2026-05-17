@@ -42,5 +42,6 @@ assert.match(mainSource, /scheme: 'newamp-app'/, 'main process should register t
 assert.match(mainSource, /protocol\.handle\('newamp-app'/, 'main process should serve packaged renderer assets through newamp-app');
 assert.ok(!/\bbypassCSP:\s*true\b/.test(mainSource), 'custom protocols should not bypass renderer CSP');
 assert.match(packageSource, /"smoke:security"/, 'package.json should expose the security smoke');
+assert.match(packageSource, /"smoke:release-secrets"/, 'package.json should expose release secret hygiene smoke');
 
 console.log(JSON.stringify({ ok: true, directives: directives.size }, null, 2));
