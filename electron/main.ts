@@ -752,6 +752,9 @@ function registerIpc(): void {
   ipcMain.handle('library:get-folder-tracks', async (_e, folderPath: string, opts) =>
     library.getFolderTracks(folderPath, opts ?? {}),
   );
+  ipcMain.handle('library:get-folder-track-ids', async (_e, folderPath: string, opts) =>
+    library.getFolderTrackIds(folderPath, opts ?? {}),
+  );
   ipcMain.handle('library:get-album-tracks', async (_e, album: string, albumArtist: string) =>
     library.getAlbumTracks(album, albumArtist),
   );
