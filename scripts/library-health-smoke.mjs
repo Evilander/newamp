@@ -127,12 +127,13 @@ const legacyReviewPlaylist = library.savePlaylist({
 assert.equal(legacyReviewPlaylist.trackCount, 1, 'legacy review playlist should contain legacy-format tracks');
 library.close();
 
-const [sharedTypes, mainSource, preloadSource, apiSource, libraryViewSource] = await Promise.all([
+const [sharedTypes, mainSource, preloadSource, apiSource, libraryViewSource, librarySource] = await Promise.all([
   readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
   readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
   readFile(new URL('../electron/preload.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/lib/api.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/LibraryView.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../electron/library.ts', import.meta.url), 'utf8'),
 ]);
 
 assert.match(sharedTypes, /LibraryHealth/, 'shared API should expose LibraryHealth');
@@ -150,6 +151,9 @@ assert.match(libraryViewSource, /Missing Metadata Review/, 'Library view should 
 assert.match(libraryViewSource, /Save legacy review/, 'Library view should make legacy formats actionable');
 assert.match(libraryViewSource, /Legacy Format Review/, 'Library view should create a named legacy-format review playlist');
 assert.match(libraryViewSource, /collectTracksByQueries/, 'Library view should collect review playlists from power-search queries');
+assert.match(librarySource, /LibraryHealthRow/, 'Library health should use a lightweight row shape for full-library scans');
+assert.match(librarySource, /SELECT id, path, title, artist, album, year, duration, size, mtime, has_art FROM tracks/, 'Library health should avoid hydrating every track for aggregate counts');
+assert.match(librarySource, /getTracksByIdsInOrder/, 'Library health should hydrate only the duplicate samples it returns');
 
 console.log(JSON.stringify({
   ok: true,
