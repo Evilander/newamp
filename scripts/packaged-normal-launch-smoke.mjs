@@ -200,8 +200,10 @@ function isExpectedPackagedLaunchWarning(line) {
     /notify_icon\.cc/.test(line) ||
     /Failed to create shared context for virtualization/.test(line) ||
     /\[newamp\] tray icon unavailable/.test(line) ||
+    /\[newamp\] tray icon bounds unavailable/.test(line) ||
     /\[newamp\] global media shortcut not registered:/.test(line) ||
     /\[newamp\] global media shortcut unavailable:/.test(line) ||
-    /Windows notification area did not accept the tray icon/.test(line)
+    /Windows notification area did not accept the tray icon/.test(line) ||
+    /Windows notification area did not report tray bounds/.test(line)
   );
 }

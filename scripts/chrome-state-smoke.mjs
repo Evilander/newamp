@@ -127,7 +127,10 @@ assert.match(mainSource, /setResizable\(true\)/, 'full library window should res
 assert.match(mainSource, /NEWAMP_DISABLE_HARDWARE_ACCELERATION/, 'main process should expose explicit rendering-mode controls');
 assert.match(mainSource, /if \(!tray \|\| tray\.isDestroyed\(\)\) return/, 'closing should not hide the app when the tray is unavailable');
 assert.match(mainSource, /process\.platform === 'win32'[\s\S]+icon\.ico/, 'Windows tray icons should prefer the packaged ICO asset');
-assert.match(mainSource, /hasTrayBounds\(nextTray\.getBounds\(\)\)/, 'Windows tray registration should verify that the OS accepted the icon');
+assert.match(mainSource, /nativeImage\.createFromPath\(iconPath\)/, 'tray should create a native image from the packaged NewAmp icon');
+assert.match(mainSource, /image\.resize\(\{ width: 16, height: 16, quality: 'best' \}\)/, 'tray should use a shell-sized native image');
+assert.match(mainSource, /scheduleTrayBoundsDiagnostic\(nextTray\)/, 'Windows tray registration should diagnose zero bounds after the shell settles');
+assert.match(mainSource, /hasTrayBounds\(nextTray\.getBounds\(\)\)/, 'Windows tray diagnostics should verify that the OS accepted the icon');
 assert.match(mainSource, /writeDiagnosticEvent\('tray-unavailable'/, 'tray failures should leave diagnostics instead of silently stranding the app');
 assert.match(preloadSource, /win:set-always-on-top/, 'preload should expose always-on-top IPC');
 assert.match(apiSource, /setAlwaysOnTop/, 'renderer window-control API should expose always-on-top');
