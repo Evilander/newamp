@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 
 const repoRoot = resolve('.');
 const pkg = JSON.parse(await readText(join(repoRoot, 'package.json')));
+const fixtureVersion = String(pkg.version);
 const signScriptPath = join(repoRoot, 'scripts', 'sign-artifacts.mjs');
 
 assert.equal(pkg.scripts?.['release:sign'], 'node scripts/sign-artifacts.mjs', 'package.json should expose release:sign');
@@ -21,8 +22,8 @@ await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(smokeRoot, { recursive: true });
 
 const artifacts = [
-  { name: 'installer', path: join(smokeRoot, 'NewAmp Setup 1.0.0.exe') },
-  { name: 'portable', path: join(smokeRoot, 'NewAmp Portable 1.0.0.exe') },
+  { name: 'installer', path: join(smokeRoot, `NewAmp Setup ${fixtureVersion}.exe`) },
+  { name: 'portable', path: join(smokeRoot, `NewAmp Portable ${fixtureVersion}.exe`) },
   { name: 'exe', path: join(smokeRoot, 'NewAmp.exe') },
 ];
 await Promise.all(artifacts.map((artifact, index) => writeFile(artifact.path, `artifact-${index}`, 'utf8')));

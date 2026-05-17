@@ -11,12 +11,15 @@ const {
   resolveLastfmCredentials,
 } = await import('./lastfm-live-proof.mjs');
 
+const repoRoot = resolve('.');
+const pkg = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8'));
+const fixtureVersion = String(pkg.version);
 const smokeRoot = resolve('tmp', 'lastfm-live-proof-smoke');
 await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(smokeRoot, { recursive: true });
 
 const proofPath = join(smokeRoot, 'lastfm-live-proof.json');
-assert.deepEqual(defaultLastfmLiveProofArtifacts(resolve('.')).map((artifact) => artifact.name), [
+assert.deepEqual(defaultLastfmLiveProofArtifacts(repoRoot).map((artifact) => artifact.name), [
   'installer',
   'portable',
   'exe',
@@ -27,8 +30,8 @@ assert.deepEqual(defaultLastfmLiveProofArtifacts(resolve('.')).map((artifact) =>
 ]);
 
 const artifacts = [
-  { name: 'installer', path: join(smokeRoot, 'NewAmp Setup 1.0.0.exe') },
-  { name: 'portable', path: join(smokeRoot, 'NewAmp Portable 1.0.0.exe') },
+  { name: 'installer', path: join(smokeRoot, `NewAmp Setup ${fixtureVersion}.exe`) },
+  { name: 'portable', path: join(smokeRoot, `NewAmp Portable ${fixtureVersion}.exe`) },
   { name: 'exe', path: join(smokeRoot, 'NewAmp.exe') },
 ];
 await Promise.all(artifacts.map((artifact, index) => writeFile(artifact.path, `artifact-${index}`, 'utf8')));
