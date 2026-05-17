@@ -16,6 +16,8 @@ const result = await runElectronSmoke();
 assert.equal(result.ok, true, 'UI deck smoke should report success');
 assert.equal(result.openedViaDeckButton, true, 'real DECK button should enter compact mode');
 assert.ok(result.visibleSkinButtons >= 8, 'deck should expose all shape-changing skin buttons');
+assert.equal(result.selectAppRegion, 'no-drag', 'deck skin dropdown should not be swallowed by window dragging');
+assert.equal(result.pickerAppRegion, 'no-drag', 'deck skin picker should remain clickable in deck titlebars');
 assertWindow(result.shade, 820, 112, 'default windowshade deck');
 assertWindow(result.record, 540, 540, 'record-player deck');
 assertWindow(result.hotdog, 740, 240, 'hotdog deck');
