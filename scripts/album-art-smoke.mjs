@@ -179,6 +179,8 @@ assert.match(albumsViewSource, /APPLY COVER/, 'Albums view should require review
 assert.match(albumsViewSource, /MISSING ART/, 'Albums view should expose a missing-art review lane');
 assert.match(albumsViewSource, /REVIEW COVER/, 'Albums view should jump through albums missing cover art');
 assert.match(albumsViewSource, /showMissingArtOnly/, 'Albums view should filter to albums missing cover art');
+assert.match(albumsViewSource, /data-newamp-albums-scroll/, 'Albums view should own a restorable scroll container');
+assert.match(albumsViewSource, /restoreAlbumScrollTop/, 'Albums view should return to prior scroll position after closing an album');
 assert.match(packageSource, /"smoke:album-art"/, 'package.json should expose album art smoke');
 assert.match(gateSource, /smoke:album-art/, 'release gate should include album art smoke');
 

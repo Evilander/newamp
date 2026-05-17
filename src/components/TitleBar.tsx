@@ -15,11 +15,11 @@ export function TitleBar(): JSX.Element {
 
   return (
     <header
-      className="titlebar-drag relative flex h-9 items-center justify-between px-2 text-xs"
+      className="titlebar-drag relative flex h-10 items-center justify-between px-2 text-xs"
       style={{ background: 'var(--titlebar)' }}
     >
       <div className="titlebar-nodrag flex items-center gap-2">
-        <HeideckerLogo size={22} title="NewAmp" />
+        <HeideckerLogo size={28} title="NewAmp" />
         <span
           className="lcd-text font-bold tracking-[0.3em]"
           style={{ fontFamily: 'var(--font-display)', fontSize: 11 }}
@@ -96,4 +96,3 @@ export function TitleBar(): JSX.Element {
     </header>
   );
 }
-

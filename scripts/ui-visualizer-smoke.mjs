@@ -26,9 +26,14 @@ const result = await runElectronSmoke();
 assert.equal(result.ok, true, 'UI visualizer smoke should report success');
 assert.match(result.currentTitle, /Visualizer Smoke/, 'visualizer smoke should play the generated fixture');
 assert.equal(result.preset, 'spectrum', 'fullscreen visualizer should render the stable spectrum preset');
+assert.ok(result.stageRect.width >= result.viewport.width * 0.9, 'fullscreen visualizer should cover viewport width');
+assert.ok(result.stageRect.height >= result.viewport.height * 0.9, 'fullscreen visualizer should cover viewport height');
 assert.ok(result.render.width >= 120, `visualizer canvas width is too small: ${result.render.width}`);
 assert.ok(result.render.height >= 80, `visualizer canvas height is too small: ${result.render.height}`);
 assert.ok(result.render.litSamples > 0, 'visualizer canvas should contain nonblank pixels');
+assert.equal(result.openedViaVizButton, true, 'regular UI VIZ button should open the fullscreen visualizer');
+assert.equal(result.openedViaTransportArt, true, 'transport album art should open the fullscreen visualizer');
+assert.equal(result.compactClearsFullscreen, true, 'entering deck mode should clear fullscreen visualizer state');
 console.log(JSON.stringify(result, null, 2));
 
 async function resetSmokeRoot() {

@@ -381,6 +381,7 @@ export function NowPlayingView(): JSX.Element {
             type="button"
             onClick={() => setFs(true)}
             className="newamp-now-art relative shrink-0"
+            data-newamp-open-visualizer
             style={{
               background: 'var(--panel-2)',
               borderBottom: '1px solid var(--line)',

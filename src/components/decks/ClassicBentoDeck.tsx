@@ -22,6 +22,7 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
         <button
           type="button"
           className="compact-art titlebar-nodrag"
+          data-newamp-open-visualizer
           onClick={onToggleVizExpanded}
           onDoubleClick={onOpenFullscreenViz}
           title={vizExpanded ? 'Show album art' : 'Show visualizer'}

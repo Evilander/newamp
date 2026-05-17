@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AlbumArtLookupResult, AlbumSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
@@ -19,6 +19,8 @@ export function AlbumsView(): JSX.Element {
   const [showMissingArtOnly, setShowMissingArtOnly] = useState(false);
   const [artCandidate, setArtCandidate] = useState<AlbumArtLookupResult | null>(null);
   const [artStatus, setArtStatus] = useState<string | null>(null);
+  const albumListRef = useRef<HTMLDivElement>(null);
+  const [restoreAlbumScrollTop, setRestoreAlbumScrollTop] = useState(0);
 
   useEffect(() => {
     api.getAlbums().then(setAlbums).catch(() => undefined);
@@ -33,6 +35,16 @@ export function AlbumsView(): JSX.Element {
       .then(setTracks)
       .catch(() => undefined);
   }, [selected?.album, selected?.albumArtist]);
+
+  useLayoutEffect(() => {
+    if (selected) return;
+    const list = albumListRef.current;
+    if (!list) return;
+    const frame = window.requestAnimationFrame(() => {
+      list.scrollTop = restoreAlbumScrollTop;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [selected, restoreAlbumScrollTop, filter, showMissingArtOnly]);
 
   async function findAlbumCover(): Promise<void> {
     if (!selected) return;
@@ -85,6 +97,15 @@ export function AlbumsView(): JSX.Element {
     if (next) setSelected(next);
   }
 
+  function openAlbum(album: AlbumSummary): void {
+    setRestoreAlbumScrollTop(albumListRef.current?.scrollTop ?? 0);
+    setSelected(album);
+  }
+
+  function closeAlbum(): void {
+    setSelected(null);
+  }
+
   if (selected) {
     return (
       <div className="flex h-full flex-col">
@@ -92,7 +113,7 @@ export function AlbumsView(): JSX.Element {
           className="flex items-center gap-3 border-b px-4 py-3"
           style={{ borderColor: 'var(--line)' }}
         >
-          <button className="pxbtn" onClick={() => setSelected(null)}>
+          <button className="pxbtn" onClick={closeAlbum}>
             ← All albums
           </button>
           <AlbumArt album={selected} />
@@ -217,7 +238,7 @@ export function AlbumsView(): JSX.Element {
           Missing Art Review uses the same reviewed Cover Art Archive apply flow as album detail: open an album, find a cover, approve it, then jump to the next missing cover.
         </div>
       )}
-      <div className="flex-1 overflow-auto p-4">
+      <div ref={albumListRef} data-newamp-albums-scroll className="flex-1 overflow-auto p-4">
         <div
           className="grid gap-4"
           style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(168px, 1fr))' }}
@@ -225,7 +246,7 @@ export function AlbumsView(): JSX.Element {
           {filtered.map((a) => (
             <button
               key={`${a.album}::${a.albumArtist}`}
-              onClick={() => setSelected(a)}
+              onClick={() => openAlbum(a)}
               className="group flex flex-col gap-1 text-left"
             >
               <AlbumArt album={a} size={168} />

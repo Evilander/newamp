@@ -5,7 +5,14 @@ import { formatTime } from '../lib/format';
 import { api } from '../lib/api';
 
 const PRESETS = [
+  { id: 'neon-waves', label: 'Neon Waves' },
+  { id: 'prism-bars', label: 'Prism Bars' },
+  { id: 'confetti', label: 'Confetti' },
+  { id: 'burning-cloud', label: 'Burning Cloud' },
   { id: 'spectrum', label: 'Spectrum' },
+  { id: 'radial', label: 'Radial' },
+  { id: 'tunnel', label: 'Tunnel' },
+  { id: 'pulse', label: 'Pulse' },
   { id: 'galaxy', label: 'Galaxy' },
   { id: 'aurora', label: 'Aurora' },
   { id: 'oscilloscope', label: 'Oscilloscope' },
@@ -26,7 +33,7 @@ export function FullscreenVisualizer(): JSX.Element {
   const setPreset = usePlayerStore((s) => s.setVizPreset);
 
   const [showChrome, setShowChrome] = useState(true);
-  const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'spectrum';
+  const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
 
   const artUrl = useMemo(
     () => (current?.hasArt ? api.getArtUrl(current.id) : null),
@@ -37,7 +44,7 @@ export function FullscreenVisualizer(): JSX.Element {
     <div
       data-newamp-fullscreen-visualizer
       data-newamp-visualizer-preset={activePreset}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black"
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-black"
       onMouseMove={() => setShowChrome(true)}
       onMouseLeave={() => setShowChrome(false)}
       onDoubleClick={() => setFs(false)}
@@ -70,11 +77,11 @@ export function FullscreenVisualizer(): JSX.Element {
       )}
 
       <div
-        className={`pointer-events-auto absolute right-4 top-4 flex items-center gap-2 transition-opacity duration-300 ${
+        className={`pointer-events-auto absolute right-4 top-4 flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 transition-opacity duration-300 ${
           showChrome ? 'opacity-100' : 'opacity-0'
         }`}
       >
-        <div className="flex gap-1 bevel-out p-1">
+        <div className="flex flex-wrap justify-end gap-1 bevel-out p-1">
           {PRESETS.map((p) => (
             <button
               key={p.id}

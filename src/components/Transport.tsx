@@ -43,12 +43,15 @@ export function Transport(): JSX.Element {
             style={{ borderRadius: 'var(--radius)' }}
             onClick={() => setFs(true)}
             title="Open visualizer"
+            data-newamp-open-visualizer
           />
         ) : (
           <div
             className="flex h-[72px] w-[72px] cursor-pointer items-center justify-center text-[11px]"
             style={{ color: 'var(--muted)', borderRadius: 'var(--radius)' }}
             onClick={() => setFs(true)}
+            title="Open visualizer"
+            data-newamp-open-visualizer
           >
             ♪
           </div>
@@ -165,4 +168,3 @@ function ScrubBar({
     />
   );
 }
-

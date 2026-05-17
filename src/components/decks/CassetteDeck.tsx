@@ -29,7 +29,7 @@ export function CassetteDeck(props: DeckProps): JSX.Element {
         <HeideckerLogo size={20} withGlow={false} />
         <span className="deck-cs-brand">NEWAMP · TYPE-IV METAL</span>
         <div className="deck-cs-window titlebar-nodrag">
-          <DeckSkinPicker current="cassette" onPick={props.onPickSkin} />
+          <DeckSkinPicker current="cassette" onPick={props.onPickSkin} compact />
           <button
             className={`pxbtn ${alwaysOnTop ? 'is-active' : ''}`}
             onClick={() => onSetAlwaysOnTop(!alwaysOnTop)}
@@ -43,6 +43,7 @@ export function CassetteDeck(props: DeckProps): JSX.Element {
       <button
         type="button"
         className="deck-cs-shell titlebar-nodrag"
+        data-newamp-open-visualizer
         onClick={onToggleVizExpanded}
         onDoubleClick={onOpenFullscreenViz}
         title="Click to swap reels for visualizer · double-click for fullscreen viz"

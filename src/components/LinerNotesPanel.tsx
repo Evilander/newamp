@@ -1,24 +1,18 @@
-// Liner Notes — the "On Air" side panel that replaces the musician-tools
-// stack in the guitar-tab slot. It is what you read while listening: a track
-// stat block, a sonic vitals grid, lyric hot lines pulled from the synced
-// lyrics, optional producer credits when present, and a rotating Heidecker
-// blurb (an On Cinema reference because the brand mascot is New Heidecker).
-
 import { useMemo } from 'react';
 import type { LrcLine } from '../api/lrclib';
 import type { Track } from '@shared/types';
 import { formatTime } from '../lib/format';
 
 const HEIDECKER_BLURBS: string[] = [
-  "Five bagels. That's how many bagels I'd give this one.",
+  "Five bags of popcorn. That's the rating.",
   'New Heidecker says: a song is just a movie with no pictures, folks.',
-  'I would compare this to *Mr. Brooks*, but better.',
+  'I would compare this to Mr. Brooks, but better.',
   'This track has the rare three-headed quality: vibe, hook, and gravitas.',
-  'A subtle homage to *Decker: Mind of an Architect* — if you listen closely.',
-  "On Cinema at the Cinema rates this song 'In My Top 200'.",
-  'Recorded somewhere between *Decker vs. Dracula* and *Hung Sky II*.',
-  "I'd put this on a playlist between Beatles tracks and you'd think it was the Beatles.",
-  'Bagel reference: warm, with cream cheese, not toasted.',
+  'A subtle homage to Decker: Mind of an Architect if you listen closely.',
+  'On Cinema at the Cinema rates this song five bags of popcorn.',
+  'Recorded somewhere between Decker vs. Dracula and Hung Sky II.',
+  'I would put this between Beatles tracks and you would think it was the Beatles.',
+  'This is a five-bag popcorn cut.',
   'A no-nonsense banger from the world of NEWAMP. Five bags of popcorn.',
 ];
 
@@ -34,7 +28,7 @@ function pickLyricHotLines(lines: LrcLine[] | null, plain: string | null | undef
   if (lines?.length) {
     for (const line of lines) {
       const text = (line.text || '').trim();
-      if (!text || text === '♪') continue;
+      if (!text || text === '\u266a') continue;
       candidates.push(text);
     }
   } else if (plain) {
@@ -45,7 +39,6 @@ function pickLyricHotLines(lines: LrcLine[] | null, plain: string | null | undef
     }
   }
   if (!candidates.length) return [];
-  // Score: distinct words preferred, between 4 and 14 words, no common chorus words alone.
   const scored = candidates
     .map((text) => ({
       text,
@@ -74,7 +67,8 @@ interface LinerNotesPanelProps {
 export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.Element {
   const blurb = useMemo(() => heideckerBlurb(`${track.id}:${track.artist}`), [track.id, track.artist]);
   const hotLines = useMemo(() => pickLyricHotLines(lyrics.lines, lyrics.plain), [lyrics.lines, lyrics.plain]);
-  const scoreLabel = track.ratingScore != null ? track.ratingScore.toFixed(1) : '—';
+  const bags = Math.max(0, Math.min(5, Math.round((track.ratingScore ?? track.rating * 20) / 20)));
+  const scoreLabel = `${bags}/5 bags`;
 
   return (
     <div
@@ -82,34 +76,34 @@ export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.El
       className="liner-notes-panel"
     >
       <header className="liner-notes-header">
-        <span className="liner-notes-eyebrow">On Air · New Heidecker reviews</span>
+        <span className="liner-notes-eyebrow">On Air / New Heidecker reviews</span>
         <span className="liner-notes-score" data-newamp-liner-score>{scoreLabel}</span>
       </header>
 
       <section className="liner-notes-blurb">
         <span className="liner-notes-quote-mark">&ldquo;</span>
         <p>{blurb}</p>
-        <span className="liner-notes-attribution">— New Heidecker, NewAmp Notes</span>
+        <span className="liner-notes-attribution">New Heidecker, NewAmp Notes</span>
       </section>
 
       <section className="liner-notes-vitals">
         <span className="liner-notes-vitals-title">Sonic Vitals</span>
         <div className="liner-notes-vital-grid">
-          <Vital label="BPM" value={track.bpm ? track.bpm.toFixed(1) : '—'} />
-          <Vital label="Key" value={track.key || '—'} />
+          <Vital label="BPM" value={track.bpm ? track.bpm.toFixed(1) : '-'} />
+          <Vital label="Key" value={track.key || '-'} />
           <Vital
             label="Loud"
             value={
               track.replayGainTrackDb != null
                 ? `${track.replayGainTrackDb > 0 ? '+' : ''}${track.replayGainTrackDb.toFixed(1)} dB`
-                : '—'
+                : '-'
             }
           />
-          <Vital label="Year" value={track.year ? String(track.year) : '—'} />
+          <Vital label="Year" value={track.year ? String(track.year) : '-'} />
           <Vital label="Plays" value={track.playCount.toLocaleString()} />
           <Vital
             label="Length"
-            value={track.duration ? formatTime(track.duration) : '—'}
+            value={track.duration ? formatTime(track.duration) : '-'}
           />
         </div>
       </section>
@@ -129,20 +123,20 @@ export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.El
         <span className="liner-notes-section-title">File Credits</span>
         <dl>
           <CreditRow label="Artist" value={track.artist} />
-          <CreditRow label="Album" value={track.album || '—'} />
+          <CreditRow label="Album" value={track.album || '-'} />
           {track.albumArtist && track.albumArtist !== track.artist ? (
             <CreditRow label="Album Artist" value={track.albumArtist} />
           ) : null}
-          <CreditRow label="Genre" value={track.genre || '—'} />
+          <CreditRow label="Genre" value={track.genre || '-'} />
           <CreditRow
             label="Catalog"
-            value={track.trackNo != null ? `Track ${track.trackNo}${track.discNo ? ` · Disc ${track.discNo}` : ''}` : '—'}
+            value={track.trackNo != null ? `Track ${track.trackNo}${track.discNo ? ` / Disc ${track.discNo}` : ''}` : '-'}
           />
         </dl>
       </section>
 
       <footer className="liner-notes-footer">
-        NewAmp · NewHeidecker.exe · Field Notes · NHRP-1
+        NewAmp / NewHeidecker.exe / Field Notes / NHRP-1
       </footer>
     </div>
   );

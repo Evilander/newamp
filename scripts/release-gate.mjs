@@ -63,6 +63,7 @@ if (!skipSmokes) {
     'smoke:skin',
     'smoke:visualizer',
     'smoke:ui-visualizer',
+    'smoke:ui-deck',
     'smoke:tabs',
     'smoke:lastfm',
     'smoke:lastfm-live-proof',

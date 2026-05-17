@@ -22,6 +22,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { CompactPlayer } from './components/CompactPlayer';
 import { QuickPlayPalette } from './components/QuickPlayPalette';
 import { FirstRunHints } from './components/FirstRunHints';
+import { StartupSplash } from './components/StartupSplash';
 import { usePlayerStore } from './store/usePlayerStore';
 import { api, winctl } from './lib/api';
 import { syncMediaSession } from './lib/mediaSession';
@@ -42,6 +43,7 @@ export default function App(): JSX.Element {
   const playbackRate = usePlayerStore((s) => s.playbackRate);
   const [dropActive, setDropActive] = useState(false);
   const [dropMessage, setDropMessage] = useState<string | null>(null);
+  const [showSplash, setShowSplash] = useState(true);
 
   async function handleOpenFiles(paths: string[]) {
     if (!paths.length) return null;
@@ -112,6 +114,11 @@ export default function App(): JSX.Element {
     // Apply the persisted shell on mount so CSS data-shell attribute is set
     // before the first paint. Subsequent changes happen via ShellPicker.
     applyShell(loadInitialShell());
+  }, []);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => setShowSplash(false), 1450);
+    return () => window.clearTimeout(handle);
   }, []);
 
   useEffect(() => {
@@ -195,67 +202,70 @@ export default function App(): JSX.Element {
     return (
       <>
         <CompactPlayer />
-        {fullscreen && <FullscreenVisualizer />}
         <QuickPlayPalette />
+        {showSplash && <StartupSplash />}
       </>
     );
   }
 
   return (
-    <div
-      data-newamp-drop-zone
-      className="app-chrome relative flex h-full w-full flex-col"
-      onDragEnter={(e) => {
-        if (!hasDraggedFiles(e.dataTransfer)) return;
-        e.preventDefault();
-        setDropActive(true);
-      }}
-      onDragOver={(e) => {
-        if (!hasDraggedFiles(e.dataTransfer)) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'copy';
-        setDropActive(true);
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
-        setDropActive(false);
-      }}
-      onDrop={(e) => {
-        if (!hasDraggedFiles(e.dataTransfer)) return;
-        e.preventDefault();
-        setDropActive(false);
-        void handleDroppedFiles(e.dataTransfer);
-      }}
-    >
-      <TitleBar />
-      <ScanBanner />
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
-        <main className="relative flex-1 overflow-hidden bg-[var(--bg)]">
-          <ErrorBoundary>
-            {view === 'home' && <HomeView />}
-            {view === 'library' && <LibraryView />}
-            {view === 'folders' && <FoldersView />}
-            {view === 'mixes' && <MixesView />}
-            {view === 'albums' && <AlbumsView />}
-            {view === 'artists' && <ArtistsView />}
-            {view === 'loved' && <LovedView />}
-            {view === 'history' && <HistoryView />}
-            {view === 'playlist' && <PlaylistView />}
-            {view === 'now-playing' && <NowPlayingView />}
-            {view === 'podcasts' && <PodcastView />}
-            {view === 'radio' && <RadioView />}
-            {view === 'settings' && <SettingsView />}
-          </ErrorBoundary>
-        </main>
+    <>
+      <div
+        data-newamp-drop-zone
+        className="app-chrome relative flex h-full w-full flex-col"
+        onDragEnter={(e) => {
+          if (!hasDraggedFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          setDropActive(true);
+        }}
+        onDragOver={(e) => {
+          if (!hasDraggedFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          setDropActive(true);
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          setDropActive(false);
+        }}
+        onDrop={(e) => {
+          if (!hasDraggedFiles(e.dataTransfer)) return;
+          e.preventDefault();
+          setDropActive(false);
+          void handleDroppedFiles(e.dataTransfer);
+        }}
+      >
+        <TitleBar />
+        <ScanBanner />
+        <div className="flex flex-1 overflow-hidden">
+          <Sidebar />
+          <main className="relative flex-1 overflow-hidden bg-[var(--bg)]">
+            <ErrorBoundary>
+              {view === 'home' && <HomeView />}
+              {view === 'library' && <LibraryView />}
+              {view === 'folders' && <FoldersView />}
+              {view === 'mixes' && <MixesView />}
+              {view === 'albums' && <AlbumsView />}
+              {view === 'artists' && <ArtistsView />}
+              {view === 'loved' && <LovedView />}
+              {view === 'history' && <HistoryView />}
+              {view === 'playlist' && <PlaylistView />}
+              {view === 'now-playing' && <NowPlayingView />}
+              {view === 'podcasts' && <PodcastView />}
+              {view === 'radio' && <RadioView />}
+              {view === 'settings' && <SettingsView />}
+            </ErrorBoundary>
+          </main>
+        </div>
+        {showEq && <EqPanel />}
+        <Transport />
+        {(dropActive || dropMessage) && <AppDropOverlay message={dropMessage} active={dropActive} />}
+        <QuickPlayPalette />
+        <FirstRunHints />
       </div>
-      {showEq && <EqPanel />}
-      <Transport />
       {fullscreen && <FullscreenVisualizer />}
-      {(dropActive || dropMessage) && <AppDropOverlay message={dropMessage} active={dropActive} />}
-      <QuickPlayPalette />
-      <FirstRunHints />
-    </div>
+      {showSplash && <StartupSplash />}
+    </>
   );
 }
 

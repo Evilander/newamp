@@ -29,7 +29,7 @@ export function RecordPlayerDeck(props: DeckProps): JSX.Element {
         <HeideckerLogo size={22} withGlow={false} />
         <span className="deck-rp-brand">NEWAMP · Vinyl Bench</span>
         <div className="deck-rp-window titlebar-nodrag">
-          <DeckSkinPicker current="record-player" onPick={props.onPickSkin} />
+          <DeckSkinPicker current="record-player" onPick={props.onPickSkin} compact />
           <button
             className={`pxbtn ${alwaysOnTop ? 'is-active' : ''}`}
             onClick={() => onSetAlwaysOnTop(!alwaysOnTop)}
@@ -48,6 +48,7 @@ export function RecordPlayerDeck(props: DeckProps): JSX.Element {
         <button
           type="button"
           className="deck-rp-platter"
+          data-newamp-open-visualizer
           onClick={onToggleVizExpanded}
           onDoubleClick={onOpenFullscreenViz}
           title={vizExpanded ? 'Show album label' : 'Show visualizer'}
