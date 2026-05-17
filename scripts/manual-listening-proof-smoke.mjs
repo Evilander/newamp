@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 const {
@@ -10,6 +10,8 @@ const {
 } = await import('./manual-listening-proof.mjs');
 
 const repoRoot = resolve('.');
+const pkg = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8'));
+const fixtureVersion = String(pkg.version);
 const smokeRoot = join(repoRoot, 'tmp', 'manual-listening-proof-smoke');
 const proofPath = join(smokeRoot, 'manual-listening-proof.json');
 assert.deepEqual(defaultManualListeningArtifacts(repoRoot).map((artifact) => artifact.name), [
@@ -23,8 +25,8 @@ assert.deepEqual(defaultManualListeningArtifacts(repoRoot).map((artifact) => art
 ]);
 
 const artifacts = [
-  { name: 'installer', path: join(smokeRoot, 'NewAmp Setup 0.1.0.exe') },
-  { name: 'portable', path: join(smokeRoot, 'NewAmp Portable 0.1.0.exe') },
+  { name: 'installer', path: join(smokeRoot, `NewAmp Setup ${fixtureVersion}.exe`) },
+  { name: 'portable', path: join(smokeRoot, `NewAmp Portable ${fixtureVersion}.exe`) },
   { name: 'exe', path: join(smokeRoot, 'NewAmp.exe') },
 ];
 
