@@ -1632,10 +1632,22 @@ function uiPlaybackProbeSource(): string {
       const currentTitle =
         document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
       const currentTime = Number(timeEl.getAttribute('data-newamp-current-time') || '0');
+      const nextButton = await waitFor('transport next button', () =>
+        document.querySelector('[data-newamp-transport] button[title="Next"]'),
+      );
+      nextButton.click();
+      await sleep(450);
+      const afterTerminalNextTitle =
+        document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
+      const afterTerminalNextTime = Number(
+        document.querySelector('[data-newamp-current-time]')?.getAttribute('data-newamp-current-time') || '0',
+      );
       return {
         ok: true,
         currentTitle,
         currentTime,
+        afterTerminalNextTitle,
+        afterTerminalNextTime,
         rowText: (row.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 180),
       };
     })()
@@ -1698,11 +1710,15 @@ function uiVisualizerProbeSource(): string {
       );
       spectrumButton.click();
       const sampleCanvas = (canvas) => {
-        const context = canvas.getContext('2d', { willReadFrequently: true });
-        if (!context || canvas.width < 120 || canvas.height < 80) return null;
         const width = canvas.width;
         const height = canvas.height;
-        const data = context.getImageData(0, 0, width, height).data;
+        if (width < 120 || height < 80) return null;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        const gl = context ? null : (canvas.getContext('webgl') || canvas.getContext('experimental-webgl'));
+        const data = new Uint8Array(width * height * 4);
+        if (context) data.set(context.getImageData(0, 0, width, height).data);
+        else if (gl) gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
+        else return null;
         let litSamples = 0;
         let totalSamples = 0;
         for (let index = 0; index < data.length; index += 16) {
@@ -1772,6 +1788,19 @@ function uiVisualizerProbeSource(): string {
       await waitFor('4K visualizer quality state', () =>
         stage.getAttribute('data-newamp-visualizer-quality') === '4k',
       );
+      const appliedQuality = stage.getAttribute('data-newamp-visualizer-quality');
+      const performanceButton = await waitFor('low-end visualizer toggle', () =>
+        document.querySelector('[data-newamp-viz-performance-button]'),
+      );
+      performanceButton.click();
+      await waitFor('low-end visualizer state', () =>
+        stage.getAttribute('data-newamp-visualizer-performance') === 'low' &&
+        stage.getAttribute('data-newamp-visualizer-quality') === 'auto',
+      );
+      performanceButton.click();
+      await waitFor('balanced visualizer state', () =>
+        stage.getAttribute('data-newamp-visualizer-performance') === 'balanced',
+      );
       const artButton = await waitFor('art overlay toggle', () =>
         document.querySelector('[data-newamp-viz-art-button]'),
       );
@@ -1793,6 +1822,25 @@ function uiVisualizerProbeSource(): string {
       cleanButton.click();
       await waitFor('clean visualizer chrome state', () =>
         stage.getAttribute('data-newamp-visualizer-chrome') === 'clean',
+      );
+      const paletteButton = await waitFor('visualizer palette toggle', () =>
+        document.querySelector('[data-newamp-viz-palette-button]'),
+      );
+      paletteButton.click();
+      await waitFor('visualizer palette state', () =>
+        stage.getAttribute('data-newamp-visualizer-palette') !== 'theme',
+      );
+      const navButton = await waitFor('top navigation visualizer toggle', () =>
+        document.querySelector('[data-newamp-viz-nav-button]'),
+      );
+      navButton.click();
+      await waitFor('top navigation hidden state', () =>
+        stage.getAttribute('data-newamp-visualizer-nav') === 'hidden' &&
+        document.querySelector('[data-newamp-viz-show-toolbar]'),
+      );
+      document.querySelector('[data-newamp-viz-show-toolbar]')?.click();
+      await waitFor('top navigation restored state', () =>
+        stage.getAttribute('data-newamp-visualizer-nav') === 'visible',
       );
       const currentTitle =
         document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
@@ -1831,10 +1879,13 @@ function uiVisualizerProbeSource(): string {
         openedViaVizButton: true,
         openedViaTransportArt: true,
         compactClearsFullscreen: true,
-        qualityToggle: stage.getAttribute('data-newamp-visualizer-quality'),
+        qualityToggle: appliedQuality,
         artToggle: stage.getAttribute('data-newamp-visualizer-art'),
         screenToggle: true,
         chromeMode: stage.getAttribute('data-newamp-visualizer-chrome'),
+        palette: stage.getAttribute('data-newamp-visualizer-palette'),
+        navMode: stage.getAttribute('data-newamp-visualizer-nav'),
+        performanceMode: stage.getAttribute('data-newamp-visualizer-performance'),
       };
     })()
   `;

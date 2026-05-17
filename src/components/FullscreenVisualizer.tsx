@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
-import { Visualizer, type VizQuality } from './Visualizer';
+import { Visualizer, type VizPalette, type VizPerformance, type VizQuality } from './Visualizer';
 import { formatTime } from '../lib/format';
 import { api, winctl } from '../lib/api';
 import type { VisualizerPreset } from '@shared/types';
@@ -30,6 +30,17 @@ type CanvasVisualizerPreset = Exclude<VisualizerPreset, 'album-breathe'>;
 const VIZ_QUALITY_KEY = 'newamp:viz:quality';
 const VIZ_SHOW_ART_KEY = 'newamp:viz:showArt';
 const VIZ_CHROME_KEY = 'newamp:viz:chrome';
+const VIZ_TOP_NAV_KEY = 'newamp:viz:topNav';
+const VIZ_PALETTE_KEY = 'newamp:viz:palette';
+const VIZ_PERFORMANCE_KEY = 'newamp:viz:performance';
+
+const PALETTES = [
+  { id: 'theme', label: 'Theme' },
+  { id: 'phosphor', label: 'Phosphor' },
+  { id: 'ice', label: 'Ice' },
+  { id: 'sunset', label: 'Sunset' },
+  { id: 'rainbow', label: 'Cycle' },
+] as const satisfies ReadonlyArray<{ id: VizPalette; label: string }>;
 
 function loadVisualizerQuality(): VizQuality {
   if (typeof window === 'undefined') return 'auto';
@@ -42,6 +53,17 @@ function loadStoredBoolean(key: string, fallback: boolean): boolean {
   if (raw === '1') return true;
   if (raw === '0') return false;
   return fallback;
+}
+
+function loadVisualizerPalette(): VizPalette {
+  if (typeof window === 'undefined') return 'theme';
+  const raw = window.localStorage.getItem(VIZ_PALETTE_KEY);
+  return PALETTES.some((item) => item.id === raw) ? raw as VizPalette : 'theme';
+}
+
+function loadVisualizerPerformance(): VizPerformance {
+  if (typeof window === 'undefined') return 'balanced';
+  return window.localStorage.getItem(VIZ_PERFORMANCE_KEY) === 'low' ? 'low' : 'balanced';
 }
 
 export function FullscreenVisualizer(): JSX.Element {
@@ -61,6 +83,9 @@ export function FullscreenVisualizer(): JSX.Element {
   const [artPulseEnabled, setArtPulseEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_SHOW_ART_KEY, true));
   const [artPulseVisible, setArtPulseVisible] = useState(false);
   const [chromeVisible, setChromeVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_CHROME_KEY, true));
+  const [topNavVisible, setTopNavVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_TOP_NAV_KEY, true));
+  const [palette, setPalette] = useState<VizPalette>(() => loadVisualizerPalette());
+  const [performance, setPerformance] = useState<VizPerformance>(() => loadVisualizerPerformance());
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
@@ -82,6 +107,7 @@ export function FullscreenVisualizer(): JSX.Element {
   }
 
   function toggleQuality(): void {
+    if (performance === 'low') return;
     setQuality((value) => {
       const next: VizQuality = value === '4k' ? 'auto' : '4k';
       window.localStorage.setItem(VIZ_QUALITY_KEY, next);
@@ -115,6 +141,35 @@ export function FullscreenVisualizer(): JSX.Element {
     setChromeVisible((value) => {
       const next = !value;
       window.localStorage.setItem(VIZ_CHROME_KEY, next ? '1' : '0');
+      return next;
+    });
+  }
+
+  function toggleTopNav(): void {
+    setTopNavVisible((value) => {
+      const next = !value;
+      window.localStorage.setItem(VIZ_TOP_NAV_KEY, next ? '1' : '0');
+      return next;
+    });
+  }
+
+  function cyclePalette(): void {
+    setPalette((value) => {
+      const index = Math.max(0, PALETTES.findIndex((item) => item.id === value));
+      const next = PALETTES[(index + 1) % PALETTES.length]!.id;
+      window.localStorage.setItem(VIZ_PALETTE_KEY, next);
+      return next;
+    });
+  }
+
+  function togglePerformance(): void {
+    setPerformance((value) => {
+      const next: VizPerformance = value === 'low' ? 'balanced' : 'low';
+      window.localStorage.setItem(VIZ_PERFORMANCE_KEY, next);
+      if (next === 'low') {
+        window.localStorage.setItem(VIZ_QUALITY_KEY, 'auto');
+        setQuality('auto');
+      }
       return next;
     });
   }
@@ -177,6 +232,15 @@ export function FullscreenVisualizer(): JSX.Element {
       } else if (event.key.toLowerCase() === 'h') {
         event.preventDefault();
         toggleChrome();
+      } else if (event.key.toLowerCase() === 't') {
+        event.preventDefault();
+        toggleTopNav();
+      } else if (event.key.toLowerCase() === 'p') {
+        event.preventDefault();
+        cyclePalette();
+      } else if (event.key.toLowerCase() === 'l') {
+        event.preventDefault();
+        togglePerformance();
       } else if (event.key.toLowerCase() === 'f') {
         event.preventDefault();
         toggleNativeFullscreen();
@@ -192,6 +256,9 @@ export function FullscreenVisualizer(): JSX.Element {
       data-newamp-visualizer-preset={activePreset}
       data-newamp-visualizer-quality={quality}
       data-newamp-visualizer-chrome={chromeVisible ? 'visible' : 'clean'}
+      data-newamp-visualizer-nav={topNavVisible ? 'visible' : 'hidden'}
+      data-newamp-visualizer-palette={palette}
+      data-newamp-visualizer-performance={performance}
       data-newamp-visualizer-art={artPulseEnabled ? (artPulseVisible ? 'pulse' : 'armed') : 'hidden'}
       data-newamp-native-fullscreen={nativeFullscreen ? 'true' : 'false'}
       className="fullscreen-viz-root fixed inset-0 z-[90] flex items-center justify-center bg-black"
@@ -215,6 +282,8 @@ export function FullscreenVisualizer(): JSX.Element {
           <Visualizer
             mode={activePreset as CanvasVisualizerPreset}
             quality={quality}
+            performance={performance}
+            palette={palette}
             className="absolute inset-0 h-full w-full"
           />
         </div>
@@ -236,7 +305,7 @@ export function FullscreenVisualizer(): JSX.Element {
       )}
 
       <div
-        className={`fullscreen-viz-toolbar pointer-events-auto absolute inset-x-4 top-4 flex max-w-[calc(100vw-2rem)] items-center gap-2 ${chromeVisible ? '' : 'is-clean'}`}
+        className={`fullscreen-viz-toolbar pointer-events-auto absolute inset-x-4 top-4 flex max-w-[calc(100vw-2rem)] items-center gap-2 ${chromeVisible ? '' : 'is-clean'} ${topNavVisible ? '' : 'is-top-hidden'}`}
         data-newamp-visualizer-toolbar
       >
         <button className="pxbtn" onClick={() => cyclePreset(-1)} title="Previous visualizer preset ([)">
@@ -261,9 +330,18 @@ export function FullscreenVisualizer(): JSX.Element {
           className={`pxbtn ${quality === '4k' ? 'is-active' : ''}`}
           data-newamp-viz-quality-button
           onClick={toggleQuality}
+          disabled={performance === 'low'}
           title={quality === '4k' ? 'Use balanced performance render quality (Q)' : 'Use sharper 4K render quality (Q)'}
         >
-          {quality === '4k' ? '4K' : 'PERF'}
+          {performance === 'low' ? 'LOW' : quality === '4k' ? '4K' : 'PERF'}
+        </button>
+        <button
+          className={`pxbtn ${performance === 'low' ? 'is-active' : ''}`}
+          data-newamp-viz-performance-button
+          onClick={togglePerformance}
+          title="Low-end mode for older CPUs/GPUs (L)"
+        >
+          LOW-END
         </button>
         <button
           className={`pxbtn ${artPulseEnabled ? 'is-active' : ''}`}
@@ -272,6 +350,14 @@ export function FullscreenVisualizer(): JSX.Element {
           title="Toggle album-art overlay (A)"
         >
           ART PULSE
+        </button>
+        <button
+          className="pxbtn"
+          data-newamp-viz-palette-button
+          onClick={cyclePalette}
+          title="Cycle visualizer colors (P)"
+        >
+          {PALETTES.find((item) => item.id === palette)?.label ?? 'Theme'}
         </button>
         <button
           className={`pxbtn ${nativeFullscreen ? 'is-active' : ''}`}
@@ -289,10 +375,29 @@ export function FullscreenVisualizer(): JSX.Element {
         >
           CLEAN
         </button>
+        <button
+          className={`pxbtn ${topNavVisible ? 'is-active' : ''}`}
+          data-newamp-viz-nav-button
+          onClick={toggleTopNav}
+          title="Hide or show the top visualizer navigation (T)"
+        >
+          TOP NAV
+        </button>
         <button className="pxbtn" onClick={exitVisualizer} title="Exit visualizer (Esc)">
           ESC X
         </button>
       </div>
+
+      {!topNavVisible && (
+        <button
+          className="fullscreen-viz-toolbar-tab pointer-events-auto absolute left-1/2 top-3 -translate-x-1/2"
+          data-newamp-viz-show-toolbar
+          onClick={toggleTopNav}
+          title="Show visualizer controls (T)"
+        >
+          VIS MENU
+        </button>
+      )}
 
       <div
         className={`fullscreen-viz-now pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16 ${chromeVisible ? '' : 'is-clean'}`}

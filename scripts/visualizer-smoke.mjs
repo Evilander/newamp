@@ -53,11 +53,21 @@ assert.match(fullscreenSource, /id: 'album-breathe'/, 'Fullscreen visualizer mus
 assert.match(typesSource, /'album-breathe'/, 'visualizer preset type should include album-breathe');
 assert.match(fullscreenSource, /data-newamp-viz-quality-button/, 'Fullscreen visualizer should expose a 4K quality toggle');
 assert.match(fullscreenSource, /data-newamp-viz-screen-button/, 'Fullscreen visualizer should expose native screen takeover');
+assert.match(fullscreenSource, /data-newamp-viz-palette-button/, 'Fullscreen visualizer should expose visualizer color palette controls');
+assert.match(fullscreenSource, /data-newamp-viz-nav-button/, 'Fullscreen visualizer should let users hide top navigation');
+assert.match(fullscreenSource, /data-newamp-viz-performance-button/, 'Fullscreen visualizer should expose a low-end performance mode');
+assert.match(fullscreenSource, /data-newamp-viz-show-toolbar/, 'Fullscreen visualizer should provide a recovery control when top navigation is hidden');
 assert.match(fullscreenSource, /data-newamp-viz-hover-meter/, 'Fullscreen visualizer should expose hover-only volume meter chrome');
 assert.match(fullscreenSource, /data-newamp-album-breathe-visualizer/, 'Album breathe visualizer should be a real full-screen mode');
 assert.match(fullscreenSource, /ART PULSE/, 'Fullscreen visualizer should expose random album-art pulse mode');
 assert.match(fullscreenSource, /ArrowRight/, 'Fullscreen visualizer should support keyboard preset cycling');
 assert.match(visualizerSource, /boostFrequencyData\(freq\)/, 'Visualizer should boost analyzer data for more obvious music reactivity');
+assert.match(visualizerSource, /type VizPalette/, 'Visualizer should support user-selectable color palettes');
+assert.match(visualizerSource, /type VizPerformance/, 'Visualizer should support a low-end rendering mode');
+assert.match(visualizerSource, /startShaderVisualizer/, 'Heavy fullscreen visualizer presets should use the GPU shader path');
+assert.match(visualizerSource, /u_beat/, 'Shader visualizers should receive beat-reactive audio features');
+assert.match(visualizerSource, /u_bands0/, 'Shader visualizers should receive reduced FFT band uniforms');
+assert.match(visualizerSource, /oscilloscopePalette/, 'Oscilloscope should support selectable and changing colors');
 assert.match(
   visualizerSource,
   /quality === '4k' \? 4_200_000 : 2_100_000/,
@@ -68,6 +78,7 @@ assert.match(
   /quality === '4k' \? 1000 \/ 30 : 1000 \/ 45/,
   'Fullscreen visualizer should throttle paint rate enough to stay clickable',
 );
+assert.match(visualizerSource, /1_050_000/, 'Low-end visualizer mode should cap render pixels for older GPUs');
 assert.match(
   fullscreenSource,
   /data-newamp-fullscreen-visualizer/,

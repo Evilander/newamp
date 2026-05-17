@@ -64,6 +64,7 @@ export function AlbumsView(): JSX.Element {
   const [randomSeed, setRandomSeed] = useState(() => albumViewSnapshot.randomSeed);
   const [hasMoreAlbums, setHasMoreAlbums] = useState(() => albumViewSnapshot.hasMoreAlbums);
   const [loadingAlbums, setLoadingAlbums] = useState(false);
+  const [scanStatus, setScanStatus] = useState<string | null>(null);
   const albumListRef = useRef<HTMLDivElement>(null);
   const albumPageRequestRef = useRef(false);
   const albumScrollTopRef = useRef(albumViewSnapshot.scrollTop);
@@ -190,6 +191,56 @@ export function AlbumsView(): JSX.Element {
     }
   }
 
+  async function reloadAlbumsAfterScan(): Promise<void> {
+    setLoadingAlbums(true);
+    try {
+      const pageSize = Math.max(ALBUM_PAGE_SIZE, albums.length || ALBUM_PAGE_SIZE);
+      const rows = await api.getAlbums({
+        search: albumQuery,
+        missingArtOnly: showMissingArtOnly,
+        sort: albumSort,
+        randomSeed,
+        limit: pageSize + 1,
+        offset: 0,
+      });
+      setAlbums(rows.slice(0, pageSize));
+      setHasMoreAlbums(rows.length > pageSize);
+    } finally {
+      setLoadingAlbums(false);
+    }
+  }
+
+  async function scanLibraryNow(): Promise<void> {
+    setScanStatus('Scanning music folders...');
+    try {
+      await api.scanLibrary();
+      await reloadAlbumsAfterScan();
+      setScanStatus('Library scan finished.');
+    } catch (err) {
+      setScanStatus(err instanceof Error ? err.message : 'Library scan failed.');
+    }
+  }
+
+  async function addFolderAndScan(): Promise<void> {
+    setScanStatus('Choose a music folder...');
+    try {
+      const dir = await api.pickFolder();
+      if (!dir) {
+        setScanStatus(null);
+        return;
+      }
+      const settings = await api.getSettings();
+      const roots = Array.from(new Set([...settings.libraryRoots, dir]));
+      await api.setSettings({ libraryRoots: roots, libraryAutoWatch: true });
+      setScanStatus(`Scanning ${dir}...`);
+      await api.scanLibrary([dir]);
+      await reloadAlbumsAfterScan();
+      setScanStatus('New folder scanned and added to library watch.');
+    } catch (err) {
+      setScanStatus(err instanceof Error ? err.message : 'Folder scan failed.');
+    }
+  }
+
   function handleAlbumsScroll(event: UIEvent<HTMLDivElement>): void {
     const list = event.currentTarget;
     albumScrollTopRef.current = list.scrollTop;
@@ -296,6 +347,12 @@ export function AlbumsView(): JSX.Element {
             RESHUFFLE
           </button>
         )}
+        <button className="pxbtn is-active" onClick={() => void scanLibraryNow()} disabled={loadingAlbums}>
+          SCAN NEW
+        </button>
+        <button className="pxbtn" onClick={() => void addFolderAndScan()} disabled={loadingAlbums}>
+          + FOLDER
+        </button>
         <button className="pxbtn" onClick={() => setCompactMode(true)} title="Open the compact deck">
           DECK
         </button>
@@ -306,6 +363,7 @@ export function AlbumsView(): JSX.Element {
           {albums.length.toLocaleString()}{hasMoreAlbums ? '+' : ''}{' '}
           {showMissingArtOnly ? 'missing-art albums' : 'albums'}
           {loadingAlbums ? ' / loading' : ''}
+          {scanStatus ? ` / ${scanStatus}` : ''}
         </span>
       </div>
       <div
