@@ -99,6 +99,7 @@
     "smoke:build-provenance": "node scripts/build-provenance-smoke.mjs",
     "smoke:release-checksums": "node scripts/release-checksums.mjs --check",
     "smoke:release-bundle": "node scripts/release-bundle-smoke.mjs",
+    "smoke:completion-audit": "node scripts/completion-audit-smoke.mjs",
     "smoke:publish-github": "node scripts/publish-github-smoke.mjs",
     "smoke:reliability": "npm run build:electron && node scripts/reliability-smoke.mjs",
     "smoke:support-backup": "npm run build:electron && node scripts/support-backup-smoke.mjs",

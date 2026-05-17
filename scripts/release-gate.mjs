@@ -99,6 +99,7 @@ if (!skipSmokes) {
     'smoke:build-provenance',
     'smoke:release-checksums',
     'smoke:release-bundle',
+    'smoke:completion-audit',
     'smoke:publish-github',
     'smoke:reliability',
     'smoke:support-backup',
