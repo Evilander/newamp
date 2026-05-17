@@ -12,10 +12,10 @@ export function DeckSkinPicker({
 }): JSX.Element {
   if (compact) {
     return (
-      <label className="deck-skin-picker is-compact" data-newamp-deck-skin-picker>
+      <label className="deck-skin-picker is-compact titlebar-nodrag" data-newamp-deck-skin-picker>
         <span className="deck-skin-picker-label">Skin</span>
         <select
-          className="deck-skin-select"
+          className="deck-skin-select titlebar-nodrag"
           value={current}
           onChange={(event) => onPick(event.target.value as DeckSkin)}
           aria-label="Deck skin"
@@ -32,7 +32,7 @@ export function DeckSkinPicker({
   }
 
   return (
-    <div className="deck-skin-picker" data-newamp-deck-skin-picker>
+    <div className="deck-skin-picker titlebar-nodrag" data-newamp-deck-skin-picker>
       <span className="deck-skin-picker-label" aria-hidden="true">
         SKIN
       </span>
@@ -40,7 +40,7 @@ export function DeckSkinPicker({
         <button
           key={skin.id}
           type="button"
-          className={`deck-skin-chip ${skin.id === current ? 'is-current' : ''}`}
+          className={`deck-skin-chip titlebar-nodrag ${skin.id === current ? 'is-current' : ''}`}
           onClick={() => onPick(skin.id)}
           title={`${skin.label}: ${skin.tagline} (${skin.size.width}x${skin.size.height})`}
           aria-pressed={skin.id === current}

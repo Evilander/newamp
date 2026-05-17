@@ -1758,10 +1758,16 @@ function uiDeckProbeSource(): string {
         const box = measure();
         return Math.abs(box.width - 820) <= 12 && Math.abs(box.height - 112) <= 12 ? box : null;
       });
+      const finalSelect = await waitFor('final deck skin select', () => document.querySelector('[data-newamp-deck-skin-select]'));
+      const finalPicker = finalSelect.closest('[data-newamp-deck-skin-picker]');
+      const selectAppRegion = getComputedStyle(finalSelect).webkitAppRegion || '';
+      const pickerAppRegion = finalPicker ? getComputedStyle(finalPicker).webkitAppRegion || '' : '';
       return {
         ok: true,
         openedViaDeckButton: true,
         visibleSkinButtons: document.querySelectorAll('[data-newamp-deck-skin-select] option').length,
+        selectAppRegion,
+        pickerAppRegion,
         shade,
         record,
         hotdog,
