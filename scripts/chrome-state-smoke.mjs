@@ -125,6 +125,10 @@ assert.match(storeSource, /fullscreenViz: on \? false : get\(\)\.fullscreenViz/,
 assert.match(mainSource, /setResizable\(false\)/, 'compact deck window should lock user resizing');
 assert.match(mainSource, /setResizable\(true\)/, 'full library window should restore resizing');
 assert.match(mainSource, /NEWAMP_DISABLE_HARDWARE_ACCELERATION/, 'main process should expose explicit rendering-mode controls');
+assert.match(mainSource, /if \(!tray \|\| tray\.isDestroyed\(\)\) return/, 'closing should not hide the app when the tray is unavailable');
+assert.match(mainSource, /process\.platform === 'win32'[\s\S]+icon\.ico/, 'Windows tray icons should prefer the packaged ICO asset');
+assert.match(mainSource, /hasTrayBounds\(nextTray\.getBounds\(\)\)/, 'Windows tray registration should verify that the OS accepted the icon');
+assert.match(mainSource, /writeDiagnosticEvent\('tray-unavailable'/, 'tray failures should leave diagnostics instead of silently stranding the app');
 assert.match(preloadSource, /win:set-always-on-top/, 'preload should expose always-on-top IPC');
 assert.match(apiSource, /setAlwaysOnTop/, 'renderer window-control API should expose always-on-top');
 assert.match(viteEnvSource, /setAlwaysOnTop/, 'window control types should include always-on-top');
