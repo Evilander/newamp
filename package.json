@@ -27,6 +27,7 @@
     "build:vite": "node scripts/vite-build.mjs",
     "preview": "vite preview",
     "smoke:build-lock": "node scripts/build-lock-smoke.mjs",
+    "smoke:startup-bundle": "npm run build && node scripts/startup-bundle-smoke.mjs",
     "smoke:library": "npm run build:electron && node scripts/library-smoke.mjs",
     "smoke:album-art": "npm run build:electron && node scripts/album-art-smoke.mjs",
     "smoke:full-library": "npm run build:electron && node scripts/full-library-smoke.mjs",
