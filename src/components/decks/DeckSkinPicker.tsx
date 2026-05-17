@@ -10,8 +10,29 @@ export function DeckSkinPicker({
   onPick: (skin: DeckSkin) => void;
   compact?: boolean;
 }): JSX.Element {
+  if (compact) {
+    return (
+      <label className="deck-skin-picker is-compact" data-newamp-deck-skin-picker>
+        <span className="deck-skin-picker-label">Skin</span>
+        <select
+          className="deck-skin-select"
+          value={current}
+          onChange={(event) => onPick(event.target.value as DeckSkin)}
+          aria-label="Deck skin"
+          data-newamp-deck-skin-select
+        >
+          {DECK_SKINS.map((skin) => (
+            <option key={skin.id} value={skin.id}>
+              {skin.shortLabel} - {skin.label}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  }
+
   return (
-    <div className={`deck-skin-picker ${compact ? 'is-compact' : ''}`} data-newamp-deck-skin-picker>
+    <div className="deck-skin-picker" data-newamp-deck-skin-picker>
       <span className="deck-skin-picker-label" aria-hidden="true">
         SKIN
       </span>

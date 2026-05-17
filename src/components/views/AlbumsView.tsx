@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { AlbumArtLookupResult, AlbumSummary, Track } from '@shared/types';
+import type { AlbumSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
 import { PlaylistAppendPicker, TrackTable } from './LibraryView';
@@ -17,8 +17,6 @@ export function AlbumsView(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
   const [filter, setFilter] = useState('');
   const [showMissingArtOnly, setShowMissingArtOnly] = useState(false);
-  const [artCandidate, setArtCandidate] = useState<AlbumArtLookupResult | null>(null);
-  const [artStatus, setArtStatus] = useState<string | null>(null);
   const albumListRef = useRef<HTMLDivElement>(null);
   const [restoreAlbumScrollTop, setRestoreAlbumScrollTop] = useState(0);
 
@@ -28,8 +26,6 @@ export function AlbumsView(): JSX.Element {
 
   useEffect(() => {
     if (!selected) return;
-    setArtCandidate(null);
-    setArtStatus(null);
     api
       .getAlbumTracks(selected.album, selected.albumArtist)
       .then(setTracks)
@@ -46,56 +42,7 @@ export function AlbumsView(): JSX.Element {
     return () => window.cancelAnimationFrame(frame);
   }, [selected, restoreAlbumScrollTop, filter, showMissingArtOnly]);
 
-  async function findAlbumCover(): Promise<void> {
-    if (!selected) return;
-    setArtCandidate(null);
-    setArtStatus('Searching MusicBrainz...');
-    try {
-      const candidates = await api.lookupAlbumArt({
-        album: selected.album,
-        albumArtist: selected.albumArtist,
-      });
-      const next = candidates[0] ?? null;
-      setArtCandidate(next);
-      setArtStatus(next ? `Found ${next.releaseGroupTitle}${next.artist ? ` by ${next.artist}` : ''}.` : 'No cover found.');
-    } catch (err) {
-      setArtStatus(err instanceof Error ? err.message : 'Cover lookup failed.');
-    }
-  }
-
-  async function applyAlbumCover(): Promise<void> {
-    if (!selected || !artCandidate) return;
-    setArtStatus('Applying cover...');
-    try {
-      const result = await api.applyAlbumArt({
-        album: selected.album,
-        albumArtist: selected.albumArtist,
-      }, artCandidate);
-      if (!result) {
-        setArtStatus('Cover could not be applied.');
-        return;
-      }
-      const nextAlbums = await api.getAlbums();
-      setAlbums(nextAlbums);
-      const updated = nextAlbums.find((album) => albumKey(album) === albumKey(selected)) ?? selected;
-      setSelected(updated);
-      setTracks(await api.getAlbumTracks(updated.album, updated.albumArtist));
-      setArtCandidate(null);
-      setArtStatus(`Applied cover to ${result.appliedTrackCount.toLocaleString()} track(s).`);
-    } catch (err) {
-      setArtStatus(err instanceof Error ? err.message : 'Cover apply failed.');
-    }
-  }
-
   const missingArtAlbums = albums.filter((album) => !album.artFromTrackId);
-
-  function openNextMissingCover(): void {
-    const next =
-      missingArtAlbums.find((album) => !selected || albumKey(album) !== albumKey(selected)) ??
-      missingArtAlbums[0] ??
-      null;
-    if (next) setSelected(next);
-  }
 
   function openAlbum(album: AlbumSummary): void {
     setRestoreAlbumScrollTop(albumListRef.current?.scrollTop ?? 0);
@@ -134,51 +81,12 @@ export function AlbumsView(): JSX.Element {
           <button className="pxbtn" onClick={() => addTracksToQueue(tracks)} disabled={!tracks.length} title="Queue album">
             QUEUE ALBUM
           </button>
-          <button className="pxbtn" onClick={() => void findAlbumCover()} disabled={!selected.album}>
-            FIND COVER
-          </button>
-          <button
-            className="pxbtn"
-            onClick={openNextMissingCover}
-            disabled={!missingArtAlbums.length}
-            title="Open the next album that still needs cover art"
-          >
-            REVIEW COVER
-          </button>
           <PlaylistAppendPicker
             tracks={tracks}
             label="ADD ALBUM TO PLAYLIST"
             disabled={!tracks.length}
           />
         </div>
-        {(artCandidate || artStatus) && (
-          <div className="flex items-center gap-3 border-b px-4 py-2" style={{ borderColor: 'var(--line)' }}>
-            {artCandidate?.thumbnailUrl && (
-              <img
-                src={artCandidate.thumbnailUrl}
-                alt={artCandidate.releaseGroupTitle}
-                width={52}
-                height={52}
-                className="object-cover"
-                style={{ borderRadius: 'var(--radius-card)', boxShadow: 'var(--shadow-card)' }}
-              />
-            )}
-            <div className="min-w-0 flex-1 text-[12px]" style={{ color: 'var(--ink-2)' }}>
-              <div className="truncate">{artStatus}</div>
-              {artCandidate && (
-                <div className="truncate" style={{ color: 'var(--muted)' }}>
-                  Cover Art Archive / score {artCandidate.score}
-                  {artCandidate.firstReleaseDate ? ` / ${artCandidate.firstReleaseDate}` : ''}
-                </div>
-              )}
-            </div>
-            {artCandidate && (
-              <button className="pxbtn is-active" onClick={() => void applyAlbumCover()}>
-                APPLY COVER
-              </button>
-            )}
-          </div>
-        )}
         <div className="flex-1 overflow-auto">
           <TrackTable
             tracks={tracks}
@@ -221,23 +129,10 @@ export function AlbumsView(): JSX.Element {
           className="bevel-in lcd-text flex-1 px-3 py-1.5 text-[14px] outline-none"
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
         />
-        <button
-          className="pxbtn"
-          onClick={openNextMissingCover}
-          disabled={!missingArtAlbums.length}
-          title="Open the next album that still needs cover art"
-        >
-          REVIEW COVER
-        </button>
         <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
           {filtered.length.toLocaleString()} albums / {missingArtAlbums.length.toLocaleString()} missing art
         </span>
       </div>
-      {showMissingArtOnly && (
-        <div className="border-b px-4 py-2 text-[12px]" style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}>
-          Missing Art Review uses the same reviewed Cover Art Archive apply flow as album detail: open an album, find a cover, approve it, then jump to the next missing cover.
-        </div>
-      )}
       <div ref={albumListRef} data-newamp-albums-scroll className="flex-1 overflow-auto p-4">
         <div
           className="grid gap-4"

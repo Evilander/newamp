@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, inElectron } from '../../lib/api';
-import { HeideckerLogo } from '../HeideckerLogo';
+import { BrandLogo } from '../BrandLogo';
 import type { MusicFolderSuggestion } from '@shared/types';
 
 export function EmptyLibrary(): JSX.Element {
@@ -82,7 +82,7 @@ export function EmptyLibrary(): JSX.Element {
     <div className="empty-library-hero">
       <div className="empty-library-glow" aria-hidden="true" />
       <div className="empty-library-panel">
-        <HeideckerLogo size={80} withGlow />
+        <BrandLogo size={80} withGlow />
         <div className="empty-library-copy">
           <h2>Your music. Your machine.</h2>
           <p>Newamp scans local folders, builds a private library, and keeps playback off-cloud by default.</p>

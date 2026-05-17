@@ -168,6 +168,13 @@ export function SettingsView(): JSX.Element {
     setOpenAiStatus(updated.openaiApiKey ? 'ChatGPT assist key saved locally.' : 'ChatGPT assist disabled.');
   }
 
+  async function showTutorialOnNextLaunch(): Promise<void> {
+    if (!settings) return;
+    const updated = await api.setSettings({ firstLaunchTutorialSeen: false });
+    setSettings(updated);
+    setOpenAiStatus('First-launch tutorial will show the next time Newamp opens.');
+  }
+
   async function refreshAudioOutputs(): Promise<void> {
     const mediaDevices = typeof navigator !== 'undefined' ? navigator.mediaDevices : null;
     if (!mediaDevices?.enumerateDevices) {
@@ -680,6 +687,9 @@ export function SettingsView(): JSX.Element {
           <div className="flex flex-wrap items-center gap-2">
             <button className="pxbtn" onClick={() => void saveOpenAiSettings()}>
               Save ChatGPT key
+            </button>
+            <button className="pxbtn" onClick={() => void showTutorialOnNextLaunch()}>
+              Show first-launch tutorial
             </button>
             <span className="text-[11px]" style={{ color: settings.openaiApiKey ? 'var(--accent)' : 'var(--muted)' }}>
               {settings.openaiApiKey ? `Ready: ${settings.openaiModel || DEFAULT_SETTINGS.openaiModel}` : 'Local metadata mode only'}

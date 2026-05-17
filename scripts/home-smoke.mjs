@@ -111,11 +111,12 @@ try {
   library.close();
 }
 
-const [appSource, sidebarSource, storeSource, homeSource, packageSource] = await Promise.all([
+const [appSource, sidebarSource, storeSource, homeSource, easterEggSource, packageSource] = await Promise.all([
   readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/Sidebar.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/store/usePlayerStore.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/HomeView.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../src/lib/easterEggs.ts', import.meta.url), 'utf8'),
   readFile(new URL('../package.json', import.meta.url), 'utf8'),
 ]);
 
@@ -134,9 +135,9 @@ assert.match(homeSource, /getSmartPlaylistRules/, 'Home should load saved smart 
 assert.match(homeSource, /getSuggestedSmartPlaylistRules/, 'Home should load suggested smart playlist stations');
 assert.match(homeSource, /runSmartPlaylistRule/, 'Home should launch saved smart playlist rules');
 assert.match(homeSource, /setAutoDjSmartRuleId/, 'Home should arm Auto DJ from saved smart playlist rules');
-assert.match(homeSource, /PopcornRating/, 'Home should render New Heidecker popcorn ratings');
-assert.match(homeSource, /five-bag popcorn ratings/, 'Home should describe Heidecker ratings as popcorn-only');
-assert.doesNotMatch(homeSource, /bagel/i, 'Home should not use bagels for New Heidecker ratings');
+assert.match(homeSource, /ScoreBadge/, 'Home should render library score badges');
+assert.doesNotMatch(homeSource, /popcorn|bagel/i, 'Home rating UI should not use public food-gag copy');
+assert.match(easterEggSource, /Tim & Gregg give this 5 bags of popcorn\./, 'Hidden review easter egg should preserve the intended line');
 assert.match(homeSource, /Station Active/, 'Home should show active station state');
 assert.match(homeSource, /STOP RADIO/, 'Home should expose active station stop controls');
 assert.match(homeSource, /Smart Rule Radio/, 'Home should start continuous Smart Rule Radio');
