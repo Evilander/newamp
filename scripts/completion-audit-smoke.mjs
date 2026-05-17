@@ -10,6 +10,7 @@ assert.match(source, /localOk/, 'completion audit should report local readiness 
 assert.match(source, /publicReleaseOk/, 'completion audit should report public release readiness separately');
 assert.match(source, /blockerGroups/, 'completion audit should group blockers by actionability');
 assert.match(source, /publicationReadinessBlockerClass/, 'publication readiness blockers should be classified');
+assert.match(source, /dedupeBlockerDetails/, 'completion audit should not double-count the same blocker across sections');
 
 const result = spawnSync(process.execPath, ['scripts/completion-audit.mjs', '--allow-incomplete'], {
   cwd: repoRoot,
@@ -37,8 +38,20 @@ assert.ok(
   'nested publication readiness blockers should split credential/signing failures into the external group',
 );
 assert.ok(
-  report.blockerGroups.external.some((blocker) => blocker.includes('manual listening proof')),
+  report.blockerGroups.external.some((blocker) =>
+    blocker.includes('manual-listening-proof') || blocker.includes('manual listening proof'),
+  ),
   'manual listening proof should be grouped as external',
+);
+assert.equal(
+  new Set(report.blockerGroups.external).size,
+  report.blockerGroups.external.length,
+  'external blockers should not contain duplicate text entries',
+);
+assert.equal(
+  report.blockerGroups.external.filter((blocker) => blocker.includes('manual-listening-proof') || blocker.includes('manual listening proof')).length,
+  1,
+  'manual listening proof should only be counted once',
 );
 assert.match(
   report.conclusion,
