@@ -91,7 +91,7 @@ export function buildGithubPublishPlan({
     const hasHead = gitDirExists && hasGitHead(root, gitDir);
     const needsCommit = !gitDirExists || !hasHead || isGitDirty(root, gitDir);
     if (!gitDirExists) {
-      commands.push(command('git-init-external', 'git', ['init', '--bare', gitDir]));
+      commands.push(gitCliCommand('git-init-external', ['init', '--bare', gitDir]));
     }
     if (!gitDirExists || !hasHead) {
       commands.push(gitCommand('git-main-branch', root, gitDir, ['symbolic-ref', 'HEAD', 'refs/heads/main']));
@@ -121,18 +121,18 @@ export function buildGithubPublishPlan({
     const hasHead = gitRootExists && hasGitHead(root, null);
     const needsCommit = !gitRootExists || !hasHead || isGitDirty(root, null);
     if (!gitRootExists) {
-      commands.push(command('git-init', 'git', ['init']));
+      commands.push(gitCliCommand('git-init', ['init']));
     }
     if (!gitRootExists || !hasHead) {
-      commands.push(command('git-main-branch', 'git', ['symbolic-ref', 'HEAD', 'refs/heads/main']));
+      commands.push(gitCliCommand('git-main-branch', ['symbolic-ref', 'HEAD', 'refs/heads/main']));
     }
     if (needsCommit) {
-      commands.push(command('stage', 'git', ['add', '.']));
-      commands.push(command('commit', 'git', ['commit', '-m', `Release NewAmp ${version}`]));
+      commands.push(gitCliCommand('stage', ['add', '.']));
+      commands.push(gitCliCommand('commit', ['commit', '-m', `Release NewAmp ${version}`]));
     }
     commands.push(ensureGithubRepoCommand(repo));
     commands.push(originCommand(root, null, originUrl));
-    commands.push(command('push-main', 'git', ['push', '-u', 'origin', 'HEAD:main']));
+    commands.push(gitCliCommand('push-main', ['push', '-u', 'origin', 'HEAD:main']));
     const tagState = gitTagState(root, null, tag);
     if (tagState === 'different' || (tagState === 'current' && needsCommit)) {
       return failedPlan(root, env, `local tag ${tag} already exists and does not match the planned release HEAD`, {
@@ -143,9 +143,9 @@ export function buildGithubPublishPlan({
       });
     }
     if (tagState !== 'current') {
-      commands.push(command('tag', 'git', ['tag', tag]));
+      commands.push(gitCliCommand('tag', ['tag', tag]));
     }
-    commands.push(command('push-tag', 'git', ['push', 'origin', tag]));
+    commands.push(gitCliCommand('push-tag', ['push', 'origin', tag]));
   }
   commands.push(publishReleaseCommand({ repo, tag, version, readmePath, ...artifacts }));
 
@@ -180,6 +180,7 @@ export function publishGithubRelease({
     const readiness = spawnSync(process.execPath, [resolve(root, 'scripts', 'publication-readiness.mjs')], {
       cwd: root,
       encoding: 'utf8',
+      env: nonInteractivePublishEnv(env),
       windowsHide: true,
       timeout: 30_000,
     });
@@ -202,7 +203,7 @@ export function publishGithubRelease({
 
   const results = [];
   for (const item of plan.commands) {
-    const result = runPublishStep(item, root);
+    const result = runPublishStep(item, root, env);
     results.push({ label: item.label, ...result });
     if (!result.ok) {
       return { ...plan, ok: false, executed: true, results, reason: `${item.label} failed` };
@@ -245,7 +246,11 @@ function command(label, commandName, args) {
 }
 
 function gitCommand(label, root, gitDir, args) {
-  return command(label, 'git', ['--git-dir', gitDir, '--work-tree', root, ...args]);
+  return gitCliCommand(label, ['--git-dir', gitDir, '--work-tree', root, ...args]);
+}
+
+function gitCliCommand(label, args) {
+  return command(label, 'git', hardenedGitArgs(args));
 }
 
 function ensureGithubRepoCommand(repo) {
@@ -265,7 +270,7 @@ function originCommand(root, gitDir, originUrl) {
     ? ['remote', 'set-url', 'origin', originUrl]
     : ['remote', 'add', 'origin', originUrl];
   const label = currentOrigin ? 'set-origin' : 'add-origin';
-  return gitDir ? gitCommand(label, root, gitDir, args) : command(label, 'git', args);
+  return gitDir ? gitCommand(label, root, gitDir, args) : gitCliCommand(label, args);
 }
 
 function publishReleaseCommand({ repo, tag, version, installer, portable, checksums, provenance, source, manifest, bundle, readmePath }) {
@@ -315,14 +320,15 @@ function isGitDirty(root, gitDir) {
 }
 
 function runGit(root, gitDir, args) {
-  const commandArgs = gitDir ? ['--git-dir', gitDir, '--work-tree', root, ...args] : args;
+  const commandArgs = hardenedGitArgs(gitDir ? ['--git-dir', gitDir, '--work-tree', root, ...args] : args);
   return spawnSync('git', commandArgs, {
     cwd: root,
     encoding: 'utf8',
     env: gitDir
-      ? process.env
-      : { ...process.env, GIT_CEILING_DIRECTORIES: dirname(resolve(root)) },
+      ? nonInteractivePublishEnv()
+      : nonInteractivePublishEnv(process.env, { GIT_CEILING_DIRECTORIES: dirname(resolve(root)) }),
     windowsHide: true,
+    timeout: 30_000,
   });
 }
 
@@ -339,18 +345,18 @@ function gitTagState(root, gitDir, tag) {
   return tagResult.stdout.trim() === headResult.stdout.trim() ? 'current' : 'different';
 }
 
-function runPublishStep(item, root) {
-  if (item.label === 'ensure-repo') return runEnsureRepoStep(item, root);
-  if (item.label === 'publish-release') return runPublishReleaseStep(item, root);
-  return resultFromSpawn(spawnPublishCommand(item.command, item.args, root));
+function runPublishStep(item, root, env) {
+  if (item.label === 'ensure-repo') return runEnsureRepoStep(item, root, env);
+  if (item.label === 'publish-release') return runPublishReleaseStep(item, root, env);
+  return resultFromSpawn(spawnPublishCommand(item.command, item.args, root, env));
 }
 
-function runEnsureRepoStep(item, root) {
-  const view = spawnPublishCommand(item.command, item.args, root);
+function runEnsureRepoStep(item, root, env) {
+  const view = spawnPublishCommand(item.command, item.args, root, env);
   if (view.status === 0 && !view.error) {
     return { ...resultFromSpawn(view), action: 'repo-exists' };
   }
-  const create = spawnPublishCommand(item.create.command, item.create.args, root);
+  const create = spawnPublishCommand(item.create.command, item.create.args, root, env);
   return {
     ...resultFromSpawn(create),
     action: 'repo-created',
@@ -360,10 +366,10 @@ function runEnsureRepoStep(item, root) {
   };
 }
 
-function runPublishReleaseStep(item, root) {
-  const view = spawnPublishCommand(item.command, item.args, root);
+function runPublishReleaseStep(item, root, env) {
+  const view = spawnPublishCommand(item.command, item.args, root, env);
   if (view.status === 0 && !view.error) {
-    const edit = spawnPublishCommand('gh', item.editArgs, root);
+    const edit = spawnPublishCommand('gh', item.editArgs, root, env);
     if (edit.status !== 0 || edit.error) {
       return {
         ...resultFromSpawn(edit),
@@ -371,7 +377,7 @@ function runPublishReleaseStep(item, root) {
         viewExitCode: view.status,
       };
     }
-    const upload = spawnPublishCommand('gh', item.uploadArgs, root);
+    const upload = spawnPublishCommand('gh', item.uploadArgs, root, env);
     return {
       ...resultFromSpawn(upload),
       action: 'release-updated',
@@ -382,7 +388,7 @@ function runPublishReleaseStep(item, root) {
     };
   }
 
-  const create = spawnPublishCommand('gh', item.createArgs, root);
+  const create = spawnPublishCommand('gh', item.createArgs, root, env);
   return {
     ...resultFromSpawn(create),
     action: 'release-created',
@@ -392,11 +398,13 @@ function runPublishReleaseStep(item, root) {
   };
 }
 
-function spawnPublishCommand(commandName, args, root) {
+function spawnPublishCommand(commandName, args, root, env = process.env) {
   return spawnSync(commandName, args, {
     cwd: root,
     encoding: 'utf8',
+    env: nonInteractivePublishEnv(env),
     windowsHide: true,
+    timeout: 60_000,
   });
 }
 
@@ -427,6 +435,21 @@ function quoteForDisplay(value) {
 
 function displayCommand(commandName, args) {
   return [commandName, ...args].map(quoteForDisplay).join(' ');
+}
+
+function hardenedGitArgs(args) {
+  if (process.platform !== 'win32') return args;
+  return ['-c', 'http.sslBackend=openssl', ...args];
+}
+
+function nonInteractivePublishEnv(baseEnv = process.env, extra = {}) {
+  return {
+    ...baseEnv,
+    GIT_TERMINAL_PROMPT: '0',
+    GCM_INTERACTIVE: 'Never',
+    GH_PROMPT_DISABLED: '1',
+    ...extra,
+  };
 }
 
 function text(value) {
