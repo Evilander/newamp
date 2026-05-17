@@ -1113,16 +1113,33 @@ export class LibraryStore {
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
   ): Track[] {
+    return this.queryFolderTrackRows(folderPath, opts).map(rowToTrack);
+  }
+
+  getFolderTrackIds(
+    folderPath: string,
+    opts: { recursive?: boolean; limit?: number; offset?: number } = {},
+  ): number[] {
+    return this.queryFolderTrackRows(folderPath, opts).map((row) => row.id);
+  }
+
+  private queryFolderTrackRows(
+    folderPath: string,
+    opts: { recursive?: boolean; limit?: number; offset?: number } = {},
+  ): RawRow[] {
     const folder = normalizeFolderPath(folderPath);
     if (!folder) return [];
     const recursive = !!opts.recursive;
     const limit = Math.max(1, Math.min(opts.limit ?? 100000, 100000));
     const offset = Math.max(0, opts.offset ?? 0);
-    return this.many<RawRow>(`SELECT * FROM tracks`)
+    return this.many<RawRow>(
+      `SELECT * FROM tracks
+        WHERE lower(replace(path, '/', '\\')) LIKE ?`,
+      [folderTrackPathPrefixParam(folder)],
+    )
       .filter((row) => trackPathIsInFolder(row.path, folder, recursive))
       .sort(compareFolderTracks)
-      .slice(offset, offset + limit)
-      .map(rowToTrack);
+      .slice(offset, offset + limit);
   }
 
   private getFolderTrackRows(): FolderTrackRow[] {
@@ -2621,6 +2638,10 @@ function trackPathIsInFolder(path: string, folder: string, recursive: boolean): 
   if (!trackFolder) return false;
   if (foldersEqual(trackFolder, folder)) return true;
   return recursive && folderIsInside(trackFolder, folder);
+}
+
+function folderTrackPathPrefixParam(folder: string): string {
+  return `${folderKey(folder)}\\%`;
 }
 
 function folderOfTrackPath(path: string): string | null {

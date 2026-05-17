@@ -74,6 +74,8 @@ const api: NewampAPI = {
   getFolders: (parentPath) => ipcRenderer.invoke('library:get-folders', parentPath),
   getFolderTracks: (folderPath, opts) =>
     ipcRenderer.invoke('library:get-folder-tracks', folderPath, opts),
+  getFolderTrackIds: (folderPath, opts) =>
+    ipcRenderer.invoke('library:get-folder-track-ids', folderPath, opts) as Promise<number[]>,
   getAlbumTracks: (album, albumArtist) =>
     ipcRenderer.invoke('library:get-album-tracks', album, albumArtist),
   getArtistTracks: (artist) => ipcRenderer.invoke('library:get-artist-tracks', artist),

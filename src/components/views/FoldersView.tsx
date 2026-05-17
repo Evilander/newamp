@@ -280,14 +280,18 @@ function FolderPlaylistAppendPicker({
 
   async function appendToPlaylist(playlistId: number): Promise<void> {
     onStatus(`Loading ${folder.name}...`);
-    const tracks = await api.getFolderTracks(folder.path, { recursive: true, limit: 100000 });
-    const updated = await api.addTracksToPlaylist({ playlistId, trackIds: tracks.map((track) => track.id) });
+    const trackIds = await api.getFolderTrackIds(folder.path, { recursive: true, limit: 100000 });
+    if (!trackIds.length) {
+      onStatus(`${folder.name} has no playable tracks.`);
+      return;
+    }
+    const updated = await api.addTracksToPlaylist({ playlistId, trackIds });
     if (!updated) {
       onStatus('Playlist was not found.');
       return;
     }
     setPlaylists((current) => current.map((playlist) => (playlist.id === updated.id ? updated : playlist)));
-    onStatus(`Added ${tracks.length.toLocaleString()} tracks from ${folder.name} to ${updated.name}.`);
+    onStatus(`Added ${trackIds.length.toLocaleString()} tracks from ${folder.name} to ${updated.name}.`);
   }
 
   if (!playlists.length) return null;
