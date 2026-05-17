@@ -136,6 +136,8 @@ assert.match(preloadSource, /toggleAvoidAutoPlay/, 'preload should expose avoida
 assert.match(apiSource, /toggleAvoidAutoPlay/, 'browser-safe API should include avoidance toggle');
 assert.match(storeSource, /toggleAvoidAutoPlay/, 'player store should update current and queued tracks after avoidance changes');
 assert.match(libraryViewSource, /data-avoid-autoplay/, 'Library rows should expose Auto DJ avoidance control');
+assert.match(libraryViewSource, /storeToggleAvoidAutoPlay/, 'shared track tables should toggle avoidance outside the main Library view');
+assert.doesNotMatch(libraryViewSource, /currentTarget\.innerText|style\.borderColor/, 'avoidance buttons should re-render from React state, not mutate DOM');
 assert.match(nowPlayingSource, /data-now-playing-avoid-autoplay/, 'Now Playing should expose Auto DJ avoidance control');
 assert.match(packageSource, /smoke:avoid-autoplay/, 'package scripts should include avoidance smoke');
 assert.match(releaseGateSource, /smoke:avoid-autoplay/, 'release gate should include avoidance smoke');

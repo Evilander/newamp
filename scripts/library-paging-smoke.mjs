@@ -56,10 +56,15 @@ try {
     readText('../package.json'),
   ]);
   assert.match(libraryViewSource, /LIBRARY_PAGE_SIZE/, 'LibraryView should centralize the large-library page size');
+  const pageSizeMatch = libraryViewSource.match(/const LIBRARY_PAGE_SIZE = (\d+)/);
+  assert.ok(pageSizeMatch, 'LibraryView should declare a numeric page size');
+  assert.ok(Number(pageSizeMatch[1]) <= 1500, 'LibraryView should keep initial DOM row count light for huge libraries');
   assert.match(libraryViewSource, /offset: tracks\.length/, 'LibraryView should request subsequent pages by loaded row count');
   assert.match(libraryViewSource, /Load more/, 'LibraryView should expose a load-more control');
   assert.match(libraryViewSource, /hasMoreTracks/, 'LibraryView should track whether more catalog rows are available');
   assert.match(libraryViewSource, /getTrackCount/, 'LibraryView should fetch exact filtered totals');
+  assert.match(libraryViewSource, /summaryRefreshKey/, 'LibraryView should refresh heavy library summary data explicitly');
+  assert.doesNotMatch(libraryViewSource, /\[tracks\.length\]/, 'LibraryView should not recompute library health when loading more rows');
   for (const sortId of ['title', 'added', 'year', 'genre', 'duration']) {
     assert.match(libraryViewSource, new RegExp(`id: '${sortId}'`), `LibraryView should expose ${sortId} sort`);
   }
