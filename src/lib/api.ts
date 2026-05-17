@@ -107,6 +107,7 @@ const stub: NewampAPI = {
   getArtists: async () => [],
   getFolders: async () => [],
   getFolderTracks: async () => [],
+  getFolderTrackIds: async () => [],
   getAlbumTracks: async () => [],
   getArtistTracks: async () => [],
   getTrack: async () => null,
