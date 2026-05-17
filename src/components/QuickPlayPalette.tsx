@@ -8,6 +8,7 @@ import { usePlayerStore } from '../store/usePlayerStore';
 
 const RESULT_LIMIT = 48;
 const TRACK_LIMIT = 24;
+const CATALOG_LIMIT = 8;
 
 type PaletteCommand = 'scan-library' | 'toggle-eq' | 'fullscreen-viz' | 'compact-deck';
 
@@ -115,8 +116,8 @@ export function QuickPlayPalette(): JSX.Element | null {
           loadTrackResults(trimmedQuery),
           api.getPlaylists(),
           api.getSmartPlaylistRules(),
-          trimmedQuery ? api.getAlbums() : Promise.resolve([]),
-          trimmedQuery ? api.getArtists() : Promise.resolve([]),
+          trimmedQuery ? api.getAlbums({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
+          trimmedQuery ? api.getArtists({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
         ]);
         if (cancelled) return;
         const next = buildPaletteItems(trimmedQuery, tracks, playlists, smartRules, albums, artists);

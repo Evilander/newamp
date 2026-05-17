@@ -73,6 +73,12 @@ export interface TrackQueryOptions {
   sort?: string;
 }
 
+export interface CatalogSummaryQueryOptions {
+  search?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export interface AlbumSummary {
   album: string;
   albumArtist: string;
@@ -683,10 +689,10 @@ export interface NewampAPI {
   onScanProgress: (cb: (p: ScanProgress) => void) => () => void;
   getTracks: (opts?: TrackQueryOptions) => Promise<Track[]>;
   getTrackCount: (opts?: Pick<TrackQueryOptions, 'search' | 'sort'>) => Promise<number>;
-  getAlbums: () => Promise<AlbumSummary[]>;
+  getAlbums: (opts?: CatalogSummaryQueryOptions) => Promise<AlbumSummary[]>;
   lookupAlbumArt: (input: AlbumArtLookupInput) => Promise<AlbumArtLookupResult[]>;
   applyAlbumArt: (input: AlbumArtLookupInput, candidate: AlbumArtLookupResult) => Promise<AlbumArtApplyResult | null>;
-  getArtists: () => Promise<ArtistSummary[]>;
+  getArtists: (opts?: CatalogSummaryQueryOptions) => Promise<ArtistSummary[]>;
   getFolders: (parentPath?: string | null) => Promise<FolderSummary[]>;
   getFolderTracks: (
     folderPath: string,
