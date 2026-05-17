@@ -77,6 +77,8 @@ export interface CatalogSummaryQueryOptions {
   search?: string;
   limit?: number;
   offset?: number;
+  sort?: string;
+  randomSeed?: number;
   missingArtOnly?: boolean;
   year?: number | null;
   yearWindow?: number;
@@ -582,7 +584,8 @@ export type VisualizerPreset =
   | 'plasma-grid'
   | 'prism-bars'
   | 'confetti'
-  | 'burning-cloud';
+  | 'burning-cloud'
+  | 'album-breathe';
 export type GuitarTabLineType = 'chords' | 'lyrics' | 'blank' | 'section' | 'tab';
 export type GuitarTabSource = 'ultimate-guitar' | 'local';
 

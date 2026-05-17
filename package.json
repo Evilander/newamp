@@ -180,6 +180,8 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "build/logo.png",
+      "build/logo-app.webp",
       "build/icon.png",
       "build/icon.ico",
       "node_modules/ffmpeg-static/**/*",
@@ -196,7 +198,9 @@
         "to": "build",
         "filter": [
           "icon.ico",
-          "icon.png"
+          "icon.png",
+          "logo.png",
+          "logo-app.webp"
         ]
       }
     ],

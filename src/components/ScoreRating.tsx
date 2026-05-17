@@ -1,12 +1,12 @@
 // 0-100 decimal rating with one decimal of precision (e.g. 88.3).
 //
 // Interactions:
+//   - Type an exact score in the number field
 //   - Click on the bar = set score to that position
 //   - Drag = scrub
-//   - Mouse wheel = ±0.1
-//   - Shift+wheel = ±1.0
-//   - Arrow keys = ±0.1 / ±1.0 with Shift / ±10 with Alt
-//   - Double-click = enter typed score
+//   - Mouse wheel = +/-0.1
+//   - Shift+wheel = +/-1.0
+//   - Arrow keys = +/-0.1 / +/-1.0 with Shift / +/-10 with Alt
 //   - Right-click = clear (also Clear button)
 //
 // The integer star rating stays in sync (round(score / 20)) so existing
@@ -24,7 +24,7 @@ function clampScore(value: number): number {
 }
 
 function formatScore(value: number | null): string {
-  if (value == null) return '—';
+  if (value == null) return '\u2014';
   return value.toFixed(1);
 }
 
@@ -48,16 +48,16 @@ interface ScoreRatingProps {
 export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): JSX.Element {
   const barRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState<string>('');
-  const [editing, setEditing] = useState(false);
+  const [editingInput, setEditingInput] = useState(false);
   const [pointerActive, setPointerActive] = useState(false);
   const tier = scoreTier(value);
   const display = value ?? 0;
   const fillPct = (display / SCORE_MAX) * 100;
 
-  // Sync the typed draft with the bound value when leaving edit mode.
+  // Keep the visible number field from fighting the user while they type.
   useEffect(() => {
-    if (!editing) setDraft(value != null ? value.toFixed(1) : '');
-  }, [value, editing]);
+    if (!editingInput) setDraft(value != null ? value.toFixed(1) : '');
+  }, [value, editingInput]);
 
   function commitFromPointer(clientX: number): void {
     const bar = barRef.current;
@@ -72,6 +72,22 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
     onChange(next);
   }
 
+  function commitDraft(): void {
+    const nextDraft = draft.trim();
+    if (!nextDraft) {
+      onChange(null);
+      return;
+    }
+    const parsed = Number(nextDraft);
+    if (Number.isFinite(parsed)) {
+      const next = clampScore(parsed);
+      onChange(next);
+      setDraft(next.toFixed(1));
+    } else {
+      setDraft(value != null ? value.toFixed(1) : '');
+    }
+  }
+
   return (
     <div
       data-newamp-score-rating
@@ -84,40 +100,38 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
     >
       <div
         className="score-rating-display"
-        onDoubleClick={() => {
-          setEditing(true);
-          setDraft(value != null ? value.toFixed(1) : '');
-        }}
-        title="Double-click to type a score · right-click to clear"
+        title="Type an exact score, or use the bar/wheel/arrow keys. Right-click to clear."
       >
-        {editing ? (
-          <input
-            autoFocus
-            inputMode="decimal"
-            value={draft}
-            onChange={(event) => setDraft(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                const parsed = Number.parseFloat(draft);
-                if (Number.isFinite(parsed)) onChange(clampScore(parsed));
-                setEditing(false);
-              } else if (event.key === 'Escape') {
-                setEditing(false);
-              }
-            }}
-            onBlur={() => {
-              const parsed = Number.parseFloat(draft);
-              if (Number.isFinite(parsed)) onChange(clampScore(parsed));
-              setEditing(false);
-            }}
-            className="score-rating-input"
-            style={{ color: tier.color }}
-          />
-        ) : (
-          <span className="score-rating-value" style={{ color: tier.color }}>
-            {formatScore(value)}
-          </span>
-        )}
+        <input
+          type="number"
+          min={0}
+          max={SCORE_MAX}
+          step={SCORE_STEP_FINE}
+          inputMode="decimal"
+          value={draft}
+          placeholder={formatScore(value)}
+          onFocus={(event) => {
+            setEditingInput(true);
+            event.currentTarget.select();
+          }}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              commitDraft();
+              event.currentTarget.blur();
+            } else if (event.key === 'Escape') {
+              setDraft(value != null ? value.toFixed(1) : '');
+              event.currentTarget.blur();
+            }
+          }}
+          onBlur={() => {
+            commitDraft();
+            setEditingInput(false);
+          }}
+          className="score-rating-input"
+          data-newamp-score-rating-input
+          style={{ color: tier.color }}
+        />
         <span className="score-rating-divider">/ 100</span>
       </div>
 
@@ -195,7 +209,7 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
           {tier.label}
         </span>
         <span className="score-rating-stars" aria-label={`${stars} of 5 stars`}>
-          {'★★★★★'.slice(0, stars).padEnd(5, '☆')}
+          {'\u2605'.repeat(stars).padEnd(5, '\u2606')}
         </span>
         <button
           type="button"

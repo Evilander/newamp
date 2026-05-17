@@ -347,6 +347,8 @@ if (import.meta.env.DEV && typeof window !== 'undefined') {
 export const winctl = {
   minimize: () => window.winctl?.minimize() ?? Promise.resolve(),
   toggleMax: () => window.winctl?.toggleMax() ?? Promise.resolve(),
+  setFullscreen: (on: boolean) => window.winctl?.setFullscreen?.(on) ?? Promise.resolve(),
+  isFullscreen: () => window.winctl?.isFullscreen?.() ?? Promise.resolve(false),
   setCompact: (on: boolean, size?: { width?: number; height?: number }) =>
     window.winctl?.setCompact(on, size) ?? Promise.resolve(),
   setCompactSize: (size: { width: number; height: number }) =>

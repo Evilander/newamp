@@ -21,6 +21,7 @@ assert.ok(presetCount >= 100, `expected at least 100 Milkdrop presets, got ${pre
 const visualizerSource = await readFile(new URL('../src/components/Visualizer.tsx', import.meta.url), 'utf8');
 const nowPlayingSource = await readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8');
 const engineSource = await readFile(new URL('../src/audio/engine.ts', import.meta.url), 'utf8');
+const typesSource = await readFile(new URL('../shared/types.ts', import.meta.url), 'utf8');
 assert.match(visualizerSource, /mode === 'butterchurn'/, 'Visualizer must implement Butterchurn mode');
 assert.match(
   visualizerSource,
@@ -29,7 +30,8 @@ assert.match(
 );
 assert.match(engineSource, /get visualizerNode\(\): AudioNode/, 'audio engine should expose a dedicated visualizer node');
 assert.match(engineSource, /limiter\.connect\(analyser\)[\s\S]*analyser\.connect\(masterGain\)[\s\S]*masterGain\.connect\(ctx\.destination\)/, 'visualizers should see pre-volume audio so low listening volume remains reactive');
-assert.match(engineSource, /smoothingTimeConstant = 0\.42/, 'analyser smoothing should favor responsive visual motion');
+assert.match(engineSource, /smoothingTimeConstant = 0\.24/, 'analyser smoothing should favor responsive visual motion');
+assert.match(engineSource, /minDecibels = -86/, 'analyser should expose quieter passages to the visualizer');
 
 const fullscreenSource = await readFile(
   new URL('../src/components/FullscreenVisualizer.tsx', import.meta.url),
@@ -47,8 +49,15 @@ assert.match(fullscreenSource, /id: 'plasma-grid'/, 'Fullscreen visualizer must 
 assert.match(fullscreenSource, /id: 'prism-bars'/, 'Fullscreen visualizer must expose Prism Bars preset');
 assert.match(fullscreenSource, /id: 'confetti'/, 'Fullscreen visualizer must expose Confetti preset');
 assert.match(fullscreenSource, /id: 'burning-cloud'/, 'Fullscreen visualizer must expose Burning Cloud preset');
+assert.match(fullscreenSource, /id: 'album-breathe'/, 'Fullscreen visualizer must expose the quiet album-cover breathing preset');
+assert.match(typesSource, /'album-breathe'/, 'visualizer preset type should include album-breathe');
 assert.match(fullscreenSource, /data-newamp-viz-quality-button/, 'Fullscreen visualizer should expose a 4K quality toggle');
+assert.match(fullscreenSource, /data-newamp-viz-screen-button/, 'Fullscreen visualizer should expose native screen takeover');
+assert.match(fullscreenSource, /data-newamp-viz-hover-meter/, 'Fullscreen visualizer should expose hover-only volume meter chrome');
+assert.match(fullscreenSource, /data-newamp-album-breathe-visualizer/, 'Album breathe visualizer should be a real full-screen mode');
+assert.match(fullscreenSource, /ART PULSE/, 'Fullscreen visualizer should expose random album-art pulse mode');
 assert.match(fullscreenSource, /ArrowRight/, 'Fullscreen visualizer should support keyboard preset cycling');
+assert.match(visualizerSource, /boostFrequencyData\(freq\)/, 'Visualizer should boost analyzer data for more obvious music reactivity');
 assert.match(
   visualizerSource,
   /quality === '4k' \? 4_200_000 : 2_100_000/,

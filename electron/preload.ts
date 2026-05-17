@@ -276,6 +276,8 @@ contextBridge.exposeInMainWorld('newamp', api);
 contextBridge.exposeInMainWorld('winctl', {
   minimize: () => ipcRenderer.invoke('win:minimize'),
   toggleMax: () => ipcRenderer.invoke('win:toggle-max'),
+  setFullscreen: (on: boolean) => ipcRenderer.invoke('win:set-fullscreen', on),
+  isFullscreen: () => ipcRenderer.invoke('win:is-fullscreen') as Promise<boolean>,
   setCompact: (on: boolean, size?: { width?: number; height?: number }) =>
     ipcRenderer.invoke('win:set-compact', on, size),
   setCompactSize: (size: { width: number; height: number }) =>

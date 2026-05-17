@@ -9,7 +9,7 @@ import { fetchLyrics, parseLrc, type LrcLine } from '../../api/lrclib';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
 import { fetchAlbumFacts, type AlbumFact } from '../../api/albumFacts';
 import { formatTime, playbackCodecLabel } from '../../lib/format';
-import { api } from '../../lib/api';
+import { api, winctl } from '../../lib/api';
 import { aiAssistSummary } from '../../lib/aiAssist';
 import { ScoreRating } from '../ScoreRating';
 import { LinerNotesPanel } from '../LinerNotesPanel';
@@ -37,6 +37,11 @@ type LyricPayload = Partial<Pick<LocalLyricsResult, 'plainLyrics' | 'syncedLyric
 type LyricStatus = 'idle' | 'loading' | 'none' | 'ok';
 type LyricSource = 'sidecar' | 'custom' | 'lrclib' | null;
 type LyricsDraftMode = 'plain' | 'synced';
+const LYRICS_TEXT_SCALE_KEY = 'newamp:lyrics:textScale';
+
+function clampLyricsTextScale(value: number): number {
+  return Math.max(0.75, Math.min(2.4, Math.round(value * 20) / 20));
+}
 
 export function NowPlayingView(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
@@ -76,6 +81,11 @@ export function NowPlayingView(): JSX.Element {
   const [exportMessage, setExportMessage] = useState<string | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
   const [lyricsKaraokeMode, setLyricsKaraokeMode] = useState(false);
+  const [lyricsTextScale, setLyricsTextScale] = useState<number>(() => {
+    if (typeof window === 'undefined') return 1;
+    const parsed = Number.parseFloat(window.localStorage.getItem(LYRICS_TEXT_SCALE_KEY) ?? '');
+    return Number.isFinite(parsed) ? clampLyricsTextScale(parsed) : 1;
+  });
   const [practiceLoop, setPracticeLoop] = useState<PracticeLoop>({
     start: null,
     end: null,
@@ -105,6 +115,18 @@ export function NowPlayingView(): JSX.Element {
   useEffect(() => {
     window.localStorage.setItem('newamp:np:spectrumStyle', spectrumStyle);
   }, [spectrumStyle]);
+
+  useEffect(() => {
+    window.localStorage.setItem(LYRICS_TEXT_SCALE_KEY, String(lyricsTextScale));
+  }, [lyricsTextScale]);
+
+  useEffect(() => {
+    if (!lyricsKaraokeMode) return undefined;
+    void winctl.setFullscreen(true);
+    return () => {
+      void winctl.setFullscreen(false);
+    };
+  }, [lyricsKaraokeMode]);
 
   useEffect(() => {
     if (!current) {
@@ -596,7 +618,9 @@ export function NowPlayingView(): JSX.Element {
                     draftMode={lyricsDraftMode}
                     message={lyricsMessage}
                     karaokeMode={lyricsKaraokeMode}
-                    onToggleKaraoke={() => setLyricsKaraokeMode((value) => !value)}
+                    textScale={lyricsTextScale}
+                    onTextScaleChange={setLyricsTextScale}
+                    onToggleKaraoke={() => setLyricsKaraokeMode(true)}
                     onOpenEditor={openLyricsEditor}
                     onDraftChange={setLyricsDraft}
                     onDraftModeChange={setLyricsDraftMode}
@@ -610,6 +634,19 @@ export function NowPlayingView(): JSX.Element {
           </div>
         </div>
       </div>
+      {lyricsKaraokeMode && (
+        <KaraokeOverlay
+          lyrics={lyrics}
+          activeIdx={activeIdx}
+          status={lyricStatus}
+          source={lyricSource}
+          currentTime={currentTime}
+          current={current}
+          textScale={lyricsTextScale}
+          onTextScaleChange={setLyricsTextScale}
+          onExit={() => setLyricsKaraokeMode(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1363,6 +1400,22 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
     .filter((value): value is string => Boolean(value && value !== 'Unknown Artist'));
   const creditNames = Array.from(new Set(knownCredits)).slice(0, 6);
   const releaseNote = albumReleaseNote(fact, albumYear);
+  const scoreValues = albumTracks
+    .map((item) => item.ratingScore ?? item.rating * 20)
+    .filter((score) => Number.isFinite(score) && score > 0);
+  const averageScore = scoreValues.length
+    ? Math.round(scoreValues.reduce((sum, score) => sum + score, 0) / scoreValues.length)
+    : null;
+  const lovedCount = albumTracks.filter((item) => item.loved).length;
+  const totalPlays = albumTracks.reduce((sum, item) => sum + item.playCount, 0);
+  const sortedAlbumTracks = [...albumTracks].sort(albumTrackOrder);
+  const opener = sortedAlbumTracks[0] ?? null;
+  const closer = sortedAlbumTracks[sortedAlbumTracks.length - 1] ?? null;
+  const longestTrack = albumTracks.reduce<Track | null>(
+    (best, item) => (!best || (item.duration ?? 0) > (best.duration ?? 0) ? item : best),
+    null,
+  );
+  const albumShape = albumShapeNote(albumTracks, averageScore, lovedCount, totalPlays);
 
   return (
     <section className="album-context-panel" data-newamp-album-context-panel>
@@ -1414,6 +1467,13 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
         </div>
       </div>
 
+      <div className="album-context-insights" data-newamp-album-context-insights>
+        <AlbumInsight label="Album shape" value={albumShape} />
+        <AlbumInsight label="Bookends" value={opener && closer ? `${opener.title} / ${closer.title}` : 'Track order is not tagged yet.'} />
+        <AlbumInsight label="Library signal" value={`${averageScore ?? '--'}/100 avg / ${lovedCount} loved / ${totalPlays.toLocaleString()} plays`} />
+        <AlbumInsight label="Longest cut" value={longestTrack ? `${longestTrack.title} (${formatTime(longestTrack.duration ?? 0)})` : 'Duration tags are missing.'} />
+      </div>
+
       {albumTracks.length > 1 && (
         <ol className="album-context-tracklist">
           {albumTracks.slice(0, 10).map((item) => (
@@ -1427,6 +1487,31 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
       )}
     </section>
   );
+}
+
+function AlbumInsight({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function albumTrackOrder(a: Track, b: Track): number {
+  return (a.discNo ?? 1) - (b.discNo ?? 1) ||
+    (a.trackNo ?? Number.MAX_SAFE_INTEGER) - (b.trackNo ?? Number.MAX_SAFE_INTEGER) ||
+    a.title.localeCompare(b.title);
+}
+
+function albumShapeNote(tracks: Track[], averageScore: number | null, lovedCount: number, totalPlays: number): string {
+  if (!tracks.length) return 'Waiting for local album tracks.';
+  const minutes = Math.round(tracks.reduce((sum, item) => sum + (item.duration ?? 0), 0) / 60);
+  const hasSignal = averageScore != null || lovedCount > 0 || totalPlays > 0;
+  if (hasSignal) {
+    return `${tracks.length} tracks / ${minutes || '?'} min / ${averageScore ?? '--'} avg score`;
+  }
+  return `${tracks.length} tracks / ${minutes || '?'} min / ready for rating and plays`;
 }
 
 function albumReleaseNote(fact: AlbumFact | null, albumYear: number | null): string {
@@ -1730,7 +1815,7 @@ function ArtistImageStage({ artist }: { artist: string }): JSX.Element {
                   {fact.description}
                 </div>
               )}
-              <p className="mt-2 line-clamp-5 text-[11px] leading-[1.42]" style={{ color: 'var(--ink-2)' }}>
+              <p className="artist-fact-summary mt-2 text-[11px] leading-[1.42]" style={{ color: 'var(--ink-2)' }}>
                 {fact.summary}
               </p>
             </>
@@ -1755,6 +1840,8 @@ function LyricsPanel({
   draftMode,
   message,
   karaokeMode,
+  textScale,
+  onTextScaleChange,
   onToggleKaraoke,
   onOpenEditor,
   onDraftChange,
@@ -1772,6 +1859,8 @@ function LyricsPanel({
   draftMode: LyricsDraftMode;
   message: string | null;
   karaokeMode: boolean;
+  textScale: number;
+  onTextScaleChange: (value: number) => void;
   onToggleKaraoke: () => void;
   onOpenEditor: () => void;
   onDraftChange: (value: string) => void;
@@ -1797,7 +1886,7 @@ function LyricsPanel({
       data-newamp-lyrics-line-count={lyrics.lines?.length ?? 0}
       data-newamp-lyrics-plain-length={lyrics.plain?.length ?? 0}
       className="flex flex-col overflow-hidden"
-      style={{ background: 'var(--bg)' }}
+      style={{ background: 'var(--bg)', '--newamp-lyric-scale': textScale } as CSSProperties}
     >
       <div
         className="sticky top-0 z-10 flex items-center justify-between px-4 py-2 text-[9px] uppercase tracking-[0.1em]"
@@ -1829,8 +1918,26 @@ function LyricsPanel({
           onClick={onToggleKaraoke}
           title="Center the current lyric line for sing-along playback"
         >
-          Karaoke
+          Karaoke Fullscreen
         </button>
+        <div className="lyrics-text-size-control" data-newamp-lyrics-size-control>
+          <button className="pxbtn" onClick={() => onTextScaleChange(clampLyricsTextScale(textScale - 0.1))} title="Smaller lyrics">
+            A-
+          </button>
+          <input
+            type="range"
+            min={0.75}
+            max={2.4}
+            step={0.05}
+            value={textScale}
+            onChange={(event) => onTextScaleChange(clampLyricsTextScale(Number(event.currentTarget.value)))}
+            data-newamp-lyrics-size-slider
+            aria-label="Lyrics text size"
+          />
+          <button className="pxbtn" onClick={() => onTextScaleChange(clampLyricsTextScale(textScale + 0.1))} title="Larger lyrics">
+            A+
+          </button>
+        </div>
         <button className="pxbtn" onClick={onOpenEditor}>
           {source === 'custom' ? 'EDIT SAVED LYRICS' : 'SAVE / EDIT LYRICS'}
         </button>
@@ -1893,7 +2000,7 @@ function LyricsPanel({
                 data-newamp-lyric-line
                 data-newamp-lyric-time={l.time}
                 data-newamp-lyric-state={state}
-                className="lyric-line grid items-baseline gap-[10px] px-4 py-[8px] text-[12px] transition-colors"
+                className="lyric-line grid items-baseline gap-[10px] px-4 py-[8px] transition-colors"
                 style={{
                   gridTemplateColumns: '52px 1fr',
                   background:
@@ -1908,7 +2015,7 @@ function LyricsPanel({
                 }}
               >
                 <span
-                  className="text-[9px] tabular-nums"
+                  className="lyric-line-time tabular-nums"
                   style={{
                     color: state === 'current' ? 'var(--accent)' : 'var(--ink-2)',
                     opacity: state === 'current' ? 1 : 0.55,
@@ -1930,7 +2037,7 @@ function LyricsPanel({
         ) : lyrics.plain ? (
           <pre
             data-newamp-plain-lyrics
-            className="whitespace-pre-wrap px-6 py-4 text-[13px] leading-[1.7]"
+            className="plain-lyrics-text whitespace-pre-wrap px-6 py-4 leading-[1.7]"
             style={{ color: 'var(--ink)', fontFamily: 'var(--font-display)' }}
           >
             {lyrics.plain}
@@ -1943,6 +2050,112 @@ function LyricsPanel({
             {status === 'loading'
               ? 'fetching lyrics…'
               : 'No lyrics found on LRCLIB. Contribute synced lyrics at lrclib.net.'}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KaraokeOverlay({
+  lyrics,
+  activeIdx,
+  status,
+  source,
+  currentTime,
+  current,
+  textScale,
+  onTextScaleChange,
+  onExit,
+}: {
+  lyrics: { plain?: string | null; lines: LrcLine[] | null };
+  activeIdx: number;
+  status: LyricStatus;
+  source: LyricSource;
+  currentTime: number;
+  current: Track;
+  textScale: number;
+  onTextScaleChange: (value: number) => void;
+  onExit: () => void;
+}): JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key === 'Escape') onExit();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onExit]);
+
+  useEffect(() => {
+    if (!lyrics.lines || activeIdx < 0 || !ref.current) return;
+    const el = ref.current.querySelector<HTMLElement>(`[data-line="${activeIdx}"]`);
+    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [activeIdx, lyrics.lines]);
+
+  return (
+    <div
+      data-newamp-karaoke-fullscreen
+      data-newamp-lyrics-source={source ?? ''}
+      data-newamp-lyrics-status={status}
+      className="karaoke-fullscreen fixed inset-0 z-[92] flex flex-col overflow-hidden"
+      style={{ '--newamp-lyric-scale': textScale } as CSSProperties}
+    >
+      <div className="karaoke-fullscreen-header">
+        <div className="min-w-0">
+          <div className="karaoke-fullscreen-title" title={current.title}>{current.title}</div>
+          <div className="karaoke-fullscreen-meta">
+            {current.artist}{current.album ? ` / ${current.album}` : ''} / {formatTime(currentTime)}
+          </div>
+        </div>
+        <div className="lyrics-text-size-control">
+          <button className="pxbtn" onClick={() => onTextScaleChange(clampLyricsTextScale(textScale - 0.1))}>
+            A-
+          </button>
+          <input
+            type="range"
+            min={0.75}
+            max={2.4}
+            step={0.05}
+            value={textScale}
+            onChange={(event) => onTextScaleChange(clampLyricsTextScale(Number(event.currentTarget.value)))}
+            data-newamp-karaoke-size-slider
+            aria-label="Karaoke text size"
+          />
+          <button className="pxbtn" onClick={() => onTextScaleChange(clampLyricsTextScale(textScale + 0.1))}>
+            A+
+          </button>
+          <button className="pxbtn" onClick={onExit}>
+            EXIT
+          </button>
+        </div>
+      </div>
+      <div ref={ref} className="karaoke-fullscreen-body lyrics-karaoke">
+        {lyrics.lines ? (
+          lyrics.lines.map((line, i) => {
+            const state = i === activeIdx ? 'current' : i < activeIdx ? 'past' : 'upcoming';
+            return (
+              <div
+                key={i}
+                data-line={i}
+                data-newamp-lyric-line
+                data-newamp-lyric-time={line.time}
+                data-newamp-lyric-state={state}
+                className="lyric-line karaoke-line"
+              >
+                <span className="lyric-line-time tabular-nums">{formatTime(line.time)}</span>
+                <span>{line.text || '\u266a'}</span>
+              </div>
+            );
+          })
+        ) : lyrics.plain ? (
+          <pre data-newamp-plain-lyrics className="plain-lyrics-text karaoke-plain">
+            {lyrics.plain}
+          </pre>
+        ) : (
+          <div className="karaoke-empty">
+            {status === 'loading' ? 'Fetching lyrics...' : 'No lyrics loaded for karaoke.'}
           </div>
         )}
       </div>

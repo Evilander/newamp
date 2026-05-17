@@ -36,7 +36,8 @@ assert.ok(result.xboxRender?.neonRibbons?.litSamples > 0, 'Neon Ribbons should r
 assert.ok(result.xboxRender?.orbitalRings?.litSamples > 0, 'Orbital Rings should render nonblank pixels');
 assert.ok(result.auroraRender?.litSamples > 0, 'Aurora should render a nonblank reactive frame');
 assert.equal(result.qualityToggle, '4k', 'fullscreen visualizer should expose and apply 4K mode');
-assert.equal(result.artToggle, 'visible', 'fullscreen visualizer should expose an album-art overlay toggle');
+assert.ok(['armed', 'pulse'].includes(result.artToggle), 'fullscreen visualizer should expose random album-art pulse mode');
+assert.equal(result.screenToggle, true, 'fullscreen visualizer should expose native full-screen screen takeover');
 assert.equal(result.chromeMode, 'clean', 'fullscreen visualizer should expose a clean cinema mode');
 assert.equal(result.openedViaVizButton, true, 'regular UI VIZ button should open the fullscreen visualizer');
 assert.equal(result.openedViaTransportArt, true, 'transport album art should open the fullscreen visualizer');

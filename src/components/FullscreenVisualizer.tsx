@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { Visualizer, type VizQuality } from './Visualizer';
 import { formatTime } from '../lib/format';
-import { api } from '../lib/api';
+import { api, winctl } from '../lib/api';
 import type { VisualizerPreset } from '@shared/types';
+import { volumeLabel } from './VolumeSlider';
 
 const PRESETS = [
   { id: 'neon-waves', label: 'Neon Waves' },
@@ -20,8 +21,11 @@ const PRESETS = [
   { id: 'galaxy', label: 'Galaxy' },
   { id: 'aurora', label: 'Aurora' },
   { id: 'oscilloscope', label: 'Oscilloscope' },
+  { id: 'album-breathe', label: 'Album Breathe' },
   { id: 'butterchurn', label: 'Milkdrop' },
 ] as const satisfies ReadonlyArray<{ id: VisualizerPreset; label: string }>;
+
+type CanvasVisualizerPreset = Exclude<VisualizerPreset, 'album-breathe'>;
 
 const VIZ_QUALITY_KEY = 'newamp:viz:quality';
 const VIZ_SHOW_ART_KEY = 'newamp:viz:showArt';
@@ -45,6 +49,7 @@ export function FullscreenVisualizer(): JSX.Element {
   const currentTime = usePlayerStore((s) => s.currentTime);
   const duration = usePlayerStore((s) => s.duration);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const volume = usePlayerStore((s) => s.volume);
   const setFs = usePlayerStore((s) => s.setFullscreenViz);
   const togglePlay = usePlayerStore((s) => s.togglePlay);
   const next = usePlayerStore((s) => s.next);
@@ -53,8 +58,10 @@ export function FullscreenVisualizer(): JSX.Element {
   const preset = usePlayerStore((s) => s.vizPreset);
   const setPreset = usePlayerStore((s) => s.setVizPreset);
   const [quality, setQuality] = useState<VizQuality>(() => loadVisualizerQuality());
-  const [showArt, setShowArt] = useState<boolean>(() => loadStoredBoolean(VIZ_SHOW_ART_KEY, false));
+  const [artPulseEnabled, setArtPulseEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_SHOW_ART_KEY, true));
+  const [artPulseVisible, setArtPulseVisible] = useState(false);
   const [chromeVisible, setChromeVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_CHROME_KEY, true));
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
   const activeIndex = Math.max(0, PRESETS.findIndex((p) => p.id === activePreset));
@@ -63,6 +70,7 @@ export function FullscreenVisualizer(): JSX.Element {
     () => (current ? api.getArtUrl(current.id) : null),
     [current?.id],
   );
+  const volumePct = Math.max(0, Math.min(100, Math.round((volume / 2) * 100)));
 
   function pickPreset(id: VisualizerPreset): void {
     setPreset(id);
@@ -82,11 +90,25 @@ export function FullscreenVisualizer(): JSX.Element {
   }
 
   function toggleArt(): void {
-    setShowArt((value) => {
+    setArtPulseEnabled((value) => {
       const next = !value;
       window.localStorage.setItem(VIZ_SHOW_ART_KEY, next ? '1' : '0');
       return next;
     });
+  }
+
+  function toggleNativeFullscreen(): void {
+    setNativeFullscreen((value) => {
+      const next = !value;
+      void winctl.setFullscreen(next);
+      return next;
+    });
+  }
+
+  function exitVisualizer(): void {
+    void winctl.setFullscreen(false);
+    setNativeFullscreen(false);
+    setFs(false);
   }
 
   function toggleChrome(): void {
@@ -96,6 +118,46 @@ export function FullscreenVisualizer(): JSX.Element {
       return next;
     });
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    void winctl.isFullscreen().then((value) => {
+      if (!cancelled) setNativeFullscreen(value);
+    });
+    return () => {
+      cancelled = true;
+      void winctl.setFullscreen(false);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!artPulseEnabled || !artUrl) {
+      setArtPulseVisible(false);
+      return undefined;
+    }
+    let cancelled = false;
+    let showTimer = 0;
+    let hideTimer = 0;
+
+    const schedulePulse = () => {
+      showTimer = window.setTimeout(() => {
+        if (cancelled) return;
+        setArtPulseVisible(true);
+        hideTimer = window.setTimeout(() => {
+          if (cancelled) return;
+          setArtPulseVisible(false);
+          schedulePulse();
+        }, 1500 + Math.random() * 1400);
+      }, 2200 + Math.random() * 6200);
+    };
+
+    schedulePulse();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(showTimer);
+      window.clearTimeout(hideTimer);
+    };
+  }, [artPulseEnabled, artUrl]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
@@ -115,6 +177,9 @@ export function FullscreenVisualizer(): JSX.Element {
       } else if (event.key.toLowerCase() === 'h') {
         event.preventDefault();
         toggleChrome();
+      } else if (event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        toggleNativeFullscreen();
       }
     }
     window.addEventListener('keydown', onKeyDown);
@@ -127,21 +192,37 @@ export function FullscreenVisualizer(): JSX.Element {
       data-newamp-visualizer-preset={activePreset}
       data-newamp-visualizer-quality={quality}
       data-newamp-visualizer-chrome={chromeVisible ? 'visible' : 'clean'}
-      data-newamp-visualizer-art={showArt ? 'visible' : 'hidden'}
+      data-newamp-visualizer-art={artPulseEnabled ? (artPulseVisible ? 'pulse' : 'armed') : 'hidden'}
+      data-newamp-native-fullscreen={nativeFullscreen ? 'true' : 'false'}
       className="fullscreen-viz-root fixed inset-0 z-[90] flex items-center justify-center bg-black"
-      onDoubleClick={() => setFs(false)}
+      onDoubleClick={exitVisualizer}
     >
-      <div className="absolute inset-0">
-        <Visualizer
-          mode={activePreset}
-          quality={quality}
-          className="absolute inset-0 h-full w-full"
-        />
-      </div>
+      {activePreset === 'album-breathe' ? (
+        <div
+          className="fullscreen-viz-album-breathe absolute inset-0 flex items-center justify-center"
+          data-newamp-album-breathe-visualizer
+        >
+          {artUrl ? (
+            <img src={artUrl} alt="" draggable={false} />
+          ) : (
+            <div className="fullscreen-viz-album-breathe-fallback">
+              {current ? current.title.slice(0, 2).toUpperCase() : 'NA'}
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="absolute inset-0">
+          <Visualizer
+            mode={activePreset as CanvasVisualizerPreset}
+            quality={quality}
+            className="absolute inset-0 h-full w-full"
+          />
+        </div>
+      )}
 
-      {showArt && artUrl && (
+      {artPulseEnabled && artUrl && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div className="fullscreen-viz-cover relative">
+          <div className={`fullscreen-viz-cover relative ${artPulseVisible ? 'is-visible' : ''}`}>
             <img
               src={artUrl}
               alt=""
@@ -185,12 +266,20 @@ export function FullscreenVisualizer(): JSX.Element {
           {quality === '4k' ? '4K' : 'PERF'}
         </button>
         <button
-          className={`pxbtn ${showArt ? 'is-active' : ''}`}
+          className={`pxbtn ${artPulseEnabled ? 'is-active' : ''}`}
           data-newamp-viz-art-button
           onClick={toggleArt}
           title="Toggle album-art overlay (A)"
         >
-          ART
+          ART PULSE
+        </button>
+        <button
+          className={`pxbtn ${nativeFullscreen ? 'is-active' : ''}`}
+          data-newamp-viz-screen-button
+          onClick={toggleNativeFullscreen}
+          title="Take over the physical screen (F)"
+        >
+          SCREEN
         </button>
         <button
           className={`pxbtn ${!chromeVisible ? 'is-active' : ''}`}
@@ -200,7 +289,7 @@ export function FullscreenVisualizer(): JSX.Element {
         >
           CLEAN
         </button>
-        <button className="pxbtn" onClick={() => setFs(false)} title="Exit visualizer (Esc)">
+        <button className="pxbtn" onClick={exitVisualizer} title="Exit visualizer (Esc)">
           ESC X
         </button>
       </div>
@@ -240,6 +329,19 @@ export function FullscreenVisualizer(): JSX.Element {
             onChange={(e) => seek(parseFloat(e.target.value))}
           />
           <span>{formatTime(duration)}</span>
+        </div>
+      </div>
+
+      <div
+        className="fullscreen-viz-hover-meter pointer-events-none absolute right-6 top-1/2 w-[148px] -translate-y-1/2"
+        data-newamp-viz-hover-meter
+      >
+        <div className="fullscreen-viz-hover-meter-label">
+          <span>VOL</span>
+          <strong>{volumeLabel(volume)}</strong>
+        </div>
+        <div className="fullscreen-viz-hover-meter-track">
+          <span style={{ height: `${volumePct}%` }} />
         </div>
       </div>
     </div>
