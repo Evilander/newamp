@@ -375,17 +375,21 @@ export function LibraryView(): JSX.Element {
         />
       )}
       <div
-        className="flex flex-wrap items-center gap-2 border-b px-3 py-2"
+        className="library-commandbar flex flex-wrap items-center gap-2 border-b px-3 py-2"
         style={{ borderColor: 'var(--line)' }}
       >
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder='Search: artist:radiohead album:"in rainbows" year:2007 format:wma missing:art'
-          className="bevel-in lcd-text min-w-[260px] flex-1 px-3 py-1.5 text-[14px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          autoFocus
-        />
+        <label className="library-search-command" data-newamp-library-search-command>
+          <span>SEARCH LIBRARY</span>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder='artist:radiohead album:"in rainbows" year:2007 format:wma missing:art'
+            className="lcd-text min-w-[260px] flex-1 text-[14px] outline-none"
+            style={{ background: 'transparent', color: 'var(--display-fg)' }}
+            autoFocus
+          />
+          <kbd>Ctrl K</kbd>
+        </label>
         <SortPicker value={sort} onChange={setSort} />
         <input
           value={smartRuleName}

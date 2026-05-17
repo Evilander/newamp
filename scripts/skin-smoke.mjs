@@ -144,6 +144,9 @@ assert.match(deckPickerSource, /data-newamp-deck-skin-button/, 'compact deck sho
 assert.match(styleSource, /\.deck-record-player/, 'record deck should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-jukebox/, 'jukebox should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-cassette/, 'cassette should be a real shaped deck skin');
+assert.match(styleSource, /\.deck-hotdog/, 'hotdog deck should be a real shaped deck skin');
+assert.match(styleSource, /\.deck-retro-tv/, 'retro TV deck should be a real shaped deck skin');
+assert.match(styleSource, /\.deck-winamp-classic/, 'classic Winamp deck should be a real shaped deck skin');
 assert.match(packageSource, /"smoke:skin"/, 'package scripts should expose skin smoke');
 assert.match(gateSource, /smoke:skin/, 'release gate should include skin smoke');
 

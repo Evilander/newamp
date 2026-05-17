@@ -26,6 +26,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   lastfmSessionKey: null,
   lastfmUsername: null,
   lastfmAuthToken: null,
+  openaiApiKey: null,
+  openaiModel: 'gpt-4.1-mini',
   crossfadeMs: 0,
   replayGain: 'off',
   limiterEnabled: true,

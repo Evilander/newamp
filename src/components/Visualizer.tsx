@@ -12,6 +12,8 @@ export type VizMode =
   | 'tunnel'
   | 'pulse'
   | 'neon-waves'
+  | 'neon-ribbons'
+  | 'plasma-grid'
   | 'prism-bars'
   | 'confetti'
   | 'burning-cloud'
@@ -374,22 +376,23 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
         }
         ctx.stroke();
       } else if (mode === 'neon-waves') {
-        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.fillStyle = 'rgba(0,0,0,0.16)';
         ctx.fillRect(0, 0, w, h);
         const bass = avg(freq, 0, 18) / 255;
         const mid = avg(freq, 18, 90) / 255;
+        const treble = avg(freq, 90, 180) / 255;
         const time = Date.now() / 420;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
         for (let band = 0; band < 18; band += 1) {
           const energy = avg(freq, band * 6, band * 6 + 10) / 255;
           const yBase = h * (0.18 + band * 0.038);
-          const amp = 8 + energy * 46 + bass * 34;
+          const amp = 10 + energy * 54 + bass * 52 + treble * 18;
           const hue = (band * 13 + Date.now() / 55) % 360;
           ctx.strokeStyle = `hsla(${hue}, 96%, ${58 + energy * 18}%, ${0.2 + energy * 0.64})`;
-          ctx.lineWidth = 0.8 + energy * 2.6;
+          ctx.lineWidth = 0.9 + energy * 3.2 + bass * 1.2;
           ctx.shadowColor = `hsl(${hue}, 96%, 62%)`;
-          ctx.shadowBlur = 8 + energy * 18;
+          ctx.shadowBlur = 10 + energy * 22 + bass * 18;
           ctx.beginPath();
           for (let x = -8; x <= w + 8; x += 8) {
             const phase = x / (42 + band * 3) + time + band * 0.42;
@@ -402,6 +405,110 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
           }
           ctx.stroke();
         }
+        ctx.restore();
+      } else if (mode === 'neon-ribbons') {
+        ctx.fillStyle = 'rgba(0,0,0,0.11)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 0, 20) / 255;
+        const mid = avg(freq, 20, 90) / 255;
+        const treble = avg(freq, 90, 190) / 255;
+        const cx = w / 2;
+        const cy = h / 2;
+        const time = Date.now() / 1000;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let ribbon = 0; ribbon < 7; ribbon += 1) {
+          const hue = (ribbon * 42 + Date.now() / 28 + bass * 90) % 360;
+          const orbitX = w * (0.2 + ribbon * 0.033) + bass * w * 0.09;
+          const orbitY = h * (0.18 + ribbon * 0.026) + mid * h * 0.12;
+          ctx.beginPath();
+          for (let i = 0; i <= 240; i += 1) {
+            const bin = freq[(i * 2 + ribbon * 11) % Math.max(1, freq.length)]! / 255;
+            const theta = (i / 240) * Math.PI * 2;
+            const wobble = 1 + bin * 0.38 + bass * 0.18;
+            const x =
+              cx +
+              Math.cos(theta * (2 + ribbon * 0.18) + time * (0.8 + ribbon * 0.08)) *
+                orbitX *
+                wobble +
+              Math.sin(theta * 7 + time * 2.1) * treble * 30;
+            const y =
+              cy +
+              Math.sin(theta * (3 + ribbon * 0.12) - time * (0.65 + ribbon * 0.07)) *
+                orbitY *
+                wobble +
+              Math.cos(theta * 5 - time * 1.6) * mid * 22;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = `hsla(${hue}, 96%, ${58 + treble * 20}%, ${0.22 + mid * 0.36 + bass * 0.24})`;
+          ctx.lineWidth = 1.4 + bass * 5 + ribbon * 0.12;
+          ctx.shadowColor = `hsl(${hue}, 96%, 64%)`;
+          ctx.shadowBlur = 14 + bass * 32;
+          ctx.stroke();
+        }
+        for (let ring = 0; ring < 5; ring += 1) {
+          const radius = 42 + ring * 38 + bass * 160;
+          ctx.strokeStyle = `hsla(${(Date.now() / 36 + ring * 54) % 360}, 96%, 66%, ${0.12 + bass * 0.28})`;
+          ctx.lineWidth = 1 + bass * 4;
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      } else if (mode === 'plasma-grid') {
+        ctx.fillStyle = 'rgba(0,0,0,0.22)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 0, 22) / 255;
+        const mid = avg(freq, 22, 100) / 255;
+        const treble = avg(freq, 100, 210) / 255;
+        const step = Math.max(18, Math.min(44, Math.floor(Math.min(w, h) / 14)));
+        const time = Date.now() / 520;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let y = -step; y <= h + step; y += step) {
+          ctx.beginPath();
+          for (let x = -step; x <= w + step; x += step) {
+            const bin = freq[Math.abs(Math.floor((x + y) / step * 3)) % Math.max(1, freq.length)]! / 255;
+            const warp =
+              Math.sin(x / 42 + time) * (8 + bass * 30) +
+              Math.cos(y / 36 - time * 1.24) * (5 + mid * 26) +
+              bin * treble * 34;
+            const px = x + Math.sin(y / 70 + time) * bass * 26;
+            const py = y + warp;
+            if (x <= -step) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          const hue = (y * 0.23 + Date.now() / 46 + bass * 110) % 360;
+          ctx.strokeStyle = `hsla(${hue}, 96%, 62%, ${0.12 + mid * 0.35})`;
+          ctx.lineWidth = 0.8 + bass * 2.8;
+          ctx.shadowColor = `hsl(${hue}, 96%, 62%)`;
+          ctx.shadowBlur = 8 + bass * 20;
+          ctx.stroke();
+        }
+        for (let x = -step; x <= w + step; x += step) {
+          ctx.beginPath();
+          for (let y = -step; y <= h + step; y += step) {
+            const bin = freq[Math.abs(Math.floor((x * 2 + y) / step * 2)) % Math.max(1, freq.length)]! / 255;
+            const warp =
+              Math.cos(y / 38 + time * 1.1) * (8 + mid * 24) +
+              Math.sin(x / 50 - time) * (5 + bass * 32) +
+              bin * 28;
+            const px = x + warp;
+            const py = y + Math.cos(x / 76 - time) * treble * 24;
+            if (y <= -step) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          const hue = (x * 0.32 + Date.now() / 52 + treble * 120) % 360;
+          ctx.strokeStyle = `hsla(${hue}, 96%, 58%, ${0.08 + treble * 0.34 + bass * 0.18})`;
+          ctx.lineWidth = 0.8 + treble * 2.4;
+          ctx.stroke();
+        }
+        const glow = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.64);
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.18 + bass * 0.34})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, w, h);
         ctx.restore();
       } else if (mode === 'prism-bars') {
         ctx.fillStyle = 'rgba(0,0,0,0.34)';

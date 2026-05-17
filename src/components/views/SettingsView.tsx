@@ -39,6 +39,7 @@ export function SettingsView(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [stats, setStats] = useState<{ tracks: number; albums: number; artists: number; duration: number } | null>(null);
   const [lastfmStatus, setLastfmStatus] = useState<string | null>(null);
+  const [openAiStatus, setOpenAiStatus] = useState<string | null>(null);
   const [lastfmOutbox, setLastfmOutbox] = useState<LastfmOutboxStatus | null>(null);
   const [supportDiagnostics, setSupportDiagnostics] = useState<SupportDiagnostics | null>(null);
   const [supportBackup, setSupportBackup] = useState<SupportBackupResult | null>(null);
@@ -154,6 +155,16 @@ export function SettingsView(): JSX.Element {
     } catch (err) {
       setLastfmStatus(err instanceof Error ? err.message : 'Last.fm now-playing test failed.');
     }
+  }
+
+  async function saveOpenAiSettings(): Promise<void> {
+    if (!settings) return;
+    const updated = await api.setSettings({
+      openaiApiKey: settings.openaiApiKey?.trim() || null,
+      openaiModel: settings.openaiModel?.trim() || DEFAULT_SETTINGS.openaiModel,
+    });
+    setSettings(updated);
+    setOpenAiStatus(updated.openaiApiKey ? 'ChatGPT assist key saved locally.' : 'ChatGPT assist disabled.');
   }
 
   async function refreshAudioOutputs(): Promise<void> {
@@ -626,6 +637,47 @@ export function SettingsView(): JSX.Element {
             {lastfmStatus && (
               <span className="text-[11px]" style={{ color: 'var(--ink-2)' }}>
                 {lastfmStatus}
+              </span>
+            )}
+          </div>
+        </section>
+
+        <section className="bevel-out flex flex-col gap-4 p-6">
+          <h2 className="text-[11px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
+            ChatGPT Assist
+          </h2>
+          <div className="text-[12px] leading-relaxed" style={{ color: 'var(--ink-2)' }}>
+            Optional local enrichments for liner notes, artist context, review prompts, and discussion seeds.
+            The key is stored in Newamp settings on this machine and is never needed for basic playback.
+          </div>
+          <Row label="API key">
+            <input
+              type="password"
+              value={settings.openaiApiKey ?? ''}
+              onChange={(e) => setSettings({ ...settings, openaiApiKey: e.target.value || null })}
+              placeholder="sk-..."
+              className="bevel-in w-[320px] px-2 py-1 text-[13px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            />
+          </Row>
+          <Row label="Model">
+            <input
+              value={settings.openaiModel ?? DEFAULT_SETTINGS.openaiModel}
+              onChange={(e) => setSettings({ ...settings, openaiModel: e.target.value || DEFAULT_SETTINGS.openaiModel })}
+              className="bevel-in w-[220px] px-2 py-1 text-[13px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            />
+          </Row>
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="pxbtn" onClick={() => void saveOpenAiSettings()}>
+              Save ChatGPT key
+            </button>
+            <span className="text-[11px]" style={{ color: settings.openaiApiKey ? 'var(--accent)' : 'var(--muted)' }}>
+              {settings.openaiApiKey ? `Ready: ${settings.openaiModel || DEFAULT_SETTINGS.openaiModel}` : 'Local metadata mode only'}
+            </span>
+            {openAiStatus && (
+              <span className="text-[11px]" style={{ color: 'var(--ink-2)' }}>
+                {openAiStatus}
               </span>
             )}
           </div>
