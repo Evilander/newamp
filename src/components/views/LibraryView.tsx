@@ -25,7 +25,8 @@ type Sort =
   | 'loved'
   | 'rating';
 
-const LIBRARY_PAGE_SIZE = 1200;
+const LIBRARY_PAGE_SIZE = 600;
+const LIBRARY_SEARCH_DEBOUNCE_MS = 180;
 
 export function LibraryView(): JSX.Element {
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -54,6 +55,7 @@ export function LibraryView(): JSX.Element {
   const [smartRuleName, setSmartRuleName] = useState('');
   const [searchRuleStatus, setSearchRuleStatus] = useState<string | null>(null);
   const search = usePlayerStore((s) => s.searchQuery);
+  const libraryQuery = useDebouncedValue(search, LIBRARY_SEARCH_DEBOUNCE_MS);
   const setSearch = usePlayerStore((s) => s.setSearchQuery);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
@@ -69,8 +71,8 @@ export function LibraryView(): JSX.Element {
     let cancelled = false;
     setLoading(true);
     Promise.all([
-      api.getTracks({ search, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
-      api.getTrackCount({ search, sort }),
+      api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
+      api.getTrackCount({ search: libraryQuery, sort }),
     ])
       .then(([rows, total]) => {
         if (!cancelled) {
@@ -90,7 +92,7 @@ export function LibraryView(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [search, sort]);
+  }, [libraryQuery, sort]);
 
   useEffect(() => {
     let cancelled = false;
@@ -125,7 +127,7 @@ export function LibraryView(): JSX.Element {
     setLoadingMore(true);
     try {
       const rows = await api.getTracks({
-        search,
+        search: libraryQuery,
         sort,
         limit: LIBRARY_PAGE_SIZE,
         offset: tracks.length,
@@ -142,8 +144,8 @@ export function LibraryView(): JSX.Element {
 
   async function reloadLibraryPage(): Promise<void> {
     const [nextTracks, nextCount] = await Promise.all([
-      api.getTracks({ search, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
-      api.getTrackCount({ search, sort }),
+      api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
+      api.getTrackCount({ search: libraryQuery, sort }),
     ]);
     setTracks(nextTracks);
     setMatchingTrackCount(nextCount);
@@ -162,21 +164,21 @@ export function LibraryView(): JSX.Element {
         .map((t) => (t.id === id ? { ...t, loved: nextLoved } : t))
         .filter((t) => sort !== 'loved' || t.loved),
     );
-    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
+    api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function rateTrack(id: number, rating: number): Promise<void> {
     const updated = await setTrackRating(id, rating);
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === id ? updated : track)));
-    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
+    api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function toggleAvoid(id: number): Promise<void> {
     const updated = await toggleAvoidAutoPlay(id);
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === id ? updated : track)));
-    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
+    api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function lookupMetadata(track: Track): Promise<void> {
@@ -213,7 +215,7 @@ export function LibraryView(): JSX.Element {
       loading: false,
       status: `Applied ${updated.artist} - ${updated.title}.`,
     });
-    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
+    api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function applyManualMetadataEdit(patch: TrackMetadataPatchInput): Promise<void> {
@@ -228,7 +230,7 @@ export function LibraryView(): JSX.Element {
       loading: false,
       status: `Saved manual edits for ${updated.artist} - ${updated.title}.`,
     });
-    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
+    api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   function applyBulkMetadataResults(updated: Track[]): void {
@@ -236,15 +238,15 @@ export function LibraryView(): JSX.Element {
     const byId = new Map(updated.map((track) => [track.id, track]));
     setTracks((rows) => rows.map((track) => byId.get(track.id) ?? track));
     refreshLibrarySummary();
-    api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
+    api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function cleanMissingFiles(): Promise<void> {
     setCleanupStatus('Checking file paths...');
     const result = await api.pruneMissingTracks();
     const [nextTracks, nextCount, nextStats, nextHealth] = await Promise.all([
-      api.getTracks({ search, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
-      api.getTrackCount({ search, sort }),
+      api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
+      api.getTrackCount({ search: libraryQuery, sort }),
       api.getStats(),
       api.getLibraryHealth(),
     ]);
@@ -430,7 +432,9 @@ export function LibraryView(): JSX.Element {
           className="text-[10px] uppercase tracking-[0.1em] tabular-nums"
           style={{ color: 'var(--ink-2)' }}
         >
-          {libraryCountLabel(tracks.length, matchingTrackCount, hasMoreTracks, !!search)}
+          {search !== libraryQuery
+            ? 'Updating...'
+            : libraryCountLabel(tracks.length, matchingTrackCount, hasMoreTracks, !!libraryQuery)}
         </span>
       </div>
       {dropMessage && (
@@ -464,12 +468,12 @@ export function LibraryView(): JSX.Element {
             Loading…
           </div>
           ) : tracks.length === 0 ? (
-          search ? (
+          libraryQuery ? (
             <div
               className="flex h-full items-center justify-center text-[12px]"
               style={{ color: 'var(--muted)' }}
             >
-              No matches for &ldquo;{search}&rdquo;.
+              No matches for &ldquo;{libraryQuery}&rdquo;.
             </div>
           ) : hasLibrary ? (
             <div
@@ -486,7 +490,7 @@ export function LibraryView(): JSX.Element {
             <TrackTable
               tracks={tracks}
               currentId={current?.id ?? null}
-              search={search}
+              search={libraryQuery}
               onPlay={(idx) => void playQueue(tracks, idx)}
               onPlayTracks={(selected) => void playQueue(selected, 0)}
               onPlayNext={queueTrackNext}
@@ -516,6 +520,17 @@ export function LibraryView(): JSX.Element {
 function smartRuleDefaultName(query: string): string {
   const compact = query.replace(/\s+/g, ' ').trim();
   return `Search: ${compact.slice(0, 80)}`;
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [value, delayMs]);
+
+  return debounced;
 }
 
 function libraryCountLabel(

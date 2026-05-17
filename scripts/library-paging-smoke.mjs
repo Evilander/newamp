@@ -58,7 +58,9 @@ try {
   assert.match(libraryViewSource, /LIBRARY_PAGE_SIZE/, 'LibraryView should centralize the large-library page size');
   const pageSizeMatch = libraryViewSource.match(/const LIBRARY_PAGE_SIZE = (\d+)/);
   assert.ok(pageSizeMatch, 'LibraryView should declare a numeric page size');
-  assert.ok(Number(pageSizeMatch[1]) <= 1500, 'LibraryView should keep initial DOM row count light for huge libraries');
+  assert.ok(Number(pageSizeMatch[1]) <= 800, 'LibraryView should keep initial DOM row count light for huge libraries');
+  assert.match(libraryViewSource, /useDebouncedValue\(search, LIBRARY_SEARCH_DEBOUNCE_MS\)/, 'LibraryView should debounce large-library search before querying the catalog');
+  assert.match(libraryViewSource, /search: libraryQuery/, 'LibraryView should run catalog paging against the debounced search query');
   assert.match(libraryViewSource, /offset: tracks\.length/, 'LibraryView should request subsequent pages by loaded row count');
   assert.match(libraryViewSource, /Load more/, 'LibraryView should expose a load-more control');
   assert.match(libraryViewSource, /hasMoreTracks/, 'LibraryView should track whether more catalog rows are available');
