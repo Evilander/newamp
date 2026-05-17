@@ -67,6 +67,7 @@ try {
   assert.equal(recentArtist?.rule.mood, 'drive');
   for (const suggestion of suggestions) {
     assert.ok(suggestion.sampleCount > 0, `${suggestion.title} should have playable samples`);
+    assert.ok(suggestion.sampleCount <= suggestion.rule.count, `${suggestion.title} sample count should be capped to rule size`);
     assert.ok(library.runSmartPlaylistRule(suggestion.rule).length > 0, `${suggestion.title} rule should run`);
   }
 } finally {
@@ -85,6 +86,8 @@ const [sharedTypes, librarySource, mainSource, preloadSource, apiSource, homeSou
 
 assert.match(sharedTypes, /SmartPlaylistSuggestion/, 'shared API should expose suggested station types');
 assert.match(librarySource, /getSuggestedSmartPlaylistRules/, 'library should generate suggested smart-rule stations');
+assert.match(librarySource, /countSmartPlaylistRuleMatches/, 'suggested stations should use cheap count checks before rendering');
+assert.doesNotMatch(librarySource, /const sampleCount = this\.runSmartPlaylistRule/, 'suggested stations should not generate full playlists just to count samples');
 assert.match(librarySource, /Recent .* Radio/, 'library should generate recent-history artist stations');
 assert.match(mainSource, /smart:suggestions/, 'main process should expose suggested stations IPC');
 assert.match(preloadSource, /smart:suggestions/, 'preload should expose suggested stations IPC');
