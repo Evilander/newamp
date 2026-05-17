@@ -3,14 +3,21 @@ import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeBuildProvenance } from './build-provenance.mjs';
+import { createReleaseBundle } from './release-bundle.mjs';
+import { writeReleaseChecksums } from './release-checksums.mjs';
 
 const scriptPath = fileURLToPath(import.meta.url);
 const repoRoot = resolve('.');
 const defaultTimestampUrl = 'http://timestamp.digicert.com';
+export const postSignRefreshCommands = Object.freeze([
+  'npm run release:checksums',
+  'npm run release:provenance',
+  'npm run release:bundle',
+]);
 
 export function defaultSigningArtifacts(root = repoRoot) {
-  const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
-  const version = String(pkg.version ?? '').trim() || '0.0.0';
+  const version = readPackageVersion(root);
   return [
     { name: 'installer', path: resolve(root, 'release', `NewAmp Setup ${version}.exe`) },
     { name: 'portable', path: resolve(root, 'release', `NewAmp Portable ${version}.exe`) },
@@ -60,6 +67,7 @@ export function buildSigningPlan({
     commands,
     artifacts: artifactProof,
     env: redactedEnvSummary(env, identity),
+    postSignRefresh: postSignRefreshPlan(),
     reason: null,
   };
 }
@@ -69,6 +77,7 @@ export function signArtifacts({
   artifacts = defaultSigningArtifacts(),
   env = process.env,
   requireExistingTool = true,
+  root = repoRoot,
 } = {}) {
   const plan = buildSigningPlan({ artifacts, env, requireExistingTool });
   if (!plan.ok) return { ...plan, executed: false, results: [] };
@@ -97,7 +106,48 @@ export function signArtifacts({
     }
   }
 
-  return { ...plan, executed: true, results };
+  const postSignRefresh = refreshSignedReleaseMetadata({ root });
+  if (!postSignRefresh.ok) {
+    return {
+      ...plan,
+      ok: false,
+      executed: true,
+      results,
+      postSignRefresh,
+      reason: `post-sign release metadata refresh failed: ${postSignRefresh.reason}`,
+    };
+  }
+
+  return { ...plan, executed: true, results, postSignRefresh };
+}
+
+export function refreshSignedReleaseMetadata({ root = repoRoot } = {}) {
+  const version = readPackageVersion(root);
+  const steps = [];
+  const refreshActions = [
+    {
+      name: 'release-checksums',
+      command: postSignRefreshCommands[0],
+      action: () => writeReleaseChecksums({ root, version }),
+    },
+    {
+      name: 'build-provenance',
+      command: postSignRefreshCommands[1],
+      action: () => writeBuildProvenance({ root, version }),
+    },
+    {
+      name: 'release-bundle',
+      command: postSignRefreshCommands[2],
+      action: () => createReleaseBundle({ root, version }),
+    },
+  ];
+
+  for (const refreshAction of refreshActions) {
+    const failure = runRefreshStep(steps, refreshAction);
+    if (failure) return refreshReport({ ok: false, steps, reason: failure.reason });
+  }
+
+  return refreshReport({ ok: true, steps, reason: null });
 }
 
 function failedPlan({ reason, artifacts, env, signtoolPath = null }) {
@@ -110,7 +160,52 @@ function failedPlan({ reason, artifacts, env, signtoolPath = null }) {
     commands: [],
     artifacts,
     env: redactedEnvSummary(env),
+    postSignRefresh: postSignRefreshPlan(),
     reason,
+  };
+}
+
+function runRefreshStep(steps, { name, command, action }) {
+  try {
+    const report = action();
+    const step = {
+      name,
+      command,
+      ok: report.ok === true,
+      reason: report.reason ?? null,
+    };
+    steps.push(step);
+    return step.ok ? null : step;
+  } catch (error) {
+    const step = {
+      name,
+      command,
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+    steps.push(step);
+    return step;
+  }
+}
+
+function refreshReport({ ok, steps, reason }) {
+  return {
+    required: true,
+    executed: true,
+    ok,
+    commands: [...postSignRefreshCommands],
+    steps,
+    reason,
+  };
+}
+
+function postSignRefreshPlan() {
+  return {
+    required: true,
+    executed: false,
+    ok: null,
+    commands: [...postSignRefreshCommands],
+    reason: 'signed artifact bytes must be followed by fresh checksums, provenance, and release bundle metadata',
   };
 }
 
@@ -305,6 +400,11 @@ function text(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
 
+function readPackageVersion(root) {
+  const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
+  return String(pkg.version ?? '').trim() || '0.0.0';
+}
+
 function tail(value) {
   return (value ?? '').trim().split(/\r?\n/).slice(-20).join('\n');
 }
@@ -326,6 +426,9 @@ function printUsage() {
     'Supported signing identities:',
     '  PFX file: NEWAMP_SIGN_CERT_PATH or CSC_LINK/WIN_CSC_LINK + password env',
     '  Installed cert: NEWAMP_SIGN_SHA1 or NEWAMP_SIGN_SUBJECT',
+    '',
+    'After a real signing run, the script refreshes:',
+    ...postSignRefreshCommands.map((command) => `  ${command}`),
     '',
     'The JSON report redacts certificate passwords.',
   ].join('\n'));
