@@ -19,6 +19,8 @@ const DEFAULTS: AppSettings = {
   lastfmSessionKey: null,
   lastfmUsername: null,
   lastfmAuthToken: null,
+  openaiApiKey: null,
+  openaiModel: 'gpt-4.1-mini',
   crossfadeMs: 0,
   replayGain: 'off',
   limiterEnabled: true,
@@ -54,12 +56,26 @@ function normalizeVisualizerPreset(value: unknown): AppSettings['visualizerPrese
     'tunnel',
     'pulse',
     'neon-waves',
+    'neon-ribbons',
+    'plasma-grid',
     'prism-bars',
     'confetti',
     'burning-cloud',
   ].includes(preset)
     ? (preset as AppSettings['visualizerPreset'])
     : DEFAULTS.visualizerPreset;
+}
+
+function normalizeOptionalSecret(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, 4096) : null;
+}
+
+function normalizeOpenAiModel(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULTS.openaiModel;
+  const trimmed = value.trim();
+  return /^[a-zA-Z0-9._:-]{1,80}$/.test(trimmed) ? trimmed : DEFAULTS.openaiModel;
 }
 
 export class SettingsStore {
@@ -82,6 +98,8 @@ export class SettingsStore {
           audioOutputDeviceId: normalizeAudioOutputDeviceId(parsed.audioOutputDeviceId),
           limiterEnabled: normalizeLimiterEnabled(parsed.limiterEnabled),
           preampDb: normalizePreampDb(parsed.preampDb),
+          openaiApiKey: normalizeOptionalSecret(parsed.openaiApiKey),
+          openaiModel: normalizeOpenAiModel(parsed.openaiModel),
           compactMode: parsed.compactMode === true,
           alwaysOnTop: parsed.alwaysOnTop === true,
           visualizerPreset: normalizeVisualizerPreset(parsed.visualizerPreset),
@@ -125,6 +143,12 @@ export class SettingsStore {
       preampDb: patch.preampDb === undefined
         ? this.state.preampDb
         : normalizePreampDb(patch.preampDb),
+      openaiApiKey: patch.openaiApiKey === undefined
+        ? this.state.openaiApiKey
+        : normalizeOptionalSecret(patch.openaiApiKey),
+      openaiModel: patch.openaiModel === undefined
+        ? this.state.openaiModel
+        : normalizeOpenAiModel(patch.openaiModel),
       compactMode: patch.compactMode === undefined
         ? this.state.compactMode
         : patch.compactMode === true,

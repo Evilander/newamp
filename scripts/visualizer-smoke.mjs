@@ -35,6 +35,8 @@ assert.match(fullscreenSource, /id: 'radial'/, 'Fullscreen visualizer must expos
 assert.match(fullscreenSource, /id: 'tunnel'/, 'Fullscreen visualizer must expose Tunnel preset');
 assert.match(fullscreenSource, /id: 'pulse'/, 'Fullscreen visualizer must expose Pulse preset');
 assert.match(fullscreenSource, /id: 'neon-waves'/, 'Fullscreen visualizer must expose Neon Waves preset');
+assert.match(fullscreenSource, /id: 'neon-ribbons'/, 'Fullscreen visualizer must expose Neon Ribbons preset');
+assert.match(fullscreenSource, /id: 'plasma-grid'/, 'Fullscreen visualizer must expose Plasma Grid preset');
 assert.match(fullscreenSource, /id: 'prism-bars'/, 'Fullscreen visualizer must expose Prism Bars preset');
 assert.match(fullscreenSource, /id: 'confetti'/, 'Fullscreen visualizer must expose Confetti preset');
 assert.match(fullscreenSource, /id: 'burning-cloud'/, 'Fullscreen visualizer must expose Burning Cloud preset');

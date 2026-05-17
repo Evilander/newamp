@@ -6,6 +6,8 @@ import { api } from '../lib/api';
 
 const PRESETS = [
   { id: 'neon-waves', label: 'Neon Waves' },
+  { id: 'neon-ribbons', label: 'Neon Ribbons' },
+  { id: 'plasma-grid', label: 'Plasma Grid' },
   { id: 'prism-bars', label: 'Prism Bars' },
   { id: 'confetti', label: 'Confetti' },
   { id: 'burning-cloud', label: 'Burning Cloud' },

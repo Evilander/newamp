@@ -1530,7 +1530,7 @@ function uiVisualizerProbeSource(): string {
       );
       window.__newampSmoke?.setCompactDeck?.(true);
       await waitFor('compact deck opens and clears fullscreen visualizer', () => {
-        const deck = document.querySelector('.compact-root, .deck-record-player, .deck-jukebox, .deck-cassette');
+        const deck = document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-hotdog, .deck-retro-tv');
         const fullscreen = document.querySelector('[data-newamp-fullscreen-visualizer]');
         return deck && !fullscreen ? deck : null;
       });
@@ -1566,8 +1566,8 @@ function uiDeckProbeSource(): string {
       const measure = () => ({
         width: window.innerWidth,
         height: window.innerHeight,
-        rootWidth: Math.round((document.querySelector('.compact-root, .deck-record-player, .deck-jukebox, .deck-cassette')?.getBoundingClientRect().width || 0)),
-        rootHeight: Math.round((document.querySelector('.compact-root, .deck-record-player, .deck-jukebox, .deck-cassette')?.getBoundingClientRect().height || 0)),
+        rootWidth: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-hotdog, .deck-retro-tv')?.getBoundingClientRect().width || 0)),
+        rootHeight: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-hotdog, .deck-retro-tv')?.getBoundingClientRect().height || 0)),
       });
       const deckButton = await waitFor('real DECK button', () =>
         Array.from(document.querySelectorAll('button'))
@@ -1588,6 +1588,33 @@ function uiDeckProbeSource(): string {
         const box = measure();
         return Math.abs(box.width - 540) <= 12 && Math.abs(box.height - 540) <= 12 ? box : null;
       });
+      const hotdogButton = await waitFor('hotdog skin button', () =>
+        document.querySelector('[data-newamp-deck-skin-button="hotdog"]'),
+      );
+      hotdogButton.click();
+      await waitFor('hotdog deck', () => document.querySelector('.deck-hotdog'));
+      const hotdog = await waitFor('hotdog size', () => {
+        const box = measure();
+        return Math.abs(box.width - 740) <= 12 && Math.abs(box.height - 240) <= 12 ? box : null;
+      });
+      const tvButton = await waitFor('retro-tv skin button', () =>
+        document.querySelector('[data-newamp-deck-skin-button="retro-tv"]'),
+      );
+      tvButton.click();
+      await waitFor('retro-tv deck', () => document.querySelector('.deck-retro-tv'));
+      const tv = await waitFor('retro-tv size', () => {
+        const box = measure();
+        return Math.abs(box.width - 520) <= 12 && Math.abs(box.height - 430) <= 12 ? box : null;
+      });
+      const winampButton = await waitFor('winamp classic skin button', () =>
+        document.querySelector('[data-newamp-deck-skin-button="winamp-classic"]'),
+      );
+      winampButton.click();
+      await waitFor('winamp-classic deck', () => document.querySelector('.deck-winamp-classic'));
+      const winamp = await waitFor('winamp-classic size', () => {
+        const box = measure();
+        return Math.abs(box.width - 560) <= 12 && Math.abs(box.height - 232) <= 12 ? box : null;
+      });
       const shadeButton = await waitFor('windowshade skin button after shape switch', () =>
         document.querySelector('[data-newamp-deck-skin-button="bento"]'),
       );
@@ -1603,6 +1630,9 @@ function uiDeckProbeSource(): string {
         visibleSkinButtons: skinButtons.length,
         shade,
         record,
+        hotdog,
+        tv,
+        winamp,
         shadeAgain,
       };
     })()
