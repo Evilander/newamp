@@ -10,6 +10,7 @@ import type {
 } from '@shared/types';
 import { engine, usePlayerStore } from '../../store/usePlayerStore';
 import { api, inElectron, DEFAULT_SETTINGS } from '../../lib/api';
+import { AI_ASSIST_OPTIONS } from '../../lib/aiAssist';
 import { SKIN_VARIABLES, readCurrentSkinVariables } from '../../lib/skins';
 import { normalizeAudioOutputDeviceId, uniqueAudioOutputDevices } from '@shared/audio-output';
 import type { AudioOutputDeviceOption } from '@shared/audio-output';
@@ -649,6 +650,14 @@ export function SettingsView(): JSX.Element {
           <div className="text-[12px] leading-relaxed" style={{ color: 'var(--ink-2)' }}>
             Optional local enrichments for liner notes, artist context, review prompts, and discussion seeds.
             The key is stored in Newamp settings on this machine and is never needed for basic playback.
+          </div>
+          <div className="ai-assist-option-grid">
+            {AI_ASSIST_OPTIONS.map((option) => (
+              <div key={option.id} className="ai-assist-option">
+                <strong>{option.label}</strong>
+                <span>{option.detail}</span>
+              </div>
+            ))}
           </div>
           <Row label="API key">
             <input

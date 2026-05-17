@@ -9,6 +9,7 @@ import { fetchLyrics, parseLrc, type LrcLine } from '../../api/lrclib';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
 import { formatTime, playbackCodecLabel } from '../../lib/format';
 import { api } from '../../lib/api';
+import { aiAssistSummary } from '../../lib/aiAssist';
 import { ScoreRating } from '../ScoreRating';
 import { LinerNotesPanel } from '../LinerNotesPanel';
 
@@ -1298,7 +1299,7 @@ function TrackSignalPanel({
       </div>
       <div className="track-signal-ai">
         <span>{aiAssistReady ? `ChatGPT assist ready: ${aiModel || 'model set'}` : 'ChatGPT assist: add your API key in Settings'}</span>
-        <span>liner notes / review seed / artist dossier</span>
+        <span>{aiAssistSummary()}</span>
       </div>
     </section>
   );

@@ -31,6 +31,8 @@ assert.ok(result.stageRect.height >= result.viewport.height * 0.9, 'fullscreen v
 assert.ok(result.render.width >= 120, `visualizer canvas width is too small: ${result.render.width}`);
 assert.ok(result.render.height >= 80, `visualizer canvas height is too small: ${result.render.height}`);
 assert.ok(result.render.litSamples > 0, 'visualizer canvas should contain nonblank pixels');
+assert.ok(result.xboxRender?.plasmaGrid?.litSamples > 0, 'Plasma Grid should render nonblank pixels');
+assert.ok(result.xboxRender?.neonRibbons?.litSamples > 0, 'Neon Ribbons should render nonblank pixels');
 assert.equal(result.openedViaVizButton, true, 'regular UI VIZ button should open the fullscreen visualizer');
 assert.equal(result.openedViaTransportArt, true, 'transport album art should open the fullscreen visualizer');
 assert.equal(result.compactClearsFullscreen, true, 'entering deck mode should clear fullscreen visualizer state');

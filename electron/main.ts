@@ -1495,10 +1495,7 @@ function uiVisualizerProbeSource(): string {
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'spectrum'),
       );
       spectrumButton.click();
-      const canvas = await waitFor('fullscreen visualizer canvas', () =>
-        stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="spectrum"]'),
-      );
-      const render = await waitFor('nonblank visualizer frame', () => {
+      const sampleCanvas = (canvas) => {
         const context = canvas.getContext('2d', { willReadFrequently: true });
         if (!context || canvas.width < 120 || canvas.height < 80) return null;
         const width = canvas.width;
@@ -1513,7 +1510,35 @@ function uiVisualizerProbeSource(): string {
           totalSamples += 1;
         }
         return litSamples > 0 ? { width, height, litSamples, totalSamples } : null;
-      }, 8000);
+      };
+      const canvas = await waitFor('fullscreen visualizer canvas', () =>
+        stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="spectrum"]'),
+      );
+      const render = await waitFor('nonblank visualizer frame', () => sampleCanvas(canvas), 8000);
+      const plasmaButton = await waitFor('Plasma Grid visualizer preset button', () =>
+        Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
+          .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'plasma-grid'),
+      );
+      plasmaButton.click();
+      await waitFor('plasma-grid visualizer stage', () =>
+        stage.getAttribute('data-newamp-visualizer-preset') === 'plasma-grid',
+      );
+      const plasmaCanvas = await waitFor('plasma-grid canvas', () =>
+        stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="plasma-grid"]'),
+      );
+      const plasmaRender = await waitFor('nonblank plasma-grid visualizer frame', () => sampleCanvas(plasmaCanvas), 8000);
+      const ribbonButton = await waitFor('Neon Ribbons visualizer preset button', () =>
+        Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
+          .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'neon-ribbons'),
+      );
+      ribbonButton.click();
+      await waitFor('neon-ribbons visualizer stage', () =>
+        stage.getAttribute('data-newamp-visualizer-preset') === 'neon-ribbons',
+      );
+      const ribbonCanvas = await waitFor('neon-ribbons canvas', () =>
+        stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="neon-ribbons"]'),
+      );
+      const ribbonRender = await waitFor('nonblank neon-ribbons visualizer frame', () => sampleCanvas(ribbonCanvas), 8000);
       const currentTitle =
         document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
       const currentTime = Number(timeEl.getAttribute('data-newamp-current-time') || '0');
@@ -1538,8 +1563,12 @@ function uiVisualizerProbeSource(): string {
         ok: true,
         currentTitle,
         currentTime,
-        preset: stage.getAttribute('data-newamp-visualizer-preset'),
+        preset: 'spectrum',
         render,
+        xboxRender: {
+          plasmaGrid: plasmaRender,
+          neonRibbons: ribbonRender,
+        },
         stageRect: { width: stageRect.width, height: stageRect.height },
         viewport,
         openedViaVizButton: true,

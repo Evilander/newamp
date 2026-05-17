@@ -3438,6 +3438,34 @@ input[type='range'].nslider.eq-slider {
 .track-signal-ai span:first-child {
   color: var(--accent);
 }
+.ai-assist-option-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.ai-assist-option {
+  min-width: 0;
+  padding: 9px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 6%, transparent), transparent),
+    var(--panel);
+  border: 1px solid var(--line);
+}
+.ai-assist-option strong {
+  display: block;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.ai-assist-option span {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-2);
+  font-size: 11px;
+  line-height: 1.35;
+}
 .album-art-placeholder {
   position: relative;
   background:
@@ -3512,6 +3540,9 @@ input[type='range'].nslider.eq-slider {
   }
   .library-search-command kbd {
     display: none;
+  }
+  .ai-assist-option-grid {
+    grid-template-columns: 1fr;
   }
   .newamp-now-grid {
     grid-template-columns: 1fr;
