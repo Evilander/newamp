@@ -158,7 +158,7 @@ assert.equal(library.getAlbums()[0].artFromTrackId, applied.artFromTrackId);
 assert.equal(library.getArt(applied.artFromTrackId)?.data.byteLength, imageBytes.byteLength);
 library.close();
 
-const [typesSource, mainSource, preloadSource, apiSource, albumsViewSource, packageSource, gateSource] =
+const [typesSource, mainSource, preloadSource, apiSource, albumsViewSource, packageSource, gateSource, scannerSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
@@ -167,6 +167,7 @@ const [typesSource, mainSource, preloadSource, apiSource, albumsViewSource, pack
     readFile(new URL('../src/components/views/AlbumsView.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../scripts/release-gate.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../electron/scanner.ts', import.meta.url), 'utf8'),
   ]);
 
 assert.match(typesSource, /AlbumArtLookupResult/, 'shared types should expose album art lookup results');
@@ -177,6 +178,9 @@ assert.match(apiSource, /applyAlbumArt/, 'renderer API should expose album art a
 const librarySource = await readFile(new URL('../electron/library.ts', import.meta.url), 'utf8');
 assert.match(librarySource, /MIN\(CASE WHEN has_art = 1 THEN id ELSE NULL END\) AS art_track/, 'album summaries should compute cover art in the grouped album query');
 assert.doesNotMatch(librarySource, /SELECT id FROM tracks t2[\s\S]+AS art_track/, 'album summaries should avoid a per-album correlated art lookup');
+assert.match(librarySource, /artHashCache/, 'library writes should cache repeated album-art hashes inside each batch');
+assert.match(librarySource, /writtenArtHashes/, 'library writes should avoid repeated album-art existence checks inside each batch');
+assert.match(scannerSource, /folderArtForFile/, 'scanner should allow cached folder-art resolution during large imports');
 assert.doesNotMatch(albumsViewSource, /FIND COVER|APPLY COVER|REVIEW COVER/, 'Albums view should not expose cover review buttons in album chrome');
 assert.match(albumsViewSource, /MISSING ART/, 'Albums view should expose a missing-art review lane');
 assert.match(albumsViewSource, /showMissingArtOnly/, 'Albums view should filter to albums missing cover art');
