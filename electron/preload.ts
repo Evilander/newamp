@@ -65,12 +65,12 @@ const api: NewampAPI = {
   },
   getTracks: (opts) => ipcRenderer.invoke('library:get-tracks', opts) as Promise<Track[]>,
   getTrackCount: (opts) => ipcRenderer.invoke('library:get-track-count', opts) as Promise<number>,
-  getAlbums: () => ipcRenderer.invoke('library:get-albums'),
+  getAlbums: (opts) => ipcRenderer.invoke('library:get-albums', opts),
   lookupAlbumArt: (input: AlbumArtLookupInput) =>
     ipcRenderer.invoke('album-art:lookup', input) as Promise<AlbumArtLookupResult[]>,
   applyAlbumArt: (input: AlbumArtLookupInput, candidate: AlbumArtLookupResult) =>
     ipcRenderer.invoke('album-art:apply', input, candidate) as Promise<AlbumArtApplyResult | null>,
-  getArtists: () => ipcRenderer.invoke('library:get-artists'),
+  getArtists: (opts) => ipcRenderer.invoke('library:get-artists', opts),
   getFolders: (parentPath) => ipcRenderer.invoke('library:get-folders', parentPath),
   getFolderTracks: (folderPath, opts) =>
     ipcRenderer.invoke('library:get-folder-tracks', folderPath, opts),
