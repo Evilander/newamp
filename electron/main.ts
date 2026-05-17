@@ -379,6 +379,7 @@ function createWindow(): BrowserWindow {
   win.on('unmaximize', () => win.webContents.send('window-state', { maximized: false }));
   win.on('close', (event) => {
     if (smokeMode || isQuitting) return;
+    if (!tray || tray.isDestroyed()) return;
     event.preventDefault();
     win.hide();
   });
@@ -452,10 +453,10 @@ function registerTray(): void {
   const icon = resolveTrayIconImage();
   if (!icon) return;
   try {
-    tray = new Tray(icon);
-    tray.setToolTip('NewAmp');
-    tray.on('click', toggleMainWindow);
-    tray.setContextMenu(Menu.buildFromTemplate([
+    const nextTray = new Tray(icon);
+    nextTray.setToolTip('NewAmp');
+    nextTray.on('click', toggleMainWindow);
+    nextTray.setContextMenu(Menu.buildFromTemplate([
       { label: 'Show / Hide NewAmp', click: toggleMainWindow },
       { type: 'separator' },
       { label: 'Previous', click: () => sendPlayerCommand('previous') },
@@ -471,21 +472,39 @@ function registerTray(): void {
         },
       },
     ]));
+    if (process.platform === 'win32' && !hasTrayBounds(nextTray.getBounds())) {
+      nextTray.destroy();
+      throw new Error('Windows notification area did not accept the tray icon.');
+    }
+    tray = nextTray;
   } catch (error) {
     tray = null;
+    writeDiagnosticEvent('tray-unavailable', { error });
     console.warn('[newamp] tray icon unavailable', error);
   }
 }
 
-function resolveTrayIconImage(): Electron.NativeImage | null {
-  const iconPaths = [
-    join(process.resourcesPath, 'build', 'icon.png'),
-    join(app.getAppPath(), 'build', 'icon.png'),
-    join(process.resourcesPath, 'build', 'icon.ico'),
-    join(app.getAppPath(), 'build', 'icon.ico'),
-  ];
+function hasTrayBounds(bounds: Rectangle): boolean {
+  return bounds.width > 0 || bounds.height > 0;
+}
+
+function resolveTrayIconImage(): Electron.NativeImage | string | null {
+  const iconPaths = process.platform === 'win32'
+    ? [
+        join(process.resourcesPath, 'build', 'icon.ico'),
+        join(app.getAppPath(), 'build', 'icon.ico'),
+        join(process.resourcesPath, 'build', 'icon.png'),
+        join(app.getAppPath(), 'build', 'icon.png'),
+      ]
+    : [
+        join(process.resourcesPath, 'build', 'icon.png'),
+        join(app.getAppPath(), 'build', 'icon.png'),
+        join(process.resourcesPath, 'build', 'icon.ico'),
+        join(app.getAppPath(), 'build', 'icon.ico'),
+      ];
   for (const iconPath of iconPaths) {
     if (!existsSync(iconPath)) continue;
+    if (process.platform === 'win32' && extname(iconPath).toLowerCase() === '.ico') return iconPath;
     const image = nativeImage.createFromPath(iconPath);
     if (!image.isEmpty()) return image.resize({ width: 16, height: 16, quality: 'best' });
   }
