@@ -1475,9 +1475,15 @@ export class LibraryStore {
       rule: SmartPlaylistRuleInput,
     ) => {
       if (suggestions.some((item) => item.id === id || item.title.toLowerCase() === title.toLowerCase())) return;
-      const sampleCount = this.runSmartPlaylistRule(rule).length;
+      const normalizedRule = normalizeSmartRuleInput(rule);
+      const sampleCount = this.countSmartPlaylistRuleMatches({
+        ...normalizedRule,
+        id: 0,
+        createdAt: 0,
+        updatedAt: 0,
+      });
       if (!sampleCount) return;
-      suggestions.push({ id, title, subtitle, reason, sampleCount, rule });
+      suggestions.push({ id, title, subtitle, reason, sampleCount, rule: normalizedRule });
     };
 
     const loved = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks WHERE loved = 1`)?.n ?? 0;
@@ -1678,6 +1684,12 @@ export class LibraryStore {
       )
       .slice(0, rule.count)
       .map((item) => item.track);
+  }
+
+  private countSmartPlaylistRuleMatches(rule: SmartPlaylistRule): number {
+    const { where, params } = smartRuleWhere(rule);
+    const row = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks ${where}`, params);
+    return Math.min(rule.count, Math.max(0, row?.n ?? 0));
   }
 
   buildHarmonicMix(input: HarmonicMixInput = {}): Track[] {
