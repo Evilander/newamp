@@ -1,6 +1,6 @@
 // Library store backed by sql.js (pure WASM SQLite) plus filesystem-backed
 // album art. We chose sql.js over better-sqlite3 because it removes the
-// native compilation dependency, making Newamp easier to install on any
+// native compilation dependency, making NewAmp easier to install on any
 // Node/Electron combination.
 
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
@@ -1355,7 +1355,7 @@ export class LibraryStore {
         'taste:fresh',
         'Discovery Radio',
         `${unplayed.toLocaleString()} unplayed tracks`,
-        'Pulls from tracks Newamp has not seen you play yet.',
+        'Pulls from tracks NewAmp has not seen you play yet.',
         { name: 'Discovery Radio', mood: 'deep-cuts', count: 40, unplayedOnly: true },
       );
     }
@@ -1381,7 +1381,7 @@ export class LibraryStore {
         `recent-artist:${slugId(artist)}`,
         `Recent ${artist} Radio`,
         `${row.plays.toLocaleString()} recent plays`,
-        `Built from artists Newamp has seen you return to recently.`,
+        `Built from artists NewAmp has seen you return to recently.`,
         {
           name: `Recent ${artist} Radio`,
           mood: moodForStationText(row.genre ?? artist),
@@ -1939,7 +1939,7 @@ export class LibraryStore {
     const existingTrack = this.one<{ id: number }>(`SELECT id FROM tracks WHERE id = ?`, [id]);
     if (!existingTrack) throw new Error('Cannot cache a guitar tab for a missing track.');
     if (!['ultimate-guitar', 'local'].includes(document.source) || !document.url.trim()) {
-      throw new Error('Only Newamp guitar tab documents can be cached.');
+      throw new Error('Only NewAmp guitar tab documents can be cached.');
     }
 
     const now = Date.now();

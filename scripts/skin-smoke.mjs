@@ -68,7 +68,7 @@ assert.equal(reloaded.customSkin?.variables['--accent'], '#66ffaa');
 
 assert.throws(
   () => parseCustomSkinFile(JSON.stringify({ name: 'Bad', variables: { '--nope': '#fff' } })),
-  /valid Newamp custom skin/,
+  /valid NewAmp custom skin/,
 );
 
 assert.equal(isWinampClassicSkinArchiveName('Industrial.wsz'), true, 'WSZ should be accepted as a Winamp skin archive');

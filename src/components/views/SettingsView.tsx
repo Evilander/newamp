@@ -103,7 +103,7 @@ export function SettingsView(): JSX.Element {
       await api.lastfmStartAuth();
       const updated = await api.getSettings();
       setSettings(updated);
-      setLastfmStatus('Browser opened. Approve Newamp, then complete the connection.');
+      setLastfmStatus('Browser opened. Approve NewAmp, then complete the connection.');
     } catch (err) {
       setLastfmStatus(err instanceof Error ? err.message : 'Last.fm authorization failed.');
     }
@@ -145,10 +145,10 @@ export function SettingsView(): JSX.Element {
     try {
       await saveLastfmCredentials();
       await api.lastfmUpdateNowPlaying({
-        artist: 'Newamp QA',
+        artist: 'NewAmp QA',
         title: 'Settings Now Playing Test',
-        album: 'Newamp Release Proof',
-        albumArtist: 'Newamp QA',
+        album: 'NewAmp Release Proof',
+        albumArtist: 'NewAmp QA',
         duration: 181,
         trackNumber: 1,
       });
@@ -172,7 +172,7 @@ export function SettingsView(): JSX.Element {
     if (!settings) return;
     const updated = await api.setSettings({ firstLaunchTutorialSeen: false });
     setSettings(updated);
-    setOpenAiStatus('First-launch tutorial will show the next time Newamp opens.');
+    setOpenAiStatus('First-launch tutorial will show the next time NewAmp opens.');
   }
 
   async function refreshAudioOutputs(): Promise<void> {
@@ -262,7 +262,7 @@ export function SettingsView(): JSX.Element {
   }
 
   async function restoreBackup(): Promise<void> {
-    setSupportBackupStatus('Choose a Newamp backup folder to restore...');
+    setSupportBackupStatus('Choose a NewAmp backup folder to restore...');
     try {
       const result = await api.restoreSupportBackup();
       if (!result) {
@@ -271,7 +271,7 @@ export function SettingsView(): JSX.Element {
       }
       setSupportRestore(result);
       setSupportBackupStatus(
-        `Restored ${result.restored.length.toLocaleString()} item(s). Restart Newamp to refresh every view.`,
+        `Restored ${result.restored.length.toLocaleString()} item(s). Restart NewAmp to refresh every view.`,
       );
       await refreshSupportDiagnostics();
     } catch (err) {
@@ -349,13 +349,40 @@ export function SettingsView(): JSX.Element {
 
         <section className="bevel-out flex flex-col gap-3 p-6">
           <h2 className="text-[11px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
-            Shell · Layout
+            Shell / Layout
           </h2>
           <p className="text-[12px]" style={{ color: 'var(--ink-2)' }}>
-            The shell changes the chrome — sidebar, transport, glass effects. The skin (below) changes the
+            The shell changes the chrome: sidebar, transport, glass effects. The skin (below) changes the
             colors. Mix and match: Liquid Glass + Amber, Modern + Midnight, Concourse + Ops.
           </p>
           <ShellPicker />
+          <Row label="Text size">
+            <div className="flex min-w-[260px] items-center gap-3">
+              <input
+                type="range"
+                min={0.85}
+                max={1.35}
+                step={0.05}
+                value={settings.textScale}
+                onChange={(e) => {
+                  const textScale = Number(e.target.value);
+                  api.setSettings({ textScale }).then(setSettings).catch(() => undefined);
+                }}
+                className="nslider flex-1"
+              />
+              <span className="w-[52px] text-right text-[12px] tabular-nums" style={{ color: 'var(--ink-2)' }}>
+                {Math.round(settings.textScale * 100)}%
+              </span>
+              <button
+                className="pxbtn"
+                onClick={() => {
+                  api.setSettings({ textScale: 1 }).then(setSettings).catch(() => undefined);
+                }}
+              >
+                Reset
+              </button>
+            </div>
+          </Row>
         </section>
 
         <section className="bevel-out flex flex-col gap-4 p-6">
@@ -568,8 +595,8 @@ export function SettingsView(): JSX.Element {
             Last.fm
           </h2>
           <div className="text-[12px] leading-relaxed" style={{ color: 'var(--ink-2)' }}>
-            Last.fm is optional. Newamp needs your own Last.fm API account because scrobbling is tied
-            to your Last.fm identity, not to a shared Newamp account. Create one at{' '}
+            Last.fm is optional. NewAmp needs your own Last.fm API account because scrobbling is tied
+            to your Last.fm identity, not to a shared NewAmp account. Create one at{' '}
             <a
               href="https://www.last.fm/api/account/create"
               target="_blank"
@@ -578,7 +605,7 @@ export function SettingsView(): JSX.Element {
             >
               last.fm/api/account/create
             </a>
-            , use <span style={{ color: 'var(--ink)' }}>Newamp</span> as the application name,
+            , use <span style={{ color: 'var(--ink)' }}>NewAmp</span> as the application name,
             and leave callback URL blank for desktop auth.
           </div>
           <Row label="API key">
@@ -656,7 +683,7 @@ export function SettingsView(): JSX.Element {
           </h2>
           <div className="text-[12px] leading-relaxed" style={{ color: 'var(--ink-2)' }}>
             Optional local enrichments for liner notes, artist context, review prompts, and discussion seeds.
-            The key is stored in Newamp settings on this machine and is never needed for basic playback.
+            The key is stored in NewAmp settings on this machine and is never needed for basic playback.
           </div>
           <div className="ai-assist-option-grid">
             {AI_ASSIST_OPTIONS.map((option) => (
@@ -707,7 +734,7 @@ export function SettingsView(): JSX.Element {
             About
           </h2>
           <div>
-            Newamp v{api.appVersion} · Built for {api.platform}
+            NewAmp v{api.appVersion} / Built for {api.platform}
             {!inElectron && (
               <span style={{ color: 'var(--warn)' }}> · browser preview (no library access)</span>
             )}
@@ -737,7 +764,7 @@ export function SettingsView(): JSX.Element {
           {supportDiagnostics ? (
             <>
               <DiagnosticRow label="App">
-                Newamp v{supportDiagnostics.appVersion} / Electron {supportDiagnostics.electronVersion}
+                NewAmp v{supportDiagnostics.appVersion} / Electron {supportDiagnostics.electronVersion}
               </DiagnosticRow>
               <DiagnosticRow label="Library">
                 {supportDiagnostics.libraryStats.tracks.toLocaleString()} tracks /{' '}
@@ -834,12 +861,12 @@ function SkinWorkshop({
   onSaved: (settings: AppSettings) => void;
 }): JSX.Element {
   const saveCustomSkin = usePlayerStore((s) => s.saveCustomSkin);
-  const [name, setName] = useState(settings.customSkin?.name ?? 'Newamp Custom');
+  const [name, setName] = useState(settings.customSkin?.name ?? 'NewAmp Custom');
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [skinFileStatus, setSkinFileStatus] = useState<string | null>(null);
 
   useEffect(() => {
-    setName(settings.customSkin?.name ?? 'Newamp Custom');
+    setName(settings.customSkin?.name ?? 'NewAmp Custom');
     setDraft(settings.theme === 'custom' && settings.customSkin
       ? settings.customSkin.variables
       : readCurrentSkinVariables());
@@ -859,7 +886,7 @@ function SkinWorkshop({
       SKIN_VARIABLES.map((key) => [key, draft[key] || readCurrentSkinVariables()[key] || '']),
     );
     return {
-      name: name.trim() || 'Newamp Custom',
+      name: name.trim() || 'NewAmp Custom',
       baseTheme,
       variables,
       updatedAt: Date.now(),

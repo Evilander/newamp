@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 const {
   checkLastfmLiveProof,
   defaultLastfmLiveProofArtifacts,
+  lastfmSettingsPathCandidates,
   lastfmLiveProofTrack,
   resolveLastfmCredentials,
 } = await import('./lastfm-live-proof.mjs');
@@ -26,9 +27,9 @@ assert.deepEqual(defaultLastfmLiveProofArtifacts(resolve('.')).map((artifact) =>
 ]);
 
 const artifacts = [
-  { name: 'installer', path: join(smokeRoot, 'Newamp Setup 1.0.0.exe') },
-  { name: 'portable', path: join(smokeRoot, 'Newamp Portable 1.0.0.exe') },
-  { name: 'exe', path: join(smokeRoot, 'Newamp.exe') },
+  { name: 'installer', path: join(smokeRoot, 'NewAmp Setup 1.0.0.exe') },
+  { name: 'portable', path: join(smokeRoot, 'NewAmp Portable 1.0.0.exe') },
+  { name: 'exe', path: join(smokeRoot, 'NewAmp.exe') },
 ];
 await Promise.all(artifacts.map((artifact, index) => writeFile(artifact.path, `artifact-${index}`, 'utf8')));
 
@@ -45,7 +46,7 @@ const proofArtifacts = Object.fromEntries(artifacts.map((artifact) => [artifact.
 }]));
 await writeFile(proofPath, JSON.stringify({
   schemaVersion: 1,
-  app: 'Newamp',
+  app: 'NewAmp',
   createdAt: new Date().toISOString(),
   platform: process.platform,
   username: 'newamp-smoke-user',
@@ -79,6 +80,13 @@ assert.equal(credentials.apiKey, 'api-key');
 assert.equal(credentials.sharedSecret, 'shared-secret');
 assert.equal(credentials.sources.apiKey, 'env:NEWAMP_LASTFM_API_KEY');
 assert.equal(credentials.sources.sharedSecret, 'env:NEWAMP_LASTFM_SHARED_SECRET');
+assert.ok(
+  lastfmSettingsPathCandidates({
+    APPDATA: 'C:\\Users\\Example\\AppData\\Roaming',
+    LOCALAPPDATA: 'C:\\Users\\Example\\AppData\\Local',
+  }).some((candidate) => /\\NewAmp\\settings\.json$/.test(candidate)),
+  'Last.fm proof should discover the current NewAmp app settings path',
+);
 
 const [packageSource, gateSource, readmeSource, liveProofSource] = await Promise.all([
   readFile(new URL('../package.json', import.meta.url), 'utf8'),

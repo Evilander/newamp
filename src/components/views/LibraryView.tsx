@@ -1084,7 +1084,7 @@ export function TrackTable({
             data-analyze-selected-replaygain
             onClick={() => void analyzeSelectedReplayGain()}
             disabled={bulkBusy}
-            title="Analyze selected tracks and store ReplayGain in the Newamp catalog"
+            title="Analyze selected tracks and store ReplayGain in the NewAmp catalog"
           >
             ANALYZE REPLAYGAIN
           </button>

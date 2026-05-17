@@ -10,20 +10,20 @@ export function releaseArtifactSpecs({ root = defaultRoot, version = readPackage
   return [
     {
       name: 'installer',
-      path: join(root, 'release', `Newamp Setup ${version}.exe`),
-      checksumName: `Newamp Setup ${version}.exe`,
+      path: join(root, 'release', `NewAmp Setup ${version}.exe`),
+      checksumName: `NewAmp Setup ${version}.exe`,
       minimumBytes: 100_000_000,
     },
     {
       name: 'portable',
-      path: join(root, 'release', `Newamp Portable ${version}.exe`),
-      checksumName: `Newamp Portable ${version}.exe`,
+      path: join(root, 'release', `NewAmp Portable ${version}.exe`),
+      checksumName: `NewAmp Portable ${version}.exe`,
       minimumBytes: 100_000_000,
     },
     {
       name: 'exe',
-      path: join(root, 'release', 'win-unpacked', 'Newamp.exe'),
-      checksumName: 'win-unpacked/Newamp.exe',
+      path: join(root, 'release', 'win-unpacked', 'NewAmp.exe'),
+      checksumName: 'win-unpacked/NewAmp.exe',
       minimumBytes: 200_000_000,
     },
   ];

@@ -12,12 +12,17 @@ assert.match(artistFactsSource, /piprop/, 'artist facts should request PageImage
 assert.match(artistFactsSource, /pithumbsize:\s*'900'/, 'artist images should request large thumbnails');
 assert.match(artistFactsSource, /originalImageUrl/, 'artist facts should expose an original artist image URL');
 assert.match(artistFactsSource, /description/, 'artist facts should expose a short artist description');
-assert.match(artistFactsSource, /newamp:artist-facts:v1/, 'artist facts should use a stable local cache namespace');
+assert.match(artistFactsSource, /newamp:artist-facts:v3/, 'artist facts should use a stable local cache namespace');
+assert.match(artistFactsSource, /isLikelyMusicArtistFact/, 'artist facts should reject animal/species false positives');
+assert.match(artistFactsSource, /scoreMusicArtistFact/, 'artist facts should rank musician pages above same-name non-music pages');
+assert.match(artistFactsSource, /bestMusicArtistFact/, 'artist facts should choose the best musician candidate from multiple results');
 assert.match(artistFactsSource, /ARTIST_FACT_CACHE_TTL_MS/, 'artist facts cache should have an explicit freshness window');
 assert.match(artistFactsSource, /readCachedArtistFact/, 'artist facts should read cached Wikipedia data before fetching');
 assert.match(artistFactsSource, /writeCachedArtistFact/, 'artist facts should persist successful Wikipedia data');
 assert.match(artistsViewSource, /ArtistSpotlight/, 'Artists view should show an artist image/facts spotlight');
 assert.match(nowPlayingSource, /ArtistImageStage/, 'Now Playing should render an image-first artist facts stage');
+assert.match(nowPlayingSource, /AlbumContextPanel/, 'Now Playing should replace Studio with album context');
+assert.match(nowPlayingSource, /fetchAlbumFacts/, 'Album context should look up album stories when available');
 
 const originalFetch = globalThis.fetch;
 const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
@@ -61,7 +66,10 @@ try {
   assert.match(fact.summary, /English rock band/);
 
   const directUrl = new URL(requestedUrls[0]);
-  assert.equal(directUrl.searchParams.get('titles'), 'Radiohead');
+  assert.ok(
+    ['Radiohead', 'Radiohead (musician)', 'Radiohead (band)'].includes(String(directUrl.searchParams.get('titles'))),
+    'artist facts should begin with a direct title or music disambiguation title',
+  );
   assert.equal(directUrl.searchParams.get('piprop'), 'thumbnail|original');
   assert.equal(directUrl.searchParams.get('pithumbsize'), '900');
   assert.equal(storage.size, 1, 'successful artist facts should be cached locally');
@@ -98,9 +106,111 @@ try {
   const fallback = await fetchArtistFacts('The National');
   assert.ok(fallback, 'artist facts should fall back to a musician-oriented search');
   assert.equal(fallback.title, 'The National');
-  const fallbackUrl = new URL(requestedUrls[1]);
-  assert.equal(fallbackUrl.searchParams.get('generator'), 'search');
-  assert.match(fallbackUrl.searchParams.get('gsrsearch') ?? '', /band OR singer OR musician/);
+  assert.ok(
+    requestedUrls.some((url) => url.includes('The+National+%28musician%29') || url.includes('The+National+%28band%29')),
+    'artist facts should try direct musician/band disambiguation titles',
+  );
+
+  storage.clear();
+  requestedUrls.length = 0;
+  storage.set(
+    'newamp:artist-facts:v3:panda%20bear',
+    JSON.stringify({
+      fetchedAt: Date.now(),
+      fact: {
+        title: 'Giant panda',
+        description: 'species of bear',
+        summary: 'The giant panda is a bear species endemic to China.',
+        url: 'https://en.wikipedia.org/wiki/Giant_panda',
+        imageUrl: null,
+        thumbnailUrl: null,
+        originalImageUrl: null,
+      },
+    }),
+  );
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(String(url));
+    const parsed = new URL(String(url));
+    const title = String(parsed.searchParams.get('titles') ?? '');
+    if (!title.includes('Panda Bear (musician)')) {
+      return jsonResponse({
+        query: {
+          pages: {
+            3: {
+              title: 'Giant panda',
+              description: 'species of bear',
+              extract: 'The giant panda is a bear species endemic to China.',
+              fullurl: 'https://en.wikipedia.org/wiki/Giant_panda',
+            },
+          },
+        },
+      });
+    }
+    return jsonResponse({
+      query: {
+        pages: {
+          4: {
+            title: 'Panda Bear (musician)',
+            description: 'American musician',
+            extract: 'Noah Lennox, known as Panda Bear, is an American musician and member of Animal Collective.',
+            fullurl: 'https://en.wikipedia.org/wiki/Panda_Bear_(musician)',
+            thumbnail: { source: 'https://images.example/panda-bear-900.jpg' },
+          },
+        },
+      },
+    });
+  };
+
+  const panda = await fetchArtistFacts('Panda Bear');
+  assert.ok(panda, 'Panda Bear should resolve to the musician, not the cached animal');
+  assert.equal(panda.title, 'Panda Bear (musician)');
+  assert.ok(
+    requestedUrls.some((url) => url.includes('Panda+Bear+%28musician%29')),
+    'artist facts should proactively try musician disambiguation before trusting ambiguous direct pages',
+  );
+
+  storage.clear();
+  requestedUrls.length = 0;
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(String(url));
+    const parsed = new URL(String(url));
+    if (!parsed.searchParams.has('generator')) {
+      return jsonResponse({ query: { pages: { '-1': { title: 'Missing' } } } });
+    }
+    return jsonResponse({
+      query: {
+        pages: {
+          5: {
+            title: 'Phoenix',
+            description: 'capital city of Arizona',
+            extract: 'Phoenix is a city with museums, sports, and a large live music scene.',
+            fullurl: 'https://en.wikipedia.org/wiki/Phoenix,_Arizona',
+          },
+          6: {
+            title: 'Phoenix (band)',
+            description: 'French indie pop band',
+            extract: 'Phoenix are a French indie pop band from Versailles.',
+            fullurl: 'https://en.wikipedia.org/wiki/Phoenix_(band)',
+            thumbnail: { source: 'https://images.example/phoenix-900.jpg' },
+          },
+          7: {
+            title: 'Phoenix (album)',
+            description: 'album by a rock band',
+            extract: 'Phoenix is an album by a rock band.',
+            fullurl: 'https://en.wikipedia.org/wiki/Phoenix_(album)',
+          },
+        },
+      },
+    });
+  };
+
+  const phoenix = await fetchArtistFacts('Phoenix');
+  assert.ok(phoenix, 'ambiguous artist names should resolve to musician pages from multi-result search');
+  assert.equal(phoenix.title, 'Phoenix (band)');
+  assert.ok(
+    requestedUrls.some((url) => new URL(url).searchParams.get('gsrlimit') === '6'),
+    'artist facts should inspect multiple fallback candidates, not just the first search hit',
+  );
 
   console.log(
     JSON.stringify(
@@ -108,6 +218,8 @@ try {
         ok: true,
         directTitle: fact.title,
         fallbackTitle: fallback.title,
+        pandaTitle: panda.title,
+        phoenixTitle: phoenix.title,
         cachedEntries: storage.size,
         requests: requestedUrls.length,
       },

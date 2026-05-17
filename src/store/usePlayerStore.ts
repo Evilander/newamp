@@ -58,6 +58,7 @@ export type ViewMode =
   | 'podcasts'
   | 'radio'
   | 'now-playing'
+  | 'about'
   | 'settings';
 
 interface PlayerState {

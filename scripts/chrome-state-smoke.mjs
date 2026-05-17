@@ -16,6 +16,7 @@ assert.equal(settings.get().compactMode, false, 'compact deck should default to 
 assert.equal(settings.get().alwaysOnTop, false, 'always-on-top should default to off');
 assert.equal(settings.get().visualizerPreset, 'neon-waves', 'visualizer preset should default to Xbox-style Neon Waves');
 assert.equal(settings.get().firstLaunchTutorialSeen, false, 'first-launch tutorial should show by default');
+assert.equal(settings.get().textScale, 1, 'text scale should default to 100%');
 
 const compactSaved = settings.set({ compactMode: true });
 assert.equal(compactSaved.compactMode, true, 'compact deck preference should save');
@@ -36,8 +37,10 @@ assert.equal(settings.set({ visualizerPreset: 'plasma-grid' }).visualizerPreset,
 assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'neon-waves', 'visualizer preset should reject unknown values');
 assert.equal(settings.set({ firstLaunchTutorialSeen: true }).firstLaunchTutorialSeen, true, 'first-launch tutorial completion should save');
 assert.equal(new SettingsStore(settingsPath).get().firstLaunchTutorialSeen, true, 'first-launch tutorial completion should reload');
+assert.equal(settings.set({ textScale: 1.25 }).textScale, 1.25, 'text scale should save');
+assert.equal(settings.set({ textScale: 9 }).textScale, 1.35, 'text scale should clamp oversized values');
 
-const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource, startupSource, firstLaunchSource] =
+const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource, startupSource, firstLaunchSource, appVersionSource, customSkinSource, lastfmProofSource, liveServicesSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/settings.ts', import.meta.url), 'utf8'),
@@ -54,6 +57,10 @@ const [typesSource, settingsSource, storeSource, appSource, titleBarSource, comp
     readFile(new URL('./release-gate.mjs', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/StartupSplash.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/FirstLaunchTutorial.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../shared/app-version.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../shared/custom-skin.ts', import.meta.url), 'utf8'),
+    readFile(new URL('./lastfm-live-proof.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('./live-services-readiness-smoke.mjs', import.meta.url), 'utf8'),
   ]);
 
 assert.match(typesSource, /compactMode: boolean/, 'AppSettings should include compact deck persistence');
@@ -80,10 +87,23 @@ assert.match(storeSource, /setSettings\(\{ visualizerPreset: name \}\)/, 'player
 assert.match(appSource, /winctl\.setCompact\(compact\)/, 'renderer should sync compact mode to the native window');
 assert.match(appSource, /winctl\.setAlwaysOnTop\(compact \|\| alwaysOnTop\)/, 'renderer should sync pinned/native topmost state');
 assert.match(appSource, /\{fullscreen && <FullscreenVisualizer \/>\}/, 'fullscreen visualizer should render outside app chrome');
-assert.match(appSource, /StartupSplash/, 'app should show the Newamp logo on launch');
+assert.match(appSource, /StartupSplash/, 'app should show the NewAmp logo on launch');
 assert.match(appSource, /FirstLaunchTutorial/, 'app should show first-launch tutorial');
-assert.match(appSource, /setShowSplash\(false\), 2600/, 'startup logo animation should remain visible long enough to see');
-assert.match(startupSource, /BrandLogo size=\{220\}/, 'startup splash should use the large current Newamp logo');
+assert.match(appSource, /setShowSplash\(false\), 3600/, 'startup logo animation should remain visible long enough to see');
+assert.match(startupSource, /BrandLogo size=\{220\}/, 'startup splash should use the large current NewAmp logo');
+assert.match(appSource, /AboutView/, 'app should expose an About view');
+assert.match(settingsSource, /textScale/, 'settings should persist global text scale');
+assert.match(appSource, /--newamp-text-scale/, 'app should apply persisted text scale to the document');
+assert.match(packageSource, /"productName": "NewAmp"/, 'package product name should use NewAmp casing');
+assert.equal(packageSource.includes('\u00e2'), false, 'package metadata should not contain mojibake text');
+assert.match(mainSource, /'NewAmp', 'session-data'/, 'normal session data should use current NewAmp casing');
+assert.match(customSkinSource, /NewAmp Custom/, 'custom skin defaults should use current NewAmp casing');
+assert.match(customSkinSource, /valid NewAmp custom skin/, 'custom skin errors should use current NewAmp casing');
+assert.match(lastfmProofSource, /'NewAmp', 'settings\.json'/, 'Last.fm proof should check current NewAmp settings path');
+assert.match(liveServicesSource, /'NewAmp', 'settings\.json'/, 'live service proof should check current NewAmp settings path');
+const packageVersion = JSON.parse(packageSource).version;
+assert.match(appVersionSource, new RegExp(`NEWAMP_VERSION = '${escapeRegExp(packageVersion)}'`), 'shared app version should match package.json');
+assert.match(appVersionSource, /NewAmp\/\$\{NEWAMP_VERSION\}/, 'shared user agent should use current NewAmp casing');
 assert.match(firstLaunchSource, /data-newamp-first-launch-tutorial/, 'first-launch tutorial should expose a stable UI marker');
 assert.match(firstLaunchSource, /data-newamp-openai-key-prompt/, 'first-launch tutorial should prompt for a ChatGPT API key');
 assert.match(storeSource, /fullscreenViz: on \? false : get\(\)\.fullscreenViz/, 'entering compact deck should clear fullscreen visualizer state');
@@ -97,7 +117,7 @@ assert.match(titleBarSource, /PIN/, 'title bar should expose a pin button');
 assert.match(titleBarSource, /setAlwaysOnTop\(!alwaysOnTop\)/, 'title bar pin should toggle persisted topmost state');
 assert.match(compactSource, /onSetAlwaysOnTop: setAlwaysOnTop/, 'compact deck should expose the same pin toggle');
 assert.match(compactSource, /setCompact\(true, deck\.size\)/, 'compact deck should force the native window to the selected skin size');
-assert.match(mainSource, /resolveTrayIconImage/, 'tray should use the packaged Newamp logo/icon asset');
+assert.match(mainSource, /resolveTrayIconImage/, 'tray should use the packaged NewAmp logo/icon asset');
 assert.doesNotMatch(packageSource, /generate-icon\.mjs/, 'package scripts must not regenerate and overwrite custom icons');
 assert.match(titleBarSource, /api\.appVersion/, 'title bar should display the real app version');
 assert.doesNotMatch(titleBarSource, /v0\.1/, 'title bar should not show stale pre-release version text');
@@ -122,3 +142,7 @@ console.log(
     2,
   ),
 );
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

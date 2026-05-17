@@ -9,7 +9,7 @@ const smokeRoot = resolve('tmp', 'packaged-open-files-smoke');
 const userData = join(smokeRoot, 'user-data');
 const mediaDir = join(smokeRoot, 'media');
 const fixturePath = join(mediaDir, 'Newamp Packaged Open File Smoke.mp3');
-const exePath = resolve('release', 'win-unpacked', 'Newamp.exe');
+const exePath = resolve('release', 'win-unpacked', 'NewAmp.exe');
 const marker = '[newamp-ui-open-file-smoke] ';
 
 if (!ffmpeg) {

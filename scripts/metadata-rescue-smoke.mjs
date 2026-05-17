@@ -10,7 +10,7 @@ const smokeRoot = join(repoRoot, 'tmp', 'metadata-rescue-smoke');
 const musicRoot = join(smokeRoot, 'music');
 const dbPath = join(smokeRoot, 'library.db');
 const packageMeta = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
-const expectedNewampUserAgent = new RegExp(`Newamp/${escapeRegExp(String(packageMeta.version))}`);
+const expectedNewampUserAgent = new RegExp(`NewAmp/${escapeRegExp(String(packageMeta.version))}`);
 
 await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(musicRoot, { recursive: true });

@@ -25,9 +25,9 @@ export function defaultLastfmLiveProofArtifacts(root = repoRoot) {
   const version = appVersion(root);
   const bundlePaths = releaseBundlePaths({ root, version });
   return [
-    { name: 'installer', path: resolve(root, 'release', `Newamp Setup ${version}.exe`) },
-    { name: 'portable', path: resolve(root, 'release', `Newamp Portable ${version}.exe`) },
-    { name: 'exe', path: resolve(root, 'release', 'win-unpacked', 'Newamp.exe') },
+    { name: 'installer', path: resolve(root, 'release', `NewAmp Setup ${version}.exe`) },
+    { name: 'portable', path: resolve(root, 'release', `NewAmp Portable ${version}.exe`) },
+    { name: 'exe', path: resolve(root, 'release', 'win-unpacked', 'NewAmp.exe') },
     { name: 'checksums', path: releaseChecksumsPath({ root }) },
     { name: 'source', path: bundlePaths.sourceZip },
     { name: 'manifest', path: bundlePaths.manifest },
@@ -55,7 +55,7 @@ export async function startLastfmLiveProof({
     authUrl: auth.authUrl,
     token: auth.token,
     credentialSources: credentials.sources,
-    nextStep: 'Open authUrl, approve Newamp in Last.fm, then run npm run release:record-lastfm-proof -- --token=<token> --confirm-live-write',
+    nextStep: 'Open authUrl, approve NewAmp in Last.fm, then run npm run release:record-lastfm-proof -- --token=<token> --confirm-live-write',
   };
 }
 
@@ -99,7 +99,7 @@ export async function recordLastfmLiveProof({
 
   const proof = {
     schemaVersion: 1,
-    app: 'Newamp',
+    app: 'NewAmp',
     createdAt: new Date().toISOString(),
     platform: process.platform,
     username: session.username,
@@ -202,16 +202,19 @@ export function lastfmSettingsPathCandidates(env = process.env) {
   if (process.platform === 'win32') {
     if (env.APPDATA) {
       candidates.push(join(env.APPDATA, 'newamp', 'settings.json'));
+      candidates.push(join(env.APPDATA, 'NewAmp', 'settings.json'));
       candidates.push(join(env.APPDATA, 'Newamp', 'settings.json'));
     }
     if (env.LOCALAPPDATA) {
       candidates.push(join(env.LOCALAPPDATA, 'newamp', 'settings.json'));
+      candidates.push(join(env.LOCALAPPDATA, 'NewAmp', 'settings.json'));
       candidates.push(join(env.LOCALAPPDATA, 'Newamp', 'settings.json'));
     }
   } else {
     const home = env.HOME;
     if (home) {
       candidates.push(join(home, '.config', 'newamp', 'settings.json'));
+      candidates.push(join(home, '.config', 'NewAmp', 'settings.json'));
       candidates.push(join(home, '.config', 'Newamp', 'settings.json'));
     }
   }

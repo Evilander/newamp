@@ -18,7 +18,7 @@
 
 ## What it is
 
-NewAmp is a desktop music player for people who actually own their music. It indexes a local folder of MP3 / FLAC / OGG / Opus / WAV / M4A / AAC / WMA / AIFF / APE / WV / MPC and gives you a player that feels like a piece of hardware — not a subscription dashboard.
+NewAmp is a local-first Windows music player for people who actually own their music. It indexes a local folder of MP3 / FLAC / OGG / Opus / WAV / M4A / AAC / WMA / AIFF / APE / WV / MPC and gives you a player that feels like a piece of hardware — not a subscription dashboard.
 
 It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on your machine, and never phones home.
 
@@ -30,9 +30,15 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 - **0–100 decimal track scoring** — Drag, scroll-wheel, keyboard-nudge, or double-click to type `88.3`. Stars stay in sync for legacy sorts and smart rules
 - **0–200% volume** with a red-zone past unity — VLC-style amp boost, full `0 dB / +6 dB` tick labels, runs after the master limiter so it amplifies without clipping
 - **Magazine-style Home** — greeting hero with blurred album backdrop, Today's Pick (high-rated track you haven't played in 6+ weeks, with a reason chip), Your Highest Rated rail, NewAmp News editorial card, Listening Stats This Week, plus the classic Harmonic / Taste / Loved / Heavy Rotation / Fresh Imports rails
-- **Bloomberg-density Now Playing** with a tabbed side panel (On Air / Studio / Lyrics), draggable spectrum-split, spectrum + VU + waveform overview, LRCLIB-synced lyrics, optional karaoke mode, custom-lyrics editor, tempo trainer, practice A/B loop, track bookmarks
+- **Bloomberg-density Now Playing** with a tabbed side panel (On Air / Album / Lyrics), draggable spectrum-split, selectable spectrum styles, VU + waveform overview, LRCLIB-synced lyrics, optional karaoke mode, custom-lyrics editor, tempo trainer, practice A/B loop, track bookmarks
+- **Milkdrop visualizer + Xbox-inspired fullscreen modes** — Butterchurn presets, spectrum modes, aurora, plasma grid, and neon ribbon renderers built for 4K fullscreen use
 - **Auto DJ + smart playlists** — BPM/key-aware harmonic mixes, taste-learning from plays/loves/ratings/skips, smart rules with min-rating filters
-- **Audiophile chain** — WASAPI output, ReplayGain (per-track + per-album), software limiter, 10-band EQ, lossless WAV export of any track, output-device picker with test tone
+- **Album art rescue + Metadata rescue** — embedded art, folder art, Cover Art Archive, MusicBrainz lookup, and manual cleanup tools for rough local libraries
+- **Artist facts and images** — musician-first artist context and large artist images without confusing bands for species, cities, albums, or other same-name pages
+- **Custom playlists** — create named playlists, reorder tracks, export portable folders, and pick or drop playlist artwork for the playlist icon
+- **Native guitar tab companion** — cache local/Ultimate Guitar-style tabs and pop out a native tab window when a playable match exists
+- **Audiophile chain** — WASAPI output, ReplayGain (per-track + per-album), crossfade/gapless playback checks, software limiter, 10-band EQ, lossless WAV export of any track, output-device picker with test tone
+- **CUE sheet playback** — one-file albums split into playable, seekable tracks with performer/title/year/genre metadata
 - **Last.fm** — full scrobbling + now-playing + offline outbox queue
 - **Local-first** — SQLite library, sql.js, no account, no telemetry, no required network
 
@@ -40,8 +46,8 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 
 Grab the latest from [**Releases**](https://github.com/evilander/newamp/releases):
 
-- **`Newamp Setup 1.1.0.exe`** — NSIS installer, registers file associations for 16 audio formats + 4 playlist formats
-- **`Newamp Portable 1.1.0.exe`** — single-file portable, no install, no registry writes
+- **`NewAmp Setup 1.1.1.exe`** — NSIS installer, registers file associations for 16 audio formats + 4 playlist formats
+- **`NewAmp Portable 1.1.1.exe`** — single-file portable, no install, no registry writes
 
 All artifacts are listed with SHA256 hashes in `SHA256SUMS.txt`.
 
@@ -93,7 +99,7 @@ npm run dev                  # development with hot reload
 Build a production installer:
 
 ```powershell
-npm run package              # produces release/Newamp Setup *.exe + Newamp Portable *.exe + SHA256SUMS.txt
+npm run package              # produces release/NewAmp Setup *.exe + NewAmp Portable *.exe + SHA256SUMS.txt
 npm run package:installer    # NSIS only
 npm run package:portable     # portable .exe only
 ```
@@ -104,7 +110,19 @@ Run the full smoke suite (~80 smokes, several minutes):
 npm run release:gate:local
 ```
 
+Release proof helpers:
+
+```powershell
+npm run release:start-lastfm-proof
+npm run release:record-lastfm-proof -- --token=<token> --confirm-live-write
+npm run release:check-lastfm-proof
+npm run release:start-listening-proof
+npm run release:record-listening-proof -- --confirm-playback --confirm-output-switching --confirm-crossfade --confirm-gapless
+```
+
 ## Keyboard shortcuts
+
+Winamp-style keyboard controls are available anywhere outside text fields:
 
 | Shortcut          | Action                              |
 | ----------------- | ----------------------------------- |
@@ -152,7 +170,7 @@ newamp/
 ## Privacy
 
 - No telemetry. No analytics. No crash reporters that phone home.
-- Library, settings, ratings, bookmarks, and history live in your OS user profile under `%APPDATA%/Newamp`.
+- Library, settings, ratings, bookmarks, and history live in your OS user profile under `%APPDATA%/NewAmp`.
 - Last.fm scrobbling is opt-in and uses your own API credentials; tokens are stored hashed in the release proof manifest.
 - Synced lyrics fetched from LRCLIB are anonymous lookups by artist + title + duration.
 
