@@ -74,6 +74,11 @@ assert.equal(
 
 const artifactStat = statSync(exePath);
 const stderrAnalysis = analyzeStderr(stderr);
+assert.deepEqual(
+  stderrAnalysis.unexpected,
+  [],
+  diagnostic('packaged app should not write unexpected stderr during normal launch'),
+);
 const report = {
   ok: true,
   minAliveMs,
@@ -183,7 +188,10 @@ function analyzeStderr(raw) {
   for (const line of raw.trim().split(/\r?\n/).filter(Boolean)) {
     if (isExpectedPackagedLaunchWarning(line) || (acceptingTrayStack && /^\s+at\s/.test(line))) {
       accepted.push(line);
-      acceptingTrayStack = line.includes('[newamp] tray icon unavailable') || (acceptingTrayStack && /^\s+at\s/.test(line));
+      acceptingTrayStack =
+        line.includes('[newamp] tray icon unavailable') ||
+        line.includes('[newamp] tray icon bounds unavailable') ||
+        (acceptingTrayStack && /^\s+at\s/.test(line));
       continue;
     }
     acceptingTrayStack = false;

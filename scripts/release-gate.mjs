@@ -354,9 +354,10 @@ function runPackagedStartupSmoke() {
   const stdout = (result.stdout ?? '').trim();
   const stderr = (result.stderr ?? '').trim();
   const stderrAnalysis = analyzePackagedLaunchStderr(stderr);
+  const ok = result.status === 0 && !result.error && stdout.includes(startupMarker) && stderrAnalysis.unexpected.length === 0;
   return {
     name: 'packaged-startup-smoke',
-    ok: result.status === 0 && !result.error && stdout.includes(startupMarker),
+    ok,
     exitCode: result.status,
     error: result.error?.message ?? null,
     requiredStdout: startupMarker,
@@ -414,7 +415,7 @@ async function runPackagedNormalLaunchSmoke() {
   }
 
   const elapsedMs = Date.now() - started;
-  const ok = !spawnError && exitCode === null && elapsedMs >= minAliveMs;
+  const aliveLongEnough = !spawnError && exitCode === null && elapsedMs >= minAliveMs;
   if (exitCode === null) {
     cleanupProcessTree(child.pid);
     await waitForChildExit(child, () => exitCode !== null, 2000);
@@ -427,6 +428,7 @@ async function runPackagedNormalLaunchSmoke() {
     child.unref();
   }
   const stderrAnalysis = analyzePackagedLaunchStderr(stderr);
+  const ok = aliveLongEnough && stderrAnalysis.unexpected.length === 0;
   return {
     name: 'packaged-normal-launch-smoke',
     ok,
@@ -439,7 +441,11 @@ async function runPackagedNormalLaunchSmoke() {
     stderr: stderrAnalysis.unexpected.join('\n').slice(-1200),
     acceptedStderr: stderrAnalysis.accepted,
     unexpectedStderr: stderrAnalysis.unexpected,
-    reason: ok ? null : `exited before ${minAliveMs}ms`,
+    reason: ok
+      ? null
+      : stderrAnalysis.unexpected.length
+        ? `unexpected stderr during normal launch: ${stderrAnalysis.unexpected.slice(-3).join(' | ')}`
+        : `exited before ${minAliveMs}ms`,
   };
 }
 
@@ -450,7 +456,10 @@ function analyzePackagedLaunchStderr(raw) {
   for (const line of raw.trim().split(/\r?\n/).filter(Boolean)) {
     if (isExpectedPackagedLaunchWarning(line) || (acceptingTrayStack && /^\s+at\s/.test(line))) {
       accepted.push(line);
-      acceptingTrayStack = line.includes('[newamp] tray icon unavailable') || (acceptingTrayStack && /^\s+at\s/.test(line));
+      acceptingTrayStack =
+        line.includes('[newamp] tray icon unavailable') ||
+        line.includes('[newamp] tray icon bounds unavailable') ||
+        (acceptingTrayStack && /^\s+at\s/.test(line));
       continue;
     }
     acceptingTrayStack = false;
