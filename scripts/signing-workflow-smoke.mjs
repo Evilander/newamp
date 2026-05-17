@@ -14,8 +14,15 @@ assert.ok(existsSync(signScriptPath), 'scripts/sign-artifacts.mjs should exist')
 const {
   buildSigningPlan,
   defaultSigningArtifacts,
+  postSignRefreshCommands,
   signArtifacts,
 } = await import('./sign-artifacts.mjs');
+
+assert.deepEqual(
+  postSignRefreshCommands,
+  ['npm run release:checksums', 'npm run release:provenance', 'npm run release:bundle'],
+  'signing should refresh release metadata after artifact bytes change',
+);
 
 const smokeRoot = join(repoRoot, 'tmp', 'signing-workflow-smoke');
 await rm(smokeRoot, { recursive: true, force: true });
@@ -60,6 +67,8 @@ const pfxPlan = buildSigningPlan({
 assert.equal(pfxPlan.ok, true, pfxPlan.reason);
 assert.equal(pfxPlan.mode, 'pfx');
 assert.equal(pfxPlan.commands.length, 3);
+assert.equal(pfxPlan.postSignRefresh.required, true);
+assert.deepEqual(pfxPlan.postSignRefresh.commands, postSignRefreshCommands);
 assert.ok(pfxPlan.commands.every((command) => command.displayArgs.includes('<redacted>')), 'display args should redact certificate password');
 assert.ok(!JSON.stringify(pfxPlan).includes('super-secret-password'), 'signing plan must not expose certificate password');
 assert.ok(pfxPlan.commands.every((command) => command.artifact?.sha256), 'dry-run plan should fingerprint artifacts');
@@ -110,12 +119,15 @@ const dryRun = signArtifacts({
 assert.equal(dryRun.ok, true);
 assert.equal(dryRun.executed, false);
 assert.equal(dryRun.commands.length, 3);
+assert.equal(dryRun.postSignRefresh.executed, false);
+assert.deepEqual(dryRun.postSignRefresh.commands, postSignRefreshCommands);
 
 console.log(JSON.stringify({
   ok: true,
   pfxCommands: pfxPlan.commands.length,
   storeMode: storePlan.mode,
   dryRunExecuted: dryRun.executed,
+  postSignRefreshCommands: postSignRefreshCommands.length,
 }, null, 2));
 
 async function readText(path) {
