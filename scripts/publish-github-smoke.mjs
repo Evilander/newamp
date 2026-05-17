@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 
 const repoRoot = resolve('.');
 const pkg = JSON.parse(await readText(join(repoRoot, 'package.json')));
+const fixtureVersion = String(pkg.version);
 const publishScriptPath = join(repoRoot, 'scripts', 'publish-github-release.mjs');
 
 assert.equal(
@@ -29,21 +30,21 @@ await rm(smokeRoot, { recursive: true, force: true });
 await rm(cleanExternalGitDir, { recursive: true, force: true });
 await mkdir(join(smokeRoot, 'release', 'win-unpacked'), { recursive: true });
 await mkdir(join(smokeRoot, 'source-fixture'), { recursive: true });
-await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
+await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: fixtureVersion }), 'utf8');
 await writeFile(join(smokeRoot, 'README.md'), '# NewAmp\n', 'utf8');
-await writeFile(join(smokeRoot, 'release', 'NewAmp Setup 1.0.0.exe'), 'installer', 'utf8');
-await writeFile(join(smokeRoot, 'release', 'NewAmp Portable 1.0.0.exe'), 'portable', 'utf8');
+await writeFile(join(smokeRoot, 'release', `NewAmp Setup ${fixtureVersion}.exe`), 'installer', 'utf8');
+await writeFile(join(smokeRoot, 'release', `NewAmp Portable ${fixtureVersion}.exe`), 'portable', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'win-unpacked', 'NewAmp.exe'), 'exe', 'utf8');
 await writeFile(join(smokeRoot, 'source-fixture', 'README.md'), '# NewAmp source fixture\n', 'utf8');
 compressDirectoryToZip(
   join(smokeRoot, 'source-fixture'),
-  join(smokeRoot, 'release', 'NewAmp-1.0.0-source.zip'),
+  join(smokeRoot, 'release', `NewAmp-${fixtureVersion}-source.zip`),
 );
-writeReleaseChecksums({ root: smokeRoot, version: '1.0.0' });
-writeBuildProvenance({ root: smokeRoot, version: '1.0.0' });
+writeReleaseChecksums({ root: smokeRoot, version: fixtureVersion });
+writeBuildProvenance({ root: smokeRoot, version: fixtureVersion });
 const bundle = createReleaseBundle({
   root: smokeRoot,
-  version: '1.0.0',
+  version: fixtureVersion,
   createSourceArchive: false,
   verifyChecksums: false,
 });
@@ -55,14 +56,14 @@ const plan = buildGithubPublishPlan({
 });
 assert.equal(plan.ok, true, plan.reason);
 assert.equal(plan.repo, 'evilander/newamp');
-assert.equal(plan.tag, 'v1.0.0');
+assert.equal(plan.tag, `v${fixtureVersion}`);
 assert.ok(plan.commands.some((command) => command.label === 'ensure-repo'));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.includes('--repo')));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /SHA256SUMS\.txt$/.test(arg))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /BUILD-PROVENANCE\.json$/.test(arg))));
-assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /NewAmp-1\.0\.0-source\.zip$/.test(arg))));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => arg.endsWith(`NewAmp-${fixtureVersion}-source.zip`))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /RELEASE-MANIFEST\.json$/.test(arg))));
-assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /NewAmp-1\.0\.0-release-bundle\.zip$/.test(arg))));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => arg.endsWith(`NewAmp-${fixtureVersion}-release-bundle.zip`))));
 assert.ok(plan.commands.every((command) => !command.commandLine.includes('\n')));
 const pushMainCommand = plan.commands.find((command) => command.label === 'push-main');
 assert.ok(pushMainCommand, 'publish plan should push main');
@@ -73,12 +74,12 @@ if (process.platform === 'win32') {
     'Windows publish git commands should avoid schannel credential-provider failures',
   );
 }
-assert.match(JSON.stringify(plan), /NewAmp Setup 1\.0\.0\.exe/);
-assert.match(JSON.stringify(plan), /NewAmp Portable 1\.0\.0\.exe/);
+assert.ok(JSON.stringify(plan).includes(`NewAmp Setup ${fixtureVersion}.exe`));
+assert.ok(JSON.stringify(plan).includes(`NewAmp Portable ${fixtureVersion}.exe`));
 assert.match(JSON.stringify(plan), /SHA256SUMS\.txt/);
 assert.match(JSON.stringify(plan), /BUILD-PROVENANCE\.json/);
 assert.match(JSON.stringify(plan), /RELEASE-MANIFEST\.json/);
-assert.match(JSON.stringify(plan), /NewAmp-1\.0\.0-release-bundle\.zip/);
+assert.ok(JSON.stringify(plan).includes(`NewAmp-${fixtureVersion}-release-bundle.zip`));
 
 const dryRun = publishGithubRelease({
   root: smokeRoot,
@@ -164,7 +165,7 @@ assert.equal(retargetOriginPlan.ok, true, retargetOriginPlan.reason);
 assert.ok(retargetOriginPlan.commands.some((command) => command.label === 'set-origin'));
 assert.ok(!retargetOriginPlan.commands.some((command) => command.label === 'add-origin'));
 
-run('git', ['--git-dir', cleanExternalGitDir, '--work-tree', smokeRoot, 'tag', 'v1.0.0'], repoRoot);
+run('git', ['--git-dir', cleanExternalGitDir, '--work-tree', smokeRoot, 'tag', `v${fixtureVersion}`], repoRoot);
 const existingTagPlan = buildGithubPublishPlan({
   root: smokeRoot,
   env: { NEWAMP_GIT_DIR: cleanExternalGitDir },
