@@ -33,6 +33,8 @@ const AUDIO_EXTS = new Set([
 const METADATA_OPTIONS: IOptions = { duration: true, skipCovers: false, skipPostHeaders: true };
 const DISCOVERY_CONCURRENCY = 4;
 const DISCOVERY_PROGRESS_INTERVAL = 200;
+const METADATA_BATCH_SIZE = 128;
+const METADATA_CONCURRENCY = 8;
 
 patchTokenizerNegativeIgnore();
 
@@ -130,7 +132,12 @@ function mimeFromExt(p: string): string {
   return 'image/jpeg';
 }
 
-async function readMeta(full: string, size: number, mtime: number): Promise<IncomingTrack> {
+async function readMeta(
+  full: string,
+  size: number,
+  mtime: number,
+  folderArtForFile: (filePath: string) => Promise<ArtBlob | null> = (filePath) => readFolderArtFile(dirname(filePath)),
+): Promise<IncomingTrack> {
   let title = basename(full, extname(full));
   let artist = 'Unknown Artist';
   let album = '';
@@ -177,16 +184,7 @@ async function readMeta(full: string, size: number, mtime: number): Promise<Inco
   }
 
   if (!art) {
-    // Folder-level cover fallback
-    const folderArt = await pickFolderArtFile(dirname(full));
-    if (folderArt) {
-      try {
-        const data = await fs.readFile(folderArt);
-        art = { mime: mimeFromExt(folderArt), data };
-      } catch {
-        /* ignore */
-      }
-    }
+    art = await folderArtForFile(full);
   }
 
   return {
@@ -210,6 +208,21 @@ async function readMeta(full: string, size: number, mtime: number): Promise<Inco
     mtime: Math.round(mtime),
     art,
   };
+}
+
+async function readFolderArtFile(dir: string): Promise<ArtBlob | null> {
+  const folderArt = await pickFolderArtFile(dir);
+  if (!folderArt) return null;
+  return readArtBlob(folderArt);
+}
+
+async function readArtBlob(path: string): Promise<ArtBlob | null> {
+  try {
+    const data = await fs.readFile(path);
+    return { mime: mimeFromExt(path), data };
+  } catch {
+    return null;
+  }
 }
 
 async function parseMetadata(full: string): Promise<IAudioMetadata> {
@@ -312,37 +325,47 @@ export class Scanner {
 
       const total = discovered.length;
       let scanned = 0;
-      const BATCH = 32;
-      const CONC = 6;
       const existing = options.force
         ? new Map<string, TrackFileState>()
         : this.library.getTrackFileStates(discovered.map((f) => f.full));
-      const folderArtCache = new Map<string, Promise<boolean>>();
-      const hasFolderArt = (filePath: string): Promise<boolean> => {
+      const folderArtPathCache = new Map<string, Promise<string | null>>();
+      const folderArtBlobCache = new Map<string, Promise<ArtBlob | null>>();
+      const folderArtPathForFile = (filePath: string): Promise<string | null> => {
         const dir = dirname(filePath);
-        let cached = folderArtCache.get(dir);
+        let cached = folderArtPathCache.get(dir);
         if (!cached) {
-          cached = pickFolderArtFile(dir).then(Boolean);
-          folderArtCache.set(dir, cached);
+          cached = pickFolderArtFile(dir);
+          folderArtPathCache.set(dir, cached);
+        }
+        return cached;
+      };
+      const hasFolderArt = async (filePath: string): Promise<boolean> => Boolean(await folderArtPathForFile(filePath));
+      const folderArtForFile = async (filePath: string): Promise<ArtBlob | null> => {
+        const artPath = await folderArtPathForFile(filePath);
+        if (!artPath) return null;
+        let cached = folderArtBlobCache.get(artPath);
+        if (!cached) {
+          cached = readArtBlob(artPath);
+          folderArtBlobCache.set(artPath, cached);
         }
         return cached;
       };
 
-      for (let i = 0; i < discovered.length; i += BATCH) {
+      for (let i = 0; i < discovered.length; i += METADATA_BATCH_SIZE) {
         if (this.cancelled) return;
-        const slice = discovered.slice(i, i + BATCH);
+        const slice = discovered.slice(i, i + METADATA_BATCH_SIZE);
         const changed = options.force
           ? slice
-          : await pMap(slice, CONC, async (f) =>
+          : await pMap(slice, METADATA_CONCURRENCY, async (f) =>
               (await needsMetadataRefresh(f, existing.get(f.full), hasFolderArt)) ? f : null,
             ).then((rows) =>
               rows.filter((row): row is { full: string; size: number; mtime: number } => !!row),
             );
         skipped += slice.length - changed.length;
 
-        const incoming = await pMap(changed, CONC, async (f) => {
+        const incoming = await pMap(changed, METADATA_CONCURRENCY, async (f) => {
           try {
-            return await readMeta(f.full, f.size, f.mtime);
+            return await readMeta(f.full, f.size, f.mtime, folderArtForFile);
           } catch (err) {
             console.warn(`[newamp] metadata parse failed for ${f.full}: ${errorMessage(err)}`);
             return fallbackTrack(f.full, f.size, f.mtime);

@@ -55,6 +55,8 @@ try {
   ]);
   assert.match(scannerSource, /scanQueue/, 'scanner should serialize start requests through a queue');
   assert.match(scannerSource, /DISCOVERY_CONCURRENCY/, 'scanner should discover multiple configured roots concurrently');
+  assert.match(scannerSource, /METADATA_BATCH_SIZE\s*=\s*128/, 'scanner should batch metadata writes for large libraries');
+  assert.match(scannerSource, /folderArtBlobCache/, 'scanner should reuse folder cover bytes across album tracks');
   assert.match(mainSource, /return scanner\.start\(targets\)/, 'library scan IPC should resolve after the queued scan finishes');
   assert.match(packageSource, /smoke:scanner-queue/, 'package scripts should expose scanner queue smoke');
 

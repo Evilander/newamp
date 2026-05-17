@@ -592,11 +592,18 @@ export class LibraryStore {
            has_art=excluded.has_art,
            art_hash=excluded.art_hash`,
       );
+      const artHashCache = new WeakMap<Buffer, string>();
+      const writtenArtHashes = new Set<string>();
       for (const r of items) {
         let artHash: string | null = null;
         if (r.art && r.art.data.length) {
-          artHash = createHash('sha1').update(r.art.data).digest('hex');
-          this.writeArtIfMissing(artHash, r.art);
+          const cachedHash = artHashCache.get(r.art.data);
+          artHash = cachedHash ?? createHash('sha1').update(r.art.data).digest('hex');
+          if (!cachedHash) artHashCache.set(r.art.data, artHash);
+          if (!writtenArtHashes.has(artHash)) {
+            this.writeArtIfMissing(artHash, r.art);
+            writtenArtHashes.add(artHash);
+          }
         }
         stmt.run([
           r.path,
