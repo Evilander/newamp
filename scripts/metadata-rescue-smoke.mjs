@@ -154,8 +154,23 @@ assert.match(libraryViewSource, /AUTO NUMBER SELECTED/, 'selected-track toolbar 
 assert.match(libraryViewSource, /trackNo: index \+ 1/, 'auto-numbering should assign track numbers from visible selection order');
 assert.match(
   libraryViewSource,
-  /applyMetadataCandidate[\s\S]+api\.getStats\(\)\.then\(setStats\)/,
-  'applying a metadata patch should refresh Library stats without needing a rescan',
+  /summaryRefreshKey[\s\S]+api\.getStats\(\)[\s\S]+api\.getLibraryHealth\(\)/,
+  'Library summary refreshes should reload stats and health without needing a rescan',
+);
+assert.match(
+  libraryViewSource,
+  /applyMetadataCandidate[\s\S]+refreshLibrarySummary\(\)/,
+  'applying a metadata lookup candidate should refresh Library stats without needing a rescan',
+);
+assert.match(
+  libraryViewSource,
+  /applyManualMetadataEdit[\s\S]+refreshLibrarySummary\(\)/,
+  'manual metadata edits should refresh Library stats without needing a rescan',
+);
+assert.match(
+  libraryViewSource,
+  /applyBulkMetadataResults[\s\S]+refreshLibrarySummary\(\)/,
+  'bulk metadata edits should refresh Library stats without needing a rescan',
 );
 
 console.log(JSON.stringify({

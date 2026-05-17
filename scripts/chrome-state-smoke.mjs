@@ -89,7 +89,12 @@ assert.match(storeSource, /vizPreset: settings\.visualizerPreset/, 'player store
 assert.match(storeSource, /setSettings\(\{ visualizerPreset: name \}\)/, 'player store should persist visualizer preset changes');
 assert.match(appSource, /winctl\.setCompact\(compact\)/, 'renderer should sync compact mode to the native window');
 assert.match(appSource, /winctl\.setAlwaysOnTop\(compact \|\| alwaysOnTop\)/, 'renderer should sync pinned/native topmost state');
-assert.match(appSource, /\{fullscreen && <FullscreenVisualizer \/>\}/, 'fullscreen visualizer should render outside app chrome');
+assert.match(appSource, /const FullscreenVisualizer = lazy/, 'fullscreen visualizer should be lazy-loaded off the startup path');
+assert.match(
+  appSource,
+  /\{fullscreen && \(\s*<Suspense fallback=\{null\}>\s*<FullscreenVisualizer \/>\s*<\/Suspense>\s*\)\}/,
+  'fullscreen visualizer should render outside app chrome',
+);
 assert.match(appSource, /StartupSplash/, 'app should show the NewAmp logo on launch');
 assert.match(appSource, /FirstLaunchTutorial/, 'app should show first-launch tutorial');
 assert.match(appSource, /setShowSplash\(false\), 3600/, 'startup logo animation should remain visible long enough to see');
