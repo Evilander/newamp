@@ -982,6 +982,8 @@ export class LibraryStore {
     const offset = summaryQueryOffset(opts.offset);
     const where = ['album != \'\''];
     const params: unknown[] = [];
+    const having: string[] = [];
+    const havingParams: unknown[] = [];
 
     if (search) {
       const q = likeParam(search);
@@ -990,6 +992,24 @@ export class LibraryStore {
       );
       params.push(q, q, q);
     }
+    if (typeof opts.excludeAlbum === 'string' && opts.excludeAlbum.trim()) {
+      const excludeAlbum = opts.excludeAlbum.trim();
+      const excludeAlbumArtist = String(opts.excludeAlbumArtist ?? '').trim();
+      if (excludeAlbumArtist) {
+        where.push('NOT (album = ? AND COALESCE(NULLIF(album_artist,\'\'), artist) = ?)');
+        params.push(excludeAlbum, excludeAlbumArtist);
+      } else {
+        where.push('album != ?');
+        params.push(excludeAlbum);
+      }
+    }
+    if (Number.isFinite(opts.year)) {
+      const year = Math.trunc(Number(opts.year));
+      const yearWindow = Math.max(0, Math.min(Math.trunc(Number(opts.yearWindow ?? 0)), 10));
+      having.push('MIN(year) IS NOT NULL AND ABS(MIN(year) - ?) <= ?');
+      havingParams.push(year, yearWindow);
+    }
+    const havingSql = having.length ? `HAVING ${having.join(' AND ')}` : '';
 
     const rows = this.many<{
       album: string;
@@ -1008,9 +1028,10 @@ export class LibraryStore {
          FROM tracks t
         WHERE ${where.join(' AND ')}
         GROUP BY album, COALESCE(NULLIF(album_artist,''), artist)
+        ${havingSql}
         ORDER BY album_artist COLLATE NOCASE, year, album COLLATE NOCASE
         LIMIT ? OFFSET ?`,
-      [...params, limit, offset],
+      [...params, ...havingParams, limit, offset],
     );
     return rows.map((r) => ({
       album: r.album,

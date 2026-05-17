@@ -1322,13 +1322,23 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
 
     const ctrl = new AbortController();
     setStatus('loading');
-    Promise.all([
-      api.getAlbumTracks(album, albumArtist).catch(() => []),
-      api.getAlbums().catch(() => []),
-      fetchAlbumFacts(album, albumArtist, ctrl.signal).catch(() => null),
-    ]).then(([tracks, albums, nextFact]) => {
+    void (async () => {
+      const [tracks, nextFact] = await Promise.all([
+        api.getAlbumTracks(album, albumArtist).catch(() => []),
+        fetchAlbumFacts(album, albumArtist, ctrl.signal).catch(() => null),
+      ]);
       if (ctrl.signal.aborted) return;
       const albumYear = deferredTrack.year ?? tracks.find((item) => item.year)?.year ?? null;
+      const albums = albumYear == null
+        ? []
+        : await api.getAlbums({
+          year: albumYear,
+          yearWindow: 1,
+          excludeAlbum: album,
+          excludeAlbumArtist: albumArtist,
+          limit: 5,
+        }).catch(() => []);
+      if (ctrl.signal.aborted) return;
       setAlbumTracks(tracks);
       setRelatedAlbums(
         albums
@@ -1342,7 +1352,7 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
       );
       setFact(nextFact);
       setStatus(nextFact ? 'ok' : 'none');
-    });
+    })();
     return () => ctrl.abort();
   }, [deferredTrack.album, deferredTrack.albumArtist, deferredTrack.artist, deferredTrack.year]);
 
