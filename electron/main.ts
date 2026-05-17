@@ -1616,6 +1616,27 @@ function uiVisualizerProbeSource(): string {
         stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="aurora"]'),
       );
       const auroraRender = await waitFor('nonblank aurora visualizer frame', () => sampleCanvas(auroraCanvas), 8000);
+      const qualityButton = await waitFor('4K quality toggle', () =>
+        document.querySelector('[data-newamp-viz-quality-button]'),
+      );
+      qualityButton.click();
+      await waitFor('4K visualizer quality state', () =>
+        stage.getAttribute('data-newamp-visualizer-quality') === '4k',
+      );
+      const artButton = await waitFor('art overlay toggle', () =>
+        document.querySelector('[data-newamp-viz-art-button]'),
+      );
+      artButton.click();
+      await waitFor('art overlay state', () =>
+        stage.getAttribute('data-newamp-visualizer-art') === 'visible',
+      );
+      const cleanButton = await waitFor('clean visualizer toggle', () =>
+        document.querySelector('[data-newamp-viz-clean-button]'),
+      );
+      cleanButton.click();
+      await waitFor('clean visualizer chrome state', () =>
+        stage.getAttribute('data-newamp-visualizer-chrome') === 'clean',
+      );
       const currentTitle =
         document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
       const currentTime = Number(timeEl.getAttribute('data-newamp-current-time') || '0');
@@ -1652,6 +1673,9 @@ function uiVisualizerProbeSource(): string {
         openedViaVizButton: true,
         openedViaTransportArt: true,
         compactClearsFullscreen: true,
+        qualityToggle: stage.getAttribute('data-newamp-visualizer-quality'),
+        artToggle: stage.getAttribute('data-newamp-visualizer-art'),
+        chromeMode: stage.getAttribute('data-newamp-visualizer-chrome'),
       };
     })()
   `;
@@ -1684,7 +1708,7 @@ function uiDeckProbeSource(): string {
       await waitFor('windowshade compact deck', () => document.querySelector('.compact-root'));
       const shade = await waitFor('windowshade size', () => {
         const box = measure();
-        return Math.abs(box.width - 720) <= 12 && Math.abs(box.height - 152) <= 12 ? box : null;
+        return Math.abs(box.width - 820) <= 12 && Math.abs(box.height - 112) <= 12 ? box : null;
       });
       const pickSkin = async (skin) => {
         const select = await waitFor('deck skin select', () => document.querySelector('[data-newamp-deck-skin-select]'));
@@ -1719,7 +1743,7 @@ function uiDeckProbeSource(): string {
       await waitFor('windowshade deck returns', () => document.querySelector('.compact-root'));
       const shadeAgain = await waitFor('windowshade size after shape switch', () => {
         const box = measure();
-        return Math.abs(box.width - 720) <= 12 && Math.abs(box.height - 152) <= 12 ? box : null;
+        return Math.abs(box.width - 820) <= 12 && Math.abs(box.height - 112) <= 12 ? box : null;
       });
       return {
         ok: true,

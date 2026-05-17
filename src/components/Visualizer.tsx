@@ -20,12 +20,15 @@ export type VizMode =
   | 'burning-cloud'
   | 'butterchurn';
 
+export type VizQuality = 'auto' | '4k';
+
 interface Props {
   mode: VizMode;
   width?: number;
   height?: number;
   className?: string;
   artUrl?: string | null;
+  quality?: VizQuality;
 }
 
 function createFrameGate(canvasRef: RefObject<HTMLCanvasElement>, frameIntervalMs: number): (now: number) => boolean {
@@ -40,11 +43,13 @@ function createFrameGate(canvasRef: RefObject<HTMLCanvasElement>, frameIntervalM
   };
 }
 
-export function Visualizer({ mode, width, height, className, artUrl }: Props): JSX.Element {
+export function Visualizer({ mode, width, height, className, artUrl, quality = 'auto' }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engine = usePlayerStore((s) => s.engine);
   const isFullscreen = width == null && height == null && mode !== 'mini';
   const frameIntervalMs = isFullscreen ? 1000 / 60 : 1000 / 30;
+  const dprCap = isFullscreen ? (quality === '4k' ? 1.5 : 1.25) : 2;
+  const maxPixels = isFullscreen ? (quality === '4k' ? 8_300_000 : 3_700_000) : 2_000_000;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -59,7 +64,7 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
       let lastW = 0;
       let lastH = 0;
 
-      const dpr = Math.min(window.devicePixelRatio || 1, isFullscreen ? 1.25 : 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
       const canPaint = createFrameGate(canvasRef, frameIntervalMs);
 
       function ensureSize() {
@@ -67,8 +72,11 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
         if (!node) return;
         const cssW = node.clientWidth || node.width || 100;
         const cssH = node.clientHeight || node.height || 100;
-        const targetW = Math.max(8, Math.floor(cssW * dpr));
-        const targetH = Math.max(8, Math.floor(cssH * dpr));
+        const scaledW = Math.max(8, Math.floor(cssW * dpr));
+        const scaledH = Math.max(8, Math.floor(cssH * dpr));
+        const scale = Math.min(1, Math.sqrt(maxPixels / Math.max(1, scaledW * scaledH)));
+        const targetW = Math.max(8, Math.floor(scaledW * scale));
+        const targetH = Math.max(8, Math.floor(scaledH * scale));
         if (targetW === lastW && targetH === lastH) return;
         lastW = targetW;
         lastH = targetH;
@@ -143,7 +151,7 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
       };
     }
 
-    const dpr = Math.min(window.devicePixelRatio || 1, isFullscreen ? 1.25 : 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
     let raf = 0;
     let ctx: CanvasRenderingContext2D | null = null;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
@@ -155,7 +163,6 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
       if (!node) return;
       const w = node.clientWidth || node.width || 100;
       const h = node.clientHeight || node.height || 40;
-      const maxPixels = isFullscreen ? 3_700_000 : 2_000_000;
       const scaledW = Math.max(2, Math.floor(w * dpr));
       const scaledH = Math.max(2, Math.floor(h * dpr));
       const scale = Math.min(1, Math.sqrt(maxPixels / Math.max(1, scaledW * scaledH)));
@@ -638,7 +645,7 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [engine, frameIntervalMs, isFullscreen, mode]);
+  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode]);
 
   const style: CSSProperties = {};
   if (width != null) style.width = `${width}px`;
