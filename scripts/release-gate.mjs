@@ -118,7 +118,10 @@ if (realLibrary) {
   if (!existsSync(realLibraryRoot)) {
     blockers.push(`${realLibraryRoot} is unavailable, so the real-library gate could not run.`);
   } else {
-    run('npm', ['run', 'smoke:full-library', '--', realLibraryRoot], `npm run smoke:full-library -- ${realLibraryRoot}`);
+    run('npm', ['run', 'smoke:full-library', '--', realLibraryRoot], `npm run smoke:full-library -- ${realLibraryRoot}`, {
+      NEWAMP_FULL_SCAN_CLEAN: '1',
+      NEWAMP_FULL_SCAN_SKIP_ART_STORAGE: '1',
+    });
     checks.push({ name: `smoke:full-library ${realLibraryRoot}`, ok: true });
     run(
       'npm',
@@ -126,6 +129,8 @@ if (realLibrary) {
       `npm run smoke:full-library -- ${realLibraryRoot} (incremental proof)`,
       {
         NEWAMP_FULL_SCAN_EXPECT_INCREMENTAL: '1',
+        NEWAMP_FULL_SCAN_SKIP_ART_STORAGE: '1',
+        NEWAMP_FULL_SCAN_CLEAN_AFTER: '1',
         NEWAMP_FULL_SCAN_MAX_MS: process.env.NEWAMP_FULL_SCAN_INCREMENTAL_MAX_MS || '60000',
         NEWAMP_FULL_SCAN_MIN_SKIPPED: process.env.NEWAMP_FULL_SCAN_MIN_SKIPPED || '5000',
       },
