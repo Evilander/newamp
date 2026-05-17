@@ -73,6 +73,7 @@ assert.equal(
 );
 
 const artifactStat = statSync(exePath);
+const stderrAnalysis = analyzeStderr(stderr);
 const report = {
   ok: true,
   minAliveMs,
@@ -87,7 +88,8 @@ const report = {
   exitSignal,
   diagnostics: launchDiagnostics,
   stdout: stdout.trim().slice(-600),
-  stderr: stderr.trim().slice(-1200),
+  acceptedStderr: stderrAnalysis.accepted,
+  unexpectedStderr: stderrAnalysis.unexpected,
 };
 
 console.log(JSON.stringify(report, null, 2));
@@ -172,4 +174,32 @@ function readLaunchDiagnostics(path) {
     crashedChildren: crashed.length,
     crashedChildSamples: crashed.slice(0, 5),
   };
+}
+
+function analyzeStderr(raw) {
+  const accepted = [];
+  const unexpected = [];
+  let acceptingTrayStack = false;
+  for (const line of raw.trim().split(/\r?\n/).filter(Boolean)) {
+    if (isExpectedPackagedLaunchWarning(line) || (acceptingTrayStack && /^\s+at\s/.test(line))) {
+      accepted.push(line);
+      acceptingTrayStack = line.includes('[newamp] tray icon unavailable') || (acceptingTrayStack && /^\s+at\s/.test(line));
+      continue;
+    }
+    acceptingTrayStack = false;
+    unexpected.push(line);
+  }
+  return {
+    accepted: accepted.slice(-20),
+    unexpected: unexpected.slice(-20),
+  };
+}
+
+function isExpectedPackagedLaunchWarning(line) {
+  return (
+    /notify_icon\.cc/.test(line) ||
+    /Failed to create shared context for virtualization/.test(line) ||
+    /\[newamp\] tray icon unavailable/.test(line) ||
+    /Windows notification area did not accept the tray icon/.test(line)
+  );
 }
