@@ -290,6 +290,19 @@ interface FolderTrackRow {
   has_art: number;
 }
 
+interface LibraryHealthRow {
+  id: number;
+  path: string;
+  title: string;
+  artist: string;
+  album: string;
+  year: number | null;
+  duration: number | null;
+  size: number | null;
+  mtime: number;
+  has_art: number;
+}
+
 interface FolderSummaryAccumulator {
   path: string;
   parentPath: string | null;
@@ -637,29 +650,37 @@ export class LibraryStore {
   }
 
   getLibraryHealth(): LibraryHealth {
-    const tracks = this.many<RawRow>(`SELECT * FROM tracks`).map(rowToTrack);
+    const rows = this.many<LibraryHealthRow>(
+      `SELECT id, path, title, artist, album, year, duration, size, mtime, has_art FROM tracks`,
+    );
     const totals = this.getStats();
     const missing = {
-      artist: tracks.filter((track) => isUnknownArtistName(track.artist)).length,
-      album: tracks.filter((track) => !track.album.trim()).length,
-      year: tracks.filter((track) => track.year == null).length,
-      art: tracks.filter((track) => !track.hasArt).length,
-      duration: tracks.filter((track) => track.duration == null || track.duration <= 0).length,
+      artist: 0,
+      album: 0,
+      year: 0,
+      art: 0,
+      duration: 0,
     };
 
-    const duplicateMap = new Map<string, Track[]>();
+    const duplicateMap = new Map<string, LibraryHealthRow[]>();
     const legacyMap = new Map<string, number>();
-    for (const track of tracks) {
-      const artist = normalizeDuplicateText(track.artist);
-      const title = normalizeDuplicateText(track.title);
+    for (const row of rows) {
+      if (isUnknownArtistName(row.artist)) missing.artist += 1;
+      if (!row.album.trim()) missing.album += 1;
+      if (row.year == null) missing.year += 1;
+      if (!row.has_art) missing.art += 1;
+      if (row.duration == null || row.duration <= 0) missing.duration += 1;
+
+      const artist = normalizeDuplicateText(row.artist);
+      const title = normalizeDuplicateText(row.title);
       if (artist && title && !isUnknownArtistName(artist)) {
         const key = `${artist}\u0000${title}`;
         const group = duplicateMap.get(key) ?? [];
-        group.push(track);
+        group.push(row);
         duplicateMap.set(key, group);
       }
 
-      const ext = extname(track.path).toLowerCase();
+      const ext = extname(row.path).toLowerCase();
       if (LEGACY_FORMATS.has(ext)) legacyMap.set(ext, (legacyMap.get(ext) ?? 0) + 1);
     }
 
@@ -667,14 +688,16 @@ export class LibraryStore {
       .filter((group) => group.length > 1)
       .map((group) => {
         const first = group[0]!;
+        const trackIds = [...group]
+          .sort((a, b) => (a.album || '').localeCompare(b.album || '') || a.path.localeCompare(b.path))
+          .slice(0, 8)
+          .map((row) => row.id);
         return {
           artist: first.artist,
           title: first.title,
           count: group.length,
           exactMatchCount: duplicateExactMatchCount(group),
-          tracks: group
-            .sort((a, b) => (a.album || '').localeCompare(b.album || '') || a.path.localeCompare(b.path))
-            .slice(0, 8),
+          trackIds,
         };
       })
       .sort(
@@ -684,15 +707,19 @@ export class LibraryStore {
           a.artist.localeCompare(b.artist) ||
           a.title.localeCompare(b.title),
       )
-      .slice(0, 12);
+      .slice(0, 12)
+      .map(({ trackIds, ...group }) => ({
+        ...group,
+        tracks: this.getTracksByIdsInOrder(trackIds),
+      }));
 
     const legacyFormats = [...legacyMap.entries()]
       .map(([ext, count]) => ({ ext, count }))
       .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
 
-    const recentlyAdded = tracks
-      .sort((a, b) => b.mtime - a.mtime || a.artist.localeCompare(b.artist) || a.title.localeCompare(b.title))
-      .slice(0, 12);
+    const recentlyAdded = this.many<RawRow>(
+      `SELECT * FROM tracks ORDER BY mtime DESC, artist COLLATE NOCASE, title COLLATE NOCASE LIMIT 12`,
+    ).map(rowToTrack);
 
     return {
       totals,
@@ -745,6 +772,12 @@ export class LibraryStore {
   getTrack(id: number): Track | null {
     const row = this.one<RawRow>(`SELECT * FROM tracks WHERE id = ?`, [id]);
     return row ? rowToTrack(row) : null;
+  }
+
+  private getTracksByIdsInOrder(ids: number[]): Track[] {
+    return ids
+      .map((id) => this.getTrack(id))
+      .filter((track): track is Track => !!track);
   }
 
   getCustomLyrics(trackId: number): LocalLyricsResult | null {
@@ -2659,7 +2692,7 @@ function normalizeDuplicateText(value: string): string {
     .trim();
 }
 
-function duplicateExactMatchCount(tracks: Track[]): number {
+function duplicateExactMatchCount(tracks: Array<Pick<Track, 'duration' | 'size'>>): number {
   const buckets = new Map<string, number>();
   for (const track of tracks) {
     const duration = track.duration == null || track.duration <= 0 ? null : Math.round(track.duration);
