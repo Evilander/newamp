@@ -20,12 +20,16 @@ assert.ok(presetCount >= 100, `expected at least 100 Milkdrop presets, got ${pre
 
 const visualizerSource = await readFile(new URL('../src/components/Visualizer.tsx', import.meta.url), 'utf8');
 const nowPlayingSource = await readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8');
+const engineSource = await readFile(new URL('../src/audio/engine.ts', import.meta.url), 'utf8');
 assert.match(visualizerSource, /mode === 'butterchurn'/, 'Visualizer must implement Butterchurn mode');
 assert.match(
   visualizerSource,
-  /connectAudio\(engine\.masterGain\)/,
-  'Butterchurn must connect to the real Newamp audio graph',
+  /connectAudio\(engine\.visualizerNode\)/,
+  'Butterchurn must connect to the pre-volume Newamp visualizer node',
 );
+assert.match(engineSource, /get visualizerNode\(\): AudioNode/, 'audio engine should expose a dedicated visualizer node');
+assert.match(engineSource, /limiter\.connect\(analyser\)[\s\S]*analyser\.connect\(masterGain\)[\s\S]*masterGain\.connect\(ctx\.destination\)/, 'visualizers should see pre-volume audio so low listening volume remains reactive');
+assert.match(engineSource, /smoothingTimeConstant = 0\.42/, 'analyser smoothing should favor responsive visual motion');
 
 const fullscreenSource = await readFile(
   new URL('../src/components/FullscreenVisualizer.tsx', import.meta.url),
@@ -47,8 +51,13 @@ assert.match(fullscreenSource, /data-newamp-viz-quality-button/, 'Fullscreen vis
 assert.match(fullscreenSource, /ArrowRight/, 'Fullscreen visualizer should support keyboard preset cycling');
 assert.match(
   visualizerSource,
-  /quality === '4k' \? 8_300_000 : 3_700_000/,
-  'Fullscreen visualizer should have a true 4K render budget option',
+  /quality === '4k' \? 4_200_000 : 2_100_000/,
+  'Fullscreen visualizer should cap render pixels for responsive full-screen playback',
+);
+assert.match(
+  visualizerSource,
+  /quality === '4k' \? 1000 \/ 30 : 1000 \/ 45/,
+  'Fullscreen visualizer should throttle paint rate enough to stay clickable',
 );
 assert.match(
   fullscreenSource,

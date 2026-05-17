@@ -60,8 +60,8 @@ export function FullscreenVisualizer(): JSX.Element {
   const activeIndex = Math.max(0, PRESETS.findIndex((p) => p.id === activePreset));
 
   const artUrl = useMemo(
-    () => (current?.hasArt ? api.getArtUrl(current.id) : null),
-    [current?.id, current?.hasArt],
+    () => (current ? api.getArtUrl(current.id) : null),
+    [current?.id],
   );
 
   function pickPreset(id: VisualizerPreset): void {
