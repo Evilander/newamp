@@ -174,6 +174,9 @@ assert.match(mainSource, /album-art:lookup/, 'main process should register album
 assert.match(mainSource, /album-art:apply/, 'main process should register album art apply IPC');
 assert.match(preloadSource, /lookupAlbumArt/, 'preload should expose album art lookup');
 assert.match(apiSource, /applyAlbumArt/, 'renderer API should expose album art apply');
+const librarySource = await readFile(new URL('../electron/library.ts', import.meta.url), 'utf8');
+assert.match(librarySource, /MIN\(CASE WHEN has_art = 1 THEN id ELSE NULL END\) AS art_track/, 'album summaries should compute cover art in the grouped album query');
+assert.doesNotMatch(librarySource, /SELECT id FROM tracks t2[\s\S]+AS art_track/, 'album summaries should avoid a per-album correlated art lookup');
 assert.doesNotMatch(albumsViewSource, /FIND COVER|APPLY COVER|REVIEW COVER/, 'Albums view should not expose cover review buttons in album chrome');
 assert.match(albumsViewSource, /MISSING ART/, 'Albums view should expose a missing-art review lane');
 assert.match(albumsViewSource, /showMissingArtOnly/, 'Albums view should filter to albums missing cover art');

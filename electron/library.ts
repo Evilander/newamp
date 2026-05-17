@@ -989,11 +989,7 @@ export class LibraryStore {
               MIN(year) AS year,
               COUNT(*) AS track_count,
               COALESCE(SUM(duration), 0) AS duration,
-              (SELECT id FROM tracks t2
-                 WHERE t2.album = t.album
-                   AND COALESCE(NULLIF(t2.album_artist,''), t2.artist) = COALESCE(NULLIF(t.album_artist,''), t.artist)
-                   AND t2.has_art = 1
-                 LIMIT 1) AS art_track
+              MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) AS art_track
          FROM tracks t
         WHERE album != ''
         GROUP BY album, COALESCE(NULLIF(album_artist,''), artist)
