@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
-import { Visualizer, type VizPalette, type VizPerformance, type VizQuality } from './Visualizer';
+import { Visualizer, type VizPalette, type VizPerformance, type VizQuality, type VizReactivity } from './Visualizer';
 import { formatTime } from '../lib/format';
 import { api, winctl } from '../lib/api';
 import type { VisualizerPreset } from '@shared/types';
@@ -33,6 +33,8 @@ const VIZ_CHROME_KEY = 'newamp:viz:chrome';
 const VIZ_TOP_NAV_KEY = 'newamp:viz:topNav';
 const VIZ_PALETTE_KEY = 'newamp:viz:palette';
 const VIZ_PERFORMANCE_KEY = 'newamp:viz:performance';
+const VIZ_REACTIVITY_KEY = 'newamp:viz:reactivity';
+const VIZ_AUTO_VJ_KEY = 'newamp:viz:autoVj';
 
 const PALETTES = [
   { id: 'theme', label: 'Theme' },
@@ -41,6 +43,37 @@ const PALETTES = [
   { id: 'sunset', label: 'Sunset' },
   { id: 'rainbow', label: 'Cycle' },
 ] as const satisfies ReadonlyArray<{ id: VizPalette; label: string }>;
+
+const REACTIVITY_MODES = [
+  { id: 'truth', label: 'Truth' },
+  { id: 'punch', label: 'Punch' },
+  { id: 'wild', label: 'Wild' },
+] as const satisfies ReadonlyArray<{ id: VizReactivity; label: string }>;
+
+const AUTO_VJ_BALANCED: VisualizerPreset[] = [
+  'neon-waves',
+  'plasma-grid',
+  'orbital-rings',
+  'neon-ribbons',
+  'burning-cloud',
+  'prism-bars',
+  'radial',
+  'tunnel',
+  'galaxy',
+  'aurora',
+  'confetti',
+  'pulse',
+  'oscilloscope',
+];
+
+const AUTO_VJ_LOW: VisualizerPreset[] = [
+  'spectrum',
+  'oscilloscope',
+  'album-breathe',
+  'prism-bars',
+  'orbital-rings',
+  'pulse',
+];
 
 function loadVisualizerQuality(): VizQuality {
   if (typeof window === 'undefined') return 'auto';
@@ -66,6 +99,12 @@ function loadVisualizerPerformance(): VizPerformance {
   return window.localStorage.getItem(VIZ_PERFORMANCE_KEY) === 'low' ? 'low' : 'balanced';
 }
 
+function loadVisualizerReactivity(): VizReactivity {
+  if (typeof window === 'undefined') return 'punch';
+  const raw = window.localStorage.getItem(VIZ_REACTIVITY_KEY);
+  return REACTIVITY_MODES.some((item) => item.id === raw) ? raw as VizReactivity : 'punch';
+}
+
 export function FullscreenVisualizer(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
   const currentTime = usePlayerStore((s) => s.currentTime);
@@ -73,6 +112,7 @@ export function FullscreenVisualizer(): JSX.Element {
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const volume = usePlayerStore((s) => s.volume);
   const setFs = usePlayerStore((s) => s.setFullscreenViz);
+  const engine = usePlayerStore((s) => s.engine);
   const togglePlay = usePlayerStore((s) => s.togglePlay);
   const next = usePlayerStore((s) => s.next);
   const prev = usePlayerStore((s) => s.prev);
@@ -86,6 +126,8 @@ export function FullscreenVisualizer(): JSX.Element {
   const [topNavVisible, setTopNavVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_TOP_NAV_KEY, true));
   const [palette, setPalette] = useState<VizPalette>(() => loadVisualizerPalette());
   const [performance, setPerformance] = useState<VizPerformance>(() => loadVisualizerPerformance());
+  const [reactivity, setReactivity] = useState<VizReactivity>(() => loadVisualizerReactivity());
+  const [autoVjEnabled, setAutoVjEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_AUTO_VJ_KEY, false));
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
@@ -174,6 +216,23 @@ export function FullscreenVisualizer(): JSX.Element {
     });
   }
 
+  function cycleReactivity(): void {
+    setReactivity((value) => {
+      const index = Math.max(0, REACTIVITY_MODES.findIndex((item) => item.id === value));
+      const next = REACTIVITY_MODES[(index + 1) % REACTIVITY_MODES.length]!.id;
+      window.localStorage.setItem(VIZ_REACTIVITY_KEY, next);
+      return next;
+    });
+  }
+
+  function toggleAutoVj(): void {
+    setAutoVjEnabled((value) => {
+      const next = !value;
+      window.localStorage.setItem(VIZ_AUTO_VJ_KEY, next ? '1' : '0');
+      return next;
+    });
+  }
+
   useEffect(() => {
     let cancelled = false;
     void winctl.isFullscreen().then((value) => {
@@ -238,6 +297,12 @@ export function FullscreenVisualizer(): JSX.Element {
       } else if (event.key.toLowerCase() === 'p') {
         event.preventDefault();
         cyclePalette();
+      } else if (event.key.toLowerCase() === 'r') {
+        event.preventDefault();
+        cycleReactivity();
+      } else if (event.key.toLowerCase() === 'v') {
+        event.preventDefault();
+        toggleAutoVj();
       } else if (event.key.toLowerCase() === 'l') {
         event.preventDefault();
         togglePerformance();
@@ -250,6 +315,32 @@ export function FullscreenVisualizer(): JSX.Element {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [activeIndex]);
 
+  useEffect(() => {
+    if (!autoVjEnabled) return undefined;
+    const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+    let raf = 0;
+    let lastSwitchAt = window.performance.now();
+
+    const tick = (now: number) => {
+      if (isPlaying) {
+        engine.getFreqData(freq);
+        const energy = visualizerEnergy(freq);
+        const elapsed = now - lastSwitchAt;
+        if (elapsed > 14000 && (energy > 0.42 || elapsed > 30000)) {
+          const nextPreset = pickAutoVjPreset(activePreset, energy, performance);
+          if (nextPreset !== activePreset) {
+            setPreset(nextPreset);
+            lastSwitchAt = now;
+          }
+        }
+      }
+      raf = window.requestAnimationFrame(tick);
+    };
+
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [activePreset, autoVjEnabled, engine, isPlaying, performance, setPreset]);
+
   return (
     <div
       data-newamp-fullscreen-visualizer
@@ -259,6 +350,8 @@ export function FullscreenVisualizer(): JSX.Element {
       data-newamp-visualizer-nav={topNavVisible ? 'visible' : 'hidden'}
       data-newamp-visualizer-palette={palette}
       data-newamp-visualizer-performance={performance}
+      data-newamp-visualizer-reactivity={reactivity}
+      data-newamp-visualizer-auto-vj={autoVjEnabled ? 'on' : 'off'}
       data-newamp-visualizer-art={artPulseEnabled ? (artPulseVisible ? 'pulse' : 'armed') : 'hidden'}
       data-newamp-native-fullscreen={nativeFullscreen ? 'true' : 'false'}
       className="fullscreen-viz-root fixed inset-0 z-[90] flex items-center justify-center bg-black"
@@ -284,6 +377,7 @@ export function FullscreenVisualizer(): JSX.Element {
             quality={quality}
             performance={performance}
             palette={palette}
+            reactivity={reactivity}
             className="absolute inset-0 h-full w-full"
           />
         </div>
@@ -358,6 +452,22 @@ export function FullscreenVisualizer(): JSX.Element {
           title="Cycle visualizer colors (P)"
         >
           {PALETTES.find((item) => item.id === palette)?.label ?? 'Theme'}
+        </button>
+        <button
+          className="pxbtn"
+          data-newamp-viz-reactivity-button
+          onClick={cycleReactivity}
+          title="Cycle visualizer signal response (R)"
+        >
+          REACT {REACTIVITY_MODES.find((item) => item.id === reactivity)?.label ?? 'Punch'}
+        </button>
+        <button
+          className={`pxbtn ${autoVjEnabled ? 'is-active' : ''}`}
+          data-newamp-viz-auto-vj-button
+          onClick={toggleAutoVj}
+          title="Auto-switch visualizer scenes on song energy (V)"
+        >
+          AUTO VJ
         </button>
         <button
           className={`pxbtn ${nativeFullscreen ? 'is-active' : ''}`}
@@ -455,4 +565,33 @@ export function FullscreenVisualizer(): JSX.Element {
 
 function isEditableTarget(target: EventTarget | null): boolean {
   return target instanceof Element && !!target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]');
+}
+
+function visualizerEnergy(freq: Uint8Array): number {
+  if (!freq.length) return 0;
+  const low = averageBand(freq, 0, 36) / 255;
+  const mid = averageBand(freq, 36, 180) / 255;
+  const high = averageBand(freq, 180, 420) / 255;
+  return Math.min(1, Math.pow(low * 0.48 + mid * 0.36 + high * 0.16, 0.72));
+}
+
+function averageBand(freq: Uint8Array, from: number, to: number): number {
+  let total = 0;
+  let count = 0;
+  for (let index = from; index < to && index < freq.length; index += 1) {
+    total += freq[index]!;
+    count += 1;
+  }
+  return count ? total / count : 0;
+}
+
+function pickAutoVjPreset(current: VisualizerPreset, energy: number, performance: VizPerformance): VisualizerPreset {
+  const pool = performance === 'low' ? AUTO_VJ_LOW : AUTO_VJ_BALANCED;
+  const currentIndex = Math.max(0, pool.indexOf(current));
+  if (energy < 0.12) return 'album-breathe';
+  if (energy > 0.68 && performance !== 'low') {
+    const highEnergy = ['plasma-grid', 'neon-ribbons', 'burning-cloud', 'confetti'] as const;
+    return highEnergy[(currentIndex + 1) % highEnergy.length]!;
+  }
+  return pool[(currentIndex + 1) % pool.length]!;
 }
