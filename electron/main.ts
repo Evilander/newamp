@@ -523,7 +523,9 @@ function registerMediaShortcuts(): void {
   for (const [accelerator, command] of shortcuts) {
     try {
       const ok = globalShortcut.register(accelerator, () => sendPlayerCommand(command));
-      if (!ok) console.warn(`[newamp] global media shortcut not registered: ${accelerator}`);
+      if (!ok && process.env.NEWAMP_VERBOSE_MEDIA_KEYS === '1') {
+        console.info(`[newamp] global media shortcut unavailable: ${accelerator}`);
+      }
     } catch (err) {
       console.warn(`[newamp] global media shortcut failed: ${accelerator}`, err);
     }
