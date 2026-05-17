@@ -352,6 +352,7 @@ function runPackagedStartupSmoke() {
   if (result.error) cleanupPackagedSmokeProcess();
   const stdout = (result.stdout ?? '').trim();
   const stderr = (result.stderr ?? '').trim();
+  const stderrAnalysis = analyzePackagedLaunchStderr(stderr);
   return {
     name: 'packaged-startup-smoke',
     ok: result.status === 0 && !result.error && stdout.includes(startupMarker),
@@ -359,7 +360,9 @@ function runPackagedStartupSmoke() {
     error: result.error?.message ?? null,
     requiredStdout: startupMarker,
     stdout: stdout.slice(-600),
-    stderr: stderr.slice(-600),
+    stderr: stderrAnalysis.unexpected.join('\n').slice(-600),
+    acceptedStderr: stderrAnalysis.accepted,
+    unexpectedStderr: stderrAnalysis.unexpected,
   };
 }
 
@@ -422,6 +425,7 @@ async function runPackagedNormalLaunchSmoke() {
     child.stderr.destroy();
     child.unref();
   }
+  const stderrAnalysis = analyzePackagedLaunchStderr(stderr);
   return {
     name: 'packaged-normal-launch-smoke',
     ok,
@@ -431,9 +435,41 @@ async function runPackagedNormalLaunchSmoke() {
     exitSignal,
     error: spawnError?.message ?? null,
     stdout: stdout.trim().slice(-600),
-    stderr: stderr.trim().slice(-1200),
+    stderr: stderrAnalysis.unexpected.join('\n').slice(-1200),
+    acceptedStderr: stderrAnalysis.accepted,
+    unexpectedStderr: stderrAnalysis.unexpected,
     reason: ok ? null : `exited before ${minAliveMs}ms`,
   };
+}
+
+function analyzePackagedLaunchStderr(raw) {
+  const accepted = [];
+  const unexpected = [];
+  let acceptingTrayStack = false;
+  for (const line of raw.trim().split(/\r?\n/).filter(Boolean)) {
+    if (isExpectedPackagedLaunchWarning(line) || (acceptingTrayStack && /^\s+at\s/.test(line))) {
+      accepted.push(line);
+      acceptingTrayStack = line.includes('[newamp] tray icon unavailable') || (acceptingTrayStack && /^\s+at\s/.test(line));
+      continue;
+    }
+    acceptingTrayStack = false;
+    unexpected.push(line);
+  }
+  return {
+    accepted: accepted.slice(-20),
+    unexpected: unexpected.slice(-20),
+  };
+}
+
+function isExpectedPackagedLaunchWarning(line) {
+  return (
+    /notify_icon\.cc/.test(line) ||
+    /Failed to create shared context for virtualization/.test(line) ||
+    /\[newamp\] tray icon unavailable/.test(line) ||
+    /\[newamp\] global media shortcut not registered:/.test(line) ||
+    /\[newamp\] global media shortcut unavailable:/.test(line) ||
+    /Windows notification area did not accept the tray icon/.test(line)
+  );
 }
 
 function checkSignatures() {
