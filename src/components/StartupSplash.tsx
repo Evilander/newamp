@@ -4,9 +4,7 @@ export function StartupSplash(): JSX.Element {
   return (
     <div className="startup-splash" data-newamp-startup-splash>
       <div className="startup-splash-badge">
-        <BrandLogo size={220} title="NewAmp loading" themed={false} withGlow={false} className="startup-splash-logo" />
-        <div className="startup-splash-wordmark">NEWAMP</div>
-        <div className="startup-splash-subtitle">LOCAL MUSIC PLAYER</div>
+        <BrandLogo size={220} title="NewAmp loading" withGlow={false} className="startup-splash-logo" />
       </div>
     </div>
   );

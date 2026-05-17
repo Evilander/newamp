@@ -50,8 +50,10 @@ export function HotdogDeck(props: DeckProps): JSX.Element {
       </header>
 
       <main className="deck-hd-bun titlebar-nodrag">
-        <span className="deck-hd-seam is-top" aria-hidden="true" />
-        <span className="deck-hd-seam is-bottom" aria-hidden="true" />
+        <span className="deck-hd-bun-half is-top" aria-hidden="true" />
+        <span className="deck-hd-bun-half is-bottom" aria-hidden="true" />
+        <span className="deck-hd-sausage" aria-hidden="true" />
+        <span className="deck-hd-relish" aria-hidden="true" />
         <button
           type="button"
           className="deck-hd-screen"

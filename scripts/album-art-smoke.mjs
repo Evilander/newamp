@@ -158,13 +158,14 @@ assert.equal(library.getAlbums()[0].artFromTrackId, applied.artFromTrackId);
 assert.equal(library.getArt(applied.artFromTrackId)?.data.byteLength, imageBytes.byteLength);
 library.close();
 
-const [typesSource, mainSource, preloadSource, apiSource, albumsViewSource, packageSource, gateSource, scannerSource] =
+const [typesSource, mainSource, preloadSource, apiSource, albumsViewSource, compactPlayerSource, packageSource, gateSource, scannerSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/preload.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/api.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/views/AlbumsView.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/CompactPlayer.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../scripts/release-gate.mjs', import.meta.url), 'utf8'),
     readFile(new URL('../electron/scanner.ts', import.meta.url), 'utf8'),
@@ -181,6 +182,7 @@ assert.doesNotMatch(librarySource, /SELECT id FROM tracks t2[\s\S]+AS art_track/
 assert.match(librarySource, /artHashCache/, 'library writes should cache repeated album-art hashes inside each batch');
 assert.match(librarySource, /writtenArtHashes/, 'library writes should avoid repeated album-art existence checks inside each batch');
 assert.match(scannerSource, /folderArtForFile/, 'scanner should allow cached folder-art resolution during large imports');
+assert.match(compactPlayerSource, /\(current \? api\.getArtUrl\(current\.id\) : null\)/, 'deck mode should try the current track art URL instead of hiding covers behind stale hasArt flags');
 assert.doesNotMatch(albumsViewSource, /FIND COVER|APPLY COVER|REVIEW COVER/, 'Albums view should not expose cover review buttons in album chrome');
 assert.match(albumsViewSource, /MISSING ART/, 'Albums view should expose a missing-art review lane');
 assert.match(albumsViewSource, /showMissingArtOnly/, 'Albums view should filter to albums missing cover art');

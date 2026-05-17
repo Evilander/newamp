@@ -4,6 +4,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const brandLogoSource = await readFile(new URL('../src/components/BrandLogo.tsx', import.meta.url), 'utf8');
 const startupSplashSource = await readFile(new URL('../src/components/StartupSplash.tsx', import.meta.url), 'utf8');
+const styleSource = await readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8');
 const packageSource = await readFile(new URL('../package.json', import.meta.url), 'utf8');
 const releaseGateSource = await readFile(new URL('./release-gate.mjs', import.meta.url), 'utf8');
 
@@ -15,9 +16,15 @@ assert.doesNotMatch(appSource, /import \{ HomeView \} from '\.\/components\/view
 assert.doesNotMatch(appSource, /import \{ NowPlayingView \} from '\.\/components\/views\/NowPlayingView'/, 'NowPlayingView should not be imported eagerly');
 
 assert.match(brandLogoSource, /logo-app\.webp/, 'Renderer should use the display-sized app logo');
-assert.match(startupSplashSource, /themed=\{false\}/, 'startup splash should use the original logo colors');
+assert.match(brandLogoSource, /<img[\s\S]*data-newamp-brand-logo/, 'brand logo should render the original image');
+assert.doesNotMatch(brandLogoSource, /brand-logo-themed|WebkitMaskImage|maskImage/, 'brand logo should not use theme-colored masks');
+assert.doesNotMatch(brandLogoSource, /filter:/, 'brand logo should not tint or recolor the original artwork');
 assert.match(startupSplashSource, /withGlow=\{false\}/, 'startup splash logo should not be recolored by skin glow');
 assert.match(startupSplashSource, /startup-splash-logo/, 'startup splash should have a dedicated original-logo style hook');
+assert.doesNotMatch(startupSplashSource, /startup-splash-wordmark|startup-splash-subtitle/, 'startup splash should render only the circle logo');
+assert.match(styleSource, /\.startup-splash\s*\{[\s\S]*?background:\s*transparent;/, 'startup splash should not paint a black overlay');
+assert.doesNotMatch(styleSource, /brand-logo-themed/, 'theme-colored logo skin CSS should not ship');
+assert.doesNotMatch(styleSource, /\.startup-splash-logo\s*\{[\s\S]*?filter:/, 'startup splash should not add a color-changing logo filter');
 const appLogo = await stat(new URL('../build/logo-app.webp', import.meta.url));
 assert.ok(appLogo.size < 120_000, `display app logo should stay below 120KB, got ${appLogo.size}`);
 

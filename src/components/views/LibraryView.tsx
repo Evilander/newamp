@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type {
   AudioExportFormat,
   LibraryHealth,
@@ -809,6 +809,88 @@ function SortPicker({ value, onChange }: { value: Sort; onChange: (s: Sort) => v
   );
 }
 
+type TrackColumnKey =
+  | 'play'
+  | 'select'
+  | 'queue'
+  | 'playlist'
+  | 'number'
+  | 'title'
+  | 'artist'
+  | 'album'
+  | 'year'
+  | 'time'
+  | 'plays'
+  | 'rating'
+  | 'mix'
+  | 'tag'
+  | 'love';
+
+const TRACK_TABLE_COLUMN_WIDTH_KEY = 'newamp:track-table:column-widths';
+const TRACK_TABLE_COLUMN_DEFAULTS: Record<TrackColumnKey, number> = {
+  play: 34,
+  select: 34,
+  queue: 74,
+  playlist: 154,
+  number: 44,
+  title: 340,
+  artist: 210,
+  album: 220,
+  year: 62,
+  time: 70,
+  plays: 62,
+  rating: 96,
+  mix: 70,
+  tag: 56,
+  love: 44,
+};
+const TRACK_TABLE_COLUMN_MINS: Record<TrackColumnKey, number> = {
+  play: 28,
+  select: 28,
+  queue: 58,
+  playlist: 112,
+  number: 36,
+  title: 160,
+  artist: 120,
+  album: 130,
+  year: 48,
+  time: 54,
+  plays: 48,
+  rating: 82,
+  mix: 58,
+  tag: 46,
+  love: 36,
+};
+
+function loadTrackTableColumnWidths(): Record<TrackColumnKey, number> {
+  if (typeof window === 'undefined') return { ...TRACK_TABLE_COLUMN_DEFAULTS };
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TRACK_TABLE_COLUMN_WIDTH_KEY) ?? '{}') as Partial<Record<TrackColumnKey, unknown>>;
+    return normalizeTrackTableColumnWidths(parsed);
+  } catch {
+    return { ...TRACK_TABLE_COLUMN_DEFAULTS };
+  }
+}
+
+function normalizeTrackTableColumnWidths(input: Partial<Record<TrackColumnKey, unknown>>): Record<TrackColumnKey, number> {
+  const widths = { ...TRACK_TABLE_COLUMN_DEFAULTS };
+  for (const key of Object.keys(TRACK_TABLE_COLUMN_DEFAULTS) as TrackColumnKey[]) {
+    const raw = Number(input[key]);
+    if (!Number.isFinite(raw)) continue;
+    widths[key] = Math.max(TRACK_TABLE_COLUMN_MINS[key], Math.min(680, Math.round(raw)));
+  }
+  return widths;
+}
+
+function saveTrackTableColumnWidths(widths: Record<TrackColumnKey, number>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(TRACK_TABLE_COLUMN_WIDTH_KEY, JSON.stringify(widths));
+  } catch {
+    /* ignore storage failures */
+  }
+}
+
 export function TrackTable({
   tracks,
   currentId,
@@ -867,6 +949,28 @@ export function TrackTable({
     [visible, selectedIds],
   );
   const allVisibleSelected = visible.length > 0 && visible.every((track) => selectedIds.has(track.id));
+  const [columnWidths, setColumnWidths] = useState<Record<TrackColumnKey, number>>(() => loadTrackTableColumnWidths());
+  const activeColumnKeys = useMemo<TrackColumnKey[]>(
+    () => [
+      'select',
+      'play',
+      ...(showQueueActions ? ['queue' as TrackColumnKey] : []),
+      ...(playlistTargets.length > 0 ? ['playlist' as TrackColumnKey] : []),
+      'number',
+      'title',
+      'artist',
+      'album',
+      'year',
+      'time',
+      'plays',
+      'rating',
+      'mix',
+      ...(showMetadataLookup ? ['tag' as TrackColumnKey] : []),
+      'love',
+    ],
+    [playlistTargets.length, showMetadataLookup, showQueueActions],
+  );
+  const tableMinWidth = activeColumnKeys.reduce((sum, key) => sum + columnWidths[key], 0);
 
   useEffect(() => {
     let cancelled = false;
@@ -915,6 +1019,66 @@ export function TrackTable({
       }
       return next;
     });
+  }
+
+  function startColumnResize(column: TrackColumnKey, event: ReactPointerEvent<HTMLElement>): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = columnWidths[column];
+    const target = event.currentTarget;
+    target.setPointerCapture(event.pointerId);
+
+    const onMove = (moveEvent: PointerEvent): void => {
+      const nextWidth = Math.max(
+        TRACK_TABLE_COLUMN_MINS[column],
+        Math.min(680, Math.round(startWidth + moveEvent.clientX - startX)),
+      );
+      setColumnWidths((current) => {
+        if (current[column] === nextWidth) return current;
+        const next = { ...current, [column]: nextWidth };
+        saveTrackTableColumnWidths(next);
+        return next;
+      });
+    };
+    const onUp = (upEvent: PointerEvent): void => {
+      try {
+        target.releasePointerCapture(upEvent.pointerId);
+      } catch {
+        /* pointer may already be released */
+      }
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  function headerCell(
+    column: TrackColumnKey,
+    content: ReactNode,
+    className = '',
+    label = column,
+  ): JSX.Element {
+    return (
+      <th
+        className={`track-table-resizable-th px-2 py-[6px] ${className}`}
+        style={{ width: columnWidths[column] }}
+        data-newamp-track-column={column}
+      >
+        {content}
+        <span
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={`Resize ${label} column`}
+          tabIndex={0}
+          className="track-table-resize-handle"
+          data-newamp-track-column-resizer={column}
+          onPointerDown={(event) => startColumnResize(column, event)}
+        />
+      </th>
+    );
   }
 
   function patchLocalTrack(id: number, patch: Partial<Track>): void {
@@ -1232,9 +1396,20 @@ export function TrackTable({
         </div>
       )}
       <table
-        className="w-full table-fixed text-[12px]"
-        style={{ fontFamily: 'var(--font-mono)', borderCollapse: 'separate', borderSpacing: 0 }}
+        className="table-fixed text-[12px]"
+        style={{
+          fontFamily: 'var(--font-mono)',
+          borderCollapse: 'separate',
+          borderSpacing: 0,
+          minWidth: tableMinWidth,
+          width: `max(100%, ${tableMinWidth}px)`,
+        }}
       >
+      <colgroup>
+        {activeColumnKeys.map((column) => (
+          <col key={column} style={{ width: columnWidths[column] }} />
+        ))}
+      </colgroup>
       <thead
         className="sticky top-0 z-10"
         style={{ background: 'var(--panel)', color: 'var(--ink-2)' }}
@@ -1243,28 +1418,28 @@ export function TrackTable({
           className="text-left text-[9px] uppercase tracking-[0.12em]"
           style={{ borderBottom: '1px solid var(--line)' }}
         >
-          <th className="w-[28px] px-2 py-[6px]"></th>
-          <th className="w-[28px] px-2 py-[6px]">
+          {headerCell('select', (
             <input
               type="checkbox"
               aria-label="Select all visible tracks"
               checked={allVisibleSelected}
               onChange={(event) => setAllVisibleSelected(event.currentTarget.checked)}
             />
-          </th>
-          {showQueueActions && <th className="w-[66px] px-2 py-[6px]">Queue</th>}
-          {playlistTargets.length > 0 && <th className="w-[138px] px-2 py-[6px]">Playlist</th>}
-          <th className="w-[36px] px-2 py-[6px] text-right tabular-nums">#</th>
-          <th className="px-2 py-[6px]">Title</th>
-          <th className="w-[22%] px-2 py-[6px]">Artist</th>
-          <th className="w-[22%] px-2 py-[6px]">Album</th>
-          <th className="w-[50px] px-2 py-[6px] text-right tabular-nums">Year</th>
-          <th className="w-[58px] px-2 py-[6px] text-right tabular-nums">Time</th>
-          <th className="w-[50px] px-2 py-[6px] text-right tabular-nums">Plays</th>
-          <th className="w-[86px] px-2 py-[6px] text-right">Rating</th>
-          <th className="w-[58px] px-2 py-[6px] text-right">Mix</th>
-          {showMetadataLookup && <th className="w-[48px] px-2 py-[6px] text-right">Tag</th>}
-          <th className="w-[36px] px-2 py-[6px] text-right">★</th>
+          ), '', 'select')}
+          {headerCell('play', '')}
+          {showQueueActions && headerCell('queue', 'Queue')}
+          {playlistTargets.length > 0 && headerCell('playlist', 'Playlist')}
+          {headerCell('number', '#', 'text-right tabular-nums', 'track number')}
+          {headerCell('title', 'Title')}
+          {headerCell('artist', 'Artist')}
+          {headerCell('album', 'Album')}
+          {headerCell('year', 'Year', 'text-right tabular-nums')}
+          {headerCell('time', 'Time', 'text-right tabular-nums')}
+          {headerCell('plays', 'Plays', 'text-right tabular-nums')}
+          {headerCell('rating', 'Rating', 'text-right')}
+          {headerCell('mix', 'Mix', 'text-right')}
+          {showMetadataLookup && headerCell('tag', 'Tag', 'text-right')}
+          {headerCell('love', '★', 'text-right', 'love')}
         </tr>
       </thead>
       <tbody>

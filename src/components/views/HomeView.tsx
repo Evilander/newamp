@@ -766,9 +766,9 @@ function HomeHero({
   onPlayPick: (track: Track) => void;
 }): JSX.Element {
   const progress = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
-  const heroArt = current?.hasArt ? api.getArtUrl(current.id) : null;
+  const heroArt = current ? api.getArtUrl(current.id) : null;
   const topRatedSeed = todayPick?.track ?? null;
-  const pickArt = topRatedSeed?.hasArt ? api.getArtUrl(topRatedSeed.id) : null;
+  const pickArt = topRatedSeed ? api.getArtUrl(topRatedSeed.id) : null;
   const greeting = useMemo(() => {
     const hour = new Date().getHours();
     if (hour < 5) return 'Late shift';
@@ -810,7 +810,14 @@ function HomeHero({
         <div className="home-hero-now">
           <div className="home-hero-art">
             {heroArt ? (
-              <img src={heroArt} alt={current?.album ?? ''} draggable={false} />
+              <img
+                src={heroArt}
+                alt={current?.album ?? ''}
+                draggable={false}
+                onError={(event) => {
+                  event.currentTarget.style.display = 'none';
+                }}
+              />
             ) : (
               <span className="home-hero-art-empty">{current ? '♪' : 'NEW'}</span>
             )}
@@ -856,7 +863,14 @@ function HomeHero({
               <span className="home-hero-pick-tag">Today&rsquo;s Pick</span>
               <div className="home-hero-pick-art">
                 {pickArt ? (
-                  <img src={pickArt} alt={topRatedSeed.album ?? ''} draggable={false} />
+                  <img
+                    src={pickArt}
+                    alt={topRatedSeed.album ?? ''}
+                    draggable={false}
+                    onError={(event) => {
+                      event.currentTarget.style.display = 'none';
+                    }}
+                  />
                 ) : (
                   <span>♪</span>
                 )}
@@ -906,7 +920,7 @@ function RatedHighlightRail({
       {visible.length ? (
         <div className="home-rated-grid">
           {visible.map((track, idx) => {
-            const art = track.hasArt ? api.getArtUrl(track.id) : null;
+            const art = api.getArtUrl(track.id);
             const scoreStrong = (track.ratingScore ?? track.rating * 20) >= 85;
             return (
               <button
@@ -917,7 +931,18 @@ function RatedHighlightRail({
                 title={`Play ${track.artist} — ${track.title}`}
               >
                 <div className="home-rated-card-art">
-                  {art ? <img src={art} alt={track.album ?? ''} draggable={false} loading="lazy" decoding="async" /> : <span>♪</span>}
+                  {art ? (
+                    <img
+                      src={art}
+                      alt={track.album ?? ''}
+                      draggable={false}
+                      loading="lazy"
+                      decoding="async"
+                      onError={(event) => {
+                        event.currentTarget.style.display = 'none';
+                      }}
+                    />
+                  ) : <span>♪</span>}
           <span className={`home-rated-card-score ${scoreStrong ? 'is-strong' : ''}`}>{scoreLabel(track)}</span>
                 </div>
                 <div className="home-rated-card-meta">
