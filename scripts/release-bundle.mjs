@@ -23,6 +23,7 @@ export function releaseBundleFileSpecs({ root = defaultRoot, version = readPacka
   return [
     { name: 'readme', path: join(root, 'README.md'), entryName: 'README.md' },
     { name: 'checksums', path: join(paths.releaseRoot, 'SHA256SUMS.txt'), entryName: 'SHA256SUMS.txt' },
+    { name: 'provenance', path: join(paths.releaseRoot, 'BUILD-PROVENANCE.json'), entryName: 'BUILD-PROVENANCE.json' },
     { name: 'installer', path: join(paths.releaseRoot, `NewAmp Setup ${version}.exe`), entryName: `NewAmp Setup ${version}.exe` },
     { name: 'portable', path: join(paths.releaseRoot, `NewAmp Portable ${version}.exe`), entryName: `NewAmp Portable ${version}.exe` },
     { name: 'source', path: paths.sourceZip, entryName: basename(paths.sourceZip) },

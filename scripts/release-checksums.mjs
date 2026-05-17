@@ -128,9 +128,12 @@ function displayPath(root, path) {
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
   try {
-    const report = process.argv.includes('--check')
-      ? checkReleaseChecksums()
-      : writeReleaseChecksums();
+    const checkOnly = process.argv.includes('--check');
+    const report = checkOnly ? checkReleaseChecksums() : writeReleaseChecksums();
+    if (!checkOnly && report.ok) {
+      const { writeBuildProvenance } = await import('./build-provenance.mjs');
+      writeBuildProvenance();
+    }
     console.log(JSON.stringify({
       ...report,
       file: basename(report.path),

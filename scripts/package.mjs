@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { copyFile, mkdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeBuildProvenance } from './build-provenance.mjs';
 import { writeReleaseChecksums } from './release-checksums.mjs';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -38,6 +39,8 @@ const shouldWriteChecksums = !process.argv.includes('--installer') && !process.a
 if (shouldWriteChecksums) {
   const checksums = writeReleaseChecksums({ root: repoRoot });
   console.log(`release checksums: ${checksums.path}`);
+  const provenance = writeBuildProvenance({ root: repoRoot });
+  console.log(`build provenance: ${provenance.path}`);
 }
 
 function electronBuilderTargetArgs(args) {

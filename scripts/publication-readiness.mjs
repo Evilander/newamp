@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { checkBuildProvenance } from './build-provenance.mjs';
 import { checkManualListeningProof, summarizeManualListeningProof } from './manual-listening-proof.mjs';
 import { checkReleaseBundle } from './release-bundle.mjs';
 import { checkReleaseChecksums } from './release-checksums.mjs';
@@ -29,6 +30,7 @@ const checks = [
   signingWorkflowCheck(),
   githubPublishWorkflowCheck(),
   releaseChecksumsCheck(),
+  buildProvenanceCheck(),
   releaseBundleCheck(),
   artifactSignatureCheck(),
   lastfmProofCheck(),
@@ -184,6 +186,18 @@ function releaseChecksumsCheck() {
     ok: report.ok,
     path: report.path,
     exists: report.exists,
+    reason: report.reason,
+  };
+}
+
+function buildProvenanceCheck() {
+  const report = checkBuildProvenance({ root: repoRoot, version: releaseVersion });
+  return {
+    name: 'build-provenance',
+    ok: report.ok,
+    path: report.path,
+    git: report.git,
+    artifactCount: report.artifactCount,
     reason: report.reason,
   };
 }
