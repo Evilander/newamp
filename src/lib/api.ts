@@ -5,6 +5,8 @@
 
 import type {
   AppSettings,
+  DiscoverSurface,
+  DiscoverSurfaceInput,
   GuitarTabLine,
   ListeningInsights,
   NewAmpAPI,
@@ -83,6 +85,26 @@ function emptyListeningInsights(now = Date.now()): ListeningInsights {
     topArtists: [],
     topAlbums: [],
     recentDays: [],
+  };
+}
+
+function emptyDiscoverSurface(input: DiscoverSurfaceInput = {}): DiscoverSurface {
+  return {
+    modeName: 'Living Library',
+    generatedAt: typeof input.now === 'number' ? input.now : Date.now(),
+    seed: input.seed?.trim() || 'browser-preview',
+    summary: {
+      trackCount: 0,
+      albumCount: 0,
+      artistCount: 0,
+      lovedCount: 0,
+      highRatedCount: 0,
+      unplayedCount: 0,
+      recentlyAddedCount: 0,
+      forgottenFavoriteCount: 0,
+    },
+    cards: [],
+    missions: [],
   };
 }
 
@@ -167,6 +189,7 @@ const stub: NewAmpAPI = {
   },
   getSmartPlaylistRules: async () => [],
   getSuggestedSmartPlaylistRules: async () => [],
+  getDiscoverSurface: async (input) => emptyDiscoverSurface(input),
   saveSmartPlaylistRule: async (input) => ({
     id: input.id ?? 0,
     name: input.name,
