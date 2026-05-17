@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildProvenancePath, checkBuildProvenance } from './build-provenance.mjs';
 import { checkReleaseBundle, releaseBundlePaths } from './release-bundle.mjs';
 import { checkReleaseChecksums, releaseChecksumsPath } from './release-checksums.mjs';
 
@@ -32,11 +33,13 @@ export function buildGithubPublishPlan({
   const installer = resolve(root, 'release', `NewAmp Setup ${version}.exe`);
   const portable = resolve(root, 'release', `NewAmp Portable ${version}.exe`);
   const checksums = releaseChecksumsPath({ root });
+  const provenance = buildProvenancePath({ root });
   const bundlePaths = releaseBundlePaths({ root, version });
   const artifacts = {
     installer,
     portable,
     checksums,
+    provenance,
     source: bundlePaths.sourceZip,
     manifest: bundlePaths.manifest,
     bundle: bundlePaths.bundleZip,
@@ -55,6 +58,15 @@ export function buildGithubPublishPlan({
   const checksumReport = checkReleaseChecksums({ root, version });
   if (!checksumReport.ok) {
     return failedPlan(root, env, checksumReport.reason ?? 'release checksum manifest is not current', {
+      repo,
+      tag,
+      ...artifacts,
+      version,
+    });
+  }
+  const provenanceReport = checkBuildProvenance({ root, version });
+  if (!provenanceReport.ok) {
+    return failedPlan(root, env, provenanceReport.reason ?? 'release build provenance is not current', {
       repo,
       tag,
       ...artifacts,
@@ -212,6 +224,7 @@ function failedPlan(root, env, reason, extra = {}) {
       installer: extra.installer ?? null,
       portable: extra.portable ?? null,
       checksums: extra.checksums ?? null,
+      provenance: extra.provenance ?? null,
       source: extra.source ?? null,
       manifest: extra.manifest ?? null,
       bundle: extra.bundle ?? null,
@@ -255,10 +268,10 @@ function originCommand(root, gitDir, originUrl) {
   return gitDir ? gitCommand(label, root, gitDir, args) : command(label, 'git', args);
 }
 
-function publishReleaseCommand({ repo, tag, version, installer, portable, checksums, source, manifest, bundle, readmePath }) {
+function publishReleaseCommand({ repo, tag, version, installer, portable, checksums, provenance, source, manifest, bundle, readmePath }) {
   const viewArgs = ['release', 'view', tag, '--repo', repo];
   const editArgs = ['release', 'edit', tag, '--repo', repo, '--title', `NewAmp ${version}`, '--notes-file', readmePath];
-  const releaseAssets = [installer, portable, checksums, source, manifest, bundle];
+  const releaseAssets = [installer, portable, checksums, provenance, source, manifest, bundle];
   const uploadArgs = ['release', 'upload', tag, ...releaseAssets, '--repo', repo, '--clobber'];
   const createArgs = [
     'release',
