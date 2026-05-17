@@ -87,6 +87,8 @@ assert.match(gateSource, /smoke:packaged-normal-launch/, 'release gate should ru
 assert.match(gateSource, /smoke:portable-app/, 'release gate should run portable app startup smoke after packaging');
 assert.match(gateSource, /portablePath/, 'release gate should include portable artifact checks');
 assert.match(gateSource, /checkInstalledAssociations/, 'release gate should include installed association registry proof');
+assert.match(gateSource, /NEWAMP_FULL_SCAN_SKIP_ART_STORAGE/, 'release gate real-library proof should stay disk-light beside release artifacts');
+assert.match(gateSource, /NEWAMP_FULL_SCAN_CLEAN_AFTER/, 'release gate real-library proof should clean heavyweight smoke data after incremental proof');
 assert.match(packageScriptSource, /resetPackageTemp/, 'package script should clear its temp directory before building');
 assert.match(packageScriptSource, /pruneObsoleteReleaseArtifacts/, 'package script should prune stale versioned release artifacts before building');
 assert.match(packageScriptSource, /Refusing to remove outside repo/, 'package cleanup should refuse paths outside the repo');
