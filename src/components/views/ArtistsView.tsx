@@ -5,6 +5,9 @@ import { PlaylistAppendPicker, TrackTable } from './LibraryView';
 import { api } from '../../lib/api';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
 
+const ARTIST_PAGE_SIZE = 320;
+const CATALOG_SEARCH_DEBOUNCE_MS = 180;
+
 export function ArtistsView(): JSX.Element {
   const [artists, setArtists] = useState<ArtistSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -12,6 +15,9 @@ export function ArtistsView(): JSX.Element {
   const [artistFact, setArtistFact] = useState<ArtistFact | null>(null);
   const [factStatus, setFactStatus] = useState<'idle' | 'loading' | 'none' | 'ok'>('idle');
   const [filter, setFilter] = useState('');
+  const artistQuery = useDebouncedValue(filter, CATALOG_SEARCH_DEBOUNCE_MS);
+  const [hasMoreArtists, setHasMoreArtists] = useState(false);
+  const [loadingArtists, setLoadingArtists] = useState(false);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
@@ -20,8 +26,28 @@ export function ArtistsView(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
 
   useEffect(() => {
-    api.getArtists().then(setArtists).catch(() => undefined);
-  }, []);
+    let cancelled = false;
+    setLoadingArtists(true);
+    api
+      .getArtists({ search: artistQuery, limit: ARTIST_PAGE_SIZE + 1, offset: 0 })
+      .then((rows) => {
+        if (cancelled) return;
+        setArtists(rows.slice(0, ARTIST_PAGE_SIZE));
+        setHasMoreArtists(rows.length > ARTIST_PAGE_SIZE);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setArtists([]);
+          setHasMoreArtists(false);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingArtists(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [artistQuery]);
 
   useEffect(() => {
     if (!selected) {
@@ -51,9 +77,21 @@ export function ArtistsView(): JSX.Element {
     return () => ctrl.abort();
   }, [selected]);
 
-  const filtered = filter
-    ? artists.filter((a) => a.artist.toLowerCase().includes(filter.toLowerCase()))
-    : artists;
+  async function loadMoreArtists(): Promise<void> {
+    if (loadingArtists || !hasMoreArtists) return;
+    setLoadingArtists(true);
+    try {
+      const rows = await api.getArtists({
+        search: artistQuery,
+        limit: ARTIST_PAGE_SIZE + 1,
+        offset: artists.length,
+      });
+      setArtists((currentArtists) => [...currentArtists, ...rows.slice(0, ARTIST_PAGE_SIZE)]);
+      setHasMoreArtists(rows.length > ARTIST_PAGE_SIZE);
+    } finally {
+      setLoadingArtists(false);
+    }
+  }
 
   if (selected) {
     return (
@@ -119,7 +157,8 @@ export function ArtistsView(): JSX.Element {
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
         />
         <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
-          {filtered.length.toLocaleString()} artists
+          {artists.length.toLocaleString()}{hasMoreArtists ? '+' : ''} artists
+          {loadingArtists ? ' / loading' : ''}
         </span>
       </div>
       <div className="flex-1 overflow-auto">
@@ -127,7 +166,7 @@ export function ArtistsView(): JSX.Element {
           className="grid"
           style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}
         >
-          {filtered.map((a) => (
+          {artists.map((a) => (
             <button
               key={a.artist}
               onClick={() => setSelected(a.artist)}
@@ -141,9 +180,32 @@ export function ArtistsView(): JSX.Element {
             </button>
           ))}
         </div>
+        {hasMoreArtists && (
+          <div className="flex justify-center py-4">
+            <button
+              className="pxbtn is-active"
+              onClick={() => void loadMoreArtists()}
+              disabled={loadingArtists}
+              data-newamp-artists-load-more
+            >
+              {loadingArtists ? 'Loading...' : 'Load more artists'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+
+  return debounced;
 }
 
 function ArtistSpotlight({
