@@ -499,6 +499,8 @@ export interface AppSettings {
   lastfmSessionKey: string | null;
   lastfmUsername: string | null;
   lastfmAuthToken: string | null;
+  openaiApiKey: string | null;
+  openaiModel: string;
   crossfadeMs: number;
   replayGain: 'off' | 'track' | 'album';
   limiterEnabled: boolean;
@@ -528,6 +530,8 @@ export type VisualizerPreset =
   | 'tunnel'
   | 'pulse'
   | 'neon-waves'
+  | 'neon-ribbons'
+  | 'plasma-grid'
   | 'prism-bars'
   | 'confetti'
   | 'burning-cloud';

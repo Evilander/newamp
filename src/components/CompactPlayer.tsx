@@ -10,6 +10,9 @@ import { ClassicBentoDeck } from './decks/ClassicBentoDeck';
 import { RecordPlayerDeck } from './decks/RecordPlayerDeck';
 import { JukeboxDeck } from './decks/JukeboxDeck';
 import { CassetteDeck } from './decks/CassetteDeck';
+import { HotdogDeck } from './decks/HotdogDeck';
+import { RetroTvDeck } from './decks/RetroTvDeck';
+import { WinampClassicDeck, WinampIndustrialDeck } from './decks/WinampClassicDeck';
 import { DECK_SKINS, findDeck, type DeckProps, type DeckSkin } from './decks/types';
 
 const DECK_SKIN_KEY = 'newamp:deck:skin';
@@ -104,12 +107,20 @@ export function CompactPlayer(): JSX.Element {
   };
 
   switch (deckSkin) {
+    case 'winamp-classic':
+      return <WinampClassicDeck {...deckProps} />;
+    case 'winamp-industrial':
+      return <WinampIndustrialDeck {...deckProps} />;
     case 'record-player':
       return <RecordPlayerDeck {...deckProps} />;
     case 'jukebox':
       return <JukeboxDeck {...deckProps} />;
     case 'cassette':
       return <CassetteDeck {...deckProps} />;
+    case 'hotdog':
+      return <HotdogDeck {...deckProps} />;
+    case 'retro-tv':
+      return <RetroTvDeck {...deckProps} />;
     case 'bento':
     default:
       return <ClassicBentoDeck {...deckProps} />;

@@ -497,7 +497,13 @@ export function NowPlayingView(): JSX.Element {
               gridTemplateColumns: `${(spectrumFrac * 100).toFixed(2)}% 6px 1fr`,
             }}
           >
-            <SpectrumPanel currentTime={currentTime} duration={current.duration ?? 0} />
+            <SpectrumPanel
+              current={current}
+              currentTime={currentTime}
+              duration={current.duration ?? 0}
+              aiAssistReady={!!settings?.openaiApiKey}
+              aiModel={settings?.openaiModel ?? null}
+            />
             <SplitHandle
               orientation="vertical"
               onDrag={(frac) => {
@@ -1110,11 +1116,17 @@ function PracticeLoopPanel({
 }
 
 function SpectrumPanel({
+  current,
   currentTime,
   duration,
+  aiAssistReady,
+  aiModel,
 }: {
+  current: Track;
   currentTime: number;
   duration: number;
+  aiAssistReady: boolean;
+  aiModel: string | null;
 }): JSX.Element {
   const barsRef = useRef<HTMLDivElement>(null);
   const peakRef = useRef<HTMLDivElement>(null);
@@ -1210,6 +1222,14 @@ function SpectrumPanel({
 
       <VuMeter />
 
+      <TrackSignalPanel
+        track={current}
+        currentTime={currentTime}
+        duration={duration}
+        aiAssistReady={aiAssistReady}
+        aiModel={aiModel}
+      />
+
       <div>
         <div
           className="mb-[6px] flex items-center justify-between text-[9px] uppercase tracking-[0.1em]"
@@ -1224,6 +1244,90 @@ function SpectrumPanel({
       </div>
     </div>
   );
+}
+
+function TrackSignalPanel({
+  track,
+  currentTime,
+  duration,
+  aiAssistReady,
+  aiModel,
+}: {
+  track: Track;
+  currentTime: number;
+  duration: number;
+  aiAssistReady: boolean;
+  aiModel: string | null;
+}): JSX.Element {
+  const ext = fileExtension(track.path);
+  const folder = parentFolder(track.path);
+  const elapsed = duration > 0 ? currentTime / duration : 0;
+  const quality = qualityBadge(track);
+  const density = track.size && duration > 0 ? track.size / duration : null;
+  const chips = [
+    ['FORMAT', ext || 'AUDIO'],
+    ['BITRATE', track.bitrate ? `${Math.round(track.bitrate / 1000)} kbps` : 'unknown'],
+    ['RATE', track.sampleRate ? `${(track.sampleRate / 1000).toFixed(track.sampleRate % 1000 === 0 ? 0 : 1)} kHz` : 'unknown'],
+    ['SIZE', formatOptionalBytes(track.size)],
+    ['BPM', track.bpm ? `${Math.round(track.bpm)}` : 'unset'],
+    ['KEY', track.key || 'unset'],
+  ] as const;
+
+  return (
+    <section className="track-signal-panel" data-newamp-track-signal-panel>
+      <div className="track-signal-head">
+        <span>Signal Bay</span>
+        <strong>{quality}</strong>
+      </div>
+      <div className="track-signal-chips">
+        {chips.map(([label, value]) => (
+          <div key={label} className="track-signal-chip">
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="track-signal-strip">
+        <span style={{ width: `${Math.max(2, Math.min(100, elapsed * 100))}%` }} />
+      </div>
+      <div className="track-signal-detail">
+        <span title={folder}>{folder || 'No folder path'}</span>
+        <span>{track.year ?? 'year unset'} / {track.genre || 'genre unset'}</span>
+        <span>{track.playCount} plays / {track.skipCount} skips</span>
+        <span>{density ? `${formatBytes(density)}/s` : 'density unknown'}</span>
+      </div>
+      <div className="track-signal-ai">
+        <span>{aiAssistReady ? `ChatGPT assist ready: ${aiModel || 'model set'}` : 'ChatGPT assist: add your API key in Settings'}</span>
+        <span>liner notes / review seed / artist dossier</span>
+      </div>
+    </section>
+  );
+}
+
+function fileExtension(path: string): string {
+  const match = /\.([^.\\/]+)$/.exec(path);
+  return match?.[1]?.toUpperCase() ?? '';
+}
+
+function parentFolder(path: string): string {
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  if (parts.length <= 1) return '';
+  return parts.slice(Math.max(0, parts.length - 3), -1).join(' / ');
+}
+
+function formatOptionalBytes(value: number | null): string {
+  if (!value || value <= 0) return 'unknown';
+  return formatBytes(value);
+}
+
+function qualityBadge(track: Track): string {
+  const ext = fileExtension(track.path).toLowerCase();
+  const lossless = ['flac', 'wav', 'aiff', 'aif', 'alac', 'ape', 'wv'].includes(ext);
+  if (lossless && track.sampleRate && track.sampleRate >= 88200) return 'hi-res lossless';
+  if (lossless) return 'lossless';
+  if (track.bitrate && track.bitrate >= 256000) return 'high bitrate';
+  if (track.bitrate && track.bitrate > 0) return 'lossy';
+  return 'unknown source';
 }
 
 function VuMeter(): JSX.Element {

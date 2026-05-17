@@ -4,7 +4,15 @@
 
 import type { Track } from '@shared/types';
 
-export type DeckSkin = 'bento' | 'record-player' | 'jukebox' | 'cassette';
+export type DeckSkin =
+  | 'bento'
+  | 'winamp-classic'
+  | 'winamp-industrial'
+  | 'record-player'
+  | 'jukebox'
+  | 'cassette'
+  | 'hotdog'
+  | 'retro-tv';
 
 export const DECK_SKINS: {
   id: DeckSkin;
@@ -13,10 +21,14 @@ export const DECK_SKINS: {
   tagline: string;
   size: { width: number; height: number };
 }[] = [
-  { id: 'bento',         label: 'Windowshade',   shortLabel: 'BAR',  tagline: 'Slim Winamp-style bar',      size: { width: 620, height: 116 } },
-  { id: 'record-player', label: 'Record Player', shortLabel: 'VIN',  tagline: 'Spinning vinyl + tonearm',   size: { width: 540, height: 540 } },
-  { id: 'jukebox',       label: 'Jukebox',       shortLabel: 'JUKE', tagline: 'Wurlitzer arch + chrome',    size: { width: 420, height: 560 } },
-  { id: 'cassette',      label: 'Cassette Deck', shortLabel: 'TAPE', tagline: 'Twin spools, magnetic tape', size: { width: 760, height: 320 } },
+  { id: 'bento',             label: 'Windowshade',      shortLabel: 'BAR',  tagline: 'Slim Winamp-style bar',       size: { width: 620, height: 116 } },
+  { id: 'winamp-classic',    label: 'Winamp Classic',   shortLabel: 'W2X',  tagline: 'Main + equalizer stack',      size: { width: 560, height: 232 } },
+  { id: 'winamp-industrial', label: 'Winamp Industrial',shortLabel: 'IND',  tagline: 'Dark pixel-skin throwback',   size: { width: 560, height: 232 } },
+  { id: 'record-player',     label: 'Record Player',    shortLabel: 'VIN',  tagline: 'Spinning vinyl + tonearm',    size: { width: 540, height: 540 } },
+  { id: 'jukebox',           label: 'Jukebox',          shortLabel: 'JUKE', tagline: 'Wurlitzer arch + chrome',     size: { width: 420, height: 560 } },
+  { id: 'cassette',          label: 'Cassette Deck',    shortLabel: 'TAPE', tagline: 'Twin spools, magnetic tape',  size: { width: 760, height: 320 } },
+  { id: 'hotdog',            label: 'Hotdog Deck',      shortLabel: 'DOG',  tagline: 'Rounded bun transport deck',  size: { width: 740, height: 240 } },
+  { id: 'retro-tv',          label: 'Retro TV',         shortLabel: 'TV',   tagline: 'CRT screen + rabbit ears',    size: { width: 520, height: 430 } },
 ];
 
 export interface DeckProps {

@@ -31,6 +31,7 @@ assert.equal(normalized.compactMode, false, 'compact deck preference should reje
 const visualizerSaved = settings.set({ visualizerPreset: 'galaxy' });
 assert.equal(visualizerSaved.visualizerPreset, 'galaxy', 'visualizer preset should save');
 assert.equal(new SettingsStore(settingsPath).get().visualizerPreset, 'galaxy', 'visualizer preset should reload');
+assert.equal(settings.set({ visualizerPreset: 'plasma-grid' }).visualizerPreset, 'plasma-grid', 'Xbox-style Plasma Grid preset should save');
 assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'neon-waves', 'visualizer preset should reject unknown values');
 
 const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource] =
@@ -53,6 +54,7 @@ const [typesSource, settingsSource, storeSource, appSource, titleBarSource, comp
 assert.match(typesSource, /compactMode: boolean/, 'AppSettings should include compact deck persistence');
 assert.match(typesSource, /alwaysOnTop: boolean/, 'AppSettings should include always-on-top persistence');
 assert.match(typesSource, /visualizerPreset: VisualizerPreset/, 'AppSettings should include visualizer preset persistence');
+assert.match(typesSource, /openaiApiKey: string \| null/, 'AppSettings should include optional ChatGPT assist key persistence');
 assert.match(settingsSource, /compactMode: false/, 'SettingsStore should default compact mode to false');
 assert.match(settingsSource, /alwaysOnTop: false/, 'SettingsStore should default always-on-top to false');
 assert.match(settingsSource, /parsed\.compactMode === true/, 'SettingsStore should normalize loaded compact mode');
@@ -60,6 +62,7 @@ assert.match(settingsSource, /parsed\.alwaysOnTop === true/, 'SettingsStore shou
 assert.match(settingsSource, /patch\.compactMode === true/, 'SettingsStore should normalize patched compact mode');
 assert.match(settingsSource, /patch\.alwaysOnTop === true/, 'SettingsStore should normalize patched always-on-top');
 assert.match(settingsSource, /normalizeVisualizerPreset/, 'SettingsStore should normalize visualizer presets');
+assert.match(settingsSource, /normalizeOpenAiModel/, 'SettingsStore should normalize ChatGPT assist model names');
 assert.match(storeSource, /compactMode: settings\.compactMode/, 'player store should initialize compact mode from settings');
 assert.match(storeSource, /alwaysOnTop: settings\.alwaysOnTop/, 'player store should initialize always-on-top from settings');
 assert.match(storeSource, /setSettings\(\{ compactMode: on \}\)/, 'player store should persist compact mode changes');
