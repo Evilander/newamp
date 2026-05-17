@@ -85,6 +85,7 @@ assert.match(
 assert.match(gateSource, /smoke:installer-artifact/, 'release gate should run installer artifact smoke after packaging');
 assert.match(gateSource, /smoke:packaged-normal-launch/, 'release gate should run packaged normal launch smoke after packaging');
 assert.match(gateSource, /smoke:portable-app/, 'release gate should run portable app startup smoke after packaging');
+assert.match(gateSource, /smoke:installed-app/, 'release gate should run installed app proof after packaging');
 assert.match(gateSource, /portablePath/, 'release gate should include portable artifact checks');
 assert.match(gateSource, /checkInstalledAssociations/, 'release gate should include installed association registry proof');
 assert.match(gateSource, /NEWAMP_FULL_SCAN_SKIP_ART_STORAGE/, 'release gate real-library proof should stay disk-light beside release artifacts');
