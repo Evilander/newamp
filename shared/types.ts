@@ -77,6 +77,10 @@ export interface CatalogSummaryQueryOptions {
   search?: string;
   limit?: number;
   offset?: number;
+  year?: number | null;
+  yearWindow?: number;
+  excludeAlbum?: string | null;
+  excludeAlbumArtist?: string | null;
 }
 
 export interface AlbumSummary {

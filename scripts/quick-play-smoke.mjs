@@ -30,6 +30,18 @@ try {
   const albumResults = library.getAlbums({ search: 'computer', limit: 4 });
   assert.equal(albumResults.length, 1, 'quick palette album search should filter in the catalog layer');
   assert.equal(albumResults[0].album, 'OK Computer');
+  const nearbyAlbums = library.getAlbums({
+    year: 1997,
+    yearWindow: 0,
+    excludeAlbum: 'OK Computer',
+    excludeAlbumArtist: 'Radiohead',
+    limit: 4,
+  });
+  assert.deepEqual(
+    nearbyAlbums.map((album) => album.album),
+    ['Crooked Rain'],
+    'album context should fetch nearby releases without reading the full album catalog',
+  );
 
   const artistTracks = library.getArtistTracks('Radiohead');
   assert.equal(artistTracks.length, 2, 'quick palette artist results should be able to launch artist tracks');
@@ -106,6 +118,7 @@ try {
     titleSearch: titleSearch.length,
     pathSearch: pathSearch.length,
     albumResults: albumResults.length,
+    nearbyAlbums: nearbyAlbums.length,
     albumTracks: albumTracks.length,
     artistResults: artistResults.length,
     artistTracks: artistTracks.length,
