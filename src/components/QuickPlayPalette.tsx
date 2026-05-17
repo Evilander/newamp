@@ -24,6 +24,7 @@ type PaletteItem =
 const VIEW_ITEMS: Array<{ view: ViewMode; title: string; subtitle: string }> = [
   { view: 'home', title: 'Home', subtitle: 'Continue, mixes, history, health, playlists' },
   { view: 'library', title: 'Library', subtitle: 'Full catalog and power search' },
+  { view: 'discover', title: 'Discover', subtitle: 'Living Library missions and crate digging' },
   { view: 'mixes', title: 'Mixes', subtitle: 'Generated sets from the local library' },
   { view: 'folders', title: 'Folders', subtitle: 'Browse by filesystem path' },
   { view: 'albums', title: 'Albums', subtitle: 'Album grid and album playback' },

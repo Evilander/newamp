@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "A Winamp-inspired modern desktop music player for Windows. Your local library, your rules, no streaming required. Four UI shells, shape-changing deck skins, 0-200% volume with red-zone boost, 0-100 decimal track scoring, and a magazine-style home.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
@@ -59,6 +59,7 @@
     "smoke:skin": "npm run build:electron && node scripts/skin-smoke.mjs",
     "smoke:smart": "npm run build:electron && node scripts/smart-rules-smoke.mjs",
     "smoke:suggested-stations": "npm run build:electron && node scripts/suggested-stations-smoke.mjs",
+    "smoke:discover": "npm run build:electron && node scripts/discover-smoke.mjs",
     "smoke:harmonic": "npm run build:electron && node scripts/harmonic-mix-smoke.mjs",
     "smoke:mixes": "npm run build:electron && node scripts/mixes-smoke.mjs",
     "smoke:auto-dj": "npm run build:electron && node scripts/auto-dj-smoke.mjs",
@@ -107,6 +108,7 @@
     "smoke:ui-playback": "npm run build && node scripts/ui-playback-smoke.mjs",
     "smoke:ui-quick-play": "npm run build && node scripts/ui-quick-play-smoke.mjs",
     "smoke:ui-visualizer": "npm run build && node scripts/ui-visualizer-smoke.mjs",
+    "smoke:ui-discover": "npm run build && node scripts/ui-discover-smoke.mjs",
     "smoke:ui-deck": "npm run build && node scripts/ui-deck-smoke.mjs",
     "smoke:ui-art": "npm run build && node scripts/ui-art-smoke.mjs",
     "smoke:installer-artifact": "node scripts/installer-artifact-smoke.mjs",

@@ -349,6 +349,86 @@ export interface SmartPlaylistSuggestion {
   rule: SmartPlaylistRuleInput;
 }
 
+export type DiscoverTone = 'accent' | 'warn' | 'plain';
+
+export type DiscoverDeckSkin =
+  | 'bento'
+  | 'winamp-classic'
+  | 'winamp-industrial'
+  | 'record-player'
+  | 'jukebox'
+  | 'cassette'
+  | 'discman'
+  | 'hotdog'
+  | 'retro-tv';
+
+export interface DiscoverSurfaceInput {
+  seed?: string | null;
+  limit?: number | null;
+  lowEndMode?: boolean | null;
+  now?: number | null;
+  seedTrackId?: number | null;
+}
+
+export interface DiscoverInsightSummary {
+  trackCount: number;
+  albumCount: number;
+  artistCount: number;
+  lovedCount: number;
+  highRatedCount: number;
+  unplayedCount: number;
+  recentlyAddedCount: number;
+  forgottenFavoriteCount: number;
+}
+
+export interface DiscoverVisualPlan {
+  title: string;
+  subtitle: string;
+  presets: VisualizerPreset[];
+  deckSkin: DiscoverDeckSkin;
+  lowEndMode: boolean;
+  albumOverlay: boolean;
+}
+
+export interface DiscoverMixCard {
+  id: string;
+  title: string;
+  subtitle: string;
+  reason: string;
+  tone: DiscoverTone;
+  tracks: Track[];
+  scoreLabel: string;
+  visualPlan: DiscoverVisualPlan | null;
+}
+
+export interface DiscoverMissionStep {
+  id: string;
+  title: string;
+  instruction: string;
+  actionLabel: string;
+  tracks: Track[];
+}
+
+export interface DiscoverMission {
+  id: string;
+  title: string;
+  subtitle: string;
+  reason: string;
+  tone: DiscoverTone;
+  steps: DiscoverMissionStep[];
+  tracks: Track[];
+  visualPlan: DiscoverVisualPlan | null;
+}
+
+export interface DiscoverSurface {
+  modeName: 'Living Library';
+  generatedAt: number;
+  seed: string;
+  summary: DiscoverInsightSummary;
+  cards: DiscoverMixCard[];
+  missions: DiscoverMission[];
+}
+
 export interface HarmonicMixInput {
   seedTrackId?: number | null;
   count?: number;
@@ -740,6 +820,7 @@ export interface NewAmpAPI {
   getDroppedFilePaths: (files: unknown[]) => string[];
   getSmartPlaylistRules: () => Promise<SmartPlaylistRule[]>;
   getSuggestedSmartPlaylistRules: () => Promise<SmartPlaylistSuggestion[]>;
+  getDiscoverSurface: (input?: DiscoverSurfaceInput) => Promise<DiscoverSurface>;
   saveSmartPlaylistRule: (input: SmartPlaylistRuleInput) => Promise<SmartPlaylistRule>;
   deleteSmartPlaylistRule: (id: number) => Promise<void>;
   runSmartPlaylistRule: (input: number | SmartPlaylistRuleInput) => Promise<Track[]>;

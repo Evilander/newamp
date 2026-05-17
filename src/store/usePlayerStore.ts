@@ -49,6 +49,7 @@ export type ViewMode =
   | 'home'
   | 'library'
   | 'folders'
+  | 'discover'
   | 'mixes'
   | 'albums'
   | 'artists'
