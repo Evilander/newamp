@@ -129,7 +129,7 @@ interface PlayerState {
   setEqBand: (i: number, dB: number) => Promise<void>;
   setEqPreset: (values: number[]) => Promise<void>;
   setEqEnabled: (on: boolean) => Promise<void>;
-  toggleLove: (id: number) => Promise<void>;
+  toggleLove: (id: number) => Promise<boolean>;
   setTrackRating: (id: number, rating: number) => Promise<Track | null>;
   setTrackRatingScore: (id: number, score: number | null) => Promise<Track | null>;
   toggleAvoidAutoPlay: (id: number) => Promise<Track | null>;
@@ -1082,6 +1082,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         current: state.current?.id === id ? { ...state.current, loved: nextLoved } : state.current,
         queue: state.queue.map((track) => (track.id === id ? { ...track, loved: nextLoved } : track)),
       }));
+      return loved;
     },
 
     setTrackRating: async (id, rating) => {

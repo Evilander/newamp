@@ -25,7 +25,7 @@ type Sort =
   | 'loved'
   | 'rating';
 
-const LIBRARY_PAGE_SIZE = 5000;
+const LIBRARY_PAGE_SIZE = 1200;
 
 export function LibraryView(): JSX.Element {
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -33,6 +33,7 @@ export function LibraryView(): JSX.Element {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMoreTracks, setHasMoreTracks] = useState(false);
   const [matchingTrackCount, setMatchingTrackCount] = useState(0);
+  const [summaryRefreshKey, setSummaryRefreshKey] = useState(0);
   const [sort, setSort] = useState<Sort>('artist');
   const [dropActive, setDropActive] = useState(false);
   const [dropMessage, setDropMessage] = useState<string | null>(null);
@@ -59,6 +60,7 @@ export function LibraryView(): JSX.Element {
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
+  const toggleCurrentLove = usePlayerStore((s) => s.toggleLove);
   const setTrackRating = usePlayerStore((s) => s.setTrackRating);
   const toggleAvoidAutoPlay = usePlayerStore((s) => s.toggleAvoidAutoPlay);
   const current = usePlayerStore((s) => s.current);
@@ -91,9 +93,18 @@ export function LibraryView(): JSX.Element {
   }, [search, sort]);
 
   useEffect(() => {
-    api.getStats().then(setStats).catch(() => undefined);
-    api.getLibraryHealth().then(setHealth).catch(() => undefined);
-  }, [tracks.length]);
+    let cancelled = false;
+    Promise.all([api.getStats(), api.getLibraryHealth()])
+      .then(([nextStats, nextHealth]) => {
+        if (cancelled) return;
+        setStats(nextStats);
+        setHealth(nextHealth);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [summaryRefreshKey]);
 
   const hasLibrary = stats.tracks > 0;
 
@@ -105,6 +116,8 @@ export function LibraryView(): JSX.Element {
     }
     setDropMessage(`Scanning ${paths.length.toLocaleString()} dropped item${paths.length === 1 ? '' : 's'}...`);
     await api.scanLibrary(paths);
+    await reloadLibraryPage();
+    refreshLibrarySummary();
   }
 
   async function loadMoreTracks(): Promise<void> {
@@ -127,8 +140,22 @@ export function LibraryView(): JSX.Element {
     }
   }
 
+  async function reloadLibraryPage(): Promise<void> {
+    const [nextTracks, nextCount] = await Promise.all([
+      api.getTracks({ search, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
+      api.getTrackCount({ search, sort }),
+    ]);
+    setTracks(nextTracks);
+    setMatchingTrackCount(nextCount);
+    setHasMoreTracks(nextTracks.length < nextCount);
+  }
+
+  function refreshLibrarySummary(): void {
+    setSummaryRefreshKey((key) => key + 1);
+  }
+
   async function toggleLove(id: number): Promise<void> {
-    const loved = await api.toggleLove(id);
+    const loved = await toggleCurrentLove(id);
     const nextLoved: 0 | 1 = loved ? 1 : 0;
     setTracks((rows) =>
       rows
@@ -179,8 +206,7 @@ export function LibraryView(): JSX.Element {
     const updated = await api.applyTrackMetadataPatch(metadataPanel.track.id, candidate);
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === updated.id ? updated : track)));
-    api.getStats().then(setStats).catch(() => undefined);
-    api.getLibraryHealth().then(setHealth).catch(() => undefined);
+    refreshLibrarySummary();
     setMetadataPanel({
       track: updated,
       candidates: [],
@@ -195,8 +221,7 @@ export function LibraryView(): JSX.Element {
     const updated = await api.applyTrackMetadataEdit(metadataPanel.track.id, patch);
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === updated.id ? updated : track)));
-    api.getStats().then(setStats).catch(() => undefined);
-    api.getLibraryHealth().then(setHealth).catch(() => undefined);
+    refreshLibrarySummary();
     setMetadataPanel({
       track: updated,
       candidates: metadataPanel.candidates,
@@ -210,8 +235,7 @@ export function LibraryView(): JSX.Element {
     if (!updated.length) return;
     const byId = new Map(updated.map((track) => [track.id, track]));
     setTracks((rows) => rows.map((track) => byId.get(track.id) ?? track));
-    api.getStats().then(setStats).catch(() => undefined);
-    api.getLibraryHealth().then(setHealth).catch(() => undefined);
+    refreshLibrarySummary();
     api.getTrackCount({ search, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
@@ -798,13 +822,23 @@ export function TrackTable({
   onAddToQueue?: (track: Track) => void;
   onPlayNextTracks?: (tracks: Track[]) => void;
   onAddTracksToQueue?: (tracks: Track[]) => void;
-  onToggleLove?: (id: number) => Promise<void>;
-  onSetRating?: (id: number, rating: number) => Promise<void>;
-  onToggleAvoidAutoPlay?: (id: number) => Promise<void>;
+  onToggleLove?: (id: number) => Promise<boolean | void>;
+  onSetRating?: (id: number, rating: number) => Promise<Track | null | void>;
+  onToggleAvoidAutoPlay?: (id: number) => Promise<Track | null | void>;
   onMetadataLookup?: (track: Track) => void;
   onBulkMetadataSaved?: (tracks: Track[]) => void;
 }): JSX.Element {
-  const visible = useMemo(() => tracks, [tracks]);
+  const storeToggleLove = usePlayerStore((s) => s.toggleLove);
+  const storeSetTrackRating = usePlayerStore((s) => s.setTrackRating);
+  const storeToggleAvoidAutoPlay = usePlayerStore((s) => s.toggleAvoidAutoPlay);
+  const [localPatches, setLocalPatches] = useState<Map<number, Partial<Track>>>(() => new Map());
+  const visible = useMemo(
+    () => tracks.map((track) => {
+      const patch = localPatches.get(track.id);
+      return patch ? { ...track, ...patch } : track;
+    }),
+    [tracks, localPatches],
+  );
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
   const showMetadataLookup = !!onMetadataLookup;
   const showQueueActions = !!onPlayNext || !!onAddToQueue;
@@ -842,6 +876,15 @@ export function TrackTable({
     });
   }, [visible]);
 
+  useEffect(() => {
+    setLocalPatches((current) => {
+      if (!current.size) return current;
+      const trackIds = new Set(tracks.map((track) => track.id));
+      const next = new Map([...current].filter(([id]) => trackIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [tracks]);
+
   function setTrackSelected(id: number, selected: boolean): void {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -860,6 +903,33 @@ export function TrackTable({
       }
       return next;
     });
+  }
+
+  function patchLocalTrack(id: number, patch: Partial<Track>): void {
+    setLocalPatches((current) => {
+      const next = new Map(current);
+      next.set(id, { ...(next.get(id) ?? {}), ...patch });
+      return next;
+    });
+  }
+
+  async function toggleLoveForTrack(track: Track): Promise<void> {
+    const loved = onToggleLove ? await onToggleLove(track.id) : await storeToggleLove(track.id);
+    if (typeof loved === 'boolean') patchLocalTrack(track.id, { loved: loved ? 1 : 0 });
+  }
+
+  async function setRatingForTrack(track: Track, rating: number): Promise<void> {
+    const updated = onSetRating
+      ? await onSetRating(track.id, rating)
+      : await storeSetTrackRating(track.id, rating);
+    if (updated) patchLocalTrack(track.id, updated);
+  }
+
+  async function toggleAvoidForTrack(track: Track): Promise<void> {
+    const updated = onToggleAvoidAutoPlay
+      ? await onToggleAvoidAutoPlay(track.id)
+      : await storeToggleAvoidAutoPlay(track.id);
+    if (updated) patchLocalTrack(track.id, updated);
   }
 
   async function addToSavedPlaylist(playlistId: number, track: Track): Promise<void> {
@@ -1349,9 +1419,7 @@ export function TrackTable({
               <td className="px-2 py-[5px] text-right" data-newamp-rating={t.rating}>
                 <RatingStars
                   value={t.rating}
-                  onChange={async (rating) => {
-                    await onSetRating?.(t.id, rating);
-                  }}
+                  onChange={(rating) => setRatingForTrack(t, rating)}
                 />
               </td>
               <td className="px-2 py-[5px] text-right">
@@ -1360,14 +1428,7 @@ export function TrackTable({
                   data-avoid-autoplay
                   onClick={async (e) => {
                     e.stopPropagation();
-                    const updated = onToggleAvoidAutoPlay
-                      ? await onToggleAvoidAutoPlay(t.id).then(() => null)
-                      : await api.toggleAvoidAutoPlay(t.id);
-                    const avoid = updated ? !!updated.avoidAutoPlay : !t.avoidAutoPlay;
-                    (t as Track).avoidAutoPlay = avoid ? 1 : 0;
-                    e.currentTarget.innerText = avoid ? 'NO DJ' : 'DJ OK';
-                    e.currentTarget.style.color = avoid ? 'var(--warn)' : 'var(--muted)';
-                    e.currentTarget.style.borderColor = avoid ? 'var(--warn)' : 'var(--line)';
+                    await toggleAvoidForTrack(t);
                   }}
                   style={{
                     color: t.avoidAutoPlay ? 'var(--warn)' : 'var(--muted)',
@@ -1398,12 +1459,7 @@ export function TrackTable({
                 <button
                   onClick={async (e) => {
                     e.stopPropagation();
-                    await (onToggleLove ? onToggleLove(t.id) : api.toggleLove(t.id));
-                    // optimistic: flip locally
-                    (t as Track).loved = t.loved ? 0 : 1;
-                    // trigger re-render via state change in parent — quick hack: reload row
-                    const el = (e.target as HTMLElement);
-                    el.innerText = t.loved ? '★' : '☆';
+                    await toggleLoveForTrack(t);
                   }}
                 style={{ color: t.loved ? 'var(--accent)' : 'var(--muted)' }}
                 title="Love"

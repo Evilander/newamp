@@ -72,6 +72,9 @@ assert.match(preloadSource, /setTrackRating/, 'preload should expose rating upda
 assert.match(apiSource, /setTrackRating/, 'browser-safe API should include rating updates');
 assert.match(storeSource, /setTrackRating/, 'player store should update current queue rating state');
 assert.match(libraryViewSource, /data-newamp-rating/, 'Library rows should expose rating controls');
+assert.match(libraryViewSource, /storeToggleLove/, 'shared track tables should love tracks outside the main Library view');
+assert.match(libraryViewSource, /storeSetTrackRating/, 'shared track tables should rate tracks outside the main Library view');
+assert.match(libraryViewSource, /patchLocalTrack/, 'shared track tables should re-render local row actions without mutating DOM');
 assert.match(nowPlayingSource, /Rating/, 'Now Playing should expose current-track rating');
 assert.match(packageSource, /smoke:rating/, 'package scripts should include rating smoke');
 
