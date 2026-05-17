@@ -45,7 +45,7 @@ const THEME_SET = new Set<string>(BUILT_IN_THEMES);
 const SKIN_FORMAT = 'newamp.custom-skin';
 const SKIN_VERSION = 1;
 
-export interface NewampSkinFile {
+export interface NewAmpSkinFile {
   format: typeof SKIN_FORMAT;
   version: typeof SKIN_VERSION;
   exportedAt: number;
@@ -69,7 +69,7 @@ export function normalizeCustomSkin(value: unknown): CustomSkin | null {
   };
 }
 
-export function skinToFile(skin: CustomSkin, now = Date.now()): NewampSkinFile {
+export function skinToFile(skin: CustomSkin, now = Date.now()): NewAmpSkinFile {
   const normalized = normalizeCustomSkin(skin);
   if (!normalized) throw new Error('Custom skin has no valid variables.');
   return {
