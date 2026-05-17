@@ -56,6 +56,21 @@ try {
   const directArtistTracks = library.getFolderTracks('K:/music/Artist A', { recursive: false });
   assert.equal(directArtistTracks.length, 0, 'direct folder tracks should not include child albums');
 
+  library.upsertTracks([
+    fixture('K:\\music\\100% Exact\\01 - Percent Song.mp3', 'Percent Song', 6, null),
+    fixture('K:\\music\\100X Exact\\01 - Decoy Song.mp3', 'Decoy Song', 7, null),
+  ]);
+  assert.deepEqual(
+    library.getFolderTracks('K:/music/100% Exact', { recursive: true }).map((track) => track.title),
+    ['Percent Song'],
+    'folder lookup should treat percent signs as literal path characters',
+  );
+  assert.deepEqual(
+    library.getFolderTrackIds('K:/music/100% Exact', { recursive: true }),
+    library.getFolderTracks('K:/music/100% Exact', { recursive: true }).map((track) => track.id),
+    'folder id lookup should use the same bounded literal path matching',
+  );
+
   const derivedRoots = library.getFolders(null, []);
   assert.deepEqual([...derivedRoots.map((folder) => folder.path)].sort(), ['K:\\music', 'L:\\incoming']);
 
@@ -90,7 +105,9 @@ try {
   assert.match(foldersViewSource, /Load more direct tracks/, 'Folders view should expose explicit direct-track pagination');
   const librarySource = await readText('../electron/library.ts');
   assert.match(librarySource, /queryFolderTrackRows/, 'folder track lookup should share a bounded query path');
-  assert.match(librarySource, /WHERE lower\(replace\(path, '\/', '\\\\'\)\) LIKE \?/, 'folder track lookup should prefilter by normalized path in SQL');
+  assert.match(librarySource, /queryFolderRows/, 'folder track lookup should stream through the shared cursor path');
+  assert.match(librarySource, /LIKE \? ESCAPE '\|'/, 'folder track lookup should escape LIKE wildcard characters in paths');
+  assert.match(librarySource, /while \(stmt\.step\(\)\)/, 'folder track lookup should stop once a page is filled');
   assert.doesNotMatch(librarySource, /getFolderTracks[\s\S]+SELECT \* FROM tracks`\)[\s\S]+filter\(\(row\) => trackPathIsInFolder/, 'folder track lookup should not scan every track before filtering');
   assert.match(packageSource, /smoke:folders/, 'package scripts should expose folder browser smoke');
 
