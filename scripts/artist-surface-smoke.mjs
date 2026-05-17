@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fetchArtistFacts } from '../src/api/artistFacts.ts';
+import { fetchAlbumFacts } from '../src/api/albumFacts.ts';
 
-const [artistFactsSource, artistsViewSource, nowPlayingSource] = await Promise.all([
+const [artistFactsSource, albumFactsSource, artistsViewSource, nowPlayingSource] = await Promise.all([
   readFile(new URL('../src/api/artistFacts.ts', import.meta.url), 'utf8'),
+  readFile(new URL('../src/api/albumFacts.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/ArtistsView.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8'),
 ]);
@@ -23,6 +25,9 @@ assert.match(artistsViewSource, /ArtistSpotlight/, 'Artists view should show an 
 assert.match(nowPlayingSource, /ArtistImageStage/, 'Now Playing should render an image-first artist facts stage');
 assert.match(nowPlayingSource, /AlbumContextPanel/, 'Now Playing should replace Studio with album context');
 assert.match(nowPlayingSource, /fetchAlbumFacts/, 'Album context should look up album stories when available');
+assert.match(albumFactsSource, /bestAlbumFact/, 'Album context should rank multiple Wikipedia album candidates');
+assert.match(albumFactsSource, /ALBUM_FACT_CACHE_TTL_MS/, 'Album context should cache successful album facts briefly');
+assert.match(albumFactsSource, /ALBUM_FACT_SEARCH_LIMIT\s*=\s*'6'/, 'Album context should inspect multiple search candidates');
 assert.match(nowPlayingSource, /api\.getAlbums\(\{\s*year: albumYear,[\s\S]*yearWindow: 1,[\s\S]*limit: 5/, 'Album context should query only nearby release years');
 assert.doesNotMatch(nowPlayingSource, /api\.getAlbums\(\)\.catch/, 'Album context should not pull the full album catalog');
 
@@ -214,6 +219,85 @@ try {
     'artist facts should inspect multiple fallback candidates, not just the first search hit',
   );
 
+  storage.clear();
+  requestedUrls.length = 0;
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(String(url));
+    const parsed = new URL(String(url));
+    const title = String(parsed.searchParams.get('titles') ?? '');
+    if (title.includes('Kid A (Radiohead album)')) {
+      return jsonResponse({
+        query: {
+          pages: {
+            8: {
+              title: 'Kid A',
+              description: 'album by Radiohead',
+              extract: 'Kid A is the fourth studio album by the English rock band Radiohead, released in 2000.',
+              fullurl: 'https://en.wikipedia.org/wiki/Kid_A',
+              thumbnail: { source: 'https://images.example/kid-a-900.jpg' },
+              original: { source: 'https://images.example/kid-a-original.jpg' },
+            },
+          },
+        },
+      });
+    }
+    return jsonResponse({ query: { pages: { '-1': { title: 'Missing' } } } });
+  };
+
+  const kidA = await fetchAlbumFacts('Kid A', 'Radiohead');
+  assert.ok(kidA, 'album context should resolve direct album disambiguation pages');
+  assert.equal(kidA.title, 'Kid A');
+  assert.equal(kidA.imageUrl, 'https://images.example/kid-a-900.jpg');
+  assert.equal(storage.size, 1, 'successful album facts should be cached locally');
+
+  globalThis.fetch = async () => {
+    throw new Error('album cache should avoid a second network fetch');
+  };
+  assert.deepEqual(await fetchAlbumFacts('Kid A', 'Radiohead'), kidA, 'second album lookup should read cached facts');
+
+  storage.clear();
+  requestedUrls.length = 0;
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(String(url));
+    const parsed = new URL(String(url));
+    if (!parsed.searchParams.has('generator')) {
+      return jsonResponse({ query: { pages: { '-1': { title: 'Missing' } } } });
+    }
+    return jsonResponse({
+      query: {
+        pages: {
+          9: {
+            title: 'Blue (film)',
+            description: 'film',
+            extract: 'Blue is a film released in the 1990s.',
+            fullurl: 'https://en.wikipedia.org/wiki/Blue_(film)',
+          },
+          10: {
+            title: 'Blue (Joni Mitchell album)',
+            description: 'album by Joni Mitchell',
+            extract: 'Blue is the fourth studio album by Canadian singer-songwriter Joni Mitchell, released in 1971.',
+            fullurl: 'https://en.wikipedia.org/wiki/Blue_(Joni_Mitchell_album)',
+            thumbnail: { source: 'https://images.example/blue-900.jpg' },
+          },
+          11: {
+            title: 'Blue (song)',
+            description: 'song',
+            extract: 'Blue is a song by a pop artist.',
+            fullurl: 'https://en.wikipedia.org/wiki/Blue_(song)',
+          },
+        },
+      },
+    });
+  };
+
+  const blue = await fetchAlbumFacts('Blue', 'Joni Mitchell');
+  assert.ok(blue, 'album context should choose album pages over films or songs');
+  assert.equal(blue.title, 'Blue (Joni Mitchell album)');
+  assert.ok(
+    requestedUrls.some((url) => new URL(url).searchParams.get('gsrlimit') === '6'),
+    'album context should inspect multiple fallback candidates, not just the first search hit',
+  );
+
   console.log(
     JSON.stringify(
       {
@@ -222,6 +306,8 @@ try {
         fallbackTitle: fallback.title,
         pandaTitle: panda.title,
         phoenixTitle: phoenix.title,
+        directAlbum: kidA.title,
+        fallbackAlbum: blue.title,
         cachedEntries: storage.size,
         requests: requestedUrls.length,
       },
