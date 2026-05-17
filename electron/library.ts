@@ -314,6 +314,11 @@ interface FolderSummaryAccumulator {
   artFromTrackId: number | null;
 }
 
+interface FolderTrackIdRow {
+  id: number;
+  path: string;
+}
+
 function rowToTrack(r: RawRow): Track {
   return {
     id: r.id,
@@ -1163,26 +1168,54 @@ export class LibraryStore {
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
   ): number[] {
-    return this.queryFolderTrackRows(folderPath, opts).map((row) => row.id);
+    return this.queryFolderRows<FolderTrackIdRow>(
+      folderPath,
+      opts,
+      'id, path, disc_no, track_no, title',
+    ).map((row) => row.id);
   }
 
   private queryFolderTrackRows(
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
   ): RawRow[] {
+    return this.queryFolderRows<RawRow>(folderPath, opts, '*');
+  }
+
+  private queryFolderRows<T extends { path: string }>(
+    folderPath: string,
+    opts: { recursive?: boolean; limit?: number; offset?: number } = {},
+    selectClause: string,
+  ): T[] {
     const folder = normalizeFolderPath(folderPath);
     if (!folder) return [];
     const recursive = !!opts.recursive;
     const limit = Math.max(1, Math.min(opts.limit ?? 100000, 100000));
     const offset = Math.max(0, opts.offset ?? 0);
-    return this.many<RawRow>(
-      `SELECT * FROM tracks
-        WHERE lower(replace(path, '/', '\\')) LIKE ?`,
-      [folderTrackPathPrefixParam(folder)],
-    )
-      .filter((row) => trackPathIsInFolder(row.path, folder, recursive))
-      .sort(compareFolderTracks)
-      .slice(offset, offset + limit);
+    const rows: T[] = [];
+    let matched = 0;
+    const stmt = this.db.prepare(
+      `SELECT ${selectClause} FROM tracks
+        WHERE lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'
+        ORDER BY lower(replace(path, '/', '\\')) COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE, id`,
+    );
+    try {
+      stmt.bind([folderTrackPathPrefixParam(folder)] as unknown as import('sql.js').BindParams);
+      while (stmt.step()) {
+        const row = stmt.getAsObject() as unknown as T;
+        if (!trackPathIsInFolder(row.path, folder, recursive)) continue;
+        if (matched < offset) {
+          matched += 1;
+          continue;
+        }
+        rows.push(row);
+        matched += 1;
+        if (rows.length >= limit) break;
+      }
+      return rows;
+    } finally {
+      stmt.free();
+    }
   }
 
   private getFolderTrackRows(): FolderTrackRow[] {
@@ -2684,7 +2717,7 @@ function trackPathIsInFolder(path: string, folder: string, recursive: boolean): 
 }
 
 function folderTrackPathPrefixParam(folder: string): string {
-  return `${folderKey(folder)}\\%`;
+  return `${escapeFolderLikePattern(folderKey(folder))}\\%`;
 }
 
 function folderOfTrackPath(path: string): string | null {
@@ -2754,17 +2787,12 @@ function sortFolders(folders: FolderSummary[]): FolderSummary[] {
   return folders.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 }
 
-function compareFolderTracks(a: RawRow, b: RawRow): number {
-  return (
-    folderKey(a.path).localeCompare(folderKey(b.path), undefined, { numeric: true, sensitivity: 'base' }) ||
-    (a.disc_no ?? 0) - (b.disc_no ?? 0) ||
-    (a.track_no ?? 0) - (b.track_no ?? 0) ||
-    a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' })
-  );
-}
-
 function likeParam(value: string): string {
   return `%${escapeLike(value.toLowerCase())}%`;
+}
+
+function escapeFolderLikePattern(value: string): string {
+  return value.replace(/[|%_]/g, (ch) => `|${ch}`);
 }
 
 function summaryQueryLimit(value: number | undefined): number {
