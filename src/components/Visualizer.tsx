@@ -24,6 +24,7 @@ export type VizMode =
 export type VizQuality = 'auto' | '4k';
 export type VizPerformance = 'balanced' | 'low';
 export type VizPalette = 'theme' | 'phosphor' | 'ice' | 'sunset' | 'rainbow';
+export type VizReactivity = 'truth' | 'punch' | 'wild';
 
 interface Props {
   mode: VizMode;
@@ -34,6 +35,7 @@ interface Props {
   quality?: VizQuality;
   performance?: VizPerformance;
   palette?: VizPalette;
+  reactivity?: VizReactivity;
 }
 
 function createFrameGate(canvasRef: RefObject<HTMLCanvasElement>, frameIntervalMs: number): (now: number) => boolean {
@@ -48,7 +50,17 @@ function createFrameGate(canvasRef: RefObject<HTMLCanvasElement>, frameIntervalM
   };
 }
 
-export function Visualizer({ mode, width, height, className, artUrl, quality = 'auto', performance = 'balanced', palette = 'theme' }: Props): JSX.Element {
+export function Visualizer({
+  mode,
+  width,
+  height,
+  className,
+  artUrl,
+  quality = 'auto',
+  performance = 'balanced',
+  palette = 'theme',
+  reactivity = 'punch',
+}: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engine = usePlayerStore((s) => s.engine);
   const isFullscreen = width == null && height == null && mode !== 'mini';
@@ -175,6 +187,7 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
         engine,
         mode,
         palette,
+        reactivity,
         frameIntervalMs,
         dprCap,
         maxPixels,
@@ -243,7 +256,7 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
 
       engine.getFreqData(freq);
       engine.getTimeData(wave);
-      boostFrequencyData(freq);
+      boostFrequencyData(freq, reactivity);
 
       const accent = getCssVar('--accent') || '#39ff14';
       const accentDim = getCssVar('--accent-dim') || '#1aa30a';
@@ -342,7 +355,14 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
           ctx.stroke();
         }
 
-        void treble; // reserved for sparkle layer later
+        if (treble > 0.08) {
+          ctx.fillStyle = `rgba(255,255,255,${0.08 + treble * 0.32})`;
+          for (let i = 0; i < 18; i += 1) {
+            const x = (Math.sin(Date.now() / 700 + i * 12.989) * 0.5 + 0.5) * w;
+            const y = (Math.sin(Date.now() / 920 + i * 78.233) * 0.5 + 0.5) * h;
+            ctx.fillRect(x, y, 1 + treble * 3, 1 + treble * 3);
+          }
+        }
       } else if (mode === 'aurora') {
         ctx.fillStyle = 'rgba(0,0,0,0.16)';
         ctx.fillRect(0, 0, w, h);
@@ -757,7 +777,7 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode, palette]);
+  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode, palette, reactivity]);
 
   const style: CSSProperties = {};
   if (width != null) style.width = `${width}px`;
@@ -765,7 +785,7 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
 
   return (
     <canvas
-      key={`${mode}-${palette}-${quality}-${performance}`}
+      key={`${mode}-${palette}-${quality}-${performance}-${reactivity}`}
       ref={canvasRef}
       data-newamp-visualizer-canvas
       data-newamp-visualizer-mode={mode}
@@ -806,6 +826,7 @@ interface ShaderVisualizerOptions {
   engine: AudioEngine;
   mode: VizMode;
   palette: VizPalette;
+  reactivity: VizReactivity;
   frameIntervalMs: number;
   dprCap: number;
   maxPixels: number;
@@ -900,7 +921,7 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
       ensureSize();
       options.engine.getFreqData(freq);
       options.engine.getTimeData(wave);
-      boostFrequencyData(freq);
+      boostFrequencyData(freq, options.reactivity);
       const features = analyze(freq, wave);
       bands.set(features.bands);
       const accent = parseRgbVec(getCssVar('--accent'));
@@ -942,7 +963,7 @@ function paintMilkdropFallback(canvas: HTMLCanvasElement, engine: AudioEngine): 
   if (!ctx) return;
   const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
   engine.getFreqData(freq);
-  boostFrequencyData(freq);
+  boostFrequencyData(freq, 'punch');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cssW = canvas.clientWidth || 640;
   const cssH = canvas.clientHeight || 360;
@@ -990,13 +1011,20 @@ function avg(arr: Uint8Array, from: number, to: number): number {
   return count ? sum / count : 0;
 }
 
-function boostFrequencyData(arr: Uint8Array): void {
+function boostFrequencyData(arr: Uint8Array, reactivity: VizReactivity = 'punch'): void {
+  const settings = reactivitySettings(reactivity);
   for (let i = 0; i < arr.length; i += 1) {
     const normalized = arr[i]! / 255;
-    const lowBandLift = i < 36 ? 1.18 : i < 120 ? 1.08 : 1;
-    const shaped = Math.pow(normalized, 0.68) * 1.34 * lowBandLift;
+    const lowBandLift = i < 36 ? settings.bassLift : i < 120 ? settings.lowMidLift : 1;
+    const shaped = Math.pow(normalized, settings.curve) * settings.gain * lowBandLift;
     arr[i] = Math.max(0, Math.min(255, Math.round(shaped * 255)));
   }
+}
+
+function reactivitySettings(reactivity: VizReactivity): { curve: number; gain: number; bassLift: number; lowMidLift: number } {
+  if (reactivity === 'truth') return { curve: 0.92, gain: 1.08, bassLift: 1.06, lowMidLift: 1.02 };
+  if (reactivity === 'wild') return { curve: 0.52, gain: 1.58, bassLift: 1.3, lowMidLift: 1.14 };
+  return { curve: 0.68, gain: 1.34, bassLift: 1.18, lowMidLift: 1.08 };
 }
 
 function createAudioFeatureAnalyzer(): (freq: Uint8Array, wave: Uint8Array) => AudioFeatures {

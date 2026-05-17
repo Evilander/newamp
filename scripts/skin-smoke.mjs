@@ -147,6 +147,7 @@ assert.match(styleSource, /\.deck-skin-picker[\s\S]*?-webkit-app-region: no-drag
 assert.match(styleSource, /\.deck-record-player/, 'record deck should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-jukebox/, 'jukebox should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-cassette/, 'cassette should be a real shaped deck skin');
+assert.match(styleSource, /\.deck-discman/, 'discman should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-hotdog/, 'hotdog deck should be a real shaped deck skin');
 assert.match(styleSource, /deck-hd-bun-half/, 'hotdog deck should render visible bun halves around the sausage');
 assert.match(styleSource, /deck-hd-sausage/, 'hotdog deck should have a distinct sausage layer instead of one orange capsule');

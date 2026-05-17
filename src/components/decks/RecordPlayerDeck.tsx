@@ -18,9 +18,9 @@ export function RecordPlayerDeck(props: DeckProps): JSX.Element {
     onExitDeck, onMinimize, onClose, onToggleVizExpanded, onOpenFullscreenViz,
   } = props;
 
-  const progress = duration > 0 ? currentTime / duration : 0;
-  // Tonearm swings from -22° (rest) to +18° (end of side).
-  const tonearmAngle = useMemo(() => -22 + progress * 40, [progress]);
+  const progress = duration > 0 ? Math.max(0, Math.min(1, currentTime / duration)) : 0;
+  // Keep the cartridge on the playable band instead of dragging across the label.
+  const tonearmAngle = useMemo(() => -34 + progress * 26, [progress]);
   // Vinyl rotation is purely CSS, driven by isPlaying.
 
   return (
