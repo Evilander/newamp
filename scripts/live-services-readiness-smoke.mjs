@@ -11,12 +11,12 @@ const newampUserAgent = `NewAmp/${packageVersion}`;
 
 export async function checkLiveServicesReadiness({ timeoutMs = defaultTimeoutMs } = {}) {
   const [ultimateGuitar, lastfm] = await Promise.all([
-    checkUltimateGuitar({ timeoutMs }),
+    maybeCheckUltimateGuitar({ timeoutMs }),
     checkLastfm({ timeoutMs }),
   ]);
   return {
     name: 'live-services-readiness',
-    ok: ultimateGuitar.ok && lastfm.ok,
+    ok: (!ultimateGuitar.required || ultimateGuitar.ok) && lastfm.ok,
     timeoutMs,
     ultimateGuitar,
     lastfm,
@@ -25,9 +25,30 @@ export async function checkLiveServicesReadiness({ timeoutMs = defaultTimeoutMs 
 
 export function summarizeLiveServices(report) {
   const parts = [];
-  if (!report.ultimateGuitar?.ok) parts.push(`Ultimate Guitar: ${report.ultimateGuitar?.reason ?? 'not proven'}`);
+  if (report.ultimateGuitar?.required && !report.ultimateGuitar?.ok) {
+    parts.push(`Ultimate Guitar: ${report.ultimateGuitar?.reason ?? 'not proven'}`);
+  }
   if (!report.lastfm?.ok) parts.push(`Last.fm: ${report.lastfm?.reason ?? 'not proven'}`);
   return parts.join('; ') || 'live services are not proven';
+}
+
+async function maybeCheckUltimateGuitar({ timeoutMs }) {
+  const required = process.env.NEWAMP_REQUIRE_UG_LIVE_PROOF === '1';
+  const enabled = required || process.env.NEWAMP_UG_LIVE_PROOF === '1';
+  if (!enabled) {
+    return {
+      ok: true,
+      required: false,
+      skipped: true,
+      reason: 'guitar tabs are optional for this release and are not a live-service gate',
+    };
+  }
+  const report = await checkUltimateGuitar({ timeoutMs });
+  return {
+    ...report,
+    required,
+    skipped: false,
+  };
 }
 
 async function checkUltimateGuitar({ timeoutMs }) {
