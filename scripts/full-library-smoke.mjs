@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LibraryStore } from '../dist-electron/electron/library.js';
 import { Scanner } from '../dist-electron/electron/scanner.js';
@@ -13,6 +13,7 @@ const root = resolve(process.argv[2] ?? 'K:/music');
 const minTracks = Number.parseInt(process.env.NEWAMP_FULL_SCAN_MIN_TRACKS ?? '5000', 10);
 const maxMs = Number.parseInt(process.env.NEWAMP_FULL_SCAN_MAX_MS ?? '300000', 10);
 const clean = process.env.NEWAMP_FULL_SCAN_CLEAN === '1';
+const cleanAfter = process.env.NEWAMP_FULL_SCAN_CLEAN_AFTER === '1';
 const expectIncremental = process.env.NEWAMP_FULL_SCAN_EXPECT_INCREMENTAL === '1';
 const minSkipped = Number.parseInt(process.env.NEWAMP_FULL_SCAN_MIN_SKIPPED ?? String(minTracks), 10);
 
@@ -22,11 +23,7 @@ if (!existsSync(root)) {
 }
 
 if (clean) {
-  const resolvedSmokeRoot = resolve(smokeRoot);
-  if (!resolvedSmokeRoot.startsWith(repoRoot + '\\')) {
-    throw new Error(`refusing to clean outside repo: ${resolvedSmokeRoot}`);
-  }
-  await rm(resolvedSmokeRoot, { recursive: true, force: true });
+  await rmInsideRepo(smokeRoot);
 }
 
 await mkdir(smokeRoot, { recursive: true });
@@ -99,6 +96,18 @@ try {
   process.exitCode = ok ? 0 : 1;
 } finally {
   library.close();
+  if (cleanAfter) {
+    await rmInsideRepo(smokeRoot);
+  }
+}
+
+async function rmInsideRepo(path) {
+  const resolved = resolve(path);
+  const relativePath = relative(repoRoot, resolved);
+  if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    throw new Error(`refusing to clean outside repo: ${resolved}`);
+  }
+  await rm(resolved, { recursive: true, force: true });
 }
 
 function countExtensions(paths) {

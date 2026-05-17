@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkLastfmLiveProof, summarizeLastfmLiveProof } from './lastfm-live-proof.mjs';
 import { checkManualListeningProof, summarizeManualListeningProof } from './manual-listening-proof.mjs';
@@ -249,11 +249,16 @@ function runRealLibraryProof(root) {
   }
   const first = run(process.execPath, [join(repoRoot, 'scripts', 'full-library-smoke.mjs'), root], {
     timeout: 360_000,
+    env: {
+      NEWAMP_FULL_SCAN_CLEAN: '1',
+    },
   });
+  if (!first.ok) cleanFullLibrarySmokeRoot();
   const second = first.ok
     ? run(process.execPath, [join(repoRoot, 'scripts', 'full-library-smoke.mjs'), root], {
       timeout: 120_000,
       env: {
+        NEWAMP_FULL_SCAN_CLEAN_AFTER: '1',
         NEWAMP_FULL_SCAN_EXPECT_INCREMENTAL: '1',
         NEWAMP_FULL_SCAN_MAX_MS: process.env.NEWAMP_FULL_SCAN_INCREMENTAL_MAX_MS || '60000',
         NEWAMP_FULL_SCAN_MIN_SKIPPED: process.env.NEWAMP_FULL_SCAN_MIN_SKIPPED || '5000',
@@ -268,6 +273,16 @@ function runRealLibraryProof(root) {
     first: summarizeFullLibraryRun(first, firstReport),
     incremental: second ? summarizeFullLibraryRun(second, secondReport) : null,
   });
+}
+
+function cleanFullLibrarySmokeRoot() {
+  const smokeRoot = join(repoRoot, 'tmp', 'full-library-smoke');
+  const resolved = resolve(smokeRoot);
+  const relativePath = relative(repoRoot, resolved);
+  if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    throw new Error(`refusing to clean outside repo: ${resolved}`);
+  }
+  rmSync(resolved, { recursive: true, force: true });
 }
 
 function summarizeFullLibraryRun(result, parsed) {
