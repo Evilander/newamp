@@ -2224,14 +2224,27 @@ export class LibraryStore {
   }
 
   getArt(trackId: number): { mime: string; data: Buffer } | null {
-    const row = this.one<{ art_hash: string | null }>(
-      `SELECT art_hash FROM tracks WHERE id = ?`,
+    const row = this.one<{ art_hash: string | null; album: string | null; album_artist: string | null }>(
+      `SELECT art_hash, album, album_artist FROM tracks WHERE id = ?`,
       [trackId],
     );
-    if (!row || !row.art_hash) return null;
+    if (!row) return null;
+    let artHash = row.art_hash;
+    if (!artHash && row.album && row.album_artist) {
+      const fallback = this.one<{ art_hash: string | null }>(
+        `SELECT art_hash
+         FROM tracks
+         WHERE album = ? AND album_artist = ? AND art_hash IS NOT NULL AND art_hash != ''
+         ORDER BY COALESCE(disc_no, 1), COALESCE(track_no, 999999), id
+         LIMIT 1`,
+        [row.album, row.album_artist],
+      );
+      artHash = fallback?.art_hash ?? null;
+    }
+    if (!artHash) return null;
     // Find the file. We don't store mime in the DB, so probe common extensions.
     for (const ext of ['.jpg', '.jpeg', '.png', '.webp']) {
-      const p = join(this.artDir, `${row.art_hash}${ext}`);
+      const p = join(this.artDir, `${artHash}${ext}`);
       if (existsSync(p)) {
         try {
           const data = readFileSync(p);

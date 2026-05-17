@@ -203,6 +203,7 @@ function applyReplayGain(track: Track | null, settings: AppSettings | null): voi
 }
 
 export const engine = new AudioEngine();
+const CONTEXT_EXPANSION_LIMIT = 300;
 
 let lastfmPlayStartedAt = 0;
 let lastfmPlayKey = '';
@@ -432,6 +433,66 @@ function prepareEngineTrack(track: Track): void {
 
 function recordLibraryPlay(track: Track): void {
   if (track.id > 0) void api.recordPlay(track.id).catch(() => undefined);
+}
+
+function searchLiteral(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function albumContextPath(track: Track): string | null {
+  const parts = track.path.split(/[\\/]+/).filter(Boolean);
+  if (parts.length < 2) return null;
+  const album = track.album.trim().toLowerCase();
+  if (album) {
+    for (let i = parts.length - 2; i >= 0; i -= 1) {
+      if (parts[i]!.toLowerCase().includes(album)) {
+        const prefix = /^[A-Za-z]:/.test(track.path) ? `${parts[0]}\\` : track.path.startsWith('\\\\') ? '\\\\' : '';
+        const start = prefix ? 1 : 0;
+        return `${prefix}${parts.slice(start, i + 1).join('\\')}`;
+      }
+    }
+  }
+  return parts.slice(0, -1).join('\\');
+}
+
+function compareContextTracks(a: Track, b: Track): number {
+  const disc = (a.discNo ?? 9999) - (b.discNo ?? 9999);
+  if (disc) return disc;
+  const track = (a.trackNo ?? 9999) - (b.trackNo ?? 9999);
+  if (track) return track;
+  return a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function dedupeTracks(tracks: Track[]): Track[] {
+  const seen = new Set<number>();
+  const out: Track[] = [];
+  for (const track of tracks) {
+    if (seen.has(track.id)) continue;
+    seen.add(track.id);
+    out.push(track);
+  }
+  return out;
+}
+
+async function expandQueueFromCurrentContext(state: PlayerState): Promise<{ queue: Track[]; index: number } | null> {
+  const current = state.current;
+  if (!current || current.id <= 0) return null;
+  const searches: string[] = [];
+  const album = current.album.trim();
+  const pathRoot = albumContextPath(current);
+  if (album && pathRoot) searches.push(`album:"${searchLiteral(album)}" path:"${searchLiteral(pathRoot)}"`);
+  if (album && current.albumArtist.trim()) {
+    searches.push(`album:"${searchLiteral(album)}" albumartist:"${searchLiteral(current.albumArtist)}"`);
+  }
+  if (pathRoot) searches.push(`path:"${searchLiteral(pathRoot)}"`);
+
+  for (const search of searches) {
+    const rows = dedupeTracks(await api.getTracks({ search, sort: 'album', limit: CONTEXT_EXPANSION_LIMIT }).catch(() => []))
+      .sort(compareContextTracks);
+    const index = rows.findIndex((track) => track.id === current.id);
+    if (index >= 0 && rows.length > 1) return { queue: rows, index };
+  }
+  return null;
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => {
@@ -874,10 +935,26 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         else {
           const additions = await get().refillAutoDjQueue(true);
           if (!additions.length) {
-            engine.stop();
-            return;
+            const expanded = await expandQueueFromCurrentContext(state);
+            if (!expanded || expanded.index >= expanded.queue.length - 1) {
+              engine.pause();
+              set({ isPlaying: false });
+              schedulePersistPlaybackSession(get(), true);
+              return;
+            }
+            nextIdx = expanded.index + 1;
+            const contextShuffleHistory = mode === 'shuffle'
+              ? resetSmartShuffleHistory(expanded.queue.length, expanded.index)
+              : [];
+            set({
+              queue: expanded.queue,
+              index: expanded.index,
+              shuffleHistory: contextShuffleHistory,
+            });
+            nextShuffleHistory = contextShuffleHistory;
+          } else {
+            nextIdx = index + 1;
           }
-          nextIdx = index + 1;
         }
       }
       const latestQueue = get().queue;

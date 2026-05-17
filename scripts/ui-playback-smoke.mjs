@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import electronPath from 'electron';
 import ffmpeg from 'ffmpeg-static';
 import { spawn, spawnSync } from 'node:child_process';
@@ -22,6 +23,14 @@ await createFixture();
 await writeSmokeSettings();
 
 const result = await runElectronSmoke();
+assert.equal(result.ok, true, 'UI playback smoke should report success');
+assert.match(result.currentTitle, /UI Playback Smoke/, 'UI playback smoke should play the generated fixture');
+assert.ok(result.currentTime > 0.25, 'playback clock should advance before terminal next');
+assert.equal(result.afterTerminalNextTitle, result.currentTitle, 'terminal next should keep the current track selected');
+assert.ok(
+  result.afterTerminalNextTime > 0.15,
+  `terminal next should not reset the current track to 0; got ${result.afterTerminalNextTime}`,
+);
 console.log(JSON.stringify(result, null, 2));
 
 async function resetSmokeRoot() {

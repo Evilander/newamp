@@ -39,6 +39,9 @@ assert.equal(result.qualityToggle, '4k', 'fullscreen visualizer should expose an
 assert.ok(['armed', 'pulse'].includes(result.artToggle), 'fullscreen visualizer should expose random album-art pulse mode');
 assert.equal(result.screenToggle, true, 'fullscreen visualizer should expose native full-screen screen takeover');
 assert.equal(result.chromeMode, 'clean', 'fullscreen visualizer should expose a clean cinema mode');
+assert.notEqual(result.palette, 'theme', 'fullscreen visualizer should apply color palette changes');
+assert.equal(result.navMode, 'visible', 'fullscreen visualizer top nav should hide and restore cleanly');
+assert.equal(result.performanceMode, 'balanced', 'fullscreen visualizer low-end mode should toggle and restore');
 assert.equal(result.openedViaVizButton, true, 'regular UI VIZ button should open the fullscreen visualizer');
 assert.equal(result.openedViaTransportArt, true, 'transport album art should open the fullscreen visualizer');
 assert.equal(result.compactClearsFullscreen, true, 'entering deck mode should clear fullscreen visualizer state');

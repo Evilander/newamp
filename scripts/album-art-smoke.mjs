@@ -16,7 +16,11 @@ await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(musicRoot, { recursive: true });
 
 const trackPath = join(musicRoot, '01 - Everything In Its Right Place.mp3');
+const fallbackArtPath = join(musicRoot, 'fallback-01.mp3');
+const fallbackNoArtPath = join(musicRoot, 'fallback-02.mp3');
 await writeFile(trackPath, '');
+await writeFile(fallbackArtPath, '');
+await writeFile(fallbackNoArtPath, '');
 
 const requests = [];
 const imageBytes = Buffer.from([
@@ -124,6 +128,55 @@ await assert.rejects(
 const library = await LibraryStore.open(dbPath);
 library.upsertTracks([
   {
+    path: fallbackArtPath,
+    title: 'Cover Carrier',
+    artist: 'Fallback Artist',
+    album: 'Fallback Album',
+    albumArtist: 'Fallback Artist',
+    trackNo: 1,
+    discNo: 1,
+    year: 2026,
+    genre: 'Test',
+    duration: 120,
+    bitrate: null,
+    sampleRate: null,
+    bpm: null,
+    key: null,
+    replayGainTrackDb: null,
+    replayGainAlbumDb: null,
+    size: 0,
+    mtime: Date.now(),
+    art: { mime: image.mime, data: image.data },
+  },
+  {
+    path: fallbackNoArtPath,
+    title: 'Cover Borrower',
+    artist: 'Fallback Artist',
+    album: 'Fallback Album',
+    albumArtist: 'Fallback Artist',
+    trackNo: 2,
+    discNo: 1,
+    year: 2026,
+    genre: 'Test',
+    duration: 120,
+    bitrate: null,
+    sampleRate: null,
+    bpm: null,
+    key: null,
+    replayGainTrackDb: null,
+    replayGainAlbumDb: null,
+    size: 0,
+    mtime: Date.now(),
+    art: null,
+  },
+]);
+const fallbackBorrower = library.getAlbumTracks('Fallback Album', 'Fallback Artist').find((track) => track.trackNo === 2);
+assert.ok(fallbackBorrower, 'fallback fixture should include the no-art album track');
+assert.equal(fallbackBorrower.hasArt, 0, 'fallback borrower should not claim embedded art');
+assert.equal(library.getArt(fallbackBorrower.id)?.data.byteLength, imageBytes.byteLength, 'track art protocol should fall back to another track on the same album');
+
+library.upsertTracks([
+  {
     path: trackPath,
     title: 'Everything In Its Right Place',
     artist: 'Radiohead',
@@ -146,7 +199,8 @@ library.upsertTracks([
   },
 ]);
 
-const before = library.getAlbums()[0];
+const before = library.getAlbums().find((album) => album.album === 'Kid A' && album.albumArtist === 'Radiohead');
+assert.ok(before, 'Kid A fixture album should exist');
 assert.equal(before.artFromTrackId, null, 'fixture album should start without art');
 const applied = library.applyAlbumArtToAlbum('Kid A', 'Radiohead', {
   mime: image.mime,
@@ -154,7 +208,7 @@ const applied = library.applyAlbumArtToAlbum('Kid A', 'Radiohead', {
 }, image.sourceUrl);
 assert.ok(applied, 'album art should apply to matching album tracks');
 assert.equal(applied.appliedTrackCount, 1);
-assert.equal(library.getAlbums()[0].artFromTrackId, applied.artFromTrackId);
+assert.equal(library.getAlbums().find((album) => album.album === 'Kid A' && album.albumArtist === 'Radiohead')?.artFromTrackId, applied.artFromTrackId);
 assert.equal(library.getArt(applied.artFromTrackId)?.data.byteLength, imageBytes.byteLength);
 library.close();
 
@@ -187,7 +241,10 @@ assert.doesNotMatch(albumsViewSource, /FIND COVER|APPLY COVER|REVIEW COVER/, 'Al
 assert.match(albumsViewSource, /MISSING ART/, 'Albums view should expose a missing-art review lane');
 assert.match(albumsViewSource, /showMissingArtOnly/, 'Albums view should filter to albums missing cover art');
 assert.match(albumsViewSource, /data-newamp-albums-scroll/, 'Albums view should own a restorable scroll container');
-assert.match(albumsViewSource, /restoreAlbumScrollTop/, 'Albums view should return to prior scroll position after closing an album');
+assert.match(albumsViewSource, /albumScrollTopRef/, 'Albums view should return to prior scroll position after closing an album');
+assert.match(albumsViewSource, /SCAN NEW/, 'Albums view should expose a direct scan action for newly downloaded albums');
+assert.match(albumsViewSource, /addFolderAndScan/, 'Albums view should let users add and scan a new music folder in place');
+assert.match(albumsViewSource, /libraryAutoWatch: true/, 'Albums view folder import should keep the new root watched');
 assert.match(packageSource, /"smoke:album-art"/, 'package.json should expose album art smoke');
 assert.match(gateSource, /smoke:album-art/, 'release gate should include album art smoke');
 

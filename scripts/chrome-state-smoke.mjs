@@ -125,6 +125,10 @@ assert.match(settingsViewSource, /Application description: Local Windows music p
 assert.match(settingsViewSource, /Callback URL: leave blank\./, 'Last.fm setup guide should tell desktop users to leave callback URL blank');
 assert.match(settingsViewSource, /Complete auth/, 'Last.fm setup guide should explain the browser approval flow');
 assert.match(fullscreenSource, /'PERF'/, 'fullscreen visualizer should label balanced render mode without vague AUTO copy');
+assert.match(fullscreenSource, /VIZ_TOP_NAV_KEY/, 'fullscreen visualizer should persist top navigation visibility');
+assert.match(fullscreenSource, /VIZ_PALETTE_KEY/, 'fullscreen visualizer should persist color palette choices');
+assert.match(fullscreenSource, /VIZ_PERFORMANCE_KEY/, 'fullscreen visualizer should persist low-end performance mode');
+assert.match(fullscreenSource, /Cycle/, 'fullscreen visualizer should include a changing color palette');
 assert.match(typesSource, /generateLinerNotes: \(input: AiLinerNotesInput\)/, 'shared API should expose native ChatGPT liner notes');
 assert.match(preloadSource, /ai:liner-notes/, 'preload should expose native ChatGPT liner notes IPC');
 assert.match(mainSource, /generateOpenAiLinerNotes/, 'main process should own ChatGPT assist calls');

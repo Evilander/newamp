@@ -22,6 +22,8 @@ export type VizMode =
   | 'butterchurn';
 
 export type VizQuality = 'auto' | '4k';
+export type VizPerformance = 'balanced' | 'low';
+export type VizPalette = 'theme' | 'phosphor' | 'ice' | 'sunset' | 'rainbow';
 
 interface Props {
   mode: VizMode;
@@ -30,6 +32,8 @@ interface Props {
   className?: string;
   artUrl?: string | null;
   quality?: VizQuality;
+  performance?: VizPerformance;
+  palette?: VizPalette;
 }
 
 function createFrameGate(canvasRef: RefObject<HTMLCanvasElement>, frameIntervalMs: number): (now: number) => boolean {
@@ -44,13 +48,25 @@ function createFrameGate(canvasRef: RefObject<HTMLCanvasElement>, frameIntervalM
   };
 }
 
-export function Visualizer({ mode, width, height, className, artUrl, quality = 'auto' }: Props): JSX.Element {
+export function Visualizer({ mode, width, height, className, artUrl, quality = 'auto', performance = 'balanced', palette = 'theme' }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engine = usePlayerStore((s) => s.engine);
   const isFullscreen = width == null && height == null && mode !== 'mini';
-  const frameIntervalMs = isFullscreen ? (quality === '4k' ? 1000 / 30 : 1000 / 45) : 1000 / 30;
-  const dprCap = isFullscreen ? (quality === '4k' ? 1.25 : 1) : 2;
-  const maxPixels = isFullscreen ? (quality === '4k' ? 4_200_000 : 2_100_000) : 2_000_000;
+  const frameIntervalMs = isFullscreen
+    ? performance === 'low'
+      ? 1000 / 30
+      : quality === '4k' ? 1000 / 30 : 1000 / 45
+    : 1000 / 30;
+  const dprCap = isFullscreen
+    ? performance === 'low'
+      ? 0.75
+      : quality === '4k' ? 1.25 : 1
+    : 2;
+  const maxPixels = isFullscreen
+    ? performance === 'low'
+      ? 1_050_000
+      : quality === '4k' ? 4_200_000 : 2_100_000
+    : 2_000_000;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -152,6 +168,20 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
       };
     }
 
+    if (isShaderVisualizerMode(mode)) {
+      const cleanup = startShaderVisualizer({
+        canvas,
+        canvasRef,
+        engine,
+        mode,
+        palette,
+        frameIntervalMs,
+        dprCap,
+        maxPixels,
+      });
+      if (cleanup) return cleanup;
+    }
+
     const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
     let raf = 0;
     let ctx: CanvasRenderingContext2D | null = null;
@@ -243,7 +273,8 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
       } else if (mode === 'oscilloscope') {
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillRect(0, 0, w, h);
-        ctx.strokeStyle = accent;
+        const osc = oscilloscopePalette(palette, accent, now);
+        ctx.strokeStyle = osc.stroke;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         const slice = w / wave.length;
@@ -253,8 +284,8 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
           if (i === 0) ctx.moveTo(0, y);
           else ctx.lineTo(i * slice, y);
         }
-        ctx.shadowColor = accent;
-        ctx.shadowBlur = 8;
+        ctx.shadowColor = osc.glow;
+        ctx.shadowBlur = osc.blur;
         ctx.stroke();
         ctx.shadowBlur = 0;
       } else if (mode === 'galaxy') {
@@ -726,7 +757,7 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode]);
+  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode, palette]);
 
   const style: CSSProperties = {};
   if (width != null) style.width = `${width}px`;
@@ -734,6 +765,7 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
 
   return (
     <canvas
+      key={`${mode}-${palette}-${quality}-${performance}`}
       ref={canvasRef}
       data-newamp-visualizer-canvas
       data-newamp-visualizer-mode={mode}
@@ -766,6 +798,143 @@ interface ButterchurnPresetApi {
 function unwrapDefault<T>(module: unknown): T {
   const first = (module as { default?: unknown }).default ?? module;
   return ((first as { default?: unknown }).default ?? first) as T;
+}
+
+interface ShaderVisualizerOptions {
+  canvas: HTMLCanvasElement;
+  canvasRef: RefObject<HTMLCanvasElement>;
+  engine: AudioEngine;
+  mode: VizMode;
+  palette: VizPalette;
+  frameIntervalMs: number;
+  dprCap: number;
+  maxPixels: number;
+}
+
+interface AudioFeatures {
+  bass: number;
+  lowMid: number;
+  mid: number;
+  treble: number;
+  rms: number;
+  beat: number;
+  bands: number[];
+}
+
+function isShaderVisualizerMode(mode: VizMode): boolean {
+  return mode === 'neon-waves' ||
+    mode === 'neon-ribbons' ||
+    mode === 'plasma-grid' ||
+    mode === 'burning-cloud';
+}
+
+function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) | null {
+  const smokeReadback = Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke);
+  const gl = options.canvas.getContext('webgl', {
+    alpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    preserveDrawingBuffer: smokeReadback,
+    powerPreference: 'high-performance',
+  });
+  if (!gl) return null;
+
+  const program = createShaderProgram(gl, SHADER_VERTEX_SOURCE, SHADER_FRAGMENT_SOURCE);
+  if (!program) return null;
+
+  const positionBuffer = gl.createBuffer();
+  if (!positionBuffer) return null;
+  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+
+  const position = gl.getAttribLocation(program, 'a_position');
+  const uniforms = {
+    resolution: gl.getUniformLocation(program, 'u_resolution'),
+    time: gl.getUniformLocation(program, 'u_time'),
+    mode: gl.getUniformLocation(program, 'u_mode'),
+    palette: gl.getUniformLocation(program, 'u_palette'),
+    accent: gl.getUniformLocation(program, 'u_accent'),
+    bass: gl.getUniformLocation(program, 'u_bass'),
+    lowMid: gl.getUniformLocation(program, 'u_lowMid'),
+    mid: gl.getUniformLocation(program, 'u_mid'),
+    treble: gl.getUniformLocation(program, 'u_treble'),
+    rms: gl.getUniformLocation(program, 'u_rms'),
+    beat: gl.getUniformLocation(program, 'u_beat'),
+    bands0: gl.getUniformLocation(program, 'u_bands0'),
+    bands1: gl.getUniformLocation(program, 'u_bands1'),
+    bands2: gl.getUniformLocation(program, 'u_bands2'),
+    bands3: gl.getUniformLocation(program, 'u_bands3'),
+  };
+
+  const freq = new Uint8Array(new ArrayBuffer(options.engine.frequencyBinCount));
+  const wave = new Uint8Array(new ArrayBuffer(options.engine.fftSize));
+  const bands = new Float32Array(16);
+  const canPaint = createFrameGate(options.canvasRef, options.frameIntervalMs);
+  const analyze = createAudioFeatureAnalyzer();
+  const dpr = Math.min(window.devicePixelRatio || 1, options.dprCap);
+  let raf = 0;
+  let lastWidth = 0;
+  let lastHeight = 0;
+
+  function ensureSize(): void {
+    const node = options.canvasRef.current;
+    if (!node) return;
+    const cssW = node.clientWidth || node.width || 100;
+    const cssH = node.clientHeight || node.height || 100;
+    const scaledW = Math.max(2, Math.floor(cssW * dpr));
+    const scaledH = Math.max(2, Math.floor(cssH * dpr));
+    const scale = Math.min(1, Math.sqrt(options.maxPixels / Math.max(1, scaledW * scaledH)));
+    const targetW = Math.max(2, Math.floor(scaledW * scale));
+    const targetH = Math.max(2, Math.floor(scaledH * scale));
+    if (targetW === lastWidth && targetH === lastHeight) return;
+    lastWidth = targetW;
+    lastHeight = targetH;
+    node.width = targetW;
+    node.height = targetH;
+    gl.viewport(0, 0, targetW, targetH);
+  }
+
+  function frame(now: number): void {
+    if (canPaint(now)) {
+      ensureSize();
+      options.engine.getFreqData(freq);
+      options.engine.getTimeData(wave);
+      boostFrequencyData(freq);
+      const features = analyze(freq, wave);
+      bands.set(features.bands);
+      const accent = parseRgbVec(getCssVar('--accent'));
+
+      gl.useProgram(program);
+      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+      gl.enableVertexAttribArray(position);
+      gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform2f(uniforms.resolution, Math.max(1, lastWidth), Math.max(1, lastHeight));
+      gl.uniform1f(uniforms.time, now / 1000);
+      gl.uniform1i(uniforms.mode, shaderModeIndex(options.mode));
+      gl.uniform1i(uniforms.palette, paletteIndex(options.palette));
+      gl.uniform3f(uniforms.accent, accent[0], accent[1], accent[2]);
+      gl.uniform1f(uniforms.bass, features.bass);
+      gl.uniform1f(uniforms.lowMid, features.lowMid);
+      gl.uniform1f(uniforms.mid, features.mid);
+      gl.uniform1f(uniforms.treble, features.treble);
+      gl.uniform1f(uniforms.rms, features.rms);
+      gl.uniform1f(uniforms.beat, features.beat);
+      gl.uniform4f(uniforms.bands0, bands[0]!, bands[1]!, bands[2]!, bands[3]!);
+      gl.uniform4f(uniforms.bands1, bands[4]!, bands[5]!, bands[6]!, bands[7]!);
+      gl.uniform4f(uniforms.bands2, bands[8]!, bands[9]!, bands[10]!, bands[11]!);
+      gl.uniform4f(uniforms.bands3, bands[12]!, bands[13]!, bands[14]!, bands[15]!);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  raf = requestAnimationFrame(frame);
+  return () => {
+    cancelAnimationFrame(raf);
+    gl.deleteBuffer(positionBuffer);
+    gl.deleteProgram(program);
+  };
 }
 
 function paintMilkdropFallback(canvas: HTMLCanvasElement, engine: AudioEngine): void {
@@ -830,6 +999,138 @@ function boostFrequencyData(arr: Uint8Array): void {
   }
 }
 
+function createAudioFeatureAnalyzer(): (freq: Uint8Array, wave: Uint8Array) => AudioFeatures {
+  let bassFloor = 0.08;
+  let rmsFloor = 0.04;
+  let beat = 0;
+
+  return (freq, wave) => {
+    const bass = bandValue(freq, 0, 28);
+    const lowMid = bandValue(freq, 28, 90);
+    const mid = bandValue(freq, 90, 220);
+    const treble = bandValue(freq, 220, 520);
+    const rms = waveRms(wave);
+
+    const bassOnset = Math.max(0, bass - bassFloor * 1.12);
+    const rmsOnset = Math.max(0, rms - rmsFloor * 1.08);
+    beat = Math.max(beat * 0.76, Math.min(1, bassOnset * 5.2 + rmsOnset * 3.4));
+    bassFloor = bass > bassFloor
+      ? bassFloor * 0.94 + bass * 0.06
+      : bassFloor * 0.985 + bass * 0.015;
+    rmsFloor = rms > rmsFloor
+      ? rmsFloor * 0.94 + rms * 0.06
+      : rmsFloor * 0.985 + rms * 0.015;
+
+    return {
+      bass,
+      lowMid,
+      mid,
+      treble,
+      rms,
+      beat,
+      bands: logBands(freq, 16),
+    };
+  };
+}
+
+function bandValue(arr: Uint8Array, from: number, to: number): number {
+  return Math.min(1, Math.pow(avg(arr, from, to) / 255, 0.72) * 1.22);
+}
+
+function waveRms(arr: Uint8Array): number {
+  if (!arr.length) return 0;
+  let sum = 0;
+  const stride = Math.max(1, Math.floor(arr.length / 768));
+  let count = 0;
+  for (let i = 0; i < arr.length; i += stride) {
+    const centered = (arr[i]! - 128) / 128;
+    sum += centered * centered;
+    count += 1;
+  }
+  return Math.min(1, Math.sqrt(sum / Math.max(1, count)) * 1.85);
+}
+
+function logBands(arr: Uint8Array, count: number): number[] {
+  const out: number[] = [];
+  const usable = Math.max(2, Math.min(arr.length, 760));
+  for (let i = 0; i < count; i += 1) {
+    const start = Math.floor(Math.pow(i / count, 1.72) * usable);
+    const end = Math.max(start + 2, Math.floor(Math.pow((i + 1) / count, 1.72) * usable));
+    out.push(bandValue(arr, start, end));
+  }
+  return out;
+}
+
+function getCssVar(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#39ff14';
+}
+
+function parseRgbVec(color: string): [number, number, number] {
+  if (color.startsWith('#') && color.length === 7) {
+    const r = parseInt(color.slice(1, 3), 16) / 255;
+    const g = parseInt(color.slice(3, 5), 16) / 255;
+    const b = parseInt(color.slice(5, 7), 16) / 255;
+    if ([r, g, b].every(Number.isFinite)) return [r, g, b];
+  }
+  return [0.22, 1, 0.08];
+}
+
+function shaderModeIndex(mode: VizMode): number {
+  if (mode === 'neon-ribbons') return 1;
+  if (mode === 'plasma-grid') return 2;
+  if (mode === 'burning-cloud') return 3;
+  return 0;
+}
+
+function paletteIndex(palette: VizPalette): number {
+  if (palette === 'phosphor') return 1;
+  if (palette === 'ice') return 2;
+  if (palette === 'sunset') return 3;
+  if (palette === 'rainbow') return 4;
+  return 0;
+}
+
+function oscilloscopePalette(palette: VizPalette, accent: string, now: number): { stroke: string; glow: string; blur: number } {
+  const hue = (now / 32) % 360;
+  if (palette === 'rainbow') return { stroke: `hsl(${hue}, 98%, 64%)`, glow: `hsl(${(hue + 36) % 360}, 100%, 62%)`, blur: 14 };
+  if (palette === 'phosphor') return { stroke: '#66ff7d', glow: '#29ff55', blur: 10 };
+  if (palette === 'ice') return { stroke: '#b6f4ff', glow: '#31c7ff', blur: 12 };
+  if (palette === 'sunset') return { stroke: '#ffcb5a', glow: '#ff335f', blur: 13 };
+  return { stroke: accent, glow: accent, blur: 8 };
+}
+
+function createShaderProgram(gl: WebGLRenderingContext, vertexSource: string, fragmentSource: string): WebGLProgram | null {
+  const vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
+  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+  if (!vertex || !fragment) return null;
+  const program = gl.createProgram();
+  if (!program) return null;
+  gl.attachShader(program, vertex);
+  gl.attachShader(program, fragment);
+  gl.linkProgram(program);
+  gl.deleteShader(vertex);
+  gl.deleteShader(fragment);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.warn('[newamp] visualizer shader link failed', gl.getProgramInfoLog(program));
+    gl.deleteProgram(program);
+    return null;
+  }
+  return program;
+}
+
+function compileShader(gl: WebGLRenderingContext, type: number, source: string): WebGLShader | null {
+  const shader = gl.createShader(type);
+  if (!shader) return null;
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.warn('[newamp] visualizer shader compile failed', gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
 function parseRgb(color: string): string {
   // accept #rrggbb or hsl/hsla — fallback to green
   if (color.startsWith('#') && color.length === 7) {
@@ -840,3 +1141,162 @@ function parseRgb(color: string): string {
   }
   return '57, 255, 20';
 }
+
+const SHADER_VERTEX_SOURCE = `
+attribute vec2 a_position;
+varying vec2 v_uv;
+
+void main() {
+  v_uv = a_position * 0.5 + 0.5;
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}
+`;
+
+const SHADER_FRAGMENT_SOURCE = `
+precision highp float;
+
+varying vec2 v_uv;
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform int u_mode;
+uniform int u_palette;
+uniform vec3 u_accent;
+uniform float u_bass;
+uniform float u_lowMid;
+uniform float u_mid;
+uniform float u_treble;
+uniform float u_rms;
+uniform float u_beat;
+uniform vec4 u_bands0;
+uniform vec4 u_bands1;
+uniform vec4 u_bands2;
+uniform vec4 u_bands3;
+
+float sat(float v) { return clamp(v, 0.0, 1.0); }
+
+vec3 hsb2rgb(vec3 c) {
+  vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+  rgb = rgb * rgb * (3.0 - 2.0 * rgb);
+  return c.z * mix(vec3(1.0), rgb, c.y);
+}
+
+float bandAt(float x) {
+  float idx = floor(clamp(x, 0.0, 0.999) * 16.0);
+  if (idx < 0.5) return u_bands0.x;
+  if (idx < 1.5) return u_bands0.y;
+  if (idx < 2.5) return u_bands0.z;
+  if (idx < 3.5) return u_bands0.w;
+  if (idx < 4.5) return u_bands1.x;
+  if (idx < 5.5) return u_bands1.y;
+  if (idx < 6.5) return u_bands1.z;
+  if (idx < 7.5) return u_bands1.w;
+  if (idx < 8.5) return u_bands2.x;
+  if (idx < 9.5) return u_bands2.y;
+  if (idx < 10.5) return u_bands2.z;
+  if (idx < 11.5) return u_bands2.w;
+  if (idx < 12.5) return u_bands3.x;
+  if (idx < 13.5) return u_bands3.y;
+  if (idx < 14.5) return u_bands3.z;
+  return u_bands3.w;
+}
+
+vec3 palette(float t) {
+  t = fract(t);
+  if (u_palette == 1) return mix(vec3(0.03, 0.18, 0.06), vec3(0.46, 1.0, 0.48), t);
+  if (u_palette == 2) return mix(vec3(0.08, 0.34, 0.56), vec3(0.78, 0.98, 1.0), t);
+  if (u_palette == 3) return mix(vec3(0.85, 0.08, 0.22), vec3(1.0, 0.74, 0.24), t);
+  if (u_palette == 4) return hsb2rgb(vec3(t + u_time * 0.045, 0.86, 1.0));
+  return mix(u_accent * 0.26, normalize(u_accent + vec3(0.12, 0.18, 0.22)), 0.18 + t * 0.82);
+}
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
+    u.y
+  );
+}
+
+float fbm(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 4; i += 1) {
+    v += noise(p) * a;
+    p = p * 2.02 + vec2(17.7, 9.2);
+    a *= 0.5;
+  }
+  return v;
+}
+
+void main() {
+  vec2 uv = v_uv;
+  float aspect = u_resolution.x / max(1.0, u_resolution.y);
+  vec2 p = (uv - 0.5) * vec2(aspect, 1.0);
+  float energy = sat(u_rms * 0.55 + u_bass * 0.28 + u_mid * 0.18);
+  vec3 color = vec3(0.0);
+
+  if (u_mode == 0) {
+    vec3 bg = mix(vec3(0.006, 0.006, 0.015), palette(0.08) * 0.12, energy);
+    color += bg;
+    for (int i = 0; i < 9; i += 1) {
+      float fi = float(i);
+      float b = bandAt(fi / 8.0);
+      float y = 0.15 + fi * 0.083 + sin(u_time * (0.65 + fi * 0.035) + fi + u_bass * 4.0) * (0.018 + b * 0.075);
+      float xphase = uv.x * (5.0 + fi * 0.34) + u_time * (0.74 + b * 0.95) + fi * 0.83;
+      float wave = y + sin(xphase) * (0.035 + b * 0.12 + u_bass * 0.04) + sin(xphase * 0.47 + u_mid * 5.0) * (0.025 + u_treble * 0.05);
+      float line = exp(-abs(uv.y - wave) * (92.0 - b * 34.0));
+      color += palette(fi * 0.095 + b * 0.32 + u_time * 0.02) * line * (0.26 + b * 1.45 + u_beat * 0.9);
+    }
+    float scan = 0.88 + 0.12 * sin(uv.y * u_resolution.y * 1.7);
+    color *= scan;
+  } else if (u_mode == 1) {
+    color += vec3(0.002, 0.001, 0.008);
+    for (int i = 0; i < 6; i += 1) {
+      float fi = float(i);
+      float b = bandAt(fi / 5.0);
+      float theta = atan(p.y, p.x);
+      float radius = length(p);
+      float curve = abs(sin(theta * (2.0 + fi * 0.55) + u_time * (0.9 + fi * 0.15) + radius * (6.0 + b * 9.0)));
+      float target = 0.48 + sin(theta * 3.0 - u_time + fi) * 0.12 + b * 0.22 + u_bass * 0.16;
+      float line = exp(-abs(radius - target * curve) * (12.0 + b * 22.0));
+      color += palette(fi * 0.12 + theta * 0.08 + u_time * 0.03) * line * (0.24 + b * 1.35 + u_beat * 0.75);
+    }
+    float core = exp(-length(p) * (6.0 - u_bass * 2.0));
+    color += palette(0.62 + u_time * 0.02) * core * (0.16 + energy * 0.54);
+  } else if (u_mode == 2) {
+    vec2 q = uv;
+    float b0 = bandAt(q.x);
+    float b1 = bandAt(q.y);
+    q.x += sin(q.y * 13.0 + u_time * 1.25) * (0.018 + u_bass * 0.05) + b1 * 0.045;
+    q.y += cos(q.x * 11.0 - u_time * 1.08) * (0.018 + u_mid * 0.045) + b0 * 0.04;
+    float gridX = 1.0 - smoothstep(0.006, 0.028 + u_bass * 0.018, abs(fract(q.x * (10.0 + u_treble * 10.0)) - 0.5));
+    float gridY = 1.0 - smoothstep(0.006, 0.028 + u_mid * 0.018, abs(fract(q.y * (8.0 + u_bass * 8.0)) - 0.5));
+    float plasma = fbm(q * (4.0 + u_mid * 5.0) + vec2(u_time * 0.22, -u_time * 0.16));
+    float lines = max(gridX, gridY) * (0.25 + plasma + u_beat * 0.65);
+    color += palette(plasma + u_time * 0.04) * lines;
+    color += palette(0.7 + plasma) * exp(-length(p) * (2.7 - u_bass)) * (0.08 + u_bass * 0.36);
+  } else {
+    vec2 q = p * (2.1 - u_bass * 0.35);
+    float heat = fbm(q * (2.0 + u_mid * 3.0) + vec2(0.0, -u_time * (0.38 + u_bass)));
+    heat += fbm(q * 4.2 + vec2(u_time * 0.15, u_time * 0.22)) * 0.5;
+    heat += u_bass * 0.85 + u_beat * 0.7;
+    float plume = smoothstep(0.18, 1.58, heat - length(p) * (0.48 - u_rms * 0.16));
+    vec3 ember = mix(vec3(0.09, 0.01, 0.0), vec3(0.96, 0.19, 0.03), plume);
+    vec3 flame = mix(ember, vec3(1.0, 0.82, 0.26), smoothstep(0.78, 1.56, heat));
+    vec3 accentBurn = mix(flame, palette(heat * 0.33 + u_time * 0.03), 0.16 + u_treble * 0.24);
+    color += accentBurn * plume * (0.55 + energy * 0.75);
+    color += vec3(0.018, 0.004, 0.0);
+  }
+
+  color += palette(0.55 + u_time * 0.08) * u_beat * 0.22;
+  color = pow(color, vec3(0.82));
+  gl_FragColor = vec4(color, 1.0);
+}
+`;
