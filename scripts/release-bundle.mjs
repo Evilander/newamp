@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkReleaseChecksums } from './release-checksums.mjs';
@@ -279,28 +279,84 @@ function gitHead(root) {
 
 function compressBundle({ inputPaths, outputPath }) {
   if (process.platform !== 'win32') {
-    return { ok: false, reason: 'release bundle zip creation currently uses Windows PowerShell Compress-Archive' };
+    return { ok: false, reason: 'release bundle zip creation currently uses Windows PowerShell .NET zip support' };
   }
-  const command = [
-    'Compress-Archive',
-    '-LiteralPath',
-    `@(${inputPaths.map(quoteForPowerShell).join(',')})`,
-    '-DestinationPath',
-    quoteForPowerShell(outputPath),
-    '-CompressionLevel',
-    'Optimal',
-    '-Force',
+  const maxAttempts = 4;
+  const command = dotNetZipCommand(inputPaths, outputPath);
+
+  let lastReason = 'PowerShell .NET zip creation did not produce a bundle zip';
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const cleared = removeExistingFile(outputPath);
+    if (!cleared.ok) return cleared;
+
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], {
+      cwd: defaultRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 120_000,
+    });
+    if (result.status !== 0 || result.error) {
+      lastReason = result.error?.message || (result.stderr || result.stdout || 'PowerShell .NET zip creation failed').trim();
+    } else {
+      const proof = fileExistsWithBytes(outputPath);
+      if (proof.ok) return { ok: true };
+      lastReason = proof.reason;
+    }
+    if (attempt < maxAttempts) sleepSync(1500);
+  }
+  return { ok: false, reason: `${lastReason}; failed after ${maxAttempts} attempts` };
+}
+
+function dotNetZipCommand(inputPaths, outputPath) {
+  const fileObjects = inputPaths
+    .map((path) => `@{ Path = ${quoteForPowerShell(path)}; Name = ${quoteForPowerShell(basename(path))} }`)
+    .join(',');
+  return [
+    "$ErrorActionPreference = 'Stop';",
+    'Add-Type -AssemblyName System.IO.Compression;',
+    'Add-Type -AssemblyName System.IO.Compression.FileSystem;',
+    `$dest = ${quoteForPowerShell(outputPath)};`,
+    "if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force; }",
+    `$files = @(${fileObjects});`,
+    '$zip = [System.IO.Compression.ZipFile]::Open($dest, [System.IO.Compression.ZipArchiveMode]::Create);',
+    'try {',
+    'foreach ($file in $files) {',
+    '[System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file.Path, $file.Name, [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null;',
+    '}',
+    '} finally { $zip.Dispose(); }',
   ].join(' ');
-  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command], {
-    cwd: defaultRoot,
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 120_000,
-  });
-  if (result.status !== 0 || result.error) {
-    return { ok: false, reason: result.error?.message || (result.stderr || result.stdout || 'Compress-Archive failed').trim() };
+}
+
+function removeExistingFile(path) {
+  if (!existsSync(path)) return { ok: true };
+  try {
+    unlinkSync(path);
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `could not remove stale release bundle before compression: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
-  return { ok: true };
+}
+
+function fileExistsWithBytes(path) {
+  if (!existsSync(path)) return { ok: false, reason: 'PowerShell zip creation exited successfully but bundle zip is missing' };
+  try {
+    const stat = statSync(path);
+    return stat.size > 0
+      ? { ok: true }
+      : { ok: false, reason: 'PowerShell zip creation produced an empty bundle zip' };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `could not inspect compressed bundle: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function listZipEntries(path) {
