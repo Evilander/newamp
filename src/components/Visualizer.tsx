@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import type { CSSProperties, RefObject } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import type { AudioEngine } from '../audio/engine';
 
@@ -27,10 +28,23 @@ interface Props {
   artUrl?: string | null;
 }
 
+function createFrameGate(canvasRef: RefObject<HTMLCanvasElement>, frameIntervalMs: number): (now: number) => boolean {
+  let lastPaintAt = 0;
+  return (now: number) => {
+    const node = canvasRef.current;
+    if (!node || !node.isConnected || document.hidden) return false;
+    if (node.clientWidth <= 0 || node.clientHeight <= 0) return false;
+    if (now - lastPaintAt < frameIntervalMs) return false;
+    lastPaintAt = now;
+    return true;
+  };
+}
+
 export function Visualizer({ mode, width, height, className, artUrl }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engine = usePlayerStore((s) => s.engine);
   const isFullscreen = width == null && height == null && mode !== 'mini';
+  const frameIntervalMs = isFullscreen ? 1000 / 60 : 1000 / 30;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -46,6 +60,7 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
       let lastH = 0;
 
       const dpr = Math.min(window.devicePixelRatio || 1, isFullscreen ? 1.25 : 2);
+      const canPaint = createFrameGate(canvasRef, frameIntervalMs);
 
       function ensureSize() {
         const node = canvasRef.current;
@@ -95,16 +110,18 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
           loadRandomPreset(0);
           presetTimer = window.setInterval(() => loadRandomPreset(3.6), 16000);
 
-          const frame = () => {
-            ensureSize();
-            visualizer?.render();
+          const frame = (now: number) => {
+            if (canPaint(now)) {
+              ensureSize();
+              visualizer?.render();
+            }
             raf = requestAnimationFrame(frame);
           };
           raf = requestAnimationFrame(frame);
         } catch (err) {
           if (!cancelled) {
-            const frameFallback = () => {
-              paintMilkdropFallback(butterCanvas, engine);
+            const frameFallback = (now: number) => {
+              if (canPaint(now)) paintMilkdropFallback(butterCanvas, engine);
               raf = requestAnimationFrame(frameFallback);
             };
             raf = requestAnimationFrame(frameFallback);
@@ -131,6 +148,7 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
     let ctx: CanvasRenderingContext2D | null = null;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
+    const canPaint = createFrameGate(canvasRef, frameIntervalMs);
 
     function ensureSize() {
       const node = canvasRef.current;
@@ -167,7 +185,11 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
     }
     const particles: Particle[] = [];
 
-    function frame() {
+    function frame(now: number) {
+      if (!canPaint(now)) {
+        raf = requestAnimationFrame(frame);
+        return;
+      }
       ensureSize();
       const c = canvasRef.current;
       if (!c) {
@@ -616,9 +638,9 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [engine, isFullscreen, mode]);
+  }, [engine, frameIntervalMs, isFullscreen, mode]);
 
-  const style: React.CSSProperties = {};
+  const style: CSSProperties = {};
   if (width != null) style.width = `${width}px`;
   if (height != null) style.height = `${height}px`;
 

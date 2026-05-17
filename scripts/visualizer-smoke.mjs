@@ -52,6 +52,26 @@ assert.match(
   'Visualizer canvas must expose a stable UI smoke selector',
 );
 assert.match(
+  visualizerSource,
+  /1000 \/ 30/,
+  'Embedded visualizers must be capped below fullscreen frame rate',
+);
+assert.match(
+  visualizerSource,
+  /document\.hidden/,
+  'Visualizers must pause painting while the app is hidden',
+);
+assert.match(
+  visualizerSource,
+  /isConnected/,
+  'Visualizers must skip detached canvases',
+);
+assert.match(
+  visualizerSource,
+  /clientWidth <= 0 \|\| node\.clientHeight <= 0/,
+  'Visualizers must skip zero-size canvases',
+);
+assert.match(
   nowPlayingSource,
   /data-newamp-spectrum-style-picker/,
   'Now Playing should expose multiple spectrum display choices',
