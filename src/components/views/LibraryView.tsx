@@ -297,14 +297,14 @@ export function LibraryView(): JSX.Element {
       return;
     }
     setCleanupStatus('Building missing metadata review...');
-    const tracks = await collectTracksByQueries([
+    const trackIds = await collectTrackIdsByQueries([
       'missing:artist',
       'missing:album',
       'missing:year',
       'missing:art',
       'missing:duration',
     ]);
-    await saveHealthReviewPlaylist('Missing Metadata Review', tracks, 'missing metadata/art candidate');
+    await saveHealthReviewPlaylist('Missing Metadata Review', trackIds, 'missing metadata/art candidate');
   }
 
   async function createLegacyReviewPlaylist(): Promise<void> {
@@ -313,27 +313,24 @@ export function LibraryView(): JSX.Element {
       return;
     }
     setCleanupStatus('Building legacy format review...');
-    const tracks = await collectTracksByQueries(
+    const trackIds = await collectTrackIdsByQueries(
       health.legacyFormats.map((item) => `format:${item.ext.replace(/^\./, '')}`),
     );
-    await saveHealthReviewPlaylist('Legacy Format Review', tracks, 'legacy-format track');
+    await saveHealthReviewPlaylist('Legacy Format Review', trackIds, 'legacy-format track');
   }
 
-  async function collectTracksByQueries(queries: string[]): Promise<Track[]> {
+  async function collectTrackIdsByQueries(queries: string[]): Promise<number[]> {
     const rows = await Promise.all(
-      queries.map((query) => api.getTracks({ search: query, sort: 'artist', limit: 100000 })),
+      queries.map((query) => api.getTrackIds({ search: query, sort: 'artist', limit: 100000 })),
     );
-    const byId = new Map<number, Track>();
-    for (const track of rows.flat()) byId.set(track.id, track);
-    return [...byId.values()];
+    return [...new Set(rows.flat())];
   }
 
   async function saveHealthReviewPlaylist(
     baseName: string,
-    tracks: Track[],
+    trackIds: number[],
     label: string,
   ): Promise<void> {
-    const trackIds = tracks.map((track) => track.id);
     if (!trackIds.length) {
       setCleanupStatus(`No ${label}s were available.`);
       return;
