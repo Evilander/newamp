@@ -24,6 +24,7 @@ const FirstLaunchTutorial = lazy(() =>
 const HomeView = lazy(() => import('./components/views/HomeView').then((module) => ({ default: module.HomeView })));
 const LibraryView = lazy(() => import('./components/views/LibraryView').then((module) => ({ default: module.LibraryView })));
 const FoldersView = lazy(() => import('./components/views/FoldersView').then((module) => ({ default: module.FoldersView })));
+const DiscoverView = lazy(() => import('./components/views/DiscoverView').then((module) => ({ default: module.DiscoverView })));
 const MixesView = lazy(() => import('./components/views/MixesView').then((module) => ({ default: module.MixesView })));
 const AlbumsView = lazy(() => import('./components/views/AlbumsView').then((module) => ({ default: module.AlbumsView })));
 const ArtistsView = lazy(() => import('./components/views/ArtistsView').then((module) => ({ default: module.ArtistsView })));
@@ -280,6 +281,7 @@ export default function App(): JSX.Element {
                 {view === 'home' && <HomeView />}
                 {view === 'library' && <LibraryView />}
                 {view === 'folders' && <FoldersView />}
+                {view === 'discover' && <DiscoverView />}
                 {view === 'mixes' && <MixesView />}
                 {view === 'albums' && <AlbumsView />}
                 {view === 'artists' && <ArtistsView />}

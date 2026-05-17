@@ -25,11 +25,12 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 ## 30-second pitch
 
 - **Four UI shells** — Retro (Bloomberg-density Winamp 2 homage), Modern (rounded, content-forward), Liquid Glass (translucent stacked panes with backdrop-filter), Concourse (operator-console split-cells)
-- **Four deck (compact-window) skins** — Classic Bento, Record Player (spinning vinyl, swinging tonearm), Jukebox (Wurlitzer arch, bubble tubes), Cassette Deck (twin spinning reels). Each declares its own native window size — no letterbox
+- **Nine deck (compact-window) skins** — Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Hotdog Deck, and Retro TV. Each declares its own native window size — no letterbox
 - **13 color skins** — Classic, Ops, Midnight, Neon, Amber, Oxide, Steel, Walnut, Jukebox, Terminal, Ice, Miami, Mono. Plus full Winamp 2.x `.wsz` skin import
 - **0–100 decimal track scoring** — Drag, scroll-wheel, keyboard-nudge, or double-click to type `88.3`. Stars stay in sync for legacy sorts and smart rules
 - **0–200% volume** with a red-zone past unity — VLC-style amp boost, full `0 dB / +6 dB` tick labels, runs after the master limiter so it amplifies without clipping
 - **Magazine-style Home** — greeting hero with blurred album backdrop, Today's Pick (high-rated track you haven't played in 6+ weeks, with a reason chip), Your Highest Rated rail, NewAmp News editorial card, Listening Stats This Week, plus the classic Harmonic / Taste / Loved / Heavy Rotation / Fresh Imports rails
+- **Living Library Discover mode** — local-first crate-digging missions that turn ratings, plays, skips, fresh imports, deep album candidates, and underplayed corners into playable sessions with Deck / Full Vis / Save as Playlist actions
 - **Bloomberg-density Now Playing** with a tabbed side panel (On Air / Album / Lyrics), draggable spectrum-split, selectable spectrum styles, VU + waveform overview, LRCLIB-synced lyrics, optional karaoke mode, custom-lyrics editor, tempo trainer, practice A/B loop, track bookmarks
 - **Milkdrop visualizer + Xbox-inspired fullscreen modes** — Butterchurn presets, spectrum modes, aurora, plasma grid, and neon ribbon renderers built for 4K fullscreen use
 - **Auto DJ + smart playlists** — BPM/key-aware harmonic mixes, taste-learning from plays/loves/ratings/skips, smart rules with min-rating filters
@@ -46,8 +47,8 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 
 Grab the latest from [**Releases**](https://github.com/evilander/newamp/releases):
 
-- **`NewAmp Setup 1.1.1.exe`** — NSIS installer, registers file associations for 16 audio formats + 4 playlist formats
-- **`NewAmp Portable 1.1.1.exe`** — single-file portable, no install, no registry writes
+- **`NewAmp Setup 1.2.0.exe`** — NSIS installer, registers file associations for 16 audio formats + 4 playlist formats
+- **`NewAmp Portable 1.2.0.exe`** — single-file portable, no install, no registry writes
 
 All artifacts are listed with SHA256 hashes in `SHA256SUMS.txt`.
 
@@ -59,7 +60,7 @@ All artifacts are listed with SHA256 hashes in `SHA256SUMS.txt`.
 2. Empty Library view will offer to scan your default Music folder, or pick any folder. NewAmp will also surface one-click music folder suggestions for places it finds in standard locations (`Music`, `OneDrive/Music`, etc.).
 3. Wait for the initial scan to finish (~10s per thousand tracks for tag + cover-art extraction).
 4. Drop a `.wsz` Winamp 2.x skin file onto the window to install it. Or open Settings → Shell · Layout to switch the chrome shell, or Settings → Skin for the color palette.
-5. Press **Ctrl+K** anywhere to open the command palette (search anything: tracks, albums, artists, commands).
+5. Open **Discover** for a Living Library session, or press **Ctrl+K** anywhere to open the command palette (search anything: tracks, albums, artists, views, commands).
 
 ## Theming
 
@@ -144,16 +145,16 @@ Winamp-style keyboard controls are available anywhere outside text fields:
 newamp/
   electron/        Main process: IPC, protocols, library store (sql.js), scanner,
                    metadata, music-folder suggestions, ReplayGain, EQ, exports
-  shared/          Types, audio limiter math, keyboard shortcut tables
+  shared/          Types, Discover scoring, audio limiter math, keyboard shortcut tables
   src/             Renderer (React + Zustand)
     audio/         Web Audio chain: input → eq → replayGain → limiter → master → analyser
     components/
       decks/       Compact-window skin variants (record player, jukebox, cassette)
-      views/       Home, Library, Albums, Artists, NowPlaying, Playlist, Settings, ...
+      views/       Home, Discover, Library, Albums, Artists, NowPlaying, Playlist, Settings, ...
     store/         Zustand state + engine bridge
     styles/        index.css — 13 skins + 4 shells + magazine Home + Liquid Glass etc.
     lib/           api wrapper, skins, format, mediaSession
-  scripts/         80+ smoke tests, packaging, release gate, security checks
+  scripts/         96 smoke tests, packaging, release gate, security checks
   build/           App icon, logo, NSIS bits
 ```
 

@@ -3,6 +3,19 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-05-17
+
+Living Library release.
+
+### Added
+- Added Discover, a local-first Living Library view that builds playable crate-digging missions from fresh imports, forgotten favorites, deep album candidates, underplayed corners, and visual-night sets.
+- Added a native `getDiscoverSurface` API with deterministic seeds, low-end visual preset safety, deck/visualizer plans, and saveable mission payloads.
+- Added Discover navigation in the sidebar and command palette.
+- Added `smoke:discover` and `smoke:ui-discover`, and wired both into the release gate.
+
+### Changed
+- Broadened README coverage for Discover, current deck skins, release artifact names, architecture, and smoke-test count.
+
 ## [1.1.1] - 2026-05-17
 
 Release polish for the first broader test build.

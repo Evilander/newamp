@@ -18,6 +18,8 @@ import type {
   CatalogSummaryQueryOptions,
   CachedGuitarTab,
   CustomLyricsInput,
+  DiscoverSurface,
+  DiscoverSurfaceInput,
   FolderSummary,
   GuitarTabDocument,
   HarmonicMixInput,
@@ -42,6 +44,7 @@ import type {
   Track,
   RecoveryEvent,
 } from '../shared/types.js';
+import { buildDiscoverSurface } from '../shared/discover.js';
 import { buildHarmonicMix as buildHarmonicMixSequence } from '../shared/harmonic-mix.js';
 import { quarantineCorruptFile, recoveryReason } from './recovery.js';
 
@@ -1595,6 +1598,59 @@ export class LibraryStore {
     }
 
     return suggestions.slice(0, 12);
+  }
+
+  getDiscoverSurface(input: DiscoverSurfaceInput = {}): DiscoverSurface {
+    const limit = Math.max(4, Math.min(40, Math.trunc(Number(input.limit) || 12)));
+    const currentTrack = input.seedTrackId ? this.getTrack(Math.trunc(input.seedTrackId)) : null;
+    const highSignalCandidates = this.many<RawRow>(
+      `SELECT * FROM tracks
+        WHERE path IS NOT NULL
+          AND avoid_auto_play = 0
+        ORDER BY
+          loved DESC,
+          rating_score DESC,
+          rating DESC,
+          play_count DESC,
+          mtime DESC,
+          album_artist COLLATE NOCASE,
+          album COLLATE NOCASE,
+          disc_no,
+          track_no,
+          title COLLATE NOCASE
+        LIMIT 6000`,
+    ).map(rowToTrack);
+    const freshCandidates = this.many<RawRow>(
+      `SELECT * FROM tracks
+        WHERE path IS NOT NULL
+          AND avoid_auto_play = 0
+        ORDER BY mtime DESC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
+        LIMIT 3000`,
+    ).map(rowToTrack);
+    const underplayedCandidates = this.many<RawRow>(
+      `SELECT * FROM tracks
+        WHERE path IS NOT NULL
+          AND avoid_auto_play = 0
+          AND play_count <= 1
+        ORDER BY mtime ASC, year IS NULL, year ASC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
+        LIMIT 4000`,
+    ).map(rowToTrack);
+    const albumCandidates = this.many<RawRow>(
+      `SELECT * FROM tracks
+        WHERE path IS NOT NULL
+          AND avoid_auto_play = 0
+        ORDER BY album_artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
+        LIMIT 6000`,
+    ).map(rowToTrack);
+    const tracks = currentTrack && !currentTrack.avoidAutoPlay
+      ? uniqueTracksById([currentTrack, ...highSignalCandidates, ...freshCandidates, ...underplayedCandidates, ...albumCandidates])
+      : uniqueTracksById([...highSignalCandidates, ...freshCandidates, ...underplayedCandidates, ...albumCandidates]);
+    return buildDiscoverSurface({
+      ...input,
+      limit,
+      tracks,
+      stats: this.getStats(),
+    });
   }
 
   saveSmartPlaylistRule(input: SmartPlaylistRuleInput): SmartPlaylistRule {

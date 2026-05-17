@@ -57,6 +57,7 @@ import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import type {
   CustomSkin,
+  DiscoverSurfaceInput,
   AiLinerNotesInput,
   ExportTracksFolderInput,
   AudioExportFormat,
@@ -96,6 +97,7 @@ const uiOpenFileSmoke = process.env.NEWAMP_UI_OPEN_FILE_SMOKE === '1';
 const uiVisualizerSmoke = process.env.NEWAMP_UI_VISUALIZER_SMOKE === '1';
 const uiDeckSmoke = process.env.NEWAMP_UI_DECK_SMOKE === '1';
 const uiArtSmoke = process.env.NEWAMP_UI_ART_SMOKE === '1';
+const uiDiscoverSmoke = process.env.NEWAMP_UI_DISCOVER_SMOKE === '1';
 const smokeMode =
   startupSmoke ||
   uiPlaybackSmoke ||
@@ -106,7 +108,8 @@ const smokeMode =
   uiOpenFileSmoke ||
   uiVisualizerSmoke ||
   uiDeckSmoke ||
-  uiArtSmoke;
+  uiArtSmoke ||
+  uiDiscoverSmoke;
 const OPEN_AUDIO_EXTS = new Set([
   '.mp3',
   '.flac',
@@ -155,6 +158,8 @@ if (smokeMode && !userDataOverride) {
                 ? 'ui-deck-smoke-user-data'
               : uiArtSmoke
                 ? 'ui-art-smoke-user-data'
+              : uiDiscoverSmoke
+                ? 'ui-discover-smoke-user-data'
                 : 'ui-playback-smoke-user-data';
   const smokeUserData = process.env.NEWAMP_SMOKE_USER_DATA
     ? resolve(process.env.NEWAMP_SMOKE_USER_DATA)
@@ -424,8 +429,10 @@ function createWindow(): BrowserWindow {
 
 function createStartupSplashWindow(): void {
   if (!startupSplashEnabled || startupSplashWin) return;
-  const logoDataUrl = resolveStartupSplashLogoDataUrl();
-  if (!logoDataUrl) return;
+  const logoPath = resolveStartupSplashLogoPath();
+  if (!logoPath) return;
+  const splashHtmlPath = writeStartupSplashHtml(logoPath);
+  if (!splashHtmlPath) return;
   startupSplashStartedAt = Date.now();
   startupSplashWin = new BrowserWindow({
     width: 340,
@@ -453,8 +460,8 @@ function createStartupSplashWindow(): void {
   startupSplashWin.on('closed', () => {
     startupSplashWin = null;
   });
-  startupSplashWin.loadURL(buildStartupSplashHtml(logoDataUrl)).catch((err) => {
-    console.warn('[newamp] startup splash failed', err);
+  startupSplashWin.loadFile(splashHtmlPath).catch((err) => {
+    writeDiagnosticEvent('startup-splash-unavailable', { error: err });
     closeStartupSplashWindow();
   });
 }
@@ -468,7 +475,7 @@ function closeStartupSplashWindow(): void {
   startupSplashWin = null;
 }
 
-function resolveStartupSplashLogoDataUrl(): string | null {
+function resolveStartupSplashLogoPath(): string | null {
   const candidates = [
     resolveBundledRendererLogoPath(),
     join(process.resourcesPath, 'build', 'logo-app.webp'),
@@ -479,9 +486,7 @@ function resolveStartupSplashLogoDataUrl(): string | null {
   for (const logoPath of candidates) {
     try {
       if (!existsSync(logoPath)) continue;
-      const ext = extname(logoPath).toLowerCase();
-      const mime = ext === '.png' ? 'image/png' : 'image/webp';
-      return `data:${mime};base64,${readFileSync(logoPath).toString('base64')}`;
+      return logoPath;
     } catch {
       continue;
     }
@@ -499,8 +504,21 @@ function resolveBundledRendererLogoPath(): string | null {
   }
 }
 
-function buildStartupSplashHtml(logoDataUrl: string): string {
-  const html = `<!doctype html>
+function writeStartupSplashHtml(logoPath: string): string | null {
+  try {
+    const splashDir = join(app.getPath('userData'), 'startup');
+    mkdirSync(splashDir, { recursive: true });
+    const splashHtmlPath = join(splashDir, 'startup-splash.html');
+    writeFileSync(splashHtmlPath, buildStartupSplashHtml(pathToFileURL(logoPath).toString()), 'utf8');
+    return splashHtmlPath;
+  } catch (err) {
+    writeDiagnosticEvent('startup-splash-unavailable', { error: err });
+    return null;
+  }
+}
+
+function buildStartupSplashHtml(logoUrl: string): string {
+  return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -535,10 +553,9 @@ img {
 </style>
 </head>
 <body>
-  <img alt="NewAmp" src="${logoDataUrl}">
+  <img alt="NewAmp" src="${escapeHtml(logoUrl)}">
 </body>
 </html>`;
-  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
 function showMainWindow(): void {
@@ -1016,6 +1033,9 @@ function registerIpc(): void {
   ipcMain.handle('open:files', async (_e, paths: string[]) => openFiles(paths));
   ipcMain.handle('smart:list', async () => library.getSmartPlaylistRules());
   ipcMain.handle('smart:suggestions', async () => library.getSuggestedSmartPlaylistRules());
+  ipcMain.handle('library:get-discover-surface', async (_e, input?: DiscoverSurfaceInput) =>
+    library.getDiscoverSurface(input ?? {}),
+  );
   ipcMain.handle('smart:save', async (_e, input) => library.saveSmartPlaylistRule(input));
   ipcMain.handle('smart:delete', async (_e, id: number) => library.deleteSmartPlaylistRule(id));
   ipcMain.handle('smart:run', async (_e, input) => library.runSmartPlaylistRule(input));
@@ -1550,6 +1570,23 @@ async function runUiArtSmoke(win: BrowserWindow, scanPromise: Promise<void>): Pr
   }
 }
 
+async function runUiDiscoverSmoke(win: BrowserWindow): Promise<void> {
+  try {
+    const result = await Promise.race([
+      win.webContents.executeJavaScript(uiDiscoverProbeSource(), true),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for UI Discover probe')), 20000),
+      ),
+    ]);
+    console.log(`[newamp-ui-discover-smoke] ${JSON.stringify(result)}`);
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    console.error('[newamp-ui-discover-smoke] failed:', err);
+    app.exit(1);
+  }
+}
+
 async function runUiDeckSmoke(win: BrowserWindow): Promise<void> {
   try {
     const result = await Promise.race([
@@ -1994,6 +2031,56 @@ function uiDeckProbeSource(): string {
         tv,
         winamp,
         shadeAgain,
+      };
+    })()
+  `;
+}
+
+function uiDiscoverProbeSource(): string {
+  return `
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (label, fn, timeout = 10000) => {
+        const start = performance.now();
+        while (performance.now() - start < timeout) {
+          const value = fn();
+          if (value) return value;
+          await sleep(75);
+        }
+        throw new Error('Timed out waiting for ' + label);
+      };
+      const discoverButton = await waitFor('Discover navigation', () =>
+        Array.from(document.querySelectorAll('button'))
+          .find((item) => (item.textContent || '').includes('Discover')),
+      );
+      discoverButton.click();
+      const view = await waitFor('Discover view', () => document.querySelector('[data-newamp-discover]'), 12000);
+      const mission = await waitFor('Discover mission', () =>
+        document.querySelector('[data-newamp-discover-mission]'),
+      );
+      const saveButton = await waitFor('Discover save button', () =>
+        document.querySelector('[data-newamp-discover-save]'),
+      );
+      const stepAction = await waitFor('Discover step action', () =>
+        document.querySelector('[data-newamp-discover-step-action]'),
+      );
+      const fullVisButton = await waitFor('Discover full visualizer button', () =>
+        document.querySelector('[data-newamp-discover-full-vis]'),
+      );
+      const deckButton = await waitFor('Discover deck button', () =>
+        document.querySelector('[data-newamp-discover-deck]'),
+      );
+      saveButton.click();
+      await waitFor('Discover save status', () => /Saved /.test(view.textContent || '') ? view : null);
+      return {
+        ok: true,
+        missionCount: document.querySelectorAll('[data-newamp-discover-mission]').length,
+        trackRows: document.querySelectorAll('[data-newamp-track-row]').length,
+        hasSave: !!saveButton,
+        hasStepAction: !!stepAction,
+        hasFullVisualizer: !!fullVisButton,
+        hasDeck: !!deckButton,
+        missionText: (mission.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 180),
       };
     })()
   `;
@@ -2939,6 +3026,8 @@ async function bootstrap(): Promise<void> {
       void runUiDeckSmoke(mainWin);
     } else if (uiArtSmoke && mainWin) {
       void runUiArtSmoke(mainWin, scanPromise);
+    } else if (uiDiscoverSmoke && mainWin) {
+      void runUiDiscoverSmoke(mainWin);
     }
   });
 }

@@ -12,6 +12,8 @@ import type {
   CachedGuitarTab,
   CustomLyricsInput,
   CustomSkin,
+  DiscoverSurface,
+  DiscoverSurfaceInput,
   ExportTracksFolderInput,
   GuitarTabDocument,
   GuitarTabSearchQuery,
@@ -142,6 +144,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('smart:list') as Promise<SmartPlaylistRule[]>,
   getSuggestedSmartPlaylistRules: () =>
     ipcRenderer.invoke('smart:suggestions') as Promise<SmartPlaylistSuggestion[]>,
+  getDiscoverSurface: (input?: DiscoverSurfaceInput) =>
+    ipcRenderer.invoke('library:get-discover-surface', input) as Promise<DiscoverSurface>,
   saveSmartPlaylistRule: (input: SmartPlaylistRuleInput) =>
     ipcRenderer.invoke('smart:save', input) as Promise<SmartPlaylistRule>,
   deleteSmartPlaylistRule: (id: number) => ipcRenderer.invoke('smart:delete', id) as Promise<void>,
