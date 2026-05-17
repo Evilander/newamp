@@ -1,8 +1,9 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
-import { Visualizer } from './Visualizer';
+import { Visualizer, type VizQuality } from './Visualizer';
 import { formatTime } from '../lib/format';
 import { api } from '../lib/api';
+import type { VisualizerPreset } from '@shared/types';
 
 const PRESETS = [
   { id: 'neon-waves', label: 'Neon Waves' },
@@ -19,7 +20,24 @@ const PRESETS = [
   { id: 'aurora', label: 'Aurora' },
   { id: 'oscilloscope', label: 'Oscilloscope' },
   { id: 'butterchurn', label: 'Milkdrop' },
-] as const;
+] as const satisfies ReadonlyArray<{ id: VisualizerPreset; label: string }>;
+
+const VIZ_QUALITY_KEY = 'newamp:viz:quality';
+const VIZ_SHOW_ART_KEY = 'newamp:viz:showArt';
+const VIZ_CHROME_KEY = 'newamp:viz:chrome';
+
+function loadVisualizerQuality(): VizQuality {
+  if (typeof window === 'undefined') return 'auto';
+  return window.localStorage.getItem(VIZ_QUALITY_KEY) === '4k' ? '4k' : 'auto';
+}
+
+function loadStoredBoolean(key: string, fallback: boolean): boolean {
+  if (typeof window === 'undefined') return fallback;
+  const raw = window.localStorage.getItem(key);
+  if (raw === '1') return true;
+  if (raw === '0') return false;
+  return fallback;
+}
 
 export function FullscreenVisualizer(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
@@ -33,42 +51,102 @@ export function FullscreenVisualizer(): JSX.Element {
   const seek = usePlayerStore((s) => s.seek);
   const preset = usePlayerStore((s) => s.vizPreset);
   const setPreset = usePlayerStore((s) => s.setVizPreset);
+  const [quality, setQuality] = useState<VizQuality>(() => loadVisualizerQuality());
+  const [showArt, setShowArt] = useState<boolean>(() => loadStoredBoolean(VIZ_SHOW_ART_KEY, false));
+  const [chromeVisible, setChromeVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_CHROME_KEY, true));
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
+  const activeIndex = Math.max(0, PRESETS.findIndex((p) => p.id === activePreset));
 
   const artUrl = useMemo(
     () => (current?.hasArt ? api.getArtUrl(current.id) : null),
     [current?.id, current?.hasArt],
   );
 
+  function pickPreset(id: VisualizerPreset): void {
+    setPreset(id);
+  }
+
+  function cyclePreset(direction: -1 | 1): void {
+    const nextIndex = (activeIndex + direction + PRESETS.length) % PRESETS.length;
+    pickPreset(PRESETS[nextIndex]!.id);
+  }
+
+  function toggleQuality(): void {
+    setQuality((value) => {
+      const next: VizQuality = value === '4k' ? 'auto' : '4k';
+      window.localStorage.setItem(VIZ_QUALITY_KEY, next);
+      return next;
+    });
+  }
+
+  function toggleArt(): void {
+    setShowArt((value) => {
+      const next = !value;
+      window.localStorage.setItem(VIZ_SHOW_ART_KEY, next ? '1' : '0');
+      return next;
+    });
+  }
+
+  function toggleChrome(): void {
+    setChromeVisible((value) => {
+      const next = !value;
+      window.localStorage.setItem(VIZ_CHROME_KEY, next ? '1' : '0');
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent): void {
+      if (isEditableTarget(event.target)) return;
+      if (event.key === 'ArrowRight' || event.key === ']') {
+        event.preventDefault();
+        cyclePreset(1);
+      } else if (event.key === 'ArrowLeft' || event.key === '[') {
+        event.preventDefault();
+        cyclePreset(-1);
+      } else if (event.key.toLowerCase() === 'q') {
+        event.preventDefault();
+        toggleQuality();
+      } else if (event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        toggleArt();
+      } else if (event.key.toLowerCase() === 'h') {
+        event.preventDefault();
+        toggleChrome();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeIndex]);
+
   return (
     <div
       data-newamp-fullscreen-visualizer
       data-newamp-visualizer-preset={activePreset}
-      className="fixed inset-0 z-[90] flex items-center justify-center bg-black"
+      data-newamp-visualizer-quality={quality}
+      data-newamp-visualizer-chrome={chromeVisible ? 'visible' : 'clean'}
+      data-newamp-visualizer-art={showArt ? 'visible' : 'hidden'}
+      className="fullscreen-viz-root fixed inset-0 z-[90] flex items-center justify-center bg-black"
       onDoubleClick={() => setFs(false)}
     >
       <div className="absolute inset-0">
         <Visualizer
           mode={activePreset}
+          quality={quality}
           className="absolute inset-0 h-full w-full"
         />
       </div>
 
-      {artUrl && (
+      {showArt && artUrl && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div className="relative">
+          <div className="fullscreen-viz-cover relative">
             <img
               src={artUrl}
               alt=""
-              className="pulse-soft h-[420px] w-[420px] object-cover"
+              className="pulse-soft h-full w-full object-cover"
               onError={(event) => {
                 event.currentTarget.style.display = 'none';
-              }}
-              style={{
-                borderRadius: '12px',
-                boxShadow: '0 0 80px var(--accent-glow), 0 0 200px var(--accent-glow)',
-                opacity: 0.92,
               }}
             />
           </div>
@@ -76,28 +154,58 @@ export function FullscreenVisualizer(): JSX.Element {
       )}
 
       <div
-        className="pointer-events-auto absolute right-4 top-4 flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2"
+        className={`fullscreen-viz-toolbar pointer-events-auto absolute inset-x-4 top-4 flex max-w-[calc(100vw-2rem)] items-center gap-2 ${chromeVisible ? '' : 'is-clean'}`}
         data-newamp-visualizer-toolbar
       >
-        <div className="flex flex-wrap justify-end gap-1 bevel-out p-1">
+        <button className="pxbtn" onClick={() => cyclePreset(-1)} title="Previous visualizer preset ([)">
+          PREV
+        </button>
+        <div className="fullscreen-viz-preset-rail bevel-out">
           {PRESETS.map((p) => (
             <button
               key={p.id}
               data-newamp-viz-preset-button={p.id}
-              className={`pxbtn ${preset === p.id ? 'is-active' : ''}`}
-              onClick={() => setPreset(p.id)}
+              className={`pxbtn ${activePreset === p.id ? 'is-active' : ''}`}
+              onClick={() => pickPreset(p.id)}
             >
               {p.label}
             </button>
           ))}
         </div>
+        <button className="pxbtn" onClick={() => cyclePreset(1)} title="Next visualizer preset (])">
+          NEXT
+        </button>
+        <button
+          className={`pxbtn ${quality === '4k' ? 'is-active' : ''}`}
+          data-newamp-viz-quality-button
+          onClick={toggleQuality}
+          title="Toggle 4K render quality (Q)"
+        >
+          {quality === '4k' ? '4K' : 'AUTO'}
+        </button>
+        <button
+          className={`pxbtn ${showArt ? 'is-active' : ''}`}
+          data-newamp-viz-art-button
+          onClick={toggleArt}
+          title="Toggle album-art overlay (A)"
+        >
+          ART
+        </button>
+        <button
+          className={`pxbtn ${!chromeVisible ? 'is-active' : ''}`}
+          data-newamp-viz-clean-button
+          onClick={toggleChrome}
+          title="Clean visualizer mode (H)"
+        >
+          CLEAN
+        </button>
         <button className="pxbtn" onClick={() => setFs(false)} title="Exit visualizer (Esc)">
           ESC X
         </button>
       </div>
 
       <div
-        className="pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16"
+        className={`fullscreen-viz-now pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16 ${chromeVisible ? '' : 'is-clean'}`}
         style={{
           background: 'linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.85) 100%)',
         }}
@@ -135,4 +243,8 @@ export function FullscreenVisualizer(): JSX.Element {
       </div>
     </div>
   );
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]');
 }

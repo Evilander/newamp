@@ -41,6 +41,13 @@ assert.match(fullscreenSource, /id: 'plasma-grid'/, 'Fullscreen visualizer must 
 assert.match(fullscreenSource, /id: 'prism-bars'/, 'Fullscreen visualizer must expose Prism Bars preset');
 assert.match(fullscreenSource, /id: 'confetti'/, 'Fullscreen visualizer must expose Confetti preset');
 assert.match(fullscreenSource, /id: 'burning-cloud'/, 'Fullscreen visualizer must expose Burning Cloud preset');
+assert.match(fullscreenSource, /data-newamp-viz-quality-button/, 'Fullscreen visualizer should expose a 4K quality toggle');
+assert.match(fullscreenSource, /ArrowRight/, 'Fullscreen visualizer should support keyboard preset cycling');
+assert.match(
+  visualizerSource,
+  /quality === '4k' \? 8_300_000 : 3_700_000/,
+  'Fullscreen visualizer should have a true 4K render budget option',
+);
 assert.match(
   fullscreenSource,
   /data-newamp-fullscreen-visualizer/,
