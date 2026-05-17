@@ -6,7 +6,7 @@ import { api } from '../../lib/api';
 import { TrackTable } from './LibraryView';
 import { LoadMoreFooter } from './LoadMoreFooter';
 
-const FOLDER_TRACK_LIMIT = 5000;
+const FOLDER_TRACK_LIMIT = 600;
 
 export function FoldersView(): JSX.Element {
   const [stack, setStack] = useState<FolderSummary[]>([]);
