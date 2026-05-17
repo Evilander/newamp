@@ -575,6 +575,7 @@ export type VisualizerPreset =
   | 'radial'
   | 'tunnel'
   | 'pulse'
+  | 'orbital-rings'
   | 'neon-waves'
   | 'neon-ribbons'
   | 'plasma-grid'

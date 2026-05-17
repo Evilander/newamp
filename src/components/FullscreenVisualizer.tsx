@@ -13,6 +13,7 @@ const PRESETS = [
   { id: 'confetti', label: 'Confetti' },
   { id: 'burning-cloud', label: 'Burning Cloud' },
   { id: 'spectrum', label: 'Spectrum' },
+  { id: 'orbital-rings', label: 'Orbital Rings' },
   { id: 'radial', label: 'Radial' },
   { id: 'tunnel', label: 'Tunnel' },
   { id: 'pulse', label: 'Pulse' },
@@ -179,9 +180,9 @@ export function FullscreenVisualizer(): JSX.Element {
           className={`pxbtn ${quality === '4k' ? 'is-active' : ''}`}
           data-newamp-viz-quality-button
           onClick={toggleQuality}
-          title="Toggle 4K render quality (Q)"
+          title={quality === '4k' ? 'Use balanced performance render quality (Q)' : 'Use sharper 4K render quality (Q)'}
         >
-          {quality === '4k' ? '4K' : 'AUTO'}
+          {quality === '4k' ? '4K' : 'PERF'}
         </button>
         <button
           className={`pxbtn ${showArt ? 'is-active' : ''}`}

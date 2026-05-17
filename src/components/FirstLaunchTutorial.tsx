@@ -43,7 +43,7 @@ export function FirstLaunchTutorial({
             <div className="first-launch-kicker">First launch</div>
             <h1>Set up NewAmp</h1>
             <p>
-              Add music, choose a deck, and optionally unlock ChatGPT-powered library features.
+              Add your library, choose a deck, connect optional services, and keep playback local-first.
             </p>
           </div>
         </header>
@@ -51,7 +51,7 @@ export function FirstLaunchTutorial({
         <div className="first-launch-steps">
           <div>
             <strong>1. Add your music folder</strong>
-            <span>Use Settings to add local folders such as K:\music, then scan once.</span>
+            <span>Use Settings to add your Music folder, an external drive, or any folder where your audio files live.</span>
           </div>
           <div>
             <strong>2. Pick the player shape</strong>
@@ -60,6 +60,10 @@ export function FirstLaunchTutorial({
           <div>
             <strong>3. Use the library rails</strong>
             <span>Home builds mixes, recent imports, smart stations, playlists, and listening history from your files.</span>
+          </div>
+          <div data-newamp-live-services-onboarding>
+            <strong>4. Connect services only when you want them</strong>
+            <span>Last.fm scrobbling and ChatGPT liner notes are optional. Private recordings still play normally when web facts, lyrics, or scrobbles do not exist.</span>
           </div>
         </div>
 

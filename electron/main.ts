@@ -1604,6 +1604,18 @@ function uiVisualizerProbeSource(): string {
         stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="neon-ribbons"]'),
       );
       const ribbonRender = await waitFor('nonblank neon-ribbons visualizer frame', () => sampleCanvas(ribbonCanvas), 8000);
+      const orbitalButton = await waitFor('Orbital Rings visualizer preset button', () =>
+        Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
+          .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'orbital-rings'),
+      );
+      orbitalButton.click();
+      await waitFor('orbital-rings visualizer stage', () =>
+        stage.getAttribute('data-newamp-visualizer-preset') === 'orbital-rings',
+      );
+      const orbitalCanvas = await waitFor('orbital-rings canvas', () =>
+        stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="orbital-rings"]'),
+      );
+      const orbitalRender = await waitFor('nonblank orbital-rings visualizer frame', () => sampleCanvas(orbitalCanvas), 8000);
       const auroraButton = await waitFor('Aurora visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'aurora'),
@@ -1666,6 +1678,7 @@ function uiVisualizerProbeSource(): string {
         xboxRender: {
           plasmaGrid: plasmaRender,
           neonRibbons: ribbonRender,
+          orbitalRings: orbitalRender,
         },
         auroraRender,
         stageRect: { width: stageRect.width, height: stageRect.height },

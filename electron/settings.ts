@@ -57,6 +57,7 @@ function normalizeVisualizerPreset(value: unknown): AppSettings['visualizerPrese
     'radial',
     'tunnel',
     'pulse',
+    'orbital-rings',
     'neon-waves',
     'neon-ribbons',
     'plasma-grid',

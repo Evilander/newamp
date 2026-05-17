@@ -34,13 +34,14 @@ const visualizerSaved = settings.set({ visualizerPreset: 'galaxy' });
 assert.equal(visualizerSaved.visualizerPreset, 'galaxy', 'visualizer preset should save');
 assert.equal(new SettingsStore(settingsPath).get().visualizerPreset, 'galaxy', 'visualizer preset should reload');
 assert.equal(settings.set({ visualizerPreset: 'plasma-grid' }).visualizerPreset, 'plasma-grid', 'Xbox-style Plasma Grid preset should save');
+assert.equal(settings.set({ visualizerPreset: 'orbital-rings' }).visualizerPreset, 'orbital-rings', 'Orbital Rings preset should save');
 assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'neon-waves', 'visualizer preset should reject unknown values');
 assert.equal(settings.set({ firstLaunchTutorialSeen: true }).firstLaunchTutorialSeen, true, 'first-launch tutorial completion should save');
 assert.equal(new SettingsStore(settingsPath).get().firstLaunchTutorialSeen, true, 'first-launch tutorial completion should reload');
 assert.equal(settings.set({ textScale: 1.25 }).textScale, 1.25, 'text scale should save');
 assert.equal(settings.set({ textScale: 9 }).textScale, 1.35, 'text scale should clamp oversized values');
 
-const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource, startupSource, firstLaunchSource, appVersionSource, customSkinSource, lastfmProofSource, liveServicesSource, openAiAssistSource, linerNotesSource] =
+const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource, startupSource, firstLaunchSource, settingsViewSource, appVersionSource, customSkinSource, lastfmProofSource, liveServicesSource, openAiAssistSource, linerNotesSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/settings.ts', import.meta.url), 'utf8'),
@@ -57,6 +58,7 @@ const [typesSource, settingsSource, storeSource, appSource, titleBarSource, comp
     readFile(new URL('./release-gate.mjs', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/StartupSplash.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/FirstLaunchTutorial.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/views/SettingsView.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../shared/app-version.ts', import.meta.url), 'utf8'),
     readFile(new URL('../shared/custom-skin.ts', import.meta.url), 'utf8'),
     readFile(new URL('./lastfm-live-proof.mjs', import.meta.url), 'utf8'),
@@ -114,6 +116,13 @@ assert.match(appVersionSource, new RegExp(`NEWAMP_VERSION = '${escapeRegExp(pack
 assert.match(appVersionSource, /NewAmp\/\$\{NEWAMP_VERSION\}/, 'shared user agent should use current NewAmp casing');
 assert.match(firstLaunchSource, /data-newamp-first-launch-tutorial/, 'first-launch tutorial should expose a stable UI marker');
 assert.match(firstLaunchSource, /data-newamp-openai-key-prompt/, 'first-launch tutorial should prompt for a ChatGPT API key');
+assert.match(firstLaunchSource, /data-newamp-live-services-onboarding/, 'first-launch tutorial should explain optional live services');
+assert.match(firstLaunchSource, /Private recordings still play normally/, 'first-launch tutorial should handle non-web local recordings');
+assert.match(settingsViewSource, /data-newamp-lastfm-setup-guide/, 'Settings should expose a stable Last.fm setup guide marker');
+assert.match(settingsViewSource, /Application description: Local Windows music player with optional Last\.fm scrobbling\./, 'Last.fm setup guide should include the app description field');
+assert.match(settingsViewSource, /Callback URL: leave blank\./, 'Last.fm setup guide should tell desktop users to leave callback URL blank');
+assert.match(settingsViewSource, /Complete auth/, 'Last.fm setup guide should explain the browser approval flow');
+assert.match(fullscreenSource, /'PERF'/, 'fullscreen visualizer should label balanced render mode without vague AUTO copy');
 assert.match(typesSource, /generateLinerNotes: \(input: AiLinerNotesInput\)/, 'shared API should expose native ChatGPT liner notes');
 assert.match(preloadSource, /ai:liner-notes/, 'preload should expose native ChatGPT liner notes IPC');
 assert.match(mainSource, /generateOpenAiLinerNotes/, 'main process should own ChatGPT assist calls');
