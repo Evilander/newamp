@@ -682,7 +682,7 @@ export function SettingsView(): JSX.Element {
             ChatGPT Assist
           </h2>
           <div className="text-[12px] leading-relaxed" style={{ color: 'var(--ink-2)' }}>
-            Optional local enrichments for liner notes, artist context, review prompts, and discussion seeds.
+            Optional local enrichments for real On Air liner notes, artist context, review prompts, and discussion seeds.
             The key is stored in NewAmp settings on this machine and is never needed for basic playback.
           </div>
           <div className="ai-assist-option-grid">

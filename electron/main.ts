@@ -50,12 +50,14 @@ import {
 } from './transcode.js';
 import { exportPlaylistFolder } from './playlist-export.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
+import { generateOpenAiLinerNotes } from './openai-assist.js';
 import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from './winamp-skin-import.js';
 import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
 import { suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import type {
   CustomSkin,
+  AiLinerNotesInput,
   ExportTracksFolderInput,
   AudioExportFormat,
   AlbumArtLookupInput,
@@ -1047,6 +1049,9 @@ function registerIpc(): void {
   ipcMain.handle('lyrics:custom:clear', async (_e, trackId: number) => {
     library.clearCustomLyrics(trackId);
   });
+  ipcMain.handle('ai:liner-notes', async (_e, input: AiLinerNotesInput) =>
+    generateOpenAiLinerNotes(settings.get(), input),
+  );
   ipcMain.handle('tabs:search', async (_e, query) => searchUltimateGuitarTabs(query));
   ipcMain.handle('tabs:get', async (_e, url: string) => fetchUltimateGuitarTab(url));
   ipcMain.handle('tabs:cache:list', async (_e, trackId: number) => library.getCachedGuitarTabs(trackId));

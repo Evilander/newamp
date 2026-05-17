@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { NEWAMP_VERSION } from '../shared/app-version.js';
 import type {
   AddTracksToPlaylistInput,
+  AiLinerNotesInput,
+  AiLinerNotesResult,
   AlbumArtApplyResult,
   AlbumArtLookupInput,
   AlbumArtLookupResult,
@@ -164,6 +166,8 @@ const api: NewampAPI = {
     ipcRenderer.invoke('lyrics:custom:save', input) as Promise<LocalLyricsResult | null>,
   clearCustomLyrics: (trackId: number) =>
     ipcRenderer.invoke('lyrics:custom:clear', trackId) as Promise<void>,
+  generateLinerNotes: (input: AiLinerNotesInput) =>
+    ipcRenderer.invoke('ai:liner-notes', input) as Promise<AiLinerNotesResult>,
   listPodcastSubscriptions: () =>
     ipcRenderer.invoke('podcasts:list') as Promise<PodcastSubscription[]>,
   subscribePodcastFeed: (url: string) =>

@@ -389,6 +389,40 @@ export interface CustomLyricsInput {
   syncedLyrics?: string | null;
 }
 
+export interface AiLinerNotesTrack {
+  id: number;
+  title: string;
+  artist: string;
+  album: string;
+  albumArtist: string;
+  genre: string | null;
+  year: number | null;
+  duration: number | null;
+  rating: number;
+  ratingScore: number | null;
+  bpm: number | null;
+  key: string | null;
+  playCount: number;
+  skipCount: number;
+}
+
+export interface AiLinerNotesInput {
+  track: AiLinerNotesTrack;
+  lyricHighlights: string[];
+  lyricsPreview: string | null;
+  localContext: string[];
+}
+
+export interface AiLinerNotesResult {
+  headline: string;
+  summary: string;
+  listeningNotes: string[];
+  contextCards: { label: string; value: string }[];
+  caution: string | null;
+  generatedAt: number;
+  model: string;
+}
+
 export type PlaybackMode = 'normal' | 'repeat-one' | 'repeat-all' | 'shuffle';
 
 export interface PlaybackResumeState {
@@ -701,6 +735,7 @@ export interface NewampAPI {
   getLocalLyrics: (trackId: number) => Promise<LocalLyricsResult | null>;
   saveCustomLyrics: (input: CustomLyricsInput) => Promise<LocalLyricsResult | null>;
   clearCustomLyrics: (trackId: number) => Promise<void>;
+  generateLinerNotes: (input: AiLinerNotesInput) => Promise<AiLinerNotesResult>;
   listPodcastSubscriptions: () => Promise<PodcastSubscription[]>;
   subscribePodcastFeed: (url: string) => Promise<PodcastSubscription>;
   refreshPodcastFeed: (url: string) => Promise<PodcastSubscription>;

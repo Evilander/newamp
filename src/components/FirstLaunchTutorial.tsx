@@ -69,7 +69,7 @@ export function FirstLaunchTutorial({
             <h2>ChatGPT API key</h2>
             <p>
               Optional. Playback works without it; adding a key enables local music context, artist notes,
-              metadata repair prompts, and listening companions.
+              real On Air liner-note drafts, metadata repair prompts, and listening companions.
             </p>
           </div>
           <div className="ai-assist-option-grid">

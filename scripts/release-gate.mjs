@@ -88,6 +88,7 @@ if (!skipSmokes) {
     'smoke:ui-playback',
     'smoke:audio-proof',
     'smoke:manual-listening-proof',
+    'smoke:ai-assist',
     'smoke:listening-proof-session',
     'smoke:eq',
     'smoke:security',

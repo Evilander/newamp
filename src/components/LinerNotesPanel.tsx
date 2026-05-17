@@ -1,6 +1,7 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { LrcLine } from '../api/lrclib';
-import type { Track } from '@shared/types';
+import type { AiLinerNotesResult, Track } from '@shared/types';
+import { api } from '../lib/api';
 import { formatTime } from '../lib/format';
 
 const FIELD_NOTE_BLURBS: string[] = [
@@ -60,13 +61,62 @@ function pickLyricHotLines(lines: LrcLine[] | null, plain: string | null | undef
 interface LinerNotesPanelProps {
   track: Track;
   lyrics: { lines: LrcLine[] | null; plain?: string | null };
+  aiAssistReady: boolean;
+  aiModel: string | null;
 }
 
-export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.Element {
+export function LinerNotesPanel({
+  track,
+  lyrics,
+  aiAssistReady,
+  aiModel,
+}: LinerNotesPanelProps): JSX.Element {
+  const [aiNotes, setAiNotes] = useState<AiLinerNotesResult | null>(null);
+  const [aiStatus, setAiStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
+  const [aiError, setAiError] = useState<string | null>(null);
   const blurb = useMemo(() => fieldNoteBlurb(`${track.id}:${track.artist}`), [track.id, track.artist]);
   const hotLines = useMemo(() => pickLyricHotLines(lyrics.lines, lyrics.plain), [lyrics.lines, lyrics.plain]);
   const score = Math.round(Math.max(0, Math.min(100, track.ratingScore ?? track.rating * 20)));
   const scoreLabel = `${score}/100`;
+
+  useEffect(() => {
+    setAiNotes(null);
+    setAiStatus('idle');
+    setAiError(null);
+  }, [track.id]);
+
+  async function draftAiNotes(): Promise<void> {
+    setAiStatus('loading');
+    setAiError(null);
+    try {
+      const result = await api.generateLinerNotes({
+        track: {
+          id: track.id,
+          title: track.title,
+          artist: track.artist,
+          album: track.album,
+          albumArtist: track.albumArtist,
+          genre: track.genre,
+          year: track.year,
+          duration: track.duration,
+          rating: track.rating,
+          ratingScore: track.ratingScore,
+          bpm: track.bpm,
+          key: track.key,
+          playCount: track.playCount,
+          skipCount: track.skipCount,
+        },
+        lyricHighlights: hotLines,
+        lyricsPreview: lyricsPreview(lyrics.lines, lyrics.plain),
+        localContext: localTrackContext(track, scoreLabel),
+      });
+      setAiNotes(result);
+      setAiStatus('ok');
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'ChatGPT assist failed.');
+      setAiStatus('error');
+    }
+  }
 
   return (
     <div
@@ -75,8 +125,52 @@ export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.El
     >
       <header className="liner-notes-header">
         <span className="liner-notes-eyebrow">On Air / Field Notes</span>
+        <button
+          type="button"
+          className={`pxbtn liner-notes-ai-button ${aiStatus === 'ok' ? 'is-active' : ''}`}
+          onClick={() => void draftAiNotes()}
+          disabled={!aiAssistReady || aiStatus === 'loading'}
+          title={aiAssistReady ? `Draft with ${aiModel || 'ChatGPT'}` : 'Add a ChatGPT API key in Settings'}
+        >
+          {aiStatus === 'loading' ? 'Drafting' : 'AI Notes'}
+        </button>
         <span className="liner-notes-score" data-newamp-liner-score>{scoreLabel}</span>
       </header>
+
+      {aiNotes ? (
+        <section className="liner-notes-ai" data-newamp-ai-liner-notes>
+          <div className="liner-notes-ai-top">
+            <span>ChatGPT Assist</span>
+            <em>{aiNotes.model}</em>
+          </div>
+          <strong>{aiNotes.headline}</strong>
+          <p>{aiNotes.summary}</p>
+          {aiNotes.listeningNotes.length ? (
+            <ul>
+              {aiNotes.listeningNotes.map((note) => (
+                <li key={note}>{note}</li>
+              ))}
+            </ul>
+          ) : null}
+          {aiNotes.contextCards.length ? (
+            <div className="liner-notes-ai-cards">
+              {aiNotes.contextCards.map((card) => (
+                <span key={`${card.label}:${card.value}`}>
+                  <em>{card.label}</em>
+                  <b>{card.value}</b>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {aiNotes.caution ? <small>{aiNotes.caution}</small> : null}
+        </section>
+      ) : null}
+
+      {aiError ? (
+        <div className="liner-notes-ai-error" data-newamp-ai-liner-notes-error>
+          {aiError}
+        </div>
+      ) : null}
 
       <section className="liner-notes-blurb">
         <span className="liner-notes-quote-mark">&ldquo;</span>
@@ -138,6 +232,32 @@ export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.El
       </footer>
     </div>
   );
+}
+
+function lyricsPreview(lines: LrcLine[] | null, plain: string | null | undefined): string | null {
+  if (lines?.length) {
+    return lines
+      .map((line) => line.text.trim())
+      .filter(Boolean)
+      .slice(0, 18)
+      .join('\n') || null;
+  }
+  return plain?.trim().slice(0, 1200) || null;
+}
+
+function localTrackContext(track: Track, scoreLabel: string): string[] {
+  return [
+    `${track.artist || 'Unknown Artist'} - ${track.title || 'Unknown Title'}`,
+    track.album ? `Album: ${track.album}` : '',
+    track.albumArtist && track.albumArtist !== track.artist ? `Album artist: ${track.albumArtist}` : '',
+    track.genre ? `Genre tag: ${track.genre}` : '',
+    track.year ? `Year tag: ${track.year}` : '',
+    track.duration ? `Length: ${formatTime(track.duration)}` : '',
+    `NewAmp rating: ${scoreLabel}`,
+    track.bpm ? `BPM: ${track.bpm.toFixed(1)}` : '',
+    track.key ? `Key: ${track.key}` : '',
+    `${track.playCount} plays / ${track.skipCount} skips`,
+  ].filter(Boolean);
 }
 
 function Vital({ label, value }: { label: string; value: string }): JSX.Element {

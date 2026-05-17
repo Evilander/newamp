@@ -555,6 +555,8 @@ export function NowPlayingView(): JSX.Element {
                   <LinerNotesPanel
                     track={current}
                     lyrics={{ lines: lyrics.lines, plain: lyrics.plain }}
+                    aiAssistReady={!!settings?.openaiApiKey}
+                    aiModel={settings?.openaiModel ?? null}
                   />
                 ) : sideTab === 'album' ? (
                   <div className="flex min-h-0 flex-col overflow-y-auto">

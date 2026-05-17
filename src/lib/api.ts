@@ -27,7 +27,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   lastfmUsername: null,
   lastfmAuthToken: null,
   openaiApiKey: null,
-  openaiModel: 'gpt-4.1-mini',
+  openaiModel: 'gpt-5.4-mini',
   firstLaunchTutorialSeen: false,
   textScale: 1,
   crossfadeMs: 0,
@@ -211,6 +211,9 @@ const stub: NewampAPI = {
     };
   },
   clearCustomLyrics: async () => undefined,
+  generateLinerNotes: async () => {
+    throw new Error('ChatGPT assist is only available in the Electron app.');
+  },
   listPodcastSubscriptions: async () => [],
   subscribePodcastFeed: async () => {
     throw new Error('Podcast subscriptions are only available in the Electron app.');
