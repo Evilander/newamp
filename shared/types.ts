@@ -501,6 +501,7 @@ export interface AppSettings {
   lastfmAuthToken: string | null;
   openaiApiKey: string | null;
   openaiModel: string;
+  firstLaunchTutorialSeen: boolean;
   crossfadeMs: number;
   replayGain: 'off' | 'track' | 'album';
   limiterEnabled: boolean;

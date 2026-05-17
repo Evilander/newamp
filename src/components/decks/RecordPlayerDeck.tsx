@@ -8,7 +8,7 @@ import type { DeckProps } from './types';
 import { Visualizer } from '../Visualizer';
 import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
-import { HeideckerLogo } from '../HeideckerLogo';
+import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 
 export function RecordPlayerDeck(props: DeckProps): JSX.Element {
@@ -26,7 +26,7 @@ export function RecordPlayerDeck(props: DeckProps): JSX.Element {
   return (
     <div className={`deck-record-player ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
       <header className="deck-rp-titlebar titlebar-drag">
-        <HeideckerLogo size={22} withGlow={false} />
+        <BrandLogo size={22} withGlow={false} />
         <span className="deck-rp-brand">NEWAMP · Vinyl Bench</span>
         <div className="deck-rp-window titlebar-nodrag">
           <DeckSkinPicker current="record-player" onPick={props.onPickSkin} compact />

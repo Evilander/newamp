@@ -27,7 +27,6 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 - **Four UI shells** — Retro (Bloomberg-density Winamp 2 homage), Modern (rounded, content-forward), Liquid Glass (translucent stacked panes with backdrop-filter), Concourse (operator-console split-cells)
 - **Four deck (compact-window) skins** — Classic Bento, Record Player (spinning vinyl, swinging tonearm), Jukebox (Wurlitzer arch, bubble tubes), Cassette Deck (twin spinning reels). Each declares its own native window size — no letterbox
 - **13 color skins** — Classic, Ops, Midnight, Neon, Amber, Oxide, Steel, Walnut, Jukebox, Terminal, Ice, Miami, Mono. Plus full Winamp 2.x `.wsz` skin import
-- **Themed logo** — A real per-pixel canvas tint of the brand badge follows whichever skin you pick. Switch from Mono to Neon and the medallion re-tints in real-time
 - **0–100 decimal track scoring** — Drag, scroll-wheel, keyboard-nudge, or double-click to type `88.3`. Stars stay in sync for legacy sorts and smart rules
 - **0–200% volume** with a red-zone past unity — VLC-style amp boost, full `0 dB / +6 dB` tick labels, runs after the master limiter so it amplifies without clipping
 - **Magazine-style Home** — greeting hero with blurred album backdrop, Today's Pick (high-rated track you haven't played in 6+ weeks, with a reason chip), Your Highest Rated rail, NewAmp News editorial card, Listening Stats This Week, plus the classic Harmonic / Taste / Loved / Heavy Rotation / Fresh Imports rails
@@ -167,7 +166,7 @@ Pull requests welcome. Before opening one:
 
 ## License
 
-[MIT](LICENSE). The "NewAmp" name and the New Heidecker badge artwork are project-specific; everything else is yours to fork.
+[MIT](LICENSE). The "NewAmp" name and logo artwork are project-specific; everything else is yours to fork.
 
 ## Acknowledgements
 

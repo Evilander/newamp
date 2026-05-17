@@ -16,10 +16,17 @@ import { WinampClassicDeck, WinampIndustrialDeck } from './decks/WinampClassicDe
 import { DECK_SKINS, findDeck, type DeckProps, type DeckSkin } from './decks/types';
 
 const DECK_SKIN_KEY = 'newamp:deck:skin';
+const DECK_SKIN_SCHEMA_KEY = 'newamp:deck:skinSchema';
+const DECK_SKIN_SCHEMA = '2';
 const VIZ_EXPANDED_KEY = 'newamp:deck:vizExpanded';
 
 function loadInitialSkin(): DeckSkin {
   if (typeof window === 'undefined') return 'bento';
+  if (window.localStorage.getItem(DECK_SKIN_SCHEMA_KEY) !== DECK_SKIN_SCHEMA) {
+    window.localStorage.setItem(DECK_SKIN_KEY, 'bento');
+    window.localStorage.setItem(DECK_SKIN_SCHEMA_KEY, DECK_SKIN_SCHEMA);
+    return 'bento';
+  }
   const raw = window.localStorage.getItem(DECK_SKIN_KEY);
   if (raw && DECK_SKINS.some((skin) => skin.id === raw)) return raw as DeckSkin;
   return 'bento';
@@ -60,12 +67,13 @@ export function CompactPlayer(): JSX.Element {
   // skin changes. setMinimumSize is dropped so the user is never letterboxed.
   useEffect(() => {
     const deck = findDeck(deckSkin);
-    void winctl.setCompactSize(deck.size);
+    void winctl.setCompact(true, deck.size);
   }, [deckSkin]);
 
   function handlePickSkin(skin: DeckSkin): void {
     setDeckSkin(skin);
     window.localStorage.setItem(DECK_SKIN_KEY, skin);
+    window.localStorage.setItem(DECK_SKIN_SCHEMA_KEY, DECK_SKIN_SCHEMA);
   }
 
   function handleToggleVizExpanded(): void {

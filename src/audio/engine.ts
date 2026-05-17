@@ -19,7 +19,7 @@ export interface EngineState {
 export type EngineListener = (e: EngineState) => void;
 
 const EQ_FREQS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
-const DEFAULT_FFT_SIZE = 2048;
+const DEFAULT_FFT_SIZE = 4096;
 const DEFAULT_FREQUENCY_BIN_COUNT = DEFAULT_FFT_SIZE / 2;
 
 interface Deck {
@@ -134,7 +134,7 @@ export class AudioEngine {
 
     const analyser = ctx.createAnalyser();
     analyser.fftSize = DEFAULT_FFT_SIZE;
-    analyser.smoothingTimeConstant = 0.78;
+    analyser.smoothingTimeConstant = 0.64;
 
     const decks = [this.createDeck(0, ctx), this.createDeck(1, ctx)] as [Deck, Deck];
     for (const deck of decks) {

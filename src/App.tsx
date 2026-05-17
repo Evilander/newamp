@@ -23,6 +23,7 @@ import { CompactPlayer } from './components/CompactPlayer';
 import { QuickPlayPalette } from './components/QuickPlayPalette';
 import { FirstRunHints } from './components/FirstRunHints';
 import { StartupSplash } from './components/StartupSplash';
+import { FirstLaunchTutorial } from './components/FirstLaunchTutorial';
 import { usePlayerStore } from './store/usePlayerStore';
 import { api, winctl } from './lib/api';
 import { syncMediaSession } from './lib/mediaSession';
@@ -41,9 +42,12 @@ export default function App(): JSX.Element {
   const currentTime = usePlayerStore((s) => s.currentTime);
   const duration = usePlayerStore((s) => s.duration);
   const playbackRate = usePlayerStore((s) => s.playbackRate);
+  const settings = usePlayerStore((s) => s.settings);
+  const setView = usePlayerStore((s) => s.setView);
   const [dropActive, setDropActive] = useState(false);
   const [dropMessage, setDropMessage] = useState<string | null>(null);
   const [showSplash, setShowSplash] = useState(true);
+  const [tutorialDismissed, setTutorialDismissed] = useState(false);
 
   async function handleOpenFiles(paths: string[]) {
     if (!paths.length) return null;
@@ -117,9 +121,18 @@ export default function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    const handle = window.setTimeout(() => setShowSplash(false), 1450);
+    const handle = window.setTimeout(() => setShowSplash(false), 2600);
     return () => window.clearTimeout(handle);
   }, []);
+
+  async function finishFirstLaunchTutorial(patch: { openaiApiKey?: string | null; openaiModel?: string } = {}): Promise<void> {
+    const updated = await api.setSettings({
+      firstLaunchTutorialSeen: true,
+      ...patch,
+    });
+    usePlayerStore.setState({ settings: updated });
+    setTutorialDismissed(true);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -265,6 +278,16 @@ export default function App(): JSX.Element {
       </div>
       {fullscreen && <FullscreenVisualizer />}
       {showSplash && <StartupSplash />}
+      {settings && !settings.firstLaunchTutorialSeen && !tutorialDismissed && (
+        <FirstLaunchTutorial
+          settings={settings}
+          onFinish={finishFirstLaunchTutorial}
+          onOpenSettings={() => {
+            setView('settings');
+            void finishFirstLaunchTutorial();
+          }}
+        />
+      )}
     </>
   );
 }

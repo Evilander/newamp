@@ -7,7 +7,7 @@ import type { DeckProps } from './types';
 import { Visualizer } from '../Visualizer';
 import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
-import { HeideckerLogo } from '../HeideckerLogo';
+import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 
 export function CassetteDeck(props: DeckProps): JSX.Element {
@@ -26,7 +26,7 @@ export function CassetteDeck(props: DeckProps): JSX.Element {
   return (
     <div className={`deck-cassette ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
       <header className="deck-cs-titlebar titlebar-drag">
-        <HeideckerLogo size={20} withGlow={false} />
+        <BrandLogo size={20} withGlow={false} />
         <span className="deck-cs-brand">NEWAMP · TYPE-IV METAL</span>
         <div className="deck-cs-window titlebar-nodrag">
           <DeckSkinPicker current="cassette" onPick={props.onPickSkin} compact />

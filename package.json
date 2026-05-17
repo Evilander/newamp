@@ -1,7 +1,7 @@
 {
   "name": "newamp",
   "version": "1.1.0",
-  "description": "A Winamp-inspired modern desktop music player for Windows. Your local library, your rules, no streaming required. Four UI shells, four deck skins, themed Heidecker badge, 0–200% volume with red-zone boost, 0–100 decimal track scoring, and a magazine-style home.",
+  "description": "A Winamp-inspired modern desktop music player for Windows. Your local library, your rules, no streaming required. Four UI shells, shape-changing deck skins, 0–200% volume with red-zone boost, 0–100 decimal track scoring, and a magazine-style home.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
   "author": "evilander",
@@ -112,12 +112,11 @@
     "smoke:local-lyrics": "npm run build:electron && node scripts/local-lyrics-smoke.mjs",
     "smoke:ui-local-lyrics": "npm run build && node scripts/ui-local-lyrics-smoke.mjs",
     "start": "npm run build && electron .",
-    "generate:icon": "node scripts/generate-icon.mjs",
     "electron:install": "node scripts/install-electron.mjs",
     "postinstall": "node scripts/install-electron.mjs",
-    "package": "node scripts/generate-icon.mjs && node scripts/package.mjs",
-    "package:installer": "node scripts/generate-icon.mjs && node scripts/package.mjs --installer",
-    "package:portable": "node scripts/generate-icon.mjs && node scripts/package.mjs --portable",
+    "package": "node scripts/package.mjs",
+    "package:installer": "node scripts/package.mjs --installer",
+    "package:portable": "node scripts/package.mjs --portable",
     "release:sign": "node scripts/sign-artifacts.mjs",
     "release:checksums": "node scripts/release-checksums.mjs",
     "release:bundle": "node scripts/release-bundle.mjs",
@@ -171,6 +170,9 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "build/icon.png",
+      "build/icon.ico",
+      "build/logo.png",
       "node_modules/ffmpeg-static/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm",
       "package.json"
@@ -179,6 +181,15 @@
       {
         "from": "dist",
         "to": "dist"
+      },
+      {
+        "from": "build",
+        "to": "build",
+        "filter": [
+          "icon.ico",
+          "icon.png",
+          "logo.png"
+        ]
       }
     ],
     "asarUnpack": [

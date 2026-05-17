@@ -21,6 +21,7 @@ const DEFAULTS: AppSettings = {
   lastfmAuthToken: null,
   openaiApiKey: null,
   openaiModel: 'gpt-4.1-mini',
+  firstLaunchTutorialSeen: false,
   crossfadeMs: 0,
   replayGain: 'off',
   limiterEnabled: true,
@@ -100,6 +101,7 @@ export class SettingsStore {
           preampDb: normalizePreampDb(parsed.preampDb),
           openaiApiKey: normalizeOptionalSecret(parsed.openaiApiKey),
           openaiModel: normalizeOpenAiModel(parsed.openaiModel),
+          firstLaunchTutorialSeen: parsed.firstLaunchTutorialSeen === true,
           compactMode: parsed.compactMode === true,
           alwaysOnTop: parsed.alwaysOnTop === true,
           visualizerPreset: normalizeVisualizerPreset(parsed.visualizerPreset),
@@ -149,6 +151,9 @@ export class SettingsStore {
       openaiModel: patch.openaiModel === undefined
         ? this.state.openaiModel
         : normalizeOpenAiModel(patch.openaiModel),
+      firstLaunchTutorialSeen: patch.firstLaunchTutorialSeen === undefined
+        ? this.state.firstLaunchTutorialSeen
+        : patch.firstLaunchTutorialSeen === true,
       compactMode: patch.compactMode === undefined
         ? this.state.compactMode
         : patch.compactMode === true,

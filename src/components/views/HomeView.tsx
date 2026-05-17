@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { LibraryHealth, ListeningHistoryItem, ListeningInsights, SavedPlaylist, SmartPlaylistRule, SmartPlaylistSuggestion, Track } from '@shared/types';
 import { api } from '../../lib/api';
+import { hiddenReviewLine } from '../../lib/easterEggs';
 import { formatDuration, formatNumber, formatTime } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
-import { HeideckerLogo } from '../HeideckerLogo';
+import { BrandLogo } from '../BrandLogo';
 
 interface HomeData {
   stats: { tracks: number; albums: number; artists: number; duration: number };
@@ -789,7 +790,7 @@ function HomeHero({
       )}
       <div className="home-hero-content">
         <div className="home-hero-meta">
-          <HeideckerLogo size={38} withGlow={false} />
+          <BrandLogo size={38} withGlow={false} />
           <div className="home-hero-meta-text">
             <span className="home-hero-greet">{greeting}</span>
             <span className="home-hero-sub">
@@ -862,7 +863,7 @@ function HomeHero({
               </div>
               <span className="home-hero-pick-title">{topRatedSeed.title}</span>
               <span className="home-hero-pick-artist">{topRatedSeed.artist}</span>
-              <PopcornRating track={topRatedSeed} compact />
+              <ScoreBadge track={topRatedSeed} compact />
               <span className="home-hero-pick-reason">Why this pick? {todayPick?.reason}</span>
             </button>
           ) : null}
@@ -917,12 +918,12 @@ function RatedHighlightRail({
               >
                 <div className="home-rated-card-art">
                   {art ? <img src={art} alt={track.album ?? ''} draggable={false} loading="lazy" decoding="async" /> : <span>♪</span>}
-                  <span className={`home-rated-card-score ${scoreStrong ? 'is-strong' : ''}`}>{popcornBags(track)}/5</span>
+          <span className={`home-rated-card-score ${scoreStrong ? 'is-strong' : ''}`}>{scoreLabel(track)}</span>
                 </div>
                 <div className="home-rated-card-meta">
                   <span className="home-rated-card-title" title={track.title}>{track.title}</span>
                   <span className="home-rated-card-artist" title={track.artist}>{track.artist}</span>
-                  <PopcornRating track={track} compact />
+                  <ScoreBadge track={track} compact />
                 </div>
               </button>
             );
@@ -944,8 +945,8 @@ function NewsCard({ fresh, loved, top }: { fresh: Track[]; loved: Track[]; top: 
     ? `${featured.artist} — “${featured.title}”`
     : 'NewAmp · field report from the desk';
   const blurb = featured
-    ? `New Heidecker writes: a strong entry from ${featured.artist}. ${featured.year ? `Vintage ${featured.year}. ` : ''}${featured.bpm ? `Sits at ${featured.bpm.toFixed(0)} BPM, ` : ''}${featured.genre ? `${featured.genre} territory, ` : ''}${popcornBags(featured)} bags of popcorn.`
-    : 'When the library has tracks, this column comes alive with New Heidecker reviews and five-bag popcorn ratings.';
+    ? `${featured.artist} is high in your library signals. ${featured.year ? `Vintage ${featured.year}. ` : ''}${featured.bpm ? `Sits at ${featured.bpm.toFixed(0)} BPM. ` : ''}${featured.genre ? `${featured.genre} territory. ` : ''}${scoreLabel(featured)} library score.`
+    : 'When the library has tracks, this column becomes a compact field report on fresh imports and high-signal picks.';
   return (
     <section className="bevel-out home-news p-3" data-cell="NEWS-03" style={{ background: 'var(--panel)' }}>
       <div className="mb-2 flex items-center gap-2">
@@ -968,29 +969,35 @@ function NewsCard({ fresh, loved, top }: { fresh: Track[]; loved: Track[]; top: 
   );
 }
 
-function PopcornRating({ track, compact = false }: { track: Track; compact?: boolean }): JSX.Element {
-  const bags = popcornBags(track);
+function ScoreBadge({ track, compact = false }: { track: Track; compact?: boolean }): JSX.Element {
   const score = trackScorePercent(track);
+  const [easterEggOpen, setEasterEggOpen] = useState(false);
   return (
-    <span
-      className={`popcorn-rating ${compact ? 'is-compact' : ''}`}
-      data-newamp-popcorn-rating={bags}
-      title={`New Heidecker: ${bags} of 5 bags of popcorn (${score.toFixed(1)} score)`}
-    >
-      <span className="popcorn-rating-bags" aria-hidden="true">
-        {[1, 2, 3, 4, 5].map((bag) => (
-          <span key={bag} className={`popcorn-bag ${bag <= bags ? 'is-filled' : ''}`}>
-            {'\uD83C\uDF7F'}
-          </span>
-        ))}
+    <span className="score-badge-wrap">
+      <span
+        className={`score-badge ${compact ? 'is-compact' : ''}`}
+        data-newamp-score-badge={Math.round(score)}
+        title={`Newamp score: ${score.toFixed(1)}`}
+        onClick={(event) => {
+          if (!event.altKey) return;
+          event.preventDefault();
+          event.stopPropagation();
+          setEasterEggOpen((open) => !open);
+        }}
+      >
+        <span className="score-badge-label">{scoreLabel(track)}</span>
       </span>
-      <span className="popcorn-rating-label">{bags}/5 bags</span>
+      {easterEggOpen ? (
+        <span className="score-badge-egg" data-newamp-hidden-review>
+          {hiddenReviewLine()}
+        </span>
+      ) : null}
     </span>
   );
 }
 
-function popcornBags(track: Track): number {
-  return Math.max(0, Math.min(5, Math.round(trackScorePercent(track) / 20)));
+function scoreLabel(track: Track): string {
+  return `${Math.round(trackScorePercent(track))}/100`;
 }
 
 function trackScorePercent(track: Track): number {

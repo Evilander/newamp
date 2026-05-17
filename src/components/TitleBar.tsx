@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { api, winctl } from '../lib/api';
-import { HeideckerLogo } from './HeideckerLogo';
+import { BrandLogo } from './BrandLogo';
 
 export function TitleBar(): JSX.Element {
   const [maximized, setMaximized] = useState(false);
@@ -19,7 +19,7 @@ export function TitleBar(): JSX.Element {
       style={{ background: 'var(--titlebar)' }}
     >
       <div className="titlebar-nodrag flex items-center gap-2">
-        <HeideckerLogo size={28} title="NewAmp" />
+        <BrandLogo size={28} title="NewAmp" />
         <span
           className="lcd-text font-bold tracking-[0.3em]"
           style={{ fontFamily: 'var(--font-display)', fontSize: 11 }}

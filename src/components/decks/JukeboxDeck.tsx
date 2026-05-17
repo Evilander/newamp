@@ -6,7 +6,7 @@ import type { DeckProps } from './types';
 import { Visualizer } from '../Visualizer';
 import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
-import { HeideckerLogo } from '../HeideckerLogo';
+import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 
 export function JukeboxDeck(props: DeckProps): JSX.Element {
@@ -37,7 +37,7 @@ export function JukeboxDeck(props: DeckProps): JSX.Element {
       </div>
 
       <header className="deck-jb-titlebar titlebar-drag">
-        <HeideckerLogo size={20} withGlow={false} />
+        <BrandLogo size={20} withGlow={false} />
         <div className="deck-jb-window titlebar-nodrag">
           <DeckSkinPicker current="jukebox" onPick={props.onPickSkin} compact />
           <button

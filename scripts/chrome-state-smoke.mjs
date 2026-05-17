@@ -15,6 +15,7 @@ const settings = new SettingsStore(settingsPath);
 assert.equal(settings.get().compactMode, false, 'compact deck should default to full library mode');
 assert.equal(settings.get().alwaysOnTop, false, 'always-on-top should default to off');
 assert.equal(settings.get().visualizerPreset, 'neon-waves', 'visualizer preset should default to Xbox-style Neon Waves');
+assert.equal(settings.get().firstLaunchTutorialSeen, false, 'first-launch tutorial should show by default');
 
 const compactSaved = settings.set({ compactMode: true });
 assert.equal(compactSaved.compactMode, true, 'compact deck preference should save');
@@ -33,8 +34,10 @@ assert.equal(visualizerSaved.visualizerPreset, 'galaxy', 'visualizer preset shou
 assert.equal(new SettingsStore(settingsPath).get().visualizerPreset, 'galaxy', 'visualizer preset should reload');
 assert.equal(settings.set({ visualizerPreset: 'plasma-grid' }).visualizerPreset, 'plasma-grid', 'Xbox-style Plasma Grid preset should save');
 assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'neon-waves', 'visualizer preset should reject unknown values');
+assert.equal(settings.set({ firstLaunchTutorialSeen: true }).firstLaunchTutorialSeen, true, 'first-launch tutorial completion should save');
+assert.equal(new SettingsStore(settingsPath).get().firstLaunchTutorialSeen, true, 'first-launch tutorial completion should reload');
 
-const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource] =
+const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource, startupSource, firstLaunchSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/settings.ts', import.meta.url), 'utf8'),
@@ -49,12 +52,15 @@ const [typesSource, settingsSource, storeSource, appSource, titleBarSource, comp
     readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('./release-gate.mjs', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/StartupSplash.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/FirstLaunchTutorial.tsx', import.meta.url), 'utf8'),
   ]);
 
 assert.match(typesSource, /compactMode: boolean/, 'AppSettings should include compact deck persistence');
 assert.match(typesSource, /alwaysOnTop: boolean/, 'AppSettings should include always-on-top persistence');
 assert.match(typesSource, /visualizerPreset: VisualizerPreset/, 'AppSettings should include visualizer preset persistence');
 assert.match(typesSource, /openaiApiKey: string \| null/, 'AppSettings should include optional ChatGPT assist key persistence');
+assert.match(typesSource, /firstLaunchTutorialSeen: boolean/, 'AppSettings should persist first-launch tutorial state');
 assert.match(settingsSource, /compactMode: false/, 'SettingsStore should default compact mode to false');
 assert.match(settingsSource, /alwaysOnTop: false/, 'SettingsStore should default always-on-top to false');
 assert.match(settingsSource, /parsed\.compactMode === true/, 'SettingsStore should normalize loaded compact mode');
@@ -63,6 +69,8 @@ assert.match(settingsSource, /patch\.compactMode === true/, 'SettingsStore shoul
 assert.match(settingsSource, /patch\.alwaysOnTop === true/, 'SettingsStore should normalize patched always-on-top');
 assert.match(settingsSource, /normalizeVisualizerPreset/, 'SettingsStore should normalize visualizer presets');
 assert.match(settingsSource, /normalizeOpenAiModel/, 'SettingsStore should normalize ChatGPT assist model names');
+assert.match(settingsSource, /firstLaunchTutorialSeen: false/, 'SettingsStore should default first-launch tutorial to visible');
+assert.match(settingsSource, /patch\.firstLaunchTutorialSeen === true/, 'SettingsStore should normalize patched first-launch tutorial state');
 assert.match(storeSource, /compactMode: settings\.compactMode/, 'player store should initialize compact mode from settings');
 assert.match(storeSource, /alwaysOnTop: settings\.alwaysOnTop/, 'player store should initialize always-on-top from settings');
 assert.match(storeSource, /setSettings\(\{ compactMode: on \}\)/, 'player store should persist compact mode changes');
@@ -73,6 +81,11 @@ assert.match(appSource, /winctl\.setCompact\(compact\)/, 'renderer should sync c
 assert.match(appSource, /winctl\.setAlwaysOnTop\(compact \|\| alwaysOnTop\)/, 'renderer should sync pinned/native topmost state');
 assert.match(appSource, /\{fullscreen && <FullscreenVisualizer \/>\}/, 'fullscreen visualizer should render outside app chrome');
 assert.match(appSource, /StartupSplash/, 'app should show the Newamp logo on launch');
+assert.match(appSource, /FirstLaunchTutorial/, 'app should show first-launch tutorial');
+assert.match(appSource, /setShowSplash\(false\), 2600/, 'startup logo animation should remain visible long enough to see');
+assert.match(startupSource, /BrandLogo size=\{220\}/, 'startup splash should use the large current Newamp logo');
+assert.match(firstLaunchSource, /data-newamp-first-launch-tutorial/, 'first-launch tutorial should expose a stable UI marker');
+assert.match(firstLaunchSource, /data-newamp-openai-key-prompt/, 'first-launch tutorial should prompt for a ChatGPT API key');
 assert.match(storeSource, /fullscreenViz: on \? false : get\(\)\.fullscreenViz/, 'entering compact deck should clear fullscreen visualizer state');
 assert.match(mainSource, /setResizable\(false\)/, 'compact deck window should lock user resizing');
 assert.match(mainSource, /setResizable\(true\)/, 'full library window should restore resizing');
@@ -83,6 +96,9 @@ assert.match(viteEnvSource, /setAlwaysOnTop/, 'window control types should inclu
 assert.match(titleBarSource, /PIN/, 'title bar should expose a pin button');
 assert.match(titleBarSource, /setAlwaysOnTop\(!alwaysOnTop\)/, 'title bar pin should toggle persisted topmost state');
 assert.match(compactSource, /onSetAlwaysOnTop: setAlwaysOnTop/, 'compact deck should expose the same pin toggle');
+assert.match(compactSource, /setCompact\(true, deck\.size\)/, 'compact deck should force the native window to the selected skin size');
+assert.match(mainSource, /resolveTrayIconImage/, 'tray should use the packaged Newamp logo/icon asset');
+assert.doesNotMatch(packageSource, /generate-icon\.mjs/, 'package scripts must not regenerate and overwrite custom icons');
 assert.match(titleBarSource, /api\.appVersion/, 'title bar should display the real app version');
 assert.doesNotMatch(titleBarSource, /v0\.1/, 'title bar should not show stale pre-release version text');
 

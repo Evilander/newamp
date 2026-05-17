@@ -174,10 +174,8 @@ assert.match(mainSource, /album-art:lookup/, 'main process should register album
 assert.match(mainSource, /album-art:apply/, 'main process should register album art apply IPC');
 assert.match(preloadSource, /lookupAlbumArt/, 'preload should expose album art lookup');
 assert.match(apiSource, /applyAlbumArt/, 'renderer API should expose album art apply');
-assert.match(albumsViewSource, /FIND COVER/, 'Albums view should expose cover lookup');
-assert.match(albumsViewSource, /APPLY COVER/, 'Albums view should require review before applying cover art');
+assert.doesNotMatch(albumsViewSource, /FIND COVER|APPLY COVER|REVIEW COVER/, 'Albums view should not expose cover review buttons in album chrome');
 assert.match(albumsViewSource, /MISSING ART/, 'Albums view should expose a missing-art review lane');
-assert.match(albumsViewSource, /REVIEW COVER/, 'Albums view should jump through albums missing cover art');
 assert.match(albumsViewSource, /showMissingArtOnly/, 'Albums view should filter to albums missing cover art');
 assert.match(albumsViewSource, /data-newamp-albums-scroll/, 'Albums view should own a restorable scroll container');
 assert.match(albumsViewSource, /restoreAlbumScrollTop/, 'Albums view should return to prior scroll position after closing an album');

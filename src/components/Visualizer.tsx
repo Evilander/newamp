@@ -30,6 +30,7 @@ interface Props {
 export function Visualizer({ mode, width, height, className, artUrl }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engine = usePlayerStore((s) => s.engine);
+  const isFullscreen = width == null && height == null && mode !== 'mini';
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -44,7 +45,7 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
       let lastW = 0;
       let lastH = 0;
 
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, isFullscreen ? 1.25 : 2);
 
       function ensureSize() {
         const node = canvasRef.current;
@@ -125,7 +126,7 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
       };
     }
 
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, isFullscreen ? 1.25 : 2);
     let raf = 0;
     let ctx: CanvasRenderingContext2D | null = null;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
@@ -136,14 +137,18 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
       if (!node) return;
       const w = node.clientWidth || node.width || 100;
       const h = node.clientHeight || node.height || 40;
-      const targetW = Math.max(2, Math.floor(w * dpr));
-      const targetH = Math.max(2, Math.floor(h * dpr));
+      const maxPixels = isFullscreen ? 3_700_000 : 2_000_000;
+      const scaledW = Math.max(2, Math.floor(w * dpr));
+      const scaledH = Math.max(2, Math.floor(h * dpr));
+      const scale = Math.min(1, Math.sqrt(maxPixels / Math.max(1, scaledW * scaledH)));
+      const targetW = Math.max(2, Math.floor(scaledW * scale));
+      const targetH = Math.max(2, Math.floor(scaledH * scale));
       if (node.width !== targetW || node.height !== targetH) {
         node.width = targetW;
         node.height = targetH;
       }
-      ctx = node.getContext('2d');
-      if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx = node.getContext('2d', { alpha: false });
+      if (ctx) ctx.setTransform(targetW / Math.max(1, w), 0, 0, targetH / Math.max(1, h), 0, 0);
     }
 
     function getCssVar(name: string): string {
@@ -277,22 +282,41 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
 
         void treble; // reserved for sparkle layer later
       } else if (mode === 'aurora') {
-        // Smooth gradient bands sliding horizontally, modulated by mid energy.
-        ctx.fillStyle = 'rgba(0,0,0,0.22)';
+        ctx.fillStyle = 'rgba(0,0,0,0.16)';
         ctx.fillRect(0, 0, w, h);
-        const bands = 6;
-        const t = Date.now() / 1600;
+        const bass = avg(freq, 0, 22) / 255;
+        const mid = avg(freq, 22, 110) / 255;
+        const treble = avg(freq, 110, 240) / 255;
+        const bands = 9;
+        const t = Date.now() / 900;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
         for (let b = 0; b < bands; b++) {
-          const energy = avg(freq, b * 8, b * 8 + 12) / 255;
-          const yc = h * (0.2 + 0.12 * b) + Math.sin(t + b) * 18;
-          const grd = ctx.createLinearGradient(0, yc - 40, 0, yc + 40);
-          const hue = (b * 50 + Date.now() / 50) % 360;
-          grd.addColorStop(0, `hsla(${hue}, 90%, 60%, 0)`);
-          grd.addColorStop(0.5, `hsla(${hue}, 95%, 65%, ${0.18 + energy * 0.5})`);
-          grd.addColorStop(1, `hsla(${hue}, 90%, 60%, 0)`);
-          ctx.fillStyle = grd;
-          ctx.fillRect(0, yc - 40, w, 80);
+          const energy = avg(freq, b * 10, b * 10 + 18) / 255;
+          const yc = h * (0.16 + 0.082 * b) + Math.sin(t + b * 0.78) * (18 + bass * 80);
+          const hue = (b * 36 + Date.now() / 34 + bass * 110) % 360;
+          ctx.beginPath();
+          for (let x = -12; x <= w + 12; x += 10) {
+            const phase = x / (80 + b * 8) + t + b * 0.62;
+            const y =
+              yc +
+              Math.sin(phase) * (30 + energy * 120 + bass * 90) +
+              Math.sin(phase * 0.43 + mid * 5) * (18 + treble * 48);
+            if (x <= -12) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = `hsla(${hue}, 96%, ${58 + energy * 18}%, ${0.28 + energy * 0.58})`;
+          ctx.lineWidth = 2 + energy * 7 + bass * 5;
+          ctx.shadowColor = `hsl(${hue}, 96%, 62%)`;
+          ctx.shadowBlur = 18 + energy * 34 + bass * 26;
+          ctx.stroke();
         }
+        const glow = ctx.createRadialGradient(w / 2, h * 0.52, 0, w / 2, h * 0.52, Math.max(w, h) * 0.74);
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.1 + bass * 0.42 + mid * 0.18})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
       } else if (mode === 'radial') {
         ctx.fillStyle = 'rgba(0,0,0,0.24)';
         ctx.fillRect(0, 0, w, h);
@@ -592,7 +616,7 @@ export function Visualizer({ mode, width, height, className, artUrl }: Props): J
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [engine, mode]);
+  }, [engine, isFullscreen, mode]);
 
   const style: React.CSSProperties = {};
   if (width != null) style.width = `${width}px`;

@@ -16,13 +16,13 @@ const result = await runElectronSmoke();
 assert.equal(result.ok, true, 'UI deck smoke should report success');
 assert.equal(result.openedViaDeckButton, true, 'real DECK button should enter compact mode');
 assert.ok(result.visibleSkinButtons >= 8, 'deck should expose all shape-changing skin buttons');
-assertWindow(result.shade, 620, 116, 'default windowshade deck');
+assertWindow(result.shade, 720, 152, 'default windowshade deck');
 assertWindow(result.record, 540, 540, 'record-player deck');
 assertWindow(result.hotdog, 740, 240, 'hotdog deck');
 assertWindow(result.tv, 520, 430, 'retro TV deck');
 assertWindow(result.winamp, 560, 232, 'Winamp classic deck');
-assertWindow(result.shadeAgain, 620, 116, 'windowshade deck after skin switch');
-assertWindow(result.nativeBounds, 620, 116, 'native BrowserWindow after returning to windowshade');
+assertWindow(result.shadeAgain, 720, 152, 'windowshade deck after skin switch');
+assertWindow(result.nativeBounds, 720, 152, 'native BrowserWindow after returning to windowshade');
 assert.equal(result.resizable, false, 'compact deck BrowserWindow should not be user-resizable');
 console.log(JSON.stringify(result, null, 2));
 
@@ -46,6 +46,9 @@ async function writeSmokeSettings() {
         lastfmSessionKey: null,
         lastfmUsername: null,
         lastfmAuthToken: null,
+        openaiApiKey: null,
+        openaiModel: 'gpt-4.1-mini',
+        firstLaunchTutorialSeen: true,
         crossfadeMs: 0,
         replayGain: 'off',
         limiterEnabled: true,

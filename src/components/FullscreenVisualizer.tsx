@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { Visualizer } from './Visualizer';
 import { formatTime } from '../lib/format';
@@ -34,7 +34,6 @@ export function FullscreenVisualizer(): JSX.Element {
   const preset = usePlayerStore((s) => s.vizPreset);
   const setPreset = usePlayerStore((s) => s.setVizPreset);
 
-  const [showChrome, setShowChrome] = useState(true);
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
 
   const artUrl = useMemo(
@@ -47,8 +46,6 @@ export function FullscreenVisualizer(): JSX.Element {
       data-newamp-fullscreen-visualizer
       data-newamp-visualizer-preset={activePreset}
       className="fixed inset-0 z-[90] flex items-center justify-center bg-black"
-      onMouseMove={() => setShowChrome(true)}
-      onMouseLeave={() => setShowChrome(false)}
       onDoubleClick={() => setFs(false)}
     >
       <div className="absolute inset-0">
@@ -79,9 +76,8 @@ export function FullscreenVisualizer(): JSX.Element {
       )}
 
       <div
-        className={`pointer-events-auto absolute right-4 top-4 flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2 transition-opacity duration-300 ${
-          showChrome ? 'opacity-100' : 'opacity-0'
-        }`}
+        className="pointer-events-auto absolute right-4 top-4 flex max-w-[calc(100vw-2rem)] flex-wrap items-center justify-end gap-2"
+        data-newamp-visualizer-toolbar
       >
         <div className="flex flex-wrap justify-end gap-1 bevel-out p-1">
           {PRESETS.map((p) => (
@@ -101,9 +97,7 @@ export function FullscreenVisualizer(): JSX.Element {
       </div>
 
       <div
-        className={`pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16 transition-opacity duration-300 ${
-          showChrome ? 'opacity-100' : 'opacity-0'
-        }`}
+        className="pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16"
         style={{
           background: 'linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.85) 100%)',
         }}
