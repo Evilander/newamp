@@ -1,35 +1,46 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { Sidebar } from './components/Sidebar';
 import { Transport } from './components/Transport';
-import { EqPanel } from './components/EqPanel';
-import { HomeView } from './components/views/HomeView';
-import { LibraryView } from './components/views/LibraryView';
-import { FoldersView } from './components/views/FoldersView';
-import { MixesView } from './components/views/MixesView';
-import { AlbumsView } from './components/views/AlbumsView';
-import { ArtistsView } from './components/views/ArtistsView';
-import { NowPlayingView } from './components/views/NowPlayingView';
-import { LovedView } from './components/views/LovedView';
-import { HistoryView } from './components/views/HistoryView';
-import { PlaylistView } from './components/views/PlaylistView';
-import { RadioView } from './components/views/RadioView';
-import { PodcastView } from './components/views/PodcastView';
-import { SettingsView } from './components/views/SettingsView';
-import { AboutView } from './components/views/AboutView';
-import { FullscreenVisualizer } from './components/FullscreenVisualizer';
 import { ScanBanner } from './components/ScanBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { CompactPlayer } from './components/CompactPlayer';
 import { QuickPlayPalette } from './components/QuickPlayPalette';
 import { FirstRunHints } from './components/FirstRunHints';
 import { StartupSplash } from './components/StartupSplash';
-import { FirstLaunchTutorial } from './components/FirstLaunchTutorial';
 import { usePlayerStore } from './store/usePlayerStore';
 import { api, winctl } from './lib/api';
 import { syncMediaSession } from './lib/mediaSession';
 import { resolvePlayerShortcut, type PlayerShortcutCommand } from '@shared/keyboard-shortcuts';
 import { applyShell, loadInitialShell } from './components/ShellPicker';
+
+const EqPanel = lazy(() => import('./components/EqPanel').then((module) => ({ default: module.EqPanel })));
+const CompactPlayer = lazy(() => import('./components/CompactPlayer').then((module) => ({ default: module.CompactPlayer })));
+const FullscreenVisualizer = lazy(() =>
+  import('./components/FullscreenVisualizer').then((module) => ({ default: module.FullscreenVisualizer })),
+);
+const FirstLaunchTutorial = lazy(() =>
+  import('./components/FirstLaunchTutorial').then((module) => ({ default: module.FirstLaunchTutorial })),
+);
+const HomeView = lazy(() => import('./components/views/HomeView').then((module) => ({ default: module.HomeView })));
+const LibraryView = lazy(() => import('./components/views/LibraryView').then((module) => ({ default: module.LibraryView })));
+const FoldersView = lazy(() => import('./components/views/FoldersView').then((module) => ({ default: module.FoldersView })));
+const MixesView = lazy(() => import('./components/views/MixesView').then((module) => ({ default: module.MixesView })));
+const AlbumsView = lazy(() => import('./components/views/AlbumsView').then((module) => ({ default: module.AlbumsView })));
+const ArtistsView = lazy(() => import('./components/views/ArtistsView').then((module) => ({ default: module.ArtistsView })));
+const NowPlayingView = lazy(() =>
+  import('./components/views/NowPlayingView').then((module) => ({ default: module.NowPlayingView })),
+);
+const LovedView = lazy(() => import('./components/views/LovedView').then((module) => ({ default: module.LovedView })));
+const HistoryView = lazy(() => import('./components/views/HistoryView').then((module) => ({ default: module.HistoryView })));
+const PlaylistView = lazy(() =>
+  import('./components/views/PlaylistView').then((module) => ({ default: module.PlaylistView })),
+);
+const RadioView = lazy(() => import('./components/views/RadioView').then((module) => ({ default: module.RadioView })));
+const PodcastView = lazy(() => import('./components/views/PodcastView').then((module) => ({ default: module.PodcastView })));
+const SettingsView = lazy(() =>
+  import('./components/views/SettingsView').then((module) => ({ default: module.SettingsView })),
+);
+const AboutView = lazy(() => import('./components/views/AboutView').then((module) => ({ default: module.AboutView })));
 
 export default function App(): JSX.Element {
   const init = usePlayerStore((s) => s.init);
@@ -221,7 +232,9 @@ export default function App(): JSX.Element {
   if (compact) {
     return (
       <>
-        <CompactPlayer />
+        <Suspense fallback={<DeckFallback />}>
+          <CompactPlayer />
+        </Suspense>
         <QuickPlayPalette />
         {showSplash && <StartupSplash />}
       </>
@@ -261,42 +274,78 @@ export default function App(): JSX.Element {
           <Sidebar />
           <main className="relative flex-1 overflow-hidden bg-[var(--bg)]">
             <ErrorBoundary>
-              {view === 'home' && <HomeView />}
-              {view === 'library' && <LibraryView />}
-              {view === 'folders' && <FoldersView />}
-              {view === 'mixes' && <MixesView />}
-              {view === 'albums' && <AlbumsView />}
-              {view === 'artists' && <ArtistsView />}
-              {view === 'loved' && <LovedView />}
-              {view === 'history' && <HistoryView />}
-              {view === 'playlist' && <PlaylistView />}
-              {view === 'now-playing' && <NowPlayingView />}
-              {view === 'podcasts' && <PodcastView />}
-              {view === 'radio' && <RadioView />}
-              {view === 'about' && <AboutView />}
-              {view === 'settings' && <SettingsView />}
+              <Suspense fallback={<ViewFallback />}>
+                {view === 'home' && <HomeView />}
+                {view === 'library' && <LibraryView />}
+                {view === 'folders' && <FoldersView />}
+                {view === 'mixes' && <MixesView />}
+                {view === 'albums' && <AlbumsView />}
+                {view === 'artists' && <ArtistsView />}
+                {view === 'loved' && <LovedView />}
+                {view === 'history' && <HistoryView />}
+                {view === 'playlist' && <PlaylistView />}
+                {view === 'now-playing' && <NowPlayingView />}
+                {view === 'podcasts' && <PodcastView />}
+                {view === 'radio' && <RadioView />}
+                {view === 'about' && <AboutView />}
+                {view === 'settings' && <SettingsView />}
+              </Suspense>
             </ErrorBoundary>
           </main>
         </div>
-        {showEq && <EqPanel />}
+        {showEq && (
+          <Suspense fallback={null}>
+            <EqPanel />
+          </Suspense>
+        )}
         <Transport />
         {(dropActive || dropMessage) && <AppDropOverlay message={dropMessage} active={dropActive} />}
         <QuickPlayPalette />
         <FirstRunHints />
       </div>
-      {fullscreen && <FullscreenVisualizer />}
+      {fullscreen && (
+        <Suspense fallback={null}>
+          <FullscreenVisualizer />
+        </Suspense>
+      )}
       {showSplash && <StartupSplash />}
       {settings && !settings.firstLaunchTutorialSeen && !tutorialDismissed && (
-        <FirstLaunchTutorial
-          settings={settings}
-          onFinish={finishFirstLaunchTutorial}
-          onOpenSettings={() => {
-            setView('settings');
-            void finishFirstLaunchTutorial();
-          }}
-        />
+        <Suspense fallback={null}>
+          <FirstLaunchTutorial
+            settings={settings}
+            onFinish={finishFirstLaunchTutorial}
+            onOpenSettings={() => {
+              setView('settings');
+              void finishFirstLaunchTutorial();
+            }}
+          />
+        </Suspense>
       )}
     </>
+  );
+}
+
+function ViewFallback(): JSX.Element {
+  return (
+    <div
+      data-newamp-view-loading
+      className="flex h-full items-center justify-center text-[11px] uppercase tracking-[0.18em]"
+      style={{ color: 'var(--ink-2)', background: 'var(--bg)' }}
+    >
+      Loading
+    </div>
+  );
+}
+
+function DeckFallback(): JSX.Element {
+  return (
+    <div
+      data-newamp-deck-loading
+      className="compact-root text-[11px] uppercase tracking-[0.18em]"
+      style={{ color: 'var(--ink-2)' }}
+    >
+      Loading
+    </div>
   );
 }
 
