@@ -47,7 +47,7 @@ export async function createSupportBackup(input: SupportBackupInput): Promise<Su
   }
 
   const manifest = {
-    app: 'Newamp',
+    app: 'NewAmp',
     createdAt,
     userDataPath,
     filesCopied,
@@ -180,11 +180,11 @@ async function readBackupManifest(backupPath: string): Promise<BackupManifest> {
   } catch (err) {
     throw new Error(`Backup manifest could not be read: ${errorMessage(err)}`);
   }
-  if (parsed.app !== 'Newamp' || !Array.isArray(parsed.included)) {
-    throw new Error('Backup manifest is not a Newamp support backup.');
+  if (!['NewAmp', 'Newamp'].includes(String(parsed.app ?? '')) || !Array.isArray(parsed.included)) {
+    throw new Error('Backup manifest is not a NewAmp support backup.');
   }
   return {
-    app: parsed.app,
+    app: String(parsed.app),
     filesCopied: Math.max(0, Math.trunc(Number(parsed.filesCopied) || 0)),
     included: parsed.included.filter((item): item is string => typeof item === 'string'),
   };

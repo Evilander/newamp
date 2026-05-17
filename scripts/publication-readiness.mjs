@@ -13,9 +13,9 @@ const gitDir = resolveGitDir(repoRoot, process.env);
 const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
 const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
 const artifacts = [
-  { name: 'installer', path: resolve(repoRoot, 'release', `Newamp Setup ${releaseVersion}.exe`) },
-  { name: 'portable', path: resolve(repoRoot, 'release', `Newamp Portable ${releaseVersion}.exe`) },
-  { name: 'exe', path: resolve(repoRoot, 'release', 'win-unpacked', 'Newamp.exe') },
+  { name: 'installer', path: resolve(repoRoot, 'release', `NewAmp Setup ${releaseVersion}.exe`) },
+  { name: 'portable', path: resolve(repoRoot, 'release', `NewAmp Portable ${releaseVersion}.exe`) },
+  { name: 'exe', path: resolve(repoRoot, 'release', 'win-unpacked', 'NewAmp.exe') },
 ];
 
 const checks = [
@@ -39,7 +39,7 @@ const report = {
   ok: blockers.length === 0,
   target: {
     repo: process.env.NEWAMP_GITHUB_REPO || 'evilander/newamp',
-    tag: 'v1.0.0',
+    tag: `v${releaseVersion}`,
     git: {
       mode: gitDir ? 'external' : 'worktree',
       gitDir,
@@ -48,7 +48,7 @@ const report = {
   checks,
   blockers,
   nextStepsWhenReady: [
-    'npm version 1.0.0 --no-git-tag-version',
+    'confirm package.json version matches the release you want to publish',
     'npm run package',
     'npm run release:checksums',
     'npm run release:bundle',
@@ -68,11 +68,12 @@ console.log(JSON.stringify(report, null, 2));
 process.exitCode = report.ok ? 0 : 1;
 
 function packageVersionCheck() {
+  const publishable = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(pkg.version);
   return {
     name: 'package-version',
-    ok: pkg.version === '1.0.0',
+    ok: publishable,
     version: pkg.version,
-    reason: pkg.version === '1.0.0' ? null : `package.json version is ${pkg.version}; public release target is 1.0.0`,
+    reason: publishable ? null : `package.json version is not a publishable semver: ${pkg.version}`,
   };
 }
 
@@ -81,7 +82,7 @@ function readmeCheck() {
     return { name: 'readme', ok: false, path: readmePath, reason: 'README.md is missing' };
   }
   const readme = readFileSync(readmePath, 'utf8');
-  const required = ['Newamp', 'Installable Builds', 'Release Plan', 'Privacy'];
+  const required = ['NewAmp', 'Install', 'Build from source', 'Privacy'];
   const missing = required.filter((text) => !readme.includes(text));
   return {
     name: 'readme',

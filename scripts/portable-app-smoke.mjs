@@ -9,7 +9,7 @@ const repoRoot = resolve('.');
 const releaseRoot = resolve(repoRoot, 'release');
 const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
 const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
-const portablePath = resolve(releaseRoot, `Newamp Portable ${releaseVersion}.exe`);
+const portablePath = resolve(releaseRoot, `NewAmp Portable ${releaseVersion}.exe`);
 const smokeRoot = resolve(repoRoot, 'tmp', 'portable-app-smoke');
 const markerPath = resolve(smokeRoot, `startup-${process.pid}-${Date.now()}.json`);
 const wrapperTemp = resolve(smokeRoot, `wrapper-temp-${process.pid}-${Date.now()}`);
@@ -177,13 +177,13 @@ async function runPlainPortableLaunch() {
   const plainStarted = Date.now();
   while (Date.now() - plainStarted < 25_000) {
     snapshot = readPortableProcessSnapshot(child.pid);
-    if (hasNsisErrorWindow(snapshot) || hasNewampMainWindow(snapshot)) break;
+    if (hasNsisErrorWindow(snapshot) || hasNewAmpMainWindow(snapshot)) break;
     if (plainSpawnError || plainExitCode !== null) break;
     await sleep(500);
   }
 
   const elapsedMs = Date.now() - plainStarted;
-  const ok = !plainSpawnError && plainExitCode === null && hasNewampMainWindow(snapshot) && !hasNsisErrorWindow(snapshot);
+  const ok = !plainSpawnError && plainExitCode === null && hasNewAmpMainWindow(snapshot) && !hasNsisErrorWindow(snapshot);
   cleanupProcessTree(child.pid);
 
   return {
@@ -205,7 +205,7 @@ function readPortableProcessSnapshot(pid) {
 $targetPid = ${Number(pid)}
 $items = @()
 try { $items += Get-Process -Id $targetPid -ErrorAction SilentlyContinue } catch {}
-try { $items += Get-Process -Name 'Newamp*' -ErrorAction SilentlyContinue } catch {}
+try { $items += Get-Process -Name 'NewAmp*' -ErrorAction SilentlyContinue } catch {}
 $items |
   Sort-Object Id -Unique |
   Select-Object Id, ProcessName, MainWindowTitle, Responding, @{ Name = 'Path'; Expression = { try { $_.Path } catch { $null } } } |
@@ -233,8 +233,8 @@ function hasNsisErrorWindow(snapshot) {
   return (snapshot?.processes ?? []).some((item) => /NSIS Error/i.test(String(item.MainWindowTitle ?? '')));
 }
 
-function hasNewampMainWindow(snapshot) {
-  return (snapshot?.processes ?? []).some((item) => String(item.MainWindowTitle ?? '') === 'Newamp');
+function hasNewAmpMainWindow(snapshot) {
+  return (snapshot?.processes ?? []).some((item) => String(item.MainWindowTitle ?? '') === 'NewAmp');
 }
 
 function diagnostic(message) {
@@ -252,7 +252,7 @@ function diagnostic(message) {
 
 function plainLaunchDiagnostic(plainLaunch) {
   return [
-    'portable artifact should open the Newamp window in plain double-click mode',
+    'portable artifact should open the NewAmp window in plain double-click mode',
     `ok=${plainLaunch.ok}`,
     `elapsedMs=${plainLaunch.elapsedMs}`,
     `pid=${plainLaunch.pid}`,

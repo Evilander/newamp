@@ -11,7 +11,7 @@ export async function exportPlaylistFolder(input: {
   if (!root) throw new Error('Choose a destination folder first.');
 
   await mkdir(root, { recursive: true });
-  const exportDir = await createUniqueExportDirectory(root, safePortableStem(input.playlist.name || 'Newamp Playlist'));
+  const exportDir = await createUniqueExportDirectory(root, safePortableStem(input.playlist.name || 'NewAmp Playlist'));
   const skipped: string[] = [];
   const lines = ['#EXTM3U', `#PLAYLIST:${input.playlist.name}`];
   let copied = 0;
@@ -83,5 +83,5 @@ function safePortableStem(value: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 120);
-  return cleaned || 'Newamp Playlist';
+  return cleaned || 'NewAmp Playlist';
 }

@@ -1,4 +1,4 @@
-// Newamp audio engine. Two HTMLAudioElement decks feed one EQ/master/analyser
+// NewAmp audio engine. Two HTMLAudioElement decks feed one EQ/master/analyser
 // chain so track changes can overlap for real crossfade instead of muting and
 // swapping a single element.
 

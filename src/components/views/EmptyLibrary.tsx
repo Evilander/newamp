@@ -47,7 +47,7 @@ export function EmptyLibrary(): JSX.Element {
     setStatus('Scanning default music folder...');
     try {
       await api.scanLibrary();
-      setStatus('Scan started. Newamp will fill in as files are indexed.');
+      setStatus('Scan started. NewAmp will fill in as files are indexed.');
     } catch (err) {
       setStatus(err instanceof Error ? err.message : 'Default scan failed.');
     } finally {
@@ -58,7 +58,7 @@ export function EmptyLibrary(): JSX.Element {
   async function pickFolder(): Promise<void> {
     if (!inElectron) {
       // eslint-disable-next-line no-alert
-      alert('Open Newamp in Electron to pick a local folder.');
+      alert('Open NewAmp in Electron to pick a local folder.');
       return;
     }
     const dir = await api.pickFolder();
@@ -70,7 +70,7 @@ export function EmptyLibrary(): JSX.Element {
       const roots = mergeRoots(settings.libraryRoots, dir);
       await api.setSettings({ libraryRoots: roots });
       await api.scanLibrary([dir]);
-      setStatus('Scan started. You can keep using Newamp while it indexes.');
+      setStatus('Scan started. You can keep using NewAmp while it indexes.');
     } catch (err) {
       setStatus(err instanceof Error ? err.message : 'Folder scan failed.');
     } finally {
@@ -85,7 +85,7 @@ export function EmptyLibrary(): JSX.Element {
         <BrandLogo size={80} withGlow />
         <div className="empty-library-copy">
           <h2>Your music. Your machine.</h2>
-          <p>Newamp scans local folders, builds a private library, and keeps playback off-cloud by default.</p>
+          <p>NewAmp scans local folders, builds a private library, and keeps playback off-cloud by default.</p>
         </div>
         <div className="empty-library-actions">
           <button className="pxbtn is-active empty-library-primary" onClick={() => void scanDefault()} disabled={scanning}>

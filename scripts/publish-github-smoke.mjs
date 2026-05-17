@@ -29,14 +29,14 @@ await rm(cleanExternalGitDir, { recursive: true, force: true });
 await mkdir(join(smokeRoot, 'release', 'win-unpacked'), { recursive: true });
 await mkdir(join(smokeRoot, 'source-fixture'), { recursive: true });
 await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
-await writeFile(join(smokeRoot, 'README.md'), '# Newamp\n', 'utf8');
-await writeFile(join(smokeRoot, 'release', 'Newamp Setup 1.0.0.exe'), 'installer', 'utf8');
-await writeFile(join(smokeRoot, 'release', 'Newamp Portable 1.0.0.exe'), 'portable', 'utf8');
-await writeFile(join(smokeRoot, 'release', 'win-unpacked', 'Newamp.exe'), 'exe', 'utf8');
-await writeFile(join(smokeRoot, 'source-fixture', 'README.md'), '# Newamp source fixture\n', 'utf8');
+await writeFile(join(smokeRoot, 'README.md'), '# NewAmp\n', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'NewAmp Setup 1.0.0.exe'), 'installer', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'NewAmp Portable 1.0.0.exe'), 'portable', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'win-unpacked', 'NewAmp.exe'), 'exe', 'utf8');
+await writeFile(join(smokeRoot, 'source-fixture', 'README.md'), '# NewAmp source fixture\n', 'utf8');
 compressDirectoryToZip(
   join(smokeRoot, 'source-fixture'),
-  join(smokeRoot, 'release', 'Newamp-1.0.0-source.zip'),
+  join(smokeRoot, 'release', 'NewAmp-1.0.0-source.zip'),
 );
 writeReleaseChecksums({ root: smokeRoot, version: '1.0.0' });
 const bundle = createReleaseBundle({
@@ -57,15 +57,15 @@ assert.equal(plan.tag, 'v1.0.0');
 assert.ok(plan.commands.some((command) => command.label === 'ensure-repo'));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.includes('--repo')));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /SHA256SUMS\.txt$/.test(arg))));
-assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /Newamp-1\.0\.0-source\.zip$/.test(arg))));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /NewAmp-1\.0\.0-source\.zip$/.test(arg))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /RELEASE-MANIFEST\.json$/.test(arg))));
-assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /Newamp-1\.0\.0-release-bundle\.zip$/.test(arg))));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /NewAmp-1\.0\.0-release-bundle\.zip$/.test(arg))));
 assert.ok(plan.commands.every((command) => !command.commandLine.includes('\n')));
-assert.match(JSON.stringify(plan), /Newamp Setup 1\.0\.0\.exe/);
-assert.match(JSON.stringify(plan), /Newamp Portable 1\.0\.0\.exe/);
+assert.match(JSON.stringify(plan), /NewAmp Setup 1\.0\.0\.exe/);
+assert.match(JSON.stringify(plan), /NewAmp Portable 1\.0\.0\.exe/);
 assert.match(JSON.stringify(plan), /SHA256SUMS\.txt/);
 assert.match(JSON.stringify(plan), /RELEASE-MANIFEST\.json/);
-assert.match(JSON.stringify(plan), /Newamp-1\.0\.0-release-bundle\.zip/);
+assert.match(JSON.stringify(plan), /NewAmp-1\.0\.0-release-bundle\.zip/);
 
 const dryRun = publishGithubRelease({
   root: smokeRoot,

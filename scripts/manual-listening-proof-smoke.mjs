@@ -23,9 +23,9 @@ assert.deepEqual(defaultManualListeningArtifacts(repoRoot).map((artifact) => art
 ]);
 
 const artifacts = [
-  { name: 'installer', path: join(smokeRoot, 'Newamp Setup 0.1.0.exe') },
-  { name: 'portable', path: join(smokeRoot, 'Newamp Portable 0.1.0.exe') },
-  { name: 'exe', path: join(smokeRoot, 'Newamp.exe') },
+  { name: 'installer', path: join(smokeRoot, 'NewAmp Setup 0.1.0.exe') },
+  { name: 'portable', path: join(smokeRoot, 'NewAmp Portable 0.1.0.exe') },
+  { name: 'exe', path: join(smokeRoot, 'NewAmp.exe') },
 ];
 
 await rm(smokeRoot, { recursive: true, force: true });

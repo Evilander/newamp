@@ -16,6 +16,7 @@ import { PlaylistView } from './components/views/PlaylistView';
 import { RadioView } from './components/views/RadioView';
 import { PodcastView } from './components/views/PodcastView';
 import { SettingsView } from './components/views/SettingsView';
+import { AboutView } from './components/views/AboutView';
 import { FullscreenVisualizer } from './components/FullscreenVisualizer';
 import { ScanBanner } from './components/ScanBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -121,9 +122,15 @@ export default function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    const handle = window.setTimeout(() => setShowSplash(false), 2600);
+    const handle = window.setTimeout(() => setShowSplash(false), 3600);
     return () => window.clearTimeout(handle);
   }, []);
+
+  useEffect(() => {
+    const scale = Math.min(1.35, Math.max(0.85, settings?.textScale ?? 1));
+    document.documentElement.style.setProperty('--newamp-text-scale', scale.toFixed(2));
+    document.documentElement.dataset.textScale = scale === 1 ? 'normal' : 'custom';
+  }, [settings?.textScale]);
 
   async function finishFirstLaunchTutorial(patch: { openaiApiKey?: string | null; openaiModel?: string } = {}): Promise<void> {
     const updated = await api.setSettings({
@@ -266,6 +273,7 @@ export default function App(): JSX.Element {
               {view === 'now-playing' && <NowPlayingView />}
               {view === 'podcasts' && <PodcastView />}
               {view === 'radio' && <RadioView />}
+              {view === 'about' && <AboutView />}
               {view === 'settings' && <SettingsView />}
             </ErrorBoundary>
           </main>

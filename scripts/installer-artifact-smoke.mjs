@@ -13,13 +13,13 @@ const mainPath = resolve(repoRoot, 'electron', 'main.ts');
 const releaseRoot = resolve(repoRoot, 'release');
 const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
 const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
-const installerPath = resolve(releaseRoot, `Newamp Setup ${releaseVersion}.exe`);
-const portablePath = resolve(releaseRoot, `Newamp Portable ${releaseVersion}.exe`);
+const installerPath = resolve(releaseRoot, `NewAmp Setup ${releaseVersion}.exe`);
+const portablePath = resolve(releaseRoot, `NewAmp Portable ${releaseVersion}.exe`);
 const blockmapPath = `${installerPath}.blockmap`;
 const builderDebugPath = resolve(releaseRoot, 'builder-debug-nsis.yml');
 const builderDebugLatestPath = resolve(releaseRoot, 'builder-debug.yml');
 const unpackedRoot = resolve(releaseRoot, 'win-unpacked');
-const exePath = resolve(unpackedRoot, 'Newamp.exe');
+const exePath = resolve(unpackedRoot, 'NewAmp.exe');
 const resourcesRoot = resolve(unpackedRoot, 'resources');
 const appAsarPath = resolve(resourcesRoot, 'app.asar');
 const extraDistIndex = resolve(resourcesRoot, 'dist', 'index.html');
@@ -34,11 +34,11 @@ const gateSource = readFileSync(gatePath, 'utf8');
 const mainSource = readFileSync(mainPath, 'utf8');
 const builderDebug = readRequiredText(builderDebugPath);
 
-assert.equal(pkg.build?.productName, 'Newamp', 'build productName should stay Newamp');
+assert.equal(pkg.build?.productName, 'NewAmp', 'build productName should stay NewAmp');
 assert.equal(pkg.build?.appId, 'io.newamp.player', 'build appId should be stable for upgrades/file associations');
 assert.ok(pkg.build?.win?.target?.includes('nsis'), 'Windows build target should include NSIS installer output');
 assert.ok(pkg.build?.win?.target?.includes('portable'), 'Windows build target should include a no-install portable EXE');
-assert.equal(pkg.build?.portable?.artifactName, 'Newamp Portable ${version}.${ext}', 'portable artifact should have a stable human-readable file name');
+assert.equal(pkg.build?.portable?.artifactName, 'NewAmp Portable ${version}.${ext}', 'portable artifact should have a stable human-readable file name');
 assert.match(
   JSON.stringify(pkg.scripts ?? {}),
   /smoke:installer-artifact/,
@@ -94,20 +94,20 @@ assert.match(mainSource, /render-process-gone/, 'packaged app should record rend
 
 const configuredExtensions = (pkg.build?.fileAssociations ?? []).flatMap((association) => association.ext ?? []);
 const configuredProgIds = (pkg.build?.fileAssociations ?? []).map((association) => association.name ?? '');
-assert.ok(configuredProgIds.includes('Newamp.AudioFile'), 'audio association should use stable Newamp.AudioFile ProgID');
-assert.ok(configuredProgIds.includes('Newamp.PlaylistFile'), 'playlist association should use stable Newamp.PlaylistFile ProgID');
+assert.ok(configuredProgIds.includes('NewAmp.AudioFile'), 'audio association should use stable NewAmp.AudioFile ProgID');
+assert.ok(configuredProgIds.includes('NewAmp.PlaylistFile'), 'playlist association should use stable NewAmp.PlaylistFile ProgID');
 for (const progId of configuredProgIds) {
-  assert.match(progId, /^Newamp\.[A-Za-z0-9_.-]+$/, `association ProgID should be stable and space-free: ${progId}`);
+  assert.match(progId, /^NewAmp\.[A-Za-z0-9_.-]+$/, `association ProgID should be stable and space-free: ${progId}`);
 }
 for (const extension of requiredExtensions) {
   assert.ok(configuredExtensions.includes(extension), `package config should register .${extension}`);
   assert.match(builderDebug, new RegExp(`APP_ASSOCIATE "${extension}"`), `NSIS script should register .${extension}`);
 }
-assert.match(builderDebug, /APP_ASSOCIATE "mp3" "Newamp\.AudioFile"/, 'NSIS script should register audio files under Newamp.AudioFile');
-assert.match(builderDebug, /APP_ASSOCIATE "m3u" "Newamp\.PlaylistFile"/, 'NSIS script should register playlists under Newamp.PlaylistFile');
-assert.match(builderDebug, /APP_ASSOCIATE "cue" "Newamp\.PlaylistFile"/, 'NSIS script should register CUE sheets under Newamp.PlaylistFile');
+assert.match(builderDebug, /APP_ASSOCIATE "mp3" "NewAmp\.AudioFile"/, 'NSIS script should register audio files under NewAmp.AudioFile');
+assert.match(builderDebug, /APP_ASSOCIATE "m3u" "NewAmp\.PlaylistFile"/, 'NSIS script should register playlists under NewAmp.PlaylistFile');
+assert.match(builderDebug, /APP_ASSOCIATE "cue" "NewAmp\.PlaylistFile"/, 'NSIS script should register CUE sheets under NewAmp.PlaylistFile');
 assert.match(builderDebug, /FileAssociation\.nsh/, 'NSIS script should include electron-builder file-association helpers');
-assert.match(builderDebug, /\$appExe \$\\"%1\$\\"/, 'NSIS file-open command should pass the selected file path to Newamp.exe');
+assert.match(builderDebug, /\$appExe \$\\"%1\$\\"/, 'NSIS file-open command should pass the selected file path to NewAmp.exe');
 assert.match(builderDebug, /RequestExecutionLevel user/, 'installer should support current-user install mode');
 
 const installer = artifact(installerPath, 100_000_000);

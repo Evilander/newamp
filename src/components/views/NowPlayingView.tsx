@@ -3,17 +3,19 @@
 // LRC lyrics. Top status strip carries hex badge + track stats. Everything
 // pulls live state from the audio engine.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { usePlayerStore, engine } from '../../store/usePlayerStore';
 import { fetchLyrics, parseLrc, type LrcLine } from '../../api/lrclib';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
+import { fetchAlbumFacts, type AlbumFact } from '../../api/albumFacts';
 import { formatTime, playbackCodecLabel } from '../../lib/format';
 import { api } from '../../lib/api';
 import { aiAssistSummary } from '../../lib/aiAssist';
 import { ScoreRating } from '../ScoreRating';
 import { LinerNotesPanel } from '../LinerNotesPanel';
 
-type SideTab = 'on-air' | 'studio' | 'lyrics';
+type SideTab = 'on-air' | 'album' | 'lyrics';
+type SpectrumStyle = 'classic' | 'wide' | 'needles' | 'stacked';
 import type { LocalLyricsResult, SmartPlaylistRule, Track, TrackBookmark } from '@shared/types';
 import {
   canEnablePracticeLoop,
@@ -79,14 +81,30 @@ export function NowPlayingView(): JSX.Element {
     end: null,
     enabled: false,
   });
-  const [sideTab, setSideTab] = useState<SideTab>('on-air');
-  // Persisted spectrum/side split width. 0..1 fraction of the right pane.
+  const [sideTab, setSideTab] = useState<SideTab>(() => {
+    if (typeof window === 'undefined') return 'on-air';
+    const saved = window.localStorage.getItem('newamp:np:sideTab');
+    return saved === 'album' || saved === 'lyrics' || saved === 'on-air' ? saved : 'on-air';
+  });
+  const [spectrumStyle, setSpectrumStyle] = useState<SpectrumStyle>(() => {
+    if (typeof window === 'undefined') return 'classic';
+    const saved = window.localStorage.getItem('newamp:np:spectrumStyle');
+    return saved === 'wide' || saved === 'needles' || saved === 'stacked' ? saved : 'classic';
+  });
   const [spectrumFrac, setSpectrumFrac] = useState<number>(() => {
     if (typeof window === 'undefined') return 0.42;
     const raw = window.localStorage.getItem('newamp:np:spectrumFrac');
     const parsed = raw ? Number.parseFloat(raw) : NaN;
     return Number.isFinite(parsed) ? Math.min(0.7, Math.max(0.2, parsed)) : 0.42;
   });
+
+  useEffect(() => {
+    window.localStorage.setItem('newamp:np:sideTab', sideTab);
+  }, [sideTab]);
+
+  useEffect(() => {
+    window.localStorage.setItem('newamp:np:spectrumStyle', spectrumStyle);
+  }, [spectrumStyle]);
 
   useEffect(() => {
     if (!current) {
@@ -347,7 +365,7 @@ export function NowPlayingView(): JSX.Element {
             NEWAMP
           </span>
           <StatusPill on={isPlaying} text={isPlaying ? 'PLAYING' : 'PAUSED'} />
-          {activeStationName ? <StatusPill on text="MIX" /> : null}
+          {activeStationName ? <StatusPill on text="RADIO" /> : null}
           {settings?.replayGain !== 'off' ? <StatusPill on text="RG" /> : null}
           <span style={{ color: 'var(--muted)' }}>
             OUTPUT · WASAPI · {fmtKbps} · {fmtRate}
@@ -360,7 +378,7 @@ export function NowPlayingView(): JSX.Element {
                 {activeStationName} / {Math.max(0, queue.length - Math.max(queueIndex, 0) - 1)} left / goal {autoDjTarget}
               </button>
               <button className="pxbtn px-2 py-[2px] text-[10px]" onClick={() => void stopStation()}>
-                STOP MIX
+                STOP RADIO
               </button>
             </>
           ) : null}
@@ -504,6 +522,8 @@ export function NowPlayingView(): JSX.Element {
               duration={current.duration ?? 0}
               aiAssistReady={!!settings?.openaiApiKey}
               aiModel={settings?.openaiModel ?? null}
+              spectrumStyle={spectrumStyle}
+              onSpectrumStyleChange={setSpectrumStyle}
             />
             <SplitHandle
               orientation="vertical"
@@ -523,8 +543,8 @@ export function NowPlayingView(): JSX.Element {
                 <SideTabButton active={sideTab === 'on-air'} onClick={() => setSideTab('on-air')}>
                   On Air
                 </SideTabButton>
-                <SideTabButton active={sideTab === 'studio'} onClick={() => setSideTab('studio')}>
-                  Studio
+                <SideTabButton active={sideTab === 'album'} onClick={() => setSideTab('album')}>
+                  Album
                 </SideTabButton>
                 <SideTabButton active={sideTab === 'lyrics'} onClick={() => setSideTab('lyrics')}>
                   Lyrics
@@ -536,8 +556,9 @@ export function NowPlayingView(): JSX.Element {
                     track={current}
                     lyrics={{ lines: lyrics.lines, plain: lyrics.plain }}
                   />
-                ) : sideTab === 'studio' ? (
+                ) : sideTab === 'album' ? (
                   <div className="flex min-h-0 flex-col overflow-y-auto">
+                    <AlbumContextPanel track={current} />
                     <TempoTrainerPanel
                       playbackRate={playbackRate}
                       onChange={(rate) => void setPlaybackRate(rate)}
@@ -1116,26 +1137,44 @@ function PracticeLoopPanel({
   );
 }
 
+const SPECTRUM_STYLES: { id: SpectrumStyle; label: string; shortLabel: string }[] = [
+  { id: 'classic', label: 'Classic 24-band analyzer', shortLabel: '24' },
+  { id: 'wide', label: 'Wide 12-band analyzer', shortLabel: '12' },
+  { id: 'needles', label: 'Needle peaks', shortLabel: 'PK' },
+  { id: 'stacked', label: 'Stacked block spectrum', shortLabel: 'STK' },
+];
+
+function spectrumBandCount(style: SpectrumStyle): number {
+  if (style === 'wide') return 12;
+  if (style === 'needles') return 36;
+  return 24;
+}
+
 function SpectrumPanel({
   current,
   currentTime,
   duration,
   aiAssistReady,
   aiModel,
+  spectrumStyle,
+  onSpectrumStyleChange,
 }: {
   current: Track;
   currentTime: number;
   duration: number;
   aiAssistReady: boolean;
   aiModel: string | null;
+  spectrumStyle: SpectrumStyle;
+  onSpectrumStyleChange: (style: SpectrumStyle) => void;
 }): JSX.Element {
   const barsRef = useRef<HTMLDivElement>(null);
   const peakRef = useRef<HTMLDivElement>(null);
+  const barCount = spectrumBandCount(spectrumStyle);
 
   useEffect(() => {
-    const BARS = 24;
+    const bars = spectrumBandCount(spectrumStyle);
     const freq = new Uint8Array(engine.frequencyBinCount);
-    const peaks = new Float32Array(BARS);
+    const peaks = new Float32Array(bars);
     let raf = 0;
     const tick = (): void => {
       engine.getFreqData(freq as Uint8Array<ArrayBuffer>);
@@ -1145,18 +1184,24 @@ function SpectrumPanel({
         raf = requestAnimationFrame(tick);
         return;
       }
-      // Map FFT bins logarithmically to BARS columns.
-      for (let i = 0; i < BARS; i++) {
-        const lo = Math.floor(Math.pow(i / BARS, 2) * freq.length);
-        const hi = Math.floor(Math.pow((i + 1) / BARS, 2) * freq.length);
+      for (let i = 0; i < bars; i++) {
+        const curve = spectrumStyle === 'wide' ? 1.35 : 2;
+        const lo = Math.floor(Math.pow(i / bars, curve) * freq.length);
+        const hi = Math.floor(Math.pow((i + 1) / bars, curve) * freq.length);
         let max = 0;
         for (let k = lo; k < hi && k < freq.length; k++) {
           if ((freq[k] ?? 0) > max) max = freq[k] ?? 0;
         }
         const norm = max / 255;
-        peaks[i] = Math.max(peaks[i]! - 0.012, norm);
+        const falloff = spectrumStyle === 'needles' ? 0.022 : 0.012;
+        peaks[i] = Math.max(peaks[i]! - falloff, norm);
         const bar = container.children.item(i) as HTMLElement | null;
-        if (bar) bar.style.height = `${Math.max(2, norm * 100)}%`;
+        if (bar) {
+          const nextHeight = spectrumStyle === 'stacked'
+            ? Math.max(4, Math.round(norm * 10) * 10)
+            : Math.max(2, norm * 100);
+          bar.style.height = `${nextHeight}%`;
+        }
         const peak = peakContainer?.children.item(i) as HTMLElement | null;
         if (peak) peak.style.bottom = `${Math.max(0, peaks[i]! * 100 - 1)}%`;
       }
@@ -1164,7 +1209,7 @@ function SpectrumPanel({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [spectrumStyle]);
 
   return (
     <div
@@ -1178,22 +1223,30 @@ function SpectrumPanel({
         >
           Spectrum
         </span>
-        <span className="text-[9px] tabular-nums" style={{ color: 'var(--muted)' }}>
-          24 bands
-        </span>
+        <div className="flex items-center gap-1" data-newamp-spectrum-style-picker>
+          {SPECTRUM_STYLES.map((style) => (
+            <button
+              key={style.id}
+              className={`pxbtn ${spectrumStyle === style.id ? 'is-active' : ''}`}
+              onClick={() => onSpectrumStyleChange(style.id)}
+              title={style.label}
+            >
+              {style.shortLabel}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div className="relative" style={{ height: 120 }}>
+      <div className={`spectrum-stage is-${spectrumStyle} relative`} style={{ height: 120 }}>
         <div
           ref={barsRef}
           className="absolute inset-0 flex items-end gap-[2px]"
         >
-          {Array.from({ length: 24 }, (_, i) => (
+          {Array.from({ length: barCount }, (_, i) => (
             <div
               key={i}
-              className="flex-1"
+              className="spectrum-bar flex-1"
               style={{
-                background: 'var(--accent-dim)',
                 minHeight: 2,
                 height: '2%',
                 transition: 'height 80ms ease-out',
@@ -1205,7 +1258,7 @@ function SpectrumPanel({
           ref={peakRef}
           className="pointer-events-none absolute inset-0 flex items-end gap-[2px]"
         >
-          {Array.from({ length: 24 }, (_, i) => (
+          {Array.from({ length: barCount }, (_, i) => (
             <div key={i} className="relative flex-1">
               <div
                 className="absolute left-0 right-0"
@@ -1244,6 +1297,118 @@ function SpectrumPanel({
         <WaveformOverview currentTime={currentTime} duration={duration} />
       </div>
     </div>
+  );
+}
+
+function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
+  const deferredTrack = useDeferredValue(track);
+  const [albumTracks, setAlbumTracks] = useState<Track[]>([]);
+  const [relatedAlbums, setRelatedAlbums] = useState<{ album: string; albumArtist: string; year: number | null }[]>([]);
+  const [fact, setFact] = useState<AlbumFact | null>(null);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'none' | 'ok'>('idle');
+
+  useEffect(() => {
+    const album = deferredTrack.album;
+    const albumArtist = deferredTrack.albumArtist || deferredTrack.artist;
+    if (!album || album === 'Unknown Album') {
+      setAlbumTracks([]);
+      setRelatedAlbums([]);
+      setFact(null);
+      setStatus('idle');
+      return;
+    }
+
+    const ctrl = new AbortController();
+    setStatus('loading');
+    Promise.all([
+      api.getAlbumTracks(album, albumArtist).catch(() => []),
+      api.getAlbums().catch(() => []),
+      fetchAlbumFacts(album, albumArtist, ctrl.signal).catch(() => null),
+    ]).then(([tracks, albums, nextFact]) => {
+      if (ctrl.signal.aborted) return;
+      const albumYear = deferredTrack.year ?? tracks.find((item) => item.year)?.year ?? null;
+      setAlbumTracks(tracks);
+      setRelatedAlbums(
+        albums
+          .filter((item) =>
+            item.album !== album &&
+            item.year != null &&
+            albumYear != null &&
+            Math.abs(item.year - albumYear) <= 1)
+          .slice(0, 5)
+          .map((item) => ({ album: item.album, albumArtist: item.albumArtist, year: item.year })),
+      );
+      setFact(nextFact);
+      setStatus(nextFact ? 'ok' : 'none');
+    });
+    return () => ctrl.abort();
+  }, [deferredTrack.album, deferredTrack.albumArtist, deferredTrack.artist, deferredTrack.year]);
+
+  const albumYear = deferredTrack.year ?? albumTracks.find((item) => item.year)?.year ?? null;
+  const duration = albumTracks.reduce((sum, item) => sum + (item.duration ?? 0), 0);
+  const knownCredits = albumTracks
+    .flatMap((item) => [item.artist, item.albumArtist])
+    .filter((value): value is string => Boolean(value && value !== 'Unknown Artist'));
+  const creditNames = Array.from(new Set(knownCredits)).slice(0, 6);
+
+  return (
+    <section className="album-context-panel" data-newamp-album-context-panel>
+      <div className="album-context-head">
+        <div>
+          <span>Album Context</span>
+          <strong>{deferredTrack.album || 'Unknown Album'}</strong>
+        </div>
+        <div className="album-context-meta">
+          <span>{albumYear ?? 'year unset'}</span>
+          <span>{albumTracks.length || 1} track{albumTracks.length === 1 ? '' : 's'}</span>
+          <span>{duration ? formatTime(duration) : 'duration unknown'}</span>
+        </div>
+      </div>
+
+      {fact ? (
+        <a href={fact.url} target="_blank" rel="noreferrer" className="album-context-story">
+          {fact.imageUrl && <img src={fact.imageUrl} alt={fact.title} draggable={false} />}
+          <span>
+            <strong>{fact.title}</strong>
+            {fact.description && <em>{fact.description}</em>}
+            <small>{fact.summary}</small>
+          </span>
+        </a>
+      ) : (
+        <div className="album-context-empty">
+          {status === 'loading'
+            ? 'Looking for release notes and album story...'
+            : 'No online album story found yet. Local tags still build the release card below.'}
+        </div>
+      )}
+
+      <div className="album-context-grid">
+        <div>
+          <span>Credits from tags</span>
+          <strong>{creditNames.length ? creditNames.join(' / ') : deferredTrack.albumArtist || deferredTrack.artist}</strong>
+        </div>
+        <div>
+          <span>Release neighborhood</span>
+          <strong>
+            {relatedAlbums.length
+              ? relatedAlbums.map((item) => `${item.albumArtist} - ${item.album} (${item.year})`).join(' / ')
+              : albumYear ? `No other local albums found around ${albumYear}.` : 'Add release years to compare nearby albums.'}
+          </strong>
+        </div>
+      </div>
+
+      {albumTracks.length > 1 && (
+        <ol className="album-context-tracklist">
+          {albumTracks.slice(0, 10).map((item) => (
+            <li key={item.id}>
+              <span>{item.trackNo ?? '-'}</span>
+              <strong>{item.title}</strong>
+              <em>{item.duration ? formatTime(item.duration) : '--:--'}</em>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
   );
 }
 

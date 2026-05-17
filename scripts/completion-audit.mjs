@@ -57,7 +57,7 @@ const checklist = [
     scriptCheck('smoke:skin'),
     fileExists('electron/winamp-skin-import.ts'),
     fileExists('shared/custom-skin.ts'),
-    fileContains('src/styles/index.css', /Newamp skin system/i),
+    fileContains('src/styles/index.css', /NewAmp skin system/i),
     fileContains('README.md', /\.newampskin\.json/i),
     fileContains('README.md', /\.wsz/i),
   ]),

@@ -21,9 +21,9 @@ await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(smokeRoot, { recursive: true });
 
 const artifacts = [
-  { name: 'installer', path: join(smokeRoot, 'Newamp Setup 1.0.0.exe') },
-  { name: 'portable', path: join(smokeRoot, 'Newamp Portable 1.0.0.exe') },
-  { name: 'exe', path: join(smokeRoot, 'Newamp.exe') },
+  { name: 'installer', path: join(smokeRoot, 'NewAmp Setup 1.0.0.exe') },
+  { name: 'portable', path: join(smokeRoot, 'NewAmp Portable 1.0.0.exe') },
+  { name: 'exe', path: join(smokeRoot, 'NewAmp.exe') },
 ];
 await Promise.all(artifacts.map((artifact, index) => writeFile(artifact.path, `artifact-${index}`, 'utf8')));
 
@@ -38,7 +38,7 @@ if (process.platform === 'win32') {
     artifacts,
     env: {
       NEWAMP_WINDOWS_KITS_ROOT: kitsRoot,
-      NEWAMP_SIGN_SUBJECT: 'Newamp Release',
+      NEWAMP_SIGN_SUBJECT: 'NewAmp Release',
     },
     requireExistingTool: true,
   });
@@ -102,7 +102,7 @@ const dryRun = signArtifacts({
   artifacts,
   env: {
     NEWAMP_SIGNTOOL_PATH: join(smokeRoot, 'signtool.exe'),
-    NEWAMP_SIGN_SUBJECT: 'Newamp Release',
+    NEWAMP_SIGN_SUBJECT: 'NewAmp Release',
   },
   requireExistingTool: false,
 });

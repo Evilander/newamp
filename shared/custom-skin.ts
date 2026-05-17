@@ -62,7 +62,7 @@ export function normalizeCustomSkin(value: unknown): CustomSkin | null {
   if (!Object.keys(variables).length) return null;
 
   return {
-    name: name || 'Newamp Custom',
+    name: name || 'NewAmp Custom',
     baseTheme,
     variables,
     updatedAt: normalizeTimestamp(value.updatedAt),
@@ -88,7 +88,7 @@ export function parseCustomSkinFile(content: string): CustomSkin {
   const parsed = JSON.parse(content) as unknown;
   const candidate = isObject(parsed) && isObject(parsed.skin) ? parsed.skin : parsed;
   const skin = normalizeCustomSkin(candidate);
-  if (!skin) throw new Error('This file does not contain a valid Newamp custom skin.');
+  if (!skin) throw new Error('This file does not contain a valid NewAmp custom skin.');
   return skin;
 }
 
