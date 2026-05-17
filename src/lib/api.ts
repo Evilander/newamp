@@ -33,7 +33,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   resumeState: null,
   compactMode: false,
   alwaysOnTop: false,
-  visualizerPreset: 'spectrum',
+  visualizerPreset: 'neon-waves',
   volume: 0.75,
   playbackRate: 1,
   audioOutputDeviceId: null,

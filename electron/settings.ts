@@ -26,7 +26,7 @@ const DEFAULTS: AppSettings = {
   resumeState: null,
   compactMode: false,
   alwaysOnTop: false,
-  visualizerPreset: 'spectrum',
+  visualizerPreset: 'neon-waves',
   volume: 0.75,
   playbackRate: 1,
   audioOutputDeviceId: null,
@@ -44,7 +44,20 @@ function normalizeAutoDjSmartRuleId(value: unknown): number | null {
 
 function normalizeVisualizerPreset(value: unknown): AppSettings['visualizerPreset'] {
   const preset = String(value);
-  return ['butterchurn', 'galaxy', 'aurora', 'spectrum', 'oscilloscope'].includes(preset)
+  return [
+    'butterchurn',
+    'galaxy',
+    'aurora',
+    'spectrum',
+    'oscilloscope',
+    'radial',
+    'tunnel',
+    'pulse',
+    'neon-waves',
+    'prism-bars',
+    'confetti',
+    'burning-cloud',
+  ].includes(preset)
     ? (preset as AppSettings['visualizerPreset'])
     : DEFAULTS.visualizerPreset;
 }

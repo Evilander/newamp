@@ -83,7 +83,9 @@ assert.match(mainSource, /--newamp-startup-smoke/, 'packaged app should accept a
 assert.match(mainSource, /NEWAMP_STARTUP_SMOKE_MARKER/, 'packaged app should be able to write startup smoke marker files');
 assert.match(mainSource, /app\.setPath\('sessionData'/, 'packaged app should isolate Chromium session data from durable library/settings data');
 assert.match(mainSource, /disk-cache-dir/, 'packaged app should route Chromium disk cache to the isolated session data path');
-assert.match(mainSource, /NEWAMP_ENABLE_HARDWARE_ACCELERATION/, 'packaged app should keep hardware acceleration opt-in');
+assert.match(mainSource, /NEWAMP_DISABLE_HARDWARE_ACCELERATION/, 'packaged app should retain an explicit software-rendering switch');
+assert.match(mainSource, /NEWAMP_ENABLE_NATIVE_GPU/, 'packaged app should allow native GPU opt-in when a host supports it');
+assert.match(mainSource, /applySoftwareRenderingSwitches\('normal'\)/, 'packaged app should default to stable software rendering');
 assert.match(mainSource, /MediaPlayPause/, 'global media shortcuts should use Electron accelerator names that do not crash bootstrap');
 assert.match(mainSource, /crashReporter\.start\(\{\s*uploadToServer:\s*false\s*\}\)/, 'packaged app should collect local crash dumps without uploading them');
 assert.match(mainSource, /app\.setPath\('crashDumps'/, 'packaged app should use a deterministic local crash dump folder');

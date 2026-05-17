@@ -99,7 +99,7 @@ assert.equal(importedWinampSkin.variables['--display-bg'], '#101316');
 assert.ok(importedWinampSkin.variables['--bg'], 'Winamp BMP colors should produce a Newamp background variable');
 assert.ok(importedWinampSkin.variables['--panel'], 'Winamp BMP colors should produce a Newamp panel variable');
 
-const [typesSource, preloadSource, apiSource, mainSource, settingsViewSource, appSource, skinsSource, styleSource, packageSource, gateSource] =
+const [typesSource, preloadSource, apiSource, mainSource, settingsViewSource, appSource, skinsSource, styleSource, deckTypesSource, deckPickerSource, packageSource, gateSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/preload.ts', import.meta.url), 'utf8'),
@@ -109,6 +109,8 @@ const [typesSource, preloadSource, apiSource, mainSource, settingsViewSource, ap
     readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/skins.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/decks/types.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/decks/DeckSkinPicker.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../scripts/release-gate.mjs', import.meta.url), 'utf8'),
   ]);
@@ -136,9 +138,12 @@ assert.match(appSource, /isDroppedSkinFile/, 'app-wide drop handling should clas
 assert.match(appSource, /importCustomSkinFile/, 'app-wide drop handling should import dropped skin files');
 assert.match(appSource, /Applied skin/, 'app-wide drop handling should report applied skins');
 assert.match(skinsSource, /@shared\/custom-skin/, 'renderer skin constants should come from shared validation');
-assert.match(styleSource, /\[data-theme='walnut'\] \.compact-art/, 'record deck should change compact player shape');
-assert.match(styleSource, /\[data-theme='jukebox'\] \.compact-shell/, 'jukebox should change compact player shape');
-assert.match(styleSource, /\[data-theme='terminal'\] \.compact-display/, 'vintage computer should change compact player shape');
+assert.match(deckTypesSource, /Windowshade/, 'deck skins should include a slim default windowshade bar');
+assert.match(deckTypesSource, /size: \{ width: 620, height: 116 \}/, 'default deck skin should have a compact fixed native size');
+assert.match(deckPickerSource, /data-newamp-deck-skin-button/, 'compact deck should expose always-visible skin switching buttons');
+assert.match(styleSource, /\.deck-record-player/, 'record deck should be a real shaped deck skin');
+assert.match(styleSource, /\.deck-jukebox/, 'jukebox should be a real shaped deck skin');
+assert.match(styleSource, /\.deck-cassette/, 'cassette should be a real shaped deck skin');
 assert.match(packageSource, /"smoke:skin"/, 'package scripts should expose skin smoke');
 assert.match(gateSource, /smoke:skin/, 'release gate should include skin smoke');
 

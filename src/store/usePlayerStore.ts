@@ -629,9 +629,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     setView: (v) => set({ view: v }),
     toggleEq: () => set({ showEq: !get().showEq }),
-    setFullscreenViz: (on) => set({ fullscreenViz: on }),
+    setFullscreenViz: (on) => {
+      const wasCompact = get().compactMode;
+      set({ fullscreenViz: on, compactMode: on ? false : wasCompact });
+      if (on && wasCompact) {
+        void api
+          .setSettings({ compactMode: false })
+          .then((settings) => set({ settings, compactMode: settings.compactMode }))
+          .catch(() => undefined);
+      }
+    },
     setCompactMode: (on) => {
-      set({ compactMode: on });
+      set({ compactMode: on, fullscreenViz: on ? false : get().fullscreenViz });
       void api
         .setSettings({ compactMode: on })
         .then((settings) => set({ settings, compactMode: settings.compactMode }))
@@ -1156,6 +1165,7 @@ if (typeof window !== 'undefined') {
       __newampSmoke?: {
         seek: (seconds: number) => void;
         setFullscreenVisualizer: (on: boolean) => void;
+        setCompactDeck: (on: boolean) => void;
       };
     }).__newampSmoke = {
       seek: (seconds: number) => {
@@ -1174,6 +1184,9 @@ if (typeof window !== 'undefined') {
       },
       setFullscreenVisualizer: (on: boolean) => {
         usePlayerStore.getState().setFullscreenViz(on);
+      },
+      setCompactDeck: (on: boolean) => {
+        usePlayerStore.getState().setCompactMode(on);
       },
     };
   }

@@ -98,6 +98,7 @@
     "smoke:ui-playback": "npm run build && node scripts/ui-playback-smoke.mjs",
     "smoke:ui-quick-play": "npm run build && node scripts/ui-quick-play-smoke.mjs",
     "smoke:ui-visualizer": "npm run build && node scripts/ui-visualizer-smoke.mjs",
+    "smoke:ui-deck": "npm run build && node scripts/ui-deck-smoke.mjs",
     "smoke:ui-art": "npm run build && node scripts/ui-art-smoke.mjs",
     "smoke:installer-artifact": "node scripts/installer-artifact-smoke.mjs",
     "smoke:installed-associations": "node scripts/installed-associations-smoke.mjs",

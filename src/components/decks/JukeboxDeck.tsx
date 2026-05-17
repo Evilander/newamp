@@ -39,7 +39,7 @@ export function JukeboxDeck(props: DeckProps): JSX.Element {
       <header className="deck-jb-titlebar titlebar-drag">
         <HeideckerLogo size={20} withGlow={false} />
         <div className="deck-jb-window titlebar-nodrag">
-          <DeckSkinPicker current="jukebox" onPick={props.onPickSkin} />
+          <DeckSkinPicker current="jukebox" onPick={props.onPickSkin} compact />
           <button
             className={`pxbtn ${alwaysOnTop ? 'is-active' : ''}`}
             onClick={() => onSetAlwaysOnTop(!alwaysOnTop)}
@@ -57,6 +57,7 @@ export function JukeboxDeck(props: DeckProps): JSX.Element {
       <button
         type="button"
         className="deck-jb-stage titlebar-nodrag"
+        data-newamp-open-visualizer
         onClick={onToggleVizExpanded}
         onDoubleClick={onOpenFullscreenViz}
         title={vizExpanded ? 'Show 45 sleeve' : 'Show visualizer'}

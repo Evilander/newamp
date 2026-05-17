@@ -1,75 +1,31 @@
 import assert from 'node:assert/strict';
 import electronPath from 'electron';
-import ffmpeg from 'ffmpeg-static';
-import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 const appRoot = resolve('.');
-const smokeRoot = resolve('tmp', 'ui-visualizer-smoke');
+const smokeRoot = resolve('tmp', 'ui-deck-smoke');
 const userData = join(smokeRoot, 'user-data');
-const mediaDir = join(smokeRoot, 'media');
-const fixturePath = join(mediaDir, 'Newamp UI Visualizer Smoke.mp3');
-const marker = '[newamp-ui-visualizer-smoke] ';
-
-if (!ffmpeg) {
-  console.error('ffmpeg-static did not resolve a binary for this platform');
-  process.exit(1);
-}
+const marker = '[newamp-ui-deck-smoke] ';
 
 await resetSmokeRoot();
-await createFixture();
 await writeSmokeSettings();
 
 const result = await runElectronSmoke();
-assert.equal(result.ok, true, 'UI visualizer smoke should report success');
-assert.match(result.currentTitle, /Visualizer Smoke/, 'visualizer smoke should play the generated fixture');
-assert.equal(result.preset, 'spectrum', 'fullscreen visualizer should render the stable spectrum preset');
-assert.ok(result.stageRect.width >= result.viewport.width * 0.9, 'fullscreen visualizer should cover viewport width');
-assert.ok(result.stageRect.height >= result.viewport.height * 0.9, 'fullscreen visualizer should cover viewport height');
-assert.ok(result.render.width >= 120, `visualizer canvas width is too small: ${result.render.width}`);
-assert.ok(result.render.height >= 80, `visualizer canvas height is too small: ${result.render.height}`);
-assert.ok(result.render.litSamples > 0, 'visualizer canvas should contain nonblank pixels');
-assert.equal(result.openedViaVizButton, true, 'regular UI VIZ button should open the fullscreen visualizer');
-assert.equal(result.openedViaTransportArt, true, 'transport album art should open the fullscreen visualizer');
-assert.equal(result.compactClearsFullscreen, true, 'entering deck mode should clear fullscreen visualizer state');
+assert.equal(result.ok, true, 'UI deck smoke should report success');
+assert.equal(result.openedViaDeckButton, true, 'real DECK button should enter compact mode');
+assert.ok(result.visibleSkinButtons >= 4, 'deck should expose all shape-changing skin buttons');
+assertWindow(result.shade, 620, 116, 'default windowshade deck');
+assertWindow(result.record, 540, 540, 'record-player deck');
+assertWindow(result.shadeAgain, 620, 116, 'windowshade deck after skin switch');
+assertWindow(result.nativeBounds, 620, 116, 'native BrowserWindow after returning to windowshade');
+assert.equal(result.resizable, false, 'compact deck BrowserWindow should not be user-resizable');
 console.log(JSON.stringify(result, null, 2));
 
 async function resetSmokeRoot() {
   await rm(smokeRoot, { recursive: true, force: true });
-  await mkdir(mediaDir, { recursive: true });
   await mkdir(userData, { recursive: true });
-}
-
-async function createFixture() {
-  const args = [
-    '-y',
-    '-hide_banner',
-    '-loglevel',
-    'error',
-    '-f',
-    'lavfi',
-    '-i',
-    'sine=frequency=880:duration=4.2',
-    '-metadata',
-    'title=Visualizer Smoke',
-    '-metadata',
-    'artist=Newamp QA',
-    '-metadata',
-    'album=Renderer Smoke',
-    '-metadata',
-    'date=2026',
-    '-c:a',
-    'libmp3lame',
-    '-q:a',
-    '6',
-    fixturePath,
-  ];
-  const result = spawnSync(ffmpeg, args, { encoding: 'utf8', windowsHide: true });
-  if (result.status !== 0 || !existsSync(fixturePath)) {
-    throw new Error(`ffmpeg fixture generation failed (${result.status})\n${result.stderr || result.stdout}`);
-  }
 }
 
 async function writeSmokeSettings() {
@@ -77,7 +33,7 @@ async function writeSmokeSettings() {
     join(userData, 'settings.json'),
     JSON.stringify(
       {
-        libraryRoots: [mediaDir],
+        libraryRoots: [],
         libraryAutoWatch: false,
         theme: 'classic',
         customSkin: null,
@@ -92,6 +48,9 @@ async function writeSmokeSettings() {
         limiterEnabled: true,
         preampDb: 0,
         resumeState: null,
+        compactMode: false,
+        alwaysOnTop: false,
+        visualizerPreset: 'neon-waves',
         volume: 0,
         playbackRate: 1,
         audioOutputDeviceId: null,
@@ -115,7 +74,7 @@ function runElectronSmoke() {
       env: {
         ...process.env,
         NODE_ENV: 'production',
-        NEWAMP_UI_VISUALIZER_SMOKE: '1',
+        NEWAMP_UI_DECK_SMOKE: '1',
         NEWAMP_SMOKE_USER_DATA: userData,
       },
       windowsHide: true,
@@ -127,7 +86,7 @@ function runElectronSmoke() {
     let stderr = '';
 
     const timeout = setTimeout(() => {
-      finish(new Error(`UI visualizer smoke timed out without result marker. stderr:\n${tail(stderr)}`));
+      finish(new Error(`UI deck smoke timed out without result marker. stderr:\n${tail(stderr)}`));
     }, 45000);
 
     child.stdout.setEncoding('utf8');
@@ -150,7 +109,7 @@ function runElectronSmoke() {
     child.on('error', (err) => finish(err));
     child.on('exit', (code) => {
       if (!settled && code !== 0) {
-        finish(new Error(`Electron exited ${code ?? 'without code'} before UI visualizer result.\nstderr:\n${tail(stderr)}`));
+        finish(new Error(`Electron exited ${code ?? 'without code'} before UI deck result.\nstderr:\n${tail(stderr)}`));
       }
     });
 
@@ -163,6 +122,12 @@ function runElectronSmoke() {
       else resolvePromise(value);
     }
   });
+}
+
+function assertWindow(value, width, height, label) {
+  assert.ok(value, `${label} should report a measured window`);
+  assert.ok(Math.abs(value.width - width) <= 12, `${label} width expected ${width}, got ${value.width}`);
+  assert.ok(Math.abs(value.height - height) <= 12, `${label} height expected ${height}, got ${value.height}`);
 }
 
 function tail(text) {

@@ -518,7 +518,19 @@ export interface AppSettings {
 }
 
 export type PlayerCommand = 'toggle-play' | 'next' | 'previous' | 'stop';
-export type VisualizerPreset = 'butterchurn' | 'galaxy' | 'aurora' | 'spectrum' | 'oscilloscope';
+export type VisualizerPreset =
+  | 'butterchurn'
+  | 'galaxy'
+  | 'aurora'
+  | 'spectrum'
+  | 'oscilloscope'
+  | 'radial'
+  | 'tunnel'
+  | 'pulse'
+  | 'neon-waves'
+  | 'prism-bars'
+  | 'confetti'
+  | 'burning-cloud';
 export type GuitarTabLineType = 'chords' | 'lyrics' | 'blank' | 'section' | 'tab';
 export type GuitarTabSource = 'ultimate-guitar' | 'local';
 

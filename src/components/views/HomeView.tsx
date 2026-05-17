@@ -81,7 +81,7 @@ export function HomeView(): JSX.Element {
 
   useEffect(() => {
     void refreshHome();
-  }, [current?.id]);
+  }, []);
 
   const recentTracks = useMemo(() => {
     const seen = new Set<number>();
@@ -862,11 +862,7 @@ function HomeHero({
               </div>
               <span className="home-hero-pick-title">{topRatedSeed.title}</span>
               <span className="home-hero-pick-artist">{topRatedSeed.artist}</span>
-              <span className="home-hero-pick-score">
-                {topRatedSeed.ratingScore != null
-                  ? `${topRatedSeed.ratingScore.toFixed(1)} / 100`
-                  : `${topRatedSeed.rating}/5`}
-              </span>
+              <PopcornRating track={topRatedSeed} compact />
               <span className="home-hero-pick-reason">Why this pick? {todayPick?.reason}</span>
             </button>
           ) : null}
@@ -910,7 +906,6 @@ function RatedHighlightRail({
         <div className="home-rated-grid">
           {visible.map((track, idx) => {
             const art = track.hasArt ? api.getArtUrl(track.id) : null;
-            const score = track.ratingScore != null ? track.ratingScore.toFixed(1) : `${track.rating}/5`;
             const scoreStrong = (track.ratingScore ?? track.rating * 20) >= 85;
             return (
               <button
@@ -922,11 +917,12 @@ function RatedHighlightRail({
               >
                 <div className="home-rated-card-art">
                   {art ? <img src={art} alt={track.album ?? ''} draggable={false} loading="lazy" decoding="async" /> : <span>♪</span>}
-                  <span className={`home-rated-card-score ${scoreStrong ? 'is-strong' : ''}`}>{score}</span>
+                  <span className={`home-rated-card-score ${scoreStrong ? 'is-strong' : ''}`}>{popcornBags(track)}/5</span>
                 </div>
                 <div className="home-rated-card-meta">
                   <span className="home-rated-card-title" title={track.title}>{track.title}</span>
                   <span className="home-rated-card-artist" title={track.artist}>{track.artist}</span>
+                  <PopcornRating track={track} compact />
                 </div>
               </button>
             );
@@ -948,8 +944,8 @@ function NewsCard({ fresh, loved, top }: { fresh: Track[]; loved: Track[]; top: 
     ? `${featured.artist} — “${featured.title}”`
     : 'NewAmp · field report from the desk';
   const blurb = featured
-    ? `New Heidecker writes: a strong entry from ${featured.artist}. ${featured.year ? `Vintage ${featured.year}. ` : ''}${featured.bpm ? `Sits at ${featured.bpm.toFixed(0)} BPM, ` : ''}${featured.genre ? `${featured.genre} territory, ` : ''}and it would slot nicely between bagels.`
-    : 'When the library has tracks, this column comes alive with reviews, comparisons, and bagel ratings from New Heidecker.';
+    ? `New Heidecker writes: a strong entry from ${featured.artist}. ${featured.year ? `Vintage ${featured.year}. ` : ''}${featured.bpm ? `Sits at ${featured.bpm.toFixed(0)} BPM, ` : ''}${featured.genre ? `${featured.genre} territory, ` : ''}${popcornBags(featured)} bags of popcorn.`
+    : 'When the library has tracks, this column comes alive with New Heidecker reviews and five-bag popcorn ratings.';
   return (
     <section className="bevel-out home-news p-3" data-cell="NEWS-03" style={{ background: 'var(--panel)' }}>
       <div className="mb-2 flex items-center gap-2">
@@ -970,6 +966,36 @@ function NewsCard({ fresh, loved, top }: { fresh: Track[]; loved: Track[]; top: 
       ) : null}
     </section>
   );
+}
+
+function PopcornRating({ track, compact = false }: { track: Track; compact?: boolean }): JSX.Element {
+  const bags = popcornBags(track);
+  const score = trackScorePercent(track);
+  return (
+    <span
+      className={`popcorn-rating ${compact ? 'is-compact' : ''}`}
+      data-newamp-popcorn-rating={bags}
+      title={`New Heidecker: ${bags} of 5 bags of popcorn (${score.toFixed(1)} score)`}
+    >
+      <span className="popcorn-rating-bags" aria-hidden="true">
+        {[1, 2, 3, 4, 5].map((bag) => (
+          <span key={bag} className={`popcorn-bag ${bag <= bags ? 'is-filled' : ''}`}>
+            {'\uD83C\uDF7F'}
+          </span>
+        ))}
+      </span>
+      <span className="popcorn-rating-label">{bags}/5 bags</span>
+    </span>
+  );
+}
+
+function popcornBags(track: Track): number {
+  return Math.max(0, Math.min(5, Math.round(trackScorePercent(track) / 20)));
+}
+
+function trackScorePercent(track: Track): number {
+  if (track.ratingScore != null) return Math.max(0, Math.min(100, track.ratingScore));
+  return Math.max(0, Math.min(100, (track.rating || 0) * 20));
 }
 
 interface TodayPick {

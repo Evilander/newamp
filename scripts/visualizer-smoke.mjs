@@ -31,6 +31,13 @@ const fullscreenSource = await readFile(
   'utf8',
 );
 assert.match(fullscreenSource, /id: 'butterchurn'/, 'Fullscreen visualizer must expose a Butterchurn preset');
+assert.match(fullscreenSource, /id: 'radial'/, 'Fullscreen visualizer must expose Radial preset');
+assert.match(fullscreenSource, /id: 'tunnel'/, 'Fullscreen visualizer must expose Tunnel preset');
+assert.match(fullscreenSource, /id: 'pulse'/, 'Fullscreen visualizer must expose Pulse preset');
+assert.match(fullscreenSource, /id: 'neon-waves'/, 'Fullscreen visualizer must expose Neon Waves preset');
+assert.match(fullscreenSource, /id: 'prism-bars'/, 'Fullscreen visualizer must expose Prism Bars preset');
+assert.match(fullscreenSource, /id: 'confetti'/, 'Fullscreen visualizer must expose Confetti preset');
+assert.match(fullscreenSource, /id: 'burning-cloud'/, 'Fullscreen visualizer must expose Burning Cloud preset');
 assert.match(
   fullscreenSource,
   /data-newamp-fullscreen-visualizer/,
@@ -41,6 +48,7 @@ assert.match(
   /data-newamp-visualizer-canvas/,
   'Visualizer canvas must expose a stable UI smoke selector',
 );
+assert.doesNotMatch(visualizerSource, /fillText\(['"]Milkdrop/i, 'Milkdrop fallback should remain visual instead of showing an unavailable error label');
 
 const packageSource = await readFile(new URL('../package.json', import.meta.url), 'utf8');
 assert.match(packageSource, /"smoke:ui-visualizer"/, 'package.json must expose the UI visualizer smoke');

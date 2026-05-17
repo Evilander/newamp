@@ -57,7 +57,12 @@ export function Sidebar(): JSX.Element {
           <button className={`pxbtn ${showEq ? 'is-active' : ''}`} onClick={toggleEq} title="Toggle equalizer">
             EQ
           </button>
-          <button className="pxbtn" onClick={() => setFs(true)} title="Fullscreen visualizer (F)">
+          <button
+            className="pxbtn"
+            onClick={() => setFs(true)}
+            title="Fullscreen visualizer (F)"
+            data-newamp-open-visualizer
+          >
             VIZ
           </button>
           <button className="pxbtn" onClick={() => setCompactMode(true)} title="Compact deck">

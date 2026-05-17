@@ -125,6 +125,7 @@ assert.match(sidebarSource, /Home/, 'Sidebar should include Home navigation');
 assert.match(appSource, /HomeView/, 'App should route to HomeView');
 assert.match(homeSource, /getStats/, 'Home should show library stats');
 assert.match(homeSource, /getLibraryHealth/, 'Home should surface library health');
+assert.doesNotMatch(homeSource, /\}, \[current\?\.id\]\)/, 'Home should not run the full dashboard refresh on every track change');
 assert.match(homeSource, /getListeningHistory/, 'Home should surface listening history');
 assert.match(homeSource, /buildHarmonicMix/, 'Home should expose harmonic launch recommendations');
 assert.match(homeSource, /Fresh Imports/, 'Home should expose scan-derived fresh imports');
@@ -133,6 +134,9 @@ assert.match(homeSource, /getSmartPlaylistRules/, 'Home should load saved smart 
 assert.match(homeSource, /getSuggestedSmartPlaylistRules/, 'Home should load suggested smart playlist stations');
 assert.match(homeSource, /runSmartPlaylistRule/, 'Home should launch saved smart playlist rules');
 assert.match(homeSource, /setAutoDjSmartRuleId/, 'Home should arm Auto DJ from saved smart playlist rules');
+assert.match(homeSource, /PopcornRating/, 'Home should render New Heidecker popcorn ratings');
+assert.match(homeSource, /five-bag popcorn ratings/, 'Home should describe Heidecker ratings as popcorn-only');
+assert.doesNotMatch(homeSource, /bagel/i, 'Home should not use bagels for New Heidecker ratings');
 assert.match(homeSource, /Station Active/, 'Home should show active station state');
 assert.match(homeSource, /STOP RADIO/, 'Home should expose active station stop controls');
 assert.match(homeSource, /Smart Rule Radio/, 'Home should start continuous Smart Rule Radio');

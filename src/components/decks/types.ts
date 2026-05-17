@@ -6,11 +6,17 @@ import type { Track } from '@shared/types';
 
 export type DeckSkin = 'bento' | 'record-player' | 'jukebox' | 'cassette';
 
-export const DECK_SKINS: { id: DeckSkin; label: string; tagline: string; size: { width: number; height: number } }[] = [
-  { id: 'bento',         label: 'Bento',         tagline: 'Winamp 2 classic',          size: { width: 720, height: 168 } },
-  { id: 'record-player', label: 'Record Player', tagline: 'Spinning vinyl + tonearm',  size: { width: 540, height: 540 } },
-  { id: 'jukebox',       label: 'Jukebox',       tagline: 'Wurlitzer arch + chrome',   size: { width: 420, height: 560 } },
-  { id: 'cassette',      label: 'Cassette Deck', tagline: 'Twin spools, magnetic tape', size: { width: 760, height: 320 } },
+export const DECK_SKINS: {
+  id: DeckSkin;
+  label: string;
+  shortLabel: string;
+  tagline: string;
+  size: { width: number; height: number };
+}[] = [
+  { id: 'bento',         label: 'Windowshade',   shortLabel: 'BAR',  tagline: 'Slim Winamp-style bar',      size: { width: 620, height: 116 } },
+  { id: 'record-player', label: 'Record Player', shortLabel: 'VIN',  tagline: 'Spinning vinyl + tonearm',   size: { width: 540, height: 540 } },
+  { id: 'jukebox',       label: 'Jukebox',       shortLabel: 'JUKE', tagline: 'Wurlitzer arch + chrome',    size: { width: 420, height: 560 } },
+  { id: 'cassette',      label: 'Cassette Deck', shortLabel: 'TAPE', tagline: 'Twin spools, magnetic tape', size: { width: 760, height: 320 } },
 ];
 
 export interface DeckProps {

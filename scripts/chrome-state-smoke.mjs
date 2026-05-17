@@ -14,7 +14,7 @@ await mkdir(smokeRoot, { recursive: true });
 const settings = new SettingsStore(settingsPath);
 assert.equal(settings.get().compactMode, false, 'compact deck should default to full library mode');
 assert.equal(settings.get().alwaysOnTop, false, 'always-on-top should default to off');
-assert.equal(settings.get().visualizerPreset, 'spectrum', 'visualizer preset should default to spectrum');
+assert.equal(settings.get().visualizerPreset, 'neon-waves', 'visualizer preset should default to Xbox-style Neon Waves');
 
 const compactSaved = settings.set({ compactMode: true });
 assert.equal(compactSaved.compactMode, true, 'compact deck preference should save');
@@ -31,9 +31,9 @@ assert.equal(normalized.compactMode, false, 'compact deck preference should reje
 const visualizerSaved = settings.set({ visualizerPreset: 'galaxy' });
 assert.equal(visualizerSaved.visualizerPreset, 'galaxy', 'visualizer preset should save');
 assert.equal(new SettingsStore(settingsPath).get().visualizerPreset, 'galaxy', 'visualizer preset should reload');
-assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'spectrum', 'visualizer preset should reject unknown values');
+assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'neon-waves', 'visualizer preset should reject unknown values');
 
-const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, packageSource, gateSource] =
+const [typesSource, settingsSource, storeSource, appSource, titleBarSource, compactSource, preloadSource, apiSource, viteEnvSource, fullscreenSource, mainSource, packageSource, gateSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/settings.ts', import.meta.url), 'utf8'),
@@ -45,6 +45,7 @@ const [typesSource, settingsSource, storeSource, appSource, titleBarSource, comp
     readFile(new URL('../src/lib/api.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/vite-env.d.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/FullscreenVisualizer.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('./release-gate.mjs', import.meta.url), 'utf8'),
   ]);
@@ -67,12 +68,18 @@ assert.match(storeSource, /vizPreset: settings\.visualizerPreset/, 'player store
 assert.match(storeSource, /setSettings\(\{ visualizerPreset: name \}\)/, 'player store should persist visualizer preset changes');
 assert.match(appSource, /winctl\.setCompact\(compact\)/, 'renderer should sync compact mode to the native window');
 assert.match(appSource, /winctl\.setAlwaysOnTop\(compact \|\| alwaysOnTop\)/, 'renderer should sync pinned/native topmost state');
+assert.match(appSource, /\{fullscreen && <FullscreenVisualizer \/>\}/, 'fullscreen visualizer should render outside app chrome');
+assert.match(appSource, /StartupSplash/, 'app should show the Newamp logo on launch');
+assert.match(storeSource, /fullscreenViz: on \? false : get\(\)\.fullscreenViz/, 'entering compact deck should clear fullscreen visualizer state');
+assert.match(mainSource, /setResizable\(false\)/, 'compact deck window should lock user resizing');
+assert.match(mainSource, /setResizable\(true\)/, 'full library window should restore resizing');
+assert.match(mainSource, /NEWAMP_DISABLE_HARDWARE_ACCELERATION/, 'main process should expose explicit rendering-mode controls');
 assert.match(preloadSource, /win:set-always-on-top/, 'preload should expose always-on-top IPC');
 assert.match(apiSource, /setAlwaysOnTop/, 'renderer window-control API should expose always-on-top');
 assert.match(viteEnvSource, /setAlwaysOnTop/, 'window control types should include always-on-top');
 assert.match(titleBarSource, /PIN/, 'title bar should expose a pin button');
 assert.match(titleBarSource, /setAlwaysOnTop\(!alwaysOnTop\)/, 'title bar pin should toggle persisted topmost state');
-assert.match(compactSource, /setAlwaysOnTop\(!alwaysOnTop\)/, 'compact deck should expose the same pin toggle');
+assert.match(compactSource, /onSetAlwaysOnTop: setAlwaysOnTop/, 'compact deck should expose the same pin toggle');
 assert.match(titleBarSource, /api\.appVersion/, 'title bar should display the real app version');
 assert.doesNotMatch(titleBarSource, /v0\.1/, 'title bar should not show stale pre-release version text');
 

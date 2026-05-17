@@ -97,7 +97,10 @@ export function CompactPlayer(): JSX.Element {
     onClose: () => void winctl.close(),
     onPickSkin: handlePickSkin,
     onToggleVizExpanded: handleToggleVizExpanded,
-    onOpenFullscreenViz: () => setFullscreenViz(true),
+    onOpenFullscreenViz: () => {
+      setCompactMode(false);
+      setFullscreenViz(true);
+    },
   };
 
   switch (deckSkin) {

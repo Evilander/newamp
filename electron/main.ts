@@ -8,6 +8,7 @@ import {
   nativeImage,
   net,
   protocol,
+  screen,
   shell,
   dialog,
   Tray,
@@ -81,7 +82,9 @@ const userDataOverride =
   process.env.NEWAMP_USER_DATA_DIR || commandLineValue('--newamp-user-data-dir');
 const sessionDataOverride =
   process.env.NEWAMP_SESSION_DATA_DIR || commandLineValue('--newamp-session-data-dir');
-const forceSoftwareRendering = process.env.NEWAMP_ENABLE_HARDWARE_ACCELERATION !== '1';
+const forceNativeGpuRendering = process.env.NEWAMP_ENABLE_NATIVE_GPU === '1';
+const forceSoftwareRendering =
+  process.env.NEWAMP_DISABLE_HARDWARE_ACCELERATION === '1' || !forceNativeGpuRendering;
 const uiPlaybackSmoke = process.env.NEWAMP_UI_PLAYBACK_SMOKE === '1';
 const uiQuickPlaySmoke = process.env.NEWAMP_UI_QUICK_PLAY_SMOKE === '1';
 const uiHandoffSmoke = process.env.NEWAMP_UI_HANDOFF_SMOKE === '1';
@@ -89,6 +92,7 @@ const uiGaplessSmoke = process.env.NEWAMP_UI_GAPLESS_SMOKE === '1';
 const uiLyricsSmoke = process.env.NEWAMP_UI_LYRICS_SMOKE === '1';
 const uiOpenFileSmoke = process.env.NEWAMP_UI_OPEN_FILE_SMOKE === '1';
 const uiVisualizerSmoke = process.env.NEWAMP_UI_VISUALIZER_SMOKE === '1';
+const uiDeckSmoke = process.env.NEWAMP_UI_DECK_SMOKE === '1';
 const uiArtSmoke = process.env.NEWAMP_UI_ART_SMOKE === '1';
 const smokeMode =
   startupSmoke ||
@@ -99,6 +103,7 @@ const smokeMode =
   uiLyricsSmoke ||
   uiOpenFileSmoke ||
   uiVisualizerSmoke ||
+  uiDeckSmoke ||
   uiArtSmoke;
 const OPEN_AUDIO_EXTS = new Set([
   '.mp3',
@@ -144,6 +149,8 @@ if (smokeMode && !userDataOverride) {
             ? 'ui-open-file-smoke-user-data'
             : uiVisualizerSmoke
               ? 'ui-visualizer-smoke-user-data'
+              : uiDeckSmoke
+                ? 'ui-deck-smoke-user-data'
               : uiArtSmoke
                 ? 'ui-art-smoke-user-data'
                 : 'ui-playback-smoke-user-data';
@@ -1108,15 +1115,18 @@ function registerIpc(): void {
           : mainWin.getBounds();
       }
       if (mainWin.isMaximized()) mainWin.unmaximize();
-      const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 720)));
-      const height = Math.max(120, Math.min(1000, Math.trunc(Number(size?.height) || 168)));
+      const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 620)));
+      const height = Math.max(100, Math.min(1000, Math.trunc(Number(size?.height) || 116)));
+      mainWin.setResizable(true);
       // Allow shrinking the minimum to the deck's natural size so resize cannot
       // pad the chrome with empty border. Each skin owns its aspect ratio.
-      mainWin.setMinimumSize(Math.min(280, width), Math.min(120, height));
+      mainWin.setMinimumSize(Math.min(280, width), Math.min(100, height));
       mainWin.setSize(width, height, true);
+      mainWin.setResizable(false);
       mainWin.setAlwaysOnTop(true, 'floating');
       return;
     }
+    mainWin.setResizable(true);
     mainWin.setAlwaysOnTop(false);
     mainWin.setMinimumSize(980, 640);
     // Pull the window above the minimum first if it is currently smaller, then
@@ -1128,7 +1138,7 @@ function registerIpc(): void {
     } else {
       // Fallback for the edge case where deck mode was entered without a saved
       // pre-deck bounds (e.g. fresh app start in compactMode from settings).
-      const display = require('electron').screen.getDisplayMatching(mainWin.getBounds()).workArea;
+      const display = screen.getDisplayMatching(mainWin.getBounds()).workArea;
       const fallbackWidth = Math.min(1280, Math.max(980, display.width - 200));
       const fallbackHeight = Math.min(820, Math.max(640, display.height - 200));
       mainWin.setSize(fallbackWidth, fallbackHeight, true);
@@ -1140,10 +1150,12 @@ function registerIpc(): void {
   });
   ipcMain.handle('win:set-compact-size', (_e, size: { width: number; height: number }) => {
     if (!mainWin) return;
-    const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 720)));
-    const height = Math.max(120, Math.min(1000, Math.trunc(Number(size?.height) || 168)));
-    mainWin.setMinimumSize(Math.min(280, width), Math.min(120, height));
+    const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 620)));
+    const height = Math.max(100, Math.min(1000, Math.trunc(Number(size?.height) || 116)));
+    mainWin.setResizable(true);
+    mainWin.setMinimumSize(Math.min(280, width), Math.min(100, height));
     mainWin.setSize(width, height, true);
+    mainWin.setResizable(false);
   });
   ipcMain.handle('win:set-always-on-top', (_e, on: boolean) => {
     mainWin?.setAlwaysOnTop(!!on, 'floating');
@@ -1336,6 +1348,28 @@ async function runUiArtSmoke(win: BrowserWindow, scanPromise: Promise<void>): Pr
   }
 }
 
+async function runUiDeckSmoke(win: BrowserWindow): Promise<void> {
+  try {
+    const result = await Promise.race([
+      win.webContents.executeJavaScript(uiDeckProbeSource(), true),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for UI deck probe')), 20000),
+      ),
+    ]);
+    const bounds = win.getBounds();
+    console.log(`[newamp-ui-deck-smoke] ${JSON.stringify({
+      ...result,
+      nativeBounds: { width: bounds.width, height: bounds.height },
+      resizable: win.isResizable(),
+    })}`);
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    console.error('[newamp-ui-deck-smoke] failed:', err);
+    app.exit(1);
+  }
+}
+
 function reloadForSmoke(win: BrowserWindow): Promise<void> {
   return new Promise((resolveReload, rejectReload) => {
     const cleanup = (): void => {
@@ -1440,19 +1474,22 @@ function uiVisualizerProbeSource(): string {
         const value = Number(el?.getAttribute('data-newamp-current-time') || '0');
         return value > 0.25 ? el : null;
       }, 8000);
-      if (window.__newampSmoke?.setFullscreenVisualizer) {
-        window.__newampSmoke.setFullscreenVisualizer(true);
-      } else {
-        window.dispatchEvent(new KeyboardEvent('keydown', {
-          key: 'f',
-          code: 'KeyF',
-          bubbles: true,
-          cancelable: true,
-        }));
-      }
+      const vizButton = await waitFor('real VIZ button', () =>
+        Array.from(document.querySelectorAll('[data-newamp-open-visualizer]'))
+          .find((item) => (item.textContent || '').trim() === 'VIZ'),
+      );
+      vizButton.click();
       const stage = await waitFor('fullscreen visualizer stage', () =>
         document.querySelector('[data-newamp-fullscreen-visualizer]'),
       );
+      const stageRect = stage.getBoundingClientRect();
+      const viewport = { width: window.innerWidth, height: window.innerHeight };
+      if (stageRect.width < viewport.width * 0.9 || stageRect.height < viewport.height * 0.9) {
+        throw new Error(
+          'Fullscreen visualizer is not covering the viewport: ' +
+            JSON.stringify({ stageRect: { width: stageRect.width, height: stageRect.height }, viewport }),
+        );
+      }
       const spectrumButton = await waitFor('Spectrum visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'spectrum'),
@@ -1480,12 +1517,93 @@ function uiVisualizerProbeSource(): string {
       const currentTitle =
         document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
       const currentTime = Number(timeEl.getAttribute('data-newamp-current-time') || '0');
+      window.__newampSmoke?.setFullscreenVisualizer?.(false);
+      await waitFor('fullscreen visualizer closes', () =>
+        document.querySelector('[data-newamp-fullscreen-visualizer]') ? null : true,
+      );
+      const transportArtButton = await waitFor('transport visualizer opener', () =>
+        document.querySelector('[data-newamp-transport] [data-newamp-open-visualizer]'),
+      );
+      transportArtButton.click();
+      await waitFor('fullscreen visualizer reopens', () =>
+        document.querySelector('[data-newamp-fullscreen-visualizer]'),
+      );
+      window.__newampSmoke?.setCompactDeck?.(true);
+      await waitFor('compact deck opens and clears fullscreen visualizer', () => {
+        const deck = document.querySelector('.compact-root, .deck-record-player, .deck-jukebox, .deck-cassette');
+        const fullscreen = document.querySelector('[data-newamp-fullscreen-visualizer]');
+        return deck && !fullscreen ? deck : null;
+      });
       return {
         ok: true,
         currentTitle,
         currentTime,
         preset: stage.getAttribute('data-newamp-visualizer-preset'),
         render,
+        stageRect: { width: stageRect.width, height: stageRect.height },
+        viewport,
+        openedViaVizButton: true,
+        openedViaTransportArt: true,
+        compactClearsFullscreen: true,
+      };
+    })()
+  `;
+}
+
+function uiDeckProbeSource(): string {
+  return `
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (label, fn, timeout = 10000) => {
+        const start = performance.now();
+        while (performance.now() - start < timeout) {
+          const value = fn();
+          if (value) return value;
+          await sleep(75);
+        }
+        throw new Error('Timed out waiting for ' + label);
+      };
+      const measure = () => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+        rootWidth: Math.round((document.querySelector('.compact-root, .deck-record-player, .deck-jukebox, .deck-cassette')?.getBoundingClientRect().width || 0)),
+        rootHeight: Math.round((document.querySelector('.compact-root, .deck-record-player, .deck-jukebox, .deck-cassette')?.getBoundingClientRect().height || 0)),
+      });
+      const deckButton = await waitFor('real DECK button', () =>
+        Array.from(document.querySelectorAll('button'))
+          .find((item) => (item.textContent || '').trim() === 'DECK'),
+      );
+      deckButton.click();
+      await waitFor('windowshade compact deck', () => document.querySelector('.compact-root'));
+      const shade = await waitFor('windowshade size', () => {
+        const box = measure();
+        return Math.abs(box.width - 620) <= 12 && Math.abs(box.height - 116) <= 12 ? box : null;
+      });
+      const skinButtons = Array.from(document.querySelectorAll('[data-newamp-deck-skin-button]'));
+      const vinyl = skinButtons.find((item) => item.getAttribute('data-newamp-deck-skin-button') === 'record-player');
+      if (!vinyl) throw new Error('Record-player deck skin button is missing');
+      vinyl.click();
+      await waitFor('record-player deck', () => document.querySelector('.deck-record-player'));
+      const record = await waitFor('record-player size', () => {
+        const box = measure();
+        return Math.abs(box.width - 540) <= 12 && Math.abs(box.height - 540) <= 12 ? box : null;
+      });
+      const shadeButton = await waitFor('windowshade skin button after shape switch', () =>
+        document.querySelector('[data-newamp-deck-skin-button="bento"]'),
+      );
+      shadeButton.click();
+      await waitFor('windowshade deck returns', () => document.querySelector('.compact-root'));
+      const shadeAgain = await waitFor('windowshade size after shape switch', () => {
+        const box = measure();
+        return Math.abs(box.width - 620) <= 12 && Math.abs(box.height - 116) <= 12 ? box : null;
+      });
+      return {
+        ok: true,
+        openedViaDeckButton: true,
+        visibleSkinButtons: skinButtons.length,
+        shade,
+        record,
+        shadeAgain,
       };
     })()
   `;
@@ -2413,6 +2531,8 @@ async function bootstrap(): Promise<void> {
       void runUiLyricsSmoke(mainWin, scanPromise);
     } else if (uiVisualizerSmoke && mainWin) {
       void runUiVisualizerSmoke(mainWin, scanPromise);
+    } else if (uiDeckSmoke && mainWin) {
+      void runUiDeckSmoke(mainWin);
     } else if (uiArtSmoke && mainWin) {
       void runUiArtSmoke(mainWin, scanPromise);
     }
