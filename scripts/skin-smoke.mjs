@@ -139,7 +139,7 @@ assert.match(appSource, /importCustomSkinFile/, 'app-wide drop handling should i
 assert.match(appSource, /Applied skin/, 'app-wide drop handling should report applied skins');
 assert.match(skinsSource, /@shared\/custom-skin/, 'renderer skin constants should come from shared validation');
 assert.match(deckTypesSource, /Windowshade/, 'deck skins should include a slim default windowshade bar');
-assert.match(deckTypesSource, /size: \{ width: 720, height: 152 \}/, 'default deck skin should restore the original thin windowshade native size');
+assert.match(deckTypesSource, /size: \{ width: 820, height: 112 \}/, 'default deck skin should keep the slimmer fixed windowshade native size');
 assert.match(deckPickerSource, /data-newamp-deck-skin-select/, 'compact deck should expose skin switching without consuming the whole bar');
 assert.match(styleSource, /\.deck-record-player/, 'record deck should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-jukebox/, 'jukebox should be a real shaped deck skin');

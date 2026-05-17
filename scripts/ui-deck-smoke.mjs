@@ -16,13 +16,13 @@ const result = await runElectronSmoke();
 assert.equal(result.ok, true, 'UI deck smoke should report success');
 assert.equal(result.openedViaDeckButton, true, 'real DECK button should enter compact mode');
 assert.ok(result.visibleSkinButtons >= 8, 'deck should expose all shape-changing skin buttons');
-assertWindow(result.shade, 720, 152, 'default windowshade deck');
+assertWindow(result.shade, 820, 112, 'default windowshade deck');
 assertWindow(result.record, 540, 540, 'record-player deck');
 assertWindow(result.hotdog, 740, 240, 'hotdog deck');
 assertWindow(result.tv, 520, 430, 'retro TV deck');
 assertWindow(result.winamp, 550, 232, 'Winamp classic deck');
-assertWindow(result.shadeAgain, 720, 152, 'windowshade deck after skin switch');
-assertWindow(result.nativeBounds, 720, 152, 'native BrowserWindow after returning to windowshade');
+assertWindow(result.shadeAgain, 820, 112, 'windowshade deck after skin switch');
+assertWindow(result.nativeBounds, 820, 112, 'native BrowserWindow after returning to windowshade');
 assert.equal(result.resizable, false, 'compact deck BrowserWindow should not be user-resizable');
 console.log(JSON.stringify(result, null, 2));
 

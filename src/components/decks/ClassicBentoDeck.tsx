@@ -121,7 +121,7 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
         </div>
 
         <div className="compact-viz">
-          <Visualizer mode="mini" width={118} height={96} />
+          <Visualizer mode="mini" width={96} height={96} />
         </div>
       </section>
     </div>
