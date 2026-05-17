@@ -12,6 +12,7 @@ export type VizMode =
   | 'radial'
   | 'tunnel'
   | 'pulse'
+  | 'orbital-rings'
   | 'neon-waves'
   | 'neon-ribbons'
   | 'plasma-grid'
@@ -428,6 +429,85 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
           ctx.lineTo(x, y);
         }
         ctx.stroke();
+      } else if (mode === 'orbital-rings') {
+        ctx.fillStyle = 'rgba(0,0,0,0.15)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 0, 22) / 255;
+        const lowMid = avg(freq, 22, 86) / 255;
+        const highMid = avg(freq, 86, 168) / 255;
+        const treble = avg(freq, 168, 280) / 255;
+        const cx = w / 2;
+        const cy = h / 2;
+        const minSide = Math.min(w, h);
+        const time = Date.now();
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(time / 3600);
+        ctx.globalCompositeOperation = 'lighter';
+
+        for (let ring = 0; ring < 5; ring += 1) {
+          const radius = minSide * (0.11 + ring * 0.072) + bass * minSide * 0.035;
+          const bars = 96 + ring * 18;
+          const spin = (ring % 2 === 0 ? 1 : -1) * time / (2800 + ring * 620);
+          ctx.save();
+          ctx.rotate(spin);
+          for (let i = 0; i < bars; i += 1) {
+            const binIndex = Math.floor((i / bars) * Math.min(freq.length - 1, 260));
+            const energy = Math.max(0.035, freq[binIndex]! / 255);
+            const angle = (Math.PI * 2 * i) / bars;
+            const pulse = 1 + Math.sin(time / 240 + i * 0.17 + ring) * 0.08;
+            const inner = radius * (0.96 + lowMid * 0.04);
+            const outer =
+              radius +
+              (8 + ring * 2 + energy * minSide * 0.09 + bass * minSide * 0.04) * pulse;
+            const hue = (155 + ring * 26 + i * 0.9 + time / 70 + treble * 120) % 360;
+            ctx.strokeStyle = `hsla(${hue}, 96%, ${54 + energy * 22}%, ${0.18 + energy * 0.74})`;
+            ctx.lineWidth = 0.75 + energy * 2.8 + bass * 1.5;
+            ctx.beginPath();
+            ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+            ctx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        for (let ring = 0; ring < 4; ring += 1) {
+          const radius = minSide * (0.18 + ring * 0.105) + bass * minSide * 0.09;
+          ctx.strokeStyle = `hsla(${190 + ring * 34 + time / 52}, 92%, 62%, ${0.08 + bass * 0.34 + highMid * 0.18})`;
+          ctx.lineWidth = 1 + bass * 4 + ring * 0.28;
+          ctx.shadowColor = `hsl(${190 + ring * 34}, 92%, 62%)`;
+          ctx.shadowBlur = 12 + bass * 38;
+          ctx.beginPath();
+          ctx.arc(0, 0, radius + Math.sin(time / 300 + ring) * (4 + bass * 22), 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        ctx.shadowBlur = 0;
+        ctx.rotate(-time / 2200);
+        ctx.beginPath();
+        for (let i = 0; i < 240; i += 1) {
+          const waveIndex = Math.floor((i / 240) * wave.length);
+          const sample = (wave[waveIndex]! - 128) / 128;
+          const angle = (Math.PI * 2 * i) / 240;
+          const radius =
+            minSide * (0.055 + bass * 0.03) + sample * minSide * (0.05 + highMid * 0.04);
+          const x = Math.cos(angle) * radius;
+          const y = Math.sin(angle) * radius;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = `rgba(${parseRgb(accent)}, ${0.5 + treble * 0.35})`;
+        ctx.lineWidth = 1.2 + lowMid * 2;
+        ctx.stroke();
+        ctx.restore();
+
+        const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, minSide * (0.18 + bass * 0.22));
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.18 + bass * 0.48})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, w, h);
       } else if (mode === 'neon-waves') {
         ctx.fillStyle = 'rgba(0,0,0,0.16)';
         ctx.fillRect(0, 0, w, h);

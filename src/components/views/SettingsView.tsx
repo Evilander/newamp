@@ -594,7 +594,11 @@ export function SettingsView(): JSX.Element {
           <h2 className="text-[11px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
             Last.fm
           </h2>
-          <div className="text-[12px] leading-relaxed" style={{ color: 'var(--ink-2)' }}>
+          <div
+            className="text-[12px] leading-relaxed"
+            data-newamp-lastfm-setup-guide
+            style={{ color: 'var(--ink-2)' }}
+          >
             Last.fm is optional. NewAmp needs your own Last.fm API account because scrobbling is tied
             to your Last.fm identity, not to a shared NewAmp account. Create one at{' '}
             <a
@@ -607,6 +611,22 @@ export function SettingsView(): JSX.Element {
             </a>
             , use <span style={{ color: 'var(--ink)' }}>NewAmp</span> as the application name,
             and leave callback URL blank for desktop auth.
+          </div>
+          <div className="grid gap-2 text-[11px] md:grid-cols-2" style={{ color: 'var(--ink-2)' }}>
+            <div className="bevel-in px-3 py-2">
+              <strong style={{ color: 'var(--ink)' }}>Last.fm app form</strong>
+              <div>Application name: NewAmp</div>
+              <div>Application description: Local Windows music player with optional Last.fm scrobbling.</div>
+              <div>Homepage: https://github.com/evilander/newamp</div>
+              <div>Callback URL: leave blank.</div>
+            </div>
+            <div className="bevel-in px-3 py-2">
+              <strong style={{ color: 'var(--ink)' }}>Connection order</strong>
+              <div>1. Save API key and shared secret.</div>
+              <div>2. Open Last.fm auth and approve NewAmp in the browser.</div>
+              <div>3. Return here and press Complete auth.</div>
+              <div>4. Enable scrobbling or send a now-playing test.</div>
+            </div>
           </div>
           <Row label="API key">
             <input
