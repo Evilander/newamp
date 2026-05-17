@@ -1,10 +1,10 @@
 /// <reference types="vite/client" />
 
-import type { NewampAPI } from '../shared/types';
+import type { NewAmpAPI } from '../shared/types';
 
 declare global {
   interface Window {
-    newamp: NewampAPI;
+    newamp: NewAmpAPI;
     winctl: {
       minimize: () => Promise<void>;
       toggleMax: () => Promise<void>;

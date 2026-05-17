@@ -28,7 +28,7 @@ import type {
   ListeningHistoryItem,
   ListeningInsights,
   MetadataLookupCandidate,
-  NewampAPI,
+  NewAmpAPI,
   PlaylistFolderExportResult,
   PlaylistM3uImportResult,
   PodcastEpisode,
@@ -55,7 +55,7 @@ import type {
   TrackWavExportResult,
 } from '../shared/types.js';
 
-const api: NewampAPI = {
+const api: NewAmpAPI = {
   scanLibrary: (roots) => ipcRenderer.invoke('library:scan', roots),
   cancelScan: () => ipcRenderer.invoke('library:cancel-scan'),
   onScanProgress: (cb) => {

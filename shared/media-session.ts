@@ -1,27 +1,27 @@
 import type { Track } from './types.js';
 
-export interface NewampMediaImage {
+export interface NewAmpMediaImage {
   src: string;
   sizes: string;
   type: string;
 }
 
-export interface NewampMediaMetadata {
+export interface NewAmpMediaMetadata {
   title: string;
   artist: string;
   album: string;
-  artwork: NewampMediaImage[];
+  artwork: NewAmpMediaImage[];
 }
 
-export interface NewampMediaPositionState {
+export interface NewAmpMediaPositionState {
   duration: number;
   position: number;
   playbackRate: number;
 }
 
-export type NewampMediaPlaybackState = 'none' | 'paused' | 'playing';
+export type NewAmpMediaPlaybackState = 'none' | 'paused' | 'playing';
 
-export function buildMediaSessionMetadata(track: Track, artUrl: string | null): NewampMediaMetadata {
+export function buildMediaSessionMetadata(track: Track, artUrl: string | null): NewAmpMediaMetadata {
   return {
     title: track.title.trim() || 'Unknown Track',
     artist: track.artist.trim() || 'Unknown Artist',
@@ -33,7 +33,7 @@ export function buildMediaSessionMetadata(track: Track, artUrl: string | null): 
 export function mediaSessionPlaybackState(
   playing: boolean,
   current: Track | null,
-): NewampMediaPlaybackState {
+): NewAmpMediaPlaybackState {
   if (!current) return 'none';
   return playing ? 'playing' : 'paused';
 }
@@ -46,7 +46,7 @@ export function mediaSessionPositionState({
   duration: number | null | undefined;
   currentTime: number;
   playbackRate: number;
-}): NewampMediaPositionState | null {
+}): NewAmpMediaPositionState | null {
   if (!Number.isFinite(duration) || !duration || duration <= 0) return null;
   const safeDuration = Math.max(0, duration);
   const position = Math.max(0, Math.min(safeDuration, Number.isFinite(currentTime) ? currentTime : 0));

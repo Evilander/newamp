@@ -7,7 +7,7 @@ import type {
   AppSettings,
   GuitarTabLine,
   ListeningInsights,
-  NewampAPI,
+  NewAmpAPI,
   SupportDiagnostics,
   TrackMetadataPatchInput,
 } from '@shared/types';
@@ -86,7 +86,7 @@ function emptyListeningInsights(now = Date.now()): ListeningInsights {
   };
 }
 
-const stub: NewampAPI = {
+const stub: NewAmpAPI = {
   scanLibrary: async () => undefined,
   cancelScan: async () => undefined,
   onScanProgress: () => () => undefined,
@@ -336,7 +336,7 @@ const stub: NewampAPI = {
 
 export const inElectron = typeof window !== 'undefined' && !!window.newamp;
 
-export const api: NewampAPI =
+export const api: NewAmpAPI =
   typeof window !== 'undefined' && window.newamp ? window.newamp : stub;
 
 // Dev-only: expose for in-browser mocking & QA.
