@@ -46,7 +46,7 @@ export function PlaylistView(): JSX.Element {
   const [queueFilter, setQueueFilter] = useState('');
   const [smartRules, setSmartRules] = useState<SmartPlaylistRule[]>([]);
   const [selectedSmartRule, setSelectedSmartRule] = useState<SmartPlaylistRule | null>(null);
-  const [playlistName, setPlaylistName] = useState('Newamp Set');
+  const [playlistName, setPlaylistName] = useState('NewAmp Set');
   const [playlistCoverPath, setPlaylistCoverPath] = useState<string | null>(null);
   const [clearPlaylistCover, setClearPlaylistCover] = useState(false);
   const [smartCount, setSmartCount] = useState(30);
@@ -508,7 +508,7 @@ export function PlaylistView(): JSX.Element {
     setSelectedPlaylist(null);
     setSelectedPlaylistTracks([]);
     setPlaylistTrackFilter('');
-    setPlaylistName('Newamp Set');
+    setPlaylistName('NewAmp Set');
     setPlaylistCoverPath(null);
     setClearPlaylistCover(false);
     setStatus('Ready to create a new playlist.');
@@ -550,9 +550,9 @@ export function PlaylistView(): JSX.Element {
           className={`pxbtn ${autoDjEnabled ? 'is-active' : ''}`}
           onClick={() => void setAutoDjEnabled(!autoDjEnabled)}
           disabled={busy}
-          title="Continuous mix keeps the queue topped up from the selected source"
+          title="Auto DJ keeps the queue topped up from the selected source"
         >
-          {autoDjEnabled ? 'MIX ON' : 'MIX OFF'}
+          {autoDjEnabled ? 'AUTO DJ ON' : 'AUTO DJ OFF'}
         </button>
         <input
           value={autoDjTarget}
@@ -562,16 +562,16 @@ export function PlaylistView(): JSX.Element {
           max={80}
           className="bevel-in w-[58px] px-2 py-1 text-[11px] outline-none"
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          aria-label="Continuous mix target queue length"
-          title="Continuous mix target queue length"
+          aria-label="Auto DJ target queue length"
+          title="Auto DJ target queue length"
         />
         <select
           value={autoDjSmartRuleId ?? ''}
           onChange={(e) => void setAutoDjSmartRuleId(e.target.value ? Number(e.target.value) : null)}
           className="bevel-in max-w-[180px] px-2 py-1 text-[11px]"
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          aria-label="Continuous mix source"
-          title="Continuous mix source"
+          aria-label="Auto DJ source"
+          title="Auto DJ source"
         >
           <option value="">Harmonic Mix</option>
           {autoDjSourceMissing ? (
@@ -1144,8 +1144,8 @@ function playlistTextMatches(query: string, values: Array<string | null | undefi
 
 function queueExportName(value: string): string {
   const trimmed = value.trim();
-  if (trimmed && trimmed !== 'Newamp Set') return trimmed;
-  return `Newamp Queue ${new Date().toISOString().slice(0, 10)}`;
+  if (trimmed && trimmed !== 'NewAmp Set') return trimmed;
+  return `NewAmp Queue ${new Date().toISOString().slice(0, 10)}`;
 }
 
 function formatSleepRemaining(endsAt: number, now: number): string {

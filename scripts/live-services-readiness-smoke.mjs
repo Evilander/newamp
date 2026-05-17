@@ -7,7 +7,7 @@ const repoRoot = resolve('.');
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultTimeoutMs = Math.max(2000, Number(process.env.NEWAMP_LIVE_SERVICE_TIMEOUT_MS ?? 12000));
 const packageVersion = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).version;
-const newampUserAgent = `Newamp/${packageVersion}`;
+const newampUserAgent = `NewAmp/${packageVersion}`;
 
 export async function checkLiveServicesReadiness({ timeoutMs = defaultTimeoutMs } = {}) {
   const [ultimateGuitar, lastfm] = await Promise.all([
@@ -243,16 +243,19 @@ export function lastfmSettingsPathCandidates(env = process.env) {
   if (process.platform === 'win32') {
     if (env.APPDATA) {
       candidates.push(join(env.APPDATA, 'newamp', 'settings.json'));
+      candidates.push(join(env.APPDATA, 'NewAmp', 'settings.json'));
       candidates.push(join(env.APPDATA, 'Newamp', 'settings.json'));
     }
     if (env.LOCALAPPDATA) {
       candidates.push(join(env.LOCALAPPDATA, 'newamp', 'settings.json'));
+      candidates.push(join(env.LOCALAPPDATA, 'NewAmp', 'settings.json'));
       candidates.push(join(env.LOCALAPPDATA, 'Newamp', 'settings.json'));
     }
   } else {
     const home = env.HOME;
     if (home) {
       candidates.push(join(home, '.config', 'newamp', 'settings.json'));
+      candidates.push(join(home, '.config', 'NewAmp', 'settings.json'));
       candidates.push(join(home, '.config', 'Newamp', 'settings.json'));
     }
   }

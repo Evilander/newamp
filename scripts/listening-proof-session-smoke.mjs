@@ -22,7 +22,7 @@ assert.equal(report.ok, true);
 assert.equal(report.dryRun, true);
 assert.equal(report.launch.executed, false);
 assert.equal(report.launch.ready, true);
-assert.match(report.launch.exePath, /Newamp\.exe$/);
+assert.match(report.launch.exePath, /NewAmp\.exe$/);
 assert.ok(Array.isArray(report.launch.args) && report.launch.args[0]?.endsWith('newamp-speaker-proof.mp3'));
 assert.ok(report.proofFile.ok, 'speaker proof file should be prepared');
 assert.ok(report.checklist.length >= 4, 'listening checklist should include the release proof steps');

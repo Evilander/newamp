@@ -21,9 +21,9 @@ const skipPackage = args.has('--skip-package');
 const realLibraryRoot = process.env.NEWAMP_REAL_LIBRARY_ROOT || 'K:/music';
 const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
 const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
-const installerPath = resolve(repoRoot, 'release', `Newamp Setup ${releaseVersion}.exe`);
-const portablePath = resolve(repoRoot, 'release', `Newamp Portable ${releaseVersion}.exe`);
-const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'Newamp.exe');
+const installerPath = resolve(repoRoot, 'release', `NewAmp Setup ${releaseVersion}.exe`);
+const portablePath = resolve(repoRoot, 'release', `NewAmp Portable ${releaseVersion}.exe`);
+const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'NewAmp.exe');
 
 const checks = [];
 const blockers = [];
@@ -470,7 +470,7 @@ function signatureStatus(path) {
 function cleanupPackagedSmokeProcess() {
   if (process.platform !== 'win32') return;
   const command = [
-    'Get-Process Newamp -ErrorAction SilentlyContinue',
+    'Get-Process NewAmp -ErrorAction SilentlyContinue',
     `| Where-Object { $_.Path -eq ${quoteForPowerShell(exePath)} }`,
     '| Stop-Process -Force',
   ].join(' ');

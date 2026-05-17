@@ -48,7 +48,7 @@ function WinampDeck({
   return (
     <div className={`deck-winamp-classic is-${variant} ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
       <header className="deck-wa-titlebar titlebar-drag">
-        <button className="deck-wa-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full Newamp">
+        <button className="deck-wa-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full NewAmp">
           <BrandLogo size={18} withGlow={false} />
           <span>NEWAMP 2.X</span>
         </button>
@@ -74,7 +74,7 @@ function WinampDeck({
           <div className="deck-wa-time">{formatTime(currentTime)}</div>
           <div className="deck-wa-track">
             <div title={track?.title}>{track?.title ?? 'No track loaded'}</div>
-            <span title={track?.artist}>{track?.artist ?? 'Drop music into Newamp'}</span>
+            <span title={track?.artist}>{track?.artist ?? 'Drop music into NewAmp'}</span>
           </div>
           <div className="deck-wa-mini-viz">
             <Visualizer mode="mini" width={96} height={42} />

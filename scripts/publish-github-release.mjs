@@ -20,8 +20,8 @@ export function buildGithubPublishPlan({
   const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
   const version = String(pkg.version ?? '').trim();
   if (!version) return failedPlan(root, env, 'package.json has no version');
-  if (version !== '1.0.0') {
-    return failedPlan(root, env, `package.json version is ${version}; GitHub publication is reserved for 1.0.0`);
+  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+    return failedPlan(root, env, `package.json version is not a publishable semver: ${version}`);
   }
 
   const readmePath = resolve(root, 'README.md');
@@ -29,8 +29,8 @@ export function buildGithubPublishPlan({
 
   const repo = text(env.NEWAMP_GITHUB_REPO) || 'evilander/newamp';
   const tag = `v${version}`;
-  const installer = resolve(root, 'release', `Newamp Setup ${version}.exe`);
-  const portable = resolve(root, 'release', `Newamp Portable ${version}.exe`);
+  const installer = resolve(root, 'release', `NewAmp Setup ${version}.exe`);
+  const portable = resolve(root, 'release', `NewAmp Portable ${version}.exe`);
   const checksums = releaseChecksumsPath({ root });
   const bundlePaths = releaseBundlePaths({ root, version });
   const artifacts = {
@@ -86,7 +86,7 @@ export function buildGithubPublishPlan({
     }
     if (needsCommit) {
       commands.push(gitCommand('stage', root, gitDir, ['add', '.']));
-      commands.push(gitCommand('commit', root, gitDir, ['-c', 'user.name=evilander', '-c', 'user.email=evilander@users.noreply.github.com', 'commit', '-m', `Release Newamp ${version}`]));
+      commands.push(gitCommand('commit', root, gitDir, ['-c', 'user.name=evilander', '-c', 'user.email=evilander@users.noreply.github.com', 'commit', '-m', `Release NewAmp ${version}`]));
     }
     commands.push(ensureGithubRepoCommand(repo));
     commands.push(originCommand(root, gitDir, originUrl));
@@ -116,7 +116,7 @@ export function buildGithubPublishPlan({
     }
     if (needsCommit) {
       commands.push(command('stage', 'git', ['add', '.']));
-      commands.push(command('commit', 'git', ['commit', '-m', `Release Newamp ${version}`]));
+      commands.push(command('commit', 'git', ['commit', '-m', `Release NewAmp ${version}`]));
     }
     commands.push(ensureGithubRepoCommand(repo));
     commands.push(originCommand(root, null, originUrl));
@@ -257,7 +257,7 @@ function originCommand(root, gitDir, originUrl) {
 
 function publishReleaseCommand({ repo, tag, version, installer, portable, checksums, source, manifest, bundle, readmePath }) {
   const viewArgs = ['release', 'view', tag, '--repo', repo];
-  const editArgs = ['release', 'edit', tag, '--repo', repo, '--title', `Newamp ${version}`, '--notes-file', readmePath];
+  const editArgs = ['release', 'edit', tag, '--repo', repo, '--title', `NewAmp ${version}`, '--notes-file', readmePath];
   const releaseAssets = [installer, portable, checksums, source, manifest, bundle];
   const uploadArgs = ['release', 'upload', tag, ...releaseAssets, '--repo', repo, '--clobber'];
   const createArgs = [
@@ -268,7 +268,7 @@ function publishReleaseCommand({ repo, tag, version, installer, portable, checks
     '--repo',
     repo,
     '--title',
-    `Newamp ${version}`,
+    `NewAmp ${version}`,
     '--notes-file',
     readmePath,
   ];

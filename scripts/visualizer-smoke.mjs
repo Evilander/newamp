@@ -19,6 +19,7 @@ const presetCount = Object.keys(presets).length;
 assert.ok(presetCount >= 100, `expected at least 100 Milkdrop presets, got ${presetCount}`);
 
 const visualizerSource = await readFile(new URL('../src/components/Visualizer.tsx', import.meta.url), 'utf8');
+const nowPlayingSource = await readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8');
 assert.match(visualizerSource, /mode === 'butterchurn'/, 'Visualizer must implement Butterchurn mode');
 assert.match(
   visualizerSource,
@@ -49,6 +50,11 @@ assert.match(
   visualizerSource,
   /data-newamp-visualizer-canvas/,
   'Visualizer canvas must expose a stable UI smoke selector',
+);
+assert.match(
+  nowPlayingSource,
+  /data-newamp-spectrum-style-picker/,
+  'Now Playing should expose multiple spectrum display choices',
 );
 assert.doesNotMatch(visualizerSource, /fillText\(['"]Milkdrop/i, 'Milkdrop fallback should remain visual instead of showing an unavailable error label');
 

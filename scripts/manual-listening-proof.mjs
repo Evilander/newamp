@@ -23,9 +23,9 @@ export function defaultManualListeningArtifacts(root = repoRoot) {
   const version = appVersion(root);
   const bundlePaths = releaseBundlePaths({ root, version });
   return [
-    { name: 'installer', path: resolve(root, 'release', `Newamp Setup ${version}.exe`) },
-    { name: 'portable', path: resolve(root, 'release', `Newamp Portable ${version}.exe`) },
-    { name: 'exe', path: resolve(root, 'release', 'win-unpacked', 'Newamp.exe') },
+    { name: 'installer', path: resolve(root, 'release', `NewAmp Setup ${version}.exe`) },
+    { name: 'portable', path: resolve(root, 'release', `NewAmp Portable ${version}.exe`) },
+    { name: 'exe', path: resolve(root, 'release', 'win-unpacked', 'NewAmp.exe') },
     { name: 'checksums', path: releaseChecksumsPath({ root }) },
     { name: 'source', path: bundlePaths.sourceZip },
     { name: 'manifest', path: bundlePaths.manifest },
@@ -50,7 +50,7 @@ export function recordManualListeningProof({
   }
   const proof = {
     schemaVersion: 1,
-    app: 'Newamp',
+    app: 'NewAmp',
     createdAt: new Date().toISOString(),
     platform: process.platform,
     confirmations: Object.fromEntries(MANUAL_LISTENING_REQUIREMENTS.map((key) => [key, true])),

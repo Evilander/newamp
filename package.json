@@ -1,7 +1,7 @@
 {
   "name": "newamp",
-  "version": "1.1.0",
-  "description": "A Winamp-inspired modern desktop music player for Windows. Your local library, your rules, no streaming required. Four UI shells, shape-changing deck skins, 0–200% volume with red-zone boost, 0–100 decimal track scoring, and a magazine-style home.",
+  "version": "1.1.1",
+  "description": "A Winamp-inspired modern desktop music player for Windows. Your local library, your rules, no streaming required. Four UI shells, shape-changing deck skins, 0-200% volume with red-zone boost, 0-100 decimal track scoring, and a magazine-style home.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
   "author": "evilander",
@@ -17,9 +17,13 @@
   "scripts": {
     "dev": "cross-env NODE_ENV=development concurrently -k -n vite,electron -c blue,magenta \"npm:dev:vite\" \"npm:dev:electron\"",
     "dev:vite": "vite",
+    "predev:electron": "node scripts/sync-app-version.mjs",
     "dev:electron": "wait-on tcp:5173 && tsc -p electron/tsconfig.json && cross-env NODE_ENV=development electron .",
+    "prebuild": "node scripts/sync-app-version.mjs",
     "build": "tsc -p electron/tsconfig.json && node scripts/vite-build.mjs",
+    "prebuild:electron": "node scripts/sync-app-version.mjs",
     "build:electron": "tsc -p electron/tsconfig.json",
+    "prebuild:vite": "node scripts/sync-app-version.mjs",
     "build:vite": "node scripts/vite-build.mjs",
     "preview": "vite preview",
     "smoke:build-lock": "node scripts/build-lock-smoke.mjs",
@@ -163,7 +167,7 @@
   },
   "build": {
     "appId": "io.newamp.player",
-    "productName": "Newamp",
+    "productName": "NewAmp",
     "directories": {
       "output": "release"
     },
@@ -204,7 +208,7 @@
       ]
     },
     "portable": {
-      "artifactName": "Newamp Portable ${version}.${ext}",
+      "artifactName": "NewAmp Portable ${version}.${ext}",
       "unpackDirName": false
     },
     "fileAssociations": [
@@ -230,8 +234,8 @@
           "dts",
           "dsf"
         ],
-        "name": "Newamp.AudioFile",
-        "description": "Newamp audio file",
+        "name": "NewAmp.AudioFile",
+        "description": "NewAmp audio file",
         "role": "Viewer"
       },
       {
@@ -241,8 +245,8 @@
           "pls",
           "cue"
         ],
-        "name": "Newamp.PlaylistFile",
-        "description": "Newamp playlist or CUE sheet",
+        "name": "NewAmp.PlaylistFile",
+        "description": "NewAmp playlist or CUE sheet",
         "role": "Viewer"
       }
     ]

@@ -22,8 +22,8 @@ export const DECK_SKINS: {
   size: { width: number; height: number };
 }[] = [
   { id: 'bento',             label: 'Windowshade',      shortLabel: 'BAR',  tagline: 'Slim Winamp-style bar',       size: { width: 720, height: 152 } },
-  { id: 'winamp-classic',    label: 'Winamp Classic',   shortLabel: 'W2X',  tagline: 'Main + equalizer stack',      size: { width: 560, height: 232 } },
-  { id: 'winamp-industrial', label: 'Winamp Industrial',shortLabel: 'IND',  tagline: 'Dark pixel-skin throwback',   size: { width: 560, height: 232 } },
+  { id: 'winamp-classic',    label: 'Winamp Classic',   shortLabel: 'W2X',  tagline: '275x116 Winamp 2 main window, scaled 2x', size: { width: 550, height: 232 } },
+  { id: 'winamp-industrial', label: 'Winamp Industrial',shortLabel: 'IND',  tagline: 'Dark pixel-skin throwback',   size: { width: 550, height: 232 } },
   { id: 'record-player',     label: 'Record Player',    shortLabel: 'VIN',  tagline: 'Spinning vinyl + tonearm',    size: { width: 540, height: 540 } },
   { id: 'jukebox',           label: 'Jukebox',          shortLabel: 'JUKE', tagline: 'Wurlitzer arch + chrome',     size: { width: 420, height: 560 } },
   { id: 'cassette',          label: 'Cassette Deck',    shortLabel: 'TAPE', tagline: 'Twin spools, magnetic tape',  size: { width: 760, height: 320 } },

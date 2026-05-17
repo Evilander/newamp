@@ -7,33 +7,50 @@ interface BrandLogoProps {
   title?: string;
   withGlow?: boolean;
   className?: string;
+  themed?: boolean;
 }
 
 export function BrandLogo({
   size = 22,
-  title = 'Newamp',
+  title = 'NewAmp',
   withGlow = true,
   className,
+  themed = true,
 }: BrandLogoProps): JSX.Element {
   const style = useMemo<CSSProperties>(
     () => ({
       width: size,
       height: size,
-      objectFit: 'contain',
-      filter: withGlow ? 'drop-shadow(0 0 10px var(--accent-glow))' : undefined,
+      filter: !themed && withGlow ? 'drop-shadow(0 0 10px var(--accent-glow))' : undefined,
     }),
-    [size, withGlow],
+    [size, themed, withGlow],
   );
 
+  if (!themed) {
+    return (
+      <img
+        src={logoUrl}
+        alt={title}
+        width={size}
+        height={size}
+        draggable={false}
+        className={['brand-logo', className].filter(Boolean).join(' ')}
+        style={{ ...style, objectFit: 'contain' }}
+        data-newamp-brand-logo
+      />
+    );
+  }
+
   return (
-    <img
-      src={logoUrl}
-      alt={title}
-      width={size}
-      height={size}
-      draggable={false}
-      className={['brand-logo', className].filter(Boolean).join(' ')}
-      style={style}
+    <span
+      role="img"
+      aria-label={title}
+      className={['brand-logo brand-logo-themed', className].filter(Boolean).join(' ')}
+      style={{
+        ...style,
+        WebkitMaskImage: `url(${logoUrl})`,
+        maskImage: `url(${logoUrl})`,
+      }}
       data-newamp-brand-logo
     />
   );

@@ -419,7 +419,7 @@ function SuggestedStationsPanel({
         </div>
       ) : (
         <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
-          Suggested stations appear after Newamp sees genre, year, loved, rating, or play-count signals.
+          Suggested stations appear after NewAmp sees genre, year, loved, rating, or play-count signals.
         </div>
       )}
     </section>
@@ -977,7 +977,7 @@ function ScoreBadge({ track, compact = false }: { track: Track; compact?: boolea
       <span
         className={`score-badge ${compact ? 'is-compact' : ''}`}
         data-newamp-score-badge={Math.round(score)}
-        title={`Newamp score: ${score.toFixed(1)}`}
+        title={`NewAmp score: ${score.toFixed(1)}`}
         onClick={(event) => {
           if (!event.altKey) return;
           event.preventDefault();

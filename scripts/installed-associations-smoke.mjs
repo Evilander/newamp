@@ -87,7 +87,7 @@ function loadExpectedAssociations(root, { requiredOnly }) {
         ext: normalizeExt(ext),
         progId: String(association.name ?? ''),
         description: String(association.description ?? ''),
-        commandText: 'Open with Newamp',
+        commandText: 'Open with NewAmp',
       });
     }
   }
@@ -115,8 +115,8 @@ function checkPackageAssociations(expected) {
     if (!/^[A-Za-z][A-Za-z0-9_.-]+$/.test(progId)) {
       issues.push(`file association ProgID "${progId}" should be a stable registry ID without spaces`);
     }
-    if (!progId.startsWith('Newamp.')) {
-      issues.push(`file association ProgID "${progId}" should start with Newamp.`);
+    if (!progId.startsWith('NewAmp.')) {
+      issues.push(`file association ProgID "${progId}" should start with NewAmp.`);
     }
     for (const ext of association.ext ?? []) {
       const normalized = normalizeExt(ext);
@@ -227,8 +227,8 @@ function validateRegistryRow(row, expected, expectedExePath) {
   if (row.verbText !== expected.commandText) issues.push(`open verb text is ${JSON.stringify(row.verbText)}`);
 
   const command = String(row.command ?? '');
-  const commandExe = extractNewampExe(command);
-  if (!/Newamp\.exe/i.test(command)) issues.push('command does not reference Newamp.exe');
+  const commandExe = extractNewAmpExe(command);
+  if (!/NewAmp\.exe/i.test(command)) issues.push('command does not reference NewAmp.exe');
   if (!/%1/.test(command)) issues.push('command does not pass "%1"');
   if (!commandExe) issues.push('command executable could not be parsed');
   if (commandExe && !existsSync(commandExe)) issues.push(`command executable is missing: ${commandExe}`);
@@ -244,10 +244,10 @@ function validateRegistryRow(row, expected, expectedExePath) {
   };
 }
 
-function extractNewampExe(command) {
-  const quoted = command.match(/"([^"]*Newamp\.exe)"/i);
+function extractNewAmpExe(command) {
+  const quoted = command.match(/"([^"]*NewAmp\.exe)"/i);
   if (quoted) return quoted[1];
-  const unquoted = command.match(/([A-Za-z]:\\[^\r\n"]*?Newamp\.exe)/i);
+  const unquoted = command.match(/([A-Za-z]:\\[^\r\n"]*?NewAmp\.exe)/i);
   return unquoted?.[1] ?? null;
 }
 

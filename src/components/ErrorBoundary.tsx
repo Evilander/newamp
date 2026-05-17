@@ -17,7 +17,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error): void {
-    console.error('Newamp UI error:', error);
+    console.error('NewAmp UI error:', error);
   }
 
   reset = (): void => this.setState({ error: null });

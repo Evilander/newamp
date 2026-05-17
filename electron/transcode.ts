@@ -345,7 +345,7 @@ function batchAudioFileName(
 
 function trackLabel(track: Track): string {
   const title = track.title || basename(track.path, extname(track.path));
-  const artist = track.artist && track.artist !== 'Unknown Artist' ? track.artist : 'Newamp';
+  const artist = track.artist && track.artist !== 'Unknown Artist' ? track.artist : 'NewAmp';
   return `${artist} - ${title}`;
 }
 
@@ -381,5 +381,5 @@ function uniqueAudioFileName(
 }
 
 function safeFileStem(name: string): string {
-  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim() || 'Newamp Track';
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim() || 'NewAmp Track';
 }

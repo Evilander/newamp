@@ -3,6 +3,18 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-05-17
+
+Release polish for the first broader test build.
+
+### Fixed
+- Restored the compact deck sizing path and tightened the Winamp-style deck to a locked 550x232 shell with in-deck skin switching still accessible.
+- Hardened artist facts so ambiguous names resolve to musicians, bands, singers, composers, or record producers instead of species or unrelated pages.
+- Regenerated package naming around NewAmp casing for the app, installer, portable build, file associations, release bundle, and publication helper.
+
+### Added
+- Added theme-colored logo rendering, longer startup logo animation, an About screen, user text scaling, Now Playing spectrum styles, and an Album context panel.
+
 ## [1.1.0] — 2026-05-16
 
 First public release. Major feature drop across UI shells, deck skins, scoring,
@@ -63,7 +75,7 @@ audiophile audio chain, and home experience.
 - Fresh Imports rail subtitle shows the date of the newest file `mtime`.
 
 ### Added — Now Playing
-- Side-panel tab strip: **On Air** (default - Liner Notes / sonic vitals / lyric hot lines / file credits), **Studio**
+- Side-panel tab strip: **On Air** (default - Liner Notes / sonic vitals / lyric hot lines / file credits), **Album**
   (Tempo Trainer / Practice Loop / Track Bookmarks musician tools),
   **Lyrics**.
 - Draggable spectrum/side split with `localStorage` persistence

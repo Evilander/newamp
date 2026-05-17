@@ -83,7 +83,7 @@ export function MixesView(): JSX.Element {
         {
           id: 'fresh-imports',
           title: 'Fresh Imports',
-          subtitle: 'Newest files Newamp has seen on disk',
+          subtitle: 'Newest files NewAmp has seen on disk',
           tracks: freshImports,
           tone: 'plain',
         },
@@ -104,7 +104,7 @@ export function MixesView(): JSX.Element {
         {
           id: 'most-played',
           title: 'Heavy Rotation',
-          subtitle: 'The tracks Newamp sees you return to most',
+          subtitle: 'The tracks NewAmp sees you return to most',
           tracks: mostPlayed,
           tone: 'plain',
         },
@@ -147,7 +147,7 @@ export function MixesView(): JSX.Element {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
         <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
-          Newamp Mixes
+          NewAmp Mixes
         </div>
         <button className="pxbtn" onClick={() => void refreshMixes()} disabled={loading}>
           {loading ? 'Building...' : 'Refresh mixes'}

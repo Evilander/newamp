@@ -265,7 +265,7 @@ assert.match(apiSource, /findLocalGuitarTab/, 'browser-safe API should include l
 assert.match(mainSource, /openGuitarTabWindow/, 'main process should create native guitar tab windows');
 assert.match(mainSource, /tabs:local:save/, 'main process should save pasted local tabs');
 assert.match(mainSource, /tabs:local:find/, 'main process should discover sidecar local tabs');
-assert.match(mainSource, /Newamp Native Guitar Tab Window/, 'native window HTML should be branded as a Newamp tab window');
+assert.match(mainSource, /NewAmp Native Guitar Tab Window/, 'native window HTML should be branded as a NewAmp tab window');
 assert.doesNotMatch(nowPlayingSource, /GuitarTabCompanion/, 'Now Playing should not mount guitar tabs in the primary player surface');
 
 console.log(

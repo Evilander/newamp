@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 const repoRoot = resolve('.');
-const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'Newamp.exe');
+const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'NewAmp.exe');
 const smokeRoot = resolve(repoRoot, 'tmp', 'packaged-normal-launch-smoke');
 const userData = resolve(smokeRoot, `user-data-${process.pid}-${Date.now()}`);
 const minAliveMs = Number(process.env.NEWAMP_NORMAL_LAUNCH_MIN_ALIVE_MS ?? 4000);

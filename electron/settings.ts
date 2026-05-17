@@ -22,6 +22,7 @@ const DEFAULTS: AppSettings = {
   openaiApiKey: null,
   openaiModel: 'gpt-4.1-mini',
   firstLaunchTutorialSeen: false,
+  textScale: 1,
   crossfadeMs: 0,
   replayGain: 'off',
   limiterEnabled: true,
@@ -79,6 +80,11 @@ function normalizeOpenAiModel(value: unknown): string {
   return /^[a-zA-Z0-9._:-]{1,80}$/.test(trimmed) ? trimmed : DEFAULTS.openaiModel;
 }
 
+function normalizeTextScale(value: unknown): number {
+  const scale = Number(value);
+  return Number.isFinite(scale) ? Math.min(1.35, Math.max(0.85, scale)) : DEFAULTS.textScale;
+}
+
 export class SettingsStore {
   public readonly recoveryEvents: RecoveryEvent[] = [];
   private state: AppSettings;
@@ -102,6 +108,7 @@ export class SettingsStore {
           openaiApiKey: normalizeOptionalSecret(parsed.openaiApiKey),
           openaiModel: normalizeOpenAiModel(parsed.openaiModel),
           firstLaunchTutorialSeen: parsed.firstLaunchTutorialSeen === true,
+          textScale: normalizeTextScale(parsed.textScale),
           compactMode: parsed.compactMode === true,
           alwaysOnTop: parsed.alwaysOnTop === true,
           visualizerPreset: normalizeVisualizerPreset(parsed.visualizerPreset),
@@ -154,6 +161,9 @@ export class SettingsStore {
       firstLaunchTutorialSeen: patch.firstLaunchTutorialSeen === undefined
         ? this.state.firstLaunchTutorialSeen
         : patch.firstLaunchTutorialSeen === true,
+      textScale: patch.textScale === undefined
+        ? this.state.textScale
+        : normalizeTextScale(patch.textScale),
       compactMode: patch.compactMode === undefined
         ? this.state.compactMode
         : patch.compactMode === true,

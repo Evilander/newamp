@@ -12,8 +12,8 @@ export function releaseBundlePaths({ root = defaultRoot, version = readPackageVe
   const releaseRoot = join(root, 'release');
   return {
     releaseRoot,
-    sourceZip: join(releaseRoot, `Newamp-${version}-source.zip`),
-    bundleZip: join(releaseRoot, `Newamp-${version}-release-bundle.zip`),
+    sourceZip: join(releaseRoot, `NewAmp-${version}-source.zip`),
+    bundleZip: join(releaseRoot, `NewAmp-${version}-release-bundle.zip`),
     manifest: join(releaseRoot, 'RELEASE-MANIFEST.json'),
   };
 }
@@ -23,8 +23,8 @@ export function releaseBundleFileSpecs({ root = defaultRoot, version = readPacka
   return [
     { name: 'readme', path: join(root, 'README.md'), entryName: 'README.md' },
     { name: 'checksums', path: join(paths.releaseRoot, 'SHA256SUMS.txt'), entryName: 'SHA256SUMS.txt' },
-    { name: 'installer', path: join(paths.releaseRoot, `Newamp Setup ${version}.exe`), entryName: `Newamp Setup ${version}.exe` },
-    { name: 'portable', path: join(paths.releaseRoot, `Newamp Portable ${version}.exe`), entryName: `Newamp Portable ${version}.exe` },
+    { name: 'installer', path: join(paths.releaseRoot, `NewAmp Setup ${version}.exe`), entryName: `NewAmp Setup ${version}.exe` },
+    { name: 'portable', path: join(paths.releaseRoot, `NewAmp Portable ${version}.exe`), entryName: `NewAmp Portable ${version}.exe` },
     { name: 'source', path: paths.sourceZip, entryName: basename(paths.sourceZip) },
   ];
 }
@@ -34,6 +34,7 @@ export function createReleaseBundle({
   version = readPackageVersion(root),
   createSourceArchive = true,
   verifyChecksums = true,
+  allowDirtySource = false,
 } = {}) {
   const paths = releaseBundlePaths({ root, version });
   mkdirSync(paths.releaseRoot, { recursive: true });
@@ -52,6 +53,16 @@ export function createReleaseBundle({
   }
 
   if (createSourceArchive) {
+    const gitClean = gitCleanStatus(root);
+    if (!allowDirtySource && (!gitClean.ok || !gitClean.clean)) {
+      return failedReport({
+        root,
+        version,
+        reason: gitCleanReason(gitClean),
+        paths,
+        files: [],
+      });
+    }
     const source = createSourceZip({ root, outputPath: paths.sourceZip });
     if (!source.ok) {
       return failedReport({ root, version, reason: source.reason, paths, files: [] });
@@ -89,10 +100,10 @@ export function createReleaseBundle({
     return failedReport({ root, version, reason: compressed.reason, paths, files: bundleInputs });
   }
 
-  return checkReleaseBundle({ root, version });
+  return checkReleaseBundle({ root, version, requireCleanSource: createSourceArchive && !allowDirtySource });
 }
 
-export function checkReleaseBundle({ root = defaultRoot, version = readPackageVersion(root) } = {}) {
+export function checkReleaseBundle({ root = defaultRoot, version = readPackageVersion(root), requireCleanSource = false } = {}) {
   const paths = releaseBundlePaths({ root, version });
   const files = [
     ...releaseBundleFileSpecs({ root, version }).map((spec) => fileProof(spec, root)),
@@ -109,6 +120,9 @@ export function checkReleaseBundle({ root = defaultRoot, version = readPackageVe
   const actualEntries = entries.entries.map((entry) => entry.fullName);
   const missingEntries = expectedEntries.filter((entry) => !actualEntries.includes(entry));
   const unexpectedEntries = actualEntries.filter((entry) => !expectedEntries.includes(entry));
+  const gitClean = requireCleanSource
+    ? gitCleanStatus(root)
+    : { ok: true, clean: true, changed: [], reason: null, skipped: true };
   const sizeMismatches = files
     .filter((file) => file.ok)
     .map((file) => {
@@ -124,6 +138,8 @@ export function checkReleaseBundle({ root = defaultRoot, version = readPackageVe
     manifest.ok &&
     entries.ok &&
     sourceArchive.ok &&
+    gitClean.ok &&
+    gitClean.clean &&
     missingEntries.length === 0 &&
     unexpectedEntries.length === 0 &&
     sizeMismatches.length === 0 &&
@@ -143,6 +159,7 @@ export function checkReleaseBundle({ root = defaultRoot, version = readPackageVe
     bundle: bundle.ok ? withoutAbsolutePath(bundle) : bundle,
     entries: entries.entries,
     sourceArchive,
+    gitClean,
     missingEntries,
     unexpectedEntries,
     sizeMismatches,
@@ -155,6 +172,7 @@ export function checkReleaseBundle({ root = defaultRoot, version = readPackageVe
         manifest,
         entries,
         sourceArchive,
+        gitClean,
         missingEntries,
         unexpectedEntries,
         sizeMismatches,
@@ -177,6 +195,35 @@ function createSourceZip({ root, outputPath }) {
     };
   }
   return { ok: true, path: outputPath };
+}
+
+function gitCleanStatus(root) {
+  const result = spawnSync('git', [...gitBaseArgs(root), 'status', '--porcelain'], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.status !== 0 || result.error) {
+    return {
+      ok: false,
+      clean: false,
+      changed: [],
+      reason: result.error?.message || (result.stderr || result.stdout || 'git status failed').trim(),
+    };
+  }
+  const changed = result.stdout.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return {
+    ok: true,
+    clean: changed.length === 0,
+    changed,
+    reason: changed.length ? `working tree has uncommitted changes: ${changed.slice(0, 8).join(', ')}` : null,
+  };
+}
+
+function gitCleanReason(status) {
+  if (!status.ok) return `git status failed before creating source archive: ${status.reason}`;
+  if (!status.clean) return `${status.reason}; commit or stash changes before creating a release bundle`;
+  return null;
 }
 
 export function checkSourceArchiveHygiene(path) {
@@ -344,6 +391,7 @@ function releaseBundleReason({
   manifest,
   entries,
   sourceArchive,
+  gitClean,
   missingEntries,
   unexpectedEntries,
   sizeMismatches,
@@ -355,6 +403,7 @@ function releaseBundleReason({
   if (!manifest.ok) return `release bundle manifest is not ready: ${manifest.reason}`;
   if (!entries.ok) return `release bundle entries could not be inspected: ${entries.reason}`;
   if (!sourceArchive.ok) return sourceArchive.reason;
+  if (gitClean && (!gitClean.ok || !gitClean.clean)) return gitCleanReason(gitClean);
   if (missingEntries.length || unexpectedEntries.length) {
     return `release bundle entries are mismatched (${missingEntries.length} missing, ${unexpectedEntries.length} unexpected)`;
   }
@@ -423,9 +472,11 @@ function printUsage() {
     '  npm run release:bundle -- --check',
     '',
     'Creates and verifies:',
-    '  release/Newamp-<version>-source.zip',
+    '  release/NewAmp-<version>-source.zip',
     '  release/RELEASE-MANIFEST.json',
-    '  release/Newamp-<version>-release-bundle.zip',
+    '  release/NewAmp-<version>-release-bundle.zip',
+    '',
+    'The source archive is built from git HEAD and refuses a dirty worktree.',
   ].join('\n'));
 }
 
@@ -434,7 +485,7 @@ if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
   if (cli.help) {
     printUsage();
   } else {
-    const report = cli.check ? checkReleaseBundle() : createReleaseBundle();
+    const report = cli.check ? checkReleaseBundle({ requireCleanSource: true }) : createReleaseBundle();
     console.log(JSON.stringify(report, null, 2));
     process.exitCode = report.ok ? 0 : 1;
   }

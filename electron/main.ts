@@ -165,7 +165,7 @@ const sessionData = sessionDataOverride
   ? resolve(sessionDataOverride)
   : userDataOverride || smokeMode
     ? resolve(app.getPath('userData'), 'session-data')
-    : resolve(process.env.LOCALAPPDATA || process.env.APPDATA || appRoot, 'Newamp', 'session-data');
+    : resolve(process.env.LOCALAPPDATA || process.env.APPDATA || appRoot, 'NewAmp', 'session-data');
 mkdirSync(sessionData, { recursive: true });
 app.setPath('sessionData', sessionData);
 app.commandLine.appendSwitch('disk-cache-dir', join(sessionData, 'Cache'));
@@ -451,10 +451,10 @@ function registerTray(): void {
   if (!icon) return;
   try {
     tray = new Tray(icon);
-    tray.setToolTip('Newamp');
+    tray.setToolTip('NewAmp');
     tray.on('click', toggleMainWindow);
     tray.setContextMenu(Menu.buildFromTemplate([
-      { label: 'Show / Hide Newamp', click: toggleMainWindow },
+      { label: 'Show / Hide NewAmp', click: toggleMainWindow },
       { type: 'separator' },
       { label: 'Previous', click: () => sendPlayerCommand('previous') },
       { label: 'Play / Pause', click: () => sendPlayerCommand('toggle-play') },
@@ -462,7 +462,7 @@ function registerTray(): void {
       { label: 'Stop', click: () => sendPlayerCommand('stop') },
       { type: 'separator' },
       {
-        label: 'Quit Newamp',
+        label: 'Quit NewAmp',
         click: () => {
           isQuitting = true;
           app.quit();
@@ -892,14 +892,14 @@ function registerIpc(): void {
     const file = serializeCustomSkin(skin);
     const result = mainWin
       ? await dialog.showSaveDialog(mainWin, {
-          title: 'Export Newamp skin',
-          defaultPath: `${safeFileStem(skin.name || 'Newamp Custom')}.newampskin.json`,
-          filters: [{ name: 'Newamp skin', extensions: ['json'] }],
+          title: 'Export NewAmp skin',
+          defaultPath: `${safeFileStem(skin.name || 'NewAmp Custom')}.newampskin.json`,
+          filters: [{ name: 'NewAmp skin', extensions: ['json'] }],
         })
       : await dialog.showSaveDialog({
-          title: 'Export Newamp skin',
-          defaultPath: `${safeFileStem(skin.name || 'Newamp Custom')}.newampskin.json`,
-          filters: [{ name: 'Newamp skin', extensions: ['json'] }],
+          title: 'Export NewAmp skin',
+          defaultPath: `${safeFileStem(skin.name || 'NewAmp Custom')}.newampskin.json`,
+          filters: [{ name: 'NewAmp skin', extensions: ['json'] }],
         });
     if (result.canceled || !result.filePath) return null;
     await writeFile(result.filePath, file, 'utf8');
@@ -908,14 +908,14 @@ function registerIpc(): void {
   ipcMain.handle('settings:skin-import', async () => {
     const result = mainWin
       ? await dialog.showOpenDialog(mainWin, {
-          title: 'Import Newamp or Winamp skin',
+          title: 'Import NewAmp or Winamp skin',
           properties: ['openFile'],
-          filters: [{ name: 'Newamp / Winamp skin', extensions: ['json', 'wsz', 'zip'] }],
+          filters: [{ name: 'NewAmp / Winamp skin', extensions: ['json', 'wsz', 'zip'] }],
         })
       : await dialog.showOpenDialog({
-          title: 'Import Newamp or Winamp skin',
+          title: 'Import NewAmp or Winamp skin',
           properties: ['openFile'],
-          filters: [{ name: 'Newamp / Winamp skin', extensions: ['json', 'wsz', 'zip'] }],
+          filters: [{ name: 'NewAmp / Winamp skin', extensions: ['json', 'wsz', 'zip'] }],
         });
     if (result.canceled || !result.filePaths.length) return null;
     return importSkinFile(result.filePaths[0]!);
@@ -938,7 +938,7 @@ function registerIpc(): void {
       mainWin.focus();
     }
     const options: Electron.OpenDialogOptions = {
-      title: 'Restore Newamp backup',
+      title: 'Restore NewAmp backup',
       buttonLabel: 'Restore backup',
       defaultPath: join(userData, 'backups'),
       properties: ['openDirectory'],
@@ -1667,7 +1667,7 @@ function uiDeckProbeSource(): string {
       await waitFor('winamp-classic deck', () => document.querySelector('.deck-winamp-classic'));
       const winamp = await waitFor('winamp-classic size', () => {
         const box = measure();
-        return Math.abs(box.width - 560) <= 12 && Math.abs(box.height - 232) <= 12 ? box : null;
+        return Math.abs(box.width - 550) <= 12 && Math.abs(box.height - 232) <= 12 ? box : null;
       });
       await pickSkin('bento');
       await waitFor('windowshade deck returns', () => document.querySelector('.compact-root'));
@@ -1922,7 +1922,7 @@ function uiArtProbeSource(): string {
         throw new Error('Timed out waiting for ' + label);
       };
       if (!window.newamp?.getTracks || !window.newamp?.getArtUrl) {
-        throw new Error('Newamp preload API is unavailable');
+        throw new Error('NewAmp preload API is unavailable');
       }
       const track = await waitFor('track with album art', async () => {
         const rows = await window.newamp.getTracks({ limit: 250 });
@@ -1992,6 +1992,11 @@ function uiLyricsProbeSource(): string {
           .find((item) => (item.textContent || '').includes('Now Playing')),
       );
       nowPlayingButton.click();
+      const lyricsTab = await waitFor('Lyrics side tab', () =>
+        Array.from(document.querySelectorAll('[role="tab"], button'))
+          .find((item) => (item.textContent || '').trim() === 'Lyrics'),
+      );
+      lyricsTab.click();
       const panel = await waitFor('lyrics panel', () =>
         document.querySelector('[data-newamp-lyrics-panel]'),
       );
@@ -2055,7 +2060,7 @@ function uiLyricsProbeSource(): string {
 }
 
 function safeFileStem(name: string): string {
-  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim() || 'Newamp Playlist';
+  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim() || 'NewAmp Playlist';
 }
 
 async function importSkinFile(skinPath: string): Promise<CustomSkin> {
@@ -2067,14 +2072,14 @@ async function importSkinFile(skinPath: string): Promise<CustomSkin> {
 
 function openGuitarTabWindow(document: GuitarTabDocument, startAutoscroll: boolean): void {
   if (!['ultimate-guitar', 'local'].includes(document.source) || !document.lines.length) {
-    throw new Error('Only Newamp guitar tab documents can be opened.');
+    throw new Error('Only NewAmp guitar tab documents can be opened.');
   }
   const win = new BrowserWindow({
     width: 980,
     height: 760,
     minWidth: 720,
     minHeight: 520,
-    title: `${document.artist} - ${document.title} - Newamp Tab`,
+    title: `${document.artist} - ${document.title} - NewAmp Tab`,
     backgroundColor: '#060a0e',
     autoHideMenuBar: true,
     show: false,
@@ -2109,7 +2114,7 @@ function renderGuitarTabWindowHtml(document: GuitarTabDocument, startAutoscroll:
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'" />
-  <title>${escapeHtml(title)} - Newamp Tab</title>
+  <title>${escapeHtml(title)} - NewAmp Tab</title>
   <style>
     :root { color-scheme: dark; --bg: #060a0e; --panel: #0d151b; --panel2: #101d25; --line: #1b3038; --ink: #e6f5ea; --muted: #8fa0aa; --accent: #34d399; --warn: #f5c451; }
     * { box-sizing: border-box; }
@@ -2136,7 +2141,7 @@ function renderGuitarTabWindowHtml(document: GuitarTabDocument, startAutoscroll:
 <body>
   <header>
     <div>
-      <div class="eyebrow">Newamp Native Guitar Tab Window</div>
+      <div class="eyebrow">NewAmp Native Guitar Tab Window</div>
       <h1>${escapeHtml(title)}</h1>
       <div class="meta">
         <span>${escapeHtml(document.kind)}</span>
@@ -2240,7 +2245,7 @@ async function choosePlaylistExportPath(
     mainWin.focus();
   }
   const options: Electron.SaveDialogOptions = {
-    title: 'Export Newamp playlist',
+    title: 'Export NewAmp playlist',
     defaultPath: `${safeFileStem(playlist.name)}.${extension}`,
     filters,
   };
@@ -2265,7 +2270,7 @@ async function choosePlaylistFolderExportRoot(
 
 function normalizeExportFolderName(name: unknown, now = Date.now()): string {
   const value = typeof name === 'string' ? name.trim() : '';
-  return value || `Newamp Queue ${new Date(now).toISOString().slice(0, 10)}`;
+  return value || `NewAmp Queue ${new Date(now).toISOString().slice(0, 10)}`;
 }
 
 async function chooseTrackWavExportPath(track: Track): Promise<Electron.SaveDialogReturnValue> {
@@ -2274,7 +2279,7 @@ async function chooseTrackWavExportPath(track: Track): Promise<Electron.SaveDial
     mainWin.show();
     mainWin.focus();
   }
-  const artist = track.artist && track.artist !== 'Unknown Artist' ? track.artist : 'Newamp';
+  const artist = track.artist && track.artist !== 'Unknown Artist' ? track.artist : 'NewAmp';
   const title = track.title || basename(track.path, extname(track.path));
   const options: Electron.SaveDialogOptions = {
     title: 'Export track as WAV',

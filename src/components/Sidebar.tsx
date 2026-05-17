@@ -19,6 +19,7 @@ const ITEMS: NavItem[] = [
   { id: 'now-playing', label: 'Now Playing', icon: 'M10 14a4 4 0 100-8 4 4 0 000 8zm0-2a2 2 0 100-4 2 2 0 000 4z' },
   { id: 'podcasts', label: 'Podcasts', icon: 'M5 15v-3a5 5 0 0110 0v3M8 15v-3a2 2 0 114 0v3M10 4v3M6 5l2 2M14 5l-2 2' },
   { id: 'radio', label: 'Radio', icon: 'M2 8h16v9H2zM2 8L14 4v4M5 13h2M9 13h2' },
+  { id: 'about', label: 'About', icon: 'M10 3a7 7 0 100 14 7 7 0 000-14zM10 8v6M10 6h.01' },
   { id: 'settings', label: 'Settings', icon: 'M10 3v3M10 14v3M3 10h3M14 10h3M5 5l2 2M13 13l2 2M5 15l2-2M13 7l2-2M10 7a3 3 0 100 6 3 3 0 000-6z' },
 ];
 

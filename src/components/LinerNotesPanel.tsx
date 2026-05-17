@@ -81,7 +81,7 @@ export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.El
       <section className="liner-notes-blurb">
         <span className="liner-notes-quote-mark">&ldquo;</span>
         <p>{blurb}</p>
-        <span className="liner-notes-attribution">Newamp Notes</span>
+        <span className="liner-notes-attribution">NewAmp Notes</span>
       </section>
 
       <section className="liner-notes-vitals">
@@ -134,7 +134,7 @@ export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.El
       </section>
 
       <footer className="liner-notes-footer">
-        Newamp / Field Notes / NAMP-1
+        NewAmp / Field Notes / NAMP-1
       </footer>
     </div>
   );

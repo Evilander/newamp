@@ -41,7 +41,7 @@ assert.ok(existsSync(join(result.backupPath, 'lastfm-scrobbles.json')), 'Last.fm
 assert.equal(existsSync(join(result.backupPath, 'backups', 'old-backup', 'skip.txt')), false, 'backup should not recursively copy old backups');
 
 const manifest = JSON.parse(await readFile(join(result.backupPath, 'manifest.json'), 'utf8'));
-assert.equal(manifest.app, 'Newamp');
+assert.equal(manifest.app, 'NewAmp');
 assert.equal(manifest.filesCopied, result.filesCopied);
 assert.deepEqual(manifest.included, result.included);
 

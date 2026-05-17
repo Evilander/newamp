@@ -36,7 +36,7 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
         <span />
       </div>
       <header className="deck-tv-titlebar titlebar-drag">
-        <button className="deck-tv-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full Newamp">
+        <button className="deck-tv-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full NewAmp">
           <BrandLogo size={22} withGlow={false} />
           <span>NEWAMP UHF</span>
         </button>
@@ -83,7 +83,7 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
       <section className="deck-tv-info titlebar-nodrag">
         <div>
           <div className="deck-tv-title" title={track?.title}>{track?.title ?? 'No signal'}</div>
-          <div className="deck-tv-artist" title={track?.artist}>{track?.artist ?? 'Tune Newamp to a track'}</div>
+          <div className="deck-tv-artist" title={track?.artist}>{track?.artist ?? 'Tune NewAmp to a track'}</div>
         </div>
         <span>{formatTime(currentTime)} / {formatTime(duration)}</span>
       </section>

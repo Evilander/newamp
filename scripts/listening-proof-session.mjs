@@ -9,7 +9,7 @@ const args = new Set(process.argv.slice(2));
 const launch = args.has('--launch');
 const dryRun = args.has('--dry-run') || !launch;
 const version = appVersion();
-const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'Newamp.exe');
+const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'NewAmp.exe');
 
 const hardware = await checkAudioHardwareReadiness();
 const manualProof = checkManualListeningProof();
@@ -56,7 +56,7 @@ console.log(JSON.stringify(report, null, 2));
 process.exitCode = report.ok ? 0 : 1;
 
 function launchBlocker(hardware, exePath) {
-  if (!existsSync(exePath)) return 'packaged win-unpacked Newamp.exe is missing; run npm run package first';
+  if (!existsSync(exePath)) return 'packaged win-unpacked NewAmp.exe is missing; run npm run package first';
   if (!hardware.ok) return hardware.proofFile?.reason ?? 'audio hardware proof file could not be prepared';
   if (!hardware.proofFile?.ok) return 'speaker proof file is missing';
   return 'listening proof session is not launch-ready';

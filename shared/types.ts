@@ -502,6 +502,7 @@ export interface AppSettings {
   openaiApiKey: string | null;
   openaiModel: string;
   firstLaunchTutorialSeen: boolean;
+  textScale: number;
   crossfadeMs: number;
   replayGain: 'off' | 'track' | 'album';
   limiterEnabled: boolean;

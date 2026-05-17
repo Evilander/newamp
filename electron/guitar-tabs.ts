@@ -165,7 +165,7 @@ export function buildLocalGuitarTabDocument(input: LocalGuitarTabInput): GuitarT
     title,
     artist,
     kind,
-    author: 'Newamp local',
+    author: 'NewAmp local',
     rating: null,
     votes: null,
     key,

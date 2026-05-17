@@ -34,7 +34,7 @@ export function HotdogDeck(props: DeckProps): JSX.Element {
   return (
     <div className={`deck-hotdog ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
       <header className="deck-hd-rail titlebar-drag">
-        <button className="deck-hd-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full Newamp">
+        <button className="deck-hd-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full NewAmp">
           <BrandLogo size={20} withGlow={false} />
           <span>NEWAMP CONEY</span>
         </button>

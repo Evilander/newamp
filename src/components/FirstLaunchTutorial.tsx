@@ -38,10 +38,10 @@ export function FirstLaunchTutorial({
     <div className="first-launch-overlay" data-newamp-first-launch-tutorial>
       <section className="first-launch-panel bevel-out">
         <header className="first-launch-header">
-          <BrandLogo size={72} title="Newamp" />
+          <BrandLogo size={72} title="NewAmp" />
           <div>
             <div className="first-launch-kicker">First launch</div>
-            <h1>Set up Newamp</h1>
+            <h1>Set up NewAmp</h1>
             <p>
               Add music, choose a deck, and optionally unlock ChatGPT-powered library features.
             </p>
