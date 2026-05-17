@@ -23,6 +23,8 @@ assert.match(artistsViewSource, /ArtistSpotlight/, 'Artists view should show an 
 assert.match(nowPlayingSource, /ArtistImageStage/, 'Now Playing should render an image-first artist facts stage');
 assert.match(nowPlayingSource, /AlbumContextPanel/, 'Now Playing should replace Studio with album context');
 assert.match(nowPlayingSource, /fetchAlbumFacts/, 'Album context should look up album stories when available');
+assert.match(nowPlayingSource, /api\.getAlbums\(\{\s*year: albumYear,[\s\S]*yearWindow: 1,[\s\S]*limit: 5/, 'Album context should query only nearby release years');
+assert.doesNotMatch(nowPlayingSource, /api\.getAlbums\(\)\.catch/, 'Album context should not pull the full album catalog');
 
 const originalFetch = globalThis.fetch;
 const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
