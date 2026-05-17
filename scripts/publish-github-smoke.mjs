@@ -8,6 +8,8 @@ const repoRoot = resolve('.');
 const pkg = JSON.parse(await readText(join(repoRoot, 'package.json')));
 const fixtureVersion = String(pkg.version);
 const publishScriptPath = join(repoRoot, 'scripts', 'publish-github-release.mjs');
+const publishScriptSource = await readText(publishScriptPath);
+const publicationReadinessSource = await readText(join(repoRoot, 'scripts', 'publication-readiness.mjs'));
 
 assert.equal(
   pkg.scripts?.['release:publish-github'],
@@ -15,6 +17,41 @@ assert.equal(
   'package.json should expose release:publish-github',
 );
 assert.ok(existsSync(publishScriptPath), 'scripts/publish-github-release.mjs should exist');
+assert.match(
+  publishScriptSource,
+  /NEWAMP_PUBLICATION_READINESS_MODE:\s*'prepublish'/,
+  'execute mode should run local prepublish readiness before it pushes remote refs',
+);
+assert.match(
+  publishScriptSource,
+  /post-publication readiness failed after GitHub publish commands/,
+  'execute mode should run strict publication readiness after pushing and publishing',
+);
+assert.match(
+  publicationReadinessSource,
+  /remote source is checked after publish pushes main and the release tag/,
+  'prepublish readiness should not require remote refs before the publisher pushes them',
+);
+
+const prepublishReadiness = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'publication-readiness.mjs')], {
+  cwd: repoRoot,
+  encoding: 'utf8',
+  env: {
+    ...process.env,
+    NEWAMP_PUBLICATION_READINESS_MODE: 'prepublish',
+  },
+  windowsHide: true,
+  timeout: 30_000,
+});
+const prepublishReport = JSON.parse(prepublishReadiness.stdout);
+const prepublishRemoteSource = prepublishReport.checks.find((check) => check.name === 'remote-source');
+assert.equal(prepublishReport.mode, 'prepublish');
+assert.equal(prepublishRemoteSource?.ok, true);
+assert.equal(prepublishRemoteSource?.skipped, true);
+assert.ok(
+  !prepublishReport.blockers.some((blocker) => blocker.startsWith('remote-source:')),
+  'prepublish readiness should leave remote-source out of blockers',
+);
 
 const {
   buildGithubPublishPlan,
