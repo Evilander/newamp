@@ -68,7 +68,11 @@ export function summarizeInstalledAssociations(report) {
   if (registry.reason) return registry.reason;
   const missing = registry.missing ?? [];
   if (missing.length > 0) {
+    const legacyCasing = missing.filter((item) => /Newamp/.test(item.reason ?? '')).length;
     const sample = missing.slice(0, 6).map((item) => `.${item.ext}`).join(', ');
+    if (legacyCasing > 0) {
+      return `${missing.length} extension registrations missing or stale (${sample}); ${legacyCasing} still contain previous Newamp registry text, rerun the current NewAmp installer to refresh Windows associations`;
+    }
     return `${missing.length} extension registrations missing or incomplete (${sample})`;
   }
   if (registry.commandFailures?.length > 0) return `${registry.commandFailures.length} command registrations are incomplete`;
@@ -210,6 +214,11 @@ function analyzeRegistryProof(associations, rows, expectedExePath) {
     checkedExtensions: associations.length,
     proven,
     missing,
+    staleLegacyCasing: missing.filter((item) => /Newamp/.test(item.reason ?? '')).length,
+    repairHint:
+      missing.some((item) => /Newamp/.test(item.reason ?? ''))
+        ? 'Rerun the current NewAmp installer or repair install to replace stale previous-install registry text.'
+        : null,
     defaultWarnings,
   };
 }
