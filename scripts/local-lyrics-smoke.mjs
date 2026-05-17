@@ -132,6 +132,8 @@ assert.match(sourceChecks[4], /lyricSource/, 'Now Playing should track local vs 
 assert.match(sourceChecks[4], /getLocalLyrics/, 'Now Playing should ask for local lyrics before LRCLIB');
 assert.match(sourceChecks[4], /data-newamp-lyrics-editor/, 'Now Playing should expose a custom lyrics editor');
 assert.match(sourceChecks[4], /SAVE \/ EDIT LYRICS/, 'Now Playing should offer saved lyrics entry');
+assert.match(sourceChecks[4], /data-newamp-lyrics-size-slider/, 'lyrics panel should expose text resizing');
+assert.match(sourceChecks[4], /data-newamp-karaoke-fullscreen/, 'karaoke mode should open a full-screen lyrics surface');
 assert.match(sourceChecks[5], /smoke:local-lyrics/, 'package scripts should include local lyrics smoke');
 
 console.log(JSON.stringify({
