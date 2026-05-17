@@ -13,6 +13,7 @@ const readmePath = resolve(repoRoot, 'README.md');
 const gitDir = resolveGitDir(repoRoot, process.env);
 const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
 const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
+const readinessMode = process.env.NEWAMP_PUBLICATION_READINESS_MODE === 'prepublish' ? 'prepublish' : 'strict';
 const artifacts = [
   { name: 'installer', path: resolve(repoRoot, 'release', `NewAmp Setup ${releaseVersion}.exe`) },
   { name: 'portable', path: resolve(repoRoot, 'release', `NewAmp Portable ${releaseVersion}.exe`) },
@@ -25,7 +26,7 @@ const checks = [
   gitRepoCheck(),
   gitWritableCheck(),
   gitCleanCheck(),
-  remoteSourceCheck(),
+  remoteSourceCheck(readinessMode),
   githubCliCheck(),
   githubAuthCheck(),
   signingWorkflowCheck(),
@@ -48,6 +49,7 @@ const report = {
       gitDir,
     },
   },
+  mode: readinessMode,
   checks,
   blockers,
   nextStepsWhenReady: [
@@ -63,8 +65,8 @@ const report = {
     'npm run release:gate',
     'commit any final source changes if git-clean fails',
     'gh auth login',
-    'npm run release:publication-readiness',
     'npm run release:publish-github -- --execute',
+    'npm run release:publication-readiness',
   ],
 };
 
@@ -137,7 +139,17 @@ function gitCleanCheck() {
   };
 }
 
-function remoteSourceCheck() {
+function remoteSourceCheck(mode = 'strict') {
+  if (mode === 'prepublish') {
+    return {
+      name: 'remote-source',
+      ok: true,
+      skipped: true,
+      reason: null,
+      note: 'remote source is checked after publish pushes main and the release tag',
+    };
+  }
+
   const head = runGit(['rev-parse', '--verify', 'HEAD']);
   if (head.status !== 0) {
     return {

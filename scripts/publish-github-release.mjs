@@ -180,7 +180,7 @@ export function publishGithubRelease({
     const readiness = spawnSync(process.execPath, [resolve(root, 'scripts', 'publication-readiness.mjs')], {
       cwd: root,
       encoding: 'utf8',
-      env: nonInteractivePublishEnv(env),
+      env: nonInteractivePublishEnv(env, { NEWAMP_PUBLICATION_READINESS_MODE: 'prepublish' }),
       windowsHide: true,
       timeout: 30_000,
     });
@@ -190,7 +190,7 @@ export function publishGithubRelease({
         ok: false,
         executed: false,
         results: [],
-        reason: 'publication readiness failed; refusing to create GitHub repo/release',
+        reason: 'prepublish readiness failed; refusing to create GitHub repo/release',
         readiness: {
           exitCode: readiness.status,
           error: readiness.error?.message ?? null,
@@ -208,6 +208,41 @@ export function publishGithubRelease({
     if (!result.ok) {
       return { ...plan, ok: false, executed: true, results, reason: `${item.label} failed` };
     }
+  }
+
+  if (!skipReadiness) {
+    const postReadiness = spawnSync(process.execPath, [resolve(root, 'scripts', 'publication-readiness.mjs')], {
+      cwd: root,
+      encoding: 'utf8',
+      env: nonInteractivePublishEnv(env),
+      windowsHide: true,
+      timeout: 30_000,
+    });
+    if (postReadiness.status !== 0 || postReadiness.error) {
+      return {
+        ...plan,
+        ok: false,
+        executed: true,
+        results,
+        reason: 'post-publication readiness failed after GitHub publish commands',
+        postReadiness: {
+          exitCode: postReadiness.status,
+          error: postReadiness.error?.message ?? null,
+          stdout: tail(postReadiness.stdout),
+          stderr: tail(postReadiness.stderr),
+        },
+      };
+    }
+    return {
+      ...plan,
+      executed: true,
+      results,
+      postReadiness: {
+        exitCode: postReadiness.status,
+        stdout: tail(postReadiness.stdout),
+        stderr: tail(postReadiness.stderr),
+      },
+    };
   }
 
   return { ...plan, executed: true, results };
