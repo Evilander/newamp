@@ -2,7 +2,7 @@ import type { DeckProps } from './types';
 import { Visualizer } from '../Visualizer';
 import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
-import { HeideckerLogo } from '../HeideckerLogo';
+import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 
 export function RetroTvDeck(props: DeckProps): JSX.Element {
@@ -37,7 +37,7 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
       </div>
       <header className="deck-tv-titlebar titlebar-drag">
         <button className="deck-tv-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full Newamp">
-          <HeideckerLogo size={22} withGlow={false} />
+          <BrandLogo size={22} withGlow={false} />
           <span>NEWAMP UHF</span>
         </button>
         <DeckSkinPicker current="retro-tv" onPick={props.onPickSkin} compact />

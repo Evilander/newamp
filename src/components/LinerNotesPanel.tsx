@@ -3,24 +3,22 @@ import type { LrcLine } from '../api/lrclib';
 import type { Track } from '@shared/types';
 import { formatTime } from '../lib/format';
 
-const HEIDECKER_BLURBS: string[] = [
-  "Five bags of popcorn. That's the rating.",
-  'New Heidecker says: a song is just a movie with no pictures, folks.',
-  'I would compare this to Mr. Brooks, but better.',
-  'This track has the rare three-headed quality: vibe, hook, and gravitas.',
-  'A subtle homage to Decker: Mind of an Architect if you listen closely.',
-  'On Cinema at the Cinema rates this song five bags of popcorn.',
-  'Recorded somewhere between Decker vs. Dracula and Hung Sky II.',
-  'I would put this between Beatles tracks and you would think it was the Beatles.',
-  'This is a five-bag popcorn cut.',
-  'A no-nonsense banger from the world of NEWAMP. Five bags of popcorn.',
+const FIELD_NOTE_BLURBS: string[] = [
+  'This track has the rare three-part signal: vibe, hook, and replay value.',
+  'A clean library pick with enough personality to earn its slot.',
+  'Strong metadata, strong rotation potential, no streaming account required.',
+  'The kind of local-file find that makes a personal library feel alive.',
+  'A high-signal track for late-night queue building.',
+  'Good candidate for a smart station seed.',
+  'The scan says this one deserves attention.',
+  'A useful anchor for the next mix.',
 ];
 
-function heideckerBlurb(seed: string): string {
+function fieldNoteBlurb(seed: string): string {
   let hash = 0;
   for (let i = 0; i < seed.length; i += 1) hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
-  const idx = Math.abs(hash) % HEIDECKER_BLURBS.length;
-  return HEIDECKER_BLURBS[idx]!;
+  const idx = Math.abs(hash) % FIELD_NOTE_BLURBS.length;
+  return FIELD_NOTE_BLURBS[idx]!;
 }
 
 function pickLyricHotLines(lines: LrcLine[] | null, plain: string | null | undefined): string[] {
@@ -65,10 +63,10 @@ interface LinerNotesPanelProps {
 }
 
 export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.Element {
-  const blurb = useMemo(() => heideckerBlurb(`${track.id}:${track.artist}`), [track.id, track.artist]);
+  const blurb = useMemo(() => fieldNoteBlurb(`${track.id}:${track.artist}`), [track.id, track.artist]);
   const hotLines = useMemo(() => pickLyricHotLines(lyrics.lines, lyrics.plain), [lyrics.lines, lyrics.plain]);
-  const bags = Math.max(0, Math.min(5, Math.round((track.ratingScore ?? track.rating * 20) / 20)));
-  const scoreLabel = `${bags}/5 bags`;
+  const score = Math.round(Math.max(0, Math.min(100, track.ratingScore ?? track.rating * 20)));
+  const scoreLabel = `${score}/100`;
 
   return (
     <div
@@ -76,14 +74,14 @@ export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.El
       className="liner-notes-panel"
     >
       <header className="liner-notes-header">
-        <span className="liner-notes-eyebrow">On Air / New Heidecker reviews</span>
+        <span className="liner-notes-eyebrow">On Air / Field Notes</span>
         <span className="liner-notes-score" data-newamp-liner-score>{scoreLabel}</span>
       </header>
 
       <section className="liner-notes-blurb">
         <span className="liner-notes-quote-mark">&ldquo;</span>
         <p>{blurb}</p>
-        <span className="liner-notes-attribution">New Heidecker, NewAmp Notes</span>
+        <span className="liner-notes-attribution">Newamp Notes</span>
       </section>
 
       <section className="liner-notes-vitals">
@@ -136,7 +134,7 @@ export function LinerNotesPanel({ track, lyrics }: LinerNotesPanelProps): JSX.El
       </section>
 
       <footer className="liner-notes-footer">
-        NewAmp / NewHeidecker.exe / Field Notes / NHRP-1
+        Newamp / Field Notes / NAMP-1
       </footer>
     </div>
   );

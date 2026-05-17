@@ -6,7 +6,7 @@ import type { DeckProps } from './types';
 import { Visualizer } from '../Visualizer';
 import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
-import { HeideckerLogo } from '../HeideckerLogo';
+import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 
 export function ClassicBentoDeck(props: DeckProps): JSX.Element {
@@ -51,16 +51,16 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
         <div className="compact-main">
           <div className="compact-topline">
             <button className="compact-brand titlebar-nodrag" onClick={onExitDeck}>
-              <HeideckerLogo size={16} withGlow={false} />
+              <BrandLogo size={16} withGlow={false} />
               <span>NEWAMP</span>
             </button>
-            <DeckSkinPicker current="bento" onPick={props.onPickSkin} compact />
             <div className="compact-leds" aria-hidden="true">
               <span className={isPlaying ? 'on' : ''} />
               <span className={mode === 'shuffle' ? 'on' : ''} />
               <span className={mode !== 'normal' ? 'on' : ''} />
             </div>
             <div className="compact-window titlebar-nodrag">
+              <DeckSkinPicker current="bento" onPick={props.onPickSkin} compact />
               <button onClick={onMinimize} title="Minimize">_</button>
               <button
                 className={alwaysOnTop ? 'active' : ''}

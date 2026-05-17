@@ -337,8 +337,6 @@ let pendingOpenFiles = collectOpenFileArgs(process.argv);
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL;
 const openDevTools = isDev && process.env.OPEN_DEVTOOLS === '1';
-const trayIconDataUrl =
-  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAACTSURBVHgBpZKBCYAgEEV/TeAIjuIIbdQIuUGt0CS1gW1iZ2jIVaTnhw+Cvs8/OYDJA4Y8kR3ZR2/kmazxJbpUEfQ/Dm/UG7wVwHkjlQdMFfDdJMFaACebnjJGyDWgcnZu1/lrCrl6NCoEHJBrDwEr5NrT6ko/UV8xdLAC2N49mlc5CylpYh8wCwqrvbBGLoKGvz8Bfq0QPWEUo/EAAAAASUVORK5CYII=';
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -449,26 +447,47 @@ function enqueueOpenFiles(paths: string[]): void {
 function registerTray(): void {
   if (tray || smokeMode) return;
 
-  const icon = nativeImage.createFromDataURL(trayIconDataUrl);
-  tray = new Tray(icon);
-  tray.setToolTip('Newamp');
-  tray.on('click', toggleMainWindow);
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Show / Hide Newamp', click: toggleMainWindow },
-    { type: 'separator' },
-    { label: 'Previous', click: () => sendPlayerCommand('previous') },
-    { label: 'Play / Pause', click: () => sendPlayerCommand('toggle-play') },
-    { label: 'Next', click: () => sendPlayerCommand('next') },
-    { label: 'Stop', click: () => sendPlayerCommand('stop') },
-    { type: 'separator' },
-    {
-      label: 'Quit Newamp',
-      click: () => {
-        isQuitting = true;
-        app.quit();
+  const icon = resolveTrayIconImage();
+  if (!icon) return;
+  try {
+    tray = new Tray(icon);
+    tray.setToolTip('Newamp');
+    tray.on('click', toggleMainWindow);
+    tray.setContextMenu(Menu.buildFromTemplate([
+      { label: 'Show / Hide Newamp', click: toggleMainWindow },
+      { type: 'separator' },
+      { label: 'Previous', click: () => sendPlayerCommand('previous') },
+      { label: 'Play / Pause', click: () => sendPlayerCommand('toggle-play') },
+      { label: 'Next', click: () => sendPlayerCommand('next') },
+      { label: 'Stop', click: () => sendPlayerCommand('stop') },
+      { type: 'separator' },
+      {
+        label: 'Quit Newamp',
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
       },
-    },
-  ]));
+    ]));
+  } catch (error) {
+    tray = null;
+    console.warn('[newamp] tray icon unavailable', error);
+  }
+}
+
+function resolveTrayIconImage(): Electron.NativeImage | null {
+  const iconPaths = [
+    join(process.resourcesPath, 'build', 'icon.png'),
+    join(app.getAppPath(), 'build', 'icon.png'),
+    join(process.resourcesPath, 'build', 'icon.ico'),
+    join(app.getAppPath(), 'build', 'icon.ico'),
+  ];
+  for (const iconPath of iconPaths) {
+    if (!existsSync(iconPath)) continue;
+    const image = nativeImage.createFromPath(iconPath);
+    if (!image.isEmpty()) return image.resize({ width: 16, height: 16, quality: 'best' });
+  }
+  return null;
 }
 
 function registerMediaShortcuts(): void {
@@ -1115,8 +1134,8 @@ function registerIpc(): void {
           : mainWin.getBounds();
       }
       if (mainWin.isMaximized()) mainWin.unmaximize();
-      const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 620)));
-      const height = Math.max(100, Math.min(1000, Math.trunc(Number(size?.height) || 116)));
+      const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 720)));
+      const height = Math.max(100, Math.min(1000, Math.trunc(Number(size?.height) || 152)));
       mainWin.setResizable(true);
       // Allow shrinking the minimum to the deck's natural size so resize cannot
       // pad the chrome with empty border. Each skin owns its aspect ratio.
@@ -1150,8 +1169,8 @@ function registerIpc(): void {
   });
   ipcMain.handle('win:set-compact-size', (_e, size: { width: number; height: number }) => {
     if (!mainWin) return;
-    const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 620)));
-    const height = Math.max(100, Math.min(1000, Math.trunc(Number(size?.height) || 116)));
+    const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 720)));
+    const height = Math.max(100, Math.min(1000, Math.trunc(Number(size?.height) || 152)));
     mainWin.setResizable(true);
     mainWin.setMinimumSize(Math.min(280, width), Math.min(100, height));
     mainWin.setSize(width, height, true);
@@ -1539,6 +1558,18 @@ function uiVisualizerProbeSource(): string {
         stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="neon-ribbons"]'),
       );
       const ribbonRender = await waitFor('nonblank neon-ribbons visualizer frame', () => sampleCanvas(ribbonCanvas), 8000);
+      const auroraButton = await waitFor('Aurora visualizer preset button', () =>
+        Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
+          .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'aurora'),
+      );
+      auroraButton.click();
+      await waitFor('aurora visualizer stage', () =>
+        stage.getAttribute('data-newamp-visualizer-preset') === 'aurora',
+      );
+      const auroraCanvas = await waitFor('aurora canvas', () =>
+        stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="aurora"]'),
+      );
+      const auroraRender = await waitFor('nonblank aurora visualizer frame', () => sampleCanvas(auroraCanvas), 8000);
       const currentTitle =
         document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
       const currentTime = Number(timeEl.getAttribute('data-newamp-current-time') || '0');
@@ -1569,6 +1600,7 @@ function uiVisualizerProbeSource(): string {
           plasmaGrid: plasmaRender,
           neonRibbons: ribbonRender,
         },
+        auroraRender,
         stageRect: { width: stageRect.width, height: stageRect.height },
         viewport,
         openedViaVizButton: true,
@@ -1606,57 +1638,47 @@ function uiDeckProbeSource(): string {
       await waitFor('windowshade compact deck', () => document.querySelector('.compact-root'));
       const shade = await waitFor('windowshade size', () => {
         const box = measure();
-        return Math.abs(box.width - 620) <= 12 && Math.abs(box.height - 116) <= 12 ? box : null;
+        return Math.abs(box.width - 720) <= 12 && Math.abs(box.height - 152) <= 12 ? box : null;
       });
-      const skinButtons = Array.from(document.querySelectorAll('[data-newamp-deck-skin-button]'));
-      const vinyl = skinButtons.find((item) => item.getAttribute('data-newamp-deck-skin-button') === 'record-player');
-      if (!vinyl) throw new Error('Record-player deck skin button is missing');
-      vinyl.click();
+      const pickSkin = async (skin) => {
+        const select = await waitFor('deck skin select', () => document.querySelector('[data-newamp-deck-skin-select]'));
+        select.value = skin;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      await pickSkin('record-player');
       await waitFor('record-player deck', () => document.querySelector('.deck-record-player'));
       const record = await waitFor('record-player size', () => {
         const box = measure();
         return Math.abs(box.width - 540) <= 12 && Math.abs(box.height - 540) <= 12 ? box : null;
       });
-      const hotdogButton = await waitFor('hotdog skin button', () =>
-        document.querySelector('[data-newamp-deck-skin-button="hotdog"]'),
-      );
-      hotdogButton.click();
+      await pickSkin('hotdog');
       await waitFor('hotdog deck', () => document.querySelector('.deck-hotdog'));
       const hotdog = await waitFor('hotdog size', () => {
         const box = measure();
         return Math.abs(box.width - 740) <= 12 && Math.abs(box.height - 240) <= 12 ? box : null;
       });
-      const tvButton = await waitFor('retro-tv skin button', () =>
-        document.querySelector('[data-newamp-deck-skin-button="retro-tv"]'),
-      );
-      tvButton.click();
+      await pickSkin('retro-tv');
       await waitFor('retro-tv deck', () => document.querySelector('.deck-retro-tv'));
       const tv = await waitFor('retro-tv size', () => {
         const box = measure();
         return Math.abs(box.width - 520) <= 12 && Math.abs(box.height - 430) <= 12 ? box : null;
       });
-      const winampButton = await waitFor('winamp classic skin button', () =>
-        document.querySelector('[data-newamp-deck-skin-button="winamp-classic"]'),
-      );
-      winampButton.click();
+      await pickSkin('winamp-classic');
       await waitFor('winamp-classic deck', () => document.querySelector('.deck-winamp-classic'));
       const winamp = await waitFor('winamp-classic size', () => {
         const box = measure();
         return Math.abs(box.width - 560) <= 12 && Math.abs(box.height - 232) <= 12 ? box : null;
       });
-      const shadeButton = await waitFor('windowshade skin button after shape switch', () =>
-        document.querySelector('[data-newamp-deck-skin-button="bento"]'),
-      );
-      shadeButton.click();
+      await pickSkin('bento');
       await waitFor('windowshade deck returns', () => document.querySelector('.compact-root'));
       const shadeAgain = await waitFor('windowshade size after shape switch', () => {
         const box = measure();
-        return Math.abs(box.width - 620) <= 12 && Math.abs(box.height - 116) <= 12 ? box : null;
+        return Math.abs(box.width - 720) <= 12 && Math.abs(box.height - 152) <= 12 ? box : null;
       });
       return {
         ok: true,
         openedViaDeckButton: true,
-        visibleSkinButtons: skinButtons.length,
+        visibleSkinButtons: document.querySelectorAll('[data-newamp-deck-skin-select] option').length,
         shade,
         record,
         hotdog,

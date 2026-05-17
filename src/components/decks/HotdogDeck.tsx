@@ -2,7 +2,7 @@ import type { DeckProps } from './types';
 import { Visualizer } from '../Visualizer';
 import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
-import { HeideckerLogo } from '../HeideckerLogo';
+import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 
 export function HotdogDeck(props: DeckProps): JSX.Element {
@@ -35,7 +35,7 @@ export function HotdogDeck(props: DeckProps): JSX.Element {
     <div className={`deck-hotdog ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
       <header className="deck-hd-rail titlebar-drag">
         <button className="deck-hd-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full Newamp">
-          <HeideckerLogo size={20} withGlow={false} />
+          <BrandLogo size={20} withGlow={false} />
           <span>NEWAMP CONEY</span>
         </button>
         <DeckSkinPicker current="hotdog" onPick={props.onPickSkin} compact />

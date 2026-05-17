@@ -33,16 +33,6 @@ audiophile audio chain, and home experience.
   even when DECK mode was entered from a maximized window.
 - DeckSkinPicker overlay lets you switch deck shape from inside any deck.
 
-### Added — Themed New Heidecker logo
-- Real per-pixel canvas tinter (`HeideckerLogo.tsx`) replaces the previous
-  CSS `hue-rotate` filter. Walks the source PNG pixels off-screen, recolors
-  only red-dominant pixels with the active `--accent` (luminance-preserving),
-  leaves the face/skin tones and black background untouched.
-- `MutationObserver` on the document root watches `data-theme`, `data-shell`,
-  and inline style changes so the badge re-tints in real-time when the skin
-  is switched (including for `.wsz` skins that only set `--accent`).
-- Per-accent cache means repeat-skin switches are a Map lookup.
-
 ### Added — Rating
 - 0–100 decimal track scoring via new `tracks.rating_score REAL` column
   alongside the legacy `rating INTEGER (0–5)`. Stars stay in sync
@@ -68,13 +58,12 @@ audiophile audio chain, and home experience.
   not played in 30+ days, not currently playing; falls back to top rated).
 - `RatedHighlightRail` — 8 album-art cards sorted by rating score, with
   decimal score badges.
-- `NewsCard` — New Heidecker editorial review of the most recent import.
+- `NewsCard` - compact field report for the most recent import.
 - `ListeningStatsThisWeek` — total minutes, distinct artists, top genre.
 - Fresh Imports rail subtitle shows the date of the newest file `mtime`.
 
 ### Added — Now Playing
-- Side-panel tab strip: **On Air** (default — Liner Notes / Heidecker
-  blurb / sonic vitals / lyric hot lines / file credits), **Studio**
+- Side-panel tab strip: **On Air** (default - Liner Notes / sonic vitals / lyric hot lines / file credits), **Studio**
   (Tempo Trainer / Practice Loop / Track Bookmarks musician tools),
   **Lyrics**.
 - Draggable spectrum/side split with `localStorage` persistence
@@ -87,7 +76,7 @@ audiophile audio chain, and home experience.
   first launch (tracked via `localStorage`).
 
 ### Added — Other
-- Music news / editorial copy delivered as in-product Heidecker blurbs.
+- Music field-report copy delivered in-product without requiring a network account.
 - Score-aware sort and `data.rated` rail in `HomeView`.
 
 ### Performance

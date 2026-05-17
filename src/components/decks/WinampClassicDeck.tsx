@@ -2,7 +2,7 @@ import type { DeckProps, DeckSkin } from './types';
 import { Visualizer } from '../Visualizer';
 import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
-import { HeideckerLogo } from '../HeideckerLogo';
+import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 
 type WinampVariant = 'classic' | 'industrial';
@@ -49,7 +49,7 @@ function WinampDeck({
     <div className={`deck-winamp-classic is-${variant} ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
       <header className="deck-wa-titlebar titlebar-drag">
         <button className="deck-wa-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full Newamp">
-          <HeideckerLogo size={18} withGlow={false} />
+          <BrandLogo size={18} withGlow={false} />
           <span>NEWAMP 2.X</span>
         </button>
         <DeckSkinPicker current={currentSkin} onPick={props.onPickSkin} compact />

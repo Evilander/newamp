@@ -33,6 +33,7 @@ assert.ok(result.render.height >= 80, `visualizer canvas height is too small: ${
 assert.ok(result.render.litSamples > 0, 'visualizer canvas should contain nonblank pixels');
 assert.ok(result.xboxRender?.plasmaGrid?.litSamples > 0, 'Plasma Grid should render nonblank pixels');
 assert.ok(result.xboxRender?.neonRibbons?.litSamples > 0, 'Neon Ribbons should render nonblank pixels');
+assert.ok(result.auroraRender?.litSamples > 0, 'Aurora should render a nonblank reactive frame');
 assert.equal(result.openedViaVizButton, true, 'regular UI VIZ button should open the fullscreen visualizer');
 assert.equal(result.openedViaTransportArt, true, 'transport album art should open the fullscreen visualizer');
 assert.equal(result.compactClearsFullscreen, true, 'entering deck mode should clear fullscreen visualizer state');
@@ -89,6 +90,9 @@ async function writeSmokeSettings() {
         lastfmSessionKey: null,
         lastfmUsername: null,
         lastfmAuthToken: null,
+        openaiApiKey: null,
+        openaiModel: 'gpt-4.1-mini',
+        firstLaunchTutorialSeen: true,
         crossfadeMs: 0,
         replayGain: 'off',
         limiterEnabled: true,

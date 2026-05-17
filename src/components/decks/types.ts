@@ -21,7 +21,7 @@ export const DECK_SKINS: {
   tagline: string;
   size: { width: number; height: number };
 }[] = [
-  { id: 'bento',             label: 'Windowshade',      shortLabel: 'BAR',  tagline: 'Slim Winamp-style bar',       size: { width: 620, height: 116 } },
+  { id: 'bento',             label: 'Windowshade',      shortLabel: 'BAR',  tagline: 'Slim Winamp-style bar',       size: { width: 720, height: 152 } },
   { id: 'winamp-classic',    label: 'Winamp Classic',   shortLabel: 'W2X',  tagline: 'Main + equalizer stack',      size: { width: 560, height: 232 } },
   { id: 'winamp-industrial', label: 'Winamp Industrial',shortLabel: 'IND',  tagline: 'Dark pixel-skin throwback',   size: { width: 560, height: 232 } },
   { id: 'record-player',     label: 'Record Player',    shortLabel: 'VIN',  tagline: 'Spinning vinyl + tonearm',    size: { width: 540, height: 540 } },
