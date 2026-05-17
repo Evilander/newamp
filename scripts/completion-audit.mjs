@@ -23,6 +23,11 @@ const externalPublicationChecks = new Set([
   'lastfm-live-proof',
   'manual-listening-proof',
 ]);
+const evidenceBlockerKeys = new Map([
+  ['manual listening proof', 'manual-listening-proof'],
+  ['Last.fm live proof', 'lastfm-live-proof'],
+  ['signed public artifacts', 'signed-artifacts'],
+]);
 
 const objective =
   'make this project better than the original Winamp from the 2000s; be ambitious; create skins; create an installer/exe; create the full application';
@@ -163,13 +168,14 @@ const checklist = [
   ]),
 ];
 
-const blockerDetails = checklist.flatMap((entry) =>
+const rawBlockerDetails = checklist.flatMap((entry) =>
   entry.ok
     ? []
     : entry.checks
       .filter((evidence) => evidence.ok !== true)
       .flatMap((evidence) => evidenceBlockers(entry, evidence)),
 );
+const blockerDetails = dedupeBlockerDetails(rawBlockerDetails);
 const blockers = blockerDetails.map((entry) => entry.text);
 const localBlockers = blockerDetails.filter((entry) => entry.class !== 'external');
 const externalBlockers = blockerDetails.filter((entry) => entry.class === 'external');
@@ -229,6 +235,7 @@ function evidenceBlockers(entry, evidence) {
       const parsed = parsePublicationBlocker(blocker);
       return blockerDetail(entry, evidence, {
         class: externalPublicationChecks.has(parsed.name) ? 'external' : 'local',
+        key: parsed.name,
         label: `${evidence.label}/${parsed.name}`,
         reason: parsed.reason,
       });
@@ -237,6 +244,7 @@ function evidenceBlockers(entry, evidence) {
 
   return [blockerDetail(entry, evidence, {
     class: evidence.blockerClass ?? 'local',
+    key: evidenceBlockerKeys.get(evidence.label) ?? `${entry.id}:${evidence.label}`,
     label: evidence.label,
     reason: evidence.reason ?? evidence.status,
   })];
@@ -248,10 +256,22 @@ function blockerDetail(entry, evidence, override = {}) {
   return {
     class: override.class ?? evidence.blockerClass ?? 'local',
     id: entry.id,
+    key: override.key ?? `${entry.id}:${label}`,
     label,
     reason,
     text: `${entry.id}: ${label}: ${reason}`,
   };
+}
+
+function dedupeBlockerDetails(details) {
+  const seen = new Set();
+  const deduped = [];
+  for (const detail of details) {
+    if (seen.has(detail.key)) continue;
+    seen.add(detail.key);
+    deduped.push(detail);
+  }
+  return deduped;
 }
 
 function parsePublicationBlocker(blocker) {
