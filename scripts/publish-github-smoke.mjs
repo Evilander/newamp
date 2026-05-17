@@ -64,6 +64,15 @@ assert.ok(plan.commands.some((command) => command.label === 'publish-release' &&
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /RELEASE-MANIFEST\.json$/.test(arg))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /NewAmp-1\.0\.0-release-bundle\.zip$/.test(arg))));
 assert.ok(plan.commands.every((command) => !command.commandLine.includes('\n')));
+const pushMainCommand = plan.commands.find((command) => command.label === 'push-main');
+assert.ok(pushMainCommand, 'publish plan should push main');
+if (process.platform === 'win32') {
+  assert.deepEqual(
+    pushMainCommand.args.slice(0, 2),
+    ['-c', 'http.sslBackend=openssl'],
+    'Windows publish git commands should avoid schannel credential-provider failures',
+  );
+}
 assert.match(JSON.stringify(plan), /NewAmp Setup 1\.0\.0\.exe/);
 assert.match(JSON.stringify(plan), /NewAmp Portable 1\.0\.0\.exe/);
 assert.match(JSON.stringify(plan), /SHA256SUMS\.txt/);
@@ -105,6 +114,12 @@ assert.ok(
   externalPlan.commands.filter((command) => command.command === 'git').every((command) => command.args.includes(externalGitDir)),
   'external git plan should route git commands through NEWAMP_GIT_DIR',
 );
+if (process.platform === 'win32') {
+  assert.ok(
+    externalPlan.commands.filter((command) => command.command === 'git').every((command) => command.args[0] === '-c'),
+    'external git publish commands should also use hardened git transport settings',
+  );
+}
 
 run('git', ['init', '--bare', cleanExternalGitDir], repoRoot);
 run('git', ['--git-dir', cleanExternalGitDir, 'symbolic-ref', 'HEAD', 'refs/heads/main'], repoRoot);
