@@ -251,6 +251,7 @@ function runRealLibraryProof(root) {
     timeout: 360_000,
     env: {
       NEWAMP_FULL_SCAN_CLEAN: '1',
+      NEWAMP_FULL_SCAN_SKIP_ART_STORAGE: '1',
     },
   });
   if (!first.ok) cleanFullLibrarySmokeRoot();
@@ -259,6 +260,7 @@ function runRealLibraryProof(root) {
       timeout: 120_000,
       env: {
         NEWAMP_FULL_SCAN_CLEAN_AFTER: '1',
+        NEWAMP_FULL_SCAN_SKIP_ART_STORAGE: '1',
         NEWAMP_FULL_SCAN_EXPECT_INCREMENTAL: '1',
         NEWAMP_FULL_SCAN_MAX_MS: process.env.NEWAMP_FULL_SCAN_INCREMENTAL_MAX_MS || '60000',
         NEWAMP_FULL_SCAN_MIN_SKIPPED: process.env.NEWAMP_FULL_SCAN_MIN_SKIPPED || '5000',

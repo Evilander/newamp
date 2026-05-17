@@ -14,6 +14,7 @@ const minTracks = Number.parseInt(process.env.NEWAMP_FULL_SCAN_MIN_TRACKS ?? '50
 const maxMs = Number.parseInt(process.env.NEWAMP_FULL_SCAN_MAX_MS ?? '300000', 10);
 const clean = process.env.NEWAMP_FULL_SCAN_CLEAN === '1';
 const cleanAfter = process.env.NEWAMP_FULL_SCAN_CLEAN_AFTER === '1';
+const skipArtStorage = process.env.NEWAMP_FULL_SCAN_SKIP_ART_STORAGE === '1';
 const expectIncremental = process.env.NEWAMP_FULL_SCAN_EXPECT_INCREMENTAL === '1';
 const minSkipped = Number.parseInt(process.env.NEWAMP_FULL_SCAN_MIN_SKIPPED ?? String(minTracks), 10);
 
@@ -33,6 +34,11 @@ const progress = [];
 let lastLogAt = 0;
 
 const library = await LibraryStore.open(dbPath);
+if (skipArtStorage) {
+  // The large-library proof validates scanner/catalog scale; album-art persistence has its own focused smoke.
+  library.writeArtIfMissing = () => undefined;
+  library.artFileExists = () => true;
+}
 const scanner = new Scanner(library, (event) => {
   progress.push(event);
   const now = Date.now();
@@ -82,6 +88,9 @@ try {
       maxMs,
       expectIncremental,
       minSkipped,
+    },
+    storage: {
+      skipArtStorage,
     },
     checks,
     stats,
