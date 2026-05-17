@@ -472,11 +472,8 @@ function registerTray(): void {
         },
       },
     ]));
-    if (process.platform === 'win32' && !hasTrayBounds(nextTray.getBounds())) {
-      nextTray.destroy();
-      throw new Error('Windows notification area did not accept the tray icon.');
-    }
     tray = nextTray;
+    if (process.platform === 'win32') scheduleTrayBoundsDiagnostic(nextTray);
   } catch (error) {
     tray = null;
     writeDiagnosticEvent('tray-unavailable', { error });
@@ -484,11 +481,24 @@ function registerTray(): void {
   }
 }
 
+function scheduleTrayBoundsDiagnostic(nextTray: Tray): void {
+  if (hasTrayBounds(nextTray.getBounds())) return;
+  const timer = setTimeout(() => {
+    if (nextTray.isDestroyed() || hasTrayBounds(nextTray.getBounds())) return;
+    const error = new Error('Windows notification area did not report tray bounds.');
+    writeDiagnosticEvent('tray-unavailable', { error });
+    console.warn('[newamp] tray icon bounds unavailable', error);
+    nextTray.destroy();
+    if (tray === nextTray) tray = null;
+  }, 2000);
+  timer.unref?.();
+}
+
 function hasTrayBounds(bounds: Rectangle): boolean {
   return bounds.width > 0 || bounds.height > 0;
 }
 
-function resolveTrayIconImage(): Electron.NativeImage | string | null {
+function resolveTrayIconImage(): Electron.NativeImage | null {
   const iconPaths = process.platform === 'win32'
     ? [
         join(process.resourcesPath, 'build', 'icon.ico'),
@@ -504,9 +514,10 @@ function resolveTrayIconImage(): Electron.NativeImage | string | null {
       ];
   for (const iconPath of iconPaths) {
     if (!existsSync(iconPath)) continue;
-    if (process.platform === 'win32' && extname(iconPath).toLowerCase() === '.ico') return iconPath;
     const image = nativeImage.createFromPath(iconPath);
-    if (!image.isEmpty()) return image.resize({ width: 16, height: 16, quality: 'best' });
+    if (image.isEmpty()) continue;
+    const trayImage = image.resize({ width: 16, height: 16, quality: 'best' });
+    if (!trayImage.isEmpty()) return trayImage;
   }
   return null;
 }
