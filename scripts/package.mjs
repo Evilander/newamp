@@ -1,16 +1,19 @@
 import { spawnSync } from 'node:child_process';
-import { copyFile, mkdir } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { copyFile, mkdir, readdir, readFile, rm } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeBuildProvenance } from './build-provenance.mjs';
 import { writeReleaseChecksums } from './release-checksums.mjs';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
+const releaseVersion = String(JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8')).version ?? '').trim() || '0.0.0';
 const packageTemp = join(repoRoot, 'tmp', 'package-temp');
 const releaseRoot = join(repoRoot, 'release');
 const builderDebugPath = join(releaseRoot, 'builder-debug.yml');
 const nsisBuilderDebugPath = join(releaseRoot, 'builder-debug-nsis.yml');
 
+await resetPackageTemp();
+await pruneObsoleteReleaseArtifacts(releaseVersion);
 await mkdir(packageTemp, { recursive: true });
 
 run('npm', ['run', 'build']);
@@ -47,6 +50,34 @@ function electronBuilderTargetArgs(args) {
   if (args.includes('--portable')) return [['--win=portable']];
   if (args.includes('--installer') || args.includes('--nsis')) return [['--win=nsis']];
   return [['--win=nsis'], ['--win=portable']];
+}
+
+async function resetPackageTemp() {
+  await removeInsideRepo(packageTemp);
+}
+
+async function pruneObsoleteReleaseArtifacts(version) {
+  await mkdir(releaseRoot, { recursive: true });
+  const entries = await readdir(releaseRoot, { withFileTypes: true });
+  await Promise.all(entries
+    .filter((entry) => entry.isFile() && isObsoleteNewampReleaseArtifact(entry.name, version))
+    .map((entry) => removeInsideRepo(join(releaseRoot, entry.name))));
+}
+
+function isObsoleteNewampReleaseArtifact(name, version) {
+  if (!/^NewAmp/i.test(name) && !/^Newamp/i.test(name)) return false;
+  if (name.includes(version)) return false;
+  return /^Newamp? (?:Setup|Portable) \d+\.\d+\.\d+/i.test(name) ||
+    /^NewAmp-\d+\.\d+\.\d+-(?:source|release-bundle)\.zip$/i.test(name);
+}
+
+async function removeInsideRepo(target) {
+  const resolved = resolve(target);
+  const relativePath = relative(repoRoot, resolved);
+  if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    throw new Error(`Refusing to remove outside repo: ${resolved}`);
+  }
+  await rm(resolved, { recursive: true, force: true });
 }
 
 function run(command, args, options = {}) {

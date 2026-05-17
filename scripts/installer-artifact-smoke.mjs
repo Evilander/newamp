@@ -8,6 +8,7 @@ import { checkReleaseChecksums } from './release-checksums.mjs';
 
 const repoRoot = resolve('.');
 const packagePath = resolve(repoRoot, 'package.json');
+const packageScriptPath = resolve(repoRoot, 'scripts', 'package.mjs');
 const gatePath = resolve(repoRoot, 'scripts', 'release-gate.mjs');
 const mainPath = resolve(repoRoot, 'electron', 'main.ts');
 const releaseRoot = resolve(repoRoot, 'release');
@@ -33,6 +34,7 @@ const requiredExtensions = [...requiredAudioExtensions, ...requiredPlaylistExten
 
 const gateSource = readFileSync(gatePath, 'utf8');
 const mainSource = readFileSync(mainPath, 'utf8');
+const packageScriptSource = readFileSync(packageScriptPath, 'utf8');
 const builderDebug = readRequiredText(builderDebugPath);
 
 assert.equal(pkg.build?.productName, 'NewAmp', 'build productName should stay NewAmp');
@@ -82,6 +84,9 @@ assert.match(gateSource, /smoke:packaged-normal-launch/, 'release gate should ru
 assert.match(gateSource, /smoke:portable-app/, 'release gate should run portable app startup smoke after packaging');
 assert.match(gateSource, /portablePath/, 'release gate should include portable artifact checks');
 assert.match(gateSource, /checkInstalledAssociations/, 'release gate should include installed association registry proof');
+assert.match(packageScriptSource, /resetPackageTemp/, 'package script should clear its temp directory before building');
+assert.match(packageScriptSource, /pruneObsoleteReleaseArtifacts/, 'package script should prune stale versioned release artifacts before building');
+assert.match(packageScriptSource, /Refusing to remove outside repo/, 'package cleanup should refuse paths outside the repo');
 assert.match(mainSource, /--newamp-startup-smoke/, 'packaged app should accept a startup smoke command-line switch');
 assert.match(mainSource, /NEWAMP_STARTUP_SMOKE_MARKER/, 'packaged app should be able to write startup smoke marker files');
 assert.match(mainSource, /app\.setPath\('sessionData'/, 'packaged app should isolate Chromium session data from durable library/settings data');
