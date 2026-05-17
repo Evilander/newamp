@@ -23,6 +23,7 @@ const exePath = resolve(unpackedRoot, 'NewAmp.exe');
 const resourcesRoot = resolve(unpackedRoot, 'resources');
 const appAsarPath = resolve(resourcesRoot, 'app.asar');
 const extraDistIndex = resolve(resourcesRoot, 'dist', 'index.html');
+const packagedLegacyLogo = resolve(resourcesRoot, 'build', 'logo.png');
 const unpackedFfmpeg = resolve(resourcesRoot, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe');
 const unpackedSqlWasm = resolve(resourcesRoot, 'app.asar.unpacked', 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
 
@@ -39,6 +40,8 @@ assert.equal(pkg.build?.appId, 'io.newamp.player', 'build appId should be stable
 assert.ok(pkg.build?.win?.target?.includes('nsis'), 'Windows build target should include NSIS installer output');
 assert.ok(pkg.build?.win?.target?.includes('portable'), 'Windows build target should include a no-install portable EXE');
 assert.equal(pkg.build?.portable?.artifactName, 'NewAmp Portable ${version}.${ext}', 'portable artifact should have a stable human-readable file name');
+assert.doesNotMatch(JSON.stringify(pkg.build?.files ?? []), /build\/logo\.png/, 'packaged files should not copy the full-size renderer source logo');
+assert.doesNotMatch(JSON.stringify(pkg.build?.extraResources ?? []), /logo\.png/, 'extra resources should not copy the full-size renderer source logo');
 assert.match(
   JSON.stringify(pkg.scripts ?? {}),
   /smoke:installer-artifact/,
@@ -121,6 +124,7 @@ const distIndex = artifact(extraDistIndex, 1_000);
 const ffmpeg = artifact(unpackedFfmpeg, 50_000_000);
 const sqlWasm = artifact(unpackedSqlWasm, 500_000);
 const asarEntries = listPackage(appAsarPath).map((entry) => entry.replaceAll('\\', '/'));
+assert.equal(existsSync(packagedLegacyLogo), false, 'packaged resources should omit unused full-size logo.png');
 
 for (const entry of ['/dist/index.html', '/dist-electron/electron/main.js', '/package.json']) {
   assert.ok(asarEntries.includes(entry), `app.asar should include ${entry}`);

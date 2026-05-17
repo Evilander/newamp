@@ -180,7 +180,6 @@
       "dist-electron/**/*",
       "build/icon.png",
       "build/icon.ico",
-      "build/logo.png",
       "node_modules/ffmpeg-static/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm",
       "package.json"
@@ -195,8 +194,7 @@
         "to": "build",
         "filter": [
           "icon.ico",
-          "icon.png",
-          "logo.png"
+          "icon.png"
         ]
       }
     ],
