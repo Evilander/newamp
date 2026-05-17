@@ -19,6 +19,8 @@ assert.ok(appLogo.size < 120_000, `display app logo should stay below 120KB, got
 
 const assetDir = new URL('../dist/assets/', import.meta.url);
 const assets = await readdir(assetDir);
+const sourceMaps = assets.filter((asset) => asset.endsWith('.map'));
+assert.deepEqual(sourceMaps, [], 'production renderer build should not emit public source maps by default');
 const mainScripts = [];
 for (const asset of assets) {
   if (!/^index-.*\.js$/.test(asset)) continue;
@@ -31,9 +33,13 @@ assert.ok(largestMain.bytes < 420_000, `main renderer chunk should stay below 42
 
 assert.match(packageSource, /"smoke:startup-bundle"/, 'package.json must expose startup bundle smoke');
 assert.match(releaseGateSource, /'smoke:startup-bundle'/, 'release gate must run startup bundle smoke');
+const viteConfigSource = await readFile(new URL('../vite.config.ts', import.meta.url), 'utf8');
+assert.match(viteConfigSource, /NEWAMP_SOURCE_MAPS/, 'source maps should remain opt-in for debug builds');
+assert.doesNotMatch(viteConfigSource, /sourcemap:\s*true/, 'production source maps should not be forced on');
 
 console.log(JSON.stringify({
   ok: true,
   appLogoBytes: appLogo.size,
   mainChunk: largestMain,
+  sourceMaps: sourceMaps.length,
 }, null, 2));
