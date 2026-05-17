@@ -125,6 +125,8 @@ assert.match(builderDebug, /RequestExecutionLevel user/, 'installer should suppo
 assert.match(installerIncludeSource, /NEWAMP_REFRESH_ASSOCIATION HKEY_CURRENT_USER/, 'installer include should refresh current-user associations during repair installs');
 assert.match(installerIncludeSource, /NewAmp audio file/, 'installer include should repair stale Newamp audio association casing');
 assert.match(installerIncludeSource, /NewAmp playlist or CUE sheet/, 'installer include should repair stale Newamp playlist association casing');
+assert.match(installerIncludeSource, /DeleteRegValue[\s\S]*"Newamp\.AudioFile"/, 'installer include should remove legacy-cased audio OpenWithProgids values before repair writes');
+assert.match(installerIncludeSource, /DeleteRegValue[\s\S]*"Newamp\.PlaylistFile"/, 'installer include should remove legacy-cased playlist OpenWithProgids values before repair writes');
 assert.match(builderDebug, /build\\installer\.nsh/, 'packaged NSIS script should include the NewAmp installer customization file');
 assert.match(installerIncludeSource, /!insertmacro UPDATEFILEASSOC/, 'installer include should notify Explorer after association repair');
 

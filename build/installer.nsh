@@ -1,5 +1,7 @@
 !macro NEWAMP_REFRESH_ASSOCIATION ROOT EXT FILECLASS DESCRIPTION COMMANDTEXT
   WriteRegStr ${ROOT} "Software\Classes\.${EXT}" "" "${FILECLASS}"
+  DeleteRegValue ${ROOT} "Software\Classes\.${EXT}\OpenWithProgids" "Newamp.AudioFile"
+  DeleteRegValue ${ROOT} "Software\Classes\.${EXT}\OpenWithProgids" "Newamp.PlaylistFile"
   WriteRegNone ${ROOT} "Software\Classes\.${EXT}\OpenWithProgids" "${FILECLASS}"
   WriteRegStr ${ROOT} "Software\Classes\${FILECLASS}" "" `${DESCRIPTION}`
   WriteRegStr ${ROOT} "Software\Classes\${FILECLASS}\DefaultIcon" "" `$appExe,0`
