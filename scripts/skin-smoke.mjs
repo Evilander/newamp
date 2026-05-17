@@ -141,6 +141,9 @@ assert.match(skinsSource, /@shared\/custom-skin/, 'renderer skin constants shoul
 assert.match(deckTypesSource, /Windowshade/, 'deck skins should include a slim default windowshade bar');
 assert.match(deckTypesSource, /size: \{ width: 820, height: 112 \}/, 'default deck skin should keep the slimmer fixed windowshade native size');
 assert.match(deckPickerSource, /data-newamp-deck-skin-select/, 'compact deck should expose skin switching without consuming the whole bar');
+assert.match(deckPickerSource, /deck-skin-picker is-compact titlebar-nodrag/, 'compact deck skin picker must stay clickable inside draggable deck chrome');
+assert.match(deckPickerSource, /deck-skin-select titlebar-nodrag/, 'deck skin select must opt out of Electron window dragging');
+assert.match(styleSource, /\.deck-skin-picker[\s\S]*?-webkit-app-region: no-drag/, 'deck skin picker CSS should force no-drag behavior');
 assert.match(styleSource, /\.deck-record-player/, 'record deck should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-jukebox/, 'jukebox should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-cassette/, 'cassette should be a real shaped deck skin');
