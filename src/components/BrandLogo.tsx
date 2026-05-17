@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import type { CSSProperties } from 'react';
-import logoUrl from '../../build/logo.png';
+import logoUrl from '../../build/logo-app.webp';
 
 interface BrandLogoProps {
   size?: number;
