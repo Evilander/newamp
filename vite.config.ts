@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const emitSourceMaps = process.env.NEWAMP_SOURCE_MAPS === '1';
 
 export default defineConfig({
   plugins: [react()],
@@ -17,7 +18,7 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    sourcemap: true,
+    sourcemap: emitSourceMaps,
   },
   server: {
     port: 5173,
