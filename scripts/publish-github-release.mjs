@@ -185,18 +185,14 @@ export function publishGithubRelease({
       timeout: 30_000,
     });
     if (readiness.status !== 0 || readiness.error) {
+      const readinessReport = readinessResultFromSpawn(readiness);
       return {
         ...plan,
         ok: false,
         executed: false,
         results: [],
-        reason: 'prepublish readiness failed; refusing to create GitHub repo/release',
-        readiness: {
-          exitCode: readiness.status,
-          error: readiness.error?.message ?? null,
-          stdout: tail(readiness.stdout),
-          stderr: tail(readiness.stderr),
-        },
+        reason: readinessFailureReason('prepublish readiness failed; refusing to create GitHub repo/release', readinessReport),
+        readiness: readinessReport,
       };
     }
   }
@@ -219,29 +215,21 @@ export function publishGithubRelease({
       timeout: 30_000,
     });
     if (postReadiness.status !== 0 || postReadiness.error) {
+      const postReadinessReport = readinessResultFromSpawn(postReadiness);
       return {
         ...plan,
         ok: false,
         executed: true,
         results,
-        reason: 'post-publication readiness failed after GitHub publish commands',
-        postReadiness: {
-          exitCode: postReadiness.status,
-          error: postReadiness.error?.message ?? null,
-          stdout: tail(postReadiness.stdout),
-          stderr: tail(postReadiness.stderr),
-        },
+        reason: readinessFailureReason('post-publication readiness failed after GitHub publish commands', postReadinessReport),
+        postReadiness: postReadinessReport,
       };
     }
     return {
       ...plan,
       executed: true,
       results,
-      postReadiness: {
-        exitCode: postReadiness.status,
-        stdout: tail(postReadiness.stdout),
-        stderr: tail(postReadiness.stderr),
-      },
+      postReadiness: readinessResultFromSpawn(postReadiness),
     };
   }
 
@@ -451,6 +439,53 @@ function resultFromSpawn(result) {
     stdout: tail(result.stdout),
     stderr: tail(result.stderr),
   };
+}
+
+function readinessResultFromSpawn(result) {
+  const parsed = parseJsonReport(result.stdout);
+  const base = {
+    exitCode: result.status,
+    error: result.error?.message ?? null,
+    stderr: tail(result.stderr),
+  };
+  if (!parsed) {
+    return {
+      ...base,
+      stdout: tail(result.stdout),
+    };
+  }
+  return {
+    ...base,
+    mode: parsed.mode ?? null,
+    blockers: Array.isArray(parsed.blockers) ? parsed.blockers : [],
+    failedChecks: Array.isArray(parsed.checks)
+      ? parsed.checks
+          .filter((check) => check && check.ok === false)
+          .map((check) => ({
+            name: check.name ?? 'unknown',
+            reason: check.reason ?? null,
+          }))
+      : [],
+  };
+}
+
+function readinessFailureReason(prefix, readinessReport) {
+  return readinessReport.blockers?.length
+    ? `${prefix}: ${readinessReport.blockers.join('; ')}`
+    : prefix;
+}
+
+function parseJsonReport(output) {
+  const textValue = String(output ?? '').trim();
+  if (!textValue) return null;
+  const start = textValue.indexOf('{');
+  const end = textValue.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    return JSON.parse(textValue.slice(start, end + 1));
+  } catch {
+    return null;
+  }
 }
 
 function resolveGitDir(root, env) {
