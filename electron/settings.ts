@@ -64,6 +64,7 @@ function normalizeVisualizerPreset(value: unknown): AppSettings['visualizerPrese
     'prism-bars',
     'confetti',
     'burning-cloud',
+    'album-breathe',
   ].includes(preset)
     ? (preset as AppSettings['visualizerPreset'])
     : DEFAULTS.visualizerPreset;

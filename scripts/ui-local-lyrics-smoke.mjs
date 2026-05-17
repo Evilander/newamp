@@ -26,6 +26,8 @@ await writeSmokeSettings();
 
 const result = await runElectronSmoke();
 assert.equal(result.lyricSource, 'sidecar', 'Now Playing should prefer the sidecar LRC over LRCLIB');
+assert.equal(result.karaokeFullscreen, true, 'Karaoke mode should open a fullscreen lyrics view');
+assert.ok(result.karaokeSize >= 0.75, 'Karaoke fullscreen should expose lyrics text sizing');
 assert.match(result.activeLine, /Local sidecar lyric/, 'active synced line should come from the sidecar file');
 console.log(JSON.stringify(result, null, 2));
 

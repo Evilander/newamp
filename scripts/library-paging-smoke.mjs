@@ -42,6 +42,8 @@ try {
   const exactTotal = library.getTrackCount({ search: 'Paging Smoke', sort: 'artist' });
   const albumFirstPage = library.getAlbums({ search: 'Large Library', limit: 5000, offset: 0 });
   const albumSecondPage = library.getAlbums({ search: 'Large Library', limit: 5000, offset: albumFirstPage.length });
+  const albumRandomA = library.getAlbums({ search: 'Large Library', sort: 'random', randomSeed: 111, limit: 12, offset: 0 });
+  const albumRandomB = library.getAlbums({ search: 'Large Library', sort: 'random', randomSeed: 222, limit: 12, offset: 0 });
   const missingArtAlbums = library.getAlbums({ search: 'Large Library', missingArtOnly: true, limit: 10, offset: 0 });
   const artistFirstPage = library.getArtists({ search: 'Paging Smoke Artist', limit: 5000, offset: 0 });
   const artistSecondPage = library.getArtists({ search: 'Paging Smoke Artist', limit: 5000, offset: artistFirstPage.length });
@@ -54,6 +56,11 @@ try {
   assert.equal(exactTotal, total, 'large-library search should expose an exact filtered total');
   assert.equal(albumFirstPage.length, 5000, 'album summaries should support large-library paging');
   assert.equal(albumSecondPage.length, 12, 'album summaries should expose later pages');
+  assert.notDeepEqual(
+    albumRandomA.map((album) => album.album),
+    albumRandomB.map((album) => album.album),
+    'random album sort should reshuffle based on seed',
+  );
   assert.equal(missingArtAlbums.length, 10, 'album summaries should support server-side missing-art filtering');
   assert.equal(artistFirstPage.length, 5000, 'artist summaries should support large-library paging');
   assert.equal(artistSecondPage.length, 12, 'artist summaries should expose later pages');
@@ -107,6 +114,12 @@ try {
   assert.match(albumsViewSource, /offset: albums\.length/, 'AlbumsView should request later album pages by loaded row count');
   assert.match(albumsViewSource, /Load more albums/, 'AlbumsView should expose explicit album pagination');
   assert.match(albumsViewSource, /data-newamp-albums-load-more/, 'AlbumsView should expose a stable load-more marker');
+  assert.match(albumsViewSource, /data-newamp-albums-sort/, 'AlbumsView should expose album sort controls');
+  assert.match(albumsViewSource, /data-newamp-albums-reshuffle/, 'AlbumsView should expose a random album reshuffle action');
+  assert.match(albumsViewSource, /albumViewSnapshot/, 'AlbumsView should preserve loaded albums and scroll position when navigating away');
+  assert.match(albumsViewSource, /ALBUM_AUTO_LOAD_SCROLL_PX/, 'AlbumsView should auto-load the next album page near scroll bottom');
+  assert.match(albumsViewSource, /onScroll=\{handleAlbumsScroll\}/, 'AlbumsView should bind album-page loading to its scroll container');
+  assert.match(albumsViewSource, /albumPageRequestRef/, 'AlbumsView should guard auto-load pagination from duplicate scroll bursts');
   assert.doesNotMatch(albumsViewSource, /api\.getAlbums\(\)\.then\(setAlbums\)/, 'AlbumsView should not load every album on mount');
   assert.match(artistsViewSource, /const ARTIST_PAGE_SIZE = (\d+)/, 'ArtistsView should centralize the artist page size');
   const artistPageSizeMatch = artistsViewSource.match(/const ARTIST_PAGE_SIZE = (\d+)/);

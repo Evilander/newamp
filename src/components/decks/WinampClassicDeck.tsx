@@ -42,15 +42,17 @@ function WinampDeck({
     onClose,
     onOpenFullscreenViz,
   } = props;
-
-  const bars = Array.from({ length: 10 }, (_, i) => i);
+  const title = track?.title ?? 'No track loaded';
+  const artist = track?.artist ?? 'Drop music into NewAmp';
+  const album = track?.album ?? 'No album';
+  const model = variant === 'industrial' ? 'NEWAMP INDUSTRIAL' : 'NEWAMP 2.X';
 
   return (
     <div className={`deck-winamp-classic is-${variant} ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
       <header className="deck-wa-titlebar titlebar-drag">
         <button className="deck-wa-brand titlebar-nodrag" onClick={onExitDeck} title="Back to full NewAmp">
           <BrandLogo size={18} withGlow={false} />
-          <span>NEWAMP 2.X</span>
+          <span>{model}</span>
         </button>
         <DeckSkinPicker current={currentSkin} onPick={props.onPickSkin} compact />
         <div className="deck-wa-window titlebar-nodrag">
@@ -73,8 +75,8 @@ function WinampDeck({
         >
           <div className="deck-wa-time">{formatTime(currentTime)}</div>
           <div className="deck-wa-track">
-            <div title={track?.title}>{track?.title ?? 'No track loaded'}</div>
-            <span title={track?.artist}>{track?.artist ?? 'Drop music into NewAmp'}</span>
+            <div title={title}>{title}</div>
+            <span title={artist}>{artist}</span>
           </div>
           <div className="deck-wa-mini-viz">
             <Visualizer mode="mini" width={96} height={42} />
@@ -120,12 +122,14 @@ function WinampDeck({
         <div className="deck-wa-art">
           {artUrl ? <img src={artUrl} alt={track?.album ?? ''} draggable={false} /> : <span>NA</span>}
         </div>
-        <div className="deck-wa-bandset" aria-hidden="true">
-          {bars.map((bar) => (
-            <span key={bar} style={{ height: `${26 + ((bar * 17) % 54)}%` }} />
-          ))}
+        <div className="deck-wa-status-bank">
+          <span>{variant === 'industrial' ? 'RACK' : 'MAIN'}</span>
+          <strong title={album}>{album}</strong>
+          <em>{isPlaying ? 'playing' : 'paused'} / {mode === 'normal' ? 'linear' : mode.replace('-', ' ')}</em>
         </div>
-        <VolumeSlider value={volume} onChange={onSetVolume} width={116} showLabel={false} compact />
+        <div className="deck-wa-volume">
+          <VolumeSlider value={volume} onChange={onSetVolume} width={116} showLabel={false} compact />
+        </div>
       </section>
     </div>
   );

@@ -8,7 +8,7 @@ import { QuickPlayPalette } from './components/QuickPlayPalette';
 import { FirstRunHints } from './components/FirstRunHints';
 import { StartupSplash } from './components/StartupSplash';
 import { usePlayerStore } from './store/usePlayerStore';
-import { api, winctl } from './lib/api';
+import { api, inElectron, winctl } from './lib/api';
 import { syncMediaSession } from './lib/mediaSession';
 import { resolvePlayerShortcut, type PlayerShortcutCommand } from '@shared/keyboard-shortcuts';
 import { applyShell, loadInitialShell } from './components/ShellPicker';
@@ -41,6 +41,7 @@ const SettingsView = lazy(() =>
   import('./components/views/SettingsView').then((module) => ({ default: module.SettingsView })),
 );
 const AboutView = lazy(() => import('./components/views/AboutView').then((module) => ({ default: module.AboutView })));
+const RENDERER_STARTUP_SPLASH_MS = 5600;
 
 export default function App(): JSX.Element {
   const init = usePlayerStore((s) => s.init);
@@ -58,7 +59,7 @@ export default function App(): JSX.Element {
   const setView = usePlayerStore((s) => s.setView);
   const [dropActive, setDropActive] = useState(false);
   const [dropMessage, setDropMessage] = useState<string | null>(null);
-  const [showSplash, setShowSplash] = useState(true);
+  const [showSplash, setShowSplash] = useState(() => !inElectron);
   const [tutorialDismissed, setTutorialDismissed] = useState(false);
 
   async function handleOpenFiles(paths: string[]) {
@@ -133,9 +134,10 @@ export default function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    const handle = window.setTimeout(() => setShowSplash(false), 3600);
+    if (!showSplash) return undefined;
+    const handle = window.setTimeout(() => setShowSplash(false), RENDERER_STARTUP_SPLASH_MS);
     return () => window.clearTimeout(handle);
-  }, []);
+  }, [showSplash]);
 
   useEffect(() => {
     const scale = Math.min(1.35, Math.max(0.85, settings?.textScale ?? 1));

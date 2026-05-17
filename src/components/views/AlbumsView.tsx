@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type UIEvent } from 'react';
 import type { AlbumSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
@@ -7,32 +7,118 @@ import { api } from '../../lib/api';
 
 const ALBUM_PAGE_SIZE = 240;
 const CATALOG_SEARCH_DEBOUNCE_MS = 180;
+const ALBUM_AUTO_LOAD_SCROLL_PX = 560;
+
+type AlbumSort = 'artist' | 'album' | 'year-desc' | 'year-asc' | 'recent' | 'plays' | 'duration' | 'tracks' | 'random';
+
+const ALBUM_SORTS: Array<{ id: AlbumSort; label: string }> = [
+  { id: 'artist', label: 'Artist / year' },
+  { id: 'album', label: 'Album title' },
+  { id: 'year-desc', label: 'Newest year' },
+  { id: 'year-asc', label: 'Oldest year' },
+  { id: 'recent', label: 'Recently added' },
+  { id: 'plays', label: 'Most played' },
+  { id: 'duration', label: 'Longest albums' },
+  { id: 'tracks', label: 'Most tracks' },
+  { id: 'random', label: 'Random' },
+];
+
+const albumViewSnapshot: {
+  albums: AlbumSummary[];
+  selected: AlbumSummary | null;
+  tracks: Track[];
+  filter: string;
+  showMissingArtOnly: boolean;
+  sort: AlbumSort;
+  randomSeed: number;
+  hasMoreAlbums: boolean;
+  scrollTop: number;
+} = {
+  albums: [],
+  selected: null,
+  tracks: [],
+  filter: '',
+  showMissingArtOnly: false,
+  sort: 'artist',
+  randomSeed: Date.now(),
+  hasMoreAlbums: false,
+  scrollTop: 0,
+};
 
 export function AlbumsView(): JSX.Element {
-  const [albums, setAlbums] = useState<AlbumSummary[]>([]);
-  const [selected, setSelected] = useState<AlbumSummary | null>(null);
-  const [tracks, setTracks] = useState<Track[]>([]);
+  const [albums, setAlbums] = useState<AlbumSummary[]>(() => albumViewSnapshot.albums);
+  const [selected, setSelected] = useState<AlbumSummary | null>(() => albumViewSnapshot.selected);
+  const [tracks, setTracks] = useState<Track[]>(() => albumViewSnapshot.tracks);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
+  const setCompactMode = usePlayerStore((s) => s.setCompactMode);
+  const setFullscreenViz = usePlayerStore((s) => s.setFullscreenViz);
   const current = usePlayerStore((s) => s.current);
-  const [filter, setFilter] = useState('');
+  const [filter, setFilter] = useState(() => albumViewSnapshot.filter);
   const albumQuery = useDebouncedValue(filter, CATALOG_SEARCH_DEBOUNCE_MS);
-  const [showMissingArtOnly, setShowMissingArtOnly] = useState(false);
-  const [hasMoreAlbums, setHasMoreAlbums] = useState(false);
+  const [showMissingArtOnly, setShowMissingArtOnly] = useState(() => albumViewSnapshot.showMissingArtOnly);
+  const [albumSort, setAlbumSort] = useState<AlbumSort>(() => albumViewSnapshot.sort);
+  const [randomSeed, setRandomSeed] = useState(() => albumViewSnapshot.randomSeed);
+  const [hasMoreAlbums, setHasMoreAlbums] = useState(() => albumViewSnapshot.hasMoreAlbums);
   const [loadingAlbums, setLoadingAlbums] = useState(false);
   const albumListRef = useRef<HTMLDivElement>(null);
-  const [restoreAlbumScrollTop, setRestoreAlbumScrollTop] = useState(0);
+  const albumPageRequestRef = useRef(false);
+  const albumScrollTopRef = useRef(albumViewSnapshot.scrollTop);
+  const hydratedSnapshotRef = useRef(albumViewSnapshot.albums.length > 0 || !!albumViewSnapshot.selected);
 
   useEffect(() => {
+    albumViewSnapshot.filter = filter;
+  }, [filter]);
+
+  useEffect(() => {
+    albumViewSnapshot.showMissingArtOnly = showMissingArtOnly;
+  }, [showMissingArtOnly]);
+
+  useEffect(() => {
+    albumViewSnapshot.sort = albumSort;
+    albumViewSnapshot.randomSeed = randomSeed;
+  }, [albumSort, randomSeed]);
+
+  useEffect(() => {
+    albumViewSnapshot.albums = albums;
+    albumViewSnapshot.hasMoreAlbums = hasMoreAlbums;
+  }, [albums, hasMoreAlbums]);
+
+  useEffect(() => {
+    albumViewSnapshot.selected = selected;
+  }, [selected]);
+
+  useEffect(() => {
+    albumViewSnapshot.tracks = tracks;
+  }, [tracks]);
+
+  useEffect(() => {
+    return () => {
+      albumViewSnapshot.scrollTop = albumScrollTopRef.current;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (hydratedSnapshotRef.current) {
+      hydratedSnapshotRef.current = false;
+      return undefined;
+    }
     let cancelled = false;
+    albumPageRequestRef.current = false;
+    albumScrollTopRef.current = 0;
+    albumViewSnapshot.scrollTop = 0;
+    setSelected(null);
+    setTracks([]);
     setLoadingAlbums(true);
     api
       .getAlbums({
         search: albumQuery,
         missingArtOnly: showMissingArtOnly,
+        sort: albumSort,
+        randomSeed,
         limit: ALBUM_PAGE_SIZE + 1,
         offset: 0,
       })
@@ -40,7 +126,6 @@ export function AlbumsView(): JSX.Element {
         if (cancelled) return;
         setAlbums(rows.slice(0, ALBUM_PAGE_SIZE));
         setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
-        setRestoreAlbumScrollTop(0);
       })
       .catch(() => {
         if (!cancelled) {
@@ -54,7 +139,7 @@ export function AlbumsView(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [albumQuery, showMissingArtOnly]);
+  }, [albumQuery, showMissingArtOnly, albumSort, randomSeed]);
 
   useEffect(() => {
     if (!selected) return;
@@ -69,13 +154,14 @@ export function AlbumsView(): JSX.Element {
     const list = albumListRef.current;
     if (!list) return;
     const frame = window.requestAnimationFrame(() => {
-      list.scrollTop = restoreAlbumScrollTop;
+      list.scrollTop = albumScrollTopRef.current;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [selected, restoreAlbumScrollTop, filter, showMissingArtOnly]);
+  }, [selected, albums.length, filter, showMissingArtOnly, albumSort, randomSeed]);
 
   function openAlbum(album: AlbumSummary): void {
-    setRestoreAlbumScrollTop(albumListRef.current?.scrollTop ?? 0);
+    albumScrollTopRef.current = albumListRef.current?.scrollTop ?? albumScrollTopRef.current;
+    albumViewSnapshot.scrollTop = albumScrollTopRef.current;
     setSelected(album);
   }
 
@@ -84,20 +170,38 @@ export function AlbumsView(): JSX.Element {
   }
 
   async function loadMoreAlbums(): Promise<void> {
-    if (loadingAlbums || !hasMoreAlbums) return;
+    if (loadingAlbums || albumPageRequestRef.current || !hasMoreAlbums) return;
+    albumPageRequestRef.current = true;
     setLoadingAlbums(true);
     try {
       const rows = await api.getAlbums({
         search: albumQuery,
         missingArtOnly: showMissingArtOnly,
+        sort: albumSort,
+        randomSeed,
         limit: ALBUM_PAGE_SIZE + 1,
         offset: albums.length,
       });
       setAlbums((currentAlbums) => [...currentAlbums, ...rows.slice(0, ALBUM_PAGE_SIZE)]);
       setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
     } finally {
+      albumPageRequestRef.current = false;
       setLoadingAlbums(false);
     }
+  }
+
+  function handleAlbumsScroll(event: UIEvent<HTMLDivElement>): void {
+    const list = event.currentTarget;
+    albumScrollTopRef.current = list.scrollTop;
+    albumViewSnapshot.scrollTop = list.scrollTop;
+    const remaining = list.scrollHeight - list.scrollTop - list.clientHeight;
+    if (remaining > ALBUM_AUTO_LOAD_SCROLL_PX) return;
+    void loadMoreAlbums();
+  }
+
+  function changeAlbumSort(nextSort: AlbumSort): void {
+    setAlbumSort(nextSort);
+    if (nextSort === 'random') setRandomSeed(Date.now());
   }
 
   if (selected) {
@@ -127,6 +231,12 @@ export function AlbumsView(): JSX.Element {
           </button>
           <button className="pxbtn" onClick={() => addTracksToQueue(tracks)} disabled={!tracks.length} title="Queue album">
             QUEUE ALBUM
+          </button>
+          <button className="pxbtn" onClick={() => setCompactMode(true)} title="Open the compact deck">
+            DECK
+          </button>
+          <button className="pxbtn" onClick={() => setFullscreenViz(true)} title="Open fullscreen visualizer">
+            FULL VIS
           </button>
           <PlaylistAppendPicker
             tracks={tracks}
@@ -167,13 +277,43 @@ export function AlbumsView(): JSX.Element {
           className="bevel-in lcd-text flex-1 px-3 py-1.5 text-[14px] outline-none"
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
         />
+        <select
+          value={albumSort}
+          onChange={(event) => changeAlbumSort(event.currentTarget.value as AlbumSort)}
+          className="bevel-in lcd-text px-2 py-1.5 text-[12px] outline-none"
+          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          title="Sort albums"
+          data-newamp-albums-sort
+        >
+          {ALBUM_SORTS.map((sort) => (
+            <option key={sort.id} value={sort.id}>
+              {sort.label}
+            </option>
+          ))}
+        </select>
+        {albumSort === 'random' && (
+          <button className="pxbtn" onClick={() => setRandomSeed(Date.now())} data-newamp-albums-reshuffle>
+            RESHUFFLE
+          </button>
+        )}
+        <button className="pxbtn" onClick={() => setCompactMode(true)} title="Open the compact deck">
+          DECK
+        </button>
+        <button className="pxbtn" onClick={() => setFullscreenViz(true)} title="Open fullscreen visualizer">
+          FULL VIS
+        </button>
         <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
           {albums.length.toLocaleString()}{hasMoreAlbums ? '+' : ''}{' '}
           {showMissingArtOnly ? 'missing-art albums' : 'albums'}
           {loadingAlbums ? ' / loading' : ''}
         </span>
       </div>
-      <div ref={albumListRef} data-newamp-albums-scroll className="flex-1 overflow-auto p-4">
+      <div
+        ref={albumListRef}
+        data-newamp-albums-scroll
+        className="flex-1 overflow-auto p-4"
+        onScroll={handleAlbumsScroll}
+      >
         <div
           className="grid gap-4"
           style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(168px, 1fr))' }}

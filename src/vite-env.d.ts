@@ -8,6 +8,8 @@ declare global {
     winctl: {
       minimize: () => Promise<void>;
       toggleMax: () => Promise<void>;
+      setFullscreen: (on: boolean) => Promise<void>;
+      isFullscreen: () => Promise<boolean>;
       setCompact: (on: boolean, size?: { width?: number; height?: number }) => Promise<void>;
       setCompactSize: (size: { width: number; height: number }) => Promise<void>;
       setAlwaysOnTop: (on: boolean) => Promise<void>;

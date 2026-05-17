@@ -1037,6 +1037,7 @@ export class LibraryStore {
       having.push('MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) IS NULL');
     }
     const havingSql = having.length ? `HAVING ${having.join(' AND ')}` : '';
+    const orderSql = albumSortOrder(opts.sort, opts.randomSeed);
 
     const rows = this.many<{
       album: string;
@@ -1056,7 +1057,7 @@ export class LibraryStore {
         WHERE ${where.join(' AND ')}
         GROUP BY album, COALESCE(NULLIF(album_artist,''), artist)
         ${havingSql}
-        ORDER BY album_artist COLLATE NOCASE, year, album COLLATE NOCASE
+        ORDER BY ${orderSql}
         LIMIT ? OFFSET ?`,
       [...params, ...havingParams, limit, offset],
     );
@@ -2367,6 +2368,40 @@ function trackSortOrder(sort: string | undefined): string {
     default:
       return 'artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE';
   }
+}
+
+function albumSortOrder(sort: string | undefined, randomSeed: number | undefined): string {
+  const artistOrder = 'album_artist COLLATE NOCASE, year IS NULL, year, album COLLATE NOCASE';
+  switch (sort) {
+    case 'album':
+      return 'album COLLATE NOCASE, album_artist COLLATE NOCASE, year IS NULL, year';
+    case 'year-desc':
+      return 'year IS NULL, year DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+    case 'year-asc':
+      return 'year IS NULL, year ASC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+    case 'recent':
+      return 'MAX(mtime) DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+    case 'plays':
+      return 'SUM(play_count) DESC, MAX(last_played) DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+    case 'duration':
+      return 'duration DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+    case 'tracks':
+      return 'track_count DESC, duration DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+    case 'random': {
+      const seed = normalizeAlbumRandomSeed(randomSeed);
+      const linear = 1_103_515_245 + (seed % 7_919);
+      const curve = 17 + (seed % 991);
+      return `ABS(((MIN(id) * MIN(id) * ${curve}) + (MIN(id) * ${linear}) + ${seed}) % 2147483647), album_artist COLLATE NOCASE, album COLLATE NOCASE`;
+    }
+    case 'artist':
+    default:
+      return artistOrder;
+  }
+}
+
+function normalizeAlbumRandomSeed(seed: number | undefined): number {
+  if (!Number.isFinite(seed)) return 1;
+  return Math.max(1, Math.min(2_147_483_646, Math.trunc(Math.abs(Number(seed)))));
 }
 
 function parseTrackSearchQuery(input: string): ParsedTrackSearch {

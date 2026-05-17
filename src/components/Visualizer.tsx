@@ -213,6 +213,7 @@ export function Visualizer({ mode, width, height, className, artUrl, quality = '
 
       engine.getFreqData(freq);
       engine.getTimeData(wave);
+      boostFrequencyData(freq);
 
       const accent = getCssVar('--accent') || '#39ff14';
       const accentDim = getCssVar('--accent-dim') || '#1aa30a';
@@ -772,6 +773,7 @@ function paintMilkdropFallback(canvas: HTMLCanvasElement, engine: AudioEngine): 
   if (!ctx) return;
   const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
   engine.getFreqData(freq);
+  boostFrequencyData(freq);
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cssW = canvas.clientWidth || 640;
   const cssH = canvas.clientHeight || 360;
@@ -817,6 +819,15 @@ function avg(arr: Uint8Array, from: number, to: number): number {
     count++;
   }
   return count ? sum / count : 0;
+}
+
+function boostFrequencyData(arr: Uint8Array): void {
+  for (let i = 0; i < arr.length; i += 1) {
+    const normalized = arr[i]! / 255;
+    const lowBandLift = i < 36 ? 1.18 : i < 120 ? 1.08 : 1;
+    const shaped = Math.pow(normalized, 0.68) * 1.34 * lowBandLift;
+    arr[i] = Math.max(0, Math.min(255, Math.round(shaped * 255)));
+  }
 }
 
 function parseRgb(color: string): string {

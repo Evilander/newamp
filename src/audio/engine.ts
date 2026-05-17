@@ -138,7 +138,9 @@ export class AudioEngine {
 
     const analyser = ctx.createAnalyser();
     analyser.fftSize = DEFAULT_FFT_SIZE;
-    analyser.smoothingTimeConstant = 0.42;
+    analyser.minDecibels = -86;
+    analyser.maxDecibels = -10;
+    analyser.smoothingTimeConstant = 0.24;
 
     const decks = [this.createDeck(0, ctx), this.createDeck(1, ctx)] as [Deck, Deck];
     for (const deck of decks) {

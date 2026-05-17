@@ -76,6 +76,11 @@ assert.match(libraryViewSource, /storeToggleLove/, 'shared track tables should l
 assert.match(libraryViewSource, /storeSetTrackRating/, 'shared track tables should rate tracks outside the main Library view');
 assert.match(libraryViewSource, /patchLocalTrack/, 'shared track tables should re-render local row actions without mutating DOM');
 assert.match(nowPlayingSource, /Rating/, 'Now Playing should expose current-track rating');
+assert.match(nowPlayingSource, /ScoreRating/, 'Now Playing should use the decimal score control');
+const scoreRatingSource = await readFile(new URL('../src/components/ScoreRating.tsx', import.meta.url), 'utf8');
+assert.match(scoreRatingSource, /data-newamp-score-rating-input/, 'score rating should expose a direct typed numeric input');
+assert.match(scoreRatingSource, /type="number"/, 'score rating input should be numeric');
+assert.match(scoreRatingSource, /step=\{SCORE_STEP_FINE\}/, 'score rating input should accept exact 0.1 steps');
 assert.match(packageSource, /smoke:rating/, 'package scripts should include rating smoke');
 
 console.log(JSON.stringify({

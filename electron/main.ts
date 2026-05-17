@@ -16,7 +16,7 @@ import {
 } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
-import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { LibraryStore } from './library.js';
 import { LibraryWatcher } from './library-watcher.js';
@@ -328,6 +328,8 @@ let normalBounds: Rectangle | null = null;
 // where toggling DECK while maximized stranded the window at the deck size.
 let normalWasMaximized = false;
 let tray: Tray | null = null;
+let startupSplashWin: BrowserWindow | null = null;
+let startupSplashStartedAt = 0;
 let isQuitting = false;
 let library: LibraryStore;
 let settings: SettingsStore;
@@ -339,6 +341,8 @@ let pendingOpenFiles = collectOpenFileArgs(process.argv);
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL;
 const openDevTools = isDev && process.env.OPEN_DEVTOOLS === '1';
+const STARTUP_SPLASH_HOLD_MS = 5600;
+const startupSplashEnabled = !smokeMode && process.env.NEWAMP_DISABLE_STARTUP_SPLASH !== '1';
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -346,10 +350,11 @@ function createWindow(): BrowserWindow {
     height: 820,
     minWidth: 980,
     minHeight: 640,
-    show: !smokeMode,
+    show: false,
     frame: false,
     titleBarStyle: 'hidden',
-    backgroundColor: '#0a0e07',
+    transparent: true,
+    backgroundColor: '#00000000',
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
@@ -371,8 +376,17 @@ function createWindow(): BrowserWindow {
 
   win.once('ready-to-show', () => {
     if (smokeMode) return;
-    win.show();
-    if (openDevTools) win.webContents.openDevTools({ mode: 'detach' });
+    const reveal = () => {
+      closeStartupSplashWindow();
+      if (win.isDestroyed()) return;
+      win.show();
+      win.focus();
+      if (openDevTools) win.webContents.openDevTools({ mode: 'detach' });
+    };
+    const remainingSplashMs = startupSplashWin
+      ? Math.max(0, STARTUP_SPLASH_HOLD_MS - (Date.now() - startupSplashStartedAt))
+      : 0;
+    setTimeout(reveal, remainingSplashMs);
   });
 
   win.on('maximize', () => win.webContents.send('window-state', { maximized: true }));
@@ -406,6 +420,125 @@ function createWindow(): BrowserWindow {
   }
 
   return win;
+}
+
+function createStartupSplashWindow(): void {
+  if (!startupSplashEnabled || startupSplashWin) return;
+  const logoDataUrl = resolveStartupSplashLogoDataUrl();
+  if (!logoDataUrl) return;
+  startupSplashStartedAt = Date.now();
+  startupSplashWin = new BrowserWindow({
+    width: 340,
+    height: 340,
+    show: false,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: false,
+    resizable: false,
+    movable: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    title: 'NewAmp',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  startupSplashWin.once('ready-to-show', () => {
+    if (!startupSplashWin || startupSplashWin.isDestroyed()) return;
+    startupSplashWin.showInactive();
+  });
+  startupSplashWin.on('closed', () => {
+    startupSplashWin = null;
+  });
+  startupSplashWin.loadURL(buildStartupSplashHtml(logoDataUrl)).catch((err) => {
+    console.warn('[newamp] startup splash failed', err);
+    closeStartupSplashWindow();
+  });
+}
+
+function closeStartupSplashWindow(): void {
+  if (!startupSplashWin || startupSplashWin.isDestroyed()) {
+    startupSplashWin = null;
+    return;
+  }
+  startupSplashWin.close();
+  startupSplashWin = null;
+}
+
+function resolveStartupSplashLogoDataUrl(): string | null {
+  const candidates = [
+    resolveBundledRendererLogoPath(),
+    join(process.resourcesPath, 'build', 'logo-app.webp'),
+    join(app.getAppPath(), 'build', 'logo-app.webp'),
+    join(appRoot, 'build', 'logo-app.webp'),
+    join(appRoot, 'build', 'logo.png'),
+  ].filter((value): value is string => !!value);
+  for (const logoPath of candidates) {
+    try {
+      if (!existsSync(logoPath)) continue;
+      const ext = extname(logoPath).toLowerCase();
+      const mime = ext === '.png' ? 'image/png' : 'image/webp';
+      return `data:${mime};base64,${readFileSync(logoPath).toString('base64')}`;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function resolveBundledRendererLogoPath(): string | null {
+  try {
+    const assetsDir = join(rendererDistPath(), 'assets');
+    const logoAsset = readdirSync(assetsDir).find((name) => /^logo-app-.*\.webp$/i.test(name));
+    return logoAsset ? join(assetsDir, logoAsset) : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildStartupSplashHtml(logoDataUrl: string): string {
+  const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+body {
+  display: grid;
+  place-items: center;
+}
+img {
+  width: 240px;
+  height: 240px;
+  object-fit: contain;
+  animation: logo-spin 2600ms cubic-bezier(.18,.86,.18,1) both, logo-hold 5600ms ease both;
+}
+@keyframes logo-spin {
+  0% { transform: rotate(0deg) scale(.72); opacity: 0; filter: blur(8px); }
+  18% { opacity: 1; filter: blur(0); }
+  72% { transform: rotate(360deg) scale(1.08); }
+  100% { transform: rotate(360deg) scale(1); opacity: 1; filter: blur(0); }
+}
+@keyframes logo-hold {
+  0%, 88% { opacity: 1; }
+  100% { opacity: 0; }
+}
+</style>
+</head>
+<body>
+  <img alt="NewAmp" src="${logoDataUrl}">
+</body>
+</html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
 }
 
 function showMainWindow(): void {
@@ -1167,6 +1300,10 @@ function registerIpc(): void {
     if (mainWin.isMaximized()) mainWin.unmaximize();
     else mainWin.maximize();
   });
+  ipcMain.handle('win:set-fullscreen', (_e, on: boolean) => {
+    mainWin?.setFullScreen(!!on);
+  });
+  ipcMain.handle('win:is-fullscreen', () => mainWin?.isFullScreen() ?? false);
   ipcMain.handle('win:set-compact', (_e, on: boolean, size?: { width?: number; height?: number }) => {
     if (!mainWin) return;
     if (on) {
@@ -1638,10 +1775,18 @@ function uiVisualizerProbeSource(): string {
       const artButton = await waitFor('art overlay toggle', () =>
         document.querySelector('[data-newamp-viz-art-button]'),
       );
-      artButton.click();
-      await waitFor('art overlay state', () =>
-        stage.getAttribute('data-newamp-visualizer-art') === 'visible',
+      if (stage.getAttribute('data-newamp-visualizer-art') === 'hidden') artButton.click();
+      await waitFor('art pulse armed state', () =>
+        ['armed', 'pulse'].includes(stage.getAttribute('data-newamp-visualizer-art') || ''),
       );
+      const screenButton = await waitFor('native fullscreen visualizer toggle', () =>
+        document.querySelector('[data-newamp-viz-screen-button]'),
+      );
+      screenButton.click();
+      await waitFor('native fullscreen state', () =>
+        stage.getAttribute('data-newamp-native-fullscreen') === 'true',
+      );
+      screenButton.click();
       const cleanButton = await waitFor('clean visualizer toggle', () =>
         document.querySelector('[data-newamp-viz-clean-button]'),
       );
@@ -1688,6 +1833,7 @@ function uiVisualizerProbeSource(): string {
         compactClearsFullscreen: true,
         qualityToggle: stage.getAttribute('data-newamp-visualizer-quality'),
         artToggle: stage.getAttribute('data-newamp-visualizer-art'),
+        screenToggle: true,
         chromeMode: stage.getAttribute('data-newamp-visualizer-chrome'),
       };
     })()
@@ -2097,6 +2243,12 @@ function uiLyricsProbeSource(): string {
       await waitFor('karaoke lyrics mode', () =>
         panel.getAttribute('data-newamp-lyrics-karaoke') === 'true' ? panel : null,
       );
+      const karaokeStage = await waitFor('fullscreen karaoke stage', () =>
+        document.querySelector('[data-newamp-karaoke-fullscreen]'),
+      );
+      const karaokeSizeSlider = await waitFor('karaoke text-size slider', () =>
+        karaokeStage.querySelector('[data-newamp-karaoke-size-slider]'),
+      );
       const lyricReady = await waitFor('LRCLIB lyric content', () => {
         const status = panel.getAttribute('data-newamp-lyrics-status') || '';
         const mode = panel.getAttribute('data-newamp-lyrics-mode') || '';
@@ -2137,6 +2289,8 @@ function uiLyricsProbeSource(): string {
         lyricStatus: lyricReady.status,
         lyricMode: lyricReady.mode,
         karaokeMode: panel.getAttribute('data-newamp-lyrics-karaoke') === 'true',
+        karaokeFullscreen: !!karaokeStage,
+        karaokeSize: Number(karaokeSizeSlider.value || '0'),
         lyricSource: lyricReady.source,
         lineCount: lyricReady.lineCount,
         plainLength: lyricReady.plainLength,
@@ -2679,6 +2833,7 @@ async function bootstrap(): Promise<void> {
   registerAudioProtocol();
   registerIpc();
 
+  createStartupSplashWindow();
   mainWin = createWindow();
   registerTray();
   registerMediaShortcuts();
@@ -2763,6 +2918,7 @@ app.on('before-quit', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  closeStartupSplashWindow();
   libraryWatcher?.stop();
   tray?.destroy();
   tray = null;

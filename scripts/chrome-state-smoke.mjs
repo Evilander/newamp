@@ -35,6 +35,7 @@ assert.equal(visualizerSaved.visualizerPreset, 'galaxy', 'visualizer preset shou
 assert.equal(new SettingsStore(settingsPath).get().visualizerPreset, 'galaxy', 'visualizer preset should reload');
 assert.equal(settings.set({ visualizerPreset: 'plasma-grid' }).visualizerPreset, 'plasma-grid', 'Xbox-style Plasma Grid preset should save');
 assert.equal(settings.set({ visualizerPreset: 'orbital-rings' }).visualizerPreset, 'orbital-rings', 'Orbital Rings preset should save');
+assert.equal(settings.set({ visualizerPreset: 'album-breathe' }).visualizerPreset, 'album-breathe', 'Album Breathe preset should save');
 assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'neon-waves', 'visualizer preset should reject unknown values');
 assert.equal(settings.set({ firstLaunchTutorialSeen: true }).firstLaunchTutorialSeen, true, 'first-launch tutorial completion should save');
 assert.equal(new SettingsStore(settingsPath).get().firstLaunchTutorialSeen, true, 'first-launch tutorial completion should reload');
@@ -99,7 +100,8 @@ assert.match(
 );
 assert.match(appSource, /StartupSplash/, 'app should show the NewAmp logo on launch');
 assert.match(appSource, /FirstLaunchTutorial/, 'app should show first-launch tutorial');
-assert.match(appSource, /setShowSplash\(false\), 3600/, 'startup logo animation should remain visible long enough to see');
+assert.match(appSource, /RENDERER_STARTUP_SPLASH_MS = 5600/, 'browser-preview startup logo animation should remain visible long enough to see');
+assert.match(appSource, /useState\(\(\) => !inElectron\)/, 'Electron should use the native logo splash instead of showing app chrome behind a renderer overlay');
 assert.match(startupSource, /BrandLogo size=\{220\}/, 'startup splash should use the large current NewAmp logo');
 assert.match(appSource, /AboutView/, 'app should expose an About view');
 assert.match(settingsSource, /textScale/, 'settings should persist global text scale');

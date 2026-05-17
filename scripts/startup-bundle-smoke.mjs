@@ -5,6 +5,7 @@ const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'ut
 const brandLogoSource = await readFile(new URL('../src/components/BrandLogo.tsx', import.meta.url), 'utf8');
 const startupSplashSource = await readFile(new URL('../src/components/StartupSplash.tsx', import.meta.url), 'utf8');
 const styleSource = await readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8');
+const mainSource = await readFile(new URL('../electron/main.ts', import.meta.url), 'utf8');
 const packageSource = await readFile(new URL('../package.json', import.meta.url), 'utf8');
 const releaseGateSource = await readFile(new URL('./release-gate.mjs', import.meta.url), 'utf8');
 
@@ -25,6 +26,10 @@ assert.doesNotMatch(startupSplashSource, /startup-splash-wordmark|startup-splash
 assert.match(styleSource, /\.startup-splash\s*\{[\s\S]*?background:\s*transparent;/, 'startup splash should not paint a black overlay');
 assert.doesNotMatch(styleSource, /brand-logo-themed/, 'theme-colored logo skin CSS should not ship');
 assert.doesNotMatch(styleSource, /\.startup-splash-logo\s*\{[\s\S]*?filter:/, 'startup splash should not add a color-changing logo filter');
+assert.match(mainSource, /STARTUP_SPLASH_HOLD_MS = 5600/, 'native startup splash should linger long enough to read the logo');
+assert.match(mainSource, /show:\s*false/, 'main window should start hidden behind the native logo splash');
+assert.match(mainSource, /createStartupSplashWindow\(\);[\s\S]*?mainWin = createWindow\(\)/, 'native logo splash should open before the main window');
+assert.match(mainSource, /closeStartupSplashWindow\(\);[\s\S]*?win\.show\(\)/, 'main window should reveal only after the splash closes');
 const appLogo = await stat(new URL('../build/logo-app.webp', import.meta.url));
 assert.ok(appLogo.size < 120_000, `display app logo should stay below 120KB, got ${appLogo.size}`);
 
