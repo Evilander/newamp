@@ -53,7 +53,7 @@ import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
 import { generateOpenAiLinerNotes } from './openai-assist.js';
 import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from './winamp-skin-import.js';
 import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
-import { suggestMusicFolders } from './music-folders.js';
+import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import type {
   CustomSkin,
@@ -718,8 +718,13 @@ function withAudioCors(response: Response): Response {
 
 function registerIpc(): void {
   ipcMain.handle('library:scan', async (_e, roots?: string[]) => {
-    const targets = roots && roots.length ? roots : settings.get().libraryRoots;
+    const configuredRoots = settings.get().libraryRoots;
+    const fallbackRoots = roots && roots.length
+      ? []
+      : defaultMusicScanRoots({ fallbackMusicPath: app.getPath('music') });
+    const targets = roots && roots.length ? roots : configuredRoots.length ? configuredRoots : fallbackRoots;
     if (!targets.length) return;
+    if (!configuredRoots.length) settings.set({ libraryRoots: targets });
     return scanner.start(targets);
   });
 

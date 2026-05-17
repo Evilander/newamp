@@ -10,6 +10,10 @@ export interface MusicFolderSuggestionOptions {
   exists?: (path: string) => boolean;
 }
 
+export interface DefaultMusicScanRootOptions extends MusicFolderSuggestionOptions {
+  fallbackMusicPath?: string;
+}
+
 export function suggestMusicFolders({
   homeDir = homedir(),
   env = process.env,
@@ -61,6 +65,19 @@ export function suggestMusicFolders({
     out.push({ ...candidate, path });
   }
   return out;
+}
+
+export function defaultMusicScanRoots({
+  fallbackMusicPath,
+  exists = existsSync,
+  ...options
+}: DefaultMusicScanRootOptions = {}): string[] {
+  const [firstSuggestion] = suggestMusicFolders({ ...options, exists });
+  if (firstSuggestion) return [firstSuggestion.path];
+
+  const fallback = cleanPath(fallbackMusicPath);
+  if (fallback && safeExists(fallback, exists)) return [fallback];
+  return [];
 }
 
 function childPath(parent: string, child: string): string {

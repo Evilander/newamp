@@ -43,6 +43,12 @@ export function EmptyLibrary(): JSX.Element {
   }
 
   async function scanDefault(): Promise<void> {
+    const [bestSuggestion] = suggestions;
+    if (bestSuggestion) {
+      await scanSuggestedFolder(bestSuggestion.path);
+      return;
+    }
+
     setScanning(true);
     setStatus('Scanning default music folder...');
     try {
