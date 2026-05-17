@@ -66,6 +66,7 @@ const cleanExternalGitDir = join(repoRoot, 'tmp', 'publish-github-smoke-clean.gi
 await rm(smokeRoot, { recursive: true, force: true });
 await rm(cleanExternalGitDir, { recursive: true, force: true });
 await mkdir(join(smokeRoot, 'release', 'win-unpacked'), { recursive: true });
+await mkdir(join(smokeRoot, 'scripts'), { recursive: true });
 await mkdir(join(smokeRoot, 'source-fixture'), { recursive: true });
 await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: fixtureVersion }), 'utf8');
 await writeFile(join(smokeRoot, 'README.md'), '# NewAmp\n', 'utf8');
@@ -73,6 +74,22 @@ await writeFile(join(smokeRoot, 'release', `NewAmp Setup ${fixtureVersion}.exe`)
 await writeFile(join(smokeRoot, 'release', `NewAmp Portable ${fixtureVersion}.exe`), 'portable', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'win-unpacked', 'NewAmp.exe'), 'exe', 'utf8');
 await writeFile(join(smokeRoot, 'source-fixture', 'README.md'), '# NewAmp source fixture\n', 'utf8');
+await writeFile(
+  join(smokeRoot, 'scripts', 'publication-readiness.mjs'),
+  [
+    'console.log(JSON.stringify({',
+    "  mode: process.env.NEWAMP_PUBLICATION_READINESS_MODE || 'strict',",
+    "  blockers: ['signed-artifacts: fixture unsigned', 'github-auth: fixture missing auth'],",
+    '  checks: [',
+    "    { name: 'signed-artifacts', ok: false, reason: 'fixture unsigned' },",
+    "    { name: 'github-auth', ok: false, reason: 'fixture missing auth' }",
+    '  ]',
+    '}));',
+    'process.exitCode = 1;',
+    '',
+  ].join('\n'),
+  'utf8',
+);
 compressDirectoryToZip(
   join(smokeRoot, 'source-fixture'),
   join(smokeRoot, 'release', `NewAmp-${fixtureVersion}-source.zip`),
@@ -127,6 +144,23 @@ const dryRun = publishGithubRelease({
 assert.equal(dryRun.ok, true);
 assert.equal(dryRun.executed, false);
 assert.equal(dryRun.commands.length, plan.commands.length);
+
+const refusedExecute = publishGithubRelease({
+  root: smokeRoot,
+  env: {},
+  execute: true,
+});
+assert.equal(refusedExecute.ok, false);
+assert.equal(refusedExecute.executed, false);
+assert.match(refusedExecute.reason, /fixture unsigned/);
+assert.deepEqual(refusedExecute.readiness?.blockers, [
+  'signed-artifacts: fixture unsigned',
+  'github-auth: fixture missing auth',
+]);
+assert.deepEqual(
+  refusedExecute.readiness?.failedChecks.map((check) => check.name),
+  ['signed-artifacts', 'github-auth'],
+);
 
 const overridePlan = buildGithubPublishPlan({
   root: smokeRoot,
