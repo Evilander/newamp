@@ -19,6 +19,7 @@ const {
   buildGithubPublishPlan,
   publishGithubRelease,
 } = await import('./publish-github-release.mjs');
+const { writeBuildProvenance } = await import('./build-provenance.mjs');
 const { createReleaseBundle } = await import('./release-bundle.mjs');
 const { writeReleaseChecksums } = await import('./release-checksums.mjs');
 
@@ -39,6 +40,7 @@ compressDirectoryToZip(
   join(smokeRoot, 'release', 'NewAmp-1.0.0-source.zip'),
 );
 writeReleaseChecksums({ root: smokeRoot, version: '1.0.0' });
+writeBuildProvenance({ root: smokeRoot, version: '1.0.0' });
 const bundle = createReleaseBundle({
   root: smokeRoot,
   version: '1.0.0',
@@ -57,6 +59,7 @@ assert.equal(plan.tag, 'v1.0.0');
 assert.ok(plan.commands.some((command) => command.label === 'ensure-repo'));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.includes('--repo')));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /SHA256SUMS\.txt$/.test(arg))));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /BUILD-PROVENANCE\.json$/.test(arg))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /NewAmp-1\.0\.0-source\.zip$/.test(arg))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /RELEASE-MANIFEST\.json$/.test(arg))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /NewAmp-1\.0\.0-release-bundle\.zip$/.test(arg))));
@@ -64,6 +67,7 @@ assert.ok(plan.commands.every((command) => !command.commandLine.includes('\n')))
 assert.match(JSON.stringify(plan), /NewAmp Setup 1\.0\.0\.exe/);
 assert.match(JSON.stringify(plan), /NewAmp Portable 1\.0\.0\.exe/);
 assert.match(JSON.stringify(plan), /SHA256SUMS\.txt/);
+assert.match(JSON.stringify(plan), /BUILD-PROVENANCE\.json/);
 assert.match(JSON.stringify(plan), /RELEASE-MANIFEST\.json/);
 assert.match(JSON.stringify(plan), /NewAmp-1\.0\.0-release-bundle\.zip/);
 

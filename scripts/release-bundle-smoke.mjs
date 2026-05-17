@@ -27,6 +27,7 @@ await mkdir(join(smokeRoot, 'release'), { recursive: true });
 await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
 await writeFile(join(smokeRoot, 'README.md'), '# NewAmp\n', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'SHA256SUMS.txt'), 'fake checksums\n', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'BUILD-PROVENANCE.json'), '{"name":"fixture"}\n', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'NewAmp Setup 1.0.0.exe'), 'installer', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'NewAmp Portable 1.0.0.exe'), 'portable', 'utf8');
 await mkdir(join(smokeRoot, 'source-fixture', 'build'), { recursive: true });
@@ -45,6 +46,7 @@ const specs = releaseBundleFileSpecs({ root: smokeRoot, version: '1.0.0' });
 assert.deepEqual(specs.map((spec) => spec.entryName), [
   'README.md',
   'SHA256SUMS.txt',
+  'BUILD-PROVENANCE.json',
   'NewAmp Setup 1.0.0.exe',
   'NewAmp Portable 1.0.0.exe',
   'NewAmp-1.0.0-source.zip',
@@ -75,6 +77,7 @@ await writeFile(join(gitRoot, '.gitignore'), '.newamp-git/\nrelease/\n', 'utf8')
 await writeFile(join(gitRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
 await writeFile(join(gitRoot, 'README.md'), '# NewAmp\n', 'utf8');
 await writeFile(join(gitRoot, 'release', 'SHA256SUMS.txt'), 'fake checksums\n', 'utf8');
+await writeFile(join(gitRoot, 'release', 'BUILD-PROVENANCE.json'), '{"name":"fixture"}\n', 'utf8');
 await writeFile(join(gitRoot, 'release', 'NewAmp Setup 1.0.0.exe'), 'installer', 'utf8');
 await writeFile(join(gitRoot, 'release', 'NewAmp Portable 1.0.0.exe'), 'portable', 'utf8');
 run('git', ['init', '--bare', gitDir]);
