@@ -77,6 +77,7 @@ export interface CatalogSummaryQueryOptions {
   search?: string;
   limit?: number;
   offset?: number;
+  missingArtOnly?: boolean;
   year?: number | null;
   yearWindow?: number;
   excludeAlbum?: string | null;

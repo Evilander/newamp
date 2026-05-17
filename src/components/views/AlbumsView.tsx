@@ -5,6 +5,9 @@ import { formatDuration } from '../../lib/format';
 import { PlaylistAppendPicker, TrackTable } from './LibraryView';
 import { api } from '../../lib/api';
 
+const ALBUM_PAGE_SIZE = 240;
+const CATALOG_SEARCH_DEBOUNCE_MS = 180;
+
 export function AlbumsView(): JSX.Element {
   const [albums, setAlbums] = useState<AlbumSummary[]>([]);
   const [selected, setSelected] = useState<AlbumSummary | null>(null);
@@ -16,13 +19,42 @@ export function AlbumsView(): JSX.Element {
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
   const current = usePlayerStore((s) => s.current);
   const [filter, setFilter] = useState('');
+  const albumQuery = useDebouncedValue(filter, CATALOG_SEARCH_DEBOUNCE_MS);
   const [showMissingArtOnly, setShowMissingArtOnly] = useState(false);
+  const [hasMoreAlbums, setHasMoreAlbums] = useState(false);
+  const [loadingAlbums, setLoadingAlbums] = useState(false);
   const albumListRef = useRef<HTMLDivElement>(null);
   const [restoreAlbumScrollTop, setRestoreAlbumScrollTop] = useState(0);
 
   useEffect(() => {
-    api.getAlbums().then(setAlbums).catch(() => undefined);
-  }, []);
+    let cancelled = false;
+    setLoadingAlbums(true);
+    api
+      .getAlbums({
+        search: albumQuery,
+        missingArtOnly: showMissingArtOnly,
+        limit: ALBUM_PAGE_SIZE + 1,
+        offset: 0,
+      })
+      .then((rows) => {
+        if (cancelled) return;
+        setAlbums(rows.slice(0, ALBUM_PAGE_SIZE));
+        setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
+        setRestoreAlbumScrollTop(0);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAlbums([]);
+          setHasMoreAlbums(false);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingAlbums(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [albumQuery, showMissingArtOnly]);
 
   useEffect(() => {
     if (!selected) return;
@@ -42,8 +74,6 @@ export function AlbumsView(): JSX.Element {
     return () => window.cancelAnimationFrame(frame);
   }, [selected, restoreAlbumScrollTop, filter, showMissingArtOnly]);
 
-  const missingArtAlbums = albums.filter((album) => !album.artFromTrackId);
-
   function openAlbum(album: AlbumSummary): void {
     setRestoreAlbumScrollTop(albumListRef.current?.scrollTop ?? 0);
     setSelected(album);
@@ -51,6 +81,23 @@ export function AlbumsView(): JSX.Element {
 
   function closeAlbum(): void {
     setSelected(null);
+  }
+
+  async function loadMoreAlbums(): Promise<void> {
+    if (loadingAlbums || !hasMoreAlbums) return;
+    setLoadingAlbums(true);
+    try {
+      const rows = await api.getAlbums({
+        search: albumQuery,
+        missingArtOnly: showMissingArtOnly,
+        limit: ALBUM_PAGE_SIZE + 1,
+        offset: albums.length,
+      });
+      setAlbums((currentAlbums) => [...currentAlbums, ...rows.slice(0, ALBUM_PAGE_SIZE)]);
+      setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
+    } finally {
+      setLoadingAlbums(false);
+    }
   }
 
   if (selected) {
@@ -103,15 +150,6 @@ export function AlbumsView(): JSX.Element {
     );
   }
 
-  const visibleAlbums = showMissingArtOnly ? missingArtAlbums : albums;
-  const filtered = filter
-    ? visibleAlbums.filter(
-        (a) =>
-          a.album.toLowerCase().includes(filter.toLowerCase()) ||
-          a.albumArtist.toLowerCase().includes(filter.toLowerCase()),
-      )
-    : visibleAlbums;
-
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
@@ -130,7 +168,9 @@ export function AlbumsView(): JSX.Element {
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
         />
         <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
-          {filtered.length.toLocaleString()} albums / {missingArtAlbums.length.toLocaleString()} missing art
+          {albums.length.toLocaleString()}{hasMoreAlbums ? '+' : ''}{' '}
+          {showMissingArtOnly ? 'missing-art albums' : 'albums'}
+          {loadingAlbums ? ' / loading' : ''}
         </span>
       </div>
       <div ref={albumListRef} data-newamp-albums-scroll className="flex-1 overflow-auto p-4">
@@ -138,7 +178,7 @@ export function AlbumsView(): JSX.Element {
           className="grid gap-4"
           style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(168px, 1fr))' }}
         >
-          {filtered.map((a) => (
+          {albums.map((a) => (
             <button
               key={`${a.album}::${a.albumArtist}`}
               onClick={() => openAlbum(a)}
@@ -153,13 +193,21 @@ export function AlbumsView(): JSX.Element {
             </button>
           ))}
         </div>
+        {hasMoreAlbums && (
+          <div className="flex justify-center py-4">
+            <button
+              className="pxbtn is-active"
+              onClick={() => void loadMoreAlbums()}
+              disabled={loadingAlbums}
+              data-newamp-albums-load-more
+            >
+              {loadingAlbums ? 'Loading...' : 'Load more albums'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
-}
-
-function albumKey(album: AlbumSummary): string {
-  return `${album.album}::${album.albumArtist}`;
 }
 
 function AlbumArt({ album, size = 64 }: { album: AlbumSummary; size?: number }): JSX.Element {
@@ -198,4 +246,15 @@ function AlbumArt({ album, size = 64 }: { album: AlbumSummary; size?: number }):
       ♫
     </div>
   );
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+
+  return debounced;
 }

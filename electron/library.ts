@@ -1028,6 +1028,9 @@ export class LibraryStore {
       having.push('MIN(year) IS NOT NULL AND ABS(MIN(year) - ?) <= ?');
       havingParams.push(year, yearWindow);
     }
+    if (opts.missingArtOnly === true) {
+      having.push('MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) IS NULL');
+    }
     const havingSql = having.length ? `HAVING ${having.join(' AND ')}` : '';
 
     const rows = this.many<{
