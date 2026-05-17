@@ -729,7 +729,7 @@ function registerIpc(): void {
 
   ipcMain.handle('library:get-tracks', async (_e, opts) => library.getTracks(opts ?? {}));
   ipcMain.handle('library:get-track-count', async (_e, opts) => library.getTrackCount(opts ?? {}));
-  ipcMain.handle('library:get-albums', async () => library.getAlbums());
+  ipcMain.handle('library:get-albums', async (_e, opts) => library.getAlbums(opts ?? {}));
   ipcMain.handle('album-art:lookup', async (_e, input: AlbumArtLookupInput) =>
     searchAlbumArt(input),
   );
@@ -740,7 +740,7 @@ function registerIpc(): void {
       data: image.data,
     }, image.sourceUrl);
   });
-  ipcMain.handle('library:get-artists', async () => library.getArtists());
+  ipcMain.handle('library:get-artists', async (_e, opts) => library.getArtists(opts ?? {}));
   ipcMain.handle('library:get-folders', async (_e, parentPath?: string | null) =>
     library.getFolders(parentPath ?? null, settings.get().libraryRoots),
   );

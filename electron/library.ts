@@ -15,6 +15,7 @@ import type {
   AlbumArtApplyResult,
   AlbumSummary,
   ArtistSummary,
+  CatalogSummaryQueryOptions,
   CachedGuitarTab,
   CustomLyricsInput,
   FolderSummary,
@@ -975,7 +976,21 @@ export class LibraryStore {
     return this.getTrack(id);
   }
 
-  getAlbums(): AlbumSummary[] {
+  getAlbums(opts: CatalogSummaryQueryOptions = {}): AlbumSummary[] {
+    const search = String(opts.search ?? '').trim();
+    const limit = summaryQueryLimit(opts.limit);
+    const offset = summaryQueryOffset(opts.offset);
+    const where = ['album != \'\''];
+    const params: unknown[] = [];
+
+    if (search) {
+      const q = likeParam(search);
+      where.push(
+        '(lower(album) LIKE ? OR lower(COALESCE(NULLIF(album_artist,\'\'), artist)) LIKE ? OR CAST(year AS TEXT) LIKE ?)',
+      );
+      params.push(q, q, q);
+    }
+
     const rows = this.many<{
       album: string;
       album_artist: string;
@@ -991,9 +1006,11 @@ export class LibraryStore {
               COALESCE(SUM(duration), 0) AS duration,
               MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) AS art_track
          FROM tracks t
-        WHERE album != ''
+        WHERE ${where.join(' AND ')}
         GROUP BY album, COALESCE(NULLIF(album_artist,''), artist)
-        ORDER BY album_artist COLLATE NOCASE, year, album COLLATE NOCASE`,
+        ORDER BY album_artist COLLATE NOCASE, year, album COLLATE NOCASE
+        LIMIT ? OFFSET ?`,
+      [...params, limit, offset],
     );
     return rows.map((r) => ({
       album: r.album,
@@ -1051,12 +1068,26 @@ export class LibraryStore {
     };
   }
 
-  getArtists(): ArtistSummary[] {
+  getArtists(opts: CatalogSummaryQueryOptions = {}): ArtistSummary[] {
+    const search = String(opts.search ?? '').trim();
+    const limit = summaryQueryLimit(opts.limit);
+    const offset = summaryQueryOffset(opts.offset);
+    const where = ['artist != \'\''];
+    const params: unknown[] = [];
+
+    if (search) {
+      const q = likeParam(search);
+      where.push('(lower(artist) LIKE ? OR lower(album) LIKE ?)');
+      params.push(q, q);
+    }
+
     return this.many<{ artist: string; track_count: number; album_count: number }>(
       `SELECT artist, COUNT(*) AS track_count, COUNT(DISTINCT album) AS album_count
-         FROM tracks WHERE artist != ''
+         FROM tracks WHERE ${where.join(' AND ')}
         GROUP BY artist
-        ORDER BY artist COLLATE NOCASE`,
+        ORDER BY artist COLLATE NOCASE
+        LIMIT ? OFFSET ?`,
+      [...params, limit, offset],
     ).map((r) => ({ artist: r.artist, trackCount: r.track_count, albumCount: r.album_count }));
   }
 
@@ -2670,6 +2701,14 @@ function compareFolderTracks(a: RawRow, b: RawRow): number {
 
 function likeParam(value: string): string {
   return `%${escapeLike(value.toLowerCase())}%`;
+}
+
+function summaryQueryLimit(value: number | undefined): number {
+  return Math.max(1, Math.min(value ?? 100000, 100000));
+}
+
+function summaryQueryOffset(value: number | undefined): number {
+  return Math.max(0, value ?? 0);
 }
 
 function escapeLike(value: string): string {

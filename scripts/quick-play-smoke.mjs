@@ -27,9 +27,15 @@ try {
 
   const albumTracks = library.getAlbumTracks('OK Computer', 'Radiohead');
   assert.equal(albumTracks.length, 2, 'quick palette album results should be able to launch album tracks');
+  const albumResults = library.getAlbums({ search: 'computer', limit: 4 });
+  assert.equal(albumResults.length, 1, 'quick palette album search should filter in the catalog layer');
+  assert.equal(albumResults[0].album, 'OK Computer');
 
   const artistTracks = library.getArtistTracks('Radiohead');
   assert.equal(artistTracks.length, 2, 'quick palette artist results should be able to launch artist tracks');
+  const artistResults = library.getArtists({ search: 'radio', limit: 4 });
+  assert.equal(artistResults.length, 1, 'quick palette artist search should filter in the catalog layer');
+  assert.equal(artistResults[0].artist, 'Radiohead');
 
   const playlist = library.savePlaylist({
     name: 'Quick Palette Playlist',
@@ -63,7 +69,9 @@ try {
   assert.match(paletteSource, /api\.getPlaylists/, 'Quick Play should search saved playlists');
   assert.match(paletteSource, /api\.getSmartPlaylistRules/, 'Quick Play should search saved smart playlist rules');
   assert.match(paletteSource, /api\.getAlbums/, 'Quick Play should search albums');
+  assert.match(paletteSource, /api\.getAlbums\(\{ search: trimmedQuery, limit: CATALOG_LIMIT \}\)/, 'Quick Play should not pull every album while searching');
   assert.match(paletteSource, /api\.getArtists/, 'Quick Play should search artists');
+  assert.match(paletteSource, /api\.getArtists\(\{ search: trimmedQuery, limit: CATALOG_LIMIT \}\)/, 'Quick Play should not pull every artist while searching');
   assert.match(paletteSource, /api\.getPlaylistTracks/, 'Quick Play should launch saved playlists');
   assert.match(paletteSource, /api\.runSmartPlaylistRule/, 'Quick Play should launch saved smart playlist rules');
   assert.match(paletteSource, /setAutoDjSmartRuleId/, 'Quick Play should arm Auto DJ from saved smart playlist rules');
@@ -97,7 +105,9 @@ try {
     ok: true,
     titleSearch: titleSearch.length,
     pathSearch: pathSearch.length,
+    albumResults: albumResults.length,
     albumTracks: albumTracks.length,
+    artistResults: artistResults.length,
     artistTracks: artistTracks.length,
     playlistTracks: playlist.trackCount,
     smartRuleTracks: smartRuleTracks.length,
