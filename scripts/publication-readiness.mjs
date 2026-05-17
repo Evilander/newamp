@@ -25,6 +25,7 @@ const checks = [
   gitRepoCheck(),
   gitWritableCheck(),
   gitCleanCheck(),
+  remoteSourceCheck(),
   githubCliCheck(),
   githubAuthCheck(),
   signingWorkflowCheck(),
@@ -132,6 +133,47 @@ function gitCleanCheck() {
     reason: dirty ? 'git worktree has uncommitted changes' : null,
     status: result.status,
     output: result.stdout.trim().slice(0, 1000),
+  };
+}
+
+function remoteSourceCheck() {
+  const head = runGit(['rev-parse', '--verify', 'HEAD']);
+  if (head.status !== 0) {
+    return {
+      name: 'remote-source',
+      ok: false,
+      reason: 'cannot resolve local HEAD before checking remote source state',
+      output: (head.stderr || head.stdout).trim().slice(0, 1000),
+    };
+  }
+
+  const expected = head.stdout.trim();
+  const tag = `v${releaseVersion}`;
+  const refs = [`refs/heads/main`, `refs/tags/${tag}`, `refs/tags/${tag}^{}`];
+  const remote = runGit(['ls-remote', 'origin', ...refs]);
+  if (remote.status !== 0) {
+    return {
+      name: 'remote-source',
+      ok: false,
+      reason: 'cannot read origin/main and release tag from GitHub',
+      output: (remote.stderr || remote.stdout).trim().slice(0, 1000),
+    };
+  }
+
+  const remoteRefs = parseLsRemote(remote.stdout);
+  const remoteMain = remoteRefs.get('refs/heads/main') ?? null;
+  const remoteTag = remoteRefs.get(`refs/tags/${tag}^{}`) ?? remoteRefs.get(`refs/tags/${tag}`) ?? null;
+  const mismatches = [];
+  if (remoteMain !== expected) mismatches.push(`origin/main=${shortSha(remoteMain)} expected ${shortSha(expected)}`);
+  if (remoteTag !== expected) mismatches.push(`${tag}=${shortSha(remoteTag)} expected ${shortSha(expected)}`);
+
+  return {
+    name: 'remote-source',
+    ok: mismatches.length === 0,
+    head: expected,
+    remoteMain,
+    remoteTag,
+    reason: mismatches.length ? `remote source is not at the release commit: ${mismatches.join('; ')}` : null,
   };
 }
 
@@ -252,8 +294,11 @@ function lastfmProofCheck() {
 
 function runGit(args, options = {}) {
   return gitDir
-    ? run('git', ['--git-dir', gitDir, '--work-tree', repoRoot, ...args], options)
-    : run('git', args, options);
+    ? run('git', hardenedGitArgs(['--git-dir', gitDir, '--work-tree', repoRoot, ...args]), {
+        env: nonInteractiveEnv(),
+        ...options,
+      })
+    : run('git', hardenedGitArgs(args), { env: nonInteractiveEnv(), ...options });
 }
 
 function resolveGitDir(root, env) {
@@ -308,6 +353,33 @@ function run(command, args, options = {}) {
       ...options,
     },
   );
+}
+
+function parseLsRemote(output) {
+  const refs = new Map();
+  for (const line of output.trim().split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const [sha, ref] = line.split(/\s+/, 2);
+    if (sha && ref) refs.set(ref, sha);
+  }
+  return refs;
+}
+
+function shortSha(value) {
+  return value ? value.slice(0, 7) : 'missing';
+}
+
+function hardenedGitArgs(args) {
+  if (process.platform !== 'win32') return args;
+  return ['-c', 'http.sslBackend=openssl', ...args];
+}
+
+function nonInteractiveEnv() {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: '0',
+    GCM_INTERACTIVE: 'Never',
+  };
 }
 
 function quoteForCmd(value) {
