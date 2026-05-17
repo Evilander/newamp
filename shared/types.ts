@@ -688,7 +688,7 @@ export interface MusicFolderSuggestion {
   reason: string;
 }
 
-export interface NewampAPI {
+export interface NewAmpAPI {
   // library
   scanLibrary: (roots?: string[]) => Promise<void>;
   cancelScan: () => Promise<void>;
@@ -808,6 +808,6 @@ export interface NewampAPI {
 
 declare global {
   interface Window {
-    newamp: NewampAPI;
+    newamp: NewAmpAPI;
   }
 }

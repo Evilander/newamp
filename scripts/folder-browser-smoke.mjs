@@ -66,8 +66,8 @@ try {
       readText('../package.json'),
     ]);
   assert.match(typesSource, /FolderSummary/, 'shared types should expose folder summaries');
-  assert.match(typesSource, /getFolderTracks/, 'NewampAPI should expose folder track lookup');
-  assert.match(typesSource, /getFolderTrackIds/, 'NewampAPI should expose folder track id lookup');
+  assert.match(typesSource, /getFolderTracks/, 'NewAmpAPI should expose folder track lookup');
+  assert.match(typesSource, /getFolderTrackIds/, 'NewAmpAPI should expose folder track id lookup');
   assert.match(mainSource, /library:get-folders/, 'main process should register folder IPC');
   assert.match(preloadSource, /library:get-folder-tracks/, 'preload should bridge folder tracks');
   assert.match(preloadSource, /library:get-folder-track-ids/, 'preload should bridge folder track ids');
