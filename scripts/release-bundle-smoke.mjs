@@ -39,6 +39,7 @@ compressDirectoryToZip(
 
 const paths = releaseBundlePaths({ root: smokeRoot, version: '1.0.0' });
 assert.match(paths.bundleZip, /NewAmp-1\.0\.0-release-bundle\.zip$/);
+await writeFile(paths.bundleZip, 'stale bundle that must be replaced', 'utf8');
 
 const specs = releaseBundleFileSpecs({ root: smokeRoot, version: '1.0.0' });
 assert.deepEqual(specs.map((spec) => spec.entryName), [
@@ -56,7 +57,7 @@ const created = createReleaseBundle({
   verifyChecksums: false,
 });
 assert.equal(created.ok, true, created.reason);
-assert.ok(created.bundle.bytes > 0, 'bundle should have bytes');
+assert.ok(created.bundle.bytes > 1024, 'bundle should be a real zip, not stale bundle text');
 assert.ok(created.files.every((file) => file.sha256), 'bundle files should be fingerprinted');
 assert.ok(created.entries.some((entry) => entry.fullName === 'RELEASE-MANIFEST.json'), 'bundle should include release manifest');
 assert.equal(created.manifestMismatches.length, 0, 'fresh manifest should match inputs');
