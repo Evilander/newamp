@@ -83,6 +83,8 @@ try {
   assert.match(foldersViewSource, /ADD FOLDER TO PLAYLIST/, 'Folders view should append folders to saved playlists');
   assert.match(foldersViewSource, /api\.getFolderTrackIds/, 'Folders view should append large folders by id instead of full track rows');
   assert.match(foldersViewSource, /FOLDER_TRACK_LIMIT/, 'Folders view should centralize direct-track page size');
+  const folderTrackLimit = foldersViewSource.match(/const FOLDER_TRACK_LIMIT = (\d+)/);
+  assert.ok(Number(folderTrackLimit?.[1] ?? 9999) <= 800, 'Folders view should keep direct-track DOM pages light');
   assert.match(foldersViewSource, /hasMoreDirectTracks/, 'Folders view should track when direct folder tracks are paged');
   assert.match(foldersViewSource, /const offset = tracks\.length/, 'Folders view should page direct folder tracks by loaded row count');
   assert.match(foldersViewSource, /Load more direct tracks/, 'Folders view should expose explicit direct-track pagination');
