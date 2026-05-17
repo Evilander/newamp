@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 
 const repoRoot = resolve('.');
 const pkg = JSON.parse(await readText(join(repoRoot, 'package.json')));
+const fixtureVersion = String(pkg.version);
 const bundleScriptPath = join(repoRoot, 'scripts', 'release-bundle.mjs');
 
 assert.equal(pkg.scripts?.['release:bundle'], 'node scripts/release-bundle.mjs', 'package.json should expose release:bundle');
@@ -24,37 +25,37 @@ const smokeRoot = join(repoRoot, 'tmp', 'release-bundle-smoke');
 await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(join(smokeRoot, 'release'), { recursive: true });
 
-await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
+await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: fixtureVersion }), 'utf8');
 await writeFile(join(smokeRoot, 'README.md'), '# NewAmp\n', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'SHA256SUMS.txt'), 'fake checksums\n', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'BUILD-PROVENANCE.json'), '{"name":"fixture"}\n', 'utf8');
-await writeFile(join(smokeRoot, 'release', 'NewAmp Setup 1.0.0.exe'), 'installer', 'utf8');
-await writeFile(join(smokeRoot, 'release', 'NewAmp Portable 1.0.0.exe'), 'portable', 'utf8');
+await writeFile(join(smokeRoot, 'release', `NewAmp Setup ${fixtureVersion}.exe`), 'installer', 'utf8');
+await writeFile(join(smokeRoot, 'release', `NewAmp Portable ${fixtureVersion}.exe`), 'portable', 'utf8');
 await mkdir(join(smokeRoot, 'source-fixture', 'build'), { recursive: true });
 await writeFile(join(smokeRoot, 'source-fixture', 'README.md'), '# Source\n', 'utf8');
 await writeFile(join(smokeRoot, 'source-fixture', 'build', 'icon.png'), 'icon', 'utf8');
 compressDirectoryToZip(
   join(smokeRoot, 'source-fixture'),
-  join(smokeRoot, 'release', 'NewAmp-1.0.0-source.zip'),
+  join(smokeRoot, 'release', `NewAmp-${fixtureVersion}-source.zip`),
 );
 
-const paths = releaseBundlePaths({ root: smokeRoot, version: '1.0.0' });
-assert.match(paths.bundleZip, /NewAmp-1\.0\.0-release-bundle\.zip$/);
+const paths = releaseBundlePaths({ root: smokeRoot, version: fixtureVersion });
+assert.ok(paths.bundleZip.endsWith(`NewAmp-${fixtureVersion}-release-bundle.zip`));
 await writeFile(paths.bundleZip, 'stale bundle that must be replaced', 'utf8');
 
-const specs = releaseBundleFileSpecs({ root: smokeRoot, version: '1.0.0' });
+const specs = releaseBundleFileSpecs({ root: smokeRoot, version: fixtureVersion });
 assert.deepEqual(specs.map((spec) => spec.entryName), [
   'README.md',
   'SHA256SUMS.txt',
   'BUILD-PROVENANCE.json',
-  'NewAmp Setup 1.0.0.exe',
-  'NewAmp Portable 1.0.0.exe',
-  'NewAmp-1.0.0-source.zip',
+  `NewAmp Setup ${fixtureVersion}.exe`,
+  `NewAmp Portable ${fixtureVersion}.exe`,
+  `NewAmp-${fixtureVersion}-source.zip`,
 ]);
 
 const created = createReleaseBundle({
   root: smokeRoot,
-  version: '1.0.0',
+  version: fixtureVersion,
   createSourceArchive: false,
   verifyChecksums: false,
 });
@@ -64,7 +65,7 @@ assert.ok(created.files.every((file) => file.sha256), 'bundle files should be fi
 assert.ok(created.entries.some((entry) => entry.fullName === 'RELEASE-MANIFEST.json'), 'bundle should include release manifest');
 assert.equal(created.manifestMismatches.length, 0, 'fresh manifest should match inputs');
 
-const checked = checkReleaseBundle({ root: smokeRoot, version: '1.0.0' });
+const checked = checkReleaseBundle({ root: smokeRoot, version: fixtureVersion });
 assert.equal(checked.ok, true, checked.reason);
 assert.deepEqual(checked.missingEntries, []);
 assert.deepEqual(checked.unexpectedEntries, []);
@@ -74,12 +75,12 @@ const gitRoot = join(smokeRoot, 'git-source');
 const gitDir = join(gitRoot, '.newamp-git');
 await mkdir(join(gitRoot, 'release', 'win-unpacked'), { recursive: true });
 await writeFile(join(gitRoot, '.gitignore'), '.newamp-git/\nrelease/\n', 'utf8');
-await writeFile(join(gitRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: '1.0.0' }), 'utf8');
+await writeFile(join(gitRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: fixtureVersion }), 'utf8');
 await writeFile(join(gitRoot, 'README.md'), '# NewAmp\n', 'utf8');
 await writeFile(join(gitRoot, 'release', 'SHA256SUMS.txt'), 'fake checksums\n', 'utf8');
 await writeFile(join(gitRoot, 'release', 'BUILD-PROVENANCE.json'), '{"name":"fixture"}\n', 'utf8');
-await writeFile(join(gitRoot, 'release', 'NewAmp Setup 1.0.0.exe'), 'installer', 'utf8');
-await writeFile(join(gitRoot, 'release', 'NewAmp Portable 1.0.0.exe'), 'portable', 'utf8');
+await writeFile(join(gitRoot, 'release', `NewAmp Setup ${fixtureVersion}.exe`), 'installer', 'utf8');
+await writeFile(join(gitRoot, 'release', `NewAmp Portable ${fixtureVersion}.exe`), 'portable', 'utf8');
 run('git', ['init', '--bare', gitDir]);
 run('git', ['--git-dir', gitDir, 'symbolic-ref', 'HEAD', 'refs/heads/main']);
 run('git', ['--git-dir', gitDir, '--work-tree', gitRoot, 'add', '.gitignore', 'README.md', 'package.json']);
@@ -98,7 +99,7 @@ run('git', [
 ]);
 const cleanGitBundle = createReleaseBundle({
   root: gitRoot,
-  version: '1.0.0',
+  version: fixtureVersion,
   verifyChecksums: false,
 });
 assert.equal(cleanGitBundle.ok, true, cleanGitBundle.reason);
@@ -106,12 +107,12 @@ assert.equal(cleanGitBundle.gitClean.clean, true, 'clean git source bundle shoul
 await writeFile(join(gitRoot, 'README.md'), '# Dirty NewAmp\n', 'utf8');
 const dirtyGitBundle = createReleaseBundle({
   root: gitRoot,
-  version: '1.0.0',
+  version: fixtureVersion,
   verifyChecksums: false,
 });
 assert.equal(dirtyGitBundle.ok, false, 'release source archive should refuse dirty tracked files');
 assert.match(dirtyGitBundle.reason, /uncommitted changes/i);
-const dirtyCheck = checkReleaseBundle({ root: gitRoot, version: '1.0.0', requireCleanSource: true });
+const dirtyCheck = checkReleaseBundle({ root: gitRoot, version: fixtureVersion, requireCleanSource: true });
 assert.equal(dirtyCheck.ok, false, 'strict bundle check should fail while source worktree is dirty');
 assert.match(dirtyCheck.reason, /uncommitted changes/i);
 
