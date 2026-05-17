@@ -692,6 +692,7 @@ export interface NewampAPI {
   cancelScan: () => Promise<void>;
   onScanProgress: (cb: (p: ScanProgress) => void) => () => void;
   getTracks: (opts?: TrackQueryOptions) => Promise<Track[]>;
+  getTrackIds: (opts?: TrackQueryOptions) => Promise<number[]>;
   getTrackCount: (opts?: Pick<TrackQueryOptions, 'search' | 'sort'>) => Promise<number>;
   getAlbums: (opts?: CatalogSummaryQueryOptions) => Promise<AlbumSummary[]>;
   lookupAlbumArt: (input: AlbumArtLookupInput) => Promise<AlbumArtLookupResult[]>;
