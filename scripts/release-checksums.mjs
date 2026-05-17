@@ -130,13 +130,10 @@ if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
   try {
     const checkOnly = process.argv.includes('--check');
     const report = checkOnly ? checkReleaseChecksums() : writeReleaseChecksums();
-    if (!checkOnly && report.ok) {
-      const { writeBuildProvenance } = await import('./build-provenance.mjs');
-      writeBuildProvenance();
-    }
     console.log(JSON.stringify({
       ...report,
       file: basename(report.path),
+      nextStep: !checkOnly && report.ok ? 'npm run release:provenance' : null,
     }, null, 2));
     process.exitCode = report.ok ? 0 : 1;
   } catch (err) {
