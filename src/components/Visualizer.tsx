@@ -19,10 +19,49 @@ export type VizMode =
   | 'prism-bars'
   | 'confetti'
   | 'burning-cloud'
+  | 'tempo-pulse'
+  | 'lattice-strobe'
   | 'butterchurn';
 
 export type VizQuality = 'auto' | '4k';
 export type VizPerformance = 'balanced' | 'low';
+
+// Auto-detect a reasonable performance tier for this machine. Run once per
+// session — the first call computes, subsequent calls return the cache.
+let detectedTier: VizPerformance | null = null;
+export function detectPerformanceTier(): VizPerformance {
+  if (detectedTier) return detectedTier;
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+    return (detectedTier = 'balanced');
+  }
+  const cores = navigator.hardwareConcurrency ?? 4;
+  const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4;
+  let score = 0;
+  if (cores >= 8) score += 2;
+  else if (cores >= 4) score += 1;
+  if (memory >= 8) score += 2;
+  else if (memory >= 4) score += 1;
+
+  // GPU sniff via WebGL — software rasterizers (SwiftShader, llvmpipe) get
+  // demoted to low. The unmasked renderer string is the most reliable signal.
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl') as WebGLRenderingContext | null;
+    if (gl) {
+      const ext = gl.getExtension('WEBGL_debug_renderer_info');
+      const renderer = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL ?? 0) ?? '') : '';
+      const lower = renderer.toLowerCase();
+      if (/swiftshader|llvmpipe|software|microsoft basic/.test(lower)) score -= 3;
+      else if (/intel/.test(lower) && !/arc|iris xe/.test(lower)) score -= 1;
+      else if (/(rtx|radeon (rx|vii)|apple m[1-9]|nvidia)/.test(lower)) score += 1;
+    } else {
+      score -= 2;
+    }
+  } catch {
+    /* no webgl, ignore */
+  }
+  return (detectedTier = score >= 2 ? 'balanced' : 'low');
+}
 export type VizPalette = 'theme' | 'phosphor' | 'ice' | 'sunset' | 'rainbow';
 export type VizReactivity = 'truth' | 'punch' | 'wild';
 
@@ -201,6 +240,7 @@ export function Visualizer({
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
     const canPaint = createFrameGate(canvasRef, frameIntervalMs);
+    const analyzeFeatures = createAudioFeatureAnalyzer();
 
     function ensureSize() {
       const node = canvasRef.current;
@@ -236,6 +276,16 @@ export function Visualizer({
     }
     const particles: Particle[] = [];
 
+    // Tempo Pulse: rings spawned on each beat, expanding outward
+    interface TempoRing { x: number; y: number; r: number; life: number; hue: number; thickness: number }
+    const tempoRings: TempoRing[] = [];
+    let lastTempoBeat = 0;
+
+    // Lattice Strobe: alternating palette flip + beat-driven scale
+    let latticeFlip = 0;
+    let latticeStrobe = 0;
+    let lastLatticeBeat = 0;
+
     function frame(now: number) {
       if (!canPaint(now)) {
         raf = requestAnimationFrame(frame);
@@ -257,6 +307,7 @@ export function Visualizer({
       engine.getFreqData(freq);
       engine.getTimeData(wave);
       boostFrequencyData(freq, reactivity);
+      const features = analyzeFeatures(freq, wave);
 
       const accent = getCssVar('--accent') || '#39ff14';
       const accentDim = getCssVar('--accent-dim') || '#1aa30a';
@@ -311,8 +362,9 @@ export function Visualizer({
         const mid = avg(freq, 12, 60) / 255;
         const treble = avg(freq, 60, 180) / 255;
 
-        // Spawn particles based on bass kicks
-        const spawn = Math.floor(bass * 6 + mid * 2);
+        // Spawn particles based on bass kicks. Real beat onsets — from the
+        // shared analyzer — get an extra burst on top of the running average.
+        const spawn = Math.floor(bass * 6 + mid * 2 + features.beat * 8);
         for (let i = 0; i < spawn; i++) {
           const angle = Math.random() * Math.PI * 2;
           const speed = 1 + bass * 8 + Math.random() * 3;
@@ -455,7 +507,9 @@ export function Visualizer({
           ctx.stroke();
         }
       } else if (mode === 'pulse') {
-        ctx.fillStyle = 'rgba(0,0,0,0.18)';
+        // Beat onsets briefly flash the whole field — gives Pulse a tempo
+        // anchor instead of drifting on the smoothed RMS curve.
+        ctx.fillStyle = features.beat > 0.55 ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.18)';
         ctx.fillRect(0, 0, w, h);
         const bass = avg(freq, 0, 14) / 255;
         const mid = avg(freq, 14, 72) / 255;
@@ -768,6 +822,127 @@ export function Visualizer({
             ctx.fillStyle = g;
             ctx.fillRect(x - cell, y - cell, cell * 3, cell * 3);
           }
+        }
+      } else if (mode === 'tempo-pulse') {
+        // Beat-locked ring bursts. Each rising-edge beat spawns a ring at the
+        // origin; rings expand outward and fade. Bass scales the burst size,
+        // treble jitters the ring center for liveliness.
+        ctx.fillStyle = 'rgba(0,0,0,0.22)';
+        ctx.fillRect(0, 0, w, h);
+        const cx = w / 2;
+        const cy = h / 2;
+        const minSide = Math.min(w, h);
+        const now = Date.now();
+
+        // Spawn new rings on beat edge (debounced)
+        if (features.beat > 0.42 && now - lastTempoBeat > 110) {
+          const burstCount = features.beat > 0.78 ? 3 : features.beat > 0.6 ? 2 : 1;
+          for (let i = 0; i < burstCount; i++) {
+            tempoRings.push({
+              x: cx + (Math.random() - 0.5) * minSide * 0.08 * features.treble,
+              y: cy + (Math.random() - 0.5) * minSide * 0.08 * features.treble,
+              r: minSide * 0.04,
+              life: 1,
+              hue: (now / 60 + i * 28 + features.bass * 90) % 360,
+              thickness: 3 + features.bass * 8,
+            });
+          }
+          lastTempoBeat = now;
+        }
+        if (tempoRings.length > 80) tempoRings.splice(0, tempoRings.length - 80);
+
+        // Background radial glow following RMS energy
+        const energy = features.rms;
+        const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, minSide * 0.7);
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.05 + energy * 0.32})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, w, h);
+
+        // Render & advance rings
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = tempoRings.length - 1; i >= 0; i--) {
+          const ring = tempoRings[i]!;
+          ring.r += minSide * (0.012 + features.bass * 0.018);
+          ring.life -= 0.014;
+          if (ring.life <= 0 || ring.r > minSide * 0.9) {
+            tempoRings.splice(i, 1);
+            continue;
+          }
+          const alpha = Math.max(0, Math.min(1, ring.life)) * (0.55 + features.bass * 0.4);
+          ctx.strokeStyle = `hsla(${ring.hue}, 96%, 64%, ${alpha})`;
+          ctx.lineWidth = ring.thickness * ring.life;
+          ctx.shadowColor = `hsl(${ring.hue}, 96%, 60%)`;
+          ctx.shadowBlur = 14 + features.bass * 28;
+          ctx.beginPath();
+          ctx.arc(ring.x, ring.y, ring.r, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.shadowBlur = 0;
+        ctx.restore();
+
+        // Center dot — pulses with bass
+        const dotR = minSide * 0.018 + features.bass * minSide * 0.04;
+        const dotGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, dotR * 2.2);
+        dotGrad.addColorStop(0, `hsla(${(now / 30) % 360}, 100%, 78%, ${0.55 + features.bass * 0.4})`);
+        dotGrad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = dotGrad;
+        ctx.fillRect(cx - dotR * 2.2, cy - dotR * 2.2, dotR * 4.4, dotR * 4.4);
+      } else if (mode === 'lattice-strobe') {
+        // 2026 club-style lattice. A grid of dots that flashes palette and
+        // shifts scale on each beat. The strobe is short and sharp so even at
+        // 30fps the kick reads clearly.
+        const now = Date.now();
+        if (features.beat > 0.4 && now - lastLatticeBeat > 90) {
+          latticeFlip = 1 - latticeFlip;
+          latticeStrobe = 1;
+          lastLatticeBeat = now;
+        }
+        latticeStrobe = Math.max(0, latticeStrobe - 0.08);
+
+        const baseHue = (now / 80 + features.bass * 120 + latticeFlip * 180) % 360;
+        ctx.fillStyle = latticeStrobe > 0.5 ? `hsla(${baseHue}, 90%, 18%, 1)` : 'rgba(0,0,0,0.32)';
+        ctx.fillRect(0, 0, w, h);
+
+        const cell = Math.max(22, Math.floor(Math.min(w, h) / (16 + features.treble * 6)));
+        const cx = w / 2;
+        const cy = h / 2;
+        const scaleK = 1 + features.bass * 0.18 + latticeStrobe * 0.16;
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(latticeFlip ? Math.PI / 96 : -Math.PI / 96);
+        ctx.scale(scaleK, scaleK);
+        ctx.globalCompositeOperation = 'lighter';
+
+        for (let y = -h; y < h; y += cell) {
+          for (let x = -w; x < w; x += cell) {
+            const distNorm = Math.hypot(x, y) / Math.max(w, h);
+            const bandIdx = Math.floor(distNorm * features.bands.length) % features.bands.length;
+            const energy = features.bands[bandIdx] ?? 0;
+            const dotR = Math.max(0.6, (cell * 0.18) * (0.4 + energy * 1.4 + latticeStrobe * 0.6));
+            const hue = (baseHue + distNorm * 220 + bandIdx * 18) % 360;
+            const sat = 88 + latticeStrobe * 12;
+            const light = latticeFlip ? 52 + energy * 30 : 64 + energy * 22;
+            const alpha = 0.22 + energy * 0.6 + features.beat * 0.18;
+            ctx.fillStyle = `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(x, y, dotR, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+
+        // Scan-line strobe band — sweeps vertically on beat
+        if (latticeStrobe > 0.18) {
+          const sweepY = (1 - latticeStrobe) * h;
+          const grad = ctx.createLinearGradient(0, sweepY - 24, 0, sweepY + 24);
+          grad.addColorStop(0, 'rgba(255,255,255,0)');
+          grad.addColorStop(0.5, `hsla(${baseHue}, 90%, 78%, ${0.42 * latticeStrobe})`);
+          grad.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, sweepY - 24, w, 48);
         }
       }
 

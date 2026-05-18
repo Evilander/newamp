@@ -101,16 +101,21 @@ export function Transport(): JSX.Element {
         </div>
 
         <div className="flex items-center gap-2">
-          <button className="pxbtn" onClick={() => void prev()} title="Previous">
+          <button className="pxbtn" onClick={() => void prev()} title="Previous (Ctrl+←)" aria-label="Previous track">
             ⏮
           </button>
-          <button className="pxbtn" onClick={togglePlay} title="Play / Pause">
+          <button
+            className="pxbtn is-primary"
+            onClick={togglePlay}
+            title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+            aria-label={isPlaying ? 'Pause' : 'Play'}
+          >
             {isPlaying ? '⏸' : '▶'}
           </button>
-          <button className="pxbtn" onClick={stop} title="Stop">
+          <button className="pxbtn" onClick={stop} title="Stop" aria-label="Stop">
             ◼
           </button>
-          <button className="pxbtn" onClick={() => void next()} title="Next">
+          <button className="pxbtn" onClick={() => void next()} title="Next (Ctrl+→)" aria-label="Next track">
             ⏭
           </button>
           <ScrubBar
