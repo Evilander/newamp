@@ -665,6 +665,8 @@ export type VisualizerPreset =
   | 'prism-bars'
   | 'confetti'
   | 'burning-cloud'
+  | 'tempo-pulse'
+  | 'lattice-strobe'
   | 'album-breathe';
 export type GuitarTabLineType = 'chords' | 'lyrics' | 'blank' | 'section' | 'tab';
 export type GuitarTabSource = 'ultimate-guitar' | 'local';

@@ -38,10 +38,20 @@ const HEAVY_VISUAL_PRESETS = new Set<VisualizerPreset>([
   'neon-ribbons',
   'plasma-grid',
   'burning-cloud',
+  'lattice-strobe',
 ]);
 
 const LOW_END_PRESETS: VisualizerPreset[] = ['album-breathe', 'oscilloscope', 'spectrum', 'radial', 'pulse'];
-const FULL_PRESETS: VisualizerPreset[] = ['album-breathe', 'spectrum', 'oscilloscope', 'radial', 'prism-bars', 'orbital-rings', 'galaxy'];
+const FULL_PRESETS: VisualizerPreset[] = [
+  'album-breathe',
+  'spectrum',
+  'oscilloscope',
+  'radial',
+  'prism-bars',
+  'orbital-rings',
+  'galaxy',
+  'tempo-pulse',
+];
 const DECK_ROTATION: DiscoverDeckSkin[] = ['bento', 'discman', 'winamp-classic', 'record-player', 'cassette', 'retro-tv'];
 
 export function buildDiscoverSurface(input: BuildDiscoverSurfaceInput): DiscoverSurface {

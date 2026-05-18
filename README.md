@@ -25,14 +25,14 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 ## 30-second pitch
 
 - **Four UI shells** — Retro (Bloomberg-density Winamp 2 homage), Modern (rounded, content-forward), Liquid Glass (translucent stacked panes with backdrop-filter), Concourse (operator-console split-cells)
-- **Nine deck (compact-window) skins** — Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Hotdog Deck, and Retro TV. Each declares its own native window size — no letterbox
+- **Nine deck (compact-window) skins** — Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Hotdog Deck (photorealistic SVG bun with controls baked into the bread — no rectangle frame), and Retro TV. Each declares its own native window size — no letterbox
 - **13 color skins** — Classic, Ops, Midnight, Neon, Amber, Oxide, Steel, Walnut, Jukebox, Terminal, Ice, Miami, Mono. Plus full Winamp 2.x `.wsz` skin import
 - **0–100 decimal track scoring** — Drag, scroll-wheel, keyboard-nudge, or double-click to type `88.3`. Stars stay in sync for legacy sorts and smart rules
 - **0–200% volume** with a red-zone past unity — VLC-style amp boost, full `0 dB / +6 dB` tick labels, runs after the master limiter so it amplifies without clipping
 - **Magazine-style Home** — greeting hero with blurred album backdrop, Today's Pick (high-rated track you haven't played in 6+ weeks, with a reason chip), Your Highest Rated rail, NewAmp News editorial card, Listening Stats This Week, plus the classic Harmonic / Taste / Loved / Heavy Rotation / Fresh Imports rails
 - **Living Library Discover mode** — local-first crate-digging missions that turn ratings, plays, skips, fresh imports, deep album candidates, and underplayed corners into playable sessions with Deck / Full Vis / Save as Playlist actions
 - **Bloomberg-density Now Playing** with a tabbed side panel (On Air / Album / Lyrics), draggable spectrum-split, selectable spectrum styles, VU + waveform overview, LRCLIB-synced lyrics, optional karaoke mode, custom-lyrics editor, tempo trainer, practice A/B loop, track bookmarks
-- **Milkdrop visualizer + Xbox-inspired fullscreen modes** — Butterchurn presets, spectrum modes, aurora, plasma grid, and neon ribbon renderers built for 4K fullscreen use
+- **Milkdrop visualizer + 17 in-house fullscreen modes** — Butterchurn presets plus beat-locked Tempo Pulse, club-strobe Lattice, neon waves/ribbons, plasma grid, prism bars, burning cloud, aurora, orbital rings and the rest. Real spectral-flux beat detection drives the visuals; an auto hardware tier picks balanced/low so older machines don't lurch
 - **Auto DJ + smart playlists** — BPM/key-aware harmonic mixes, taste-learning from plays/loves/ratings/skips, smart rules with min-rating filters
 - **Album art rescue + Metadata rescue** — embedded art, folder art, Cover Art Archive, MusicBrainz lookup, and manual cleanup tools for rough local libraries
 - **Artist facts and images** — musician-first artist context and large artist images without confusing bands for species, cities, albums, or other same-name pages
@@ -47,8 +47,8 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 
 Grab the latest from [**Releases**](https://github.com/evilander/newamp/releases):
 
-- **`NewAmp Setup 1.2.0.exe`** — NSIS installer, registers file associations for 16 audio formats + 4 playlist formats
-- **`NewAmp Portable 1.2.0.exe`** — single-file portable, no install, no registry writes
+- **`NewAmp Setup 1.3.0.exe`** — NSIS installer, registers file associations for 16 audio formats + 4 playlist formats
+- **`NewAmp Portable 1.3.0.exe`** — single-file portable, no install, no registry writes
 
 All artifacts are listed with SHA256 hashes in `SHA256SUMS.txt`.
 

@@ -149,9 +149,9 @@ assert.match(styleSource, /\.deck-jukebox/, 'jukebox should be a real shaped dec
 assert.match(styleSource, /\.deck-cassette/, 'cassette should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-discman/, 'discman should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-hotdog/, 'hotdog deck should be a real shaped deck skin');
-assert.match(styleSource, /deck-hd-bun-half/, 'hotdog deck should render visible bun halves around the sausage');
-assert.match(styleSource, /deck-hd-sausage/, 'hotdog deck should have a distinct sausage layer instead of one orange capsule');
-assert.match(styleSource, /deck-hd-relish/, 'hotdog deck should include garnish detail so the shape reads as a hot dog');
+assert.match(styleSource, /\.deck-hd-art/, 'hotdog deck should render the photorealistic SVG bun art layer');
+assert.match(styleSource, /\.deck-hd-screen/, 'hotdog deck should expose the visualizer/album-art screen baked into the bun');
+assert.match(styleSource, /\.deck-hd-transport/, 'hotdog deck should keep transport controls embedded in the bun');
 assert.match(styleSource, /\.deck-retro-tv/, 'retro TV deck should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-winamp-classic/, 'classic Winamp deck should be a real shaped deck skin');
 assert.match(packageSource, /"smoke:skin"/, 'package scripts should expose skin smoke');
