@@ -1,12 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
-import { Visualizer, type VizPalette, type VizPerformance, type VizQuality, type VizReactivity } from './Visualizer';
+import {
+  Visualizer,
+  detectPerformanceTier,
+  type VizPalette,
+  type VizPerformance,
+  type VizQuality,
+  type VizReactivity,
+} from './Visualizer';
 import { formatTime } from '../lib/format';
 import { api, winctl } from '../lib/api';
 import type { VisualizerPreset } from '@shared/types';
 import { volumeLabel } from './VolumeSlider';
 
 const PRESETS = [
+  { id: 'tempo-pulse', label: 'Tempo Pulse' },
+  { id: 'lattice-strobe', label: 'Lattice Strobe' },
   { id: 'neon-waves', label: 'Neon Waves' },
   { id: 'neon-ribbons', label: 'Neon Ribbons' },
   { id: 'plasma-grid', label: 'Plasma Grid' },
@@ -51,6 +60,8 @@ const REACTIVITY_MODES = [
 ] as const satisfies ReadonlyArray<{ id: VizReactivity; label: string }>;
 
 const AUTO_VJ_BALANCED: VisualizerPreset[] = [
+  'tempo-pulse',
+  'lattice-strobe',
   'neon-waves',
   'plasma-grid',
   'orbital-rings',
@@ -96,7 +107,14 @@ function loadVisualizerPalette(): VizPalette {
 
 function loadVisualizerPerformance(): VizPerformance {
   if (typeof window === 'undefined') return 'balanced';
-  return window.localStorage.getItem(VIZ_PERFORMANCE_KEY) === 'low' ? 'low' : 'balanced';
+  const stored = window.localStorage.getItem(VIZ_PERFORMANCE_KEY);
+  if (stored === 'low' || stored === 'balanced') return stored;
+  // No saved preference yet. Auto-detect, but never demote below balanced for
+  // first-run users with no obvious red flag — Electron's renderer often
+  // reports SwiftShader/software in offscreen contexts which would otherwise
+  // hide the 4K mode behind a low-end gate the user didn't ask for.
+  const detected = detectPerformanceTier();
+  return detected === 'low' && (navigator.hardwareConcurrency ?? 0) >= 4 ? 'balanced' : detected;
 }
 
 function loadVisualizerReactivity(): VizReactivity {
