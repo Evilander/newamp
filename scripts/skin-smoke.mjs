@@ -110,6 +110,7 @@ const [
   styleSource,
   deckTypesSource,
   deckPickerSource,
+  recordDeckSource,
   hotdogDeckSource,
   hotdogShellPng,
   hotdogMaskPng,
@@ -127,6 +128,7 @@ const [
     readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/decks/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/decks/DeckSkinPicker.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/decks/RecordPlayerDeck.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/decks/HotdogDeck.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/assets/decks/hotdog-shell.png', import.meta.url)),
     readFile(new URL('../src/assets/decks/hotdog-mask.png', import.meta.url)),
@@ -164,6 +166,8 @@ assert.match(deckPickerSource, /deck-skin-picker is-compact titlebar-nodrag/, 'c
 assert.match(deckPickerSource, /deck-skin-select titlebar-nodrag/, 'deck skin select must opt out of Electron window dragging');
 assert.match(styleSource, /\.deck-skin-picker[\s\S]*?-webkit-app-region: no-drag/, 'deck skin picker CSS should force no-drag behavior');
 assert.match(styleSource, /\.deck-record-player/, 'record deck should be a real shaped deck skin');
+assert.match(recordDeckSource, /10 \+ progress \* 24/, 'record-player tonearm should stay on the playable band');
+assert.doesNotMatch(recordDeckSource, /-34 \+ progress \* 26/, 'record-player tonearm should not drift off the right side of the record');
 assert.match(styleSource, /\.deck-jukebox/, 'jukebox should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-cassette/, 'cassette should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-discman/, 'discman should be a real shaped deck skin');

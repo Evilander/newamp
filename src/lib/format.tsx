@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+export { playbackCodecLabel } from '@shared/audio-quality';
 
 export function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -11,7 +12,7 @@ export function formatTime(seconds: number): string {
 }
 
 export function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return '—';
+  if (!Number.isFinite(seconds) || seconds <= 0) return '-';
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   if (h > 0) return `${h}h ${m}m`;
@@ -20,27 +21,6 @@ export function formatDuration(seconds: number): string {
 
 export function formatNumber(n: number): string {
   return new Intl.NumberFormat('en-US').format(n);
-}
-
-const FFMPEG_FALLBACK_EXTS = new Set([
-  'wma',
-  'alac',
-  'aiff',
-  'aif',
-  'dsf',
-  'dff',
-  'ape',
-  'wv',
-  'mpc',
-  'tta',
-  'mka',
-  'ac3',
-  'dts',
-]);
-
-export function playbackCodecLabel(path: string): string {
-  const ext = path.match(/\.([a-z0-9]+)$/i)?.[1]?.toUpperCase() ?? 'AUDIO';
-  return FFMPEG_FALLBACK_EXTS.has(ext.toLowerCase()) ? `${ext}->WAV` : ext;
 }
 
 export function highlight(text: string, query: string): ReactNode {

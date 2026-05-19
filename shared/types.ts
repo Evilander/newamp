@@ -239,6 +239,18 @@ export interface LibraryFormatCount {
   count: number;
 }
 
+export interface LibraryQualityHealth {
+  lossless: number;
+  lossy: number;
+  hiRes: number;
+  dsd: number;
+  ffmpegFallback: number;
+  lowBitrate: number;
+  replayGainReady: number;
+  replayGainMissing: number;
+  unknown: number;
+}
+
 export interface LibraryHealth {
   totals: { tracks: number; albums: number; artists: number; duration: number };
   missing: {
@@ -248,6 +260,7 @@ export interface LibraryHealth {
     art: number;
     duration: number;
   };
+  quality: LibraryQualityHealth;
   duplicateGroups: LibraryDuplicateGroup[];
   legacyFormats: LibraryFormatCount[];
   recentlyAdded: Track[];

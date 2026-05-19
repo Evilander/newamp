@@ -14,6 +14,7 @@ import { aiAssistSummary } from '../../lib/aiAssist';
 import { musicEntitySearchText, wikipediaSearchUrl } from '../../lib/wiki';
 import { ScoreRating } from '../ScoreRating';
 import { LinerNotesPanel } from '../LinerNotesPanel';
+import { classifyAudioQuality } from '@shared/audio-quality';
 
 type SideTab = 'on-air' | 'album' | 'lyrics';
 type SpectrumStyle = 'classic' | 'wide' | 'needles' | 'stacked';
@@ -1570,16 +1571,19 @@ function TrackSignalPanel({
   aiAssistReady: boolean;
   aiModel: string | null;
 }): JSX.Element {
-  const ext = fileExtension(track.path);
+  const quality = classifyAudioQuality(track);
   const folder = parentFolder(track.path);
   const elapsed = duration > 0 ? currentTime / duration : 0;
-  const quality = qualityBadge(track);
-  const density = track.size && duration > 0 ? track.size / duration : null;
+  const density = quality.densityBytesPerSecond;
+  const archiveFlags = quality.flags.length ? quality.flags.join(' / ') : 'Archive signal clean';
   const chips = [
-    ['FORMAT', ext || 'AUDIO'],
+    ['FORMAT', quality.displayExt],
+    ['ARCHIVE', quality.family.toUpperCase()],
+    ['DECODE', quality.decodePath === 'ffmpeg-pcm-fallback' ? 'FFMPEG PCM' : 'NATIVE'],
     ['BITRATE', track.bitrate ? `${Math.round(track.bitrate / 1000)} kbps` : 'unknown'],
     ['RATE', track.sampleRate ? `${(track.sampleRate / 1000).toFixed(track.sampleRate % 1000 === 0 ? 0 : 1)} kHz` : 'unknown'],
     ['SIZE', formatOptionalBytes(track.size)],
+    ['RG', replayGainLabel(track)],
     ['BPM', track.bpm ? `${Math.round(track.bpm)}` : 'unset'],
     ['KEY', track.key || 'unset'],
   ] as const;
@@ -1588,7 +1592,7 @@ function TrackSignalPanel({
     <section className="track-signal-panel" data-newamp-track-signal-panel>
       <div className="track-signal-head">
         <span>Signal Bay</span>
-        <strong>{quality}</strong>
+        <strong>{quality.label}</strong>
       </div>
       <div className="track-signal-chips">
         {chips.map(([label, value]) => (
@@ -1606,6 +1610,7 @@ function TrackSignalPanel({
         <span>{track.year ?? 'year unset'} / {track.genre || 'genre unset'}</span>
         <span>{track.playCount} plays / {track.skipCount} skips</span>
         <span>{density ? `${formatBytes(density)}/s` : 'density unknown'}</span>
+        <span title={archiveFlags}>{archiveFlags}</span>
       </div>
       <div className="track-signal-ai">
         <span>{aiAssistReady ? `ChatGPT assist ready: ${aiModel || 'model set'}` : 'ChatGPT assist: add your API key in Settings'}</span>
@@ -1613,11 +1618,6 @@ function TrackSignalPanel({
       </div>
     </section>
   );
-}
-
-function fileExtension(path: string): string {
-  const match = /\.([^.\\/]+)$/.exec(path);
-  return match?.[1]?.toUpperCase() ?? '';
 }
 
 function parentFolder(path: string): string {
@@ -1631,15 +1631,14 @@ function formatOptionalBytes(value: number | null): string {
   return formatBytes(value);
 }
 
-function qualityBadge(track: Track): string {
-  const ext = fileExtension(track.path).toLowerCase();
-  if (ext === 'dsf' || ext === 'dff') return 'DSD via PCM fallback';
-  const lossless = ['flac', 'wav', 'aiff', 'aif', 'alac', 'ape', 'wv'].includes(ext);
-  if (lossless && track.sampleRate && track.sampleRate >= 88200) return 'hi-res lossless';
-  if (lossless) return 'lossless';
-  if (track.bitrate && track.bitrate >= 256000) return 'high bitrate';
-  if (track.bitrate && track.bitrate > 0) return 'lossy';
-  return 'unknown source';
+function replayGainLabel(track: Track): string {
+  if (track.replayGainTrackDb != null) return `track ${formatDb(track.replayGainTrackDb)}`;
+  if (track.replayGainAlbumDb != null) return `album ${formatDb(track.replayGainAlbumDb)}`;
+  return 'missing';
+}
+
+function formatDb(value: number): string {
+  return `${value > 0 ? '+' : ''}${value.toFixed(1)} dB`;
 }
 
 function VuMeter(): JSX.Element {
@@ -1651,7 +1650,7 @@ function VuMeter(): JSX.Element {
     let raf = 0;
     const tick = (): void => {
       engine.getTimeData(time as Uint8Array<ArrayBuffer>);
-      // Single-channel approx — we don't have split L/R from the analyser.
+      // Single-channel approx - we don't have split L/R from the analyser.
       let sumSq = 0;
       for (let i = 0; i < time.length; i++) {
         const v = (time[i]! - 128) / 128;

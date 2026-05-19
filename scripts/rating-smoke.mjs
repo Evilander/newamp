@@ -51,7 +51,7 @@ const reloaded = await LibraryStore.open(dbPath);
 assert.equal(reloaded.getTracks({ search: 'rating:5', limit: 10, sort: 'artist' }).length, 1);
 reloaded.close();
 
-const [typesSource, librarySource, mainSource, preloadSource, apiSource, storeSource, libraryViewSource, nowPlayingSource, packageSource] =
+const [typesSource, librarySource, mainSource, preloadSource, apiSource, storeSource, libraryViewSource, albumsViewSource, nowPlayingSource, packageSource] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/library.ts', import.meta.url), 'utf8'),
@@ -60,6 +60,7 @@ const [typesSource, librarySource, mainSource, preloadSource, apiSource, storeSo
     readFile(new URL('../src/lib/api.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/store/usePlayerStore.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/views/LibraryView.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/views/AlbumsView.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
   ]);
@@ -75,6 +76,9 @@ assert.match(libraryViewSource, /data-newamp-rating/, 'Library rows should expos
 assert.match(libraryViewSource, /storeToggleLove/, 'shared track tables should love tracks outside the main Library view');
 assert.match(libraryViewSource, /storeSetTrackRating/, 'shared track tables should rate tracks outside the main Library view');
 assert.match(libraryViewSource, /patchLocalTrack/, 'shared track tables should re-render local row actions without mutating DOM');
+assert.match(albumsViewSource, /data-newamp-album-rating/, 'Albums view should expose an album-level score slider');
+assert.match(albumsViewSource, /setTrackRatingScore/, 'Album rating should reuse the 0-100 track score updater');
+assert.match(albumsViewSource, /albumScore/, 'Album rating should summarize selected album track scores');
 assert.match(nowPlayingSource, /Rating/, 'Now Playing should expose current-track rating');
 assert.match(nowPlayingSource, /ScoreRating/, 'Now Playing should use the decimal score control');
 const scoreRatingSource = await readFile(new URL('../src/components/ScoreRating.tsx', import.meta.url), 'utf8');

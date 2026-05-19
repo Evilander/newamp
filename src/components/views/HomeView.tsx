@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { LibraryHealth, ListeningHistoryItem, ListeningInsights, SavedPlaylist, SmartPlaylistRule, SmartPlaylistSuggestion, Track } from '@shared/types';
+import { buildArchiveCompass, duplicateExactTotal, legacyFormatTotal, missingMetadataTotal } from '@shared/archive-compass';
 import { api } from '../../lib/api';
 import { hiddenReviewLine } from '../../lib/easterEggs';
 import { formatDuration, formatNumber, formatTime } from '../../lib/format';
@@ -95,13 +96,6 @@ export function HomeView(): JSX.Element {
       });
   }, [data.history]);
 
-  const missingTotal = data.health
-    ? data.health.missing.artist +
-      data.health.missing.album +
-      data.health.missing.year +
-      data.health.missing.art +
-      data.health.missing.duration
-    : 0;
   const activeStationName = autoDjEnabled
     ? autoDjSmartRuleId
       ? data.smartRules.find((rule) => rule.id === autoDjSmartRuleId)?.name ?? `Smart Rule #${autoDjSmartRuleId}`
@@ -350,9 +344,7 @@ export function HomeView(): JSX.Element {
 
               <div className="flex min-w-0 flex-col gap-3">
                 <HealthPanel
-                  missingTotal={missingTotal}
-                  duplicateCount={data.health?.duplicateGroups.length ?? 0}
-                  legacyCount={data.health?.legacyFormats.reduce((sum, item) => sum + item.count, 0) ?? 0}
+                  health={data.health}
                   onOpenLibrary={() => setView('library')}
                 />
 
@@ -504,31 +496,67 @@ function NowPanel({
 }
 
 function HealthPanel({
-  missingTotal,
-  duplicateCount,
-  legacyCount,
+  health,
   onOpenLibrary,
 }: {
-  missingTotal: number;
-  duplicateCount: number;
-  legacyCount: number;
+  health: LibraryHealth | null;
   onOpenLibrary: () => void;
 }): JSX.Element {
+  const compass = health ? buildArchiveCompass(health) : null;
+  const missingTotal = health ? missingMetadataTotal(health) : 0;
+  const duplicateCount = health ? duplicateExactTotal(health) : 0;
+  const legacyCount = health ? legacyFormatTotal(health) : 0;
   return (
     <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
       <div className="mb-2 flex items-center gap-2">
         <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
-          Library Health
+          Archive Compass
         </div>
         <button className="pxbtn ml-auto" onClick={onOpenLibrary}>
           OPEN
         </button>
       </div>
+      {compass && (
+        <div className="mb-2 grid grid-cols-[58px_minmax(0,1fr)] gap-2">
+          <div
+            className="bevel-in flex h-[58px] items-center justify-center text-[26px] font-black leading-none"
+            style={{ color: compass.grade === 'S' || compass.grade === 'A' ? 'var(--accent)' : 'var(--warn)' }}
+            title={`Archive score ${compass.score}/100`}
+          >
+            {compass.grade}
+          </div>
+          <div className="min-w-0">
+            <div className="truncate text-[13px] font-bold">{compass.profile}</div>
+            <div className="mt-1 line-clamp-2 text-[10px] leading-snug" style={{ color: 'var(--ink-2)' }}>
+              {compass.headline}
+            </div>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-3 gap-2 text-center">
         <Metric label="Missing" value={missingTotal} />
-        <Metric label="Duplicates" value={duplicateCount} />
+        <Metric label="Exact dupes" value={duplicateCount} />
         <Metric label="Legacy" value={legacyCount} />
       </div>
+      {compass && (
+        <div className="mt-2 grid gap-1 text-[10px]">
+          {compass.moves.slice(0, 2).map((move) => (
+            <button
+              key={move.label}
+              className="bevel-in min-w-0 px-2 py-1.5 text-left"
+              onClick={onOpenLibrary}
+              title={move.detail}
+            >
+              <span className="block truncate font-bold" style={{ color: 'var(--accent)' }}>
+                {move.label}
+              </span>
+              <span className="block truncate" style={{ color: 'var(--muted)' }}>
+                {move.detail}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

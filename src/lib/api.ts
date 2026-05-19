@@ -254,6 +254,17 @@ const stub: NewAmpAPI = {
   getLibraryHealth: async () => ({
     totals: { tracks: 0, albums: 0, artists: 0, duration: 0 },
     missing: { artist: 0, album: 0, year: 0, art: 0, duration: 0 },
+    quality: {
+      lossless: 0,
+      lossy: 0,
+      hiRes: 0,
+      dsd: 0,
+      ffmpegFallback: 0,
+      lowBitrate: 0,
+      replayGainReady: 0,
+      replayGainMissing: 0,
+      unknown: 0,
+    },
     duplicateGroups: [],
     legacyFormats: [],
     recentlyAdded: [],

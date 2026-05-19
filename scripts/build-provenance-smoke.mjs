@@ -8,10 +8,13 @@ const fixtureVersion = String(pkg.version);
 const smokeRoot = join(repoRoot, 'tmp', 'build-provenance-smoke');
 await rm(smokeRoot, { recursive: true, force: true });
 await mkdir(join(smokeRoot, 'release', 'win-unpacked'), { recursive: true });
+await mkdir(join(smokeRoot, 'release', 'linux-unpacked'), { recursive: true });
 await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: fixtureVersion }), 'utf8');
 await writeFile(join(smokeRoot, 'release', `NewAmp Setup ${fixtureVersion}.exe`), 'installer', 'utf8');
 await writeFile(join(smokeRoot, 'release', `NewAmp Portable ${fixtureVersion}.exe`), 'portable', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'win-unpacked', 'NewAmp.exe'), 'exe', 'utf8');
+await writeFile(join(smokeRoot, 'release', `NewAmp Linux ${fixtureVersion} x64.tar.gz`), 'linux tar', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'linux-unpacked', 'newamp'), 'linux binary', 'utf8');
 
 const {
   buildProvenance,
@@ -30,7 +33,13 @@ assert.match(missing.reason, /missing/i);
 const planned = buildProvenance({ root: smokeRoot, version: fixtureVersion, now: new Date('2026-01-01T00:00:00.000Z') });
 assert.equal(planned.name, 'newamp-build-provenance');
 assert.equal(planned.version, fixtureVersion);
-assert.equal(planned.artifacts.length, 3);
+assert.deepEqual(planned.artifacts.map((artifact) => artifact.name), [
+  'installer',
+  'portable',
+  'exe',
+  'linux-tar',
+  'linux-binary',
+]);
 assert.ok(planned.artifacts.every((artifact) => artifact.sha256), 'all artifacts should be fingerprinted');
 
 const written = writeBuildProvenance({ root: smokeRoot, version: fixtureVersion, now: new Date('2026-01-01T00:00:00.000Z') });
