@@ -3,6 +3,49 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Living Library night — a content-aware, programmable upgrade to the library.
+
+### Added — Audio DNA Engine
+- Per-track perceptual feature vectors extracted via ffmpeg → 22 050 Hz mono PCM → hand-rolled FFT. Eleven dimensions per track: RMS, dynamic range, spectral centroid (brightness), spectral flatness, 85th-percentile rolloff, onset density, and five normalized band energies (low → high).
+- `tracks.dna_json` + `dna_analyzed_at` columns persist the vectors. `setTrackDna` / `getTrackDna` / `getTrackIdsMissingDna` / `getAllTrackDna` / `getDnaStats` round-trip them.
+- Smoke `smoke:dna` covers pure-math determinism, FFmpeg-driven analyzer round-trip on real FLAC fixtures, persistence, similarity math, and source-link assertions across the IPC, preload, types, and renderer surface.
+
+### Added — Living Tags DSL (moonshot)
+- A tiny embedded expression language for user-authored derived tags. Tags are named expressions over track metadata, audio DNA, listening behavior, and time context. Editing a rule retroactively re-tags every track in the library.
+- Grammar: `tag(name) when <expr> [boost N]`. Operators: `and / or / not`, `== != < <= > >=`, `matches`, `contains`, `in`, ranges (`90..120`), arithmetic. Identifiers: `track.*` + `dna.*` plus bareword shortcuts. Functions: `weekday() / hour() / month() / season() / now() / daysSince()`, `matches`, `contains`, `lower / upper / length`, `abs / min / max`, `tag(other)` for composition.
+- Sandboxed eval: hand-rolled AST walker, whitelisted function table guarded by `hasOwnProperty` so the prototype chain is unreachable. Three-valued null logic: missing fields fail comparisons rather than poisoning the boolean. Topological-sort cycle detection rejects circular tag references at definition time. Tag names locked to `[a-z_][a-z0-9_-]*`, ≤48 chars; rule bodies ≤4 000 chars.
+- New tables `tag_rules` (definition + boost + enabled + `last_error`) and `track_tags` (materialized with cascade on track deletion). Library power-search gains `tag:<name>` and `untagged:true`.
+- `saveTagRule` / `deleteTagRule` / `setTagRuleEnabled` / `recomputeTags` / `previewTagRule` / `getTagsForTrack` / `getTagSummaries` / `getTrackIdsByTag`. Saving or toggling a rule auto-recomputes.
+- Living Tags workshop view (`/tags` in the sidebar): three-column UI — rule list, expression editor with boost slider and inline parse-error caret, live preview pane that runs the candidate rule against a 2 000-track sample on every keystroke (350 ms debounce). One-click Play sample, recompute-all action, tag-summary chip strip.
+- Smoke `smoke:tags`: parser correctness, sandbox escape attempts (`constructor("alert(1)")`, `__proto__` lookup, chained `f()()`), three-valued null behaviour, range filters, composition + cycle detection, and end-to-end persistence including disabled-rule cleanup.
+
+### Added — Sounds Like
+- `findSimilarTracks(trackId, limit)` ranks the library by cosine similarity over DNA vectors and returns hydrated tracks with their score.
+- Now Playing gains a Sounds Like panel under the Signal Bay. If the track has no DNA, the panel offers an inline "Analyze DNA" button that calls `analyzeTracksDna([id])` and reloads. Otherwise the top five matches show with cosine percentages and a "Play set" action that queues the full result.
+
+### Added — Spectral Cover Art
+- Deterministic procedural SVG cover for albums without embedded or sidecar art. Seeded by FNV-1a hash of `artist::album` so the same library renders the same artwork across launches.
+- Three-stop OKLCH-ish gradient over a 14-bar spectrogram-style figure with offset accent circles. Lower band stamps `ARTIST + ALBUM` in monospace small caps (HTML escaped). Wired into `AlbumArt` and `FolderArt` as the no-real-art fallback.
+- Reference gallery captured at `assets/screenshots/spectral-art-gallery.png`.
+- Smoke `smoke:spectral-art`: byte-stable output, palette diversity, valid SVG structure, data-URL round-trip, edge cases.
+
+### Added — Library Radio Brain
+- Toggleable HTTP server (`Settings → Library Radio Brain`) that turns NewAmp into a tunable station on the local network. Default port `17117`, configurable (1024–65535).
+- Endpoints: `GET /` (HTML status page), `GET /library.m3u`, `GET /random.m3u` (200 shuffled tracks per fetch), `GET /tag/<name>.m3u` (Living-Tag stream), `GET /audio/<trackId>` (raw audio for native formats; WAV-via-ffmpeg transcode for legacy codecs, reusing the engine's transcoder).
+- Aborts on client disconnect propagate to the underlying ffmpeg process. `syncRadioBrain` reacts to `settings:set` so flipping the toggle starts / stops / rebinds the server automatically and the renderer status row polls `getRadioBrainStatus` every 4 s.
+- Smoke `smoke:radio-brain`: validates endpoint surface, M3U content, audio Content-Type, 405-on-POST, 404 paths, and clean shutdown.
+
+### Changed
+- Library power-search grammar gains `tag` and `untagged` field tokens.
+- `AlbumArt` and `FolderArt` no longer show a single `♫` placeholder when art is missing — every album/folder gets a unique spectral cover instead.
+
+### Fixed
+- Reverted accidental ASCII downgrades of UI glyphs in `RecordPlayerDeck` (brand dot, close, play/pause/stop, vinyl-label fallbacks) and `formatDuration`'s em-dash. Kept the tonearm-angle correction.
+- `profileFor` in `shared/archive-compass.ts` no longer reports `Lossless Library` for an empty library; it returns `Empty Shelf` so Home's grade tile matches the headline.
+- Two unprefixed debug `console.log` lines in the `os:pick-folder` IPC handler that printed dialog results on every folder pick.
+
 ## [1.2.0] - 2026-05-17
 
 Living Library release.
