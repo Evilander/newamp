@@ -3849,13 +3849,32 @@ input[type='range'].nslider.eq-slider {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  padding: 5px 12px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
   color: var(--ink-2);
   cursor: pointer;
   border-radius: var(--radius);
-  font-size: 12px;
-  letter-spacing: 0.02em;
+  font-size: 11px;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+/* Compact keyboard-shortcut chip used in the sidebar tools section. */
+.kbd-hint {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 1px 4px;
+  font-family: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--ink-2);
 }
 .nav-item:hover {
   color: var(--ink);

@@ -107,8 +107,12 @@ export function DiscoverView(): JSX.Element {
         <button className="pxbtn" onClick={() => void refreshDiscover(`${dailySeed()}:${Date.now()}`)} disabled={loading}>
           {loading ? 'Building...' : 'Reshuffle'}
         </button>
-        <button className={`pxbtn ${lowEndMode ? 'is-active' : ''}`} onClick={toggleLowEnd}>
-          Low-End
+        <button
+          className={`pxbtn ${lowEndMode ? 'is-active' : ''}`}
+          onClick={toggleLowEnd}
+          title="Use lighter visualizers and skip heavy effects (helps on older GPUs)"
+        >
+          Light Viz
         </button>
         {status && <span className="truncate text-[11px]" style={{ color: 'var(--ink-2)' }}>{status}</span>}
         {surface && (
