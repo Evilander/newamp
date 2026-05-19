@@ -39,7 +39,15 @@ const DEFAULTS: AppSettings = {
   autoDjSmartRuleId: null,
   equalizer: [...FLAT_EQ_VALUES],
   eqEnabled: false,
+  radioBrainEnabled: false,
+  radioBrainPort: 17117,
 };
+
+function normalizeRadioBrainPort(value: unknown): number {
+  const port = Math.trunc(Number(value));
+  if (Number.isFinite(port) && port >= 1024 && port <= 65535) return port;
+  return DEFAULTS.radioBrainPort;
+}
 
 function normalizeAutoDjSmartRuleId(value: unknown): number | null {
   const id = Math.trunc(Number(value));
@@ -119,6 +127,8 @@ export class SettingsStore {
           autoDjEnabled: !!parsed.autoDjEnabled,
           autoDjTarget: normalizeAutoDjTarget(parsed.autoDjTarget ?? DEFAULTS.autoDjTarget),
           autoDjSmartRuleId: normalizeAutoDjSmartRuleId(parsed.autoDjSmartRuleId),
+          radioBrainEnabled: parsed.radioBrainEnabled === true,
+          radioBrainPort: normalizeRadioBrainPort(parsed.radioBrainPort),
         };
       } catch (err) {
         const event = quarantineCorruptFile(this.file, 'settings', recoveryReason(err));
