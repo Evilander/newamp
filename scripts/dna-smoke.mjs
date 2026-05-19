@@ -122,6 +122,16 @@ const lowStored = idToDna.get(lowTrackId);
 assert.ok(brightStored && lowStored);
 assert.ok(brightStored.brightness > lowStored.brightness, 'persisted bright DNA should still outshine persisted low DNA');
 
+// findSimilarTracks: brightTone should match the quietTone (1kHz) more closely than the
+// low-tone fixture because the low-tone sits in the bottom band while the bright
+// and quiet tones share upper-band energy.
+const brightSimilar = library.findSimilarTracks(brightTrackId, 5);
+assert.ok(brightSimilar.length >= 1, 'similar list should contain peers');
+assert.ok(!brightSimilar.some((row) => row.track.id === brightTrackId), 'source track must not be returned in similar list');
+for (const row of brightSimilar) {
+  assert.ok(row.score >= 0 && row.score <= 1, 'similarity score should be normalized 0..1');
+}
+
 // Clearing
 assert.equal(library.setTrackDna(tracks[0].id, null), true);
 assert.equal(library.getTrackDna(tracks[0].id), null);
@@ -150,6 +160,11 @@ assert.match(preloadSource, /analyzeTracksDna/, 'preload should expose analyzeTr
 assert.match(typesSource, /TracksDnaAnalysisResult/, 'shared types should expose TracksDnaAnalysisResult');
 assert.match(typesSource, /DnaStats/, 'shared types should expose DnaStats');
 assert.match(apiSource, /analyzeTracksDna/, 'renderer API should stub analyzeTracksDna');
+assert.match(librarySource, /findSimilarTracks/, 'library should expose findSimilarTracks');
+assert.match(mainSource, /tracks:dna-similar/, 'main process should register similarity IPC');
+assert.match(preloadSource, /findSimilarTracks/, 'preload should expose findSimilarTracks');
+assert.match(typesSource, /SimilarTrack\b/, 'shared types should expose SimilarTrack');
+assert.match(apiSource, /findSimilarTracks/, 'renderer API should stub findSimilarTracks');
 
 console.log(JSON.stringify({
   ok: true,

@@ -1052,6 +1052,7 @@ function registerIpc(): void {
   ipcMain.handle('tracks:dna-missing-ids', async (_e, limit?: number) => library.getTrackIdsMissingDna(limit ?? 100));
   ipcMain.handle('tracks:dna-stats', async () => library.getDnaStats());
   ipcMain.handle('tracks:dna-all', async () => library.getAllTrackDna());
+  ipcMain.handle('tracks:dna-similar', async (_e, id: number, limit?: number) => library.findSimilarTracks(id, limit ?? 20));
   ipcMain.handle('tags:list-rules', async () => library.listTagRules());
   ipcMain.handle('tags:save-rule', async (_e, input) => {
     const saved = library.saveTagRule(input);

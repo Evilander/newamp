@@ -177,6 +177,7 @@ const stub: NewAmpAPI = {
   getTrackIdsMissingDna: async () => [],
   getDnaStats: async () => ({ analyzed: 0, missing: 0, total: 0 }),
   getAllTrackDna: async () => [],
+  findSimilarTracks: async () => [],
   listTagRules: async () => [],
   saveTagRule: async (input) => ({
     id: 0,
