@@ -1289,7 +1289,6 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('os:pick-folder', async () => {
-    console.log('[newamp] os:pick-folder invoked');
     try {
       // Bring window to front first; frameless windows sometimes lose focus
       // and the dialog will open behind them silently.
@@ -1310,7 +1309,6 @@ function registerIpc(): void {
       const res = mainWin
         ? await dialog.showOpenDialog(mainWin, opts)
         : await dialog.showOpenDialog(opts);
-      console.log('[newamp] os:pick-folder result:', res);
       if (res.canceled || !res.filePaths.length) return null;
       return res.filePaths[0];
     } catch (err) {

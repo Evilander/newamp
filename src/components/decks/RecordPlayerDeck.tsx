@@ -27,7 +27,7 @@ export function RecordPlayerDeck(props: DeckProps): JSX.Element {
     <div className={`deck-record-player ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
       <header className="deck-rp-titlebar titlebar-drag">
         <BrandLogo size={22} withGlow={false} />
-        <span className="deck-rp-brand">NEWAMP - Vinyl Bench</span>
+        <span className="deck-rp-brand">NEWAMP · Vinyl Bench</span>
         <div className="deck-rp-window titlebar-nodrag">
           <DeckSkinPicker current="record-player" onPick={props.onPickSkin} compact />
           <button
@@ -39,12 +39,12 @@ export function RecordPlayerDeck(props: DeckProps): JSX.Element {
           </button>
           <button className="pxbtn" onClick={onExitDeck} title="Back to full library">FULL</button>
           <button className="pxbtn" onClick={onMinimize} title="Minimize">_</button>
-          <button className="pxbtn" onClick={onClose} title="Close" style={{ color: 'var(--error)' }}>X</button>
+          <button className="pxbtn" onClick={onClose} title="Close" style={{ color: 'var(--error)' }}>×</button>
         </div>
       </header>
 
       <div className="deck-rp-stage titlebar-nodrag">
-        {/* Spinning vinyl - center stage */}
+        {/* Spinning vinyl — center stage */}
         <button
           type="button"
           className="deck-rp-platter"
@@ -63,7 +63,7 @@ export function RecordPlayerDeck(props: DeckProps): JSX.Element {
               {artUrl ? (
                 <img src={artUrl} alt={track?.album ?? ''} draggable={false} />
               ) : (
-                <span className="deck-rp-label-blank">{track ? '*' : '-'}</span>
+                <span className="deck-rp-label-blank">{track ? '♪' : '—'}</span>
               )}
               <span className="deck-rp-spindle" />
             </div>
@@ -104,9 +104,9 @@ export function RecordPlayerDeck(props: DeckProps): JSX.Element {
       <footer className="deck-rp-transport titlebar-nodrag">
         <button className="pxbtn" onClick={onPrev} title="Previous">&lt;&lt;</button>
         <button className="pxbtn is-active" onClick={onTogglePlay} title="Play / Pause">
-          {isPlaying ? 'II' : '>'}
+          {isPlaying ? '⏸' : '▶'}
         </button>
-        <button className="pxbtn" onClick={onStop} title="Stop">[]</button>
+        <button className="pxbtn" onClick={onStop} title="Stop">◼</button>
         <button className="pxbtn" onClick={onNext} title="Next">&gt;&gt;</button>
         <VolumeSlider value={volume} onChange={onSetVolume} width={120} showLabel={false} />
       </footer>

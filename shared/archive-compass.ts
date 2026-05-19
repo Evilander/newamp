@@ -160,6 +160,7 @@ function buildMoves(
 }
 
 function profileFor(health: LibraryHealth, score: number): string {
+  if (!health.totals.tracks) return 'Empty Shelf';
   const q = health.quality;
   if (score >= 92 && q.hiRes >= 12) return 'Reference Vault';
   if (q.dsd >= 1 && q.lossless >= q.lossy) return 'DSD Cabinet';
