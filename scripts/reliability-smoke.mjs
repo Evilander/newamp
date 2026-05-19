@@ -44,6 +44,8 @@ assert.match(settingsViewSource, /Show crash log/, 'Settings should expose local
 assert.match(mainSource, /OPEN_DEVTOOLS/, 'devtools should be opt-in so normal dev launches stay usable');
 assert.match(mainSource, /crashDumpsPath/, 'support diagnostics should include the local crash dump path');
 assert.match(mainSource, /openDevTools/, 'main window should still support explicit devtools opening');
+assert.match(mainSource, /NEWAMP_ENABLE_HARDWARE_ACCELERATION/, 'hardware acceleration should be an explicit opt-in after packaged GPU crash evidence');
+assert.match(mainSource, /const forceSoftwareRendering = !forceHardwareAcceleration;/, 'normal launches should default to the stable software-rendering path');
 
 console.log(
   JSON.stringify(

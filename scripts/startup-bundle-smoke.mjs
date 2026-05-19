@@ -7,6 +7,7 @@ const startupSplashSource = await readFile(new URL('../src/components/StartupSpl
 const styleSource = await readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8');
 const mainSource = await readFile(new URL('../electron/main.ts', import.meta.url), 'utf8');
 const packageSource = await readFile(new URL('../package.json', import.meta.url), 'utf8');
+const readmeSource = await readFile(new URL('../README.md', import.meta.url), 'utf8');
 const releaseGateSource = await readFile(new URL('./release-gate.mjs', import.meta.url), 'utf8');
 
 assert.match(appSource, /lazy\(\(\) =>[\s\S]*?import\('\.\/components\/views\/HomeView'\)/, 'Home view should be route-lazy');
@@ -32,6 +33,10 @@ assert.match(mainSource, /createStartupSplashWindow\(\);[\s\S]*?mainWin = create
 assert.match(mainSource, /closeStartupSplashWindow\(\);[\s\S]*?win\.show\(\)/, 'main window should reveal only after the splash closes');
 const appLogo = await stat(new URL('../build/logo-app.webp', import.meta.url));
 assert.ok(appLogo.size < 120_000, `display app logo should stay below 120KB, got ${appLogo.size}`);
+const readmeLogo = await stat(new URL('../assets/github/logo-readme.png', import.meta.url));
+assert.ok(readmeLogo.size < 650_000, `README logo should be mobile-safe and not use the oversized build asset, got ${readmeLogo.size}`);
+assert.match(readmeSource, /assets\/github\/logo-readme\.png/, 'README should use the dedicated mobile-safe GitHub logo asset');
+assert.doesNotMatch(readmeSource, /<img src="build\/logo\.png"/, 'README should not embed the oversized packaging logo directly');
 
 const assetDir = new URL('../dist/assets/', import.meta.url);
 const assets = await readdir(assetDir);

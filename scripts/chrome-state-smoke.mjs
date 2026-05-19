@@ -36,6 +36,8 @@ assert.equal(new SettingsStore(settingsPath).get().visualizerPreset, 'galaxy', '
 assert.equal(settings.set({ visualizerPreset: 'plasma-grid' }).visualizerPreset, 'plasma-grid', 'Xbox-style Plasma Grid preset should save');
 assert.equal(settings.set({ visualizerPreset: 'orbital-rings' }).visualizerPreset, 'orbital-rings', 'Orbital Rings preset should save');
 assert.equal(settings.set({ visualizerPreset: 'album-breathe' }).visualizerPreset, 'album-breathe', 'Album Breathe preset should save');
+assert.equal(settings.set({ visualizerPreset: 'tempo-pulse' }).visualizerPreset, 'tempo-pulse', 'Tempo Pulse preset should save');
+assert.equal(settings.set({ visualizerPreset: 'lattice-strobe' }).visualizerPreset, 'lattice-strobe', 'Lattice Strobe preset should save');
 assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'neon-waves', 'visualizer preset should reject unknown values');
 assert.equal(settings.set({ firstLaunchTutorialSeen: true }).firstLaunchTutorialSeen, true, 'first-launch tutorial completion should save');
 assert.equal(new SettingsStore(settingsPath).get().firstLaunchTutorialSeen, true, 'first-launch tutorial completion should reload');

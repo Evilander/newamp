@@ -51,6 +51,8 @@ assert.match(fullscreenSource, /id: 'confetti'/, 'Fullscreen visualizer must exp
 assert.match(fullscreenSource, /id: 'burning-cloud'/, 'Fullscreen visualizer must expose Burning Cloud preset');
 assert.match(fullscreenSource, /id: 'album-breathe'/, 'Fullscreen visualizer must expose the quiet album-cover breathing preset');
 assert.match(typesSource, /'album-breathe'/, 'visualizer preset type should include album-breathe');
+assert.match(typesSource, /'tempo-pulse'/, 'visualizer preset type should include Tempo Pulse');
+assert.match(typesSource, /'lattice-strobe'/, 'visualizer preset type should include Lattice Strobe');
 assert.match(fullscreenSource, /data-newamp-viz-quality-button/, 'Fullscreen visualizer should expose a 4K quality toggle');
 assert.match(fullscreenSource, /data-newamp-viz-screen-button/, 'Fullscreen visualizer should expose native screen takeover');
 assert.match(fullscreenSource, /data-newamp-viz-palette-button/, 'Fullscreen visualizer should expose visualizer color palette controls');
@@ -60,6 +62,8 @@ assert.match(fullscreenSource, /data-newamp-viz-reactivity-button/, 'Fullscreen 
 assert.match(fullscreenSource, /data-newamp-viz-auto-vj-button/, 'Fullscreen visualizer should expose an automatic visualizer DJ mode');
 assert.match(fullscreenSource, /data-newamp-viz-show-toolbar/, 'Fullscreen visualizer should provide a recovery control when top navigation is hidden');
 assert.match(fullscreenSource, /data-newamp-viz-hover-meter/, 'Fullscreen visualizer should expose hover-only volume meter chrome');
+assert.match(fullscreenSource, /data-newamp-viz-level-meter-bar/, 'Fullscreen visualizer meter should expose an analyzer-driven level bar');
+assert.match(fullscreenSource, /engine\.getTimeData/, 'Fullscreen visualizer meter should read audio analyzer time data, not only the volume setting');
 assert.match(fullscreenSource, /data-newamp-album-breathe-visualizer/, 'Album breathe visualizer should be a real full-screen mode');
 assert.match(fullscreenSource, /ART PULSE/, 'Fullscreen visualizer should expose random album-art pulse mode');
 assert.match(fullscreenSource, /ArrowRight/, 'Fullscreen visualizer should support keyboard preset cycling');

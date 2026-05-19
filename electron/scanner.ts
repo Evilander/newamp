@@ -21,6 +21,7 @@ const AUDIO_EXTS = new Set([
   '.aiff',
   '.aif',
   '.dsf',
+  '.dff',
   '.ape',
   '.wv',
   '.mpc',

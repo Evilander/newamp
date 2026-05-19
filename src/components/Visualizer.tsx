@@ -1018,7 +1018,8 @@ interface AudioFeatures {
 }
 
 function isShaderVisualizerMode(mode: VizMode): boolean {
-  return mode === 'neon-waves' ||
+  return mode === 'aurora' ||
+    mode === 'neon-waves' ||
     mode === 'neon-ribbons' ||
     mode === 'plasma-grid' ||
     mode === 'burning-cloud';

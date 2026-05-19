@@ -99,7 +99,23 @@ assert.equal(importedWinampSkin.variables['--display-bg'], '#101316');
 assert.ok(importedWinampSkin.variables['--bg'], 'Winamp BMP colors should produce a Newamp background variable');
 assert.ok(importedWinampSkin.variables['--panel'], 'Winamp BMP colors should produce a Newamp panel variable');
 
-const [typesSource, preloadSource, apiSource, mainSource, settingsViewSource, appSource, skinsSource, styleSource, deckTypesSource, deckPickerSource, packageSource, gateSource] =
+const [
+  typesSource,
+  preloadSource,
+  apiSource,
+  mainSource,
+  settingsViewSource,
+  appSource,
+  skinsSource,
+  styleSource,
+  deckTypesSource,
+  deckPickerSource,
+  hotdogDeckSource,
+  hotdogShellPng,
+  hotdogMaskPng,
+  packageSource,
+  gateSource,
+] =
   await Promise.all([
     readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../electron/preload.ts', import.meta.url), 'utf8'),
@@ -111,6 +127,9 @@ const [typesSource, preloadSource, apiSource, mainSource, settingsViewSource, ap
     readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/decks/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/decks/DeckSkinPicker.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/decks/HotdogDeck.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/assets/decks/hotdog-shell.png', import.meta.url)),
+    readFile(new URL('../src/assets/decks/hotdog-mask.png', import.meta.url)),
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../scripts/release-gate.mjs', import.meta.url), 'utf8'),
   ]);
@@ -149,7 +168,14 @@ assert.match(styleSource, /\.deck-jukebox/, 'jukebox should be a real shaped dec
 assert.match(styleSource, /\.deck-cassette/, 'cassette should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-discman/, 'discman should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-hotdog/, 'hotdog deck should be a real shaped deck skin');
-assert.match(styleSource, /\.deck-hd-art/, 'hotdog deck should render the photorealistic SVG bun art layer');
+assert.match(styleSource, /\.deck-hd-art/, 'hotdog deck should render the shaped bun art layer');
+assert.match(styleSource, /mask-image: url\('\.\.\/assets\/decks\/hotdog-mask\.png'\)/, 'hotdog deck should use the food-only PNG alpha as the visible window mask');
+assert.match(hotdogDeckSource, /hotdog-shell\.png/, 'hotdog deck should render the realistic PNG shell asset');
+assert.doesNotMatch(hotdogDeckSource, /<svg/, 'hotdog deck should not regress to the old rectangular inline SVG shell');
+assert.ok(hotdogShellPng.length > 50000, 'hotdog shell PNG should be a real raster shell, not a placeholder');
+assert.equal(hotdogShellPng.subarray(1, 4).toString('ascii'), 'PNG', 'hotdog shell should be a PNG asset');
+assert.ok(hotdogMaskPng.length > 10000, 'hotdog mask PNG should be a real alpha mask, not a placeholder');
+assert.equal(hotdogMaskPng.subarray(1, 4).toString('ascii'), 'PNG', 'hotdog mask should be a PNG asset');
 assert.match(styleSource, /\.deck-hd-screen/, 'hotdog deck should expose the visualizer/album-art screen baked into the bun');
 assert.match(styleSource, /\.deck-hd-transport/, 'hotdog deck should keep transport controls embedded in the bun');
 assert.match(styleSource, /\.deck-retro-tv/, 'retro TV deck should be a real shaped deck skin');

@@ -32,12 +32,14 @@ export function buildGithubPublishPlan({
   const tag = `v${version}`;
   const installer = resolve(root, 'release', `NewAmp Setup ${version}.exe`);
   const portable = resolve(root, 'release', `NewAmp Portable ${version}.exe`);
+  const linuxTar = resolve(root, 'release', `NewAmp Linux ${version} x64.tar.gz`);
   const checksums = releaseChecksumsPath({ root });
   const provenance = buildProvenancePath({ root });
   const bundlePaths = releaseBundlePaths({ root, version });
   const artifacts = {
     installer,
     portable,
+    linuxTar,
     checksums,
     provenance,
     source: bundlePaths.sourceZip,
@@ -47,6 +49,7 @@ export function buildGithubPublishPlan({
   const missingArtifacts = [
     ['installer', installer],
     ['portable', portable],
+    ['linuxTar', linuxTar],
   ].filter(([, path]) => !existsSync(path));
   if (missingArtifacts.length) {
     return failedPlan(root, env, `missing release artifacts: ${missingArtifacts.map(([name]) => name).join(', ')}`, {
@@ -247,6 +250,7 @@ function failedPlan(root, env, reason, extra = {}) {
     artifacts: {
       installer: extra.installer ?? null,
       portable: extra.portable ?? null,
+      linuxTar: extra.linuxTar ?? null,
       checksums: extra.checksums ?? null,
       provenance: extra.provenance ?? null,
       source: extra.source ?? null,
@@ -296,10 +300,10 @@ function originCommand(root, gitDir, originUrl) {
   return gitDir ? gitCommand(label, root, gitDir, args) : gitCliCommand(label, args);
 }
 
-function publishReleaseCommand({ repo, tag, version, installer, portable, checksums, provenance, source, manifest, bundle, readmePath }) {
+function publishReleaseCommand({ repo, tag, version, installer, portable, linuxTar, checksums, provenance, source, manifest, bundle, readmePath }) {
   const viewArgs = ['release', 'view', tag, '--repo', repo];
   const editArgs = ['release', 'edit', tag, '--repo', repo, '--title', `NewAmp ${version}`, '--notes-file', readmePath];
-  const releaseAssets = [installer, portable, checksums, provenance, source, manifest, bundle];
+  const releaseAssets = [installer, portable, linuxTar, checksums, provenance, source, manifest, bundle];
   const uploadArgs = ['release', 'upload', tag, ...releaseAssets, '--repo', repo, '--clobber'];
   const createArgs = [
     'release',

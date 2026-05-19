@@ -28,6 +28,7 @@ const FFMPEG_FALLBACK_EXTS = new Set([
   'aiff',
   'aif',
   'dsf',
+  'dff',
   'ape',
   'wv',
   'mpc',

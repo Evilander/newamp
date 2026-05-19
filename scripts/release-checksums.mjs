@@ -26,6 +26,18 @@ export function releaseArtifactSpecs({ root = defaultRoot, version = readPackage
       checksumName: 'win-unpacked/NewAmp.exe',
       minimumBytes: 200_000_000,
     },
+    {
+      name: 'linux-tar',
+      path: join(root, 'release', `NewAmp Linux ${version} x64.tar.gz`),
+      checksumName: `NewAmp Linux ${version} x64.tar.gz`,
+      minimumBytes: 80_000_000,
+    },
+    {
+      name: 'linux-binary',
+      path: join(root, 'release', 'linux-unpacked', 'newamp'),
+      checksumName: 'linux-unpacked/newamp',
+      minimumBytes: 150_000_000,
+    },
   ];
 }
 

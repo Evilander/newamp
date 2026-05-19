@@ -31,6 +31,7 @@ await writeFile(join(smokeRoot, 'release', 'SHA256SUMS.txt'), 'fake checksums\n'
 await writeFile(join(smokeRoot, 'release', 'BUILD-PROVENANCE.json'), '{"name":"fixture"}\n', 'utf8');
 await writeFile(join(smokeRoot, 'release', `NewAmp Setup ${fixtureVersion}.exe`), 'installer', 'utf8');
 await writeFile(join(smokeRoot, 'release', `NewAmp Portable ${fixtureVersion}.exe`), 'portable', 'utf8');
+await writeFile(join(smokeRoot, 'release', `NewAmp Linux ${fixtureVersion} x64.tar.gz`), 'linux tar', 'utf8');
 await mkdir(join(smokeRoot, 'source-fixture', 'build'), { recursive: true });
 await writeFile(join(smokeRoot, 'source-fixture', 'README.md'), '# Source\n', 'utf8');
 await writeFile(join(smokeRoot, 'source-fixture', 'build', 'icon.png'), 'icon', 'utf8');
@@ -50,6 +51,7 @@ assert.deepEqual(specs.map((spec) => spec.entryName), [
   'BUILD-PROVENANCE.json',
   `NewAmp Setup ${fixtureVersion}.exe`,
   `NewAmp Portable ${fixtureVersion}.exe`,
+  `NewAmp Linux ${fixtureVersion} x64.tar.gz`,
   `NewAmp-${fixtureVersion}-source.zip`,
 ]);
 
@@ -81,6 +83,7 @@ await writeFile(join(gitRoot, 'release', 'SHA256SUMS.txt'), 'fake checksums\n', 
 await writeFile(join(gitRoot, 'release', 'BUILD-PROVENANCE.json'), '{"name":"fixture"}\n', 'utf8');
 await writeFile(join(gitRoot, 'release', `NewAmp Setup ${fixtureVersion}.exe`), 'installer', 'utf8');
 await writeFile(join(gitRoot, 'release', `NewAmp Portable ${fixtureVersion}.exe`), 'portable', 'utf8');
+await writeFile(join(gitRoot, 'release', `NewAmp Linux ${fixtureVersion} x64.tar.gz`), 'linux tar', 'utf8');
 run('git', ['init', '--bare', gitDir]);
 run('git', ['--git-dir', gitDir, 'symbolic-ref', 'HEAD', 'refs/heads/main']);
 run('git', ['--git-dir', gitDir, '--work-tree', gitRoot, 'add', '.gitignore', 'README.md', 'package.json']);

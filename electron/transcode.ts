@@ -33,6 +33,7 @@ const FFMPEG_FALLBACK_EXTS = new Set([
   '.aiff',
   '.aif',
   '.dsf',
+  '.dff',
   '.ape',
   '.wv',
   '.mpc',
@@ -259,10 +260,11 @@ export function calculateAlbumReplayGainDb(
 }
 
 function resolveFfmpegPath(): string {
-  const candidate = process.env.NEWAMP_FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
-  return candidate.includes('app.asar')
-    ? candidate.replace('app.asar', 'app.asar.unpacked')
-    : candidate;
+  if (process.env.NEWAMP_FFMPEG_PATH) return process.env.NEWAMP_FFMPEG_PATH;
+  const staticCandidate = ffmpegStatic?.includes('app.asar')
+    ? ffmpegStatic.replace('app.asar', 'app.asar.unpacked')
+    : ffmpegStatic;
+  return staticCandidate && existsSync(staticCandidate) ? staticCandidate : 'ffmpeg';
 }
 
 function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
