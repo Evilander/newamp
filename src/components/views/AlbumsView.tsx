@@ -4,6 +4,7 @@ import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
 import { PlaylistAppendPicker, TrackTable } from './LibraryView';
 import { api } from '../../lib/api';
+import { spectralArtDataUrl } from '@shared/spectral-art';
 import { ScoreRating } from '../ScoreRating';
 
 const ALBUM_PAGE_SIZE = 240;
@@ -504,17 +505,25 @@ function AlbumArt({ album, size = 64 }: { album: AlbumSummary; size?: number }):
       </div>
     );
   }
+  const spectralUrl = spectralArtDataUrl({ artist: album.albumArtist, album: album.album }, Math.max(96, size * 2));
   return (
     <div
-      className="album-art-tile album-art-placeholder flex items-center justify-center text-[22px]"
+      className="album-art-tile relative overflow-hidden"
       style={{
         width: size,
         height: size,
         borderRadius: 'var(--radius-card)',
         boxShadow: 'var(--shadow-card)',
       }}
+      title="Spectral cover (auto-generated)"
     >
-      ♫
+      <img
+        src={spectralUrl}
+        alt={`${album.album} (spectral cover)`}
+        width={size}
+        height={size}
+        className="h-full w-full object-cover"
+      />
     </div>
   );
 }
