@@ -19,6 +19,41 @@ import type { TrackDna } from './audio-dna.js';
 export const TAG_DSL_VERSION = 1;
 export const MAX_TAG_NAME_LENGTH = 48;
 export const MAX_RULE_BODY_LENGTH = 4000;
+export const MAX_REGEX_PATTERN_LENGTH = 200;
+export const MAX_REGEX_INPUT_LENGTH = 4096;
+
+// Reject patterns that the JS engine evaluates with catastrophic
+// backtracking. We don't ship a real DFA matcher (would mean re2), so we
+// pre-screen common evil shapes: nested quantifiers like (a+)+, (a*)*,
+// (a+)*, (a*)+, (a+)?+, and alternations of equivalent branches like (a|a)*
+// or (a|aa)*. Anything matching these refuses to compile-into-regex and the
+// `matches` operator returns null. This is conservative — some legitimate
+// patterns are blocked — but rule authors can always rewrite.
+const REDOS_NESTED_QUANT = /\([^)]*[+*][^)]*\)\s*[+*?]/;
+const REDOS_ALT_REPEAT = /\(([^|()]+)\|[^)]*\1[^)]*\)\s*[+*]/;
+
+function safeRegex(pattern: string): RegExp | null {
+  if (typeof pattern !== 'string') return null;
+  if (pattern.length === 0 || pattern.length > MAX_REGEX_PATTERN_LENGTH) return null;
+  if (REDOS_NESTED_QUANT.test(pattern)) return null;
+  if (REDOS_ALT_REPEAT.test(pattern)) return null;
+  try {
+    return new RegExp(pattern, 'i');
+  } catch {
+    return null;
+  }
+}
+
+function safeRegexTest(pattern: string, input: string): boolean | null {
+  const re = safeRegex(pattern);
+  if (!re) return null;
+  const slice = input.length > MAX_REGEX_INPUT_LENGTH ? input.slice(0, MAX_REGEX_INPUT_LENGTH) : input;
+  try {
+    return re.test(slice);
+  } catch {
+    return null;
+  }
+}
 
 export interface TrackContext {
   id: number;
@@ -656,7 +691,7 @@ const FUNCTIONS: Record<string, FunctionImpl> = {
     const nums = args.map(numberValue).filter((v): v is number => v != null);
     return nums.length ? Math.max(...nums) : null;
   },
-  daysSince: (args, _c, env) => {
+  dayssince: (args, _c, env) => {
     const ts = numberValue(args[0]);
     if (ts == null) return null;
     const ms = ts > 1e12 ? ts : ts * 1000;
@@ -666,11 +701,7 @@ const FUNCTIONS: Record<string, FunctionImpl> = {
     const s = stringValue(args[0]);
     const pattern = stringValue(args[1]);
     if (s == null || pattern == null) return null;
-    try {
-      return new RegExp(pattern, 'i').test(s);
-    } catch {
-      return null;
-    }
+    return safeRegexTest(pattern, s);
   },
   contains: (args) => {
     const s = stringValue(args[0]);

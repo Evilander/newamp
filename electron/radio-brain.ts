@@ -147,6 +147,12 @@ export class RadioBrain {
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.end(`Not found: ${path}\n\nSee / for endpoints.`);
     } catch (err) {
+      if (res.headersSent) {
+        // Already streaming a response (likely audio) - just drop the socket
+        // so the client doesn't receive a chimera of audio bytes + error text.
+        res.destroy();
+        return;
+      }
       res.statusCode = 500;
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.end(`Error: ${err instanceof Error ? err.message : String(err)}`);
@@ -218,8 +224,11 @@ export class RadioBrain {
       const tracks = this.opts.library.getTracksByIdsInOrder(trackIds);
       for (const track of tracks) {
         const duration = track.duration ? Math.max(1, Math.round(track.duration)) : -1;
-        const title = `${track.artist ?? 'Unknown'} - ${track.title ?? 'Unknown'}`;
-        lines.push(`#EXTINF:${duration},${title}`);
+        // Strip newlines + carriage returns so malformed tags can't smuggle
+        // extra #EXTINF lines or absolute URLs into the playlist.
+        const sanitizedArtist = (track.artist ?? 'Unknown').replace(/[\r\n]+/g, ' ');
+        const sanitizedTitle = (track.title ?? 'Unknown').replace(/[\r\n]+/g, ' ');
+        lines.push(`#EXTINF:${duration},${sanitizedArtist} - ${sanitizedTitle}`);
         lines.push(`${base}/audio/${track.id}`);
       }
     }

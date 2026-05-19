@@ -71,19 +71,24 @@ export function TagsView(): JSX.Element {
   }, [refresh]);
 
   const previewTimer = useRef<number | null>(null);
+  const previewSeq = useRef(0);
   useEffect(() => {
     if (previewTimer.current) window.clearTimeout(previewTimer.current);
+    const seq = ++previewSeq.current;
     previewTimer.current = window.setTimeout(async () => {
       try {
         const result = await api.previewTagRule({ body: draft.body, limit: 2000 });
+        if (seq !== previewSeq.current) return;
         setPreview(result);
         if (result.ok && result.sampleTrackIds.length) {
           const tracks = await Promise.all(result.sampleTrackIds.slice(0, 12).map((id) => api.getTrack(id)));
+          if (seq !== previewSeq.current) return;
           setPreviewTracks(tracks.filter((t): t is Track => !!t));
         } else {
           setPreviewTracks([]);
         }
       } catch (err) {
+        if (seq !== previewSeq.current) return;
         setError(err instanceof Error ? err.message : String(err));
       }
     }, 350);
