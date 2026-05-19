@@ -38,6 +38,7 @@ import type {
   PodcastSubscription,
   PlayerCommand,
   DnaStats,
+  RadioBrainStatus,
   ReplayGainAnalysisResult,
   SavedPlaylist,
   SimilarTrack,
@@ -144,6 +145,7 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tracks:dna-all') as Promise<Array<{ id: number; dna: TrackDna }>>,
   findSimilarTracks: (trackId: number, limit?: number) =>
     ipcRenderer.invoke('tracks:dna-similar', trackId, limit) as Promise<SimilarTrack[]>,
+  getRadioBrainStatus: () => ipcRenderer.invoke('radio-brain:status') as Promise<RadioBrainStatus>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,
   getDroppedFilePaths: (files: unknown[]) => {

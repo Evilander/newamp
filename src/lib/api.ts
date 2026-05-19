@@ -178,6 +178,7 @@ const stub: NewAmpAPI = {
   getDnaStats: async () => ({ analyzed: 0, missing: 0, total: 0 }),
   getAllTrackDna: async () => [],
   findSimilarTracks: async () => [],
+  getRadioBrainStatus: async () => ({ enabled: false, port: 17117, baseUrl: null, endpoints: [], startedAt: null, error: null }),
   listTagRules: async () => [],
   saveTagRule: async (input) => ({
     id: 0,

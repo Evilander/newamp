@@ -49,6 +49,8 @@ import {
   transcodeTracksToWavFolder,
 } from './transcode.js';
 import { analyzeTrackDna } from './dna-analyzer.js';
+import { RadioBrain } from './radio-brain.js';
+import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
 import { exportPlaylistFolder } from './playlist-export.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
 import { generateOpenAiLinerNotes } from './openai-assist.js';
@@ -363,6 +365,7 @@ let scanner: Scanner;
 let libraryWatcher: LibraryWatcher;
 let lastfmOutbox: LastfmScrobbleOutbox;
 let podcastStore: PodcastStore;
+let radioBrain: RadioBrain | null = null;
 let pendingOpenFiles = collectOpenFileArgs(process.argv);
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL;
@@ -715,6 +718,30 @@ function registerMediaShortcuts(): void {
   }
 }
 
+async function syncRadioBrain(): Promise<void> {
+  const current = settings.get();
+  if (!current.radioBrainEnabled) {
+    if (radioBrain) {
+      await radioBrain.stop();
+      radioBrain = null;
+    }
+    return;
+  }
+  if (radioBrain && radioBrain.status().port !== current.radioBrainPort) {
+    await radioBrain.stop();
+    radioBrain = null;
+  }
+  if (!radioBrain) {
+    radioBrain = new RadioBrain({
+      library,
+      port: current.radioBrainPort,
+      transcode: (path, signal) => transcodeToWavResponse(path, new Request('http://localhost/audio', { signal })),
+      ffmpegFallbackExt: (path) => isFfmpegFallbackExtension(path.split('.').pop() ?? ''),
+    });
+    await radioBrain.start();
+  }
+}
+
 function syncLibraryWatcher(): void {
   if (!libraryWatcher) return;
   const current = settings.get();
@@ -747,6 +774,7 @@ async function reloadRuntimeStores(userData: string): Promise<void> {
   scanner = createScannerService(library);
   libraryWatcher = createLibraryWatcherService();
   syncLibraryWatcher();
+  void syncRadioBrain();
 }
 
 function registerAudioProtocol(): void {
@@ -1129,7 +1157,12 @@ function registerIpc(): void {
   ipcMain.handle('settings:set', async (_e, patch) => {
     const updated = settings.set(patch);
     syncLibraryWatcher();
+    void syncRadioBrain();
     return updated;
+  });
+  ipcMain.handle('radio-brain:status', async () => {
+    if (!radioBrain) return { enabled: false, port: settings.get().radioBrainPort, baseUrl: null, endpoints: [], startedAt: null, error: null };
+    return radioBrain.status();
   });
   ipcMain.handle('settings:skin-export', async (_e, skin: CustomSkin) => {
     const file = serializeCustomSkin(skin);

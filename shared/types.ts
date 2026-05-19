@@ -731,6 +731,17 @@ export interface AppSettings {
   autoDjSmartRuleId: number | null;
   equalizer: number[]; // 10 bands, -12..+12 dB
   eqEnabled: boolean;
+  radioBrainEnabled: boolean;
+  radioBrainPort: number;
+}
+
+export interface RadioBrainStatus {
+  enabled: boolean;
+  port: number;
+  baseUrl: string | null;
+  endpoints: string[];
+  startedAt: number | null;
+  error: string | null;
 }
 
 export type PlayerCommand = 'toggle-play' | 'next' | 'previous' | 'stop';
@@ -908,6 +919,7 @@ export interface NewAmpAPI {
   getDnaStats: () => Promise<DnaStats>;
   getAllTrackDna: () => Promise<Array<{ id: number; dna: TrackDnaPublic }>>;
   findSimilarTracks: (trackId: number, limit?: number) => Promise<SimilarTrack[]>;
+  getRadioBrainStatus: () => Promise<RadioBrainStatus>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;
   getDroppedFilePaths: (files: unknown[]) => string[];

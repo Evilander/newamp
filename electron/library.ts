@@ -908,7 +908,7 @@ export class LibraryStore {
     return row ? rowToTrack(row) : null;
   }
 
-  private getTracksByIdsInOrder(ids: number[]): Track[] {
+  getTracksByIdsInOrder(ids: number[]): Track[] {
     return ids
       .map((id) => this.getTrack(id))
       .filter((track): track is Track => !!track);
