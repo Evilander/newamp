@@ -24,18 +24,77 @@ export const MAX_REGEX_INPUT_LENGTH = 4096;
 
 // Reject patterns that the JS engine evaluates with catastrophic
 // backtracking. We don't ship a real DFA matcher (would mean re2), so we
-// pre-screen common evil shapes: nested quantifiers like (a+)+, (a*)*,
-// (a+)*, (a*)+, (a+)?+, and alternations of equivalent branches like (a|a)*
-// or (a|aa)*. Anything matching these refuses to compile-into-regex and the
-// `matches` operator returns null. This is conservative — some legitimate
-// patterns are blocked — but rule authors can always rewrite.
-const REDOS_NESTED_QUANT = /\([^)]*[+*][^)]*\)\s*[+*?]/;
+// pre-screen for the two structural shapes that produce exponential blowup
+// in NFA backtrackers:
+//   1. Any group that itself contains an unbounded quantifier AND is then
+//      followed by another unbounded quantifier — e.g. (a+)+, (a*)*, (.+)+,
+//      (([a-z])+.)+ . This walks balanced parens so it catches nested cases.
+//   2. Alternations of overlapping branches under a + or *, e.g. (a|a)*,
+//      (a|aa)*, (.|a)+.
+// This is conservative — some legitimate patterns are blocked — but rule
+// authors can always rewrite into a safer shape.
 const REDOS_ALT_REPEAT = /\(([^|()]+)\|[^)]*\1[^)]*\)\s*[+*]/;
+
+function hasNestedUnboundedQuantifier(pattern: string): boolean {
+  // Walk the pattern with a stack. For each `(...)` group, record whether
+  // the group's interior contains a `+` or `*` quantifier (excluding ones
+  // inside character classes, escapes, or deeper groups). When the group
+  // closes, if the closing `)` is followed by `+`, `*`, `{N,}`, or `+?`/`*?`
+  // AND the interior had its own unbounded quantifier, the pattern is
+  // unsafe.
+  const stack: boolean[] = []; // hasUnboundedQuant per open group
+  let i = 0;
+  while (i < pattern.length) {
+    const ch = pattern[i]!;
+    if (ch === '\\') { i += 2; continue; }
+    if (ch === '[') {
+      i++;
+      while (i < pattern.length && pattern[i] !== ']') {
+        if (pattern[i] === '\\') i++;
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (ch === '(') {
+      // skip non-capturing markers like (?: (?= (?! (?<= (?<!
+      let j = i + 1;
+      if (pattern[j] === '?') {
+        j++;
+        if (pattern[j] === '<') j++;
+        if (pattern[j] === ':' || pattern[j] === '=' || pattern[j] === '!') j++;
+      }
+      stack.push(false);
+      i = j;
+      continue;
+    }
+    if (ch === ')') {
+      const inner = stack.pop() ?? false;
+      // look at the quantifier immediately following the close paren
+      const next = pattern[i + 1];
+      const isUnboundedAfter = next === '+' || next === '*'
+        || (next === '{' && /\{\s*\d+\s*,\s*\}/.test(pattern.slice(i + 1, i + 12)));
+      if (inner && isUnboundedAfter) return true;
+      // The closed group itself is "unbounded" from the perspective of its
+      // parent if it has a +/* quantifier after it.
+      if (isUnboundedAfter && stack.length > 0) {
+        stack[stack.length - 1] = true;
+      }
+      i++;
+      continue;
+    }
+    if ((ch === '+' || ch === '*') && stack.length > 0) {
+      stack[stack.length - 1] = true;
+    }
+    i++;
+  }
+  return false;
+}
 
 function safeRegex(pattern: string): RegExp | null {
   if (typeof pattern !== 'string') return null;
   if (pattern.length === 0 || pattern.length > MAX_REGEX_PATTERN_LENGTH) return null;
-  if (REDOS_NESTED_QUANT.test(pattern)) return null;
+  if (hasNestedUnboundedQuantifier(pattern)) return null;
   if (REDOS_ALT_REPEAT.test(pattern)) return null;
   try {
     return new RegExp(pattern, 'i');
@@ -190,6 +249,8 @@ export interface TagEvaluationOutput {
   errors: Map<string, string[]>;
 }
 
+export const MAX_TAG_BOOST_PRODUCT = 1e6;
+
 export function evaluateRulesForTrack(input: TagEvaluationInput): TagEvaluationOutput {
   const ordered = topologicalSort(input.rules);
   const matched = new Set<string>();
@@ -201,7 +262,12 @@ export function evaluateRulesForTrack(input: TagEvaluationInput): TagEvaluationO
     if (result.errors.length) errors.set(rule.name, result.errors);
     if (result.matched) {
       matched.add(rule.name);
-      if (rule.boost > 0 && rule.boost !== 1) boost *= rule.boost;
+      if (rule.boost > 0 && rule.boost !== 1) {
+        // Cap the running boost product so a careless pack of high-multiplier
+        // rules can't drift toward Infinity and break downstream Auto-DJ
+        // weighting that uses the value.
+        boost = Math.min(boost * rule.boost, MAX_TAG_BOOST_PRODUCT);
+      }
     }
   }
   return { tags: matched, boost, errors };
@@ -448,7 +514,19 @@ class Parser {
     return { name, body: '', ast, boost, references };
   }
 
-  parseExpr(): AstNode { return this.parseOr(); }
+  private depth = 0;
+
+  parseExpr(): AstNode {
+    if (++this.depth > 256) {
+      const tok = this.peek();
+      throw new CompileException('expression nested too deeply (max 256)', tok.line, tok.column);
+    }
+    try {
+      return this.parseOr();
+    } finally {
+      this.depth--;
+    }
+  }
 
   private parseOr(): AstNode {
     let left = this.parseAnd();

@@ -139,6 +139,12 @@ const cycleA = parseRule('tag(cyc_a) when tag(cyc_b)').rule;
 const cycleB = parseRule('tag(cyc_b) when tag(cyc_a)').rule;
 assert.throws(() => topologicalSort([cycleA, cycleB]), /cycle/, 'cyclic tag DAG should throw');
 
+// Parser depth guard — deep nesting should fail gracefully, not blow the call stack.
+const deepBody = `tag(deep) when ${'('.repeat(400)}1${')'.repeat(400)} = 1`;
+const deepResult = parseRule(deepBody);
+assert.ok(!deepResult.rule, 'deeply nested expressions should be refused before stack overflow');
+assert.match(deepResult.errors[0]?.message ?? '', /too deeply/, 'depth guard should be the surfaced error');
+
 // daysSince should resolve regardless of casing (regression: function table key was mixedCase)
 const daysRule = parseRule('tag(stale) when daysSince(lastplayed) > 30').rule;
 assert.ok(daysRule);
