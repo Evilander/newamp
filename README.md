@@ -1,15 +1,15 @@
 <div align="center">
 
-<img src="build/logo.png" alt="NewAmp" width="200">
+<img src="assets/github/logo-readme.png" alt="NewAmp" width="200">
 
 # NewAmp
 
-**A Winamp-inspired modern desktop music player for Windows.**
+**A Winamp-inspired modern desktop music player for Windows and Linux.**
 **Your local library. Your rules. No streaming. No cloud. No telemetry.**
 
 [![Release](https://img.shields.io/github/v/release/evilander/newamp?style=flat-square&color=39ff14)](https://github.com/evilander/newamp/releases)
 [![License](https://img.shields.io/github/license/evilander/newamp?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows-blue?style=flat-square)](https://github.com/evilander/newamp/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%2B%20Linux-blue?style=flat-square)](https://github.com/evilander/newamp/releases)
 [![Made with Electron](https://img.shields.io/badge/electron-42-9cf?style=flat-square)](https://www.electronjs.org/)
 
 </div>
@@ -18,14 +18,14 @@
 
 ## What it is
 
-NewAmp is a local-first Windows music player for people who actually own their music. It indexes a local folder of MP3 / FLAC / OGG / Opus / WAV / M4A / AAC / WMA / AIFF / APE / WV / MPC and gives you a player that feels like a piece of hardware — not a subscription dashboard.
+NewAmp is a local-first Windows and Linux music player for people who actually own their music. It indexes a local folder of MP3 / FLAC / OGG / Opus / WAV / M4A / AAC / WMA / AIFF / APE / WV / MPC / DSF / DFF and gives you a player that feels like a piece of hardware, not a subscription dashboard.
 
 It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on your machine, and never phones home.
 
 ## 30-second pitch
 
 - **Four UI shells** — Retro (Bloomberg-density Winamp 2 homage), Modern (rounded, content-forward), Liquid Glass (translucent stacked panes with backdrop-filter), Concourse (operator-console split-cells)
-- **Nine deck (compact-window) skins** — Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Hotdog Deck (photorealistic SVG bun with controls baked into the bread — no rectangle frame), and Retro TV. Each declares its own native window size — no letterbox
+- **Nine deck (compact-window) skins** - Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Hotdog Deck, and Retro TV. Each declares its own native window size with no letterbox
 - **13 color skins** — Classic, Ops, Midnight, Neon, Amber, Oxide, Steel, Walnut, Jukebox, Terminal, Ice, Miami, Mono. Plus full Winamp 2.x `.wsz` skin import
 - **0–100 decimal track scoring** — Drag, scroll-wheel, keyboard-nudge, or double-click to type `88.3`. Stars stay in sync for legacy sorts and smart rules
 - **0–200% volume** with a red-zone past unity — VLC-style amp boost, full `0 dB / +6 dB` tick labels, runs after the master limiter so it amplifies without clipping
@@ -38,21 +38,46 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 - **Artist facts and images** — musician-first artist context and large artist images without confusing bands for species, cities, albums, or other same-name pages
 - **Custom playlists** — create named playlists, reorder tracks, export portable folders, and pick or drop playlist artwork for the playlist icon
 - **Native guitar tab companion** — cache local/Ultimate Guitar-style tabs and pop out a native tab window when a playable match exists
-- **Audiophile chain** — WASAPI output, ReplayGain (per-track + per-album), crossfade/gapless playback checks, software limiter, 10-band EQ, lossless WAV export of any track, output-device picker with test tone
+- **Audiophile chain** - WASAPI on Windows, Chromium system audio on Linux, ReplayGain (per-track + per-album), crossfade/gapless playback checks, software limiter, 10-band EQ, lossless WAV export of any track, output-device picker with test tone where the OS exposes it
 - **CUE sheet playback** — one-file albums split into playable, seekable tracks with performer/title/year/genre metadata
 - **Last.fm** — full scrobbling + now-playing + offline outbox queue
 - **Local-first** — SQLite library, sql.js, no account, no telemetry, no required network
+
+## Screenshots
+
+| Home / Deerhoof | Albums / Wilco |
+| --- | --- |
+| <img src="assets/screenshots/feature-home-deerhoof.png" alt="NewAmp Home view playing Deerhoof" width="420"> | <img src="assets/screenshots/feature-albums-wilco.png" alt="NewAmp Albums view with Wilco in view" width="420"> |
+
+| Now Playing / Hella | Library / Dave Brubeck |
+| --- | --- |
+| <img src="assets/screenshots/feature-now-playing-hella.png" alt="NewAmp Now Playing view playing Hella" width="420"> | <img src="assets/screenshots/feature-library-dave-brubeck.png" alt="NewAmp Library view with Dave Brubeck in view" width="420"> |
+
+| Tempo Pulse | Aurora |
+| --- | --- |
+| <img src="assets/screenshots/visualizer-tempo-pulse-deerhoof.png" alt="NewAmp fullscreen Tempo Pulse visualizer" width="420"> | <img src="assets/screenshots/visualizer-aurora-hella.png" alt="NewAmp fullscreen Aurora visualizer" width="420"> |
+
+| Lattice Strobe | Spectrum |
+| --- | --- |
+| <img src="assets/screenshots/visualizer-lattice-strobe-wilco.png" alt="NewAmp fullscreen Lattice Strobe visualizer" width="420"> | <img src="assets/screenshots/visualizer-spectrum-dave-brubeck.png" alt="NewAmp fullscreen Spectrum visualizer" width="420"> |
+
+| Hotdog Deck / Dave Brubeck |
+| --- |
+| <img src="assets/screenshots/feature-hotdog-deck-dave-brubeck.png" alt="NewAmp hotdog deck playing Dave Brubeck" width="420"> |
+
+Additional contributed deck and library captures live in `assets/screenshots/`.
 
 ## Install
 
 Grab the latest from [**Releases**](https://github.com/evilander/newamp/releases):
 
-- **`NewAmp Setup 1.3.0.exe`** — NSIS installer, registers file associations for 16 audio formats + 4 playlist formats
-- **`NewAmp Portable 1.3.0.exe`** — single-file portable, no install, no registry writes
+- **`NewAmp Setup 1.4.0.exe`** - Windows NSIS installer, registers file associations for 20 audio formats + 4 playlist formats
+- **`NewAmp Portable 1.4.0.exe`** - Windows single-file portable, no install, no registry writes
+- **`NewAmp Linux 1.4.0 x64.tar.gz`** - Linux portable build. Extract it and run `./newamp`
 
 All artifacts are listed with SHA256 hashes in `SHA256SUMS.txt`.
 
-> Windows SmartScreen may warn on first launch because NewAmp ships without a $200/yr code-signing certificate. Click "More info" → "Run anyway", or verify against the checksum file before launching.
+> Windows SmartScreen may warn on first launch depending on local trust state. Click "More info" -> "Run anyway", or verify against the checksum file before launching.
 
 ## First run
 
@@ -79,16 +104,17 @@ Custom skins:
 
 ## Audio
 
-- Outputs through Web Audio's `AudioContext` to the selected WASAPI device. Sample rate / bit depth shown live in Settings → Audio.
+- Outputs through Web Audio's `AudioContext`. On Windows this uses the selected WASAPI device; on Linux it uses the system audio stack exposed to Chromium, typically PipeWire or PulseAudio.
 - ReplayGain: tracks parsed for `replaygain_track_gain` / `replaygain_album_gain` tags. Per-track or per-album mode selectable.
 - Software peak limiter sits in the chain by default and can be toggled with a single preamp dB control.
 - Volume slider goes to 200% with a red-zone past unity (`+6 dB`) — like VLC. The amp runs after the limiter so over-100% boost stays clean.
 - 10-band EQ with `eqEnabled` gate. Custom presets persist via settings.
 - Export any track as 16-bit WAV from the Now Playing header.
+- DSF and DFF files are accepted through the ffmpeg fallback path and decoded to PCM for Web Audio playback. That is DSD-file compatibility, not native/DoP bit-perfect DSD output. The Windows package includes `ffmpeg-static`; the Linux portable build falls back to system `ffmpeg` when the bundled platform binary is not present, so install `ffmpeg` or set `NEWAMP_FFMPEG_PATH` for DSD/WMA/AIFF-style fallback formats.
 
 ## Build from source
 
-Requires Node 20+ and Windows.
+Requires Node 20+ on Windows or Linux.
 
 ```powershell
 git clone https://github.com/evilander/newamp.git
@@ -97,12 +123,13 @@ npm install
 npm run dev                  # development with hot reload
 ```
 
-Build a production installer:
+Build production artifacts:
 
 ```powershell
-npm run package              # produces release/NewAmp Setup *.exe + NewAmp Portable *.exe + SHA256SUMS.txt
+npm run package              # produces Windows installer/portable + Linux tar.gz + SHA256SUMS.txt
 npm run package:installer    # NSIS only
 npm run package:portable     # portable .exe only
+npm run package:linux        # Linux portable tar.gz only
 ```
 
 Run the full smoke suite (~80 smokes, several minutes):
@@ -163,7 +190,7 @@ newamp/
 - [Electron](https://www.electronjs.org/) 42 + [Vite](https://vite.dev/) 6 + [React](https://react.dev/) 18 + [Zustand](https://zustand.docs.pmnd.rs/) 5
 - [sql.js](https://sql.js.org/) 1.12 (SQLite compiled to WASM, no native deps)
 - [music-metadata](https://github.com/Borewit/music-metadata) for tag + ReplayGain extraction
-- [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) for WAV export
+- [ffmpeg-static](https://github.com/eugeneware/ffmpeg-static) plus system `ffmpeg` fallback for WAV export and non-native formats
 - [butterchurn](https://github.com/jberg/butterchurn) for MilkDrop-style fullscreen visualizer presets
 - [LRCLIB](https://lrclib.net/) for synced lyrics (with custom-lyrics override)
 - [Last.fm](https://www.last.fm/api) (optional, fully offline-queueable)
@@ -171,7 +198,7 @@ newamp/
 ## Privacy
 
 - No telemetry. No analytics. No crash reporters that phone home.
-- Library, settings, ratings, bookmarks, and history live in your OS user profile under `%APPDATA%/NewAmp`.
+- Library, settings, ratings, bookmarks, and history live in your OS user profile under `%APPDATA%/NewAmp` on Windows or `~/.config/NewAmp` on Linux.
 - Last.fm scrobbling is opt-in and uses your own API credentials; tokens are stored hashed in the release proof manifest.
 - Synced lyrics fetched from LRCLIB are anonymous lookups by artist + title + duration.
 
@@ -181,7 +208,7 @@ Pull requests welcome. Before opening one:
 
 1. `npm run smoke:rating && npm run smoke:home && npm run smoke:skin && npm run smoke:audio-limiter && npm run smoke:audio-output` — at minimum
 2. `npx tsc -p tsconfig.json --noEmit && npx tsc -p electron/tsconfig.json --noEmit`
-3. For UI work, run `npm run package` and try the produced installer end-to-end
+3. For UI work, run `npm run package` and try the produced Windows installer or Linux tarball end-to-end
 
 ## License
 

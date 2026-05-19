@@ -79,7 +79,7 @@ for (const format of ['mp3', 'flac', 'opus']) {
   multiFormatExports.push({ format, result, magic });
 }
 
-const [typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource] = await Promise.all([
+const [typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource, scannerSource, watcherSource, librarySource, installerSource, packageSource, formatSource] = await Promise.all([
   readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
   readFile(new URL('../electron/transcode.ts', import.meta.url), 'utf8'),
   readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
@@ -87,9 +87,16 @@ const [typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPl
   readFile(new URL('../src/lib/api.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/LibraryView.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../electron/scanner.ts', import.meta.url), 'utf8'),
+  readFile(new URL('../electron/library-watcher.ts', import.meta.url), 'utf8'),
+  readFile(new URL('../electron/library.ts', import.meta.url), 'utf8'),
+  readFile(new URL('../build/installer.nsh', import.meta.url), 'utf8'),
+  readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  readFile(new URL('../src/lib/format.tsx', import.meta.url), 'utf8'),
 ]);
 
 assertExportWiring(typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource);
+assertDsdWiring({ transcodeSource, mainSource, scannerSource, watcherSource, librarySource, installerSource, packageSource, formatSource, nowPlayingSource });
 
 assert.equal(batch.exported, 2, 'batch export should transcode every selected fixture');
 assert.equal(batch.skipped.length, 0, 'batch export should not skip valid fixtures');
@@ -168,6 +175,16 @@ function generateFixture() {
     throw new Error(`ffmpeg fixture generation failed (${result.status})\n${result.stderr || result.stdout}`);
   }
   return out;
+}
+
+function assertDsdWiring(sources) {
+  for (const [label, source] of Object.entries(sources)) {
+    assert.match(source, /['"]\.?dsf['"]|["']dsf["']/i, `${label} should include DSF support`);
+    assert.match(source, /['"]\.?dff['"]|["']dff["']/i, `${label} should include DFF support`);
+  }
+  assert.match(sources.transcodeSource, /X-Newamp-Playback.*ffmpeg-transcode/s, 'DSD fallback should keep using the ffmpeg playback path');
+  assert.match(sources.transcodeSource, /existsSync\(staticCandidate\)/, 'Linux packages should fall back to system ffmpeg when a platform-static binary is missing');
+  assert.match(sources.packageSource, /node_modules\/ffmpeg-static\/\*\*\/\*/, 'packaged apps should unpack the available platform ffmpeg-static payload');
 }
 
 function fixtureTrack(path, id, title) {

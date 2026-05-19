@@ -85,9 +85,6 @@ const userDataOverride =
   process.env.NEWAMP_USER_DATA_DIR || commandLineValue('--newamp-user-data-dir');
 const sessionDataOverride =
   process.env.NEWAMP_SESSION_DATA_DIR || commandLineValue('--newamp-session-data-dir');
-const forceNativeGpuRendering = process.env.NEWAMP_ENABLE_NATIVE_GPU === '1';
-const forceSoftwareRendering =
-  process.env.NEWAMP_DISABLE_HARDWARE_ACCELERATION === '1' || !forceNativeGpuRendering;
 const uiPlaybackSmoke = process.env.NEWAMP_UI_PLAYBACK_SMOKE === '1';
 const uiQuickPlaySmoke = process.env.NEWAMP_UI_QUICK_PLAY_SMOKE === '1';
 const uiHandoffSmoke = process.env.NEWAMP_UI_HANDOFF_SMOKE === '1';
@@ -98,6 +95,7 @@ const uiVisualizerSmoke = process.env.NEWAMP_UI_VISUALIZER_SMOKE === '1';
 const uiDeckSmoke = process.env.NEWAMP_UI_DECK_SMOKE === '1';
 const uiArtSmoke = process.env.NEWAMP_UI_ART_SMOKE === '1';
 const uiDiscoverSmoke = process.env.NEWAMP_UI_DISCOVER_SMOKE === '1';
+const screenshotGallery = process.env.NEWAMP_SCREENSHOT_GALLERY === '1';
 const smokeMode =
   startupSmoke ||
   uiPlaybackSmoke ||
@@ -109,7 +107,13 @@ const smokeMode =
   uiVisualizerSmoke ||
   uiDeckSmoke ||
   uiArtSmoke ||
-  uiDiscoverSmoke;
+  uiDiscoverSmoke ||
+  screenshotGallery;
+const forceHardwareAcceleration =
+  process.env.NEWAMP_ENABLE_HARDWARE_ACCELERATION === '1' &&
+  process.env.NEWAMP_DISABLE_HARDWARE_ACCELERATION !== '1' &&
+  !smokeMode;
+const forceSoftwareRendering = !forceHardwareAcceleration;
 const OPEN_AUDIO_EXTS = new Set([
   '.mp3',
   '.flac',
@@ -130,6 +134,7 @@ const OPEN_AUDIO_EXTS = new Set([
   '.ac3',
   '.dts',
   '.dsf',
+  '.dff',
 ]);
 const OPEN_PLAYLIST_EXTS = new Set(['.m3u', '.m3u8', '.pls', '.cue']);
 
@@ -189,13 +194,12 @@ try {
   console.error('[newamp] crash reporter failed to start', err);
 }
 
-if (forceSoftwareRendering) {
-  applySoftwareRenderingSwitches('normal');
-}
-
 if (smokeMode) {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-  applySoftwareRenderingSwitches('smoke');
+}
+
+if (forceSoftwareRendering) {
+  applySoftwareRenderingSwitches(smokeMode ? 'smoke' : 'normal');
 }
 
 function commandLineValue(name: string): string | null {
@@ -281,6 +285,22 @@ function attachWindowDiagnostics(win: BrowserWindow, label: string): void {
   win.on('responsive', () => {
     writeDiagnosticEvent('window-responsive', { label, title: win.getTitle(), url: win.webContents.getURL() });
   });
+}
+
+function attachExternalLinkHandler(win: BrowserWindow): void {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (isExternalUrl(url)) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!isExternalUrl(url)) return;
+    event.preventDefault();
+    void shell.openExternal(url);
+  });
+}
+
+function isExternalUrl(url: string): boolean {
+  return /^(https?:|mailto:)/i.test(url);
 }
 
 // Register custom protocol as standard + streaming before app ready, so it
@@ -371,6 +391,7 @@ function createWindow(): BrowserWindow {
     },
   });
   attachWindowDiagnostics(win, 'main');
+  attachExternalLinkHandler(win);
 
   if (smokeMode) {
     win.webContents.on('console-message', (details) => {
@@ -450,7 +471,7 @@ function createStartupSplashWindow(): void {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      sandbox: false,
     },
   });
   startupSplashWin.once('ready-to-show', () => {
@@ -1587,6 +1608,90 @@ async function runUiDiscoverSmoke(win: BrowserWindow): Promise<void> {
   }
 }
 
+async function runScreenshotGallery(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
+  try {
+    await Promise.race([
+      scanPromise,
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for screenshot gallery scan')), 20000),
+      ),
+    ]);
+    await reloadForSmoke(win);
+    win.setResizable(true);
+    win.setMinimumSize(980, 640);
+    win.setSize(1440, 940, true);
+    win.center();
+    win.show();
+    win.focus();
+
+    const screenshotDir = process.env.NEWAMP_SCREENSHOT_DIR
+      ? resolve(process.env.NEWAMP_SCREENSHOT_DIR)
+      : join(appRoot, 'assets', 'screenshots');
+    mkdirSync(screenshotDir, { recursive: true });
+
+    const files: string[] = [];
+    const captured: unknown[] = [];
+    const capture = async (filename: string, action: string): Promise<void> => {
+      const result = await Promise.race([
+        win.webContents.executeJavaScript(screenshotGalleryActionSource(action), true),
+        new Promise((_resolve, reject) =>
+          setTimeout(() => reject(new Error(`Timed out preparing screenshot ${filename}`)), 20000),
+        ),
+      ]);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
+      const image = await win.webContents.capturePage();
+      const outPath = join(screenshotDir, filename);
+      await writeFile(outPath, image.toPNG());
+      files.push(relative(appRoot, outPath).replace(/\\/g, '/'));
+      captured.push(result);
+    };
+
+    await capture(
+      'feature-home-deerhoof.png',
+      "await shot.playTrack('Dummy Discards A Heart'); await shot.go('Home'); await shot.sleep(1000); return shot.summary('home');",
+    );
+    await capture(
+      'feature-albums-wilco.png',
+      "await shot.playTrack('I Am Trying to Break Your Heart'); await shot.go('Albums'); await shot.sleep(900); return shot.summary('albums');",
+    );
+    await capture(
+      'feature-now-playing-hella.png',
+      "await shot.playTrack('Biblical Violence'); await shot.go('Now Playing'); await shot.sleep(900); return shot.summary('now-playing');",
+    );
+    await capture(
+      'feature-library-dave-brubeck.png',
+      "await shot.playTrack('Take Five'); await shot.go('Library'); await shot.sleep(800); return shot.summary('library');",
+    );
+    await capture(
+      'visualizer-tempo-pulse-deerhoof.png',
+      "await shot.playAndVisualize('Dummy Discards A Heart', 'tempo-pulse'); return shot.summary('visualizer-tempo-pulse');",
+    );
+    await capture(
+      'visualizer-lattice-strobe-wilco.png',
+      "await shot.playAndVisualize('I Am Trying to Break Your Heart', 'lattice-strobe'); return shot.summary('visualizer-lattice-strobe');",
+    );
+    await capture(
+      'visualizer-aurora-hella.png',
+      "await shot.playAndVisualize('Biblical Violence', 'aurora'); return shot.summary('visualizer-aurora');",
+    );
+    await capture(
+      'visualizer-spectrum-dave-brubeck.png',
+      "await shot.playAndVisualize('Take Five', 'spectrum'); return shot.summary('visualizer-spectrum');",
+    );
+    await capture(
+      'feature-hotdog-deck-dave-brubeck.png',
+      "await shot.playTrack('Take Five'); await shot.openDeck('hotdog'); return shot.summary('hotdog-deck');",
+    );
+
+    console.log(`[newamp-screenshot-gallery] ${JSON.stringify({ ok: true, files, captured })}`);
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    console.error('[newamp-screenshot-gallery] failed:', err);
+    app.exit(1);
+  }
+}
+
 async function runUiDeckSmoke(win: BrowserWindow): Promise<void> {
   try {
     const result = await Promise.race([
@@ -1632,6 +1737,118 @@ function reloadForSmoke(win: BrowserWindow): Promise<void> {
     win.webContents.once('did-fail-load', onFail);
     win.webContents.reloadIgnoringCache();
   });
+}
+
+function screenshotGalleryActionSource(action: string): string {
+  return `
+    (async () => {
+      const shot = (() => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const waitFor = async (label, fn, timeout = 10000) => {
+          const start = performance.now();
+          while (performance.now() - start < timeout) {
+            const value = fn();
+            if (value) return value;
+            await sleep(75);
+          }
+          throw new Error('Timed out waiting for ' + label);
+        };
+        const resetScroll = () => {
+          window.scrollTo(0, 0);
+          if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+          document.querySelectorAll('*').forEach((item) => {
+            item.scrollTop = 0;
+            item.scrollLeft = 0;
+          });
+        };
+        const go = async (label) => {
+          const button = await waitFor(label + ' navigation', () =>
+            Array.from(document.querySelectorAll('button'))
+              .find((item) => (item.textContent || '').toLowerCase().includes(label.toLowerCase())),
+          );
+          button.click();
+          await sleep(450);
+          resetScroll();
+          return button;
+        };
+        const closeVisualizer = async () => {
+          window.__newampSmoke?.setFullscreenVisualizer?.(false);
+          await sleep(250);
+        };
+        const playTrack = async (needle) => {
+          await closeVisualizer();
+          await go('Library');
+          const row = await waitFor('track row ' + needle, () =>
+            Array.from(document.querySelectorAll('[data-newamp-track-row]'))
+              .find((item) => (item.textContent || '').includes(needle)),
+            15000,
+          );
+          row.scrollIntoView({ block: 'center' });
+          row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window }));
+          await waitFor('current track ' + needle, () => {
+            const title = document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
+            return title.includes(needle) ? title : null;
+          }, 10000);
+          await sleep(700);
+          return row;
+        };
+        const openVisualizer = async (preset) => {
+          const opener = await waitFor('visualizer opener', () =>
+            Array.from(document.querySelectorAll('[data-newamp-open-visualizer]'))
+              .find((item) => (item.textContent || '').trim() === 'VIZ') ||
+            document.querySelector('[data-newamp-open-visualizer]'),
+          );
+          opener.click();
+          const stage = await waitFor('fullscreen visualizer stage', () =>
+            document.querySelector('[data-newamp-fullscreen-visualizer]'),
+          );
+          const presetButton = await waitFor('visualizer preset ' + preset, () =>
+            Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
+              .find((item) => item.getAttribute('data-newamp-viz-preset-button') === preset),
+          );
+          presetButton.click();
+          await waitFor('visualizer preset state ' + preset, () =>
+            stage.getAttribute('data-newamp-visualizer-preset') === preset,
+          );
+          await waitFor('visualizer canvas ' + preset, () =>
+            stage.querySelector('[data-newamp-visualizer-canvas]'),
+          );
+          await sleep(1000);
+          return stage;
+        };
+        const playAndVisualize = async (needle, preset) => {
+          await playTrack(needle);
+          return openVisualizer(preset);
+        };
+        const openDeck = async (skin) => {
+          await closeVisualizer();
+          window.__newampSmoke?.setCompactDeck?.(true);
+          await waitFor('compact deck', () =>
+            document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv'),
+          );
+          const select = await waitFor('deck skin select', () =>
+            document.querySelector('[data-newamp-deck-skin-select]'),
+          );
+          select.value = skin;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          await waitFor(skin + ' deck', () =>
+            document.querySelector(skin === 'hotdog' ? '.deck-hotdog' : '.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv'),
+          );
+          await sleep(700);
+          return document.querySelector('.deck-hotdog, .compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv');
+        };
+        const summary = (surface) => ({
+          ok: true,
+          surface,
+          title: document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '',
+          preset: document.querySelector('[data-newamp-fullscreen-visualizer]')?.getAttribute('data-newamp-visualizer-preset') || null,
+          bodyText: (document.body.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 240),
+        });
+        return { sleep, waitFor, go, playTrack, playAndVisualize, openDeck, summary };
+      })();
+      ${action}
+    })()
+  `;
 }
 
 function uiPlaybackProbeSource(): string {
@@ -3028,6 +3245,8 @@ async function bootstrap(): Promise<void> {
       void runUiArtSmoke(mainWin, scanPromise);
     } else if (uiDiscoverSmoke && mainWin) {
       void runUiDiscoverSmoke(mainWin);
+    } else if (screenshotGallery && mainWin) {
+      void runScreenshotGallery(mainWin, scanPromise);
     }
   });
 }

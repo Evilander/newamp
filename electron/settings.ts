@@ -64,6 +64,8 @@ function normalizeVisualizerPreset(value: unknown): AppSettings['visualizerPrese
     'prism-bars',
     'confetti',
     'burning-cloud',
+    'tempo-pulse',
+    'lattice-strobe',
     'album-breathe',
   ].includes(preset)
     ? (preset as AppSettings['visualizerPreset'])

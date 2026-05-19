@@ -71,6 +71,12 @@ assert.equal(
   diagnostic('packaged app should not crash child processes during idle normal launch') +
     `\ndiagnostics=${JSON.stringify(launchDiagnostics, null, 2)}`,
 );
+assert.equal(
+  launchDiagnostics.renderProcessFailures,
+  0,
+  diagnostic('packaged app should not lose renderer processes during idle normal launch') +
+    `\ndiagnostics=${JSON.stringify(launchDiagnostics, null, 2)}`,
+);
 
 const artifactStat = statSync(exePath);
 const stderrAnalysis = analyzeStderr(stderr);
@@ -151,7 +157,14 @@ function diagnostic(message) {
 function readLaunchDiagnostics(path) {
   const eventsPath = resolve(path, 'diagnostics', 'events.jsonl');
   if (!existsSync(eventsPath)) {
-    return { eventsPath, events: 0, crashedChildren: 0, crashedChildSamples: [] };
+    return {
+      eventsPath,
+      events: 0,
+      crashedChildren: 0,
+      crashedChildSamples: [],
+      renderProcessFailures: 0,
+      renderProcessFailureSamples: [],
+    };
   }
 
   const events = readFileSync(eventsPath, 'utf8')
@@ -172,12 +185,17 @@ function readLaunchDiagnostics(path) {
       ['Audio Service', 'GPU'].includes(String(event.payload?.name ?? event.payload?.serviceName ?? ''))
     );
   });
+  const renderFailures = events.filter((event) => {
+    return ['app-render-process-gone', 'window-render-process-gone'].includes(String(event.kind));
+  });
 
   return {
     eventsPath,
     events: events.length,
     crashedChildren: crashed.length,
     crashedChildSamples: crashed.slice(0, 5),
+    renderProcessFailures: renderFailures.length,
+    renderProcessFailureSamples: renderFailures.slice(0, 5),
   };
 }
 

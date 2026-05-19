@@ -2027,44 +2027,53 @@ input[type='range'].nslider.eq-slider {
   justify-content: flex-end;
 }
 
-/* ----- Hotdog Deck — photorealistic SVG bun, controls baked in ----- */
+/* ----- Hotdog Deck - alpha-cutout bun shell, controls baked in ----- */
 .deck-hotdog {
   position: relative;
   width: 100vw;
   height: 100vh;
   display: block;
   padding: 0;
-  overflow: visible;
+  overflow: hidden;
   color: #2a1208;
   background: transparent;
   border: 0;
   box-shadow: none;
   font-family: var(--font-display);
+  -webkit-mask-image: url('../assets/decks/hotdog-mask.png');
+  mask-image: url('../assets/decks/hotdog-mask.png');
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-position: center;
+  mask-position: center;
 }
 .deck-hd-art {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+  object-fit: fill;
   pointer-events: none;
-  filter: drop-shadow(0 14px 24px rgba(0,0,0,0.5));
+  user-select: none;
 }
 
 .deck-hd-titlebar {
   position: absolute;
   z-index: 9;
-  left: 22%;
-  right: 22%;
-  top: 14%;
+  left: 24%;
+  right: 15%;
+  top: 16.5%;
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 22px;
-  padding: 0 8px;
-  border-radius: 11px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
   color: #fff6d6;
   font-size: 10px;
-  background: linear-gradient(180deg, rgba(48,16,2,0.46), rgba(20,6,2,0.46));
+  background: linear-gradient(180deg, rgba(72,25,5,0.58), rgba(22,7,2,0.66));
   backdrop-filter: blur(5px);
   -webkit-backdrop-filter: blur(5px);
   box-shadow:
@@ -2072,17 +2081,22 @@ input[type='range'].nslider.eq-slider {
     inset 0 1px 0 rgba(255,255,255,0.12);
 }
 .deck-hd-brand {
-  background: transparent;
+  background: linear-gradient(180deg, #ffd36a, #b65c08);
   border: 0;
-  padding: 0;
+  border-radius: 999px;
+  padding: 0 8px;
+  height: 18px;
   cursor: pointer;
-  color: #ffc04d;
+  color: #421705;
   font-size: 9px;
   font-weight: 900;
-  letter-spacing: 0.22em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  text-shadow: 0 1px 1px rgba(0,0,0,0.55);
+  text-shadow: 0 1px 0 rgba(255,255,255,0.32);
   white-space: nowrap;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.35),
+    0 1px 3px rgba(0,0,0,0.42);
 }
 .deck-hd-marquee {
   flex: 1;
@@ -2146,10 +2160,10 @@ input[type='range'].nslider.eq-slider {
 .deck-hd-screen {
   position: absolute;
   z-index: 6;
-  left: 8%;
-  top: 50%;
+  left: 14.8%;
+  top: 52%;
   transform: translateY(-50%);
-  width: 12%;
+  width: 11%;
   aspect-ratio: 1;
   border-radius: 50%;
   overflow: hidden;
@@ -2186,9 +2200,9 @@ input[type='range'].nslider.eq-slider {
 .deck-hd-time {
   position: absolute;
   z-index: 5;
-  left: 23%;
-  right: 6%;
-  top: 64%;
+  left: 30%;
+  right: 10%;
+  top: 57%;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2230,9 +2244,9 @@ input[type='range'].nslider.eq-slider {
 .deck-hd-transport {
   position: absolute;
   z-index: 6;
-  left: 23%;
-  right: 6%;
-  top: 76%;
+  left: 30%;
+  right: 11%;
+  top: 70%;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2241,8 +2255,8 @@ input[type='range'].nslider.eq-slider {
   display: inline-grid;
   place-items: center;
   height: 26px;
-  min-width: 32px;
-  padding: 0 10px;
+  min-width: 46px;
+  padding: 0 9px;
   border: 0;
   cursor: pointer;
   border-radius: 8px;
@@ -2257,7 +2271,7 @@ input[type='range'].nslider.eq-slider {
   text-shadow: 0 1px 1px rgba(0,0,0,0.6);
 }
 .deck-hd-t.is-play {
-  min-width: 50px;
+  min-width: 60px;
   height: 30px;
   font-size: 13px;
   background: linear-gradient(180deg, #ffd95a, #f3a512 60%, #b35a06);
@@ -2271,6 +2285,21 @@ input[type='range'].nslider.eq-slider {
 .deck-hd-t:hover { filter: brightness(1.12); }
 .deck-hd-t:active { transform: translateY(1px); filter: brightness(0.92); }
 .deck-hd-transport .nvol { margin-left: 4px; }
+.deck-hd-transport .volume-slider-track {
+  height: 12px;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.deck-hd-transport .volume-db-tick {
+  display: none;
+}
+.deck-hd-transport .volume-slider-track input[type='range'].volume-slider-input::-webkit-slider-runnable-track {
+  height: 12px;
+}
+.deck-hd-transport .volume-slider-track input[type='range'].volume-slider-input::-webkit-slider-thumb {
+  height: 16px;
+  border-radius: 3px;
+}
 
 /* ----- Retro TV ----- */
 .deck-retro-tv {
@@ -4461,6 +4490,11 @@ input[type='range'].nslider.eq-slider {
   color: var(--ink-2);
   font-size: 10px;
   line-height: 1.38;
+}
+.album-context-summary {
+  max-height: 78px;
+  overflow-y: auto;
+  padding-right: 6px;
 }
 .album-context-grid {
   display: grid;

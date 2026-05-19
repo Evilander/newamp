@@ -26,6 +26,7 @@ export function releaseBundleFileSpecs({ root = defaultRoot, version = readPacka
     { name: 'provenance', path: join(paths.releaseRoot, 'BUILD-PROVENANCE.json'), entryName: 'BUILD-PROVENANCE.json' },
     { name: 'installer', path: join(paths.releaseRoot, `NewAmp Setup ${version}.exe`), entryName: `NewAmp Setup ${version}.exe` },
     { name: 'portable', path: join(paths.releaseRoot, `NewAmp Portable ${version}.exe`), entryName: `NewAmp Portable ${version}.exe` },
+    { name: 'linux-tar', path: join(paths.releaseRoot, `NewAmp Linux ${version} x64.tar.gz`), entryName: `NewAmp Linux ${version} x64.tar.gz` },
     { name: 'source', path: paths.sourceZip, entryName: basename(paths.sourceZip) },
   ];
 }
