@@ -118,6 +118,15 @@ const cycleA = parseRule('tag(cyc_a) when tag(cyc_b)').rule;
 const cycleB = parseRule('tag(cyc_b) when tag(cyc_a)').rule;
 assert.throws(() => topologicalSort([cycleA, cycleB]), /cycle/, 'cyclic tag DAG should throw');
 
+// daysSince should resolve regardless of casing (regression: function table key was mixedCase)
+const daysRule = parseRule('tag(stale) when daysSince(lastplayed) > 30').rule;
+assert.ok(daysRule);
+const lastPlayedAgo = Date.now() - 90 * 24 * 60 * 60 * 1000;
+const daysCtx = { ...makeStubContext({ lastPlayed: lastPlayedAgo }) };
+const daysResult = evaluateRule(daysRule, daysCtx, buildEvalEnvironment());
+assert.equal(daysResult.errors.length, 0, `daysSince eval should not error, got ${daysResult.errors.join(', ')}`);
+assert.equal(daysResult.matched, true, 'a 90-days-ago lastPlayed should match daysSince > 30');
+
 // ---------- LibraryStore integration ----------
 
 const library = await LibraryStore.open(dbPath);
@@ -202,6 +211,28 @@ assert.equal(summariesAfterDisable.find((s) => s.name === 'bright_song')?.trackC
 library.deleteTagRule(savedMellow.id);
 const summariesAfterDelete = library.getTagSummaries();
 assert.equal(summariesAfterDelete.find((s) => s.name === 'low_tone'), undefined);
+
+// Cycle-at-save: re-enable bright_song, then try to save a cycle and expect rejection.
+library.setTagRuleEnabled(savedBright.id, true);
+library.saveTagRule({
+  name: 'cycle_first',
+  body: 'tag(cycle_first) when bpm > 0',
+});
+library.saveTagRule({
+  name: 'cycle_second',
+  body: 'tag(cycle_second) when tag(cycle_first)',
+});
+// Now mutate cycle_first to depend on cycle_second — this should be rejected.
+const cycleFirstId = library.listTagRules().find((r) => r.name === 'cycle_first').id;
+assert.throws(
+  () => library.saveTagRule({
+    id: cycleFirstId,
+    name: 'cycle_first',
+    body: 'tag(cycle_first) when tag(cycle_second)',
+  }),
+  /cycle/,
+  'saveTagRule should refuse to introduce a cycle between two existing rules',
+);
 
 library.close();
 
