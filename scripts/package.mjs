@@ -25,12 +25,14 @@ const electronBuilder = join(
   process.platform === 'win32' ? 'electron-builder.cmd' : 'electron-builder',
 );
 
-for (const args of electronBuilderTargetArgs(process.argv.slice(2))) {
+const requestedTargets = process.argv.slice(2);
+for (const args of electronBuilderTargetArgs(requestedTargets)) {
   run(electronBuilder, args, {
     env: {
       ...process.env,
       TEMP: packageTemp,
       TMP: packageTemp,
+      ELECTRON_CACHE: join(packageTemp, 'electron-cache'),
     },
   });
   if (args.includes('--win=nsis')) {
@@ -38,7 +40,7 @@ for (const args of electronBuilderTargetArgs(process.argv.slice(2))) {
   }
 }
 
-const shouldWriteChecksums = !process.argv.includes('--installer') && !process.argv.includes('--nsis') && !process.argv.includes('--portable');
+const shouldWriteChecksums = requestedTargets.length === 0 || requestedTargets.includes('--all');
 if (shouldWriteChecksums) {
   const checksums = writeReleaseChecksums({ root: repoRoot });
   console.log(`release checksums: ${checksums.path}`);
@@ -49,7 +51,9 @@ if (shouldWriteChecksums) {
 function electronBuilderTargetArgs(args) {
   if (args.includes('--portable')) return [['--win=portable']];
   if (args.includes('--installer') || args.includes('--nsis')) return [['--win=nsis']];
-  return [['--win=nsis'], ['--win=portable']];
+  if (args.includes('--linux')) return [['--linux=tar.gz']];
+  if (args.includes('--win')) return [['--win=nsis'], ['--win=portable']];
+  return [['--win=nsis'], ['--win=portable'], ['--linux=tar.gz']];
 }
 
 async function resetPackageTemp() {
@@ -68,6 +72,7 @@ function isObsoleteNewampReleaseArtifact(name, version) {
   if (!/^NewAmp/i.test(name) && !/^Newamp/i.test(name)) return false;
   if (name.includes(version)) return false;
   return /^Newamp? (?:Setup|Portable) \d+\.\d+\.\d+/i.test(name) ||
+    /^NewAmp Linux \d+\.\d+\.\d+ [^.]+\.tar\.gz$/i.test(name) ||
     /^NewAmp-\d+\.\d+\.\d+-(?:source|release-bundle)\.zip$/i.test(name);
 }
 

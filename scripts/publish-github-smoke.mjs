@@ -66,13 +66,16 @@ const cleanExternalGitDir = join(repoRoot, 'tmp', 'publish-github-smoke-clean.gi
 await rm(smokeRoot, { recursive: true, force: true });
 await rm(cleanExternalGitDir, { recursive: true, force: true });
 await mkdir(join(smokeRoot, 'release', 'win-unpacked'), { recursive: true });
+await mkdir(join(smokeRoot, 'release', 'linux-unpacked'), { recursive: true });
 await mkdir(join(smokeRoot, 'scripts'), { recursive: true });
 await mkdir(join(smokeRoot, 'source-fixture'), { recursive: true });
 await writeFile(join(smokeRoot, 'package.json'), JSON.stringify({ name: 'newamp', version: fixtureVersion }), 'utf8');
 await writeFile(join(smokeRoot, 'README.md'), '# NewAmp\n', 'utf8');
 await writeFile(join(smokeRoot, 'release', `NewAmp Setup ${fixtureVersion}.exe`), 'installer', 'utf8');
 await writeFile(join(smokeRoot, 'release', `NewAmp Portable ${fixtureVersion}.exe`), 'portable', 'utf8');
+await writeFile(join(smokeRoot, 'release', `NewAmp Linux ${fixtureVersion} x64.tar.gz`), 'linux tar', 'utf8');
 await writeFile(join(smokeRoot, 'release', 'win-unpacked', 'NewAmp.exe'), 'exe', 'utf8');
+await writeFile(join(smokeRoot, 'release', 'linux-unpacked', 'newamp'), 'linux binary', 'utf8');
 await writeFile(join(smokeRoot, 'source-fixture', 'README.md'), '# NewAmp source fixture\n', 'utf8');
 await writeFile(
   join(smokeRoot, 'scripts', 'publication-readiness.mjs'),
@@ -114,6 +117,7 @@ assert.equal(plan.tag, `v${fixtureVersion}`);
 assert.ok(plan.commands.some((command) => command.label === 'ensure-repo'));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.includes('--repo')));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /SHA256SUMS\.txt$/.test(arg))));
+assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => arg.endsWith(`NewAmp Linux ${fixtureVersion} x64.tar.gz`))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /BUILD-PROVENANCE\.json$/.test(arg))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => arg.endsWith(`NewAmp-${fixtureVersion}-source.zip`))));
 assert.ok(plan.commands.some((command) => command.label === 'publish-release' && command.createArgs.some((arg) => /RELEASE-MANIFEST\.json$/.test(arg))));
@@ -130,6 +134,7 @@ if (process.platform === 'win32') {
 }
 assert.ok(JSON.stringify(plan).includes(`NewAmp Setup ${fixtureVersion}.exe`));
 assert.ok(JSON.stringify(plan).includes(`NewAmp Portable ${fixtureVersion}.exe`));
+assert.ok(JSON.stringify(plan).includes(`NewAmp Linux ${fixtureVersion} x64.tar.gz`));
 assert.match(JSON.stringify(plan), /SHA256SUMS\.txt/);
 assert.match(JSON.stringify(plan), /BUILD-PROVENANCE\.json/);
 assert.match(JSON.stringify(plan), /RELEASE-MANIFEST\.json/);

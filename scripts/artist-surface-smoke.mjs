@@ -3,11 +3,14 @@ import { readFile } from 'node:fs/promises';
 import { fetchArtistFacts } from '../src/api/artistFacts.ts';
 import { fetchAlbumFacts } from '../src/api/albumFacts.ts';
 
-const [artistFactsSource, albumFactsSource, artistsViewSource, nowPlayingSource] = await Promise.all([
+const [artistFactsSource, albumFactsSource, artistsViewSource, nowPlayingSource, mainSource, linerNotesSource, styleSource] = await Promise.all([
   readFile(new URL('../src/api/artistFacts.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/api/albumFacts.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/ArtistsView.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
+  readFile(new URL('../src/components/LinerNotesPanel.tsx', import.meta.url), 'utf8'),
+  readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8'),
 ]);
 
 assert.match(artistFactsSource, /piprop/, 'artist facts should request PageImages original/thumbnail data');
@@ -33,6 +36,13 @@ assert.match(nowPlayingSource, /Release notes/, 'Album context should use source
 assert.match(nowPlayingSource, /Same-year in your library/, 'Album context should clearly label local era matches as library-only');
 assert.doesNotMatch(nowPlayingSource, /Release neighborhood/, 'Album context should not imply local library matches are global release peers');
 assert.doesNotMatch(nowPlayingSource, /api\.getAlbums\(\)\.catch/, 'Album context should not pull the full album catalog');
+assert.match(nowPlayingSource, /wikipediaSearchUrl/, 'Now Playing should provide artist and album links even before facts load');
+assert.match(nowPlayingSource, /data-newamp-now-playing-artist-link/, 'Now Playing header should expose a stable artist link');
+assert.match(nowPlayingSource, /data-newamp-now-playing-album-link/, 'Now Playing header should expose a stable album link');
+assert.match(linerNotesSource, /data-newamp-liner-artist-link/, 'Liner Notes should make the artist credit clickable');
+assert.match(linerNotesSource, /data-newamp-liner-album-link/, 'Liner Notes should make the album credit clickable');
+assert.match(mainSource, /setWindowOpenHandler[\s\S]*shell\.openExternal/, 'main BrowserWindow should route target=_blank links to the OS browser');
+assert.match(styleSource, /\.album-context-summary[\s\S]*overflow-y:\s*auto/, 'album Wikipedia summaries should be independently scrollable');
 
 const originalFetch = globalThis.fetch;
 const originalLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');

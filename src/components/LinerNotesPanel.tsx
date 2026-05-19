@@ -3,6 +3,7 @@ import type { LrcLine } from '../api/lrclib';
 import type { AiLinerNotesResult, Track } from '@shared/types';
 import { api } from '../lib/api';
 import { formatTime } from '../lib/format';
+import { musicEntitySearchText, wikipediaSearchUrl } from '../lib/wiki';
 
 const FIELD_NOTE_BLURBS: string[] = [
   'This track has the rare three-part signal: vibe, hook, and replay value.',
@@ -214,8 +215,18 @@ export function LinerNotesPanel({
       <section className="liner-notes-credits">
         <span className="liner-notes-section-title">File Credits</span>
         <dl>
-          <CreditRow label="Artist" value={track.artist} />
-          <CreditRow label="Album" value={track.album || '-'} />
+          <CreditRow
+            label="Artist"
+            value={track.artist}
+            href={wikipediaSearchUrl(musicEntitySearchText(track.artist, 'musician'))}
+            linkDataAttr="data-newamp-liner-artist-link"
+          />
+          <CreditRow
+            label="Album"
+            value={track.album || '-'}
+            href={track.album ? wikipediaSearchUrl(musicEntitySearchText(track.artist, track.album, 'album')) : null}
+            linkDataAttr="data-newamp-liner-album-link"
+          />
           {track.albumArtist && track.albumArtist !== track.artist ? (
             <CreditRow label="Album Artist" value={track.albumArtist} />
           ) : null}
@@ -269,11 +280,33 @@ function Vital({ label, value }: { label: string; value: string }): JSX.Element 
   );
 }
 
-function CreditRow({ label, value }: { label: string; value: string }): JSX.Element {
+function CreditRow({
+  label,
+  value,
+  href,
+  linkDataAttr,
+}: {
+  label: string;
+  value: string;
+  href?: string | null;
+  linkDataAttr?: 'data-newamp-liner-artist-link' | 'data-newamp-liner-album-link';
+}): JSX.Element {
+  const linkProps =
+    linkDataAttr === 'data-newamp-liner-artist-link'
+      ? { 'data-newamp-liner-artist-link': true }
+      : linkDataAttr === 'data-newamp-liner-album-link'
+        ? { 'data-newamp-liner-album-link': true }
+        : {};
   return (
     <>
       <dt>{label}</dt>
-      <dd>{value}</dd>
+      <dd>
+        {href ? (
+          <a href={href} target="_blank" rel="noreferrer" {...linkProps}>
+            {value}
+          </a>
+        ) : value}
+      </dd>
     </>
   );
 }

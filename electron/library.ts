@@ -55,6 +55,7 @@ const LEGACY_FORMATS = new Set([
   '.aif',
   '.alac',
   '.dsf',
+  '.dff',
   '.ape',
   '.wv',
   '.mpc',

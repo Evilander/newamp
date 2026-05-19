@@ -130,6 +130,38 @@ function cleanupProcessTree(pid) {
   });
 }
 
+function cleanupPortableSnapshot(snapshot) {
+  const ids = (snapshot?.processes ?? [])
+    .map((item) => Number(item.Id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (!ids.length || process.platform !== 'win32') return;
+  spawnSync(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      `Stop-Process -Id ${ids.join(',')} -Force -ErrorAction SilentlyContinue`,
+    ],
+    {
+      cwd: repoRoot,
+      stdio: 'ignore',
+      windowsHide: true,
+    },
+  );
+}
+
+function waitForExit(child, ms) {
+  if (child.exitCode !== null) return Promise.resolve();
+  return new Promise((resolveWait) => {
+    const timer = setTimeout(resolveWait, ms);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolveWait();
+    });
+  });
+}
+
 function checkDefaultTempUsable() {
   const tempRoot = tmpdir();
   let proofDir = null;
@@ -149,9 +181,12 @@ async function runPlainPortableLaunch() {
     env: {
       ...process.env,
       ELECTRON_ENABLE_LOGGING: '1',
+      NEWAMP_USER_DATA_DIR: resolve(smokeRoot, `plain-user-data-${process.pid}-${Date.now()}`),
+      TEMP: wrapperTemp,
+      TMP: wrapperTemp,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
+    windowsHide: false,
   });
 
   let plainStdout = '';
@@ -184,7 +219,12 @@ async function runPlainPortableLaunch() {
 
   const elapsedMs = Date.now() - plainStarted;
   const ok = !plainSpawnError && plainExitCode === null && hasNewAmpMainWindow(snapshot) && !hasNsisErrorWindow(snapshot);
+  cleanupPortableSnapshot(snapshot);
   cleanupProcessTree(child.pid);
+  await waitForExit(child, 3000);
+  child.stdout.destroy();
+  child.stderr.destroy();
+  child.unref();
 
   return {
     ok,

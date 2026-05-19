@@ -24,7 +24,9 @@ const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
 const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
 const installerPath = resolve(repoRoot, 'release', `NewAmp Setup ${releaseVersion}.exe`);
 const portablePath = resolve(repoRoot, 'release', `NewAmp Portable ${releaseVersion}.exe`);
+const linuxTarPath = resolve(repoRoot, 'release', `NewAmp Linux ${releaseVersion} x64.tar.gz`);
 const exePath = resolve(repoRoot, 'release', 'win-unpacked', 'NewAmp.exe');
+const linuxExePath = resolve(repoRoot, 'release', 'linux-unpacked', 'newamp');
 
 const checks = [];
 const blockers = [];
@@ -298,12 +300,16 @@ function checkArtifacts() {
   const installer = artifact(installerPath, 100_000_000);
   const portable = artifact(portablePath, 100_000_000);
   const exe = artifact(exePath, 200_000_000);
+  const linuxTar = artifact(linuxTarPath, 80_000_000);
+  const linuxExe = artifact(linuxExePath, 150_000_000);
   return {
     name: 'artifacts',
-    ok: installer.ok && portable.ok && exe.ok,
+    ok: installer.ok && portable.ok && exe.ok && linuxTar.ok && linuxExe.ok,
     installer,
     portable,
     exe,
+    linuxTar,
+    linuxExe,
   };
 }
 
@@ -325,7 +331,7 @@ function artifact(path, minimumBytes) {
 function checkFileAssociations() {
   const associations = pkg.build?.fileAssociations ?? [];
   const extGroups = associations.map((item) => item.ext ?? []).flat();
-  const required = ['mp3', 'flac', 'wav', 'm4a', 'wma', 'm3u', 'm3u8', 'pls', 'cue'];
+  const required = ['mp3', 'flac', 'wav', 'm4a', 'wma', 'dsf', 'dff', 'm3u', 'm3u8', 'pls', 'cue'];
   const missing = required.filter((ext) => !extGroups.includes(ext));
   return {
     name: 'file-association-config',

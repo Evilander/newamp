@@ -11,6 +11,7 @@ import { fetchAlbumFacts, type AlbumFact } from '../../api/albumFacts';
 import { formatTime, playbackCodecLabel } from '../../lib/format';
 import { api, winctl } from '../../lib/api';
 import { aiAssistSummary } from '../../lib/aiAssist';
+import { musicEntitySearchText, wikipediaSearchUrl } from '../../lib/wiki';
 import { ScoreRating } from '../ScoreRating';
 import { LinerNotesPanel } from '../LinerNotesPanel';
 
@@ -529,6 +530,8 @@ export function NowPlayingView(): JSX.Element {
             exportBusy={exportBusy}
             exportMessage={exportMessage}
             codecHint={codecHint}
+            artistHref={wikipediaSearchUrl(musicEntitySearchText(current.artist, 'musician'))}
+            albumHref={current.album ? wikipediaSearchUrl(musicEntitySearchText(current.artist, current.album, 'album')) : null}
           />
 
           <div
@@ -729,6 +732,8 @@ function TrackInfoHeader({
   exportBusy,
   exportMessage,
   codecHint,
+  artistHref,
+  albumHref,
 }: {
   current: Track;
   onLove: () => void;
@@ -740,6 +745,8 @@ function TrackInfoHeader({
   exportBusy: boolean;
   exportMessage: string | null;
   codecHint: string;
+  artistHref: string;
+  albumHref: string | null;
 }): JSX.Element {
   return (
     <div
@@ -766,8 +773,34 @@ function TrackInfoHeader({
         >
           {current.title}
         </div>
-        <div className="mt-1 text-[13px]" style={{ color: 'var(--accent)' }}>
-          {current.artist}
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]">
+          <a
+            href={artistHref}
+            target="_blank"
+            rel="noreferrer"
+            data-newamp-now-playing-artist-link
+            className="truncate"
+            style={{ color: 'var(--accent)' }}
+            title={`Open Wikipedia search for ${current.artist}`}
+          >
+            {current.artist}
+          </a>
+          {current.album ? (
+            <>
+              <span style={{ color: 'var(--muted)' }}>/</span>
+              <a
+                href={albumHref ?? wikipediaSearchUrl(musicEntitySearchText(current.artist, current.album, 'album'))}
+                target="_blank"
+                rel="noreferrer"
+                data-newamp-now-playing-album-link
+                className="truncate"
+                style={{ color: 'var(--ink-2)' }}
+                title={`Open Wikipedia search for ${current.album}`}
+              >
+                {current.album}
+              </a>
+            </>
+          ) : null}
         </div>
         <div className="mt-[8px] flex flex-wrap gap-[6px]">
           {current.genre && <Tag accent>{current.genre}</Tag>}
@@ -1437,7 +1470,7 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
           <span>
             <strong>{fact.title}</strong>
             {fact.description && <em>{fact.description}</em>}
-            <small>{fact.summary}</small>
+            <small className="album-context-summary">{fact.summary}</small>
           </span>
         </a>
       ) : (
@@ -1600,6 +1633,7 @@ function formatOptionalBytes(value: number | null): string {
 
 function qualityBadge(track: Track): string {
   const ext = fileExtension(track.path).toLowerCase();
+  if (ext === 'dsf' || ext === 'dff') return 'DSD via PCM fallback';
   const lossless = ['flac', 'wav', 'aiff', 'aif', 'alac', 'ape', 'wv'].includes(ext);
   if (lossless && track.sampleRate && track.sampleRate >= 88200) return 'hi-res lossless';
   if (lossless) return 'lossless';

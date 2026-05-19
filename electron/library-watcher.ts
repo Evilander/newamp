@@ -24,6 +24,7 @@ const AUDIO_EXTS = new Set([
   '.ac3',
   '.dts',
   '.dsf',
+  '.dff',
 ]);
 
 const FOLDER_ART_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);

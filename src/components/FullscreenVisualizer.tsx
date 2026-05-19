@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import {
   Visualizer,
@@ -147,6 +147,7 @@ export function FullscreenVisualizer(): JSX.Element {
   const [reactivity, setReactivity] = useState<VizReactivity>(() => loadVisualizerReactivity());
   const [autoVjEnabled, setAutoVjEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_AUTO_VJ_KEY, false));
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const levelMeterRef = useRef<HTMLSpanElement>(null);
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
   const activeIndex = Math.max(0, PRESETS.findIndex((p) => p.id === activePreset));
@@ -290,6 +291,32 @@ export function FullscreenVisualizer(): JSX.Element {
       window.clearTimeout(hideTimer);
     };
   }, [artPulseEnabled, artUrl]);
+
+  useEffect(() => {
+    const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
+    let raf = 0;
+    let level = 0;
+    const tick = () => {
+      engine.getTimeData(wave);
+      let sumSq = 0;
+      for (let i = 0; i < wave.length; i += 1) {
+        const centered = (wave[i]! - 128) / 128;
+        sumSq += centered * centered;
+      }
+      const rms = Math.sqrt(sumSq / Math.max(1, wave.length));
+      const audibleLevel = Math.min(1, rms * 3.6 * Math.max(0.02, Math.min(2, volume)) / 2);
+      level = Math.max(level * 0.82, audibleLevel);
+      const bar = levelMeterRef.current;
+      if (bar) {
+        const height = Math.max(2, Math.round(level * 100));
+        bar.style.height = `${height}%`;
+        bar.dataset.newampVizLevel = String(height);
+      }
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [engine, volume]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
@@ -574,7 +601,11 @@ export function FullscreenVisualizer(): JSX.Element {
           <strong>{volumeLabel(volume)}</strong>
         </div>
         <div className="fullscreen-viz-hover-meter-track">
-          <span style={{ height: `${volumePct}%` }} />
+          <span
+            ref={levelMeterRef}
+            data-newamp-viz-level-meter-bar
+            style={{ height: `${Math.max(2, volumePct)}%` }}
+          />
         </div>
       </div>
     </div>

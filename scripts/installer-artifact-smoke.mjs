@@ -17,11 +17,13 @@ const pkg = JSON.parse(readFileSync(packagePath, 'utf8'));
 const releaseVersion = String(pkg.version ?? '').trim() || '0.0.0';
 const installerPath = resolve(releaseRoot, `NewAmp Setup ${releaseVersion}.exe`);
 const portablePath = resolve(releaseRoot, `NewAmp Portable ${releaseVersion}.exe`);
+const linuxTarPath = resolve(releaseRoot, `NewAmp Linux ${releaseVersion} x64.tar.gz`);
 const blockmapPath = `${installerPath}.blockmap`;
 const builderDebugPath = resolve(releaseRoot, 'builder-debug-nsis.yml');
 const builderDebugLatestPath = resolve(releaseRoot, 'builder-debug.yml');
 const unpackedRoot = resolve(releaseRoot, 'win-unpacked');
 const exePath = resolve(unpackedRoot, 'NewAmp.exe');
+const linuxExecutablePath = resolve(releaseRoot, 'linux-unpacked', 'newamp');
 const resourcesRoot = resolve(unpackedRoot, 'resources');
 const appAsarPath = resolve(resourcesRoot, 'app.asar');
 const extraDistIndex = resolve(resourcesRoot, 'dist', 'index.html');
@@ -30,7 +32,7 @@ const packagedSplashLogoWebp = resolve(resourcesRoot, 'build', 'logo-app.webp');
 const unpackedFfmpeg = resolve(resourcesRoot, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe');
 const unpackedSqlWasm = resolve(resourcesRoot, 'app.asar.unpacked', 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
 
-const requiredAudioExtensions = ['mp3', 'flac', 'wav', 'm4a', 'wma'];
+const requiredAudioExtensions = ['mp3', 'flac', 'wav', 'm4a', 'wma', 'dsf', 'dff'];
 const requiredPlaylistExtensions = ['m3u', 'm3u8', 'pls', 'cue'];
 const requiredExtensions = [...requiredAudioExtensions, ...requiredPlaylistExtensions];
 
@@ -44,6 +46,10 @@ assert.equal(pkg.build?.productName, 'NewAmp', 'build productName should stay Ne
 assert.equal(pkg.build?.appId, 'io.newamp.player', 'build appId should be stable for upgrades/file associations');
 assert.ok(pkg.build?.win?.target?.includes('nsis'), 'Windows build target should include NSIS installer output');
 assert.ok(pkg.build?.win?.target?.includes('portable'), 'Windows build target should include a no-install portable EXE');
+assert.equal(pkg.build?.linux?.category, 'AudioVideo', 'Linux build should publish under the desktop audio/video category');
+assert.equal(pkg.build?.linux?.executableName, 'newamp', 'Linux build should expose a stable lowercase executable name');
+assert.match(JSON.stringify(pkg.build?.linux?.target ?? []), /tar\.gz/, 'Linux build target should include a portable tar.gz');
+assert.equal(pkg.build?.linux?.artifactName, 'NewAmp Linux ${version} ${arch}.${ext}', 'Linux artifact should have a stable human-readable file name');
 assert.equal(pkg.build?.portable?.artifactName, 'NewAmp Portable ${version}.${ext}', 'portable artifact should have a stable human-readable file name');
 assert.equal(pkg.build?.nsis?.include, 'build/installer.nsh', 'NSIS installer should include NewAmp repair customizations');
 assert.match(JSON.stringify(pkg.build?.files ?? []), /build\/logo\.png/, 'packaged files should include the native splash PNG fallback');
@@ -59,6 +65,11 @@ assert.match(
   JSON.stringify(pkg.scripts ?? {}),
   /package:portable/,
   'package.json should expose a portable-only package command',
+);
+assert.match(
+  JSON.stringify(pkg.scripts ?? {}),
+  /package:linux/,
+  'package.json should expose a Linux package command',
 );
 assert.match(
   JSON.stringify(pkg.scripts ?? {}),
@@ -95,14 +106,16 @@ assert.match(gateSource, /NEWAMP_FULL_SCAN_SKIP_ART_STORAGE/, 'release gate real
 assert.match(gateSource, /cleanFullLibrarySmokeRoot/, 'release gate real-library proof should clean heavyweight smoke data after probing it');
 assert.match(packageScriptSource, /resetPackageTemp/, 'package script should clear its temp directory before building');
 assert.match(packageScriptSource, /pruneObsoleteReleaseArtifacts/, 'package script should prune stale versioned release artifacts before building');
+assert.match(packageScriptSource, /--linux=tar\.gz/, 'package script should build the Linux tarball target');
 assert.match(packageScriptSource, /Refusing to remove outside repo/, 'package cleanup should refuse paths outside the repo');
 assert.match(mainSource, /--newamp-startup-smoke/, 'packaged app should accept a startup smoke command-line switch');
 assert.match(mainSource, /NEWAMP_STARTUP_SMOKE_MARKER/, 'packaged app should be able to write startup smoke marker files');
 assert.match(mainSource, /app\.setPath\('sessionData'/, 'packaged app should isolate Chromium session data from durable library/settings data');
 assert.match(mainSource, /disk-cache-dir/, 'packaged app should route Chromium disk cache to the isolated session data path');
 assert.match(mainSource, /NEWAMP_DISABLE_HARDWARE_ACCELERATION/, 'packaged app should retain an explicit software-rendering switch');
-assert.match(mainSource, /NEWAMP_ENABLE_NATIVE_GPU/, 'packaged app should allow native GPU opt-in when a host supports it');
-assert.match(mainSource, /applySoftwareRenderingSwitches\('normal'\)/, 'packaged app should default to stable software rendering');
+assert.match(mainSource, /NEWAMP_ENABLE_HARDWARE_ACCELERATION/, 'packaged app should retain an explicit hardware-acceleration opt-in');
+assert.match(mainSource, /const forceSoftwareRendering = !forceHardwareAcceleration;/, 'packaged app should use stable software rendering unless hardware is explicitly enabled');
+assert.match(mainSource, /applySoftwareRenderingSwitches\(smokeMode \? 'smoke' : 'normal'\)/, 'software rendering should be the normal launch fallback and smoke-safe');
 assert.match(mainSource, /MediaPlayPause/, 'global media shortcuts should use Electron accelerator names that do not crash bootstrap');
 assert.match(mainSource, /crashReporter\.start\(\{\s*uploadToServer:\s*false\s*\}\)/, 'packaged app should collect local crash dumps without uploading them');
 assert.match(mainSource, /app\.setPath\('crashDumps'/, 'packaged app should use a deterministic local crash dump folder');
@@ -137,6 +150,8 @@ assert.match(installerIncludeSource, /!insertmacro UPDATEFILEASSOC/, 'installer 
 const installer = artifact(installerPath, 100_000_000);
 const portable = artifact(portablePath, 100_000_000);
 const exe = artifact(exePath, 200_000_000);
+const linuxTar = artifact(linuxTarPath, 80_000_000);
+const linuxExecutable = artifact(linuxExecutablePath, 150_000_000);
 const releaseChecksums = checkReleaseChecksums({ root: repoRoot, version: releaseVersion });
 assert.equal(releaseChecksums.ok, true, releaseChecksums.reason);
 const blockmap = parseBlockmap(blockmapPath);
@@ -176,6 +191,8 @@ const report = {
   artifacts: {
     installer,
     portable,
+    linuxTar,
+    linuxExecutable,
     blockmap: {
       path: blockmapPath,
       bytes: statSync(blockmapPath).size,
