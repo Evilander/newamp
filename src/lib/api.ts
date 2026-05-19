@@ -48,6 +48,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoDjSmartRuleId: null,
   equalizer: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   eqEnabled: false,
+  radioBrainEnabled: false,
+  radioBrainPort: 17117,
 };
 
 const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {
@@ -178,7 +180,7 @@ const stub: NewAmpAPI = {
   getDnaStats: async () => ({ analyzed: 0, missing: 0, total: 0 }),
   getAllTrackDna: async () => [],
   findSimilarTracks: async () => [],
-  getRadioBrainStatus: async () => ({ enabled: false, port: 17117, baseUrl: null, endpoints: [], startedAt: null, error: null }),
+  getRadioBrainStatus: async () => ({ enabled: false, port: DEFAULT_SETTINGS.radioBrainPort, baseUrl: null, endpoints: [], startedAt: null, error: null }),
   listTagRules: async () => [],
   saveTagRule: async (input) => ({
     id: 0,
