@@ -49,25 +49,33 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 
 ## Screenshots
 
-| Home / Deerhoof | Albums / Wilco |
+| Home | Albums |
 | --- | --- |
-| <img src="assets/screenshots/feature-home-deerhoof.png" alt="NewAmp Home view playing Deerhoof" width="420"> | <img src="assets/screenshots/feature-albums-wilco.png" alt="NewAmp Albums view with Wilco in view" width="420"> |
+| <img src="assets/screenshots/feature-home-deerhoof.png" alt="NewAmp Home view — greeting hero, library stats, smart rails" width="420"> | <img src="assets/screenshots/feature-albums-wilco.png" alt="NewAmp Albums view — grid of album covers with playback overlay" width="420"> |
 
-| Now Playing / Hella | Library / Dave Brubeck |
+| Now Playing | Library |
 | --- | --- |
-| <img src="assets/screenshots/feature-now-playing-hella.png" alt="NewAmp Now Playing view playing Hella" width="420"> | <img src="assets/screenshots/feature-library-dave-brubeck.png" alt="NewAmp Library view with Dave Brubeck in view" width="420"> |
+| <img src="assets/screenshots/feature-now-playing-hella.png" alt="NewAmp Now Playing — tabbed side panel, spectrum split, transport" width="420"> | <img src="assets/screenshots/feature-library-dave-brubeck.png" alt="NewAmp Library view — power-search, multi-select, smart rule editor" width="420"> |
 
-| Tempo Pulse | Aurora |
+| Living Tags workshop | Sonic Atlas |
 | --- | --- |
-| <img src="assets/screenshots/visualizer-tempo-pulse-deerhoof.png" alt="NewAmp fullscreen Tempo Pulse visualizer" width="420"> | <img src="assets/screenshots/visualizer-aurora-hella.png" alt="NewAmp fullscreen Aurora visualizer" width="420"> |
+| <img src="assets/screenshots/feature-living-tags-workshop.png" alt="NewAmp Living Tags — three-column DSL editor with live preview" width="420"> | <img src="assets/screenshots/feature-sonic-atlas-empty.png" alt="NewAmp Sonic Atlas — your library projected by Audio DNA" width="420"> |
 
-| Lattice Strobe | Spectrum |
+| Tempo Pulse visualizer | Aurora visualizer |
 | --- | --- |
-| <img src="assets/screenshots/visualizer-lattice-strobe-wilco.png" alt="NewAmp fullscreen Lattice Strobe visualizer" width="420"> | <img src="assets/screenshots/visualizer-spectrum-dave-brubeck.png" alt="NewAmp fullscreen Spectrum visualizer" width="420"> |
+| <img src="assets/screenshots/visualizer-tempo-pulse-deerhoof.png" alt="NewAmp fullscreen Tempo Pulse visualizer — beat-locked pulse rings" width="420"> | <img src="assets/screenshots/visualizer-aurora-hella.png" alt="NewAmp fullscreen Aurora visualizer — flowing ribbons" width="420"> |
 
-| Hotdog Deck / Dave Brubeck |
+| Lattice Strobe visualizer | Spectrum visualizer |
+| --- | --- |
+| <img src="assets/screenshots/visualizer-lattice-strobe-wilco.png" alt="NewAmp fullscreen Lattice Strobe visualizer — club-style strobe lattice" width="420"> | <img src="assets/screenshots/visualizer-spectrum-dave-brubeck.png" alt="NewAmp fullscreen Spectrum visualizer — classic FFT bars" width="420"> |
+
+| Spectral Cover Art | Grouped sidebar nav |
+| --- | --- |
+| <img src="assets/screenshots/spectral-art-gallery.png" alt="NewAmp procedural cover gallery — stable, distinct SVGs per album" width="420"> | <img src="assets/screenshots/feature-sidebar-grouped.png" alt="NewAmp sidebar grouped into Main / Explore / Discovery / Yours / Streaming / App" width="420"> |
+
+| Hotdog Deck (shape-changing compact mode) |
 | --- |
-| <img src="assets/screenshots/feature-hotdog-deck-dave-brubeck.png" alt="NewAmp hotdog deck playing Dave Brubeck" width="420"> |
+| <img src="assets/screenshots/feature-hotdog-deck-dave-brubeck.png" alt="NewAmp Hotdog Deck — shape-changing compact deck skin" width="420"> |
 
 Additional contributed deck and library captures live in `assets/screenshots/`.
 
