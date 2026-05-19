@@ -40,6 +40,7 @@ import type {
   DnaStats,
   ReplayGainAnalysisResult,
   SavedPlaylist,
+  SimilarTrack,
   TagRecomputeOptions,
   TagRecomputeResult,
   TagRule,
@@ -141,6 +142,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tracks:dna-stats') as Promise<DnaStats>,
   getAllTrackDna: () =>
     ipcRenderer.invoke('tracks:dna-all') as Promise<Array<{ id: number; dna: TrackDna }>>,
+  findSimilarTracks: (trackId: number, limit?: number) =>
+    ipcRenderer.invoke('tracks:dna-similar', trackId, limit) as Promise<SimilarTrack[]>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,
   getDroppedFilePaths: (files: unknown[]) => {

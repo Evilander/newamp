@@ -18,7 +18,7 @@ import { classifyAudioQuality } from '@shared/audio-quality';
 
 type SideTab = 'on-air' | 'album' | 'lyrics';
 type SpectrumStyle = 'classic' | 'wide' | 'needles' | 'stacked';
-import type { LocalLyricsResult, SmartPlaylistRule, Track, TrackBookmark } from '@shared/types';
+import type { LocalLyricsResult, SimilarTrack, SmartPlaylistRule, Track, TrackBookmark } from '@shared/types';
 import {
   canEnablePracticeLoop,
   loopProgressPercent,
@@ -1357,6 +1357,8 @@ function SpectrumPanel({
         aiModel={aiModel}
       />
 
+      <SoundsLikePanel trackId={current.id} />
+
       <div>
         <div
           className="mb-[6px] flex items-center justify-between text-[9px] uppercase tracking-[0.1em]"
@@ -1616,6 +1618,110 @@ function TrackSignalPanel({
         <span>{aiAssistReady ? `ChatGPT assist ready: ${aiModel || 'model set'}` : 'ChatGPT assist: add your API key in Settings'}</span>
         <span>{aiAssistSummary()}</span>
       </div>
+    </section>
+  );
+}
+
+function SoundsLikePanel({ trackId }: { trackId: number }): JSX.Element | null {
+  const [similar, setSimilar] = useState<SimilarTrack[]>([]);
+  const [needsAnalysis, setNeedsAnalysis] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const playQueue = usePlayerStore((s) => s.playQueue);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    setNeedsAnalysis(false);
+    setSimilar([]);
+    void (async () => {
+      const dna = await api.getTrackDna(trackId);
+      if (cancelled) return;
+      if (!dna) {
+        setNeedsAnalysis(true);
+        return;
+      }
+      const matches = await api.findSimilarTracks(trackId, 8);
+      if (cancelled) return;
+      setSimilar(matches);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [trackId]);
+
+  async function analyzeNow(): Promise<void> {
+    setAnalyzing(true);
+    setError(null);
+    try {
+      const result = await api.analyzeTracksDna([trackId]);
+      if (result.analyzed === 1) {
+        const matches = await api.findSimilarTracks(trackId, 8);
+        setSimilar(matches);
+        setNeedsAnalysis(false);
+      } else if (result.skipped.length) {
+        setError(result.skipped[0]!);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  async function playSimilar(): Promise<void> {
+    if (!similar.length) return;
+    await playQueue(similar.map((s) => s.track), 0);
+  }
+
+  if (needsAnalysis) {
+    return (
+      <section className="bevel-out p-2" style={{ background: 'var(--panel)' }}>
+        <div className="flex items-center justify-between">
+          <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+            Sounds Like
+          </span>
+          <button className="pxbtn text-[10px]" onClick={() => void analyzeNow()} disabled={analyzing}>
+            {analyzing ? 'Analyzing audio…' : 'Analyze DNA'}
+          </button>
+        </div>
+        <div className="mt-1 text-[10px]" style={{ color: 'var(--muted)' }}>
+          No DNA computed for this track yet. Click to extract perceptual features.
+        </div>
+        {error && <div className="mt-1 text-[10px]" style={{ color: 'var(--error)' }}>{error}</div>}
+      </section>
+    );
+  }
+
+  if (!similar.length) return null;
+
+  return (
+    <section className="bevel-out p-2" style={{ background: 'var(--panel)' }}>
+      <div className="mb-1 flex items-center gap-2">
+        <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+          Sounds Like
+        </span>
+        <span className="text-[9px]" style={{ color: 'var(--muted)' }}>
+          DNA cosine match
+        </span>
+        <button className="pxbtn ml-auto text-[10px]" onClick={() => void playSimilar()}>
+          Play set
+        </button>
+      </div>
+      <ol className="m-0 grid gap-[2px] p-0 text-[10px]" style={{ color: 'var(--ink-2)' }}>
+        {similar.slice(0, 5).map((row, idx) => (
+          <li key={row.track.id} className="flex items-baseline gap-2 truncate">
+            <span className="font-mono" style={{ color: 'var(--muted)', minWidth: 18 }}>
+              {String(idx + 1).padStart(2, '0')}
+            </span>
+            <span className="truncate font-bold" style={{ color: 'var(--ink)' }}>{row.track.title}</span>
+            <span className="truncate" style={{ color: 'var(--muted)' }}>· {row.track.artist}</span>
+            <span className="ml-auto tabular-nums" style={{ color: 'var(--accent)' }}>
+              {Math.round(row.score * 100)}%
+            </span>
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }

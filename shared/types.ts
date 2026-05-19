@@ -293,6 +293,11 @@ export interface DnaStats {
   total: number;
 }
 
+export interface SimilarTrack {
+  track: Track;
+  score: number;
+}
+
 export interface LibraryDuplicateGroup {
   artist: string;
   title: string;
@@ -902,6 +907,7 @@ export interface NewAmpAPI {
   getTrackIdsMissingDna: (limit?: number) => Promise<number[]>;
   getDnaStats: () => Promise<DnaStats>;
   getAllTrackDna: () => Promise<Array<{ id: number; dna: TrackDnaPublic }>>;
+  findSimilarTracks: (trackId: number, limit?: number) => Promise<SimilarTrack[]>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;
   getDroppedFilePaths: (files: unknown[]) => string[];
