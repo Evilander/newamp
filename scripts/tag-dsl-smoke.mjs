@@ -82,6 +82,27 @@ assert.ok(protoAttempt.rule);
 const protoEval = evaluateRule(protoAttempt.rule, makeStubContext(), buildEvalEnvironment());
 assert.ok(protoEval.errors.length > 0, 'host object fields should not be reachable');
 
+// ReDoS guards — pathological regexes must short-circuit, not hang the evaluator.
+const redos1 = parseRule('tag(redos1) when title matches "(a+)+b"');
+assert.ok(redos1.rule, 'pattern with nested quantifier should still parse');
+const evilTitle = 'a'.repeat(40) + '!';
+const tRedos = Date.now();
+const redos1Eval = evaluateRule(redos1.rule, makeStubContext({ title: evilTitle }), buildEvalEnvironment());
+const redosMs = Date.now() - tRedos;
+assert.ok(redosMs < 100, `nested-quantifier regex must be refused fast, took ${redosMs}ms`);
+assert.equal(redos1Eval.matched, false, 'unsafe regex should evaluate to null/false');
+
+const redos2 = parseRule('tag(redos2) when title matches "(a|a)*b"');
+assert.ok(redos2.rule);
+const tRedos2 = Date.now();
+evaluateRule(redos2.rule, makeStubContext({ title: 'a'.repeat(40) }), buildEvalEnvironment());
+assert.ok((Date.now() - tRedos2) < 100, 'alternation-of-equivalents regex must be refused fast');
+
+const bigPattern = parseRule(`tag(bigpat) when title matches "${'a'.repeat(250)}"`);
+assert.ok(bigPattern.rule);
+const bigPatternEval = evaluateRule(bigPattern.rule, makeStubContext({ title: 'a'.repeat(250) }), buildEvalEnvironment());
+assert.equal(bigPatternEval.matched, false, 'oversized regex pattern should be refused');
+
 // Three-valued null
 const nullRule = parseRule('tag(missing) when bpm > 100');
 assert.ok(nullRule.rule);
