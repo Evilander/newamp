@@ -1947,11 +1947,11 @@ export class LibraryStore {
     const rules: ParsedRule[] = [...parsedOthers, compiled.rule];
     const limit = Math.max(1, Math.min(10000, Math.trunc(input.limit ?? 2000)));
     const rows = this.many<RawRow>(`SELECT * FROM tracks LIMIT ${limit}`);
+    const dnaIndex = this.buildDnaIndex();
     let matchCount = 0;
     const samples: number[] = [];
     for (const row of rows) {
       const track = rowToTrack(row);
-      const dna = this.getTrackDna(track.id);
       const baseContext: Omit<TrackContext, 'tags'> = {
         id: track.id,
         title: track.title,
@@ -1978,7 +1978,7 @@ export class LibraryStore {
         avoidAutoPlay: Boolean(track.avoidAutoPlay),
         replayGainTrack: track.replayGainTrackDb,
         replayGainAlbum: track.replayGainAlbumDb,
-        dna,
+        dna: dnaIndex.get(track.id) ?? null,
       };
       const evaluation = evaluateRulesForTrack({ rules, context: baseContext, env });
       if (evaluation.tags.has(compiled.rule.name)) {
@@ -2053,11 +2053,12 @@ export class LibraryStore {
       this.db.run(`DELETE FROM track_tags`);
     }
 
+    const dnaIndex = this.buildDnaIndex();
+    const pending: Array<[number, string]> = [];
     let tagsAssigned = 0;
     let tracksEvaluated = 0;
     for (const row of rows) {
       const track = rowToTrack(row);
-      const dna = this.getTrackDna(track.id);
       const baseContext: Omit<TrackContext, 'tags'> = {
         id: track.id,
         title: track.title,
@@ -2084,17 +2085,12 @@ export class LibraryStore {
         avoidAutoPlay: Boolean(track.avoidAutoPlay),
         replayGainTrack: track.replayGainTrackDb,
         replayGainAlbum: track.replayGainAlbumDb,
-        dna,
+        dna: dnaIndex.get(track.id) ?? null,
       };
       try {
         const evaluation = evaluateRulesForTrack({ rules: parsedRules, context: baseContext, env });
-        for (const tag of evaluation.tags) {
-          this.db.run(
-            `INSERT OR IGNORE INTO track_tags (track_id, tag_name) VALUES (?, ?)`,
-            [track.id, tag],
-          );
-          tagsAssigned += 1;
-        }
+        for (const tag of evaluation.tags) pending.push([track.id, tag]);
+        tagsAssigned += evaluation.tags.size;
         for (const [tagName, ruleErrors] of evaluation.errors) {
           if (ruleErrors.length) errors[tagName] = ruleErrors[0]!;
         }
@@ -2103,8 +2099,33 @@ export class LibraryStore {
       }
       tracksEvaluated += 1;
     }
+    this.bulkInsertTrackTags(pending);
     this.scheduleFlush();
     return { rulesEvaluated: parsedRules.length, tracksEvaluated, tagsAssigned, errors };
+  }
+
+  private buildDnaIndex(): Map<number, TrackDna> {
+    const all = this.getAllTrackDna();
+    const map = new Map<number, TrackDna>();
+    for (const row of all) map.set(row.id, row.dna);
+    return map;
+  }
+
+  private bulkInsertTrackTags(pairs: Array<[number, string]>): void {
+    if (!pairs.length) return;
+    const CHUNK = 500;
+    for (let i = 0; i < pairs.length; i += CHUNK) {
+      const slice = pairs.slice(i, i + CHUNK);
+      const placeholders = slice.map(() => '(?, ?)').join(',');
+      const params: Array<number | string> = [];
+      for (const [trackId, tag] of slice) {
+        params.push(trackId, tag);
+      }
+      this.db.run(
+        `INSERT OR IGNORE INTO track_tags (track_id, tag_name) VALUES ${placeholders}`,
+        params,
+      );
+    }
   }
 
   runSmartPlaylistRule(input: number | SmartPlaylistRuleInput): Track[] {

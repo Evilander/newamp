@@ -9,7 +9,9 @@ import {
 } from '../dist-electron/shared/spectral-art.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
-const outRoot = join(repoRoot, 'tmp', 'spectral-art-smoke');
+// Per-run unique subdir avoids EBUSY when an OS browser still holds the
+// previous run's directory (Windows file locks from playwright sessions).
+const outRoot = join(repoRoot, 'tmp', `spectral-art-smoke-${process.pid}-${Date.now()}`);
 await rm(outRoot, { recursive: true, force: true });
 await mkdir(outRoot, { recursive: true });
 

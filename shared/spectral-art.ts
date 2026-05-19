@@ -20,7 +20,30 @@ export interface SpectralArtPalette {
   ink: string;
 }
 
+// Memoize the most recently-rendered SVGs and data URLs so an album grid
+// scrolling through a few hundred fallback covers doesn't pay the FNV hash
+// + paths-string-building cost on every React re-render. The cache is small
+// and bounded so it can't grow unbounded for users with very large libraries.
+const SVG_CACHE_LIMIT = 512;
+const svgCache = new Map<string, string>();
+const dataUrlCache = new Map<string, string>();
+
+function cacheKey(seed: SpectralArtSeed, size: number): string {
+  return `${size}::${seed.artist ?? ''}::${seed.album ?? ''}`;
+}
+
+function setBounded(cache: Map<string, string>, key: string, value: string): void {
+  if (cache.size >= SVG_CACHE_LIMIT) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) cache.delete(firstKey);
+  }
+  cache.set(key, value);
+}
+
 export function spectralArtSvg(seed: SpectralArtSeed, size = 256): string {
+  const key = cacheKey(seed, size);
+  const cached = svgCache.get(key);
+  if (cached !== undefined) return cached;
   const labelArtist = (seed.artist || '').trim() || 'Unknown';
   const labelAlbum = (seed.album || '').trim() || 'Untitled';
   const hash = fnv1a(`${labelArtist}::${labelAlbum}`);
@@ -53,7 +76,7 @@ export function spectralArtSvg(seed: SpectralArtSeed, size = 256): string {
   const artistLabel = clipLabel(labelArtist, 28).toUpperCase();
   const albumLabel = clipLabel(labelAlbum, 30).toUpperCase();
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img" aria-label="${escapeAttr(labelAlbum)} by ${escapeAttr(labelArtist)}">
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img" aria-label="${escapeAttr(labelAlbum)} by ${escapeAttr(labelArtist)}">
   <defs>
     <linearGradient id="${gradientId}" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="${palette.bg1}" />
@@ -69,11 +92,18 @@ export function spectralArtSvg(seed: SpectralArtSeed, size = 256): string {
     <text x="${num(size / 2)}" y="${num(size * 0.9)}" font-size="${num(size * 0.046)}" letter-spacing="${num(size * 0.008)}" text-anchor="middle" opacity="0.62">${escapeText(albumLabel)}</text>
   </g>
 </svg>`;
+  setBounded(svgCache, key, svg);
+  return svg;
 }
 
 export function spectralArtDataUrl(seed: SpectralArtSeed, size = 256): string {
+  const key = cacheKey(seed, size);
+  const cached = dataUrlCache.get(key);
+  if (cached !== undefined) return cached;
   const svg = spectralArtSvg(seed, size);
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  const url = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  setBounded(dataUrlCache, key, url);
+  return url;
 }
 
 export function spectralArtPalette(seed: SpectralArtSeed): SpectralArtPalette {
