@@ -12,6 +12,7 @@ const ITEMS: NavItem[] = [
   { id: 'folders', label: 'Folders', icon: 'M2 5h6l2 2h8v9H2zM4 9h12' },
   { id: 'discover', label: 'Discover', icon: 'M10 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2z' },
   { id: 'mixes', label: 'Mixes', icon: 'M3 5h4l3 10h2l3-10h4M4 15h4M12 15h4' },
+  { id: 'tags', label: 'Living Tags', icon: 'M3 9l7-7 8 8-7 7zM14 5a1 1 0 100 2 1 1 0 000-2z' },
   { id: 'albums', label: 'Albums', icon: 'M3 3h6v6H3zM11 3h6v6h-6zM3 11h6v6H3zM11 11h6v6h-6z' },
   { id: 'artists', label: 'Artists', icon: 'M10 10a3 3 0 100-6 3 3 0 000 6zM4 17a6 6 0 0112 0H4z' },
   { id: 'loved', label: 'Loved', icon: 'M10 17l-6.5-6.5a4 4 0 015.66-5.66L10 6l.84-1.16a4 4 0 015.66 5.66L10 17z' },
