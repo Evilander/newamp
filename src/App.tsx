@@ -27,6 +27,7 @@ const FoldersView = lazy(() => import('./components/views/FoldersView').then((mo
 const DiscoverView = lazy(() => import('./components/views/DiscoverView').then((module) => ({ default: module.DiscoverView })));
 const MixesView = lazy(() => import('./components/views/MixesView').then((module) => ({ default: module.MixesView })));
 const TagsView = lazy(() => import('./components/views/TagsView').then((module) => ({ default: module.TagsView })));
+const AtlasView = lazy(() => import('./components/views/AtlasView').then((module) => ({ default: module.AtlasView })));
 const AlbumsView = lazy(() => import('./components/views/AlbumsView').then((module) => ({ default: module.AlbumsView })));
 const ArtistsView = lazy(() => import('./components/views/ArtistsView').then((module) => ({ default: module.ArtistsView })));
 const NowPlayingView = lazy(() =>
@@ -284,6 +285,7 @@ export default function App(): JSX.Element {
                 {view === 'folders' && <FoldersView />}
                 {view === 'discover' && <DiscoverView />}
                 {view === 'tags' && <TagsView />}
+                {view === 'atlas' && <AtlasView />}
                 {view === 'mixes' && <MixesView />}
                 {view === 'albums' && <AlbumsView />}
                 {view === 'artists' && <ArtistsView />}

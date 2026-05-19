@@ -57,6 +57,7 @@ export type ViewMode =
   | 'loved'
   | 'history'
   | 'tags'
+  | 'atlas'
   | 'podcasts'
   | 'radio'
   | 'now-playing'
@@ -666,6 +667,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           .catch(() => ({ ...settings, audioOutputDeviceId: null }));
         await engine.setOutputDevice(null).catch(() => undefined);
       }
+      engine.setPreferredSampleRate(
+        settings.audioBitPerfectPath ? settings.audioPreferredSampleRate : null,
+      );
       engine.setVolume(settings.volume);
       engine.setPlaybackRate(settings.playbackRate);
       engine.setCrossfadeMs(settings.crossfadeMs);

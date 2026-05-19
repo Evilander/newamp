@@ -733,6 +733,8 @@ export interface AppSettings {
   eqEnabled: boolean;
   radioBrainEnabled: boolean;
   radioBrainPort: number;
+  audioBitPerfectPath: boolean;
+  audioPreferredSampleRate: number | null;
 }
 
 export interface RadioBrainStatus {
