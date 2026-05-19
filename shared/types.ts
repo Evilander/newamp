@@ -1,5 +1,7 @@
 // Shared types between main and renderer. Keep this tiny and serializable.
 
+import type { TrackDna as TrackDnaPublic } from './audio-dna.js';
+
 export interface Track {
   id: number;
   path: string;
@@ -224,6 +226,18 @@ export interface ReplayGainAnalysisResult {
   skipped: string[];
   tracks: Track[];
   albumGroups?: number;
+}
+
+export interface TracksDnaAnalysisResult {
+  analyzed: number;
+  skipped: string[];
+  total: number;
+}
+
+export interface DnaStats {
+  analyzed: number;
+  missing: number;
+  total: number;
 }
 
 export interface LibraryDuplicateGroup {
@@ -830,6 +844,11 @@ export interface NewAmpAPI {
   exportTracksAudio: (ids: number[], format: AudioExportFormat) => Promise<TrackAudioBatchExportResult | null>;
   analyzeReplayGain: (ids: number[]) => Promise<ReplayGainAnalysisResult>;
   analyzeAlbumReplayGain: (ids: number[]) => Promise<ReplayGainAnalysisResult>;
+  analyzeTracksDna: (ids: number[]) => Promise<TracksDnaAnalysisResult>;
+  getTrackDna: (id: number) => Promise<TrackDnaPublic | null>;
+  getTrackIdsMissingDna: (limit?: number) => Promise<number[]>;
+  getDnaStats: () => Promise<DnaStats>;
+  getAllTrackDna: () => Promise<Array<{ id: number; dna: TrackDnaPublic }>>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;
   getDroppedFilePaths: (files: unknown[]) => string[];

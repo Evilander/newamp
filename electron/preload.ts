@@ -37,8 +37,10 @@ import type {
   PodcastProgressInput,
   PodcastSubscription,
   PlayerCommand,
+  DnaStats,
   ReplayGainAnalysisResult,
   SavedPlaylist,
+  TracksDnaAnalysisResult,
   SavePlaylistInput,
   SaveTrackBookmarkInput,
   ScanProgress,
@@ -56,6 +58,7 @@ import type {
   TrackWavBatchExportResult,
   TrackWavExportResult,
 } from '../shared/types.js';
+import type { TrackDna } from '../shared/audio-dna.js';
 
 const api: NewAmpAPI = {
   scanLibrary: (roots) => ipcRenderer.invoke('library:scan', roots),
@@ -121,6 +124,16 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tracks:analyze-replaygain', ids) as Promise<ReplayGainAnalysisResult>,
   analyzeAlbumReplayGain: (ids: number[]) =>
     ipcRenderer.invoke('tracks:analyze-album-replaygain', ids) as Promise<ReplayGainAnalysisResult>,
+  analyzeTracksDna: (ids: number[]) =>
+    ipcRenderer.invoke('tracks:analyze-dna', ids) as Promise<TracksDnaAnalysisResult>,
+  getTrackDna: (id: number) =>
+    ipcRenderer.invoke('tracks:dna-get', id) as Promise<TrackDna | null>,
+  getTrackIdsMissingDna: (limit?: number) =>
+    ipcRenderer.invoke('tracks:dna-missing-ids', limit) as Promise<number[]>,
+  getDnaStats: () =>
+    ipcRenderer.invoke('tracks:dna-stats') as Promise<DnaStats>,
+  getAllTrackDna: () =>
+    ipcRenderer.invoke('tracks:dna-all') as Promise<Array<{ id: number; dna: TrackDna }>>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,
   getDroppedFilePaths: (files: unknown[]) => {
