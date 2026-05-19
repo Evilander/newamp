@@ -44,6 +44,14 @@ import type {
   Track,
   RecoveryEvent,
 } from '../shared/types.js';
+import {
+  classifyAudioQuality,
+  CONTAINER_AUDIO_EXTENSIONS,
+  DSD_EXTENSIONS,
+  FFMPEG_FALLBACK_EXTENSIONS,
+  LOSSY_EXTENSIONS,
+  PCM_LOSSLESS_EXTENSIONS,
+} from '../shared/audio-quality.js';
 import { buildDiscoverSurface } from '../shared/discover.js';
 import { buildHarmonicMix as buildHarmonicMixSequence } from '../shared/harmonic-mix.js';
 import { quarantineCorruptFile, recoveryReason } from './recovery.js';
@@ -303,9 +311,13 @@ interface LibraryHealthRow {
   album: string;
   year: number | null;
   duration: number | null;
+  bitrate: number | null;
+  sample_rate: number | null;
   size: number | null;
   mtime: number;
   has_art: number;
+  replaygain_track_db: number | null;
+  replaygain_album_db: number | null;
 }
 
 interface FolderSummaryAccumulator {
@@ -668,7 +680,7 @@ export class LibraryStore {
 
   getLibraryHealth(): LibraryHealth {
     const rows = this.many<LibraryHealthRow>(
-      `SELECT id, path, title, artist, album, year, duration, size, mtime, has_art FROM tracks`,
+      `SELECT id, path, title, artist, album, year, duration, bitrate, sample_rate, size, mtime, has_art, replaygain_track_db, replaygain_album_db FROM tracks`,
     );
     const totals = this.getStats();
     const missing = {
@@ -677,6 +689,17 @@ export class LibraryStore {
       year: 0,
       art: 0,
       duration: 0,
+    };
+    const quality = {
+      lossless: 0,
+      lossy: 0,
+      hiRes: 0,
+      dsd: 0,
+      ffmpegFallback: 0,
+      lowBitrate: 0,
+      replayGainReady: 0,
+      replayGainMissing: 0,
+      unknown: 0,
     };
 
     const duplicateMap = new Map<string, LibraryHealthRow[]>();
@@ -687,6 +710,25 @@ export class LibraryStore {
       if (row.year == null) missing.year += 1;
       if (!row.has_art) missing.art += 1;
       if (row.duration == null || row.duration <= 0) missing.duration += 1;
+
+      const signal = classifyAudioQuality({
+        path: row.path,
+        bitrate: row.bitrate,
+        sampleRate: row.sample_rate,
+        duration: row.duration,
+        size: row.size,
+        replayGainTrackDb: row.replaygain_track_db,
+        replayGainAlbumDb: row.replaygain_album_db,
+      });
+      if (signal.isLossless) quality.lossless += 1;
+      if (signal.family === 'lossy') quality.lossy += 1;
+      if (signal.isHiRes) quality.hiRes += 1;
+      if (signal.isDsd) quality.dsd += 1;
+      if (signal.decodePath === 'ffmpeg-pcm-fallback') quality.ffmpegFallback += 1;
+      if (signal.isLowBitrate) quality.lowBitrate += 1;
+      if (signal.hasReplayGain) quality.replayGainReady += 1;
+      else quality.replayGainMissing += 1;
+      if (signal.family === 'unknown') quality.unknown += 1;
 
       const artist = normalizeDuplicateText(row.artist);
       const title = normalizeDuplicateText(row.title);
@@ -741,6 +783,7 @@ export class LibraryStore {
     return {
       totals,
       missing,
+      quality,
       duplicateGroups,
       legacyFormats,
       recentlyAdded,
@@ -2486,6 +2529,10 @@ function parseTrackSearchQuery(input: string): ParsedTrackSearch {
     'ext',
     'missing',
     'has',
+    'quality',
+    'codec',
+    'replaygain',
+    'rg',
     'loved',
     'avoid',
     'autoplay',
@@ -2615,6 +2662,8 @@ function applyTrackSearchFilter(
     params.push(`%${escapeLike(ext)}`);
     return;
   }
+  if (field === 'quality' || field === 'codec') return pushQualityFilter(where, params, value);
+  if (field === 'replaygain' || field === 'rg') return pushReplayGainFilter(where, value);
   if (field === 'year') return pushYearFilter(where, params, value);
   if (field === 'loved') {
     where.push(truthySearchValue(value) ? 'loved = 1' : 'loved = 0');
@@ -2667,6 +2716,68 @@ function pushRatingFilter(where: string[], params: unknown[], value: string): vo
   params.push(rating);
 }
 
+function pushQualityFilter(where: string[], params: unknown[], value: string): void {
+  const key = value.toLowerCase().replace(/[\s_]+/g, '-');
+  if (key === 'lossless') return pushExtensionSetFilter(where, params, [...PCM_LOSSLESS_EXTENSIONS, ...DSD_EXTENSIONS]);
+  if (key === 'lossy') return pushExtensionSetFilter(where, params, LOSSY_EXTENSIONS);
+  if (key === 'dsd') return pushExtensionSetFilter(where, params, DSD_EXTENSIONS);
+  if (key === 'fallback' || key === 'ffmpeg' || key === 'ffmpeg-fallback') {
+    return pushExtensionSetFilter(where, params, FFMPEG_FALLBACK_EXTENSIONS);
+  }
+  if (key === 'low' || key === 'low-bitrate') {
+    const extWhere = extensionSetSql(LOSSY_EXTENSIONS);
+    where.push(`bitrate IS NOT NULL AND bitrate > 0 AND bitrate < 192000 AND ${extWhere.sql}`);
+    params.push(...extWhere.params);
+    return;
+  }
+  if (key === 'hires' || key === 'hi-res') {
+    const dsdWhere = extensionSetSql(DSD_EXTENSIONS);
+    const losslessWhere = extensionSetSql(PCM_LOSSLESS_EXTENSIONS);
+    where.push(`(${dsdWhere.sql} OR (sample_rate IS NOT NULL AND sample_rate >= 88200 AND ${losslessWhere.sql}))`);
+    params.push(...dsdWhere.params, ...losslessWhere.params);
+    return;
+  }
+  if (key === 'unknown') {
+    return pushExtensionSetFilter(
+      where,
+      params,
+      [...PCM_LOSSLESS_EXTENSIONS, ...DSD_EXTENSIONS, ...LOSSY_EXTENSIONS, ...CONTAINER_AUDIO_EXTENSIONS],
+      true,
+    );
+  }
+}
+
+function pushReplayGainFilter(where: string[], value: string): void {
+  const key = value.toLowerCase();
+  const ready = `(replaygain_track_db IS NOT NULL OR replaygain_album_db IS NOT NULL)`;
+  if (/^(1|true|yes|ready|present|has|on)$/.test(key)) {
+    where.push(ready);
+    return;
+  }
+  if (/^(0|false|no|missing|none|off)$/.test(key)) {
+    where.push(`NOT ${ready}`);
+  }
+}
+
+function pushExtensionSetFilter(
+  where: string[],
+  params: unknown[],
+  extensions: readonly string[],
+  negate = false,
+): void {
+  const extWhere = extensionSetSql(extensions);
+  where.push(negate ? `NOT (${extWhere.sql})` : extWhere.sql);
+  params.push(...extWhere.params);
+}
+
+function extensionSetSql(extensions: readonly string[]): { sql: string; params: string[] } {
+  const unique = [...new Set(extensions.map((ext) => ext.toLowerCase().replace(/^\./, '')))];
+  return {
+    sql: `(${unique.map(() => 'lower(path) LIKE ?').join(' OR ')})`,
+    params: unique.map((ext) => `%.${escapeLike(ext)}`),
+  };
+}
+
 function pushMissingFilter(where: string[], value: string, has: boolean): void {
   const key = value.toLowerCase();
   const clauses: Record<string, string> = {
@@ -2678,6 +2789,7 @@ function pushMissingFilter(where: string[], value: string, has: boolean): void {
     genre: `(genre IS NULL OR trim(genre) = '')`,
     bpm: `bpm IS NULL`,
     key: `(key IS NULL OR trim(key) = '')`,
+    replaygain: `(replaygain_track_db IS NULL AND replaygain_album_db IS NULL)`,
   };
   const clause = clauses[key];
   if (!clause) return;

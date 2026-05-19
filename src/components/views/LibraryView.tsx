@@ -7,6 +7,7 @@ import type {
   Track,
   TrackMetadataPatchInput,
 } from '@shared/types';
+import { buildArchiveCompass, duplicateExactTotal, missingMetadataTotal } from '@shared/archive-compass';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime, highlight } from '../../lib/format';
 import { api } from '../../lib/api';
@@ -319,6 +320,23 @@ export function LibraryView(): JSX.Element {
     await saveHealthReviewPlaylist('Legacy Format Review', trackIds, 'legacy-format track');
   }
 
+  async function createQualityReviewPlaylist(): Promise<void> {
+    if (!health) return;
+    const qualityIssueCount = health.quality.lowBitrate + health.quality.unknown + health.quality.replayGainMissing;
+    if (!qualityIssueCount) {
+      setCleanupStatus('No archive-quality candidates to review.');
+      return;
+    }
+    setCleanupStatus('Building archive radar review...');
+    const queries = [
+      health.quality.lowBitrate ? 'quality:low-bitrate' : null,
+      health.quality.unknown ? 'quality:unknown' : null,
+      health.quality.replayGainMissing ? 'rg:missing' : null,
+    ].filter((query): query is string => query != null);
+    const trackIds = await collectTrackIdsByQueries(queries);
+    await saveHealthReviewPlaylist('Archive Radar Review', trackIds, 'archive-quality candidate');
+  }
+
   async function collectTrackIdsByQueries(queries: string[]): Promise<number[]> {
     const rows = await Promise.all(
       queries.map((query) => api.getTrackIds({ search: query, sort: 'artist', limit: 100000 })),
@@ -395,6 +413,7 @@ export function LibraryView(): JSX.Element {
           onCreateDuplicateReviewPlaylist={() => void createDuplicateReviewPlaylist()}
           onCreateMissingReviewPlaylist={() => void createMissingReviewPlaylist()}
           onCreateLegacyReviewPlaylist={() => void createLegacyReviewPlaylist()}
+          onCreateQualityReviewPlaylist={() => void createQualityReviewPlaylist()}
         />
       )}
       <div
@@ -658,6 +677,7 @@ function LibraryHealthPanel({
   onCreateDuplicateReviewPlaylist,
   onCreateMissingReviewPlaylist,
   onCreateLegacyReviewPlaylist,
+  onCreateQualityReviewPlaylist,
 }: {
   health: LibraryHealth;
   cleanupStatus: string | null;
@@ -665,16 +685,14 @@ function LibraryHealthPanel({
   onCreateDuplicateReviewPlaylist: () => void;
   onCreateMissingReviewPlaylist: () => void;
   onCreateLegacyReviewPlaylist: () => void;
+  onCreateQualityReviewPlaylist: () => void;
 }): JSX.Element {
-  const missingTotal =
-    health.missing.artist +
-    health.missing.album +
-    health.missing.year +
-    health.missing.art +
-    health.missing.duration;
+  const compass = buildArchiveCompass(health);
+  const missingTotal = missingMetadataTotal(health);
   const legacySummary = health.legacyFormats.length
     ? health.legacyFormats.map((item) => `${item.ext} ${item.count}`).join(' / ')
     : 'none';
+  const qualityIssueCount = health.quality.lowBitrate + health.quality.unknown + health.quality.replayGainMissing;
   const recent = health.recentlyAdded.slice(0, 3);
 
   return (
@@ -683,7 +701,7 @@ function LibraryHealthPanel({
       style={{
         borderColor: 'var(--line)',
         background: 'var(--panel)',
-        gridTemplateColumns: 'minmax(180px,0.8fr) minmax(220px,1fr) minmax(220px,1fr)',
+        gridTemplateColumns: 'minmax(210px,0.9fr) minmax(240px,1fr) minmax(220px,1fr) minmax(220px,1fr)',
       }}
     >
       <div>
@@ -693,8 +711,42 @@ function LibraryHealthPanel({
         <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums" style={{ color: 'var(--ink-2)' }}>
           <span>Missing tags</span><span className="text-right">{missingTotal.toLocaleString()}</span>
           <span>Duplicates</span><span className="text-right">{health.duplicateGroups.length.toLocaleString()}</span>
-          <span>Exact matches</span><span className="text-right">{duplicateExactMatchTotal(health).toLocaleString()}</span>
+          <span>Exact matches</span><span className="text-right">{duplicateExactTotal(health).toLocaleString()}</span>
           <span>Legacy</span><span className="truncate text-right" title={legacySummary}>{legacySummary}</span>
+        </div>
+        <div className="mt-2 grid grid-cols-[52px_minmax(0,1fr)] gap-2">
+          <div
+            className="bevel-in flex h-[52px] items-center justify-center text-[24px] font-black"
+            style={{ color: compass.score >= 86 ? 'var(--accent)' : 'var(--warn)' }}
+            title={`Archive score ${compass.score}/100`}
+          >
+            {compass.grade}
+          </div>
+          <div className="min-w-0">
+            <div className="truncate text-[12px] font-bold" style={{ color: 'var(--ink)' }}>
+              {compass.profile}
+            </div>
+            <div className="mt-1 line-clamp-2 leading-snug" style={{ color: 'var(--ink-2)' }}>
+              {compass.headline}
+            </div>
+          </div>
+        </div>
+        <div className="mt-2 text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+          Archive Radar
+        </div>
+        <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums" style={{ color: 'var(--ink-2)' }}>
+          <span>Lossless / hi-res</span>
+          <span className="text-right">{health.quality.lossless.toLocaleString()} / {health.quality.hiRes.toLocaleString()}</span>
+          <span>DSD / fallback</span>
+          <span className="text-right">{health.quality.dsd.toLocaleString()} / {health.quality.ffmpegFallback.toLocaleString()}</span>
+          <span>Low bitrate</span>
+          <span className="text-right">{health.quality.lowBitrate.toLocaleString()}</span>
+          <span>Lossy / unknown</span>
+          <span className="text-right">{health.quality.lossy.toLocaleString()} / {health.quality.unknown.toLocaleString()}</span>
+          <span>ReplayGain ready</span>
+          <span className="text-right">{health.quality.replayGainReady.toLocaleString()}</span>
+          <span>ReplayGain missing</span>
+          <span className="text-right">{health.quality.replayGainMissing.toLocaleString()}</span>
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <button className="pxbtn" onClick={onCleanMissingFiles}>
@@ -721,11 +773,37 @@ function LibraryHealthPanel({
           >
             Save legacy review
           </button>
+          <button
+            className="pxbtn"
+            onClick={onCreateQualityReviewPlaylist}
+            disabled={!qualityIssueCount}
+          >
+            Save archive radar
+          </button>
           {cleanupStatus && (
             <span className="truncate" style={{ color: 'var(--muted)' }}>
               {cleanupStatus}
             </span>
           )}
+        </div>
+      </div>
+      <div className="min-w-0">
+        <div className="text-[9px] uppercase tracking-[0.12em]" style={{ color: 'var(--ink-2)' }}>
+          Compass Moves
+        </div>
+        <div className="mt-1 grid gap-[3px]">
+          {compass.moves.slice(0, 4).map((move) => (
+            <div key={move.label} className="bevel-in px-2 py-[5px]" title={move.detail}>
+              <div className="flex gap-2">
+                <span className="w-24 shrink-0 truncate font-bold" style={{ color: 'var(--accent)' }}>
+                  {move.label}
+                </span>
+                <span className="min-w-0 truncate" style={{ color: 'var(--ink-2)' }}>
+                  {move.detail}
+                </span>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
       <div className="min-w-0">
@@ -774,10 +852,6 @@ function formatRuntime(seconds: number): string {
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
-function duplicateExactMatchTotal(health: LibraryHealth): number {
-  return health.duplicateGroups.reduce((sum, group) => sum + Math.max(0, group.exactMatchCount), 0);
 }
 
 function SortPicker({ value, onChange }: { value: Sort; onChange: (s: Sort) => void }): JSX.Element {
