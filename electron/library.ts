@@ -33,6 +33,7 @@ import type {
   SavedPlaylist,
   SavePlaylistInput,
   SaveTrackBookmarkInput,
+  SimilarTrack,
   SmartPlaylistMood,
   SmartPlaylistRule,
   SmartPlaylistRuleInput,
@@ -49,7 +50,7 @@ import type {
   Track,
   RecoveryEvent,
 } from '../shared/types.js';
-import { isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
+import { dnaCosineSimilarity, isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
 import {
   buildEvalEnvironment,
   evaluateRulesForTrack,
@@ -2285,6 +2286,33 @@ export class LibraryStore {
       }
     }
     return out;
+  }
+
+  findSimilarTracks(trackId: number, limit = 20): SimilarTrack[] {
+    const id = Math.trunc(Number(trackId));
+    if (!Number.isFinite(id) || id <= 0) return [];
+    const sourceDna = this.getTrackDna(id);
+    if (!sourceDna) return [];
+    const all = this.getAllTrackDna();
+    const scored: Array<{ id: number; score: number }> = [];
+    for (const row of all) {
+      if (row.id === id) continue;
+      const score = dnaCosineSimilarity(sourceDna, row.dna);
+      scored.push({ id: row.id, score });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    const cap = Math.max(1, Math.min(200, Math.trunc(limit) || 20));
+    const top = scored.slice(0, cap);
+    if (!top.length) return [];
+    const idList = top.map((entry) => entry.id);
+    const tracks = this.getTracksByIdsInOrder(idList);
+    const byId = new Map(tracks.map((t) => [t.id, t]));
+    return top
+      .map((entry) => {
+        const track = byId.get(entry.id);
+        return track ? { track, score: Math.round(entry.score * 1000) / 1000 } : null;
+      })
+      .filter((row): row is SimilarTrack => row != null);
   }
 
   getDnaStats(): { analyzed: number; missing: number; total: number } {
