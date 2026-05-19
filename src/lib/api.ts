@@ -50,6 +50,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   eqEnabled: false,
   radioBrainEnabled: false,
   radioBrainPort: 17117,
+  audioBitPerfectPath: false,
+  audioPreferredSampleRate: null,
 };
 
 const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {

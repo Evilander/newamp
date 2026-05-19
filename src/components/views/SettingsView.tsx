@@ -558,6 +558,8 @@ export function SettingsView(): JSX.Element {
               <span>32-bit float / Web Audio</span>
             </div>
           </Row>
+          <BitPerfectRow settings={settings} onChange={(patch) => api.setSettings(patch).then(setSettings)} />
+
           <Row label="Audio Output">
             <div className="flex max-w-[560px] flex-wrap items-center justify-end gap-2">
               <select
@@ -1026,6 +1028,81 @@ function SkinWorkshop({
         })}
       </div>
     </section>
+  );
+}
+
+const PREFERRED_SAMPLE_RATES: Array<{ value: number | null; label: string; rationale: string }> = [
+  { value: null, label: 'System default', rationale: 'Use whatever rate Windows / Linux is currently driving the DAC at.' },
+  { value: 44100, label: '44.1 kHz', rationale: 'Native rate for CD-quality FLAC / MP3.' },
+  { value: 48000, label: '48 kHz', rationale: 'Native rate for most video soundtracks and modern downloads.' },
+  { value: 88200, label: '88.2 kHz', rationale: 'CD-multiple hi-res.' },
+  { value: 96000, label: '96 kHz', rationale: 'Common DAC hi-res rate; bit-perfect for 96 kHz FLAC / WAV.' },
+  { value: 176400, label: '176.4 kHz', rationale: 'High-end CD-multiple.' },
+  { value: 192000, label: '192 kHz', rationale: 'Top of mainstream DAC hi-res.' },
+  { value: 352800, label: '352.8 kHz', rationale: 'DSD64 PCM-equivalent.' },
+  { value: 384000, label: '384 kHz', rationale: 'DSD128 / R2R DAC territory.' },
+];
+
+function BitPerfectRow({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (patch: Partial<AppSettings>) => void;
+}): JSX.Element {
+  const actualRate = engine.getActualSampleRate?.() ?? null;
+  const actualLabel = actualRate ? `${(actualRate / 1000).toFixed(1)} kHz` : '—';
+  const preferred = settings.audioPreferredSampleRate;
+  const matched = settings.audioBitPerfectPath && preferred != null && actualRate != null && Math.abs(actualRate - preferred) < 1;
+  const willRestart = settings.audioBitPerfectPath && preferred != null && actualRate != null && Math.abs(actualRate - preferred) >= 1;
+  return (
+    <div className="mt-1 flex flex-col gap-2 rounded p-3" style={{ background: 'var(--panel-2)', border: '1px solid var(--line)' }}>
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--ink)' }}>
+          <input
+            type="checkbox"
+            checked={settings.audioBitPerfectPath}
+            onChange={(e) => onChange({ audioBitPerfectPath: e.target.checked })}
+          />
+          <span className="font-bold" style={{ color: 'var(--accent)' }}>Bit-Perfect Path</span>
+          <span style={{ color: 'var(--muted)' }}>· pin the AudioContext to a fixed sample rate</span>
+        </label>
+        <span className="ml-auto flex items-center gap-2 text-[12px]" style={{ color: 'var(--ink-2)' }}>
+          <span>Preferred</span>
+          <select
+            value={preferred == null ? '' : String(preferred)}
+            disabled={!settings.audioBitPerfectPath}
+            onChange={(e) => {
+              const raw = e.target.value;
+              const nextRate = raw === '' ? null : Number(raw);
+              onChange({ audioPreferredSampleRate: nextRate });
+            }}
+            className="bevel-in px-2 py-1 text-[12px]"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          >
+            {PREFERRED_SAMPLE_RATES.map((opt) => (
+              <option key={String(opt.value ?? 'auto')} value={opt.value == null ? '' : String(opt.value)}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </span>
+      </div>
+      <div className="text-[11px]" style={{ color: 'var(--ink-2)' }}>
+        Live AudioContext rate: <span style={{ color: matched ? 'var(--accent)' : 'var(--ink)' }}>{actualLabel}</span>
+        {matched && <span style={{ color: 'var(--accent)' }}> · matched</span>}
+        {willRestart && <span style={{ color: 'var(--warn)' }}> · restart NewAmp to apply the new rate</span>}
+      </div>
+      <details className="text-[11px]" style={{ color: 'var(--muted)' }}>
+        <summary className="cursor-pointer select-none font-bold uppercase tracking-[0.1em]">Real bit-perfect setup (Windows / Linux)</summary>
+        <div className="mt-1 grid gap-1 pl-1" style={{ lineHeight: 1.5 }}>
+          <span><strong>Windows · WASAPI Exclusive:</strong> Right-click the speaker icon → Sound settings → choose your DAC → Driver properties → Advanced → check "Allow applications to take exclusive control" + set Default Format to match the rate above. Some DACs also need their own ASIO driver; NewAmp does not yet support ASIO directly.</span>
+          <span><strong>Linux · ALSA hw:</strong> Configure PipeWire / PulseAudio to expose the DAC at the target rate (`pw-cli set-param ... rate 96000` or `default-sample-rate=96000` in pulse / pipewire config). NewAmp routes through the system mixer either way, so PipeWire's bit-perfect mode applies.</span>
+          <span><strong>What "Bit-Perfect Path" actually does:</strong> creates the Web Audio AudioContext at the preferred rate so Chromium does not resample on the way out. Combined with the OS-side settings above, no DSP touches the bitstream between your decoder and the DAC. Without the OS-side step, Chromium's bitstream still goes through the Windows / PipeWire mixer.</span>
+          <span><strong>True kernel streaming (WASAPI Exclusive, ASIO, ALSA hw: direct):</strong> requires a native Node addon binding to PortAudio / miniaudio. Tracked as a future phase; opens the DAC and locks every other app out while NewAmp is playing.</span>
+        </div>
+      </details>
+    </div>
   );
 }
 

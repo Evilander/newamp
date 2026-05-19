@@ -67,6 +67,7 @@ export class AudioEngine {
   private eqEnabled = true;
   private eqValues = EQ_FREQS.map(() => 0);
   private outputDeviceId: string | null = null;
+  private preferredSampleRate: number | null = null;
   private preparedNext: PreparedNextDeck | null = null;
 
   private state: EngineState = {
@@ -114,10 +115,40 @@ export class AudioEngine {
     return this.ensureGraph().decks;
   }
 
+  setPreferredSampleRate(rate: number | null): void {
+    const normalized = rate && Number.isFinite(rate) && rate >= 8000 && rate <= 384000 ? Math.trunc(rate) : null;
+    if (normalized === this.preferredSampleRate) return;
+    this.preferredSampleRate = normalized;
+    // We don't rip down a live graph - that would interrupt playback. The
+    // preference takes effect the next time the engine boots its
+    // AudioContext, which is the first playback after launch. The Settings
+    // UI explains this and offers a one-click "Reload to apply" action.
+  }
+
+  getActualSampleRate(): number | null {
+    return this.graph?.ctx.sampleRate ?? null;
+  }
+
+  isSampleRateMatched(trackSampleRate: number | null | undefined): boolean {
+    if (!this.graph || !trackSampleRate || !Number.isFinite(trackSampleRate)) return false;
+    return Math.abs(this.graph.ctx.sampleRate - trackSampleRate) < 1;
+  }
+
   private ensureGraph(): AudioGraph {
     if (this.graph) return this.graph;
 
-    const ctx = new AudioContext({ latencyHint: 'playback' });
+    const contextOptions: AudioContextOptions = { latencyHint: 'playback' };
+    if (this.preferredSampleRate) {
+      contextOptions.sampleRate = this.preferredSampleRate;
+    }
+    let ctx: AudioContext;
+    try {
+      ctx = new AudioContext(contextOptions);
+    } catch {
+      // Chromium rejects unsupported sample rates with NotSupportedError. Fall
+      // back to the device default so playback never gates on a setting.
+      ctx = new AudioContext({ latencyHint: 'playback' });
+    }
     const inputGain = ctx.createGain();
     inputGain.gain.value = this.preampLinear;
 
