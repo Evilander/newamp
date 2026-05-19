@@ -4,6 +4,7 @@ import type {
   BuiltInTheme,
   CustomSkin,
   LastfmOutboxStatus,
+  RadioBrainStatus,
   SupportBackupResult,
   SupportDiagnostics,
   SupportRestoreResult,
@@ -345,6 +346,10 @@ export function SettingsView(): JSX.Element {
               Refresh when music files or cover art change
             </label>
           </Row>
+          <RadioBrainRow
+            settings={settings}
+            onChange={(patch) => api.setSettings(patch).then(setSettings).catch(() => undefined)}
+          />
         </section>
 
         <section className="bevel-out flex flex-col gap-3 p-6">
@@ -1021,6 +1026,88 @@ function SkinWorkshop({
         })}
       </div>
     </section>
+  );
+}
+
+function RadioBrainRow({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (patch: Partial<AppSettings>) => void;
+}): JSX.Element {
+  const [status, setStatus] = useState<RadioBrainStatus | null>(null);
+  const enabled = settings.radioBrainEnabled;
+  const port = settings.radioBrainPort;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refresh(): Promise<void> {
+      try {
+        const next = await api.getRadioBrainStatus();
+        if (!cancelled) setStatus(next);
+      } catch {
+        /* ignore */
+      }
+    }
+    void refresh();
+    const handle = window.setInterval(refresh, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
+  }, [enabled, port]);
+
+  return (
+    <div className="mt-2 flex flex-col gap-2 rounded p-3" style={{ background: 'var(--panel-2)', border: '1px solid var(--line)' }}>
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--ink-2)' }}>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => onChange({ radioBrainEnabled: e.target.checked })}
+          />
+          <span className="font-bold" style={{ color: 'var(--accent)' }}>Library Radio Brain</span>
+          <span style={{ color: 'var(--muted)' }}>· broadcast the library as a local HTTP station</span>
+        </label>
+        <span className="ml-auto flex items-center gap-2">
+          <span className="text-[11px]" style={{ color: 'var(--muted)' }}>Port</span>
+          <input
+            type="number"
+            min={1024}
+            max={65535}
+            step={1}
+            value={port}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              if (Number.isFinite(next)) onChange({ radioBrainPort: Math.max(1024, Math.min(65535, Math.trunc(next))) });
+            }}
+            className="w-[90px] rounded px-2 py-1 text-[12px]"
+            style={{ background: 'var(--panel)', border: '1px solid var(--line)', color: 'var(--ink)' }}
+          />
+        </span>
+      </div>
+      {status?.enabled && status.baseUrl && (
+        <div className="text-[11px]" style={{ color: 'var(--ink-2)' }}>
+          Streaming at <a href={status.baseUrl} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>{status.baseUrl}</a>
+          {' '}— try{' '}
+          <code style={{ color: 'var(--accent)' }}>/library.m3u</code>,{' '}
+          <code style={{ color: 'var(--accent)' }}>/random.m3u</code>, or{' '}
+          <code style={{ color: 'var(--accent)' }}>/tag/{'<name>'}.m3u</code> in VLC.
+        </div>
+      )}
+      {!status?.enabled && enabled && (
+        <div className="text-[11px]" style={{ color: 'var(--muted)' }}>
+          {status?.error ? `Server error: ${status.error}` : 'Starting server…'}
+        </div>
+      )}
+      {!enabled && (
+        <div className="text-[11px]" style={{ color: 'var(--muted)' }}>
+          When enabled, NewAmp serves M3U playlists and audio streams on the local network so VLC,
+          Sonos, OBS, or any HTTP-aware client can tune your library.
+        </div>
+      )}
+    </div>
   );
 }
 
