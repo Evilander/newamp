@@ -4,6 +4,7 @@ import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
 import { PlaylistAppendPicker, TrackTable } from './LibraryView';
 import { api } from '../../lib/api';
+import { ScoreRating } from '../ScoreRating';
 
 const ALBUM_PAGE_SIZE = 240;
 const CATALOG_SEARCH_DEBOUNCE_MS = 180;
@@ -54,6 +55,7 @@ export function AlbumsView(): JSX.Element {
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
+  const setTrackRatingScore = usePlayerStore((s) => s.setTrackRatingScore);
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
   const setFullscreenViz = usePlayerStore((s) => s.setFullscreenViz);
   const current = usePlayerStore((s) => s.current);
@@ -296,6 +298,20 @@ export function AlbumsView(): JSX.Element {
     openAlbum(pick);
   }
 
+  const selectedAlbumScore = selected ? albumScore(tracks) : null;
+
+  async function setAlbumScore(score: number | null): Promise<void> {
+    if (!selected || !tracks.length) return;
+    const updated = await Promise.all(tracks.map((track) => setTrackRatingScore(track.id, score)));
+    const byId = new Map(updated.filter((track): track is Track => track != null).map((track) => [track.id, track]));
+    setTracks((rows) => rows.map((track) => byId.get(track.id) ?? track));
+    setScanStatus(
+      score == null
+        ? `Cleared album rating for ${selected.album}.`
+        : `Rated ${selected.album} ${score.toFixed(1)}/100.`,
+    );
+  }
+
   if (selected) {
     return (
       <div className="flex h-full flex-col">
@@ -314,6 +330,16 @@ export function AlbumsView(): JSX.Element {
               {selected.year ? `  ·  ${selected.year}` : ''}
               {`  ·  ${selected.trackCount} tracks  ·  ${formatDuration(selected.duration)}`}
             </div>
+          </div>
+          <div className="w-[230px] shrink-0" data-newamp-album-rating>
+            <div className="mb-1 text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+              Album Rating
+            </div>
+            <ScoreRating
+              value={selectedAlbumScore}
+              stars={Math.round((selectedAlbumScore ?? 0) / 20)}
+              onChange={(score) => void setAlbumScore(score)}
+            />
           </div>
           <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)}>
             ▶ Play album
@@ -491,6 +517,14 @@ function AlbumArt({ album, size = 64 }: { album: AlbumSummary; size?: number }):
       ♫
     </div>
   );
+}
+
+function albumScore(tracks: Track[]): number | null {
+  const scores = tracks
+    .map((track) => track.ratingScore ?? (track.rating > 0 ? track.rating * 20 : null))
+    .filter((score): score is number => score != null);
+  if (!scores.length) return null;
+  return Math.round((scores.reduce((sum, score) => sum + score, 0) / scores.length) * 10) / 10;
 }
 
 function useDebouncedValue<T>(value: T, delayMs: number): T {
