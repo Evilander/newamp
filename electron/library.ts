@@ -55,6 +55,7 @@ import {
   buildEvalEnvironment,
   evaluateRulesForTrack,
   parseRule,
+  topologicalSort,
   type ParsedRule,
   type TrackContext,
 } from '../shared/tag-dsl.js';
@@ -1848,6 +1849,17 @@ export class LibraryStore {
     }
     if (compiled.rule.name !== input.name) {
       throw new Error(`tag name mismatch: header "${input.name}", body "${compiled.rule.name}"`);
+    }
+    const otherRules = this.listTagRules()
+      .filter((rule) => rule.id !== input.id && rule.enabled)
+      .map((rule) => parseRule(rule.body).rule)
+      .filter((rule): rule is ParsedRule => rule != null);
+    try {
+      topologicalSort([...otherRules, compiled.rule]);
+    } catch (err) {
+      throw new Error(
+        `tag rule "${compiled.rule.name}" would form a cycle: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     const boost = Number.isFinite(input.boost) && input.boost! > 0 ? input.boost! : compiled.rule.boost;
     const now = Date.now();
