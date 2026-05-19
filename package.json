@@ -54,6 +54,8 @@
     "smoke:lastfm": "npm run build:electron && node scripts/lastfm-smoke.mjs",
     "smoke:lastfm-live-proof": "npm run build:electron && node scripts/lastfm-live-proof-smoke.mjs",
     "smoke:replaygain": "npm run build:electron && node scripts/replaygain-smoke.mjs",
+    "smoke:dna": "npm run build:electron && node scripts/dna-smoke.mjs",
+    "smoke:tags": "npm run build:electron && node scripts/tag-dsl-smoke.mjs",
     "smoke:session": "npm run build:electron && node scripts/session-smoke.mjs",
     "smoke:chrome-state": "npm run build:electron && node scripts/chrome-state-smoke.mjs",
     "smoke:skin": "npm run build:electron && node scripts/skin-smoke.mjs",

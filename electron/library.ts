@@ -37,6 +37,11 @@ import type {
   SmartPlaylistRule,
   SmartPlaylistRuleInput,
   SmartPlaylistSuggestion,
+  TagRecomputeOptions,
+  TagRecomputeResult,
+  TagRule,
+  TagRuleInput,
+  TagSummary,
   TasteMixInput,
   TrackQueryOptions,
   TrackMetadataPatchInput,
@@ -46,6 +51,14 @@ import type {
 } from '../shared/types.js';
 import { isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
 import {
+  buildEvalEnvironment,
+  evaluateRulesForTrack,
+  parseRule,
+  type ParsedRule,
+  type TrackContext,
+} from '../shared/tag-dsl.js';
+import {
+  audioExtension,
   classifyAudioQuality,
   CONTAINER_AUDIO_EXTENSIONS,
   DSD_EXTENSIONS,
@@ -209,6 +222,27 @@ CREATE TABLE IF NOT EXISTS smart_rules (
   updated_at     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_smart_rules_updated ON smart_rules(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS tag_rules (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT    UNIQUE NOT NULL,
+  body        TEXT    NOT NULL,
+  boost       REAL    NOT NULL DEFAULT 1,
+  enabled     INTEGER NOT NULL DEFAULT 1,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  last_error  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tag_rules_updated ON tag_rules(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS track_tags (
+  track_id    INTEGER NOT NULL,
+  tag_name    TEXT    NOT NULL,
+  PRIMARY KEY (track_id, tag_name),
+  FOREIGN KEY (track_id) REFERENCES tracks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_track_tags_name ON track_tags(tag_name);
+CREATE INDEX IF NOT EXISTS idx_track_tags_track ON track_tags(track_id);
 `;
 
 interface RawRow {
@@ -259,6 +293,17 @@ interface SmartRuleRow {
   unplayed_only: number;
   created_at: number;
   updated_at: number;
+}
+
+interface TagRuleRow {
+  id: number;
+  name: string;
+  body: string;
+  boost: number;
+  enabled: number;
+  created_at: number;
+  updated_at: number;
+  last_error: string | null;
 }
 
 interface TrackSearchToken {
@@ -366,6 +411,19 @@ function rowToTrack(r: RawRow): Track {
     key: r.key,
     replayGainTrackDb: r.replaygain_track_db,
     replayGainAlbumDb: r.replaygain_album_db,
+  };
+}
+
+function rowToTagRule(row: TagRuleRow): TagRule {
+  return {
+    id: row.id,
+    name: row.name,
+    body: row.body,
+    boost: Number(row.boost) || 1,
+    enabled: row.enabled !== 0,
+    createdAt: Number(row.created_at) || 0,
+    updatedAt: Number(row.updated_at) || 0,
+    lastError: row.last_error,
   };
 }
 
@@ -1764,6 +1822,278 @@ export class LibraryStore {
     this.scheduleFlush();
   }
 
+  listTagRules(): TagRule[] {
+    const rows = this.many<TagRuleRow>(
+      `SELECT id, name, body, boost, enabled, created_at, updated_at, last_error
+       FROM tag_rules ORDER BY updated_at DESC`,
+    );
+    return rows.map(rowToTagRule);
+  }
+
+  getTagRule(id: number): TagRule | null {
+    const row = this.one<TagRuleRow>(
+      `SELECT id, name, body, boost, enabled, created_at, updated_at, last_error
+       FROM tag_rules WHERE id = ?`,
+      [Math.trunc(id)],
+    );
+    return row ? rowToTagRule(row) : null;
+  }
+
+  saveTagRule(input: TagRuleInput): TagRule {
+    const compiled = parseRule(input.body);
+    if (!compiled.rule) {
+      const err = compiled.errors[0];
+      throw new Error(`tag rule "${input.name}" failed to parse: ${err?.message ?? 'unknown error'}`);
+    }
+    if (compiled.rule.name !== input.name) {
+      throw new Error(`tag name mismatch: header "${input.name}", body "${compiled.rule.name}"`);
+    }
+    const boost = Number.isFinite(input.boost) && input.boost! > 0 ? input.boost! : compiled.rule.boost;
+    const now = Date.now();
+    const enabled = input.enabled === false ? 0 : 1;
+    const trimmedBody = input.body.trim();
+    if (input.id) {
+      this.db.run(
+        `UPDATE tag_rules SET name = ?, body = ?, boost = ?, enabled = ?, updated_at = ?, last_error = NULL WHERE id = ?`,
+        [compiled.rule.name, trimmedBody, boost, enabled, now, Math.trunc(input.id)],
+      );
+      this.scheduleFlush();
+      const saved = this.getTagRule(input.id);
+      if (!saved) throw new Error(`tag rule ${input.id} disappeared after update`);
+      return saved;
+    }
+    this.db.run(
+      `INSERT INTO tag_rules (name, body, boost, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [compiled.rule.name, trimmedBody, boost, enabled, now, now],
+    );
+    const row = this.one<{ id: number }>(`SELECT id FROM tag_rules WHERE name = ?`, [compiled.rule.name]);
+    this.scheduleFlush();
+    const saved = row ? this.getTagRule(row.id) : null;
+    if (!saved) throw new Error(`tag rule ${compiled.rule.name} could not be loaded after insert`);
+    return saved;
+  }
+
+  deleteTagRule(id: number): void {
+    const rule = this.getTagRule(id);
+    if (!rule) return;
+    this.db.run(`DELETE FROM track_tags WHERE tag_name = ?`, [rule.name]);
+    this.db.run(`DELETE FROM tag_rules WHERE id = ?`, [Math.trunc(id)]);
+    this.scheduleFlush();
+  }
+
+  setTagRuleEnabled(id: number, enabled: boolean): TagRule | null {
+    this.db.run(`UPDATE tag_rules SET enabled = ?, updated_at = ? WHERE id = ?`,
+      [enabled ? 1 : 0, Date.now(), Math.trunc(id)]);
+    this.scheduleFlush();
+    const rule = this.getTagRule(id);
+    if (rule && !enabled) {
+      this.db.run(`DELETE FROM track_tags WHERE tag_name = ?`, [rule.name]);
+      this.scheduleFlush();
+    }
+    return rule;
+  }
+
+  getTagsForTrack(id: number): string[] {
+    const rows = this.many<{ tag_name: string }>(
+      `SELECT tag_name FROM track_tags WHERE track_id = ? ORDER BY tag_name`,
+      [Math.trunc(id)],
+    );
+    return rows.map((row) => row.tag_name);
+  }
+
+  getTrackIdsByTag(name: string): number[] {
+    const tag = String(name || '').toLowerCase();
+    if (!tag) return [];
+    const rows = this.many<{ track_id: number }>(
+      `SELECT track_id FROM track_tags WHERE tag_name = ?`,
+      [tag],
+    );
+    return rows.map((row) => row.track_id);
+  }
+
+  previewTagRule(input: { body: string; limit?: number }): {
+    ok: boolean;
+    errors: { message: string; line: number; column: number }[];
+    ruleName: string | null;
+    references: string[];
+    matchCount: number;
+    sampleTrackIds: number[];
+  } {
+    const compiled = parseRule(String(input.body || ''));
+    if (!compiled.rule) {
+      return { ok: false, errors: compiled.errors, ruleName: null, references: [], matchCount: 0, sampleTrackIds: [] };
+    }
+    const env = buildEvalEnvironment();
+    const otherRules = this.listTagRules().filter((r) => r.enabled && r.name !== compiled.rule!.name);
+    const parsedOthers: ParsedRule[] = [];
+    for (const rule of otherRules) {
+      const c = parseRule(rule.body);
+      if (c.rule) parsedOthers.push({ ...c.rule, boost: rule.boost });
+    }
+    const rules: ParsedRule[] = [...parsedOthers, compiled.rule];
+    const limit = Math.max(1, Math.min(10000, Math.trunc(input.limit ?? 2000)));
+    const rows = this.many<RawRow>(`SELECT * FROM tracks LIMIT ${limit}`);
+    let matchCount = 0;
+    const samples: number[] = [];
+    for (const row of rows) {
+      const track = rowToTrack(row);
+      const dna = this.getTrackDna(track.id);
+      const baseContext: Omit<TrackContext, 'tags'> = {
+        id: track.id,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        albumArtist: track.albumArtist,
+        genre: track.genre,
+        year: track.year,
+        duration: track.duration,
+        bitrate: track.bitrate,
+        sampleRate: track.sampleRate,
+        size: track.size,
+        mtime: track.mtime,
+        bpm: track.bpm,
+        key: track.key,
+        format: audioExtension(track.path),
+        rating: track.rating,
+        ratingScore: track.ratingScore,
+        playCount: track.playCount,
+        skipCount: track.skipCount,
+        lastPlayed: track.lastPlayed,
+        lastSkipped: track.lastSkipped,
+        loved: Boolean(track.loved),
+        avoidAutoPlay: Boolean(track.avoidAutoPlay),
+        replayGainTrack: track.replayGainTrackDb,
+        replayGainAlbum: track.replayGainAlbumDb,
+        dna,
+      };
+      const evaluation = evaluateRulesForTrack({ rules, context: baseContext, env });
+      if (evaluation.tags.has(compiled.rule.name)) {
+        matchCount += 1;
+        if (samples.length < 12) samples.push(track.id);
+      }
+    }
+    return {
+      ok: true,
+      errors: [],
+      ruleName: compiled.rule.name,
+      references: compiled.rule.references,
+      matchCount,
+      sampleTrackIds: samples,
+    };
+  }
+
+  getTagSummaries(): TagSummary[] {
+    const rules = this.listTagRules();
+    const boostByName = new Map(rules.map((r) => [r.name, r.boost] as const));
+    const enabledByName = new Map(rules.map((r) => [r.name, r.enabled] as const));
+    const rows = this.many<{ tag_name: string; count: number }>(
+      `SELECT tag_name, COUNT(*) as count FROM track_tags GROUP BY tag_name ORDER BY count DESC`,
+    );
+    return rows.map((row) => ({
+      name: row.tag_name,
+      trackCount: row.count,
+      boost: boostByName.get(row.tag_name) ?? 1,
+      enabled: enabledByName.get(row.tag_name) ?? true,
+    }));
+  }
+
+  recomputeTags(opts: TagRecomputeOptions = {}): TagRecomputeResult {
+    const rules = this.listTagRules().filter((r) => r.enabled);
+    const parsedRules: ParsedRule[] = [];
+    const errors: Record<string, string> = {};
+    for (const rule of rules) {
+      const compiled = parseRule(rule.body);
+      if (!compiled.rule) {
+        const message = compiled.errors[0]?.message ?? 'parse error';
+        errors[rule.name] = message;
+        this.db.run(`UPDATE tag_rules SET last_error = ? WHERE id = ?`, [message, rule.id]);
+        continue;
+      }
+      parsedRules.push({ ...compiled.rule, boost: rule.boost });
+      this.db.run(`UPDATE tag_rules SET last_error = NULL WHERE id = ?`, [rule.id]);
+    }
+    if (!parsedRules.length) {
+      this.db.run(`DELETE FROM track_tags`);
+      this.scheduleFlush();
+      return { rulesEvaluated: 0, tracksEvaluated: 0, tagsAssigned: 0, errors };
+    }
+
+    const env = buildEvalEnvironment(opts.now);
+    const targetIds = opts.trackIds && opts.trackIds.length
+      ? opts.trackIds.map((id) => Math.trunc(Number(id))).filter((n) => Number.isFinite(n) && n > 0)
+      : null;
+    const limitSql = opts.limit ? ` LIMIT ${Math.max(1, Math.trunc(opts.limit))}` : '';
+    const rows = targetIds
+      ? this.many<RawRow>(
+          `SELECT * FROM tracks WHERE id IN (${targetIds.map(() => '?').join(',') || '0'})${limitSql}`,
+          targetIds,
+        )
+      : this.many<RawRow>(`SELECT * FROM tracks${limitSql}`);
+
+    if (targetIds) {
+      this.db.run(
+        `DELETE FROM track_tags WHERE track_id IN (${targetIds.map(() => '?').join(',') || '0'})`,
+        targetIds,
+      );
+    } else {
+      this.db.run(`DELETE FROM track_tags`);
+    }
+
+    let tagsAssigned = 0;
+    let tracksEvaluated = 0;
+    for (const row of rows) {
+      const track = rowToTrack(row);
+      const dna = this.getTrackDna(track.id);
+      const baseContext: Omit<TrackContext, 'tags'> = {
+        id: track.id,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        albumArtist: track.albumArtist,
+        genre: track.genre,
+        year: track.year,
+        duration: track.duration,
+        bitrate: track.bitrate,
+        sampleRate: track.sampleRate,
+        size: track.size,
+        mtime: track.mtime,
+        bpm: track.bpm,
+        key: track.key,
+        format: audioExtension(track.path),
+        rating: track.rating,
+        ratingScore: track.ratingScore,
+        playCount: track.playCount,
+        skipCount: track.skipCount,
+        lastPlayed: track.lastPlayed,
+        lastSkipped: track.lastSkipped,
+        loved: Boolean(track.loved),
+        avoidAutoPlay: Boolean(track.avoidAutoPlay),
+        replayGainTrack: track.replayGainTrackDb,
+        replayGainAlbum: track.replayGainAlbumDb,
+        dna,
+      };
+      try {
+        const evaluation = evaluateRulesForTrack({ rules: parsedRules, context: baseContext, env });
+        for (const tag of evaluation.tags) {
+          this.db.run(
+            `INSERT OR IGNORE INTO track_tags (track_id, tag_name) VALUES (?, ?)`,
+            [track.id, tag],
+          );
+          tagsAssigned += 1;
+        }
+        for (const [tagName, ruleErrors] of evaluation.errors) {
+          if (ruleErrors.length) errors[tagName] = ruleErrors[0]!;
+        }
+      } catch (err) {
+        errors.__recompute__ = err instanceof Error ? err.message : String(err);
+      }
+      tracksEvaluated += 1;
+    }
+    this.scheduleFlush();
+    return { rulesEvaluated: parsedRules.length, tracksEvaluated, tagsAssigned, errors };
+  }
+
   runSmartPlaylistRule(input: number | SmartPlaylistRuleInput): Track[] {
     const rule = typeof input === 'number'
       ? this.getSmartRule(Math.trunc(input))
@@ -2610,6 +2940,8 @@ function parseTrackSearchQuery(input: string): ParsedTrackSearch {
     'rating',
     'stars',
     'path',
+    'tag',
+    'untagged',
   ]);
   const tokens = tokenizeSearch(input);
   const terms: string[] = [];
@@ -2746,6 +3078,19 @@ function applyTrackSearchFilter(
   if (field === 'rating' || field === 'stars') return pushRatingFilter(where, params, value);
   if (field === 'missing') return pushMissingFilter(where, value, false);
   if (field === 'has') return pushMissingFilter(where, value, true);
+  if (field === 'tag') {
+    where.push(`EXISTS (SELECT 1 FROM track_tags tt WHERE tt.track_id = tracks.id AND tt.tag_name = ?)`);
+    params.push(value.toLowerCase());
+    return;
+  }
+  if (field === 'untagged') {
+    if (truthySearchValue(value)) {
+      where.push(`NOT EXISTS (SELECT 1 FROM track_tags tt WHERE tt.track_id = tracks.id)`);
+    } else {
+      where.push(`EXISTS (SELECT 1 FROM track_tags tt WHERE tt.track_id = tracks.id)`);
+    }
+    return;
+  }
 }
 
 function pushTextFilter(where: string[], params: unknown[], column: string, value: string): void {

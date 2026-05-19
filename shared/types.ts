@@ -2,6 +2,59 @@
 
 import type { TrackDna as TrackDnaPublic } from './audio-dna.js';
 
+export interface TagRule {
+  id: number;
+  name: string;
+  body: string;
+  boost: number;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastError: string | null;
+}
+
+export interface TagRuleInput {
+  id?: number;
+  name: string;
+  body: string;
+  boost?: number;
+  enabled?: boolean;
+}
+
+export interface TagRecomputeOptions {
+  trackIds?: number[];
+  limit?: number;
+  now?: number;
+}
+
+export interface TagRecomputeResult {
+  rulesEvaluated: number;
+  tracksEvaluated: number;
+  tagsAssigned: number;
+  errors: Record<string, string>;
+}
+
+export interface TagSummary {
+  name: string;
+  trackCount: number;
+  boost: number;
+  enabled: boolean;
+}
+
+export interface TagRulePreviewInput {
+  body: string;
+  limit?: number;
+}
+
+export interface TagRulePreviewResult {
+  ok: boolean;
+  errors: { message: string; line: number; column: number }[];
+  ruleName: string | null;
+  references: string[];
+  matchCount: number;
+  sampleTrackIds: number[];
+}
+
 export interface Track {
   id: number;
   path: string;
@@ -858,6 +911,15 @@ export interface NewAmpAPI {
   saveSmartPlaylistRule: (input: SmartPlaylistRuleInput) => Promise<SmartPlaylistRule>;
   deleteSmartPlaylistRule: (id: number) => Promise<void>;
   runSmartPlaylistRule: (input: number | SmartPlaylistRuleInput) => Promise<Track[]>;
+  listTagRules: () => Promise<TagRule[]>;
+  saveTagRule: (input: TagRuleInput) => Promise<TagRule>;
+  deleteTagRule: (id: number) => Promise<void>;
+  setTagRuleEnabled: (id: number, enabled: boolean) => Promise<TagRule | null>;
+  recomputeTags: (opts?: TagRecomputeOptions) => Promise<TagRecomputeResult>;
+  getTagsForTrack: (id: number) => Promise<string[]>;
+  getTagSummaries: () => Promise<TagSummary[]>;
+  previewTagRule: (input: TagRulePreviewInput) => Promise<TagRulePreviewResult>;
+  getTrackIdsByTag: (name: string) => Promise<number[]>;
   buildHarmonicMix: (input?: HarmonicMixInput) => Promise<Track[]>;
   buildTasteMix: (input?: TasteMixInput) => Promise<Track[]>;
   lastfmStartAuth: () => Promise<LastfmAuthStart>;

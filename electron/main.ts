@@ -1052,6 +1052,25 @@ function registerIpc(): void {
   ipcMain.handle('tracks:dna-missing-ids', async (_e, limit?: number) => library.getTrackIdsMissingDna(limit ?? 100));
   ipcMain.handle('tracks:dna-stats', async () => library.getDnaStats());
   ipcMain.handle('tracks:dna-all', async () => library.getAllTrackDna());
+  ipcMain.handle('tags:list-rules', async () => library.listTagRules());
+  ipcMain.handle('tags:save-rule', async (_e, input) => {
+    const saved = library.saveTagRule(input);
+    library.recomputeTags();
+    return saved;
+  });
+  ipcMain.handle('tags:delete-rule', async (_e, id: number) => {
+    library.deleteTagRule(id);
+  });
+  ipcMain.handle('tags:set-rule-enabled', async (_e, id: number, enabled: boolean) => {
+    const rule = library.setTagRuleEnabled(id, enabled);
+    library.recomputeTags();
+    return rule;
+  });
+  ipcMain.handle('tags:recompute', async (_e, opts) => library.recomputeTags(opts));
+  ipcMain.handle('tags:for-track', async (_e, id: number) => library.getTagsForTrack(id));
+  ipcMain.handle('tags:summaries', async () => library.getTagSummaries());
+  ipcMain.handle('tags:preview-rule', async (_e, input) => library.previewTagRule(input));
+  ipcMain.handle('tags:track-ids-by-tag', async (_e, name: string) => library.getTrackIdsByTag(name));
   ipcMain.handle('open:consume-pending-files', async () => {
     const files = pendingOpenFiles;
     pendingOpenFiles = [];

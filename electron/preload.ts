@@ -40,6 +40,13 @@ import type {
   DnaStats,
   ReplayGainAnalysisResult,
   SavedPlaylist,
+  TagRecomputeOptions,
+  TagRecomputeResult,
+  TagRule,
+  TagRuleInput,
+  TagRulePreviewInput,
+  TagRulePreviewResult,
+  TagSummary,
   TracksDnaAnalysisResult,
   SavePlaylistInput,
   SaveTrackBookmarkInput,
@@ -164,6 +171,18 @@ const api: NewAmpAPI = {
   deleteSmartPlaylistRule: (id: number) => ipcRenderer.invoke('smart:delete', id) as Promise<void>,
   runSmartPlaylistRule: (input: number | SmartPlaylistRuleInput) =>
     ipcRenderer.invoke('smart:run', input) as Promise<Track[]>,
+  listTagRules: () => ipcRenderer.invoke('tags:list-rules') as Promise<TagRule[]>,
+  saveTagRule: (input: TagRuleInput) => ipcRenderer.invoke('tags:save-rule', input) as Promise<TagRule>,
+  deleteTagRule: (id: number) => ipcRenderer.invoke('tags:delete-rule', id) as Promise<void>,
+  setTagRuleEnabled: (id: number, enabled: boolean) =>
+    ipcRenderer.invoke('tags:set-rule-enabled', id, enabled) as Promise<TagRule | null>,
+  recomputeTags: (opts?: TagRecomputeOptions) =>
+    ipcRenderer.invoke('tags:recompute', opts) as Promise<TagRecomputeResult>,
+  getTagsForTrack: (id: number) => ipcRenderer.invoke('tags:for-track', id) as Promise<string[]>,
+  getTagSummaries: () => ipcRenderer.invoke('tags:summaries') as Promise<TagSummary[]>,
+  previewTagRule: (input: TagRulePreviewInput) =>
+    ipcRenderer.invoke('tags:preview-rule', input) as Promise<TagRulePreviewResult>,
+  getTrackIdsByTag: (name: string) => ipcRenderer.invoke('tags:track-ids-by-tag', name) as Promise<number[]>,
   buildHarmonicMix: (input?: HarmonicMixInput) =>
     ipcRenderer.invoke('smart:harmonic-mix', input) as Promise<Track[]>,
   buildTasteMix: (input?: TasteMixInput) =>
