@@ -3,6 +3,7 @@ import type { FolderSummary, SavedPlaylist, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
 import { api } from '../../lib/api';
+import { spectralArtDataUrl } from '@shared/spectral-art';
 import { TrackTable } from './LibraryView';
 import { LoadMoreFooter } from './LoadMoreFooter';
 
@@ -280,19 +281,15 @@ function FolderArt({ folder, size }: { folder: FolderSummary; size: number }): J
     );
   }
   return (
-    <div
-      className="flex items-center justify-center text-[16px]"
-      style={{
-        width: size,
-        height: size,
-        background: 'var(--panel-2)',
-        border: '1px solid var(--line)',
-        borderRadius: 'var(--radius-card)',
-        color: 'var(--muted)',
-      }}
-    >
-      DIR
-    </div>
+    <img
+      src={spectralArtDataUrl({ artist: folder.parentPath ?? '', album: folder.name }, Math.max(96, size * 2))}
+      alt={`${folder.name} (spectral cover)`}
+      width={size}
+      height={size}
+      style={{ borderRadius: 'var(--radius-card)', boxShadow: 'var(--shadow-card)' }}
+      title="Spectral cover (auto-generated)"
+      draggable={false}
+    />
   );
 }
 
