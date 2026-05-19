@@ -44,6 +44,7 @@ import type {
   Track,
   RecoveryEvent,
 } from '../shared/types.js';
+import { isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
 import {
   classifyAudioQuality,
   CONTAINER_AUDIO_EXTENSIONS,
@@ -522,6 +523,8 @@ export class LibraryStore {
       this.ensureColumn('tracks', 'last_skipped', 'INTEGER');
       this.ensureColumn('tracks', 'replaygain_track_db', 'REAL');
       this.ensureColumn('tracks', 'replaygain_album_db', 'REAL');
+      this.ensureColumn('tracks', 'dna_json', 'TEXT');
+      this.ensureColumn('tracks', 'dna_analyzed_at', 'INTEGER');
       this.ensureColumn('smart_rules', 'min_rating', 'INTEGER');
       this.ensureColumn('smart_rules', 'search_query', 'TEXT');
       this.ensureColumn('playlists', 'cover_art_path', 'TEXT');
@@ -1895,6 +1898,73 @@ export class LibraryStore {
     if (this.db.getRowsModified() <= 0) return null;
     this.scheduleFlush();
     return this.getTrack(trackId);
+  }
+
+  setTrackDna(id: number, dna: TrackDna | null): boolean {
+    const trackId = Math.trunc(Number(id));
+    if (!Number.isFinite(trackId) || trackId <= 0) return false;
+    if (dna == null) {
+      this.db.run(`UPDATE tracks SET dna_json = NULL, dna_analyzed_at = NULL WHERE id = ?`, [trackId]);
+    } else {
+      const json = JSON.stringify(dna);
+      const now = Date.now();
+      this.db.run(`UPDATE tracks SET dna_json = ?, dna_analyzed_at = ? WHERE id = ?`, [json, now, trackId]);
+    }
+    if (this.db.getRowsModified() <= 0) return false;
+    this.scheduleFlush();
+    return true;
+  }
+
+  getTrackDna(id: number): TrackDna | null {
+    const trackId = Math.trunc(Number(id));
+    if (!Number.isFinite(trackId) || trackId <= 0) return null;
+    const row = this.one<{ dna_json: string | null }>(
+      `SELECT dna_json FROM tracks WHERE id = ?`,
+      [trackId],
+    );
+    if (!row?.dna_json) return null;
+    try {
+      const parsed = JSON.parse(row.dna_json);
+      return isValidTrackDna(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  getTrackIdsMissingDna(limit = 100): number[] {
+    const cap = Math.max(1, Math.min(5000, Math.trunc(Number(limit) || 100)));
+    const rows = this.many<{ id: number }>(
+      `SELECT id FROM tracks WHERE dna_json IS NULL ORDER BY (loved + rating + (rating_score IS NOT NULL)) DESC, mtime DESC LIMIT ?`,
+      [cap],
+    );
+    return rows.map((row) => row.id);
+  }
+
+  getAllTrackDna(): Array<{ id: number; dna: TrackDna }> {
+    const rows = this.many<{ id: number; dna_json: string | null }>(
+      `SELECT id, dna_json FROM tracks WHERE dna_json IS NOT NULL`,
+    );
+    const out: Array<{ id: number; dna: TrackDna }> = [];
+    for (const row of rows) {
+      if (!row.dna_json) continue;
+      try {
+        const parsed = JSON.parse(row.dna_json);
+        if (isValidTrackDna(parsed)) out.push({ id: row.id, dna: parsed });
+      } catch {
+        /* skip corrupt */
+      }
+    }
+    return out;
+  }
+
+  getDnaStats(): { analyzed: number; missing: number; total: number } {
+    const totalRow = this.one<{ count: number }>(`SELECT COUNT(*) as count FROM tracks`);
+    const analyzedRow = this.one<{ count: number }>(
+      `SELECT COUNT(*) as count FROM tracks WHERE dna_json IS NOT NULL`,
+    );
+    const total = Number(totalRow?.count ?? 0);
+    const analyzed = Number(analyzedRow?.count ?? 0);
+    return { analyzed, missing: Math.max(0, total - analyzed), total };
   }
 
   setTrackReplayGain(id: number, replayGainTrackDb: number, replayGainAlbumDb?: number | null): Track | null {

@@ -48,6 +48,7 @@ import {
   transcodeTracksToAudioFolder,
   transcodeTracksToWavFolder,
 } from './transcode.js';
+import { analyzeTrackDna } from './dna-analyzer.js';
 import { exportPlaylistFolder } from './playlist-export.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
 import { generateOpenAiLinerNotes } from './openai-assist.js';
@@ -1046,6 +1047,11 @@ function registerIpc(): void {
   });
   ipcMain.handle('tracks:analyze-replaygain', async (_e, ids: number[]) => analyzeReplayGain(ids));
   ipcMain.handle('tracks:analyze-album-replaygain', async (_e, ids: number[]) => analyzeAlbumReplayGain(ids));
+  ipcMain.handle('tracks:analyze-dna', async (_e, ids: number[]) => analyzeTracksDna(ids));
+  ipcMain.handle('tracks:dna-get', async (_e, id: number) => library.getTrackDna(id));
+  ipcMain.handle('tracks:dna-missing-ids', async (_e, limit?: number) => library.getTrackIdsMissingDna(limit ?? 100));
+  ipcMain.handle('tracks:dna-stats', async () => library.getDnaStats());
+  ipcMain.handle('tracks:dna-all', async () => library.getAllTrackDna());
   ipcMain.handle('open:consume-pending-files', async () => {
     const files = pendingOpenFiles;
     pendingOpenFiles = [];
@@ -2949,6 +2955,22 @@ function resolveExportTracks(ids: number[]): Track[] {
     if (track) tracks.push(track);
   }
   return tracks;
+}
+
+async function analyzeTracksDna(ids: number[]): Promise<{ analyzed: number; skipped: string[]; total: number }> {
+  const tracks = resolveExportTracks(ids);
+  let analyzed = 0;
+  const skipped: string[] = [];
+  for (const track of tracks) {
+    try {
+      const dna = await analyzeTrackDna(track.path);
+      if (library.setTrackDna(track.id, dna)) analyzed++;
+      else skipped.push(`${track.artist} - ${track.title}: not updated`);
+    } catch (err) {
+      skipped.push(`${track.artist} - ${track.title}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return { analyzed, skipped, total: tracks.length };
 }
 
 async function analyzeReplayGain(ids: number[]) {
