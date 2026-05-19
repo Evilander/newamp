@@ -41,7 +41,16 @@ const DEFAULTS: AppSettings = {
   eqEnabled: false,
   radioBrainEnabled: false,
   radioBrainPort: 17117,
+  audioBitPerfectPath: false,
+  audioPreferredSampleRate: null,
 };
+
+function normalizePreferredSampleRate(value: unknown): number | null {
+  if (value == null) return null;
+  const rate = Math.trunc(Number(value));
+  const ALLOWED = new Set([44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000]);
+  return ALLOWED.has(rate) ? rate : null;
+}
 
 function normalizeRadioBrainPort(value: unknown): number {
   const port = Math.trunc(Number(value));
@@ -129,6 +138,8 @@ export class SettingsStore {
           autoDjSmartRuleId: normalizeAutoDjSmartRuleId(parsed.autoDjSmartRuleId),
           radioBrainEnabled: parsed.radioBrainEnabled === true,
           radioBrainPort: normalizeRadioBrainPort(parsed.radioBrainPort),
+          audioBitPerfectPath: parsed.audioBitPerfectPath === true,
+          audioPreferredSampleRate: normalizePreferredSampleRate(parsed.audioPreferredSampleRate),
         };
       } catch (err) {
         const event = quarantineCorruptFile(this.file, 'settings', recoveryReason(err));
