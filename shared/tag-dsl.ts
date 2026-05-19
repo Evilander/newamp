@@ -850,7 +850,7 @@ function evalBinary(node: Extract<AstNode, { kind: 'binary' }>, ctx: TrackContex
     const s = stringValue(left);
     const pattern = stringValue(right);
     if (s == null || pattern == null) return null;
-    try { return new RegExp(pattern, 'i').test(s); } catch { return null; }
+    return safeRegexTest(pattern, s);
   }
 
   if (node.op === 'contains') {
