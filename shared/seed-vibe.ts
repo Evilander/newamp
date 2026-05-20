@@ -1,29 +1,44 @@
 import type { Track } from './types.js';
 import { dnaCosineSimilarity, type TrackDna } from './audio-dna.js';
 
-export interface SeedVibeOptions {
+/**
+ * Precomputed seed-side context. Build once per mix call (NOT per candidate)
+ * via `createSeedVibeContext`; reuse for every candidate. This hoists three
+ * per-call costs that used to happen per-candidate in the old API:
+ *   - `genreTokens(seed.genre)` allocation
+ *   - The seed-side `Set` build for Jaccard
+ *   - `normalize(seed.artist)` / `normalize(seed.album)`
+ *
+ * On a 10k-candidate mix that saves ~30k allocations per call.
+ */
+export interface SeedVibeContext {
   seed: Track;
-  seedDna?: TrackDna | null;
-  /** Lookup function for candidate DNA. May return null if unanalyzed. */
-  getDna?: (trackId: number) => TrackDna | null;
+  seedDna: TrackDna | null;
+  /** @internal */ readonly seedGenres: string[];
+  /** @internal */ readonly seedGenreSet: Set<string>;
+  /** @internal */ readonly seedArtist: string;
+  /** @internal */ readonly seedAlbum: string;
+  /** @internal */ readonly hasGenreSignal: boolean;
 }
 
-export interface SeedVibeBreakdown {
-  total: number;
-  dna: number;
-  genre: number;
-  artist: number;
-  album: number;
-  era: number;
-  bpm: number;
-  hasDnaSignal: boolean;
-  hasGenreSignal: boolean;
+export function createSeedVibeContext(seed: Track, seedDna: TrackDna | null = null): SeedVibeContext {
+  const seedGenres = genreTokens(seed.genre);
+  return {
+    seed,
+    seedDna,
+    seedGenres,
+    seedGenreSet: new Set(seedGenres),
+    seedArtist: normalize(seed.artist),
+    seedAlbum: normalize(seed.album),
+    hasGenreSignal: seedGenres.length > 0,
+  };
 }
 
 /**
  * Score how vibe-similar a candidate is to the mix seed. Returns 0..1.
  *
- * The score blends multiple soft signals so missing metadata never zeros it out:
+ * The score blends multiple soft signals so missing metadata never zeros it
+ * out:
  *   - DNA cosine (strongest when both tracks are analyzed)
  *   - Genre token Jaccard
  *   - Artist match
@@ -37,33 +52,28 @@ export interface SeedVibeBreakdown {
  */
 export function seedVibeSimilarity(
   candidate: Track,
-  options: SeedVibeOptions,
-): SeedVibeBreakdown {
-  const { seed, seedDna = null, getDna } = options;
-  const candidateDna = getDna ? getDna(candidate.id) : null;
-
+  ctx: SeedVibeContext,
+  candidateDna: TrackDna | null = null,
+): number {
   let dna = 0;
   let hasDnaSignal = false;
-  if (seedDna && candidateDna) {
-    dna = dnaCosineSimilarity(seedDna, candidateDna);
+  if (ctx.seedDna && candidateDna) {
+    dna = dnaCosineSimilarity(ctx.seedDna, candidateDna);
     hasDnaSignal = true;
   }
 
-  const seedGenres = genreTokens(seed.genre);
   const candidateGenres = genreTokens(candidate.genre);
-  const genre = jaccard(seedGenres, candidateGenres);
-  const hasGenreSignal = seedGenres.length > 0 && candidateGenres.length > 0;
+  const genre = jaccardAgainstSeed(candidateGenres, ctx.seedGenreSet);
+  const hasGenreSignal = ctx.hasGenreSignal && candidateGenres.length > 0;
 
-  const artist =
-    normalize(candidate.artist) && normalize(candidate.artist) === normalize(seed.artist) ? 1 : 0;
-  const album =
-    normalize(candidate.album) && normalize(candidate.album) === normalize(seed.album) ? 1 : 0;
+  const candidateArtist = normalize(candidate.artist);
+  const candidateAlbum = normalize(candidate.album);
+  const artist = candidateArtist && candidateArtist === ctx.seedArtist ? 1 : 0;
+  const album = candidateAlbum && candidateAlbum === ctx.seedAlbum ? 1 : 0;
 
-  const era = eraProximity(seed.year, candidate.year);
-  const bpm = bpmProximity(seed.bpm, candidate.bpm);
+  const era = eraProximity(ctx.seed.year, candidate.year);
+  const bpm = bpmProximity(ctx.seed.bpm, candidate.bpm);
 
-  // Adaptive blending: if we have DNA for both, lean on it; otherwise lean on
-  // genre + era. Artist match is always a strong anchor.
   let total: number;
   if (hasDnaSignal && hasGenreSignal) {
     total = 0.42 * dna + 0.28 * genre + 0.14 * era + 0.1 * artist + 0.04 * album + 0.02 * bpm;
@@ -72,25 +82,23 @@ export function seedVibeSimilarity(
   } else if (hasGenreSignal) {
     total = 0.5 * genre + 0.22 * era + 0.2 * artist + 0.06 * album + 0.02 * bpm;
   } else {
-    // No DNA, no genre — fall back to era + artist + bpm so we don't return 0
-    // for everything (which would make the seed gate useless).
     total = 0.4 * era + 0.4 * artist + 0.15 * album + 0.05 * bpm;
   }
 
-  // Artist match should always be a strong floor.
   if (artist === 1) total = Math.max(total, 0.55);
 
-  return {
-    total: clamp01(total),
-    dna,
-    genre,
-    artist,
-    album,
-    era,
-    bpm,
-    hasDnaSignal,
-    hasGenreSignal,
-  };
+  return clamp01(total);
+}
+
+/**
+ * Apply the multiplicative seed-vibe gate on top of a base taste/harmonic
+ * score. Off-vibe tracks (vibe ≈ 0) keep 15% of their base score so the mix
+ * still has some serendipity; on-vibe tracks (vibe ≈ 1) get full credit. This
+ * was previously inlined in `electron/library.ts` — moved here so the gate
+ * constant lives with the formula it gates.
+ */
+export function applySeedVibeGate(baseScore: number, vibe: number): number {
+  return baseScore * (0.15 + 0.85 * vibe);
 }
 
 function genreTokens(value: string | null): string[] {
@@ -101,13 +109,17 @@ function genreTokens(value: string | null): string[] {
     .filter(Boolean);
 }
 
-function jaccard(a: string[], b: string[]): number {
-  if (!a.length || !b.length) return 0;
-  const setA = new Set(a);
-  const setB = new Set(b);
+/**
+ * Jaccard similarity of a fresh candidate token list against a precomputed
+ * seed Set. We only build one Set per candidate (instead of two like the old
+ * `jaccard(a, b)`), which halves the per-candidate allocation pressure.
+ */
+function jaccardAgainstSeed(candidateGenres: string[], seedSet: Set<string>): number {
+  if (candidateGenres.length === 0 || seedSet.size === 0) return 0;
   let intersect = 0;
-  for (const t of setA) if (setB.has(t)) intersect += 1;
-  const union = setA.size + setB.size - intersect;
+  const candidateSet = new Set(candidateGenres);
+  for (const t of candidateSet) if (seedSet.has(t)) intersect += 1;
+  const union = seedSet.size + candidateSet.size - intersect;
   return union === 0 ? 0 : intersect / union;
 }
 

@@ -3,6 +3,54 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.3] - 2026-05-20
+
+Bug-fix and review-followup pass. Six review-flagged blockers, nine high-priority issues, and ten nice-to-haves resolved, plus durable regression smokes for the algorithmic surfaces (seed-vibe similarity, Sonic Atlas region playback, random album sort).
+
+### Fixed — Volume past 100% no longer clips the limiter
+- The audio graph was source → eq → replayGain → masterGain (volume) → limiter → destination, so anything above 1.0× volume amplified the post-limiter signal and pushed the device into clipping. Volume now lives upstream of the limiter and the analyser tap is parallel to the master/limiter chain, so the visualizer stays reactive even at silent volume.
+
+### Fixed — DNA cosine similarity returned [0.5, 1] instead of [0, 1]
+- `dnaCosineSimilarity` was remapping cos via `(cos + 1) / 2`, which made sense only if vectors could be anti-aligned. Audio DNA vectors are non-negative, so cos already sits in [0, 1]; the remap collapsed the seed-vibe gate's discriminative power into a flat half-range.
+
+### Fixed — Random album sort crashed every call
+- `albumSortOrder('random', …)` emitted `MIN(id) ^ xorMask`, but SQLite has no `^` operator. Every shuffle, every Random sort, every random-album quick-pick was an SQL parse error since 1.5.2. Replaced with a bounded three-term polynomial seeded by Knuth multiplicative hashing.
+- `normalizeAlbumRandomSeed` clamped any seed above 2^31-1 to the same ceiling, so consecutive `Date.now()` values collapsed to a single normalized seed and the "random" sort was deterministic across the session. Replaced clamp with modulo so the low 31 bits of entropy survive.
+
+### Fixed — Sonic Atlas crashed when empty
+- AtlasView dereferenced `atlas.points[…]` before the projection finished. Now falls back to no-center when the atlas is empty.
+
+### Fixed — Close-button behavior reset on settings patch
+- A `closeButtonBehavior: undefined` patch (sent by every other settings save) overwrote the user's preference back to the default. Now preserves the stored value when the patch field is missing.
+
+### Fixed — `useEffect` shadowed `window.performance`
+- The fullscreen visualizer's local state variable named `performance` shadowed `window.performance` in some closures and broke frame-rate measurement on cold boot. Renamed to `perfTier`.
+
+### Fixed — Long-session float drift on visualizer accumulators
+- `radialRotation`, `tunnelTwist`, `orbitalRotation`, and `mercuryHueDrift` accumulated monotonically and lost trig precision after roughly thirty minutes. Wrapped with explicit modulo.
+
+### Improved — Audio analyzer sample-rate awareness
+- Kick-band, bass, low-mid, mid, and treble bins are now derived from sample rate plus FFT size instead of hardcoded for 48 kHz. The visualizer now reads correct bands on 44.1 kHz devices.
+- Dedicated unsmoothed `AnalyserNode` for kick onset detection so the smoothed analyser can keep its visual smoothing without lying about transients.
+
+### Improved — DNA index caching
+- `LibraryStore.buildDnaIndex` cached and invalidated on writes. Harmonic and taste mix calls used to re-parse the entire DNA table per invocation.
+
+### Improved — Seed-vibe scoring hoisted out of the per-candidate loop
+- `createSeedVibeContext` precomputes genre tokens, normalized artist/album, and the seed-side DNA snapshot once per mix call instead of per candidate.
+
+### Improved — Wikipedia client extracted to a shared helper
+- `src/lib/wiki.ts` now owns the user-agent, response shape, and search/lookup helpers. Artist and album fact paths share the implementation and surface non-OK responses via `console.warn` instead of silently failing.
+
+### Tests
+- New: `scripts/seed-vibe-smoke.mjs` covers identical DNA, genre+era branch, same-artist floor, all-null inputs, BPM half/double match, and the `applySeedVibeGate` formula.
+- New: `scripts/album-random-sort-smoke.mjs` reproduces the `^` parse failure, asserts close seeds decorrelate, and stresses int64 bounds at MIN(id) ≈ 2^30.
+- Tightened: `scripts/sonic-atlas-smoke.mjs` now asserts `nearestAtlasPoints` clamp bounds, monotonic distance ordering, and floor behavior.
+- Tightened: `scripts/ui-visualizer-smoke.mjs` requires a positive `milkdropMounted` data attribute (set after `butterchurn.createVisualizer` succeeds) instead of only checking the absence of an eval error.
+
+### Deferred
+- Butterchurn CSP iframe sandbox. Splitting the audio graph across an iframe boundary is the right fix but breaks the live analyser path. Tracked in `docs/butterchurn-csp-iframe-plan.md`.
+
 ## [1.5.2] - 2026-05-20
 
 Production-readiness pass. A long autonomous run resolving real-world bug reports plus a complete visualizer reactivity overhaul, deck art improvements, smarter Mixes, and in-app navigation from Now Playing.

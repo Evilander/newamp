@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "description": "A Winamp-inspired modern desktop music player for Windows and Linux. Your local library, your rules, no streaming required. Four UI shells, shape-changing deck skins, 0-200% volume with red-zone boost, 0-100 decimal track scoring, and a magazine-style home.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
@@ -60,6 +60,8 @@
     "smoke:radio-brain": "npm run build:electron && node scripts/radio-brain-smoke.mjs",
     "smoke:perf-bench": "npm run build:electron && node scripts/perf-bench-smoke.mjs",
     "smoke:sonic-atlas": "npm run build:electron && node scripts/sonic-atlas-smoke.mjs",
+    "smoke:seed-vibe": "npm run build:electron && node scripts/seed-vibe-smoke.mjs",
+    "smoke:album-random-sort": "npm run build:electron && node scripts/album-random-sort-smoke.mjs",
     "smoke:session": "npm run build:electron && node scripts/session-smoke.mjs",
     "smoke:chrome-state": "npm run build:electron && node scripts/chrome-state-smoke.mjs",
     "smoke:skin": "npm run build:electron && node scripts/skin-smoke.mjs",

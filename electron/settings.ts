@@ -217,6 +217,9 @@ export class SettingsStore {
       resumeState: patch.resumeState === undefined
         ? this.state.resumeState
         : this.normalizeResume(patch.resumeState),
+      closeButtonBehavior: patch.closeButtonBehavior === undefined
+        ? this.state.closeButtonBehavior
+        : normalizeCloseButtonBehavior(patch.closeButtonBehavior),
     };
     this.state = next;
     this.persist();

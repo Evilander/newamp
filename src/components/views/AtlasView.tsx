@@ -190,9 +190,20 @@ export function AtlasView(): JSX.Element {
     const hit = nearestAtlasPoint(atlas, atlasCoord.x, atlasCoord.y, 0.02 / transform.scale);
     if (!hit) return;
     setSelected(hit);
-    const track = trackIndex.get(hit.id) ?? (await api.getTrack(hit.id));
-    if (!track) return;
-    if (!trackIndex.has(hit.id)) setTrackIndex((prev) => new Map(prev).set(hit.id, track));
+    let track = trackIndex.get(hit.id) ?? null;
+    if (!track) {
+      try {
+        track = await api.getTrack(hit.id);
+      } catch (err) {
+        setStatus(`Could not load track #${hit.id}: ${err instanceof Error ? err.message : 'unknown error'}`);
+        return;
+      }
+    }
+    if (!track) {
+      setStatus(`Track #${hit.id} is no longer in the library.`);
+      return;
+    }
+    if (!trackIndex.has(hit.id)) setTrackIndex((prev) => new Map(prev).set(hit.id, track!));
     if (e.shiftKey) {
       queueTracksNext([track]);
     } else {
@@ -209,8 +220,17 @@ export function AtlasView(): JSX.Element {
     const points = nearestAtlasPoints(atlas, center.x, center.y, count);
     if (!points.length) return;
     const ids = points.map((p) => p.id);
-    const tracks = await api.getTracksByIds(ids);
-    if (!tracks.length) return;
+    let tracks: Track[];
+    try {
+      tracks = await api.getTracksByIds(ids);
+    } catch (err) {
+      setStatus(`Could not load region tracks: ${err instanceof Error ? err.message : 'unknown error'}`);
+      return;
+    }
+    if (!tracks.length) {
+      setStatus(`No playable tracks in this region (${ids.length} candidate ids).`);
+      return;
+    }
     // Preserve atlas-neighborhood order so the journey reads as a smooth
     // walk through sound space.
     const byId = new Map(tracks.map((t) => [t.id, t]));
@@ -250,9 +270,14 @@ export function AtlasView(): JSX.Element {
     if (trackIndex.has(hovered.id)) return;
     let cancelled = false;
     void (async () => {
-      const track = await api.getTrack(hovered.id);
-      if (!cancelled && track) {
-        setTrackIndex((prev) => new Map(prev).set(track.id, track));
+      try {
+        const track = await api.getTrack(hovered.id);
+        if (!cancelled && track) {
+          setTrackIndex((prev) => new Map(prev).set(track.id, track));
+        }
+      } catch {
+        // Hover lookup is decorative; the cursor will move and we'll retry on
+        // the next hovered point. Don't pollute the status pill for a hover.
       }
     })();
     return () => {
@@ -367,10 +392,13 @@ export function AtlasView(): JSX.Element {
             className="pxbtn is-active"
             data-newamp-atlas-play-region
             onClick={() => {
-              const center = selected ?? hovered ?? atlas?.points[Math.floor((atlas.points.length || 1) / 2)] ?? null;
+              const fallback = atlas && atlas.points.length > 0
+                ? atlas.points[Math.floor(atlas.points.length / 2)]!
+                : null;
+              const center = selected ?? hovered ?? fallback;
               if (center) void playRegion(center, clusterSize, 'play');
             }}
-            disabled={!atlas}
+            disabled={!atlas || atlas.points.length === 0}
           >
             ▶ Play region
           </button>

@@ -1958,8 +1958,11 @@ function uiPlaybackProbeSource(): string {
       const currentTitle =
         document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
       const currentTime = Number(timeEl.getAttribute('data-newamp-current-time') || '0');
+      // Substring match. The transport Next button title carries the
+      // keyboard hint, so a strict title="Next" selector never matched.
+      // Anchor on the prefix instead.
       const nextButton = await waitFor('transport next button', () =>
-        document.querySelector('[data-newamp-transport] button[title="Next"]'),
+        document.querySelector('[data-newamp-transport] button[title^="Next"]'),
       );
       nextButton.click();
       await sleep(450);
@@ -2148,6 +2151,12 @@ function uiVisualizerProbeSource(): string {
         if (sample) { milkdropRender = sample; break; }
         await sleep(120);
       }
+      // Positive boot signal — Visualizer.tsx sets this attribute the
+      // moment butterchurn.createVisualizer + connectAudio succeed. The
+      // older smoke only proved that NO eval error fired, which a silently
+      // gated catch could fake; this distinguishes "really mounted" from
+      // "canvas alive but factory threw".
+      const milkdropMounted = milkdropCanvas.getAttribute('data-newamp-butterchurn-mounted');
       // Now Liquid Mercury — the new 1.5.2 preset. Verify it renders too.
       const mercuryButton = await waitFor('Liquid Mercury visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
@@ -2270,6 +2279,7 @@ function uiVisualizerProbeSource(): string {
         auroraRender,
         milkdropRender,
         milkdropEvalError: milkdropEvalError ?? null,
+        milkdropMounted: milkdropMounted ?? null,
         mercuryRender,
         stageRect: { width: stageRect.width, height: stageRect.height },
         viewport,
