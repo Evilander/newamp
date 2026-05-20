@@ -75,10 +75,15 @@ export function Sidebar(): JSX.Element {
 
   return (
     <aside
-      className="flex w-[200px] flex-col border-r"
+      className="flex w-[200px] flex-col overflow-y-auto border-r"
       style={{ background: 'var(--panel)', borderColor: 'var(--line)' }}
+      data-newamp-sidebar
     >
-      <nav className="flex min-h-0 flex-1 flex-col overflow-y-auto px-3 py-2">
+      {/* The outer <aside> scrolls so neither the main nav nor the Tools
+          footer becomes inaccessible when the window is short. The nav
+          itself drops its inner overflow so we get one unified scrollbar
+          instead of two competing scroll regions. */}
+      <nav className="flex flex-col px-3 py-2">
         {GROUPS.map((group, groupIdx) => (
           <div key={group.label} className={groupIdx === 0 ? '' : 'mt-2'}>
             <div className="mb-0.5 px-2 text-[9px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
@@ -102,7 +107,7 @@ export function Sidebar(): JSX.Element {
       </nav>
 
       <div
-        className="shrink-0 border-t px-3 py-3"
+        className="mt-auto shrink-0 border-t px-3 py-3"
         style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}
       >
         <div className="mb-2 px-2 text-[9px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
