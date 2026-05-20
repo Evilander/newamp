@@ -428,6 +428,27 @@ export function FullscreenVisualizer(): JSX.Element {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [activeIndex]);
 
+  // AutoVJ loop. Depend only on the stable handles (engine, autoVjEnabled);
+  // read current preset / isPlaying / performance via refs so changing them
+  // doesn't restart the RAF + re-allocate the freq buffer. The previous
+  // shape re-allocated on every preset switch — over a long session that
+  // accumulated GC pressure and contributed to the gradual slowdown.
+  const autoVjActivePresetRef = useRef(activePreset);
+  const autoVjIsPlayingRef = useRef(isPlaying);
+  const autoVjPerformanceRef = useRef(performance);
+  const autoVjSetPresetRef = useRef(setPreset);
+  useEffect(() => {
+    autoVjActivePresetRef.current = activePreset;
+  }, [activePreset]);
+  useEffect(() => {
+    autoVjIsPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+  useEffect(() => {
+    autoVjPerformanceRef.current = performance;
+  }, [performance]);
+  useEffect(() => {
+    autoVjSetPresetRef.current = setPreset;
+  }, [setPreset]);
   useEffect(() => {
     if (!autoVjEnabled) return undefined;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
@@ -435,14 +456,15 @@ export function FullscreenVisualizer(): JSX.Element {
     let lastSwitchAt = window.performance.now();
 
     const tick = (now: number) => {
-      if (isPlaying) {
+      if (autoVjIsPlayingRef.current) {
         engine.getFreqData(freq);
         const energy = visualizerEnergy(freq);
         const elapsed = now - lastSwitchAt;
         if (elapsed > 14000 && (energy > 0.42 || elapsed > 30000)) {
-          const nextPreset = pickAutoVjPreset(activePreset, energy, performance);
-          if (nextPreset !== activePreset) {
-            setPreset(nextPreset);
+          const currentPreset = autoVjActivePresetRef.current;
+          const nextPreset = pickAutoVjPreset(currentPreset, energy, autoVjPerformanceRef.current);
+          if (nextPreset !== currentPreset) {
+            autoVjSetPresetRef.current(nextPreset);
             lastSwitchAt = now;
           }
         }
@@ -452,7 +474,7 @@ export function FullscreenVisualizer(): JSX.Element {
 
     raf = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(raf);
-  }, [activePreset, autoVjEnabled, engine, isPlaying, performance, setPreset]);
+  }, [autoVjEnabled, engine]);
 
   return (
     <div
