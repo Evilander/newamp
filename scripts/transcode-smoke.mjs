@@ -94,9 +94,17 @@ const [typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPl
   readFile(new URL('../package.json', import.meta.url), 'utf8'),
   readFile(new URL('../src/lib/format.tsx', import.meta.url), 'utf8'),
 ]);
+// format.tsx re-exports playbackCodecLabel from audio-quality.ts; the actual
+// DSF/DFF literal lives there. Probe that module too so the assertion in
+// assertDsdWiring still finds the strings after the 1.4.1 refactor.
+const audioQualitySource = await readFile(new URL('../shared/audio-quality.ts', import.meta.url), 'utf8');
+const combinedFormatSource = `${formatSource}\n${audioQualitySource}`;
 
 assertExportWiring(typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource);
-assertDsdWiring({ transcodeSource, mainSource, scannerSource, watcherSource, librarySource, installerSource, packageSource, formatSource, nowPlayingSource });
+// NowPlayingView delegates codec display to playbackCodecLabel(); it does
+// not need to reference DSF/DFF literals directly. Audio-quality wiring is
+// already covered by combinedFormatSource above.
+assertDsdWiring({ transcodeSource, mainSource, scannerSource, watcherSource, librarySource, installerSource, packageSource, formatSource: combinedFormatSource });
 
 assert.equal(batch.exported, 2, 'batch export should transcode every selected fixture');
 assert.equal(batch.skipped.length, 0, 'batch export should not skip valid fixtures');
