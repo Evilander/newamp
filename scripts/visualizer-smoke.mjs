@@ -53,6 +53,9 @@ assert.match(fullscreenSource, /id: 'album-breathe'/, 'Fullscreen visualizer mus
 assert.match(typesSource, /'album-breathe'/, 'visualizer preset type should include album-breathe');
 assert.match(typesSource, /'tempo-pulse'/, 'visualizer preset type should include Tempo Pulse');
 assert.match(typesSource, /'lattice-strobe'/, 'visualizer preset type should include Lattice Strobe');
+assert.match(typesSource, /'liquid-mercury'/, 'visualizer preset type should include Liquid Mercury (new in 1.5.2)');
+assert.match(fullscreenSource, /id: 'liquid-mercury'/, 'Fullscreen visualizer must expose Liquid Mercury preset');
+assert.match(visualizerSource, /mode === 'liquid-mercury'/, 'Visualizer must implement the Liquid Mercury preset');
 assert.match(fullscreenSource, /data-newamp-viz-quality-button/, 'Fullscreen visualizer should expose a 4K quality toggle');
 assert.match(fullscreenSource, /data-newamp-viz-screen-button/, 'Fullscreen visualizer should expose native screen takeover');
 assert.match(fullscreenSource, /data-newamp-viz-palette-button/, 'Fullscreen visualizer should expose visualizer color palette controls');
