@@ -21,6 +21,7 @@ export type VizMode =
   | 'burning-cloud'
   | 'tempo-pulse'
   | 'lattice-strobe'
+  | 'liquid-mercury'
   | 'butterchurn';
 
 export type VizQuality = 'auto' | '4k';
@@ -286,6 +287,31 @@ export function Visualizer({
     let latticeStrobe = 0;
     let lastLatticeBeat = 0;
 
+    // Radial / Tunnel / Orbital rotation accumulators — beat-driven instead of
+    // wall-clock so the spin speed scales with the music, not real time.
+    let radialRotation = 0;
+    let tunnelTwist = 0;
+    let orbitalRotation = 0;
+
+    // Liquid Mercury: 12 metaball blobs floating around with band-coupled
+    // momentum. Each blob's hue, radius, and velocity respond to a distinct
+    // frequency slice so the cluster as a whole reads as a living fluid that
+    // breathes with the music. Initialized lazily so we only allocate when
+    // the preset actually runs.
+    interface MercuryBlob {
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      radius: number;
+      hue: number;
+      band: number;
+    }
+    const mercuryBlobs: MercuryBlob[] = [];
+    let mercuryAttractor = 1; // +1 attracts blobs to center; -1 explodes outward
+    let lastMercuryFlip = 0;
+    let mercuryHueDrift = 0;
+
     function frame(now: number) {
       if (!canPaint(now)) {
         raf = requestAnimationFrame(frame);
@@ -364,17 +390,19 @@ export function Visualizer({
 
         // Spawn particles based on bass kicks. Real beat onsets — from the
         // shared analyzer — get an extra burst on top of the running average.
-        const spawn = Math.floor(bass * 6 + mid * 2 + features.beat * 8);
+        const galaxyBeatBurst = features.beatEdge ? 14 : 0;
+        const spawn = Math.floor(bass * 6 + mid * 2 + features.beat * 8 + galaxyBeatBurst);
+        const galaxyHueBase = (features.bass * 360 + features.beat * 140 + Date.now() / 120) % 360;
         for (let i = 0; i < spawn; i++) {
           const angle = Math.random() * Math.PI * 2;
-          const speed = 1 + bass * 8 + Math.random() * 3;
+          const speed = 1 + bass * 8 + features.beat * 4 + Math.random() * 3;
           particles.push({
             x: w / 2,
             y: h / 2,
             vx: Math.cos(angle) * speed,
             vy: Math.sin(angle) * speed,
-            r: 1 + mid * 3 + Math.random() * 1.5,
-            hue: (Date.now() / 25 + Math.random() * 40) % 360,
+            r: 1 + mid * 3 + features.beat * 2 + Math.random() * 1.5,
+            hue: (galaxyHueBase + Math.random() * 30) % 360,
             life: 60 + Math.random() * 60,
           });
         }
@@ -398,12 +426,14 @@ export function Visualizer({
           ctx.fill();
         }
 
-        // Bass ring
-        if (bass > 0.15) {
-          ctx.strokeStyle = `rgba(${parseRgb(accent)}, ${0.6 * bass})`;
-          ctx.lineWidth = 2 + bass * 3;
+        // Bass ring — hue cycles with bass + beat so kicks change color, not
+        // just size. Beat onsets thicken the ring; energy expands it outward.
+        if (bass > 0.12 || features.beat > 0.35) {
+          const ringHue = (galaxyHueBase + 40) % 360;
+          ctx.strokeStyle = `hsla(${ringHue}, 96%, ${56 + features.beat * 18}%, ${0.4 + bass * 0.55 + features.beat * 0.25})`;
+          ctx.lineWidth = 2 + bass * 3 + features.beat * 4;
           ctx.beginPath();
-          ctx.arc(w / 2, h / 2, 60 + bass * 140, 0, Math.PI * 2);
+          ctx.arc(w / 2, h / 2, 60 + bass * 140 + features.beat * 80, 0, Math.PI * 2);
           ctx.stroke();
         }
 
@@ -459,17 +489,22 @@ export function Visualizer({
         const cx = w / 2;
         const cy = h / 2;
         const spokes = 96;
-        const maxR = Math.min(w, h) * (0.28 + bass * 0.18);
+        // Beat pumps the wheel outward; bass drives the rolling rotation so
+        // the speed of the spin scales with low-end energy instead of a fixed
+        // wall-clock divisor.
+        radialRotation += 0.004 + features.bass * 0.04 + (features.beatEdge ? 0.18 : 0);
+        const maxR = Math.min(w, h) * (0.28 + bass * 0.18 + features.beat * 0.18);
         ctx.save();
         ctx.translate(cx, cy);
-        ctx.rotate(Date.now() / 2800);
+        ctx.rotate(radialRotation);
         for (let i = 0; i < spokes; i++) {
-          const bin = freq[(i * 3) % Math.max(1, freq.length)]! / 255;
+          const bandEnergy = features.bands[i % features.bands.length] ?? 0;
+          const bin = (freq[(i * 3) % Math.max(1, freq.length)]! / 255) * 0.6 + bandEnergy * 0.4;
           const angle = (Math.PI * 2 * i) / spokes;
           const inner = maxR * (0.28 + mid * 0.08);
-          const outer = inner + maxR * (0.38 + bin * 0.74);
-          ctx.strokeStyle = `hsla(${(i * 3.8 + Date.now() / 44) % 360}, 92%, 62%, ${0.18 + bin * 0.7})`;
-          ctx.lineWidth = 1 + bin * 3;
+          const outer = inner + maxR * (0.38 + bin * 0.74 + features.beat * 0.2);
+          ctx.strokeStyle = `hsla(${(i * 3.8 + radialRotation * 80 + features.bass * 80) % 360}, 92%, 62%, ${0.18 + bin * 0.7 + features.beat * 0.18})`;
+          ctx.lineWidth = 1 + bin * 3 + features.beat * 1.5;
           ctx.beginPath();
           ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
           ctx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
@@ -477,7 +512,7 @@ export function Visualizer({
         }
         ctx.restore();
         const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR * 1.7);
-        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.28 + bass * 0.48})`);
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.28 + bass * 0.48 + features.beat * 0.22})`);
         glow.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.fillStyle = glow;
         ctx.fillRect(0, 0, w, h);
@@ -488,22 +523,27 @@ export function Visualizer({
         const cx = w / 2;
         const cy = h / 2;
         const rings = 26;
-        const twist = Date.now() / 900;
+        // Accumulator twist driven by bass + beat — silent tracks freeze the
+        // tunnel; pumping kicks accelerate it instead of the constant
+        // Date.now()/900 drift.
+        tunnelTwist += 0.005 + bass * 0.035 + (features.beatEdge ? 0.12 : 0);
+        // Sides mutate on beat for a polygon-morph effect.
+        const sides = 6 + Math.floor(features.beat * 4 + features.bass * 2);
         for (let r = rings; r > 0; r--) {
           const phase = r / rings;
-          const radius = phase * Math.max(w, h) * (0.62 + bass * 0.14);
-          const sides = 7;
+          const radius = phase * Math.max(w, h) * (0.46 + bass * 0.32 + features.beat * 0.18);
           ctx.beginPath();
           for (let i = 0; i <= sides; i++) {
-            const angle = (Math.PI * 2 * i) / sides + twist * (1 - phase);
-            const wobble = Math.sin(Date.now() / 220 + i + r) * (6 + bass * 18);
+            const angle = (Math.PI * 2 * i) / sides + tunnelTwist * (1 - phase);
+            const wobble = Math.sin(tunnelTwist * 4 + i + r) * (6 + bass * 18 + features.beat * 12);
             const x = cx + Math.cos(angle) * (radius + wobble);
             const y = cy + Math.sin(angle) * (radius + wobble);
             if (i === 0) ctx.moveTo(x, y);
             else ctx.lineTo(x, y);
           }
-          ctx.strokeStyle = `hsla(${(phase * 240 + Date.now() / 80) % 360}, 88%, 60%, ${0.08 + (1 - phase) * 0.58})`;
-          ctx.lineWidth = 1 + bass * 3;
+          const hue = (phase * 240 + tunnelTwist * 60 + features.bass * 120) % 360;
+          ctx.strokeStyle = `hsla(${hue}, 88%, 60%, ${0.1 + (1 - phase) * 0.58 + features.beat * 0.18})`;
+          ctx.lineWidth = 1 + bass * 3 + features.beat * 2;
           ctx.stroke();
         }
       } else if (mode === 'pulse') {
@@ -546,16 +586,21 @@ export function Visualizer({
         const cy = h / 2;
         const minSide = Math.min(w, h);
         const time = Date.now();
+        // Beat drives the master rotation so the rings push outward on kicks.
+        orbitalRotation += 0.002 + features.bass * 0.022 + (features.beatEdge ? 0.06 : 0);
 
         ctx.save();
         ctx.translate(cx, cy);
-        ctx.rotate(time / 3600);
+        ctx.rotate(orbitalRotation);
         ctx.globalCompositeOperation = 'lighter';
 
         for (let ring = 0; ring < 5; ring += 1) {
-          const radius = minSide * (0.11 + ring * 0.072) + bass * minSide * 0.035;
-          const bars = 96 + ring * 18;
-          const spin = (ring % 2 === 0 ? 1 : -1) * time / (2800 + ring * 620);
+          const radius = minSide * (0.11 + ring * 0.072) + bass * minSide * 0.035 + features.beat * minSide * 0.04;
+          // Cut bar count almost in half — was 96+ring*18 (~432 max bars).
+          // The bottleneck was many strokes with shadowBlur; reducing the
+          // stroke count eliminates the lag complaint while preserving look.
+          const bars = 48 + ring * 10;
+          const spin = (ring % 2 === 0 ? 1 : -1) * orbitalRotation * (0.6 + ring * 0.18);
           ctx.save();
           ctx.rotate(spin);
           for (let i = 0; i < bars; i += 1) {
@@ -566,9 +611,9 @@ export function Visualizer({
             const inner = radius * (0.96 + lowMid * 0.04);
             const outer =
               radius +
-              (8 + ring * 2 + energy * minSide * 0.09 + bass * minSide * 0.04) * pulse;
-            const hue = (155 + ring * 26 + i * 0.9 + time / 70 + treble * 120) % 360;
-            ctx.strokeStyle = `hsla(${hue}, 96%, ${54 + energy * 22}%, ${0.18 + energy * 0.74})`;
+              (8 + ring * 2 + energy * minSide * 0.09 + bass * minSide * 0.04 + features.beat * minSide * 0.04) * pulse;
+            const hue = (155 + ring * 26 + i * 0.9 + orbitalRotation * 30 + treble * 120) % 360;
+            ctx.strokeStyle = `hsla(${hue}, 96%, ${54 + energy * 22}%, ${0.18 + energy * 0.74 + features.beat * 0.12})`;
             ctx.lineWidth = 0.75 + energy * 2.8 + bass * 1.5;
             ctx.beginPath();
             ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
@@ -578,19 +623,26 @@ export function Visualizer({
           ctx.restore();
         }
 
+        // shadowBlur is the expensive op — only enable when the beat actually
+        // fires so the rest of the time the renderer stays cheap.
+        const ringShadow = features.beat > 0.42 ? 12 + features.beat * 28 : 0;
         for (let ring = 0; ring < 4; ring += 1) {
-          const radius = minSide * (0.18 + ring * 0.105) + bass * minSide * 0.09;
-          ctx.strokeStyle = `hsla(${190 + ring * 34 + time / 52}, 92%, 62%, ${0.08 + bass * 0.34 + highMid * 0.18})`;
-          ctx.lineWidth = 1 + bass * 4 + ring * 0.28;
-          ctx.shadowColor = `hsl(${190 + ring * 34}, 92%, 62%)`;
-          ctx.shadowBlur = 12 + bass * 38;
+          const radius = minSide * (0.18 + ring * 0.105) + bass * minSide * 0.09 + features.beat * minSide * 0.05;
+          ctx.strokeStyle = `hsla(${190 + ring * 34 + orbitalRotation * 40}, 92%, 62%, ${0.08 + bass * 0.34 + highMid * 0.18 + features.beat * 0.18})`;
+          ctx.lineWidth = 1 + bass * 4 + ring * 0.28 + features.beat * 1.5;
+          if (ringShadow > 0) {
+            ctx.shadowColor = `hsl(${190 + ring * 34}, 92%, 62%)`;
+            ctx.shadowBlur = ringShadow;
+          } else {
+            ctx.shadowBlur = 0;
+          }
           ctx.beginPath();
-          ctx.arc(0, 0, radius + Math.sin(time / 300 + ring) * (4 + bass * 22), 0, Math.PI * 2);
+          ctx.arc(0, 0, radius + Math.sin(time / 300 + ring) * (4 + bass * 22 + features.beat * 12), 0, Math.PI * 2);
           ctx.stroke();
         }
 
         ctx.shadowBlur = 0;
-        ctx.rotate(-time / 2200);
+        ctx.rotate(-orbitalRotation * 0.6);
         ctx.beginPath();
         for (let i = 0; i < 240; i += 1) {
           const waveIndex = Math.floor((i / 240) * wave.length);
@@ -779,17 +831,24 @@ export function Visualizer({
         const mid = avg(freq, 18, 92) / 255;
         const pieces = 96;
         const time = Date.now() / 1000;
+        // Beat-locked orbital sweep — silence keeps pieces faint; a kick
+        // throws everything bright + larger so the rhythm is legible even
+        // when the underlying spectrum is uniform.
+        const beatBoost = features.beat;
+        const beatHueShift = features.beatEdge ? 120 : 0;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
         for (let i = 0; i < pieces; i += 1) {
           const bin = freq[(i * 5) % Math.max(1, freq.length)]! / 255;
           const lane = i / pieces;
-          const orbit = 18 + lane * Math.max(w, h) * 0.58 + bass * 40;
-          const angle = time * (0.35 + lane) + i * 2.399;
+          const orbit = 18 + lane * Math.max(w, h) * 0.58 + bass * 40 + beatBoost * 30;
+          const angle = time * (0.35 + lane + beatBoost * 0.6) + i * 2.399;
           const x = w / 2 + Math.cos(angle) * orbit * (0.72 + mid * 0.18);
           const y = h / 2 + Math.sin(angle * 1.18) * orbit * 0.48;
-          const size = 2 + bin * 13;
-          ctx.fillStyle = `hsla(${(i * 11 + Date.now() / 34) % 360}, 92%, 62%, ${0.18 + bin * 0.72})`;
+          const size = 2 + bin * 13 + beatBoost * 8;
+          const baseAlpha = 0.18 + bin * 0.72;
+          const beatedAlpha = baseAlpha * (0.45 + beatBoost * 0.85);
+          ctx.fillStyle = `hsla(${(i * 11 + Date.now() / 34 + beatHueShift) % 360}, 92%, 62%, ${beatedAlpha})`;
           ctx.beginPath();
           ctx.arc(x, y, size, 0, Math.PI * 2);
           ctx.fill();
@@ -834,17 +893,22 @@ export function Visualizer({
         const minSide = Math.min(w, h);
         const now = Date.now();
 
-        // Spawn new rings on beat edge (debounced)
-        if (features.beat > 0.42 && now - lastTempoBeat > 110) {
-          const burstCount = features.beat > 0.78 ? 3 : features.beat > 0.6 ? 2 : 1;
+        // True rising-edge spawn: kick onset (beatEdge) triggers instantly,
+        // not when the smoothed beat envelope decays past a threshold. The
+        // debounce drops to 70ms so fast hat-driven tracks still feel locked
+        // to the beat instead of dropping every other hit.
+        const tempoTrigger = features.beatEdge || (features.beat > 0.55 && now - lastTempoBeat > 110);
+        if (tempoTrigger && now - lastTempoBeat > 70) {
+          const intensity = Math.max(features.beat, features.kick);
+          const burstCount = intensity > 0.78 ? 3 : intensity > 0.55 ? 2 : 1;
           for (let i = 0; i < burstCount; i++) {
             tempoRings.push({
               x: cx + (Math.random() - 0.5) * minSide * 0.08 * features.treble,
               y: cy + (Math.random() - 0.5) * minSide * 0.08 * features.treble,
               r: minSide * 0.04,
               life: 1,
-              hue: (now / 60 + i * 28 + features.bass * 90) % 360,
-              thickness: 3 + features.bass * 8,
+              hue: (now / 60 + i * 28 + features.bass * 140 + features.kick * 80) % 360,
+              thickness: 3 + features.bass * 8 + features.kick * 4,
             });
           }
           lastTempoBeat = now;
@@ -944,6 +1008,152 @@ export function Visualizer({
           ctx.fillStyle = grad;
           ctx.fillRect(0, sweepY - 24, w, 48);
         }
+      } else if (mode === 'liquid-mercury') {
+        // Liquid Mercury — psychedelic metaball fluid. Each blob couples to a
+        // distinct frequency band; beat onsets flip the attractor sign so the
+        // whole cluster collapses on the kick and explodes back out. Hue
+        // drift is bass-driven, not wall-clock, so silent passages freeze the
+        // palette and a heavy track sets it spinning through every color.
+        const now = Date.now();
+        const cx = w / 2;
+        const cy = h / 2;
+        const minSide = Math.min(w, h);
+
+        if (mercuryBlobs.length === 0) {
+          for (let i = 0; i < 12; i += 1) {
+            const angle = (Math.PI * 2 * i) / 12;
+            mercuryBlobs.push({
+              x: cx + Math.cos(angle) * minSide * 0.25,
+              y: cy + Math.sin(angle) * minSide * 0.25,
+              vx: Math.cos(angle + Math.PI / 2) * 0.6,
+              vy: Math.sin(angle + Math.PI / 2) * 0.6,
+              radius: minSide * 0.1,
+              hue: (i * 30) % 360,
+              band: i % features.bands.length,
+            });
+          }
+        }
+
+        // Beat-driven attractor flip — gives the fluid its "breathing" feel.
+        if (features.beatEdge && now - lastMercuryFlip > 240) {
+          mercuryAttractor *= -1;
+          lastMercuryFlip = now;
+        }
+        mercuryHueDrift += features.bass * 4 + features.beat * 2;
+
+        // Smudge previous frame for a heavy trail — fluids should look
+        // smeared, not punctuated. Bass thickens the trail (slower fade).
+        const fadeAlpha = 0.18 - features.bass * 0.08 - features.beat * 0.05;
+        ctx.fillStyle = `rgba(2,2,8,${Math.max(0.05, fadeAlpha)})`;
+        ctx.fillRect(0, 0, w, h);
+
+        // Update + render each blob.
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < mercuryBlobs.length; i += 1) {
+          const blob = mercuryBlobs[i]!;
+          const bandEnergy = features.bands[blob.band] ?? 0;
+
+          // Each blob is pulled toward (or pushed from) the center based on
+          // mercuryAttractor, with strength scaling by the blob's band.
+          const dx = cx - blob.x;
+          const dy = cy - blob.y;
+          const dist = Math.max(1, Math.hypot(dx, dy));
+          const pull = mercuryAttractor * (0.04 + bandEnergy * 0.12 + features.beat * 0.06);
+          blob.vx += (dx / dist) * pull;
+          blob.vy += (dy / dist) * pull;
+
+          // Random kick on each transient so the cluster never settles into
+          // a periodic orbit — keeps the motion organic.
+          if (features.beatEdge) {
+            const jitterAngle = Math.random() * Math.PI * 2;
+            const jitterStrength = 0.8 + features.beat * 2.2;
+            blob.vx += Math.cos(jitterAngle) * jitterStrength;
+            blob.vy += Math.sin(jitterAngle) * jitterStrength;
+          }
+
+          // Cap velocity so blobs can't fly offscreen, and damp gently so
+          // they keep flowing.
+          const maxSpeed = 3 + features.beat * 5;
+          const speed = Math.hypot(blob.vx, blob.vy);
+          if (speed > maxSpeed) {
+            blob.vx = (blob.vx / speed) * maxSpeed;
+            blob.vy = (blob.vy / speed) * maxSpeed;
+          }
+          blob.vx *= 0.94;
+          blob.vy *= 0.94;
+          blob.x += blob.vx;
+          blob.y += blob.vy;
+
+          // Soft-bound to canvas: push back at edges instead of clamping
+          // hard, so collisions feel like the fluid hitting a wall.
+          const margin = blob.radius * 0.4;
+          if (blob.x < margin) blob.vx += (margin - blob.x) * 0.06;
+          if (blob.x > w - margin) blob.vx -= (blob.x - (w - margin)) * 0.06;
+          if (blob.y < margin) blob.vy += (margin - blob.y) * 0.06;
+          if (blob.y > h - margin) blob.vy -= (blob.y - (h - margin)) * 0.06;
+
+          // Radius pumps with the band + global beat.
+          blob.radius = minSide * (0.06 + bandEnergy * 0.16 + features.beat * 0.08);
+          // Hue drifts on bass; each blob has a fixed phase offset so the
+          // cluster reads as a palette wheel rather than monochrome.
+          blob.hue = (mercuryHueDrift + i * 26 + bandEnergy * 90) % 360;
+
+          // Render as overlapping radial gradients in 'lighter' mode — gives
+          // a metaball-style fluid look without per-pixel compute.
+          const layers = 3;
+          for (let layer = 0; layer < layers; layer += 1) {
+            const layerR = blob.radius * (1 + layer * 0.6);
+            const grad = ctx.createRadialGradient(blob.x, blob.y, 0, blob.x, blob.y, layerR);
+            const sat = 88 + features.beat * 12;
+            const light = 58 + bandEnergy * 22 - layer * 12;
+            const alpha = (0.42 - layer * 0.11) * (0.6 + bandEnergy * 0.9 + features.beat * 0.3);
+            grad.addColorStop(0, `hsla(${blob.hue}, ${sat}%, ${light}%, ${alpha})`);
+            grad.addColorStop(0.55, `hsla(${(blob.hue + 30) % 360}, ${sat}%, ${light - 16}%, ${alpha * 0.45})`);
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(blob.x, blob.y, layerR, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+
+        // Connect lines between blobs that are touching — gives the metaball
+        // illusion without per-pixel sampling. Distance gated by combined
+        // radii so only close pairs draw a connector.
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < mercuryBlobs.length; i += 1) {
+          for (let j = i + 1; j < mercuryBlobs.length; j += 1) {
+            const a = mercuryBlobs[i]!;
+            const b = mercuryBlobs[j]!;
+            const distAB = Math.hypot(a.x - b.x, a.y - b.y);
+            const fuseDist = (a.radius + b.radius) * 1.1;
+            if (distAB > fuseDist) continue;
+            const overlap = 1 - distAB / fuseDist;
+            const midHue = ((a.hue + b.hue) / 2 + features.beat * 30) % 360;
+            ctx.strokeStyle = `hsla(${midHue}, 92%, 70%, ${0.4 * overlap + features.beat * 0.18})`;
+            ctx.lineWidth = (4 + features.beat * 8) * overlap;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+
+        // Center caustic flare on every beat — makes the kick read as a
+        // physical compression of the fluid toward the focal point.
+        if (features.beat > 0.32) {
+          const flareR = minSide * (0.06 + features.beat * 0.32);
+          const flare = ctx.createRadialGradient(cx, cy, 0, cx, cy, flareR);
+          const flareHue = (mercuryHueDrift + 180) % 360;
+          flare.addColorStop(0, `hsla(${flareHue}, 100%, 86%, ${0.32 * features.beat})`);
+          flare.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = flare;
+          ctx.fillRect(cx - flareR, cy - flareR, flareR * 2, flareR * 2);
+        }
       }
 
       void ink2;
@@ -1014,6 +1224,12 @@ interface AudioFeatures {
   treble: number;
   rms: number;
   beat: number;
+  /** Narrow-band low-frequency energy (0-140 Hz at 48 kHz), unsmoothed. */
+  kick: number;
+  /** True on the frame where bass crosses adaptive floor — rising edge. */
+  beatEdge: boolean;
+  /** Spectral flux (sum of positive bin deltas vs previous frame). 0..1. */
+  flux: number;
   bands: number[];
 }
 
@@ -1027,7 +1243,7 @@ function isShaderVisualizerMode(mode: VizMode): boolean {
 
 function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) | null {
   const smokeReadback = Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke);
-  const gl = options.canvas.getContext('webgl', {
+  const context = options.canvas.getContext('webgl', {
     alpha: false,
     antialias: false,
     depth: false,
@@ -1035,7 +1251,8 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
     preserveDrawingBuffer: smokeReadback,
     powerPreference: 'high-performance',
   });
-  if (!gl) return null;
+  if (!context) return null;
+  const gl: WebGLRenderingContext = context;
 
   const program = createShaderProgram(gl, SHADER_VERTEX_SOURCE, SHADER_FRAGMENT_SOURCE);
   if (!program) return null;
@@ -1206,7 +1423,13 @@ function reactivitySettings(reactivity: VizReactivity): { curve: number; gain: n
 function createAudioFeatureAnalyzer(): (freq: Uint8Array, wave: Uint8Array) => AudioFeatures {
   let bassFloor = 0.08;
   let rmsFloor = 0.04;
+  let kickFloor = 0.06;
   let beat = 0;
+  let prevKick = 0;
+  // Rolling reference for spectral flux. Keep the lower 256 bins (covers up to
+  // ~6 kHz at 48 kHz / 2048 fft) — enough to detect transients without going
+  // quadratic on the bin count.
+  let prevFreq: Uint8Array | null = null;
 
   return (freq, wave) => {
     const bass = bandValue(freq, 0, 28);
@@ -1214,16 +1437,42 @@ function createAudioFeatureAnalyzer(): (freq: Uint8Array, wave: Uint8Array) => A
     const mid = bandValue(freq, 90, 220);
     const treble = bandValue(freq, 220, 520);
     const rms = waveRms(wave);
+    // Narrow kick band (~0-140 Hz at 48 kHz / 2048 fft). Raw, not curve-shaped,
+    // so we can compare to an adaptive floor and trigger on real transients.
+    const kick = Math.min(1, avg(freq, 0, 6) / 255);
 
     const bassOnset = Math.max(0, bass - bassFloor * 1.12);
     const rmsOnset = Math.max(0, rms - rmsFloor * 1.08);
-    beat = Math.max(beat * 0.76, Math.min(1, bassOnset * 5.2 + rmsOnset * 3.4));
+    const kickOnset = Math.max(0, kick - kickFloor * 1.18);
+    // Faster decay (was 0.76) so the gate releases quickly — fixes the
+    // "Tempo Pulse laggy" complaint by letting visualizers see distinct beats
+    // instead of one smeared envelope.
+    beat = Math.max(beat * 0.5, Math.min(1, bassOnset * 5.2 + rmsOnset * 3.4 + kickOnset * 2.4));
+    const beatEdge = prevKick < kickFloor * 1.18 && kick >= kickFloor * 1.18;
+
+    let flux = 0;
+    if (prevFreq && prevFreq.length === freq.length) {
+      let positive = 0;
+      const upper = Math.min(256, freq.length);
+      for (let i = 0; i < upper; i += 1) {
+        const delta = (freq[i]! - prevFreq[i]!) / 255;
+        if (delta > 0) positive += delta;
+      }
+      flux = Math.min(1, positive / (upper * 0.18));
+    }
+    if (!prevFreq || prevFreq.length !== freq.length) prevFreq = new Uint8Array(freq.length);
+    prevFreq.set(freq);
+    prevKick = kick;
+
     bassFloor = bass > bassFloor
       ? bassFloor * 0.94 + bass * 0.06
       : bassFloor * 0.985 + bass * 0.015;
     rmsFloor = rms > rmsFloor
       ? rmsFloor * 0.94 + rms * 0.06
       : rmsFloor * 0.985 + rms * 0.015;
+    kickFloor = kick > kickFloor
+      ? kickFloor * 0.92 + kick * 0.08
+      : kickFloor * 0.98 + kick * 0.02;
 
     return {
       bass,
@@ -1232,6 +1481,9 @@ function createAudioFeatureAnalyzer(): (freq: Uint8Array, wave: Uint8Array) => A
       treble,
       rms,
       beat,
+      kick,
+      beatEdge,
+      flux,
       bands: logBands(freq, 16),
     };
   };
@@ -1465,38 +1717,56 @@ void main() {
     for (int i = 0; i < 6; i += 1) {
       float fi = float(i);
       float b = bandAt(fi / 5.0);
+      // Use cos(theta*n) instead of raw theta so the ribbon wraps smoothly
+      // through pi without the discontinuity that caused the visible seam
+      // along the negative x-axis.
       float theta = atan(p.y, p.x);
       float radius = length(p);
-      float curve = abs(sin(theta * (2.0 + fi * 0.55) + u_time * (0.9 + fi * 0.15) + radius * (6.0 + b * 9.0)));
-      float target = 0.48 + sin(theta * 3.0 - u_time + fi) * 0.12 + b * 0.22 + u_bass * 0.16;
+      float wrappedAngle = cos(theta * (2.0 + fi * 0.55) + u_time * (0.9 + fi * 0.15) + radius * (6.0 + b * 9.0));
+      float curve = abs(wrappedAngle);
+      float target = 0.46 + sin(theta * 3.0 - u_time + fi) * 0.12 + b * 0.22 + u_bass * 0.18 + u_beat * 0.18;
       float line = exp(-abs(radius - target * curve) * (12.0 + b * 22.0));
-      color += palette(fi * 0.12 + theta * 0.08 + u_time * 0.03) * line * (0.24 + b * 1.35 + u_beat * 0.75);
+      color += palette(fi * 0.12 + sin(theta * 0.5) * 0.06 + u_time * 0.03) * line * (0.24 + b * 1.35 + u_beat * 0.95 + u_bass * 0.4);
     }
-    float core = exp(-length(p) * (6.0 - u_bass * 2.0));
-    color += palette(0.62 + u_time * 0.02) * core * (0.16 + energy * 0.54);
+    float core = exp(-length(p) * (6.0 - u_bass * 2.0 - u_beat * 1.0));
+    color += palette(0.62 + u_time * 0.02 + u_bass * 0.4) * core * (0.16 + energy * 0.54 + u_beat * 0.32);
   } else if (u_mode == 2) {
+    // Plasma Grid was tiling at 10-20x across X and 8-16x across Y, producing
+    // a "wall of tiny windows" instead of a flowing plasma. Drop the tile
+    // frequency to 3-5x so we see 3-5 large warped cells per axis, and let
+    // the fbm plasma actually dominate the look.
     vec2 q = uv;
     float b0 = bandAt(q.x);
     float b1 = bandAt(q.y);
-    q.x += sin(q.y * 13.0 + u_time * 1.25) * (0.018 + u_bass * 0.05) + b1 * 0.045;
-    q.y += cos(q.x * 11.0 - u_time * 1.08) * (0.018 + u_mid * 0.045) + b0 * 0.04;
-    float gridX = 1.0 - smoothstep(0.006, 0.028 + u_bass * 0.018, abs(fract(q.x * (10.0 + u_treble * 10.0)) - 0.5));
-    float gridY = 1.0 - smoothstep(0.006, 0.028 + u_mid * 0.018, abs(fract(q.y * (8.0 + u_bass * 8.0)) - 0.5));
-    float plasma = fbm(q * (4.0 + u_mid * 5.0) + vec2(u_time * 0.22, -u_time * 0.16));
-    float lines = max(gridX, gridY) * (0.25 + plasma + u_beat * 0.65);
-    color += palette(plasma + u_time * 0.04) * lines;
-    color += palette(0.7 + plasma) * exp(-length(p) * (2.7 - u_bass)) * (0.08 + u_bass * 0.36);
+    q.x += sin(q.y * 6.0 + u_time * 1.25) * (0.04 + u_bass * 0.09) + b1 * 0.06;
+    q.y += cos(q.x * 5.5 - u_time * 1.08) * (0.04 + u_mid * 0.08) + b0 * 0.06;
+    float gridX = 1.0 - smoothstep(0.012, 0.06 + u_bass * 0.045, abs(fract(q.x * (3.0 + u_treble * 2.0)) - 0.5));
+    float gridY = 1.0 - smoothstep(0.012, 0.06 + u_mid * 0.045, abs(fract(q.y * (2.0 + u_bass * 1.5)) - 0.5));
+    float plasma = fbm(q * (3.0 + u_mid * 4.0 + u_beat * 2.0) + vec2(u_time * 0.22, -u_time * 0.16));
+    float lines = max(gridX, gridY) * (0.18 + plasma * 0.8 + u_beat * 0.7);
+    // Make plasma the dominant signal — the grid is now a soft overlay,
+    // not the whole picture.
+    color += palette(plasma + u_time * 0.04 + u_bass * 0.4) * (plasma * 0.6 + lines * 0.45 + u_beat * 0.18);
+    color += palette(0.7 + plasma) * exp(-length(p) * (2.4 - u_bass - u_beat * 0.5)) * (0.12 + u_bass * 0.44 + u_beat * 0.28);
   } else {
+    // Burning Cloud — was locked to a red→orange→amber ramp regardless of
+    // music. Switch to palette-driven hues so the cloud actually shifts color
+    // with the beat instead of looking like a static brown plume.
     vec2 q = p * (2.1 - u_bass * 0.35);
     float heat = fbm(q * (2.0 + u_mid * 3.0) + vec2(0.0, -u_time * (0.38 + u_bass)));
     heat += fbm(q * 4.2 + vec2(u_time * 0.15, u_time * 0.22)) * 0.5;
     heat += u_bass * 0.85 + u_beat * 0.7;
     float plume = smoothstep(0.18, 1.58, heat - length(p) * (0.48 - u_rms * 0.16));
-    vec3 ember = mix(vec3(0.09, 0.01, 0.0), vec3(0.96, 0.19, 0.03), plume);
-    vec3 flame = mix(ember, vec3(1.0, 0.82, 0.26), smoothstep(0.78, 1.56, heat));
-    vec3 accentBurn = mix(flame, palette(heat * 0.33 + u_time * 0.03), 0.16 + u_treble * 0.24);
-    color += accentBurn * plume * (0.55 + energy * 0.75);
-    color += vec3(0.018, 0.004, 0.0);
+    // palette() cycles hue, so the cloud's main body shifts on the beat.
+    vec3 corePalette = palette(u_time * 0.03 + heat * 0.4 + u_bass * 0.6);
+    vec3 hotPalette = palette(u_time * 0.05 + heat * 0.32 + 0.4 + u_beat * 0.5);
+    vec3 ember = mix(corePalette * 0.18, corePalette, plume);
+    vec3 flame = mix(ember, hotPalette * 1.15, smoothstep(0.78, 1.56, heat));
+    // Raise palette mix factor from 0.16 to 0.55+u_bass*0.4 so the palette
+    // dominates instead of being a subtle tint over the brown ramp.
+    vec3 accentBurn = mix(flame, palette(heat * 0.33 + u_time * 0.03), 0.55 + u_bass * 0.4);
+    color += accentBurn * plume * (0.55 + energy * 0.75 + u_beat * 0.32);
+    color += corePalette * 0.04;
   }
 
   color += palette(0.55 + u_time * 0.08) * u_beat * 0.22;

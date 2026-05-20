@@ -963,6 +963,13 @@ function registerIpc(): void {
     library.getArtistTracks(artist),
   );
   ipcMain.handle('library:get-track', async (_e, id: number) => library.getTrack(id));
+  ipcMain.handle('library:get-tracks-by-ids', async (_e, ids: unknown) => {
+    if (!Array.isArray(ids)) return [];
+    const cleanIds = ids
+      .map((id) => Math.trunc(Number(id)))
+      .filter((id) => Number.isFinite(id) && id > 0);
+    return library.getTracksByIdsInOrder(cleanIds);
+  });
   ipcMain.handle('playlist:list', async () => library.getPlaylists());
   ipcMain.handle('playlist:save', async (_e, input) => library.savePlaylist(input));
   ipcMain.handle('playlist:add-tracks', async (_e, input) => library.addTracksToPlaylist(input));

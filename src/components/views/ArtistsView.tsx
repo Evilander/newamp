@@ -111,6 +111,16 @@ export function ArtistsView(): JSX.Element {
     setSelected(artist);
   }
 
+  // Consume programmatic navigation requests — e.g. clicking an artist name
+  // from Now Playing arrives here with the artist pre-selected.
+  const pendingNavigation = usePlayerStore((s) => s.pendingNavigation);
+  const consumePendingNavigation = usePlayerStore((s) => s.consumePendingNavigation);
+  useEffect(() => {
+    if (!pendingNavigation || pendingNavigation.kind !== 'artist') return;
+    setSelected(pendingNavigation.name);
+    consumePendingNavigation();
+  }, [pendingNavigation, consumePendingNavigation]);
+
   function closeArtist(): void {
     setSelected(null);
   }

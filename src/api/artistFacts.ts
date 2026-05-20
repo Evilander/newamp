@@ -21,8 +21,19 @@ const MUSIC_DISAMBIGUATORS = [
   'composer',
   'record producer',
   'musical group',
+  'musical project',
+  'music producer',
+  'producer',
   'DJ',
+  'artist',
 ];
+
+// Wikipedia's UA policy strongly requests a descriptive User-Agent. Without
+// one, requests can be rate-limited or blocked entirely. The bug where Blood
+// Orange and other less-disambiguated artists returned nothing was caused by
+// either WP throttling anonymous browser-default UAs or by the requests
+// failing CORS preflight on some networks.
+const WIKI_USER_AGENT = 'NewAmp/1.5.2 (https://github.com/evilander/newamp)';
 
 const MUSIC_TITLE_PATTERN = /\((?:musician|band|singer|singer-songwriter|rapper|composer|record producer|musical group|group|dj)\)/i;
 const NON_MUSIC_TITLE_PATTERN = /\((?:album|song|single|film|novel|book|software|video game|television series|tv series|episode|company|species|animal|character|place)\)/i;
@@ -270,12 +281,23 @@ async function fetchWikiCandidates(
   const params = new URLSearchParams({
     ...query,
   });
-  const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, { signal });
-  if (!res.ok) return [];
-  const data = (await res.json()) as WikiResponse;
-  return Object.values(data.query?.pages ?? {})
-    .map(pageToArtistFact)
-    .filter((fact): fact is ArtistFact => !!fact);
+  try {
+    const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, {
+      signal,
+      headers: { 'Api-User-Agent': WIKI_USER_AGENT },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as WikiResponse;
+    return Object.values(data.query?.pages ?? {})
+      .map(pageToArtistFact)
+      .filter((fact): fact is ArtistFact => !!fact);
+  } catch (err) {
+    // Network failures, AbortErrors, and CORS rejections all surface here.
+    // Returning [] keeps the caller's fallback chain alive so an artist with
+    // one failed lookup still has a chance via the next disambiguator.
+    if (err instanceof Error && err.name === 'AbortError') throw err;
+    return [];
+  }
 }
 
 function pageToArtistFact(page: WikiPage): ArtistFact | null {

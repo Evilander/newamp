@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { formatDuration } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { TrackTable } from './LibraryView';
+import { ViewOnboarding } from '../ViewOnboarding';
 
 interface GeneratedMix {
   id: string;
@@ -145,6 +146,17 @@ export function MixesView(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col">
+      <ViewOnboarding
+        viewId="mixes"
+        title="Mixes"
+        lede="Eight live mixes regenerated from your library every time you open this view or play a new seed track."
+        bullets={[
+          'Harmonic chains tracks by BPM + key + seed-vibe similarity for smooth DJ-style transitions.',
+          'Taste Match weighs plays, loves, ratings, and skips around whatever you\'re listening to.',
+          'Loved Signal / Heavy Rotation / Recently Played are fast paths back into your favorites.',
+          'Click SAVE on any mix card to keep it as a normal playlist.',
+        ]}
+      />
       <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
         <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
           NewAmp Mixes

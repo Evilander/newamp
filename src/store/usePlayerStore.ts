@@ -93,9 +93,17 @@ interface PlayerState {
   vizPreset: AppSettings['visualizerPreset'];
   searchQuery: string;
   showEq: boolean;
+  /** One-shot navigation request consumed by destination views on mount/render. */
+  pendingNavigation:
+    | null
+    | { kind: 'artist'; name: string }
+    | { kind: 'album'; album: string; albumArtist: string };
   init: () => Promise<void>;
   persistPlaybackSession: () => Promise<void>;
   setView: (v: ViewMode) => void;
+  navigateToArtist: (name: string) => void;
+  navigateToAlbum: (album: string, albumArtist: string) => void;
+  consumePendingNavigation: () => void;
   toggleEq: () => void;
   setFullscreenViz: (on: boolean) => void;
   setCompactMode: (on: boolean) => void;
@@ -654,6 +662,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     vizPreset: 'spectrum',
     searchQuery: '',
     showEq: false,
+    pendingNavigation: null,
 
     init: async () => {
       let settings = inElectron
@@ -696,6 +705,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     persistPlaybackSession: async () => persistPlaybackSession(get()),
 
     setView: (v) => set({ view: v }),
+    navigateToArtist: (name) => {
+      const cleaned = (name ?? '').trim();
+      if (!cleaned) return;
+      set({ view: 'artists', pendingNavigation: { kind: 'artist', name: cleaned } });
+    },
+    navigateToAlbum: (album, albumArtist) => {
+      const a = (album ?? '').trim();
+      if (!a) return;
+      set({
+        view: 'albums',
+        pendingNavigation: { kind: 'album', album: a, albumArtist: (albumArtist ?? '').trim() },
+      });
+    },
+    consumePendingNavigation: () => set({ pendingNavigation: null }),
     toggleEq: () => set({ showEq: !get().showEq }),
     setFullscreenViz: (on) => {
       const wasCompact = get().compactMode;

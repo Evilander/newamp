@@ -16,6 +16,7 @@ import { volumeLabel } from './VolumeSlider';
 const PRESETS = [
   { id: 'tempo-pulse', label: 'Tempo Pulse' },
   { id: 'lattice-strobe', label: 'Lattice Strobe' },
+  { id: 'liquid-mercury', label: 'Liquid Mercury' },
   { id: 'neon-waves', label: 'Neon Waves' },
   { id: 'neon-ribbons', label: 'Neon Ribbons' },
   { id: 'plasma-grid', label: 'Plasma Grid' },
@@ -62,6 +63,7 @@ const REACTIVITY_MODES = [
 const AUTO_VJ_BALANCED: VisualizerPreset[] = [
   'tempo-pulse',
   'lattice-strobe',
+  'liquid-mercury',
   'neon-waves',
   'plasma-grid',
   'orbital-rings',
@@ -129,6 +131,7 @@ export function FullscreenVisualizer(): JSX.Element {
   const duration = usePlayerStore((s) => s.duration);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const volume = usePlayerStore((s) => s.volume);
+  const setVolume = usePlayerStore((s) => s.setVolume);
   const setFs = usePlayerStore((s) => s.setFullscreenViz);
   const engine = usePlayerStore((s) => s.engine);
   const togglePlay = usePlayerStore((s) => s.togglePlay);
@@ -147,6 +150,11 @@ export function FullscreenVisualizer(): JSX.Element {
   const [reactivity, setReactivity] = useState<VizReactivity>(() => loadVisualizerReactivity());
   const [autoVjEnabled, setAutoVjEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_AUTO_VJ_KEY, false));
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  // Auto-hide tracking: when the mouse is idle in fullscreen we collapse the
+  // top toolbar so the visualizer can be enjoyed without UI clutter. Any
+  // cursor movement re-shows it for a few seconds before hiding again.
+  const [cursorActive, setCursorActive] = useState(true);
+  const cursorTimeoutRef = useRef<number>(0);
   const levelMeterRef = useRef<HTMLSpanElement>(null);
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
@@ -260,6 +268,57 @@ export function FullscreenVisualizer(): JSX.Element {
     return () => {
       cancelled = true;
       void winctl.setFullscreen(false);
+    };
+  }, []);
+
+  // Cursor-position-driven chrome reveal. Cursor near the top edge shows the
+  // toolbar; moving away hides it after a short delay. Effect runs once on
+  // mount — listeners read fresh state via refs to avoid re-binding storms.
+  useEffect(() => {
+    const TOP_REVEAL_PX = 110;
+    const HIDE_DELAY_MS = 1400;
+    let hideTimer = 0;
+    let shown = false;
+    function show(): void {
+      if (!shown) {
+        shown = true;
+        setCursorActive(true);
+      }
+      if (hideTimer) {
+        window.clearTimeout(hideTimer);
+        hideTimer = 0;
+      }
+    }
+    function scheduleHide(delay = HIDE_DELAY_MS): void {
+      if (hideTimer) window.clearTimeout(hideTimer);
+      hideTimer = window.setTimeout(() => {
+        shown = false;
+        setCursorActive(false);
+        hideTimer = 0;
+      }, delay);
+    }
+    function handleMove(e: MouseEvent): void {
+      if (e.clientY <= TOP_REVEAL_PX) {
+        show();
+      } else if (shown && !hideTimer) {
+        scheduleHide();
+      }
+    }
+    function handleKey(): void {
+      show();
+      scheduleHide(2400);
+    }
+    setCursorActive(false);
+    cursorTimeoutRef.current = 0;
+    window.addEventListener('mousemove', handleMove, { passive: true });
+    window.addEventListener('keydown', handleKey, { passive: true });
+    return () => {
+      window.removeEventListener('mousemove', handleMove);
+      window.removeEventListener('keydown', handleKey);
+      if (hideTimer) {
+        window.clearTimeout(hideTimer);
+        hideTimer = 0;
+      }
     };
   }, []);
 
@@ -444,8 +503,9 @@ export function FullscreenVisualizer(): JSX.Element {
       )}
 
       <div
-        className={`fullscreen-viz-toolbar pointer-events-auto absolute inset-x-4 top-4 flex max-w-[calc(100vw-2rem)] items-center gap-2 ${chromeVisible ? '' : 'is-clean'} ${topNavVisible ? '' : 'is-top-hidden'}`}
+        className={`fullscreen-viz-toolbar pointer-events-auto absolute inset-x-4 top-4 flex max-w-[calc(100vw-2rem)] items-center gap-2 ${chromeVisible ? '' : 'is-clean'} ${topNavVisible && cursorActive ? '' : 'is-top-hidden'}`}
         data-newamp-visualizer-toolbar
+        data-newamp-visualizer-toolbar-idle={!cursorActive ? 'idle' : 'active'}
       >
         <button className="pxbtn" onClick={() => cyclePreset(-1)} title="Previous visualizer preset ([)">
           PREV
@@ -593,18 +653,41 @@ export function FullscreenVisualizer(): JSX.Element {
       </div>
 
       <div
-        className="fullscreen-viz-hover-meter pointer-events-none absolute right-6 top-1/2 w-[148px] -translate-y-1/2"
+        className={`fullscreen-viz-hover-meter pointer-events-auto absolute right-6 top-1/2 w-[148px] -translate-y-1/2 ${cursorActive ? '' : 'is-dim'}`}
         data-newamp-viz-hover-meter
       >
         <div className="fullscreen-viz-hover-meter-label">
           <span>VOL</span>
           <strong>{volumeLabel(volume)}</strong>
         </div>
-        <div className="fullscreen-viz-hover-meter-track">
+        <div className="fullscreen-viz-hover-meter-track" data-newamp-viz-volume-slider>
+          {/* Live RMS-driven level meter sits beneath the interactive slider so
+              the bar still reacts to audio while the user can also drag to set
+              volume. The slider is the source of truth for volume control. */}
           <span
             ref={levelMeterRef}
             data-newamp-viz-level-meter-bar
             style={{ height: `${Math.max(2, volumePct)}%` }}
+          />
+          <input
+            type="range"
+            className="fullscreen-viz-hover-meter-input"
+            data-newamp-viz-volume-input
+            min={0}
+            max={200}
+            step={1}
+            value={Math.round(volume * 100)}
+            onChange={(event) => {
+              const raw = Number(event.target.value);
+              if (Number.isFinite(raw)) void setVolume(Math.max(0, Math.min(2, raw / 100)));
+            }}
+            onWheel={(event) => {
+              event.preventDefault();
+              const delta = event.deltaY > 0 ? -0.05 : 0.05;
+              void setVolume(Math.max(0, Math.min(2, volume + delta)));
+            }}
+            aria-label="Visualizer volume"
+            title={`Volume ${volumeLabel(volume)} — drag or scroll to change`}
           />
         </div>
       </div>
