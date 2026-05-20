@@ -388,6 +388,26 @@ export function SettingsView(): JSX.Element {
               </button>
             </div>
           </Row>
+          <Row label="Close button (X)">
+            <label className="flex items-center gap-3 text-[12px]" style={{ color: 'var(--ink-2)' }}>
+              <select
+                value={settings.closeButtonBehavior}
+                onChange={(event) => {
+                  const closeButtonBehavior = event.target.value === 'close-app' ? 'close-app' : 'minimize-to-tray';
+                  api.setSettings({ closeButtonBehavior }).then(setSettings).catch(() => undefined);
+                }}
+                className="bevel-in px-2 py-1"
+                data-newamp-close-button-behavior
+                style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              >
+                <option value="minimize-to-tray">Minimize to tray</option>
+                <option value="close-app">Close the app</option>
+              </select>
+              <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
+                Choose what happens when you click the X button in the title bar.
+              </span>
+            </label>
+          </Row>
         </section>
 
         <section className="bevel-out flex flex-col gap-4 p-6">

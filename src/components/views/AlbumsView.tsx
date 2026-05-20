@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type UIEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import type { AlbumSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
@@ -481,45 +481,125 @@ export function AlbumsView(): JSX.Element {
           {scanStatus ? ` / ${scanStatus}` : ''}
         </span>
       </div>
-      <div
-        ref={albumListRef}
-        data-newamp-albums-scroll
-        className="flex-1 overflow-auto p-4"
-        onScroll={handleAlbumsScroll}
-      >
+      <div className="relative flex flex-1 overflow-hidden">
         <div
-          className="grid gap-4"
-          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(168px, 1fr))' }}
+          ref={albumListRef}
+          data-newamp-albums-scroll
+          className="flex-1 overflow-auto p-4"
+          onScroll={handleAlbumsScroll}
         >
-          {albums.map((a) => (
-            <button
-              key={`${a.album}::${a.albumArtist}`}
-              onClick={() => openAlbum(a)}
-              className="group flex flex-col gap-1 text-left"
-            >
-              <AlbumArt album={a} size={168} />
-              <div className="truncate pt-1 text-[13px] font-semibold">{a.album}</div>
-              <div className="truncate text-[11px]" style={{ color: 'var(--ink-2)' }}>
-                {a.albumArtist}
-                {a.year ? `  ·  ${a.year}` : ''}
-              </div>
-            </button>
-          ))}
-        </div>
-        {hasMoreAlbums && (
-          <div className="flex justify-center py-4">
-            <button
-              className="pxbtn is-active"
-              onClick={() => void loadMoreAlbums()}
-              disabled={loadingAlbums}
-              data-newamp-albums-load-more
-            >
-              {loadingAlbums ? 'Loading...' : 'Load more albums'}
-            </button>
+          <div
+            className="grid gap-4"
+            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(168px, 1fr))' }}
+          >
+            {albums.map((a) => {
+              const firstLetter = albumArtistFirstLetter(a.albumArtist);
+              return (
+                <button
+                  key={`${a.album}::${a.albumArtist}`}
+                  onClick={() => openAlbum(a)}
+                  className="group flex flex-col gap-1 text-left"
+                  data-newamp-album-artist-letter={firstLetter}
+                >
+                  <AlbumArt album={a} size={168} />
+                  <div className="truncate pt-1 text-[13px] font-semibold">{a.album}</div>
+                  <div className="truncate text-[11px]" style={{ color: 'var(--ink-2)' }}>
+                    {a.albumArtist}
+                    {a.year ? `  ·  ${a.year}` : ''}
+                  </div>
+                </button>
+              );
+            })}
           </div>
+          {hasMoreAlbums && (
+            <div className="flex justify-center py-4">
+              <button
+                className="pxbtn is-active"
+                onClick={() => void loadMoreAlbums()}
+                disabled={loadingAlbums}
+                data-newamp-albums-load-more
+              >
+                {loadingAlbums ? 'Loading...' : 'Load more albums'}
+              </button>
+            </div>
+          )}
+        </div>
+        {albumSort === 'artist' && (
+          <AlphabetRail
+            albums={albums}
+            listRef={albumListRef}
+          />
         )}
       </div>
     </div>
+  );
+}
+
+function albumArtistFirstLetter(value: string | null | undefined): string {
+  const trimmed = String(value ?? '').trim();
+  if (!trimmed) return '#';
+  // Skip leading articles so "The Beatles" jumps to B, not T.
+  const stripped = trimmed.replace(/^(the|a|an)\s+/i, '');
+  const first = stripped.charAt(0).toUpperCase();
+  return /[A-Z]/.test(first) ? first : '#';
+}
+
+/**
+ * Vertical A-Z navigation rail. Letters with no matching album render dimmed
+ * and disabled; clicking a present letter scrolls the album grid to the
+ * first matching album. The rail floats over the right edge of the album
+ * list so it doesn't take any horizontal space away from the grid.
+ */
+function AlphabetRail({
+  albums,
+  listRef,
+}: {
+  albums: AlbumSummary[];
+  listRef: React.RefObject<HTMLDivElement>;
+}): JSX.Element {
+  const letters = ['#', ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i))];
+  const available = useMemo(() => {
+    const set = new Set<string>();
+    for (const album of albums) set.add(albumArtistFirstLetter(album.albumArtist));
+    return set;
+  }, [albums]);
+
+  function jumpTo(letter: string): void {
+    const container = listRef.current;
+    if (!container) return;
+    const target = container.querySelector<HTMLElement>(`[data-newamp-album-artist-letter="${letter}"]`);
+    if (!target) return;
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const offset = targetRect.top - containerRect.top + container.scrollTop - 12;
+    container.scrollTo({ top: Math.max(0, offset), behavior: 'smooth' });
+  }
+
+  return (
+    <nav
+      className="album-letter-rail"
+      data-newamp-album-letter-rail
+      aria-label="Jump to artist letter"
+    >
+      {letters.map((letter) => {
+        const present = available.has(letter);
+        return (
+          <button
+            key={letter}
+            type="button"
+            data-letter={letter}
+            data-newamp-album-letter={letter}
+            data-newamp-album-letter-present={present ? 'true' : 'false'}
+            className={`album-letter-rail-key ${present ? 'is-present' : 'is-empty'}`}
+            disabled={!present}
+            onClick={() => present && jumpTo(letter)}
+            title={present ? `Jump to artists starting with ${letter}` : `No ${letter} artists yet`}
+          >
+            {letter}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 

@@ -424,6 +424,15 @@ function createWindow(): BrowserWindow {
   win.on('close', (event) => {
     if (smokeMode || isQuitting) return;
     if (!tray || tray.isDestroyed()) return;
+    // User-configurable close behavior. Default preserves the legacy
+    // minimize-to-tray flow; 'close-app' actually quits the process so the
+    // X button matches what most desktop users expect.
+    const behavior = settings.get().closeButtonBehavior;
+    if (behavior === 'close-app') {
+      isQuitting = true;
+      app.quit();
+      return;
+    }
     event.preventDefault();
     win.hide();
   });

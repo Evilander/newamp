@@ -43,6 +43,7 @@ const DEFAULTS: AppSettings = {
   radioBrainPort: 17117,
   audioBitPerfectPath: false,
   audioPreferredSampleRate: null,
+  closeButtonBehavior: 'minimize-to-tray',
 };
 
 function normalizePreferredSampleRate(value: unknown): number | null {
@@ -106,6 +107,10 @@ function normalizeTextScale(value: unknown): number {
   return Number.isFinite(scale) ? Math.min(1.35, Math.max(0.85, scale)) : DEFAULTS.textScale;
 }
 
+function normalizeCloseButtonBehavior(value: unknown): AppSettings['closeButtonBehavior'] {
+  return value === 'close-app' ? 'close-app' : 'minimize-to-tray';
+}
+
 export class SettingsStore {
   public readonly recoveryEvents: RecoveryEvent[] = [];
   private state: AppSettings;
@@ -140,6 +145,7 @@ export class SettingsStore {
           radioBrainPort: normalizeRadioBrainPort(parsed.radioBrainPort),
           audioBitPerfectPath: parsed.audioBitPerfectPath === true,
           audioPreferredSampleRate: normalizePreferredSampleRate(parsed.audioPreferredSampleRate),
+          closeButtonBehavior: normalizeCloseButtonBehavior(parsed.closeButtonBehavior),
         };
       } catch (err) {
         const event = quarantineCorruptFile(this.file, 'settings', recoveryReason(err));

@@ -734,6 +734,13 @@ export interface AppSettings {
   radioBrainPort: number;
   audioBitPerfectPath: boolean;
   audioPreferredSampleRate: number | null;
+  /**
+   * What the window's X (close) button should do. `minimize-to-tray` (default)
+   * preserves the legacy behavior — hides the window so playback continues
+   * with a tray icon. `close-app` actually quits the process, matching what
+   * users expect from a desktop close button.
+   */
+  closeButtonBehavior: 'minimize-to-tray' | 'close-app';
 }
 
 export interface RadioBrainStatus {

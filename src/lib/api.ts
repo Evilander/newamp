@@ -52,6 +52,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   radioBrainPort: 17117,
   audioBitPerfectPath: false,
   audioPreferredSampleRate: null,
+  closeButtonBehavior: 'minimize-to-tray',
 };
 
 const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {

@@ -3946,6 +3946,53 @@ input[type='range'].nslider.eq-slider {
   pointer-events: none;
 }
 
+/* Alphabet rail on the Albums view. Floats over the right edge of the
+   album grid so it doesn't reduce the grid's horizontal space. Letters
+   that don't have any matching artist are dimmed and skipped. */
+.album-letter-rail {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  right: 4px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-evenly;
+  padding: 4px 2px;
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  pointer-events: auto;
+}
+.album-letter-rail-key {
+  width: 22px;
+  min-height: 16px;
+  line-height: 1;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.album-letter-rail-key.is-present {
+  color: var(--accent);
+}
+.album-letter-rail-key.is-present:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--ink);
+}
+.album-letter-rail-key.is-empty {
+  color: var(--muted);
+  opacity: 0.35;
+  cursor: default;
+}
+
 /* Living Tag chips inside the liner notes panel — shows the user how their
    DSL rules have classified the current track. Replaces the old static
    "NewAmp Notes" filler that conveyed no real information. */
