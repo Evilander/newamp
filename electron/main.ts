@@ -1628,7 +1628,10 @@ async function runUiVisualizerSmoke(win: BrowserWindow, scanPromise: Promise<voi
     const result = await Promise.race([
       win.webContents.executeJavaScript(uiVisualizerProbeSource(), true),
       new Promise((_resolve, reject) =>
-        setTimeout(() => reject(new Error('Timed out waiting for UI visualizer probe')), 20000),
+        // 60s — needs headroom for butterchurn shader compilation + Liquid
+        // Mercury setup on top of the existing preset battery. Was 20s
+        // before, which assumed canvas-2D only.
+        setTimeout(() => reject(new Error('Timed out waiting for UI visualizer probe')), 60000),
       ),
     ]);
     console.log(`[newamp-ui-visualizer-smoke] ${JSON.stringify(result)}`);
@@ -2104,6 +2107,60 @@ function uiVisualizerProbeSource(): string {
         stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="aurora"]'),
       );
       const auroraRender = await waitFor('nonblank aurora visualizer frame', () => sampleCanvas(auroraCanvas), 8000);
+      // Verify Milkdrop (butterchurn) actually mounts without a CSP eval
+      // failure. We CAN'T reliably check non-zero pixels in software-WebGL
+      // (which the smoke runs under via disable-hardware-acceleration);
+      // shader presets compile and link differently on SwiftShader. The
+      // production check is "does butterchurn boot without the CSP error
+      // that previously bombed it?" — we verify that by capturing console
+      // errors and asserting no eval-policy failures fire.
+      const milkdropButton = await waitFor('Milkdrop visualizer preset button', () =>
+        Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
+          .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'butterchurn'),
+      );
+      const consoleErrors = [];
+      const originalError = console.error;
+      console.error = function (...args) {
+        const text = args.map(String).join(' ');
+        consoleErrors.push(text);
+        return originalError.apply(console, args);
+      };
+      milkdropButton.click();
+      await waitFor('butterchurn visualizer stage', () =>
+        stage.getAttribute('data-newamp-visualizer-preset') === 'butterchurn',
+      );
+      const milkdropCanvas = await waitFor('butterchurn canvas', () =>
+        stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="butterchurn"]'),
+      );
+      // Give butterchurn 4s to compile shaders + load a preset, then check
+      // for CSP/eval failures. Pixel output is best-effort.
+      await sleep(4000);
+      console.error = originalError;
+      const milkdropEvalError = consoleErrors.find((line) =>
+        /unsafe-eval|EvalError|Evaluating a string as JavaScript|butterchurn failed to start/.test(line),
+      );
+      // Try to sample pixels, but don't require — software WebGL may not
+      // render butterchurn shaders even when the code itself works.
+      let milkdropRender = null;
+      const sampleStart = Date.now();
+      while (Date.now() - sampleStart < 5000) {
+        const sample = sampleCanvas(milkdropCanvas);
+        if (sample) { milkdropRender = sample; break; }
+        await sleep(120);
+      }
+      // Now Liquid Mercury — the new 1.5.2 preset. Verify it renders too.
+      const mercuryButton = await waitFor('Liquid Mercury visualizer preset button', () =>
+        Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
+          .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'liquid-mercury'),
+      );
+      mercuryButton.click();
+      await waitFor('liquid-mercury visualizer stage', () =>
+        stage.getAttribute('data-newamp-visualizer-preset') === 'liquid-mercury',
+      );
+      const mercuryCanvas = await waitFor('liquid-mercury canvas', () =>
+        stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="liquid-mercury"]'),
+      );
+      const mercuryRender = await waitFor('nonblank liquid-mercury visualizer frame', () => sampleCanvas(mercuryCanvas), 8000);
       const qualityButton = await waitFor('4K quality toggle', () =>
         document.querySelector('[data-newamp-viz-quality-button]'),
       );
@@ -2211,6 +2268,9 @@ function uiVisualizerProbeSource(): string {
           orbitalRings: orbitalRender,
         },
         auroraRender,
+        milkdropRender,
+        milkdropEvalError: milkdropEvalError ?? null,
+        mercuryRender,
         stageRect: { width: stageRect.width, height: stageRect.height },
         viewport,
         openedViaVizButton: true,

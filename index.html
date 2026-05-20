@@ -3,7 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: file: https: newart: newplaylistart:; media-src 'self' blob: file: https: newamp:; connect-src 'self' https: newamp: newart: newplaylistart: http://localhost:5173 ws://localhost:5173; object-src 'none'; base-uri 'self'" />
+    <!-- script-src includes 'unsafe-eval' so Butterchurn/Milkdrop can compile
+         its preset shader expressions. butterchurn-presets ships preset
+         definitions whose math is parsed at runtime via Function constructor,
+         which requires the eval source. The compiled code comes only from
+         the local bundled package, not the network - connect-src still
+         restricts what can be fetched. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: file: https: newart: newplaylistart:; media-src 'self' blob: file: https: newamp:; connect-src 'self' https: newamp: newart: newplaylistart: http://localhost:5173 ws://localhost:5173; object-src 'none'; base-uri 'self'" />
     <title>NewAmp</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

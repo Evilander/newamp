@@ -35,6 +35,20 @@ assert.ok(result.xboxRender?.plasmaGrid?.litSamples > 0, 'Plasma Grid should ren
 assert.ok(result.xboxRender?.neonRibbons?.litSamples > 0, 'Neon Ribbons should render nonblank pixels');
 assert.ok(result.xboxRender?.orbitalRings?.litSamples > 0, 'Orbital Rings should render nonblank pixels');
 assert.ok(result.auroraRender?.litSamples > 0, 'Aurora should render a nonblank reactive frame');
+// Milkdrop (butterchurn) production-correctness check: confirm the CSP
+// allows the preset shader eval. Pixel output isn't reliable in software
+// WebGL (smoke runs without hardware acceleration), so we just verify the
+// integration didn't bomb with the eval policy error that previously broke
+// it. On Tyler's hardware-accelerated app this also produces pixels.
+assert.equal(
+  result.milkdropEvalError,
+  null,
+  `Milkdrop should not fail with a CSP/eval error — got: ${result.milkdropEvalError}`,
+);
+assert.ok(
+  result.mercuryRender?.litSamples > 0,
+  `Liquid Mercury should render a nonblank frame — was ${JSON.stringify(result.mercuryRender)}`,
+);
 assert.equal(result.qualityToggle, '4k', 'fullscreen visualizer should expose and apply 4K mode');
 assert.ok(['armed', 'pulse'].includes(result.artToggle), 'fullscreen visualizer should expose random album-art pulse mode');
 assert.equal(result.screenToggle, true, 'fullscreen visualizer should expose native full-screen screen takeover');
