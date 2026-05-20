@@ -69,9 +69,9 @@ Nine compact-window skins, each declaring its own native window size so the OS c
 | --- | --- |
 | <img src="assets/screenshots/contributed-record-player-deck.png" alt="NewAmp Record Player deck — spinning vinyl with album-art label, swinging tonearm" width="420"> | <img src="assets/screenshots/contributed-jukebox-deck.png" alt="NewAmp Jukebox deck — chrome arch, animated bubble tubes, selection numerals" width="420"> |
 
-| Hotdog | Windowshade (classic) |
-| --- | --- |
-| <img src="assets/screenshots/feature-hotdog-deck-dave-brubeck.png" alt="NewAmp Hotdog deck — photoreal hotdog shell, art swaps into the bun" width="420"> | <img src="assets/screenshots/contributed-windowshade-deck.png" alt="NewAmp Windowshade — Winamp 2-style ultra-thin classic deck with embedded spectrum" width="420"> |
+| Windowshade (Winamp-classic compact deck) |
+| --- |
+| <img src="assets/screenshots/contributed-windowshade-deck.png" alt="NewAmp Windowshade — Winamp 2-style ultra-thin classic deck with embedded spectrum" width="420"> |
 
 ### Reactive tagging + sonic cartography
 
