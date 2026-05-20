@@ -165,6 +165,31 @@ export function Visualizer({
           const presetApi = unwrapDefault<ButterchurnPresetApi>(presetModule);
 
           ensureSize();
+          // Guard against zero-sized canvas — butterchurn throws on width=0
+          // and the silent catch then drops us into the fallback forever.
+          // Wait one rAF for layout if we got an empty canvas on first paint.
+          if (lastW < 8 || lastH < 8) {
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            if (cancelled) return;
+            ensureSize();
+          }
+          if (lastW < 8 || lastH < 8) {
+            // Layout still hasn't given us real dimensions. Force a minimum
+            // so the visualizer can boot; ensureSize will resize on next frame.
+            lastW = Math.max(lastW, 320);
+            lastH = Math.max(lastH, 180);
+            butterCanvas.width = lastW;
+            butterCanvas.height = lastH;
+          }
+          // Butterchurn needs an AudioContext that's been resumed at least
+          // once. Touch it first so renderer + analyser are both alive.
+          if (engine.ctx.state === 'suspended') {
+            try {
+              await engine.ctx.resume();
+            } catch {
+              /* user gesture required — render will pick up when audio plays */
+            }
+          }
           visualizer = butterchurn.createVisualizer(engine.ctx, butterCanvas, {
             width: lastW,
             height: lastH,
@@ -196,6 +221,10 @@ export function Visualizer({
           };
           raf = requestAnimationFrame(frame);
         } catch (err) {
+          // Surface the real failure so users (and the milkdrop smoke) can
+          // see WHY butterchurn isn't rendering. Previously we silently
+          // dropped into the fallback which made the bug invisible.
+          console.error('[newamp] butterchurn failed to start:', err);
           if (!cancelled) {
             const frameFallback = (now: number) => {
               if (canPaint(now)) paintMilkdropFallback(butterCanvas, engine);
