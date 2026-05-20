@@ -29,7 +29,7 @@ assert.match(
   'Butterchurn must connect to the pre-volume Newamp visualizer node',
 );
 assert.match(engineSource, /get visualizerNode\(\): AudioNode/, 'audio engine should expose a dedicated visualizer node');
-assert.match(engineSource, /limiter\.connect\(analyser\)[\s\S]*analyser\.connect\(masterGain\)[\s\S]*masterGain\.connect\(ctx\.destination\)/, 'visualizers should see pre-volume audio so low listening volume remains reactive');
+assert.match(engineSource, /replayGain\.connect\(masterGain\)[\s\S]*replayGain\.connect\(analyser\)[\s\S]*masterGain\.connect\(limiter\)[\s\S]*limiter\.connect\(ctx\.destination\)/, 'visualizers must tap pre-volume audio (analyser branches off replayGain) and the audio path must be replayGain→masterGain→limiter→destination so post-limiter clipping is impossible');
 assert.match(engineSource, /smoothingTimeConstant = 0\.24/, 'analyser smoothing should favor responsive visual motion');
 assert.match(engineSource, /minDecibels = -86/, 'analyser should expose quieter passages to the visualizer');
 

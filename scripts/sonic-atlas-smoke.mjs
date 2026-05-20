@@ -7,6 +7,7 @@ import {
   atlasPointColor,
   buildSonicAtlas,
   nearestAtlasPoint,
+  nearestAtlasPoints,
 } from '../dist-electron/shared/sonic-atlas.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -103,6 +104,38 @@ const found = nearestAtlasPoint(atlas, target.x, target.y, 0.05);
 assert.equal(found?.id, target.id, 'nearestAtlasPoint should resolve to the same track');
 const missed = nearestAtlasPoint(atlas, 2, 2, 0.05);
 assert.equal(missed, null, 'nearestAtlasPoint should return null for far-away coords');
+
+// nearestAtlasPoints — "play this region" contract.
+{
+  const ten = nearestAtlasPoints(atlas, target.x, target.y, 10);
+  assert.equal(ten.length, 10, 'nearestAtlasPoints should return the requested count when atlas has enough points');
+  assert.equal(ten[0].id, target.id, 'nearestAtlasPoints[0] must be the closest point (the seed itself when on-grid)');
+
+  // Monotonic squared-distance ordering — index i must be no farther than index i+1.
+  let prevDist = -Infinity;
+  for (const point of ten) {
+    const dx = point.x - target.x;
+    const dy = point.y - target.y;
+    const dist = dx * dx + dy * dy;
+    assert.ok(dist >= prevDist, `nearestAtlasPoints must be sorted ascending by distance; got ${dist} after ${prevDist}`);
+    prevDist = dist;
+  }
+
+  // Clamp upper bound — count > 500 must collapse to 500, regardless of atlas size.
+  const clamped = nearestAtlasPoints(atlas, target.x, target.y, 9999);
+  assert.ok(clamped.length <= 500, `nearestAtlasPoints must clamp count to 500, got ${clamped.length}`);
+  assert.equal(clamped.length, Math.min(500, atlas.points.length), 'nearestAtlasPoints should saturate at 500 when atlas is large');
+
+  // Clamp lower bound — count <= 0 must still return one point (the floor protects UI handlers from "" inputs).
+  const floored = nearestAtlasPoints(atlas, target.x, target.y, 0);
+  assert.equal(floored.length, 1, `nearestAtlasPoints(count=0) must floor to 1, got ${floored.length}`);
+  const negative = nearestAtlasPoints(atlas, target.x, target.y, -3);
+  assert.equal(negative.length, 1, `nearestAtlasPoints(count<0) must floor to 1, got ${negative.length}`);
+
+  // Far-away origin still returns ordered nearest points (no maxDist gate on this API).
+  const farAway = nearestAtlasPoints(atlas, 5, 5, 5);
+  assert.equal(farAway.length, 5, 'nearestAtlasPoints has no maxDist gate — should still return count items');
+}
 
 // Color is a valid hsl() string.
 const color = atlasPointColor(atlas.points[0]);

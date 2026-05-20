@@ -179,7 +179,12 @@ export function dnaCosineSimilarity(a: TrackDna, b: TrackDna): number {
   }
   if (aMag === 0 || bMag === 0) return 0;
   const cos = dot / (Math.sqrt(aMag) * Math.sqrt(bMag));
-  return clamp01((cos + 1) / 2);
+  // DNA components are all non-negative (rms, brightness, bands, etc all in
+  // [0, 1]), so cosine is already in [0, 1]. The old (cos+1)/2 remap collapsed
+  // the floor to 0.5 — making "maximally dissimilar" tracks score the same as
+  // moderately similar ones. Returning clamp01(cos) restores the dynamic
+  // range so the seed-vibe gate actually discriminates.
+  return clamp01(cos);
 }
 
 export function dnaDistance(a: TrackDna, b: TrackDna): number {

@@ -1,3 +1,4 @@
+import { fetchWikipediaPages, localStorageSafe, normalizeForMatch, type WikiPage } from '../lib/wiki';
 export interface ArtistFact {
   title: string;
   description: string | null;
@@ -28,12 +29,6 @@ const MUSIC_DISAMBIGUATORS = [
   'artist',
 ];
 
-// Wikipedia's UA policy strongly requests a descriptive User-Agent. Without
-// one, requests can be rate-limited or blocked entirely. The bug where Blood
-// Orange and other less-disambiguated artists returned nothing was caused by
-// either WP throttling anonymous browser-default UAs or by the requests
-// failing CORS preflight on some networks.
-const WIKI_USER_AGENT = 'NewAmp/1.5.2 (https://github.com/evilander/newamp)';
 
 const MUSIC_TITLE_PATTERN = /\((?:musician|band|singer|singer-songwriter|rapper|composer|record producer|musical group|group|dj)\)/i;
 const NON_MUSIC_TITLE_PATTERN = /\((?:album|song|single|film|novel|book|software|video game|television series|tv series|episode|company|species|animal|character|place)\)/i;
@@ -44,21 +39,6 @@ const CREATIVE_WORK_DESCRIPTION_PATTERN = /\b(?:studio album|live album|compilat
 interface CachedArtistFact {
   fetchedAt: number;
   fact: ArtistFact;
-}
-
-interface WikiPage {
-  title?: string;
-  description?: string;
-  extract?: string;
-  fullurl?: string;
-  thumbnail?: { source?: string };
-  original?: { source?: string };
-}
-
-interface WikiResponse {
-  query?: {
-    pages?: Record<string, WikiPage>;
-  };
 }
 
 export async function fetchArtistFacts(
@@ -149,14 +129,6 @@ function writeCachedArtistFact(artist: string, fact: ArtistFact): void {
 
 function artistFactCacheKey(artist: string): string {
   return `${ARTIST_FACT_CACHE_PREFIX}${encodeURIComponent(artist.trim().toLowerCase())}`;
-}
-
-function localStorageSafe(): Storage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage;
-  } catch {
-    return null;
-  }
 }
 
 function isArtistFact(value: unknown): value is ArtistFact {
@@ -258,18 +230,6 @@ function directTitleCandidates(artist: string): string[] {
   return [...new Set(titles)];
 }
 
-function normalizeForMatch(value: string): string {
-  return value
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/&/g, ' and ')
-    .replace(/[''']/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .replace(/\s+/g, ' ');
-}
-
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -278,26 +238,7 @@ async function fetchWikiCandidates(
   query: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<ArtistFact[]> {
-  const params = new URLSearchParams({
-    ...query,
-  });
-  try {
-    const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, {
-      signal,
-      headers: { 'Api-User-Agent': WIKI_USER_AGENT },
-    });
-    if (!res.ok) return [];
-    const data = (await res.json()) as WikiResponse;
-    return Object.values(data.query?.pages ?? {})
-      .map(pageToArtistFact)
-      .filter((fact): fact is ArtistFact => !!fact);
-  } catch (err) {
-    // Network failures, AbortErrors, and CORS rejections all surface here.
-    // Returning [] keeps the caller's fallback chain alive so an artist with
-    // one failed lookup still has a chance via the next disambiguator.
-    if (err instanceof Error && err.name === 'AbortError') throw err;
-    return [];
-  }
+  return fetchWikipediaPages(query, pageToArtistFact, signal, 'wiki artist');
 }
 
 function pageToArtistFact(page: WikiPage): ArtistFact | null {

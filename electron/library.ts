@@ -51,7 +51,7 @@ import type {
   RecoveryEvent,
 } from '../shared/types.js';
 import { dnaCosineSimilarity, isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
-import { seedVibeSimilarity } from '../shared/seed-vibe.js';
+import { applySeedVibeGate, createSeedVibeContext, seedVibeSimilarity } from '../shared/seed-vibe.js';
 import {
   buildEvalEnvironment,
   evaluateRulesForTrack,
@@ -522,6 +522,11 @@ export class LibraryStore {
   private playlistArtDir: string;
   private persistTimer: NodeJS.Timeout | null = null;
   private dirty = false;
+  // Cache of the full track DNA index. Building it walks the entire DNA table
+  // and JSON.parses every blob; for a 50k-track library that's a real cost on
+  // every Harmonic / Taste mix call. We cache after first build and invalidate
+  // on any track DNA write (setTrackDna, upsertTracks with dna_json).
+  private dnaIndexCache: Map<number, TrackDna> | null = null;
 
   private constructor(private readonly file: string) {
     this.artDir = join(dirname(file), 'art');
@@ -1047,6 +1052,7 @@ export class LibraryStore {
         this.db.run(`DELETE FROM custom_lyrics WHERE track_id = ?`, [id]);
         this.db.run(`DELETE FROM tracks WHERE id = ?`, [id]);
       }
+      this.invalidateDnaIndexCache();
       this.db.run('COMMIT');
     } catch (err) {
       this.db.run('ROLLBACK');
@@ -2106,10 +2112,16 @@ export class LibraryStore {
   }
 
   private buildDnaIndex(): Map<number, TrackDna> {
+    if (this.dnaIndexCache) return this.dnaIndexCache;
     const all = this.getAllTrackDna();
     const map = new Map<number, TrackDna>();
     for (const row of all) map.set(row.id, row.dna);
+    this.dnaIndexCache = map;
     return map;
+  }
+
+  private invalidateDnaIndexCache(): void {
+    this.dnaIndexCache = null;
   }
 
   private bulkInsertTrackTags(pairs: Array<[number, string]>): void {
@@ -2190,11 +2202,11 @@ export class LibraryStore {
     if (seed) {
       const seedDnaIndex = this.buildDnaIndex();
       const seedDna = seedDnaIndex.get(seed.id) ?? null;
-      const getDna = (id: number): TrackDna | null => seedDnaIndex.get(id) ?? null;
+      const seedCtx = createSeedVibeContext(seed, seedDna);
       const scored = candidates
         .map((track) => ({
           track,
-          vibe: track.id === seed.id ? 1 : seedVibeSimilarity(track, { seed, seedDna, getDna }).total,
+          vibe: track.id === seed.id ? 1 : seedVibeSimilarity(track, seedCtx, seedDnaIndex.get(track.id) ?? null),
         }))
         .sort((a, b) => b.vibe - a.vibe);
       const targetCount = Math.max(80, Math.min(800, normalizeMixCount(input.count) * 12));
@@ -2229,27 +2241,16 @@ export class LibraryStore {
     // then blend it as a strong multiplier on the taste score so off-vibe
     // tracks (different genre / era / no DNA match) drop out even if they're
     // loved heavy-rotation favorites.
-    let seedDnaIndex: Map<number, TrackDna> | null = null;
-    let seedDna: TrackDna | null = null;
-    if (opener) {
-      seedDnaIndex = this.buildDnaIndex();
-      seedDna = seedDnaIndex.get(opener.id) ?? null;
-    }
-    const getDna = (id: number): TrackDna | null =>
-      seedDnaIndex ? seedDnaIndex.get(id) ?? null : null;
+    const seedDnaIndex = opener ? this.buildDnaIndex() : null;
+    const seedCtx = opener ? createSeedVibeContext(opener, seedDnaIndex?.get(opener.id) ?? null) : null;
 
     const scored = unique
       .filter((track) => track.id !== opener?.id)
       .map((track) => {
         const base = scoreTasteTrack(track, context) + stableJitter(track.id);
-        if (!opener) return { track, score: base };
-        const vibe = seedVibeSimilarity(track, { seed: opener, seedDna, getDna }).total;
-        // Multiplicative gate: a track with vibe=0 still gets 15% of its taste
-        // score (preserves some serendipity), but a vibe=1 track gets full
-        // credit. This means heavy-rotation off-vibe tracks fall behind
-        // moderately-loved on-vibe tracks.
-        const gated = base * (0.15 + 0.85 * vibe);
-        return { track, score: gated };
+        if (!opener || !seedCtx) return { track, score: base };
+        const vibe = seedVibeSimilarity(track, seedCtx, seedDnaIndex?.get(track.id) ?? null);
+        return { track, score: applySeedVibeGate(base, vibe) };
       })
       .sort((a, b) =>
         b.score - a.score ||
@@ -2313,6 +2314,7 @@ export class LibraryStore {
       this.db.run(`UPDATE tracks SET dna_json = ?, dna_analyzed_at = ? WHERE id = ?`, [json, now, trackId]);
     }
     if (this.db.getRowsModified() <= 0) return false;
+    this.invalidateDnaIndexCache();
     this.scheduleFlush();
     return true;
   }
@@ -2982,7 +2984,7 @@ function trackSortOrder(sort: string | undefined): string {
   }
 }
 
-function albumSortOrder(sort: string | undefined, randomSeed: number | undefined): string {
+export function albumSortOrder(sort: string | undefined, randomSeed: number | undefined): string {
   const artistOrder = 'album_artist COLLATE NOCASE, year IS NULL, year, album COLLATE NOCASE';
   switch (sort) {
     case 'album':
@@ -3001,14 +3003,36 @@ function albumSortOrder(sort: string | undefined, randomSeed: number | undefined
       return 'track_count DESC, duration DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
     case 'random': {
       const seed = normalizeAlbumRandomSeed(randomSeed);
-      // Multi-term mix: XOR + multiplicative scramble so two seeds that differ
-      // by ~1ms still produce a wildly different per-album sort key. The plain
-      // polynomial used to occasionally land in near-equal orderings when two
-      // close Date.now() values shared `% 991` or `% 7919` residues.
-      const linear = 1_103_515_245 + (seed % 7_919);
-      const curve = 17 + (seed % 991);
-      const xorMask = seed & 0x7fffffff;
-      return `ABS((((MIN(id) ^ ${xorMask}) * (MIN(id) * ${curve} + ${linear})) + ${seed}) % 2147483647), MAX(id) % 9973, album_artist COLLATE NOCASE, album COLLATE NOCASE`;
+      // Three-term polynomial scramble. Two seeds that differ by ~1ms must
+      // produce visibly different per-album orderings — the plain polynomial
+      // used in earlier releases collapsed close `Date.now()` values that
+      // happened to share a `% 991` / `% 7919` residue.
+      //
+      // Earlier 1.5.2 used a XOR mask, but SQLite has no XOR operator
+      // (its bitwise set is `&`, `|`, `~`, `<<`, `>>`), so `MIN(id) ^ mask`
+      // failed at parse time with `unrecognized token: "^"`. This version
+      // sticks to `*`, `+`, `%` and bounds every intermediate term so the
+      // product never overflows int64 even on libraries with huge MIN(id).
+      //
+      //   46337² = 2_147_114_569 < 2^31 → `(MIN(id) % 46337)²` < 2^31
+      //   a < 32_749, b < 1_000_003, c < 2^31 → each term < 2^46 (safe in int64)
+      //
+      // Knuth multiplicative hash (2654435761 ≈ φ × 2^32) decorrelates
+      // close seeds before deriving multipliers. `Math.imul` is the JS-safe
+      // way to get a 32-bit multiplication; without it, large seeds overflow
+      // JS's int53 ceiling and lose precision.
+      const knuth = 2_654_435_761;
+      const h1 = (Math.imul(seed, knuth) >>> 0) % 2_147_483_647;
+      const h2 = (Math.imul(h1, knuth) >>> 0) % 2_147_483_647;
+      const h3 = (Math.imul(h2, knuth) >>> 0) % 2_147_483_647;
+      const a = 1 + (h1 % 32_749);     // prime near 2^15
+      const b = 1 + (h2 % 1_000_003);  // prime near 10^6
+      const c = h3;                    // 0..2^31-2
+      return `ABS(
+        ((MIN(id) % 46337) * (MIN(id) % 46337) * ${a}) % 2147483647
+        + ((MIN(id) % 46337) * ${b}) % 2147483647
+        + ${c}
+      ) % 2147483647, MAX(id) % 9973, album_artist COLLATE NOCASE, album COLLATE NOCASE`;
     }
     case 'artist':
     default:
@@ -3016,9 +3040,15 @@ function albumSortOrder(sort: string | undefined, randomSeed: number | undefined
   }
 }
 
-function normalizeAlbumRandomSeed(seed: number | undefined): number {
+export function normalizeAlbumRandomSeed(seed: number | undefined): number {
   if (!Number.isFinite(seed)) return 1;
-  return Math.max(1, Math.min(2_147_483_646, Math.trunc(Math.abs(Number(seed)))));
+  // Mod, don't clamp. Date.now() is currently ~1.7e12 (≈ 2^40); the old
+  // `Math.min(2_147_483_646, ...)` clamped every realistic seed to the
+  // ceiling, so two calls 1ms apart hashed to the same normalized value
+  // and the "random" sort was deterministic across the whole session.
+  // Mod preserves the entropy of the low 31 bits.
+  const truncated = Math.trunc(Math.abs(Number(seed)));
+  return Math.max(1, truncated % 2_147_483_647);
 }
 
 function parseTrackSearchQuery(input: string): ParsedTrackSearch {
