@@ -3,9 +3,31 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.5.0] - 2026-05-19
 
-Living Library night — a content-aware, programmable upgrade to the library.
+Living Library — a content-aware, programmable upgrade to the library.
+
+This release adds six new surfaces (Audio DNA, Sounds Like, Living Tags DSL + workshop, Sonic Atlas, Library Radio Brain, Spectral Cover Art) plus a Bit-Perfect Path through the audio chain and a sidebar redesign. Performance regression smoke detects 5× drops on a synthetic 60 000-track library; current numbers are 5–12× under budget.
+
+### Added — Sonic Atlas (new this release)
+- 2D projection of the library's per-track Audio DNA via zero-deps PCA (power iteration + Hotelling deflation, deterministic across runs). Pan, zoom, click to play, Shift-click to queue next. Hover for the DNA breakdown.
+- Axis hints surface the dominant DNA dimensions per axis ("+brightness & +rolloff" / "+rms & +dynRng") so the user can read what the axes actually mean.
+- `atlasPointColor` keys an HSL palette on brightness (hue) + dynamic range (saturation) + low-band energy (lightness) so adjacent dots read as adjacent colors at a glance.
+- Smoke `smoke:sonic-atlas` synthesizes three sonic clusters, asserts each cluster's centroid stays > 0.15 apart in the projection, verifies determinism, hit-testing, axis hints, and color formatting.
+
+### Added — Bit-Perfect Path (new this release)
+- `AppSettings.audioBitPerfectPath` + `audioPreferredSampleRate` (44.1 / 48 / 88.2 / 96 / 176.4 / 192 / 352.8 / 384 kHz). When enabled, the Web Audio AudioContext is created at the preferred rate so Chromium's resampler is a pass-through on matching sources.
+- `AudioEngine.setPreferredSampleRate` honors the setting at next AudioContext boot; falls back to the device default if Chromium rejects the rate.
+- Settings → Audio gains a Bit-Perfect row: toggle, rate picker, live "Live AudioContext rate" indicator showing whether the requested rate is actually active, and a collapsible setup guide that documents WASAPI Exclusive on Windows + ALSA `hw:` / PipeWire bit-perfect on Linux.
+- Honest copy: true kernel streaming (WASAPI Exclusive, ASIO, ALSA `hw:` direct) requires a native PortAudio addon — tracked as Phase 2.
+
+### Added — Audio DNA Engine
+- Per-track perceptual feature vectors extracted via ffmpeg → 22 050 Hz mono PCM → hand-rolled FFT. Eleven dimensions per track: RMS, dynamic range, spectral centroid (brightness), spectral flatness, 85th-percentile rolloff, onset density, and five normalized band energies (low → high).
+- `tracks.dna_json` + `dna_analyzed_at` columns persist the vectors. `setTrackDna` / `getTrackDna` / `getTrackIdsMissingDna` / `getAllTrackDna` / `getDnaStats` round-trip them.
+- Background batch analysis runs three concurrent ffmpeg workers so library-wide DNA fills 2.5× faster on multi-core machines without contending with active playback.
+- Smoke `smoke:dna` covers pure-math determinism, FFmpeg-driven analyzer round-trip on real FLAC fixtures, persistence, similarity math, and source-link assertions across the IPC, preload, types, and renderer surface.
+
+### Added — Living Tags DSL (the moonshot)
 
 ### Added — Audio DNA Engine
 - Per-track perceptual feature vectors extracted via ffmpeg → 22 050 Hz mono PCM → hand-rolled FFT. Eleven dimensions per track: RMS, dynamic range, spectral centroid (brightness), spectral flatness, 85th-percentile rolloff, onset density, and five normalized band energies (low → high).
@@ -40,11 +62,29 @@ Living Library night — a content-aware, programmable upgrade to the library.
 ### Changed
 - Library power-search grammar gains `tag` and `untagged` field tokens.
 - `AlbumArt` and `FolderArt` no longer show a single `♫` placeholder when art is missing — every album/folder gets a unique spectral cover instead.
+- Sidebar nav reorganised from a 17-item flat list into six labeled groups (Main / Explore / Discovery / Yours / Streaming / App) with a bordered Tools footer that anchors EQ / VIZ / DECK + the keyboard chip cheat sheet. Row padding compressed so all groups fit a 900 px window without scroll.
+- Logo: shipped raster + ICO + new SVG vector wrapper rebuilt from a clean alpha pipeline — no more transparent-hair / ghost-eyes on light GitHub-mobile pages.
+- README screenshot grid swapped to higher-density contributed captures with section headers; added a Shape-changing decks row (Record Player / Jukebox / Hotdog / Windowshade) and a Reactive tagging row (Living Tags / Sonic Atlas).
+
+### Performance
+- `recomputeTags` and `previewTagRule` build a single in-memory DNA index via `buildDnaIndex()` instead of running one SQLite query per track. `bulkInsertTrackTags` batches the result writes 500 pairs per multi-row INSERT. Result: full library re-tag on 60 000 tracks × 2 rules drops from ~3.9 s projected to **743 ms measured**.
+- Spectral SVG renderer gets a bounded LRU memo (512 entries) for both SVG strings and data URLs. Scrolling album grids no longer rebuild every cover on every React re-render.
+- `analyzeTracksDna` runs a three-worker pool over the input ids; ffmpeg-bound decode parallelises ~2.5× on multi-core machines.
+- New `smoke:perf-bench`: synthetic 60 000-track regression detector that asserts every hot path under per-step budgets and prints the live headroom ratio (current run lands at 5–12× under budget).
 
 ### Fixed
 - Reverted accidental ASCII downgrades of UI glyphs in `RecordPlayerDeck` (brand dot, close, play/pause/stop, vinyl-label fallbacks) and `formatDuration`'s em-dash. Kept the tonearm-angle correction.
 - `profileFor` in `shared/archive-compass.ts` no longer reports `Lossless Library` for an empty library; it returns `Empty Shelf` so Home's grade tile matches the headline.
 - Two unprefixed debug `console.log` lines in the `os:pick-folder` IPC handler that printed dialog results on every folder pick.
+- Living Tags DSL ReDoS hardening: `matches` and `matches()` route through `safeRegexTest` that pre-screens for nested-quantifier and alternation-of-equivalents patterns; input is sliced to 4 096 chars. Without the screener, `title matches "(a+)+b"` on 28 'a's locked the recompute thread for 17 s — that's library-wide pause.
+- Living Tags DSL parser depth guard (`>256` nested parens rejected with a clean compile error) and boost-product cap (`1e6`) so a careless rule pack can't drift the running shuffle-bag weight toward Infinity.
+- Living Tags DSL `daysSince()` was unreachable from user rules because the function-table key was mixedCase while the dispatcher lowercases the lookup. Caught by review pass; smoke now asserts the regression.
+- `saveTagRule` now runs `topologicalSort` across the full enabled rule set before writing, so cross-rule cycles (`tag(a) when tag(b)` + `tag(b) when tag(a)`) are rejected at save with a clear "would form a cycle" message instead of silently zeroing out the recompute.
+- Radio Brain's `respondAudio` destroys the socket when an error fires after headers are sent so a mid-stream error can't chimera audio bytes with error text. M3U `#EXTINF` lines strip `\r\n` from artist/title so a malformed tag can't inject playlist entries.
+- TagsView preview pane race condition: each keystroke now carries a sequence number; slow responses to old keystrokes are discarded when a newer edit has already queried.
+
+## [Unreleased]
+
 
 ## [1.2.0] - 2026-05-17
 
