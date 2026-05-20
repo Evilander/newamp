@@ -49,33 +49,51 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 
 ## Screenshots
 
+### Daily-driver views
+
 | Home | Albums |
 | --- | --- |
-| <img src="assets/screenshots/feature-home-deerhoof.png" alt="NewAmp Home view — greeting hero, library stats, smart rails" width="420"> | <img src="assets/screenshots/feature-albums-wilco.png" alt="NewAmp Albums view — grid of album covers with playback overlay" width="420"> |
+| <img src="assets/screenshots/contributed-home-pink-floyd.png" alt="NewAmp Home — greeting hero with blurred album backdrop, Today's Pick reason chip, smart rails, library health" width="420"> | <img src="assets/screenshots/contributed-albums-built-to-spill.png" alt="NewAmp Albums — dense cover grid scaling to thousands of albums" width="420"> |
 
-| Now Playing | Library |
+### Now Playing
+
+| On Air — facts + spectrum | Lyrics |
 | --- | --- |
-| <img src="assets/screenshots/feature-now-playing-hella.png" alt="NewAmp Now Playing — tabbed side panel, spectrum split, transport" width="420"> | <img src="assets/screenshots/feature-library-dave-brubeck.png" alt="NewAmp Library view — power-search, multi-select, smart rule editor" width="420"> |
+| <img src="assets/screenshots/contributed-now-playing-facts.png" alt="NewAmp Now Playing — On Air tab with artist facts, spectrum bars, waveform overview" width="420"> | <img src="assets/screenshots/contributed-now-playing-lyrics.png" alt="NewAmp Now Playing — synced lyrics scrolling with playback, transpose + karaoke controls" width="420"> |
+
+### Shape-changing decks
+
+Nine compact-window skins, each declaring its own native window size so the OS chrome stays out of the way.
+
+| Record Player | Jukebox |
+| --- | --- |
+| <img src="assets/screenshots/contributed-record-player-deck.png" alt="NewAmp Record Player deck — spinning vinyl with album-art label, swinging tonearm" width="420"> | <img src="assets/screenshots/contributed-jukebox-deck.png" alt="NewAmp Jukebox deck — chrome arch, animated bubble tubes, selection numerals" width="420"> |
+
+| Hotdog | Windowshade (classic) |
+| --- | --- |
+| <img src="assets/screenshots/feature-hotdog-deck-dave-brubeck.png" alt="NewAmp Hotdog deck — photoreal hotdog shell, art swaps into the bun" width="420"> | <img src="assets/screenshots/contributed-windowshade-deck.png" alt="NewAmp Windowshade — Winamp 2-style ultra-thin classic deck with embedded spectrum" width="420"> |
+
+### Reactive tagging + sonic cartography
 
 | Living Tags workshop | Sonic Atlas |
 | --- | --- |
-| <img src="assets/screenshots/feature-living-tags-workshop.png" alt="NewAmp Living Tags — three-column DSL editor with live preview" width="420"> | <img src="assets/screenshots/feature-sonic-atlas-empty.png" alt="NewAmp Sonic Atlas — your library projected by Audio DNA" width="420"> |
+| <img src="assets/screenshots/feature-living-tags-workshop.png" alt="NewAmp Living Tags — three-column DSL editor with rule list, expression editor, and live preview" width="420"> | <img src="assets/screenshots/feature-sonic-atlas-empty.png" alt="NewAmp Sonic Atlas — pannable 2D map of the library projected by Audio DNA, click any dot to play" width="420"> |
 
-| Tempo Pulse visualizer | Aurora visualizer |
-| --- | --- |
-| <img src="assets/screenshots/visualizer-tempo-pulse-deerhoof.png" alt="NewAmp fullscreen Tempo Pulse visualizer — beat-locked pulse rings" width="420"> | <img src="assets/screenshots/visualizer-aurora-hella.png" alt="NewAmp fullscreen Aurora visualizer — flowing ribbons" width="420"> |
+### Visualizers
 
-| Lattice Strobe visualizer | Spectrum visualizer |
+| Tempo Pulse | Aurora |
 | --- | --- |
-| <img src="assets/screenshots/visualizer-lattice-strobe-wilco.png" alt="NewAmp fullscreen Lattice Strobe visualizer — club-style strobe lattice" width="420"> | <img src="assets/screenshots/visualizer-spectrum-dave-brubeck.png" alt="NewAmp fullscreen Spectrum visualizer — classic FFT bars" width="420"> |
+| <img src="assets/screenshots/visualizer-tempo-pulse-deerhoof.png" alt="NewAmp Tempo Pulse — beat-locked pulse rings driven by spectral-flux onset detection" width="420"> | <img src="assets/screenshots/visualizer-aurora-hella.png" alt="NewAmp Aurora — flowing ribbons that react to mid-band energy" width="420"> |
+
+| Lattice Strobe | Spectrum |
+| --- | --- |
+| <img src="assets/screenshots/visualizer-lattice-strobe-wilco.png" alt="NewAmp Lattice Strobe — club-style strobe lattice, beat-locked" width="420"> | <img src="assets/screenshots/visualizer-spectrum-dave-brubeck.png" alt="NewAmp Spectrum — classic FFT bar visualizer with selectable styles" width="420"> |
+
+### Library polish
 
 | Spectral Cover Art | Grouped sidebar nav |
 | --- | --- |
-| <img src="assets/screenshots/spectral-art-gallery.png" alt="NewAmp procedural cover gallery — stable, distinct SVGs per album" width="420"> | <img src="assets/screenshots/feature-sidebar-grouped.png" alt="NewAmp sidebar grouped into Main / Explore / Discovery / Yours / Streaming / App" width="420"> |
-
-| Hotdog Deck (shape-changing compact mode) |
-| --- |
-| <img src="assets/screenshots/feature-hotdog-deck-dave-brubeck.png" alt="NewAmp Hotdog Deck — shape-changing compact deck skin" width="420"> |
+| <img src="assets/screenshots/spectral-art-gallery.png" alt="NewAmp Spectral Cover Art — deterministic procedural SVG covers for albums with no embedded or sidecar art" width="420"> | <img src="assets/screenshots/feature-sidebar-grouped.png" alt="NewAmp sidebar grouped into Main / Explore / Discovery / Yours / Streaming / App, with anchored Tools row + keyboard hints" width="420"> |
 
 Additional contributed deck and library captures live in `assets/screenshots/`.
 
