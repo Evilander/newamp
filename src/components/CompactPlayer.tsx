@@ -11,7 +11,6 @@ import { RecordPlayerDeck } from './decks/RecordPlayerDeck';
 import { JukeboxDeck } from './decks/JukeboxDeck';
 import { CassetteDeck } from './decks/CassetteDeck';
 import { DiscmanDeck } from './decks/DiscmanDeck';
-import { HotdogDeck } from './decks/HotdogDeck';
 import { RetroTvDeck } from './decks/RetroTvDeck';
 import { WinampClassicDeck, WinampIndustrialDeck } from './decks/WinampClassicDeck';
 import { DECK_SKINS, findDeck, type DeckProps, type DeckSkin } from './decks/types';
@@ -128,8 +127,6 @@ export function CompactPlayer(): JSX.Element {
       return <CassetteDeck {...deckProps} />;
     case 'discman':
       return <DiscmanDeck {...deckProps} />;
-    case 'hotdog':
-      return <HotdogDeck {...deckProps} />;
     case 'retro-tv':
       return <RetroTvDeck {...deckProps} />;
     case 'bento':

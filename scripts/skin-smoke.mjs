@@ -111,9 +111,6 @@ const [
   deckTypesSource,
   deckPickerSource,
   recordDeckSource,
-  hotdogDeckSource,
-  hotdogShellPng,
-  hotdogMaskPng,
   packageSource,
   gateSource,
 ] =
@@ -129,9 +126,6 @@ const [
     readFile(new URL('../src/components/decks/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/decks/DeckSkinPicker.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/decks/RecordPlayerDeck.tsx', import.meta.url), 'utf8'),
-    readFile(new URL('../src/components/decks/HotdogDeck.tsx', import.meta.url), 'utf8'),
-    readFile(new URL('../src/assets/decks/hotdog-shell.png', import.meta.url)),
-    readFile(new URL('../src/assets/decks/hotdog-mask.png', import.meta.url)),
     readFile(new URL('../package.json', import.meta.url), 'utf8'),
     readFile(new URL('../scripts/release-gate.mjs', import.meta.url), 'utf8'),
   ]);
@@ -171,17 +165,8 @@ assert.doesNotMatch(recordDeckSource, /-34 \+ progress \* 26/, 'record-player to
 assert.match(styleSource, /\.deck-jukebox/, 'jukebox should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-cassette/, 'cassette should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-discman/, 'discman should be a real shaped deck skin');
-assert.match(styleSource, /\.deck-hotdog/, 'hotdog deck should be a real shaped deck skin');
-assert.match(styleSource, /\.deck-hd-art/, 'hotdog deck should render the shaped bun art layer');
-assert.match(styleSource, /mask-image: url\('\.\.\/assets\/decks\/hotdog-mask\.png'\)/, 'hotdog deck should use the food-only PNG alpha as the visible window mask');
-assert.match(hotdogDeckSource, /hotdog-shell\.png/, 'hotdog deck should render the realistic PNG shell asset');
-assert.doesNotMatch(hotdogDeckSource, /<svg/, 'hotdog deck should not regress to the old rectangular inline SVG shell');
-assert.ok(hotdogShellPng.length > 50000, 'hotdog shell PNG should be a real raster shell, not a placeholder');
-assert.equal(hotdogShellPng.subarray(1, 4).toString('ascii'), 'PNG', 'hotdog shell should be a PNG asset');
-assert.ok(hotdogMaskPng.length > 10000, 'hotdog mask PNG should be a real alpha mask, not a placeholder');
-assert.equal(hotdogMaskPng.subarray(1, 4).toString('ascii'), 'PNG', 'hotdog mask should be a PNG asset');
-assert.match(styleSource, /\.deck-hd-screen/, 'hotdog deck should expose the visualizer/album-art screen baked into the bun');
-assert.match(styleSource, /\.deck-hd-transport/, 'hotdog deck should keep transport controls embedded in the bun');
+assert.doesNotMatch(styleSource, /\.deck-hotdog/, 'hotdog deck CSS must not regress after removal');
+assert.doesNotMatch(deckTypesSource, /hotdog/, 'hotdog must not appear in the deck skin registry');
 assert.match(styleSource, /\.deck-retro-tv/, 'retro TV deck should be a real shaped deck skin');
 assert.match(styleSource, /\.deck-winamp-classic/, 'classic Winamp deck should be a real shaped deck skin');
 assert.match(packageSource, /"smoke:skin"/, 'package scripts should expose skin smoke');

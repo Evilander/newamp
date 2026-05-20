@@ -1735,10 +1735,6 @@ async function runScreenshotGallery(win: BrowserWindow, scanPromise: Promise<voi
       'visualizer-spectrum-dave-brubeck.png',
       "await shot.playAndVisualize('Take Five', 'spectrum'); return shot.summary('visualizer-spectrum');",
     );
-    await capture(
-      'feature-hotdog-deck-dave-brubeck.png',
-      "await shot.playTrack('Take Five'); await shot.openDeck('hotdog'); return shot.summary('hotdog-deck');",
-    );
 
     console.log(`[newamp-screenshot-gallery] ${JSON.stringify({ ok: true, files, captured })}`);
     isQuitting = true;
@@ -1881,7 +1877,7 @@ function screenshotGalleryActionSource(action: string): string {
           await closeVisualizer();
           window.__newampSmoke?.setCompactDeck?.(true);
           await waitFor('compact deck', () =>
-            document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv'),
+            document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv'),
           );
           const select = await waitFor('deck skin select', () =>
             document.querySelector('[data-newamp-deck-skin-select]'),
@@ -1889,10 +1885,10 @@ function screenshotGalleryActionSource(action: string): string {
           select.value = skin;
           select.dispatchEvent(new Event('change', { bubbles: true }));
           await waitFor(skin + ' deck', () =>
-            document.querySelector(skin === 'hotdog' ? '.deck-hotdog' : '.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv'),
+            document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv'),
           );
           await sleep(700);
-          return document.querySelector('.deck-hotdog, .compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv');
+          return document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv');
         };
         const summary = (surface) => ({
           ok: true,
@@ -2183,7 +2179,7 @@ function uiVisualizerProbeSource(): string {
       );
       window.__newampSmoke?.setCompactDeck?.(true);
       await waitFor('compact deck opens and clears fullscreen visualizer', () => {
-        const deck = document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv');
+        const deck = document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv');
         const fullscreen = document.querySelector('[data-newamp-fullscreen-visualizer]');
         return deck && !fullscreen ? deck : null;
       });
@@ -2234,8 +2230,8 @@ function uiDeckProbeSource(): string {
       const measure = () => ({
         width: window.innerWidth,
         height: window.innerHeight,
-        rootWidth: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv')?.getBoundingClientRect().width || 0)),
-        rootHeight: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-hotdog, .deck-retro-tv')?.getBoundingClientRect().height || 0)),
+        rootWidth: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv')?.getBoundingClientRect().width || 0)),
+        rootHeight: Math.round((document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv')?.getBoundingClientRect().height || 0)),
       });
       const deckButton = await waitFor('real DECK button', () =>
         Array.from(document.querySelectorAll('button'))
@@ -2257,12 +2253,6 @@ function uiDeckProbeSource(): string {
       const record = await waitFor('record-player size', () => {
         const box = measure();
         return Math.abs(box.width - 540) <= 12 && Math.abs(box.height - 540) <= 12 ? box : null;
-      });
-      await pickSkin('hotdog');
-      await waitFor('hotdog deck', () => document.querySelector('.deck-hotdog'));
-      const hotdog = await waitFor('hotdog size', () => {
-        const box = measure();
-        return Math.abs(box.width - 740) <= 12 && Math.abs(box.height - 240) <= 12 ? box : null;
       });
       await pickSkin('discman');
       await waitFor('discman deck', () => document.querySelector('.deck-discman'));
@@ -2300,7 +2290,6 @@ function uiDeckProbeSource(): string {
         pickerAppRegion,
         shade,
         record,
-        hotdog,
         discman,
         tv,
         winamp,

@@ -94,7 +94,7 @@ try {
   assert.ok(visualMission.visualPlan, 'visual night should include a visual set plan');
   assert.ok(!visualMission.visualPlan.presets.some((preset) => ['neon-waves', 'neon-ribbons', 'plasma-grid', 'burning-cloud'].includes(preset)), 'low-end visual plan should avoid heavy presets');
   assert.ok(
-    ['bento', 'winamp-classic', 'winamp-industrial', 'record-player', 'jukebox', 'cassette', 'discman', 'hotdog', 'retro-tv'].includes(visualMission.visualPlan.deckSkin),
+    ['bento', 'winamp-classic', 'winamp-industrial', 'record-player', 'jukebox', 'cassette', 'discman', 'retro-tv'].includes(visualMission.visualPlan.deckSkin),
     'visual plan should choose a real deck skin',
   );
 
