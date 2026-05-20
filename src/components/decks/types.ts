@@ -12,7 +12,6 @@ export type DeckSkin =
   | 'jukebox'
   | 'cassette'
   | 'discman'
-  | 'hotdog'
   | 'retro-tv';
 
 export const DECK_SKINS: {
@@ -29,7 +28,6 @@ export const DECK_SKINS: {
   { id: 'jukebox',           label: 'Jukebox',          shortLabel: 'JUKE', tagline: 'Wurlitzer arch + chrome',     size: { width: 420, height: 560 } },
   { id: 'cassette',          label: 'Cassette Deck',    shortLabel: 'TAPE', tagline: 'Twin spools, magnetic tape',  size: { width: 760, height: 320 } },
   { id: 'discman',           label: 'Discman',          shortLabel: 'CD',   tagline: 'Portable CD player shell',    size: { width: 620, height: 460 } },
-  { id: 'hotdog',            label: 'Hotdog Deck',      shortLabel: 'DOG',  tagline: 'Oval bun transport deck',     size: { width: 740, height: 240 } },
   { id: 'retro-tv',          label: 'Retro TV',         shortLabel: 'TV',   tagline: 'CRT screen + rabbit ears',    size: { width: 520, height: 430 } },
 ];
 
