@@ -272,12 +272,26 @@ export class AudioEngine {
     if (!this.graph) return;
     const el = this.graph.decks[this.activeDeckIndex]!.el;
     if (el.src) {
+      const nextTime = el.currentTime;
+      const nextDuration = Number.isFinite(el.duration) ? el.duration : this.state.duration;
+      // Throttle notification frequency. Audio time advances at 60 fps via
+      // RAF, but the React tree only needs a refresh every ~100 ms — that's
+      // plenty for the time display, scrub bar, and waveform overhead. Going
+      // from 60 fps to 10 fps notifications cuts NowPlayingView re-renders
+      // by 6x, which is the dominant contributor to gradual slowdown over
+      // long playback sessions.
+      const prevTimeBucket = Math.floor(this.state.currentTime * 10);
+      const nextTimeBucket = Math.floor(nextTime * 10);
+      const seekOrJump = Math.abs(nextTime - this.state.currentTime) > 0.5;
+      const durationChanged = nextDuration !== this.state.duration;
       this.state = {
         ...this.state,
-        currentTime: el.currentTime,
-        duration: Number.isFinite(el.duration) ? el.duration : this.state.duration,
+        currentTime: nextTime,
+        duration: nextDuration,
       };
-      this.notify();
+      if (nextTimeBucket !== prevTimeBucket || seekOrJump || durationChanged) {
+        this.notify();
+      }
     }
     this.rafId = requestAnimationFrame(this.tick);
   };
