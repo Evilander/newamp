@@ -3822,7 +3822,9 @@ input[type='range'].nslider.eq-slider {
 }
 .fullscreen-viz-hover-meter {
   display: grid;
-  grid-template-columns: 86px 18px;
+  /* 30px column gives the new draggable slider room — was 18px which clipped
+     the slider thumb so dragging never registered. */
+  grid-template-columns: 86px 30px;
   gap: 12px;
   align-items: center;
   padding: 10px;
@@ -3830,16 +3832,19 @@ input[type='range'].nslider.eq-slider {
   background: rgba(0,0,0,0.48);
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 8px;
-  opacity: 0;
-  transform: translateY(-50%) translateX(12px);
-  transition: opacity 160ms ease, transform 160ms ease;
+  /* Default to a soft visible state so the user can actually see the slider
+     to grab it. Hover boosts opacity to full. The previous opacity:0 default
+     made the slider effectively invisible until the user already knew where
+     to aim. */
+  opacity: 0.32;
+  transform: translateY(-50%) translateX(0);
+  transition: opacity 160ms ease;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
 }
 .fullscreen-viz-root:hover .fullscreen-viz-hover-meter,
 .fullscreen-viz-root:focus-within .fullscreen-viz-hover-meter {
   opacity: 1;
-  transform: translateY(-50%) translateX(0);
 }
 .fullscreen-viz-hover-meter-label {
   display: grid;

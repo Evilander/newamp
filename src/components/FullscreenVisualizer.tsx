@@ -351,6 +351,14 @@ export function FullscreenVisualizer(): JSX.Element {
     };
   }, [artPulseEnabled, artUrl]);
 
+  // Level meter loop. Decouple from `volume` so dragging the slider doesn't
+  // restart the RAF + re-allocate the wave buffer on every tick — that was
+  // a per-frame allocation source during volume drags and contributed to
+  // gradual slowdown over long sessions.
+  const volumeRef = useRef(volume);
+  useEffect(() => {
+    volumeRef.current = volume;
+  }, [volume]);
   useEffect(() => {
     const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
     let raf = 0;
@@ -363,7 +371,8 @@ export function FullscreenVisualizer(): JSX.Element {
         sumSq += centered * centered;
       }
       const rms = Math.sqrt(sumSq / Math.max(1, wave.length));
-      const audibleLevel = Math.min(1, rms * 3.6 * Math.max(0.02, Math.min(2, volume)) / 2);
+      const liveVolume = Math.max(0.02, Math.min(2, volumeRef.current));
+      const audibleLevel = Math.min(1, rms * 3.6 * liveVolume / 2);
       level = Math.max(level * 0.82, audibleLevel);
       const bar = levelMeterRef.current;
       if (bar) {
@@ -375,7 +384,7 @@ export function FullscreenVisualizer(): JSX.Element {
     };
     raf = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(raf);
-  }, [engine, volume]);
+  }, [engine]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
@@ -653,7 +662,7 @@ export function FullscreenVisualizer(): JSX.Element {
       </div>
 
       <div
-        className={`fullscreen-viz-hover-meter pointer-events-auto absolute right-6 top-1/2 w-[148px] -translate-y-1/2 ${cursorActive ? '' : 'is-dim'}`}
+        className="fullscreen-viz-hover-meter pointer-events-auto absolute right-6 top-1/2 w-[160px] -translate-y-1/2"
         data-newamp-viz-hover-meter
       >
         <div className="fullscreen-viz-hover-meter-label">
