@@ -30,6 +30,15 @@ assert.match(
 );
 assert.match(engineSource, /get visualizerNode\(\): AudioNode/, 'audio engine should expose a dedicated visualizer node');
 assert.match(engineSource, /replayGain\.connect\(masterGain\)[\s\S]*replayGain\.connect\(analyser\)[\s\S]*masterGain\.connect\(limiter\)[\s\S]*limiter\.connect\(ctx\.destination\)/, 'visualizers must tap pre-volume audio (analyser branches off replayGain) and the audio path must be replayGain→masterGain→limiter→destination so post-limiter clipping is impossible');
+// Silent-sink contract: the analyser+onsetAnalyser subtree must reach
+// AudioDestinationNode via a 0-gain GainNode. Without this, Chrome's audio
+// graph optimizer can cull the visualizer-tap subtree and the FFT buffer
+// freezes at zero — that's exactly what made butterchurn stop reacting in
+// 1.5.3 even though everything else looked correct.
+assert.match(engineSource, /silentSink\.gain\.value = 0/, 'engine must declare a 0-gain silent sink');
+assert.match(engineSource, /analyser\.connect\(silentSink\)/, 'analyser must route to the silent sink so the subtree stays alive');
+assert.match(engineSource, /onsetAnalyser\.connect\(silentSink\)/, 'onsetAnalyser must route to the silent sink for the same reason');
+assert.match(engineSource, /silentSink\.connect\(ctx\.destination\)/, 'silent sink must reach AudioDestinationNode');
 assert.match(engineSource, /smoothingTimeConstant = 0\.24/, 'analyser smoothing should favor responsive visual motion');
 assert.match(engineSource, /minDecibels = -86/, 'analyser should expose quieter passages to the visualizer');
 
@@ -59,11 +68,18 @@ assert.match(visualizerSource, /mode === 'liquid-mercury'/, 'Visualizer must imp
 assert.match(fullscreenSource, /data-newamp-viz-quality-button/, 'Fullscreen visualizer should expose a 4K quality toggle');
 assert.match(fullscreenSource, /data-newamp-viz-screen-button/, 'Fullscreen visualizer should expose native screen takeover');
 assert.match(fullscreenSource, /data-newamp-viz-palette-button/, 'Fullscreen visualizer should expose visualizer color palette controls');
-assert.match(fullscreenSource, /data-newamp-viz-nav-button/, 'Fullscreen visualizer should let users hide top navigation');
+// data-newamp-viz-nav-button / data-newamp-viz-show-toolbar were the
+// persistent top-nav toggle. They were removed in favor of pure auto-hide
+// on cursor idle — the storage toggle could leave users with no nav at
+// all if they had toggled it off in a previous session.
 assert.match(fullscreenSource, /data-newamp-viz-performance-button/, 'Fullscreen visualizer should expose a low-end performance mode');
 assert.match(fullscreenSource, /data-newamp-viz-reactivity-button/, 'Fullscreen visualizer should expose reactivity accuracy controls');
 assert.match(fullscreenSource, /data-newamp-viz-auto-vj-button/, 'Fullscreen visualizer should expose an automatic visualizer DJ mode');
-assert.match(fullscreenSource, /data-newamp-viz-show-toolbar/, 'Fullscreen visualizer should provide a recovery control when top navigation is hidden');
+assert.match(
+  fullscreenSource,
+  /data-newamp-visualizer-nav=\{cursorActive \? 'visible' : 'hidden'\}/,
+  'Fullscreen visualizer auto-hide must drive nav visibility from cursor activity alone',
+);
 assert.match(fullscreenSource, /data-newamp-viz-hover-meter/, 'Fullscreen visualizer should expose hover-only volume meter chrome');
 assert.match(fullscreenSource, /data-newamp-viz-level-meter-bar/, 'Fullscreen visualizer meter should expose an analyzer-driven level bar');
 assert.match(fullscreenSource, /engine\.getTimeData/, 'Fullscreen visualizer meter should read audio analyzer time data, not only the volume setting');

@@ -7,6 +7,7 @@ import type {
   AlbumArtApplyResult,
   AlbumArtLookupInput,
   AlbumArtLookupResult,
+  AlbumRating,
   AppSettings,
   AudioExportFormat,
   CachedGuitarTab,
@@ -246,6 +247,10 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('library:set-rating', id, rating) as Promise<Track | null>,
   setTrackRatingScore: (id: number, score: number | null) =>
     ipcRenderer.invoke('library:set-rating-score', id, score) as Promise<Track | null>,
+  setAlbumRatingScore: (albumArtist: string, album: string, score: number | null) =>
+    ipcRenderer.invoke('library:set-album-rating-score', albumArtist, album, score) as Promise<AlbumRating | null>,
+  getAlbumRating: (albumArtist: string, album: string) =>
+    ipcRenderer.invoke('library:get-album-rating', albumArtist, album) as Promise<AlbumRating | null>,
   toggleAvoidAutoPlay: (id: number) =>
     ipcRenderer.invoke('library:toggle-avoid-autoplay', id) as Promise<Track | null>,
   recordPlay: (id) => ipcRenderer.invoke('library:record-play', id),

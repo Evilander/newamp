@@ -198,17 +198,32 @@ export class AudioEngine {
     }
     // Signal chain:
     //   source → eq → replayGain ─┬─→ masterGain (volume) → limiter → destination
-    //                             └─→ analyser (visualization tap, passive)
+    //                             ├─→ analyser (visualization tap)
+    //                             └─→ onsetAnalyser (unsmoothed onset tap)
+    //                                  ↓
+    //                              silentSink (gain=0) → destination
+    //
     // Volume (masterGain) is upstream of the limiter so any boost past unity
     // still hits the limiter and the device never clips. The analyser is a
     // parallel sink off replayGain so visualizers see pre-volume audio and
-    // stay reactive when the user listens quietly. AnalyserNode is passive —
-    // tapping it from the main signal does not affect the audio that reaches
-    // the device.
+    // stay reactive when the user listens quietly.
+    //
+    // The `silentSink` is load-bearing: AnalyserNode subtrees that don't
+    // reach `AudioDestinationNode` may be culled by Chrome/Electron's graph
+    // optimizer, leaving the FFT buffer frozen at zero — which is exactly
+    // what made butterchurn fail to react in 1.5.3. Routing both analysers
+    // to destination via a 0-gain GainNode keeps the subtree alive without
+    // adding any audible signal. This is the standard Web Audio pattern.
+    const silentSink = ctx.createGain();
+    silentSink.gain.value = 0;
+    silentSink.connect(ctx.destination);
+
     node.connect(replayGain);
     replayGain.connect(masterGain);
     replayGain.connect(analyser);
     replayGain.connect(onsetAnalyser);
+    analyser.connect(silentSink);
+    onsetAnalyser.connect(silentSink);
     masterGain.connect(limiter);
     limiter.connect(ctx.destination);
 
@@ -688,7 +703,32 @@ export class AudioEngine {
   seek(seconds: number): void {
     if (!Number.isFinite(seconds) || !this.graph) return;
     const el = this.activeDeck.el;
-    el.currentTime = Math.max(0, Math.min(el.duration || 0, seconds));
+    const target = Math.max(0, Math.min(el.duration || 0, seconds));
+    const previous = el.currentTime;
+    el.currentTime = target;
+    // VBR MP3 without a Xing/Info header can't be seeked accurately by
+    // HTMLAudioElement — Chromium falls back to byte-position guessing
+    // and on some encoder outputs it restarts from 0 instead of landing
+    // at the target. Detect that one-frame post-seek and log a warning
+    // so the user has a clue (and so future telemetry can quantify it).
+    // Tyler reports this on Comets on Fire — Field Recordings from the
+    // Sun, which is exactly the era of LAME --vbr-old + no Xing header.
+    if (target > 1 && previous > 1) {
+      const expectedNotRestart = target > 1;
+      window.setTimeout(() => {
+        if (!this.graph) return;
+        const landed = this.activeDeck.el.currentTime;
+        const restarted = expectedNotRestart && landed < 0.5;
+        const farOff = !restarted && Math.abs(landed - target) > 1.5;
+        if (restarted || farOff) {
+          console.warn(
+            '[newamp] seek failed:',
+            { target, landed, restarted, farOff, src: this.activeDeck.el.currentSrc },
+            'Most likely a VBR MP3 without a Xing/Info header; HTMLAudioElement cannot seek these accurately. Consider re-encoding the file.',
+          );
+        }
+      }, 220);
+    }
   }
 
   setVolume(v: number): void {

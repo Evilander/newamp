@@ -867,13 +867,14 @@ function TrackInfoHeader({
           </button>
           <TrackRating value={current.rating} onChange={onSetRating} />
           <div className="score-rating-shell">
-            <span className="score-rating-shell-label">Score</span>
+            <span className="score-rating-shell-label">Song</span>
             <ScoreRating
               value={current.ratingScore}
               stars={current.rating}
               onChange={onSetRatingScore}
             />
           </div>
+          <AlbumScoreInline track={current} />
           <button
             type="button"
             data-now-playing-show-in-folder
@@ -913,6 +914,59 @@ function TrackInfoHeader({
         />
         <Stat label="PLAYS" value={current.playCount.toLocaleString()} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Album-level rating slider that lives next to the per-song slider in the
+ * Now Playing header. Loads the stored album rating from the library on
+ * track change, and writes back to album_ratings (NOT to the track table)
+ * so the album score and the per-song scores stay independent.
+ */
+function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
+  const [albumRating, setAlbumRating] = useState<{ rating: number; ratingScore: number | null } | null>(null);
+  const albumKey = `${track.albumArtist}|${track.album}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!track.album || !track.albumArtist) {
+      setAlbumRating(null);
+      return;
+    }
+    void api
+      .getAlbumRating(track.albumArtist, track.album)
+      .then((row) => {
+        if (cancelled) return;
+        setAlbumRating(
+          row ? { rating: row.rating, ratingScore: row.ratingScore } : { rating: 0, ratingScore: null },
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setAlbumRating({ rating: 0, ratingScore: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [albumKey, track.album, track.albumArtist]);
+
+  if (!track.album || !track.albumArtist) return null;
+
+  async function handleChange(score: number | null): Promise<void> {
+    const updated = await api.setAlbumRatingScore(track.albumArtist, track.album, score);
+    setAlbumRating(
+      updated ? { rating: updated.rating, ratingScore: updated.ratingScore } : { rating: 0, ratingScore: null },
+    );
+  }
+
+  return (
+    <div className="score-rating-shell" data-newamp-now-playing-album-rating>
+      <span className="score-rating-shell-label">Album</span>
+      <ScoreRating
+        value={albumRating?.ratingScore ?? null}
+        stars={albumRating?.rating ?? 0}
+        onChange={(score) => void handleChange(score)}
+      />
     </div>
   );
 }

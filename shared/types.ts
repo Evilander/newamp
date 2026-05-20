@@ -148,6 +148,24 @@ export interface AlbumSummary {
   trackCount: number;
   duration: number;
   artFromTrackId: number | null;
+  /** Album-level user rating (1..5), 0 = unrated. Independent of track ratings. */
+  rating: number;
+  /** Album-level fine score 0..100; null when unrated. Persists separately so a rated album never overrides per-song ratings. */
+  ratingScore: number | null;
+}
+
+/**
+ * A stored album rating. Keyed on (albumArtist, album) — the same composite
+ * the rest of the codebase uses to group tracks into albums. NOT a join row
+ * with track-level rating; an album can be rated without rating any of its
+ * tracks, and vice versa.
+ */
+export interface AlbumRating {
+  albumArtist: string;
+  album: string;
+  rating: number;
+  ratingScore: number | null;
+  updatedAt: number;
 }
 
 export interface AlbumArtLookupInput {
@@ -980,6 +998,12 @@ export interface NewAmpAPI {
   toggleLove: (id: number) => Promise<boolean>;
   setTrackRating: (id: number, rating: number) => Promise<Track | null>;
   setTrackRatingScore: (id: number, score: number | null) => Promise<Track | null>;
+  setAlbumRatingScore: (
+    albumArtist: string,
+    album: string,
+    score: number | null,
+  ) => Promise<AlbumRating | null>;
+  getAlbumRating: (albumArtist: string, album: string) => Promise<AlbumRating | null>;
   toggleAvoidAutoPlay: (id: number) => Promise<Track | null>;
   recordPlay: (id: number) => Promise<void>;
   recordSkip: (id: number, position?: number) => Promise<void>;

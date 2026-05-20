@@ -59,6 +59,11 @@ function resolveUnmodifiedShortcut(
   if (code === 'Escape' || key === 'escape') {
     return fullscreenVisualizer ? 'exit-fullscreen-visualizer' : null;
   }
+  // In fullscreen visualizer, ←/→ cycle presets — let the visualizer's own
+  // keydown handler own them. Returning null here avoids the double-fire
+  // where seek-backward/forward ran alongside cyclePreset and skipped time
+  // every time the user changed preset. Up/Down still nudge volume.
+  if (fullscreenVisualizer && (code === 'ArrowLeft' || code === 'ArrowRight')) return null;
   if (code === 'ArrowLeft') return 'seek-backward';
   if (code === 'ArrowRight') return 'seek-forward';
   if (code === 'ArrowUp') return 'volume-up';

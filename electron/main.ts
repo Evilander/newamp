@@ -1161,6 +1161,15 @@ function registerIpc(): void {
   ipcMain.handle('library:set-rating-score', async (_e, id: number, score: number | null) =>
     library.setTrackRatingScore(id, score),
   );
+  ipcMain.handle(
+    'library:set-album-rating-score',
+    async (_e, albumArtist: string, album: string, score: number | null) =>
+      library.setAlbumRatingScore(albumArtist, album, score),
+  );
+  ipcMain.handle(
+    'library:get-album-rating',
+    async (_e, albumArtist: string, album: string) => library.getAlbumRating(albumArtist, album),
+  );
   ipcMain.handle('library:toggle-avoid-autoplay', async (_e, id: number) =>
     library.toggleAvoidAutoPlay(id),
   );
@@ -2233,16 +2242,19 @@ function uiVisualizerProbeSource(): string {
       await waitFor('auto VJ enabled state', () =>
         stage.getAttribute('data-newamp-visualizer-auto-vj') === 'on',
       );
-      const navButton = await waitFor('top navigation visualizer toggle', () =>
-        document.querySelector('[data-newamp-viz-nav-button]'),
+      // Auto-hide nav contract: moving the cursor away from the top edge
+      // hides the toolbar after the hide delay (1.4s in product). Moving
+      // the cursor back into the reveal band (<=110px from the top) makes
+      // it visible again. The persistent "TOP NAV" storage toggle was
+      // removed — auto-hide is the only mode now, and it must always be
+      // recoverable from cursor movement alone.
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 400, clientY: 700, bubbles: true }));
+      await waitFor('top navigation hides on cursor idle', () =>
+        stage.getAttribute('data-newamp-visualizer-nav') === 'hidden',
+        4000,
       );
-      navButton.click();
-      await waitFor('top navigation hidden state', () =>
-        stage.getAttribute('data-newamp-visualizer-nav') === 'hidden' &&
-        document.querySelector('[data-newamp-viz-show-toolbar]'),
-      );
-      document.querySelector('[data-newamp-viz-show-toolbar]')?.click();
-      await waitFor('top navigation restored state', () =>
+      window.dispatchEvent(new MouseEvent('mousemove', { clientX: 400, clientY: 40, bubbles: true }));
+      await waitFor('top navigation reappears on hover', () =>
         stage.getAttribute('data-newamp-visualizer-nav') === 'visible',
       );
       const currentTitle =

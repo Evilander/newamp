@@ -56,7 +56,11 @@ export function AlbumsView(): JSX.Element {
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
-  const setTrackRatingScore = usePlayerStore((s) => s.setTrackRatingScore);
+  // setTrackRatingScore intentionally removed from the album-rating path.
+  // Earlier versions wrote the same score to every track in the album,
+  // which silently overwrote per-song user nuance. Album ratings now live
+  // in `album_ratings` (see electron/library.ts) and are independent of
+  // track ratings.
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
   const setFullscreenViz = usePlayerStore((s) => s.setFullscreenViz);
   const current = usePlayerStore((s) => s.current);
@@ -342,17 +346,36 @@ export function AlbumsView(): JSX.Element {
     openAlbum(pick);
   }
 
-  const selectedAlbumScore = selected ? albumScore(tracks) : null;
+  // Album rating is now its own stored value (album_ratings table) rather
+  // than the average of the album's track scores. When the album has never
+  // been rated explicitly, fall back to the track-score average as a hint
+  // so the slider still shows something meaningful before the user has
+  // assigned an album rating.
+  const selectedAlbumScore =
+    selected?.ratingScore ?? (selected ? albumScore(tracks) : null);
 
   async function setAlbumScore(score: number | null): Promise<void> {
-    if (!selected || !tracks.length) return;
-    const updated = await Promise.all(tracks.map((track) => setTrackRatingScore(track.id, score)));
-    const byId = new Map(updated.filter((track): track is Track => track != null).map((track) => [track.id, track]));
-    setTracks((rows) => rows.map((track) => byId.get(track.id) ?? track));
+    if (!selected) return;
+    const updated = await api.setAlbumRatingScore(selected.albumArtist, selected.album, score);
+    const nextRating = updated?.rating ?? 0;
+    const nextScore = updated?.ratingScore ?? null;
+    // Reflect the new album rating on both the selected AlbumSummary and
+    // the cached album list so the slider's optimistic update sticks
+    // across renders without waiting for a full re-fetch.
+    setSelected((prev) =>
+      prev ? { ...prev, rating: nextRating, ratingScore: nextScore } : prev,
+    );
+    setAlbums((rows) =>
+      rows.map((row) =>
+        sameText(row.album, selected.album) && sameText(row.albumArtist, selected.albumArtist)
+          ? { ...row, rating: nextRating, ratingScore: nextScore }
+          : row,
+      ),
+    );
     setScanStatus(
       score == null
         ? `Cleared album rating for ${selected.album}.`
-        : `Rated ${selected.album} ${score.toFixed(1)}/100.`,
+        : `Rated ${selected.album} ${score.toFixed(1)}/100. Track ratings unchanged.`,
     );
   }
 
