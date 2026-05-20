@@ -75,6 +75,23 @@ Production-readiness pass. A long autonomous run resolving real-world bug report
 ### Fixed — Vintage Computer (terminal) theme legibility
 - Ink, ink-2, muted darkened to pass AA contrast against the `#c4c1aa` beige panel. Accent, accent-dim, warn, and error similarly darkened. The whole theme now reads cleanly instead of fading into the background.
 
+### Fixed — Milkdrop (Butterchurn) visualizer actually renders
+- Root cause: `script-src 'self'` in the renderer CSP blocked butterchurn-presets from compiling preset shader math via the Function constructor (used by butterchurn at preset load). The catch in `startButterchurn` fell back to the placeholder fallback without surfacing the EvalError. Added `'unsafe-eval'` to script-src — the compiled code only comes from the locally-bundled butterchurn-presets package (connect-src still restricts what can be fetched).
+- `electron/settings.ts.normalizeVisualizerPreset` whitelist now includes `liquid-mercury` so the new preset persists across sessions instead of silently reverting to default.
+- `ui-visualizer-smoke` extended end-to-end: clicks the Milkdrop button, waits for canvas mount, asserts no CSP/eval errors fire. Also covers Liquid Mercury with full pixel-output validation.
+- Probe timeout extended from 20s to 60s to fit the new battery + butterchurn shader compilation time.
+
+### Fixed — Engine tick re-rendering NowPlayingView 60× per second
+- The audio engine's RAF tick was notifying state listeners on every frame. Each `notify()` fired re-renders of every Zustand-subscribed component including the 1900-line NowPlayingView. Throttled to 10Hz integer buckets — seek + duration changes still fire immediately — for a 6× cut in per-second React work. Largest contributor to the "gets heavier after an hour" report.
+
+### Fixed — Folders view capped at 7 visible folders
+- The `grid-rows-[minmax(180px,0.42fr)_minmax(0,1fr)]` layout kept the folder list at most 42% of available height even when no folder was selected. Now the layout adapts: full height for the folder list when nothing is selected (~25 folders on an 800px window), split layout when a folder IS opened so tracks have room.
+
+### Community feedback round
+- Sidebar scrolls when the window is too short to show all nav + tools (outer `<aside>` now owns the scroll; inner nav drops its own overflow for a single unified scrollbar).
+- New `closeButtonBehavior` setting in Settings > Shell/Layout: choose between minimize-to-tray (default) or close-the-app for the X button.
+- Albums view (artist sort) gets a vertical A-Z letter rail on the right edge for quick jump-to-letter scrolling. Letters with no matching artist render dimmed. Skips leading articles so "The Beatles" jumps to B.
+
 ## [1.5.1] - 2026-05-19
 
 ### Removed
