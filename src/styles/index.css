@@ -3729,44 +3729,21 @@ input[type='range'].nslider.eq-slider {
   }
 }
 .fullscreen-viz-toolbar {
-  align-items: flex-start;
-  flex-wrap: wrap;
-  padding: 8px;
-  background: rgba(0,0,0,0.58);
-  border: 1px solid rgba(255,255,255,0.14);
-  border-radius: 8px;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  opacity: 0.96;
-  transition: opacity 180ms ease, transform 180ms ease;
+  align-items: center;
+  flex-wrap: nowrap;
+  padding: 4px 6px;
+  background: rgba(0,0,0,0.52);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 6px;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  opacity: 0.94;
+  transition: opacity 180ms ease, transform 220ms ease;
 }
 .fullscreen-viz-toolbar.is-top-hidden {
   opacity: 0;
   pointer-events: none;
   transform: translateY(calc(-100% - 18px));
-}
-.fullscreen-viz-toolbar-tab {
-  z-index: 2;
-  height: 28px;
-  padding: 0 12px;
-  color: rgba(255,255,255,0.72);
-  background: rgba(0,0,0,0.36);
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 999px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  opacity: 0.24;
-  text-transform: uppercase;
-  transition: opacity 140ms ease, transform 140ms ease, background 140ms ease;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-}
-.fullscreen-viz-toolbar-tab:hover,
-.fullscreen-viz-toolbar-tab:focus-visible {
-  opacity: 0.92;
-  background: rgba(0,0,0,0.62);
-  transform: translateX(-50%) translateY(2px);
 }
 .fullscreen-viz-toolbar.is-clean,
 .fullscreen-viz-now.is-clean {
@@ -3781,12 +3758,12 @@ input[type='range'].nslider.eq-slider {
 .fullscreen-viz-preset-rail {
   display: flex;
   flex: 1 1 auto;
-  gap: 6px;
-  min-height: 42px;
+  gap: 4px;
+  min-height: 28px;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 6px;
+  padding: 2px 4px;
   scrollbar-width: thin;
 }
 .fullscreen-viz-preset-rail .pxbtn {
@@ -3795,8 +3772,10 @@ input[type='range'].nslider.eq-slider {
 }
 .fullscreen-viz-toolbar > .pxbtn,
 .fullscreen-viz-preset-rail .pxbtn {
-  min-height: 34px;
-  padding: 0 12px;
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
 }
 .fullscreen-viz-cover {
   width: min(34vw, 360px);
@@ -3832,18 +3811,31 @@ input[type='range'].nslider.eq-slider {
   background: rgba(0,0,0,0.48);
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 8px;
-  /* Default to a soft visible state so the user can actually see the slider
-     to grab it. Hover boosts opacity to full. The previous opacity:0 default
-     made the slider effectively invisible until the user already knew where
-     to aim. */
-  opacity: 0.32;
+  /* Hidden by default — Tyler wants the visualizer to be the only thing
+     on screen until the user actually reaches for the volume. Cursor
+     proximity to the meter (or anywhere on the viz root via hover)
+     reveals it. opacity:0 elements still receive pointer events, so the
+     slider stays grabbable even when invisible.
+     The mouse-wheel anywhere over the viz also drives volume — see the
+     window-level wheel handler in FullscreenVisualizer.tsx. */
+  opacity: 0;
   transform: translateY(-50%) translateX(0);
-  transition: opacity 160ms ease;
+  transition: opacity 220ms ease;
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
 }
-.fullscreen-viz-root:hover .fullscreen-viz-hover-meter,
-.fullscreen-viz-root:focus-within .fullscreen-viz-hover-meter {
+.fullscreen-viz-hover-meter:hover,
+.fullscreen-viz-hover-meter:focus-within {
+  opacity: 1;
+}
+/* When the top nav is up (cursor near top), surface the volume meter as
+   a faint silhouette so the user knows it's grabbable. Cursor proximity
+   then fades it to fully visible. */
+.fullscreen-viz-root[data-newamp-visualizer-nav='visible'] .fullscreen-viz-hover-meter {
+  opacity: 0.22;
+}
+.fullscreen-viz-root[data-newamp-visualizer-nav='visible'] .fullscreen-viz-hover-meter:hover,
+.fullscreen-viz-root[data-newamp-visualizer-nav='visible'] .fullscreen-viz-hover-meter:focus-within {
   opacity: 1;
 }
 .fullscreen-viz-hover-meter-label {

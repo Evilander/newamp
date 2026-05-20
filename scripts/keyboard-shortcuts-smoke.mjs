@@ -14,6 +14,19 @@ assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowLeft' }), 'seek-backwa
 assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowRight' }), 'seek-forward');
 assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowUp' }), 'volume-up');
 assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowDown' }), 'volume-down');
+// In fullscreen visualizer the ←/→ keys cycle visualizer presets — the
+// shortcut layer must defer to the viz's own keydown handler instead of
+// also nudging seek-back/forward, otherwise every preset change scrubs
+// the song five seconds in one direction.
+assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowLeft', fullscreenVisualizer: true }), null);
+assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowRight', fullscreenVisualizer: true }), null);
+// Ctrl+arrow is the global "previous/next track" shortcut and must keep
+// working everywhere, including fullscreen viz.
+assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowLeft', ctrlKey: true, fullscreenVisualizer: true }), 'previous');
+assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowRight', ctrlKey: true, fullscreenVisualizer: true }), 'next');
+// Up/Down still nudge volume in fullscreen viz.
+assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowUp', fullscreenVisualizer: true }), 'volume-up');
+assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowDown', fullscreenVisualizer: true }), 'volume-down');
 assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowLeft', ctrlKey: true }), 'previous');
 assert.equal(resolvePlayerShortcut({ ...base, code: 'ArrowRight', ctrlKey: true }), 'next');
 assert.equal(resolvePlayerShortcut({ ...base, key: 'l', code: 'KeyL' }), 'toggle-love');

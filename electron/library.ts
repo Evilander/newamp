@@ -13,6 +13,7 @@ import { createRequire } from 'node:module';
 import type {
   AddTracksToPlaylistInput,
   AlbumArtApplyResult,
+  AlbumRating,
   AlbumSummary,
   ArtistSummary,
   CatalogSummaryQueryOptions,
@@ -246,6 +247,20 @@ CREATE TABLE IF NOT EXISTS track_tags (
 );
 CREATE INDEX IF NOT EXISTS idx_track_tags_name ON track_tags(tag_name);
 CREATE INDEX IF NOT EXISTS idx_track_tags_track ON track_tags(track_id);
+
+-- Album-level ratings, separate from per-track ratings. Album rating no
+-- longer cascades to every track; the user can rate the album AND rate
+-- individual songs independently. Composite key (album_artist, album)
+-- with NOCASE collation matches how tracks are grouped into albums
+-- elsewhere in the codebase.
+CREATE TABLE IF NOT EXISTS album_ratings (
+  album_artist  TEXT NOT NULL COLLATE NOCASE,
+  album         TEXT NOT NULL COLLATE NOCASE,
+  rating        INTEGER NOT NULL DEFAULT 0,
+  rating_score  REAL,
+  updated_at    INTEGER NOT NULL,
+  PRIMARY KEY (album_artist, album)
+);
 `;
 
 interface RawRow {
@@ -1163,16 +1178,23 @@ export class LibraryStore {
       track_count: number;
       duration: number;
       art_track: number | null;
+      album_rating: number | null;
+      album_rating_score: number | null;
     }>(
-      `SELECT album,
-              COALESCE(NULLIF(album_artist,''), artist) AS album_artist,
-              MIN(year) AS year,
+      `SELECT t.album AS album,
+              COALESCE(NULLIF(t.album_artist,''), t.artist) AS album_artist,
+              MIN(t.year) AS year,
               COUNT(*) AS track_count,
-              COALESCE(SUM(duration), 0) AS duration,
-              MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) AS art_track
+              COALESCE(SUM(t.duration), 0) AS duration,
+              MIN(CASE WHEN t.has_art = 1 THEN t.id ELSE NULL END) AS art_track,
+              MAX(ar.rating)       AS album_rating,
+              MAX(ar.rating_score) AS album_rating_score
          FROM tracks t
+         LEFT JOIN album_ratings ar
+           ON ar.album_artist = COALESCE(NULLIF(t.album_artist,''), t.artist) COLLATE NOCASE
+          AND ar.album        = t.album COLLATE NOCASE
         WHERE ${where.join(' AND ')}
-        GROUP BY album, COALESCE(NULLIF(album_artist,''), artist)
+        GROUP BY t.album, COALESCE(NULLIF(t.album_artist,''), t.artist)
         ${havingSql}
         ORDER BY ${orderSql}
         LIMIT ? OFFSET ?`,
@@ -1185,6 +1207,8 @@ export class LibraryStore {
       trackCount: r.track_count,
       duration: r.duration,
       artFromTrackId: r.art_track,
+      rating: r.album_rating ?? 0,
+      ratingScore: r.album_rating_score,
     }));
   }
 
@@ -2234,7 +2258,7 @@ export class LibraryStore {
     if (!unique.length) return [];
 
     const opener = seed && isTasteMixCandidate(seed) ? seed : null;
-    const context = buildTasteContext(unique, opener);
+    const context = buildTasteContext(unique, opener, this.buildAlbumRatingIndex());
 
     // When the user has a seed track, the mix must cohere around that track's
     // vibe. Compute per-candidate seed similarity (DNA + genre + era + artist),
@@ -2301,6 +2325,93 @@ export class LibraryStore {
     if (this.db.getRowsModified() <= 0) return null;
     this.scheduleFlush();
     return this.getTrack(trackId);
+  }
+
+  /**
+   * Bulk-read every (album_artist, album) → rating_score row into a Map
+   * keyed on `lowercase(albumArtist)|lowercase(album)`. One SQL hit per
+   * mix call avoids the N+1 that would otherwise happen if each track
+   * looked up its album rating individually.
+   */
+  buildAlbumRatingIndex(): Map<string, number> {
+    const rows = this.many<{ album_artist: string; album: string; rating_score: number | null }>(
+      `SELECT album_artist, album, rating_score FROM album_ratings WHERE rating_score IS NOT NULL`,
+      [],
+    );
+    const index = new Map<string, number>();
+    for (const row of rows) {
+      index.set(`${row.album_artist.trim().toLowerCase()}|${row.album.trim().toLowerCase()}`, row.rating_score!);
+    }
+    return index;
+  }
+
+  /**
+   * Read the stored album rating for a specific (album_artist, album) pair.
+   * Returns null if the album has never been rated. Independent of any
+   * per-track rating cascade — the previous "set album rating" cascade
+   * overwrote each track's rating, losing the user's per-song nuance.
+   */
+  getAlbumRating(albumArtist: string, album: string): AlbumRating | null {
+    const a = (albumArtist ?? '').trim();
+    const b = (album ?? '').trim();
+    if (!a || !b) return null;
+    const row = this.one<{ rating: number; rating_score: number | null; updated_at: number }>(
+      `SELECT rating, rating_score, updated_at
+         FROM album_ratings
+        WHERE album_artist = ? COLLATE NOCASE
+          AND album        = ? COLLATE NOCASE`,
+      [a, b],
+    );
+    if (!row) return null;
+    return {
+      albumArtist: a,
+      album: b,
+      rating: row.rating,
+      ratingScore: row.rating_score,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  /**
+   * Upsert the album-level rating score. score === null clears the entry.
+   * Track ratings are untouched — albums and songs hold independent
+   * ratings now. AlbumSummary queries join in this row, so the new value
+   * propagates back to the UI on the next `listAlbums` call.
+   */
+  setAlbumRatingScore(albumArtist: string, album: string, score: number | null): AlbumRating | null {
+    const a = (albumArtist ?? '').trim();
+    const b = (album ?? '').trim();
+    if (!a || !b) return null;
+    const nextScore = normalizeTrackRatingScore(score);
+    if (nextScore == null) {
+      this.db.run(
+        `DELETE FROM album_ratings
+          WHERE album_artist = ? COLLATE NOCASE
+            AND album        = ? COLLATE NOCASE`,
+        [a, b],
+      );
+      this.scheduleFlush();
+      return null;
+    }
+    const nextStars = Math.max(0, Math.min(5, Math.round(nextScore / 20)));
+    const now = Date.now();
+    this.db.run(
+      `INSERT INTO album_ratings (album_artist, album, rating, rating_score, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(album_artist, album) DO UPDATE SET
+         rating       = excluded.rating,
+         rating_score = excluded.rating_score,
+         updated_at   = excluded.updated_at`,
+      [a, b, nextStars, nextScore, now],
+    );
+    this.scheduleFlush();
+    return {
+      albumArtist: a,
+      album: b,
+      rating: nextStars,
+      ratingScore: nextScore,
+      updatedAt: now,
+    };
   }
 
   setTrackDna(id: number, dna: TrackDna | null): boolean {
@@ -3760,9 +3871,20 @@ interface TasteContext {
   seed: Track | null;
   artistAffinity: Map<string, number>;
   genreAffinity: Map<string, number>;
+  /**
+   * (albumArtist|album) -> rating_score (0..100). Lookup happens at
+   * scoring time so highly-rated albums float their songs up in mixes —
+   * essentially the "love the album, surface its songs" signal that was
+   * missing while album rating overwrote track ratings.
+   */
+  albumRatingScores: Map<string, number>;
 }
 
-function buildTasteContext(tracks: Track[], seed: Track | null): TasteContext {
+function buildTasteContext(
+  tracks: Track[],
+  seed: Track | null,
+  albumRatingScores: Map<string, number>,
+): TasteContext {
   const artistAffinity = new Map<string, number>();
   const genreAffinity = new Map<string, number>();
   for (const track of tracks) {
@@ -3771,7 +3893,27 @@ function buildTasteContext(tracks: Track[], seed: Track | null): TasteContext {
     addTasteSignal(artistAffinity, normalizeTasteKey(track.artist), signal);
     for (const genre of genreTokens(track.genre)) addTasteSignal(genreAffinity, genre, signal);
   }
-  return { seed, artistAffinity, genreAffinity };
+  return { seed, artistAffinity, genreAffinity, albumRatingScores };
+}
+
+function albumRatingKey(albumArtist: string | null | undefined, album: string | null | undefined): string {
+  return `${(albumArtist ?? '').trim().toLowerCase()}|${(album ?? '').trim().toLowerCase()}`;
+}
+
+/**
+ * Album rating contribution to the per-track taste score. Capped at 2.0
+ * so it nudges ordering without overpowering the per-song rating signal:
+ *   - 100/100 album → +2.0
+ *   - 75/100 album  → +1.5
+ *   - 50/100 album  → +1.0
+ *   - unrated       → +0.0
+ * Linear is fine — non-linearity here would just amplify noise.
+ */
+function albumRatingBoost(track: Track, context: TasteContext): number {
+  if (!track.album || !track.albumArtist) return 0;
+  const score = context.albumRatingScores.get(albumRatingKey(track.albumArtist, track.album));
+  if (score == null) return 0;
+  return Math.max(0, Math.min(2, (score / 100) * 2));
 }
 
 function scoreTasteTrack(track: Track, context: TasteContext): number {
@@ -3783,7 +3925,8 @@ function scoreTasteTrack(track: Track, context: TasteContext): number {
   const artistAffinity = Math.min(5, (context.artistAffinity.get(normalizeTasteKey(track.artist)) ?? 0) * 0.22);
   const genreAffinity = Math.min(5, genreTokens(track.genre).reduce((sum, genre) => sum + (context.genreAffinity.get(genre) ?? 0), 0) * 0.14);
   const seedAffinity = scoreSeedAffinity(track, context.seed);
-  return loved + rating + played + discovery + artistAffinity + genreAffinity + seedAffinity - skipPenalty;
+  const albumRating = albumRatingBoost(track, context);
+  return loved + rating + played + discovery + artistAffinity + genreAffinity + seedAffinity + albumRating - skipPenalty;
 }
 
 function tasteSignal(track: Track): number {
