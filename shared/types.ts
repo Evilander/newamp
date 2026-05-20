@@ -444,7 +444,6 @@ export type DiscoverDeckSkin =
   | 'jukebox'
   | 'cassette'
   | 'discman'
-  | 'hotdog'
   | 'retro-tv';
 
 export interface DiscoverSurfaceInput {

@@ -3,6 +3,11 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.1] - 2026-05-19
+
+### Removed
+- Hotdog Deck skin and assets. The compact-deck registry, CompactPlayer case, CSS block, mask + shell PNGs, and ui-deck/skin/discover smoke entries all gone. The shape-changing decks lineup is now Windowshade, Winamp Classic + Industrial, Record Player, Jukebox, Cassette, Discman, Retro TV.
+
 ## [1.5.0] - 2026-05-19
 
 Living Library — a content-aware, programmable upgrade to the library.
