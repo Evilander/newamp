@@ -41,7 +41,6 @@ type CanvasVisualizerPreset = Exclude<VisualizerPreset, 'album-breathe'>;
 const VIZ_QUALITY_KEY = 'newamp:viz:quality';
 const VIZ_SHOW_ART_KEY = 'newamp:viz:showArt';
 const VIZ_CHROME_KEY = 'newamp:viz:chrome';
-const VIZ_TOP_NAV_KEY = 'newamp:viz:topNav';
 const VIZ_PALETTE_KEY = 'newamp:viz:palette';
 const VIZ_PERFORMANCE_KEY = 'newamp:viz:performance';
 const VIZ_REACTIVITY_KEY = 'newamp:viz:reactivity';
@@ -145,7 +144,6 @@ export function FullscreenVisualizer(): JSX.Element {
   const [artPulseEnabled, setArtPulseEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_SHOW_ART_KEY, true));
   const [artPulseVisible, setArtPulseVisible] = useState(false);
   const [chromeVisible, setChromeVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_CHROME_KEY, true));
-  const [topNavVisible, setTopNavVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_TOP_NAV_KEY, true));
   const [palette, setPalette] = useState<VizPalette>(() => loadVisualizerPalette());
   const [perfTier, setPerfTier] = useState<VizPerformance>(() => loadVisualizerPerformance());
   const [reactivity, setReactivity] = useState<VizReactivity>(() => loadVisualizerReactivity());
@@ -210,14 +208,6 @@ export function FullscreenVisualizer(): JSX.Element {
     setChromeVisible((value) => {
       const next = !value;
       window.localStorage.setItem(VIZ_CHROME_KEY, next ? '1' : '0');
-      return next;
-    });
-  }
-
-  function toggleTopNav(): void {
-    setTopNavVisible((value) => {
-      const next = !value;
-      window.localStorage.setItem(VIZ_TOP_NAV_KEY, next ? '1' : '0');
       return next;
     });
   }
@@ -400,9 +390,6 @@ export function FullscreenVisualizer(): JSX.Element {
       } else if (event.key.toLowerCase() === 'h') {
         event.preventDefault();
         toggleChrome();
-      } else if (event.key.toLowerCase() === 't') {
-        event.preventDefault();
-        toggleTopNav();
       } else if (event.key.toLowerCase() === 'p') {
         event.preventDefault();
         cyclePalette();
@@ -423,6 +410,36 @@ export function FullscreenVisualizer(): JSX.Element {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [activeIndex]);
+
+  // Mouse wheel anywhere over the fullscreen visualizer drives volume.
+  // Outside the viz this has no effect — wheel still scrolls the page
+  // normally. Tyler wants this restricted to fullscreen viz so it doesn't
+  // hijack scrolling in the library views.
+  const wheelVolumeRef = useLatestRef(volume);
+  const wheelSetVolumeRef = useLatestRef(setVolume);
+  useEffect(() => {
+    function onWheel(event: WheelEvent): void {
+      if (isEditableTarget(event.target)) return;
+      // Don't fight existing wheel handlers (preset rail, volume slider
+      // input). If the event target is inside an interactive control that
+      // already wheel-binds, let it own the event.
+      if (
+        event.target instanceof Element &&
+        event.target.closest('input, select, [data-newamp-viz-volume-input]')
+      ) return;
+      event.preventDefault();
+      const step = event.shiftKey ? 0.12 : 0.04;
+      const delta = event.deltaY > 0 ? -step : step;
+      const next = Math.max(0, Math.min(2, wheelVolumeRef.current + delta));
+      void wheelSetVolumeRef.current(next);
+    }
+    // Bind on the root visualizer element only — keeps the rest of the
+    // app's scroll behavior untouched.
+    const root = document.querySelector<HTMLElement>('[data-newamp-fullscreen-visualizer]');
+    if (!root) return;
+    root.addEventListener('wheel', onWheel, { passive: false });
+    return () => root.removeEventListener('wheel', onWheel);
+  }, [wheelVolumeRef, wheelSetVolumeRef]);
 
   // AutoVJ loop. Depend only on the stable handles (engine, autoVjEnabled);
   // read current preset / isPlaying / performance via refs so changing them
@@ -466,7 +483,7 @@ export function FullscreenVisualizer(): JSX.Element {
       data-newamp-visualizer-preset={activePreset}
       data-newamp-visualizer-quality={quality}
       data-newamp-visualizer-chrome={chromeVisible ? 'visible' : 'clean'}
-      data-newamp-visualizer-nav={topNavVisible ? 'visible' : 'hidden'}
+      data-newamp-visualizer-nav={cursorActive ? 'visible' : 'hidden'}
       data-newamp-visualizer-palette={palette}
       data-newamp-visualizer-performance={perfTier}
       data-newamp-visualizer-reactivity={reactivity}
@@ -518,7 +535,7 @@ export function FullscreenVisualizer(): JSX.Element {
       )}
 
       <div
-        className={`fullscreen-viz-toolbar pointer-events-auto absolute inset-x-4 top-4 flex max-w-[calc(100vw-2rem)] items-center gap-2 ${chromeVisible ? '' : 'is-clean'} ${topNavVisible && cursorActive ? '' : 'is-top-hidden'}`}
+        className={`fullscreen-viz-toolbar pointer-events-auto absolute inset-x-3 top-3 flex max-w-[calc(100vw-1.5rem)] items-center gap-[6px] ${chromeVisible ? '' : 'is-clean'} ${cursorActive ? '' : 'is-top-hidden'}`}
         data-newamp-visualizer-toolbar
         data-newamp-visualizer-toolbar-idle={!cursorActive ? 'idle' : 'active'}
       >
@@ -605,29 +622,10 @@ export function FullscreenVisualizer(): JSX.Element {
         >
           CLEAN
         </button>
-        <button
-          className={`pxbtn ${topNavVisible ? 'is-active' : ''}`}
-          data-newamp-viz-nav-button
-          onClick={toggleTopNav}
-          title="Hide or show the top visualizer navigation (T)"
-        >
-          TOP NAV
-        </button>
         <button className="pxbtn" onClick={exitVisualizer} title="Exit visualizer (Esc)">
           ESC X
         </button>
       </div>
-
-      {!topNavVisible && (
-        <button
-          className="fullscreen-viz-toolbar-tab pointer-events-auto absolute left-1/2 top-3 -translate-x-1/2"
-          data-newamp-viz-show-toolbar
-          onClick={toggleTopNav}
-          title="Show visualizer controls (T)"
-        >
-          VIS MENU
-        </button>
-      )}
 
       <div
         className={`fullscreen-viz-now pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16 ${chromeVisible ? '' : 'is-clean'}`}
