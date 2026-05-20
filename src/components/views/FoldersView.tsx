@@ -179,7 +179,15 @@ export function FoldersView(): JSX.Element {
         </div>
       )}
 
-      <div className="grid min-h-0 flex-1 grid-rows-[minmax(180px,0.42fr)_minmax(0,1fr)]">
+      {/* Adaptive layout: when no folder is selected, the folder list takes the
+          whole available height so users can see as many folders as fit. When
+          a folder is selected, split the space so tracks have room. The hard
+          42% cap before made only ~7 folders visible on typical 800px windows
+          even when no track preview was needed. */}
+      <div
+        className={`grid min-h-0 flex-1 ${selected ? 'grid-rows-[minmax(180px,0.42fr)_minmax(0,1fr)]' : 'grid-rows-[minmax(0,1fr)]'}`}
+        data-newamp-folders-layout={selected ? 'split' : 'list-full'}
+      >
         <div className="overflow-auto border-b" style={{ borderColor: 'var(--line)' }}>
           <table className="w-full table-fixed text-[12px]" style={{ fontFamily: 'var(--font-mono)', borderCollapse: 'separate', borderSpacing: 0 }}>
             <thead className="sticky top-0 z-10" style={{ background: 'var(--panel)', color: 'var(--ink-2)' }}>
@@ -227,40 +235,34 @@ export function FoldersView(): JSX.Element {
           </table>
         </div>
 
-        <div className="min-h-0 overflow-auto">
-          {selected ? (
-            <>
-              {selected.trackCount > tracks.length && (
-                <div className="border-b px-3 py-1 text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--muted)' }}>
-                  Showing first {tracks.length.toLocaleString()} direct tracks. Load more to browse the rest. Folder actions include subfolders.
-                </div>
-              )}
-              <TrackTable
-                tracks={tracks}
-                currentId={current?.id ?? null}
-                onPlay={(index) => void playQueue(tracks, index)}
-                onPlayTracks={(selectedTracks) => void playQueue(selectedTracks, 0)}
-                onPlayNext={queueTrackNext}
-                onAddToQueue={addTrackToQueue}
-                onPlayNextTracks={queueTracksNext}
-                onAddTracksToQueue={addTracksToQueue}
-              />
-              <LoadMoreFooter
-                shown={tracks.length}
-                total={selected.trackCount}
-                noun="direct tracks"
-                hasMore={hasMoreDirectTracks}
-                loading={loadingMoreTracks}
-                loadLabel="Load more direct tracks"
-                onLoadMore={() => void loadMoreDirectTracks()}
-              />
-            </>
-          ) : (
-            <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
-              Open a root folder to browse its cataloged subfolders and direct tracks.
-            </div>
-          )}
-        </div>
+        {selected ? (
+          <div className="min-h-0 overflow-auto">
+            {selected.trackCount > tracks.length && (
+              <div className="border-b px-3 py-1 text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--muted)' }}>
+                Showing first {tracks.length.toLocaleString()} direct tracks. Load more to browse the rest. Folder actions include subfolders.
+              </div>
+            )}
+            <TrackTable
+              tracks={tracks}
+              currentId={current?.id ?? null}
+              onPlay={(index) => void playQueue(tracks, index)}
+              onPlayTracks={(selectedTracks) => void playQueue(selectedTracks, 0)}
+              onPlayNext={queueTrackNext}
+              onAddToQueue={addTrackToQueue}
+              onPlayNextTracks={queueTracksNext}
+              onAddTracksToQueue={addTracksToQueue}
+            />
+            <LoadMoreFooter
+              shown={tracks.length}
+              total={selected.trackCount}
+              noun="direct tracks"
+              hasMore={hasMoreDirectTracks}
+              loading={loadingMoreTracks}
+              loadLabel="Load more direct tracks"
+              onLoadMore={() => void loadMoreDirectTracks()}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );
