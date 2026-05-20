@@ -77,6 +77,34 @@ export function AlbumsView(): JSX.Element {
     albumViewSnapshot.filter = filter;
   }, [filter]);
 
+  // Handle programmatic navigation requests from elsewhere in the app — e.g.
+  // clicking the album name in Now Playing lands here with the album/artist
+  // pre-selected for instant detail view.
+  const pendingNavigation = usePlayerStore((s) => s.pendingNavigation);
+  const consumePendingNavigation = usePlayerStore((s) => s.consumePendingNavigation);
+  useEffect(() => {
+    if (!pendingNavigation || pendingNavigation.kind !== 'album') return;
+    const target = pendingNavigation;
+    void (async () => {
+      try {
+        const tracks = await api.getAlbumTracks(target.album, target.albumArtist).catch(() => []);
+        const albumSummary: AlbumSummary = {
+          album: target.album,
+          albumArtist: target.albumArtist || (tracks[0]?.albumArtist ?? tracks[0]?.artist ?? 'Unknown Artist'),
+          year: tracks.find((t) => t.year)?.year ?? null,
+          trackCount: tracks.length,
+          duration: tracks.reduce((sum, t) => sum + (t.duration ?? 0), 0),
+          artFromTrackId: tracks.find((t) => t.hasArt)?.id ?? null,
+        };
+        setSelected(albumSummary);
+        setTracks(tracks);
+        setFilter(target.album);
+      } finally {
+        consumePendingNavigation();
+      }
+    })();
+  }, [pendingNavigation, consumePendingNavigation]);
+
   useEffect(() => {
     albumViewSnapshot.showMissingArtOnly = showMissingArtOnly;
   }, [showMissingArtOnly]);
@@ -317,14 +345,14 @@ export function AlbumsView(): JSX.Element {
     return (
       <div className="flex h-full flex-col">
         <div
-          className="flex items-center gap-3 border-b px-4 py-3"
+          className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-3"
           style={{ borderColor: 'var(--line)' }}
         >
           <button className="pxbtn" onClick={closeAlbum}>
             ← All albums
           </button>
           <AlbumArt album={selected} />
-          <div className="flex-1">
+          <div className="min-w-[180px] flex-1">
             <div className="text-lg font-semibold">{selected.album}</div>
             <div className="text-[12px]" style={{ color: 'var(--ink-2)' }}>
               {selected.albumArtist}
@@ -332,31 +360,44 @@ export function AlbumsView(): JSX.Element {
               {`  ·  ${selected.trackCount} tracks  ·  ${formatDuration(selected.duration)}`}
             </div>
           </div>
-          <div className="w-[230px] shrink-0" data-newamp-album-rating>
-            <div className="mb-1 text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
-              Album Rating
-            </div>
-            <ScoreRating
-              value={selectedAlbumScore}
-              stars={Math.round((selectedAlbumScore ?? 0) / 20)}
-              onChange={(score) => void setAlbumScore(score)}
-            />
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)}>
+              ▶ Play album
+            </button>
+            <button className="pxbtn" onClick={() => queueTracksNext(tracks)} disabled={!tracks.length} title="Play album next">
+              PLAY NEXT
+            </button>
+            <button className="pxbtn" onClick={() => addTracksToQueue(tracks)} disabled={!tracks.length} title="Queue album">
+              QUEUE ALBUM
+            </button>
+            <button className="pxbtn" onClick={() => setCompactMode(true)} title="Open the compact deck">
+              DECK
+            </button>
+            <button className="pxbtn" onClick={() => setFullscreenViz(true)} title="Open fullscreen visualizer">
+              FULL VIS
+            </button>
           </div>
-          <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)}>
-            ▶ Play album
-          </button>
-          <button className="pxbtn" onClick={() => queueTracksNext(tracks)} disabled={!tracks.length} title="Play album next">
-            PLAY NEXT
-          </button>
-          <button className="pxbtn" onClick={() => addTracksToQueue(tracks)} disabled={!tracks.length} title="Queue album">
-            QUEUE ALBUM
-          </button>
-          <button className="pxbtn" onClick={() => setCompactMode(true)} title="Open the compact deck">
-            DECK
-          </button>
-          <button className="pxbtn" onClick={() => setFullscreenViz(true)} title="Open fullscreen visualizer">
-            FULL VIS
-          </button>
+          {/* Rating gets its own full-width row underneath the action buttons.
+              ScoreRating's internal grid is 88+180+auto = at least 280px, which
+              regularly collides with the play / queue buttons on any non-huge
+              window. Putting it on a dedicated row eliminates the overlap
+              entirely. */}
+          <div
+            className="flex w-full items-center gap-3 border-t pt-2"
+            style={{ borderColor: 'var(--line)' }}
+            data-newamp-album-rating-row
+          >
+            <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+              Album Rating
+            </span>
+            <div className="flex-1" data-newamp-album-rating>
+              <ScoreRating
+                value={selectedAlbumScore}
+                stars={Math.round((selectedAlbumScore ?? 0) / 20)}
+                onChange={(score) => void setAlbumScore(score)}
+              />
+            </div>
+          </div>
           <PlaylistAppendPicker
             tracks={tracks}
             label="ADD ALBUM TO PLAYLIST"

@@ -230,6 +230,26 @@ export function nearestAtlasPoint(atlas: SonicAtlas, x: number, y: number, maxDi
   return best;
 }
 
+/**
+ * Return up to `count` atlas points sorted by 2D projection distance from
+ * (x, y). Useful for "play this region" workflows where a user clicks into
+ * the atlas and wants the cluster of N most similar-sounding tracks.
+ *
+ * The result includes the seed point (if any falls within range) so the
+ * caller can use index 0 as the chosen track.
+ */
+export function nearestAtlasPoints(atlas: SonicAtlas, x: number, y: number, count: number): AtlasPoint[] {
+  const limit = Math.max(1, Math.min(500, Math.trunc(count)));
+  const scored: Array<{ point: AtlasPoint; dist: number }> = [];
+  for (const point of atlas.points) {
+    const dx = point.x - x;
+    const dy = point.y - y;
+    scored.push({ point, dist: dx * dx + dy * dy });
+  }
+  scored.sort((a, b) => a.dist - b.dist);
+  return scored.slice(0, limit).map((entry) => entry.point);
+}
+
 export function atlasPointColor(point: AtlasPoint): string {
   // HSL keyed on brightness (hue) + bands (saturation/lightness) so similar
   // tracks render in similar colors and the cluster structure reads

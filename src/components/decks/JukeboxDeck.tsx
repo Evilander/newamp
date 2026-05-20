@@ -69,7 +69,7 @@ export function JukeboxDeck(props: DeckProps): JSX.Element {
         ) : (
           <>
             {artUrl ? (
-              <img src={artUrl} alt={track?.album ?? ''} className="deck-jb-art" draggable={false} />
+              <img src={artUrl} alt={track?.album ?? ''} className="deck-jb-art deck-jb-art-pan" draggable={false} />
             ) : (
               <div className="deck-jb-art-fallback">{track ? '45' : '—'}</div>
             )}

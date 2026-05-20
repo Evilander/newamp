@@ -3,6 +3,78 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.2] - 2026-05-20
+
+Production-readiness pass. A long autonomous run resolving real-world bug reports plus a complete visualizer reactivity overhaul, deck art improvements, smarter Mixes, and in-app navigation from Now Playing.
+
+### Added — Liquid Mercury visualizer (new preset)
+- Twelve metaball blobs that each couple to a distinct frequency band. Beat-driven attractor flips collapse and explode the cluster on every kick; bass drives a slow palette wheel rotation so the whole field cycles color with the music.
+- Connection lines fuse between overlapping blobs for a true metaball look without per-pixel sampling cost. Center caustic flare on each kick gives the bass a physical compression effect.
+- Available in fullscreen preset list and Auto VJ rotation.
+
+### Added — In-app navigation from Now Playing
+- Clicking the artist name in Now Playing now jumps to the Artists view filtered to that artist (instead of opening a Wikipedia search).
+- Clicking the album name jumps to the Albums view with that album pre-selected.
+- External Wikipedia search moved behind a small ↗ icon next to each name.
+- Backed by a `pendingNavigation` action on the player store consumed by AlbumsView/ArtistsView on next render.
+
+### Added — Sonic Atlas region playback
+- Click any atlas point to pin it (warn-colored halo + crosshair stays put through panning).
+- New footer: pick 6/12/24/48 nearest tracks, then PLAY REGION / QUEUE NEXT. The cluster is hydrated via the new bulk `getTracksByIds` IPC, preserving atlas-neighborhood order so the result reads as a smooth journey through sound space.
+- Hover overlay now shows album + year + genre alongside the DNA breakdown.
+
+### Added — Living Tags in Now Playing
+- The "NewAmp Notes" filler is replaced with a Living Tags chip panel that shows every DSL-derived tag currently assigned to the playing track. Empty-state hint points the user at the Living Tags view to write their first rule.
+
+### Added — First-visit onboarding cards
+- Discover, Mixes, Living Tags, and Sonic Atlas each show an inline explainer card on first visit. Dismissed state persists per view via `localStorage`. The cards explain what each surface does, what to expect, and where to click next.
+
+### Added — Spectral-art fallback in the transport bar
+- Bottom transport bar falls back to a deterministic SVG cover (FNV-1a hashed from artist+album) whenever the embedded art URL 404s. No more music-note placeholder for tagless tracks; every track in the library gets a distinct visual identity.
+
+### Added — Visualizer auto-hide top nav + working volume slider
+- Cursor near the top edge (≤110 px) reveals the toolbar; moving away hides it after 1.4 s. Keyboard shortcuts also reveal briefly. Fullscreen no longer feels cluttered.
+- Right-side volume meter is now a real volume slider (native `appearance: slider-vertical` + `writing-mode: vertical-lr`). Drag or scroll to set volume. The animated RMS fill bar remains visible behind the input.
+
+### Added — Deck art pan + TV static
+- Jukebox + Retro TV decks now slowly pan the album cover up→center→down on a 14 s loop instead of showing a static crop. Honors `prefers-reduced-motion`.
+- Retro TV deck overlays animated SVG snow noise that intensifies when no track is tuned in, becomes subtle film grain during playback.
+
+### Changed — Mixes seed coherence
+- Both Harmonic Mix and Taste Match now gate candidate tracks by audio DNA cosine + genre Jaccard + era proximity + artist match before scoring. A Lykke Li track no longer shows up in a mix seeded from Everclear ('90s alt-rock) just because it's heavily played; seed-vibe similarity becomes a multiplicative gate on top of the existing taste score.
+- New `shared/seed-vibe.ts` exports `seedVibeSimilarity(track, seed, ...)` returning 0–1.
+
+### Changed — Visualizer reactivity overhaul
+- Beat decay tightened from `0.76` to `0.5` so kicks read as discrete events instead of one smeared envelope. Fixes Tempo Pulse lag.
+- New `kick`, `beatEdge`, and `flux` features on `AudioFeatures`. `kick` is unsmoothed narrow-band (0–140 Hz) energy. `beatEdge` is true exactly on the frame a transient fires. `flux` is positive-only spectral delta.
+- Galaxy: hue now coupled to `bass + beat + time`; bass ring color cycles instead of staying accent-colored. Beat edges trigger a 14-particle burst.
+- Radial: beat-driven rotation accumulator; consumes `features.bands[i]` per spoke; maxR pumps with beat.
+- Tunnel: accumulator twist (silent → frozen, kick → accelerate); polygon side count modulates with beat; per-ring radius scales with bass + beat.
+- Orbital Rings: outer-bar count cut from `96+ring*18` to `48+ring*10`. The expensive `shadowBlur` is now gated on `features.beat > 0.42` — only fires during transients. Rotation derives from `orbitalRotation` accumulator.
+- Tempo Pulse: rising-edge trigger via `features.beatEdge`; debounce drops from 110 ms to 70 ms.
+- Confetti: alpha + size pulse on beat; angle accelerates with beat; hue shifts on edges.
+- Burning Cloud (shader): swapped hardcoded red→orange→amber ramp for palette()-driven hues so the cloud actually cycles color with the music. Palette mix factor raised from 0.16 to 0.55+bass*0.4.
+- Plasma Grid (shader): tile frequency cut from 10–20× to 3–5× per axis so we see flowing plasma cells instead of "a wall of tiny windows". Plasma now dominates over the grid lines.
+- Neon Ribbons (shader): replaced raw `atan(p.y, p.x)` with periodic `cos(theta*n)` — eliminates the broken seam along the negative x-axis.
+
+### Fixed — Wikipedia integration (Blood Orange + similar artists)
+- Added `Api-User-Agent` header per Wikipedia's UA policy; anonymous browser UAs were getting throttled which made lookups silently fail.
+- `MUSIC_DISAMBIGUATORS` extended with `musical project`, `music producer`, `producer`, `artist` so artist aliases (Blood Orange = Devonté Hynes) resolve directly to `Page (musical project)` etc.
+- Album panel in Now Playing falls back to the artist's Wikipedia entry when no album-specific page exists, with a "showing the artist instead" note. No more empty panel for off-catalog releases.
+- Fetch errors no longer kill the candidate chain — failure on one disambiguator continues to the next.
+
+### Fixed — Album rating overlapping Play Album buttons
+- Album rating widget was rendering wider than its 230 px container and crashing into the action buttons row. Now lives on a dedicated full-width row beneath the action buttons, no overlap at any viewport.
+
+### Fixed — Rating a song no longer "rates the album"
+- Album Context panel in Now Playing was showing an averageScore that updated whenever the user rated a single song, making it look like the album received a rating. Now only displays the average when 3+ tracks (or ≥50%) of the album are actually rated; otherwise shows `(N of M tracks rated)` to make it clear it's an aggregate.
+
+### Fixed — Random album reshuffle producing identical orderings
+- The polynomial random sort could occasionally hit near-identical orderings when two Date.now() seeds shared the same `% 991` or `% 7919` residue. New formula XORs `MIN(id)` against the seed before the polynomial mix so tiny seed deltas always produce visibly distinct orders.
+
+### Fixed — Vintage Computer (terminal) theme legibility
+- Ink, ink-2, muted darkened to pass AA contrast against the `#c4c1aa` beige panel. Accent, accent-dim, warn, and error similarly darkened. The whole theme now reads cleanly instead of fading into the background.
+
 ## [1.5.1] - 2026-05-19
 
 ### Removed

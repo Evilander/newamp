@@ -9,6 +9,7 @@ export interface AlbumFact {
 const ALBUM_FACT_CACHE_PREFIX = 'newamp:album-facts:v1:';
 const ALBUM_FACT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ALBUM_FACT_SEARCH_LIMIT = '6';
+const WIKI_USER_AGENT = 'NewAmp/1.5.2 (https://github.com/evilander/newamp)';
 
 const ALBUM_TITLE_PATTERN = /\((?:album|ep|extended play|mixtape|soundtrack)\)/i;
 const NON_ALBUM_TITLE_PATTERN = /\((?:song|single|film|novel|book|software|video game|television series|tv series|episode|company|species|animal|character|place|city|band|musician)\)/i;
@@ -282,12 +283,20 @@ async function fetchWikiCandidates(
   signal?: AbortSignal,
 ): Promise<AlbumFact[]> {
   const params = new URLSearchParams(query);
-  const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, { signal });
-  if (!res.ok) return [];
-  const data = (await res.json()) as WikiResponse;
-  return Object.values(data.query?.pages ?? {})
-    .map(pageToAlbumFact)
-    .filter((fact): fact is AlbumFact => !!fact);
+  try {
+    const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, {
+      signal,
+      headers: { 'Api-User-Agent': WIKI_USER_AGENT },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as WikiResponse;
+    return Object.values(data.query?.pages ?? {})
+      .map(pageToAlbumFact)
+      .filter((fact): fact is AlbumFact => !!fact);
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') throw err;
+    return [];
+  }
 }
 
 function pageToAlbumFact(page: WikiPage): AlbumFact | null {

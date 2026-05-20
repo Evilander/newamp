@@ -138,6 +138,7 @@ const stub: NewAmpAPI = {
   getAlbumTracks: async () => [],
   getArtistTracks: async () => [],
   getTrack: async () => null,
+  getTracksByIds: async () => [],
   lookupTrackMetadata: async () => [],
   applyTrackMetadataPatch: async () => null,
   applyTrackMetadataEdit: async (_id: number, _patch: TrackMetadataPatchInput) => null,

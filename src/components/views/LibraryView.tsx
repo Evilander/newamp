@@ -1133,7 +1133,7 @@ export function TrackTable({
     column: TrackColumnKey,
     content: ReactNode,
     className = '',
-    label = column,
+    label: string = column,
   ): JSX.Element {
     return (
       <th

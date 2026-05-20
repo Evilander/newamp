@@ -59,12 +59,17 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
           onDoubleClick={onOpenFullscreenViz}
           data-newamp-open-visualizer
           title="Click for screen visualizer, double-click for fullscreen"
+          data-newamp-tv-state={track ? 'tuned' : 'static'}
         >
           <span className="deck-tv-scanlines" aria-hidden="true" />
+          {/* TV static overlay — animated noise/snow that fades in when no
+              track is loaded or while the channel is "tuning". Subtle on
+              playback so the cover still reads. */}
+          <span className="deck-tv-static" aria-hidden="true" />
           {vizExpanded ? (
             <Visualizer mode="mini" width={300} height={220} />
           ) : artUrl ? (
-            <img src={artUrl} alt={track?.album ?? ''} draggable={false} />
+            <img src={artUrl} alt={track?.album ?? ''} draggable={false} className="deck-tv-art-pan" />
           ) : (
             <Visualizer mode="mini" width={300} height={220} />
           )}

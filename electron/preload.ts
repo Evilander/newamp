@@ -95,6 +95,7 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('library:get-album-tracks', album, albumArtist),
   getArtistTracks: (artist) => ipcRenderer.invoke('library:get-artist-tracks', artist),
   getTrack: (id) => ipcRenderer.invoke('library:get-track', id),
+  getTracksByIds: (ids) => ipcRenderer.invoke('library:get-tracks-by-ids', ids) as Promise<Track[]>,
   lookupTrackMetadata: (id: number) =>
     ipcRenderer.invoke('metadata:lookup', id) as Promise<MetadataLookupCandidate[]>,
   applyTrackMetadataPatch: (id: number, candidate: MetadataLookupCandidate) =>
