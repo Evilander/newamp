@@ -86,22 +86,37 @@ export function AlbumsView(): JSX.Element {
     if (!pendingNavigation || pendingNavigation.kind !== 'album') return;
     const target = pendingNavigation;
     void (async () => {
+      let tracks: Track[] = [];
+      let lookupFailed = false;
       try {
-        const tracks = await api.getAlbumTracks(target.album, target.albumArtist).catch(() => []);
-        const albumSummary: AlbumSummary = {
-          album: target.album,
-          albumArtist: target.albumArtist || (tracks[0]?.albumArtist ?? tracks[0]?.artist ?? 'Unknown Artist'),
-          year: tracks.find((t) => t.year)?.year ?? null,
-          trackCount: tracks.length,
-          duration: tracks.reduce((sum, t) => sum + (t.duration ?? 0), 0),
-          artFromTrackId: tracks.find((t) => t.hasArt)?.id ?? null,
-        };
-        setSelected(albumSummary);
-        setTracks(tracks);
-        setFilter(target.album);
-      } finally {
-        consumePendingNavigation();
+        tracks = await api.getAlbumTracks(target.album, target.albumArtist);
+      } catch (err) {
+        lookupFailed = true;
+        setScanStatus(`Could not open ${target.album}: ${err instanceof Error ? err.message : 'unknown error'}. Click again to retry.`);
       }
+      if (lookupFailed || tracks.length === 0) {
+        // Don't consume on partial failure — a retry click on the same album
+        // link in Now Playing should be able to fire again. Leave the pending
+        // nav alone so the next render either retries (if the user re-clicks)
+        // or stays put.
+        if (!lookupFailed) {
+          setScanStatus(`No tracks found for ${target.album}.`);
+          consumePendingNavigation();
+        }
+        return;
+      }
+      const albumSummary: AlbumSummary = {
+        album: target.album,
+        albumArtist: target.albumArtist || (tracks[0]?.albumArtist ?? tracks[0]?.artist ?? 'Unknown Artist'),
+        year: tracks.find((t) => t.year)?.year ?? null,
+        trackCount: tracks.length,
+        duration: tracks.reduce((sum, t) => sum + (t.duration ?? 0), 0),
+        artFromTrackId: tracks.find((t) => t.hasArt)?.id ?? null,
+      };
+      setSelected(albumSummary);
+      setTracks(tracks);
+      setFilter(target.album);
+      consumePendingNavigation();
     })();
   }, [pendingNavigation, consumePendingNavigation]);
 
@@ -544,6 +559,10 @@ function albumArtistFirstLetter(value: string | null | undefined): string {
   return /[A-Z]/.test(first) ? first : '#';
 }
 
+// Hoisted at module scope so it's not re-allocated on every AlphabetRail
+// render. The set never changes — `#` then A through Z.
+const ALPHABET_RAIL_LETTERS = ['#', ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i))] as const;
+
 /**
  * Vertical A-Z navigation rail. Letters with no matching album render dimmed
  * and disabled; clicking a present letter scrolls the album grid to the
@@ -557,7 +576,6 @@ function AlphabetRail({
   albums: AlbumSummary[];
   listRef: React.RefObject<HTMLDivElement>;
 }): JSX.Element {
-  const letters = ['#', ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i))];
   const available = useMemo(() => {
     const set = new Set<string>();
     for (const album of albums) set.add(albumArtistFirstLetter(album.albumArtist));
@@ -581,7 +599,7 @@ function AlphabetRail({
       data-newamp-album-letter-rail
       aria-label="Jump to artist letter"
     >
-      {letters.map((letter) => {
+      {ALPHABET_RAIL_LETTERS.map((letter) => {
         const present = available.has(letter);
         return (
           <button

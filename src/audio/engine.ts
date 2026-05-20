@@ -32,6 +32,7 @@ interface Deck {
 interface AudioGraph {
   ctx: AudioContext;
   analyser: AnalyserNode;
+  onsetAnalyser: AnalyserNode;
   masterGain: GainNode;
   limiter: DynamicsCompressorNode;
   eqBands: BiquadFilterNode[];
@@ -172,6 +173,15 @@ export class AudioEngine {
     analyser.minDecibels = -86;
     analyser.maxDecibels = -10;
     analyser.smoothingTimeConstant = 0.24;
+    // Dedicated unsmoothed analyser for onset detection. The visualizer
+    // analyser smooths over ~1.3 frames which makes "rising-edge" beat
+    // detection lag behind real transients. This tap reads raw frame energy
+    // so kick-drum onset gates fire in the right frame.
+    const onsetAnalyser = ctx.createAnalyser();
+    onsetAnalyser.fftSize = DEFAULT_FFT_SIZE;
+    onsetAnalyser.minDecibels = -86;
+    onsetAnalyser.maxDecibels = -10;
+    onsetAnalyser.smoothingTimeConstant = 0;
 
     const decks = [this.createDeck(0, ctx), this.createDeck(1, ctx)] as [Deck, Deck];
     for (const deck of decks) {
@@ -186,15 +196,26 @@ export class AudioEngine {
       node.connect(band);
       node = band;
     }
+    // Signal chain:
+    //   source → eq → replayGain ─┬─→ masterGain (volume) → limiter → destination
+    //                             └─→ analyser (visualization tap, passive)
+    // Volume (masterGain) is upstream of the limiter so any boost past unity
+    // still hits the limiter and the device never clips. The analyser is a
+    // parallel sink off replayGain so visualizers see pre-volume audio and
+    // stay reactive when the user listens quietly. AnalyserNode is passive —
+    // tapping it from the main signal does not affect the audio that reaches
+    // the device.
     node.connect(replayGain);
-    replayGain.connect(limiter);
-    limiter.connect(analyser);
-    analyser.connect(masterGain);
-    masterGain.connect(ctx.destination);
+    replayGain.connect(masterGain);
+    replayGain.connect(analyser);
+    replayGain.connect(onsetAnalyser);
+    masterGain.connect(limiter);
+    limiter.connect(ctx.destination);
 
     const graph = {
       ctx,
       analyser,
+      onsetAnalyser,
       masterGain,
       limiter,
       eqBands,
@@ -671,9 +692,10 @@ export class AudioEngine {
   }
 
   setVolume(v: number): void {
-    // Volume range extends to 2.0 (VLC-style boost). Past 1.0 amplifies post-limiter.
-    // The limiter still catches inter-sample peaks; values approaching 2.0 will be
-    // clipped, which is the expected behavior — we let users push and warn visually.
+    // Volume range extends to 2.0 (VLC-style boost). masterGain is upstream of
+    // the limiter (see graph wiring), so values past 1.0 are caught by the
+    // limiter and never reach the device above 0 dBFS. No more silent
+    // post-limiter clipping when users push past unity.
     this.volume = Math.max(0, Math.min(2, v));
     if (!this.graph) return;
     this.graph.masterGain.gain.setTargetAtTime(this.volume, this.graph.ctx.currentTime, 0.01);
@@ -743,6 +765,24 @@ export class AudioEngine {
       return;
     }
     this.graph.analyser.getByteTimeDomainData(buf);
+  }
+
+  /**
+   * Read frequency data from the unsmoothed onset-detection analyser. Use this
+   * for transient/kick detection where the visualizer's smoothed analyser
+   * (smoothingTimeConstant=0.24) would lag real beats by ~1.3 frames.
+   */
+  getOnsetFreqData(buf: Uint8Array<ArrayBuffer>): void {
+    if (!this.graph) {
+      buf.fill(0);
+      return;
+    }
+    this.graph.onsetAnalyser.getByteFrequencyData(buf);
+  }
+
+  /** Current audio sample rate in Hz, or null when the engine has not booted. */
+  getSampleRate(): number {
+    return this.graph?.ctx.sampleRate ?? 48000;
   }
 
   dispose(): void {

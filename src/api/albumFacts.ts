@@ -1,3 +1,5 @@
+import { fetchWikipediaPages, localStorageSafe, normalizeForMatch, type WikiPage } from '../lib/wiki';
+
 export interface AlbumFact {
   title: string;
   description: string | null;
@@ -9,7 +11,6 @@ export interface AlbumFact {
 const ALBUM_FACT_CACHE_PREFIX = 'newamp:album-facts:v1:';
 const ALBUM_FACT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const ALBUM_FACT_SEARCH_LIMIT = '6';
-const WIKI_USER_AGENT = 'NewAmp/1.5.2 (https://github.com/evilander/newamp)';
 
 const ALBUM_TITLE_PATTERN = /\((?:album|ep|extended play|mixtape|soundtrack)\)/i;
 const NON_ALBUM_TITLE_PATTERN = /\((?:song|single|film|novel|book|software|video game|television series|tv series|episode|company|species|animal|character|place|city|band|musician)\)/i;
@@ -20,21 +21,6 @@ const NON_ALBUM_CREATIVE_WORK_PATTERN = /\b(?:song by|single by|film directed|no
 interface CachedAlbumFact {
   fetchedAt: number;
   fact: AlbumFact;
-}
-
-interface WikiPage {
-  title?: string;
-  description?: string;
-  extract?: string;
-  fullurl?: string;
-  thumbnail?: { source?: string };
-  original?: { source?: string };
-}
-
-interface WikiResponse {
-  query?: {
-    pages?: Record<string, WikiPage>;
-  };
 }
 
 export async function fetchAlbumFacts(
@@ -133,13 +119,6 @@ function albumFactCacheKey(album: string, artist: string): string {
   return `${ALBUM_FACT_CACHE_PREFIX}${encodeURIComponent(album.trim().toLowerCase())}::${encodeURIComponent(artist.trim().toLowerCase())}`;
 }
 
-function localStorageSafe(): Storage | null {
-  try {
-    return typeof localStorage === 'undefined' ? null : localStorage;
-  } catch {
-    return null;
-  }
-}
 
 function isAlbumFact(value: unknown): value is AlbumFact {
   if (!value || typeof value !== 'object') return false;
@@ -266,37 +245,11 @@ function directTitleCandidates(album: string, artist: string): string[] {
   return [...new Set(titles)];
 }
 
-function normalizeForMatch(value: string): string {
-  return value
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/&/g, ' and ')
-    .replace(/['`]/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .replace(/\s+/g, ' ');
-}
-
 async function fetchWikiCandidates(
   query: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<AlbumFact[]> {
-  const params = new URLSearchParams(query);
-  try {
-    const res = await fetch(`https://en.wikipedia.org/w/api.php?${params}`, {
-      signal,
-      headers: { 'Api-User-Agent': WIKI_USER_AGENT },
-    });
-    if (!res.ok) return [];
-    const data = (await res.json()) as WikiResponse;
-    return Object.values(data.query?.pages ?? {})
-      .map(pageToAlbumFact)
-      .filter((fact): fact is AlbumFact => !!fact);
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') throw err;
-    return [];
-  }
+  return fetchWikipediaPages(query, pageToAlbumFact, signal, 'wiki album');
 }
 
 function pageToAlbumFact(page: WikiPage): AlbumFact | null {

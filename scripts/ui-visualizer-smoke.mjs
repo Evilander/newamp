@@ -37,13 +37,20 @@ assert.ok(result.xboxRender?.orbitalRings?.litSamples > 0, 'Orbital Rings should
 assert.ok(result.auroraRender?.litSamples > 0, 'Aurora should render a nonblank reactive frame');
 // Milkdrop (butterchurn) production-correctness check: confirm the CSP
 // allows the preset shader eval. Pixel output isn't reliable in software
-// WebGL (smoke runs without hardware acceleration), so we just verify the
-// integration didn't bomb with the eval policy error that previously broke
-// it. On Tyler's hardware-accelerated app this also produces pixels.
+// WebGL (smoke runs without hardware acceleration), so we layer two
+// asserts: (1) NO eval error fired during the 4s boot window, and
+// (2) Visualizer.tsx set the positive `mounted=true` flag *after*
+// createVisualizer + connectAudio succeeded. The second guards against
+// a silently-caught factory failure that would slip past assert (1).
 assert.equal(
   result.milkdropEvalError,
   null,
   `Milkdrop should not fail with a CSP/eval error — got: ${result.milkdropEvalError}`,
+);
+assert.equal(
+  result.milkdropMounted,
+  'true',
+  `butterchurn.createVisualizer must succeed and tag the canvas — got milkdropMounted=${result.milkdropMounted}`,
 );
 assert.ok(
   result.mercuryRender?.litSamples > 0,
@@ -156,9 +163,13 @@ function runElectronSmoke() {
     let stdout = '';
     let stderr = '';
 
+    // 90s outer guard. The inner probe in electron/main.ts is bounded at 60s;
+    // the outer must give the renderer enough headroom for cold-boot shader
+    // compilation + Milkdrop + Liquid Mercury frames. The old 45s value
+    // killed Electron before the probe could report on cold machines.
     const timeout = setTimeout(() => {
-      finish(new Error(`UI visualizer smoke timed out without result marker. stderr:\n${tail(stderr)}`));
-    }, 45000);
+      finish(new Error(`UI visualizer smoke timed out at 90s without result marker (renderer may have hung in shader compilation). stderr tail:\n${tail(stderr)}`));
+    }, 90000);
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');

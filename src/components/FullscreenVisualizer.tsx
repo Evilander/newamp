@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLatestRef } from '../hooks/useLatestRef';
 import { usePlayerStore } from '../store/usePlayerStore';
 import {
   Visualizer,
@@ -146,7 +147,7 @@ export function FullscreenVisualizer(): JSX.Element {
   const [chromeVisible, setChromeVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_CHROME_KEY, true));
   const [topNavVisible, setTopNavVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_TOP_NAV_KEY, true));
   const [palette, setPalette] = useState<VizPalette>(() => loadVisualizerPalette());
-  const [performance, setPerformance] = useState<VizPerformance>(() => loadVisualizerPerformance());
+  const [perfTier, setPerfTier] = useState<VizPerformance>(() => loadVisualizerPerformance());
   const [reactivity, setReactivity] = useState<VizReactivity>(() => loadVisualizerReactivity());
   const [autoVjEnabled, setAutoVjEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_AUTO_VJ_KEY, false));
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
@@ -154,7 +155,6 @@ export function FullscreenVisualizer(): JSX.Element {
   // top toolbar so the visualizer can be enjoyed without UI clutter. Any
   // cursor movement re-shows it for a few seconds before hiding again.
   const [cursorActive, setCursorActive] = useState(true);
-  const cursorTimeoutRef = useRef<number>(0);
   const levelMeterRef = useRef<HTMLSpanElement>(null);
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
@@ -176,7 +176,7 @@ export function FullscreenVisualizer(): JSX.Element {
   }
 
   function toggleQuality(): void {
-    if (performance === 'low') return;
+    if (perfTier === 'low') return;
     setQuality((value) => {
       const next: VizQuality = value === '4k' ? 'auto' : '4k';
       window.localStorage.setItem(VIZ_QUALITY_KEY, next);
@@ -231,8 +231,8 @@ export function FullscreenVisualizer(): JSX.Element {
     });
   }
 
-  function togglePerformance(): void {
-    setPerformance((value) => {
+  function togglePerfTier(): void {
+    setPerfTier((value) => {
       const next: VizPerformance = value === 'low' ? 'balanced' : 'low';
       window.localStorage.setItem(VIZ_PERFORMANCE_KEY, next);
       if (next === 'low') {
@@ -309,7 +309,6 @@ export function FullscreenVisualizer(): JSX.Element {
       scheduleHide(2400);
     }
     setCursorActive(false);
-    cursorTimeoutRef.current = 0;
     window.addEventListener('mousemove', handleMove, { passive: true });
     window.addEventListener('keydown', handleKey, { passive: true });
     return () => {
@@ -355,10 +354,7 @@ export function FullscreenVisualizer(): JSX.Element {
   // restart the RAF + re-allocate the wave buffer on every tick — that was
   // a per-frame allocation source during volume drags and contributed to
   // gradual slowdown over long sessions.
-  const volumeRef = useRef(volume);
-  useEffect(() => {
-    volumeRef.current = volume;
-  }, [volume]);
+  const volumeRef = useLatestRef(volume);
   useEffect(() => {
     const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
     let raf = 0;
@@ -418,7 +414,7 @@ export function FullscreenVisualizer(): JSX.Element {
         toggleAutoVj();
       } else if (event.key.toLowerCase() === 'l') {
         event.preventDefault();
-        togglePerformance();
+        togglePerfTier();
       } else if (event.key.toLowerCase() === 'f') {
         event.preventDefault();
         toggleNativeFullscreen();
@@ -433,22 +429,10 @@ export function FullscreenVisualizer(): JSX.Element {
   // doesn't restart the RAF + re-allocate the freq buffer. The previous
   // shape re-allocated on every preset switch — over a long session that
   // accumulated GC pressure and contributed to the gradual slowdown.
-  const autoVjActivePresetRef = useRef(activePreset);
-  const autoVjIsPlayingRef = useRef(isPlaying);
-  const autoVjPerformanceRef = useRef(performance);
-  const autoVjSetPresetRef = useRef(setPreset);
-  useEffect(() => {
-    autoVjActivePresetRef.current = activePreset;
-  }, [activePreset]);
-  useEffect(() => {
-    autoVjIsPlayingRef.current = isPlaying;
-  }, [isPlaying]);
-  useEffect(() => {
-    autoVjPerformanceRef.current = performance;
-  }, [performance]);
-  useEffect(() => {
-    autoVjSetPresetRef.current = setPreset;
-  }, [setPreset]);
+  const autoVjActivePresetRef = useLatestRef(activePreset);
+  const autoVjIsPlayingRef = useLatestRef(isPlaying);
+  const autoVjPerfTierRef = useLatestRef(perfTier);
+  const autoVjSetPresetRef = useLatestRef(setPreset);
   useEffect(() => {
     if (!autoVjEnabled) return undefined;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
@@ -462,7 +446,7 @@ export function FullscreenVisualizer(): JSX.Element {
         const elapsed = now - lastSwitchAt;
         if (elapsed > 14000 && (energy > 0.42 || elapsed > 30000)) {
           const currentPreset = autoVjActivePresetRef.current;
-          const nextPreset = pickAutoVjPreset(currentPreset, energy, autoVjPerformanceRef.current);
+          const nextPreset = pickAutoVjPreset(currentPreset, energy, autoVjPerfTierRef.current);
           if (nextPreset !== currentPreset) {
             autoVjSetPresetRef.current(nextPreset);
             lastSwitchAt = now;
@@ -484,7 +468,7 @@ export function FullscreenVisualizer(): JSX.Element {
       data-newamp-visualizer-chrome={chromeVisible ? 'visible' : 'clean'}
       data-newamp-visualizer-nav={topNavVisible ? 'visible' : 'hidden'}
       data-newamp-visualizer-palette={palette}
-      data-newamp-visualizer-performance={performance}
+      data-newamp-visualizer-performance={perfTier}
       data-newamp-visualizer-reactivity={reactivity}
       data-newamp-visualizer-auto-vj={autoVjEnabled ? 'on' : 'off'}
       data-newamp-visualizer-art={artPulseEnabled ? (artPulseVisible ? 'pulse' : 'armed') : 'hidden'}
@@ -510,7 +494,7 @@ export function FullscreenVisualizer(): JSX.Element {
           <Visualizer
             mode={activePreset as CanvasVisualizerPreset}
             quality={quality}
-            performance={performance}
+            performance={perfTier}
             palette={palette}
             reactivity={reactivity}
             className="absolute inset-0 h-full w-full"
@@ -560,15 +544,15 @@ export function FullscreenVisualizer(): JSX.Element {
           className={`pxbtn ${quality === '4k' ? 'is-active' : ''}`}
           data-newamp-viz-quality-button
           onClick={toggleQuality}
-          disabled={performance === 'low'}
+          disabled={perfTier === 'low'}
           title={quality === '4k' ? 'Use balanced performance render quality (Q)' : 'Use sharper 4K render quality (Q)'}
         >
-          {performance === 'low' ? 'LOW' : quality === '4k' ? '4K' : 'PERF'}
+          {perfTier === 'low' ? 'LOW' : quality === '4k' ? '4K' : 'PERF'}
         </button>
         <button
-          className={`pxbtn ${performance === 'low' ? 'is-active' : ''}`}
+          className={`pxbtn ${perfTier === 'low' ? 'is-active' : ''}`}
           data-newamp-viz-performance-button
-          onClick={togglePerformance}
+          onClick={togglePerfTier}
           title="Low-end mode for older CPUs/GPUs (L)"
         >
           LOW-END
@@ -748,11 +732,11 @@ function averageBand(freq: Uint8Array, from: number, to: number): number {
   return count ? total / count : 0;
 }
 
-function pickAutoVjPreset(current: VisualizerPreset, energy: number, performance: VizPerformance): VisualizerPreset {
-  const pool = performance === 'low' ? AUTO_VJ_LOW : AUTO_VJ_BALANCED;
+function pickAutoVjPreset(current: VisualizerPreset, energy: number, perfTier: VizPerformance): VisualizerPreset {
+  const pool = perfTier === 'low' ? AUTO_VJ_LOW : AUTO_VJ_BALANCED;
   const currentIndex = Math.max(0, pool.indexOf(current));
   if (energy < 0.12) return 'album-breathe';
-  if (energy > 0.68 && performance !== 'low') {
+  if (energy > 0.68 && perfTier !== 'low') {
     const highEnergy = ['plasma-grid', 'neon-ribbons', 'burning-cloud', 'confetti'] as const;
     return highEnergy[(currentIndex + 1) % highEnergy.length]!;
   }

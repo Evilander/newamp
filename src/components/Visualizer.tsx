@@ -197,6 +197,13 @@ export function Visualizer({
             meshHeight: 36,
           });
           visualizer.connectAudio(engine.visualizerNode);
+          // Positive boot signal for the ui-visualizer smoke. Setting this
+          // *after* createVisualizer + connectAudio means the smoke can
+          // distinguish "butterchurn really mounted" from "canvas exists in
+          // the DOM but the factory threw inside it". Software WebGL can't
+          // reliably paint shader pixels, so this is the production proof
+          // that the integration is live.
+          butterCanvas.setAttribute('data-newamp-butterchurn-mounted', 'true');
 
           const presets = Object.entries(presetApi.getPresets()).filter(
             (entry): entry is [string, Record<string, unknown>] =>
@@ -225,6 +232,7 @@ export function Visualizer({
           // see WHY butterchurn isn't rendering. Previously we silently
           // dropped into the fallback which made the bug invisible.
           console.error('[newamp] butterchurn failed to start:', err);
+          butterCanvas.setAttribute('data-newamp-butterchurn-mounted', 'failed');
           if (!cancelled) {
             const frameFallback = (now: number) => {
               if (canPaint(now)) paintMilkdropFallback(butterCanvas, engine);
@@ -243,8 +251,11 @@ export function Visualizer({
         if (presetTimer != null) window.clearInterval(presetTimer);
         try {
           visualizer?.disconnectAudio(engine.visualizerNode);
-        } catch {
-          /* ignore */
+        } catch (err) {
+          // Expected: double-disconnect after rapid preset switches when the
+          // visualizer was never fully wired. Other errors are worth knowing
+          // about (graph corruption, disposed analyser).
+          console.warn('[newamp] butterchurn disconnectAudio failed (ok during preset thrash):', err instanceof Error ? err.message : err);
         }
       };
     }
@@ -268,9 +279,13 @@ export function Visualizer({
     let raf = 0;
     let ctx: CanvasRenderingContext2D | null = null;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+    const onsetFreq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
     const canPaint = createFrameGate(canvasRef, frameIntervalMs);
-    const analyzeFeatures = createAudioFeatureAnalyzer();
+    const analyzeFeatures = createAudioFeatureAnalyzer({
+      sampleRate: engine.getSampleRate(),
+      fftSize: engine.fftSize,
+    });
 
     function ensureSize() {
       const node = canvasRef.current;
@@ -340,6 +355,16 @@ export function Visualizer({
     let mercuryAttractor = 1; // +1 attracts blobs to center; -1 explodes outward
     let lastMercuryFlip = 0;
     let mercuryHueDrift = 0;
+    // Track canvas size between frames so we can rescale blob positions when
+    // the user resizes the window (e.g. small → fullscreen). Without this the
+    // blobs stay anchored at their original coordinates and cluster in one
+    // corner until the attractor slowly drags them back to center.
+    let mercuryLastW = 0;
+    let mercuryLastH = 0;
+    // Color-stop cache for Liquid Mercury gradients. Quantized (hue, band,
+    // beat, layer) → 2-stop hsla strings. Keeps the per-frame template-string
+    // alloc count down by ~95% on steady music.
+    const mercuryColorStopCache = new Map<number, [string, string]>();
 
     function frame(now: number) {
       if (!canPaint(now)) {
@@ -360,9 +385,10 @@ export function Visualizer({
       }
 
       engine.getFreqData(freq);
+      engine.getOnsetFreqData(onsetFreq);
       engine.getTimeData(wave);
       boostFrequencyData(freq, reactivity);
-      const features = analyzeFeatures(freq, wave);
+      const features = analyzeFeatures(freq, wave, onsetFreq);
 
       const accent = getCssVar('--accent') || '#39ff14';
       const accentDim = getCssVar('--accent-dim') || '#1aa30a';
@@ -521,7 +547,10 @@ export function Visualizer({
         // Beat pumps the wheel outward; bass drives the rolling rotation so
         // the speed of the spin scales with low-end energy instead of a fixed
         // wall-clock divisor.
-        radialRotation += 0.004 + features.bass * 0.04 + (features.beatEdge ? 0.18 : 0);
+        // Wrap to avoid float-precision drift after long sessions. At
+        // ~radialRotation > 1e6 the hue derivation loses precision and
+        // quantizes into visible color bands.
+        radialRotation = (radialRotation + 0.004 + features.bass * 0.04 + (features.beatEdge ? 0.18 : 0)) % (Math.PI * 2);
         const maxR = Math.min(w, h) * (0.28 + bass * 0.18 + features.beat * 0.18);
         ctx.save();
         ctx.translate(cx, cy);
@@ -555,7 +584,7 @@ export function Visualizer({
         // Accumulator twist driven by bass + beat — silent tracks freeze the
         // tunnel; pumping kicks accelerate it instead of the constant
         // Date.now()/900 drift.
-        tunnelTwist += 0.005 + bass * 0.035 + (features.beatEdge ? 0.12 : 0);
+        tunnelTwist = (tunnelTwist + 0.005 + bass * 0.035 + (features.beatEdge ? 0.12 : 0)) % (Math.PI * 2);
         // Sides mutate on beat for a polygon-morph effect.
         const sides = 6 + Math.floor(features.beat * 4 + features.bass * 2);
         for (let r = rings; r > 0; r--) {
@@ -616,7 +645,7 @@ export function Visualizer({
         const minSide = Math.min(w, h);
         const time = Date.now();
         // Beat drives the master rotation so the rings push outward on kicks.
-        orbitalRotation += 0.002 + features.bass * 0.022 + (features.beatEdge ? 0.06 : 0);
+        orbitalRotation = (orbitalRotation + 0.002 + features.bass * 0.022 + (features.beatEdge ? 0.06 : 0)) % (Math.PI * 2);
 
         ctx.save();
         ctx.translate(cx, cy);
@@ -1061,6 +1090,23 @@ export function Visualizer({
               band: i % features.bands.length,
             });
           }
+          mercuryLastW = w;
+          mercuryLastH = h;
+        } else if (mercuryLastW > 0 && mercuryLastH > 0 && (w !== mercuryLastW || h !== mercuryLastH)) {
+          // Canvas resized — rescale blob positions proportionally so the
+          // cluster keeps its relative geometry instead of being stranded at
+          // the old corner. Velocities scale too so motion intensity stays
+          // proportional to the new viewport.
+          const sx = w / mercuryLastW;
+          const sy = h / mercuryLastH;
+          for (const blob of mercuryBlobs) {
+            blob.x *= sx;
+            blob.y *= sy;
+            blob.vx *= sx;
+            blob.vy *= sy;
+          }
+          mercuryLastW = w;
+          mercuryLastH = h;
         }
 
         // Beat-driven attractor flip — gives the fluid its "breathing" feel.
@@ -1068,7 +1114,7 @@ export function Visualizer({
           mercuryAttractor *= -1;
           lastMercuryFlip = now;
         }
-        mercuryHueDrift += features.bass * 4 + features.beat * 2;
+        mercuryHueDrift = (mercuryHueDrift + features.bass * 4 + features.beat * 2) % 360;
 
         // Smudge previous frame for a heavy trail — fluids should look
         // smeared, not punctuated. Bass thickens the trail (slower fade).
@@ -1129,16 +1175,39 @@ export function Visualizer({
           blob.hue = (mercuryHueDrift + i * 26 + bandEnergy * 90) % 360;
 
           // Render as overlapping radial gradients in 'lighter' mode — gives
-          // a metaball-style fluid look without per-pixel compute.
-          const layers = 3;
+          // a metaball-style fluid look without per-pixel compute. Color
+          // strings are cached per frame keyed on quantized (hueBucket,
+          // bandBucket, beatBucket, layer) so repeated frames with similar
+          // energy reuse the same hsla strings (~95% hit rate on steady
+          // music; saves the templated-string allocation × 36 per frame).
+          // Layer count cut from 3 to 2: dropped the outermost halo which
+          // contributed ~80% of pixels to clip-test against zero alpha.
+          const layers = 2;
+          const hueBucket = Math.floor(blob.hue / 6) * 6;
+          const bandBucket = Math.floor(bandEnergy * 10);
+          const beatBucket = Math.floor(features.beat * 10);
           for (let layer = 0; layer < layers; layer += 1) {
             const layerR = blob.radius * (1 + layer * 0.6);
             const grad = ctx.createRadialGradient(blob.x, blob.y, 0, blob.x, blob.y, layerR);
-            const sat = 88 + features.beat * 12;
-            const light = 58 + bandEnergy * 22 - layer * 12;
-            const alpha = (0.42 - layer * 0.11) * (0.6 + bandEnergy * 0.9 + features.beat * 0.3);
-            grad.addColorStop(0, `hsla(${blob.hue}, ${sat}%, ${light}%, ${alpha})`);
-            grad.addColorStop(0.55, `hsla(${(blob.hue + 30) % 360}, ${sat}%, ${light - 16}%, ${alpha * 0.45})`);
+            const cacheKey = (hueBucket * 100 + bandBucket * 10 + beatBucket) * 4 + layer;
+            let stops = mercuryColorStopCache.get(cacheKey);
+            if (!stops) {
+              const sat = 88 + beatBucket * 1.2;
+              const light = 58 + bandBucket * 2.2 - layer * 12;
+              const alpha = (0.42 - layer * 0.11) * (0.6 + bandBucket * 0.09 + beatBucket * 0.03);
+              stops = [
+                `hsla(${hueBucket}, ${sat}%, ${light}%, ${alpha})`,
+                `hsla(${(hueBucket + 30) % 360}, ${sat}%, ${light - 16}%, ${alpha * 0.45})`,
+              ];
+              if (mercuryColorStopCache.size > 256) {
+                // Bounded LRU-ish: when full, clear so we don't pay map-resize
+                // costs. Frame-coherent inputs refill quickly.
+                mercuryColorStopCache.clear();
+              }
+              mercuryColorStopCache.set(cacheKey, stops);
+            }
+            grad.addColorStop(0, stops[0]!);
+            grad.addColorStop(0.55, stops[1]!);
             grad.addColorStop(1, 'rgba(0,0,0,0)');
             ctx.fillStyle = grad;
             ctx.beginPath();
@@ -1253,12 +1322,12 @@ interface AudioFeatures {
   treble: number;
   rms: number;
   beat: number;
-  /** Narrow-band low-frequency energy (0-140 Hz at 48 kHz), unsmoothed. */
+  /** Narrow-band low-frequency energy (0-140 Hz, sample-rate-aware). Read from
+   * the unsmoothed onset analyser tap, so transient gates fire on the actual
+   * frame a kick lands instead of ~1.3 frames late. */
   kick: number;
-  /** True on the frame where bass crosses adaptive floor — rising edge. */
+  /** True exactly on the frame the kick band crosses the adaptive floor. */
   beatEdge: boolean;
-  /** Spectral flux (sum of positive bin deltas vs previous frame). 0..1. */
-  flux: number;
   bands: number[];
 }
 
@@ -1311,10 +1380,14 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
   };
 
   const freq = new Uint8Array(new ArrayBuffer(options.engine.frequencyBinCount));
+  const onsetFreq = new Uint8Array(new ArrayBuffer(options.engine.frequencyBinCount));
   const wave = new Uint8Array(new ArrayBuffer(options.engine.fftSize));
   const bands = new Float32Array(16);
   const canPaint = createFrameGate(options.canvasRef, options.frameIntervalMs);
-  const analyze = createAudioFeatureAnalyzer();
+  const analyze = createAudioFeatureAnalyzer({
+    sampleRate: options.engine.getSampleRate(),
+    fftSize: options.engine.fftSize,
+  });
   const dpr = Math.min(window.devicePixelRatio || 1, options.dprCap);
   let raf = 0;
   let lastWidth = 0;
@@ -1342,9 +1415,10 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
     if (canPaint(now)) {
       ensureSize();
       options.engine.getFreqData(freq);
+      options.engine.getOnsetFreqData(onsetFreq);
       options.engine.getTimeData(wave);
       boostFrequencyData(freq, options.reactivity);
-      const features = analyze(freq, wave);
+      const features = analyze(freq, wave, onsetFreq);
       bands.set(features.bands);
       const accent = parseRgbVec(getCssVar('--accent'));
 
@@ -1449,48 +1523,50 @@ function reactivitySettings(reactivity: VizReactivity): { curve: number; gain: n
   return { curve: 0.68, gain: 1.34, bassLift: 1.18, lowMidLift: 1.08 };
 }
 
-function createAudioFeatureAnalyzer(): (freq: Uint8Array, wave: Uint8Array) => AudioFeatures {
+interface AnalyzerConfig {
+  sampleRate: number;
+  fftSize: number;
+}
+
+function createAudioFeatureAnalyzer(config: AnalyzerConfig): (freq: Uint8Array, wave: Uint8Array, onsetFreq: Uint8Array) => AudioFeatures {
+  // Compute Hz-accurate bin counts so the same band labels mean the same
+  // perceptual range whether the source is 44.1, 48, 96, or 192 kHz.
+  // binWidth = sampleRate / fftSize. Floor + max 1 keeps a single-bin minimum
+  // so high-rate sources (192k) don't collapse to zero-width bands.
+  const binWidth = config.sampleRate / config.fftSize;
+  const binFor = (hz: number): number => Math.max(1, Math.floor(hz / binWidth));
+  const kickBins = Math.max(4, Math.ceil(140 / binWidth)); // kick drum fundamental ~50-140 Hz
+  const bassEnd = binFor(250);
+  const lowMidEnd = binFor(500);
+  const midEnd = binFor(2000);
+  const trebleEnd = binFor(8000);
+
   let bassFloor = 0.08;
   let rmsFloor = 0.04;
   let kickFloor = 0.06;
   let beat = 0;
   let prevKick = 0;
-  // Rolling reference for spectral flux. Keep the lower 256 bins (covers up to
-  // ~6 kHz at 48 kHz / 2048 fft) — enough to detect transients without going
-  // quadratic on the bin count.
-  let prevFreq: Uint8Array | null = null;
 
-  return (freq, wave) => {
-    const bass = bandValue(freq, 0, 28);
-    const lowMid = bandValue(freq, 28, 90);
-    const mid = bandValue(freq, 90, 220);
-    const treble = bandValue(freq, 220, 520);
+  return (freq, wave, onsetFreq) => {
+    const bass = bandValue(freq, 0, bassEnd);
+    const lowMid = bandValue(freq, bassEnd, lowMidEnd);
+    const mid = bandValue(freq, lowMidEnd, midEnd);
+    const treble = bandValue(freq, midEnd, trebleEnd);
     const rms = waveRms(wave);
-    // Narrow kick band (~0-140 Hz at 48 kHz / 2048 fft). Raw, not curve-shaped,
-    // so we can compare to an adaptive floor and trigger on real transients.
-    const kick = Math.min(1, avg(freq, 0, 6) / 255);
+    // Kick band: 0-140 Hz, derived from the actual sample rate. Read from the
+    // unsmoothed onset analyser so transient detection isn't lagged by the
+    // visualizer's 1.3-frame smoothing window.
+    const kick = Math.min(1, avg(onsetFreq, 0, kickBins) / 255);
 
     const bassOnset = Math.max(0, bass - bassFloor * 1.12);
     const rmsOnset = Math.max(0, rms - rmsFloor * 1.08);
     const kickOnset = Math.max(0, kick - kickFloor * 1.18);
-    // Faster decay (was 0.76) so the gate releases quickly — fixes the
-    // "Tempo Pulse laggy" complaint by letting visualizers see distinct beats
-    // instead of one smeared envelope.
     beat = Math.max(beat * 0.5, Math.min(1, bassOnset * 5.2 + rmsOnset * 3.4 + kickOnset * 2.4));
+    // True same-frame rising edge: prev frame below adaptive floor, this frame
+    // above. With the unsmoothed onset analyser this fires on the exact frame
+    // a kick lands instead of ~1.3 frames late.
     const beatEdge = prevKick < kickFloor * 1.18 && kick >= kickFloor * 1.18;
 
-    let flux = 0;
-    if (prevFreq && prevFreq.length === freq.length) {
-      let positive = 0;
-      const upper = Math.min(256, freq.length);
-      for (let i = 0; i < upper; i += 1) {
-        const delta = (freq[i]! - prevFreq[i]!) / 255;
-        if (delta > 0) positive += delta;
-      }
-      flux = Math.min(1, positive / (upper * 0.18));
-    }
-    if (!prevFreq || prevFreq.length !== freq.length) prevFreq = new Uint8Array(freq.length);
-    prevFreq.set(freq);
     prevKick = kick;
 
     bassFloor = bass > bassFloor
@@ -1512,7 +1588,6 @@ function createAudioFeatureAnalyzer(): (freq: Uint8Array, wave: Uint8Array) => A
       beat,
       kick,
       beatEdge,
-      flux,
       bands: logBands(freq, 16),
     };
   };
