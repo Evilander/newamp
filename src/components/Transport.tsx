@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { Visualizer } from './Visualizer';
 import { formatTime, playbackCodecLabel } from '../lib/format';
 import { api } from '../lib/api';
 import { VolumeSlider } from './VolumeSlider';
+import { spectralArtDataUrl } from '@shared/spectral-art';
 
 export function Transport(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
@@ -26,6 +27,22 @@ export function Transport(): JSX.Element {
     () => (current ? api.getArtUrl(current.id) : null),
     [current?.id],
   );
+  // Generated spectral SVG fallback — deterministic per (artist, album), so
+  // every track without embedded art still gets a consistent cover instead of
+  // a music-note placeholder. Tracks across the user's library are visually
+  // distinguishable even when none have folder art.
+  const fallbackArtUrl = useMemo(
+    () => (current ? spectralArtDataUrl({ artist: current.artist, album: current.album }, 144) : null),
+    [current?.artist, current?.album],
+  );
+  // When the real artUrl request fails, we flip to the fallback. Tracking
+  // it as state means the failed load isn't permanently hidden — switching
+  // to a new track resets the flag.
+  const [artFailed, setArtFailed] = useState(false);
+  useEffect(() => {
+    setArtFailed(false);
+  }, [current?.id]);
+  const shownArtUrl = artUrl && !artFailed ? artUrl : fallbackArtUrl;
 
   return (
     <footer
@@ -35,18 +52,17 @@ export function Transport(): JSX.Element {
       style={{ borderTop: '1px solid var(--line)' }}
     >
       <div className="flex w-[88px] shrink-0 flex-col items-center justify-center gap-1 bevel-in p-1">
-        {artUrl ? (
+        {shownArtUrl ? (
           <img
-            src={artUrl}
+            src={shownArtUrl}
             alt="cover"
             className="h-[72px] w-[72px] cursor-pointer object-cover"
             style={{ borderRadius: 'var(--radius)' }}
             onClick={() => setFs(true)}
             title="Open visualizer"
             data-newamp-open-visualizer
-            onError={(event) => {
-              event.currentTarget.style.display = 'none';
-            }}
+            data-newamp-art-source={artUrl && !artFailed ? 'embedded' : 'spectral'}
+            onError={() => setArtFailed(true)}
           />
         ) : (
           <div

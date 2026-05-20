@@ -5,24 +5,6 @@ import { api } from '../lib/api';
 import { formatTime } from '../lib/format';
 import { musicEntitySearchText, wikipediaSearchUrl } from '../lib/wiki';
 
-const FIELD_NOTE_BLURBS: string[] = [
-  'This track has the rare three-part signal: vibe, hook, and replay value.',
-  'A clean library pick with enough personality to earn its slot.',
-  'Strong metadata, strong rotation potential, no streaming account required.',
-  'The kind of local-file find that makes a personal library feel alive.',
-  'A high-signal track for late-night queue building.',
-  'Good candidate for a smart station seed.',
-  'The scan says this one deserves attention.',
-  'A useful anchor for the next mix.',
-];
-
-function fieldNoteBlurb(seed: string): string {
-  let hash = 0;
-  for (let i = 0; i < seed.length; i += 1) hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
-  const idx = Math.abs(hash) % FIELD_NOTE_BLURBS.length;
-  return FIELD_NOTE_BLURBS[idx]!;
-}
-
 function pickLyricHotLines(lines: LrcLine[] | null, plain: string | null | undefined): string[] {
   const candidates: string[] = [];
   if (lines?.length) {
@@ -75,7 +57,7 @@ export function LinerNotesPanel({
   const [aiNotes, setAiNotes] = useState<AiLinerNotesResult | null>(null);
   const [aiStatus, setAiStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
   const [aiError, setAiError] = useState<string | null>(null);
-  const blurb = useMemo(() => fieldNoteBlurb(`${track.id}:${track.artist}`), [track.id, track.artist]);
+  const [livingTags, setLivingTags] = useState<string[]>([]);
   const hotLines = useMemo(() => pickLyricHotLines(lyrics.lines, lyrics.plain), [lyrics.lines, lyrics.plain]);
   const score = Math.round(Math.max(0, Math.min(100, track.ratingScore ?? track.rating * 20)));
   const scoreLabel = `${score}/100`;
@@ -84,6 +66,25 @@ export function LinerNotesPanel({
     setAiNotes(null);
     setAiStatus('idle');
     setAiError(null);
+  }, [track.id]);
+
+  // Load Living Tags assigned to this track. These are user-defined classifications
+  // (e.g. "late_night", "rainy_day", "deep_cut") that come from DSL rules — show
+  // them prominently so the user can see how their automation has categorized
+  // the current track.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const tags = await api.getTagsForTrack(track.id);
+        if (!cancelled) setLivingTags(tags);
+      } catch {
+        if (!cancelled) setLivingTags([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [track.id]);
 
   async function draftAiNotes(): Promise<void> {
@@ -173,11 +174,28 @@ export function LinerNotesPanel({
         </div>
       ) : null}
 
-      <section className="liner-notes-blurb">
-        <span className="liner-notes-quote-mark">&ldquo;</span>
-        <p>{blurb}</p>
-        <span className="liner-notes-attribution">NewAmp Notes</span>
-      </section>
+      {livingTags.length > 0 ? (
+        <section className="liner-notes-tags" data-newamp-liner-living-tags>
+          <span className="liner-notes-section-title">Living Tags</span>
+          <ul className="liner-notes-tag-list">
+            {livingTags.map((tagName) => (
+              <li key={tagName}>
+                <span className="liner-notes-tag-chip">{tagName.replace(/_/g, ' ')}</span>
+              </li>
+            ))}
+          </ul>
+          <small className="liner-notes-tag-hint">
+            Assigned by your DSL rules — edit in Living Tags view.
+          </small>
+        </section>
+      ) : (
+        <section className="liner-notes-tags" data-newamp-liner-no-tags>
+          <span className="liner-notes-section-title">Living Tags</span>
+          <small className="liner-notes-tag-hint">
+            No tags yet. Write a rule in the Living Tags view and this track will auto-classify on next listen.
+          </small>
+        </section>
+      )}
 
       <section className="liner-notes-vitals">
         <span className="liner-notes-vitals-title">Sonic Vitals</span>

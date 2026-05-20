@@ -764,6 +764,7 @@ export type VisualizerPreset =
   | 'burning-cloud'
   | 'tempo-pulse'
   | 'lattice-strobe'
+  | 'liquid-mercury'
   | 'album-breathe';
 export type GuitarTabLineType = 'chords' | 'lyrics' | 'blank' | 'section' | 'tab';
 export type GuitarTabSource = 'ultimate-guitar' | 'local';
@@ -894,6 +895,7 @@ export interface NewAmpAPI {
   getAlbumTracks: (album: string, albumArtist: string) => Promise<Track[]>;
   getArtistTracks: (artist: string) => Promise<Track[]>;
   getTrack: (id: number) => Promise<Track | null>;
+  getTracksByIds: (ids: number[]) => Promise<Track[]>;
   lookupTrackMetadata: (id: number) => Promise<MetadataLookupCandidate[]>;
   applyTrackMetadataPatch: (id: number, candidate: MetadataLookupCandidate) => Promise<Track | null>;
   applyTrackMetadataEdit: (id: number, patch: TrackMetadataPatchInput) => Promise<Track | null>;

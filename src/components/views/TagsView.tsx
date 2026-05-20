@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TagRule, TagRulePreviewResult, TagSummary, Track } from '@shared/types';
 import { api } from '../../lib/api';
 import { usePlayerStore } from '../../store/usePlayerStore';
+import { ViewOnboarding } from '../ViewOnboarding';
 
 const DEFAULT_BODY = `tag(midnight_drive) when
   bpm > 110
@@ -198,6 +199,18 @@ export function TagsView(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col gap-3 p-3">
+      <ViewOnboarding
+        viewId="tags"
+        title="Living Tags"
+        lede="Write tag rules in a small expression language. NewAmp keeps applying them as you listen — new tracks get tagged automatically, old tracks re-tag when their stats change."
+        bullets={[
+          'Tags are derived, not stored on disk: change a rule and the whole library re-tags instantly.',
+          'Rules see audio DNA (bpm, energy, brightness), playback history, ratings, and existing tags.',
+          'Example: tag(late_night) when dna.energy < 0.35 and listenedAt.hour > 22.',
+          'Tagged tracks show up in their own filters in Library and feed Mixes/Discover.',
+        ]}
+        cta="Pick a starter template below to see the syntax. Save the rule to make it permanent."
+      />
       <header className="flex items-baseline gap-3">
         <h2 className="text-[14px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
           Living Tags

@@ -66,6 +66,8 @@ export function NowPlayingView(): JSX.Element {
   const setAutoDjEnabled = usePlayerStore((s) => s.setAutoDjEnabled);
   const setAutoDjSmartRuleId = usePlayerStore((s) => s.setAutoDjSmartRuleId);
   const setView = usePlayerStore((s) => s.setView);
+  const navigateToArtist = usePlayerStore((s) => s.navigateToArtist);
+  const navigateToAlbum = usePlayerStore((s) => s.navigateToAlbum);
   const settings = usePlayerStore((s) => s.settings);
 
   const [lyrics, setLyrics] = useState<{ plain?: string | null; lines: LrcLine[] | null }>(
@@ -533,6 +535,8 @@ export function NowPlayingView(): JSX.Element {
             codecHint={codecHint}
             artistHref={wikipediaSearchUrl(musicEntitySearchText(current.artist, 'musician'))}
             albumHref={current.album ? wikipediaSearchUrl(musicEntitySearchText(current.artist, current.album, 'album')) : null}
+            navigateToArtist={navigateToArtist}
+            navigateToAlbum={navigateToAlbum}
           />
 
           <div
@@ -735,6 +739,8 @@ function TrackInfoHeader({
   codecHint,
   artistHref,
   albumHref,
+  navigateToArtist,
+  navigateToAlbum,
 }: {
   current: Track;
   onLove: () => void;
@@ -748,6 +754,8 @@ function TrackInfoHeader({
   codecHint: string;
   artistHref: string;
   albumHref: string | null;
+  navigateToArtist: (name: string) => void;
+  navigateToAlbum: (album: string, albumArtist: string) => void;
 }): JSX.Element {
   return (
     <div
@@ -775,30 +783,53 @@ function TrackInfoHeader({
           {current.title}
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]">
+          {/* Artist/album are in-app navigation actions: clicking jumps to
+              the Artists or Albums view filtered to that entity. The
+              external Wikipedia search now lives behind the small ↗ icons
+              next to each name so the dominant click still routes the user
+              into their own library context. */}
+          <button
+            type="button"
+            data-newamp-now-playing-artist-nav
+            className="truncate underline-offset-2 hover:underline"
+            style={{ color: 'var(--accent)', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
+            onClick={() => navigateToArtist(current.artist)}
+            title={`Show all ${current.artist} albums in your library`}
+          >
+            {current.artist}
+          </button>
           <a
             href={artistHref}
             target="_blank"
             rel="noreferrer"
             data-newamp-now-playing-artist-link
-            className="truncate"
-            style={{ color: 'var(--accent)' }}
-            title={`Open Wikipedia search for ${current.artist}`}
+            style={{ color: 'var(--ink-2)', fontSize: '11px', textDecoration: 'none' }}
+            title={`Open Wikipedia for ${current.artist}`}
           >
-            {current.artist}
+            ↗
           </a>
           {current.album ? (
             <>
               <span style={{ color: 'var(--muted)' }}>/</span>
+              <button
+                type="button"
+                data-newamp-now-playing-album-nav
+                className="truncate underline-offset-2 hover:underline"
+                style={{ color: 'var(--ink-2)', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
+                onClick={() => navigateToAlbum(current.album, current.albumArtist || current.artist)}
+                title={`Show ${current.album} in Albums`}
+              >
+                {current.album}
+              </button>
               <a
                 href={albumHref ?? wikipediaSearchUrl(musicEntitySearchText(current.artist, current.album, 'album'))}
                 target="_blank"
                 rel="noreferrer"
                 data-newamp-now-playing-album-link
-                className="truncate"
-                style={{ color: 'var(--ink-2)' }}
-                title={`Open Wikipedia search for ${current.album}`}
+                style={{ color: 'var(--ink-2)', fontSize: '11px', textDecoration: 'none' }}
+                title={`Open Wikipedia for ${current.album}`}
               >
-                {current.album}
+                ↗
               </a>
             </>
           ) : null}
@@ -1380,6 +1411,7 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
   const [albumTracks, setAlbumTracks] = useState<Track[]>([]);
   const [sameYearAlbums, setSameYearAlbums] = useState<{ album: string; albumArtist: string; year: number | null }[]>([]);
   const [fact, setFact] = useState<AlbumFact | null>(null);
+  const [artistFallback, setArtistFallback] = useState<ArtistFact | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'none' | 'ok'>('idle');
 
   useEffect(() => {
@@ -1389,6 +1421,7 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
       setAlbumTracks([]);
       setSameYearAlbums([]);
       setFact(null);
+      setArtistFallback(null);
       setStatus('idle');
       return;
     }
@@ -1424,6 +1457,15 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
           .map((item) => ({ album: item.album, albumArtist: item.albumArtist, year: item.year })),
       );
       setFact(nextFact);
+      // If Wikipedia couldn't locate the specific album, fall back to the
+      // artist's Wikipedia page so the user still gets real context instead
+      // of an empty panel. This is what makes the album tab non-useless.
+      if (!nextFact && albumArtist) {
+        const artistInfo = await fetchArtistFacts(albumArtist, ctrl.signal).catch(() => null);
+        if (!ctrl.signal.aborted) setArtistFallback(artistInfo);
+      } else {
+        setArtistFallback(null);
+      }
       setStatus(nextFact ? 'ok' : 'none');
     })();
     return () => ctrl.abort();
@@ -1439,7 +1481,13 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
   const scoreValues = albumTracks
     .map((item) => item.ratingScore ?? item.rating * 20)
     .filter((score) => Number.isFinite(score) && score > 0);
-  const averageScore = scoreValues.length
+  // Only treat the per-track average as an album-level signal when the user
+  // has actually rated most of the album. A single rated song shouldn't make
+  // the "Library signal" line look like the album received a rating.
+  const ratedCount = scoreValues.length;
+  const totalAlbumTracks = albumTracks.length || 0;
+  const meaningfulSample = ratedCount >= 3 || (totalAlbumTracks > 0 && ratedCount / totalAlbumTracks >= 0.5);
+  const averageScore = meaningfulSample
     ? Math.round(scoreValues.reduce((sum, score) => sum + score, 0) / scoreValues.length)
     : null;
   const lovedCount = albumTracks.filter((item) => item.loved).length;
@@ -1476,6 +1524,20 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
             <small className="album-context-summary">{fact.summary}</small>
           </span>
         </a>
+      ) : artistFallback ? (
+        <a href={artistFallback.url} target="_blank" rel="noreferrer" className="album-context-story" data-newamp-album-context-artist-fallback>
+          {artistFallback.imageUrl && <img src={artistFallback.imageUrl} alt={artistFallback.title} draggable={false} />}
+          <span>
+            <strong>About {artistFallback.title}</strong>
+            {artistFallback.description && <em>{artistFallback.description}</em>}
+            <small className="album-context-summary">
+              {artistFallback.summary}
+            </small>
+            <small className="album-context-summary" style={{ opacity: 0.7, fontStyle: 'italic' }}>
+              No Wikipedia page for this album yet — showing the artist instead.
+            </small>
+          </span>
+        </a>
       ) : (
         <div className="album-context-empty">
           {status === 'loading'
@@ -1506,7 +1568,16 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
       <div className="album-context-insights" data-newamp-album-context-insights>
         <AlbumInsight label="Album shape" value={albumShape} />
         <AlbumInsight label="Bookends" value={opener && closer ? `${opener.title} / ${closer.title}` : 'Track order is not tagged yet.'} />
-        <AlbumInsight label="Library signal" value={`${averageScore ?? '--'}/100 avg / ${lovedCount} loved / ${totalPlays.toLocaleString()} plays`} />
+        <AlbumInsight
+          label="Your album signal"
+          value={
+            averageScore != null
+              ? `${averageScore}/100 avg across ${ratedCount} rated tracks / ${lovedCount} loved / ${totalPlays.toLocaleString()} plays`
+              : ratedCount > 0
+                ? `${ratedCount} of ${totalAlbumTracks} tracks rated / ${lovedCount} loved / ${totalPlays.toLocaleString()} plays`
+                : `unrated / ${lovedCount} loved / ${totalPlays.toLocaleString()} plays`
+          }
+        />
         <AlbumInsight label="Longest cut" value={longestTrack ? `${longestTrack.title} (${formatTime(longestTrack.duration ?? 0)})` : 'Duration tags are missing.'} />
       </div>
 

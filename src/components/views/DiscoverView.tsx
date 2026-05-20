@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { formatDuration } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { TrackTable } from './LibraryView';
+import { ViewOnboarding } from '../ViewOnboarding';
 
 export function DiscoverView(): JSX.Element {
   const [surface, setSurface] = useState<DiscoverSurface | null>(null);
@@ -97,6 +98,18 @@ export function DiscoverView(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col" data-newamp-discover>
+      <ViewOnboarding
+        viewId="discover"
+        title="Discover · Living Library"
+        lede="A native mode that builds playable missions from your own listening history — no streaming required."
+        bullets={[
+          'New Download Radar surfaces tracks added to your library since the last session.',
+          'Forgotten Favorites resurfaces loved tracks that haven\'t played in a while.',
+          'Deep Album Run picks an album you should listen to end-to-end again.',
+          'Each card opens as a saveable playlist or jumps straight into Auto VJ.',
+        ]}
+        cta="Click PLAY MISSION on any card below to start. Save as Playlist to keep one."
+      />
       <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
         <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
           Living Library

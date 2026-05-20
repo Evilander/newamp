@@ -267,20 +267,23 @@
 }
 
 /* === Terminal: beige CRT shell with green phosphor glass === */
+/* Ink/ink-2/muted are darkened so body and secondary text are legible against
+   the beige panel. The previous values failed WCAG AA contrast against
+   #c4c1aa, making the whole theme read as "unreadable" in practice. */
 [data-theme='terminal'] {
   --bg: #1c2018;
   --panel: #c4c1aa;
   --panel-2: #d8d4ba;
   --panel-3: #9a9a83;
-  --line: #5f6555;
-  --accent: #59ff85;
-  --accent-dim: #18a846;
+  --line: #3f4538;
+  --accent: #1c8a3f;
+  --accent-dim: #0e6128;
   --accent-glow: rgba(89, 255, 133, 0.45);
-  --warn: #b86f17;
-  --error: #b93434;
-  --ink: #182218;
-  --ink-2: #3c4c3d;
-  --muted: #6a705f;
+  --warn: #8a4a02;
+  --error: #8b1818;
+  --ink: #0c130c;
+  --ink-2: #1f2c20;
+  --muted: #3a4034;
   --display-bg: #041006;
   --display-fg: #59ff85;
   --titlebar: linear-gradient(180deg, #ded9be 0%, #b8b49d 50%, #7a7a68 100%);
@@ -1238,9 +1241,29 @@ input[type='range'].nslider.eq-slider {
   width: 100%;
   height: 180px;
   object-fit: cover;
+  object-position: center;
   border-radius: 6px;
   border: 1px solid var(--accent-dim);
   box-shadow: 0 0 16px var(--accent-glow);
+}
+/* Pan animation so a cropped square cover slowly reveals top-to-bottom — the
+   jukebox + TV both have non-square viewports that hide pieces of square art
+   when set to object-fit:cover. The pan loops over ~14s so the whole image is
+   eventually seen without feeling busy. */
+.deck-jb-art-pan,
+.deck-tv-art-pan {
+  animation: newamp-deck-art-pan 14s ease-in-out infinite alternate;
+}
+@keyframes newamp-deck-art-pan {
+  0% { object-position: center top; }
+  50% { object-position: center center; }
+  100% { object-position: center bottom; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .deck-jb-art-pan,
+  .deck-tv-art-pan {
+    animation: none;
+  }
 }
 .deck-jb-art-fallback {
   height: 180px;
@@ -2114,6 +2137,36 @@ input[type='range'].nslider.eq-slider {
     radial-gradient(90% 72% at 50% 45%, transparent 54%, rgba(0,0,0,0.46) 100%);
   mix-blend-mode: screen;
   opacity: 0.42;
+}
+/* TV static overlay — animated noise that's stronger when no track is tuned
+   in, lighter (just a subtle film grain) during playback. The static uses a
+   tiled SVG noise pattern so it works without an asset file and stays crisp
+   at any DPR. */
+.deck-tv-static {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='128' height='128'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.95' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.7'/></svg>");
+  background-size: 128px 128px;
+  opacity: 0.06;
+  animation: newamp-tv-static 0.18s steps(4) infinite;
+  mix-blend-mode: screen;
+}
+.deck-tv-screen[data-newamp-tv-state="static"] .deck-tv-static {
+  opacity: 0.55;
+}
+@keyframes newamp-tv-static {
+  0% { background-position: 0 0; }
+  25% { background-position: 32px -16px; }
+  50% { background-position: -16px 24px; }
+  75% { background-position: 8px 56px; }
+  100% { background-position: -24px 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .deck-tv-static {
+    animation: none;
+  }
 }
 .deck-tv-console {
   display: flex;
@@ -3809,11 +3862,12 @@ input[type='range'].nslider.eq-slider {
 }
 .fullscreen-viz-hover-meter-track {
   position: relative;
-  width: 18px;
-  height: 92px;
+  width: 22px;
+  height: 132px;
   overflow: hidden;
   background: rgba(255,255,255,0.08);
   border: 1px solid rgba(255,255,255,0.18);
+  cursor: ns-resize;
 }
 .fullscreen-viz-hover-meter-track span {
   position: absolute;
@@ -3822,6 +3876,190 @@ input[type='range'].nslider.eq-slider {
   background:
     linear-gradient(180deg, rgba(255,59,106,0.95), rgba(255,176,0,0.95) 36%, var(--accent) 100%);
   box-shadow: 0 0 16px var(--accent-glow);
+  pointer-events: none;
+}
+.fullscreen-viz-hover-meter.is-dim {
+  opacity: 0.18;
+}
+/* Vertical volume slider using native writing-mode + appearance:slider-vertical.
+   The previous rotate(-90deg) approach was getting clipped by the track's
+   overflow:hidden (needed for the RMS fill bar), so the input rendered but
+   pointer events landed outside the clipped region. writing-mode:vertical-lr
+   gives a true vertical slider with native pointer hit-testing. */
+.fullscreen-viz-hover-meter-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  cursor: ns-resize;
+  z-index: 4;
+  appearance: slider-vertical;
+  -webkit-appearance: slider-vertical;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  opacity: 0.55;
+}
+.fullscreen-viz-hover-meter-input:hover,
+.fullscreen-viz-hover-meter-input:focus {
+  opacity: 1;
+  outline: none;
+}
+.fullscreen-viz-hover-meter-input::-webkit-slider-runnable-track {
+  width: 22px;
+  background: transparent;
+  border: none;
+}
+.fullscreen-viz-hover-meter-input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 24px;
+  height: 12px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.95);
+  border: 1px solid rgba(0,0,0,0.6);
+  box-shadow: 0 0 8px rgba(255,255,255,0.45);
+  cursor: ns-resize;
+}
+.fullscreen-viz-hover-meter-input::-moz-range-track {
+  width: 22px;
+  background: transparent;
+  border: none;
+}
+.fullscreen-viz-hover-meter-input::-moz-range-thumb {
+  width: 24px;
+  height: 12px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.95);
+  border: 1px solid rgba(0,0,0,0.6);
+  box-shadow: 0 0 8px rgba(255,255,255,0.45);
+  cursor: ns-resize;
+}
+/* Let the track wrapper show overflow so the input thumb can extend past
+   the bar edges and remain hit-testable. The fill bar (.span) is constrained
+   inside via its absolute positioning, not via overflow:hidden on the parent. */
+.fullscreen-viz-hover-meter-track {
+  overflow: visible;
+}
+.fullscreen-viz-hover-meter-track span {
+  pointer-events: none;
+}
+
+/* Living Tag chips inside the liner notes panel — shows the user how their
+   DSL rules have classified the current track. Replaces the old static
+   "NewAmp Notes" filler that conveyed no real information. */
+.liner-notes-tags {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px dashed var(--line);
+}
+.liner-notes-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.liner-notes-tag-list li {
+  display: inline-flex;
+}
+.liner-notes-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel-2));
+  border: 1px solid var(--accent-dim);
+  border-radius: 2px;
+}
+.liner-notes-tag-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* View onboarding cards — first-visit explainers for Discover, Mixes,
+   Living Tags, and Sonic Atlas. Sit at the top of the view, can be
+   dismissed permanently, and use the panel chrome so they read as part of
+   NewAmp rather than a modal. */
+.view-onboarding {
+  margin: 12px 14px 0;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, var(--panel)) 0%, var(--panel-2) 60%);
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius-card);
+  box-shadow: 0 0 0 1px var(--bevel-light) inset, 0 0 16px var(--accent-glow);
+  color: var(--ink);
+}
+.view-onboarding-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.view-onboarding-kicker {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.view-onboarding-title {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--ink);
+}
+.view-onboarding-lede {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  margin: 0;
+}
+.view-onboarding-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.view-onboarding-list li {
+  position: relative;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.view-onboarding-list li::before {
+  content: '▸';
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--accent);
+  font-weight: 700;
+}
+.view-onboarding-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.view-onboarding-cta {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--muted);
 }
 
 /* Compact deck / windowshade mode */

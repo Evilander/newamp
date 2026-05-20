@@ -4,10 +4,12 @@ import {
   atlasPointColor,
   buildSonicAtlas,
   nearestAtlasPoint,
+  nearestAtlasPoints,
   type AtlasPoint,
   type SonicAtlas,
 } from '@shared/sonic-atlas';
 import { api } from '../../lib/api';
+import { ViewOnboarding } from '../ViewOnboarding';
 import { usePlayerStore } from '../../store/usePlayerStore';
 
 interface ViewTransform {
@@ -29,6 +31,9 @@ export function AtlasView(): JSX.Element {
   const dragRef = useRef<{ startX: number; startY: number; startTx: number; startTy: number } | null>(null);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
+  const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
+  const [selected, setSelected] = useState<AtlasPoint | null>(null);
+  const [clusterSize, setClusterSize] = useState(12);
 
   const reload = useCallback(async () => {
     setStatus('Loading library DNA…');
@@ -102,7 +107,29 @@ export function AtlasView(): JSX.Element {
       ctx.arc(hx, hy, r + 3, 0, Math.PI * 2);
       ctx.stroke();
     }
-  }, [atlas, transform, hovered]);
+    if (selected) {
+      const sx = (selected.x * w - transform.x) * transform.scale + transform.x;
+      const sy = ((1 - selected.y) * h - transform.y) * transform.scale + transform.y;
+      // Draw a halo + crosshair around the pinned point so the user can find
+      // it again after panning. Smaller circle uses the warn color so it
+      // visually separates from the hover indicator.
+      ctx.strokeStyle = readVar('--warn', '#ffb800');
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r + 7, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(sx - r - 12, sy);
+      ctx.lineTo(sx - r - 4, sy);
+      ctx.moveTo(sx + r + 4, sy);
+      ctx.lineTo(sx + r + 12, sy);
+      ctx.moveTo(sx, sy - r - 12);
+      ctx.lineTo(sx, sy - r - 4);
+      ctx.moveTo(sx, sy + r + 4);
+      ctx.lineTo(sx, sy + r + 12);
+      ctx.stroke();
+    }
+  }, [atlas, transform, hovered, selected]);
 
   // Re-render on resize.
   useEffect(() => {
@@ -162,6 +189,7 @@ export function AtlasView(): JSX.Element {
     if (!atlasCoord) return;
     const hit = nearestAtlasPoint(atlas, atlasCoord.x, atlasCoord.y, 0.02 / transform.scale);
     if (!hit) return;
+    setSelected(hit);
     const track = trackIndex.get(hit.id) ?? (await api.getTrack(hit.id));
     if (!track) return;
     if (!trackIndex.has(hit.id)) setTrackIndex((prev) => new Map(prev).set(hit.id, track));
@@ -170,6 +198,34 @@ export function AtlasView(): JSX.Element {
     } else {
       await playQueue([track], 0);
     }
+  }
+
+  // Region play: takes the N atlas points nearest the selected (or hovered)
+  // point in 2D projection space, hydrates them into Tracks, and plays them
+  // as a journey across the sonic neighborhood. This is the unique Atlas
+  // value-add — exploring by sound rather than by name.
+  async function playRegion(center: AtlasPoint, count: number, mode: 'play' | 'queue' | 'next'): Promise<void> {
+    if (!atlas) return;
+    const points = nearestAtlasPoints(atlas, center.x, center.y, count);
+    if (!points.length) return;
+    const ids = points.map((p) => p.id);
+    const tracks = await api.getTracksByIds(ids);
+    if (!tracks.length) return;
+    // Preserve atlas-neighborhood order so the journey reads as a smooth
+    // walk through sound space.
+    const byId = new Map(tracks.map((t) => [t.id, t]));
+    const orderedTracks = ids
+      .map((id) => byId.get(id))
+      .filter((track): track is Track => track != null);
+    if (!orderedTracks.length) return;
+    setTrackIndex((prev) => {
+      const next = new Map(prev);
+      for (const track of orderedTracks) next.set(track.id, track);
+      return next;
+    });
+    if (mode === 'play') await playQueue(orderedTracks, 0);
+    else if (mode === 'next') queueTracksNext(orderedTracks);
+    else addTracksToQueue(orderedTracks);
   }
 
   function handleWheel(e: React.WheelEvent<HTMLCanvasElement>): void {
@@ -211,6 +267,17 @@ export function AtlasView(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col gap-3 p-3">
+      <ViewOnboarding
+        viewId="atlas"
+        title="Sonic Atlas"
+        lede="A 2D map of your whole library, projected from audio DNA. Tracks that sound alike cluster together — you can wander into regions instead of searching by name."
+        bullets={[
+          'Each dot is a track. Color encodes brightness + energy; cluster density encodes shared sound.',
+          'Click any point to play that track immediately and let neighboring tracks queue up.',
+          'Drag to pan. Scroll wheel to zoom. Hover for the title, artist, and DNA breakdown.',
+          'Add new music and the map updates next time you analyze DNA from Settings.',
+        ]}
+      />
       <header className="flex items-baseline gap-3">
         <h2 className="text-[14px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
           Sonic Atlas
@@ -261,6 +328,13 @@ export function AtlasView(): JSX.Element {
               {hoveredTrack?.title ?? `Track #${hovered.id}`}
             </div>
             <div style={{ color: 'var(--ink-2)' }}>{hoveredTrack?.artist ?? 'loading…'}</div>
+            {hoveredTrack?.album ? (
+              <div style={{ color: 'var(--muted)', fontSize: '10px' }}>
+                {hoveredTrack.album}
+                {hoveredTrack.year ? ` · ${hoveredTrack.year}` : ''}
+                {hoveredTrack.genre ? ` · ${hoveredTrack.genre}` : ''}
+              </div>
+            ) : null}
             <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 tabular-nums" style={{ color: 'var(--muted)' }}>
               <span>brightness</span><span className="text-right">{hovered.dna.brightness.toFixed(2)}</span>
               <span>energy</span><span className="text-right">{hovered.dna.rms.toFixed(2)}</span>
@@ -272,9 +346,47 @@ export function AtlasView(): JSX.Element {
           </div>
         )}
       </div>
-      <footer className="flex items-center gap-3 bevel-out p-2 text-[11px]" style={{ background: 'var(--panel)', color: 'var(--muted)' }}>
+      <footer className="flex flex-wrap items-center gap-3 bevel-out p-2 text-[11px]" style={{ background: 'var(--panel)', color: 'var(--muted)' }}>
         <span>{summary}</span>
         <span style={{ color: status ? 'var(--ink-2)' : 'var(--muted)' }}>{status ?? '—'}</span>
+        <div className="flex items-center gap-2" data-newamp-atlas-region-controls>
+          <span style={{ color: 'var(--ink-2)' }}>Region from {selected || hovered ? 'pinned point' : 'center'}:</span>
+          <select
+            className="bevel-in px-1 py-[2px] text-[11px]"
+            value={clusterSize}
+            onChange={(event) => setClusterSize(Number(event.target.value))}
+            title="How many neighboring tracks to play"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          >
+            <option value={6}>6 tracks</option>
+            <option value={12}>12 tracks</option>
+            <option value={24}>24 tracks</option>
+            <option value={48}>48 tracks</option>
+          </select>
+          <button
+            className="pxbtn is-active"
+            data-newamp-atlas-play-region
+            onClick={() => {
+              const center = selected ?? hovered ?? atlas?.points[Math.floor((atlas.points.length || 1) / 2)] ?? null;
+              if (center) void playRegion(center, clusterSize, 'play');
+            }}
+            disabled={!atlas}
+          >
+            ▶ Play region
+          </button>
+          <button
+            className="pxbtn"
+            data-newamp-atlas-queue-region
+            onClick={() => {
+              const center = selected ?? hovered ?? null;
+              if (center) void playRegion(center, clusterSize, 'next');
+            }}
+            disabled={!atlas || (!selected && !hovered)}
+            title="Queue this region after the current track"
+          >
+            QUEUE NEXT
+          </button>
+        </div>
         <span className="ml-auto" style={{ color: 'var(--muted)' }}>
           Zoom {transform.scale.toFixed(2)}× · Drag to pan · Wheel to zoom · Click = play, Shift-click = queue next
         </span>

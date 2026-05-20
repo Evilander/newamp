@@ -51,6 +51,7 @@ import type {
   RecoveryEvent,
 } from '../shared/types.js';
 import { dnaCosineSimilarity, isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
+import { seedVibeSimilarity } from '../shared/seed-vibe.js';
 import {
   buildEvalEnvironment,
   evaluateRulesForTrack,
@@ -2168,7 +2169,7 @@ export class LibraryStore {
       where.push('genre IS NOT NULL AND lower(genre) LIKE ?');
       params.push(`%${genreQuery.toLowerCase()}%`);
     }
-    const candidates = this.many<RawRow>(
+    let candidates = this.many<RawRow>(
       `SELECT * FROM tracks
         WHERE ${where.join(' AND ')}
         ORDER BY
@@ -2181,9 +2182,24 @@ export class LibraryStore {
       params,
     ).map(rowToTrack);
 
-    if (input.seedTrackId && !candidates.some((track) => track.id === input.seedTrackId)) {
-      const seed = this.getTrack(input.seedTrackId);
-      if (seed && !seed.avoidAutoPlay) candidates.unshift(seed);
+    const seed = input.seedTrackId ? this.getTrack(input.seedTrackId) : null;
+    if (seed && !candidates.some((track) => track.id === seed.id) && !seed.avoidAutoPlay) {
+      candidates.unshift(seed);
+    }
+
+    if (seed) {
+      const seedDnaIndex = this.buildDnaIndex();
+      const seedDna = seedDnaIndex.get(seed.id) ?? null;
+      const getDna = (id: number): TrackDna | null => seedDnaIndex.get(id) ?? null;
+      const scored = candidates
+        .map((track) => ({
+          track,
+          vibe: track.id === seed.id ? 1 : seedVibeSimilarity(track, { seed, seedDna, getDna }).total,
+        }))
+        .sort((a, b) => b.vibe - a.vibe);
+      const targetCount = Math.max(80, Math.min(800, normalizeMixCount(input.count) * 12));
+      const trimmed = scored.slice(0, targetCount).map((entry) => entry.track);
+      candidates = trimmed.length ? trimmed : candidates;
     }
 
     return buildHarmonicMixSequence(candidates, input);
@@ -2207,12 +2223,34 @@ export class LibraryStore {
 
     const opener = seed && isTasteMixCandidate(seed) ? seed : null;
     const context = buildTasteContext(unique, opener);
+
+    // When the user has a seed track, the mix must cohere around that track's
+    // vibe. Compute per-candidate seed similarity (DNA + genre + era + artist),
+    // then blend it as a strong multiplier on the taste score so off-vibe
+    // tracks (different genre / era / no DNA match) drop out even if they're
+    // loved heavy-rotation favorites.
+    let seedDnaIndex: Map<number, TrackDna> | null = null;
+    let seedDna: TrackDna | null = null;
+    if (opener) {
+      seedDnaIndex = this.buildDnaIndex();
+      seedDna = seedDnaIndex.get(opener.id) ?? null;
+    }
+    const getDna = (id: number): TrackDna | null =>
+      seedDnaIndex ? seedDnaIndex.get(id) ?? null : null;
+
     const scored = unique
       .filter((track) => track.id !== opener?.id)
-      .map((track) => ({
-        track,
-        score: scoreTasteTrack(track, context) + stableJitter(track.id),
-      }))
+      .map((track) => {
+        const base = scoreTasteTrack(track, context) + stableJitter(track.id);
+        if (!opener) return { track, score: base };
+        const vibe = seedVibeSimilarity(track, { seed: opener, seedDna, getDna }).total;
+        // Multiplicative gate: a track with vibe=0 still gets 15% of its taste
+        // score (preserves some serendipity), but a vibe=1 track gets full
+        // credit. This means heavy-rotation off-vibe tracks fall behind
+        // moderately-loved on-vibe tracks.
+        const gated = base * (0.15 + 0.85 * vibe);
+        return { track, score: gated };
+      })
       .sort((a, b) =>
         b.score - a.score ||
         (a.track.artist || '').localeCompare(b.track.artist || '') ||
@@ -2963,9 +3001,14 @@ function albumSortOrder(sort: string | undefined, randomSeed: number | undefined
       return 'track_count DESC, duration DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
     case 'random': {
       const seed = normalizeAlbumRandomSeed(randomSeed);
+      // Multi-term mix: XOR + multiplicative scramble so two seeds that differ
+      // by ~1ms still produce a wildly different per-album sort key. The plain
+      // polynomial used to occasionally land in near-equal orderings when two
+      // close Date.now() values shared `% 991` or `% 7919` residues.
       const linear = 1_103_515_245 + (seed % 7_919);
       const curve = 17 + (seed % 991);
-      return `ABS(((MIN(id) * MIN(id) * ${curve}) + (MIN(id) * ${linear}) + ${seed}) % 2147483647), album_artist COLLATE NOCASE, album COLLATE NOCASE`;
+      const xorMask = seed & 0x7fffffff;
+      return `ABS((((MIN(id) ^ ${xorMask}) * (MIN(id) * ${curve} + ${linear})) + ${seed}) % 2147483647), MAX(id) % 9973, album_artist COLLATE NOCASE, album COLLATE NOCASE`;
     }
     case 'artist':
     default:
