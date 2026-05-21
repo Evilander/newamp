@@ -3,6 +3,20 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.5] - 2026-05-20
+
+Hotfix for a 1.5.4 regression that hid every album.
+
+### Fixed — Albums view showed nothing
+
+The 1.5.4 album-rating work added a `LEFT JOIN album_ratings` to `getAlbums`. The join made `album` and `album_artist` exist on **two** tables, so every existing `WHERE` clause (`album != ''`, `lower(album) LIKE ?`, `lower(COALESCE(NULLIF(album_artist,''), artist))`) became an ambiguous-column reference and SQLite threw on every call. `AlbumsView`'s `.catch` silently swallowed the error and rendered an empty list — so the symptom looked like "library is empty" instead of "query is broken."
+
+Reverted to the unchanged aggregation query and now merge album ratings in via a single bulk `Map` lookup — same number of round trips, no join fragility.
+
+### Improved — getAlbums failures are now visible
+
+`AlbumsView`'s catch handler now logs the error to the console *and* shows the failure message in the scan-status banner. Future backend regressions will surface as a visible error message instead of looking like an empty library.
+
 ## [1.5.4] - 2026-05-20
 
 Live-feedback pass driven by playing the 1.5.3 build. Five user-reported issues from a single listening session, all fixed.
