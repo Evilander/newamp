@@ -52,6 +52,20 @@ assert.equal(
   'true',
   `butterchurn.createVisualizer must succeed and tag the canvas — got milkdropMounted=${result.milkdropMounted}`,
 );
+// Liveness check: mounted=true is set BEFORE the render loop runs.
+// 1.5.5 shipped a broken render loop that left mounted='true' but never
+// painted a frame, AND 1.5.3 shipped a graph-culled analyser that left
+// butterchurn reading zeros. The smoke must distinguish "really alive"
+// from "mounted but inert". milkdropAlive is true if EITHER butterchurn
+// produces non-zero pixels OR the engine FFT sum is non-zero across
+// the sample window. Software WebGL drops shader paint so pixels stay
+// zero in the smoke environment, but the analyserFft samples catch the
+// 1.5.3-class culling regression directly.
+assert.equal(
+  result.milkdropAlive,
+  true,
+  `butterchurn render loop OR engine FFT must show liveness — pixels=${JSON.stringify(result.milkdropFrameSamples)} fftSamples=${JSON.stringify(result.analyserFftSamples)}`,
+);
 assert.ok(
   result.mercuryRender?.litSamples > 0,
   `Liquid Mercury should render a nonblank frame — was ${JSON.stringify(result.mercuryRender)}`,
@@ -85,7 +99,10 @@ async function createFixture() {
     '-f',
     'lavfi',
     '-i',
-    'sine=frequency=880:duration=4.2',
+    // 30s of 880Hz sine. Was 4.2s in 1.5.6 which ended well before the
+    // milkdrop sampling block could read FFT bytes off the analyser —
+    // long enough now that the analyserFftSum check still sees signal.
+    'sine=frequency=880:duration=30',
     '-metadata',
     'title=Visualizer Smoke',
     '-metadata',

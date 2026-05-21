@@ -198,12 +198,8 @@ export function Visualizer({
               /* user gesture required — render will pick up when audio plays */
             }
           }
-          // Mesh size dominates butterchurn's per-vertex cost. 32×24 (= 768
-          // verts) is the default in upstream butterchurn examples and is
-          // what every Milkdrop reference plays smoothly. The 48×36 mesh we
-          // were using was 2.25× more expensive per frame and caused the
-          // post-blend choppiness Tyler saw on heavier presets — butterchurn
-          // pays the mesh cost for *both* presets during the blend window.
+          // 32×24 = upstream butterchurn default; 48×36 was 2.25× per-vertex
+          // cost during preset blend (renders both presets simultaneously).
           visualizer = butterchurn.createVisualizer(engine.ctx, butterCanvas, {
             width: lastW,
             height: lastH,
@@ -278,10 +274,17 @@ export function Visualizer({
         try {
           visualizer?.disconnectAudio(engine.visualizerNode);
         } catch (err) {
-          // Expected: double-disconnect after rapid preset switches when the
-          // visualizer was never fully wired. Other errors are worth knowing
-          // about (graph corruption, disposed analyser).
-          console.warn('[newamp] butterchurn disconnectAudio failed (ok during preset thrash):', err instanceof Error ? err.message : err);
+          // Web Audio throws InvalidAccessError / "not connected" when a
+          // node was never wired or already disconnected — that's the
+          // benign double-disconnect we expect during rapid preset
+          // thrash. Anything else (graph corruption, disposed analyser,
+          // closed AudioContext) is a real problem and must not be
+          // logged at the same level as the noise.
+          const msg = err instanceof Error ? err.message : String(err);
+          const isBenignDoubleDisconnect = /InvalidAccessError|not connected/i.test(msg);
+          if (!isBenignDoubleDisconnect) {
+            console.error('[newamp] butterchurn disconnectAudio: unexpected graph error', err);
+          }
         }
       };
     }

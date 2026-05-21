@@ -170,7 +170,7 @@ library.upsertTracks([
     art: null,
   },
 ]);
-const fallbackBorrower = library.getAlbumTracks('Fallback Album', 'Fallback Artist').find((track) => track.trackNo === 2);
+const fallbackBorrower = library.getAlbumTracks('Fallback Artist', 'Fallback Album').find((track) => track.trackNo === 2);
 assert.ok(fallbackBorrower, 'fallback fixture should include the no-art album track');
 assert.equal(fallbackBorrower.hasArt, 0, 'fallback borrower should not claim embedded art');
 assert.equal(library.getArt(fallbackBorrower.id)?.data.byteLength, imageBytes.byteLength, 'track art protocol should fall back to another track on the same album');

@@ -25,7 +25,7 @@ try {
   const pathSearch = library.getTracks({ search: 'path:"OK Computer"', limit: 10, offset: 0 });
   assert.equal(pathSearch.length, 2, 'power-search path filters should support quick library narrowing');
 
-  const albumTracks = library.getAlbumTracks('OK Computer', 'Radiohead');
+  const albumTracks = library.getAlbumTracks('Radiohead', 'OK Computer');
   assert.equal(albumTracks.length, 2, 'quick palette album results should be able to launch album tracks');
   const albumResults = library.getAlbums({ search: 'computer', limit: 4 });
   assert.equal(albumResults.length, 1, 'quick palette album search should filter in the catalog layer');

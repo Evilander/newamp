@@ -923,40 +923,76 @@ function TrackInfoHeader({
  * Now Playing header. Loads the stored album rating from the library on
  * track change, and writes back to album_ratings (NOT to the track table)
  * so the album score and the per-song scores stay independent.
+ *
+ * Album-artist fallback: a track with empty `albumArtist` tag but a valid
+ * `artist` still appears in AlbumsView via the SQL `COALESCE(NULLIF(...))`
+ * grouping. Mirror that fallback here so those albums can also be rated.
  */
 function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
   const [albumRating, setAlbumRating] = useState<{ rating: number; ratingScore: number | null } | null>(null);
-  const albumKey = `${track.albumArtist}|${track.album}`;
+  const writeGenRef = useRef(0);
+  // Mirror the SQL `COALESCE(NULLIF(album_artist,''), artist)` fallback so a
+  // track tagged with an Artist but empty AlbumArtist can still be rated.
+  const ratingArtist = track.albumArtist || track.artist;
+  const albumKey = `${ratingArtist}|${track.album}`;
 
   useEffect(() => {
     let cancelled = false;
-    if (!track.album || !track.albumArtist) {
+    if (!track.album || !ratingArtist) {
       setAlbumRating(null);
       return;
     }
     void api
-      .getAlbumRating(track.albumArtist, track.album)
+      .getAlbumRating(ratingArtist, track.album)
       .then((row) => {
         if (cancelled) return;
         setAlbumRating(
           row ? { rating: row.rating, ratingScore: row.ratingScore } : { rating: 0, ratingScore: null },
         );
       })
-      .catch(() => {
-        if (!cancelled) setAlbumRating({ rating: 0, ratingScore: null });
+      .catch((err) => {
+        if (cancelled) return;
+        // Don't silently replace the prior value with 0/null — that's the
+        // 1.5.4-class anti-pattern where a transient IPC failure looked
+        // identical to "user never rated this album" and the next slider
+        // drag would silently overwrite the real stored rating. Keep the
+        // previous state and surface the failure in the console.
+        console.error('[newamp] getAlbumRating failed:', { albumKey, err });
+        setAlbumRating((prev) => prev ?? { rating: 0, ratingScore: null });
       });
     return () => {
       cancelled = true;
     };
-  }, [albumKey, track.album, track.albumArtist]);
+    // `albumKey` is a pure function of `ratingArtist` + `track.album` —
+    // listing the two raw deps too is redundant. ESLint exhaustive-deps
+    // wants the raw values; the derived key is sufficient because its
+    // string identity changes iff the raw deps change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [albumKey]);
 
-  if (!track.album || !track.albumArtist) return null;
+  if (!track.album || !ratingArtist) return null;
 
   async function handleChange(score: number | null): Promise<void> {
-    const updated = await api.setAlbumRatingScore(track.albumArtist, track.album, score);
-    setAlbumRating(
-      updated ? { rating: updated.rating, ratingScore: updated.ratingScore } : { rating: 0, ratingScore: null },
-    );
+    // Write-generation guard: a slow IPC followed by a fast track-skip
+    // must not let the previous track's resolved write overwrite the new
+    // track's displayed rating. Capture the gen + the (artist, album)
+    // pair at call time and bail if either has changed when the IPC
+    // resolves.
+    const myGen = ++writeGenRef.current;
+    const writeArtist = ratingArtist;
+    const writeAlbum = track.album;
+    try {
+      const updated = await api.setAlbumRatingScore(writeArtist, writeAlbum, score);
+      if (writeGenRef.current !== myGen) return;
+      if (writeArtist !== ratingArtist || writeAlbum !== track.album) return;
+      setAlbumRating(
+        updated ? { rating: updated.rating, ratingScore: updated.ratingScore } : { rating: 0, ratingScore: null },
+      );
+    } catch (err) {
+      console.error('[newamp] setAlbumRatingScore failed:', { writeArtist, writeAlbum, score, err });
+      // Leave the prior state in place so the user sees the value that
+      // is actually stored on disk, not a fake "cleared" zero.
+    }
   }
 
   return (
@@ -1484,7 +1520,7 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
     setStatus('loading');
     void (async () => {
       const [tracks, nextFact] = await Promise.all([
-        api.getAlbumTracks(album, albumArtist).catch(() => []),
+        api.getAlbumTracks(albumArtist, album).catch(() => []),
         fetchAlbumFacts(album, albumArtist, ctrl.signal).catch(() => null),
       ]);
       if (ctrl.signal.aborted) return;

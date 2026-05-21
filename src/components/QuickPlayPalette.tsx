@@ -545,7 +545,7 @@ async function playableTracksFor(item: PaletteItem): Promise<Track[]> {
   if (item.kind === 'track') return [item.track];
   if (item.kind === 'playlist') return api.getPlaylistTracks(item.playlist.id);
   if (item.kind === 'smart-rule') return api.runSmartPlaylistRule(item.rule.id);
-  if (item.kind === 'album') return api.getAlbumTracks(item.album.album, item.album.albumArtist);
+  if (item.kind === 'album') return api.getAlbumTracks(item.album.albumArtist, item.album.album);
   if (item.kind === 'artist') return api.getArtistTracks(item.artist.artist);
   return [];
 }
