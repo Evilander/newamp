@@ -178,10 +178,17 @@ export function AlbumsView(): JSX.Element {
         setAlbums(rows.slice(0, ALBUM_PAGE_SIZE));
         setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
       })
-      .catch(() => {
+      .catch((err) => {
+        // Don't silently swallow — a 1.5.4 LEFT JOIN regression made the
+        // SQL throw an "ambiguous column" error, this catch fired, and the
+        // UI showed an empty album list with no clue why. Surface the
+        // failure to the console and to the scan status banner so the next
+        // backend bug is visible instead of looking like an empty library.
         if (!cancelled) {
+          console.error('[newamp] getAlbums failed:', err);
           setAlbums([]);
           setHasMoreAlbums(false);
+          setScanStatus(`Couldn't load albums: ${err instanceof Error ? err.message : String(err)}`);
         }
       })
       .finally(() => {
