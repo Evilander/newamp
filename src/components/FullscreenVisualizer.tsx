@@ -154,6 +154,7 @@ export function FullscreenVisualizer(): JSX.Element {
   // cursor movement re-shows it for a few seconds before hiding again.
   const [cursorActive, setCursorActive] = useState(true);
   const levelMeterRef = useRef<HTMLSpanElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
   const activeIndex = Math.max(0, PRESETS.findIndex((p) => p.id === activePreset));
@@ -433,13 +434,18 @@ export function FullscreenVisualizer(): JSX.Element {
       const next = Math.max(0, Math.min(2, wheelVolumeRef.current + delta));
       void wheelSetVolumeRef.current(next);
     }
-    // Bind on the root visualizer element only — keeps the rest of the
-    // app's scroll behavior untouched.
-    const root = document.querySelector<HTMLElement>('[data-newamp-fullscreen-visualizer]');
+    // Bind on the root via ref — keeps the listener attached to the
+    // exact DOM node React owns instead of a CSS-selector lookup that
+    // can race against parent re-mounts.
+    const root = rootRef.current;
     if (!root) return;
     root.addEventListener('wheel', onWheel, { passive: false });
     return () => root.removeEventListener('wheel', onWheel);
-  }, [wheelVolumeRef, wheelSetVolumeRef]);
+    // useLatestRef returns a stable MutableRefObject — listing them in
+    // the deps array would never re-run the effect, so we omit them and
+    // let the closure read .current fresh on each wheel event.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // AutoVJ loop. Depend only on the stable handles (engine, autoVjEnabled);
   // read current preset / isPlaying / performance via refs so changing them
@@ -479,6 +485,7 @@ export function FullscreenVisualizer(): JSX.Element {
 
   return (
     <div
+      ref={rootRef}
       data-newamp-fullscreen-visualizer
       data-newamp-visualizer-preset={activePreset}
       data-newamp-visualizer-quality={quality}

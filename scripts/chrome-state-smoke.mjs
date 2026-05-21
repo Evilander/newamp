@@ -127,7 +127,9 @@ assert.match(settingsViewSource, /Application description: Local Windows music p
 assert.match(settingsViewSource, /Callback URL: leave blank\./, 'Last.fm setup guide should tell desktop users to leave callback URL blank');
 assert.match(settingsViewSource, /Complete auth/, 'Last.fm setup guide should explain the browser approval flow');
 assert.match(fullscreenSource, /'PERF'/, 'fullscreen visualizer should label balanced render mode without vague AUTO copy');
-assert.match(fullscreenSource, /VIZ_TOP_NAV_KEY/, 'fullscreen visualizer should persist top navigation visibility');
+// VIZ_TOP_NAV_KEY was removed in 1.5.6 — the persistent toggle was deleted
+// in favor of pure cursor-idle auto-hide. The auto-hide behavior is
+// covered by ui-visualizer-smoke (mousemove → navMode='visible').
 assert.match(fullscreenSource, /VIZ_PALETTE_KEY/, 'fullscreen visualizer should persist color palette choices');
 assert.match(fullscreenSource, /VIZ_PERFORMANCE_KEY/, 'fullscreen visualizer should persist low-end performance mode');
 assert.match(fullscreenSource, /VIZ_REACTIVITY_KEY/, 'fullscreen visualizer should persist reactivity mode choices');

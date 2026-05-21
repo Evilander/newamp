@@ -56,11 +56,6 @@ export function AlbumsView(): JSX.Element {
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
-  // setTrackRatingScore intentionally removed from the album-rating path.
-  // Earlier versions wrote the same score to every track in the album,
-  // which silently overwrote per-song user nuance. Album ratings now live
-  // in `album_ratings` (see electron/library.ts) and are independent of
-  // track ratings.
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
   const setFullscreenViz = usePlayerStore((s) => s.setFullscreenViz);
   const current = usePlayerStore((s) => s.current);
@@ -93,7 +88,7 @@ export function AlbumsView(): JSX.Element {
       let tracks: Track[] = [];
       let lookupFailed = false;
       try {
-        tracks = await api.getAlbumTracks(target.album, target.albumArtist);
+        tracks = await api.getAlbumTracks(target.albumArtist, target.album);
       } catch (err) {
         lookupFailed = true;
         setScanStatus(`Could not open ${target.album}: ${err instanceof Error ? err.message : 'unknown error'}. Click again to retry.`);
@@ -109,13 +104,29 @@ export function AlbumsView(): JSX.Element {
         }
         return;
       }
+      const albumArtist =
+        target.albumArtist || (tracks[0]?.albumArtist ?? tracks[0]?.artist ?? 'Unknown Artist');
+      // Hydrate the stored album rating so the AlbumsView slider shows the
+      // real value when the user lands on the album via pending navigation.
+      // Falls back to 0/null on lookup failure — the slider's fallback
+      // (selected.ratingScore ?? albumScore(tracks)) still displays a
+      // reasonable value from the per-track scores.
+      let albumRating: { rating: number; ratingScore: number | null } = { rating: 0, ratingScore: null };
+      try {
+        const stored = await api.getAlbumRating(albumArtist, target.album);
+        if (stored) albumRating = { rating: stored.rating, ratingScore: stored.ratingScore };
+      } catch (err) {
+        console.error('[newamp] getAlbumRating failed during pending navigation:', err);
+      }
       const albumSummary: AlbumSummary = {
         album: target.album,
-        albumArtist: target.albumArtist || (tracks[0]?.albumArtist ?? tracks[0]?.artist ?? 'Unknown Artist'),
+        albumArtist,
         year: tracks.find((t) => t.year)?.year ?? null,
         trackCount: tracks.length,
         duration: tracks.reduce((sum, t) => sum + (t.duration ?? 0), 0),
         artFromTrackId: tracks.find((t) => t.hasArt)?.id ?? null,
+        rating: albumRating.rating,
+        ratingScore: albumRating.ratingScore,
       };
       setSelected(albumSummary);
       setTracks(tracks);
@@ -202,7 +213,7 @@ export function AlbumsView(): JSX.Element {
   useEffect(() => {
     if (!selected) return;
     api
-      .getAlbumTracks(selected.album, selected.albumArtist)
+      .getAlbumTracks(selected.albumArtist, selected.album)
       .then(setTracks)
       .catch(() => undefined);
   }, [selected?.album, selected?.albumArtist]);
@@ -363,7 +374,18 @@ export function AlbumsView(): JSX.Element {
 
   async function setAlbumScore(score: number | null): Promise<void> {
     if (!selected) return;
-    const updated = await api.setAlbumRatingScore(selected.albumArtist, selected.album, score);
+    let updated;
+    try {
+      updated = await api.setAlbumRatingScore(selected.albumArtist, selected.album, score);
+    } catch (err) {
+      // Mirror the read-path catch hardening — surface the failure
+      // instead of letting "Rated X 75/100" lie about a write that never
+      // happened. No state mutation on failure, so the slider snaps back
+      // to the prior value on the next re-render.
+      console.error('[newamp] setAlbumRatingScore failed:', err);
+      setScanStatus(`Couldn't save album rating: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
     const nextRating = updated?.rating ?? 0;
     const nextScore = updated?.ratingScore ?? null;
     // Reflect the new album rating on both the selected AlbumSummary and

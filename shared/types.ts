@@ -917,7 +917,7 @@ export interface NewAmpAPI {
     folderPath: string,
     opts?: { recursive?: boolean; limit?: number; offset?: number },
   ) => Promise<number[]>;
-  getAlbumTracks: (album: string, albumArtist: string) => Promise<Track[]>;
+  getAlbumTracks: (albumArtist: string, album: string) => Promise<Track[]>;
   getArtistTracks: (artist: string) => Promise<Track[]>;
   getTrack: (id: number) => Promise<Track | null>;
   getTracksByIds: (ids: number[]) => Promise<Track[]>;
