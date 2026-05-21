@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "description": "A Winamp-inspired modern desktop music player for Windows and Linux. Your local library, your rules, no streaming required. Four UI shells, shape-changing deck skins, 0-200% volume with red-zone boost, 0-100 decimal track scoring, and a magazine-style home.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
