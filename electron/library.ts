@@ -1171,6 +1171,13 @@ export class LibraryStore {
     const havingSql = having.length ? `HAVING ${having.join(' AND ')}` : '';
     const orderSql = albumSortOrder(opts.sort, opts.randomSeed);
 
+    // NOTE: Don't JOIN album_ratings here. An earlier attempt at a LEFT
+    // JOIN broke listAlbums entirely: the WHERE clause references
+    // unqualified `album` / `album_artist` columns, which became ambiguous
+    // once both `tracks` and `album_ratings` carried them — SQLite raised
+    // "ambiguous column" on every call and zero rows came back. Instead,
+    // run the aggregation query unchanged and merge album ratings in via
+    // a single bulk lookup. Same number of round-trips, no JOIN fragility.
     const rows = this.many<{
       album: string;
       album_artist: string;
@@ -1178,38 +1185,54 @@ export class LibraryStore {
       track_count: number;
       duration: number;
       art_track: number | null;
-      album_rating: number | null;
-      album_rating_score: number | null;
     }>(
-      `SELECT t.album AS album,
-              COALESCE(NULLIF(t.album_artist,''), t.artist) AS album_artist,
-              MIN(t.year) AS year,
+      `SELECT album,
+              COALESCE(NULLIF(album_artist,''), artist) AS album_artist,
+              MIN(year) AS year,
               COUNT(*) AS track_count,
-              COALESCE(SUM(t.duration), 0) AS duration,
-              MIN(CASE WHEN t.has_art = 1 THEN t.id ELSE NULL END) AS art_track,
-              MAX(ar.rating)       AS album_rating,
-              MAX(ar.rating_score) AS album_rating_score
-         FROM tracks t
-         LEFT JOIN album_ratings ar
-           ON ar.album_artist = COALESCE(NULLIF(t.album_artist,''), t.artist) COLLATE NOCASE
-          AND ar.album        = t.album COLLATE NOCASE
+              COALESCE(SUM(duration), 0) AS duration,
+              MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) AS art_track
+         FROM tracks
         WHERE ${where.join(' AND ')}
-        GROUP BY t.album, COALESCE(NULLIF(t.album_artist,''), t.artist)
+        GROUP BY album, COALESCE(NULLIF(album_artist,''), artist)
         ${havingSql}
         ORDER BY ${orderSql}
         LIMIT ? OFFSET ?`,
       [...params, ...havingParams, limit, offset],
     );
-    return rows.map((r) => ({
-      album: r.album,
-      albumArtist: r.album_artist || 'Unknown Artist',
-      year: r.year,
-      trackCount: r.track_count,
-      duration: r.duration,
-      artFromTrackId: r.art_track,
-      rating: r.album_rating ?? 0,
-      ratingScore: r.album_rating_score,
-    }));
+
+    // One extra query for the whole rating set — typically tiny (only rated
+    // albums). Map-lookup on `lowercase(artist)|lowercase(album)` matches
+    // the schema's NOCASE collation without an extra string compare.
+    const ratingIndex = this.many<{
+      album_artist: string;
+      album: string;
+      rating: number;
+      rating_score: number | null;
+    }>(
+      `SELECT album_artist, album, rating, rating_score FROM album_ratings`,
+      [],
+    );
+    const ratingMap = new Map<string, { rating: number; ratingScore: number | null }>();
+    for (const row of ratingIndex) {
+      const key = `${row.album_artist.trim().toLowerCase()}|${row.album.trim().toLowerCase()}`;
+      ratingMap.set(key, { rating: row.rating, ratingScore: row.rating_score });
+    }
+
+    return rows.map((r) => {
+      const key = `${(r.album_artist || 'Unknown Artist').trim().toLowerCase()}|${r.album.trim().toLowerCase()}`;
+      const rating = ratingMap.get(key);
+      return {
+        album: r.album,
+        albumArtist: r.album_artist || 'Unknown Artist',
+        year: r.year,
+        trackCount: r.track_count,
+        duration: r.duration,
+        artFromTrackId: r.art_track,
+        rating: rating?.rating ?? 0,
+        ratingScore: rating?.ratingScore ?? null,
+      };
+    });
   }
 
   applyAlbumArtToAlbum(
