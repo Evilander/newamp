@@ -239,90 +239,19 @@ export function Visualizer({
           loadRandomPreset(0);
           presetTimer = window.setInterval(() => loadRandomPreset(2.2), 22000);
 
-          // Adaptive resolution scaling. Butterchurn presets vary 5–10× in
-          // fragment cost, so a preset switch can suddenly miss the frame
-          // budget on a heavier shader. We track an EMA of paint time and
-          // shrink the render canvas when the average exceeds the budget;
-          // recovery scales back up gradually so the resolution doesn't
-          // hunt visibly. This is the same dynamic-resolution trick AAA
-          // games use; the visual cost of a 15% smaller texture is far
-          // less noticeable than a frame stall.
-          const targetFrameMs = frameIntervalMs;
-          const upperBudget = targetFrameMs * 1.4;
-          const lowerBudget = targetFrameMs * 0.6;
-          let frameEmaMs = targetFrameMs;
-          let renderScale = 1.0;
-          let lastTickMs = 0;
-          const MIN_SCALE = 0.55;
-          const MAX_SCALE = 1.0;
-          const DOWNSCALE_STEP = 0.85;
-          const UPSCALE_STEP = 1.04;
-          let consecutiveOver = 0;
-          let consecutiveUnder = 0;
-
-          const applyAdaptiveScale = (next: number) => {
-            const clamped = Math.max(MIN_SCALE, Math.min(MAX_SCALE, next));
-            if (Math.abs(clamped - renderScale) < 0.01) return;
-            renderScale = clamped;
-            // Force the next ensureSize() to re-measure under the new scale.
-            lastW = 0;
-            lastH = 0;
-          };
-
+          // Simple render loop — the previous "adaptive resolution scaling"
+          // attempt reassigned the `ensureSize` function declaration mid-
+          // effect, which in TypeScript strict-mode modules breaks the
+          // visualizer entirely. The simpler path is fast enough: mesh
+          // 32×24 + the presetMaxPixels cap above already keep butterchurn
+          // smooth on heavy presets without runtime resolution hunting.
           const frame = (now: number) => {
             if (canPaint(now)) {
-              const startedAt = performance.now();
               ensureSize();
               visualizer?.render();
-              const elapsed = performance.now() - startedAt;
-              // EMA with α=0.18 — responsive to genuine perf shifts without
-              // letting one stutter dominate.
-              frameEmaMs = frameEmaMs * 0.82 + elapsed * 0.18;
-              if (frameEmaMs > upperBudget) {
-                consecutiveOver++;
-                consecutiveUnder = 0;
-                if (consecutiveOver >= 6) {
-                  applyAdaptiveScale(renderScale * DOWNSCALE_STEP);
-                  consecutiveOver = 0;
-                }
-              } else if (frameEmaMs < lowerBudget) {
-                consecutiveUnder++;
-                consecutiveOver = 0;
-                if (consecutiveUnder >= 30) {
-                  applyAdaptiveScale(renderScale * UPSCALE_STEP);
-                  consecutiveUnder = 0;
-                }
-              } else {
-                consecutiveOver = 0;
-                consecutiveUnder = 0;
-              }
             }
-            lastTickMs = now;
             raf = requestAnimationFrame(frame);
           };
-          // Re-route the existing ensureSize path through the adaptive
-          // scale by treating `renderScale` as an additional multiplier.
-          const baseEnsureSize = ensureSize;
-          ensureSize = function adaptiveEnsureSize() {
-            const node = canvasRef.current;
-            if (!node) return;
-            const cssW = node.clientWidth || node.width || 100;
-            const cssH = node.clientHeight || node.height || 100;
-            const scaledW = Math.max(8, Math.floor(cssW * dpr * renderScale));
-            const scaledH = Math.max(8, Math.floor(cssH * dpr * renderScale));
-            const scale = Math.min(1, Math.sqrt(presetMaxPixels / Math.max(1, scaledW * scaledH)));
-            const targetW = Math.max(8, Math.floor(scaledW * scale));
-            const targetH = Math.max(8, Math.floor(scaledH * scale));
-            if (targetW === lastW && targetH === lastH) return;
-            lastW = targetW;
-            lastH = targetH;
-            node.width = targetW;
-            node.height = targetH;
-            visualizer?.setRendererSize(targetW, targetH);
-          };
-          // Avoid unused-variable lints on `baseEnsureSize` / `lastTickMs`.
-          void baseEnsureSize;
-          void lastTickMs;
           raf = requestAnimationFrame(frame);
         } catch (err) {
           // Surface the real failure so users (and the milkdrop smoke) can

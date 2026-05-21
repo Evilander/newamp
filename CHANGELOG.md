@@ -3,6 +3,20 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.6] - 2026-05-20
+
+Hotfix for a 1.5.4-introduced Milkdrop break.
+
+### Fixed — Milkdrop visualizer was broken
+
+The 1.5.4 "adaptive resolution scaling" experiment reassigned the `ensureSize` function declaration mid-effect (`ensureSize = function adaptiveEnsureSize() { ... }`). In TypeScript strict-mode modules this is unsafe and broke the visualizer entirely on real hardware (the smoke happened to slip past because it doesn't exercise the full render loop under sustained frame pressure).
+
+Ripped the adaptive logic out. The simpler render loop is restored. The other 1.5.4 perf wins — mesh 32×24, presetMaxPixels cap at 2.5M for butterchurn, slower preset rotation with shorter blend, silent-sink GainNode for reactivity — are kept because they do real work without depending on the broken adaptive path.
+
+### Lesson
+
+Loud failures over silent fallbacks: this is the second 1.5.x release where a quiet "improvement" hid a complete feature break (1.5.4: empty albums; 1.5.5: dead Milkdrop). The smoke layer needs an actual frame-render assertion, not just `milkdropMounted: 'true'`. Filed as follow-up.
+
 ## [1.5.5] - 2026-05-20
 
 Hotfix for a 1.5.4 regression that hid every album.
