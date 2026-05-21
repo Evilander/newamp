@@ -965,8 +965,8 @@ function registerIpc(): void {
   ipcMain.handle('library:get-folder-track-ids', async (_e, folderPath: string, opts) =>
     library.getFolderTrackIds(folderPath, opts ?? {}),
   );
-  ipcMain.handle('library:get-album-tracks', async (_e, album: string, albumArtist: string) =>
-    library.getAlbumTracks(album, albumArtist),
+  ipcMain.handle('library:get-album-tracks', async (_e, albumArtist: string, album: string) =>
+    library.getAlbumTracks(albumArtist, album),
   );
   ipcMain.handle('library:get-artist-tracks', async (_e, artist: string) =>
     library.getArtistTracks(artist),
@@ -2166,6 +2166,47 @@ function uiVisualizerProbeSource(): string {
       // gated catch could fake; this distinguishes "really mounted" from
       // "canvas alive but factory threw".
       const milkdropMounted = milkdropCanvas.getAttribute('data-newamp-butterchurn-mounted');
+      // Frame-delta check: a "mounted=true" flag set BEFORE the render
+      // loop runs is not enough to prove butterchurn is actually
+      // producing frames — that's exactly how 1.5.5 shipped a dead
+      // visualizer. Two-pronged check:
+      //
+      // 1. Sample litSamples 4 times across ~1.2s. Hardware-accelerated
+      //    butterchurn produces non-zero pixels here; software WebGL
+      //    (which the smoke runs under) drops shader paint and returns
+      //    zero pixels regardless of render-loop liveness. So this
+      //    succeeds on Tyler's hardware but never on the smoke.
+      // 2. Sample the engine's FFT sum twice ~600ms apart. This is the
+      //    actually load-bearing signal — the silent-sink fix exists to
+      //    make these bytes non-zero. If the analyser subtree is alive
+      //    (silentSink wired, audio flowing) the sum is non-zero;
+      //    1.5.3-era graph culling produced zero here.
+      //
+      // milkdropAlive = either condition passes. The smoke asserts on
+      // the OR, so it works under software WebGL (FFT signal) AND
+      // catches a future regression that breaks butterchurn but not the
+      // audio path (pixel signal).
+      const milkdropFrameSamples = [];
+      for (let i = 0; i < 4; i++) {
+        const sample = sampleCanvas(milkdropCanvas);
+        milkdropFrameSamples.push(sample ? sample.litSamples : 0);
+        await sleep(380);
+      }
+      const milkdropFrameDeltas = [];
+      for (let i = 1; i < milkdropFrameSamples.length; i++) {
+        milkdropFrameDeltas.push(Math.abs(milkdropFrameSamples[i] - milkdropFrameSamples[i - 1]));
+      }
+      const analyserFftSamples = [];
+      for (let i = 0; i < 3; i++) {
+        const fn = window.__newampSmoke?.analyserFftSum;
+        analyserFftSamples.push(typeof fn === 'function' ? fn() : 0);
+        await sleep(300);
+      }
+      const pixelsAlive =
+        milkdropFrameSamples.some((s) => s > 0) ||
+        milkdropFrameDeltas.some((d) => d > 0);
+      const analyserAlive = analyserFftSamples.some((s) => s > 0);
+      const milkdropAlive = pixelsAlive || analyserAlive;
       // Now Liquid Mercury — the new 1.5.2 preset. Verify it renders too.
       const mercuryButton = await waitFor('Liquid Mercury visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
@@ -2292,6 +2333,10 @@ function uiVisualizerProbeSource(): string {
         milkdropRender,
         milkdropEvalError: milkdropEvalError ?? null,
         milkdropMounted: milkdropMounted ?? null,
+        milkdropFrameSamples,
+        milkdropFrameDeltas,
+        analyserFftSamples,
+        milkdropAlive,
         mercuryRender,
         stageRect: { width: stageRect.width, height: stageRect.height },
         viewport,

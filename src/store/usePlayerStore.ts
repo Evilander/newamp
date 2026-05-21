@@ -152,6 +152,35 @@ interface PlayerState {
   saveCustomSkin: (skin: CustomSkin) => Promise<void>;
 }
 
+// Debounce settings.json writes triggered by high-frequency volume changes.
+// The wheel-anywhere-over-fullscreen-viz handler (added 1.5.4) fires 60-120
+// WheelEvents/sec on rapid scroll; each pre-debounce setVolume call hit
+// settings.persist() which writeFileSync's the whole settings JSON. On HDD
+// that meant the main process spent ~300-900ms/sec blocked in I/O. The
+// Web Audio gain ramp must stay synchronous (volume is a real-time
+// control), so we only debounce the persist side. AppSettings is the only
+// caller path that touches disk; the in-memory store updates immediately.
+let volumePersistTimer: ReturnType<typeof setTimeout> | null = null;
+let volumePersistPending: number | null = null;
+const VOLUME_PERSIST_DEBOUNCE_MS = 250;
+function schedulePersistVolume(
+  volume: number,
+  apply: (updated: AppSettings) => void,
+): void {
+  volumePersistPending = volume;
+  if (volumePersistTimer != null) return;
+  volumePersistTimer = setTimeout(() => {
+    const pending = volumePersistPending;
+    volumePersistTimer = null;
+    volumePersistPending = null;
+    if (pending == null) return;
+    void api
+      .setSettings({ volume: pending })
+      .then(apply)
+      .catch((err) => console.error('[newamp] persist volume failed:', err));
+  }, VOLUME_PERSIST_DEBOUNCE_MS);
+}
+
 function toLastfmTrack(track: Track): LastfmTrackPayload {
   return {
     artist: track.artist,
@@ -1033,10 +1062,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     seek: (t) => engine.seek(cueStart(get().current) + Math.max(0, t)),
 
     setVolume: async (v) => {
+      // Real-time path: gain ramp + in-memory store update fire immediately
+      // so the UI and the audio output respond on the very next frame.
       engine.setVolume(v);
       set({ volume: v });
-      const settings = await api.setSettings({ volume: v });
-      set({ settings });
+      // Persist path: coalesce bursts (wheel scroll, slider drag) onto a
+      // single trailing-edge writeFileSync. Last value wins.
+      schedulePersistVolume(v, (settings) => set({ settings }));
     },
 
     setPlaybackRate: async (rate) => {
@@ -1274,6 +1306,7 @@ if (typeof window !== 'undefined') {
         seek: (seconds: number) => void;
         setFullscreenVisualizer: (on: boolean) => void;
         setCompactDeck: (on: boolean) => void;
+        analyserFftSum: () => number;
       };
     }).__newampSmoke = {
       seek: (seconds: number) => {
@@ -1295,6 +1328,20 @@ if (typeof window !== 'undefined') {
       },
       setCompactDeck: (on: boolean) => {
         usePlayerStore.getState().setCompactMode(on);
+      },
+      // Sum of byte-frequency-data over all bins. Returns 0 when the
+      // analyser subtree is culled by Chrome's audio graph optimizer
+      // (the 1.5.3-1.5.4 silent-sink bug) AND when no audio is playing.
+      // Smokes use this to prove the FFT path is live independent of
+      // butterchurn pixel output — software WebGL drops shader paint
+      // but the analyser still receives audio.
+      analyserFftSum: () => {
+        const engine = usePlayerStore.getState().engine;
+        const buf = new Uint8Array(engine.frequencyBinCount) as Uint8Array<ArrayBuffer>;
+        engine.getFreqData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i]!;
+        return sum;
       },
     };
   }

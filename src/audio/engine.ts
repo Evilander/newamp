@@ -21,6 +21,12 @@ export type EngineListener = (e: EngineState) => void;
 const EQ_FREQS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
 const DEFAULT_FFT_SIZE = 2048;
 const DEFAULT_FREQUENCY_BIN_COUNT = DEFAULT_FFT_SIZE / 2;
+// How long the VBR-seek diagnostic waits before sampling currentTime.
+// Long enough for a normal seek to settle on slow files, short enough
+// that a typical user-perceived seek failure (restart) is caught before
+// the next user action. Tuning higher than ~300ms starts catching
+// legitimate fast track-changes; lower than ~150ms misses real seeks.
+const SEEK_VERIFY_MS = 220;
 
 interface Deck {
   id: number;
@@ -70,6 +76,11 @@ export class AudioEngine {
   private outputDeviceId: string | null = null;
   private preferredSampleRate: number | null = null;
   private preparedNext: PreparedNextDeck | null = null;
+  // Monotonically increments each call to `seek`. The 220ms verify timer
+  // captures this value and bails if a newer seek (or track-change) has
+  // happened in the meantime — otherwise rapid seekbar drags fire dozens
+  // of false-positive "seek failed" warnings.
+  private seekSeq = 0;
 
   private state: EngineState = {
     duration: 0,
@@ -706,28 +717,42 @@ export class AudioEngine {
     const target = Math.max(0, Math.min(el.duration || 0, seconds));
     const previous = el.currentTime;
     el.currentTime = target;
-    // VBR MP3 without a Xing/Info header can't be seeked accurately by
-    // HTMLAudioElement — Chromium falls back to byte-position guessing
-    // and on some encoder outputs it restarts from 0 instead of landing
-    // at the target. Detect that one-frame post-seek and log a warning
-    // so the user has a clue (and so future telemetry can quantify it).
-    // Tyler reports this on Comets on Fire — Field Recordings from the
-    // Sun, which is exactly the era of LAME --vbr-old + no Xing header.
+    // VBR seek diagnostic: VBR MP3s without a Xing/Info header
+    // (reproduces on LAME --vbr-old encodes) can't be seeked accurately
+    // by HTMLAudioElement — Chromium guesses byte position and may
+    // restart from 0 instead of landing at the target. The check below
+    // detects that case and logs it. Skipped if either anchor (target
+    // or previous position) is at the very start of the file, because a
+    // genuine seek-to-zero or play-from-zero would false-positive.
     if (target > 1 && previous > 1) {
-      const expectedNotRestart = target > 1;
+      // Snapshot deck identity + src + a monotonic seek-id at schedule
+      // time. The 220ms verify window is long enough for a normal seek
+      // to settle, but also long enough for the user to drag the seekbar
+      // multiple times or skip to the next track. We must not log a
+      // "seek failed" against a deck that has since been swapped or a
+      // track that has since changed under us — that produced 30+
+      // false-positive warnings per seekbar drag in 1.5.4-1.5.6.
+      const scheduledSeq = ++this.seekSeq;
+      const scheduledDeckIndex = this.activeDeckIndex;
+      const scheduledEl = el;
+      const scheduledSrc = el.currentSrc;
       window.setTimeout(() => {
         if (!this.graph) return;
+        if (this.seekSeq !== scheduledSeq) return; // newer seek superseded
+        if (this.activeDeckIndex !== scheduledDeckIndex) return; // crossfade swap
+        if (this.activeDeck.el !== scheduledEl) return; // deck re-bound
+        if (this.activeDeck.el.currentSrc !== scheduledSrc) return; // track changed
         const landed = this.activeDeck.el.currentTime;
-        const restarted = expectedNotRestart && landed < 0.5;
+        const restarted = landed < 0.5;
         const farOff = !restarted && Math.abs(landed - target) > 1.5;
         if (restarted || farOff) {
           console.warn(
             '[newamp] seek failed:',
-            { target, landed, restarted, farOff, src: this.activeDeck.el.currentSrc },
+            { target, landed, restarted, farOff, src: scheduledSrc },
             'Most likely a VBR MP3 without a Xing/Info header; HTMLAudioElement cannot seek these accurately. Consider re-encoding the file.',
           );
         }
-      }, 220);
+      }, SEEK_VERIFY_MS);
     }
   }
 

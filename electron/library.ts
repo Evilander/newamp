@@ -51,6 +51,7 @@ import type {
   Track,
   RecoveryEvent,
 } from '../shared/types.js';
+import { albumKey } from '../shared/album-key.js';
 import { dnaCosineSimilarity, isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
 import { applySeedVibeGate, createSeedVibeContext, seedVibeSimilarity } from '../shared/seed-vibe.js';
 import {
@@ -252,7 +253,11 @@ CREATE INDEX IF NOT EXISTS idx_track_tags_track ON track_tags(track_id);
 -- longer cascades to every track; the user can rate the album AND rate
 -- individual songs independently. Composite key (album_artist, album)
 -- with NOCASE collation matches how tracks are grouped into albums
--- elsewhere in the codebase.
+-- elsewhere in the codebase. Note: SQLite NOCASE is ASCII-only — for
+-- non-ASCII album titles (e.g., "ÉLAN"), JS-side lookups using
+-- toLowerCase() will fold characters that SQL NOCASE won't. Until the
+-- ICU extension is loaded, treat (artist, album) lookups as
+-- best-effort case-folded for the ASCII alphabet only.
 CREATE TABLE IF NOT EXISTS album_ratings (
   album_artist  TEXT NOT NULL COLLATE NOCASE,
   album         TEXT NOT NULL COLLATE NOCASE,
@@ -260,6 +265,13 @@ CREATE TABLE IF NOT EXISTS album_ratings (
   rating_score  REAL,
   updated_at    INTEGER NOT NULL,
   PRIMARY KEY (album_artist, album)
+);
+
+-- One-shot migration flags. Keeps schema-migration state next to the DB
+-- so it travels with the data instead of living in settings.json.
+CREATE TABLE IF NOT EXISTS library_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 `;
 
@@ -611,6 +623,9 @@ export class LibraryStore {
       this.ensureColumn('playlists', 'cover_art_path', 'TEXT');
       this.ensureColumn('playlists', 'cover_art_updated_at', 'INTEGER');
       this.db.exec('PRAGMA foreign_keys = ON');
+      // One-shot DB migrations gated by flags in library_meta. Currently:
+      // backfill album_ratings from pre-1.5.4 cascaded track rating_score.
+      this.runOneShotMigrations();
     };
     try {
       applySchema();
@@ -1215,12 +1230,12 @@ export class LibraryStore {
     );
     const ratingMap = new Map<string, { rating: number; ratingScore: number | null }>();
     for (const row of ratingIndex) {
-      const key = `${row.album_artist.trim().toLowerCase()}|${row.album.trim().toLowerCase()}`;
+      const key = albumKey(row.album_artist, row.album);
       ratingMap.set(key, { rating: row.rating, ratingScore: row.rating_score });
     }
 
     return rows.map((r) => {
-      const key = `${(r.album_artist || 'Unknown Artist').trim().toLowerCase()}|${r.album.trim().toLowerCase()}`;
+      const key = albumKey(r.album_artist || 'Unknown Artist', r.album);
       const rating = ratingMap.get(key);
       return {
         album: r.album,
@@ -1387,7 +1402,7 @@ export class LibraryStore {
     return this.many<FolderTrackRow>(`SELECT id, path, duration, has_art FROM tracks`);
   }
 
-  getAlbumTracks(album: string, albumArtist: string): Track[] {
+  getAlbumTracks(albumArtist: string, album: string): Track[] {
     return this.many<RawRow>(
       `SELECT * FROM tracks
         WHERE album = ?
@@ -2351,6 +2366,65 @@ export class LibraryStore {
   }
 
   /**
+   * Run one-shot DB migrations gated by flags in `library_meta`. Each
+   * migration is idempotent and bails early if its flag is already set.
+   * Called once per LibraryStore boot, right after schema is applied.
+   */
+  private runOneShotMigrations(): void {
+    this.maybeBackfillAlbumRatingsFromTracks();
+  }
+
+  /**
+   * Migration: when a user upgrades from 1.5.3 (or earlier), their album
+   * ratings live in `tracks.rating_score` because the old AlbumsView
+   * cascade wrote the same score across every track in the album. 1.5.4
+   * split album rating into its own table but did not backfill, so those
+   * users saw their ratings vanish from NowPlayingView + the taste-mix
+   * boost. This migration walks the tracks table, finds (artist, album)
+   * groups where every track shares the same nonzero rating_score, and
+   * inserts a row into album_ratings. INSERT OR IGNORE preserves any
+   * explicit album rating the user has set since 1.5.4.
+   */
+  private maybeBackfillAlbumRatingsFromTracks(): void {
+    const flagKey = 'album_ratings_backfilled_from_tracks_v1';
+    const existing = this.one<{ value: string }>(
+      `SELECT value FROM library_meta WHERE key = ?`,
+      [flagKey],
+    );
+    if (existing) return;
+    try {
+      this.db.run(
+        `INSERT OR IGNORE INTO album_ratings (album_artist, album, rating, rating_score, updated_at)
+         SELECT COALESCE(NULLIF(album_artist, ''), artist) AS album_artist,
+                album AS album,
+                MIN(rating) AS rating,
+                MIN(rating_score) AS rating_score,
+                0 AS updated_at
+           FROM tracks
+          WHERE album != ''
+       GROUP BY COALESCE(NULLIF(album_artist, ''), artist), album
+         HAVING MIN(rating_score) IS NOT NULL
+            AND MIN(rating_score) > 0
+            AND MIN(rating_score) = MAX(rating_score)`,
+      );
+      const inserted = this.db.getRowsModified();
+      this.db.run(
+        `INSERT OR REPLACE INTO library_meta (key, value) VALUES (?, ?)`,
+        [flagKey, String(Date.now())],
+      );
+      if (inserted > 0) {
+        console.log(`[newamp] backfilled ${inserted} album_ratings rows from pre-1.5.4 track-cascade scores`);
+      }
+      this.scheduleFlush();
+    } catch (err) {
+      // Don't poison the boot path — if the backfill fails (corrupt DB,
+      // unexpected schema), the user just doesn't get their old ratings
+      // surfaced. Their tracks table is untouched.
+      console.error('[newamp] album_ratings backfill migration failed:', err);
+    }
+  }
+
+  /**
    * Bulk-read every (album_artist, album) → rating_score row into a Map
    * keyed on `lowercase(albumArtist)|lowercase(album)`. One SQL hit per
    * mix call avoids the N+1 that would otherwise happen if each track
@@ -2363,7 +2437,7 @@ export class LibraryStore {
     );
     const index = new Map<string, number>();
     for (const row of rows) {
-      index.set(`${row.album_artist.trim().toLowerCase()}|${row.album.trim().toLowerCase()}`, row.rating_score!);
+      index.set(albumKey(row.album_artist, row.album), row.rating_score!);
     }
     return index;
   }
@@ -2377,7 +2451,15 @@ export class LibraryStore {
   getAlbumRating(albumArtist: string, album: string): AlbumRating | null {
     const a = (albumArtist ?? '').trim();
     const b = (album ?? '').trim();
-    if (!a || !b) return null;
+    // Missing input is the renderer's bug, not "this album is unrated".
+    // Throw so the caller's try/catch surfaces it instead of folding
+    // "rateable album never rated" and "this call should never have
+    // been made" into the same `null` return.
+    if (!a || !b) {
+      throw new Error(
+        `getAlbumRating requires non-empty albumArtist and album (got albumArtist=${JSON.stringify(albumArtist)}, album=${JSON.stringify(album)})`,
+      );
+    }
     const row = this.one<{ rating: number; rating_score: number | null; updated_at: number }>(
       `SELECT rating, rating_score, updated_at
          FROM album_ratings
@@ -2398,13 +2480,25 @@ export class LibraryStore {
   /**
    * Upsert the album-level rating score. score === null clears the entry.
    * Track ratings are untouched — albums and songs hold independent
-   * ratings now. AlbumSummary queries join in this row, so the new value
-   * propagates back to the UI on the next `listAlbums` call.
+   * ratings. `getAlbums` reads `album_ratings` separately and merges into
+   * its result rows via a Map (the LEFT JOIN approach was reverted in
+   * 1.5.5 after it broke the WHERE clause with ambiguous columns).
+   *
+   * Returns `null` only on a successful clear. Throws on missing
+   * (albumArtist, album) so the renderer can distinguish "I tried to
+   * rate an unrateable album" (e.g., empty AlbumArtist tag) from
+   * "I cleared the rating successfully" — those used to share the same
+   * `null` return and the UI lied about successful clears for albums
+   * that were actually no-ops.
    */
   setAlbumRatingScore(albumArtist: string, album: string, score: number | null): AlbumRating | null {
     const a = (albumArtist ?? '').trim();
     const b = (album ?? '').trim();
-    if (!a || !b) return null;
+    if (!a || !b) {
+      throw new Error(
+        `setAlbumRatingScore requires non-empty albumArtist and album (got albumArtist=${JSON.stringify(albumArtist)}, album=${JSON.stringify(album)})`,
+      );
+    }
     const nextScore = normalizeTrackRatingScore(score);
     if (nextScore == null) {
       this.db.run(
@@ -3919,10 +4013,6 @@ function buildTasteContext(
   return { seed, artistAffinity, genreAffinity, albumRatingScores };
 }
 
-function albumRatingKey(albumArtist: string | null | undefined, album: string | null | undefined): string {
-  return `${(albumArtist ?? '').trim().toLowerCase()}|${(album ?? '').trim().toLowerCase()}`;
-}
-
 /**
  * Album rating contribution to the per-track taste score. Capped at 2.0
  * so it nudges ordering without overpowering the per-song rating signal:
@@ -3934,7 +4024,7 @@ function albumRatingKey(albumArtist: string | null | undefined, album: string | 
  */
 function albumRatingBoost(track: Track, context: TasteContext): number {
   if (!track.album || !track.albumArtist) return 0;
-  const score = context.albumRatingScores.get(albumRatingKey(track.albumArtist, track.album));
+  const score = context.albumRatingScores.get(albumKey(track.albumArtist, track.album));
   if (score == null) return 0;
   return Math.max(0, Math.min(2, (score / 100) * 2));
 }

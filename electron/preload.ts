@@ -92,8 +92,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('library:get-folder-tracks', folderPath, opts),
   getFolderTrackIds: (folderPath, opts) =>
     ipcRenderer.invoke('library:get-folder-track-ids', folderPath, opts) as Promise<number[]>,
-  getAlbumTracks: (album, albumArtist) =>
-    ipcRenderer.invoke('library:get-album-tracks', album, albumArtist),
+  getAlbumTracks: (albumArtist, album) =>
+    ipcRenderer.invoke('library:get-album-tracks', albumArtist, album),
   getArtistTracks: (artist) => ipcRenderer.invoke('library:get-artist-tracks', artist),
   getTrack: (id) => ipcRenderer.invoke('library:get-track', id),
   getTracksByIds: (ids) => ipcRenderer.invoke('library:get-tracks-by-ids', ids) as Promise<Track[]>,
