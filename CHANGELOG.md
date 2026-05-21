@@ -3,6 +3,46 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.4] - 2026-05-20
+
+Live-feedback pass driven by playing the 1.5.3 build. Five user-reported issues from a single listening session, all fixed.
+
+### Fixed — Milkdrop visualizer reactivity
+
+In 1.5.3 the audio graph was rewired so volume sits upstream of the limiter. The new shape made the AnalyserNode tap a leaf node (no path to `AudioDestinationNode`), and Chrome's audio graph optimizer culled the subtree — leaving butterchurn with a frozen FFT buffer that always read zero. The visualizer rendered shaders but had no real audio to react to.
+
+Added a `silentSink` (0-gain `GainNode`) that routes both the visualization analyser and the unsmoothed onset analyser to `ctx.destination`. The subtree now stays alive, butterchurn receives live FFT data again, and no audible signal is added.
+
+### Fixed — Milkdrop fullscreen performance
+
+Three layered changes:
+- Mesh dropped from 48×36 to 32×24 (butterchurn upstream default). 2.25× cheaper per vertex, and butterchurn pays the vertex cost for *both* presets during a blend.
+- Preset rotation slowed from every 16 s with 3.6 s blend to every 22 s with 2.2 s blend. The blend window is the GPU-hot moment.
+- Adaptive resolution scaling: an EMA of paint time drives a dynamic downscale when frames miss budget for sustained intervals, then recovers gradually. Same trick AAA games use as "dynamic resolution."
+- Render budget for butterchurn capped at ~2.5 M pixels regardless of the 4K toggle. Butterchurn's shader fragments dominate at high resolution and don't gain visible detail above 1440p.
+
+### Fixed — Fullscreen visualizer top nav
+
+A user could toggle "TOP NAV" off in a previous session and find themselves with no nav and no way to bring it back (the "VIS MENU" recovery button was too subtle). Deleted the persistent toggle entirely. Auto-hide on cursor idle is the only mode now — moving the cursor to the top edge always reveals the toolbar.
+
+Buttons also tightened to 26 px height with 0 / 8 px padding for a denser, less obtrusive look.
+
+### Fixed — Arrow keys cycled visualizer presets AND skipped song time
+
+In fullscreen visualizer, the shortcut layer resolved ←/→ to `seek-backward`/`seek-forward` while the visualizer's own keydown handler simultaneously called `cyclePreset(±1)`. Every preset change scrubbed five seconds in the same direction. The shortcut layer now returns `null` for unmodified ←/→ when `fullscreenVisualizer` is true. Ctrl+arrows still resolve to previous/next track everywhere; Up/Down still nudge volume.
+
+### Fixed — Album rating cascaded over per-song ratings
+
+The AlbumsView rating slider rewrote `rating_score` on every track in the album, silently destroying per-song nuance. New `album_ratings` table holds album-level ratings independent of `tracks`. Now Playing exposes both a "Song" slider and an "Album" slider so the user can rate the song they're hearing without leaving the screen. The mix scorer factors `albumRatingBoost(track, context)` so a 100/100 album lifts each of its songs by +2.0 in TasteContext — well-rated albums float their songs into Auto DJ and mixes without overwriting per-song detail.
+
+### Improved — Fullscreen volume bar
+
+Fully hidden by default. A faint silhouette appears when the top nav is up (signalling "grabbable"); direct hover/focus fades it to fully visible. Mouse wheel anywhere over the fullscreen visualizer also drives volume (Shift+wheel for coarse step). Wheel handling is bound to the visualizer root only — library and Now Playing scroll behavior is untouched.
+
+### Added — Seek-failure diagnostic
+
+VBR MP3s without a Xing/Info header (typical of LAME `--vbr-old` era encodes — Tyler hit this on Comets on Fire / Field Recordings from the Sun) can't be seeked accurately by HTMLAudioElement. The engine now detects the "seek requested past 1 s, landed near 0" pattern and logs a diagnostic with the source URL and target. A full fix (AudioBuffer fallback or re-encode pipeline) is queued for a follow-up.
+
 ## [1.5.3] - 2026-05-20
 
 Bug-fix and review-followup pass. Six review-flagged blockers, nine high-priority issues, and ten nice-to-haves resolved, plus durable regression smokes for the algorithmic surfaces (seed-vibe similarity, Sonic Atlas region playback, random album sort).
