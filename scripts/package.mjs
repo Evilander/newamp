@@ -56,7 +56,10 @@ function electronBuilderTargetArgs(args) {
   if (args.includes('--portable')) return [['--win=portable']];
   if (args.includes('--installer') || args.includes('--nsis')) return [['--win=nsis']];
   if (args.includes('--linux')) return [['--linux=tar.gz']];
-  if (args.includes('--mac')) return [['--mac=dmg', '--mac=zip']];
+  // Bare `--mac` so electron-builder uses the package.json mac.target config
+  // (dmg + zip) across BOTH configured arches (arm64 + x64). Passing
+  // `--mac=dmg` would override the arch list and build host-arch only.
+  if (args.includes('--mac')) return [['--mac']];
   if (args.includes('--win')) return [['--win=nsis'], ['--win=portable']];
   return [['--win=nsis'], ['--win=portable'], ['--linux=tar.gz']];
 }
