@@ -22,11 +22,31 @@ const visualizerSource = await readFile(new URL('../src/components/Visualizer.ts
 const nowPlayingSource = await readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8');
 const engineSource = await readFile(new URL('../src/audio/engine.ts', import.meta.url), 'utf8');
 const typesSource = await readFile(new URL('../shared/types.ts', import.meta.url), 'utf8');
+const butterchurnIframeSource = await readFile(new URL('../src/butterchurn-iframe/main.ts', import.meta.url), 'utf8');
 assert.match(visualizerSource, /mode === 'butterchurn'/, 'Visualizer must implement Butterchurn mode');
+// Butterchurn is sandboxed in butterchurn-iframe.html (the only eval surface);
+// the main renderer can't pass a Web Audio node across the frame, so it reads
+// the pre-volume visualizer analyser via engine.getTimeData and posts the bytes
+// to the frame, which drives butterchurn through its render({ audioLevels }) path.
 assert.match(
   visualizerSource,
-  /connectAudio\(engine\.visualizerNode\)/,
-  'Butterchurn must connect to the pre-volume Newamp visualizer node',
+  /butterchurn-iframe\.html/,
+  'Butterchurn must run inside the sandboxed butterchurn-iframe.html frame',
+);
+assert.match(
+  visualizerSource,
+  /engine\.getTimeData\(/,
+  'Butterchurn must be fed time-domain bytes from the pre-volume visualizer analyser (engine.getTimeData)',
+);
+assert.match(
+  butterchurnIframeSource,
+  /createVisualizer/,
+  'sandboxed frame must create the butterchurn visualizer',
+);
+assert.match(
+  butterchurnIframeSource,
+  /audioLevels/,
+  'sandboxed frame must drive butterchurn via the render({ audioLevels }) injection path',
 );
 assert.match(engineSource, /get visualizerNode\(\): AudioNode/, 'audio engine should expose a dedicated visualizer node');
 assert.match(engineSource, /replayGain\.connect\(masterGain\)[\s\S]*replayGain\.connect\(analyser\)[\s\S]*masterGain\.connect\(limiter\)[\s\S]*limiter\.connect\(ctx\.destination\)/, 'visualizers must tap pre-volume audio (analyser branches off replayGain) and the audio path must be replayGain→masterGain→limiter→destination so post-limiter clipping is impossible');

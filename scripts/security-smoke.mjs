@@ -44,4 +44,23 @@ assert.ok(!/\bbypassCSP:\s*true\b/.test(mainSource), 'custom protocols should no
 assert.match(packageSource, /"smoke:security"/, 'package.json should expose the security smoke');
 assert.match(packageSource, /"smoke:release-secrets"/, 'package.json should expose release secret hygiene smoke');
 
-console.log(JSON.stringify({ ok: true, directives: directives.size }, null, 2));
+// Butterchurn/Milkdrop is the only code that needs eval. It is isolated in a
+// sandboxed iframe so the MAIN renderer can stay on script-src 'self' (asserted
+// above). Confirm that frame exists and that ITS CSP is the one scoping
+// 'unsafe-eval' — i.e. the eval surface really did move, it wasn't just removed.
+const iframeHtml = await readFile(new URL('../butterchurn-iframe.html', import.meta.url), 'utf8');
+const iframeCspMeta = iframeHtml.match(/<meta\s+[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/i);
+assert.ok(iframeCspMeta, 'butterchurn-iframe.html must define a Content-Security-Policy meta tag');
+const iframeCspMatch = iframeCspMeta[0].match(/content="([^"]+)"|content='([^']+)'/i);
+assert.ok(iframeCspMatch, 'butterchurn-iframe.html CSP must define a content attribute');
+const iframeCsp = iframeCspMatch[1] ?? iframeCspMatch[2];
+const iframeScriptSrc = iframeCsp
+  .split(';')
+  .map((part) => part.trim())
+  .find((part) => part.startsWith('script-src'));
+assert.ok(
+  iframeScriptSrc?.includes("'unsafe-eval'"),
+  'butterchurn-iframe.html must scope unsafe-eval to the sandboxed frame',
+);
+
+console.log(JSON.stringify({ ok: true, directives: directives.size, iframeScoped: true }, null, 2));

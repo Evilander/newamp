@@ -1,0 +1,5 @@
+{
+  "name": "newamp-particle-flow-smoke",
+  "type": "module",
+  "main": "../particle-flow-smoke.mjs"
+}

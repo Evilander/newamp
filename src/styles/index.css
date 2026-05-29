@@ -4914,3 +4914,22 @@ input[type='range'].nslider.eq-slider {
     display: none;
   }
 }
+
+/* Shared form control used by the Profile view (reviews/lists/identity). */
+.ninput {
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: var(--radius, 6px);
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+.ninput:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.ninput::placeholder {
+  color: var(--muted);
+}

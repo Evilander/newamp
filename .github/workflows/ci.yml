@@ -1,0 +1,72 @@
+name: CI
+
+# Typecheck + build + the CI-safe (pure-node, no display, no audio hardware)
+# smokes on every push and PR. The display- and audio-dependent smokes and the
+# Windows/macOS signing readiness smokes are NOT run here — they live in the
+# release workflow's per-OS legs (see release.yml) and in the local release
+# gate. See docs/ci.md for the full classification.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Typecheck · Build · Smokes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (renderer + electron)
+        run: npm run typecheck
+
+      - name: Build (vite renderer + electron main)
+        run: npm run build
+
+      - name: Smoke — build lock
+        run: npm run smoke:build-lock
+
+      - name: Smoke — library (scan + query)
+        run: npm run smoke:library
+
+      - name: Smoke — Wrapped stats (day/week/month/year/all) + wiring
+        run: npm run smoke:wrapped
+
+      - name: Smoke — social objects (reviews/lists/profile + export)
+        run: npm run smoke:social
+
+      - name: Smoke — visualizer module exports
+        run: npm run smoke:visualizer
+
+      - name: Smoke — renderer CSP (no unsafe-eval; eval scoped to iframe)
+        run: npm run smoke:security
+
+      - name: Smoke — visualizer capture/share wiring
+        run: npm run smoke:viz-capture
+
+      - name: Smoke — build provenance
+        run: npm run smoke:build-provenance
+
+      - name: Smoke — release secret hygiene
+        run: npm run smoke:release-secrets
+
+      - name: Smoke — reliability (DB corruption recovery)
+        run: npm run smoke:reliability
+
+      - name: Smoke — completion audit
+        run: npm run smoke:completion-audit

@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   crashReporter,
   globalShortcut,
   ipcMain,
@@ -1150,6 +1151,36 @@ function registerIpc(): void {
   );
   ipcMain.handle('history:get', async (_e, opts) => library.getListeningHistory(opts ?? {}));
   ipcMain.handle('history:insights', async (_e, opts) => library.getListeningInsights(opts ?? {}));
+  ipcMain.handle('history:wrapped', async (_e, opts) => library.getWrappedStats(opts ?? {}));
+
+  // --- Local-first social objects ---
+  ipcMain.handle('social:reviews:get', async (_e, target) => library.getReviews(target ?? undefined));
+  ipcMain.handle('social:reviews:save', async (_e, input) => library.saveReview(input));
+  ipcMain.handle('social:reviews:delete', async (_e, id: number) => library.deleteReview(id));
+  ipcMain.handle('social:lists:get', async () => library.getLists());
+  ipcMain.handle('social:list:get', async (_e, id: number) => library.getList(id));
+  ipcMain.handle('social:lists:save', async (_e, input) => library.saveList(input));
+  ipcMain.handle('social:lists:delete', async (_e, id: number) => library.deleteList(id));
+  ipcMain.handle('social:list-item:add', async (_e, input) => library.addListItem(input));
+  ipcMain.handle('social:list-item:remove', async (_e, id: number) => library.removeListItem(id));
+  ipcMain.handle('social:list:reorder', async (_e, listId: number, orderedIds: number[]) =>
+    library.reorderListItems(listId, orderedIds ?? []),
+  );
+  ipcMain.handle('social:profile:get', async () => library.getProfile());
+  ipcMain.handle('social:profile:save', async (_e, input) => library.saveProfile(input ?? {}));
+  ipcMain.handle('social:export-profile', async () => {
+    const html = library.buildProfileBundleHtml();
+    const profile = library.getProfile();
+    const opts = {
+      title: 'Export NewAmp profile',
+      defaultPath: `${safeFileStem(profile.displayName || 'NewAmp profile')}.html`,
+      filters: [{ name: 'HTML page', extensions: ['html'] }],
+    };
+    const result = mainWin ? await dialog.showSaveDialog(mainWin, opts) : await dialog.showSaveDialog(opts);
+    if (result.canceled || !result.filePath) return null;
+    await writeFile(result.filePath, html, 'utf8');
+    return result.filePath;
+  });
   ipcMain.handle('history:clear', async () => library.clearListeningHistory());
   ipcMain.handle('bookmark:list', async (_e, trackId: number) => library.getTrackBookmarks(trackId));
   ipcMain.handle('bookmark:save', async (_e, input) => library.saveTrackBookmark(input));
@@ -1206,6 +1237,50 @@ function registerIpc(): void {
     await writeFile(result.filePath, file, 'utf8');
     return result.filePath;
   });
+  // --- Visualizer capture / share ---------------------------------------
+  // capturePage works for every visualizer mode (including the sandboxed
+  // Butterchurn iframe and the WebGL2 particle field) because it reads the
+  // composited page, not a single canvas' drawing buffer.
+  ipcMain.handle(
+    'media:capture-page',
+    async (_e, rect?: { x: number; y: number; width: number; height: number }) => {
+      if (!mainWin) return null;
+      const image =
+        rect && rect.width > 1 && rect.height > 1
+          ? await mainWin.webContents.capturePage({
+              x: Math.max(0, Math.round(rect.x)),
+              y: Math.max(0, Math.round(rect.y)),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            })
+          : await mainWin.webContents.capturePage();
+      return image.isEmpty() ? null : image.toDataURL();
+    },
+  );
+  ipcMain.handle('media:copy-png', async (_e, dataUrl: string) => {
+    const image = nativeImage.createFromDataURL(String(dataUrl ?? ''));
+    if (image.isEmpty()) return false;
+    clipboard.writeImage(image);
+    return true;
+  });
+  ipcMain.handle(
+    'media:save-capture',
+    async (_e, payload: { base64: string; defaultName: string; filterName: string; ext: string }) => {
+      const buf = Buffer.from(String(payload?.base64 ?? ''), 'base64');
+      if (!buf.length) return null;
+      const ext = String(payload?.ext || 'png').replace(/[^a-z0-9]/gi, '') || 'png';
+      const opts = {
+        title: 'Save capture',
+        defaultPath: `${safeFileStem(payload?.defaultName || 'NewAmp')}.${ext}`,
+        filters: [{ name: payload?.filterName || ext.toUpperCase(), extensions: [ext] }],
+      };
+      const result = mainWin ? await dialog.showSaveDialog(mainWin, opts) : await dialog.showSaveDialog(opts);
+      if (result.canceled || !result.filePath) return null;
+      await writeFile(result.filePath, buf);
+      return result.filePath;
+    },
+  );
+
   ipcMain.handle('settings:skin-import', async () => {
     const result = mainWin
       ? await dialog.showOpenDialog(mainWin, {

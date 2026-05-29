@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Sandboxed Butterchurn/Milkdrop frame. This is the ONLY surface allowed
+         to eval: butterchurn-presets compiles MilkDrop preset math via the
+         Function constructor at preset load. Scoping it here lets the main
+         renderer (index.html) run with script-src 'self' — no eval. The frame
+         is same-origin app code only; connect-src stays tight (the localhost
+         entries are dev-server HMR only and unused in production). 'unsafe-inline'
+         covers Vite's dev fast-refresh preamble. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws://localhost:5173 http://localhost:5173; base-uri 'none'; form-action 'none'"
+    />
+    <title>NewAmp Milkdrop</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+      }
+      #bc {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="bc"></canvas>
+    <script type="module" src="/src/butterchurn-iframe/main.ts"></script>
+  </body>
+</html>

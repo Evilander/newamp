@@ -38,6 +38,37 @@ export function releaseArtifactSpecs({ root = defaultRoot, version = readPackage
       checksumName: 'linux-unpacked/newamp',
       minimumBytes: 150_000_000,
     },
+    // macOS artifacts can only be produced on a Mac. They are `optional`: hashed
+    // and validated when present (a Mac build, or the CI matrix's merged release
+    // job), but their absence does not invalidate a Windows/Linux-only build.
+    {
+      name: 'mac-dmg-arm64',
+      path: join(root, 'release', `NewAmp ${version} arm64.dmg`),
+      checksumName: `NewAmp ${version} arm64.dmg`,
+      minimumBytes: 80_000_000,
+      optional: true,
+    },
+    {
+      name: 'mac-dmg-x64',
+      path: join(root, 'release', `NewAmp ${version} x64.dmg`),
+      checksumName: `NewAmp ${version} x64.dmg`,
+      minimumBytes: 80_000_000,
+      optional: true,
+    },
+    {
+      name: 'mac-zip-arm64',
+      path: join(root, 'release', `NewAmp ${version} arm64.zip`),
+      checksumName: `NewAmp ${version} arm64.zip`,
+      minimumBytes: 60_000_000,
+      optional: true,
+    },
+    {
+      name: 'mac-zip-x64',
+      path: join(root, 'release', `NewAmp ${version} x64.zip`),
+      checksumName: `NewAmp ${version} x64.zip`,
+      minimumBytes: 60_000_000,
+      optional: true,
+    },
   ];
 }
 
@@ -46,7 +77,10 @@ export function releaseChecksumsPath({ root = defaultRoot } = {}) {
 }
 
 export function buildReleaseChecksums({ root = defaultRoot, version = readPackageVersion(root) } = {}) {
-  const artifacts = releaseArtifactSpecs({ root, version }).map((artifact) => artifactChecksum(artifact, root));
+  const all = releaseArtifactSpecs({ root, version }).map((artifact) => artifactChecksum(artifact, root));
+  // Drop optional artifacts (e.g. macOS, only buildable on a Mac) that are
+  // absent — they neither appear in the manifest nor invalidate the release.
+  const artifacts = all.filter((artifact) => artifact.exists || !artifact.optional);
   return {
     ok: artifacts.every((artifact) => artifact.ok),
     path: releaseChecksumsPath({ root }),

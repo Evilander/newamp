@@ -1,4 +1,15 @@
-# Butterchurn CSP iframe sandbox — deferred
+# Butterchurn CSP iframe sandbox — IMPLEMENTED
+
+> **Status: done.** Butterchurn now runs in `butterchurn-iframe.html`
+> (`src/butterchurn-iframe/`), a same-origin frame whose CSP scopes
+> `'unsafe-eval'` to just that frame; the main renderer is back on
+> `script-src 'self'`. Two simplifications vs. the sketch below: the frame uses
+> its **own visible canvas** (no `OffscreenCanvas.transferControlToOffscreen`),
+> and audio crosses as **per-frame time-domain bytes via `postMessage`** fed to
+> butterchurn's `render({ audioLevels })` path (no SharedArrayBuffer / no shared
+> AudioContext) — which sidesteps the audio-routing problem the original plan
+> called the hard part. Covered by `smoke:butterchurn-sandbox` + `smoke:security`.
+> The historical sketch is kept below for reference.
 
 ## Context
 
