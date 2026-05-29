@@ -27,7 +27,11 @@ const electronBuilder = join(
 
 const requestedTargets = process.argv.slice(2);
 for (const args of electronBuilderTargetArgs(requestedTargets)) {
-  run(electronBuilder, args, {
+  // `--publish never`: NewAmp manages its own release publishing (release
+  // bundle + the CI release job + publish-github-release). Without this,
+  // electron-builder auto-publishes when it sees a git tag and aborts with
+  // "GitHub Personal Access Token is not set" on tagged CI builds.
+  run(electronBuilder, [...args, '--publish', 'never'], {
     env: {
       ...process.env,
       TEMP: packageTemp,
