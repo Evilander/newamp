@@ -403,6 +403,131 @@ export interface ListeningInsights {
   recentDays: ListeningInsightDay[];
 }
 
+// --- NewAmp Wrapped -------------------------------------------------------
+export type WrappedRange = 'day' | 'week' | 'month' | 'year' | 'all';
+
+export interface WrappedTopTrack {
+  id: number;
+  title: string;
+  artist: string;
+  plays: number;
+}
+export interface WrappedTopArtist {
+  artist: string;
+  plays: number;
+  durationSec: number;
+}
+export interface WrappedTopAlbum {
+  album: string;
+  albumArtist: string;
+  plays: number;
+}
+export interface WrappedGenre {
+  genre: string;
+  plays: number;
+}
+export interface WrappedTaste {
+  energy: number; // 0..1
+  brightness: number; // 0..1
+  mood: string;
+}
+export interface WrappedStats {
+  range: WrappedRange;
+  label: string;
+  generatedAt: number;
+  rangeStart: number;
+  rangeEnd: number;
+  totals: {
+    plays: number;
+    durationSec: number;
+    uniqueTracks: number;
+    uniqueArtists: number;
+    discoveries: number;
+    loved: number;
+  };
+  topTracks: WrappedTopTrack[];
+  topArtists: WrappedTopArtist[];
+  topAlbums: WrappedTopAlbum[];
+  genres: WrappedGenre[];
+  listeningClock: number[]; // 24 entries, plays per local hour-of-day
+  peakHour: number | null;
+  busiestDay: { date: string; plays: number } | null;
+  longestStreakDays: number;
+  taste: WrappedTaste | null;
+}
+
+// --- Local-first social objects (Letterboxd-for-listening foundation) -----
+export type SocialPrivacy = 'local' | 'friends' | 'public';
+export type ReviewTargetType = 'track' | 'album' | 'artist';
+
+export interface Review {
+  id: number;
+  targetType: ReviewTargetType;
+  targetKey: string;
+  title: string;
+  body: string;
+  rating: number | null;
+  privacy: SocialPrivacy;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface ReviewInput {
+  id?: number;
+  targetType: ReviewTargetType;
+  targetKey: string;
+  title?: string;
+  body?: string;
+  rating?: number | null;
+  privacy?: SocialPrivacy;
+}
+export interface ListItem {
+  id: number;
+  listId: number;
+  trackId: number | null;
+  label: string;
+  note: string;
+  position: number;
+}
+export interface ListItemInput {
+  listId: number;
+  trackId?: number | null;
+  label?: string;
+  note?: string;
+}
+export interface ListSummary {
+  id: number;
+  title: string;
+  description: string;
+  ranked: boolean;
+  privacy: SocialPrivacy;
+  itemCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface ListDetail extends ListSummary {
+  items: ListItem[];
+}
+export interface ListInput {
+  id?: number;
+  title?: string;
+  description?: string;
+  ranked?: boolean;
+  privacy?: SocialPrivacy;
+}
+export interface UserProfile {
+  displayName: string;
+  bio: string;
+  favorites: string[];
+  defaultPrivacy: SocialPrivacy;
+  updatedAt: number;
+}
+export interface UserProfileInput {
+  displayName?: string;
+  bio?: string;
+  favorites?: string[];
+  defaultPrivacy?: SocialPrivacy;
+}
+
 export interface SaveTrackBookmarkInput {
   id?: number;
   trackId: number;
@@ -790,6 +915,7 @@ export type VisualizerPreset =
   | 'tempo-pulse'
   | 'lattice-strobe'
   | 'liquid-mercury'
+  | 'particle-flow'
   | 'album-breathe';
 export type GuitarTabLineType = 'chords' | 'lyrics' | 'blank' | 'section' | 'tab';
 export type GuitarTabSource = 'ultimate-guitar' | 'local';
@@ -936,6 +1062,9 @@ export interface NewAmpAPI {
   exportPlaylistFolder: (id: number) => Promise<PlaylistFolderExportResult | null>;
   exportTracksFolder: (input: ExportTracksFolderInput) => Promise<PlaylistFolderExportResult | null>;
   importPlaylistM3u: () => Promise<PlaylistM3uImportResult | null>;
+  captureVisualizerPng: (rect?: { x: number; y: number; width: number; height: number }) => Promise<string | null>;
+  copyPngToClipboard: (dataUrl: string) => Promise<boolean>;
+  saveCaptureBytes: (payload: { base64: string; defaultName: string; filterName: string; ext: string }) => Promise<string | null>;
   exportTrackWav: (id: number) => Promise<TrackWavExportResult | null>;
   exportTracksWav: (ids: number[]) => Promise<TrackWavBatchExportResult | null>;
   exportTracksAudio: (ids: number[], format: AudioExportFormat) => Promise<TrackAudioBatchExportResult | null>;
@@ -991,6 +1120,20 @@ export interface NewAmpAPI {
   pruneMissingTracks: (targets?: string[]) => Promise<LibraryPruneMissingResult>;
   getListeningHistory: (opts?: { limit?: number; offset?: number }) => Promise<ListeningHistoryItem[]>;
   getListeningInsights: (opts?: { now?: number }) => Promise<ListeningInsights>;
+  getWrappedStats: (opts?: { range?: WrappedRange; now?: number }) => Promise<WrappedStats>;
+  getReviews: (target?: { type: ReviewTargetType; key: string }) => Promise<Review[]>;
+  saveReview: (input: ReviewInput) => Promise<Review>;
+  deleteReview: (id: number) => Promise<void>;
+  getLists: () => Promise<ListSummary[]>;
+  getList: (id: number) => Promise<ListDetail | null>;
+  saveList: (input: ListInput) => Promise<ListSummary>;
+  deleteList: (id: number) => Promise<void>;
+  addListItem: (input: ListItemInput) => Promise<ListItem>;
+  removeListItem: (id: number) => Promise<void>;
+  reorderListItems: (listId: number, orderedIds: number[]) => Promise<void>;
+  getProfile: () => Promise<UserProfile>;
+  saveProfile: (input: UserProfileInput) => Promise<UserProfile>;
+  exportProfileBundle: () => Promise<string | null>;
   clearListeningHistory: () => Promise<void>;
   getTrackBookmarks: (trackId: number) => Promise<TrackBookmark[]>;
   saveTrackBookmark: (input: SaveTrackBookmarkInput) => Promise<TrackBookmark>;

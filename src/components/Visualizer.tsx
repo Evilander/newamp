@@ -2,6 +2,14 @@ import { useEffect, useRef } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import type { AudioEngine } from '../audio/engine';
+import {
+  BUTTERCHURN_FFT_SIZE,
+  type BcAudioMessage,
+  type BcDisposeMessage,
+  type BcFrameMessage,
+  type BcInitMessage,
+} from '../butterchurn-iframe/protocol';
+import { createParticleFlowRenderer } from '../visualizer/particle-flow';
 
 export type VizMode =
   | 'mini'
@@ -22,6 +30,7 @@ export type VizMode =
   | 'tempo-pulse'
   | 'lattice-strobe'
   | 'liquid-mercury'
+  | 'particle-flow'
   | 'butterchurn';
 
 export type VizQuality = 'auto' | '4k';
@@ -102,6 +111,7 @@ export function Visualizer({
   reactivity = 'punch',
 }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const butterchurnIframeRef = useRef<HTMLIFrameElement>(null);
   const engine = usePlayerStore((s) => s.engine);
   const isFullscreen = width == null && height == null && mode !== 'mini';
   const frameIntervalMs = isFullscreen
@@ -125,167 +135,167 @@ export function Visualizer({
     if (!canvas) return;
 
     if (mode === 'butterchurn') {
-      const butterCanvas = canvas;
+      // Butterchurn runs inside a sandboxed iframe (butterchurn-iframe.html) so
+      // its preset-shader eval is scoped to a frame whose CSP permits
+      // 'unsafe-eval' — the main renderer stays on script-src 'self'. Web Audio
+      // nodes can't cross the iframe boundary, so we post raw time-domain bytes
+      // each frame and the iframe feeds them to butterchurn's render({ audioLevels })
+      // path. If the frame can't host butterchurn (load error / missing feature /
+      // timeout) we drop to the non-eval canvas-2D fallback so it never goes dark.
+      const iframe = butterchurnIframeRef.current;
+      if (!iframe) return;
       let raf = 0;
-      let presetTimer: number | null = null;
-      let cancelled = false;
-      let visualizer: ButterchurnVisualizer | null = null;
-      let lastW = 0;
-      let lastH = 0;
+      let fallbackRaf = 0;
+      let disposed = false;
+      let ready = false;
+      let mounted = false;
 
       const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
       const canPaint = createFrameGate(canvasRef, frameIntervalMs);
-      // Butterchurn is shader-fragment-dominated and gains little visual
-      // detail above 1440p — but a 4K render is ~2.25× the fragment cost.
-      // Cap its render budget to ~2.5M pixels regardless of the user's 4K
-      // toggle so heavy presets stay smooth. The standalone canvas-2D
-      // presets don't have this scaling issue.
-      const presetMaxPixels = isFullscreen && mode === 'butterchurn'
-        ? Math.min(maxPixels, 2_500_000)
-        : maxPixels;
+      const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
+      const samples = new Uint8Array(BUTTERCHURN_FFT_SIZE);
+      // butterchurn wants 1024 time-domain samples; the engine analyser is 2048.
+      // Decimate by an integer stride to cover the same window at half rate.
+      const stride = Math.max(1, Math.floor(engine.fftSize / BUTTERCHURN_FFT_SIZE));
 
-      function ensureSize() {
+      const startFallback = () => {
+        iframe.style.display = 'none';
         const node = canvasRef.current;
         if (!node) return;
-        const cssW = node.clientWidth || node.width || 100;
-        const cssH = node.clientHeight || node.height || 100;
-        const scaledW = Math.max(8, Math.floor(cssW * dpr));
-        const scaledH = Math.max(8, Math.floor(cssH * dpr));
-        const scale = Math.min(1, Math.sqrt(presetMaxPixels / Math.max(1, scaledW * scaledH)));
-        const targetW = Math.max(8, Math.floor(scaledW * scale));
-        const targetH = Math.max(8, Math.floor(scaledH * scale));
-        if (targetW === lastW && targetH === lastH) return;
-        lastW = targetW;
-        lastH = targetH;
-        node.width = targetW;
-        node.height = targetH;
-        visualizer?.setRendererSize(targetW, targetH);
-      }
+        const fb = (now: number) => {
+          if (disposed) return;
+          if (canPaint(now)) paintMilkdropFallback(node, engine);
+          fallbackRaf = requestAnimationFrame(fb);
+        };
+        fallbackRaf = requestAnimationFrame(fb);
+      };
 
-      async function startButterchurn() {
-        try {
-          const [butterchurnModule, presetModule] = await Promise.all([
-            import('butterchurn'),
-            import('butterchurn-presets'),
-          ]);
-          if (cancelled) return;
-          const butterchurn = unwrapDefault<ButterchurnFactory>(butterchurnModule);
-          const presetApi = unwrapDefault<ButterchurnPresetApi>(presetModule);
-
-          ensureSize();
-          // Guard against zero-sized canvas — butterchurn throws on width=0
-          // and the silent catch then drops us into the fallback forever.
-          // Wait one rAF for layout if we got an empty canvas on first paint.
-          if (lastW < 8 || lastH < 8) {
-            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-            if (cancelled) return;
-            ensureSize();
-          }
-          if (lastW < 8 || lastH < 8) {
-            // Layout still hasn't given us real dimensions. Force a minimum
-            // so the visualizer can boot; ensureSize will resize on next frame.
-            lastW = Math.max(lastW, 320);
-            lastH = Math.max(lastH, 180);
-            butterCanvas.width = lastW;
-            butterCanvas.height = lastH;
-          }
-          // Butterchurn needs an AudioContext that's been resumed at least
-          // once. Touch it first so renderer + analyser are both alive.
-          if (engine.ctx.state === 'suspended') {
-            try {
-              await engine.ctx.resume();
-            } catch {
-              /* user gesture required — render will pick up when audio plays */
-            }
-          }
-          // 32×24 = upstream butterchurn default; 48×36 was 2.25× per-vertex
-          // cost during preset blend (renders both presets simultaneously).
-          visualizer = butterchurn.createVisualizer(engine.ctx, butterCanvas, {
-            width: lastW,
-            height: lastH,
-            meshWidth: 32,
-            meshHeight: 24,
-          });
-          visualizer.connectAudio(engine.visualizerNode);
-          // Positive boot signal for the ui-visualizer smoke. Setting this
-          // *after* createVisualizer + connectAudio means the smoke can
-          // distinguish "butterchurn really mounted" from "canvas exists in
-          // the DOM but the factory threw inside it". Software WebGL can't
-          // reliably paint shader pixels, so this is the production proof
-          // that the integration is live.
-          butterCanvas.setAttribute('data-newamp-butterchurn-mounted', 'true');
-
-          const presets = Object.entries(presetApi.getPresets()).filter(
-            (entry): entry is [string, Record<string, unknown>] =>
-              !!entry[1] && typeof entry[1] === 'object',
-          );
-          if (!presets.length) throw new Error('No Butterchurn presets loaded');
-
-          const loadRandomPreset = (blendSeconds: number) => {
-            const [, preset] = presets[Math.floor(Math.random() * presets.length)]!;
-            visualizer?.loadPreset(preset, blendSeconds);
-          };
-
-          // Rotate slower (was 16s) and blend faster (was 3.6s). The blend
-          // window is the GPU-hot moment for butterchurn — both presets
-          // render simultaneously, doubling shader cost. Shorter blend +
-          // longer dwell means less time spent in the expensive crossfade
-          // state and more time on a single preset, which is what users
-          // actually see and what stays smooth.
-          loadRandomPreset(0);
-          presetTimer = window.setInterval(() => loadRandomPreset(2.2), 22000);
-
-          // Simple render loop — the previous "adaptive resolution scaling"
-          // attempt reassigned the `ensureSize` function declaration mid-
-          // effect, which in TypeScript strict-mode modules breaks the
-          // visualizer entirely. The simpler path is fast enough: mesh
-          // 32×24 + the presetMaxPixels cap above already keep butterchurn
-          // smooth on heavy presets without runtime resolution hunting.
-          const frame = (now: number) => {
-            if (canPaint(now)) {
-              ensureSize();
-              visualizer?.render();
-            }
-            raf = requestAnimationFrame(frame);
-          };
-          raf = requestAnimationFrame(frame);
-        } catch (err) {
-          // Surface the real failure so users (and the milkdrop smoke) can
-          // see WHY butterchurn isn't rendering. Previously we silently
-          // dropped into the fallback which made the bug invisible.
-          console.error('[newamp] butterchurn failed to start:', err);
-          butterCanvas.setAttribute('data-newamp-butterchurn-mounted', 'failed');
-          if (!cancelled) {
-            const frameFallback = (now: number) => {
-              if (canPaint(now)) paintMilkdropFallback(butterCanvas, engine);
-              raf = requestAnimationFrame(frameFallback);
-            };
-            raf = requestAnimationFrame(frameFallback);
-          }
+      const onMessage = (event: MessageEvent) => {
+        if (event.source !== iframe.contentWindow) return;
+        const msg = event.data as BcFrameMessage | undefined;
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.type === 'ready') {
+          ready = true;
+          const init: BcInitMessage = { type: 'init', sampleRate: engine.getSampleRate(), dpr };
+          iframe.contentWindow?.postMessage(init, '*');
+        } else if (msg.type === 'mounted') {
+          mounted = true;
+          // Mirror the legacy boot signal the ui-visualizer smoke asserts on.
+          canvasRef.current?.setAttribute('data-newamp-butterchurn-mounted', 'true');
+        } else if (msg.type === 'failed') {
+          console.error('[newamp] butterchurn iframe failed to start:', msg.error);
+          canvasRef.current?.setAttribute('data-newamp-butterchurn-mounted', 'failed');
+          startFallback();
         }
-      }
+      };
+      window.addEventListener('message', onMessage);
 
-      void startButterchurn();
+      // Resume the AudioContext so the analyser produces real bytes.
+      if (engine.ctx.state === 'suspended') void engine.ctx.resume().catch(() => {});
+
+      const pump = (now: number) => {
+        if (disposed) return;
+        if (ready && canPaint(now)) {
+          engine.getTimeData(wave);
+          for (let i = 0; i < BUTTERCHURN_FFT_SIZE; i++) samples[i] = wave[i * stride] ?? 128;
+          const audio: BcAudioMessage = { type: 'audio', samples };
+          iframe.contentWindow?.postMessage(audio, '*');
+        }
+        raf = requestAnimationFrame(pump);
+      };
+      raf = requestAnimationFrame(pump);
+
+      // dev: http://localhost:5173/butterchurn-iframe.html
+      // prod: newamp-app://app/butterchurn-iframe.html
+      iframe.src = new URL('butterchurn-iframe.html', window.location.href).toString();
+
+      const mountTimeout = window.setTimeout(() => {
+        if (!mounted && !disposed) {
+          console.error('[newamp] butterchurn iframe did not mount within timeout; using fallback');
+          canvasRef.current?.setAttribute('data-newamp-butterchurn-mounted', 'failed');
+          startFallback();
+        }
+      }, 8000);
 
       return () => {
-        cancelled = true;
+        disposed = true;
         cancelAnimationFrame(raf);
-        if (presetTimer != null) window.clearInterval(presetTimer);
+        cancelAnimationFrame(fallbackRaf);
+        window.clearTimeout(mountTimeout);
+        window.removeEventListener('message', onMessage);
         try {
-          visualizer?.disconnectAudio(engine.visualizerNode);
-        } catch (err) {
-          // Web Audio throws InvalidAccessError / "not connected" when a
-          // node was never wired or already disconnected — that's the
-          // benign double-disconnect we expect during rapid preset
-          // thrash. Anything else (graph corruption, disposed analyser,
-          // closed AudioContext) is a real problem and must not be
-          // logged at the same level as the noise.
-          const msg = err instanceof Error ? err.message : String(err);
-          const isBenignDoubleDisconnect = /InvalidAccessError|not connected/i.test(msg);
-          if (!isBenignDoubleDisconnect) {
-            console.error('[newamp] butterchurn disconnectAudio: unexpected graph error', err);
-          }
+          const dispose: BcDisposeMessage = { type: 'dispose' };
+          iframe.contentWindow?.postMessage(dispose, '*');
+        } catch {
+          /* frame already torn down */
         }
+        iframe.src = 'about:blank';
+      };
+    }
+
+    if (mode === 'particle-flow') {
+      // WebGL2 GPU particle flow-field. createParticleFlowRenderer returns null
+      // when WebGL2 / transform feedback is unavailable, in which case we keep
+      // the canvas alive with the non-eval 2D fallback so it never goes dark.
+      const smoke = Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke);
+      const particleBudget = performance === 'low'
+        ? 40_000
+        : isFullscreen
+          ? quality === '4k' ? 140_000 : 110_000
+          : 60_000;
+      const canPaint = createFrameGate(canvasRef, frameIntervalMs);
+      const baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
+      let raf = 0;
+      const renderer = createParticleFlowRenderer(canvas, { particles: particleBudget, smoke });
+
+      if (!renderer) {
+        const fb = (now: number) => {
+          if (canPaint(now)) paintMilkdropFallback(canvas, engine);
+          raf = requestAnimationFrame(fb);
+        };
+        raf = requestAnimationFrame(fb);
+        return () => cancelAnimationFrame(raf);
+      }
+
+      const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+      const onsetFreq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+      const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
+      const analyze = createAudioFeatureAnalyzer({
+        sampleRate: engine.getSampleRate(),
+        fftSize: engine.fftSize,
+      });
+      let lastNow = 0;
+      if (engine.ctx.state === 'suspended') void engine.ctx.resume().catch(() => {});
+
+      const frame = (now: number) => {
+        if (canPaint(now)) {
+          const node = canvasRef.current;
+          if (node) {
+            const cssW = node.clientWidth || 100;
+            const cssH = node.clientHeight || 100;
+            const fit = Math.min(1, Math.sqrt(maxPixels / Math.max(1, cssW * baseDpr * cssH * baseDpr)));
+            renderer.resize(cssW, cssH, baseDpr * fit);
+          }
+          engine.getFreqData(freq);
+          engine.getOnsetFreqData(onsetFreq);
+          engine.getTimeData(wave);
+          boostFrequencyData(freq, reactivity);
+          const f = analyze(freq, wave, onsetFreq);
+          const dt = lastNow ? (now - lastNow) / 1000 : 1 / 60;
+          lastNow = now;
+          renderer.render(
+            { bass: f.bass, mid: f.mid, treble: f.treble, rms: f.rms, beat: f.beat, kick: f.kick, beatEdge: f.beatEdge },
+            parseRgbVec(getCssVar('--accent')),
+            dt,
+          );
+        }
+        raf = requestAnimationFrame(frame);
+      };
+      raf = requestAnimationFrame(frame);
+
+      return () => {
+        cancelAnimationFrame(raf);
+        renderer.dispose();
       };
     }
 
@@ -1295,6 +1305,33 @@ export function Visualizer({
   if (width != null) style.width = `${width}px`;
   if (height != null) style.height = `${height}px`;
 
+  // Butterchurn mode layers a sandboxed iframe (the actual Milkdrop render)
+  // over a placeholder canvas. The canvas keeps the smoke selector + mount flag
+  // and is the surface the canvas-2D fallback paints to if the iframe can't host.
+  if (mode === 'butterchurn') {
+    return (
+      <div
+        key={`bc-${palette}-${quality}-${performance}-${reactivity}`}
+        className={className ?? 'h-full w-full'}
+        style={{ position: 'relative', overflow: 'hidden', borderRadius: 'var(--radius)', ...style }}
+      >
+        <canvas
+          ref={canvasRef}
+          data-newamp-visualizer-canvas
+          data-newamp-visualizer-mode={mode}
+          style={{ position: 'absolute', inset: 0, display: 'block', width: '100%', height: '100%', borderRadius: 'var(--radius)' }}
+        />
+        <iframe
+          ref={butterchurnIframeRef}
+          title="NewAmp Milkdrop visualizer"
+          aria-hidden="true"
+          tabIndex={-1}
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 'none', borderRadius: 'var(--radius)', display: 'block', pointerEvents: 'none' }}
+        />
+      </div>
+    );
+  }
+
   return (
     <canvas
       key={`${mode}-${palette}-${quality}-${performance}-${reactivity}`}
@@ -1305,31 +1342,6 @@ export function Visualizer({
       style={{ display: 'block', borderRadius: 'var(--radius)', ...style }}
     />
   );
-}
-
-interface ButterchurnVisualizer {
-  connectAudio(audioNode: AudioNode): void;
-  disconnectAudio(audioNode: AudioNode): void;
-  loadPreset(preset: Record<string, unknown>, blendSeconds?: number): void;
-  render(): void;
-  setRendererSize(width: number, height: number): void;
-}
-
-interface ButterchurnFactory {
-  createVisualizer(
-    context: AudioContext,
-    canvas: HTMLCanvasElement,
-    opts: Record<string, unknown>,
-  ): ButterchurnVisualizer;
-}
-
-interface ButterchurnPresetApi {
-  getPresets(): Record<string, Record<string, unknown>>;
-}
-
-function unwrapDefault<T>(module: unknown): T {
-  const first = (module as { default?: unknown }).default ?? module;
-  return ((first as { default?: unknown }).default ?? first) as T;
 }
 
 interface ShaderVisualizerOptions {

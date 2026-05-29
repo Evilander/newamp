@@ -31,6 +31,8 @@ const VIEW_ITEMS: Array<{ view: ViewMode; title: string; subtitle: string }> = [
   { view: 'artists', title: 'Artists', subtitle: 'Artist drill-in and facts' },
   { view: 'loved', title: 'Loved', subtitle: 'Loved tracks' },
   { view: 'history', title: 'History', subtitle: 'Listening history' },
+  { view: 'wrapped', title: 'Wrapped', subtitle: 'Daily / weekly / monthly / yearly listening recap, shareable cards' },
+  { view: 'profile', title: 'Profile', subtitle: 'Your reviews, lists, and an exportable local profile page' },
   { view: 'playlist', title: 'Playlists', subtitle: 'Saved playlists, queue, smart sets, Auto DJ' },
   { view: 'now-playing', title: 'Now Playing', subtitle: 'Visualizer, lyrics, tabs, practice tools' },
   { view: 'podcasts', title: 'Podcasts', subtitle: 'Subscriptions, resume, downloads' },

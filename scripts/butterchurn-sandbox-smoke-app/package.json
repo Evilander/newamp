@@ -1,0 +1,5 @@
+{
+  "name": "newamp-butterchurn-sandbox-smoke",
+  "type": "module",
+  "main": "../butterchurn-sandbox-smoke.mjs"
+}

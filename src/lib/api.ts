@@ -9,6 +9,8 @@ import type {
   DiscoverSurfaceInput,
   GuitarTabLine,
   ListeningInsights,
+  WrappedStats,
+  WrappedRange,
   NewAmpAPI,
   SupportDiagnostics,
   TrackMetadataPatchInput,
@@ -93,6 +95,26 @@ function emptyListeningInsights(now = Date.now()): ListeningInsights {
   };
 }
 
+function emptyWrappedStats(range: WrappedRange = 'year', now = Date.now()): WrappedStats {
+  return {
+    range,
+    label: range === 'all' ? 'All Time' : '',
+    generatedAt: now,
+    rangeStart: 0,
+    rangeEnd: now,
+    totals: { plays: 0, durationSec: 0, uniqueTracks: 0, uniqueArtists: 0, discoveries: 0, loved: 0 },
+    topTracks: [],
+    topArtists: [],
+    topAlbums: [],
+    genres: [],
+    listeningClock: new Array(24).fill(0),
+    peakHour: null,
+    busiestDay: null,
+    longestStreakDays: 0,
+    taste: null,
+  };
+}
+
 function emptyDiscoverSurface(input: DiscoverSurfaceInput = {}): DiscoverSurface {
   return {
     modeName: 'Living Library',
@@ -173,6 +195,9 @@ const stub: NewAmpAPI = {
   exportPlaylistFolder: async () => null,
   exportTracksFolder: async () => null,
   importPlaylistM3u: async () => null,
+  captureVisualizerPng: async () => null,
+  copyPngToClipboard: async () => false,
+  saveCaptureBytes: async () => null,
   exportTrackWav: async () => null,
   exportTracksWav: async () => null,
   exportTracksAudio: async () => null,
@@ -304,6 +329,52 @@ const stub: NewAmpAPI = {
   pruneMissingTracks: async () => ({ checked: 0, removed: 0 }),
   getListeningHistory: async () => [],
   getListeningInsights: async (opts) => emptyListeningInsights(opts?.now),
+  getWrappedStats: async (opts) => emptyWrappedStats(opts?.range, opts?.now),
+  getReviews: async () => [],
+  saveReview: async (input) => ({
+    id: 0,
+    targetType: input.targetType,
+    targetKey: input.targetKey,
+    title: input.title ?? '',
+    body: input.body ?? '',
+    rating: input.rating ?? null,
+    privacy: input.privacy ?? 'local',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  }),
+  deleteReview: async () => undefined,
+  getLists: async () => [],
+  getList: async () => null,
+  saveList: async (input) => ({
+    id: 0,
+    title: input.title ?? 'Untitled list',
+    description: input.description ?? '',
+    ranked: input.ranked ?? true,
+    privacy: input.privacy ?? 'local',
+    itemCount: 0,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  }),
+  deleteList: async () => undefined,
+  addListItem: async (input) => ({
+    id: 0,
+    listId: input.listId,
+    trackId: input.trackId ?? null,
+    label: input.label ?? '',
+    note: input.note ?? '',
+    position: 0,
+  }),
+  removeListItem: async () => undefined,
+  reorderListItems: async () => undefined,
+  getProfile: async () => ({ displayName: '', bio: '', favorites: [], defaultPrivacy: 'local', updatedAt: 0 }),
+  saveProfile: async (input) => ({
+    displayName: input.displayName ?? '',
+    bio: input.bio ?? '',
+    favorites: input.favorites ?? [],
+    defaultPrivacy: input.defaultPrivacy ?? 'local',
+    updatedAt: Date.now(),
+  }),
+  exportProfileBundle: async () => null,
   clearListeningHistory: async () => undefined,
   getTrackBookmarks: async () => [],
   saveTrackBookmark: async (input) => ({

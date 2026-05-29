@@ -15,6 +15,7 @@ import type { VisualizerPreset } from '@shared/types';
 import { volumeLabel } from './VolumeSlider';
 
 const PRESETS = [
+  { id: 'particle-flow', label: 'Particle Flow' },
   { id: 'tempo-pulse', label: 'Tempo Pulse' },
   { id: 'lattice-strobe', label: 'Lattice Strobe' },
   { id: 'liquid-mercury', label: 'Liquid Mercury' },
@@ -61,6 +62,7 @@ const REACTIVITY_MODES = [
 ] as const satisfies ReadonlyArray<{ id: VizReactivity; label: string }>;
 
 const AUTO_VJ_BALANCED: VisualizerPreset[] = [
+  'particle-flow',
   'tempo-pulse',
   'lattice-strobe',
   'liquid-mercury',
@@ -99,6 +101,15 @@ function loadStoredBoolean(key: string, fallback: boolean): boolean {
   if (raw === '1') return true;
   if (raw === '0') return false;
   return fallback;
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error('FileReader failed'));
+    reader.readAsDataURL(blob);
+  });
 }
 
 function loadVisualizerPalette(): VizPalette {
@@ -153,6 +164,8 @@ export function FullscreenVisualizer(): JSX.Element {
   // top toolbar so the visualizer can be enjoyed without UI clutter. Any
   // cursor movement re-shows it for a few seconds before hiding again.
   const [cursorActive, setCursorActive] = useState(true);
+  const [recording, setRecording] = useState(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
   const levelMeterRef = useRef<HTMLSpanElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -483,6 +496,78 @@ export function FullscreenVisualizer(): JSX.Element {
     return () => window.cancelAnimationFrame(raf);
   }, [autoVjEnabled, engine]);
 
+  // Stop an in-flight recording if the visualizer is closed mid-capture.
+  useEffect(() => () => {
+    try {
+      recorderRef.current?.stop();
+    } catch {
+      /* recorder already stopped */
+    }
+  }, []);
+
+  const captureStem = (): string =>
+    current ? `NewAmp - ${current.artist} - ${current.title}` : 'NewAmp Visualizer';
+
+  const captureRect = (): { x: number; y: number; width: number; height: number } | undefined => {
+    const el = rootRef.current;
+    if (!el) return undefined;
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.top, width: r.width, height: r.height };
+  };
+
+  // Still capture uses capturePage (main process) so it works for every mode —
+  // including the sandboxed Butterchurn iframe and the WebGL2 particle field.
+  const captureStill = async (): Promise<void> => {
+    const dataUrl = await api.captureVisualizerPng(captureRect());
+    if (!dataUrl) return;
+    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    await api.saveCaptureBytes({ base64, defaultName: captureStem(), filterName: 'PNG image', ext: 'png' });
+  };
+
+  const copyStill = async (): Promise<void> => {
+    const dataUrl = await api.captureVisualizerPng(captureRect());
+    if (dataUrl) await api.copyPngToClipboard(dataUrl);
+  };
+
+  // Clip recording streams the live visualizer canvas (the rendering surface —
+  // for Butterchurn that's the canvas inside its iframe) to a WebM via
+  // MediaRecorder. Toggle to start/stop; on stop we offer a save dialog.
+  const toggleRecord = (): void => {
+    if (recording) {
+      recorderRef.current?.stop();
+      return;
+    }
+    let canvas = rootRef.current?.querySelector(
+      'canvas[data-newamp-visualizer-canvas]',
+    ) as HTMLCanvasElement | null;
+    const iframe = rootRef.current?.querySelector('iframe') as HTMLIFrameElement | null;
+    const frameCanvas = iframe?.contentDocument?.getElementById('bc') as HTMLCanvasElement | null;
+    if (frameCanvas) canvas = frameCanvas;
+    if (!canvas || typeof canvas.captureStream !== 'function' || typeof MediaRecorder === 'undefined') return;
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(canvas.captureStream(30), { mimeType: 'video/webm' });
+    } catch {
+      return;
+    }
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size) chunks.push(event.data);
+    };
+    recorder.onstop = async () => {
+      setRecording(false);
+      recorderRef.current = null;
+      if (!chunks.length) return;
+      const dataUrl = await blobToDataUrl(new Blob(chunks, { type: 'video/webm' }));
+      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      await api.saveCaptureBytes({ base64, defaultName: captureStem(), filterName: 'WebM video', ext: 'webm' });
+    };
+    recorderRef.current = recorder;
+    recorder.start();
+    setRecording(true);
+  };
+
   return (
     <div
       ref={rootRef}
@@ -620,6 +705,30 @@ export function FullscreenVisualizer(): JSX.Element {
           title="Take over the physical screen (F)"
         >
           SCREEN
+        </button>
+        <button
+          className="pxbtn"
+          data-newamp-viz-capture-button
+          onClick={() => void captureStill()}
+          title="Save a PNG still of the visualizer (press H first for a clean shot)"
+        >
+          CAPTURE
+        </button>
+        <button
+          className="pxbtn"
+          data-newamp-viz-copy-button
+          onClick={() => void copyStill()}
+          title="Copy a PNG still to the clipboard"
+        >
+          COPY
+        </button>
+        <button
+          className={`pxbtn ${recording ? 'is-active' : ''}`}
+          data-newamp-viz-record-button
+          onClick={toggleRecord}
+          title={recording ? 'Stop recording and save a WebM clip' : 'Record a WebM clip of the visualizer'}
+        >
+          {recording ? '■ STOP' : '● REC'}
         </button>
         <button
           className={`pxbtn ${!chromeVisible ? 'is-active' : ''}`}
