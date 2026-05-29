@@ -1,0 +1,127 @@
+name: Release
+
+# Tag-triggered, per-OS matrix build. Each runner packages NewAmp for its own
+# platform, optionally signs/notarizes when the relevant secrets are present
+# (skips cleanly when absent — mirrors scripts/sign-artifacts.mjs env-gating),
+# and uploads its artifacts. A final job recomputes the cross-platform checksum
+# manifest + release bundle and drafts a GitHub release.
+#
+# NOTE: the macOS leg uses `npm run package:mac`, added in Phase 1 alongside the
+# package.json `mac` target and entitlements. This workflow only fires on a
+# version tag, so it is safe to land ahead of that.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Map signing/notarization secrets to job-level env so step `if:` conditions
+    # can see them (a step's own `env:` is NOT visible to its own `if:`). Absent
+    # secrets resolve to '' and the dependent steps skip cleanly.
+    env:
+      NEWAMP_SIGN_CERT_PATH: ${{ secrets.NEWAMP_SIGN_CERT_PATH }}
+      NEWAMP_SIGN_CERT_PASSWORD: ${{ secrets.NEWAMP_SIGN_CERT_PASSWORD }}
+      NEWAMP_APPLE_ID: ${{ secrets.NEWAMP_APPLE_ID }}
+      NEWAMP_APPLE_PASSWORD: ${{ secrets.NEWAMP_APPLE_PASSWORD }}
+      NEWAMP_TEAM_ID: ${{ secrets.NEWAMP_TEAM_ID }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            package_cmd: npm run package:mac
+            artifact: macos
+          - os: windows-latest
+            package_cmd: npm run package -- --win
+            artifact: windows
+          - os: ubuntu-latest
+            package_cmd: npm run package:linux
+            artifact: linux
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Package
+        run: ${{ matrix.package_cmd }}
+
+      - name: Verify packaged app launches (macOS)
+        if: matrix.os == 'macos-latest'
+        # Non-blocking: GUI launch can be flaky on hosted runners without a
+        # display; don't block artifact publishing on it.
+        continue-on-error: true
+        run: npm run smoke:mac-launch
+
+      - name: Sign (Windows Authenticode)
+        if: matrix.os == 'windows-latest' && env.NEWAMP_SIGN_CERT_PATH != ''
+        run: npm run release:sign
+
+      - name: Notarize (macOS)
+        if: matrix.os == 'macos-latest' && env.NEWAMP_APPLE_ID != ''
+        run: npm run release:notarize
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: newamp-${{ matrix.artifact }}
+          path: |
+            release/NewAmp*.*
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Draft GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: newamp-*
+          merge-multiple: true
+          path: release
+
+      - name: Recompute cross-platform checksums + bundle
+        run: |
+          npm run release:checksums
+          npm run release:provenance
+          npm run release:bundle
+
+      - name: Draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            release/NewAmp*.*
+            release/SHA256SUMS.txt
+            release/BUILD-PROVENANCE.json

@@ -52,6 +52,7 @@ function electronBuilderTargetArgs(args) {
   if (args.includes('--portable')) return [['--win=portable']];
   if (args.includes('--installer') || args.includes('--nsis')) return [['--win=nsis']];
   if (args.includes('--linux')) return [['--linux=tar.gz']];
+  if (args.includes('--mac')) return [['--mac=dmg', '--mac=zip']];
   if (args.includes('--win')) return [['--win=nsis'], ['--win=portable']];
   return [['--win=nsis'], ['--win=portable'], ['--linux=tar.gz']];
 }

@@ -30,6 +30,15 @@ import type {
   LocalLyricsResult,
   ListeningHistoryItem,
   ListeningInsights,
+  WrappedStats,
+  Review,
+  ReviewInput,
+  ListSummary,
+  ListDetail,
+  ListItem,
+  ListInput,
+  ListItemInput,
+  UserProfile,
   MetadataLookupCandidate,
   NewAmpAPI,
   PlaylistFolderExportResult,
@@ -125,6 +134,12 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('playlist:export-tracks-folder', input) as Promise<PlaylistFolderExportResult | null>,
   importPlaylistM3u: () =>
     ipcRenderer.invoke('playlist:import-m3u') as Promise<PlaylistM3uImportResult | null>,
+  captureVisualizerPng: (rect?: { x: number; y: number; width: number; height: number }) =>
+    ipcRenderer.invoke('media:capture-page', rect) as Promise<string | null>,
+  copyPngToClipboard: (dataUrl: string) =>
+    ipcRenderer.invoke('media:copy-png', dataUrl) as Promise<boolean>,
+  saveCaptureBytes: (payload: { base64: string; defaultName: string; filterName: string; ext: string }) =>
+    ipcRenderer.invoke('media:save-capture', payload) as Promise<string | null>,
   exportTrackWav: (id: number) =>
     ipcRenderer.invoke('track:export-wav', id) as Promise<TrackWavExportResult | null>,
   exportTracksWav: (ids: number[]) =>
@@ -236,6 +251,22 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('history:get', opts) as Promise<ListeningHistoryItem[]>,
   getListeningInsights: (opts) =>
     ipcRenderer.invoke('history:insights', opts) as Promise<ListeningInsights>,
+  getWrappedStats: (opts) =>
+    ipcRenderer.invoke('history:wrapped', opts) as Promise<WrappedStats>,
+  getReviews: (target) => ipcRenderer.invoke('social:reviews:get', target) as Promise<Review[]>,
+  saveReview: (input) => ipcRenderer.invoke('social:reviews:save', input) as Promise<Review>,
+  deleteReview: (id: number) => ipcRenderer.invoke('social:reviews:delete', id) as Promise<void>,
+  getLists: () => ipcRenderer.invoke('social:lists:get') as Promise<ListSummary[]>,
+  getList: (id: number) => ipcRenderer.invoke('social:list:get', id) as Promise<ListDetail | null>,
+  saveList: (input) => ipcRenderer.invoke('social:lists:save', input) as Promise<ListSummary>,
+  deleteList: (id: number) => ipcRenderer.invoke('social:lists:delete', id) as Promise<void>,
+  addListItem: (input) => ipcRenderer.invoke('social:list-item:add', input) as Promise<ListItem>,
+  removeListItem: (id: number) => ipcRenderer.invoke('social:list-item:remove', id) as Promise<void>,
+  reorderListItems: (listId: number, orderedIds: number[]) =>
+    ipcRenderer.invoke('social:list:reorder', listId, orderedIds) as Promise<void>,
+  getProfile: () => ipcRenderer.invoke('social:profile:get') as Promise<UserProfile>,
+  saveProfile: (input) => ipcRenderer.invoke('social:profile:save', input) as Promise<UserProfile>,
+  exportProfileBundle: () => ipcRenderer.invoke('social:export-profile') as Promise<string | null>,
   clearListeningHistory: () => ipcRenderer.invoke('history:clear') as Promise<void>,
   getTrackBookmarks: (trackId: number) =>
     ipcRenderer.invoke('bookmark:list', trackId) as Promise<TrackBookmark[]>,

@@ -46,6 +46,8 @@ const GROUPS: NavGroup[] = [
     items: [
       { id: 'loved', label: 'Loved', icon: 'M10 17l-6.5-6.5a4 4 0 015.66-5.66L10 6l.84-1.16a4 4 0 015.66 5.66L10 17z' },
       { id: 'history', label: 'History', icon: 'M10 3a7 7 0 107 7M10 6v5l4 2M10 3v4M7 3h6' },
+      { id: 'wrapped', label: 'Wrapped', icon: 'M10 2v16M2 6l8-4 8 4M4 6v8l6 3 6-3V6' },
+      { id: 'profile', label: 'Profile', icon: 'M10 10a3 3 0 100-6 3 3 0 000 6zM4 17a6 6 0 0112 0z' },
       { id: 'playlist', label: 'Playlists', icon: 'M3 4h14M3 9h14M3 14h9M14 14l3 3M17 14l-3 3' },
     ],
   },

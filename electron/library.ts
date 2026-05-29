@@ -28,6 +28,19 @@ import type {
   LibraryPruneMissingResult,
   ListeningHistoryItem,
   ListeningInsights,
+  WrappedStats,
+  WrappedRange,
+  Review,
+  ReviewInput,
+  ReviewTargetType,
+  ListSummary,
+  ListDetail,
+  ListItem,
+  ListInput,
+  ListItemInput,
+  UserProfile,
+  UserProfileInput,
+  SocialPrivacy,
   LocalLyricsResult,
   MetadataLookupCandidate,
   PlaylistM3uImportResult,
@@ -272,6 +285,48 @@ CREATE TABLE IF NOT EXISTS album_ratings (
 CREATE TABLE IF NOT EXISTS library_meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+-- Local-first social objects (Letterboxd-for-listening foundation). No server,
+-- no upload: every row carries a privacy flag (local / friends / public) that
+-- only governs what a future export/sync would include. Default is local.
+CREATE TABLE IF NOT EXISTS reviews (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  target_type TEXT NOT NULL,           -- 'track' | 'album' | 'artist'
+  target_key  TEXT NOT NULL,           -- track id, albumKey, or artist name
+  title       TEXT NOT NULL DEFAULT '',
+  body        TEXT NOT NULL DEFAULT '',
+  rating      REAL,                    -- optional 0-100 score
+  privacy     TEXT NOT NULL DEFAULT 'local',
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_target ON reviews(target_type, target_key);
+CREATE TABLE IF NOT EXISTS lists (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  title       TEXT NOT NULL DEFAULT 'Untitled list',
+  description TEXT NOT NULL DEFAULT '',
+  ranked      INTEGER NOT NULL DEFAULT 1,
+  privacy     TEXT NOT NULL DEFAULT 'local',
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS list_items (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  list_id   INTEGER NOT NULL,
+  track_id  INTEGER,                   -- nullable: items can be free-text entries
+  label     TEXT NOT NULL DEFAULT '',
+  note      TEXT NOT NULL DEFAULT '',
+  position  INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY(list_id) REFERENCES lists(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_list_items_list ON list_items(list_id, position);
+CREATE TABLE IF NOT EXISTS profile (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  display_name TEXT NOT NULL DEFAULT '',
+  bio          TEXT NOT NULL DEFAULT '',
+  favorites    TEXT NOT NULL DEFAULT '[]', -- JSON array of "five bags" picks
+  default_privacy TEXT NOT NULL DEFAULT 'local',
+  updated_at   INTEGER NOT NULL DEFAULT 0
 );
 `;
 
@@ -2867,6 +2922,484 @@ export class LibraryStore {
     };
   }
 
+  getWrappedStats(opts: { range?: WrappedRange; now?: number } = {}): WrappedStats {
+    const requestedNow = Number(opts.now);
+    const now = Number.isFinite(requestedNow) ? Math.max(0, Math.trunc(requestedNow)) : Date.now();
+    const validRanges: WrappedRange[] = ['day', 'week', 'month', 'year', 'all'];
+    const range: WrappedRange = validRanges.includes(opts.range as WrappedRange) ? (opts.range as WrappedRange) : 'year';
+    const { start, end, label } = wrappedWindow(range, now);
+
+    const rows = this.many<{
+      track_id: number;
+      played_at: number;
+      title: string;
+      artist: string;
+      album: string;
+      album_artist: string;
+      duration: number | null;
+      genre: string | null;
+      loved: number;
+      dna_json: string | null;
+    }>(
+      `SELECT h.track_id, h.played_at, t.title, t.artist, t.album, t.album_artist, t.duration, t.genre, t.loved, t.dna_json
+         FROM play_history h
+         JOIN tracks t ON t.id = h.track_id
+        WHERE h.played_at >= ? AND h.played_at <= ?`,
+      [start, end],
+    );
+
+    // Global first-play per track → "discoveries" = tracks whose first-ever
+    // play landed inside this window.
+    const firstPlays = this.many<{ track_id: number; first_at: number }>(
+      `SELECT track_id, MIN(played_at) AS first_at FROM play_history GROUP BY track_id`,
+    );
+    let discoveries = 0;
+    for (const fp of firstPlays) {
+      const at = Math.trunc(fp.first_at);
+      if (at >= start && at <= end) discoveries += 1;
+    }
+
+    const trackPlays = new Map<number, { title: string; artist: string; plays: number }>();
+    const artistAgg = new Map<string, { plays: number; duration: number }>();
+    const albumAgg = new Map<string, { album: string; albumArtist: string; plays: number }>();
+    const genreAgg = new Map<string, number>();
+    const clock = new Array(24).fill(0) as number[];
+    const dayPlays = new Map<string, number>();
+    const uniqueTracks = new Set<number>();
+    const uniqueArtists = new Set<string>();
+    const lovedTracks = new Set<number>();
+    const dnaSeen = new Map<number, TrackDna | null>();
+    let durationSec = 0;
+    let energySum = 0;
+    let brightSum = 0;
+    let dnaWeight = 0;
+    const clamp01 = (n: number): number => Math.min(1, Math.max(0, n));
+
+    for (const row of rows) {
+      const playedAt = Math.max(0, Math.trunc(row.played_at));
+      const dur = Math.max(0, Number(row.duration) || 0);
+      durationSec += dur;
+      uniqueTracks.add(row.track_id);
+      const artist = row.artist || 'Unknown Artist';
+      uniqueArtists.add(artist);
+      if (row.loved) lovedTracks.add(row.track_id);
+
+      const tp = trackPlays.get(row.track_id) ?? { title: row.title || 'Unknown', artist, plays: 0 };
+      tp.plays += 1;
+      trackPlays.set(row.track_id, tp);
+
+      const ab = artistAgg.get(artist) ?? { plays: 0, duration: 0 };
+      ab.plays += 1;
+      ab.duration += dur;
+      artistAgg.set(artist, ab);
+
+      const album = row.album || 'Unknown Album';
+      const albumArtist = row.album_artist || artist;
+      const akey = `${albumArtist} ${album}`;
+      const al = albumAgg.get(akey) ?? { album, albumArtist, plays: 0 };
+      al.plays += 1;
+      albumAgg.set(akey, al);
+
+      const genre = (row.genre || '').trim();
+      if (genre) genreAgg.set(genre, (genreAgg.get(genre) ?? 0) + 1);
+
+      clock[new Date(playedAt).getHours()] += 1;
+      const dk = localDateKey(playedAt);
+      dayPlays.set(dk, (dayPlays.get(dk) ?? 0) + 1);
+
+      if (!dnaSeen.has(row.track_id)) {
+        let dna: TrackDna | null = null;
+        if (row.dna_json) {
+          try {
+            const parsed = JSON.parse(row.dna_json) as unknown;
+            dna = isValidTrackDna(parsed) ? parsed : null;
+          } catch {
+            dna = null;
+          }
+        }
+        dnaSeen.set(row.track_id, dna);
+      }
+      const dna = dnaSeen.get(row.track_id);
+      if (dna) {
+        energySum += clamp01(dna.rms * 0.5 + dna.onsetDensity * 0.5);
+        brightSum += clamp01(dna.brightness);
+        dnaWeight += 1;
+      }
+    }
+
+    let busiestDay: { date: string; plays: number } | null = null;
+    for (const [date, plays] of dayPlays) {
+      if (!busiestDay || plays > busiestDay.plays) busiestDay = { date, plays };
+    }
+
+    // Longest run of consecutive local days with at least one play in window.
+    const sortedDays = [...dayPlays.keys()].sort();
+    let longestStreakDays = 0;
+    let run = 0;
+    let prevKey: string | null = null;
+    for (const key of sortedDays) {
+      if (prevKey && new Date(`${key}T00:00:00`).getTime() - new Date(`${prevKey}T00:00:00`).getTime() === 86_400_000) {
+        run += 1;
+      } else {
+        run = 1;
+      }
+      longestStreakDays = Math.max(longestStreakDays, run);
+      prevKey = key;
+    }
+
+    let peakHour: number | null = null;
+    let peakHourPlays = -1;
+    for (let h = 0; h < 24; h++) {
+      if (clock[h]! > peakHourPlays) {
+        peakHourPlays = clock[h]!;
+        peakHour = h;
+      }
+    }
+    if (peakHourPlays <= 0) peakHour = null;
+
+    const taste: WrappedStats['taste'] = dnaWeight > 0
+      ? (() => {
+          const energy = energySum / dnaWeight;
+          const brightness = brightSum / dnaWeight;
+          return { energy, brightness, mood: wrappedMoodLabel(energy, brightness) };
+        })()
+      : null;
+
+    return {
+      range,
+      label,
+      generatedAt: now,
+      rangeStart: start,
+      rangeEnd: end,
+      totals: {
+        plays: rows.length,
+        durationSec,
+        uniqueTracks: uniqueTracks.size,
+        uniqueArtists: uniqueArtists.size,
+        discoveries,
+        loved: lovedTracks.size,
+      },
+      topTracks: [...trackPlays.entries()]
+        .map(([id, t]) => ({ id, title: t.title, artist: t.artist, plays: t.plays }))
+        .sort((a, b) => b.plays - a.plays || a.title.localeCompare(b.title))
+        .slice(0, 10),
+      topArtists: [...artistAgg.entries()]
+        .map(([artist, a]) => ({ artist, plays: a.plays, durationSec: a.duration }))
+        .sort((a, b) => b.plays - a.plays || a.artist.localeCompare(b.artist))
+        .slice(0, 10),
+      topAlbums: [...albumAgg.values()]
+        .sort((a, b) => b.plays - a.plays || a.album.localeCompare(b.album))
+        .slice(0, 8),
+      genres: [...genreAgg.entries()]
+        .map(([genre, plays]) => ({ genre, plays }))
+        .sort((a, b) => b.plays - a.plays || a.genre.localeCompare(b.genre))
+        .slice(0, 8),
+      listeningClock: clock,
+      peakHour,
+      busiestDay,
+      longestStreakDays,
+      taste,
+    };
+  }
+
+  // --- Local-first social objects -----------------------------------------
+  private normalizePrivacy(value: unknown): SocialPrivacy {
+    return value === 'friends' || value === 'public' ? value : 'local';
+  }
+
+  private mapReviewRow(row: {
+    id: number;
+    target_type: string;
+    target_key: string;
+    title: string;
+    body: string;
+    rating: number | null;
+    privacy: string;
+    created_at: number;
+    updated_at: number;
+  }): Review {
+    return {
+      id: row.id,
+      targetType: (row.target_type as ReviewTargetType) ?? 'track',
+      targetKey: row.target_key,
+      title: row.title ?? '',
+      body: row.body ?? '',
+      rating: row.rating == null ? null : Number(row.rating),
+      privacy: this.normalizePrivacy(row.privacy),
+      createdAt: Math.trunc(row.created_at),
+      updatedAt: Math.trunc(row.updated_at),
+    };
+  }
+
+  getReviews(target?: { type: ReviewTargetType; key: string }): Review[] {
+    const rows = target
+      ? this.many<Parameters<typeof this.mapReviewRow>[0]>(
+          `SELECT * FROM reviews WHERE target_type = ? AND target_key = ? ORDER BY updated_at DESC`,
+          [target.type, String(target.key)],
+        )
+      : this.many<Parameters<typeof this.mapReviewRow>[0]>(`SELECT * FROM reviews ORDER BY updated_at DESC`);
+    return rows.map((row) => this.mapReviewRow(row));
+  }
+
+  getReviewById(id: number): Review | null {
+    const row = this.one<Parameters<typeof this.mapReviewRow>[0]>(`SELECT * FROM reviews WHERE id = ?`, [Math.trunc(id)]);
+    return row ? this.mapReviewRow(row) : null;
+  }
+
+  saveReview(input: ReviewInput): Review {
+    if (!input || (input.targetType !== 'track' && input.targetType !== 'album' && input.targetType !== 'artist')) {
+      throw new Error('saveReview requires a valid targetType');
+    }
+    const now = Date.now();
+    const privacy = this.normalizePrivacy(input.privacy);
+    const rating = input.rating == null ? null : Math.max(0, Math.min(100, Number(input.rating) || 0));
+    const title = String(input.title ?? '');
+    const body = String(input.body ?? '');
+    const targetKey = String(input.targetKey ?? '');
+    let id = input.id ? Math.trunc(input.id) : 0;
+    if (id && this.one<{ id: number }>(`SELECT id FROM reviews WHERE id = ?`, [id])) {
+      this.db.run(
+        `UPDATE reviews SET target_type = ?, target_key = ?, title = ?, body = ?, rating = ?, privacy = ?, updated_at = ? WHERE id = ?`,
+        [input.targetType, targetKey, title, body, rating, privacy, now, id],
+      );
+    } else {
+      this.db.run(
+        `INSERT INTO reviews (target_type, target_key, title, body, rating, privacy, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [input.targetType, targetKey, title, body, rating, privacy, now, now],
+      );
+      id = this.one<{ id: number }>(`SELECT last_insert_rowid() AS id`)?.id ?? 0;
+    }
+    this.scheduleFlush();
+    const saved = this.getReviewById(id);
+    if (!saved) throw new Error('Review was not saved.');
+    return saved;
+  }
+
+  deleteReview(id: number): void {
+    this.db.run(`DELETE FROM reviews WHERE id = ?`, [Math.trunc(id)]);
+    this.scheduleFlush();
+  }
+
+  private listItems(listId: number): ListItem[] {
+    return this.many<{ id: number; list_id: number; track_id: number | null; label: string; note: string; position: number }>(
+      `SELECT * FROM list_items WHERE list_id = ? ORDER BY position ASC, id ASC`,
+      [Math.trunc(listId)],
+    ).map((row) => ({
+      id: row.id,
+      listId: row.list_id,
+      trackId: row.track_id == null ? null : Math.trunc(row.track_id),
+      label: row.label ?? '',
+      note: row.note ?? '',
+      position: Math.trunc(row.position),
+    }));
+  }
+
+  getLists(): ListSummary[] {
+    return this.many<{
+      id: number;
+      title: string;
+      description: string;
+      ranked: number;
+      privacy: string;
+      created_at: number;
+      updated_at: number;
+      item_count: number;
+    }>(
+      `SELECT l.*, (SELECT COUNT(*) FROM list_items i WHERE i.list_id = l.id) AS item_count
+         FROM lists l ORDER BY l.updated_at DESC`,
+    ).map((row) => ({
+      id: row.id,
+      title: row.title ?? '',
+      description: row.description ?? '',
+      ranked: row.ranked !== 0,
+      privacy: this.normalizePrivacy(row.privacy),
+      itemCount: Math.trunc(row.item_count),
+      createdAt: Math.trunc(row.created_at),
+      updatedAt: Math.trunc(row.updated_at),
+    }));
+  }
+
+  getList(id: number): ListDetail | null {
+    const summary = this.getLists().find((l) => l.id === Math.trunc(id));
+    if (!summary) return null;
+    return { ...summary, items: this.listItems(summary.id) };
+  }
+
+  saveList(input: ListInput): ListSummary {
+    const now = Date.now();
+    const privacy = this.normalizePrivacy(input.privacy);
+    const title = String(input.title ?? 'Untitled list') || 'Untitled list';
+    const description = String(input.description ?? '');
+    const ranked = input.ranked === false ? 0 : 1;
+    let id = input.id ? Math.trunc(input.id) : 0;
+    if (id && this.one<{ id: number }>(`SELECT id FROM lists WHERE id = ?`, [id])) {
+      this.db.run(
+        `UPDATE lists SET title = ?, description = ?, ranked = ?, privacy = ?, updated_at = ? WHERE id = ?`,
+        [title, description, ranked, privacy, now, id],
+      );
+    } else {
+      this.db.run(
+        `INSERT INTO lists (title, description, ranked, privacy, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [title, description, ranked, privacy, now, now],
+      );
+      id = this.one<{ id: number }>(`SELECT last_insert_rowid() AS id`)?.id ?? 0;
+    }
+    this.scheduleFlush();
+    const saved = this.getLists().find((l) => l.id === id);
+    if (!saved) throw new Error('List was not saved.');
+    return saved;
+  }
+
+  deleteList(id: number): void {
+    this.db.run(`DELETE FROM lists WHERE id = ?`, [Math.trunc(id)]);
+    this.scheduleFlush();
+  }
+
+  addListItem(input: ListItemInput): ListItem {
+    const listId = Math.trunc(input.listId);
+    if (!this.one<{ id: number }>(`SELECT id FROM lists WHERE id = ?`, [listId])) {
+      throw new Error('addListItem: list does not exist');
+    }
+    const nextPos = (this.one<{ pos: number }>(`SELECT COALESCE(MAX(position), -1) + 1 AS pos FROM list_items WHERE list_id = ?`, [listId])?.pos) ?? 0;
+    this.db.run(
+      `INSERT INTO list_items (list_id, track_id, label, note, position) VALUES (?, ?, ?, ?, ?)`,
+      [listId, input.trackId == null ? null : Math.trunc(input.trackId), String(input.label ?? ''), String(input.note ?? ''), nextPos],
+    );
+    const id = this.one<{ id: number }>(`SELECT last_insert_rowid() AS id`)?.id ?? 0;
+    this.db.run(`UPDATE lists SET updated_at = ? WHERE id = ?`, [Date.now(), listId]);
+    this.scheduleFlush();
+    return this.listItems(listId).find((i) => i.id === id)!;
+  }
+
+  removeListItem(id: number): void {
+    const item = this.one<{ list_id: number }>(`SELECT list_id FROM list_items WHERE id = ?`, [Math.trunc(id)]);
+    this.db.run(`DELETE FROM list_items WHERE id = ?`, [Math.trunc(id)]);
+    if (item) this.db.run(`UPDATE lists SET updated_at = ? WHERE id = ?`, [Date.now(), item.list_id]);
+    this.scheduleFlush();
+  }
+
+  reorderListItems(listId: number, orderedIds: number[]): void {
+    const lid = Math.trunc(listId);
+    this.db.run('BEGIN');
+    try {
+      orderedIds.forEach((itemId, index) => {
+        this.db.run(`UPDATE list_items SET position = ? WHERE id = ? AND list_id = ?`, [index, Math.trunc(itemId), lid]);
+      });
+      this.db.run(`UPDATE lists SET updated_at = ? WHERE id = ?`, [Date.now(), lid]);
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    this.scheduleFlush();
+  }
+
+  getProfile(): UserProfile {
+    this.db.run(`INSERT OR IGNORE INTO profile (id, updated_at) VALUES (1, ?)`, [Date.now()]);
+    const row = this.one<{ display_name: string; bio: string; favorites: string; default_privacy: string; updated_at: number }>(
+      `SELECT display_name, bio, favorites, default_privacy, updated_at FROM profile WHERE id = 1`,
+    );
+    let favorites: string[] = [];
+    if (row?.favorites) {
+      try {
+        const parsed = JSON.parse(row.favorites) as unknown;
+        if (Array.isArray(parsed)) favorites = parsed.map((x) => String(x)).slice(0, 5);
+      } catch {
+        favorites = [];
+      }
+    }
+    return {
+      displayName: row?.display_name ?? '',
+      bio: row?.bio ?? '',
+      favorites,
+      defaultPrivacy: this.normalizePrivacy(row?.default_privacy),
+      updatedAt: Math.trunc(row?.updated_at ?? 0),
+    };
+  }
+
+  saveProfile(input: UserProfileInput): UserProfile {
+    const current = this.getProfile();
+    const now = Date.now();
+    const displayName = input.displayName === undefined ? current.displayName : String(input.displayName);
+    const bio = input.bio === undefined ? current.bio : String(input.bio);
+    const favorites = (input.favorites === undefined ? current.favorites : input.favorites).map((x) => String(x)).slice(0, 5);
+    const defaultPrivacy = input.defaultPrivacy === undefined ? current.defaultPrivacy : this.normalizePrivacy(input.defaultPrivacy);
+    this.db.run(
+      `UPDATE profile SET display_name = ?, bio = ?, favorites = ?, default_privacy = ?, updated_at = ? WHERE id = 1`,
+      [displayName, bio, JSON.stringify(favorites), defaultPrivacy, now],
+    );
+    this.scheduleFlush();
+    return this.getProfile();
+  }
+
+  // Build a self-contained, offline-shareable HTML profile page from local
+  // data. No network, no upload — the export the social roadmap requires before
+  // any account service exists.
+  buildProfileBundleHtml(opts: { now?: number } = {}): string {
+    const profile = this.getProfile();
+    const lists = this.getLists().map((l) => ({ ...l, items: this.listItems(l.id) }));
+    const reviews = this.getReviews();
+    const insights = this.getListeningInsights({ now: opts.now });
+    const esc = htmlEscape;
+    const topArtists = insights.topArtists
+      .slice(0, 10)
+      .map((a) => `<li>${esc(a.artist)} <span class="muted">· ${a.plays} plays</span></li>`)
+      .join('');
+    const favoritesHtml = profile.favorites.length
+      ? `<ul class="favorites">${profile.favorites.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>`
+      : '<p class="muted">No favorites picked yet.</p>';
+    const listsHtml = lists.length
+      ? lists
+          .map(
+            (l) =>
+              `<section class="card"><h3>${esc(l.title)}${l.ranked ? ' <span class="muted">(ranked)</span>' : ''}</h3>` +
+              (l.description ? `<p>${esc(l.description)}</p>` : '') +
+              `<ol>${l.items.map((i) => `<li>${esc(i.label || (i.trackId ? `Track #${i.trackId}` : 'Item'))}${i.note ? ` <span class="muted">— ${esc(i.note)}</span>` : ''}</li>`).join('')}</ol></section>`,
+          )
+          .join('')
+      : '<p class="muted">No lists yet.</p>';
+    const reviewsHtml = reviews.length
+      ? reviews
+          .map(
+            (r) =>
+              `<section class="card"><h3>${esc(r.title || `${r.targetType} review`)}${r.rating != null ? ` <span class="score">${r.rating.toFixed(0)}/100</span>` : ''}</h3>` +
+              `<p class="muted">${esc(r.targetType)} · ${esc(r.targetKey)}</p>` +
+              `<p>${esc(r.body)}</p></section>`,
+          )
+          .join('')
+      : '<p class="muted">No reviews yet.</p>';
+
+    return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${esc(profile.displayName || 'NewAmp')} · NewAmp profile</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0a0c0a;color:#eef2ee;font:16px/1.5 Inter,system-ui,sans-serif;padding:40px}
+.wrap{max-width:880px;margin:0 auto}
+h1{font-size:44px;margin:0 0 4px}
+h2{color:#39ff14;font:700 14px/1 "JetBrains Mono",monospace;letter-spacing:.18em;text-transform:uppercase;margin:36px 0 12px}
+h3{margin:0 0 6px}
+.muted{color:rgba(238,242,238,.55)}
+.score{color:#39ff14;font-weight:700}
+.card{background:#13110f;border:1px solid #232323;border-radius:10px;padding:16px;margin-bottom:12px}
+ul,ol{margin:0;padding-left:20px}
+.favorites{list-style:none;padding:0;display:flex;flex-wrap:wrap;gap:8px}
+.favorites li{background:#39ff1418;border:1px solid #39ff1440;border-radius:8px;padding:8px 12px}
+footer{margin-top:48px;color:rgba(238,242,238,.4);font:600 14px "JetBrains Mono",monospace}
+</style></head>
+<body><div class="wrap">
+<h1>${esc(profile.displayName || 'Anonymous listener')}</h1>
+${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
+<h2>Five bags</h2>${favoritesHtml}
+<h2>Top artists</h2><ul>${topArtists || '<li class="muted">No plays yet.</li>'}</ul>
+<h2>Lists</h2>${listsHtml}
+<h2>Reviews</h2>${reviewsHtml}
+<footer>Exported from NewAmp · local-first music · no account, no cloud</footer>
+</div></body></html>`;
+  }
+
   clearListeningHistory(): void {
     this.db.run(`DELETE FROM play_history`);
     this.db.run(`DELETE FROM skip_history`);
@@ -4142,6 +4675,50 @@ function sortInsightBuckets<T extends { plays: number; duration: number; skips: 
 function startOfLocalDay(value: number): number {
   const date = new Date(value);
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+function wrappedWindow(range: WrappedRange, now: number): { start: number; end: number; label: string } {
+  const d = new Date(now);
+  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  switch (range) {
+    case 'day':
+      return { start: startOfLocalDay(now), end: now, label: 'Today' };
+    case 'week':
+      return { start: startOfLocalDay(now) - 6 * 86_400_000, end: now, label: 'This Week' };
+    case 'month':
+      return { start: new Date(d.getFullYear(), d.getMonth(), 1).getTime(), end: now, label: `${months[d.getMonth()]} ${d.getFullYear()}` };
+    case 'year':
+      return { start: new Date(d.getFullYear(), 0, 1).getTime(), end: now, label: `${d.getFullYear()}` };
+    case 'all':
+    default:
+      return { start: 0, end: now, label: 'All Time' };
+  }
+}
+
+function htmlEscape(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function wrappedMoodLabel(energy: number, brightness: number): string {
+  const e = energy >= 0.6 ? 'high' : energy >= 0.35 ? 'mid' : 'low';
+  const b = brightness >= 0.6 ? 'bright' : brightness >= 0.35 ? 'warm' : 'dark';
+  const table: Record<string, string> = {
+    'high-bright': 'Bright & Energetic',
+    'high-warm': 'Driving & Warm',
+    'high-dark': 'Heavy & Dark',
+    'mid-bright': 'Upbeat & Clear',
+    'mid-warm': 'Easy Groove',
+    'mid-dark': 'Moody Mid-tempo',
+    'low-bright': 'Airy & Calm',
+    'low-warm': 'Mellow & Warm',
+    'low-dark': 'Late-night & Deep',
+  };
+  return table[`${e}-${b}`] ?? 'Eclectic';
 }
 
 function localDateKey(value: number): string {

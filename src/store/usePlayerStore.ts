@@ -56,6 +56,8 @@ export type ViewMode =
   | 'playlist'
   | 'loved'
   | 'history'
+  | 'wrapped'
+  | 'profile'
   | 'tags'
   | 'atlas'
   | 'podcasts'

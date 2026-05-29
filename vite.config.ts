@@ -19,6 +19,14 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: emitSourceMaps,
+    rollupOptions: {
+      input: {
+        // Main renderer.
+        main: resolve(__dirname, 'index.html'),
+        // Sandboxed Butterchurn/Milkdrop frame — the only eval surface.
+        butterchurn: resolve(__dirname, 'butterchurn-iframe.html'),
+      },
+    },
   },
   server: {
     port: 5173,

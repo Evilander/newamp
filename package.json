@@ -1,7 +1,7 @@
 {
   "name": "newamp",
-  "version": "1.5.7",
-  "description": "A Winamp-inspired modern desktop music player for Windows and Linux. Your local library, your rules, no streaming required. Four UI shells, shape-changing deck skins, 0-200% volume with red-zone boost, 0-100 decimal track scoring, and a magazine-style home.",
+  "version": "1.6.0",
+  "description": "A Winamp-inspired modern desktop music player for macOS, Windows, and Linux. Your local library, your rules, no streaming required. Four UI shells, shape-changing deck skins, 0-200% volume with red-zone boost, 0-100 decimal track scoring, and a magazine-style home.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
   "author": "evilander",
@@ -36,6 +36,11 @@
     "smoke:playback": "npm run build:electron && electron scripts/playback-smoke-app",
     "smoke:transcode": "npm run build:electron && node scripts/transcode-smoke.mjs",
     "smoke:visualizer": "node scripts/visualizer-smoke.mjs",
+    "smoke:butterchurn-sandbox": "npm run build && electron scripts/butterchurn-sandbox-smoke-app",
+    "smoke:particle-flow": "electron scripts/particle-flow-smoke-app",
+    "smoke:viz-capture": "node scripts/viz-capture-smoke.mjs",
+    "smoke:wrapped": "npm run build:electron && node scripts/wrapped-smoke.mjs",
+    "smoke:social": "npm run build:electron && node scripts/social-smoke.mjs",
     "smoke:tabs": "npm run build:electron && node scripts/tabs-smoke.mjs",
     "smoke:live-services": "npm run build:electron && node scripts/live-services-readiness-smoke.mjs",
     "smoke:artist": "node scripts/artist-surface-smoke.mjs",
@@ -124,6 +129,7 @@
     "smoke:installed-associations": "node scripts/installed-associations-smoke.mjs",
     "smoke:installed-app": "node scripts/installed-app-smoke.mjs",
     "smoke:packaged-normal-launch": "node scripts/packaged-normal-launch-smoke.mjs",
+    "smoke:mac-launch": "node scripts/packaged-mac-launch-smoke.mjs",
     "smoke:packaged-open-files": "node scripts/packaged-open-files-smoke.mjs",
     "smoke:portable-app": "node scripts/portable-app-smoke.mjs",
     "smoke:ui-handoff": "npm run build && node scripts/ui-handoff-smoke.mjs",
@@ -139,7 +145,9 @@
     "package:installer": "node scripts/package.mjs --installer",
     "package:portable": "node scripts/package.mjs --portable",
     "package:linux": "node scripts/package.mjs --linux",
+    "package:mac": "node scripts/package.mjs --mac",
     "release:sign": "node scripts/sign-artifacts.mjs",
+    "release:notarize": "node scripts/notarize-artifacts.mjs",
     "release:checksums": "node scripts/release-checksums.mjs",
     "release:provenance": "node scripts/build-provenance.mjs",
     "release:bundle": "node scripts/release-bundle.mjs",
@@ -221,6 +229,34 @@
       "node_modules/ffmpeg-static/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm"
     ],
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.music",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "artifactName": "NewAmp ${version} ${arch}.${ext}"
+    },
+    "dmg": {
+      "artifactName": "NewAmp ${version} ${arch}.${ext}"
+    },
     "win": {
       "icon": "build/icon.ico",
       "target": [
