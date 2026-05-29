@@ -110,11 +110,16 @@ jobs:
           merge-multiple: true
           path: release
 
-      - name: Recompute cross-platform checksums + bundle
+      # Checksum the distributable artifacts the matrix uploaded. (The repo's
+      # release:checksums also expects the win-unpacked/linux-unpacked build
+      # intermediates, and release:bundle is Windows-PowerShell-only — neither
+      # applies to this cross-platform merge, so we hash the artifacts directly.)
+      - name: Generate SHA256SUMS over release artifacts
+        working-directory: release
         run: |
-          npm run release:checksums
-          npm run release:provenance
-          npm run release:bundle
+          ls -la
+          rm -f SHA256SUMS.txt
+          for f in NewAmp*; do [ -f "$f" ] && sha256sum "$f"; done | tee SHA256SUMS.txt
 
       - name: Draft release
         uses: softprops/action-gh-release@v2
@@ -122,6 +127,5 @@ jobs:
           draft: true
           generate_release_notes: true
           files: |
-            release/NewAmp*.*
+            release/NewAmp*
             release/SHA256SUMS.txt
-            release/BUILD-PROVENANCE.json
