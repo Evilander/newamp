@@ -99,9 +99,11 @@ vec2 curl(vec2 p){
 }
 `;
 
-// Pillar 2: feedback field — sample prev, apply curl-noise domain warp + decay
-// + a small global drift driven by stereo pan, plus residual turbulence from
-// section novelty so a "different feeling" passage looks different.
+// Pillar 2: feedback field — MilkDrop-style per-frame transform of the previous
+// frame. Each frame we ZOOM in/out around the centre, ROTATE around the centre,
+// add a small curl-noise warp for organic detail, then sample the prev field
+// and HUE-CYCLE the colour so trails drift through palette as they age. This is
+// the difference between "diffuse white cloud" and "swirling tunneling rainbow".
 const FIELD_FRAG = `#version 300 es
 precision highp float;
 in vec2 v_uv;
@@ -114,16 +116,60 @@ uniform vec2  u_flow;
 uniform float u_time;
 uniform float u_novelty;
 uniform float u_sectionSeed;
+uniform float u_zoom;        // 0 = static, positive = zoom IN (tunnel toward centre)
+uniform float u_rotate;      // radians per frame of central rotation
+uniform float u_hueCycle;    // radians to rotate the sampled colour's hue (0..~0.1)
+uniform float u_swirl;       // swirl strength (rotation falls off with radius)
 ${NOISE_GLSL}
+
+// YIQ-based hue rotation matrix — compact and stable; rotates around the
+// luminance axis so brightness is preserved. Cheaper than rgb→hsv→rgb.
+vec3 rotateHue(vec3 col, float ang){
+  float c = cos(ang); float s = sin(ang);
+  // RGB → YIQ
+  float y = dot(col, vec3(0.299, 0.587, 0.114));
+  float i = dot(col, vec3(0.596,-0.274,-0.322));
+  float q = dot(col, vec3(0.211,-0.523, 0.312));
+  // Rotate I/Q (chroma) plane
+  float i2 = c*i - s*q;
+  float q2 = s*i + c*q;
+  // YIQ → RGB
+  return vec3(
+    y + 0.956*i2 + 0.621*q2,
+    y - 0.272*i2 - 0.647*q2,
+    y - 1.106*i2 + 1.703*q2
+  );
+}
+
 void main(){
   vec2 uv = v_uv;
-  // Per-section noise offset gives returning choruses a recognisable signature.
-  vec2 base = uv * u_warpScale + vec2(u_time * 0.018, -u_time * 0.014) + vec2(u_sectionSeed, -u_sectionSeed*0.7);
+  vec2 centre = vec2(0.5);
+  vec2 p = uv - centre;
+
+  // MilkDrop motion: rotate around the centre, with stronger spin near the
+  // edge (swirl) so the image rolls instead of rigidly rotating.
+  float radius = length(p);
+  float ang = u_rotate + u_swirl * radius;
+  float ca = cos(ang); float sa = sin(ang);
+  p = mat2(ca, -sa, sa, ca) * p;
+
+  // Zoom: multiply by inverse zoom so positive u_zoom pulls UV inward
+  // (trails appear to march OUT from the centre as a tunnel rush).
+  float invZ = 1.0 / (1.0 + u_zoom);
+  p *= invZ;
+
+  // Re-centre + organic curl detail (small) modulated by treble/novelty.
+  vec2 src = p + centre;
+  vec2 base = src * u_warpScale + vec2(u_time * 0.018, -u_time * 0.014)
+            + vec2(u_sectionSeed, -u_sectionSeed*0.7);
   vec2 w = curl(base) * u_warpAmp;
-  // Octave 2: cheaper, smaller — turbulence rides on the main flow.
   w += curl(base * 2.1 + 11.7) * (u_warpAmp * 0.45 + u_novelty * 0.6);
-  vec2 src = clamp(uv - u_flow + w, 0.001, 0.999);
+
+  src = clamp(src - u_flow + w, 0.001, 0.999);
   vec3 prev = texture(u_prev, src).rgb;
+
+  // Hue cycle: shift colour every frame so trails drift across the palette.
+  prev = rotateHue(prev, u_hueCycle);
   prev *= u_decay;
   o = vec4(prev, 1.0);
 }`;
@@ -171,33 +217,38 @@ in float v_intensity;
 out vec4 o;
 void main(){
   float r = length(v_local);
-  // Common life envelope: fast-in 0..0.05, decay 0.05..1
   float life = (1.0 - v_age);
   if (life <= 0.0) discard;
   vec3 col = v_color.rgb;
   float alpha = 0.0;
   if (v_kind == 0) {
-    // Ring (kick): expanding circle, thickness from instance, fade with age.
-    float ring = exp(-pow((r - v_age) / max(0.004, v_thick), 2.0));
-    alpha = ring * life * v_intensity * 0.95;
+    // Ring (kick): thin bright annulus that expands with age. Crisp falloff
+    // (40 instead of 2 in the gaussian) so the ring reads as a structured
+    // line being drawn into the feedback field, not a soft puff.
+    float band = max(0.003, v_thick * 0.6);
+    float ring = exp(-pow((r - v_age) / band, 2.0) * 40.0);
+    alpha = ring * life * v_intensity * 0.85;
   } else if (v_kind == 1) {
-    // Burst (snare): jagged radial gaussian — sharp centre, soft edge.
-    float core = exp(-r*r * 14.0);
-    float halo = exp(-r*r * 3.0) * 0.4;
-    alpha = (core + halo) * life * v_intensity;
+    // Burst (snare): a sharp star — radial spikes plus a hot core. Reads as
+    // a distinct hit rather than a haze.
+    float core = exp(-r*r * 40.0);
+    float angle = atan(v_local.y, v_local.x);
+    float spike = pow(max(0.0, abs(cos(angle * 3.0))), 12.0) * exp(-r*r * 6.0);
+    alpha = (core + spike * 0.6) * life * v_intensity * 0.7;
   } else if (v_kind == 2) {
-    // Sparkle (hat): thin radial streaks plus a bright pinpoint.
-    float pin = exp(-r*r * 60.0);
-    float streak = exp(-r*8.0) * (0.5 + 0.5 * cos(atan(v_local.y, v_local.x) * 10.0));
-    alpha = (pin + streak * 0.25) * life * v_intensity;
+    // Sparkle (hat): crisp pinpoint + thin cross-streaks (cardinal directions).
+    float pin = exp(-r*r * 140.0);
+    float ang = atan(v_local.y, v_local.x);
+    float cross = pow(abs(cos(ang * 2.0)), 32.0) * exp(-r * 22.0);
+    alpha = (pin + cross * 0.5) * life * v_intensity * 0.75;
   } else if (v_kind == 3) {
-    // Blob (vocal): soft, fat gaussian — the character the eye tracks.
-    alpha = exp(-r*r * 5.0) * life * v_intensity * 0.85;
+    // Blob (vocal): soft gaussian, smaller than before so it doesn't dominate.
+    alpha = exp(-r*r * 9.0) * life * v_intensity * 0.55;
   } else {
-    // Core (kick punch): solid disc with rim glow.
-    float disc = smoothstep(0.85, 0.7, r);
-    float rim = smoothstep(0.98, 0.92, r) * (1.0 - smoothstep(0.95, 0.85, r));
-    alpha = (disc * 0.7 + rim * 0.6) * life * v_intensity;
+    // Core (kick punch): solid disc with a hard rim.
+    float disc = smoothstep(0.78, 0.62, r);
+    float rim  = smoothstep(0.95, 0.86, r) - smoothstep(0.86, 0.78, r);
+    alpha = (disc * 0.55 + max(0.0, rim) * 0.85) * life * v_intensity * 0.7;
   }
   if (alpha <= 0.003) discard;
   o = vec4(col * alpha, alpha);
@@ -278,9 +329,10 @@ void main(){
   o = vec4(s / 12.0, 1.0);
 }`;
 
-// Final composite: field + bloom + chromatic aberration (driven by snare+hat,
-// never bass — bass-driven aberration is the cheap cliché) + ACES tone-map +
-// subtle vignette. bg colour bleeds in at low intensity for the "scene".
+// Final composite: map the field through a palette ramp (bg → accent → light)
+// so the image has REAL COLOUR not a brightness-to-white ramp; mix bloom in at
+// reduced weight; chromatic aberration on snare+hat only; ACES tone-map +
+// vignette. This is the difference between "white cloud" and "vivid scene".
 const POST_FRAG = `#version 300 es
 precision highp float;
 in vec2 v_uv;
@@ -291,36 +343,67 @@ uniform float u_bloomIntensity;
 uniform float u_aberration; // 0 off .. 1 strong
 uniform float u_saturation; // 0..1 (1 = full, 0 = monochrome)
 uniform vec3  u_bg;
-uniform vec3  u_hueShift;   // RGB lookup tint for centroid → colour drift
+uniform vec3  u_accent;
+uniform vec3  u_dark;
+uniform vec3  u_light;
+uniform vec3  u_hueShift;   // mild centroid tint
 
 vec3 aces(vec3 x){
   const float a=2.51; const float b=0.03; const float c=2.43;
   const float d=0.59; const float e=0.14;
   return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
 }
+
+// Three-stop palette ramp by intensity: dark grounds the image, accent fills
+// the body, light caps the highlights. The field's own hue (from the cycled
+// feedback) tints the ramp so each instrument's colour still reads through.
+vec3 paletteRamp(float t, vec3 fieldTint){
+  vec3 lo = mix(u_dark, u_accent, smoothstep(0.0, 0.55, t));
+  vec3 hi = mix(u_accent, u_light, smoothstep(0.45, 1.0, t));
+  vec3 ramp = mix(lo, hi, smoothstep(0.40, 0.65, t));
+  // Tint the ramp by the field's actual colour so hue-cycled trails are
+  // visible (otherwise the palette would dominate completely).
+  return mix(ramp, ramp * (0.6 + fieldTint * 1.4), 0.55);
+}
+
 void main(){
   vec2 uv = v_uv;
   vec2 dir = uv - 0.5;
   float r2 = dot(dir, dir);
-  // Radial chromatic aberration — fast attack envelope on snare+hat upstream.
-  float amt = u_aberration * (0.004 + r2 * 0.020);
+  // Aberration: sample R/B with opposing radial offsets, G centred.
+  float amt = u_aberration * (0.003 + r2 * 0.018);
   vec3 fieldC;
-  fieldC.r = texture(u_field, uv + dir * amt * 1.4).r;
+  fieldC.r = texture(u_field, uv + dir * amt * 1.3).r;
   fieldC.g = texture(u_field, uv).g;
-  fieldC.b = texture(u_field, uv - dir * amt * 1.4).b;
-  vec3 bloomC = texture(u_bloom, uv).rgb * u_bloomIntensity;
-  vec3 colour = fieldC + bloomC;
-  // Centroid-driven hue drift around the palette accent.
+  fieldC.b = texture(u_field, uv - dir * amt * 1.3).b;
+
+  // Intensity drives the palette ramp; chroma from the field tints it so the
+  // hue-cycled feedback shows through as colour drift instead of being lost.
+  float intensity = clamp(dot(fieldC, vec3(0.34, 0.42, 0.24)), 0.0, 1.4);
+  vec3 chroma = (fieldC + 1e-4) / (max(max(fieldC.r, fieldC.g), fieldC.b) + 0.05);
+  vec3 colour = paletteRamp(intensity, chroma);
+
+  // Soft additive bloom on top — at HALF the previous weight so highlights
+  // glow rather than clip the whole frame white.
+  vec3 bloomC = texture(u_bloom, uv).rgb * u_bloomIntensity * 0.5;
+  colour += bloomC;
+
+  // Centroid hue tilt — gentle (the field already drifts; this is a static bias).
   colour *= u_hueShift;
-  // Mix toward greyscale when flatness is high (saturation falls).
+
+  // Saturation falls in noisy/percussive passages.
   float luma = dot(colour, vec3(0.299, 0.587, 0.114));
   colour = mix(vec3(luma), colour, u_saturation);
-  // Background tint shows through dark zones (the field is mostly black).
-  float darkness = 1.0 - smoothstep(0.0, 0.15, luma);
-  colour += u_bg * darkness * 0.7;
-  // Vignette + tone-map.
+
+  // Dark-ground: bg shows everywhere the field is quiet, but DIMLY — the
+  // whole frame should read as a near-black scene with coloured events in it,
+  // not a flat bg-coloured wash. Multiply bg down so empty zones are nearly
+  // black (a tiny bg tint at most).
+  float darkness = 1.0 - smoothstep(0.0, 0.18, intensity);
+  colour = mix(colour, u_bg * 0.12, darkness);
+
   float vig = smoothstep(1.0, 0.45, length(dir));
-  colour *= 0.92 + vig * 0.16;
+  colour *= 0.88 + vig * 0.18;
   colour = aces(colour);
   o = vec4(colour, 1.0);
 }`;
@@ -564,6 +647,10 @@ export function createEvilandRenderer(
     time: gl.getUniformLocation(fieldProg, 'u_time'),
     novelty: gl.getUniformLocation(fieldProg, 'u_novelty'),
     sectionSeed: gl.getUniformLocation(fieldProg, 'u_sectionSeed'),
+    zoom: gl.getUniformLocation(fieldProg, 'u_zoom'),
+    rotate: gl.getUniformLocation(fieldProg, 'u_rotate'),
+    hueCycle: gl.getUniformLocation(fieldProg, 'u_hueCycle'),
+    swirl: gl.getUniformLocation(fieldProg, 'u_swirl'),
   };
   const terrainUni = {
     bass: gl.getUniformLocation(terrainProg, 'u_bass'),
@@ -590,6 +677,9 @@ export function createEvilandRenderer(
     aberration: gl.getUniformLocation(postProg, 'u_aberration'),
     saturation: gl.getUniformLocation(postProg, 'u_saturation'),
     bg: gl.getUniformLocation(postProg, 'u_bg'),
+    accent: gl.getUniformLocation(postProg, 'u_accent'),
+    dark: gl.getUniformLocation(postProg, 'u_dark'),
+    light: gl.getUniformLocation(postProg, 'u_light'),
     hueShift: gl.getUniformLocation(postProg, 'u_hueShift'),
   };
 
@@ -853,16 +943,30 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, fieldA.tex);
     gl.uniform1i(fieldUni.prev, 0);
-    // Decay: slower decay during sustains, faster after onsets — but never
-    // below 0.94 (the field needs persistence).
-    const decay = 0.96 + 0.026 * (1 - frame.flatness) - 0.014 * frame.crest;
-    gl.uniform1f(fieldUni.decay, Math.max(0.94, Math.min(0.995, decay)));
-    gl.uniform1f(fieldUni.warpAmp, 0.0015 + frame.bass * 0.0075);
+    // Decay: a bit faster than before (the new zoom/rotate motion keeps trails
+    // alive on its own; old high decay was a major reason everything stacked
+    // to white). Slower during sustains, faster after onsets.
+    const decay = 0.935 + 0.030 * (1 - frame.flatness) - 0.014 * frame.crest;
+    gl.uniform1f(fieldUni.decay, Math.max(0.92, Math.min(0.985, decay)));
+    gl.uniform1f(fieldUni.warpAmp, 0.0010 + frame.bass * 0.0050);
     gl.uniform1f(fieldUni.warpScale, 2.5 + frame.width * 1.8);
     gl.uniform2f(fieldUni.flow, frame.pan * 0.0008 + 0.00012, -0.00018);
     gl.uniform1f(fieldUni.time, time);
     gl.uniform1f(fieldUni.novelty, frame.novelty);
     gl.uniform1f(fieldUni.sectionSeed, sectionSeed);
+    // MilkDrop-style motion: small base zoom (always a gentle tunnel rush),
+    // kick punches it up; rotation drifts over time + accelerates with energy;
+    // hue cycles a touch per frame — slow when quiet, faster when bright.
+    const zoom = 0.0024 + frame.kick * 0.018 + frame.bass * 0.006;
+    const rotateBase = 0.0011 * (sectionSeed * 0.5 + 0.5); // section-stable drift
+    const rotateSign = ((Math.floor(sectionSeed * 7) % 2) === 0) ? 1 : -1;
+    const rotate = rotateSign * (rotateBase + frame.energy * 0.0035 + frame.beatPhase * 0.0006);
+    const hueCycle = (0.0012 + frame.centroid * 0.0040 + frame.energy * 0.0020) * (sectionSeed < 0.5 ? -1 : 1);
+    const swirl = 0.012 + frame.width * 0.030 + frame.novelty * 0.020;
+    gl.uniform1f(fieldUni.zoom, zoom);
+    gl.uniform1f(fieldUni.rotate, rotate);
+    gl.uniform1f(fieldUni.hueCycle, hueCycle);
+    gl.uniform1f(fieldUni.swirl, swirl);
     drawFullscreen();
 
     // ---- PASS 2: terrain (bass horizon) drawn into the field ----
@@ -944,18 +1048,23 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, bloomSrc ?? fieldA.tex);
     gl.uniform1i(postUni.bloom, 1);
-    gl.uniform1f(postUni.bloomIntensity, bloomSrc ? 0.45 + bloomEnv * 0.65 : 0);
+    // Pull bloom intensity DOWN (the post shader already halves it again);
+    // bloom now glows around bright parts instead of dominating the whole frame.
+    gl.uniform1f(postUni.bloomIntensity, bloomSrc ? 0.30 + bloomEnv * 0.45 : 0);
     gl.uniform1f(postUni.aberration, aberrationOn ? aberrEnv * 0.9 : 0);
-    gl.uniform1f(postUni.saturation, Math.max(0.25, 1 - frame.flatness * 0.65));
+    gl.uniform1f(postUni.saturation, Math.max(0.35, 1 - frame.flatness * 0.55));
     gl.uniform3f(postUni.bg, palette.bg[0], palette.bg[1], palette.bg[2]);
-    // Centroid → hue: tilt the colour toward the accent at high centroid,
-    // toward the dark/warm at low centroid; stay close to neutral overall.
+    gl.uniform3f(postUni.accent, palette.accent[0], palette.accent[1], palette.accent[2]);
+    gl.uniform3f(postUni.dark, palette.dark[0], palette.dark[1], palette.dark[2]);
+    gl.uniform3f(postUni.light, palette.light[0], palette.light[1], palette.light[2]);
+    // Gentle centroid tilt — most of the colour now comes from the palette
+    // ramp + field tint, so this stays a quiet bias (≈±10%).
     const c = frame.centroid;
     gl.uniform3f(
       postUni.hueShift,
-      0.85 + (palette.accent[0] * 0.4 + (1 - c) * 0.25),
-      0.9 + (palette.accent[1] * 0.35 + c * 0.05),
-      0.85 + (palette.accent[2] * 0.45 + c * 0.30),
+      0.95 + (1 - c) * 0.12,
+      0.96 + c * 0.04,
+      0.95 + c * 0.12,
     );
     drawFullscreen();
   }

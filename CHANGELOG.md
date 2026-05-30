@@ -3,6 +3,20 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.2] - 2026-05-30
+
+### Changed — Eviland looks like MilkDrop now, not a white cloud
+
+Eviland reacted correctly but rendered as a flat, pale cloud because three things each pushed toward "diffuse white": the feedback field only applied soft curl-noise (no structured motion), emitters were soft gaussian blobs, and the final composite was raw additive (`field + bloom`), so accumulating energy summed straight to white. Rebuilt the shaders to adopt MilkDrop's actual visual language while keeping Eviland's 24-band causal reactivity:
+
+- **Feedback field** now does a MilkDrop-style per-frame transform of the previous frame — inward **zoom** (kick/bass-driven tunnel rush), **rotate + swirl** (energy/beat-driven spirals), curl-noise detail on top — and a **YIQ hue-rotation** so trails drift through colors as they age (the signature MilkDrop palette feel). Section seed sets the spin direction so a returning chorus rhymes.
+- **Emitters** sharpened from blobs into crisp shapes: thin bright ring (kick), spike-star burst (snare), pinpoint + cross-streak sparkle (hat), tighter blob (vocal), hard-rim core.
+- **Composite** maps field intensity through a dark→accent→light **palette ramp** (color depth, not a brightness ramp to white), with bloom mixed at half weight as glow rather than flood, ACES tone-mapping, and dark-grounded empty zones.
+
+### Fixed — album-art overlay invisible on Eviland
+
+The fullscreen album-cover overlay used `mix-blend-mode: screen` at 0.34 opacity, which washed out completely against Eviland's bright field. It now uses normal blending at 0.72 so the cover reads clearly over any visualizer.
+
 ## [1.7.1] - 2026-05-30
 
 ### Changed — Eviland is now the default visualizer
