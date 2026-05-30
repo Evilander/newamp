@@ -3,6 +3,12 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] - 2026-05-30
+
+### Changed — Eviland is now the default visualizer
+
+New installs open the fullscreen visualizer on Eviland (was Neon Waves), so the causal, reacts-to-every-instrument experience is what you get out of the box. Existing users keep whatever they last selected. On machines without WebGL2 float support Eviland still falls back to MilkDrop automatically — one binary, no configuration needed.
+
 ## [1.7.0] - 2026-05-30
 
 ### Added — Eviland: a visualizer that reacts to every instrument
