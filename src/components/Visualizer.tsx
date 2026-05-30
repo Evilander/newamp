@@ -10,6 +10,8 @@ import {
   type BcInitMessage,
 } from '../butterchurn-iframe/protocol';
 import { createParticleFlowRenderer } from '../visualizer/particle-flow';
+import { createEvilandRenderer } from '../visualizer/eviland';
+import { createEvilandReactor } from '../visualizer/eviland-audio';
 
 export type VizMode =
   | 'mini'
@@ -31,6 +33,7 @@ export type VizMode =
   | 'lattice-strobe'
   | 'liquid-mercury'
   | 'particle-flow'
+  | 'eviland'
   | 'kaleido-bloom'
   | 'liquid-aurora-storm'
   | 'fractal-pulse'
@@ -252,6 +255,79 @@ export function Visualizer({
           /* frame already torn down */
         }
         iframe.src = 'about:blank';
+      };
+    }
+
+    if (mode === 'eviland') {
+      // Flagship: WebGL2 RGBA16F feedback-field reactor driven by the 24-band
+      // onset bus + structural memory. Returns null when WebGL2 or float
+      // render targets are unavailable, in which case we keep the canvas
+      // alive with the non-eval 2D fallback so it never goes dark.
+      const smoke = Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke);
+      const evilandQuality: 'high' | 'medium' | 'low' =
+        performance === 'low' ? 'low' : isFullscreen ? 'high' : 'medium';
+      const canPaint = createFrameGate(canvasRef, frameIntervalMs);
+      const baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
+      let raf = 0;
+      const renderer = createEvilandRenderer(canvas, { quality: evilandQuality, smoke });
+
+      if (!renderer) {
+        const fb = (now: number) => {
+          if (canPaint(now)) paintMilkdropFallback(canvas, engine);
+          raf = requestAnimationFrame(fb);
+        };
+        raf = requestAnimationFrame(fb);
+        return () => cancelAnimationFrame(raf);
+      }
+
+      const binCount = engine.frequencyBinCount;
+      const freq = new Uint8Array(new ArrayBuffer(binCount));
+      const onsetFreq = new Uint8Array(new ArrayBuffer(binCount));
+      const leftFreq = new Uint8Array(new ArrayBuffer(binCount));
+      const rightFreq = new Uint8Array(new ArrayBuffer(binCount));
+      const reactor = createEvilandReactor({
+        sampleRate: engine.getSampleRate(),
+        fftSize: engine.fftSize,
+        binCount,
+      });
+      let lastNow = 0;
+      if (engine.ctx.state === 'suspended') void engine.ctx.resume().catch(() => {});
+
+      // Hoist the palette out of the rAF loop. getComputedStyle forces a style
+      // recalc; calling it 4x per frame + allocating 4 fresh rgb arrays was
+      // burning real CPU. The canvas key includes palette/mode/etc so a theme
+      // change remounts this effect and rebuilds the palette — correct.
+      const palette = {
+        accent: parseRgbVec(getCssVar('--accent')),
+        dark: parseRgbVec(getCssVar('--accent-dim') || getCssVar('--accent')),
+        light: parseRgbVec(getCssVar('--ink') || '#ffffff'),
+        bg: parseRgbVec(getCssVar('--bg') || '#05060a'),
+      };
+
+      const loop = (now: number) => {
+        raf = requestAnimationFrame(loop);
+        if (!canPaint(now)) return;
+        const node = canvasRef.current;
+        if (node) {
+          const cssW = node.clientWidth || 100;
+          const cssH = node.clientHeight || 100;
+          const fit = Math.min(1, Math.sqrt(maxPixels / Math.max(1, cssW * baseDpr * cssH * baseDpr)));
+          renderer.resize(cssW, cssH, baseDpr * fit);
+        }
+        engine.getFreqData(freq);
+        engine.getOnsetFreqData(onsetFreq);
+        engine.getLeftFreqData(leftFreq);
+        engine.getRightFreqData(rightFreq);
+        const dtMs = lastNow ? now - lastNow : 16.7;
+        const evFrame = reactor.analyze(freq, onsetFreq, leftFreq, rightFreq, dtMs, now);
+        lastNow = now;
+        renderer.render(evFrame, palette, dtMs);
+      };
+      raf = requestAnimationFrame(loop);
+
+      return () => {
+        cancelAnimationFrame(raf);
+        renderer.dispose();
       };
     }
 

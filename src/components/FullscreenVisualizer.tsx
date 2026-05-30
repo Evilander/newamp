@@ -20,6 +20,7 @@ import { volumeLabel } from './VolumeSlider';
 // union + dispatch live in Visualizer.tsx; this file only labels them).
 const PRESETS = [
   { id: 'butterchurn', label: 'Milkdrop', group: 'milkdrop' },
+  { id: 'eviland', label: 'Eviland', group: 'gpu' },
   { id: 'kaleido-bloom', label: 'Kaleido Bloom', group: 'crazy' },
   { id: 'liquid-aurora-storm', label: 'Aurora Storm', group: 'crazy' },
   { id: 'fractal-pulse', label: 'Fractal Pulse', group: 'crazy' },
@@ -81,6 +82,7 @@ const REACTIVITY_MODES = [
 ] as const satisfies ReadonlyArray<{ id: VizReactivity; label: string }>;
 
 const AUTO_VJ_BALANCED: VisualizerPreset[] = [
+  'eviland',
   'particle-flow',
   'kaleido-bloom',
   'liquid-aurora-storm',

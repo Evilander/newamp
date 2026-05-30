@@ -3,6 +3,19 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-05-30
+
+### Added — Eviland: a visualizer that reacts to every instrument
+
+NewAmp's new flagship visualizer, and a genuinely new thing in the space. MilkDrop/butterchurn — and Plexamp, Specterr, Synesthesia, and essentially every Shadertoy audio shader — react to roughly three lumped frequency bands fed through one shared loudness envelope, so everything pulses together on the bass. Eviland is built the opposite way: it runs a **24-band perceptual (mel) spectral-flux onset detector** with per-band adaptive thresholds and refractory gating, so each instrument fires its *own* visual event. A kick blooms a red shockwave from the floor; the snare cracks white off-center and drives a chromatic split; hi-hats sparkle along the top edge; the lead/vocal drifts mid-screen tracking spectral brightness; the bass is a horizon line the whole scene rests on. Frequency maps to vertical position and stereo to horizontal, so it reads like a spectrogram you can feel.
+
+It renders into a **WebGL2 RGBA16F ping-pong feedback field** — the persistent, flowing substrate MilkDrop fakes with per-pixel equations — advected by curl noise, with a dual-Kawase bloom pyramid and ACES tone-mapping for the glow. Two things no other player's visualizer does:
+
+- **Structural memory** — a self-similarity novelty curve detects section boundaries (verse → chorus → drop), fingerprints each section, and when a section *returns* the field visually rhymes with its earlier appearance instead of starting over.
+- **Anticipation** — a kick inter-onset-interval tempo estimate yields a beat phase, so on confident tempo the visuals *lead* the downbeat (wind up ~80 ms early) instead of chasing it.
+
+Color is derived from the album-art palette plus the live spectral centroid (brightness → hue) and flatness (tonal → saturated, percussive → washed out). It self-throttles across three quality tiers and returns to real MilkDrop on machines without WebGL2 float support — one binary, no separate lite build. New audio infrastructure: dedicated stereo L/R analyser taps in the engine for width/pan. Eviland is the default-prominent first entry in the visualizer picker.
+
 ## [1.6.2] - 2026-05-30
 
 The visualizer pass: the MilkDrop "lag between animations" is gone, the whole visualizer is more reactive, there are five new GPU shader modes, and the fullscreen controls are no longer a wall of cryptic buttons.
