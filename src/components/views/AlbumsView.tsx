@@ -364,13 +364,15 @@ export function AlbumsView(): JSX.Element {
     openAlbum(pick);
   }
 
-  // Album rating is now its own stored value (album_ratings table) rather
-  // than the average of the album's track scores. When the album has never
-  // been rated explicitly, fall back to the track-score average as a hint
-  // so the slider still shows something meaningful before the user has
-  // assigned an album rating.
-  const selectedAlbumScore =
-    selected?.ratingScore ?? (selected ? albumScore(tracks) : null);
+  // Album rating is its own stored value (album_ratings table), kept strictly
+  // independent of per-track scores. The editable control reflects ONLY the
+  // explicit album rating (null = unrated) — falling back to the track-score
+  // average here caused the song-rating slider to visibly move the album
+  // rating, since the average shifts when any track rating changes. The
+  // track-score average is still surfaced separately below as a read-only
+  // hint, so the user can see "songs avg N" without it driving the slider.
+  const selectedAlbumScore = selected?.ratingScore ?? null;
+  const selectedTrackAverage = selected ? albumScore(tracks) : null;
 
   async function setAlbumScore(score: number | null): Promise<void> {
     if (!selected) return;
@@ -464,6 +466,16 @@ export function AlbumsView(): JSX.Element {
                 onChange={(score) => void setAlbumScore(score)}
               />
             </div>
+            {selectedTrackAverage != null ? (
+              <span
+                className="text-[10px] tabular-nums"
+                style={{ color: 'var(--muted)' }}
+                data-newamp-album-songs-avg
+                title="Average of this album's track scores (read-only)"
+              >
+                songs avg {selectedTrackAverage.toFixed(1)}
+              </span>
+            ) : null}
           </div>
           <PlaylistAppendPicker
             tracks={tracks}

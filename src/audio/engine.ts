@@ -62,6 +62,17 @@ type SinkAudioElement = HTMLAudioElement & {
   setSinkId?: (sinkId: string) => Promise<void>;
 };
 
+// Human loudness is ~logarithmic; a linear slider->gain map crams nearly all
+// audible change into the bottom of the travel (the "slider does nothing past
+// ~15%" complaint). Cubic taper below unity makes equal slider movement ~=
+// equal perceived loudness; the 1.0-2.0 boost zone stays linear (limiter
+// catches >0dBFS). Unity (1.0) preserved exactly.
+function volumePositionToGain(position: number): number {
+  const p = Math.max(0, Math.min(2, position));
+  if (p <= 1) return p * p * p;
+  return p;
+}
+
 export class AudioEngine {
   private graph: AudioGraph | null = null;
   private activeDeckIndex = 0;
@@ -761,9 +772,16 @@ export class AudioEngine {
     // the limiter (see graph wiring), so values past 1.0 are caught by the
     // limiter and never reach the device above 0 dBFS. No more silent
     // post-limiter clipping when users push past unity.
+    // `this.volume` keeps the raw slider POSITION (for the % label,
+    // persistence, headroom math); the gain node gets a perceptual taper via
+    // volumePositionToGain so equal slider travel ~= equal perceived loudness.
     this.volume = Math.max(0, Math.min(2, v));
     if (!this.graph) return;
-    this.graph.masterGain.gain.setTargetAtTime(this.volume, this.graph.ctx.currentTime, 0.01);
+    this.graph.masterGain.gain.setTargetAtTime(
+      volumePositionToGain(this.volume),
+      this.graph.ctx.currentTime,
+      0.01,
+    );
   }
 
   setReplayGainDb(db: number | null): void {

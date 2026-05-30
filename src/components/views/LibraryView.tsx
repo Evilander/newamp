@@ -12,6 +12,7 @@ import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime, highlight } from '../../lib/format';
 import { api } from '../../lib/api';
 import { EmptyLibrary } from './EmptyLibrary';
+import { ArtistLink, AlbumLink } from '../EntityLink';
 
 type Sort =
   | 'artist'
@@ -1650,14 +1651,22 @@ export function TrackTable({
                 style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
                 title={t.artist}
               >
-                {search ? highlight(t.artist, search) : t.artist}
+                <ArtistLink artist={t.artist} color="inherit">
+                  {search ? highlight(t.artist, search) : t.artist}
+                </ArtistLink>
               </td>
               <td
                 className="truncate px-2 py-[5px]"
                 style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
                 title={t.album}
               >
-                {search ? highlight(t.album, search) : t.album}
+                <AlbumLink
+                  album={t.album}
+                  albumArtist={t.albumArtist || t.artist}
+                  color="inherit"
+                >
+                  {search ? highlight(t.album, search) : t.album}
+                </AlbumLink>
               </td>
               <td
                 className="px-2 py-[5px] text-right tabular-nums"

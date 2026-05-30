@@ -412,6 +412,60 @@ export function SettingsView(): JSX.Element {
 
         <section className="bevel-out flex flex-col gap-4 p-6">
           <h2 className="text-[11px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
+            Performance &amp; Resonance
+          </h2>
+          <Row label="Performance">
+            <label className="flex flex-col gap-1 text-[12px]" style={{ color: 'var(--ink-2)' }}>
+              <select
+                value={settings.performanceTier}
+                onChange={(event) => {
+                  const performanceTier =
+                    event.target.value === 'high' || event.target.value === 'lite'
+                      ? (event.target.value as 'high' | 'lite')
+                      : 'auto';
+                  api.setSettings({ performanceTier }).then(setSettings).catch(() => undefined);
+                }}
+                className="bevel-in px-2 py-1"
+                data-newamp-performance-tier
+                style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              >
+                <option value="auto">Auto (detect this machine)</option>
+                <option value="high">High (full richness)</option>
+                <option value="lite">Lite (lightest, for weak hardware)</option>
+              </select>
+              <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
+                Auto measures your frame rate and scales the visualizer and motion to keep playback smooth.
+              </span>
+            </label>
+          </Row>
+          <Row label="Resonance">
+            <label className="flex flex-col gap-1 text-[12px]" style={{ color: 'var(--ink-2)' }}>
+              <select
+                value={settings.ambientReactivity}
+                onChange={(event) => {
+                  const ambientReactivity =
+                    event.target.value === 'on' || event.target.value === 'off'
+                      ? (event.target.value as 'on' | 'off')
+                      : 'auto';
+                  api.setSettings({ ambientReactivity }).then(setSettings).catch(() => undefined);
+                }}
+                className="bevel-in px-2 py-1"
+                data-newamp-ambient-reactivity
+                style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              >
+                <option value="auto">Auto (on, unless the machine is slow)</option>
+                <option value="on">On</option>
+                <option value="off">Off</option>
+              </select>
+              <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
+                The whole interface breathes with the music — a colored glow from the album art and a beat pulse on the controls.
+              </span>
+            </label>
+          </Row>
+        </section>
+
+        <section className="bevel-out flex flex-col gap-4 p-6">
+          <h2 className="text-[11px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
             Skin
           </h2>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">

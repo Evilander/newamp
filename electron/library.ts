@@ -609,6 +609,12 @@ export class LibraryStore {
   // every Harmonic / Taste mix call. We cache after first build and invalidate
   // on any track DNA write (setTrackDna, upsertTracks with dna_json).
   private dnaIndexCache: Map<number, TrackDna> | null = null;
+  // Folder summarization iterates EVERY track row in JS to build the folder
+  // tree. Without this cache, every folder click re-ran SELECT id, path,
+  // duration, has_art FROM tracks on ~60k rows — single-threaded sql.js stalls
+  // the main process and freezes IPC. Cache invalidates only when the columns
+  // we read change: insert/update of path/duration/has_art, or delete.
+  private folderTrackRowsCache: FolderTrackRow[] | null = null;
 
   private constructor(private readonly file: string) {
     this.artDir = join(dirname(file), 'art');
@@ -809,6 +815,8 @@ export class LibraryStore {
       this.db.run('ROLLBACK');
       throw err;
     }
+    // upsertTracks writes path/duration/has_art — cached folder-row columns.
+    this.invalidateFolderTrackRowsCache();
     this.scheduleFlush();
   }
 
@@ -1138,6 +1146,7 @@ export class LibraryStore {
         this.db.run(`DELETE FROM tracks WHERE id = ?`, [id]);
       }
       this.invalidateDnaIndexCache();
+      this.invalidateFolderTrackRowsCache();
       this.db.run('COMMIT');
     } catch (err) {
       this.db.run('ROLLBACK');
@@ -1169,6 +1178,8 @@ export class LibraryStore {
         WHERE id = ?`,
       [title, artist, album, albumArtist, trackNo, discNo, year, duration, id],
     );
+    // duration is one of the cached folder-row columns.
+    this.invalidateFolderTrackRowsCache();
     this.scheduleFlush();
     return this.getTrack(id);
   }
@@ -1337,6 +1348,8 @@ export class LibraryStore {
       this.db.run('ROLLBACK');
       throw err;
     }
+    // has_art is one of the cached folder-row columns.
+    this.invalidateFolderTrackRowsCache();
     this.scheduleFlush();
 
     return {
@@ -1454,7 +1467,14 @@ export class LibraryStore {
   }
 
   private getFolderTrackRows(): FolderTrackRow[] {
-    return this.many<FolderTrackRow>(`SELECT id, path, duration, has_art FROM tracks`);
+    if (this.folderTrackRowsCache) return this.folderTrackRowsCache;
+    const rows = this.many<FolderTrackRow>(`SELECT id, path, duration, has_art FROM tracks`);
+    this.folderTrackRowsCache = rows;
+    return rows;
+  }
+
+  private invalidateFolderTrackRowsCache(): void {
+    this.folderTrackRowsCache = null;
   }
 
   getAlbumTracks(albumArtist: string, album: string): Track[] {

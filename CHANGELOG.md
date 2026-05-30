@@ -3,6 +3,38 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.1] - 2026-05-29
+
+A performance + feel release layered on 1.6.0. The headline is **Resonance** — the whole UI reacts to the live audio — but the biggest practical win is that **hardware acceleration is finally on by default**, which alone makes the entire app feel dramatically lighter.
+
+### Fixed — hardware acceleration was disabled by default (the single biggest perf bug)
+
+Since the project's first commit, `electron/main.ts` required an opt-in env var (`NEWAMP_ENABLE_HARDWARE_ACCELERATION=1`) to use the GPU; the default path called `app.disableHardwareAcceleration()` plus `disable-gpu`/`disable-gpu-compositing`/`disable-gpu-rasterization`. This was a holdover from the GPU-less cloud sandbox the app was built in. On real machines it forced the WebGL visualizer onto SwiftShader (CPU) and CPU-composited the entire UI — the dominant cause of sluggishness.
+
+Hardware acceleration now defaults **on**. Software rendering is used only for smoke tests, an explicit `NEWAMP_DISABLE_HARDWARE_ACCELERATION=1` opt-out, or automatic crash recovery: a GPU-process crash drops a sentinel file under `userData` so the next launch falls back to software once, then retries — a one-off crash self-heals, a persistently broken driver stays on software. Chromium's own GPU blocklist still handles known-bad drivers.
+
+### Added — Resonance: the whole UI reacts to the live audio
+
+Every other player themes from static cover art or confines audio-reactivity to a dedicated visualizer window. NewAmp now makes the *application chrome itself* respond to what's playing: a live album-art accent wash behind the content, a beat pulse on the transport, and energy-driven glow — all driven by one `requestAnimationFrame` loop writing a handful of `:root` CSS custom properties (`--amp-energy`, `--amp-beat`, `--amp-bright`), consumed by compositor-only `transform`/`opacity` rules. No per-frame React.
+
+It self-throttles: an honest adaptive-quality tier (a static device-capability probe plus a tiny live rAF-frame-budget monitor — not the abandoned "pressure" machinery) drops Resonance to a single accent pulse, then to a clean static theme, on weak hardware — and `prefers-reduced-motion` disables it entirely. New Settings rows: **Performance** (Auto / High / Lite) and **Resonance** (Auto / On / Off). The accent palette is extracted from album art on `requestIdleCallback`, cached per track.
+
+### Fixed — volume slider did almost nothing past ~15%
+
+`setVolume` mapped slider position directly to gain (linear). Because loudness perception is logarithmic, nearly all the audible change was crammed into the bottom of the travel. Volume now passes through a perceptual cubic taper below unity (the 1.0–2.0 boost zone stays linear, still caught by the limiter), so equal slider movement produces roughly equal perceived loudness change across the whole range.
+
+### Fixed — Folders view stutter on large libraries
+
+`getFolders` ran a full `SELECT … FROM tracks` (60k+ rows) and re-derived the folder tree in JS on *every* folder click; that row set only changes on a library rescan, so it's now memoized and invalidated precisely at the four track-mutation sites (upsert, prune, metadata patch, album-art apply). Folder navigation on a large library is no longer an O(library) operation per click.
+
+### Added — clickable artist and album names
+
+Artist and album names across Library, History, and Playlist/queue rows are now links to their artist/album views (a reusable `EntityLink`), reusing the existing navigation store.
+
+### Fixed — rating a song no longer changes the album's rating
+
+The database split (per-track vs per-album ratings) was already correct; the Albums view was *displaying* the live track-score average as the album rating when an album had no explicit rating, so editing a song appeared to move the album. The editable album control now reflects only the explicit album rating, with the track average shown as a separate read-only hint.
+
 ## [1.6.0] - 2026-05-29
 
 Production-ready & special: macOS becomes a first-class platform, CI lands as a
