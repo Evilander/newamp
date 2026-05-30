@@ -104,7 +104,7 @@ assert.match(fullscreenSource, /data-newamp-viz-hover-meter/, 'Fullscreen visual
 assert.match(fullscreenSource, /data-newamp-viz-level-meter-bar/, 'Fullscreen visualizer meter should expose an analyzer-driven level bar');
 assert.match(fullscreenSource, /engine\.getTimeData/, 'Fullscreen visualizer meter should read audio analyzer time data, not only the volume setting');
 assert.match(fullscreenSource, /data-newamp-album-breathe-visualizer/, 'Album breathe visualizer should be a real full-screen mode');
-assert.match(fullscreenSource, /ART PULSE/, 'Fullscreen visualizer should expose random album-art pulse mode');
+assert.match(fullscreenSource, /data-newamp-viz-art-button|Album-art overlay/, 'Fullscreen visualizer should expose album-art overlay control');
 assert.match(fullscreenSource, /ArrowRight/, 'Fullscreen visualizer should support keyboard preset cycling');
 assert.match(fullscreenSource, /pickAutoVjPreset/, 'Auto VJ should choose presets from live audio energy');
 assert.match(fullscreenSource, /visualizerEnergy/, 'Auto VJ should inspect analyzer bins instead of cycling blindly');
