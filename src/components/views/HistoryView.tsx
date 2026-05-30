@@ -4,6 +4,7 @@ import { api } from '../../lib/api';
 import { formatDuration, formatTime } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { LoadMoreFooter } from './LoadMoreFooter';
+import { ArtistLink, AlbumLink } from '../EntityLink';
 
 const HISTORY_PAGE_SIZE = 500;
 
@@ -268,10 +269,10 @@ function HistoryTable({
               </td>
               <td className="truncate px-2 py-[5px]" title={track.title}>{track.title}</td>
               <td className="truncate px-2 py-[5px]" title={track.artist} style={{ color: 'var(--ink-2)' }}>
-                {track.artist}
+                <ArtistLink artist={track.artist} color="inherit" />
               </td>
               <td className="truncate px-2 py-[5px]" title={track.album} style={{ color: 'var(--ink-2)' }}>
-                {track.album}
+                <AlbumLink album={track.album} albumArtist={track.albumArtist || track.artist} color="inherit" />
               </td>
               <td className="px-2 py-[5px] text-right tabular-nums" style={{ color: 'var(--ink-2)' }}>
                 {formatTime(track.duration ?? 0)}

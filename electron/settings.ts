@@ -44,6 +44,8 @@ const DEFAULTS: AppSettings = {
   audioBitPerfectPath: false,
   audioPreferredSampleRate: null,
   closeButtonBehavior: 'minimize-to-tray',
+  performanceTier: 'auto',
+  ambientReactivity: 'auto',
 };
 
 function normalizePreferredSampleRate(value: unknown): number | null {
@@ -113,6 +115,14 @@ function normalizeCloseButtonBehavior(value: unknown): AppSettings['closeButtonB
   return value === 'close-app' ? 'close-app' : 'minimize-to-tray';
 }
 
+function normalizePerformanceTier(value: unknown): AppSettings['performanceTier'] {
+  return value === 'high' || value === 'lite' ? value : 'auto';
+}
+
+function normalizeAmbientReactivity(value: unknown): AppSettings['ambientReactivity'] {
+  return value === 'on' || value === 'off' ? value : 'auto';
+}
+
 export class SettingsStore {
   public readonly recoveryEvents: RecoveryEvent[] = [];
   private state: AppSettings;
@@ -148,6 +158,8 @@ export class SettingsStore {
           audioBitPerfectPath: parsed.audioBitPerfectPath === true,
           audioPreferredSampleRate: normalizePreferredSampleRate(parsed.audioPreferredSampleRate),
           closeButtonBehavior: normalizeCloseButtonBehavior(parsed.closeButtonBehavior),
+          performanceTier: normalizePerformanceTier(parsed.performanceTier),
+          ambientReactivity: normalizeAmbientReactivity(parsed.ambientReactivity),
         };
       } catch (err) {
         const event = quarantineCorruptFile(this.file, 'settings', recoveryReason(err));
@@ -221,6 +233,12 @@ export class SettingsStore {
       closeButtonBehavior: patch.closeButtonBehavior === undefined
         ? this.state.closeButtonBehavior
         : normalizeCloseButtonBehavior(patch.closeButtonBehavior),
+      performanceTier: patch.performanceTier === undefined
+        ? this.state.performanceTier
+        : normalizePerformanceTier(patch.performanceTier),
+      ambientReactivity: patch.ambientReactivity === undefined
+        ? this.state.ambientReactivity
+        : normalizeAmbientReactivity(patch.ambientReactivity),
     };
     this.state = next;
     this.persist();

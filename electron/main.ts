@@ -17,7 +17,7 @@ import {
 } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { LibraryStore } from './library.js';
 import { LibraryWatcher } from './library-watcher.js';
@@ -113,11 +113,17 @@ const smokeMode =
   uiArtSmoke ||
   uiDiscoverSmoke ||
   screenshotGallery;
-const forceHardwareAcceleration =
-  process.env.NEWAMP_ENABLE_HARDWARE_ACCELERATION === '1' &&
-  process.env.NEWAMP_DISABLE_HARDWARE_ACCELERATION !== '1' &&
-  !smokeMode;
-const forceSoftwareRendering = !forceHardwareAcceleration;
+// Hardware acceleration defaults ON. NewAmp is a real-time WebGL visualizer
+// (Butterchurn) plus GPU-composited, audio-reactive chrome — it MUST run on the
+// GPU to feel light. The historical default of software rendering was a
+// holdover from the GPU-less sandbox the app was built in; it forced
+// Butterchurn onto SwiftShader and CPU-composited the entire UI, the single
+// biggest "feels heavy" cause on every machine. Software is now used only for:
+// smokes (often headless / no GPU), an explicit opt-out, or auto-recovery
+// after a prior GPU-process crash (sentinel resolved below, once userData is
+// set up). Chromium's GPU blocklist still handles known-bad drivers.
+const gpuForcedOff = process.env.NEWAMP_DISABLE_HARDWARE_ACCELERATION === '1';
+const gpuForcedOn = process.env.NEWAMP_ENABLE_HARDWARE_ACCELERATION === '1';
 const OPEN_AUDIO_EXTS = new Set([
   '.mp3',
   '.flac',
@@ -201,6 +207,23 @@ try {
 if (smokeMode) {
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 }
+
+// Auto-recovery: if a previous launch crashed the GPU process, this launch
+// falls back to software and clears the flag so the NEXT launch retries the
+// GPU. A genuinely broken driver will rewrite the sentinel and stay on
+// software; a one-off transient crash recovers automatically. Chromium's own
+// GPU blocklist still handles known-bad drivers even with HW accel on.
+const gpuCrashSentinel = join(app.getPath('userData'), 'gpu-crash-recovery');
+let gpuCrashedLastLaunch = false;
+if (!gpuForcedOn && existsSync(gpuCrashSentinel)) {
+  gpuCrashedLastLaunch = true;
+  try {
+    rmSync(gpuCrashSentinel);
+  } catch {
+    /* best effort — next launch will still retry */
+  }
+}
+const forceSoftwareRendering = smokeMode || gpuForcedOff || gpuCrashedLastLaunch;
 
 if (forceSoftwareRendering) {
   applySoftwareRenderingSwitches(smokeMode ? 'smoke' : 'normal');
@@ -3558,6 +3581,16 @@ process.on('unhandledRejection', (reason) => {
 
 app.on('child-process-gone', (_event, details) => {
   writeDiagnosticEvent('child-process-gone', details as unknown as Record<string, unknown>);
+  // A crashed GPU process means hardware acceleration is unstable on this
+  // machine. Drop the recovery sentinel so the next launch falls back to
+  // software rendering instead of crash-looping on the GPU.
+  if (details.type === 'GPU' && !smokeMode) {
+    try {
+      writeFileSync(gpuCrashSentinel, `${new Date().toISOString()} ${details.reason}\n`, 'utf8');
+    } catch {
+      /* best effort */
+    }
+  }
 });
 
 app.on('render-process-gone', (_event, webContents, details) => {

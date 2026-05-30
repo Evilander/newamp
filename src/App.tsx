@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { TitleBar } from './components/TitleBar';
 import { Sidebar } from './components/Sidebar';
 import { Transport } from './components/Transport';
@@ -12,6 +12,9 @@ import { api, inElectron, winctl } from './lib/api';
 import { syncMediaSession } from './lib/mediaSession';
 import { resolvePlayerShortcut, type PlayerShortcutCommand } from '@shared/keyboard-shortcuts';
 import { applyShell, loadInitialShell } from './components/ShellPicker';
+import { useAdaptiveQuality } from './lib/adaptiveQuality';
+import { useReducedMotion } from './hooks/useReducedMotion';
+import { startResonance, stopResonance, pokeResonance, type ResonanceOpts } from './lib/resonance';
 
 const EqPanel = lazy(() => import('./components/EqPanel').then((module) => ({ default: module.EqPanel })));
 const CompactPlayer = lazy(() => import('./components/CompactPlayer').then((module) => ({ default: module.CompactPlayer })));
@@ -149,6 +152,26 @@ export default function App(): JSX.Element {
     document.documentElement.style.setProperty('--newamp-text-scale', scale.toFixed(2));
     document.documentElement.dataset.textScale = scale === 1 ? 'normal' : 'custom';
   }, [settings?.textScale]);
+
+  // Resonance: feed the adaptive tier + ambient setting + reduced-motion into
+  // the live audio→CSS-var loop. `data-amp-reactive` is the CSS opt-in gate.
+  const ambientReactivity = settings?.ambientReactivity ?? 'auto';
+  const performanceSetting = settings?.performanceTier ?? 'auto';
+  const adaptiveTier = useAdaptiveQuality(performanceSetting);
+  const reducedMotion = useReducedMotion();
+  const resonanceOptsRef = useRef<ResonanceOpts>({ tier: 'medium', reactive: true, reducedMotion: false });
+  useEffect(() => {
+    const reactive =
+      ambientReactivity === 'on' ? true : ambientReactivity === 'off' ? false : adaptiveTier !== 'low';
+    const live = reactive && !reducedMotion && adaptiveTier !== 'low';
+    resonanceOptsRef.current = { tier: adaptiveTier, reactive, reducedMotion };
+    document.documentElement.dataset.ampReactive = live ? 'on' : 'off';
+    pokeResonance();
+  }, [adaptiveTier, ambientReactivity, reducedMotion]);
+  useEffect(() => {
+    startResonance(() => resonanceOptsRef.current);
+    return () => stopResonance();
+  }, []);
 
   async function finishFirstLaunchTutorial(patch: { openaiApiKey?: string | null; openaiModel?: string } = {}): Promise<void> {
     const updated = await api.setSettings({
