@@ -88,6 +88,11 @@ function normalizeVisualizerPreset(value: unknown): AppSettings['visualizerPrese
     'lattice-strobe',
     'liquid-mercury',
     'particle-flow',
+    'kaleido-bloom',
+    'liquid-aurora-storm',
+    'fractal-pulse',
+    'starfield-warp',
+    'spectral-tunnel',
     'album-breathe',
   ].includes(preset)
     ? (preset as AppSettings['visualizerPreset'])

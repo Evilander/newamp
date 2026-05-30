@@ -863,6 +863,20 @@ export class AudioEngine {
     this.graph.onsetAnalyser.getByteFrequencyData(buf);
   }
 
+  /**
+   * Read time-domain samples from the unsmoothed onset-detection analyser.
+   * Use this when feeding butterchurn (or any external visualizer) so its
+   * internal FFT sees snappy transients instead of the visualizer analyser's
+   * 1.3-frame smoothing lag.
+   */
+  getOnsetTimeData(buf: Uint8Array<ArrayBuffer>): void {
+    if (!this.graph) {
+      buf.fill(128);
+      return;
+    }
+    this.graph.onsetAnalyser.getByteTimeDomainData(buf);
+  }
+
   /** Current audio sample rate in Hz, or null when the engine has not booted. */
   getSampleRate(): number {
     return this.graph?.ctx.sampleRate ?? 48000;
