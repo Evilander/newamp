@@ -41,7 +41,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   resumeState: null,
   compactMode: false,
   alwaysOnTop: false,
-  visualizerPreset: 'neon-waves',
+  visualizerPreset: 'eviland',
   volume: 0.75,
   playbackRate: 1,
   audioOutputDeviceId: null,
