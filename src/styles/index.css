@@ -3824,6 +3824,203 @@ input[type='range'].nslider.eq-slider {
   font-size: 10px;
   letter-spacing: 0.08em;
 }
+
+/* Redesigned slim visualizer control bar: prev/next around the active preset
+   name, then a spacer, then ⚙ / ? / ✕. Replaces the old wall of cryptic
+   identical pills. The picker / settings / help popovers below it carry the
+   actual labeled controls. UI-only — every handler/state is the original. */
+.fullscreen-viz-toolbar.viz-control-bar { gap: 8px; padding: 6px 8px; }
+.viz-control-bar > .viz-control-nav {
+  min-width: 32px;
+  padding: 0 10px;
+  font-size: 14px;
+}
+.viz-control-bar > .viz-control-preset {
+  flex: 0 1 auto;
+  min-width: 180px;
+  max-width: min(46vw, 480px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 14px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+.viz-control-bar .viz-control-preset-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.viz-control-bar .viz-control-caret { font-size: 10px; opacity: 0.7; }
+.viz-control-bar .viz-control-spacer { flex: 1 1 auto; }
+
+.viz-popover-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+.viz-popover {
+  position: absolute;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 96;
+  max-width: min(720px, calc(100vw - 32px));
+  max-height: calc(100vh - 96px);
+  overflow: auto;
+  background: var(--panel, rgba(16, 18, 22, 0.96));
+  color: var(--ink, #e7eaef);
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.viz-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px -4px 0;
+}
+.viz-popover-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink, #e7eaef);
+}
+.viz-popover-close {
+  min-width: 28px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.viz-preset-picker { min-width: min(560px, calc(100vw - 32px)); }
+.viz-preset-group { display: flex; flex-direction: column; gap: 8px; }
+.viz-preset-group-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-2, rgba(231, 234, 239, 0.6));
+  margin: 0;
+}
+.viz-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 6px;
+}
+.viz-preset-grid .viz-preset-cell {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viz-settings-panel { min-width: min(420px, calc(100vw - 32px)); gap: 10px; }
+.viz-setting-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line, rgba(255, 255, 255, 0.06));
+}
+.viz-setting-row:last-child { border-bottom: none; }
+.viz-setting-label {
+  font-size: 12px;
+  color: var(--ink, #e7eaef);
+  line-height: 1.3;
+}
+.viz-setting-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--ink-2, rgba(231, 234, 239, 0.55));
+  letter-spacing: 0.02em;
+  text-transform: none;
+  margin-top: 2px;
+}
+.viz-segmented {
+  display: inline-flex;
+  gap: 4px;
+}
+.viz-segmented .pxbtn { min-width: 52px; }
+.viz-setting-cycle {
+  min-width: 120px;
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.viz-setting-cycle .viz-setting-hint { margin-top: 0; }
+.viz-setting-capture .viz-setting-capture-buttons {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.viz-help-panel { min-width: min(440px, calc(100vw - 32px)); }
+.viz-help-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin: 0;
+}
+.viz-help-list > div {
+  display: grid;
+  grid-template-columns: minmax(140px, max-content) 1fr;
+  gap: 12px;
+  align-items: baseline;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line, rgba(255, 255, 255, 0.05));
+}
+.viz-help-list > div:last-child { border-bottom: none; }
+.viz-help-list dt {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  font-size: 11px;
+  color: var(--ink, #e7eaef);
+}
+.viz-help-list dd {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ink-2, rgba(231, 234, 239, 0.7));
+}
+.viz-help-or {
+  font-size: 10px;
+  color: var(--ink-2, rgba(231, 234, 239, 0.55));
+  letter-spacing: 0.04em;
+}
+.viz-help-list kbd {
+  display: inline-block;
+  min-width: 22px;
+  padding: 1px 6px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--ink, #e7eaef);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.16));
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  text-align: center;
+}
 .fullscreen-viz-cover {
   width: min(34vw, 360px);
   aspect-ratio: 1;

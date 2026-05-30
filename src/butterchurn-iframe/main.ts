@@ -34,12 +34,22 @@ function unwrapDefault<T>(module: unknown): T {
 
 let visualizer: ButterchurnVisualizer | null = null;
 let presets: Array<[string, Record<string, unknown>]> = [];
+// Lightweight presets only — the heaviest entries in the full preset pack are
+// the ones with sprawling per_pixel / per_frame equation bodies that JIT-compile
+// slowly inside loadPreset(), which is what users perceive as "lag between
+// animations". Sorted-by-weight ascending; rotation picks from the lighter
+// portion most of the time with an occasional excursion into a heavier one.
+let presetWeights: number[] = [];
+let presetOrder: number[] = [];
+let lastAudioPostAt = 0;
 let presetTimer: number | null = null;
+let pendingPresetIdle: number | null = null;
 let raf = 0;
 let dpr = 1;
 let disposed = false;
 let started = false;
 let haveAudio = false;
+let pageVisible = typeof document === 'undefined' ? true : !document.hidden;
 const latestTime = new Uint8Array(BUTTERCHURN_FFT_SIZE);
 
 function sizeCanvas(): void {
@@ -98,12 +108,63 @@ async function start(sampleRate: number): Promise<void> {
     );
     if (!presets.length) throw new Error('No Butterchurn presets loaded');
 
+    // Weight = JSON length as a cheap proxy for equation-body complexity.
+    // Heavier presets take longer to JIT-compile inside loadPreset(), which is
+    // the actual frame-blocking hitch users see as "lag between animations".
+    presetWeights = presets.map(([, preset]) => {
+      try { return JSON.stringify(preset).length; } catch { return 0; }
+    });
+    presetOrder = presets.map((_, i) => i).sort((a, b) => presetWeights[a]! - presetWeights[b]!);
+
+    // Pick a preset, biased toward the lighter half. ~85% from the light half,
+    // ~15% from the heavy half so the rotation still surprises you with the
+    // dramatic presets occasionally.
+    const pickIndex = (): number => {
+      const halfBoundary = Math.floor(presetOrder.length / 2);
+      const fromLight = Math.random() < 0.85;
+      const lo = fromLight ? 0 : halfBoundary;
+      const hi = fromLight ? Math.max(1, halfBoundary) : presetOrder.length;
+      return presetOrder[lo + Math.floor(Math.random() * (hi - lo))]!;
+    };
+
+    // Run the heavy loadPreset() during the iframe's idle time so the JIT
+    // compile lands between paints rather than mid-frame. Falls back to
+    // setTimeout(0) where requestIdleCallback isn't available.
+    type IdleCb = (cb: () => void, opts?: { timeout: number }) => number;
+    const ric: IdleCb = (window as unknown as { requestIdleCallback?: IdleCb }).requestIdleCallback
+      ?? ((cb) => window.setTimeout(cb, 0) as unknown as number);
+    const cic = (window as unknown as { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback
+      ?? ((id: number) => window.clearTimeout(id));
+
     const loadRandomPreset = (blendSeconds: number): void => {
-      const [, preset] = presets[Math.floor(Math.random() * presets.length)]!;
-      visualizer?.loadPreset(preset, blendSeconds);
+      if (pendingPresetIdle != null) cic(pendingPresetIdle);
+      pendingPresetIdle = ric(() => {
+        pendingPresetIdle = null;
+        if (disposed || !visualizer) return;
+        const [, preset] = presets[pickIndex()]!;
+        try { visualizer.loadPreset(preset, blendSeconds); } catch { /* bad preset, skip */ }
+      }, { timeout: 1500 });
     };
     loadRandomPreset(0);
-    presetTimer = window.setInterval(() => loadRandomPreset(2.2), 22000);
+
+    const scheduleRotation = (): void => {
+      if (presetTimer != null) window.clearInterval(presetTimer);
+      // Skip a rotation tick when the page is hidden OR the parent stopped
+      // sending audio (track paused) — compiling a preset nobody can see is
+      // wasted CPU.
+      presetTimer = window.setInterval(() => {
+        if (!pageVisible) return;
+        if (performance.now() - lastAudioPostAt > 1500) return; // parent paused
+        loadRandomPreset(2.0);
+      }, 22000);
+    };
+    scheduleRotation();
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        pageVisible = !document.hidden;
+      });
+    }
 
     if (typeof ResizeObserver !== 'undefined') {
       new ResizeObserver(() => sizeCanvas()).observe(canvas);
@@ -149,11 +210,18 @@ window.addEventListener('message', (event: MessageEvent) => {
     if (message.samples && message.samples.length) {
       latestTime.set(message.samples.subarray(0, BUTTERCHURN_FFT_SIZE));
       haveAudio = true;
+      lastAudioPostAt = performance.now();
     }
   } else if (message.type === 'dispose') {
     disposed = true;
     cancelAnimationFrame(raf);
     if (presetTimer != null) window.clearInterval(presetTimer);
+    if (pendingPresetIdle != null) {
+      const cic = (window as unknown as { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback
+        ?? ((id: number) => window.clearTimeout(id));
+      cic(pendingPresetIdle);
+      pendingPresetIdle = null;
+    }
   }
 });
 
