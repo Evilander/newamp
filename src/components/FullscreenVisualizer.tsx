@@ -14,28 +14,47 @@ import { api, winctl } from '../lib/api';
 import type { VisualizerPreset } from '@shared/types';
 import { volumeLabel } from './VolumeSlider';
 
+// Preset registry. `group` drives the labeled sections in the new preset
+// picker popover so users can scan by category instead of one long rail. The
+// five `crazy` entries are the GPU shader modes added in 1.6.2 (the type
+// union + dispatch live in Visualizer.tsx; this file only labels them).
 const PRESETS = [
-  { id: 'particle-flow', label: 'Particle Flow' },
-  { id: 'tempo-pulse', label: 'Tempo Pulse' },
-  { id: 'lattice-strobe', label: 'Lattice Strobe' },
-  { id: 'liquid-mercury', label: 'Liquid Mercury' },
-  { id: 'neon-waves', label: 'Neon Waves' },
-  { id: 'neon-ribbons', label: 'Neon Ribbons' },
-  { id: 'plasma-grid', label: 'Plasma Grid' },
-  { id: 'prism-bars', label: 'Prism Bars' },
-  { id: 'confetti', label: 'Confetti' },
-  { id: 'burning-cloud', label: 'Burning Cloud' },
-  { id: 'spectrum', label: 'Spectrum' },
-  { id: 'orbital-rings', label: 'Orbital Rings' },
-  { id: 'radial', label: 'Radial' },
-  { id: 'tunnel', label: 'Tunnel' },
-  { id: 'pulse', label: 'Pulse' },
-  { id: 'galaxy', label: 'Galaxy' },
-  { id: 'aurora', label: 'Aurora' },
-  { id: 'oscilloscope', label: 'Oscilloscope' },
-  { id: 'album-breathe', label: 'Album Breathe' },
-  { id: 'butterchurn', label: 'Milkdrop' },
-] as const satisfies ReadonlyArray<{ id: VisualizerPreset; label: string }>;
+  { id: 'butterchurn', label: 'Milkdrop', group: 'milkdrop' },
+  { id: 'kaleido-bloom', label: 'Kaleido Bloom', group: 'crazy' },
+  { id: 'liquid-aurora-storm', label: 'Aurora Storm', group: 'crazy' },
+  { id: 'fractal-pulse', label: 'Fractal Pulse', group: 'crazy' },
+  { id: 'starfield-warp', label: 'Starfield Warp', group: 'crazy' },
+  { id: 'spectral-tunnel', label: 'Spectral Tunnel', group: 'crazy' },
+  { id: 'particle-flow', label: 'Particle Flow', group: 'gpu' },
+  { id: 'tempo-pulse', label: 'Tempo Pulse', group: 'reactive' },
+  { id: 'lattice-strobe', label: 'Lattice Strobe', group: 'reactive' },
+  { id: 'liquid-mercury', label: 'Liquid Mercury', group: 'reactive' },
+  { id: 'neon-waves', label: 'Neon Waves', group: 'reactive' },
+  { id: 'neon-ribbons', label: 'Neon Ribbons', group: 'reactive' },
+  { id: 'plasma-grid', label: 'Plasma Grid', group: 'reactive' },
+  { id: 'prism-bars', label: 'Prism Bars', group: 'reactive' },
+  { id: 'confetti', label: 'Confetti', group: 'reactive' },
+  { id: 'burning-cloud', label: 'Burning Cloud', group: 'reactive' },
+  { id: 'spectrum', label: 'Spectrum', group: 'classic' },
+  { id: 'orbital-rings', label: 'Orbital Rings', group: 'classic' },
+  { id: 'radial', label: 'Radial', group: 'classic' },
+  { id: 'tunnel', label: 'Tunnel', group: 'classic' },
+  { id: 'pulse', label: 'Pulse', group: 'classic' },
+  { id: 'galaxy', label: 'Galaxy', group: 'classic' },
+  { id: 'aurora', label: 'Aurora', group: 'classic' },
+  { id: 'oscilloscope', label: 'Oscilloscope', group: 'classic' },
+  { id: 'album-breathe', label: 'Album Breathe', group: 'art' },
+] as const satisfies ReadonlyArray<{ id: VisualizerPreset; label: string; group: PresetGroup }>;
+
+type PresetGroup = 'milkdrop' | 'crazy' | 'gpu' | 'reactive' | 'classic' | 'art';
+const PRESET_GROUPS: ReadonlyArray<{ id: PresetGroup; label: string }> = [
+  { id: 'milkdrop', label: 'Milkdrop' },
+  { id: 'crazy', label: 'Crazy GPU shaders' },
+  { id: 'gpu', label: 'GPU particles' },
+  { id: 'reactive', label: 'Reactive' },
+  { id: 'classic', label: 'Classic' },
+  { id: 'art', label: 'Album art' },
+];
 
 type CanvasVisualizerPreset = Exclude<VisualizerPreset, 'album-breathe'>;
 
@@ -63,6 +82,11 @@ const REACTIVITY_MODES = [
 
 const AUTO_VJ_BALANCED: VisualizerPreset[] = [
   'particle-flow',
+  'kaleido-bloom',
+  'liquid-aurora-storm',
+  'fractal-pulse',
+  'starfield-warp',
+  'spectral-tunnel',
   'tempo-pulse',
   'lattice-strobe',
   'liquid-mercury',
@@ -165,6 +189,10 @@ export function FullscreenVisualizer(): JSX.Element {
   // cursor movement re-shows it for a few seconds before hiding again.
   const [cursorActive, setCursorActive] = useState(true);
   const [recording, setRecording] = useState(false);
+  // Popover state for the redesigned control surface. Only one popover open at
+  // a time. Esc closes the open one before falling through to exitVisualizer.
+  type OpenPanel = 'preset' | 'settings' | 'help' | null;
+  const [openPanel, setOpenPanel] = useState<OpenPanel>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const levelMeterRef = useRef<HTMLSpanElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -216,6 +244,24 @@ export function FullscreenVisualizer(): JSX.Element {
     void winctl.setFullscreen(false);
     setNativeFullscreen(false);
     setFs(false);
+  }
+
+  // Render-quality is a single conceptual axis with three values (Auto | 4K |
+  // Lite), but the underlying state is two flags: perfTier ('low'|'balanced')
+  // wins when low, otherwise quality decides between 4k and auto. The
+  // segmented control reads/writes both via the existing toggle handlers.
+  type QualityMode = 'auto' | '4k' | 'lite';
+  const qualityMode: QualityMode = perfTier === 'low' ? 'lite' : quality === '4k' ? '4k' : 'auto';
+  function setQualityMode(mode: QualityMode): void {
+    if (mode === qualityMode) return;
+    if (mode === 'lite') {
+      if (perfTier !== 'low') togglePerfTier();
+      return;
+    }
+    // Leaving Lite: flip perfTier back to balanced first so toggleQuality is allowed.
+    if (perfTier === 'low') togglePerfTier();
+    const wantsFourK = mode === '4k';
+    if ((quality === '4k') !== wantsFourK) toggleQuality();
   }
 
   function toggleChrome(): void {
@@ -419,11 +465,21 @@ export function FullscreenVisualizer(): JSX.Element {
       } else if (event.key.toLowerCase() === 'f') {
         event.preventDefault();
         toggleNativeFullscreen();
+      } else if (event.key === '?') {
+        event.preventDefault();
+        setOpenPanel((p) => (p === 'help' ? null : 'help'));
+      } else if (event.key === 'Escape') {
+        // Close any open popover first; only exit the visualizer when nothing
+        // is open. This is the conventional progressive-Esc UX users expect.
+        if (openPanel) {
+          event.preventDefault();
+          setOpenPanel(null);
+        }
       }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeIndex]);
+  }, [activeIndex, openPanel]);
 
   // Mouse wheel anywhere over the fullscreen visualizer drives volume.
   // Outside the viz this has no effect — wheel still scrolls the page
@@ -627,121 +683,331 @@ export function FullscreenVisualizer(): JSX.Element {
       )}
 
       <div
-        className={`fullscreen-viz-toolbar pointer-events-auto absolute inset-x-3 top-3 flex max-w-[calc(100vw-1.5rem)] items-center gap-[6px] ${chromeVisible ? '' : 'is-clean'} ${cursorActive ? '' : 'is-top-hidden'}`}
+        className={`fullscreen-viz-toolbar viz-control-bar pointer-events-auto absolute inset-x-3 top-3 flex max-w-[calc(100vw-1.5rem)] items-center gap-2 ${chromeVisible ? '' : 'is-clean'} ${cursorActive ? '' : 'is-top-hidden'}`}
         data-newamp-visualizer-toolbar
         data-newamp-visualizer-toolbar-idle={!cursorActive ? 'idle' : 'active'}
       >
-        <button className="pxbtn" onClick={() => cyclePreset(-1)} title="Previous visualizer preset ([)">
-          PREV
-        </button>
-        <div className="fullscreen-viz-preset-rail bevel-out">
-          {PRESETS.map((p) => (
-            <button
-              key={p.id}
-              data-newamp-viz-preset-button={p.id}
-              className={`pxbtn ${activePreset === p.id ? 'is-active' : ''}`}
-              onClick={() => pickPreset(p.id)}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
-        <button className="pxbtn" onClick={() => cyclePreset(1)} title="Next visualizer preset (])">
-          NEXT
+        <button
+          className="pxbtn viz-control-nav"
+          onClick={() => cyclePreset(-1)}
+          title="Previous visualizer preset ([)"
+          aria-label="Previous visualizer preset"
+          data-newamp-viz-prev-button
+        >
+          ‹
         </button>
         <button
-          className={`pxbtn ${quality === '4k' ? 'is-active' : ''}`}
-          data-newamp-viz-quality-button
-          onClick={toggleQuality}
-          disabled={perfTier === 'low'}
-          title={quality === '4k' ? 'Use balanced performance render quality (Q)' : 'Use sharper 4K render quality (Q)'}
+          className="pxbtn viz-control-preset"
+          onClick={() => setOpenPanel((p) => (p === 'preset' ? null : 'preset'))}
+          title="Pick visualizer preset"
+          aria-haspopup="dialog"
+          aria-expanded={openPanel === 'preset'}
+          data-newamp-viz-preset-picker-toggle
         >
-          {perfTier === 'low' ? 'LOW' : quality === '4k' ? '4K' : 'PERF'}
+          <span className="viz-control-preset-label">
+            {PRESETS.find((p) => p.id === activePreset)?.label ?? 'Visualizer'}
+          </span>
+          <span className="viz-control-caret" aria-hidden="true">▾</span>
         </button>
         <button
-          className={`pxbtn ${perfTier === 'low' ? 'is-active' : ''}`}
-          data-newamp-viz-performance-button
-          onClick={togglePerfTier}
-          title="Low-end mode for older CPUs/GPUs (L)"
+          className="pxbtn viz-control-nav"
+          onClick={() => cyclePreset(1)}
+          title="Next visualizer preset (])"
+          aria-label="Next visualizer preset"
+          data-newamp-viz-next-button
         >
-          LOW-END
+          ›
+        </button>
+
+        <div className="viz-control-spacer" aria-hidden="true" />
+
+        <button
+          className={`pxbtn ${openPanel === 'settings' ? 'is-active' : ''}`}
+          onClick={() => setOpenPanel((p) => (p === 'settings' ? null : 'settings'))}
+          title="Visualizer settings"
+          aria-haspopup="dialog"
+          aria-expanded={openPanel === 'settings'}
+          data-newamp-viz-settings-toggle
+          // Existing per-flag data attributes kept so downstream tests/skins
+          // can still observe each underlying state without us having to
+          // scatter individual buttons across the bar.
+          data-newamp-viz-quality-button={qualityMode}
+          data-newamp-viz-performance-button={perfTier}
+          data-newamp-viz-palette-button={palette}
+          data-newamp-viz-reactivity-button={reactivity}
+          data-newamp-viz-art-button={artPulseEnabled ? 'on' : 'off'}
+          data-newamp-viz-auto-vj-button={autoVjEnabled ? 'on' : 'off'}
+          data-newamp-viz-screen-button={nativeFullscreen ? 'on' : 'off'}
+          data-newamp-viz-clean-button={chromeVisible ? 'off' : 'on'}
+        >
+          ⚙ Settings
         </button>
         <button
-          className={`pxbtn ${artPulseEnabled ? 'is-active' : ''}`}
-          data-newamp-viz-art-button
-          onClick={toggleArt}
-          title="Toggle album-art overlay (A)"
+          className={`pxbtn ${openPanel === 'help' ? 'is-active' : ''}`}
+          onClick={() => setOpenPanel((p) => (p === 'help' ? null : 'help'))}
+          title="Keyboard shortcuts (?)"
+          aria-haspopup="dialog"
+          aria-expanded={openPanel === 'help'}
+          data-newamp-viz-help-toggle
         >
-          ART PULSE
-        </button>
-        <button
-          className="pxbtn"
-          data-newamp-viz-palette-button
-          onClick={cyclePalette}
-          title="Cycle visualizer colors (P)"
-        >
-          {PALETTES.find((item) => item.id === palette)?.label ?? 'Theme'}
-        </button>
-        <button
-          className="pxbtn"
-          data-newamp-viz-reactivity-button
-          onClick={cycleReactivity}
-          title="Cycle visualizer signal response (R)"
-        >
-          REACT {REACTIVITY_MODES.find((item) => item.id === reactivity)?.label ?? 'Punch'}
-        </button>
-        <button
-          className={`pxbtn ${autoVjEnabled ? 'is-active' : ''}`}
-          data-newamp-viz-auto-vj-button
-          onClick={toggleAutoVj}
-          title="Auto-switch visualizer scenes on song energy (V)"
-        >
-          AUTO VJ
-        </button>
-        <button
-          className={`pxbtn ${nativeFullscreen ? 'is-active' : ''}`}
-          data-newamp-viz-screen-button
-          onClick={toggleNativeFullscreen}
-          title="Take over the physical screen (F)"
-        >
-          SCREEN
+          ?
         </button>
         <button
           className="pxbtn"
-          data-newamp-viz-capture-button
-          onClick={() => void captureStill()}
-          title="Save a PNG still of the visualizer (press H first for a clean shot)"
+          onClick={exitVisualizer}
+          title="Exit visualizer (Esc)"
+          aria-label="Exit visualizer"
+          data-newamp-viz-exit-button
         >
-          CAPTURE
-        </button>
-        <button
-          className="pxbtn"
-          data-newamp-viz-copy-button
-          onClick={() => void copyStill()}
-          title="Copy a PNG still to the clipboard"
-        >
-          COPY
-        </button>
-        <button
-          className={`pxbtn ${recording ? 'is-active' : ''}`}
-          data-newamp-viz-record-button
-          onClick={toggleRecord}
-          title={recording ? 'Stop recording and save a WebM clip' : 'Record a WebM clip of the visualizer'}
-        >
-          {recording ? '■ STOP' : '● REC'}
-        </button>
-        <button
-          className={`pxbtn ${!chromeVisible ? 'is-active' : ''}`}
-          data-newamp-viz-clean-button
-          onClick={toggleChrome}
-          title="Clean visualizer mode (H)"
-        >
-          CLEAN
-        </button>
-        <button className="pxbtn" onClick={exitVisualizer} title="Exit visualizer (Esc)">
-          ESC X
+          ✕
         </button>
       </div>
+
+      {openPanel !== null && (
+        <div
+          className="viz-popover-backdrop"
+          data-newamp-viz-popover-backdrop
+          onClick={() => setOpenPanel(null)}
+          aria-hidden="true"
+        />
+      )}
+
+      {openPanel === 'preset' && (
+        <div
+          className="viz-popover viz-preset-picker pointer-events-auto"
+          role="dialog"
+          aria-label="Pick visualizer preset"
+          data-newamp-viz-preset-picker
+        >
+          <div className="viz-popover-header">
+            <span className="viz-popover-title">Visualizer</span>
+            <button
+              type="button"
+              className="pxbtn viz-popover-close"
+              onClick={() => setOpenPanel(null)}
+              aria-label="Close preset picker"
+            >
+              ✕
+            </button>
+          </div>
+          {PRESET_GROUPS.map((group) => {
+            const items = PRESETS.filter((p) => p.group === group.id);
+            if (!items.length) return null;
+            return (
+              <section key={group.id} className="viz-preset-group">
+                <h3 className="viz-preset-group-label">{group.label}</h3>
+                <div className="viz-preset-grid">
+                  {items.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={`pxbtn viz-preset-cell ${activePreset === p.id ? 'is-active' : ''}`}
+                      onClick={() => {
+                        pickPreset(p.id);
+                        setOpenPanel(null);
+                      }}
+                      title={p.label}
+                      aria-label={p.label}
+                      aria-pressed={activePreset === p.id}
+                      data-newamp-viz-preset-button={p.id}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+
+      {openPanel === 'settings' && (
+        <div
+          className="viz-popover viz-settings-panel pointer-events-auto"
+          role="dialog"
+          aria-label="Visualizer settings"
+          data-newamp-viz-settings-panel
+        >
+          <div className="viz-popover-header">
+            <span className="viz-popover-title">Settings</span>
+            <button
+              type="button"
+              className="pxbtn viz-popover-close"
+              onClick={() => setOpenPanel(null)}
+              aria-label="Close settings"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="viz-setting-row">
+            <div className="viz-setting-label">Render quality</div>
+            <div className="viz-segmented" role="group" aria-label="Render quality">
+              {(['auto', '4k', 'lite'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={`pxbtn ${qualityMode === mode ? 'is-active' : ''}`}
+                  onClick={() => setQualityMode(mode)}
+                  aria-pressed={qualityMode === mode}
+                >
+                  {mode === 'auto' ? 'Auto' : mode === '4k' ? '4K' : 'Lite'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="viz-setting-row">
+            <div className="viz-setting-label">Color palette</div>
+            <button
+              type="button"
+              className="pxbtn viz-setting-cycle"
+              onClick={cyclePalette}
+              title="Cycle visualizer colors (P)"
+              aria-label={`Palette ${PALETTES.find((item) => item.id === palette)?.label ?? 'Theme'} — click to cycle`}
+            >
+              <span>{PALETTES.find((item) => item.id === palette)?.label ?? 'Theme'}</span>
+              <span className="viz-setting-hint">cycle</span>
+            </button>
+          </div>
+
+          <div className="viz-setting-row">
+            <div className="viz-setting-label">Reactivity</div>
+            <button
+              type="button"
+              className="pxbtn viz-setting-cycle"
+              onClick={cycleReactivity}
+              title="Cycle visualizer signal response (R)"
+              aria-label={`Reactivity ${REACTIVITY_MODES.find((item) => item.id === reactivity)?.label ?? 'Punch'} — click to cycle`}
+            >
+              <span>{REACTIVITY_MODES.find((item) => item.id === reactivity)?.label ?? 'Punch'}</span>
+              <span className="viz-setting-hint">cycle</span>
+            </button>
+          </div>
+
+          <div className="viz-setting-row">
+            <div className="viz-setting-label">Album-art overlay</div>
+            <button
+              type="button"
+              className={`pxbtn ${artPulseEnabled ? 'is-active' : ''}`}
+              onClick={toggleArt}
+              aria-pressed={artPulseEnabled}
+            >
+              {artPulseEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          <div className="viz-setting-row">
+            <div className="viz-setting-label">
+              Auto-VJ
+              <div className="viz-setting-hint">Auto-switch scenes on song energy</div>
+            </div>
+            <button
+              type="button"
+              className={`pxbtn ${autoVjEnabled ? 'is-active' : ''}`}
+              onClick={toggleAutoVj}
+              aria-pressed={autoVjEnabled}
+            >
+              {autoVjEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          <div className="viz-setting-row">
+            <div className="viz-setting-label">Native fullscreen</div>
+            <button
+              type="button"
+              className={`pxbtn ${nativeFullscreen ? 'is-active' : ''}`}
+              onClick={toggleNativeFullscreen}
+              aria-pressed={nativeFullscreen}
+            >
+              {nativeFullscreen ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          <div className="viz-setting-row">
+            <div className="viz-setting-label">
+              Cinema mode
+              <div className="viz-setting-hint">Hides the controls — press H to bring them back</div>
+            </div>
+            <button
+              type="button"
+              className="pxbtn"
+              onClick={() => {
+                setOpenPanel(null);
+                toggleChrome();
+              }}
+            >
+              Hide controls
+            </button>
+          </div>
+
+          <div className="viz-setting-row viz-setting-capture">
+            <div className="viz-setting-label">Capture</div>
+            <div className="viz-setting-capture-buttons">
+              <button
+                type="button"
+                className="pxbtn"
+                onClick={() => void captureStill()}
+                title="Save a PNG still (press H first for a clean shot)"
+              >
+                Save PNG
+              </button>
+              <button
+                type="button"
+                className="pxbtn"
+                onClick={() => void copyStill()}
+                title="Copy a PNG still to the clipboard"
+              >
+                Copy PNG
+              </button>
+              <button
+                type="button"
+                className={`pxbtn ${recording ? 'is-active' : ''}`}
+                onClick={toggleRecord}
+                title={recording ? 'Stop recording and save a WebM clip' : 'Record a WebM clip of the visualizer'}
+              >
+                {recording ? '■ Stop recording' : '● Record clip'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {openPanel === 'help' && (
+        <div
+          className="viz-popover viz-help-panel pointer-events-auto"
+          role="dialog"
+          aria-label="Keyboard shortcuts"
+          data-newamp-viz-help-panel
+        >
+          <div className="viz-popover-header">
+            <span className="viz-popover-title">Keyboard shortcuts</span>
+            <button
+              type="button"
+              className="pxbtn viz-popover-close"
+              onClick={() => setOpenPanel(null)}
+              aria-label="Close help"
+            >
+              ✕
+            </button>
+          </div>
+          <dl className="viz-help-list">
+            <div><dt><kbd>‹</kbd> <kbd>›</kbd> <span className="viz-help-or">or</span> <kbd>[</kbd> <kbd>]</kbd></dt><dd>Previous / next preset</dd></div>
+            <div><dt><kbd>Q</kbd></dt><dd>Toggle 4K render quality</dd></div>
+            <div><dt><kbd>L</kbd></dt><dd>Toggle Lite (low-end) mode</dd></div>
+            <div><dt><kbd>A</kbd></dt><dd>Album-art overlay</dd></div>
+            <div><dt><kbd>P</kbd></dt><dd>Cycle color palette</dd></div>
+            <div><dt><kbd>R</kbd></dt><dd>Cycle reactivity (Truth / Punch / Wild)</dd></div>
+            <div><dt><kbd>V</kbd></dt><dd>Auto-VJ (auto-switch scenes)</dd></div>
+            <div><dt><kbd>F</kbd></dt><dd>Native fullscreen</dd></div>
+            <div><dt><kbd>H</kbd></dt><dd>Hide controls (cinema mode)</dd></div>
+            <div><dt><kbd>?</kbd></dt><dd>This help</dd></div>
+            <div><dt><kbd>Esc</kbd></dt><dd>Close popover, then exit visualizer</dd></div>
+            <div><dt>Scroll wheel</dt><dd>Volume up / down (Shift = bigger steps)</dd></div>
+            <div><dt>Double-click</dt><dd>Exit visualizer</dd></div>
+          </dl>
+        </div>
+      )}
 
       <div
         className={`fullscreen-viz-now pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16 ${chromeVisible ? '' : 'is-clean'}`}

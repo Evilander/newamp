@@ -31,6 +31,11 @@ export type VizMode =
   | 'lattice-strobe'
   | 'liquid-mercury'
   | 'particle-flow'
+  | 'kaleido-bloom'
+  | 'liquid-aurora-storm'
+  | 'fractal-pulse'
+  | 'starfield-warp'
+  | 'spectral-tunnel'
   | 'butterchurn';
 
 export type VizQuality = 'auto' | '4k';
@@ -157,6 +162,11 @@ export function Visualizer({
       // butterchurn wants 1024 time-domain samples; the engine analyser is 2048.
       // Decimate by an integer stride to cover the same window at half rate.
       const stride = Math.max(1, Math.floor(engine.fftSize / BUTTERCHURN_FFT_SIZE));
+      // Mild pre-emphasis (~1.4x with soft-clip) so butterchurn's internal FFT
+      // sees the same hotter signal the canvas modes get via boostFrequencyData.
+      // Without this butterchurn reads raw -86..-10 dBFS bytes and reacts
+      // noticeably less to transients than every other visualizer mode.
+      const PREEMPHASIS = 1.4;
 
       const startFallback = () => {
         iframe.style.display = 'none';
@@ -196,8 +206,20 @@ export function Visualizer({
       const pump = (now: number) => {
         if (disposed) return;
         if (ready && canPaint(now)) {
-          engine.getTimeData(wave);
-          for (let i = 0; i < BUTTERCHURN_FFT_SIZE; i++) samples[i] = wave[i * stride] ?? 128;
+          // Read from the unsmoothed onset analyser tap so transients reach
+          // butterchurn on the same frame they happen (the smoothed analyser
+          // would lag ~1.3 frames). Then apply mild pre-emphasis: center,
+          // amplify by PREEMPHASIS, tanh-style soft clip back into 0..255.
+          // Result: kicks punch harder inside butterchurn's internal FFT
+          // without distortion artifacts.
+          engine.getOnsetTimeData(wave);
+          for (let i = 0; i < BUTTERCHURN_FFT_SIZE; i++) {
+            const centered = ((wave[i * stride] ?? 128) - 128) / 128;
+            const lifted = centered * PREEMPHASIS;
+            // Soft-clip via x / (1 + |x|) — keeps the waveform shape, no harsh wrap.
+            const clipped = lifted / (1 + Math.abs(lifted));
+            samples[i] = 128 + Math.round(clipped * 127);
+          }
           const audio: BcAudioMessage = { type: 'audio', samples };
           iframe.contentWindow?.postMessage(audio, '*');
         }
@@ -1377,7 +1399,12 @@ function isShaderVisualizerMode(mode: VizMode): boolean {
     mode === 'neon-waves' ||
     mode === 'neon-ribbons' ||
     mode === 'plasma-grid' ||
-    mode === 'burning-cloud';
+    mode === 'burning-cloud' ||
+    mode === 'kaleido-bloom' ||
+    mode === 'liquid-aurora-storm' ||
+    mode === 'fractal-pulse' ||
+    mode === 'starfield-warp' ||
+    mode === 'spectral-tunnel';
 }
 
 function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) | null {
@@ -1552,16 +1579,33 @@ function boostFrequencyData(arr: Uint8Array, reactivity: VizReactivity = 'punch'
   const settings = reactivitySettings(reactivity);
   for (let i = 0; i < arr.length; i += 1) {
     const normalized = arr[i]! / 255;
-    const lowBandLift = i < 36 ? settings.bassLift : i < 120 ? settings.lowMidLift : 1;
+    // Band-aware lift: bass (bins <36) still gets the biggest boost, but
+    // low-mid + mid + treble now each get a meaningful lift too so the canvas
+    // modes' upper-spectrum response catches up to the low-end (which has
+    // always read as "more alive" by virtue of being the only band lifted).
+    const lowBandLift =
+      i < 36 ? settings.bassLift
+      : i < 120 ? settings.lowMidLift
+      : i < 280 ? settings.midLift
+      : settings.trebleLift;
     const shaped = Math.pow(normalized, settings.curve) * settings.gain * lowBandLift;
     arr[i] = Math.max(0, Math.min(255, Math.round(shaped * 255)));
   }
 }
 
-function reactivitySettings(reactivity: VizReactivity): { curve: number; gain: number; bassLift: number; lowMidLift: number } {
-  if (reactivity === 'truth') return { curve: 0.92, gain: 1.08, bassLift: 1.06, lowMidLift: 1.02 };
-  if (reactivity === 'wild') return { curve: 0.52, gain: 1.58, bassLift: 1.3, lowMidLift: 1.14 };
-  return { curve: 0.68, gain: 1.34, bassLift: 1.18, lowMidLift: 1.08 };
+interface ReactivityCurve {
+  curve: number;
+  gain: number;
+  bassLift: number;
+  lowMidLift: number;
+  midLift: number;
+  trebleLift: number;
+}
+
+function reactivitySettings(reactivity: VizReactivity): ReactivityCurve {
+  if (reactivity === 'truth') return { curve: 0.92, gain: 1.08, bassLift: 1.06, lowMidLift: 1.04, midLift: 1.03, trebleLift: 1.02 };
+  if (reactivity === 'wild') return { curve: 0.52, gain: 1.58, bassLift: 1.3, lowMidLift: 1.22, midLift: 1.20, trebleLift: 1.18 };
+  return { curve: 0.68, gain: 1.34, bassLift: 1.18, lowMidLift: 1.14, midLift: 1.12, trebleLift: 1.10 };
 }
 
 interface AnalyzerConfig {
@@ -1680,6 +1724,11 @@ function shaderModeIndex(mode: VizMode): number {
   if (mode === 'neon-ribbons') return 1;
   if (mode === 'plasma-grid') return 2;
   if (mode === 'burning-cloud') return 3;
+  if (mode === 'kaleido-bloom') return 4;
+  if (mode === 'liquid-aurora-storm') return 5;
+  if (mode === 'fractal-pulse') return 6;
+  if (mode === 'starfield-warp') return 7;
+  if (mode === 'spectral-tunnel') return 8;
   return 0;
 }
 
@@ -1840,7 +1889,10 @@ void main() {
   vec2 uv = v_uv;
   float aspect = u_resolution.x / max(1.0, u_resolution.y);
   vec2 p = (uv - 0.5) * vec2(aspect, 1.0);
-  float energy = sat(u_rms * 0.55 + u_bass * 0.28 + u_mid * 0.18);
+  // Energy formula — bass gets a slightly larger share so all shader modes
+  // feel as alive as the bass already does, while mids/treble still contribute
+  // so non-kick content (vocals, hats, ride) still drives the visuals.
+  float energy = sat(u_rms * 0.42 + u_bass * 0.38 + u_mid * 0.16 + u_treble * 0.10);
   vec3 color = vec3(0.0);
 
   if (u_mode == 0) {
@@ -1893,7 +1945,7 @@ void main() {
     // not the whole picture.
     color += palette(plasma + u_time * 0.04 + u_bass * 0.4) * (plasma * 0.6 + lines * 0.45 + u_beat * 0.18);
     color += palette(0.7 + plasma) * exp(-length(p) * (2.4 - u_bass - u_beat * 0.5)) * (0.12 + u_bass * 0.44 + u_beat * 0.28);
-  } else {
+  } else if (u_mode == 3) {
     // Burning Cloud — was locked to a red→orange→amber ramp regardless of
     // music. Switch to palette-driven hues so the cloud actually shifts color
     // with the beat instead of looking like a static brown plume.
@@ -1902,16 +1954,142 @@ void main() {
     heat += fbm(q * 4.2 + vec2(u_time * 0.15, u_time * 0.22)) * 0.5;
     heat += u_bass * 0.85 + u_beat * 0.7;
     float plume = smoothstep(0.18, 1.58, heat - length(p) * (0.48 - u_rms * 0.16));
-    // palette() cycles hue, so the cloud's main body shifts on the beat.
     vec3 corePalette = palette(u_time * 0.03 + heat * 0.4 + u_bass * 0.6);
     vec3 hotPalette = palette(u_time * 0.05 + heat * 0.32 + 0.4 + u_beat * 0.5);
     vec3 ember = mix(corePalette * 0.18, corePalette, plume);
     vec3 flame = mix(ember, hotPalette * 1.15, smoothstep(0.78, 1.56, heat));
-    // Raise palette mix factor from 0.16 to 0.55+u_bass*0.4 so the palette
-    // dominates instead of being a subtle tint over the brown ramp.
     vec3 accentBurn = mix(flame, palette(heat * 0.33 + u_time * 0.03), 0.55 + u_bass * 0.4);
     color += accentBurn * plume * (0.55 + energy * 0.75 + u_beat * 0.32);
     color += corePalette * 0.04;
+  } else if (u_mode == 4) {
+    // KALEIDO-BLOOM — N-fold mirror kaleidoscope. Petal count breathes with
+    // treble (4..10 petals), spin pulled by mids, bloom radius pumped by bass,
+    // beat fires a halo ring through the whole field.
+    float petals = floor(4.0 + u_treble * 6.0);
+    float theta = atan(p.y, p.x);
+    float r = length(p);
+    float sector = 6.2831853 / petals;
+    // Fold the angle into one petal slice and mirror.
+    float a = mod(theta + u_time * (0.12 + u_mid * 0.6), sector);
+    a = abs(a - sector * 0.5);
+    vec2 q = vec2(cos(a), sin(a)) * r;
+    float bloom = exp(-pow(r * (3.2 - u_bass * 1.3 - u_beat * 0.6), 2.0));
+    float petalCurve = sin(q.x * (5.5 + u_treble * 5.0)) * sin(q.y * (4.5 + u_mid * 4.0));
+    float petalIntensity = smoothstep(-0.25, 0.85, petalCurve);
+    vec3 petalCol = palette(u_time * 0.04 + r * 1.4 + u_bass * 0.5);
+    color += petalCol * (petalIntensity * (0.6 + bloom * 1.1 + u_beat * 0.6));
+    // Beat halo ring expanding outward.
+    float haloR = 0.18 + fract(u_time * 0.55 + u_beat) * 0.42;
+    float halo = exp(-pow((r - haloR) * 16.0, 2.0)) * (0.45 + u_beat * 0.6);
+    color += palette(0.3 + u_beat * 0.5) * halo;
+    color += vec3(0.005);
+  } else if (u_mode == 5) {
+    // LIQUID-AURORA-STORM — five stacked aurora ribbons, each centered on a
+    // different band; bass drives sideways "wind", and the beat triggers a
+    // forked-lightning flash that lights the whole sky.
+    color += vec3(0.004, 0.006, 0.018);
+    float wind = sin(u_time * 0.4 + u_bass * 3.0) * (0.04 + u_bass * 0.18);
+    for (int i = 0; i < 5; i += 1) {
+      float fi = float(i);
+      float b = bandAt(0.12 + fi * 0.18);
+      float center = 0.18 + fi * 0.16;
+      float xphase = uv.x * (3.0 + fi * 0.45) + u_time * (0.62 + b * 1.4) + fi * 0.9 + wind;
+      float ribbonY = center
+        + sin(xphase) * (0.04 + b * 0.13 + u_bass * 0.05)
+        + sin(xphase * 0.43 + u_mid * 5.0) * (0.02 + u_treble * 0.04);
+      float band = exp(-abs(uv.y - ribbonY) * (38.0 - b * 22.0 - u_beat * 8.0));
+      vec3 ribbon = palette(fi * 0.14 + b * 0.4 + u_time * 0.03);
+      color += ribbon * band * (0.3 + b * 1.4 + u_beat * 0.6);
+    }
+    // Beat lightning — short-lived fork. Random per-x hash gated by beat,
+    // narrow vertical strike at random angle.
+    float strike = step(0.55, u_beat);
+    float bolt = hash(vec2(floor(u_time * 4.0), 1.0));
+    float xStrike = bolt;
+    float lightning = exp(-abs(uv.x - xStrike) * 220.0) * strike;
+    float verticalFade = smoothstep(0.0, 0.6, uv.y);
+    color += vec3(0.85, 0.92, 1.0) * lightning * verticalFade * (0.6 + u_beat);
+  } else if (u_mode == 6) {
+    // FRACTAL-PULSE — folded-IFS escape-time fractal. Iterated abs-fold +
+    // rotation + scale-translate; fold angle from mids, scale from bass, iris
+    // bloom on every beat.
+    vec2 z = p * (1.4 - u_bass * 0.4);
+    float foldAngle = 0.6 + u_mid * 1.4 + sin(u_time * 0.5) * 0.3;
+    float ca = cos(foldAngle);
+    float sa = sin(foldAngle);
+    float scaleK = 1.32 + u_bass * 0.45 + u_beat * 0.18;
+    float iter = 0.0;
+    float esc = 0.0;
+    for (int i = 0; i < 7; i += 1) {
+      z = abs(z);
+      z = vec2(z.x * ca - z.y * sa, z.x * sa + z.y * ca);
+      z = z * scaleK - vec2(0.6 + u_treble * 0.2, 0.42 + u_rms * 0.2);
+      float l = dot(z, z);
+      if (l > 6.0) { esc = float(i); break; }
+      iter += 1.0;
+    }
+    float t = (esc > 0.0 ? esc : iter) / 7.0;
+    vec3 frac = palette(t * 1.6 + u_time * 0.04 + u_bass * 0.5);
+    color += frac * (0.35 + (1.0 - t) * 1.1 + u_beat * 0.45);
+    // Iris flash from center on beat.
+    float iris = exp(-length(p) * (4.0 - u_beat * 1.6)) * (u_beat * 0.7);
+    color += palette(0.7 + u_beat) * iris;
+  } else if (u_mode == 7) {
+    // STARFIELD-WARP — radial hyperspace tunnel. Per-ring per-wedge hashed
+    // stars stream outward; streak length stretches on beat, central forward
+    // flare lit by treble + bass.
+    float r = length(p);
+    float theta = atan(p.y, p.x);
+    // Stream rings outward over time + bass speed.
+    float warp = u_time * (0.6 + u_bass * 1.4 + u_beat * 0.8);
+    float ringIdx = floor(r * 14.0 + warp);
+    float ringFrac = fract(r * 14.0 + warp);
+    // Discretize angle into 64 wedges, hash by (ring,wedge) for stable stars.
+    float wedge = floor(theta * 10.18);
+    float starSeed = hash(vec2(ringIdx, wedge));
+    // Each star "exists" only where seed > threshold (sparse field).
+    float exists = step(0.78, starSeed);
+    // Streak length grows on beat — long radial smear.
+    float streakLen = 0.12 + u_beat * 0.6 + u_bass * 0.18;
+    float streakProfile = exp(-pow((ringFrac - 0.5) / streakLen, 2.0));
+    // Per-wedge sub-angle jitter so stars aren't perfectly aligned.
+    float wedgeAngle = wedge / 10.18 + (starSeed - 0.5) * 0.04;
+    float angleProfile = exp(-pow((theta - wedgeAngle) * 80.0, 2.0));
+    float star = exists * streakProfile * angleProfile * (0.5 + r * 1.6);
+    vec3 starCol = palette(starSeed + u_time * 0.05);
+    color += starCol * star * (0.8 + u_treble * 0.6 + u_beat * 0.5);
+    // Forward-flare core (vanishing point glow).
+    float core = exp(-r * (5.0 - u_bass * 1.8 - u_beat * 0.8));
+    color += palette(0.55 + u_treble * 0.4) * core * (0.4 + u_treble * 0.5 + u_rms * 0.3);
+    color += vec3(0.003, 0.005, 0.012);
+  } else if (u_mode == 8) {
+    // SPECTRAL-TUNNEL — polar tunnel where the 16-band spectrum carves the
+    // wall ribbing; concentric ring shockwaves travel outward on every beat,
+    // vanishing-point flare pumps with bass.
+    float r = length(p);
+    float theta = atan(p.y, p.x);
+    // Wall depth modulated by the spectrum bands wrapped around the tunnel.
+    float spectrum = bandAt(fract(theta / 6.2831853 + 0.5));
+    float depth = 1.0 / max(0.04, r * (1.0 - spectrum * 0.4));
+    // Vertical ribbing from treble; horizontal banding from spectrum samples.
+    float rib = sin(depth * (4.0 + u_treble * 6.0)) * 0.5 + 0.5;
+    float wallShade = mix(0.12, 1.0, rib * (0.4 + spectrum * 0.9));
+    vec3 wallCol = palette(depth * 0.22 + theta * 0.08 + u_time * 0.04);
+    color += wallCol * wallShade * (0.45 + u_bass * 0.4);
+    // Ring shockwaves: phase advances on beat, exponential rings expanding.
+    for (int i = 0; i < 3; i += 1) {
+      float fi = float(i);
+      float phase = fract(u_time * 0.32 + u_beat * 0.5 + fi * 0.33);
+      float ringR = phase * 1.4;
+      float shockwave = exp(-pow((r - ringR) * 18.0, 2.0));
+      color += palette(0.6 + fi * 0.18 + u_beat * 0.4) * shockwave * (0.4 + u_beat * 0.6);
+    }
+    // Vanishing-point flare — looking down the tunnel.
+    float vp = exp(-r * (6.0 - u_bass * 2.4));
+    color += palette(0.78 + u_bass * 0.3) * vp * (0.35 + u_bass * 0.7 + u_beat * 0.4);
+  } else {
+    // Fallback to burning cloud for safety.
+    color += vec3(0.05);
   }
 
   color += palette(0.55 + u_time * 0.08) * u_beat * 0.22;

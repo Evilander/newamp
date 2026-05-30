@@ -927,6 +927,11 @@ export type VisualizerPreset =
   | 'lattice-strobe'
   | 'liquid-mercury'
   | 'particle-flow'
+  | 'kaleido-bloom'
+  | 'liquid-aurora-storm'
+  | 'fractal-pulse'
+  | 'starfield-warp'
+  | 'spectral-tunnel'
   | 'album-breathe';
 export type GuitarTabLineType = 'chords' | 'lyrics' | 'blank' | 'section' | 'tab';
 export type GuitarTabSource = 'ultimate-guitar' | 'local';

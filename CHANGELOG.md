@@ -3,6 +3,31 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.6.2] - 2026-05-30
+
+The visualizer pass: the MilkDrop "lag between animations" is gone, the whole visualizer is more reactive, there are five new GPU shader modes, and the fullscreen controls are no longer a wall of cryptic buttons.
+
+### Fixed — MilkDrop "lag between animations"
+
+The hitch on every preset change wasn't the crossfade — it was butterchurn JIT-compiling a preset's MilkDrop math (GLSL + JS) synchronously on the iframe's main thread the instant the timer fired, picking uniformly at random from the full ~120-preset pack so the heaviest presets hit as often as the cheapest. Three compounding fixes in `src/butterchurn-iframe/main.ts`:
+- **Complexity-biased selection** — presets are weighted by equation-body size (a cheap compile-cost proxy); rotation draws ~85% from the lighter half, ~15% heavy for variety, cutting average compile time per swap.
+- **Idle-callback dispatch** — `loadPreset` now runs inside `requestIdleCallback` so the remaining compile lands between paints instead of mid-frame.
+- **Visibility + pause gating** — rotation skips while the window is hidden or playback is paused, so it never compiles a preset nobody can see or hear.
+
+The crossfade stays smooth (~2 s) and the 22 s dwell is unchanged.
+
+### Added — five new GPU shader visualizers
+
+Kaleido Bloom (N-fold mirrored kaleidoscope, petals pulse with treble, bloom with bass), Aurora Storm (stacked band-driven aurora ribbons with beat-triggered lightning), Fractal Pulse (a real folded-IFS escape-time fractal, fold angle from mids, iris bloom on the beat), Starfield Warp (radial hyperspace tunnel, streaks stretch on the beat), and Spectral Tunnel (a polar tunnel carved by the 16-band spectrum with beat-locked ring shockwaves). All run on the GPU through the existing single-pass shader and are audio-reactive across the full spectrum.
+
+### Changed — the visualizer is more reactive, especially mids and highs
+
+Butterchurn was fed raw, smoothed time-domain bytes with no boost, so it reacted less than the in-house canvas modes. It now reads the unsmoothed onset analyser (a new `engine.getOnsetTimeData`) with a gentle pre-emphasis + soft-clip, so kicks punch and presets shimmer. Across the shader and canvas modes the reactivity mapping was rebalanced so mids and highs lift toward the bass instead of the low end carrying everything: the shader energy formula now includes treble, and `boostFrequencyData` gained per-band mid/treble lifts.
+
+### Changed — redesigned fullscreen visualizer controls
+
+The old top bar was ~15 identical cryptic pills (LOW/4K/PERF, palette-name-only, REACT Punch, SCREEN, CLEAN, ESC X…) plus a 20-button preset rail. It's now a slim bar — `[‹] [active preset ▾] [›] … [⚙ Settings] [?] [✕]` — with a grouped preset picker, a settings panel of plain-language rows (a segmented Auto/4K/Lite quality control, named palette/reactivity controls, clearly-labeled toggles, and a Capture/Copy/Record cluster), and a `?` keyboard-shortcut legend. Every existing handler, setting, and shortcut is preserved; this is purely a discoverability redesign.
+
 ## [1.6.1] - 2026-05-29
 
 A performance + feel release layered on 1.6.0. The headline is **Resonance** — the whole UI reacts to the live audio — but the biggest practical win is that **hardware acceleration is finally on by default**, which alone makes the entire app feel dramatically lighter.
