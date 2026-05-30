@@ -3,6 +3,17 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.7.3] - 2026-05-30
+
+### Changed — Eviland goes full MilkDrop
+
+Pushed Eviland's look hard toward the classic MilkDrop aesthetic while keeping its 24-band per-instrument causal reactivity:
+
+- **Kaleidoscopic symmetry** — the feedback sampling coordinate is folded into N-fold mirror symmetry, so the zoom/swirl flow becomes a fractal kaleidoscope. The segment count (off / 3 / 4 / 6 / 8) is chosen per song-section from the structural-memory seed, and the mirror blend rises with energy — so verses and choruses get visibly different symmetry.
+- **Stronger motion** — roughly 2× the zoom (deeper kick-driven tunnel rush), rotation, and swirl, so beats visibly pull and spiral the whole field.
+- **Crisp spectrum overlay** — a radial 24-ray "sun" drawn from the live band magnitudes each frame, additively, *before* the feedback captures it — so the structure is continuously drawn and then swept into the swirling flow (the signature MilkDrop "draw-and-advect" look). The sun's color drifts over time.
+- **Bolder color cycling** — ~2.3× the per-frame hue rotation, so trails sweep through the palette as they age.
+
 ## [1.7.2] - 2026-05-30
 
 ### Changed — Eviland looks like MilkDrop now, not a white cloud
