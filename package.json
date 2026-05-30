@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "description": "A Winamp-inspired modern desktop music player for macOS, Windows, and Linux. Your local library, your rules, no streaming required. Features Resonance — the whole UI reacts to your live audio — plus NewAmp Wrapped, a GPU particle visualizer + real MilkDrop, four UI shells, shape-changing deck skins, perceptual 0-200% volume, 0-100 decimal track scoring, and a magazine-style home. GPU-accelerated and tuned to stay light on weak hardware.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
@@ -162,7 +162,8 @@
     "release:record-lastfm-proof": "node scripts/lastfm-live-proof.mjs --record",
     "release:check-lastfm-proof": "node scripts/lastfm-live-proof.mjs --check",
     "release:gate": "node scripts/release-gate.mjs",
-    "release:gate:local": "node scripts/release-gate.mjs --allow-unsigned --ack-manual --real-library"
+    "release:gate:local": "node scripts/release-gate.mjs --allow-unsigned --ack-manual --real-library",
+    "smoke:eviland": "electron scripts/eviland-smoke.mjs"
   },
   "dependencies": {
     "butterchurn": "^2.6.7",

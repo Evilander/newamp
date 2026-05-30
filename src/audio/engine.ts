@@ -39,6 +39,9 @@ interface AudioGraph {
   ctx: AudioContext;
   analyser: AnalyserNode;
   onsetAnalyser: AnalyserNode;
+  stereoSplitter: ChannelSplitterNode;
+  leftAnalyser: AnalyserNode;
+  rightAnalyser: AnalyserNode;
   masterGain: GainNode;
   limiter: DynamicsCompressorNode;
   eqBands: BiquadFilterNode[];
@@ -204,6 +207,20 @@ export class AudioEngine {
     onsetAnalyser.minDecibels = -86;
     onsetAnalyser.maxDecibels = -10;
     onsetAnalyser.smoothingTimeConstant = 0;
+    // Stereo split for the Eviland flagship visualizer's stereo width/pan
+    // features. A ChannelSplitter off replayGain feeds one analyser per
+    // channel; like the mono analysers above they route to the silent sink so
+    // the subtree is never graph-culled. Unsmoothed for transient-accurate
+    // per-channel energy.
+    const stereoSplitter = ctx.createChannelSplitter(2);
+    const leftAnalyser = ctx.createAnalyser();
+    const rightAnalyser = ctx.createAnalyser();
+    for (const a of [leftAnalyser, rightAnalyser]) {
+      a.fftSize = DEFAULT_FFT_SIZE;
+      a.minDecibels = -86;
+      a.maxDecibels = -10;
+      a.smoothingTimeConstant = 0;
+    }
 
     const decks = [this.createDeck(0, ctx), this.createDeck(1, ctx)] as [Deck, Deck];
     for (const deck of decks) {
@@ -244,8 +261,13 @@ export class AudioEngine {
     replayGain.connect(masterGain);
     replayGain.connect(analyser);
     replayGain.connect(onsetAnalyser);
+    replayGain.connect(stereoSplitter);
+    stereoSplitter.connect(leftAnalyser, 0);
+    stereoSplitter.connect(rightAnalyser, 1);
     analyser.connect(silentSink);
     onsetAnalyser.connect(silentSink);
+    leftAnalyser.connect(silentSink);
+    rightAnalyser.connect(silentSink);
     masterGain.connect(limiter);
     limiter.connect(ctx.destination);
 
@@ -253,6 +275,9 @@ export class AudioEngine {
       ctx,
       analyser,
       onsetAnalyser,
+      stereoSplitter,
+      leftAnalyser,
+      rightAnalyser,
       masterGain,
       limiter,
       eqBands,
@@ -861,6 +886,23 @@ export class AudioEngine {
       return;
     }
     this.graph.onsetAnalyser.getByteFrequencyData(buf);
+  }
+
+  /** Per-channel frequency data for the Eviland visualizer's stereo width/pan. */
+  getLeftFreqData(buf: Uint8Array<ArrayBuffer>): void {
+    if (!this.graph) {
+      buf.fill(0);
+      return;
+    }
+    this.graph.leftAnalyser.getByteFrequencyData(buf);
+  }
+
+  getRightFreqData(buf: Uint8Array<ArrayBuffer>): void {
+    if (!this.graph) {
+      buf.fill(0);
+      return;
+    }
+    this.graph.rightAnalyser.getByteFrequencyData(buf);
   }
 
   /**
