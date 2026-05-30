@@ -88,6 +88,7 @@ function normalizeVisualizerPreset(value: unknown): AppSettings['visualizerPrese
     'lattice-strobe',
     'liquid-mercury',
     'particle-flow',
+    'eviland',
     'kaleido-bloom',
     'liquid-aurora-storm',
     'fractal-pulse',
