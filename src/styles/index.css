@@ -37,6 +37,53 @@
   --scanline-opacity: 0.06;
   --texture-noise: 0.07;
   --newamp-text-scale: 1;
+  /* Resonance live-audio vars (written per-frame by src/lib/resonance.ts).
+     Kept out of SKIN_VARIABLES so theme switches never wipe them. */
+  --amp-energy: 0;
+  --amp-beat: 0;
+  --amp-bright: 0.5;
+}
+
+/* =========================================================
+   Resonance — the live audio drives the chrome itself.
+   One rAF loop writes --amp-energy / --amp-beat on :root; the
+   rules below consume them with compositor-only opacity/transform.
+   Active only when [data-amp-reactive='on'] (set by the adaptive
+   tier + Ambient setting). Reduced motion / weak HW => static.
+   ========================================================= */
+@property --amp-energy { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --amp-beat { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --amp-bright { syntax: '<number>'; inherits: true; initial-value: 0.5; }
+
+html[data-amp-reactive='on'] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  background:
+    radial-gradient(58% 48% at 28% 16%, var(--amp-bg1, transparent), transparent 70%),
+    radial-gradient(54% 46% at 82% 88%, var(--amp-bg2, transparent), transparent 72%);
+  mix-blend-mode: screen;
+  opacity: calc(0.05 + var(--amp-energy) * 0.11 + var(--amp-beat) * 0.05);
+  transition: opacity 200ms linear;
+  will-change: opacity;
+}
+
+html[data-amp-reactive='on'] .amp-beat-scale {
+  transform: scale(calc(1 + var(--amp-beat) * 0.05));
+  transform-origin: center;
+}
+html[data-amp-reactive='on'] .amp-energy-glow {
+  opacity: calc(0.4 + var(--amp-energy) * 0.55);
+}
+html[data-amp-accent='on'] .amp-accent {
+  color: var(--accent-live, var(--accent));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-amp-reactive='on'] body::after { display: none; }
+  html[data-amp-reactive='on'] .amp-beat-scale { transform: none; }
 }
 
 /* === Classic: vintage Winamp 2.x. Dark gray cast-metal chrome with a green

@@ -884,6 +884,17 @@ export interface AppSettings {
    * users expect from a desktop close button.
    */
   closeButtonBehavior: 'minimize-to-tray' | 'close-app';
+  /**
+   * Adaptive rendering quality. `auto` measures the machine at runtime and
+   * scales the visualizer + ambient reactivity; `high` forces full richness;
+   * `lite` forces the lightest path for weak hardware.
+   */
+  performanceTier: 'auto' | 'high' | 'lite';
+  /**
+   * "Resonance" — the UI chrome reacting to the live audio. `auto` enables it
+   * on capable hardware and disables it on weak machines; `on`/`off` force it.
+   */
+  ambientReactivity: 'auto' | 'on' | 'off';
 }
 
 export interface RadioBrainStatus {

@@ -10,6 +10,7 @@ import { moveQueueItem, removeQueueItem } from '@shared/queue-edit';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime } from '../../lib/format';
 import { api } from '../../lib/api';
+import { ArtistLink } from '../EntityLink';
 
 type SetMood = SmartPlaylistMood;
 
@@ -969,7 +970,7 @@ export function PlaylistView(): JSX.Element {
                           {(i + 1).toString().padStart(2, '0')}
                         </span>
                         <span className="flex-1 truncate">
-                          {t.artist} - {t.title}
+                          <ArtistLink artist={t.artist} color="inherit" /> - {t.title}
                         </span>
                         <span style={{ color: 'var(--muted)' }}>{formatTime(t.duration ?? 0)}</span>
                         <span className="flex shrink-0 items-center gap-1">
@@ -1076,7 +1077,7 @@ export function PlaylistView(): JSX.Element {
                         {(i + 1).toString().padStart(2, '0')}
                       </span>
                       <span className="flex-1 truncate">
-                        {t.artist} - {t.title}
+                        <ArtistLink artist={t.artist} color="inherit" /> - {t.title}
                       </span>
                       <span style={{ color: 'var(--muted)' }}>{formatTime(t.duration ?? 0)}</span>
                       <span className="flex shrink-0 items-center gap-1">

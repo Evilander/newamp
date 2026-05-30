@@ -55,6 +55,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   audioBitPerfectPath: false,
   audioPreferredSampleRate: null,
   closeButtonBehavior: 'minimize-to-tray',
+  performanceTier: 'auto',
+  ambientReactivity: 'auto',
 };
 
 const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {

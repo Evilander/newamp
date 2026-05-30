@@ -121,7 +121,7 @@ export function Transport(): JSX.Element {
             ⏮
           </button>
           <button
-            className="pxbtn is-primary"
+            className="pxbtn is-primary amp-beat-scale"
             onClick={togglePlay}
             title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
             aria-label={isPlaying ? 'Pause' : 'Play'}

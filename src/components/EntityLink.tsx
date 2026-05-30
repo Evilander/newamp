@@ -1,0 +1,85 @@
+import type { CSSProperties, ReactNode } from 'react';
+import { usePlayerStore } from '../store/usePlayerStore';
+
+// Shared link styling that matches the canonical artist/album nav buttons in
+// NowPlayingView: a plain <button> dressed as an inline text link so artist
+// and album names are clickable everywhere without pulling in a router.
+const LINK_STYLE: CSSProperties = {
+  background: 'transparent',
+  border: 'none',
+  padding: 0,
+  cursor: 'pointer',
+};
+
+function isUnknown(name: string | null | undefined): boolean {
+  const trimmed = (name ?? '').trim();
+  return !trimmed || trimmed.toLowerCase() === 'unknown' || trimmed.toLowerCase().startsWith('unknown ');
+}
+
+export function ArtistLink({
+  artist,
+  className,
+  title,
+  color,
+  children,
+}: {
+  artist: string;
+  className?: string;
+  title?: string;
+  color?: string;
+  children?: ReactNode;
+}): JSX.Element {
+  if (isUnknown(artist)) {
+    return <span className={className}>{children ?? artist}</span>;
+  }
+  return (
+    <button
+      type="button"
+      data-newamp-artist-link
+      className={`underline-offset-2 hover:underline ${className ?? ''}`}
+      style={{ ...LINK_STYLE, color: color ?? 'var(--accent)' }}
+      title={title ?? `Show all ${artist} albums in your library`}
+      onClick={(event) => {
+        event.stopPropagation();
+        usePlayerStore.getState().navigateToArtist(artist);
+      }}
+    >
+      {children ?? artist}
+    </button>
+  );
+}
+
+export function AlbumLink({
+  album,
+  albumArtist,
+  className,
+  title,
+  color,
+  children,
+}: {
+  album: string;
+  albumArtist: string;
+  className?: string;
+  title?: string;
+  color?: string;
+  children?: ReactNode;
+}): JSX.Element {
+  if (isUnknown(album)) {
+    return <span className={className}>{children ?? album}</span>;
+  }
+  return (
+    <button
+      type="button"
+      data-newamp-album-link
+      className={`underline-offset-2 hover:underline ${className ?? ''}`}
+      style={{ ...LINK_STYLE, color: color ?? 'var(--ink-2)' }}
+      title={title ?? `Show ${album} in Albums`}
+      onClick={(event) => {
+        event.stopPropagation();
+        usePlayerStore.getState().navigateToAlbum(album, albumArtist);
+      }}
+    >
+      {children ?? album}
+    </button>
+  );
+}
