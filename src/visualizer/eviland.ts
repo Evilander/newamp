@@ -100,10 +100,10 @@ vec2 curl(vec2 p){
 `;
 
 // Pillar 2: feedback field — MilkDrop-style per-frame transform of the previous
-// frame. Each frame we ZOOM in/out around the centre, ROTATE around the centre,
-// add a small curl-noise warp for organic detail, then sample the prev field
-// and HUE-CYCLE the colour so trails drift through palette as they age. This is
-// the difference between "diffuse white cloud" and "swirling tunneling rainbow".
+// frame. Each frame we (optionally) FOLD the sampling coord into N-fold mirror
+// symmetry, ZOOM in around centre (tunnel rush), ROTATE+SWIRL around centre,
+// add curl-noise organic detail, then sample the prev field and HUE-CYCLE the
+// colour. The mirror fold is the single most "MilkDrop" trick — kaleidoscope.
 const FIELD_FRAG = `#version 300 es
 precision highp float;
 in vec2 v_uv;
@@ -120,7 +120,11 @@ uniform float u_zoom;        // 0 = static, positive = zoom IN (tunnel toward ce
 uniform float u_rotate;      // radians per frame of central rotation
 uniform float u_hueCycle;    // radians to rotate the sampled colour's hue (0..~0.1)
 uniform float u_swirl;       // swirl strength (rotation falls off with radius)
+uniform float u_mirror;      // segment count (0 = off; 2..8 active)
+uniform float u_mirrorMix;   // 0..1 blend between unfolded and folded sample
 ${NOISE_GLSL}
+
+const float TAU = 6.28318530718;
 
 // YIQ-based hue rotation matrix — compact and stable; rotates around the
 // luminance axis so brightness is preserved. Cheaper than rgb→hsv→rgb.
@@ -141,6 +145,16 @@ vec3 rotateHue(vec3 col, float ang){
   );
 }
 
+// Fold polar angle into 1/N of the circle then mirror — classic kaleidoscope.
+// Returns a Cartesian offset from centre (caller adds centre back).
+vec2 kaleidoFold(vec2 p, float segments){
+  float r = length(p);
+  float a = atan(p.y, p.x);
+  float seg = TAU / segments;
+  float folded = abs(mod(a + seg * 0.5, seg) - seg * 0.5);
+  return vec2(cos(folded), sin(folded)) * r;
+}
+
 void main(){
   vec2 uv = v_uv;
   vec2 centre = vec2(0.5);
@@ -158,8 +172,17 @@ void main(){
   float invZ = 1.0 / (1.0 + u_zoom);
   p *= invZ;
 
+  // Kaleidoscope fold — optional. When u_mirror >= 2 we blend in a folded
+  // copy of the same sample coord; u_mirrorMix=1 = full kaleidoscope,
+  // u_mirrorMix=0 = off. Cheap (a single atan/cos/sin).
+  vec2 pFinal = p;
+  if (u_mirror >= 1.5 && u_mirrorMix > 0.001) {
+    vec2 folded = kaleidoFold(p, u_mirror);
+    pFinal = mix(p, folded, clamp(u_mirrorMix, 0.0, 1.0));
+  }
+
   // Re-centre + organic curl detail (small) modulated by treble/novelty.
-  vec2 src = p + centre;
+  vec2 src = pFinal + centre;
   vec2 base = src * u_warpScale + vec2(u_time * 0.018, -u_time * 0.014)
             + vec2(u_sectionSeed, -u_sectionSeed*0.7);
   vec2 w = curl(base) * u_warpAmp;
@@ -277,6 +300,56 @@ void main(){
   float glow = exp(-pow((uv.y - h) * 12.0, 2.0)) * (0.6 + u_bass * 0.8);
   float a = edge * 0.18 + glow * 0.55;
   o = vec4(u_color * a, a);
+}`;
+
+// Pillar 1 (spectrum): the bright structural overlay MilkDrop draws every
+// frame, which then gets sucked into the feedback flow next frame so the lines
+// leave swirling trails. We draw a centred radial "sun" of 24 rays, one per
+// mel band; ray length = band magnitude. Cheap, crisp, additively composited
+// into the field BEFORE ping-pong swap so the feedback advect captures it.
+const SPECTRUM_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o;
+uniform sampler2D u_bands;   // 24x1 R32F texture; r = band magnitude 0..1
+uniform vec3  u_color;
+uniform float u_intensity;
+uniform float u_time;
+uniform float u_aspect;      // viewH / viewW for ray length normalisation
+
+const float TAU2 = 6.28318530718;
+const float SEGMENTS = 24.0;
+
+void main(){
+  vec2 p = v_uv - vec2(0.5);
+  p.x /= max(0.0001, u_aspect); // square the radial space
+  float r = length(p) * 2.0;       // 0 at centre .. ~1 at edge
+  float a = atan(p.y, p.x);        // -PI..PI
+  // Band index from angle. Slowly rotate over time so the spectrum sweeps.
+  float t = (a + TAU2 + u_time * 0.07) / TAU2;
+  float idx = fract(t) * SEGMENTS;
+  float i0 = floor(idx);
+  float frac = idx - i0;
+  // Sample two neighbouring bands and linearly interpolate so the rays
+  // blend smoothly between segments instead of stepping.
+  float u0 = (i0 + 0.5) / SEGMENTS;
+  float u1 = (mod(i0 + 1.0, SEGMENTS) + 0.5) / SEGMENTS;
+  float b0 = texture(u_bands, vec2(u0, 0.5)).r;
+  float b1 = texture(u_bands, vec2(u1, 0.5)).r;
+  float band = mix(b0, b1, frac);
+  // Ray reaches to ~0.08 + band*0.55 (inside the screen).
+  float rayLen = 0.08 + band * 0.55;
+  // Crisp ray edge along the radius — rises near the centre, falls past tip.
+  float radial = smoothstep(0.0, 0.04, r) * (1.0 - smoothstep(rayLen, rayLen + 0.025, r));
+  // Sharp angular cut so rays read as distinct lines, not a soft sun.
+  float seg = TAU2 / SEGMENTS;
+  float folded = abs(mod(a + seg * 0.5, seg) - seg * 0.5);
+  float angular = pow(1.0 - clamp(folded / (seg * 0.45), 0.0, 1.0), 6.0);
+  float ray = radial * angular;
+  // A small bright centre always so the sun has a hot core.
+  float core = exp(-r * r * 60.0) * 0.6;
+  float a_out = clamp((ray + core) * u_intensity, 0.0, 1.0);
+  o = vec4(u_color * a_out, a_out);
 }`;
 
 // Bloom — threshold pass extracts bright pixels.
@@ -524,18 +597,20 @@ export function createEvilandRenderer(
   const fieldProg = link(gl, QUAD_VERT, FIELD_FRAG);
   const emitterProg = link(gl, EMITTER_VERT, EMITTER_FRAG);
   const terrainProg = link(gl, QUAD_VERT, TERRAIN_FRAG);
+  const spectrumProg = link(gl, QUAD_VERT, SPECTRUM_FRAG);
   const thresholdProg = link(gl, QUAD_VERT, THRESHOLD_FRAG);
   const downProg = link(gl, QUAD_VERT, KAWASE_DOWN_FRAG);
   const upProg = link(gl, QUAD_VERT, KAWASE_UP_FRAG);
   const postProg = link(gl, QUAD_VERT, POST_FRAG);
 
-  if (!fieldProg || !emitterProg || !terrainProg || !thresholdProg || !downProg || !upProg || !postProg) {
+  if (!fieldProg || !emitterProg || !terrainProg || !spectrumProg || !thresholdProg || !downProg || !upProg || !postProg) {
     return null;
   }
   // Narrow once so the inner closures don't need null guards on every use.
   const FIELD: WebGLProgram = fieldProg;
   const EMITTER: WebGLProgram = emitterProg;
   const TERRAIN: WebGLProgram = terrainProg;
+  const SPECTRUM: WebGLProgram = spectrumProg;
   const THRESHOLD: WebGLProgram = thresholdProg;
   const DOWN: WebGLProgram = downProg;
   const UP: WebGLProgram = upProg;
@@ -553,6 +628,22 @@ export function createEvilandRenderer(
   const instanceBuf = gl.createBuffer();
   if (!instanceBuf) return null;
   const instanceData = new Float32Array(maxEmitters * 12);
+
+  // Spectrum bands texture: 24x1 R32F so the spectrum shader can look up band
+  // magnitudes by angle without packing into a uniform array. R32F renderable
+  // is gated by EXT_color_buffer_float (already checked above); SAMPLING R32F
+  // is a separate concern — we use NEAREST filter so OES_texture_float_linear
+  // isn't needed for this texture.
+  const bandsTex = gl.createTexture();
+  if (!bandsTex) return null;
+  gl.bindTexture(gl.TEXTURE_2D, bandsTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, 24, 1, 0, gl.RED, gl.FLOAT, new Float32Array(24));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  // Scratch buffer for per-frame band uploads (avoid per-frame allocations).
+  const bandsScratch = new Float32Array(24);
 
   // Field FBOs (ping-pong) sized at render-time.
   let fieldA: Fbo | null = null;
@@ -651,6 +742,15 @@ export function createEvilandRenderer(
     rotate: gl.getUniformLocation(fieldProg, 'u_rotate'),
     hueCycle: gl.getUniformLocation(fieldProg, 'u_hueCycle'),
     swirl: gl.getUniformLocation(fieldProg, 'u_swirl'),
+    mirror: gl.getUniformLocation(fieldProg, 'u_mirror'),
+    mirrorMix: gl.getUniformLocation(fieldProg, 'u_mirrorMix'),
+  };
+  const spectrumUni = {
+    bands: gl.getUniformLocation(spectrumProg, 'u_bands'),
+    color: gl.getUniformLocation(spectrumProg, 'u_color'),
+    intensity: gl.getUniformLocation(spectrumProg, 'u_intensity'),
+    time: gl.getUniformLocation(spectrumProg, 'u_time'),
+    aspect: gl.getUniformLocation(spectrumProg, 'u_aspect'),
   };
   const terrainUni = {
     bass: gl.getUniformLocation(terrainProg, 'u_bass'),
@@ -954,19 +1054,33 @@ export function createEvilandRenderer(
     gl.uniform1f(fieldUni.time, time);
     gl.uniform1f(fieldUni.novelty, frame.novelty);
     gl.uniform1f(fieldUni.sectionSeed, sectionSeed);
-    // MilkDrop-style motion: small base zoom (always a gentle tunnel rush),
-    // kick punches it up; rotation drifts over time + accelerates with energy;
-    // hue cycles a touch per frame — slow when quiet, faster when bright.
-    const zoom = 0.0024 + frame.kick * 0.018 + frame.bass * 0.006;
-    const rotateBase = 0.0011 * (sectionSeed * 0.5 + 0.5); // section-stable drift
+    // MilkDrop-style motion — bolder than the previous tuning:
+    //  • zoom: stronger base tunnel + kick punches in deeper.
+    //  • rotate: always drifting; energy + beatPhase accelerate it.
+    //  • hue cycle: visibly sweeps the palette (~2x previous range).
+    //  • swirl: pronounced edge spin.
+    const zoom = 0.0055 + frame.kick * 0.040 + frame.bass * 0.015;
+    const rotateBase = 0.0028 * (sectionSeed * 0.5 + 0.5); // section-stable drift
     const rotateSign = ((Math.floor(sectionSeed * 7) % 2) === 0) ? 1 : -1;
-    const rotate = rotateSign * (rotateBase + frame.energy * 0.0035 + frame.beatPhase * 0.0006);
-    const hueCycle = (0.0012 + frame.centroid * 0.0040 + frame.energy * 0.0020) * (sectionSeed < 0.5 ? -1 : 1);
-    const swirl = 0.012 + frame.width * 0.030 + frame.novelty * 0.020;
+    const rotate = rotateSign * (rotateBase + frame.energy * 0.0090 + frame.beatPhase * 0.0014);
+    const hueCycle = (0.0028 + frame.centroid * 0.0090 + frame.energy * 0.0055) * (sectionSeed < 0.5 ? -1 : 1);
+    const swirl = 0.028 + frame.width * 0.070 + frame.novelty * 0.045;
     gl.uniform1f(fieldUni.zoom, zoom);
     gl.uniform1f(fieldUni.rotate, rotate);
     gl.uniform1f(fieldUni.hueCycle, hueCycle);
     gl.uniform1f(fieldUni.swirl, swirl);
+    // Kaleidoscope: pick a segment count from the section seed so the song's
+    // structure changes the symmetry, and let high energy crossfade it in.
+    // Available sets: 0 (off), 3, 4, 6, 8. Choose deterministically per section.
+    const mirrorCounts = [0, 0, 3, 4, 6, 8];
+    const mirrorIdx = Math.floor(sectionSeed * 13) % mirrorCounts.length;
+    const mirrorN = mirrorCounts[mirrorIdx]!;
+    // Crossfade up with energy; a low constant blend keeps it subtle when quiet.
+    const mirrorMix = mirrorN === 0
+      ? 0
+      : Math.min(1, 0.30 + frame.energy * 0.55 + frame.bass * 0.20);
+    gl.uniform1f(fieldUni.mirror, mirrorN);
+    gl.uniform1f(fieldUni.mirrorMix, mirrorMix);
     drawFullscreen();
 
     // ---- PASS 2: terrain (bass horizon) drawn into the field ----
@@ -989,6 +1103,41 @@ export function createEvilandRenderer(
       gl.blendFunc(gl.ONE, gl.ONE); // additive
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, active);
       unbindEmitterDivisors();
+    }
+
+    // ---- PASS 3b: radial spectrum overlay (the crisp structure MilkDrop
+    // draws each frame). Upload the 24 bands → R32F texture, draw the "sun".
+    // Still inside fieldB + additive blend so the feedback advect captures it
+    // next frame and the rays leave swirling trails.
+    {
+      const bands = frame.bands;
+      const n = Math.min(24, bands.length);
+      for (let i = 0; i < n; i++) bandsScratch[i] = bands[i]!;
+      for (let i = n; i < 24; i++) bandsScratch[i] = 0;
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, bandsTex);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 24, 1, gl.RED, gl.FLOAT, bandsScratch);
+      gl.useProgram(SPECTRUM);
+      bindFullscreenQuad(SPECTRUM);
+      gl.uniform1i(spectrumUni.bands, 0);
+      // Spectrum hue rotates the accent through the palette over time so the
+      // bright "sun" itself drifts colour — feeds into the field's hue cycle.
+      const hueT = (time * 0.25) % 1;
+      const r = palette.accent[0] * (0.6 + 0.4 * Math.cos(hueT * 6.283));
+      const g = palette.accent[1] * (0.6 + 0.4 * Math.cos((hueT + 0.33) * 6.283));
+      const b = palette.accent[2] * (0.6 + 0.4 * Math.cos((hueT + 0.66) * 6.283));
+      gl.uniform3f(
+        spectrumUni.color,
+        Math.max(0.2, r),
+        Math.max(0.2, g),
+        Math.max(0.2, b),
+      );
+      // Intensity rises with energy + beat, but stays bounded so it never floods.
+      const intensity = 0.45 + frame.energy * 0.65 + frame.beatPhase * 0.05;
+      gl.uniform1f(spectrumUni.intensity, Math.min(1.4, intensity));
+      gl.uniform1f(spectrumUni.time, time);
+      gl.uniform1f(spectrumUni.aspect, fieldH / Math.max(1, fieldW));
+      drawFullscreen();
     }
     gl.disable(gl.BLEND);
 
@@ -1073,12 +1222,14 @@ export function createEvilandRenderer(
     if (fieldProg) gl.deleteProgram(fieldProg);
     if (emitterProg) gl.deleteProgram(emitterProg);
     if (terrainProg) gl.deleteProgram(terrainProg);
+    if (spectrumProg) gl.deleteProgram(spectrumProg);
     if (thresholdProg) gl.deleteProgram(thresholdProg);
     if (downProg) gl.deleteProgram(downProg);
     if (upProg) gl.deleteProgram(upProg);
     if (postProg) gl.deleteProgram(postProg);
     if (quadBuf) gl.deleteBuffer(quadBuf);
     if (instanceBuf) gl.deleteBuffer(instanceBuf);
+    if (bandsTex) gl.deleteTexture(bandsTex);
     disposeFbo(fieldA);
     disposeFbo(fieldB);
     for (const f of bloomDown) disposeFbo(f);
