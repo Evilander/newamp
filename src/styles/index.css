@@ -4035,7 +4035,7 @@ input[type='range'].nslider.eq-slider {
   mix-blend-mode: normal;
 }
 .fullscreen-viz-cover.is-visible {
-  opacity: 0.72;
+  opacity: 0.55;
   transform: scale(1);
   animation: fullscreen-cover-breathe 1800ms ease-in-out both;
 }
