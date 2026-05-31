@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Detached visualizer window. No eval surfaces; no remote resources.
+         The renderer module talks to a MessagePort posted in by the main
+         process and never reaches outside the frame. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'" />
+    <title>NewAmp — Eviland</title>
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+      body { cursor: none; font: 13px ui-monospace, Menlo, Consolas, monospace; color: #aaa; }
+      canvas#eviland-canvas { display: block; width: 100vw; height: 100vh; }
+      .eviland-msg {
+        position: fixed; inset: 0;
+        display: grid; place-items: center;
+        padding: 24px; text-align: center;
+        background: #000; color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="eviland-canvas"></canvas>
+    <script type="module" src="/src/detached/main.tsx"></script>
+  </body>
+</html>

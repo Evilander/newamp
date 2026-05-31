@@ -716,9 +716,11 @@ function Clock(): JSX.Element {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
-  const ts = `${now.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${now
-    .toISOString()
-    .slice(0, 10)} · ${now.toLocaleTimeString([], { hour12: false })}`;
+  // All three parts use the local timezone (en-CA renders YYYY-MM-DD) so the
+  // weekday, date, and time can't disagree across a UTC/local midnight.
+  const ts = `${now.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase()} ${now.toLocaleDateString(
+    'en-CA',
+  )} · ${now.toLocaleTimeString([], { hour12: false })}`;
   return (
     <span className="text-[10px]" style={{ color: 'var(--ink)' }}>
       {ts}
