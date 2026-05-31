@@ -10,6 +10,7 @@ import type {
 } from '@shared/types';
 import { AudioEngine } from '../audio/engine';
 import { api, inElectron, toAudioUrl, DEFAULT_SETTINGS } from '../lib/api';
+import { decode as decodeEvilandCode } from '../visualizer/eviland-randomizer';
 import { applyTheme } from '../lib/skins';
 import { normalizePlaybackRate } from '@shared/tempo-trainer';
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
@@ -93,6 +94,19 @@ interface PlayerState {
   compactMode: boolean;
   alwaysOnTop: boolean;
   vizPreset: AppSettings['visualizerPreset'];
+  /** Eviland AI Director: when on, the renderer's look conducts itself to the song. */
+  evilandDirector: boolean;
+  /** Last seed code applied to Eviland (display + share). Null = renderer default. */
+  evilandSeed: string | null;
+  /**
+   * Bumped whenever the UI requests a new manual Eviland config (randomize,
+   * seed paste). The Visualizer rAF loop tracks the last-applied nonce and
+   * only calls renderer.setConfig() when it changes — keeps the hot loop
+   * allocation-free under steady state.
+   */
+  evilandConfigNonce: number;
+  /** Optional waveform-layer override applied on top of the active config. */
+  evilandWaveMode: 'off' | 'line' | 'radial' | 'bars';
   searchQuery: string;
   showEq: boolean;
   /** One-shot navigation request consumed by destination views on mount/render. */
@@ -111,6 +125,16 @@ interface PlayerState {
   setCompactMode: (on: boolean) => void;
   setAlwaysOnTop: (on: boolean) => void;
   setVizPreset: (name: AppSettings['visualizerPreset']) => void;
+  toggleEvilandDirector: () => void;
+  /**
+   * Mint a new Eviland look. When `seed` is omitted, derive it deterministically
+   * from the current nonce so the result is reproducible across reloads (no
+   * Math.random / Date.now in the store; the randomizer hashes the string).
+   */
+  randomizeEviland: (seed?: string) => void;
+  /** Apply a shared seed code (e.g. "K7Q2-9XMF"). Returns true on decode success. */
+  applyEvilandCode: (code: string) => boolean;
+  setEvilandWaveMode: (mode: 'off' | 'line' | 'radial' | 'bars') => void;
   setSearchQuery: (q: string) => void;
   playTrack: (track: Track, queue?: Track[]) => Promise<void>;
   playPodcastEpisode: (episode: PodcastEpisode) => Promise<void>;
@@ -691,6 +715,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     compactMode: false,
     alwaysOnTop: false,
     vizPreset: 'spectrum',
+    evilandDirector: false,
+    evilandSeed: null,
+    evilandConfigNonce: 0,
+    evilandWaveMode: 'off',
     searchQuery: '',
     showEq: false,
     pendingNavigation: null,
@@ -781,6 +809,56 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         .setSettings({ visualizerPreset: name })
         .then((settings) => set({ settings, vizPreset: settings.visualizerPreset }))
         .catch(() => undefined);
+    },
+    toggleEvilandDirector: () => {
+      // Toggling the director is a pure UI flag — the Visualizer rAF loop
+      // consults state.evilandDirector each frame and either uses
+      // director.update() or the manually-applied config. No persistence:
+      // the director is an in-session "auto-VJ for one preset" affordance,
+      // mirroring how the Auto-VJ toggle in FullscreenVisualizer is local
+      // (localStorage) rather than settings.json.
+      set((s) => ({ evilandDirector: !s.evilandDirector }));
+    },
+    randomizeEviland: (seed) => {
+      // Derive a seed from the next nonce when none is supplied — deterministic
+      // and reproducible across reloads. The randomizer hashes the string via
+      // FNV-1a, so any non-empty value is fine. Compute the nonce inside the
+      // functional updater so two rapid calls can't both read the same value
+      // and clobber each other's bump.
+      set((s) => {
+        const nextNonce = s.evilandConfigNonce + 1;
+        const requested = seed && seed.trim() ? seed.trim() : `seed-${nextNonce}`;
+        return {
+          evilandSeed: requested,
+          evilandConfigNonce: nextNonce,
+          // Manual look — let it stick. The Director toggle is a separate axis;
+          // the user can re-enable it explicitly when they want the song back
+          // in charge.
+          evilandDirector: false,
+        };
+      });
+    },
+    applyEvilandCode: (code) => {
+      const trimmed = (code ?? '').trim();
+      if (!trimmed) return false;
+      // decode() returns null for unrecognisable codes — surface that to the
+      // caller so the UI can toast/inline-error without us having to throw.
+      const decoded = decodeEvilandCode(trimmed);
+      if (!decoded) return false;
+      set((s) => ({
+        evilandSeed: decoded.seed ?? trimmed,
+        evilandConfigNonce: s.evilandConfigNonce + 1,
+        evilandDirector: false,
+      }));
+      return true;
+    },
+    setEvilandWaveMode: (mode) => {
+      // Bump the nonce so the rAF loop re-applies the active config with the
+      // new waveform override on its next frame.
+      set((s) => ({
+        evilandWaveMode: mode,
+        evilandConfigNonce: s.evilandConfigNonce + 1,
+      }));
     },
     setSearchQuery: (q) => set({ searchQuery: q }),
 

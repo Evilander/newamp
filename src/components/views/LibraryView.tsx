@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type {
   AudioExportFormat,
   LibraryHealth,
@@ -69,8 +69,14 @@ export function LibraryView(): JSX.Element {
   const toggleAvoidAutoPlay = usePlayerStore((s) => s.toggleAvoidAutoPlay);
   const current = usePlayerStore((s) => s.current);
 
+  // Bumped every time the active query/sort changes so an in-flight "load more"
+  // can detect it resolved against a stale query and drop its page instead of
+  // appending rows from a search the user already left.
+  const loadGenerationRef = useRef(0);
+
   useEffect(() => {
     let cancelled = false;
+    loadGenerationRef.current += 1;
     setLoading(true);
     Promise.all([
       api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
@@ -126,6 +132,7 @@ export function LibraryView(): JSX.Element {
 
   async function loadMoreTracks(): Promise<void> {
     if (loadingMore || !hasMoreTracks) return;
+    const generation = loadGenerationRef.current;
     setLoadingMore(true);
     try {
       const rows = await api.getTracks({
@@ -134,11 +141,25 @@ export function LibraryView(): JSX.Element {
         limit: LIBRARY_PAGE_SIZE,
         offset: tracks.length,
       });
+      // The query/sort changed while this page was in flight — these rows belong
+      // to a search the user already left; drop them rather than polluting the
+      // current results.
+      if (generation !== loadGenerationRef.current) return;
+      const seen = new Set(tracks.map((track) => track.id));
+      const freshRows = rows.filter((track) => !seen.has(track.id));
+      // Append race-safe: re-dedupe against the LATEST committed list inside the
+      // functional updater so a StrictMode double-fire or two in-flight pages
+      // can't both append the same rows from this stale `tracks` snapshot.
       setTracks((current) => {
-        const seen = new Set(current.map((track) => track.id));
-        return [...current, ...rows.filter((track) => !seen.has(track.id))];
+        if (!freshRows.length) return current;
+        const have = new Set(current.map((track) => track.id));
+        const add = freshRows.filter((track) => !have.has(track.id));
+        return add.length ? [...current, ...add] : current;
       });
-      setHasMoreTracks(tracks.length + rows.length < matchingTrackCount);
+      // Base "load more" on the unique rows in this page: raw rows.length
+      // over-counts when pages overlap, which keeps the button enabled and can
+      // spin on no-op loads once offset stops advancing.
+      setHasMoreTracks(freshRows.length > 0 && tracks.length + freshRows.length < matchingTrackCount);
     } finally {
       setLoadingMore(false);
     }

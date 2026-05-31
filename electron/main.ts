@@ -6,6 +6,7 @@ import {
   globalShortcut,
   ipcMain,
   Menu,
+  MessageChannelMain,
   nativeImage,
   net,
   protocol,
@@ -13,6 +14,7 @@ import {
   shell,
   dialog,
   Tray,
+  type Display,
   type Rectangle,
 } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -483,6 +485,233 @@ function createWindow(): BrowserWindow {
   }
 
   return win;
+}
+
+// --- Detached Eviland visualizer window (pop-out to projector / 2nd monitor) ---
+//
+// One reactor lives in the main renderer. The detached window is a thin
+// EvilandFrame consumer connected via a MessageChannelMain port pair, so
+// per-frame data flows renderer ↔ renderer without round-tripping through
+// main. The window MUST have backgroundThrottling:false — a projector
+// display loses focus and Chromium would otherwise drop its rAF to ~1 Hz.
+
+let detachedVizWin: BrowserWindow | null = null;
+let displayWatcherRegistered = false;
+
+interface DetachedDisplay {
+  id: number;
+  label: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  workArea: { x: number; y: number; width: number; height: number };
+  scaleFactor: number;
+  internal: boolean;
+  primary: boolean;
+}
+
+function mapDisplay(display: Display, primaryId: number): DetachedDisplay {
+  return {
+    id: display.id,
+    label: display.label || `Display ${display.id}`,
+    bounds: { ...display.bounds },
+    workArea: { ...display.workArea },
+    scaleFactor: display.scaleFactor,
+    internal: Boolean((display as Display & { internal?: boolean }).internal),
+    primary: display.id === primaryId,
+  };
+}
+
+function listDetachedDisplays(): DetachedDisplay[] {
+  const primaryId = screen.getPrimaryDisplay().id;
+  return screen.getAllDisplays().map((d) => mapDisplay(d, primaryId));
+}
+
+function pickDetachedDisplay(displayId?: number): Display {
+  const all = screen.getAllDisplays();
+  if (displayId !== undefined) {
+    const match = all.find((d) => d.id === displayId);
+    if (match) return match;
+  }
+  const primary = screen.getPrimaryDisplay();
+  // Default to the first non-primary display (typical projector / 2nd monitor
+  // case); fall back to primary if only one display exists.
+  return all.find((d) => d.id !== primary.id) ?? primary;
+}
+
+function getRendererBaseUrl(): URL {
+  return isDev
+    ? new URL('http://localhost:5173/')
+    : new URL('newamp-app://app/');
+}
+
+// Tear down a half-opened detached window and tell the main renderer why, so
+// the UI toggle never gets stuck "open" against a phantom/black window the user
+// can't recover without restarting NewAmp.
+function failDetachedOpen(reason: string, err: unknown): void {
+  console.error(`[newamp] detached visualizer ${reason}`, err);
+  writeDiagnosticEvent('detached-viz-open-failed', { reason, error: err });
+  const win = detachedVizWin;
+  detachedVizWin = null;
+  if (win && !win.isDestroyed()) {
+    try { win.destroy(); } catch { /* already gone */ }
+  }
+  if (mainWin && !mainWin.isDestroyed()) {
+    mainWin.webContents.send('detached-viz:open-failed', { reason });
+  }
+}
+
+function openDetachedVisualizer(opts: { displayId?: number; fullscreen?: boolean } = {}): void {
+  if (detachedVizWin && !detachedVizWin.isDestroyed()) {
+    detachedVizWin.show();
+    detachedVizWin.focus();
+    if (opts.fullscreen !== undefined) {
+      detachedVizWin.setFullScreen(Boolean(opts.fullscreen));
+    }
+    return;
+  }
+  if (!mainWin || mainWin.isDestroyed()) return;
+
+  const target = pickDetachedDisplay(opts.displayId);
+  const width = Math.min(1280, Math.max(480, target.bounds.width - 80));
+  const height = Math.min(720, Math.max(320, target.bounds.height - 80));
+
+  const win = new BrowserWindow({
+    x: target.bounds.x + 40,
+    y: target.bounds.y + 40,
+    width,
+    height,
+    show: false,
+    frame: false,
+    backgroundColor: '#000000',
+    autoHideMenuBar: true,
+    title: 'NewAmp — Eviland',
+    webPreferences: {
+      preload: join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      webSecurity: true,
+      // LOAD-BEARING: without this, Chromium throttles requestAnimationFrame
+      // to ~1 Hz when the detached window's display is not focused — exactly
+      // the projector case.
+      backgroundThrottling: false,
+    },
+  });
+  detachedVizWin = win;
+  attachWindowDiagnostics(win, 'detached-viz');
+  attachExternalLinkHandler(win);
+
+  win.on('closed', () => {
+    if (detachedVizWin === win) detachedVizWin = null;
+    if (mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send('detached-viz:closed');
+    }
+  });
+
+  win.webContents.on('render-process-gone', (_event, details) => {
+    if (mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send('detached-viz:crashed', { reason: details.reason });
+    }
+    // A crashed renderer can leave the BrowserWindow alive-but-stuck; the
+    // 'closed' event is NOT guaranteed to fire. Destroy it ourselves so the
+    // next open() doesn't short-circuit on a zombie window.
+    if (detachedVizWin === win) detachedVizWin = null;
+    if (!win.isDestroyed()) {
+      try { win.destroy(); } catch { /* already gone */ }
+    }
+  });
+
+  const rendererUrl = new URL('detached.html', getRendererBaseUrl());
+  win.loadURL(rendererUrl.toString()).catch((err) => {
+    failDetachedOpen('loadURL failed', err);
+  });
+
+  win.once('ready-to-show', () => {
+    if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
+    detachedVizWin.show();
+    if (opts.fullscreen) detachedVizWin.setFullScreen(true);
+
+    // Wire the per-frame transport AFTER both renderers can receive
+    // postMessage events. port1 → main renderer (producer), port2 → detached
+    // renderer (consumer). Transferring ownership requires the ports be
+    // listed in the third arg of webContents.postMessage; the channel name
+    // matches the preload bridge in electron/preload.ts.
+    if (!mainWin || mainWin.isDestroyed()) {
+      // The main renderer (the frame producer) is gone — a detached window with
+      // no peer would just sit black. Don't claim success.
+      failDetachedOpen('port wiring failed: main window unavailable', null);
+      return;
+    }
+    try {
+      const channel = new MessageChannelMain();
+      mainWin.webContents.postMessage('eviland:frame-port', null, [channel.port1]);
+      detachedVizWin.webContents.postMessage('eviland:frame-port', null, [channel.port2]);
+      mainWin.webContents.send('detached-viz:opened');
+    } catch (err) {
+      failDetachedOpen('port wiring failed', err);
+    }
+  });
+}
+
+function closeDetachedVisualizer(): void {
+  if (!detachedVizWin || detachedVizWin.isDestroyed()) {
+    detachedVizWin = null;
+    return;
+  }
+  try {
+    detachedVizWin.close();
+  } catch (err) {
+    console.error('[newamp] detached visualizer close failed', err);
+  }
+}
+
+function moveDetachedVisualizerToDisplay(displayId: number): void {
+  if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
+  const target = pickDetachedDisplay(displayId);
+  const wasFullscreen = detachedVizWin.isFullScreen();
+  if (wasFullscreen) detachedVizWin.setFullScreen(false);
+  const width = Math.min(1280, Math.max(480, target.bounds.width - 80));
+  const height = Math.min(720, Math.max(320, target.bounds.height - 80));
+  detachedVizWin.setBounds({
+    x: target.bounds.x + 40,
+    y: target.bounds.y + 40,
+    width,
+    height,
+  });
+  if (wasFullscreen) detachedVizWin.setFullScreen(true);
+}
+
+function setDetachedVisualizerFullscreen(on: boolean): void {
+  if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
+  detachedVizWin.setFullScreen(Boolean(on));
+}
+
+function registerDisplayWatchers(): void {
+  if (displayWatcherRegistered) return;
+  displayWatcherRegistered = true;
+  const broadcast = () => {
+    if (mainWin && !mainWin.isDestroyed()) {
+      mainWin.webContents.send('displays:changed');
+    }
+  };
+  screen.on('display-added', broadcast);
+  screen.on('display-removed', (_event, removed) => {
+    broadcast();
+    if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
+    // If the detached window lived on the removed display, snap it home so
+    // the user doesn't lose track of it.
+    const winDisplay = screen.getDisplayMatching(detachedVizWin.getBounds());
+    if (winDisplay.id === removed.id) {
+      const fallback = screen.getPrimaryDisplay();
+      detachedVizWin.setFullScreen(false);
+      detachedVizWin.setBounds({
+        x: fallback.bounds.x + 40,
+        y: fallback.bounds.y + 40,
+        width: Math.min(1280, Math.max(480, fallback.bounds.width - 80)),
+        height: Math.min(720, Math.max(320, fallback.bounds.height - 80)),
+      });
+    }
+  });
+  screen.on('display-metrics-changed', broadcast);
 }
 
 function createStartupSplashWindow(): void {
@@ -1584,6 +1813,24 @@ function registerIpc(): void {
     mainWin?.setAlwaysOnTop(!!on, 'floating');
   });
   ipcMain.handle('win:close', () => mainWin?.close());
+
+  // detached visualizer window
+  ipcMain.handle('detached-viz:list-displays', () => listDetachedDisplays());
+  ipcMain.handle('detached-viz:open', (_e, opts?: { displayId?: number; fullscreen?: boolean }) => {
+    openDetachedVisualizer(opts ?? {});
+  });
+  ipcMain.handle('detached-viz:close', () => {
+    closeDetachedVisualizer();
+  });
+  ipcMain.handle('detached-viz:move-to-display', (_e, displayId: number) => {
+    moveDetachedVisualizerToDisplay(Math.trunc(Number(displayId)));
+  });
+  ipcMain.handle('detached-viz:set-fullscreen', (_e, on: boolean) => {
+    setDetachedVisualizerFullscreen(Boolean(on));
+  });
+  ipcMain.handle('detached-viz:is-open', () =>
+    Boolean(detachedVizWin && !detachedVizWin.isDestroyed()),
+  );
 }
 
 async function runUiPlaybackSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
@@ -3525,12 +3772,30 @@ async function bootstrap(): Promise<void> {
 
   registerAudioProtocol();
   registerIpc();
+  registerDisplayWatchers();
 
   createStartupSplashWindow();
   mainWin = createWindow();
   registerTray();
   registerMediaShortcuts();
   syncLibraryWatcher();
+
+  // If the main renderer reloads (crash recovery, dev hot-reload) while a
+  // detached visualizer window is open, the old MessageChannel port dies with
+  // the previous renderer and the projector feed would go permanently static.
+  // Re-issue a fresh port pair on every (re)load so the feed resumes. No-op on
+  // the initial load (no detached window yet) and when nothing is detached.
+  mainWin.webContents.on('did-finish-load', () => {
+    if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
+    if (!mainWin || mainWin.isDestroyed()) return;
+    try {
+      const channel = new MessageChannelMain();
+      mainWin.webContents.postMessage('eviland:frame-port', null, [channel.port1]);
+      detachedVizWin.webContents.postMessage('eviland:frame-port', null, [channel.port2]);
+    } catch (err) {
+      console.error('[newamp] detached visualizer re-wire after main reload failed', err);
+    }
+  });
 
   // Auto-scan on launch if the library is empty and roots are configured
   mainWin.webContents.once('did-finish-load', () => {

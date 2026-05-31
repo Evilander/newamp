@@ -64,10 +64,12 @@ const hzToMel = (hz: number): number => 2595 * Math.log10(1 + hz / 700);
 const melToHz = (mel: number): number => 700 * (10 ** (mel / 2595) - 1);
 
 // Which raw bands belong to each semantic voice (see spec §Part 1).
+// Inclusive [lo, hi] band ranges; kept non-overlapping so groupPeak() and
+// groupForBand() classify every boundary band identically.
 const GROUP_BANDS: Record<Exclude<VoiceGroup, 'other'>, [number, number]> = {
   kick: [0, 2],
-  bass: [2, 5],
-  snare: [5, 9],
+  bass: [3, 5],
+  snare: [6, 9],
   vocal: [10, 14],
   hat: [19, 23],
 };
@@ -234,7 +236,7 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
         const n = Math.max(1, e - s);
         const mag = sum / n / 255; // 0..1 smoothed-source magnitude
         const onsetMag = onsetSum / n / 255; // 0..1 unsmoothed-source magnitude
-        bandMag[b] += (mag - bandMag[b]!) * 0.35; // light visual smoothing
+        bandMag[b] = bandMag[b]! + (mag - bandMag[b]!) * 0.35; // light visual smoothing
 
         // Half-wave rectified flux against previous unsmoothed band.
         const flux = Math.max(0, onsetMag - prevOnsetBand[b]!);
@@ -290,10 +292,14 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
       const geoMean = logCount > 0 ? Math.exp(logSum / logCount) : 0;
       const flatnessRaw = meanMag > 1e-6 ? Math.min(1, geoMean / meanMag) : 0;
       const crestRaw = meanMag > 1e-6 ? Math.min(1, (peak / meanMag) / 8) : 0;
-      // rolloff: band holding 85% cumulative energy.
+      // rolloff: band holding 85% cumulative energy. Use the smoothed display
+      // magnitudes (bandMag) for BOTH the cumulative sum and the threshold so
+      // transients can't bias the chosen band by mixing smoothed/raw sources.
+      let bandMagTotal = 0;
+      for (let b = 0; b < EVILAND_BANDS; b++) bandMagTotal += bandMag[b]!;
       let cum = 0;
       let rollBand = EVILAND_BANDS - 1;
-      const energy85 = totalMag * 0.85;
+      const energy85 = bandMagTotal * 0.85;
       for (let b = 0; b < EVILAND_BANDS; b++) {
         cum += bandMag[b]!;
         if (cum >= energy85) {

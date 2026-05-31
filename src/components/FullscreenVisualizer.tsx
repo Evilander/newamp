@@ -13,6 +13,8 @@ import { formatTime } from '../lib/format';
 import { api, winctl } from '../lib/api';
 import type { VisualizerPreset } from '@shared/types';
 import { volumeLabel } from './VolumeSlider';
+import { createCanvasRecorder, CanvasRecorderError, type CanvasRecorder } from '../visualizer/eviland-recorder';
+import { useDetachedVisualizer } from './useDetachedVisualizer';
 
 // Preset registry. `group` drives the labeled sections in the new preset
 // picker popover so users can scan by category instead of one long rail. The
@@ -177,6 +179,15 @@ export function FullscreenVisualizer(): JSX.Element {
   const seek = usePlayerStore((s) => s.seek);
   const preset = usePlayerStore((s) => s.vizPreset);
   const setPreset = usePlayerStore((s) => s.setVizPreset);
+  // Eviland controls. Reads + actions live in usePlayerStore; this component
+  // is just the surface that wires them to the popover UI.
+  const evilandDirector = usePlayerStore((s) => s.evilandDirector);
+  const toggleEvilandDirector = usePlayerStore((s) => s.toggleEvilandDirector);
+  const evilandSeed = usePlayerStore((s) => s.evilandSeed);
+  const randomizeEviland = usePlayerStore((s) => s.randomizeEviland);
+  const applyEvilandCode = usePlayerStore((s) => s.applyEvilandCode);
+  const evilandWaveMode = usePlayerStore((s) => s.evilandWaveMode);
+  const setEvilandWaveMode = usePlayerStore((s) => s.setEvilandWaveMode);
   const [quality, setQuality] = useState<VizQuality>(() => loadVisualizerQuality());
   const [artPulseEnabled, setArtPulseEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_SHOW_ART_KEY, true));
   const [artPulseVisible, setArtPulseVisible] = useState(false);
@@ -191,13 +202,32 @@ export function FullscreenVisualizer(): JSX.Element {
   // cursor movement re-shows it for a few seconds before hiding again.
   const [cursorActive, setCursorActive] = useState(true);
   const [recording, setRecording] = useState(false);
+  // Transient recorder failure message shown under the Record button. Without
+  // this the clip button silently no-ops (no codec, canvas not painting, save
+  // failed) and the user can't tell what went wrong.
+  const [recordError, setRecordError] = useState<string | null>(null);
   // Popover state for the redesigned control surface. Only one popover open at
   // a time. Esc closes the open one before falling through to exitVisualizer.
   type OpenPanel = 'preset' | 'settings' | 'help' | null;
   const [openPanel, setOpenPanel] = useState<OpenPanel>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  // Eviland recorder uses createCanvasRecorder (vp9/opus WebM with engine
+  // audio muxed in parallel). Kept as a separate ref so the legacy
+  // MediaRecorder code path for non-Eviland presets stays untouched.
+  const evilandRecorderRef = useRef<CanvasRecorder | null>(null);
+  const evilandRecorderAudioRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const levelMeterRef = useRef<HTMLSpanElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  // Eviland popover scratch state: paste-input value, decode-failure flash,
+  // and a transient "Copied!" hint on the seed display. Local to this
+  // component — they're conversational UI, not durable settings.
+  const [evilandPasteValue, setEvilandPasteValue] = useState('');
+  const [evilandPasteError, setEvilandPasteError] = useState<string | null>(null);
+  const [evilandSeedCopied, setEvilandSeedCopied] = useState(false);
+  // Detached / pop-out visualizer window (second monitor / projector). The hook
+  // owns open state + failure surfacing; this picks which display to target.
+  const detached = useDetachedVisualizer();
+  const [detachedDisplayId, setDetachedDisplayId] = useState<number | null>(null);
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
   const activeIndex = Math.max(0, PRESETS.findIndex((p) => p.id === activePreset));
@@ -561,7 +591,20 @@ export function FullscreenVisualizer(): JSX.Element {
     } catch {
       /* recorder already stopped */
     }
-  }, []);
+    if (evilandRecorderRef.current) {
+      try {
+        void evilandRecorderRef.current.stop();
+      } catch {
+        /* recorder already stopped */
+      }
+      evilandRecorderRef.current = null;
+    }
+    const audioDest = evilandRecorderAudioRef.current;
+    if (audioDest) {
+      try { engine.visualizerNode.disconnect(audioDest); } catch { /* ignore */ }
+      evilandRecorderAudioRef.current = null;
+    }
+  }, [engine]);
 
   const captureStem = (): string =>
     current ? `NewAmp - ${current.artist} - ${current.title}` : 'NewAmp Visualizer';
@@ -587,26 +630,167 @@ export function FullscreenVisualizer(): JSX.Element {
     if (dataUrl) await api.copyPngToClipboard(dataUrl);
   };
 
+  // Eviland-only handlers ───────────────────────────────────────────────────
+  // The seed display gets a transient "Copied!" hint via setTimeout; the paste
+  // input flashes an inline error when decode() returns null so the user knows
+  // the code wasn't recognised. Both are cheap UI niceties, not durable state.
+  const copyEvilandSeed = async (): Promise<void> => {
+    if (!evilandSeed) return;
+    try {
+      await navigator.clipboard.writeText(evilandSeed);
+      setEvilandSeedCopied(true);
+      window.setTimeout(() => setEvilandSeedCopied(false), 1500);
+    } catch {
+      /* clipboard refused — surfacing a toast here would be more noise than
+         signal; the seed text is selectable in the input so the user can grab
+         it manually. */
+    }
+  };
+  const submitEvilandPaste = (): void => {
+    const value = evilandPasteValue.trim();
+    if (!value) return;
+    const ok = applyEvilandCode(value);
+    if (ok) {
+      setEvilandPasteValue('');
+      setEvilandPasteError(null);
+    } else {
+      setEvilandPasteError('Unrecognised seed code');
+      window.setTimeout(() => setEvilandPasteError(null), 2200);
+    }
+  };
+
+  // Show a recorder failure for a few seconds, mapping the typed error codes to
+  // something actionable. Auto-clears so it stays a transient hint.
+  const flashRecordError = (err: unknown, fallback: string): void => {
+    let message = fallback;
+    if (err instanceof CanvasRecorderError) {
+      message =
+        err.code === 'no-mime' || err.code === 'unsupported'
+          ? 'Recording is not supported in this build (no WebM/VP9 encoder).'
+          : err.code === 'capture-failed'
+            ? 'Could not capture the visualizer canvas — try again once it is painting.'
+            : err.code === 'no-audio-track'
+              ? 'No audio could be captured; the clip would be silent.'
+              : `Recorder failed (${err.code}).`;
+    }
+    setRecordError(message);
+    window.setTimeout(() => setRecordError(null), 4000);
+  };
+
   // Clip recording streams the live visualizer canvas (the rendering surface —
-  // for Butterchurn that's the canvas inside its iframe) to a WebM via
-  // MediaRecorder. Toggle to start/stop; on stop we offer a save dialog.
+  // for Butterchurn that's the canvas inside its iframe) to a WebM. For the
+  // Eviland preset we use createCanvasRecorder (vp9/opus, 60fps, ~12 Mbps,
+  // engine audio muxed via a parallel MediaStreamAudioDestinationNode on the
+  // already-parallel visualizerNode tap). For every other preset we keep the
+  // legacy 30fps WebM MediaRecorder path so the rest of the visualizers
+  // continue to record exactly as before.
   const toggleRecord = (): void => {
     if (recording) {
-      recorderRef.current?.stop();
+      if (evilandRecorderRef.current) {
+        const rec = evilandRecorderRef.current;
+        const audioDest = evilandRecorderAudioRef.current;
+        // Stop is async — clear the refs after the blob resolves so a quick
+        // toggle-back doesn't try to reuse a torn-down recorder.
+        void rec.stop()
+          .then(async (blob) => {
+            evilandRecorderRef.current = null;
+            // Disconnect the parallel audio tap. We never touched the master
+            // graph, so this only frees the destination node we created.
+            if (audioDest) {
+              try { engine.visualizerNode.disconnect(audioDest); } catch { /* ignore */ }
+            }
+            evilandRecorderAudioRef.current = null;
+            if (!blob || blob.size === 0) return;
+            const dataUrl = await blobToDataUrl(blob);
+            const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+            await api.saveCaptureBytes({
+              base64,
+              defaultName: captureStem(),
+              filterName: 'WebM video',
+              ext: 'webm',
+            });
+          })
+          .catch((err) => {
+            console.error('[newamp] eviland recorder stop failed:', err);
+            evilandRecorderRef.current = null;
+            if (audioDest) {
+              try { engine.visualizerNode.disconnect(audioDest); } catch { /* ignore */ }
+              evilandRecorderAudioRef.current = null;
+            }
+            flashRecordError(err, 'Saving the recording failed — see the console for details.');
+          })
+          .finally(() => setRecording(false));
+      } else {
+        recorderRef.current?.stop();
+      }
       return;
     }
+
+    if (activePreset === 'eviland') {
+      const canvas = rootRef.current?.querySelector(
+        'canvas[data-newamp-visualizer-canvas]',
+      ) as HTMLCanvasElement | null;
+      if (!canvas) {
+        flashRecordError(null, 'Visualizer canvas is not ready yet — try again in a moment.');
+        return;
+      }
+      let rec: CanvasRecorder;
+      try {
+        rec = createCanvasRecorder(canvas, { fps: 60, videoBitsPerSecond: 12_000_000 });
+      } catch (err) {
+        console.error('[newamp] eviland recorder construction failed:', err);
+        flashRecordError(err, 'Could not start recording.');
+        return;
+      }
+      // Build a PARALLEL audio capture: connect the engine's visualizer
+      // analyser (which is itself a parallel tap → silentSink) to a fresh
+      // MediaStreamAudioDestinationNode. The master chain is never touched,
+      // so capture is fail-safe — toggling record while music plays cannot
+      // alter what the user hears.
+      let audioStream: MediaStream | undefined;
+      try {
+        const dest = engine.ctx.createMediaStreamDestination();
+        engine.visualizerNode.connect(dest);
+        evilandRecorderAudioRef.current = dest;
+        audioStream = dest.stream;
+      } catch (err) {
+        // Audio tap is best-effort; the video take still goes ahead silent.
+        console.warn('[newamp] eviland recorder audio tap failed (recording video-only):', err);
+        evilandRecorderAudioRef.current = null;
+      }
+      try {
+        rec.start(audioStream);
+      } catch (err) {
+        console.error('[newamp] eviland recorder start failed:', err);
+        const dest = evilandRecorderAudioRef.current;
+        if (dest) {
+          try { engine.visualizerNode.disconnect(dest); } catch { /* ignore */ }
+          evilandRecorderAudioRef.current = null;
+        }
+        flashRecordError(err, 'Could not start recording.');
+        return;
+      }
+      evilandRecorderRef.current = rec;
+      setRecording(true);
+      return;
+    }
+
     let canvas = rootRef.current?.querySelector(
       'canvas[data-newamp-visualizer-canvas]',
     ) as HTMLCanvasElement | null;
     const iframe = rootRef.current?.querySelector('iframe') as HTMLIFrameElement | null;
     const frameCanvas = iframe?.contentDocument?.getElementById('bc') as HTMLCanvasElement | null;
     if (frameCanvas) canvas = frameCanvas;
-    if (!canvas || typeof canvas.captureStream !== 'function' || typeof MediaRecorder === 'undefined') return;
+    if (!canvas || typeof canvas.captureStream !== 'function' || typeof MediaRecorder === 'undefined') {
+      flashRecordError(null, 'This visualizer cannot be recorded in this build.');
+      return;
+    }
 
     let recorder: MediaRecorder;
     try {
       recorder = new MediaRecorder(canvas.captureStream(30), { mimeType: 'video/webm' });
-    } catch {
+    } catch (err) {
+      flashRecordError(err, 'Could not start recording (no WebM encoder).');
       return;
     }
     const chunks: BlobPart[] = [];
@@ -899,6 +1083,203 @@ export function FullscreenVisualizer(): JSX.Element {
             </button>
           </div>
 
+          {activePreset === 'eviland' && (
+            <>
+              <div className="viz-setting-row" data-newamp-viz-eviland-randomize-row>
+                <div className="viz-setting-label">
+                  Eviland look
+                  <div className="viz-setting-hint">Mint a fresh randomized visual</div>
+                </div>
+                <button
+                  type="button"
+                  className="pxbtn"
+                  onClick={() => randomizeEviland()}
+                  title="Randomize Eviland (new seed)"
+                  aria-label="Randomize Eviland look"
+                  data-newamp-viz-eviland-randomize
+                >
+                  🎲 Randomize
+                </button>
+              </div>
+
+              <div className="viz-setting-row" data-newamp-viz-eviland-director-row>
+                <div className="viz-setting-label">
+                  Director
+                  <div className="viz-setting-hint">
+                    Auto-VJ for Eviland — conducts visuals to the song
+                    {evilandDirector ? ' (on)' : ''}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className={`pxbtn ${evilandDirector ? 'is-active' : ''}`}
+                  onClick={toggleEvilandDirector}
+                  aria-pressed={evilandDirector}
+                  data-newamp-viz-eviland-director
+                >
+                  {evilandDirector ? 'On' : 'Off'}
+                </button>
+              </div>
+
+              <div className="viz-setting-row" data-newamp-viz-eviland-seed-row>
+                <div className="viz-setting-label">
+                  Seed
+                  <div className="viz-setting-hint">
+                    {evilandSeedCopied
+                      ? 'Copied!'
+                      : evilandSeed
+                        ? 'Share this code to recall the look'
+                        : 'Randomize or paste a code to set a seed'}
+                  </div>
+                </div>
+                <div className="viz-setting-capture-buttons">
+                  <input
+                    type="text"
+                    className="pxbtn"
+                    readOnly
+                    value={evilandSeed ?? ''}
+                    placeholder="(default)"
+                    onFocus={(e) => e.currentTarget.select()}
+                    style={{ minWidth: 140, fontFamily: 'monospace' }}
+                    data-newamp-viz-eviland-seed-display
+                    aria-label="Current Eviland seed code"
+                  />
+                  <button
+                    type="button"
+                    className="pxbtn"
+                    onClick={() => void copyEvilandSeed()}
+                    disabled={!evilandSeed}
+                    title="Copy seed code to clipboard"
+                    data-newamp-viz-eviland-seed-copy
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+
+              <div className="viz-setting-row" data-newamp-viz-eviland-paste-row>
+                <div className="viz-setting-label">
+                  Apply seed
+                  <div className="viz-setting-hint">
+                    {evilandPasteError ?? 'Paste a shared code, then Apply'}
+                  </div>
+                </div>
+                <div className="viz-setting-capture-buttons">
+                  <input
+                    type="text"
+                    className="pxbtn"
+                    value={evilandPasteValue}
+                    onChange={(e) => {
+                      setEvilandPasteValue(e.target.value);
+                      if (evilandPasteError) setEvilandPasteError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        submitEvilandPaste();
+                      }
+                    }}
+                    placeholder="K7Q2-9XMF"
+                    style={{ minWidth: 140, fontFamily: 'monospace' }}
+                    data-newamp-viz-eviland-paste
+                    aria-label="Paste Eviland seed code"
+                    aria-invalid={evilandPasteError ? 'true' : 'false'}
+                  />
+                  <button
+                    type="button"
+                    className="pxbtn"
+                    onClick={submitEvilandPaste}
+                    disabled={!evilandPasteValue.trim()}
+                    title="Apply pasted seed code"
+                    data-newamp-viz-eviland-paste-apply
+                  >
+                    Apply
+                  </button>
+                </div>
+              </div>
+
+              <div className="viz-setting-row" data-newamp-viz-eviland-wave-row>
+                <div className="viz-setting-label">
+                  Waveform layer
+                  <div className="viz-setting-hint">
+                    Override the look&apos;s built-in waveform mode
+                  </div>
+                </div>
+                <div className="viz-segmented" role="group" aria-label="Eviland waveform mode">
+                  {(['off', 'line', 'radial', 'bars'] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={`pxbtn ${evilandWaveMode === mode ? 'is-active' : ''}`}
+                      onClick={() => setEvilandWaveMode(mode)}
+                      aria-pressed={evilandWaveMode === mode}
+                      data-newamp-viz-eviland-wave={mode}
+                    >
+                      {mode === 'off' ? 'Off' : mode === 'line' ? 'Line' : mode === 'radial' ? 'Radial' : 'Bars'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {detached.available && (
+                <div className="viz-setting-row" data-newamp-viz-eviland-detach-row>
+                  <div className="viz-setting-label">
+                    Detached window
+                    <div className="viz-setting-hint">
+                      {detached.error
+                        ? detached.error
+                        : detached.isOpen
+                          ? 'Eviland is playing in its own window — drag it to a 2nd monitor or projector'
+                          : 'Pop Eviland out into its own window for a second monitor'}
+                    </div>
+                  </div>
+                  <div className="viz-setting-capture-buttons">
+                    {detached.displays.length > 1 && (
+                      <select
+                        className="pxbtn"
+                        value={detachedDisplayId ?? ''}
+                        onChange={(e) => {
+                          const id = e.target.value ? Number(e.target.value) : null;
+                          setDetachedDisplayId(id);
+                          if (detached.isOpen && id !== null) detached.moveToDisplay(id);
+                        }}
+                        aria-label="Detached visualizer display"
+                        data-newamp-viz-eviland-detach-display
+                      >
+                        <option value="">Auto (2nd display)</option>
+                        {detached.displays.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.label}
+                            {d.primary ? ' (primary)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <button
+                      type="button"
+                      className={`pxbtn ${detached.isOpen ? 'is-active' : ''}`}
+                      onClick={() =>
+                        detached.isOpen
+                          ? detached.close()
+                          : detached.open(detachedDisplayId ?? undefined)
+                      }
+                      disabled={detached.busy}
+                      title={
+                        detached.isOpen
+                          ? 'Close the detached visualizer window'
+                          : 'Open Eviland in its own window'
+                      }
+                      aria-pressed={detached.isOpen}
+                      data-newamp-viz-eviland-detach
+                    >
+                      {detached.busy ? '…' : detached.isOpen ? 'Close' : '⧉ Detach'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
           <div className="viz-setting-row">
             <div className="viz-setting-label">
               Auto-VJ
@@ -971,6 +1352,16 @@ export function FullscreenVisualizer(): JSX.Element {
                 {recording ? '■ Stop recording' : '● Record clip'}
               </button>
             </div>
+            {recordError && (
+              <div
+                className="viz-setting-hint"
+                role="alert"
+                style={{ color: 'var(--danger, #ff6b6b)' }}
+                data-newamp-viz-record-error
+              >
+                {recordError}
+              </div>
+            )}
           </div>
         </div>
       )}

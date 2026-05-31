@@ -56,11 +56,20 @@ export function LovedView(): JSX.Element {
     try {
       const rows = await api.getTracks({ sort: 'loved', limit: LOVED_PAGE_SIZE, offset });
       const lovedRows = rows.filter((track) => track.loved);
+      const seen = new Set(tracks.map((track) => track.id));
+      const freshRows = lovedRows.filter((track) => !seen.has(track.id));
+      // Append race-safe: re-dedupe against the LATEST committed list inside the
+      // updater. An unlove (which shifts server-side offsets) or a StrictMode
+      // double-fire can otherwise re-append rows this stale snapshot didn't see.
       setTracks((currentTracks) => {
-        const seen = new Set(currentTracks.map((track) => track.id));
-        return [...currentTracks, ...lovedRows.filter((track) => !seen.has(track.id))];
+        if (!freshRows.length) return currentTracks;
+        const have = new Set(currentTracks.map((track) => track.id));
+        const add = freshRows.filter((track) => !have.has(track.id));
+        return add.length ? [...currentTracks, ...add] : currentTracks;
       });
-      setHasMoreLoved(offset + lovedRows.length < totalLoved);
+      // Advance "has more" by the unique rows in this page, not the raw page
+      // size: deduped pages would otherwise keep this true and loop on no-op loads.
+      setHasMoreLoved(freshRows.length > 0 && tracks.length + freshRows.length < totalLoved);
     } finally {
       setLoadingMore(false);
     }

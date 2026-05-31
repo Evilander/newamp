@@ -33,6 +33,7 @@
 // or EXT_color_buffer_float — fall back to butterchurn / canvas downstream.
 
 import type { EvilandFrame } from './eviland-audio';
+import { evalConfig, createDynamics, defaultConfig, type OperatorConfig } from './eviland-operators';
 
 export interface EvilandPalette {
   accent: [number, number, number]; // each channel 0..1
@@ -44,6 +45,12 @@ export interface EvilandPalette {
 export interface EvilandRenderer {
   resize(cssWidth: number, cssHeight: number, dpr: number): void;
   render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number): void;
+  /** Swap the active operator config (the "look"). Default reproduces classic Eviland. */
+  setConfig(config: OperatorConfig): void;
+  /** Read the active operator config. */
+  getConfig(): OperatorConfig;
+  /** Upload time-domain samples (Uint8, 128 = silence) for the waveform layer. */
+  setWaveform(samples: Uint8Array): void;
   dispose(): void;
 }
 
@@ -265,8 +272,10 @@ void main(){
     float cross = pow(abs(cos(ang * 2.0)), 32.0) * exp(-r * 22.0);
     alpha = (pin + cross * 0.5) * life * v_intensity * 0.75;
   } else if (v_kind == 3) {
-    // Blob (vocal): soft gaussian, smaller than before so it doesn't dominate.
-    alpha = exp(-r*r * 9.0) * life * v_intensity * 0.55;
+    // Blob (vocal): tighter + dimmer so it stops piling up into a central
+    // white blob (it spawns mid-screen on every vocal onset and additively
+    // over-accumulates). A defined orb, not a soft puff.
+    alpha = exp(-r*r * 14.0) * life * v_intensity * 0.38;
   } else {
     // Core (kick punch): solid disc with a hard rim.
     float disc = smoothstep(0.78, 0.62, r);
@@ -340,16 +349,69 @@ void main(){
   // Ray reaches to ~0.08 + band*0.55 (inside the screen).
   float rayLen = 0.08 + band * 0.55;
   // Crisp ray edge along the radius — rises near the centre, falls past tip.
-  float radial = smoothstep(0.0, 0.04, r) * (1.0 - smoothstep(rayLen, rayLen + 0.025, r));
+  float radial = smoothstep(0.05, 0.10, r) * (1.0 - smoothstep(rayLen, rayLen + 0.025, r));
   // Sharp angular cut so rays read as distinct lines, not a soft sun.
   float seg = TAU2 / SEGMENTS;
   float folded = abs(mod(a + seg * 0.5, seg) - seg * 0.5);
   float angular = pow(1.0 - clamp(folded / (seg * 0.45), 0.0, 1.0), 6.0);
   float ray = radial * angular;
-  // A small bright centre always so the sun has a hot core.
-  float core = exp(-r * r * 60.0) * 0.6;
+  // A small bright centre so the sun has a hot core — kept modest so the middle
+  // is a clean "eye", not a permanent blown-out white blob.
+  float core = exp(-r * r * 60.0) * 0.22;
   float a_out = clamp((ray + core) * u_intensity, 0.0, 1.0);
   o = vec4(u_color * a_out, a_out);
+}`;
+
+// Pillar 1 (waveform): the signature MilkDrop oscilloscope. A bright continuous
+// line drawn from the live time-domain samples (256x1 R8 texture, 0.5=silence),
+// composited additively into the field BEFORE the ping-pong swap so the warp
+// advects it into trails. Modes: 1 line, 2 radial ring, 4 spectrum bars
+// (3 lissajous falls back to line). Anti-aliased via smoothstep on the signed
+// distance to the waveform curve.
+const WAVE_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o;
+uniform sampler2D u_wave;   // 256x1 R8, .r in 0..1, 0.5 = silence
+uniform float u_mode;       // 1 line, 2 radial, 3 lissajous, 4 bars
+uniform vec3  u_color;
+uniform float u_intensity;
+uniform float u_thickness;
+uniform float u_scale;
+uniform float u_aspect;     // viewH / viewW
+const float TAU = 6.28318530718;
+float samp(float t){ return texture(u_wave, vec2(clamp(t, 0.0, 1.0), 0.5)).r - 0.5; }
+void main(){
+  vec2 uv = v_uv;
+  float th = max(0.0025, u_thickness);
+  int mode = int(u_mode + 0.5);
+  float a = 0.0;
+  if (mode == 2) {
+    // Radial ring: angle → sample index, displaced radius.
+    vec2 p = uv - 0.5; p.x /= max(0.0001, u_aspect);
+    float r = length(p);
+    float ang = atan(p.y, p.x);
+    float t = (ang + 3.14159265) / TAU;
+    float w = samp(t) * u_scale;
+    float r0 = 0.28 + w;
+    a = smoothstep(th, 0.0, abs(r - r0));
+  } else if (mode == 4) {
+    // Spectrum bars: vertical bars whose height tracks |sample|.
+    float bars = 64.0;
+    float bx = (floor(uv.x * bars) + 0.5) / bars;
+    float w = abs(samp(bx)) * 2.0 * u_scale;
+    float inBar = step(0.5 - w, uv.y) * step(uv.y, 0.5 + w);
+    float gap = smoothstep(0.0, 0.07, abs(fract(uv.x * bars) - 0.5));
+    a = inBar * gap;
+  } else {
+    // Horizontal line (default + lissajous fallback): bright core + soft body.
+    float w = samp(uv.x) * u_scale;
+    float d = abs(uv.y - (0.5 + w));
+    a = smoothstep(th, 0.0, d) + 0.35 * smoothstep(th * 3.0, 0.0, d);
+  }
+  a *= u_intensity;
+  if (a <= 0.004) discard;
+  o = vec4(u_color * a, a);
 }`;
 
 // Bloom — threshold pass extracts bright pixels.
@@ -432,11 +494,14 @@ vec3 aces(vec3 x){
 // feedback) tints the ramp so each instrument's colour still reads through.
 vec3 paletteRamp(float t, vec3 fieldTint){
   vec3 lo = mix(u_dark, u_accent, smoothstep(0.0, 0.55, t));
-  vec3 hi = mix(u_accent, u_light, smoothstep(0.45, 1.0, t));
+  // Highlights only lean PART-WAY to the warm "light" stop (full reach was the
+  // root of the cream blow-out — every bright region became cream). Mostly they
+  // brighten along the accent, so loud events read as the instrument colour.
+  vec3 hi = mix(u_accent, u_light, smoothstep(0.45, 1.0, t) * 0.5);
   vec3 ramp = mix(lo, hi, smoothstep(0.40, 0.65, t));
-  // Tint the ramp by the field's actual colour so hue-cycled trails are
-  // visible (otherwise the palette would dominate completely).
-  return mix(ramp, ramp * (0.6 + fieldTint * 1.4), 0.55);
+  // Tint HARD by the field's own hue so per-instrument colour dominates the
+  // palette, not the other way round (was 0.55 → palette won → monochrome).
+  return mix(ramp, ramp * (0.45 + fieldTint * 1.7), 0.7);
 }
 
 void main(){
@@ -460,6 +525,18 @@ void main(){
   // glow rather than clip the whole frame white.
   vec3 bloomC = texture(u_bloom, uv).rgb * u_bloomIntensity * 0.5;
   colour += bloomC;
+
+  // KILL the cream/white blow-out. Where the feedback over-accumulates, every
+  // channel clips high → a desaturated cream/white blob (the whole "gold/cream
+  // smoke" complaint). A white pixel has no hue left to preserve, so we detect
+  // bright-AND-desaturated regions and pull them back toward the accent hue at
+  // the same brightness. Already-coloured areas (pink rings, cyan bursts) have
+  // high saturation → untouched.
+  float cmax = max(max(colour.r, colour.g), colour.b);
+  float cmin = min(min(colour.r, colour.g), colour.b);
+  float csat = (cmax - cmin) / max(cmax, 1e-3);
+  float washed = smoothstep(0.55, 1.05, cmax) * (1.0 - smoothstep(0.12, 0.42, csat));
+  colour = mix(colour, u_accent * (cmax * 0.92 + 0.08), washed * 0.75);
 
   // Centroid hue tilt — gentle (the field already drifts; this is a static bias).
   colour *= u_hueShift;
@@ -598,12 +675,13 @@ export function createEvilandRenderer(
   const emitterProg = link(gl, EMITTER_VERT, EMITTER_FRAG);
   const terrainProg = link(gl, QUAD_VERT, TERRAIN_FRAG);
   const spectrumProg = link(gl, QUAD_VERT, SPECTRUM_FRAG);
+  const waveProg = link(gl, QUAD_VERT, WAVE_FRAG);
   const thresholdProg = link(gl, QUAD_VERT, THRESHOLD_FRAG);
   const downProg = link(gl, QUAD_VERT, KAWASE_DOWN_FRAG);
   const upProg = link(gl, QUAD_VERT, KAWASE_UP_FRAG);
   const postProg = link(gl, QUAD_VERT, POST_FRAG);
 
-  if (!fieldProg || !emitterProg || !terrainProg || !spectrumProg || !thresholdProg || !downProg || !upProg || !postProg) {
+  if (!fieldProg || !emitterProg || !terrainProg || !spectrumProg || !waveProg || !thresholdProg || !downProg || !upProg || !postProg) {
     return null;
   }
   // Narrow once so the inner closures don't need null guards on every use.
@@ -611,6 +689,7 @@ export function createEvilandRenderer(
   const EMITTER: WebGLProgram = emitterProg;
   const TERRAIN: WebGLProgram = terrainProg;
   const SPECTRUM: WebGLProgram = spectrumProg;
+  const WAVE: WebGLProgram = waveProg;
   const THRESHOLD: WebGLProgram = thresholdProg;
   const DOWN: WebGLProgram = downProg;
   const UP: WebGLProgram = upProg;
@@ -644,6 +723,19 @@ export function createEvilandRenderer(
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   // Scratch buffer for per-frame band uploads (avoid per-frame allocations).
   const bandsScratch = new Float32Array(24);
+
+  // Waveform sample texture (256x1 R8) for the reactive oscilloscope layer.
+  const WAVE_SAMPLES = 256;
+  const waveScratch = new Uint8Array(WAVE_SAMPLES).fill(128);
+  const waveTex = gl.createTexture();
+  if (!waveTex) return null;
+  gl.bindTexture(gl.TEXTURE_2D, waveTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, WAVE_SAMPLES, 1, 0, gl.RED, gl.UNSIGNED_BYTE, waveScratch);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  let haveWave = false;
 
   // Field FBOs (ping-pong) sized at render-time.
   let fieldA: Fbo | null = null;
@@ -752,6 +844,15 @@ export function createEvilandRenderer(
     time: gl.getUniformLocation(spectrumProg, 'u_time'),
     aspect: gl.getUniformLocation(spectrumProg, 'u_aspect'),
   };
+  const waveUni = {
+    wave: gl.getUniformLocation(waveProg, 'u_wave'),
+    mode: gl.getUniformLocation(waveProg, 'u_mode'),
+    color: gl.getUniformLocation(waveProg, 'u_color'),
+    intensity: gl.getUniformLocation(waveProg, 'u_intensity'),
+    thickness: gl.getUniformLocation(waveProg, 'u_thickness'),
+    scale: gl.getUniformLocation(waveProg, 'u_scale'),
+    aspect: gl.getUniformLocation(waveProg, 'u_aspect'),
+  };
   const terrainUni = {
     bass: gl.getUniformLocation(terrainProg, 'u_bass'),
     time: gl.getUniformLocation(terrainProg, 'u_time'),
@@ -827,6 +928,12 @@ export function createEvilandRenderer(
   let lastSectionId = -1;
   let sectionSeed = 0; // re-derived per section for the field warp
   const sectionSeeds: number[] = []; // store per sectionId so returns rhyme
+
+  // Active operator config (the "look") + a reusable dynamics scratch object.
+  // The default config re-expresses the original hardcoded warp formulas, so
+  // until setConfig() swaps it the visualizer is byte-identical to before.
+  let currentConfig: OperatorConfig = defaultConfig();
+  const dyn = createDynamics();
 
   // ---------------------------------------------------------------------------
   // Public API.
@@ -1013,7 +1120,10 @@ export function createEvilandRenderer(
       }
       sectionSeeds[frame.sectionId] = sectionSeed;
       // Spawn a full-field flash by injecting a bright burst at centre.
-      spawn(3, 0, 0, 1.4, palette.light[0], palette.light[1], palette.light[2], 0.45, 0, 0.9);
+      // Central core: a SMALL accent-coloured orb that pulses with bass/energy,
+      // not a screen-filling cream cloud (radius 1.4 + light colour was THE
+      // persistent "cream blob" — it dominated every frame regardless of audio).
+      spawn(3, 0, 0, 0.30 + frame.bass * 0.30, palette.accent[0], palette.accent[1], palette.accent[2], 0.45, 0, 0.20 + frame.energy * 0.38);
       lastSectionId = frame.sectionId;
     } else if (lastSectionId !== frame.sectionId && frame.sectionId < sectionSeeds.length) {
       sectionSeed = sectionSeeds[frame.sectionId]!;
@@ -1043,44 +1153,25 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, fieldA.tex);
     gl.uniform1i(fieldUni.prev, 0);
-    // Decay: a bit faster than before (the new zoom/rotate motion keeps trails
-    // alive on its own; old high decay was a major reason everything stacked
-    // to white). Slower during sustains, faster after onsets.
-    const decay = 0.935 + 0.030 * (1 - frame.flatness) - 0.014 * frame.crest;
-    gl.uniform1f(fieldUni.decay, Math.max(0.92, Math.min(0.985, decay)));
-    gl.uniform1f(fieldUni.warpAmp, 0.0010 + frame.bass * 0.0050);
-    gl.uniform1f(fieldUni.warpScale, 2.5 + frame.width * 1.8);
-    gl.uniform2f(fieldUni.flow, frame.pan * 0.0008 + 0.00012, -0.00018);
+    // Data-driven warp params: evaluate the active OperatorConfig against this
+    // audio frame. The default config reproduces the original hardcoded formulas
+    // (zoom/rotate/swirl/hue/decay/warp/kaleidoscope); the randomizer + Director
+    // mint and morph configs to change the look. evalConfig clamps every output
+    // to a GPU-safe range so no config can crash or white-out the field.
+    evalConfig(currentConfig, frame, sectionSeed, dyn);
+    gl.uniform1f(fieldUni.decay, dyn.decay);
+    gl.uniform1f(fieldUni.warpAmp, dyn.warpAmp);
+    gl.uniform1f(fieldUni.warpScale, dyn.warpScale);
+    gl.uniform2f(fieldUni.flow, dyn.flowX, dyn.flowY);
     gl.uniform1f(fieldUni.time, time);
     gl.uniform1f(fieldUni.novelty, frame.novelty);
     gl.uniform1f(fieldUni.sectionSeed, sectionSeed);
-    // MilkDrop-style motion — bolder than the previous tuning:
-    //  • zoom: stronger base tunnel + kick punches in deeper.
-    //  • rotate: always drifting; energy + beatPhase accelerate it.
-    //  • hue cycle: visibly sweeps the palette (~2x previous range).
-    //  • swirl: pronounced edge spin.
-    const zoom = 0.0055 + frame.kick * 0.040 + frame.bass * 0.015;
-    const rotateBase = 0.0028 * (sectionSeed * 0.5 + 0.5); // section-stable drift
-    const rotateSign = ((Math.floor(sectionSeed * 7) % 2) === 0) ? 1 : -1;
-    const rotate = rotateSign * (rotateBase + frame.energy * 0.0090 + frame.beatPhase * 0.0014);
-    const hueCycle = (0.0028 + frame.centroid * 0.0090 + frame.energy * 0.0055) * (sectionSeed < 0.5 ? -1 : 1);
-    const swirl = 0.028 + frame.width * 0.070 + frame.novelty * 0.045;
-    gl.uniform1f(fieldUni.zoom, zoom);
-    gl.uniform1f(fieldUni.rotate, rotate);
-    gl.uniform1f(fieldUni.hueCycle, hueCycle);
-    gl.uniform1f(fieldUni.swirl, swirl);
-    // Kaleidoscope: pick a segment count from the section seed so the song's
-    // structure changes the symmetry, and let high energy crossfade it in.
-    // Available sets: 0 (off), 3, 4, 6, 8. Choose deterministically per section.
-    const mirrorCounts = [0, 0, 3, 4, 6, 8];
-    const mirrorIdx = Math.floor(sectionSeed * 13) % mirrorCounts.length;
-    const mirrorN = mirrorCounts[mirrorIdx]!;
-    // Crossfade up with energy; a low constant blend keeps it subtle when quiet.
-    const mirrorMix = mirrorN === 0
-      ? 0
-      : Math.min(1, 0.30 + frame.energy * 0.55 + frame.bass * 0.20);
-    gl.uniform1f(fieldUni.mirror, mirrorN);
-    gl.uniform1f(fieldUni.mirrorMix, mirrorMix);
+    gl.uniform1f(fieldUni.zoom, dyn.zoom);
+    gl.uniform1f(fieldUni.rotate, dyn.rotate);
+    gl.uniform1f(fieldUni.hueCycle, dyn.hueCycle);
+    gl.uniform1f(fieldUni.swirl, dyn.swirl);
+    gl.uniform1f(fieldUni.mirror, dyn.mirror);
+    gl.uniform1f(fieldUni.mirrorMix, dyn.mirrorMix);
     drawFullscreen();
 
     // ---- PASS 2: terrain (bass horizon) drawn into the field ----
@@ -1132,11 +1223,31 @@ export function createEvilandRenderer(
         Math.max(0.2, g),
         Math.max(0.2, b),
       );
-      // Intensity rises with energy + beat, but stays bounded so it never floods.
-      const intensity = 0.45 + frame.energy * 0.65 + frame.beatPhase * 0.05;
-      gl.uniform1f(spectrumUni.intensity, Math.min(1.4, intensity));
+      // Bright crisp rays = the structural overlay. Push them well above the
+      // field so the spectrum "sun" reads as drawn geometry, not haze.
+      const intensity = 1.1 + frame.energy * 1.3 + frame.beatPhase * 0.1;
+      gl.uniform1f(spectrumUni.intensity, Math.min(2.8, intensity));
       gl.uniform1f(spectrumUni.time, time);
       gl.uniform1f(spectrumUni.aspect, fieldH / Math.max(1, fieldW));
+      drawFullscreen();
+    }
+
+    // ---- PASS 3c: reactive waveform (the signature MilkDrop oscilloscope) ----
+    // Additive, into fieldB BEFORE the swap, so the line is advected by next
+    // frame's warp and leaves trails. Off unless the active config enables it.
+    if (haveWave && dyn.waveMode > 0 && dyn.waveIntensity > 0.001) {
+      gl.blendFunc(gl.ONE, gl.ONE);
+      gl.useProgram(WAVE);
+      bindFullscreenQuad(WAVE);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, waveTex);
+      gl.uniform1i(waveUni.wave, 0);
+      gl.uniform1f(waveUni.mode, dyn.waveMode);
+      gl.uniform3f(waveUni.color, palette.accent[0], palette.accent[1], palette.accent[2]);
+      gl.uniform1f(waveUni.intensity, dyn.waveIntensity);
+      gl.uniform1f(waveUni.thickness, dyn.waveThickness);
+      gl.uniform1f(waveUni.scale, dyn.waveScale);
+      gl.uniform1f(waveUni.aspect, fieldH / Math.max(1, fieldW));
       drawFullscreen();
     }
     gl.disable(gl.BLEND);
@@ -1227,9 +1338,11 @@ export function createEvilandRenderer(
     if (downProg) gl.deleteProgram(downProg);
     if (upProg) gl.deleteProgram(upProg);
     if (postProg) gl.deleteProgram(postProg);
+    if (waveProg) gl.deleteProgram(waveProg);
     if (quadBuf) gl.deleteBuffer(quadBuf);
     if (instanceBuf) gl.deleteBuffer(instanceBuf);
     if (bandsTex) gl.deleteTexture(bandsTex);
+    if (waveTex) gl.deleteTexture(waveTex);
     disposeFbo(fieldA);
     disposeFbo(fieldB);
     for (const f of bloomDown) disposeFbo(f);
@@ -1242,5 +1355,21 @@ export function createEvilandRenderer(
     if (lose) lose.loseContext();
   }
 
-  return { resize, render, dispose };
+  function setConfig(config: OperatorConfig): void {
+    currentConfig = config;
+  }
+  function getConfig(): OperatorConfig {
+    return currentConfig;
+  }
+  function setWaveform(samples: Uint8Array): void {
+    const n = Math.min(WAVE_SAMPLES, samples.length);
+    for (let i = 0; i < n; i++) waveScratch[i] = samples[i]!;
+    for (let i = n; i < WAVE_SAMPLES; i++) waveScratch[i] = 128;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, waveTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, WAVE_SAMPLES, 1, gl.RED, gl.UNSIGNED_BYTE, waveScratch);
+    haveWave = true;
+  }
+
+  return { resize, render, dispose, setConfig, getConfig, setWaveform };
 }

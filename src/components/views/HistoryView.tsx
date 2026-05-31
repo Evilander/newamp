@@ -62,11 +62,20 @@ export function HistoryView(): JSX.Element {
         offset: items.length,
       });
       const nextRows = rows.slice(0, HISTORY_PAGE_SIZE);
+      const seen = new Set(items.map((item) => item.id));
+      const freshRows = nextRows.filter((item) => !seen.has(item.id));
+      // Append race-safe: re-dedupe against the LATEST committed list inside the
+      // functional updater so a StrictMode double-fire or two in-flight pages
+      // can't both append the same rows from this stale `items` snapshot.
       setItems((currentItems) => {
-        const seen = new Set(currentItems.map((item) => item.id));
-        return [...currentItems, ...nextRows.filter((item) => !seen.has(item.id))];
+        if (!freshRows.length) return currentItems;
+        const have = new Set(currentItems.map((item) => item.id));
+        const add = freshRows.filter((item) => !have.has(item.id));
+        return add.length ? [...currentItems, ...add] : currentItems;
       });
-      setHasMoreHistory(rows.length > HISTORY_PAGE_SIZE);
+      // Stop paging once the server returns a full page that dedupes to nothing
+      // new — otherwise overlap-heavy pages trigger endless no-op loads.
+      setHasMoreHistory(rows.length > HISTORY_PAGE_SIZE && freshRows.length > 0);
     } finally {
       setLoadingMore(false);
     }

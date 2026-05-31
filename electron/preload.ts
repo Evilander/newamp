@@ -369,6 +369,79 @@ contextBridge.exposeInMainWorld('winctl', {
   },
 });
 
+// Detached Eviland visualizer window bridge.
+//
+// This preload runs in BOTH the main renderer and the detached window. The
+// IPC verbs are no-ops in the detached window (they invoke main, which only
+// honors them when the main window is alive — which it always is, because
+// the detached window is a child of the main session).
+//
+// The 'eviland:frame-port' bridge is the load-bearing piece for the detached
+// window: Electron's webContents.postMessage(channel, message, transferables)
+// delivers the MessagePort on event.ports[]. We MUST re-dispatch it as a
+// window MessageEvent so renderer code (frame-bus.ts, src/detached/main.tsx)
+// can pick it up — preload listeners are the only place those ports survive
+// the contextIsolation boundary.
+interface DetachedDisplayBridge {
+  id: number;
+  label: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  workArea: { x: number; y: number; width: number; height: number };
+  scaleFactor: number;
+  internal: boolean;
+  primary: boolean;
+}
+
+contextBridge.exposeInMainWorld('detachedViz', {
+  listDisplays: (): Promise<DetachedDisplayBridge[]> =>
+    ipcRenderer.invoke('detached-viz:list-displays') as Promise<DetachedDisplayBridge[]>,
+  open: (opts: { displayId?: number; fullscreen?: boolean } = {}): Promise<void> =>
+    ipcRenderer.invoke('detached-viz:open', opts) as Promise<void>,
+  close: (): Promise<void> => ipcRenderer.invoke('detached-viz:close') as Promise<void>,
+  moveToDisplay: (displayId: number): Promise<void> =>
+    ipcRenderer.invoke('detached-viz:move-to-display', displayId) as Promise<void>,
+  setFullscreen: (on: boolean): Promise<void> =>
+    ipcRenderer.invoke('detached-viz:set-fullscreen', on) as Promise<void>,
+  isOpen: (): Promise<boolean> =>
+    ipcRenderer.invoke('detached-viz:is-open') as Promise<boolean>,
+  onOpened: (cb: () => void): (() => void) => {
+    const h = () => cb();
+    ipcRenderer.on('detached-viz:opened', h);
+    return () => ipcRenderer.off('detached-viz:opened', h);
+  },
+  onClosed: (cb: () => void): (() => void) => {
+    const h = () => cb();
+    ipcRenderer.on('detached-viz:closed', h);
+    return () => ipcRenderer.off('detached-viz:closed', h);
+  },
+  onCrashed: (cb: (reason: string) => void): (() => void) => {
+    const h = (_e: unknown, info: { reason?: string } | undefined) => cb(info?.reason ?? 'unknown');
+    ipcRenderer.on('detached-viz:crashed', h);
+    return () => ipcRenderer.off('detached-viz:crashed', h);
+  },
+  onOpenFailed: (cb: (reason: string) => void): (() => void) => {
+    const h = (_e: unknown, info: { reason?: string } | undefined) => cb(info?.reason ?? 'unknown');
+    ipcRenderer.on('detached-viz:open-failed', h);
+    return () => ipcRenderer.off('detached-viz:open-failed', h);
+  },
+  onDisplaysChanged: (cb: () => void): (() => void) => {
+    const h = () => cb();
+    ipcRenderer.on('displays:changed', h);
+    return () => ipcRenderer.off('displays:changed', h);
+  },
+});
+
+// Frame-port hand-off. event.ports is a MessagePortMain[] in main-side land,
+// but by the time it reaches the renderer-side ipcRenderer.on listener it is
+// a DOM MessagePort[]. Re-dispatch onto window so frame-bus.ts (and the
+// detached entry) can attach without crossing the context-isolation seam.
+ipcRenderer.on('eviland:frame-port', (event) => {
+  if (!event.ports || event.ports.length === 0) return;
+  window.dispatchEvent(
+    new MessageEvent('eviland:frame-port', { ports: event.ports as unknown as MessagePort[] }),
+  );
+});
+
 // Helper that turns a local file path into a newamp:// URL the renderer can play.
 contextBridge.exposeInMainWorld('toAudioUrl', (filePath: string) => {
   if (/^(https?:|blob:|newamp:)/i.test(filePath)) return filePath;

@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "1.7.3",
+  "version": "1.8.0",
   "description": "A Winamp-inspired modern desktop music player for macOS, Windows, and Linux. Your local library, your rules, no streaming required. Features Resonance — the whole UI reacts to your live audio — plus NewAmp Wrapped, a GPU particle visualizer + real MilkDrop, four UI shells, shape-changing deck skins, perceptual 0-200% volume, 0-100 decimal track scoring, and a magazine-style home. GPU-accelerated and tuned to stay light on weak hardware.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
@@ -20,7 +20,7 @@
     "predev:electron": "node scripts/sync-app-version.mjs",
     "dev:electron": "wait-on tcp:5173 && tsc -p electron/tsconfig.json && cross-env NODE_ENV=development electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit",
-    "prebuild": "node scripts/sync-app-version.mjs && npm run typecheck",
+    "prebuild": "node scripts/sync-app-version.mjs && node packages/eviland-core/sync.mjs --check && npm run typecheck",
     "build": "tsc -p electron/tsconfig.json && node scripts/vite-build.mjs",
     "prebuild:electron": "node scripts/sync-app-version.mjs",
     "build:electron": "tsc -p electron/tsconfig.json",
@@ -163,7 +163,8 @@
     "release:check-lastfm-proof": "node scripts/lastfm-live-proof.mjs --check",
     "release:gate": "node scripts/release-gate.mjs",
     "release:gate:local": "node scripts/release-gate.mjs --allow-unsigned --ack-manual --real-library",
-    "smoke:eviland": "electron scripts/eviland-smoke.mjs"
+    "smoke:eviland": "electron scripts/eviland-smoke.mjs",
+    "smoke:detached": "node scripts/detached-viz-smoke.mjs"
   },
   "dependencies": {
     "butterchurn": "^2.6.7",
@@ -184,6 +185,7 @@
     "cross-env": "^7.0.3",
     "electron": "^42.0.1",
     "electron-builder": "^26.8.1",
+    "esbuild": "^0.25.0",
     "postcss": "^8.4.49",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

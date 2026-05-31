@@ -25,6 +25,8 @@ export default defineConfig({
         main: resolve(__dirname, 'index.html'),
         // Sandboxed Butterchurn/Milkdrop frame — the only eval surface.
         butterchurn: resolve(__dirname, 'butterchurn-iframe.html'),
+        // Detached Eviland visualizer window (pop-out to projector / 2nd monitor).
+        detached: resolve(__dirname, 'detached.html'),
       },
     },
   },

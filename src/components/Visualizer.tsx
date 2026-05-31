@@ -12,6 +12,13 @@ import {
 import { createParticleFlowRenderer } from '../visualizer/particle-flow';
 import { createEvilandRenderer } from '../visualizer/eviland';
 import { createEvilandReactor } from '../visualizer/eviland-audio';
+import { createDirector } from '../visualizer/eviland-director';
+import {
+  generate as generateEvilandConfig,
+  decode as decodeEvilandConfig,
+} from '../visualizer/eviland-randomizer';
+import { frameBus } from '../visualizer/frame-bus';
+import type { OperatorConfig, WaveMode } from '../visualizer/eviland-operators';
 
 export type VizMode =
   | 'mini'
@@ -121,6 +128,32 @@ export function Visualizer({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const butterchurnIframeRef = useRef<HTMLIFrameElement>(null);
   const engine = usePlayerStore((s) => s.engine);
+  // Eviland-only state mirrored into a ref so the rAF loop can read live values
+  // without restarting on every toggle. The loop reads `evilandStateRef.current`
+  // each frame; the ref updates in a tiny effect below. This is the same
+  // technique FullscreenVisualizer uses for its Auto-VJ loop.
+  const evilandDirectorEnabled = usePlayerStore((s) => s.evilandDirector);
+  const evilandSeed = usePlayerStore((s) => s.evilandSeed);
+  const evilandConfigNonce = usePlayerStore((s) => s.evilandConfigNonce);
+  const evilandWaveMode = usePlayerStore((s) => s.evilandWaveMode);
+  const currentTrackId = usePlayerStore((s) => s.current?.id ?? null);
+  const evilandStateRef = useRef({
+    director: evilandDirectorEnabled,
+    seed: evilandSeed,
+    nonce: evilandConfigNonce,
+    waveMode: evilandWaveMode,
+    trackId: currentTrackId,
+  });
+  useEffect(() => {
+    evilandStateRef.current = {
+      director: evilandDirectorEnabled,
+      seed: evilandSeed,
+      nonce: evilandConfigNonce,
+      waveMode: evilandWaveMode,
+      trackId: currentTrackId,
+    };
+  }, [evilandDirectorEnabled, evilandSeed, evilandConfigNonce, evilandWaveMode, currentTrackId]);
+
   const isFullscreen = width == null && height == null && mode !== 'mini';
   const frameIntervalMs = isFullscreen
     ? performance === 'low'
@@ -285,6 +318,10 @@ export function Visualizer({
       const onsetFreq = new Uint8Array(new ArrayBuffer(binCount));
       const leftFreq = new Uint8Array(new ArrayBuffer(binCount));
       const rightFreq = new Uint8Array(new ArrayBuffer(binCount));
+      // Time-domain bytes for the renderer's waveform layer. 256 samples is the
+      // tap size the renderer expects; reuse one buffer across the lifetime of
+      // the effect to keep the hot path allocation-free.
+      const evWave = new Uint8Array(256);
       const reactor = createEvilandReactor({
         sampleRate: engine.getSampleRate(),
         fftSize: engine.fftSize,
@@ -304,6 +341,44 @@ export function Visualizer({
         bg: parseRgbVec(getCssVar('--bg') || '#05060a'),
       };
 
+      // ── Eviland AI Director + manual look state ───────────────────────────
+      // The Director morphs the operator config across song sections; manual
+      // looks (randomize / shared seed) are applied once when the store's
+      // nonce changes and persist until the user randomizes again or re-
+      // enables the director.
+      const initial = evilandStateRef.current;
+      const director = createDirector({
+        songId: initial.trackId != null ? `track-${initial.trackId}` : 'eviland',
+      });
+      let lastAppliedNonce = -1;
+      let lastTrackId: number | null = initial.trackId;
+      let manualConfig: OperatorConfig | null = null;
+
+      function applyManualSeed(seed: string | null): OperatorConfig | null {
+        if (!seed) return null;
+        // Prefer decode() so user-shared codes round-trip exactly; fall back to
+        // generate() for derived "seed-N" strings the store mints.
+        const decoded = decodeEvilandConfig(seed);
+        if (decoded) return decoded;
+        return generateEvilandConfig(seed).config;
+      }
+
+      function applyWaveformOverride(
+        config: OperatorConfig,
+        waveMode: 'off' | 'line' | 'radial' | 'bars',
+      ): OperatorConfig {
+        // Cheap shallow clone of the waveform sub-object only — the rest of the
+        // config stays referentially identical so the renderer's setConfig call
+        // doesn't have to re-clone anything else. waveMode === 'off' leaves the
+        // config's own waveform mode in place so a randomized look that wants
+        // bars/radial waveforms still shows them.
+        if (waveMode === 'off') return config;
+        return {
+          ...config,
+          waveform: { ...config.waveform, mode: waveMode as WaveMode },
+        };
+      }
+
       const loop = (now: number) => {
         raf = requestAnimationFrame(loop);
         if (!canPaint(now)) return;
@@ -318,9 +393,48 @@ export function Visualizer({
         engine.getOnsetFreqData(onsetFreq);
         engine.getLeftFreqData(leftFreq);
         engine.getRightFreqData(rightFreq);
+        engine.getTimeData(evWave);
+        renderer.setWaveform(evWave);
+
         const dtMs = lastNow ? now - lastNow : 16.7;
         const evFrame = reactor.analyze(freq, onsetFreq, leftFreq, rightFreq, dtMs, now);
         lastNow = now;
+
+        // Broadcast to the detached/undocked visualizer window (if open) so a
+        // projector / second monitor renders the same look in sync. No-op cost
+        // when there is no detached consumer.
+        frameBus.publish(evFrame, palette, dtMs);
+
+        // Live UI state (director toggle, randomize nonce, waveform override).
+        // Read via ref — no per-frame React subscription, no rAF restart.
+        const ui = evilandStateRef.current;
+        if (ui.trackId !== lastTrackId) {
+          lastTrackId = ui.trackId;
+          director.reset(ui.trackId != null ? `track-${ui.trackId}` : 'eviland');
+        }
+
+        if (ui.director) {
+          // Director owns the config: it produces a fresh OperatorConfig each
+          // frame (a smoothstep crossfade between section looks). Push it to
+          // the renderer every frame so live audio reactivity stays current.
+          const directed = director.update(evFrame, dtMs);
+          renderer.setConfig(applyWaveformOverride(directed, ui.waveMode));
+          // Reset manual tracking so the next director→off flip re-applies
+          // the manual look (or default) cleanly.
+          lastAppliedNonce = -1;
+          manualConfig = null;
+        } else if (ui.nonce !== lastAppliedNonce) {
+          // A randomize / paste-seed / waveform-mode change just landed.
+          // Rebuild + apply the look exactly once, then idle the setConfig
+          // path until the next nonce bump.
+          const base = ui.seed ? applyManualSeed(ui.seed) : null;
+          manualConfig = base ?? renderer.getConfig();
+          renderer.setConfig(applyWaveformOverride(manualConfig, ui.waveMode));
+          lastAppliedNonce = ui.nonce;
+        }
+        // else: director off + no pending change → renderer keeps its last
+        // config (default or last manual look). No per-frame setConfig.
+
         renderer.render(evFrame, palette, dtMs);
       };
       raf = requestAnimationFrame(loop);

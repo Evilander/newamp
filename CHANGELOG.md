@@ -3,6 +3,82 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.8.0] - 2026-05-30
+
+### Added — Eviland becomes a generative visual engine
+
+Eviland grows from a reactive visualizer into an instrument-aware **generative
+engine** — native MilkDrop-class animation, endless original looks, and an
+autonomous conductor. The whole engine is also extracted as a reusable
+zero-dependency package, [`@eviland/core`](packages/eviland-core/README.md).
+
+- **Native MilkDrop-class waveform layer.** The signature oscilloscope, drawn
+  into the feedback field before the warp so it advects into evolving symmetry —
+  with line, radial, and spectrum-bar modes.
+- **Operator engine.** Every look is now data (`OperatorConfig`): a base value
+  plus audio-feature bindings per visual channel, evaluated and clamped each
+  frame. Serializable, interpolatable, shareable. The classic Eviland look is
+  one such config (so nothing changed unless you ask it to).
+- **Randomizer.** Mints endless musically-coherent looks across six archetypes
+  (tunnel, kaleidoscope, liquid, lattice, nebula, strobe), each with a generated
+  palette. Every look is a short **shareable seed** (e.g. `K7Q2-9XMF`) you can
+  copy, paste, and recall exactly — on any machine.
+- **Director (auto-VJ).** An autonomous conductor that reads the song's structure
+  (sections, energy tiers, novelty) and crossfades looks on the beat — gentle in
+  intros, intense on drops, and recalling a section's earlier look when it
+  returns so the visuals rhyme with the music. Hands-free, fully overridable.
+- **Live input — engine groundwork.** The capture layer that lets Eviland react
+  to a microphone / line-in / audio interface, with voice DSP (AGC / noise-
+  suppression / echo-cancellation) forced off so music stays intact. The
+  device-picker UI is a follow-up; this release ships the typed capture core.
+- **Detached / undocked visualizer window.** Pop the visualizer out into its own
+  window (Detach button in the fullscreen Eviland controls), pick a display,
+  drag it to a second monitor or projector, and fullscreen it there — while the
+  main NewAmp window stays fully browsable. Audio + the reactor stay in the main
+  window; the per-frame data streams to the detached window over a low-latency
+  message port, so the two stay perfectly in sync, and the feed auto-recovers if
+  the main window reloads.
+- **Video recording.** Capture the visualizer to WebM (VP9/Opus) at 60 fps /
+  12 Mbps with the audio muxed in, via a parallel tap that never touches your
+  audible output.
+- **New fullscreen controls** for Eviland: Randomize, Director toggle, a
+  copyable seed with paste-to-recall, and a waveform-mode selector.
+- **`@eviland/core`** — the renderer, reactor, operator engine, randomizer, RNG,
+  director, and recorder packaged as a zero-dependency, framework-agnostic
+  library. Embeddable like Butterchurn, but it listens. (Staged in-repo and
+  build-isolated; the standalone npm publish is a tracked follow-up. NewAmp's
+  build now fails on any drift between the package copy and `src/visualizer/`.)
+
+### Fixed
+
+- **Visualizer no longer stutters under the Director.** The Director was deep-
+  cloning its entire operator config every frame (a `JSON.parse(JSON.stringify)`
+  round-trip ~60×/sec); steady-state frames now reuse the owned config by
+  reference, cutting the dominant per-frame GC churn behind the reported lag.
+- **Library / History / Loved "load more" no longer duplicates or cross-
+  contaminates rows.** Page de-duplication now runs inside the state updater
+  (race-safe), and the library's infinite scroll drops any page that resolves
+  after you've changed the search, instead of appending stale results.
+- **Detached window failures are now visible and recoverable.** A failed open,
+  port hand-off, or renderer crash tears the window down, reports the reason in
+  the controls, and releases the frame feed — no more stuck "open" state.
+
+## [1.7.4] - 2026-05-30
+
+### Fixed — Eviland: real structure, no more gold/cream
+
+Eviland reacted correctly but still rendered as a "gold/cream reactive smoke." Built a headless **visual** capture harness (`scripts/eviland-capture.mjs`) to actually see the output frame-by-frame — the GPU smoke proves *reactive*, this proves *structured* — and traced the cream to three real sources, none of which were the per-instrument emitters:
+
+- **The palette ramp's warm highlight stop.** Every bright region was driven to the single cream `light` colour, so any energetic frame went monochrome-cream regardless of the (correct) reactivity. Highlights now lean on the accent and the field's *own* hue, so loud events read as their instrument colour (cyan kick-rings, magenta bursts), with a guard that recolours any residual blown-out highlight toward the accent.
+- **The zoom focal point.** A constant inward zoom piled feedback energy into a permanent bright blob at centre; lowered the base zoom so the tunnel still punches on kicks but doesn't accumulate a static core.
+- **A cream section-flash.** The structural-memory section-change flash was a screen-filling cream burst; it's now a small accent-coloured core that pulses with bass/energy.
+
+Plus: field decay cut (0.92–0.985 → 0.80–0.91) and curl turbulence near-eliminated so shapes stay crisp instead of smearing into haze; kaleidoscope always-on and strongly mixed; spectrum "sun" brightened with a clean centre eye.
+
+### Changed — album-art overlay more transparent
+
+Fullscreen album-cover overlay lowered from 0.72 → 0.55 opacity so it sits more gently over the visualizer.
+
 ## [1.7.3] - 2026-05-30
 
 ### Changed — Eviland goes full MilkDrop
