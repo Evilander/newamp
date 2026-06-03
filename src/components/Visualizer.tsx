@@ -12,6 +12,7 @@ import {
 import { createParticleFlowRenderer } from '../visualizer/particle-flow';
 import { createEvilandRenderer } from '../visualizer/eviland';
 import { createEvilandReactor } from '../visualizer/eviland-audio';
+import { createReactorOverlay, type ReactorOverlay } from '../visualizer/reactor-overlay';
 import { createDirector } from '../visualizer/eviland-director';
 import {
   generate as generateEvilandConfig,
@@ -41,6 +42,7 @@ export type VizMode =
   | 'liquid-mercury'
   | 'particle-flow'
   | 'eviland'
+  | 'eviland-live'
   | 'kaleido-bloom'
   | 'liquid-aurora-storm'
   | 'fractal-pulse'
@@ -127,6 +129,9 @@ export function Visualizer({
 }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const butterchurnIframeRef = useRef<HTMLIFrameElement>(null);
+  // Eviland Live overlay: the transparent reactor canvas stacked over the
+  // butterchurn (MilkDrop) iframe.
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const engine = usePlayerStore((s) => s.engine);
   // Eviland-only state mirrored into a ref so the rAF loop can read live values
   // without restarting on every toggle. The loop reads `evilandStateRef.current`
@@ -175,7 +180,10 @@ export function Visualizer({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    if (mode === 'butterchurn') {
+    if (mode === 'butterchurn' || mode === 'eviland-live') {
+      // 'eviland-live' reuses this exact butterchurn (MilkDrop) iframe as its
+      // warp/field base, then composites NewAmp's causal reactor events on a
+      // transparent overlay canvas on top (set up further down, gated on mode).
       // Butterchurn runs inside a sandboxed iframe (butterchurn-iframe.html) so
       // its preset-shader eval is scoped to a frame whose CSP permits
       // 'unsafe-eval' — the main renderer stays on script-src 'self'. Web Audio
@@ -203,6 +211,51 @@ export function Visualizer({
       // Without this butterchurn reads raw -86..-10 dBFS bytes and reacts
       // noticeably less to transients than every other visualizer mode.
       const PREEMPHASIS = 1.4;
+
+      // --- Eviland Live overlay (reactor events composited over MilkDrop) ---
+      const liveMode = mode === 'eviland-live';
+      const binCount = engine.frequencyBinCount;
+      const ovFreq = liveMode ? new Uint8Array(new ArrayBuffer(binCount)) : null;
+      const ovOnsetFreq = liveMode ? new Uint8Array(new ArrayBuffer(binCount)) : null;
+      const ovLeftFreq = liveMode ? new Uint8Array(new ArrayBuffer(binCount)) : null;
+      const ovRightFreq = liveMode ? new Uint8Array(new ArrayBuffer(binCount)) : null;
+      const ovReactor = liveMode
+        ? createEvilandReactor({ sampleRate: engine.getSampleRate(), fftSize: engine.fftSize, binCount })
+        : null;
+      let overlay: ReactorOverlay | null = null;
+      let overlayLastNow = 0;
+      // Palette for the overlay events — read once from the theme (the MilkDrop
+      // field below carries the dominant color; this just tints the events).
+      const ovPalette = {
+        accent: parseRgbVec(getCssVar('--accent')),
+        dark: parseRgbVec(getCssVar('--accent-dim') || getCssVar('--accent')),
+        light: parseRgbVec(getCssVar('--ink') || '#ffffff'),
+        bg: parseRgbVec(getCssVar('--bg') || '#05060a'),
+      };
+      if (liveMode && overlayCanvasRef.current) {
+        overlay = createReactorOverlay(overlayCanvasRef.current);
+      }
+
+      const updateOverlay = (now: number): void => {
+        if (!overlay || !ovReactor || !ovFreq || !ovOnsetFreq || !ovLeftFreq || !ovRightFreq) return;
+        const node = overlayCanvasRef.current;
+        if (node) {
+          const cssW = node.clientWidth || 100;
+          const cssH = node.clientHeight || 100;
+          const odpr = Math.min(window.devicePixelRatio || 1, dprCap);
+          if (node.width !== Math.round(cssW * odpr) || node.height !== Math.round(cssH * odpr)) {
+            overlay.resize(cssW, cssH, odpr);
+          }
+        }
+        engine.getFreqData(ovFreq);
+        engine.getOnsetFreqData(ovOnsetFreq);
+        engine.getLeftFreqData(ovLeftFreq);
+        engine.getRightFreqData(ovRightFreq);
+        const dt = overlayLastNow ? now - overlayLastNow : 16.7;
+        overlayLastNow = now;
+        const frame = ovReactor.analyze(ovFreq, ovOnsetFreq, ovLeftFreq, ovRightFreq, dt, now);
+        overlay.render(frame, ovPalette, dt);
+      };
 
       const startFallback = () => {
         iframe.style.display = 'none';
@@ -241,7 +294,8 @@ export function Visualizer({
 
       const pump = (now: number) => {
         if (disposed) return;
-        if (ready && canPaint(now)) {
+        const paint = canPaint(now);
+        if (ready && paint) {
           // Read from the unsmoothed onset analyser tap so transients reach
           // butterchurn on the same frame they happen (the smoothed analyser
           // would lag ~1.3 frames). Then apply mild pre-emphasis: center,
@@ -259,6 +313,9 @@ export function Visualizer({
           const audio: BcAudioMessage = { type: 'audio', samples };
           iframe.contentWindow?.postMessage(audio, '*');
         }
+        // The reactor overlay is independent of iframe readiness — run it on the
+        // same frame cadence so the events stay in sync with the audio.
+        if (paint) updateOverlay(now);
         raf = requestAnimationFrame(pump);
       };
       raf = requestAnimationFrame(pump);
@@ -281,6 +338,7 @@ export function Visualizer({
         cancelAnimationFrame(fallbackRaf);
         window.clearTimeout(mountTimeout);
         window.removeEventListener('message', onMessage);
+        overlay?.dispose();
         try {
           const dispose: BcDisposeMessage = { type: 'dispose' };
           iframe.contentWindow?.postMessage(dispose, '*');
@@ -1520,10 +1578,12 @@ export function Visualizer({
   // Butterchurn mode layers a sandboxed iframe (the actual Milkdrop render)
   // over a placeholder canvas. The canvas keeps the smoke selector + mount flag
   // and is the surface the canvas-2D fallback paints to if the iframe can't host.
-  if (mode === 'butterchurn') {
+  // 'eviland-live' uses the same stack and adds a transparent reactor-overlay
+  // canvas on top (the causal per-instrument events drawn over the MilkDrop field).
+  if (mode === 'butterchurn' || mode === 'eviland-live') {
     return (
       <div
-        key={`bc-${palette}-${quality}-${performance}-${reactivity}`}
+        key={`${mode}-${palette}-${quality}-${performance}-${reactivity}`}
         className={className ?? 'h-full w-full'}
         style={{ position: 'relative', overflow: 'hidden', borderRadius: 'var(--radius)', ...style }}
       >
@@ -1540,6 +1600,14 @@ export function Visualizer({
           tabIndex={-1}
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 'none', borderRadius: 'var(--radius)', display: 'block', pointerEvents: 'none' }}
         />
+        {mode === 'eviland-live' && (
+          <canvas
+            ref={overlayCanvasRef}
+            data-newamp-reactor-overlay
+            aria-hidden="true"
+            style={{ position: 'absolute', inset: 0, display: 'block', width: '100%', height: '100%', borderRadius: 'var(--radius)', pointerEvents: 'none', zIndex: 2 }}
+          />
+        )}
       </div>
     );
   }

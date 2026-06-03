@@ -928,6 +928,7 @@ export type VisualizerPreset =
   | 'liquid-mercury'
   | 'particle-flow'
   | 'eviland'
+  | 'eviland-live'
   | 'kaleido-bloom'
   | 'liquid-aurora-storm'
   | 'fractal-pulse'

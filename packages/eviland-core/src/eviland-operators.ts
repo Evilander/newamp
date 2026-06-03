@@ -268,8 +268,10 @@ export function defaultConfig(): OperatorConfig {
     version: 1,
     name: 'Eviland Classic',
     archetype: 'classic',
-    // zoom = 0.0018 + kick*0.038 + bass*0.012
-    zoom: { base: 0.0018, bindings: [{ feature: 'kick', gain: 0.038 }, { feature: 'bass', gain: 0.012 }] },
+    // zoom = 0.0018 + kick*0.016 + bass*0.010 — kick gain dialed down from 0.038;
+    // the old value made the whole field "bounce" on every kick (the dominant
+    // source of the "bouncy object" read). A gentler push still reads as a pulse.
+    zoom: { base: 0.0018, bindings: [{ feature: 'kick', gain: 0.016 }, { feature: 'bass', gain: 0.010 }] },
     // rotate base/sign handled by spinFromSection; + energy*0.009 + beatPhase*0.0014
     rotate: { base: 0, bindings: [{ feature: 'energy', gain: 0.0090 }, { feature: 'beatPhase', gain: 0.0014 }] },
     // swirl = 0.012 + width*0.030 + novelty*0.020
@@ -291,8 +293,10 @@ export function defaultConfig(): OperatorConfig {
     flowX: { base: 0.00012, bindings: [{ feature: 'pan', gain: 0.0008 }] },
     flowY: { base: -0.00018 },
     spinFromSection: true,
-    // Waveform OFF by default → default look unchanged (regression-safe).
-    waveform: { mode: 'off', intensity: { base: 1.0, bindings: [{ feature: 'energy', gain: 0.8 }] }, thickness: 0.012, scale: 0.32 },
+    // Waveform ON ('line') by default — the drawn oscilloscope advected through
+    // the warp field is MilkDrop's single most recognizable signature. It also
+    // breaks up the centred-blob silhouette that read as "one bouncy object".
+    waveform: { mode: 'line', intensity: { base: 0.7, bindings: [{ feature: 'energy', gain: 0.6 }] }, thickness: 0.012, scale: 0.34 },
     palette: null,
     bloom: { base: 0 },
     emitterScale: 1,
