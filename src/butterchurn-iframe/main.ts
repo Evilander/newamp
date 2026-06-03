@@ -32,6 +32,29 @@ function unwrapDefault<T>(module: unknown): T {
   return ((first as { default?: unknown }).default ?? first) as T;
 }
 
+// Estimate the main-thread cost of switching TO a preset. The dominant cost is
+// butterchurn allocating an ~8 MB megabuffer per ENABLED shape and wave inside
+// loadPreset() (plus running their init equations + compiling their shaders) —
+// a 50–80 MB allocation storm and a major GC pause that reads as a stutter.
+// Equation-body length is a minor secondary factor. Bias rotation toward cheap
+// presets and the inter-animation hitch largely disappears.
+function presetSwitchCost(preset: Record<string, unknown>): number {
+  const countEnabled = (arr: unknown): number => {
+    if (!Array.isArray(arr)) return 0;
+    let n = 0;
+    for (const item of arr) {
+      const enabled = (item as { baseVals?: { enabled?: number } })?.baseVals?.enabled;
+      if (enabled != null && Number(enabled) !== 0) n += 1;
+    }
+    return n;
+  };
+  const shapes = countEnabled((preset as { shapes?: unknown }).shapes);
+  const waves = countEnabled((preset as { waves?: unknown }).waves);
+  let cost = (shapes + waves) * 100_000; // each ≈ one 8 MB megabuf alloc
+  try { cost += JSON.stringify(preset).length; } catch { /* circular — ignore */ }
+  return cost;
+}
+
 let visualizer: ButterchurnVisualizer | null = null;
 let presets: Array<[string, Record<string, unknown>]> = [];
 // Lightweight presets only — the heaviest entries in the full preset pack are
@@ -43,7 +66,10 @@ let presetWeights: number[] = [];
 let presetOrder: number[] = [];
 let lastAudioPostAt = 0;
 let presetTimer: number | null = null;
-let pendingPresetIdle: number | null = null;
+// When >0, frame() holds the last painted frame for this many ticks. Used to
+// give butterchurn's synchronous loadPreset() shader-compile + megabuf GC a
+// clear slot instead of colliding with an active paint (the inter-preset judder).
+let skipRenderFrames = 0;
 let raf = 0;
 let dpr = 1;
 let disposed = false;
@@ -99,8 +125,11 @@ async function start(sampleRate: number): Promise<void> {
     visualizer = butterchurn.createVisualizer(audioCtx, canvas, {
       width: canvas.width,
       height: canvas.height,
-      meshWidth: 32,
-      meshHeight: 24,
+      // Lowered from 32x24: fewer warp-mesh vertices means less per-frame pixel-
+      // equation work AND a smaller per-load warpUV buffer, both of which feed
+      // the inter-preset hitch. Visually near-identical at typical window sizes.
+      meshWidth: 24,
+      meshHeight: 18,
     });
 
     presets = Object.entries(presetApi.getPresets()).filter(
@@ -108,12 +137,12 @@ async function start(sampleRate: number): Promise<void> {
     );
     if (!presets.length) throw new Error('No Butterchurn presets loaded');
 
-    // Weight = JSON length as a cheap proxy for equation-body complexity.
-    // Heavier presets take longer to JIT-compile inside loadPreset(), which is
-    // the actual frame-blocking hitch users see as "lag between animations".
-    presetWeights = presets.map(([, preset]) => {
-      try { return JSON.stringify(preset).length; } catch { return 0; }
-    });
+    // The real cost of a preset switch is NOT equation-body length — it's the
+    // ~8 MB `new Array(1048576).fill(0)` megabuffer butterchurn allocates per
+    // ENABLED shape and wave inside loadPreset (a 50–80 MB allocation storm +
+    // major GC pause). So weight primarily by enabled shape/wave count; JSON
+    // length is only a minor tiebreaker for equation JIT cost.
+    presetWeights = presets.map(([, preset]) => presetSwitchCost(preset));
     presetOrder = presets.map((_, i) => i).sort((a, b) => presetWeights[a]! - presetWeights[b]!);
 
     // Pick a preset, biased toward the lighter half. ~85% from the light half,
@@ -127,23 +156,18 @@ async function start(sampleRate: number): Promise<void> {
       return presetOrder[lo + Math.floor(Math.random() * (hi - lo))]!;
     };
 
-    // Run the heavy loadPreset() during the iframe's idle time so the JIT
-    // compile lands between paints rather than mid-frame. Falls back to
-    // setTimeout(0) where requestIdleCallback isn't available.
-    type IdleCb = (cb: () => void, opts?: { timeout: number }) => number;
-    const ric: IdleCb = (window as unknown as { requestIdleCallback?: IdleCb }).requestIdleCallback
-      ?? ((cb) => window.setTimeout(cb, 0) as unknown as number);
-    const cic = (window as unknown as { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback
-      ?? ((id: number) => window.clearTimeout(id));
-
+    // loadPreset() does its heavy work (GLSL compile + ~8 MB/shape megabuf
+    // allocation) SYNCHRONOUSLY on this thread. requestIdleCallback was tried
+    // here but is a no-op: the continuous rAF render loop below never yields a
+    // real idle window, so ric just falls through to its setTimeout(0) deadline
+    // and the compile still lands on a paint frame. Instead we hold the next
+    // paint (skipRenderFrames) so the compile + first heavy render + GC get a
+    // clear frame, then the loop resumes smoothly.
     const loadRandomPreset = (blendSeconds: number): void => {
-      if (pendingPresetIdle != null) cic(pendingPresetIdle);
-      pendingPresetIdle = ric(() => {
-        pendingPresetIdle = null;
-        if (disposed || !visualizer) return;
-        const [, preset] = presets[pickIndex()]!;
-        try { visualizer.loadPreset(preset, blendSeconds); } catch { /* bad preset, skip */ }
-      }, { timeout: 1500 });
+      if (disposed || !visualizer) return;
+      const [, preset] = presets[pickIndex()]!;
+      skipRenderFrames = 1;
+      try { visualizer.loadPreset(preset, blendSeconds); } catch { /* bad preset, skip */ }
     };
     loadRandomPreset(0);
 
@@ -177,6 +201,13 @@ async function start(sampleRate: number): Promise<void> {
     const frame = (): void => {
       if (disposed) return;
       sizeCanvas();
+      if (skipRenderFrames > 0) {
+        // Hold the last painted frame one tick so a just-loaded preset's compile
+        // + GC settle off the critical paint path.
+        skipRenderFrames -= 1;
+        raf = requestAnimationFrame(frame);
+        return;
+      }
       try {
         visualizer?.render(
           haveAudio
@@ -216,12 +247,6 @@ window.addEventListener('message', (event: MessageEvent) => {
     disposed = true;
     cancelAnimationFrame(raf);
     if (presetTimer != null) window.clearInterval(presetTimer);
-    if (pendingPresetIdle != null) {
-      const cic = (window as unknown as { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback
-        ?? ((id: number) => window.clearTimeout(id));
-      cic(pendingPresetIdle);
-      pendingPresetIdle = null;
-    }
   }
 });
 
