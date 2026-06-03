@@ -5,6 +5,7 @@ import { formatTime, playbackCodecLabel } from '../lib/format';
 import { api } from '../lib/api';
 import { VolumeSlider } from './VolumeSlider';
 import { spectralArtDataUrl } from '@shared/spectral-art';
+import { PrevIcon, NextIcon, StopIcon, PlayPauseIcon, ShuffleIcon, RepeatIcon } from './TransportIcons';
 
 export function Transport(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
@@ -117,22 +118,23 @@ export function Transport(): JSX.Element {
         </div>
 
         <div className="flex items-center gap-2">
-          <button className="pxbtn" onClick={() => void prev()} title="Previous (Ctrl+←)" aria-label="Previous track">
-            ⏮
+          <button className="pxbtn pxbtn-icon" onClick={() => void prev()} title="Previous (Ctrl+←)" aria-label="Previous track">
+            <PrevIcon />
           </button>
           <button
-            className="pxbtn is-primary amp-beat-scale"
+            className="pxbtn pxbtn-icon is-primary amp-beat-scale"
             onClick={togglePlay}
             title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
             aria-label={isPlaying ? 'Pause' : 'Play'}
+            aria-pressed={isPlaying}
           >
-            {isPlaying ? '⏸' : '▶'}
+            <PlayPauseIcon playing={isPlaying} />
           </button>
-          <button className="pxbtn" onClick={stop} title="Stop" aria-label="Stop">
-            ◼
+          <button className="pxbtn pxbtn-icon" onClick={stop} title="Stop" aria-label="Stop">
+            <StopIcon />
           </button>
-          <button className="pxbtn" onClick={() => void next()} title="Next (Ctrl+→)" aria-label="Next track">
-            ⏭
+          <button className="pxbtn pxbtn-icon" onClick={() => void next()} title="Next (Ctrl+→)" aria-label="Next track">
+            <NextIcon />
           </button>
           <ScrubBar
             value={currentTime}
@@ -140,20 +142,30 @@ export function Transport(): JSX.Element {
             onChange={(v) => seek(v)}
           />
           <button
-            className={`pxbtn ${mode === 'shuffle' ? 'is-active' : ''}`}
+            className={`pxbtn pxbtn-icon ${mode === 'shuffle' ? 'is-active' : ''}`}
             onClick={() => setMode(mode === 'shuffle' ? 'normal' : 'shuffle')}
             title="Shuffle"
+            aria-label="Shuffle"
+            aria-pressed={mode === 'shuffle'}
           >
-            ↬
+            <ShuffleIcon />
           </button>
           <button
-            className={`pxbtn ${mode === 'repeat-all' || mode === 'repeat-one' ? 'is-active' : ''}`}
+            className={`pxbtn pxbtn-icon ${mode === 'repeat-all' || mode === 'repeat-one' ? 'is-active' : ''}`}
+            data-state={mode === 'repeat-all' ? 'all' : mode === 'repeat-one' ? 'one' : 'off'}
             onClick={() =>
               setMode(mode === 'repeat-all' ? 'repeat-one' : mode === 'repeat-one' ? 'normal' : 'repeat-all')
             }
             title="Repeat mode"
+            aria-label={
+              mode === 'repeat-one'
+                ? 'Repeat one. Press to turn repeat off.'
+                : mode === 'repeat-all'
+                  ? 'Repeat all. Press to switch to repeat one.'
+                  : 'Repeat off. Press to repeat all.'
+            }
           >
-            {mode === 'repeat-one' ? '↺1' : '↺'}
+            <RepeatIcon one={mode === 'repeat-one'} />
           </button>
           <VolumeSlider value={volume} onChange={(v) => void setVolume(v)} width={120} />
         </div>

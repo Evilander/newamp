@@ -3,6 +3,45 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.9.0] - 2026-06-02
+
+### Added
+
+- **Eviland Live — the MilkDrop rip-off.** A new default visualizer that uses the
+  real MilkDrop engine (butterchurn) for its warp/zoom/decay field and composites
+  NewAmp's causal per-instrument reactor on top: kick rings, snare spike-stars,
+  hat sparkles, vocal blobs, and a bass terrain glow, all drawn as a transparent
+  additive overlay over the MilkDrop field. MilkDrop's animations, NewAmp's ears.
+- **New transport buttons.** The play/pause/prev/next/stop/shuffle/repeat controls
+  are now crisp inline SVG (theme-colored, optically weighted) with a play↔pause
+  crossfade, springy press feedback, and an audio-reactive glow on the play button.
+  Proper WCAG 2.2 semantics for the shuffle/repeat toggles.
+
+### Changed
+
+- **Visualizer interaction.** Double-click now toggles fullscreen↔windowed
+  (was: exit). Esc or right-click exits the visualizer.
+- **Cinema mode** now fully hides the bottom transport (title, scrubber,
+  prev/play/next) and reveals it on hover or cursor-near-bottom.
+- **Detach is a standard toolbar control** in the visualizer (no longer buried in
+  Eviland's settings).
+- **Eviland (engine) de-collapsed.** The Director runs by default and the
+  randomizer's multi-hue palette now actually drives rendered color (it was
+  previously ignored — everything rendered in the theme's single accent hue). The
+  oscilloscope is on by default; the kick-zoom bounce, the central "sun", and the
+  wash-to-accent force are all dialed back.
+
+### Fixed
+
+- **MilkDrop no longer stutters between presets.** Preset rotation is now weighted
+  by real switch cost (enabled shapes/waves = the megabuffer allocation storm,
+  not equation length), the warp mesh is lighter, and the synchronous shader
+  compile gets a render gap so it stops colliding with active paints.
+- **Text is readable across all 14 themes.** Raised the failing `--muted` values,
+  added an accent-text token so accent-colored labels pass contrast on light
+  themes, fixed the terminal theme (body text was ~1.2:1), and made the
+  visualizer overlay labels theme-aware.
+
 ## [1.8.0] - 2026-05-30
 
 ### Added — Eviland becomes a generative visual engine

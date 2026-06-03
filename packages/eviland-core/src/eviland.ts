@@ -535,8 +535,11 @@ void main(){
   float cmax = max(max(colour.r, colour.g), colour.b);
   float cmin = min(min(colour.r, colour.g), colour.b);
   float csat = (cmax - cmin) / max(cmax, 1e-3);
-  float washed = smoothstep(0.55, 1.05, cmax) * (1.0 - smoothstep(0.12, 0.42, csat));
-  colour = mix(colour, u_accent * (cmax * 0.92 + 0.08), washed * 0.75);
+  float washed = smoothstep(0.62, 1.05, cmax) * (1.0 - smoothstep(0.10, 0.36, csat));
+  // Pull washed-out highlights back toward accent, but gently (was 0.75 — that
+  // strongly repainted every bright region in the accent hue, reinforcing the
+  // monochrome look). 0.40 still kills cream blow-out without flattening colour.
+  colour = mix(colour, u_accent * (cmax * 0.92 + 0.08), washed * 0.40);
 
   // Centroid hue tilt — gentle (the field already drifts; this is a static bias).
   colour *= u_hueShift;
@@ -1109,6 +1112,13 @@ export function createEvilandRenderer(
     const dt = Math.max(0.0005, Math.min(0.1, dtMs / 1000));
     time += dt;
 
+    // Use the active config's generated palette (the randomizer/Director mints a
+    // real multi-hue HSV palette per look) instead of the single-hue CSS theme
+    // accent. Falling back to the host palette only when the config has none
+    // (the "Classic" default). This is what stops every bright pixel collapsing
+    // onto the theme accent — the root of the "everything is pink" complaint.
+    if (currentConfig.palette) palette = currentConfig.palette;
+
     // Pillar 3: structural memory. New section → record/replay a seed; this
     // makes the field's warp signature recognisable when the chorus returns.
     if (frame.sectionChanged) {
@@ -1225,8 +1235,12 @@ export function createEvilandRenderer(
       );
       // Bright crisp rays = the structural overlay. Push them well above the
       // field so the spectrum "sun" reads as drawn geometry, not haze.
-      const intensity = 1.1 + frame.energy * 1.3 + frame.beatPhase * 0.1;
-      gl.uniform1f(spectrumUni.intensity, Math.min(2.8, intensity));
+      // Dialed down from 1.1 + energy*1.3 (cap 2.8): the spectrum "sun" was the
+      // dominant always-bright centred object. Lower base + cap lets the warp
+      // field and the now-default oscilloscope carry the look instead of a
+      // screen-centre glow that read as "one pulsing thing".
+      const intensity = 0.5 + frame.energy * 0.8 + frame.beatPhase * 0.1;
+      gl.uniform1f(spectrumUni.intensity, Math.min(1.8, intensity));
       gl.uniform1f(spectrumUni.time, time);
       gl.uniform1f(spectrumUni.aspect, fieldH / Math.max(1, fieldW));
       drawFullscreen();

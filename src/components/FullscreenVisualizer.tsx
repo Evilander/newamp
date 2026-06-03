@@ -21,8 +21,9 @@ import { useDetachedVisualizer } from './useDetachedVisualizer';
 // five `crazy` entries are the GPU shader modes added in 1.6.2 (the type
 // union + dispatch live in Visualizer.tsx; this file only labels them).
 const PRESETS = [
+  { id: 'eviland-live', label: 'Eviland Live', group: 'milkdrop' },
   { id: 'butterchurn', label: 'Milkdrop', group: 'milkdrop' },
-  { id: 'eviland', label: 'Eviland', group: 'gpu' },
+  { id: 'eviland', label: 'Eviland (engine)', group: 'gpu' },
   { id: 'kaleido-bloom', label: 'Kaleido Bloom', group: 'crazy' },
   { id: 'liquid-aurora-storm', label: 'Aurora Storm', group: 'crazy' },
   { id: 'fractal-pulse', label: 'Fractal Pulse', group: 'crazy' },
@@ -201,6 +202,10 @@ export function FullscreenVisualizer(): JSX.Element {
   // top toolbar so the visualizer can be enjoyed without UI clutter. Any
   // cursor movement re-shows it for a few seconds before hiding again.
   const [cursorActive, setCursorActive] = useState(true);
+  // Cinema mode (chrome hidden): the bottom now-playing bar (title, scrubber,
+  // prev/play/next) collapses and only reveals when the cursor nears the
+  // bottom edge or hovers the bar. Independent of the top toolbar.
+  const [nowActive, setNowActive] = useState(false);
   const [recording, setRecording] = useState(false);
   // Transient recorder failure message shown under the Record button. Without
   // this the clip button silently no-ops (no codec, canvas not painting, save
@@ -358,48 +363,47 @@ export function FullscreenVisualizer(): JSX.Element {
   // mount — listeners read fresh state via refs to avoid re-binding storms.
   useEffect(() => {
     const TOP_REVEAL_PX = 110;
+    const BOTTOM_REVEAL_PX = 160;
     const HIDE_DELAY_MS = 1400;
-    let hideTimer = 0;
-    let shown = false;
-    function show(): void {
-      if (!shown) {
-        shown = true;
-        setCursorActive(true);
-      }
-      if (hideTimer) {
-        window.clearTimeout(hideTimer);
-        hideTimer = 0;
-      }
+    let topTimer = 0;
+    let topShown = false;
+    let bottomTimer = 0;
+    let bottomShown = false;
+    function showTop(): void {
+      if (!topShown) { topShown = true; setCursorActive(true); }
+      if (topTimer) { window.clearTimeout(topTimer); topTimer = 0; }
     }
-    function scheduleHide(delay = HIDE_DELAY_MS): void {
-      if (hideTimer) window.clearTimeout(hideTimer);
-      hideTimer = window.setTimeout(() => {
-        shown = false;
-        setCursorActive(false);
-        hideTimer = 0;
-      }, delay);
+    function hideTopSoon(delay = HIDE_DELAY_MS): void {
+      if (topTimer) window.clearTimeout(topTimer);
+      topTimer = window.setTimeout(() => { topShown = false; setCursorActive(false); topTimer = 0; }, delay);
+    }
+    function showBottom(): void {
+      if (!bottomShown) { bottomShown = true; setNowActive(true); }
+      if (bottomTimer) { window.clearTimeout(bottomTimer); bottomTimer = 0; }
+    }
+    function hideBottomSoon(delay = HIDE_DELAY_MS): void {
+      if (bottomTimer) window.clearTimeout(bottomTimer);
+      bottomTimer = window.setTimeout(() => { bottomShown = false; setNowActive(false); bottomTimer = 0; }, delay);
     }
     function handleMove(e: MouseEvent): void {
-      if (e.clientY <= TOP_REVEAL_PX) {
-        show();
-      } else if (shown && !hideTimer) {
-        scheduleHide();
-      }
+      if (e.clientY <= TOP_REVEAL_PX) showTop();
+      else if (topShown && !topTimer) hideTopSoon();
+      if (e.clientY >= window.innerHeight - BOTTOM_REVEAL_PX) showBottom();
+      else if (bottomShown && !bottomTimer) hideBottomSoon();
     }
     function handleKey(): void {
-      show();
-      scheduleHide(2400);
+      showTop();
+      hideTopSoon(2400);
     }
     setCursorActive(false);
+    setNowActive(false);
     window.addEventListener('mousemove', handleMove, { passive: true });
     window.addEventListener('keydown', handleKey, { passive: true });
     return () => {
       window.removeEventListener('mousemove', handleMove);
       window.removeEventListener('keydown', handleKey);
-      if (hideTimer) {
-        window.clearTimeout(hideTimer);
-        hideTimer = 0;
-      }
+      if (topTimer) window.clearTimeout(topTimer);
+      if (bottomTimer) window.clearTimeout(bottomTimer);
     };
   }, []);
 
@@ -501,11 +505,13 @@ export function FullscreenVisualizer(): JSX.Element {
         event.preventDefault();
         setOpenPanel((p) => (p === 'help' ? null : 'help'));
       } else if (event.key === 'Escape') {
-        // Close any open popover first; only exit the visualizer when nothing
-        // is open. This is the conventional progressive-Esc UX users expect.
+        // Progressive Esc: close an open popover first; otherwise exit the
+        // visualizer entirely (alongside right-click as the documented way out).
+        event.preventDefault();
         if (openPanel) {
-          event.preventDefault();
           setOpenPanel(null);
+        } else {
+          exitVisualizer();
         }
       }
     }
@@ -825,7 +831,12 @@ export function FullscreenVisualizer(): JSX.Element {
       data-newamp-visualizer-art={artPulseEnabled ? (artPulseVisible ? 'pulse' : 'armed') : 'hidden'}
       data-newamp-native-fullscreen={nativeFullscreen ? 'true' : 'false'}
       className="fullscreen-viz-root fixed inset-0 z-[90] flex items-center justify-center bg-black"
-      onDoubleClick={exitVisualizer}
+      onDoubleClick={toggleNativeFullscreen}
+      onContextMenu={(e) => {
+        // Right-click anywhere is a fast exit out of the visualizer.
+        e.preventDefault();
+        exitVisualizer();
+      }}
     >
       {activePreset === 'album-breathe' ? (
         <div
@@ -906,6 +917,28 @@ export function FullscreenVisualizer(): JSX.Element {
         </button>
 
         <div className="viz-control-spacer" aria-hidden="true" />
+
+        {detached.available && (
+          <button
+            className={`pxbtn ${detached.isOpen ? 'is-active' : ''}`}
+            onClick={() => {
+              if (detached.isOpen) {
+                detached.close();
+              } else {
+                // The detached window is an Eviland projector — frames only
+                // publish from the Eviland branch, so switch to it on open.
+                if (activePreset !== 'eviland') setPreset('eviland');
+                detached.open(detachedDisplayId ?? undefined);
+              }
+            }}
+            disabled={detached.busy}
+            title={detached.isOpen ? 'Close the detached visualizer window' : 'Pop the visualizer out into its own window'}
+            aria-pressed={detached.isOpen}
+            data-newamp-viz-detach-toggle
+          >
+            {detached.busy ? '…' : detached.isOpen ? '⧉ Docked' : '⧉ Detach'}
+          </button>
+        )}
 
         <button
           className={`pxbtn ${openPanel === 'settings' ? 'is-active' : ''}`}
@@ -1397,13 +1430,15 @@ export function FullscreenVisualizer(): JSX.Element {
             <div><dt><kbd>?</kbd></dt><dd>This help</dd></div>
             <div><dt><kbd>Esc</kbd></dt><dd>Close popover, then exit visualizer</dd></div>
             <div><dt>Scroll wheel</dt><dd>Volume up / down (Shift = bigger steps)</dd></div>
-            <div><dt>Double-click</dt><dd>Exit visualizer</dd></div>
+            <div><dt>Double-click</dt><dd>Toggle fullscreen / windowed</dd></div>
+            <div><dt>Right-click <span className="viz-help-or">or</span> <kbd>Esc</kbd></dt><dd>Exit visualizer</dd></div>
           </dl>
         </div>
       )}
 
       <div
-        className={`fullscreen-viz-now pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16 ${chromeVisible ? '' : 'is-clean'}`}
+        className={`fullscreen-viz-now pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16 ${chromeVisible ? '' : `is-cinema ${nowActive ? 'is-revealed' : ''}`}`}
+        onMouseEnter={() => setNowActive(true)}
         style={{
           background: 'linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.85) 100%)',
         }}

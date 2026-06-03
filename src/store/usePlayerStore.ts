@@ -715,7 +715,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     compactMode: false,
     alwaysOnTop: false,
     vizPreset: 'spectrum',
-    evilandDirector: false,
+    evilandDirector: true,
     evilandSeed: null,
     evilandConfigNonce: 0,
     evilandWaveMode: 'off',
