@@ -49,7 +49,15 @@ assert.match(
   'sandboxed frame must drive butterchurn via the render({ audioLevels }) injection path',
 );
 assert.match(engineSource, /get visualizerNode\(\): AudioNode/, 'audio engine should expose a dedicated visualizer node');
-assert.match(engineSource, /replayGain\.connect\(masterGain\)[\s\S]*replayGain\.connect\(analyser\)[\s\S]*masterGain\.connect\(limiter\)[\s\S]*limiter\.connect\(ctx\.destination\)/, 'visualizers must tap pre-volume audio (analyser branches off replayGain) and the audio path must be replayGain→masterGain→limiter→destination so post-limiter clipping is impossible');
+// Pre-volume tap invariant: the analyser branches off replayGain, upstream of
+// masterGain (volume) and the limiter — so visualizers see clean pre-volume
+// audio. This part is the load-bearing guarantee and must not regress.
+assert.match(engineSource, /replayGain\.connect\(masterGain\)[\s\S]*replayGain\.connect\(analyser\)/, 'visualizers must tap pre-volume audio: the analyser branches off replayGain, upstream of masterGain/limiter');
+// Limiter routing: as of the true-bypass change the masterGain→limiter→destination
+// edge is owned by applyLimiter (it disconnects the limiter entirely when off,
+// rather than leaving a unity-ratio node in-chain), so the enabled-path wiring
+// lives there, not in the static graph build. Assert that enabled path exists.
+assert.match(engineSource, /graph\.masterGain\.connect\(graph\.limiter\)[\s\S]*graph\.limiter\.connect\(ctx\.destination\)/, 'with the limiter enabled the path must be masterGain→limiter→destination (applyLimiter owns this routing for true bypass)');
 // Silent-sink contract: the analyser+onsetAnalyser subtree must reach
 // AudioDestinationNode via a 0-gain GainNode. Without this, Chrome's audio
 // graph optimizer can cull the visualizer-tap subtree and the FFT buffer
