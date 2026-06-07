@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { Visualizer } from './Visualizer';
 import { formatTime, playbackCodecLabel } from '../lib/format';
@@ -6,6 +6,8 @@ import { api } from '../lib/api';
 import { VolumeSlider } from './VolumeSlider';
 import { spectralArtDataUrl } from '@shared/spectral-art';
 import { PrevIcon, NextIcon, StopIcon, PlayPauseIcon, ShuffleIcon, RepeatIcon } from './TransportIcons';
+import { ScrubBar } from './ScrubBar';
+import { ArtistLink, AlbumLink } from './EntityLink';
 
 export function Transport(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
@@ -95,9 +97,28 @@ export function Transport(): JSX.Element {
               style={{ whiteSpace: 'nowrap', maxWidth: '100%', textOverflow: 'ellipsis', overflow: 'hidden' }}
               title={current ? `${current.artist} — ${current.title}` : ''}
             >
-              {current
-                ? `★ ${current.artist} — ${current.title} ${current.album ? `(${current.album})` : ''}`
-                : '— no track loaded — choose something from your library —'}
+              {current ? (
+                <>
+                  {'★ '}
+                  <ArtistLink artist={current.artist} color="inherit" title={`Show all ${current.artist} albums`} />
+                  {' — '}
+                  {current.title}
+                  {current.album ? (
+                    <>
+                      {' ('}
+                      <AlbumLink
+                        album={current.album}
+                        albumArtist={current.albumArtist || current.artist}
+                        color="inherit"
+                        title={`Show ${current.album} in Albums`}
+                      />
+                      {')'}
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                '— no track loaded — choose something from your library —'
+              )}
             </div>
             <div className="lcd-text text-[11px]" style={{ color: 'var(--ink-2)' }}>
               {playbackError ? (
@@ -139,7 +160,9 @@ export function Transport(): JSX.Element {
           <ScrubBar
             value={currentTime}
             max={duration || 1}
-            onChange={(v) => seek(v)}
+            onSeek={(v) => seek(v)}
+            className="nslider flex-1"
+            data-newamp-scrub
           />
           <button
             className={`pxbtn pxbtn-icon ${mode === 'shuffle' ? 'is-active' : ''}`}
@@ -171,36 +194,5 @@ export function Transport(): JSX.Element {
         </div>
       </div>
     </footer>
-  );
-}
-
-function ScrubBar({
-  value,
-  max,
-  onChange,
-}: {
-  value: number;
-  max: number;
-  onChange: (v: number) => void;
-}): JSX.Element {
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    if (ref.current && document.activeElement !== ref.current) {
-      ref.current.value = String(value);
-    }
-  }, [value]);
-  return (
-    <input
-      ref={ref}
-      data-newamp-scrub
-      type="range"
-      className="nslider flex-1"
-      min={0}
-      max={max}
-      step={0.1}
-      defaultValue={value}
-      onInput={(e) => onChange(parseFloat(e.currentTarget.value))}
-      onChange={(e) => onChange(parseFloat(e.target.value))}
-    />
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { ListeningHistoryItem, ListeningInsights } from '@shared/types';
 import { api } from '../../lib/api';
 import { formatDuration, formatTime } from '../../lib/format';
@@ -164,7 +164,8 @@ function HistoryInsights({ insights }: { insights: ListeningInsights }): JSX.Ele
         emptyLabel="No artist data."
         items={insights.topArtists.slice(0, 4).map((item) => ({
           key: item.artist,
-          primary: item.artist,
+          primary: <ArtistLink artist={item.artist} color="inherit" />,
+          primaryTitle: item.artist,
           secondary: formatDuration(item.duration),
           plays: item.plays,
           skips: item.skips,
@@ -175,8 +176,10 @@ function HistoryInsights({ insights }: { insights: ListeningInsights }): JSX.Ele
         emptyLabel="No album data."
         items={insights.topAlbums.slice(0, 4).map((item) => ({
           key: `${item.albumArtist}:${item.album}`,
-          primary: item.album,
-          secondary: item.albumArtist,
+          primary: <AlbumLink album={item.album} albumArtist={item.albumArtist} color="inherit" />,
+          primaryTitle: item.album,
+          secondary: <ArtistLink artist={item.albumArtist} color="inherit" />,
+          secondaryTitle: item.albumArtist,
           plays: item.plays,
           skips: item.skips,
         }))}
@@ -203,7 +206,15 @@ function InsightList({
 }: {
   title: string;
   emptyLabel: string;
-  items: Array<{ key: string; primary: string; secondary: string; plays: number; skips: number }>;
+  items: Array<{
+    key: string;
+    primary: ReactNode;
+    primaryTitle?: string;
+    secondary: ReactNode;
+    secondaryTitle?: string;
+    plays: number;
+    skips: number;
+  }>;
 }): JSX.Element {
   return (
     <div className="min-w-0">
@@ -215,10 +226,17 @@ function InsightList({
           {items.map((item) => (
             <div key={item.key} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-2">
               <div className="min-w-0">
-                <div className="truncate" title={item.primary}>
+                <div
+                  className="truncate"
+                  title={item.primaryTitle ?? (typeof item.primary === 'string' ? item.primary : undefined)}
+                >
                   {item.primary}
                 </div>
-                <div className="truncate text-[10px]" title={item.secondary} style={{ color: 'var(--muted)' }}>
+                <div
+                  className="truncate text-[10px]"
+                  title={item.secondaryTitle ?? (typeof item.secondary === 'string' ? item.secondary : undefined)}
+                  style={{ color: 'var(--muted)' }}
+                >
                   {item.secondary}
                 </div>
               </div>

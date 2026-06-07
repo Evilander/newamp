@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { Track } from '@shared/types';
 import { api } from '../../lib/api';
 import { formatDuration } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { TrackTable } from './LibraryView';
 import { ViewOnboarding } from '../ViewOnboarding';
+import { ArtistLink } from '../EntityLink';
 
 interface GeneratedMix {
   id: string;
   title: string;
-  subtitle: string;
+  subtitle: ReactNode;
   tracks: Track[];
   tone: 'accent' | 'warn' | 'plain';
 }
@@ -66,18 +67,26 @@ export function MixesView(): JSX.Element {
         {
           id: 'harmonic',
           title: current ? 'Harmonic From Now' : 'Harmonic Library Mix',
-          subtitle: current
-            ? `Transition-aware sequence from ${current.artist} - ${current.title}`
-            : 'Transition-aware sequence using BPM/key metadata where available',
+          subtitle: current ? (
+            <>
+              Transition-aware sequence from <ArtistLink artist={current.artist} color="inherit" /> - {current.title}
+            </>
+          ) : (
+            'Transition-aware sequence using BPM/key metadata where available'
+          ),
           tracks: harmonic,
           tone: 'accent',
         },
         {
           id: 'taste-match',
           title: 'Taste Match',
-          subtitle: current
-            ? `Learns from plays, loves, ratings, and skips around ${current.artist} - ${current.title}`
-            : 'Learns from plays, loves, ratings, and skips across the library',
+          subtitle: current ? (
+            <>
+              Learns from plays, loves, ratings, and skips around <ArtistLink artist={current.artist} color="inherit" /> - {current.title}
+            </>
+          ) : (
+            'Learns from plays, loves, ratings, and skips across the library'
+          ),
           tracks: taste,
           tone: 'warn',
         },
@@ -166,7 +175,13 @@ export function MixesView(): JSX.Element {
         </button>
         {status && <span className="text-[11px]" style={{ color: 'var(--ink-2)' }}>{status}</span>}
         <span className="ml-auto text-[11px]" style={{ color: 'var(--muted)' }}>
-          {current ? `Seed: ${current.artist} - ${current.title}` : 'Play a track to seed harmonic mixes'}
+          {current ? (
+            <>
+              Seed: <ArtistLink artist={current.artist} color="inherit" /> - {current.title}
+            </>
+          ) : (
+            'Play a track to seed harmonic mixes'
+          )}
         </span>
       </div>
 

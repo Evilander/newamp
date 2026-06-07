@@ -1079,8 +1079,20 @@ function registerAudioProtocol(): void {
       if (playbackMode(filePath) === 'ffmpeg') {
         return transcodeToWavResponse(filePath, request);
       }
+      // Forward the media element's Range header so net.fetch on the file URL
+      // returns a 206 Partial Content with Content-Range. Without this the
+      // file loader always answers 200 with the full body, Chromium treats the
+      // audio as non-seekable, and dragging the scrubber snaps playback back to
+      // the start. This is THE seek fix — the "byte-range support" the original
+      // comment promised only happens when the Range header is propagated.
+      const forwardHeaders: Record<string, string> = {};
+      const range = request.headers.get('Range');
+      if (range) forwardHeaders.Range = range;
+      const ifRange = request.headers.get('If-Range');
+      if (ifRange) forwardHeaders['If-Range'] = ifRange;
       const response = await net.fetch(pathToFileURL(filePath).toString(), {
         bypassCustomProtocolHandlers: true,
+        headers: forwardHeaders,
       });
       return withAudioCors(response);
     } catch (err) {

@@ -6,6 +6,7 @@ import { PlaylistAppendPicker, TrackTable } from './LibraryView';
 import { api } from '../../lib/api';
 import { spectralArtDataUrl } from '@shared/spectral-art';
 import { ScoreRating } from '../ScoreRating';
+import { ArtistLink } from '../EntityLink';
 
 const ALBUM_PAGE_SIZE = 240;
 const CATALOG_SEARCH_DEBOUNCE_MS = 180;
@@ -424,7 +425,7 @@ export function AlbumsView(): JSX.Element {
           <div className="min-w-[180px] flex-1">
             <div className="text-lg font-semibold">{selected.album}</div>
             <div className="text-[12px]" style={{ color: 'var(--ink-2)' }}>
-              {selected.albumArtist}
+              <ArtistLink artist={selected.albumArtist} color="inherit" />
               {selected.year ? `  ·  ${selected.year}` : ''}
               {`  ·  ${selected.trackCount} tracks  ·  ${formatDuration(selected.duration)}`}
             </div>
@@ -512,7 +513,7 @@ export function AlbumsView(): JSX.Element {
         <input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter albums…"
+          placeholder="Filter albums or songs…"
           className="bevel-in lcd-text flex-1 px-3 py-1.5 text-[14px] outline-none"
           style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
         />
@@ -574,19 +575,34 @@ export function AlbumsView(): JSX.Element {
             {albums.map((a) => {
               const firstLetter = albumArtistFirstLetter(a.albumArtist);
               return (
-                <button
+                <div
                   key={`${a.album}::${a.albumArtist}`}
-                  onClick={() => openAlbum(a)}
-                  className="group flex flex-col gap-1 text-left"
+                  className="group flex flex-col gap-1"
                   data-newamp-album-artist-letter={firstLetter}
                 >
-                  <AlbumArt album={a} size={168} />
-                  <div className="truncate pt-1 text-[13px] font-semibold">{a.album}</div>
+                  <button
+                    onClick={() => openAlbum(a)}
+                    className="flex flex-col gap-1 text-left"
+                    title={`Open ${a.album}`}
+                  >
+                    <AlbumArt album={a} size={168} />
+                    <div className="truncate pt-1 text-[13px] font-semibold">{a.album}</div>
+                  </button>
                   <div className="truncate text-[11px]" style={{ color: 'var(--ink-2)' }}>
-                    {a.albumArtist}
+                    <ArtistLink artist={a.albumArtist} color="var(--ink-2)" />
                     {a.year ? `  ·  ${a.year}` : ''}
                   </div>
-                </button>
+                  {a.matchedTrackTitles && (
+                    <div
+                      className="truncate text-[10px]"
+                      style={{ color: 'var(--accent)' }}
+                      title={a.matchedTrackTitles}
+                      data-newamp-album-matched-songs
+                    >
+                      ♪ {a.matchedTrackTitles}
+                    </div>
+                  )}
+                </div>
               );
             })}
           </div>

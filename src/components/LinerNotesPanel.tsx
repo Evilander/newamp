@@ -4,6 +4,7 @@ import type { AiLinerNotesResult, Track } from '@shared/types';
 import { api } from '../lib/api';
 import { formatTime } from '../lib/format';
 import { musicEntitySearchText, wikipediaSearchUrl } from '../lib/wiki';
+import { ArtistLink, AlbumLink } from './EntityLink';
 
 function pickLyricHotLines(lines: LrcLine[] | null, plain: string | null | undefined): string[] {
   const candidates: string[] = [];
@@ -233,20 +234,59 @@ export function LinerNotesPanel({
       <section className="liner-notes-credits">
         <span className="liner-notes-section-title">File Credits</span>
         <dl>
-          <CreditRow
-            label="Artist"
-            value={track.artist}
-            href={wikipediaSearchUrl(musicEntitySearchText(track.artist, 'musician'))}
-            linkDataAttr="data-newamp-liner-artist-link"
-          />
-          <CreditRow
-            label="Album"
-            value={track.album || '-'}
-            href={track.album ? wikipediaSearchUrl(musicEntitySearchText(track.artist, track.album, 'album')) : null}
-            linkDataAttr="data-newamp-liner-album-link"
-          />
+          <>
+            <dt>Artist</dt>
+            <dd>
+              <ArtistLink artist={track.artist} color="inherit" />
+              {track.artist ? (
+                <>
+                  {' '}
+                  <a
+                    href={wikipediaSearchUrl(musicEntitySearchText(track.artist, 'musician'))}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-newamp-liner-artist-link
+                    title="Open on Wikipedia"
+                  >
+                    ↗
+                  </a>
+                </>
+              ) : null}
+            </dd>
+          </>
+          <>
+            <dt>Album</dt>
+            <dd>
+              {track.album ? (
+                <>
+                  <AlbumLink
+                    album={track.album}
+                    albumArtist={track.albumArtist || track.artist}
+                    color="inherit"
+                  />
+                  {' '}
+                  <a
+                    href={wikipediaSearchUrl(musicEntitySearchText(track.artist, track.album, 'album'))}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-newamp-liner-album-link
+                    title="Open on Wikipedia"
+                  >
+                    ↗
+                  </a>
+                </>
+              ) : (
+                '-'
+              )}
+            </dd>
+          </>
           {track.albumArtist && track.albumArtist !== track.artist ? (
-            <CreditRow label="Album Artist" value={track.albumArtist} />
+            <>
+              <dt>Album Artist</dt>
+              <dd>
+                <ArtistLink artist={track.albumArtist} color="inherit" />
+              </dd>
+            </>
           ) : null}
           <CreditRow label="Genre" value={track.genre || '-'} />
           <CreditRow
