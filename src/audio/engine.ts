@@ -95,6 +95,15 @@ export class AudioEngine {
   // happened in the meantime — otherwise rapid seekbar drags fire dozens
   // of false-positive "seek failed" warnings.
   private seekSeq = 0;
+  // applyLimiter owns the masterGain → (limiter) → destination edge.
+  // `limiterWired` lets the first (boot) wiring skip the anti-click mute dip;
+  // `limiterDipTimer` lets a rapid re-toggle cancel a pending dip.
+  private limiterWired = false;
+  private limiterDipTimer: number | null = null;
+  // Set when ensureGraph asks for a sample rate the device rejects and we fall
+  // back to the default — surfaced in the Bit-Perfect UI so the rate request
+  // never fails silently.
+  private sampleRateFallback: { requested: number; actual: number } | null = null;
 
   private state: EngineState = {
     duration: 0,
@@ -168,12 +177,22 @@ export class AudioEngine {
       contextOptions.sampleRate = this.preferredSampleRate;
     }
     let ctx: AudioContext;
+    this.sampleRateFallback = null;
     try {
       ctx = new AudioContext(contextOptions);
-    } catch {
+    } catch (err) {
       // Chromium rejects unsupported sample rates with NotSupportedError. Fall
-      // back to the device default so playback never gates on a setting.
+      // back to the device default so playback never gates on a setting — but
+      // RECORD it (and warn) so the Bit-Perfect UI can tell the user their
+      // requested rate was rejected instead of silently showing the wrong one.
       ctx = new AudioContext({ latencyHint: 'playback' });
+      if (this.preferredSampleRate && Math.abs(ctx.sampleRate - this.preferredSampleRate) >= 1) {
+        this.sampleRateFallback = { requested: this.preferredSampleRate, actual: ctx.sampleRate };
+        console.warn(
+          `[newamp] requested sample rate ${this.preferredSampleRate} Hz not supported by the output device; running at ${ctx.sampleRate} Hz instead.`,
+          err,
+        );
+      }
     }
     const inputGain = ctx.createGain();
     inputGain.gain.value = this.preampLinear;
@@ -268,8 +287,9 @@ export class AudioEngine {
     onsetAnalyser.connect(silentSink);
     leftAnalyser.connect(silentSink);
     rightAnalyser.connect(silentSink);
-    masterGain.connect(limiter);
-    limiter.connect(ctx.destination);
+    // masterGain → (limiter) → destination routing is owned by applyLimiter()
+    // so the limiter can be TRULY bypassed (disconnected from the graph) when
+    // the user turns it off, instead of left in-chain at unity ratio.
 
     const graph = {
       ctx,
@@ -317,12 +337,26 @@ export class AudioEngine {
     const patchIfActive = (p: Partial<EngineState>) => {
       if (deckId === this.activeDeckIndex) this.patch(p);
     };
-    el.addEventListener('play', () => patchIfActive({ playing: true, ended: false }));
+    el.addEventListener('play', () => {
+      patchIfActive({ playing: true, ended: false });
+      this.startTick();
+    });
     el.addEventListener('pause', () => patchIfActive({ playing: false }));
     el.addEventListener('ended', () => patchIfActive({ playing: false, ended: true }));
     el.addEventListener('waiting', () => patchIfActive({ buffering: true }));
     el.addEventListener('canplay', () => patchIfActive({ buffering: false }));
-    el.addEventListener('playing', () => patchIfActive({ buffering: false }));
+    el.addEventListener('playing', () => {
+      patchIfActive({ buffering: false });
+      this.startTick();
+    });
+    el.addEventListener('seeked', () => {
+      if (deckId !== this.activeDeckIndex) return;
+      // Reflect the seeked position right away — while paused the rAF poll is
+      // suspended, so without this the scrubber/clock would not move until the
+      // next play. Re-arm the poll if we're actually playing.
+      this.patch({ currentTime: Number.isFinite(el.currentTime) ? el.currentTime : this.state.currentTime });
+      if (!el.paused && !el.ended) this.startTick();
+    });
     el.addEventListener('loadedmetadata', () =>
       patchIfActive({ duration: Number.isFinite(el.duration) ? el.duration : 0 }),
     );
@@ -376,7 +410,12 @@ export class AudioEngine {
         this.notify();
       }
     }
-    this.rafId = requestAnimationFrame(this.tick);
+    // Only keep polling while audio is actually advancing. A 60fps rAF running
+    // with playback paused/ended/idle burned CPU + battery for the whole app
+    // lifetime; play/playing/seeked re-arm the loop via startTick().
+    if (el.src && !el.paused && !el.ended) {
+      this.rafId = requestAnimationFrame(this.tick);
+    }
   };
 
   subscribe(fn: EngineListener): () => void {
@@ -750,9 +789,39 @@ export class AudioEngine {
   seek(seconds: number): void {
     if (!Number.isFinite(seconds) || !this.graph) return;
     const el = this.activeDeck.el;
-    const target = Math.max(0, Math.min(el.duration || 0, seconds));
+    // Only clamp to duration when it is actually known. `el.duration || 0`
+    // collapses to 0 whenever duration is NaN/Infinity (custom protocol before
+    // metadata, live transcode), which turned every seek into seek-to-zero.
+    // Fall back to the raw target and let the element clamp internally.
+    const upper = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : Number.POSITIVE_INFINITY;
+    const target = Math.max(0, Math.min(upper, seconds));
     const previous = el.currentTime;
-    el.currentTime = target;
+    let assigned = false;
+    try {
+      el.currentTime = target;
+      assigned = true;
+    } catch (err) {
+      // Element not ready to seek yet (readyState < HAVE_METADATA). Mirror
+      // applyStartPosition's retry: land the seek once metadata arrives instead
+      // of silently dropping it (e.g. resuming a saved position on a cold deck).
+      console.warn('[newamp] seek before metadata; retrying on loadedmetadata', err);
+      el.addEventListener(
+        'loadedmetadata',
+        () => {
+          try {
+            const max = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : target;
+            el.currentTime = Math.max(0, Math.min(max, target));
+          } catch {
+            /* still not seekable (non-seekable stream); nothing more we can do */
+          }
+        },
+        { once: true },
+      );
+    }
+    // Don't run the VBR-failure diagnostic when the assignment itself threw —
+    // the position never changed, so the verify would false-positive "seek
+    // failed: VBR MP3" when the real cause was "metadata not ready".
+    if (!assigned) return;
     // VBR seek diagnostic: VBR MP3s without a Xing/Info header
     // (reproduces on LAME --vbr-old encodes) can't be seeked accurately
     // by HTMLAudioElement — Chromium guesses byte position and may
@@ -794,9 +863,10 @@ export class AudioEngine {
 
   setVolume(v: number): void {
     // Volume range extends to 2.0 (VLC-style boost). masterGain is upstream of
-    // the limiter (see graph wiring), so values past 1.0 are caught by the
-    // limiter and never reach the device above 0 dBFS. No more silent
-    // post-limiter clipping when users push past unity.
+    // the limiter (see graph wiring), so when the limiter is ENABLED values
+    // past 1.0 are caught by it and never reach the device above 0 dBFS. With
+    // the limiter bypassed (true off), boost past unity CAN clip at the device
+    // — that is the user's explicit choice when they disable clipping protection.
     // `this.volume` keeps the raw slider POSITION (for the % label,
     // persistence, headroom math); the gain node gets a perceptual taper via
     // volumePositionToGain so equal slider travel ~= equal perceived loudness.
@@ -813,13 +883,24 @@ export class AudioEngine {
     const clampedDb = db == null || !Number.isFinite(db) ? 0 : Math.max(-18, Math.min(12, db));
     this.replayGainLinear = Math.pow(10, clampedDb / 20);
     if (!this.graph) return;
-    this.graph.replayGain.gain.setTargetAtTime(this.replayGainLinear, this.graph.ctx.currentTime, 0.02);
+    // Short time-constant (~6ms): ReplayGain changes at track boundaries, and a
+    // 20ms ramp was audible as a brief loudness "swell" on the first beat. Still
+    // smoothed enough to avoid a zipper/click.
+    this.graph.replayGain.gain.setTargetAtTime(this.replayGainLinear, this.graph.ctx.currentTime, 0.006);
   }
 
   setPreampDb(db: number): void {
     this.preampLinear = preampDbToLinear(db);
     if (!this.graph) return;
-    this.graph.inputGain.gain.setTargetAtTime(this.preampLinear, this.graph.ctx.currentTime, 0.02);
+    // Preamp is a live Settings slider (not a track-boundary one-shot like
+    // ReplayGain), so it uses the slider-class time constant that volume/EQ use
+    // — a 0.006 ramp made dragging it audibly steppy next to the others.
+    this.graph.inputGain.gain.setTargetAtTime(this.preampLinear, this.graph.ctx.currentTime, 0.015);
+  }
+
+  /** Requested-vs-actual rate when the device rejected the preferred rate; null otherwise. */
+  getSampleRateFallback(): { requested: number; actual: number } | null {
+    return this.sampleRateFallback;
   }
 
   setLimiterEnabled(enabled: boolean): void {
@@ -828,12 +909,70 @@ export class AudioEngine {
   }
 
   private applyLimiter(graph: AudioGraph, enabled: boolean): void {
-    const now = graph.ctx.currentTime;
-    graph.limiter.threshold.setTargetAtTime(enabled ? -1 : 0, now, 0.01);
-    graph.limiter.knee.setTargetAtTime(0, now, 0.01);
-    graph.limiter.ratio.setTargetAtTime(enabled ? 20 : 1, now, 0.01);
-    graph.limiter.attack.setTargetAtTime(enabled ? 0.003 : 0, now, 0.01);
-    graph.limiter.release.setTargetAtTime(enabled ? 0.12 : 0.01, now, 0.01);
+    const ctx = graph.ctx;
+    // TRUE bypass when off: take the DynamicsCompressor out of the path entirely
+    // (masterGain → destination) instead of leaving a unity-ratio compressor +
+    // its ~6ms lookahead in the chain. Targeted disconnect(target) documents the
+    // exact edge severed and stays correct if a future parallel tap is added off
+    // masterGain. The whole rewire is guarded: a connect() failure must NEVER
+    // leave masterGain unrouted (that would silently mute all playback) — on any
+    // error we force the direct masterGain → destination path and surface it.
+    const rewire = (): void => {
+      try {
+        try { graph.masterGain.disconnect(graph.limiter); } catch { /* edge absent */ }
+        try { graph.masterGain.disconnect(ctx.destination); } catch { /* edge absent */ }
+        try { graph.limiter.disconnect(ctx.destination); } catch { /* edge absent */ }
+        if (enabled) {
+          // Constants, not ramps — the mute dip below covers the transition, so
+          // ramping to a fixed value would be pointless audio-thread churn.
+          graph.limiter.threshold.value = -1;
+          graph.limiter.knee.value = 0;
+          graph.limiter.ratio.value = 20;
+          graph.limiter.attack.value = 0.003;
+          graph.limiter.release.value = 0.12;
+          graph.masterGain.connect(graph.limiter);
+          graph.limiter.connect(ctx.destination);
+        } else {
+          graph.masterGain.connect(ctx.destination);
+        }
+        this.limiterWired = true;
+      } catch (err) {
+        console.error('[newamp] limiter rewire failed; forcing direct output to keep audio alive', err);
+        try { graph.masterGain.disconnect(); } catch { /* ignore */ }
+        try {
+          graph.masterGain.connect(ctx.destination);
+          this.limiterWired = true;
+        } catch (fatal) {
+          console.error('[newamp] limiter recovery failed; audio routing is broken', fatal);
+          this.patch({ error: 'Audio routing failed — reload NewAmp.' });
+        }
+      }
+    };
+
+    // First wiring (graph boot) or a non-running context: nothing is audible, so
+    // rewire directly. On a live, running graph the limited↔raw amplitude step is
+    // an instantaneous discontinuity → a click; mute the master across the switch
+    // (~8ms down, rewire, ~8ms up) so the toggle is inaudible.
+    if (!this.limiterWired || ctx.state !== 'running') {
+      rewire();
+      return;
+    }
+    const target = volumePositionToGain(this.volume);
+    const DIP_S = 0.008;
+    const now = ctx.currentTime;
+    graph.masterGain.gain.cancelScheduledValues(now);
+    graph.masterGain.gain.setValueAtTime(Math.max(0.0001, graph.masterGain.gain.value), now);
+    graph.masterGain.gain.linearRampToValueAtTime(0.0001, now + DIP_S);
+    if (this.limiterDipTimer != null) window.clearTimeout(this.limiterDipTimer);
+    this.limiterDipTimer = window.setTimeout(() => {
+      this.limiterDipTimer = null;
+      if (!this.graph) return;
+      rewire();
+      const t = ctx.currentTime;
+      graph.masterGain.gain.cancelScheduledValues(t);
+      graph.masterGain.gain.setValueAtTime(0.0001, t);
+      graph.masterGain.gain.linearRampToValueAtTime(target, t + DIP_S);
+    }, Math.ceil(DIP_S * 1000) + 4);
   }
 
   setEqBand(index: number, dB: number): void {
@@ -926,6 +1065,11 @@ export class AudioEngine {
 
   dispose(): void {
     this.clearFadeTimer();
+    if (this.limiterDipTimer != null) {
+      window.clearTimeout(this.limiterDipTimer);
+      this.limiterDipTimer = null;
+    }
+    this.limiterWired = false;
     if (this.rafId) cancelAnimationFrame(this.rafId);
     this.rafId = null;
     if (!this.graph) return;

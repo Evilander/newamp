@@ -9,6 +9,7 @@ import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
+import { ScrubBar } from '../ScrubBar';
 
 export function CassetteDeck(props: DeckProps): JSX.Element {
   const {
@@ -76,16 +77,7 @@ export function CassetteDeck(props: DeckProps): JSX.Element {
       </button>
 
       <div className="deck-cs-seek titlebar-nodrag">
-        <input
-          type="range"
-          className="nslider"
-          min={0}
-          max={duration || 1}
-          step={0.1}
-          value={currentTime}
-          onChange={(e) => onSeek(parseFloat(e.currentTarget.value))}
-          title="Seek"
-        />
+        <ScrubBar className="nslider" value={currentTime} max={duration || 1} onSeek={onSeek} />
       </div>
 
       <footer className="deck-cs-transport titlebar-nodrag">

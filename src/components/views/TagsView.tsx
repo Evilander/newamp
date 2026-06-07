@@ -3,6 +3,7 @@ import type { TagRule, TagRulePreviewResult, TagSummary, Track } from '@shared/t
 import { api } from '../../lib/api';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { ViewOnboarding } from '../ViewOnboarding';
+import { ArtistLink } from '../EntityLink';
 
 const DEFAULT_BODY = `tag(midnight_drive) when
   bpm > 110
@@ -479,7 +480,7 @@ function PreviewPane({
                   {String(idx + 1).padStart(2, '0')}
                 </span>
                 <span className="font-bold" style={{ color: 'var(--ink)' }}>{track.title}</span>
-                <span className="ml-1" style={{ color: 'var(--muted)' }}>· {track.artist}</span>
+                <span className="ml-1" style={{ color: 'var(--muted)' }}>· <ArtistLink artist={track.artist} color="inherit" /></span>
               </li>
             ))}
           </ol>

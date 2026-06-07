@@ -4,6 +4,7 @@ import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
+import { ScrubBar } from '../ScrubBar';
 
 export function RetroTvDeck(props: DeckProps): JSX.Element {
   const {
@@ -98,15 +99,7 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
         <button className="pxbtn is-active" onClick={onTogglePlay}>{isPlaying ? 'PAUSE' : 'PLAY'}</button>
         <button className="pxbtn" onClick={onStop}>STOP</button>
         <button className="pxbtn" onClick={onNext}>NEXT</button>
-        <input
-          type="range"
-          className="nslider deck-tv-seek"
-          min={0}
-          max={duration || 1}
-          step={0.1}
-          value={currentTime}
-          onChange={(e) => onSeek(parseFloat(e.currentTarget.value))}
-        />
+        <ScrubBar className="nslider deck-tv-seek" value={currentTime} max={duration || 1} onSeek={onSeek} />
       </footer>
     </div>
   );

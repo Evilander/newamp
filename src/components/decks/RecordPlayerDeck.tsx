@@ -10,6 +10,7 @@ import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
+import { ScrubBar } from '../ScrubBar';
 
 export function RecordPlayerDeck(props: DeckProps): JSX.Element {
   const {
@@ -85,16 +86,7 @@ export function RecordPlayerDeck(props: DeckProps): JSX.Element {
       <div className="deck-rp-info titlebar-nodrag">
         <div className="deck-rp-title">{track ? track.title : 'No record loaded'}</div>
         <div className="deck-rp-artist">{track ? track.artist : 'Drop a track to spin it up.'}</div>
-        <input
-          type="range"
-          className="nslider deck-rp-seek"
-          min={0}
-          max={duration || 1}
-          step={0.1}
-          value={currentTime}
-          onChange={(e) => onSeek(parseFloat(e.currentTarget.value))}
-          title="Seek"
-        />
+        <ScrubBar className="nslider deck-rp-seek" value={currentTime} max={duration || 1} onSeek={onSeek} />
         <div className="deck-rp-times">
           <span>{formatTime(currentTime)}</span>
           <span>{formatTime(duration)}</span>

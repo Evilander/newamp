@@ -1222,12 +1222,22 @@ export class LibraryStore {
     const having: string[] = [];
     const havingParams: unknown[] = [];
 
+    // Search matches album name, album artist, year — AND song titles. A query
+    // like "helter skelter" surfaces the album that contains that track even
+    // though no album/artist field matches. We must NOT filter track rows in
+    // WHERE for that (it would shrink the album's track_count/duration to only
+    // the matching songs); instead group every track and decide album inclusion
+    // in HAVING via MAX(CASE ...). matched_titles surfaces the matching songs.
+    let matchSelect = '';
+    const matchSelectParams: unknown[] = [];
     if (search) {
       const q = likeParam(search);
-      where.push(
-        '(lower(album) LIKE ? OR lower(COALESCE(NULLIF(album_artist,\'\'), artist)) LIKE ? OR CAST(year AS TEXT) LIKE ?)',
-      );
-      params.push(q, q, q);
+      matchSelect = `,
+              MAX(CASE WHEN lower(album) LIKE ? OR lower(COALESCE(NULLIF(album_artist,''), artist)) LIKE ? OR CAST(year AS TEXT) LIKE ? THEN 1 ELSE 0 END) AS matched_meta,
+              MAX(CASE WHEN lower(title) LIKE ? THEN 1 ELSE 0 END) AS matched_track,
+              GROUP_CONCAT(CASE WHEN lower(title) LIKE ? THEN title ELSE NULL END, char(31)) AS matched_titles`;
+      matchSelectParams.push(q, q, q, q, q);
+      having.push('(matched_meta = 1 OR matched_track = 1)');
     }
     if (typeof opts.excludeAlbum === 'string' && opts.excludeAlbum.trim()) {
       const excludeAlbum = opts.excludeAlbum.trim();
@@ -1250,7 +1260,9 @@ export class LibraryStore {
       having.push('MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) IS NULL');
     }
     const havingSql = having.length ? `HAVING ${having.join(' AND ')}` : '';
-    const orderSql = albumSortOrder(opts.sort, opts.randomSeed);
+    // When searching, float album/artist/year matches above songs-only matches
+    // within each sort group so a literal album name still leads.
+    const orderSql = (search ? 'matched_meta DESC, ' : '') + albumSortOrder(opts.sort, opts.randomSeed);
 
     // NOTE: Don't JOIN album_ratings here. An earlier attempt at a LEFT
     // JOIN broke listAlbums entirely: the WHERE clause references
@@ -1266,20 +1278,22 @@ export class LibraryStore {
       track_count: number;
       duration: number;
       art_track: number | null;
+      matched_track?: number;
+      matched_titles?: string | null;
     }>(
       `SELECT album,
               COALESCE(NULLIF(album_artist,''), artist) AS album_artist,
               MIN(year) AS year,
               COUNT(*) AS track_count,
               COALESCE(SUM(duration), 0) AS duration,
-              MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) AS art_track
+              MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) AS art_track${matchSelect}
          FROM tracks
         WHERE ${where.join(' AND ')}
         GROUP BY album, COALESCE(NULLIF(album_artist,''), artist)
         ${havingSql}
         ORDER BY ${orderSql}
         LIMIT ? OFFSET ?`,
-      [...params, ...havingParams, limit, offset],
+      [...matchSelectParams, ...params, ...havingParams, limit, offset],
     );
 
     // One extra query for the whole rating set — typically tiny (only rated
@@ -1312,6 +1326,13 @@ export class LibraryStore {
         artFromTrackId: r.art_track,
         rating: rating?.rating ?? 0,
         ratingScore: rating?.ratingScore ?? null,
+        matchedOnTrack: search ? Boolean(r.matched_track) : undefined,
+        // Split on the U+001F unit separator (the SQL GROUP_CONCAT used char(31))
+        // — chosen because it cannot occur inside a song title.
+        matchedTrackTitles:
+          search && r.matched_titles
+            ? Array.from(new Set(r.matched_titles.split(''))).slice(0, 4).join(' · ')
+            : null,
       };
     });
   }

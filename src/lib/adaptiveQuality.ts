@@ -101,6 +101,10 @@ function subscribe(cb: () => void): () => void {
   ensureMonitor();
   return () => {
     subscribers.delete(cb);
+    // Stop the rAF monitor when the last consumer leaves — `tick` bails on its
+    // next frame because it checks `monitorRunning` up top. Without this the
+    // frame-budget loop ran forever (one wasted rAF/frame for the app's life).
+    if (subscribers.size === 0) monitorRunning = false;
   };
 }
 

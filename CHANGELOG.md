@@ -3,6 +3,76 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.10.0] - 2026-06-07
+
+### Audio quality
+
+- **Hi-res no longer gets crushed.** The ffmpeg fallback path (ALAC, AIFF, APE, WV,
+  TTA, DSD…) used to hardcode 16-bit / 48 kHz, irreversibly downsampling and
+  truncating every 24/96 lossless file on playback. It now emits **32-bit float PCM
+  at the source sample rate** (the only lossless PCM-in-WAV format Chromium decodes —
+  24-bit int WAV is unsupported), and DSD gets a pinned high-precision SoX resampler
+  instead of ffmpeg's uncontrolled default. (`electron/transcode.ts`)
+- **"Limiter off" is now a true bypass** — the DynamicsCompressor is disconnected from
+  the graph, not left in-chain at unity ratio with its lookahead delay. The toggle is
+  click-free (an ~8 ms master dip across the rewire) and mute-safe (a routing failure
+  force-restores direct output instead of silently killing audio). (`engine.ts`)
+- **Hi-res WAV export too** — "Export to WAV" now writes 24-bit at the source rate
+  (`pcm_s24le`), matching playback fidelity instead of crushing to 16-bit/48 kHz.
+- **Smoother track transitions** — ReplayGain gain changes use a 6 ms ramp (was 20 ms),
+  killing the loudness "swell" on the first beat of a new track (preamp stays on the
+  slider-class 15 ms ramp so dragging it glides like volume/EQ).
+- **Honest sample-rate readout** in Settings → Audio: shows the playing track's source
+  rate vs the live engine rate, flags when Chromium is resampling the track, and now
+  warns when the device rejected the requested rate (instead of silently showing the
+  wrong one). Seeks before metadata loads retry on `loadedmetadata` instead of being
+  dropped, and no longer emit a misleading "VBR" warning.
+- **`docs/audio-quality.md`** documents the full signal path, the real ceiling of a
+  Web-Audio player, and the native WASAPI-exclusive backend roadmap for true
+  bit-perfect output.
+
+### Fixed
+
+- **Scrubbing no longer resets the song to the start.** The big one. The native
+  audio protocol now forwards the media element's HTTP `Range` header to
+  `net.fetch`, so Chromium gets a real `206 Partial Content` and can seek mp3 /
+  flac / m4a / aac / ogg / opus. `engine.seek` also stops collapsing to 0 when
+  duration is briefly unknown (`NaN`/`Infinity`), and seeks while paused now
+  reflect immediately. (`electron/main.ts`, `src/audio/engine.ts`)
+- **The seek bar now actually scrubs.** Every scrubber (the transport, all 9 deck
+  skins, the fullscreen visualizer) was a *controlled* `<input>` whose value was
+  yanked back to the playhead ~10×/sec, fighting the drag. They now share one
+  uncontrolled-while-dragging `ScrubBar`. (`src/components/ScrubBar.tsx`)
+- **The Now Playing waveform is a real scrubber.** The big "Overview" waveform was
+  decorative; click or drag it to seek. (`src/components/views/NowPlayingView.tsx`)
+- **The detached visualizer works as a projector.** It no longer opens a black
+  window: a headless Eviland frame producer now publishes to it independently of
+  the on-screen visualizer, so you can pop Eviland onto a second monitor and keep
+  using NewAmp normally. Opening it no longer force-switches the main window's
+  look, and the projector follows the Director's choreography.
+  (`src/visualizer/eviland-producer.ts`, `frame-bus.ts`, `detached/main.tsx`)
+- **Searching Albums now finds songs too.** Typing a track title (e.g. "helter
+  skelter") surfaces the album that contains it, with the matching song titles
+  shown under the cover. (`electron/library.ts`, `AlbumsView.tsx`)
+
+### Added
+
+- **Projector toggle in the sidebar.** Pop Eviland out into its own window from
+  anywhere — no need to enter fullscreen first. (`src/components/Sidebar.tsx`)
+- **Clickable artist & album names across the app.** The transport marquee and the
+  Albums grid (and more) route to the artist/album. (`Transport.tsx`,
+  `AlbumsView.tsx`, `EntityLink`)
+- **`docs/newamp-2.0-plan.md`** — a synthesized, prioritized build plan for the
+  Eviland MilkDrop-parity engine sprint and the NewAmp 2.0 feature set.
+
+### Performance
+
+- **No more idle 60fps loops.** The adaptive-quality monitor now stops when nothing
+  is subscribed; the engine's playback-clock rAF suspends while paused/ended and
+  re-arms on play/seek; the Now Playing spectrum + VU meter stop polling while
+  paused (and the VU meter now reads true L/R levels instead of a faked split).
+  (`adaptiveQuality.ts`, `engine.ts`, `NowPlayingView.tsx`, `frame-bus.ts`)
+
 ## [1.9.0] - 2026-06-02
 
 ### Added
