@@ -44,8 +44,14 @@ assert.match(settingsViewSource, /Show crash log/, 'Settings should expose local
 assert.match(mainSource, /OPEN_DEVTOOLS/, 'devtools should be opt-in so normal dev launches stay usable');
 assert.match(mainSource, /crashDumpsPath/, 'support diagnostics should include the local crash dump path');
 assert.match(mainSource, /openDevTools/, 'main window should still support explicit devtools opening');
-assert.match(mainSource, /NEWAMP_ENABLE_HARDWARE_ACCELERATION/, 'hardware acceleration should be an explicit opt-in after packaged GPU crash evidence');
-assert.match(mainSource, /const forceSoftwareRendering = !forceHardwareAcceleration;/, 'normal launches should default to the stable software-rendering path');
+// Hardware acceleration defaults ON (NewAmp is a real-time WebGL visualizer +
+// GPU-composited, audio-reactive chrome — software rendering is the "feels heavy"
+// path). Software is forced ONLY for smokes, an explicit opt-out, or auto-recovery
+// after a prior GPU-process crash — never as the normal-launch default. (The old
+// software-default contract was the pre-1.6 GPU-default bug.)
+assert.match(mainSource, /NEWAMP_DISABLE_HARDWARE_ACCELERATION/, 'software rendering must be available as an explicit opt-out env var');
+assert.match(mainSource, /const forceSoftwareRendering = smokeMode \|\| gpuForcedOff \|\| gpuCrashedLastLaunch;/, 'normal launches must default to GPU; software is forced only for smokes / opt-out / GPU-crash recovery');
+assert.match(mainSource, /gpuCrashedLastLaunch/, 'a prior GPU-process crash must fall back to software on the next launch (auto-recovery)');
 
 console.log(
   JSON.stringify(
