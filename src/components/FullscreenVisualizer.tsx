@@ -1366,6 +1366,7 @@ export function FullscreenVisualizer(): JSX.Element {
                 className="pxbtn"
                 onClick={() => void captureStill()}
                 title="Save a PNG still (press H first for a clean shot)"
+                data-newamp-viz-capture-button
               >
                 Save PNG
               </button>
@@ -1382,6 +1383,8 @@ export function FullscreenVisualizer(): JSX.Element {
                 className={`pxbtn ${recording ? 'is-active' : ''}`}
                 onClick={toggleRecord}
                 title={recording ? 'Stop recording and save a WebM clip' : 'Record a WebM clip of the visualizer'}
+                data-newamp-viz-record-button
+                aria-pressed={recording}
               >
                 {recording ? '■ Stop recording' : '● Record clip'}
               </button>
