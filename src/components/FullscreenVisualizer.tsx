@@ -15,6 +15,7 @@ import type { VisualizerPreset } from '@shared/types';
 import { volumeLabel } from './VolumeSlider';
 import { createCanvasRecorder, CanvasRecorderError, type CanvasRecorder } from '../visualizer/eviland-recorder';
 import { useDetachedVisualizer } from './useDetachedVisualizer';
+import { ScrubBar } from './ScrubBar';
 
 // Preset registry. `group` drives the labeled sections in the new preset
 // picker popover so users can scan by category instead of one long rail. The
@@ -925,9 +926,9 @@ export function FullscreenVisualizer(): JSX.Element {
               if (detached.isOpen) {
                 detached.close();
               } else {
-                // The detached window is an Eviland projector — frames only
-                // publish from the Eviland branch, so switch to it on open.
-                if (activePreset !== 'eviland') setPreset('eviland');
+                // The headless producer feeds the projector regardless of which
+                // preset is on-screen, so we no longer force-switch to 'eviland'
+                // here — the user keeps whatever look they were enjoying.
                 detached.open(detachedDisplayId ?? undefined);
               }
             }}
@@ -1462,14 +1463,11 @@ export function FullscreenVisualizer(): JSX.Element {
         </div>
         <div className="flex items-center gap-3 text-xs" style={{ color: 'rgba(255,255,255,0.6)' }}>
           <span>{formatTime(currentTime)}</span>
-          <input
-            type="range"
+          <ScrubBar
             className="nslider flex-1"
-            min={0}
-            max={duration || 1}
-            step={0.1}
             value={currentTime}
-            onChange={(e) => seek(parseFloat(e.target.value))}
+            max={duration || 1}
+            onSeek={(v) => seek(v)}
           />
           <span>{formatTime(duration)}</span>
         </div>

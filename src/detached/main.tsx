@@ -80,6 +80,10 @@ function attachPort(port: MessagePort): void {
     const active = renderer;
     if (!active) return;
     try {
+      // The producer ships the Director/manual operator look alongside each
+      // frame; apply it so the projector is choreographed, not the renderer's
+      // flat default. Guarded — a bad config must never stop the render.
+      if (payload.operator) active.setConfig(payload.operator);
       active.render(payload.frame, payload.palette, payload.dtMs);
     } catch (err) {
       console.error('[eviland-detached] render threw', err);

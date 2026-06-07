@@ -1365,10 +1365,25 @@ function SpectrumPanel({
 }): JSX.Element {
   const barsRef = useRef<HTMLDivElement>(null);
   const peakRef = useRef<HTMLDivElement>(null);
+  const seek = usePlayerStore((s) => s.seek);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
   const barCount = spectrumBandCount(spectrumStyle);
 
   useEffect(() => {
     const bars = spectrumBandCount(spectrumStyle);
+    // Don't run the analyser rAF while paused — there's no signal to draw and
+    // it was burning a frame budget on the Now Playing screen indefinitely.
+    // Park the bars low so they don't freeze mid-spectrum.
+    if (!isPlaying) {
+      const container = barsRef.current;
+      if (container) {
+        for (let i = 0; i < bars; i++) {
+          const bar = container.children.item(i) as HTMLElement | null;
+          if (bar) bar.style.height = '2%';
+        }
+      }
+      return;
+    }
     const freq = new Uint8Array(engine.frequencyBinCount);
     const peaks = new Float32Array(bars);
     let raf = 0;
@@ -1405,7 +1420,7 @@ function SpectrumPanel({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [spectrumStyle]);
+  }, [spectrumStyle, isPlaying]);
 
   return (
     <div
@@ -1492,7 +1507,7 @@ function SpectrumPanel({
             {duration > 0 ? `${Math.round((currentTime / duration) * 100)}%` : '0%'}
           </span>
         </div>
-        <WaveformOverview currentTime={currentTime} duration={duration} />
+        <WaveformOverview currentTime={currentTime} duration={duration} onSeek={seek} />
       </div>
     </div>
   );
@@ -1911,39 +1926,45 @@ function formatDb(value: number): string {
 }
 
 function VuMeter(): JSX.Element {
-  const ref = useRef<HTMLDivElement>(null);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const lRef = useRef<HTMLDivElement>(null);
+  const rRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const time = new Uint8Array(engine.fftSize);
-    let l = 0,
-      r = 0;
+    if (!isPlaying) {
+      // Drain to zero and stop — no point polling a silent analyser, and
+      // querySelector-per-frame against a paused signal was pure waste.
+      if (lRef.current) lRef.current.style.width = '0%';
+      if (rRef.current) rRef.current.style.width = '0%';
+      return;
+    }
+    const left = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+    const right = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+    let l = 0;
+    let r = 0;
     let raf = 0;
+    // Real per-channel level from the engine's dedicated L/R analysers (no more
+    // faked *0.96 / *1.02 mono split). Mean bin energy, lightly gained so
+    // typical music sits mid-scale.
+    const channelLevel = (buf: Uint8Array): number => {
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i]!;
+      return Math.min(1, (sum / (buf.length * 255)) * 3.2);
+    };
     const tick = (): void => {
-      engine.getTimeData(time as Uint8Array<ArrayBuffer>);
-      // Single-channel approx - we don't have split L/R from the analyser.
-      let sumSq = 0;
-      for (let i = 0; i < time.length; i++) {
-        const v = (time[i]! - 128) / 128;
-        sumSq += v * v;
-      }
-      const rms = Math.sqrt(sumSq / time.length); // 0..1
-      // Simulate a tiny channel split so the visual reads "stereo"
-      l = Math.max(l * 0.86, rms * 0.96);
-      r = Math.max(r * 0.86, rms * 1.02);
-      const el = ref.current;
-      if (el) {
-        const lf = el.querySelector<HTMLElement>('[data-vu="L"]');
-        const rf = el.querySelector<HTMLElement>('[data-vu="R"]');
-        if (lf) lf.style.width = `${Math.min(100, l * 100)}%`;
-        if (rf) rf.style.width = `${Math.min(100, r * 100)}%`;
-      }
+      engine.getLeftFreqData(left as Uint8Array<ArrayBuffer>);
+      engine.getRightFreqData(right as Uint8Array<ArrayBuffer>);
+      l = Math.max(l * 0.86, channelLevel(left));
+      r = Math.max(r * 0.86, channelLevel(right));
+      if (lRef.current) lRef.current.style.width = `${Math.min(100, l * 100)}%`;
+      if (rRef.current) rRef.current.style.width = `${Math.min(100, r * 100)}%`;
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [isPlaying]);
 
   return (
-    <div ref={ref} className="flex flex-col gap-1">
+    <div className="flex flex-col gap-1">
       {(['L', 'R'] as const).map((side) => (
         <div key={side} className="flex items-center gap-2">
           <span
@@ -1957,6 +1978,7 @@ function VuMeter(): JSX.Element {
             style={{ background: 'var(--panel-2)', overflow: 'hidden' }}
           >
             <div
+              ref={side === 'L' ? lRef : rRef}
               data-vu={side}
               className="h-full"
               style={{
@@ -1975,9 +1997,11 @@ function VuMeter(): JSX.Element {
 function WaveformOverview({
   currentTime,
   duration,
+  onSeek,
 }: {
   currentTime: number;
   duration: number;
+  onSeek: (seconds: number) => void;
 }): JSX.Element {
   // Decorative pseudo-waveform — real PCM peak data would require off-thread
   // decode at scan time; this gives the right "shape signature" for now.
@@ -2001,8 +2025,44 @@ function WaveformOverview({
 
   const pct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
 
+  // Click or drag anywhere on the waveform to seek. Previously this big,
+  // scrubber-looking surface was purely decorative — the user could only seek
+  // from the small transport bar. Pointer capture keeps the drag tracking even
+  // when the cursor leaves the 40px-tall strip.
+  const draggingRef = useRef(false);
+  const seekFromPointer = (clientX: number, target: Element): void => {
+    if (duration <= 0) return;
+    const rect = target.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    onSeek(frac * duration);
+  };
+
   return (
-    <svg width="100%" height={40} viewBox="0 0 100 40" preserveAspectRatio="none">
+    <svg
+      width="100%"
+      height={40}
+      viewBox="0 0 100 40"
+      preserveAspectRatio="none"
+      data-newamp-waveform-seek
+      style={{ cursor: duration > 0 ? 'pointer' : 'default', touchAction: 'none' }}
+      onPointerDown={(e) => {
+        draggingRef.current = true;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        seekFromPointer(e.clientX, e.currentTarget);
+      }}
+      onPointerMove={(e) => {
+        if (draggingRef.current) seekFromPointer(e.clientX, e.currentTarget);
+      }}
+      onPointerUp={(e) => {
+        draggingRef.current = false;
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        } catch {
+          /* pointer already released */
+        }
+      }}
+    >
       <defs>
         <linearGradient id="wave-played" x1="0" x2="1">
           <stop offset="0%" stopColor="var(--accent)" />

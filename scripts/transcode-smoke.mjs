@@ -54,6 +54,21 @@ controller.abort();
 const buf = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), total);
 const magic = buf.subarray(0, 4).toString('ascii');
 const ok = res.ok && playbackMode(filePath) === 'ffmpeg' && magic === 'RIFF' && total > 44;
+
+// Fidelity contract for the streaming-playback transcode (transcodeToWavResponse).
+// Locks in: 32-bit IEEE float (NOT 16-bit, NOT 24-bit int — the only lossless
+// PCM-in-WAV Chromium decodes) at the SOURCE sample rate (NOT forced 48k). This
+// catches both the old `pcm_s16le -ar 48000` regression and any future switch to
+// `pcm_s24le`/`pcm_s32le` (which Chromium's <audio> silently fails to decode).
+// ffmpeg writes WAVE_FORMAT_EXTENSIBLE (0xFFFE) for these, with the real format
+// code in the SubFormat GUID at offset 44.
+assert.equal(buf.subarray(12, 16).toString('ascii'), 'fmt ', 'streamed transcode WAV must have a fmt chunk at offset 12');
+const wavAudioFormat = buf.readUInt16LE(20);
+const wavFormatCode = wavAudioFormat === 0xfffe ? buf.readUInt16LE(44) : wavAudioFormat;
+assert.equal(wavFormatCode, 3, 'streaming transcode must emit IEEE float (Chromium cannot decode 24-bit int WAV)');
+assert.equal(buf.readUInt16LE(34), 32, 'streaming transcode must be 32-bit (no 16-bit crush)');
+assert.equal(buf.readUInt16LE(22), 2, 'streaming transcode must keep the stereo fold');
+assert.equal(buf.readUInt32LE(24), 44100, 'streaming transcode must preserve the 44.1 kHz source rate (no forced 48k)');
 const exportPath = resolve('tmp', 'transcode-smoke', 'exported-track.wav');
 const exported = await transcodeTrackToWavFile(filePath, exportPath);
 const exportedMagic = (await readFile(exportPath)).subarray(0, 4).toString('ascii');

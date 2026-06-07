@@ -859,7 +859,7 @@ function LibraryHealthPanel({
         <div className="mt-1 grid gap-[2px]">
           {recent.map((track) => (
             <div key={track.id} className="truncate" title={`${track.artist} - ${track.title}`}>
-              {track.artist} - {track.title}
+              <ArtistLink artist={track.artist} color="inherit" /> - {track.title}
             </div>
           ))}
         </div>

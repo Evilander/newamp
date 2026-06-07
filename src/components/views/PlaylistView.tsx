@@ -10,7 +10,7 @@ import { moveQueueItem, removeQueueItem } from '@shared/queue-edit';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime } from '../../lib/format';
 import { api } from '../../lib/api';
-import { ArtistLink } from '../EntityLink';
+import { ArtistLink, AlbumLink } from '../EntityLink';
 
 type SetMood = SmartPlaylistMood;
 
@@ -971,6 +971,16 @@ export function PlaylistView(): JSX.Element {
                         </span>
                         <span className="flex-1 truncate">
                           <ArtistLink artist={t.artist} color="inherit" /> - {t.title}
+                          {t.album ? (
+                            <>
+                              {' '}·{' '}
+                              <AlbumLink
+                                album={t.album}
+                                albumArtist={t.albumArtist || t.artist}
+                                color="inherit"
+                              />
+                            </>
+                          ) : null}
                         </span>
                         <span style={{ color: 'var(--muted)' }}>{formatTime(t.duration ?? 0)}</span>
                         <span className="flex shrink-0 items-center gap-1">
@@ -1078,6 +1088,16 @@ export function PlaylistView(): JSX.Element {
                       </span>
                       <span className="flex-1 truncate">
                         <ArtistLink artist={t.artist} color="inherit" /> - {t.title}
+                        {t.album ? (
+                          <>
+                            {' '}·{' '}
+                            <AlbumLink
+                              album={t.album}
+                              albumArtist={t.albumArtist || t.artist}
+                              color="inherit"
+                            />
+                          </>
+                        ) : null}
                       </span>
                       <span style={{ color: 'var(--muted)' }}>{formatTime(t.duration ?? 0)}</span>
                       <span className="flex shrink-0 items-center gap-1">

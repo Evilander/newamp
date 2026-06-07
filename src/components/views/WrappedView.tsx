@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { WrappedRange, WrappedStats } from '@shared/types';
 import { api } from '../../lib/api';
+import { ArtistLink } from '../EntityLink';
 
 const RANGES: Array<{ id: WrappedRange; label: string }> = [
   { id: 'day', label: 'Today' },
@@ -252,7 +253,7 @@ export function WrappedView(): JSX.Element {
                       {i + 1}
                     </span>
                     <span className="flex-1 truncate" style={{ color: 'var(--ink)' }}>
-                      {t.title} <span style={{ color: 'var(--muted)' }}>· {t.artist}</span>
+                      {t.title} <span style={{ color: 'var(--muted)' }}>· <ArtistLink artist={t.artist} color="inherit" /></span>
                     </span>
                     <span style={{ color: 'var(--muted)' }}>{t.plays}</span>
                   </li>
@@ -295,7 +296,7 @@ export function WrappedView(): JSX.Element {
                       {i + 1}
                     </span>
                     <span className="flex-1 truncate" style={{ color: 'var(--ink)' }}>
-                      {a.artist}
+                      <ArtistLink artist={a.artist} color="inherit" />
                     </span>
                     <span style={{ color: 'var(--muted)' }}>{a.plays}</span>
                   </li>

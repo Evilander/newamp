@@ -1124,8 +1124,17 @@ function BitPerfectRow({
   settings: AppSettings;
   onChange: (patch: Partial<AppSettings>) => void;
 }): JSX.Element {
-  const actualRate = engine.getActualSampleRate?.() ?? null;
-  const actualLabel = actualRate ? `${(actualRate / 1000).toFixed(1)} kHz` : '—';
+  const currentTrack = usePlayerStore((s) => s.current);
+  const actualRate = engine.getActualSampleRate();
+  const actualLabel = actualRate != null ? `${(actualRate / 1000).toFixed(1)} kHz` : '—';
+  const sourceRate = currentTrack?.sampleRate ?? null;
+  const sourceLabel = sourceRate != null ? `${(sourceRate / 1000).toFixed(1)} kHz` : '—';
+  // Honest indicator: does Chromium resample the file → AudioContext? (The OS
+  // mixer may also resample AudioContext → device; that we can't observe here.)
+  const sourceResampled = sourceRate != null && actualRate != null && Math.abs(sourceRate - actualRate) >= 1;
+  // If the device rejected the preferred rate, the engine fell back — surface it
+  // rather than silently showing a rate the user didn't ask for.
+  const rateFallback = engine.getSampleRateFallback?.() ?? null;
   const preferred = settings.audioPreferredSampleRate;
   const matched = settings.audioBitPerfectPath && preferred != null && actualRate != null && Math.abs(actualRate - preferred) < 1;
   const willRestart = settings.audioBitPerfectPath && preferred != null && actualRate != null && Math.abs(actualRate - preferred) >= 1;
@@ -1167,6 +1176,26 @@ function BitPerfectRow({
         {matched && <span style={{ color: 'var(--accent)' }}> · matched</span>}
         {willRestart && <span style={{ color: 'var(--warn)' }}> · restart NewAmp to apply the new rate</span>}
       </div>
+      {rateFallback && (
+        <div className="text-[11px]" style={{ color: 'var(--warn)' }} data-newamp-rate-fallback>
+          {(rateFallback.requested / 1000).toFixed(1)} kHz not supported by your output device — running at{' '}
+          {(rateFallback.actual / 1000).toFixed(1)} kHz instead.
+        </div>
+      )}
+      {currentTrack && (
+        <div className="text-[11px]" style={{ color: 'var(--ink-2)' }} data-newamp-now-playing-rate>
+          Now playing:{' '}
+          <span style={{ color: sourceResampled ? 'var(--warn)' : 'var(--accent)' }}>{sourceLabel}</span> source →{' '}
+          <span style={{ color: sourceResampled ? 'var(--ink)' : 'var(--accent)' }}>{actualLabel}</span> engine
+          {sourceRate != null && actualRate != null && (
+            sourceResampled ? (
+              <span style={{ color: 'var(--warn)' }}> · Chromium resamples this track (pin the engine + your DAC to {sourceLabel} for a clean path)</span>
+            ) : (
+              <span style={{ color: 'var(--accent)' }}> · no engine-side resample</span>
+            )
+          )}
+        </div>
+      )}
       <details className="text-[11px]" style={{ color: 'var(--muted)' }}>
         <summary className="cursor-pointer select-none font-bold uppercase tracking-[0.1em]">Real bit-perfect setup (Windows / Linux)</summary>
         <div className="mt-1 grid gap-1 pl-1" style={{ lineHeight: 1.5 }}>

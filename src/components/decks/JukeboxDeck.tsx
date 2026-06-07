@@ -8,6 +8,7 @@ import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
+import { ScrubBar } from '../ScrubBar';
 
 export function JukeboxDeck(props: DeckProps): JSX.Element {
   const {
@@ -94,16 +95,7 @@ export function JukeboxDeck(props: DeckProps): JSX.Element {
 
       {/* Seek bar */}
       <div className="deck-jb-seek titlebar-nodrag">
-        <input
-          type="range"
-          className="nslider"
-          min={0}
-          max={duration || 1}
-          step={0.1}
-          value={currentTime}
-          onChange={(e) => onSeek(parseFloat(e.currentTarget.value))}
-          title="Seek"
-        />
+        <ScrubBar className="nslider" value={currentTime} max={duration || 1} onSeek={onSeek} />
         <div className="deck-jb-times">
           <span>{formatTime(currentTime)}</span>
           <span>{formatTime(duration)}</span>

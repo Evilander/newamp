@@ -4,6 +4,7 @@ import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
+import { ScrubBar } from '../ScrubBar';
 
 type WinampVariant = 'classic' | 'industrial';
 
@@ -105,15 +106,7 @@ function WinampDeck({
         </div>
 
         <div className="deck-wa-seek-row">
-          <input
-            type="range"
-            className="nslider"
-            min={0}
-            max={duration || 1}
-            step={0.1}
-            value={currentTime}
-            onChange={(e) => onSeek(parseFloat(e.currentTarget.value))}
-          />
+          <ScrubBar className="nslider" value={currentTime} max={duration || 1} onSeek={onSeek} />
           <span>{formatTime(duration)}</span>
         </div>
       </main>

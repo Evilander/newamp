@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { LibraryHealth, ListeningHistoryItem, ListeningInsights, SavedPlaylist, SmartPlaylistRule, SmartPlaylistSuggestion, Track } from '@shared/types';
 import { buildArchiveCompass, duplicateExactTotal, legacyFormatTotal, missingMetadataTotal } from '@shared/archive-compass';
 import { api } from '../../lib/api';
@@ -6,6 +6,7 @@ import { hiddenReviewLine } from '../../lib/easterEggs';
 import { formatDuration, formatNumber, formatTime } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { BrandLogo } from '../BrandLogo';
+import { ArtistLink, AlbumLink } from '../EntityLink';
 
 interface HomeData {
   stats: { tracks: number; albums: number; artists: number; duration: number };
@@ -275,7 +276,15 @@ export function HomeView(): JSX.Element {
               <div className="flex min-w-0 flex-col gap-3">
                 <HomeRail
                   title={current ? 'Harmonic From Now' : 'Harmonic Library Mix'}
-                  subtitle={current ? `Seeded by ${current.artist} — ${current.title}` : 'BPM/key-aware sequence from the catalog'}
+                  subtitle={
+                    current ? (
+                      <>
+                        Seeded by <ArtistLink artist={current.artist} color="inherit" /> — {current.title}
+                      </>
+                    ) : (
+                      'BPM/key-aware sequence from the catalog'
+                    )
+                  }
                   tracks={data.harmonic}
                   actionLabel="SAVE MIX"
                   onPlay={(start) => void playQueue(data.harmonic, start)}
@@ -586,7 +595,7 @@ function HomeRail({
   onAction,
 }: {
   title: string;
-  subtitle: string;
+  subtitle: ReactNode;
   tracks: Track[];
   actionLabel?: string;
   compact?: boolean;
@@ -630,23 +639,31 @@ function HomeRail({
       {rows.length ? (
         <div className="divide-y" style={{ borderColor: 'var(--line)' }}>
           {rows.map((track, index) => (
-            <button
+            <div
               key={`${track.id}-${index}`}
-              className="grid w-full grid-cols-[minmax(0,1fr)_46px] gap-2 px-1 py-[5px] text-left text-[11px]"
+              role="button"
+              tabIndex={0}
+              className="grid w-full cursor-pointer grid-cols-[minmax(0,1fr)_46px] gap-2 px-1 py-[5px] text-left text-[11px]"
               style={{ color: 'var(--ink)' }}
               onClick={() => onPlay(index)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onPlay(index);
+                }
+              }}
               title={`${track.artist} - ${track.title}`}
             >
               <span className="min-w-0">
                 <span className="block truncate">{track.title}</span>
                 <span className="block truncate text-[10px]" style={{ color: 'var(--muted)' }}>
-                  {track.artist}
+                  <ArtistLink artist={track.artist} color="inherit" />
                 </span>
               </span>
               <span className="self-center text-right tabular-nums" style={{ color: 'var(--ink-2)' }}>
                 {formatTime(track.duration ?? 0)}
               </span>
-            </button>
+            </div>
           ))}
         </div>
       ) : (
@@ -856,7 +873,18 @@ function HomeHero({
               {current ? current.title : 'NewAmp · ready when you are'}
             </h1>
             <p className="home-hero-credits">
-              {current ? `${current.artist} / ${current.album || 'Unknown album'}` : 'Drop a folder, pick a playlist, or pop into the Library.'}
+              {current ? (
+                <>
+                  <ArtistLink artist={current.artist} color="inherit" /> /{' '}
+                  <AlbumLink
+                    album={current.album || 'Unknown album'}
+                    albumArtist={current.albumArtist || current.artist}
+                    color="inherit"
+                  />
+                </>
+              ) : (
+                'Drop a folder, pick a playlist, or pop into the Library.'
+              )}
             </p>
             <div className="home-hero-progress">
               <div className="home-hero-progress-fill" style={{ width: `${progress}%` }} />
@@ -882,10 +910,17 @@ function HomeHero({
           </div>
 
           {topRatedSeed ? (
-            <button
-              type="button"
-              className="home-hero-pick"
+            <div
+              role="button"
+              tabIndex={0}
+              className="home-hero-pick cursor-pointer"
               onClick={() => onPlayPick(topRatedSeed)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  onPlayPick(topRatedSeed);
+                }
+              }}
               title={`Today's pick: ${topRatedSeed.artist} — ${topRatedSeed.title}`}
             >
               <span className="home-hero-pick-tag">Today&rsquo;s Pick</span>
@@ -904,10 +939,12 @@ function HomeHero({
                 )}
               </div>
               <span className="home-hero-pick-title">{topRatedSeed.title}</span>
-              <span className="home-hero-pick-artist">{topRatedSeed.artist}</span>
+              <span className="home-hero-pick-artist">
+                <ArtistLink artist={topRatedSeed.artist} color="inherit" />
+              </span>
               <ScoreBadge track={topRatedSeed} compact />
               <span className="home-hero-pick-reason">Why this pick? {todayPick?.reason}</span>
-            </button>
+            </div>
           ) : null}
         </div>
       </div>
@@ -951,11 +988,18 @@ function RatedHighlightRail({
             const art = api.getArtUrl(track.id);
             const scoreStrong = (track.ratingScore ?? track.rating * 20) >= 85;
             return (
-              <button
+              <div
                 key={track.id}
-                type="button"
-                className="home-rated-card"
+                role="button"
+                tabIndex={0}
+                className="home-rated-card cursor-pointer"
                 onClick={() => onPlay(idx)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    onPlay(idx);
+                  }
+                }}
                 title={`Play ${track.artist} — ${track.title}`}
               >
                 <div className="home-rated-card-art">
@@ -975,10 +1019,12 @@ function RatedHighlightRail({
                 </div>
                 <div className="home-rated-card-meta">
                   <span className="home-rated-card-title" title={track.title}>{track.title}</span>
-                  <span className="home-rated-card-artist" title={track.artist}>{track.artist}</span>
+                  <span className="home-rated-card-artist" title={track.artist}>
+                    <ArtistLink artist={track.artist} color="inherit" />
+                  </span>
                   <ScoreBadge track={track} compact />
                 </div>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -994,12 +1040,12 @@ function RatedHighlightRail({
 function NewsCard({ fresh, loved, top }: { fresh: Track[]; loved: Track[]; top: Track | null }): JSX.Element {
   const newestImport = fresh[0] ?? null;
   const featured = top ?? loved[0] ?? newestImport ?? null;
-  const headline = featured
+  const headlineTitle = featured
     ? `${featured.artist} — “${featured.title}”`
     : 'NewAmp · field report from the desk';
-  const blurb = featured
-    ? `${featured.artist} is high in your library signals. ${featured.year ? `Vintage ${featured.year}. ` : ''}${featured.bpm ? `Sits at ${featured.bpm.toFixed(0)} BPM. ` : ''}${featured.genre ? `${featured.genre} territory. ` : ''}${scoreLabel(featured)} library score.`
-    : 'When the library has tracks, this column becomes a compact field report on fresh imports and high-signal picks.';
+  const blurbExtras = featured
+    ? `${featured.year ? `Vintage ${featured.year}. ` : ''}${featured.bpm ? `Sits at ${featured.bpm.toFixed(0)} BPM. ` : ''}${featured.genre ? `${featured.genre} territory. ` : ''}${scoreLabel(featured)} library score.`
+    : null;
   return (
     <section className="bevel-out home-news p-3" data-cell="NEWS-03" style={{ background: 'var(--panel)' }}>
       <div className="mb-2 flex items-center gap-2">
@@ -1010,12 +1056,30 @@ function NewsCard({ fresh, loved, top }: { fresh: Track[]; loved: Track[]; top: 
           Field report · {new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
         </span>
       </div>
-      <div className="home-news-headline" title={headline}>{headline}</div>
-      <p className="home-news-body">{blurb}</p>
+      <div className="home-news-headline" title={headlineTitle}>
+        {featured ? (
+          <>
+            <ArtistLink artist={featured.artist} color="inherit" /> — “{featured.title}”
+          </>
+        ) : (
+          'NewAmp · field report from the desk'
+        )}
+      </div>
+      <p className="home-news-body">
+        {featured ? (
+          <>
+            <ArtistLink artist={featured.artist} color="inherit" /> is high in your library signals. {blurbExtras}
+          </>
+        ) : (
+          'When the library has tracks, this column becomes a compact field report on fresh imports and high-signal picks.'
+        )}
+      </p>
       {newestImport ? (
         <div className="home-news-foot">
           <span className="home-news-foot-eyebrow">Most recent import</span>
-          <span className="home-news-foot-title">{newestImport.artist} — {newestImport.title}</span>
+          <span className="home-news-foot-title">
+            <ArtistLink artist={newestImport.artist} color="inherit" /> — {newestImport.title}
+          </span>
         </div>
       ) : null}
     </section>

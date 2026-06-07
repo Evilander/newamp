@@ -8,6 +8,7 @@ import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
+import { ScrubBar } from '../ScrubBar';
 
 export function ClassicBentoDeck(props: DeckProps): JSX.Element {
   const {
@@ -92,15 +93,7 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
             <button onClick={onTogglePlay} title="Play / Pause">{isPlaying ? '||' : '>'}</button>
             <button onClick={onStop} title="Stop">[]</button>
             <button onClick={onNext} title="Next">&gt;&gt;</button>
-            <input
-              type="range"
-              className="nslider compact-seek"
-              min={0}
-              max={duration || 1}
-              step={0.1}
-              value={currentTime}
-              onChange={(e) => onSeek(parseFloat(e.target.value))}
-            />
+            <ScrubBar className="nslider compact-seek" value={currentTime} max={duration || 1} onSeek={onSeek} />
             <button
               className={mode === 'shuffle' ? 'active' : ''}
               onClick={() => onSetMode(mode === 'shuffle' ? 'normal' : 'shuffle')}

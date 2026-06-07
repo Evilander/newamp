@@ -152,6 +152,10 @@ export interface AlbumSummary {
   rating: number;
   /** Album-level fine score 0..100; null when unrated. Persists separately so a rated album never overrides per-song ratings. */
   ratingScore: number | null;
+  /** True when this album surfaced in a search because one of its SONGS matched (not the album/artist/year). Only set on search queries. */
+  matchedOnTrack?: boolean;
+  /** Up to 4 matching song titles (separator " · "), surfaced under the card when a search matched on track titles. Null otherwise. */
+  matchedTrackTitles?: string | null;
 }
 
 /**

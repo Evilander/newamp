@@ -18,7 +18,6 @@ import {
   generate as generateEvilandConfig,
   decode as decodeEvilandConfig,
 } from '../visualizer/eviland-randomizer';
-import { frameBus } from '../visualizer/frame-bus';
 import type { OperatorConfig, WaveMode } from '../visualizer/eviland-operators';
 
 export type VizMode =
@@ -458,10 +457,10 @@ export function Visualizer({
         const evFrame = reactor.analyze(freq, onsetFreq, leftFreq, rightFreq, dtMs, now);
         lastNow = now;
 
-        // Broadcast to the detached/undocked visualizer window (if open) so a
-        // projector / second monitor renders the same look in sync. No-op cost
-        // when there is no detached consumer.
-        frameBus.publish(evFrame, palette, dtMs);
+        // The detached/projector window is fed by the headless producer
+        // (src/visualizer/eviland-producer.ts), NOT from here — that keeps the
+        // projector alive while the user browses NewAmp with no on-screen
+        // visualizer mounted. This branch only renders the on-screen canvas.
 
         // Live UI state (director toggle, randomize nonce, waveform override).
         // Read via ref — no per-frame React subscription, no rAF restart.

@@ -28,6 +28,7 @@
 
 import type { EvilandFrame } from './eviland-audio';
 import type { EvilandPalette } from './eviland';
+import type { OperatorConfig } from './eviland-operators';
 
 export type EvilandFrameListener = (
   frame: EvilandFrame,
@@ -41,6 +42,13 @@ export interface DetachedFramePayload {
   frame: EvilandFrame;
   palette: EvilandPalette;
   dtMs: number;
+  /**
+   * Operator config the consumer should render with. Carries the headless
+   * producer's Director/manual look across to the detached window so the
+   * projector is choreographed, not the renderer's flat default. Omitted when
+   * the producer has no opinion (the consumer then keeps its last config).
+   */
+  operator?: OperatorConfig;
   /** Sent only on change; the consumer reapplies on each tick. */
   config?: {
     quality?: 'high' | 'medium' | 'low';
@@ -54,7 +62,7 @@ export interface DetachedAckPayload {
 
 export interface FrameBus {
   subscribe(fn: EvilandFrameListener): () => void;
-  publish(frame: EvilandFrame, palette: EvilandPalette, dtMs: number): void;
+  publish(frame: EvilandFrame, palette: EvilandPalette, dtMs: number, operator?: OperatorConfig): void;
   hasDetachedConsumer(): boolean;
   onConsumerChange(cb: (hasDetached: boolean) => void): () => void;
   attachDetachedPort(port: MessagePort): void;
@@ -104,7 +112,10 @@ export const frameBus: FrameBus = {
     };
   },
 
-  publish(frame, palette, dtMs) {
+  publish(frame, palette, dtMs, operator) {
+    // Cheap early-out: when nothing is listening (no on-screen subscriber and
+    // no detached window) publish is a no-op. Fires up to 60x/s otherwise.
+    if (state.listeners.size === 0 && !state.port) return;
     // Local consumers first. A listener throwing must not prevent IPC fan-out.
     for (const listener of state.listeners) {
       try {
@@ -123,6 +134,7 @@ export const frameBus: FrameBus = {
       palette,
       dtMs,
     };
+    if (operator) payload.operator = operator;
     if (state.qualityDirty && state.quality) {
       payload.config = { quality: state.quality };
       state.qualityDirty = false;

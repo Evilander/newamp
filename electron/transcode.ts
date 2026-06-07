@@ -54,6 +54,20 @@ export function playbackMode(filePath: string): 'native' | 'ffmpeg' {
 
 export function transcodeToWavResponse(filePath: string, request: Request): Response {
   const ffmpeg = resolveFfmpegPath();
+  const ext = extname(filePath).toLowerCase();
+  const isDsd = ext === '.dsf' || ext === '.dff';
+  // Preserve source fidelity. The old path hardcoded `pcm_s16le -ar 48000`,
+  // which irreversibly crushed 24/96 ALAC/AIFF/APE/WV down to 16-bit/48kHz on
+  // every play. We now emit 32-bit float PCM — the only lossless PCM-in-WAV
+  // format Chromium's <audio> actually decodes (24-bit int WAV is NOT
+  // supported) — at the SOURCE sample rate (no forced -ar), so no bit-depth
+  // truncation and no pre-resample before Chromium's own output stage.
+  // DSD has no native browser path and ffmpeg's default DSD→PCM filter is
+  // uncontrolled, so we pin a high-precision SoX resampler to a DSD-friendly
+  // 88.2 kHz instead of leaving the modulator/decimation to chance.
+  const codecArgs = isDsd
+    ? ['-af', 'aresample=resampler=soxr:precision=28', '-ar', '88200', '-acodec', 'pcm_f32le']
+    : ['-acodec', 'pcm_f32le'];
   const child = spawn(
     ffmpeg,
     [
@@ -68,10 +82,10 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
       '-vn',
       '-f',
       'wav',
-      '-acodec',
-      'pcm_s16le',
-      '-ar',
-      '48000',
+      ...codecArgs,
+      // Keep a stereo fold — the deck graph + per-channel analysers are stereo,
+      // and forcing 2ch is a no-op for the (overwhelmingly stereo) source set
+      // while giving rare multichannel DTS/AC3 a sane downmix.
       '-ac',
       '2',
       'pipe:1',
@@ -321,7 +335,12 @@ function normalizeAudioExportFormat(format: AudioExportFormat): AudioExportForma
 
 function audioExportArgs(format: AudioExportFormat): string[] {
   if (format === 'wav') {
-    return ['-f', 'wav', '-acodec', 'pcm_s16le', '-ar', '48000', '-ac', '2'];
+    // Preserve source fidelity on export too: 24-bit at the source sample rate
+    // (no forced 16-bit/48k crush). 24-bit int WAV is the standard interchange
+    // format for hi-res files written to disk (unlike the streaming-playback
+    // path, which must use float because Chromium's <audio> won't decode 24-bit
+    // int — here the file is for the user/other tools, not Chromium).
+    return ['-f', 'wav', '-acodec', 'pcm_s24le', '-ac', '2'];
   }
   if (format === 'mp3') {
     return ['-codec:a', 'libmp3lame', '-b:a', '320k', '-ar', '48000', '-ac', '2'];

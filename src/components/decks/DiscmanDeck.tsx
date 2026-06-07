@@ -5,6 +5,7 @@ import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
+import { ScrubBar } from '../ScrubBar';
 
 export function DiscmanDeck(props: DeckProps): JSX.Element {
   const {
@@ -84,15 +85,7 @@ export function DiscmanDeck(props: DeckProps): JSX.Element {
             <span>{formatTime(currentTime)}</span>
             <span>{formatTime(duration)}</span>
           </div>
-          <input
-            type="range"
-            className="nslider deck-dm-seek"
-            min={0}
-            max={duration || 1}
-            step={0.1}
-            value={currentTime}
-            onChange={(event) => onSeek(parseFloat(event.currentTarget.value))}
-          />
+          <ScrubBar className="nslider deck-dm-seek" value={currentTime} max={duration || 1} onSeek={onSeek} />
         </section>
       </main>
 

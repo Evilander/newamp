@@ -1,4 +1,5 @@
 import { usePlayerStore, type ViewMode } from '../store/usePlayerStore';
+import { useDetachedVisualizer } from './useDetachedVisualizer';
 
 interface NavItem {
   id: ViewMode;
@@ -74,6 +75,7 @@ export function Sidebar(): JSX.Element {
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
   const toggleEq = usePlayerStore((s) => s.toggleEq);
   const showEq = usePlayerStore((s) => s.showEq);
+  const detached = useDetachedVisualizer();
 
   return (
     <aside
@@ -135,6 +137,24 @@ export function Sidebar(): JSX.Element {
             DECK
           </button>
         </div>
+        {detached.available && (
+          <div className="mb-2 px-2">
+            <button
+              className={`pxbtn w-full ${detached.isOpen ? 'is-active' : ''}`}
+              onClick={() => (detached.isOpen ? detached.close() : detached.open())}
+              disabled={detached.busy}
+              title={
+                detached.isOpen
+                  ? 'Close the Eviland projector window'
+                  : 'Pop Eviland out into its own window — drag it to a 2nd monitor or projector and keep using NewAmp'
+              }
+              data-newamp-sidebar-projector
+              aria-pressed={detached.isOpen}
+            >
+              {detached.busy ? '…' : detached.isOpen ? '⧉ Projector on' : '⧉ Projector'}
+            </button>
+          </div>
+        )}
         <div className="px-2 text-[9px]" style={{ color: 'var(--muted)', lineHeight: 1.5 }}>
           <kbd className="kbd-hint">Space</kbd>play / pause
           <span className="ml-2"><kbd className="kbd-hint">F</kbd>viz</span>

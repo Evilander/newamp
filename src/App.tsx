@@ -15,6 +15,7 @@ import { applyShell, loadInitialShell } from './components/ShellPicker';
 import { useAdaptiveQuality } from './lib/adaptiveQuality';
 import { useReducedMotion } from './hooks/useReducedMotion';
 import { startResonance, stopResonance, pokeResonance, type ResonanceOpts } from './lib/resonance';
+import { startEvilandProducer } from './visualizer/eviland-producer';
 
 const EqPanel = lazy(() => import('./components/EqPanel').then((module) => ({ default: module.EqPanel })));
 const CompactPlayer = lazy(() => import('./components/CompactPlayer').then((module) => ({ default: module.CompactPlayer })));
@@ -171,6 +172,23 @@ export default function App(): JSX.Element {
   useEffect(() => {
     startResonance(() => resonanceOptsRef.current);
     return () => stopResonance();
+  }, []);
+
+  // Headless Eviland producer: feeds the detached/projector window with frames
+  // whenever it is open, independent of the on-screen visualizer. Lets the user
+  // pop Eviland onto a 2nd monitor and keep navigating NewAmp. Idle cost is zero
+  // until a projector window attaches.
+  useEffect(() => {
+    return startEvilandProducer(usePlayerStore.getState().engine, () => {
+      const s = usePlayerStore.getState();
+      return {
+        director: s.evilandDirector,
+        seed: s.evilandSeed,
+        nonce: s.evilandConfigNonce,
+        waveMode: s.evilandWaveMode,
+        trackId: s.current?.id ?? null,
+      };
+    });
   }, []);
 
   async function finishFirstLaunchTutorial(patch: { openaiApiKey?: string | null; openaiModel?: string } = {}): Promise<void> {

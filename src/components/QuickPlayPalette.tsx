@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import type { AlbumSummary, ArtistSummary, SavedPlaylist, SmartPlaylistRule, Track } from '@shared/types';
 import type { ViewMode } from '../store/usePlayerStore';
 import { api } from '../lib/api';
 import { formatDuration, formatTime } from '../lib/format';
 import { usePlayerStore } from '../store/usePlayerStore';
+import { ArtistLink, AlbumLink } from './EntityLink';
 
 const RESULT_LIMIT = 48;
 const TRACK_LIMIT = 24;
@@ -13,13 +14,13 @@ const CATALOG_LIMIT = 8;
 type PaletteCommand = 'scan-library' | 'toggle-eq' | 'fullscreen-viz' | 'compact-deck';
 
 type PaletteItem =
-  | { kind: 'track'; id: string; title: string; subtitle: string; detail: string; track: Track }
-  | { kind: 'playlist'; id: string; title: string; subtitle: string; detail: string; playlist: SavedPlaylist }
-  | { kind: 'smart-rule'; id: string; title: string; subtitle: string; detail: string; rule: SmartPlaylistRule }
-  | { kind: 'album'; id: string; title: string; subtitle: string; detail: string; album: AlbumSummary }
-  | { kind: 'artist'; id: string; title: string; subtitle: string; detail: string; artist: ArtistSummary }
-  | { kind: 'view'; id: string; title: string; subtitle: string; detail: string; view: ViewMode }
-  | { kind: 'command'; id: string; title: string; subtitle: string; detail: string; command: PaletteCommand };
+  | { kind: 'track'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; track: Track }
+  | { kind: 'playlist'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; playlist: SavedPlaylist }
+  | { kind: 'smart-rule'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; rule: SmartPlaylistRule }
+  | { kind: 'album'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; album: AlbumSummary }
+  | { kind: 'artist'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; artist: ArtistSummary }
+  | { kind: 'view'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; view: ViewMode }
+  | { kind: 'command'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; command: PaletteCommand };
 
 const VIEW_ITEMS: Array<{ view: ViewMode; title: string; subtitle: string }> = [
   { view: 'home', title: 'Home', subtitle: 'Continue, mixes, history, health, playlists' },
@@ -341,7 +342,7 @@ export function QuickPlayPalette(): JSX.Element | null {
                 </div>
                 <div className="min-w-0">
                   <div className="truncate font-semibold" title={item.title}>{item.title}</div>
-                  <div className="truncate text-[10px]" style={{ color: 'var(--muted)' }} title={item.subtitle}>
+                  <div className="truncate text-[10px]" style={{ color: 'var(--muted)' }} title={item.subtitleText}>
                     {item.subtitle}
                   </div>
                 </div>
@@ -429,6 +430,7 @@ function viewItems(query: string): PaletteItem[] {
       id: `view:${item.view}`,
       title: item.title,
       subtitle: item.subtitle,
+      subtitleText: item.subtitle,
       detail: 'open view',
       view: item.view,
     }));
@@ -442,6 +444,7 @@ function commandItems(query: string): PaletteItem[] {
       id: `command:${item.command}`,
       title: item.title,
       subtitle: item.subtitle,
+      subtitleText: item.subtitle,
       detail: 'app command',
       command: item.command,
     }));
@@ -485,33 +488,46 @@ function filteredArtists(artists: ArtistSummary[], query: string): ArtistSummary
 }
 
 function trackItem(track: Track): PaletteItem {
+  const artistLabel = track.artist || 'Unknown Artist';
+  const albumLabel = track.album || 'Unknown Album';
   return {
     kind: 'track',
     id: `track:${track.id}`,
     title: track.title,
-    subtitle: `${track.artist || 'Unknown Artist'} / ${track.album || 'Unknown Album'}`,
+    subtitle: (
+      <>
+        <ArtistLink artist={artistLabel} color="inherit" />
+        {' / '}
+        <AlbumLink album={albumLabel} albumArtist={track.albumArtist || artistLabel} color="inherit" />
+      </>
+    ),
+    subtitleText: `${artistLabel} / ${albumLabel}`,
     detail: formatTime(track.duration ?? 0),
     track,
   };
 }
 
 function playlistItem(playlist: SavedPlaylist): PaletteItem {
+  const text = `${playlist.trackCount.toLocaleString()} tracks`;
   return {
     kind: 'playlist',
     id: `playlist:${playlist.id}`,
     title: playlist.name,
-    subtitle: `${playlist.trackCount.toLocaleString()} tracks`,
+    subtitle: text,
+    subtitleText: text,
     detail: formatDuration(playlist.duration),
     playlist,
   };
 }
 
 function smartRuleItem(rule: SmartPlaylistRule): PaletteItem {
+  const text = smartRuleSubtitle(rule);
   return {
     kind: 'smart-rule',
     id: `smart-rule:${rule.id}`,
     title: rule.name,
-    subtitle: smartRuleSubtitle(rule),
+    subtitle: text,
+    subtitleText: text,
     detail: `${rule.count.toLocaleString()} dynamic`,
     rule,
   };
@@ -522,18 +538,21 @@ function albumItem(album: AlbumSummary): PaletteItem {
     kind: 'album',
     id: `album:${album.albumArtist}:${album.album}`,
     title: album.album,
-    subtitle: album.albumArtist,
+    subtitle: <ArtistLink artist={album.albumArtist} color="inherit" />,
+    subtitleText: album.albumArtist,
     detail: `${album.trackCount.toLocaleString()} tracks`,
     album,
   };
 }
 
 function artistItem(artist: ArtistSummary): PaletteItem {
+  const text = `${artist.albumCount.toLocaleString()} albums`;
   return {
     kind: 'artist',
     id: `artist:${artist.artist}`,
     title: artist.artist,
-    subtitle: `${artist.albumCount.toLocaleString()} albums`,
+    subtitle: text,
+    subtitleText: text,
     detail: `${artist.trackCount.toLocaleString()} tracks`,
     artist,
   };
