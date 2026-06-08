@@ -125,6 +125,56 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
   });
 }
 
+// Build the ffmpeg argument vector that transcodes an ffmpeg-mode source into a
+// SEEKABLE, lossless FLAC FILE for the transcode cache (see transcode-cache.ts).
+//
+// Why FLAC-to-file instead of the live pcm_f32le WAV pipe: Chromium's <audio>
+// can only seek a resource that is byte-range addressable with a known total
+// size. The live pipe (transcodeToWavResponse) sends Accept-Ranges: none with no
+// Content-Length, so scrubbing snaps to 0. A finalized FLAC file on disk has a
+// real Content-Length and STREAMINFO total-samples, so net.fetch(file://) serves
+// 206 Partial Content and seek works.
+//
+// Fidelity (verified by audiophile review):
+//  - `-sample_fmt s32` preserves native bit depth up to 24-bit (the realistic
+//    range for ALAC/AIFF/APE/WV/WMA-lossless): bitwise lossless. (A true 32-bit
+//    source would encode 32-bit FLAC; if any such file fails to decode in
+//    Chromium, drop this to s16/24-bit — not expected in practice.)
+//  - No forced `-ar` outside DSD: source sample rate is preserved.
+//  - DSD keeps the high-precision soxr→88.2 kHz step (no lossless DSD→PCM exists).
+//  - `-ac 2` matches the stereo deck graph, downmixing rare multichannel sources.
+export function buildPlaybackFlacArgs(inputPath: string, outputPath: string): string[] {
+  const ext = extname(inputPath).toLowerCase();
+  const isDsd = ext === '.dsf' || ext === '.dff';
+  // compression_level 1 (not the default 5): FLAC is lossless at every level, so
+  // the decoded samples are bit-identical — but level 1 encodes ~2-4x faster,
+  // which directly cuts the first-play wait (the handler awaits the full encode).
+  // Disk is cheap relative to the 8 GB LRU cap; encode wall-clock is what hurts.
+  const codecArgs = isDsd
+    ? ['-af', 'aresample=resampler=soxr:precision=28', '-ar', '88200', '-c:a', 'flac', '-compression_level', '1', '-sample_fmt', 's32']
+    : ['-c:a', 'flac', '-compression_level', '1', '-sample_fmt', 's32'];
+  return [
+    '-hide_banner',
+    '-nostdin',
+    '-loglevel',
+    'error',
+    '-i',
+    inputPath,
+    '-map',
+    '0:a:0',
+    '-vn',
+    ...codecArgs,
+    '-ac',
+    '2',
+    // Force the FLAC muxer explicitly: the cache writes to a per-job temp name
+    // ending in `.part`, so ffmpeg cannot infer the format from the extension.
+    '-f',
+    'flac',
+    '-y',
+    outputPath,
+  ];
+}
+
 export async function transcodeTrackToWavFile(inputPath: string, outputPath: string): Promise<{ path: string; bytes: number }> {
   const result = await transcodeTrackToAudioFile(inputPath, outputPath, 'wav');
   return { path: result.path, bytes: result.bytes };
@@ -273,7 +323,7 @@ export function calculateAlbumReplayGainDb(
   return normalizeReplayGainDb(REPLAYGAIN_TARGET_LUFS - albumLufs);
 }
 
-function resolveFfmpegPath(): string {
+export function resolveFfmpegPath(): string {
   if (process.env.NEWAMP_FFMPEG_PATH) return process.env.NEWAMP_FFMPEG_PATH;
   const staticCandidate = ffmpegStatic?.includes('app.asar')
     ? ffmpegStatic.replace('app.asar', 'app.asar.unpacked')
