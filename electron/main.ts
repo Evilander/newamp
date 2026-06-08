@@ -51,6 +51,7 @@ import {
   transcodeTracksToAudioFolder,
   transcodeTracksToWavFolder,
 } from './transcode.js';
+import { initTranscodeCache, getOrTranscodeToFlac } from './transcode-cache.js';
 import { analyzeTrackDna } from './dna-analyzer.js';
 import { RadioBrain } from './radio-brain.js';
 import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
@@ -628,6 +629,9 @@ function openDetachedVisualizer(opts: { displayId?: number; fullscreen?: boolean
   win.once('ready-to-show', () => {
     if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
     detachedVizWin.show();
+    // Pull the projector to the front so it isn't lost behind the (often
+    // maximized / fullscreen) main window when both share one display.
+    detachedVizWin.focus();
     if (opts.fullscreen) detachedVizWin.setFullScreen(true);
 
     // Wire the per-frame transport AFTER both renderers can receive
@@ -1040,6 +1044,8 @@ async function reloadRuntimeStores(userData: string): Promise<void> {
 }
 
 function registerAudioProtocol(): void {
+  // Seekable transcode cache lives on the user-data drive (not the library drive).
+  initTranscodeCache(join(app.getPath('userData'), 'transcode-cache'));
   protocol.handle('newamp-app', async (request) => {
     try {
       const rendererBase = rendererDistPath();
@@ -1077,6 +1083,40 @@ function registerAudioProtocol(): void {
         return new Response('Not found', { status: 404 });
       }
       if (playbackMode(filePath) === 'ffmpeg') {
+        // Seekable path: serve a finalized, cached, lossless FLAC (range-capable)
+        // instead of the non-seekable live WAV pipe, so the scrubber works on
+        // .wma/.alac/.aiff/.dsf/.dff/.ape/.wv/etc. The cache awaits the transcode
+        // so a Range request never hits a half-written file.
+        const cached = await getOrTranscodeToFlac(filePath);
+        if (cached.ok) {
+          const forwardHeaders: Record<string, string> = {};
+          const range = request.headers.get('Range');
+          if (range) forwardHeaders.Range = range;
+          const ifRange = request.headers.get('If-Range');
+          if (ifRange) forwardHeaders['If-Range'] = ifRange;
+          const cachedResp = await net.fetch(pathToFileURL(cached.path).toString(), {
+            bypassCustomProtocolHandlers: true,
+            headers: forwardHeaders,
+          });
+          const headers = new Headers(cachedResp.headers);
+          headers.set('Access-Control-Allow-Origin', '*');
+          headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
+          headers.set('Content-Type', 'audio/flac');
+          headers.set('X-Newamp-Playback', 'ffmpeg-cached-flac');
+          return new Response(cachedResp.body, {
+            status: cachedResp.status,
+            statusText: cachedResp.statusText,
+            headers,
+          });
+        }
+        if (cached.reason === 'ffmpeg-missing') {
+          return new Response('ffmpeg unavailable', {
+            status: 503,
+            headers: { 'X-Newamp-Reason': 'ffmpeg-missing' },
+          });
+        }
+        // Cache unavailable/failed: fall back to the live stream so audio still
+        // plays (seek won't work in this degraded mode, but it never fully breaks).
         return transcodeToWavResponse(filePath, request);
       }
       // Forward the media element's Range header so net.fetch on the file URL

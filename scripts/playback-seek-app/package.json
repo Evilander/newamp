@@ -1,0 +1,5 @@
+{
+  "name": "newamp-playback-seek-smoke",
+  "type": "module",
+  "main": "../playback-seek.mjs"
+}

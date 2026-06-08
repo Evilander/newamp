@@ -927,9 +927,12 @@ export function FullscreenVisualizer(): JSX.Element {
                 detached.close();
               } else {
                 // The headless producer feeds the projector regardless of which
-                // preset is on-screen, so we no longer force-switch to 'eviland'
-                // here — the user keeps whatever look they were enjoying.
+                // preset is on-screen, so we no longer force-switch to 'eviland'.
+                // Also drop the fullscreen overlay: on a single monitor the new
+                // window otherwise opens BEHIND NewAmp's fullscreen viz and looks
+                // like nothing happened. The producer keeps feeding it after exit.
                 detached.open(detachedDisplayId ?? undefined);
+                exitVisualizer();
               }
             }}
             disabled={detached.busy}
@@ -1292,11 +1295,16 @@ export function FullscreenVisualizer(): JSX.Element {
                     <button
                       type="button"
                       className={`pxbtn ${detached.isOpen ? 'is-active' : ''}`}
-                      onClick={() =>
-                        detached.isOpen
-                          ? detached.close()
-                          : detached.open(detachedDisplayId ?? undefined)
-                      }
+                      onClick={() => {
+                        if (detached.isOpen) {
+                          detached.close();
+                        } else {
+                          // Exit the fullscreen overlay so the projector is
+                          // visible (single-monitor); the producer keeps feeding it.
+                          detached.open(detachedDisplayId ?? undefined);
+                          exitVisualizer();
+                        }
+                      }}
                       disabled={detached.busy}
                       title={
                         detached.isOpen
