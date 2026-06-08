@@ -84,6 +84,8 @@
     "smoke:playback-start": "npm run build:electron && node scripts/playback-start-smoke.mjs",
     "smoke:playback-error": "npm run build:electron && node scripts/playback-error-smoke.mjs",
     "smoke:playback-controls": "npm run build:electron && node scripts/playback-controls-smoke.mjs",
+    "smoke:transcode-seek": "npm run build:electron && node scripts/transcode-seek-smoke.mjs",
+    "smoke:playback-seek": "npm run build:electron && electron scripts/playback-seek-app",
     "smoke:keyboard": "npm run build:electron && node scripts/keyboard-shortcuts-smoke.mjs",
     "smoke:media-session": "npm run build:electron && node scripts/media-session-smoke.mjs",
     "smoke:smart-shuffle": "npm run build:electron && node scripts/smart-shuffle-smoke.mjs",
