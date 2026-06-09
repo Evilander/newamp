@@ -1236,6 +1236,9 @@ export class LibraryStore {
         WHERE id = ?`,
       [title, artist, album, albumArtist, trackNo, discNo, year, genre, id],
     );
+    // artist/album/year feed getLibraryHealth's missing-metadata + duplicate
+    // detection — a manual edit must not leave the health card stale.
+    this.invalidateLibraryHealthCache();
     this.scheduleFlush();
     return this.getTrack(id);
   }
