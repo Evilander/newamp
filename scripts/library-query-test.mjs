@@ -68,6 +68,13 @@ const h3 = lib.getLibraryHealth();
 if (h3 === h1) fail('B2 getLibraryHealth cache should be invalidated after upsertTracks');
 log.push(`B2 cache: same-ref-before=${h2 === h1} new-ref-after-write=${h3 !== h1}`);
 
+// B2b: a ReplayGain write also invalidates health (it feeds the RG-ready count).
+const h3b = lib.getLibraryHealth(); // re-cache
+lib.setTrackReplayGain(id(1), -6.5);
+const h4 = lib.getLibraryHealth();
+if (h4 === h3b) fail('B2 setTrackReplayGain should invalidate the health cache (RG-ready count)');
+log.push(`B2b RG-write invalidates health: ${h4 !== h3b}`);
+
 const report = log.join('\n') + '\n' + (pass ? '[library-query-test] PASS' : '[library-query-test] FAIL') + '\n';
 writeFileSync(RESULT, report);
 console.log(report);
