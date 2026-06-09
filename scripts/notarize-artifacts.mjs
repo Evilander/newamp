@@ -96,6 +96,13 @@ function main() {
     process.exit(1);
   }
 
+  // Preflight: verify the .app is Developer-ID-signed before wasting a notarytool round-trip.
+  const _preflight = spawnSync(process.execPath, [new URL('./verify-mac-signing.mjs', import.meta.url).pathname], { stdio: 'inherit' });
+  if (_preflight.status !== 0) {
+    console.error('[notarize] signing preflight failed — aborting notarization');
+    process.exit(_preflight.status ?? 1);
+  }
+
   const results = [];
   for (const artifact of artifacts) {
     const args = notarytoolArgs(creds, artifact.path);
