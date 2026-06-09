@@ -14,8 +14,11 @@
 // mirrorMix. The tier is derived from a slow moving average of energy plus a
 // novelty pulse, so the Director feels the song's shape, not just its loudness.
 //
-// Everything is deterministic from (songId, sectionId): the same song always
-// gets the same sequence of looks. The platform RNG / clock is never read.
+// Look generation is deterministic from (songId, sectionId, rotationIndex):
+// the same song always produces the same SEQUENCE of looks. The platform RNG
+// is never read. Two timing inputs do follow the playback clock by design: the
+// ~20s timer-rotation floor (so the look still changes when the music is
+// structurally quiet, MilkDrop-style) and the gentle intra-section drift.
 //
 // Zero dependencies, ES modules. The renderer owns the loop; the Director
 // returns the OperatorConfig the renderer should use this frame.
