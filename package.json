@@ -38,6 +38,11 @@
     "smoke:visualizer": "node scripts/visualizer-smoke.mjs",
     "test:eviland-audio": "node scripts/eviland-audio-test.mjs",
     "test:eviland-director": "node scripts/eviland-director-test.mjs",
+    "test:device-change": "node scripts/device-change-test.mjs",
+    "test:music-folders": "node scripts/music-folders-test.mjs",
+    "test:cache-key-casing": "node scripts/cache-key-casing-test.mjs",
+    "test:app-menu": "node scripts/app-menu-test.mjs",
+    "test:macho-arch": "node scripts/macho-arch-test.mjs",
     "smoke:butterchurn-sandbox": "npm run build && electron scripts/butterchurn-sandbox-smoke-app",
     "smoke:particle-flow": "electron scripts/particle-flow-smoke-app",
     "smoke:viz-capture": "node scripts/viz-capture-smoke.mjs",
@@ -236,6 +241,7 @@
       "node_modules/ffmpeg-static/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm"
     ],
+    "afterPack": "scripts/afterpack-verify-ffmpeg-arch.mjs",
     "mac": {
       "icon": "build/icon.icns",
       "category": "public.app-category.music",
