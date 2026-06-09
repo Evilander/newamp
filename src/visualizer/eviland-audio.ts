@@ -162,6 +162,15 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
   // Structure: ~2 Hz history of band vectors for a novelty curve, plus stored
   // section fingerprints so returning sections can be recognised.
   const STRUCT_PERIOD_MS = 500;
+  // Structure-detection tuning. A slower recent-average EMA keeps a genuine
+  // musical change reading as "novel" instead of being absorbed within ~3s,
+  // and relaxed time guards let real sections fire ~2x more often — this is
+  // what gives the visualizer MilkDrop-like variety. See
+  // docs/superpowers/specs/2026-06-09-eviland-evolving-variety-design.md.
+  const STRUCT_RECENT_ALPHA = 0.06; // was 0.18
+  const SECTION_NOVELTY_THRESH = 0.22; // unchanged
+  const SECTION_MIN_GAP_MS = 3500; // min ms since last boundary (was 6000)
+  const SECTION_MIN_LEN_MS = 3500; // min section length before a new boundary (was 6000)
   let lastStructAt = 0;
   const recentAvg = new Float32Array(EVILAND_BANDS);
   let recentInit = false;
@@ -397,10 +406,10 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
         for (let b = 0; b < EVILAND_BANDS; b++) tmp[b] = bandMag[b]!;
         const sim = cosine(tmp, recentAvg);
         out.novelty = Math.max(0, Math.min(1, 1 - sim));
-        for (let b = 0; b < EVILAND_BANDS; b++) recentAvg[b]! += (bandMag[b]! - recentAvg[b]!) * 0.18;
+        for (let b = 0; b < EVILAND_BANDS; b++) recentAvg[b]! += (bandMag[b]! - recentAvg[b]!) * STRUCT_RECENT_ALPHA;
 
         // A sustained novelty spike, not too soon after the last, = boundary.
-        if (out.novelty > 0.22 && nowMs - lastNoveltyAt > 6000 && nowMs - sectionStartAt > 6000) {
+        if (out.novelty > SECTION_NOVELTY_THRESH && nowMs - lastNoveltyAt > SECTION_MIN_GAP_MS && nowMs - sectionStartAt > SECTION_MIN_LEN_MS) {
           lastNoveltyAt = nowMs;
           // Fingerprint the section we're leaving.
           const fp = new Float32Array(EVILAND_BANDS);
