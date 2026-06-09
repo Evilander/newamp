@@ -1531,25 +1531,6 @@ export function TrackTable({
   storeSetTrackRatingRef.current = storeSetTrackRating;
   storeToggleAvoidAutoPlayRef.current = storeToggleAvoidAutoPlay;
 
-  async function toggleLoveForTrack(track: Track): Promise<void> {
-    const loved = onToggleLove ? await onToggleLove(track.id) : await storeToggleLove(track.id);
-    if (typeof loved === 'boolean') patchLocalTrack(track.id, { loved: loved ? 1 : 0 });
-  }
-
-  async function setRatingForTrack(track: Track, rating: number): Promise<void> {
-    const updated = onSetRating
-      ? await onSetRating(track.id, rating)
-      : await storeSetTrackRating(track.id, rating);
-    if (updated) patchLocalTrack(track.id, updated);
-  }
-
-  async function toggleAvoidForTrack(track: Track): Promise<void> {
-    const updated = onToggleAvoidAutoPlay
-      ? await onToggleAvoidAutoPlay(track.id)
-      : await storeToggleAvoidAutoPlay(track.id);
-    if (updated) patchLocalTrack(track.id, updated);
-  }
-
   async function addToSavedPlaylist(playlistId: number, track: Track): Promise<void> {
     const updated = await api.addTracksToPlaylist({ playlistId, trackIds: [track.id] });
     if (!updated) {

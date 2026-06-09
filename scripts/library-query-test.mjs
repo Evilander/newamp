@@ -75,6 +75,14 @@ const h4 = lib.getLibraryHealth();
 if (h4 === h3b) fail('B2 setTrackReplayGain should invalidate the health cache (RG-ready count)');
 log.push(`B2b RG-write invalidates health: ${h4 !== h3b}`);
 
+// B2c: a manual metadata edit (artist/album/year feed missing-metadata +
+// duplicate detection) also invalidates health.
+const h4b = lib.getLibraryHealth(); // re-cache
+lib.applyManualMetadataPatch(id(2), { artist: 'Renamed Artist' });
+const h5 = lib.getLibraryHealth();
+if (h5 === h4b) fail('B2 applyManualMetadataPatch should invalidate the health cache');
+log.push(`B2c manual-edit invalidates health: ${h5 !== h4b}`);
+
 const report = log.join('\n') + '\n' + (pass ? '[library-query-test] PASS' : '[library-query-test] FAIL') + '\n';
 writeFileSync(RESULT, report);
 console.log(report);
