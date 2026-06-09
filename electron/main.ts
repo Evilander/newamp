@@ -62,6 +62,7 @@ import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from '.
 import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
 import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
+import { buildAppMenuTemplate } from './app-menu.js';
 import type {
   CustomSkin,
   DiscoverSurfaceInput,
@@ -230,6 +231,16 @@ const forceSoftwareRendering = smokeMode || gpuForcedOff || gpuCrashedLastLaunch
 
 if (forceSoftwareRendering) {
   applySoftwareRenderingSwitches(smokeMode ? 'smoke' : 'normal');
+}
+
+function safeListMacVolumesMusic(): string[] {
+  try {
+    return readdirSync('/Volumes')
+      .filter((vol) => vol !== 'Macintosh HD' && !vol.startsWith('.'))
+      .map((vol) => `/Volumes/${vol}/Music`);
+  } catch {
+    return [];
+  }
 }
 
 function commandLineValue(name: string): string | null {
@@ -401,6 +412,7 @@ const STARTUP_SPLASH_HOLD_MS = 5600;
 const startupSplashEnabled = !smokeMode && process.env.NEWAMP_DISABLE_STARTUP_SPLASH !== '1';
 
 function createWindow(): BrowserWindow {
+  const isMac = process.platform === 'darwin';
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -409,8 +421,9 @@ function createWindow(): BrowserWindow {
     show: false,
     frame: false,
     titleBarStyle: 'hidden',
-    transparent: true,
-    backgroundColor: '#00000000',
+    ...(isMac
+      ? { trafficLightPosition: { x: 14, y: 13 }, backgroundColor: '#0b0b10' }
+      : { transparent: true, backgroundColor: '#00000000' }),
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
@@ -448,6 +461,11 @@ function createWindow(): BrowserWindow {
 
   win.on('maximize', () => win.webContents.send('window-state', { maximized: true }));
   win.on('unmaximize', () => win.webContents.send('window-state', { maximized: false }));
+  win.on('closed', () => {
+    // On macOS (no tray) closing actually destroys the window; drop the stale
+    // reference so `activate` recreates cleanly instead of probing a dead one.
+    if (mainWin === win) mainWin = null;
+  });
   win.on('close', (event) => {
     if (smokeMode || isQuitting) return;
     if (!tray || tray.isDestroyed()) return;
@@ -888,7 +906,27 @@ function enqueueOpenFiles(paths: string[]): void {
   }
 }
 
+function installApplicationMenu(): void {
+  const template = buildAppMenuTemplate(process.platform, {
+    appName: app.getName(),
+    appVersion: app.getVersion(),
+  });
+  if (process.platform === 'darwin') {
+    app.setAboutPanelOptions({
+      applicationName: app.getName(),
+      applicationVersion: app.getVersion(),
+    });
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  } else {
+    // Keep the existing chromeless custom-titlebar look on Windows/Linux.
+    Menu.setApplicationMenu(null);
+  }
+}
+
 function registerTray(): void {
+  // macOS uses the Dock lifecycle (close hides the window, app stays in the
+  // Dock, Cmd-Q quits) — a persistent menu-bar icon is non-idiomatic, so skip it.
+  if (process.platform === 'darwin') return;
   if (tray || smokeMode) return;
 
   const icon = resolveTrayIconImage();
@@ -3802,10 +3840,14 @@ async function bootstrap(): Promise<void> {
   lastfmOutbox = new LastfmScrobbleOutbox(join(userData, 'lastfm-scrobbles.json'));
   podcastStore = new PodcastStore(join(userData, 'podcasts.json'));
 
-  // Auto-seed default library root to K:\music if nothing configured and it exists.
+  // Auto-seed the default library root from the first existing platform
+  // candidate when nothing is configured (macOS: ~/Music + /Volumes/*; Windows:
+  // K:/C: drive paths).
   const current = settings.get();
   if (!smokeMode && !current.libraryRoots.length) {
-    const candidates = ['K:/music', 'K:\\music', 'C:/Music', 'C:/Users/Public/Music'];
+    const candidates = process.platform === 'darwin'
+      ? [app.getPath('music'), ...safeListMacVolumesMusic()]
+      : ['K:/music', 'K:\\music', 'C:/Music', 'C:/Users/Public/Music'];
     for (const c of candidates) {
       try {
         if (existsSync(c) && statSync(c).isDirectory()) {
@@ -3828,6 +3870,7 @@ async function bootstrap(): Promise<void> {
 
   createStartupSplashWindow();
   mainWin = createWindow();
+  installApplicationMenu();
   registerTray();
   registerMediaShortcuts();
   syncLibraryWatcher();

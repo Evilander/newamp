@@ -27,6 +27,10 @@ const electronBuilder = join(
 
 const requestedTargets = process.argv.slice(2);
 for (const args of electronBuilderTargetArgs(requestedTargets)) {
+  const macArch = args.includes('--arm64') ? 'arm64' : args.includes('--x64') ? 'x64' : null;
+  if (args.includes('--mac') && macArch) {
+    run(process.execPath, [join(repoRoot, 'scripts', 'stage-ffmpeg-for-arch.mjs'), macArch]);
+  }
   // `--publish never`: NewAmp manages its own release publishing (release
   // bundle + the CI release job + publish-github-release). Without this,
   // electron-builder auto-publishes when it sees a git tag and aborts with
@@ -56,10 +60,11 @@ function electronBuilderTargetArgs(args) {
   if (args.includes('--portable')) return [['--win=portable']];
   if (args.includes('--installer') || args.includes('--nsis')) return [['--win=nsis']];
   if (args.includes('--linux')) return [['--linux=tar.gz']];
-  // Bare `--mac` so electron-builder uses the package.json mac.target config
-  // (dmg + zip) across BOTH configured arches (arm64 + x64). Passing
-  // `--mac=dmg` would override the arch list and build host-arch only.
-  if (args.includes('--mac')) return [['--mac']];
+  // Build each mac arch separately so we can stage the matching ffmpeg-static
+  // binary before each electron-builder invocation (ffmpeg-static only installs
+  // the host-arch binary; cross-arch DMGs would otherwise get a wrong-arch
+  // ffmpeg → spawn fails → 503 for all transcoded formats).
+  if (args.includes('--mac')) return [['--mac', '--arm64'], ['--mac', '--x64']];
   if (args.includes('--win')) return [['--win=nsis'], ['--win=portable']];
   return [['--win=nsis'], ['--win=portable'], ['--linux=tar.gz']];
 }
