@@ -30,6 +30,10 @@ if (r.status !== 0) {
 }
 
 const bin = resolve('node_modules/ffmpeg-static/ffmpeg');
+if (!existsSync(bin)) {
+  console.error(`stage-ffmpeg-for-arch: installer exited 0 but no binary at ${bin}`);
+  process.exit(1);
+}
 const got = detectMachOArch(bin);
 if (got !== target && got !== 'universal') {
   console.error(`stage-ffmpeg-for-arch: staged ffmpeg arch ${got} != requested ${target}`);

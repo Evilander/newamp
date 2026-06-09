@@ -13,7 +13,7 @@ export function detectMachOArchFromBytes(buf) {
   const beMagic = buf.readUInt32BE(0);
   if (beMagic === 0xcafebabe || beMagic === 0xbebafeca) return 'universal';
   const leMagic = buf.readUInt32LE(0);
-  const isMacho64 = leMagic === 0xfeedfacf || buf.readUInt32BE(0) === 0xfeedfacf;
+  const isMacho64 = leMagic === 0xfeedfacf || beMagic === 0xfeedfacf;
   if (!isMacho64) return 'unknown';
   const cpuLE = buf.readUInt32LE(4);
   const cpuBE = buf.readUInt32BE(4);
