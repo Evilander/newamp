@@ -919,6 +919,9 @@ function installApplicationMenu(): void {
 }
 
 function registerTray(): void {
+  // macOS uses the Dock lifecycle (close hides the window, app stays in the
+  // Dock, Cmd-Q quits) — a persistent menu-bar icon is non-idiomatic, so skip it.
+  if (process.platform === 'darwin') return;
   if (tray || smokeMode) return;
 
   const icon = resolveTrayIconImage();
