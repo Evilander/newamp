@@ -46,11 +46,13 @@ const log = [];
 let pass = true;
 const fail = (m) => { pass = false; log.push('FAIL: ' + m); };
 
+// Order preserved, DUPLICATES preserved (a queue may repeat a track), missing ids skipped.
+// This matches the prior ids.map(getTrack).filter(Boolean) behavior.
 const want = [id(5), id(1), id(5), 999999999, id(3)];
 const got = lib.getTracksByIdsInOrder(want).map((t) => t.path);
 log.push('B1 ordered result: ' + JSON.stringify(got));
-if (JSON.stringify(got) !== JSON.stringify(['/music/track-5.flac', '/music/track-1.flac', '/music/track-3.flac'])) {
-  fail('B1 ordering/dedup/missing-skip incorrect');
+if (JSON.stringify(got) !== JSON.stringify(['/music/track-5.flac', '/music/track-1.flac', '/music/track-5.flac', '/music/track-3.flac'])) {
+  fail('B1 ordering/duplicate-preservation/missing-skip incorrect');
 }
 const ids = Array.from({ length: N }, (_, k) => id(k + 1));
 const big = lib.getTracksByIdsInOrder(ids);
