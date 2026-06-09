@@ -31,6 +31,7 @@ import {
   Rng,
   encodeSeedCode,
   decodeSeedCode,
+  hashSeed,
   toSeedState,
 } from './eviland-rng';
 
@@ -83,6 +84,8 @@ interface ArchetypeTemplate {
   mirrorMix: ChannelSpec;
   flowX: ChannelSpec;
   flowY: ChannelSpec;
+  fluid: ChannelSpec;
+  vorticity: ChannelSpec;
   bloom: ChannelSpec;
   /** Allowed kaleidoscope segment counts when mirrorSet is used. */
   mirrorSets: number[][];
@@ -115,7 +118,7 @@ type PaletteScheme = 'analogous' | 'complementary' | 'triadic' | 'splitComplemen
 // SAFETY: clamp limits from evalConfig are
 //   zoom[-0.12,0.25], rotate[-0.06,0.06], swirl[-0.25,0.25], hueCycle[-0.05,0.05],
 //   decay[0.78,0.97], warpAmp[0,0.02], warpScale[0.5,8],
-//   mirror[1,16], mirrorMix[0,0.98], flow[-0.01,0.01],
+//   mirror[1,16], mirrorMix[0,0.98], flow[-0.01,0.01], fluid[0,1], vorticity[0,30],
 //   waveIntensity[0,3], bloom[0,1.2], emitterScale[0.2,3], emitterGain[0,2.5].
 // All sampler ranges below stay *well* inside those, especially:
 //   - decay base in [0.82,0.93] (audio bindings can dip it briefly)
@@ -193,6 +196,16 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     },
     flowY: {
       base: { min: -0.0008, max: 0.0002 },
+      bindings: [],
+    },
+    fluid: {
+      base: { min: 0.2, max: 0.6 },
+      bindings: [
+        { feature: 'energy', gain: { min: 0.05, max: 0.18 }, chance: 0.6 },
+      ],
+    },
+    vorticity: {
+      base: { min: 6, max: 16 },
       bindings: [],
     },
     bloom: {
@@ -290,6 +303,16 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     },
     flowX: { base: { min: -0.0003, max: 0.0003 }, bindings: [] },
     flowY: { base: { min: -0.0003, max: 0.0003 }, bindings: [] },
+    fluid: {
+      base: { min: 0.2, max: 0.6 },
+      bindings: [
+        { feature: 'energy', gain: { min: 0.04, max: 0.15 }, chance: 0.5 },
+      ],
+    },
+    vorticity: {
+      base: { min: 6, max: 16 },
+      bindings: [],
+    },
     bloom: {
       base: { min: 0.1, max: 0.4 },
       bindings: [
@@ -400,6 +423,16 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
         { feature: 'energy', gain: { min: 0.0005, max: 0.0015 }, chance: 0.4 },
       ],
     },
+    fluid: {
+      base: { min: 0.5, max: 1.0 },
+      bindings: [
+        { feature: 'energy', gain: { min: 0.05, max: 0.2 }, chance: 0.7 },
+      ],
+    },
+    vorticity: {
+      base: { min: 10, max: 24 },
+      bindings: [],
+    },
     bloom: {
       base: { min: 0.25, max: 0.6 },
       bindings: [
@@ -488,6 +521,14 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     },
     flowX: { base: { min: -0.0002, max: 0.0002 }, bindings: [] },
     flowY: { base: { min: -0.0002, max: 0.0002 }, bindings: [] },
+    fluid: {
+      base: { min: 0, max: 0.25 },
+      bindings: [],
+    },
+    vorticity: {
+      base: { min: 0, max: 8 },
+      bindings: [],
+    },
     bloom: {
       base: { min: 0.05, max: 0.25 },
       bindings: [
@@ -588,6 +629,16 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       base: { min: -0.0005, max: 0.0005 },
       bindings: [],
     },
+    fluid: {
+      base: { min: 0.5, max: 1.0 },
+      bindings: [
+        { feature: 'energy', gain: { min: 0.05, max: 0.2 }, chance: 0.6 },
+      ],
+    },
+    vorticity: {
+      base: { min: 10, max: 24 },
+      bindings: [],
+    },
     bloom: {
       base: { min: 0.35, max: 0.75 },
       bindings: [
@@ -683,6 +734,14 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     },
     flowX: { base: { min: -0.0003, max: 0.0003 }, bindings: [] },
     flowY: { base: { min: -0.0003, max: 0.0003 }, bindings: [] },
+    fluid: {
+      base: { min: 0, max: 0.25 },
+      bindings: [],
+    },
+    vorticity: {
+      base: { min: 0, max: 8 },
+      bindings: [],
+    },
     bloom: {
       base: { min: 0.05, max: 0.2 },
       bindings: [
@@ -872,6 +931,12 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
 
   const palette = generatePalette(rng, template);
 
+  // Derived RNG: existing shared seed codes must keep their exact look, so the
+  // new fluid channels must NOT consume draws from the main rng sequence.
+  const fluidRng = new Rng(hashSeed(`${code}::fluid`));
+  const fluid = sampleChannel(fluidRng, template.fluid);
+  const vorticity = sampleChannel(fluidRng, template.vorticity);
+
   const config: OperatorConfig = {
     version: 1,
     name: `${chosen[0]!.toUpperCase()}${chosen.slice(1)} ${code}`,
@@ -888,6 +953,8 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     mirrorMix: sampleChannel(rng, template.mirrorMix),
     flowX: sampleChannel(rng, template.flowX),
     flowY: sampleChannel(rng, template.flowY),
+    fluid,
+    vorticity,
     spinFromSection: template.spinFromSection,
     waveform: sampleWaveform(rng, template),
     palette,
@@ -929,6 +996,8 @@ const SAFE_RANGES: Record<string, SafeRange> = {
   mirrorMix: { min: 0, max: 0.9 },
   flowX: { min: -0.009, max: 0.009 },
   flowY: { min: -0.009, max: 0.009 },
+  fluid: { min: 0, max: 1 },
+  vorticity: { min: 0, max: 30 },
   bloom: { min: 0, max: 1.1 },
   emitterScale: { min: 0.3, max: 2.8 },
   emitterGain: { min: 0.1, max: 2.3 },
@@ -995,6 +1064,8 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
   next.mirrorMix = mutateChannel(rng, 'mirrorMix', next.mirrorMix, a);
   next.flowX = mutateChannel(rng, 'flowX', next.flowX, a);
   next.flowY = mutateChannel(rng, 'flowY', next.flowY, a);
+  next.fluid = mutateChannel(rng, 'fluid', next.fluid, a);
+  next.vorticity = mutateChannel(rng, 'vorticity', next.vorticity, a);
   next.bloom = mutateChannel(rng, 'bloom', next.bloom, a);
 
   // Waveform: jitter scalars, occasionally flip mode (rare; modes are characterful).
