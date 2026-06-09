@@ -461,6 +461,11 @@ function createWindow(): BrowserWindow {
 
   win.on('maximize', () => win.webContents.send('window-state', { maximized: true }));
   win.on('unmaximize', () => win.webContents.send('window-state', { maximized: false }));
+  win.on('closed', () => {
+    // On macOS (no tray) closing actually destroys the window; drop the stale
+    // reference so `activate` recreates cleanly instead of probing a dead one.
+    if (mainWin === win) mainWin = null;
+  });
   win.on('close', (event) => {
     if (smokeMode || isQuitting) return;
     if (!tray || tray.isDestroyed()) return;
