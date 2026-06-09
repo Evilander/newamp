@@ -25,6 +25,7 @@ const homeDir = '/Users/tester';
 const existsSet = new Set([
   `${homeDir}/Music`,
   `${homeDir}/Music/Music/Media`,
+  `${homeDir}/Music/iTunes/iTunes Media`,
   '/Volumes/BigDrive/Music',
 ]);
 const result = suggestMusicFolders({
@@ -38,7 +39,10 @@ const paths = result.map((r) => r.path);
 log.push('darwin suggestions: ' + JSON.stringify(paths));
 
 if (!paths.includes(`${homeDir}/Music`)) fail('expected ~/Music suggestion on darwin');
+if (!paths.includes(`${homeDir}/Music/Music/Media`)) fail('expected Apple Music media suggestion on darwin');
+if (!paths.includes(`${homeDir}/Music/iTunes/iTunes Media`)) fail('expected iTunes media suggestion on darwin');
 if (!paths.includes('/Volumes/BigDrive/Music')) fail('expected /Volumes external-drive suggestion');
+if (paths.includes('/Volumes/Macintosh HD/Music')) fail('boot volume should be excluded from /Volumes suggestions');
 if (paths.some((p) => p.startsWith('K:/') || p.startsWith('I:/'))) fail('Windows drive paths leaked into darwin suggestions');
 if (result.some((r) => /windows/i.test(r.label))) fail('"Windows Music" label leaked into darwin suggestions');
 
