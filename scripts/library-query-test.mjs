@@ -59,6 +59,15 @@ const big = lib.getTracksByIdsInOrder(ids);
 if (big.length !== N) fail(`B1 expected ${N} tracks, got ${big.length}`);
 if (big[0].path !== '/music/track-1.flac' || big[N - 1].path !== `/music/track-${N}.flac`) fail('B1 large-request order wrong');
 
+// B2: getLibraryHealth is cached and invalidated on write.
+const h1 = lib.getLibraryHealth();
+const h2 = lib.getLibraryHealth();
+if (h2 !== h1) fail('B2 getLibraryHealth should return the SAME cached object reference on repeat calls');
+lib.upsertTracks([track(N + 1)]);
+const h3 = lib.getLibraryHealth();
+if (h3 === h1) fail('B2 getLibraryHealth cache should be invalidated after upsertTracks');
+log.push(`B2 cache: same-ref-before=${h2 === h1} new-ref-after-write=${h3 !== h1}`);
+
 const report = log.join('\n') + '\n' + (pass ? '[library-query-test] PASS' : '[library-query-test] FAIL') + '\n';
 writeFileSync(RESULT, report);
 console.log(report);
