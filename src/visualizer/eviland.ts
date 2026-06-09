@@ -34,6 +34,7 @@
 
 import type { EvilandFrame } from './eviland-audio';
 import { evalConfig, createDynamics, defaultConfig, type OperatorConfig } from './eviland-operators';
+import { createFluidSim, fluidForcesFromFrame, type FluidSim } from './eviland-fluid';
 
 export interface EvilandPalette {
   accent: [number, number, number]; // each channel 0..1
@@ -129,6 +130,8 @@ uniform float u_hueCycle;    // radians to rotate the sampled colour's hue (0..~
 uniform float u_swirl;       // swirl strength (rotation falls off with radius)
 uniform float u_mirror;      // segment count (0 = off; 2..8 active)
 uniform float u_mirrorMix;   // 0..1 blend between unfolded and folded sample
+uniform sampler2D u_velocity; // stable-fluids sim velocity (RG16F, UV/s)
+uniform float u_fluid;       // sim influence, premultiplied by dt CPU-side (0 = off)
 ${NOISE_GLSL}
 
 const float TAU = 6.28318530718;
@@ -195,7 +198,11 @@ void main(){
   vec2 w = curl(base) * u_warpAmp;
   w += curl(base * 2.1 + 11.7) * (u_warpAmp * 0.45 + u_novelty * 0.6);
 
-  src = clamp(src - u_flow + w, 0.001, 0.999);
+  // Simulated fluid displacement: velocity is UV/s and u_fluid carries
+  // channel * scale * dt, so this composes with the procedural warp. When
+  // u_fluid = 0 the subtraction is a zero vector — bit-identical to before.
+  vec2 simFlow = texture(u_velocity, src).xy * u_fluid;
+  src = clamp(src - u_flow + w - simFlow, 0.001, 0.999);
   vec3 prev = texture(u_prev, src).rgb;
 
   // Hue cycle: shift colour every frame so trails drift across the palette.
@@ -670,6 +677,13 @@ export function createEvilandRenderer(
   const bloomLevels = quality === 'high' ? 3 : quality === 'medium' ? 2 : 0;
   const aberrationOn = quality !== 'low';
   const maxEmitters = quality === 'high' ? 32 : quality === 'medium' ? 20 : 10;
+  // Stable-fluids sim: grid as a fraction of the field resolution (0 = no sim
+  // on the low tier) + Jacobi pressure iterations per step.
+  const fluidGrid = quality === 'high' ? 0.5 : quality === 'medium' ? 0.375 : 0;
+  const fluidIterations = quality === 'high' ? 20 : 12;
+  // Velocity is UV/s; the dye displacement premultiplies channel * scale * dt
+  // CPU-side so the shader's u_fluid is a plain magnitude.
+  const FLUID_ADVECT_SCALE = 0.9;
 
   const quadProg = link(gl, QUAD_VERT, THRESHOLD_FRAG); // placeholder — replaced below per-program
   if (quadProg) gl.deleteProgram(quadProg);
@@ -783,11 +797,24 @@ export function createEvilandRenderer(
     gl.deleteFramebuffer(f.fbo);
   }
 
+  // Stable-fluids velocity sim (tiered off entirely on 'low'; null when the
+  // GPU can't do RG16F targets — both cases render exactly as before because
+  // u_fluid is forced to 0). Sized as a fraction of the field; resize() below
+  // keeps it in step via rebuildTargets.
+  let fluid: FluidSim | null = fluidGrid > 0
+    ? createFluidSim(gl, {
+        width: Math.max(64, Math.round(fieldW * fluidGrid)),
+        height: Math.max(64, Math.round(fieldH * fluidGrid)),
+        pressureIterations: fluidIterations,
+      })
+    : null;
+
   function rebuildTargets(): void {
     disposeFbo(fieldA);
     disposeFbo(fieldB);
     fieldA = makeFbo(fieldW, fieldH);
     fieldB = makeFbo(fieldW, fieldH);
+    fluid?.resize(Math.max(64, Math.round(fieldW * fluidGrid)), Math.max(64, Math.round(fieldH * fluidGrid)));
     for (const f of bloomDown) disposeFbo(f);
     for (const f of bloomUp) disposeFbo(f);
     bloomDown.length = 0;
@@ -839,6 +866,8 @@ export function createEvilandRenderer(
     swirl: gl.getUniformLocation(fieldProg, 'u_swirl'),
     mirror: gl.getUniformLocation(fieldProg, 'u_mirror'),
     mirrorMix: gl.getUniformLocation(fieldProg, 'u_mirrorMix'),
+    velocity: gl.getUniformLocation(fieldProg, 'u_velocity'),
+    fluid: gl.getUniformLocation(fieldProg, 'u_fluid'),
   };
   const spectrumUni = {
     bands: gl.getUniformLocation(spectrumProg, 'u_bands'),
@@ -1154,6 +1183,19 @@ export function createEvilandRenderer(
     const active = packEmitters();
     advanceEmitters(dt);
 
+    // Data-driven warp params: evaluate the active OperatorConfig against this
+    // audio frame. The default config reproduces the original hardcoded formulas
+    // (zoom/rotate/swirl/hue/decay/warp/kaleidoscope); the randomizer + Director
+    // mint and morph configs to change the look. evalConfig clamps every output
+    // to a GPU-safe range so no config can crash or white-out the field.
+    // Runs BEFORE the fluid step because the sim needs dyn.vorticity/dyn.fluid.
+    evalConfig(currentConfig, frame, sectionSeed, dyn);
+
+    // ---- PASS 0: stable-fluids velocity step. The sim binds its own FBOs/
+    // programs, so it runs before the field pass establishes its state; the
+    // renderer's dt is passed as-is (the sim clamps internally).
+    if (fluid) fluid.step(dt, fluidForcesFromFrame(frame), { vorticity: dyn.vorticity, dissipation: 0.985 });
+
     // ---- PASS 1: feedback field (advect prev → fieldB) ----
     gl.bindFramebuffer(gl.FRAMEBUFFER, fieldB.fbo);
     gl.viewport(0, 0, fieldW, fieldH);
@@ -1163,12 +1205,16 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, fieldA.tex);
     gl.uniform1i(fieldUni.prev, 0);
-    // Data-driven warp params: evaluate the active OperatorConfig against this
-    // audio frame. The default config reproduces the original hardcoded formulas
-    // (zoom/rotate/swirl/hue/decay/warp/kaleidoscope); the randomizer + Director
-    // mint and morph configs to change the look. evalConfig clamps every output
-    // to a GPU-safe range so no config can crash or white-out the field.
-    evalConfig(currentConfig, frame, sectionSeed, dyn);
+    // Simulated fluid velocity on unit 1 (u_prev owns unit 0; no other texture
+    // is bound in this pass). When the sim is off (low tier / unsupported GPU)
+    // bind the prev field instead — any valid texture works because the sample
+    // is multiplied by u_fluid = 0, reproducing the previous math exactly.
+    const velTex = fluid ? fluid.velocityTexture() : null;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, velTex ?? fieldA.tex);
+    gl.uniform1i(fieldUni.velocity, 1);
+    gl.uniform1f(fieldUni.fluid, velTex ? dyn.fluid * FLUID_ADVECT_SCALE * dt : 0);
+    gl.activeTexture(gl.TEXTURE0);
     gl.uniform1f(fieldUni.decay, dyn.decay);
     gl.uniform1f(fieldUni.warpAmp, dyn.warpAmp);
     gl.uniform1f(fieldUni.warpScale, dyn.warpScale);
@@ -1365,6 +1411,8 @@ export function createEvilandRenderer(
     fieldB = null;
     bloomDown.length = 0;
     bloomUp.length = 0;
+    fluid?.dispose();
+    fluid = null;
     const lose = gl.getExtension('WEBGL_lose_context');
     if (lose) lose.loseContext();
   }
