@@ -108,8 +108,8 @@ export interface FluidSimOptions {
 
 export interface FluidSim {
   step(dt: number, forces: FluidForce[], params: { vorticity: number; dissipation: number }): void;
-  /** Current velocity texture (RG16F, UV-space units per second). */
-  velocityTexture(): WebGLTexture;
+  /** Current velocity texture (RG16F, UV-space units per second); null after dispose(). */
+  velocityTexture(): WebGLTexture | null;
   resize(width: number, height: number): void;
   dispose(): void;
 }
@@ -595,7 +595,8 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     gl.activeTexture(gl.TEXTURE0);
   }
 
-  function velocityTexture(): WebGLTexture {
+  function velocityTexture(): WebGLTexture | null {
+    if (!targets) return null; // disposed — never hand back a deleted texture
     return velRead.tex;
   }
 
