@@ -53,6 +53,12 @@ jobs:
       - name: Smoke — visualizer module exports
         run: npm run smoke:visualizer
 
+      - name: Test — Eviland audio reactor (structure detection)
+        run: npm run test:eviland-audio
+
+      - name: Test — Eviland Director (timer rotation + drift + recall)
+        run: npm run test:eviland-director
+
       - name: Smoke — renderer CSP (no unsafe-eval; eval scoped to iframe)
         run: npm run smoke:security
 
