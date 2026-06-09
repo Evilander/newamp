@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import type {
   AudioExportFormat,
   LibraryHealth,
@@ -13,6 +13,7 @@ import { formatTime, highlight } from '../../lib/format';
 import { api } from '../../lib/api';
 import { EmptyLibrary } from './EmptyLibrary';
 import { ArtistLink, AlbumLink } from '../EntityLink';
+import { useVirtualRows } from '../../hooks/useVirtualRows';
 
 type Sort =
   | 'artist'
@@ -500,57 +501,28 @@ export function LibraryView(): JSX.Element {
           onManualSave={(patch) => void applyManualMetadataEdit(patch)}
         />
       )}
-      <div className="flex-1 overflow-auto">
-        {loading ? (
-          <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
-            Loading…
-          </div>
-          ) : tracks.length === 0 ? (
-          libraryQuery ? (
-            <div
-              className="flex h-full items-center justify-center text-[12px]"
-              style={{ color: 'var(--muted)' }}
-            >
-              No matches for &ldquo;{libraryQuery}&rdquo;.
-            </div>
-          ) : hasLibrary ? (
-            <div
-              className="flex h-full items-center justify-center text-[12px]"
-              style={{ color: 'var(--muted)' }}
-            >
-              No tracks in this view.
-            </div>
-          ) : (
-            <EmptyLibrary />
-          )
-        ) : (
-          <>
-            <TrackTable
-              tracks={tracks}
-              currentId={current?.id ?? null}
-              search={libraryQuery}
-              onPlay={(idx) => void playQueue(tracks, idx)}
-              onPlayTracks={(selected) => void playQueue(selected, 0)}
-              onPlayNext={queueTrackNext}
-              onAddToQueue={addTrackToQueue}
-              onPlayNextTracks={queueTracksNext}
-              onAddTracksToQueue={addTracksToQueue}
-              onToggleLove={toggleLove}
-              onSetRating={rateTrack}
-              onToggleAvoidAutoPlay={toggleAvoid}
-              onMetadataLookup={(track) => void lookupMetadata(track)}
-              onBulkMetadataSaved={applyBulkMetadataResults}
-            />
-            <LibraryPagingFooter
-              shown={tracks.length}
-              total={matchingTrackCount}
-              hasMore={hasMoreTracks}
-              loading={loadingMore}
-              onLoadMore={() => void loadMoreTracks()}
-            />
-          </>
-        )}
-      </div>
+      <LibraryTrackPane
+        tracks={tracks}
+        loading={loading}
+        hasLibrary={hasLibrary}
+        libraryQuery={libraryQuery}
+        currentId={current?.id ?? null}
+        matchingTrackCount={matchingTrackCount}
+        hasMoreTracks={hasMoreTracks}
+        loadingMore={loadingMore}
+        onLoadMore={() => void loadMoreTracks()}
+        onPlay={(idx) => void playQueue(tracks, idx)}
+        onPlayTracks={(selected) => void playQueue(selected, 0)}
+        onPlayNext={queueTrackNext}
+        onAddToQueue={addTrackToQueue}
+        onPlayNextTracks={queueTracksNext}
+        onAddTracksToQueue={addTracksToQueue}
+        onToggleLove={toggleLove}
+        onSetRating={rateTrack}
+        onToggleAvoidAutoPlay={toggleAvoid}
+        onMetadataLookup={(track) => void lookupMetadata(track)}
+        onBulkMetadataSaved={applyBulkMetadataResults}
+      />
     </div>
   );
 }
@@ -623,6 +595,106 @@ function LibraryPagingFooter({
 
 function droppedPaths(dataTransfer: DataTransfer): string[] {
   return api.getDroppedFilePaths(Array.from(dataTransfer.files));
+}
+
+/**
+ * Scroll-container + virtual-window wrapper for the Library track list.
+ * Extracted so LibraryView can stay clean and `TrackTable` can remain
+ * shareable (other views render TrackTable without virtualisation).
+ */
+function LibraryTrackPane({
+  tracks,
+  loading,
+  hasLibrary,
+  libraryQuery,
+  currentId,
+  matchingTrackCount,
+  hasMoreTracks,
+  loadingMore,
+  onLoadMore,
+  ...tableProps
+}: {
+  tracks: Track[];
+  loading: boolean;
+  hasLibrary: boolean;
+  libraryQuery: string;
+  currentId: number | null;
+  matchingTrackCount: number;
+  hasMoreTracks: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
+  onPlay: (index: number) => void;
+  onPlayTracks: (tracks: Track[]) => void;
+  onPlayNext: (track: Track) => void;
+  onAddToQueue: (track: Track) => void;
+  onPlayNextTracks: (tracks: Track[]) => void;
+  onAddTracksToQueue: (tracks: Track[]) => void;
+  onToggleLove: (id: number) => Promise<void>;
+  onSetRating: (id: number, rating: number) => Promise<void>;
+  onToggleAvoidAutoPlay: (id: number) => Promise<void>;
+  onMetadataLookup: (track: Track) => void;
+  onBulkMetadataSaved: (tracks: Track[]) => void;
+}): JSX.Element {
+  const { startIndex, endIndex, topPad, bottomPad, onScroll, scrollRef } = useVirtualRows({
+    rowCount: tracks.length,
+    rowHeight: LIBRARY_ROW_HEIGHT,
+  });
+
+  if (loading) {
+    return (
+      <div className="flex-1 overflow-auto">
+        <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
+          Loading…
+        </div>
+      </div>
+    );
+  }
+
+  if (tracks.length === 0) {
+    return (
+      <div className="flex-1 overflow-auto">
+        {libraryQuery ? (
+          <div
+            className="flex h-full items-center justify-center text-[12px]"
+            style={{ color: 'var(--muted)' }}
+          >
+            No matches for &ldquo;{libraryQuery}&rdquo;.
+          </div>
+        ) : hasLibrary ? (
+          <div
+            className="flex h-full items-center justify-center text-[12px]"
+            style={{ color: 'var(--muted)' }}
+          >
+            No tracks in this view.
+          </div>
+        ) : (
+          <EmptyLibrary />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      ref={scrollRef}
+      onScroll={onScroll}
+      className="flex-1 overflow-auto"
+    >
+      <TrackTable
+        tracks={tracks}
+        currentId={currentId}
+        virtualWindow={{ startIndex, endIndex, topPad, bottomPad }}
+        {...tableProps}
+      />
+      <LibraryPagingFooter
+        shown={tracks.length}
+        total={matchingTrackCount}
+        hasMore={hasMoreTracks}
+        loading={loadingMore}
+        onLoadMore={onLoadMore}
+      />
+    </div>
+  );
 }
 
 function DropOverlay(): JSX.Element {
@@ -987,6 +1059,271 @@ function saveTrackTableColumnWidths(widths: Record<TrackColumnKey, number>): voi
   }
 }
 
+/** Fixed height of each data row. Must match `contain-intrinsic-size` in CSS (36px). */
+const LIBRARY_ROW_HEIGHT = 36; // matches contain-intrinsic-size: 0 36px on [data-newamp-track-row]
+
+interface LibraryRowProps {
+  track: Track;
+  absoluteIndex: number;
+  selected: boolean;
+  isActive: boolean;
+  search: string | undefined;
+  showQueueActions: boolean;
+  showMetadataLookup: boolean;
+  playlistTargets: SavedPlaylist[];
+  onPlay: (absoluteIndex: number) => void;
+  onToggleSelect: (id: number, checked: boolean) => void;
+  onPlayNext: ((track: Track) => void) | undefined;
+  onAddToQueue: ((track: Track) => void) | undefined;
+  onAddToPlaylist: (playlistId: number, track: Track) => void;
+  onToggleLove: (id: number) => void;
+  onSetRating: (id: number, rating: number) => void;
+  onToggleAvoid: (id: number) => void;
+  onMetadataLookup: ((track: Track) => void) | undefined;
+  onShowInFolder: (path: string) => void;
+}
+
+const LibraryRow = memo(function LibraryRow({
+  track: t,
+  absoluteIndex,
+  selected,
+  isActive,
+  search,
+  showQueueActions,
+  showMetadataLookup,
+  playlistTargets,
+  onPlay,
+  onToggleSelect,
+  onPlayNext,
+  onAddToQueue,
+  onAddToPlaylist,
+  onToggleLove,
+  onSetRating,
+  onToggleAvoid,
+  onMetadataLookup,
+  onShowInFolder,
+}: LibraryRowProps): JSX.Element {
+  const zebra = absoluteIndex % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)';
+  return (
+    <tr
+      key={t.id}
+      data-newamp-track-row
+      data-track-id={t.id}
+      data-track-title={t.title}
+      className="cursor-pointer transition-colors"
+      style={{
+        background: isActive ? 'rgba(52,211,153,0.06)' : zebra,
+        color: isActive ? 'var(--accent)' : 'var(--ink)',
+      }}
+      onDoubleClick={() => onPlay(absoluteIndex)}
+      onMouseEnter={(e) =>
+        !isActive && (e.currentTarget.style.background = 'var(--panel-2)')
+      }
+      onMouseLeave={(e) => !isActive && (e.currentTarget.style.background = zebra)}
+    >
+      <td className="px-2 py-[5px]">
+        <input
+          type="checkbox"
+          aria-label={`Select ${t.title}`}
+          checked={selected}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => onToggleSelect(t.id, event.currentTarget.checked)}
+        />
+      </td>
+      <td className="px-2 py-[5px]">
+        {isActive ? (
+          <span className="eq-bars">
+            <span /><span /><span /><span />
+          </span>
+        ) : (
+          <button
+            className="opacity-50 hover:opacity-100"
+            onClick={(e) => {
+              e.stopPropagation();
+              onPlay(absoluteIndex);
+            }}
+            title="Play"
+          >
+            ▶
+          </button>
+        )}
+      </td>
+      {showQueueActions && (
+        <td className="px-2 py-[5px]">
+          <div className="track-action-cluster">
+            {onPlayNext && (
+              <button
+                className="track-icon-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onPlayNext(t);
+                }}
+                aria-label="Play next"
+                title="Play next"
+              >
+                ⤴
+              </button>
+            )}
+            {onAddToQueue && (
+              <button
+                className="track-icon-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onAddToQueue(t);
+                }}
+                aria-label="Add to queue"
+                title="Add to queue"
+              >
+                ≡
+              </button>
+            )}
+          </div>
+        </td>
+      )}
+      {playlistTargets.length > 0 && (
+        <td className="px-2 py-[5px]">
+          <select
+            aria-label="Add to playlist"
+            title="Add to playlist"
+            value=""
+            onClick={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              event.stopPropagation();
+              const playlistId = Number(event.currentTarget.value);
+              if (playlistId > 0) onAddToPlaylist(playlistId, t);
+            }}
+            className="bevel-in w-full px-1 py-[2px] text-[10px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          >
+            <option value="">Add to playlist</option>
+            {playlistTargets.map((playlist) => (
+              <option key={playlist.id} value={playlist.id}>
+                {playlist.name}
+              </option>
+            ))}
+          </select>
+        </td>
+      )}
+      <td
+        className="px-2 py-[5px] text-right tabular-nums"
+        style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }}
+      >
+        {t.trackNo ?? absoluteIndex + 1}
+      </td>
+      <td className="px-2 py-[5px]">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 flex-1 truncate" title={t.title}>
+            {search ? highlight(t.title, search) : t.title}
+          </span>
+          <button
+            className="track-icon-btn track-folder-btn"
+            data-show-in-folder
+            onClick={(e) => {
+              e.stopPropagation();
+              onShowInFolder(t.path);
+            }}
+            aria-label="Show in folder"
+            title="Show in folder"
+          >
+            ⌕
+          </button>
+        </div>
+      </td>
+      <td
+        className="truncate px-2 py-[5px]"
+        style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
+        title={t.artist}
+      >
+        <ArtistLink artist={t.artist} color="inherit">
+          {search ? highlight(t.artist, search) : t.artist}
+        </ArtistLink>
+      </td>
+      <td
+        className="truncate px-2 py-[5px]"
+        style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
+        title={t.album}
+      >
+        <AlbumLink
+          album={t.album}
+          albumArtist={t.albumArtist || t.artist}
+          color="inherit"
+        >
+          {search ? highlight(t.album, search) : t.album}
+        </AlbumLink>
+      </td>
+      <td
+        className="px-2 py-[5px] text-right tabular-nums"
+        style={{ color: 'var(--muted)' }}
+      >
+        {t.year ?? '—'}
+      </td>
+      <td
+        className="px-2 py-[5px] text-right tabular-nums"
+        style={{ color: 'var(--ink-2)' }}
+      >
+        {formatTime(t.duration ?? 0)}
+      </td>
+      <td
+        className="px-2 py-[5px] text-right tabular-nums"
+        style={{ color: t.playCount > 0 ? 'var(--ink-2)' : 'var(--muted)' }}
+      >
+        {t.playCount > 0 ? t.playCount.toLocaleString() : ''}
+      </td>
+      <td className="px-2 py-[5px] text-right" data-newamp-rating={t.rating}>
+        <RatingStars
+          value={t.rating}
+          onChange={(rating) => Promise.resolve(onSetRating(t.id, rating))}
+        />
+      </td>
+      <td className="px-2 py-[5px] text-right">
+        <button
+          className="pxbtn px-1.5 py-[1px] text-[9px]"
+          data-avoid-autoplay
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleAvoid(t.id);
+          }}
+          style={{
+            color: t.avoidAutoPlay ? 'var(--warn)' : 'var(--muted)',
+            borderColor: t.avoidAutoPlay ? 'var(--warn)' : 'var(--line)',
+          }}
+          title={t.avoidAutoPlay ? 'Excluded from continuous mix and generated sets' : 'Allowed in continuous mix and generated sets'}
+        >
+          {t.avoidAutoPlay ? 'NO DJ' : 'DJ OK'}
+        </button>
+      </td>
+      {showMetadataLookup && (
+        <td className="px-2 py-[5px] text-right">
+          {needsMetadataRescue(t) && (
+            <button
+              className="pxbtn px-1.5 py-[1px] text-[9px]"
+              onClick={(e) => {
+                e.stopPropagation();
+                onMetadataLookup?.(t);
+              }}
+              title="Search MusicBrainz"
+            >
+              TAG
+            </button>
+          )}
+        </td>
+      )}
+      <td className="px-2 py-[5px] text-right">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleLove(t.id);
+          }}
+          style={{ color: t.loved ? 'var(--accent)' : 'var(--muted)' }}
+          title="Love"
+        >
+          {t.loved ? '★' : '☆'}
+        </button>
+      </td>
+    </tr>
+  );
+});
+
 export function TrackTable({
   tracks,
   currentId,
@@ -1002,6 +1339,7 @@ export function TrackTable({
   onToggleAvoidAutoPlay,
   onMetadataLookup,
   onBulkMetadataSaved,
+  virtualWindow,
 }: {
   tracks: Track[];
   currentId: number | null;
@@ -1017,6 +1355,8 @@ export function TrackTable({
   onToggleAvoidAutoPlay?: (id: number) => Promise<Track | null | void>;
   onMetadataLookup?: (track: Track) => void;
   onBulkMetadataSaved?: (tracks: Track[]) => void;
+  /** Optional virtual window from useVirtualRows; omit to render all rows. */
+  virtualWindow?: { startIndex: number; endIndex: number; topPad: number; bottomPad: number };
 }): JSX.Element {
   const storeToggleLove = usePlayerStore((s) => s.toggleLove);
   const storeSetTrackRating = usePlayerStore((s) => s.setTrackRating);
@@ -1097,15 +1437,6 @@ export function TrackTable({
     });
   }, [tracks]);
 
-  function setTrackSelected(id: number, selected: boolean): void {
-    setSelectedIds((current) => {
-      const next = new Set(current);
-      if (selected) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-  }
-
   function setAllVisibleSelected(selected: boolean): void {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -1184,6 +1515,21 @@ export function TrackTable({
       return next;
     });
   }
+
+  // Stable refs so useCallback closures don't need to redeclare deps on these async fns
+  const onToggleLoveRef = useRef(onToggleLove);
+  const onSetRatingRef = useRef(onSetRating);
+  const onToggleAvoidAutoPlayRef = useRef(onToggleAvoidAutoPlay);
+  onToggleLoveRef.current = onToggleLove;
+  onSetRatingRef.current = onSetRating;
+  onToggleAvoidAutoPlayRef.current = onToggleAvoidAutoPlay;
+  // Keep a ref to the current storeToggleLove etc. (already stable from zustand, but defensive)
+  const storeToggleLoveRef = useRef(storeToggleLove);
+  const storeSetTrackRatingRef = useRef(storeSetTrackRating);
+  const storeToggleAvoidAutoPlayRef = useRef(storeToggleAvoidAutoPlay);
+  storeToggleLoveRef.current = storeToggleLove;
+  storeSetTrackRatingRef.current = storeSetTrackRating;
+  storeToggleAvoidAutoPlayRef.current = storeToggleAvoidAutoPlay;
 
   async function toggleLoveForTrack(track: Track): Promise<void> {
     const loved = onToggleLove ? await onToggleLove(track.id) : await storeToggleLove(track.id);
@@ -1339,6 +1685,73 @@ export function TrackTable({
       setBulkBusy(false);
     }
   }
+
+  // ── virtualisation ─────────────────────────────────────────────────────────
+  // Use the caller-supplied window (startIndex/endIndex/pads) when provided,
+  // or fall back to rendering the full list (all rows) when omitted.
+  const winStart = virtualWindow?.startIndex ?? 0;
+  const winEnd = virtualWindow?.endIndex ?? visible.length - 1;
+  const winTopPad = virtualWindow?.topPad ?? 0;
+  const winBottomPad = virtualWindow?.bottomPad ?? 0;
+  const COLS = activeColumnKeys.length;
+
+  // ── stable row callbacks ────────────────────────────────────────────────────
+  // Keyed only on state setters (stable) so LibraryRow.memo never re-renders
+  // due to callback identity changes. Async work uses refs to capture the
+  // latest prop values at call time.
+  const patchLocalTrackRef = useRef(patchLocalTrack);
+  patchLocalTrackRef.current = patchLocalTrack;
+
+  const onPlayRef = useRef(onPlay);
+  onPlayRef.current = onPlay;
+  const stableOnPlay = useCallback((absoluteIndex: number) => {
+    onPlayRef.current(absoluteIndex);
+  }, []);
+
+  // setTrackSelected only closes over setSelectedIds which is a stable state setter.
+  const stableOnToggleSelect = useCallback((id: number, checked: boolean) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []); // setSelectedIds is stable
+
+  const stableOnToggleLove = useCallback((id: number) => {
+    void (async () => {
+      const onTL = onToggleLoveRef.current;
+      const storeTL = storeToggleLoveRef.current;
+      const loved = onTL ? await onTL(id) : await storeTL(id);
+      if (typeof loved === 'boolean') patchLocalTrackRef.current(id, { loved: loved ? 1 : 0 });
+    })();
+  }, []);
+
+  const stableOnSetRating = useCallback((id: number, rating: number) => {
+    void (async () => {
+      const onSR = onSetRatingRef.current;
+      const storeSR = storeSetTrackRatingRef.current;
+      const updated = onSR ? await onSR(id, rating) : await storeSR(id, rating);
+      if (updated) patchLocalTrackRef.current(id, updated);
+    })();
+  }, []);
+
+  const stableOnToggleAvoid = useCallback((id: number) => {
+    void (async () => {
+      const onTA = onToggleAvoidAutoPlayRef.current;
+      const storeTA = storeToggleAvoidAutoPlayRef.current;
+      const updated = onTA ? await onTA(id) : await storeTA(id);
+      if (updated) patchLocalTrackRef.current(id, updated);
+    })();
+  }, []);
+
+  const stableOnAddToPlaylist = useCallback((playlistId: number, track: Track) => {
+    void addToSavedPlaylist(playlistId, track);
+  }, []); // addToSavedPlaylist only reads playlistTargets at call time via state setter
+
+  const stableOnShowInFolder = useCallback((path: string) => {
+    void api.showInFolder(path);
+  }, []);
 
   return (
     <>
@@ -1539,228 +1952,38 @@ export function TrackTable({
         </tr>
       </thead>
       <tbody>
-        {visible.map((t, i) => {
-          const isActive = currentId === t.id;
-          const zebra = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)';
+        {winTopPad > 0 && (
+          <tr aria-hidden><td colSpan={COLS} style={{ height: winTopPad, padding: 0, border: 0 }} /></tr>
+        )}
+        {visible.slice(winStart, winEnd + 1).map((t, sliceIdx) => {
+          const absoluteIndex = winStart + sliceIdx;
           return (
-            <tr
+            <LibraryRow
               key={t.id}
-              data-newamp-track-row
-              data-track-id={t.id}
-              data-track-title={t.title}
-              className="cursor-pointer transition-colors"
-              style={{
-                background: isActive ? 'rgba(52,211,153,0.06)' : zebra,
-                color: isActive ? 'var(--accent)' : 'var(--ink)',
-              }}
-              onDoubleClick={() => onPlay(i)}
-              onMouseEnter={(e) =>
-                !isActive && (e.currentTarget.style.background = 'var(--panel-2)')
-              }
-              onMouseLeave={(e) => !isActive && (e.currentTarget.style.background = zebra)}
-            >
-              <td className="px-2 py-[5px]">
-                <input
-                  type="checkbox"
-                  aria-label={`Select ${t.title}`}
-                  checked={selectedIds.has(t.id)}
-                  onClick={(event) => event.stopPropagation()}
-                  onChange={(event) => setTrackSelected(t.id, event.currentTarget.checked)}
-                />
-              </td>
-              <td className="px-2 py-[5px]">
-                {isActive ? (
-                  <span className="eq-bars">
-                    <span /><span /><span /><span />
-                  </span>
-                ) : (
-                  <button
-                    className="opacity-50 hover:opacity-100"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onPlay(i);
-                    }}
-                    title="Play"
-                  >
-                    ▶
-                  </button>
-                )}
-              </td>
-              {showQueueActions && (
-                <td className="px-2 py-[5px]">
-                  <div className="track-action-cluster">
-                    {onPlayNext && (
-                      <button
-                        className="track-icon-btn"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onPlayNext(t);
-                        }}
-                        aria-label="Play next"
-                        title="Play next"
-                      >
-                        ⤴
-                      </button>
-                    )}
-                    {onAddToQueue && (
-                      <button
-                        className="track-icon-btn"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onAddToQueue(t);
-                        }}
-                        aria-label="Add to queue"
-                        title="Add to queue"
-                      >
-                        ≡
-                      </button>
-                    )}
-                  </div>
-                </td>
-              )}
-              {playlistTargets.length > 0 && (
-                <td className="px-2 py-[5px]">
-                  <select
-                    aria-label="Add to playlist"
-                    title="Add to playlist"
-                    value=""
-                    onClick={(event) => event.stopPropagation()}
-                    onChange={(event) => {
-                      event.stopPropagation();
-                      const playlistId = Number(event.currentTarget.value);
-                      if (playlistId > 0) void addToSavedPlaylist(playlistId, t);
-                    }}
-                    className="bevel-in w-full px-1 py-[2px] text-[10px] outline-none"
-                    style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-                  >
-                    <option value="">Add to playlist</option>
-                    {playlistTargets.map((playlist) => (
-                      <option key={playlist.id} value={playlist.id}>
-                        {playlist.name}
-                      </option>
-                    ))}
-                  </select>
-                </td>
-              )}
-              <td
-                className="px-2 py-[5px] text-right tabular-nums"
-                style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }}
-              >
-                {t.trackNo ?? i + 1}
-              </td>
-              <td className="px-2 py-[5px]">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate" title={t.title}>
-                    {search ? highlight(t.title, search) : t.title}
-                  </span>
-                  <button
-                    className="track-icon-btn track-folder-btn"
-                    data-show-in-folder
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void api.showInFolder(t.path);
-                    }}
-                    aria-label="Show in folder"
-                    title="Show in folder"
-                  >
-                    ⌕
-                  </button>
-                </div>
-              </td>
-              <td
-                className="truncate px-2 py-[5px]"
-                style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
-                title={t.artist}
-              >
-                <ArtistLink artist={t.artist} color="inherit">
-                  {search ? highlight(t.artist, search) : t.artist}
-                </ArtistLink>
-              </td>
-              <td
-                className="truncate px-2 py-[5px]"
-                style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
-                title={t.album}
-              >
-                <AlbumLink
-                  album={t.album}
-                  albumArtist={t.albumArtist || t.artist}
-                  color="inherit"
-                >
-                  {search ? highlight(t.album, search) : t.album}
-                </AlbumLink>
-              </td>
-              <td
-                className="px-2 py-[5px] text-right tabular-nums"
-                style={{ color: 'var(--muted)' }}
-              >
-                {t.year ?? '—'}
-              </td>
-              <td
-                className="px-2 py-[5px] text-right tabular-nums"
-                style={{ color: 'var(--ink-2)' }}
-              >
-                {formatTime(t.duration ?? 0)}
-              </td>
-              <td
-                className="px-2 py-[5px] text-right tabular-nums"
-                style={{ color: t.playCount > 0 ? 'var(--ink-2)' : 'var(--muted)' }}
-              >
-                {t.playCount > 0 ? t.playCount.toLocaleString() : ''}
-              </td>
-              <td className="px-2 py-[5px] text-right" data-newamp-rating={t.rating}>
-                <RatingStars
-                  value={t.rating}
-                  onChange={(rating) => setRatingForTrack(t, rating)}
-                />
-              </td>
-              <td className="px-2 py-[5px] text-right">
-                <button
-                  className="pxbtn px-1.5 py-[1px] text-[9px]"
-                  data-avoid-autoplay
-                  onClick={async (e) => {
-                    e.stopPropagation();
-                    await toggleAvoidForTrack(t);
-                  }}
-                  style={{
-                    color: t.avoidAutoPlay ? 'var(--warn)' : 'var(--muted)',
-                    borderColor: t.avoidAutoPlay ? 'var(--warn)' : 'var(--line)',
-                  }}
-                  title={t.avoidAutoPlay ? 'Excluded from continuous mix and generated sets' : 'Allowed in continuous mix and generated sets'}
-                >
-                  {t.avoidAutoPlay ? 'NO DJ' : 'DJ OK'}
-                </button>
-              </td>
-              {showMetadataLookup && (
-                <td className="px-2 py-[5px] text-right">
-                  {needsMetadataRescue(t) && (
-                    <button
-                      className="pxbtn px-1.5 py-[1px] text-[9px]"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onMetadataLookup?.(t);
-                      }}
-                      title="Search MusicBrainz"
-                    >
-                      TAG
-                    </button>
-                  )}
-                </td>
-              )}
-              <td className="px-2 py-[5px] text-right">
-                <button
-                  onClick={async (e) => {
-                    e.stopPropagation();
-                    await toggleLoveForTrack(t);
-                  }}
-                style={{ color: t.loved ? 'var(--accent)' : 'var(--muted)' }}
-                title="Love"
-              >
-                {t.loved ? '★' : '☆'}
-              </button>
-            </td>
-          </tr>
+              track={t}
+              absoluteIndex={absoluteIndex}
+              selected={selectedIds.has(t.id)}
+              isActive={currentId === t.id}
+              search={search}
+              showQueueActions={showQueueActions}
+              showMetadataLookup={showMetadataLookup}
+              playlistTargets={playlistTargets}
+              onPlay={stableOnPlay}
+              onToggleSelect={stableOnToggleSelect}
+              onPlayNext={onPlayNext}
+              onAddToQueue={onAddToQueue}
+              onAddToPlaylist={stableOnAddToPlaylist}
+              onToggleLove={stableOnToggleLove}
+              onSetRating={stableOnSetRating}
+              onToggleAvoid={stableOnToggleAvoid}
+              onMetadataLookup={onMetadataLookup}
+              onShowInFolder={stableOnShowInFolder}
+            />
           );
         })}
+        {winBottomPad > 0 && (
+          <tr aria-hidden><td colSpan={COLS} style={{ height: winBottomPad, padding: 0, border: 0 }} /></tr>
+        )}
       </tbody>
       </table>
     </>
