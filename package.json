@@ -44,6 +44,7 @@
     "test:app-menu": "node scripts/app-menu-test.mjs",
     "test:macho-arch": "node scripts/macho-arch-test.mjs",
     "test:library-query": "npm run build:electron && node scripts/library-query-test.mjs",
+    "test:virtual-rows": "node scripts/virtual-rows-test.mjs",
     "smoke:butterchurn-sandbox": "npm run build && electron scripts/butterchurn-sandbox-smoke-app",
     "smoke:particle-flow": "electron scripts/particle-flow-smoke-app",
     "smoke:viz-capture": "node scripts/viz-capture-smoke.mjs",
