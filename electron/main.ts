@@ -232,6 +232,16 @@ if (forceSoftwareRendering) {
   applySoftwareRenderingSwitches(smokeMode ? 'smoke' : 'normal');
 }
 
+function safeListMacVolumesMusic(): string[] {
+  try {
+    return readdirSync('/Volumes')
+      .filter((vol) => vol !== 'Macintosh HD' && !vol.startsWith('.'))
+      .map((vol) => `/Volumes/${vol}/Music`);
+  } catch {
+    return [];
+  }
+}
+
 function commandLineValue(name: string): string | null {
   const prefix = `${name}=`;
   const found = process.argv.find((arg) => arg.startsWith(prefix));
@@ -3805,7 +3815,9 @@ async function bootstrap(): Promise<void> {
   // Auto-seed default library root to K:\music if nothing configured and it exists.
   const current = settings.get();
   if (!smokeMode && !current.libraryRoots.length) {
-    const candidates = ['K:/music', 'K:\\music', 'C:/Music', 'C:/Users/Public/Music'];
+    const candidates = process.platform === 'darwin'
+      ? [app.getPath('music'), ...safeListMacVolumesMusic()]
+      : ['K:/music', 'K:\\music', 'C:/Music', 'C:/Users/Public/Music'];
     for (const c of candidates) {
       try {
         if (existsSync(c) && statSync(c).isDirectory()) {
