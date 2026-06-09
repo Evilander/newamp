@@ -34,6 +34,7 @@ import { mkdir, open, readdir, realpath, rename, stat, unlink, utimes, copyFile 
 import { cpus } from 'node:os';
 import { join } from 'node:path';
 import { resolveFfmpegPath, buildPlaybackFlacArgs } from './transcode.js';
+import { caseFoldCachePath } from './cache-key-casing.js';
 
 export type TranscodeResult =
   | { ok: true; path: string }
@@ -268,7 +269,7 @@ async function canonicalKey(filePath: string, size: number, mtimeMs: number): Pr
     /* keep original */
   }
   canon = canon.replace(/\\/g, '/');
-  if (process.platform === 'win32') canon = canon.toLowerCase();
+  canon = caseFoldCachePath(canon, process.platform);
   return createHash('sha1')
     .update(`${canon}|${size}|${Math.round(mtimeMs)}|${RECIPE_TAG}`)
     .digest('hex')
