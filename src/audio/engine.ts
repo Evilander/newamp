@@ -34,6 +34,9 @@ interface Deck {
   el: HTMLAudioElement;
   source: MediaElementAudioSourceNode;
   gain: GainNode;
+  /** Pending deferred seek listener (loadedmetadata) so it can be cancelled
+   *  when the deck is silenced or a newer deferred seek replaces it. */
+  pendingSeek?: { handler: () => void } | null;
 }
 
 interface AudioGraph {
@@ -580,6 +583,7 @@ export class AudioEngine {
     const graph = this.graph;
     if (!graph) return;
     try {
+      this.cancelPendingSeek(deck);
       deck.el.pause();
       deck.el.currentTime = 0;
       if (clearSrc) {
@@ -603,16 +607,44 @@ export class AudioEngine {
       }
       return;
     }
-    const seek = () => {
+    if (Number.isFinite(deck.el.duration) && deck.el.duration > 0) {
+      try {
+        deck.el.currentTime = Math.max(0, Math.min(deck.el.duration, target));
+      } catch {
+        /* metadata may not be ready */
+      }
+      return;
+    }
+    this.scheduleMetadataSeek(deck, target);
+  }
+
+  /**
+   * Land a seek once metadata arrives — guarded against the deck's src
+   * changing first (prepareNext B then play C on the same deck used to seek C
+   * to B's offset), and cancellable via silenceDeck. Mirrors the seekSeq /
+   * scheduledSrc guard the VBR diagnostic already uses.
+   */
+  private scheduleMetadataSeek(deck: Deck, target: number): void {
+    this.cancelPendingSeek(deck);
+    const scheduledSrc = deck.el.currentSrc;
+    const handler = (): void => {
+      deck.pendingSeek = null;
+      if (deck.el.currentSrc !== scheduledSrc) return; // src changed — stale seek
       try {
         const max = Number.isFinite(deck.el.duration) && deck.el.duration > 0 ? deck.el.duration : target;
         deck.el.currentTime = Math.max(0, Math.min(max, target));
       } catch {
-        /* metadata may not be ready */
+        /* still not seekable (non-seekable stream); nothing more we can do */
       }
     };
-    if (Number.isFinite(deck.el.duration) && deck.el.duration > 0) seek();
-    else deck.el.addEventListener('loadedmetadata', seek, { once: true });
+    deck.pendingSeek = { handler };
+    deck.el.addEventListener('loadedmetadata', handler, { once: true });
+  }
+
+  private cancelPendingSeek(deck: Deck): void {
+    if (!deck.pendingSeek) return;
+    deck.el.removeEventListener('loadedmetadata', deck.pendingSeek.handler);
+    deck.pendingSeek = null;
   }
 
   private clearFadeTimer(): void {
@@ -846,18 +878,7 @@ export class AudioEngine {
       // applyStartPosition's retry: land the seek once metadata arrives instead
       // of silently dropping it (e.g. resuming a saved position on a cold deck).
       console.warn('[newamp] seek before metadata; retrying on loadedmetadata', err);
-      el.addEventListener(
-        'loadedmetadata',
-        () => {
-          try {
-            const max = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : target;
-            el.currentTime = Math.max(0, Math.min(max, target));
-          } catch {
-            /* still not seekable (non-seekable stream); nothing more we can do */
-          }
-        },
-        { once: true },
-      );
+      this.scheduleMetadataSeek(this.activeDeck, target);
     }
     // Don't run the VBR-failure diagnostic when the assignment itself threw —
     // the position never changed, so the verify would false-positive "seek
