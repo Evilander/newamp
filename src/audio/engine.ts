@@ -3,6 +3,7 @@
 // swapping a single element.
 
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
+import { planDeviceChange } from './device-change';
 import { normalizeLimiterEnabled, preampDbToLinear } from '@shared/audio-limiter';
 
 export interface EngineState {
@@ -104,6 +105,8 @@ export class AudioEngine {
   // back to the default — surfaced in the Bit-Perfect UI so the rate request
   // never fails silently.
   private sampleRateFallback: { requested: number; actual: number } | null = null;
+  private deviceFallback: { requestedId: string } | null = null;
+  private deviceChangeHandler: (() => void) | null = null;
 
   private state: EngineState = {
     duration: 0,
@@ -312,6 +315,7 @@ export class AudioEngine {
     if (this.outputDeviceId) {
       void this.applyOutputDevice(this.outputDeviceId).catch(() => undefined);
     }
+    this.registerDeviceChangeListener();
 
     return graph;
   }
@@ -665,6 +669,38 @@ export class AudioEngine {
     throw rejected?.reason ?? new Error('Audio output device switch failed.');
   }
 
+  private registerDeviceChangeListener(): void {
+    if (this.deviceChangeHandler) return;
+    const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
+    if (!md || typeof md.addEventListener !== 'function') return;
+    const handler = (): void => { void this.handleDeviceChange(); };
+    this.deviceChangeHandler = handler;
+    md.addEventListener('devicechange', handler);
+  }
+
+  private async handleDeviceChange(): Promise<void> {
+    try {
+      const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
+      if (!md || typeof md.enumerateDevices !== 'function' || !this.graph) return;
+      const devices = await md.enumerateDevices();
+      const outputIds = devices.filter((d) => d.kind === 'audiooutput').map((d) => d.deviceId);
+      const plan = planDeviceChange(this.outputDeviceId, outputIds);
+      if (plan === 'noop') return;
+      if (plan === 'reapply') {
+        await this.applyOutputDevice(this.outputDeviceId);
+        return;
+      }
+      // 'fallback': the pinned device vanished — drop to the system default and
+      // record it so the Settings UI can surface "output device changed".
+      this.deviceFallback = this.outputDeviceId ? { requestedId: this.outputDeviceId } : null;
+      this.outputDeviceId = null;
+      await this.applyOutputDevice(null);
+    } catch (err) {
+      // Never let device-change handling throw into the audio path.
+      console.warn('[newamp] device-change handling failed', err);
+    }
+  }
+
   async playOutputTestTone(): Promise<void> {
     const graph = this.ensureGraph();
     if (graph.ctx.state === 'suspended') {
@@ -903,6 +939,10 @@ export class AudioEngine {
     return this.sampleRateFallback;
   }
 
+  getDeviceFallback(): { requestedId: string } | null {
+    return this.deviceFallback;
+  }
+
   setLimiterEnabled(enabled: boolean): void {
     this.limiterEnabled = normalizeLimiterEnabled(enabled);
     if (this.graph) this.applyLimiter(this.graph, this.limiterEnabled);
@@ -1072,6 +1112,10 @@ export class AudioEngine {
     this.limiterWired = false;
     if (this.rafId) cancelAnimationFrame(this.rafId);
     this.rafId = null;
+    if (this.deviceChangeHandler && typeof navigator !== 'undefined' && navigator.mediaDevices?.removeEventListener) {
+      navigator.mediaDevices.removeEventListener('devicechange', this.deviceChangeHandler);
+    }
+    this.deviceChangeHandler = null;
     if (!this.graph) return;
     for (const deck of this.graph.decks) {
       try {
