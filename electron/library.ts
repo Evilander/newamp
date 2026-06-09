@@ -615,6 +615,7 @@ export class LibraryStore {
   // the main process and freezes IPC. Cache invalidates only when the columns
   // we read change: insert/update of path/duration/has_art, or delete.
   private folderTrackRowsCache: FolderTrackRow[] | null = null;
+  private libraryHealthCache: LibraryHealth | null = null;
 
   private constructor(private readonly file: string) {
     this.artDir = join(dirname(file), 'art');
@@ -817,6 +818,7 @@ export class LibraryStore {
     }
     // upsertTracks writes path/duration/has_art — cached folder-row columns.
     this.invalidateFolderTrackRowsCache();
+    this.invalidateLibraryHealthCache();
     this.scheduleFlush();
   }
 
@@ -841,6 +843,7 @@ export class LibraryStore {
   }
 
   getLibraryHealth(): LibraryHealth {
+    if (this.libraryHealthCache) return this.libraryHealthCache;
     const rows = this.many<LibraryHealthRow>(
       `SELECT id, path, title, artist, album, year, duration, bitrate, sample_rate, size, mtime, has_art, replaygain_track_db, replaygain_album_db FROM tracks`,
     );
@@ -942,7 +945,7 @@ export class LibraryStore {
       `SELECT * FROM tracks ORDER BY mtime DESC, artist COLLATE NOCASE, title COLLATE NOCASE LIMIT 12`,
     ).map(rowToTrack);
 
-    return {
+    const health: LibraryHealth = {
       totals,
       missing,
       quality,
@@ -951,6 +954,8 @@ export class LibraryStore {
       recentlyAdded,
       generatedAt: Date.now(),
     };
+    this.libraryHealthCache = health;
+    return health;
   }
 
   getTrackCount(opts: Pick<TrackQueryOptions, 'search' | 'sort'> = {}): number {
@@ -1009,9 +1014,29 @@ export class LibraryStore {
   }
 
   getTracksByIdsInOrder(ids: number[]): Track[] {
-    return ids
-      .map((id) => this.getTrack(id))
-      .filter((track): track is Track => !!track);
+    const wanted = ids.filter((id) => Number.isFinite(id));
+    if (!wanted.length) return [];
+    const byId = new Map<number, Track>();
+    const unique = [...new Set(wanted)];
+    const chunkSize = 500;
+    for (let i = 0; i < unique.length; i += chunkSize) {
+      const chunk = unique.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.many<RawRow>(`SELECT * FROM tracks WHERE id IN (${placeholders})`, chunk);
+      for (const row of rows) {
+        const track = rowToTrack(row);
+        byId.set(track.id, track);
+      }
+    }
+    // Preserve input order AND duplicates (a play queue may legitimately
+    // contain the same track more than once); only missing ids are dropped.
+    // This matches the prior `ids.map(getTrack).filter(Boolean)` behavior.
+    const out: Track[] = [];
+    for (const id of wanted) {
+      const track = byId.get(id);
+      if (track) out.push(track);
+    }
+    return out;
   }
 
   getCustomLyrics(trackId: number): LocalLyricsResult | null {
@@ -1147,6 +1172,7 @@ export class LibraryStore {
       }
       this.invalidateDnaIndexCache();
       this.invalidateFolderTrackRowsCache();
+      this.invalidateLibraryHealthCache();
       this.db.run('COMMIT');
     } catch (err) {
       this.db.run('ROLLBACK');
@@ -1180,6 +1206,7 @@ export class LibraryStore {
     );
     // duration is one of the cached folder-row columns.
     this.invalidateFolderTrackRowsCache();
+    this.invalidateLibraryHealthCache();
     this.scheduleFlush();
     return this.getTrack(id);
   }
@@ -1209,6 +1236,9 @@ export class LibraryStore {
         WHERE id = ?`,
       [title, artist, album, albumArtist, trackNo, discNo, year, genre, id],
     );
+    // artist/album/year feed getLibraryHealth's missing-metadata + duplicate
+    // detection — a manual edit must not leave the health card stale.
+    this.invalidateLibraryHealthCache();
     this.scheduleFlush();
     return this.getTrack(id);
   }
@@ -1371,6 +1401,7 @@ export class LibraryStore {
     }
     // has_art is one of the cached folder-row columns.
     this.invalidateFolderTrackRowsCache();
+    this.invalidateLibraryHealthCache();
     this.scheduleFlush();
 
     return {
@@ -1496,6 +1527,10 @@ export class LibraryStore {
 
   private invalidateFolderTrackRowsCache(): void {
     this.folderTrackRowsCache = null;
+  }
+
+  private invalidateLibraryHealthCache(): void {
+    this.libraryHealthCache = null;
   }
 
   getAlbumTracks(albumArtist: string, album: string): Track[] {
@@ -2690,12 +2725,12 @@ export class LibraryStore {
     if (!Number.isFinite(id) || id <= 0) return [];
     const sourceDna = this.getTrackDna(id);
     if (!sourceDna) return [];
-    const all = this.getAllTrackDna();
+    const index = this.buildDnaIndex();
     const scored: Array<{ id: number; score: number }> = [];
-    for (const row of all) {
-      if (row.id === id) continue;
-      const score = dnaCosineSimilarity(sourceDna, row.dna);
-      scored.push({ id: row.id, score });
+    for (const [otherId, otherDna] of index) {
+      if (otherId === id) continue;
+      const score = dnaCosineSimilarity(sourceDna, otherDna);
+      scored.push({ id: otherId, score });
     }
     scored.sort((a, b) => b.score - a.score);
     const cap = Math.max(1, Math.min(200, Math.trunc(limit) || 20));
@@ -2738,6 +2773,8 @@ export class LibraryStore {
       ]);
     }
     if (this.db.getRowsModified() <= 0) return null;
+    // replaygain_*_db feed getLibraryHealth's ReplayGain-ready counts.
+    this.invalidateLibraryHealthCache();
     this.scheduleFlush();
     return this.getTrack(trackId);
   }
