@@ -202,6 +202,9 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   // so forced looks are deterministic in sequence but vary each rotation.
   let msSinceSwitch = 0;
   let rotationIndex = 0;
+  // Cached rotation threshold (depends only on rotationIndex); recomputed lazily
+  // when invalidated so the 60fps steady path does no per-frame allocation.
+  let cachedRotateThresholdMs: number | null = null;
 
   // Slow-moving energy + novelty trackers used to derive tier.
   let energyAvg = 0;
@@ -265,15 +268,19 @@ export function createDirector(opts: DirectorOptions = {}): Director {
 
   function effectiveRotateMs(): number {
     if (rotateMs <= 0) return Infinity;
-    // Deterministic jitter for the *next* rotation so the cadence varies but
-    // replays identically.
-    const r = new Rng(hashSeed(`${activeSongId}::rot::${rotationIndex + 1}`));
-    const signed = (r.next() * 2 - 1) * rotateJitterPct;
-    return rotateMs * (1 + signed);
+    if (cachedRotateThresholdMs === null) {
+      // Deterministic jitter for the *next* rotation so the cadence varies but
+      // replays identically. Cached until rotationIndex changes.
+      const r = new Rng(hashSeed(`${activeSongId}::rot::${rotationIndex + 1}`));
+      const signed = (r.next() * 2 - 1) * rotateJitterPct;
+      cachedRotateThresholdMs = rotateMs * (1 + signed);
+    }
+    return cachedRotateThresholdMs;
   }
 
   function onForcedRotation(frame: EvilandFrame): void {
     rotationIndex++;
+    cachedRotateThresholdMs = null;
     const tier = tierFor(frame);
     const nextConfig = generateForSection(frame.sectionId, tier, rotationIndex);
     // Forced rotations deliberately do NOT write the `sections` recall map or
@@ -326,6 +333,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     framesSinceSection = 0;
     // A real structural change resets the timer cadence — structure leads.
     rotationIndex = 0;
+    cachedRotateThresholdMs = null;
   }
 
   function advanceFade(frame: EvilandFrame, dtMs: number): void {
@@ -432,6 +440,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       framesSinceSection = 0;
       msSinceSwitch = 0;
       rotationIndex = 0;
+      cachedRotateThresholdMs = null;
       // Collapse any in-flight fade to the current live config so we don't
       // start the next song mid-blend with the previous one.
       from = cloneConfig(live);
