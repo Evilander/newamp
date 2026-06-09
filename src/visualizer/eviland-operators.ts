@@ -87,6 +87,10 @@ export interface OperatorConfig {
   mirrorMix: Channel;
   flowX: Channel;
   flowY: Channel;
+  /** Simulated-velocity influence on dye advection (0 = off … 1 = full sim flow). */
+  fluid: Channel;
+  /** Fluid-sim vorticity confinement strength (0..30; higher = curlier liquid). */
+  vorticity: Channel;
 
   /**
    * Kaleidoscope segment count. If `mirrorSet` is present the count is chosen
@@ -127,6 +131,8 @@ export interface EvilandDynamics {
   mirrorMix: number;
   flowX: number;
   flowY: number;
+  fluid: number;
+  vorticity: number;
   waveMode: number; // 0 off, 1 line, 2 radial, 3 lissajous, 4 bars
   waveIntensity: number;
   waveThickness: number;
@@ -202,7 +208,7 @@ function clamp(v: number, lo: number, hi: number): number {
 export function createDynamics(): EvilandDynamics {
   return {
     zoom: 0, rotate: 0, swirl: 0, hueCycle: 0, decay: 0.88, warpAmp: 0, warpScale: 2.5,
-    mirror: 6, mirrorMix: 0, flowX: 0, flowY: 0,
+    mirror: 6, mirrorMix: 0, flowX: 0, flowY: 0, fluid: 0, vorticity: 8,
     waveMode: 0, waveIntensity: 0, waveThickness: 0.01, waveScale: 0.3,
     bloom: 0, emitterScale: 1, emitterGain: 1,
   };
@@ -246,6 +252,9 @@ export function evalConfig(
 
   out.flowX = clamp(evalChannel(config.flowX, frame, sectionSeed), -0.01, 0.01);
   out.flowY = clamp(evalChannel(config.flowY, frame, sectionSeed), -0.01, 0.01);
+
+  out.fluid = clamp(evalChannel(config.fluid, frame, sectionSeed), 0, 1);
+  out.vorticity = clamp(evalChannel(config.vorticity, frame, sectionSeed), 0, 30);
 
   out.waveMode = WAVE_MODE_INDEX[config.waveform.mode] ?? 0;
   out.waveIntensity = clamp(evalChannel(config.waveform.intensity, frame, sectionSeed), 0, 3);
@@ -292,6 +301,10 @@ export function defaultConfig(): OperatorConfig {
     // flow = (pan*0.0008 + 0.00012, -0.00018)
     flowX: { base: 0.00012, bindings: [{ feature: 'pan', gain: 0.0008 }] },
     flowY: { base: -0.00018 },
+    // fluid = 0.25 + energy*0.20 — gentle sim influence that swells with the mix
+    fluid: { base: 0.25, bindings: [{ feature: 'energy', gain: 0.20 }] },
+    // vorticity confinement strength (how curly the simulated liquid stays)
+    vorticity: { base: 8 },
     spinFromSection: true,
     // Waveform ON ('line') by default — the drawn oscilloscope advected through
     // the warp field is MilkDrop's single most recognizable signature. It also
@@ -356,6 +369,8 @@ export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): Ope
     mirrorMix: lerpChannel(a.mirrorMix, b.mirrorMix, t),
     flowX: lerpChannel(a.flowX, b.flowX, t),
     flowY: lerpChannel(a.flowY, b.flowY, t),
+    fluid: lerpChannel(a.fluid, b.fluid, t),
+    vorticity: lerpChannel(a.vorticity, b.vorticity, t),
     spinFromSection: pick.spinFromSection,
     waveform: {
       mode: pick.waveform.mode,
