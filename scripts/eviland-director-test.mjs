@@ -47,7 +47,7 @@ const log = [];
 let pass = true;
 const fail = (m) => { pass = false; log.push('FAIL: ' + m); };
 
-const d = createDirector({ songId: 'unit-test', enabled: true });
+const d = createDirector({ songId: 'unit-test', enabled: true, drift: 0, rotateMs: 0 });
 
 // Section 0 — calm intro.
 d.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.08, novelty: 0.1 }), 16.7);
@@ -80,6 +80,25 @@ const cp = d.update(mockFrame({ sectionChanged: true, sectionId: 3, energy: 0.9 
 const passthrough = JSON.stringify(cp?.zoom) === JSON.stringify(c1?.zoom);
 log.push(`disabled passthrough keeps set config: ${passthrough}`);
 if (!passthrough) fail('disabled director did not passthrough');
+
+// --- timer rotation: with no section changes, the look still rotates ---
+{
+  const dr = createDirector({ songId: 'rotate-test', enabled: true, rotateMs: 20000, drift: 0 });
+  // Opening look.
+  dr.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.5 }), 16.7);
+  const opener = settle(dr, { sectionId: 0, energy: 0.5 }, 120); // ~2s, settle the fade
+  const seen = new Set([JSON.stringify(opener)]);
+  // Run ~50s of steady frames with NO section change. The timer floor must
+  // force fresh looks anyway.
+  let t = 0;
+  while (t < 50000) {
+    const c = dr.update(mockFrame({ sectionId: 0, energy: 0.5, sectionChanged: false }), 16.7);
+    seen.add(JSON.stringify(c));
+    t += 16.7;
+  }
+  log.push(`timer rotation produced ${seen.size} distinct configs over 50s`);
+  if (seen.size < 3) fail('timer rotation did not change the look without section boundaries');
+}
 
 const report = log.join('\n') + '\n' + (pass ? '[director-test] PASS' : '[director-test] FAIL') + '\n';
 writeFileSync(RESULT, report);
