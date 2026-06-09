@@ -59,6 +59,14 @@ jobs:
       - name: Test — Eviland Director (timer rotation + drift + recall)
         run: npm run test:eviland-director
 
+      - name: Test — macOS logic (device-change, music-folders, cache-key, app-menu, macho-arch)
+        run: |
+          npm run test:device-change
+          npm run test:music-folders
+          npm run test:cache-key-casing
+          npm run test:app-menu
+          npm run test:macho-arch
+
       - name: Smoke — renderer CSP (no unsafe-eval; eval scoped to iframe)
         run: npm run smoke:security
 

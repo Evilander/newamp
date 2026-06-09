@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
@@ -23,6 +23,11 @@ assert.ok(appPath, `packaged macOS .app should exist (run \`npm run package:mac\
 
 const binPath = join(appPath, 'Contents', 'MacOS', 'NewAmp');
 assert.ok(existsSync(binPath), `app executable should exist: ${binPath}`);
+
+const bundledFfmpeg = join(appPath, 'Contents', 'Resources', 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg');
+assert.ok(existsSync(bundledFfmpeg), `bundled ffmpeg should exist: ${bundledFfmpeg}`);
+const ff = spawnSync(bundledFfmpeg, ['-version'], { encoding: 'utf8' });
+assert.equal(ff.status, 0, `bundled ffmpeg -version should exit 0, got ${ff.status} (${ff.stderr || ''})`);
 
 const smokeRoot = resolve(repoRoot, 'tmp', 'packaged-mac-launch-smoke');
 const userData = join(smokeRoot, `user-data-${process.pid}-${process.hrtime.bigint()}`);

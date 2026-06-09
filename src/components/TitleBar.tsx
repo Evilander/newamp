@@ -13,12 +13,17 @@ export function TitleBar(): JSX.Element {
 
   useEffect(() => winctl.onState((s) => setMaximized(s.maximized)), []);
 
+  const isMac = api.platform === 'darwin';
+
   return (
     <header
       className="titlebar-drag relative flex h-10 items-center justify-between px-2 text-xs"
       style={{ background: 'var(--titlebar)' }}
     >
-      <div className="titlebar-nodrag flex items-center gap-2">
+      <div
+        className="titlebar-nodrag flex items-center gap-2"
+        style={isMac ? { paddingLeft: 72 } : undefined}
+      >
         <BrandLogo size={28} title="NewAmp" />
         <span
           className="lcd-text font-bold tracking-[0.3em]"
@@ -67,31 +72,35 @@ export function TitleBar(): JSX.Element {
         >
           DECK
         </button>
-        <button
-          className="pxbtn !min-w-[32px]"
-          onClick={() => void winctl.minimize()}
-          aria-label="Minimize"
-          title="Minimize"
-        >
-          _
-        </button>
-        <button
-          className="pxbtn !min-w-[32px]"
-          onClick={() => void winctl.toggleMax()}
-          aria-label="Toggle maximize"
-          title={maximized ? 'Restore' : 'Maximize'}
-        >
-          {maximized ? 'RST' : 'MAX'}
-        </button>
-        <button
-          className="pxbtn !min-w-[32px]"
-          onClick={() => void winctl.close()}
-          aria-label="Close"
-          title="Close"
-          style={{ color: 'var(--error)' }}
-        >
-          X
-        </button>
+        {!isMac && (
+          <>
+            <button
+              className="pxbtn !min-w-[32px]"
+              onClick={() => void winctl.minimize()}
+              aria-label="Minimize"
+              title="Minimize"
+            >
+              _
+            </button>
+            <button
+              className="pxbtn !min-w-[32px]"
+              onClick={() => void winctl.toggleMax()}
+              aria-label="Toggle maximize"
+              title={maximized ? 'Restore' : 'Maximize'}
+            >
+              {maximized ? 'RST' : 'MAX'}
+            </button>
+            <button
+              className="pxbtn !min-w-[32px]"
+              onClick={() => void winctl.close()}
+              aria-label="Close"
+              title="Close"
+              style={{ color: 'var(--error)' }}
+            >
+              X
+            </button>
+          </>
+        )}
       </div>
     </header>
   );
