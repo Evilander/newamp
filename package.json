@@ -38,6 +38,7 @@
     "smoke:visualizer": "node scripts/visualizer-smoke.mjs",
     "test:eviland-audio": "node scripts/eviland-audio-test.mjs",
     "test:eviland-director": "node scripts/eviland-director-test.mjs",
+    "test:device-change": "node scripts/device-change-test.mjs",
     "smoke:butterchurn-sandbox": "npm run build && electron scripts/butterchurn-sandbox-smoke-app",
     "smoke:particle-flow": "electron scripts/particle-flow-smoke-app",
     "smoke:viz-capture": "node scripts/viz-capture-smoke.mjs",
