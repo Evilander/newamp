@@ -3,7 +3,7 @@
 // LRC lyrics. Top status strip carries hex badge + track stats. Everything
 // pulls live state from the audio engine.
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { usePlayerStore, engine } from '../../store/usePlayerStore';
 import { fetchLyrics, parseLrc, type LrcLine } from '../../api/lrclib';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
@@ -50,7 +50,11 @@ export function NowPlayingView(): JSX.Element {
   const queue = usePlayerStore((s) => s.queue);
   const queueIndex = usePlayerStore((s) => s.index);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
-  const currentTime = usePlayerStore((s) => s.currentTime);
+  // NOTE: deliberately NOT subscribing to s.currentTime here — it updates 10x/sec
+  // during playback and used to reconcile this entire ~30-child tree on every
+  // tick. Time-driven leaves (WaveformOverview, ElapsedStrip, lyric highlights,
+  // PracticeLoopWatcher, …) subscribe themselves; event handlers read the clock
+  // imperatively via usePlayerStore.getState().currentTime.
   const toggleLove = usePlayerStore((s) => s.toggleLove);
   const setTrackRating = usePlayerStore((s) => s.setTrackRating);
   const setTrackRatingScore = usePlayerStore((s) => s.setTrackRatingScore);
@@ -234,10 +238,8 @@ export function NowPlayingView(): JSX.Element {
     };
   }, [autoDjSmartRuleId]);
 
-  useEffect(() => {
-    if (!isPlaying || !shouldRestartPracticeLoop(practiceLoop, currentTime)) return;
-    seek(practiceLoop.start ?? 0);
-  }, [currentTime, isPlaying, practiceLoop, seek]);
+  // Practice-loop wraparound lives in <PracticeLoopWatcher/> (mounted in the
+  // JSX below) so its 10x/sec clock subscription doesn't re-render this tree.
 
   const artUrl = useMemo(
     () => (current ? api.getArtUrl(current.id) : null),
@@ -261,17 +263,18 @@ export function NowPlayingView(): JSX.Element {
     );
   }
 
-  const activeIdx = lyrics.lines ? findActive(lyrics.lines, currentTime) : -1;
   const fmtKbps = current.bitrate ? `${Math.round(current.bitrate / 1000)} kbps` : '—';
   const fmtRate = current.sampleRate ? `${(current.sampleRate / 1000).toFixed(1)} khz` : '—';
   const codecHint = playbackCodecLabel(current.path);
 
   async function saveBookmark(): Promise<void> {
     if (!current) return;
+    // Event-time read — don't subscribe the whole view to the 10Hz clock.
+    const position = usePlayerStore.getState().currentTime;
     const saved = await api.saveTrackBookmark({
       trackId: current.id,
-      position: currentTime,
-      label: `Mark ${formatTime(currentTime)}`,
+      position,
+      label: `Mark ${formatTime(position)}`,
     });
     setBookmarks((rows) =>
       [...rows.filter((row) => row.id !== saved.id), saved].sort((a, b) => a.position - b.position),
@@ -325,8 +328,10 @@ export function NowPlayingView(): JSX.Element {
 
   function setLoopPoint(point: 'start' | 'end'): void {
     const duration = current?.duration ?? null;
+    // Event-time read — don't subscribe the whole view to the 10Hz clock.
+    const at = usePlayerStore.getState().currentTime;
     setPracticeLoop((loop) =>
-      normalizePracticeLoop({ ...loop, [point]: currentTime }, duration),
+      normalizePracticeLoop({ ...loop, [point]: at }, duration),
     );
   }
 
@@ -548,7 +553,6 @@ export function NowPlayingView(): JSX.Element {
           >
             <SpectrumPanel
               current={current}
-              currentTime={currentTime}
               duration={current.duration ?? 0}
               aiAssistReady={!!settings?.openaiApiKey}
               aiModel={settings?.openaiModel ?? null}
@@ -597,7 +601,6 @@ export function NowPlayingView(): JSX.Element {
                     />
                     <PracticeLoopPanel
                       loop={practiceLoop}
-                      currentTime={currentTime}
                       duration={current.duration ?? null}
                       onSetStart={() => setLoopPoint('start')}
                       onSetEnd={() => setLoopPoint('end')}
@@ -609,7 +612,6 @@ export function NowPlayingView(): JSX.Element {
                     />
                     <BookmarkPanel
                       bookmarks={bookmarks}
-                      currentTime={currentTime}
                       onSave={() => void saveBookmark()}
                       onDelete={(id) => void deleteBookmark(id)}
                       onJump={(bookmark) => seek(bookmark.position)}
@@ -618,7 +620,6 @@ export function NowPlayingView(): JSX.Element {
                 ) : (
                   <LyricsPanel
                     lyrics={lyrics}
-                    activeIdx={activeIdx}
                     status={lyricStatus}
                     source={lyricSource}
                     editorOpen={lyricsEditorOpen}
@@ -642,13 +643,12 @@ export function NowPlayingView(): JSX.Element {
           </div>
         </div>
       </div>
+      <PracticeLoopWatcher practiceLoop={practiceLoop} />
       {lyricsKaraokeMode && (
         <KaraokeOverlay
           lyrics={lyrics}
-          activeIdx={activeIdx}
           status={lyricStatus}
           source={lyricSource}
-          currentTime={currentTime}
           current={current}
           textScale={lyricsTextScale}
           onTextScaleChange={setLyricsTextScale}
@@ -724,6 +724,43 @@ function Clock(): JSX.Element {
   return (
     <span className="text-[10px]" style={{ color: 'var(--ink)' }}>
       {ts}
+    </span>
+  );
+}
+
+/**
+ * Null-rendering watcher for practice-loop wraparound. Owns the 10Hz
+ * currentTime subscription so the loop check doesn't force the whole
+ * NowPlayingView tree to reconcile on every clock tick.
+ */
+function PracticeLoopWatcher({ practiceLoop }: { practiceLoop: PracticeLoop }): null {
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const seek = usePlayerStore((s) => s.seek);
+  useEffect(() => {
+    if (!isPlaying || !shouldRestartPracticeLoop(practiceLoop, currentTime)) return;
+    seek(practiceLoop.start ?? 0);
+  }, [currentTime, isPlaying, practiceLoop, seek]);
+  return null;
+}
+
+/** Time-driven elapsed bar (Signal Bay strip). Subscribes to the clock itself. */
+function ElapsedStrip({ duration }: { duration: number }): JSX.Element {
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const elapsed = duration > 0 ? currentTime / duration : 0;
+  return (
+    <div className="track-signal-strip">
+      <span style={{ width: `${Math.max(2, Math.min(100, elapsed * 100))}%` }} />
+    </div>
+  );
+}
+
+/** Time-driven "NN%" readout (spectrum Overview header). Clock-subscribed leaf. */
+function ProgressPercent({ duration }: { duration: number }): JSX.Element {
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  return (
+    <span className="tabular-nums" style={{ color: 'var(--muted)' }}>
+      {duration > 0 ? `${Math.round((currentTime / duration) * 100)}%` : '0%'}
     </span>
   );
 }
@@ -1147,17 +1184,17 @@ function QueueRow({
 
 function BookmarkPanel({
   bookmarks,
-  currentTime,
   onSave,
   onDelete,
   onJump,
 }: {
   bookmarks: TrackBookmark[];
-  currentTime: number;
   onSave: () => void;
   onDelete: (id: number) => void;
   onJump: (bookmark: TrackBookmark) => void;
 }): JSX.Element {
+  // Clock-subscribed: shows the live position next to "SAVE MARK".
+  const currentTime = usePlayerStore((s) => s.currentTime);
   return (
     <div
       className="min-h-0 border-b px-4 py-3"
@@ -1267,7 +1304,6 @@ function TempoTrainerPanel({
 
 function PracticeLoopPanel({
   loop,
-  currentTime,
   duration,
   onSetStart,
   onSetEnd,
@@ -1276,7 +1312,6 @@ function PracticeLoopPanel({
   onJumpStart,
 }: {
   loop: PracticeLoop;
-  currentTime: number;
   duration: number | null;
   onSetStart: () => void;
   onSetEnd: () => void;
@@ -1284,6 +1319,8 @@ function PracticeLoopPanel({
   onClear: () => void;
   onJumpStart: () => void;
 }): JSX.Element {
+  // Clock-subscribed: live loop progress + "Set A/B at <time>" label.
+  const currentTime = usePlayerStore((s) => s.currentTime);
   const normalized = normalizePracticeLoop(loop, duration);
   const ready = canEnablePracticeLoop(normalized);
   const progress = loopProgressPercent(normalized, currentTime);
@@ -1348,7 +1385,6 @@ function spectrumBandCount(style: SpectrumStyle): number {
 
 function SpectrumPanel({
   current,
-  currentTime,
   duration,
   aiAssistReady,
   aiModel,
@@ -1356,7 +1392,6 @@ function SpectrumPanel({
   onSpectrumStyleChange,
 }: {
   current: Track;
-  currentTime: number;
   duration: number;
   aiAssistReady: boolean;
   aiModel: string | null;
@@ -1489,7 +1524,6 @@ function SpectrumPanel({
 
       <TrackSignalPanel
         track={current}
-        currentTime={currentTime}
         duration={duration}
         aiAssistReady={aiAssistReady}
         aiModel={aiModel}
@@ -1503,17 +1537,15 @@ function SpectrumPanel({
           style={{ color: 'var(--ink-2)' }}
         >
           <span>Overview</span>
-          <span className="tabular-nums" style={{ color: 'var(--muted)' }}>
-            {duration > 0 ? `${Math.round((currentTime / duration) * 100)}%` : '0%'}
-          </span>
+          <ProgressPercent duration={duration} />
         </div>
-        <WaveformOverview currentTime={currentTime} duration={duration} onSeek={seek} />
+        <WaveformOverview duration={duration} onSeek={seek} />
       </div>
     </div>
   );
 }
 
-function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
+const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
   const deferredTrack = useDeferredValue(track);
   const [albumTracks, setAlbumTracks] = useState<Track[]>([]);
   const [sameYearAlbums, setSameYearAlbums] = useState<{ album: string; albumArtist: string; year: number | null }[]>([]);
@@ -1701,7 +1733,7 @@ function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
       )}
     </section>
   );
-}
+});
 
 function AlbumInsight({ label, value }: { label: string; value: string }): JSX.Element {
   return (
@@ -1740,20 +1772,17 @@ function albumReleaseNote(fact: AlbumFact | null, albumYear: number | null): str
 
 function TrackSignalPanel({
   track,
-  currentTime,
   duration,
   aiAssistReady,
   aiModel,
 }: {
   track: Track;
-  currentTime: number;
   duration: number;
   aiAssistReady: boolean;
   aiModel: string | null;
 }): JSX.Element {
   const quality = classifyAudioQuality(track);
   const folder = parentFolder(track.path);
-  const elapsed = duration > 0 ? currentTime / duration : 0;
   const density = quality.densityBytesPerSecond;
   const archiveFlags = quality.flags.length ? quality.flags.join(' / ') : 'Archive signal clean';
   const chips = [
@@ -1782,9 +1811,7 @@ function TrackSignalPanel({
           </div>
         ))}
       </div>
-      <div className="track-signal-strip">
-        <span style={{ width: `${Math.max(2, Math.min(100, elapsed * 100))}%` }} />
-      </div>
+      <ElapsedStrip duration={duration} />
       <div className="track-signal-detail">
         <span title={folder}>{folder || 'No folder path'}</span>
         <span>{track.year ?? 'year unset'} / {track.genre || 'genre unset'}</span>
@@ -1800,7 +1827,7 @@ function TrackSignalPanel({
   );
 }
 
-function SoundsLikePanel({ trackId }: { trackId: number }): JSX.Element | null {
+const SoundsLikePanel = memo(function SoundsLikePanel({ trackId }: { trackId: number }): JSX.Element | null {
   const [similar, setSimilar] = useState<SimilarTrack[]>([]);
   const [needsAnalysis, setNeedsAnalysis] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
@@ -1902,7 +1929,7 @@ function SoundsLikePanel({ trackId }: { trackId: number }): JSX.Element | null {
       </ol>
     </section>
   );
-}
+});
 
 function parentFolder(path: string): string {
   const parts = path.split(/[\\/]+/).filter(Boolean);
@@ -1995,14 +2022,14 @@ function VuMeter(): JSX.Element {
 }
 
 function WaveformOverview({
-  currentTime,
   duration,
   onSeek,
 }: {
-  currentTime: number;
   duration: number;
   onSeek: (seconds: number) => void;
 }): JSX.Element {
+  // Clock-subscribed leaf: the playhead is the only continuously moving part.
+  const currentTime = usePlayerStore((s) => s.currentTime);
   // Decorative pseudo-waveform — real PCM peak data would require off-thread
   // decode at scan time; this gives the right "shape signature" for now.
   const path = useMemo(() => {
@@ -2094,7 +2121,7 @@ function WaveformOverview({
   );
 }
 
-function ArtistImageStage({ artist }: { artist: string }): JSX.Element {
+const ArtistImageStage = memo(function ArtistImageStage({ artist }: { artist: string }): JSX.Element {
   const [fact, setFact] = useState<ArtistFact | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'none' | 'ok'>('idle');
 
@@ -2190,11 +2217,10 @@ function ArtistImageStage({ artist }: { artist: string }): JSX.Element {
       </div>
     </div>
   );
-}
+});
 
 function LyricsPanel({
   lyrics,
-  activeIdx,
   status,
   source,
   editorOpen,
@@ -2213,7 +2239,6 @@ function LyricsPanel({
   onCancelEditor,
 }: {
   lyrics: { plain?: string | null; lines: LrcLine[] | null };
-  activeIdx: number;
   status: LyricStatus;
   source: LyricSource;
   editorOpen: boolean;
@@ -2231,6 +2256,9 @@ function LyricsPanel({
   onClearCustom: () => void;
   onCancelEditor: () => void;
 }): JSX.Element {
+  // Clock-subscribed: this panel exists to highlight the active synced line.
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const activeIdx = lyrics.lines ? findActive(lyrics.lines, currentTime) : -1;
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!lyrics.lines || activeIdx < 0 || !ref.current) return;
@@ -2421,25 +2449,24 @@ function LyricsPanel({
 
 function KaraokeOverlay({
   lyrics,
-  activeIdx,
   status,
   source,
-  currentTime,
   current,
   textScale,
   onTextScaleChange,
   onExit,
 }: {
   lyrics: { plain?: string | null; lines: LrcLine[] | null };
-  activeIdx: number;
   status: LyricStatus;
   source: LyricSource;
-  currentTime: number;
   current: Track;
   textScale: number;
   onTextScaleChange: (value: number) => void;
   onExit: () => void;
 }): JSX.Element {
+  // Clock-subscribed: karaoke is the most time-driven surface in the app.
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const activeIdx = lyrics.lines ? findActive(lyrics.lines, currentTime) : -1;
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
