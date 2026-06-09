@@ -1009,9 +1009,31 @@ export class LibraryStore {
   }
 
   getTracksByIdsInOrder(ids: number[]): Track[] {
-    return ids
-      .map((id) => this.getTrack(id))
-      .filter((track): track is Track => !!track);
+    const wanted = ids.filter((id) => Number.isFinite(id));
+    if (!wanted.length) return [];
+    const byId = new Map<number, Track>();
+    const unique = [...new Set(wanted)];
+    const chunkSize = 500;
+    for (let i = 0; i < unique.length; i += chunkSize) {
+      const chunk = unique.slice(i, i + chunkSize);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = this.many<RawRow>(`SELECT * FROM tracks WHERE id IN (${placeholders})`, chunk);
+      for (const row of rows) {
+        const track = rowToTrack(row);
+        byId.set(track.id, track);
+      }
+    }
+    const out: Track[] = [];
+    const emitted = new Set<number>();
+    for (const id of wanted) {
+      if (emitted.has(id)) continue;
+      const track = byId.get(id);
+      if (track) {
+        out.push(track);
+        emitted.add(id);
+      }
+    }
+    return out;
   }
 
   getCustomLyrics(trackId: number): LocalLyricsResult | null {
