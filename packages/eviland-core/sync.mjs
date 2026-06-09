@@ -22,6 +22,7 @@ const checkOnly = process.argv.includes('--check');
 const FILES = [
   'eviland.ts',
   'eviland-audio.ts',
+  'eviland-fluid.ts',
   'eviland-operators.ts',
   'eviland-randomizer.ts',
   'eviland-rng.ts',
