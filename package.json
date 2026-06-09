@@ -38,6 +38,7 @@
     "smoke:visualizer": "node scripts/visualizer-smoke.mjs",
     "test:eviland-audio": "node scripts/eviland-audio-test.mjs",
     "test:eviland-director": "node scripts/eviland-director-test.mjs",
+    "test:eviland-fluid": "node scripts/eviland-fluid-test.mjs",
     "test:device-change": "node scripts/device-change-test.mjs",
     "test:music-folders": "node scripts/music-folders-test.mjs",
     "test:cache-key-casing": "node scripts/cache-key-casing-test.mjs",
