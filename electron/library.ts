@@ -1023,15 +1023,13 @@ export class LibraryStore {
         byId.set(track.id, track);
       }
     }
+    // Preserve input order AND duplicates (a play queue may legitimately
+    // contain the same track more than once); only missing ids are dropped.
+    // This matches the prior `ids.map(getTrack).filter(Boolean)` behavior.
     const out: Track[] = [];
-    const emitted = new Set<number>();
     for (const id of wanted) {
-      if (emitted.has(id)) continue;
       const track = byId.get(id);
-      if (track) {
-        out.push(track);
-        emitted.add(id);
-      }
+      if (track) out.push(track);
     }
     return out;
   }
