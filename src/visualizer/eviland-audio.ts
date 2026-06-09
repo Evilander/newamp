@@ -169,8 +169,8 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
   // docs/superpowers/specs/2026-06-09-eviland-evolving-variety-design.md.
   const STRUCT_RECENT_ALPHA = 0.06; // was 0.18
   const SECTION_NOVELTY_THRESH = 0.22; // unchanged
-  const SECTION_MIN_GAP_MS = 3500; // min ms since last boundary (was 6000)
-  const SECTION_MIN_LEN_MS = 3500; // min section length before a new boundary (was 6000)
+  const SECTION_MIN_GAP_MS = 3500; // min ms since lastNoveltyAt (last boundary) — was 6000
+  const SECTION_MIN_LEN_MS = 3500; // min ms since sectionStartAt (current section length) — was 6000
   let lastStructAt = 0;
   const recentAvg = new Float32Array(EVILAND_BANDS);
   let recentInit = false;
