@@ -636,6 +636,8 @@ export class AudioEngine {
   async setOutputDevice(deviceId: string | null): Promise<void> {
     const normalized = normalizeAudioOutputDeviceId(deviceId);
     this.outputDeviceId = normalized;
+    // A successful explicit selection clears any prior auto-fallback notice.
+    this.deviceFallback = null;
     if (!this.graph) return;
     await this.applyOutputDevice(normalized);
   }
@@ -683,6 +685,9 @@ export class AudioEngine {
       const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
       if (!md || typeof md.enumerateDevices !== 'function' || !this.graph) return;
       const devices = await md.enumerateDevices();
+      // dispose() may have torn down the graph during the await; bail before
+      // applyOutputDevice → ensureGraph could spawn a zombie AudioContext.
+      if (!this.graph) return;
       const outputIds = devices.filter((d) => d.kind === 'audiooutput').map((d) => d.deviceId);
       const plan = planDeviceChange(this.outputDeviceId, outputIds);
       if (plan === 'noop') return;
