@@ -3812,7 +3812,9 @@ async function bootstrap(): Promise<void> {
   lastfmOutbox = new LastfmScrobbleOutbox(join(userData, 'lastfm-scrobbles.json'));
   podcastStore = new PodcastStore(join(userData, 'podcasts.json'));
 
-  // Auto-seed default library root to K:\music if nothing configured and it exists.
+  // Auto-seed the default library root from the first existing platform
+  // candidate when nothing is configured (macOS: ~/Music + /Volumes/*; Windows:
+  // K:/C: drive paths).
   const current = settings.get();
   if (!smokeMode && !current.libraryRoots.length) {
     const candidates = process.platform === 'darwin'
