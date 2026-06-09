@@ -1060,7 +1060,7 @@ function saveTrackTableColumnWidths(widths: Record<TrackColumnKey, number>): voi
 }
 
 /** Fixed height of each data row. Must match `contain-intrinsic-size` in CSS (36px). */
-const LIBRARY_ROW_HEIGHT = 36; // matches contain-intrinsic-size: 0 36px on [data-newamp-track-row]
+const LIBRARY_ROW_HEIGHT = 36; // matches contain-intrinsic-size: 0 36px on the track-row selectors in src/styles/index.css
 
 interface LibraryRowProps {
   track: Track;
@@ -1708,6 +1708,15 @@ export function TrackTable({
     onPlayRef.current(absoluteIndex);
   }, []);
 
+  // Stabilize the metadata-lookup callback too (the parent passes a fresh arrow
+  // each render); without this the memoized rows all re-render on every parent
+  // render, defeating the virtualization win.
+  const onMetadataLookupRef = useRef(onMetadataLookup);
+  onMetadataLookupRef.current = onMetadataLookup;
+  const stableOnMetadataLookup = useCallback((track: Track) => {
+    onMetadataLookupRef.current?.(track);
+  }, []);
+
   // setTrackSelected only closes over setSelectedIds which is a stable state setter.
   const stableOnToggleSelect = useCallback((id: number, checked: boolean) => {
     setSelectedIds((current) => {
@@ -1976,7 +1985,7 @@ export function TrackTable({
               onToggleLove={stableOnToggleLove}
               onSetRating={stableOnSetRating}
               onToggleAvoid={stableOnToggleAvoid}
-              onMetadataLookup={onMetadataLookup}
+              onMetadataLookup={onMetadataLookup ? stableOnMetadataLookup : undefined}
               onShowInFolder={stableOnShowInFolder}
             />
           );
