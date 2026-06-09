@@ -503,6 +503,12 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       from = cloneConfig(config);
       target = cloneConfig(config);
       fade = 1;
+      // Reset the timer-rotation clock too, so a user-set preset gets its full
+      // dwell before the next forced rotation rather than lurching away if
+      // msSinceSwitch was already near the threshold.
+      msSinceSwitch = 0;
+      rotationIndex = 0;
+      cachedRotateThresholdMs = null;
       // Start drift neutral for the new look (no drift until the next switch
       // computes a real driftTarget).
       driftTarget = cloneConfig(config);
