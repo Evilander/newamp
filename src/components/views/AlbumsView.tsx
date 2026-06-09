@@ -717,6 +717,8 @@ function AlbumArt({ album, size = 64 }: { album: AlbumSummary; size?: number }):
           alt={album.album}
           width={size}
           height={size}
+          loading="lazy"
+          decoding="async"
           className="relative h-full w-full object-cover transition-transform group-hover:scale-[1.02]"
           style={{ zIndex: 1 }}
           onError={() => setFailed(true)}
