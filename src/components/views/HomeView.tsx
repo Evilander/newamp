@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { LibraryHealth, ListeningHistoryItem, ListeningInsights, SavedPlaylist, SmartPlaylistRule, SmartPlaylistSuggestion, Track } from '@shared/types';
 import { buildArchiveCompass, duplicateExactTotal, legacyFormatTotal, missingMetadataTotal } from '@shared/archive-compass';
 import { api } from '../../lib/api';
@@ -65,6 +65,9 @@ export function HomeView(): JSX.Element {
   const [data, setData] = useState<HomeData>(EMPTY_DATA);
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  // Monotonic token so a deferred below-fold batch from an older refresh can't
+  // overwrite data from a newer one (the Refresh button re-runs refreshHome).
+  const refreshGenerationRef = useRef(0);
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTime = usePlayerStore((s) => s.currentTime);
@@ -109,42 +112,68 @@ export function HomeView(): JSX.Element {
   const newestFreshDate = data.fresh[0]?.mtime ? formatYmd(data.fresh[0].mtime) : null;
 
   async function refreshHome(): Promise<void> {
+    const generation = ++refreshGenerationRef.current;
     setLoading(true);
     setStatus(null);
     try {
-      const [stats, health, insights, fresh, loved, history, heavy, harmonic, taste, rated, playlists, smartRules, suggestedStations] = await Promise.all([
+      // Above the fold: the shelves a user sees first. Cheap queries — render
+      // them immediately instead of gating the whole page on the heavy calls.
+      const [stats, fresh, loved, history, heavy, playlists] = await Promise.all([
         api.getStats(),
-        api.getLibraryHealth(),
-        api.getListeningInsights({}),
         api.getTracks({ sort: 'added', limit: HOME_LIMIT, offset: 0 }),
         api.getTracks({ sort: 'loved', limit: HOME_LIMIT, offset: 0 }),
         api.getListeningHistory({ limit: 30, offset: 0 }),
         api.getTracks({ sort: 'plays', limit: HOME_LIMIT, offset: 0 }),
-        api.buildHarmonicMix({ seedTrackId: current?.id ?? null, count: HOME_LIMIT }),
-        api.buildTasteMix({ seedTrackId: current?.id ?? null, count: HOME_LIMIT }),
-        api.getTracks({ sort: 'rating', limit: HOME_LIMIT, offset: 0 }),
         api.getPlaylists(),
-        api.getSmartPlaylistRules(),
-        api.getSuggestedSmartPlaylistRules(),
       ]);
-      setData({
+      if (generation !== refreshGenerationRef.current) return;
+      setData((prev) => ({
+        ...prev,
         stats,
-        health,
-        insights,
         fresh,
         loved,
         history,
         heavy,
-        harmonic,
-        taste,
-        rated,
         playlists: playlists.slice(0, 8),
-        smartRules: smartRules.slice(0, 6),
-        suggestedStations: suggestedStations.slice(0, 6),
-      });
+      }));
     } finally {
       setLoading(false);
     }
+
+    // Below the fold: health (full-library scan, now cached), insights, the
+    // harmonic/taste mixes and suggestions. Deferred off the first paint so
+    // opening Home never blocks on them; sections keep their existing
+    // empty/placeholder state until this lands.
+    const seedTrackId = current?.id ?? null;
+    const runBelowFold = async (): Promise<void> => {
+      try {
+        const [health, insights, harmonic, taste, rated, smartRules, suggestedStations] = await Promise.all([
+          api.getLibraryHealth(),
+          api.getListeningInsights({}),
+          api.buildHarmonicMix({ seedTrackId, count: HOME_LIMIT }),
+          api.buildTasteMix({ seedTrackId, count: HOME_LIMIT }),
+          api.getTracks({ sort: 'rating', limit: HOME_LIMIT, offset: 0 }),
+          api.getSmartPlaylistRules(),
+          api.getSuggestedSmartPlaylistRules(),
+        ]);
+        if (generation !== refreshGenerationRef.current) return;
+        setData((prev) => ({
+          ...prev,
+          health,
+          insights,
+          harmonic,
+          taste,
+          rated,
+          smartRules: smartRules.slice(0, 6),
+          suggestedStations: suggestedStations.slice(0, 6),
+        }));
+      } catch {
+        // Keep the already-rendered sections; below-fold shelves stay in their
+        // empty state (same outcome as the old all-or-nothing load on failure).
+      }
+    };
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(() => void runBelowFold());
+    else setTimeout(() => void runBelowFold(), 0);
   }
 
   async function saveSet(name: string, tracks: Track[]): Promise<void> {
