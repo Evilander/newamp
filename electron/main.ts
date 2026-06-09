@@ -411,6 +411,7 @@ const STARTUP_SPLASH_HOLD_MS = 5600;
 const startupSplashEnabled = !smokeMode && process.env.NEWAMP_DISABLE_STARTUP_SPLASH !== '1';
 
 function createWindow(): BrowserWindow {
+  const isMac = process.platform === 'darwin';
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -419,8 +420,9 @@ function createWindow(): BrowserWindow {
     show: false,
     frame: false,
     titleBarStyle: 'hidden',
-    transparent: true,
-    backgroundColor: '#00000000',
+    ...(isMac
+      ? { trafficLightPosition: { x: 14, y: 13 }, backgroundColor: '#0b0b10' }
+      : { transparent: true, backgroundColor: '#00000000' }),
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
