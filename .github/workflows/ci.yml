@@ -78,6 +78,9 @@ jobs:
       - name: Test — library query perf (N+1 ordering + health cache)
         run: npm run test:library-query
 
+      - name: Test — transcode cache probe (stream-first first play)
+        run: npm run test:transcode-peek
+
       - name: Smoke — renderer CSP (no unsafe-eval; eval scoped to iframe)
         run: npm run smoke:security
 
