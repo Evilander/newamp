@@ -59,6 +59,11 @@ jobs:
       - name: Test — Eviland Director (timer rotation + drift + recall)
         run: npm run test:eviland-director
 
+      - name: Test — Eviland fluid forces + operator channels
+        run: |
+          npm run test:eviland-fluid
+          npm run test:eviland-operators
+
       - name: Test — macOS logic (device-change, music-folders, cache-key, app-menu, macho-arch)
         run: |
           npm run test:device-change
