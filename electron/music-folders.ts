@@ -1,13 +1,23 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import type { MusicFolderSuggestion } from '../shared/types.js';
 
 type EnvLike = Record<string, string | undefined>;
 
+function listVolumes(): string[] {
+  try {
+    return readdirSync('/Volumes');
+  } catch {
+    return [];
+  }
+}
+
 export interface MusicFolderSuggestionOptions {
   homeDir?: string;
   env?: EnvLike;
   exists?: (path: string) => boolean;
+  platform?: NodeJS.Platform;
+  readVolumes?: () => string[];
 }
 
 export interface DefaultMusicScanRootOptions extends MusicFolderSuggestionOptions {
@@ -18,6 +28,8 @@ export function suggestMusicFolders({
   homeDir = homedir(),
   env = process.env,
   exists = existsSync,
+  platform = process.platform,
+  readVolumes = listVolumes,
 }: MusicFolderSuggestionOptions = {}): MusicFolderSuggestion[] {
   const candidates: MusicFolderSuggestion[] = [];
   const configuredRoot = cleanPath(env.NEWAMP_REAL_LIBRARY_ROOT);
@@ -29,28 +41,47 @@ export function suggestMusicFolders({
     });
   }
 
-  candidates.push(
-    { path: 'K:/music', label: 'K drive music', reason: 'Detected common external music library path' },
-    { path: 'I:/music', label: 'I drive music', reason: 'Detected common external music library path' },
-  );
+  if (platform === 'darwin') {
+    const home = cleanPath(homeDir);
+    if (home) {
+      candidates.push(
+        { path: childPath(home, 'Music'), label: 'Music', reason: 'Default macOS user music folder' },
+        { path: childPath(home, 'Music/Music/Media'), label: 'Apple Music library', reason: 'Apple Music media folder' },
+        { path: childPath(home, 'Music/iTunes/iTunes Media'), label: 'iTunes library', reason: 'iTunes media folder' },
+      );
+    }
+    for (const vol of readVolumes()) {
+      if (vol === 'Macintosh HD' || vol.startsWith('.')) continue;
+      candidates.push({
+        path: `/Volumes/${vol}/Music`,
+        label: `${vol} music`,
+        reason: 'External volume music folder',
+      });
+    }
+  } else {
+    candidates.push(
+      { path: 'K:/music', label: 'K drive music', reason: 'Detected common external music library path' },
+      { path: 'I:/music', label: 'I drive music', reason: 'Detected common external music library path' },
+    );
 
-  const profileMusic = cleanPath(homeDir) ? childPath(homeDir, 'Music') : '';
-  if (profileMusic) {
-    candidates.push({
-      path: profileMusic,
-      label: 'Windows Music',
-      reason: 'Default Windows profile music folder',
-    });
-  }
+    const profileMusic = cleanPath(homeDir) ? childPath(homeDir, 'Music') : '';
+    if (profileMusic) {
+      candidates.push({
+        path: profileMusic,
+        label: 'Windows Music',
+        reason: 'Default Windows profile music folder',
+      });
+    }
 
-  for (const key of ['OneDrive', 'OneDriveConsumer', 'OneDriveCommercial']) {
-    const root = cleanPath(env[key]);
-    if (!root) continue;
-    candidates.push({
-      path: childPath(root, 'Music'),
-      label: key === 'OneDriveCommercial' ? 'Work OneDrive Music' : 'OneDrive Music',
-      reason: `${key} music folder`,
-    });
+    for (const key of ['OneDrive', 'OneDriveConsumer', 'OneDriveCommercial']) {
+      const root = cleanPath(env[key]);
+      if (!root) continue;
+      candidates.push({
+        path: childPath(root, 'Music'),
+        label: key === 'OneDriveCommercial' ? 'Work OneDrive Music' : 'OneDrive Music',
+        reason: `${key} music folder`,
+      });
+    }
   }
 
   const seen = new Set<string>();
