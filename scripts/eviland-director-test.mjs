@@ -100,6 +100,36 @@ if (!passthrough) fail('disabled director did not passthrough');
   if (seen.size < 3) fail('timer rotation did not change the look without section boundaries');
 }
 
+// --- intra-section drift: a held look breathes (on) / is frozen (off) ---
+{
+  // Drift ON: live must change across a held section but stay bounded near target.
+  const don = createDirector({ songId: 'drift-on', enabled: true, drift: 0.12, rotateMs: 0 });
+  don.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.5 }), 16.7);
+  const settled = settle(don, { sectionId: 0, energy: 0.5 }, 180); // ~3s, finish the fade
+  const zoomStart = settled.zoom.base;
+  let zoomMax = zoomStart, zoomMin = zoomStart;
+  let t = 0;
+  while (t < 5000) {
+    const c = don.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+    zoomMax = Math.max(zoomMax, c.zoom.base);
+    zoomMin = Math.min(zoomMin, c.zoom.base);
+    t += 16.7;
+  }
+  const moved = zoomMax - zoomMin;
+  log.push(`drift on: zoom.base moved ${moved.toFixed(4)} over 5s (start ${zoomStart.toFixed(4)})`);
+  if (moved <= 1e-4) fail('drift on: held look did not move');
+  if (moved > 0.5) fail('drift on: held look moved too far (runaway, not breathing)');
+
+  // Drift OFF: live must be referentially stable frame-to-frame in steady state.
+  const doff = createDirector({ songId: 'drift-off', enabled: true, drift: 0, rotateMs: 0 });
+  doff.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.5 }), 16.7);
+  settle(doff, { sectionId: 0, energy: 0.5 }, 180);
+  const a = doff.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+  const b = doff.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+  log.push(`drift off: same reference across frames: ${a === b}`);
+  if (a !== b) fail('drift off: steady-state config is not referentially stable (GC fast path broken)');
+}
+
 const report = log.join('\n') + '\n' + (pass ? '[director-test] PASS' : '[director-test] FAIL') + '\n';
 writeFileSync(RESULT, report);
 console.log(report);
