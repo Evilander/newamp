@@ -2770,6 +2770,8 @@ export class LibraryStore {
       ]);
     }
     if (this.db.getRowsModified() <= 0) return null;
+    // replaygain_*_db feed getLibraryHealth's ReplayGain-ready counts.
+    this.invalidateLibraryHealthCache();
     this.scheduleFlush();
     return this.getTrack(trackId);
   }
