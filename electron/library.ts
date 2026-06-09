@@ -2722,12 +2722,12 @@ export class LibraryStore {
     if (!Number.isFinite(id) || id <= 0) return [];
     const sourceDna = this.getTrackDna(id);
     if (!sourceDna) return [];
-    const all = this.getAllTrackDna();
+    const index = this.buildDnaIndex();
     const scored: Array<{ id: number; score: number }> = [];
-    for (const row of all) {
-      if (row.id === id) continue;
-      const score = dnaCosineSimilarity(sourceDna, row.dna);
-      scored.push({ id: row.id, score });
+    for (const [otherId, otherDna] of index) {
+      if (otherId === id) continue;
+      const score = dnaCosineSimilarity(sourceDna, otherDna);
+      scored.push({ id: otherId, score });
     }
     scored.sort((a, b) => b.score - a.score);
     const cap = Math.max(1, Math.min(200, Math.trunc(limit) || 20));
