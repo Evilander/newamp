@@ -14,8 +14,11 @@
 // mirrorMix. The tier is derived from a slow moving average of energy plus a
 // novelty pulse, so the Director feels the song's shape, not just its loudness.
 //
-// Everything is deterministic from (songId, sectionId): the same song always
-// gets the same sequence of looks. The platform RNG / clock is never read.
+// Look generation is deterministic from (songId, sectionId, rotationIndex):
+// the same song always produces the same SEQUENCE of looks. The platform RNG
+// is never read. Two timing inputs do follow the playback clock by design: the
+// ~20s timer-rotation floor (so the look still changes when the music is
+// structurally quiet, MilkDrop-style) and the gentle intra-section drift.
 //
 // Zero dependencies, ES modules. The renderer owns the loop; the Director
 // returns the OperatorConfig the renderer should use this frame.
@@ -118,6 +121,21 @@ function transitionSpeedFor(prev: EnergyTier | null, next: EnergyTier): number {
 }
 
 // ---------------------------------------------------------------------------
+// Timer-rotation + drift tuning (MilkDrop-like variety floor).
+// ---------------------------------------------------------------------------
+
+/** Default ms between forced look rotations when structure stays quiet. */
+const ROTATE_INTERVAL_MS = 20000;
+/** Default deterministic ±jitter on the rotation interval so it isn't metronomic. */
+const ROTATE_JITTER_PCT = 0.15;
+/** Default intra-section drift strength (0 disables). */
+const DRIFT_AMOUNT = 0.12;
+/** Period of the drift "breathe out and back" triangle wave, ms. */
+const DRIFT_PERIOD_MS = 14000;
+/** Throttle: recompute the drift lerp at most this often (ms) to bound GC. */
+const DRIFT_TICK_MS = 100;
+
+// ---------------------------------------------------------------------------
 // Director options + state
 // ---------------------------------------------------------------------------
 
@@ -132,6 +150,12 @@ export interface DirectorOptions {
   initial?: OperatorConfig;
   /** Director starts enabled. Set false for passthrough mode. */
   enabled?: boolean;
+  /** ms between forced "timer" look rotations when no section boundary fires. Default 20000. 0 disables. */
+  rotateMs?: number;
+  /** Deterministic ±jitter fraction on the rotation interval (0..0.9). Default 0.15. */
+  rotateJitterPct?: number;
+  /** Intra-section drift strength 0..1 — held looks slowly breathe. Default 0.12. 0 disables. */
+  drift?: number;
 }
 
 export interface Director {
@@ -159,6 +183,9 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   const transitionBeats = Math.max(0.25, opts.transitionBeats ?? 2);
   const transitionMsFallback = Math.max(150, opts.transitionMsFallback ?? 1800);
   const initial = opts.initial ? cloneConfig(opts.initial) : defaultConfig();
+  const rotateMs = Math.max(0, opts.rotateMs ?? ROTATE_INTERVAL_MS);
+  const rotateJitterPct = Math.max(0, Math.min(0.9, opts.rotateJitterPct ?? ROTATE_JITTER_PCT));
+  const driftAmount = Math.max(0, Math.min(1, opts.drift ?? DRIFT_AMOUNT));
 
   // ── core state ────────────────────────────────────────────────────────────
   let enabled = opts.enabled !== false;
@@ -181,6 +208,22 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   const sections = new Map<number, SectionMemory>();
   let lastSectionId = -1;
   let lastTier: EnergyTier | null = null;
+
+  // Timer-rotation floor: ms since the last look switch, and a monotonic
+  // rotation counter (reset on a real section boundary) folded into the seed
+  // so forced looks are deterministic in sequence but vary each rotation.
+  let msSinceSwitch = 0;
+  let rotationIndex = 0;
+  // Cached rotation threshold (depends only on rotationIndex); recomputed lazily
+  // when invalidated so the 60fps steady path does no per-frame allocation.
+  let cachedRotateThresholdMs: number | null = null;
+
+  // Intra-section drift: one precomputed mutated "breathe toward" target per
+  // look, a phase clock, and a throttled cache so we don't lerp every frame.
+  let driftTarget: OperatorConfig = cloneConfig(initial);
+  let driftPhaseMs = 0;
+  let driftAccumMs = 0;
+  let driftCache: OperatorConfig = cloneConfig(initial);
 
   // Slow-moving energy + novelty trackers used to derive tier.
   let energyAvg = 0;
@@ -208,13 +251,19 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     return 'lift';
   }
 
-  function seedFor(sectionId: number): number {
-    // Per-(song, section) deterministic seed. hashSeed is stable across runs.
-    return hashSeed(`${activeSongId}::section::${sectionId}`);
+  function seedFor(sectionId: number, rotation = 0): number {
+    // Per-(song, section, rotation) deterministic seed. rotation 0 keeps the
+    // original key so a song's first look per section is unchanged; forced
+    // timer rotations (rotation > 0) derive distinct looks.
+    const key =
+      rotation === 0
+        ? `${activeSongId}::section::${sectionId}`
+        : `${activeSongId}::section::${sectionId}::r${rotation}`;
+    return hashSeed(key);
   }
 
-  function generateForSection(sectionId: number, tier: EnergyTier): OperatorConfig {
-    const baseSeed = seedFor(sectionId);
+  function generateForSection(sectionId: number, tier: EnergyTier, rotation = 0): OperatorConfig {
+    const baseSeed = seedFor(sectionId, rotation);
     const rng = new Rng(baseSeed);
     const weights = TIER_ARCHETYPE_WEIGHTS[tier];
     const archetype = rng.weighted(
@@ -236,6 +285,31 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     return tuned;
   }
 
+  function effectiveRotateMs(): number {
+    if (rotateMs <= 0) return Infinity;
+    if (cachedRotateThresholdMs === null) {
+      // Deterministic jitter for the *next* rotation so the cadence varies but
+      // replays identically. Cached until rotationIndex changes.
+      const r = new Rng(hashSeed(`${activeSongId}::rot::${rotationIndex + 1}`));
+      const signed = (r.next() * 2 - 1) * rotateJitterPct;
+      cachedRotateThresholdMs = rotateMs * (1 + signed);
+    }
+    return cachedRotateThresholdMs;
+  }
+
+  function onForcedRotation(frame: EvilandFrame): void {
+    rotationIndex++;
+    cachedRotateThresholdMs = null;
+    const tier = tierFor(frame);
+    const nextConfig = generateForSection(frame.sectionId, tier, rotationIndex);
+    // Forced rotations deliberately do NOT write the `sections` recall map or
+    // touch the audio sectionId — chorus recall stays driven by
+    // frame.sectionReturn, which forced rotations never set.
+    const speed = transitionSpeedFor(lastTier, tier);
+    startFade(nextConfig, speed, frame.bpm);
+    lastTier = tier;
+  }
+
   function startFade(next: OperatorConfig, speedMul: number, bpm: number): void {
     // Snapshot the live config as the new "from"; the current fade progress
     // collapses into that snapshot (because live IS the lerp(from,target,fade)
@@ -247,6 +321,16 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     const beatMs = bpm > 1 ? 60000 / bpm : 0;
     const beats = transitionBeats / Math.max(0.25, speedMul);
     fadeDurationMs = beatMs > 0 ? beatMs * beats : transitionMsFallback / Math.max(0.25, speedMul);
+    // Reset the timer-rotation clock on every switch (section- or timer-driven).
+    msSinceSwitch = 0;
+    // Precompute one deterministic drift target for this look; reset the phase.
+    if (driftAmount > 0) {
+      const driftSeed =
+        hashSeed(`${activeSongId}::drift::${target.seed ?? 'x'}::${rotationIndex}`) >>> 0;
+      driftTarget = mutate(target, driftAmount, driftSeed);
+      driftPhaseMs = 0;
+      driftAccumMs = 0;
+    }
   }
 
   function onSectionBoundary(frame: EvilandFrame): void {
@@ -274,6 +358,9 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     energyPeak = 0;
     noveltyAccum = 0;
     framesSinceSection = 0;
+    // A real structural change resets the timer cadence — structure leads.
+    rotationIndex = 0;
+    cachedRotateThresholdMs = null;
   }
 
   function advanceFade(frame: EvilandFrame, dtMs: number): void {
@@ -291,19 +378,31 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     fade = Math.min(1, fade + step);
   }
 
-  function recomputeLive(): void {
+  function recomputeLive(dtMs = 0): void {
     if (fade >= 1) {
-      // Steady state (the ~99% of frames between section boundaries): return the
-      // owned `target` by reference. No per-frame clone — `target`/`from` are only
-      // ever reassigned to fresh clones in startFade/reset/setCurrent and are never
-      // mutated in place, and the renderer treats the config as read-only. Cloning
-      // here every frame was the dominant GC source behind the "laggy visualizer".
-      live = target;
+      if (driftAmount <= 0) {
+        // Zero-alloc fast path — `target` is read-only and never mutated in
+        // place. This was the GC fix behind the "laggy visualizer".
+        live = target;
+        return;
+      }
+      // Drift: slowly breathe target<->driftTarget and back on a triangle wave.
+      // Throttled to DRIFT_TICK_MS so we allocate ~10x/sec, not 60x/sec; the
+      // cached config is returned by reference between ticks.
+      const dt = Math.max(0, Math.min(250, dtMs));
+      driftPhaseMs = (driftPhaseMs + dt) % DRIFT_PERIOD_MS;
+      driftAccumMs += dt;
+      if (driftAccumMs >= DRIFT_TICK_MS) {
+        driftAccumMs = 0;
+        const phase = driftPhaseMs / DRIFT_PERIOD_MS; // 0..1
+        const tri = phase < 0.5 ? phase * 2 : (1 - phase) * 2; // 0..1..0
+        const t = tri * tri * (3 - 2 * tri); // smoothstep ease
+        driftCache = lerpConfig(target, driftTarget, t);
+      }
+      live = driftCache;
     } else if (fade <= 0) {
       live = from;
     } else {
-      // Smoothstep gives an ease-in/out feel — much more musical than linear.
-      // lerpConfig allocates, but only during the brief beat-synced crossfade.
       const t = fade * fade * (3 - 2 * fade);
       live = lerpConfig(from, target, t);
     }
@@ -348,7 +447,16 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       }
 
       advanceFade(frame, dtMs);
-      recomputeLive();
+
+      // Timer floor: if structure hasn't changed the look in a while, force a
+      // fresh rotation (MilkDrop-style). Only when settled, never mid-fade.
+      msSinceSwitch += dt;
+      if (rotateMs > 0 && fade >= 1 && msSinceSwitch >= effectiveRotateMs()) {
+        onForcedRotation(frame);
+        advanceFade(frame, dtMs);
+      }
+
+      recomputeLive(dtMs);
       return live;
     },
 
@@ -369,6 +477,12 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       energyPeak = 0;
       noveltyAccum = 0;
       framesSinceSection = 0;
+      msSinceSwitch = 0;
+      rotationIndex = 0;
+      cachedRotateThresholdMs = null;
+      driftTarget = cloneConfig(live);
+      driftPhaseMs = 0;
+      driftAccumMs = 0;
       // Collapse any in-flight fade to the current live config so we don't
       // start the next song mid-blend with the previous one.
       from = cloneConfig(live);
@@ -389,6 +503,17 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       from = cloneConfig(config);
       target = cloneConfig(config);
       fade = 1;
+      // Reset the timer-rotation clock too, so a user-set preset gets its full
+      // dwell before the next forced rotation rather than lurching away if
+      // msSinceSwitch was already near the threshold.
+      msSinceSwitch = 0;
+      rotationIndex = 0;
+      cachedRotateThresholdMs = null;
+      // Start drift neutral for the new look (no drift until the next switch
+      // computes a real driftTarget).
+      driftTarget = cloneConfig(config);
+      driftPhaseMs = 0;
+      driftAccumMs = 0;
     },
   };
 }
