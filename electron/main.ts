@@ -62,6 +62,7 @@ import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from '.
 import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
 import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
+import { buildAppMenuTemplate } from './app-menu.js';
 import type {
   CustomSkin,
   DiscoverSurfaceInput,
@@ -897,6 +898,23 @@ function enqueueOpenFiles(paths: string[]): void {
       seen.add(key);
       pendingOpenFiles.push(path);
     }
+  }
+}
+
+function installApplicationMenu(): void {
+  const template = buildAppMenuTemplate(process.platform, {
+    appName: app.getName(),
+    appVersion: app.getVersion(),
+  });
+  if (process.platform === 'darwin') {
+    app.setAboutPanelOptions({
+      applicationName: app.getName(),
+      applicationVersion: app.getVersion(),
+    });
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  } else {
+    // Keep the existing chromeless custom-titlebar look on Windows/Linux.
+    Menu.setApplicationMenu(null);
   }
 }
 
@@ -3844,6 +3862,7 @@ async function bootstrap(): Promise<void> {
 
   createStartupSplashWindow();
   mainWin = createWindow();
+  installApplicationMenu();
   registerTray();
   registerMediaShortcuts();
   syncLibraryWatcher();
