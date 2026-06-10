@@ -13,6 +13,7 @@ import { formatTime, highlight } from '../../lib/format';
 import { api } from '../../lib/api';
 import { EmptyLibrary } from './EmptyLibrary';
 import { ArtistLink, AlbumLink } from '../EntityLink';
+import { FormatBadges } from '../FormatBadges';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
 
 type Sort =
@@ -1215,6 +1216,7 @@ const LibraryRow = memo(function LibraryRow({
           <span className="min-w-0 flex-1 truncate" title={t.title}>
             {search ? highlight(t.title, search) : t.title}
           </span>
+          <FormatBadges track={t} density="compact" />
           <button
             className="track-icon-btn track-folder-btn"
             data-show-in-folder

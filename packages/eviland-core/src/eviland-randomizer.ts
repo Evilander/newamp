@@ -21,6 +21,7 @@ import {
   type Curve,
   type OperatorConfig,
   type PaletteConfig,
+  type QSlot,
   type RGB,
   type WaveMode,
   type WaveformConfig,
@@ -47,12 +48,37 @@ import {
 // but never twins.
 
 export const ARCHETYPES = [
+  // Original six — kept first so existing tests/UI lists stay stable in order.
   'tunnel',
   'kaleidoscope',
   'liquid',
   'lattice',
   'nebula',
   'strobe',
+  // 20 new MilkDrop-variety archetypes (plan §3 archetype expansion). Each
+  // leans on the §2.1–§2.5 primitives (q-slots, radial warp, decayRGB, centre,
+  // echo) so the morphing rotation reads as preset-grade variety, not just
+  // recoloured versions of the same six looks.
+  'vortex',
+  'inkwell',
+  'supernova',
+  'cathedral',
+  'phosphor',
+  'ribbonfall',
+  'pulsar',
+  'mosaic',
+  'deepfield',
+  'solarflare',
+  'glasshouse',
+  'stormfront',
+  'heartbeat',
+  'carousel',
+  'firefly',
+  'tidal',
+  'prism',
+  'echochamber',
+  'wireframe',
+  'emberveil',
 ] as const;
 
 export type Archetype = (typeof ARCHETYPES)[number];
@@ -86,6 +112,10 @@ interface ArchetypeTemplate {
   flowY: ChannelSpec;
   fluid: ChannelSpec;
   vorticity: ChannelSpec;
+  /** How visible the dye field is in the final composite (0..1). */
+  liquidMix: ChannelSpec;
+  /** Per-archetype dye dissipation bias (added to the silence-gated value). */
+  dyeDissipation: ChannelSpec;
   bloom: ChannelSpec;
   /** Allowed kaleidoscope segment counts when mirrorSet is used. */
   mirrorSets: number[][];
@@ -110,6 +140,40 @@ interface ArchetypeTemplate {
   paletteVal: NumRange;
   /** Background lightness (kept dark to give bloom room). */
   paletteBgVal: NumRange;
+  /**
+   * Optional q-slot scaffold. Sampler emits these slots verbatim (LFO shape
+   * and bindings are characterful, not numbers to perturb); ranges in `base`
+   * still get sampled per slot so two seeds against the same archetype still
+   * cousin-rhyme rather than twin. Up to 8 slots referenceable as q1..q8.
+   */
+  qSlots?: QSlotSpec[];
+  // ── Optional §2.2–§2.5 primitive channel specs. Absent = neutral default
+  // (no radial effect, decayRGB balanced, centre 0.5, echo off). When present
+  // the sampler emits the matching OperatorConfig Channel — that's how an
+  // archetype "owns" a primitive (e.g. supernova has radialZoom + echoZoom).
+  radialZoom?: ChannelSpec;
+  radialRotate?: ChannelSpec;
+  radialSwirl?: ChannelSpec;
+  radialDecay?: ChannelSpec;
+  decayR?: ChannelSpec;
+  decayG?: ChannelSpec;
+  decayB?: ChannelSpec;
+  centreX?: ChannelSpec;
+  centreY?: ChannelSpec;
+  echoZoom?: ChannelSpec;
+  echoRotate?: ChannelSpec;
+  echoAlpha?: ChannelSpec;
+  echoFlipX?: ChannelSpec;
+  echoFlipY?: ChannelSpec;
+}
+
+/** Per-slot recipe: numeric ranges sampled, shape + bindings emitted verbatim. */
+interface QSlotSpec {
+  name?: string;
+  base: NumRange;
+  lfo?: { rate: NumRange; shape: 'sine' | 'tri' | 'saw' | 'square'; amp?: NumRange };
+  smooth?: NumRange;
+  bindings?: BindingSpec[];
 }
 
 type PaletteScheme = 'analogous' | 'complementary' | 'triadic' | 'splitComplementary' | 'monochrome' | 'tetradic';
@@ -125,6 +189,44 @@ type PaletteScheme = 'analogous' | 'complementary' | 'triadic' | 'splitComplemen
 //   - mirrorMix in [0,0.9]
 //   - warpAmp small enough that bindings can't push past 0.02
 // ---------------------------------------------------------------------------
+
+/**
+ * Baseline template skeleton — safe neutral values for every required field.
+ * The 20 new archetypes spread this and override only the channels that give
+ * them their identity, which keeps the file readable and prevents accidental
+ * out-of-range gaps when a new field is added later.
+ */
+function baseSpec(): ArchetypeTemplate {
+  return {
+    zoom: { base: { min: 0.002, max: 0.012 }, bindings: [{ feature: 'kick', gain: { min: 0.015, max: 0.03 }, chance: 0.7 }] },
+    rotate: { base: { min: -0.003, max: 0.003 }, bindings: [{ feature: 'energy', gain: { min: 0.004, max: 0.009 }, chance: 0.6 }] },
+    swirl: { base: { min: 0, max: 0.04 }, bindings: [{ feature: 'novelty', gain: { min: 0.01, max: 0.03 }, chance: 0.5 }] },
+    hueCycle: { base: { min: 0.002, max: 0.005 }, bindings: [{ feature: 'centroid', gain: { min: 0.004, max: 0.009 }, chance: 0.6 }] },
+    decay: { base: { min: 0.87, max: 0.92 }, bindings: [{ feature: 'flatness', gain: { min: -0.04, max: -0.015 }, chance: 0.5 }] },
+    warpAmp: { base: { min: 0.0003, max: 0.0012 }, bindings: [{ feature: 'bass', gain: { min: 0.0005, max: 0.0012 }, chance: 0.5 }] },
+    warpScale: { base: { min: 2, max: 4 }, bindings: [] },
+    mirror: { base: { min: 4, max: 8 }, bindings: [] },
+    mirrorMix: { base: { min: 0.5, max: 0.75 }, bindings: [{ feature: 'energy', gain: { min: 0.05, max: 0.15 }, chance: 0.5 }] },
+    flowX: { base: { min: -0.0003, max: 0.0003 }, bindings: [] },
+    flowY: { base: { min: -0.0003, max: 0.0003 }, bindings: [] },
+    fluid: { base: { min: 0.2, max: 0.6 }, bindings: [{ feature: 'energy', gain: { min: 0.05, max: 0.15 }, chance: 0.5 }] },
+    vorticity: { base: { min: 6, max: 16 }, bindings: [] },
+    liquidMix: { base: { min: 0, max: 0.15 }, bindings: [] },
+    dyeDissipation: { base: { min: -0.05, max: 0 }, bindings: [] },
+    bloom: { base: { min: 0.15, max: 0.45 }, bindings: [{ feature: 'energy', gain: { min: 0.08, max: 0.2 }, chance: 0.5 }] },
+    mirrorSets: [[4, 6, 8, 12], [6, 8, 8, 12]],
+    mirrorSetChance: 0.45,
+    spinFromSection: true,
+    waveModes: [{ mode: 'line', weight: 2 }, { mode: 'radial', weight: 2 }, { mode: 'off', weight: 1 }],
+    waveform: { intensity: { min: 0.5, max: 1.1 }, intensityBindings: [{ feature: 'energy', gain: { min: 0.3, max: 0.7 }, chance: 0.5 }], thickness: { min: 0.006, max: 0.016 }, scale: { min: 0.22, max: 0.42 } },
+    emitterScale: { min: 0.8, max: 1.3 },
+    emitterGain: { min: 0.9, max: 1.4 },
+    paletteSchemes: [{ scheme: 'analogous', weight: 2 }, { scheme: 'triadic', weight: 1 }, { scheme: 'complementary', weight: 1 }],
+    paletteSat: { min: 0.6, max: 0.9 },
+    paletteVal: { min: 0.7, max: 0.95 },
+    paletteBgVal: { min: 0.02, max: 0.07 },
+  };
+}
 
 const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // ── tunnel ──────────────────────────────────────────────────────────────
@@ -208,6 +310,9 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       base: { min: 6, max: 16 },
       bindings: [],
     },
+    // tunnel: subtle dye accent only (the warp is the star).
+    liquidMix: { base: { min: 0, max: 0.15 }, bindings: [] },
+    dyeDissipation: { base: { min: -0.05, max: 0 }, bindings: [] },
     bloom: {
       base: { min: 0.15, max: 0.5 },
       bindings: [
@@ -240,6 +345,19 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSat: { min: 0.6, max: 0.95 },
     paletteVal: { min: 0.7, max: 1 },
     paletteBgVal: { min: 0.02, max: 0.08 },
+    // Plan retune: tunnel = strong radial zoom-in (pulls the eye toward the
+    // vanishing point) + a slow orbiting centre via two bar-rate q-LFOs in
+    // quadrature so the vortex never sits exactly at 0.5,0.5.
+    qSlots: [
+      { name: 'orbit-x', base: { min: 0, max: 0 }, lfo: { rate: { min: 0.18, max: 0.28 }, shape: 'sine', amp: { min: 0.06, max: 0.12 } }, smooth: { min: 0.3, max: 0.55 } },
+      { name: 'orbit-y', base: { min: 0, max: 0 }, lfo: { rate: { min: 0.18, max: 0.28 }, shape: 'tri', amp: { min: 0.05, max: 0.1 } }, smooth: { min: 0.3, max: 0.55 } },
+    ],
+    radialZoom: {
+      base: { min: 0.08, max: 0.18 },
+      bindings: [{ feature: 'kick', gain: { min: 0.04, max: 0.09 }, chance: 0.7, curve: 'pulse' }],
+    },
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q1', gain: { min: 1, max: 1 }, chance: 1 }] },
+    centreY: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q2', gain: { min: 1, max: 1 }, chance: 1 }] },
   },
 
   // ── kaleidoscope ────────────────────────────────────────────────────────
@@ -313,6 +431,9 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       base: { min: 6, max: 16 },
       bindings: [],
     },
+    // kaleidoscope: symmetry is the show, dye stays muted.
+    liquidMix: { base: { min: 0, max: 0.12 }, bindings: [] },
+    dyeDissipation: { base: { min: -0.05, max: 0 }, bindings: [] },
     bloom: {
       base: { min: 0.1, max: 0.4 },
       bindings: [
@@ -350,6 +471,20 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSat: { min: 0.75, max: 1 },
     paletteVal: { min: 0.75, max: 1 },
     paletteBgVal: { min: 0.02, max: 0.06 },
+    // Plan retune: kaleidoscope = radialSwirl ramps off-axis (centres stay
+    // crisp, edges fan) + soft echo with random flips so the fold mirrors
+    // never read static.
+    radialSwirl: {
+      base: { min: 0.1, max: 0.25 },
+      bindings: [{ feature: 'energy', gain: { min: 0.05, max: 0.12 }, chance: 0.6 }],
+    },
+    echoAlpha: {
+      base: { min: 0.04, max: 0.12 },
+      bindings: [{ feature: 'snare', gain: { min: 0.08, max: 0.18 }, chance: 0.7, curve: 'pulse' }],
+    },
+    echoRotate: { base: { min: -0.08, max: 0.08 }, bindings: [] },
+    echoFlipX: { base: { min: 0.4, max: 0.65 }, bindings: [] },
+    echoFlipY: { base: { min: 0.35, max: 0.6 }, bindings: [] },
   },
 
   // ── liquid ──────────────────────────────────────────────────────────────
@@ -433,6 +568,27 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       base: { min: 10, max: 24 },
       bindings: [],
     },
+    // ── EVILAND LIQUID: dye IS the picture. ───────────────────────────────
+    // Base ramped near full visibility. Energy bumps it the last bit so a
+    // quiet intro reads as a slow watery wash and a chorus fills the screen
+    // with reactive color. Section seed (clamped to [0,1] by the seed math)
+    // adds gentle per-section variation so a returning chorus rhymes but
+    // never looks identical.
+    liquidMix: {
+      base: { min: 0.78, max: 0.95 },
+      bindings: [
+        { feature: 'energy', gain: { min: 0.04, max: 0.10 }, chance: 0.9 },
+        { feature: 'sectionSeed', gain: { min: -0.05, max: 0.05 }, chance: 0.5 },
+      ],
+    },
+    // Let dye linger longer than the silence gate's default; even quiet
+    // moments should hold a slow watery memory of the last beat.
+    dyeDissipation: {
+      base: { min: 0, max: 0.04 },
+      bindings: [
+        { feature: 'flatness', gain: { min: -0.02, max: -0.005 }, chance: 0.5 },
+      ],
+    },
     bloom: {
       base: { min: 0.25, max: 0.6 },
       bindings: [
@@ -465,6 +621,15 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSat: { min: 0.5, max: 0.85 },
     paletteVal: { min: 0.6, max: 0.95 },
     paletteBgVal: { min: 0.03, max: 0.1 },
+    // Plan retune: liquid = soft radial decay falloff + a faint echo wash that
+    // swells only when energy crests, so quiet moments stay glassy.
+    radialDecay: { base: { min: -0.025, max: -0.008 }, bindings: [] },
+    echoAlpha: {
+      base: { min: 0.02, max: 0.08 },
+      bindings: [{ feature: 'energy', gain: { min: 0.08, max: 0.18 }, chance: 0.85 }],
+    },
+    echoZoom: { base: { min: -0.04, max: -0.01 }, bindings: [] },
+    echoRotate: { base: { min: -0.02, max: 0.02 }, bindings: [] },
   },
 
   // ── lattice ─────────────────────────────────────────────────────────────
@@ -529,6 +694,9 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       base: { min: 0, max: 8 },
       bindings: [],
     },
+    // lattice: crisp/percussive — dye stays off so bars read sharp.
+    liquidMix: { base: { min: 0, max: 0.05 }, bindings: [] },
+    dyeDissipation: { base: { min: -0.1, max: -0.04 }, bindings: [] },
     bloom: {
       base: { min: 0.05, max: 0.25 },
       bindings: [
@@ -561,6 +729,15 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSat: { min: 0.7, max: 1 },
     paletteVal: { min: 0.8, max: 1 },
     paletteBgVal: { min: 0.01, max: 0.05 },
+    // Plan retune: lattice = sharp echo flips that punctuate every snare —
+    // the grid never feels symmetrical the same way twice.
+    echoAlpha: {
+      base: { min: 0.05, max: 0.12 },
+      bindings: [{ feature: 'snare', gain: { min: 0.15, max: 0.3 }, chance: 0.85, curve: 'pulse' }],
+    },
+    echoZoom: { base: { min: -0.04, max: 0.04 }, bindings: [] },
+    echoFlipX: { base: { min: 0.45, max: 0.7 }, bindings: [] },
+    echoFlipY: { base: { min: 0.45, max: 0.7 }, bindings: [] },
   },
 
   // ── nebula ──────────────────────────────────────────────────────────────
@@ -639,6 +816,9 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       base: { min: 10, max: 24 },
       bindings: [],
     },
+    // nebula: gentle dye wash, very slow drift; reads as a coloured fog.
+    liquidMix: { base: { min: 0.15, max: 0.4 }, bindings: [] },
+    dyeDissipation: { base: { min: 0, max: 0.03 }, bindings: [] },
     bloom: {
       base: { min: 0.35, max: 0.75 },
       bindings: [
@@ -671,6 +851,17 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSat: { min: 0.4, max: 0.8 },
     paletteVal: { min: 0.6, max: 0.95 },
     paletteBgVal: { min: 0.02, max: 0.08 },
+    // Plan retune: nebula = slow centre drift via bar-rate q-LFOs + warm RGB
+    // decay (R linger, B drain) so trails curl into a warm dust haze.
+    qSlots: [
+      { name: 'centre-x', base: { min: -0.05, max: 0.05 }, lfo: { rate: { min: 0.12, max: 0.2 }, shape: 'sine', amp: { min: 0.1, max: 0.18 } }, smooth: { min: 0.5, max: 0.75 } },
+      { name: 'centre-y', base: { min: -0.05, max: 0.05 }, lfo: { rate: { min: 0.1, max: 0.18 }, shape: 'sine', amp: { min: 0.08, max: 0.16 } }, smooth: { min: 0.5, max: 0.75 } },
+    ],
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q1', gain: { min: 1, max: 1 }, chance: 1 }] },
+    centreY: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q2', gain: { min: 1, max: 1 }, chance: 1 }] },
+    decayR: { base: { min: 0.012, max: 0.025 }, bindings: [] },
+    decayG: { base: { min: -0.005, max: 0.005 }, bindings: [] },
+    decayB: { base: { min: -0.025, max: -0.012 }, bindings: [] },
   },
 
   // ── strobe ──────────────────────────────────────────────────────────────
@@ -742,6 +933,9 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       base: { min: 0, max: 8 },
       bindings: [],
     },
+    // strobe: hard flashes own the look; dye stays off so hits read crisp.
+    liquidMix: { base: { min: 0, max: 0.05 }, bindings: [] },
+    dyeDissipation: { base: { min: -0.1, max: -0.05 }, bindings: [] },
     bloom: {
       base: { min: 0.05, max: 0.2 },
       bindings: [
@@ -775,6 +969,522 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSat: { min: 0.85, max: 1 },
     paletteVal: { min: 0.85, max: 1 },
     paletteBgVal: { min: 0.01, max: 0.05 },
+    // Plan retune: strobe = a beat-locked square LFO gates echoAlpha on and
+    // off so the feedback layer flashes ON the downbeat and dies between.
+    qSlots: [
+      { name: 'beat-gate', base: { min: 0.4, max: 0.5 }, lfo: { rate: { min: 1, max: 1 }, shape: 'square', amp: { min: 0.45, max: 0.5 } } },
+    ],
+    echoAlpha: { base: { min: 0, max: 0 }, bindings: [{ feature: 'q1', gain: { min: 0.9, max: 1 }, chance: 1 }] },
+    echoZoom: { base: { min: 0.02, max: 0.06 }, bindings: [] },
+  },
+
+  // ── vortex ──────────────────────────────────────────────────────────────
+  // Strong radialSwirl + an orbiting centre (q-LFO quadrature pair). Kick
+  // flips the spin sign so a drop reverses the whirlpool.
+  vortex: {
+    ...baseSpec(),
+    rotate: { base: { min: 0.004, max: 0.012 }, bindings: [{ feature: 'kick', gain: { min: -0.03, max: -0.012 }, chance: 0.9, curve: 'pulse' }, { feature: 'energy', gain: { min: 0.005, max: 0.012 }, chance: 0.7 }] },
+    swirl: { base: { min: 0.06, max: 0.14 }, bindings: [{ feature: 'novelty', gain: { min: 0.02, max: 0.05 }, chance: 0.7 }] },
+    radialSwirl: { base: { min: 0.18, max: 0.32 }, bindings: [{ feature: 'energy', gain: { min: 0.06, max: 0.14 }, chance: 0.8 }] },
+    qSlots: [
+      { name: 'orbit-x', base: { min: 0, max: 0 }, lfo: { rate: { min: 0.16, max: 0.24 }, shape: 'sine', amp: { min: 0.1, max: 0.16 } } },
+      { name: 'orbit-y', base: { min: 0, max: 0 }, lfo: { rate: { min: 0.16, max: 0.24 }, shape: 'tri', amp: { min: 0.1, max: 0.16 } } },
+    ],
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q1', gain: { min: 1, max: 1 }, chance: 1 }] },
+    centreY: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q2', gain: { min: 1, max: 1 }, chance: 1 }] },
+    mirror: { base: { min: 6, max: 10 }, bindings: [] },
+    mirrorMix: { base: { min: 0.55, max: 0.78 }, bindings: [{ feature: 'energy', gain: { min: 0.08, max: 0.16 }, chance: 0.6 }] },
+    decay: { base: { min: 0.88, max: 0.92 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'triadic', weight: 3 }, { scheme: 'analogous', weight: 1 }],
+    paletteSat: { min: 0.75, max: 0.95 },
+  },
+
+  // ── inkwell ─────────────────────────────────────────────────────────────
+  // Dark glassy field. Dye dominates, snare paints white ink, trails decay
+  // toward deep blue (R drains, B lingers).
+  inkwell: {
+    ...baseSpec(),
+    zoom: { base: { min: -0.004, max: 0.004 }, bindings: [{ feature: 'bass', gain: { min: 0.008, max: 0.018 }, chance: 0.6 }] },
+    rotate: { base: { min: -0.0015, max: 0.0015 }, bindings: [] },
+    swirl: { base: { min: 0.04, max: 0.1 }, bindings: [{ feature: 'width', gain: { min: 0.015, max: 0.035 }, chance: 0.7 }] },
+    warpAmp: { base: { min: 0.0015, max: 0.004 }, bindings: [{ feature: 'bass', gain: { min: 0.0008, max: 0.002 }, chance: 0.7 }] },
+    decay: { base: { min: 0.92, max: 0.95 }, bindings: [] },
+    liquidMix: { base: { min: 0.7, max: 0.9 }, bindings: [{ feature: 'energy', gain: { min: 0.03, max: 0.08 }, chance: 0.7 }] },
+    dyeDissipation: { base: { min: 0.02, max: 0.05 }, bindings: [] },
+    fluid: { base: { min: 0.7, max: 1 }, bindings: [] },
+    vorticity: { base: { min: 14, max: 24 }, bindings: [] },
+    mirror: { base: { min: 1, max: 3 }, bindings: [] },
+    mirrorMix: { base: { min: 0.1, max: 0.3 }, bindings: [] },
+    decayR: { base: { min: -0.025, max: -0.012 }, bindings: [] },
+    decayG: { base: { min: -0.012, max: -0.004 }, bindings: [] },
+    decayB: { base: { min: 0.015, max: 0.03 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'monochrome', weight: 3 }, { scheme: 'analogous', weight: 1 }],
+    paletteSat: { min: 0.55, max: 0.85 },
+    paletteVal: { min: 0.4, max: 0.7 },
+    paletteBgVal: { min: 0.005, max: 0.025 },
+    waveModes: [{ mode: 'lissajous', weight: 3 }, { mode: 'line', weight: 1 }, { mode: 'off', weight: 1 }],
+    mirrorSets: [[1, 2, 3], [2, 3, 4]],
+    mirrorSetChance: 0.3,
+  },
+
+  // ── supernova ───────────────────────────────────────────────────────────
+  // Kick explodes the field outward via radialZoom burst + echo zoom-out.
+  // Red-orange decay (B drains hardest).
+  supernova: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.01, max: 0.025 }, bindings: [{ feature: 'kick', gain: { min: 0.04, max: 0.055 }, chance: 1, curve: 'pulse' }, { feature: 'bass', gain: { min: 0.008, max: 0.018 }, chance: 0.7 }] },
+    radialZoom: { base: { min: 0.04, max: 0.1 }, bindings: [{ feature: 'kick', gain: { min: 0.18, max: 0.3 }, chance: 1, curve: 'pulse' }] },
+    decay: { base: { min: 0.84, max: 0.89 }, bindings: [{ feature: 'crest', gain: { min: -0.02, max: -0.005 }, chance: 0.6 }] },
+    decayR: { base: { min: 0.012, max: 0.025 }, bindings: [] },
+    decayG: { base: { min: -0.004, max: 0.008 }, bindings: [] },
+    decayB: { base: { min: -0.025, max: -0.012 }, bindings: [] },
+    echoAlpha: { base: { min: 0.1, max: 0.25 }, bindings: [{ feature: 'kick', gain: { min: 0.2, max: 0.4 }, chance: 0.9, curve: 'pulse' }] },
+    echoZoom: { base: { min: -0.15, max: -0.06 }, bindings: [] },
+    bloom: { base: { min: 0.35, max: 0.7 }, bindings: [{ feature: 'kick', gain: { min: 0.3, max: 0.6 }, chance: 0.9, curve: 'pulse' }] },
+    mirror: { base: { min: 5, max: 8 }, bindings: [] },
+    mirrorMix: { base: { min: 0.55, max: 0.75 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'splitComplementary', weight: 3 }, { scheme: 'analogous', weight: 2 }],
+    paletteSat: { min: 0.85, max: 1 },
+    paletteVal: { min: 0.85, max: 1 },
+    waveModes: [{ mode: 'radial', weight: 3 }, { mode: 'bars', weight: 1 }],
+    emitterGain: { min: 1.2, max: 1.9 },
+  },
+
+  // ── cathedral ───────────────────────────────────────────────────────────
+  // High mirror count + echo flipY = vaulted symmetry. Gold decay (R+G
+  // linger). Very slow rotation.
+  cathedral: {
+    ...baseSpec(),
+    zoom: { base: { min: -0.002, max: 0.005 }, bindings: [{ feature: 'bass', gain: { min: 0.005, max: 0.012 }, chance: 0.6, curve: 'sqrt' }] },
+    rotate: { base: { min: -0.0015, max: 0.0015 }, bindings: [{ feature: 'beatPhase', gain: { min: 0.0006, max: 0.0014 }, chance: 0.6 }] },
+    swirl: { base: { min: 0, max: 0.03 }, bindings: [] },
+    decay: { base: { min: 0.92, max: 0.95 }, bindings: [{ feature: 'flatness', gain: { min: -0.03, max: -0.01 }, chance: 0.5 }] },
+    mirror: { base: { min: 10, max: 14 }, bindings: [] },
+    mirrorSets: [[10, 12, 14, 16], [8, 12, 16]],
+    mirrorSetChance: 0.85,
+    mirrorMix: { base: { min: 0.78, max: 0.9 }, bindings: [] },
+    echoAlpha: { base: { min: 0.08, max: 0.16 }, bindings: [{ feature: 'energy', gain: { min: 0.04, max: 0.1 }, chance: 0.6 }] },
+    echoFlipY: { base: { min: 0.55, max: 0.75 }, bindings: [] },
+    echoZoom: { base: { min: -0.02, max: 0.02 }, bindings: [] },
+    decayR: { base: { min: 0.012, max: 0.022 }, bindings: [] },
+    decayG: { base: { min: 0.008, max: 0.018 }, bindings: [] },
+    decayB: { base: { min: -0.022, max: -0.01 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 3 }, { scheme: 'monochrome', weight: 2 }],
+    paletteSat: { min: 0.6, max: 0.9 },
+    paletteVal: { min: 0.75, max: 1 },
+    waveModes: [{ mode: 'radial', weight: 3 }, { mode: 'off', weight: 2 }],
+    emitterScale: { min: 1.2, max: 1.8 },
+  },
+
+  // ── phosphor ────────────────────────────────────────────────────────────
+  // Waveform-forward CRT look. Mono green decay (R+B drain, G lingers).
+  // Centre locked, thin sharp trails.
+  phosphor: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.002, max: 0.008 }, bindings: [{ feature: 'kick', gain: { min: 0.01, max: 0.022 }, chance: 0.5 }] },
+    rotate: { base: { min: -0.002, max: 0.002 }, bindings: [] },
+    swirl: { base: { min: -0.01, max: 0.01 }, bindings: [] },
+    decay: { base: { min: 0.83, max: 0.88 }, bindings: [{ feature: 'crest', gain: { min: -0.02, max: -0.005 }, chance: 0.6 }] },
+    warpAmp: { base: { min: 0.0001, max: 0.0004 }, bindings: [] },
+    mirror: { base: { min: 1, max: 3 }, bindings: [] },
+    mirrorMix: { base: { min: 0, max: 0.2 }, bindings: [] },
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [] },
+    centreY: { base: { min: 0.5, max: 0.5 }, bindings: [] },
+    decayR: { base: { min: -0.03, max: -0.015 }, bindings: [] },
+    decayG: { base: { min: 0.015, max: 0.028 }, bindings: [] },
+    decayB: { base: { min: -0.03, max: -0.015 }, bindings: [] },
+    waveform: { intensity: { min: 1.4, max: 2.2 }, intensityBindings: [{ feature: 'energy', gain: { min: 0.6, max: 1.2 }, chance: 0.9 }], thickness: { min: 0.003, max: 0.008 }, scale: { min: 0.3, max: 0.55 } },
+    waveModes: [{ mode: 'line', weight: 4 }, { mode: 'lissajous', weight: 2 }, { mode: 'bars', weight: 1 }],
+    paletteSchemes: [{ scheme: 'monochrome', weight: 4 }],
+    paletteSat: { min: 0.8, max: 1 },
+    paletteVal: { min: 0.85, max: 1 },
+    paletteBgVal: { min: 0.005, max: 0.02 },
+    bloom: { base: { min: 0.25, max: 0.5 }, bindings: [] },
+    emitterScale: { min: 0.5, max: 0.9 },
+    mirrorSets: [[1, 2]],
+    mirrorSetChance: 0.5,
+  },
+
+  // ── ribbonfall ──────────────────────────────────────────────────────────
+  // Strong terrain ridge with a downward drift — flowY positive plus a
+  // negative zoom pulls trails toward the bottom. Hats sparkle on top.
+  ribbonfall: {
+    ...baseSpec(),
+    zoom: { base: { min: -0.018, max: -0.006 }, bindings: [{ feature: 'bass', gain: { min: 0.008, max: 0.016 }, chance: 0.5 }] },
+    rotate: { base: { min: -0.001, max: 0.001 }, bindings: [] },
+    swirl: { base: { min: 0, max: 0.02 }, bindings: [] },
+    flowY: { base: { min: 0.002, max: 0.005 }, bindings: [{ feature: 'energy', gain: { min: 0.001, max: 0.0025 }, chance: 0.7 }] },
+    flowX: { base: { min: -0.0006, max: 0.0006 }, bindings: [{ feature: 'pan', gain: { min: 0.0006, max: 0.0014 }, chance: 0.6 }] },
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [] },
+    centreY: { base: { min: 0.65, max: 0.78 }, bindings: [] },
+    mirror: { base: { min: 2, max: 5 }, bindings: [] },
+    mirrorMix: { base: { min: 0.2, max: 0.45 }, bindings: [] },
+    decay: { base: { min: 0.89, max: 0.93 }, bindings: [] },
+    waveform: { intensity: { min: 1, max: 1.6 }, intensityBindings: [{ feature: 'hat', gain: { min: 0.4, max: 0.9 }, chance: 0.85 }], thickness: { min: 0.005, max: 0.012 }, scale: { min: 0.35, max: 0.55 } },
+    waveModes: [{ mode: 'line', weight: 3 }, { mode: 'bars', weight: 2 }],
+    emitterGain: { min: 1.1, max: 1.6 },
+    paletteSchemes: [{ scheme: 'analogous', weight: 3 }, { scheme: 'splitComplementary', weight: 1 }],
+    paletteSat: { min: 0.7, max: 0.95 },
+    mirrorSets: [[2, 3, 4, 5]],
+    mirrorSetChance: 0.5,
+  },
+
+  // ── pulsar ──────────────────────────────────────────────────────────────
+  // Echo alpha strobes on a beat-locked square q-LFO. Anticipation inhale
+  // visible via centreY breathing on a half-bar sine.
+  pulsar: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.008, max: 0.018 }, bindings: [{ feature: 'kick', gain: { min: 0.025, max: 0.045 }, chance: 0.9, curve: 'pulse' }] },
+    qSlots: [
+      { name: 'beat-gate', base: { min: 0.45, max: 0.5 }, lfo: { rate: { min: 1, max: 1 }, shape: 'square', amp: { min: 0.45, max: 0.5 } } },
+      { name: 'inhale', base: { min: 0, max: 0 }, lfo: { rate: { min: 0.25, max: 0.25 }, shape: 'sine', amp: { min: 0.05, max: 0.08 } } },
+    ],
+    echoAlpha: { base: { min: 0, max: 0 }, bindings: [{ feature: 'q1', gain: { min: 0.85, max: 1 }, chance: 1 }] },
+    echoZoom: { base: { min: -0.05, max: 0.05 }, bindings: [] },
+    centreY: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q2', gain: { min: 1, max: 1 }, chance: 1 }] },
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [] },
+    decay: { base: { min: 0.85, max: 0.89 }, bindings: [{ feature: 'crest', gain: { min: -0.02, max: -0.005 }, chance: 0.6 }] },
+    mirror: { base: { min: 6, max: 10 }, bindings: [] },
+    mirrorMix: { base: { min: 0.6, max: 0.78 }, bindings: [] },
+    bloom: { base: { min: 0.2, max: 0.4 }, bindings: [{ feature: 'kick', gain: { min: 0.25, max: 0.5 }, chance: 0.9, curve: 'pulse' }] },
+    paletteSchemes: [{ scheme: 'complementary', weight: 3 }, { scheme: 'splitComplementary', weight: 1 }],
+    paletteSat: { min: 0.8, max: 1 },
+    waveModes: [{ mode: 'bars', weight: 3 }, { mode: 'radial', weight: 2 }],
+  },
+
+  // ── mosaic ──────────────────────────────────────────────────────────────
+  // High mirror folds + lattice flavour + radialRotate that alternates sign
+  // across radius (centre spins one way, edges the other).
+  mosaic: {
+    ...baseSpec(),
+    rotate: { base: { min: -0.004, max: 0.004 }, bindings: [{ feature: 'beatPhase', gain: { min: 0.001, max: 0.0025 }, chance: 0.7 }] },
+    radialRotate: { base: { min: -0.08, max: -0.03 }, bindings: [{ feature: 'energy', gain: { min: 0.04, max: 0.08 }, chance: 0.7 }] },
+    swirl: { base: { min: -0.03, max: 0.06 }, bindings: [{ feature: 'snare', gain: { min: 0.01, max: 0.025 }, chance: 0.5 }] },
+    mirror: { base: { min: 8, max: 14 }, bindings: [] },
+    mirrorSets: [[8, 10, 12, 14, 16], [6, 8, 12, 16]],
+    mirrorSetChance: 0.8,
+    mirrorMix: { base: { min: 0.72, max: 0.88 }, bindings: [] },
+    decay: { base: { min: 0.85, max: 0.9 }, bindings: [] },
+    waveform: { intensity: { min: 0.7, max: 1.3 }, intensityBindings: [{ feature: 'energy', gain: { min: 0.4, max: 0.8 }, chance: 0.7 }], thickness: { min: 0.004, max: 0.01 }, scale: { min: 0.3, max: 0.5 } },
+    waveModes: [{ mode: 'bars', weight: 3 }, { mode: 'radial', weight: 2 }],
+    paletteSchemes: [{ scheme: 'tetradic', weight: 3 }, { scheme: 'triadic', weight: 2 }],
+    paletteSat: { min: 0.8, max: 1 },
+    paletteVal: { min: 0.8, max: 1 },
+  },
+
+  // ── deepfield ───────────────────────────────────────────────────────────
+  // Slow tunnel zoom-in, star-rich emitters, blue-violet decay. Quiet drift.
+  deepfield: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.015, max: 0.028 }, bindings: [{ feature: 'bass', gain: { min: 0.006, max: 0.014 }, chance: 0.6, curve: 'sqrt' }] },
+    rotate: { base: { min: -0.0015, max: 0.0015 }, bindings: [{ feature: 'energy', gain: { min: 0.002, max: 0.005 }, chance: 0.5 }] },
+    swirl: { base: { min: 0.01, max: 0.04 }, bindings: [{ feature: 'width', gain: { min: 0.008, max: 0.02 }, chance: 0.5 }] },
+    decay: { base: { min: 0.92, max: 0.95 }, bindings: [] },
+    warpAmp: { base: { min: 0.0002, max: 0.0008 }, bindings: [] },
+    mirror: { base: { min: 4, max: 8 }, bindings: [] },
+    mirrorMix: { base: { min: 0.55, max: 0.75 }, bindings: [] },
+    decayR: { base: { min: -0.015, max: -0.005 }, bindings: [] },
+    decayG: { base: { min: -0.012, max: -0.003 }, bindings: [] },
+    decayB: { base: { min: 0.012, max: 0.025 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 3 }, { scheme: 'monochrome', weight: 1 }],
+    paletteSat: { min: 0.5, max: 0.85 },
+    paletteVal: { min: 0.6, max: 0.9 },
+    paletteBgVal: { min: 0.005, max: 0.02 },
+    waveModes: [{ mode: 'off', weight: 4 }, { mode: 'line', weight: 1 }],
+    emitterScale: { min: 1.4, max: 2.2 },
+    emitterGain: { min: 0.7, max: 1.2 },
+    bloom: { base: { min: 0.4, max: 0.7 }, bindings: [{ feature: 'hat', gain: { min: 0.1, max: 0.25 }, chance: 0.7 }] },
+  },
+
+  // ── solarflare ──────────────────────────────────────────────────────────
+  // Bass-driven terrain glow + orange decay. Snare adds white flares with
+  // echo rotation accents.
+  solarflare: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.006, max: 0.015 }, bindings: [{ feature: 'bass', gain: { min: 0.015, max: 0.028 }, chance: 0.85 }, { feature: 'kick', gain: { min: 0.02, max: 0.035 }, chance: 0.85, curve: 'pulse' }] },
+    swirl: { base: { min: 0.04, max: 0.1 }, bindings: [{ feature: 'novelty', gain: { min: 0.015, max: 0.04 }, chance: 0.7 }] },
+    warpAmp: { base: { min: 0.001, max: 0.003 }, bindings: [{ feature: 'bass', gain: { min: 0.001, max: 0.0025 }, chance: 0.9 }] },
+    decay: { base: { min: 0.86, max: 0.91 }, bindings: [{ feature: 'flatness', gain: { min: -0.04, max: -0.015 }, chance: 0.6 }] },
+    decayR: { base: { min: 0.018, max: 0.03 }, bindings: [] },
+    decayG: { base: { min: 0, max: 0.012 }, bindings: [] },
+    decayB: { base: { min: -0.03, max: -0.015 }, bindings: [] },
+    echoAlpha: { base: { min: 0.05, max: 0.12 }, bindings: [{ feature: 'snare', gain: { min: 0.12, max: 0.28 }, chance: 0.85, curve: 'pulse' }] },
+    echoRotate: { base: { min: 0.05, max: 0.15 }, bindings: [] },
+    echoZoom: { base: { min: -0.04, max: 0.02 }, bindings: [] },
+    mirror: { base: { min: 4, max: 8 }, bindings: [] },
+    mirrorMix: { base: { min: 0.5, max: 0.75 }, bindings: [] },
+    bloom: { base: { min: 0.35, max: 0.7 }, bindings: [{ feature: 'bass', gain: { min: 0.15, max: 0.35 }, chance: 0.8 }] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 4 }, { scheme: 'splitComplementary', weight: 1 }],
+    paletteSat: { min: 0.85, max: 1 },
+    paletteVal: { min: 0.85, max: 1 },
+    waveModes: [{ mode: 'radial', weight: 3 }, { mode: 'bars', weight: 1 }],
+    emitterGain: { min: 1.2, max: 1.8 },
+  },
+
+  // ── glasshouse ──────────────────────────────────────────────────────────
+  // Both echo flips on, low alpha, mid liquidMix, prismatic palette via
+  // decayRGB imbalance (each channel drifts a different way).
+  glasshouse: {
+    ...baseSpec(),
+    zoom: { base: { min: -0.003, max: 0.006 }, bindings: [{ feature: 'kick', gain: { min: 0.012, max: 0.025 }, chance: 0.6 }] },
+    rotate: { base: { min: -0.002, max: 0.002 }, bindings: [{ feature: 'energy', gain: { min: 0.003, max: 0.007 }, chance: 0.5 }] },
+    swirl: { base: { min: 0.02, max: 0.07 }, bindings: [{ feature: 'width', gain: { min: 0.012, max: 0.028 }, chance: 0.7 }] },
+    decay: { base: { min: 0.9, max: 0.94 }, bindings: [] },
+    warpAmp: { base: { min: 0.0006, max: 0.002 }, bindings: [] },
+    liquidMix: { base: { min: 0.35, max: 0.55 }, bindings: [{ feature: 'energy', gain: { min: 0.03, max: 0.08 }, chance: 0.6 }] },
+    fluid: { base: { min: 0.45, max: 0.8 }, bindings: [] },
+    echoAlpha: { base: { min: 0.06, max: 0.14 }, bindings: [] },
+    echoFlipX: { base: { min: 0.55, max: 0.75 }, bindings: [] },
+    echoFlipY: { base: { min: 0.55, max: 0.75 }, bindings: [] },
+    echoZoom: { base: { min: -0.03, max: 0.03 }, bindings: [] },
+    decayR: { base: { min: 0.01, max: 0.025 }, bindings: [] },
+    decayG: { base: { min: -0.015, max: 0.005 }, bindings: [] },
+    decayB: { base: { min: 0.005, max: 0.02 }, bindings: [] },
+    mirror: { base: { min: 4, max: 8 }, bindings: [] },
+    mirrorMix: { base: { min: 0.4, max: 0.7 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'splitComplementary', weight: 2 }, { scheme: 'tetradic', weight: 2 }],
+    paletteSat: { min: 0.65, max: 0.95 },
+    waveModes: [{ mode: 'lissajous', weight: 3 }, { mode: 'line', weight: 1 }],
+  },
+
+  // ── stormfront ──────────────────────────────────────────────────────────
+  // Max vorticity + desaturated cool palette. Kick = thunder shock zoom,
+  // snare = lightning flash bloom.
+  stormfront: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.003, max: 0.012 }, bindings: [{ feature: 'kick', gain: { min: 0.045, max: 0.06 }, chance: 1, curve: 'pulse' }] },
+    rotate: { base: { min: -0.003, max: 0.003 }, bindings: [{ feature: 'novelty', gain: { min: 0.003, max: 0.008 }, chance: 0.6 }] },
+    swirl: { base: { min: -0.05, max: 0.08 }, bindings: [{ feature: 'novelty', gain: { min: 0.025, max: 0.05 }, chance: 0.85 }] },
+    decay: { base: { min: 0.83, max: 0.88 }, bindings: [{ feature: 'crest', gain: { min: -0.025, max: -0.01 }, chance: 0.7 }] },
+    warpAmp: { base: { min: 0.002, max: 0.005 }, bindings: [{ feature: 'bass', gain: { min: 0.0015, max: 0.003 }, chance: 0.85 }] },
+    fluid: { base: { min: 0.75, max: 1 }, bindings: [] },
+    vorticity: { base: { min: 22, max: 30 }, bindings: [] },
+    liquidMix: { base: { min: 0.45, max: 0.7 }, bindings: [] },
+    radialSwirl: { base: { min: 0.12, max: 0.25 }, bindings: [{ feature: 'energy', gain: { min: 0.06, max: 0.15 }, chance: 0.8 }] },
+    decayR: { base: { min: -0.018, max: -0.008 }, bindings: [] },
+    decayG: { base: { min: -0.012, max: -0.003 }, bindings: [] },
+    decayB: { base: { min: 0.005, max: 0.018 }, bindings: [] },
+    bloom: { base: { min: 0.1, max: 0.3 }, bindings: [{ feature: 'snare', gain: { min: 0.5, max: 0.85 }, chance: 0.95, curve: 'pulse' }, { feature: 'kick', gain: { min: 0.25, max: 0.5 }, chance: 0.9, curve: 'pulse' }] },
+    mirror: { base: { min: 2, max: 5 }, bindings: [] },
+    mirrorMix: { base: { min: 0.2, max: 0.5 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'monochrome', weight: 3 }, { scheme: 'analogous', weight: 1 }],
+    paletteSat: { min: 0.25, max: 0.55 },
+    paletteVal: { min: 0.55, max: 0.85 },
+    paletteBgVal: { min: 0.005, max: 0.025 },
+    waveModes: [{ mode: 'lissajous', weight: 2 }, { mode: 'bars', weight: 2 }, { mode: 'line', weight: 1 }],
+  },
+
+  // ── heartbeat ───────────────────────────────────────────────────────────
+  // Centre pulse zoom on beatPhase sine, red decay, minimal emitters.
+  heartbeat: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.002, max: 0.008 }, bindings: [{ feature: 'q1', gain: { min: 0.04, max: 0.06 }, chance: 1 }] },
+    rotate: { base: { min: -0.0008, max: 0.0008 }, bindings: [] },
+    swirl: { base: { min: 0, max: 0.02 }, bindings: [] },
+    qSlots: [
+      { name: 'pulse', base: { min: 0, max: 0 }, lfo: { rate: { min: 1, max: 1 }, shape: 'sine', amp: { min: 0.45, max: 0.55 } } },
+    ],
+    decay: { base: { min: 0.9, max: 0.94 }, bindings: [] },
+    warpAmp: { base: { min: 0.0002, max: 0.0008 }, bindings: [{ feature: 'q1', gain: { min: 0.0005, max: 0.0012 }, chance: 0.8 }] },
+    decayR: { base: { min: 0.018, max: 0.03 }, bindings: [] },
+    decayG: { base: { min: -0.018, max: -0.005 }, bindings: [] },
+    decayB: { base: { min: -0.018, max: -0.005 }, bindings: [] },
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [] },
+    centreY: { base: { min: 0.5, max: 0.5 }, bindings: [] },
+    mirror: { base: { min: 1, max: 3 }, bindings: [] },
+    mirrorMix: { base: { min: 0.05, max: 0.25 }, bindings: [] },
+    bloom: { base: { min: 0.2, max: 0.45 }, bindings: [{ feature: 'q1', gain: { min: 0.15, max: 0.3 }, chance: 0.9 }] },
+    paletteSchemes: [{ scheme: 'monochrome', weight: 3 }, { scheme: 'analogous', weight: 1 }],
+    paletteSat: { min: 0.7, max: 1 },
+    paletteVal: { min: 0.6, max: 0.95 },
+    waveModes: [{ mode: 'off', weight: 4 }, { mode: 'line', weight: 1 }],
+    emitterScale: { min: 0.4, max: 0.8 },
+    emitterGain: { min: 0.6, max: 1.1 },
+    mirrorSets: [[1, 2]],
+    mirrorSetChance: 0.4,
+  },
+
+  // ── carousel ────────────────────────────────────────────────────────────
+  // RadialRotate sign flip at radius (inner ring goes one way, outer ring
+  // the other). Melodic centroid drives a hue ladder.
+  carousel: {
+    ...baseSpec(),
+    rotate: { base: { min: 0.003, max: 0.008 }, bindings: [{ feature: 'beatPhase', gain: { min: 0.001, max: 0.0025 }, chance: 0.8 }] },
+    radialRotate: { base: { min: -0.1, max: -0.04 }, bindings: [] },
+    swirl: { base: { min: 0.02, max: 0.06 }, bindings: [] },
+    hueCycle: { base: { min: 0.003, max: 0.008 }, bindings: [{ feature: 'centroid', gain: { min: 0.008, max: 0.018 }, chance: 0.9 }, { feature: 'vocal', gain: { min: 0.003, max: 0.008 }, chance: 0.6 }] },
+    qSlots: [
+      { name: 'pan-swing', base: { min: 0, max: 0 }, lfo: { rate: { min: 0.5, max: 0.5 }, shape: 'sine', amp: { min: 0.06, max: 0.1 } } },
+    ],
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q1', gain: { min: 1, max: 1 }, chance: 1 }] },
+    decay: { base: { min: 0.88, max: 0.92 }, bindings: [] },
+    mirror: { base: { min: 6, max: 10 }, bindings: [] },
+    mirrorMix: { base: { min: 0.6, max: 0.8 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'tetradic', weight: 3 }, { scheme: 'triadic', weight: 2 }],
+    paletteSat: { min: 0.8, max: 1 },
+    paletteVal: { min: 0.8, max: 1 },
+    waveModes: [{ mode: 'radial', weight: 3 }, { mode: 'lissajous', weight: 1 }],
+  },
+
+  // ── firefly ─────────────────────────────────────────────────────────────
+  // Near-black field. Long decay holds tiny sparks. Slow q-LFO drifts
+  // centre like wind. Emitters small but bright.
+  firefly: {
+    ...baseSpec(),
+    zoom: { base: { min: -0.002, max: 0.003 }, bindings: [] },
+    rotate: { base: { min: -0.001, max: 0.001 }, bindings: [] },
+    swirl: { base: { min: 0, max: 0.015 }, bindings: [] },
+    qSlots: [
+      { name: 'wind-x', base: { min: 0, max: 0 }, lfo: { rate: { min: 0.08, max: 0.14 }, shape: 'sine', amp: { min: 0.06, max: 0.12 } }, smooth: { min: 0.6, max: 0.8 } },
+      { name: 'wind-y', base: { min: 0, max: 0 }, lfo: { rate: { min: 0.08, max: 0.14 }, shape: 'tri', amp: { min: 0.05, max: 0.1 } }, smooth: { min: 0.6, max: 0.8 } },
+    ],
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q1', gain: { min: 1, max: 1 }, chance: 1 }] },
+    centreY: { base: { min: 0.5, max: 0.5 }, bindings: [{ feature: 'q2', gain: { min: 1, max: 1 }, chance: 1 }] },
+    decay: { base: { min: 0.93, max: 0.96 }, bindings: [] },
+    warpAmp: { base: { min: 0.0001, max: 0.0005 }, bindings: [] },
+    mirror: { base: { min: 1, max: 4 }, bindings: [] },
+    mirrorMix: { base: { min: 0, max: 0.2 }, bindings: [] },
+    decayR: { base: { min: 0.008, max: 0.018 }, bindings: [] },
+    decayG: { base: { min: 0.005, max: 0.015 }, bindings: [] },
+    decayB: { base: { min: -0.02, max: -0.008 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 3 }, { scheme: 'monochrome', weight: 1 }],
+    paletteSat: { min: 0.65, max: 0.95 },
+    paletteVal: { min: 0.55, max: 0.85 },
+    paletteBgVal: { min: 0.002, max: 0.012 },
+    waveModes: [{ mode: 'off', weight: 5 }],
+    emitterScale: { min: 0.3, max: 0.7 },
+    emitterGain: { min: 1.2, max: 1.8 },
+    bloom: { base: { min: 0.3, max: 0.6 }, bindings: [{ feature: 'hat', gain: { min: 0.1, max: 0.25 }, chance: 0.7 }] },
+    mirrorSets: [[1, 2, 3]],
+    mirrorSetChance: 0.3,
+  },
+
+  // ── tidal ───────────────────────────────────────────────────────────────
+  // High liquidMix + amplified stereo currents (flowX driven by pan).
+  // Bar-rate swell zoom q-LFO.
+  tidal: {
+    ...baseSpec(),
+    zoom: { base: { min: 0, max: 0 }, bindings: [{ feature: 'q1', gain: { min: 0.025, max: 0.04 }, chance: 1 }, { feature: 'bass', gain: { min: 0.008, max: 0.018 }, chance: 0.7 }] },
+    rotate: { base: { min: -0.0015, max: 0.0015 }, bindings: [] },
+    swirl: { base: { min: 0.06, max: 0.14 }, bindings: [{ feature: 'width', gain: { min: 0.02, max: 0.04 }, chance: 0.85 }] },
+    qSlots: [
+      { name: 'swell', base: { min: 0.5, max: 0.6 }, lfo: { rate: { min: 0.25, max: 0.25 }, shape: 'sine', amp: { min: 0.4, max: 0.5 } } },
+    ],
+    flowX: { base: { min: -0.0005, max: 0.0005 }, bindings: [{ feature: 'pan', gain: { min: 0.003, max: 0.006 }, chance: 0.95 }] },
+    flowY: { base: { min: -0.0004, max: 0.0004 }, bindings: [{ feature: 'energy', gain: { min: 0.0006, max: 0.0014 }, chance: 0.5 }] },
+    decay: { base: { min: 0.91, max: 0.94 }, bindings: [] },
+    warpAmp: { base: { min: 0.0012, max: 0.0035 }, bindings: [{ feature: 'bass', gain: { min: 0.0008, max: 0.002 }, chance: 0.8 }] },
+    liquidMix: { base: { min: 0.7, max: 0.9 }, bindings: [{ feature: 'energy', gain: { min: 0.04, max: 0.08 }, chance: 0.85 }] },
+    fluid: { base: { min: 0.7, max: 1 }, bindings: [] },
+    vorticity: { base: { min: 16, max: 28 }, bindings: [] },
+    mirror: { base: { min: 2, max: 5 }, bindings: [] },
+    mirrorMix: { base: { min: 0.15, max: 0.4 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 4 }, { scheme: 'monochrome', weight: 1 }],
+    paletteSat: { min: 0.55, max: 0.85 },
+    paletteVal: { min: 0.65, max: 0.95 },
+    waveModes: [{ mode: 'lissajous', weight: 3 }, { mode: 'line', weight: 1 }],
+    emitterScale: { min: 1.2, max: 1.8 },
+  },
+
+  // ── prism ───────────────────────────────────────────────────────────────
+  // DecayRGB imbalance splits white emitters into bands. Bright bloom drive.
+  prism: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.004, max: 0.012 }, bindings: [{ feature: 'kick', gain: { min: 0.02, max: 0.038 }, chance: 0.85 }] },
+    rotate: { base: { min: -0.003, max: 0.003 }, bindings: [{ feature: 'energy', gain: { min: 0.005, max: 0.012 }, chance: 0.7 }] },
+    swirl: { base: { min: 0.02, max: 0.07 }, bindings: [{ feature: 'width', gain: { min: 0.015, max: 0.035 }, chance: 0.7 }] },
+    hueCycle: { base: { min: 0.004, max: 0.01 }, bindings: [{ feature: 'centroid', gain: { min: 0.008, max: 0.018 }, chance: 0.9 }] },
+    decay: { base: { min: 0.87, max: 0.91 }, bindings: [] },
+    decayR: { base: { min: 0.025, max: 0.04 }, bindings: [] },
+    decayG: { base: { min: -0.005, max: 0.015 }, bindings: [] },
+    decayB: { base: { min: -0.04, max: -0.025 }, bindings: [] },
+    mirror: { base: { min: 4, max: 8 }, bindings: [] },
+    mirrorMix: { base: { min: 0.5, max: 0.75 }, bindings: [] },
+    bloom: { base: { min: 0.35, max: 0.65 }, bindings: [{ feature: 'energy', gain: { min: 0.15, max: 0.3 }, chance: 0.85 }] },
+    paletteSchemes: [{ scheme: 'tetradic', weight: 2 }, { scheme: 'splitComplementary', weight: 2 }],
+    paletteSat: { min: 0.85, max: 1 },
+    paletteVal: { min: 0.85, max: 1 },
+    waveModes: [{ mode: 'radial', weight: 3 }, { mode: 'lissajous', weight: 2 }],
+    emitterGain: { min: 1.2, max: 1.7 },
+  },
+
+  // ── echochamber ─────────────────────────────────────────────────────────
+  // Echo IS the motif. Alpha ~0.6, slow echoRotate, onsets re-echo via kick
+  // binding into echoAlpha. Mid mirrorMix.
+  echochamber: {
+    ...baseSpec(),
+    zoom: { base: { min: 0, max: 0.008 }, bindings: [{ feature: 'kick', gain: { min: 0.012, max: 0.025 }, chance: 0.7 }] },
+    rotate: { base: { min: -0.002, max: 0.002 }, bindings: [{ feature: 'energy', gain: { min: 0.003, max: 0.008 }, chance: 0.6 }] },
+    swirl: { base: { min: 0.02, max: 0.06 }, bindings: [] },
+    decay: { base: { min: 0.86, max: 0.9 }, bindings: [] },
+    echoAlpha: { base: { min: 0.5, max: 0.7 }, bindings: [{ feature: 'kick', gain: { min: 0.08, max: 0.18 }, chance: 0.85, curve: 'pulse' }] },
+    echoRotate: { base: { min: 0.08, max: 0.18 }, bindings: [{ feature: 'energy', gain: { min: 0.03, max: 0.08 }, chance: 0.6 }] },
+    echoZoom: { base: { min: -0.05, max: 0.05 }, bindings: [] },
+    mirror: { base: { min: 4, max: 8 }, bindings: [] },
+    mirrorMix: { base: { min: 0.45, max: 0.68 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'complementary', weight: 2 }, { scheme: 'analogous', weight: 2 }],
+    paletteSat: { min: 0.7, max: 1 },
+    waveModes: [{ mode: 'lissajous', weight: 3 }, { mode: 'radial', weight: 2 }],
+  },
+
+  // ── wireframe ───────────────────────────────────────────────────────────
+  // Terrain-line aesthetic: thin bright waveform, cyan phosphor decay, echo
+  // OFF, centre locked. Reads like CAD output.
+  wireframe: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.002, max: 0.008 }, bindings: [{ feature: 'kick', gain: { min: 0.008, max: 0.02 }, chance: 0.6 }] },
+    rotate: { base: { min: -0.001, max: 0.001 }, bindings: [] },
+    swirl: { base: { min: 0, max: 0.02 }, bindings: [] },
+    decay: { base: { min: 0.82, max: 0.86 }, bindings: [{ feature: 'crest', gain: { min: -0.025, max: -0.01 }, chance: 0.7 }] },
+    warpAmp: { base: { min: 0, max: 0.0003 }, bindings: [] },
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [] },
+    centreY: { base: { min: 0.5, max: 0.5 }, bindings: [] },
+    decayR: { base: { min: -0.025, max: -0.012 }, bindings: [] },
+    decayG: { base: { min: 0.008, max: 0.022 }, bindings: [] },
+    decayB: { base: { min: 0.005, max: 0.018 }, bindings: [] },
+    mirror: { base: { min: 1, max: 3 }, bindings: [] },
+    mirrorMix: { base: { min: 0, max: 0.15 }, bindings: [] },
+    waveform: { intensity: { min: 1.5, max: 2.4 }, intensityBindings: [{ feature: 'energy', gain: { min: 0.5, max: 1 }, chance: 0.9 }], thickness: { min: 0.002, max: 0.006 }, scale: { min: 0.35, max: 0.6 } },
+    waveModes: [{ mode: 'line', weight: 3 }, { mode: 'bars', weight: 2 }],
+    paletteSchemes: [{ scheme: 'monochrome', weight: 4 }],
+    paletteSat: { min: 0.75, max: 1 },
+    paletteVal: { min: 0.8, max: 1 },
+    paletteBgVal: { min: 0.005, max: 0.02 },
+    emitterScale: { min: 0.3, max: 0.7 },
+    emitterGain: { min: 0.4, max: 0.9 },
+    mirrorSets: [[1, 2]],
+    mirrorSetChance: 0.4,
+  },
+
+  // ── emberveil ───────────────────────────────────────────────────────────
+  // Embers drifting upward (centreY low, negative radialZoom inhales toward
+  // the centre), deep red-black decay, lows drive emitter strength.
+  emberveil: {
+    ...baseSpec(),
+    zoom: { base: { min: -0.01, max: -0.002 }, bindings: [{ feature: 'bass', gain: { min: 0.006, max: 0.014 }, chance: 0.7, curve: 'sqrt' }] },
+    rotate: { base: { min: -0.001, max: 0.001 }, bindings: [] },
+    swirl: { base: { min: 0.015, max: 0.05 }, bindings: [{ feature: 'width', gain: { min: 0.01, max: 0.025 }, chance: 0.6 }] },
+    radialZoom: { base: { min: -0.12, max: -0.05 }, bindings: [] },
+    flowY: { base: { min: -0.004, max: -0.0015 }, bindings: [] },
+    centreX: { base: { min: 0.5, max: 0.5 }, bindings: [] },
+    centreY: { base: { min: 0.28, max: 0.4 }, bindings: [] },
+    decay: { base: { min: 0.9, max: 0.94 }, bindings: [] },
+    warpAmp: { base: { min: 0.0006, max: 0.0018 }, bindings: [] },
+    decayR: { base: { min: 0.018, max: 0.028 }, bindings: [] },
+    decayG: { base: { min: -0.015, max: -0.005 }, bindings: [] },
+    decayB: { base: { min: -0.03, max: -0.018 }, bindings: [] },
+    mirror: { base: { min: 1, max: 4 }, bindings: [] },
+    mirrorMix: { base: { min: 0.1, max: 0.3 }, bindings: [] },
+    bloom: { base: { min: 0.25, max: 0.5 }, bindings: [{ feature: 'bass', gain: { min: 0.1, max: 0.25 }, chance: 0.75 }] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 3 }, { scheme: 'monochrome', weight: 1 }],
+    paletteSat: { min: 0.7, max: 0.95 },
+    paletteVal: { min: 0.55, max: 0.85 },
+    paletteBgVal: { min: 0.005, max: 0.02 },
+    waveModes: [{ mode: 'off', weight: 4 }, { mode: 'line', weight: 1 }],
+    emitterScale: { min: 0.6, max: 1.1 },
+    emitterGain: { min: 1.1, max: 1.6 },
+    fluid: { base: { min: 0.55, max: 0.9 }, bindings: [] },
+    liquidMix: { base: { min: 0.25, max: 0.5 }, bindings: [] },
   },
 };
 
@@ -900,6 +1610,43 @@ function sampleWaveform(rng: Rng, template: ArchetypeTemplate): WaveformConfig {
   };
 }
 
+/** Materialise a q-slot recipe into the concrete QSlot stored on a config. */
+function sampleQSlot(rng: Rng, spec: QSlotSpec): QSlot {
+  const out: QSlot = { base: sampleNum(rng, spec.base) };
+  if (spec.name) out.name = spec.name;
+  if (spec.lfo) {
+    const amp = spec.lfo.amp ? sampleNum(rng, spec.lfo.amp) : undefined;
+    out.lfo = { rate: sampleNum(rng, spec.lfo.rate), shape: spec.lfo.shape };
+    if (amp !== undefined) out.lfo.amp = amp;
+  }
+  if (spec.smooth) out.smooth = sampleNum(rng, spec.smooth);
+  if (spec.bindings && spec.bindings.length > 0) {
+    const bindings: Binding[] = [];
+    for (const b of spec.bindings) {
+      const p = b.chance ?? 1;
+      if (!rng.bool(p)) continue;
+      const bind: Binding = { feature: b.feature, gain: sampleNum(rng, b.gain) };
+      if (b.curve) bind.curve = b.curve;
+      bindings.push(bind);
+    }
+    if (bindings.length > 0) out.bindings = bindings;
+  }
+  return out;
+}
+
+/**
+ * The list of optional new-primitive channels we sample onto the config when
+ * the template provides a spec. Kept central so generate(), mutate(), and the
+ * distinctness tooling all see the same surface.
+ */
+const NEW_PRIMITIVE_KEYS = [
+  'radialZoom', 'radialRotate', 'radialSwirl', 'radialDecay',
+  'decayR', 'decayG', 'decayB',
+  'centreX', 'centreY',
+  'echoZoom', 'echoRotate', 'echoAlpha', 'echoFlipX', 'echoFlipY',
+] as const;
+type NewPrimitiveKey = (typeof NEW_PRIMITIVE_KEYS)[number];
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -932,10 +1679,15 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
   const palette = generatePalette(rng, template);
 
   // Derived RNG: existing shared seed codes must keep their exact look, so the
-  // new fluid channels must NOT consume draws from the main rng sequence.
+  // new fluid/dye channels must NOT consume draws from the main rng sequence.
   const fluidRng = new Rng(hashSeed(`${code}::fluid`));
   const fluid = sampleChannel(fluidRng, template.fluid);
   const vorticity = sampleChannel(fluidRng, template.vorticity);
+  // Dye channels also live on a derived stream so shared seeds keep their
+  // pre-dye look exactly when liquidMix happens to sample to 0.
+  const dyeRng = new Rng(hashSeed(`${code}::dye`));
+  const liquidMix = sampleChannel(dyeRng, template.liquidMix);
+  const dyeDissipation = sampleChannel(dyeRng, template.dyeDissipation);
 
   const config: OperatorConfig = {
     version: 1,
@@ -955,6 +1707,8 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     flowY: sampleChannel(rng, template.flowY),
     fluid,
     vorticity,
+    liquidMix,
+    dyeDissipation,
     spinFromSection: template.spinFromSection,
     waveform: sampleWaveform(rng, template),
     palette,
@@ -967,6 +1721,30 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     const set = rng.pick(template.mirrorSets);
     // Defensive copy — configs are JSON, callers may serialize/mutate.
     config.mirrorSet = set.slice();
+  }
+
+  // ── New primitives (plan §2.1–§2.5). All on derived RNG streams so they
+  // never disturb the main-channel draws above; existing seed→config mappings
+  // for the original six archetypes stay stable per-channel even as we add
+  // new look-defining knobs. (The archetype *list* itself grew, which is what
+  // moves seeds 42/1337 to different looks — see the deliberate golden
+  // regeneration in scripts/eviland-operators-test.mjs.)
+  if (template.qSlots && template.qSlots.length > 0) {
+    const qRng = new Rng(hashSeed(`${code}::q`));
+    const slots: QSlot[] = [];
+    const max = Math.min(8, template.qSlots.length);
+    for (let i = 0; i < max; i++) slots.push(sampleQSlot(qRng, template.qSlots[i]!));
+    config.q = slots;
+  }
+
+  // One derived stream per family keeps the diff between archetypes clean
+  // (channels that aren't templated stay genuinely absent — evalConfig's
+  // default-base path then produces the neutral value).
+  const primRng = new Rng(hashSeed(`${code}::prim`));
+  const configRec = config as unknown as Record<string, unknown>;
+  for (const key of NEW_PRIMITIVE_KEYS) {
+    const spec = (template as ArchetypeTemplate)[key];
+    if (spec) configRec[key] = sampleChannel(primRng, spec);
   }
 
   return { config, seed: code };
@@ -998,9 +1776,30 @@ const SAFE_RANGES: Record<string, SafeRange> = {
   flowY: { min: -0.009, max: 0.009 },
   fluid: { min: 0, max: 1 },
   vorticity: { min: 0, max: 30 },
+  liquidMix: { min: 0, max: 1 },
+  dyeDissipation: { min: -0.3, max: 0.05 },
   bloom: { min: 0, max: 1.1 },
   emitterScale: { min: 0.3, max: 2.8 },
   emitterGain: { min: 0.1, max: 2.3 },
+  // Plan §2.2–§2.5 new primitives. Mutate ranges sit comfortably inside the
+  // evalConfig hard clamps so audio drive can still push past mutate's drift
+  // without ever exiting the safe envelope. Keeping mutate's emergence safe
+  // matters because the Director invokes it both at section start and during
+  // intra-section drift.
+  radialZoom:   { min: -0.35, max: 0.35 },
+  radialRotate: { min: -0.1,  max: 0.1 },
+  radialSwirl:  { min: -0.45, max: 0.45 },
+  radialDecay:  { min: -0.07, max: 0.07 },
+  decayR:       { min: -0.07, max: 0.07 },
+  decayG:       { min: -0.07, max: 0.07 },
+  decayB:       { min: -0.07, max: 0.07 },
+  centreX:      { min: 0.22,  max: 0.78 },
+  centreY:      { min: 0.22,  max: 0.78 },
+  echoZoom:     { min: -0.45, max: 0.45 },
+  echoRotate:   { min: -0.45, max: 0.45 },
+  echoAlpha:    { min: 0,     max: 0.85 },
+  echoFlipX:    { min: 0,     max: 1 },
+  echoFlipY:    { min: 0,     max: 1 },
 };
 
 function clampSafe(key: keyof typeof SAFE_RANGES, v: number): number {
@@ -1066,6 +1865,8 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
   next.flowY = mutateChannel(rng, 'flowY', next.flowY, a);
   next.fluid = mutateChannel(rng, 'fluid', next.fluid, a);
   next.vorticity = mutateChannel(rng, 'vorticity', next.vorticity, a);
+  next.liquidMix = mutateChannel(rng, 'liquidMix', next.liquidMix, a);
+  next.dyeDissipation = mutateChannel(rng, 'dyeDissipation', next.dyeDissipation, a);
   next.bloom = mutateChannel(rng, 'bloom', next.bloom, a);
 
   // Waveform: jitter scalars, occasionally flip mode (rare; modes are characterful).
@@ -1082,6 +1883,45 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
 
   next.emitterScale = clampSafe('emitterScale', next.emitterScale + rng.gaussian(0, 0.2) * a);
   next.emitterGain = clampSafe('emitterGain', next.emitterGain + rng.gaussian(0, 0.2) * a);
+
+  // ── Mutate the §2.1–§2.5 primitives only when present. Drift respects
+  // archetype identity: a tunnel that DOESN'T template echo never grows one
+  // mid-drift; an inkwell that DOES template decayB lingering only nudges
+  // around that bias. Each clamped via its SAFE_RANGE.
+  const nextRec = next as unknown as Record<string, unknown>;
+  for (const key of NEW_PRIMITIVE_KEYS) {
+    const ch = nextRec[key] as Channel | undefined;
+    if (ch) nextRec[key] = mutateChannel(rng, key, ch, a);
+  }
+  // Q-slots: jitter scalar bases + LFO rates/amps. Shapes are characterful and
+  // stay; bindings stay so a slot keeps reading the same features. Smooth
+  // coefficient drifts in [0, 0.99].
+  if (next.q && next.q.length > 0) {
+    next.q = next.q.map((s) => {
+      const slot: QSlot = { ...s };
+      slot.base = s.base + rng.gaussian(0, 1) * a * 0.15;
+      if (s.lfo) {
+        slot.lfo = { ...s.lfo };
+        slot.lfo.rate = Math.max(0.05, s.lfo.rate + rng.gaussian(0, 1) * a * 0.1);
+        if (s.lfo.amp !== undefined) {
+          slot.lfo.amp = Math.max(0, Math.min(2, s.lfo.amp + rng.gaussian(0, 1) * a * 0.1));
+        }
+      }
+      if (s.smooth !== undefined) {
+        slot.smooth = Math.max(0, Math.min(0.99, s.smooth + rng.gaussian(0, 1) * a * 0.1));
+      }
+      // bindings: copy with light gain jitter, like mutateChannel does.
+      if (s.bindings && s.bindings.length > 0) {
+        slot.bindings = s.bindings.map((b) => {
+          const gainScale = Math.max(Math.abs(b.gain), 0.001);
+          const out: Binding = { feature: b.feature, gain: b.gain + rng.gaussian(0, 1) * a * gainScale * 0.4 };
+          if (b.curve) out.curve = b.curve;
+          return out;
+        });
+      }
+      return slot;
+    });
+  }
 
   // Palette mutation is rarer — palette is the most identity-defining field
   // and we don't want every nudge to lose the look's colour family.
@@ -1116,11 +1956,3 @@ export function decode(code: string): OperatorConfig | null {
   return generate(state).config;
 }
 
-// ---------------------------------------------------------------------------
-// Convenience: classic fallback (kept exported so callers can ask for "the
-// canonical Eviland look" without importing two modules).
-// ---------------------------------------------------------------------------
-
-export function classic(): OperatorConfig {
-  return defaultConfig();
-}

@@ -8,6 +8,7 @@ import { spectralArtDataUrl } from '@shared/spectral-art';
 import { PrevIcon, NextIcon, StopIcon, PlayPauseIcon, ShuffleIcon, RepeatIcon } from './TransportIcons';
 import { ScrubBar } from './ScrubBar';
 import { ArtistLink, AlbumLink } from './EntityLink';
+import { SignalPathBadge } from './SignalPathBadge';
 
 export function Transport(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
@@ -120,17 +121,20 @@ export function Transport(): JSX.Element {
                 '— no track loaded — choose something from your library —'
               )}
             </div>
-            <div className="lcd-text text-[11px]" style={{ color: 'var(--ink-2)' }}>
+            <div className="lcd-text flex items-center gap-2 text-[11px]" style={{ color: 'var(--ink-2)' }}>
               {playbackError ? (
                 <span data-newamp-playback-error style={{ color: 'var(--error)' }}>
                   {playbackError}
                 </span>
               ) : (
                 <>
-                  {current ? playbackCodecLabel(current.path) : 'AUDIO'}
-                  {current && current.bitrate ? `  ${Math.round(current.bitrate / 1000)} kbps` : '  --'}
-                  {current && current.sampleRate ? `  ·  ${(current.sampleRate / 1000).toFixed(1)} kHz` : ''}
-                  {current && current.year ? `  ·  ${current.year}` : ''}
+                  <span>
+                    {current ? playbackCodecLabel(current.path) : 'AUDIO'}
+                    {current && current.bitrate ? `  ${Math.round(current.bitrate / 1000)} kbps` : '  --'}
+                    {current && current.sampleRate ? `  ·  ${(current.sampleRate / 1000).toFixed(1)} kHz` : ''}
+                    {current && current.year ? `  ·  ${current.year}` : ''}
+                  </span>
+                  <SignalPathBadge />
                 </>
               )}
             </div>
