@@ -35,7 +35,7 @@ function writeDismissed(viewId: string): void {
 /**
  * Inline onboarding card that appears the first time a user opens a view.
  * Dismissed state persists per viewId so once the user understands what
- * Discover / Mixes / Living Tags / Sonic Atlas are, the card stays hidden.
+ * Discover / Mixes / Living Tags are, the card stays hidden.
  *
  * Renders nothing once dismissed, so it's safe to mount at the top of any
  * view without affecting the steady-state layout.

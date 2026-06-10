@@ -114,7 +114,7 @@ assert.match(mainSource, /app\.setPath\('sessionData'/, 'packaged app should iso
 assert.match(mainSource, /disk-cache-dir/, 'packaged app should route Chromium disk cache to the isolated session data path');
 assert.match(mainSource, /NEWAMP_DISABLE_HARDWARE_ACCELERATION/, 'packaged app should retain an explicit software-rendering switch');
 assert.match(mainSource, /NEWAMP_ENABLE_HARDWARE_ACCELERATION/, 'packaged app should retain an explicit hardware-acceleration opt-in');
-assert.match(mainSource, /const forceSoftwareRendering = !forceHardwareAcceleration;/, 'packaged app should use stable software rendering unless hardware is explicitly enabled');
+assert.match(mainSource, /const gpuForcedOff = process.env.NEWAMP_DISABLE_HARDWARE_ACCELERATION === '1';/, 'packaged app should run on the GPU by default with an explicit opt-out');
 assert.match(mainSource, /applySoftwareRenderingSwitches\(smokeMode \? 'smoke' : 'normal'\)/, 'software rendering should be the normal launch fallback and smoke-safe');
 assert.match(mainSource, /MediaPlayPause/, 'global media shortcuts should use Electron accelerator names that do not crash bootstrap');
 assert.match(mainSource, /crashReporter\.start\(\{\s*uploadToServer:\s*false\s*\}\)/, 'packaged app should collect local crash dumps without uploading them');

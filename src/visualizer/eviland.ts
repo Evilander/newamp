@@ -34,7 +34,7 @@
 
 import type { EvilandFrame } from './eviland-audio';
 import { evalConfig, createDynamics, defaultConfig, type OperatorConfig } from './eviland-operators';
-import { createFluidSim, fluidForcesFromFrame, type FluidSim } from './eviland-fluid';
+import { createFluidSim, fluidForcesFromFrame, dyeDissipationFromFrame, type FluidSim } from './eviland-fluid';
 
 export interface EvilandPalette {
   accent: [number, number, number]; // each channel 0..1
@@ -117,7 +117,7 @@ precision highp float;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_prev;
-uniform float u_decay;
+uniform vec3  u_decay;       // plan §2.3 per-channel RGB decay
 uniform float u_warpAmp;
 uniform float u_warpScale;
 uniform vec2  u_flow;
@@ -132,6 +132,13 @@ uniform float u_mirror;      // segment count (0 = off; 2..8 active)
 uniform float u_mirrorMix;   // 0..1 blend between unfolded and folded sample
 uniform sampler2D u_velocity; // stable-fluids sim velocity (RG16F, UV/s)
 uniform float u_fluid;       // sim influence, premultiplied by dt CPU-side (0 = off)
+// Plan §2.2 radial warp profile gains (multiply radius² for per-pixel character).
+uniform float u_zoomRadGain;
+uniform float u_rotateRadGain;
+uniform float u_swirlRadGain;
+uniform float u_decayRadGain;
+// Plan §2.4 centre offset (default vec2(0.5)). Clamped CPU-side to [0.2,0.8].
+uniform vec2  u_centre;
 ${NOISE_GLSL}
 
 const float TAU = 6.28318530718;
@@ -167,19 +174,28 @@ vec2 kaleidoFold(vec2 p, float segments){
 
 void main(){
   vec2 uv = v_uv;
-  vec2 centre = vec2(0.5);
+  // Plan §2.4: centre is now a moving uniform. Defaults to vec2(0.5) so the
+  // fold/zoom axis matches the pre-2.4 behaviour exactly.
+  vec2 centre = u_centre;
   vec2 p = uv - centre;
 
   // MilkDrop motion: rotate around the centre, with stronger spin near the
   // edge (swirl) so the image rolls instead of rigidly rotating.
   float radius = length(p);
-  float ang = u_rotate + u_swirl * radius;
+  float r2 = radius * radius;
+  // Plan §2.2: each transform gets a radius² gain so the channel's strength
+  // varies with distance from centre. Gains default to 0 → bit-identical to
+  // pre-2.2 (the additive term vanishes everywhere).
+  float zoomEff = u_zoom + u_zoomRadGain * r2;
+  float rotEff = u_rotate + u_rotateRadGain * r2;
+  float swirlEff = u_swirl + u_swirlRadGain * r2;
+  float ang = rotEff + swirlEff * radius;
   float ca = cos(ang); float sa = sin(ang);
   p = mat2(ca, -sa, sa, ca) * p;
 
   // Zoom: multiply by inverse zoom so positive u_zoom pulls UV inward
   // (trails appear to march OUT from the centre as a tunnel rush).
-  float invZ = 1.0 / (1.0 + u_zoom);
+  float invZ = 1.0 / (1.0 + zoomEff);
   p *= invZ;
 
   // Kaleidoscope fold — optional. When u_mirror >= 2 we blend in a folded
@@ -207,7 +223,11 @@ void main(){
 
   // Hue cycle: shift colour every frame so trails drift across the palette.
   prev = rotateHue(prev, u_hueCycle);
-  prev *= u_decay;
+  // Plan §2.3: per-RGB decay. u_decay is a vec3; default = (d,d,d) reproduces
+  // the scalar decay exactly. Plan §2.2 radial decay bias adds r²-scaled gain
+  // before clamp so the trail length can change with distance from centre.
+  vec3 decayRGB = clamp(u_decay + vec3(u_decayRadGain * r2), vec3(0.65), vec3(0.99));
+  prev *= decayRGB;
   o = vec4(prev, 1.0);
 }`;
 
@@ -471,6 +491,55 @@ void main(){
   o = vec4(s / 12.0, 1.0);
 }`;
 
+// Plan §2.6 identity blit — copies a texture into the bound FBO with no math.
+// Used to capture the field snapshot at the start of a crossfade. Cheap one-
+// off; allocates no per-frame work when no transition is in flight.
+const BLIT_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o;
+uniform sampler2D u_src;
+void main(){ o = texture(u_src, v_uv); }`;
+
+// Plan §2.5 video-echo pass. Reads the previous frame's field, samples it at a
+// zoom/rotation/flip offset, and writes that into a separate echo target. The
+// composite then blends echo on top of the live field with `u_echoAlpha`. The
+// echo's prev-frame state is kept in the echo target itself so it feeds back
+// from frame to frame (the "video echo" repeat). When alpha=0 we skip the
+// entire pass and the FBO is never allocated, so default behaviour matches
+// today byte-for-byte.
+const ECHO_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o;
+uniform sampler2D u_field;    // current live field (post-swap)
+uniform sampler2D u_prevEcho; // last frame's echo target (feedback)
+uniform float u_zoom;
+uniform float u_rot;
+uniform float u_flipX;        // 0 or 1
+uniform float u_flipY;        // 0 or 1
+uniform float u_feedback;     // how much of last echo bleeds in (≈0.55)
+uniform vec2  u_centre;
+void main(){
+  vec2 uv = v_uv;
+  vec2 p = uv - u_centre;
+  // Optional flip — mirrors the echo through the centre axis.
+  if (u_flipX > 0.5) p.x = -p.x;
+  if (u_flipY > 0.5) p.y = -p.y;
+  float ca = cos(u_rot);
+  float sa = sin(u_rot);
+  p = mat2(ca, -sa, sa, ca) * p;
+  float invZ = 1.0 / (1.0 + u_zoom);
+  p *= invZ;
+  vec2 src = clamp(p + u_centre, 0.001, 0.999);
+  vec3 fieldC = texture(u_field, uv).rgb;
+  vec3 echoC = texture(u_prevEcho, src).rgb * u_feedback;
+  // Echo target keeps the bright field + decayed feedback so the repeat is
+  // visible as ghost trails fading over multiple frames.
+  vec3 outC = fieldC * 0.92 + echoC;
+  o = vec4(outC, 1.0);
+}`;
+
 // Final composite: map the field through a palette ramp (bg → accent → light)
 // so the image has REAL COLOUR not a brightness-to-white ramp; mix bloom in at
 // reduced weight; chromatic aberration on snare+hat only; ACES tone-map +
@@ -481,9 +550,15 @@ in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_field;
 uniform sampler2D u_bloom;
+uniform sampler2D u_dye;     // simulated-fluid dye (RGBA16F)
+uniform sampler2D u_echo;    // video-echo target (plan §2.5)
+uniform sampler2D u_snapshot;// pre-fade field snapshot (plan §2.6)
 uniform float u_bloomIntensity;
 uniform float u_aberration; // 0 off .. 1 strong
 uniform float u_saturation; // 0..1 (1 = full, 0 = monochrome)
+uniform float u_liquidMix;   // 0 dye invisible (legacy look) .. 1 dye-dominant
+uniform float u_echoAlpha;   // 0 = echo pass off (plan §2.5)
+uniform float u_snapshotMix; // 0 = no crossfade in flight; 1 = full from-snapshot
 uniform vec3  u_bg;
 uniform vec3  u_accent;
 uniform vec3  u_dark;
@@ -522,11 +597,52 @@ void main(){
   fieldC.g = texture(u_field, uv).g;
   fieldC.b = texture(u_field, uv - dir * amt * 1.3).b;
 
+  // Plan §2.6 field-buffer crossfade. When the Director starts a fade the
+  // renderer snapshots the field into u_snapshot; this mix smoothly walks
+  // from the FROM look's frozen field over to the TO look's live one,
+  // killing the mid-fade tear caused by discrete-channel snapping (mirrorSet,
+  // waveMode). When no fade is in flight u_snapshotMix=0 → no-op.
+  if (u_snapshotMix > 0.0) {
+    vec3 snap = texture(u_snapshot, uv).rgb;
+    fieldC = mix(fieldC, snap, clamp(u_snapshotMix, 0.0, 1.0));
+  }
+
+  // Plan §2.5 video-echo composite. Default alpha=0 = no echo, no FBO touch.
+  // The echo target keeps a self-feeding decayed copy so trails repeat
+  // visibly. Blended on top of the field BEFORE palette ramp + bloom so the
+  // echo participates in tone-mapping like a real feedback layer would.
+  if (u_echoAlpha > 0.0) {
+    vec3 echoC = texture(u_echo, uv).rgb;
+    fieldC = mix(fieldC, echoC, clamp(u_echoAlpha, 0.0, 0.9));
+  }
+
   // Intensity drives the palette ramp; chroma from the field tints it so the
   // hue-cycled feedback shows through as colour drift instead of being lost.
   float intensity = clamp(dot(fieldC, vec3(0.34, 0.42, 0.24)), 0.0, 1.4);
   vec3 chroma = (fieldC + 1e-4) / (max(max(fieldC.r, fieldC.g), fieldC.b) + 0.05);
   vec3 colour = paletteRamp(intensity, chroma);
+
+  // Eviland Liquid: the simulated dye is the picture. At u_liquidMix = 0
+  // the dye contribution is exactly zero and the composite is byte-identical
+  // (in spirit) to the pre-dye look — every existing archetype keeps its
+  // exact output. At u_liquidMix = 1 the palette ramp is fully replaced by
+  // the dye color (with a gentle floor mixed back in for unlit regions so
+  // empty zones aren't pitch black). Sampling happens BEFORE bloom/aberration
+  // so bloom still glows on the brightest dye streaks.
+  if (u_liquidMix > 0.0) {
+    vec3 dye = texture(u_dye, uv).rgb;
+    // Saturate via tanh-ish: dye stays bright but never blows past ~1 without
+    // tone-mapping help. Keeps the silence floor visible (low values pass
+    // through almost linearly).
+    vec3 dyeSat = dye / (1.0 + 0.35 * dye);
+    // Floor: at high liquidMix we still want a faint palette wash in quiet
+    // regions instead of dead black, so the empty parts read as a tinted
+    // canvas, not a void. Weight by ramp's accent so the archetype palette
+    // is the substrate even at liquidMix=1.
+    vec3 floorCol = u_accent * 0.08;
+    vec3 dyeFull = max(dyeSat, floorCol);
+    colour = mix(colour, dyeFull, clamp(u_liquidMix, 0.0, 1.0));
+  }
 
   // Soft additive bloom on top — at HALF the previous weight so highlights
   // glow rather than clip the whole frame white.
@@ -640,6 +756,16 @@ function makeEmitter(): Emitter {
   return { x: 0, y: 0, baseRadius: 0.2, age: 0, lifespan: 0, r: 1, g: 1, b: 1, aspectAdjust: 1, kind: 0, jitter: 0, thickness: 0.06, intensity: 1 };
 }
 
+/**
+ * Per-channel decay clamp (plan §2.3). The base scalar is already clamped to
+ * [0.78, 0.97] by evalConfig; per-channel biases are at most ±0.08 each, so
+ * the sum can fall into [0.70, 1.05]. Re-clamp here to [0.70, 0.99] so the
+ * shader's outer guard stays untriggered and channel imbalance can't blow up.
+ */
+function clampDecayChannel(v: number): number {
+  return v < 0.70 ? 0.70 : v > 0.99 ? 0.99 : v;
+}
+
 // ---------------------------------------------------------------------------
 // Factory.
 // ---------------------------------------------------------------------------
@@ -685,9 +811,6 @@ export function createEvilandRenderer(
   // CPU-side so the shader's u_fluid is a plain magnitude.
   const FLUID_ADVECT_SCALE = 0.9;
 
-  const quadProg = link(gl, QUAD_VERT, THRESHOLD_FRAG); // placeholder — replaced below per-program
-  if (quadProg) gl.deleteProgram(quadProg);
-
   const fieldProg = link(gl, QUAD_VERT, FIELD_FRAG);
   const emitterProg = link(gl, EMITTER_VERT, EMITTER_FRAG);
   const terrainProg = link(gl, QUAD_VERT, TERRAIN_FRAG);
@@ -697,8 +820,10 @@ export function createEvilandRenderer(
   const downProg = link(gl, QUAD_VERT, KAWASE_DOWN_FRAG);
   const upProg = link(gl, QUAD_VERT, KAWASE_UP_FRAG);
   const postProg = link(gl, QUAD_VERT, POST_FRAG);
+  const echoProg = link(gl, QUAD_VERT, ECHO_FRAG);
+  const blitProg = link(gl, QUAD_VERT, BLIT_FRAG);
 
-  if (!fieldProg || !emitterProg || !terrainProg || !spectrumProg || !waveProg || !thresholdProg || !downProg || !upProg || !postProg) {
+  if (!fieldProg || !emitterProg || !terrainProg || !spectrumProg || !waveProg || !thresholdProg || !downProg || !upProg || !postProg || !echoProg || !blitProg) {
     return null;
   }
   // Narrow once so the inner closures don't need null guards on every use.
@@ -711,6 +836,9 @@ export function createEvilandRenderer(
   const DOWN: WebGLProgram = downProg;
   const UP: WebGLProgram = upProg;
   const POST: WebGLProgram = postProg;
+  const ECHO: WebGLProgram = echoProg;
+  const BLIT: WebGLProgram = blitProg;
+  const blitUni = { src: gl.getUniformLocation(blitProg, 'u_src') };
 
   // Fullscreen quad: shared across all fullscreen passes.
   const quadBuf = gl.createBuffer();
@@ -760,6 +888,19 @@ export function createEvilandRenderer(
   // Bloom ping-pongs: one per pyramid level (only used at level count > 0).
   const bloomDown: Fbo[] = [];
   const bloomUp: Fbo[] = [];
+  // Plan §2.5 video-echo. Ping-pong because echo self-feeds (each frame writes
+  // into echoB after reading echoA). Allocated LAZILY on first nonzero alpha —
+  // an archetype that never sets echo never pays the ~16MB cost. Force-off on
+  // the `low` quality tier (per plan launch gate).
+  const echoEnabled = quality !== 'low';
+  let echoA: Fbo | null = null;
+  let echoB: Fbo | null = null;
+  // Plan §2.6 field-buffer snapshot. Allocated on the FIRST frame of a fade,
+  // freed when the fade settles. Off on `low` too — the projector running on
+  // a weak GPU should not double its peak RGBA16F footprint mid-fade.
+  const snapshotEnabled = quality !== 'low';
+  let fieldSnapshot: Fbo | null = null;
+  let snapshotActive = false; // we've captured a snapshot this transition
 
   let viewW = 1;
   let viewH = 1;
@@ -819,6 +960,12 @@ export function createEvilandRenderer(
     for (const f of bloomUp) disposeFbo(f);
     bloomDown.length = 0;
     bloomUp.length = 0;
+    // Plan §2.5/§2.6: if echo/snapshot FBOs exist, rebuild them at the new
+    // field resolution. Allocation stays lazy on first use; resize never
+    // creates them speculatively.
+    if (echoA) { disposeFbo(echoA); echoA = makeFbo(fieldW, fieldH); }
+    if (echoB) { disposeFbo(echoB); echoB = makeFbo(fieldW, fieldH); }
+    if (fieldSnapshot) { disposeFbo(fieldSnapshot); fieldSnapshot = makeFbo(fieldW, fieldH); snapshotActive = false; }
     let bw = Math.max(8, Math.floor(viewW / 2));
     let bh = Math.max(8, Math.floor(viewH / 2));
     for (let i = 0; i < bloomLevels; i++) {
@@ -868,6 +1015,21 @@ export function createEvilandRenderer(
     mirrorMix: gl.getUniformLocation(fieldProg, 'u_mirrorMix'),
     velocity: gl.getUniformLocation(fieldProg, 'u_velocity'),
     fluid: gl.getUniformLocation(fieldProg, 'u_fluid'),
+    zoomRadGain: gl.getUniformLocation(fieldProg, 'u_zoomRadGain'),
+    rotateRadGain: gl.getUniformLocation(fieldProg, 'u_rotateRadGain'),
+    swirlRadGain: gl.getUniformLocation(fieldProg, 'u_swirlRadGain'),
+    decayRadGain: gl.getUniformLocation(fieldProg, 'u_decayRadGain'),
+    centre: gl.getUniformLocation(fieldProg, 'u_centre'),
+  };
+  const echoUni = {
+    field: gl.getUniformLocation(echoProg, 'u_field'),
+    prevEcho: gl.getUniformLocation(echoProg, 'u_prevEcho'),
+    zoom: gl.getUniformLocation(echoProg, 'u_zoom'),
+    rot: gl.getUniformLocation(echoProg, 'u_rot'),
+    flipX: gl.getUniformLocation(echoProg, 'u_flipX'),
+    flipY: gl.getUniformLocation(echoProg, 'u_flipY'),
+    feedback: gl.getUniformLocation(echoProg, 'u_feedback'),
+    centre: gl.getUniformLocation(echoProg, 'u_centre'),
   };
   const spectrumUni = {
     bands: gl.getUniformLocation(spectrumProg, 'u_bands'),
@@ -906,9 +1068,15 @@ export function createEvilandRenderer(
   const postUni = {
     field: gl.getUniformLocation(postProg, 'u_field'),
     bloom: gl.getUniformLocation(postProg, 'u_bloom'),
+    dye: gl.getUniformLocation(postProg, 'u_dye'),
+    echo: gl.getUniformLocation(postProg, 'u_echo'),
+    snapshot: gl.getUniformLocation(postProg, 'u_snapshot'),
     bloomIntensity: gl.getUniformLocation(postProg, 'u_bloomIntensity'),
     aberration: gl.getUniformLocation(postProg, 'u_aberration'),
     saturation: gl.getUniformLocation(postProg, 'u_saturation'),
+    liquidMix: gl.getUniformLocation(postProg, 'u_liquidMix'),
+    echoAlpha: gl.getUniformLocation(postProg, 'u_echoAlpha'),
+    snapshotMix: gl.getUniformLocation(postProg, 'u_snapshotMix'),
     bg: gl.getUniformLocation(postProg, 'u_bg'),
     accent: gl.getUniformLocation(postProg, 'u_accent'),
     dark: gl.getUniformLocation(postProg, 'u_dark'),
@@ -1191,10 +1359,20 @@ export function createEvilandRenderer(
     // Runs BEFORE the fluid step because the sim needs dyn.vorticity/dyn.fluid.
     evalConfig(currentConfig, frame, sectionSeed, dyn);
 
-    // ---- PASS 0: stable-fluids velocity step. The sim binds its own FBOs/
-    // programs, so it runs before the field pass establishes its state; the
-    // renderer's dt is passed as-is (the sim clamps internally).
-    if (fluid) fluid.step(dt, fluidForcesFromFrame(frame), { vorticity: dyn.vorticity, dissipation: 0.985 });
+    // ---- PASS 0: stable-fluids velocity + dye step. The sim binds its own
+    // FBOs/programs, so it runs before the field pass establishes its state;
+    // the renderer's dt is passed as-is (the sim clamps internally). Dye
+    // dissipation is silence-gated (dyeDissipationFromFrame) plus the active
+    // config's bias so an archetype can let dye linger longer or drain it.
+    if (fluid) {
+      const baseDyeDiss = dyeDissipationFromFrame(frame) + dyn.dyeDissipation;
+      const dyeDiss = baseDyeDiss < 0.6 ? 0.6 : baseDyeDiss > 1 ? 1 : baseDyeDiss;
+      fluid.step(dt, fluidForcesFromFrame(frame), {
+        vorticity: dyn.vorticity,
+        dissipation: 0.985,
+        dyeDissipation: dyeDiss,
+      });
+    }
 
     // ---- PASS 1: feedback field (advect prev → fieldB) ----
     gl.bindFramebuffer(gl.FRAMEBUFFER, fieldB.fbo);
@@ -1215,7 +1393,13 @@ export function createEvilandRenderer(
     gl.uniform1i(fieldUni.velocity, 1);
     gl.uniform1f(fieldUni.fluid, velTex ? dyn.fluid * FLUID_ADVECT_SCALE * dt : 0);
     gl.activeTexture(gl.TEXTURE0);
-    gl.uniform1f(fieldUni.decay, dyn.decay);
+    // Plan §2.3: per-RGB decay. dyn.decay + dyn.decayR/G/B biases. Clamped
+    // CPU-side to the GPU-safe envelope so a runaway audio gain can't push
+    // past the shader's outer clamp band.
+    const dr = clampDecayChannel(dyn.decay + dyn.decayR);
+    const dg = clampDecayChannel(dyn.decay + dyn.decayG);
+    const db = clampDecayChannel(dyn.decay + dyn.decayB);
+    gl.uniform3f(fieldUni.decay, dr, dg, db);
     gl.uniform1f(fieldUni.warpAmp, dyn.warpAmp);
     gl.uniform1f(fieldUni.warpScale, dyn.warpScale);
     gl.uniform2f(fieldUni.flow, dyn.flowX, dyn.flowY);
@@ -1228,6 +1412,14 @@ export function createEvilandRenderer(
     gl.uniform1f(fieldUni.swirl, dyn.swirl);
     gl.uniform1f(fieldUni.mirror, dyn.mirror);
     gl.uniform1f(fieldUni.mirrorMix, dyn.mirrorMix);
+    // Plan §2.2/§2.4: radial gains + centre offset. Defaults are 0 / (0.5,0.5)
+    // → bit-identical to pre-§2.2 (the additive radial term vanishes and the
+    // centre uniform matches the hardcoded vec2(0.5)).
+    gl.uniform1f(fieldUni.zoomRadGain, dyn.radialZoom);
+    gl.uniform1f(fieldUni.rotateRadGain, dyn.radialRotate);
+    gl.uniform1f(fieldUni.swirlRadGain, dyn.radialSwirl);
+    gl.uniform1f(fieldUni.decayRadGain, dyn.radialDecay);
+    gl.uniform2f(fieldUni.centre, dyn.centreX, dyn.centreY);
     drawFullscreen();
 
     // ---- PASS 2: terrain (bass horizon) drawn into the field ----
@@ -1317,6 +1509,75 @@ export function createEvilandRenderer(
     fieldA = fieldB;
     fieldB = tmp;
 
+    // ---- PASS 3d: video-echo (plan §2.5). Ping-pong self-feeding pass that
+    // samples the live field through a zoom/rotate/flip transform and blends
+    // it with last frame's echo. Lazily allocated on first nonzero alpha;
+    // never present on `low` quality. Per plan: ~16MB at 1080p.
+    if (echoEnabled && dyn.echoAlpha > 0.001) {
+      if (!echoA || !echoB) {
+        echoA = makeFbo(fieldW, fieldH);
+        echoB = makeFbo(fieldW, fieldH);
+      }
+      if (echoA && echoB) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, echoB.fbo);
+        gl.viewport(0, 0, fieldW, fieldH);
+        gl.disable(gl.BLEND);
+        gl.useProgram(ECHO);
+        bindFullscreenQuad(ECHO);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, fieldA.tex);
+        gl.uniform1i(echoUni.field, 0);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, echoA.tex);
+        gl.uniform1i(echoUni.prevEcho, 1);
+        gl.uniform1f(echoUni.zoom, dyn.echoZoom);
+        gl.uniform1f(echoUni.rot, dyn.echoRotate);
+        gl.uniform1f(echoUni.flipX, dyn.echoFlipX);
+        gl.uniform1f(echoUni.flipY, dyn.echoFlipY);
+        gl.uniform1f(echoUni.feedback, 0.55);
+        gl.uniform2f(echoUni.centre, dyn.centreX, dyn.centreY);
+        drawFullscreen();
+        // Swap echo ping-pong so next frame reads the result we just wrote.
+        const et = echoA;
+        echoA = echoB;
+        echoB = et;
+        gl.activeTexture(gl.TEXTURE0); // reset before bloom pass binds u_src
+      }
+    } else if (echoA || echoB) {
+      // Alpha fell to zero — free the FBOs so a one-shot echo doesn't keep
+      // ~16MB pinned for the rest of the song. Cheap to rebuild on next use.
+      disposeFbo(echoA); disposeFbo(echoB);
+      echoA = null; echoB = null;
+    }
+
+    // ---- PASS 3e: snapshot capture (plan §2.6). When a transition starts
+    // (dyn.transition < 1 and we haven't captured yet), blit the live fieldA
+    // into fieldSnapshot. The composite then crossfades against this frozen
+    // FROM look so mid-fade discrete-channel snaps (mirrorSet, waveMode) don't
+    // tear the picture. When transition settles back to 1 the snapshot is
+    // freed. Off on `low` quality per plan launch gate.
+    if (snapshotEnabled && dyn.transition < 0.999) {
+      if (!fieldSnapshot) fieldSnapshot = makeFbo(fieldW, fieldH);
+      if (fieldSnapshot && !snapshotActive) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fieldSnapshot.fbo);
+        gl.viewport(0, 0, fieldW, fieldH);
+        gl.disable(gl.BLEND);
+        gl.useProgram(BLIT);
+        bindFullscreenQuad(BLIT);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, fieldA.tex);
+        gl.uniform1i(blitUni.src, 0);
+        drawFullscreen();
+        snapshotActive = true;
+      }
+    } else if (fieldSnapshot && snapshotActive && dyn.transition >= 0.999) {
+      // Transition settled. Free the snapshot FBO so it doesn't hold ~16MB
+      // between fades. Sub-second re-allocation is fine — fades are rare.
+      disposeFbo(fieldSnapshot);
+      fieldSnapshot = null;
+      snapshotActive = false;
+    }
+
     // ---- PASS 4: bloom pyramid (threshold → kawase down → kawase up) ----
     let bloomSrc: WebGLTexture | null = null;
     if (bloomLevels > 0 && bloomDown.length === bloomLevels && bloomUp.length === bloomLevels) {
@@ -1368,11 +1629,38 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, bloomSrc ?? fieldA.tex);
     gl.uniform1i(postUni.bloom, 1);
+    // Dye field on unit 2 — when the sim is unavailable (low tier / GPU
+    // doesn't support RGBA16F render targets) bind fieldA as a placeholder
+    // and force liquidMix to 0 below so the shader's `if (u_liquidMix > 0)`
+    // branch skips the sample entirely.
+    const dyeTex = fluid ? fluid.dyeTexture() : null;
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, dyeTex ?? fieldA.tex);
+    gl.uniform1i(postUni.dye, 2);
+    // Plan §2.5 echo source — when alpha=0 the shader skips the texture
+    // entirely, so binding fieldA as a placeholder is safe (any valid
+    // texture is fine; the sample is gated by `u_echoAlpha > 0`).
+    const echoSrcTex = echoA ? echoA.tex : fieldA.tex;
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, echoSrcTex);
+    gl.uniform1i(postUni.echo, 3);
+    // Plan §2.6 snapshot source — same trick: fall back to the live field
+    // when there's no snapshot, and gate the sample shader-side with
+    // `u_snapshotMix > 0`. snapshotMix = 1 - transition, so a freshly
+    // started fade (transition≈0) gives mix≈1 (full from-snapshot), then
+    // marches to 0 as transition→1.
+    const snapTex = fieldSnapshot ? fieldSnapshot.tex : fieldA.tex;
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, snapTex);
+    gl.uniform1i(postUni.snapshot, 4);
     // Pull bloom intensity DOWN (the post shader already halves it again);
     // bloom now glows around bright parts instead of dominating the whole frame.
     gl.uniform1f(postUni.bloomIntensity, bloomSrc ? 0.30 + bloomEnv * 0.45 : 0);
     gl.uniform1f(postUni.aberration, aberrationOn ? aberrEnv * 0.9 : 0);
     gl.uniform1f(postUni.saturation, Math.max(0.35, 1 - frame.flatness * 0.55));
+    gl.uniform1f(postUni.liquidMix, dyeTex ? dyn.liquidMix : 0);
+    gl.uniform1f(postUni.echoAlpha, echoA ? dyn.echoAlpha : 0);
+    gl.uniform1f(postUni.snapshotMix, snapshotActive && fieldSnapshot ? Math.max(0, 1 - dyn.transition) : 0);
     gl.uniform3f(postUni.bg, palette.bg[0], palette.bg[1], palette.bg[2]);
     gl.uniform3f(postUni.accent, palette.accent[0], palette.accent[1], palette.accent[2]);
     gl.uniform3f(postUni.dark, palette.dark[0], palette.dark[1], palette.dark[2]);
@@ -1399,16 +1687,25 @@ export function createEvilandRenderer(
     if (upProg) gl.deleteProgram(upProg);
     if (postProg) gl.deleteProgram(postProg);
     if (waveProg) gl.deleteProgram(waveProg);
+    if (echoProg) gl.deleteProgram(echoProg);
+    if (blitProg) gl.deleteProgram(blitProg);
     if (quadBuf) gl.deleteBuffer(quadBuf);
     if (instanceBuf) gl.deleteBuffer(instanceBuf);
     if (bandsTex) gl.deleteTexture(bandsTex);
     if (waveTex) gl.deleteTexture(waveTex);
     disposeFbo(fieldA);
     disposeFbo(fieldB);
+    disposeFbo(echoA);
+    disposeFbo(echoB);
+    disposeFbo(fieldSnapshot);
     for (const f of bloomDown) disposeFbo(f);
     for (const f of bloomUp) disposeFbo(f);
     fieldA = null;
     fieldB = null;
+    echoA = null;
+    echoB = null;
+    fieldSnapshot = null;
+    snapshotActive = false;
     bloomDown.length = 0;
     bloomUp.length = 0;
     fluid?.dispose();

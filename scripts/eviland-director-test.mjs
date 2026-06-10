@@ -81,6 +81,34 @@ const passthrough = JSON.stringify(cp?.zoom) === JSON.stringify(c1?.zoom);
 log.push(`disabled passthrough keeps set config: ${passthrough}`);
 if (!passthrough) fail('disabled director did not passthrough');
 
+// --- plan §2.6: live config carries _transition during section fades, ---
+// --- absent/1 when settled, and absent during intra-section drift ---
+{
+  const dt = createDirector({ songId: 'transition-test', enabled: true, drift: 0, rotateMs: 0 });
+  // First frame at section 0 — Director starts a fade (no prior live).
+  let c = dt.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.5 }), 16.7);
+  // Mid-fade: _transition should be set and <1.
+  let sawMid = false;
+  for (let i = 0; i < 20; i++) {
+    c = dt.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+    if (typeof c._transition === 'number' && c._transition > 0 && c._transition < 1) { sawMid = true; break; }
+  }
+  if (!sawMid) fail('Director did not stamp _transition < 1 during a section fade');
+  // Settle the fade; _transition should be undefined (the live === target fast-path).
+  for (let i = 0; i < 240; i++) c = dt.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+  if (c._transition !== undefined) fail(`settled live config must not carry _transition, got ${c._transition}`);
+  log.push('crossfade meta: _transition stamped mid-fade, absent when settled');
+
+  // Drift ON, fade settled: _transition must STILL be absent on the drift cache
+  // (drift is intra-section breathing, not a section crossfade).
+  const dd = createDirector({ songId: 'transition-drift', enabled: true, drift: 0.12, rotateMs: 0 });
+  dd.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.5 }), 16.7);
+  for (let i = 0; i < 300; i++) dd.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+  const drifted = dd.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+  if (drifted._transition !== undefined) fail(`drift cache must not carry _transition, got ${drifted._transition}`);
+  log.push('crossfade meta: drift never triggers crossfade');
+}
+
 // --- timer rotation: with no section changes, the look still rotates ---
 {
   const dr = createDirector({ songId: 'rotate-test', enabled: true, rotateMs: 20000, drift: 0 });

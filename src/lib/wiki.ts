@@ -1,4 +1,4 @@
-import { NEWAMP_REPO_USER_AGENT } from '@shared/app-version';
+import { NEWAMP_REPO_USER_AGENT } from '../../shared/app-version.ts';
 
 export function wikipediaSearchUrl(query: string): string {
   const clean = query.replace(/\s+/g, ' ').trim();

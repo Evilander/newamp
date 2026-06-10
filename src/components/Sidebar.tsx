@@ -39,7 +39,6 @@ const GROUPS: NavGroup[] = [
       { id: 'discover', label: 'Discover', icon: 'M10 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2z' },
       { id: 'mixes', label: 'Mixes', icon: 'M3 5h4l3 10h2l3-10h4M4 15h4M12 15h4' },
       { id: 'tags', label: 'Living Tags', icon: 'M3 9l7-7 8 8-7 7zM14 5a1 1 0 100 2 1 1 0 000-2z' },
-      { id: 'atlas', label: 'Sonic Atlas', icon: 'M3 3l5 3 4-2 5 2v12l-5-2-4 2-5-2zm5 3v11M12 4v12' },
     ],
   },
   {

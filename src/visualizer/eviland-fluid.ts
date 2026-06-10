@@ -30,9 +30,13 @@ export interface FluidForce {
   x: number; y: number;      // splat center, UV space
   dx: number; dy: number;    // impulse (UV/s, pre-clamped)
   radius: number;            // splat radius, UV space
+  // OPTIONAL dye splat (RGBA16F advected field). Omit for backward compat:
+  // velocity-only forces (no color/dye) keep the historical behavior intact.
+  color?: [number, number, number]; // dye RGB 0..1, premultiplied by `dye`
+  dye?: number;                     // dye intensity (additive amount, ~0..1.5)
 }
 
-export const MAX_FLUID_FORCES = 16;
+export const MAX_FLUID_FORCES = 32;
 
 const KICK_SPOKES = 6;
 const KICK_STRENGTH = 0.55;
@@ -43,7 +47,47 @@ const PAN_BIAS = 0.04;
 const INHALE_STRENGTH = 0.10;
 const INHALE_SPOKES = 4;
 
+// Per-voice dye amounts. Tuned so a busy mix reads bright without ever clipping
+// every channel to white (that produced the cream-blob complaint in eviland.ts).
+const DYE_KICK = 0.95;
+const DYE_SNARE = 0.85;
+const DYE_HAT = 0.35;
+const DYE_VOCAL = 0.55;
+const DYE_OTHER = 0.45;
+
 let snareSide = 1; // alternates per snare onset so jets trade sides
+
+// Deterministic HSV→RGB used by the seam to derive dye colors from band index.
+// Local, pure, allocation-free (writes into a caller-owned 3-tuple). Mirrors
+// the HSV math in eviland-randomizer.ts; duplicated here so eviland-fluid stays
+// dependency-free for the Node test bundle.
+function hsvToRgbInto(out: [number, number, number], h: number, s: number, v: number): void {
+  const hh = (((h % 1) + 1) % 1) * 6;
+  const i = Math.floor(hh);
+  const f = hh - i;
+  const p = v * (1 - s);
+  const q = v * (1 - s * f);
+  const t = v * (1 - s * (1 - f));
+  switch (i % 6) {
+    case 0: out[0] = v; out[1] = t; out[2] = p; return;
+    case 1: out[0] = q; out[1] = v; out[2] = p; return;
+    case 2: out[0] = p; out[1] = v; out[2] = t; return;
+    case 3: out[0] = p; out[1] = q; out[2] = v; return;
+    case 4: out[0] = t; out[1] = p; out[2] = v; return;
+    case 5: out[0] = v; out[1] = p; out[2] = q; return;
+    default: out[0] = v; out[1] = v; out[2] = v; return;
+  }
+}
+
+// Map a band index (0..23) to a hue around the palette circle. The constant
+// offset + golden-ratio step gives perceptually distinct neighbors and a
+// stable, reproducible mapping the tests can lock onto.
+function hueForBand(band: number): number {
+  // golden-ratio conjugate keeps adjacent bands visually separated even with
+  // a small palette range.
+  const phi = 0.61803398875;
+  return ((band * phi) + 0.07) % 1;
+}
 
 export function fluidForcesFromFrame(frame: EvilandFrame): FluidForce[] {
   const out: FluidForce[] = [];
@@ -54,33 +98,88 @@ export function fluidForcesFromFrame(frame: EvilandFrame): FluidForce[] {
     push({ x: 0.5, y: 0.15, dx: BASS_SHEAR * frame.bass * (frame.pan >= 0 ? 1 : -1), dy: 0, radius: 0.35 });
   }
   if (Math.abs(frame.pan) > 0.05) {
-    push({ x: 0.5, y: 0.5, dx: PAN_BIAS * frame.pan, dy: 0, radius: 0.45 });
+    // Persistent lateral current biased by stereo position; doubles as a faint
+    // ambient dye drift so quiet wide passages still show a slow color slide.
+    const colour: [number, number, number] = [0, 0, 0];
+    hsvToRgbInto(colour, 0.55 + frame.pan * 0.15, 0.5, 0.45);
+    push({
+      x: 0.5, y: 0.5, dx: PAN_BIAS * frame.pan, dy: 0, radius: 0.45,
+      color: colour, dye: 0.06 * Math.abs(frame.pan) * (0.4 + frame.width * 0.6),
+    });
   }
+
+  // Scratch tuple reused inside the loop — avoids per-onset allocations on the
+  // hot path. Each push() spreads it into a fresh array when emitting.
+  const tmp: [number, number, number] = [0, 0, 0];
 
   for (const onset of frame.onsets) {
     if (onset.group === 'kick') {
       // Radial shockwave: KICK_SPOKES outward impulses around a low-center anchor.
+      // Each spoke carries kick-band dye so the slam reads as a colored shock,
+      // not an invisible push. Hue drifts with pan so left/right kicks differ.
       const ax = 0.5 + frame.pan * 0.2;
       const ay = 0.3;
       const s = KICK_STRENGTH * onset.intensity;
+      hsvToRgbInto(tmp, hueForBand(onset.band) + frame.pan * 0.08, 0.85, 1);
+      const kr = tmp[0], kg = tmp[1], kb = tmp[2];
+      // Bottom-center dye splat (large radius, sustained by frame.bass so a
+      // sustained kick-and-bass passage stays warm and the field doesn't go
+      // gray between hits). dx=dy=0 so velocity is unchanged.
+      push({
+        x: ax, y: ay, dx: 0, dy: 0, radius: 0.22 + frame.bass * 0.06,
+        color: [kr, kg, kb], dye: DYE_KICK * (0.6 + frame.bass * 0.6) * onset.intensity,
+      });
       for (let i = 0; i < KICK_SPOKES; i++) {
         const a = (i / KICK_SPOKES) * Math.PI * 2;
-        push({ x: ax + Math.cos(a) * 0.04, y: ay + Math.sin(a) * 0.04, dx: Math.cos(a) * s, dy: Math.sin(a) * s, radius: 0.12 });
+        push({
+          x: ax + Math.cos(a) * 0.04, y: ay + Math.sin(a) * 0.04,
+          dx: Math.cos(a) * s, dy: Math.sin(a) * s, radius: 0.12,
+          color: [kr, kg, kb], dye: DYE_KICK * 0.4 * onset.intensity,
+        });
       }
     } else if (onset.group === 'snare') {
-      // One sharp angled jet, alternating sides.
+      // One sharp angled jet, alternating sides. Bright, near-white dye so the
+      // snare reads as a flash even against a colored backdrop.
       snareSide = -snareSide;
       const jx = 0.5 + snareSide * 0.22;
       const s = SNARE_STRENGTH * onset.intensity;
-      push({ x: jx, y: 0.55, dx: -snareSide * s * 0.8, dy: s * 0.5, radius: 0.06 });
+      hsvToRgbInto(tmp, hueForBand(onset.band) + 0.5, 0.25, 1);
+      push({
+        x: jx, y: 0.55, dx: -snareSide * s * 0.8, dy: s * 0.5, radius: 0.06,
+        color: [tmp[0], tmp[1], tmp[2]], dye: DYE_SNARE * onset.intensity,
+      });
     } else if (onset.group === 'hat') {
       // Top-edge micro-turbulence: two small lateral jitters (deterministic from band).
+      // Sparkle dye on each — small radius keeps it hat-shaped, not curtained.
       const s = HAT_STRENGTH * onset.intensity;
       const seedX = 0.2 + ((onset.band * 37) % 13) / 20;
-      push({ x: seedX, y: 0.85, dx: s, dy: -s * 0.3, radius: 0.03 });
-      push({ x: 1 - seedX, y: 0.88, dx: -s, dy: -s * 0.2, radius: 0.03 });
+      hsvToRgbInto(tmp, hueForBand(onset.band), 0.55, 1);
+      const hr = tmp[0], hg = tmp[1], hb = tmp[2];
+      push({
+        x: seedX, y: 0.85, dx: s, dy: -s * 0.3, radius: 0.03,
+        color: [hr, hg, hb], dye: DYE_HAT * onset.intensity,
+      });
+      push({
+        x: 1 - seedX, y: 0.88, dx: -s, dy: -s * 0.2, radius: 0.03,
+        color: [hr, hg, hb], dye: DYE_HAT * onset.intensity,
+      });
+    } else {
+      // vocal / bass / other groups: dye-only splat at a deterministic emitter
+      // position. dx=dy=0 keeps velocity untouched (the envelope baselines
+      // above already cover the spatial truth for these voices), so the snare
+      // test's "exactly one off-center jet" guarantee is preserved.
+      // band index → vertical slot (matches eviland's emitter convention);
+      // stereo pan biases x. Hue from band → busy mix reads as a song-aware
+      // palette, not a mush.
+      const py = onset.band / 23;
+      const px = 0.5 + frame.pan * 0.25 + ((onset.band * 19) % 11 - 5) / 110;
+      const amt = onset.group === 'vocal' ? DYE_VOCAL : DYE_OTHER;
+      hsvToRgbInto(tmp, hueForBand(onset.band), 0.7, 0.95);
+      push({
+        x: px, y: py, dx: 0, dy: 0, radius: 0.07 + onset.intensity * 0.05,
+        color: [tmp[0], tmp[1], tmp[2]], dye: amt * onset.intensity,
+      });
     }
-    // vocal/bass-group onsets: covered by the envelope baselines; no extra splat.
   }
 
   // Anticipation: just before a confident beat, the scene inhales (inward pull).
@@ -96,6 +195,20 @@ export function fluidForcesFromFrame(frame: EvilandFrame): FluidForce[] {
   return out;
 }
 
+/**
+ * Silence-gated dye dissipation. When the frame is quiet, the dye field decays
+ * fast so the surface settles to near-black (hits read as hits). When loud,
+ * dissipation rises toward 1 (no decay) so motion lingers. Pure, deterministic,
+ * Node-testable — the renderer feeds the returned value to FluidSim.step.
+ */
+export function dyeDissipationFromFrame(frame: EvilandFrame): number {
+  // Curve: at energy 0 we hold ~0.94 (heavy decay), at energy 1 ~0.995 (almost
+  // none). Tuned so a sustained loud passage keeps dye coherent for a few
+  // seconds but never piles up to white.
+  const e = frame.energy < 0 ? 0 : frame.energy > 1 ? 1 : frame.energy;
+  return 0.94 + e * 0.055;
+}
+
 // ---------------------------------------------------------------------------
 // GL solver.
 // ---------------------------------------------------------------------------
@@ -106,10 +219,20 @@ export interface FluidSimOptions {
   pressureIterations: number; // Jacobi iterations per step
 }
 
+export interface FluidStepParams {
+  vorticity: number;
+  /** Velocity dissipation per step (existing). */
+  dissipation: number;
+  /** Dye dissipation per step. >=1 = no decay, ~0.93 = heavy. Default 0.985. */
+  dyeDissipation?: number;
+}
+
 export interface FluidSim {
-  step(dt: number, forces: FluidForce[], params: { vorticity: number; dissipation: number }): void;
+  step(dt: number, forces: FluidForce[], params: FluidStepParams): void;
   /** Current velocity texture (RG16F, UV-space units per second); null after dispose(). */
   velocityTexture(): WebGLTexture | null;
+  /** Current dye texture (RGBA16F, premultiplied color); null after dispose() or if dye disabled. */
+  dyeTexture(): WebGLTexture | null;
   resize(width: number, height: number): void;
   dispose(): void;
 }
@@ -240,6 +363,43 @@ void main(){
   o = vec4((L + R + B + T - div) * 0.25, 0.0, 0.0, 1.0);
 }`;
 
+// Dye advection — semi-Lagrangian like velocity, but the sampled value is the
+// RGBA dye field and the *velocity* texture drives the backtrace. Dissipation
+// is multiplicative per step so the silence gate (driven from the audio frame)
+// can shorten or lengthen dye memory smoothly.
+const DYE_ADVECT_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o;
+uniform sampler2D u_velocity;
+uniform sampler2D u_dye;
+uniform float u_dt;
+uniform float u_dissipation;
+void main(){
+  vec2 coord = v_uv - texture(u_velocity, v_uv).xy * u_dt;
+  vec4 d = texture(u_dye, coord) * u_dissipation;
+  o = d;
+}`;
+
+// Dye splat — same Gaussian profile as the velocity splat, with the impulse
+// being premultiplied RGB. Alpha is set from the dye amount so consumers can
+// compose-over without re-reading the brightness.
+const DYE_SPLAT_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o;
+uniform sampler2D u_dye;
+uniform vec2 u_point;
+uniform vec3 u_color;   // dye RGB, pre-multiplied by amount
+uniform float u_amount; // dye scalar (additive scale)
+uniform float u_radius;
+void main(){
+  vec2 p = v_uv - u_point;
+  float g = exp(-dot(p, p) / (u_radius * u_radius));
+  vec4 prev = texture(u_dye, v_uv);
+  o = vec4(prev.rgb + u_color * u_amount * g, max(prev.a, u_amount * g));
+}`;
+
 // Pass 7 — projection: u' = u − ∇p with the same half-rdx = 0.5 stencil as
 // the divergence pass (consistent operators ⇒ div(u') ≈ 0). This is what
 // makes the motion read as liquid: momentum has to go *around*, not vanish.
@@ -361,8 +521,13 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
   const divergenceProg = link(gl, QUAD_VERT, DIVERGENCE_FRAG);
   const pressureProg = link(gl, QUAD_VERT, PRESSURE_FRAG);
   const gradientProg = link(gl, QUAD_VERT, GRADIENT_FRAG);
-  const allProgs = [advectProg, splatProg, curlProg, vorticityProg, divergenceProg, pressureProg, gradientProg];
-  if (!advectProg || !splatProg || !curlProg || !vorticityProg || !divergenceProg || !pressureProg || !gradientProg) {
+  // Dye programs: advection and splat. The dye field is a coupled, advected
+  // RGBA carrying the per-voice colors mapped in fluidForcesFromFrame; the
+  // renderer composites it into the visible output via a `liquidMix` channel.
+  const dyeAdvectProg = link(gl, QUAD_VERT, DYE_ADVECT_FRAG);
+  const dyeSplatProg = link(gl, QUAD_VERT, DYE_SPLAT_FRAG);
+  const allProgs = [advectProg, splatProg, curlProg, vorticityProg, divergenceProg, pressureProg, gradientProg, dyeAdvectProg, dyeSplatProg];
+  if (!advectProg || !splatProg || !curlProg || !vorticityProg || !divergenceProg || !pressureProg || !gradientProg || !dyeAdvectProg || !dyeSplatProg) {
     for (const p of allProgs) if (p) gl.deleteProgram(p);
     return null;
   }
@@ -420,6 +585,21 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     velocity: gl.getUniformLocation(gradientProg, 'u_velocity'),
     texelSize: gl.getUniformLocation(gradientProg, 'u_texelSize'),
   };
+  const dyeAdvectUni = {
+    aPos: gl.getAttribLocation(dyeAdvectProg, 'a_pos'),
+    velocity: gl.getUniformLocation(dyeAdvectProg, 'u_velocity'),
+    dye: gl.getUniformLocation(dyeAdvectProg, 'u_dye'),
+    dt: gl.getUniformLocation(dyeAdvectProg, 'u_dt'),
+    dissipation: gl.getUniformLocation(dyeAdvectProg, 'u_dissipation'),
+  };
+  const dyeSplatUni = {
+    aPos: gl.getAttribLocation(dyeSplatProg, 'a_pos'),
+    dye: gl.getUniformLocation(dyeSplatProg, 'u_dye'),
+    point: gl.getUniformLocation(dyeSplatProg, 'u_point'),
+    color: gl.getUniformLocation(dyeSplatProg, 'u_color'),
+    amount: gl.getUniformLocation(dyeSplatProg, 'u_amount'),
+    radius: gl.getUniformLocation(dyeSplatProg, 'u_radius'),
+  };
 
   // Sampler→unit assignments are static; set them once.
   gl.useProgram(advectProg); gl.uniform1i(advectUni.velocity, 0);
@@ -429,6 +609,8 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
   gl.useProgram(divergenceProg); gl.uniform1i(divergenceUni.velocity, 0);
   gl.useProgram(pressureProg); gl.uniform1i(pressureUni.pressure, 0); gl.uniform1i(pressureUni.divergence, 1);
   gl.useProgram(gradientProg); gl.uniform1i(gradientUni.pressure, 0); gl.uniform1i(gradientUni.velocity, 1);
+  gl.useProgram(dyeAdvectProg); gl.uniform1i(dyeAdvectUni.velocity, 0); gl.uniform1i(dyeAdvectUni.dye, 1);
+  gl.useProgram(dyeSplatProg); gl.uniform1i(dyeSplatUni.dye, 0);
 
   // ---- Render targets ----
   let width = Math.max(2, Math.floor(opts.width));
@@ -440,6 +622,7 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     curl: Target;                     // R16F
     divergence: Target;               // R16F
     pressA: Target; pressB: Target;   // pressure ping-pong, R16F
+    dyeA: Target; dyeB: Target;       // dye ping-pong, RGBA16F
   }
 
   function createTargets(w: number, h: number): Targets | null {
@@ -449,17 +632,24 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     const divergence = makeTarget(w, h, gl.R16F, gl.RED);
     const pressA = makeTarget(w, h, gl.R16F, gl.RED);
     const pressB = makeTarget(w, h, gl.R16F, gl.RED);
-    if (!velA || !velB || !curl || !divergence || !pressA || !pressB) {
+    // Dye is RGBA16F — float so it composes with the existing RGBA16F field
+    // pipeline without quantization seams. Same EXT_color_buffer_float gate as
+    // velocity above; if RGBA16F fails creation we abort and fall back.
+    const dyeA = makeTarget(w, h, gl.RGBA16F, gl.RGBA);
+    const dyeB = makeTarget(w, h, gl.RGBA16F, gl.RGBA);
+    if (!velA || !velB || !curl || !divergence || !pressA || !pressB || !dyeA || !dyeB) {
       disposeTarget(velA); disposeTarget(velB); disposeTarget(curl);
       disposeTarget(divergence); disposeTarget(pressA); disposeTarget(pressB);
+      disposeTarget(dyeA); disposeTarget(dyeB);
       return null;
     }
-    return { velA, velB, curl, divergence, pressA, pressB };
+    return { velA, velB, curl, divergence, pressA, pressB, dyeA, dyeB };
   }
 
   function disposeTargets(t: Targets): void {
     disposeTarget(t.velA); disposeTarget(t.velB); disposeTarget(t.curl);
     disposeTarget(t.divergence); disposeTarget(t.pressA); disposeTarget(t.pressB);
+    disposeTarget(t.dyeA); disposeTarget(t.dyeB);
   }
 
   let targets = createTargets(width, height);
@@ -471,6 +661,9 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
   // Velocity ping-pong: read from velRead, write to velWrite, then swap.
   let velRead = targets.velA;
   let velWrite = targets.velB;
+  // Dye ping-pong follows the same pattern.
+  let dyeRead = targets.dyeA;
+  let dyeWrite = targets.dyeB;
 
   // ---- Per-pass plumbing ----
 
@@ -495,11 +688,16 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     velRead = velWrite;
     velWrite = tmp;
   }
+  function swapDye(): void {
+    const tmp = dyeRead;
+    dyeRead = dyeWrite;
+    dyeWrite = tmp;
+  }
 
   function step(
     dt: number,
     forces: FluidForce[],
-    params: { vorticity: number; dissipation: number },
+    params: FluidStepParams,
   ): void {
     if (!targets) return;
     // Clamp dt so tab-switch hitches can't fling the field and high-Hz
@@ -507,6 +705,9 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     const stepDt = Math.min(1 / 30, Math.max(1 / 240, dt));
     const tx = 1 / width;
     const ty = 1 / height;
+    // Default dye dissipation is just under 1 — most callers (the renderer)
+    // override this from dyeDissipationFromFrame so silence drains the field.
+    const dyeDiss = params.dyeDissipation ?? 0.985;
 
     // The solver owns blend/viewport/framebuffer state for its passes; the
     // renderer re-establishes its own viewport per pass as eviland already does.
@@ -523,13 +724,18 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     swapVel();
 
     // 2) Force splats — one fullscreen draw per impulse, ping-ponging so each
-    // splat reads the previous result (additive without blending).
+    // splat reads the previous result (additive without blending). Velocity
+    // and dye are coupled: velocity uses (dx, dy); dye splats are emitted in
+    // a separate loop below so each pass can stay bound to a single program.
     const forceCount = Math.min(forces.length, MAX_FLUID_FORCES);
     if (forceCount > 0) {
       gl.useProgram(splatProg);
       bindQuad(splatUni.aPos);
       for (let i = 0; i < forceCount; i++) {
         const f = forces[i];
+        // Skip dye-only entries (dx=dy=0): they don't move the fluid, only
+        // tint it. Saves a no-op fullscreen draw on every busy frame.
+        if (f.dx === 0 && f.dy === 0) continue;
         gl.uniform2f(splatUni.point, f.x, f.y);
         gl.uniform2f(splatUni.force, f.dx, f.dy);
         gl.uniform1f(splatUni.radius, Math.max(1e-4, f.radius));
@@ -591,6 +797,40 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     drawTo(velWrite);
     swapVel();
 
+    // 8) Dye advection by the (now divergence-free) velocity. Runs AFTER the
+    // pressure projection so the dye is carried by the same field the renderer
+    // samples — color and momentum stay visually coupled.
+    gl.useProgram(dyeAdvectProg);
+    bindQuad(dyeAdvectUni.aPos);
+    gl.uniform1f(dyeAdvectUni.dt, stepDt);
+    gl.uniform1f(dyeAdvectUni.dissipation, dyeDiss);
+    bindTex(0, velRead.tex);
+    bindTex(1, dyeRead.tex);
+    drawTo(dyeWrite);
+    swapDye();
+
+    // 9) Dye splats — one fullscreen draw per force that carries color. We
+    // ping-pong reads/writes additively (color is summed in the fragment) so
+    // no GL blend state is needed. Forces without a color field are velocity-
+    // only and skipped here (backward compat with the pre-dye seam).
+    if (forceCount > 0) {
+      gl.useProgram(dyeSplatProg);
+      bindQuad(dyeSplatUni.aPos);
+      for (let i = 0; i < forceCount; i++) {
+        const f = forces[i];
+        const color = f.color;
+        const amt = f.dye;
+        if (!color || !amt || amt <= 0) continue;
+        gl.uniform2f(dyeSplatUni.point, f.x, f.y);
+        gl.uniform3f(dyeSplatUni.color, color[0], color[1], color[2]);
+        gl.uniform1f(dyeSplatUni.amount, amt);
+        gl.uniform1f(dyeSplatUni.radius, Math.max(1e-4, f.radius));
+        bindTex(0, dyeRead.tex);
+        drawTo(dyeWrite);
+        swapDye();
+      }
+    }
+
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.activeTexture(gl.TEXTURE0);
   }
@@ -598,6 +838,10 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
   function velocityTexture(): WebGLTexture | null {
     if (!targets) return null; // disposed — never hand back a deleted texture
     return velRead.tex;
+  }
+  function dyeTexture(): WebGLTexture | null {
+    if (!targets) return null;
+    return dyeRead.tex;
   }
 
   function resize(w: number, h: number): void {
@@ -615,6 +859,8 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     targets = next;
     velRead = targets.velA;
     velWrite = targets.velB;
+    dyeRead = targets.dyeA;
+    dyeWrite = targets.dyeB;
     width = nw;
     height = nh;
   }
@@ -628,5 +874,5 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     gl.deleteBuffer(quadBuf);
   }
 
-  return { step, velocityTexture, resize, dispose };
+  return { step, velocityTexture, dyeTexture, resize, dispose };
 }

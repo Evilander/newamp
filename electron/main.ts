@@ -2555,6 +2555,16 @@ function uiVisualizerProbeSource(): string {
             JSON.stringify({ stageRect: { width: stageRect.width, height: stageRect.height }, viewport }),
         );
       }
+      // Preset buttons live inside the collapsible picker panel; picking a
+      // preset closes it, so reopen via the toolbar toggle before each pick.
+      const openPresetPanel = async () => {
+        if (document.querySelector('[data-newamp-viz-preset-button]')) return;
+        const toggle = await waitFor('preset picker toggle', () =>
+          document.querySelector('[data-newamp-viz-preset-picker-toggle]'),
+        );
+        toggle.click();
+      };
+      await openPresetPanel();
       const spectrumButton = await waitFor('Spectrum visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'spectrum'),
@@ -2584,6 +2594,7 @@ function uiVisualizerProbeSource(): string {
         stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="spectrum"]'),
       );
       const render = await waitFor('nonblank visualizer frame', () => sampleCanvas(canvas), 8000);
+      await openPresetPanel();
       const plasmaButton = await waitFor('Plasma Grid visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'plasma-grid'),
@@ -2596,6 +2607,7 @@ function uiVisualizerProbeSource(): string {
         stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="plasma-grid"]'),
       );
       const plasmaRender = await waitFor('nonblank plasma-grid visualizer frame', () => sampleCanvas(plasmaCanvas), 8000);
+      await openPresetPanel();
       const ribbonButton = await waitFor('Neon Ribbons visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'neon-ribbons'),
@@ -2608,6 +2620,7 @@ function uiVisualizerProbeSource(): string {
         stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="neon-ribbons"]'),
       );
       const ribbonRender = await waitFor('nonblank neon-ribbons visualizer frame', () => sampleCanvas(ribbonCanvas), 8000);
+      await openPresetPanel();
       const orbitalButton = await waitFor('Orbital Rings visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'orbital-rings'),
@@ -2620,6 +2633,7 @@ function uiVisualizerProbeSource(): string {
         stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="orbital-rings"]'),
       );
       const orbitalRender = await waitFor('nonblank orbital-rings visualizer frame', () => sampleCanvas(orbitalCanvas), 8000);
+      await openPresetPanel();
       const auroraButton = await waitFor('Aurora visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'aurora'),
@@ -2639,6 +2653,7 @@ function uiVisualizerProbeSource(): string {
       // production check is "does butterchurn boot without the CSP error
       // that previously bombed it?" — we verify that by capturing console
       // errors and asserting no eval-policy failures fire.
+      await openPresetPanel();
       const milkdropButton = await waitFor('Milkdrop visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'butterchurn'),
@@ -2721,6 +2736,7 @@ function uiVisualizerProbeSource(): string {
       const analyserAlive = analyserFftSamples.some((s) => s > 0);
       const milkdropAlive = pixelsAlive || analyserAlive;
       // Now Liquid Mercury — the new 1.5.2 preset. Verify it renders too.
+      await openPresetPanel();
       const mercuryButton = await waitFor('Liquid Mercury visualizer preset button', () =>
         Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
           .find((item) => item.getAttribute('data-newamp-viz-preset-button') === 'liquid-mercury'),
@@ -2733,66 +2749,47 @@ function uiVisualizerProbeSource(): string {
         stage.querySelector('[data-newamp-visualizer-canvas][data-newamp-visualizer-mode="liquid-mercury"]'),
       );
       const mercuryRender = await waitFor('nonblank liquid-mercury visualizer frame', () => sampleCanvas(mercuryCanvas), 8000);
-      const qualityButton = await waitFor('4K quality toggle', () =>
-        document.querySelector('[data-newamp-viz-quality-button]'),
-      );
-      qualityButton.click();
+      // The per-control toolbar buttons were consolidated into the Settings
+      // panel; each control's contract is now its keyboard shortcut, so the
+      // probe drives the same path a user's fingers do.
+      const pressKey = (key) => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+      };
+      pressKey('q');
       await waitFor('4K visualizer quality state', () =>
         stage.getAttribute('data-newamp-visualizer-quality') === '4k',
       );
       const appliedQuality = stage.getAttribute('data-newamp-visualizer-quality');
-      const performanceButton = await waitFor('low-end visualizer toggle', () =>
-        document.querySelector('[data-newamp-viz-performance-button]'),
-      );
-      performanceButton.click();
+      pressKey('l');
       await waitFor('low-end visualizer state', () =>
         stage.getAttribute('data-newamp-visualizer-performance') === 'low' &&
         stage.getAttribute('data-newamp-visualizer-quality') === 'auto',
       );
-      performanceButton.click();
+      pressKey('l');
       await waitFor('balanced visualizer state', () =>
         stage.getAttribute('data-newamp-visualizer-performance') === 'balanced',
       );
-      const artButton = await waitFor('art overlay toggle', () =>
-        document.querySelector('[data-newamp-viz-art-button]'),
-      );
-      if (stage.getAttribute('data-newamp-visualizer-art') === 'hidden') artButton.click();
+      if (stage.getAttribute('data-newamp-visualizer-art') === 'hidden') pressKey('a');
       await waitFor('art pulse armed state', () =>
         ['armed', 'pulse'].includes(stage.getAttribute('data-newamp-visualizer-art') || ''),
       );
-      const screenButton = await waitFor('native fullscreen visualizer toggle', () =>
-        document.querySelector('[data-newamp-viz-screen-button]'),
-      );
-      screenButton.click();
-      await waitFor('native fullscreen state', () =>
-        stage.getAttribute('data-newamp-native-fullscreen') === 'true',
-      );
-      screenButton.click();
-      const cleanButton = await waitFor('clean visualizer toggle', () =>
-        document.querySelector('[data-newamp-viz-clean-button]'),
-      );
-      cleanButton.click();
+      // Native (OS) fullscreen is not observable under the smoke's hidden
+      // window: the renderer flips optimistically but main pushes the real
+      // window state back, which can never be fullscreen with windowsHide.
+      // The F-key wiring is covered by the keyboard-shortcuts smoke instead.
+      pressKey('h');
       await waitFor('clean visualizer chrome state', () =>
         stage.getAttribute('data-newamp-visualizer-chrome') === 'clean',
       );
-      const paletteButton = await waitFor('visualizer palette toggle', () =>
-        document.querySelector('[data-newamp-viz-palette-button]'),
-      );
-      paletteButton.click();
+      pressKey('p');
       await waitFor('visualizer palette state', () =>
         stage.getAttribute('data-newamp-visualizer-palette') !== 'theme',
       );
-      const reactivityButton = await waitFor('visualizer reactivity toggle', () =>
-        document.querySelector('[data-newamp-viz-reactivity-button]'),
-      );
-      reactivityButton.click();
+      pressKey('r');
       await waitFor('visualizer reactivity state', () =>
         stage.getAttribute('data-newamp-visualizer-reactivity') !== 'punch',
       );
-      const autoVjButton = await waitFor('auto VJ toggle', () =>
-        document.querySelector('[data-newamp-viz-auto-vj-button]'),
-      );
-      autoVjButton.click();
+      pressKey('v');
       await waitFor('auto VJ enabled state', () =>
         stage.getAttribute('data-newamp-visualizer-auto-vj') === 'on',
       );

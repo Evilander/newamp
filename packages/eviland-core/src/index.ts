@@ -50,6 +50,9 @@ export {
   type PaletteConfig,
   type RGB,
   type FrameLike,
+  type QSlot,
+  type QLfo,
+  type LfoShape,
 } from './eviland-operators';
 
 // ── Deterministic RNG + shareable seed codes ───────────────────────────────

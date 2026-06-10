@@ -47,48 +47,163 @@ export type EnergyTier = 'calm' | 'steady' | 'lift' | 'drop' | 'climax';
 /**
  * Per-tier archetype weights. Each tier biases toward archetypes that suit its
  * character. Every archetype keeps a small non-zero weight so the Director
- * never feels locked into one look family within a tier.
+ * never feels locked into one look family within a tier — and every tier hits
+ * ≥6 archetypes with meaningful weight so the morphing rotation reads as
+ * preset-grade variety, not a single look family per energy band.
+ *
+ * Liquid's original weights are preserved (calm 3, steady 3, lift 2, drop 1,
+ * climax 0.8) so the liquid look keeps its established air time across tiers.
  */
 const TIER_ARCHETYPE_WEIGHTS: Record<EnergyTier, Record<Archetype, number>> = {
   calm: {
+    // Original six — liquid weight preserved.
     nebula: 5,
     liquid: 3,
     kaleidoscope: 1,
     tunnel: 0.5,
     lattice: 0.3,
     strobe: 0.1,
+    // New: dreamy, slow, dark-field archetypes belong here.
+    vortex: 0.4,
+    inkwell: 4,
+    supernova: 0.2,
+    cathedral: 3,
+    phosphor: 2,
+    ribbonfall: 1.5,
+    pulsar: 0.3,
+    mosaic: 0.6,
+    deepfield: 4,
+    solarflare: 0.3,
+    glasshouse: 1.5,
+    stormfront: 0.3,
+    heartbeat: 3.5,
+    carousel: 0.8,
+    firefly: 4,
+    tidal: 2,
+    prism: 0.6,
+    echochamber: 1.5,
+    wireframe: 2,
+    emberveil: 3.5,
   },
   steady: {
+    // Original six — liquid weight preserved.
     liquid: 3,
     kaleidoscope: 3,
     nebula: 2,
     tunnel: 2,
     lattice: 1.5,
     strobe: 0.5,
+    // New: archetypes with continuous motion belong here.
+    vortex: 2,
+    inkwell: 2,
+    supernova: 0.6,
+    cathedral: 1.5,
+    phosphor: 2.5,
+    ribbonfall: 3,
+    pulsar: 1.2,
+    mosaic: 3,
+    deepfield: 1.5,
+    solarflare: 1.5,
+    glasshouse: 3,
+    stormfront: 1,
+    heartbeat: 1.5,
+    carousel: 3,
+    firefly: 2,
+    tidal: 3,
+    prism: 1.5,
+    echochamber: 3,
+    wireframe: 2,
+    emberveil: 2,
   },
   lift: {
+    // Original six — liquid weight preserved.
     tunnel: 3,
     kaleidoscope: 3,
     liquid: 2,
     lattice: 2,
     nebula: 1,
     strobe: 1,
+    // New: anticipation/build archetypes belong here.
+    vortex: 3,
+    inkwell: 0.8,
+    supernova: 1.5,
+    cathedral: 0.8,
+    phosphor: 1.5,
+    ribbonfall: 1.5,
+    pulsar: 4,
+    mosaic: 3,
+    deepfield: 0.8,
+    solarflare: 1.8,
+    glasshouse: 1.5,
+    stormfront: 1.5,
+    heartbeat: 0.6,
+    carousel: 2,
+    firefly: 0.5,
+    tidal: 1.5,
+    prism: 3,
+    echochamber: 3,
+    wireframe: 1,
+    emberveil: 0.8,
   },
   drop: {
+    // Original six — liquid weight preserved.
     kaleidoscope: 4,
     tunnel: 4,
     lattice: 3,
     strobe: 2,
     liquid: 1,
     nebula: 0.5,
+    // New: hits/explosions belong here.
+    vortex: 4,
+    inkwell: 0.4,
+    supernova: 4,
+    cathedral: 0.5,
+    phosphor: 0.8,
+    ribbonfall: 0.6,
+    pulsar: 3,
+    mosaic: 2,
+    deepfield: 0.3,
+    solarflare: 4,
+    glasshouse: 1,
+    stormfront: 3.5,
+    heartbeat: 0.4,
+    carousel: 1.5,
+    firefly: 0.2,
+    tidal: 1,
+    prism: 2.5,
+    echochamber: 2,
+    wireframe: 0.6,
+    emberveil: 0.5,
   },
   climax: {
+    // Original six — liquid weight preserved.
     strobe: 4,
     kaleidoscope: 4,
     tunnel: 3,
     lattice: 2,
     liquid: 0.8,
     nebula: 0.4,
+    // New: loudest, most-explosive archetypes belong here.
+    vortex: 3.5,
+    inkwell: 0.3,
+    supernova: 4.5,
+    cathedral: 0.6,
+    phosphor: 0.6,
+    ribbonfall: 0.4,
+    pulsar: 3,
+    mosaic: 2.5,
+    deepfield: 0.2,
+    solarflare: 4,
+    glasshouse: 0.8,
+    stormfront: 4,
+    heartbeat: 0.3,
+    carousel: 1.2,
+    firefly: 0.2,
+    tidal: 0.6,
+    prism: 3,
+    echochamber: 1.5,
+    wireframe: 0.4,
+    emberveil: 0.3,
   },
 };
 
@@ -398,6 +513,8 @@ export function createDirector(opts: DirectorOptions = {}): Director {
         const tri = phase < 0.5 ? phase * 2 : (1 - phase) * 2; // 0..1..0
         const t = tri * tri * (3 - 2 * tri); // smoothstep ease
         driftCache = lerpConfig(target, driftTarget, t);
+        // Drift is NOT a section transition — leave `_transition` undefined so
+        // the renderer's field-buffer crossfade (plan §2.6) stays disarmed.
       }
       live = driftCache;
     } else if (fade <= 0) {
@@ -405,6 +522,10 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     } else {
       const t = fade * fade * (3 - 2 * fade);
       live = lerpConfig(from, target, t);
+      // Section fade — stamp the eased transition value so the renderer
+      // captures a field snapshot at fade start and crossfades against it.
+      // Falls back to undefined the instant fade reaches 1 (see above).
+      live._transition = t;
     }
   }
 

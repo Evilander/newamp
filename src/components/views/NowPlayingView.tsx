@@ -14,6 +14,7 @@ import { aiAssistSummary } from '../../lib/aiAssist';
 import { musicEntitySearchText, wikipediaSearchUrl } from '../../lib/wiki';
 import { ScoreRating } from '../ScoreRating';
 import { LinerNotesPanel } from '../LinerNotesPanel';
+import { FormatBadges } from '../FormatBadges';
 import { classifyAudioQuality } from '@shared/audio-quality';
 
 type SideTab = 'on-air' | 'album' | 'lyrics';
@@ -873,13 +874,12 @@ function TrackInfoHeader({
             </>
           ) : null}
         </div>
-        <div className="mt-[8px] flex flex-wrap gap-[6px]">
+        <div className="mt-[8px] flex flex-wrap items-center gap-[6px]">
           {current.genre && <Tag accent>{current.genre}</Tag>}
-          {codecHint && <Tag>{codecHint}</Tag>}
+          <FormatBadges track={current} density="comfortable" verbose />
           {current.sampleRate && (
             <Tag>{(current.sampleRate / 1000).toFixed(1)} khz</Tag>
           )}
-          {current.bitrate && <Tag>{Math.round(current.bitrate / 1000)} kbps</Tag>}
           <button
             type="button"
             onClick={onLove}

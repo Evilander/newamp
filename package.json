@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "A Winamp-inspired modern desktop music player for macOS, Windows, and Linux. Your local library, your rules, no streaming required. Features Resonance \u2014 the whole UI reacts to your live audio \u2014 plus NewAmp Wrapped, a GPU particle visualizer + real MilkDrop, four UI shells, shape-changing deck skins, perceptual 0-200% volume, 0-100 decimal track scoring, and a magazine-style home. GPU-accelerated and tuned to stay light on weak hardware.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
@@ -79,7 +79,6 @@
     "smoke:spectral-art": "npm run build:electron && node scripts/spectral-art-smoke.mjs",
     "smoke:radio-brain": "npm run build:electron && node scripts/radio-brain-smoke.mjs",
     "smoke:perf-bench": "npm run build:electron && node scripts/perf-bench-smoke.mjs",
-    "smoke:sonic-atlas": "npm run build:electron && node scripts/sonic-atlas-smoke.mjs",
     "smoke:seed-vibe": "npm run build:electron && node scripts/seed-vibe-smoke.mjs",
     "smoke:album-random-sort": "npm run build:electron && node scripts/album-random-sort-smoke.mjs",
     "smoke:session": "npm run build:electron && node scripts/session-smoke.mjs",
@@ -180,6 +179,7 @@
     "release:gate": "node scripts/release-gate.mjs",
     "release:gate:local": "node scripts/release-gate.mjs --allow-unsigned --ack-manual --real-library",
     "smoke:eviland": "electron scripts/eviland-smoke.mjs",
+    "smoke:eviland-arch-distinct": "electron scripts/eviland-archetype-distinctness-capture.mjs",
     "smoke:detached": "node scripts/detached-viz-smoke.mjs"
   },
   "dependencies": {

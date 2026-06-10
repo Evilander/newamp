@@ -60,7 +60,6 @@ export type ViewMode =
   | 'wrapped'
   | 'profile'
   | 'tags'
-  | 'atlas'
   | 'podcasts'
   | 'radio'
   | 'now-playing'
