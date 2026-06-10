@@ -1,4 +1,4 @@
-import { fetchWikipediaPages, localStorageSafe, normalizeForMatch, type WikiPage } from '../lib/wiki';
+import { fetchWikipediaPages, localStorageSafe, normalizeForMatch, type WikiPage } from '../lib/wiki.ts';
 
 export interface AlbumFact {
   title: string;

@@ -23,6 +23,11 @@
 // ---------------------------------------------------------------------------
 // Audio features a binding can read. These mirror EvilandFrame's scalar fields
 // (plus a few synthesized inputs). Kept as a string union so configs are JSON.
+//
+// q1..q8 read from the preset-internal q-variable scratch (see QSlot below).
+// evalConfig computes q's FIRST every frame so any downstream channel can
+// reference them via {feature:'q1', ...}. Q-vars are NOT allowed inside other
+// q-vars (no cycles) — featureValue treats missing q's as 0 in that path.
 // ---------------------------------------------------------------------------
 export type AudioFeature =
   | 'const'
@@ -30,7 +35,8 @@ export type AudioFeature =
   | 'energy' | 'centroid' | 'flatness' | 'crest' | 'rolloff'
   | 'width' | 'pan' | 'novelty'
   | 'beatPhase' | 'beatConfidence'
-  | 'sectionSeed';
+  | 'sectionSeed'
+  | 'q1' | 'q2' | 'q3' | 'q4' | 'q5' | 'q6' | 'q7' | 'q8';
 
 /** Response shaping applied to a feature value (0..1-ish) before scaling. */
 export type Curve = 'linear' | 'quad' | 'sqrt' | 'pulse' | 'inv';
@@ -45,6 +51,45 @@ export interface Binding {
 /** A single visual channel: base value + summed bindings, optionally clamped. */
 export interface Channel {
   base: number;
+  bindings?: Binding[];
+}
+
+// ---------------------------------------------------------------------------
+// Q-variable system (preset-internal scratch + LFOs).
+//
+// A QSlot is a declarative per-frame scalar named q1..q8 (max 8 slots).
+// Each slot mixes three pieces: a constant `base`, an optional tempo-locked
+// LFO (`rate * frame.beatPhase`), and optional audio bindings. The combined
+// value can also be smoothed (EMA over previous frames) so a noisy feature
+// drives a slow scalar. Channels reference q's via {feature:'q1'..'q8'}.
+//
+// MilkDrop's q1..q8 are a programmable register file; this is the same idea
+// turned into JSON so it survives serialization. No expression language —
+// that's tracked separately (plan §2 Tier C).
+// ---------------------------------------------------------------------------
+
+export type LfoShape = 'sine' | 'tri' | 'saw' | 'square';
+
+/** A tempo-locked LFO. Phase = TAU * rate * frame.beatPhase. */
+export interface QLfo {
+  /** Cycles per beat. 1 = one full cycle per beat, 0.25 = one per bar (4/4). */
+  rate: number;
+  shape: LfoShape;
+  /** Optional amplitude (default 1) so the LFO contribution is `amp * shape(phase)`. */
+  amp?: number;
+}
+
+/** One programmable scalar. base + lfo + bindings, optionally smoothed. */
+export interface QSlot {
+  /** Optional label for introspection — not used at runtime. */
+  name?: string;
+  base: number;
+  lfo?: QLfo;
+  /**
+   * EMA coefficient applied to the previous frame's value. 0 = no smoothing,
+   * 0.9 = slow drift. Clamped to [0, 0.99].
+   */
+  smooth?: number;
   bindings?: Binding[];
 }
 
@@ -91,6 +136,19 @@ export interface OperatorConfig {
   fluid: Channel;
   /** Fluid-sim vorticity confinement strength (0..30; higher = curlier liquid). */
   vorticity: Channel;
+  /**
+   * How visible the simulated dye field is in the final composite.
+   * 0 (default) = byte-identical to pre-dye look (existing archetypes), 1 =
+   * dye dominates the picture. The 'liquid' archetype drives this toward 1
+   * so audio-reactive liquid IS the image, not just an invisible warp.
+   */
+  liquidMix: Channel;
+  /**
+   * Dye dissipation bias added to the silence-gated value from
+   * dyeDissipationFromFrame. 0 = use the audio-driven value as-is.
+   * Negative = drain dye faster than the silence gate; positive = let it linger.
+   */
+  dyeDissipation: Channel;
 
   /**
    * Kaleidoscope segment count. If `mirrorSet` is present the count is chosen
@@ -116,6 +174,50 @@ export interface OperatorConfig {
   bloom: Channel;      // extra bloom drive
   emitterScale: number; // global emitter radius multiplier
   emitterGain: number;  // global emitter intensity multiplier
+
+  // ── Programmable q-variables (plan §2.1). Up to 8; reference as 'q1'..'q8'.
+  /** Preset-internal scratch slots evaluated FIRST each frame. */
+  q?: QSlot[];
+
+  // ── Radial warp profile (plan §2.2). Each is a small gain on `radius*radius`
+  // (radius in [0..√2/2] from screen centre) so the channel's effect scales
+  // with distance from `centre`. All optional, default 0 → byte-identical to
+  // pre-2.2 behaviour. The shader applies `effectiveZoom = zoom + zoomRad * r²`.
+  radialZoom?: Channel;
+  radialRotate?: Channel;
+  radialSwirl?: Channel;
+  radialDecay?: Channel;
+
+  // ── Per-channel RGB decay (plan §2.3). Biases ADDED on top of base decay.
+  // Default 0 → all three channels identical (current behaviour). Letting R
+  // decay slightly slower than G/B is the classic MilkDrop "everything turns
+  // warm" feel. Clamped per-channel so the sum can't fall outside [0.78,0.97].
+  decayR?: Channel;
+  decayG?: Channel;
+  decayB?: Channel;
+
+  // ── Centre offset (plan §2.4). Replaces the hardcoded vec2(0.5) in the
+  // field warp / kaleidoscope fold. Range-clamped to [0.2, 0.8] so the fold
+  // axis never marches off-screen. Default centre 0.5,0.5 = current behaviour.
+  centreX?: Channel;
+  centreY?: Channel;
+
+  // ── Video-echo pass (plan §2.5). One extra RGBA16F FBO between field swap
+  // and bloom; alpha=0 (default) → pass skipped entirely, no FBO allocated.
+  // zoom/rotate/alpha drive the echo transform; flipX/flipY (0 or 1) mirror
+  // the echo sample. The MilkDrop "echo" signature in declarative form.
+  echoZoom?: Channel;
+  echoRotate?: Channel;
+  echoAlpha?: Channel;
+  echoFlipX?: Channel;
+  echoFlipY?: Channel;
+
+  /**
+   * Transition meta — set by lerpConfig when the Director is mid-fade. The
+   * renderer reads this to drive the field-buffer crossfade (plan §2.6):
+   * <1 = transition in progress; >=1 or absent = settled. Not a channel.
+   */
+  _transition?: number;
 }
 
 /** Concrete per-frame uniform values produced by evalConfig (scratch object). */
@@ -133,6 +235,10 @@ export interface EvilandDynamics {
   flowY: number;
   fluid: number;
   vorticity: number;
+  /** 0..1 visibility of the dye field in the final composite. */
+  liquidMix: number;
+  /** Bias added to dye dissipation (final clamped to 0.6..1). */
+  dyeDissipation: number;
   waveMode: number; // 0 off, 1 line, 2 radial, 3 lissajous, 4 bars
   waveIntensity: number;
   waveThickness: number;
@@ -140,6 +246,29 @@ export interface EvilandDynamics {
   bloom: number;
   emitterScale: number;
   emitterGain: number;
+  // Q-variable scratch — q[i] is the value of slot q(i+1). Persists across
+  // frames so smoothed slots have access to their previous value (EMA state).
+  q: Float64Array;
+  // Radial warp profile gains (plan §2.2). 0 = no radial effect.
+  radialZoom: number;
+  radialRotate: number;
+  radialSwirl: number;
+  radialDecay: number;
+  // Per-channel RGB decay biases (plan §2.3). Final per-channel decay = clamp(decay + decayR/G/B).
+  decayR: number;
+  decayG: number;
+  decayB: number;
+  // Centre offset (plan §2.4). Default 0.5, 0.5; clamped to [0.2, 0.8].
+  centreX: number;
+  centreY: number;
+  // Video-echo pass (plan §2.5). alpha=0 = pass skipped.
+  echoZoom: number;
+  echoRotate: number;
+  echoAlpha: number;
+  echoFlipX: number; // 0 or 1
+  echoFlipY: number; // 0 or 1
+  /** Crossfade progress (plan §2.6). 1 = settled, <1 = mid-transition. */
+  transition: number;
 }
 
 /** Minimal shape of the audio frame evalConfig reads (subset of EvilandFrame). */
@@ -154,7 +283,12 @@ const WAVE_MODE_INDEX: Record<WaveMode, number> = {
   off: 0, line: 1, radial: 2, lissajous: 3, bars: 4,
 };
 
-function featureValue(f: AudioFeature, frame: FrameLike, sectionSeed: number): number {
+function featureValue(
+  f: AudioFeature,
+  frame: FrameLike,
+  sectionSeed: number,
+  q: Float64Array | null,
+): number {
   switch (f) {
     case 'const': return 1;
     case 'kick': return frame.kick;
@@ -173,6 +307,14 @@ function featureValue(f: AudioFeature, frame: FrameLike, sectionSeed: number): n
     case 'beatPhase': return frame.beatPhase;
     case 'beatConfidence': return frame.beatConfidence;
     case 'sectionSeed': return sectionSeed;
+    case 'q1': return q ? q[0]! : 0;
+    case 'q2': return q ? q[1]! : 0;
+    case 'q3': return q ? q[2]! : 0;
+    case 'q4': return q ? q[3]! : 0;
+    case 'q5': return q ? q[4]! : 0;
+    case 'q6': return q ? q[5]! : 0;
+    case 'q7': return q ? q[6]! : 0;
+    case 'q8': return q ? q[7]! : 0;
     default: return 0;
   }
 }
@@ -188,16 +330,66 @@ function applyCurve(v: number, curve: Curve | undefined): number {
   }
 }
 
-function evalChannel(ch: Channel, frame: FrameLike, sectionSeed: number): number {
+function evalChannel(
+  ch: Channel,
+  frame: FrameLike,
+  sectionSeed: number,
+  q: Float64Array | null,
+): number {
   let v = ch.base;
   const b = ch.bindings;
   if (b) {
     for (let i = 0; i < b.length; i++) {
       const bind = b[i]!;
-      v += applyCurve(featureValue(bind.feature, frame, sectionSeed), bind.curve) * bind.gain;
+      v += applyCurve(featureValue(bind.feature, frame, sectionSeed, q), bind.curve) * bind.gain;
     }
   }
   return v;
+}
+
+/** Optional-channel eval: missing channel resolves to `defaultBase`. */
+function evalOptional(
+  ch: Channel | undefined,
+  frame: FrameLike,
+  sectionSeed: number,
+  q: Float64Array | null,
+  defaultBase: number,
+): number {
+  if (!ch) return defaultBase;
+  return evalChannel(ch, frame, sectionSeed, q);
+}
+
+const TAU = Math.PI * 2;
+
+/** Evaluate one LFO at the current beat phase. Output in [-1, 1] before amp. */
+function evalLfo(lfo: QLfo, beatPhase: number): number {
+  // Phase locked to beatPhase * rate. Modulo to [0, 1) for triangle/saw/square
+  // shapes; sine takes the raw angle so harmonic rates (rate > 1) still cycle.
+  const phase = beatPhase * lfo.rate;
+  let v: number;
+  switch (lfo.shape) {
+    case 'sine':
+      v = Math.sin(phase * TAU);
+      break;
+    case 'tri': {
+      const p = ((phase % 1) + 1) % 1;
+      v = p < 0.5 ? p * 4 - 1 : 3 - p * 4;
+      break;
+    }
+    case 'saw': {
+      const p = ((phase % 1) + 1) % 1;
+      v = p * 2 - 1;
+      break;
+    }
+    case 'square': {
+      const p = ((phase % 1) + 1) % 1;
+      v = p < 0.5 ? 1 : -1;
+      break;
+    }
+    default:
+      v = 0;
+  }
+  return v * (lfo.amp ?? 1);
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -209,9 +401,22 @@ export function createDynamics(): EvilandDynamics {
   return {
     zoom: 0, rotate: 0, swirl: 0, hueCycle: 0, decay: 0.88, warpAmp: 0, warpScale: 2.5,
     mirror: 6, mirrorMix: 0, flowX: 0, flowY: 0, fluid: 0, vorticity: 8,
+    liquidMix: 0, dyeDissipation: 0,
     waveMode: 0, waveIntensity: 0, waveThickness: 0.01, waveScale: 0.3,
     bloom: 0, emitterScale: 1, emitterGain: 1,
+    // Q-vars + new uniforms all default to neutral (no visual change vs pre-2.1).
+    q: new Float64Array(8),
+    radialZoom: 0, radialRotate: 0, radialSwirl: 0, radialDecay: 0,
+    decayR: 0, decayG: 0, decayB: 0,
+    centreX: 0.5, centreY: 0.5,
+    echoZoom: 0, echoRotate: 0, echoAlpha: 0, echoFlipX: 0, echoFlipY: 0,
+    transition: 1,
   };
+}
+
+/** Q-var safety clamp: bound to [-8, 8] so a runaway LFO can't NaN downstream. */
+function clampQ(v: number): number {
+  return v < -8 ? -8 : v > 8 ? 8 : v;
 }
 
 /**
@@ -225,45 +430,112 @@ export function evalConfig(
   sectionSeed: number,
   out: EvilandDynamics,
 ): EvilandDynamics {
+  // ── Q-VARS FIRST (plan §2.1). Computed before any channel so downstream
+  // bindings with feature:'q1'..'q8' can read this frame's value. q's see
+  // themselves as 0 (their previous value isn't visible — only the *smoothed*
+  // tail through `smooth` carries memory). Eval order is slot index, so an
+  // earlier slot's NEW value is visible to a later slot via its q-feature.
+  const q = out.q;
+  const qConfig = config.q;
+  const slotCount = qConfig ? (qConfig.length > 8 ? 8 : qConfig.length) : 0;
+  for (let i = 0; i < slotCount; i++) {
+    const slot = qConfig![i]!;
+    // base + LFO + bindings. Bindings see the q array up to slot i (the
+    // current entry hasn't been written yet, so q[i] still holds the previous
+    // frame's value — that's intentional: it lets a slot reference its own
+    // prior value via 'q{i+1}' for hand-rolled feedback if desired).
+    let v = slot.base;
+    if (slot.lfo) v += evalLfo(slot.lfo, frame.beatPhase);
+    const b = slot.bindings;
+    if (b) {
+      for (let j = 0; j < b.length; j++) {
+        const bind = b[j]!;
+        v += applyCurve(featureValue(bind.feature, frame, sectionSeed, q), bind.curve) * bind.gain;
+      }
+    }
+    // EMA smoothing: out = smooth * prev + (1-smooth) * v.
+    const smooth = slot.smooth;
+    if (smooth && smooth > 0) {
+      const s = smooth > 0.99 ? 0.99 : smooth;
+      v = s * q[i]! + (1 - s) * v;
+    }
+    q[i] = clampQ(v);
+  }
+  // Zero the unused tail so a config that shrinks `q` doesn't leak stale slots.
+  for (let i = slotCount; i < 8; i++) q[i] = 0;
+
   // Structural-memory spin: a stable sign + base scale per section.
   const spin = config.spinFromSection ? (((Math.floor(sectionSeed * 7) % 2) === 0) ? 1 : -1) : 1;
   const hueSign = config.spinFromSection ? (sectionSeed < 0.5 ? -1 : 1) : 1;
   const sectionRotBase = config.spinFromSection ? 0.0028 * (sectionSeed * 0.5 + 0.5) : 0;
 
-  out.zoom = clamp(evalChannel(config.zoom, frame, sectionSeed), -0.12, 0.25);
-  out.rotate = spin * (sectionRotBase + evalChannel(config.rotate, frame, sectionSeed));
+  out.zoom = clamp(evalChannel(config.zoom, frame, sectionSeed, q), -0.12, 0.25);
+  out.rotate = spin * (sectionRotBase + evalChannel(config.rotate, frame, sectionSeed, q));
   out.rotate = clamp(out.rotate, -0.06, 0.06);
-  out.swirl = clamp(evalChannel(config.swirl, frame, sectionSeed), -0.25, 0.25);
-  out.hueCycle = hueSign * evalChannel(config.hueCycle, frame, sectionSeed);
+  out.swirl = clamp(evalChannel(config.swirl, frame, sectionSeed, q), -0.25, 0.25);
+  out.hueCycle = hueSign * evalChannel(config.hueCycle, frame, sectionSeed, q);
   out.hueCycle = clamp(out.hueCycle, -0.05, 0.05);
   // Decay is the most dangerous channel: too high = white-out, too low = strobe.
-  out.decay = clamp(evalChannel(config.decay, frame, sectionSeed), 0.78, 0.97);
-  out.warpAmp = clamp(evalChannel(config.warpAmp, frame, sectionSeed), 0, 0.02);
-  out.warpScale = clamp(evalChannel(config.warpScale, frame, sectionSeed), 0.5, 8);
+  out.decay = clamp(evalChannel(config.decay, frame, sectionSeed, q), 0.78, 0.97);
+  out.warpAmp = clamp(evalChannel(config.warpAmp, frame, sectionSeed, q), 0, 0.02);
+  out.warpScale = clamp(evalChannel(config.warpScale, frame, sectionSeed, q), 0.5, 8);
 
   if (config.mirrorSet && config.mirrorSet.length > 0) {
     const idx = Math.floor(sectionSeed * 13) % config.mirrorSet.length;
     out.mirror = config.mirrorSet[idx]!;
   } else {
-    out.mirror = Math.round(evalChannel(config.mirror, frame, sectionSeed));
+    out.mirror = Math.round(evalChannel(config.mirror, frame, sectionSeed, q));
   }
   out.mirror = clamp(out.mirror, 1, 16);
-  out.mirrorMix = clamp(evalChannel(config.mirrorMix, frame, sectionSeed), 0, 0.98);
+  out.mirrorMix = clamp(evalChannel(config.mirrorMix, frame, sectionSeed, q), 0, 0.98);
 
-  out.flowX = clamp(evalChannel(config.flowX, frame, sectionSeed), -0.01, 0.01);
-  out.flowY = clamp(evalChannel(config.flowY, frame, sectionSeed), -0.01, 0.01);
+  out.flowX = clamp(evalChannel(config.flowX, frame, sectionSeed, q), -0.01, 0.01);
+  out.flowY = clamp(evalChannel(config.flowY, frame, sectionSeed, q), -0.01, 0.01);
 
-  out.fluid = clamp(evalChannel(config.fluid, frame, sectionSeed), 0, 1);
-  out.vorticity = clamp(evalChannel(config.vorticity, frame, sectionSeed), 0, 30);
+  out.fluid = clamp(evalChannel(config.fluid, frame, sectionSeed, q), 0, 1);
+  out.vorticity = clamp(evalChannel(config.vorticity, frame, sectionSeed, q), 0, 30);
+  out.liquidMix = clamp(evalChannel(config.liquidMix, frame, sectionSeed, q), 0, 1);
+  out.dyeDissipation = clamp(evalChannel(config.dyeDissipation, frame, sectionSeed, q), -0.4, 0.06);
 
   out.waveMode = WAVE_MODE_INDEX[config.waveform.mode] ?? 0;
-  out.waveIntensity = clamp(evalChannel(config.waveform.intensity, frame, sectionSeed), 0, 3);
+  out.waveIntensity = clamp(evalChannel(config.waveform.intensity, frame, sectionSeed, q), 0, 3);
   out.waveThickness = clamp(config.waveform.thickness, 0.0015, 0.06);
   out.waveScale = clamp(config.waveform.scale, 0, 0.9);
 
-  out.bloom = clamp(evalChannel(config.bloom, frame, sectionSeed), 0, 1.2);
+  out.bloom = clamp(evalChannel(config.bloom, frame, sectionSeed, q), 0, 1.2);
   out.emitterScale = clamp(config.emitterScale, 0.2, 3);
   out.emitterGain = clamp(config.emitterGain, 0, 2.5);
+
+  // ── Plan §2.2 radial warp profile. Gains scale `radius²` in the shader so
+  // each channel's effect changes with distance from centre. Clamped to keep
+  // GPU-safe even with audio-driven push. Defaults are 0 (no radial effect).
+  out.radialZoom = clamp(evalOptional(config.radialZoom, frame, sectionSeed, q, 0), -0.4, 0.4);
+  out.radialRotate = clamp(evalOptional(config.radialRotate, frame, sectionSeed, q, 0), -0.12, 0.12);
+  out.radialSwirl = clamp(evalOptional(config.radialSwirl, frame, sectionSeed, q, 0), -0.5, 0.5);
+  out.radialDecay = clamp(evalOptional(config.radialDecay, frame, sectionSeed, q, 0), -0.08, 0.08);
+
+  // ── Plan §2.3 RGB decay biases. Each kept small so the final per-channel
+  // decay (clamped in the shader) stays inside the safe 0.78..0.97 envelope.
+  out.decayR = clamp(evalOptional(config.decayR, frame, sectionSeed, q, 0), -0.08, 0.08);
+  out.decayG = clamp(evalOptional(config.decayG, frame, sectionSeed, q, 0), -0.08, 0.08);
+  out.decayB = clamp(evalOptional(config.decayB, frame, sectionSeed, q, 0), -0.08, 0.08);
+
+  // ── Plan §2.4 centre offset. Clamped to [0.2, 0.8] so the warp/fold axis
+  // can't march off-screen (the kaleidoscope sample fold blows up at edges).
+  out.centreX = clamp(evalOptional(config.centreX, frame, sectionSeed, q, 0.5), 0.2, 0.8);
+  out.centreY = clamp(evalOptional(config.centreY, frame, sectionSeed, q, 0.5), 0.2, 0.8);
+
+  // ── Plan §2.5 video-echo channels. Alpha=0 (default) signals "pass off".
+  out.echoZoom = clamp(evalOptional(config.echoZoom, frame, sectionSeed, q, 0), -0.5, 0.5);
+  out.echoRotate = clamp(evalOptional(config.echoRotate, frame, sectionSeed, q, 0), -0.5, 0.5);
+  out.echoAlpha = clamp(evalOptional(config.echoAlpha, frame, sectionSeed, q, 0), 0, 0.9);
+  out.echoFlipX = evalOptional(config.echoFlipX, frame, sectionSeed, q, 0) > 0.5 ? 1 : 0;
+  out.echoFlipY = evalOptional(config.echoFlipY, frame, sectionSeed, q, 0) > 0.5 ? 1 : 0;
+
+  // ── Plan §2.6 crossfade meta. lerpConfig stamps `_transition` on the live
+  // config when the Director is mid-fade; absent or >=1 means "settled".
+  const tx = config._transition;
+  out.transition = typeof tx === 'number' && tx < 1 ? (tx < 0 ? 0 : tx) : 1;
   return out;
 }
 
@@ -305,6 +577,12 @@ export function defaultConfig(): OperatorConfig {
     fluid: { base: 0.25, bindings: [{ feature: 'energy', gain: 0.20 }] },
     // vorticity confinement strength (how curly the simulated liquid stays)
     vorticity: { base: 8 },
+    // liquidMix = 0 for the Classic look — preserves the pre-dye composite
+    // byte-for-byte. Other archetypes (the 'liquid' one in the randomizer) set
+    // this high so the dye field becomes the picture.
+    liquidMix: { base: 0 },
+    // dyeDissipation bias 0 → use the silence-gated value as-is.
+    dyeDissipation: { base: 0 },
     spinFromSection: true,
     // Waveform ON ('line') by default — the drawn oscilloscope advected through
     // the warp field is MilkDrop's single most recognizable signature. It also
@@ -317,9 +595,12 @@ export function defaultConfig(): OperatorConfig {
   };
 }
 
-/** Deep-ish clone of a config (configs are plain JSON, so structuredClone-free). */
+/** Deep clone of a config. Uses structuredClone (Node 17+ / all targeted
+ *  browsers) — JSON.parse(JSON.stringify(...)) is ~3× slower and was a
+ *  per-frame hotspot on the Director's crossfade path. Configs are plain JSON,
+ *  so structuredClone preserves them exactly. */
 export function cloneConfig(c: OperatorConfig): OperatorConfig {
-  return JSON.parse(JSON.stringify(c)) as OperatorConfig;
+  return structuredClone(c);
 }
 
 function lerp(a: number, b: number, t: number): number { return a + (b - a) * t; }
@@ -345,14 +626,31 @@ function lerpRGB(a: RGB, b: RGB, t: number): RGB {
   return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 }
 
+/** Interpolate an optional Channel; missing inputs treated as {base: defaultBase}. */
+function lerpOptional(
+  a: Channel | undefined,
+  b: Channel | undefined,
+  t: number,
+  defaultBase: number,
+): Channel | undefined {
+  if (!a && !b) return undefined;
+  const aa: Channel = a ?? { base: defaultBase };
+  const bb: Channel = b ?? { base: defaultBase };
+  return lerpChannel(aa, bb, t);
+}
+
 /**
  * Smoothly interpolate two configs (for the Director's beat-synced crossfades).
  * Numeric channels lerp; discrete fields (mirrorSet, waveMode, spinFromSection)
  * snap at the midpoint so they don't pass through nonsense intermediate states.
+ *
+ * Does NOT stamp `_transition`: the Director sets that ONLY for real section
+ * fades. Intra-section drift uses lerpConfig too and must not trigger the
+ * field-buffer crossfade (plan §2.6).
  */
 export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): OperatorConfig {
   const pick = t < 0.5 ? a : b;
-  return {
+  const out: OperatorConfig = {
     version: 1,
     name: pick.name,
     seed: pick.seed,
@@ -371,6 +669,8 @@ export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): Ope
     flowY: lerpChannel(a.flowY, b.flowY, t),
     fluid: lerpChannel(a.fluid, b.fluid, t),
     vorticity: lerpChannel(a.vorticity, b.vorticity, t),
+    liquidMix: lerpChannel(a.liquidMix, b.liquidMix, t),
+    dyeDissipation: lerpChannel(a.dyeDissipation, b.dyeDissipation, t),
     spinFromSection: pick.spinFromSection,
     waveform: {
       mode: pick.waveform.mode,
@@ -389,5 +689,26 @@ export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): Ope
     bloom: lerpChannel(a.bloom, b.bloom, t),
     emitterScale: lerp(a.emitterScale, b.emitterScale, t),
     emitterGain: lerp(a.emitterGain, b.emitterGain, t),
+    // Q-vars: discrete (LFO shapes, bindings vary too much for safe lerp);
+    // snap at the midpoint like mirrorSet. cloneConfig keeps the deep copy
+    // honest so a downstream mutation can't leak back into the source config.
+    q: pick.q ? pick.q.map((s) => ({ ...s, bindings: s.bindings ? s.bindings.map((b2) => ({ ...b2 })) : undefined, lfo: s.lfo ? { ...s.lfo } : undefined })) : undefined,
+    // New optional Channels lerp through evalOptional defaults so a config
+    // that only sets one side still crossfades cleanly to neutral.
+    radialZoom: lerpOptional(a.radialZoom, b.radialZoom, t, 0),
+    radialRotate: lerpOptional(a.radialRotate, b.radialRotate, t, 0),
+    radialSwirl: lerpOptional(a.radialSwirl, b.radialSwirl, t, 0),
+    radialDecay: lerpOptional(a.radialDecay, b.radialDecay, t, 0),
+    decayR: lerpOptional(a.decayR, b.decayR, t, 0),
+    decayG: lerpOptional(a.decayG, b.decayG, t, 0),
+    decayB: lerpOptional(a.decayB, b.decayB, t, 0),
+    centreX: lerpOptional(a.centreX, b.centreX, t, 0.5),
+    centreY: lerpOptional(a.centreY, b.centreY, t, 0.5),
+    echoZoom: lerpOptional(a.echoZoom, b.echoZoom, t, 0),
+    echoRotate: lerpOptional(a.echoRotate, b.echoRotate, t, 0),
+    echoAlpha: lerpOptional(a.echoAlpha, b.echoAlpha, t, 0),
+    echoFlipX: lerpOptional(a.echoFlipX, b.echoFlipX, t, 0),
+    echoFlipY: lerpOptional(a.echoFlipY, b.echoFlipY, t, 0),
   };
+  return out;
 }

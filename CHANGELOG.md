@@ -3,6 +3,87 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.11.0] - 2026-06-10
+
+### Added
+
+- **Eviland Liquid — the fluid is now the picture.** Eviland's Navier-Stokes solver
+  (previously an invisible warp layer) gained a full dye field advected by the
+  divergence-free velocity: the kick floods colored dye up from the floor, the snare
+  jets near-white, hats sparkle the top edge, and vocals/leads bloom at their own
+  band height — each of the 24 detector bands gets a deterministic emitter position
+  and hue, so a busy mix reads as a liquid that knows the song. Silence stills the
+  surface (energy-gated dissipation); stereo pans become visible currents. The
+  Director's `liquid` archetype now drives it (`liquidMix` 0.78–0.95); all other
+  looks remain byte-identical at `liquidMix=0`, and existing shareable seed codes
+  keep their exact pre-dye looks. Falls back to the procedural warp path on low-tier
+  hardware. (`src/visualizer/eviland-fluid.ts`, `eviland.ts`, `eviland-operators.ts`,
+  `eviland-randomizer.ts`)
+- **Format badges.** Small monospace chips on Library rows, album track lists, and
+  Now Playing: lossless codec (FLAC/ALAC/APE/…), hi-res rate (24/96-style, derived
+  from the real sample rate), DSD64–DSD1024, and notable lossy bitrates. Mid-bitrate
+  MP3s stay un-chipped so the library doesn't drown in tags.
+  (`shared/format-badge.ts`, `src/components/FormatBadges.tsx`)
+- **Signal-path badge on the transport.** Live "44.1k DIRECT" vs "44.1k→48k
+  RESAMPLED" indicator showing whether Chromium is resampling the playing track;
+  click-through to the full readout in Settings → Audio.
+  (`src/components/SignalPathBadge.tsx`)
+- **The six MilkDrop-variety engine primitives.** What gives MilkDrop presets
+  their character is now native to Eviland: a q-variable system (8 preset-internal
+  scratch slots with tempo-locked sine/tri/saw/square LFOs, referenceable from any
+  channel), per-pixel radial warp profiles (zoom/rotate/swirl/decay as functions of
+  radius²), per-channel RGB trail decay ("everything drifts toward a hue"), a
+  moving warp centre, a video-echo pass (zoomed/rotated/flipped self-composite,
+  FBO allocated only while active, off on low tier), and a field-snapshot
+  crossfade that kills the mid-fade tear on section changes. All default-neutral:
+  existing looks render bit-identically. (`src/visualizer/eviland-operators.ts`,
+  `eviland.ts`, `eviland-director.ts`)
+- **26-look morphing pool.** Eviland's Director now rotates through 26 archetypes
+  (was 6): the original six retuned to exploit the new primitives, plus vortex,
+  inkwell, supernova, cathedral, phosphor, ribbonfall, pulsar, mosaic, deepfield,
+  solarflare, glasshouse, stormfront, heartbeat, carousel, firefly, tidal, prism,
+  echochamber, wireframe, and emberveil — each with a distinct motion signature,
+  palette behavior, and emitter usage, enforced forever by a pairwise-distance
+  distinctness test plus a GPU capture harness
+  (`npm run smoke:eviland-arch-distinct`) that proves no two looks are
+  metrics-twins. Note: shareable look seeds map into the expanded pool, so an old
+  seed code may resolve to a different look than before.
+  (`src/visualizer/eviland-randomizer.ts`, `eviland-director.ts`)
+
+### Removed
+
+- **Sonic Atlas.** The 2D library-projection view never earned its sidebar slot —
+  its data source (Audio DNA) is analyze-on-demand, so the map opened empty for
+  most libraries. The view, its PCA projection math, and its smoke are gone
+  (~900 LOC including the dead `live-input.ts`). The **Audio DNA engine stays**:
+  Sounds Like, Living Tags `dna.*` fields, Wrapped's vibe, and seed-vibe mixes are
+  untouched.
+
+### Performance
+
+- `cloneConfig` uses `structuredClone` instead of a JSON round-trip (called on every
+  section boundary), the placeholder shader pair compiled-then-discarded at boot is
+  gone, and the dead `classic()` randomizer wrapper is deleted.
+
+### Fixed
+
+- **The release gate runs green again.** Five pre-existing breaks: the display app
+  logo (177KB) and README logo (1.25MB) both exceeded the startup-bundle smoke's own
+  size caps — recompressed to 101KB webp / 495KB png with no visible change — the
+  smoke still grepped for an `index-*.js` entry chunk after the vite entry was
+  renamed to `main`, `smoke:artist` couldn't load `artistFacts.ts` under Node's
+  native type-stripping because the wiki helper chain used an extensionless import
+  plus a tsconfig path alias (now relative, extensioned imports that resolve
+  everywhere), and the `ui-visualizer` smoke probe still scripted the pre-redesign
+  fullscreen controls — an always-visible preset rail and per-control toolbar
+  buttons that no longer exist. The probe now opens the preset picker panel like a
+  user and drives quality/performance/art/clean/palette/reactivity/auto-VJ through
+  their real keyboard shortcuts; the OS-fullscreen assertion was dropped as
+  unobservable under the smoke's hidden window. (`build/logo-app.webp`,
+  `assets/github/logo-readme.png`, `scripts/startup-bundle-smoke.mjs`,
+  `src/api/artistFacts.ts`, `src/api/albumFacts.ts`, `src/lib/wiki.ts`,
+  `electron/main.ts`)
+
 ## [1.10.0] - 2026-06-07
 
 ### Audio quality

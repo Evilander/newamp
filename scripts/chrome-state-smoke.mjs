@@ -14,7 +14,7 @@ await mkdir(smokeRoot, { recursive: true });
 const settings = new SettingsStore(settingsPath);
 assert.equal(settings.get().compactMode, false, 'compact deck should default to full library mode');
 assert.equal(settings.get().alwaysOnTop, false, 'always-on-top should default to off');
-assert.equal(settings.get().visualizerPreset, 'neon-waves', 'visualizer preset should default to Xbox-style Neon Waves');
+assert.equal(settings.get().visualizerPreset, 'eviland-live', 'visualizer preset should default to Eviland Live');
 assert.equal(settings.get().firstLaunchTutorialSeen, false, 'first-launch tutorial should show by default');
 assert.equal(settings.get().textScale, 1, 'text scale should default to 100%');
 
@@ -38,7 +38,7 @@ assert.equal(settings.set({ visualizerPreset: 'orbital-rings' }).visualizerPrese
 assert.equal(settings.set({ visualizerPreset: 'album-breathe' }).visualizerPreset, 'album-breathe', 'Album Breathe preset should save');
 assert.equal(settings.set({ visualizerPreset: 'tempo-pulse' }).visualizerPreset, 'tempo-pulse', 'Tempo Pulse preset should save');
 assert.equal(settings.set({ visualizerPreset: 'lattice-strobe' }).visualizerPreset, 'lattice-strobe', 'Lattice Strobe preset should save');
-assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'neon-waves', 'visualizer preset should reject unknown values');
+assert.equal(settings.set({ visualizerPreset: 'bogus' }).visualizerPreset, 'eviland-live', 'visualizer preset should reject unknown values');
 assert.equal(settings.set({ firstLaunchTutorialSeen: true }).firstLaunchTutorialSeen, true, 'first-launch tutorial completion should save');
 assert.equal(new SettingsStore(settingsPath).get().firstLaunchTutorialSeen, true, 'first-launch tutorial completion should reload');
 assert.equal(settings.set({ textScale: 1.25 }).textScale, 1.25, 'text scale should save');
@@ -126,7 +126,7 @@ assert.match(settingsViewSource, /data-newamp-lastfm-setup-guide/, 'Settings sho
 assert.match(settingsViewSource, /Application description: Local Windows music player with optional Last\.fm scrobbling\./, 'Last.fm setup guide should include the app description field');
 assert.match(settingsViewSource, /Callback URL: leave blank\./, 'Last.fm setup guide should tell desktop users to leave callback URL blank');
 assert.match(settingsViewSource, /Complete auth/, 'Last.fm setup guide should explain the browser approval flow');
-assert.match(fullscreenSource, /'PERF'/, 'fullscreen visualizer should label balanced render mode without vague AUTO copy');
+assert.match(fullscreenSource, /Render quality/, 'fullscreen visualizer should expose a labeled render-quality control');
 // VIZ_TOP_NAV_KEY was removed in 1.5.6 — the persistent toggle was deleted
 // in favor of pure cursor-idle auto-hide. The auto-hide behavior is
 // covered by ui-visualizer-smoke (mousemove → navMode='visible').

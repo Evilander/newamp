@@ -44,7 +44,7 @@ const sourceMaps = assets.filter((asset) => asset.endsWith('.map'));
 assert.deepEqual(sourceMaps, [], 'production renderer build should not emit public source maps by default');
 const mainScripts = [];
 for (const asset of assets) {
-  if (!/^index-.*\.js$/.test(asset)) continue;
+  if (!/^(index|main)-.*\.js$/.test(asset)) continue;
   const assetStat = await stat(new URL(asset, assetDir));
   mainScripts.push({ asset, bytes: assetStat.size });
 }
