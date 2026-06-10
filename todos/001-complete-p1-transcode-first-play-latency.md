@@ -1,5 +1,5 @@
 ---
-status: pending
+status: complete
 priority: p1
 issue_id: "001"
 tags: [code-review, performance, transcode-cache, audio]
@@ -38,3 +38,4 @@ for first-play (subsequent plays/seeks are instant cache hits).
 ## Work Log
 - 2026-06-07: Filed from /review (performance-oracle). Verified the await-full-file flow in main.ts + transcode-cache.ts.
 - 2026-06-07: PARTIAL — applied mitigation #1: `buildPlaybackFlacArgs` compression_level 5→1 (≈2–4× faster encode; bit-identical audio; RECIPE_TAG bumped to flac-s32-cl1-v1). Cuts first-play wait for ALAC/AIFF/APE/WV. Does NOT help DSD (soxr precision=28 is the long pole there). STILL OPEN: the proper fix (#2 stream-while-encoding) + #3 progress affordance — the handler still awaits the full encode. Leaving PENDING.
+- 2026-06-09: COMPLETE — stream-first fix shipped (audio-correctness plan, Task 1). New non-blocking `peekCachedFlac` probe in `electron/transcode-cache.ts` (never transcodes, ignores `.part` files; unit-tested by `scripts/transcode-peek-test.mjs` / `npm run test:transcode-peek`). The `newamp:` handler ffmpeg branch now: ffmpeg-missing → 503 up front; peek hit → seekable cached FLAC (unchanged); peek miss → fire-and-forget `getOrTranscodeToFlac` warm (semaphore-bounded, inflight-deduped) + immediate `transcodeToWavResponse` live stream. First play starts in tens of ms; the next play is seekable. Acceptance met: first play < 1 s via the wav pipe; `prepareNext` only warms the cache and never blocks a user-initiated play. `smoke:transcode` + `smoke:transcode-seek` pass unchanged.
