@@ -146,7 +146,10 @@ assert.match(appSource, /data-newamp-app-drop-overlay/, 'App should render a vis
 assert.match(appSource, /setView\('now-playing'\)/, 'App should switch to Now Playing after opening playable files');
 assert.match(libraryViewSource, /getDroppedFilePaths/, 'Library drag-drop should use preload path resolution');
 assert.match(libraryViewSource, /data-show-in-folder/, 'Library rows should expose a file reveal control');
-assert.match(libraryViewSource, /api\.showInFolder\(t\.path\)/, 'Library file reveal should open the selected track path');
+// The virtualized library table routes the row's reveal click through a
+// memo-stable callback: row → onShowInFolder(t.path) → api.showInFolder(path).
+assert.match(libraryViewSource, /onShowInFolder\(t\.path\)/, 'Library file reveal should open the selected track path');
+assert.match(libraryViewSource, /api\.showInFolder\(/, 'Library file reveal should call the Explorer reveal API');
 assert.match(nowPlayingSource, /data-now-playing-show-in-folder/, 'Now Playing should expose a current-track file reveal control');
 assert.match(nowPlayingSource, /api\.showInFolder\(current\.path\)/, 'Now Playing file reveal should open the current track path');
 assert.match(JSON.stringify(pkg.scripts ?? {}), /smoke:packaged-open-files/, 'package scripts should expose packaged open-file proof');

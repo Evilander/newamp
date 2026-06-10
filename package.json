@@ -43,6 +43,7 @@
     "test:device-change": "node scripts/device-change-test.mjs",
     "test:music-folders": "node scripts/music-folders-test.mjs",
     "test:cache-key-casing": "node scripts/cache-key-casing-test.mjs",
+    "test:audio-path-policy": "node scripts/audio-path-policy-test.mjs",
     "test:app-menu": "node scripts/app-menu-test.mjs",
     "test:macho-arch": "node scripts/macho-arch-test.mjs",
     "test:library-query": "npm run build:electron && node scripts/library-query-test.mjs",
