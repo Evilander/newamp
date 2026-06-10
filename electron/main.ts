@@ -51,7 +51,7 @@ import {
   transcodeTracksToAudioFolder,
   transcodeTracksToWavFolder,
 } from './transcode.js';
-import { initTranscodeCache, getOrTranscodeToFlac } from './transcode-cache.js';
+import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac, transcodeCacheStatus } from './transcode-cache.js';
 import { analyzeTrackDna } from './dna-analyzer.js';
 import { RadioBrain } from './radio-brain.js';
 import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
@@ -1121,18 +1121,28 @@ function registerAudioProtocol(): void {
         return new Response('Not found', { status: 404 });
       }
       if (playbackMode(filePath) === 'ffmpeg') {
-        // Seekable path: serve a finalized, cached, lossless FLAC (range-capable)
-        // instead of the non-seekable live WAV pipe, so the scrubber works on
-        // .wma/.alac/.aiff/.dsf/.dff/.ape/.wv/etc. The cache awaits the transcode
-        // so a Range request never hits a half-written file.
-        const cached = await getOrTranscodeToFlac(filePath);
-        if (cached.ok) {
+        // Seekable path: serve the finalized cached FLAC (range-capable) when it
+        // already exists. First play streams the live WAV pipe INSTEAD of
+        // awaiting the full encode (todo 001) — audio starts in tens of ms —
+        // while the cache warms in the background; the next play is seekable.
+        // NOTE: peek runs FIRST because it awaits the cache's ensureReady(),
+        // which is what populates the ffmpeg probe — checking the status before
+        // peek would falsely 503 the first request after app start.
+        const ready = await peekCachedFlac(filePath);
+        // Preserve the clean 503 contract when ffmpeg is genuinely unavailable.
+        if (!ready && !transcodeCacheStatus().ffmpeg) {
+          return new Response('ffmpeg unavailable', {
+            status: 503,
+            headers: { 'X-Newamp-Reason': 'ffmpeg-missing' },
+          });
+        }
+        if (ready) {
           const forwardHeaders: Record<string, string> = {};
           const range = request.headers.get('Range');
           if (range) forwardHeaders.Range = range;
           const ifRange = request.headers.get('If-Range');
           if (ifRange) forwardHeaders['If-Range'] = ifRange;
-          const cachedResp = await net.fetch(pathToFileURL(cached.path).toString(), {
+          const cachedResp = await net.fetch(pathToFileURL(ready).toString(), {
             bypassCustomProtocolHandlers: true,
             headers: forwardHeaders,
           });
@@ -1147,14 +1157,9 @@ function registerAudioProtocol(): void {
             headers,
           });
         }
-        if (cached.reason === 'ffmpeg-missing') {
-          return new Response('ffmpeg unavailable', {
-            status: 503,
-            headers: { 'X-Newamp-Reason': 'ffmpeg-missing' },
-          });
-        }
-        // Cache unavailable/failed: fall back to the live stream so audio still
-        // plays (seek won't work in this degraded mode, but it never fully breaks).
+        // Cache miss: warm it in the background (semaphore-bounded, inflight-
+        // deduped — duplicate warms coalesce) and stream immediately.
+        void getOrTranscodeToFlac(filePath).catch(() => {});
         return transcodeToWavResponse(filePath, request);
       }
       // Forward the media element's Range header so net.fetch on the file URL

@@ -139,6 +139,29 @@ export async function getOrTranscodeToFlac(filePath: string): Promise<TranscodeR
   }
 }
 
+/**
+ * Non-blocking probe: returns the finalized cached FLAC's path, or null.
+ * Never transcodes, never touches the semaphore or inflight map — safe to call
+ * on the hot serve path. (`finalPath` only exists post-atomic-rename, so a
+ * half-written `.part` can never satisfy this.)
+ */
+export async function peekCachedFlac(filePath: string): Promise<string | null> {
+  await ensureReady();
+  if (!cacheEnabled) return null;
+  let st;
+  try {
+    st = await stat(filePath);
+  } catch {
+    return null;
+  }
+  const key = await canonicalKey(filePath, st.size, st.mtimeMs);
+  const finalPath = join(cacheDir, `${key}.flac`);
+  if (!existsSync(finalPath)) return null;
+  // Bump mtime so frequently played tracks survive LRU eviction (best-effort).
+  void utimes(finalPath, new Date(), new Date()).catch(() => {});
+  return finalPath;
+}
+
 async function runTranscode(filePath: string, key: string, finalPath: string): Promise<string> {
   await acquire();
   // Per-job temp name (pid + random) so concurrent/leftover jobs never collide.
