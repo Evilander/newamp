@@ -1121,18 +1121,21 @@ function registerAudioProtocol(): void {
         return new Response('Not found', { status: 404 });
       }
       if (playbackMode(filePath) === 'ffmpeg') {
+        // Seekable path: serve the finalized cached FLAC (range-capable) when it
+        // already exists. First play streams the live WAV pipe INSTEAD of
+        // awaiting the full encode (todo 001) — audio starts in tens of ms —
+        // while the cache warms in the background; the next play is seekable.
+        // NOTE: peek runs FIRST because it awaits the cache's ensureReady(),
+        // which is what populates the ffmpeg probe — checking the status before
+        // peek would falsely 503 the first request after app start.
+        const ready = await peekCachedFlac(filePath);
         // Preserve the clean 503 contract when ffmpeg is genuinely unavailable.
-        if (!transcodeCacheStatus().ffmpeg) {
+        if (!ready && !transcodeCacheStatus().ffmpeg) {
           return new Response('ffmpeg unavailable', {
             status: 503,
             headers: { 'X-Newamp-Reason': 'ffmpeg-missing' },
           });
         }
-        // Seekable path: serve the finalized cached FLAC (range-capable) when it
-        // already exists. First play streams the live WAV pipe INSTEAD of
-        // awaiting the full encode (todo 001) — audio starts in tens of ms —
-        // while the cache warms in the background; the next play is seekable.
-        const ready = await peekCachedFlac(filePath);
         if (ready) {
           const forwardHeaders: Record<string, string> = {};
           const range = request.headers.get('Range');
