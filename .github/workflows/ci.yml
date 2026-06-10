@@ -81,6 +81,11 @@ jobs:
       - name: Test — transcode cache probe (stream-first first play)
         run: npm run test:transcode-peek
 
+      - name: Test — security (audio path allowlist + podcast host guard)
+        run: |
+          npm run test:audio-path-policy
+          npm run test:podcast-host-guard
+
       - name: Smoke — renderer CSP (no unsafe-eval; eval scoped to iframe)
         run: npm run smoke:security
 
