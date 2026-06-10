@@ -387,10 +387,51 @@ function parseDate(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/**
+ * SSRF guard: block podcast fetches to loopback/private/link-local hosts so a
+ * malicious feed can't probe the user's machine or LAN (e.g. 127.0.0.1,
+ * 169.254.169.254, fridge.local). Hostname-literal check only — DNS-rebinding
+ * defenses are out of scope for a single-user desktop app.
+ * Exported for scripts/podcast-host-guard-test.mjs.
+ */
+export function isBlockedPodcastHost(hostname: string): boolean {
+  // Explicit test escape: the podcast smokes serve fixture feeds from a local
+  // http server. Never set outside test harnesses.
+  if (process.env.NEWAMP_ALLOW_PRIVATE_PODCAST_HOSTS === '1') return false;
+  let host = String(hostname).trim().toLowerCase();
+  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+
+  // IPv6 literals.
+  if (host.includes(':')) {
+    if (host === '::' || host === '::1') return true;
+    if (host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb')) {
+      return true; // fe80::/10 link-local
+    }
+    if (host.startsWith('fc') || host.startsWith('fd')) return true; // fc00::/7 unique-local
+    return false;
+  }
+
+  // IPv4 literals (numeric octet parse — regex alone can't express the ranges).
+  const octets = host.split('.');
+  if (octets.length === 4 && octets.every((o) => /^\d{1,3}$/.test(o))) {
+    const [a, b] = octets.map((o) => Number(o));
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b! >= 16 && b! <= 31) return true;
+    if (a === 192 && b === 168) return true;
+  }
+  return false;
+}
+
 function normalizeFeedUrl(url: string): string {
   const parsed = new URL(String(url).trim());
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new Error('Podcast feed URL must start with http:// or https://');
+  }
+  if (isBlockedPodcastHost(parsed.hostname)) {
+    throw new Error('Podcast feed host is not allowed (private or local address)');
   }
   return parsed.toString();
 }
@@ -400,6 +441,7 @@ function normalizeMaybeUrl(url: string | null | undefined): string | null {
   try {
     const parsed = new URL(decodeEntities(url.trim()));
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+    if (isBlockedPodcastHost(parsed.hostname)) return null;
     return parsed.toString();
   } catch {
     return null;

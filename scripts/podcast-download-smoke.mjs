@@ -1,3 +1,8 @@
+// This smoke serves its fixture episode from a local http server; the SSRF
+// guard (isBlockedPodcastHost) blocks private hosts by default, so opt out
+// explicitly for the test harness BEFORE the podcasts module loads.
+process.env.NEWAMP_ALLOW_PRIVATE_PODCAST_HOSTS = '1';
+
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
