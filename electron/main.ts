@@ -20,7 +20,7 @@ import {
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { LibraryStore } from './library.js';
 import { LibraryWatcher } from './library-watcher.js';
 import { findLocalLyricsForTrack } from './local-lyrics.js';
@@ -52,6 +52,7 @@ import {
   transcodeTracksToWavFolder,
 } from './transcode.js';
 import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac, transcodeCacheStatus } from './transcode-cache.js';
+import { isAllowedAudioPath } from './audio-path-policy.js';
 import { analyzeTrackDna } from './dna-analyzer.js';
 import { RadioBrain } from './radio-brain.js';
 import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
@@ -405,6 +406,38 @@ let lastfmOutbox: LastfmScrobbleOutbox;
 let podcastStore: PodcastStore;
 let radioBrain: RadioBrain | null = null;
 let pendingOpenFiles = collectOpenFileArgs(process.argv);
+
+// Session opened-files allowlist for the `newamp:` protocol (todo 005). Every
+// open-file entry point (CLI argv, macOS open-file event, second-instance
+// argv, drag-drop via the open:files IPC) registers its realpathed targets so
+// the protocol handler can serve them even when they live outside the library.
+const openedAudioFiles = new Set<string>();
+// Lazily realpathed podcast downloads root. Cached on first success only —
+// the directory does not exist until the first download completes, and a
+// cached null would 403 podcast playback forever.
+let podcastDownloadsRealRoot: string | null = null;
+
+async function allowOpenedAudioFile(path: string): Promise<void> {
+  try {
+    openedAudioFiles.add((await realpath(path)).replace(/\\/g, '/'));
+  } catch {
+    /* vanished/unreadable — stays unauthorized */
+  }
+}
+
+async function getPodcastDownloadsRealRoot(): Promise<string | null> {
+  if (podcastDownloadsRealRoot) return podcastDownloadsRealRoot;
+  try {
+    podcastDownloadsRealRoot = await realpath(join(app.getPath('userData'), 'podcast-downloads'));
+  } catch {
+    return null;
+  }
+  return podcastDownloadsRealRoot;
+}
+
+for (const initialOpenFile of pendingOpenFiles) {
+  void allowOpenedAudioFile(initialOpenFile);
+}
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL;
 const openDevTools = isDev && process.env.OPEN_DEVTOOLS === '1';
@@ -892,6 +925,7 @@ function sendPlayerCommand(command: PlayerCommand): void {
 function enqueueOpenFiles(paths: string[]): void {
   const clean = normalizeOpenTargets(paths).map((target) => target.path);
   if (!clean.length) return;
+  for (const path of clean) void allowOpenedAudioFile(path);
   if (mainWin && !mainWin.isDestroyed() && !mainWin.webContents.isLoading()) {
     mainWin.webContents.send('app:open-files', clean);
     return;
@@ -1120,7 +1154,46 @@ function registerAudioProtocol(): void {
       if (!existsSync(filePath)) {
         return new Response('Not found', { status: 404 });
       }
-      if (playbackMode(filePath) === 'ffmpeg') {
+      // Allowlist gate (todo 005): only paths that arrived through the app's
+      // own flows — library roots, library DB, session open-with/drag-drop,
+      // podcast downloads — may be served. Decided BEFORE any ffmpeg/cache
+      // work so an unauthorized path never reaches the persistent cache.
+      // TOCTOU: every downstream consumer gets `real`, the exact validated
+      // target, so a symlink swap cannot cache another file under this key.
+      let real: string;
+      try {
+        real = await realpath(filePath);
+      } catch {
+        return new Response('Not found', { status: 404 });
+      }
+      const libraryRoots: string[] = [];
+      for (const root of settings.get().libraryRoots) {
+        try {
+          libraryRoots.push(await realpath(root));
+        } catch {
+          /* missing/unreadable root contributes nothing */
+        }
+      }
+      let isLibraryTrack = false;
+      try {
+        isLibraryTrack = (library?.getTracksByPaths?.([filePath, real])?.length ?? 0) > 0;
+      } catch {
+        /* library DB not open yet → not a library track */
+      }
+      const allowed = isAllowedAudioPath({
+        realPath: real,
+        libraryRoots,
+        openedFiles: openedAudioFiles,
+        podcastRoot: await getPodcastDownloadsRealRoot(),
+        isLibraryTrack,
+      });
+      if (!allowed) {
+        return new Response('Forbidden', {
+          status: 403,
+          headers: { 'X-Newamp-Reason': 'path-not-allowed' },
+        });
+      }
+      if (playbackMode(real) === 'ffmpeg') {
         // Seekable path: serve the finalized cached FLAC (range-capable) when it
         // already exists. First play streams the live WAV pipe INSTEAD of
         // awaiting the full encode (todo 001) — audio starts in tens of ms —
@@ -1128,7 +1201,7 @@ function registerAudioProtocol(): void {
         // NOTE: peek runs FIRST because it awaits the cache's ensureReady(),
         // which is what populates the ffmpeg probe — checking the status before
         // peek would falsely 503 the first request after app start.
-        const ready = await peekCachedFlac(filePath);
+        const ready = await peekCachedFlac(real);
         // Preserve the clean 503 contract when ffmpeg is genuinely unavailable.
         if (!ready && !transcodeCacheStatus().ffmpeg) {
           return new Response('ffmpeg unavailable', {
@@ -1159,8 +1232,8 @@ function registerAudioProtocol(): void {
         }
         // Cache miss: warm it in the background (semaphore-bounded, inflight-
         // deduped — duplicate warms coalesce) and stream immediately.
-        void getOrTranscodeToFlac(filePath).catch(() => {});
-        return transcodeToWavResponse(filePath, request);
+        void getOrTranscodeToFlac(real).catch(() => {});
+        return transcodeToWavResponse(real, request);
       }
       // Forward the media element's Range header so net.fetch on the file URL
       // returns a 206 Partial Content with Content-Range. Without this the
@@ -1173,7 +1246,7 @@ function registerAudioProtocol(): void {
       if (range) forwardHeaders.Range = range;
       const ifRange = request.headers.get('If-Range');
       if (ifRange) forwardHeaders['If-Range'] = ifRange;
-      const response = await net.fetch(pathToFileURL(filePath).toString(), {
+      const response = await net.fetch(pathToFileURL(real).toString(), {
         bypassCustomProtocolHandlers: true,
         headers: forwardHeaders,
       });
@@ -3691,6 +3764,10 @@ function normalizeAlbumReplayGainKeyPart(value: string | null | undefined): stri
 
 async function openFiles(paths: string[]): Promise<OpenFilesResult> {
   const targets = normalizeOpenTargets(paths);
+  // Authorize before any scan/lookup so playback can never race the allowlist.
+  await Promise.all(
+    targets.filter((target) => target.kind === 'file').map((target) => allowOpenedAudioFile(target.path)),
+  );
   const audioPaths: string[] = [];
   const playlistPaths: string[] = [];
   const cuePaths: string[] = [];
