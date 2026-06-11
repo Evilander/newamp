@@ -14,11 +14,15 @@
 // mirrorMix. The tier is derived from a slow moving average of energy plus a
 // novelty pulse, so the Director feels the song's shape, not just its loudness.
 //
-// Look generation is deterministic from (songId, sectionId, rotationIndex):
-// the same song always produces the same SEQUENCE of looks. The platform RNG
-// is never read. Two timing inputs do follow the playback clock by design: the
-// ~20s timer-rotation floor (so the look still changes when the music is
-// structurally quiet, MilkDrop-style) and the gentle intra-section drift.
+// Look generation is deterministic from (songId, sectionId, rotationIndex)
+// PLUS a lineage salt (lineage.generation, lineage.rootSeed) when the track has
+// a loaded VisualMemoryPlan with generation > 0. At generation 0 the lineage
+// salt is empty and the seed key is byte-identical to the pre-memory format —
+// a plan-less or first-play track renders exactly the same as before. The
+// platform RNG is never read. Two timing inputs do follow the playback clock by
+// design: the ~20s timer-rotation floor (so the look still changes when the
+// music is structurally quiet, MilkDrop-style) and the gentle intra-section
+// drift.
 //
 // Zero dependencies, ES modules. The renderer owns the loop; the Director
 // returns the OperatorConfig the renderer should use this frame.
@@ -37,6 +41,12 @@ import {
   mutate,
 } from './eviland-randomizer';
 import { Rng, hashSeed } from './eviland-rng';
+import {
+  VISUAL_MEMORY_ALGO_VERSION,
+  type VisualMemoryLineage,
+  type VisualMemoryPlan,
+  type VisualMemorySection,
+} from './eviland-memory-types';
 
 // ---------------------------------------------------------------------------
 // Energy tiers — how the Director categorises a section's emotional weight.
@@ -271,6 +281,25 @@ export interface DirectorOptions {
   rotateJitterPct?: number;
   /** Intra-section drift strength 0..1 — held looks slowly breathe. Default 0.12. 0 disables. */
   drift?: number;
+  /**
+   * Pre-populated visual memory plan. When supplied, the Director re-derives
+   * its sections map from `plan.sections` via the existing generator (we never
+   * store full OperatorConfigs — only seeds) and folds `plan.lineage` into
+   * seedFor() so the track "remembers" its evolved look family. If the plan's
+   * algoVersion mismatches the current algorithm, the plan loads in
+   * fingerprints-only mode: stored fingerprints still guide section-return
+   * detection, but stored seeds are NOT used to re-derive looks.
+   */
+  plan?: VisualMemoryPlan;
+  /**
+   * Fires when the Director writes a new section to its in-memory map from a
+   * REAL audio section boundary. The renderer-side memory bridge coalesces
+   * these writes into the persistent VisualMemoryPlan. Forced timer rotations
+   * NEVER trigger this callback — only true `frame.sectionChanged === true`
+   * paths do. `firstSeenAt`/`lastSeenAt` are left at 0 here; the bridge stamps
+   * them with its supplied epoch ms.
+   */
+  onSectionLearn?: (section: VisualMemorySection) => void;
 }
 
 export interface Director {
@@ -286,11 +315,36 @@ export interface Director {
   current(): OperatorConfig;
   /** Override the passthrough config (used when disabled, or as the "from" of next fade). */
   setCurrent(config: OperatorConfig): void;
+  /**
+   * Hot-load a visual memory plan mid-track. Calls reset() internally so the
+   * sections map is re-derived from `plan.sections`. Mostly used by the bridge
+   * when the track-load races the renderer construction; common path is to
+   * supply `plan` via DirectorOptions.
+   */
+  loadPlan(plan: VisualMemoryPlan): void;
+  /**
+   * Export the current sections + lineage as a fresh VisualMemoryPlan for the
+   * bridge to persist. Pure projection of in-memory state; safe to call any
+   * time. `updatedAt` is supplied by the caller (the bridge stamps it from its
+   * epoch ms source — keeping this function deterministic and free of
+   * Date.now).
+   */
+  exportPlan(updatedAt?: number): VisualMemoryPlan;
 }
 
 interface SectionMemory {
   config: OperatorConfig;
   tier: EnergyTier;
+  /** The seed used to mint `config` — exported on plan write, never used inside the Director. */
+  seed: number;
+  /** Archetype string at write time — exported on plan write. */
+  archetype: string;
+  /** Rotation index that produced `config`. 0 = primary look from a section boundary. */
+  rotationIndex: number;
+  /** Section fingerprint from the reactor; null when this entry was loaded from a plan with no fingerprint. */
+  fingerprint: Float32Array | null;
+  /** How many real section boundaries have written this entry (1 = first-seen). */
+  observedCount: number;
 }
 
 export function createDirector(opts: DirectorOptions = {}): Director {
@@ -319,10 +373,37 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   // mid-fade BPM change doesn't warp progress).
   let fadeDurationMs = transitionMsFallback;
 
-  // Section memory: sectionId -> stored config + tier.
+  // Section memory: sectionId -> stored config + tier + seed lineage.
   const sections = new Map<number, SectionMemory>();
   let lastSectionId = -1;
   let lastTier: EnergyTier | null = null;
+
+  // ── visual-memory plan state ──────────────────────────────────────────────
+  // Lineage = the evolutionary history of THIS track's primary look family.
+  // Folded into seedFor() when generation > 0 so a track that's been played
+  // many times slowly drifts to fresh seeds while still rhyming with itself.
+  // At generation 0 (no plan, or brand-new plan) the lineage salt is empty and
+  // seedFor() returns the EXACT same key as before the memory system existed —
+  // plan-less tracks render byte-identically to v1.11.0.
+  let lineage: VisualMemoryLineage = opts.plan?.lineage
+    ? {
+        rootSeed: opts.plan.lineage.rootSeed >>> 0,
+        ancestors: opts.plan.lineage.ancestors.slice(),
+        generation: opts.plan.lineage.generation | 0,
+        evolutionLog: opts.plan.lineage.evolutionLog.slice(),
+      }
+    : { rootSeed: hashSeed(activeSongId), ancestors: [], generation: 0, evolutionLog: [] };
+  let counters = opts.plan?.counters
+    ? { ...opts.plan.counters }
+    : { plays: 0, skips: 0, loves: 0, sectionReturns: 0 };
+  let neighborSeed = opts.plan?.neighborSeed ? { ...opts.plan.neighborSeed } : undefined;
+  let activeTrackId: number = opts.plan?.trackId ?? 0;
+  // True when the plan's algoVersion doesn't match the current algorithm — in
+  // that mode stored fingerprints still guide section-return detection (the
+  // future bridge feature), but stored seeds are NEVER consumed to re-derive
+  // looks. Re-derivation falls through to the generator's own seedFor() path.
+  let staleAlgo = false;
+  const staleAlgoFingerprints = new Map<number, Float32Array>();
 
   // Timer-rotation floor: ms since the last look switch, and a monotonic
   // rotation counter (reset on a real section boundary) folded into the seed
@@ -367,17 +448,37 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   }
 
   function seedFor(sectionId: number, rotation = 0): number {
-    // Per-(song, section, rotation) deterministic seed. rotation 0 keeps the
-    // original key so a song's first look per section is unchanged; forced
-    // timer rotations (rotation > 0) derive distinct looks.
+    // Per-(song, section, rotation) deterministic seed, optionally lineage-
+    // salted when the loaded plan has evolved past generation 0. CRITICAL
+    // invariant: when generation === 0 the salt is the empty string, so the
+    // key collapses to EXACTLY the pre-memory format — plan-less tracks and
+    // first-play tracks render byte-identically to v1.11.0. This is the
+    // No Man's Sky lesson (don't churn existing users' worlds) encoded in code.
+    const lineageSalt =
+      lineage.generation > 0 ? `::g${lineage.generation}::${lineage.rootSeed >>> 0}` : '';
     const key =
       rotation === 0
-        ? `${activeSongId}::section::${sectionId}`
-        : `${activeSongId}::section::${sectionId}::r${rotation}`;
+        ? `${activeSongId}${lineageSalt}::section::${sectionId}`
+        : `${activeSongId}${lineageSalt}::section::${sectionId}::r${rotation}`;
     return hashSeed(key);
   }
 
   function generateForSection(sectionId: number, tier: EnergyTier, rotation = 0): OperatorConfig {
+    return generateForSectionFull(sectionId, tier, rotation).config;
+  }
+
+  /**
+   * Same generation pipeline as `generateForSection`, but returns the picked
+   * archetype + base seed alongside the config so the caller can stamp the
+   * SectionMemory entry without re-running the weighted pick. Used by both the
+   * onSectionBoundary path (which writes to `sections`) and `loadPlan`/`reset`
+   * (which re-derives from stored seeds).
+   */
+  function generateForSectionFull(
+    sectionId: number,
+    tier: EnergyTier,
+    rotation = 0,
+  ): { config: OperatorConfig; archetype: Archetype; seed: number } {
     const baseSeed = seedFor(sectionId, rotation);
     const rng = new Rng(baseSeed);
     const weights = TIER_ARCHETYPE_WEIGHTS[tier];
@@ -397,7 +498,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     const tuned = amount > 0 ? mutate(config, amount, mutateSeed) : config;
     // Stamp section info onto the config for downstream tooling/UI.
     tuned.name = `${tuned.archetype ?? 'look'} • s${sectionId} • ${tier}`;
-    return tuned;
+    return { config: tuned, archetype, seed: baseSeed };
   }
 
   function effectiveRotateMs(): number {
@@ -419,7 +520,11 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     const nextConfig = generateForSection(frame.sectionId, tier, rotationIndex);
     // Forced rotations deliberately do NOT write the `sections` recall map or
     // touch the audio sectionId — chorus recall stays driven by
-    // frame.sectionReturn, which forced rotations never set.
+    // frame.sectionReturn, which forced rotations never set. The
+    // onSectionLearn callback is wired to the same gate: only real audio
+    // section boundaries learn into the persistent VisualMemoryPlan. Forced
+    // timer rotations are an ephemeral variety floor, not part of the song's
+    // remembered shape.
     const speed = transitionSpeedFor(lastTier, tier);
     startFade(nextConfig, speed, frame.bpm);
     lastTier = tier;
@@ -452,16 +557,44 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     const tier = tierFor(frame);
 
     let nextConfig: OperatorConfig;
+    let storedSeed: number;
+    let storedArchetype: string;
     if (frame.sectionReturn >= 0 && sections.has(frame.sectionReturn)) {
       // Returning section — recall the stored look so the chorus visually
       // rhymes with its previous appearance. Re-stamp the current sectionId
       // into the memory map so any second return hits this same look.
       const stored = sections.get(frame.sectionReturn)!;
       nextConfig = cloneConfig(stored.config);
-      sections.set(frame.sectionId, { config: cloneConfig(nextConfig), tier: stored.tier });
+      storedSeed = stored.seed;
+      storedArchetype = stored.archetype;
+      const fp = frame.sectionFingerprint;
+      sections.set(frame.sectionId, {
+        config: cloneConfig(nextConfig),
+        tier: stored.tier,
+        seed: storedSeed,
+        archetype: storedArchetype,
+        rotationIndex: 0,
+        fingerprint: fp ? new Float32Array(fp) : stored.fingerprint,
+        observedCount: stored.observedCount + 1,
+      });
+      // Bump the returning-section's observedCount too so the journal reflects
+      // that this look got "seen" again.
+      stored.observedCount += 1;
     } else {
-      nextConfig = generateForSection(frame.sectionId, tier);
-      sections.set(frame.sectionId, { config: cloneConfig(nextConfig), tier });
+      const minted = generateForSectionFull(frame.sectionId, tier);
+      nextConfig = minted.config;
+      storedSeed = minted.seed;
+      storedArchetype = String(minted.archetype);
+      const fp = frame.sectionFingerprint;
+      sections.set(frame.sectionId, {
+        config: cloneConfig(nextConfig),
+        tier,
+        seed: storedSeed,
+        archetype: storedArchetype,
+        rotationIndex: 0,
+        fingerprint: fp ? new Float32Array(fp) : null,
+        observedCount: 1,
+      });
     }
 
     const speed = transitionSpeedFor(lastTier, tier);
@@ -476,6 +609,28 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     // A real structural change resets the timer cadence — structure leads.
     rotationIndex = 0;
     cachedRotateThresholdMs = null;
+
+    // Fire the learn callback ONLY from this real-boundary path. The
+    // onForcedRotation function (timer-driven) deliberately does NOT call it
+    // (see the gate comment in onForcedRotation). The bridge is what stamps
+    // firstSeenAt/lastSeenAt; we emit zeros to keep this function deterministic.
+    const cb = opts.onSectionLearn;
+    if (cb) {
+      const memory = sections.get(frame.sectionId)!;
+      cb({
+        sectionId: frame.sectionId,
+        fingerprint: memory.fingerprint
+          ? Array.from(memory.fingerprint)
+          : new Array(24).fill(0),
+        seed: memory.seed >>> 0,
+        archetype: memory.archetype,
+        tier: memory.tier,
+        rotationIndex: memory.rotationIndex,
+        observedCount: memory.observedCount,
+        firstSeenAt: 0,
+        lastSeenAt: 0,
+      });
+    }
   }
 
   function advanceFade(frame: EvilandFrame, dtMs: number): void {
@@ -529,6 +684,79 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     }
   }
 
+  // The plan that should be replayed on the NEXT reset(). Construction reads
+  // `opts.plan`; the bridge's loadPlan() rebinds this. Distinct from the
+  // exported `opts.plan` so a later reset(songId) doesn't get tangled with the
+  // initial-construction plan.
+  let pendingPlan: VisualMemoryPlan | undefined = opts.plan;
+  staleAlgo = pendingPlan != null && (pendingPlan.algoVersion | 0) !== VISUAL_MEMORY_ALGO_VERSION;
+  if (pendingPlan?.trackId) activeTrackId = pendingPlan.trackId | 0;
+
+  /**
+   * Re-populate `sections` from `pendingPlan`, if any. Each section's heavy
+   * OperatorConfig is RE-DERIVED via the generator using the stored seed +
+   * tier — we never persist generated configs (huge, brittle to algorithm
+   * tweaks). When the plan's algoVersion mismatches the current algorithm,
+   * the stored seeds would map to looks the new algorithm never produces, so
+   * we skip seed re-derivation entirely and only stash fingerprints into
+   * `staleAlgoFingerprints` (the reactor-return detector's future use). The
+   * lineage threads forward regardless; the song still "remembers" without
+   * snapping.
+   */
+  function repopulateFromPlan(): void {
+    if (!pendingPlan) return;
+    if (staleAlgo) {
+      for (const s of pendingPlan.sections) {
+        staleAlgoFingerprints.set(
+          s.sectionId,
+          new Float32Array(s.fingerprint.length === 24 ? s.fingerprint : new Array(24).fill(0)),
+        );
+      }
+      return;
+    }
+    for (const s of pendingPlan.sections) {
+      // Re-derive the look from the stored seed via the generator. We do NOT
+      // call generateForSection(sectionId, tier) here because the stored seed
+      // may have been minted under an older songId/lineage path; pull the
+      // exact seed from the plan and feed it directly to generate()+mutate().
+      const baseSeed = s.seed >>> 0;
+      const tier = s.tier;
+      const lookSeed = (baseSeed ^ 0x9e3779b1) >>> 0;
+      // Pick archetype with the same RNG ordering as generateForSectionFull
+      // so plan-stored looks reproduce identically.
+      const rng = new Rng(baseSeed);
+      const weights = TIER_ARCHETYPE_WEIGHTS[tier];
+      const archetype = rng.weighted(
+        ARCHETYPES as readonly Archetype[],
+        ARCHETYPES.map((a) => weights[a] ?? 0),
+      );
+      // If the stored archetype string differs from the redrawn one (e.g.
+      // weights changed within an algoVersion), prefer the stored archetype —
+      // the song should look the way the journal said it did.
+      const finalArchetype = (s.archetype as Archetype) ?? archetype;
+      const { config } = generate(lookSeed, finalArchetype);
+      const amount = TIER_MUTATE_AMOUNT[tier];
+      const mutateSeed = (baseSeed ^ 0x85ebca6b) >>> 0;
+      const tuned = amount > 0 ? mutate(config, amount, mutateSeed) : config;
+      tuned.name = `${tuned.archetype ?? 'look'} • s${s.sectionId} • ${tier}`;
+      sections.set(s.sectionId, {
+        config: tuned,
+        tier,
+        seed: baseSeed,
+        archetype: String(finalArchetype),
+        rotationIndex: s.rotationIndex | 0,
+        fingerprint:
+          s.fingerprint.length === 24 ? new Float32Array(s.fingerprint) : null,
+        observedCount: s.observedCount | 0,
+      });
+    }
+  }
+
+  // Initial-construction plan replay. If a plan was supplied via opts.plan,
+  // its sections are re-derived into `sections` now so the first
+  // update(sectionChanged=true) for a known sectionId recalls the look.
+  repopulateFromPlan();
+
   // Prime the first frame so callers see `current()` even before update().
   recomputeLive();
 
@@ -559,12 +787,25 @@ export function createDirector(opts: DirectorOptions = {}): Director {
         // First-ever update on a brand-new song: don't wait for the first
         // section boundary (which can take 6+ seconds) to start adapting —
         // generate an opening look immediately based on the priming tier.
+        // This is NOT a real audio section boundary (the reactor hasn't fired
+        // sectionChanged yet), so onSectionLearn is deliberately NOT called
+        // here — the bridge only persists looks the reactor structurally
+        // confirmed. The first real boundary that follows will overwrite this
+        // entry with a fingerprint-bearing one and fire the learn callback.
         const tier = tierFor(frame);
-        const nextConfig = generateForSection(frame.sectionId, tier);
-        sections.set(frame.sectionId, { config: cloneConfig(nextConfig), tier });
+        const minted = generateForSectionFull(frame.sectionId, tier);
+        sections.set(frame.sectionId, {
+          config: cloneConfig(minted.config),
+          tier,
+          seed: minted.seed,
+          archetype: String(minted.archetype),
+          rotationIndex: 0,
+          fingerprint: null,
+          observedCount: 1,
+        });
         lastSectionId = frame.sectionId;
         lastTier = tier;
-        startFade(nextConfig, 1, frame.bpm);
+        startFade(minted.config, 1, frame.bpm);
       }
 
       advanceFade(frame, dtMs);
@@ -592,6 +833,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     reset(nextSongId?: string): void {
       if (nextSongId) activeSongId = nextSongId;
       sections.clear();
+      staleAlgoFingerprints.clear();
       lastSectionId = -1;
       lastTier = null;
       energyAvg = 0;
@@ -610,6 +852,79 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       target = cloneConfig(live);
       fade = 1;
       fadeDurationMs = transitionMsFallback;
+      // Repopulate from the loaded plan, if any. We re-derive each section's
+      // OperatorConfig from its stored seed (via the same generator that
+      // mints them at runtime) — we never persist heavy configs. When the
+      // plan's algoVersion mismatches the current algorithm, we DON'T consume
+      // the stored seeds: we only keep the fingerprints to bias the reactor's
+      // section-return detector toward "this feels like the previous chorus".
+      repopulateFromPlan();
+    },
+
+    loadPlan(nextPlan): void {
+      // Replace lineage + counters + neighbor seed + sections from the new
+      // plan; reset() does the actual section repopulation work.
+      lineage = {
+        rootSeed: (nextPlan.lineage.rootSeed >>> 0) || hashSeed(activeSongId),
+        ancestors: nextPlan.lineage.ancestors.slice(),
+        generation: nextPlan.lineage.generation | 0,
+        evolutionLog: nextPlan.lineage.evolutionLog.slice(),
+      };
+      counters = { ...nextPlan.counters };
+      neighborSeed = nextPlan.neighborSeed ? { ...nextPlan.neighborSeed } : undefined;
+      activeTrackId = nextPlan.trackId | 0;
+      staleAlgo = (nextPlan.algoVersion | 0) !== VISUAL_MEMORY_ALGO_VERSION;
+      // Stash a reference so reset() can pull section data from it. We don't
+      // mutate `opts.plan` directly; instead use a private field.
+      pendingPlan = nextPlan;
+      // Full reset replays the plan into sections via repopulateFromPlan().
+      sections.clear();
+      staleAlgoFingerprints.clear();
+      lastSectionId = -1;
+      lastTier = null;
+      energyAvg = 0;
+      energyPeak = 0;
+      noveltyAccum = 0;
+      framesSinceSection = 0;
+      msSinceSwitch = 0;
+      rotationIndex = 0;
+      cachedRotateThresholdMs = null;
+      repopulateFromPlan();
+    },
+
+    exportPlan(updatedAt = 0): VisualMemoryPlan {
+      const sectionEntries: VisualMemorySection[] = [];
+      for (const [sectionId, mem] of sections) {
+        sectionEntries.push({
+          sectionId,
+          fingerprint: mem.fingerprint ? Array.from(mem.fingerprint) : new Array(24).fill(0),
+          seed: mem.seed >>> 0,
+          archetype: mem.archetype,
+          tier: mem.tier,
+          rotationIndex: mem.rotationIndex,
+          observedCount: mem.observedCount,
+          firstSeenAt: 0,
+          lastSeenAt: 0,
+        });
+      }
+      sectionEntries.sort((a, b) => a.sectionId - b.sectionId);
+      const plan: VisualMemoryPlan = {
+        schema: 1,
+        algoVersion: VISUAL_MEMORY_ALGO_VERSION,
+        trackId: activeTrackId | 0,
+        songId: activeSongId,
+        lineage: {
+          rootSeed: lineage.rootSeed >>> 0,
+          ancestors: lineage.ancestors.slice(),
+          generation: lineage.generation | 0,
+          evolutionLog: lineage.evolutionLog.slice(),
+        },
+        sections: sectionEntries,
+        counters: { ...counters },
+        updatedAt,
+      };
+      if (neighborSeed) plan.neighborSeed = { ...neighborSeed };
+      return plan;
     },
 
     current(): OperatorConfig {

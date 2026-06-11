@@ -84,6 +84,7 @@ import type {
   Track,
   TrackMetadataPatchInput,
 } from '../shared/types.js';
+import type { VisualMemoryPlan } from '../shared/visual-memory.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appRoot = join(__dirname, '..', '..');
@@ -1518,6 +1519,14 @@ function registerIpc(): void {
   ipcMain.handle('tracks:dna-stats', async () => library.getDnaStats());
   ipcMain.handle('tracks:dna-all', async () => library.getAllTrackDna());
   ipcMain.handle('tracks:dna-similar', async (_e, id: number, limit?: number) => library.findSimilarTracks(id, limit ?? 20));
+  ipcMain.handle('tracks:visual-memory-get', async (_e, id: number) => library.getTrackVisualMemory(id));
+  ipcMain.handle('tracks:visual-memory-set', async (_e, id: number, plan: unknown) =>
+    library.setTrackVisualMemory(id, plan as VisualMemoryPlan | null),
+  );
+  ipcMain.handle('tracks:visual-memory-clear', async (_e, id: number) =>
+    library.clearTrackVisualMemory(id),
+  );
+  ipcMain.handle('tracks:visual-memory-stats', async () => library.getVisualMemoryStats());
   ipcMain.handle('tags:list-rules', async () => library.listTagRules());
   ipcMain.handle('tags:save-rule', async (_e, input) => {
     const saved = library.saveTagRule(input);
