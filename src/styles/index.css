@@ -5358,3 +5358,91 @@ input[type='range'].nslider.eq-slider {
 .signal-path-badge.is-dim {
   opacity: 0.65;
 }
+
+/* Eviland "remembers this song" badge. Styled off the signal-path-badge tokens
+   so theme swaps carry through; positioned top-left of the fullscreen viz with
+   a slow CSS opacity transition driving the fade-in / fade-out states. */
+.eviland-memory-badge {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 80;
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+  border-radius: var(--radius, 2px);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: auto;
+  text-shadow: 0 0 6px color-mix(in srgb, var(--accent) 40%, transparent);
+  /* Spring-ish ease for arrival; honors reduced-motion below. */
+  transition: opacity 4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.eviland-memory-badge--fade-in {
+  opacity: 1;
+}
+.eviland-memory-badge--visible {
+  opacity: 1;
+  transition: opacity 0.8s ease;
+}
+.eviland-memory-badge--fade-out {
+  opacity: 0;
+  transition: opacity 0.8s ease;
+}
+.eviland-memory-badge--pinned {
+  opacity: 1;
+  transition: none;
+}
+.eviland-memory-badge:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.eviland-memory-badge-popover {
+  position: absolute;
+  top: 46px;
+  left: 16px;
+  z-index: 81;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 260px;
+  max-width: 360px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card, 6px);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  color: var(--ink-2);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+.eviland-memory-badge-popover__row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.eviland-memory-badge-popover__line {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eviland-memory-badge,
+  .eviland-memory-badge--fade-in,
+  .eviland-memory-badge--visible,
+  .eviland-memory-badge--fade-out {
+    transition: none;
+  }
+}
