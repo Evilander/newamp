@@ -1103,6 +1103,7 @@ export interface NewAmpAPI {
   setTrackVisualMemory: (id: number, plan: VisualMemoryPlanPublic) => Promise<boolean>;
   clearTrackVisualMemory: (id: number) => Promise<boolean>;
   getVisualMemoryStats: () => Promise<VisualMemoryStatsPublic>;
+  clearAllVisualMemory: () => Promise<number>;
   getRadioBrainStatus: () => Promise<RadioBrainStatus>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;

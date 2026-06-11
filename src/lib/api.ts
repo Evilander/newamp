@@ -215,6 +215,7 @@ const stub: NewAmpAPI = {
   setTrackVisualMemory: async () => false,
   clearTrackVisualMemory: async () => false,
   getVisualMemoryStats: async () => ({ tracksWithMemory: 0, totalSections: 0, oldestAt: null }),
+  clearAllVisualMemory: async () => 0,
   getRadioBrainStatus: async () => ({ enabled: false, port: DEFAULT_SETTINGS.radioBrainPort, baseUrl: null, endpoints: [], startedAt: null, error: null }),
   listTagRules: async () => [],
   saveTagRule: async (input) => ({

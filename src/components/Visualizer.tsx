@@ -19,6 +19,9 @@ import {
   decode as decodeEvilandConfig,
 } from '../visualizer/eviland-randomizer';
 import type { OperatorConfig, WaveMode } from '../visualizer/eviland-operators';
+import { createMemoryBridge, type MemoryBridge } from '../visualizer/eviland-memory-bridge';
+import { publishActiveBridge } from '../visualizer/eviland-memory-bridge-registry';
+import { api } from '../lib/api';
 
 export type VizMode =
   | 'mini'
@@ -403,9 +406,23 @@ export function Visualizer({
       // looks (randomize / shared seed) are applied once when the store's
       // nonce changes and persist until the user randomizes again or re-
       // enables the director.
+      //
+      // The MemoryBridge owns persistence + lineage evolution; the Director
+      // stays pure (no Date.now, no IPC). We construct the Director WITHOUT
+      // a plan, then loadOrSeed → loadPlan asynchronously so a track-load
+      // race never blocks the renderer's first frame.
       const initial = evilandStateRef.current;
+      let bridge: MemoryBridge = createMemoryBridge({ trackId: initial.trackId, api });
+      let bridgeLoadCancelled = false;
       const director = createDirector({
         songId: initial.trackId != null ? `track-${initial.trackId}` : 'eviland',
+        onSectionLearn: (section) => bridge.observeSection(section),
+      });
+      bridge.attachDirector(director);
+      publishActiveBridge(bridge);
+      void bridge.loadOrSeed().then((plan) => {
+        if (bridgeLoadCancelled) return;
+        if (plan) director.loadPlan(plan);
       });
       let lastAppliedNonce = -1;
       let lastTrackId: number | null = initial.trackId;
@@ -466,8 +483,25 @@ export function Visualizer({
         // Read via ref — no per-frame React subscription, no rAF restart.
         const ui = evilandStateRef.current;
         if (ui.trackId !== lastTrackId) {
+          // Track change: flush + dispose the old bridge, then mint a fresh one
+          // for the new track and reset the Director. We don't await the flush
+          // — it's fire-and-forget so the next track's loop starts immediately.
+          const previousBridge = bridge;
+          void previousBridge.flushAndDispose('track-change');
+          bridgeLoadCancelled = true; // cancel any in-flight loadOrSeed for the prior track
           lastTrackId = ui.trackId;
           director.reset(ui.trackId != null ? `track-${ui.trackId}` : 'eviland');
+          bridge = createMemoryBridge({ trackId: ui.trackId, api });
+          bridge.attachDirector(director);
+          publishActiveBridge(bridge);
+          bridgeLoadCancelled = false;
+          // Capture the bridge in scope so a later track change doesn't
+          // race the loadPlan into a stale director.
+          const currentBridge = bridge;
+          void currentBridge.loadOrSeed().then((plan) => {
+            if (bridge !== currentBridge) return;
+            if (plan) director.loadPlan(plan);
+          });
         }
 
         if (ui.director) {
@@ -498,6 +532,9 @@ export function Visualizer({
 
       return () => {
         cancelAnimationFrame(raf);
+        bridgeLoadCancelled = true;
+        void bridge.flushAndDispose('unmount');
+        publishActiveBridge(null);
         renderer.dispose();
       };
     }
