@@ -3,6 +3,48 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.12.0] - 2026-06-11
+
+### Added
+
+- **Eviland remembers your library.** The visualizer now has long-term memory of
+  your taste — the first music visualizer anywhere to have one. Every song you
+  play with Eviland active learns a persistent visual plan: its section
+  fingerprints, the look each section earned, and a seed lineage that *evolves*
+  with your listening (a song's visuals gain a generation at 8, 32, 96, and 256
+  plays — loving a track evolves it early; old favorites stabilize). Plans
+  survive restarts: when you come back to a song, its choruses bloom the same
+  visual they did last week. New songs aren't blank either — a track that sounds
+  like one Eviland already knows (Audio DNA cosine ≥ 0.92) borrows a derived
+  visual lineage from its sonic cousin, disclosed in the UI as "Borrowed visual
+  DNA from …". Identity is seed lineage, never stored frames: one tiny row per
+  track (≤1 database write per completed play), deterministic re-derivation,
+  ancestor seeds preserved forever (your visualizer stays recognizable as it
+  evolves), and an `algoVersion` contract — enforced by a CI guard — so engine
+  upgrades can never silently break a remembered look. A small "REMEMBERS THIS
+  SONG · gen 2 — 17 plays · 4 sections known" badge fades in on track start
+  (pin it for per-track reset and lineage details); Settings shows how many
+  tracks Eviland knows, with a one-click purge. Non-library playback (dropped
+  files, podcasts) is never memorized. The detached projector reads memory but
+  never writes it. (`src/visualizer/eviland-memory-*.ts`,
+  `eviland-director.ts`, `electron/library.ts` `track_visual_memory`)
+
+### Performance
+
+- Echo FBOs now free with 30-frame hysteresis instead of thrashing ~32MB of
+  allocations when a look's echo hovers at the activation gate; fluid forces
+  come from a preallocated pool (was ~25–30 allocations per audio frame);
+  section fades use an allocation-free config lerp with an owned-palette
+  alias-safety contract; attribute locations are cached per program (was ~16
+  driver lookups per frame); the transport signal-path badge re-renders only
+  when its readout actually changes (was 10×/sec during playback). All
+  zero-value changes: operator goldens untouched, GPU smoke byte-identical.
+
+### Fixed
+
+- DSD format badges now recognize 48kHz-base DSD streams (DSD64 at 3.072MHz)
+  instead of labeling them bare "DSD".
+
 ## [1.11.0] - 2026-06-10
 
 ### Added
