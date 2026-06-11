@@ -143,6 +143,25 @@ export interface MemoryBridge {
   /** Flush + tear down event listeners. Idempotent. */
   flushAndDispose(reason: FlushReason): Promise<boolean>;
 
+  /**
+   * Tear down WITHOUT flushing. Drops the in-memory plan + counters + buffered
+   * sections + dirty flag, and short-circuits every subsequent flush() /
+   * flushAndDispose() / observeSection() / record* call for the lifetime of
+   * this bridge. Use this when the caller has just deleted the row out from
+   * under us (badge "Reset visual memory for this track") so a trailing flush
+   * doesn't immediately resurrect the row from still-resident in-memory state.
+   * Idempotent.
+   */
+  discard(): void;
+
+  /**
+   * Snapshot of the bridge's current in-memory plan, or null if no plan is
+   * loaded. Used by the Visualizer's same-track remount path (finding #6) to
+   * re-prime a freshly-constructed Director with the cached bridge's plan
+   * WITHOUT a fresh IPC round-trip. Read-only — callers must not mutate.
+   */
+  getCurrentPlan(): VisualMemoryPlan | null;
+
   /** Live state snapshot for the badge. */
   getState(): MemoryBridgeState;
 
@@ -171,6 +190,13 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
   let plan: VisualMemoryPlan | null = null;
   let director: Director | null = null;
   let disposed = false;
+  // discarded: hard kill-switch set by discard(). Distinct from disposed
+  // because flushAndDispose() sets disposed=true BEFORE calling flush() to
+  // make the dispose path idempotent — if `flush()` checked `disposed` it
+  // would early-return and the dispose path could never persist its
+  // buffered work. discarded means "drop everything, future writes are
+  // forbidden for this bridge's lifetime" and IS checked by flush().
+  let discarded = false;
   let dirty = 0;
   /** Sections buffered since the last flush. We dedupe by sectionId so a chorus return doesn't double-flush. */
   const bufferedSections = new Map<number, VisualMemorySection>();
@@ -336,6 +362,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
 
   let flushInFlight: Promise<boolean> | null = null;
   async function flush(reason: FlushReason): Promise<boolean> {
+    if (discarded) return false;
     if (trackId == null) return false;
     if (!director && !plan) return false;
     if (dirty === 0 && bufferedSections.size === 0 && !plan) return false;
@@ -395,6 +422,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
   }
 
   function recordCompletedPlay(): void {
+    if (disposed) return;
     if (!plan || trackId == null) return;
     plan.counters.plays++;
     // The ladder is [8, 32, 96, 256]. nextGenerationAt returns the threshold
@@ -409,6 +437,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
   }
 
   function recordLove(): void {
+    if (disposed) return;
     if (!plan || trackId == null) return;
     plan.counters.loves++;
     // Love forces an immediate generation tick when generation < 3 — the
@@ -421,6 +450,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
   }
 
   function recordSkip(): void {
+    if (disposed) return;
     if (!plan || trackId == null) return;
     plan.counters.skips++;
     refreshStateFromPlan();
@@ -428,6 +458,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
   }
 
   function recordSectionReturn(): void {
+    if (disposed) return;
     if (!plan || trackId == null) return;
     plan.counters.sectionReturns++;
     refreshStateFromPlan();
@@ -465,6 +496,39 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     return flush(reason);
   }
 
+  /**
+   * Drop everything in memory and short-circuit future writes. Used by the
+   * badge's Reset path so a trailing flush can't resurrect the row we just
+   * asked the DB to delete.
+   *
+   * Implementation: we mark the bridge `disposed` (which makes flush(),
+   * observeSection(), and the record* methods all early-return), null the
+   * plan, drop counters + buffered sections + dirty, drop the in-flight flush
+   * promise (further writes are blocked by the disposed gate anyway), tear
+   * down listeners + visibility timer + handler, and refresh state → notify
+   * subscribers once with hasPlan=false so the badge re-renders as "no plan".
+   */
+  function discard(): void {
+    if (disposed) return;
+    disposed = true;
+    discarded = true;
+    plan = null;
+    dirty = 0;
+    bufferedSections.clear();
+    flushInFlight = null;
+    if (visibilityTimer) {
+      clearTimeout(visibilityTimer);
+      visibilityTimer = null;
+    }
+    if (visibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', visibilityHandler);
+      visibilityHandler = null;
+    }
+    refreshStateFromPlan();
+    notify();
+    listeners.clear();
+  }
+
   return {
     loadOrSeed,
     attachDirector,
@@ -475,6 +539,10 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     recordSectionReturn,
     flush,
     flushAndDispose,
+    discard,
+    getCurrentPlan() {
+      return plan;
+    },
     getState() {
       return { ...state };
     },
