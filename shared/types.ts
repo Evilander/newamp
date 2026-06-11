@@ -1,6 +1,7 @@
 // Shared types between main and renderer. Keep this tiny and serializable.
 
 import type { TrackDna as TrackDnaPublic } from './audio-dna.js';
+import type { VisualMemoryPlan as VisualMemoryPlanPublic, VisualMemoryStats as VisualMemoryStatsPublic } from './visual-memory.js';
 
 export interface TagRule {
   id: number;
@@ -1098,6 +1099,11 @@ export interface NewAmpAPI {
   getDnaStats: () => Promise<DnaStats>;
   getAllTrackDna: () => Promise<Array<{ id: number; dna: TrackDnaPublic }>>;
   findSimilarTracks: (trackId: number, limit?: number) => Promise<SimilarTrack[]>;
+  getTrackVisualMemory: (id: number) => Promise<VisualMemoryPlanPublic | null>;
+  setTrackVisualMemory: (id: number, plan: VisualMemoryPlanPublic) => Promise<boolean>;
+  clearTrackVisualMemory: (id: number) => Promise<boolean>;
+  getVisualMemoryStats: () => Promise<VisualMemoryStatsPublic>;
+  clearAllVisualMemory: () => Promise<number>;
   getRadioBrainStatus: () => Promise<RadioBrainStatus>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;

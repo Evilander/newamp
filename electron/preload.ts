@@ -78,6 +78,7 @@ import type {
   TrackWavExportResult,
 } from '../shared/types.js';
 import type { TrackDna } from '../shared/audio-dna.js';
+import type { VisualMemoryPlan, VisualMemoryStats } from '../shared/visual-memory.js';
 
 const api: NewAmpAPI = {
   scanLibrary: (roots) => ipcRenderer.invoke('library:scan', roots),
@@ -162,6 +163,16 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tracks:dna-all') as Promise<Array<{ id: number; dna: TrackDna }>>,
   findSimilarTracks: (trackId: number, limit?: number) =>
     ipcRenderer.invoke('tracks:dna-similar', trackId, limit) as Promise<SimilarTrack[]>,
+  getTrackVisualMemory: (id: number) =>
+    ipcRenderer.invoke('tracks:visual-memory-get', id) as Promise<VisualMemoryPlan | null>,
+  setTrackVisualMemory: (id: number, plan: VisualMemoryPlan) =>
+    ipcRenderer.invoke('tracks:visual-memory-set', id, plan) as Promise<boolean>,
+  clearTrackVisualMemory: (id: number) =>
+    ipcRenderer.invoke('tracks:visual-memory-clear', id) as Promise<boolean>,
+  getVisualMemoryStats: () =>
+    ipcRenderer.invoke('tracks:visual-memory-stats') as Promise<VisualMemoryStats>,
+  clearAllVisualMemory: () =>
+    ipcRenderer.invoke('tracks:visual-memory-clear-all') as Promise<number>,
   getRadioBrainStatus: () => ipcRenderer.invoke('radio-brain:status') as Promise<RadioBrainStatus>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,

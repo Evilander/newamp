@@ -48,6 +48,17 @@ export interface EvilandFrame {
   sectionId: number; // monotonically increasing section index
   sectionChanged: boolean; // a section boundary fired this frame
   sectionReturn: number; // -1 if novel, else index of the matching prior section
+  /**
+   * The 24-float mel-band average for the section that just ENDED, made
+   * available ONLY on the frame where sectionChanged === true. Null on every
+   * other frame (including frames inside a section). Allocated once per real
+   * boundary (~every 10-30s) — the hot path stays allocation-free.
+   *
+   * Consumers: the renderer-side memory bridge fingerprints sections into the
+   * persistent VisualMemoryPlan. The visualizer itself does NOT read this — it
+   * already gets section identity from sectionId + sectionReturn.
+   */
+  sectionFingerprint: Float32Array | null;
 }
 
 export interface EvilandReactorConfig {
@@ -203,6 +214,7 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
     sectionId: 0,
     sectionChanged: false,
     sectionReturn: -1,
+    sectionFingerprint: null,
   };
   const onsetPool: EvilandOnset[] = [];
   // Reusable scratch for the BPM median sort: avoids a per-frame [...ioi]
@@ -393,6 +405,9 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
       // --- structural memory: novelty curve + section fingerprints ---
       out.sectionChanged = false;
       out.sectionReturn = -1;
+      // sectionFingerprint is non-null ONLY on the frame a boundary fires; reset
+      // here so any null-check downstream reads false on every other frame.
+      out.sectionFingerprint = null;
       sectionFrames++;
       for (let b = 0; b < EVILAND_BANDS; b++) sectionAccum[b]! += bandMag[b]!;
       if (nowMs - lastStructAt >= STRUCT_PERIOD_MS) {
@@ -432,6 +447,11 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
           sectionAccum.fill(0);
           out.sectionChanged = true;
           out.sectionReturn = bestIdx;
+          // Surface the just-fingerprinted section so the renderer-side memory
+          // bridge can persist it. The one Float32Array(24) allocation per real
+          // boundary (~every 10-30s) is the entire per-frame cost — the rest of
+          // the hot path stays allocation-free.
+          out.sectionFingerprint = fp;
         }
       } else {
         out.novelty *= 0.9;

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { engine, usePlayerStore } from '../store/usePlayerStore';
 
 /**
@@ -15,10 +15,31 @@ export function SignalPathBadge(): JSX.Element | null {
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const setView = usePlayerStore((s) => s.setView);
-  // Re-render whenever the engine emits — covers the boot transition where
-  // getActualSampleRate() goes from null to a real rate after the first play.
+  // Re-render whenever the engine emits a NEW signal-path signature — covers
+  // the boot transition where getActualSampleRate() goes from null to a real
+  // rate after the first play, but skips the ~10Hz time-bucket churn that the
+  // engine also fires during playback (which previously re-rendered every
+  // SignalPathBadge instance on the page for no visible change).
   const [, bumpTick] = useState(0);
-  useEffect(() => engine.subscribe(() => bumpTick((n) => n + 1)), []);
+  const lastSigRef = useRef<string | null>(null);
+  useEffect(
+    () =>
+      engine.subscribe(() => {
+        const src = usePlayerStore.getState().current?.sampleRate ?? null;
+        const actual = engine.getActualSampleRate();
+        const fb = engine.getSampleRateFallback?.() ?? null;
+        // Composite signature: source rate | engine rate | fallback shape.
+        // Anything that changes the rendered label/title (rate transitions,
+        // fallback appearing/disappearing) flips this string; the time-bucket
+        // ticks every ~100ms do not.
+        const sig = `${src ?? 'x'}|${actual ?? 'x'}|${fb ? `${fb.requested}>${fb.actual}` : 'n'}`;
+        if (sig !== lastSigRef.current) {
+          lastSigRef.current = sig;
+          bumpTick((n) => n + 1);
+        }
+      }),
+    [],
+  );
 
   const sourceRate = current?.sampleRate ?? null;
   const actualRate = engine.getActualSampleRate();

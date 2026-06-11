@@ -23,7 +23,7 @@ await build({
   bundle: true, format: 'esm', platform: 'node', target: 'es2022',
   outfile: resolve('tmp/eviland-ops-bundle.mjs'), logLevel: 'silent',
 });
-const { defaultConfig, cloneConfig, lerpConfig, createDynamics, evalConfig } = await import(pathToFileURL(resolve('tmp/eviland-ops-bundle.mjs')).href);
+const { defaultConfig, cloneConfig, lerpConfig, lerpConfigInto, createDynamics, evalConfig } = await import(pathToFileURL(resolve('tmp/eviland-ops-bundle.mjs')).href);
 
 function mockFrame(over = {}) {
   return {
@@ -205,6 +205,107 @@ log.push('default/clone/lerp/mutate plumbing OK');
   evalConfig(stamped, mockFrame(), 0.5, out);
   if (Math.abs(out.transition - 0.3) > 1e-9) fail('evalConfig must propagate _transition to dynamics.transition');
   log.push('crossfade meta plumbing OK');
+}
+
+// ─── lerpConfigInto EQUIVALENCE (Director's per-frame fade-path GC fix) ────
+// lerpConfigInto must produce values byte-identical to lerpConfig at every t,
+// for every channel + optional field that the Director's fade path touches.
+// If this drifts, the renderer's section fades render differently between the
+// allocating and pool variants — which is exactly the regression class we
+// guard against by keeping lerpConfig for drift and lerpConfigInto for fades.
+{
+  const a3 = generate(42).config;
+  const b3 = generate(1337).config;
+  // Reusable scratch — populated by the FIRST call; the SECOND call (with a
+  // different t) must overwrite every relevant field cleanly.
+  const scratch = cloneConfig(a3);
+  // Required channel fields we expect lerpConfigInto to mutate in place.
+  const reqChannels = [
+    'zoom','rotate','swirl','hueCycle','decay','warpAmp','warpScale','mirror',
+    'mirrorMix','flowX','flowY','fluid','vorticity','liquidMix','dyeDissipation','bloom',
+  ];
+  const optChannels = [
+    'radialZoom','radialRotate','radialSwirl','radialDecay',
+    'decayR','decayG','decayB','centreX','centreY',
+    'echoZoom','echoRotate','echoAlpha','echoFlipX','echoFlipY',
+  ];
+  function eqChannel(x, y, label, t) {
+    if (!x && !y) return;
+    if (!x || !y) { fail(`lerpConfigInto/${label}: presence mismatch at t=${t} (alloc=${!!y} pool=${!!x})`); return; }
+    if (!close(x.base, y.base)) fail(`lerpConfigInto/${label}.base drift at t=${t}: ${x.base} vs ${y.base}`);
+    const ab = (x.bindings ?? []).slice().sort((p, q) => p.feature.localeCompare(q.feature));
+    const bb = (y.bindings ?? []).slice().sort((p, q) => p.feature.localeCompare(q.feature));
+    if (ab.length !== bb.length) { fail(`lerpConfigInto/${label}.bindings length at t=${t}: ${ab.length} vs ${bb.length}`); return; }
+    for (let i = 0; i < ab.length; i++) {
+      if (ab[i].feature !== bb[i].feature) fail(`lerpConfigInto/${label}.bindings[${i}].feature at t=${t}`);
+      if (!close(ab[i].gain, bb[i].gain)) fail(`lerpConfigInto/${label}.bindings[${i}].gain at t=${t}: ${ab[i].gain} vs ${bb[i].gain}`);
+      if (ab[i].curve !== bb[i].curve) fail(`lerpConfigInto/${label}.bindings[${i}].curve at t=${t}`);
+    }
+  }
+  for (const t of [0, 0.1, 0.25, 0.4999, 0.5, 0.5001, 0.7, 1]) {
+    const ref = lerpConfig(a3, b3, t);
+    lerpConfigInto(scratch, a3, b3, t);
+    // Discrete + scalar fields.
+    if (scratch.mirrorSet !== ref.mirrorSet) fail(`lerpConfigInto: mirrorSet at t=${t}`);
+    if (scratch.spinFromSection !== ref.spinFromSection) fail(`lerpConfigInto: spinFromSection at t=${t}`);
+    if (scratch.waveform.mode !== ref.waveform.mode) fail(`lerpConfigInto: waveform.mode at t=${t}`);
+    if (!close(scratch.waveform.thickness, ref.waveform.thickness)) fail(`lerpConfigInto: waveform.thickness at t=${t}`);
+    if (!close(scratch.waveform.scale, ref.waveform.scale)) fail(`lerpConfigInto: waveform.scale at t=${t}`);
+    eqChannel(scratch.waveform.intensity, ref.waveform.intensity, 'waveform.intensity', t);
+    if (!close(scratch.emitterScale, ref.emitterScale)) fail(`lerpConfigInto: emitterScale at t=${t}`);
+    if (!close(scratch.emitterGain, ref.emitterGain)) fail(`lerpConfigInto: emitterGain at t=${t}`);
+    if (scratch._transition !== undefined) fail(`lerpConfigInto must not stamp _transition (t=${t})`);
+    // Required channels.
+    for (const k of reqChannels) eqChannel(scratch[k], ref[k], k, t);
+    // Optional channels (presence-mismatch is itself an error).
+    for (const k of optChannels) eqChannel(scratch[k], ref[k], k, t);
+    // Palette: when both have palettes, components must match; otherwise both
+    // should pick from `pick.palette ?? null`.
+    if (a3.palette && b3.palette) {
+      for (const slot of ['bg','dark','accent','light']) {
+        for (let i = 0; i < 3; i++) {
+          if (!close(scratch.palette[slot][i], ref.palette[slot][i])) fail(`lerpConfigInto: palette.${slot}[${i}] at t=${t}`);
+        }
+      }
+    }
+  }
+  // Scratch reuse contract: writing again with a different (a,b) pair fully
+  // overwrites the previous result; no stale binding leaks across calls.
+  const a4 = generate(7).config;
+  const b4 = generate(9999).config;
+  lerpConfigInto(scratch, a3, b3, 0.3);
+  lerpConfigInto(scratch, a4, b4, 0.6);
+  const fresh = lerpConfig(a4, b4, 0.6);
+  for (const k of reqChannels) eqChannel(scratch[k], fresh[k], `reuse/${k}`, 0.6);
+  for (const k of optChannels) eqChannel(scratch[k], fresh[k], `reuse/${k}`, 0.6);
+  log.push('lerpConfigInto: byte-identical to lerpConfig across t∈{0..1} and across scratch reuse');
+
+  // ALIAS SAFETY: lerpConfigInto must NOT alias `out`'s palette/channel arrays
+  // onto any input. The Director's section recall caught this in the wild:
+  // when one input had a null palette and the other had a real palette, an
+  // earlier draft assigned `out.palette = pick.palette` (the input ref).
+  // The next call then mutated through to a stashed section snapshot.
+  {
+    const aP = generate(42).config;      // has palette
+    const bN = cloneConfig(generate(1337).config);
+    bN.palette = null;                   // force "one side null" branch
+    const out2 = cloneConfig(defaultConfig());
+    // First call: pick is aP (t=0.2 < 0.5); out.palette must be a clone, not aP.palette.
+    lerpConfigInto(out2, aP, bN, 0.2);
+    if (out2.palette === aP.palette) fail('lerpConfigInto aliased out.palette onto input (a.palette ref)');
+    // Mutate out.palette and re-check aP.palette is untouched.
+    const accentSnap = aP.palette ? aP.palette.accent.slice() : null;
+    out2.palette.accent[0] = -999;
+    if (aP.palette && (aP.palette.accent[0] !== accentSnap[0])) fail('lerpConfigInto mutation bled through to input a.palette');
+    // Second call with both palettes present: still no aliasing.
+    const aP2 = generate(7).config;
+    const bP2 = generate(9999).config;
+    lerpConfigInto(out2, aP2, bP2, 0.5);
+    if (out2.palette === aP2.palette || out2.palette === bP2.palette) fail('lerpConfigInto aliased out.palette onto input on second call');
+    out2.palette.bg[0] = -999;
+    if (aP2.palette.bg[0] === -999 || bP2.palette.bg[0] === -999) fail('mutation bled through to inputs on both-palettes branch');
+  }
+  log.push('lerpConfigInto: palette never aliases an input config (section-recall safety)');
 }
 
 // ─── PLAN §3 ARCHETYPE DISTINCTNESS ────────────────────────────────────────

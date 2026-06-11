@@ -23,6 +23,8 @@ import { generate as generateEvilandConfig, decode as decodeEvilandConfig } from
 import type { OperatorConfig, WaveMode } from './eviland-operators';
 import type { EvilandPalette } from './eviland';
 import { frameBus } from './frame-bus';
+import { createMemoryBridge, type MemoryBridge } from './eviland-memory-bridge';
+import { api } from '../lib/api';
 
 export interface EvilandProducerUiState {
   /** AI Director on → look conducts itself to the song. */
@@ -76,6 +78,45 @@ function applyWaveformOverride(
 }
 
 let activeStop: (() => void) | null = null;
+
+/**
+ * Producer-side: hot-load the persisted plan into the local Director so the
+ * detached projector remembers the track without being on-screen. READ-ONLY:
+ * we never call observeSection or flush — the on-screen Visualizer's bridge
+ * owns writes.
+ *
+ * Cancellation: captures the trackId at call time and compares against the
+ * producer's CURRENT trackId after the IPC resolves. If the producer's track
+ * changed mid-flight, the loaded plan is discarded (loadPlan is NOT called)
+ * so the now-reset director for the new track isn't repopulated with stale
+ * sections. This is the producer-side mirror of the on-screen Visualizer's
+ * captured-bridge identity guard (finding #5 from the pre-release review).
+ *
+ * The `getCurrentTrackId` getter reads the producer's `lastTrackId` closure
+ * variable lazily — it's the source of truth for the producer's current track,
+ * updated synchronously by the rAF loop's track-change branch.
+ */
+function maybeLoadPlanIntoProducerDirector(
+  director: Director,
+  trackId: number | null,
+  getCurrentTrackId: () => number | null,
+): void {
+  if (trackId == null) return;
+  const readOnlyBridge: MemoryBridge = createMemoryBridge({ trackId, api });
+  const target = director;
+  const capturedTrackId = trackId;
+  void readOnlyBridge.loadOrSeed().then((plan) => {
+    // Discard if the producer's track changed while we were waiting.
+    if (getCurrentTrackId() !== capturedTrackId) {
+      void readOnlyBridge.flushAndDispose('manual');
+      return;
+    }
+    if (plan) target.loadPlan(plan);
+    // Dispose without flushing — the bridge has no buffered sections (we
+    // never observed) so this is a clean teardown of the visibility listener.
+    void readOnlyBridge.flushAndDispose('manual');
+  });
+}
 
 /**
  * Start the singleton headless producer. Idempotent — a second call replaces
@@ -142,10 +183,19 @@ export function startEvilandProducer(
     const ui = getUiState();
     if (!director) {
       director = createDirector({ songId: ui.trackId != null ? `track-${ui.trackId}` : 'eviland' });
+      // Set lastTrackId BEFORE issuing the read so getCurrentTrackId() returns
+      // the right value if the IPC resolves before the next rAF tick.
+      lastTrackId = ui.trackId;
+      // Producer-side bridge is READ-ONLY: it loads the plan into the local
+      // Director so the projector remembers, but it does NOT observe sections
+      // or flush. The on-screen Visualizer's bridge is the sole writer; this
+      // avoids double-flush + double-counted plays when both run at once.
+      maybeLoadPlanIntoProducerDirector(director, ui.trackId, () => lastTrackId);
     }
     if (ui.trackId !== lastTrackId) {
       lastTrackId = ui.trackId;
       director.reset(ui.trackId != null ? `track-${ui.trackId}` : 'eviland');
+      maybeLoadPlanIntoProducerDirector(director, ui.trackId, () => lastTrackId);
     }
 
     let config: OperatorConfig;
