@@ -33,6 +33,7 @@ import {
   cloneConfig,
   defaultConfig,
   lerpConfig,
+  lerpConfigInto,
 } from './eviland-operators';
 import {
   ARCHETYPES,
@@ -366,6 +367,14 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   let target: OperatorConfig = cloneConfig(initial);
   // The look we're fading from; snapshot taken when the fade starts.
   let from: OperatorConfig = cloneConfig(initial);
+  // Scratch config used by the per-frame fade path via lerpConfigInto so we
+  // don't allocate ~30 fresh Channel objects (+ a Map per channel) every
+  // frame. `live` is reassigned to point at this scratch while a section
+  // fade is in flight; it is then snapshotted by startFade()'s
+  // `from = cloneConfig(live)` which deep-copies values out, so the next
+  // lerpConfigInto can safely overwrite the scratch in place. The renderer's
+  // read of `live` happens synchronously within the same recomputeLive call.
+  const fadeScratch: OperatorConfig = cloneConfig(initial);
 
   // Crossfade progress 0..1. 1 = fully on target.
   let fade = 1;
@@ -676,7 +685,14 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       live = from;
     } else {
       const t = fade * fade * (3 - 2 * fade);
-      live = lerpConfig(from, target, t);
+      // Allocation-light fade path: lerpConfigInto reuses fadeScratch's
+      // channels (and their bindings arrays) instead of minting fresh objects
+      // every frame. Output values are byte-identical to `lerpConfig(from,
+      // target, t)`. fadeScratch is the same object every frame; that's safe
+      // because the renderer reads `live` synchronously and startFade()
+      // deep-copies it via `from = cloneConfig(live)` before the next fade.
+      lerpConfigInto(fadeScratch, from, target, t);
+      live = fadeScratch;
       // Section fade — stamp the eased transition value so the renderer
       // captures a field snapshot at fade start and crossfades against it.
       // Falls back to undefined the instant fade reaches 1 (see above).
