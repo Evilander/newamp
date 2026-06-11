@@ -151,17 +151,22 @@ function codecLabel(ext: string, fallback: string): string {
 
 /**
  * Map a DSD sample rate to the familiar DSD64/128/256/512 multiplier label.
- * DSD64 base rate = 44.1 kHz × 64 = 2,822,400 Hz; allow ±5% slop for tagger
- * rounding.
+ * The multiplier convention names the rate CLASS (DSD64 ≈ 2.8 MHz, DSD128 ≈
+ * 5.6 MHz, …), not the underlying base, so both 44.1k-base and 48k-base
+ * sources should classify to the same label. We accept either base with the
+ * same ±5% tolerance for tagger rounding; bare "DSD" is only returned when
+ * neither family matches.
  */
 export function dsdLabelFromSampleRate(sampleRate: number | null | undefined): string {
   const rate = numberOrNull(sampleRate);
   if (rate == null) return 'DSD';
-  const base = 44100;
+  const bases = [44100, 48000];
   const multipliers = [64, 128, 256, 512, 1024] as const;
-  for (const m of multipliers) {
-    const target = base * m;
-    if (Math.abs(rate - target) <= target * 0.05) return `DSD${m}`;
+  for (const base of bases) {
+    for (const m of multipliers) {
+      const target = base * m;
+      if (Math.abs(rate - target) <= target * 0.05) return `DSD${m}`;
+    }
   }
   return 'DSD';
 }

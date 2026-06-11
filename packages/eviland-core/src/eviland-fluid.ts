@@ -12,10 +12,15 @@
 // Jacobi pressure projection. The renderer samples `velocityTexture()` in the
 // dye pass so simulated momentum composes with the procedural warp.
 //
-// Two exports:
-//   - fluidForcesFromFrame — pure, Node-testable mapping from an EvilandFrame
-//     to a bounded list of impulses (kick=shockwave, snare=jet, hats=top
-//     turbulence, bass/pan=shear+bias, pre-beat inhale).
+// Three exports:
+//   - createFluidForceSource — pooled audio→impulse factory. Owns a
+//     preallocated FluidForce pool + the snare alternator, so the per-frame
+//     audio path stays allocation-free on the hot path. Returned arrays are
+//     reused across calls (see contract on the function); tests that need
+//     cross-call comparisons must snapshot or build separate factories.
+//   - fluidForcesFromFrame — back-compat singleton wrapper around the default
+//     factory, used by the in-app call site which consumes the impulses
+//     synchronously within the same frame.
 //   - createFluidSim — the GL solver. Self-contained like particle-flow.ts
 //     (local compile/link helpers); returns null when float render targets are
 //     unsupported so callers fall back to the procedural-only path.
@@ -55,8 +60,6 @@ const DYE_HAT = 0.35;
 const DYE_VOCAL = 0.55;
 const DYE_OTHER = 0.45;
 
-let snareSide = 1; // alternates per snare onset so jets trade sides
-
 // Deterministic HSV→RGB used by the seam to derive dye colors from band index.
 // Local, pure, allocation-free (writes into a caller-owned 3-tuple). Mirrors
 // the HSV math in eviland-randomizer.ts; duplicated here so eviland-fluid stays
@@ -89,110 +92,187 @@ function hueForBand(band: number): number {
   return ((band * phi) + 0.07) % 1;
 }
 
-export function fluidForcesFromFrame(frame: EvilandFrame): FluidForce[] {
+/**
+ * Pooled audio→impulse source. Owns its own snareSide alternator and a
+ * preallocated FluidForce pool so the per-frame audio path stays
+ * allocation-free on the hot path: the previous implementation allocated a
+ * fresh `out` array + one literal per onset + a per-emit `color` tuple every
+ * frame (~25 small objects). Each `forces(frame)` call:
+ *
+ *   - writes into the next-available pool slot (slots are reused across calls)
+ *   - returns the same backing array, sliced to .length=count
+ *
+ * Contract: **the returned array and its FluidForce entries are valid ONLY
+ * until the next forces() call on the same factory.** The single in-app
+ * consumer (eviland.ts `fluid.step(dt, fluidForcesFromFrame(frame), ...)`)
+ * consumes them synchronously within the same frame and never holds a
+ * reference past the call, so pooling is safe there. Tests that need to
+ * compare results across calls must either snapshot the values or use
+ * separate factories per call.
+ */
+export interface FluidForceSource {
+  forces(frame: EvilandFrame): FluidForce[];
+  /** Reset internal state (snare alternator). Useful for deterministic tests. */
+  reset(): void;
+}
+
+export function createFluidForceSource(): FluidForceSource {
+  // Pool: MAX_FLUID_FORCES preallocated slots, each with its own color tuple.
+  // Slots are mutated in place; entries that don't carry dye have color/dye
+  // cleared to undefined so consumers (and tests) can use the same
+  // `f.color && f.dye > 0` discrimination as before.
+  const pool: FluidForce[] = new Array(MAX_FLUID_FORCES);
+  for (let i = 0; i < MAX_FLUID_FORCES; i++) {
+    pool[i] = { x: 0, y: 0, dx: 0, dy: 0, radius: 0, color: [0, 0, 0], dye: 0 };
+  }
+  // The returned array IS reused across calls — its .length is reset to the
+  // active count each call so consumers iterating [0..length) see only this
+  // frame's forces. Same pool object identity per slot index across calls.
   const out: FluidForce[] = [];
-  const push = (f: FluidForce) => { if (out.length < MAX_FLUID_FORCES) out.push(f); };
-
-  // Baseline: bass shear along the bottom + pan bias (spatial truth).
-  if (frame.bass > 0.05) {
-    push({ x: 0.5, y: 0.15, dx: BASS_SHEAR * frame.bass * (frame.pan >= 0 ? 1 : -1), dy: 0, radius: 0.35 });
-  }
-  if (Math.abs(frame.pan) > 0.05) {
-    // Persistent lateral current biased by stereo position; doubles as a faint
-    // ambient dye drift so quiet wide passages still show a slow color slide.
-    const colour: [number, number, number] = [0, 0, 0];
-    hsvToRgbInto(colour, 0.55 + frame.pan * 0.15, 0.5, 0.45);
-    push({
-      x: 0.5, y: 0.5, dx: PAN_BIAS * frame.pan, dy: 0, radius: 0.45,
-      color: colour, dye: 0.06 * Math.abs(frame.pan) * (0.4 + frame.width * 0.6),
-    });
-  }
-
-  // Scratch tuple reused inside the loop — avoids per-onset allocations on the
-  // hot path. Each push() spreads it into a fresh array when emitting.
+  // Reused HSV→RGB scratch tuple (no per-onset alloc).
   const tmp: [number, number, number] = [0, 0, 0];
+  let snareSide = 1; // alternates per snare onset so jets trade sides
 
-  for (const onset of frame.onsets) {
-    if (onset.group === 'kick') {
-      // Radial shockwave: KICK_SPOKES outward impulses around a low-center anchor.
-      // Each spoke carries kick-band dye so the slam reads as a colored shock,
-      // not an invisible push. Hue drifts with pan so left/right kicks differ.
-      const ax = 0.5 + frame.pan * 0.2;
-      const ay = 0.3;
-      const s = KICK_STRENGTH * onset.intensity;
-      hsvToRgbInto(tmp, hueForBand(onset.band) + frame.pan * 0.08, 0.85, 1);
-      const kr = tmp[0], kg = tmp[1], kb = tmp[2];
-      // Bottom-center dye splat (large radius, sustained by frame.bass so a
-      // sustained kick-and-bass passage stays warm and the field doesn't go
-      // gray between hits). dx=dy=0 so velocity is unchanged.
-      push({
-        x: ax, y: ay, dx: 0, dy: 0, radius: 0.22 + frame.bass * 0.06,
-        color: [kr, kg, kb], dye: DYE_KICK * (0.6 + frame.bass * 0.6) * onset.intensity,
-      });
-      for (let i = 0; i < KICK_SPOKES; i++) {
-        const a = (i / KICK_SPOKES) * Math.PI * 2;
-        push({
-          x: ax + Math.cos(a) * 0.04, y: ay + Math.sin(a) * 0.04,
-          dx: Math.cos(a) * s, dy: Math.sin(a) * s, radius: 0.12,
-          color: [kr, kg, kb], dye: DYE_KICK * 0.4 * onset.intensity,
-        });
+  function writeVel(x: number, y: number, dx: number, dy: number, radius: number): void {
+    const i = out.length;
+    if (i >= MAX_FLUID_FORCES) return;
+    const slot = pool[i]!;
+    slot.x = x; slot.y = y; slot.dx = dx; slot.dy = dy; slot.radius = radius;
+    // Velocity-only slot: clear dye so the dye-splat loop in createFluidSim
+    // skips it (the same backward-compat path the pre-pool seam relied on).
+    slot.color = undefined;
+    slot.dye = undefined;
+    out.push(slot);
+  }
+
+  function writeDyed(
+    x: number, y: number, dx: number, dy: number, radius: number,
+    r: number, g: number, b: number, dye: number,
+  ): void {
+    const i = out.length;
+    if (i >= MAX_FLUID_FORCES) return;
+    const slot = pool[i]!;
+    slot.x = x; slot.y = y; slot.dx = dx; slot.dy = dy; slot.radius = radius;
+    // Reuse the slot's pre-allocated color tuple — no per-emit `[r,g,b]`
+    // literal. Length is fixed at 3 by construction so this is always safe.
+    let col = slot.color;
+    if (!col) {
+      col = [0, 0, 0];
+      slot.color = col;
+    }
+    col[0] = r; col[1] = g; col[2] = b;
+    slot.dye = dye;
+    out.push(slot);
+  }
+
+  function forces(frame: EvilandFrame): FluidForce[] {
+    out.length = 0;
+
+    // Baseline: bass shear along the bottom + pan bias (spatial truth).
+    if (frame.bass > 0.05) {
+      writeVel(0.5, 0.15, BASS_SHEAR * frame.bass * (frame.pan >= 0 ? 1 : -1), 0, 0.35);
+    }
+    if (Math.abs(frame.pan) > 0.05) {
+      // Persistent lateral current biased by stereo position; doubles as a faint
+      // ambient dye drift so quiet wide passages still show a slow color slide.
+      hsvToRgbInto(tmp, 0.55 + frame.pan * 0.15, 0.5, 0.45);
+      writeDyed(
+        0.5, 0.5, PAN_BIAS * frame.pan, 0, 0.45,
+        tmp[0], tmp[1], tmp[2],
+        0.06 * Math.abs(frame.pan) * (0.4 + frame.width * 0.6),
+      );
+    }
+
+    for (const onset of frame.onsets) {
+      if (onset.group === 'kick') {
+        // Radial shockwave: KICK_SPOKES outward impulses around a low-center anchor.
+        // Each spoke carries kick-band dye so the slam reads as a colored shock,
+        // not an invisible push. Hue drifts with pan so left/right kicks differ.
+        const ax = 0.5 + frame.pan * 0.2;
+        const ay = 0.3;
+        const s = KICK_STRENGTH * onset.intensity;
+        hsvToRgbInto(tmp, hueForBand(onset.band) + frame.pan * 0.08, 0.85, 1);
+        const kr = tmp[0], kg = tmp[1], kb = tmp[2];
+        // Bottom-center dye splat (large radius, sustained by frame.bass so a
+        // sustained kick-and-bass passage stays warm and the field doesn't go
+        // gray between hits). dx=dy=0 so velocity is unchanged.
+        writeDyed(
+          ax, ay, 0, 0, 0.22 + frame.bass * 0.06,
+          kr, kg, kb, DYE_KICK * (0.6 + frame.bass * 0.6) * onset.intensity,
+        );
+        for (let i = 0; i < KICK_SPOKES; i++) {
+          const a = (i / KICK_SPOKES) * Math.PI * 2;
+          writeDyed(
+            ax + Math.cos(a) * 0.04, ay + Math.sin(a) * 0.04,
+            Math.cos(a) * s, Math.sin(a) * s, 0.12,
+            kr, kg, kb, DYE_KICK * 0.4 * onset.intensity,
+          );
+        }
+      } else if (onset.group === 'snare') {
+        // One sharp angled jet, alternating sides. Bright, near-white dye so the
+        // snare reads as a flash even against a colored backdrop.
+        snareSide = -snareSide;
+        const jx = 0.5 + snareSide * 0.22;
+        const s = SNARE_STRENGTH * onset.intensity;
+        hsvToRgbInto(tmp, hueForBand(onset.band) + 0.5, 0.25, 1);
+        writeDyed(
+          jx, 0.55, -snareSide * s * 0.8, s * 0.5, 0.06,
+          tmp[0], tmp[1], tmp[2], DYE_SNARE * onset.intensity,
+        );
+      } else if (onset.group === 'hat') {
+        // Top-edge micro-turbulence: two small lateral jitters (deterministic from band).
+        // Sparkle dye on each — small radius keeps it hat-shaped, not curtained.
+        const s = HAT_STRENGTH * onset.intensity;
+        const seedX = 0.2 + ((onset.band * 37) % 13) / 20;
+        hsvToRgbInto(tmp, hueForBand(onset.band), 0.55, 1);
+        const hr = tmp[0], hg = tmp[1], hb = tmp[2];
+        writeDyed(seedX, 0.85, s, -s * 0.3, 0.03, hr, hg, hb, DYE_HAT * onset.intensity);
+        writeDyed(1 - seedX, 0.88, -s, -s * 0.2, 0.03, hr, hg, hb, DYE_HAT * onset.intensity);
+      } else {
+        // vocal / bass / other groups: dye-only splat at a deterministic emitter
+        // position. dx=dy=0 keeps velocity untouched (the envelope baselines
+        // above already cover the spatial truth for these voices), so the snare
+        // test's "exactly one off-center jet" guarantee is preserved.
+        // band index → vertical slot (matches eviland's emitter convention);
+        // stereo pan biases x. Hue from band → busy mix reads as a song-aware
+        // palette, not a mush.
+        const py = onset.band / 23;
+        const px = 0.5 + frame.pan * 0.25 + ((onset.band * 19) % 11 - 5) / 110;
+        const amt = onset.group === 'vocal' ? DYE_VOCAL : DYE_OTHER;
+        hsvToRgbInto(tmp, hueForBand(onset.band), 0.7, 0.95);
+        writeDyed(
+          px, py, 0, 0, 0.07 + onset.intensity * 0.05,
+          tmp[0], tmp[1], tmp[2], amt * onset.intensity,
+        );
       }
-    } else if (onset.group === 'snare') {
-      // One sharp angled jet, alternating sides. Bright, near-white dye so the
-      // snare reads as a flash even against a colored backdrop.
-      snareSide = -snareSide;
-      const jx = 0.5 + snareSide * 0.22;
-      const s = SNARE_STRENGTH * onset.intensity;
-      hsvToRgbInto(tmp, hueForBand(onset.band) + 0.5, 0.25, 1);
-      push({
-        x: jx, y: 0.55, dx: -snareSide * s * 0.8, dy: s * 0.5, radius: 0.06,
-        color: [tmp[0], tmp[1], tmp[2]], dye: DYE_SNARE * onset.intensity,
-      });
-    } else if (onset.group === 'hat') {
-      // Top-edge micro-turbulence: two small lateral jitters (deterministic from band).
-      // Sparkle dye on each — small radius keeps it hat-shaped, not curtained.
-      const s = HAT_STRENGTH * onset.intensity;
-      const seedX = 0.2 + ((onset.band * 37) % 13) / 20;
-      hsvToRgbInto(tmp, hueForBand(onset.band), 0.55, 1);
-      const hr = tmp[0], hg = tmp[1], hb = tmp[2];
-      push({
-        x: seedX, y: 0.85, dx: s, dy: -s * 0.3, radius: 0.03,
-        color: [hr, hg, hb], dye: DYE_HAT * onset.intensity,
-      });
-      push({
-        x: 1 - seedX, y: 0.88, dx: -s, dy: -s * 0.2, radius: 0.03,
-        color: [hr, hg, hb], dye: DYE_HAT * onset.intensity,
-      });
-    } else {
-      // vocal / bass / other groups: dye-only splat at a deterministic emitter
-      // position. dx=dy=0 keeps velocity untouched (the envelope baselines
-      // above already cover the spatial truth for these voices), so the snare
-      // test's "exactly one off-center jet" guarantee is preserved.
-      // band index → vertical slot (matches eviland's emitter convention);
-      // stereo pan biases x. Hue from band → busy mix reads as a song-aware
-      // palette, not a mush.
-      const py = onset.band / 23;
-      const px = 0.5 + frame.pan * 0.25 + ((onset.band * 19) % 11 - 5) / 110;
-      const amt = onset.group === 'vocal' ? DYE_VOCAL : DYE_OTHER;
-      hsvToRgbInto(tmp, hueForBand(onset.band), 0.7, 0.95);
-      push({
-        x: px, y: py, dx: 0, dy: 0, radius: 0.07 + onset.intensity * 0.05,
-        color: [tmp[0], tmp[1], tmp[2]], dye: amt * onset.intensity,
-      });
     }
+
+    // Anticipation: just before a confident beat, the scene inhales (inward pull).
+    if (frame.bpm > 1 && frame.beatConfidence > 0.6 && frame.beatPhase > 0.85) {
+      for (let i = 0; i < INHALE_SPOKES; i++) {
+        const a = (i / INHALE_SPOKES) * Math.PI * 2 + 0.4;
+        const px = 0.5 + Math.cos(a) * 0.3;
+        const py = 0.5 + Math.sin(a) * 0.3;
+        writeVel(px, py, -Math.cos(a) * INHALE_STRENGTH, -Math.sin(a) * INHALE_STRENGTH, 0.18);
+      }
+    }
+
+    return out;
   }
 
-  // Anticipation: just before a confident beat, the scene inhales (inward pull).
-  if (frame.bpm > 1 && frame.beatConfidence > 0.6 && frame.beatPhase > 0.85) {
-    for (let i = 0; i < INHALE_SPOKES; i++) {
-      const a = (i / INHALE_SPOKES) * Math.PI * 2 + 0.4;
-      const px = 0.5 + Math.cos(a) * 0.3;
-      const py = 0.5 + Math.sin(a) * 0.3;
-      push({ x: px, y: py, dx: -Math.cos(a) * INHALE_STRENGTH, dy: -Math.sin(a) * INHALE_STRENGTH, radius: 0.18 });
-    }
+  function reset(): void {
+    snareSide = 1;
+    out.length = 0;
   }
 
-  return out;
+  return { forces, reset };
+}
+
+// Default singleton — what eviland.ts imports. Single-consumer + immediate
+// consumption pattern (see contract on createFluidForceSource).
+const defaultSource = createFluidForceSource();
+export function fluidForcesFromFrame(frame: EvilandFrame): FluidForce[] {
+  return defaultSource.forces(frame);
 }
 
 /**
