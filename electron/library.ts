@@ -2834,6 +2834,21 @@ export class LibraryStore {
     return this.setTrackVisualMemory(id, null);
   }
 
+  /**
+   * Purge every track's visual memory in one statement.
+   *
+   * SettingsView surfaces this behind a confirm dialog; the operation needs to
+   * be O(1) round-trips because a 60k+ library would be unworkable as a loop
+   * over clearTrackVisualMemory. Returns the count of removed rows. Calls
+   * scheduleFlush so the debounce coalesces this with any in-flight writes.
+   */
+  clearAllVisualMemory(): number {
+    this.db.run(`DELETE FROM track_visual_memory`);
+    const removed = this.db.getRowsModified();
+    if (removed > 0) this.scheduleFlush();
+    return removed;
+  }
+
   getVisualMemoryStats(): VisualMemoryStats {
     const totalRow = this.one<{ count: number }>(
       `SELECT COUNT(*) as count FROM track_visual_memory`,

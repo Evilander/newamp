@@ -23,6 +23,8 @@ import { generate as generateEvilandConfig, decode as decodeEvilandConfig } from
 import type { OperatorConfig, WaveMode } from './eviland-operators';
 import type { EvilandPalette } from './eviland';
 import { frameBus } from './frame-bus';
+import { createMemoryBridge, type MemoryBridge } from './eviland-memory-bridge';
+import { api } from '../lib/api';
 
 export interface EvilandProducerUiState {
   /** AI Director on → look conducts itself to the song. */
@@ -76,6 +78,25 @@ function applyWaveformOverride(
 }
 
 let activeStop: (() => void) | null = null;
+
+/**
+ * Producer-side: hot-load the persisted plan into the local Director so the
+ * detached projector remembers the track without being on-screen. READ-ONLY:
+ * we never call observeSection or flush — the on-screen Visualizer's bridge
+ * owns writes. Cancellation: each call captures its director; if the producer's
+ * track changes before the IPC resolves, the loaded plan is discarded.
+ */
+function maybeLoadPlanIntoProducerDirector(director: Director, trackId: number | null): void {
+  if (trackId == null) return;
+  const readOnlyBridge: MemoryBridge = createMemoryBridge({ trackId, api });
+  const target = director;
+  void readOnlyBridge.loadOrSeed().then((plan) => {
+    if (plan) target.loadPlan(plan);
+    // Dispose without flushing — the bridge has no buffered sections (we
+    // never observed) so this is a clean teardown of the visibility listener.
+    void readOnlyBridge.flushAndDispose('manual');
+  });
+}
 
 /**
  * Start the singleton headless producer. Idempotent — a second call replaces
@@ -142,10 +163,16 @@ export function startEvilandProducer(
     const ui = getUiState();
     if (!director) {
       director = createDirector({ songId: ui.trackId != null ? `track-${ui.trackId}` : 'eviland' });
+      // Producer-side bridge is READ-ONLY: it loads the plan into the local
+      // Director so the projector remembers, but it does NOT observe sections
+      // or flush. The on-screen Visualizer's bridge is the sole writer; this
+      // avoids double-flush + double-counted plays when both run at once.
+      maybeLoadPlanIntoProducerDirector(director, ui.trackId);
     }
     if (ui.trackId !== lastTrackId) {
       lastTrackId = ui.trackId;
       director.reset(ui.trackId != null ? `track-${ui.trackId}` : 'eviland');
+      maybeLoadPlanIntoProducerDirector(director, ui.trackId);
     }
 
     let config: OperatorConfig;

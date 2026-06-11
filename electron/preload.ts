@@ -171,6 +171,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tracks:visual-memory-clear', id) as Promise<boolean>,
   getVisualMemoryStats: () =>
     ipcRenderer.invoke('tracks:visual-memory-stats') as Promise<VisualMemoryStats>,
+  clearAllVisualMemory: () =>
+    ipcRenderer.invoke('tracks:visual-memory-clear-all') as Promise<number>,
   getRadioBrainStatus: () => ipcRenderer.invoke('radio-brain:status') as Promise<RadioBrainStatus>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,
