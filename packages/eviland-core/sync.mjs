@@ -28,6 +28,7 @@ const FILES = [
   'eviland-rng.ts',
   'eviland-director.ts',
   'eviland-recorder.ts',
+  'eviland-memory-types.ts',
 ];
 
 const targetDir = resolve(here, 'src');

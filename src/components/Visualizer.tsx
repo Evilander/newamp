@@ -19,6 +19,16 @@ import {
   decode as decodeEvilandConfig,
 } from '../visualizer/eviland-randomizer';
 import type { OperatorConfig, WaveMode } from '../visualizer/eviland-operators';
+import { type MemoryBridge } from '../visualizer/eviland-memory-bridge';
+import {
+  publishActiveBridge,
+  acquireBridgeForTrack,
+  releaseBridgeForTrack,
+  notifySectionReturn,
+} from '../visualizer/eviland-memory-bridge-registry';
+import { createEmptyPlan } from '../visualizer/eviland-memory-types';
+import { hashSeed } from '../visualizer/eviland-rng';
+import { api } from '../lib/api';
 
 export type VizMode =
   | 'mini'
@@ -403,13 +413,64 @@ export function Visualizer({
       // looks (randomize / shared seed) are applied once when the store's
       // nonce changes and persist until the user randomizes again or re-
       // enables the director.
+      //
+      // The MemoryBridge owns persistence + lineage evolution; the Director
+      // stays pure (no Date.now, no IPC). We construct the Director WITHOUT
+      // a plan, then loadOrSeed → loadPlan asynchronously so a track-load
+      // race never blocks the renderer's first frame.
+      //
+      // Bridge ownership: we ask the registry's keyed cache for the bridge
+      // matching the current trackId. The cache survives same-track remounts
+      // (palette/quality/performance/reactivity changes re-run this effect
+      // mid-song — finding #6 from the pre-release review). On track change we
+      // explicitly releaseBridgeForTrack(oldId), which flushes + drops the
+      // cache entry. On effect cleanup we DO NOT release: a remount caused by
+      // a deps change is the common case and we want zero IPC churn.
       const initial = evilandStateRef.current;
+      let bridge: MemoryBridge = acquireBridgeForTrack({ trackId: initial.trackId, api });
       const director = createDirector({
         songId: initial.trackId != null ? `track-${initial.trackId}` : 'eviland',
+        // onSectionLearn captures `bridge` by reference via a closure that
+        // reads the current value — so the Director keeps writing into
+        // whatever bridge is active after a track change, not the original.
+        onSectionLearn: (section) => bridge.observeSection(section),
+        // Bounded priming defer (finding #9): hold the first-ever fresh-mint
+        // for ~30 frames (~500ms @ 60fps) while loadOrSeed's IPC resolves,
+        // so a track with a persisted plan doesn't render its opening
+        // moments under the default lineage. loadPlan() opens the gate the
+        // instant the plan lands; the gate expires by itself if no plan
+        // arrives (the song is genuinely new) so a brand-new track sees
+        // <500ms of default-config rendering before the priming look mints.
+        deferPrimingFrames: 30,
+      });
+      bridge.attachDirector(director);
+      publishActiveBridge(bridge);
+      // Same-track remount fast path (finding #6): if the cached bridge
+      // already has an in-memory plan (we just re-attached an existing
+      // bridge across a palette/quality/etc remount), prime the fresh
+      // Director from that plan synchronously. No IPC round-trip.
+      const cachedPlan = bridge.getCurrentPlan();
+      if (cachedPlan) director.loadPlan(cachedPlan);
+      // Captured identity guard: if a track change replaces `bridge` before
+      // this IPC resolves, the .then closure sees `bridge !== originalBridge`
+      // and bails — never calling loadPlan onto the now-reset director with
+      // an old track's plan. Same shape as the track-change branch below.
+      // We still call loadOrSeed even on a cached bridge so a stale row that
+      // was persisted by another writer can refresh us — but the cachedPlan
+      // path above ensures the Director is bound BEFORE the first frame
+      // either way, killing the "fresh-mint look on remount" race.
+      const originalBridge = bridge;
+      void originalBridge.loadOrSeed().then((plan) => {
+        if (bridge !== originalBridge) return;
+        if (plan) director.loadPlan(plan);
       });
       let lastAppliedNonce = -1;
       let lastTrackId: number | null = initial.trackId;
       let manualConfig: OperatorConfig | null = null;
+      // Edge-detect frame.sectionReturn for the lineage counter. We compare
+      // integers only and route through the registry — wrong-track events
+      // are no-ops, no-bridge events are no-ops. Allocation-free.
+      let lastSectionReturn = -1;
 
       function applyManualSeed(seed: string | null): OperatorConfig | null {
         if (!seed) return null;
@@ -466,9 +527,56 @@ export function Visualizer({
         // Read via ref — no per-frame React subscription, no rAF restart.
         const ui = evilandStateRef.current;
         if (ui.trackId !== lastTrackId) {
+          // Track change: release the OLD bridge from the keyed cache (this
+          // flushes-and-disposes it asynchronously — we don't await), reset
+          // the Director for the new song, then acquire a bridge for the new
+          // track from the cache. lastSectionReturn resets so the first frame
+          // of the new track doesn't fire a spurious section-return event.
+          const previousTrackId = lastTrackId;
+          void releaseBridgeForTrack(previousTrackId, 'track-change');
           lastTrackId = ui.trackId;
+          lastSectionReturn = -1;
           director.reset(ui.trackId != null ? `track-${ui.trackId}` : 'eviland');
+          bridge = acquireBridgeForTrack({ trackId: ui.trackId, api });
+          bridge.attachDirector(director);
+          publishActiveBridge(bridge);
+          // Captured identity guard: a subsequent track change before this
+          // resolves invalidates the .then. Belt-and-suspenders for finding
+          // #3: ALWAYS call director.loadPlan, falling back to an empty plan
+          // when loadOrSeed yields null, so the Director's pendingPlan is
+          // ALWAYS bound to the new track. The Director-side reset() clear
+          // (eviland-director.ts) is the load-bearing fix; this is the
+          // belt-and-suspenders pass.
+          const currentBridge = bridge;
+          const capturedTrackId = ui.trackId;
+          void currentBridge.loadOrSeed().then((plan) => {
+            if (bridge !== currentBridge) return;
+            if (plan) {
+              director.loadPlan(plan);
+            } else if (capturedTrackId != null) {
+              // No own plan + no neighbor borrow → seed the Director with an
+              // empty plan stamped for THIS trackId so reset()'s pendingPlan
+              // can never hold a previous track's data. createEmptyPlan
+              // produces a deterministic rootSeed derived from `track-${id}`,
+              // matching the Director's first-play seedFor() path so this
+              // doesn't change the visible look.
+              director.loadPlan(createEmptyPlan(
+                capturedTrackId,
+                `track-${capturedTrackId}`,
+                hashSeed(`track-${capturedTrackId}`),
+              ));
+            }
+          });
         }
+
+        // Section-return edge detect → lineage counter. Allocation-free
+        // integer compare; routed through the registry so wrong-track and
+        // no-bridge cases are cheap no-ops. Only fires on the RISING edge
+        // (i.e. the frame where sectionReturn transitions from -1 to >=0).
+        if (evFrame.sectionReturn >= 0 && evFrame.sectionReturn !== lastSectionReturn) {
+          notifySectionReturn(ui.trackId);
+        }
+        lastSectionReturn = evFrame.sectionReturn;
 
         if (ui.director) {
           // Director owns the config: it produces a fresh OperatorConfig each
@@ -498,6 +606,16 @@ export function Visualizer({
 
       return () => {
         cancelAnimationFrame(raf);
+        // Finding #6 fix: do NOT flushAndDispose here. The registry's keyed
+        // cache holds the bridge across same-track remounts (palette/quality/
+        // performance/reactivity changes mid-song re-run this effect). The
+        // bridge's in-memory plan, buffered learning, and counters all carry
+        // forward — no IPC round-trip, no race between an old fire-and-forget
+        // flush and the new mount's loadOrSeed. Persistence still happens via
+        // the bridge's own dirty-threshold + visibility-hidden flush triggers
+        // (LEARN_FLUSH_THRESHOLD and VISIBILITY_FLUSH_DEBOUNCE_MS), and on
+        // true track-change via releaseBridgeForTrack() above.
+        publishActiveBridge(null);
         renderer.dispose();
       };
     }

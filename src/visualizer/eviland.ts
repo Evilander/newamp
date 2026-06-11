@@ -622,13 +622,15 @@ void main(){
   vec3 chroma = (fieldC + 1e-4) / (max(max(fieldC.r, fieldC.g), fieldC.b) + 0.05);
   vec3 colour = paletteRamp(intensity, chroma);
 
-  // Eviland Liquid: the simulated dye is the picture. At u_liquidMix = 0
-  // the dye contribution is exactly zero and the composite is byte-identical
-  // (in spirit) to the pre-dye look — every existing archetype keeps its
-  // exact output. At u_liquidMix = 1 the palette ramp is fully replaced by
-  // the dye color (with a gentle floor mixed back in for unlit regions so
-  // empty zones aren't pitch black). Sampling happens BEFORE bloom/aberration
-  // so bloom still glows on the brightest dye streaks.
+  // Eviland Liquid: the simulated dye is the picture. At u_liquidMix = 0 the
+  // entire dye block below is gated out by the shader (the if(u_liquidMix>0)
+  // branch never executes), so the dye contribution is strictly zero and the
+  // composite is byte-identical to the pre-dye look — every existing
+  // archetype keeps its exact output, matching the README's backward-compat
+  // claim. At u_liquidMix = 1 the palette ramp is fully replaced by the dye
+  // color (with a gentle floor mixed back in for unlit regions so empty zones
+  // aren't pitch black). Sampling happens BEFORE bloom/aberration so bloom
+  // still glows on the brightest dye streaks.
   if (u_liquidMix > 0.0) {
     vec3 dye = texture(u_dye, uv).rgb;
     // Saturate via tanh-ish: dye stays bright but never blows past ~1 without
@@ -895,6 +897,15 @@ export function createEvilandRenderer(
   const echoEnabled = quality !== 'low';
   let echoA: Fbo | null = null;
   let echoB: Fbo | null = null;
+  // Free-side hysteresis: don't drop the echo FBOs the instant alpha dips
+  // below threshold. A pulse-curve binding on snare/kick in a quiet passage
+  // can oscillate across the gate, and an immediate free + realloc on every
+  // crossing thrashes two ~16MB RGBA16F buffers. We require N consecutive
+  // sub-threshold frames before freeing; any one frame above the threshold
+  // resets the counter. The alloc path (below) stays IMMEDIATE so the first
+  // echo frame is never delayed.
+  const ECHO_FREE_FRAMES = 30; // ~0.5s @60fps — quieter than typical hysteresis intervals on the pulse curve
+  let echoIdleFrames = 0;
   // Plan §2.6 field-buffer snapshot. Allocated on the FIRST frame of a fade,
   // freed when the fade settles. Off on `low` too — the projector running on
   // a weak GPU should not double its peak RGBA16F footprint mid-fade.
@@ -990,8 +1001,24 @@ export function createEvilandRenderer(
     }
   }
 
+  // ---- Cached attribute locations (avoid getAttribLocation per frame) ----
+  // bindFullscreenQuad runs ~10×/frame, bindEmitterAttribs runs 3× per frame,
+  // and each getAttribLocation forces a string→GLint lookup in the driver. The
+  // cache resolves on first use and remembers per (program, attribute name).
+  const attribCache = new Map<WebGLProgram, Map<string, number>>();
+  function attribLoc(prog: WebGLProgram, name: string): number {
+    let perProg = attribCache.get(prog);
+    if (!perProg) { perProg = new Map(); attribCache.set(prog, perProg); }
+    let loc = perProg.get(name);
+    if (loc === undefined) {
+      loc = gl.getAttribLocation(prog, name);
+      perProg.set(name, loc);
+    }
+    return loc;
+  }
+
   function bindFullscreenQuad(prog: WebGLProgram): void {
-    const loc = gl.getAttribLocation(prog, 'a_pos');
+    const loc = attribLoc(prog, 'a_pos');
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf!);
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
@@ -1255,10 +1282,10 @@ export function createEvilandRenderer(
 
   // Bind 3-vec4 instance attribs starting at attribute location offset.
   function bindEmitterAttribs(): void {
-    const aPos = gl.getAttribLocation(EMITTER, 'a_quad');
-    const iPosSize = gl.getAttribLocation(EMITTER, 'i_posSize');
-    const iColor = gl.getAttribLocation(EMITTER, 'i_color');
-    const iKindData = gl.getAttribLocation(EMITTER, 'i_kindData');
+    const aPos = attribLoc(EMITTER, 'a_quad');
+    const iPosSize = attribLoc(EMITTER, 'i_posSize');
+    const iColor = attribLoc(EMITTER, 'i_color');
+    const iKindData = attribLoc(EMITTER, 'i_kindData');
     // Per-vertex quad
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf!);
     gl.enableVertexAttribArray(aPos);
@@ -1284,9 +1311,9 @@ export function createEvilandRenderer(
     // instanceBuf's `active*48`-byte payload when active < 4. Leaving them
     // enabled is undefined behaviour — INVALID_OPERATION on strict drivers,
     // black frames / context loss on some Intel stacks.
-    const iPosSize = gl.getAttribLocation(EMITTER, 'i_posSize');
-    const iColor = gl.getAttribLocation(EMITTER, 'i_color');
-    const iKindData = gl.getAttribLocation(EMITTER, 'i_kindData');
+    const iPosSize = attribLoc(EMITTER, 'i_posSize');
+    const iColor = attribLoc(EMITTER, 'i_color');
+    const iKindData = attribLoc(EMITTER, 'i_kindData');
     if (iPosSize >= 0) {
       gl.vertexAttribDivisor(iPosSize, 0);
       gl.disableVertexAttribArray(iPosSize);
@@ -1514,6 +1541,9 @@ export function createEvilandRenderer(
     // it with last frame's echo. Lazily allocated on first nonzero alpha;
     // never present on `low` quality. Per plan: ~16MB at 1080p.
     if (echoEnabled && dyn.echoAlpha > 0.001) {
+      // Any frame above threshold resets the idle counter so a single audible
+      // hit re-arms the full hysteresis window.
+      echoIdleFrames = 0;
       if (!echoA || !echoB) {
         echoA = makeFbo(fieldW, fieldH);
         echoB = makeFbo(fieldW, fieldH);
@@ -1544,10 +1574,18 @@ export function createEvilandRenderer(
         gl.activeTexture(gl.TEXTURE0); // reset before bloom pass binds u_src
       }
     } else if (echoA || echoB) {
-      // Alpha fell to zero — free the FBOs so a one-shot echo doesn't keep
-      // ~16MB pinned for the rest of the song. Cheap to rebuild on next use.
-      disposeFbo(echoA); disposeFbo(echoB);
-      echoA = null; echoB = null;
+      // Alpha is below threshold this frame. Don't free immediately — a
+      // pulse-curve binding can flicker across the gate at audio rate, and
+      // immediate free + realloc thrashes two ~16MB FBOs per crossing. Only
+      // release after the alpha has stayed sub-threshold for ECHO_FREE_FRAMES
+      // consecutive rendered frames. A one-shot echo still pays only ~0.5s of
+      // residency past its last audible frame.
+      echoIdleFrames++;
+      if (echoIdleFrames >= ECHO_FREE_FRAMES) {
+        disposeFbo(echoA); disposeFbo(echoB);
+        echoA = null; echoB = null;
+        echoIdleFrames = 0;
+      }
     }
 
     // ---- PASS 3e: snapshot capture (plan §2.6). When a transition starts
