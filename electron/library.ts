@@ -66,6 +66,7 @@ import type {
 } from '../shared/types.js';
 import { albumKey } from '../shared/album-key.js';
 import { dnaCosineSimilarity, isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
+import { type VisualMemoryPlan, isValidVisualMemoryPlan, type VisualMemoryStats } from '../shared/visual-memory.js';
 import { applySeedVibeGate, createSeedVibeContext, seedVibeSimilarity } from '../shared/seed-vibe.js';
 import {
   buildEvalEnvironment,
@@ -278,6 +279,20 @@ CREATE TABLE IF NOT EXISTS album_ratings (
   rating_score  REAL,
   updated_at    INTEGER NOT NULL,
   PRIMARY KEY (album_artist, album)
+);
+
+-- Per-track visual memory plan: the durable Eviland "remembers your library"
+-- record. plan_json is the JSON-encoded VisualMemoryPlan (schema/algoVersion
+-- live inside the blob and are also denormalized here for cheap stats queries
+-- and bulk algoVersion-aware purges). ON DELETE CASCADE keeps the row tied to
+-- the track row's lifetime; sql.js doesn't enforce FKs by default, so
+-- pruneMissingTracks also DELETEs from this table explicitly.
+CREATE TABLE IF NOT EXISTS track_visual_memory (
+  track_id     INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+  plan_json    TEXT NOT NULL,
+  version      INTEGER NOT NULL,
+  algo_version INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
 );
 
 -- One-shot migration flags. Keeps schema-migration state next to the DB
@@ -1168,6 +1183,10 @@ export class LibraryStore {
         this.db.run(`DELETE FROM track_bookmarks WHERE track_id = ?`, [id]);
         this.db.run(`DELETE FROM guitar_tab_cache WHERE track_id = ?`, [id]);
         this.db.run(`DELETE FROM custom_lyrics WHERE track_id = ?`, [id]);
+        // sql.js does not enforce ON DELETE CASCADE foreign keys; we have to
+        // delete the visual memory row explicitly so a vanished track doesn't
+        // strand a plan blob in the database.
+        this.db.run(`DELETE FROM track_visual_memory WHERE track_id = ?`, [id]);
         this.db.run(`DELETE FROM tracks WHERE id = ?`, [id]);
       }
       this.invalidateDnaIndexCache();
@@ -2755,6 +2774,98 @@ export class LibraryStore {
     const total = Number(totalRow?.count ?? 0);
     const analyzed = Number(analyzedRow?.count ?? 0);
     return { analyzed, missing: Math.max(0, total - analyzed), total };
+  }
+
+  // ── Eviland visual memory persistence ──────────────────────────────────────
+  // Mirrors the DNA pattern (setTrackDna/getTrackDna at ~line 2665) intentionally,
+  // including silent JSON-parse quarantine. Differences vs DNA:
+  //   - Lives in its own table (track_visual_memory) — denormalized version +
+  //     algo_version columns let stats queries skip JSON parsing for big libs.
+  //   - ON DELETE CASCADE in the schema; sql.js doesn't enforce FKs, so
+  //     pruneMissingTracks adds an explicit DELETE for these rows above.
+  //   - All write paths end with scheduleFlush() (NOT flushSync) so the 800ms
+  //     debounce can coalesce burst writes from the bridge's flush triggers.
+
+  setTrackVisualMemory(id: number, plan: VisualMemoryPlan | null): boolean {
+    const trackId = Math.trunc(Number(id));
+    if (!Number.isFinite(trackId) || trackId <= 0) return false;
+    if (plan == null) {
+      this.db.run(`DELETE FROM track_visual_memory WHERE track_id = ?`, [trackId]);
+      if (this.db.getRowsModified() <= 0) return false;
+      this.scheduleFlush();
+      return true;
+    }
+    if (!isValidVisualMemoryPlan(plan)) return false;
+    const json = JSON.stringify(plan);
+    const now = Date.now();
+    this.db.run(
+      `INSERT INTO track_visual_memory (track_id, plan_json, version, algo_version, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(track_id) DO UPDATE SET
+         plan_json    = excluded.plan_json,
+         version      = excluded.version,
+         algo_version = excluded.algo_version,
+         updated_at   = excluded.updated_at`,
+      [trackId, json, plan.schema | 0, plan.algoVersion | 0, now],
+    );
+    this.scheduleFlush();
+    return true;
+  }
+
+  getTrackVisualMemory(id: number): VisualMemoryPlan | null {
+    const trackId = Math.trunc(Number(id));
+    if (!Number.isFinite(trackId) || trackId <= 0) return null;
+    const row = this.one<{ plan_json: string | null }>(
+      `SELECT plan_json FROM track_visual_memory WHERE track_id = ?`,
+      [trackId],
+    );
+    if (!row?.plan_json) return null;
+    try {
+      const parsed = JSON.parse(row.plan_json);
+      return isValidVisualMemoryPlan(parsed) ? parsed : null;
+    } catch {
+      // Quarantine the corrupt row the same way DNA does — silent null return
+      // is the de-facto contract. The next write replaces the bad blob.
+      return null;
+    }
+  }
+
+  clearTrackVisualMemory(id: number): boolean {
+    return this.setTrackVisualMemory(id, null);
+  }
+
+  getVisualMemoryStats(): VisualMemoryStats {
+    const totalRow = this.one<{ count: number }>(
+      `SELECT COUNT(*) as count FROM track_visual_memory`,
+    );
+    const tracksWithMemory = Number(totalRow?.count ?? 0);
+    const oldestRow = this.one<{ updated_at: number | null }>(
+      `SELECT MIN(updated_at) as updated_at FROM track_visual_memory`,
+    );
+    const oldestAt = oldestRow?.updated_at != null ? Number(oldestRow.updated_at) : null;
+
+    // totalSections: sum of sections.length across plan blobs. sql.js can't run
+    // json_array_length without the json1 extension, so we parse client-side.
+    // For a library with 10k+ entries this is heavy — pull the COUNT cheaply
+    // and only parse when callers ask for the full stat. Acceptable here:
+    // getVisualMemoryStats is a SettingsView-style infrequent query.
+    let totalSections = 0;
+    if (tracksWithMemory > 0) {
+      const rows = this.many<{ plan_json: string | null }>(
+        `SELECT plan_json FROM track_visual_memory`,
+      );
+      for (const r of rows) {
+        if (!r.plan_json) continue;
+        try {
+          const parsed = JSON.parse(r.plan_json);
+          if (parsed && Array.isArray(parsed.sections)) totalSections += parsed.sections.length;
+        } catch {
+          /* skip corrupt */
+        }
+      }
+    }
+
+    return { tracksWithMemory, totalSections, oldestAt };
   }
 
   setTrackReplayGain(id: number, replayGainTrackDb: number, replayGainAlbumDb?: number | null): Track | null {
