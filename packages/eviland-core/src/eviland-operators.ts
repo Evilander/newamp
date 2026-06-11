@@ -622,6 +622,29 @@ function lerpChannel(a: Channel, b: Channel, t: number): Channel {
   return out;
 }
 
+// Scratch reused by lerpChannelInto to avoid a Map alloc per channel per call
+// (30 channels × 60 fps = 1.8k transient Maps/sec during the fade path).
+const lerpChannelScratch = new Map<string, { a: number; b: number; curve?: Curve }>();
+
+/** lerpChannel variant that writes into a caller-owned Channel object,
+ *  reusing its `bindings` array. The scratch Map above is cleared per use.
+ *  Output values are identical to lerpChannel; this is purely a GC fix. */
+function lerpChannelInto(out: Channel, a: Channel, b: Channel, t: number): void {
+  out.base = lerp(a.base, b.base, t);
+  if (!out.bindings) out.bindings = [];
+  else out.bindings.length = 0;
+  lerpChannelScratch.clear();
+  for (const bd of a.bindings ?? []) lerpChannelScratch.set(bd.feature, { a: bd.gain, b: 0, curve: bd.curve });
+  for (const bd of b.bindings ?? []) {
+    const e = lerpChannelScratch.get(bd.feature);
+    if (e) { e.b = bd.gain; } else { lerpChannelScratch.set(bd.feature, { a: 0, b: bd.gain, curve: bd.curve }); }
+  }
+  for (const [feature, e] of lerpChannelScratch) {
+    const gain = lerp(e.a, e.b, t);
+    if (gain !== 0) out.bindings.push({ feature: feature as AudioFeature, gain, curve: e.curve });
+  }
+}
+
 function lerpRGB(a: RGB, b: RGB, t: number): RGB {
   return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
 }
@@ -711,4 +734,176 @@ export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): Ope
     echoFlipY: lerpOptional(a.echoFlipY, b.echoFlipY, t, 0),
   };
   return out;
+}
+
+/**
+ * Allocation-light variant of lerpConfig for the Director's per-frame fade
+ * path. Writes into a caller-owned `out` config, reusing its channel objects
+ * (and their `bindings` arrays) instead of minting ~30 fresh Channel objects
+ * + a transient Map per channel per frame.
+ *
+ * Output values are byte-identical to `lerpConfig(a, b, t)`.
+ *
+ * Contract: `out` is a "scratch" config that callers must NOT hold past the
+ * next lerpConfigInto call on the same `out`. The Director's `live = scratch`
+ * assignment is safe because the renderer reads `live` synchronously within
+ * the same frame and `from = cloneConfig(live)` (in startFade) takes a deep
+ * copy — neither pattern aliases `out` past the call.
+ *
+ * The drift path keeps using `lerpConfig` (allocating) because driftCache is
+ * read across frames; reuse there would alias the live config.
+ */
+function lerpOptionalInto(
+  out: OperatorConfig,
+  key:
+    | 'radialZoom' | 'radialRotate' | 'radialSwirl' | 'radialDecay'
+    | 'decayR' | 'decayG' | 'decayB'
+    | 'centreX' | 'centreY'
+    | 'echoZoom' | 'echoRotate' | 'echoAlpha' | 'echoFlipX' | 'echoFlipY',
+  a: Channel | undefined,
+  b: Channel | undefined,
+  t: number,
+  defaultBase: number,
+): void {
+  if (!a && !b) {
+    // Match lerpOptional: result is undefined when neither side sets the
+    // channel. Delete so consumers see "missing" and use the eval default.
+    if (out[key] !== undefined) out[key] = undefined;
+    return;
+  }
+  const aa: Channel = a ?? { base: defaultBase };
+  const bb: Channel = b ?? { base: defaultBase };
+  let slot = out[key];
+  if (!slot) {
+    slot = { base: 0, bindings: [] };
+    out[key] = slot;
+  }
+  lerpChannelInto(slot, aa, bb, t);
+}
+
+/** Ensure `out.palette` is a privately-owned object whose arrays this module
+ *  can mutate without aliasing any caller-supplied palette. Idempotent after
+ *  the first ownership-establishing call (an internal Set tracks the set of
+ *  palette objects we minted here). */
+const ownedPalettes = new WeakSet<object>();
+function ensureOwnedPalette(out: OperatorConfig): void {
+  if (out.palette && ownedPalettes.has(out.palette)) return;
+  const p = { bg: [0, 0, 0] as [number, number, number],
+              dark: [0, 0, 0] as [number, number, number],
+              accent: [0, 0, 0] as [number, number, number],
+              light: [0, 0, 0] as [number, number, number] };
+  ownedPalettes.add(p);
+  out.palette = p;
+}
+
+export function lerpConfigInto(
+  out: OperatorConfig,
+  a: OperatorConfig,
+  b: OperatorConfig,
+  t: number,
+): void {
+  const pick = t < 0.5 ? a : b;
+  out.version = 1;
+  out.name = pick.name;
+  out.seed = pick.seed;
+  out.archetype = pick.archetype;
+  // Required channels — reuse out's channel slots + bindings arrays.
+  lerpChannelInto(out.zoom, a.zoom, b.zoom, t);
+  lerpChannelInto(out.rotate, a.rotate, b.rotate, t);
+  lerpChannelInto(out.swirl, a.swirl, b.swirl, t);
+  lerpChannelInto(out.hueCycle, a.hueCycle, b.hueCycle, t);
+  lerpChannelInto(out.decay, a.decay, b.decay, t);
+  lerpChannelInto(out.warpAmp, a.warpAmp, b.warpAmp, t);
+  lerpChannelInto(out.warpScale, a.warpScale, b.warpScale, t);
+  lerpChannelInto(out.mirror, a.mirror, b.mirror, t);
+  out.mirrorSet = pick.mirrorSet;
+  lerpChannelInto(out.mirrorMix, a.mirrorMix, b.mirrorMix, t);
+  lerpChannelInto(out.flowX, a.flowX, b.flowX, t);
+  lerpChannelInto(out.flowY, a.flowY, b.flowY, t);
+  lerpChannelInto(out.fluid, a.fluid, b.fluid, t);
+  lerpChannelInto(out.vorticity, a.vorticity, b.vorticity, t);
+  lerpChannelInto(out.liquidMix, a.liquidMix, b.liquidMix, t);
+  lerpChannelInto(out.dyeDissipation, a.dyeDissipation, b.dyeDissipation, t);
+  out.spinFromSection = pick.spinFromSection;
+  // Waveform: in-place mutate the existing object.
+  out.waveform.mode = pick.waveform.mode;
+  lerpChannelInto(out.waveform.intensity, a.waveform.intensity, b.waveform.intensity, t);
+  out.waveform.thickness = lerp(a.waveform.thickness, b.waveform.thickness, t);
+  out.waveform.scale = lerp(a.waveform.scale, b.waveform.scale, t);
+  // Palette: reuse out.palette's arrays when both sides have a palette;
+  // otherwise fall back to pick.palette (the same semantic as lerpConfig).
+  // Palette: keep a privately-owned palette object on `out` so future calls
+  // can mutate its arrays in place without disturbing the input palettes
+  // (`a.palette`, `b.palette`, or `pick.palette`).
+  //
+  // The earlier draft fell back to `out.palette = pick.palette` when only one
+  // side had a palette — which aliased an INPUT palette onto `out`. The next
+  // call would then mutate THAT object via `out.palette.bg[0] = lerp(...)`,
+  // silently corrupting any reference (e.g. a Director-stashed section recall
+  // snapshot) that still pointed at it. The director test's section-recall
+  // assertion catches that. We always copy into `out`'s owned arrays instead.
+  ensureOwnedPalette(out);
+  const opal = out.palette!;
+  if (a.palette && b.palette) {
+    opal.bg[0] = lerp(a.palette.bg[0], b.palette.bg[0], t);
+    opal.bg[1] = lerp(a.palette.bg[1], b.palette.bg[1], t);
+    opal.bg[2] = lerp(a.palette.bg[2], b.palette.bg[2], t);
+    opal.dark[0] = lerp(a.palette.dark[0], b.palette.dark[0], t);
+    opal.dark[1] = lerp(a.palette.dark[1], b.palette.dark[1], t);
+    opal.dark[2] = lerp(a.palette.dark[2], b.palette.dark[2], t);
+    opal.accent[0] = lerp(a.palette.accent[0], b.palette.accent[0], t);
+    opal.accent[1] = lerp(a.palette.accent[1], b.palette.accent[1], t);
+    opal.accent[2] = lerp(a.palette.accent[2], b.palette.accent[2], t);
+    opal.light[0] = lerp(a.palette.light[0], b.palette.light[0], t);
+    opal.light[1] = lerp(a.palette.light[1], b.palette.light[1], t);
+    opal.light[2] = lerp(a.palette.light[2], b.palette.light[2], t);
+  } else if (pick.palette) {
+    // Snap-pick semantics, but COPY values (not the reference) so out.palette
+    // remains independent of pick.palette.
+    opal.bg[0] = pick.palette.bg[0];
+    opal.bg[1] = pick.palette.bg[1];
+    opal.bg[2] = pick.palette.bg[2];
+    opal.dark[0] = pick.palette.dark[0];
+    opal.dark[1] = pick.palette.dark[1];
+    opal.dark[2] = pick.palette.dark[2];
+    opal.accent[0] = pick.palette.accent[0];
+    opal.accent[1] = pick.palette.accent[1];
+    opal.accent[2] = pick.palette.accent[2];
+    opal.light[0] = pick.palette.light[0];
+    opal.light[1] = pick.palette.light[1];
+    opal.light[2] = pick.palette.light[2];
+  } else {
+    // Neither side has a palette — match lerpConfig's `pick.palette ?? null`.
+    out.palette = null;
+  }
+  lerpChannelInto(out.bloom, a.bloom, b.bloom, t);
+  out.emitterScale = lerp(a.emitterScale, b.emitterScale, t);
+  out.emitterGain = lerp(a.emitterGain, b.emitterGain, t);
+  // Q-vars snap to pick at midpoint, same as lerpConfig. Deep clone — they're
+  // small (≤8) and shape variation across configs makes in-place reuse fragile.
+  out.q = pick.q
+    ? pick.q.map((s) => ({
+        ...s,
+        bindings: s.bindings ? s.bindings.map((b2) => ({ ...b2 })) : undefined,
+        lfo: s.lfo ? { ...s.lfo } : undefined,
+      }))
+    : undefined;
+  // Optional channels — present-on-either-side lerp; absent-on-both clears.
+  lerpOptionalInto(out, 'radialZoom', a.radialZoom, b.radialZoom, t, 0);
+  lerpOptionalInto(out, 'radialRotate', a.radialRotate, b.radialRotate, t, 0);
+  lerpOptionalInto(out, 'radialSwirl', a.radialSwirl, b.radialSwirl, t, 0);
+  lerpOptionalInto(out, 'radialDecay', a.radialDecay, b.radialDecay, t, 0);
+  lerpOptionalInto(out, 'decayR', a.decayR, b.decayR, t, 0);
+  lerpOptionalInto(out, 'decayG', a.decayG, b.decayG, t, 0);
+  lerpOptionalInto(out, 'decayB', a.decayB, b.decayB, t, 0);
+  lerpOptionalInto(out, 'centreX', a.centreX, b.centreX, t, 0.5);
+  lerpOptionalInto(out, 'centreY', a.centreY, b.centreY, t, 0.5);
+  lerpOptionalInto(out, 'echoZoom', a.echoZoom, b.echoZoom, t, 0);
+  lerpOptionalInto(out, 'echoRotate', a.echoRotate, b.echoRotate, t, 0);
+  lerpOptionalInto(out, 'echoAlpha', a.echoAlpha, b.echoAlpha, t, 0);
+  lerpOptionalInto(out, 'echoFlipX', a.echoFlipX, b.echoFlipX, t, 0);
+  lerpOptionalInto(out, 'echoFlipY', a.echoFlipY, b.echoFlipY, t, 0);
+  // Director stamps _transition AFTER this call on the fade path; leave it
+  // untouched here to match lerpConfig's behavior (verified by the operators
+  // test: lerpConfig must not stamp _transition itself).
 }
