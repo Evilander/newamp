@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MemoryBridgeState } from '../visualizer/eviland-memory-bridge';
-import { subscribeActiveBridgeState, getActiveBridge } from '../visualizer/eviland-memory-bridge-registry';
+import {
+  subscribeActiveBridgeState,
+  getActiveBridge,
+  dropBridgeForTrack,
+} from '../visualizer/eviland-memory-bridge-registry';
 import { api } from '../lib/api';
 
 // "REMEMBERS THIS SONG" badge for the fullscreen eviland visualizer.
@@ -67,7 +71,13 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
     setPhase('fade-in');
     // Match the 4s fade-in window from the blueprint.
     fadeInTimer.current = setTimeout(() => {
-      setPhase('visible');
+      // Pin-aware (finding #7): if the user clicked the badge during the
+      // 4s fade-in window, togglePin set phase to 'pinned'. Without this
+      // guard, this in-flight timer would stomp the pinned phase back to
+      // 'visible' and the chain below would fade the popover out from
+      // under the user's click. The inner timers had this guard already;
+      // the outer fadeInTimer was the missing link.
+      setPhase((p) => (p === 'pinned' ? p : 'visible'));
       // Then ~5s visible before fading out.
       visibleTimer.current = setTimeout(() => {
         setPhase((p) => (p === 'pinned' ? p : 'fade-out'));
@@ -128,15 +138,27 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
     const bridge = getActiveBridge();
     const tid = bridge?.getState().trackId ?? state?.trackId ?? null;
     if (tid == null) return;
+    // Order matters (finding #1 / #2 from the pre-release review):
+    //   1. bridge.discard() FIRST — drop the in-memory plan + counters +
+    //      buffered sections + dirty flag and short-circuit every future
+    //      flush() / observeSection() / record* call for this bridge's
+    //      lifetime. Without this, any subsequent flush from the rAF loop
+    //      (or a visibilitychange) would compose a fresh plan from the
+    //      still-live in-memory state and write it BACK to the DB, instantly
+    //      resurrecting the row the user just asked to purge.
+    //   2. dropBridgeForTrack() drops the bridge from the registry's keyed
+    //      cache so the NEXT Visualizer mount for this track gets a fresh,
+    //      empty bridge (not the discarded one).
+    //   3. api.clearTrackVisualMemory() actually DELETEs the row.
+    // The badge state listener will fire from discard()'s notify() with
+    // hasPlan=false, and the badge will re-render as "no plan" naturally.
+    bridge?.discard();
+    dropBridgeForTrack(tid);
     try {
       await api.clearTrackVisualMemory(tid);
     } catch {
-      /* purge is best-effort */
+      /* purge is best-effort; the discard already neutralised the bridge */
     }
-    // The bridge holds in-memory counters that would otherwise resurrect the
-    // plan on next flush. Tear it down — the Visualizer effect will recreate
-    // a fresh bridge on the next track change or unmount/remount.
-    await bridge?.flushAndDispose('manual').catch(() => false);
     setShowPopover(false);
     setPhase('hidden');
   }

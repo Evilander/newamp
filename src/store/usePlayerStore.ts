@@ -11,6 +11,11 @@ import type {
 import { AudioEngine } from '../audio/engine';
 import { api, inElectron, toAudioUrl, DEFAULT_SETTINGS } from '../lib/api';
 import { decode as decodeEvilandCode } from '../visualizer/eviland-randomizer';
+import {
+  notifyPlayCompleted,
+  notifyLove,
+  notifySkip,
+} from '../visualizer/eviland-memory-bridge-registry';
 import { applyTheme } from '../lib/skins';
 import { normalizePlaybackRate } from '@shared/tempo-trainer';
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
@@ -250,6 +255,10 @@ function shouldRecordManualSkip(state: PlayerState): boolean {
 function recordManualSkip(state: PlayerState): void {
   if (!shouldRecordManualSkip(state) || !state.current) return;
   void api.recordSkip(state.current.id, state.currentTime).catch(() => undefined);
+  // Mirror the library skip into the eviland memory bridge so the skips
+  // counter advances. No lineage effect on its own (per the bridge contract)
+  // but it shows up in the badge popover and feeds future heuristics.
+  notifySkip(state.current.id);
 }
 
 function replayGainDbForTrack(
@@ -601,6 +610,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const segmentEnd = cueEnd(state.current);
       if (s.playing && segmentEndKey && segmentEnd && s.currentTime >= segmentEnd - 0.04 && lastCueEndKey !== segmentEndKey) {
         lastCueEndKey = segmentEndKey;
+        // The cued segment finished — count that as a completed play for the
+        // eviland memory bridge's lineage ladder. Mirrors the natural-end
+        // path below for plain track playback.
+        notifyPlayCompleted(state.current?.id ?? null);
         if (state.stopAfterCurrent) {
           set({ stopAfterCurrent: false });
           engine.stop();
@@ -678,9 +691,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
       // auto-advance on end
       if (s.ended && get().mode !== 'repeat-one') {
+        // The engine reached the end of this track. Notify the eviland memory
+        // bridge so the play counter ticks (drives the 8/32/96/256 generation
+        // ladder). The registry routes to the active bridge IFF its trackId
+        // matches — wrong-track and no-bridge are cheap no-ops.
+        notifyPlayCompleted(state.current?.id ?? null);
         // small delay to avoid re-entry
         setTimeout(() => void get().next(), 0);
       } else if (s.ended && get().mode === 'repeat-one' && get().current) {
+        // repeat-one: the same track is about to play again. From the player's
+        // POV that's a completed play, so the counter ticks here too.
+        notifyPlayCompleted(state.current?.id ?? null);
         const c = get().current!;
         void playEngineTrack(c);
       }
@@ -1299,6 +1320,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         current: state.current?.id === id ? { ...state.current, loved: nextLoved } : state.current,
         queue: state.queue.map((track) => (track.id === id ? { ...track, loved: nextLoved } : track)),
       }));
+      // Eviland memory bridge: love-tick forces a generation evolution when
+      // the lineage is < gen 3 (per the blueprint §1.6.4 rule). Only fire on
+      // the rising edge (toggling loved ON) — un-loving must not advance.
+      if (loved) notifyLove(id);
       return loved;
     },
 

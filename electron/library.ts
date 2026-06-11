@@ -631,6 +631,14 @@ export class LibraryStore {
   // we read change: insert/update of path/duration/has_art, or delete.
   private folderTrackRowsCache: FolderTrackRow[] | null = null;
   private libraryHealthCache: LibraryHealth | null = null;
+  // getVisualMemoryStats() needs totalSections, which requires reading and
+  // JSON.parsing every plan_json blob across track_visual_memory. For a 60k
+  // library with ~5KB plans that's 150MB of string churn + JSON parsing on
+  // the main process every time SettingsView opens (mounting useEffect calls
+  // api.getVisualMemoryStats with no debounce). Cache the result; invalidate
+  // on any visual-memory write/clear path. Same shape as libraryHealthCache /
+  // dnaIndexCache. Null means "stale, recompute on next read".
+  private visualMemoryStatsCache: VisualMemoryStats | null = null;
 
   private constructor(private readonly file: string) {
     this.artDir = join(dirname(file), 'art');
@@ -1192,6 +1200,10 @@ export class LibraryStore {
       this.invalidateDnaIndexCache();
       this.invalidateFolderTrackRowsCache();
       this.invalidateLibraryHealthCache();
+      // Pruning explicitly deletes track_visual_memory rows above; any prune
+      // pass that removed tracks also removed their plan blobs, so the cached
+      // section total is stale.
+      this.invalidateVisualMemoryStatsCache();
       this.db.run('COMMIT');
     } catch (err) {
       this.db.run('ROLLBACK');
@@ -2792,6 +2804,10 @@ export class LibraryStore {
     if (plan == null) {
       this.db.run(`DELETE FROM track_visual_memory WHERE track_id = ?`, [trackId]);
       if (this.db.getRowsModified() <= 0) return false;
+      // Stats cache is computed from track_visual_memory contents — any
+      // write/clear here invalidates it (finding #8 from the pre-release
+      // review). Mirrors the libraryHealthCache pattern.
+      this.invalidateVisualMemoryStatsCache();
       this.scheduleFlush();
       return true;
     }
@@ -2808,6 +2824,7 @@ export class LibraryStore {
          updated_at   = excluded.updated_at`,
       [trackId, json, plan.schema | 0, plan.algoVersion | 0, now],
     );
+    this.invalidateVisualMemoryStatsCache();
     this.scheduleFlush();
     return true;
   }
@@ -2845,11 +2862,22 @@ export class LibraryStore {
   clearAllVisualMemory(): number {
     this.db.run(`DELETE FROM track_visual_memory`);
     const removed = this.db.getRowsModified();
-    if (removed > 0) this.scheduleFlush();
+    if (removed > 0) {
+      this.invalidateVisualMemoryStatsCache();
+      this.scheduleFlush();
+    }
     return removed;
   }
 
   getVisualMemoryStats(): VisualMemoryStats {
+    // Cached result (finding #8): SettingsView opens this with no debounce,
+    // and the underlying scan is O(rows * blob size) of synchronous JSON
+    // parsing on the main process. Same invalidation pattern as
+    // libraryHealthCache and dnaIndexCache — null = recompute, otherwise
+    // return-by-reference (the value is a plain {tracksWithMemory, …}
+    // struct; mutations would corrupt the cache, so callers must treat it
+    // as read-only).
+    if (this.visualMemoryStatsCache) return this.visualMemoryStatsCache;
     const totalRow = this.one<{ count: number }>(
       `SELECT COUNT(*) as count FROM track_visual_memory`,
     );
@@ -2861,9 +2889,7 @@ export class LibraryStore {
 
     // totalSections: sum of sections.length across plan blobs. sql.js can't run
     // json_array_length without the json1 extension, so we parse client-side.
-    // For a library with 10k+ entries this is heavy — pull the COUNT cheaply
-    // and only parse when callers ask for the full stat. Acceptable here:
-    // getVisualMemoryStats is a SettingsView-style infrequent query.
+    // Cached, so this only re-runs after a write/clear invalidates the entry.
     let totalSections = 0;
     if (tracksWithMemory > 0) {
       const rows = this.many<{ plan_json: string | null }>(
@@ -2880,7 +2906,13 @@ export class LibraryStore {
       }
     }
 
-    return { tracksWithMemory, totalSections, oldestAt };
+    const stats: VisualMemoryStats = { tracksWithMemory, totalSections, oldestAt };
+    this.visualMemoryStatsCache = stats;
+    return stats;
+  }
+
+  private invalidateVisualMemoryStatsCache(): void {
+    this.visualMemoryStatsCache = null;
   }
 
   setTrackReplayGain(id: number, replayGainTrackDb: number, replayGainAlbumDb?: number | null): Track | null {

@@ -263,6 +263,93 @@ const disposeOk = await bridge2.flushAndDispose('unmount');
 assert.equal(disposeOk, false, 'restart-bridge dispose with no observed sections should no-op');
 assert.equal(restartWriteCount, 0, 'restart path must not write back to the DB until the user observes new sections');
 
+// ─── TRACK-SWITCH PLAN-BLEED REGRESSION (findings #3/#4) ────────────────────
+//
+// Drive the second-launch director through track 1 → switch to plan-less
+// track 2 → assert that track 2's behavior is virgin: any plan written for
+// track 2 contains NO track-1 seeds, AND track 2's first-boundary seed equals
+// what a brand-new Director would produce for the same songId+sectionId
+// (proving no lineage salt leaked from track 1).
+//
+// This is the regression test for the closure-scoped pendingPlan bleed at
+// reset() time and the Visualizer initial loadOrSeed race. The Director-side
+// fix (reset() clears pendingPlan + lineage to virgin defaults) is the
+// load-bearing change; the bridge belt-and-suspenders pass (Visualizer.tsx)
+// always calls loadPlan(createEmptyPlan(...)) when loadOrSeed yields null.
+const trackId2 = 2;
+library2.db.run(
+  `INSERT OR REPLACE INTO tracks
+   (id, path, title, artist, album, album_artist, mtime, has_art, loved, rating, avoid_auto_play, play_count, skip_count)
+   VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0)`,
+  [trackId2, '/eviland-memory-smoke/fixture-track-2.wav', 'Memory Smoke Track 2', 'Eviland QA', 'Memory Album', 'Eviland QA', Date.now()],
+);
+
+// Compute the seed a VIRGIN Director would mint for track 2's sectionId=0
+// using only the public hashSeed (same formula seedFor() uses at generation 0).
+// This is the "what should the seed look like if no plan bled in" reference.
+function virginSeedFor(songId, sectionId) {
+  return hashSeed(`${songId}::section::${sectionId}`) >>> 0;
+}
+
+// Continue with director2 (which has track 1's plan loaded). Switch it to
+// track 2 via reset() + loadPlan(createEmptyPlan) — the production path.
+director2.reset(`track-${trackId2}`);
+// Belt-and-suspenders: simulate the Visualizer always calling loadPlan with
+// an empty plan when loadOrSeed yields null. createEmptyPlan needs a
+// rootSeed; use the same formula as createEmptyPlan when called by the
+// Visualizer in production.
+const { createEmptyPlan } = mods.types;
+director2.loadPlan(createEmptyPlan(trackId2, `track-${trackId2}`, hashSeed(`track-${trackId2}`)));
+
+// Fire a real section boundary on the freshly-reset director and snapshot.
+// We don't drive 30 seconds of synthetic audio here — just one boundary is
+// enough to prove no plan-bleed.
+const evFrame2 = {
+  kick: 0, bass: 0, snare: 0, hat: 0, vocal: 0,
+  energy: 0.3, centroid: 0.4, flatness: 0.3, crest: 0.3, rolloff: 0.5,
+  width: 0.4, pan: 0, novelty: 0.2, beatPhase: 0, beatConfidence: 0.5, bpm: 120,
+  sectionId: 0, sectionChanged: true, sectionReturn: -1,
+  sectionFingerprint: new Float32Array(24).fill(0.3),
+  bands: new Array(24).fill(0.2), onsets: [],
+};
+director2.update(evFrame2, 16.7);
+// Settle the fade so the section is fully written.
+for (let i = 0; i < 240; i++) {
+  director2.update({ ...evFrame2, sectionChanged: false }, 16.7);
+}
+
+const track2Export = director2.exportPlan(0);
+
+// Track 2 export must have its own songId + virgin lineage.
+assert.equal(track2Export.songId, `track-${trackId2}`, 'track 2 export must have its own songId');
+assert.equal(track2Export.lineage.generation, 0, 'track 2 lineage must be virgin (generation 0)');
+assert.equal(track2Export.lineage.ancestors.length, 0, 'track 2 lineage must have no ancestors');
+assert.equal(track2Export.counters.plays, 0, 'track 2 counters must be virgin');
+assert.equal(track2Export.counters.loves, 0, 'track 2 counters must be virgin');
+
+// Critical assertion: no section in track 2's export may share a seed with
+// track 1's persisted plan. This is the "track A's chorus visually rhymes
+// with track B's chorus" regression for finding #3.
+const track1Seeds = new Set(persisted.sections.map((s) => s.seed >>> 0));
+for (const s of track2Export.sections) {
+  assert.ok(
+    !track1Seeds.has(s.seed >>> 0),
+    `track 2 section seed ${s.seed} matched a track 1 seed (cross-track plan bleed)`,
+  );
+}
+
+// And: track 2's section 0 seed must equal a virgin Director's seed for the
+// same songId+sectionId (i.e., the seedFor() path produced the byte-identical
+// pre-memory key, proving lineage.generation === 0 with no salt).
+const track2Section0 = track2Export.sections.find((s) => s.sectionId === 0);
+assert.ok(track2Section0, 'track 2 should have a section 0 after the boundary');
+const expectedVirginSeed = virginSeedFor(`track-${trackId2}`, 0);
+assert.equal(
+  track2Section0.seed >>> 0,
+  expectedVirginSeed,
+  `track 2 section 0 seed ${track2Section0.seed} differs from virgin seed ${expectedVirginSeed} (lineage salt leaked)`,
+);
+
 library2.close();
 
 console.log(JSON.stringify({
@@ -274,4 +361,11 @@ console.log(JSON.stringify({
   writesPerCompletedPlay: writesThisPlay,
   recalledSeed: matchedSection.seed >>> 0,
   recalledArchetype: matchedSection.archetype,
+  // Track-switch regression for findings #3/#4: track 2 produced virgin seed.
+  trackSwitch: {
+    track2RootSeed: track2Export.lineage.rootSeed,
+    track2Generation: track2Export.lineage.generation,
+    track2Section0Seed: track2Section0.seed >>> 0,
+    expectedVirginSeed,
+  },
 }, null, 2));
