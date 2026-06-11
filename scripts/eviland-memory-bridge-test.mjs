@@ -282,7 +282,172 @@ function makeDirector(initialPlan) {
   log.push('love-tick: gen 0→1→2→3, frozen at ≥3 ✓');
 }
 
-// ─── 8. flushAndDispose persists once, then is idempotent ───────────────────
+// ─── 8. discard() drops in-memory state + short-circuits future writes ─────
+//
+// Repro for finding #1/#2 of the pre-release review: badge "Reset visual
+// memory" used to call api.clearTrackVisualMemory then flushAndDispose, but
+// the bridge's still-resident in-memory plan + buffered sections caused
+// flushAndDispose to re-write the row that was just deleted. discard() is
+// the load-bearing primitive that makes that sequence safe.
+{
+  const { api, store, similar, writeCount } = makeMockApi();
+  const trackId = 91;
+  similar.set(trackId, []);
+  const initial = createEmptyPlan(trackId, `track-${trackId}`, 0x1234abcd);
+  initial.sections.push(fakeSection(0, 0xdeadbeef));
+  initial.counters.plays = 5;
+  store.set(trackId, initial);
+  const b = createMemoryBridge({ trackId, api });
+  await b.loadOrSeed();
+  if (!b.getState().hasPlan) fail('discard precondition: plan should be loaded');
+  if (b.getState().plays !== 5) fail('discard precondition: plays should be 5');
+
+  // Buffer some learning so flush() WOULD do work.
+  const director = makeDirector(initial);
+  b.attachDirector(director);
+  director.setSections([fakeSection(0, 0xdeadbeef)]);
+  b.observeSection(fakeSection(0, 0xdeadbeef));
+
+  const writesBeforeDiscard = writeCount();
+  b.discard();
+  // discard() emitted a notify() with hasPlan=false before clearing listeners.
+  if (b.getState().hasPlan) fail('discard: state.hasPlan should be false post-discard');
+  if (b.getState().plays !== 0) fail('discard: state.plays should be 0 post-discard');
+
+  // Any subsequent flush MUST be a no-op (no DB write).
+  const flushed = await b.flush('manual');
+  if (flushed) fail('discard: flush() after discard should return false');
+  const flushAndDisposed = await b.flushAndDispose('manual');
+  if (flushAndDisposed) fail('discard: flushAndDispose() after discard should return false');
+
+  // observeSection() after discard must be inert (no allocation, no flush).
+  for (let i = 0; i < LEARN_FLUSH_THRESHOLD + 2; i++) b.observeSection(fakeSection(i + 100, 0xcafe));
+  if (writeCount() !== writesBeforeDiscard) {
+    fail(`discard: writes leaked after discard (${writeCount() - writesBeforeDiscard})`);
+  }
+  // record* methods after discard must also be inert.
+  b.recordCompletedPlay();
+  b.recordLove();
+  b.recordSkip();
+  b.recordSectionReturn();
+  if (writeCount() !== writesBeforeDiscard) fail('discard: record* methods wrote after discard');
+  log.push('discard: future flushes + observes + record* short-circuit ✓');
+}
+
+// ─── 9. Registry routing: right-track routes, wrong-track + no-bridge no-op ─
+//
+// Coverage for the notifyPlayCompleted / notifyLove / notifySkip /
+// notifySectionReturn fns that wire usePlayerStore into the bridge in
+// production (finding #1 of the regression-and-claims dimension). Loads
+// the registry as a separate bundle since its exports are independent.
+{
+  await build({
+    entryPoints: [resolve('src/visualizer/eviland-memory-bridge-registry.ts')],
+    bundle: true, format: 'esm', platform: 'node', target: 'es2022',
+    outfile: resolve('tmp/eviland-memory-bridge-registry-bundle.mjs'), logLevel: 'silent',
+  });
+  const reg = await import(pathToFileURL(resolve('tmp/eviland-memory-bridge-registry-bundle.mjs')).href);
+
+  // No bridge: notify* must be cheap no-ops (no throw).
+  reg.publishActiveBridge(null);
+  reg.notifyPlayCompleted(42);
+  reg.notifyLove(42);
+  reg.notifySkip(42);
+  reg.notifySectionReturn(42);
+  // The above is "doesn't throw"; nothing observable to assert. We carry on.
+
+  // Build a real bridge bound to trackId=42, publish it.
+  const { api, store } = makeMockApi();
+  const trackId = 42;
+  const initial = createEmptyPlan(trackId, `track-${trackId}`, 0xabc12345);
+  store.set(trackId, initial);
+  const bridge = createMemoryBridge({ trackId, api });
+  await bridge.loadOrSeed();
+  reg.publishActiveBridge(bridge);
+
+  // Right-track routes: notifyPlayCompleted bumps plays + (at ladder boundary)
+  // the generation. notifyLove ticks generation when < 3.
+  const before = bridge.getState();
+  reg.notifyPlayCompleted(trackId);
+  if (bridge.getState().plays !== before.plays + 1) {
+    fail(`registry: notifyPlayCompleted should bump plays (was ${before.plays}, now ${bridge.getState().plays})`);
+  }
+  const playsBeforeLove = bridge.getState().plays;
+  reg.notifyLove(trackId);
+  if (bridge.getState().generation === before.generation) {
+    fail('registry: notifyLove at gen<3 must tick generation');
+  }
+  // notifySkip / notifySectionReturn are routed but don't tick generation.
+  reg.notifySkip(trackId);
+  reg.notifySectionReturn(trackId);
+
+  // Wrong-track: notify* must NOT mutate the active bridge.
+  const stateBeforeWrong = bridge.getState();
+  reg.notifyPlayCompleted(999); // not the active bridge's trackId
+  reg.notifyLove(999);
+  reg.notifySkip(999);
+  reg.notifySectionReturn(999);
+  const stateAfterWrong = bridge.getState();
+  if (
+    stateBeforeWrong.plays !== stateAfterWrong.plays ||
+    stateBeforeWrong.generation !== stateAfterWrong.generation
+  ) {
+    fail('registry: wrong-track notify* mutated the active bridge');
+  }
+  // Sanity: plays did go up by 1 from the right-track notifyPlayCompleted earlier.
+  if (bridge.getState().plays !== playsBeforeLove) {
+    fail(`registry: plays should be stable post-wrong-track notifies (${playsBeforeLove} vs ${bridge.getState().plays})`);
+  }
+
+  // null trackId: cheap no-op (no throw).
+  reg.notifyPlayCompleted(null);
+  reg.notifyLove(null);
+  reg.notifySkip(null);
+  reg.notifySectionReturn(null);
+
+  reg.publishActiveBridge(null);
+  log.push('registry: routes by trackId match (right=route, wrong=no-op, no-bridge=no-op) ✓');
+}
+
+// ─── 10. acquireBridgeForTrack returns cached bridge for same trackId ──────
+//
+// Same-track remount fast path (finding #6). On a palette/quality/etc remount
+// the Visualizer re-runs its effect: acquireBridgeForTrack({trackId: 42})
+// returns the SAME bridge instance, preserving in-memory plan + buffered
+// learning + counters. releaseBridgeForTrack flushes-and-disposes + drops.
+{
+  const reg = await import(pathToFileURL(resolve('tmp/eviland-memory-bridge-registry-bundle.mjs')).href);
+  reg.__resetBridgeRegistryForTests();
+
+  const { api, store } = makeMockApi();
+  const trackId = 55;
+  const initial = createEmptyPlan(trackId, `track-${trackId}`, 0xfacefeed);
+  store.set(trackId, initial);
+
+  // First mount: acquire, load.
+  const b1 = reg.acquireBridgeForTrack({ trackId, api });
+  await b1.loadOrSeed();
+  if (!b1.getState().hasPlan) fail('acquire: first acquire should load the plan');
+
+  // "Palette change" — second mount with same trackId returns the SAME bridge.
+  const b2 = reg.acquireBridgeForTrack({ trackId, api });
+  if (b1 !== b2) fail('acquire: same trackId should return the SAME bridge instance');
+  if (!b2.getState().hasPlan) fail('acquire: cached bridge should still have its plan');
+
+  // Track change: release flushes + drops; next acquire for a NEW track mints fresh.
+  await reg.releaseBridgeForTrack(trackId, 'track-change');
+  const b3 = reg.acquireBridgeForTrack({ trackId, api });
+  if (b3 === b1) fail('acquire: post-release, acquire for same trackId should mint a fresh bridge');
+
+  // Different trackId never returns the cached one.
+  const b4 = reg.acquireBridgeForTrack({ trackId: trackId + 1, api });
+  if (b4 === b3) fail('acquire: different trackId must mint a fresh bridge');
+
+  reg.__resetBridgeRegistryForTests();
+  log.push('registry: acquire returns cached bridge for same trackId, fresh for new ✓');
+}
+
+// ─── 11. flushAndDispose persists once, then is idempotent ─────────────────
 {
   const { api, store, similar, writeCount } = makeMockApi();
   const trackId = 90;

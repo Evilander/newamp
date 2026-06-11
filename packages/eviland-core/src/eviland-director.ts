@@ -19,10 +19,16 @@
 // a loaded VisualMemoryPlan with generation > 0. At generation 0 the lineage
 // salt is empty and the seed key is byte-identical to the pre-memory format —
 // a plan-less or first-play track renders exactly the same as before. The
-// platform RNG is never read. Two timing inputs do follow the playback clock by
+// platform RNG is never read. THREE timing inputs follow the playback clock by
 // design: the ~20s timer-rotation floor (so the look still changes when the
-// music is structurally quiet, MilkDrop-style) and the gentle intra-section
-// drift.
+// music is structurally quiet, MilkDrop-style), the gentle intra-section
+// drift, and a bounded priming-defer window (deferPrimingFrames) that lets the
+// Visualizer ask the Director to hold its first-ever fresh-mint until a
+// loadPlan() call arrives OR a small frame budget expires (finding #9 from
+// the pre-release review). The defer fixes the "first ~500ms of a known song
+// renders a fresh-mint look under the WRONG lineage, then snaps to the right
+// look when the async loadOrSeed lands" race; with deferPrimingFrames=0 the
+// Director's behavior is byte-identical to the pre-defer code.
 //
 // Zero dependencies, ES modules. The renderer owns the loop; the Director
 // returns the OperatorConfig the renderer should use this frame.
@@ -301,6 +307,20 @@ export interface DirectorOptions {
    * them with its supplied epoch ms.
    */
   onSectionLearn?: (section: VisualMemorySection) => void;
+  /**
+   * Bounded "wait for loadPlan() before priming the first look" window
+   * (finding #9 from the pre-release review). When > 0, the first-update
+   * fresh-mint priming branch is suppressed until EITHER loadPlan() is called
+   * (the plan landed) OR `deferPrimingFrames` updates have ticked through
+   * the update loop (the bound expired and we proceed plan-less). Default 0:
+   * no defer, byte-identical to the pre-defer behavior. The Visualizer sets
+   * this to ~30 (about 500ms @ 60fps) when it knows a loadOrSeed IPC is in
+   * flight, so a track with a persisted plan never renders its first ~500ms
+   * under the WRONG lineage. The "frames" here are calls to `update()`, not
+   * wall-clock — which IS the rendered-frames clock since the Visualizer
+   * gates this with createFrameGate to its target frame interval.
+   */
+  deferPrimingFrames?: number;
 }
 
 export interface Director {
@@ -435,6 +455,17 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   let energyPeak = 0;
   let noveltyAccum = 0;
   let framesSinceSection = 0;
+
+  // ── bounded priming defer (finding #9) ────────────────────────────────────
+  // primingDeferRemaining counts how many more update() calls will suppress
+  // the first-update fresh-mint priming branch. Starts at deferPrimingFrames
+  // when no plan was supplied at construction; loadPlan() forces it to 0 (the
+  // plan landed, gate is open). The default 0 means "never defer" — existing
+  // call sites get byte-identical behavior. Set to ~30 by the Visualizer so a
+  // track with a persisted plan doesn't render its first ~500ms under the
+  // wrong lineage before loadOrSeed lands.
+  const deferPrimingFrames = Math.max(0, opts.deferPrimingFrames ?? 0);
+  let primingDeferRemaining = opts.plan ? 0 : deferPrimingFrames;
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -808,20 +839,37 @@ export function createDirector(opts: DirectorOptions = {}): Director {
         // here — the bridge only persists looks the reactor structurally
         // confirmed. The first real boundary that follows will overwrite this
         // entry with a fingerprint-bearing one and fire the learn callback.
-        const tier = tierFor(frame);
-        const minted = generateForSectionFull(frame.sectionId, tier);
-        sections.set(frame.sectionId, {
-          config: cloneConfig(minted.config),
-          tier,
-          seed: minted.seed,
-          archetype: String(minted.archetype),
-          rotationIndex: 0,
-          fingerprint: null,
-          observedCount: 1,
-        });
-        lastSectionId = frame.sectionId;
-        lastTier = tier;
-        startFade(minted.config, 1, frame.bpm);
+        //
+        // Bounded priming defer (finding #9): when the caller knows a
+        // loadPlan IPC is in flight, primingDeferRemaining was seeded > 0 at
+        // construction. We DEFER the priming mint until either the plan
+        // lands (loadPlan() zeroes primingDeferRemaining) or the budget
+        // runs out. During the defer window we keep `live` at the initial
+        // config (passthrough) — the renderer paints the default look, not
+        // a fresh mint under the wrong lineage. framesSinceSection stays
+        // pinned to 0 so this branch re-evaluates on the next update.
+        if (primingDeferRemaining > 0) {
+          primingDeferRemaining--;
+          framesSinceSection = 0;
+          // No fade started, no section minted, no learn callback. Return
+          // the current live config (the default/passthrough) via the
+          // normal recomputeLive path below.
+        } else {
+          const tier = tierFor(frame);
+          const minted = generateForSectionFull(frame.sectionId, tier);
+          sections.set(frame.sectionId, {
+            config: cloneConfig(minted.config),
+            tier,
+            seed: minted.seed,
+            archetype: String(minted.archetype),
+            rotationIndex: 0,
+            fingerprint: null,
+            observedCount: 1,
+          });
+          lastSectionId = frame.sectionId;
+          lastTier = tier;
+          startFade(minted.config, 1, frame.bpm);
+        }
       }
 
       advanceFade(frame, dtMs);
@@ -868,16 +916,53 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       target = cloneConfig(live);
       fade = 1;
       fadeDurationMs = transitionMsFallback;
-      // Repopulate from the loaded plan, if any. We re-derive each section's
-      // OperatorConfig from its stored seed (via the same generator that
-      // mints them at runtime) — we never persist heavy configs. When the
-      // plan's algoVersion mismatches the current algorithm, we DON'T consume
-      // the stored seeds: we only keep the fingerprints to bias the reactor's
-      // section-return detector toward "this feels like the previous chorus".
-      repopulateFromPlan();
+      // CROSS-TRACK PLAN BLEED FIX (finding #3 from the pre-release review):
+      // Drop the previous track's pendingPlan + lineage + counters + neighbor
+      // seed BEFORE attempting any repopulation. The previous code's
+      // closure-scoped pendingPlan persisted across reset() calls, so a track
+      // change followed by repopulateFromPlan() could replay the OLD track's
+      // sections into the NEW song's sections map — and the OLD track's
+      // lineage would salt the NEW track's seeds. This produced the "track B
+      // visually rhymes with track A's chorus" leak the review caught.
+      //
+      // After reset(), the Director is in virgin-track state for `nextSongId`:
+      //   - pendingPlan: undefined (no replay until loadPlan() is called)
+      //   - lineage: { rootSeed: hashSeed(songId), generation: 0, ... }
+      //   - counters: zeroes
+      //   - neighborSeed: undefined
+      //   - activeTrackId: 0
+      //   - staleAlgo: false
+      // The bridge's belt-and-suspenders pass (Visualizer.tsx) calls
+      // director.loadPlan(...) on every track change with the actual plan
+      // (own / borrowed / empty) for the new track, so this default is only
+      // observed during the brief window between reset() and loadPlan().
+      pendingPlan = undefined;
+      lineage = {
+        rootSeed: hashSeed(activeSongId),
+        ancestors: [],
+        generation: 0,
+        evolutionLog: [],
+      };
+      counters = { plays: 0, skips: 0, loves: 0, sectionReturns: 0 };
+      neighborSeed = undefined;
+      activeTrackId = 0;
+      staleAlgo = false;
+      // Re-arm the bounded priming defer (finding #9). After reset() the
+      // bridge will issue a fresh loadOrSeed IPC; until that lands we want
+      // the priming branch suppressed so the first ~30 frames don't render
+      // the new song under default lineage when a persisted plan might be
+      // about to arrive. loadPlan() zeroes this when the plan lands.
+      primingDeferRemaining = deferPrimingFrames;
+      // No repopulation here — repopulateFromPlan() is a no-op when
+      // pendingPlan is null. Plan injection happens through loadPlan().
     },
 
     loadPlan(nextPlan): void {
+      // A plan landed — open the bounded-priming-defer gate so the next
+      // update() can mint the opening look immediately (finding #9). Without
+      // this, the defer window would idle the visualizer at the default
+      // config until the budget expired even when the plan arrived sooner.
+      primingDeferRemaining = 0;
       // Replace lineage + counters + neighbor seed + sections from the new
       // plan; reset() does the actual section repopulation work.
       lineage = {
