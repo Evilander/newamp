@@ -56,13 +56,19 @@ jobs:
       - name: Test — Eviland audio reactor (structure detection)
         run: npm run test:eviland-audio
 
-      - name: Test — Eviland Director (timer rotation + drift + recall)
+      - name: Test — Eviland Director (timer rotation + drift + recall + plan round-trip)
         run: npm run test:eviland-director
+
+      - name: Test — Eviland visual-memory schema + helpers
+        run: npm run test:eviland-memory
 
       - name: Test — Eviland fluid forces + operator channels
         run: |
           npm run test:eviland-fluid
           npm run test:eviland-operators
+
+      - name: Test — algoVersion guard (randomizer/director changes bump VISUAL_MEMORY_ALGO_VERSION)
+        run: npm run test:algo-version-guard
 
       - name: Test — macOS logic (device-change, music-folders, cache-key, app-menu, macho-arch)
         run: |
