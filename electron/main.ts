@@ -1527,6 +1527,7 @@ function registerIpc(): void {
     library.clearTrackVisualMemory(id),
   );
   ipcMain.handle('tracks:visual-memory-stats', async () => library.getVisualMemoryStats());
+  ipcMain.handle('tracks:visual-memory-clear-all', async () => library.clearAllVisualMemory());
   ipcMain.handle('tags:list-rules', async () => library.listTagRules());
   ipcMain.handle('tags:save-rule', async (_e, input) => {
     const saved = library.saveTagRule(input);

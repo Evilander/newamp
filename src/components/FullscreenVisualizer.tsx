@@ -16,6 +16,7 @@ import { volumeLabel } from './VolumeSlider';
 import { createCanvasRecorder, CanvasRecorderError, type CanvasRecorder } from '../visualizer/eviland-recorder';
 import { useDetachedVisualizer } from './useDetachedVisualizer';
 import { ScrubBar } from './ScrubBar';
+import { EvilandMemoryBadge } from './EvilandMemoryBadge';
 
 // Preset registry. `group` drives the labeled sections in the new preset
 // picker popover so users can scan by category instead of one long rail. The
@@ -879,6 +880,8 @@ export function FullscreenVisualizer(): JSX.Element {
           </div>
         </div>
       )}
+
+      <EvilandMemoryBadge enabled={activePreset === 'eviland'} />
 
       <div
         className={`fullscreen-viz-toolbar viz-control-bar pointer-events-auto absolute inset-x-3 top-3 flex max-w-[calc(100vw-1.5rem)] items-center gap-2 ${chromeVisible ? '' : 'is-clean'} ${cursorActive ? '' : 'is-top-hidden'}`}

@@ -62,6 +62,9 @@ jobs:
       - name: Test — Eviland visual-memory schema + helpers
         run: npm run test:eviland-memory
 
+      - name: Test — Eviland visual-memory bridge (loader + lineage + flush)
+        run: npm run test:eviland-memory-bridge
+
       - name: Test — Eviland fluid forces + operator channels
         run: |
           npm run test:eviland-fluid

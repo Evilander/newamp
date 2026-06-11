@@ -40,6 +40,7 @@
     "test:eviland-director": "node scripts/eviland-director-test.mjs",
     "test:eviland-fluid": "node scripts/eviland-fluid-test.mjs",
     "test:eviland-memory": "node scripts/eviland-memory-test.mjs",
+    "test:eviland-memory-bridge": "node scripts/eviland-memory-bridge-test.mjs",
     "test:eviland-operators": "node scripts/eviland-operators-test.mjs",
     "test:algo-version-guard": "node scripts/algo-version-guard.mjs",
     "test:device-change": "node scripts/device-change-test.mjs",
@@ -182,6 +183,7 @@
     "release:gate:local": "node scripts/release-gate.mjs --allow-unsigned --ack-manual --real-library",
     "smoke:eviland": "electron scripts/eviland-smoke.mjs",
     "smoke:eviland-arch-distinct": "electron scripts/eviland-archetype-distinctness-capture.mjs",
+    "smoke:eviland-memory": "npm run build:electron && node scripts/eviland-memory-smoke.mjs",
     "smoke:detached": "node scripts/detached-viz-smoke.mjs"
   },
   "dependencies": {

@@ -462,6 +462,9 @@ export function SettingsView(): JSX.Element {
               </span>
             </label>
           </Row>
+          <Row label="Eviland memory">
+            <EvilandMemoryRow />
+          </Row>
         </section>
 
         <section className="bevel-out flex flex-col gap-4 p-6">
@@ -1298,6 +1301,86 @@ function Row({ label, children }: { label: string; children: React.ReactNode }):
         {label}
       </span>
       {children}
+    </div>
+  );
+}
+
+function EvilandMemoryRow(): JSX.Element {
+  const [stats, setStats] = useState<{ tracksWithMemory: number; totalSections: number; oldestAt: number | null } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+
+  function refresh(): void {
+    api.getVisualMemoryStats().then(setStats).catch(() => undefined);
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  async function purge(): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const removed = await api.clearAllVisualMemory();
+      setStatus(removed > 0 ? `Cleared ${removed} remembered tracks.` : 'Nothing to clear.');
+      refresh();
+    } catch {
+      setStatus('Purge failed.');
+    } finally {
+      setBusy(false);
+      setConfirming(false);
+    }
+  }
+
+  const tracks = stats?.tracksWithMemory ?? 0;
+  const sections = stats?.totalSections ?? 0;
+  return (
+    <div className="flex flex-col items-end gap-2 text-[12px]" style={{ color: 'var(--ink-2)' }}>
+      <span data-newamp-eviland-memory-stats>
+        Eviland remembers {tracks} track{tracks === 1 ? '' : 's'} ({sections} section{sections === 1 ? '' : 's'})
+      </span>
+      {!confirming && (
+        <button
+          type="button"
+          className="pxbtn"
+          onClick={() => setConfirming(true)}
+          disabled={busy || tracks === 0}
+          data-newamp-eviland-memory-purge
+        >
+          Purge all
+        </button>
+      )}
+      {confirming && (
+        <div className="flex flex-col items-end gap-2">
+          <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
+            This resets the visual look of every remembered song to its first-play default.
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="pxbtn"
+              onClick={() => setConfirming(false)}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="pxbtn"
+              onClick={() => { void purge(); }}
+              disabled={busy}
+              data-newamp-eviland-memory-purge-confirm
+            >
+              {busy ? 'Purging…' : 'Purge all visual memory'}
+            </button>
+          </div>
+        </div>
+      )}
+      {status && (
+        <span className="text-[11px]" style={{ color: 'var(--muted)' }}>{status}</span>
+      )}
     </div>
   );
 }
