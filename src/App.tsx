@@ -180,12 +180,26 @@ export default function App(): JSX.Element {
   useEffect(() => {
     return startEvilandProducer(usePlayerStore.getState().engine, () => {
       const s = usePlayerStore.getState();
+      // Transport snapshot is piggy-backed onto the 30Hz frame publish so the
+      // detached projector can render a live control bar (track title, scrub,
+      // play/pause) without round-tripping the main process for state.
+      const transport = s.current
+        ? {
+            title: s.current.title ?? null,
+            artist: s.current.artist ?? null,
+            album: s.current.album ?? null,
+            currentTime: s.currentTime,
+            duration: s.duration,
+            isPlaying: s.isPlaying,
+          }
+        : null;
       return {
         director: s.evilandDirector,
         seed: s.evilandSeed,
         nonce: s.evilandConfigNonce,
         waveMode: s.evilandWaveMode,
         trackId: s.current?.id ?? null,
+        transport,
       };
     });
   }, []);
@@ -237,6 +251,19 @@ export default function App(): JSX.Element {
       else if (command === 'previous') void store.prev();
       else if (command === 'stop') store.engine.stop();
     });
+    // Detached projector → main renderer. The projector window has no engine
+    // of its own; its floating control bar invokes transport commands here.
+    const detachedBridge = typeof window !== 'undefined' ? window.detachedViz : undefined;
+    const offTransportCommand = detachedBridge?.onTransportCommand
+      ? detachedBridge.onTransportCommand((cmd, arg) => {
+          const store = usePlayerStore.getState();
+          if (cmd === 'togglePlay') store.togglePlay();
+          else if (cmd === 'next') void store.next();
+          else if (cmd === 'prev') void store.prev();
+          else if (cmd === 'seek' && Number.isFinite(arg)) store.seek(Math.max(0, arg ?? 0));
+          else if (cmd === 'setVolume' && Number.isFinite(arg)) void store.setVolume(Math.max(0, Math.min(2, arg ?? 0)));
+        })
+      : () => undefined;
     const persistOnExit = (): void => {
       void usePlayerStore.getState().persistPlaybackSession();
     };
@@ -247,6 +274,7 @@ export default function App(): JSX.Element {
       window.removeEventListener('beforeunload', persistOnExit);
       offOpenFiles();
       offPlayerCommand();
+      offTransportCommand();
     };
   }, [init]);
 

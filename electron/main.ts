@@ -772,6 +772,22 @@ function setDetachedVisualizerFullscreen(on: boolean): void {
   detachedVizWin.setFullScreen(Boolean(on));
 }
 
+// Toggle returns the resulting state so the projector's control bar can update
+// its button without a separate round-trip. Without this, callers had to know
+// the current fullscreen state before they could ask to leave it — the
+// projector window has no way to discover that on its own.
+function toggleDetachedVisualizerFullscreen(): boolean {
+  if (!detachedVizWin || detachedVizWin.isDestroyed()) return false;
+  const next = !detachedVizWin.isFullScreen();
+  detachedVizWin.setFullScreen(next);
+  return next;
+}
+
+function isDetachedVisualizerFullscreen(): boolean {
+  if (!detachedVizWin || detachedVizWin.isDestroyed()) return false;
+  return detachedVizWin.isFullScreen();
+}
+
 function registerDisplayWatchers(): void {
   if (displayWatcherRegistered) return;
   displayWatcherRegistered = true;
@@ -2002,6 +2018,24 @@ function registerIpc(): void {
   });
   ipcMain.handle('detached-viz:set-fullscreen', (_e, on: boolean) => {
     setDetachedVisualizerFullscreen(Boolean(on));
+  });
+  ipcMain.handle('detached-viz:toggle-fullscreen', () => toggleDetachedVisualizerFullscreen());
+  ipcMain.handle('detached-viz:is-fullscreen', () => isDetachedVisualizerFullscreen());
+  // Transport commands originate in the detached projector window's floating
+  // control bar. They are forwarded to the MAIN window's renderer because that
+  // is where the AudioEngine + store live; the projector is a pure consumer.
+  // Caps the surface: only known verbs reach the renderer.
+  const TRANSPORT_CMDS = new Set([
+    'togglePlay',
+    'next',
+    'prev',
+    'seek',
+    'setVolume',
+  ]);
+  ipcMain.handle('transport:command', (_e, cmd: string, arg?: number) => {
+    if (!TRANSPORT_CMDS.has(cmd)) return;
+    if (!mainWin || mainWin.isDestroyed()) return;
+    mainWin.webContents.send('transport:command', { cmd, arg });
   });
   ipcMain.handle('detached-viz:is-open', () =>
     Boolean(detachedVizWin && !detachedVizWin.isDestroyed()),
