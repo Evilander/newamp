@@ -3,6 +3,57 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.13.0] - 2026-06-13
+
+### Fixed
+
+- **Scrubbing works everywhere now — for real this time.** Every prior "seek
+  fix" forwarded Range headers into Electron's `net.fetch(file://)`, which
+  slices the bytes but answers a bare `200` with no
+  `Content-Range`/`Content-Length`/`Accept-Ranges` — Chromium's media stack read
+  that as "endless live stream" and snapped every scrub back to 0:00, on every
+  format including plain MP3/FLAC. NewAmp now answers byte ranges itself with
+  real `206 Partial Content` responses (`electron/audio-serve.ts`), and the
+  first play of exotic formats (.wma/.ape/.wv/.dsf/…) streams a
+  synthesized-header float-WAV whose constant bitrate maps any byte range to an
+  `ffmpeg -ss` seek — so even the live transcode path is scrubbable from second
+  zero. Gates: `smoke:playback-seek` (4 serving paths, real `<audio>` scrub
+  assertions) and a production-stack scrub assert in `smoke:ui-detached-viz`.
+- **The detached visualizer actually works.** The projector window was black
+  for three compounding reasons, all fixed: (1) the frame MessagePort was wired
+  at `ready-to-show`, racing module evaluation — the port could be dropped
+  forever; the detached renderer now signals `renderer-ready` and the port is
+  wired only then. (2) The frame producer ran on `requestAnimationFrame` in the
+  main window, which the compositor throttles to ~1fps the moment the projector
+  occludes it — the headless producer now runs on a steady 30Hz timer and the
+  main window's background throttling is disabled while a projector is
+  attached. (3) The detached window rendered the bare WebGL field instead of
+  the flagship composition — it now hosts the REAL Eviland Live stack: the
+  butterchurn (MilkDrop) iframe fed live time-domain audio over the port, the
+  new scene overlay, and the reactor event canvas, with the WebGL renderer as
+  fallback. The frame bus also self-heals from lost messages/acks instead of
+  freezing. Gate: `smoke:ui-detached-viz` boots the real app, scrubs, opens the
+  projector, and asserts non-black pixels via `capturePage`.
+
+### Added
+
+- **Eviland Live: 25 scene overlays + the full MilkDrop catalog.** The
+  butterchurn layer now loads the base + Extra + Extra2 + MD1 preset packs
+  (hundreds of real MilkDrop presets, up from ~170). On top of the field, a new
+  transparent WebGL2 **scene overlay** (`src/visualizer/scene-overlay.ts`,
+  `src/visualizer/scenes/`) runs 25 hand-built audio-reactive scenes —
+  lightning veins, voronoi pulse, kaleido bloom, liquid metal, neon grid,
+  orbit swarm, fractal zoom, comet trails, constellation, and 16 more — each a
+  self-contained shader driven by the 24-band reactor (voice envelopes, onset
+  impulses, beat phase, stereo field, spectral shape). Scene choice is a seeded
+  walk keyed on track × section × your evolved visual-memory lineage, layered
+  under MilkDrop's own randomized rotation — the resulting composition is
+  effectively unreplicable on anyone else's machine. Scenes crossfade on
+  section boundaries, skip entirely on `performance: low`, and any scene that
+  fails to compile is blacklisted for the session without taking the layer
+  down. Gate: `smoke:scene-overlay` compiles and renders every scene and fails
+  any that are black, static, or audio-deaf.
+
 ## [1.12.0] - 2026-06-11
 
 ### Added

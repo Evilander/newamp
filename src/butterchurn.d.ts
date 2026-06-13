@@ -25,3 +25,12 @@ declare module 'butterchurn-presets' {
 
   export default presetApi;
 }
+
+// Extra preset packs (Extra/Extra2/MD1/...) share the base pack's API.
+declare module 'butterchurn-presets/lib/*' {
+  const presetApi: {
+    getPresets(): Record<string, Record<string, unknown>>;
+  };
+
+  export default presetApi;
+}

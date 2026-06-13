@@ -25,6 +25,12 @@ import type { EvilandPalette } from './eviland';
 import { frameBus } from './frame-bus';
 import { createMemoryBridge, type MemoryBridge } from './eviland-memory-bridge';
 import { api } from '../lib/api';
+import { BUTTERCHURN_FFT_SIZE } from '../butterchurn-iframe/protocol';
+
+// Mild pre-emphasis (~1.4x with soft-clip) so the detached window's MilkDrop
+// field reacts to transients the way the on-screen one does — same constant as
+// Visualizer.tsx's butterchurn pump.
+const WAVE_PREEMPHASIS = 1.4;
 
 export interface EvilandProducerUiState {
   /** AI Director on → look conducts itself to the song. */
@@ -128,7 +134,7 @@ export function startEvilandProducer(
 ): () => void {
   activeStop?.();
 
-  let raf = 0;
+  let timer = 0;
   let loopActive = false;
   let reactor: EvilandReactor | null = null;
   let director: Director | null = null;
@@ -142,6 +148,8 @@ export function startEvilandProducer(
   let onsetFreq: Uint8Array<ArrayBuffer> | null = null;
   let leftFreq: Uint8Array<ArrayBuffer> | null = null;
   let rightFreq: Uint8Array<ArrayBuffer> | null = null;
+  let rawWave: Uint8Array<ArrayBuffer> | null = null;
+  const waveSamples = new Uint8Array(new ArrayBuffer(BUTTERCHURN_FFT_SIZE));
 
   function ensureBuffers(): void {
     const n = engine.frequencyBinCount;
@@ -151,11 +159,34 @@ export function startEvilandProducer(
       leftFreq = new Uint8Array(new ArrayBuffer(n));
       rightFreq = new Uint8Array(new ArrayBuffer(n));
     }
+    if (!rawWave || rawWave.length !== engine.fftSize) {
+      rawWave = new Uint8Array(new ArrayBuffer(engine.fftSize));
+    }
   }
 
-  const tick = (now: number): void => {
+  // Decimate the analyser's time-domain bytes to BUTTERCHURN_FFT_SIZE and
+  // apply pre-emphasis + soft-clip — byte-identical math to the on-screen
+  // butterchurn pump so the projector's MilkDrop reacts the same way.
+  function fillWaveSamples(): void {
+    if (!rawWave) return;
+    engine.getOnsetTimeData(rawWave);
+    const stride = Math.max(1, Math.floor(rawWave.length / BUTTERCHURN_FFT_SIZE));
+    for (let i = 0; i < BUTTERCHURN_FFT_SIZE; i++) {
+      const centered = ((rawWave[i * stride] ?? 128) - 128) / 128;
+      const lifted = centered * WAVE_PREEMPHASIS;
+      const clipped = lifted / (1 + Math.abs(lifted));
+      waveSamples[i] = 128 + Math.round(clipped * 127);
+    }
+  }
+
+  let tickCount = 0;
+  let lastTickAt = 0;
+
+  const tick = (): void => {
     if (!loopActive) return;
-    raf = requestAnimationFrame(tick);
+    const now = performance.now();
+    tickCount += 1;
+    lastTickAt = now;
     if (!frameBus.hasDetachedConsumer()) return;
     if (engine.ctx.state === 'suspended') void engine.ctx.resume().catch(() => {});
 
@@ -209,20 +240,34 @@ export function startEvilandProducer(
       config = applyWaveformOverride(manualConfig ?? director.current(), ui.waveMode);
     }
 
-    frameBus.publish(frame, palette, dtMs, config);
+    fillWaveSamples();
+    frameBus.publish(frame, palette, dtMs, config, {
+      wave: waveSamples,
+      sampleRate: engine.getSampleRate(),
+      trackId: ui.trackId,
+    });
   };
+
+  // setInterval, NOT requestAnimationFrame: rAF is tied to the compositor's
+  // BeginFrame stream, which stops when the main window is occluded — e.g.
+  // when the projector window covers it on a single-monitor setup. The
+  // producer is headless (analysis + postMessage; it paints nothing), so a
+  // steady 30Hz timer is the right clock. The Electron main process disables
+  // backgroundThrottling on this window while a projector is attached so the
+  // timer keeps full rate even hidden/minimized.
+  const TICK_MS = 33;
 
   function startLoop(): void {
     if (loopActive) return;
     loopActive = true;
     lastNow = 0;
-    raf = requestAnimationFrame(tick);
+    timer = window.setInterval(tick, TICK_MS);
   }
 
   function stopLoop(): void {
     loopActive = false;
-    if (raf) cancelAnimationFrame(raf);
-    raf = 0;
+    if (timer) window.clearInterval(timer);
+    timer = 0;
     reactor = null;
     director = null;
   }
@@ -234,6 +279,18 @@ export function startEvilandProducer(
     } else {
       stopLoop();
     }
+  });
+
+  // Live diagnostics for smokes/DevTools.
+  Object.defineProperty(window, '__newampProducerDiag', {
+    configurable: true,
+    get: () => ({
+      loopActive,
+      tickCount,
+      lastTickAgoMs: lastTickAt ? Math.round(performance.now() - lastTickAt) : -1,
+      hasConsumer: frameBus.hasDetachedConsumer(),
+      bus: frameBus.debugStats(),
+    }),
   });
 
   if (frameBus.hasDetachedConsumer()) {

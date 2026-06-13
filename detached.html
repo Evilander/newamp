@@ -3,15 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Detached visualizer window. No eval surfaces; no remote resources.
-         The renderer module talks to a MessagePort posted in by the main
-         process and never reaches outside the frame. -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'" />
+    <!-- Detached visualizer window. No eval surfaces IN THIS DOCUMENT; the
+         MilkDrop (butterchurn) layer runs inside the same sandboxed
+         butterchurn-iframe.html the main window uses — that frame's own CSP
+         scopes 'unsafe-eval' to itself. frame-src stays same-origin. The
+         renderer module talks to a MessagePort posted in by the main process
+         and never reaches outside the window. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'self'" />
     <title>NewAmp — Eviland</title>
     <style>
       html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
       body { cursor: none; font: 13px ui-monospace, Menlo, Consolas, monospace; color: #aaa; }
-      canvas#eviland-canvas { display: block; width: 100vw; height: 100vh; }
+      /* Layer stack (bottom → top): WebGL fallback canvas, MilkDrop iframe,
+         reactor overlay. The flagship look is iframe + overlay (eviland-live);
+         the WebGL canvas only paints when the iframe can't host butterchurn. */
+      canvas#eviland-canvas { position: fixed; inset: 0; display: block; width: 100vw; height: 100vh; }
+      iframe#milkdrop-frame { position: fixed; inset: 0; width: 100vw; height: 100vh; border: none; display: block; pointer-events: none; z-index: 1; }
+      canvas#scene-overlay { position: fixed; inset: 0; display: block; width: 100vw; height: 100vh; pointer-events: none; z-index: 2; }
+      canvas#reactor-overlay { position: fixed; inset: 0; display: block; width: 100vw; height: 100vh; pointer-events: none; z-index: 3; }
       .eviland-msg {
         position: fixed; inset: 0;
         display: grid; place-items: center;
@@ -22,6 +31,9 @@
   </head>
   <body>
     <canvas id="eviland-canvas"></canvas>
+    <iframe id="milkdrop-frame" title="NewAmp Milkdrop visualizer" aria-hidden="true" tabindex="-1"></iframe>
+    <canvas id="scene-overlay" aria-hidden="true"></canvas>
+    <canvas id="reactor-overlay" aria-hidden="true"></canvas>
     <script type="module" src="/src/detached/main.tsx"></script>
   </body>
 </html>

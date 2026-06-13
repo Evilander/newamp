@@ -16,9 +16,17 @@
 // that is expected. This module deliberately does no audio or rendering on its
 // own; it is pure plumbing.
 //
-// Backpressure: drop-newest with at most MAX_INFLIGHT frames outstanding to
-// the detached consumer. A stuck detached window must never block the main
-// rAF loop. ACKs from the consumer release the inflight slot.
+// Backpressure: NONE by design — publishing is fire-and-forget at the
+// producer's ~30Hz tick. The original ack-gated inflight window (max 3
+// outstanding, consumer acks release slots) froze the projector in
+// production: an OCCLUDED Electron renderer stops processing incoming
+// MessagePort messages even with backgroundThrottling disabled, so the acks
+// returning to the (covered-by-the-projector) main window never landed and
+// the window jammed shut. postMessage is async and never blocks the sender;
+// the consumer coalesces to the newest frame on its own rAF, so a slow or
+// briefly-blocked projector simply skips stale frames instead of starving.
+// Acks are still SENT by the consumer for diagnostics, but nothing gates on
+// them.
 //
 // Cloning rule: EvilandFrame.bands is a reused Float32Array and
 // EvilandFrame.onsets reuses pooled objects. postMessage uses the
@@ -49,6 +57,18 @@ export interface DetachedFramePayload {
    * the producer has no opinion (the consumer then keeps its last config).
    */
   operator?: OperatorConfig;
+  /**
+   * Pre-emphasized time-domain bytes (BUTTERCHURN_FFT_SIZE samples). Drives
+   * the detached window's MilkDrop (butterchurn) field and the WebGL
+   * renderer's waveform layer — without these the projector could only show
+   * the bare feedback field, which reads as "black screen" next to the
+   * flagship eviland-live composition.
+   */
+  wave?: Uint8Array;
+  /** Engine sample rate — the butterchurn iframe needs it once at init. */
+  sampleRate?: number;
+  /** Current track id — seeds the detached window's scene-overlay walk. */
+  trackId?: number | null;
   /** Sent only on change; the consumer reapplies on each tick. */
   config?: {
     quality?: 'high' | 'medium' | 'low';
@@ -61,8 +81,23 @@ export interface DetachedAckPayload {
 }
 
 export interface FrameBus {
+  /** Live counters for smokes/DevTools — never used for control flow. */
+  debugStats(): {
+    hasPort: boolean;
+    seq: number;
+    publishCalls: number;
+    postErrors: number;
+    detaches: number;
+    acks: number;
+  };
   subscribe(fn: EvilandFrameListener): () => void;
-  publish(frame: EvilandFrame, palette: EvilandPalette, dtMs: number, operator?: OperatorConfig): void;
+  publish(
+    frame: EvilandFrame,
+    palette: EvilandPalette,
+    dtMs: number,
+    operator?: OperatorConfig,
+    extras?: { wave?: Uint8Array; sampleRate?: number; trackId?: number | null },
+  ): void;
   hasDetachedConsumer(): boolean;
   onConsumerChange(cb: (hasDetached: boolean) => void): () => void;
   attachDetachedPort(port: MessagePort): void;
@@ -71,13 +106,10 @@ export interface FrameBus {
   setDetachedQuality(quality: 'high' | 'medium' | 'low'): void;
 }
 
-const MAX_INFLIGHT = 3;
-
 interface BusState {
   listeners: Set<EvilandFrameListener>;
   consumerChange: Set<(hasDetached: boolean) => void>;
   port: MessagePort | null;
-  inflight: number;
   quality: 'high' | 'medium' | 'low' | null;
   qualityDirty: boolean;
   seq: number;
@@ -87,11 +119,12 @@ const state: BusState = {
   listeners: new Set(),
   consumerChange: new Set(),
   port: null,
-  inflight: 0,
   quality: null,
   qualityDirty: false,
   seq: 0,
 };
+
+const debug = { publishCalls: 0, postErrors: 0, detaches: 0, acks: 0 };
 
 function notifyConsumerChange(): void {
   const has = state.port !== null;
@@ -105,6 +138,14 @@ function notifyConsumerChange(): void {
 }
 
 export const frameBus: FrameBus = {
+  debugStats() {
+    return {
+      hasPort: state.port !== null,
+      seq: state.seq,
+      ...debug,
+    };
+  },
+
   subscribe(fn) {
     state.listeners.add(fn);
     return () => {
@@ -112,7 +153,7 @@ export const frameBus: FrameBus = {
     };
   },
 
-  publish(frame, palette, dtMs, operator) {
+  publish(frame, palette, dtMs, operator, extras) {
     // Cheap early-out: when nothing is listening (no on-screen subscriber and
     // no detached window) publish is a no-op. Fires up to 60x/s otherwise.
     if (state.listeners.size === 0 && !state.port) return;
@@ -126,7 +167,7 @@ export const frameBus: FrameBus = {
     }
     const port = state.port;
     if (!port) return;
-    if (state.inflight >= MAX_INFLIGHT) return; // drop-newest backpressure
+    debug.publishCalls += 1;
 
     const payload: DetachedFramePayload = {
       t: ++state.seq,
@@ -135,18 +176,20 @@ export const frameBus: FrameBus = {
       dtMs,
     };
     if (operator) payload.operator = operator;
+    if (extras?.wave) payload.wave = extras.wave; // structured-clone copies it
+    if (extras?.sampleRate) payload.sampleRate = extras.sampleRate;
+    if (extras?.trackId !== undefined) payload.trackId = extras.trackId;
     if (state.qualityDirty && state.quality) {
       payload.config = { quality: state.quality };
       state.qualityDirty = false;
     }
-    state.inflight++;
     try {
       port.postMessage(payload);
     } catch (err) {
       // The port can be closed mid-frame if the detached window crashed or
-      // was destroyed between attach and post. Roll back the inflight count
-      // and tear down the port so the next publish doesn't try again.
-      state.inflight = Math.max(0, state.inflight - 1);
+      // was destroyed between attach and post. Tear down the port so the
+      // next publish doesn't try again.
+      debug.postErrors += 1;
       console.error('[frame-bus] postMessage failed; detaching port', err);
       frameBus.detachPort();
     }
@@ -173,7 +216,6 @@ export const frameBus: FrameBus = {
       }
     }
     state.port = port;
-    state.inflight = 0;
     // On reattach, the consumer needs the current quality on the first frame
     // (its prior renderer was torn down with the window).
     state.qualityDirty = state.quality !== null;
@@ -181,7 +223,7 @@ export const frameBus: FrameBus = {
     port.onmessage = (msg: MessageEvent) => {
       const data = msg.data as DetachedAckPayload | undefined;
       if (data && data.type === 'ack') {
-        state.inflight = Math.max(0, state.inflight - 1);
+        debug.acks += 1; // diagnostics only — nothing gates on acks
       }
     };
     port.onmessageerror = (err) => {
@@ -199,8 +241,8 @@ export const frameBus: FrameBus = {
   detachPort() {
     const port = state.port;
     if (!port) return;
+    debug.detaches += 1;
     state.port = null;
-    state.inflight = 0;
     try {
       port.onmessage = null;
       port.onmessageerror = null;

@@ -415,6 +415,12 @@ contextBridge.exposeInMainWorld('detachedViz', {
     ipcRenderer.invoke('detached-viz:set-fullscreen', on) as Promise<void>,
   isOpen: (): Promise<boolean> =>
     ipcRenderer.invoke('detached-viz:is-open') as Promise<boolean>,
+  // The detached renderer calls this AFTER its 'eviland:frame-port' listener
+  // is installed. Main wires the MessageChannelMain pair only then — wiring at
+  // ready-to-show raced module evaluation, and a port posted before the
+  // listener existed was dropped forever (black projector, stuck on
+  // "Connecting to NewAmp…").
+  rendererReady: (): void => ipcRenderer.send('detached-viz:renderer-ready'),
   onOpened: (cb: () => void): (() => void) => {
     const h = () => cb();
     ipcRenderer.on('detached-viz:opened', h);

@@ -13,6 +13,7 @@ import { createParticleFlowRenderer } from '../visualizer/particle-flow';
 import { createEvilandRenderer } from '../visualizer/eviland';
 import { createEvilandReactor } from '../visualizer/eviland-audio';
 import { createReactorOverlay, type ReactorOverlay } from '../visualizer/reactor-overlay';
+import { createSceneOverlay, type SceneOverlay } from '../visualizer/scene-overlay';
 import { createDirector } from '../visualizer/eviland-director';
 import {
   generate as generateEvilandConfig,
@@ -141,6 +142,9 @@ export function Visualizer({
   // Eviland Live overlay: the transparent reactor canvas stacked over the
   // butterchurn (MilkDrop) iframe.
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  // Eviland Live scene layer: the WebGL2 scene overlay (25 audio-reactive
+  // scenes) sandwiched between the MilkDrop iframe and the reactor events.
+  const sceneCanvasRef = useRef<HTMLCanvasElement>(null);
   const engine = usePlayerStore((s) => s.engine);
   // Eviland-only state mirrored into a ref so the rAF loop can read live values
   // without restarting on every toggle. The loop reads `evilandStateRef.current`
@@ -244,6 +248,18 @@ export function Visualizer({
       if (liveMode && overlayCanvasRef.current) {
         overlay = createReactorOverlay(overlayCanvasRef.current);
       }
+      // Scene overlay: skipped entirely on 'low' so weak GPUs keep their
+      // frame budget — MilkDrop + reactor events still run.
+      let sceneOverlay: SceneOverlay | null = null;
+      let sceneW = 0;
+      let sceneH = 0;
+      let sceneDpr = 0;
+      if (liveMode && performance !== 'low' && sceneCanvasRef.current) {
+        sceneOverlay = createSceneOverlay(sceneCanvasRef.current, {
+          quality: 'high',
+          seedKey: `track-${usePlayerStore.getState().current?.id ?? 'idle'}`,
+        });
+      }
 
       const updateOverlay = (now: number): void => {
         if (!overlay || !ovReactor || !ovFreq || !ovOnsetFreq || !ovLeftFreq || !ovRightFreq) return;
@@ -264,6 +280,25 @@ export function Visualizer({
         overlayLastNow = now;
         const frame = ovReactor.analyze(ovFreq, ovOnsetFreq, ovLeftFreq, ovRightFreq, dt, now);
         overlay.render(frame, ovPalette, dt);
+        if (sceneOverlay) {
+          const sceneNode = sceneCanvasRef.current;
+          if (sceneNode) {
+            const cssW = sceneNode.clientWidth || 100;
+            const cssH = sceneNode.clientHeight || 100;
+            const odpr = Math.min(window.devicePixelRatio || 1, dprCap);
+            if (cssW !== sceneW || cssH !== sceneH || odpr !== sceneDpr) {
+              sceneW = cssW;
+              sceneH = cssH;
+              sceneDpr = odpr;
+              sceneOverlay.resize(cssW, cssH, odpr);
+            }
+          }
+          // Re-seed on track change so the scene walk is per-track (and thus
+          // per user-history once the lineage evolves the look). No-op when
+          // unchanged.
+          sceneOverlay.setSeedKey(`track-${usePlayerStore.getState().current?.id ?? 'idle'}`);
+          sceneOverlay.render(frame, ovPalette, dt);
+        }
       };
 
       const startFallback = () => {
@@ -339,7 +374,9 @@ export function Visualizer({
           canvasRef.current?.setAttribute('data-newamp-butterchurn-mounted', 'failed');
           startFallback();
         }
-      }, 8000);
+        // 20s: the full preset catalog (base+Extra+Extra2+MD1) takes longer to
+        // parse than the old single pack; 8s false-failed slow cold boots.
+      }, 20000);
 
       return () => {
         disposed = true;
@@ -348,6 +385,7 @@ export function Visualizer({
         window.clearTimeout(mountTimeout);
         window.removeEventListener('message', onMessage);
         overlay?.dispose();
+        sceneOverlay?.dispose();
         try {
           const dispose: BcDisposeMessage = { type: 'dispose' };
           iframe.contentWindow?.postMessage(dispose, '*');
@@ -1717,6 +1755,14 @@ export function Visualizer({
           tabIndex={-1}
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 'none', borderRadius: 'var(--radius)', display: 'block', pointerEvents: 'none' }}
         />
+        {mode === 'eviland-live' && (
+          <canvas
+            ref={sceneCanvasRef}
+            data-newamp-scene-overlay
+            aria-hidden="true"
+            style={{ position: 'absolute', inset: 0, display: 'block', width: '100%', height: '100%', borderRadius: 'var(--radius)', pointerEvents: 'none', zIndex: 1 }}
+          />
+        )}
         {mode === 'eviland-live' && (
           <canvas
             ref={overlayCanvasRef}

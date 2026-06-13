@@ -1,11 +1,22 @@
-// Real-machine gate: PROVE that scrubbing a transcoded (ffmpeg-mode) track lands
-// at the target time instead of resetting to the start. Run with:
+// Real-machine gate: PROVE that scrubbing lands at the target time instead of
+// resetting to the start. Run with:
 //   npm run smoke:playback-seek
 //
-// It exercises the SHIPPED fix: protocol.handle('newamp') serving a cached,
-// finalized FLAC with byte-range support for ffmpeg-mode sources. The control
-// case is a native MP3 (always seekable). The regression case is a .wma (was
-// non-seekable before the fix). Both must seek to ~8.5s and not collapse to 0.
+// It exercises the SHIPPED serving code (electron/audio-serve.ts — the same
+// functions protocol.handle('newamp') uses in main.ts) across all four
+// production paths:
+//   1. native MP3      → fileRangeResponse        (hand-rolled 206s)
+//   2. native FLAC     → fileRangeResponse        (Tyler's library majority)
+//   3. cold-cache .wma → seekableTranscodeResponse (first play, ffmpeg -ss)
+//   4. warm-cache .wma → fileRangeResponse on the finalized cached FLAC
+//
+// History: the original implementation forwarded Range headers into
+// net.fetch(file://), which slices bodies but answers a bare 200 with no
+// Content-Range/Content-Length/Accept-Ranges — Chromium treated EVERY track as
+// a non-seekable live stream. This smoke failed on real machines and the
+// failure was misattributed to "headless CI sandbox". The assertions below are
+// environment-independent at the protocol level (header checks) plus a real
+// <audio> scrub probe.
 //
 // Fixtures are frequency-changing tones (440 Hz for the first half, 880 Hz for
 // the second), so after seeking past the midpoint an FFT must show ~880 Hz —
@@ -14,12 +25,12 @@
 import ffmpeg from 'ffmpeg-static';
 import { app, BrowserWindow, net, protocol } from 'electron';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { playbackMode, transcodeToWavResponse } from '../dist-electron/electron/transcode.js';
-import { initTranscodeCache, getOrTranscodeToFlac } from '../dist-electron/electron/transcode-cache.js';
+import { playbackMode } from '../dist-electron/electron/transcode.js';
+import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac } from '../dist-electron/electron/transcode-cache.js';
+import { fileRangeResponse, seekableTranscodeResponse } from '../dist-electron/electron/audio-serve.js';
 
 const smokeRoot = resolve('tmp', 'playback-seek-smoke');
 const SEEK_TARGET = 8.5;
@@ -30,7 +41,7 @@ if (!ffmpeg) {
   process.exit(1);
 }
 
-const hardTimeout = setTimeout(() => fail(new Error('playback-seek smoke timed out')), 45000);
+const hardTimeout = setTimeout(() => fail(new Error('playback-seek smoke timed out')), 120000);
 
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -44,29 +55,29 @@ protocol.registerSchemesAsPrivileged([
 void app.whenReady().then(run).catch(fail);
 
 async function run() {
+  // Fresh cache dir each run so the "cold" case is genuinely cold.
+  rmSync(join(smokeRoot, 'transcode-cache'), { recursive: true, force: true });
   initTranscodeCache(join(smokeRoot, 'transcode-cache'));
-  const targets = await createFixtures();
+  const fixtures = await createFixtures();
 
-  // Mirrors the shipped protocol handler in electron/main.ts.
+  // Mirrors the shipped protocol handler in electron/main.ts (minus the
+  // allowlist gate, which is orthogonal to seeking).
   protocol.handle('newamp', async (request) => {
     try {
       const url = new URL(request.url);
       const filePath = resolve(decodeURIComponent(url.pathname.replace(/^\/+/, '')));
       if (!existsSync(filePath)) return new Response('Not found', { status: 404 });
-      const forward = {};
-      const range = request.headers.get('Range');
-      if (range) forward.Range = range;
       if (playbackMode(filePath) === 'ffmpeg') {
-        const cached = await getOrTranscodeToFlac(filePath);
-        if (cached.ok) {
-          const r = await net.fetch(pathToFileURL(cached.path).toString(), { bypassCustomProtocolHandlers: true, headers: forward });
-          const h = new Headers(r.headers);
-          h.set('Content-Type', 'audio/flac');
-          return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
+        const ready = await peekCachedFlac(filePath);
+        if (ready) {
+          return fileRangeResponse(ready, request, {
+            'Content-Type': 'audio/flac',
+            'X-Newamp-Playback': 'ffmpeg-cached-flac',
+          });
         }
-        return transcodeToWavResponse(filePath, request);
+        return seekableTranscodeResponse(filePath, request);
       }
-      return net.fetch(pathToFileURL(filePath).toString(), { bypassCustomProtocolHandlers: true, headers: forward });
+      return fileRangeResponse(filePath, request);
     } catch (err) {
       console.error('seek smoke protocol failed:', err);
       return new Response('Server Error', { status: 500 });
@@ -76,24 +87,56 @@ async function run() {
   const win = new BrowserWindow({ show: false, webPreferences: { backgroundThrottling: false, sandbox: false } });
   await win.loadURL('data:text/html,<meta charset="utf-8"><title>Newamp seek smoke</title>');
 
-  const results = [];
-  for (const t of targets) {
-    const normalized = t.path.replace(/\\/g, '/');
-    const url = `newamp://track/${encodeURI(normalized).replace(/#/g, '%23')}`;
-    const mode = playbackMode(t.path);
-    console.error(`[newamp] seek-probing ${t.name} (mode=${mode})`);
+  const cases = [
+    { name: 'native-control.mp3', path: fixtures.mp3, expectPlayback: null },
+    { name: 'native-control.flac', path: fixtures.flac, expectPlayback: null },
+    { name: 'transcoded-cold.wma', path: fixtures.wma, expectPlayback: 'ffmpeg-seekable-wav' },
+    { name: 'transcoded-warm.wma', path: fixtures.wma, warm: true, expectPlayback: 'ffmpeg-cached-flac' },
+  ];
 
-    // Faithful proof: scrub the real <audio> element to SEEK_TARGET and assert it
-    // LANDS there (instead of resetting to 0) with a seekable range ~= duration,
-    // and the post-seek dominant pitch is ~880 Hz (second-half tone) — proving the
-    // fetched bytes came from the right offset.
-    //
-    // NOTE: requires a real audio output device. In a headless/no-audio CI sandbox
-    // the media element loads metadata but never realizes seekable ranges, so this
-    // reports ok=false even for known-seekable native files. Run on a real machine.
+  const results = [];
+  for (const c of cases) {
+    if (c.warm) {
+      const cached = await getOrTranscodeToFlac(c.path);
+      if (!cached.ok) {
+        results.push({ file: c.name, ok: false, error: `warm transcode failed: ${cached.reason}` });
+        continue;
+      }
+    }
+    const normalized = c.path.replace(/\\/g, '/');
+    const url = `newamp://track/${encodeURI(normalized).replace(/#/g, '%23')}`;
+    const mode = playbackMode(c.path);
+    console.error(`[newamp] seek-probing ${c.name} (mode=${mode})`);
+
+    // Protocol-level proof: a media-style Range probe MUST come back as a 206
+    // with Content-Range + Content-Length. This is the exact contract
+    // Chromium's media stack uses to decide a resource is seekable.
+    const probeResp = await net.fetch(url, { headers: { Range: 'bytes=0-' } });
+    const headerProof = {
+      status: probeResp.status,
+      contentRange: probeResp.headers.get('Content-Range'),
+      contentLength: probeResp.headers.get('Content-Length'),
+      acceptRanges: probeResp.headers.get('Accept-Ranges'),
+      playbackPath: probeResp.headers.get('X-Newamp-Playback'),
+    };
+    await probeResp.body?.cancel().catch(() => {});
+    const headersOk =
+      headerProof.status === 206 &&
+      !!headerProof.contentRange &&
+      !!headerProof.contentLength &&
+      headerProof.acceptRanges === 'bytes' &&
+      (c.expectPlayback === null || headerProof.playbackPath === c.expectPlayback);
+
+    // Faithful proof: scrub a real <audio> element to SEEK_TARGET and assert it
+    // LANDS there with a seekable range ~= duration, and the post-seek dominant
+    // pitch is ~880 Hz (second-half tone) — proving the fetched bytes came from
+    // the right offset, not a restart.
     const media = await win.webContents.executeJavaScript(seekProbe(url, SEEK_TARGET), true);
-    results.push({ file: t.name, mode, ...media });
-    console.error(`[newamp] ${t.name}: landed=${media.landed} duration=${media.duration} seekableEnd=${media.seekableEnd} dominantHz=${media.dominantHz} ok=${media.ok}`);
+    results.push({ file: c.name, mode, ...headerProof, headersOk, ...media, ok: !!(headersOk && media.ok) });
+    console.error(
+      `[newamp] ${c.name}: status=${headerProof.status} path=${headerProof.playbackPath} landed=${media.landed} ` +
+      `duration=${media.duration} seekableEnd=${media.seekableEnd} dominantHz=${media.dominantHz} ok=${headersOk && media.ok}`,
+    );
   }
 
   win.close();
@@ -107,21 +150,24 @@ async function run() {
 async function createFixtures() {
   await mkdir(smokeRoot, { recursive: true });
   const defs = [
-    { name: 'native-control.mp3', codec: ['-c:a', 'libmp3lame', '-b:a', '192k'] },
-    { name: 'transcoded-regression.wma', codec: ['-c:a', 'wmav2', '-b:a', '192k'] },
+    { key: 'mp3', name: 'native-control.mp3', codec: ['-c:a', 'libmp3lame', '-b:a', '192k'] },
+    { key: 'flac', name: 'native-control.flac', codec: ['-c:a', 'flac'] },
+    { key: 'wma', name: 'transcoded-regression.wma', codec: ['-c:a', 'wmav2', '-b:a', '192k'] },
   ];
+  const out = {};
   for (const d of defs) {
-    const out = join(smokeRoot, d.name);
-    if (existsSync(out)) continue;
+    const file = join(smokeRoot, d.name);
+    out[d.key] = file;
+    if (existsSync(file)) continue;
     runFfmpeg([
       '-y', '-hide_banner', '-loglevel', 'error',
       '-f', 'lavfi', '-i', `sine=frequency=440:duration=${DURATION / 2}`,
       '-f', 'lavfi', '-i', `sine=frequency=880:duration=${DURATION / 2}`,
       '-filter_complex', '[0:a][1:a]concat=n=2:v=0:a=1[a]', '-map', '[a]',
-      ...d.codec, out,
+      ...d.codec, file,
     ]);
   }
-  return defs.map((d) => ({ name: d.name, path: join(smokeRoot, d.name) }));
+  return out;
 }
 
 function seekProbe(url, target) {
@@ -147,7 +193,7 @@ function seekProbe(url, target) {
         const seeked = await wait('seeked', 5000);
         // let a little audio flow so the analyser has data at the new position and
         // the seekable range is populated
-        await new Promise((r) => setTimeout(r, 400));
+        await new Promise((r) => setTimeout(r, 600));
         const seekableEnd = audio.seekable.length ? audio.seekable.end(audio.seekable.length - 1) : 0;
         const bins = new Float32Array(analyser.frequencyBinCount);
         analyser.getFloatFrequencyData(bins);

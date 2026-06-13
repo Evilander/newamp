@@ -88,7 +88,10 @@ async function runStaticWiringSmoke() {
   const bus = await read('src/visualizer/frame-bus.ts');
   assertMatch(bus, /attachDetachedPort/, 'frame-bus must expose attachDetachedPort');
   assertMatch(bus, /publish\b/, 'frame-bus must expose publish');
-  assertMatch(bus, /MAX_INFLIGHT/, 'frame-bus must implement drop-newest backpressure');
+  // Fire-and-forget by design: ack-gated backpressure froze the projector when
+  // the occluded main renderer stopped processing returning acks. The consumer
+  // coalesces to the newest frame instead.
+  assertMatch(bus, /nothing gates on\s*\n?\/\/ them/, 'frame-bus must document the no-ack-gating contract');
   assertMatch(bus, /typeof window !==\s*['"]undefined['"]/, 'frame-bus must be Node-import-safe (window guard)');
 
   const detachedTs = await read('src/detached/main.tsx');
