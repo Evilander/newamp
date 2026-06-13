@@ -93,19 +93,41 @@ async function start(sampleRate: number): Promise<void> {
   if (started || disposed || !canvas) return;
   started = true;
   try {
-    const [butterchurnModule, presetModule] = await Promise.all([
+    // The FULL MilkDrop catalog: base + Extra + Extra2 + MD1 packs (~700
+    // presets vs ~170 base-only). Extra packs load best-effort — a missing
+    // pack must never take down the visualizer, so each settles separately.
+    const [butterchurnModule, presetModule, ...extraPackResults] = await Promise.allSettled([
       import('butterchurn'),
       import('butterchurn-presets'),
+      import('butterchurn-presets/lib/butterchurnPresetsExtra.min.js'),
+      import('butterchurn-presets/lib/butterchurnPresetsExtra2.min.js'),
+      import('butterchurn-presets/lib/butterchurnPresetsMD1.min.js'),
     ]);
     if (disposed) return;
+    if (butterchurnModule.status !== 'fulfilled' || presetModule.status !== 'fulfilled') {
+      throw (butterchurnModule.status === 'rejected' ? butterchurnModule.reason : (presetModule as PromiseRejectedResult).reason);
+    }
     const butterchurn = unwrapDefault<{
       createVisualizer(
         context: BaseAudioContext,
         canvas: HTMLCanvasElement,
         opts: Record<string, unknown>,
       ): ButterchurnVisualizer;
-    }>(butterchurnModule);
-    const presetApi = unwrapDefault<{ getPresets(): Record<string, Record<string, unknown>> }>(presetModule);
+    }>(butterchurnModule.value);
+    const presetApi = unwrapDefault<{ getPresets(): Record<string, Record<string, unknown>> }>(presetModule.value);
+    const presetCatalog: Record<string, Record<string, unknown>> = { ...presetApi.getPresets() };
+    for (const pack of extraPackResults) {
+      if (pack.status !== 'fulfilled') continue;
+      try {
+        const packApi = unwrapDefault<{ getPresets(): Record<string, Record<string, unknown>> }>(pack.value);
+        // Base pack wins name collisions — insertion order keeps its entries.
+        for (const [name, preset] of Object.entries(packApi.getPresets())) {
+          if (!(name in presetCatalog)) presetCatalog[name] = preset;
+        }
+      } catch {
+        /* malformed pack — skip */
+      }
+    }
 
     // OfflineAudioContext purely supplies sampleRate + analyser nodes for
     // butterchurn's AudioProcessor. It is never started and grabs no device;
@@ -132,7 +154,7 @@ async function start(sampleRate: number): Promise<void> {
       meshHeight: 18,
     });
 
-    presets = Object.entries(presetApi.getPresets()).filter(
+    presets = Object.entries(presetCatalog).filter(
       (entry): entry is [string, Record<string, unknown>] => !!entry[1] && typeof entry[1] === 'object',
     );
     if (!presets.length) throw new Error('No Butterchurn presets loaded');

@@ -91,10 +91,14 @@ encoder delay/padding) and one fewer implicit resample.
 
 ## Known remaining limitations / follow-ups
 
-- **Transcoded formats still aren't seekable** (`Accept-Ranges: none`, streamed WAV).
-  The clean fix is to **transcode-to-disk-cache once** (`userData/transcode-cache/
-  <sha1>.wav`, LRU) as f32le and serve via the range-aware `newamp` handler — that
-  gives hi-res preservation AND seeking for these formats in one move. (~1 day.)
+- ~~Transcoded formats still aren't seekable~~ **FIXED.** All playback paths are now
+  range-addressable: native files and finalized cached FLACs are served with
+  hand-rolled `206 Partial Content` responses (`electron/audio-serve.ts` —
+  Electron's `net.fetch(file://)` slices Range bodies but answers a bare `200`,
+  which Chromium reads as non-seekable), and the first-play live transcode is a
+  synthesized-header f32le WAV whose constant bitrate maps byte ranges to
+  `ffmpeg -ss` seeks. Gate: `npm run smoke:playback-seek` (4 paths, real `<audio>`
+  scrub assertions).
 - **No null-test in CI.** To claim "bit-perfect verified", add an `OfflineAudioContext`
   harness that renders a known WAV through the real engine graph and asserts peak
   error < 2^-23 with all DSP bypassed. (Refactor `engine.ts` to expose

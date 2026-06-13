@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "A Winamp-inspired modern desktop music player for macOS, Windows, and Linux. Your local library, your rules, no streaming required. Features Resonance \u2014 the whole UI reacts to your live audio \u2014 plus NewAmp Wrapped, a GPU particle visualizer + real MilkDrop, four UI shells, shape-changing deck skins, perceptual 0-200% volume, 0-100 decimal track scoring, and a magazine-style home. GPU-accelerated and tuned to stay light on weak hardware.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
@@ -140,6 +140,8 @@
     "smoke:ui-playback": "npm run build && node scripts/ui-playback-smoke.mjs",
     "smoke:ui-quick-play": "npm run build && node scripts/ui-quick-play-smoke.mjs",
     "smoke:ui-visualizer": "npm run build && node scripts/ui-visualizer-smoke.mjs",
+    "smoke:ui-detached-viz": "npm run build && node scripts/ui-detached-viz-smoke.mjs",
+    "smoke:scene-overlay": "electron scripts/scene-overlay-smoke.mjs",
     "smoke:ui-discover": "npm run build && node scripts/ui-discover-smoke.mjs",
     "smoke:ui-deck": "npm run build && node scripts/ui-deck-smoke.mjs",
     "smoke:ui-art": "npm run build && node scripts/ui-art-smoke.mjs",

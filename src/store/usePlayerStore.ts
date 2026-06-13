@@ -1411,6 +1411,7 @@ if (typeof window !== 'undefined') {
         setFullscreenVisualizer: (on: boolean) => void;
         setCompactDeck: (on: boolean) => void;
         analyserFftSum: () => number;
+        engineCurrentTime: () => number;
       };
     }).__newampSmoke = {
       seek: (seconds: number) => {
@@ -1447,6 +1448,10 @@ if (typeof window !== 'undefined') {
         for (let i = 0; i < buf.length; i++) sum += buf[i]!;
         return sum;
       },
+      // The REAL media-element playhead — unlike the store's currentTime,
+      // which __newampSmoke.seek pins to the target for ~1s. Seek smokes
+      // read this to prove a scrub actually landed instead of restarting.
+      engineCurrentTime: () => usePlayerStore.getState().engine.getState().currentTime,
     };
   }
 }
