@@ -8,7 +8,6 @@ import {
   Menu,
   MessageChannelMain,
   nativeImage,
-  net,
   protocol,
   screen,
   shell,
@@ -51,6 +50,7 @@ import {
   transcodeTracksToAudioFolder,
   transcodeTracksToWavFolder,
 } from './transcode.js';
+import { fileRangeResponse, seekableTranscodeResponse } from './audio-serve.js';
 import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac, transcodeCacheStatus } from './transcode-cache.js';
 import { isAllowedAudioPath } from './audio-path-policy.js';
 import { analyzeTrackDna } from './dna-analyzer.js';
@@ -102,6 +102,7 @@ const uiGaplessSmoke = process.env.NEWAMP_UI_GAPLESS_SMOKE === '1';
 const uiLyricsSmoke = process.env.NEWAMP_UI_LYRICS_SMOKE === '1';
 const uiOpenFileSmoke = process.env.NEWAMP_UI_OPEN_FILE_SMOKE === '1';
 const uiVisualizerSmoke = process.env.NEWAMP_UI_VISUALIZER_SMOKE === '1';
+const uiDetachedVizSmoke = process.env.NEWAMP_UI_DETACHED_VIZ_SMOKE === '1';
 const uiDeckSmoke = process.env.NEWAMP_UI_DECK_SMOKE === '1';
 const uiArtSmoke = process.env.NEWAMP_UI_ART_SMOKE === '1';
 const uiDiscoverSmoke = process.env.NEWAMP_UI_DISCOVER_SMOKE === '1';
@@ -115,6 +116,7 @@ const smokeMode =
   uiLyricsSmoke ||
   uiOpenFileSmoke ||
   uiVisualizerSmoke ||
+  uiDetachedVizSmoke ||
   uiDeckSmoke ||
   uiArtSmoke ||
   uiDiscoverSmoke ||
@@ -602,6 +604,7 @@ function getRendererBaseUrl(): URL {
 function failDetachedOpen(reason: string, err: unknown): void {
   console.error(`[newamp] detached visualizer ${reason}`, err);
   writeDiagnosticEvent('detached-viz-open-failed', { reason, error: err });
+  restoreMainWindowThrottling();
   const win = detachedVizWin;
   detachedVizWin = null;
   if (win && !win.isDestroyed()) {
@@ -655,12 +658,14 @@ function openDetachedVisualizer(opts: { displayId?: number; fullscreen?: boolean
 
   win.on('closed', () => {
     if (detachedVizWin === win) detachedVizWin = null;
+    restoreMainWindowThrottling();
     if (mainWin && !mainWin.isDestroyed()) {
       mainWin.webContents.send('detached-viz:closed');
     }
   });
 
   win.webContents.on('render-process-gone', (_event, details) => {
+    restoreMainWindowThrottling();
     if (mainWin && !mainWin.isDestroyed()) {
       mainWin.webContents.send('detached-viz:crashed', { reason: details.reason });
     }
@@ -685,27 +690,53 @@ function openDetachedVisualizer(opts: { displayId?: number; fullscreen?: boolean
     // maximized / fullscreen) main window when both share one display.
     detachedVizWin.focus();
     if (opts.fullscreen) detachedVizWin.setFullScreen(true);
-
-    // Wire the per-frame transport AFTER both renderers can receive
-    // postMessage events. port1 → main renderer (producer), port2 → detached
-    // renderer (consumer). Transferring ownership requires the ports be
-    // listed in the third arg of webContents.postMessage; the channel name
-    // matches the preload bridge in electron/preload.ts.
-    if (!mainWin || mainWin.isDestroyed()) {
-      // The main renderer (the frame producer) is gone — a detached window with
-      // no peer would just sit black. Don't claim success.
-      failDetachedOpen('port wiring failed: main window unavailable', null);
-      return;
-    }
-    try {
-      const channel = new MessageChannelMain();
-      mainWin.webContents.postMessage('eviland:frame-port', null, [channel.port1]);
-      detachedVizWin.webContents.postMessage('eviland:frame-port', null, [channel.port2]);
-      mainWin.webContents.send('detached-viz:opened');
-    } catch (err) {
-      failDetachedOpen('port wiring failed', err);
-    }
+    // NOTE: the frame port is NOT wired here. ready-to-show fires around
+    // first paint, which races the detached entry module's evaluation — a
+    // MessagePort posted before its window listener existed was dropped
+    // forever (black projector stuck on "Connecting to NewAmp…"). The
+    // detached renderer signals 'detached-viz:renderer-ready' once its
+    // listener is installed; wireDetachedFramePort() runs then.
   });
+}
+
+// Wire the per-frame transport once BOTH renderers can receive postMessage
+// events. port1 → main renderer (producer), port2 → detached renderer
+// (consumer). Transferring ownership requires the ports be listed in the
+// third arg of webContents.postMessage; the channel name matches the preload
+// bridge in electron/preload.ts. Called from the renderer-ready IPC and from
+// the main-window reload re-wire.
+function wireDetachedFramePort(): void {
+  if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
+  if (!mainWin || mainWin.isDestroyed()) {
+    // The main renderer (the frame producer) is gone — a detached window with
+    // no peer would just sit black. Don't claim success.
+    failDetachedOpen('port wiring failed: main window unavailable', null);
+    return;
+  }
+  try {
+    // LOAD-BEARING: the frame producer is a rAF loop in the MAIN renderer.
+    // The projector typically covers/defocuses the main window, and a
+    // throttled (occluded) renderer stops its rAF — the projector froze after
+    // ~30 frames. Disable throttling while a projector is attached; restored
+    // on close/crash so the idle-CPU behavior is unchanged otherwise.
+    mainWin.webContents.setBackgroundThrottling(false);
+    const channel = new MessageChannelMain();
+    mainWin.webContents.postMessage('eviland:frame-port', null, [channel.port1]);
+    detachedVizWin.webContents.postMessage('eviland:frame-port', null, [channel.port2]);
+    mainWin.webContents.send('detached-viz:opened');
+  } catch (err) {
+    failDetachedOpen('port wiring failed', err);
+  }
+}
+
+function restoreMainWindowThrottling(): void {
+  if (mainWin && !mainWin.isDestroyed()) {
+    try {
+      mainWin.webContents.setBackgroundThrottling(true);
+    } catch {
+      /* shutting down */
+    }
+  }
 }
 
 function closeDetachedVisualizer(): void {
@@ -1196,9 +1227,11 @@ function registerAudioProtocol(): void {
       }
       if (playbackMode(real) === 'ffmpeg') {
         // Seekable path: serve the finalized cached FLAC (range-capable) when it
-        // already exists. First play streams the live WAV pipe INSTEAD of
-        // awaiting the full encode (todo 001) — audio starts in tens of ms —
-        // while the cache warms in the background; the next play is seekable.
+        // already exists. First play streams a SEEKABLE synthesized WAV instead
+        // of awaiting the full encode (todo 001) — audio starts in tens of ms
+        // AND scrubbing works (PCM byte offsets map linearly to seconds, so a
+        // Range request becomes an `ffmpeg -ss` spawn) — while the FLAC cache
+        // warms in the background for cheap repeat plays.
         // NOTE: peek runs FIRST because it awaits the cache's ensureReady(),
         // which is what populates the ffmpeg probe — checking the status before
         // peek would falsely 503 the first request after app start.
@@ -1211,47 +1244,22 @@ function registerAudioProtocol(): void {
           });
         }
         if (ready) {
-          const forwardHeaders: Record<string, string> = {};
-          const range = request.headers.get('Range');
-          if (range) forwardHeaders.Range = range;
-          const ifRange = request.headers.get('If-Range');
-          if (ifRange) forwardHeaders['If-Range'] = ifRange;
-          const cachedResp = await net.fetch(pathToFileURL(ready).toString(), {
-            bypassCustomProtocolHandlers: true,
-            headers: forwardHeaders,
-          });
-          const headers = new Headers(cachedResp.headers);
-          headers.set('Access-Control-Allow-Origin', '*');
-          headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
-          headers.set('Content-Type', 'audio/flac');
-          headers.set('X-Newamp-Playback', 'ffmpeg-cached-flac');
-          return new Response(cachedResp.body, {
-            status: cachedResp.status,
-            statusText: cachedResp.statusText,
-            headers,
+          return fileRangeResponse(ready, request, {
+            'Content-Type': 'audio/flac',
+            'X-Newamp-Playback': 'ffmpeg-cached-flac',
           });
         }
         // Cache miss: warm it in the background (semaphore-bounded, inflight-
         // deduped — duplicate warms coalesce) and stream immediately.
         void getOrTranscodeToFlac(real).catch(() => {});
-        return transcodeToWavResponse(real, request);
+        return seekableTranscodeResponse(real, request);
       }
-      // Forward the media element's Range header so net.fetch on the file URL
-      // returns a 206 Partial Content with Content-Range. Without this the
-      // file loader always answers 200 with the full body, Chromium treats the
-      // audio as non-seekable, and dragging the scrubber snaps playback back to
-      // the start. This is THE seek fix — the "byte-range support" the original
-      // comment promised only happens when the Range header is propagated.
-      const forwardHeaders: Record<string, string> = {};
-      const range = request.headers.get('Range');
-      if (range) forwardHeaders.Range = range;
-      const ifRange = request.headers.get('If-Range');
-      if (ifRange) forwardHeaders['If-Range'] = ifRange;
-      const response = await net.fetch(pathToFileURL(real).toString(), {
-        bypassCustomProtocolHandlers: true,
-        headers: forwardHeaders,
-      });
-      return withAudioCors(response);
+      // Native formats: answer byte ranges ourselves. Electron's
+      // net.fetch(file://) slices the body per the Range header but reports a
+      // bare 200 with no Content-Range/Content-Length/Accept-Ranges, which
+      // Chromium's media stack reads as "non-seekable live stream" — that one
+      // missing status line is why every scrub snapped back to 0:00.
+      return fileRangeResponse(real, request);
     } catch (err) {
       console.error('newamp protocol error:', err);
       return new Response('Server Error', { status: 500 });
@@ -1334,17 +1342,6 @@ function rendererMimeType(filePath: string): string {
     default:
       return 'application/octet-stream';
   }
-}
-
-function withAudioCors(response: Response): Response {
-  const headers = new Headers(response.headers);
-  headers.set('Access-Control-Allow-Origin', '*');
-  headers.set('Cross-Origin-Resource-Policy', 'cross-origin');
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
 }
 
 function registerIpc(): void {
@@ -2009,6 +2006,16 @@ function registerIpc(): void {
   ipcMain.handle('detached-viz:is-open', () =>
     Boolean(detachedVizWin && !detachedVizWin.isDestroyed()),
   );
+  // Deterministic port handshake: fires when the detached renderer's
+  // 'eviland:frame-port' listener is provably installed (it sends this from
+  // its entry module), so the MessagePort can never be dropped by an
+  // evaluation race. Guarded: only honor the signal from the actual detached
+  // window's webContents.
+  ipcMain.on('detached-viz:renderer-ready', (event) => {
+    if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
+    if (event.sender !== detachedVizWin.webContents) return;
+    wireDetachedFramePort();
+  });
 }
 
 async function runUiPlaybackSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
@@ -2173,6 +2180,225 @@ async function runUiVisualizerSmoke(win: BrowserWindow, scanPromise: Promise<voi
     console.error('[newamp-ui-visualizer-smoke] failed:', err);
     app.exit(1);
   }
+}
+
+// Detached projector gate: plays a fixture in the REAL app, proves scrubbing
+// lands (production protocol + engine + store stack, not a harness replica),
+// opens the detached visualizer, and asserts the projector (a) completes the
+// renderer-ready port handshake, (b) renders frames, and (c) actually paints
+// non-black pixels (capturePage) — the literal "black screen" regression.
+async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
+  const phase = (name: string): void => console.log(`[newamp-ui-detached-viz-smoke-phase] ${name}`);
+  try {
+    phase('scan');
+    await Promise.race([
+      scanPromise,
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for detached viz smoke scan')), 15000),
+      ),
+    ]);
+    phase('reload');
+    await Promise.race([
+      reloadForSmoke(win),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for smoke reload')), 30000),
+      ),
+    ]);
+    phase('playback-probe');
+
+    // Phase 1 (main window): play the fixture, then scrub it and read the REAL
+    // engine playhead after the smoke bridge's 1s pinned clock expires.
+    const playback = (await Promise.race([
+      win.webContents.executeJavaScript(uiDetachedPlaybackProbeSource(), true),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for detached viz playback probe')), 45000),
+      ),
+    ])) as { title: string; scrubTarget: number; scrubLanded: number };
+
+    // Phase 2: open the projector and wait for its self-reported stats.
+    phase('open-projector');
+    openDetachedVisualizer({});
+    let stats: unknown;
+    try {
+      stats = await waitForDetachedStats(30000);
+    } catch (err) {
+      // Diagnose the producer side before failing: is the MAIN renderer's rAF
+      // alive, and what does the page think its visibility is?
+      const mainDiag = await win.webContents.executeJavaScript(
+        `(async () => {
+          const start = performance.now();
+          let frames = 0;
+          await new Promise((done) => {
+            const tick = () => { frames++; if (performance.now() - start < 2000) requestAnimationFrame(tick); else done(); };
+            requestAnimationFrame(tick);
+            setTimeout(done, 2500);
+          });
+          return {
+            rafPerSec: Math.round(frames / 2),
+            visibility: document.visibilityState,
+            hidden: document.hidden,
+            producer: window.__newampProducerDiag ?? null,
+          };
+        })()`,
+        true,
+      ).catch((diagErr) => ({ diagFailed: String(diagErr) }));
+      throw new Error(`${(err as Error).message} | mainRendererDiag: ${JSON.stringify(mainDiag)}`);
+    }
+
+    // Phase 2.5: wait (bounded) for MilkDrop to mount or fail over. The full
+    // preset catalog takes a few seconds to parse; on an occluded window its
+    // timers are throttled so this can stay "booting" — proceed regardless
+    // and let the runner judge the final state.
+    phase('milkdrop-wait');
+    {
+      const start = Date.now();
+      while (Date.now() - start < 20000) {
+        if (!detachedVizWin || detachedVizWin.isDestroyed()) break;
+        try {
+          const s = (await detachedVizWin.webContents.executeJavaScript('window.__newampDetachedStats', true)) as {
+            bcMounted?: boolean;
+            bcFailed?: boolean;
+            webglFallback?: boolean;
+          };
+          if (s?.bcMounted || s?.bcFailed || s?.webglFallback) break;
+        } catch {
+          /* booting */
+        }
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+
+    // Phase 3: give butterchurn a beat to paint, then capture real pixels.
+    phase('capture');
+    await new Promise((r) => setTimeout(r, 3000));
+    if (!detachedVizWin || detachedVizWin.isDestroyed()) {
+      throw new Error('detached window disappeared before capture');
+    }
+    // capturePage waits for a compositor frame and HANGS FOREVER when the
+    // window is occluded (e.g. the user's other windows cover the smoke run).
+    // Raise the window, race the capture, and fall back to an in-renderer
+    // readback of the reactor-overlay 2D canvas — which paints regardless of
+    // compositor frames because the whole pipeline is timer/message driven.
+    try {
+      detachedVizWin.moveTop();
+      detachedVizWin.focus();
+    } catch {
+      /* window manager refused; the fallback still proves pixels */
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    const shot = await Promise.race([
+      detachedVizWin.webContents.capturePage(),
+      new Promise<null>((r) => setTimeout(() => r(null), 8000)),
+    ]);
+    let capture: { width: number; height: number; lit: number; sampled: number; litFraction: number; source: string };
+    if (shot) {
+      const { width, height } = shot.getSize();
+      const bitmap = shot.toBitmap(); // BGRA
+      let lit = 0;
+      let sampled = 0;
+      for (let i = 0; i < bitmap.length; i += 64) {
+        const lum = (bitmap[i] ?? 0) + (bitmap[i + 1] ?? 0) + (bitmap[i + 2] ?? 0);
+        if (lum > 36) lit += 1;
+        sampled += 1;
+      }
+      capture = { width, height, lit, sampled, litFraction: sampled ? lit / sampled : 0, source: 'capturePage' };
+    } else {
+      capture = (await detachedVizWin.webContents.executeJavaScript(
+        `(() => {
+          const c = document.getElementById('reactor-overlay');
+          const ctx = c.getContext('2d');
+          const { width, height } = c;
+          const d = ctx.getImageData(0, 0, Math.max(1, width), Math.max(1, height)).data;
+          let lit = 0, sampled = 0;
+          for (let i = 0; i < d.length; i += 64) {
+            if ((d[i] + d[i + 1] + d[i + 2]) > 36 && d[i + 3] > 0) lit++;
+            sampled++;
+          }
+          return { width, height, lit, sampled, litFraction: sampled ? lit / sampled : 0, source: 'reactor-overlay-readback' };
+        })()`,
+        true,
+      )) as typeof capture;
+    }
+    const finalStats = await detachedVizWin.webContents.executeJavaScript('window.__newampDetachedStats', true);
+
+    const result = {
+      ok: true,
+      ...playback,
+      detached: finalStats,
+      firstStats: stats,
+      capture,
+    };
+    console.log(`[newamp-ui-detached-viz-smoke] ${JSON.stringify(result)}`);
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    console.error('[newamp-ui-detached-viz-smoke] failed:', err);
+    app.exit(1);
+  }
+}
+
+async function waitForDetachedStats(timeoutMs: number): Promise<unknown> {
+  const start = Date.now();
+  let last: unknown = null;
+  while (Date.now() - start < timeoutMs) {
+    if (detachedVizWin && !detachedVizWin.isDestroyed()) {
+      try {
+        last = await detachedVizWin.webContents.executeJavaScript('window.__newampDetachedStats', true);
+        const stats = last as { portAttached?: boolean; framesRendered?: number } | null;
+        if (stats?.portAttached && (stats.framesRendered ?? 0) > 30) return stats;
+      } catch {
+        /* window still booting */
+      }
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`detached projector never reached 30 rendered frames; last stats: ${JSON.stringify(last)}`);
+}
+
+function uiDetachedPlaybackProbeSource(): string {
+  return `
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (label, fn, timeout = 10000) => {
+        const start = performance.now();
+        while (performance.now() - start < timeout) {
+          const value = fn();
+          if (value) return value;
+          await sleep(75);
+        }
+        throw new Error('Timed out waiting for ' + label);
+      };
+      const libraryButton = await waitFor('Library navigation', () =>
+        Array.from(document.querySelectorAll('button'))
+          .find((item) => (item.textContent || '').includes('Library')),
+      );
+      libraryButton.click();
+      const row = await waitFor('detached smoke track row', () =>
+        Array.from(document.querySelectorAll('[data-newamp-track-row]'))
+          .find((item) => /Detached Smoke/.test(item.textContent || '')),
+      );
+      row.scrollIntoView({ block: 'center' });
+      row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window }));
+      await waitFor('detached smoke playback', () => {
+        const transport = document.querySelector('[data-newamp-transport][data-newamp-playing="true"]');
+        const title = document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
+        return transport && /Detached Smoke/.test(title) ? transport : null;
+      });
+      await waitFor('time advancement', () => window.__newampSmoke.engineCurrentTime() > 0.5, 8000);
+      // Scrub proof on the production stack: seek to 20s, wait out the smoke
+      // bridge's 1s pinned clock, then read the REAL media-element playhead.
+      // A restart-on-seek regression reads ~1.7s here; a working seek ~20.5s.
+      const scrubTarget = 20;
+      window.__newampSmoke.seek(scrubTarget);
+      await sleep(1700);
+      const scrubLanded = window.__newampSmoke.engineCurrentTime();
+      if (!(scrubLanded > scrubTarget - 3 && scrubLanded < scrubTarget + 5)) {
+        throw new Error('scrub failed: target=' + scrubTarget + ' landed=' + scrubLanded);
+      }
+      const title = document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
+      return { title, scrubTarget, scrubLanded: Number(scrubLanded.toFixed(2)) };
+    })()
+  `;
 }
 
 async function runUiArtSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
@@ -3971,14 +4197,7 @@ async function bootstrap(): Promise<void> {
   // the initial load (no detached window yet) and when nothing is detached.
   mainWin.webContents.on('did-finish-load', () => {
     if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
-    if (!mainWin || mainWin.isDestroyed()) return;
-    try {
-      const channel = new MessageChannelMain();
-      mainWin.webContents.postMessage('eviland:frame-port', null, [channel.port1]);
-      detachedVizWin.webContents.postMessage('eviland:frame-port', null, [channel.port2]);
-    } catch (err) {
-      console.error('[newamp] detached visualizer re-wire after main reload failed', err);
-    }
+    wireDetachedFramePort();
   });
 
   // Auto-scan on launch if the library is empty and roots are configured
@@ -4003,6 +4222,8 @@ async function bootstrap(): Promise<void> {
       void runUiLyricsSmoke(mainWin, scanPromise);
     } else if (uiVisualizerSmoke && mainWin) {
       void runUiVisualizerSmoke(mainWin, scanPromise);
+    } else if (uiDetachedVizSmoke && mainWin) {
+      void runUiDetachedVizSmoke(mainWin, scanPromise);
     } else if (uiDeckSmoke && mainWin) {
       void runUiDeckSmoke(mainWin);
     } else if (uiArtSmoke && mainWin) {
