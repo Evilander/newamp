@@ -3,6 +3,22 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.13.1] - 2026-06-13
+
+### Added
+
+- **Projector controls.** When you detached the visualizer in 1.13.0, every
+  control vanished with it — no way to play/pause, no way to scrub, no way to
+  go exclusive fullscreen. The projector now has a floating control bar that
+  appears on cursor movement (and hides again on idle, so the visuals stay
+  primary): current track + artist, scrub bar, play/pause, prev/next,
+  fullscreen toggle, and a close button. Double-click anywhere on the visuals
+  toggles exclusive fullscreen; F11 toggles it from the keyboard; Esc always
+  exits. Space plays/pauses, ←/→ scrub ±5s, Ctrl+←/→ change tracks. The
+  control bar is driven by transport state piggy-backed on the existing 30Hz
+  frame publish (no extra round-trips) and dispatches via a new
+  `transport:command` IPC the main window subscribes to.
+
 ## [1.13.0] - 2026-06-13
 
 ### Fixed

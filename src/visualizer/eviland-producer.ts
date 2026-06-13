@@ -43,6 +43,18 @@ export interface EvilandProducerUiState {
   waveMode: 'off' | 'line' | 'radial' | 'bars';
   /** Current track id (re-arms the director's section memory on change). */
   trackId: number | null;
+  /**
+   * Live transport snapshot for the detached projector's floating control bar.
+   * Null when nothing is playing (the projector renders an idle state).
+   */
+  transport?: {
+    title: string | null;
+    artist: string | null;
+    album: string | null;
+    currentTime: number;
+    duration: number;
+    isPlaying: boolean;
+  } | null;
 }
 
 function getCssVar(name: string): string {
@@ -245,6 +257,7 @@ export function startEvilandProducer(
       wave: waveSamples,
       sampleRate: engine.getSampleRate(),
       trackId: ui.trackId,
+      transport: ui.transport ?? undefined,
     });
   };
 

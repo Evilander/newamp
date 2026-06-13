@@ -95,6 +95,263 @@ if (!canvas || !milkdropFrame || !overlayCanvas) {
 if (document.body) document.body.appendChild(statusEl);
 setStatus('Connecting to NewAmp…');
 
+// ---------------------------------------------------------------------------
+// Floating control bar: track info + transport + fullscreen + close.
+//
+// Without this, detaching the visualizer literally takes away every control —
+// the projector window has no chrome, no menu, no way to even go exclusive
+// fullscreen. The bar is opaque enough to read and translucent enough that
+// the visuals remain primary. Auto-hides on cursor idle so the projector is
+// uninterrupted while you're watching.
+// ---------------------------------------------------------------------------
+
+const detachedBridge = (window as Window & {
+  detachedViz?: {
+    setFullscreen?: (on: boolean) => Promise<void>;
+    toggleFullscreen?: () => Promise<boolean>;
+    isFullscreen?: () => Promise<boolean>;
+    transportCommand?: (
+      cmd: 'togglePlay' | 'next' | 'prev' | 'seek' | 'setVolume',
+      arg?: number,
+    ) => Promise<void>;
+    close?: () => Promise<void>;
+    rendererReady?: () => void;
+  };
+}).detachedViz;
+
+let isFullscreen = false;
+
+const controlsEl = document.createElement('div');
+controlsEl.setAttribute('data-newamp-detached-controls', '');
+Object.assign(controlsEl.style, {
+  position: 'fixed',
+  left: '0',
+  right: '0',
+  bottom: '0',
+  padding: '14px 24px 18px',
+  display: 'grid',
+  gridTemplateColumns: '1fr auto 1fr',
+  alignItems: 'center',
+  gap: '16px',
+  font: '13px ui-monospace, Menlo, Consolas, monospace',
+  color: '#e6ecf5',
+  background: 'linear-gradient(to top, rgba(4,6,10,0.78), rgba(4,6,10,0.0))',
+  pointerEvents: 'none',
+  opacity: '0',
+  transition: 'opacity 240ms',
+  zIndex: '20',
+  userSelect: 'none',
+});
+
+const trackInfoEl = document.createElement('div');
+Object.assign(trackInfoEl.style, {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '2px',
+  minWidth: '0',
+  overflow: 'hidden',
+});
+const titleEl = document.createElement('div');
+Object.assign(titleEl.style, {
+  fontWeight: '600',
+  fontSize: '13px',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+});
+titleEl.textContent = '—';
+const artistEl = document.createElement('div');
+Object.assign(artistEl.style, {
+  fontSize: '11px',
+  opacity: '0.72',
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+});
+artistEl.textContent = '';
+trackInfoEl.append(titleEl, artistEl);
+
+const transportEl = document.createElement('div');
+Object.assign(transportEl.style, {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: '8px',
+});
+
+function makeButton(label: string, title: string, onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = label;
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+  Object.assign(btn.style, {
+    width: '34px',
+    height: '34px',
+    borderRadius: '999px',
+    border: '1px solid rgba(230,236,245,0.18)',
+    background: 'rgba(20,24,34,0.78)',
+    color: 'inherit',
+    font: 'inherit',
+    fontSize: '15px',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    pointerEvents: 'auto',
+    transition: 'background 120ms, transform 120ms',
+  });
+  btn.addEventListener('pointerenter', () => {
+    btn.style.background = 'rgba(40,50,72,0.88)';
+  });
+  btn.addEventListener('pointerleave', () => {
+    btn.style.background = 'rgba(20,24,34,0.78)';
+  });
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+const prevBtn = makeButton('⏮', 'Previous track', () => {
+  void detachedBridge?.transportCommand?.('prev').catch(() => undefined);
+});
+const playBtn = makeButton('▶', 'Play / pause', () => {
+  void detachedBridge?.transportCommand?.('togglePlay').catch(() => undefined);
+});
+playBtn.style.width = '40px';
+playBtn.style.height = '40px';
+playBtn.style.fontSize = '17px';
+const nextBtn = makeButton('⏭', 'Next track', () => {
+  void detachedBridge?.transportCommand?.('next').catch(() => undefined);
+});
+transportEl.append(prevBtn, playBtn, nextBtn);
+
+const rightEl = document.createElement('div');
+Object.assign(rightEl.style, {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'flex-end',
+  gap: '12px',
+  minWidth: '0',
+});
+
+const timeEl = document.createElement('div');
+Object.assign(timeEl.style, {
+  fontVariantNumeric: 'tabular-nums',
+  fontSize: '11px',
+  opacity: '0.78',
+  whiteSpace: 'nowrap',
+});
+timeEl.textContent = '–:–– / –:––';
+
+// Uncontrolled-while-dragging scrub bar — same UX as ScrubBar.tsx but inlined
+// for the no-React projector. Stops mirroring the playhead during drag, fires
+// the seek IPC on commit (input event), resumes mirroring on release.
+const scrubEl = document.createElement('input');
+scrubEl.type = 'range';
+scrubEl.min = '0';
+scrubEl.max = '100';
+scrubEl.step = '0.1';
+scrubEl.value = '0';
+Object.assign(scrubEl.style, {
+  width: '160px',
+  pointerEvents: 'auto',
+  cursor: 'pointer',
+  accentColor: '#7aa8ff',
+});
+let scrubbing = false;
+scrubEl.addEventListener('pointerdown', () => {
+  scrubbing = true;
+});
+const finishScrub = (): void => {
+  if (!scrubbing) return;
+  scrubbing = false;
+  const t = Number(scrubEl.value);
+  if (Number.isFinite(t)) {
+    void detachedBridge?.transportCommand?.('seek', t).catch(() => undefined);
+  }
+};
+scrubEl.addEventListener('pointerup', finishScrub);
+scrubEl.addEventListener('pointercancel', finishScrub);
+scrubEl.addEventListener('blur', finishScrub);
+
+const fsBtn = makeButton('⛶', 'Toggle exclusive fullscreen (F11)', () => {
+  toggleFullscreen();
+});
+const closeBtn = makeButton('✕', 'Close the projector', () => {
+  void detachedBridge?.close?.().catch(() => undefined);
+});
+
+rightEl.append(timeEl, scrubEl, fsBtn, closeBtn);
+
+controlsEl.append(trackInfoEl, transportEl, rightEl);
+document.body.appendChild(controlsEl);
+
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '–:––';
+  const total = Math.floor(seconds);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+let controlsVisible = false;
+function showControls(): void {
+  if (!controlsVisible) {
+    controlsVisible = true;
+    controlsEl.style.opacity = '1';
+  }
+}
+function hideControls(): void {
+  if (controlsVisible) {
+    controlsVisible = false;
+    controlsEl.style.opacity = '0';
+  }
+}
+
+let lastTransport: DetachedFramePayload['transport'] | null = null;
+function applyTransportState(transport: DetachedFramePayload['transport'] | undefined): void {
+  if (!transport) return;
+  lastTransport = transport;
+  const title = transport.title || 'Unknown track';
+  const artist = transport.artist || '';
+  if (titleEl.textContent !== title) titleEl.textContent = title;
+  if (artistEl.textContent !== artist) artistEl.textContent = artist;
+  const play = transport.isPlaying ? '⏸' : '▶';
+  if (playBtn.textContent !== play) playBtn.textContent = play;
+  const cur = Math.max(0, transport.currentTime);
+  const dur = Math.max(0, transport.duration);
+  const nextTime = `${formatTime(cur)} / ${formatTime(dur)}`;
+  if (timeEl.textContent !== nextTime) timeEl.textContent = nextTime;
+  if (!scrubbing && dur > 0) {
+    if (scrubEl.max !== String(dur)) scrubEl.max = String(dur);
+    scrubEl.value = String(Math.min(cur, dur));
+  } else if (!scrubbing && dur <= 0) {
+    scrubEl.value = '0';
+  }
+}
+
+async function syncFullscreenState(): Promise<void> {
+  if (!detachedBridge?.isFullscreen) return;
+  try {
+    isFullscreen = await detachedBridge.isFullscreen();
+    fsBtn.textContent = isFullscreen ? '⛶' : '⛶'; // glyph stays — title carries the state
+    fsBtn.title = isFullscreen ? 'Exit fullscreen (F11 / Esc)' : 'Enter exclusive fullscreen (F11)';
+  } catch {
+    /* projector closing */
+  }
+}
+void syncFullscreenState();
+
+function toggleFullscreen(): void {
+  if (!detachedBridge?.toggleFullscreen) return;
+  void detachedBridge.toggleFullscreen()
+    .then((next) => {
+      isFullscreen = next;
+      fsBtn.title = next ? 'Exit fullscreen (F11 / Esc)' : 'Enter exclusive fullscreen (F11)';
+    })
+    .catch(() => undefined);
+}
+
 let currentQuality: 'high' | 'medium' | 'low' = 'high';
 
 // --- MilkDrop (butterchurn) field — flagship layer -------------------------
@@ -230,6 +487,11 @@ function handlePayload(payload: DetachedFramePayload): void {
   maybeInitButterchurn();
 
   try {
+    // Live transport state (track title, scrub, play/pause) for the floating
+    // control bar — piggy-backed on the same 30Hz publish so no round-trip is
+    // ever needed.
+    if (payload.transport) applyTransportState(payload.transport);
+
     // MilkDrop field: forward the pre-emphasized time-domain bytes. The iframe
     // runs its own rAF render loop and preset rotation — it only needs audio.
     if (!bcFailed && bcReady && payload.wave && payload.wave.length) {
@@ -361,28 +623,77 @@ window.setInterval(() => {
   setStatus(null); // rendering with audio → clean projector
 }, 600);
 
-// Cursor auto-hide after 2s of idle — projector mode default. Cursor is already
-// hidden via CSS; show it briefly on movement.
+// Cursor auto-hide + control-bar visibility tied together. Idle → cursor and
+// controls both disappear so the projector is unobstructed; any movement
+// brings them back for 2s, long enough to scrub/click without the bar
+// vanishing under the pointer.
 let cursorTimer = 0;
-window.addEventListener('mousemove', () => {
+function poke(): void {
   document.body.style.cursor = '';
+  showControls();
   if (cursorTimer) window.clearTimeout(cursorTimer);
   cursorTimer = window.setTimeout(() => {
     document.body.style.cursor = 'none';
+    hideControls();
   }, 2000);
+}
+window.addEventListener('mousemove', poke);
+// Pointer on the controls themselves must not race the idle timer — keep
+// them up while interacting.
+controlsEl.addEventListener('pointerenter', () => {
+  if (cursorTimer) window.clearTimeout(cursorTimer);
+  showControls();
+});
+controlsEl.addEventListener('pointerleave', poke);
+
+// Double-click anywhere on the canvas area = toggle fullscreen. Mirrors how
+// most video players let you go fullscreen, no keyboard required.
+window.addEventListener('dblclick', (event) => {
+  // Don't fire when double-clicking inside the controls (the buttons handle
+  // their own activations and a double-click on the scrub bar shouldn't
+  // change fullscreen state).
+  if (controlsEl.contains(event.target as Node)) return;
+  event.preventDefault();
+  toggleFullscreen();
 });
 
-// Escape / F11: ask main to drop fullscreen. Pure renderers cannot toggle
-// Electron's fullscreen state directly.
+// F11 TOGGLES (was: only exited). Escape always exits — it's the universal
+// "give me out of fullscreen" gesture.
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' || event.key === 'F11') {
+  if (event.key === 'F11') {
     event.preventDefault();
-    const bridge = (window as Window & { detachedViz?: { setFullscreen?: (on: boolean) => Promise<void> } }).detachedViz;
-    if (bridge && typeof bridge.setFullscreen === 'function') {
-      void bridge.setFullscreen(false).catch((err: unknown) => {
+    toggleFullscreen();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    if (detachedBridge?.setFullscreen) {
+      void detachedBridge.setFullscreen(false).then(() => {
+        isFullscreen = false;
+        fsBtn.title = 'Enter exclusive fullscreen (F11)';
+      }).catch((err: unknown) => {
         console.error('[eviland-detached] setFullscreen(false) failed', err);
       });
     }
+  } else if (event.key === ' ' || event.code === 'Space') {
+    // Space = play/pause — the projector is "the player" while it's on a
+    // second monitor and you've alt-tabbed away from the main window.
+    event.preventDefault();
+    void detachedBridge?.transportCommand?.('togglePlay').catch(() => undefined);
+  } else if (event.key === 'ArrowRight' && event.ctrlKey) {
+    event.preventDefault();
+    void detachedBridge?.transportCommand?.('next').catch(() => undefined);
+  } else if (event.key === 'ArrowLeft' && event.ctrlKey) {
+    event.preventDefault();
+    void detachedBridge?.transportCommand?.('prev').catch(() => undefined);
+  } else if (event.key === 'ArrowRight') {
+    if (!lastTransport) return;
+    event.preventDefault();
+    const target = Math.min(lastTransport.duration, lastTransport.currentTime + 5);
+    void detachedBridge?.transportCommand?.('seek', target).catch(() => undefined);
+  } else if (event.key === 'ArrowLeft') {
+    if (!lastTransport) return;
+    event.preventDefault();
+    const target = Math.max(0, lastTransport.currentTime - 5);
+    void detachedBridge?.transportCommand?.('seek', target).catch(() => undefined);
   }
 });
 

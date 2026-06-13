@@ -18,12 +18,22 @@ interface DetachedVizBridge {
   close: () => Promise<void>;
   moveToDisplay: (displayId: number) => Promise<void>;
   setFullscreen: (on: boolean) => Promise<void>;
+  toggleFullscreen: () => Promise<boolean>;
+  isFullscreen: () => Promise<boolean>;
+  transportCommand: (
+    cmd: 'togglePlay' | 'next' | 'prev' | 'seek' | 'setVolume',
+    arg?: number,
+  ) => Promise<void>;
   isOpen: () => Promise<boolean>;
+  rendererReady?: () => void;
   onOpened: (cb: () => void) => () => void;
   onClosed: (cb: () => void) => () => void;
   onCrashed: (cb: (reason: string) => void) => () => void;
   onOpenFailed: (cb: (reason: string) => void) => () => void;
   onDisplaysChanged: (cb: () => void) => () => void;
+  onTransportCommand: (
+    cb: (cmd: 'togglePlay' | 'next' | 'prev' | 'seek' | 'setVolume', arg?: number) => void,
+  ) => () => void;
 }
 
 declare global {

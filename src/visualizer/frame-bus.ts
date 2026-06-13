@@ -69,6 +69,19 @@ export interface DetachedFramePayload {
   sampleRate?: number;
   /** Current track id — seeds the detached window's scene-overlay walk. */
   trackId?: number | null;
+  /**
+   * Live playback state for the projector's floating control bar. Piggy-backs
+   * on the existing 30Hz publish so the projector never needs to round-trip
+   * for what's currently playing.
+   */
+  transport?: {
+    title: string | null;
+    artist: string | null;
+    album: string | null;
+    currentTime: number;
+    duration: number;
+    isPlaying: boolean;
+  };
   /** Sent only on change; the consumer reapplies on each tick. */
   config?: {
     quality?: 'high' | 'medium' | 'low';
@@ -96,7 +109,12 @@ export interface FrameBus {
     palette: EvilandPalette,
     dtMs: number,
     operator?: OperatorConfig,
-    extras?: { wave?: Uint8Array; sampleRate?: number; trackId?: number | null },
+    extras?: {
+      wave?: Uint8Array;
+      sampleRate?: number;
+      trackId?: number | null;
+      transport?: DetachedFramePayload['transport'];
+    },
   ): void;
   hasDetachedConsumer(): boolean;
   onConsumerChange(cb: (hasDetached: boolean) => void): () => void;
@@ -179,6 +197,7 @@ export const frameBus: FrameBus = {
     if (extras?.wave) payload.wave = extras.wave; // structured-clone copies it
     if (extras?.sampleRate) payload.sampleRate = extras.sampleRate;
     if (extras?.trackId !== undefined) payload.trackId = extras.trackId;
+    if (extras?.transport) payload.transport = extras.transport;
     if (state.qualityDirty && state.quality) {
       payload.config = { quality: state.quality };
       state.qualityDirty = false;

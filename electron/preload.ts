@@ -413,6 +413,19 @@ contextBridge.exposeInMainWorld('detachedViz', {
     ipcRenderer.invoke('detached-viz:move-to-display', displayId) as Promise<void>,
   setFullscreen: (on: boolean): Promise<void> =>
     ipcRenderer.invoke('detached-viz:set-fullscreen', on) as Promise<void>,
+  // Toggle returns the resulting fullscreen state — used by the projector's
+  // control bar to flip its own button without needing a separate is-fullscreen
+  // probe. Falls back to false if the IPC has no win (closed mid-toggle).
+  toggleFullscreen: (): Promise<boolean> =>
+    ipcRenderer.invoke('detached-viz:toggle-fullscreen') as Promise<boolean>,
+  isFullscreen: (): Promise<boolean> =>
+    ipcRenderer.invoke('detached-viz:is-fullscreen') as Promise<boolean>,
+  // Transport commands from the projector. Forwarded by the main process to
+  // the MAIN window's renderer (where the AudioEngine + store live). The
+  // detached window has no AudioContext of its own — without this, the
+  // projector is a beautiful spectator with no way to play/pause/next/scrub.
+  transportCommand: (cmd: 'togglePlay' | 'next' | 'prev' | 'seek' | 'setVolume', arg?: number): Promise<void> =>
+    ipcRenderer.invoke('transport:command', cmd, arg) as Promise<void>,
   isOpen: (): Promise<boolean> =>
     ipcRenderer.invoke('detached-viz:is-open') as Promise<boolean>,
   // The detached renderer calls this AFTER its 'eviland:frame-port' listener
@@ -445,6 +458,20 @@ contextBridge.exposeInMainWorld('detachedViz', {
     const h = () => cb();
     ipcRenderer.on('displays:changed', h);
     return () => ipcRenderer.off('displays:changed', h);
+  },
+  // Subscribed in the MAIN window. The detached projector calls
+  // transportCommand(...), the main process forwards it here, and the main
+  // renderer dispatches the right store action. Same channel name as the
+  // main-side IPC the projector window invokes.
+  onTransportCommand: (
+    cb: (cmd: 'togglePlay' | 'next' | 'prev' | 'seek' | 'setVolume', arg?: number) => void,
+  ): (() => void) => {
+    const h = (_e: unknown, payload: { cmd: string; arg?: number } | undefined) => {
+      if (!payload) return;
+      cb(payload.cmd as 'togglePlay' | 'next' | 'prev' | 'seek' | 'setVolume', payload.arg);
+    };
+    ipcRenderer.on('transport:command', h);
+    return () => ipcRenderer.off('transport:command', h);
   },
 });
 
