@@ -32,7 +32,7 @@
   --radius: 2px;
   --radius-card: 4px;
   --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.45);
-  --font-display: 'Inter', system-ui, sans-serif;
+  --font-display: 'Space Grotesk', system-ui, sans-serif;
   --font-lcd: 'VT323', 'JetBrains Mono', monospace;
   --font-mono: 'JetBrains Mono', 'Consolas', monospace;
   --scanline-opacity: 0.06;

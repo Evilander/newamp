@@ -20,7 +20,3 @@ export const AI_ASSIST_OPTIONS = [
     detail: 'Builds a compact artist context card when Last.fm or local tags are sparse.',
   },
 ] as const;
-
-export function aiAssistSummary(): string {
-  return AI_ASSIST_OPTIONS.map((option) => option.label.toLowerCase()).join(' / ');
-}

@@ -122,9 +122,7 @@ export async function fileRangeResponse(
   });
 }
 
-// ---------------------------------------------------------------------------
 // Seekable live transcode: WAV(f32le) with synthesized header + ffmpeg -ss
-// ---------------------------------------------------------------------------
 
 interface PcmStreamInfo {
   durationSec: number;

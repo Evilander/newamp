@@ -55,9 +55,7 @@ import {
   type VisualMemorySection,
 } from './eviland-memory-types';
 
-// ---------------------------------------------------------------------------
 // Energy tiers — how the Director categorises a section's emotional weight.
-// ---------------------------------------------------------------------------
 
 export type EnergyTier = 'calm' | 'steady' | 'lift' | 'drop' | 'climax';
 
@@ -252,9 +250,7 @@ function transitionSpeedFor(prev: EnergyTier | null, next: EnergyTier): number {
   return 0.85; // same tier -> glide
 }
 
-// ---------------------------------------------------------------------------
 // Timer-rotation + drift tuning (MilkDrop-like variety floor).
-// ---------------------------------------------------------------------------
 
 /** Default ms between forced look rotations when structure stays quiet. */
 const ROTATE_INTERVAL_MS = 20000;
@@ -267,9 +263,7 @@ const DRIFT_PERIOD_MS = 14000;
 /** Throttle: recompute the drift lerp at most this often (ms) to bound GC. */
 const DRIFT_TICK_MS = 100;
 
-// ---------------------------------------------------------------------------
 // Director options + state
-// ---------------------------------------------------------------------------
 
 export interface DirectorOptions {
   /** Stable identifier for the song; seeds all generation. Defaults to "song". */

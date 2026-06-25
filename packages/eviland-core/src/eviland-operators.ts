@@ -20,7 +20,6 @@
 // allocation-free (writes into a caller-owned scratch object) because it runs
 // at 60fps.
 
-// ---------------------------------------------------------------------------
 // Audio features a binding can read. These mirror EvilandFrame's scalar fields
 // (plus a few synthesized inputs). Kept as a string union so configs are JSON.
 //
@@ -28,7 +27,6 @@
 // evalConfig computes q's FIRST every frame so any downstream channel can
 // reference them via {feature:'q1', ...}. Q-vars are NOT allowed inside other
 // q-vars (no cycles) — featureValue treats missing q's as 0 in that path.
-// ---------------------------------------------------------------------------
 export type AudioFeature =
   | 'const'
   | 'kick' | 'bass' | 'snare' | 'hat' | 'vocal'
@@ -54,7 +52,6 @@ export interface Channel {
   bindings?: Binding[];
 }
 
-// ---------------------------------------------------------------------------
 // Q-variable system (preset-internal scratch + LFOs).
 //
 // A QSlot is a declarative per-frame scalar named q1..q8 (max 8 slots).
@@ -66,7 +63,6 @@ export interface Channel {
 // MilkDrop's q1..q8 are a programmable register file; this is the same idea
 // turned into JSON so it survives serialization. No expression language —
 // that's tracked separately (plan §2 Tier C).
-// ---------------------------------------------------------------------------
 
 export type LfoShape = 'sine' | 'tri' | 'saw' | 'square';
 

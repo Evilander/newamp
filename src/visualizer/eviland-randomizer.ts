@@ -36,9 +36,7 @@ import {
   toSeedState,
 } from './eviland-rng';
 
-// ---------------------------------------------------------------------------
 // Archetypes
-// ---------------------------------------------------------------------------
 //
 // An archetype is an internal *template* — it doesn't literally produce a fixed
 // config, it biases the sampler so the random look has a recognisable identity.
@@ -178,7 +176,6 @@ interface QSlotSpec {
 
 type PaletteScheme = 'analogous' | 'complementary' | 'triadic' | 'splitComplementary' | 'monochrome' | 'tetradic';
 
-// ---------------------------------------------------------------------------
 // SAFETY: clamp limits from evalConfig are
 //   zoom[-0.12,0.25], rotate[-0.06,0.06], swirl[-0.25,0.25], hueCycle[-0.05,0.05],
 //   decay[0.78,0.97], warpAmp[0,0.02], warpScale[0.5,8],
@@ -188,7 +185,6 @@ type PaletteScheme = 'analogous' | 'complementary' | 'triadic' | 'splitComplemen
 //   - decay base in [0.82,0.93] (audio bindings can dip it briefly)
 //   - mirrorMix in [0,0.9]
 //   - warpAmp small enough that bindings can't push past 0.02
-// ---------------------------------------------------------------------------
 
 /**
  * Baseline template skeleton — safe neutral values for every required field.
@@ -1488,9 +1484,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   },
 };
 
-// ---------------------------------------------------------------------------
 // HSV → RGB palette generation
-// ---------------------------------------------------------------------------
 //
 // Eviland configs accept RGB in 0..1. We sample hues in HSV because the only
 // way to mint *harmonious* multi-hue palettes is to think in colour-wheel
@@ -1571,9 +1565,7 @@ function generatePalette(rng: Rng, template: ArchetypeTemplate): PaletteConfig {
   };
 }
 
-// ---------------------------------------------------------------------------
 // Channel sampler
-// ---------------------------------------------------------------------------
 
 function sampleNum(rng: Rng, r: NumRange): number {
   return rng.range(r.min, r.max);
@@ -1647,9 +1639,7 @@ const NEW_PRIMITIVE_KEYS = [
 ] as const;
 type NewPrimitiveKey = (typeof NEW_PRIMITIVE_KEYS)[number];
 
-// ---------------------------------------------------------------------------
 // Public API
-// ---------------------------------------------------------------------------
 
 export interface GenerateResult {
   config: OperatorConfig;
@@ -1750,9 +1740,7 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
   return { config, seed: code };
 }
 
-// ---------------------------------------------------------------------------
 // Mutation
-// ---------------------------------------------------------------------------
 //
 // `mutate` lets the UI/Director nudge a config without re-generating from
 // scratch (live morphing slider, "evolve" button, drift between beats). It
@@ -1932,9 +1920,7 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
   return next;
 }
 
-// ---------------------------------------------------------------------------
 // Encode / decode
-// ---------------------------------------------------------------------------
 
 /** A look's portable identity is its seed code — that's what users share. */
 export function encode(config: OperatorConfig): string {

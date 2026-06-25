@@ -33,9 +33,7 @@ import {
 import { hashSeed as defaultHashSeed } from './eviland-rng';
 import type { Director } from './eviland-director';
 
-// ---------------------------------------------------------------------------
 // Constants. Tuned to match blueprint §1.6.
-// ---------------------------------------------------------------------------
 
 /** Threshold above which DNA-neighbor borrow mints a derived plan. */
 export const NEIGHBOR_BORROW_THRESHOLD = 0.92;
@@ -46,9 +44,7 @@ export const LEARN_FLUSH_THRESHOLD = 4;
 /** Debounce window on visibilitychange→hidden flushes. */
 export const VISIBILITY_FLUSH_DEBOUNCE_MS = 2000;
 
-// ---------------------------------------------------------------------------
 // Injectable shape — the bridge's deps. Keeps the pure logic testable.
-// ---------------------------------------------------------------------------
 
 /** Subset of NewAmpAPI the bridge actually touches. */
 export interface MemoryBridgeApi {
@@ -72,9 +68,7 @@ export interface MemoryBridgeOptions extends MemoryBridgeDeps {
   trackId: number | null;
 }
 
-// ---------------------------------------------------------------------------
 // Subscribe surface — for the badge. Pushed on plan load + counter mutations.
-// ---------------------------------------------------------------------------
 
 export interface MemoryBridgeState {
   /** True when a plan has been loaded for this track (own OR neighbor-borrowed). */
@@ -169,9 +163,7 @@ export interface MemoryBridge {
   subscribe(listener: (state: MemoryBridgeState) => void): () => void;
 }
 
-// ---------------------------------------------------------------------------
 // Implementation.
-// ---------------------------------------------------------------------------
 
 /**
  * Build a memory bridge bound to a single trackId. The caller (Visualizer or

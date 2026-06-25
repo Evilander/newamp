@@ -95,7 +95,6 @@ if (!canvas || !milkdropFrame || !overlayCanvas) {
 if (document.body) document.body.appendChild(statusEl);
 setStatus('Connecting to NewAmp…');
 
-// ---------------------------------------------------------------------------
 // Floating control bar: track info + transport + fullscreen + close.
 //
 // Without this, detaching the visualizer literally takes away every control —
@@ -103,7 +102,6 @@ setStatus('Connecting to NewAmp…');
 // fullscreen. The bar is opaque enough to read and translucent enough that
 // the visuals remain primary. Auto-hides on cursor idle so the projector is
 // uninterrupted while you're watching.
-// ---------------------------------------------------------------------------
 
 const detachedBridge = (window as Window & {
   detachedViz?: {

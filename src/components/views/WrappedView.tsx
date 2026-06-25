@@ -62,16 +62,16 @@ function composeShareCard(stats: WrappedStats): string {
   ctx.font = '700 34px "JetBrains Mono", monospace';
   ctx.fillText('NEWAMP WRAPPED', 72, 130);
   ctx.fillStyle = ink;
-  ctx.font = '800 92px Inter, system-ui, sans-serif';
+  ctx.font = '800 92px "Space Grotesk", system-ui, sans-serif';
   ctx.fillText(stats.label, 72, 230);
 
   // Big totals
   ctx.fillStyle = muted;
-  ctx.font = '600 26px Inter, system-ui, sans-serif';
+  ctx.font = '600 26px "Space Grotesk", system-ui, sans-serif';
   ctx.fillText('TIME LISTENED', 72, 320);
   ctx.fillText('TRACKS PLAYED', 560, 320);
   ctx.fillStyle = ink;
-  ctx.font = '800 66px Inter, system-ui, sans-serif';
+  ctx.font = '800 66px "Space Grotesk", system-ui, sans-serif';
   ctx.fillText(formatHours(stats.totals.durationSec), 72, 392);
   ctx.fillText(String(stats.totals.plays), 560, 392);
 
@@ -81,14 +81,14 @@ function composeShareCard(stats: WrappedStats): string {
   ctx.font = '700 30px "JetBrains Mono", monospace';
   ctx.fillText('TOP TRACKS', 72, y);
   y += 26;
-  ctx.font = '600 36px Inter, system-ui, sans-serif';
+  ctx.font = '600 36px "Space Grotesk", system-ui, sans-serif';
   stats.topTracks.slice(0, 5).forEach((t, i) => {
     y += 64;
     ctx.fillStyle = muted;
-    ctx.font = '800 36px Inter, system-ui, sans-serif';
+    ctx.font = '800 36px "Space Grotesk", system-ui, sans-serif';
     ctx.fillText(`${i + 1}`, 72, y);
     ctx.fillStyle = ink;
-    ctx.font = '600 36px Inter, system-ui, sans-serif';
+    ctx.font = '600 36px "Space Grotesk", system-ui, sans-serif';
     const line = `${t.title} — ${t.artist}`;
     ctx.fillText(line.length > 38 ? `${line.slice(0, 37)}…` : line, 128, y);
   });
@@ -101,7 +101,7 @@ function composeShareCard(stats: WrappedStats): string {
   ctx.fillText('YOUR VIBE', 560, y);
   y += 56;
   ctx.fillStyle = ink;
-  ctx.font = '700 44px Inter, system-ui, sans-serif';
+  ctx.font = '700 44px "Space Grotesk", system-ui, sans-serif';
   ctx.fillText(stats.topArtists[0]?.artist ?? '—', 72, y);
   ctx.fillText(stats.taste?.mood ?? '—', 560, y);
 
@@ -117,10 +117,10 @@ function composeShareCard(stats: WrappedStats): string {
     ctx.fillStyle = `${accent}22`;
     ctx.fillRect(x, y, 288, 150);
     ctx.fillStyle = accent;
-    ctx.font = '800 56px Inter, system-ui, sans-serif';
+    ctx.font = '800 56px "Space Grotesk", system-ui, sans-serif';
     ctx.fillText(value, x + 28, y + 78);
     ctx.fillStyle = muted;
-    ctx.font = '600 26px Inter, system-ui, sans-serif';
+    ctx.font = '600 26px "Space Grotesk", system-ui, sans-serif';
     ctx.fillText(label, x + 28, y + 120);
   });
 

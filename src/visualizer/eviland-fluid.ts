@@ -27,9 +27,7 @@
 
 import type { EvilandFrame } from './eviland-audio';
 
-// ---------------------------------------------------------------------------
 // Pure audio → impulse seam (no GL; unit-tested by scripts/eviland-fluid-test).
-// ---------------------------------------------------------------------------
 
 export interface FluidForce {
   x: number; y: number;      // splat center, UV space
@@ -289,9 +287,7 @@ export function dyeDissipationFromFrame(frame: EvilandFrame): number {
   return 0.94 + e * 0.055;
 }
 
-// ---------------------------------------------------------------------------
 // GL solver.
-// ---------------------------------------------------------------------------
 
 export interface FluidSimOptions {
   width: number;              // sim grid width (fraction of field res, chosen by caller)

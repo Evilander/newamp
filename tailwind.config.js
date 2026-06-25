@@ -23,7 +23,7 @@ export default {
       fontFamily: {
         lcd: ['"VT323"', '"Press Start 2P"', 'monospace'],
         mono: ['"JetBrains Mono"', '"Consolas"', 'monospace'],
-        display: ['"Inter"', 'system-ui', 'sans-serif'],
+        display: ['"Space Grotesk"', 'system-ui', 'sans-serif'],
       },
       boxShadow: {
         glow: '0 0 12px rgba(57, 255, 20, 0.55), 0 0 28px rgba(57, 255, 20, 0.25)',

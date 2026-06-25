@@ -83,7 +83,6 @@ export function subscribeActiveBridgeState(
   };
 }
 
-// ---------------------------------------------------------------------------
 // Lineage-evolution routing.
 //
 // usePlayerStore + the Visualizer's eviland rAF call into these notify* fns
@@ -95,7 +94,6 @@ export function subscribeActiveBridgeState(
 //
 // The trackId match is the load-bearing guard: a track-end event for the song
 // the user just left must NOT advance lineage on the song they just started.
-// ---------------------------------------------------------------------------
 
 /** Record a completed play for the given trackId on the active bridge (if it matches). */
 export function notifyPlayCompleted(trackId: number | null): void {
@@ -133,7 +131,6 @@ export function notifySectionReturn(trackId: number | null): void {
   bridge.recordSectionReturn();
 }
 
-// ---------------------------------------------------------------------------
 // Keyed bridge cache (finding #6).
 //
 // acquireBridgeForTrack:
@@ -150,7 +147,6 @@ export function notifySectionReturn(trackId: number | null): void {
 // (publishActiveBridge) is updated by the Visualizer as part of acquire, not
 // here, so a same-track remount doesn't accidentally re-publish (which would
 // emit a needless state event to subscribers).
-// ---------------------------------------------------------------------------
 
 export type MemoryBridgeFactory = (opts: MemoryBridgeOptions) => MemoryBridge;
 

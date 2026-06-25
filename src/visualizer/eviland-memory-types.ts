@@ -21,7 +21,6 @@
 //
 // Zero dependencies. Pure TypeScript. Allocation-light helpers.
 
-// ---------------------------------------------------------------------------
 // Versioning. The two numbers move on different cadences:
 //
 //   schema:      the JSON shape of the plan blob. Bump on any breaking shape
@@ -35,7 +34,6 @@
 //                in "fingerprints-only" mode: stored fingerprints still guide
 //                section-return detection, but the stored seeds are NOT used
 //                to re-derive looks.
-// ---------------------------------------------------------------------------
 
 export const VISUAL_MEMORY_SCHEMA_VERSION = 1;
 export const VISUAL_MEMORY_ALGO_VERSION = 1;
@@ -140,9 +138,7 @@ export interface VisualMemoryPlan {
   updatedAt: number;
 }
 
-// ---------------------------------------------------------------------------
 // Constants for lineage evolution (the 8/32/96/256 ladder).
-// ---------------------------------------------------------------------------
 
 /**
  * The play-count ladder at which a play-driven evolution event fires.
@@ -166,9 +162,7 @@ export const ANCESTORS_CAP = 8;
 /** How many sections to retain. Old (least-recently-seen) sections trimmed. */
 export const SECTIONS_CAP = 64;
 
-// ---------------------------------------------------------------------------
 // Pure helpers — no I/O, no Date.now, no global state.
-// ---------------------------------------------------------------------------
 
 /**
  * Construct an empty plan for a brand-new (track, song) at generation 0.

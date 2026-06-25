@@ -60,10 +60,8 @@ export interface EvilandOptions {
   quality?: 'high' | 'medium' | 'low';
 }
 
-// ---------------------------------------------------------------------------
 // Shaders. Versioned (#version 300 es) per WebGL2; all sources compile/link
 // guarded so a failure returns null instead of throwing.
-// ---------------------------------------------------------------------------
 
 const QUAD_VERT = `#version 300 es
 precision highp float;
@@ -686,9 +684,7 @@ void main(){
   o = vec4(colour, 1.0);
 }`;
 
-// ---------------------------------------------------------------------------
 // GL helpers — guarded so failures return null up the chain.
-// ---------------------------------------------------------------------------
 
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader | null {
   const sh = gl.createShader(type);
@@ -733,9 +729,7 @@ interface Fbo {
   h: number;
 }
 
-// ---------------------------------------------------------------------------
 // Emitter pool. CPU-side; one instance buffer per emitter slot, batched draw.
-// ---------------------------------------------------------------------------
 
 interface Emitter {
   // Render attributes (packed into 3 vec4s per emitter for the instanced quad).
@@ -768,9 +762,7 @@ function clampDecayChannel(v: number): number {
   return v < 0.70 ? 0.70 : v > 0.99 ? 0.99 : v;
 }
 
-// ---------------------------------------------------------------------------
 // Factory.
-// ---------------------------------------------------------------------------
 
 export function createEvilandRenderer(
   canvas: HTMLCanvasElement,
@@ -1111,9 +1103,7 @@ export function createEvilandRenderer(
     hueShift: gl.getUniformLocation(postProg, 'u_hueShift'),
   };
 
-  // ---------------------------------------------------------------------------
   // Emitter pool + slow envelopes (CPU side — Pillar 1 + 3 + 4 logic).
-  // ---------------------------------------------------------------------------
 
   const emitters: Emitter[] = Array.from({ length: maxEmitters }, makeEmitter);
   function spawn(kind: number, x: number, y: number, radius: number, r: number, g: number, b: number, life: number, thickness: number, intensity: number): void {
@@ -1162,9 +1152,7 @@ export function createEvilandRenderer(
   let currentConfig: OperatorConfig = defaultConfig();
   const dyn = createDynamics();
 
-  // ---------------------------------------------------------------------------
   // Public API.
-  // ---------------------------------------------------------------------------
 
   function resize(cssWidth: number, cssHeight: number, dpr: number): void {
     // Cap internal render resolution sensibly: 2.5 MP at high tier, scaled

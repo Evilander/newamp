@@ -10,7 +10,7 @@ import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
 import { fetchAlbumFacts, type AlbumFact } from '../../api/albumFacts';
 import { formatTime, playbackCodecLabel } from '../../lib/format';
 import { api, winctl } from '../../lib/api';
-import { aiAssistSummary } from '../../lib/aiAssist';
+import { AI_ASSIST_OPTIONS } from '../../lib/aiAssist';
 import { musicEntitySearchText, wikipediaSearchUrl } from '../../lib/wiki';
 import { ScoreRating } from '../ScoreRating';
 import { LinerNotesPanel } from '../LinerNotesPanel';
@@ -1821,7 +1821,7 @@ function TrackSignalPanel({
       </div>
       <div className="track-signal-ai">
         <span>{aiAssistReady ? `ChatGPT assist ready: ${aiModel || 'model set'}` : 'ChatGPT assist: add your API key in Settings'}</span>
-        <span>{aiAssistSummary()}</span>
+        <span>{AI_ASSIST_OPTIONS.map((option) => option.label.toLowerCase()).join(' / ')}</span>
       </div>
     </section>
   );
