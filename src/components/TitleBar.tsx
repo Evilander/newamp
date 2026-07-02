@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { api, winctl } from '../lib/api';
+import { ArtistLink } from './EntityLink';
 import { BrandLogo } from './BrandLogo';
 
 export function TitleBar(): JSX.Element {
@@ -49,9 +50,19 @@ export function TitleBar(): JSX.Element {
           className="lcd-text max-w-[460px] truncate text-center text-[14px]"
           title={current ? `${current.artist} - ${current.title}` : ''}
         >
-          {current
-            ? `${current.artist} - ${current.title}`
-            : 'Ready. Load your library.'}
+          {current ? (
+            <>
+              {/* pointer-events restored just for the link — the rest of the
+                  marquee stays click-through so window dragging keeps its
+                  full hit area. */}
+              <span className="titlebar-nodrag pointer-events-auto">
+                <ArtistLink artist={current.artist} color="inherit" />
+              </span>
+              {` - ${current.title}`}
+            </>
+          ) : (
+            'Ready. Load your library.'
+          )}
         </span>
       </div>
 

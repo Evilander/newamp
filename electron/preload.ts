@@ -135,6 +135,10 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('playlist:export-tracks-folder', input) as Promise<PlaylistFolderExportResult | null>,
   importPlaylistM3u: () =>
     ipcRenderer.invoke('playlist:import-m3u') as Promise<PlaylistM3uImportResult | null>,
+  exportLibraryMetadata: (format: 'json' | 'csv') =>
+    ipcRenderer.invoke('library:export-metadata', format) as Promise<
+      { path: string; tracks: number; format: 'json' | 'csv' } | null
+    >,
   captureVisualizerPng: (rect?: { x: number; y: number; width: number; height: number }) =>
     ipcRenderer.invoke('media:capture-page', rect) as Promise<string | null>,
   copyPngToClipboard: (dataUrl: string) =>
@@ -373,6 +377,11 @@ contextBridge.exposeInMainWorld('winctl', {
     ipcRenderer.invoke('win:set-compact-size', size),
   setAlwaysOnTop: (on: boolean) => ipcRenderer.invoke('win:set-always-on-top', on),
   close: () => ipcRenderer.invoke('win:close'),
+  // Fire-and-forget playback snapshot for shell integrations (Windows
+  // taskbar thumbnail toolbar play/pause/next, tray tooltip). The renderer
+  // dedupes on (isPlaying, trackId); main applies.
+  notifyPlayback: (state: { isPlaying: boolean; title: string | null; artist: string | null }) =>
+    ipcRenderer.send('playback:state', state),
   onState: (cb: (s: { maximized: boolean }) => void) => {
     const handler = (_e: unknown, s: { maximized: boolean }) => cb(s);
     ipcRenderer.on('window-state', handler);

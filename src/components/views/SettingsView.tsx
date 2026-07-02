@@ -41,6 +41,7 @@ export function SettingsView(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [stats, setStats] = useState<{ tracks: number; albums: number; artists: number; duration: number } | null>(null);
   const [lastfmStatus, setLastfmStatus] = useState<string | null>(null);
+  const [libraryExportStatus, setLibraryExportStatus] = useState<string | null>(null);
   const [openAiStatus, setOpenAiStatus] = useState<string | null>(null);
   const [lastfmOutbox, setLastfmOutbox] = useState<LastfmOutboxStatus | null>(null);
   const [supportDiagnostics, setSupportDiagnostics] = useState<SupportDiagnostics | null>(null);
@@ -345,6 +346,49 @@ export function SettingsView(): JSX.Element {
               />
               Refresh when music files or cover art change
             </label>
+          </Row>
+          <Row label="Export metadata">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                className="pxbtn"
+                data-newamp-export-library-json
+                onClick={() => {
+                  setLibraryExportStatus('Exporting…');
+                  void api
+                    .exportLibraryMetadata('json')
+                    .then((result) =>
+                      setLibraryExportStatus(
+                        result ? `Saved ${result.tracks.toLocaleString()} tracks → ${result.path}` : null,
+                      ),
+                    )
+                    .catch((err) => setLibraryExportStatus(`Export failed: ${err instanceof Error ? err.message : err}`));
+                }}
+                title="Every tag + your listening data (plays, ratings, loves) as JSON"
+              >
+                JSON
+              </button>
+              <button
+                className="pxbtn"
+                data-newamp-export-library-csv
+                onClick={() => {
+                  setLibraryExportStatus('Exporting…');
+                  void api
+                    .exportLibraryMetadata('csv')
+                    .then((result) =>
+                      setLibraryExportStatus(
+                        result ? `Saved ${result.tracks.toLocaleString()} tracks → ${result.path}` : null,
+                      ),
+                    )
+                    .catch((err) => setLibraryExportStatus(`Export failed: ${err instanceof Error ? err.message : err}`));
+                }}
+                title="Spreadsheet-ready CSV of every tag + your listening data"
+              >
+                CSV
+              </button>
+              <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
+                {libraryExportStatus ?? 'Tags, plays, ratings, loves — audit or migrate anywhere'}
+              </span>
+            </div>
           </Row>
           <RadioBrainRow
             settings={settings}

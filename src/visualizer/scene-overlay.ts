@@ -281,6 +281,56 @@ export function createSceneOverlay(
   let accentTimeMs = 0;
   let accentLevel = 0;
 
+  // --- drop finale ----------------------------------------------------------
+  // When a section boundary lands WITH a real energy jump (the drop), the
+  // whole layer choreographs it: the scene fast-cuts instead of lazily
+  // crossfading, a bloom flash blows through and decays over ~¼s, and the
+  // accent layer surges to full. Cooldown keeps it an event, not a strobe.
+  const DROP_COOLDOWN_MS = 8000;
+  const DROP_FADE_MS = 240;
+  let fadeDurMs = CROSSFADE_MS;
+  let flashLevel = 0;
+  let energyEma = 0.2;
+  let lastDropAtMs = -1e9;
+
+  let flashProgram: WebGLProgram | null = null;
+  let flashColorLoc: WebGLUniformLocation | null = null;
+  let flashFailed = false;
+  function ensureFlashProgram(): boolean {
+    if (flashProgram) return true;
+    if (flashFailed || disposed) return false;
+    const frag = `#version 300 es
+precision highp float;
+uniform vec4 u_color;
+out vec4 fragColor;
+void main() { fragColor = u_color; }
+`;
+    const vs = gl!.createShader(gl!.VERTEX_SHADER);
+    const fs = gl!.createShader(gl!.FRAGMENT_SHADER);
+    const program = gl!.createProgram();
+    if (!vs || !fs || !program) {
+      flashFailed = true;
+      return false;
+    }
+    gl!.shaderSource(vs, VERT);
+    gl!.compileShader(vs);
+    gl!.shaderSource(fs, frag);
+    gl!.compileShader(fs);
+    gl!.attachShader(program, vs);
+    gl!.attachShader(program, fs);
+    gl!.linkProgram(program);
+    gl!.deleteShader(vs);
+    gl!.deleteShader(fs);
+    if (!gl!.getProgramParameter(program, gl!.LINK_STATUS)) {
+      gl!.deleteProgram(program);
+      flashFailed = true;
+      return false;
+    }
+    flashProgram = program;
+    flashColorLoc = gl!.getUniformLocation(program, 'u_color');
+    return true;
+  }
+
   function pickAccentScene(): void {
     if (!accentEnabled) {
       accentIndex = -1;
@@ -432,8 +482,12 @@ export function createSceneOverlay(
       dwellMs += dt;
       accentTimeMs += dt;
       accentDwellMs += dt;
-      if (outgoingIndex >= 0) fadeMs = Math.min(CROSSFADE_MS, fadeMs + dt);
+      if (outgoingIndex >= 0) fadeMs = Math.min(fadeDurMs, fadeMs + dt);
       updatePulses(frame, dt);
+
+      // Slow energy baseline for drop detection (τ ≈ 4s) + flash decay.
+      energyEma += (frame.energy - energyEma) * (1 - Math.exp(-dt / 4000));
+      flashLevel *= Math.exp(-dt / 150);
 
       // Accent-layer envelope: fast attack on transients, slow release — the
       // second scene breathes with the drums instead of sitting at a fixed
@@ -443,12 +497,29 @@ export function createSceneOverlay(
       accentLevel += (accentTarget - accentLevel) * accentK;
 
       // Rotation: switch scenes on a section boundary once we've dwelled long
-      // enough, or force a switch when a scene has overstayed.
+      // enough, or force a switch when a scene has overstayed. A section
+      // boundary that lands with a real energy jump is a DROP — it overrides
+      // the dwell gate, fast-cuts the scene, fires the flash, and surges the
+      // accent layer.
       if (!forcedSceneId) {
         const sectionChanged = frame.sectionId !== lastSectionId;
         lastSectionId = frame.sectionId;
-        if ((sectionChanged && dwellMs > MIN_DWELL_MS) || dwellMs > MAX_DWELL_MS) {
+        const isDrop =
+          sectionChanged &&
+          globalTimeMs - lastDropAtMs > DROP_COOLDOWN_MS &&
+          globalTimeMs > 6000 && // never on boot — the EMA hasn't settled yet
+          frame.beatConfidence > 0.35 &&
+          frame.energy > Math.max(0.5, energyEma * 1.35);
+        if (isDrop) {
+          lastDropAtMs = globalTimeMs;
           pickNextScene(frame);
+          fadeDurMs = DROP_FADE_MS;
+          fadeMs = 0;
+          flashLevel = 1;
+          if (accentEnabled) accentLevel = 1;
+        } else if ((sectionChanged && dwellMs > MIN_DWELL_MS) || dwellMs > MAX_DWELL_MS) {
+          pickNextScene(frame);
+          fadeDurMs = CROSSFADE_MS;
         } else if (accentEnabled && accentDwellMs > MAX_DWELL_MS * 0.6) {
           // The accent layer rotates on its own faster cadence so the pair
           // (base × accent) keeps recombining.
@@ -467,7 +538,7 @@ export function createSceneOverlay(
       const idx = resolveSceneIndex();
       const def = SCENES[idx];
       if (!def) return;
-      const fadeT = outgoingIndex >= 0 ? fadeMs / CROSSFADE_MS : 1;
+      const fadeT = outgoingIndex >= 0 ? fadeMs / fadeDurMs : 1;
 
       if (outgoingIndex >= 0 && outgoingIndex !== idx) {
         const out = SCENES[outgoingIndex];
@@ -506,6 +577,18 @@ export function createSceneOverlay(
           if (!accDrew) pickAccentScene();
         }
       }
+
+      // Drop flash: one decaying accent-white wash over the whole stack.
+      // Suppressed in forced-scene mode (smokes assert per-scene output).
+      if (flashLevel > 0.02 && !forcedSceneId && ensureFlashProgram() && flashProgram) {
+        const a = Math.min(0.42, flashLevel * 0.42);
+        const r = palette.accent[0] + (1 - palette.accent[0]) * 0.6;
+        const g = palette.accent[1] + (1 - palette.accent[1]) * 0.6;
+        const b = palette.accent[2] + (1 - palette.accent[2]) * 0.6;
+        gl.useProgram(flashProgram);
+        if (flashColorLoc) gl.uniform4f(flashColorLoc, r * a, g * a, b * a, a);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
     },
 
     setScene(id) {
@@ -518,10 +601,12 @@ export function createSceneOverlay(
       seedKey = key;
       rebuildRotation();
       outgoingIndex = -1;
-      fadeMs = CROSSFADE_MS;
+      fadeDurMs = CROSSFADE_MS;
+      fadeMs = fadeDurMs;
       sceneTimeMs = 0;
       dwellMs = 0;
       accentLevel = 0;
+      flashLevel = 0;
     },
 
     currentSceneId() {
@@ -538,6 +623,14 @@ export function createSceneOverlay(
         }
       }
       compiled.clear();
+      if (flashProgram) {
+        try {
+          gl.deleteProgram(flashProgram);
+        } catch {
+          /* context lost */
+        }
+        flashProgram = null;
+      }
     },
   };
 
