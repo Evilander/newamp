@@ -3,6 +3,82 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.14.0] - 2026-07-02
+
+### Fixed
+
+- **The player's clock no longer freezes when you can't see it.** The audio
+  engine polled `currentTime` on `requestAnimationFrame`, which Chromium
+  stops entirely for occluded or minimized windows — so the moment the
+  projector covered the main window (single monitor, projector fullscreen)
+  or you minimized to the tray, everything gated on that clock silently
+  stalled: the projector's scrub bar and time readout, gapless prepare and
+  crossfade handoff, cue-sheet segment advancement, the sleep timer,
+  scrobbling, and resume-state persistence. The clock now runs on a 100 ms
+  timer — the UI notify path was already bucketed to 100 ms, so nothing
+  renders more often; it just never stops. This was the root cause of most
+  "player + projector at the same time" weirdness.
+- **The projector's control bar resets when playback stops.** Clearing the
+  queue or running it out no longer leaves the projector frozen on the last
+  track's title and timestamp forever; the producer now ships an explicit
+  idle signal and the bar returns to its resting state.
+- **Unplugging the projector's monitor now actually rescues the window.**
+  The display-removed recovery compared against a display id that could
+  never match (the display is already gone from the list when the event
+  fires — the check was dead code). It now asks whether the window still
+  intersects any remaining display and snaps it to the primary when not.
+- **Eviland Live clips record what's actually on screen.** Recording in
+  eviland-live captured only the raw MilkDrop iframe — NewAmp's scene
+  overlay and reactor event layers were silently missing from every saved
+  clip. The recorder now composites the full layer stack live (audio muxed
+  as before), so the clip matches the screen.
+- **The projector respects the low-quality tier.** Its scene overlay ran at
+  hardcoded high quality forever, regardless of the quality the main window
+  pushed; it now skips entirely on low and re-scales on quality changes,
+  matching the main window's performance floor.
+- Closing the projector no longer briefly re-enables the toggle against a
+  still-closing window, and reloading the main window while the projector is
+  open no longer leaks a MessagePort per reload.
+
+### Added
+
+- **Eviland sees the record sleeve.** The dominant colors of the current
+  album art are extracted per track and blended into the palette that drives
+  the scene overlay, the reactor events, and the projector — a red album
+  burns red, a teal album glows teal, in both windows, with zero configuration.
+  Grayscale sleeves gracefully keep the theme palette. MilkDrop presets ship
+  fixed colors; Eviland now paints with your collection's.
+- **A second scene, played by the drums.** On the high quality tier, Eviland
+  Live composites an independent accent scene over the base scene, its
+  opacity driven live by kick/snare/vocal onset envelopes — it materializes
+  on the hits and evaporates in quiet passages, and rotates on its own
+  cadence so the base × accent pairing keeps recombining. Two full presets
+  at once, mixed per-instrument: structurally impossible in a single
+  MilkDrop preset.
+- **The scene walk remembers too.** Scene rotation is now seeded by the
+  track's visual-memory lineage (generation × root seed), not just the track
+  id — when a favorite evolves a generation, its scene deck reshuffles,
+  identically in the main window and the projector. The 1.12.0 "Eviland
+  remembers" promise now covers every layer of the composition.
+- **The projector is a real player now: volume.** The floating control bar
+  gained a volume slider (0–200% perceptual, live-mirrors the main window),
+  joining play/pause, prev/next, scrub, and fullscreen.
+- **Song search results you can click.** Album-search matches on a song
+  title (the ♪ line under a card) now open that album with the matching row
+  scrolled into view and flashed. New `TrackLink` navigation everywhere:
+  queue rows link their artist; Sounds Like rows, Album Context credits,
+  same-year albums, bookends, longest cut, and the mini tracklist all link
+  to their artist/album/track (double-click a mini-tracklist row to play
+  it). The Now Playing album card's artist and album are links as well.
+
+### Performance
+
+- Hoisted per-frame `getComputedStyle` reads out of three visualizer render
+  loops (the canvas-2D catch-all, particle-flow, and the shader modes) —
+  theme colors now refresh twice a second instead of forcing a style recalc
+  60×/s, and a dead variable that survived only via `void` suppression is
+  gone.
+
 ## [1.13.1] - 2026-06-13
 
 ### Added

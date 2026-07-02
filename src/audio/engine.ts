@@ -123,7 +123,7 @@ export class AudioEngine {
   };
 
   private listeners = new Set<EngineListener>();
-  private rafId: number | null = null;
+  private tickTimer: number | null = null;
   private fadeTimer: number | null = null;
   private outputTestTimer: number | null = null;
   private outputTestCleanup: Array<() => void> = [];
@@ -388,22 +388,40 @@ export class AudioEngine {
   }
 
   private startTick(): void {
-    if (this.rafId == null) this.rafId = requestAnimationFrame(this.tick);
+    // setInterval, NOT requestAnimationFrame. rAF rides the compositor's
+    // BeginFrame stream, which stops when this window is occluded (e.g. the
+    // detached projector covering it on a single monitor) or minimized — even
+    // with backgroundThrottling disabled. A frozen tick froze currentTime,
+    // which silently stalled everything gated on it: the projector's scrub
+    // bar/clock, gapless prepare + crossfade handoff, cue-sheet segment
+    // advancement, the sleep timer, scrobbling, and resume-state persistence.
+    // Timers keep running (Chromium exempts audibly-playing pages from timer
+    // throttling), and notify() was already bucketed to 100 ms, so a 100 ms
+    // interval delivers the exact same UI update rate with none of the
+    // occlusion failure modes.
+    if (this.tickTimer == null) this.tickTimer = window.setInterval(this.tick, 100);
+  }
+
+  private stopTick(): void {
+    if (this.tickTimer != null) {
+      window.clearInterval(this.tickTimer);
+      this.tickTimer = null;
+    }
   }
 
   private tick = (): void => {
-    this.rafId = null;
-    if (!this.graph) return;
+    if (!this.graph) {
+      this.stopTick();
+      return;
+    }
     const el = this.graph.decks[this.activeDeckIndex]!.el;
     if (el.src) {
       const nextTime = el.currentTime;
       const nextDuration = Number.isFinite(el.duration) ? el.duration : this.state.duration;
-      // Throttle notification frequency. Audio time advances at 60 fps via
-      // RAF, but the React tree only needs a refresh every ~100 ms — that's
-      // plenty for the time display, scrub bar, and waveform overhead. Going
-      // from 60 fps to 10 fps notifications cuts NowPlayingView re-renders
-      // by 6x, which is the dominant contributor to gradual slowdown over
-      // long playback sessions.
+      // Notification granularity: the React tree only needs a refresh every
+      // ~100 ms — plenty for the time display, scrub bar, and waveform
+      // overhead, and it keeps NowPlayingView re-renders from degrading long
+      // playback sessions.
       const prevTimeBucket = Math.floor(this.state.currentTime * 10);
       const nextTimeBucket = Math.floor(nextTime * 10);
       const seekOrJump = Math.abs(nextTime - this.state.currentTime) > 0.5;
@@ -417,11 +435,11 @@ export class AudioEngine {
         this.notify();
       }
     }
-    // Only keep polling while audio is actually advancing. A 60fps rAF running
-    // with playback paused/ended/idle burned CPU + battery for the whole app
+    // Only keep polling while audio is actually advancing. A poll running with
+    // playback paused/ended/idle burns CPU + battery for the whole app
     // lifetime; play/playing/seeked re-arm the loop via startTick().
-    if (el.src && !el.paused && !el.ended) {
-      this.rafId = requestAnimationFrame(this.tick);
+    if (!el.src || el.paused || el.ended) {
+      this.stopTick();
     }
   };
 
@@ -1136,8 +1154,7 @@ export class AudioEngine {
       this.limiterDipTimer = null;
     }
     this.limiterWired = false;
-    if (this.rafId) cancelAnimationFrame(this.rafId);
-    this.rafId = null;
+    this.stopTick();
     if (this.deviceChangeHandler && typeof navigator !== 'undefined' && navigator.mediaDevices?.removeEventListener) {
       navigator.mediaDevices.removeEventListener('devicechange', this.deviceChangeHandler);
     }

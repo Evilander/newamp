@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from 'react';
 import type { AlbumSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
@@ -82,8 +82,11 @@ export function AlbumsView(): JSX.Element {
   // pre-selected for instant detail view.
   const pendingNavigation = usePlayerStore((s) => s.pendingNavigation);
   const consumePendingNavigation = usePlayerStore((s) => s.consumePendingNavigation);
+  // One-shot row highlight consumed by the album detail's TrackTable after an
+  // 'album-with-track' navigation (TrackLink / ♪ matched-song click).
+  const [highlightTrack, setHighlightTrack] = useState<{ id: number | null; title: string | null } | null>(null);
   useEffect(() => {
-    if (!pendingNavigation || pendingNavigation.kind !== 'album') return;
+    if (!pendingNavigation || (pendingNavigation.kind !== 'album' && pendingNavigation.kind !== 'album-with-track')) return;
     const target = pendingNavigation;
     void (async () => {
       let tracks: Track[] = [];
@@ -132,6 +135,11 @@ export function AlbumsView(): JSX.Element {
       setSelected(albumSummary);
       setTracks(tracks);
       setFilter(target.album);
+      setHighlightTrack(
+        target.kind === 'album-with-track'
+          ? { id: target.trackId, title: target.trackTitle }
+          : null,
+      );
       consumePendingNavigation();
     })();
   }, [pendingNavigation, consumePendingNavigation]);
@@ -488,6 +496,7 @@ export function AlbumsView(): JSX.Element {
           <TrackTable
             tracks={tracks}
             currentId={current?.id ?? null}
+            highlightTrack={highlightTrack}
             onPlay={(i) => void playQueue(tracks, i)}
             onPlayTracks={(selectedTracks) => void playQueue(selectedTracks, 0)}
             onPlayNext={queueTrackNext}
@@ -599,7 +608,34 @@ export function AlbumsView(): JSX.Element {
                       title={a.matchedTrackTitles}
                       data-newamp-album-matched-songs
                     >
-                      ♪ {a.matchedTrackTitles}
+                      {'♪ '}
+                      {a.matchedTrackTitles.split(' · ').map((matchedTitle, i) => (
+                        <Fragment key={`${matchedTitle}-${i}`}>
+                          {i > 0 && ' · '}
+                          <button
+                            type="button"
+                            className="underline-offset-2 hover:underline"
+                            style={{
+                              background: 'transparent',
+                              border: 'none',
+                              padding: 0,
+                              cursor: 'pointer',
+                              color: 'inherit',
+                              font: 'inherit',
+                            }}
+                            title={`Open "${matchedTitle}" on ${a.album}`}
+                            onClick={() =>
+                              usePlayerStore.getState().navigateToTrack({
+                                title: matchedTitle,
+                                album: a.album,
+                                albumArtist: a.albumArtist,
+                              })
+                            }
+                          >
+                            {matchedTitle}
+                          </button>
+                        </Fragment>
+                      ))}
                     </div>
                   )}
                 </div>

@@ -11,6 +11,11 @@
 // aware crossfade between scenes. Output is premultiplied alpha so the
 // MilkDrop field below shows through wherever a scene leaves alpha low.
 //
+// On the 'high' quality tier a second, independent ACCENT scene runs on top
+// of the base scene, its opacity played live by the drums (kick/snare/vocal
+// onset envelopes) — two full presets composited per-instrument, which a
+// single MilkDrop preset structurally cannot do.
+//
 // "Could never be replicated": scene choice is a seeded walk keyed on
 // (seedKey × sectionId) — seedKey carries the track + the user's evolved
 // visual-memory lineage, so the same song on two machines (or two play
@@ -263,6 +268,40 @@ export function createSceneOverlay(
     return SCENES.filter((s) => !blacklisted.has(s.id));
   }
 
+  // --- accent layer (a second simultaneous scene, played by the drums) ------
+  // MilkDrop composites exactly one preset at a time; Eviland runs a second,
+  // independent scene whose visibility is a per-instrument envelope: it
+  // materializes on kick/snare hits and evaporates in quiet passages, riding
+  // ON TOP of the base scene. Structurally impossible in a single MilkDrop
+  // preset. High quality tier only (it's a second full-screen pass), and
+  // suppressed while a scene is forced so smokes/user picks stay pure.
+  const accentEnabled = quality === 'high';
+  let accentIndex = -1;
+  let accentDwellMs = 0;
+  let accentTimeMs = 0;
+  let accentLevel = 0;
+
+  function pickAccentScene(): void {
+    if (!accentEnabled) {
+      accentIndex = -1;
+      return;
+    }
+    const pool: number[] = [];
+    for (const idx of rotation) {
+      const def = SCENES[idx];
+      if (!def || blacklisted.has(def.id) || idx === activeIndex || idx === outgoingIndex) continue;
+      // Punchy tiers only — the accent layer exists to hit, not to wash.
+      if (def.mood === 'high' || def.mood === 'any') pool.push(idx);
+    }
+    if (!pool.length) {
+      accentIndex = -1;
+      return;
+    }
+    accentIndex = pool[Math.floor(walk() * pool.length)]!;
+    accentDwellMs = 0;
+    accentTimeMs = 0;
+  }
+
   function rebuildRotation(): void {
     // Seeded shuffle of scene indices — the per-user, per-track walk order.
     walk = mulberry32(hashString(seedKey));
@@ -274,6 +313,7 @@ export function createSceneOverlay(
       rotation[j] = tmp;
     }
     activeIndex = rotation[0] ?? 0;
+    pickAccentScene();
   }
   rebuildRotation();
 
@@ -298,6 +338,8 @@ export function createSceneOverlay(
     fadeMs = 0;
     sceneTimeMs = 0;
     dwellMs = 0;
+    // The accent scene must never duplicate the base scene it garnishes.
+    if (accentIndex === activeIndex || accentIndex === outgoingIndex) pickAccentScene();
   }
 
   function bindAndDraw(def: SceneDef, frame: EvilandFrame, palette: EvilandPalette, dtSec: number, fade: number, seed: number, timeMs: number): boolean {
@@ -388,8 +430,17 @@ export function createSceneOverlay(
       sceneTimeMs += dt;
       globalTimeMs += dt;
       dwellMs += dt;
+      accentTimeMs += dt;
+      accentDwellMs += dt;
       if (outgoingIndex >= 0) fadeMs = Math.min(CROSSFADE_MS, fadeMs + dt);
       updatePulses(frame, dt);
+
+      // Accent-layer envelope: fast attack on transients, slow release — the
+      // second scene breathes with the drums instead of sitting at a fixed
+      // opacity.
+      const accentTarget = Math.min(1, pulses.kick * 0.9 + pulses.snare * 0.75 + pulses.vocal * 0.35);
+      const accentK = accentTarget > accentLevel ? 1 - Math.exp(-dt / 40) : 1 - Math.exp(-dt / 320);
+      accentLevel += (accentTarget - accentLevel) * accentK;
 
       // Rotation: switch scenes on a section boundary once we've dwelled long
       // enough, or force a switch when a scene has overstayed.
@@ -398,6 +449,10 @@ export function createSceneOverlay(
         lastSectionId = frame.sectionId;
         if ((sectionChanged && dwellMs > MIN_DWELL_MS) || dwellMs > MAX_DWELL_MS) {
           pickNextScene(frame);
+        } else if (accentEnabled && accentDwellMs > MAX_DWELL_MS * 0.6) {
+          // The accent layer rotates on its own faster cadence so the pair
+          // (base × accent) keeps recombining.
+          pickAccentScene();
         }
       }
 
@@ -429,6 +484,28 @@ export function createSceneOverlay(
         // Compile failed mid-flight: hop to the next scene immediately.
         pickNextScene(frame);
       }
+
+      // Accent layer, over the base scene. Skipped when a scene is forced
+      // (smokes and user picks assert on a single scene's output), when its
+      // envelope is effectively silent (also saves the pass in quiet parts),
+      // and when it would duplicate the scene already on screen. Alpha is
+      // capped so the base scene stays primary; a failed compile only drops
+      // the garnish — never the base.
+      if (
+        accentEnabled &&
+        !forcedSceneId &&
+        accentIndex >= 0 &&
+        accentIndex !== idx &&
+        accentLevel > 0.035
+      ) {
+        const acc = SCENES[accentIndex];
+        if (acc) {
+          const accSeed = hash01(seedKey, `accent::${acc.id}`);
+          const accAlpha = Math.min(0.55, accentLevel * 0.55) * fadeT;
+          const accDrew = bindAndDraw(acc, frame, palette, dt / 1000, accAlpha, accSeed, accentTimeMs);
+          if (!accDrew) pickAccentScene();
+        }
+      }
     },
 
     setScene(id) {
@@ -444,6 +521,7 @@ export function createSceneOverlay(
       fadeMs = CROSSFADE_MS;
       sceneTimeMs = 0;
       dwellMs = 0;
+      accentLevel = 0;
     },
 
     currentSceneId() {
