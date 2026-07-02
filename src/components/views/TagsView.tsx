@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TagRule, TagRulePreviewResult, TagSummary, Track } from '@shared/types';
 import { api } from '../../lib/api';
 import { usePlayerStore } from '../../store/usePlayerStore';
-import { ViewOnboarding } from '../ViewOnboarding';
+import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
 import { ArtistLink } from '../EntityLink';
 
 const DEFAULT_BODY = `tag(midnight_drive) when
@@ -52,6 +52,7 @@ const FRESH_DRAFT: DraftState = {
 };
 
 export function TagsView(): JSX.Element {
+  const help = useViewHelp();
   const [rules, setRules] = useState<TagRule[]>([]);
   const [summaries, setSummaries] = useState<TagSummary[]>([]);
   const [draft, setDraft] = useState<DraftState>(FRESH_DRAFT);
@@ -211,10 +212,13 @@ export function TagsView(): JSX.Element {
           'Tagged tracks show up in their own filters in Library and feed Mixes/Discover.',
         ]}
         cta="Pick a starter template below to see the syntax. Save the rule to make it permanent."
+        forceVisible={help.open}
+        onClose={help.close}
       />
       <header className="flex items-baseline gap-3">
-        <h2 className="text-[14px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
+        <h2 className="flex items-center gap-1.5 text-[14px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
           Living Tags
+          <HelpDot help={help} label="What are Living Tags?" />
         </h2>
         <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
           A reactive tagging DSL — write rules, the library re-tags itself.

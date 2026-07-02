@@ -4,9 +4,10 @@ import { api } from '../../lib/api';
 import { formatDuration } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { TrackTable } from './LibraryView';
-import { ViewOnboarding } from '../ViewOnboarding';
+import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
 
 export function DiscoverView(): JSX.Element {
+  const help = useViewHelp();
   const [surface, setSurface] = useState<DiscoverSurface | null>(null);
   const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
@@ -109,10 +110,13 @@ export function DiscoverView(): JSX.Element {
           'Each card opens as a saveable playlist or jumps straight into Auto VJ.',
         ]}
         cta="Click PLAY MISSION on any card below to start. Save as Playlist to keep one."
+        forceVisible={help.open}
+        onClose={help.close}
       />
       <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
-        <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
+        <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
           Living Library
+          <HelpDot help={help} label="What is Discover?" />
         </div>
         <button className="pxbtn is-active" onClick={() => selectedMission && void playQueue(selectedMission.tracks, 0)} disabled={!selectedMission}>
           Start Session

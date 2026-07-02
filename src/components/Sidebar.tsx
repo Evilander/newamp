@@ -5,6 +5,8 @@ interface NavItem {
   id: ViewMode;
   label: string;
   icon: string;
+  /** Function-first tooltip — answers "what is this?" before the click. */
+  hint?: string;
 }
 
 interface NavGroup {
@@ -20,49 +22,49 @@ const GROUPS: NavGroup[] = [
   {
     label: 'Main',
     items: [
-      { id: 'home', label: 'Home', icon: 'M3 10l7-6 7 6v7H5v-5h10v5' },
-      { id: 'library', label: 'Library', icon: 'M2 3h16v2H2zM2 7h16v2H2zM2 11h16v2H2zM2 15h16v2H2z' },
-      { id: 'now-playing', label: 'Now Playing', icon: 'M10 14a4 4 0 100-8 4 4 0 000 8zm0-2a2 2 0 100-4 2 2 0 000 4z' },
+      { id: 'home', label: 'Home', icon: 'M3 10l7-6 7 6v7H5v-5h10v5', hint: 'Magazine-style front page built from your listening' },
+      { id: 'library', label: 'Library', icon: 'M2 3h16v2H2zM2 7h16v2H2zM2 11h16v2H2zM2 15h16v2H2z', hint: 'Every track — search, sort, bulk-tag, and play' },
+      { id: 'now-playing', label: 'Now Playing', icon: 'M10 14a4 4 0 100-8 4 4 0 000 8zm0-2a2 2 0 100-4 2 2 0 000 4z', hint: "Queue, lyrics, and the story of what's playing" },
     ],
   },
   {
     label: 'Explore',
     items: [
-      { id: 'albums', label: 'Albums', icon: 'M3 3h6v6H3zM11 3h6v6h-6zM3 11h6v6H3zM11 11h6v6h-6z' },
-      { id: 'artists', label: 'Artists', icon: 'M10 10a3 3 0 100-6 3 3 0 000 6zM4 17a6 6 0 0112 0H4z' },
-      { id: 'folders', label: 'Folders', icon: 'M2 5h6l2 2h8v9H2zM4 9h12' },
+      { id: 'albums', label: 'Albums', icon: 'M3 3h6v6H3zM11 3h6v6h-6zM3 11h6v6H3zM11 11h6v6h-6z', hint: 'Your collection as a wall of covers' },
+      { id: 'artists', label: 'Artists', icon: 'M10 10a3 3 0 100-6 3 3 0 000 6zM4 17a6 6 0 0112 0H4z', hint: 'Browse by artist' },
+      { id: 'folders', label: 'Folders', icon: 'M2 5h6l2 2h8v9H2zM4 9h12', hint: 'Browse your music exactly as it sits on disk' },
     ],
   },
   {
     label: 'Discovery',
     items: [
-      { id: 'discover', label: 'Discover', icon: 'M10 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2z' },
-      { id: 'mixes', label: 'Mixes', icon: 'M3 5h4l3 10h2l3-10h4M4 15h4M12 15h4' },
-      { id: 'tags', label: 'Living Tags', icon: 'M3 9l7-7 8 8-7 7zM14 5a1 1 0 100 2 1 1 0 000-2z' },
+      { id: 'discover', label: 'Discover', icon: 'M10 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2z', hint: 'Playable missions built from your listening history' },
+      { id: 'mixes', label: 'Mixes', icon: 'M3 5h4l3 10h2l3-10h4M4 15h4M12 15h4', hint: 'Eight live mixes regenerated from your library' },
+      { id: 'tags', label: 'Living Tags', icon: 'M3 9l7-7 8 8-7 7zM14 5a1 1 0 100 2 1 1 0 000-2z', hint: 'Rules that keep your library tagged automatically' },
     ],
   },
   {
     label: 'Yours',
     items: [
-      { id: 'loved', label: 'Loved', icon: 'M10 17l-6.5-6.5a4 4 0 015.66-5.66L10 6l.84-1.16a4 4 0 015.66 5.66L10 17z' },
-      { id: 'history', label: 'History', icon: 'M10 3a7 7 0 107 7M10 6v5l4 2M10 3v4M7 3h6' },
-      { id: 'wrapped', label: 'Wrapped', icon: 'M10 2v16M2 6l8-4 8 4M4 6v8l6 3 6-3V6' },
-      { id: 'profile', label: 'Profile', icon: 'M10 10a3 3 0 100-6 3 3 0 000 6zM4 17a6 6 0 0112 0z' },
-      { id: 'playlist', label: 'Playlists', icon: 'M3 4h14M3 9h14M3 14h9M14 14l3 3M17 14l-3 3' },
+      { id: 'loved', label: 'Loved', icon: 'M10 17l-6.5-6.5a4 4 0 015.66-5.66L10 6l.84-1.16a4 4 0 015.66 5.66L10 17z', hint: "Every track you've hearted" },
+      { id: 'history', label: 'History', icon: 'M10 3a7 7 0 107 7M10 6v5l4 2M10 3v4M7 3h6', hint: 'What you played, when — with listening insights' },
+      { id: 'wrapped', label: 'Wrapped', icon: 'M10 2v16M2 6l8-4 8 4M4 6v8l6 3 6-3V6', hint: 'Your listening year, available any day of the year' },
+      { id: 'profile', label: 'Profile', icon: 'M10 10a3 3 0 100-6 3 3 0 000 6zM4 17a6 6 0 0112 0z', hint: 'Your local listening identity — stats, reviews, lists' },
+      { id: 'playlist', label: 'Playlists', icon: 'M3 4h14M3 9h14M3 14h9M14 14l3 3M17 14l-3 3', hint: 'Hand-built and smart playlists' },
     ],
   },
   {
     label: 'Streaming',
     items: [
-      { id: 'podcasts', label: 'Podcasts', icon: 'M5 15v-3a5 5 0 0110 0v3M8 15v-3a2 2 0 114 0v3M10 4v3M6 5l2 2M14 5l-2 2' },
-      { id: 'radio', label: 'Radio', icon: 'M2 8h16v9H2zM2 8L14 4v4M5 13h2M9 13h2' },
+      { id: 'podcasts', label: 'Podcasts', icon: 'M5 15v-3a5 5 0 0110 0v3M8 15v-3a2 2 0 114 0v3M10 4v3M6 5l2 2M14 5l-2 2', hint: 'Subscribe, download, and pick up where you left off' },
+      { id: 'radio', label: 'Radio', icon: 'M2 8h16v9H2zM2 8L14 4v4M5 13h2M9 13h2', hint: 'Internet radio stations' },
     ],
   },
   {
     label: 'App',
     items: [
-      { id: 'about', label: 'About', icon: 'M10 3a7 7 0 100 14 7 7 0 000-14zM10 8v6M10 6h.01' },
-      { id: 'settings', label: 'Settings', icon: 'M10 3v3M10 14v3M3 10h3M14 10h3M5 5l2 2M13 13l2 2M5 15l2-2M13 7l2-2M10 7a3 3 0 100 6 3 3 0 000-6z' },
+      { id: 'about', label: 'About', icon: 'M10 3a7 7 0 100 14 7 7 0 000-14zM10 8v6M10 6h.01', hint: 'Version, credits, and diagnostics' },
+      { id: 'settings', label: 'Settings', icon: 'M10 3v3M10 14v3M3 10h3M14 10h3M5 5l2 2M13 13l2 2M5 15l2-2M13 7l2-2M10 7a3 3 0 100 6 3 3 0 000-6z', hint: 'Library folders, audio, look and feel, services' },
     ],
   },
 ];
@@ -97,7 +99,7 @@ export function Sidebar(): JSX.Element {
                 key={item.id}
                 className={`nav-item ${view === item.id ? 'active' : ''}`}
                 onClick={() => setView(item.id)}
-                title={item.label}
+                title={item.hint ?? item.label}
               >
                 <svg width="14" height="14" viewBox="0 0 20 20" aria-hidden="true">
                   <path d={item.icon} stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="square" />

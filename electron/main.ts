@@ -487,6 +487,7 @@ function createWindow(): BrowserWindow {
       if (win.isDestroyed()) return;
       win.show();
       win.focus();
+      applyThumbarButtons(win);
       if (openDevTools) win.webContents.openDevTools({ mode: 'detach' });
     };
     const remainingSplashMs = startupSplashWin
@@ -714,12 +715,16 @@ function wireDetachedFramePort(): void {
     return;
   }
   try {
-    // LOAD-BEARING: the frame producer is a rAF loop in the MAIN renderer.
-    // The projector typically covers/defocuses the main window, and a
-    // throttled (occluded) renderer stops its rAF — the projector froze after
-    // ~30 frames. Disable throttling while a projector is attached; restored
-    // on close/crash so the idle-CPU behavior is unchanged otherwise.
-    mainWin.webContents.setBackgroundThrottling(false);
+    // NOTE: main-window background throttling is deliberately LEFT ON now.
+    // It was disabled here in 1.13.0 because the frame producer ran on rAF —
+    // but the producer, the audio-engine clock, and all playback bookkeeping
+    // have since moved to timers, and Chromium exempts audibly-playing pages
+    // from timer throttling. Leaving throttling on means an occluded/
+    // minimized main window stops all its rAF UI rendering while the
+    // projector runs — which is most of the "suffers mightily when detached"
+    // GPU/CPU bill. When playback is paused AND the main window is hidden,
+    // the producer drops to ~1Hz and the projector's own status layer
+    // truthfully reports "Paused".
     const channel = new MessageChannelMain();
     mainWin.webContents.postMessage('eviland:frame-port', null, [channel.port1]);
     detachedVizWin.webContents.postMessage('eviland:frame-port', null, [channel.port2]);
@@ -730,6 +735,9 @@ function wireDetachedFramePort(): void {
 }
 
 function restoreMainWindowThrottling(): void {
+  // Throttling is never disabled anymore (see wireDetachedFramePort), but
+  // re-asserting the default on projector close keeps this path harmless and
+  // self-healing if some future code toggles it.
   if (mainWin && !mainWin.isDestroyed()) {
     try {
       mainWin.webContents.setBackgroundThrottling(true);
@@ -1025,7 +1033,14 @@ function registerTray(): void {
   if (process.platform === 'darwin') return;
   if (tray || smokeMode) return;
 
-  const icon = resolveTrayIconImage();
+  // On Windows, hand the tray the .ico FILE PATH when we can: the shell then
+  // selects the correctly-sized frame for the current DPI natively, which is
+  // both crisper and more robust than pre-resizing a decoded bitmap. (The
+  // historical white-square tray icon was PNG-compressed small frames inside
+  // icon.ico — Windows' notification area can't decode those; the ico now
+  // ships classic BMP frames, and the path-based Tray keeps us on the shell's
+  // own well-tested loading path.)
+  const icon = resolveTrayIconPath() ?? resolveTrayIconImage();
   if (!icon) return;
   try {
     const nextTray = new Tray(icon);
@@ -1071,6 +1086,118 @@ function scheduleTrayBoundsDiagnostic(nextTray: Tray): void {
 
 function hasTrayBounds(bounds: Rectangle): boolean {
   return bounds.width > 0 || bounds.height > 0;
+}
+
+// --- Windows taskbar thumbnail toolbar (prev / play-pause / next) ----------
+//
+// The mark of a native-feeling Windows player: transport controls in the
+// taskbar hover preview. Glyphs are rasterized programmatically into BGRA
+// buffers — no icon assets to ship, always theme-neutral white like the
+// system's own thumbar glyphs.
+
+let shellPlaybackState: { isPlaying: boolean; title: string | null; artist: string | null } = {
+  isPlaying: false,
+  title: null,
+  artist: null,
+};
+
+function thumbGlyph(inside: (x: number, y: number) => boolean): Electron.NativeImage {
+  const S = 32;
+  const buf = Buffer.alloc(S * S * 4);
+  // 2x2 supersampling for smooth edges at this tiny size.
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      let hits = 0;
+      for (const [dx, dy] of [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]] as const) {
+        if (inside((x + dx) / S, (y + dy) / S)) hits += 1;
+      }
+      if (!hits) continue;
+      const i = (y * S + x) * 4;
+      const a = Math.round((hits / 4) * 255);
+      // BGRA, premultiplied white.
+      buf[i] = a;
+      buf[i + 1] = a;
+      buf[i + 2] = a;
+      buf[i + 3] = a;
+    }
+  }
+  return nativeImage.createFromBitmap(buf, { width: S, height: S });
+}
+
+const inTriangle = (x: number, y: number, x0: number, x1: number, apexRight: boolean): boolean => {
+  if (x < x0 || x > x1) return false;
+  const u = (x - x0) / (x1 - x0);
+  const half = 0.30 * (apexRight ? 1 - u : u);
+  return Math.abs(y - 0.5) <= half;
+};
+const inBar = (x: number, y: number, x0: number, x1: number): boolean =>
+  x >= x0 && x <= x1 && y >= 0.2 && y <= 0.8;
+
+let thumbarIcons: { prev: Electron.NativeImage; play: Electron.NativeImage; pause: Electron.NativeImage; next: Electron.NativeImage } | null = null;
+
+function getThumbarIcons() {
+  if (!thumbarIcons) {
+    thumbarIcons = {
+      prev: thumbGlyph((x, y) => inBar(x, y, 0.22, 0.32) || inTriangle(x, y, 0.36, 0.78, false)),
+      play: thumbGlyph((x, y) => inTriangle(x, y, 0.3, 0.78, true)),
+      pause: thumbGlyph((x, y) => inBar(x, y, 0.3, 0.44) || inBar(x, y, 0.56, 0.7)),
+      next: thumbGlyph((x, y) => inTriangle(x, y, 0.22, 0.64, true) || inBar(x, y, 0.68, 0.78)),
+    };
+  }
+  return thumbarIcons;
+}
+
+function applyThumbarButtons(win: BrowserWindow | null = mainWin): void {
+  if (process.platform !== 'win32' || smokeMode) return;
+  if (!win || win.isDestroyed()) return;
+  const icons = getThumbarIcons();
+  try {
+    win.setThumbarButtons([
+      { tooltip: 'Previous track', icon: icons.prev, click: () => sendPlayerCommand('previous') },
+      shellPlaybackState.isPlaying
+        ? { tooltip: 'Pause', icon: icons.pause, click: () => sendPlayerCommand('toggle-play') }
+        : { tooltip: 'Play', icon: icons.play, click: () => sendPlayerCommand('toggle-play') },
+      { tooltip: 'Next track', icon: icons.next, click: () => sendPlayerCommand('next') },
+    ]);
+  } catch (err) {
+    console.warn('[newamp] thumbar buttons unavailable', err);
+  }
+}
+
+/**
+ * Renderer→shell playback snapshot: swaps the thumbar play/pause glyph and
+ * keeps the tray tooltip naming what's actually playing.
+ */
+function applyShellPlaybackState(state: typeof shellPlaybackState): void {
+  shellPlaybackState = state;
+  applyThumbarButtons();
+  if (tray && !tray.isDestroyed()) {
+    const label = state.title
+      ? `NewAmp — ${state.artist ? `${state.artist} – ` : ''}${state.title}${state.isPlaying ? '' : ' (paused)'}`
+      : 'NewAmp';
+    try {
+      tray.setToolTip(label);
+    } catch {
+      /* tray torn down mid-update */
+    }
+  }
+}
+
+/** Windows-only: the packaged/dev .ico path, for shell-native frame selection. */
+function resolveTrayIconPath(): string | null {
+  if (process.platform !== 'win32') return null;
+  const candidates = [
+    join(process.resourcesPath, 'build', 'icon.ico'),
+    join(app.getAppPath(), 'build', 'icon.ico'),
+  ];
+  for (const candidate of candidates) {
+    if (!existsSync(candidate)) continue;
+    // Asar paths exist for fs but the Windows shell can't open them — only
+    // hand back real on-disk paths.
+    if (candidate.includes('app.asar')) continue;
+    return candidate;
+  }
+  return null;
 }
 
 function resolveTrayIconImage(): Electron.NativeImage | null {
@@ -1388,6 +1515,47 @@ function registerIpc(): void {
 
   ipcMain.handle('library:cancel-scan', async () => {
     scanner.cancel();
+  });
+
+  // Full-library metadata export (JSON or CSV) — tag auditing, spreadsheets,
+  // and player migration without losing ratings/plays/loves.
+  ipcMain.handle('library:export-metadata', async (_e, format: unknown) => {
+    const fmt = format === 'csv' ? 'csv' : 'json';
+    const stamp = new Date().toISOString().slice(0, 10);
+    const opts: Electron.SaveDialogOptions = {
+      title: 'Export library metadata',
+      defaultPath: `newamp-library-${stamp}.${fmt}`,
+      filters: fmt === 'csv'
+        ? [{ name: 'CSV', extensions: ['csv'] }]
+        : [{ name: 'JSON', extensions: ['json'] }],
+    };
+    const result = mainWin ? await dialog.showSaveDialog(mainWin, opts) : await dialog.showSaveDialog(opts);
+    if (result.canceled || !result.filePath) return null;
+    const rows = library.exportTrackMetadata();
+    let payload: string;
+    if (fmt === 'json') {
+      payload = JSON.stringify(
+        { app: 'NewAmp', version: app.getVersion(), exportedAt: new Date().toISOString(), tracks: rows },
+        null,
+        2,
+      );
+    } else {
+      const headers = Object.keys(
+        rows[0] ?? { path: '', title: '', artist: '', album: '' },
+      );
+      const escape = (value: unknown): string => {
+        if (value === null || value === undefined) return '';
+        const s = String(value);
+        return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const lines = [headers.join(',')];
+      for (const row of rows) {
+        lines.push(headers.map((h) => escape((row as Record<string, unknown>)[h])).join(','));
+      }
+      payload = lines.join('\r\n');
+    }
+    await writeFile(result.filePath, payload, 'utf8');
+    return { path: result.filePath, tracks: rows.length, format: fmt };
   });
 
   ipcMain.handle('library:get-tracks', async (_e, opts) => library.getTracks(opts ?? {}));
@@ -2063,6 +2231,19 @@ function registerIpc(): void {
     if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
     if (event.sender !== detachedVizWin.webContents) return;
     wireDetachedFramePort();
+  });
+
+  // Playback snapshot from the main renderer → Windows thumbar + tray tooltip.
+  // Sender-guarded like the other renderer-originated signals.
+  ipcMain.on('playback:state', (event, state: unknown) => {
+    if (!mainWin || mainWin.isDestroyed() || event.sender !== mainWin.webContents) return;
+    if (!state || typeof state !== 'object') return;
+    const s = state as { isPlaying?: unknown; title?: unknown; artist?: unknown };
+    applyShellPlaybackState({
+      isPlaying: s.isPlaying === true,
+      title: typeof s.title === 'string' && s.title.trim() ? s.title : null,
+      artist: typeof s.artist === 'string' && s.artist.trim() ? s.artist : null,
+    });
   });
 }
 

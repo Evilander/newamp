@@ -10,6 +10,9 @@ import {
   type VizReactivity,
 } from './Visualizer';
 import { formatTime } from '../lib/format';
+import { ArtistLink, AlbumLink } from './EntityLink';
+// Shared with the headless producer (projector tier) via lib/vizPrefs.
+import { VIZ_QUALITY_KEY, VIZ_PERFORMANCE_KEY } from '../lib/vizPrefs';
 import { api, winctl } from '../lib/api';
 import type { VisualizerPreset } from '@shared/types';
 import { volumeLabel } from './VolumeSlider';
@@ -64,11 +67,9 @@ const PRESET_GROUPS: ReadonlyArray<{ id: PresetGroup; label: string }> = [
 
 type CanvasVisualizerPreset = Exclude<VisualizerPreset, 'album-breathe'>;
 
-const VIZ_QUALITY_KEY = 'newamp:viz:quality';
 const VIZ_SHOW_ART_KEY = 'newamp:viz:showArt';
 const VIZ_CHROME_KEY = 'newamp:viz:chrome';
 const VIZ_PALETTE_KEY = 'newamp:viz:palette';
-const VIZ_PERFORMANCE_KEY = 'newamp:viz:performance';
 const VIZ_REACTIVITY_KEY = 'newamp:viz:reactivity';
 const VIZ_AUTO_VJ_KEY = 'newamp:viz:autoVj';
 
@@ -1605,7 +1606,33 @@ export function FullscreenVisualizer(): JSX.Element {
               {current ? current.title : 'No track loaded'}
             </div>
             <div className="text-base" style={{ color: 'rgba(255,255,255,0.7)' }}>
-              {current ? `${current.artist}${current.album ? ` - ${current.album}` : ''}` : ''}
+              {current ? (
+                <>
+                  {/* Leave the visualizer first, then land on the artist/album —
+                      navigating underneath a fullscreen overlay would look like
+                      the click did nothing. */}
+                  <ArtistLink
+                    artist={current.artist}
+                    color="inherit"
+                    title={`Show all ${current.artist} albums`}
+                    onBeforeNavigate={() => setFs(false)}
+                  />
+                  {current.album ? (
+                    <>
+                      {' - '}
+                      <AlbumLink
+                        album={current.album}
+                        albumArtist={current.albumArtist || current.artist}
+                        color="inherit"
+                        title={`Show ${current.album} in Albums`}
+                        onBeforeNavigate={() => setFs(false)}
+                      />
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                ''
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2">
