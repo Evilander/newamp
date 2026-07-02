@@ -5,16 +5,10 @@
 // (b) the detached visualizer window via a MessageChannelMain port wired by
 // the Electron main process.
 //
-// INTEGRATOR HOOK (Visualizer.tsx, eviland branch — owned by the integrator,
-// NOT added by this module's author):
-//
-//   import { frameBus } from '../visualizer/frame-bus';
-//   // After: const evFrame = reactor.analyze(...);
-//   frameBus.publish(evFrame, palette, dtMs);
-//
-// Until that one-line call is added, the detached window will stay black —
-// that is expected. This module deliberately does no audio or rendering on its
-// own; it is pure plumbing.
+// The sole producer is the headless eviland-producer.ts singleton started by
+// App.tsx — the on-screen <Visualizer/> runs its own independent pipeline and
+// never publishes here. This module deliberately does no audio or rendering
+// on its own; it is pure plumbing.
 //
 // Backpressure: NONE by design — publishing is fire-and-forget at the
 // producer's ~30Hz tick. The original ack-gated inflight window (max 3
@@ -70,9 +64,19 @@ export interface DetachedFramePayload {
   /** Current track id — seeds the detached window's scene-overlay walk. */
   trackId?: number | null;
   /**
+   * Lineage-aware scene-overlay seed (`track-<id>::g<gen>-r<rootSeed>`).
+   * Preferred over the bare trackId when present, so the projector's scene
+   * rotation evolves with the track's visual-memory generation exactly like
+   * the on-screen composition.
+   */
+  sceneSeed?: string | null;
+  /**
    * Live playback state for the projector's floating control bar. Piggy-backs
    * on the existing 30Hz publish so the projector never needs to round-trip
-   * for what's currently playing.
+   * for what's currently playing. `null` is an explicit "nothing playing"
+   * signal — the projector resets its control bar to the idle state instead
+   * of freezing on the last track. `undefined` (key absent) means the
+   * producer had no opinion this tick.
    */
   transport?: {
     title: string | null;
@@ -81,7 +85,9 @@ export interface DetachedFramePayload {
     currentTime: number;
     duration: number;
     isPlaying: boolean;
-  };
+    /** Perceptual volume 0..2 — mirrored by the projector's volume slider. */
+    volume: number;
+  } | null;
   /** Sent only on change; the consumer reapplies on each tick. */
   config?: {
     quality?: 'high' | 'medium' | 'low';
@@ -113,6 +119,7 @@ export interface FrameBus {
       wave?: Uint8Array;
       sampleRate?: number;
       trackId?: number | null;
+      sceneSeed?: string | null;
       transport?: DetachedFramePayload['transport'];
     },
   ): void;
@@ -197,7 +204,9 @@ export const frameBus: FrameBus = {
     if (extras?.wave) payload.wave = extras.wave; // structured-clone copies it
     if (extras?.sampleRate) payload.sampleRate = extras.sampleRate;
     if (extras?.trackId !== undefined) payload.trackId = extras.trackId;
-    if (extras?.transport) payload.transport = extras.transport;
+    if (extras?.sceneSeed !== undefined) payload.sceneSeed = extras.sceneSeed;
+    // `null` transport must survive the trip — it's the explicit idle signal.
+    if (extras && 'transport' in extras) payload.transport = extras.transport;
     if (state.qualityDirty && state.quality) {
       payload.config = { quality: state.quality };
       state.qualityDirty = false;

@@ -5446,3 +5446,20 @@ input[type='range'].nslider.eq-slider {
     transition: none;
   }
 }
+
+/* Track-navigation landing flash (TrackTable highlightTrack). The animation
+   outranks the row's inline zebra background while it plays, then hands
+   control back. */
+tr[data-newamp-track-highlight] {
+  animation: newamp-track-highlight 2.4s ease-out;
+}
+@keyframes newamp-track-highlight {
+  0% { background-color: color-mix(in srgb, var(--accent) 34%, transparent); }
+  100% { background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  tr[data-newamp-track-highlight] {
+    animation: none;
+    background-color: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+}

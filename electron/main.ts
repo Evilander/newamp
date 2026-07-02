@@ -797,13 +797,27 @@ function registerDisplayWatchers(): void {
     }
   };
   screen.on('display-added', broadcast);
-  screen.on('display-removed', (_event, removed) => {
+  screen.on('display-removed', () => {
     broadcast();
     if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
     // If the detached window lived on the removed display, snap it home so
-    // the user doesn't lose track of it.
-    const winDisplay = screen.getDisplayMatching(detachedVizWin.getBounds());
-    if (winDisplay.id === removed.id) {
+    // the user doesn't lose track of it. By the time this event fires the
+    // removed display is already gone from getAllDisplays(), so matching the
+    // removed display's id via getDisplayMatching can never succeed (it only
+    // returns displays that still exist). Instead ask whether the window's
+    // bounds still overlap ANY remaining display; if not, it's stranded on
+    // the unplugged monitor.
+    const bounds = detachedVizWin.getBounds();
+    const stillVisible = screen.getAllDisplays().some((d) => {
+      const area = d.workArea ?? d.bounds;
+      return (
+        bounds.x < area.x + area.width &&
+        bounds.x + bounds.width > area.x &&
+        bounds.y < area.y + area.height &&
+        bounds.y + bounds.height > area.y
+      );
+    });
+    if (!stillVisible) {
       const fallback = screen.getPrimaryDisplay();
       detachedVizWin.setFullScreen(false);
       detachedVizWin.setBounds({

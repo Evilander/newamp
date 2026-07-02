@@ -117,12 +117,26 @@ interface PlayerState {
   pendingNavigation:
     | null
     | { kind: 'artist'; name: string }
-    | { kind: 'album'; album: string; albumArtist: string };
+    | { kind: 'album'; album: string; albumArtist: string }
+    | {
+        kind: 'album-with-track';
+        album: string;
+        albumArtist: string;
+        trackId: number | null;
+        trackTitle: string | null;
+      };
   init: () => Promise<void>;
   persistPlaybackSession: () => Promise<void>;
   setView: (v: ViewMode) => void;
   navigateToArtist: (name: string) => void;
   navigateToAlbum: (album: string, albumArtist: string) => void;
+  navigateToTrack: (track: {
+    id?: number;
+    title?: string | null;
+    album?: string | null;
+    albumArtist?: string | null;
+    artist?: string | null;
+  }) => void;
   consumePendingNavigation: () => void;
   toggleEq: () => void;
   setFullscreenViz: (on: boolean) => void;
@@ -796,6 +810,27 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         view: 'albums',
         pendingNavigation: { kind: 'album', album: a, albumArtist: (albumArtist ?? '').trim() },
       });
+    },
+    navigateToTrack: (track) => {
+      // Track navigation lands on the album detail with the row highlighted;
+      // a track with no album falls back to its artist page (better than a
+      // dead end for loose singles).
+      const album = (track.album ?? '').trim();
+      if (album) {
+        set({
+          view: 'albums',
+          pendingNavigation: {
+            kind: 'album-with-track',
+            album,
+            albumArtist: (track.albumArtist ?? track.artist ?? '').trim(),
+            trackId: track.id ?? null,
+            trackTitle: (track.title ?? '').trim() || null,
+          },
+        });
+        return;
+      }
+      const artist = (track.artist ?? '').trim();
+      if (artist) get().navigateToArtist(artist);
     },
     consumePendingNavigation: () => set({ pendingNavigation: null }),
     toggleEq: () => set({ showEq: !get().showEq }),

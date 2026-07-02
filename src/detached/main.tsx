@@ -274,6 +274,66 @@ scrubEl.addEventListener('pointerup', finishScrub);
 scrubEl.addEventListener('pointercancel', finishScrub);
 scrubEl.addEventListener('blur', finishScrub);
 
+// Volume slider — the projector frames itself as "the player" when the main
+// window is alt-tabbed away, and a player you can't turn down isn't one. The
+// 'setVolume' transport command was already wired end-to-end; this is its UI.
+const volWrapEl = document.createElement('div');
+Object.assign(volWrapEl.style, {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '5px',
+});
+const volIconEl = document.createElement('span');
+volIconEl.textContent = '🔉';
+Object.assign(volIconEl.style, { fontSize: '12px', opacity: '0.78' });
+const volEl = document.createElement('input');
+volEl.type = 'range';
+volEl.min = '0';
+volEl.max = '2';
+volEl.step = '0.01';
+volEl.value = '0.75';
+volEl.title = 'Volume (0–200%)';
+volEl.setAttribute('aria-label', 'Volume');
+Object.assign(volEl.style, {
+  width: '72px',
+  pointerEvents: 'auto',
+  cursor: 'pointer',
+  accentColor: '#7aa8ff',
+});
+volWrapEl.append(volIconEl, volEl);
+
+let volDragging = false;
+let volSendTimer = 0;
+function sendVolume(): void {
+  const v = Number(volEl.value);
+  if (Number.isFinite(v)) {
+    void detachedBridge?.transportCommand?.('setVolume', v).catch(() => undefined);
+  }
+}
+volEl.addEventListener('pointerdown', () => {
+  volDragging = true;
+});
+// Live-but-throttled while dragging (one IPC per ~60ms, not per pointermove).
+volEl.addEventListener('input', () => {
+  if (volSendTimer) return;
+  volSendTimer = window.setTimeout(() => {
+    volSendTimer = 0;
+    sendVolume();
+  }, 60);
+});
+const finishVol = (): void => {
+  if (!volDragging) return;
+  volDragging = false;
+  if (volSendTimer) {
+    window.clearTimeout(volSendTimer);
+    volSendTimer = 0;
+  }
+  sendVolume();
+};
+volEl.addEventListener('pointerup', finishVol);
+volEl.addEventListener('pointercancel', finishVol);
+volEl.addEventListener('blur', finishVol);
+
 const fsBtn = makeButton('⛶', 'Toggle exclusive fullscreen (F11)', () => {
   toggleFullscreen();
 });
@@ -281,7 +341,7 @@ const closeBtn = makeButton('✕', 'Close the projector', () => {
   void detachedBridge?.close?.().catch(() => undefined);
 });
 
-rightEl.append(timeEl, scrubEl, fsBtn, closeBtn);
+rightEl.append(timeEl, scrubEl, volWrapEl, fsBtn, closeBtn);
 
 controlsEl.append(trackInfoEl, transportEl, rightEl);
 document.body.appendChild(controlsEl);
@@ -308,9 +368,23 @@ function hideControls(): void {
   }
 }
 
-let lastTransport: DetachedFramePayload['transport'] | null = null;
-function applyTransportState(transport: DetachedFramePayload['transport'] | undefined): void {
-  if (!transport) return;
+let lastTransport: Exclude<DetachedFramePayload['transport'], undefined | null> | null = null;
+function applyTransportState(transport: DetachedFramePayload['transport']): void {
+  if (!transport) {
+    // Explicit idle signal (queue cleared / playback fully stopped): reset the
+    // bar instead of freezing on the last track forever.
+    if (lastTransport === null) return;
+    lastTransport = null;
+    titleEl.textContent = '—';
+    artistEl.textContent = 'Nothing playing';
+    playBtn.textContent = '▶';
+    timeEl.textContent = '–:–– / –:––';
+    if (!scrubbing) {
+      scrubEl.max = '100';
+      scrubEl.value = '0';
+    }
+    return;
+  }
   lastTransport = transport;
   const title = transport.title || 'Unknown track';
   const artist = transport.artist || '';
@@ -327,6 +401,10 @@ function applyTransportState(transport: DetachedFramePayload['transport'] | unde
     scrubEl.value = String(Math.min(cur, dur));
   } else if (!scrubbing && dur <= 0) {
     scrubEl.value = '0';
+  }
+  if (!volDragging && Number.isFinite(transport.volume)) {
+    const mirrored = Math.max(0, Math.min(2, transport.volume));
+    if (Math.abs(Number(volEl.value) - mirrored) > 0.005) volEl.value = String(mirrored);
   }
 }
 
@@ -369,9 +447,25 @@ let rendererFailed = false;
 let overlay: ReactorOverlay | null = createReactorOverlay(overlayCanvas);
 
 // --- Scene overlay (the 25 audio-reactive scenes between field and events) -
+// Tracks the last applied rotation seed so a quality-driven recreate resumes
+// the same walk instead of resetting to the boot default.
+let lastSceneKey = 'detached';
 let sceneOverlay: SceneOverlay | null = sceneCanvas
-  ? createSceneOverlay(sceneCanvas, { quality: 'high', seedKey: 'detached' })
+  ? createSceneOverlay(sceneCanvas, { quality: 'high', seedKey: lastSceneKey })
   : null;
+
+// Mirror the main window's performance floor: on 'low' the scene layer is
+// skipped entirely (the projector previously ran it at hardcoded 'high'
+// forever, so the low-quality tier never actually reduced projector GPU
+// cost); on higher tiers it renders at the tier's internal resolution.
+function applySceneOverlayQuality(next: 'high' | 'medium' | 'low'): void {
+  if (!sceneCanvas) return;
+  sceneOverlay?.dispose();
+  sceneOverlay = null;
+  if (next !== 'low') {
+    sceneOverlay = createSceneOverlay(sceneCanvas, { quality: next, seedKey: lastSceneKey });
+  }
+}
 
 function dprCap(): number {
   return currentQuality === 'low' ? 1 : Math.min(window.devicePixelRatio || 1, 2);
@@ -450,6 +544,7 @@ const bcMountTimeout = window.setTimeout(() => {
 function applyQuality(next: 'high' | 'medium' | 'low'): void {
   if (next === currentQuality) return;
   currentQuality = next;
+  applySceneOverlayQuality(next);
   if (renderer && canvas) {
     try {
       renderer.dispose();
@@ -489,8 +584,9 @@ function handlePayload(payload: DetachedFramePayload): void {
   try {
     // Live transport state (track title, scrub, play/pause) for the floating
     // control bar — piggy-backed on the same 30Hz publish so no round-trip is
-    // ever needed.
-    if (payload.transport) applyTransportState(payload.transport);
+    // ever needed. `null` is the explicit idle signal; only `undefined` (key
+    // absent — producer had no opinion) is skipped.
+    if (payload.transport !== undefined) applyTransportState(payload.transport);
 
     // MilkDrop field: forward the pre-emphasized time-domain bytes. The iframe
     // runs its own rAF render loop and preset rotation — it only needs audio.
@@ -531,8 +627,19 @@ function renderGlLayers(): void {
   if (payload) {
     try {
       if (sceneOverlay) {
-        if (payload.trackId !== undefined) {
-          sceneOverlay.setSeedKey(`track-${payload.trackId ?? 'idle'}`);
+        // Prefer the producer's lineage-aware seed (track × visual-memory
+        // generation) so the projector's scene walk matches — and evolves
+        // with — the on-screen composition. Bare trackId is the fallback for
+        // payloads that predate the seed.
+        const seed =
+          payload.sceneSeed !== undefined
+            ? (payload.sceneSeed ?? 'detached')
+            : payload.trackId !== undefined
+              ? `track-${payload.trackId ?? 'idle'}`
+              : null;
+        if (seed) {
+          lastSceneKey = seed;
+          sceneOverlay.setSeedKey(seed);
         }
         sceneOverlay.render(payload.frame, payload.palette, payload.dtMs);
       }
@@ -564,7 +671,20 @@ requestAnimationFrame(renderGlLayers);
 // synchronous preset compile) just queue and replay — a bounded, transient
 // burst. Nothing in the producer→projector pipeline may depend on compositor
 // frames or timers.
+let framePort: MessagePort | null = null;
 function attachPort(port: MessagePort): void {
+  // A main-renderer reload while the projector stays open re-wires a fresh
+  // MessageChannelMain pair; close the superseded port instead of leaking one
+  // live onmessage closure per reload cycle.
+  if (framePort && framePort !== port) {
+    try {
+      framePort.onmessage = null;
+      framePort.close();
+    } catch {
+      /* ignore */
+    }
+  }
+  framePort = port;
   portAttached = true;
   port.onmessage = (msg: MessageEvent) => {
     const payload = msg.data as DetachedFramePayload | undefined;

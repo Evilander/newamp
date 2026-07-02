@@ -116,10 +116,13 @@ export function useDetachedVisualizer(): DetachedVisualizerControls {
   const close = useCallback(() => {
     if (!bridge) return;
     setBusy(true);
-    void bridge
-      .close()
-      .catch(() => undefined)
-      .finally(() => setBusy(false));
+    // Like open(), busy clears on the main process's event ('detached-viz:
+    // closed' → onClosed above), NOT when the close invoke resolves — the
+    // invoke returns as soon as window.close() is *called*, before the native
+    // window is destroyed, which briefly re-enabled the toggle against a
+    // stale isOpen. Safety timeout in case the broadcast never arrives.
+    void bridge.close().catch(() => setBusy(false));
+    window.setTimeout(() => setBusy(false), 3000);
   }, [bridge]);
 
   const moveToDisplay = useCallback(
