@@ -4,7 +4,7 @@ import { api } from '../../lib/api';
 import { formatDuration } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { TrackTable } from './LibraryView';
-import { ViewOnboarding } from '../ViewOnboarding';
+import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
 import { ArtistLink } from '../EntityLink';
 
 interface GeneratedMix {
@@ -18,6 +18,7 @@ interface GeneratedMix {
 const MIX_SIZE = 30;
 
 export function MixesView(): JSX.Element {
+  const help = useViewHelp();
   const [mixes, setMixes] = useState<GeneratedMix[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -165,10 +166,13 @@ export function MixesView(): JSX.Element {
           'Loved Signal / Heavy Rotation / Recently Played are fast paths back into your favorites.',
           'Click SAVE on any mix card to keep it as a normal playlist.',
         ]}
+        forceVisible={help.open}
+        onClose={help.close}
       />
       <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
-        <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
+        <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
           NewAmp Mixes
+          <HelpDot help={help} label="What are Mixes?" />
         </div>
         <button className="pxbtn" onClick={() => void refreshMixes()} disabled={loading}>
           {loading ? 'Building...' : 'Refresh mixes'}

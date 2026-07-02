@@ -55,6 +55,10 @@ import { hexPulse } from './hex-pulse';
 import { eyeOfStorm } from './eye-of-storm';
 import { pixelBloom } from './pixel-bloom';
 import { constellation } from './constellation';
+import { spiralGalaxy } from './spiral-galaxy';
+import { cityPulse } from './city-pulse';
+import { laserStorm } from './laser-storm';
+import { deepJelly } from './deep-jelly';
 
 export const SCENES: SceneDef[] = [
   starfieldWarp,
@@ -82,4 +86,8 @@ export const SCENES: SceneDef[] = [
   eyeOfStorm,
   pixelBloom,
   constellation,
+  spiralGalaxy,
+  cityPulse,
+  laserStorm,
+  deepJelly,
 ];

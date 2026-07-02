@@ -1085,6 +1085,9 @@ export interface NewAmpAPI {
   exportPlaylistFolder: (id: number) => Promise<PlaylistFolderExportResult | null>;
   exportTracksFolder: (input: ExportTracksFolderInput) => Promise<PlaylistFolderExportResult | null>;
   importPlaylistM3u: () => Promise<PlaylistM3uImportResult | null>;
+  exportLibraryMetadata: (
+    format: 'json' | 'csv',
+  ) => Promise<{ path: string; tracks: number; format: 'json' | 'csv' } | null>;
   captureVisualizerPng: (rect?: { x: number; y: number; width: number; height: number }) => Promise<string | null>;
   copyPngToClipboard: (dataUrl: string) => Promise<boolean>;
   saveCaptureBytes: (payload: { base64: string; defaultName: string; filterName: string; ext: string }) => Promise<string | null>;

@@ -3,6 +3,60 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.15.0] - 2026-07-02
+
+### Fixed
+
+- **The Windows tray icon renders.** Every frame inside `icon.ico` — including
+  the 16px one — was PNG-compressed, which Windows officially supports only
+  for the 256px frame; the notification area drew the white placeholder while
+  the taskbar (a different decode path) looked fine. The icon now ships
+  classic BMP frames at nine sizes, and the tray hands Windows the .ico path
+  so the shell picks the right frame for your DPI natively.
+- **You can actually move the projector now.** The detached visualizer is a
+  frameless window and had no drag region at all — it was literally immovable
+  by mouse, which also meant you couldn't drag it to the monitor you wanted
+  before going fullscreen. Moving the cursor now reveals a grab bar along the
+  top ("drag to move · F11 fullscreen") that appears and hides with the
+  control bar.
+- **Detached no longer costs two players.** Three compounding fixes for the
+  "suffers mightily when detached" report: (1) the main window's background
+  throttling stays ON while a projector runs — everything that matters
+  (producer, engine clock, bookkeeping) moved to timers in 1.14.0, so a
+  covered/minimized main window now stops burning GPU on UI nobody can see;
+  (2) the projector honors your visualizer performance tier instead of
+  running hardcoded maximum quality for everyone (Lite → light, 4K opt-in →
+  full; everyone else a balanced middle); (3) its render resolution is capped
+  by tier, so a 4K TV no longer gets full-DPR MilkDrop + scene shaders
+  unless you asked for exactly that.
+
+### Added
+
+- **Windows taskbar transport.** Hover the taskbar preview: previous /
+  play-pause / next buttons, live glyph state, no icon files involved. The
+  tray tooltip now names what's actually playing.
+- **Export your whole library.** Settings → Library → Export metadata writes
+  every tag plus your listening data (plays, ratings, loves, skips,
+  ReplayGain) as JSON or spreadsheet-ready CSV — audit your collection or
+  take it anywhere.
+- **Four new Eviland scenes** (29 total): Spiral Galaxy, City Pulse — a night
+  skyline that *is* the equalizer, Laser Storm, and Deep Jelly, a
+  bioluminescent breather for the calm tier.
+- **Eviland choreographs the drop.** When a section boundary lands with a
+  real energy jump, the scene fast-cuts instead of lazily crossfading, an
+  accent-white flash blows through and decays, and the accent layer surges
+  to full — an event, not a strobe (8s cooldown, never on boot).
+- **Every view can explain itself.** A quiet "?" next to Discover / Mixes /
+  Living Tags titles reopens the view's intro card any time — the answer to
+  "what is this?" no longer vanishes after first run. Sidebar entries gained
+  function-first tooltips ("Rules that keep your library tagged
+  automatically") instead of repeating their own names.
+- **The whole app sees the record sleeve.** Now Playing carries an ambient
+  wash — the current album art blurred into a color field breathing behind
+  the panels (pure CSS, respects reduced motion). The title bar's artist and
+  the fullscreen cinema overlay's artist/album are now links, closing out
+  the "band names and albums are always clickable" sweep.
+
 ## [1.14.0] - 2026-07-02
 
 ### Fixed

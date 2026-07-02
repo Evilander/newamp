@@ -45,6 +45,13 @@ export interface EvilandProducerUiState {
   /** Current track id (re-arms the director's section memory on change). */
   trackId: number | null;
   /**
+   * Render tier for the detached projector (derived from the user's
+   * visualizer prefs — see lib/vizPrefs). Pushed to the consumer on change;
+   * previously hardcoded 'high', which double-billed weak GPUs the moment
+   * both windows ran.
+   */
+  projectorQuality: 'high' | 'medium' | 'low';
+  /**
    * Live transport snapshot for the detached projector's floating control bar.
    * Null when nothing is playing (the projector renders an idle state).
    */
@@ -250,6 +257,8 @@ export function startEvilandProducer(
     if (paletteTick++ % 30 === 0) palette = readPalette();
 
     const ui = getUiState();
+    // Deduped inside the bus — only a real tier change reaches the consumer.
+    frameBus.setDetachedQuality(ui.projectorQuality);
     const setSceneSeed = (seed: string): void => {
       sceneSeed = seed;
     };
@@ -323,7 +332,7 @@ export function startEvilandProducer(
 
   const offConsumer = frameBus.onConsumerChange((hasDetached) => {
     if (hasDetached) {
-      frameBus.setDetachedQuality('high');
+      frameBus.setDetachedQuality(getUiState().projectorQuality);
       startLoop();
     } else {
       stopLoop();
@@ -343,7 +352,7 @@ export function startEvilandProducer(
   });
 
   if (frameBus.hasDetachedConsumer()) {
-    frameBus.setDetachedQuality('high');
+    frameBus.setDetachedQuality(getUiState().projectorQuality);
     startLoop();
   }
 

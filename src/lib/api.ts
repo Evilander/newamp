@@ -197,6 +197,7 @@ const stub: NewAmpAPI = {
   exportPlaylistFolder: async () => null,
   exportTracksFolder: async () => null,
   importPlaylistM3u: async () => null,
+  exportLibraryMetadata: async () => null,
   captureVisualizerPng: async () => null,
   copyPngToClipboard: async () => false,
   saveCaptureBytes: async () => null,
@@ -500,6 +501,8 @@ export const winctl = {
     window.winctl?.setCompactSize?.(size) ?? Promise.resolve(),
   setAlwaysOnTop: (on: boolean) => window.winctl?.setAlwaysOnTop(on) ?? Promise.resolve(),
   close: () => window.winctl?.close() ?? Promise.resolve(),
+  notifyPlayback: (state: { isPlaying: boolean; title: string | null; artist: string | null }) =>
+    window.winctl?.notifyPlayback?.(state),
   onState: (cb: (s: { maximized: boolean }) => void) =>
     window.winctl?.onState(cb) ?? (() => undefined),
 };

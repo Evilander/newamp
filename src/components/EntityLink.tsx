@@ -22,12 +22,16 @@ export function ArtistLink({
   title,
   color,
   children,
+  onBeforeNavigate,
 }: {
   artist: string;
   className?: string;
   title?: string;
   color?: string;
   children?: ReactNode;
+  /** Escape hatch for links inside overlays: close the overlay first so the
+   * navigation is actually visible (e.g. fullscreen viz, karaoke). */
+  onBeforeNavigate?: () => void;
 }): JSX.Element {
   if (isUnknown(artist)) {
     return <span className={className}>{children ?? artist}</span>;
@@ -41,6 +45,7 @@ export function ArtistLink({
       title={title ?? `Show all ${artist} albums in your library`}
       onClick={(event) => {
         event.stopPropagation();
+        onBeforeNavigate?.();
         usePlayerStore.getState().navigateToArtist(artist);
       }}
     >
@@ -102,6 +107,7 @@ export function AlbumLink({
   title,
   color,
   children,
+  onBeforeNavigate,
 }: {
   album: string;
   albumArtist: string;
@@ -109,6 +115,8 @@ export function AlbumLink({
   title?: string;
   color?: string;
   children?: ReactNode;
+  /** See ArtistLink.onBeforeNavigate. */
+  onBeforeNavigate?: () => void;
 }): JSX.Element {
   if (isUnknown(album)) {
     return <span className={className}>{children ?? album}</span>;
@@ -122,6 +130,7 @@ export function AlbumLink({
       title={title ?? `Show ${album} in Albums`}
       onClick={(event) => {
         event.stopPropagation();
+        onBeforeNavigate?.();
         usePlayerStore.getState().navigateToAlbum(album, albumArtist);
       }}
     >

@@ -354,17 +354,62 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// Grab bar: this window is frameless — without a drag region it literally
+// cannot be moved by mouse (you couldn't even drag it to the monitor you
+// wanted to fullscreen it on). A top strip appears with the controls and is
+// a native drag region; it disappears with them so the visuals stay primary.
+// Hidden in exclusive fullscreen, where there's nothing to drag.
+// NOTE: the OS owns mouse events over a drag region (double-click there
+// maximizes, per Windows convention) — the hint text advertises F11 instead.
+const dragBarEl = document.createElement('div');
+dragBarEl.setAttribute('data-newamp-detached-dragbar', '');
+Object.assign(dragBarEl.style, {
+  position: 'fixed',
+  top: '0',
+  left: '0',
+  right: '0',
+  height: '44px',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  font: '11px ui-monospace, Menlo, Consolas, monospace',
+  letterSpacing: '0.08em',
+  color: 'rgba(230,236,245,0.7)',
+  background: 'linear-gradient(to bottom, rgba(4,6,10,0.72), rgba(4,6,10,0.0))',
+  opacity: '0',
+  transition: 'opacity 240ms',
+  zIndex: '19',
+  cursor: 'grab',
+  userSelect: 'none',
+});
+dragBarEl.textContent = '⋮⋮   drag to move  ·  F11 fullscreen   ⋮⋮';
+document.body.appendChild(dragBarEl);
+
+type AppRegionStyle = CSSStyleDeclaration & { webkitAppRegion?: string };
 let controlsVisible = false;
+
+function updateDragBar(): void {
+  const active = controlsVisible && !isFullscreen;
+  dragBarEl.style.opacity = active ? '1' : '0';
+  // The drag region must be released when hidden — an invisible strip that
+  // still eats clicks would be a mystery dead zone at the top of the video.
+  (dragBarEl.style as AppRegionStyle).webkitAppRegion = active ? 'drag' : 'no-drag';
+  dragBarEl.style.pointerEvents = active ? 'auto' : 'none';
+}
+updateDragBar();
+
 function showControls(): void {
   if (!controlsVisible) {
     controlsVisible = true;
     controlsEl.style.opacity = '1';
+    updateDragBar();
   }
 }
 function hideControls(): void {
   if (controlsVisible) {
     controlsVisible = false;
     controlsEl.style.opacity = '0';
+    updateDragBar();
   }
 }
 
@@ -414,6 +459,7 @@ async function syncFullscreenState(): Promise<void> {
     isFullscreen = await detachedBridge.isFullscreen();
     fsBtn.textContent = isFullscreen ? '⛶' : '⛶'; // glyph stays — title carries the state
     fsBtn.title = isFullscreen ? 'Exit fullscreen (F11 / Esc)' : 'Enter exclusive fullscreen (F11)';
+    updateDragBar();
   } catch {
     /* projector closing */
   }
@@ -426,11 +472,15 @@ function toggleFullscreen(): void {
     .then((next) => {
       isFullscreen = next;
       fsBtn.title = next ? 'Exit fullscreen (F11 / Esc)' : 'Enter exclusive fullscreen (F11)';
+      updateDragBar();
     })
     .catch(() => undefined);
 }
 
-let currentQuality: 'high' | 'medium' | 'low' = 'high';
+// 'medium' is the common tier now (the producer pushes the user's real tier
+// with the first frame; 'high' is the explicit 4K opt-in) — starting here
+// avoids a wasted high-res scene-overlay build on most machines.
+let currentQuality: 'high' | 'medium' | 'low' = 'medium';
 
 // --- MilkDrop (butterchurn) field — flagship layer -------------------------
 let bcReady = false;
@@ -451,7 +501,7 @@ let overlay: ReactorOverlay | null = createReactorOverlay(overlayCanvas);
 // the same walk instead of resetting to the boot default.
 let lastSceneKey = 'detached';
 let sceneOverlay: SceneOverlay | null = sceneCanvas
-  ? createSceneOverlay(sceneCanvas, { quality: 'high', seedKey: lastSceneKey })
+  ? createSceneOverlay(sceneCanvas, { quality: 'medium', seedKey: lastSceneKey })
   : null;
 
 // Mirror the main window's performance floor: on 'low' the scene layer is
@@ -468,7 +518,13 @@ function applySceneOverlayQuality(next: 'high' | 'medium' | 'low'): void {
 }
 
 function dprCap(): number {
-  return currentQuality === 'low' ? 1 : Math.min(window.devicePixelRatio || 1, 2);
+  // Tier-scaled: the projector often lands on a 4K TV where full-DPR
+  // MilkDrop + scene shaders is exactly the "suffers mightily when detached"
+  // report. 'high' is the explicit 4K opt-in; everyone else renders at a
+  // resolution the compositor upscales imperceptibly for motion visuals.
+  if (currentQuality === 'low') return 1;
+  const dpr = window.devicePixelRatio || 1;
+  return currentQuality === 'medium' ? Math.min(dpr, 1.25) : Math.min(dpr, 2);
 }
 
 function fitLayers(): void {
@@ -789,6 +845,7 @@ window.addEventListener('keydown', (event) => {
       void detachedBridge.setFullscreen(false).then(() => {
         isFullscreen = false;
         fsBtn.title = 'Enter exclusive fullscreen (F11)';
+        updateDragBar();
       }).catch((err: unknown) => {
         console.error('[eviland-detached] setFullscreen(false) failed', err);
       });

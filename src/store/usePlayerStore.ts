@@ -9,7 +9,7 @@ import type {
   Track,
 } from '@shared/types';
 import { AudioEngine } from '../audio/engine';
-import { api, inElectron, toAudioUrl, DEFAULT_SETTINGS } from '../lib/api';
+import { api, inElectron, toAudioUrl, winctl, DEFAULT_SETTINGS } from '../lib/api';
 import { decode as decodeEvilandCode } from '../visualizer/eviland-randomizer';
 import {
   notifyPlayCompleted,
@@ -302,6 +302,22 @@ let lastHandoffKey: string | null = null;
 let lastPreparedHandoffKey: string | null = null;
 let lastStopAfterCurrentKey: string | null = null;
 let lastPlaybackErrorKey: string | null = null;
+
+// Shell integration (Windows taskbar thumbar + tray tooltip): push a playback
+// snapshot to the main process only when the (playing, track) pair actually
+// changes — the engine notifies at 10Hz during playback and the shell doesn't
+// need any of that.
+let lastShellPlaybackKey = '';
+function notifyShellPlayback(state: PlayerState): void {
+  const key = `${state.isPlaying ? 1 : 0}|${state.current?.id ?? 'none'}`;
+  if (key === lastShellPlaybackKey) return;
+  lastShellPlaybackKey = key;
+  winctl.notifyPlayback({
+    isPlaying: state.isPlaying,
+    title: state.current?.title ?? null,
+    artist: state.current?.artist ?? null,
+  });
+}
 let lastCueEndKey: string | null = null;
 let playbackErrorAdvanceTimer: number | null = null;
 
@@ -599,6 +615,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       maybeScrobbleToLastfm(get(), relativeTime, s.playing);
       schedulePersistPlaybackSession(get());
       persistPodcastProgress(get(), s.ended, s.ended);
+      notifyShellPlayback(get());
       const state = get();
       if (s.error) {
         const decision = resolvePlaybackErrorAdvance({

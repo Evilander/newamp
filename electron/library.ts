@@ -865,6 +865,54 @@ export class LibraryStore {
     return { tracks: t?.n ?? 0, albums: a?.n ?? 0, artists: r?.n ?? 0, duration: d?.d ?? 0 };
   }
 
+  /**
+   * Full library metadata dump for export (JSON/CSV) — audit your tags, feed
+   * a spreadsheet, or migrate players without losing listening data.
+   * Everything the library knows per track EXCEPT internal caches (art
+   * hashes, DNA vectors, visual memory).
+   */
+  exportTrackMetadata(): Array<{
+    path: string;
+    title: string;
+    artist: string;
+    album: string;
+    albumArtist: string;
+    trackNo: number | null;
+    discNo: number | null;
+    year: number | null;
+    genre: string | null;
+    duration: number | null;
+    bitrate: number | null;
+    sampleRate: number | null;
+    size: number | null;
+    loved: number;
+    rating: number;
+    ratingScore: number | null;
+    playCount: number;
+    lastPlayed: number | null;
+    skipCount: number;
+    bpm: number | null;
+    key: string | null;
+    replaygainTrackDb: number | null;
+    replaygainAlbumDb: number | null;
+  }> {
+    return this.many(
+      `SELECT
+         path, title, artist, album,
+         album_artist AS albumArtist,
+         track_no AS trackNo, disc_no AS discNo, year, genre,
+         duration, bitrate, sample_rate AS sampleRate, size,
+         loved, rating, rating_score AS ratingScore,
+         play_count AS playCount, last_played AS lastPlayed,
+         skip_count AS skipCount,
+         bpm, key,
+         replaygain_track_db AS replaygainTrackDb,
+         replaygain_album_db AS replaygainAlbumDb
+       FROM tracks
+       ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE`,
+    );
+  }
+
   getLibraryHealth(): LibraryHealth {
     if (this.libraryHealthCache) return this.libraryHealthCache;
     const rows = this.many<LibraryHealthRow>(

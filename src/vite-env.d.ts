@@ -48,6 +48,7 @@ declare global {
       setCompactSize: (size: { width: number; height: number }) => Promise<void>;
       setAlwaysOnTop: (on: boolean) => Promise<void>;
       close: () => Promise<void>;
+      notifyPlayback: (state: { isPlaying: boolean; title: string | null; artist: string | null }) => void;
       onState: (cb: (s: { maximized: boolean }) => void) => () => void;
     };
     detachedViz: DetachedVizBridge;

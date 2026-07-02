@@ -16,6 +16,7 @@ import { useAdaptiveQuality } from './lib/adaptiveQuality';
 import { useReducedMotion } from './hooks/useReducedMotion';
 import { startResonance, stopResonance, pokeResonance, type ResonanceOpts } from './lib/resonance';
 import { startEvilandProducer } from './visualizer/eviland-producer';
+import { projectorQualityTier } from './lib/vizPrefs';
 
 const EqPanel = lazy(() => import('./components/EqPanel').then((module) => ({ default: module.EqPanel })));
 const CompactPlayer = lazy(() => import('./components/CompactPlayer').then((module) => ({ default: module.CompactPlayer })));
@@ -200,6 +201,7 @@ export default function App(): JSX.Element {
         nonce: s.evilandConfigNonce,
         waveMode: s.evilandWaveMode,
         trackId: s.current?.id ?? null,
+        projectorQuality: projectorQualityTier(),
         transport,
       };
     });

@@ -376,9 +376,25 @@ export function NowPlayingView(): JSX.Element {
   return (
     <div
       data-newamp-now-playing
-      className="flex h-full flex-col overflow-hidden"
-      style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+      className="relative flex h-full flex-col overflow-hidden"
+      // isolation: the art wash sits at z-index -1; isolating the stacking
+      // context keeps it INSIDE this view (above our transparent root, below
+      // every panel) instead of sinking beneath the app background.
+      style={{ fontFamily: 'var(--font-mono)', fontSize: 12, isolation: 'isolate' }}
     >
+      {/* Ambient art wash: the album sleeve, blurred to a color field, breathes
+          behind the panels — the whole view carries the record's light. Keyed
+          on the URL so a track change crossfades in the new wash. Pure CSS
+          (no per-frame work); panels stay fully legible above it. */}
+      {artUrl ? (
+        <div
+          key={artUrl}
+          aria-hidden
+          data-newamp-art-wash
+          className="newamp-art-wash"
+          style={{ backgroundImage: `url(${JSON.stringify(artUrl)})` }}
+        />
+      ) : null}
       {/* --- Top status strip --- */}
       <div
         className="flex items-center justify-between px-4 text-[10px] uppercase tracking-[0.08em]"

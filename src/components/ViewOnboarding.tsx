@@ -6,6 +6,12 @@ export interface ViewOnboardingProps {
   lede: string;
   bullets: string[];
   cta?: string;
+  /**
+   * Controlled re-open: when true the card renders even after dismissal (the
+   * HelpDot "?" path), and "Got it" calls onClose instead of only persisting.
+   */
+  forceVisible?: boolean;
+  onClose?: () => void;
 }
 
 const STORAGE_PREFIX = 'newamp:onboarding:v1:';
@@ -35,14 +41,24 @@ function writeDismissed(viewId: string): void {
 /**
  * Inline onboarding card that appears the first time a user opens a view.
  * Dismissed state persists per viewId so once the user understands what
- * Discover / Mixes / Living Tags are, the card stays hidden.
+ * Discover / Mixes / Living Tags are, the card stays hidden — but it is
+ * never gone for good: any view can mount a HelpDot next to its title that
+ * re-opens this card on demand (forceVisible).
  *
  * Renders nothing once dismissed, so it's safe to mount at the top of any
  * view without affecting the steady-state layout.
  */
-export function ViewOnboarding({ viewId, title, lede, bullets, cta }: ViewOnboardingProps): JSX.Element | null {
+export function ViewOnboarding({
+  viewId,
+  title,
+  lede,
+  bullets,
+  cta,
+  forceVisible,
+  onClose,
+}: ViewOnboardingProps): JSX.Element | null {
   const [dismissed, setDismissed] = useState(() => readDismissed(viewId));
-  if (dismissed) return null;
+  if (dismissed && !forceVisible) return null;
   return (
     <section
       className="view-onboarding"
@@ -69,11 +85,53 @@ export function ViewOnboarding({ viewId, title, lede, bullets, cta }: ViewOnboar
           onClick={() => {
             writeDismissed(viewId);
             setDismissed(true);
+            onClose?.();
           }}
         >
           Got it
         </button>
       </footer>
     </section>
+  );
+}
+
+/**
+ * The "?" affordance for view titles. Drops next to any header and toggles
+ * the view's ViewOnboarding card, so "what is this view?" always has a
+ * one-click answer — not just on first run. Render the card wherever the
+ * view wants it:
+ *
+ *   const help = useViewHelp();
+ *   <HelpDot help={help} label="About Discover" />
+ *   <ViewOnboarding {...content} forceVisible={help.open} onClose={help.close} />
+ */
+export function useViewHelp(): { open: boolean; close: () => void; toggle: () => void } {
+  const [open, setOpen] = useState(false);
+  return {
+    open,
+    close: () => setOpen(false),
+    toggle: () => setOpen((v) => !v),
+  };
+}
+
+export function HelpDot({
+  help,
+  label,
+}: {
+  help: { open: boolean; toggle: () => void };
+  label: string;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      className="view-help-dot"
+      data-newamp-view-help
+      aria-label={label}
+      aria-expanded={help.open}
+      title={label}
+      onClick={help.toggle}
+    >
+      ?
+    </button>
   );
 }
