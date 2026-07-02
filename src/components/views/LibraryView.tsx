@@ -1342,6 +1342,7 @@ export function TrackTable({
   onMetadataLookup,
   onBulkMetadataSaved,
   virtualWindow,
+  highlightTrack,
 }: {
   tracks: Track[];
   currentId: number | null;
@@ -1359,6 +1360,12 @@ export function TrackTable({
   onBulkMetadataSaved?: (tracks: Track[]) => void;
   /** Optional virtual window from useVirtualRows; omit to render all rows. */
   virtualWindow?: { startIndex: number; endIndex: number; topPad: number; bottomPad: number };
+  /**
+   * One-shot "find this row" affordance (track navigation / search landings):
+   * scrolls the matching row into view and flashes it. Matched by id first,
+   * then by exact title.
+   */
+  highlightTrack?: { id: number | null; title: string | null } | null;
 }): JSX.Element {
   const storeToggleLove = usePlayerStore((s) => s.toggleLove);
   const storeSetTrackRating = usePlayerStore((s) => s.setTrackRating);
@@ -1421,6 +1428,49 @@ export function TrackTable({
       cancelled = true;
     };
   }, []);
+
+  // Scroll-to + flash for track navigation. The rows are memoized and carry
+  // data-track-id/data-track-title already, so this is a scoped DOM effect
+  // rather than a prop threaded through every LibraryRow: find the row,
+  // scroll it into view, arm the CSS flash animation, disarm after it plays.
+  const tableRef = useRef<HTMLTableElement | null>(null);
+  useEffect(() => {
+    if (!highlightTrack || (highlightTrack.id == null && !highlightTrack.title)) return undefined;
+    let disposed = false;
+    let clearTimer = 0;
+    const retryTimer = { id: 0 };
+    const findRow = (): HTMLElement | null => {
+      const root = tableRef.current;
+      if (!root) return null;
+      if (highlightTrack.id != null) {
+        const byId = root.querySelector<HTMLElement>(`tr[data-track-id="${highlightTrack.id}"]`);
+        if (byId) return byId;
+      }
+      if (highlightTrack.title) {
+        const safe = highlightTrack.title.replace(/"/g, '\\"');
+        return root.querySelector<HTMLElement>(`tr[data-track-title="${safe}"]`);
+      }
+      return null;
+    };
+    const apply = (attempt: number): void => {
+      if (disposed) return;
+      const row = findRow();
+      if (!row) {
+        // Rows may still be mounting (album tracks load async) — retry once.
+        if (attempt < 2) retryTimer.id = window.setTimeout(() => apply(attempt + 1), 350);
+        return;
+      }
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      row.setAttribute('data-newamp-track-highlight', '');
+      clearTimer = window.setTimeout(() => row.removeAttribute('data-newamp-track-highlight'), 2600);
+    };
+    apply(0);
+    return () => {
+      disposed = true;
+      if (retryTimer.id) window.clearTimeout(retryTimer.id);
+      if (clearTimer) window.clearTimeout(clearTimer);
+    };
+  }, [highlightTrack, tracks]);
 
   useEffect(() => {
     setSelectedIds((current) => {
@@ -1897,6 +1947,7 @@ export function TrackTable({
         </div>
       )}
       <table
+        ref={tableRef}
         className="table-fixed text-[12px]"
         style={{
           fontFamily: 'var(--font-mono)',

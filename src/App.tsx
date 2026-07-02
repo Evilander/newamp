@@ -191,6 +191,7 @@ export default function App(): JSX.Element {
             currentTime: s.currentTime,
             duration: s.duration,
             isPlaying: s.isPlaying,
+            volume: s.volume,
           }
         : null;
       return {

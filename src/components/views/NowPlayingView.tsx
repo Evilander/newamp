@@ -3,7 +3,7 @@
 // LRC lyrics. Top status strip carries hex badge + track stats. Everything
 // pulls live state from the audio engine.
 
-import { memo, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Fragment, memo, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { usePlayerStore, engine } from '../../store/usePlayerStore';
 import { fetchLyrics, parseLrc, type LrcLine } from '../../api/lrclib';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
@@ -13,6 +13,7 @@ import { api, winctl } from '../../lib/api';
 import { aiAssistSummary } from '../../lib/aiAssist';
 import { musicEntitySearchText, wikipediaSearchUrl } from '../../lib/wiki';
 import { ScoreRating } from '../ScoreRating';
+import { ArtistLink, AlbumLink, TrackLink } from '../EntityLink';
 import { LinerNotesPanel } from '../LinerNotesPanel';
 import { FormatBadges } from '../FormatBadges';
 import { classifyAudioQuality } from '@shared/audio-quality';
@@ -428,10 +429,20 @@ export function NowPlayingView(): JSX.Element {
           className="flex flex-col overflow-hidden"
           style={{ background: 'var(--panel)', borderRight: '1px solid var(--line)' }}
         >
-          <button
-            type="button"
+          {/* role=button div (not <button>): the credit overlay below nests
+              real ArtistLink/AlbumLink buttons, and interactive elements may
+              not nest inside a native button. */}
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => setFs(true)}
-            className="newamp-now-art relative shrink-0"
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                setFs(true);
+              }
+            }}
+            className="newamp-now-art relative shrink-0 cursor-pointer"
             data-newamp-open-visualizer
             style={{
               background: 'var(--panel-2)',
@@ -483,13 +494,27 @@ export function NowPlayingView(): JSX.Element {
                 className="mb-1 text-[9px] uppercase tracking-[0.1em]"
                 style={{ color: 'var(--ink-2)' }}
               >
-                {current.year ?? '—'} · {current.albumArtist || current.artist}
+                {current.year ?? '—'} ·{' '}
+                <ArtistLink
+                  artist={current.albumArtist || current.artist}
+                  color="var(--ink-2)"
+                  className="pointer-events-auto"
+                />
               </div>
               <div className="text-[13px] font-bold" style={{ color: 'var(--ink)' }}>
-                {current.album || 'Unknown Album'}
+                {current.album ? (
+                  <AlbumLink
+                    album={current.album}
+                    albumArtist={current.albumArtist || current.artist}
+                    color="var(--ink)"
+                    className="pointer-events-auto"
+                  />
+                ) : (
+                  'Unknown Album'
+                )}
               </div>
             </div>
-          </button>
+          </div>
 
           {/* Queue */}
           <div className="flex-1 overflow-y-auto">
@@ -1148,10 +1173,20 @@ function QueueRow({
   onPlay: () => void;
 }): JSX.Element {
   return (
-    <button
-      type="button"
+    // role=button div (not <button>): the artist is a real ArtistLink button
+    // and interactive elements may not nest inside a native button. Row click
+    // still plays; the artist link stops propagation and navigates.
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onPlay}
       onDoubleClick={onPlay}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onPlay();
+        }
+      }}
       className="grid w-full cursor-pointer items-center gap-2 px-[14px] py-[7px] text-left transition-colors"
       style={{
         gridTemplateColumns: '20px 1fr auto',
@@ -1171,6 +1206,12 @@ function QueueRow({
         title={`${track.title} — ${track.artist}`}
       >
         {track.title}
+        {track.artist ? (
+          <span style={{ color: 'var(--ink-2)' }}>
+            {' · '}
+            <ArtistLink artist={track.artist} color="var(--ink-2)" />
+          </span>
+        ) : null}
       </span>
       <span
         className="text-[10px] tabular-nums"
@@ -1178,7 +1219,7 @@ function QueueRow({
       >
         {track.duration ? formatTime(track.duration) : '—'}
       </span>
-    </button>
+    </div>
   );
 }
 
@@ -1688,7 +1729,18 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
       <div className="album-context-grid">
         <div>
           <span>Credits from tags</span>
-          <strong>{creditNames.length ? creditNames.join(' / ') : deferredTrack.albumArtist || deferredTrack.artist}</strong>
+          <strong>
+            {creditNames.length ? (
+              creditNames.map((name, i) => (
+                <Fragment key={name}>
+                  {i > 0 && ' / '}
+                  <ArtistLink artist={name} color="inherit" />
+                </Fragment>
+              ))
+            ) : (
+              <ArtistLink artist={deferredTrack.albumArtist || deferredTrack.artist} color="inherit" />
+            )}
+          </strong>
         </div>
         <div>
           <span>Release notes</span>
@@ -1698,7 +1750,14 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
           <span>Same-year in your library</span>
           <strong>
             {sameYearAlbums.length
-              ? sameYearAlbums.map((item) => `${item.albumArtist} - ${item.album} (${item.year})`).join(' / ')
+              ? sameYearAlbums.map((item, i) => (
+                  <Fragment key={`${item.albumArtist}-${item.album}`}>
+                    {i > 0 && ' / '}
+                    <ArtistLink artist={item.albumArtist} color="inherit" /> -{' '}
+                    <AlbumLink album={item.album} albumArtist={item.albumArtist} color="inherit" />
+                    {item.year != null ? ` (${item.year})` : ''}
+                  </Fragment>
+                ))
               : albumYear ? `No other local albums tagged ${albumYear}.` : 'Add release years to compare local era matches.'}
           </strong>
         </div>
@@ -1706,7 +1765,18 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
 
       <div className="album-context-insights" data-newamp-album-context-insights>
         <AlbumInsight label="Album shape" value={albumShape} />
-        <AlbumInsight label="Bookends" value={opener && closer ? `${opener.title} / ${closer.title}` : 'Track order is not tagged yet.'} />
+        <AlbumInsight
+          label="Bookends"
+          value={
+            opener && closer ? (
+              <>
+                <TrackLink track={opener} color="inherit" /> / <TrackLink track={closer} color="inherit" />
+              </>
+            ) : (
+              'Track order is not tagged yet.'
+            )
+          }
+        />
         <AlbumInsight
           label="Your album signal"
           value={
@@ -1717,15 +1787,33 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
                 : `unrated / ${lovedCount} loved / ${totalPlays.toLocaleString()} plays`
           }
         />
-        <AlbumInsight label="Longest cut" value={longestTrack ? `${longestTrack.title} (${formatTime(longestTrack.duration ?? 0)})` : 'Duration tags are missing.'} />
+        <AlbumInsight
+          label="Longest cut"
+          value={
+            longestTrack ? (
+              <>
+                <TrackLink track={longestTrack} color="inherit" /> ({formatTime(longestTrack.duration ?? 0)})
+              </>
+            ) : (
+              'Duration tags are missing.'
+            )
+          }
+        />
       </div>
 
       {albumTracks.length > 1 && (
         <ol className="album-context-tracklist">
-          {albumTracks.slice(0, 10).map((item) => (
-            <li key={item.id}>
+          {albumTracks.slice(0, 10).map((item, itemIndex) => (
+            <li
+              key={item.id}
+              onDoubleClick={() => void usePlayerStore.getState().playQueue(albumTracks, itemIndex)}
+              title={`Double-click to play "${item.title}"`}
+              style={{ cursor: 'pointer' }}
+            >
               <span>{item.trackNo ?? '-'}</span>
-              <strong>{item.title}</strong>
+              <strong>
+                <TrackLink track={item} color="inherit" />
+              </strong>
               <em>{item.duration ? formatTime(item.duration) : '--:--'}</em>
             </li>
           ))}
@@ -1735,7 +1823,7 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
   );
 });
 
-function AlbumInsight({ label, value }: { label: string; value: string }): JSX.Element {
+function AlbumInsight({ label, value }: { label: string; value: ReactNode }): JSX.Element {
   return (
     <div>
       <span>{label}</span>
@@ -1919,8 +2007,12 @@ const SoundsLikePanel = memo(function SoundsLikePanel({ trackId }: { trackId: nu
             <span className="font-mono" style={{ color: 'var(--muted)', minWidth: 18 }}>
               {String(idx + 1).padStart(2, '0')}
             </span>
-            <span className="truncate font-bold" style={{ color: 'var(--ink)' }}>{row.track.title}</span>
-            <span className="truncate" style={{ color: 'var(--muted)' }}>· {row.track.artist}</span>
+            <span className="truncate font-bold" style={{ color: 'var(--ink)' }}>
+              <TrackLink track={row.track} color="var(--ink)" />
+            </span>
+            <span className="truncate" style={{ color: 'var(--muted)' }}>
+              · <ArtistLink artist={row.track.artist} color="var(--muted)" />
+            </span>
             <span className="ml-auto tabular-nums" style={{ color: 'var(--accent)' }}>
               {Math.round(row.score * 100)}%
             </span>

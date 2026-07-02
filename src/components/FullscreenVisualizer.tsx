@@ -223,6 +223,10 @@ export function FullscreenVisualizer(): JSX.Element {
   // MediaRecorder code path for non-Eviland presets stays untouched.
   const evilandRecorderRef = useRef<CanvasRecorder | null>(null);
   const evilandRecorderAudioRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  // Tears down the eviland-live layer compositor (rAF loop + per-layer
+  // captureStream videos) when its recording stops. Null when the active
+  // recording isn't composited.
+  const evilandCompositorStopRef = useRef<(() => void) | null>(null);
   const levelMeterRef = useRef<HTMLSpanElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   // Eviland popover scratch state: paste-input value, decode-failure flash,
@@ -607,6 +611,8 @@ export function FullscreenVisualizer(): JSX.Element {
       }
       evilandRecorderRef.current = null;
     }
+    evilandCompositorStopRef.current?.();
+    evilandCompositorStopRef.current = null;
     const audioDest = evilandRecorderAudioRef.current;
     if (audioDest) {
       try { engine.visualizerNode.disconnect(audioDest); } catch { /* ignore */ }
@@ -689,9 +695,10 @@ export function FullscreenVisualizer(): JSX.Element {
   // for Butterchurn that's the canvas inside its iframe) to a WebM. For the
   // Eviland preset we use createCanvasRecorder (vp9/opus, 60fps, ~12 Mbps,
   // engine audio muxed via a parallel MediaStreamAudioDestinationNode on the
-  // already-parallel visualizerNode tap). For every other preset we keep the
-  // legacy 30fps WebM MediaRecorder path so the rest of the visualizers
-  // continue to record exactly as before.
+  // already-parallel visualizerNode tap). Eviland Live records a live
+  // COMPOSITE of its full layer stack (MilkDrop field + scene overlay +
+  // reactor events) so the clip matches what's on screen. Every other preset
+  // keeps the legacy 30fps WebM MediaRecorder path.
   const toggleRecord = (): void => {
     if (recording) {
       if (evilandRecorderRef.current) {
@@ -699,6 +706,8 @@ export function FullscreenVisualizer(): JSX.Element {
         const audioDest = evilandRecorderAudioRef.current;
         // Stop is async — clear the refs after the blob resolves so a quick
         // toggle-back doesn't try to reuse a torn-down recorder.
+        evilandCompositorStopRef.current?.();
+        evilandCompositorStopRef.current = null;
         void rec.stop()
           .then(async (blob) => {
             evilandRecorderRef.current = null;
@@ -770,6 +779,138 @@ export function FullscreenVisualizer(): JSX.Element {
         rec.start(audioStream);
       } catch (err) {
         console.error('[newamp] eviland recorder start failed:', err);
+        const dest = evilandRecorderAudioRef.current;
+        if (dest) {
+          try { engine.visualizerNode.disconnect(dest); } catch { /* ignore */ }
+          evilandRecorderAudioRef.current = null;
+        }
+        flashRecordError(err, 'Could not start recording.');
+        return;
+      }
+      evilandRecorderRef.current = rec;
+      setRecording(true);
+      return;
+    }
+
+    if (activePreset === 'eviland-live') {
+      // Eviland Live is a LAYERED composition — MilkDrop field (iframe),
+      // scene overlay, reactor events. Recording only the iframe's canvas
+      // (the old generic path) silently produced clips of stock MilkDrop with
+      // NewAmp's two signature layers missing. Composite all layers into one
+      // offscreen canvas and record that. WebGL layers are pulled through
+      // captureStream()→<video> (reliable regardless of preserveDrawingBuffer
+      // — drawImage on a WebGL canvas whose buffer was already composited can
+      // read transparent black); the 2D reactor canvas draws directly.
+      const root = rootRef.current;
+      const iframe = root?.querySelector('iframe') as HTMLIFrameElement | null;
+      const bcCanvas = iframe?.contentDocument?.getElementById('bc') as HTMLCanvasElement | null;
+      const baseCanvas = root?.querySelector('canvas[data-newamp-visualizer-canvas]') as HTMLCanvasElement | null;
+      const sceneCanvas = root?.querySelector('canvas[data-newamp-scene-overlay]') as HTMLCanvasElement | null;
+      const reactorCanvas = root?.querySelector('canvas[data-newamp-reactor-overlay]') as HTMLCanvasElement | null;
+      const field = bcCanvas ?? baseCanvas; // 2D fallback painter when MilkDrop failed
+      if (!field || typeof field.captureStream !== 'function') {
+        flashRecordError(null, 'Visualizer is not ready yet — try again in a moment.');
+        return;
+      }
+
+      const w = Math.max(2, field.width);
+      const h = Math.max(2, field.height);
+      const compositor = document.createElement('canvas');
+      compositor.width = w;
+      compositor.height = h;
+      const ctx = compositor.getContext('2d');
+      if (!ctx) {
+        flashRecordError(null, 'Could not start recording.');
+        return;
+      }
+
+      const cleanups: Array<() => void> = [];
+      const layerVideo = (source: HTMLCanvasElement): HTMLVideoElement | null => {
+        try {
+          const stream = source.captureStream(60);
+          const video = document.createElement('video');
+          video.muted = true;
+          video.srcObject = stream;
+          void video.play().catch(() => undefined);
+          cleanups.push(() => {
+            try {
+              video.pause();
+              video.srcObject = null;
+              for (const track of stream.getTracks()) track.stop();
+            } catch {
+              /* teardown best-effort */
+            }
+          });
+          return video;
+        } catch {
+          return null;
+        }
+      };
+      const fieldVideo = layerVideo(field);
+      const sceneVideo = sceneCanvas ? layerVideo(sceneCanvas) : null;
+      if (!fieldVideo) {
+        for (const fn of cleanups) fn();
+        flashRecordError(null, 'Could not capture the visualizer canvas — try again once it is painting.');
+        return;
+      }
+
+      let compositing = true;
+      const drawLayer = (video: HTMLVideoElement | null): void => {
+        if (video && video.readyState >= 2) {
+          try {
+            ctx.drawImage(video, 0, 0, w, h);
+          } catch {
+            /* layer mid-resize — skip this frame */
+          }
+        }
+      };
+      const paint = (): void => {
+        if (!compositing) return;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, w, h);
+        drawLayer(fieldVideo);
+        drawLayer(sceneVideo);
+        if (reactorCanvas) {
+          try {
+            ctx.drawImage(reactorCanvas, 0, 0, w, h);
+          } catch {
+            /* 2D layer mid-resize */
+          }
+        }
+        requestAnimationFrame(paint);
+      };
+      requestAnimationFrame(paint);
+      evilandCompositorStopRef.current = () => {
+        compositing = false;
+        for (const fn of cleanups) fn();
+      };
+
+      let rec: CanvasRecorder;
+      try {
+        rec = createCanvasRecorder(compositor, { fps: 60, videoBitsPerSecond: 12_000_000 });
+      } catch (err) {
+        console.error('[newamp] eviland-live recorder construction failed:', err);
+        evilandCompositorStopRef.current?.();
+        evilandCompositorStopRef.current = null;
+        flashRecordError(err, 'Could not start recording.');
+        return;
+      }
+      let audioStream: MediaStream | undefined;
+      try {
+        const dest = engine.ctx.createMediaStreamDestination();
+        engine.visualizerNode.connect(dest);
+        evilandRecorderAudioRef.current = dest;
+        audioStream = dest.stream;
+      } catch (err) {
+        console.warn('[newamp] eviland-live recorder audio tap failed (recording video-only):', err);
+        evilandRecorderAudioRef.current = null;
+      }
+      try {
+        rec.start(audioStream);
+      } catch (err) {
+        console.error('[newamp] eviland-live recorder start failed:', err);
+        evilandCompositorStopRef.current?.();
+        evilandCompositorStopRef.current = null;
         const dest = evilandRecorderAudioRef.current;
         if (dest) {
           try { engine.visualizerNode.disconnect(dest); } catch { /* ignore */ }

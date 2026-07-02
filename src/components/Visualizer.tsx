@@ -20,7 +20,8 @@ import {
   decode as decodeEvilandConfig,
 } from '../visualizer/eviland-randomizer';
 import type { OperatorConfig, WaveMode } from '../visualizer/eviland-operators';
-import { type MemoryBridge } from '../visualizer/eviland-memory-bridge';
+import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from '../visualizer/eviland-memory-bridge';
+import { blendPaletteWithArt, extractArtPalette } from '../visualizer/art-palette';
 import {
   publishActiveBridge,
   acquireBridgeForTrack,
@@ -237,13 +238,28 @@ export function Visualizer({
         : null;
       let overlay: ReactorOverlay | null = null;
       let overlayLastNow = 0;
-      // Palette for the overlay events — read once from the theme (the MilkDrop
-      // field below carries the dominant color; this just tints the events).
-      const ovPalette = {
+      // Palette for the overlay events — theme base read once, then blended
+      // per-track with the album art's dominant colors (async, best-effort)
+      // so scenes and reactor events glow in the sleeve's colors. The
+      // MilkDrop field below keeps its own preset palette.
+      const themePalette = {
         accent: parseRgbVec(getCssVar('--accent')),
         dark: parseRgbVec(getCssVar('--accent-dim') || getCssVar('--accent')),
         light: parseRgbVec(getCssVar('--ink') || '#ffffff'),
         bg: parseRgbVec(getCssVar('--bg') || '#05060a'),
+      };
+      let ovPalette = themePalette;
+      let artTrackId: number | null | undefined = undefined;
+      const refreshArtPalette = (): void => {
+        const tid = usePlayerStore.getState().current?.id ?? null;
+        if (tid === artTrackId) return;
+        artTrackId = tid;
+        ovPalette = themePalette;
+        if (tid == null) return;
+        const captured = tid;
+        void extractArtPalette(api.getArtUrl(tid)).then((art) => {
+          if (artTrackId === captured && art) ovPalette = blendPaletteWithArt(themePalette, art);
+        });
       };
       if (liveMode && overlayCanvasRef.current) {
         overlay = createReactorOverlay(overlayCanvasRef.current);
@@ -260,6 +276,30 @@ export function Visualizer({
           seedKey: `track-${usePlayerStore.getState().current?.id ?? 'idle'}`,
         });
       }
+      // Lineage-aware scene seed. The bare `track-<id>` key applies instantly
+      // on track change; a read-only bridge (same pattern as the headless
+      // producer — loadOrSeed then dispose, never observe/flush, so the
+      // eviland WebGL branch stays the sole writer) upgrades it to
+      // `track-<id>::g<gen>-r<rootSeed>` when the track has a persisted plan.
+      // Result: a remembered song's scene rotation evolves with its visual
+      // generation, matching the projector byte-for-byte.
+      let sceneSeedTrackId: number | null | undefined = undefined;
+      let sceneSeedValue = 'idle';
+      const refreshSceneSeed = (): void => {
+        const tid = usePlayerStore.getState().current?.id ?? null;
+        if (tid === sceneSeedTrackId) return;
+        sceneSeedTrackId = tid;
+        sceneSeedValue = sceneSeedForTrack(tid, null) ?? 'idle';
+        if (tid == null) return;
+        const captured = tid;
+        const readOnlyBridge = createMemoryBridge({ trackId: tid, api });
+        void readOnlyBridge.loadOrSeed().then((plan) => {
+          if (sceneSeedTrackId === captured && plan) {
+            sceneSeedValue = sceneSeedForTrack(captured, plan) ?? sceneSeedValue;
+          }
+          void readOnlyBridge.flushAndDispose('manual');
+        });
+      };
 
       const updateOverlay = (now: number): void => {
         if (!overlay || !ovReactor || !ovFreq || !ovOnsetFreq || !ovLeftFreq || !ovRightFreq) return;
@@ -278,6 +318,7 @@ export function Visualizer({
         engine.getRightFreqData(ovRightFreq);
         const dt = overlayLastNow ? now - overlayLastNow : 16.7;
         overlayLastNow = now;
+        refreshArtPalette();
         const frame = ovReactor.analyze(ovFreq, ovOnsetFreq, ovLeftFreq, ovRightFreq, dt, now);
         overlay.render(frame, ovPalette, dt);
         if (sceneOverlay) {
@@ -293,10 +334,11 @@ export function Visualizer({
               sceneOverlay.resize(cssW, cssH, odpr);
             }
           }
-          // Re-seed on track change so the scene walk is per-track (and thus
-          // per user-history once the lineage evolves the look). No-op when
-          // unchanged.
-          sceneOverlay.setSeedKey(`track-${usePlayerStore.getState().current?.id ?? 'idle'}`);
+          // Re-seed on track change so the scene walk is per-track and
+          // lineage-aware (evolves with the track's visual-memory
+          // generation). No-op when unchanged.
+          refreshSceneSeed();
+          sceneOverlay.setSeedKey(sceneSeedValue);
           sceneOverlay.render(frame, ovPalette, dt);
         }
       };
@@ -692,6 +734,11 @@ export function Visualizer({
       let lastNow = 0;
       if (engine.ctx.state === 'suspended') void engine.ctx.resume().catch(() => {});
 
+      // Hoisted out of the rAF loop (getComputedStyle forces a style recalc);
+      // refreshed ~2x/sec so theme changes still land.
+      let accentVec = parseRgbVec(getCssVar('--accent'));
+      let accentTick = 0;
+
       const frame = (now: number) => {
         if (canPaint(now)) {
           const node = canvasRef.current;
@@ -708,9 +755,10 @@ export function Visualizer({
           const f = analyze(freq, wave, onsetFreq);
           const dt = lastNow ? (now - lastNow) / 1000 : 1 / 60;
           lastNow = now;
+          if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
           renderer.render(
             { bass: f.bass, mid: f.mid, treble: f.treble, rms: f.rms, beat: f.beat, kick: f.kick, beatEdge: f.beatEdge },
-            parseRgbVec(getCssVar('--accent')),
+            accentVec,
             dt,
           );
         }
@@ -830,6 +878,13 @@ export function Visualizer({
     // alloc count down by ~95% on steady music.
     const mercuryColorStopCache = new Map<number, [string, string]>();
 
+    // Theme colors, hoisted out of the rAF loop (getCssVar forces a style
+    // recalc via getComputedStyle) and refreshed ~2x/sec so theme changes
+    // still land within a blink.
+    let themeAccent = getCssVar('--accent') || '#39ff14';
+    let themeAccentDim = getCssVar('--accent-dim') || '#1aa30a';
+    let themeTick = 0;
+
     function frame(now: number) {
       if (!canPaint(now)) {
         raf = requestAnimationFrame(frame);
@@ -854,9 +909,12 @@ export function Visualizer({
       boostFrequencyData(freq, reactivity);
       const features = analyzeFeatures(freq, wave, onsetFreq);
 
-      const accent = getCssVar('--accent') || '#39ff14';
-      const accentDim = getCssVar('--accent-dim') || '#1aa30a';
-      const ink2 = getCssVar('--ink-2') || '#8fb78f';
+      if (themeTick++ % 30 === 0) {
+        themeAccent = getCssVar('--accent') || '#39ff14';
+        themeAccentDim = getCssVar('--accent-dim') || '#1aa30a';
+      }
+      const accent = themeAccent;
+      const accentDim = themeAccentDim;
 
       if (mode === 'mini' || mode === 'spectrum') {
         ctx.fillStyle = 'rgba(0,0,0,0.45)';
@@ -1718,7 +1776,6 @@ export function Visualizer({
         }
       }
 
-      void ink2;
       raf = requestAnimationFrame(frame);
     }
 
@@ -1900,6 +1957,11 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
     gl.viewport(0, 0, targetW, targetH);
   }
 
+  // Hoisted out of the rAF loop (getComputedStyle forces a style recalc);
+  // refreshed ~2x/sec so theme changes still land.
+  let accentVec = parseRgbVec(getCssVar('--accent'));
+  let accentTick = 0;
+
   function frame(now: number): void {
     if (canPaint(now)) {
       ensureSize();
@@ -1909,7 +1971,8 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
       boostFrequencyData(freq, options.reactivity);
       const features = analyze(freq, wave, onsetFreq);
       bands.set(features.bands);
-      const accent = parseRgbVec(getCssVar('--accent'));
+      if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
+      const accent = accentVec;
 
       gl.useProgram(program);
       gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);

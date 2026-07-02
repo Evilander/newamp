@@ -23,7 +23,8 @@ import { generate as generateEvilandConfig, decode as decodeEvilandConfig } from
 import type { OperatorConfig, WaveMode } from './eviland-operators';
 import type { EvilandPalette } from './eviland';
 import { frameBus } from './frame-bus';
-import { createMemoryBridge, type MemoryBridge } from './eviland-memory-bridge';
+import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from './eviland-memory-bridge';
+import { blendPaletteWithArt, extractArtPalette, type ArtPalette } from './art-palette';
 import { api } from '../lib/api';
 import { BUTTERCHURN_FFT_SIZE } from '../butterchurn-iframe/protocol';
 
@@ -54,6 +55,8 @@ export interface EvilandProducerUiState {
     currentTime: number;
     duration: number;
     isPlaying: boolean;
+    /** Perceptual volume 0..2 — drives the projector's volume slider. */
+    volume: number;
   } | null;
 }
 
@@ -118,6 +121,7 @@ function maybeLoadPlanIntoProducerDirector(
   director: Director,
   trackId: number | null,
   getCurrentTrackId: () => number | null,
+  onSceneSeed: (seed: string) => void,
 ): void {
   if (trackId == null) return;
   const readOnlyBridge: MemoryBridge = createMemoryBridge({ trackId, api });
@@ -129,7 +133,14 @@ function maybeLoadPlanIntoProducerDirector(
       void readOnlyBridge.flushAndDispose('manual');
       return;
     }
-    if (plan) target.loadPlan(plan);
+    if (plan) {
+      target.loadPlan(plan);
+      // Upgrade the projector's scene-rotation seed to the lineage-aware key
+      // under the same identity guard, so a remembered track's scene walk
+      // matches the on-screen composition (and evolves with its generation).
+      const seed = sceneSeedForTrack(capturedTrackId, plan);
+      if (seed) onSceneSeed(seed);
+    }
     // Dispose without flushing — the bridge has no buffered sections (we
     // never observed) so this is a clean teardown of the visibility listener.
     void readOnlyBridge.flushAndDispose('manual');
@@ -152,10 +163,25 @@ export function startEvilandProducer(
   let director: Director | null = null;
   let lastNow = 0;
   let lastTrackId: number | null = null;
+  let sceneSeed: string | null = null;
   let lastAppliedNonce = -1;
   let manualConfig: OperatorConfig | null = null;
   let paletteTick = 0;
   let palette = readPalette();
+  // Album-art tint for the projector: extracted once per track (async,
+  // best-effort), blended into every published palette so the detached
+  // window's scenes/reactor/fallback renderer glow in the sleeve's colors.
+  let artPalette: ArtPalette | null = null;
+  let artTrackId: number | null = null;
+  function refreshArtPalette(trackId: number | null): void {
+    artTrackId = trackId;
+    artPalette = null;
+    if (trackId == null) return;
+    const captured = trackId;
+    void extractArtPalette(api.getArtUrl(trackId)).then((art) => {
+      if (artTrackId === captured) artPalette = art;
+    });
+  }
   let freq: Uint8Array<ArrayBuffer> | null = null;
   let onsetFreq: Uint8Array<ArrayBuffer> | null = null;
   let leftFreq: Uint8Array<ArrayBuffer> | null = null;
@@ -224,21 +250,28 @@ export function startEvilandProducer(
     if (paletteTick++ % 30 === 0) palette = readPalette();
 
     const ui = getUiState();
+    const setSceneSeed = (seed: string): void => {
+      sceneSeed = seed;
+    };
     if (!director) {
       director = createDirector({ songId: ui.trackId != null ? `track-${ui.trackId}` : 'eviland' });
       // Set lastTrackId BEFORE issuing the read so getCurrentTrackId() returns
       // the right value if the IPC resolves before the next rAF tick.
       lastTrackId = ui.trackId;
+      sceneSeed = sceneSeedForTrack(ui.trackId, null);
+      refreshArtPalette(ui.trackId);
       // Producer-side bridge is READ-ONLY: it loads the plan into the local
       // Director so the projector remembers, but it does NOT observe sections
       // or flush. The on-screen Visualizer's bridge is the sole writer; this
       // avoids double-flush + double-counted plays when both run at once.
-      maybeLoadPlanIntoProducerDirector(director, ui.trackId, () => lastTrackId);
+      maybeLoadPlanIntoProducerDirector(director, ui.trackId, () => lastTrackId, setSceneSeed);
     }
     if (ui.trackId !== lastTrackId) {
       lastTrackId = ui.trackId;
+      sceneSeed = sceneSeedForTrack(ui.trackId, null);
+      refreshArtPalette(ui.trackId);
       director.reset(ui.trackId != null ? `track-${ui.trackId}` : 'eviland');
-      maybeLoadPlanIntoProducerDirector(director, ui.trackId, () => lastTrackId);
+      maybeLoadPlanIntoProducerDirector(director, ui.trackId, () => lastTrackId, setSceneSeed);
     }
 
     let config: OperatorConfig;
@@ -253,11 +286,14 @@ export function startEvilandProducer(
     }
 
     fillWaveSamples();
-    frameBus.publish(frame, palette, dtMs, config, {
+    frameBus.publish(frame, blendPaletteWithArt(palette, artPalette), dtMs, config, {
       wave: waveSamples,
       sampleRate: engine.getSampleRate(),
       trackId: ui.trackId,
-      transport: ui.transport ?? undefined,
+      sceneSeed,
+      // null (not undefined) when nothing is playing — the projector's
+      // control bar resets to its idle state on this explicit signal.
+      transport: ui.transport ?? null,
     });
   };
 

@@ -37,6 +37,24 @@ import type { Director } from './eviland-director';
 // Constants. Tuned to match blueprint §1.6.
 // ---------------------------------------------------------------------------
 
+/**
+ * Scene-overlay rotation seed for a track, lineage-aware when a plan exists.
+ * Both windows must agree byte-for-byte (the on-screen Visualizer computes it
+ * locally; the headless producer ships it to the projector in the frame
+ * payload), so the derivation lives here next to the plan machinery rather
+ * than being duplicated at each call site. Generation + rootSeed both feed
+ * the key: every lineage evolution re-shuffles the scene walk, so a track's
+ * visuals keep the "grows with your listening" promise at the scene layer too.
+ */
+export function sceneSeedForTrack(
+  trackId: number | null,
+  plan?: Pick<VisualMemoryPlan, 'lineage'> | null,
+): string | null {
+  if (trackId == null) return null;
+  if (!plan) return `track-${trackId}`;
+  return `track-${trackId}::g${plan.lineage.generation}-r${plan.lineage.rootSeed}`;
+}
+
 /** Threshold above which DNA-neighbor borrow mints a derived plan. */
 export const NEIGHBOR_BORROW_THRESHOLD = 0.92;
 

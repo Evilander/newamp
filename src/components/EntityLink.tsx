@@ -49,6 +49,52 @@ export function ArtistLink({
   );
 }
 
+export function TrackLink({
+  track,
+  className,
+  title,
+  color,
+  children,
+}: {
+  track: {
+    id?: number;
+    title: string;
+    album?: string | null;
+    albumArtist?: string | null;
+    artist?: string | null;
+  };
+  className?: string;
+  title?: string;
+  color?: string;
+  children?: ReactNode;
+}): JSX.Element {
+  // A track with neither an album to land on nor an artist to fall back to
+  // has nowhere to navigate — render plain text instead of a dead link.
+  if (isUnknown(track.album) && isUnknown(track.artist)) {
+    return <span className={className}>{children ?? track.title}</span>;
+  }
+  return (
+    <button
+      type="button"
+      data-newamp-track-link
+      className={`underline-offset-2 hover:underline ${className ?? ''}`}
+      style={{ ...LINK_STYLE, color: color ?? 'inherit' }}
+      title={
+        title ??
+        (isUnknown(track.album)
+          ? `Show ${track.artist} in Artists`
+          : `Show "${track.title}" on ${track.album}`)
+      }
+      onClick={(event) => {
+        event.stopPropagation();
+        usePlayerStore.getState().navigateToTrack(track);
+      }}
+    >
+      {children ?? track.title}
+    </button>
+  );
+}
+
 export function AlbumLink({
   album,
   albumArtist,
