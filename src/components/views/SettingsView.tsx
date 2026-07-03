@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import QRCode from 'qrcode';
 import type {
   AppSettings,
   BuiltInTheme,
@@ -1321,6 +1322,30 @@ function RadioBrainRow({
           <code style={{ color: 'var(--accent)' }}>/library.m3u</code>,{' '}
           <code style={{ color: 'var(--accent)' }}>/random.m3u</code>, or{' '}
           <code style={{ color: 'var(--accent)' }}>/tag/{'<name>'}.m3u</code> in VLC.
+          Every route needs this install's token (playlist links include it).
+        </div>
+      )}
+      {status?.enabled && status.remoteUrl && (
+        <div className="flex items-start gap-3" data-newamp-remote-pairing>
+          <RemoteQr url={status.remoteUrl} />
+          <div className="flex flex-col gap-1 text-[11px]" style={{ color: 'var(--ink-2)', maxWidth: 340 }}>
+            <span className="font-bold" style={{ color: 'var(--accent)' }}>NewAmp Remote</span>
+            <span>
+              Scan with your phone (same Wi-Fi) for a full remote: art, scrub, volume,
+              prev/play/next. The link carries this install's secret — share it like a password.
+            </span>
+            <code className="break-all" style={{ color: 'var(--muted)' }}>{status.remoteUrl}</code>
+            <button
+              className="pxbtn self-start"
+              onClick={() => {
+                onChange({ radioBrainToken: null });
+                // Server regenerates on next sync; old links stop working.
+              }}
+              title="Invalidate the current link and mint a new secret"
+            >
+              Regenerate link
+            </button>
+          </div>
         </div>
       )}
       {!status?.enabled && enabled && (
@@ -1335,6 +1360,29 @@ function RadioBrainRow({
         </div>
       )}
     </div>
+  );
+}
+
+function RemoteQr({ url }: { url: string }): JSX.Element {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    QRCode.toCanvas(canvas, url, {
+      width: 148,
+      margin: 1,
+      color: { dark: '#0a0c0a', light: '#e8f5e9' },
+    }).catch((err: unknown) => console.warn('[newamp] remote QR render failed', err));
+  }, [url]);
+  return (
+    <canvas
+      ref={canvasRef}
+      width={148}
+      height={148}
+      style={{ borderRadius: 8, border: '1px solid var(--line)' }}
+      data-newamp-remote-qr
+      aria-label="NewAmp Remote pairing QR code"
+    />
   );
 }
 

@@ -565,6 +565,12 @@ export interface SmartPlaylistRuleInput {
   minRating?: number | null;
   lovedOnly?: boolean;
   unplayedOnly?: boolean;
+  /** Exclude tracks played at/after this epoch-ms ("haven't played since…"). */
+  notPlayedSinceMs?: number | null;
+  /** DNA re-rank target 0..1 (perceptual loudness) — boosts ordering, never filters. */
+  dnaEnergyTarget?: number | null;
+  /** DNA re-rank target 0..1 (spectral brightness) — boosts ordering, never filters. */
+  dnaBrightnessTarget?: number | null;
 }
 
 export interface SmartPlaylistRule extends Required<Omit<SmartPlaylistRuleInput, 'id'>> {
@@ -880,6 +886,8 @@ export interface AppSettings {
   eqEnabled: boolean;
   radioBrainEnabled: boolean;
   radioBrainPort: number;
+  /** Shared secret for Radio Brain / NewAmp Remote — every HTTP route requires it. Auto-generated on first server start. */
+  radioBrainToken: string | null;
   audioBitPerfectPath: boolean;
   audioPreferredSampleRate: number | null;
   /**
@@ -906,6 +914,8 @@ export interface RadioBrainStatus {
   enabled: boolean;
   port: number;
   baseUrl: string | null;
+  /** Phone-ready NewAmp Remote URL (token in the #fragment). Null when stopped. */
+  remoteUrl: string | null;
   endpoints: string[];
   startedAt: number | null;
   error: string | null;
@@ -1091,6 +1101,7 @@ export interface NewAmpAPI {
   captureVisualizerPng: (rect?: { x: number; y: number; width: number; height: number }) => Promise<string | null>;
   copyPngToClipboard: (dataUrl: string) => Promise<boolean>;
   saveCaptureBytes: (payload: { base64: string; defaultName: string; filterName: string; ext: string }) => Promise<string | null>;
+  saveClipMp4: (payload: { base64: string; defaultName: string; vertical?: boolean; maxHeight?: number }) => Promise<string | null>;
   exportTrackWav: (id: number) => Promise<TrackWavExportResult | null>;
   exportTracksWav: (ids: number[]) => Promise<TrackWavBatchExportResult | null>;
   exportTracksAudio: (ids: number[], format: AudioExportFormat) => Promise<TrackAudioBatchExportResult | null>;

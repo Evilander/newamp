@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { compileQueryIntent, looksLikeNaturalQuery } from '@shared/query-intent';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import type { AlbumSummary, ArtistSummary, SavedPlaylist, SmartPlaylistRule, Track } from '@shared/types';
 import type { ViewMode } from '../store/usePlayerStore';
@@ -54,6 +55,7 @@ export function QuickPlayPalette(): JSX.Element | null {
   const [results, setResults] = useState<PaletteItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
+  const [askChips, setAskChips] = useState<string[] | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
@@ -116,18 +118,36 @@ export function QuickPlayPalette(): JSX.Element | null {
     const id = window.setTimeout(async () => {
       setStatus(trimmedQuery ? 'Searching...' : 'Loading command palette...');
       try {
+        // Ask mode: 3+ words with no field:value token reads as natural
+        // language — compile it locally to a smart rule (year/bpm/recency/
+        // loved/rating + DNA re-rank) and show the interpretation as chips.
+        // Unmatched words still free-text search inside the rule, and the
+        // classic verbatim search below stays untouched for short queries.
+        const askIntent = trimmedQuery && looksLikeNaturalQuery(trimmedQuery)
+          ? compileQueryIntent(trimmedQuery)
+          : null;
+        const useAsk = !!askIntent && askIntent.matched > 0;
         const [tracks, playlists, smartRules, albums, artists] = await Promise.all([
-          loadTrackResults(trimmedQuery),
+          useAsk ? api.runSmartPlaylistRule(askIntent.rule) : loadTrackResults(trimmedQuery),
           api.getPlaylists(),
           api.getSmartPlaylistRules(),
-          trimmedQuery ? api.getAlbums({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
-          trimmedQuery ? api.getArtists({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
+          trimmedQuery && !useAsk ? api.getAlbums({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
+          trimmedQuery && !useAsk ? api.getArtists({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
         ]);
         if (cancelled) return;
-        const next = buildPaletteItems(trimmedQuery, tracks, playlists, smartRules, albums, artists);
+        setAskChips(useAsk ? askIntent.chips : null);
+        const next = useAsk
+          ? buildPaletteItems('', tracks, [], [], [], []).filter((item) => item.kind === 'track')
+          : buildPaletteItems(trimmedQuery, tracks, playlists, smartRules, albums, artists);
         setResults(next);
         setSelectedIndex(0);
-        setStatus(next.length ? null : 'No matching commands or catalog items.');
+        setStatus(
+          next.length
+            ? null
+            : useAsk
+              ? 'Nothing in the library matches that ask — loosen a constraint.'
+              : 'No matching commands or catalog items.',
+        );
       } catch {
         if (!cancelled) setStatus('Quick Play search failed.');
       }
@@ -298,7 +318,7 @@ export function QuickPlayPalette(): JSX.Element | null {
             ref={inputRef}
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
-            placeholder="Search tracks, albums, artists, playlists, views, or commands..."
+            placeholder="Search — or just ask: warm slow stuff from the 70s I haven't played this year"
             className="bevel-in lcd-text min-w-0 flex-1 px-3 py-2 text-[16px] outline-none"
             style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
           />
@@ -306,6 +326,27 @@ export function QuickPlayPalette(): JSX.Element | null {
             Close
           </button>
         </div>
+
+        {askChips && (
+          <div
+            className="flex flex-wrap items-center gap-1.5 border-b px-3 py-2"
+            style={{ borderColor: 'var(--line)' }}
+            data-newamp-ask-chips
+          >
+            <span className="text-[9px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
+              Understood
+            </span>
+            {askChips.map((chip) => (
+              <span
+                key={chip}
+                className="rounded-full border px-2 py-0.5 text-[10px]"
+                style={{ borderColor: 'var(--line)', color: 'var(--ink-2)', background: 'var(--panel-2)' }}
+              >
+                {chip}
+              </span>
+            ))}
+          </div>
+        )}
 
         <div className="flex items-center gap-2 border-b px-3 py-2 text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}>
           <span>Ctrl+K / Ctrl+J opens</span>

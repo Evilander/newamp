@@ -19,6 +19,7 @@ import {
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { LibraryStore } from './library.js';
 import { LibraryWatcher } from './library-watcher.js';
@@ -52,6 +53,7 @@ import {
 } from './transcode.js';
 import { fileRangeResponse, seekableTranscodeResponse } from './audio-serve.js';
 import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac, transcodeCacheStatus } from './transcode-cache.js';
+import { finishWebmToMp4 } from './video-mux.js';
 import { isAllowedAudioPath } from './audio-path-policy.js';
 import { analyzeTrackDna } from './dna-analyzer.js';
 import { RadioBrain } from './radio-brain.js';
@@ -1095,11 +1097,48 @@ function hasTrayBounds(bounds: Rectangle): boolean {
 // buffers — no icon assets to ship, always theme-neutral white like the
 // system's own thumbar glyphs.
 
-let shellPlaybackState: { isPlaying: boolean; title: string | null; artist: string | null } = {
+const TRANSPORT_CMDS = new Set([
+  'togglePlay',
+  'next',
+  'prev',
+  'seek',
+  'setVolume',
+]);
+
+interface ShellPlaybackState {
+  isPlaying: boolean;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  trackId: number | null;
+  /** Seconds at snapshot time. */
+  position: number;
+  duration: number;
+  volume: number;
+  /** Epoch ms of the snapshot — remote clients interpolate from this. */
+  at: number;
+}
+
+let shellPlaybackState: ShellPlaybackState = {
   isPlaying: false,
   title: null,
   artist: null,
+  album: null,
+  trackId: null,
+  position: 0,
+  duration: 0,
+  volume: 0.75,
+  at: 0,
 };
+
+// NewAmp Remote / Radio Brain live-state fan-out.
+const shellPlaybackSubscribers = new Set<(state: ShellPlaybackState) => void>();
+function subscribeShellPlayback(cb: (state: ShellPlaybackState) => void): () => void {
+  shellPlaybackSubscribers.add(cb);
+  return () => {
+    shellPlaybackSubscribers.delete(cb);
+  };
+}
 
 function thumbGlyph(inside: (x: number, y: number) => boolean): Electron.NativeImage {
   const S = 32;
@@ -1168,8 +1207,15 @@ function applyThumbarButtons(win: BrowserWindow | null = mainWin): void {
  * Renderer→shell playback snapshot: swaps the thumbar play/pause glyph and
  * keeps the tray tooltip naming what's actually playing.
  */
-function applyShellPlaybackState(state: typeof shellPlaybackState): void {
+function applyShellPlaybackState(state: ShellPlaybackState): void {
   shellPlaybackState = state;
+  for (const cb of shellPlaybackSubscribers) {
+    try {
+      cb(state);
+    } catch (err) {
+      console.warn('[newamp] shell playback subscriber threw', err);
+    }
+  }
   applyThumbarButtons();
   if (tray && !tray.isDestroyed()) {
     const label = state.title
@@ -1254,6 +1300,13 @@ async function syncRadioBrain(): Promise<void> {
     }
     return;
   }
+  // The server never runs without a shared secret — it exposes the whole
+  // library to the LAN. Generated once, persisted; Settings regenerates by
+  // nulling the token, which re-mints here on the very next sync (getToken()
+  // reads live settings, so the running server picks it up immediately).
+  if (!settings.get().radioBrainToken) {
+    settings.set({ radioBrainToken: randomBytes(16).toString('hex') });
+  }
   if (radioBrain && radioBrain.status().port !== current.radioBrainPort) {
     await radioBrain.stop();
     radioBrain = null;
@@ -1264,6 +1317,42 @@ async function syncRadioBrain(): Promise<void> {
       port: current.radioBrainPort,
       transcode: (path, signal) => transcodeToWavResponse(path, new Request('http://localhost/audio', { signal })),
       ffmpegFallbackExt: (path) => isFfmpegFallbackExtension(path.split('.').pop() ?? ''),
+      getToken: () => settings.get().radioBrainToken ?? '',
+      getNowPlaying: () =>
+        shellPlaybackState.at > 0
+          ? {
+              trackId: shellPlaybackState.trackId,
+              title: shellPlaybackState.title,
+              artist: shellPlaybackState.artist,
+              album: shellPlaybackState.album,
+              isPlaying: shellPlaybackState.isPlaying,
+              position: shellPlaybackState.position,
+              duration: shellPlaybackState.duration,
+              volume: shellPlaybackState.volume,
+              at: shellPlaybackState.at,
+            }
+          : null,
+      onNowPlaying: (cb) =>
+        subscribeShellPlayback((state) =>
+          cb({
+            trackId: state.trackId,
+            title: state.title,
+            artist: state.artist,
+            album: state.album,
+            isPlaying: state.isPlaying,
+            position: state.position,
+            duration: state.duration,
+            volume: state.volume,
+            at: state.at,
+          }),
+        ),
+      control: (cmd, arg) => {
+        // Same whitelist + forwarding path the projector's control bar uses.
+        if (!TRANSPORT_CMDS.has(cmd)) return false;
+        if (!mainWin || mainWin.isDestroyed()) return false;
+        mainWin.webContents.send('transport:command', { cmd, arg });
+        return true;
+      },
     });
     await radioBrain.start();
   }
@@ -1906,6 +1995,29 @@ function registerIpc(): void {
     },
   );
 
+  // WebM (VP9/Opus, the renderer's only encode stack) → shareable MP4
+  // (H.264/AAC via bundled ffmpeg — NVENC first, libx264 fallback). Used by
+  // Clip Studio and Wrapped Live.
+  ipcMain.handle(
+    'video:save-clip',
+    async (_e, payload: { base64: string; defaultName: string; vertical?: boolean; maxHeight?: number }) => {
+      const buf = Buffer.from(String(payload?.base64 ?? ''), 'base64');
+      if (!buf.length) return null;
+      const opts = {
+        title: 'Save clip',
+        defaultPath: `${safeFileStem(payload?.defaultName || 'NewAmp Clip')}.mp4`,
+        filters: [{ name: 'MP4 video', extensions: ['mp4'] }],
+      };
+      const result = mainWin ? await dialog.showSaveDialog(mainWin, opts) : await dialog.showSaveDialog(opts);
+      if (result.canceled || !result.filePath) return null;
+      await finishWebmToMp4(buf, result.filePath, {
+        vertical: payload?.vertical === true,
+        maxHeight: typeof payload?.maxHeight === 'number' ? payload.maxHeight : undefined,
+      });
+      return result.filePath;
+    },
+  );
+
   ipcMain.handle('settings:skin-import', async () => {
     const result = mainWin
       ? await dialog.showOpenDialog(mainWin, {
@@ -2207,13 +2319,6 @@ function registerIpc(): void {
   // control bar. They are forwarded to the MAIN window's renderer because that
   // is where the AudioEngine + store live; the projector is a pure consumer.
   // Caps the surface: only known verbs reach the renderer.
-  const TRANSPORT_CMDS = new Set([
-    'togglePlay',
-    'next',
-    'prev',
-    'seek',
-    'setVolume',
-  ]);
   ipcMain.handle('transport:command', (_e, cmd: string, arg?: number) => {
     if (!TRANSPORT_CMDS.has(cmd)) return;
     if (!mainWin || mainWin.isDestroyed()) return;
@@ -2238,11 +2343,28 @@ function registerIpc(): void {
   ipcMain.on('playback:state', (event, state: unknown) => {
     if (!mainWin || mainWin.isDestroyed() || event.sender !== mainWin.webContents) return;
     if (!state || typeof state !== 'object') return;
-    const s = state as { isPlaying?: unknown; title?: unknown; artist?: unknown };
+    const s = state as {
+      isPlaying?: unknown;
+      title?: unknown;
+      artist?: unknown;
+      album?: unknown;
+      trackId?: unknown;
+      position?: unknown;
+      duration?: unknown;
+      volume?: unknown;
+    };
+    const num = (value: unknown, fallback: number): number =>
+      typeof value === 'number' && Number.isFinite(value) ? value : fallback;
     applyShellPlaybackState({
       isPlaying: s.isPlaying === true,
       title: typeof s.title === 'string' && s.title.trim() ? s.title : null,
       artist: typeof s.artist === 'string' && s.artist.trim() ? s.artist : null,
+      album: typeof s.album === 'string' && s.album.trim() ? s.album : null,
+      trackId: typeof s.trackId === 'number' && Number.isFinite(s.trackId) ? s.trackId : null,
+      position: Math.max(0, num(s.position, 0)),
+      duration: Math.max(0, num(s.duration, 0)),
+      volume: Math.min(2, Math.max(0, num(s.volume, 0.75))),
+      at: Date.now(),
     });
   });
 }
