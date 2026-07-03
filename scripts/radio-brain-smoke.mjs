@@ -52,6 +52,7 @@ const tagSummaries = library.getTagSummaries();
 assert.ok(tagSummaries.some((s) => s.name === 'all_alpha' && s.trackCount === 1));
 
 const port = pickFreePort();
+const SMOKE_TOKEN = 'radio-brain-smoke-token';
 const brain = new RadioBrain({
   library,
   port,
@@ -61,6 +62,10 @@ const brain = new RadioBrain({
     return new Response(buffer, { status: 200, headers: { 'Content-Type': 'audio/wav' } });
   },
   ffmpegFallbackExt: () => false,
+  getToken: () => SMOKE_TOKEN,
+  getNowPlaying: () => null,
+  onNowPlaying: () => () => undefined,
+  control: () => true,
 });
 const startStatus = await brain.start();
 assert.equal(startStatus.enabled, true, `radio brain should start (error: ${startStatus.error ?? '<none>'})`);
@@ -70,7 +75,9 @@ assert.ok(startStatus.endpoints.includes('/library.m3u'));
 const base = `http://127.0.0.1:${port}`;
 
 // HTML status page
-const statusRes = await fetch(`${base}/`);
+const unauthorized = await fetch(`${base}/`);
+assert.equal(unauthorized.status, 401, 'routes must 401 without the token');
+const statusRes = await fetch(`${base}/?token=${SMOKE_TOKEN}`);
 assert.equal(statusRes.status, 200);
 assert.match(statusRes.headers.get('content-type') ?? '', /text\/html/);
 const statusBody = await statusRes.text();
@@ -78,7 +85,7 @@ assert.match(statusBody, /NewAmp Radio Brain/);
 assert.match(statusBody, /all_alpha/);
 
 // library.m3u
-const libRes = await fetch(`${base}/library.m3u`);
+const libRes = await fetch(`${base}/library.m3u?token=${SMOKE_TOKEN}`);
 assert.equal(libRes.status, 200);
 assert.match(libRes.headers.get('content-type') ?? '', /audio\/x-mpegurl/);
 const libBody = await libRes.text();
@@ -87,13 +94,13 @@ const audioLines = libBody.split('\n').filter((l) => l.startsWith(`${base}/audio
 assert.equal(audioLines.length, fixtures.length, 'every track should appear in /library.m3u');
 
 // random.m3u
-const randomRes = await fetch(`${base}/random.m3u`);
+const randomRes = await fetch(`${base}/random.m3u?token=${SMOKE_TOKEN}`);
 const randomBody = await randomRes.text();
 const randomLines = randomBody.split('\n').filter((l) => l.startsWith(`${base}/audio/`));
 assert.equal(randomLines.length, fixtures.length, 'random playlist should include every track at small sizes');
 
 // tag/<name>.m3u
-const tagRes = await fetch(`${base}/tag/all_alpha.m3u`);
+const tagRes = await fetch(`${base}/tag/all_alpha.m3u?token=${SMOKE_TOKEN}`);
 assert.equal(tagRes.status, 200);
 const tagBody = await tagRes.text();
 const tagLines = tagBody.split('\n').filter((l) => l.startsWith(`${base}/audio/`));
@@ -101,20 +108,20 @@ assert.equal(tagLines.length, 1, 'tag playlist should include the single all_alp
 
 // audio endpoint: streams the file via the stubbed transcode path when ffmpegFallbackExt returns false (raw stream)
 const alphaId = tracks.find((t) => t.title === 'Alpha').id;
-const audioRes = await fetch(`${base}/audio/${alphaId}`);
+const audioRes = await fetch(`${base}/audio/${alphaId}?token=${SMOKE_TOKEN}`);
 assert.equal(audioRes.status, 200);
 assert.match(audioRes.headers.get('content-type') ?? '', /audio\/flac/);
 const audioBytes = new Uint8Array(await audioRes.arrayBuffer());
 assert.ok(audioBytes.length > 100, 'audio stream should have meaningful bytes');
 
 // 404 paths
-const missingRes = await fetch(`${base}/nope`);
+const missingRes = await fetch(`${base}/nope?token=${SMOKE_TOKEN}`);
 assert.equal(missingRes.status, 404);
-const missingTrackRes = await fetch(`${base}/audio/9999999`);
+const missingTrackRes = await fetch(`${base}/audio/9999999?token=${SMOKE_TOKEN}`);
 assert.equal(missingTrackRes.status, 404);
 
 // Method not allowed
-const postRes = await fetch(`${base}/library.m3u`, { method: 'POST' });
+const postRes = await fetch(`${base}/library.m3u?token=${SMOKE_TOKEN}`, { method: 'POST' });
 assert.equal(postRes.status, 405);
 
 const stopStatus = await brain.stop();

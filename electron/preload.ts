@@ -145,6 +145,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('media:copy-png', dataUrl) as Promise<boolean>,
   saveCaptureBytes: (payload: { base64: string; defaultName: string; filterName: string; ext: string }) =>
     ipcRenderer.invoke('media:save-capture', payload) as Promise<string | null>,
+  saveClipMp4: (payload: { base64: string; defaultName: string; vertical?: boolean; maxHeight?: number }) =>
+    ipcRenderer.invoke('video:save-clip', payload) as Promise<string | null>,
   exportTrackWav: (id: number) =>
     ipcRenderer.invoke('track:export-wav', id) as Promise<TrackWavExportResult | null>,
   exportTracksWav: (ids: number[]) =>
@@ -380,8 +382,16 @@ contextBridge.exposeInMainWorld('winctl', {
   // Fire-and-forget playback snapshot for shell integrations (Windows
   // taskbar thumbnail toolbar play/pause/next, tray tooltip). The renderer
   // dedupes on (isPlaying, trackId); main applies.
-  notifyPlayback: (state: { isPlaying: boolean; title: string | null; artist: string | null }) =>
-    ipcRenderer.send('playback:state', state),
+  notifyPlayback: (state: {
+    isPlaying: boolean;
+    title: string | null;
+    artist: string | null;
+    album: string | null;
+    trackId: number | null;
+    position: number;
+    duration: number;
+    volume: number;
+  }) => ipcRenderer.send('playback:state', state),
   onState: (cb: (s: { maximized: boolean }) => void) => {
     const handler = (_e: unknown, s: { maximized: boolean }) => cb(s);
     ipcRenderer.on('window-state', handler);

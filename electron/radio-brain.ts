@@ -12,11 +12,13 @@
 // The intent is to make the library castable: open VLC on a phone, point at
 // http://desktop.local:17117/random.m3u, and the queue keeps playing.
 
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream, statSync } from 'node:fs';
 import { extname } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import type { LibraryStore } from './library.js';
+import { remotePageHtml } from './remote-page.js';
 
 const M3U_LIMIT_TRACKS = 5000;
 
@@ -32,17 +34,47 @@ const CONTENT_TYPES: Record<string, string> = {
   '.wav': 'audio/wav',
 };
 
+/** Live playback snapshot pushed from the main renderer for remote clients. */
+export interface RemoteNowPlaying {
+  trackId: number | null;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  isPlaying: boolean;
+  /** Seconds. Snapshot value; clients interpolate from `at` while playing. */
+  position: number;
+  duration: number;
+  /** Perceptual volume 0..2. */
+  volume: number;
+  /** Epoch ms when this snapshot was taken. */
+  at: number;
+}
+
+export type RemoteCommand = 'togglePlay' | 'next' | 'prev' | 'seek' | 'setVolume';
+
 export interface RadioBrainOptions {
   library: LibraryStore;
   port: number;
   transcode: (path: string, signal: AbortSignal) => Response;
   ffmpegFallbackExt: (path: string) => boolean;
+  /**
+   * Shared secret gating EVERY data route — this server binds 0.0.0.0 by
+   * design (castability is the point); the token keeps that from meaning
+   * "public". The server fails closed when the token is empty.
+   */
+  getToken: () => string;
+  getNowPlaying: () => RemoteNowPlaying | null;
+  onNowPlaying: (cb: (state: RemoteNowPlaying | null) => void) => () => void;
+  /** Forward a validated transport command into the player. */
+  control: (cmd: RemoteCommand, arg?: number) => boolean;
 }
 
 export interface RadioBrainStatus {
   enabled: boolean;
   port: number;
   baseUrl: string | null;
+  /** Phone-ready URL with the auth token in the #fragment (fragments never hit server logs). */
+  remoteUrl: string | null;
   endpoints: string[];
   startedAt: number | null;
   error: string | null;
@@ -98,28 +130,92 @@ export class RadioBrain {
 
   status(): RadioBrainStatus {
     const enabled = !!this.server;
+    const baseUrl = enabled ? `http://${localAddress()}:${this.opts.port}` : null;
     return {
       enabled,
       port: this.opts.port,
-      baseUrl: enabled ? `http://${localAddress()}:${this.opts.port}` : null,
+      baseUrl,
+      remoteUrl: baseUrl ? `${baseUrl}/remote#${this.opts.getToken()}` : null,
       endpoints: enabled
-        ? ['/', '/library.m3u', '/random.m3u', '/tag/:name.m3u', '/audio/:trackId']
+        ? ['/remote', '/now', '/now/events', '/control', '/art/:trackId', '/library.m3u', '/random.m3u', '/tag/:name.m3u', '/audio/:trackId']
         : [],
       startedAt: this.startedAt,
       error: this.lastError,
     };
   }
 
+  /**
+   * Constant-time token check. Accepts `?token=` (playlist/audio URLs — VLC
+   * cannot send headers) or the `x-newamp-token` header (the remote page).
+   */
+  private authorized(url: URL, req: IncomingMessage): boolean {
+    const expected = this.opts.getToken();
+    if (!expected) return false; // fail closed
+    const presented = url.searchParams.get('token') ?? String(req.headers['x-newamp-token'] ?? '');
+    if (!presented) return false;
+    const a = createHash('sha256').update(presented).digest();
+    const b = createHash('sha256').update(expected).digest();
+    return timingSafeEqual(a, b);
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const path = decodeURIComponent(url.pathname);
+
+      // The remote page shell is the ONLY unauthenticated route — it contains
+      // no data (the token rides the URL #fragment, which never reaches the
+      // server; the page presents it per-request as a header).
+      if ((req.method === 'GET' || req.method === 'HEAD') && path === '/remote') {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        res.end(remotePageHtml());
+        return;
+      }
+
+      // Everything else — the status page and every stream included — is
+      // token-gated.
+      if (!this.authorized(url, req)) {
+        res.statusCode = 401;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end('Unauthorized. Open Settings -> Radio Brain in NewAmp for the link.');
+        return;
+      }
+
+      if (req.method === 'POST' && path === '/control') {
+        return await this.respondControl(req, res);
+      }
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         res.statusCode = 405;
-        res.setHeader('Allow', 'GET, HEAD');
+        res.setHeader('Allow', 'GET, HEAD, POST');
         res.end('Method Not Allowed');
         return;
       }
-      const path = decodeURIComponent(url.pathname);
+      if (path === '/now') {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        res.end(JSON.stringify(this.opts.getNowPlaying()));
+        return;
+      }
+      if (path === '/now/events') {
+        return this.respondNowEvents(req, res);
+      }
+      const artMatch = /^\/art\/(\d+)$/.exec(path);
+      if (artMatch) {
+        const art = this.opts.library.getArt(Number(artMatch[1]));
+        if (!art) {
+          res.statusCode = 404;
+          res.end('No art');
+          return;
+        }
+        res.statusCode = 200;
+        res.setHeader('Content-Type', art.mime);
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        res.end(Buffer.from(art.data));
+        return;
+      }
       if (path === '/' || path === '/index.html') {
         return this.respondStatusPage(res);
       }
@@ -157,6 +253,62 @@ export class RadioBrain {
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.end(`Error: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  private respondNowEvents(req: IncomingMessage, res: ServerResponse): void {
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+    const send = (state: RemoteNowPlaying | null): void => {
+      res.write(`data: ${JSON.stringify(state)}\n\n`);
+    };
+    send(this.opts.getNowPlaying());
+    const off = this.opts.onNowPlaying(send);
+    // Heartbeat keeps proxies/phone radios from reaping the idle socket.
+    const heartbeat = setInterval(() => res.write(': hb\n\n'), 25_000);
+    heartbeat.unref?.();
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      off();
+    });
+  }
+
+  private async respondControl(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += (chunk as Buffer).length;
+      if (size > 4096) {
+        res.statusCode = 413;
+        res.end('Payload too large');
+        return;
+      }
+      chunks.push(chunk as Buffer);
+    }
+    let cmd: string | undefined;
+    let arg: number | undefined;
+    try {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as {
+        cmd?: unknown;
+        arg?: unknown;
+      };
+      cmd = typeof body.cmd === 'string' ? body.cmd : undefined;
+      arg = typeof body.arg === 'number' && Number.isFinite(body.arg) ? body.arg : undefined;
+    } catch {
+      /* falls through to 400 */
+    }
+    const allowed: RemoteCommand[] = ['togglePlay', 'next', 'prev', 'seek', 'setVolume'];
+    if (!cmd || !allowed.includes(cmd as RemoteCommand)) {
+      res.statusCode = 400;
+      res.end('Bad command');
+      return;
+    }
+    const ok = this.opts.control(cmd as RemoteCommand, arg);
+    res.statusCode = ok ? 200 : 503;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok }));
   }
 
   private respondStatusPage(res: ServerResponse): void {
@@ -219,6 +371,7 @@ export class RadioBrain {
   private respondM3u(res: ServerResponse, req: IncomingMessage, trackIds: number[], label: string): void {
     const host = req.headers.host ?? `localhost:${this.opts.port}`;
     const base = `http://${host}`;
+    const tokenQuery = `?token=${encodeURIComponent(this.opts.getToken())}`;
     const lines: string[] = ['#EXTM3U', `#PLAYLIST:NewAmp Radio Brain — ${label}`];
     if (trackIds.length) {
       const tracks = this.opts.library.getTracksByIdsInOrder(trackIds);
@@ -229,7 +382,7 @@ export class RadioBrain {
         const sanitizedArtist = (track.artist ?? 'Unknown').replace(/[\r\n]+/g, ' ');
         const sanitizedTitle = (track.title ?? 'Unknown').replace(/[\r\n]+/g, ' ');
         lines.push(`#EXTINF:${duration},${sanitizedArtist} - ${sanitizedTitle}`);
-        lines.push(`${base}/audio/${track.id}`);
+        lines.push(`${base}/audio/${track.id}${tokenQuery}`);
       }
     }
     res.statusCode = 200;
@@ -275,12 +428,37 @@ export class RadioBrain {
       res.end('Track file missing');
       return;
     }
-    res.statusCode = 200;
+    // Real single-range support — the Accept-Ranges header used to be
+    // advertised without honoring Range at all, so every phone-scrubber seek
+    // re-downloaded the whole file.
+    const rangeHeader = String(req.headers.range ?? '');
+    const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+    let start = 0;
+    let end = size - 1;
+    let partial = false;
+    if (rangeMatch && (rangeMatch[1] || rangeMatch[2])) {
+      if (rangeMatch[1]) {
+        start = Number(rangeMatch[1]);
+        end = rangeMatch[2] ? Math.min(size - 1, Number(rangeMatch[2])) : size - 1;
+      } else {
+        // suffix range: last N bytes
+        start = Math.max(0, size - Number(rangeMatch[2]));
+      }
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) {
+        res.statusCode = 416;
+        res.setHeader('Content-Range', `bytes */${size}`);
+        res.end();
+        return;
+      }
+      partial = true;
+    }
+    res.statusCode = partial ? 206 : 200;
     res.setHeader('Content-Type', CONTENT_TYPES[ext] ?? 'application/octet-stream');
-    res.setHeader('Content-Length', String(size));
+    res.setHeader('Content-Length', String(end - start + 1));
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Accept-Ranges', 'bytes');
-    const stream = createReadStream(track.path);
+    if (partial) res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+    const stream = createReadStream(track.path, { start, end });
     req.on('close', () => stream.destroy());
     stream.on('error', () => {
       if (!res.headersSent) res.statusCode = 500;

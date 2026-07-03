@@ -3,6 +3,61 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.16.0] - 2026-07-02
+
+The master-plan release: four of the five planned flagships in one pass
+(`notes/newamp-master-plan-fable5.md`), plus the go verdict on the fifth.
+
+### Added
+
+- **Clip Studio — save the moment that already happened.** While the Eviland
+  Live stage is up, a WebCodecs ring buffer continuously holds the last 15
+  seconds of the full composition (MilkDrop + scenes + reactor) with engine
+  audio. Shift+R — or the "⏪ Save last 15s" button — muxes exactly that
+  window and finishes it to a shareable MP4 (H.264/AAC, NVENC when your GPU
+  offers it). No "wish I'd been recording" ever again. Skipped on the Lite
+  performance tier. Gate: `smoke:clip-replay` proves ring → WebM → MP4 with
+  real pixels and correct duration.
+- **Wrapped Live — your year as a video.** Wrapped grew a WRAPPED LIVE
+  button: a 30-second, six-chapter 1080×1920 film of your listening
+  (count-up totals, artist bars, track reveals, genre arcs, the 24-hour
+  listening clock, your sound) scored to your top track — with a Silent
+  toggle for copyright-bot-wary sharing. Gate: `smoke:wrapped-live`.
+- **NewAmp Remote — your phone is the remote.** Settings → Radio Brain now
+  shows a QR code; scan it and your phone gets a full remote over Wi-Fi:
+  album art, title, scrub, volume, prev/play/next, live via server-sent
+  events — no cloud, no app store, no account. And the important part:
+  **every Radio Brain route now requires this install's secret token**
+  (playlist links embed it automatically). The server previously answered
+  to anyone on the LAN; that hole is closed regardless of whether you use
+  the remote. Audio streams also honor HTTP Range now — the advertised
+  header used to be a lie, so phone scrubbing re-downloaded whole files.
+  Gate: `smoke:remote` (401s, SSE, control whitelist, ranges) +
+  `smoke:radio-brain` updated for auth.
+- **Ask Your Library — plain English in Ctrl+K.** Type three or more words
+  ("warm slow stuff from the 70s I haven't played this year") and the
+  palette compiles it — fully offline — into year ranges, tempo caps,
+  loved/rating filters, played-recency exclusions, and DNA-based
+  warmth/energy re-ranking, showing "Understood: 1970s · slow (bpm ≤ 95) ·
+  warm-leaning · not played this year" as chips so you always see exactly
+  what ran. Unknown words still search titles/artists/genres. Short queries
+  behave exactly as before. Gate: `test:query-intent` (10/10 canonical
+  phrases).
+
+### Under the hood
+
+- Smart rules gained `notPlayedSinceMs` (recency exclusion had no primitive
+  before) and optional DNA energy/brightness re-rank targets — boosts, never
+  filters, so un-analyzed tracks still surface.
+- New shared eviland-live compositor module powers both press-to-record and
+  the replay ring; WebM→MP4 finishing lives in one place
+  (`electron/video-mux.ts`).
+- **Bit-Perfect Mode spike: GO.** Vendored miniaudio opened true WASAPI
+  exclusive mode on real hardware at 48k and 44.1k via a custom N-API addon
+  built with the local VS2022 toolchain. Full integration (the plan's §5) is
+  next. Note: the previous audify/RtAudio plan was disproven — RtAudio's
+  WASAPI backend cannot do exclusive mode.
+
 ## [1.15.0] - 2026-07-02
 
 ### Fixed

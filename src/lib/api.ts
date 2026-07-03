@@ -52,6 +52,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   eqEnabled: false,
   radioBrainEnabled: false,
   radioBrainPort: 17117,
+  radioBrainToken: null,
   audioBitPerfectPath: false,
   audioPreferredSampleRate: null,
   closeButtonBehavior: 'minimize-to-tray',
@@ -201,6 +202,7 @@ const stub: NewAmpAPI = {
   captureVisualizerPng: async () => null,
   copyPngToClipboard: async () => false,
   saveCaptureBytes: async () => null,
+  saveClipMp4: async () => null,
   exportTrackWav: async () => null,
   exportTracksWav: async () => null,
   exportTracksAudio: async () => null,
@@ -217,7 +219,7 @@ const stub: NewAmpAPI = {
   clearTrackVisualMemory: async () => false,
   getVisualMemoryStats: async () => ({ tracksWithMemory: 0, totalSections: 0, oldestAt: null }),
   clearAllVisualMemory: async () => 0,
-  getRadioBrainStatus: async () => ({ enabled: false, port: DEFAULT_SETTINGS.radioBrainPort, baseUrl: null, endpoints: [], startedAt: null, error: null }),
+  getRadioBrainStatus: async () => ({ enabled: false, port: DEFAULT_SETTINGS.radioBrainPort, baseUrl: null, remoteUrl: null, endpoints: [], startedAt: null, error: null }),
   listTagRules: async () => [],
   saveTagRule: async (input) => ({
     id: 0,
@@ -262,6 +264,9 @@ const stub: NewAmpAPI = {
     genreQuery: input.genreQuery ?? null,
     searchQuery: input.searchQuery ?? null,
     minYear: input.minYear ?? null,
+    notPlayedSinceMs: input.notPlayedSinceMs ?? null,
+    dnaEnergyTarget: input.dnaEnergyTarget ?? null,
+    dnaBrightnessTarget: input.dnaBrightnessTarget ?? null,
     maxYear: input.maxYear ?? null,
     minBpm: input.minBpm ?? null,
     maxBpm: input.maxBpm ?? null,
@@ -501,8 +506,16 @@ export const winctl = {
     window.winctl?.setCompactSize?.(size) ?? Promise.resolve(),
   setAlwaysOnTop: (on: boolean) => window.winctl?.setAlwaysOnTop(on) ?? Promise.resolve(),
   close: () => window.winctl?.close() ?? Promise.resolve(),
-  notifyPlayback: (state: { isPlaying: boolean; title: string | null; artist: string | null }) =>
-    window.winctl?.notifyPlayback?.(state),
+  notifyPlayback: (state: {
+    isPlaying: boolean;
+    title: string | null;
+    artist: string | null;
+    album: string | null;
+    trackId: number | null;
+    position: number;
+    duration: number;
+    volume: number;
+  }) => window.winctl?.notifyPlayback?.(state),
   onState: (cb: (s: { maximized: boolean }) => void) =>
     window.winctl?.onState(cb) ?? (() => undefined),
 };

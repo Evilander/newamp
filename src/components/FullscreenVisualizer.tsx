@@ -17,6 +17,8 @@ import { api, winctl } from '../lib/api';
 import type { VisualizerPreset } from '@shared/types';
 import { volumeLabel } from './VolumeSlider';
 import { createCanvasRecorder, CanvasRecorderError, type CanvasRecorder } from '../visualizer/eviland-recorder';
+import { createEvilandLiveCompositor, type LiveCompositor } from '../visualizer/eviland-live-compositor';
+import { createReplayRing, type ReplayRing } from '../visualizer/eviland-replay';
 import { useDetachedVisualizer } from './useDetachedVisualizer';
 import { ScrubBar } from './ScrubBar';
 import { EvilandMemoryBadge } from './EvilandMemoryBadge';
@@ -228,6 +230,12 @@ export function FullscreenVisualizer(): JSX.Element {
   // captureStream videos) when its recording stops. Null when the active
   // recording isn't composited.
   const evilandCompositorStopRef = useRef<(() => void) | null>(null);
+  // Retroactive replay ring ("save what just happened") — armed while the
+  // Eviland Live stage is up on a non-low tier. Shift+R saves the last 15s.
+  const replayRef = useRef<{ ring: ReplayRing; compositor: LiveCompositor; audioDest: MediaStreamAudioDestinationNode | null } | null>(null);
+  const [replayReady, setReplayReady] = useState(false);
+  const [savingClip, setSavingClip] = useState(false);
+  const [clipStatus, setClipStatus] = useState<string | null>(null);
   const levelMeterRef = useRef<HTMLSpanElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   // Eviland popover scratch state: paste-input value, decode-failure flash,
@@ -496,6 +504,9 @@ export function FullscreenVisualizer(): JSX.Element {
       } else if (event.key.toLowerCase() === 'p') {
         event.preventDefault();
         cyclePalette();
+      } else if (event.key.toLowerCase() === 'r' && event.shiftKey) {
+        event.preventDefault();
+        void saveReplayClip();
       } else if (event.key.toLowerCase() === 'r') {
         event.preventDefault();
         cycleReactivity();
@@ -620,6 +631,112 @@ export function FullscreenVisualizer(): JSX.Element {
       evilandRecorderAudioRef.current = null;
     }
   }, [engine]);
+
+  // Arm the replay ring whenever the Eviland Live stage is visible. The
+  // MilkDrop iframe's internal canvas mounts late (preset catalog parse), so
+  // arming retries until the real field canvas exists — falling back to the
+  // 2D painter only after butterchurn has clearly failed (~25s).
+  useEffect(() => {
+    if (activePreset !== 'eviland-live' || perfTier === 'low') return undefined;
+    let cancelled = false;
+    let retryTimer = 0;
+    let attempts = 0;
+    const tryArm = (): void => {
+      if (cancelled || replayRef.current) return;
+      attempts += 1;
+      const root = rootRef.current;
+      if (!root) {
+        retryTimer = window.setTimeout(tryArm, 1200);
+        return;
+      }
+      const iframe = root.querySelector('iframe') as HTMLIFrameElement | null;
+      const bcUp = !!iframe?.contentDocument?.getElementById('bc');
+      if (iframe && !bcUp && attempts < 20) {
+        retryTimer = window.setTimeout(tryArm, 1250);
+        return;
+      }
+      const compositor = createEvilandLiveCompositor(root);
+      if (!compositor) {
+        retryTimer = window.setTimeout(tryArm, 1500);
+        return;
+      }
+      let audioDest: MediaStreamAudioDestinationNode | null = null;
+      let audioStream: MediaStream | undefined;
+      try {
+        audioDest = engine.ctx.createMediaStreamDestination();
+        engine.visualizerNode.connect(audioDest);
+        audioStream = audioDest.stream;
+      } catch {
+        audioDest = null; // video-only ring — still worth having
+      }
+      const ring = createReplayRing(compositor.canvas, { windowMs: 15_000, fps: 30, audioStream });
+      if (!ring) {
+        compositor.stop();
+        if (audioDest) {
+          try { engine.visualizerNode.disconnect(audioDest); } catch { /* ignore */ }
+        }
+        return; // WebCodecs unavailable — feature silently absent
+      }
+      ring.arm();
+      replayRef.current = { ring, compositor, audioDest };
+      setReplayReady(true);
+    };
+    tryArm();
+    return () => {
+      cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      const entry = replayRef.current;
+      replayRef.current = null;
+      setReplayReady(false);
+      if (entry) {
+        entry.ring.disarm();
+        entry.compositor.stop();
+        if (entry.audioDest) {
+          try { engine.visualizerNode.disconnect(entry.audioDest); } catch { /* ignore */ }
+        }
+      }
+    };
+  }, [activePreset, perfTier, engine]);
+
+  const flashClipStatus = (message: string): void => {
+    setClipStatus(message);
+    window.setTimeout(() => setClipStatus(null), 5000);
+  };
+
+  async function saveReplayClip(): Promise<void> {
+    const entry = replayRef.current;
+    if (!entry) {
+      flashClipStatus('Replay is only armed on the Eviland Live preset (and above Lite tier).');
+      return;
+    }
+    if (savingClip) return;
+    setSavingClip(true);
+    try {
+      const blob = await entry.ring.saveClip();
+      if (!blob || !blob.size) {
+        const stats = entry.ring.stats();
+        flashClipStatus(
+          stats.lastError
+            ? `Replay unavailable: ${stats.lastError}`
+            : 'Replay buffer is still filling — try again in a few seconds.',
+        );
+        return;
+      }
+      const dataUrl = await blobToDataUrl(blob);
+      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      const path = await api.saveClipMp4({
+        base64,
+        defaultName: `${captureStem()} - last 15s`,
+        maxHeight: 1080,
+      });
+      flashClipStatus(path ? `Clip saved → ${path}` : 'Save cancelled.');
+    } catch (err) {
+      console.error('[newamp] replay clip save failed:', err);
+      flashClipStatus('Saving the clip failed — see the console for details.');
+    } finally {
+      setSavingClip(false);
+    }
+  }
 
   const captureStem = (): string =>
     current ? `NewAmp - ${current.artist} - ${current.title}` : 'NewAmp Visualizer';
@@ -797,94 +914,16 @@ export function FullscreenVisualizer(): JSX.Element {
       // Eviland Live is a LAYERED composition — MilkDrop field (iframe),
       // scene overlay, reactor events. Recording only the iframe's canvas
       // (the old generic path) silently produced clips of stock MilkDrop with
-      // NewAmp's two signature layers missing. Composite all layers into one
-      // offscreen canvas and record that. WebGL layers are pulled through
-      // captureStream()→<video> (reliable regardless of preserveDrawingBuffer
-      // — drawImage on a WebGL canvas whose buffer was already composited can
-      // read transparent black); the 2D reactor canvas draws directly.
+      // NewAmp's two signature layers missing. The shared compositor renders
+      // what the user actually sees; record that.
       const root = rootRef.current;
-      const iframe = root?.querySelector('iframe') as HTMLIFrameElement | null;
-      const bcCanvas = iframe?.contentDocument?.getElementById('bc') as HTMLCanvasElement | null;
-      const baseCanvas = root?.querySelector('canvas[data-newamp-visualizer-canvas]') as HTMLCanvasElement | null;
-      const sceneCanvas = root?.querySelector('canvas[data-newamp-scene-overlay]') as HTMLCanvasElement | null;
-      const reactorCanvas = root?.querySelector('canvas[data-newamp-reactor-overlay]') as HTMLCanvasElement | null;
-      const field = bcCanvas ?? baseCanvas; // 2D fallback painter when MilkDrop failed
-      if (!field || typeof field.captureStream !== 'function') {
+      const live = root ? createEvilandLiveCompositor(root) : null;
+      if (!live) {
         flashRecordError(null, 'Visualizer is not ready yet — try again in a moment.');
         return;
       }
-
-      const w = Math.max(2, field.width);
-      const h = Math.max(2, field.height);
-      const compositor = document.createElement('canvas');
-      compositor.width = w;
-      compositor.height = h;
-      const ctx = compositor.getContext('2d');
-      if (!ctx) {
-        flashRecordError(null, 'Could not start recording.');
-        return;
-      }
-
-      const cleanups: Array<() => void> = [];
-      const layerVideo = (source: HTMLCanvasElement): HTMLVideoElement | null => {
-        try {
-          const stream = source.captureStream(60);
-          const video = document.createElement('video');
-          video.muted = true;
-          video.srcObject = stream;
-          void video.play().catch(() => undefined);
-          cleanups.push(() => {
-            try {
-              video.pause();
-              video.srcObject = null;
-              for (const track of stream.getTracks()) track.stop();
-            } catch {
-              /* teardown best-effort */
-            }
-          });
-          return video;
-        } catch {
-          return null;
-        }
-      };
-      const fieldVideo = layerVideo(field);
-      const sceneVideo = sceneCanvas ? layerVideo(sceneCanvas) : null;
-      if (!fieldVideo) {
-        for (const fn of cleanups) fn();
-        flashRecordError(null, 'Could not capture the visualizer canvas — try again once it is painting.');
-        return;
-      }
-
-      let compositing = true;
-      const drawLayer = (video: HTMLVideoElement | null): void => {
-        if (video && video.readyState >= 2) {
-          try {
-            ctx.drawImage(video, 0, 0, w, h);
-          } catch {
-            /* layer mid-resize — skip this frame */
-          }
-        }
-      };
-      const paint = (): void => {
-        if (!compositing) return;
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, w, h);
-        drawLayer(fieldVideo);
-        drawLayer(sceneVideo);
-        if (reactorCanvas) {
-          try {
-            ctx.drawImage(reactorCanvas, 0, 0, w, h);
-          } catch {
-            /* 2D layer mid-resize */
-          }
-        }
-        requestAnimationFrame(paint);
-      };
-      requestAnimationFrame(paint);
-      evilandCompositorStopRef.current = () => {
-        compositing = false;
-        for (const fn of cleanups) fn();
-      };
+      const compositor = live.canvas;
+      evilandCompositorStopRef.current = () => live.stop();
 
       let rec: CanvasRecorder;
       try {
@@ -1541,7 +1580,28 @@ export function FullscreenVisualizer(): JSX.Element {
               >
                 {recording ? '■ Stop recording' : '● Record clip'}
               </button>
+              {activePreset === 'eviland-live' && (
+                <button
+                  type="button"
+                  className="pxbtn"
+                  onClick={() => void saveReplayClip()}
+                  disabled={savingClip || !replayReady}
+                  title={
+                    replayReady
+                      ? 'Save the last 15 seconds as an MP4 (Shift+R)'
+                      : 'Replay arms once the Eviland Live stage is up (not on Lite tier)'
+                  }
+                  data-newamp-viz-replay-button
+                >
+                  {savingClip ? 'Saving…' : '⏪ Save last 15s'}
+                </button>
+              )}
             </div>
+            {clipStatus && (
+              <div className="viz-setting-hint" data-newamp-viz-clip-status>
+                {clipStatus}
+              </div>
+            )}
             {recordError && (
               <div
                 className="viz-setting-hint"

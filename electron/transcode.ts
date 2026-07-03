@@ -331,7 +331,7 @@ export function resolveFfmpegPath(): string {
   return staticCandidate && existsSync(staticCandidate) ? staticCandidate : 'ffmpeg';
 }
 
-function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
+export function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     let stderr = '';

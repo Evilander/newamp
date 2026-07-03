@@ -542,6 +542,10 @@ function rowToSmartRule(row: SmartRuleRow): SmartPlaylistRule {
     minRating: row.min_rating,
     lovedOnly: !!row.loved_only,
     unplayedOnly: !!row.unplayed_only,
+    // Ask-mode runtime fields — not persisted for saved rules.
+    notPlayedSinceMs: null,
+    dnaEnergyTarget: null,
+    dnaBrightnessTarget: null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -2425,10 +2429,29 @@ export class LibraryStore {
       params,
     ).map(rowToTrack);
 
+    // DNA re-rank ("warm", "loud", "gentle"…): proximity to the requested
+    // perceptual targets boosts ordering. Deliberately a boost, never a
+    // filter — un-analyzed tracks still surface, just lower.
+    const wantsDna = rule.dnaEnergyTarget != null || rule.dnaBrightnessTarget != null;
+    const dnaIndex = wantsDna ? this.buildDnaIndex() : null;
+    const dnaBoost = (track: Track): number => {
+      if (!dnaIndex) return 0;
+      const dna = dnaIndex.get(track.id);
+      if (!dna) return 0;
+      let boost = 0;
+      if (rule.dnaEnergyTarget != null) {
+        boost += (1 - Math.min(1, Math.abs(dna.rms - rule.dnaEnergyTarget) * 2)) * 1.4;
+      }
+      if (rule.dnaBrightnessTarget != null) {
+        boost += (1 - Math.min(1, Math.abs(dna.brightness - rule.dnaBrightnessTarget) * 2)) * 1.4;
+      }
+      return boost;
+    };
+
     return candidates
       .map((track) => ({
         track,
-        score: scoreSmartTrack(track, rule) + stableJitter(track.id),
+        score: scoreSmartTrack(track, rule) + dnaBoost(track) + stableJitter(track.id),
       }))
       .sort((a, b) =>
         b.score - a.score ||
@@ -4710,7 +4733,15 @@ function normalizeSmartRuleInput(input: SmartPlaylistRuleInput): Omit<SmartPlayl
     minRating: minRating == null ? null : normalizeTrackRating(minRating),
     lovedOnly: !!input.lovedOnly,
     unplayedOnly: !!input.unplayedOnly,
+    notPlayedSinceMs: finiteNumber(input.notPlayedSinceMs),
+    dnaEnergyTarget: clamp01OrNull(input.dnaEnergyTarget),
+    dnaBrightnessTarget: clamp01OrNull(input.dnaBrightnessTarget),
   };
+}
+
+function clamp01OrNull(value: number | null | undefined): number | null {
+  const n = finiteNumber(value);
+  return n == null ? null : Math.min(1, Math.max(0, n));
 }
 
 function normalizeSuggestedGenre(value: string | null | undefined): string | null {
@@ -4797,6 +4828,11 @@ function smartRuleWhere(rule: SmartPlaylistRule): { where: string; params: unkno
   }
   if (rule.lovedOnly) where.push('loved = 1');
   if (rule.unplayedOnly) where.push('play_count = 0');
+  if (rule.notPlayedSinceMs != null) {
+    // "Haven't played since X": never-played counts too.
+    where.push('(last_played IS NULL OR last_played < ?)');
+    params.push(rule.notPlayedSinceMs);
+  }
 
   return { where: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
 }
