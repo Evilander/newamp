@@ -1,0 +1,9 @@
+# Decisions — newamp-master-plan-fable5
+
+One line per decision as the executor makes them. Format: `YYYY-MM-DD — decision — why`.
+
+- 2026-07-02 — Clip Studio pattern = WebCodecs VP9/Opus ring + Mediabunny mux + ffmpeg h264_nvenc finish — MediaRecorder chunk-dropping yields unplayable WebM (cluster/header dependency); stock Electron ships no H.264 WebCodecs encode (electron#38213); bundled ffmpeg verified to carry libx264 + h264_nvenc + aac.
+- 2026-07-02 — Bit-perfect path = vendored miniaudio in a custom N-API addon, NOT audify/RtAudio — RtAudio's WASAPI backend hardcodes AUDCLNT_SHAREMODE_SHARED with exclusive as an unimplemented TODO (verified in master 2026-07-02); docs/audio-quality.md's audify plan is wrong and must be corrected.
+- 2026-07-02 — Ask Your Library compiles to SmartPlaylistRuleInput + post-fetch DNA re-rank, not a live Tags-DSL executor — the SQL path + scoring already exist end-to-end (smart:run); re-rank via buildDnaIndex recovers DNA expressiveness for ordering at a fraction of the work.
+- 2026-07-02 — NewAmp Remote extends radio-brain (one port, one secured server) and its token gate lands FIRST — the server today is 0.0.0.0 with zero auth, already serving library audio LAN-wide.
+- 2026-07-02 — Sequence 1→5 = Clip Studio, Wrapped Live, Remote, Ask, Bit-Perfect; bit-perfect go/no-go spike runs in parallel with #1 — retire the only native-code risk before its slot; mux infra from #1 feeds #2; December deadline holds #2's place.
