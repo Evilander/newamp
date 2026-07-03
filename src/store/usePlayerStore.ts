@@ -303,19 +303,29 @@ let lastPreparedHandoffKey: string | null = null;
 let lastStopAfterCurrentKey: string | null = null;
 let lastPlaybackErrorKey: string | null = null;
 
-// Shell integration (Windows taskbar thumbar + tray tooltip): push a playback
-// snapshot to the main process only when the (playing, track) pair actually
-// changes — the engine notifies at 10Hz during playback and the shell doesn't
-// need any of that.
+// Shell integration (Windows thumbar, tray tooltip, NewAmp Remote): push a
+// playback snapshot to the main process when the (playing, track) pair
+// changes, when volume moves, on seek jumps, and otherwise at most every 5s
+// of position — the engine notifies at 10Hz and neither the shell nor a
+// phone remote needs that (remote clients interpolate between snapshots).
 let lastShellPlaybackKey = '';
+let lastShellPosition = -1;
 function notifyShellPlayback(state: PlayerState): void {
-  const key = `${state.isPlaying ? 1 : 0}|${state.current?.id ?? 'none'}`;
-  if (key === lastShellPlaybackKey) return;
+  const positionBucket = Math.floor(state.currentTime / 5);
+  const seekJump = Math.abs(state.currentTime - lastShellPosition) > 6;
+  const key = `${state.isPlaying ? 1 : 0}|${state.current?.id ?? 'none'}|${positionBucket}|${Math.round(state.volume * 50)}`;
+  if (key === lastShellPlaybackKey && !seekJump) return;
   lastShellPlaybackKey = key;
+  lastShellPosition = state.currentTime;
   winctl.notifyPlayback({
     isPlaying: state.isPlaying,
     title: state.current?.title ?? null,
     artist: state.current?.artist ?? null,
+    album: state.current?.album ?? null,
+    trackId: state.current?.id ?? null,
+    position: state.currentTime,
+    duration: state.duration,
+    volume: state.volume,
   });
 }
 let lastCueEndKey: string | null = null;

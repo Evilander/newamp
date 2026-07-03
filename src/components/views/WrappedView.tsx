@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { WrappedRange, WrappedStats } from '@shared/types';
+import { WrappedLiveExport } from '../WrappedLiveExport';
 import { api } from '../../lib/api';
 import { ArtistLink } from '../EntityLink';
 
@@ -216,6 +217,8 @@ export function WrappedView(): JSX.Element {
             </button>
           </div>
         </header>
+
+        {hasData && stats && <WrappedLiveExport stats={stats} />}
 
         {status && (
           <div className="text-sm" style={{ color: 'var(--accent)' }}>
