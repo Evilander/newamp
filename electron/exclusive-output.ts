@@ -109,11 +109,11 @@ const LOSSLESS_EXTS = new Set(['.flac', '.alac', '.aiff', '.aif', '.ape', '.wv',
 const DSD_EXTS = new Set(['.dsf', '.dff']);
 
 function loadAddon(): NativeAddon | null {
-  // win32: WASAPI exclusive. linux: ALSA direct (miniaudio opens hw: devices
-  // for exclusive share mode, bypassing dmix/PulseAudio). darwin: NOT yet —
-  // miniaudio has no CoreAudio hog-mode; exposing the toggle there would be
-  // a lie. (Tracked in docs/audio-quality.md.)
-  if (process.platform !== 'win32' && process.platform !== 'linux') return null;
+  // win32: WASAPI exclusive (verified). linux: ALSA direct — miniaudio opens
+  // hw: devices for exclusive share mode, bypassing dmix/PulseAudio
+  // (experimental). darwin: CoreAudio hog mode implemented in the addon
+  // itself — device ownership + pinned nominal rate (experimental).
+  if (!['win32', 'linux', 'darwin'].includes(process.platform)) return null;
   const platformArch = `${process.platform}-${process.arch}`;
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [

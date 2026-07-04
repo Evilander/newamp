@@ -105,10 +105,17 @@ Settings → Playback → **Bit-Perfect Exclusive**.
 - The gold `EXCLUSIVE` badge = strict claim: lossless source, rate + bit depth +
   channel layout preserved, no DSD conversion. Anything less shows `EXCLUSIVE*`
   with the exact reason in the tooltip and Settings.
-- **Windows-only v1** (macOS hog-mode is NOT solved by miniaudio; roadmap).
-  Podcasts / non-library sources / cue sheets fall back to the shared path
-  automatically, per-track. Gate: `npm run smoke:exclusive-output` (+ manual
-  `NEWAMP_EXCLUSIVE_SMOKE_HW=1` full exclusive pass).
+- **Platform status:** Windows (WASAPI Exclusive) is the fully verified path.
+  Linux (ALSA direct — miniaudio opens `hw:` devices for exclusive share mode,
+  bypassing dmix/PulseAudio) and macOS (CoreAudio **hog mode** implemented in
+  the addon itself: `kAudioDevicePropertyHogMode` device ownership + pinned
+  nominal sample rate, since miniaudio has no hog-mode of its own) both ship
+  **experimental**: compile+load verified on CI (ubuntu + macos runners) and,
+  for Linux, in a Debian container — real-hardware listening verification is
+  still pending and the UI says so. Podcasts / non-library sources / cue
+  sheets fall back to the shared path automatically, per-track. Gate:
+  `npm run smoke:exclusive-output` (+ manual `NEWAMP_EXCLUSIVE_SMOKE_HW=1`
+  full exclusive pass).
 
 This is the foobar2000/Audirvana/Roon bar, and "bit-perfect available" is now on
 the box honestly.

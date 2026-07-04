@@ -30,7 +30,126 @@
 #include <string>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <CoreAudio/CoreAudio.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <unistd.h>
+#ifndef kAudioObjectPropertyElementMain
+#define kAudioObjectPropertyElementMain kAudioObjectPropertyElementMaster
+#endif
+#endif
+
 namespace {
+
+#if defined(__APPLE__)
+// macOS has no exclusive STREAM mode; the Audirvana/Roon approach is device
+// HOG mode: take whole-device ownership (kAudioDevicePropertyHogMode) and pin
+// the device's nominal sample rate to the source rate, then open the hogged
+// device through miniaudio's normal (shared) path. Exclusivity lives at the
+// device layer. EXPERIMENTAL: compile-verified on CI; unverified on real
+// hardware — the app labels it accordingly.
+AudioObjectID g_hoggedDevice = kAudioObjectUnknown;
+bool g_holdingHog = false;
+Float64 g_priorNominalRate = 0;
+
+AudioObjectID ResolveCoreAudioDevice(const ma_device_id* id) {
+  AudioObjectID device = kAudioObjectUnknown;
+  UInt32 size = sizeof(device);
+  if (id == nullptr) {
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain,
+    };
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &device) !=
+        noErr) {
+      return kAudioObjectUnknown;
+    }
+    return device;
+  }
+  CFStringRef uid =
+      CFStringCreateWithCString(kCFAllocatorDefault, id->coreaudio, kCFStringEncodingUTF8);
+  if (uid == nullptr) return kAudioObjectUnknown;
+  AudioValueTranslation translation = {&uid, sizeof(uid), &device, sizeof(device)};
+  AudioObjectPropertyAddress addr = {
+      kAudioHardwarePropertyDeviceForUID,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain,
+  };
+  size = sizeof(translation);
+  const OSStatus rc =
+      AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, &translation);
+  CFRelease(uid);
+  return rc == noErr ? device : kAudioObjectUnknown;
+}
+
+bool AcquireHogAndRate(const ma_device_id* id, double sampleRate, std::string* error) {
+  const AudioObjectID device = ResolveCoreAudioDevice(id);
+  if (device == kAudioObjectUnknown) {
+    *error = "CoreAudio device resolution failed";
+    return false;
+  }
+  AudioObjectPropertyAddress hogAddr = {
+      kAudioDevicePropertyHogMode,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain,
+  };
+  pid_t owner = -1;
+  UInt32 size = sizeof(owner);
+  AudioObjectGetPropertyData(device, &hogAddr, 0, nullptr, &size, &owner);
+  if (owner != -1 && owner != getpid()) {
+    *error = "device is hogged by another process";
+    return false;
+  }
+  // Pin the device clock to the source rate BEFORE grabbing hog — honest
+  // bit-perfect requires the hardware clock to match, not a hidden resample.
+  AudioObjectPropertyAddress rateAddr = {
+      kAudioDevicePropertyNominalSampleRate,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain,
+  };
+  size = sizeof(g_priorNominalRate);
+  AudioObjectGetPropertyData(device, &rateAddr, 0, nullptr, &size, &g_priorNominalRate);
+  Float64 target = sampleRate;
+  if (AudioObjectSetPropertyData(device, &rateAddr, 0, nullptr, sizeof(target), &target) != noErr) {
+    *error = "device rejected the requested sample rate";
+    return false;
+  }
+  if (owner != getpid()) {
+    pid_t self = getpid();
+    if (AudioObjectSetPropertyData(device, &hogAddr, 0, nullptr, sizeof(self), &self) != noErr) {
+      *error = "failed to acquire CoreAudio hog mode";
+      return false;
+    }
+  }
+  g_hoggedDevice = device;
+  g_holdingHog = true;
+  return true;
+}
+
+void ReleaseHog() {
+  if (!g_holdingHog || g_hoggedDevice == kAudioObjectUnknown) return;
+  AudioObjectPropertyAddress hogAddr = {
+      kAudioDevicePropertyHogMode,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain,
+  };
+  pid_t release = -1;
+  AudioObjectSetPropertyData(g_hoggedDevice, &hogAddr, 0, nullptr, sizeof(release), &release);
+  if (g_priorNominalRate > 0) {
+    AudioObjectPropertyAddress rateAddr = {
+        kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain,
+    };
+    AudioObjectSetPropertyData(g_hoggedDevice, &rateAddr, 0, nullptr, sizeof(g_priorNominalRate),
+                               &g_priorNominalRate);
+  }
+  g_hoggedDevice = kAudioObjectUnknown;
+  g_holdingHog = false;
+  g_priorNominalRate = 0;
+}
+#endif  // __APPLE__
 
 std::string DeviceIdToHex(const ma_device_id& id) {
   static const char* hex = "0123456789abcdef";
@@ -263,6 +382,9 @@ void CloseInternal() {
     ma_device_uninit(&g_player.device);
     g_player.deviceInitialized = false;
   }
+#if defined(__APPLE__)
+  ReleaseHog();
+#endif
   g_player.framesRendered.store(0);
   g_player.underruns.store(0);
   g_player.eos.store(false);
@@ -311,6 +433,20 @@ Napi::Value Open(const Napi::CallbackInfo& info) {
       static_cast<uint64_t>(sampleRate) * g_player.bytesPerFrame * ringMs / 1000;
   g_player.ring.allocate(ringBytes < 65536 ? 65536 : ringBytes);
 
+  bool exclusiveStream = exclusive;
+#if defined(__APPLE__)
+  if (exclusive) {
+    // CoreAudio: exclusivity = device hog + pinned nominal rate; the stream
+    // itself opens through the normal shared path on the hogged device.
+    std::string hogError;
+    if (!AcquireHogAndRate(deviceIdPtr, static_cast<double>(sampleRate), &hogError)) {
+      Napi::Error::New(env, std::string("hog mode: ") + hogError).ThrowAsJavaScriptException();
+      return env.Null();
+    }
+    exclusiveStream = false;
+  }
+#endif
+
   ma_device_config config = ma_device_config_init(ma_device_type_playback);
   config.playback.pDeviceID = deviceIdPtr;
   config.playback.format = format;
@@ -318,13 +454,16 @@ Napi::Value Open(const Napi::CallbackInfo& info) {
   config.sampleRate = sampleRate;
   config.dataCallback = DataCallback;
   config.pUserData = &g_player;
-  config.playback.shareMode = exclusive ? ma_share_mode_exclusive : ma_share_mode_shared;
+  config.playback.shareMode = exclusiveStream ? ma_share_mode_exclusive : ma_share_mode_shared;
   // Never let WASAPI resample behind our back; we either match the device
   // native format or we report the mismatch honestly.
   config.wasapi.noAutoConvertSRC = MA_TRUE;
 
   ma_result rc = ma_device_init(nullptr, &config, &g_player.device);
   if (rc != MA_SUCCESS) {
+#if defined(__APPLE__)
+    ReleaseHog();
+#endif
     Napi::Error::New(env, std::string("ma_device_init: ") + ma_result_description(rc))
         .ThrowAsJavaScriptException();
     return env.Null();

@@ -16,6 +16,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Compile + load health for the Bit-Perfect Exclusive addon on macOS
+  # (CoreAudio hog-mode section). Minimal on purpose: no repo npm ci, just the
+  # addon's own toolchain. Real-hardware verification is a separate, manual
+  # concern — this proves the code builds and the N-API surface loads.
+  native-macos:
+    name: "Native addon · macOS compile + load"
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build addon
+        working-directory: native/newamp-audio
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npx node-gyp rebuild
+      - name: Load + enumerate
+        run: |
+          node -e "const a=require('./native/newamp-audio/build/Release/newamp_audio.node'); const d=a.listDevices(); console.log('mac load OK, devices:', d.length, d.map(x=>x.name).join(', '))"
+
   verify:
     name: Typecheck · Build · Smokes
     runs-on: ubuntu-latest
