@@ -12,7 +12,10 @@
 //   4. opens EXCLUSIVE at a device-native format, pushes 1s of PCM, asserts
 //      requested==internal (honest bit-perfect negotiation), drain, close.
 //
-// Windows-only feature: on other platforms this smoke is a no-op pass.
+// Platforms: win32 (WASAPI) and linux (ALSA direct). Elsewhere: no-op pass.
+// Headless environments (CI containers) legitimately enumerate zero devices —
+// there the pass criteria is build+load+enumerate without crashing, and the
+// playback sections are skipped.
 
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -21,10 +24,17 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const prebuilt = join(root, 'native', 'newamp-audio', 'prebuilt', 'win32-x64', 'newamp_audio.node')
+const prebuilt = join(
+  root,
+  'native',
+  'newamp-audio',
+  'prebuilt',
+  `${process.platform}-${process.arch}`,
+  'newamp_audio.node',
+)
 
-if (process.platform !== 'win32') {
-  console.log('[exclusive-smoke] non-Windows platform — exclusive output is Windows-only, PASS (no-op).')
+if (process.platform !== 'win32' && process.platform !== 'linux') {
+  console.log('[exclusive-smoke] unsupported platform — exclusive output is Windows/Linux, PASS (no-op).')
   process.exit(0)
 }
 
@@ -43,7 +53,13 @@ const addon = createRequire(import.meta.url)(prebuilt)
 
 // -- 1. enumerate + probe ----------------------------------------------------
 const devices = addon.listDevices()
-if (!Array.isArray(devices) || devices.length === 0) fail('no playback devices enumerated')
+if (!Array.isArray(devices)) fail('listDevices did not return an array')
+if (devices.length === 0) {
+  // Headless CI: no audio hardware. Load + enumerate is the whole assertion.
+  console.log('[exclusive-smoke] 0 playback devices (headless environment) — load+enumerate PASS, playback sections skipped.')
+  console.log('[exclusive-smoke] PASS')
+  process.exit(0)
+}
 const def = devices.find((d) => d.isDefault) ?? devices[0]
 console.log(`[exclusive-smoke] ${devices.length} device(s); default: ${def.name}`)
 

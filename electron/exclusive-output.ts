@@ -109,12 +109,17 @@ const LOSSLESS_EXTS = new Set(['.flac', '.alac', '.aiff', '.aif', '.ape', '.wv',
 const DSD_EXTS = new Set(['.dsf', '.dff']);
 
 function loadAddon(): NativeAddon | null {
-  if (process.platform !== 'win32') return null;
+  // win32: WASAPI exclusive. linux: ALSA direct (miniaudio opens hw: devices
+  // for exclusive share mode, bypassing dmix/PulseAudio). darwin: NOT yet —
+  // miniaudio has no CoreAudio hog-mode; exposing the toggle there would be
+  // a lie. (Tracked in docs/audio-quality.md.)
+  if (process.platform !== 'win32' && process.platform !== 'linux') return null;
+  const platformArch = `${process.platform}-${process.arch}`;
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
     // dev: dist-electron/ → repo root; packaged: resources/app.asar/dist-electron
-    join(here, '..', 'native', 'newamp-audio', 'prebuilt', 'win32-x64', 'newamp_audio.node'),
-    join(here, '..', '..', 'native', 'newamp-audio', 'prebuilt', 'win32-x64', 'newamp_audio.node'),
+    join(here, '..', 'native', 'newamp-audio', 'prebuilt', platformArch, 'newamp_audio.node'),
+    join(here, '..', '..', 'native', 'newamp-audio', 'prebuilt', platformArch, 'newamp_audio.node'),
   ].map((p) => (p.includes('app.asar') ? p.replace('app.asar', 'app.asar.unpacked') : p));
   const nativeRequire = createRequire(import.meta.url);
   for (const candidate of candidates) {

@@ -499,6 +499,11 @@ const stub: NewAmpAPI = {
 
 export const inElectron = typeof window !== 'undefined' && !!window.newamp;
 
+/** Platform-correct name for the Bit-Perfect Exclusive native backend. */
+export function exclusiveBackendLabel(): string {
+  return api.platform === 'linux' ? 'ALSA Direct' : 'WASAPI Exclusive';
+}
+
 export const api: NewAmpAPI =
   typeof window !== 'undefined' && window.newamp ? window.newamp : stub;
 

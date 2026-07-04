@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { engine, usePlayerStore } from '../store/usePlayerStore';
+import { exclusiveBackendLabel } from '../lib/api';
 
 /**
  * Always-visible signal-path readout in the transport. Tells the user, in one
@@ -72,18 +73,19 @@ export function SignalPathBadge(): JSX.Element | null {
   if (exclusive.active && exclusive.negotiated) {
     const neg = exclusive.negotiated;
     const rate = formatKhz(neg.sampleRate);
+    const backend = exclusiveBackendLabel();
     if (neg.bitPerfect) {
       label = `${rate} EXCLUSIVE`;
       tone = 'gold';
       title = [
-        `WASAPI Exclusive → ${neg.deviceName}: ${neg.format} @ ${rate}, bit-perfect.`,
+        `${backend} → ${neg.deviceName}: ${neg.format} @ ${rate}, bit-perfect.`,
         'Untouched samples, no OS mixer, no DSP — the DAC gets exactly what is in the file.',
       ].join('\n');
     } else {
       label = `${rate} EXCLUSIVE*`;
       tone = 'ok';
       title = [
-        `WASAPI Exclusive → ${neg.deviceName}: ${neg.format} @ ${rate}. OS mixer bypassed.`,
+        `${backend} → ${neg.deviceName}: ${neg.format} @ ${rate}. OS mixer bypassed.`,
         neg.resampled
           ? neg.sourceSampleRate
             ? `Resampled from ${formatKhz(neg.sourceSampleRate)} by NewAmp (SoX) — the device clock doesn't support the source rate.${neg.dsd ? ' (DSD → PCM conversion.)' : ''}`

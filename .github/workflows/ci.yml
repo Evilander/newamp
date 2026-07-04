@@ -38,6 +38,15 @@ jobs:
       - name: Build (vite renderer + electron main)
         run: npm run build
 
+      - name: Native addon — build + load (Bit-Perfect Exclusive, ALSA lane)
+        # Compiles native/newamp-audio for linux-x64, loads it, and enumerates
+        # devices (zero on this headless runner — the assertion is that the
+        # cross-platform build lane and N-API surface stay healthy).
+        run: npm run build:native -- --force
+
+      - name: Smoke — exclusive output addon (headless: build+load+enumerate)
+        run: npm run smoke:exclusive-output
+
       - name: Smoke — build lock
         run: npm run smoke:build-lock
 
