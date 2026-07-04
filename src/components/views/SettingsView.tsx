@@ -12,7 +12,7 @@ import type {
   SupportRestoreResult,
 } from '@shared/types';
 import { engine, usePlayerStore } from '../../store/usePlayerStore';
-import { api, inElectron, DEFAULT_SETTINGS } from '../../lib/api';
+import { api, inElectron, DEFAULT_SETTINGS, exclusiveBackendLabel } from '../../lib/api';
 import { AI_ASSIST_OPTIONS } from '../../lib/aiAssist';
 import { SKIN_VARIABLES, readCurrentSkinVariables } from '../../lib/skins';
 import { normalizeAudioOutputDeviceId, uniqueAudioOutputDevices } from '@shared/audio-output';
@@ -699,7 +699,7 @@ export function SettingsView(): JSX.Element {
                 <>
                   <span>{(exclusiveLive.negotiated.sampleRate / 1000).toFixed(1)} kHz</span>
                   <span>
-                    {exclusiveLive.negotiated.format} / WASAPI Exclusive (native)
+                    {exclusiveLive.negotiated.format} / {exclusiveBackendLabel()} (native)
                   </span>
                 </>
               ) : (
@@ -1388,7 +1388,9 @@ function ExclusiveModeRow({
             data-newamp-exclusive-toggle
           />
           <span className="font-bold" style={{ color: '#d4a935' }}>Bit-Perfect Exclusive</span>
-          <span style={{ color: 'var(--muted)' }}>· native WASAPI, untouched samples to the DAC</span>
+          <span style={{ color: 'var(--muted)' }}>
+            · native {exclusiveBackendLabel()}, untouched samples to the DAC
+          </span>
         </label>
         <span className="ml-auto flex items-center gap-2 text-[12px]" style={{ color: 'var(--ink-2)' }}>
           <span>Device</span>
@@ -1411,7 +1413,9 @@ function ExclusiveModeRow({
       </div>
       {supported === false && (
         <div className="text-[11px]" style={{ color: 'var(--muted)' }}>
-          Requires Windows (WASAPI). macOS hog-mode and Linux ALSA direct are on the roadmap.
+          Available on Windows (WASAPI Exclusive); Linux (ALSA direct) is built but still
+          experimental — real-hardware verification pending. macOS hog-mode needs
+          CoreAudio-specific work and is on the roadmap.
         </div>
       )}
       {negotiated && (
