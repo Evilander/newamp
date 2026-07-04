@@ -92,6 +92,8 @@ if (!skipSmokes) {
     'smoke:session',
     'smoke:chrome-state',
     'smoke:audio-output',
+    'smoke:exclusive-output',
+    'smoke:exclusive-ui',
     'smoke:audio-limiter',
     'smoke:ui-playback',
     'smoke:audio-proof',

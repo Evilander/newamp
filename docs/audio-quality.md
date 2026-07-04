@@ -55,7 +55,8 @@ through an ffmpeg transcode.
 - **You cannot be bit-perfect through vanilla Electron.** Web Audio → Chromium →
   **WASAPI shared mode** (Windows) / shared CoreAudio (macOS). The OS mixer is always
   in the path and resamples to the device format. Chrome's `--enable-exclusive-audio`
-  flag has been broken for years.
+  flag has been broken for years. (This ceiling is exactly why Bit-Perfect Exclusive
+  below bypasses the Web Audio path entirely with a native addon.)
 - **Matching the AudioContext sample rate to the source per track buys nothing.** The
   Web Audio spec *mandates* the UA resample AudioContext → device when they differ,
   and the device rate is whatever the OS picked. Per-track context recreation just
@@ -71,19 +72,46 @@ through an ffmpeg transcode.
 this is transparent to ears and DACs. We are NOT bit-perfect and should not claim it
 without the native path below.
 
-## The only real bit-perfect path (future, needs native code)
+## The real bit-perfect path (SHIPPED — Bit-Perfect Exclusive, Windows)
 
-Ship an **opt-in native output backend** (default users stay on Web Audio):
-- **`audify`** (N-API bindings to **RtAudio**; prebuilds cover current Electron) →
-  **WASAPI exclusive** on Windows, **CoreAudio hog mode** on macOS, optional ASIO.
-- Decode via WebCodecs `AudioDecoder` (or a hidden OfflineAudioContext), IPC the
-  float32 PCM to the main process, push frames into the exclusive endpoint with **no
-  intervening conversion** and **automatic device sample-rate switching** per track.
-- Dither only at a float→int24/int16 boundary (TPDF, once) if the DAC needs integer.
+**v1.17.0 ships an opt-in native output backend** (default users stay on Web Audio):
+Settings → Playback → **Bit-Perfect Exclusive**.
 
-This is the foobar2000/Audirvana/Roon bar. ~2 weeks for a robust implementation
-(exclusive-mode failure handling, single-output locking, rate-switch gaps). It is the
-single highest-impact change to put "bit-perfect available" on the box honestly.
+- **NOT `audify`/RtAudio** — the plan above this section used to recommend it, but
+  RtAudio's WASAPI backend hardcodes `AUDCLNT_SHAREMODE_SHARED`; exclusive mode is a
+  literal unimplemented `TODO` in its source (verified against master, 2026-07-02).
+  Instead: **vendored `miniaudio`** in a first-party N-API addon
+  (`native/newamp-audio/`, NAPI_VERSION=8 → ABI-stable across Node/Electron, loads
+  in Electron 42 with no electron-rebuild).
+- **Decode in the main process**: `ffmpeg → raw PCM ints/floats` piped straight into
+  a lock-free ring drained by the WASAPI callback (`electron/exclusive-output.ts`).
+  No WebCodecs, no renderer round-trip, no float detour for integer sources — a
+  16-bit FLAC leaves ffmpeg as the same s16 words the encoder stored.
+- **Probe-driven honest negotiation**: the stream format is chosen from the device's
+  *native* exclusive formats (`probeDevice()`). If the source rate isn't natively
+  supported, NewAmp resamples **explicitly** (soxr, precision 28) and *says so* —
+  the badge shows `EXCLUSIVE*` instead of gold, because miniaudio would otherwise
+  insert a hidden converter (observed live: a Focusrite clocked at 48 kHz silently
+  resampled a 44.1 kHz exclusive stream; `internalSampleRate` exposes it and the
+  driver refuses dishonest opens).
+- **No DSP, structurally**: EQ, ReplayGain, crossfade, limiter, preamp and software
+  volume are out of the path (and grayed in the UI). Volume is your DAC's knob.
+  Visualizers stay live via a 30 Hz playhead-aligned PCM tap → spec-faithful
+  AnalyserNode emulation (`src/audio/exclusive-tap.ts`).
+- **Gapless over exclusive**: when the next track negotiates the identical device
+  format it is spliced into the same ring at the exact frame boundary. Rate changes
+  re-open the device with a deliberate audible micro-gap (same behavior as
+  foobar2000). Pause relinquishes the device after ~15 s so system audio returns.
+- The gold `EXCLUSIVE` badge = strict claim: lossless source, rate + bit depth +
+  channel layout preserved, no DSD conversion. Anything less shows `EXCLUSIVE*`
+  with the exact reason in the tooltip and Settings.
+- **Windows-only v1** (macOS hog-mode is NOT solved by miniaudio; roadmap).
+  Podcasts / non-library sources / cue sheets fall back to the shared path
+  automatically, per-track. Gate: `npm run smoke:exclusive-output` (+ manual
+  `NEWAMP_EXCLUSIVE_SMOKE_HW=1` full exclusive pass).
+
+This is the foobar2000/Audirvana/Roon bar, and "bit-perfect available" is now on
+the box honestly.
 
 **Second-highest (still no native code):** replace `MediaElementSource` with
 **WebCodecs `AudioDecoder` → AudioWorklet** for sample-accurate **gapless** (trim

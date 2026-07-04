@@ -32,3 +32,7 @@ npm-debug.log*
 *.crt
 
 codex.md
+
+# native addon build artifacts (prebuilt/ IS committed; these are not)
+native/newamp-audio/build/
+native/newamp-audio/node_modules/

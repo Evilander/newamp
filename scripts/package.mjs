@@ -17,6 +17,11 @@ await pruneObsoleteReleaseArtifacts(releaseVersion);
 await mkdir(packageTemp, { recursive: true });
 
 run('npm', ['run', 'build']);
+// Windows-only WASAPI-exclusive addon: no-ops on other platforms and when the
+// staged prebuilt binary is already newer than its sources. Plain 'node' (not
+// process.execPath): run() shells out, and a quoted spaces-in-path executable
+// breaks cmd.exe's argument parsing.
+run('node', [join(repoRoot, 'scripts', 'build-native.mjs')]);
 
 const electronBuilder = join(
   repoRoot,

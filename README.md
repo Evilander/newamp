@@ -46,6 +46,7 @@ It scales to **tens of thousands of tracks** (tested at 60k+), runs entirely on 
 - **Artist facts and images** — musician-first artist context and large artist images without confusing bands for species, cities, albums, or other same-name pages
 - **Custom playlists** — create named playlists, reorder tracks, export portable folders, and pick or drop playlist artwork for the playlist icon
 - **Native guitar tab companion** — cache local/Ultimate Guitar-style tabs and pop out a native tab window when a playable match exists
+- **Bit-Perfect Exclusive (Windows)** — true WASAPI-exclusive output through NewAmp's own native engine (vendored miniaudio, first-party N-API addon): ffmpeg decodes straight to raw PCM in the main process and a lock-free ring feeds the DAC — no Chromium, no Web Audio, no OS mixer. Probe-driven honest negotiation (device-native formats only; explicit SoX resample *with a label* when the device clock can't run the source rate), gapless track splicing over the exclusive stream, automatic per-track fallback for podcasts/cue sheets, and a gold `EXCLUSIVE` transport badge that only lights for the strict claim: lossless source, rate + depth + channels preserved. Visualizers keep reacting via a 30 Hz native PCM tap. This is the foobar2000/Audirvana bar, with the honesty printed on the tin
 - **Audiophile chain** - WASAPI on Windows, Chromium system audio on Linux, ReplayGain (per-track + per-album), crossfade/gapless playback checks, software limiter, 10-band EQ, lossless WAV export of any track, output-device picker with test tone where the OS exposes it
 - **Format & signal-path honesty** — FLAC / 24-96 hi-res / DSD64-1024 badges on track rows and Now Playing (derived from real sample rates, not marketing tags), plus a live transport badge that tells you whether Chromium is passing your source rate straight through ("44.1k DIRECT") or resampling it ("44.1k→48k RESAMPLED") — one click from the full signal-chain readout in Settings → Audio
 - **CUE sheet playback** — one-file albums split into playable, seekable tracks with performer/title/year/genre metadata
@@ -144,6 +145,7 @@ Custom skins:
 ## Audio
 
 - Outputs through Web Audio's `AudioContext`. On Windows this uses the selected WASAPI device; on Linux it uses the system audio stack exposed to Chromium, typically PipeWire or PulseAudio.
+- **Bit-Perfect Exclusive** (Settings → Playback, Windows): bypasses that whole path with a native WASAPI-exclusive engine. All DSP below (ReplayGain, limiter, EQ, volume, crossfade) is structurally out of the chain while it plays — the settings gray out and say so. See `docs/audio-quality.md` for the full signal-path story.
 - ReplayGain: tracks parsed for `replaygain_track_gain` / `replaygain_album_gain` tags. Per-track or per-album mode selectable.
 - Software peak limiter sits in the chain by default and can be toggled with a single preamp dB control.
 - Volume slider goes to 200% with a red-zone past unity (`+6 dB`) — like VLC. The amp runs after the limiter so over-100% boost stays clean.

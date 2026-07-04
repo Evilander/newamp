@@ -15,6 +15,9 @@ import type {
   CustomSkin,
   DiscoverSurface,
   DiscoverSurfaceInput,
+  ExclusiveDeviceInfo,
+  ExclusiveEventPayload,
+  ExclusivePlayResult,
   ExportTracksFolderInput,
   GuitarTabDocument,
   GuitarTabSearchQuery,
@@ -345,6 +348,28 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tabs:local:find', trackId) as Promise<CachedGuitarTab | null>,
   openGuitarTabWindow: (document: GuitarTabDocument, startAutoscroll?: boolean) =>
     ipcRenderer.invoke('tabs:window:open', document, !!startAutoscroll) as Promise<void>,
+  exclusiveSupported: () => ipcRenderer.invoke('exclusive:supported') as Promise<boolean>,
+  exclusiveListDevices: () =>
+    ipcRenderer.invoke('exclusive:list-devices') as Promise<ExclusiveDeviceInfo[]>,
+  exclusivePlay: (trackId: number, startAt?: number) =>
+    ipcRenderer.invoke('exclusive:play', trackId, startAt ?? 0) as Promise<ExclusivePlayResult>,
+  exclusivePause: () => ipcRenderer.invoke('exclusive:pause') as Promise<void>,
+  exclusiveResume: () => ipcRenderer.invoke('exclusive:resume') as Promise<void>,
+  exclusiveStop: () => ipcRenderer.invoke('exclusive:stop') as Promise<void>,
+  exclusiveSeek: (seconds: number) => ipcRenderer.invoke('exclusive:seek', seconds) as Promise<void>,
+  exclusivePrepareNext: (trackId: number | null) =>
+    ipcRenderer.invoke('exclusive:prepare-next', trackId) as Promise<void>,
+  onExclusiveEvent: (cb) => {
+    const handler = (_e: unknown, payload: ExclusiveEventPayload) => cb(payload);
+    ipcRenderer.on('exclusive:event', handler);
+    return () => ipcRenderer.off('exclusive:event', handler);
+  },
+  onExclusiveTap: (cb) => {
+    const handler = (_e: unknown, tap: { pcm: Float32Array; channels: number; sampleRate: number }) =>
+      cb(tap);
+    ipcRenderer.on('exclusive:tap', handler);
+    return () => ipcRenderer.off('exclusive:tap', handler);
+  },
   ...readAppInfo(),
 };
 

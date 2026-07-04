@@ -57,6 +57,7 @@ import { finishWebmToMp4 } from './video-mux.js';
 import { isAllowedAudioPath } from './audio-path-policy.js';
 import { analyzeTrackDna } from './dna-analyzer.js';
 import { RadioBrain } from './radio-brain.js';
+import { ExclusiveOutput, classifyTrackSource } from './exclusive-output.js';
 import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
 import { exportPlaylistFolder } from './playlist-export.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
@@ -67,8 +68,10 @@ import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import { buildAppMenuTemplate } from './app-menu.js';
 import type {
+  AppSettings,
   CustomSkin,
   DiscoverSurfaceInput,
+  ExclusiveTrackSource,
   AiLinerNotesInput,
   ExportTracksFolderInput,
   AudioExportFormat,
@@ -108,6 +111,7 @@ const uiDetachedVizSmoke = process.env.NEWAMP_UI_DETACHED_VIZ_SMOKE === '1';
 const uiDeckSmoke = process.env.NEWAMP_UI_DECK_SMOKE === '1';
 const uiArtSmoke = process.env.NEWAMP_UI_ART_SMOKE === '1';
 const uiDiscoverSmoke = process.env.NEWAMP_UI_DISCOVER_SMOKE === '1';
+const exclusiveUiSmoke = process.env.NEWAMP_EXCLUSIVE_UI_SMOKE === '1';
 const screenshotGallery = process.env.NEWAMP_SCREENSHOT_GALLERY === '1';
 const smokeMode =
   startupSmoke ||
@@ -122,6 +126,7 @@ const smokeMode =
   uiDeckSmoke ||
   uiArtSmoke ||
   uiDiscoverSmoke ||
+  exclusiveUiSmoke ||
   screenshotGallery;
 // Hardware acceleration defaults ON. NewAmp is a real-time WebGL visualizer
 // (Butterchurn) plus GPU-composited, audio-reactive chrome — it MUST run on the
@@ -410,6 +415,62 @@ let libraryWatcher: LibraryWatcher;
 let lastfmOutbox: LastfmScrobbleOutbox;
 let podcastStore: PodcastStore;
 let radioBrain: RadioBrain | null = null;
+let exclusiveOutput: ExclusiveOutput | null = null;
+
+function getExclusiveOutput(): ExclusiveOutput {
+  if (!exclusiveOutput) {
+    exclusiveOutput = new ExclusiveOutput({
+      send: (payload) => {
+        if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('exclusive:event', payload);
+      },
+      sendTap: (pcm, channels, sampleRate) => {
+        if (mainWin && !mainWin.isDestroyed()) {
+          mainWin.webContents.send('exclusive:tap', { pcm, channels, sampleRate });
+        }
+      },
+    });
+  }
+  return exclusiveOutput;
+}
+
+// Per-file format probe cache (bit depth / channel count aren't in the library
+// DB). Keyed on path+mtime so edits invalidate naturally.
+const exclusiveSourceCache = new Map<string, ExclusiveTrackSource>();
+
+async function resolveExclusiveSource(trackId: number): Promise<ExclusiveTrackSource | null> {
+  // The library lookup IS the access gate: only real DB rows resolve, same
+  // trust level as 'library:get-track'.
+  const track = library?.getTrack(trackId);
+  if (!track) return null;
+  const cacheKey = `${track.path}:${track.mtime}`;
+  const cached = exclusiveSourceCache.get(cacheKey);
+  if (cached) return { ...cached, trackId };
+  const classified = classifyTrackSource(track.path);
+  const source: ExclusiveTrackSource = {
+    trackId,
+    path: track.path,
+    sampleRate: track.sampleRate,
+    bitDepth: null,
+    channels: null,
+    durationSec: track.duration,
+    ...classified,
+  };
+  try {
+    const { parseFile } = await import('music-metadata');
+    const meta = await parseFile(track.path, { duration: false, skipCovers: true });
+    source.bitDepth = meta.format.bitsPerSample ?? null;
+    source.channels = meta.format.numberOfChannels ?? null;
+    source.sampleRate = meta.format.sampleRate ?? track.sampleRate;
+    if (typeof meta.format.lossless === 'boolean' && !classified.dsd) {
+      source.lossless = meta.format.lossless;
+    }
+  } catch {
+    // DB metadata + extension classification is an honest fallback.
+  }
+  if (exclusiveSourceCache.size > 500) exclusiveSourceCache.clear();
+  exclusiveSourceCache.set(cacheKey, source);
+  return source;
+}
 let pendingOpenFiles = collectOpenFileArgs(process.argv);
 
 // Session opened-files allowlist for the `newamp:` protocol (todo 005). Every
@@ -459,6 +520,7 @@ function createWindow(): BrowserWindow {
     show: false,
     frame: false,
     titleBarStyle: 'hidden',
+    icon: resolveWindowIconPath(),
     ...(isMac
       ? { trafficLightPosition: { x: 14, y: 13 }, backgroundColor: '#0b0b10' }
       : { transparent: true, backgroundColor: '#00000000' }),
@@ -643,6 +705,7 @@ function openDetachedVisualizer(opts: { displayId?: number; fullscreen?: boolean
     backgroundColor: '#000000',
     autoHideMenuBar: true,
     title: 'NewAmp — Eviland',
+    icon: resolveWindowIconPath(),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1227,6 +1290,17 @@ function applyShellPlaybackState(state: ShellPlaybackState): void {
       /* tray torn down mid-update */
     }
   }
+}
+
+/**
+ * Windows-only: explicit BrowserWindow icon so the taskbar renders our icon
+ * directly instead of falling back to the exe resource through the shell's
+ * (cache-prone) associated-icon path. Same mixed-format ICO the tray uses:
+ * BMP frames <256 for the tray decode path, PNG at 256 for the taskbar/
+ * high-res shell path (see scripts/rebuild-icon.mjs).
+ */
+function resolveWindowIconPath(): string | undefined {
+  return resolveTrayIconPath() ?? undefined;
 }
 
 /** Windows-only: the packaged/dev .ico path, for shell-native frame selection. */
@@ -1928,8 +2002,52 @@ function registerIpc(): void {
     const updated = settings.set(patch);
     syncLibraryWatcher();
     void syncRadioBrain();
+    // Turning exclusive mode off releases the WASAPI device immediately so
+    // system audio (and the Web Audio path) come back without a restart.
+    if (patch && typeof patch === 'object' && (patch as Partial<AppSettings>).bitPerfectExclusive === false) {
+      exclusiveOutput?.stop();
+    }
     return updated;
   });
+
+  // ---- Bit-Perfect Exclusive output (native WASAPI, Windows) ----------------
+  ipcMain.handle('exclusive:supported', async () => getExclusiveOutput().available);
+  ipcMain.handle('exclusive:list-devices', async () => getExclusiveOutput().listDevices());
+  // Request-ordering guard: resolveExclusiveSource awaits a metadata probe, so
+  // two rapid play requests can resolve OUT of order (track A's probe slower
+  // than track B's) — without this, the STALE play would win and the audible
+  // track would not match the UI.
+  let exclusivePlaySeq = 0;
+  ipcMain.handle('exclusive:play', async (_e, trackId: number, startAt?: number) => {
+    const requestSeq = ++exclusivePlaySeq;
+    try {
+      const source = await resolveExclusiveSource(Math.trunc(Number(trackId)));
+      if (requestSeq !== exclusivePlaySeq) return { ok: false, error: 'Superseded by a newer play request.' };
+      if (!source) return { ok: false, error: 'Track not found or not playable.' };
+      const deviceId = settings.get().bitPerfectExclusiveDeviceId;
+      const result = await getExclusiveOutput().play(source, Number(startAt) || 0, deviceId);
+      return { ok: true, chained: result.chained, negotiated: result.negotiated };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle('exclusive:pause', async () => getExclusiveOutput().pause());
+  ipcMain.handle('exclusive:resume', async () =>
+    getExclusiveOutput().resume(settings.get().bitPerfectExclusiveDeviceId),
+  );
+  ipcMain.handle('exclusive:stop', async () => getExclusiveOutput().stop());
+  ipcMain.handle('exclusive:seek', async (_e, seconds: number) =>
+    getExclusiveOutput().seek(Number(seconds) || 0),
+  );
+  ipcMain.handle('exclusive:prepare-next', async (_e, trackId: number | null) => {
+    if (trackId == null) {
+      getExclusiveOutput().prepareNext(null);
+      return;
+    }
+    const source = await resolveExclusiveSource(Math.trunc(Number(trackId)));
+    getExclusiveOutput().prepareNext(source);
+  });
+
   ipcMain.handle('radio-brain:status', async () => {
     if (!radioBrain) return { enabled: false, port: settings.get().radioBrainPort, baseUrl: null, endpoints: [], startedAt: null, error: null };
     return radioBrain.status();
@@ -2367,6 +2485,90 @@ function registerIpc(): void {
       at: Date.now(),
     });
   });
+}
+
+async function runExclusiveUiSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
+  try {
+    await Promise.race([
+      scanPromise,
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for exclusive UI smoke scan')), 15000),
+      ),
+    ]);
+    await reloadForSmoke(win);
+    const result = await Promise.race([
+      win.webContents.executeJavaScript(exclusiveUiProbeSource(), true),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for exclusive UI probe')), 25000),
+      ),
+    ]);
+    console.log(`[newamp-exclusive-ui-smoke] ${JSON.stringify(result)}`);
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    console.error('[newamp-exclusive-ui-smoke] failed:', err);
+    app.exit(1);
+  }
+}
+
+function exclusiveUiProbeSource(): string {
+  return `
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (label, fn, timeout = 10000) => {
+        const start = performance.now();
+        while (performance.now() - start < timeout) {
+          const value = fn();
+          if (value) return value;
+          await sleep(75);
+        }
+        throw new Error('Timed out waiting for ' + label);
+      };
+      const libraryButton = await waitFor('Library navigation', () =>
+        Array.from(document.querySelectorAll('button'))
+          .find((item) => (item.textContent || '').includes('Library')),
+      );
+      libraryButton.click();
+      const row = await waitFor('library track row', () =>
+        Array.from(document.querySelectorAll('[data-newamp-track-row]'))
+          .find((item) => /Exclusive Smoke/.test(item.textContent || '')),
+      );
+      row.scrollIntoView({ block: 'center' });
+      row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window }));
+      // The native path must actually engage — not fall back silently.
+      await waitFor(
+        'exclusive path active',
+        () => (window.__newampSmoke?.exclusiveInfo?.().active === true ? true : null),
+        12000,
+      );
+      const info = window.__newampSmoke.exclusiveInfo();
+      // Position must advance from the native framesRendered counter.
+      await waitFor('exclusive clock advancement', () => {
+        const el = document.querySelector('[data-newamp-current-time]');
+        return Number(el?.getAttribute('data-newamp-current-time') || '0') > 0.8 ? true : null;
+      }, 10000);
+      // The Web Audio graph is silent in exclusive mode, so ANY analyser
+      // energy proves the 30Hz native PCM tap -> AnalyserNode emulation path.
+      let fftSum = 0;
+      for (let i = 0; i < 40 && fftSum === 0; i++) {
+        fftSum = window.__newampSmoke.analyserFftSum();
+        if (fftSum === 0) await sleep(100);
+      }
+      const currentTime = Number(
+        document.querySelector('[data-newamp-current-time]')?.getAttribute('data-newamp-current-time') || '0',
+      );
+      const playing = !!document.querySelector('[data-newamp-transport][data-newamp-playing="true"]');
+      return {
+        ok: true,
+        exclusiveActive: info.active,
+        negotiated: info.negotiated,
+        fallbackReason: info.fallbackReason,
+        currentTime,
+        playing,
+        fftSum,
+      };
+    })()
+  `;
 }
 
 async function runUiPlaybackSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
@@ -3990,6 +4192,7 @@ function openGuitarTabWindow(document: GuitarTabDocument, startAutoscroll: boole
     backgroundColor: '#060a0e',
     autoHideMenuBar: true,
     show: false,
+    icon: resolveWindowIconPath(),
     parent: mainWin ?? undefined,
     webPreferences: {
       contextIsolation: true,
@@ -4581,6 +4784,8 @@ async function bootstrap(): Promise<void> {
       void runUiArtSmoke(mainWin, scanPromise);
     } else if (uiDiscoverSmoke && mainWin) {
       void runUiDiscoverSmoke(mainWin);
+    } else if (exclusiveUiSmoke && mainWin) {
+      void runExclusiveUiSmoke(mainWin, scanPromise);
     } else if (screenshotGallery && mainWin) {
       void runScreenshotGallery(mainWin, scanPromise);
     }
@@ -4621,6 +4826,13 @@ app.on('render-process-gone', (_event, webContents, details) => {
   });
 });
 
+// Explicit AppUserModelID (matches build.appId / the NSIS shortcut) so the
+// Windows taskbar groups NewAmp windows under our identity and resolves the
+// icon from our shortcut instead of a stale shell-cache entry.
+if (process.platform === 'win32') {
+  app.setAppUserModelId('io.newamp.player');
+}
+
 if (!singleInstanceLock) {
   app.quit();
 } else {
@@ -4648,6 +4860,7 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   closeStartupSplashWindow();
   libraryWatcher?.stop();
+  exclusiveOutput?.dispose();
   tray?.destroy();
   tray = null;
 });

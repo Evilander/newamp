@@ -1,0 +1,9 @@
+{
+  "name": "newamp-audio-native",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NewAmp native audio output: WASAPI exclusive via vendored miniaudio + N-API (NAPI_VERSION=8, ABI-stable across Node/Electron)",
+  "dependencies": {
+    "node-addon-api": "^8.3.0"
+  }
+}

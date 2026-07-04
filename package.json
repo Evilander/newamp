@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "1.16.0",
+  "version": "1.17.0",
   "description": "A Winamp-inspired modern desktop music player for macOS, Windows, and Linux. Your local library, your rules, no streaming required. Features Resonance — the whole UI reacts to your live audio — plus NewAmp Wrapped, a GPU particle visualizer + real MilkDrop, four UI shells, shape-changing deck skins, perceptual 0-200% volume, 0-100 decimal track scoring, and a magazine-style home. GPU-accelerated and tuned to stay light on weak hardware.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
@@ -146,6 +146,10 @@
     "smoke:clip-replay": "npm run build:electron && electron scripts/clip-replay-smoke.mjs",
     "smoke:wrapped-live": "electron scripts/wrapped-live-smoke.mjs",
     "smoke:remote": "npm run build:electron && node scripts/remote-smoke.mjs",
+    "smoke:exclusive-output": "node scripts/exclusive-smoke.mjs",
+    "smoke:exclusive-ui": "npm run build && node scripts/exclusive-ui-smoke.mjs",
+    "build:native": "node scripts/build-native.mjs",
+    "build:icon": "node scripts/rebuild-icon.mjs",
     "smoke:ui-discover": "npm run build && node scripts/ui-discover-smoke.mjs",
     "smoke:ui-deck": "npm run build && node scripts/ui-deck-smoke.mjs",
     "smoke:ui-art": "npm run build && node scripts/ui-art-smoke.mjs",
@@ -237,6 +241,7 @@
       "build/logo-app.webp",
       "build/icon.png",
       "build/icon.ico",
+      "native/newamp-audio/prebuilt/**/*",
       "node_modules/ffmpeg-static/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm",
       "package.json"
@@ -258,6 +263,7 @@
       }
     ],
     "asarUnpack": [
+      "native/newamp-audio/prebuilt/**/*",
       "node_modules/ffmpeg-static/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm"
     ],
