@@ -44,7 +44,7 @@ jobs:
         # cross-platform build lane and N-API surface stay healthy).
         run: npm run build:native -- --force
 
-      - name: Smoke — exclusive output addon (headless: build+load+enumerate)
+      - name: "Smoke — exclusive output addon (headless build+load+enumerate)"
         run: npm run smoke:exclusive-output
 
       - name: Smoke — build lock
