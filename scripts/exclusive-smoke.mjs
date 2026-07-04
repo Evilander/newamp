@@ -33,8 +33,8 @@ const prebuilt = join(
   'newamp_audio.node',
 )
 
-if (process.platform !== 'win32' && process.platform !== 'linux') {
-  console.log('[exclusive-smoke] unsupported platform — exclusive output is Windows/Linux, PASS (no-op).')
+if (!['win32', 'linux', 'darwin'].includes(process.platform)) {
+  console.log('[exclusive-smoke] unsupported platform — PASS (no-op).')
   process.exit(0)
 }
 
