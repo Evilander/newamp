@@ -853,6 +853,12 @@ export interface CustomSkin {
   updatedAt: number;
 }
 
+/** Settings with sensitive credentials removed — safe to expose to untrusted/renderer contexts. */
+export type ClientSafeAppSettings = Omit<
+  AppSettings,
+  'openaiApiKey' | 'lastfmApiKey' | 'lastfmSharedSecret' | 'lastfmSessionKey' | 'lastfmAuthToken' | 'radioBrainToken'
+>;
+
 export interface AppSettings {
   libraryRoots: string[];
   libraryAutoWatch: boolean;
