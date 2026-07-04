@@ -44,6 +44,8 @@ const DEFAULTS: AppSettings = {
   radioBrainToken: null,
   audioBitPerfectPath: false,
   audioPreferredSampleRate: null,
+  bitPerfectExclusive: false,
+  bitPerfectExclusiveDeviceId: null,
   closeButtonBehavior: 'minimize-to-tray',
   performanceTier: 'auto',
   ambientReactivity: 'auto',
@@ -54,6 +56,13 @@ function normalizePreferredSampleRate(value: unknown): number | null {
   const rate = Math.trunc(Number(value));
   const ALLOWED = new Set([44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000]);
   return ALLOWED.has(rate) ? rate : null;
+}
+
+function normalizeExclusiveDeviceId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().toLowerCase();
+  // Hex-encoded ma_device_id from the native addon.
+  return /^[0-9a-f]{2,1024}$/.test(trimmed) ? trimmed : null;
 }
 
 function normalizeRadioBrainPort(value: unknown): number {
@@ -166,6 +175,8 @@ export class SettingsStore {
           radioBrainToken: normalizeOptionalSecret(parsed.radioBrainToken),
           audioBitPerfectPath: parsed.audioBitPerfectPath === true,
           audioPreferredSampleRate: normalizePreferredSampleRate(parsed.audioPreferredSampleRate),
+          bitPerfectExclusive: parsed.bitPerfectExclusive === true,
+          bitPerfectExclusiveDeviceId: normalizeExclusiveDeviceId(parsed.bitPerfectExclusiveDeviceId),
           closeButtonBehavior: normalizeCloseButtonBehavior(parsed.closeButtonBehavior),
           performanceTier: normalizePerformanceTier(parsed.performanceTier),
           ambientReactivity: normalizeAmbientReactivity(parsed.ambientReactivity),
@@ -239,6 +250,12 @@ export class SettingsStore {
       resumeState: patch.resumeState === undefined
         ? this.state.resumeState
         : this.normalizeResume(patch.resumeState),
+      bitPerfectExclusive: patch.bitPerfectExclusive === undefined
+        ? this.state.bitPerfectExclusive
+        : patch.bitPerfectExclusive === true,
+      bitPerfectExclusiveDeviceId: patch.bitPerfectExclusiveDeviceId === undefined
+        ? this.state.bitPerfectExclusiveDeviceId
+        : normalizeExclusiveDeviceId(patch.bitPerfectExclusiveDeviceId),
       closeButtonBehavior: patch.closeButtonBehavior === undefined
         ? this.state.closeButtonBehavior
         : normalizeCloseButtonBehavior(patch.closeButtonBehavior),

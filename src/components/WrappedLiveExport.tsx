@@ -54,6 +54,20 @@ export function WrappedLiveExport({ stats }: { stats: WrappedStats }): JSX.Eleme
     // parallel visualizer node — the master graph is never touched.
     let audioDest: MediaStreamAudioDestinationNode | null = null;
     let audioStream: MediaStream | undefined;
+    const exclusiveConfigured =
+      usePlayerStore.getState().settings?.bitPerfectExclusive === true ||
+      engine.getExclusiveInfo().active;
+    if (!muted && exclusiveConfigured) {
+      // The capture tap rides the Web Audio graph, which is silent while the
+      // native exclusive path owns the DAC. Refuse to render a silent "audio
+      // on" export — that's worse than telling the user why.
+      setMessage(
+        'Bit-Perfect Exclusive is on, so the audio bed can’t be captured. Toggle it off in Settings → Playback (or export muted).',
+      );
+      scene.stop();
+      sceneRef.current = null;
+      return;
+    }
     if (!muted) {
       const topId = stats.topTracks[0]?.id;
       if (topId) {

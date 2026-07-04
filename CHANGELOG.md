@@ -3,6 +3,73 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.17.0] - 2026-07-03
+
+The fifth flagship — the audiophile moat. NewAmp's first native code.
+
+### Added
+
+- **Bit-Perfect Exclusive (Windows).** Settings → Playback grew the toggle the
+  audio-quality doc used to call "future phase": true **WASAPI-exclusive**
+  output through a first-party native engine (vendored miniaudio, N-API,
+  `native/newamp-audio/`). When it's on, tracks bypass Chromium, Web Audio,
+  and the OS mixer entirely — ffmpeg decodes straight to raw PCM in the main
+  process and a lock-free ring feeds the DAC on the WASAPI callback thread.
+  - **Honest by construction.** The stream format is negotiated from the
+    device's *native* exclusive formats; if your DAC's clock can't run the
+    source rate, NewAmp resamples explicitly (SoX, precision 28) and *tells
+    you* — it never ships miniaudio's hidden converter (which we caught
+    silently resampling 44.1→48 k on real hardware during development, and
+    now refuse at open time by comparing requested vs. internal format).
+  - **The gold badge.** The transport's signal-path badge earned a fourth
+    tone: gold `EXCLUSIVE` is the strict claim — lossless source, rate + bit
+    depth + channel layout preserved, no DSD conversion. Anything less shows
+    `EXCLUSIVE*` with the exact reason in the tooltip. 16-bit into a 24-bit
+    device slot is still gold (zero-padding loses nothing); mono-to-stereo,
+    rate conversion, or DSD→PCM honestly is not.
+  - **No DSP means no DSP.** EQ, ReplayGain, crossfade, limiter, preamp and
+    software volume are structurally out of the path and grayed in Settings
+    with an explanation. Volume is your DAC's knob — same deal foobar2000
+    gives you, now with the reasoning printed on the tin.
+  - **Visualizers stay alive.** A 30 Hz playhead-aligned PCM tap flows from
+    the native engine into a spec-faithful AnalyserNode emulation (Blackman
+    window, 1/N FFT, -86/-10 dB byte mapping), so Eviland, MilkDrop, the
+    detached projector, and Resonance react to exactly what the DAC is
+    playing — proven by the gate: analyser energy with a *silent* Web Audio
+    graph can only come from the native tap.
+  - **Gapless over exclusive.** When the next track negotiates the identical
+    device format, its PCM is spliced into the same ring at the exact frame
+    boundary — no reopen, no gap. Rate changes re-open the device with a
+    deliberate micro-gap (foobar2000 behavior). Pause releases the device
+    after ~15 s so system audio comes back.
+  - **Falls back like a grown-up.** Podcasts, cue-sheet segments, non-library
+    files, a device that vanishes mid-track, another app holding the DAC —
+    each falls back to the shared path per-track with the reason surfaced in
+    Settings, never a silent dead toggle.
+  - Gates: `smoke:exclusive-output` (addon: enum/probe/shared push, exact
+    frame accounting; full exclusive HW pass behind
+    `NEWAMP_EXCLUSIVE_SMOKE_HW=1`) and `smoke:exclusive-ui` (boots the real
+    app, plays a FLAC through the native path, asserts exclusive engagement +
+    clock advance + tap-fed analysers; earns `(bit-perfect)` on rate-matched
+    hardware).
+
+### Fixed
+
+- **Windows taskbar icon renders again.** The 1.15.0 tray fix converted every
+  ICO frame to BMP — including the 256 px frame that the taskbar/high-res
+  shell path officially expects as PNG (the CHANGELOG even said the taskbar
+  "looked fine" *because* it decoded PNG). `build/icon.ico` is now
+  mixed-format (BMP < 256 for the tray, PNG @ 256 for the taskbar), rebuilt
+  by the new committed `scripts/rebuild-icon.mjs` (do NOT use fix-logo.py —
+  Pillow writes all-PNG and re-breaks the tray). Belt-and-braces: every
+  BrowserWindow now sets an explicit window icon and the app declares its
+  AppUserModelID (`io.newamp.player`) so taskbar identity/pinning resolve to
+  our icon instead of a stale shell cache.
+- `docs/audio-quality.md` no longer recommends audify/RtAudio for the native
+  path — RtAudio's WASAPI exclusive mode is an unimplemented TODO; the doc
+  now describes the shipped miniaudio engine and the observed hidden-resample
+  trap it refuses.
+
 ## [1.16.0] - 2026-07-02
 
 The master-plan release: four of the five planned flagships in one pass

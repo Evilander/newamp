@@ -137,4 +137,12 @@ Key tradeoff: compiling to SmartPlaylistRuleInput (SQL path, no DNA predicates) 
 
 ## Execution notes
 
-<!-- executing session fills in -->
+- **2026-07-02 (v1.16.0):** Features 1–4 shipped in one pass — Clip Studio, Wrapped Live, Remote (incl. the token gate for the pre-existing LAN exposure), Ask Your Library (local compiler 10/10 canonical phrases; LLM tier deferred). Bit-perfect spike: GO.
+- **2026-07-03 (v1.17.0):** Feature 5 shipped — Bit-Perfect Exclusive. Deltas from plan §5:
+  - The addon builds against ambient Node headers with NAPI_VERSION=8 and loads in Electron 42 unmodified (N-API 10) — no electron-rebuild/prebuild lane needed; `scripts/build-native.mjs` (vcvars64 wrapper) is the whole build story, wired win-gated into `scripts/package.mjs`.
+  - Renderer seam landed as an `ExternalTransport` facade *inside* `AudioEngine` (not a parallel engine) — store and all downstream consumers unchanged; state returns via `patchExternal`.
+  - The viz tap landed at the engine's six get*Data methods (spec-faithful AnalyserNode emulation, `src/audio/exclusive-tap.ts`) rather than the frame producer — zero visualizer-code changes, detached projector included.
+  - Loopback byte-compare acceptance was replaced: WASAPI loopback cannot capture exclusive streams (they bypass the mixer). Proof instead = refuse-dishonest-open (requested vs internal format from the device itself) + exact frame accounting + the end-to-end `smoke:exclusive-ui` earning `(bit-perfect)` on real hardware.
+  - Real-hardware finding that shaped the design: exclusive devices only advertise their control-panel clock (Focusrite: 48k only); miniaudio silently resamples unless you match a probed native format. All conversion is now explicit (ffmpeg/soxr) and labeled.
+  - Bonus beyond plan: gapless-same-format ring splicing (§5 step ⑤) shipped in v1, not deferred; plus the Windows taskbar-icon regression fix (mixed-format ICO) that rode along.
+  - Open questions resolved with proposed defaults: Q2 (media keys kept, single global toggle + device picker), volume-less exclusive v1 (DAC knob, honest copy).

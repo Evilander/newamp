@@ -5,6 +5,7 @@
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
 import { planDeviceChange } from './device-change';
 import { normalizeLimiterEnabled, preampDbToLinear } from '@shared/audio-limiter';
+import type { ExclusiveNegotiated } from '@shared/types';
 
 export interface EngineState {
   duration: number;
@@ -18,6 +19,47 @@ export interface EngineState {
 }
 
 export type EngineListener = (e: EngineState) => void;
+
+/**
+ * An alternate playback backend (Bit-Perfect Exclusive: native WASAPI in the
+ * main process). When attached AND a track is accepted by it, the engine
+ * delegates transport (play/pause/seek/stop/prepareNext) and the Web Audio
+ * decks stay silent; the backend pushes position/ended/error state back
+ * through `engine.patchExternal()`, so the store and every downstream
+ * consumer (shell notify, scrobbling, sleep timer, queue advance) work
+ * unchanged. `play` returning false means "this track can't go external —
+ * use the normal deck path" (podcasts, missing ids, device failure).
+ */
+export interface ExternalTransport {
+  play(trackId: number, startAt: number): Promise<boolean>;
+  pause(): void;
+  resume(): void;
+  stop(): void;
+  seek(seconds: number): void;
+  prepareNext(trackId: number | null, startAt: number): void;
+}
+
+/**
+ * Analyser-compatible data source fed from outside the Web Audio graph
+ * (the exclusive path's 30Hz PCM tap). Serves the same byte formats the
+ * AnalyserNodes produce so every visualizer keeps working unchanged.
+ */
+export interface ExternalAnalysisSource {
+  isFresh(): boolean;
+  getSampleRate(): number;
+  getFreqData(buf: Uint8Array): void;
+  getTimeData(buf: Uint8Array): void;
+  getOnsetFreqData(buf: Uint8Array): void;
+  getOnsetTimeData(buf: Uint8Array): void;
+  getLeftFreqData(buf: Uint8Array): void;
+  getRightFreqData(buf: Uint8Array): void;
+}
+
+export interface ExclusiveInfo {
+  active: boolean;
+  negotiated: ExclusiveNegotiated | null;
+  fallbackReason: string | null;
+}
 
 const EQ_FREQS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
 const DEFAULT_FFT_SIZE = 2048;
@@ -110,6 +152,18 @@ export class AudioEngine {
   private sampleRateFallback: { requested: number; actual: number } | null = null;
   private deviceFallback: { requestedId: string } | null = null;
   private deviceChangeHandler: (() => void) | null = null;
+  // Bit-Perfect Exclusive backend. `externalActive` is per-track: it is only
+  // true while the CURRENT track was accepted by the external transport, so
+  // unsupported sources (podcasts, files without ids) fall back per-play.
+  private externalTransport: ExternalTransport | null = null;
+  private externalTap: ExternalAnalysisSource | null = null;
+  private externalActive = false;
+  private exclusiveNegotiated: ExclusiveNegotiated | null = null;
+  private exclusiveFallbackReason: string | null = null;
+  // Monotonic play-request counter (mirrors seekSeq): tryExternalPlay awaits
+  // an IPC round-trip, so a rapid skip can otherwise let a STALE acceptance
+  // clobber the newer track's state.
+  private playSeq = 0;
 
   private state: EngineState = {
     duration: 0,
@@ -453,7 +507,127 @@ export class AudioEngine {
     return this.state;
   }
 
+  // ---- Bit-Perfect Exclusive seam -----------------------------------------
+
+  setExternalTransport(transport: ExternalTransport | null): void {
+    if (transport === this.externalTransport) return;
+    if (!transport && this.externalActive) this.deactivateExternal(true);
+    this.externalTransport = transport;
+    if (!transport) {
+      this.exclusiveFallbackReason = null;
+      this.notify();
+    }
+  }
+
+  setExternalAnalysis(source: ExternalAnalysisSource | null): void {
+    this.externalTap = source;
+  }
+
+  /** State push channel for the external backend (position/ended/errors). */
+  patchExternal(p: Partial<EngineState>): void {
+    if (!this.externalActive) return;
+    this.patch(p);
+  }
+
+  getExclusiveInfo(): ExclusiveInfo {
+    return {
+      active: this.externalActive,
+      negotiated: this.externalActive ? this.exclusiveNegotiated : null,
+      fallbackReason: this.exclusiveFallbackReason,
+    };
+  }
+
+  /** Called by the bridge when the exclusive device vanished mid-play. */
+  handleExternalDeviceLost(positionSec: number): void {
+    if (!this.externalActive) return;
+    this.deactivateExternal(false);
+    this.exclusiveFallbackReason = 'Exclusive device lost — playing through the shared path.';
+    const { src, trackId } = this.state;
+    if (src) {
+      // Retry through play(): the external transport gets first refusal (the
+      // device may be back), otherwise the deck path picks up seamlessly.
+      void this.play(src, trackId, Math.max(0, positionSec)).catch(() => undefined);
+    }
+  }
+
+  private deactivateExternal(stopBackend: boolean): void {
+    this.externalActive = false;
+    this.exclusiveNegotiated = null;
+    if (stopBackend) {
+      try {
+        this.externalTransport?.stop();
+      } catch {
+        /* backend already gone */
+      }
+    }
+  }
+
+  private async tryExternalPlay(
+    src: string,
+    trackId: number,
+    startAt: number,
+    seq: number,
+  ): Promise<'accepted' | 'declined' | 'stale'> {
+    const transport = this.externalTransport;
+    if (!transport) return 'declined';
+    let accepted = false;
+    try {
+      accepted = await transport.play(trackId, startAt);
+    } catch (err) {
+      if (seq !== this.playSeq) return 'stale';
+      this.exclusiveFallbackReason = err instanceof Error ? err.message : String(err);
+      accepted = false;
+    }
+    if (seq !== this.playSeq) {
+      // A newer play() owns the state now — do not touch anything.
+      return 'stale';
+    }
+    if (!accepted) {
+      if (this.externalActive) this.deactivateExternal(true);
+      return 'declined';
+    }
+    // The external backend owns audio now — make sure the decks are silent.
+    if (this.graph) {
+      for (const deck of this.graph.decks) this.silenceDeck(deck, true);
+    }
+    this.clearFadeTimer();
+    this.preparedNext = null;
+    this.externalActive = true;
+    this.exclusiveFallbackReason = null;
+    this.patch({
+      src,
+      trackId,
+      currentTime: Math.max(0, startAt),
+      duration: 0,
+      playing: true,
+      buffering: false,
+      ended: false,
+      error: null,
+    });
+    return 'accepted';
+  }
+
+  /** The exclusive bridge records the negotiated format here after a play. */
+  setExclusiveNegotiated(negotiated: ExclusiveNegotiated | null): void {
+    this.exclusiveNegotiated = negotiated;
+    this.notify();
+  }
+
   async play(src: string, trackId: number | null, startAt = 0): Promise<void> {
+    const seq = ++this.playSeq;
+    // A new play attempt cancels any terminal ended state immediately — the
+    // external path resolves asynchronously, and a stuck ended:true across
+    // notifies is what let the store's auto-advance re-fire.
+    if (this.state.ended) this.patch({ ended: false });
+    if (this.externalTransport && trackId != null) {
+      const outcome = await this.tryExternalPlay(src, trackId, startAt, seq);
+      if (outcome !== 'declined') return;
+    } else if (this.externalActive) {
+      // Current track is external but the next one can't be (no track id) —
+      // release the exclusive device before the deck path starts.
+      this.deactivateExternal(true);
+    }
+    if (seq !== this.playSeq) return;
     const graph = this.ensureGraph();
     if (graph.ctx.state === 'suspended') {
       try {
@@ -503,6 +677,12 @@ export class AudioEngine {
   }
 
   prepareNext(src: string, trackId: number | null, startAt = 0): void {
+    if (this.externalActive) {
+      // Gapless chaining happens in the main process; deck preloading would
+      // just double-decode the file for a deck that never plays.
+      this.externalTransport?.prepareNext(trackId, normalizeStartAt(startAt));
+      return;
+    }
     if (!src || !this.graph) return;
     if (this.activeDeck.el.src === src || this.activeDeck.el.currentSrc === src) return;
     const normalizedStartAt = normalizeStartAt(startAt);
@@ -843,6 +1023,15 @@ export class AudioEngine {
   }
 
   pause(): void {
+    if (this.externalActive) {
+      try {
+        this.externalTransport?.pause();
+      } catch {
+        /* surfaced via events */
+      }
+      this.patch({ playing: false });
+      return;
+    }
     if (!this.graph) {
       this.patch({ playing: false });
       return;
@@ -851,6 +1040,36 @@ export class AudioEngine {
   }
 
   togglePlayPause(): void {
+    if (this.externalActive) {
+      if (this.state.playing) {
+        this.pause();
+      } else {
+        try {
+          this.externalTransport?.resume();
+        } catch {
+          /* surfaced via events */
+        }
+        this.patch({ playing: true, ended: false });
+      }
+      return;
+    }
+    // Re-route through play() (which gives the external transport first
+    // refusal) instead of resuming a deck, when either:
+    //  - the deck lost its src: Bit-Perfect Exclusive was toggled OFF while
+    //    paused (decks were silenced when exclusive engaged), or
+    //  - exclusive was toggled ON while a deck track sat paused — the external
+    //    path should own the resume, not the deck.
+    const coldSrc = this.state.src;
+    const deckSrcMissing = !this.graph || !this.activeDeck.el.src;
+    const exclusiveShouldTakeOver =
+      this.externalTransport != null && !this.externalActive && this.state.trackId != null;
+    if (coldSrc && !this.state.playing && (deckSrcMissing || exclusiveShouldTakeOver)) {
+      void this.play(coldSrc, this.state.trackId, Math.max(0, this.state.currentTime)).catch(
+        () => undefined,
+      );
+      return;
+    }
+    if (deckSrcMissing && !coldSrc) return;
     if (!this.graph) return;
     const active = this.activeDeck.el;
     if (!active.src) return;
@@ -864,6 +1083,11 @@ export class AudioEngine {
   stop(): void {
     this.clearFadeTimer();
     this.preparedNext = null;
+    if (this.externalActive) {
+      this.deactivateExternal(true);
+      this.patch({ playing: false, currentTime: 0, ended: false, buffering: false, error: null });
+      return;
+    }
     if (!this.graph) {
       this.patch({ playing: false, currentTime: 0, ended: false, buffering: false, error: null });
       return;
@@ -878,7 +1102,18 @@ export class AudioEngine {
   }
 
   seek(seconds: number): void {
-    if (!Number.isFinite(seconds) || !this.graph) return;
+    if (!Number.isFinite(seconds)) return;
+    if (this.externalActive) {
+      const target = Math.max(0, seconds);
+      try {
+        this.externalTransport?.seek(target);
+      } catch {
+        /* surfaced via events */
+      }
+      this.patch({ currentTime: target });
+      return;
+    }
+    if (!this.graph) return;
     const el = this.activeDeck.el;
     // Only clamp to duration when it is actually known. `el.duration || 0`
     // collapses to 0 whenever duration is NaN/Infinity (custom protocol before
@@ -1082,7 +1317,20 @@ export class AudioEngine {
     });
   }
 
+  /**
+   * True while the analyser read methods should serve external-tap data: the
+   * exclusive backend owns audio, so the Web Audio analysers only see silence.
+   */
+  private get useExternalAnalysis(): boolean {
+    return this.externalActive && this.externalTap != null;
+  }
+
   getFreqData(buf: Uint8Array<ArrayBuffer>): void {
+    if (this.useExternalAnalysis) {
+      if (this.externalTap!.isFresh()) this.externalTap!.getFreqData(buf);
+      else buf.fill(0);
+      return;
+    }
     if (!this.graph) {
       buf.fill(0);
       return;
@@ -1091,6 +1339,11 @@ export class AudioEngine {
   }
 
   getTimeData(buf: Uint8Array<ArrayBuffer>): void {
+    if (this.useExternalAnalysis) {
+      if (this.externalTap!.isFresh()) this.externalTap!.getTimeData(buf);
+      else buf.fill(128);
+      return;
+    }
     if (!this.graph) {
       buf.fill(128);
       return;
@@ -1104,6 +1357,11 @@ export class AudioEngine {
    * (smoothingTimeConstant=0.24) would lag real beats by ~1.3 frames.
    */
   getOnsetFreqData(buf: Uint8Array<ArrayBuffer>): void {
+    if (this.useExternalAnalysis) {
+      if (this.externalTap!.isFresh()) this.externalTap!.getOnsetFreqData(buf);
+      else buf.fill(0);
+      return;
+    }
     if (!this.graph) {
       buf.fill(0);
       return;
@@ -1113,6 +1371,11 @@ export class AudioEngine {
 
   /** Per-channel frequency data for the Eviland visualizer's stereo width/pan. */
   getLeftFreqData(buf: Uint8Array<ArrayBuffer>): void {
+    if (this.useExternalAnalysis) {
+      if (this.externalTap!.isFresh()) this.externalTap!.getLeftFreqData(buf);
+      else buf.fill(0);
+      return;
+    }
     if (!this.graph) {
       buf.fill(0);
       return;
@@ -1121,6 +1384,11 @@ export class AudioEngine {
   }
 
   getRightFreqData(buf: Uint8Array<ArrayBuffer>): void {
+    if (this.useExternalAnalysis) {
+      if (this.externalTap!.isFresh()) this.externalTap!.getRightFreqData(buf);
+      else buf.fill(0);
+      return;
+    }
     if (!this.graph) {
       buf.fill(0);
       return;
@@ -1135,6 +1403,11 @@ export class AudioEngine {
    * 1.3-frame smoothing lag.
    */
   getOnsetTimeData(buf: Uint8Array<ArrayBuffer>): void {
+    if (this.useExternalAnalysis) {
+      if (this.externalTap!.isFresh()) this.externalTap!.getOnsetTimeData(buf);
+      else buf.fill(128);
+      return;
+    }
     if (!this.graph) {
       buf.fill(128);
       return;
@@ -1144,6 +1417,7 @@ export class AudioEngine {
 
   /** Current audio sample rate in Hz, or null when the engine has not booted. */
   getSampleRate(): number {
+    if (this.useExternalAnalysis) return this.externalTap!.getSampleRate();
     return this.graph?.ctx.sampleRate ?? 48000;
   }
 

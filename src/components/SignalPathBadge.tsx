@@ -28,11 +28,18 @@ export function SignalPathBadge(): JSX.Element | null {
         const src = usePlayerStore.getState().current?.sampleRate ?? null;
         const actual = engine.getActualSampleRate();
         const fb = engine.getSampleRateFallback?.() ?? null;
-        // Composite signature: source rate | engine rate | fallback shape.
-        // Anything that changes the rendered label/title (rate transitions,
-        // fallback appearing/disappearing) flips this string; the time-bucket
-        // ticks every ~100ms do not.
-        const sig = `${src ?? 'x'}|${actual ?? 'x'}|${fb ? `${fb.requested}>${fb.actual}` : 'n'}`;
+        const ex = engine.getExclusiveInfo();
+        // Composite signature: source rate | engine rate | fallback shape |
+        // exclusive state. Anything that changes the rendered label/title
+        // (rate transitions, fallback appearing/disappearing, the exclusive
+        // path engaging/dropping) flips this string; the time-bucket ticks
+        // every ~100ms do not.
+        const exSig = ex.active && ex.negotiated
+          ? `e:${ex.negotiated.format}@${ex.negotiated.sampleRate}:${ex.negotiated.bitPerfect ? 1 : 0}:${ex.negotiated.resampled ? 1 : 0}`
+          : ex.fallbackReason
+            ? 'ef'
+            : 'n';
+        const sig = `${src ?? 'x'}|${actual ?? 'x'}|${fb ? `${fb.requested}>${fb.actual}` : 'n'}|${exSig}`;
         if (sig !== lastSigRef.current) {
           lastSigRef.current = sig;
           bumpTick((n) => n + 1);
@@ -44,6 +51,7 @@ export function SignalPathBadge(): JSX.Element | null {
   const sourceRate = current?.sampleRate ?? null;
   const actualRate = engine.getActualSampleRate();
   const fallback = engine.getSampleRateFallback?.() ?? null;
+  const exclusive = engine.getExclusiveInfo();
 
   // If nothing is loaded yet OR we can't yet observe the engine, stay quiet.
   // Once a track is loaded but the engine has not booted (first play hasn't
@@ -54,11 +62,42 @@ export function SignalPathBadge(): JSX.Element | null {
   const sourceKhz = sourceRate != null ? formatKhz(sourceRate) : null;
   const actualKhz = actualRate != null ? formatKhz(actualRate) : null;
 
-  let tone: 'ok' | 'warn' | 'muted' = 'muted';
+  let tone: 'ok' | 'warn' | 'muted' | 'gold' = 'muted';
   let label: string;
   let title: string;
 
-  if (sourceRate == null) {
+  // Highest-priority branch: the native exclusive path owns the output. This
+  // is a DIFFERENT claim from DIRECT (which is only about Chromium's internal
+  // resample) — here the OS mixer is out of the path entirely.
+  if (exclusive.active && exclusive.negotiated) {
+    const neg = exclusive.negotiated;
+    const rate = formatKhz(neg.sampleRate);
+    if (neg.bitPerfect) {
+      label = `${rate} EXCLUSIVE`;
+      tone = 'gold';
+      title = [
+        `WASAPI Exclusive → ${neg.deviceName}: ${neg.format} @ ${rate}, bit-perfect.`,
+        'Untouched samples, no OS mixer, no DSP — the DAC gets exactly what is in the file.',
+      ].join('\n');
+    } else {
+      label = `${rate} EXCLUSIVE*`;
+      tone = 'ok';
+      title = [
+        `WASAPI Exclusive → ${neg.deviceName}: ${neg.format} @ ${rate}. OS mixer bypassed.`,
+        neg.resampled
+          ? neg.sourceSampleRate
+            ? `Resampled from ${formatKhz(neg.sourceSampleRate)} by NewAmp (SoX) — the device clock doesn't support the source rate.${neg.dsd ? ' (DSD → PCM conversion.)' : ''}`
+            : 'Source sample rate unknown — conservatively resampled to the device rate (SoX).'
+          : !neg.lossless
+            ? 'Lossy source: the decoder output is delivered untouched.'
+            : neg.upmixed
+              ? 'Channel layout adapted for the device.'
+              : neg.channelsUnknown
+                ? 'Channel layout unverified (metadata probe failed) — treated conservatively.'
+                : 'Bit depth adapted for the device.',
+      ].join('\n');
+    }
+  } else if (sourceRate == null) {
     label = actualKhz ? `${actualKhz} ENGINE` : 'SIGNAL';
     title = actualKhz
       ? `AudioContext running at ${actualKhz}. This track has no sample-rate metadata, so the input path can't be classified.`
