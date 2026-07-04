@@ -1413,9 +1413,16 @@ function ExclusiveModeRow({
       </div>
       {supported === false && (
         <div className="text-[11px]" style={{ color: 'var(--muted)' }}>
-          Available on Windows (WASAPI Exclusive); Linux (ALSA direct) is built but still
-          experimental — real-hardware verification pending. macOS hog-mode needs
-          CoreAudio-specific work and is on the roadmap.
+          The native exclusive engine isn't available in this build. Windows (WASAPI Exclusive)
+          is fully verified; Linux (ALSA direct) and macOS (CoreAudio hog mode) ship
+          experimentally — real-hardware verification pending.
+        </div>
+      )}
+      {supported === true && enabled && api.platform !== 'win32' && (
+        <div className="text-[11px]" style={{ color: 'var(--warn)' }}>
+          {exclusiveBackendLabel()} is experimental on this platform — the engine is
+          CI-compile-verified but hasn't had a real-hardware listening pass yet. Please report
+          results.
         </div>
       )}
       {negotiated && (

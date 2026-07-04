@@ -501,7 +501,9 @@ export const inElectron = typeof window !== 'undefined' && !!window.newamp;
 
 /** Platform-correct name for the Bit-Perfect Exclusive native backend. */
 export function exclusiveBackendLabel(): string {
-  return api.platform === 'linux' ? 'ALSA Direct' : 'WASAPI Exclusive';
+  if (api.platform === 'linux') return 'ALSA Direct';
+  if (api.platform === 'darwin') return 'CoreAudio Hog Mode';
+  return 'WASAPI Exclusive';
 }
 
 export const api: NewAmpAPI =
