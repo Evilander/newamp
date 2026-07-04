@@ -891,6 +891,18 @@ export interface AppSettings {
   audioBitPerfectPath: boolean;
   audioPreferredSampleRate: number | null;
   /**
+   * Bit-Perfect Exclusive: native WASAPI-exclusive output (Windows only).
+   * While a track plays through it the renderer's Web Audio graph is bypassed
+   * entirely — no EQ, ReplayGain, crossfade, limiter, or software volume.
+   */
+  bitPerfectExclusive: boolean;
+  /**
+   * Native playback device for exclusive output (hex-encoded ma_device_id
+   * from the addon); null = system default. NOT the same id-space as
+   * audioOutputDeviceId (which is Chromium's virtualized device list).
+   */
+  bitPerfectExclusiveDeviceId: string | null;
+  /**
    * What the window's X (close) button should do. `minimize-to-tray` (default)
    * preserves the legacy behavior — hides the window so playback continues
    * with a tray icon. `close-app` actually quits the process, matching what
@@ -1053,6 +1065,79 @@ export interface MusicFolderSuggestion {
   path: string;
   label: string;
   reason: string;
+}
+
+// ---- Bit-Perfect Exclusive output (native WASAPI, Windows) ------------------
+
+export interface ExclusiveDeviceInfo {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+
+/** Resolved per-track decode source for the exclusive driver. */
+export interface ExclusiveTrackSource {
+  trackId: number;
+  path: string;
+  sampleRate: number | null;
+  bitDepth: number | null;
+  channels: number | null;
+  durationSec: number | null;
+  lossless: boolean;
+  dsd: boolean;
+}
+
+/**
+ * What actually plays, chosen from the device's NATIVE exclusive formats.
+ * `bitPerfect` is the strict claim (lossless source, rate + depth + channel
+ * layout preserved, no DSD conversion); the other flags explain any gap so
+ * the UI never has to guess why the badge isn't gold.
+ */
+export interface ExclusiveNegotiated {
+  deviceName: string;
+  format: 's16' | 's24' | 's32' | 'f32';
+  sampleRate: number;
+  channels: number;
+  sourceSampleRate: number | null;
+  sourceBitDepth: number | null;
+  bitPerfect: boolean;
+  resampled: boolean;
+  depthPreserved: boolean;
+  upmixed: boolean;
+  /** Channel layout couldn't be verified (metadata probe failed) — ffmpeg
+   *  still forces stereo, so gold is withheld conservatively. */
+  channelsUnknown: boolean;
+  dsd: boolean;
+  lossless: boolean;
+}
+
+export type ExclusiveEventPayload =
+  | {
+      type: 'state';
+      trackId: number | null;
+      playing: boolean;
+      negotiated: ExclusiveNegotiated;
+      positionSec: number;
+      durationSec: number | null;
+    }
+  | {
+      type: 'position';
+      trackId: number | null;
+      positionSec: number;
+      durationSec: number | null;
+      underruns: number;
+      bufferedFrames: number;
+    }
+  | { type: 'boundary'; trackId: number; positionSec: number; durationSec: number | null }
+  | { type: 'ended'; trackId: number }
+  | { type: 'device-lost'; trackId: number; positionSec: number }
+  | { type: 'error'; trackId: number | null; message: string };
+
+export interface ExclusivePlayResult {
+  ok: boolean;
+  chained?: boolean;
+  negotiated?: ExclusiveNegotiated;
+  error?: string;
 }
 
 export interface NewAmpAPI {
@@ -1219,6 +1304,21 @@ export interface NewAmpAPI {
   saveLocalGuitarTab: (trackId: number, input: LocalGuitarTabInput) => Promise<CachedGuitarTab>;
   findLocalGuitarTab: (trackId: number) => Promise<CachedGuitarTab | null>;
   openGuitarTabWindow: (document: GuitarTabDocument, startAutoscroll?: boolean) => Promise<void>;
+
+  // bit-perfect exclusive output (native WASAPI, Windows)
+  exclusiveSupported: () => Promise<boolean>;
+  exclusiveListDevices: () => Promise<ExclusiveDeviceInfo[]>;
+  exclusivePlay: (trackId: number, startAt?: number) => Promise<ExclusivePlayResult>;
+  exclusivePause: () => Promise<void>;
+  exclusiveResume: () => Promise<void>;
+  exclusiveStop: () => Promise<void>;
+  exclusiveSeek: (seconds: number) => Promise<void>;
+  exclusivePrepareNext: (trackId: number | null) => Promise<void>;
+  onExclusiveEvent: (cb: (payload: ExclusiveEventPayload) => void) => () => void;
+  onExclusiveTap: (
+    cb: (tap: { pcm: Float32Array; channels: number; sampleRate: number }) => void,
+  ) => () => void;
+
   platform: string;
   appVersion: string;
 }

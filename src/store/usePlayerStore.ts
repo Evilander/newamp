@@ -172,6 +172,8 @@ interface PlayerState {
   setVolume: (v: number) => Promise<void>;
   setPlaybackRate: (rate: number) => Promise<void>;
   setAudioOutputDevice: (deviceId: string | null) => Promise<void>;
+  setBitPerfectExclusive: (enabled: boolean) => Promise<AppSettings>;
+  setBitPerfectExclusiveDevice: (deviceId: string | null) => Promise<AppSettings>;
   playOutputTestTone: () => Promise<void>;
   setAutoDjEnabled: (enabled: boolean) => Promise<void>;
   setAutoDjTarget: (target: number) => Promise<void>;
@@ -302,6 +304,11 @@ let lastHandoffKey: string | null = null;
 let lastPreparedHandoffKey: string | null = null;
 let lastStopAfterCurrentKey: string | null = null;
 let lastPlaybackErrorKey: string | null = null;
+// Dedup for the auto-advance-on-end branch. The exclusive bridge patches
+// ended:true and the flag persists in merged engine state until a new play
+// resolves (an async IPC round-trip), so intervening notifies would re-fire
+// next() and skip tracks without this key. Cleared whenever ended is false.
+let lastEndedKey: string | null = null;
 
 // Shell integration (Windows thumbar, tray tooltip, NewAmp Remote): push a
 // playback snapshot to the main process when the (playing, track) pair
@@ -541,6 +548,31 @@ async function playEngineTrack(track: Track): Promise<void> {
   await engine.play(toAudioUrl(track.path), track.id, cueStart(track));
 }
 
+/**
+ * Bit-Perfect Exclusive is opt-in audiophile territory — lazy-load the bridge
+ * (and its FFT tap tables) so the main renderer chunk pays nothing for it.
+ */
+async function loadExclusiveBridge(): Promise<
+  typeof import('../audio/exclusive-bridge').exclusiveBridge
+> {
+  const module = await import('../audio/exclusive-bridge');
+  return module.exclusiveBridge;
+}
+
+/**
+ * Live output-route switch (Bit-Perfect Exclusive toggled or its device
+ * changed): restart the playing track at its current position so audio moves
+ * to the newly-selected path without waiting for the next track.
+ */
+async function restartCurrentTrackThroughActivePath(
+  get: () => PlayerState,
+): Promise<void> {
+  const { current, currentTime, isPlaying } = get();
+  if (!current || !isPlaying) return;
+  const resumeAt = cueStart(current) + Math.max(0, currentTime);
+  await engine.play(toAudioUrl(current.path), current.id, resumeAt).catch(() => undefined);
+}
+
 function prepareEngineTrack(track: Track): void {
   engine.prepareNext(toAudioUrl(track.path), track.id, cueStart(track));
 }
@@ -675,13 +707,21 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         engine.stop();
         return;
       }
+      // Crossfade is structurally bypassed while Bit-Perfect Exclusive owns
+      // the output: treat it as 0 here or a persisted crossfade setting would
+      // (a) hard-cut tracks early via shouldStartTrackHandoff (no fade exists
+      // to cover the jump) and (b) suppress the gapless prepare window that
+      // drives exclusive-stream chaining.
+      const effectiveCrossfadeMs = engine.getExclusiveInfo().active
+        ? 0
+        : state.settings?.crossfadeMs ?? 0;
       if (
         !state.stopAfterCurrent &&
         shouldPrepareTrackHandoff({
           playing: s.playing,
           duration: displayDuration,
           currentTime: relativeTime,
-          crossfadeMs: state.settings?.crossfadeMs ?? 0,
+          crossfadeMs: effectiveCrossfadeMs,
           queueLength,
           index: state.index ?? -1,
           mode: state.mode ?? 'normal',
@@ -703,7 +743,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           playing: s.playing,
           duration: displayDuration,
           currentTime: relativeTime,
-          crossfadeMs: state.settings?.crossfadeMs ?? 0,
+          crossfadeMs: effectiveCrossfadeMs,
           queueLength,
           index: state.index ?? -1,
           mode: state.mode ?? 'normal',
@@ -730,21 +770,32 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         engine.stop();
         return;
       }
-      // auto-advance on end
-      if (s.ended && get().mode !== 'repeat-one') {
-        // The engine reached the end of this track. Notify the eviland memory
-        // bridge so the play counter ticks (drives the 8/32/96/256 generation
-        // ladder). The registry routes to the active bridge IFF its trackId
-        // matches — wrong-track and no-bridge are cheap no-ops.
-        notifyPlayCompleted(state.current?.id ?? null);
-        // small delay to avoid re-entry
-        setTimeout(() => void get().next(), 0);
-      } else if (s.ended && get().mode === 'repeat-one' && get().current) {
-        // repeat-one: the same track is about to play again. From the player's
-        // POV that's a completed play, so the counter ticks here too.
-        notifyPlayCompleted(state.current?.id ?? null);
-        const c = get().current!;
-        void playEngineTrack(c);
+      // auto-advance on end — key-guarded like every other branch above:
+      // ended:true can persist across multiple notifies (exclusive mode holds
+      // it until the next play's IPC ack), and next() advances index
+      // synchronously, so an unguarded re-fire skips tracks.
+      if (!s.ended) {
+        lastEndedKey = null;
+      } else {
+        const endedKey = `${state.current?.id ?? 'x'}:${state.index}`;
+        if (lastEndedKey !== endedKey) {
+          lastEndedKey = endedKey;
+          if (get().mode !== 'repeat-one') {
+            // The engine reached the end of this track. Notify the eviland
+            // memory bridge so the play counter ticks (drives the 8/32/96/256
+            // generation ladder). The registry routes to the active bridge IFF
+            // its trackId matches — wrong-track and no-bridge are cheap no-ops.
+            notifyPlayCompleted(state.current?.id ?? null);
+            // small delay to avoid re-entry
+            setTimeout(() => void get().next(), 0);
+          } else if (get().current) {
+            // repeat-one: the same track is about to play again. From the
+            // player's POV that's a completed play, so the counter ticks too.
+            notifyPlayCompleted(state.current?.id ?? null);
+            const c = get().current!;
+            void playEngineTrack(c);
+          }
+        }
       }
     });
   });
@@ -799,6 +850,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       engine.setPreferredSampleRate(
         settings.audioBitPerfectPath ? settings.audioPreferredSampleRate : null,
       );
+      if (settings.bitPerfectExclusive) {
+        void loadExclusiveBridge().then(async (bridge) => {
+          const active = await bridge.setEnabled(engine, true);
+          if (!active) {
+            // Setting persisted on a machine where the addon can't load —
+            // surface reality instead of a dead toggle.
+            const reverted = await api
+              .setSettings({ bitPerfectExclusive: false })
+              .catch(() => null);
+            if (reverted) set({ settings: reverted });
+          }
+        });
+      }
       engine.setVolume(settings.volume);
       engine.setPlaybackRate(settings.playbackRate);
       engine.setCrossfadeMs(settings.crossfadeMs);
@@ -1248,6 +1312,29 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       set({ settings, audioOutputDeviceId: settings.audioOutputDeviceId });
     },
 
+    setBitPerfectExclusive: async (enabled) => {
+      let settings = await api.setSettings({ bitPerfectExclusive: enabled });
+      set({ settings });
+      const bridge = await loadExclusiveBridge();
+      const active = await bridge.setEnabled(engine, settings.bitPerfectExclusive);
+      if (settings.bitPerfectExclusive && !active) {
+        // Addon unavailable (non-Windows, missing binary) — revert honestly
+        // instead of showing a toggle that does nothing.
+        settings = await api.setSettings({ bitPerfectExclusive: false });
+        set({ settings });
+        return settings;
+      }
+      await restartCurrentTrackThroughActivePath(get);
+      return settings;
+    },
+
+    setBitPerfectExclusiveDevice: async (deviceId) => {
+      const settings = await api.setSettings({ bitPerfectExclusiveDeviceId: deviceId });
+      set({ settings });
+      if (settings.bitPerfectExclusive) await restartCurrentTrackThroughActivePath(get);
+      return settings;
+    },
+
     playOutputTestTone: async () => {
       await engine.playOutputTestTone();
     },
@@ -1474,6 +1561,7 @@ if (typeof window !== 'undefined') {
         setCompactDeck: (on: boolean) => void;
         analyserFftSum: () => number;
         engineCurrentTime: () => number;
+        exclusiveInfo: () => ReturnType<AudioEngine['getExclusiveInfo']>;
       };
     }).__newampSmoke = {
       seek: (seconds: number) => {
@@ -1514,6 +1602,10 @@ if (typeof window !== 'undefined') {
       // which __newampSmoke.seek pins to the target for ~1s. Seek smokes
       // read this to prove a scrub actually landed instead of restarting.
       engineCurrentTime: () => usePlayerStore.getState().engine.getState().currentTime,
+      // Bit-Perfect Exclusive status: the exclusive-ui smoke asserts the
+      // native path engaged and (via analyserFftSum) that the external tap
+      // feeds visualizers while the Web Audio graph is silent.
+      exclusiveInfo: () => usePlayerStore.getState().engine.getExclusiveInfo(),
     };
   }
 }

@@ -729,7 +729,12 @@ export function FullscreenVisualizer(): JSX.Element {
         defaultName: `${captureStem()} - last 15s`,
         maxHeight: 1080,
       });
-      flashClipStatus(path ? `Clip saved → ${path}` : 'Save cancelled.');
+      // Honest note: the ring's audio tap rides the Web Audio graph, which is
+      // silent while the native exclusive path owns the DAC.
+      const exclusiveSilent = engine.getExclusiveInfo().active
+        ? ' (audio silent: Bit-Perfect Exclusive bypasses the capture tap — toggle it off in Settings to record clips with sound)'
+        : '';
+      flashClipStatus(path ? `Clip saved → ${path}${exclusiveSilent}` : 'Save cancelled.');
     } catch (err) {
       console.error('[newamp] replay clip save failed:', err);
       flashClipStatus('Saving the clip failed — see the console for details.');

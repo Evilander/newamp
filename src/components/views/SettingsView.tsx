@@ -4,6 +4,7 @@ import type {
   AppSettings,
   BuiltInTheme,
   CustomSkin,
+  ExclusiveDeviceInfo,
   LastfmOutboxStatus,
   RadioBrainStatus,
   SupportBackupResult,
@@ -74,6 +75,10 @@ export function SettingsView(): JSX.Element {
 
   if (!settings) return <div />;
   const outputEngine = getOutputEngineReadout();
+  // While Bit-Perfect Exclusive owns the output, every Web Audio DSP stage is
+  // out of the signal path — gray the controls instead of letting them lie.
+  const dspBypassed = settings.bitPerfectExclusive;
+  const exclusiveLive = engine.getExclusiveInfo();
 
   async function pickAndAddFolder(): Promise<void> {
     const dir = await api.pickFolder();
@@ -603,9 +608,16 @@ export function SettingsView(): JSX.Element {
           <h2 className="text-[11px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
             Playback
           </h2>
+          {dspBypassed && (
+            <div className="text-[11px]" style={{ color: 'var(--warn)' }} data-newamp-dsp-bypassed>
+              Bit-Perfect Exclusive is on — crossfade, ReplayGain, limiter, preamp, EQ and software
+              volume are bypassed so the DAC receives untouched samples. Use your device's own volume.
+            </div>
+          )}
           <Row label="Crossfade">
             <select
               value={settings.crossfadeMs}
+              disabled={dspBypassed}
               onChange={(e) => {
                 const v = parseInt(e.target.value, 10);
                 setCrossfadeMs(v).then(() => {
@@ -613,7 +625,7 @@ export function SettingsView(): JSX.Element {
                 });
               }}
               className="bevel-in px-2 py-1 text-[13px]"
-              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)', opacity: dspBypassed ? 0.5 : 1 }}
             >
               <option value={0}>Off</option>
               <option value={2000}>2 s</option>
@@ -624,6 +636,7 @@ export function SettingsView(): JSX.Element {
           <Row label="ReplayGain">
             <select
               value={settings.replayGain}
+              disabled={dspBypassed}
               onChange={(e) => {
                 const replayGain = e.target.value as AppSettings['replayGain'];
                 setReplayGainMode(replayGain).then(() => {
@@ -631,7 +644,7 @@ export function SettingsView(): JSX.Element {
                 });
               }}
               className="bevel-in px-2 py-1 text-[13px]"
-              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)', opacity: dspBypassed ? 0.5 : 1 }}
             >
               <option value="off">Off</option>
               <option value="track">Track gain</option>
@@ -639,10 +652,14 @@ export function SettingsView(): JSX.Element {
             </select>
           </Row>
           <Row label="Clipping protection">
-            <label className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--ink)' }}>
+            <label
+              className="flex items-center gap-2 text-[13px]"
+              style={{ color: 'var(--ink)', opacity: dspBypassed ? 0.5 : 1 }}
+            >
               <input
                 type="checkbox"
                 checked={settings.limiterEnabled}
+                disabled={dspBypassed}
                 onChange={(e) => {
                   const limiterEnabled = e.target.checked;
                   setLimiterEnabled(limiterEnabled).then(() => {
@@ -661,6 +678,7 @@ export function SettingsView(): JSX.Element {
                 max={MAX_PREAMP_DB}
                 step={PREAMP_STEP_DB}
                 value={settings.preampDb}
+                disabled={dspBypassed}
                 onChange={(e) => {
                   const preampDb = normalizePreampDb(e.target.valueAsNumber);
                   setPreampDb(preampDb).then(() => {
@@ -668,6 +686,7 @@ export function SettingsView(): JSX.Element {
                   });
                 }}
                 className="w-[220px]"
+                style={{ opacity: dspBypassed ? 0.5 : 1 }}
               />
               <span className="min-w-[58px] text-right text-[12px]" style={{ color: 'var(--ink-2)' }}>
                 {settings.preampDb.toFixed(1)} dB
@@ -676,11 +695,23 @@ export function SettingsView(): JSX.Element {
           </Row>
           <Row label="Output engine">
             <div className="audio-engine-readout">
-              <span>{outputEngine.sampleRate}</span>
-              <span>32-bit float / Web Audio</span>
+              {exclusiveLive.active && exclusiveLive.negotiated ? (
+                <>
+                  <span>{(exclusiveLive.negotiated.sampleRate / 1000).toFixed(1)} kHz</span>
+                  <span>
+                    {exclusiveLive.negotiated.format} / WASAPI Exclusive (native)
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>{outputEngine.sampleRate}</span>
+                  <span>32-bit float / Web Audio</span>
+                </>
+              )}
             </div>
           </Row>
           <BitPerfectRow settings={settings} onChange={(patch) => api.setSettings(patch).then(setSettings)} />
+          <ExclusiveModeRow settings={settings} onSettings={setSettings} />
 
           <Row label="Audio Output">
             <div className="flex max-w-[560px] flex-wrap items-center justify-end gap-2">
@@ -1250,9 +1281,172 @@ function BitPerfectRow({
           <span><strong>Windows · WASAPI Exclusive:</strong> Right-click the speaker icon → Sound settings → choose your DAC → Driver properties → Advanced → check "Allow applications to take exclusive control" + set Default Format to match the rate above. Some DACs also need their own ASIO driver; NewAmp does not yet support ASIO directly.</span>
           <span><strong>Linux · ALSA hw:</strong> Configure PipeWire / PulseAudio to expose the DAC at the target rate (`pw-cli set-param ... rate 96000` or `default-sample-rate=96000` in pulse / pipewire config). NewAmp routes through the system mixer either way, so PipeWire's bit-perfect mode applies.</span>
           <span><strong>What "Bit-Perfect Path" actually does:</strong> creates the Web Audio AudioContext at the preferred rate so Chromium does not resample on the way out. Combined with the OS-side settings above, no DSP touches the bitstream between your decoder and the DAC. Without the OS-side step, Chromium's bitstream still goes through the Windows / PipeWire mixer.</span>
-          <span><strong>True kernel streaming (WASAPI Exclusive, ASIO, ALSA hw: direct):</strong> requires a native Node addon binding to PortAudio / miniaudio. Tracked as a future phase; opens the DAC and locks every other app out while NewAmp is playing.</span>
+          <span><strong>True kernel streaming (WASAPI Exclusive):</strong> shipped — the "Bit-Perfect Exclusive" toggle below opens the DAC directly through NewAmp's native engine (vendored miniaudio), locking every other app out while playing. This row's AudioContext pin still matters for the shared/fallback path (podcasts, non-library files).</span>
         </div>
       </details>
+    </div>
+  );
+}
+
+function ExclusiveModeRow({
+  settings,
+  onSettings,
+}: {
+  settings: AppSettings;
+  onSettings: (s: AppSettings) => void;
+}): JSX.Element {
+  const setBitPerfectExclusive = usePlayerStore((s) => s.setBitPerfectExclusive);
+  const setBitPerfectExclusiveDevice = usePlayerStore((s) => s.setBitPerfectExclusiveDevice);
+  const [supported, setSupported] = useState<boolean | null>(null);
+  const [devices, setDevices] = useState<ExclusiveDeviceInfo[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [live, setLive] = useState(() => engine.getExclusiveInfo());
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .exclusiveSupported()
+      .then((ok) => {
+        if (!cancelled) setSupported(ok);
+      })
+      .catch(() => {
+        if (!cancelled) setSupported(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supported) return;
+    let cancelled = false;
+    api
+      .exclusiveListDevices()
+      .then((list) => {
+        if (!cancelled) setDevices(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [supported, settings.bitPerfectExclusive]);
+
+  // Re-render only when the exclusive status actually changes — the engine
+  // notifies at ~10Hz during playback (same dedup idea as SignalPathBadge).
+  useEffect(() => {
+    let sig = '';
+    return engine.subscribe(() => {
+      const info = engine.getExclusiveInfo();
+      const next = `${info.active}|${
+        info.negotiated
+          ? `${info.negotiated.format}@${info.negotiated.sampleRate}:${info.negotiated.bitPerfect}:${info.negotiated.resampled}`
+          : ''
+      }|${info.fallbackReason ?? ''}`;
+      if (next !== sig) {
+        sig = next;
+        setLive(info);
+      }
+    });
+  }, []);
+
+  const enabled = settings.bitPerfectExclusive;
+  const negotiated = live.active ? live.negotiated : null;
+
+  async function toggle(next: boolean): Promise<void> {
+    setBusy(true);
+    try {
+      const updated = await setBitPerfectExclusive(next);
+      onSettings(updated);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeDevice(raw: string): Promise<void> {
+    setBusy(true);
+    try {
+      const updated = await setBitPerfectExclusiveDevice(raw === '' ? null : raw);
+      onSettings(updated);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="mt-1 flex flex-col gap-2 rounded p-3"
+      style={{ background: 'var(--panel-2)', border: '1px solid var(--line)' }}
+      data-newamp-exclusive-row
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-2 text-[13px]" style={{ color: 'var(--ink)' }}>
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={busy || supported === false}
+            onChange={(e) => void toggle(e.target.checked)}
+            data-newamp-exclusive-toggle
+          />
+          <span className="font-bold" style={{ color: '#d4a935' }}>Bit-Perfect Exclusive</span>
+          <span style={{ color: 'var(--muted)' }}>· native WASAPI, untouched samples to the DAC</span>
+        </label>
+        <span className="ml-auto flex items-center gap-2 text-[12px]" style={{ color: 'var(--ink-2)' }}>
+          <span>Device</span>
+          <select
+            value={settings.bitPerfectExclusiveDeviceId ?? ''}
+            disabled={!enabled || busy}
+            onChange={(e) => void changeDevice(e.target.value)}
+            className="bevel-in min-w-[200px] px-2 py-1 text-[12px]"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          >
+            <option value="">System default</option>
+            {devices.map((device) => (
+              <option key={device.id} value={device.id}>
+                {device.name}
+                {device.isDefault ? ' (default)' : ''}
+              </option>
+            ))}
+          </select>
+        </span>
+      </div>
+      {supported === false && (
+        <div className="text-[11px]" style={{ color: 'var(--muted)' }}>
+          Requires Windows (WASAPI). macOS hog-mode and Linux ALSA direct are on the roadmap.
+        </div>
+      )}
+      {negotiated && (
+        <div className="text-[11px]" data-newamp-exclusive-status>
+          <span style={{ color: negotiated.bitPerfect ? '#d4a935' : 'var(--ink)' }}>
+            {negotiated.deviceName} · {negotiated.format} @ {(negotiated.sampleRate / 1000).toFixed(1)} kHz
+            {negotiated.bitPerfect ? ' · bit-perfect' : ''}
+          </span>
+          {!negotiated.bitPerfect && (
+            <span style={{ color: 'var(--warn)' }}>
+              {negotiated.resampled &&
+                (negotiated.sourceSampleRate
+                  ? ` · resampled ${(negotiated.sourceSampleRate / 1000).toFixed(1)} → ${(negotiated.sampleRate / 1000).toFixed(1)} kHz by NewAmp (SoX)${negotiated.dsd ? ' (DSD → PCM)' : ' — set the device clock to the source rate for bit-perfect'}`
+                  : ` · source rate unknown — conservatively resampled to ${(negotiated.sampleRate / 1000).toFixed(1)} kHz (SoX)`)}
+              {!negotiated.resampled && negotiated.upmixed && ' · channel layout adapted'}
+              {!negotiated.resampled && !negotiated.upmixed && negotiated.channelsUnknown && ' · channel layout unverified (metadata probe failed) — treated conservatively'}
+              {!negotiated.resampled && !negotiated.upmixed && !negotiated.channelsUnknown && !negotiated.lossless && ' · lossy source (decoder output delivered untouched)'}
+              {!negotiated.resampled && !negotiated.upmixed && !negotiated.channelsUnknown && negotiated.lossless && !negotiated.depthPreserved && ' · bit depth reduced'}
+            </span>
+          )}
+        </div>
+      )}
+      {live.fallbackReason && (
+        <div className="text-[11px]" style={{ color: 'var(--warn)' }} data-newamp-exclusive-fallback>
+          {live.fallbackReason}
+        </div>
+      )}
+      {enabled && (
+        <div className="text-[11px]" style={{ color: 'var(--muted)' }}>
+          Exclusive mode locks the device while playing (other apps go silent), releases it ~15s
+          after pause, and bypasses all DSP including software volume — use your DAC or device
+          volume. Rate changes between tracks re-open the device (brief gap, same as foobar2000).
+          Podcasts and non-library files automatically fall back to the shared path.
+        </div>
+      )}
     </div>
   );
 }

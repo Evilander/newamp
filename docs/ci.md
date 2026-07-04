@@ -42,6 +42,20 @@ Need a real output device or manual confirmation; **never** CI:
 `smoke:audio-proof`, `smoke:audio-output`, `smoke:audio-hardware`,
 `smoke:manual-listening-proof`, `smoke:lastfm-live-proof`.
 
+`smoke:exclusive-output` is the exception that proves the rule: its base pass
+(device enum + probe + shared-mode push with exact frame accounting) needs a
+playback device but no human, so it runs in the local release gate; it no-ops
+cleanly on non-Windows. The full WASAPI-exclusive hardware pass (takes over
+the DAC, asserts requested == internal format) stays manual behind
+`NEWAMP_EXCLUSIVE_SMOKE_HW=1`.
+
+`smoke:exclusive-ui` (also gate-run, never CI, no-op off-Windows) boots the
+real app with `bitPerfectExclusive` pre-enabled and takes over the default
+device for ~3 quiet seconds: asserts the native path engaged (no silent
+fallback), the clock advances from the native frame counter, and the
+analysers carry energy while the Web Audio graph is silent — which can only
+come from the 30Hz native PCM tap that keeps visualizers alive.
+
 ## Platform-signing-required
 
 Windows-only tooling (`signtool`) / a built Windows installer:
