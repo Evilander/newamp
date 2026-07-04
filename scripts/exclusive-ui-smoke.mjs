@@ -20,8 +20,8 @@ import { existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
-if (process.platform !== 'win32') {
-  console.log('[exclusive-ui-smoke] non-Windows platform — exclusive output is Windows-only, PASS (no-op).');
+if (process.platform !== 'win32' && process.platform !== 'linux') {
+  console.log('[exclusive-ui-smoke] unsupported platform — exclusive output is Windows/Linux, PASS (no-op).');
   process.exit(0);
 }
 
