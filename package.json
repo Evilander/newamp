@@ -1,7 +1,7 @@
 {
   "name": "newamp",
   "version": "1.17.0",
-  "description": "A Winamp-inspired modern desktop music player for macOS, Windows, and Linux. Your local library, your rules, no streaming required. Features Resonance — the whole UI reacts to your live audio — plus NewAmp Wrapped, a GPU particle visualizer + real MilkDrop, four UI shells, shape-changing deck skins, perceptual 0-200% volume, 0-100 decimal track scoring, and a magazine-style home. GPU-accelerated and tuned to stay light on weak hardware.",
+  "description": "A local-first, Winamp-inspired music player for Windows, macOS, and Linux — your files, no cloud, no telemetry.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
   "author": "evilander",
