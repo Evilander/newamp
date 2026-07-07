@@ -3033,6 +3033,25 @@ async function runScreenshotGallery(win: BrowserWindow, scanPromise: Promise<voi
       captured.push(result);
     };
 
+    // Scripted mode: when NEWAMP_SCREENSHOT_PLAN points at a JSON file of
+    // { file, action } steps (see scripts/craft-matrix.mjs), run that plan
+    // through the same shot harness instead of the built-in gallery list.
+    const planPath = process.env.NEWAMP_SCREENSHOT_PLAN;
+    if (planPath) {
+      const plan = JSON.parse(readFileSync(resolve(planPath), 'utf8')) as Array<{
+        file: string;
+        action: string;
+      }>;
+      for (const [index, step] of plan.entries()) {
+        await capture(step.file, step.action);
+        console.log(`[newamp-screenshot-plan] ${index + 1}/${plan.length} ${step.file}`);
+      }
+      console.log(`[newamp-screenshot-gallery] ${JSON.stringify({ ok: true, files, captured })}`);
+      isQuitting = true;
+      app.quit();
+      return;
+    }
+
     await capture(
       'feature-home-deerhoof.png',
       "await shot.playTrack('Dummy Discards A Heart'); await shot.go('Home'); await shot.sleep(1000); return shot.summary('home');",
