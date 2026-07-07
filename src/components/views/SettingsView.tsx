@@ -14,30 +14,14 @@ import type {
 import { engine, usePlayerStore } from '../../store/usePlayerStore';
 import { api, inElectron, DEFAULT_SETTINGS, exclusiveBackendLabel } from '../../lib/api';
 import { AI_ASSIST_OPTIONS } from '../../lib/aiAssist';
-import { SKIN_VARIABLES, readCurrentSkinVariables } from '../../lib/skins';
+import { SKIN_VARIABLES, THEME_REGISTRY, readCurrentSkinVariables } from '../../lib/skins';
 import { normalizeAudioOutputDeviceId, uniqueAudioOutputDevices } from '@shared/audio-output';
 import type { AudioOutputDeviceOption } from '@shared/audio-output';
 import { MAX_PREAMP_DB, MIN_PREAMP_DB, PREAMP_STEP_DB, normalizePreampDb } from '@shared/audio-limiter';
 import { ShellPicker } from '../ShellPicker';
 
-const THEMES: Array<{ id: BuiltInTheme; label: string; tag: string; palette: string[] }> = [
-  { id: 'classic', label: 'Classic', tag: 'Vintage Winamp 2.x — cast-metal chrome, green LCD', palette: ['#2c3438', '#00ff66', '#c8d4d8'] },
-  { id: 'ops', label: 'Ops', tag: 'Trader-dashboard density — emerald cyan, hex grid', palette: ['#0b1014', '#34d399', '#e2e8ee'] },
-  { id: 'midnight', label: 'Midnight', tag: 'Clean modern dark with violet accents', palette: ['#11141b', '#7c5cff', '#e8ecf3'] },
-  { id: 'neon', label: 'Neon', tag: 'Cyberpunk magenta with scanlines', palette: ['#160a26', '#ff36e0', '#ffe9fe'] },
-  { id: 'amber', label: 'Amber', tag: '70s terminal phosphor orange', palette: ['#1b1408', '#ffb000', '#ffe2a1'] },
-];
-
-const EXTRA_THEMES: Array<{ id: BuiltInTheme; label: string; tag: string; palette: string[] }> = [
-  { id: 'oxide', label: 'Oxide', tag: 'Industrial steel with cyan meters and rust warning lights', palette: ['#101419', '#51e6d8', '#f38d3c'] },
-  { id: 'steel', label: 'Steel', tag: 'Late-90s brushed metal deck with blue LCD', palette: ['#c5cad0', '#2357d8', '#101826'] },
-  { id: 'walnut', label: 'Record Deck', tag: 'Turntable plinth, round album platter, amber meters', palette: ['#21160f', '#f0a629', '#d7c0a0'] },
-  { id: 'jukebox', label: 'Jukebox', tag: 'Chrome arch, bubble controls, glowing title glass', palette: ['#2a1018', '#ffcf4a', '#52f0d0'] },
-  { id: 'terminal', label: 'Vintage Computer', tag: 'CRT shell, phosphor display, square hardware keys', palette: ['#101612', '#59ff85', '#cbd8c8'] },
-  { id: 'ice', label: 'Ice', tag: 'Frosted silver skin with cyan glass display', palette: ['#e8eef2', '#00a6d6', '#14212a'] },
-  { id: 'miami', label: 'Miami', tag: 'Bright daylight deck with coral controls and teal LCD', palette: ['#f3f4ef', '#ff4f79', '#10282e'] },
-  { id: 'mono', label: 'Mono', tag: 'High-contrast black, white, and red for long sessions', palette: ['#080808', '#f5f5f0', '#ff3d3d'] },
-];
+// Skin cards (labels / taglines / swatches / order) come from the single
+// THEME_REGISTRY in @shared/custom-skin — do not redeclare them here.
 
 export function SettingsView(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -522,7 +506,7 @@ export function SettingsView(): JSX.Element {
             Skin
           </h2>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-            {[...THEMES, ...EXTRA_THEMES].map((t) => (
+            {THEME_REGISTRY.map((t) => (
               <button
                 key={t.id}
                 onClick={() => {
@@ -531,15 +515,15 @@ export function SettingsView(): JSX.Element {
                 }}
                 className="flex flex-col gap-2 p-3 text-left transition-all"
                 style={{
-                  background: t.palette[0],
+                  background: t.swatches[0],
                   borderRadius: 'var(--radius-card)',
                   outline:
-                    settings.theme === t.id ? `2px solid ${t.palette[1]}` : '1px solid var(--line)',
-                  boxShadow: settings.theme === t.id ? `0 0 18px ${t.palette[1]}55` : undefined,
+                    settings.theme === t.id ? `2px solid ${t.swatches[1]}` : '1px solid var(--line)',
+                  boxShadow: settings.theme === t.id ? `0 0 18px ${t.swatches[1]}55` : undefined,
                 }}
               >
                 <div className="flex gap-1">
-                  {t.palette.map((c, i) => (
+                  {t.swatches.map((c, i) => (
                     <span
                       key={i}
                       style={{
@@ -552,11 +536,11 @@ export function SettingsView(): JSX.Element {
                     />
                   ))}
                 </div>
-                <div className="text-[13px] font-semibold" style={{ color: t.palette[2] }}>
+                <div className="text-[13px] font-semibold" style={{ color: t.swatches[2] }}>
                   {t.label}
                 </div>
-                <div className="text-[10px]" style={{ color: t.palette[2], opacity: 0.7 }}>
-                  {t.tag}
+                <div className="text-[10px]" style={{ color: t.swatches[2], opacity: 0.7 }}>
+                  {t.tagline}
                 </div>
               </button>
             ))}

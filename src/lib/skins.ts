@@ -1,24 +1,12 @@
-import type { BuiltInTheme, CustomSkin, Theme } from '@shared/types';
-import { SKIN_VARIABLES } from '@shared/custom-skin';
+import type { CustomSkin, Theme } from '@shared/types';
+import { BUILT_IN_THEMES, SKIN_VARIABLES, THEME_REGISTRY } from '@shared/custom-skin';
+import type { ThemeRegistryEntry } from '@shared/custom-skin';
 
 export type SkinVariable = (typeof SKIN_VARIABLES)[number];
-export { SKIN_VARIABLES };
-
-export const BUILT_IN_THEMES: BuiltInTheme[] = [
-  'classic',
-  'ops',
-  'oxide',
-  'steel',
-  'walnut',
-  'jukebox',
-  'terminal',
-  'ice',
-  'midnight',
-  'neon',
-  'miami',
-  'amber',
-  'mono',
-];
+// Single source of truth for built-in skins lives in @shared/custom-skin —
+// ids, Settings card copy and swatches all come from THEME_REGISTRY.
+export { BUILT_IN_THEMES, SKIN_VARIABLES, THEME_REGISTRY };
+export type { ThemeRegistryEntry };
 
 export function applyTheme(theme: Theme, customSkin?: CustomSkin | null): void {
   const root = document.documentElement;
