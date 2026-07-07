@@ -32,5 +32,10 @@
 @import './views/extras.css'; /* album letter rail, liner-note tag chips, view onboarding */
 @import './decks-compact.css'; /* compact/windowshade deck + library command bar + lyrics */
 @import './components/badges.css'; /* .ninput + format / signal-path / eviland badges */
+@import './components/primitives.css'; /* 2.0 primitives: ViewHeader, Chip, EmptyState, Skeleton, Toast, ConfirmAction */
+@import './views/library.css'; /* Library: playing-row accent, queue affordances */
+@import './views/settings.css'; /* Settings view polish */
+@import './views/catalog.css'; /* Albums / Artists / Folders / Tags / Loved polish */
+@import './views/content.css'; /* Home / History / Mixes / Discover / Profile / Radio / Podcast / Playlist / Wrapped polish */
 @import './misc.css'; /* track highlight flash, help dot, ambient art wash */
 @import 'tailwindcss/variants.css'; /* Tailwind variant utilities — MUST stay last */
