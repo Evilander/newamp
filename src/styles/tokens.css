@@ -27,11 +27,43 @@
   --scanline-opacity: 0.06;
   --texture-noise: 0.07;
   --newamp-text-scale: 1;
+  /* --- 2.0 Reference Grade token ramps (not in SKIN_VARIABLES) --- */
+  /* Type ramp — the app's compact hardware scale. */
+  --text-2xs: 0.625rem;
+  --text-xs: 0.6875rem;
+  --text-sm: 0.75rem;
+  --text-base: 0.8125rem;
+  --text-md: 0.875rem;
+  --text-lg: 1rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 2rem;
+  /* Motion ramp. --ease-spring is the transport-button overshoot spring. */
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* Shadow ramp — dark-tuned defaults; light skins override below. */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --radius-pill: 999px;
+  /* Catalog row height — per-shell density work rebinds this later. */
+  --row-height: 36px;
+  color-scheme: dark;
   /* Resonance live-audio vars (written per-frame by src/lib/resonance.ts).
      Kept out of SKIN_VARIABLES so theme switches never wipe them. */
   --amp-energy: 0;
   --amp-beat: 0;
   --amp-bright: 0.5;
+}
+
+/* A11y: one honest keyboard focus ring everywhere. Components with a
+   more specific :focus-visible treatment (e.g. .pxbtn) still win. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* =========================================================
@@ -103,6 +135,7 @@ html[data-amp-accent='on'] .amp-accent {
   --radius-card: 2px;
   --scanline-opacity: 0.07;
   --font-lcd: 'VT323', 'JetBrains Mono', monospace;
+  color-scheme: dark;
 }
 
 /* === Midnight: clean modern dark === */
@@ -126,6 +159,7 @@ html[data-amp-accent='on'] .amp-accent {
   --radius: 6px;
   --radius-card: 12px;
   --scanline-opacity: 0;
+  color-scheme: dark;
 }
 
 /* === Neon: 80s-cyberpunk retro-futurist === */
@@ -149,6 +183,7 @@ html[data-amp-accent='on'] .amp-accent {
   --radius: 3px;
   --radius-card: 6px;
   --scanline-opacity: 0.12;
+  color-scheme: dark;
 }
 
 /* === Ops: dense terminal / trader-dashboard. Deep black, hex accents,
@@ -176,6 +211,7 @@ html[data-amp-accent='on'] .amp-accent {
   --radius-card: 6px;
   --scanline-opacity: 0;
   --font-lcd: 'JetBrains Mono', monospace;
+  color-scheme: dark;
 }
 
 /* === Amber: phosphor terminal === */
@@ -199,6 +235,7 @@ html[data-amp-accent='on'] .amp-accent {
   --radius: 2px;
   --radius-card: 3px;
   --scanline-opacity: 0.1;
+  color-scheme: dark;
 }
 
 /* === Oxide: industrial steel, cyan meters, rust warning lights === */
@@ -225,6 +262,7 @@ html[data-amp-accent='on'] .amp-accent {
   --radius-card: 5px;
   --scanline-opacity: 0.04;
   --font-lcd: 'JetBrains Mono', monospace;
+  color-scheme: dark;
 }
 
 /* === Steel: brushed late-90s desktop player chrome, cobalt display === */
@@ -242,7 +280,8 @@ html[data-amp-accent='on'] .amp-accent {
   --error: #bd2534;
   --ink: #111821;
   --ink-2: #31414f;
-  --muted: #475660;
+  /* AA fix: #475660 fell below 4.5:1 on --panel-2 (#ccd2d8). */
+  --muted: #3b4a54;
   --display-bg: #07111e;
   --display-fg: #77c8ff;
   --titlebar: linear-gradient(180deg, #eff3f6 0%, #aeb6bf 48%, #74808c 100%);
@@ -252,6 +291,11 @@ html[data-amp-accent='on'] .amp-accent {
   --radius-card: 4px;
   --scanline-opacity: 0.035;
   --font-lcd: 'JetBrains Mono', monospace;
+  /* Light chrome: softer, tighter shadows than the dark ramp. */
+  --shadow-1: 0 1px 2px rgba(23, 32, 38, 0.14);
+  --shadow-2: 0 3px 8px rgba(23, 32, 38, 0.16);
+  --shadow-3: 0 8px 20px rgba(23, 32, 38, 0.18);
+  color-scheme: light;
 }
 
 /* === Walnut: old component stereo faceplate with wood side cheeks === */
@@ -277,6 +321,7 @@ html[data-amp-accent='on'] .amp-accent {
   --radius: 2px;
   --radius-card: 3px;
   --scanline-opacity: 0.07;
+  color-scheme: dark;
 }
 
 /* === Jukebox: chrome arch, red glass, amber title glow === */
@@ -302,6 +347,7 @@ html[data-amp-accent='on'] .amp-accent {
   --radius: 8px;
   --radius-card: 10px;
   --scanline-opacity: 0.04;
+  color-scheme: dark;
 }
 
 /* === Terminal: beige CRT shell with green phosphor glass === */
@@ -332,6 +378,11 @@ html[data-amp-accent='on'] .amp-accent {
   --radius-card: 6px;
   --scanline-opacity: 0.12;
   --font-lcd: 'VT323', 'JetBrains Mono', monospace;
+  /* Light chrome: softer, tighter shadows than the dark ramp. */
+  --shadow-1: 0 1px 2px rgba(30, 33, 24, 0.14);
+  --shadow-2: 0 3px 8px rgba(30, 33, 24, 0.16);
+  --shadow-3: 0 8px 20px rgba(30, 33, 24, 0.18);
+  color-scheme: light;
 }
 
 /* === Ice: frosted silver shell, cyan glass display, high daylight contrast === */
@@ -359,6 +410,11 @@ html[data-amp-accent='on'] .amp-accent {
   --radius-card: 8px;
   --scanline-opacity: 0.02;
   --font-lcd: 'JetBrains Mono', monospace;
+  /* Light chrome: softer, tighter shadows than the dark ramp. */
+  --shadow-1: 0 1px 2px rgba(24, 38, 48, 0.12);
+  --shadow-2: 0 3px 8px rgba(24, 38, 48, 0.14);
+  --shadow-3: 0 8px 20px rgba(24, 38, 48, 0.16);
+  color-scheme: light;
 }
 
 /* === Miami: bright daylight deck, coral controls, teal LCD === */
@@ -385,6 +441,11 @@ html[data-amp-accent='on'] .amp-accent {
   --radius: 4px;
   --radius-card: 8px;
   --scanline-opacity: 0.025;
+  /* Light chrome: softer, tighter shadows than the dark ramp. */
+  --shadow-1: 0 1px 2px rgba(23, 42, 40, 0.12);
+  --shadow-2: 0 3px 8px rgba(23, 42, 40, 0.14);
+  --shadow-3: 0 8px 20px rgba(23, 42, 40, 0.16);
+  color-scheme: light;
 }
 
 /* === Mono: high contrast black, white, and red === */
@@ -411,4 +472,5 @@ html[data-amp-accent='on'] .amp-accent {
   --radius-card: 2px;
   --scanline-opacity: 0;
   --font-lcd: 'JetBrains Mono', monospace;
+  color-scheme: dark;
 }
