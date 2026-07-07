@@ -18,7 +18,7 @@ html, body, #root {
 .newamp-artists-row,
 .newamp-playlist-row {
   content-visibility: auto;
-  contain-intrinsic-size: 0 36px;
+  contain-intrinsic-size: 0 var(--row-height);
 }
 /* Reserve aspect so lazy-loaded cover art doesn't reflow long rails. */
 img[src^='newart://'] { aspect-ratio: 1; object-fit: cover; }
@@ -184,7 +184,7 @@ button {
 .pxbtn-icon {
   padding: 0 9px;
   transition:
-    transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1), /* overshoot = spring */
+    transform 200ms var(--ease-spring), /* overshoot spring — token in tokens.css */
     filter 160ms ease-out;
   will-change: transform;
 }

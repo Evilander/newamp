@@ -1061,7 +1061,7 @@ function saveTrackTableColumnWidths(widths: Record<TrackColumnKey, number>): voi
 }
 
 /** Fixed height of each data row. Must match `contain-intrinsic-size` in CSS (36px). */
-const LIBRARY_ROW_HEIGHT = 36; // matches contain-intrinsic-size: 0 36px on the track-row selectors in src/styles/index.css
+const LIBRARY_ROW_HEIGHT = 36; // matches --row-height (tokens.css), bound to contain-intrinsic-size on the track-row selectors in src/styles/chrome.css
 
 interface LibraryRowProps {
   track: Track;
