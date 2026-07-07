@@ -7,6 +7,7 @@ import { readStyleBundle } from './style-bundle.mjs';
 const {
   BUILT_IN_THEMES,
   SKIN_VARIABLES,
+  THEME_REGISTRY,
   normalizeCustomSkin,
   parseCustomSkinFile,
   serializeCustomSkin,
@@ -147,9 +148,12 @@ assert.match(mainSource, /settings:skin-import-file/, 'main process should expos
 assert.match(mainSource, /extensions: \['json', 'wsz', 'zip'\]/, 'native import dialog should accept Newamp JSON and Winamp WSZ/ZIP skins');
 assert.match(settingsViewSource, /Import skin/, 'Settings Skin Workshop should expose import');
 assert.match(settingsViewSource, /Export skin/, 'Settings Skin Workshop should expose export');
-assert.match(settingsViewSource, /Record Deck/, 'Settings should expose the record-player deck body');
-assert.match(settingsViewSource, /Jukebox/, 'Settings should expose the jukebox deck body');
-assert.match(settingsViewSource, /Vintage Computer/, 'Settings should expose the vintage-computer deck body');
+// Skin card copy lives in the single THEME_REGISTRY (shared/custom-skin.ts);
+// Settings renders that registry, so assert both halves of the contract.
+assert.match(settingsViewSource, /THEME_REGISTRY\.map/, 'Settings skin cards should render from the shared THEME_REGISTRY');
+assert.ok(THEME_REGISTRY.some((t) => t.label === 'Record Deck'), 'theme registry should expose the record-player deck body');
+assert.ok(THEME_REGISTRY.some((t) => t.label === 'Jukebox'), 'theme registry should expose the jukebox deck body');
+assert.ok(THEME_REGISTRY.some((t) => t.label === 'Vintage Computer'), 'theme registry should expose the vintage-computer deck body');
 assert.match(appSource, /isDroppedSkinFile/, 'app-wide drop handling should classify dropped skin files');
 assert.match(appSource, /importCustomSkinFile/, 'app-wide drop handling should import dropped skin files');
 assert.match(appSource, /Applied skin/, 'app-wide drop handling should report applied skins');
