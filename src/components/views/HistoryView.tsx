@@ -1,9 +1,12 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { ListeningHistoryItem, ListeningInsights } from '@shared/types';
 import { api } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
 import { formatDuration, formatTime } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { LoadMoreFooter } from './LoadMoreFooter';
+import { ViewHeader } from '../ViewHeader';
+import { ConfirmAction } from '../ConfirmAction';
 import { ArtistLink, AlbumLink } from '../EntityLink';
 
 const HISTORY_PAGE_SIZE = 500;
@@ -48,9 +51,16 @@ export function HistoryView(): JSX.Element {
   const tracks = useMemo(() => items.map((item) => item.track), [items]);
 
   async function clearHistory(): Promise<void> {
+    const cleared = items.length;
     await api.clearListeningHistory();
     setItems([]);
     setInsights(emptyListeningInsights());
+    setHasMoreHistory(false);
+    pushToast({
+      tone: 'ok',
+      title: 'Listening history cleared',
+      detail: `${cleared.toLocaleString()}${hasMoreHistory ? '+' : ''} play${cleared === 1 ? '' : 's'} removed.`,
+    });
   }
 
   async function loadMoreHistory(): Promise<void> {
@@ -83,23 +93,28 @@ export function HistoryView(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col" style={{ fontFamily: 'var(--font-mono)' }}>
-      <div
-        className="flex items-center gap-3 border-b px-3 py-2"
-        style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}
-      >
-        <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
-          Listening History
-        </div>
-        <div className="flex-1 text-[11px] tabular-nums" style={{ color: 'var(--ink-2)' }}>
-          {items.length.toLocaleString()}{hasMoreHistory ? '+' : ''} play{items.length === 1 ? '' : 's'}
-        </div>
-        <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)} disabled={!tracks.length}>
-          PLAY FROM TOP
-        </button>
-        <button className="pxbtn" onClick={() => void clearHistory()} disabled={!items.length}>
-          CLEAR
-        </button>
-      </div>
+      {/* Reference ViewHeader implementation — stage 2 rolls this voice out
+          to the other views. */}
+      <ViewHeader
+        eyebrow="Yours"
+        title="Listening History"
+        count={`${items.length.toLocaleString()}${hasMoreHistory ? '+' : ''} play${items.length === 1 ? '' : 's'}`}
+        actions={
+          <>
+            <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)} disabled={!tracks.length}>
+              PLAY FROM TOP
+            </button>
+            <ConfirmAction
+              label="CLEAR"
+              confirmLabel="SURE?"
+              tone="error"
+              disabled={!items.length}
+              title="Erase all listening history"
+              onConfirm={() => void clearHistory()}
+            />
+          </>
+        }
+      />
       {insights && insights.total.plays > 0 && <HistoryInsights insights={insights} />}
       <div className="flex-1 overflow-auto">
         {loading ? (

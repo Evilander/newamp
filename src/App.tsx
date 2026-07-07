@@ -6,6 +6,7 @@ import { ScanBanner } from './components/ScanBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { QuickPlayPalette } from './components/QuickPlayPalette';
 import { FirstRunHints } from './components/FirstRunHints';
+import { ToastHost } from './components/StatusToast';
 import { StartupSplash } from './components/StartupSplash';
 import { usePlayerStore } from './store/usePlayerStore';
 import { api, inElectron, winctl } from './lib/api';
@@ -314,6 +315,7 @@ export default function App(): JSX.Element {
           <CompactPlayer />
         </Suspense>
         <QuickPlayPalette />
+        <ToastHost />
         {showSplash && <StartupSplash />}
       </>
     );
@@ -390,6 +392,9 @@ export default function App(): JSX.Element {
           <FullscreenVisualizer />
         </Suspense>
       )}
+      {/* Toasts sit outside .app-chrome so they overlay the fullscreen
+          visualizer too; the host is position:fixed either way. */}
+      <ToastHost />
       {showSplash && <StartupSplash />}
       {settings && !settings.firstLaunchTutorialSeen && !tutorialDismissed && (
         <Suspense fallback={null}>
