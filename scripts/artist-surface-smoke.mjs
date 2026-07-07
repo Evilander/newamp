@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fetchArtistFacts } from '../src/api/artistFacts.ts';
 import { fetchAlbumFacts } from '../src/api/albumFacts.ts';
+import { readStyleBundle } from './style-bundle.mjs';
 
 const [artistFactsSource, albumFactsSource, artistsViewSource, nowPlayingSource, mainSource, linerNotesSource, styleSource] = await Promise.all([
   readFile(new URL('../src/api/artistFacts.ts', import.meta.url), 'utf8'),
@@ -10,7 +11,7 @@ const [artistFactsSource, albumFactsSource, artistsViewSource, nowPlayingSource,
   readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8'),
   readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/LinerNotesPanel.tsx', import.meta.url), 'utf8'),
-  readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8'),
+  readStyleBundle(),
 ]);
 
 assert.match(artistFactsSource, /piprop/, 'artist facts should request PageImages original/thumbnail data');
