@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { readdir, readFile, stat } from 'node:fs/promises';
+import { readStyleBundle } from './style-bundle.mjs';
 
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const brandLogoSource = await readFile(new URL('../src/components/BrandLogo.tsx', import.meta.url), 'utf8');
 const startupSplashSource = await readFile(new URL('../src/components/StartupSplash.tsx', import.meta.url), 'utf8');
-const styleSource = await readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8');
+const styleSource = await readStyleBundle();
 const mainSource = await readFile(new URL('../electron/main.ts', import.meta.url), 'utf8');
 const packageSource = await readFile(new URL('../package.json', import.meta.url), 'utf8');
 const readmeSource = await readFile(new URL('../README.md', import.meta.url), 'utf8');

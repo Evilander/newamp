@@ -1,0 +1,64 @@
+/* Track-navigation landing flash (TrackTable highlightTrack). The animation
+   outranks the row's inline zebra background while it plays, then hands
+   control back. */
+tr[data-newamp-track-highlight] {
+  animation: newamp-track-highlight 2.4s ease-out;
+}
+@keyframes newamp-track-highlight {
+  0% { background-color: color-mix(in srgb, var(--accent) 34%, transparent); }
+  100% { background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  tr[data-newamp-track-highlight] {
+    animation: none;
+    background-color: color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+}
+
+/* HelpDot — the "?" next to view titles that re-opens the view's onboarding
+   card. Deliberately quiet until hovered; it's an answer, not a call to
+   action. */
+.view-help-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font: 700 10px var(--font-mono);
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms;
+  vertical-align: middle;
+}
+.view-help-dot:hover,
+.view-help-dot[aria-expanded='true'] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Ambient art wash (Now Playing): the current sleeve blurred into a color
+   field behind the panels. z-index -1 + isolated root = above the view's
+   transparent background, below every panel. */
+.newamp-art-wash {
+  position: absolute;
+  inset: -48px;
+  z-index: -1;
+  pointer-events: none;
+  background-size: cover;
+  background-position: center;
+  filter: blur(64px) saturate(1.2) brightness(0.34);
+  opacity: 0;
+  animation: newamp-art-wash-in 1100ms ease-out forwards;
+}
+@keyframes newamp-art-wash-in {
+  to { opacity: 0.55; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .newamp-art-wash {
+    animation: none;
+    opacity: 0.55;
+  }
+}

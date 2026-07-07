@@ -1,0 +1,414 @@
+:root {
+  --bg: #0a0e07;
+  --panel: #141b14;
+  --panel-2: #1f2a1f;
+  --panel-3: #283928;
+  --line: #2a3a2a;
+  --accent: #39ff14;
+  --accent-dim: #1aa30a;
+  --accent-glow: rgba(57, 255, 20, 0.55);
+  --ink: #cfead0;
+  --ink-2: #8fb78f;
+  --muted: #7a9c7a;
+  --warn: #ffb000;
+  --error: #ff3333;
+  --display-bg: #051005;
+  --display-fg: #39ff14;
+  --accent-text: var(--accent);
+  --titlebar: linear-gradient(to bottom, #2c3a2c, #0e160e);
+  --bevel-light: rgba(255, 255, 255, 0.08);
+  --bevel-dark: rgba(0, 0, 0, 0.55);
+  --radius: 2px;
+  --radius-card: 4px;
+  --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --font-display: 'Inter', system-ui, sans-serif;
+  --font-lcd: 'VT323', 'JetBrains Mono', monospace;
+  --font-mono: 'JetBrains Mono', 'Consolas', monospace;
+  --scanline-opacity: 0.06;
+  --texture-noise: 0.07;
+  --newamp-text-scale: 1;
+  /* Resonance live-audio vars (written per-frame by src/lib/resonance.ts).
+     Kept out of SKIN_VARIABLES so theme switches never wipe them. */
+  --amp-energy: 0;
+  --amp-beat: 0;
+  --amp-bright: 0.5;
+}
+
+/* =========================================================
+   Resonance — the live audio drives the chrome itself.
+   One rAF loop writes --amp-energy / --amp-beat on :root; the
+   rules below consume them with compositor-only opacity/transform.
+   Active only when [data-amp-reactive='on'] (set by the adaptive
+   tier + Ambient setting). Reduced motion / weak HW => static.
+   ========================================================= */
+@property --amp-energy { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --amp-beat { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --amp-bright { syntax: '<number>'; inherits: true; initial-value: 0.5; }
+
+html[data-amp-reactive='on'] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  background:
+    radial-gradient(58% 48% at 28% 16%, var(--amp-bg1, transparent), transparent 70%),
+    radial-gradient(54% 46% at 82% 88%, var(--amp-bg2, transparent), transparent 72%);
+  mix-blend-mode: screen;
+  opacity: calc(0.05 + var(--amp-energy) * 0.11 + var(--amp-beat) * 0.05);
+  transition: opacity 200ms linear;
+  will-change: opacity;
+}
+
+html[data-amp-reactive='on'] .amp-beat-scale {
+  transform: scale(calc(1 + var(--amp-beat) * 0.05));
+  transform-origin: center;
+}
+html[data-amp-reactive='on'] .amp-energy-glow {
+  opacity: calc(0.4 + var(--amp-energy) * 0.55);
+}
+html[data-amp-accent='on'] .amp-accent {
+  color: var(--accent-live, var(--accent));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-amp-reactive='on'] body::after { display: none; }
+  html[data-amp-reactive='on'] .amp-beat-scale { transform: none; }
+}
+
+/* === Classic: vintage Winamp 2.x. Dark gray cast-metal chrome with a green
+   LCD display window. Silver beveled transport buttons. Tight, sharp 1px
+   bevels. The signature green-on-black phosphor stays for the LCD only. === */
+[data-theme='classic'] {
+  --bg: #14181a;
+  --panel: #2c3438;
+  --panel-2: #3a444a;
+  --panel-3: #485258;
+  --line: #1a1d20;
+  --accent: #00ff66;
+  --accent-dim: #00b340;
+  --accent-glow: rgba(0, 255, 102, 0.55);
+  --ink: #c8d4d8;
+  --ink-2: #8e9aa0;
+  --muted: #8a949a;
+  --warn: #ffaa00;
+  --error: #ff4444;
+  --display-bg: #0a1408;
+  --display-fg: #00ff66;
+  --titlebar: linear-gradient(to bottom,
+    #4a5258 0%, #3a4248 35%, #2a3034 65%, #1c2024 100%);
+  --bevel-light: rgba(255, 255, 255, 0.18);
+  --bevel-dark: rgba(0, 0, 0, 0.6);
+  --radius: 1px;
+  --radius-card: 2px;
+  --scanline-opacity: 0.07;
+  --font-lcd: 'VT323', 'JetBrains Mono', monospace;
+}
+
+/* === Midnight: clean modern dark === */
+[data-theme='midnight'] {
+  --bg: #07090d;
+  --panel: #11141b;
+  --panel-2: #181c25;
+  --panel-3: #232936;
+  --line: #2a3140;
+  --accent: #7c5cff;
+  --accent-dim: #5a3fd6;
+  --accent-glow: rgba(124, 92, 255, 0.55);
+  --ink: #e8ecf3;
+  --ink-2: #a8b0c2;
+  --muted: #8a92a6;
+  --display-bg: #0c0f17;
+  --display-fg: #c2b6ff;
+  --titlebar: linear-gradient(to bottom, #1a1f2b 0%, #0d1018 100%);
+  --bevel-light: rgba(255, 255, 255, 0.06);
+  --bevel-dark: rgba(0, 0, 0, 0.5);
+  --radius: 6px;
+  --radius-card: 12px;
+  --scanline-opacity: 0;
+}
+
+/* === Neon: 80s-cyberpunk retro-futurist === */
+[data-theme='neon'] {
+  --bg: #0a0613;
+  --panel: #160a26;
+  --panel-2: #200d34;
+  --panel-3: #2e1448;
+  --line: #401f64;
+  --accent: #ff36e0;
+  --accent-dim: #b81d9f;
+  --accent-glow: rgba(255, 54, 224, 0.65);
+  --ink: #ffe9fe;
+  --ink-2: #cca0d8;
+  --muted: #a684b6;
+  --display-bg: #100422;
+  --display-fg: #ff66f5;
+  --titlebar: linear-gradient(to bottom, #2c1248 0%, #100422 100%);
+  --bevel-light: rgba(255, 110, 255, 0.18);
+  --bevel-dark: rgba(0, 0, 0, 0.7);
+  --radius: 3px;
+  --radius-card: 6px;
+  --scanline-opacity: 0.12;
+}
+
+/* === Ops: dense terminal / trader-dashboard. Deep black, hex accents,
+   emerald-cyan primary, magenta loss, amber warn. Tight grids. === */
+[data-theme='ops'] {
+  --bg: #05080a;
+  --panel: #0b1014;
+  --panel-2: #11171d;
+  --panel-3: #1a232c;
+  --line: #1d2630;
+  --accent: #34d399;
+  --accent-dim: #0f9a6e;
+  --accent-glow: rgba(52, 211, 153, 0.45);
+  --warn: #f5b350;
+  --error: #ff3b6a;
+  --ink: #e2e8ee;
+  --ink-2: #8b96a3;
+  --muted: #7a8492;
+  --display-bg: #060a0c;
+  --display-fg: #34d399;
+  --titlebar: linear-gradient(180deg, #0e141a 0%, #050709 100%);
+  --bevel-light: rgba(52, 211, 153, 0.06);
+  --bevel-dark: rgba(0, 0, 0, 0.7);
+  --radius: 3px;
+  --radius-card: 6px;
+  --scanline-opacity: 0;
+  --font-lcd: 'JetBrains Mono', monospace;
+}
+
+/* === Amber: phosphor terminal === */
+[data-theme='amber'] {
+  --bg: #0c0902;
+  --panel: #1b1408;
+  --panel-2: #261b0a;
+  --panel-3: #322110;
+  --line: #4a3315;
+  --accent: #ffb000;
+  --accent-dim: #b87c00;
+  --accent-glow: rgba(255, 176, 0, 0.55);
+  --ink: #ffe2a1;
+  --ink-2: #c6a16a;
+  --muted: #a48052;
+  --display-bg: #170f04;
+  --display-fg: #ffc04a;
+  --titlebar: linear-gradient(to bottom, #382713 0%, #1b1408 100%);
+  --bevel-light: rgba(255, 200, 80, 0.18);
+  --bevel-dark: rgba(0, 0, 0, 0.7);
+  --radius: 2px;
+  --radius-card: 3px;
+  --scanline-opacity: 0.1;
+}
+
+/* === Oxide: industrial steel, cyan meters, rust warning lights === */
+[data-theme='oxide'] {
+  --bg: #070a0d;
+  --panel: #101419;
+  --panel-2: #1b2329;
+  --panel-3: #26333a;
+  --line: #41525b;
+  --accent: #51e6d8;
+  --accent-dim: #188f91;
+  --accent-glow: rgba(81, 230, 216, 0.42);
+  --warn: #f38d3c;
+  --error: #ff4f4f;
+  --ink: #e6eef0;
+  --ink-2: #9cafb7;
+  --muted: #8a9aa2;
+  --display-bg: #061315;
+  --display-fg: #74fff2;
+  --titlebar: linear-gradient(180deg, #2b363c 0%, #12191e 54%, #070a0d 100%);
+  --bevel-light: rgba(191, 247, 240, 0.11);
+  --bevel-dark: rgba(0, 0, 0, 0.72);
+  --radius: 2px;
+  --radius-card: 5px;
+  --scanline-opacity: 0.04;
+  --font-lcd: 'JetBrains Mono', monospace;
+}
+
+/* === Steel: brushed late-90s desktop player chrome, cobalt display === */
+[data-theme='steel'] {
+  --bg: #20262d;
+  --panel: #aeb6bf;
+  --panel-2: #ccd2d8;
+  --panel-3: #87939e;
+  --line: #5b6873;
+  --accent: #2357d8;
+  --accent-text: #14336a;
+  --accent-dim: #183984;
+  --accent-glow: rgba(35, 87, 216, 0.38);
+  --warn: #d88a13;
+  --error: #bd2534;
+  --ink: #111821;
+  --ink-2: #31414f;
+  --muted: #475660;
+  --display-bg: #07111e;
+  --display-fg: #77c8ff;
+  --titlebar: linear-gradient(180deg, #eff3f6 0%, #aeb6bf 48%, #74808c 100%);
+  --bevel-light: rgba(255, 255, 255, 0.85);
+  --bevel-dark: rgba(13, 22, 30, 0.5);
+  --radius: 2px;
+  --radius-card: 4px;
+  --scanline-opacity: 0.035;
+  --font-lcd: 'JetBrains Mono', monospace;
+}
+
+/* === Walnut: old component stereo faceplate with wood side cheeks === */
+[data-theme='walnut'] {
+  --bg: #130e0b;
+  --panel: #2a1b12;
+  --panel-2: #382416;
+  --panel-3: #4c301c;
+  --line: #6b472c;
+  --accent: #f0a629;
+  --accent-dim: #b16c18;
+  --accent-glow: rgba(240, 166, 41, 0.42);
+  --warn: #ffd15c;
+  --error: #dc3f34;
+  --ink: #f1debf;
+  --ink-2: #c59f72;
+  --muted: #a98562;
+  --display-bg: #090807;
+  --display-fg: #ffc35a;
+  --titlebar: linear-gradient(180deg, #5b3720 0%, #24160d 52%, #0c0805 100%);
+  --bevel-light: rgba(255, 213, 138, 0.14);
+  --bevel-dark: rgba(0, 0, 0, 0.78);
+  --radius: 2px;
+  --radius-card: 3px;
+  --scanline-opacity: 0.07;
+}
+
+/* === Jukebox: chrome arch, red glass, amber title glow === */
+[data-theme='jukebox'] {
+  --bg: #140911;
+  --panel: #2a1018;
+  --panel-2: #3b1721;
+  --panel-3: #5c2630;
+  --line: #8d6b62;
+  --accent: #ffcf4a;
+  --accent-dim: #d34e6a;
+  --accent-glow: rgba(255, 207, 74, 0.46);
+  --warn: #ff9b36;
+  --error: #ff4b64;
+  --ink: #fff0d2;
+  --ink-2: #e5b88c;
+  --muted: #b08c82;
+  --display-bg: #1a0910;
+  --display-fg: #52f0d0;
+  --titlebar: linear-gradient(180deg, #efe8d9 0%, #9b8a80 18%, #451621 58%, #16070d 100%);
+  --bevel-light: rgba(255, 244, 210, 0.45);
+  --bevel-dark: rgba(0, 0, 0, 0.8);
+  --radius: 8px;
+  --radius-card: 10px;
+  --scanline-opacity: 0.04;
+}
+
+/* === Terminal: beige CRT shell with green phosphor glass === */
+/* Ink/ink-2/muted are darkened so body and secondary text are legible against
+   the beige panel. The previous values failed WCAG AA contrast against
+   #c4c1aa, making the whole theme read as "unreadable" in practice. */
+[data-theme='terminal'] {
+  --bg: #b8b59c;
+  --panel: #c4c1aa;
+  --panel-2: #d8d4ba;
+  --panel-3: #9a9a83;
+  --line: #3f4538;
+  --accent: #1c8a3f;
+  --accent-text: #0c5224;
+  --accent-dim: #0e6128;
+  --accent-glow: rgba(89, 255, 133, 0.45);
+  --warn: #8a4a02;
+  --error: #8b1818;
+  --ink: #0c130c;
+  --ink-2: #1f2c20;
+  --muted: #3a4034;
+  --display-bg: #041006;
+  --display-fg: #59ff85;
+  --titlebar: linear-gradient(180deg, #ded9be 0%, #b8b49d 50%, #7a7a68 100%);
+  --bevel-light: rgba(255, 255, 230, 0.72);
+  --bevel-dark: rgba(26, 30, 22, 0.48);
+  --radius: 4px;
+  --radius-card: 6px;
+  --scanline-opacity: 0.12;
+  --font-lcd: 'VT323', 'JetBrains Mono', monospace;
+}
+
+/* === Ice: frosted silver shell, cyan glass display, high daylight contrast === */
+[data-theme='ice'] {
+  --bg: #d7e0e5;
+  --panel: #eef3f6;
+  --panel-2: #d9e3e8;
+  --panel-3: #b7c6cf;
+  --line: #8fa2ae;
+  --accent: #00a6d6;
+  --accent-text: #045f7a;
+  --accent-dim: #05789d;
+  --accent-glow: rgba(0, 166, 214, 0.34);
+  --warn: #c27600;
+  --error: #c91f42;
+  --ink: #10202a;
+  --ink-2: #3c5664;
+  --muted: #4d626c;
+  --display-bg: #071923;
+  --display-fg: #8ff3ff;
+  --titlebar: linear-gradient(180deg, #ffffff 0%, #d9e3e8 50%, #9fb5c0 100%);
+  --bevel-light: rgba(255, 255, 255, 0.95);
+  --bevel-dark: rgba(41, 62, 74, 0.35);
+  --radius: 5px;
+  --radius-card: 8px;
+  --scanline-opacity: 0.02;
+  --font-lcd: 'JetBrains Mono', monospace;
+}
+
+/* === Miami: bright daylight deck, coral controls, teal LCD === */
+[data-theme='miami'] {
+  --bg: #eef3ef;
+  --panel: #f3f4ef;
+  --panel-2: #dbe7e3;
+  --panel-3: #bfd4d0;
+  --line: #7e9c9a;
+  --accent: #ff4f79;
+  --accent-text: #a3133f;
+  --accent-dim: #c42d52;
+  --accent-glow: rgba(255, 79, 121, 0.34);
+  --warn: #d97904;
+  --error: #c9184a;
+  --ink: #172022;
+  --ink-2: #40585a;
+  --muted: #4e6766;
+  --display-bg: #10282e;
+  --display-fg: #66f7d7;
+  --titlebar: linear-gradient(180deg, #fffaf2 0%, #dbe7e3 48%, #a8cbc7 100%);
+  --bevel-light: rgba(255, 255, 255, 0.9);
+  --bevel-dark: rgba(47, 74, 77, 0.38);
+  --radius: 4px;
+  --radius-card: 8px;
+  --scanline-opacity: 0.025;
+}
+
+/* === Mono: high contrast black, white, and red === */
+[data-theme='mono'] {
+  --bg: #050505;
+  --panel: #080808;
+  --panel-2: #171717;
+  --panel-3: #262626;
+  --line: #5d5d5d;
+  --accent: #f5f5f0;
+  --accent-dim: #b8b8b1;
+  --accent-glow: rgba(245, 245, 240, 0.28);
+  --warn: #ffd447;
+  --error: #ff3d3d;
+  --ink: #f5f5f0;
+  --ink-2: #c4c4bd;
+  --muted: #8c8c86;
+  --display-bg: #f5f5f0;
+  --display-fg: #080808;
+  --titlebar: linear-gradient(180deg, #222 0%, #050505 100%);
+  --bevel-light: rgba(255, 255, 255, 0.2);
+  --bevel-dark: rgba(0, 0, 0, 0.85);
+  --radius: 0px;
+  --radius-card: 2px;
+  --scanline-opacity: 0;
+  --font-lcd: 'JetBrains Mono', monospace;
+}
