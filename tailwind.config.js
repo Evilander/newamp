@@ -3,42 +3,44 @@ export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
+      // var()-backed bridge into the skin system (src/styles/tokens.css).
+      // Utilities like text-accent / bg-panel2 / border-line follow the active
+      // [data-theme] instead of hard-coding the default green.
       colors: {
-        // Classic Winamp green-on-black aesthetic, with modern accents
-        amp: {
-          bg: '#0a0e07',
-          panel: '#141b14',
-          panel2: '#1f2a1f',
-          line: '#2a3a2a',
-          green: '#39ff14',
-          'green-dim': '#1aa30a',
-          'green-glow': '#7fff5b',
-          amber: '#ffb000',
-          red: '#ff3333',
-          cyan: '#00f0ff',
-          ink: '#cfead0',
-          muted: '#5e7d5e',
-        },
+        ink: 'var(--ink)',
+        ink2: 'var(--ink-2)',
+        muted: 'var(--muted)',
+        panel: 'var(--panel)',
+        panel2: 'var(--panel-2)',
+        panel3: 'var(--panel-3)',
+        line: 'var(--line)',
+        accent: 'var(--accent)',
+        accentDim: 'var(--accent-dim)',
+        warn: 'var(--warn)',
+        error: 'var(--error)',
+      },
+      borderRadius: {
+        DEFAULT: 'var(--radius)',
+        card: 'var(--radius-card)',
+        pill: 'var(--radius-pill)',
+      },
+      // Type ramp tokens (tokens.css). These override the Tailwind defaults for
+      // xs…3xl on purpose — the app's compact hardware scale is the system.
+      fontSize: {
+        '2xs': 'var(--text-2xs)',
+        xs: 'var(--text-xs)',
+        sm: 'var(--text-sm)',
+        base: 'var(--text-base)',
+        md: 'var(--text-md)',
+        lg: 'var(--text-lg)',
+        xl: 'var(--text-xl)',
+        '2xl': 'var(--text-2xl)',
+        '3xl': 'var(--text-3xl)',
       },
       fontFamily: {
         lcd: ['"VT323"', '"Press Start 2P"', 'monospace'],
         mono: ['"JetBrains Mono"', '"Consolas"', 'monospace'],
         display: ['"Inter"', 'system-ui', 'sans-serif'],
-      },
-      boxShadow: {
-        glow: '0 0 12px rgba(57, 255, 20, 0.55), 0 0 28px rgba(57, 255, 20, 0.25)',
-        'glow-soft': '0 0 6px rgba(57, 255, 20, 0.35)',
-        'inset-panel': 'inset 0 0 0 1px rgba(57,255,20,0.12), inset 0 1px 0 rgba(255,255,255,0.04)',
-      },
-      animation: {
-        'pulse-fast': 'pulse 1.2s cubic-bezier(0.4,0,0.6,1) infinite',
-        marquee: 'marquee 18s linear infinite',
-      },
-      keyframes: {
-        marquee: {
-          '0%': { transform: 'translateX(0%)' },
-          '100%': { transform: 'translateX(-100%)' },
-        },
       },
     },
   },
