@@ -6,6 +6,9 @@ release
 tmp
 studio/renders
 
+# craft regression matrix output (current shots, machine-local baselines, diff reports)
+craft-matrix/
+
 .serena
 .playwright-cli
 .playwright-mcp

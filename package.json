@@ -166,6 +166,7 @@
     "smoke:local-lyrics": "npm run build:electron && node scripts/local-lyrics-smoke.mjs",
     "smoke:ui-local-lyrics": "npm run build && node scripts/ui-local-lyrics-smoke.mjs",
     "screenshots:gallery": "npm run build && node scripts/screenshot-gallery.mjs",
+    "craft:matrix": "npm run build && node scripts/craft-matrix.mjs",
     "start": "npm run build && electron .",
     "electron:install": "node scripts/install-electron.mjs",
     "postinstall": "node scripts/install-electron.mjs",
