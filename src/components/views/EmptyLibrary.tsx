@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, inElectron } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
 import { BrandLogo } from '../BrandLogo';
 import type { MusicFolderSuggestion } from '@shared/types';
 
@@ -63,8 +64,11 @@ export function EmptyLibrary(): JSX.Element {
 
   async function pickFolder(): Promise<void> {
     if (!inElectron) {
-      // eslint-disable-next-line no-alert
-      alert('Open NewAmp in Electron to pick a local folder.');
+      pushToast({
+        tone: 'warn',
+        title: 'Folder picker needs the desktop app',
+        detail: 'Open NewAmp in Electron to pick a local folder.',
+      });
       return;
     }
     const dir = await api.pickFolder();
