@@ -1,0 +1,163 @@
+/* Alphabet rail on the Albums view. Floats over the right edge of the
+   album grid so it doesn't reduce the grid's horizontal space. Letters
+   that don't have any matching artist are dimmed and skipped. */
+.album-letter-rail {
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  right: 4px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-evenly;
+  padding: 4px 2px;
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  pointer-events: auto;
+}
+.album-letter-rail-key {
+  width: 22px;
+  min-height: 16px;
+  line-height: 1;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.album-letter-rail-key.is-present {
+  color: var(--accent);
+}
+.album-letter-rail-key.is-present:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--ink);
+}
+.album-letter-rail-key.is-empty {
+  color: var(--muted);
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Living Tag chips inside the liner notes panel — shows the user how their
+   DSL rules have classified the current track. Replaces the old static
+   "NewAmp Notes" filler that conveyed no real information. */
+.liner-notes-tags {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px dashed var(--line);
+}
+.liner-notes-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.liner-notes-tag-list li {
+  display: inline-flex;
+}
+.liner-notes-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 14%, var(--panel-2));
+  border: 1px solid var(--accent-dim);
+  border-radius: 2px;
+}
+.liner-notes-tag-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* View onboarding cards — first-visit explainers for Discover, Mixes,
+   and Living Tags. Sit at the top of the view, can be dismissed
+   permanently, and use the panel chrome so they read as part of
+   NewAmp rather than a modal. */
+.view-onboarding {
+  margin: 12px 14px 0;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, var(--panel)) 0%, var(--panel-2) 60%);
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius-card);
+  box-shadow: 0 0 0 1px var(--bevel-light) inset, 0 0 16px var(--accent-glow);
+  color: var(--ink);
+}
+.view-onboarding-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.view-onboarding-kicker {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.view-onboarding-title {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--ink);
+}
+.view-onboarding-lede {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  margin: 0;
+}
+.view-onboarding-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.view-onboarding-list li {
+  position: relative;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+}
+.view-onboarding-list li::before {
+  content: '▸';
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--accent);
+  font-weight: 700;
+}
+.view-onboarding-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.view-onboarding-cta {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--muted);
+}
+

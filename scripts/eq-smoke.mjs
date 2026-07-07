@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { readStyleBundle } from './style-bundle.mjs';
 
 const presets = await import('../dist-electron/shared/eq-presets.js');
 
@@ -25,7 +26,7 @@ const [settingsSource, storeSource, panelSource, stylesSource, packageSource, ga
   readFile(new URL('../electron/settings.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/store/usePlayerStore.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/components/EqPanel.tsx', import.meta.url), 'utf8'),
-  readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8'),
+  readStyleBundle(),
   readFile(new URL('../package.json', import.meta.url), 'utf8'),
   readFile(new URL('../scripts/release-gate.mjs', import.meta.url), 'utf8'),
 ]);

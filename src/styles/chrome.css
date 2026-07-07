@@ -1,0 +1,293 @@
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  overflow: hidden;
+}
+/* ============================================================
+   Performance: skip offscreen rendering for long catalog lists.
+   `content-visibility: auto` tells the browser to skip layout,
+   paint, and hit-testing for offscreen rows. With a 62k-track
+   library this is the single biggest scroll-frame improvement.
+   ============================================================ */
+[data-virtual-row],
+.newamp-library-row,
+.newamp-albums-row,
+.newamp-artists-row,
+.newamp-playlist-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 0 36px;
+}
+/* Reserve aspect so lazy-loaded cover art doesn't reflow long rails. */
+img[src^='newart://'] { aspect-ratio: 1; object-fit: cover; }
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ----------------------- Beveled chrome ----------------------- */
+
+.bevel-out {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0.18) 100%),
+    var(--panel);
+  box-shadow:
+    inset 0 1px 0 var(--bevel-light),
+    inset 0 -1px 0 var(--bevel-dark),
+    inset 1px 0 0 var(--bevel-light),
+    inset -1px 0 0 var(--bevel-dark);
+  border-radius: var(--radius);
+}
+
+.bevel-in {
+  background:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.35) 0%, rgba(0, 0, 0, 0.15) 100%),
+    var(--display-bg);
+  box-shadow:
+    inset 0 1px 0 var(--bevel-dark),
+    inset 0 -1px 0 var(--bevel-light),
+    inset 1px 0 0 var(--bevel-dark),
+    inset -1px 0 0 var(--bevel-light);
+  border-radius: var(--radius);
+}
+
+.lcd-text {
+  font-family: var(--font-lcd);
+  color: var(--display-fg);
+  text-shadow:
+    0 0 4px var(--accent-glow),
+    0 0 1px var(--display-fg);
+  letter-spacing: 0.05em;
+}
+
+.scanlines::before {
+  content: '';
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, var(--scanline-opacity)) 0px,
+    rgba(0, 0, 0, var(--scanline-opacity)) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: multiply;
+  opacity: 1;
+}
+
+.glow {
+  box-shadow: 0 0 10px var(--accent-glow), 0 0 24px var(--accent-glow);
+}
+
+/* Custom scrollbars to match the skin */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--panel-3);
+  border-radius: var(--radius);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-dim);
+}
+
+/* No text-selection caret feel for app chrome — let the user select inside lists if needed */
+.app-chrome,
+.app-chrome * {
+  user-select: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0;
+}
+
+/* a small ASCII-style pixel button */
+.pxbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: linear-gradient(180deg, var(--panel-2) 0%, var(--panel) 100%);
+  box-shadow:
+    inset 0 1px 0 var(--bevel-light),
+    inset 0 -1px 0 var(--bevel-dark),
+    inset 1px 0 0 var(--bevel-light),
+    inset -1px 0 0 var(--bevel-dark);
+  border-radius: var(--radius);
+}
+.pxbtn:hover {
+  filter: brightness(1.15);
+}
+.pxbtn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+  box-shadow:
+    inset 0 1px 0 var(--bevel-light),
+    inset 0 -1px 0 var(--bevel-dark),
+    inset 1px 0 0 var(--bevel-light),
+    inset -1px 0 0 var(--bevel-dark),
+    0 0 8px var(--accent-glow);
+}
+.pxbtn:active {
+  box-shadow:
+    inset 0 1px 0 var(--bevel-dark),
+    inset 0 -1px 0 var(--bevel-light),
+    inset 1px 0 0 var(--bevel-dark),
+    inset -1px 0 0 var(--bevel-light);
+  transform: translateY(1px);
+}
+.pxbtn.is-active {
+  color: var(--accent-text);
+  text-shadow: 0 0 6px var(--accent-glow);
+}
+/* Primary action — used on play / confirm buttons that should read first. */
+.pxbtn.is-primary {
+  min-width: 30px;
+  padding: 0 11px;
+  color: var(--accent);
+  text-shadow: 0 0 6px var(--accent-glow);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent) 22%, var(--panel-2)) 0%,
+    color-mix(in srgb, var(--accent) 8%, var(--panel)) 100%);
+  box-shadow:
+    inset 0 1px 0 var(--bevel-light),
+    inset 0 -1px 0 var(--bevel-dark),
+    inset 1px 0 0 var(--bevel-light),
+    inset -1px 0 0 var(--bevel-dark),
+    0 0 0 1px color-mix(in srgb, var(--accent) 32%, transparent),
+    0 0 12px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.pxbtn.is-primary:hover { filter: brightness(1.2); }
+
+/* === Transport control icons (inline SVG, theme-colored, animated) =========
+   Scoped to .pxbtn-icon so the rest of the app's pixel buttons are untouched.
+   Icons fill with currentColor, so they inherit is-active/is-primary color. */
+.pxbtn-icon {
+  padding: 0 9px;
+  transition:
+    transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1), /* overshoot = spring */
+    filter 160ms ease-out;
+  will-change: transform;
+}
+.pxbtn-icon > svg { display: block; }
+.pxbtn-icon:active {
+  transform: translateY(1px) scale(0.94);
+  transition-duration: 70ms; /* fast press-down, bouncy release */
+}
+.pxbtn-icon:focus-visible { outline-offset: 2px; }
+.pxbtn-icon.is-primary { min-width: 34px; }
+
+/* Play↔pause: both glyphs are drawn centered and overlapping in the same SVG;
+   data-playing crossfades + scales between them in place. */
+.pp-glyph {
+  transition: opacity 200ms ease, transform 240ms cubic-bezier(0.34, 1.4, 0.5, 1);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+svg[data-playing='false'] .pp-pause { opacity: 0; transform: scale(0.55); }
+svg[data-playing='false'] .pp-play  { opacity: 1; transform: none; }
+svg[data-playing='true']  .pp-play  { opacity: 0; transform: scale(0.55); }
+svg[data-playing='true']  .pp-pause { opacity: 1; transform: none; }
+
+/* The primary play button breathes with the live audio — drop-shadow blur only
+   (not size/position, which would break the hit target). Tight 3–12px range so
+   it pulses without becoming chaotic. Gated on the Resonance master toggle. */
+html[data-amp-reactive='on'] .pxbtn-icon.is-primary[aria-pressed='true'] {
+  filter: drop-shadow(0 0 calc(3px + var(--amp-energy) * 9px) var(--accent-glow));
+}
+@media (prefers-reduced-motion: reduce) {
+  .pxbtn-icon,
+  .pxbtn-icon:active,
+  .pp-glyph { transition: none; }
+  html[data-amp-reactive='on'] .pxbtn-icon.is-primary[aria-pressed='true'] { filter: none; }
+}
+
+.track-action-cluster {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-start;
+}
+.track-icon-btn {
+  display: inline-grid;
+  min-width: 22px;
+  height: 20px;
+  place-items: center;
+  padding: 0 5px;
+  color: var(--ink-2);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border-radius: var(--radius);
+  box-shadow:
+    inset 0 1px 0 var(--bevel-light),
+    inset 0 -1px 0 var(--bevel-dark);
+  font-size: 12px;
+  line-height: 1;
+}
+.track-icon-btn:hover {
+  color: var(--accent);
+  filter: brightness(1.12);
+  text-shadow: 0 0 6px var(--accent-glow);
+}
+.track-folder-btn {
+  opacity: 0.62;
+}
+tr:hover .track-folder-btn {
+  opacity: 1;
+}
+
+input[type='range'].nslider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  height: 18px;
+}
+input[type='range'].nslider::-webkit-slider-runnable-track {
+  height: 5px;
+  background: var(--panel-3);
+  border-radius: var(--radius);
+  box-shadow:
+    inset 0 1px 0 var(--bevel-dark),
+    inset 0 -1px 0 var(--bevel-light);
+}
+input[type='range'].nslider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 14px;
+  width: 10px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-dim));
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  border-radius: var(--radius);
+  margin-top: -4px;
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+.eq-slider-frame {
+  display: flex;
+  width: 18px;
+  height: 84px;
+  align-items: center;
+  justify-content: center;
+}
+input[type='range'].nslider.eq-slider {
+  width: 80px;
+  height: 18px;
+  transform: rotate(-90deg);
+  transform-origin: center;
+}
+

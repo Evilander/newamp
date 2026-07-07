@@ -1,0 +1,230 @@
+/* ============================================================
+   Shell variants (layout/chrome)
+   ============================================================ */
+.shell-picker { display: flex; flex-direction: column; gap: 6px; }
+.shell-picker-label {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.shell-picker-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.shell-picker-btn { min-width: 110px; padding: 6px 12px; }
+
+/* Modern: rounded panels, soft shadows, larger fonts, hidden bevels. */
+[data-shell='modern'] {
+  --radius: 6px;
+  --radius-card: 14px;
+  --shadow-card: 0 12px 36px rgba(0,0,0,0.32);
+}
+[data-shell='modern'] .titlebar-drag { background: var(--bg) !important; }
+[data-shell='modern'] .app-chrome { background: var(--bg); }
+[data-shell='modern'] .bevel-out {
+  background: var(--panel);
+  box-shadow: 0 1px 0 var(--bevel-light), 0 12px 28px rgba(0,0,0,0.34);
+  border: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  border-radius: 14px;
+}
+[data-shell='modern'] .bevel-in {
+  background: var(--display-bg);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bevel-dark) 50%, transparent);
+  border-radius: 10px;
+}
+[data-shell='modern'] .pxbtn {
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  padding: 6px 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+[data-shell='modern'] .pxbtn.is-active {
+  background: var(--accent);
+  color: color-mix(in srgb, var(--bg) 80%, #000);
+  text-shadow: none;
+}
+[data-shell='modern'] .scanlines::before { display: none; }
+[data-shell='modern'] .lcd-text { text-shadow: 0 0 8px var(--accent-glow); }
+[data-shell='modern'] .display { border-radius: 12px; }
+[data-shell='modern'] [data-newamp-transport] {
+  margin: 6px 12px 10px;
+  border-radius: 14px;
+  border-top: none !important;
+}
+[data-shell='modern'] aside {
+  margin: 8px 0 8px 8px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--line) 60%, transparent) !important;
+  box-shadow: 0 12px 28px rgba(0,0,0,0.22);
+}
+[data-shell='modern'] .nav-item {
+  border-radius: 12px;
+  text-transform: none;
+}
+[data-shell='modern'] [data-newamp-quick-play] .bevel-out,
+[data-shell='modern'] .shell-picker,
+[data-shell='modern'] .home-magazine .bevel-out {
+  border-radius: 14px;
+}
+[data-shell='modern'] [data-newamp-quick-play] .pxbtn,
+[data-shell='modern'] .shell-picker .pxbtn {
+  border-radius: 999px;
+}
+
+/* Liquid Glass: frosted translucent stacked layers over a blurred backdrop
+   driven by --accent-glow + radial gradients. Designed for the macOS-style
+   feel — depth without losing legibility. */
+[data-shell='liquid-glass'] {
+  --radius: 12px;
+  --radius-card: 18px;
+  --shadow-card: 0 22px 50px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05);
+}
+[data-shell='liquid-glass'] body,
+[data-shell='liquid-glass'] #root {
+  /* OKLCH color-mix keeps the backdrop perceptually uniform across every skin
+     accent — a deep emerald and a warm coral get equally lit halos without
+     re-tuning per palette. Pattern lifted from Claude Design MCP 66c1dbdf8625. */
+  background:
+    radial-gradient(1100px 700px at 18% 22%, color-mix(in oklch, var(--accent) 32%, transparent), transparent 60%),
+    radial-gradient(900px 600px at 82% 78%, color-mix(in oklch, var(--accent-dim) 28%, transparent), transparent 65%),
+    radial-gradient(700px 500px at 60% 40%, color-mix(in oklch, var(--warn) 18%, transparent), transparent 70%),
+    linear-gradient(180deg, color-mix(in oklch, var(--bg) 80%, #000), var(--bg));
+}
+/* Dashed hairline under panel section titles in Liquid Glass — separates header
+   from body without forcing a hard solid line, which would feel heavy on glass. */
+[data-shell='liquid-glass'] .home-news > div:first-child,
+[data-shell='liquid-glass'] .home-rated > div:first-child {
+  border-bottom: 1px dashed color-mix(in oklch, var(--accent) 22%, transparent);
+  padding-bottom: 8px;
+  margin-bottom: 6px;
+}
+[data-shell='liquid-glass'] .app-chrome {
+  background: transparent;
+}
+[data-shell='liquid-glass'] .app-chrome::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.18;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='80' height='80' filter='url(%23n)' opacity='.38'/%3E%3C/svg%3E");
+  mix-blend-mode: overlay;
+  z-index: 0;
+}
+[data-shell='liquid-glass'] .app-chrome > * {
+  position: relative;
+  z-index: 1;
+}
+[data-shell='liquid-glass'] .titlebar-drag {
+  background: color-mix(in srgb, var(--panel) 60%, transparent) !important;
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent);
+}
+[data-shell='liquid-glass'] .bevel-out {
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  backdrop-filter: blur(20px) saturate(1.3);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+  box-shadow:
+    0 14px 32px rgba(0,0,0,0.45),
+    inset 0 1px 0 color-mix(in srgb, var(--ink) 12%, transparent),
+    inset 0 -1px 0 rgba(0,0,0,0.4);
+  border-radius: 18px;
+}
+[data-shell='liquid-glass'] .bevel-in {
+  background: color-mix(in srgb, var(--display-bg) 70%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 12px;
+}
+[data-shell='liquid-glass'] .pxbtn {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ink) 18%, transparent);
+  color: var(--ink);
+  text-shadow: none;
+  text-transform: none;
+  font-weight: 600;
+}
+[data-shell='liquid-glass'] .pxbtn:hover {
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+}
+[data-shell='liquid-glass'] .pxbtn.is-active {
+  background: var(--accent);
+  color: color-mix(in srgb, var(--bg) 80%, #000);
+  box-shadow: 0 0 18px var(--accent-glow);
+}
+[data-shell='liquid-glass'] .scanlines::before { display: none; }
+[data-shell='liquid-glass'] [data-newamp-transport] {
+  margin: 8px 16px 14px;
+  border-radius: 22px;
+  border-top: none !important;
+  backdrop-filter: blur(22px) saturate(1.45);
+  -webkit-backdrop-filter: blur(22px) saturate(1.45);
+}
+[data-shell='liquid-glass'] aside {
+  margin: 8px 0 8px 8px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent) !important;
+  background: color-mix(in srgb, var(--panel) 62%, transparent) !important;
+  backdrop-filter: blur(20px) saturate(1.35);
+  -webkit-backdrop-filter: blur(20px) saturate(1.35);
+}
+[data-shell='liquid-glass'] .home-hero {
+  border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+}
+
+/* Concourse: split operator-console with rectangular cells, mono type, mission-
+   control alert chip, tighter density. Plays well with Ops and Amber skins. */
+[data-shell='concourse'] {
+  --radius: 0px;
+  --radius-card: 0px;
+}
+[data-shell='concourse'] .app-chrome { background: var(--bg); }
+[data-shell='concourse'] .bevel-out {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: none;
+  border-radius: 0;
+}
+[data-shell='concourse'] .bevel-out[data-cell]::before,
+[data-shell='concourse'] .home-hero[data-cell]::before {
+  content: 'CELL ' attr(data-cell);
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  z-index: 3;
+}
+[data-shell='concourse'] .bevel-out { position: relative; }
+[data-shell='concourse'] .pxbtn {
+  border-radius: 0;
+  font-family: var(--font-mono);
+  letter-spacing: 0.12em;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  text-transform: uppercase;
+}
+[data-shell='concourse'] .pxbtn.is-active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+[data-shell='concourse'] .display { border-radius: 0; }
+[data-shell='concourse'] [data-newamp-transport] {
+  background:
+    repeating-linear-gradient(135deg, transparent 0 12px, color-mix(in srgb, var(--accent) 5%, transparent) 12px 13px),
+    var(--panel);
+}
+[data-shell='concourse'] .home-hero {
+  border-radius: 0;
+  border-color: var(--accent-dim);
+  outline: 1px dashed color-mix(in srgb, var(--accent) 35%, transparent);
+  outline-offset: 4px;
+}
+[data-shell='concourse'] .home-hero-title { letter-spacing: -0.04em; }
+

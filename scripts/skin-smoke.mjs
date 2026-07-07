@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
+import { readStyleBundle } from './style-bundle.mjs';
 
 const {
   BUILT_IN_THEMES,
@@ -122,7 +123,7 @@ const [
     readFile(new URL('../src/components/views/SettingsView.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/lib/skins.ts', import.meta.url), 'utf8'),
-    readFile(new URL('../src/styles/index.css', import.meta.url), 'utf8'),
+    readStyleBundle(),
     readFile(new URL('../src/components/decks/types.ts', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/decks/DeckSkinPicker.tsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/components/decks/RecordPlayerDeck.tsx', import.meta.url), 'utf8'),
