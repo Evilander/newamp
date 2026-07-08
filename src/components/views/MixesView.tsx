@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { Track } from '@shared/types';
 import { api } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
 import { formatDuration } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { TrackTable } from './LibraryView';
 import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
 import { ArtistLink } from '../EntityLink';
+import { ViewHeader } from '../ViewHeader';
+import { Chip } from '../Chip';
+import { EmptyState } from '../EmptyState';
+import { ViewSkeleton } from '../ViewSkeleton';
+import * as Icons from '../Icons';
 
 interface GeneratedMix {
   id: string;
@@ -21,8 +27,10 @@ export function MixesView(): JSX.Element {
   const help = useViewHelp();
   const [mixes, setMixes] = useState<GeneratedMix[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  // Seed id the current mixes were built from. `undefined` = nothing built
+  // yet, so the "seed changed" chip can't appear before the first build.
+  const [builtSeedId, setBuiltSeedId] = useState<number | null | undefined>(undefined);
   const current = usePlayerStore((s) => s.current);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
@@ -30,18 +38,24 @@ export function MixesView(): JSX.Element {
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
 
+  // Generate once on mount. Seed changes while the view is open do NOT
+  // auto-rebuild (that yanked all 8 mixes out from under a mid-scroll user);
+  // they surface a small "Seed changed" chip that offers a rebuild instead.
   useEffect(() => {
     void refreshMixes();
-  }, [current?.id]);
+  }, []);
+
+  const seedId = current?.id ?? null;
+  const seedChanged = builtSeedId !== undefined && !loading && seedId !== builtSeedId;
 
   const selected = useMemo(
     () => mixes.find((mix) => mix.id === selectedId) ?? mixes[0] ?? null,
     [mixes, selectedId],
   );
 
-  async function refreshMixes(): Promise<void> {
+  async function refreshMixes(announce = false): Promise<void> {
+    const seedTrackId = current?.id ?? null;
     setLoading(true);
-    setStatus(null);
     try {
       const [harmonic, taste, freshImports, loved, recent, mostPlayed, deepCuts, night] = await Promise.all([
         api.buildHarmonicMix({ seedTrackId: current?.id ?? null, count: MIX_SIZE }),

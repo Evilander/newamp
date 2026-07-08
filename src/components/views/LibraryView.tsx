@@ -11,9 +11,12 @@ import { buildArchiveCompass, duplicateExactTotal, missingMetadataTotal } from '
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime, highlight } from '../../lib/format';
 import { api } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
 import { EmptyLibrary } from './EmptyLibrary';
 import { ArtistLink, AlbumLink } from '../EntityLink';
 import { FormatBadges } from '../FormatBadges';
+import { ViewHeader } from '../ViewHeader';
+import { Star, StarOutline } from '../Icons';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
 
 type Sort =
@@ -428,6 +431,33 @@ export function LibraryView(): JSX.Element {
       }}
     >
       {dropActive && <DropOverlay />}
+      <ViewHeader
+        className="library-view-header"
+        eyebrow="Main"
+        title="Library"
+        count={stats.tracks}
+        status={
+          search !== libraryQuery
+            ? 'Updating...'
+            : libraryCountLabel(tracks.length, matchingTrackCount, hasMoreTracks, !!libraryQuery)
+        }
+        actions={
+          <>
+            <input
+              value={smartRuleName}
+              onChange={(e) => setSmartRuleName(e.currentTarget.value)}
+              placeholder="Smart rule name"
+              className="bevel-in w-[154px] px-2 py-1 text-[11px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              aria-label="Smart rule name"
+            />
+            {/* Label casing is pinned by scripts/power-search-smoke.mjs; .pxbtn renders uppercase regardless. */}
+            <button className="pxbtn" onClick={() => void saveSearchAsSmartRule()} disabled={!search.trim()}>
+              SAVE SEARCH AS SMART RULE
+            </button>
+          </>
+        }
+      />
       {hasLibrary && <StatsStrip stats={stats} />}
       {hasLibrary && health && (
         <LibraryHealthPanel
