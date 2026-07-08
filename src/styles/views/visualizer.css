@@ -133,6 +133,13 @@
 }
 .viz-control-bar .viz-control-caret { font-size: 10px; opacity: 0.7; }
 .viz-control-bar .viz-control-spacer { flex: 1 1 auto; }
+/* Inline SVG glyphs inside pxbtn labels (Gear/Dice replaced the old ⚙ / 🎲
+   font glyphs — crisp at 12px, inherit the button ink via currentColor).
+   .pxbtn is inline-flex + centered, so the icon only needs its text gap. */
+.pxbtn .viz-btn-icon {
+  flex: 0 0 auto;
+  margin-right: 5px;
+}
 
 .viz-popover-backdrop {
   position: fixed;
