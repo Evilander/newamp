@@ -3,7 +3,9 @@ import type { TagRule, TagRulePreviewResult, TagSummary, Track } from '@shared/t
 import { api } from '../../lib/api';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
-import { ArtistLink } from '../EntityLink';
+import { ArtistLink, TrackLink } from '../EntityLink';
+import { ViewHeader } from '../ViewHeader';
+import { Chip } from '../Chip';
 
 const DEFAULT_BODY = `tag(midnight_drive) when
   bpm > 110
@@ -200,62 +202,70 @@ export function TagsView(): JSX.Element {
   const parseErrors = preview && !preview.ok ? preview.errors : [];
 
   return (
-    <div className="flex h-full flex-col gap-3 p-3">
-      <ViewOnboarding
-        viewId="tags"
+    <div className="flex h-full flex-col">
+      <ViewHeader
+        eyebrow="Discovery"
         title="Living Tags"
-        lede="Write tag rules in a small expression language. NewAmp keeps applying them as you listen — new tracks get tagged automatically, old tracks re-tag when their stats change."
-        bullets={[
-          'Tags are derived, not stored on disk: change a rule and the whole library re-tags instantly.',
-          'Rules see audio DNA (bpm, energy, brightness), playback history, ratings, and existing tags.',
-          'Example: tag(late_night) when dna.energy < 0.35 and listenedAt.hour > 22.',
-          'Tagged tracks show up in their own filters in Library and feed Mixes/Discover.',
-        ]}
-        cta="Pick a starter template below to see the syntax. Save the rule to make it permanent."
-        forceVisible={help.open}
-        onClose={help.close}
+        count={`${rules.length.toLocaleString()} ${rules.length === 1 ? 'rule' : 'rules'}`}
+        status={
+          <>
+            <HelpDot help={help} label="What are Living Tags?" />
+            <span className="hidden xl:inline" style={{ color: 'var(--muted)' }}>
+              A reactive tagging DSL — write rules, the library re-tags itself.
+            </span>
+          </>
+        }
+        actions={
+          <>
+            <button className="pxbtn" disabled={busy} onClick={() => void recomputeAll()}>
+              Recompute all
+            </button>
+            <button className="pxbtn is-active" onClick={newRule} disabled={busy}>
+              + New rule
+            </button>
+          </>
+        }
       />
-      <header className="flex items-baseline gap-3">
-        <h2 className="flex items-center gap-1.5 text-[14px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
-          Living Tags
-          <HelpDot help={help} label="What are Living Tags?" />
-        </h2>
-        <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
-          A reactive tagging DSL — write rules, the library re-tags itself.
-        </span>
-        <span className="ml-auto flex items-center gap-2">
-          <button className="pxbtn" disabled={busy} onClick={() => void recomputeAll()}>
-            Recompute all
-          </button>
-          <button className="pxbtn is-active" onClick={newRule} disabled={busy}>
-            + New rule
-          </button>
-        </span>
-      </header>
+      <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+        <ViewOnboarding
+          viewId="tags"
+          title="Living Tags"
+          lede="Write tag rules in a small expression language. NewAmp keeps applying them as you listen — new tracks get tagged automatically, old tracks re-tag when their stats change."
+          bullets={[
+            'Tags are derived, not stored on disk: change a rule and the whole library re-tags instantly.',
+            'Rules see audio DNA (bpm, energy, brightness), playback history, ratings, and existing tags.',
+            'Example: tag(late_night) when dna.energy < 0.35 and listenedAt.hour > 22.',
+            'Tagged tracks show up in their own filters in Library and feed Mixes/Discover.',
+          ]}
+          cta="Pick a starter template below to see the syntax. Save the rule to make it permanent."
+          forceVisible={help.open}
+          onClose={help.close}
+        />
 
-      <div className="grid min-h-0 flex-1 gap-3" style={{ gridTemplateColumns: 'minmax(220px,260px) minmax(0,1.4fr) minmax(280px,1fr)' }}>
-        <RulesList rules={rules} selectedId={draft.id} onPick={pickRule} />
-        <Editor
-          draft={draft}
-          setDraft={setDraft}
-          onSave={save}
-          onDelete={deleteRule}
-          onToggleEnabled={toggleEnabled}
-          onLoadSample={loadSample}
-          busy={busy}
-          parseErrors={parseErrors}
-          previewName={preview?.ruleName ?? null}
-          previewReferences={preview?.references ?? []}
-        />
-        <PreviewPane
-          preview={preview}
-          tracks={previewTracks}
-          onPlay={playTaggedSample}
-          busy={busy}
-        />
+        <div className="grid min-h-0 flex-1 gap-3" style={{ gridTemplateColumns: 'minmax(220px,260px) minmax(0,1.4fr) minmax(280px,1fr)' }}>
+          <RulesList rules={rules} selectedId={draft.id} onPick={pickRule} />
+          <Editor
+            draft={draft}
+            setDraft={setDraft}
+            onSave={save}
+            onDelete={deleteRule}
+            onToggleEnabled={toggleEnabled}
+            onLoadSample={loadSample}
+            busy={busy}
+            parseErrors={parseErrors}
+            previewName={preview?.ruleName ?? null}
+            previewReferences={preview?.references ?? []}
+          />
+          <PreviewPane
+            preview={preview}
+            tracks={previewTracks}
+            onPlay={playTaggedSample}
+            busy={busy}
+          />
+        </div>
+
+        <Footer status={status} error={error} summaries={summaries} />
       </div>
-
-      <Footer status={status} error={error} summaries={summaries} />
     </div>
   );
 }

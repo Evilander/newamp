@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { WrappedRange, WrappedStats } from '@shared/types';
 import { WrappedLiveExport } from '../WrappedLiveExport';
 import { api } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
+import { ViewSkeleton } from '../ViewSkeleton';
 import { ArtistLink } from '../EntityLink';
 
 const RANGES: Array<{ id: WrappedRange; label: string }> = [
@@ -15,6 +17,12 @@ const RANGES: Array<{ id: WrappedRange; label: string }> = [
 function readVar(name: string, fallback: string): string {
   if (typeof window === 'undefined') return fallback;
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+/** Append a hex alpha byte when the color is a plain 6-digit hex; otherwise
+ *  return the color untouched so canvas never sees an invalid fillStyle. */
+function hexAlpha(color: string, alpha: string): string {
+  return /^#[0-9a-fA-F]{6}$/.test(color) ? `${color}${alpha}` : color;
 }
 
 function formatHours(seconds: number): string {
@@ -32,7 +40,9 @@ function formatHour(hour: number): string {
 }
 
 // Compose a portrait, shareable PNG from the stats. Drawn entirely on an
-// offscreen 2D canvas so it's self-contained and on-brand.
+// offscreen 2D canvas so it's self-contained and on-brand. Colors are sampled
+// from the live skin tokens at draw time, so a Steel or Miami user's card
+// matches their app instead of a hardcoded dark theme.
 function composeShareCard(stats: WrappedStats): string {
   const W = 1080;
   const H = 1350;
@@ -42,19 +52,21 @@ function composeShareCard(stats: WrappedStats): string {
   const ctx = canvas.getContext('2d');
   if (!ctx) return '';
   const accent = readVar('--accent', '#39ff14');
-  const ink = '#f4f7f4';
-  const muted = 'rgba(244,247,244,0.62)';
+  const bg = readVar('--bg', '#0a0e07');
+  const panel = readVar('--panel', '#141b14');
+  const ink = readVar('--ink', '#cfead0');
+  const muted = readVar('--muted', '#7a9c7a');
 
   const grad = ctx.createLinearGradient(0, 0, W, H);
-  grad.addColorStop(0, '#0a0c0a');
-  grad.addColorStop(1, '#13110f');
+  grad.addColorStop(0, bg);
+  grad.addColorStop(1, panel);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
 
   // Accent glow band
   const glow = ctx.createRadialGradient(W * 0.5, 180, 40, W * 0.5, 180, 620);
-  glow.addColorStop(0, `${accent}33`);
-  glow.addColorStop(1, '#0a0c0a00');
+  glow.addColorStop(0, hexAlpha(accent, '33'));
+  glow.addColorStop(1, hexAlpha(bg, '00'));
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, W, 520);
 
@@ -115,7 +127,7 @@ function composeShareCard(stats: WrappedStats): string {
   ];
   chips.forEach(([value, label], i) => {
     const x = 72 + i * 320;
-    ctx.fillStyle = `${accent}22`;
+    ctx.fillStyle = hexAlpha(accent, '22');
     ctx.fillRect(x, y, 288, 150);
     ctx.fillStyle = accent;
     ctx.font = '800 56px Inter, system-ui, sans-serif';
@@ -125,10 +137,14 @@ function composeShareCard(stats: WrappedStats): string {
     ctx.fillText(label, x + 28, y + 120);
   });
 
-  // Footer wordmark
+  // Footer wordmark + repo line — the card is a share, so sign it (subtly).
   ctx.fillStyle = muted;
   ctx.font = '600 26px "JetBrains Mono", monospace';
-  ctx.fillText('made with NewAmp · local-first music', 72, H - 64);
+  ctx.fillText('made with NewAmp · local-first music', 72, H - 96);
+  ctx.globalAlpha = 0.75;
+  ctx.font = '500 22px "JetBrains Mono", monospace';
+  ctx.fillText('github.com/evilander/newamp', 72, H - 56);
+  ctx.globalAlpha = 1;
 
   return canvas.toDataURL('image/png');
 }
@@ -137,7 +153,6 @@ export function WrappedView(): JSX.Element {
   const [range, setRange] = useState<WrappedRange>('year');
   const [stats, setStats] = useState<WrappedStats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [status, setStatus] = useState<string | null>(null);
   const reqRef = useRef(0);
 
   useEffect(() => {
@@ -171,7 +186,7 @@ export function WrappedView(): JSX.Element {
       filterName: 'PNG image',
       ext: 'png',
     });
-    setStatus(saved ? 'Saved share card' : null);
+    if (saved) pushToast({ tone: 'ok', title: 'Share card saved', detail: 'Skin-true PNG, ready to post.' });
   };
 
   const copyCard = async (): Promise<void> => {
@@ -179,7 +194,8 @@ export function WrappedView(): JSX.Element {
     const dataUrl = composeShareCard(stats);
     if (!dataUrl) return;
     const ok = await api.copyPngToClipboard(dataUrl);
-    setStatus(ok ? 'Copied to clipboard' : 'Copy unavailable');
+    if (ok) pushToast({ tone: 'ok', title: 'Share card copied to clipboard' });
+    else pushToast({ tone: 'warn', title: 'Copy unavailable' });
   };
 
   const hasData = !!stats && stats.totals.plays > 0;
@@ -220,13 +236,7 @@ export function WrappedView(): JSX.Element {
 
         {hasData && stats && <WrappedLiveExport stats={stats} />}
 
-        {status && (
-          <div className="text-sm" style={{ color: 'var(--accent)' }}>
-            {status}
-          </div>
-        )}
-
-        {loading && <div style={{ color: 'var(--muted)' }}>Crunching your plays…</div>}
+        {loading && <ViewSkeleton variant="cards" count={8} />}
 
         {!loading && !hasData && (
           <div className="rounded-lg p-8 text-center" style={{ background: 'var(--panel)', color: 'var(--muted)' }}>

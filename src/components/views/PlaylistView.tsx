@@ -10,6 +10,9 @@ import { moveQueueItem, removeQueueItem } from '@shared/queue-edit';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime } from '../../lib/format';
 import { api } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
+import { ViewHeader } from '../ViewHeader';
+import { ConfirmAction } from '../ConfirmAction';
 import { ArtistLink, AlbumLink } from '../EntityLink';
 
 type SetMood = SmartPlaylistMood;
@@ -38,7 +41,7 @@ export function PlaylistView(): JSX.Element {
   const [mood, setMood] = useState<SetMood>('focus');
   const [building, setBuilding] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
   const [selectedPlaylist, setSelectedPlaylist] = useState<SavedPlaylist | null>(null);
   const [selectedPlaylistTracks, setSelectedPlaylistTracks] = useState<Track[]>([]);
@@ -134,14 +137,13 @@ export function PlaylistView(): JSX.Element {
 
   async function buildSet(): Promise<void> {
     setBuilding(true);
-    setStatus(null);
     try {
       const picked = await api.runSmartPlaylistRule(readSmartDraft());
       if (!picked.length) {
-        setStatus('No tracks available yet.');
+        pushToast({ tone: 'warn', title: 'No tracks available yet' });
         return;
       }
-      setStatus(`Built ${picked.length} track ${moodLabel(mood)} set.`);
+      pushToast({ tone: 'ok', title: 'Smart set built', detail: `${picked.length} track ${moodLabel(mood)} set.` });
       loadQueue(picked);
     } finally {
       setBuilding(false);
@@ -150,7 +152,6 @@ export function PlaylistView(): JSX.Element {
 
   async function buildHarmonicMix(): Promise<void> {
     setBuilding(true);
-    setStatus(null);
     try {
       const picked = await api.buildHarmonicMix({
         seedTrackId: current?.id ?? null,
@@ -158,13 +159,15 @@ export function PlaylistView(): JSX.Element {
         genreQuery: genreQuery.trim() || null,
       });
       if (!picked.length) {
-        setStatus('No harmonic mix candidates available yet.');
+        pushToast({ tone: 'warn', title: 'No harmonic mix candidates available yet' });
         return;
       }
       loadQueue(picked);
-      setStatus(
-        `Built ${picked.length} track harmonic mix${current ? ` from ${current.title}` : ''}.`,
-      );
+      pushToast({
+        tone: 'ok',
+        title: 'Harmonic mix built',
+        detail: `${picked.length} tracks${current ? ` from ${current.title}` : ''}.`,
+      });
     } finally {
       setBuilding(false);
     }
@@ -172,12 +175,15 @@ export function PlaylistView(): JSX.Element {
 
   async function fillAutoDjNow(): Promise<void> {
     setBuilding(true);
-    setStatus(null);
     try {
       const wasEmpty = queue.length === 0;
       const added = await refillAutoDjQueue(true);
       if (wasEmpty && added.length) await playQueue(added, 0);
-      setStatus(added.length ? `Auto DJ added ${added.length} tracks.` : 'Auto DJ found no new candidates.');
+      if (added.length) {
+        pushToast({ tone: 'ok', title: 'Auto DJ topped up', detail: `${added.length} tracks added.` });
+      } else {
+        pushToast({ tone: 'info', title: 'Auto DJ found no new candidates' });
+      }
     } finally {
       setBuilding(false);
     }
@@ -185,7 +191,6 @@ export function PlaylistView(): JSX.Element {
 
   async function saveSmartRule(): Promise<void> {
     setBusy(true);
-    setStatus(null);
     try {
       const saved = await api.saveSmartPlaylistRule({
         ...readSmartDraft(),
@@ -193,7 +198,7 @@ export function PlaylistView(): JSX.Element {
       });
       setSelectedSmartRule(saved);
       applySmartRuleToDraft(saved);
-      setStatus(`Saved smart rule ${saved.name}.`);
+      pushToast({ tone: 'ok', title: 'Smart rule saved', detail: saved.name });
       await refreshPlaylists();
     } finally {
       setBusy(false);
@@ -202,14 +207,13 @@ export function PlaylistView(): JSX.Element {
 
   async function loadSmartRule(rule: SmartPlaylistRule, play = false): Promise<void> {
     setBusy(true);
-    setStatus(null);
     try {
       const tracks = await api.runSmartPlaylistRule(rule.id);
       setSelectedSmartRule(rule);
       applySmartRuleToDraft(rule);
       if (play && tracks.length) await playQueue(tracks, 0);
       else loadQueue(tracks);
-      setStatus(`Generated ${tracks.length} tracks from ${rule.name}.`);
+      pushToast({ tone: 'info', title: 'Smart rule generated', detail: `${tracks.length} tracks from ${rule.name}.` });
     } finally {
       setBusy(false);
     }
@@ -218,19 +222,18 @@ export function PlaylistView(): JSX.Element {
   async function startSmartRuleRadio(rule = selectedSmartRule): Promise<void> {
     if (!rule) return;
     setBusy(true);
-    setStatus(null);
     try {
       const tracks = await api.runSmartPlaylistRule(rule.id);
       setSelectedSmartRule(rule);
       applySmartRuleToDraft(rule);
       if (!tracks.length) {
-        setStatus(`${rule.name} generated no playable tracks.`);
+        pushToast({ tone: 'warn', title: 'No playable tracks', detail: `${rule.name} generated nothing.` });
         return;
       }
       await playQueue(tracks, 0);
       await setAutoDjSmartRuleId(rule.id);
       await setAutoDjEnabled(true);
-      setStatus(`Smart Rule Radio started from ${rule.name}.`);
+      pushToast({ tone: 'ok', title: 'Smart Rule Radio started', detail: rule.name });
     } finally {
       setBusy(false);
     }
@@ -239,11 +242,10 @@ export function PlaylistView(): JSX.Element {
   async function deleteSmartRule(): Promise<void> {
     if (!selectedSmartRule) return;
     setBusy(true);
-    setStatus(null);
     try {
       await api.deleteSmartPlaylistRule(selectedSmartRule.id);
       if (selectedSmartRule.id === autoDjSmartRuleId) await setAutoDjSmartRuleId(null);
-      setStatus(`Deleted smart rule ${selectedSmartRule.name}.`);
+      pushToast({ tone: 'ok', title: 'Smart rule deleted', detail: selectedSmartRule.name });
       setSelectedSmartRule(null);
       await refreshPlaylists();
     } finally {
@@ -285,11 +287,10 @@ export function PlaylistView(): JSX.Element {
 
   async function saveQueue(): Promise<void> {
     if (!playlistName.trim()) {
-      setStatus('Name the playlist first.');
+      pushToast({ tone: 'warn', title: 'Name the playlist first' });
       return;
     }
     setBusy(true);
-    setStatus(null);
     try {
       const wasNew = !selectedPlaylist;
       const trackIds = selectedPlaylist
@@ -307,7 +308,11 @@ export function PlaylistView(): JSX.Element {
       setPlaylistName(saved.name);
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
-      setStatus(`${wasNew ? 'Created' : 'Updated'} ${saved.name} with ${saved.trackCount} tracks.`);
+      pushToast({
+        tone: 'ok',
+        title: `${wasNew ? 'Created' : 'Updated'} ${saved.name}`,
+        detail: `${saved.trackCount} tracks.`,
+      });
       await refreshPlaylists();
     } finally {
       setBusy(false);
@@ -316,7 +321,6 @@ export function PlaylistView(): JSX.Element {
 
   async function loadPlaylist(playlist: SavedPlaylist, play = false): Promise<void> {
     setBusy(true);
-    setStatus(null);
     try {
       const tracks = await api.getPlaylistTracks(playlist.id);
       setSelectedPlaylist(playlist);
@@ -328,10 +332,14 @@ export function PlaylistView(): JSX.Element {
       if (play && tracks.length) {
         await playQueue(tracks, 0);
       } else {
-        setStatus(`Selected ${playlist.name} with ${tracks.length} tracks. Queue unchanged.`);
+        pushToast({
+          tone: 'info',
+          title: 'Playlist selected',
+          detail: `${playlist.name} — ${tracks.length} tracks. Queue unchanged.`,
+        });
         return;
       }
-      setStatus(`Playing ${tracks.length} tracks from ${playlist.name}.`);
+      pushToast({ tone: 'ok', title: 'Playing playlist', detail: `${tracks.length} tracks from ${playlist.name}.` });
     } finally {
       setBusy(false);
     }
@@ -340,13 +348,13 @@ export function PlaylistView(): JSX.Element {
   async function playSelectedPlaylist(): Promise<void> {
     if (!selectedPlaylist || !selectedPlaylistTracks.length) return;
     await playQueue(selectedPlaylistTracks, 0);
-    setStatus(`Playing ${selectedPlaylist.name}.`);
+    pushToast({ tone: 'ok', title: 'Playing playlist', detail: selectedPlaylist.name });
   }
 
   function loadSelectedPlaylistToQueue(): void {
     if (!selectedPlaylist || !selectedPlaylistTracks.length) return;
     loadQueue(selectedPlaylistTracks);
-    setStatus(`Loaded ${selectedPlaylist.name} into the active queue.`);
+    pushToast({ tone: 'info', title: 'Queue loaded', detail: `${selectedPlaylist.name} loaded into the active queue.` });
   }
 
   function moveSelectedPlaylistTrack(fromIndex: number, toIndex: number): void {
@@ -362,10 +370,9 @@ export function PlaylistView(): JSX.Element {
   async function deleteSelected(): Promise<void> {
     if (!selectedPlaylist) return;
     setBusy(true);
-    setStatus(null);
     try {
       await api.deletePlaylist(selectedPlaylist.id);
-      setStatus(`Deleted ${selectedPlaylist.name}.`);
+      pushToast({ tone: 'ok', title: 'Playlist deleted', detail: selectedPlaylist.name });
       setSelectedPlaylist(null);
       setSelectedPlaylistTracks([]);
       setPlaylistTrackFilter('');
@@ -380,10 +387,10 @@ export function PlaylistView(): JSX.Element {
   async function exportSelected(): Promise<void> {
     if (!selectedPlaylist) return;
     setBusy(true);
-    setStatus(null);
     try {
       const filePath = await api.exportPlaylistM3u(selectedPlaylist.id);
-      setStatus(filePath ? `Exported ${selectedPlaylist.name} as M3U.` : 'Export canceled.');
+      if (filePath) pushToast({ tone: 'ok', title: 'Exported M3U', detail: selectedPlaylist.name });
+      else pushToast({ tone: 'info', title: 'Export canceled' });
     } finally {
       setBusy(false);
     }
@@ -392,10 +399,10 @@ export function PlaylistView(): JSX.Element {
   async function exportSelectedPls(): Promise<void> {
     if (!selectedPlaylist) return;
     setBusy(true);
-    setStatus(null);
     try {
       const filePath = await api.exportPlaylistPls(selectedPlaylist.id);
-      setStatus(filePath ? `Exported ${selectedPlaylist.name} as PLS.` : 'Export canceled.');
+      if (filePath) pushToast({ tone: 'ok', title: 'Exported PLS', detail: selectedPlaylist.name });
+      else pushToast({ tone: 'info', title: 'Export canceled' });
     } finally {
       setBusy(false);
     }
@@ -404,15 +411,14 @@ export function PlaylistView(): JSX.Element {
   async function exportSelectedFolder(): Promise<void> {
     if (!selectedPlaylist) return;
     setBusy(true);
-    setStatus(null);
     try {
       const result = await api.exportPlaylistFolder(selectedPlaylist.id);
       if (!result) {
-        setStatus('Export canceled.');
+        pushToast({ tone: 'info', title: 'Export canceled' });
         return;
       }
       const skipped = result.skipped.length ? `, ${result.skipped.length} skipped` : '';
-      setStatus(`Exported ${result.copied} tracks${skipped} to ${result.path}.`);
+      pushToast({ tone: 'ok', title: 'Folder exported', detail: `${result.copied} tracks${skipped} → ${result.path}` });
     } finally {
       setBusy(false);
     }
@@ -421,18 +427,21 @@ export function PlaylistView(): JSX.Element {
   async function exportQueueFolder(): Promise<void> {
     if (!queue.length) return;
     setBusy(true);
-    setStatus(null);
     try {
       const result = await api.exportTracksFolder({
         name: queueExportName(playlistName),
         trackIds: queue.map((track) => track.id),
       });
       if (!result) {
-        setStatus('Export canceled.');
+        pushToast({ tone: 'info', title: 'Export canceled' });
         return;
       }
       const skipped = result.skipped.length ? `, ${result.skipped.length} skipped` : '';
-      setStatus(`Exported queue folder with ${result.copied} tracks${skipped} to ${result.path}.`);
+      pushToast({
+        tone: 'ok',
+        title: 'Queue folder exported',
+        detail: `${result.copied} tracks${skipped} → ${result.path}`,
+      });
     } finally {
       setBusy(false);
     }
@@ -440,11 +449,10 @@ export function PlaylistView(): JSX.Element {
 
   async function importM3u(): Promise<void> {
     setBusy(true);
-    setStatus(null);
     try {
       const result = await api.importPlaylistM3u();
       if (!result) {
-        setStatus('Import canceled.');
+        pushToast({ tone: 'info', title: 'Import canceled' });
         return;
       }
       const tracks = await api.getPlaylistTracks(result.playlist.id).catch(() => []);
@@ -454,9 +462,11 @@ export function PlaylistView(): JSX.Element {
       setPlaylistName(result.playlist.name);
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
-      setStatus(
-        `Imported ${result.playlist.name}: ${result.matched} matched, ${result.skipped} skipped.`,
-      );
+      pushToast({
+        tone: 'ok',
+        title: 'Playlist imported',
+        detail: `${result.playlist.name}: ${result.matched} matched, ${result.skipped} skipped.`,
+      });
       await refreshPlaylists();
     } finally {
       setBusy(false);
@@ -465,16 +475,15 @@ export function PlaylistView(): JSX.Element {
 
   async function pickPlaylistIcon(): Promise<void> {
     setBusy(true);
-    setStatus(null);
     try {
       const path = await api.pickPlaylistCoverImage();
       if (!path) {
-        setStatus('Playlist icon selection canceled.');
+        pushToast({ tone: 'info', title: 'Icon selection canceled' });
         return;
       }
       setPlaylistCoverPath(path);
       setClearPlaylistCover(false);
-      setStatus('Playlist icon selected. Create or update the playlist to apply it.');
+      pushToast({ tone: 'info', title: 'Playlist icon selected', detail: 'Create or update the playlist to apply it.' });
     } finally {
       setBusy(false);
     }
@@ -483,7 +492,7 @@ export function PlaylistView(): JSX.Element {
   function clearPlaylistIcon(): void {
     setPlaylistCoverPath(null);
     setClearPlaylistCover(true);
-    setStatus('Playlist icon will be cleared on save.');
+    pushToast({ tone: 'info', title: 'Playlist icon will be cleared on save' });
   }
 
   function handlePlaylistIconDragOver(event: DragEvent<HTMLDivElement>): void {
@@ -497,12 +506,12 @@ export function PlaylistView(): JSX.Element {
     const paths = api.getDroppedFilePaths(Array.from(event.dataTransfer.files));
     const imagePath = paths.find(isPlaylistImagePath);
     if (!imagePath) {
-      setStatus('Drop a PNG, JPG, WEBP, GIF, or BMP image for the playlist icon.');
+      pushToast({ tone: 'warn', title: 'Not an image', detail: 'Drop a PNG, JPG, WEBP, GIF, or BMP for the playlist icon.' });
       return;
     }
     setPlaylistCoverPath(imagePath);
     setClearPlaylistCover(false);
-    setStatus('Dropped playlist icon selected. Create or update the playlist to apply it.');
+    pushToast({ tone: 'info', title: 'Playlist icon selected', detail: 'Create or update the playlist to apply it.' });
   }
 
   function startNewPlaylist(): void {
@@ -512,7 +521,6 @@ export function PlaylistView(): JSX.Element {
     setPlaylistName('NewAmp Set');
     setPlaylistCoverPath(null);
     setClearPlaylistCover(false);
-    setStatus('Ready to create a new playlist.');
   }
 
   const playlistIconSrc = playlistCoverPath
@@ -521,84 +529,195 @@ export function PlaylistView(): JSX.Element {
       ? api.getPlaylistCoverUrl(selectedPlaylist.id, selectedPlaylist.coverArtUpdatedAt)
       : null;
   const sleepRemaining = sleepTimerEndsAt ? formatSleepRemaining(sleepTimerEndsAt, timerNow) : null;
+  const playingIndicator = !selectedPlaylist && queue.length > 0 && index >= 0 ? `playing ${index + 1}` : null;
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
-        <span style={{ color: 'var(--accent)' }}>PL</span>
-        <span className="text-[12px] font-semibold">Playlists</span>
-        <span className="text-[10px] uppercase tracking-[0.08em]" style={{ color: 'var(--muted)' }}>
-          Queue + saved sets
-        </span>
-        <select
-          value={mood}
-          onChange={(e) => setMood(e.target.value as SetMood)}
-          className="bevel-in ml-3 px-2 py-1 text-[11px]"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-        >
-          <option value="focus">Focus</option>
-          <option value="drive">Drive</option>
-          <option value="night">Night</option>
-          <option value="deep-cuts">Deep cuts</option>
-        </select>
-        <button className="pxbtn is-active" onClick={() => void buildSet()} disabled={building || busy}>
-          {building ? 'BUILDING' : 'SMART SET'}
-        </button>
-        <button className="pxbtn" onClick={() => void buildHarmonicMix()} disabled={building || busy}>
-          HARMONIC MIX
-        </button>
-        <button
-          className={`pxbtn ${autoDjEnabled ? 'is-active' : ''}`}
-          onClick={() => void setAutoDjEnabled(!autoDjEnabled)}
-          disabled={busy}
-          title="Auto DJ keeps the queue topped up from the selected source"
-        >
-          {autoDjEnabled ? 'AUTO DJ ON' : 'AUTO DJ OFF'}
-        </button>
-        <input
-          value={autoDjTarget}
-          onChange={(e) => void setAutoDjTarget(parseInt(e.target.value, 10) || autoDjTarget)}
-          type="number"
-          min={6}
-          max={80}
-          className="bevel-in w-[58px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          aria-label="Auto DJ target queue length"
-          title="Auto DJ target queue length"
-        />
-        <select
-          value={autoDjSmartRuleId ?? ''}
-          onChange={(e) => void setAutoDjSmartRuleId(e.target.value ? Number(e.target.value) : null)}
-          className="bevel-in max-w-[180px] px-2 py-1 text-[11px]"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          aria-label="Auto DJ source"
-          title="Auto DJ source"
-        >
-          <option value="">Harmonic Mix</option>
-          {autoDjSourceMissing ? (
-            <option value={autoDjSmartRuleId}>Missing Smart Rule #{autoDjSmartRuleId}</option>
-          ) : null}
-          {smartRules.map((rule) => (
-            <option key={rule.id} value={rule.id}>
-              {rule.name}
-            </option>
-          ))}
-        </select>
-        <button
-          className="pxbtn"
-          onClick={() => void fillAutoDjNow()}
-          disabled={building || busy || !autoDjEnabled || (!queue.length && !autoDjSmartRuleId)}
-        >
-          FILL
-        </button>
-        <button
-          className={`pxbtn ${stopAfterCurrent ? 'is-active' : ''}`}
-          onClick={() => setStopAfterCurrent(!stopAfterCurrent)}
-          disabled={!current}
-        >
-          STOP AFTER CURRENT
-        </button>
-        <div className="flex items-center gap-1">
+      {/* One header voice + labeled control groups below. Primary set-building
+          actions stay in the header; related controls cluster into labeled
+          groups; rare file actions live behind MORE. */}
+      <ViewHeader
+        eyebrow="Yours"
+        title="Playlists"
+        count={
+          selectedPlaylist
+            ? `${selectedPlaylistTracks.length.toLocaleString()} playlist · ${queue.length.toLocaleString()} queue`
+            : `${queue.length.toLocaleString()} queued`
+        }
+        status={playingIndicator ?? undefined}
+        actions={
+          <>
+            <button className="pxbtn is-active" onClick={() => void buildSet()} disabled={building || busy}>
+              {building ? 'BUILDING' : 'SMART SET'}
+            </button>
+            <button className="pxbtn" onClick={() => void buildHarmonicMix()} disabled={building || busy}>
+              HARMONIC MIX
+            </button>
+            <button
+              className={`pxbtn ${autoDjEnabled ? 'is-active' : ''}`}
+              onClick={() => void setAutoDjEnabled(!autoDjEnabled)}
+              disabled={busy}
+              title="Auto DJ keeps the queue topped up from the selected source"
+            >
+              {autoDjEnabled ? 'AUTO DJ ON' : 'AUTO DJ OFF'}
+            </button>
+            <button
+              className="pxbtn"
+              onClick={() => void fillAutoDjNow()}
+              disabled={building || busy || !autoDjEnabled || (!queue.length && !autoDjSmartRuleId)}
+            >
+              FILL
+            </button>
+            <button
+              className={`pxbtn ${moreOpen ? 'is-active' : ''}`}
+              onClick={() => setMoreOpen((v) => !v)}
+              title="Import and export actions"
+              aria-expanded={moreOpen}
+            >
+              MORE
+            </button>
+          </>
+        }
+      />
+      <div className="playlist-toolbar">
+        <div className="toolbar-group" role="group" aria-label="Smart set recipe">
+          <span className="toolbar-group-label">Recipe</span>
+          <select
+            value={mood}
+            onChange={(e) => setMood(e.target.value as SetMood)}
+            className="bevel-in px-2 py-1 text-[11px]"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            aria-label="Smart set mood"
+          >
+            <option value="focus">Focus</option>
+            <option value="drive">Drive</option>
+            <option value="night">Night</option>
+            <option value="deep-cuts">Deep cuts</option>
+          </select>
+          <input
+            value={smartCount}
+            onChange={(e) => setSmartCount(Math.max(1, Math.min(200, parseInt(e.target.value, 10) || 1)))}
+            type="number"
+            min={1}
+            max={200}
+            className="bevel-in w-[58px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            aria-label="Smart set track count"
+            title="Track count"
+          />
+          <input
+            value={genreQuery}
+            onChange={(e) => setGenreQuery(e.target.value)}
+            placeholder="Genre filter"
+            className="bevel-in w-[118px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          />
+          <input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Power search"
+            className="bevel-in w-[142px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            title='Examples: artist:radiohead path:"Live" missing:art format:wma'
+          />
+          <button className="pxbtn" onClick={() => void saveSmartRule()} disabled={busy}>
+            SAVE SMART
+          </button>
+        </div>
+        <div className="toolbar-group" role="group" aria-label="Recipe limits">
+          <span className="toolbar-group-label">Limits</span>
+          <input
+            value={minYear}
+            onChange={(e) => setMinYear(e.target.value)}
+            placeholder="Min year"
+            type="number"
+            min={0}
+            className="bevel-in w-[78px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          />
+          <input
+            value={maxYear}
+            onChange={(e) => setMaxYear(e.target.value)}
+            placeholder="Max year"
+            type="number"
+            min={0}
+            className="bevel-in w-[78px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          />
+          <input
+            value={minBpm}
+            onChange={(e) => setMinBpm(e.target.value)}
+            placeholder="Min BPM"
+            className="bevel-in w-[74px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          />
+          <input
+            value={maxBpm}
+            onChange={(e) => setMaxBpm(e.target.value)}
+            placeholder="Max BPM"
+            className="bevel-in w-[74px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          />
+          <input
+            value={minRating}
+            onChange={(e) => setMinRating(e.target.value)}
+            placeholder="Min rating"
+            type="number"
+            min={0}
+            max={5}
+            className="bevel-in w-[86px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          />
+          <label className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--ink-2)' }}>
+            <input type="checkbox" checked={lovedOnly} onChange={(e) => setLovedOnly(e.target.checked)} />
+            Loved
+          </label>
+          <label className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--ink-2)' }}>
+            <input type="checkbox" checked={unplayedOnly} onChange={(e) => setUnplayedOnly(e.target.checked)} />
+            Fresh
+          </label>
+        </div>
+        <div className="toolbar-group" role="group" aria-label="Auto DJ settings">
+          <span className="toolbar-group-label">Auto DJ</span>
+          <input
+            value={autoDjTarget}
+            onChange={(e) => void setAutoDjTarget(parseInt(e.target.value, 10) || autoDjTarget)}
+            type="number"
+            min={6}
+            max={80}
+            className="bevel-in w-[58px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            aria-label="Auto DJ target queue length"
+            title="Auto DJ target queue length"
+          />
+          <select
+            value={autoDjSmartRuleId ?? ''}
+            onChange={(e) => void setAutoDjSmartRuleId(e.target.value ? Number(e.target.value) : null)}
+            className="bevel-in max-w-[180px] px-2 py-1 text-[11px]"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            aria-label="Auto DJ source"
+            title="Auto DJ source"
+          >
+            <option value="">Harmonic Mix</option>
+            {autoDjSourceMissing ? (
+              <option value={autoDjSmartRuleId}>Missing Smart Rule #{autoDjSmartRuleId}</option>
+            ) : null}
+            {smartRules.map((rule) => (
+              <option key={rule.id} value={rule.id}>
+                {rule.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="toolbar-group" role="group" aria-label="Playback">
+          <span className="toolbar-group-label">Playback</span>
+          <button
+            className={`pxbtn ${stopAfterCurrent ? 'is-active' : ''}`}
+            onClick={() => setStopAfterCurrent(!stopAfterCurrent)}
+            disabled={!current}
+          >
+            STOP AFTER CURRENT
+          </button>
           <span className="text-[10px] uppercase tracking-[0.08em]" style={{ color: 'var(--ink-2)' }}>
             SLEEP
           </span>
@@ -619,93 +738,24 @@ export function PlaylistView(): JSX.Element {
               {sleepRemaining}
             </span>
           )}
+          <ConfirmAction
+            label="CLEAR QUEUE"
+            confirmLabel="SURE?"
+            tone="warn"
+            disabled={busy || queue.length === 0}
+            title="Empty the active queue"
+            onConfirm={clearQueue}
+          />
         </div>
-        <input
-          value={smartCount}
-          onChange={(e) => setSmartCount(Math.max(1, Math.min(200, parseInt(e.target.value, 10) || 1)))}
-          type="number"
-          min={1}
-          max={200}
-          className="bevel-in w-[58px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          aria-label="Smart set track count"
-        />
-        <input
-          value={genreQuery}
-          onChange={(e) => setGenreQuery(e.target.value)}
-          placeholder="Genre filter"
-          className="bevel-in w-[118px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-        />
-        <input
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder='Power search'
-          className="bevel-in w-[142px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          title='Examples: artist:radiohead path:"Live" missing:art format:wma'
-        />
-        <input
-          value={minYear}
-          onChange={(e) => setMinYear(e.target.value)}
-          placeholder="Min year"
-          type="number"
-          min={0}
-          className="bevel-in w-[78px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-        />
-        <input
-          value={maxYear}
-          onChange={(e) => setMaxYear(e.target.value)}
-          placeholder="Max year"
-          type="number"
-          min={0}
-          className="bevel-in w-[78px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-        />
-        <input
-          value={minBpm}
-          onChange={(e) => setMinBpm(e.target.value)}
-          placeholder="Min BPM"
-          className="bevel-in w-[74px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-        />
-        <input
-          value={maxBpm}
-          onChange={(e) => setMaxBpm(e.target.value)}
-          placeholder="Max BPM"
-          className="bevel-in w-[74px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-        />
-        <input
-          value={minRating}
-          onChange={(e) => setMinRating(e.target.value)}
-          placeholder="Min rating"
-          type="number"
-          min={0}
-          max={5}
-          className="bevel-in w-[86px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-        />
-        <label className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--ink-2)' }}>
-          <input type="checkbox" checked={lovedOnly} onChange={(e) => setLovedOnly(e.target.checked)} />
-          Loved
-        </label>
-        <label className="flex items-center gap-1 text-[10px]" style={{ color: 'var(--ink-2)' }}>
-          <input type="checkbox" checked={unplayedOnly} onChange={(e) => setUnplayedOnly(e.target.checked)} />
-          Fresh
-        </label>
-        <input
-          value={playlistName}
-          onChange={(e) => setPlaylistName(e.target.value)}
-          className="bevel-in min-w-[180px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          aria-label="Playlist name"
-        />
-        <div className="flex items-center gap-1">
-          <span className="text-[10px] uppercase tracking-[0.08em]" style={{ color: 'var(--ink-2)' }}>
-            Playlist icon
-          </span>
+        <div className="toolbar-group" role="group" aria-label="Playlist identity">
+          <span className="toolbar-group-label">Playlist</span>
+          <input
+            value={playlistName}
+            onChange={(e) => setPlaylistName(e.target.value)}
+            className="bevel-in min-w-[180px] px-2 py-1 text-[11px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            aria-label="Playlist name"
+          />
           <div
             data-playlist-icon-dropzone
             className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden border text-[10px] font-bold"
@@ -726,35 +776,28 @@ export function PlaylistView(): JSX.Element {
           <button className="pxbtn" onClick={clearPlaylistIcon} disabled={busy || (!playlistIconSrc && !selectedPlaylist?.hasCoverArt)}>
             CLEAR ICON
           </button>
+          <button className="pxbtn" onClick={() => void saveQueue()} disabled={busy || !playlistName.trim()}>
+            {selectedPlaylist ? 'UPDATE PLAYLIST' : queue.length ? 'SAVE QUEUE AS PLAYLIST' : 'CREATE EMPTY PLAYLIST'}
+          </button>
+          <button className="pxbtn" onClick={startNewPlaylist} disabled={busy}>
+            NEW PLAYLIST
+          </button>
         </div>
-        <button className="pxbtn" onClick={() => void saveQueue()} disabled={busy || !playlistName.trim()}>
-          {selectedPlaylist ? 'UPDATE PLAYLIST' : queue.length ? 'SAVE QUEUE AS PLAYLIST' : 'CREATE EMPTY PLAYLIST'}
-        </button>
-        <button className="pxbtn" onClick={startNewPlaylist} disabled={busy}>
-          NEW PLAYLIST
-        </button>
-        <button className="pxbtn" onClick={clearQueue} disabled={busy || queue.length === 0}>
-          CLEAR
-        </button>
-        <button
-          className="pxbtn"
-          onClick={() => void exportQueueFolder()}
-          disabled={busy || queue.length === 0}
-        >
-          EXPORT QUEUE FOLDER
-        </button>
-        <button className="pxbtn" onClick={() => void saveSmartRule()} disabled={busy}>
-          SAVE SMART
-        </button>
-        <button className="pxbtn" onClick={() => void importM3u()} disabled={busy}>
-          IMPORT M3U
-        </button>
-        {status && <span className="text-[11px]" style={{ color: 'var(--ink-2)' }}>{status}</span>}
-        <span className="ml-auto text-[11px]" style={{ color: 'var(--muted)' }}>
-          {selectedPlaylist
-            ? `${selectedPlaylistTracks.length} playlist tracks - queue ${queue.length}`
-            : `${queue.length} tracks${queue.length > 0 && index >= 0 ? ` - playing ${index + 1}` : ''}`}
-        </span>
+        {moreOpen && (
+          <div className="toolbar-group" role="group" aria-label="Import and export">
+            <span className="toolbar-group-label">Files</span>
+            <button
+              className="pxbtn"
+              onClick={() => void exportQueueFolder()}
+              disabled={busy || queue.length === 0}
+            >
+              EXPORT QUEUE FOLDER
+            </button>
+            <button className="pxbtn" onClick={() => void importM3u()} disabled={busy}>
+              IMPORT M3U
+            </button>
+          </div>
+        )}
       </div>
       <div className="grid min-h-0 flex-1" style={{ gridTemplateColumns: '286px 1fr' }}>
         <aside
@@ -894,12 +937,22 @@ export function PlaylistView(): JSX.Element {
             >
               EXPORT FOLDER
             </button>
-            <button className="pxbtn" onClick={() => void deleteSelected()} disabled={busy || !selectedPlaylist}>
-              DELETE
-            </button>
-            <button className="pxbtn col-span-2" onClick={() => void deleteSmartRule()} disabled={busy || !selectedSmartRule}>
-              DELETE SMART
-            </button>
+            <ConfirmAction
+              label="DELETE"
+              confirmLabel="SURE?"
+              tone="error"
+              disabled={busy || !selectedPlaylist}
+              title="Delete the selected playlist"
+              onConfirm={() => void deleteSelected()}
+            />
+            <ConfirmAction
+              label="DELETE SMART"
+              confirmLabel="SURE?"
+              tone="error"
+              disabled={busy || !selectedSmartRule}
+              title="Delete the selected smart rule"
+              onConfirm={() => void deleteSmartRule()}
+            />
             <button className="pxbtn is-active col-span-2" onClick={() => void startSmartRuleRadio()} disabled={busy || !selectedSmartRule}>
               START SMART RULE RADIO
             </button>

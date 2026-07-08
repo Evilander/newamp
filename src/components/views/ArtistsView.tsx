@@ -3,7 +3,14 @@ import type { ArtistSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { PlaylistAppendPicker, TrackTable } from './LibraryView';
 import { api } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
+import { ViewHeader } from '../ViewHeader';
+import { Chip } from '../Chip';
+import { EmptyState } from '../EmptyState';
+import { ViewSkeleton } from '../ViewSkeleton';
+import { AlphabetRail, CatalogLoadMore, catalogScrollBehavior } from './AlbumsView';
+import { Sparkle } from '../Icons';
 
 const ARTIST_PAGE_SIZE = 320;
 const CATALOG_SEARCH_DEBOUNCE_MS = 180;
@@ -18,6 +25,8 @@ export function ArtistsView(): JSX.Element {
   const artistQuery = useDebouncedValue(filter, CATALOG_SEARCH_DEBOUNCE_MS);
   const [hasMoreArtists, setHasMoreArtists] = useState(false);
   const [loadingArtists, setLoadingArtists] = useState(false);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [refreshSeed, setRefreshSeed] = useState(0);
   const artistListRef = useRef<HTMLDivElement>(null);
   const [restoreArtistScrollTop, setRestoreArtistScrollTop] = useState(0);
   const playQueue = usePlayerStore((s) => s.playQueue);
@@ -50,7 +59,7 @@ export function ArtistsView(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [artistQuery]);
+  }, [artistQuery, refreshSeed]);
 
   useEffect(() => {
     if (!selected) {
@@ -106,6 +115,24 @@ export function ArtistsView(): JSX.Element {
     }
   }
 
+  async function scanLibraryNow(): Promise<void> {
+    setScanBusy(true);
+    pushToast({ title: 'Scanning music folders…' });
+    try {
+      await api.scanLibrary();
+      setRefreshSeed((seed) => seed + 1);
+      pushToast({ tone: 'ok', title: 'Library scan finished' });
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: 'Library scan failed',
+        detail: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setScanBusy(false);
+    }
+  }
+
   function openArtist(artist: string): void {
     setRestoreArtistScrollTop(artistListRef.current?.scrollTop ?? 0);
     setSelected(artist);
@@ -125,6 +152,25 @@ export function ArtistsView(): JSX.Element {
     setSelected(null);
   }
 
+  const artistLetters = useMemo(() => {
+    const set = new Set<string>();
+    for (const artist of artists) set.add(artistFirstLetter(artist.artist));
+    return set;
+  }, [artists]);
+
+  function jumpToArtistLetter(letter: string): void {
+    const container = artistListRef.current;
+    if (!container) return;
+    const target = container.querySelector<HTMLElement>(`[data-newamp-artist-letter="${letter}"]`);
+    if (!target) return;
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const offset = targetRect.top - containerRect.top + container.scrollTop - 12;
+    container.scrollTo({ top: Math.max(0, offset), behavior: catalogScrollBehavior() });
+  }
+
+  const filterActive = artistQuery.trim().length > 0;
+
   if (selected) {
     return (
       <div className="flex h-full flex-col">
@@ -133,26 +179,26 @@ export function ArtistsView(): JSX.Element {
           style={{ borderColor: 'var(--line)' }}
         >
           <button className="pxbtn" onClick={closeArtist}>
-            All artists
+            ← All artists
           </button>
           <div className="min-w-0 flex-1">
             <div className="truncate text-lg font-semibold">{selected}</div>
             <div className="text-[12px]" style={{ color: 'var(--ink-2)' }}>
-              {tracks.length} tracks
+              {tracks.length.toLocaleString()} {tracks.length === 1 ? 'track' : 'tracks'}
             </div>
           </div>
           <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)}>
             Play all
           </button>
           <button className="pxbtn" onClick={() => queueTracksNext(tracks)} disabled={!tracks.length} title="Play artist next">
-            NEXT
+            Next
           </button>
           <button className="pxbtn" onClick={() => addTracksToQueue(tracks)} disabled={!tracks.length} title="Queue artist">
-            QUEUE
+            Queue
           </button>
           <PlaylistAppendPicker
             tracks={tracks}
-            label="ADD ARTIST TO PLAYLIST"
+            label="Add artist to playlist"
             disabled={!tracks.length}
           />
         </div>
@@ -180,53 +226,114 @@ export function ArtistsView(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
-        <input
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter artists..."
-          className="bevel-in lcd-text flex-1 px-3 py-1.5 text-[14px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-        />
-        <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
-          {artists.length.toLocaleString()}{hasMoreArtists ? '+' : ''} artists
-          {loadingArtists ? ' / loading' : ''}
-        </span>
-      </div>
-      <div ref={artistListRef} data-newamp-artists-scroll className="flex-1 overflow-auto">
-        <div
-          className="grid"
-          style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}
-        >
-          {artists.map((a) => (
-            <button
-              key={a.artist}
-              onClick={() => openArtist(a.artist)}
-              className="flex items-center justify-between gap-2 border-b px-4 py-2 text-left transition-colors hover:bg-[var(--panel-2)]"
-              style={{ borderColor: 'var(--line)' }}
-            >
-              <span className="truncate text-[13px]">{a.artist}</span>
-              <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>
-                {a.albumCount} alb - {a.trackCount} tr
-              </span>
-            </button>
-          ))}
-        </div>
-        {hasMoreArtists && (
-          <div className="flex justify-center py-4">
-            <button
-              className="pxbtn is-active"
-              onClick={() => void loadMoreArtists()}
-              disabled={loadingArtists}
-              data-newamp-artists-load-more
-            >
-              {loadingArtists ? 'Loading...' : 'Load more artists'}
-            </button>
+      <ViewHeader
+        eyebrow="Explore"
+        title="Artists"
+        count={`${artists.length.toLocaleString()}${hasMoreArtists ? '+' : ''} artists`}
+        status={
+          scanBusy ? (
+            <Chip tone="accent" size="sm">
+              Scanning…
+            </Chip>
+          ) : loadingArtists ? (
+            <Chip tone="muted" size="sm">
+              Loading…
+            </Chip>
+          ) : null
+        }
+        actions={
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter artists…"
+            aria-label="Filter artists"
+            className="catalog-header-filter bevel-in lcd-text px-3 py-1.5 text-[14px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          />
+        }
+      />
+      <div className="relative flex flex-1 overflow-hidden">
+        {loadingArtists && artists.length === 0 ? (
+          <div className="flex-1 overflow-hidden">
+            <ViewSkeleton variant="rows" count={14} />
           </div>
+        ) : artists.length === 0 ? (
+          <div className="flex-1">
+            <EmptyState
+              icon={<Sparkle size={40} />}
+              title={filterActive ? 'No artists match' : 'No artists yet'}
+              body={
+                filterActive
+                  ? `Nothing in the library matches "${artistQuery.trim()}".`
+                  : 'Artists appear as soon as your library has music in it. Scan a music folder to get started.'
+              }
+              actions={
+                filterActive ? (
+                  <button className="pxbtn" onClick={() => setFilter('')}>
+                    Clear filter
+                  </button>
+                ) : (
+                  <button className="pxbtn is-active" onClick={() => void scanLibraryNow()} disabled={scanBusy}>
+                    Scan library
+                  </button>
+                )
+              }
+            />
+          </div>
+        ) : (
+          <>
+            <div ref={artistListRef} data-newamp-artists-scroll className="flex-1 overflow-auto">
+              <div
+                className="grid"
+                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}
+              >
+                {artists.map((a) => (
+                  <button
+                    key={a.artist}
+                    onClick={() => openArtist(a.artist)}
+                    className="flex items-center justify-between gap-2 border-b px-4 py-2 text-left transition-colors hover:bg-[var(--panel-2)]"
+                    style={{ borderColor: 'var(--line)' }}
+                    data-newamp-artist-letter={artistFirstLetter(a.artist)}
+                  >
+                    <span className="truncate text-[13px]">{a.artist}</span>
+                    <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>
+                      {formatArtistStats(a)}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              <CatalogLoadMore
+                shown={artists.length}
+                noun="artists"
+                hasMore={hasMoreArtists}
+                loading={loadingArtists}
+                onLoadMore={() => void loadMoreArtists()}
+                marker={{ 'data-newamp-artists-load-more': '' }}
+              />
+            </div>
+            <AlphabetRail available={artistLetters} onJump={jumpToArtistLetter} />
+          </>
         )}
       </div>
     </div>
   );
+}
+
+/**
+ * First letter for the rail — deliberately NOT stripping leading articles the
+ * way the Albums grid does: getArtists sorts on the raw name (COLLATE NOCASE),
+ * so "The Beatles" really does live under T here and the jump targets must
+ * agree with the sort order.
+ */
+function artistFirstLetter(value: string | null | undefined): string {
+  const first = String(value ?? '').trim().charAt(0).toUpperCase();
+  return /[A-Z]/.test(first) ? first : '#';
+}
+
+function formatArtistStats(artist: ArtistSummary): string {
+  const albums = `${artist.albumCount.toLocaleString()} ${artist.albumCount === 1 ? 'album' : 'albums'}`;
+  const tracks = `${artist.trackCount.toLocaleString()} ${artist.trackCount === 1 ? 'track' : 'tracks'}`;
+  return `${albums} · ${tracks}`;
 }
 
 function useDebouncedValue<T>(value: T, delayMs: number): T {
@@ -254,9 +361,9 @@ function ArtistSpotlight({
   const imageUrl = fact?.imageUrl ?? fact?.originalImageUrl;
   const yearSpan = useMemo(() => formatYearSpan(tracks), [tracks]);
   const statText = [
-    `${tracks.length.toLocaleString()} tracks`,
+    `${tracks.length.toLocaleString()} ${tracks.length === 1 ? 'track' : 'tracks'}`,
     yearSpan,
-  ].filter(Boolean).join(' / ');
+  ].filter(Boolean).join(' · ');
 
   return (
     <section
@@ -270,7 +377,10 @@ function ArtistSpotlight({
         <div
           className="absolute inset-0 opacity-40"
           style={{
-            backgroundImage: `linear-gradient(90deg, rgba(6,10,14,0.96), rgba(6,10,14,0.76) 48%, rgba(6,10,14,0.3)), url(${JSON.stringify(imageUrl)})`,
+            // The readability scrim mixes over --panel instead of a hardcoded
+            // near-black: on the light skins (steel/terminal/ice/miami) the
+            // old rgba(6,10,14,…) slab sat like a hole punched in the panel.
+            backgroundImage: `linear-gradient(90deg, color-mix(in srgb, var(--panel) 96%, transparent), color-mix(in srgb, var(--panel) 78%, transparent) 48%, color-mix(in srgb, var(--panel) 32%, transparent)), url(${JSON.stringify(imageUrl)})`,
             backgroundPosition: 'center',
             backgroundSize: 'cover',
           }}
@@ -282,7 +392,7 @@ function ArtistSpotlight({
             className="mb-2 flex flex-wrap items-center gap-2 text-[9px] uppercase tracking-[0.1em]"
             style={{ color: 'var(--ink-2)' }}
           >
-            <span>Artist Image - Wikipedia</span>
+            <span>Artist image · Wikipedia</span>
             <span style={{ color: 'var(--muted)' }}>{statusLabel(status)}</span>
           </div>
           <h2
@@ -343,7 +453,7 @@ function formatYearSpan(tracks: Track[]): string {
   if (years.length === 0) return '';
   const min = Math.min(...years);
   const max = Math.max(...years);
-  return min === max ? String(min) : `${min}-${max}`;
+  return min === max ? String(min) : `${min}–${max}`;
 }
 
 function statusLabel(status: 'idle' | 'loading' | 'none' | 'ok'): string {

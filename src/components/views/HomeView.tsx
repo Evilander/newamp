@@ -310,13 +310,14 @@ export function HomeView(): JSX.Element {
             <div className="grid gap-3 lg:grid-cols-[1.4fr_0.78fr_0.72fr]">
               <RatedHighlightRail
                 tracks={data.rated}
+                pending={belowFoldPending}
                 onPlay={(start) => void playQueue(data.rated, start)}
                 onNext={() => queueTracksNext(data.rated)}
                 onQueue={() => addTracksToQueue(data.rated)}
                 onAction={() => void saveSet('Top Rated', data.rated)}
               />
               <NewsCard fresh={data.fresh} loved={data.loved} top={data.rated[0] ?? null} />
-              <ListeningStatsPanel insights={data.insights} history={data.history} />
+              <ListeningStatsPanel insights={data.insights} history={data.history} pending={belowFoldPending} />
             </div>
 
             <div className="grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.7fr)]">
@@ -333,6 +334,7 @@ export function HomeView(): JSX.Element {
                     )
                   }
                   tracks={data.harmonic}
+                  pending={belowFoldPending}
                   actionLabel="SAVE MIX"
                   onPlay={(start) => void playQueue(data.harmonic, start)}
                   onNext={() => queueTracksNext(data.harmonic)}
@@ -344,6 +346,7 @@ export function HomeView(): JSX.Element {
                   title="Taste Match"
                   subtitle="Learns from plays, loves, ratings, and skips"
                   tracks={data.taste}
+                  pending={belowFoldPending}
                   actionLabel="SAVE TASTE"
                   onPlay={(start) => void playQueue(data.taste, start)}
                   onNext={() => queueTracksNext(data.taste)}
@@ -356,6 +359,7 @@ export function HomeView(): JSX.Element {
                     title="Fresh Imports"
                     subtitle={newestFreshDate ? `Newest: ${newestFreshDate}` : 'Newest files NewAmp has seen on disk'}
                     tracks={data.fresh}
+                    pending={loading}
                     compact
                     actionLabel="SAVE FRESH"
                     onPlay={(start) => void playQueue(data.fresh, start)}
@@ -367,6 +371,7 @@ export function HomeView(): JSX.Element {
                     title="Heavy Rotation"
                     subtitle={data.heavy.length ? 'Tracks with the most NewAmp plays' : 'Appears after NewAmp records plays'}
                     tracks={data.heavy}
+                    pending={loading}
                     compact
                     onPlay={(start) => void playQueue(data.heavy, start)}
                     onNext={() => queueTracksNext(data.heavy)}
@@ -379,6 +384,7 @@ export function HomeView(): JSX.Element {
                     title="Recently Played"
                     subtitle={recentTracks.length ? 'Pick up a listening thread' : 'Appears after playback history exists'}
                     tracks={recentTracks}
+                    pending={loading}
                     compact
                     onPlay={(start) => void playQueue(recentTracks, start)}
                     onNext={() => queueTracksNext(recentTracks)}
@@ -388,6 +394,7 @@ export function HomeView(): JSX.Element {
                     title="Loved Signal"
                     subtitle="Your strongest manual taste signal"
                     tracks={data.loved}
+                    pending={loading}
                     compact
                     actionLabel="SAVE LOVED"
                     onPlay={(start) => void playQueue(data.loved, start)}
@@ -401,17 +408,20 @@ export function HomeView(): JSX.Element {
               <div className="flex min-w-0 flex-col gap-3">
                 <HealthPanel
                   health={data.health}
+                  pending={belowFoldPending}
                   onOpenLibrary={() => setView('library')}
                 />
 
                 <SuggestedStationsPanel
                   suggestions={data.suggestedStations}
+                  pending={belowFoldPending}
                   onRadio={(suggestion) => void startSuggestedStation(suggestion)}
                 />
 
                 <PlaylistPanel
                   playlists={data.playlists}
                   smartRules={data.smartRules}
+                  pending={loading || belowFoldPending}
                   onPlay={(playlist) => void playSavedPlaylist(playlist)}
                   onPlaySmartRule={(rule) => void playSmartRule(rule)}
                   onSmartRuleRadio={(rule) => void startSmartRuleRadio(rule)}
@@ -428,22 +438,24 @@ export function HomeView(): JSX.Element {
 
 function SuggestedStationsPanel({
   suggestions,
+  pending = false,
   onRadio,
 }: {
   suggestions: SmartPlaylistSuggestion[];
+  pending?: boolean;
   onRadio: (suggestion: SmartPlaylistSuggestion) => void;
 }): JSX.Element {
   return (
     <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
       <div className="mb-2 flex items-center gap-2">
-        <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
-          Suggested Stations
-        </div>
-        <span className="ml-auto text-[10px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
+        <Eyebrow>Suggested Stations</Eyebrow>
+        <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
           Library-built
         </span>
       </div>
-      {suggestions.length ? (
+      {pending && !suggestions.length ? (
+        <ViewSkeleton variant="rows" count={3} />
+      ) : suggestions.length ? (
         <div className="flex flex-col gap-1">
           {suggestions.map((suggestion) => (
             <button
@@ -459,7 +471,7 @@ function SuggestedStationsPanel({
                   {suggestion.subtitle} / {suggestion.sampleCount.toLocaleString()} ready
                 </span>
               </span>
-              <span className="self-center tabular-nums" style={{ color: 'var(--accent)' }}>
+              <span className="self-center font-mono tabular-nums" style={{ color: 'var(--accent)' }}>
                 RADIO
               </span>
             </button>
@@ -553,21 +565,31 @@ function NowPanel({
 
 function HealthPanel({
   health,
+  pending = false,
   onOpenLibrary,
 }: {
   health: LibraryHealth | null;
+  pending?: boolean;
   onOpenLibrary: () => void;
 }): JSX.Element {
   const compass = health ? buildArchiveCompass(health) : null;
   const missingTotal = health ? missingMetadataTotal(health) : 0;
   const duplicateCount = health ? duplicateExactTotal(health) : 0;
   const legacyCount = health ? legacyFormatTotal(health) : 0;
+  if (pending && !health) {
+    return (
+      <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
+        <div className="mb-2 flex items-center gap-2">
+          <Eyebrow>Archive Compass</Eyebrow>
+        </div>
+        <ViewSkeleton variant="rows" count={3} />
+      </section>
+    );
+  }
   return (
     <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
       <div className="mb-2 flex items-center gap-2">
-        <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
-          Archive Compass
-        </div>
+        <Eyebrow>Archive Compass</Eyebrow>
         <button className="pxbtn ml-auto" onClick={onOpenLibrary}>
           OPEN
         </button>
@@ -623,7 +645,7 @@ function Metric({ label, value }: { label: string; value: number }): JSX.Element
       <div className="lcd-text text-[18px] leading-none" style={{ color: value ? 'var(--warn)' : 'var(--accent)' }}>
         {value.toLocaleString()}
       </div>
-      <div className="mt-1 text-[9px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
+      <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
         {label}
       </div>
     </div>
@@ -636,6 +658,7 @@ function HomeRail({
   tracks,
   actionLabel,
   compact = false,
+  pending = false,
   onPlay,
   onNext,
   onQueue,
@@ -646,6 +669,8 @@ function HomeRail({
   tracks: Track[];
   actionLabel?: string;
   compact?: boolean;
+  /** Data still in flight — show a skeleton instead of the empty message. */
+  pending?: boolean;
   onPlay: (startIndex: number) => void;
   onNext: () => void;
   onQueue: () => void;
@@ -662,7 +687,7 @@ function HomeRail({
             {subtitle}
           </div>
         </div>
-        <div className="text-right text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
+        <div className="text-right font-mono text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
           <div>{tracks.length.toLocaleString()} tracks</div>
           <div>{formatDuration(totalDuration)}</div>
         </div>
@@ -707,12 +732,14 @@ function HomeRail({
                   <ArtistLink artist={track.artist} color="inherit" />
                 </span>
               </span>
-              <span className="self-center text-right tabular-nums" style={{ color: 'var(--ink-2)' }}>
+              <span className="self-center text-right font-mono tabular-nums" style={{ color: 'var(--ink-2)' }}>
                 {formatTime(track.duration ?? 0)}
               </span>
             </div>
           ))}
         </div>
+      ) : pending ? (
+        <ViewSkeleton variant="rows" count={compact ? 3 : 4} />
       ) : (
         <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
           No tracks available yet.
@@ -725,6 +752,7 @@ function HomeRail({
 function PlaylistPanel({
   playlists,
   smartRules,
+  pending = false,
   onPlay,
   onPlaySmartRule,
   onSmartRuleRadio,
@@ -732,6 +760,7 @@ function PlaylistPanel({
 }: {
   playlists: SavedPlaylist[];
   smartRules: SmartPlaylistRule[];
+  pending?: boolean;
   onPlay: (playlist: SavedPlaylist) => void;
   onPlaySmartRule: (rule: SmartPlaylistRule) => void;
   onSmartRuleRadio: (rule: SmartPlaylistRule) => void;
@@ -740,14 +769,14 @@ function PlaylistPanel({
   return (
     <section className="bevel-out p-3" style={{ background: 'var(--panel)' }}>
       <div className="mb-2 flex items-center gap-2">
-        <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: 'var(--accent)' }}>
-          Playlists
-        </div>
+        <Eyebrow>Playlists</Eyebrow>
         <button className="pxbtn ml-auto" onClick={onOpen}>
           OPEN
         </button>
       </div>
-      {playlists.length || smartRules.length ? (
+      {pending && !playlists.length && !smartRules.length ? (
+        <ViewSkeleton variant="rows" count={3} />
+      ) : playlists.length || smartRules.length ? (
         <div className="flex flex-col gap-1">
           {playlists.map((playlist) => (
             <button
@@ -773,11 +802,11 @@ function PlaylistPanel({
               </span>
               <span className="min-w-0 self-center">
                 <span className="block truncate">{playlist.name}</span>
-                <span className="block truncate text-[10px]" style={{ color: 'var(--muted)' }}>
+                <span className="block truncate font-mono text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
                   {playlist.trackCount.toLocaleString()} tracks / {formatDuration(playlist.duration)}
                 </span>
               </span>
-              <span className="self-center tabular-nums" style={{ color: playlist.trackCount ? 'var(--accent)' : 'var(--muted)' }}>
+              <span className="self-center font-mono tabular-nums" style={{ color: playlist.trackCount ? 'var(--accent)' : 'var(--muted)' }}>
                 {playlist.trackCount ? 'PLAY' : 'EMPTY'}
               </span>
             </button>
@@ -1001,12 +1030,15 @@ function HomeHero({
 
 function RatedHighlightRail({
   tracks,
+  pending = false,
   onPlay,
   onNext,
   onQueue,
   onAction,
 }: {
   tracks: Track[];
+  /** Below-fold batch still in flight — skeleton instead of the rate-nudge. */
+  pending?: boolean;
   onPlay: (startIndex: number) => void;
   onNext: () => void;
   onQueue: () => void;
@@ -1016,9 +1048,7 @@ function RatedHighlightRail({
   return (
     <section className="bevel-out home-rated p-3" data-cell="RATE-02" style={{ background: 'var(--panel)' }}>
       <div className="mb-3 flex items-baseline gap-2">
-        <div className="text-[11px] font-bold uppercase tracking-[0.16em]" style={{ color: 'var(--accent)' }}>
-          Your Highest Rated
-        </div>
+        <Eyebrow>Your Highest Rated</Eyebrow>
         <div className="text-[10px]" style={{ color: 'var(--ink-2)' }}>
           Sorted by score · top-of-library
         </div>
@@ -1075,6 +1105,8 @@ function RatedHighlightRail({
             );
           })}
         </div>
+      ) : pending ? (
+        <ViewSkeleton variant="rails" count={5} />
       ) : (
         <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
           Rate tracks 0–100 and your top picks land here. Cmd/Ctrl-click the score in Now Playing for fine adjustment.
@@ -1096,10 +1128,8 @@ function NewsCard({ fresh, loved, top }: { fresh: Track[]; loved: Track[]; top: 
   return (
     <section className="bevel-out home-news p-3" data-cell="NEWS-03" style={{ background: 'var(--panel)' }}>
       <div className="mb-2 flex items-center gap-2">
-        <div className="text-[11px] font-bold uppercase tracking-[0.16em]" style={{ color: 'var(--accent)' }}>
-          NewAmp News
-        </div>
-        <span className="text-[10px]" style={{ color: 'var(--ink-2)' }}>
+        <Eyebrow>NewAmp News</Eyebrow>
+        <span className="font-mono text-[10px]" style={{ color: 'var(--ink-2)' }}>
           Field report · {new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
         </span>
       </div>
@@ -1213,37 +1243,46 @@ function formatYmd(ms: number): string {
 function ListeningStatsPanel({
   insights,
   history,
+  pending = false,
 }: {
   insights: ListeningInsights;
   history: ListeningHistoryItem[];
+  pending?: boolean;
 }): JSX.Element {
   const weekStart = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const weekTracks = history.filter((item) => item.playedAt >= weekStart).map((item) => item.track);
   const distinctArtists = new Set(weekTracks.map((track) => track.artist).filter(Boolean));
   const topGenre = topGenreFromTracks(weekTracks);
   const minutes = Math.round((insights.week.duration ?? 0) / 60);
+  // Insights arrive with the deferred below-fold batch — until they land the
+  // zeros would be a false readout, so wear the skeleton instead.
+  const showSkeleton = pending && insights.generatedAt === 0;
   return (
     <section className="bevel-out home-listening-stats p-3" style={{ background: 'var(--panel)' }}>
       <div className="mb-3 flex items-baseline gap-2">
-        <div className="text-[11px] font-bold uppercase tracking-[0.16em]" style={{ color: 'var(--accent)' }}>
-          Listening Stats This Week
-        </div>
-        <div className="ml-auto text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
-          {insights.week.plays.toLocaleString()} plays
-        </div>
-      </div>
-      <div className="grid grid-cols-3 gap-2">
-        <Metric label="Minutes" value={minutes} />
-        <Metric label="Artists" value={distinctArtists.size} />
-        <div className="bevel-in px-2 py-2">
-          <div className="lcd-text truncate text-[18px] leading-none" title={topGenre} style={{ color: 'var(--accent)' }}>
-            {topGenre}
+        <Eyebrow>Listening Stats This Week</Eyebrow>
+        {!showSkeleton && (
+          <div className="ml-auto font-mono text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
+            {insights.week.plays.toLocaleString()} plays
           </div>
-          <div className="mt-1 text-[9px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
-            Top genre
+        )}
+      </div>
+      {showSkeleton ? (
+        <ViewSkeleton variant="rows" count={3} />
+      ) : (
+        <div className="grid grid-cols-3 gap-2">
+          <Metric label="Minutes" value={minutes} />
+          <Metric label="Artists" value={distinctArtists.size} />
+          <div className="bevel-in px-2 py-2">
+            <div className="lcd-text truncate text-[18px] leading-none" title={topGenre} style={{ color: 'var(--accent)' }}>
+              {topGenre}
+            </div>
+            <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
+              Top genre
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }

@@ -276,7 +276,10 @@ export function createWrappedLiveScene(
       ctx.fillText(truncate(taste.mood, 16), 96, 1180);
       ctx.globalAlpha = 1;
     }
-    // Outro
+    // Outro — the branded closing beat inside the final chapter, so the
+    // film's total length is unchanged: kicker, then the wordmark, then the
+    // repo line lands last on its own delay. The repo line is brand
+    // watermarking, so it honors the watermark option.
     const outroT = easeOut(t * 2 - 1);
     if (outroT > 0) {
       ctx.globalAlpha = outroT;
@@ -286,6 +289,14 @@ export function createWrappedLiveScene(
       ctx.fillStyle = INK;
       ctx.font = '800 120px Inter, system-ui, sans-serif';
       ctx.fillText('NewAmp', 96, 1700);
+      ctx.globalAlpha = 1;
+    }
+    const brandT = easeOut(t * 2.4 - 1.6);
+    if (watermark && brandT > 0) {
+      ctx.globalAlpha = brandT * 0.85;
+      ctx.fillStyle = MUTED;
+      ctx.font = '700 40px "JetBrains Mono", monospace';
+      ctx.fillText('github.com/evilander/newamp', 96, 1788);
       ctx.globalAlpha = 1;
     }
   };

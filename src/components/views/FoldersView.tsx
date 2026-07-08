@@ -3,9 +3,15 @@ import type { FolderSummary, SavedPlaylist, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
 import { api } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
 import { spectralArtDataUrl } from '@shared/spectral-art';
 import { TrackTable } from './LibraryView';
 import { LoadMoreFooter } from './LoadMoreFooter';
+import { ViewHeader } from '../ViewHeader';
+import { Chip } from '../Chip';
+import { EmptyState } from '../EmptyState';
+import { ViewSkeleton } from '../ViewSkeleton';
+import { Queue } from '../Icons';
 
 const FOLDER_TRACK_LIMIT = 600;
 
@@ -16,7 +22,9 @@ export function FoldersView(): JSX.Element {
   const [loading, setLoading] = useState(false);
   const [loadingMoreTracks, setLoadingMoreTracks] = useState(false);
   const [hasMoreDirectTracks, setHasMoreDirectTracks] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [indexError, setIndexError] = useState(false);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [refreshSeed, setRefreshSeed] = useState(0);
   const selected = stack[stack.length - 1] ?? null;
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
@@ -28,13 +36,16 @@ export function FoldersView(): JSX.Element {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setStatus(null);
+    setIndexError(false);
     api.getFolders(selected?.path ?? null)
       .then((next) => {
         if (!cancelled) setFolders(next);
       })
       .catch(() => {
-        if (!cancelled) setStatus('Folder index unavailable.');
+        if (!cancelled) {
+          setFolders([]);
+          setIndexError(true);
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -42,7 +53,7 @@ export function FoldersView(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [selected?.path]);
+  }, [selected?.path, refreshSeed]);
 
   useEffect(() => {
     let cancelled = false;
@@ -88,14 +99,25 @@ export function FoldersView(): JSX.Element {
     folder: FolderSummary,
     action: (nextTracks: Track[]) => void | Promise<void>,
   ): Promise<void> {
-    setStatus(`Loading ${folder.name}...`);
-    const nextTracks = await api.getFolderTracks(folder.path, { recursive: true, limit: 100000 });
-    if (!nextTracks.length) {
-      setStatus(`${folder.name} has no playable tracks.`);
-      return;
+    try {
+      const nextTracks = await api.getFolderTracks(folder.path, { recursive: true, limit: 100000 });
+      if (!nextTracks.length) {
+        pushToast({ tone: 'warn', title: 'Nothing to play', detail: `${folder.name} has no playable tracks.` });
+        return;
+      }
+      await action(nextTracks);
+      pushToast({
+        tone: 'ok',
+        title: `${nextTracks.length.toLocaleString()} tracks loaded`,
+        detail: `From ${folder.name}, subfolders included.`,
+      });
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: `Couldn't load ${folder.name}`,
+        detail: err instanceof Error ? err.message : undefined,
+      });
     }
-    await action(nextTracks);
-    setStatus(`${nextTracks.length.toLocaleString()} tracks loaded from ${folder.name}.`);
   }
 
   async function loadMoreDirectTracks(): Promise<void> {
@@ -118,26 +140,64 @@ export function FoldersView(): JSX.Element {
     }
   }
 
+  async function scanLibraryNow(): Promise<void> {
+    setScanBusy(true);
+    pushToast({ title: 'Scanning music folders…' });
+    try {
+      await api.scanLibrary();
+      setRefreshSeed((seed) => seed + 1);
+      pushToast({ tone: 'ok', title: 'Library scan finished' });
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: 'Library scan failed',
+        detail: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setScanBusy(false);
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
-        <button className="pxbtn" onClick={() => setStack([])} disabled={!stack.length}>
-          Roots
-        </button>
-        {stack.map((folder, index) => (
-          <button
-            key={`${folder.path}-${index}`}
-            className={`pxbtn ${index === stack.length - 1 ? 'is-active' : ''}`}
-            onClick={() => jumpTo(index)}
-            title={folder.path}
-          >
-            {folder.name}
+      <ViewHeader
+        eyebrow="Explore"
+        title="Folders"
+        count={`${folders.length.toLocaleString()} ${folders.length === 1 ? 'folder' : 'folders'}`}
+        status={
+          loading ? (
+            <Chip tone="muted" size="sm">
+              Loading…
+            </Chip>
+          ) : scanBusy ? (
+            <Chip tone="accent" size="sm">
+              Scanning…
+            </Chip>
+          ) : (
+            <span style={{ color: 'var(--muted)' }}>
+              {totalTracks.toLocaleString()} {totalTracks === 1 ? 'track' : 'tracks'}
+            </span>
+          )
+        }
+      />
+
+      {stack.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
+          <button className="pxbtn" onClick={() => setStack([])}>
+            Roots
           </button>
-        ))}
-        <span className="ml-auto text-[11px]" style={{ color: 'var(--muted)' }}>
-          {loading ? 'Loading...' : `${folders.length.toLocaleString()} folders / ${totalTracks.toLocaleString()} tracks`}
-        </span>
-      </div>
+          {stack.map((folder, index) => (
+            <button
+              key={`${folder.path}-${index}`}
+              className={`pxbtn ${index === stack.length - 1 ? 'is-active' : ''}`}
+              onClick={() => jumpTo(index)}
+              title={folder.path}
+            >
+              {folder.name}
+            </button>
+          ))}
+        </div>
+      )}
 
       {selected && (
         <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
@@ -153,29 +213,25 @@ export function FoldersView(): JSX.Element {
             disabled={!selected.totalTrackCount}
             onClick={() => void withFolderTracks(selected, (nextTracks) => playQueue(nextTracks, 0))}
           >
-            PLAY FOLDER
+            Play folder
           </button>
           <button
             className="pxbtn"
             disabled={!selected.totalTrackCount}
+            title="Play folder next"
             onClick={() => void withFolderTracks(selected, queueTracksNext)}
           >
-            NEXT FOLDER
+            Next
           </button>
           <button
             className="pxbtn"
             disabled={!selected.totalTrackCount}
+            title="Queue folder"
             onClick={() => void withFolderTracks(selected, addTracksToQueue)}
           >
-            QUEUE FOLDER
+            Queue
           </button>
-          <FolderPlaylistAppendPicker folder={selected} onStatus={setStatus} />
-        </div>
-      )}
-
-      {status && (
-        <div className="border-b px-3 py-1 text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}>
-          {status}
+          <FolderPlaylistAppendPicker folder={selected} />
         </div>
       )}
 
@@ -189,50 +245,82 @@ export function FoldersView(): JSX.Element {
         data-newamp-folders-layout={selected ? 'split' : 'list-full'}
       >
         <div className="overflow-auto border-b" style={{ borderColor: 'var(--line)' }}>
-          <table className="w-full table-fixed text-[12px]" style={{ fontFamily: 'var(--font-mono)', borderCollapse: 'separate', borderSpacing: 0 }}>
-            <thead className="sticky top-0 z-10" style={{ background: 'var(--panel)', color: 'var(--ink-2)' }}>
-              <tr className="text-left text-[9px] uppercase tracking-[0.12em]">
-                <th className="w-[54px] px-3 py-[7px]"></th>
-                <th className="px-2 py-[7px]">Folder</th>
-                <th className="w-[110px] px-2 py-[7px] text-right">Tracks</th>
-                <th className="w-[110px] px-2 py-[7px] text-right">Direct</th>
-                <th className="w-[96px] px-2 py-[7px] text-right">Time</th>
-                <th className="w-[92px] px-2 py-[7px] text-right">Folders</th>
-              </tr>
-            </thead>
-            <tbody>
-              {folders.map((folder, index) => (
-                <tr
-                  key={folder.path}
-                  className="cursor-pointer"
-                  style={{ background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)' }}
-                  onDoubleClick={() => openFolder(folder)}
-                >
-                  <td className="px-3 py-[6px]">
-                    <FolderArt folder={folder} size={34} />
-                  </td>
-                  <td className="min-w-0 px-2 py-[6px]">
-                    <button className="block max-w-full truncate text-left font-semibold" onClick={() => openFolder(folder)} title={folder.path}>
-                      {folder.name}
-                    </button>
-                    <div className="truncate text-[10px]" style={{ color: 'var(--muted)' }} title={folder.path}>
-                      {folder.path}
-                    </div>
-                  </td>
-                  <td className="px-2 py-[6px] text-right tabular-nums">{folder.totalTrackCount.toLocaleString()}</td>
-                  <td className="px-2 py-[6px] text-right tabular-nums" style={{ color: 'var(--ink-2)' }}>
-                    {folder.trackCount.toLocaleString()}
-                  </td>
-                  <td className="px-2 py-[6px] text-right tabular-nums" style={{ color: 'var(--ink-2)' }}>
-                    {formatDuration(folder.duration)}
-                  </td>
-                  <td className="px-2 py-[6px] text-right tabular-nums" style={{ color: 'var(--muted)' }}>
-                    {folder.childFolderCount.toLocaleString()}
-                  </td>
+          {loading ? (
+            <ViewSkeleton variant="rows" count={selected ? 5 : 12} />
+          ) : folders.length === 0 ? (
+            indexError ? (
+              <EmptyState
+                size={selected ? 'panel' : 'view'}
+                title="Folder index unavailable"
+                body="The folder index could not be read. Retry once the library finishes scanning."
+                actions={
+                  <button className="pxbtn" onClick={() => setRefreshSeed((seed) => seed + 1)}>
+                    Retry
+                  </button>
+                }
+              />
+            ) : selected ? (
+              <EmptyState
+                size="panel"
+                title="No subfolders"
+                body={`Every track in ${selected.name} sits at this level.`}
+              />
+            ) : (
+              <EmptyState
+                icon={<Queue size={36} />}
+                title="No folders indexed yet"
+                body="Folders mirror your music exactly as it sits on disk. Scan a music folder and the tree appears here."
+                actions={
+                  <button className="pxbtn is-active" onClick={() => void scanLibraryNow()} disabled={scanBusy}>
+                    Scan library
+                  </button>
+                }
+              />
+            )
+          ) : (
+            <table
+              className="catalog-zebra w-full table-fixed text-[12px]"
+              style={{ fontFamily: 'var(--font-mono)', borderCollapse: 'separate', borderSpacing: 0 }}
+            >
+              <thead className="sticky top-0 z-10" style={{ background: 'var(--panel)', color: 'var(--ink-2)' }}>
+                <tr className="text-left text-[9px] uppercase tracking-[0.12em]">
+                  <th className="w-[54px] px-3 py-[7px]"></th>
+                  <th className="px-2 py-[7px]">Folder</th>
+                  <th className="w-[110px] px-2 py-[7px] text-right">Tracks</th>
+                  <th className="w-[110px] px-2 py-[7px] text-right">Direct</th>
+                  <th className="w-[96px] px-2 py-[7px] text-right">Time</th>
+                  <th className="w-[92px] px-2 py-[7px] text-right">Folders</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {folders.map((folder) => (
+                  <tr key={folder.path} className="cursor-pointer" onDoubleClick={() => openFolder(folder)}>
+                    <td className="px-3 py-[6px]">
+                      <FolderArt folder={folder} size={34} />
+                    </td>
+                    <td className="min-w-0 px-2 py-[6px]">
+                      <button className="block max-w-full truncate text-left font-semibold" onClick={() => openFolder(folder)} title={folder.path}>
+                        {folder.name}
+                      </button>
+                      <div className="truncate text-[10px]" style={{ color: 'var(--muted)' }} title={folder.path}>
+                        {folder.path}
+                      </div>
+                    </td>
+                    <td className="px-2 py-[6px] text-right tabular-nums">{folder.totalTrackCount.toLocaleString()}</td>
+                    <td className="px-2 py-[6px] text-right tabular-nums" style={{ color: 'var(--ink-2)' }}>
+                      {folder.trackCount.toLocaleString()}
+                    </td>
+                    <td className="px-2 py-[6px] text-right tabular-nums" style={{ color: 'var(--ink-2)' }}>
+                      {formatDuration(folder.duration)}
+                    </td>
+                    <td className="px-2 py-[6px] text-right tabular-nums" style={{ color: 'var(--muted)' }}>
+                      {folder.childFolderCount.toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
 
         {selected ? (
@@ -258,7 +346,7 @@ export function FoldersView(): JSX.Element {
               noun="direct tracks"
               hasMore={hasMoreDirectTracks}
               loading={loadingMoreTracks}
-              loadLabel="Load more direct tracks"
+              loadLabel="Load more"
               onLoadMore={() => void loadMoreDirectTracks()}
             />
           </div>
@@ -295,13 +383,7 @@ function FolderArt({ folder, size }: { folder: FolderSummary; size: number }): J
   );
 }
 
-function FolderPlaylistAppendPicker({
-  folder,
-  onStatus,
-}: {
-  folder: FolderSummary;
-  onStatus: (status: string | null) => void;
-}): JSX.Element | null {
+function FolderPlaylistAppendPicker({ folder }: { folder: FolderSummary }): JSX.Element | null {
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
 
   useEffect(() => {
@@ -317,19 +399,30 @@ function FolderPlaylistAppendPicker({
   }, []);
 
   async function appendToPlaylist(playlistId: number): Promise<void> {
-    onStatus(`Loading ${folder.name}...`);
-    const trackIds = await api.getFolderTrackIds(folder.path, { recursive: true, limit: 100000 });
-    if (!trackIds.length) {
-      onStatus(`${folder.name} has no playable tracks.`);
-      return;
+    try {
+      const trackIds = await api.getFolderTrackIds(folder.path, { recursive: true, limit: 100000 });
+      if (!trackIds.length) {
+        pushToast({ tone: 'warn', title: 'Nothing to add', detail: `${folder.name} has no playable tracks.` });
+        return;
+      }
+      const updated = await api.addTracksToPlaylist({ playlistId, trackIds });
+      if (!updated) {
+        pushToast({ tone: 'error', title: 'Playlist was not found' });
+        return;
+      }
+      setPlaylists((current) => current.map((playlist) => (playlist.id === updated.id ? updated : playlist)));
+      pushToast({
+        tone: 'ok',
+        title: `Added to ${updated.name}`,
+        detail: `${trackIds.length.toLocaleString()} tracks from ${folder.name}.`,
+      });
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: `Couldn't add ${folder.name} to the playlist`,
+        detail: err instanceof Error ? err.message : undefined,
+      });
     }
-    const updated = await api.addTracksToPlaylist({ playlistId, trackIds });
-    if (!updated) {
-      onStatus('Playlist was not found.');
-      return;
-    }
-    setPlaylists((current) => current.map((playlist) => (playlist.id === updated.id ? updated : playlist)));
-    onStatus(`Added ${trackIds.length.toLocaleString()} tracks from ${folder.name} to ${updated.name}.`);
   }
 
   if (!playlists.length) return null;
@@ -347,7 +440,7 @@ function FolderPlaylistAppendPicker({
       className="bevel-in px-2 py-1 text-[11px] outline-none"
       style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
     >
-      <option value="">ADD FOLDER TO PLAYLIST</option>
+      <option value="">Add folder to playlist</option>
       {playlists.map((playlist) => (
         <option key={playlist.id} value={playlist.id}>
           {playlist.name}

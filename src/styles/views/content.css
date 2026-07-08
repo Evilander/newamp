@@ -1,1 +1,38 @@
 /* views/content.css — added for the 2.0 Reference Grade pass. Owned by its stage-2 workstream; keep rules scoped to this surface. */
+
+/* === content-2: profile / radio / podcast / playlist / wrapped === */
+
+/* PlaylistView toolbar regroup — the former single wrapping row of ~30
+   controls, clustered into labeled groups under the ViewHeader. Primary
+   set-building actions live in the header; rare file actions sit behind
+   the MORE toggle. Tokens only; tints via color-mix so every skin keeps
+   its own cast. */
+.playlist-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 55%, var(--bg));
+}
+.toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--line) 75%, transparent);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--panel-2) 45%, transparent);
+}
+.toolbar-group-label {
+  margin-right: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  letter-spacing: var(--eyebrow-tracking, 0.14em);
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+}
