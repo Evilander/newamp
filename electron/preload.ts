@@ -144,6 +144,8 @@ const api: NewAmpAPI = {
     >,
   captureVisualizerPng: (rect?: { x: number; y: number; width: number; height: number }) =>
     ipcRenderer.invoke('media:capture-page', rect) as Promise<string | null>,
+  captureDeckSnapshotPng: () =>
+    ipcRenderer.invoke('deck:snapshot') as Promise<string | null>,
   copyPngToClipboard: (dataUrl: string) =>
     ipcRenderer.invoke('media:copy-png', dataUrl) as Promise<boolean>,
   saveCaptureBytes: (payload: { base64: string; defaultName: string; filterName: string; ext: string }) =>

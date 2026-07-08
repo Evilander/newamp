@@ -2089,6 +2089,17 @@ function registerIpc(): void {
       return image.isEmpty() ? null : image.toDataURL();
     },
   );
+  // Deck Snapshot (compact player polaroid). Captures the composited compact
+  // window — the compact deck IS the main window resized (win:set-compact), so
+  // capturePage reads exactly what the user sees for every registered deck
+  // skin, whatever native size it reshaped the window to. The renderer prints
+  // the polaroid frame around it (src/lib/deck-snapshot.ts) and reuses
+  // media:copy-png / media:save-capture for delivery.
+  ipcMain.handle('deck:snapshot', async () => {
+    if (!mainWin) return null;
+    const image = await mainWin.webContents.capturePage();
+    return image.isEmpty() ? null : image.toDataURL();
+  });
   ipcMain.handle('media:copy-png', async (_e, dataUrl: string) => {
     const image = nativeImage.createFromDataURL(String(dataUrl ?? ''));
     if (image.isEmpty()) return false;
