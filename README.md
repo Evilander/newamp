@@ -29,7 +29,7 @@ Grab your platform from the [latest release](https://github.com/evilander/newamp
 | **macOS** | `NewAmp <version> arm64.dmg` (Apple Silicon) or `NewAmp <version> x64.dmg` (Intel) |
 | **Linux** | `NewAmp Linux <version> x64.tar.gz` — extract and run `./newamp` |
 
-Point it at your music folder, and it just starts playing. That's the whole setup.
+Point it at your music folder, and it just starts playing — first launch even offers one-click music folder suggestions it detects on your machine. That's the whole setup.
 
 > The builds aren't code-signed yet, so Windows SmartScreen may ask you to click "More info → Run anyway", and macOS may want a right-click → Open the first time. Every file's checksum is published in `SHA256SUMS.txt` if you want to verify what you downloaded.
 
@@ -178,6 +178,8 @@ npm install
 npm run dev          # development with hot reload
 npm run package      # production artifacts for your platform
 ```
+
+Releases go through a hard gate, not vibes: `npm run release:gate:local` runs the ~100-smoke battery, packages all three platforms, and verifies checksums and build provenance. Two proofs stay human on purpose — `npm run release:start-listening-proof` (a real listening session on real hardware) and `npm run release:start-lastfm-proof` (a live scrobble round-trip) — because a music player shouldn't ship on green CI alone.
 
 The full feature reference lives in [`docs/features.md`](docs/features.md), and the deep technical docs in [`docs/`](docs/).
 
