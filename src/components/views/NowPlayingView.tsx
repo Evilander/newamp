@@ -1,7 +1,7 @@
 // Bloomberg-density Now Playing view, ported from claude-design reference
 // 346c1cdba95b. Three-column main layout: album+queue / spectrum+VU+waveform /
-// LRC lyrics. Top status strip carries hex badge + track stats. Everything
-// pulls live state from the audio engine.
+// LRC lyrics. Top status strip carries the real signal path + track stats.
+// Everything pulls live state from the audio engine.
 
 import { Fragment, memo, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { usePlayerStore, engine } from '../../store/usePlayerStore';
@@ -16,6 +16,11 @@ import { ScoreRating } from '../ScoreRating';
 import { ArtistLink, AlbumLink, TrackLink } from '../EntityLink';
 import { LinerNotesPanel } from '../LinerNotesPanel';
 import { FormatBadges } from '../FormatBadges';
+import { SignalPathBadge } from '../SignalPathBadge';
+import { Chip } from '../Chip';
+import { EmptyState } from '../EmptyState';
+import { Star, StarOutline, Note } from '../Icons';
+import { spectralArtDataUrl } from '@shared/spectral-art';
 import { classifyAudioQuality } from '@shared/audio-quality';
 
 type SideTab = 'on-air' | 'album' | 'lyrics';
@@ -249,20 +254,7 @@ export function NowPlayingView(): JSX.Element {
   );
 
   if (!current) {
-    return (
-      <div
-        className="flex h-full flex-col items-center justify-center gap-2"
-        style={{ color: 'var(--muted)' }}
-      >
-        <div
-          className="text-[10px] uppercase tracking-[0.2em]"
-          style={{ color: 'var(--ink-2)' }}
-        >
-          Now Playing
-        </div>
-        <div className="text-[14px]">Nothing&rsquo;s playing. Pick a track from the Library.</div>
-      </div>
-    );
+    return <NowPlayingAttract onOpenLibrary={() => setView('library')} />;
   }
 
   const fmtKbps = current.bitrate ? `${Math.round(current.bitrate / 1000)} kbps` : '—';
@@ -397,28 +389,24 @@ export function NowPlayingView(): JSX.Element {
       ) : null}
       {/* --- Top status strip --- */}
       <div
-        className="flex items-center justify-between px-4 text-[10px] uppercase tracking-[0.08em]"
-        style={{
-          height: 28,
-          background: 'var(--panel)',
-          borderBottom: '1px solid var(--line)',
-          color: 'var(--ink-2)',
-          flexShrink: 0,
-        }}
+        className="flex shrink-0 items-center justify-between border-b border-line bg-panel px-4 text-[10px] uppercase tracking-[0.08em] text-ink2"
+        style={{ height: 28 }}
       >
         <div className="flex items-center gap-3">
-          <span
-            className="font-bold tracking-[0.15em]"
-            style={{ color: 'var(--accent)', fontSize: 11 }}
-          >
+          <span className="text-[11px] font-bold tracking-[0.15em] text-accent">
             NEWAMP
           </span>
-          <StatusPill on={isPlaying} text={isPlaying ? 'PLAYING' : 'PAUSED'} />
+          <OnAirLamp on={isPlaying} />
           {activeStationName ? <StatusPill on text="RADIO" /> : null}
           {settings?.replayGain !== 'off' ? <StatusPill on text="RG" /> : null}
-          <span style={{ color: 'var(--muted)' }}>
-            OUTPUT · WASAPI · {fmtKbps} · {fmtRate}
-          </span>
+          {/* Truth in the chrome: the real engine signal path (same component
+              the transport uses — WASAPI-exclusive, DIRECT, RESAMPLED, …)
+              instead of the old hardcoded 'OUTPUT · WASAPI' claim, plus honest
+              per-track format/rate readouts. */}
+          <SignalPathBadge />
+          <Chip size="sm" tone="muted" title={current.path}>{codecHint}</Chip>
+          <Chip size="sm" tone="muted">{fmtKbps}</Chip>
+          <Chip size="sm" tone="muted">{fmtRate}</Chip>
         </div>
         <div className="flex items-center gap-3">
           {activeStationName ? (
@@ -431,7 +419,6 @@ export function NowPlayingView(): JSX.Element {
               </button>
             </>
           ) : null}
-          <HexBadge label="SYS" value="10/10" />
           <Clock />
         </div>
       </div>
@@ -441,10 +428,7 @@ export function NowPlayingView(): JSX.Element {
         className="newamp-now-grid grid flex-1 overflow-hidden"
       >
         {/* --- Album side --- */}
-        <div
-          className="flex flex-col overflow-hidden"
-          style={{ background: 'var(--panel)', borderRight: '1px solid var(--line)' }}
-        >
+        <div className="flex flex-col overflow-hidden border-r border-line bg-panel">
           {/* role=button div (not <button>): the credit overlay below nests
               real ArtistLink/AlbumLink buttons, and interactive elements may
               not nest inside a native button. */}
@@ -458,16 +442,17 @@ export function NowPlayingView(): JSX.Element {
                 setFs(true);
               }
             }}
-            className="newamp-now-art relative shrink-0 cursor-pointer"
+            className="newamp-now-art relative shrink-0 cursor-pointer overflow-hidden border-b border-line bg-panel2"
             data-newamp-open-visualizer
-            style={{
-              background: 'var(--panel-2)',
-              borderBottom: '1px solid var(--line)',
-              overflow: 'hidden',
-            }}
             title="Open fullscreen visualizer"
           >
             <AlbumArtPlaceholder label={current.album || current.title} />
+            {/* Stage lighting: a radial spotlight in the track's own palette
+                (--amp-bg1/--amp-bg2, written per-track by lib/resonance.ts).
+                Sits under the cover, so it carries the no-art / failed-art
+                placeholder; breathes with --amp-energy only in reactive mode
+                (opacity-only — see nowplaying.css). */}
+            <div aria-hidden className="np-stage-spotlight" data-newamp-stage-spotlight />
             {artUrl ? (
               <img
                 src={artUrl}
@@ -486,19 +471,7 @@ export function NowPlayingView(): JSX.Element {
                 }}
                 draggable={false}
               />
-            ) : (
-              <div
-                className="flex h-full w-full items-center justify-center"
-                style={{
-                  fontSize: 120,
-                  color: 'rgba(52,211,153,0.08)',
-                  background:
-                    'linear-gradient(135deg, rgba(52,211,153,0.06) 0%, var(--panel-2) 40%, rgba(124,92,255,0.05) 70%, rgba(255,59,106,0.04) 100%)',
-                }}
-              >
-                ♫
-              </div>
-            )}
+            ) : null}
             <div
               className="pointer-events-none absolute inset-0"
               style={{
@@ -506,10 +479,7 @@ export function NowPlayingView(): JSX.Element {
               }}
             />
             <div className="pointer-events-none absolute bottom-3 left-3 right-3">
-              <div
-                className="mb-1 text-[9px] uppercase tracking-[0.1em]"
-                style={{ color: 'var(--ink-2)' }}
-              >
+              <div className="mb-1 text-[9px] uppercase tracking-[0.1em] text-ink2">
                 {current.year ?? '—'} ·{' '}
                 <ArtistLink
                   artist={current.albumArtist || current.artist}
@@ -517,7 +487,7 @@ export function NowPlayingView(): JSX.Element {
                   className="pointer-events-auto"
                 />
               </div>
-              <div className="text-[13px] font-bold" style={{ color: 'var(--ink)' }}>
+              <div className="text-[13px] font-bold text-ink">
                 {current.album ? (
                   <AlbumLink
                     album={current.album}
@@ -534,20 +504,12 @@ export function NowPlayingView(): JSX.Element {
 
           {/* Queue */}
           <div className="flex-1 overflow-y-auto">
-            <div
-              className="sticky top-0 flex items-center justify-between px-[14px] py-[7px] text-[9px] uppercase tracking-[0.1em]"
-              style={{
-                color: 'var(--ink-2)',
-                background: 'var(--panel)',
-                borderBottom: '1px solid var(--line)',
-                zIndex: 1,
-              }}
-            >
+            <div className="sticky top-0 z-[1] flex items-center justify-between border-b border-line bg-panel px-[14px] py-[7px] text-[9px] uppercase tracking-[0.1em] text-ink2">
               <span>Queue · {queue.length} tracks</span>
               <span>{queueIndex >= 0 ? `${queueIndex + 1}/${queue.length}` : '—'}</span>
             </div>
             {queue.length === 0 ? (
-              <div className="px-[14px] py-3 text-[11px]" style={{ color: 'var(--muted)' }}>
+              <div className="px-[14px] py-3 text-[11px] text-muted">
                 Queue is empty.
               </div>
             ) : (
@@ -722,10 +684,7 @@ function AlbumArtPlaceholder({ label }: { label: string }): JSX.Element {
 
 function StatusPill({ on, text }: { on: boolean; text: string }): JSX.Element {
   return (
-    <span
-      className="inline-flex items-center gap-[5px] border px-[7px] py-[1px] text-[9px] tracking-[0.1em]"
-      style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
-    >
+    <span className="inline-flex items-center gap-[5px] border border-line px-[7px] py-[1px] text-[9px] tracking-[0.1em] text-ink2">
       <span
         style={{
           width: 5,
@@ -740,15 +699,134 @@ function StatusPill({ on, text }: { on: boolean; text: string }): JSX.Element {
   );
 }
 
-function HexBadge({ label, value }: { label: string; value: string }): JSX.Element {
+/**
+ * ON AIR lamp — the broadcast-studio tally light. Lit accent while playing,
+ * dark while paused. In reactive mode the halo breathes with --amp-energy
+ * (CSS-only, opacity on a pseudo-element — see nowplaying.css); with
+ * reactivity off or reduced-motion it holds a static lit glow.
+ */
+function OnAirLamp({ on }: { on: boolean }): JSX.Element {
   return (
-    <span
-      className="inline-flex items-center gap-[6px] border px-[8px] py-[1px] text-[10px] font-bold"
-      style={{ borderColor: 'var(--accent-dim)', color: 'var(--accent)' }}
-    >
-      <span style={{ color: 'var(--ink-2)', fontWeight: 400 }}>{label}</span>
-      {value}
+    <span className="np-onair-lamp" data-newamp-onair={on ? 'on' : 'off'}>
+      <span className="np-onair-dot" aria-hidden="true" />
+      ON AIR
     </span>
+  );
+}
+
+/**
+ * Attract mode — the empty Now Playing stage. Slowly cycles spectral-art
+ * covers generated from the user's recent listening history under a dim
+ * spotlight. Cycling pauses under prefers-reduced-motion (live via media
+ * query listener). Standalone component so its state never touches the
+ * playing view's memoized tree.
+ */
+function NowPlayingAttract({ onOpenLibrary }: { onOpenLibrary: () => void }): JSX.Element {
+  const [covers, setCovers] = useState<{ key: string; url: string }[]>([]);
+  const [litIndex, setLitIndex] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getListeningHistory({ limit: 24, offset: 0 })
+      .then((rows) => {
+        if (cancelled) return;
+        const seen = new Set<string>();
+        const next: { key: string; url: string }[] = [];
+        for (const row of rows) {
+          const key = `${row.track.artist}::${row.track.album}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          next.push({
+            key,
+            url: spectralArtDataUrl({ artist: row.track.artist, album: row.track.album }, 192),
+          });
+          if (next.length >= 6) break;
+        }
+        setCovers(next);
+      })
+      .catch(() => {
+        /* no history — the stage just stays dark */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (covers.length < 2 || typeof window === 'undefined') return undefined;
+    const media = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let intervalId = 0;
+    const sync = (): void => {
+      if (media.matches) {
+        if (intervalId) window.clearInterval(intervalId);
+        intervalId = 0;
+      } else if (!intervalId) {
+        intervalId = window.setInterval(
+          () => setLitIndex((index) => (index + 1) % covers.length),
+          7000,
+        );
+      }
+    };
+    sync();
+    media.addEventListener('change', sync);
+    return () => {
+      media.removeEventListener('change', sync);
+      if (intervalId) window.clearInterval(intervalId);
+    };
+  }, [covers.length]);
+
+  // Same chord QuickPlayPalette listens for on window (capture) — one code
+  // path for opening the palette, no new store surface.
+  function openQuickPlay(): void {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+  }
+
+  return (
+    <div
+      data-newamp-now-playing-attract
+      className="relative flex h-full flex-col overflow-hidden"
+      style={{ isolation: 'isolate' }}
+    >
+      <div aria-hidden className="np-stage-spotlight np-attract-spotlight" />
+      <EmptyState
+        size="view"
+        icon={
+          covers.length ? (
+            <div className="np-attract-stack" aria-hidden="true">
+              {covers.map((cover, index) => (
+                <img
+                  key={cover.key}
+                  src={cover.url}
+                  alt=""
+                  draggable={false}
+                  className={index === litIndex % covers.length ? 'is-lit' : ''}
+                />
+              ))}
+            </div>
+          ) : (
+            <Note size={44} />
+          )
+        }
+        title="The stage is dark."
+        body="Put something on."
+        actions={
+          <>
+            <button type="button" className="pxbtn is-active" onClick={onOpenLibrary}>
+              Open Library
+            </button>
+            <Chip
+              interactive
+              tone="muted"
+              title="Search and play anything (Ctrl+K)"
+              onClick={openQuickPlay}
+            >
+              Quick Play · Ctrl+K
+            </Chip>
+          </>
+        }
+      />
+    </div>
   );
 }
 
@@ -764,7 +842,7 @@ function Clock(): JSX.Element {
     'en-CA',
   )} · ${now.toLocaleTimeString([], { hour12: false })}`;
   return (
-    <span className="text-[10px]" style={{ color: 'var(--ink)' }}>
+    <span className="text-[10px] text-ink">
       {ts}
     </span>
   );
@@ -801,7 +879,7 @@ function ElapsedStrip({ duration }: { duration: number }): JSX.Element {
 function ProgressPercent({ duration }: { duration: number }): JSX.Element {
   const currentTime = usePlayerStore((s) => s.currentTime);
   return (
-    <span className="tabular-nums" style={{ color: 'var(--muted)' }}>
+    <span className="tabular-nums text-muted">
       {duration > 0 ? `${Math.round((currentTime / duration) * 100)}%` : '0%'}
     </span>
   );
@@ -839,25 +917,18 @@ function TrackInfoHeader({
   navigateToAlbum: (album: string, albumArtist: string) => void;
 }): JSX.Element {
   return (
-    <div
-      className="flex items-start justify-between gap-6 px-6 py-5"
-      style={{ borderBottom: '1px solid var(--line)' }}
-    >
+    <div className="flex items-start justify-between gap-6 border-b border-line px-6 py-5">
       <div className="min-w-0 flex-1">
-        <div
-          className="mb-[6px] text-[9px] uppercase tracking-[0.12em]"
-          style={{ color: 'var(--ink-2)' }}
-        >
+        <div className="mb-[6px] text-[9px] uppercase tracking-[0.12em] text-ink2">
           Track · {current.trackNo ?? '—'}{current.discNo ? ` · disc ${current.discNo}` : ''}
         </div>
         <div
-          className="leading-[1.1]"
+          className="leading-[1.1] text-ink"
           style={{
             fontFamily: 'var(--font-display)',
             fontSize: 28,
             fontWeight: 700,
             letterSpacing: '-0.02em',
-            color: 'var(--ink)',
           }}
           title={current.title}
         >
@@ -921,29 +992,27 @@ function TrackInfoHeader({
           {current.sampleRate && (
             <Tag>{(current.sampleRate / 1000).toFixed(1)} khz</Tag>
           )}
-          <button
-            type="button"
+          <Chip
+            interactive
+            size="sm"
+            tone={current.loved ? 'accent' : 'muted'}
+            icon={current.loved ? <Star size={11} /> : <StarOutline size={11} />}
             onClick={onLove}
-            className="border px-[6px] text-[9px] uppercase tracking-[0.1em]"
-            style={{
-              borderColor: current.loved ? 'var(--accent-dim)' : 'var(--line)',
-              color: current.loved ? 'var(--accent)' : 'var(--ink-2)',
-            }}
+            title={current.loved ? 'Remove from Loved' : 'Add to Loved'}
           >
-            {current.loved ? '★ loved' : '☆ love'}
-          </button>
+            {current.loved ? 'loved' : 'love'}
+          </Chip>
+          {/* Chip-classed native buttons (not <Chip/>): these three carry
+              smoke-contract data attributes (and `disabled` on the exporter)
+              that the primitive doesn't expose. Same CSS voice either way. */}
           <button
             type="button"
             data-now-playing-avoid-autoplay
             onClick={onToggleAvoid}
-            className="border px-[6px] text-[9px] uppercase tracking-[0.1em]"
-            style={{
-              borderColor: current.avoidAutoPlay ? 'var(--warn)' : 'var(--line)',
-              color: current.avoidAutoPlay ? 'var(--warn)' : 'var(--ink-2)',
-            }}
+            className={`chip chip-sm chip-interactive ${current.avoidAutoPlay ? 'chip-warn' : 'chip-muted'}`}
             title={current.avoidAutoPlay ? 'Excluded from Auto DJ and generated mixes' : 'Allow in Auto DJ and generated mixes'}
           >
-            {current.avoidAutoPlay ? 'avoid Auto DJ' : 'Auto DJ ok'}
+            <span className="chip-label">{current.avoidAutoPlay ? 'avoid Auto DJ' : 'Auto DJ ok'}</span>
           </button>
           <TrackRating value={current.rating} onChange={onSetRating} />
           <div className="score-rating-shell">
@@ -959,25 +1028,23 @@ function TrackInfoHeader({
             type="button"
             data-now-playing-show-in-folder
             onClick={onShowInFolder}
-            className="border px-[6px] text-[9px] uppercase tracking-[0.1em]"
-            style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
+            className="chip chip-sm chip-muted chip-interactive"
             title={current.path}
           >
-            Show in folder
+            <span className="chip-label">Show in folder</span>
           </button>
           <button
             type="button"
             data-export-track-wav
             onClick={onExportWav}
             disabled={exportBusy}
-            className="border px-[6px] text-[9px] uppercase tracking-[0.1em] disabled:opacity-50"
-            style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
+            className="chip chip-sm chip-muted chip-interactive disabled:opacity-50"
             title="Export current track as WAV"
           >
-            {exportBusy ? 'Exporting WAV' : 'Export WAV'}
+            <span className="chip-label">{exportBusy ? 'Exporting WAV' : 'Export WAV'}</span>
           </button>
           {exportMessage ? (
-            <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+            <span className="text-[10px] text-muted">
               {exportMessage}
             </span>
           ) : null}
@@ -1161,10 +1228,7 @@ function Stat({
 }): JSX.Element {
   return (
     <div className="flex flex-col items-end gap-[1px]">
-      <div
-        className="text-[8px] uppercase tracking-[0.1em]"
-        style={{ color: 'var(--ink-2)' }}
-      >
+      <div className="text-[8px] uppercase tracking-[0.1em] text-ink2">
         {label}
       </div>
       <div
@@ -1206,8 +1270,8 @@ function QueueRow({
       className="grid w-full cursor-pointer items-center gap-2 px-[14px] py-[7px] text-left transition-colors"
       style={{
         gridTemplateColumns: '20px 1fr auto',
-        background: active ? 'rgba(52,211,153,0.06)' : 'transparent',
-        borderBottom: '1px solid rgba(26,40,48,0.45)',
+        background: active ? 'color-mix(in srgb, var(--accent) 8%, transparent)' : 'transparent',
+        borderBottom: '1px solid color-mix(in srgb, var(--line) 45%, transparent)',
       }}
     >
       <span
@@ -1229,10 +1293,7 @@ function QueueRow({
           </span>
         ) : null}
       </span>
-      <span
-        className="text-[10px] tabular-nums"
-        style={{ color: 'var(--ink-2)' }}
-      >
+      <span className="text-[10px] tabular-nums text-ink2">
         {track.duration ? formatTime(track.duration) : '—'}
       </span>
     </div>
@@ -1253,15 +1314,12 @@ function BookmarkPanel({
   // Clock-subscribed: shows the live position next to "SAVE MARK".
   const currentTime = usePlayerStore((s) => s.currentTime);
   return (
-    <div
-      className="min-h-0 border-b px-4 py-3"
-      style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}
-    >
+    <div className="min-h-0 border-b border-line bg-panel px-4 py-3">
       <div className="mb-2 flex items-center gap-2">
-        <div className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+        <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-accent">
           Track Bookmarks
         </div>
-        <div className="flex-1 text-[10px] tabular-nums" style={{ color: 'var(--ink-2)' }}>
+        <div className="flex-1 text-[10px] tabular-nums text-ink2">
           {formatTime(currentTime)}
         </div>
         <button className="pxbtn is-active" onClick={onSave}>
@@ -1277,14 +1335,13 @@ function BookmarkPanel({
               style={{ gridTemplateColumns: '52px minmax(0,1fr) 48px 24px' }}
             >
               <button
-                className="text-left tabular-nums"
-                style={{ color: 'var(--accent)' }}
+                className="text-left tabular-nums text-accent"
                 onClick={() => onJump(bookmark)}
                 title="Jump to bookmark"
               >
                 {formatTime(bookmark.position)}
               </button>
-              <div className="truncate" title={bookmark.label} style={{ color: 'var(--ink)' }}>
+              <div className="truncate text-ink" title={bookmark.label}>
                 {bookmark.label}
               </div>
               <button className="pxbtn px-1 py-[1px] text-[9px]" onClick={() => onJump(bookmark)}>
@@ -1297,7 +1354,7 @@ function BookmarkPanel({
           ))}
         </div>
       ) : (
-        <div className="text-[11px]" style={{ color: 'var(--muted)' }}>
+        <div className="text-[11px] text-muted">
           No marks for this track yet.
         </div>
       )}
@@ -1318,17 +1375,16 @@ function TempoTrainerPanel({
     <div
       data-newamp-tempo-trainer
       data-newamp-playback-rate={playbackRate}
-      className="border-b px-4 py-3"
-      style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}
+      className="border-b border-line bg-panel px-4 py-3"
     >
       <div className="mb-2 flex items-center gap-2">
-        <div className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+        <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-accent">
           Tempo Trainer
         </div>
-        <div className="flex-1 text-[10px]" style={{ color: 'var(--ink-2)' }}>
+        <div className="flex-1 text-[10px] text-ink2">
           Pitch preserved
         </div>
-        <div className="lcd-text text-[18px] tabular-nums" style={{ color: 'var(--accent)' }}>
+        <div className="lcd-text text-[18px] tabular-nums text-accent">
           {playbackRateLabel(playbackRate)}
         </div>
       </div>
@@ -1385,14 +1441,14 @@ function PracticeLoopPanel({
     <div
       data-newamp-practice-loop
       data-newamp-practice-loop-enabled={normalized.enabled ? 'true' : 'false'}
-      className="border-b px-4 py-3"
-      style={{ borderColor: 'var(--line)', background: 'var(--bg)' }}
+      className="border-b border-line px-4 py-3"
+      style={{ background: 'var(--bg)' }}
     >
       <div className="mb-2 flex items-center gap-2">
-        <div className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+        <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-accent">
           Practice Loop
         </div>
-        <div className="flex-1 text-[10px] tabular-nums" style={{ color: 'var(--ink-2)' }}>
+        <div className="flex-1 text-[10px] tabular-nums text-ink2">
           {ready
             ? `${formatTime(normalized.start!)} -> ${formatTime(normalized.end!)}`
             : `Set A/B at ${formatTime(currentTime)}`}
@@ -1419,7 +1475,7 @@ function PracticeLoopPanel({
         <button className="pxbtn" onClick={onClear} disabled={normalized.start == null && normalized.end == null}>
           CLEAR
         </button>
-        <span className="ml-auto text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
+        <span className="ml-auto text-[10px] tabular-nums text-muted">
           {ready ? `${Math.round(progress)}%` : 'A/B unset'}
         </span>
       </div>
@@ -1515,15 +1571,9 @@ function SpectrumPanel({
   }, [spectrumStyle, isPlaying]);
 
   return (
-    <div
-      className="flex flex-col gap-[10px] px-4 py-3"
-      style={{ borderRight: '1px solid var(--line)', background: 'var(--panel)' }}
-    >
+    <div className="flex flex-col gap-[10px] border-r border-line bg-panel px-4 py-3">
       <div className="flex items-center justify-between">
-        <span
-          className="text-[9px] uppercase tracking-[0.1em]"
-          style={{ color: 'var(--ink-2)' }}
-        >
+        <span className="text-[9px] uppercase tracking-[0.1em] text-ink2">
           Spectrum
         </span>
         <div className="flex items-center gap-1" data-newamp-spectrum-style-picker>
@@ -1589,10 +1639,7 @@ function SpectrumPanel({
       <SoundsLikePanel trackId={current.id} />
 
       <div>
-        <div
-          className="mb-[6px] flex items-center justify-between text-[9px] uppercase tracking-[0.1em]"
-          style={{ color: 'var(--ink-2)' }}
-        >
+        <div className="mb-[6px] flex items-center justify-between text-[9px] uppercase tracking-[0.1em] text-ink2">
           <span>Overview</span>
           <ProgressPercent duration={duration} />
         </div>
@@ -1985,19 +2032,19 @@ const SoundsLikePanel = memo(function SoundsLikePanel({ trackId }: { trackId: nu
 
   if (needsAnalysis) {
     return (
-      <section className="bevel-out p-2" style={{ background: 'var(--panel)' }}>
+      <section className="bevel-out bg-panel p-2">
         <div className="flex items-center justify-between">
-          <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+          <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-accent">
             Sounds Like
           </span>
           <button className="pxbtn text-[10px]" onClick={() => void analyzeNow()} disabled={analyzing}>
             {analyzing ? 'Analyzing audio…' : 'Analyze DNA'}
           </button>
         </div>
-        <div className="mt-1 text-[10px]" style={{ color: 'var(--muted)' }}>
+        <div className="mt-1 text-[10px] text-muted">
           No DNA computed for this track yet. Click to extract perceptual features.
         </div>
-        {error && <div className="mt-1 text-[10px]" style={{ color: 'var(--error)' }}>{error}</div>}
+        {error && <div className="mt-1 text-[10px] text-error">{error}</div>}
       </section>
     );
   }
@@ -2005,31 +2052,31 @@ const SoundsLikePanel = memo(function SoundsLikePanel({ trackId }: { trackId: nu
   if (!similar.length) return null;
 
   return (
-    <section className="bevel-out p-2" style={{ background: 'var(--panel)' }}>
+    <section className="bevel-out bg-panel p-2">
       <div className="mb-1 flex items-center gap-2">
-        <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+        <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-accent">
           Sounds Like
         </span>
-        <span className="text-[9px]" style={{ color: 'var(--muted)' }}>
+        <span className="text-[9px] text-muted">
           DNA cosine match
         </span>
         <button className="pxbtn ml-auto text-[10px]" onClick={() => void playSimilar()}>
           Play set
         </button>
       </div>
-      <ol className="m-0 grid gap-[2px] p-0 text-[10px]" style={{ color: 'var(--ink-2)' }}>
+      <ol className="m-0 grid gap-[2px] p-0 text-[10px] text-ink2">
         {similar.slice(0, 5).map((row, idx) => (
           <li key={row.track.id} className="flex items-baseline gap-2 truncate">
-            <span className="font-mono" style={{ color: 'var(--muted)', minWidth: 18 }}>
+            <span className="font-mono text-muted" style={{ minWidth: 18 }}>
               {String(idx + 1).padStart(2, '0')}
             </span>
-            <span className="truncate font-bold" style={{ color: 'var(--ink)' }}>
+            <span className="truncate font-bold text-ink">
               <TrackLink track={row.track} color="var(--ink)" />
             </span>
-            <span className="truncate" style={{ color: 'var(--muted)' }}>
+            <span className="truncate text-muted">
               · <ArtistLink artist={row.track.artist} color="var(--muted)" />
             </span>
-            <span className="ml-auto tabular-nums" style={{ color: 'var(--accent)' }}>
+            <span className="ml-auto tabular-nums text-accent">
               {Math.round(row.score * 100)}%
             </span>
           </li>
@@ -2102,16 +2149,10 @@ function VuMeter(): JSX.Element {
     <div className="flex flex-col gap-1">
       {(['L', 'R'] as const).map((side) => (
         <div key={side} className="flex items-center gap-2">
-          <span
-            className="w-[14px] text-[9px]"
-            style={{ color: 'var(--ink-2)' }}
-          >
+          <span className="w-[14px] text-[9px] text-ink2">
             {side}
           </span>
-          <div
-            className="relative h-[6px] flex-1"
-            style={{ background: 'var(--panel-2)', overflow: 'hidden' }}
-          >
+          <div className="relative h-[6px] flex-1 overflow-hidden bg-panel2">
             <div
               ref={side === 'L' ? lRef : rRef}
               data-vu={side}
@@ -2256,13 +2297,7 @@ const ArtistImageStage = memo(function ArtistImageStage({ artist }: { artist: st
   const imageUrl = fact?.imageUrl ?? fact?.originalImageUrl;
 
   return (
-    <div
-      className="relative overflow-hidden border-b"
-      style={{
-        background: 'var(--panel)',
-        borderColor: 'var(--line)',
-      }}
-    >
+    <div className="relative overflow-hidden border-b border-line bg-panel">
       {imageUrl && (
         <div
           className="absolute inset-0 opacity-45"
@@ -2287,12 +2322,9 @@ const ArtistImageStage = memo(function ArtistImageStage({ artist }: { artist: st
           />
         )}
         <div className="min-w-0 self-center">
-          <div
-            className="mb-2 flex items-center justify-between gap-2 text-[9px] uppercase tracking-[0.1em]"
-            style={{ color: 'var(--ink-2)' }}
-          >
+          <div className="mb-2 flex items-center justify-between gap-2 text-[9px] uppercase tracking-[0.1em] text-ink2">
             <span>Artist Image - Facts</span>
-            <span className="shrink-0" style={{ color: 'var(--muted)' }}>
+            <span className="shrink-0 text-muted">
               {status === 'loading' ? 'fetching...' : status === 'none' ? 'no match' : 'wikipedia'}
             </span>
           </div>
@@ -2302,22 +2334,21 @@ const ArtistImageStage = memo(function ArtistImageStage({ artist }: { artist: st
                 href={fact.url}
                 target="_blank"
                 rel="noreferrer"
-                className="block truncate text-[13px] font-bold"
-                style={{ color: 'var(--accent)' }}
+                className="block truncate text-[13px] font-bold text-accent"
               >
                 {fact.title}
               </a>
               {fact.description && (
-                <div className="mt-1 truncate text-[10px] uppercase tracking-[0.08em]" style={{ color: 'var(--ink-2)' }}>
+                <div className="mt-1 truncate text-[10px] uppercase tracking-[0.08em] text-ink2">
                   {fact.description}
                 </div>
               )}
-              <p className="artist-fact-summary mt-2 text-[11px] leading-[1.42]" style={{ color: 'var(--ink-2)' }}>
+              <p className="artist-fact-summary mt-2 text-[11px] leading-[1.42] text-ink2">
                 {fact.summary}
               </p>
             </>
           ) : (
-            <div className="flex h-[108px] items-center text-[11px]" style={{ color: 'var(--muted)' }}>
+            <div className="flex h-[108px] items-center text-[11px] text-muted">
               {status === 'loading' ? 'Looking up artist image and context...' : 'Artist image and context will appear when a match is found.'}
             </div>
           )}
