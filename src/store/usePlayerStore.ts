@@ -17,6 +17,8 @@ import {
   notifySkip,
 } from '../visualizer/eviland-memory-bridge-registry';
 import { applyTheme } from '../lib/skins';
+import { pushToast } from '../lib/toast';
+import { THEME_REGISTRY } from '@shared/custom-skin';
 import { normalizePlaybackRate } from '@shared/tempo-trainer';
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
 import { normalizePreampDb } from '@shared/audio-limiter';
@@ -191,6 +193,7 @@ interface PlayerState {
   setTrackRatingScore: (id: number, score: number | null) => Promise<Track | null>;
   toggleAvoidAutoPlay: (id: number) => Promise<Track | null>;
   setTheme: (theme: AppSettings['theme']) => Promise<void>;
+  cycleTheme: () => Promise<void>;
   setCrossfadeMs: (ms: number) => Promise<void>;
   setReplayGainMode: (mode: AppSettings['replayGain']) => Promise<void>;
   setLimiterEnabled: (enabled: boolean) => Promise<void>;
@@ -1510,6 +1513,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const settings = await api.setSettings({ theme });
       set({ settings });
       applyTheme(theme, settings.customSkin);
+    },
+
+    cycleTheme: async () => {
+      // Shift+S skin surf: advance to the next built-in skin in THEME_REGISTRY
+      // order. When a custom skin (or an unknown id) is active there is no
+      // "next", so surfing restarts from the first registry entry — always a
+      // deterministic landing spot. Toast the landed skin so surfing with the
+      // eyes on the visualizer still tells you where you are.
+      const active = get().settings?.theme;
+      const index = THEME_REGISTRY.findIndex((entry) => entry.id === active);
+      const next = THEME_REGISTRY[index < 0 ? 0 : (index + 1) % THEME_REGISTRY.length]!;
+      await get().setTheme(next.id);
+      pushToast({ title: `Skin — ${next.label}` });
     },
 
     setCrossfadeMs: async (ms) => {

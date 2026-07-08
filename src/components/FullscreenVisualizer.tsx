@@ -22,6 +22,7 @@ import { createReplayRing, type ReplayRing } from '../visualizer/eviland-replay'
 import { useDetachedVisualizer } from './useDetachedVisualizer';
 import { ScrubBar } from './ScrubBar';
 import { EvilandMemoryBadge } from './EvilandMemoryBadge';
+import { Gear, Dice } from './Icons';
 
 // Preset registry. `group` drives the labeled sections in the new preset
 // picker popover so users can scan by category instead of one long rail. The
@@ -764,7 +765,11 @@ export function FullscreenVisualizer(): JSX.Element {
 
   const copyStill = async (): Promise<void> => {
     const dataUrl = await api.captureVisualizerPng(captureRect());
-    if (dataUrl) await api.copyPngToClipboard(dataUrl);
+    if (!dataUrl) return;
+    // Copied stills are the share path — burn a small wordmark into the
+    // bottom-right so screenshots that travel carry provenance. Save-PNG
+    // (above) stays clean; the clip/video pipeline is untouched.
+    await api.copyPngToClipboard(await stampCaptureWordmark(dataUrl));
   };
 
   // Eviland-only handlers ───────────────────────────────────────────────────
@@ -1152,7 +1157,8 @@ export function FullscreenVisualizer(): JSX.Element {
           data-newamp-viz-screen-button={nativeFullscreen ? 'on' : 'off'}
           data-newamp-viz-clean-button={chromeVisible ? 'off' : 'on'}
         >
-          ⚙ Settings
+          <Gear size={12} className="viz-btn-icon" />
+          Settings
         </button>
         <button
           className={`pxbtn ${openPanel === 'help' ? 'is-active' : ''}`}
@@ -1324,7 +1330,8 @@ export function FullscreenVisualizer(): JSX.Element {
                   aria-label="Randomize Eviland look"
                   data-newamp-viz-eviland-randomize
                 >
-                  🎲 Randomize
+                  <Dice size={12} className="viz-btn-icon" />
+                  Randomize
                 </button>
               </div>
 
@@ -1646,6 +1653,7 @@ export function FullscreenVisualizer(): JSX.Element {
             <div><dt><kbd>A</kbd></dt><dd>Album-art overlay</dd></div>
             <div><dt><kbd>P</kbd></dt><dd>Cycle color palette</dd></div>
             <div><dt><kbd>R</kbd></dt><dd>Cycle reactivity (Truth / Punch / Wild)</dd></div>
+            <div><dt><kbd>Shift</kbd> <kbd>S</kbd></dt><dd>Surf app skins (visuals re-tint live)</dd></div>
             <div><dt><kbd>V</kbd></dt><dd>Auto-VJ (auto-switch scenes)</dd></div>
             <div><dt><kbd>F</kbd></dt><dd>Native fullscreen</dd></div>
             <div><dt><kbd>H</kbd></dt><dd>Hide controls (cinema mode)</dd></div>
@@ -1765,6 +1773,44 @@ export function FullscreenVisualizer(): JSX.Element {
 
 function isEditableTarget(target: EventTarget | null): boolean {
   return target instanceof Element && !!target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]');
+}
+
+// Burn a small, low-opacity "NewAmp" wordmark into the bottom-right of a
+// captured PNG still (copy-to-clipboard path only). Failure-safe: any decode
+// or canvas problem returns the original capture untouched. capturePage
+// returns physical pixels, so the ~11px wordmark scales by the display's DPR
+// to read the same size the UI does.
+async function stampCaptureWordmark(dataUrl: string): Promise<string> {
+  try {
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('capture decode failed'));
+      img.src = dataUrl;
+    });
+    if (!img.naturalWidth || !img.naturalHeight) return dataUrl;
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0);
+    const scale = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const pad = Math.round(10 * scale);
+    // Skin ink so the mark belongs to the active look; 45% opacity keeps it
+    // a signature, not a watermark wall.
+    const ink =
+      getComputedStyle(document.documentElement).getPropertyValue('--ink').trim() || '#ffffff';
+    ctx.font = `600 ${Math.round(11 * scale)}px system-ui, 'Segoe UI', sans-serif`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'alphabetic';
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = ink;
+    ctx.fillText('NewAmp', canvas.width - pad, canvas.height - pad);
+    return canvas.toDataURL('image/png');
+  } catch {
+    return dataUrl;
+  }
 }
 
 function visualizerEnergy(freq: Uint8Array): number {
