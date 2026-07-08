@@ -154,7 +154,7 @@ html[data-amp-reactive='on'] body::after {
     radial-gradient(54% 46% at 82% 88%, var(--amp-bg2, transparent), transparent 72%);
   mix-blend-mode: screen;
   opacity: calc(0.05 + var(--amp-energy) * 0.11 + var(--amp-beat) * 0.05);
-  transition: opacity 200ms linear;
+  transition: opacity var(--dur-base) linear; /* linear: tracks a continuous signal */
   will-change: opacity;
 }
 
@@ -172,6 +172,73 @@ html[data-amp-accent='on'] .amp-accent {
 @media (prefers-reduced-motion: reduce) {
   html[data-amp-reactive='on'] body::after { display: none; }
   html[data-amp-reactive='on'] .amp-beat-scale { transform: none; }
+}
+
+/* =========================================================
+   Resonance chrome consumers — 2.0 "Reference Grade".
+   RESTRAINT BUDGET: exactly these three chrome consumers — do
+   not add more without removing one.
+     1. Scrub-bar progress glow tail  (.amp-scrub-wrap::after)
+     2. Transport art breathing ring  (.amp-art-frame::after)
+     3. Active nav icon beat scale    (.nav-item.active > svg)
+   All gated on html[data-amp-reactive='on'], all killed under
+   prefers-reduced-motion, all compositor-only channels
+   (transform / opacity / filter — zero layout properties).
+   No new rAF/JS: the only input beyond the Resonance loop is
+   --scrub-progress, an inline var Transport sets from state it
+   already re-renders on every playhead tick.
+   ========================================================= */
+
+/* 1. Scrub glow tail — a gradient sheen over the played portion of the
+   transport scrubber. Length tracks the playhead via scaleX(); brightness
+   rides the live energy. Sits over the 5px .nslider track, ignores hits. */
+html[data-amp-reactive='on'] .amp-scrub-wrap::after {
+  content: '';
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  top: 50%;
+  height: 5px; /* matches the .nslider runnable-track height */
+  margin-top: -2.5px;
+  pointer-events: none;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, transparent 0%, var(--accent-glow) 88%, var(--accent) 100%);
+  transform: scaleX(var(--scrub-progress, 0));
+  transform-origin: left center;
+  transition: transform var(--dur-base) linear; /* smooths between playhead ticks */
+  opacity: calc(var(--amp-energy) * 0.5 + var(--amp-beat) * 0.15);
+  will-change: transform, opacity;
+}
+
+/* 2. Transport art breathing ring — art-palette tinted halo around the
+   album thumb frame. The shadow itself is static paint; only opacity
+   pulses with the music. */
+html[data-amp-reactive='on'] .amp-art-frame::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: var(--radius);
+  box-shadow:
+    inset 0 0 0 1px var(--amp-bg1, transparent),
+    0 0 10px var(--amp-bg2, transparent),
+    0 0 18px var(--amp-bg1, transparent);
+  opacity: calc(var(--amp-energy) * 0.65 + var(--amp-beat) * 0.2);
+  will-change: opacity;
+}
+
+/* 3. Active sidebar nav icon — a 5% beat nudge on the icon only; the
+   label and hit target never move. */
+html[data-amp-reactive='on'] .nav-item.active > svg {
+  transform: scale(calc(1 + var(--amp-beat) * 0.05));
+  transform-origin: center;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-amp-reactive='on'] .amp-scrub-wrap::after,
+  html[data-amp-reactive='on'] .amp-art-frame::after { display: none; }
+  html[data-amp-reactive='on'] .nav-item.active > svg { transform: none; }
 }
 
 /* === Classic: vintage Winamp 2.x. Dark gray cast-metal chrome with a green
