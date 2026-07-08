@@ -1,1 +1,87 @@
 /* views/library.css — added for the 2.0 Reference Grade pass. Owned by its stage-2 workstream; keep rules scoped to this surface. */
+
+/* ------------------------------------------------------------------
+   Playing row — 2px left accent bar + a whisper of accent tint.
+   Applies wherever TrackTable renders (Library, Albums, Artists, …).
+   Static skins: plain --accent. Reactive mode: the bar rides the
+   per-track art palette (--accent-live) and its opacity tracks the
+   live energy signal — opacity only, so it stays compositor-only.
+   ------------------------------------------------------------------ */
+tr.track-row-playing {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+tr.track-row-playing > td:first-child {
+  position: relative;
+}
+tr.track-row-playing > td:first-child::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+html[data-amp-reactive='on'] tr.track-row-playing > td:first-child::before {
+  background: var(--accent-live, var(--accent));
+  opacity: calc(0.35 + var(--amp-energy) * 0.65);
+  will-change: opacity;
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-amp-reactive='on'] tr.track-row-playing > td:first-child::before {
+    background: var(--accent);
+    opacity: 1;
+    will-change: auto;
+  }
+}
+
+/* ------------------------------------------------------------------
+   Row focus — roving tabindex makes rows keyboard-focusable for the
+   Q / Shift+Q / Enter queueing grammar. Inset ring so it reads inside
+   the scroll area instead of colliding with neighboring rows.
+   ------------------------------------------------------------------ */
+tr[data-newamp-track-row]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Row-hosted form controls carry Tailwind's outline-none; restore an
+   honest keyboard ring for them and for the commandbar/header inputs. */
+tr[data-newamp-track-row] select:focus-visible,
+tr[data-newamp-track-row] input:focus-visible,
+.library-commandbar input:focus-visible,
+.library-view-header input:focus-visible,
+.track-table-toolbar input:focus-visible,
+.track-table-toolbar select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* ------------------------------------------------------------------
+   Star rating / love icons — SVG on the type ramp. The old ★/☆ text
+   glyphs fell into font fallback with a wobbly baseline; the shared
+   Star/StarOutline icons inherit currentColor and sit on the ramp.
+   ------------------------------------------------------------------ */
+.rating-star-btn,
+.track-love-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.rating-star-btn svg {
+  width: var(--text-sm);
+  height: var(--text-sm);
+}
+.track-love-btn svg {
+  width: var(--text-md);
+  height: var(--text-md);
+}
+/* Column-header star (the love column label). */
+svg.library-th-star {
+  display: inline-block;
+  width: var(--text-2xs);
+  height: var(--text-2xs);
+  vertical-align: text-bottom;
+}
