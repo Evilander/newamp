@@ -487,25 +487,6 @@ export function LibraryView(): JSX.Element {
           <kbd>Ctrl K</kbd>
         </label>
         <SortPicker value={sort} onChange={setSort} />
-        <input
-          value={smartRuleName}
-          onChange={(e) => setSmartRuleName(e.currentTarget.value)}
-          placeholder="Smart rule name"
-          className="bevel-in w-[154px] px-2 py-1 text-[11px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          aria-label="Smart rule name"
-        />
-        <button className="pxbtn" onClick={() => void saveSearchAsSmartRule()} disabled={!search.trim()}>
-          SAVE SEARCH AS SMART RULE
-        </button>
-        <span
-          className="text-[10px] uppercase tracking-[0.1em] tabular-nums"
-          style={{ color: 'var(--ink-2)' }}
-        >
-          {search !== libraryQuery
-            ? 'Updating...'
-            : libraryCountLabel(tracks.length, matchingTrackCount, hasMoreTracks, !!libraryQuery)}
-        </span>
       </div>
       {dropMessage && (
         <div
@@ -1141,12 +1122,48 @@ const LibraryRow = memo(function LibraryRow({
       data-newamp-track-row
       data-track-id={t.id}
       data-track-title={t.title}
-      className="cursor-pointer transition-colors"
+      className={`cursor-pointer transition-colors${isActive ? ' track-row-playing' : ''}`}
+      tabIndex={0}
       style={{
-        background: isActive ? 'rgba(52,211,153,0.06)' : zebra,
+        // Playing-row background/accent bar comes from .track-row-playing
+        // (styles/views/library.css) so Resonance can ride it via CSS vars.
+        background: isActive ? undefined : zebra,
         color: isActive ? 'var(--accent)' : 'var(--ink)',
       }}
       onDoubleClick={() => onPlay(absoluteIndex)}
+      onKeyDown={(e) => {
+        // View-local queueing grammar: Enter plays, Q queues, Shift+Q plays
+        // next, arrows walk rows. Only when the row itself has focus — keys
+        // inside row-hosted inputs/selects pass through untouched — and
+        // stopPropagation keeps the window-level player shortcuts out of it.
+        if (e.target !== e.currentTarget) return;
+        const key = e.key.toLowerCase();
+        if (key === 'enter') {
+          e.preventDefault();
+          e.stopPropagation();
+          onPlay(absoluteIndex);
+        } else if (key === 'q') {
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.shiftKey) {
+            if (onPlayNext) {
+              onPlayNext(t);
+              pushToast({ title: `Up next: ${t.title}` });
+            }
+          } else if (onAddToQueue) {
+            onAddToQueue(t);
+            pushToast({ title: `Queued: ${t.title}` });
+          }
+        } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          const sibling =
+            e.key === 'ArrowDown' ? e.currentTarget.nextElementSibling : e.currentTarget.previousElementSibling;
+          if (sibling instanceof HTMLElement && sibling.hasAttribute('data-newamp-track-row')) {
+            e.preventDefault();
+            e.stopPropagation();
+            sibling.focus();
+          }
+        }
+      }}
       onMouseEnter={(e) =>
         !isActive && (e.currentTarget.style.background = 'var(--panel-2)')
       }
@@ -1342,14 +1359,16 @@ const LibraryRow = memo(function LibraryRow({
       )}
       <td className="px-2 py-[5px] text-right">
         <button
+          className="track-love-btn"
           onClick={(e) => {
             e.stopPropagation();
             onToggleLove(t.id);
           }}
           style={{ color: t.loved ? 'var(--accent)' : 'var(--muted)' }}
           title="Love"
+          aria-label={t.loved ? 'Unlove' : 'Love'}
         >
-          {t.loved ? '★' : '☆'}
+          {t.loved ? <Star /> : <StarOutline />}
         </button>
       </td>
     </tr>
@@ -2021,7 +2040,7 @@ export function TrackTable({
           {headerCell('rating', 'Rating', 'text-right')}
           {headerCell('mix', 'Mix', 'text-right')}
           {showMetadataLookup && headerCell('tag', 'Tag', 'text-right')}
-          {headerCell('love', '★', 'text-right', 'love')}
+          {headerCell('love', <Star className="library-th-star" />, 'text-right', 'love')}
         </tr>
       </thead>
       <tbody>
@@ -2146,7 +2165,7 @@ function RatingStars({
         <button
           key={star}
           type="button"
-          className="leading-none"
+          className="rating-star-btn leading-none"
           onClick={(e) => {
             e.stopPropagation();
             void onChange(rating === star ? 0 : star);
@@ -2154,7 +2173,7 @@ function RatingStars({
           title={`${star} star${star === 1 ? '' : 's'}`}
           style={{ color: star <= rating ? 'var(--accent)' : 'var(--muted)' }}
         >
-          {star <= rating ? '★' : '☆'}
+          {star <= rating ? <Star /> : <StarOutline />}
         </button>
       ))}
     </div>

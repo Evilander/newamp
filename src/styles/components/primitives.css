@@ -8,7 +8,7 @@
    --accent/--panel/--ink for tints, never hex — the one
    exception is .chip-gold, which mirrors the theme-
    independent .signal-path-badge-gold identity), motion on
-   the --dur-*/--ease-* ramps, reduced-motion always honored.
+   the --dur / --ease ramps, reduced-motion always honored.
    Shell nativeness comes free where a primitive wears the
    frozen chrome classes (.bevel-out, .pxbtn); the few shell
    overrides below cover the rest.
