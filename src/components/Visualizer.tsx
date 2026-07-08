@@ -10,7 +10,7 @@ import {
   type BcInitMessage,
 } from '../butterchurn-iframe/protocol';
 import { createParticleFlowRenderer } from '../visualizer/particle-flow';
-import { createEvilandRenderer } from '../visualizer/eviland';
+import { createEvilandRenderer, type EvilandPalette } from '../visualizer/eviland';
 import { createEvilandReactor } from '../visualizer/eviland-audio';
 import { createReactorOverlay, type ReactorOverlay } from '../visualizer/reactor-overlay';
 import { createSceneOverlay, type SceneOverlay } from '../visualizer/scene-overlay';
@@ -21,7 +21,7 @@ import {
 } from '../visualizer/eviland-randomizer';
 import type { OperatorConfig, WaveMode } from '../visualizer/eviland-operators';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from '../visualizer/eviland-memory-bridge';
-import { blendPaletteWithArt, extractArtPalette } from '../visualizer/art-palette';
+import { blendPaletteWithArt, extractArtPalette, type ArtPalette } from '../visualizer/art-palette';
 import {
   publishActiveBridge,
   acquireBridgeForTrack,
@@ -173,6 +173,17 @@ export function Visualizer({
     };
   }, [evilandDirectorEnabled, evilandSeed, evilandConfigNonce, evilandWaveMode, currentTrackId]);
 
+  // Palette + reactivity are LIVE tuning, not renderer identity: every render
+  // loop reads this ref each frame, so changing either prop (or the app skin,
+  // which only moves CSS variables) retunes the running visualizer with zero
+  // teardown. Only mode/quality/performance stay identity-bearing — they set
+  // buffer sizes, frame budgets, and renderer topology, which genuinely need
+  // a rebuild. Same ref technique as evilandStateRef above.
+  const tuningRef = useRef({ palette, reactivity });
+  useEffect(() => {
+    tuningRef.current = { palette, reactivity };
+  }, [palette, reactivity]);
+
   const isFullscreen = width == null && height == null && mode !== 'mini';
   const frameIntervalMs = isFullscreen
     ? performance === 'low'
@@ -238,27 +249,46 @@ export function Visualizer({
         : null;
       let overlay: ReactorOverlay | null = null;
       let overlayLastNow = 0;
-      // Palette for the overlay events — theme base read once, then blended
-      // per-track with the album art's dominant colors (async, best-effort)
-      // so scenes and reactor events glow in the sleeve's colors. The
-      // MilkDrop field below keeps its own preset palette.
-      const themePalette = {
+      // Palette for the overlay events — theme base re-read ~1x/sec on the
+      // paint cadence and change-gated (the same hoisted-refresh pattern the
+      // 2D modes use), so a skin change re-tints the running overlay + scene
+      // layers WITHOUT tearing down the stage. Blended per-track with the
+      // album art's dominant colors (async, best-effort) so scenes and
+      // reactor events glow in the sleeve's colors; the extracted art palette
+      // is cached so a theme change re-blends instead of refetching. The
+      // MilkDrop field below keeps its own preset palette by design — it was
+      // never theme-driven.
+      const readThemePalette = (): EvilandPalette => ({
         accent: parseRgbVec(getCssVar('--accent')),
         dark: parseRgbVec(getCssVar('--accent-dim') || getCssVar('--accent')),
         light: parseRgbVec(getCssVar('--ink') || '#ffffff'),
         bg: parseRgbVec(getCssVar('--bg') || '#05060a'),
-      };
+      });
+      let themePalette = readThemePalette();
       let ovPalette = themePalette;
+      let ovArt: ArtPalette | null = null;
+      let themeTick = 0;
+      const refreshThemePalette = (): void => {
+        if (themeTick++ % 30 !== 0) return;
+        const next = readThemePalette();
+        if (evilandPaletteEquals(next, themePalette)) return;
+        themePalette = next;
+        ovPalette = ovArt ? blendPaletteWithArt(themePalette, ovArt) : themePalette;
+      };
       let artTrackId: number | null | undefined = undefined;
       const refreshArtPalette = (): void => {
         const tid = usePlayerStore.getState().current?.id ?? null;
         if (tid === artTrackId) return;
         artTrackId = tid;
+        ovArt = null;
         ovPalette = themePalette;
         if (tid == null) return;
         const captured = tid;
         void extractArtPalette(api.getArtUrl(tid)).then((art) => {
-          if (artTrackId === captured && art) ovPalette = blendPaletteWithArt(themePalette, art);
+          if (artTrackId === captured && art) {
+            ovArt = art;
+            ovPalette = blendPaletteWithArt(themePalette, art);
+          }
         });
       };
       if (liveMode && overlayCanvasRef.current) {
@@ -318,6 +348,7 @@ export function Visualizer({
         engine.getRightFreqData(ovRightFreq);
         const dt = overlayLastNow ? now - overlayLastNow : 16.7;
         overlayLastNow = now;
+        refreshThemePalette();
         refreshArtPalette();
         const frame = ovReactor.analyze(ovFreq, ovOnsetFreq, ovLeftFreq, ovRightFreq, dt, now);
         overlay.render(frame, ovPalette, dt);
@@ -479,14 +510,19 @@ export function Visualizer({
 
       // Hoist the palette out of the rAF loop. getComputedStyle forces a style
       // recalc; calling it 4x per frame + allocating 4 fresh rgb arrays was
-      // burning real CPU. The canvas key includes palette/mode/etc so a theme
-      // change remounts this effect and rebuilds the palette — correct.
-      const palette = {
+      // burning real CPU. Refreshed ~1x/sec on the paint cadence inside the
+      // loop (same tick pattern as the 2D modes) so a skin change re-tints
+      // the running WebGL2 renderer live — renderer.render() consumes the
+      // palette every frame, so theme colors flow as uniform updates with no
+      // remount and no setConfig call.
+      const readPalette = (): EvilandPalette => ({
         accent: parseRgbVec(getCssVar('--accent')),
         dark: parseRgbVec(getCssVar('--accent-dim') || getCssVar('--accent')),
         light: parseRgbVec(getCssVar('--ink') || '#ffffff'),
         bg: parseRgbVec(getCssVar('--bg') || '#05060a'),
-      };
+      });
+      let palette = readPalette();
+      let paletteTick = 0;
 
       // ── Eviland AI Director + manual look state ───────────────────────────
       // The Director morphs the operator config across song sections; manual
@@ -501,8 +537,9 @@ export function Visualizer({
       //
       // Bridge ownership: we ask the registry's keyed cache for the bridge
       // matching the current trackId. The cache survives same-track remounts
-      // (palette/quality/performance/reactivity changes re-run this effect
-      // mid-song — finding #6 from the pre-release review). On track change we
+      // (quality/performance changes re-run this effect mid-song — finding #6
+      // from the pre-release review; palette/reactivity are live-tuned via
+      // tuningRef and no longer remount at all). On track change we
       // explicitly releaseBridgeForTrack(oldId), which flushes + drops the
       // cache entry. On effect cleanup we DO NOT release: a remount caused by
       // a deps change is the common case and we want zero IPC churn.
@@ -527,7 +564,7 @@ export function Visualizer({
       publishActiveBridge(bridge);
       // Same-track remount fast path (finding #6): if the cached bridge
       // already has an in-memory plan (we just re-attached an existing
-      // bridge across a palette/quality/etc remount), prime the fresh
+      // bridge across a quality/performance remount), prime the fresh
       // Director from that plan synchronously. No IPC round-trip.
       const cachedPlan = bridge.getCurrentPlan();
       if (cachedPlan) director.loadPlan(cachedPlan);
@@ -680,6 +717,7 @@ export function Visualizer({
         // else: director off + no pending change → renderer keeps its last
         // config (default or last manual look). No per-frame setConfig.
 
+        if (paletteTick++ % 30 === 0) palette = readPalette();
         renderer.render(evFrame, palette, dtMs);
       };
       raf = requestAnimationFrame(loop);
@@ -687,8 +725,8 @@ export function Visualizer({
       return () => {
         cancelAnimationFrame(raf);
         // Finding #6 fix: do NOT flushAndDispose here. The registry's keyed
-        // cache holds the bridge across same-track remounts (palette/quality/
-        // performance/reactivity changes mid-song re-run this effect). The
+        // cache holds the bridge across same-track remounts (quality/
+        // performance changes mid-song re-run this effect). The
         // bridge's in-memory plan, buffered learning, and counters all carry
         // forward — no IPC round-trip, no race between an old fire-and-forget
         // flush and the new mount's loadOrSeed. Persistence still happens via
@@ -751,7 +789,7 @@ export function Visualizer({
           engine.getFreqData(freq);
           engine.getOnsetFreqData(onsetFreq);
           engine.getTimeData(wave);
-          boostFrequencyData(freq, reactivity);
+          boostFrequencyData(freq, tuningRef.current.reactivity);
           const f = analyze(freq, wave, onsetFreq);
           const dt = lastNow ? (now - lastNow) / 1000 : 1 / 60;
           lastNow = now;
@@ -778,8 +816,7 @@ export function Visualizer({
         canvasRef,
         engine,
         mode,
-        palette,
-        reactivity,
+        tuning: tuningRef,
         frameIntervalMs,
         dprCap,
         maxPixels,
@@ -815,10 +852,6 @@ export function Visualizer({
       }
       ctx = node.getContext('2d', { alpha: false });
       if (ctx) ctx.setTransform(targetW / Math.max(1, w), 0, 0, targetH / Math.max(1, h), 0, 0);
-    }
-
-    function getCssVar(name: string): string {
-      return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#39ff14';
     }
 
     // Galaxy state
@@ -906,7 +939,7 @@ export function Visualizer({
       engine.getFreqData(freq);
       engine.getOnsetFreqData(onsetFreq);
       engine.getTimeData(wave);
-      boostFrequencyData(freq, reactivity);
+      boostFrequencyData(freq, tuningRef.current.reactivity);
       const features = analyzeFeatures(freq, wave, onsetFreq);
 
       if (themeTick++ % 30 === 0) {
@@ -940,7 +973,7 @@ export function Visualizer({
       } else if (mode === 'oscilloscope') {
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillRect(0, 0, w, h);
-        const osc = oscilloscopePalette(palette, accent, now);
+        const osc = oscilloscopePalette(tuningRef.current.palette, accent, now);
         ctx.strokeStyle = osc.stroke;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
@@ -1781,7 +1814,7 @@ export function Visualizer({
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode, palette, reactivity]);
+  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode]);
 
   const style: CSSProperties = {};
   if (width != null) style.width = `${width}px`;
@@ -1795,7 +1828,11 @@ export function Visualizer({
   if (mode === 'butterchurn' || mode === 'eviland-live') {
     return (
       <div
-        key={`${mode}-${palette}-${quality}-${performance}-${reactivity}`}
+        // Zero-hitch theming: palette/reactivity deliberately NOT in the key
+        // (or the effect deps) — they flow into the live render loops via
+        // tuningRef, and skin colors via the tick-gated getCssVar refresh.
+        // Only mode/quality/performance rebuild the renderer.
+        key={`${mode}-${quality}-${performance}`}
         className={className ?? 'h-full w-full'}
         style={{ position: 'relative', overflow: 'hidden', borderRadius: 'var(--radius)', ...style }}
       >
@@ -1834,7 +1871,9 @@ export function Visualizer({
 
   return (
     <canvas
-      key={`${mode}-${palette}-${quality}-${performance}-${reactivity}`}
+      // Zero-hitch theming: palette/reactivity deliberately NOT in the key —
+      // see the identical note on the butterchurn/eviland-live wrapper above.
+      key={`${mode}-${quality}-${performance}`}
       ref={canvasRef}
       data-newamp-visualizer-canvas
       data-newamp-visualizer-mode={mode}
@@ -1844,13 +1883,18 @@ export function Visualizer({
   );
 }
 
+interface VizTuning {
+  palette: VizPalette;
+  reactivity: VizReactivity;
+}
+
 interface ShaderVisualizerOptions {
   canvas: HTMLCanvasElement;
   canvasRef: RefObject<HTMLCanvasElement>;
   engine: AudioEngine;
   mode: VizMode;
-  palette: VizPalette;
-  reactivity: VizReactivity;
+  /** Live palette/reactivity — read per frame so changes never remount. */
+  tuning: { readonly current: VizTuning };
   frameIntervalMs: number;
   dprCap: number;
   maxPixels: number;
@@ -1968,7 +2012,8 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
       options.engine.getFreqData(freq);
       options.engine.getOnsetFreqData(onsetFreq);
       options.engine.getTimeData(wave);
-      boostFrequencyData(freq, options.reactivity);
+      const tuning = options.tuning.current;
+      boostFrequencyData(freq, tuning.reactivity);
       const features = analyze(freq, wave, onsetFreq);
       bands.set(features.bands);
       if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
@@ -1981,7 +2026,9 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
       gl.uniform2f(uniforms.resolution, Math.max(1, lastWidth), Math.max(1, lastHeight));
       gl.uniform1f(uniforms.time, now / 1000);
       gl.uniform1i(uniforms.mode, shaderModeIndex(options.mode));
-      gl.uniform1i(uniforms.palette, paletteIndex(options.palette));
+      // u_palette is uploaded every frame, so a palette change is just the
+      // next frame's uniform value — no program rebuild, no canvas remount.
+      gl.uniform1i(uniforms.palette, paletteIndex(tuning.palette));
       gl.uniform3f(uniforms.accent, accent[0], accent[1], accent[2]);
       gl.uniform1f(uniforms.bass, features.bass);
       gl.uniform1f(uniforms.lowMid, features.lowMid);
@@ -2202,6 +2249,21 @@ function parseRgbVec(color: string): [number, number, number] {
     if ([r, g, b].every(Number.isFinite)) return [r, g, b];
   }
   return [0.22, 1, 0.08];
+}
+
+function rgbVecEquals(a: [number, number, number], b: [number, number, number]): boolean {
+  return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
+/** Change gate for the live theme-palette refresh — avoids re-blending the
+ * album-art mix (eviland-live overlay) when the skin hasn't actually moved. */
+function evilandPaletteEquals(a: EvilandPalette, b: EvilandPalette): boolean {
+  return (
+    rgbVecEquals(a.accent, b.accent) &&
+    rgbVecEquals(a.dark, b.dark) &&
+    rgbVecEquals(a.light, b.light) &&
+    rgbVecEquals(a.bg, b.bg)
+  );
 }
 
 function shaderModeIndex(mode: VizMode): number {

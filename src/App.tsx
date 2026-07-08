@@ -239,6 +239,7 @@ export default function App(): JSX.Element {
         ctrlKey: e.ctrlKey,
         altKey: e.altKey,
         metaKey: e.metaKey,
+        shiftKey: e.shiftKey,
         repeat: e.repeat,
         targetEditable: isEditableShortcutTarget(e.target),
         fullscreenVisualizer: store.fullscreenViz,
@@ -477,6 +478,9 @@ function runPlayerShortcut(command: PlayerShortcutCommand, store: PlayerStoreSna
     store.setFullscreenViz(!store.fullscreenViz);
   } else if (command === 'exit-fullscreen-visualizer') {
     store.setFullscreenViz(false);
+  } else if (command === 'cycle-skin') {
+    // Shift+S skin surf — cycleTheme toasts the landed skin's name itself.
+    void store.cycleTheme();
   }
 }
 

@@ -17,7 +17,8 @@ export type PlayerShortcutCommand =
   | 'rate-4'
   | 'rate-5'
   | 'toggle-fullscreen-visualizer'
-  | 'exit-fullscreen-visualizer';
+  | 'exit-fullscreen-visualizer'
+  | 'cycle-skin';
 
 export interface PlayerShortcutInput {
   key?: string;
@@ -25,6 +26,7 @@ export interface PlayerShortcutInput {
   ctrlKey?: boolean;
   altKey?: boolean;
   metaKey?: boolean;
+  shiftKey?: boolean;
   repeat?: boolean;
   targetEditable?: boolean;
   fullscreenVisualizer?: boolean;
@@ -37,7 +39,7 @@ export function resolvePlayerShortcut(input: PlayerShortcutInput): PlayerShortcu
   const key = (input.key ?? '').toLowerCase();
   const command = input.ctrlKey
     ? resolveControlShortcut(code)
-    : resolveUnmodifiedShortcut(code, key, !!input.fullscreenVisualizer);
+    : resolveUnmodifiedShortcut(code, key, !!input.shiftKey, !!input.fullscreenVisualizer);
 
   if (!command) return null;
   if (input.repeat && !isRepeatableShortcut(command)) return null;
@@ -53,6 +55,7 @@ function resolveControlShortcut(code: string): PlayerShortcutCommand | null {
 function resolveUnmodifiedShortcut(
   code: string,
   key: string,
+  shiftKey: boolean,
   fullscreenVisualizer: boolean,
 ): PlayerShortcutCommand | null {
   if (code === 'Space' || key === ' ') return 'toggle-play';
@@ -79,6 +82,10 @@ function resolveUnmodifiedShortcut(
   if (key === 'b') return 'next';
   if (key === 'l') return 'toggle-love';
   if (key === 'f') return 'toggle-fullscreen-visualizer';
+  // Shift+S: skin surf — cycle to the next built-in skin in THEME_REGISTRY
+  // order (App.tsx routes this to usePlayerStore.cycleTheme, which toasts the
+  // new skin's name). Shift-gated so a plain 's' stays free.
+  if (shiftKey && key === 's') return 'cycle-skin';
 
   return null;
 }
