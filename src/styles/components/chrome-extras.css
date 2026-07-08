@@ -49,7 +49,7 @@
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.02) 0%, rgba(0, 0, 0, 0.18) 100%), var(--panel);
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.04),
-    0 1px 0 rgba(0, 0, 0, 0.4);
+    0 1px 0 var(--bevel-dark); /* was hardcoded rgba(0,0,0,.4); midnight's bevel-dark ≈ .5 */
 }
 
 [data-theme='midnight'] .pxbtn {
@@ -94,6 +94,20 @@
   font-size: 11px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  /* Subtle hover ease — color channels only, so the active-state bevel bar
+     still lands instantly. */
+  transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
+}
+
+/* Keyboard focus: an inset ring that hugs the item's own shape (outline
+   follows border-radius, which varies per shell — 12px pills in modern,
+   sharp cells in concourse), instead of the global outer ring, which spills
+   into the tight sidebar column and collides with neighboring items. */
+.nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  color: var(--ink);
+  background: var(--panel-2);
 }
 
 /* Compact keyboard-shortcut chip used in the sidebar tools section. */
