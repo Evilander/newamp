@@ -138,8 +138,8 @@ assert.match(homeSource, /setAutoDjSmartRuleId/, 'Home should arm Auto DJ from s
 assert.match(homeSource, /ScoreBadge/, 'Home should render library score badges');
 assert.doesNotMatch(homeSource, /popcorn|bagel/i, 'Home rating UI should not use public food-gag copy');
 assert.match(easterEggSource, /Tim & Gregg give this 5 bags of popcorn\./, 'Hidden review easter egg should preserve the intended line');
-assert.match(homeSource, /Station Active/, 'Home should show active station state');
-assert.match(homeSource, /STOP RADIO/, 'Home should expose active station stop controls');
+assert.match(homeSource, /ON AIR/, 'Home should show active station state');
+assert.match(homeSource, /onStopStation/, 'Home should expose active station stop controls');
 assert.match(homeSource, /Smart Rule Radio/, 'Home should start continuous Smart Rule Radio');
 assert.match(homeSource, /RADIO/, 'Home should expose smart-rule radio launchers');
 assert.match(homeSource, /Suggested Stations/, 'Home should expose suggested station launchers');

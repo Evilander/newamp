@@ -3,6 +3,71 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] - 2026-07-08
+
+Reference Grade — the design-led major. The app that always looked like
+hardware now feels machined like it: one token layer, one header voice, truth
+in every readout, and a screenshot harness to keep it that way.
+
+### Added
+
+- **A real design system.** The 5,500-line `index.css` monolith is now ordered
+  modules (tokens / chrome / shells / decks / per-view files) with
+  type/motion/shadow/radius/row-height ramps, a Tailwind `var()` bridge, one
+  `THEME_REGISTRY`, and global keyboard focus-visible treatment.
+- **Shared primitives, everywhere.** `ViewHeader` (one header voice — eyebrow,
+  title, count chip, status slot, actions), `Chip`, `EmptyState`,
+  `ViewSkeleton` shimmer placeholders wired to real loading states,
+  `StatusToast` (a module-level toast queue replacing scattered inline status
+  text), `ConfirmAction` two-step arm-then-fire on destructive actions, and an
+  SVG icon set that retires the wobbly `★`/`☆` text glyphs.
+- **Now Playing is a stage.** ON AIR lamp, truth-in-the-chrome readouts,
+  resonance spotlight, and an attract mode when nothing is playing.
+- **Restrained Resonance set.** Playing-row accent bar, transport art
+  breathing ring, and scrub glow — all gated on `data-amp-reactive` and
+  `prefers-reduced-motion`, all compositor-only.
+- **Library queueing grammar.** Track rows are keyboard-focusable: `Enter`
+  plays, `Q` queues, `Shift+Q` plays next (with toast feedback), and arrow
+  keys walk the rows — no mouse required in a 60,000-track table.
+- **Deck Snapshot.** A quiet camera button (or `Ctrl+Shift+S`) on every
+  compact deck captures a skin-true polaroid of the deck — straight to
+  clipboard and disk.
+- **Shift+S skin surf.** Cycle the built-in skins live from anywhere;
+  zero-hitch theming means the visualizer doesn't stutter when you land.
+- **Ctrl+K resume row.** The Quick Play palette opens with your last listen
+  ready to resume before you type a single character.
+- **Music-first first launch.** The tutorial now starts with your music —
+  the API-key screen is gone from the front of the funnel.
+- **Craft regression matrix.** `npm run craft:matrix` captures 104 shots
+  (4 shells × 6 skins × 4 views, plus all 8 deck skins) by driving the real
+  Settings UI, then pixel-diffs against a local baseline.
+- **Self-hosted fonts.** Inter, JetBrains Mono, and VT323 ship as woff2 —
+  the Google Fonts origins are gone from the CSP entirely.
+- **Bit-Perfect Exclusive lanes for macOS and Linux (experimental).**
+  CoreAudio hog mode and ALSA-direct output join the Windows
+  WASAPI-exclusive native engine in the same honesty framework.
+
+### Changed
+
+- Settings reorganized into registry cards with a jump-to-section chip TOC.
+- Catalog views (Albums / Artists / Folders) share one header, skeleton,
+  empty-state, and pagination language; the AlphabetRail is generalized.
+- Mixes builds once per request and surfaces a "Seed changed — rebuild" chip
+  instead of yanking all eight mixes out from under a mid-scroll user.
+- Home loads honestly: skeletons ride real async state, and the hero absorbs
+  active-station state (ON AIR + STOP) from the old side panel.
+- README rewritten human-first, with the deep technical story in a
+  "For the nerds" section at the bottom.
+
+### Fixed
+
+- Light-skin legibility: form controls on recessed display surfaces now read
+  in display ink on Steel/Terminal/Ice/Miami.
+- First-launch tutorial completion persists before dismissal and can no
+  longer soft-lock on a failed settings write.
+- EmptyLibrary's suggested-folder buttons render styled (their CSS had been
+  missing since v1.1).
+
 ## [1.17.0] - 2026-07-03
 
 The fifth flagship — the audiophile moat. NewAmp's first native code.

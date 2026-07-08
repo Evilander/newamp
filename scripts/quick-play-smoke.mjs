@@ -68,6 +68,18 @@ try {
   assert.equal(loved, true, 'quick love action should be backed by the catalog toggle');
   assert.equal(library.getTrack(titleSearch[0].id)?.loved, 1);
 
+  // Ctrl+K zero-query resume row: the palette's lead item comes straight from
+  // listening history, so a recorded play must surface through the same query
+  // the palette issues (getListeningHistory, newest first).
+  library.recordPlay(titleSearch[0].id);
+  const resumeHistory = library.getListeningHistory({ limit: 8 });
+  assert.ok(resumeHistory.length >= 1, 'zero-query resume row should have listening history to draw from');
+  assert.equal(
+    resumeHistory[0].track.id,
+    titleSearch[0].id,
+    'zero-query resume row should lead with the most recent play',
+  );
+
   const [paletteSource, appSource, packageSource] = await Promise.all([
     readText('../src/components/QuickPlayPalette.tsx'),
     readText('../src/App.tsx'),
@@ -105,6 +117,10 @@ try {
   assert.match(paletteSource, /key === 'l' && \(event\.ctrlKey \|\| event\.metaKey\)/, 'Quick Play should route Ctrl+L to love');
   assert.match(paletteSource, /key === 'r' && \(event\.ctrlKey \|\| event\.metaKey\)/, 'Quick Play should route Ctrl+R to smart-rule radio');
   assert.match(paletteSource, /setView\('now-playing'\)/, 'Quick Play should jump to Now Playing after play');
+  assert.match(paletteSource, /zeroQueryLeadItems/, 'Quick Play should render lead items before any query is typed');
+  assert.match(paletteSource, /kind: 'resume'/, 'Quick Play zero-query state should include a resume row');
+  assert.match(paletteSource, /api\.getListeningHistory/, 'Quick Play resume row should draw from real listening history');
+  assert.match(paletteSource, /item\.kind === 'resume'/, 'Quick Play should route Enter on the resume row to playback resume');
   assert.match(paletteSource, /VIEW_ITEMS/, 'Quick Play should include app views');
   assert.match(paletteSource, /COMMAND_ITEMS/, 'Quick Play should include app commands');
   assert.match(paletteSource, /smart-rule/, 'Quick Play should expose dynamic smart rules as playable results');

@@ -308,6 +308,7 @@ export function ArtistsView(): JSX.Element {
                 hasMore={hasMoreArtists}
                 loading={loadingArtists}
                 onLoadMore={() => void loadMoreArtists()}
+                loadLabel="Load more artists"
                 marker={{ 'data-newamp-artists-load-more': '' }}
               />
             </div>

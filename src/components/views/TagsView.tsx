@@ -6,6 +6,7 @@ import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
 import { ArtistLink, TrackLink } from '../EntityLink';
 import { ViewHeader } from '../ViewHeader';
 import { Chip } from '../Chip';
+import { ConfirmAction } from '../ConfirmAction';
 
 const DEFAULT_BODY = `tag(midnight_drive) when
   bpm > 110
@@ -305,12 +306,12 @@ function RulesList({
                 {rule.name}
               </span>
               {rule.boost !== 1 && (
-                <span className="ml-auto rounded px-1 text-[9px]" style={{ background: 'var(--accent)', color: 'var(--panel)' }}>
+                <Chip tone="accent" size="sm" className="ml-auto">
                   ×{rule.boost.toFixed(2)}
-                </span>
+                </Chip>
               )}
               {!rule.enabled && (
-                <span className="ml-auto text-[9px]" style={{ color: 'var(--muted)' }}>off</span>
+                <Chip tone="muted" size="sm" className="ml-auto">off</Chip>
               )}
             </div>
             {rule.lastError && (
@@ -393,14 +394,14 @@ function Editor({
           </button>
         )}
         {draft.id && (
-          <button
-            className="pxbtn"
-            onClick={onDelete}
+          <ConfirmAction
+            label="Delete"
+            confirmLabel="Sure?"
+            tone="error"
             disabled={busy}
-            style={{ color: 'var(--error)' }}
-          >
-            Delete
-          </button>
+            title={`Delete rule "${draft.name}" — its tag assignments recompute away`}
+            onConfirm={onDelete}
+          />
         )}
         {previewName && (
           <span className="ml-auto text-[10px]" style={{ color: 'var(--ink-2)' }}>
@@ -493,7 +494,7 @@ function PreviewPane({
                 <span className="mr-1 font-mono" style={{ color: 'var(--muted)' }}>
                   {String(idx + 1).padStart(2, '0')}
                 </span>
-                <span className="font-bold" style={{ color: 'var(--ink)' }}>{track.title}</span>
+                <TrackLink track={track} className="font-bold" color="var(--ink)" />
                 <span className="ml-1" style={{ color: 'var(--muted)' }}>· <ArtistLink artist={track.artist} color="inherit" /></span>
               </li>
             ))}
@@ -534,18 +535,14 @@ function Footer({
           </span>
         )}
         {top.map((s) => (
-          <span
+          <Chip
             key={s.name}
-            className="rounded px-2 py-0.5 text-[10px]"
-            style={{
-              background: s.enabled ? 'var(--accent-soft, var(--panel-2))' : 'var(--panel-2)',
-              border: `1px solid ${s.enabled ? 'var(--accent)' : 'var(--line)'}`,
-              color: s.enabled ? 'var(--accent)' : 'var(--muted)',
-            }}
+            tone={s.enabled ? 'accent' : 'muted'}
+            size="sm"
             title={`${s.trackCount} tracks · boost ×${s.boost.toFixed(2)}${s.enabled ? '' : ' · disabled'}`}
           >
             {s.name} · {s.trackCount.toLocaleString()}
-          </span>
+          </Chip>
         ))}
       </div>
       {(status || error) && (

@@ -346,7 +346,7 @@ export function FoldersView(): JSX.Element {
               noun="direct tracks"
               hasMore={hasMoreDirectTracks}
               loading={loadingMoreTracks}
-              loadLabel="Load more"
+              loadLabel="Load more direct tracks"
               onLoadMore={() => void loadMoreDirectTracks()}
             />
           </div>

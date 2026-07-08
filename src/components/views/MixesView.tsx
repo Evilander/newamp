@@ -58,8 +58,8 @@ export function MixesView(): JSX.Element {
     setLoading(true);
     try {
       const [harmonic, taste, freshImports, loved, recent, mostPlayed, deepCuts, night] = await Promise.all([
-        api.buildHarmonicMix({ seedTrackId: current?.id ?? null, count: MIX_SIZE }),
-        api.buildTasteMix({ seedTrackId: current?.id ?? null, count: MIX_SIZE }),
+        api.buildHarmonicMix({ seedTrackId, count: MIX_SIZE }),
+        api.buildTasteMix({ seedTrackId, count: MIX_SIZE }),
         api.getTracks({ sort: 'added', limit: MIX_SIZE, offset: 0 }),
         api.getTracks({ sort: 'loved', limit: MIX_SIZE, offset: 0 }),
         api.getTracks({ sort: 'recent', limit: MIX_SIZE, offset: 0 }),
@@ -153,7 +153,14 @@ export function MixesView(): JSX.Element {
       setSelectedId((currentId) => (
         currentId && next.some((mix) => mix.id === currentId) ? currentId : next[0]?.id ?? null
       ));
-      setStatus(next.length ? `Generated ${next.length} playable mix${next.length === 1 ? '' : 'es'}.` : 'No mixes available yet.');
+      setBuiltSeedId(seedTrackId);
+      if (announce) {
+        pushToast(
+          next.length
+            ? { tone: 'ok', title: `Generated ${next.length} playable mix${next.length === 1 ? '' : 'es'}` }
+            : { tone: 'warn', title: 'No mixes available yet', detail: 'Scan music or play a track first.' },
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -165,7 +172,11 @@ export function MixesView(): JSX.Element {
       name: `${mix.title} ${date}`,
       trackIds: mix.tracks.map((track) => track.id),
     });
-    setStatus(`Saved ${saved.name} with ${saved.trackCount.toLocaleString()} tracks.`);
+    pushToast({
+      tone: 'ok',
+      title: `Saved ${saved.name}`,
+      detail: `${saved.trackCount.toLocaleString()} track${saved.trackCount === 1 ? '' : 's'} kept as a playlist.`,
+    });
   }
 
   return (
@@ -183,25 +194,41 @@ export function MixesView(): JSX.Element {
         forceVisible={help.open}
         onClose={help.close}
       />
-      <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
-        <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
-          NewAmp Mixes
-          <HelpDot help={help} label="What are Mixes?" />
-        </div>
-        <button className="pxbtn" onClick={() => void refreshMixes()} disabled={loading}>
-          {loading ? 'Building...' : 'Refresh mixes'}
-        </button>
-        {status && <span className="text-[11px]" style={{ color: 'var(--ink-2)' }}>{status}</span>}
-        <span className="ml-auto text-[11px]" style={{ color: 'var(--muted)' }}>
-          {current ? (
-            <>
-              Seed: <ArtistLink artist={current.artist} color="inherit" /> - {current.title}
-            </>
-          ) : (
-            'Play a track to seed harmonic mixes'
-          )}
-        </span>
-      </div>
+      <ViewHeader
+        eyebrow="Discovery"
+        title="Mixes"
+        count={mixes.length ? `${mixes.length} mix${mixes.length === 1 ? '' : 'es'}` : undefined}
+        status={
+          <>
+            <HelpDot help={help} label="What are Mixes?" />
+            {seedChanged && (
+              <Chip
+                tone="accent"
+                size="sm"
+                interactive
+                title="These mixes were built from a different seed track. Rebuild to follow what's playing now."
+                onClick={() => void refreshMixes(true)}
+              >
+                Seed changed — rebuild
+              </Chip>
+            )}
+            <span className="truncate text-[11px]" style={{ color: 'var(--muted)' }}>
+              {current ? (
+                <>
+                  Seed: <ArtistLink artist={current.artist} color="inherit" /> - {current.title}
+                </>
+              ) : (
+                'Play a track to seed harmonic mixes'
+              )}
+            </span>
+          </>
+        }
+        actions={
+          <button className="pxbtn" onClick={() => void refreshMixes(true)} disabled={loading}>
+            {loading ? 'Building...' : 'Refresh mixes'}
+          </button>
+        }
+      />
 
       <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)]">
         <div className="grid gap-3 border-b p-3" style={{ borderColor: 'var(--line)', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
@@ -269,9 +296,25 @@ export function MixesView(): JSX.Element {
             </div>
           ))}
           {!mixes.length && (
-            <div className="bevel-in p-4 text-[12px]" style={{ color: 'var(--muted)' }}>
-              {loading ? 'Building mixes...' : 'No playable mixes yet. Scan music or play a track first.'}
-            </div>
+            loading ? (
+              <div className="col-span-full">
+                <ViewSkeleton variant="cards" count={8} />
+              </div>
+            ) : (
+              <div className="col-span-full">
+                <EmptyState
+                  size="panel"
+                  icon={<Icons.Sparkle size={32} />}
+                  title="No playable mixes yet"
+                  body="Mixes builds eight live sets from your library. Scan music or play a track first."
+                  actions={
+                    <button className="pxbtn is-active" onClick={() => void refreshMixes(true)} disabled={loading}>
+                      Try again
+                    </button>
+                  }
+                />
+              </div>
+            )
           )}
         </div>
 

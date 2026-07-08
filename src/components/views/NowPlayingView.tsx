@@ -541,7 +541,6 @@ export function NowPlayingView(): JSX.Element {
             onExportWav={() => void exportCurrentWav()}
             exportBusy={exportBusy}
             exportMessage={exportMessage}
-            codecHint={codecHint}
             artistHref={wikipediaSearchUrl(musicEntitySearchText(current.artist, 'musician'))}
             albumHref={current.album ? wikipediaSearchUrl(musicEntitySearchText(current.artist, current.album, 'album')) : null}
             navigateToArtist={navigateToArtist}
@@ -895,7 +894,6 @@ function TrackInfoHeader({
   onExportWav,
   exportBusy,
   exportMessage,
-  codecHint,
   artistHref,
   albumHref,
   navigateToArtist,
@@ -910,7 +908,6 @@ function TrackInfoHeader({
   onExportWav: () => void;
   exportBusy: boolean;
   exportMessage: string | null;
-  codecHint: string;
   artistHref: string;
   albumHref: string | null;
   navigateToArtist: (name: string) => void;

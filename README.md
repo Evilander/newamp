@@ -42,6 +42,7 @@ Point it at your music folder, and it just starts playing. That's the whole setu
 - **Your phone is the remote.** Scan a QR code and control playback from the couch. No app store, no cloud — it's all on your Wi-Fi.
 - **Visualizers people actually screenshot.** A full MilkDrop-style engine plus Eviland, our own visualizer that hears each instrument separately — the kick, the snare, the vocals each paint their own light. Press one key to save the last 15 seconds as a video.
 - **Dress it up.** 13 color skins, 9 compact "deck" modes (record player, jukebox, cassette, even a hotdog), and it imports classic Winamp `.wsz` skins from 1999.
+- **Plays like an instrument.** Winamp-style keyboard controls everywhere — Space, arrows, `L` to love, `0–5` to rate, `Q` to queue, `F` for the fullscreen visualizer, and `Ctrl+K` opens a command palette that resumes where you left off.
 
 ## A quick look
 

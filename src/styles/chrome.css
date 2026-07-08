@@ -54,6 +54,15 @@ img[src^='newart://'] { aspect-ratio: 1; object-fit: cover; }
   border-radius: var(--radius);
 }
 
+/* Form controls on the recessed display surface must read in display ink —
+   the bevel-in wash is dark on every skin, so inherited --ink fails on the
+   light skins (Steel/Terminal/Ice/Miami). Inline styles still win. */
+input.bevel-in,
+select.bevel-in,
+textarea.bevel-in {
+  color: var(--display-fg);
+}
+
 .lcd-text {
   font-family: var(--font-lcd);
   color: var(--display-fg);
