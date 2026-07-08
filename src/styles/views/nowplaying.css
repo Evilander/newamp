@@ -304,3 +304,139 @@
   color: var(--muted);
 }
 
+/* =========================================================
+   2.0 "Now Playing is the Stage" — ON AIR lamp, stage
+   lighting, attract mode. Restraint budget: the spotlight
+   (breathing) and the ON AIR lamp are this view's only two
+   reactive surfaces. All --amp-energy binds are opacity-only
+   (compositor) and gated on html[data-amp-reactive='on'];
+   reduced-motion pins them static.
+   ========================================================= */
+
+/* --- ON AIR lamp: broadcast tally light in the status strip --- */
+.np-onair-lamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius, 2px);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  transition: color var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out);
+}
+.np-onair-lamp[data-newamp-onair='on'] {
+  color: var(--accent-text, var(--accent));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.np-onair-dot {
+  position: relative;
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--muted) 60%, transparent);
+}
+.np-onair-lamp[data-newamp-onair='on'] .np-onair-dot {
+  background: var(--accent);
+}
+/* Halo layer — a fixed-size glow whose OPACITY carries the energy bind, so
+   the reactive path never touches layout or paint. */
+.np-onair-dot::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+  border-radius: inherit;
+  background: radial-gradient(circle, var(--accent-glow), transparent 70%);
+  opacity: 0;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+.np-onair-lamp[data-newamp-onair='on'] .np-onair-dot::after {
+  opacity: 0.6; /* static lit (reactive off / reduced motion) */
+}
+html[data-amp-reactive='on'] .np-onair-lamp[data-newamp-onair='on'] .np-onair-dot::after {
+  opacity: calc(0.25 + var(--amp-energy) * 0.75);
+  transition: none; /* the rAF-written var is already smoothed */
+  will-change: opacity;
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-amp-reactive='on'] .np-onair-lamp[data-newamp-onair='on'] .np-onair-dot::after {
+    opacity: 0.6;
+  }
+}
+
+/* --- Stage lighting: radial spotlight behind the album art. Colors come
+   from the track's own palette (--amp-bg1/--amp-bg2, written per-track by
+   lib/resonance.ts) with accent-tinted token fallbacks, so it reads on
+   every skin before the first palette extraction lands. --- */
+.np-stage-spotlight {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      85% 70% at 50% 28%,
+      var(--amp-bg1, color-mix(in srgb, var(--accent) 20%, var(--panel-2))),
+      transparent 70%
+    ),
+    radial-gradient(
+      120% 90% at 50% 100%,
+      var(--amp-bg2, color-mix(in srgb, var(--accent) 9%, var(--panel-2))),
+      transparent 75%
+    );
+  opacity: 0.42; /* static token wash (reactive off / reduced motion) */
+}
+/* Breathing: intensity follows the music. Opacity-only, gated, subtle —
+   a spotlight, not a rave. */
+html[data-amp-reactive='on'] .np-stage-spotlight {
+  opacity: calc(0.3 + var(--amp-energy) * 0.4);
+  will-change: opacity;
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-amp-reactive='on'] .np-stage-spotlight {
+    opacity: 0.42;
+  }
+}
+
+/* --- Attract mode: the empty stage --- */
+/* Dimmer than the playing spotlight, and never breathing — the second
+   selector out-specifies the reactive bind above. */
+.np-stage-spotlight.np-attract-spotlight,
+html[data-amp-reactive='on'] .np-stage-spotlight.np-attract-spotlight {
+  opacity: 0.22;
+  will-change: auto;
+}
+/* Cycling spectral-art covers from recent history. The crossfade rides the
+   motion ramp (4x slow = ambient); reduced-motion cuts it and JS pauses the
+   cycle itself. */
+.np-attract-stack {
+  position: relative;
+  width: 176px;
+  aspect-ratio: 1;
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  box-shadow: var(--shadow-2);
+  background: color-mix(in srgb, var(--panel-2) 70%, transparent);
+}
+.np-attract-stack img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity calc(var(--dur-slow) * 4) var(--ease-out);
+}
+.np-attract-stack img.is-lit {
+  opacity: 0.85; /* slightly dimmed — the house lights are down */
+}
+@media (prefers-reduced-motion: reduce) {
+  .np-attract-stack img {
+    transition: none;
+  }
+}
+
