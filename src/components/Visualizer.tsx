@@ -108,7 +108,6 @@ interface Props {
   width?: number;
   height?: number;
   className?: string;
-  artUrl?: string | null;
   quality?: VizQuality;
   performance?: VizPerformance;
   palette?: VizPalette;
@@ -132,7 +131,6 @@ export function Visualizer({
   width,
   height,
   className,
-  artUrl,
   quality = 'auto',
   performance = 'balanced',
   palette = 'theme',

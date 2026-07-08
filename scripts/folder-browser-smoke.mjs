@@ -94,8 +94,8 @@ try {
   assert.match(apiSource, /getFolders: async/, 'browser stub should include folder APIs');
   assert.match(appSource, /FoldersView/, 'App should route to the Folders view');
   assert.match(sidebarSource, /Folders/, 'Sidebar should include Folders navigation');
-  assert.match(foldersViewSource, /PLAY FOLDER/, 'Folders view should play whole folders');
-  assert.match(foldersViewSource, /ADD FOLDER TO PLAYLIST/, 'Folders view should append folders to saved playlists');
+  assert.match(foldersViewSource, /Play folder/i, 'Folders view should play whole folders');
+  assert.match(foldersViewSource, /Add folder to playlist/i, 'Folders view should append folders to saved playlists');
   assert.match(foldersViewSource, /api\.getFolderTrackIds/, 'Folders view should append large folders by id instead of full track rows');
   assert.match(foldersViewSource, /FOLDER_TRACK_LIMIT/, 'Folders view should centralize direct-track page size');
   const folderTrackLimit = foldersViewSource.match(/const FOLDER_TRACK_LIMIT = (\d+)/);

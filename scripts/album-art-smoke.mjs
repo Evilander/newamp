@@ -238,11 +238,11 @@ assert.match(librarySource, /writtenArtHashes/, 'library writes should avoid rep
 assert.match(scannerSource, /folderArtForFile/, 'scanner should allow cached folder-art resolution during large imports');
 assert.match(compactPlayerSource, /\(current \? api\.getArtUrl\(current\.id\) : null\)/, 'deck mode should try the current track art URL instead of hiding covers behind stale hasArt flags');
 assert.doesNotMatch(albumsViewSource, /FIND COVER|APPLY COVER|REVIEW COVER/, 'Albums view should not expose cover review buttons in album chrome');
-assert.match(albumsViewSource, /MISSING ART/, 'Albums view should expose a missing-art review lane');
+assert.match(albumsViewSource, /Missing art/i, 'Albums view should expose a missing-art review lane');
 assert.match(albumsViewSource, /showMissingArtOnly/, 'Albums view should filter to albums missing cover art');
 assert.match(albumsViewSource, /data-newamp-albums-scroll/, 'Albums view should own a restorable scroll container');
 assert.match(albumsViewSource, /albumScrollTopRef/, 'Albums view should return to prior scroll position after closing an album');
-assert.match(albumsViewSource, /SCAN NEW/, 'Albums view should expose a direct scan action for newly downloaded albums');
+assert.match(albumsViewSource, /Scan library/i, 'Albums view should expose a direct scan action for newly downloaded albums');
 assert.match(albumsViewSource, /addFolderAndScan/, 'Albums view should let users add and scan a new music folder in place');
 assert.match(albumsViewSource, /libraryAutoWatch: true/, 'Albums view folder import should keep the new root watched');
 assert.match(albumsViewSource, /data-newamp-albums-now-lp/, 'Albums view should jump directly to the currently playing album');

@@ -780,6 +780,7 @@ export function AlbumsView(): JSX.Element {
             hasMore={hasMoreAlbums}
             loading={loadingAlbums}
             onLoadMore={() => void loadMoreAlbums()}
+            loadLabel="Load more albums"
             marker={{ 'data-newamp-albums-load-more': '' }}
           />
         </div>
@@ -808,6 +809,7 @@ export function CatalogLoadMore({
   hasMore,
   loading,
   onLoadMore,
+  loadLabel,
   marker,
 }: {
   shown: number;
@@ -816,6 +818,8 @@ export function CatalogLoadMore({
   hasMore: boolean;
   loading: boolean;
   onLoadMore: () => void;
+  /** Button copy override; defaults to "Load more {noun}". */
+  loadLabel?: string;
   /** Stable data-newamp-* attributes spread onto the load-more button. */
   marker?: Record<string, string>;
 }): JSX.Element | null {
@@ -834,7 +838,7 @@ export function CatalogLoadMore({
       </span>
       {hasMore && (
         <button className="pxbtn" onClick={onLoadMore} disabled={loading} {...(marker ?? {})}>
-          {loading ? 'Loading...' : 'Load more'}
+          {loading ? 'Loading...' : loadLabel ?? `Load more ${noun}`}
         </button>
       )}
     </div>

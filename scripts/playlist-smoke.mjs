@@ -254,8 +254,8 @@ assert.match(libraryViewSource, /ADD SELECTED TO PLAYLIST/, 'track tables should
 assert.match(libraryViewSource, /SAVE SELECTED AS PLAYLIST/, 'track tables should create a new named playlist from selected rows');
 assert.match(libraryViewSource, /New playlist name/, 'track tables should let users name selected-row playlists before saving');
 assert.match(libraryViewSource, /selectedIds/, 'track tables should maintain multi-row selection state');
-assert.match(albumsViewSource, /ADD ALBUM TO PLAYLIST/, 'Albums view should append full albums to saved playlists');
-assert.match(artistsViewSource, /ADD ARTIST TO PLAYLIST/, 'Artists view should append full artist selections to saved playlists');
+assert.match(albumsViewSource, /Add album to playlist/i, 'Albums view should append full albums to saved playlists');
+assert.match(artistsViewSource, /Add artist to playlist/i, 'Artists view should append full artist selections to saved playlists');
 assert.match(lovedViewSource, /ADD LOVED TO PLAYLIST/, 'Loved view should append all loved tracks to saved playlists');
 
 console.log(JSON.stringify({
