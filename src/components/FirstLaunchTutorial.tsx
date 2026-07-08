@@ -1,11 +1,43 @@
+// FirstLaunchTutorial — the "win the first hour" card. Music comes first: this
+// overlay's only job is to point at the one-click scan hero waiting behind it
+// and teach the three keys that matter. AI setup is a single optional line
+// that links to Settings — no key is ever typed here.
+
 import { useState } from 'react';
 import type { AppSettings } from '@shared/types';
-import { DEFAULT_SETTINGS } from '../lib/api';
-import { AI_ASSIST_OPTIONS } from '../lib/aiAssist';
 import { BrandLogo } from './BrandLogo';
 
+const TOUR_STEPS: Array<{ keys: string; title: string; detail: string }> = [
+  {
+    keys: 'Ctrl+K',
+    title: 'Anything',
+    detail: 'One box for tracks, albums, playlists, views, and commands — or just ask in plain words.',
+  },
+  {
+    keys: 'F',
+    title: 'Fullscreen visualizer',
+    detail: 'Take the stage full screen. Esc brings the library back.',
+  },
+  {
+    keys: 'Ctrl+M',
+    title: 'Deck mode',
+    detail: 'Shrink into the slim windowshade deck; the skin menu holds the larger shapes.',
+  },
+];
+
+const KBD_STYLE = {
+  display: 'inline-block',
+  padding: '1px 6px',
+  border: '1px solid var(--line)',
+  borderRadius: 'var(--radius)',
+  background: 'var(--display-bg)',
+  color: 'var(--display-fg)',
+  fontFamily: 'var(--font-mono)',
+  fontSize: 'var(--text-2xs)',
+  letterSpacing: '0.08em',
+} as const;
+
 export function FirstLaunchTutorial({
-  settings,
   onFinish,
   onOpenSettings,
 }: {
@@ -13,21 +45,14 @@ export function FirstLaunchTutorial({
   onFinish: (patch?: { openaiApiKey?: string | null; openaiModel?: string }) => Promise<void>;
   onOpenSettings: () => void;
 }): JSX.Element {
-  const [openaiApiKey, setOpenAiApiKey] = useState(settings.openaiApiKey ?? '');
-  const [openaiModel, setOpenAiModel] = useState(settings.openaiModel || DEFAULT_SETTINGS.openaiModel);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
-  async function finish(saveKey: boolean): Promise<void> {
+  async function finish(): Promise<void> {
     setBusy(true);
     setStatus(null);
     try {
-      await onFinish(saveKey
-        ? {
-            openaiApiKey: openaiApiKey.trim() || null,
-            openaiModel: openaiModel.trim() || DEFAULT_SETTINGS.openaiModel,
-          }
-        : undefined);
+      await onFinish();
     } catch (err) {
       setStatus(err instanceof Error ? err.message : 'Could not save first-launch settings.');
       setBusy(false);
@@ -41,76 +66,57 @@ export function FirstLaunchTutorial({
           <BrandLogo size={72} title="NewAmp" />
           <div>
             <div className="first-launch-kicker">First launch</div>
-            <h1>Set up NewAmp</h1>
+            <h1>Scan your Music folder</h1>
             <p>
-              Add your library, choose a deck, connect optional services, and keep playback local-first.
+              NewAmp plays the files already on this machine — no cloud, no account, no telemetry.
+              The scan button is waiting right behind this card: one click and your library builds
+              itself while you listen.
             </p>
           </div>
         </header>
 
         <div className="first-launch-steps">
-          <div>
-            <strong>1. Add your music folder</strong>
-            <span>Use Settings to add your Music folder, an external drive, or any folder where your audio files live.</span>
-          </div>
-          <div>
-            <strong>2. Pick the player shape</strong>
-            <span>DECK opens the restored slim windowshade first; the skin menu holds the larger shapes.</span>
-          </div>
-          <div>
-            <strong>3. Use the library rails</strong>
-            <span>Home builds mixes, recent imports, smart stations, playlists, and listening history from your files.</span>
-          </div>
-          <div data-newamp-live-services-onboarding>
-            <strong>4. Connect services only when you want them</strong>
-            <span>Last.fm scrobbling and ChatGPT liner notes are optional. Private recordings still play normally when web facts, lyrics, or scrobbles do not exist.</span>
-          </div>
+          {TOUR_STEPS.map((step) => (
+            <div key={step.keys}>
+              <strong>
+                <kbd style={KBD_STYLE}>{step.keys}</kbd> {step.title}
+              </strong>
+              <span>{step.detail}</span>
+            </div>
+          ))}
         </div>
 
-        <div className="first-launch-ai" data-newamp-openai-key-prompt>
-          <div>
-            <div className="first-launch-kicker">Integrated features</div>
-            <h2>ChatGPT API key</h2>
-            <p>
-              Optional. Playback works without it; adding a key enables local music context, artist notes,
-              real On Air liner-note drafts, metadata repair prompts, and listening companions.
-            </p>
-          </div>
-          <div className="ai-assist-option-grid">
-            {AI_ASSIST_OPTIONS.slice(0, 4).map((option) => (
-              <div key={option.id} className="ai-assist-option">
-                <strong>{option.label}</strong>
-                <span>{option.detail}</span>
-              </div>
-            ))}
-          </div>
-          <label className="first-launch-field">
-            <span>API key</span>
-            <input
-              type="password"
-              value={openaiApiKey}
-              onChange={(event) => setOpenAiApiKey(event.target.value)}
-              placeholder="sk-..."
-            />
-          </label>
-          <label className="first-launch-field">
-            <span>Model</span>
-            <input
-              value={openaiModel}
-              onChange={(event) => setOpenAiModel(event.target.value)}
-            />
-          </label>
-        </div>
+        <p
+          data-newamp-openai-key-prompt
+          style={{ margin: '18px 0 0', color: 'var(--muted)', fontSize: 'var(--text-xs)', lineHeight: 1.5 }}
+        >
+          Optional: AI liner notes — add an OpenAI key any time in{' '}
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            disabled={busy}
+            style={{
+              padding: 0,
+              border: 'none',
+              background: 'none',
+              color: 'var(--accent)',
+              textDecoration: 'underline',
+              cursor: 'pointer',
+              font: 'inherit',
+            }}
+          >
+            Settings
+          </button>
+          .{' '}
+          <span data-newamp-live-services-onboarding>
+            Last.fm scrobbling lives there too. Private recordings still play normally when web
+            facts, lyrics, or scrobbles do not exist.
+          </span>
+        </p>
 
         <footer className="first-launch-actions">
-          <button className="pxbtn" onClick={onOpenSettings} disabled={busy}>
-            Open Settings
-          </button>
-          <button className="pxbtn" onClick={() => void finish(false)} disabled={busy}>
-            Skip key
-          </button>
-          <button className="pxbtn is-active" onClick={() => void finish(true)} disabled={busy}>
-            Save and start
+          <button className="pxbtn is-active" onClick={() => void finish()} disabled={busy}>
+            Start listening
           </button>
           {status && <span>{status}</span>}
         </footer>

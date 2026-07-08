@@ -36,3 +36,7 @@ Make the app that looks like hardware finally feel machined like it — every re
 
 - External PR #2 (orbisai0security) claims "API keys embedded in types.ts" — false positive: those are interface field *declarations*; the PR adds an unused Omit<> type. Not a blocker.
 - Retro shell stays byte-identical as the density control; light skins (Steel/Terminal/Ice/Miami) get the shadow/contrast attention.
+
+## HANDOFF — 2026-07-08 (session limit, mid Wave A)
+
+Committed & verified: Stage 0 (CSS split/tokens/fonts/Tailwind bridge), Stage 1 (primitives), craft-matrix harness, A1 NowPlaying stage (9c82d4f), A6 chrome Resonance (4093292). This WIP commit sweeps in UNVERIFIED partial edits from interrupted parallel agents (A2 Library, A3 Settings, A4 Catalog, A5a/A5b content views, A8 Visualizer, A9 Deck Snapshot, A10 First-run) — typecheck/build NOT guaranteed on this commit; A4's AlbumsView had known TS2304s (scanStatus) mid-edit. Next session: typecheck, finish per this plan's Stage-2 specs, run npm run craft:matrix vs the committed baseline expectations, then Stage 5 ship (bump 2.0.0, CHANGELOG, release:gate:local, publish per 1.17 precedent).

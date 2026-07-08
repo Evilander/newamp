@@ -1,1 +1,90 @@
 /* views/catalog.css — added for the 2.0 Reference Grade pass. Owned by its stage-2 workstream; keep rules scoped to this surface. */
+
+/* =========================================================
+   Catalog views: Albums / Artists / Folders / Living Tags /
+   Loved. Rules of the house: skin tokens only, color-mix for
+   tints, motion on the --dur-*/--ease-* ramps, reduced-motion
+   honored.
+   ========================================================= */
+
+/* Filter inputs that live in the ViewHeader actions row — clamped so the
+   header keeps room for the primary actions on narrow windows. */
+.catalog-header-filter {
+  width: clamp(150px, 26vw, 260px);
+}
+
+/* Compact overflow cluster for secondary/rare header actions ("More"). The
+   trigger is a plain .pxbtn; the menu wears .bevel-out so every shell dresses
+   it natively, this block adds layout + elevation. */
+.catalog-overflow {
+  position: relative;
+}
+.catalog-overflow-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  min-width: 176px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  animation: catalog-overflow-in var(--dur-fast) var(--ease-out);
+}
+.catalog-overflow-menu .pxbtn {
+  width: 100%;
+  justify-content: flex-start;
+}
+@keyframes catalog-overflow-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+}
+
+/* Zebra striping that survives light panels — tint with --ink instead of the
+   old hardcoded white wash (rgba(255,255,255,0.012) vanished on steel/ice and
+   inverted the intent on every light skin). */
+.catalog-zebra tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.catalog-zebra tbody tr:hover {
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
+}
+
+/* Living Tags DSL editor — mono voice, comfortable padding, visible focus.
+   :focus (not just :focus-visible) because an editor should always show its
+   active state, pointer or keyboard. */
+.tags-dsl-editor {
+  padding: 12px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  tab-size: 2;
+  color: var(--ink);
+  caret-color: var(--accent);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+.tags-dsl-editor:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .catalog-overflow-menu {
+    animation: none;
+  }
+  .tags-dsl-editor {
+    transition: none;
+  }
+}

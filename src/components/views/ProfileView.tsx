@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ListSummary, Review, ReviewTargetType, SocialPrivacy, UserProfile } from '@shared/types';
 import { api } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
+import { ConfirmAction } from '../ConfirmAction';
+import { EmptyState } from '../EmptyState';
 
 const PRIVACY: SocialPrivacy[] = ['local', 'friends', 'public'];
 const TARGETS: ReviewTargetType[] = ['album', 'artist', 'track'];
@@ -9,7 +12,6 @@ export function ProfileView(): JSX.Element {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [lists, setLists] = useState<ListSummary[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
-  const [status, setStatus] = useState<string | null>(null);
 
   // Profile editor fields
   const [name, setName] = useState('');
@@ -43,20 +45,22 @@ export function ProfileView(): JSX.Element {
   const saveProfile = async (): Promise<void> => {
     const favs = favorites.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 5);
     await api.saveProfile({ displayName: name, bio, favorites: favs, defaultPrivacy: privacy });
-    setStatus('Profile saved');
+    pushToast({ tone: 'ok', title: 'Profile saved' });
     void reload();
   };
 
   const createList = async (): Promise<void> => {
     if (!newListTitle.trim()) return;
-    await api.saveList({ title: newListTitle.trim(), ranked: true, privacy });
+    const title = newListTitle.trim();
+    await api.saveList({ title, ranked: true, privacy });
     setNewListTitle('');
-    setStatus('List created');
+    pushToast({ tone: 'ok', title: 'List created', detail: title });
     void reload();
   };
 
-  const deleteList = async (id: number): Promise<void> => {
-    await api.deleteList(id);
+  const deleteList = async (list: ListSummary): Promise<void> => {
+    await api.deleteList(list.id);
+    pushToast({ tone: 'ok', title: 'List deleted', detail: list.title });
     void reload();
   };
 
@@ -75,19 +79,29 @@ export function ProfileView(): JSX.Element {
     setReviewTitle('');
     setReviewBody('');
     setReviewRating('');
-    setStatus('Review saved');
+    pushToast({ tone: 'ok', title: 'Review saved' });
     void reload();
   };
 
-  const deleteReview = async (id: number): Promise<void> => {
-    await api.deleteReview(id);
+  const deleteReview = async (review: Review): Promise<void> => {
+    await api.deleteReview(review.id);
+    pushToast({
+      tone: 'ok',
+      title: 'Review deleted',
+      detail: review.title || `${review.targetType} · ${review.targetKey}`,
+    });
     void reload();
   };
 
   const exportBundle = async (): Promise<void> => {
     const saved = await api.exportProfileBundle();
-    setStatus(saved ? 'Profile page exported' : null);
+    if (saved) {
+      pushToast({ tone: 'ok', title: 'Profile page exported', detail: 'One HTML file — post it anywhere.' });
+    }
   };
+
+  const freshProfile =
+    profile !== null && lists.length === 0 && reviews.length === 0 && !profile.bio && profile.favorites.length === 0;
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -101,15 +115,26 @@ export function ProfileView(): JSX.Element {
               {profile?.displayName || 'Local listener'}
             </h1>
           </div>
-          <button className="pxbtn" onClick={() => void exportBundle()} title="Export a self-contained HTML profile page (no upload)">
-            EXPORT PROFILE PAGE
+          <button
+            className="pxbtn"
+            onClick={() => void exportBundle()}
+            title="Export your profile page — a single HTML file you can post anywhere"
+          >
+            SHARE PROFILE PAGE
           </button>
         </header>
         <p className="text-xs" style={{ color: 'var(--muted)' }}>
           Local-first and private by default — nothing leaves your machine. The privacy flag on each item only governs what a
           future export or sync would include.
         </p>
-        {status && <div className="text-sm" style={{ color: 'var(--accent)' }}>{status}</div>}
+
+        {freshProfile && (
+          <EmptyState
+            size="panel"
+            title="Make this page yours"
+            body="Set a name and a line about your taste, pin five favorites, then share it — one HTML file you can post anywhere."
+          />
+        )}
 
         {/* Profile editor */}
         <section className="rounded-lg p-5" style={{ background: 'var(--panel)' }}>
@@ -150,17 +175,33 @@ export function ProfileView(): JSX.Element {
             />
             <button className="pxbtn" onClick={() => void createList()}>ADD LIST</button>
           </div>
-          <ul className="mt-3 flex flex-col gap-2">
-            {lists.length === 0 && <li style={{ color: 'var(--muted)' }}>No lists yet.</li>}
-            {lists.map((l) => (
-              <li key={l.id} className="flex items-center justify-between gap-3 rounded px-3 py-2" style={{ background: 'var(--bg)' }}>
-                <span style={{ color: 'var(--ink)' }}>
-                  {l.title} <span style={{ color: 'var(--muted)' }}>· {l.itemCount} items · {l.privacy}</span>
-                </span>
-                <button className="pxbtn" onClick={() => void deleteList(l.id)} title="Delete list">✕</button>
-              </li>
-            ))}
-          </ul>
+          {lists.length === 0 ? (
+            <div className="mt-3">
+              <EmptyState
+                size="panel"
+                title="No lists yet"
+                body="Rank your favorites — type a title above and press ADD LIST."
+              />
+            </div>
+          ) : (
+            <ul className="mt-3 flex flex-col gap-2">
+              {lists.map((l) => (
+                <li key={l.id} className="flex items-center justify-between gap-3 rounded px-3 py-2" style={{ background: 'var(--bg)' }}>
+                  <span style={{ color: 'var(--ink)' }}>
+                    {l.title} <span style={{ color: 'var(--muted)' }}>· {l.itemCount} items · {l.privacy}</span>
+                  </span>
+                  <ConfirmAction
+                    label="✕"
+                    confirmLabel="Sure?"
+                    tone="error"
+                    size="sm"
+                    title="Delete list"
+                    onConfirm={() => void deleteList(l)}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
 
         {/* Reviews */}
@@ -180,22 +221,38 @@ export function ProfileView(): JSX.Element {
           <div className="mt-2">
             <button className="pxbtn" onClick={() => void addReview()}>SAVE REVIEW</button>
           </div>
-          <ul className="mt-4 flex flex-col gap-2">
-            {reviews.length === 0 && <li style={{ color: 'var(--muted)' }}>No reviews yet.</li>}
-            {reviews.map((r) => (
-              <li key={r.id} className="rounded p-3" style={{ background: 'var(--bg)' }}>
-                <div className="flex items-center justify-between gap-2">
-                  <span style={{ color: 'var(--ink)' }}>
-                    {r.title || `${r.targetType} review`}
-                    {r.rating != null && <span style={{ color: 'var(--accent)' }}> · {r.rating.toFixed(0)}/100</span>}
-                  </span>
-                  <button className="pxbtn" onClick={() => void deleteReview(r.id)} title="Delete review">✕</button>
-                </div>
-                <div className="text-xs" style={{ color: 'var(--muted)' }}>{r.targetType} · {r.targetKey} · {r.privacy}</div>
-                {r.body && <p className="mt-1 text-sm" style={{ color: 'var(--ink)' }}>{r.body}</p>}
-              </li>
-            ))}
-          </ul>
+          {reviews.length === 0 ? (
+            <div className="mt-4">
+              <EmptyState
+                size="panel"
+                title="No reviews yet"
+                body="Pick an album, artist, or track above and log your first take."
+              />
+            </div>
+          ) : (
+            <ul className="mt-4 flex flex-col gap-2">
+              {reviews.map((r) => (
+                <li key={r.id} className="rounded p-3" style={{ background: 'var(--bg)' }}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span style={{ color: 'var(--ink)' }}>
+                      {r.title || `${r.targetType} review`}
+                      {r.rating != null && <span style={{ color: 'var(--accent)' }}> · {r.rating.toFixed(0)}/100</span>}
+                    </span>
+                    <ConfirmAction
+                      label="✕"
+                      confirmLabel="Sure?"
+                      tone="error"
+                      size="sm"
+                      title="Delete review"
+                      onConfirm={() => void deleteReview(r)}
+                    />
+                  </div>
+                  <div className="text-xs" style={{ color: 'var(--muted)' }}>{r.targetType} · {r.targetKey} · {r.privacy}</div>
+                  {r.body && <p className="mt-1 text-sm" style={{ color: 'var(--ink)' }}>{r.body}</p>}
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       </div>
     </div>

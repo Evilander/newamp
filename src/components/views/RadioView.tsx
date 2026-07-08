@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { RadioStation } from '@shared/types';
 import { clickStation, searchStations, topTags } from '../../api/radiobrowser';
 import { usePlayerStore } from '../../store/usePlayerStore';
+import { pushToast } from '../../lib/toast';
+import { ViewHeader } from '../ViewHeader';
+import { Antenna } from '../Icons';
 
 const RADIO_TAGS = ['lofi', 'jazz', 'ambient', 'metal', 'electronic', 'classical', 'reggae', 'hip-hop', 'rock', 'blues'];
 
@@ -48,7 +51,10 @@ export function RadioView(): JSX.Element {
     if (!audio.current) return;
     if (isPlayingLibrary) pauseLibrary();
     audio.current.src = s.url;
-    audio.current.play().catch((err) => console.error('radio play failed', err));
+    audio.current.play().catch((err) => {
+      console.error('radio play failed', err);
+      pushToast({ tone: 'error', title: 'Station failed to play', detail: s.name });
+    });
     setActive(s);
     void clickStation(s.id);
   }
@@ -61,38 +67,41 @@ export function RadioView(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col">
-      <div
-        className="flex flex-col gap-2 border-b px-3 py-2"
-        style={{ borderColor: 'var(--line)' }}
-      >
-        <div className="flex items-center gap-2">
-          <span style={{ color: 'var(--accent)' }}>📡</span>
-          <span className="text-[12px] font-semibold">Internet Radio</span>
+      <ViewHeader
+        eyebrow="Streaming"
+        title={
+          <span className="inline-flex items-center gap-2">
+            <span className="inline-flex" style={{ color: 'var(--accent)' }}>
+              <Antenna size={15} />
+            </span>
+            Internet Radio
+          </span>
+        }
+        count={`${stations.length.toLocaleString()} stations`}
+        actions={
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search station name…"
-            className="bevel-in lcd-text ml-2 flex-1 px-3 py-1.5 text-[14px] outline-none"
+            className="bevel-in lcd-text w-[240px] px-3 py-1.5 text-[13px] outline-none"
             style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            aria-label="Search station name"
           />
-          <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
-            {stations.length} stations
-          </span>
-        </div>
-        <div className="flex flex-wrap items-center gap-1">
-          <span className="text-[10px] uppercase tracking-widest" style={{ color: 'var(--muted)' }}>
-            Tags
-          </span>
-          {(tags.length ? tags.slice(0, 18).map((t) => t.name) : RADIO_TAGS).map((t) => (
-            <button
-              key={t}
-              className={`pxbtn ${tag === t ? 'is-active' : ''}`}
-              onClick={() => setTag(tag === t ? '' : t)}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
+        }
+      />
+      <div className="flex flex-wrap items-center gap-1 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
+        <span className="text-[10px] uppercase tracking-widest" style={{ color: 'var(--muted)' }}>
+          Tags
+        </span>
+        {(tags.length ? tags.slice(0, 18).map((t) => t.name) : RADIO_TAGS).map((t) => (
+          <button
+            key={t}
+            className={`pxbtn ${tag === t ? 'is-active' : ''}`}
+            onClick={() => setTag(tag === t ? '' : t)}
+          >
+            {t}
+          </button>
+        ))}
       </div>
 
       <div className="flex-1 overflow-auto">

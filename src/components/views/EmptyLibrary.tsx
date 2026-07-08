@@ -105,6 +105,10 @@ export function EmptyLibrary(): JSX.Element {
             or pick a folder...
           </button>
         </div>
+        {/* AppDropOverlay already routes app-wide folder drops into a scan — say so. */}
+        <div style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
+          or drop a music folder anywhere in this window
+        </div>
         {status ? <div className="empty-library-status">{status}</div> : null}
         {suggestions.length ? (
           <div className="empty-library-suggestions">
