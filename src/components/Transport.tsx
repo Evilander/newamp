@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { Visualizer } from './Visualizer';
 import { formatTime, playbackCodecLabel } from '../lib/format';
@@ -55,7 +55,9 @@ export function Transport(): JSX.Element {
       className="bevel-out scanlines relative flex items-stretch gap-2 px-3 py-2"
       style={{ borderTop: '1px solid var(--line)' }}
     >
-      <div className="flex w-[88px] shrink-0 flex-col items-center justify-center gap-1 bevel-in p-1">
+      {/* amp-art-frame: hook for the Resonance breathing ring (tokens.css
+          reactive block) — a ::after halo, so it needs a positioned parent. */}
+      <div className="amp-art-frame relative flex w-[88px] shrink-0 flex-col items-center justify-center gap-1 bevel-in p-1">
         {shownArtUrl ? (
           <img
             src={shownArtUrl}
@@ -161,13 +163,21 @@ export function Transport(): JSX.Element {
           <button className="pxbtn pxbtn-icon" onClick={() => void next()} title="Next (Ctrl+→)" aria-label="Next track">
             <NextIcon />
           </button>
-          <ScrubBar
-            value={currentTime}
-            max={duration || 1}
-            onSeek={(v) => seek(v)}
-            className="nslider flex-1"
-            data-newamp-scrub
-          />
+          {/* amp-scrub-wrap: hook for the Resonance progress glow tail (tokens.css
+              reactive block). --scrub-progress feeds the tail's scaleX from state
+              this component already re-renders on every playhead tick — no new JS. */}
+          <div
+            className="amp-scrub-wrap relative min-w-0 flex-1"
+            style={{ '--scrub-progress': duration > 0 ? Math.min(1, currentTime / duration) : 0 } as CSSProperties}
+          >
+            <ScrubBar
+              value={currentTime}
+              max={duration || 1}
+              onSeek={(v) => seek(v)}
+              className="nslider block w-full"
+              data-newamp-scrub
+            />
+          </div>
           <button
             className={`pxbtn pxbtn-icon ${mode === 'shuffle' ? 'is-active' : ''}`}
             onClick={() => setMode(mode === 'shuffle' ? 'normal' : 'shuffle')}
