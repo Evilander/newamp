@@ -7,6 +7,8 @@ import { formatDuration, formatNumber, formatTime } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { BrandLogo } from '../BrandLogo';
 import { ArtistLink, AlbumLink } from '../EntityLink';
+import { Eyebrow } from '../ViewHeader';
+import { ViewSkeleton } from '../ViewSkeleton';
 
 interface HomeData {
   stats: { tracks: number; albums: number; artists: number; duration: number };
@@ -63,7 +65,13 @@ const HOME_LIMIT = 12;
 
 export function HomeView(): JSX.Element {
   const [data, setData] = useState<HomeData>(EMPTY_DATA);
-  const [loading, setLoading] = useState(false);
+  // True from first render so the mount-effect load never flashes the
+  // "No library scanned yet" hero at a user who simply hasn't loaded yet.
+  const [loading, setLoading] = useState(true);
+  // Below-the-fold shelves (harmonic/taste/rated/health/insights/stations)
+  // arrive via requestIdleCallback — honest loading means they wear skeletons
+  // until that batch lands instead of claiming "No tracks available yet".
+  const [belowFoldPending, setBelowFoldPending] = useState(true);
   const [status, setStatus] = useState<string | null>(null);
   // Monotonic token so a deferred below-fold batch from an older refresh can't
   // overwrite data from a newer one (the Refresh button re-runs refreshHome).
@@ -114,6 +122,7 @@ export function HomeView(): JSX.Element {
   async function refreshHome(): Promise<void> {
     const generation = ++refreshGenerationRef.current;
     setLoading(true);
+    setBelowFoldPending(true);
     setStatus(null);
     try {
       // Above the fold: the shelves a user sees first. Cheap queries — render
@@ -170,6 +179,10 @@ export function HomeView(): JSX.Element {
       } catch {
         // Keep the already-rendered sections; below-fold shelves stay in their
         // empty state (same outcome as the old all-or-nothing load on failure).
+      } finally {
+        // Drop the skeletons (or reveal a genuinely-empty message) only for the
+        // refresh generation the user is actually looking at.
+        if (generation === refreshGenerationRef.current) setBelowFoldPending(false);
       }
     };
     if (typeof requestIdleCallback === 'function') requestIdleCallback(() => void runBelowFold());
@@ -239,22 +252,27 @@ export function HomeView(): JSX.Element {
   }
 
   return (
-    <div className="flex h-full flex-col" style={{ fontFamily: 'var(--font-mono)' }}>
+    // Typography roles: reading copy runs in the UI font; mono is reserved for
+    // eyebrows, stats, and numeric readouts (see views/content.css for the
+    // hero/news CSS classes that re-pin mono).
+    <div className="flex h-full flex-col" style={{ fontFamily: 'var(--font-display)' }}>
       <div className="flex items-center gap-3 border-b px-3 py-2" style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}>
-        <div className="text-[10px] font-bold uppercase tracking-[0.16em]" style={{ color: 'var(--accent)' }}>
-          Home
-        </div>
-        <div className="text-[11px] tabular-nums" style={{ color: 'var(--ink-2)' }}>
+        <Eyebrow>Home</Eyebrow>
+        <div className="font-mono text-xs tabular-nums" style={{ color: 'var(--ink-2)' }}>
           {formatNumber(data.stats.tracks)} tracks / {formatNumber(data.stats.albums)} albums / {formatNumber(data.stats.artists)} artists
         </div>
-        {status && <div className="truncate text-[11px]" style={{ color: 'var(--ink-2)' }}>{status}</div>}
+        {status && <div className="truncate font-mono text-xs" style={{ color: 'var(--ink-2)' }}>{status}</div>}
         <button className="pxbtn ml-auto" onClick={() => void refreshHome()} disabled={loading}>
           {loading ? 'Refreshing...' : 'Refresh'}
         </button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto p-3">
-        {data.stats.tracks === 0 && !loading ? (
+        {data.stats.tracks === 0 && loading ? (
+          // First load: an honest skeleton page instead of a one-frame flash of
+          // the "No library scanned yet" hero.
+          <ViewSkeleton variant="cards" count={8} />
+        ) : data.stats.tracks === 0 ? (
           <div className="bevel-in flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
             <div className="text-[14px] font-bold">No library scanned yet.</div>
             <div className="max-w-[520px] text-[12px]" style={{ color: 'var(--ink-2)' }}>

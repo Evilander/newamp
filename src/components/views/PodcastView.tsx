@@ -3,13 +3,25 @@ import type { PodcastEpisode, PodcastSubscription } from '@shared/types';
 import { api } from '../../lib/api';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime } from '../../lib/format';
+import { pushToast } from '../../lib/toast';
+import { ConfirmAction } from '../ConfirmAction';
+
+/** Busy keys are per-target so a long episode download doesn't freeze the
+ *  whole view: 'add', `feed:${url}`, `episode:${id}`. Feed list refreshes
+ *  always re-fetch from the main process, so concurrent ops converge. */
+function feedKey(url: string): string {
+  return `feed:${url}`;
+}
+
+function episodeKey(id: string): string {
+  return `episode:${id}`;
+}
 
 export function PodcastView(): JSX.Element {
   const [subscriptions, setSubscriptions] = useState<PodcastSubscription[]>([]);
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
   const [feedUrl, setFeedUrl] = useState('');
-  const [status, setStatus] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set());
   const playPodcastEpisode = usePlayerStore((state) => state.playPodcastEpisode);
 
   useEffect(() => {
@@ -21,6 +33,17 @@ export function PodcastView(): JSX.Element {
     [subscriptions, selectedUrl],
   );
 
+  const isBusy = (key: string): boolean => busyKeys.has(key);
+
+  function markBusy(key: string, on: boolean): void {
+    setBusyKeys((current) => {
+      const next = new Set(current);
+      if (on) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }
+
   async function refreshList(): Promise<void> {
     const next = await api.listPodcastSubscriptions().catch(() => []);
     setSubscriptions(next);
@@ -29,47 +52,60 @@ export function PodcastView(): JSX.Element {
 
   async function addFeed(): Promise<void> {
     const url = feedUrl.trim();
-    if (!url) return;
-    setBusy(true);
-    setStatus('Adding feed...');
+    if (!url || isBusy('add')) return;
+    markBusy('add', true);
     try {
       const subscription = await api.subscribePodcastFeed(url);
       await refreshList();
       setSelectedUrl(subscription.feed.url);
       setFeedUrl('');
-      setStatus(`Added ${subscription.feed.title}.`);
+      pushToast({ tone: 'ok', title: 'Feed added', detail: subscription.feed.title });
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : 'Feed add failed.');
+      pushToast({
+        tone: 'error',
+        title: 'Feed add failed',
+        detail: err instanceof Error ? err.message : undefined,
+      });
     } finally {
-      setBusy(false);
+      markBusy('add', false);
     }
   }
 
   async function refreshFeed(url: string): Promise<void> {
-    setBusy(true);
-    setStatus('Refreshing feed...');
+    if (isBusy(feedKey(url))) return;
+    markBusy(feedKey(url), true);
     try {
       const subscription = await api.refreshPodcastFeed(url);
       await refreshList();
       setSelectedUrl(subscription.feed.url);
-      setStatus(`Refreshed ${subscription.feed.title}.`);
+      pushToast({ tone: 'ok', title: 'Feed refreshed', detail: subscription.feed.title });
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : 'Feed refresh failed.');
+      pushToast({
+        tone: 'error',
+        title: 'Feed refresh failed',
+        detail: err instanceof Error ? err.message : undefined,
+      });
     } finally {
-      setBusy(false);
+      markBusy(feedKey(url), false);
     }
   }
 
   async function removeFeed(url: string): Promise<void> {
-    setBusy(true);
+    if (isBusy(feedKey(url))) return;
+    const title = subscriptions.find((subscription) => subscription.feed.url === url)?.feed.title;
+    markBusy(feedKey(url), true);
     try {
       await api.removePodcastFeed(url);
       await refreshList();
-      setStatus('Feed removed.');
+      pushToast({ tone: 'ok', title: 'Feed removed', detail: title });
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : 'Feed removal failed.');
+      pushToast({
+        tone: 'error',
+        title: 'Feed removal failed',
+        detail: err instanceof Error ? err.message : undefined,
+      });
     } finally {
-      setBusy(false);
+      markBusy(feedKey(url), false);
     }
   }
 
@@ -78,38 +114,46 @@ export function PodcastView(): JSX.Element {
   }
 
   async function downloadEpisode(episode: PodcastEpisode): Promise<void> {
-    setBusy(true);
-    setStatus('Downloading episode...');
+    if (isBusy(episodeKey(episode.id))) return;
+    markBusy(episodeKey(episode.id), true);
     try {
       const updated = await api.downloadPodcastEpisode(episode.feedUrl, episode.id);
       if (updated) {
         applyEpisodeUpdate(updated);
-        setStatus(`Downloaded ${updated.title}.`);
+        pushToast({ tone: 'ok', title: 'Episode downloaded', detail: updated.title });
       } else {
-        setStatus('Episode download was not available.');
+        pushToast({ tone: 'warn', title: 'Episode download was not available', detail: episode.title });
       }
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : 'Episode download failed.');
+      pushToast({
+        tone: 'error',
+        title: 'Episode download failed',
+        detail: err instanceof Error ? err.message : undefined,
+      });
     } finally {
-      setBusy(false);
+      markBusy(episodeKey(episode.id), false);
     }
   }
 
   async function removeEpisodeDownload(episode: PodcastEpisode): Promise<void> {
-    setBusy(true);
-    setStatus('Removing downloaded episode...');
+    if (isBusy(episodeKey(episode.id))) return;
+    markBusy(episodeKey(episode.id), true);
     try {
       const updated = await api.removePodcastEpisodeDownload(episode.feedUrl, episode.id);
       if (updated) {
         applyEpisodeUpdate(updated);
-        setStatus(`Removed local file for ${updated.title}.`);
+        pushToast({ tone: 'ok', title: 'Local file removed', detail: updated.title });
       } else {
-        setStatus('Downloaded episode was not found.');
+        pushToast({ tone: 'warn', title: 'Downloaded episode was not found', detail: episode.title });
       }
     } catch (err) {
-      setStatus(err instanceof Error ? err.message : 'Downloaded episode removal failed.');
+      pushToast({
+        tone: 'error',
+        title: 'Downloaded episode removal failed',
+        detail: err instanceof Error ? err.message : undefined,
+      });
     } finally {
-      setBusy(false);
+      markBusy(episodeKey(episode.id), false);
     }
   }
 
@@ -144,13 +188,12 @@ export function PodcastView(): JSX.Element {
             className="bevel-in lcd-text ml-2 flex-1 px-3 py-1.5 text-[14px] outline-none"
             style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
           />
-          <button className="pxbtn is-active" onClick={() => void addFeed()} disabled={busy || !feedUrl.trim()}>
-            Add feed
+          <button className="pxbtn is-active" onClick={() => void addFeed()} disabled={isBusy('add') || !feedUrl.trim()}>
+            {isBusy('add') ? 'Adding…' : 'Add feed'}
           </button>
         </div>
         <div className="flex items-center gap-2 text-[11px]" style={{ color: 'var(--muted)' }}>
           <span>{subscriptions.length.toLocaleString()} feeds</span>
-          {status && <span>{status}</span>}
         </div>
       </div>
 
@@ -181,7 +224,9 @@ export function PodcastView(): JSX.Element {
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[13px]">{subscription.feed.title}</span>
                       <span className="block truncate text-[10px]" style={{ color: 'var(--muted)' }}>
-                        {subscription.feed.episodeCount.toLocaleString()} episodes
+                        {isBusy(feedKey(subscription.feed.url))
+                          ? 'Working…'
+                          : `${subscription.feed.episodeCount.toLocaleString()} episodes`}
                       </span>
                     </span>
                   </button>
@@ -208,12 +253,21 @@ export function PodcastView(): JSX.Element {
                     {selected.feed.description || selected.feed.url}
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <button className="pxbtn" onClick={() => void refreshFeed(selected.feed.url)} disabled={busy}>
-                      Refresh
+                    <button
+                      className="pxbtn"
+                      onClick={() => void refreshFeed(selected.feed.url)}
+                      disabled={isBusy(feedKey(selected.feed.url))}
+                    >
+                      {isBusy(feedKey(selected.feed.url)) ? 'Refreshing…' : 'Refresh'}
                     </button>
-                    <button className="pxbtn" onClick={() => void removeFeed(selected.feed.url)} disabled={busy}>
-                      Remove
-                    </button>
+                    <ConfirmAction
+                      label="Remove"
+                      confirmLabel="Sure?"
+                      tone="error"
+                      title="Unsubscribe from this feed"
+                      disabled={isBusy(feedKey(selected.feed.url))}
+                      onConfirm={() => void removeFeed(selected.feed.url)}
+                    />
                   </div>
                 </div>
               </div>
@@ -233,17 +287,17 @@ export function PodcastView(): JSX.Element {
                         <button
                           className="pxbtn !min-w-[70px]"
                           onClick={() => void removeEpisodeDownload(episode)}
-                          disabled={busy}
+                          disabled={isBusy(episodeKey(episode.id))}
                         >
-                          Remove file
+                          {isBusy(episodeKey(episode.id)) ? 'Removing…' : 'Remove file'}
                         </button>
                       ) : (
                         <button
                           className="pxbtn !min-w-[70px]"
                           onClick={() => void downloadEpisode(episode)}
-                          disabled={busy}
+                          disabled={isBusy(episodeKey(episode.id))}
                         >
-                          Download
+                          {isBusy(episodeKey(episode.id)) ? 'Downloading…' : 'Download'}
                         </button>
                       )}
                     </div>

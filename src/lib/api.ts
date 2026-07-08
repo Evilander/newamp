@@ -202,6 +202,7 @@ const stub: NewAmpAPI = {
   importPlaylistM3u: async () => null,
   exportLibraryMetadata: async () => null,
   captureVisualizerPng: async () => null,
+  captureDeckSnapshotPng: async () => null,
   copyPngToClipboard: async () => false,
   saveCaptureBytes: async () => null,
   saveClipMp4: async () => null,

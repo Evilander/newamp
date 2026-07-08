@@ -1184,6 +1184,8 @@ export interface NewAmpAPI {
     format: 'json' | 'csv',
   ) => Promise<{ path: string; tracks: number; format: 'json' | 'csv' } | null>;
   captureVisualizerPng: (rect?: { x: number; y: number; width: number; height: number }) => Promise<string | null>;
+  /** Deck Snapshot: capture the composited compact deck window as a PNG data URL. */
+  captureDeckSnapshotPng: () => Promise<string | null>;
   copyPngToClipboard: (dataUrl: string) => Promise<boolean>;
   saveCaptureBytes: (payload: { base64: string; defaultName: string; filterName: string; ext: string }) => Promise<string | null>;
   saveClipMp4: (payload: { base64: string; defaultName: string; vertical?: boolean; maxHeight?: number }) => Promise<string | null>;

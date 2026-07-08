@@ -1,12 +1,18 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from 'react';
 import type { AlbumSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
 import { PlaylistAppendPicker, TrackTable } from './LibraryView';
 import { api } from '../../lib/api';
+import { pushToast } from '../../lib/toast';
 import { spectralArtDataUrl } from '@shared/spectral-art';
 import { ScoreRating } from '../ScoreRating';
 import { ArtistLink } from '../EntityLink';
+import { ViewHeader } from '../ViewHeader';
+import { Chip } from '../Chip';
+import { EmptyState } from '../EmptyState';
+import { ViewSkeleton } from '../ViewSkeleton';
+import { Note } from '../Icons';
 
 const ALBUM_PAGE_SIZE = 240;
 const CATALOG_SEARCH_DEBOUNCE_MS = 180;
@@ -67,7 +73,7 @@ export function AlbumsView(): JSX.Element {
   const [randomSeed, setRandomSeed] = useState(() => albumViewSnapshot.randomSeed);
   const [hasMoreAlbums, setHasMoreAlbums] = useState(() => albumViewSnapshot.hasMoreAlbums);
   const [loadingAlbums, setLoadingAlbums] = useState(false);
-  const [scanStatus, setScanStatus] = useState<string | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
   const albumListRef = useRef<HTMLDivElement>(null);
   const albumPageRequestRef = useRef(false);
   const albumScrollTopRef = useRef(albumViewSnapshot.scrollTop);
@@ -95,7 +101,11 @@ export function AlbumsView(): JSX.Element {
         tracks = await api.getAlbumTracks(target.albumArtist, target.album);
       } catch (err) {
         lookupFailed = true;
-        setScanStatus(`Could not open ${target.album}: ${err instanceof Error ? err.message : 'unknown error'}. Click again to retry.`);
+        pushToast({
+          tone: 'error',
+          title: `Could not open ${target.album}`,
+          detail: `${err instanceof Error ? err.message : 'Unknown error'}. Click again to retry.`,
+        });
       }
       if (lookupFailed || tracks.length === 0) {
         // Don't consume on partial failure — a retry click on the same album
@@ -103,7 +113,7 @@ export function AlbumsView(): JSX.Element {
         // nav alone so the next render either retries (if the user re-clicks)
         // or stays put.
         if (!lookupFailed) {
-          setScanStatus(`No tracks found for ${target.album}.`);
+          pushToast({ tone: 'warn', title: `No tracks found for ${target.album}` });
           consumePendingNavigation();
         }
         return;
@@ -202,13 +212,17 @@ export function AlbumsView(): JSX.Element {
         // Don't silently swallow — a 1.5.4 LEFT JOIN regression made the
         // SQL throw an "ambiguous column" error, this catch fired, and the
         // UI showed an empty album list with no clue why. Surface the
-        // failure to the console and to the scan status banner so the next
-        // backend bug is visible instead of looking like an empty library.
+        // failure to the console and as an error toast so the next backend
+        // bug is visible instead of looking like an empty library.
         if (!cancelled) {
           console.error('[newamp] getAlbums failed:', err);
           setAlbums([]);
           setHasMoreAlbums(false);
-          setScanStatus(`Couldn't load albums: ${err instanceof Error ? err.message : String(err)}`);
+          pushToast({
+            tone: 'error',
+            title: "Couldn't load albums",
+            detail: err instanceof Error ? err.message : String(err),
+          });
         }
       })
       .finally(() => {
@@ -288,33 +302,47 @@ export function AlbumsView(): JSX.Element {
   }
 
   async function scanLibraryNow(): Promise<void> {
-    setScanStatus('Scanning music folders...');
+    setScanBusy(true);
+    pushToast({ title: 'Scanning music folders…' });
     try {
       await api.scanLibrary();
       await reloadAlbumsAfterScan();
-      setScanStatus('Library scan finished.');
+      pushToast({ tone: 'ok', title: 'Library scan finished' });
     } catch (err) {
-      setScanStatus(err instanceof Error ? err.message : 'Library scan failed.');
+      pushToast({
+        tone: 'error',
+        title: 'Library scan failed',
+        detail: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setScanBusy(false);
     }
   }
 
   async function addFolderAndScan(): Promise<void> {
-    setScanStatus('Choose a music folder...');
+    setScanBusy(true);
     try {
       const dir = await api.pickFolder();
-      if (!dir) {
-        setScanStatus(null);
-        return;
-      }
+      if (!dir) return;
       const settings = await api.getSettings();
       const roots = Array.from(new Set([...settings.libraryRoots, dir]));
       await api.setSettings({ libraryRoots: roots, libraryAutoWatch: true });
-      setScanStatus(`Scanning ${dir}...`);
+      pushToast({ title: `Scanning ${dir}…` });
       await api.scanLibrary([dir]);
       await reloadAlbumsAfterScan();
-      setScanStatus('New folder scanned and added to library watch.');
+      pushToast({
+        tone: 'ok',
+        title: 'Folder added to the library',
+        detail: `${dir} is scanned and watched for changes.`,
+      });
     } catch (err) {
-      setScanStatus(err instanceof Error ? err.message : 'Folder scan failed.');
+      pushToast({
+        tone: 'error',
+        title: 'Folder scan failed',
+        detail: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setScanBusy(false);
     }
   }
 
@@ -334,10 +362,9 @@ export function AlbumsView(): JSX.Element {
 
   async function openCurrentAlbum(): Promise<void> {
     if (!current?.album) {
-      setScanStatus('No current album loaded.');
+      pushToast({ tone: 'warn', title: 'No current album loaded' });
       return;
     }
-    setScanStatus('Opening current album...');
     try {
       const rows = await api.getAlbums({
         search: current.album,
@@ -350,13 +377,16 @@ export function AlbumsView(): JSX.Element {
         rows.find((album) => sameText(album.album, current.album)) ??
         null;
       if (!match) {
-        setScanStatus('Current album was not found in the library.');
+        pushToast({ tone: 'warn', title: 'Current album was not found in the library' });
         return;
       }
-      setScanStatus(null);
       openAlbum(match);
     } catch (err) {
-      setScanStatus(err instanceof Error ? err.message : 'Could not open current album.');
+      pushToast({
+        tone: 'error',
+        title: 'Could not open current album',
+        detail: err instanceof Error ? err.message : undefined,
+      });
     }
   }
 
@@ -366,10 +396,9 @@ export function AlbumsView(): JSX.Element {
       ? visible[Math.floor(Math.random() * visible.length)]!
       : (await api.getAlbums({ sort: 'random', randomSeed: Date.now(), limit: 1, offset: 0 }))[0] ?? null;
     if (!pick) {
-      setScanStatus('No albums found yet.');
+      pushToast({ tone: 'warn', title: 'No albums to surprise you with yet' });
       return;
     }
-    setScanStatus(null);
     openAlbum(pick);
   }
 
@@ -394,7 +423,11 @@ export function AlbumsView(): JSX.Element {
       // happened. No state mutation on failure, so the slider snaps back
       // to the prior value on the next re-render.
       console.error('[newamp] setAlbumRatingScore failed:', err);
-      setScanStatus(`Couldn't save album rating: ${err instanceof Error ? err.message : String(err)}`);
+      pushToast({
+        tone: 'error',
+        title: "Couldn't save album rating",
+        detail: err instanceof Error ? err.message : String(err),
+      });
       return;
     }
     const nextRating = updated?.rating ?? 0;
@@ -412,12 +445,35 @@ export function AlbumsView(): JSX.Element {
           : row,
       ),
     );
-    setScanStatus(
+    pushToast(
       score == null
-        ? `Cleared album rating for ${selected.album}.`
-        : `Rated ${selected.album} ${score.toFixed(1)}/100. Track ratings unchanged.`,
+        ? { tone: 'ok', title: 'Album rating cleared', detail: selected.album }
+        : {
+            tone: 'ok',
+            title: `Rated ${selected.album} ${score.toFixed(1)}/100`,
+            detail: 'Track ratings unchanged.',
+          },
     );
   }
+
+  const albumLetters = useMemo(() => {
+    const set = new Set<string>();
+    for (const album of albums) set.add(albumArtistFirstLetter(album.albumArtist));
+    return set;
+  }, [albums]);
+
+  function jumpToAlbumLetter(letter: string): void {
+    const container = albumListRef.current;
+    if (!container) return;
+    const target = container.querySelector<HTMLElement>(`[data-newamp-album-artist-letter="${letter}"]`);
+    if (!target) return;
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const offset = targetRect.top - containerRect.top + container.scrollTop - 12;
+    container.scrollTo({ top: Math.max(0, offset), behavior: catalogScrollBehavior() });
+  }
+
+  const filterActive = albumQuery.trim().length > 0;
 
   if (selected) {
     return (
@@ -440,19 +496,19 @@ export function AlbumsView(): JSX.Element {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)}>
-              ▶ Play album
+              Play album
             </button>
             <button className="pxbtn" onClick={() => queueTracksNext(tracks)} disabled={!tracks.length} title="Play album next">
-              PLAY NEXT
+              Next
             </button>
             <button className="pxbtn" onClick={() => addTracksToQueue(tracks)} disabled={!tracks.length} title="Queue album">
-              QUEUE ALBUM
+              Queue
             </button>
             <button className="pxbtn" onClick={() => setCompactMode(true)} title="Open the compact deck">
-              DECK
+              Deck
             </button>
             <button className="pxbtn" onClick={() => setFullscreenViz(true)} title="Open fullscreen visualizer">
-              FULL VIS
+              Full vis
             </button>
           </div>
           {/* Rating gets its own full-width row underneath the action buttons.
@@ -488,7 +544,7 @@ export function AlbumsView(): JSX.Element {
           </div>
           <PlaylistAppendPicker
             tracks={tracks}
-            label="ADD ALBUM TO PLAYLIST"
+            label="Add album to playlist"
             disabled={!tracks.length}
           />
         </div>
@@ -511,72 +567,147 @@ export function AlbumsView(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
-        <button
-          className={`pxbtn ${showMissingArtOnly ? 'is-active' : ''}`}
-          onClick={() => setShowMissingArtOnly((value) => !value)}
-          title="Show albums that still need cover art"
-        >
-          MISSING ART
-        </button>
-        <input
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter albums or songs…"
-          className="bevel-in lcd-text flex-1 px-3 py-1.5 text-[14px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-        />
-        <select
-          value={albumSort}
-          onChange={(event) => changeAlbumSort(event.currentTarget.value as AlbumSort)}
-          className="bevel-in lcd-text px-2 py-1.5 text-[12px] outline-none"
-          style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          title="Sort albums"
-          data-newamp-albums-sort
-        >
-          {ALBUM_SORTS.map((sort) => (
-            <option key={sort.id} value={sort.id}>
-              {sort.label}
-            </option>
-          ))}
-        </select>
-        {albumSort === 'random' && (
-          <button className="pxbtn" onClick={() => setRandomSeed(Date.now())} data-newamp-albums-reshuffle>
-            RESHUFFLE
-          </button>
-        )}
-        <button className="pxbtn" onClick={() => void openCurrentAlbum()} disabled={!current?.album} data-newamp-albums-now-lp>
-          NOW LP
-        </button>
-        <button className="pxbtn" onClick={() => void openSurpriseAlbum()} disabled={loadingAlbums} data-newamp-albums-surprise>
-          SURPRISE LP
-        </button>
-        <button className="pxbtn is-active" onClick={() => void scanLibraryNow()} disabled={loadingAlbums}>
-          SCAN NEW
-        </button>
-        <button className="pxbtn" onClick={() => void addFolderAndScan()} disabled={loadingAlbums}>
-          + FOLDER
-        </button>
-        <button className="pxbtn" onClick={() => setCompactMode(true)} title="Open the compact deck">
-          DECK
-        </button>
-        <button className="pxbtn" onClick={() => setFullscreenViz(true)} title="Open fullscreen visualizer">
-          FULL VIS
-        </button>
-        <span className="text-[11px]" style={{ color: 'var(--muted)' }}>
-          {albums.length.toLocaleString()}{hasMoreAlbums ? '+' : ''}{' '}
-          {showMissingArtOnly ? 'missing-art albums' : 'albums'}
-          {loadingAlbums ? ' / loading' : ''}
-          {scanStatus ? ` / ${scanStatus}` : ''}
-        </span>
-      </div>
+      <ViewHeader
+        eyebrow="Explore"
+        title="Albums"
+        count={`${albums.length.toLocaleString()}${hasMoreAlbums ? '+' : ''} ${
+          showMissingArtOnly ? 'albums missing art' : 'albums'
+        }`}
+        status={
+          scanBusy ? (
+            <Chip tone="accent" size="sm">
+              Scanning…
+            </Chip>
+          ) : loadingAlbums ? (
+            <Chip tone="muted" size="sm">
+              Loading…
+            </Chip>
+          ) : null
+        }
+        actions={
+          <>
+            <input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter albums or songs…"
+              aria-label="Filter albums or songs"
+              className="catalog-header-filter bevel-in lcd-text px-3 py-1.5 text-[14px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            />
+            <select
+              value={albumSort}
+              onChange={(event) => changeAlbumSort(event.currentTarget.value as AlbumSort)}
+              className="bevel-in lcd-text px-2 py-1.5 text-[12px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              title="Sort albums"
+              data-newamp-albums-sort
+            >
+              {ALBUM_SORTS.map((sort) => (
+                <option key={sort.id} value={sort.id}>
+                  {sort.label}
+                </option>
+              ))}
+            </select>
+            {albumSort === 'random' && (
+              <button className="pxbtn" onClick={() => setRandomSeed(Date.now())} data-newamp-albums-reshuffle>
+                Reshuffle
+              </button>
+            )}
+            <button
+              className="pxbtn"
+              onClick={() => void openCurrentAlbum()}
+              disabled={!current?.album}
+              title="Jump to the album playing now"
+              data-newamp-albums-now-lp
+            >
+              Now playing
+            </button>
+            <button
+              className="pxbtn"
+              onClick={() => void openSurpriseAlbum()}
+              disabled={loadingAlbums}
+              title="Open a random album"
+              data-newamp-albums-surprise
+            >
+              Surprise me
+            </button>
+            <HeaderOverflow>
+              <button
+                className={`pxbtn ${showMissingArtOnly ? 'is-active' : ''}`}
+                onClick={() => setShowMissingArtOnly((value) => !value)}
+                title="Show albums that still need cover art"
+              >
+                Missing art
+              </button>
+              <button className="pxbtn" onClick={() => void scanLibraryNow()} disabled={scanBusy}>
+                Scan library
+              </button>
+              <button className="pxbtn" onClick={() => void addFolderAndScan()} disabled={scanBusy}>
+                Add folder…
+              </button>
+              <button className="pxbtn" onClick={() => setCompactMode(true)} title="Open the compact deck">
+                Deck
+              </button>
+              <button className="pxbtn" onClick={() => setFullscreenViz(true)} title="Open fullscreen visualizer">
+                Full visualizer
+              </button>
+            </HeaderOverflow>
+          </>
+        }
+      />
       <div className="relative flex flex-1 overflow-hidden">
+        {loadingAlbums && albums.length === 0 ? (
+          <div className="flex-1 overflow-hidden">
+            <ViewSkeleton variant="cards" count={18} />
+          </div>
+        ) : albums.length === 0 ? (
+          <div className="flex-1">
+            <EmptyState
+              icon={<Note size={40} />}
+              title={filterActive || showMissingArtOnly ? 'No albums match' : 'No albums yet'}
+              body={
+                filterActive
+                  ? `Nothing in the library matches "${albumQuery.trim()}".`
+                  : showMissingArtOnly
+                    ? 'Every album in the library already has cover art.'
+                    : 'Point NewAmp at a music folder and the wall of covers builds itself.'
+              }
+              actions={
+                filterActive || showMissingArtOnly ? (
+                  <>
+                    {filterActive && (
+                      <button className="pxbtn" onClick={() => setFilter('')}>
+                        Clear filter
+                      </button>
+                    )}
+                    {showMissingArtOnly && (
+                      <button className="pxbtn" onClick={() => setShowMissingArtOnly(false)}>
+                        Show all albums
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <button className="pxbtn is-active" onClick={() => void scanLibraryNow()} disabled={scanBusy}>
+                      Scan library
+                    </button>
+                    <button className="pxbtn" onClick={() => void addFolderAndScan()} disabled={scanBusy}>
+                      Add folder…
+                    </button>
+                  </>
+                )
+              }
+            />
+          </div>
+        ) : (
+          <>
         <div
           ref={albumListRef}
           data-newamp-albums-scroll
-          className="flex-1 overflow-auto p-4"
+          className="flex-1 overflow-auto"
           onScroll={handleAlbumsScroll}
         >
+          <div className="p-4">
           <div
             className="grid gap-4"
             style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(168px, 1fr))' }}
@@ -642,26 +773,116 @@ export function AlbumsView(): JSX.Element {
               );
             })}
           </div>
-          {hasMoreAlbums && (
-            <div className="flex justify-center py-4">
-              <button
-                className="pxbtn is-active"
-                onClick={() => void loadMoreAlbums()}
-                disabled={loadingAlbums}
-                data-newamp-albums-load-more
-              >
-                {loadingAlbums ? 'Loading...' : 'Load more albums'}
-              </button>
-            </div>
-          )}
-        </div>
-        {albumSort === 'artist' && (
-          <AlphabetRail
-            albums={albums}
-            listRef={albumListRef}
+          </div>
+          <CatalogLoadMore
+            shown={albums.length}
+            noun={showMissingArtOnly ? 'missing-art albums' : 'albums'}
+            hasMore={hasMoreAlbums}
+            loading={loadingAlbums}
+            onLoadMore={() => void loadMoreAlbums()}
+            marker={{ 'data-newamp-albums-load-more': '' }}
           />
+        </div>
+        {albumSort === 'artist' && <AlphabetRail available={albumLetters} onJump={jumpToAlbumLetter} />}
+          </>
         )}
       </div>
+    </div>
+  );
+}
+
+/** `smooth` unless the user asked for reduced motion. */
+export function catalogScrollBehavior(): ScrollBehavior {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+}
+
+/**
+ * Sticky load-more footer shared by the catalog views — same layout and copy
+ * as LoadMoreFooter, plus a `marker` slot for the frozen data-newamp-* button
+ * markers the paging smokes assert on (LoadMoreFooter can't carry those).
+ */
+export function CatalogLoadMore({
+  shown,
+  total,
+  noun,
+  hasMore,
+  loading,
+  onLoadMore,
+  marker,
+}: {
+  shown: number;
+  total?: number | null;
+  noun: string;
+  hasMore: boolean;
+  loading: boolean;
+  onLoadMore: () => void;
+  /** Stable data-newamp-* attributes spread onto the load-more button. */
+  marker?: Record<string, string>;
+}): JSX.Element | null {
+  const knownTotal = typeof total === 'number' && Number.isFinite(total) ? Math.max(0, total) : null;
+  if (!hasMore && (knownTotal === null || shown >= knownTotal)) return null;
+
+  return (
+    <div
+      className="sticky bottom-0 flex items-center justify-between border-t px-3 py-2 text-[11px]"
+      style={{ background: 'var(--panel)', borderColor: 'var(--line)', color: 'var(--ink-2)' }}
+    >
+      <span>
+        {knownTotal === null
+          ? `${shown.toLocaleString()} ${noun} loaded`
+          : `${shown.toLocaleString()} of ${knownTotal.toLocaleString()} ${noun} loaded`}
+      </span>
+      {hasMore && (
+        <button className="pxbtn" onClick={onLoadMore} disabled={loading} {...(marker ?? {})}>
+          {loading ? 'Loading...' : 'Load more'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Compact "More" cluster for secondary header actions. Children render inside
+ * a small elevated menu; any click inside closes it, as do Escape and clicks
+ * elsewhere in the document.
+ */
+function HeaderOverflow({ children }: { children: ReactNode }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    function onPointerDown(event: PointerEvent): void {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function onKeyDown(event: KeyboardEvent): void {
+      if (event.key === 'Escape') setOpen(false);
+    }
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} className="catalog-overflow" data-newamp-header-overflow>
+      <button
+        type="button"
+        className={`pxbtn ${open ? 'is-active' : ''}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="More actions"
+        onClick={() => setOpen((value) => !value)}
+      >
+        More
+      </button>
+      {open && (
+        <div className="catalog-overflow-menu bevel-out" role="menu" onClick={() => setOpen(false)}>
+          {children}
+        </div>
+      )}
     </div>
   );
 }
@@ -680,40 +901,26 @@ function albumArtistFirstLetter(value: string | null | undefined): string {
 const ALPHABET_RAIL_LETTERS = ['#', ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i))] as const;
 
 /**
- * Vertical A-Z navigation rail. Letters with no matching album render dimmed
- * and disabled; clicking a present letter scrolls the album grid to the
- * first matching album. The rail floats over the right edge of the album
- * list so it doesn't take any horizontal space away from the grid.
+ * Vertical A-Z navigation rail, shared by the catalog grids (Albums by album
+ * artist, Artists by name). Letters with nothing under them render dimmed and
+ * disabled; clicking a present letter hands off to the view's own jump
+ * handler. The rail floats over the right edge of the list so it doesn't take
+ * any horizontal space away from the grid.
  */
-function AlphabetRail({
-  albums,
-  listRef,
+export function AlphabetRail({
+  available,
+  onJump,
+  noun = 'artists',
 }: {
-  albums: AlbumSummary[];
-  listRef: React.RefObject<HTMLDivElement>;
+  available: ReadonlySet<string>;
+  onJump: (letter: string) => void;
+  noun?: string;
 }): JSX.Element {
-  const available = useMemo(() => {
-    const set = new Set<string>();
-    for (const album of albums) set.add(albumArtistFirstLetter(album.albumArtist));
-    return set;
-  }, [albums]);
-
-  function jumpTo(letter: string): void {
-    const container = listRef.current;
-    if (!container) return;
-    const target = container.querySelector<HTMLElement>(`[data-newamp-album-artist-letter="${letter}"]`);
-    if (!target) return;
-    const containerRect = container.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    const offset = targetRect.top - containerRect.top + container.scrollTop - 12;
-    container.scrollTo({ top: Math.max(0, offset), behavior: 'smooth' });
-  }
-
   return (
     <nav
       className="album-letter-rail"
       data-newamp-album-letter-rail
-      aria-label="Jump to artist letter"
+      aria-label={`Jump to ${noun} letter`}
     >
       {ALPHABET_RAIL_LETTERS.map((letter) => {
         const present = available.has(letter);
@@ -726,8 +933,8 @@ function AlphabetRail({
             data-newamp-album-letter-present={present ? 'true' : 'false'}
             className={`album-letter-rail-key ${present ? 'is-present' : 'is-empty'}`}
             disabled={!present}
-            onClick={() => present && jumpTo(letter)}
-            title={present ? `Jump to artists starting with ${letter}` : `No ${letter} artists yet`}
+            onClick={() => present && onJump(letter)}
+            title={present ? `Jump to ${noun} starting with ${letter}` : `No ${letter} ${noun} yet`}
           >
             {letter}
           </button>

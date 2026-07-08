@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { compileQueryIntent, looksLikeNaturalQuery } from '@shared/query-intent';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
-import type { AlbumSummary, ArtistSummary, SavedPlaylist, SmartPlaylistRule, Track } from '@shared/types';
+import type { AlbumSummary, ArtistSummary, ListeningHistoryItem, SavedPlaylist, SmartPlaylistRule, Track } from '@shared/types';
 import type { ViewMode } from '../store/usePlayerStore';
 import { api } from '../lib/api';
 import { formatDuration, formatTime } from '../lib/format';
@@ -15,6 +15,7 @@ const CATALOG_LIMIT = 8;
 type PaletteCommand = 'scan-library' | 'toggle-eq' | 'fullscreen-viz' | 'compact-deck';
 
 type PaletteItem =
+  | { kind: 'resume'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; track: Track }
   | { kind: 'track'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; track: Track }
   | { kind: 'playlist'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; playlist: SavedPlaylist }
   | { kind: 'smart-rule'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; rule: SmartPlaylistRule }
@@ -49,6 +50,28 @@ const COMMAND_ITEMS: Array<{ command: PaletteCommand; title: string; subtitle: s
   { command: 'compact-deck', title: 'Compact Deck', subtitle: 'Switch to windowshade deck mode' },
 ];
 
+// The five chords worth teaching. Escape, arrows, and the opener itself are
+// conventions the palette should not spend legend space on.
+const LEGEND_HINTS: Array<{ keys: string; label: string }> = [
+  { keys: 'Enter', label: 'play' },
+  { keys: 'Ctrl+Enter', label: 'play next' },
+  { keys: 'Shift+Enter', label: 'queue' },
+  { keys: 'Ctrl+L', label: 'love' },
+  { keys: 'Ctrl+R', label: 'radio' },
+];
+
+const LEGEND_KBD_STYLE = {
+  padding: '1px 5px',
+  border: '1px solid var(--line)',
+  borderRadius: 'var(--radius)',
+  background: 'var(--panel-2)',
+  color: 'var(--ink)',
+  fontFamily: 'var(--font-mono)',
+  fontSize: 'var(--text-2xs)',
+  letterSpacing: '0.06em',
+  whiteSpace: 'nowrap',
+} as const;
+
 export function QuickPlayPalette(): JSX.Element | null {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -78,6 +101,14 @@ export function QuickPlayPalette(): JSX.Element | null {
       if ((event.ctrlKey || event.metaKey) && (key === 'k' || key === 'j')) {
         event.preventDefault();
         setOpen((next) => !next);
+      } else if ((event.ctrlKey || event.metaKey) && key === 'm' && !event.altKey && !event.shiftKey) {
+        // Ctrl+M — deck mode. Documented in the README and taught by the
+        // first-launch tour; this listener is the app's global chord home.
+        // One-way by design: the deck view unmounts this component, so exit
+        // stays on the deck's own controls.
+        event.preventDefault();
+        usePlayerStore.getState().setCompactMode(true);
+        setOpen(false);
       } else if (event.key === 'Escape') {
         setOpen(false);
       }
@@ -127,18 +158,27 @@ export function QuickPlayPalette(): JSX.Element | null {
           ? compileQueryIntent(trimmedQuery)
           : null;
         const useAsk = !!askIntent && askIntent.matched > 0;
-        const [tracks, playlists, smartRules, albums, artists] = await Promise.all([
+        const [tracks, playlists, smartRules, albums, artists, history] = await Promise.all([
           useAsk ? api.runSmartPlaylistRule(askIntent.rule) : loadTrackResults(trimmedQuery),
           api.getPlaylists(),
           api.getSmartPlaylistRules(),
           trimmedQuery && !useAsk ? api.getAlbums({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
           trimmedQuery && !useAsk ? api.getArtists({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
+          trimmedQuery
+            ? Promise.resolve([] as ListeningHistoryItem[])
+            : api.getListeningHistory({ limit: 8 }).catch(() => [] as ListeningHistoryItem[]),
         ]);
         if (cancelled) return;
         setAskChips(useAsk ? askIntent.chips : null);
-        const next = useAsk
+        const base = useAsk
           ? buildPaletteItems('', tracks, [], [], [], []).filter((item) => item.kind === 'track')
           : buildPaletteItems(trimmedQuery, tracks, playlists, smartRules, albums, artists);
+        // Zero-query front door: row 1 resumes the restored session where it
+        // left off, rows 2-4 are the last things actually listened to. Typed
+        // queries keep the classic result order untouched.
+        const next = trimmedQuery
+          ? base
+          : [...zeroQueryLeadItems(history), ...base].slice(0, RESULT_LIMIT);
         setResults(next);
         setSelectedIndex(0);
         setStatus(
@@ -167,6 +207,16 @@ export function QuickPlayPalette(): JSX.Element | null {
 
   async function executeSelected(item = selected): Promise<void> {
     if (!item) return;
+    if (item.kind === 'resume') {
+      // togglePlay handles both halves of "resume": a restored-but-idle
+      // session starts its queue and seeks to the persisted resumeAt, and a
+      // merely-paused engine just unpauses.
+      const store = usePlayerStore.getState();
+      if (!store.isPlaying) store.togglePlay();
+      setView('now-playing');
+      setOpen(false);
+      return;
+    }
     if (item.kind === 'view') {
       setView(item.view);
       setOpen(false);
@@ -348,14 +398,13 @@ export function QuickPlayPalette(): JSX.Element | null {
           </div>
         )}
 
-        <div className="flex items-center gap-2 border-b px-3 py-2 text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}>
-          <span>Ctrl+K / Ctrl+J opens</span>
-          <span>Enter runs</span>
-          <span>Ctrl+Enter plays next</span>
-          <span>Shift+Enter queues</span>
-          <span>Ctrl+L loves</span>
-          <span>Ctrl+R starts radio</span>
-          <span>Arrow keys move</span>
+        <div className="flex items-center gap-3 border-b px-3 py-2 text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}>
+          {LEGEND_HINTS.map((hint) => (
+            <span key={hint.keys} className="flex items-center gap-1.5 whitespace-nowrap">
+              <kbd style={LEGEND_KBD_STYLE}>{hint.keys}</kbd>
+              {hint.label}
+            </span>
+          ))}
           {status && <span className="ml-auto" style={{ color: 'var(--accent)' }}>{status}</span>}
         </div>
 
@@ -372,7 +421,11 @@ export function QuickPlayPalette(): JSX.Element | null {
                 data-track-id={item.kind === 'track' ? item.track.id : undefined}
                 style={{
                   borderColor: 'var(--line)',
-                  background: active ? 'var(--panel-2)' : playing ? 'rgba(52,211,153,0.06)' : 'transparent',
+                  background: active
+                    ? 'var(--panel-2)'
+                    : playing
+                      ? 'color-mix(in srgb, var(--accent) 6%, transparent)'
+                      : 'transparent',
                   color: playing ? 'var(--accent)' : 'var(--ink)',
                 }}
                 onMouseEnter={() => setSelectedIndex(index)}
@@ -431,6 +484,39 @@ export function QuickPlayPalette(): JSX.Element | null {
       </div>
     </div>
   );
+}
+
+// Lead rows for the empty palette: one resume row built from the player
+// store's restored session (read-only snapshot), then up to three recently
+// played tracks from listening history. Distinct id prefixes keep React keys
+// unique even when the same track also appears in the recently-added list.
+function zeroQueryLeadItems(history: ListeningHistoryItem[]): PaletteItem[] {
+  const items: PaletteItem[] = [];
+  const store = usePlayerStore.getState();
+  const resumeTrack = !store.isPlaying && store.current ? store.current : null;
+  if (resumeTrack) {
+    const artistLabel = resumeTrack.artist || 'Unknown Artist';
+    const albumLabel = resumeTrack.album || 'Unknown Album';
+    items.push({
+      kind: 'resume',
+      id: `resume:${resumeTrack.id}`,
+      title: `Resume — ${resumeTrack.title}`,
+      subtitle: `${artistLabel} / ${albumLabel}`,
+      subtitleText: `${artistLabel} / ${albumLabel}`,
+      detail: `at ${formatTime(Math.max(0, store.currentTime))}`,
+      track: resumeTrack,
+    });
+  }
+  const seen = new Set<number>(resumeTrack ? [resumeTrack.id] : []);
+  let recents = 0;
+  for (const entry of history) {
+    if (recents >= 3) break;
+    if (seen.has(entry.track.id)) continue;
+    seen.add(entry.track.id);
+    recents += 1;
+    items.push({ ...trackItem(entry.track), id: `recent:${entry.track.id}` });
+  }
+  return items;
 }
 
 async function loadTrackResults(query: string): Promise<Track[]> {
