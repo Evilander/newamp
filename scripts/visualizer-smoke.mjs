@@ -117,7 +117,7 @@ assert.match(fullscreenSource, /ArrowRight/, 'Fullscreen visualizer should suppo
 assert.match(fullscreenSource, /pickAutoVjPreset/, 'Auto VJ should choose presets from live audio energy');
 assert.match(fullscreenSource, /visualizerEnergy/, 'Auto VJ should inspect analyzer bins instead of cycling blindly');
 assert.match(fullscreenSource, /VIZ_AUTO_VJ_KEY/, 'Auto VJ should persist between visualizer sessions');
-assert.match(visualizerSource, /boostFrequencyData\(freq, reactivity\)/, 'Visualizer should expose configurable signal response');
+assert.match(visualizerSource, /boostFrequencyData\(freq, tuningRef\.current\.reactivity\)/, 'Visualizer should expose configurable signal response');
 assert.match(visualizerSource, /type VizPalette/, 'Visualizer should support user-selectable color palettes');
 assert.match(visualizerSource, /type VizPerformance/, 'Visualizer should support a low-end rendering mode');
 assert.match(visualizerSource, /type VizReactivity/, 'Visualizer should support truthful and boosted reactivity modes');
