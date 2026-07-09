@@ -88,7 +88,7 @@ function readmeCheck() {
     return { name: 'readme', ok: false, path: readmePath, reason: 'README.md is missing' };
   }
   const readme = readFileSync(readmePath, 'utf8');
-  const required = ['NewAmp', 'Install', 'Build from source', 'Privacy'];
+  const required = ['NewAmp', 'Get it', 'Build from source', 'Privacy'];
   const missing = required.filter((text) => !readme.includes(text));
   return {
     name: 'readme',
