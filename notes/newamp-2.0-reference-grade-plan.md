@@ -1,6 +1,6 @@
 # NewAmp 2.0 — "Reference Grade" (design-led major release)
 
-**Status:** executing
+**Status:** SHIPPED — v2.0.0 published 2026-07-08 (https://github.com/Evilander/newamp/releases/tag/v2.0.0)
 **Created:** 2026-07-06
 **Owner:** Tyler
 **Chosen by:** Fable 5 — 6 parallel research agents mapped the UI surface, 3 independent design directions were generated (craft / spectacle / first-hour lenses), 3 adversarial judges (Winamp veteran, indie marketer, staff engineer) ranked them. Reference Grade won 2 of 3; all judges converged on the same grafts.
@@ -40,3 +40,22 @@ Make the app that looks like hardware finally feel machined like it — every re
 ## HANDOFF — 2026-07-08 (session limit, mid Wave A)
 
 Committed & verified: Stage 0 (CSS split/tokens/fonts/Tailwind bridge), Stage 1 (primitives), craft-matrix harness, A1 NowPlaying stage (9c82d4f), A6 chrome Resonance (4093292). This WIP commit sweeps in UNVERIFIED partial edits from interrupted parallel agents (A2 Library, A3 Settings, A4 Catalog, A5a/A5b content views, A8 Visualizer, A9 Deck Snapshot, A10 First-run) — typecheck/build NOT guaranteed on this commit; A4's AlbumsView had known TS2304s (scanStatus) mid-edit. Next session: typecheck, finish per this plan's Stage-2 specs, run npm run craft:matrix vs the committed baseline expectations, then Stage 5 ship (bump 2.0.0, CHANGELOG, release:gate:local, publish per 1.17 precedent).
+
+## CLOSEOUT — 2026-07-08 (shipped)
+
+Second session (this machine) finished the interrupted waves and shipped:
+4 parallel audit agents mapped every half-done edit; fixes landed in 51b3841
+(MixesView regen-churn completion, A2 Library queueing grammar + playing-row
+accent + SVG stars + commandbar dedup, TagsView ConfirmAction/Chip
+completion, missing settings.css TOC styles, .bevel-in display-ink rule,
+EmptyLibrary suggestion CSS, dead-code cleanups, smoke realignments to live
+2.0 copy). Build had been red on a `--dur-*/` comment landmine in two CSS
+files. release:gate:local passed clean (83 smokes + K:/music real-library
+clean+incremental proofs + packaged-app smokes; accepted: unsigned,
+Last.fm/listening proofs). Published per the 1.17 precedent (direct
+`gh release create` — the readiness script hard-blocks on the human proofs
+by design). Windows installer/portable + Linux tar + provenance/checksums/
+source/bundle uploaded; macOS artifacts ride the tag-triggered Release
+workflow. Post-ship follow-ups left deliberately: record the human listening
+proof and Last.fm live proof when convenient; EvilandMemoryRow still uses
+its hand-rolled confirm; Wrapped video export keeps the fixed film palette.
