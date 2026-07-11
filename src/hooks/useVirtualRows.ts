@@ -45,6 +45,8 @@ export interface UseVirtualRowsOptions {
   rowCount: number;
   rowHeight: number;
   overscan?: number;
+  scrollRef?: RefObject<HTMLDivElement>;
+  enabled?: boolean;
 }
 
 export interface UseVirtualRows extends VisibleWindow {
@@ -57,25 +59,73 @@ export interface UseVirtualRows extends VisibleWindow {
  * container and `onScroll` to its onScroll; render rows
  * [startIndex..endIndex] between a topPad and bottomPad spacer.
  */
-export function useVirtualRows({ rowCount, rowHeight, overscan = 6 }: UseVirtualRowsOptions): UseVirtualRows {
-  const scrollRef = useRef<HTMLDivElement>(null);
+export function useVirtualRows({
+  rowCount,
+  rowHeight,
+  overscan = 6,
+  scrollRef: providedScrollRef,
+  enabled = true,
+}: UseVirtualRowsOptions): UseVirtualRows {
+  const internalScrollRef = useRef<HTMLDivElement>(null);
+  const scrollRef = providedScrollRef ?? internalScrollRef;
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportH, setViewportH] = useState(0);
+  const pendingMetricsRef = useRef<{ scrollTop: number; viewportH: number } | null>(null);
+  const scrollFrameRef = useRef(0);
+
+  const commitMetrics = useCallback((nextScrollTop: number, nextViewportH: number) => {
+    setScrollTop((current) => (current === nextScrollTop ? current : nextScrollTop));
+    setViewportH((current) => (current === nextViewportH ? current : nextViewportH));
+  }, []);
 
   useEffect(() => {
+    if (!enabled) return;
     const el = scrollRef.current;
     if (!el) return;
-    setViewportH(el.clientHeight);
-    const ro = new ResizeObserver(() => setViewportH(el.clientHeight));
+    commitMetrics(el.scrollTop, el.clientHeight);
+    const ro = new ResizeObserver(() => commitMetrics(el.scrollTop, el.clientHeight));
     ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+    return () => {
+      ro.disconnect();
+      if (scrollFrameRef.current) window.cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = 0;
+      pendingMetricsRef.current = null;
+    };
+  }, [commitMetrics, enabled, scrollRef]);
 
   const onScroll = useCallback((e: { currentTarget: { scrollTop: number; clientHeight: number } }) => {
-    setScrollTop(e.currentTarget.scrollTop);
-    setViewportH(e.currentTarget.clientHeight);
-  }, []);
+    pendingMetricsRef.current = {
+      scrollTop: e.currentTarget.scrollTop,
+      viewportH: e.currentTarget.clientHeight,
+    };
+    if (scrollFrameRef.current) return;
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = 0;
+      const pending = pendingMetricsRef.current;
+      pendingMetricsRef.current = null;
+      if (pending) commitMetrics(pending.scrollTop, pending.viewportH);
+    });
+  }, [commitMetrics]);
 
   const win = computeVisibleWindow({ scrollTop, viewportH: viewportH || 600, rowHeight, rowCount, overscan });
   return { ...win, onScroll, scrollRef };
+}
+
+export interface GridColumnCountInput {
+  containerWidth: number;
+  minItemWidth: number;
+  gap: number;
+  horizontalPadding?: number;
+}
+
+/** Match CSS grid's `repeat(auto-fill, minmax(...))` column count. */
+export function computeGridColumnCount({
+  containerWidth,
+  minItemWidth,
+  gap,
+  horizontalPadding = 0,
+}: GridColumnCountInput): number {
+  const available = Math.max(0, containerWidth - horizontalPadding);
+  const stride = Math.max(1, minItemWidth + gap);
+  return Math.max(1, Math.floor((available + gap) / stride));
 }

@@ -650,6 +650,7 @@ function LibraryTrackPane({
   const { startIndex, endIndex, topPad, bottomPad, onScroll, scrollRef } = useVirtualRows({
     rowCount: tracks.length,
     rowHeight: LIBRARY_ROW_HEIGHT,
+    enabled: !loading && tracks.length > 0,
   });
 
   if (loading) {
