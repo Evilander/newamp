@@ -74,6 +74,7 @@ const fullscreenSource = await readFile(
   new URL('../src/components/FullscreenVisualizer.tsx', import.meta.url),
   'utf8',
 );
+const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 assert.match(fullscreenSource, /id: 'butterchurn'/, 'Fullscreen visualizer must expose a Butterchurn preset');
 assert.match(fullscreenSource, /id: 'radial'/, 'Fullscreen visualizer must expose Radial preset');
 assert.match(fullscreenSource, /id: 'tunnel'/, 'Fullscreen visualizer must expose Tunnel preset');
@@ -165,6 +166,27 @@ assert.match(
   visualizerSource,
   /clientWidth <= 0 \|\| node\.clientHeight <= 0/,
   'Visualizers must skip zero-size canvases',
+);
+assert.match(visualizerSource, /suspendedByFullscreen/, 'Background visualizers should stop while fullscreen owns the screen');
+assert.match(fullscreenSource, /function VisualizerTimeline/, 'Fullscreen playhead updates should live in a timeline leaf');
+const fullscreenRootSource = fullscreenSource.slice(
+  fullscreenSource.indexOf('export function FullscreenVisualizer'),
+  fullscreenSource.indexOf('function VisualizerTimeline'),
+);
+assert.doesNotMatch(
+  fullscreenRootSource,
+  /usePlayerStore\(\(s\) => s\.currentTime\)/,
+  'Fullscreen visualizer root must not subscribe to the 10 Hz playback clock',
+);
+assert.match(appSource, /function MediaSessionSync/, 'Media Session updates should live in an isolated leaf');
+const appRootSource = appSource.slice(
+  appSource.indexOf('export default function App'),
+  appSource.indexOf('function MediaSessionSync'),
+);
+assert.doesNotMatch(
+  appRootSource,
+  /usePlayerStore\(\(s\) => s\.currentTime\)/,
+  'App root must not subscribe to the 10 Hz playback clock',
 );
 assert.match(
   nowPlayingSource,

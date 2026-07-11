@@ -30,6 +30,7 @@ import {
 } from '../visualizer/eviland-memory-bridge-registry';
 import { createEmptyPlan } from '../visualizer/eviland-memory-types';
 import { hashSeed } from '../visualizer/eviland-rng';
+import { parseCssRgbVec as parseRgbVec } from '../visualizer/css-color';
 import { api } from '../lib/api';
 
 export type VizMode =
@@ -154,6 +155,7 @@ export function Visualizer({
   const evilandConfigNonce = usePlayerStore((s) => s.evilandConfigNonce);
   const evilandWaveMode = usePlayerStore((s) => s.evilandWaveMode);
   const currentTrackId = usePlayerStore((s) => s.current?.id ?? null);
+  const fullscreenVizActive = usePlayerStore((s) => s.fullscreenViz);
   const evilandStateRef = useRef({
     director: evilandDirectorEnabled,
     seed: evilandSeed,
@@ -183,6 +185,7 @@ export function Visualizer({
   }, [palette, reactivity]);
 
   const isFullscreen = width == null && height == null && mode !== 'mini';
+  const suspendedByFullscreen = fullscreenVizActive && !isFullscreen;
   const frameIntervalMs = isFullscreen
     ? performance === 'low'
       ? 1000 / 30
@@ -201,7 +204,7 @@ export function Visualizer({
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || suspendedByFullscreen) return;
 
     if (mode === 'butterchurn' || mode === 'eviland-live') {
       // 'eviland-live' reuses this exact butterchurn (MilkDrop) iframe as its
@@ -258,9 +261,9 @@ export function Visualizer({
       // never theme-driven.
       const readThemePalette = (): EvilandPalette => ({
         accent: parseRgbVec(getCssVar('--accent')),
-        dark: parseRgbVec(getCssVar('--accent-dim') || getCssVar('--accent')),
-        light: parseRgbVec(getCssVar('--ink') || '#ffffff'),
-        bg: parseRgbVec(getCssVar('--bg') || '#05060a'),
+        dark: parseRgbVec(getCssVar('--accent-dim', getCssVar('--accent'))),
+        light: parseRgbVec(getCssVar('--ink', '#ffffff'), [1, 1, 1]),
+        bg: parseRgbVec(getCssVar('--bg', '#05060a'), [0.02, 0.024, 0.04]),
       });
       let themePalette = readThemePalette();
       let ovPalette = themePalette;
@@ -515,9 +518,9 @@ export function Visualizer({
       // remount and no setConfig call.
       const readPalette = (): EvilandPalette => ({
         accent: parseRgbVec(getCssVar('--accent')),
-        dark: parseRgbVec(getCssVar('--accent-dim') || getCssVar('--accent')),
-        light: parseRgbVec(getCssVar('--ink') || '#ffffff'),
-        bg: parseRgbVec(getCssVar('--bg') || '#05060a'),
+        dark: parseRgbVec(getCssVar('--accent-dim', getCssVar('--accent'))),
+        light: parseRgbVec(getCssVar('--ink', '#ffffff'), [1, 1, 1]),
+        bg: parseRgbVec(getCssVar('--bg', '#05060a'), [0.02, 0.024, 0.04]),
       });
       let palette = readPalette();
       let paletteTick = 0;
@@ -1812,7 +1815,7 @@ export function Visualizer({
 
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode]);
+  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode, suspendedByFullscreen]);
 
   const style: CSSProperties = {};
   if (width != null) style.width = `${width}px`;
@@ -2235,18 +2238,8 @@ function logBands(arr: Uint8Array, count: number): number[] {
   return out;
 }
 
-function getCssVar(name: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#39ff14';
-}
-
-function parseRgbVec(color: string): [number, number, number] {
-  if (color.startsWith('#') && color.length === 7) {
-    const r = parseInt(color.slice(1, 3), 16) / 255;
-    const g = parseInt(color.slice(3, 5), 16) / 255;
-    const b = parseInt(color.slice(5, 7), 16) / 255;
-    if ([r, g, b].every(Number.isFinite)) return [r, g, b];
-  }
-  return [0.22, 1, 0.08];
+function getCssVar(name: string, fallback = '#39ff14'): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
 function rgbVecEquals(a: [number, number, number], b: [number, number, number]): boolean {
