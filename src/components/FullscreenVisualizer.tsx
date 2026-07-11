@@ -173,8 +173,6 @@ function loadVisualizerReactivity(): VizReactivity {
 
 export function FullscreenVisualizer(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
-  const currentTime = usePlayerStore((s) => s.currentTime);
-  const duration = usePlayerStore((s) => s.duration);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const volume = usePlayerStore((s) => s.volume);
   const setVolume = usePlayerStore((s) => s.setVolume);
@@ -183,7 +181,6 @@ export function FullscreenVisualizer(): JSX.Element {
   const togglePlay = usePlayerStore((s) => s.togglePlay);
   const next = usePlayerStore((s) => s.next);
   const prev = usePlayerStore((s) => s.prev);
-  const seek = usePlayerStore((s) => s.seek);
   const preset = usePlayerStore((s) => s.vizPreset);
   const setPreset = usePlayerStore((s) => s.setVizPreset);
   // Eviland controls. Reads + actions live in usePlayerStore; this component
@@ -1716,16 +1713,7 @@ export function FullscreenVisualizer(): JSX.Element {
             <button className="pxbtn" onClick={() => void next()} title="Next">NEXT</button>
           </div>
         </div>
-        <div className="flex items-center gap-3 text-xs" style={{ color: 'rgba(255,255,255,0.6)' }}>
-          <span>{formatTime(currentTime)}</span>
-          <ScrubBar
-            className="nslider flex-1"
-            value={currentTime}
-            max={duration || 1}
-            onSeek={(v) => seek(v)}
-          />
-          <span>{formatTime(duration)}</span>
-        </div>
+        <VisualizerTimeline />
       </div>
 
       <div
@@ -1767,6 +1755,25 @@ export function FullscreenVisualizer(): JSX.Element {
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+function VisualizerTimeline(): JSX.Element {
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const duration = usePlayerStore((s) => s.duration);
+  const seek = usePlayerStore((s) => s.seek);
+
+  return (
+    <div className="flex items-center gap-3 text-xs" style={{ color: 'rgba(255,255,255,0.6)' }}>
+      <span>{formatTime(currentTime)}</span>
+      <ScrubBar
+        className="nslider flex-1"
+        value={currentTime}
+        max={duration || 1}
+        onSeek={seek}
+      />
+      <span>{formatTime(duration)}</span>
     </div>
   );
 }

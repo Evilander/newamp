@@ -53,6 +53,7 @@
     "test:transcode-peek": "npm run build:electron && node scripts/transcode-peek-test.mjs",
     "test:podcast-host-guard": "node scripts/podcast-host-guard-test.mjs",
     "test:virtual-rows": "node scripts/virtual-rows-test.mjs",
+    "test:css-color": "node scripts/css-color-test.mjs",
     "test:query-intent": "node scripts/query-intent-test.mjs",
     "smoke:butterchurn-sandbox": "npm run build && electron scripts/butterchurn-sandbox-smoke-app",
     "smoke:particle-flow": "electron scripts/particle-flow-smoke-app",
