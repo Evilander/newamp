@@ -1,0 +1,441 @@
+/* ----- Jukebox Deck — "NEWAMP Bandstand" -----
+   A Wurlitzer 1015 framed from the waist up (420x560 window: 26px chrome +
+   420x534 stage; SVG units == CSS px). Materials are FIXED: burgundy wood,
+   chrome bands, amber bubble tube, warm lamp light. The gel arch cycles hue
+   like the real rotating gel cylinders. Theme accent appears only as light
+   on the selection readout and lit keycap. */
+
+.deck-jukebox {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 26px minmax(0, 1fr);
+  overflow: hidden;
+  color: var(--ink);
+  background:
+    radial-gradient(130% 95% at 50% 6%, #1a1216 0%, #0d090b 62%, #080607 100%);
+}
+
+/* --- window chrome strip --- */
+.deck-jb-chrome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+}
+.deck-jb-chrome-label {
+  color: #7a6f74;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+}
+.deck-jb-window { margin-left: auto; display: flex; gap: 4px; }
+
+/* --- stage --- */
+.deck-jb-stage {
+  position: relative;
+  width: 420px;
+  height: 534px;
+  justify-self: center;
+}
+.deck-jb-cabinet {
+  position: absolute;
+  inset: 0;
+  width: 420px;
+  height: 534px;
+  display: block;
+}
+.deck-jb-marquee {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 0.3em;
+  fill: #f7ead0;
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.4);
+  stroke-width: 2.4px;
+}
+
+/* gel arch: the rotating gel cylinders oscillate warm — red through amber to
+   magenta and back. A full hue rotation would pass through green/cyan, which
+   no Wurlitzer gel wheel ever showed. */
+.deck-jb-gel {
+  animation: jb-gel-cycle 13s ease-in-out infinite;
+}
+@keyframes jb-gel-cycle {
+  0%, 100% { filter: hue-rotate(-32deg); }
+  50% { filter: hue-rotate(30deg); }
+}
+
+/* --- bubbles riding the tube arc --- */
+.deck-jb-bubbles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.deck-jb-bubble {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 1), rgba(255, 236, 200, 0.65) 60%, transparent);
+  box-shadow: 0 0 8px rgba(255, 240, 210, 0.85);
+  opacity: 0;
+  offset-rotate: 0deg;
+}
+.deck-jb-bubble.is-left {
+  offset-path: path('M 63 510 L 63 252 A 147 147 0 0 1 210 105');
+  animation: jb-bubble-ride 4200ms linear infinite;
+}
+.deck-jb-bubble.is-right {
+  offset-path: path('M 357 510 L 357 252 A 147 147 0 0 1 210 105');
+  animation: jb-bubble-ride 4700ms linear infinite;
+}
+.deck-jb-bubble:nth-child(2n) { width: 6px; height: 6px; }
+.deck-jb-bubble:nth-child(3n) { width: 11px; height: 11px; }
+@keyframes jb-bubble-ride {
+  0% { offset-distance: 0%; opacity: 0; }
+  8% { opacity: 0.9; }
+  86% { opacity: 0.85; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+
+/* --- record chamber --- */
+.deck-jb-chamber {
+  position: absolute;
+  left: 77px;
+  top: 119px;
+  width: 266px;
+  height: 231px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  overflow: hidden;
+  border-radius: 130px 130px 8px 8px;
+}
+.deck-jb-chamber:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -3px;
+}
+.deck-jb-viz {
+  width: 224px;
+  height: 224px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.72);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+}
+.deck-jb-disc {
+  position: relative;
+  width: 172px;
+  height: 172px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 38% 32%, #23201d 0%, #121011 55%, #060505 100%);
+  box-shadow:
+    0 10px 26px rgba(0, 0, 0, 0.65),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+.deck-jukebox.is-playing .deck-jb-disc {
+  animation: jb-disc-spin 2.4s linear infinite;
+}
+@keyframes jb-disc-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.deck-jb-disc-grooves {
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  background: repeating-radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.055) 0 1px, transparent 1px 3.6px);
+}
+/* 45s carry a big label — that's where the album art goes */
+.deck-jb-disc-label {
+  position: absolute;
+  inset: 22%;
+  overflow: hidden;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: #e8ddc4;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+}
+.deck-jb-disc-label img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.deck-jb-disc-blank {
+  color: #7a6a4c;
+  font-family: var(--font-display);
+  font-size: 34px;
+  font-weight: 900;
+}
+.deck-jb-disc-hole {
+  position: absolute;
+  left: calc(50% - 5px);
+  top: calc(50% - 5px);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #0a0806;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 0 2px rgba(255, 255, 255, 0.1);
+}
+.deck-jb-tonearm {
+  position: absolute;
+  left: 236px;
+  top: 176px;
+  width: 110px;
+  height: 160px;
+  pointer-events: none;
+}
+.deck-jb-tonearm g {
+  transition: transform 360ms ease-out;
+}
+/* curved glass over the chamber */
+.deck-jb-glass {
+  position: absolute;
+  left: 77px;
+  top: 119px;
+  width: 266px;
+  height: 231px;
+  border-radius: 130px 130px 8px 8px;
+  pointer-events: none;
+  background:
+    radial-gradient(70% 42% at 32% 12%, rgba(255, 255, 255, 0.13), transparent 68%),
+    linear-gradient(116deg, rgba(255, 255, 255, 0.05) 0%, transparent 30%);
+}
+
+/* --- typed title strips --- */
+.deck-jb-strips {
+  position: absolute;
+  left: 88px;
+  top: 360px;
+  width: 244px;
+  height: 42px;
+  display: grid;
+  grid-template-rows: 14px 1fr 12px;
+  align-items: center;
+  text-align: center;
+  pointer-events: none;
+}
+.deck-jb-strip-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.deck-jb-strip-sel {
+  color: #c23b2c;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+}
+.deck-jb-strip-demo {
+  padding: 0 5px;
+  color: #8a7d63;
+  border: 1px solid #c9bda0;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 7px;
+  letter-spacing: 0.14em;
+}
+.deck-jb-strip-title {
+  overflow: hidden;
+  color: #29241d;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deck-jb-strip-artist {
+  overflow: hidden;
+  color: #6a5f4e;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+
+/* --- selector keys: one row of round cream keycaps --- */
+.deck-jb-keys {
+  position: absolute;
+  left: 68px;
+  top: 414px;
+  width: 284px;
+  display: flex;
+  gap: 4px;
+  justify-content: center;
+}
+.deck-jb-keycap {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #5c5140;
+  background: radial-gradient(circle at 36% 30%, #f8f1de 0%, #ddd2b4 62%, #b8ab88 100%);
+  border: 1px solid #8a7c5c;
+  box-shadow: 0 2px 3px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 800;
+}
+.deck-jb-keycap.is-lit {
+  color: #10130c;
+  background: radial-gradient(circle at 36% 30%, color-mix(in srgb, var(--accent) 75%, #fff) 0%, var(--accent) 66%, color-mix(in srgb, var(--accent) 60%, #000) 100%);
+  border-color: color-mix(in srgb, var(--accent) 70%, #000);
+  box-shadow: 0 0 9px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+/* --- coin plate + transport --- */
+.deck-jb-plate {
+  position: absolute;
+  left: 60px;
+  top: 440px;
+  width: 300px;
+  height: 56px;
+}
+.deck-jb-coin {
+  position: absolute;
+  right: 22px;
+  top: 12px;
+  width: 7px;
+  height: 22px;
+  border-radius: 3px;
+  background: #17181b;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.9), 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+.deck-jb-coin-label {
+  position: absolute;
+  right: 14px;
+  top: 37px;
+  width: 24px;
+  color: #4a4d52;
+  font-family: var(--font-mono);
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-align: center;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+.deck-jb-transport {
+  position: absolute;
+  left: 50%;
+  top: 6px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+}
+.deck-jb-push {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: #26282c;
+  border: 1px solid #4b4e54;
+  background: radial-gradient(circle at 36% 28%, #fdfdfd 0%, #c9cdd3 46%, #82878e 100%);
+  box-shadow:
+    0 3px 5px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.deck-jb-push:hover { filter: brightness(1.06); }
+.deck-jb-push:active {
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.4);
+}
+.deck-jb-push.is-primary {
+  color: #0d2b12;
+}
+.deck-jukebox.is-playing .deck-jb-push.is-primary {
+  box-shadow:
+    0 0 10px var(--accent-glow),
+    0 3px 5px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+/* clipped to a slit so the house slider reads as a level control set into
+   the chrome, not a web widget floating on it */
+.deck-jb-volume {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  transform: translateX(-50%);
+  width: 120px;
+  height: 13px;
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 3px;
+}
+
+/* --- seek strip: recessed control channel between plate and grille --- */
+.deck-jb-seek {
+  position: absolute;
+  left: 76px;
+  top: 500px;
+  width: 268px;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 9px;
+  border: 1px solid rgba(0, 0, 0, 0.7);
+  border-radius: 5px;
+  background: linear-gradient(180deg, #241a12, #140d08);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.8),
+    0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.deck-jb-time {
+  color: #d8c8a8;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+.deck-jb-seek .nslider { width: 100%; }
+
+/* --- lamp breathing through the grille felt --- */
+.deck-jb-lamp {
+  position: absolute;
+  left: 42px;
+  top: 502px;
+  width: 336px;
+  height: 32px;
+  pointer-events: none;
+  background: radial-gradient(60% 130% at 50% 50%, rgba(255, 158, 74, 0.28), transparent 75%);
+  opacity: 0.35;
+}
+.deck-jukebox.is-playing .deck-jb-lamp {
+  animation: jb-lamp-breathe 3.4s ease-in-out infinite;
+}
+@keyframes jb-lamp-breathe {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.85; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deck-jb-gel,
+  .deck-jb-bubble,
+  .deck-jukebox.is-playing .deck-jb-disc,
+  .deck-jukebox.is-playing .deck-jb-lamp {
+    animation: none;
+  }
+  .deck-jb-bubble { opacity: 0; }
+  .deck-jb-tonearm g { transition: none; }
+}

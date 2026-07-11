@@ -1,0 +1,359 @@
+/* ----- Retro TV Deck — "NEWAMP Telestar" -----
+   A late-60s walnut table television (520x430, size is smoke-asserted). The
+   cabinet is a fixed-size SVG (520x402 stage under a 28px chrome strip), so
+   every HTML overlay is positioned in the same pixel space. Materials are
+   FIXED; the theme accent only appears as CRT light (OSD, readout, glow). */
+
+.deck-retro-tv {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 28px minmax(0, 1fr);
+  overflow: hidden;
+  color: var(--ink);
+  background:
+    radial-gradient(130% 95% at 50% 6%, #191a1f 0%, #0c0d10 62%, #08090b 100%);
+}
+
+/* --- window chrome strip --- */
+.deck-tv-chrome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+}
+.deck-tv-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #6d7178;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+}
+.deck-tv-brand:hover { color: var(--ink); }
+.deck-tv-window { margin-left: auto; display: flex; gap: 4px; }
+
+/* --- stage: cabinet SVG + pixel-positioned overlays --- */
+.deck-tv-stage {
+  position: relative;
+  width: 520px;
+  height: 402px;
+  justify-self: center;
+}
+.deck-tv-cabinet {
+  position: absolute;
+  inset: 0;
+  width: 520px;
+  height: 402px;
+  display: block;
+}
+.deck-tv-badge {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  fill: url(#tv-chrome-text);
+}
+.deck-tv-badge-sub {
+  font-family: var(--font-mono);
+  font-size: 7px;
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  fill: #8d8272;
+}
+
+/* --- the CRT --- */
+.deck-tv-screen {
+  position: absolute;
+  left: 52px;
+  top: 64px;
+  width: 292px;
+  height: 244px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  cursor: pointer;
+  background: #050604;
+  border-radius: 26px / 22px;
+  isolation: isolate;
+}
+.deck-tv-screen:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.deck-retro-tv.is-playing .deck-tv-screen {
+  box-shadow: 0 0 38px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.deck-tv-screen img,
+.deck-tv-screen canvas {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover;
+}
+.deck-tv-art-pan {
+  animation: newamp-deck-art-pan 14s ease-in-out infinite alternate;
+}
+@keyframes newamp-deck-art-pan {
+  0% { object-position: center top; }
+  50% { object-position: center center; }
+  100% { object-position: center bottom; }
+}
+
+/* CRT physics stack (bottom → top: phosphor, scanlines, static, vignette,
+   glass). All pointer-events:none; the button below stays clickable. */
+.deck-tv-phosphor,
+.deck-tv-scanlines,
+.deck-tv-static,
+.deck-tv-vignette,
+.deck-tv-glass,
+.deck-tv-tuning,
+.deck-tv-readout {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.deck-tv-phosphor {
+  z-index: 1;
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(255, 60, 60, 0.05) 0 1px,
+    rgba(60, 255, 90, 0.05) 1px 2px,
+    rgba(70, 90, 255, 0.05) 2px 3px
+  );
+  mix-blend-mode: screen;
+}
+.deck-tv-scanlines {
+  z-index: 2;
+  background: repeating-linear-gradient(180deg, rgba(0, 0, 0, 0.22) 0 1px, transparent 1px 3px);
+}
+/* animated grain: tiled SVG noise, heavier when nothing is tuned in */
+.deck-tv-static {
+  z-index: 3;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='128' height='128'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.95' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.7'/></svg>");
+  background-size: 128px 128px;
+  opacity: 0.07;
+  animation: newamp-tv-static 0.18s steps(4) infinite;
+  mix-blend-mode: screen;
+}
+.deck-tv-screen[data-newamp-tv-state='static'] .deck-tv-static {
+  opacity: 0.55;
+}
+@keyframes newamp-tv-static {
+  0% { background-position: 0 0; }
+  25% { background-position: 32px -16px; }
+  50% { background-position: -16px 24px; }
+  75% { background-position: 8px 56px; }
+  100% { background-position: -24px 8px; }
+}
+.deck-tv-vignette {
+  z-index: 4;
+  border-radius: inherit;
+  background: radial-gradient(105% 90% at 50% 46%, transparent 58%, rgba(0, 0, 0, 0.52) 100%);
+  box-shadow: inset 0 0 30px rgba(0, 0, 0, 0.85);
+}
+/* convex glass: one broad specular sweep + a hot arc top-left */
+.deck-tv-glass {
+  z-index: 5;
+  border-radius: inherit;
+  background:
+    radial-gradient(58% 34% at 30% 12%, rgba(255, 255, 255, 0.14), transparent 70%),
+    linear-gradient(118deg, rgba(255, 255, 255, 0.07) 0%, transparent 26%, transparent 68%, rgba(255, 255, 255, 0.03) 100%);
+}
+
+/* channel retune: one-shot roll bar + flash, remounted per track */
+.deck-tv-tuning {
+  z-index: 6;
+  overflow: hidden;
+  border-radius: inherit;
+  animation: tv-tuning-flash 480ms ease-out 1 both;
+}
+.deck-tv-rollbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 42px;
+  background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.5) 45%, rgba(255, 255, 255, 0.16) 55%, transparent);
+  mix-blend-mode: screen;
+  animation: tv-rollbar 520ms cubic-bezier(0.3, 0.6, 0.4, 1) 1 both;
+}
+.deck-tv-osd {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  color: var(--accent);
+  font-family: var(--font-lcd);
+  font-size: 24px;
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 9px var(--accent-glow), 1px 0 0 rgba(255, 60, 60, 0.4), -1px 0 0 rgba(70, 90, 255, 0.4);
+  animation: tv-osd-hold 1.8s ease-in 1 both;
+}
+@keyframes tv-tuning-flash {
+  0% { background: rgba(255, 255, 255, 0.22); }
+  100% { background: transparent; }
+}
+@keyframes tv-rollbar {
+  0% { top: -18%; }
+  100% { top: 116%; }
+}
+@keyframes tv-osd-hold {
+  0%, 70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* burnt-in readout, bottom-left of the tube; a soft scrim keeps it legible
+   over busy album art without reading as a UI card */
+.deck-tv-readout {
+  z-index: 6;
+  top: auto;
+  left: 8px;
+  right: 8px;
+  bottom: 4px;
+  display: grid;
+  gap: 1px;
+  padding: 14px 8px 8px;
+  text-align: left;
+  background: linear-gradient(180deg, transparent 0%, rgba(0, 5, 2, 0.55) 55%);
+  border-radius: 0 0 18px 18px;
+}
+.deck-tv-readout-title {
+  overflow: hidden;
+  color: var(--accent);
+  font-family: var(--font-lcd);
+  font-size: 17px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 0 8px var(--accent-glow), 1px 0 0 rgba(255, 60, 60, 0.35), -1px 0 0 rgba(70, 90, 255, 0.35);
+}
+.deck-tv-readout-sub {
+  overflow: hidden;
+  color: color-mix(in srgb, var(--accent) 72%, #ffffff 8%);
+  opacity: 0.85;
+  font-family: var(--font-lcd);
+  font-size: 12px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 0 6px var(--accent-glow);
+}
+
+/* --- console column: knobs, transport, volume --- */
+.deck-tv-knob {
+  position: absolute;
+  width: 52px;
+  height: 52px;
+}
+.deck-tv-knob-ch { left: 406px; top: 72px; }
+.deck-tv-knob-vol { left: 406px; top: 146px; }
+.deck-tv-knob-face {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 28%, #55585e 0%, #2b2d31 52%, #131417 100%);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.3),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.6),
+    0 3px 6px rgba(0, 0, 0, 0.5);
+  transition: transform 420ms cubic-bezier(0.2, 1.35, 0.4, 1);
+}
+/* knurled rim */
+.deck-tv-knob-face::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: repeating-conic-gradient(rgba(255, 255, 255, 0.09) 0 5deg, transparent 5deg 10deg);
+  -webkit-mask: radial-gradient(circle, transparent 68%, #000 70%);
+  mask: radial-gradient(circle, transparent 68%, #000 70%);
+}
+/* pointer line */
+.deck-tv-knob-face::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  left: calc(50% - 1.5px);
+  width: 3px;
+  height: 15px;
+  border-radius: 2px;
+  background: #e8e5dc;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.6);
+}
+.deck-tv-knob-tag {
+  position: absolute;
+  left: -8px;
+  right: -8px;
+  bottom: -11px;
+  color: #2e3033;
+  font-family: var(--font-mono);
+  font-size: 6.5px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+  text-align: center;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+.deck-tv-transport {
+  position: absolute;
+  left: 382px;
+  top: 228px;
+  width: 100px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.deck-tv-key {
+  height: 26px;
+  color: #cfd2d7;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  border: 1px solid #0a0b0d;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #34302b 0%, #221f1b 55%, #171512 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.55),
+    0 2px 3px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+.deck-tv-key:hover { filter: brightness(1.18); }
+.deck-tv-key:active {
+  transform: translateY(1px);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.6);
+}
+.deck-tv-key.is-primary {
+  color: var(--accent);
+  text-shadow: 0 0 8px var(--accent-glow);
+}
+.deck-tv-volume {
+  position: absolute;
+  left: 384px;
+  top: 292px;
+  width: 96px;
+  display: flex;
+  justify-content: center;
+}
+
+/* --- seek: bottom strip under the screen --- */
+.deck-tv-seek {
+  position: absolute;
+  left: 186px;
+  top: 331px;
+  width: 158px;
+  display: flex;
+  align-items: center;
+}
+.deck-tv-seek .nslider { width: 100%; }
+
+@media (prefers-reduced-motion: reduce) {
+  .deck-tv-static,
+  .deck-tv-art-pan,
+  .deck-tv-rollbar,
+  .deck-tv-tuning {
+    animation: none;
+  }
+  .deck-tv-knob-face { transition: none; }
+}

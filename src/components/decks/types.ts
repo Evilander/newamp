@@ -26,7 +26,7 @@ export const DECK_SKINS: {
   { id: 'winamp-industrial', label: 'Winamp Industrial',shortLabel: 'IND',  tagline: 'Dark pixel-skin throwback',   size: { width: 550, height: 232 } },
   { id: 'record-player',     label: 'Record Player',    shortLabel: 'VIN',  tagline: 'Spinning vinyl + tonearm',    size: { width: 540, height: 540 } },
   { id: 'jukebox',           label: 'Jukebox',          shortLabel: 'JUKE', tagline: 'Wurlitzer arch + chrome',     size: { width: 420, height: 560 } },
-  { id: 'cassette',          label: 'Cassette Deck',    shortLabel: 'TAPE', tagline: 'Twin spools, magnetic tape',  size: { width: 760, height: 320 } },
+  { id: 'cassette',          label: 'Cassette Deck',    shortLabel: 'TAPE', tagline: 'Type IV shell, handwritten label', size: { width: 720, height: 530 } },
   { id: 'discman',           label: 'Discman',          shortLabel: 'CD',   tagline: 'Portable CD player shell',    size: { width: 620, height: 460 } },
   { id: 'retro-tv',          label: 'Retro TV',         shortLabel: 'TV',   tagline: 'CRT screen + rabbit ears',    size: { width: 520, height: 430 } },
 ];
