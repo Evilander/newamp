@@ -41,7 +41,7 @@ Point it at your music folder, and it just starts playing — first launch even 
 - **Your year, Wrapped — without an account.** A Spotify-Wrapped-style recap built entirely from your local listening history: shareable card, or a 30-second video. Nothing is uploaded, because there's nowhere to upload it to.
 - **Your phone is the remote.** Scan a QR code and control playback from the couch. No app store, no cloud — it's all on your Wi-Fi.
 - **Visualizers people actually screenshot.** A full MilkDrop-style engine plus Eviland, our own visualizer that hears each instrument separately — the kick, the snare, the vocals each paint their own light. Press one key to save the last 15 seconds as a video.
-- **Dress it up.** 13 color skins, 9 compact "deck" modes (record player, jukebox, cassette, even a hotdog), and it imports classic Winamp `.wsz` skins from 1999.
+- **Dress it up.** 13 color skins and 8 compact "deck" modes drawn as real hardware — a hand-labeled Type IV cassette, a walnut CRT television, a Wurlitzer-style jukebox, a direct-drive turntable, a 90s Discman — plus imports of classic Winamp `.wsz` skins from 1999.
 - **Plays like an instrument.** Winamp-style keyboard controls everywhere — Space, arrows, `L` to love, `0–5` to rate, `Q` to queue, `F` for the fullscreen visualizer, and `Ctrl+K` opens a command palette that resumes where you left off.
 
 ## A quick look

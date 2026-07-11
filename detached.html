@@ -8,7 +8,16 @@
          butterchurn-iframe.html the main window uses — that frame's own CSP
          scopes 'unsafe-eval' to itself. frame-src stays same-origin. The
          renderer module talks to a MessagePort posted in by the main process
-         and never reaches outside the window. -->
+         and never reaches outside the window.
+
+         THEME LANDMINE: this document loads NO theme stylesheet — tokens.css
+         never applies here, so getComputedStyle/CSS-var reads resolve to
+         empty strings. Never read --accent/--bg/etc. locally in
+         detached/main.tsx, reactor-overlay.ts, or scene-overlay.ts; palette
+         must arrive through the producer's frame payload (eviland-producer
+         readPalette runs in the MAIN window, where the theme exists). A local
+         read here silently falls back to default green — the 2.0.x "green
+         artifact" family. -->
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'self'" />
     <title>NewAmp — Eviland</title>
     <style>
