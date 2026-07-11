@@ -248,7 +248,7 @@ export function createFluidForceSource(): FluidForceSource {
     }
 
     // Anticipation: just before a confident beat, the scene inhales (inward pull).
-    if (frame.bpm > 1 && frame.beatConfidence > 0.6 && frame.beatPhase > 0.85) {
+    if (frame.energy > 0.04 && frame.bpm > 1 && frame.beatConfidence > 0.6 && frame.beatPhase > 0.85) {
       for (let i = 0; i < INHALE_SPOKES; i++) {
         const a = (i / INHALE_SPOKES) * Math.PI * 2 + 0.4;
         const px = 0.5 + Math.cos(a) * 0.3;

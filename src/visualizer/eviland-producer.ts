@@ -27,6 +27,7 @@ import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from './evil
 import { blendPaletteWithArt, extractArtPalette, type ArtPalette } from './art-palette';
 import { api } from '../lib/api';
 import { BUTTERCHURN_FFT_SIZE } from '../butterchurn-iframe/protocol';
+import { parseCssRgbVec as parseRgbVec } from './css-color';
 
 // Mild pre-emphasis (~1.4x with soft-clip) so the detached window's MilkDrop
 // field reacts to transients the way the on-screen one does — same constant as
@@ -67,26 +68,16 @@ export interface EvilandProducerUiState {
   } | null;
 }
 
-function getCssVar(name: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#39ff14';
-}
-
-function parseRgbVec(color: string): [number, number, number] {
-  if (color.startsWith('#') && color.length === 7) {
-    const r = parseInt(color.slice(1, 3), 16) / 255;
-    const g = parseInt(color.slice(3, 5), 16) / 255;
-    const b = parseInt(color.slice(5, 7), 16) / 255;
-    if ([r, g, b].every(Number.isFinite)) return [r, g, b];
-  }
-  return [0.22, 1, 0.08];
+function getCssVar(name: string, fallback = '#39ff14'): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
 function readPalette(): EvilandPalette {
   return {
     accent: parseRgbVec(getCssVar('--accent')),
-    dark: parseRgbVec(getCssVar('--accent-dim') || getCssVar('--accent')),
-    light: parseRgbVec(getCssVar('--ink') || '#ffffff'),
-    bg: parseRgbVec(getCssVar('--bg') || '#05060a'),
+    dark: parseRgbVec(getCssVar('--accent-dim', getCssVar('--accent'))),
+    light: parseRgbVec(getCssVar('--ink', '#ffffff'), [1, 1, 1]),
+    bg: parseRgbVec(getCssVar('--bg', '#05060a'), [0.02, 0.024, 0.04]),
   };
 }
 

@@ -114,7 +114,9 @@ jobs:
           npm run test:macho-arch
 
       - name: Test — virtualization window math
-        run: npm run test:virtual-rows
+        run: |
+          npm run test:virtual-rows
+          npm run test:css-color
 
       - name: Test — library query perf (N+1 ordering + health cache)
         run: npm run test:library-query

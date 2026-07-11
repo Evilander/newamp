@@ -90,6 +90,12 @@ const inward = inhale.filter((f) => {
 log.push(`inhale inward forces: ${inward.length}`);
 if (inward.length < 2) fail('pre-beat inhale should emit inward forces');
 
+const silentTempo = collect(frame({ energy: 0, bpm: 124, beatConfidence: 0.8, beatPhase: 0.92 }));
+if (silentTempo.some((f) => {
+  const rx = f.x - 0.5, ry = f.y - 0.5;
+  return rx * f.dx + ry * f.dy < -1e-6;
+})) fail('cached tempo must not inject inhale forces during silence');
+
 // Cap: a maximal everything-at-once frame stays within MAX_FLUID_FORCES.
 const busy = collect(frame({
   onsets: [

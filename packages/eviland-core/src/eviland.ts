@@ -328,13 +328,19 @@ ${NOISE_GLSL}
 void main(){
   vec2 uv = v_uv;
   // height field: bass amplitude, mountain-line shaped, drifting with stereo pan.
-  float base = 0.08 + u_bass * 0.30;
+  // Do not inject a permanent horizon into the feedback field at rest. The
+  // old 0.08 base kept a theme-green strip alive even after the music stopped.
+  float activity = smoothstep(0.025, 0.16, u_bass);
+  float base = 0.03 + u_bass * 0.30;
   float disp = snoise(vec2(uv.x * 4.0 - u_time * 0.25 + u_pan * 0.6, u_time * 0.1)) * 0.12 * (0.3 + u_bass);
   float h = base + disp;
-  float edge = smoothstep(h + 0.005, h - 0.015, uv.y);
-  // Soft underglow.
-  float glow = exp(-pow((uv.y - h) * 12.0, 2.0)) * (0.6 + u_bass * 0.8);
-  float a = edge * 0.18 + glow * 0.55;
+  // A narrow ridge plus a quickly decaying underglow. Filling everything
+  // below h fed a solid palette-colored slab into the feedback/kaleido pass,
+  // where it persisted as a large rectangular artifact.
+  float ridge = exp(-pow((uv.y - h) * 16.0, 2.0)) * (0.6 + u_bass * 0.8);
+  float underglow = step(uv.y, h) * exp(-(h - uv.y) * 24.0) * 0.08;
+  float a = (ridge * 0.55 + underglow) * activity;
+  if (a <= 0.002) discard;
   o = vec4(u_color * a, a);
 }`;
 
@@ -637,11 +643,10 @@ void main(){
     // tone-mapping help. Keeps the silence floor visible (low values pass
     // through almost linearly).
     vec3 dyeSat = dye / (1.0 + 0.35 * dye);
-    // Floor: at high liquidMix we still want a faint palette wash in quiet
-    // regions instead of dead black, so the empty parts read as a tinted
-    // canvas, not a void. Weight by ramp's accent so the archetype palette
-    // is the substrate even at liquidMix=1.
-    vec3 floorCol = u_accent * 0.08;
+    // Empty dye should inherit the scene background, not the accent. Using the
+    // accent here left a fixed green patch wherever the field stayed lit after
+    // the dye itself had drained.
+    vec3 floorCol = u_bg * 0.08;
     vec3 dyeFull = max(dyeSat, floorCol);
     colour = mix(colour, dyeFull, clamp(u_liquidMix, 0.0, 1.0));
   }
@@ -807,8 +812,11 @@ export function createEvilandRenderer(
   const maxEmitters = quality === 'high' ? 32 : quality === 'medium' ? 20 : 10;
   // Stable-fluids sim: grid as a fraction of the field resolution (0 = no sim
   // on the low tier) + Jacobi pressure iterations per step.
-  const fluidGrid = quality === 'high' ? 0.5 : quality === 'medium' ? 0.375 : 0;
-  const fluidIterations = quality === 'high' ? 20 : 12;
+  // The velocity field is intentionally coarser than the visible feedback
+  // field. Fluid motion is low-frequency, so these sizes preserve its shape
+  // while cutting the solver's dominant fullscreen-pass cost substantially.
+  const fluidGrid = quality === 'high' ? 0.375 : quality === 'medium' ? 0.25 : 0;
+  const fluidIterations = quality === 'high' ? 12 : 8;
   // Velocity is UV/s; the dye displacement premultiplies channel * scale * dt
   // CPU-side so the shader's u_fluid is a plain magnitude.
   const FLUID_ADVECT_SCALE = 0.9;
@@ -1236,7 +1244,7 @@ export function createEvilandRenderer(
     // "windup" core that grows as beatPhase nears 1 so the kick resolves *on*
     // the beat instead of after. Cheap: just modulate the core kind via a
     // continuous emitter whose intensity rises with phase.
-    if (frame.beatConfidence > 0.35 && frame.beatPhase > 0.78) {
+    if (frame.energy > 0.04 && frame.beatConfidence > 0.35 && frame.beatPhase > 0.78) {
       const lead = (frame.beatPhase - 0.78) / 0.22; // 0..1
       spawn(4, 0, -0.15, 0.10 + lead * 0.10, palette.dark[0], palette.dark[1] * 0.7, palette.dark[2] * 0.5, 0.18, 0, lead * 0.7 * frame.beatConfidence);
     }
@@ -1500,11 +1508,11 @@ export function createEvilandRenderer(
       );
       // Bright crisp rays = the structural overlay. Push them well above the
       // field so the spectrum "sun" reads as drawn geometry, not haze.
-      // Dialed down from 1.1 + energy*1.3 (cap 2.8): the spectrum "sun" was the
-      // dominant always-bright centred object. Lower base + cap lets the warp
-      // field and the now-default oscilloscope carry the look instead of a
-      // screen-centre glow that read as "one pulsing thing".
-      const intensity = 0.5 + frame.energy * 0.8 + frame.beatPhase * 0.1;
+      // No idle baseline: the previous 0.5 continuously redrew the center core
+      // in the theme accent (green in the default skin), even during silence.
+      // Energy carries sustained material; voice peaks keep transients crisp.
+      const voicePeak = Math.max(frame.kick, frame.snare, frame.hat, frame.vocal);
+      const intensity = frame.energy * 1.05 + voicePeak * 0.65;
       gl.uniform1f(spectrumUni.intensity, Math.min(1.8, intensity));
       gl.uniform1f(spectrumUni.time, time);
       gl.uniform1f(spectrumUni.aspect, fieldH / Math.max(1, fieldW));

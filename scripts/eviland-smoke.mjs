@@ -150,13 +150,28 @@ app.whenReady().then(async () => {
     }
     const hiLit = litCount();
 
+    // Let every emitter and feedback trail drain under a truly silent frame.
+    // A previous terrain baseline injected a colored horizon even with bass=0,
+    // leaving a persistent green strip in the real theme after playback ended.
+    for (let i = 0; i < 150; i++) {
+      synth(freq, []); synth(onsetFreq, []); synth(leftFreq, []); synth(rightFreq, []);
+      const f = reactor.analyze(freq, onsetFreq, leftFreq, rightFreq, dt, now);
+      f.bass = 0;
+      f.energy = 0;
+      f.onsets.length = 0;
+      renderer.render(f, palette, dt);
+      now += dt;
+    }
+    const settledLit = litCount();
+
     renderer.dispose();
-    return { ok: true, lowLit, hiLit, total: canvas.width*canvas.height, totalOnsets, groups: [...groups] };
+    return { ok: true, lowLit, hiLit, settledLit, total: canvas.width*canvas.height, totalOnsets, groups: [...groups] };
   })()`);
 
   if (!probe.ok) fail(probe.reason, probe);
   if (probe.hiLit < 50) fail('high-energy frame is essentially blank', probe);
   if (probe.hiLit <= probe.lowLit) fail('renderer not reacting to audio energy', probe);
+  if (probe.settledLit >= Math.max(80, probe.hiLit * 0.08)) fail('renderer leaves a persistent lit artifact after silence', probe);
   if (probe.totalOnsets < 5) fail('reactor produced too few onsets from the synthetic signal', probe);
   if (probe.groups.length < 2) fail('reactor did not distinguish instrument groups (causal reactivity broken)', probe);
 
