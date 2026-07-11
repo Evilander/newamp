@@ -22,7 +22,14 @@
 @import './tokens.css'; /* fonts, :root tokens, Resonance, the 13 [data-theme] skins */
 @import './chrome.css'; /* base chrome: bevels, scrollbars, .pxbtn, transport icons, sliders */
 @import './shells.css'; /* shell variants: modern / liquid-glass / concourse (retro = base) */
-@import './decks.css'; /* deck skins part 1 + startup splash / first-launch / about */
+@import './decks/core.css'; /* deck skin picker + shared deck chrome */
+@import './decks/record-player.css'; /* Record Player deck */
+@import './decks/jukebox.css'; /* Jukebox deck */
+@import './decks/cassette.css'; /* Cassette deck */
+@import './decks/discman.css'; /* Discman deck */
+@import './decks/winamp.css'; /* Winamp Classic / Industrial decks */
+@import './decks/retro-tv.css'; /* Retro TV deck */
+@import './decks/misc.css'; /* startup splash / first-launch / about */
 @import './views/home.css'; /* Home magazine */
 @import './views/nowplaying.css'; /* Now Playing side tabs, split handle, liner notes */
 @import './components/rating.css'; /* 0-100 decimal score rating */

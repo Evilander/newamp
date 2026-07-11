@@ -75,7 +75,7 @@ const DECK_SKINS = [
   { id: 'winamp-industrial', width: 550, height: 232 },
   { id: 'record-player', width: 540, height: 540 },
   { id: 'jukebox', width: 420, height: 560 },
-  { id: 'cassette', width: 760, height: 320 },
+  { id: 'cassette', width: 720, height: 530 },
   { id: 'discman', width: 620, height: 460 },
   { id: 'retro-tv', width: 520, height: 430 },
 ];
