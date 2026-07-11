@@ -3302,7 +3302,7 @@ export class LibraryStore {
 
       const album = row.album || 'Unknown Album';
       const albumArtist = row.album_artist || artist;
-      const akey = `${albumArtist} ${album}`;
+      const akey = `${albumArtist}\u0000${album}`;
       const al = albumAgg.get(akey) ?? { album, albumArtist, plays: 0 };
       al.plays += 1;
       albumAgg.set(akey, al);
@@ -3892,7 +3892,57 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
     );
   }
 
+  // Cover buffers keyed by content hash — the hash IS the file name, so a
+  // cached entry can never go stale; eviction is purely a memory cap.
+  private readonly artBufferCache = new Map<string, { mime: string; data: Buffer }>();
+  private artBufferCacheBytes = 0;
+  private static readonly ART_CACHE_MAX_BYTES = 48 * 1024 * 1024;
+
   getArt(trackId: number): { mime: string; data: Buffer } | null {
+    const artHash = this.resolveArtHash(trackId);
+    if (!artHash) return null;
+    const cached = this.takeCachedArt(artHash);
+    if (cached) return cached;
+    // Find the file. We don't store mime in the DB, so probe common extensions.
+    for (const ext of ['.jpg', '.jpeg', '.png', '.webp']) {
+      const p = join(this.artDir, `${artHash}${ext}`);
+      if (existsSync(p)) {
+        try {
+          const data = readFileSync(p);
+          return this.rememberArtBuffer(artHash, { mime: extToMime(ext), data });
+        } catch {
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Async art read for the newart:// protocol. getArt blocks the single
+   * main-process thread on disk (sql.js keeps every query there too), so a
+   * burst of cover reads from the album grid can stall unrelated IPC like
+   * get-album-tracks behind file IO. Only the SQL stays synchronous here —
+   * it's an in-memory lookup.
+   */
+  async getArtAsync(trackId: number): Promise<{ mime: string; data: Buffer } | null> {
+    const artHash = this.resolveArtHash(trackId);
+    if (!artHash) return null;
+    const cached = this.takeCachedArt(artHash);
+    if (cached) return cached;
+    for (const ext of ['.jpg', '.jpeg', '.png', '.webp']) {
+      const p = join(this.artDir, `${artHash}${ext}`);
+      try {
+        const data = await fsp.readFile(p);
+        return this.rememberArtBuffer(artHash, { mime: extToMime(ext), data });
+      } catch {
+        continue; // wrong extension — probe the next one
+      }
+    }
+    return null;
+  }
+
+  private resolveArtHash(trackId: number): string | null {
     const row = this.one<{ art_hash: string | null; album: string | null; album_artist: string | null }>(
       `SELECT art_hash, album, album_artist FROM tracks WHERE id = ?`,
       [trackId],
@@ -3910,20 +3960,35 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
       );
       artHash = fallback?.art_hash ?? null;
     }
-    if (!artHash) return null;
-    // Find the file. We don't store mime in the DB, so probe common extensions.
-    for (const ext of ['.jpg', '.jpeg', '.png', '.webp']) {
-      const p = join(this.artDir, `${artHash}${ext}`);
-      if (existsSync(p)) {
-        try {
-          const data = readFileSync(p);
-          return { mime: extToMime(ext), data };
-        } catch {
-          return null;
-        }
-      }
+    return artHash || null;
+  }
+
+  private takeCachedArt(artHash: string): { mime: string; data: Buffer } | null {
+    const hit = this.artBufferCache.get(artHash);
+    if (!hit) return null;
+    // Refresh recency: Map iteration order doubles as the LRU order.
+    this.artBufferCache.delete(artHash);
+    this.artBufferCache.set(artHash, hit);
+    return hit;
+  }
+
+  private rememberArtBuffer(
+    artHash: string,
+    art: { mime: string; data: Buffer },
+  ): { mime: string; data: Buffer } {
+    const existing = this.artBufferCache.get(artHash);
+    if (existing) this.artBufferCacheBytes -= existing.data.byteLength;
+    this.artBufferCache.delete(artHash);
+    this.artBufferCache.set(artHash, art);
+    this.artBufferCacheBytes += art.data.byteLength;
+    while (this.artBufferCacheBytes > LibraryStore.ART_CACHE_MAX_BYTES && this.artBufferCache.size > 1) {
+      const oldest = this.artBufferCache.keys().next().value;
+      if (oldest == null) break;
+      const evicted = this.artBufferCache.get(oldest);
+      this.artBufferCache.delete(oldest);
+      if (evicted) this.artBufferCacheBytes -= evicted.data.byteLength;
     }
-    return null;
+    return art;
   }
 
   private one<T>(sql: string, params: ReadonlyArray<unknown> = []): T | null {
