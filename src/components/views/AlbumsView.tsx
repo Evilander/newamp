@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from 'react';
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from 'react';
 import type { AlbumSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
@@ -13,10 +13,17 @@ import { Chip } from '../Chip';
 import { EmptyState } from '../EmptyState';
 import { ViewSkeleton } from '../ViewSkeleton';
 import { Note } from '../Icons';
+import { computeGridColumnCount, useVirtualRows } from '../../hooks/useVirtualRows';
 
 const ALBUM_PAGE_SIZE = 240;
 const CATALOG_SEARCH_DEBOUNCE_MS = 180;
 const ALBUM_AUTO_LOAD_SCROLL_PX = 560;
+const ALBUM_GRID_MIN_CARD_WIDTH = 168;
+const ALBUM_GRID_GAP = 16;
+const ALBUM_GRID_CARD_HEIGHT = 228;
+const ALBUM_GRID_ROW_HEIGHT = ALBUM_GRID_CARD_HEIGHT + ALBUM_GRID_GAP;
+const ALBUM_GRID_HORIZONTAL_PADDING = 32;
+const ALBUM_GRID_TOP_PADDING = 16;
 
 type AlbumSort = 'artist' | 'album' | 'year-desc' | 'year-asc' | 'recent' | 'plays' | 'duration' | 'tracks' | 'random';
 
@@ -54,7 +61,7 @@ const albumViewSnapshot: {
   scrollTop: 0,
 };
 
-export function AlbumsView(): JSX.Element {
+export const AlbumsView = memo(function AlbumsView(): JSX.Element {
   const [albums, setAlbums] = useState<AlbumSummary[]>(() => albumViewSnapshot.albums);
   const [selected, setSelected] = useState<AlbumSummary | null>(() => albumViewSnapshot.selected);
   const [tracks, setTracks] = useState<Track[]>(() => albumViewSnapshot.tracks);
@@ -78,6 +85,21 @@ export function AlbumsView(): JSX.Element {
   const albumPageRequestRef = useRef(false);
   const albumScrollTopRef = useRef(albumViewSnapshot.scrollTop);
   const hydratedSnapshotRef = useRef(albumViewSnapshot.albums.length > 0 || !!albumViewSnapshot.selected);
+  const [albumGridColumns, setAlbumGridColumns] = useState(1);
+  const hasAlbumGrid = !selected && albums.length > 0;
+  const albumRows = Math.ceil(albums.length / albumGridColumns);
+  const albumWindow = useVirtualRows({
+    rowCount: albumRows,
+    rowHeight: ALBUM_GRID_ROW_HEIGHT,
+    overscan: 2,
+    scrollRef: albumListRef,
+    enabled: hasAlbumGrid,
+  });
+  const firstVisibleAlbum = albumWindow.startIndex * albumGridColumns;
+  const lastVisibleAlbum = albumWindow.endIndex < 0
+    ? 0
+    : Math.min(albums.length, (albumWindow.endIndex + 1) * albumGridColumns);
+  const visibleAlbums = albums.slice(firstVisibleAlbum, lastVisibleAlbum);
 
   useEffect(() => {
     albumViewSnapshot.filter = filter;
@@ -182,6 +204,25 @@ export function AlbumsView(): JSX.Element {
     };
   }, []);
 
+  useLayoutEffect(() => {
+    if (!hasAlbumGrid) return undefined;
+    const list = albumListRef.current;
+    if (!list) return undefined;
+    const updateColumns = () => {
+      const next = computeGridColumnCount({
+        containerWidth: list.clientWidth,
+        minItemWidth: ALBUM_GRID_MIN_CARD_WIDTH,
+        gap: ALBUM_GRID_GAP,
+        horizontalPadding: ALBUM_GRID_HORIZONTAL_PADDING,
+      });
+      setAlbumGridColumns((current) => (current === next ? current : next));
+    };
+    updateColumns();
+    const observer = new ResizeObserver(updateColumns);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [hasAlbumGrid]);
+
   useEffect(() => {
     if (hydratedSnapshotRef.current) {
       hydratedSnapshotRef.current = false;
@@ -247,15 +288,16 @@ export function AlbumsView(): JSX.Element {
     if (!list) return;
     const frame = window.requestAnimationFrame(() => {
       list.scrollTop = albumScrollTopRef.current;
+      albumWindow.onScroll({ currentTarget: list });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [selected, albums.length, filter, showMissingArtOnly, albumSort, randomSeed]);
+  }, [selected, albums.length, filter, showMissingArtOnly, albumSort, randomSeed, albumWindow.onScroll]);
 
-  function openAlbum(album: AlbumSummary): void {
+  const openAlbum = useCallback((album: AlbumSummary): void => {
     albumScrollTopRef.current = albumListRef.current?.scrollTop ?? albumScrollTopRef.current;
     albumViewSnapshot.scrollTop = albumScrollTopRef.current;
     setSelected(album);
-  }
+  }, []);
 
   function closeAlbum(): void {
     setSelected(null);
@@ -348,6 +390,7 @@ export function AlbumsView(): JSX.Element {
 
   function handleAlbumsScroll(event: UIEvent<HTMLDivElement>): void {
     const list = event.currentTarget;
+    albumWindow.onScroll(event);
     albumScrollTopRef.current = list.scrollTop;
     albumViewSnapshot.scrollTop = list.scrollTop;
     const remaining = list.scrollHeight - list.scrollTop - list.clientHeight;
@@ -465,11 +508,10 @@ export function AlbumsView(): JSX.Element {
   function jumpToAlbumLetter(letter: string): void {
     const container = albumListRef.current;
     if (!container) return;
-    const target = container.querySelector<HTMLElement>(`[data-newamp-album-artist-letter="${letter}"]`);
-    if (!target) return;
-    const containerRect = container.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    const offset = targetRect.top - containerRect.top + container.scrollTop - 12;
+    const albumIndex = albums.findIndex((album) => albumArtistFirstLetter(album.albumArtist) === letter);
+    if (albumIndex < 0) return;
+    const row = Math.floor(albumIndex / albumGridColumns);
+    const offset = ALBUM_GRID_TOP_PADDING + row * ALBUM_GRID_ROW_HEIGHT - 12;
     container.scrollTo({ top: Math.max(0, offset), behavior: catalogScrollBehavior() });
   }
 
@@ -708,71 +750,20 @@ export function AlbumsView(): JSX.Element {
           onScroll={handleAlbumsScroll}
         >
           <div className="p-4">
-          <div
-            className="grid gap-4"
-            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(168px, 1fr))' }}
-          >
-            {albums.map((a) => {
-              const firstLetter = albumArtistFirstLetter(a.albumArtist);
-              return (
-                <div
-                  key={`${a.album}::${a.albumArtist}`}
-                  className="group flex flex-col gap-1"
-                  data-newamp-album-artist-letter={firstLetter}
-                >
-                  <button
-                    onClick={() => openAlbum(a)}
-                    className="flex flex-col gap-1 text-left"
-                    title={`Open ${a.album}`}
-                  >
-                    <AlbumArt album={a} size={168} />
-                    <div className="truncate pt-1 text-[13px] font-semibold">{a.album}</div>
-                  </button>
-                  <div className="truncate text-[11px]" style={{ color: 'var(--ink-2)' }}>
-                    <ArtistLink artist={a.albumArtist} color="var(--ink-2)" />
-                    {a.year ? `  ·  ${a.year}` : ''}
-                  </div>
-                  {a.matchedTrackTitles && (
-                    <div
-                      className="truncate text-[10px]"
-                      style={{ color: 'var(--accent)' }}
-                      title={a.matchedTrackTitles}
-                      data-newamp-album-matched-songs
-                    >
-                      {'♪ '}
-                      {a.matchedTrackTitles.split(' · ').map((matchedTitle, i) => (
-                        <Fragment key={`${matchedTitle}-${i}`}>
-                          {i > 0 && ' · '}
-                          <button
-                            type="button"
-                            className="underline-offset-2 hover:underline"
-                            style={{
-                              background: 'transparent',
-                              border: 'none',
-                              padding: 0,
-                              cursor: 'pointer',
-                              color: 'inherit',
-                              font: 'inherit',
-                            }}
-                            title={`Open "${matchedTitle}" on ${a.album}`}
-                            onClick={() =>
-                              usePlayerStore.getState().navigateToTrack({
-                                title: matchedTitle,
-                                album: a.album,
-                                albumArtist: a.albumArtist,
-                              })
-                            }
-                          >
-                            {matchedTitle}
-                          </button>
-                        </Fragment>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+            {albumWindow.topPad > 0 && <div aria-hidden="true" style={{ height: albumWindow.topPad }} />}
+            <div
+              className="grid gap-4"
+              style={{ gridTemplateColumns: `repeat(${albumGridColumns}, minmax(0, 1fr))` }}
+            >
+              {visibleAlbums.map((album) => (
+                <AlbumCard
+                  key={`${album.album}::${album.albumArtist}`}
+                  album={album}
+                  onOpen={openAlbum}
+                />
+              ))}
+            </div>
+            {albumWindow.bottomPad > 0 && <div aria-hidden="true" style={{ height: albumWindow.bottomPad }} />}
           </div>
           <CatalogLoadMore
             shown={albums.length}
@@ -790,7 +781,73 @@ export function AlbumsView(): JSX.Element {
       </div>
     </div>
   );
-}
+});
+
+const AlbumCard = memo(function AlbumCard({
+  album,
+  onOpen,
+}: {
+  album: AlbumSummary;
+  onOpen: (album: AlbumSummary) => void;
+}): JSX.Element {
+  return (
+    <div
+      className="group flex min-w-0 flex-col gap-1 overflow-hidden"
+      style={{ height: ALBUM_GRID_CARD_HEIGHT }}
+      data-newamp-album-artist-letter={albumArtistFirstLetter(album.albumArtist)}
+    >
+      <button
+        onClick={() => onOpen(album)}
+        className="flex min-w-0 flex-col gap-1 text-left"
+        title={`Open ${album.album}`}
+      >
+        <AlbumArt album={album} size={ALBUM_GRID_MIN_CARD_WIDTH} />
+        <div className="w-full truncate pt-1 text-[13px] font-semibold leading-4">{album.album}</div>
+      </button>
+      <div className="truncate text-[11px] leading-4" style={{ color: 'var(--ink-2)' }}>
+        <ArtistLink artist={album.albumArtist} color="var(--ink-2)" />
+        {album.year ? `  ·  ${album.year}` : ''}
+      </div>
+      {album.matchedTrackTitles && (
+        <div
+          className="truncate text-[10px] leading-3"
+          style={{ color: 'var(--accent)' }}
+          title={album.matchedTrackTitles}
+          data-newamp-album-matched-songs
+        >
+          {'♪ '}
+          {album.matchedTrackTitles.split(' · ').map((matchedTitle, i) => (
+            <Fragment key={`${matchedTitle}-${i}`}>
+              {i > 0 && ' · '}
+              <button
+                type="button"
+                className="underline-offset-2 hover:underline"
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  color: 'inherit',
+                  font: 'inherit',
+                }}
+                title={`Open "${matchedTitle}" on ${album.album}`}
+                onClick={() =>
+                  usePlayerStore.getState().navigateToTrack({
+                    title: matchedTitle,
+                    album: album.album,
+                    albumArtist: album.albumArtist,
+                  })
+                }
+              >
+                {matchedTitle}
+              </button>
+            </Fragment>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
 
 /** `smooth` unless the user asked for reduced motion. */
 export function catalogScrollBehavior(): ScrollBehavior {

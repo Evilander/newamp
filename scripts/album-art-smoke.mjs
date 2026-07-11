@@ -242,6 +242,8 @@ assert.match(albumsViewSource, /Missing art/i, 'Albums view should expose a miss
 assert.match(albumsViewSource, /showMissingArtOnly/, 'Albums view should filter to albums missing cover art');
 assert.match(albumsViewSource, /data-newamp-albums-scroll/, 'Albums view should own a restorable scroll container');
 assert.match(albumsViewSource, /albumScrollTopRef/, 'Albums view should return to prior scroll position after closing an album');
+assert.match(albumsViewSource, /useVirtualRows/, 'Albums view should window large cover grids');
+assert.match(albumsViewSource, /visibleAlbums\.map/, 'Albums view should only mount cards in the visible window');
 assert.match(albumsViewSource, /Scan library/i, 'Albums view should expose a direct scan action for newly downloaded albums');
 assert.match(albumsViewSource, /addFolderAndScan/, 'Albums view should let users add and scan a new music folder in place');
 assert.match(albumsViewSource, /libraryAutoWatch: true/, 'Albums view folder import should keep the new root watched');

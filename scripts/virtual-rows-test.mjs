@@ -16,7 +16,7 @@ await build({
   outfile: resolve('tmp/virtual-rows-bundle.mjs'), logLevel: 'silent',
   external: ['react'],
 });
-const { computeVisibleWindow } = await import(pathToFileURL(resolve('tmp/virtual-rows-bundle.mjs')).href);
+const { computeGridColumnCount, computeVisibleWindow } = await import(pathToFileURL(resolve('tmp/virtual-rows-bundle.mjs')).href);
 
 const log = [];
 let pass = true;
@@ -33,6 +33,10 @@ if (bottom.bottomPad !== 0) fail('bottom bottomPad should be 0');
 if (bottom.topPad !== bottom.startIndex * 40) fail('bottom topPad mismatch');
 const tiny = computeVisibleWindow({ rowHeight: 40, viewportH: 400, rowCount: 3, overscan: 3, scrollTop: 0 });
 eq(tiny, { startIndex: 0, endIndex: 2, topPad: 0, bottomPad: 0 }, 'tiny list');
+
+eq(computeGridColumnCount({ containerWidth: 800, minItemWidth: 168, gap: 16, horizontalPadding: 32 }), 4, 'album grid wide');
+eq(computeGridColumnCount({ containerWidth: 384, minItemWidth: 168, gap: 16, horizontalPadding: 32 }), 2, 'album grid medium');
+eq(computeGridColumnCount({ containerWidth: 140, minItemWidth: 168, gap: 16, horizontalPadding: 32 }), 1, 'album grid narrow clamps to one');
 
 const report = log.join('\n') + '\n' + (pass ? '[virtual-rows-test] PASS' : '[virtual-rows-test] FAIL') + '\n';
 writeFileSync(RESULT, report);

@@ -60,11 +60,6 @@ export default function App(): JSX.Element {
   const fullscreen = usePlayerStore((s) => s.fullscreenViz);
   const compact = usePlayerStore((s) => s.compactMode);
   const alwaysOnTop = usePlayerStore((s) => s.alwaysOnTop);
-  const current = usePlayerStore((s) => s.current);
-  const isPlaying = usePlayerStore((s) => s.isPlaying);
-  const currentTime = usePlayerStore((s) => s.currentTime);
-  const duration = usePlayerStore((s) => s.duration);
-  const playbackRate = usePlayerStore((s) => s.playbackRate);
   const settings = usePlayerStore((s) => s.settings);
   const setView = usePlayerStore((s) => s.setView);
   const [dropActive, setDropActive] = useState(false);
@@ -291,27 +286,10 @@ export default function App(): JSX.Element {
     void winctl.setAlwaysOnTop(compact || alwaysOnTop);
   }, [compact, alwaysOnTop]);
 
-  useEffect(() => {
-    syncMediaSession({
-      current,
-      isPlaying,
-      currentTime,
-      duration,
-      playbackRate,
-      actions: {
-        play: () => usePlayerStore.getState().togglePlay(),
-        pause: () => usePlayerStore.getState().engine.pause(),
-        previous: () => void usePlayerStore.getState().prev(),
-        next: () => void usePlayerStore.getState().next(),
-        stop: () => usePlayerStore.getState().engine.stop(),
-        seek: (position) => usePlayerStore.getState().seek(position),
-      },
-    });
-  }, [current, isPlaying, currentTime, duration, playbackRate]);
-
   if (compact) {
     return (
       <>
+        <MediaSessionSync />
         <Suspense fallback={<DeckFallback />}>
           <CompactPlayer />
         </Suspense>
@@ -324,9 +302,12 @@ export default function App(): JSX.Element {
 
   return (
     <>
+      <MediaSessionSync />
       <div
         data-newamp-drop-zone
+        aria-hidden={fullscreen || undefined}
         className="app-chrome relative flex h-full w-full flex-col"
+        style={{ visibility: fullscreen ? 'hidden' : 'visible' }}
         onDragEnter={(e) => {
           if (!hasDraggedFiles(e.dataTransfer)) return;
           e.preventDefault();
@@ -411,6 +392,34 @@ export default function App(): JSX.Element {
       )}
     </>
   );
+}
+
+function MediaSessionSync(): null {
+  const current = usePlayerStore((s) => s.current);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const duration = usePlayerStore((s) => s.duration);
+  const playbackRate = usePlayerStore((s) => s.playbackRate);
+
+  useEffect(() => {
+    syncMediaSession({
+      current,
+      isPlaying,
+      currentTime,
+      duration,
+      playbackRate,
+      actions: {
+        play: () => usePlayerStore.getState().togglePlay(),
+        pause: () => usePlayerStore.getState().engine.pause(),
+        previous: () => void usePlayerStore.getState().prev(),
+        next: () => void usePlayerStore.getState().next(),
+        stop: () => usePlayerStore.getState().engine.stop(),
+        seek: (position) => usePlayerStore.getState().seek(position),
+      },
+    });
+  }, [current, isPlaying, currentTime, duration, playbackRate]);
+
+  return null;
 }
 
 function ViewFallback(): JSX.Element {
