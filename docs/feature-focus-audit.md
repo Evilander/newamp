@@ -31,10 +31,12 @@ and shareable.** Fail all three → freeze or cut.
 | Feature | Why |
 |---|---|
 | Deck skins | Just rebuilt to wow-grade; Deck Snapshot (polaroid) is a built-in share loop — marketing/ drafts already lean on it |
-| Eviland + detached projector | Flagship; green artifact fixed this pass; keep investing in scenes over new modes |
+| Eviland + detached projector | Flagship and the app's largest code cluster (7+ dedicated test suites); green artifact fixed this pass; keep investing in scenes over new modes |
 | Resonance | Unique; self-throttling already solved the perf objection |
-| Bit-perfect / signal-path honesty | The trust story that converts audiophiles; document it louder |
-| Perceived performance | This pass: virtualized album grid, no whole-app re-render on the clock, instant album-open. Continue: LibraryView rows, art thumbnail sizes |
+| Bit-perfect / signal-path honesty | First-party native WASAPI/CoreAudio/ALSA inside Electron; the trust story that converts audiophiles — document it louder |
+| Living Tags + Audio DNA | A reactive tag-rule DSL (`tag(x) when bpm>110 boost 1.5`) over local perceptual fingerprints — no mainstream player has this; underexposed in the UI relative to its uniqueness |
+| Wrapped / Wrapped Live + Radio Brain | Fully local Wrapped with video export, and LAN broadcast of your own library — "social" features with zero cloud; both earned named releases. Wrapped stays frozen until the Nov 2026 build-up |
+| Perceived performance | This pass: virtualized album grid, no whole-app re-render on the clock, instant album-open, async art serving. Continue: LibraryView rows, art thumbnail sizes |
 
 ## Keep (table stakes — maintain, don't grow)
 
@@ -43,23 +45,31 @@ Last.fm, lyrics (local + fetched), watch folders, metadata editing, media
 keys/tray/thumbar, themes/shells, Home/History/Mixes, first-launch flow.
 These are done and gated; new work here should be bug-fix only.
 
-## Audit list (value unclear vs. upkeep cost — decide with data)
+## Audit list (most code, least evidence — decide with data)
 
-| Feature | Footprint | Concern |
+Ranked by footprint vs. verification/iteration evidence (git history +
+smoke coverage), worst first:
+
+| Feature | Footprint | Evidence problem |
 |---|---|---|
-| Podcasts | PodcastView + download/progress smokes + host-guard test | A whole subscription/download subsystem inside a local music player; dedicated apps do it better. Candidate: freeze, or reduce to "plays podcast files" |
-| Net radio | RadioView + radio-brain smoke | Same question, smaller footprint |
-| Discover | 381 LOC + 2 smokes | If it's network novelty rather than library insight, it dilutes the local-first story |
-| Social / Remote / Handoff | 4+ smokes | Multi-device surface = permanent upkeep; who uses it? |
-| AI assist (OpenAI key) | smoke:ai-assist + settings | Keep only if it demonstrably powers something loved (smart playlists, liner notes); otherwise it's a checkbox feature |
-| DNA / seed-vibe / clip-replay / practice-loop / tempo / bookmarks | 1 smoke each | Power-user micro-features; individually cheap, collectively they crowd the UI and the gate suite |
-| Wrapped | 402 LOC, seasonal | Keep frozen until Nov 2026 build-up (Wrapped Live deadline Dec 2026) |
-| Profile | 277 LOC | Unclear job; fold into Home or History? |
+| Guitar tools (tabs, practice loop, tempo trainer) | GuitarTabCompanion.tsx (530) + electron/guitar-tabs.ts (833) ≈ 1,363 LOC | Largest niche cluster in the app; real smokes exist, but it's orthogonal to the player pitch. Freeze candidate — or spin it as a named "Practice Mode" if data shows use |
+| OpenAI liner notes | openai-assist.ts + LinerNotesPanel ≈ 610 LOC | One commit ever, never revisited; requires the user's paid API key inside a product whose pitch is "no cloud, no subscription". Cut or clearly ghetto-ize behind Settings |
+| Profile | ProfileView.tsx (277) | The only nav view with zero dedicated smoke; README itself calls it a "foundation". Fold into Home/History or finish it deliberately |
+| Winamp .wsz import | winamp-skin-import.ts (310) | One commit since inception — but it's on-brand and README-advertised. Keep frozen; it costs nothing until it breaks |
+| library-watcher.ts | 152 LOC, last real touch v1.4 | Scanner kept evolving while the watcher froze — verify watch-folders still behaves with 2.0 scanning, then fold into scanner or leave |
+| Podcasts | PodcastView (347) + 4 smokes (incl. SSRF hardening) | Actively maintained, but it's a subscription/download subsystem dedicated apps do better. Freeze after next bug pass |
+| Discover | 381 LOC + 2 smokes | Keep only if it drives library engagement (it's crate-digging missions over your own files — that IS local-first; verify usage) |
 
 **How to decide honestly:** we're guessing about usage. Add an opt-in,
 local-only usage counter (JSON in userData, no network) for view opens and
-feature actions; read it after 30 days. Freeze the bottom of this table now
+feature actions; read it after 30 days. Freeze the top of this table now
 (no new work, smokes stay green), cut what the data doesn't defend.
+
+Corrections from the code inventory worth naming: Radio is not "net radio" —
+it's **Radio Brain**, LAN broadcast of your own library (differentiator, moved
+up); Living Tags/DNA is a real DSL, not a micro-feature (moved up); the README
+claimed "9 deck modes… even a hotdog" two releases after the Hotdog deck was
+removed (fixed this pass).
 
 ## Structural debt that slows every future pass
 

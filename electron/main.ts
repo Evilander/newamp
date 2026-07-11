@@ -1591,7 +1591,9 @@ function registerAudioProtocol(): void {
     try {
       const id = protocolNumericId(request.url);
       if (!id) return new Response('Bad request', { status: 400 });
-      const art = library.getArt(id);
+      // Async read: cover bursts from the album grid must not stall the
+      // single main-process thread (and every pending IPC behind it).
+      const art = await library.getArtAsync(id);
       if (!art) {
         return new Response('No art', { status: 404 });
       }
