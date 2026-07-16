@@ -1176,6 +1176,21 @@ export class AudioEngine {
     }
   }
 
+  /** Supersede any prior automation on `param` before scheduling a new
+   *  approach — the cancel+pin idiom the crossfade and limiter-dip paths
+   *  already use. Without it, high-frequency callers (wheel-volume fires
+   *  60-120 events/sec, EQ slider drags similar) stack setTargetAtTime
+   *  events on the param's automation timeline with nothing terminating
+   *  them; cancel+pin keeps the timeline bounded and the ramp start
+   *  deterministic. */
+  private retargetParam(param: AudioParam, target: number, timeConstant: number): void {
+    if (!this.graph) return;
+    const t = this.graph.ctx.currentTime;
+    param.cancelScheduledValues(t);
+    param.setValueAtTime(param.value, t);
+    param.setTargetAtTime(target, t, timeConstant);
+  }
+
   setVolume(v: number): void {
     // Volume range extends to 2.0 (VLC-style boost). masterGain is upstream of
     // the limiter (see graph wiring), so when the limiter is ENABLED values
@@ -1187,11 +1202,7 @@ export class AudioEngine {
     // volumePositionToGain so equal slider travel ~= equal perceived loudness.
     this.volume = Math.max(0, Math.min(2, v));
     if (!this.graph) return;
-    this.graph.masterGain.gain.setTargetAtTime(
-      volumePositionToGain(this.volume),
-      this.graph.ctx.currentTime,
-      0.01,
-    );
+    this.retargetParam(this.graph.masterGain.gain, volumePositionToGain(this.volume), 0.01);
   }
 
   setReplayGainDb(db: number | null): void {
@@ -1201,7 +1212,7 @@ export class AudioEngine {
     // Short time-constant (~6ms): ReplayGain changes at track boundaries, and a
     // 20ms ramp was audible as a brief loudness "swell" on the first beat. Still
     // smoothed enough to avoid a zipper/click.
-    this.graph.replayGain.gain.setTargetAtTime(this.replayGainLinear, this.graph.ctx.currentTime, 0.006);
+    this.retargetParam(this.graph.replayGain.gain, this.replayGainLinear, 0.006);
   }
 
   setPreampDb(db: number): void {
@@ -1210,7 +1221,7 @@ export class AudioEngine {
     // Preamp is a live Settings slider (not a track-boundary one-shot like
     // ReplayGain), so it uses the slider-class time constant that volume/EQ use
     // — a 0.006 ramp made dragging it audibly steppy next to the others.
-    this.graph.inputGain.gain.setTargetAtTime(this.preampLinear, this.graph.ctx.currentTime, 0.015);
+    this.retargetParam(this.graph.inputGain.gain, this.preampLinear, 0.015);
   }
 
   /** Requested-vs-actual rate when the device rejected the preferred rate; null otherwise. */
@@ -1301,7 +1312,7 @@ export class AudioEngine {
     if (!this.graph || !this.eqEnabled) return;
     const band = this.graph.eqBands[index];
     if (!band) return;
-    band.gain.setTargetAtTime(value, this.graph.ctx.currentTime, 0.015);
+    this.retargetParam(band.gain, value, 0.015);
   }
 
   setEqBands(values: number[]): void {
@@ -1313,7 +1324,7 @@ export class AudioEngine {
     if (!this.graph) return;
     this.graph.eqBands.forEach((band, index) => {
       const value = this.eqEnabled ? (this.eqValues[index] ?? 0) : 0;
-      band.gain.setTargetAtTime(value, this.graph!.ctx.currentTime, 0.02);
+      this.retargetParam(band.gain, value, 0.02);
     });
   }
 

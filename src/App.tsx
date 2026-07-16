@@ -10,13 +10,14 @@ import { ToastHost } from './components/StatusToast';
 import { StartupSplash } from './components/StartupSplash';
 import { usePlayerStore } from './store/usePlayerStore';
 import { api, inElectron, winctl } from './lib/api';
-import { syncMediaSession } from './lib/mediaSession';
+import { syncMediaSessionIdentity, syncMediaSessionPosition } from './lib/mediaSession';
 import { resolvePlayerShortcut, type PlayerShortcutCommand } from '@shared/keyboard-shortcuts';
 import { applyShell, loadInitialShell } from './components/ShellPicker';
 import { useAdaptiveQuality } from './lib/adaptiveQuality';
 import { useReducedMotion } from './hooks/useReducedMotion';
 import { startResonance, stopResonance, pokeResonance, type ResonanceOpts } from './lib/resonance';
 import { startEvilandProducer } from './visualizer/eviland-producer';
+import { frameBus } from './visualizer/frame-bus';
 import { projectorQualityTier } from './lib/vizPrefs';
 
 const EqPanel = lazy(() => import('./components/EqPanel').then((module) => ({ default: module.EqPanel })));
@@ -264,6 +265,24 @@ export default function App(): JSX.Element {
           else if (cmd === 'setVolume' && Number.isFinite(arg)) void store.setVolume(Math.max(0, Math.min(2, arg ?? 0)));
         })
       : () => undefined;
+    // Detached window closed/crashed/failed-to-open → tell the frame bus so
+    // the headless producer (visualizer/eviland-producer.ts) stops analyzing
+    // for a consumer that's gone. This wiring MUST live here rather than in
+    // useDetachedVisualizer: that hook only mounts via Sidebar/
+    // FullscreenVisualizer, neither of which is mounted in compact
+    // mini-player mode, so a projector that closes/crashes while compact
+    // used to leave the producer's 33ms tick running forever with nothing
+    // attached to its port. This effect runs in every mode (App renders it
+    // above the compact/full branch), so the bus always finds out.
+    const offDetachedClosed = detachedBridge?.onClosed
+      ? detachedBridge.onClosed(() => frameBus.detachPort())
+      : () => undefined;
+    const offDetachedCrashed = detachedBridge?.onCrashed
+      ? detachedBridge.onCrashed(() => frameBus.detachPort())
+      : () => undefined;
+    const offDetachedOpenFailed = detachedBridge?.onOpenFailed
+      ? detachedBridge.onOpenFailed(() => frameBus.detachPort())
+      : () => undefined;
     const persistOnExit = (): void => {
       void usePlayerStore.getState().persistPlaybackSession();
     };
@@ -275,6 +294,9 @@ export default function App(): JSX.Element {
       offOpenFiles();
       offPlayerCommand();
       offTransportCommand();
+      offDetachedClosed();
+      offDetachedCrashed();
+      offDetachedOpenFailed();
     };
   }, [init]);
 
@@ -401,13 +423,14 @@ function MediaSessionSync(): null {
   const duration = usePlayerStore((s) => s.duration);
   const playbackRate = usePlayerStore((s) => s.playbackRate);
 
+  // Identity sync (metadata + the six OS action handlers) only needs to run
+  // on track change or play/pause — NOT on the 10Hz currentTime tick, which
+  // used to rebuild a MediaMetadata and re-register all six handlers every
+  // ~100ms for the entire session.
   useEffect(() => {
-    syncMediaSession({
+    syncMediaSessionIdentity({
       current,
       isPlaying,
-      currentTime,
-      duration,
-      playbackRate,
       actions: {
         play: () => usePlayerStore.getState().togglePlay(),
         pause: () => usePlayerStore.getState().engine.pause(),
@@ -417,7 +440,12 @@ function MediaSessionSync(): null {
         seek: (position) => usePlayerStore.getState().seek(position),
       },
     });
-  }, [current, isPlaying, currentTime, duration, playbackRate]);
+  }, [current, isPlaying]);
+
+  // Position sync runs on the 10Hz tick — it's just one setPositionState call.
+  useEffect(() => {
+    syncMediaSessionPosition({ current, currentTime, duration, playbackRate });
+  }, [current, currentTime, duration, playbackRate]);
 
   return null;
 }

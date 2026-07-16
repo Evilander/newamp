@@ -38,7 +38,6 @@ import {
   type OperatorConfig,
   cloneConfig,
   defaultConfig,
-  lerpConfig,
   lerpConfigInto,
 } from './eviland-operators';
 import {
@@ -444,11 +443,13 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   let cachedRotateThresholdMs: number | null = null;
 
   // Intra-section drift: one precomputed mutated "breathe toward" target per
-  // look, a phase clock, and a throttled cache so we don't lerp every frame.
+  // look, a phase clock, and a persistent allocation-light scratch (reused via
+  // lerpConfigInto, same pattern as fadeScratch above) so we don't mint a
+  // fresh OperatorConfig on every DRIFT_TICK_MS recompute.
   let driftTarget: OperatorConfig = cloneConfig(initial);
   let driftPhaseMs = 0;
   let driftAccumMs = 0;
-  let driftCache: OperatorConfig = cloneConfig(initial);
+  const driftCache: OperatorConfig = cloneConfig(initial);
 
   // Slow-moving energy + novelty trackers used to derive tier.
   let energyAvg = 0;
@@ -697,8 +698,18 @@ export function createDirector(opts: DirectorOptions = {}): Director {
         return;
       }
       // Drift: slowly breathe target<->driftTarget and back on a triangle wave.
-      // Throttled to DRIFT_TICK_MS so we allocate ~10x/sec, not 60x/sec; the
-      // cached config is returned by reference between ticks.
+      // Throttled to DRIFT_TICK_MS so we recompute ~10x/sec, not 60x/sec.
+      // Allocation-light: lerpConfigInto mutates the persistent driftCache in
+      // place (same technique fadeScratch uses below) instead of minting a
+      // fresh lerpConfig() result every tick. driftAmount defaults to 0.12, so
+      // this branch runs for every session (the `drift <= 0` fast path above
+      // is dead in production) — the old per-tick lerpConfig() allocation was
+      // ~20 Maps + dozens of objects, 10x/sec, doubled with a projector open.
+      // Output values are byte-identical to lerpConfig(target, driftTarget, t).
+      // Safe to reuse across ticks: startFade() always snapshots `live` via
+      // `from = cloneConfig(live)` (a deep copy) before the next section fade
+      // runs, so nothing holds a bare reference to driftCache across the next
+      // mutation — the same safety argument that already applies to fadeScratch.
       const dt = Math.max(0, Math.min(250, dtMs));
       driftPhaseMs = (driftPhaseMs + dt) % DRIFT_PERIOD_MS;
       driftAccumMs += dt;
@@ -707,9 +718,10 @@ export function createDirector(opts: DirectorOptions = {}): Director {
         const phase = driftPhaseMs / DRIFT_PERIOD_MS; // 0..1
         const tri = phase < 0.5 ? phase * 2 : (1 - phase) * 2; // 0..1..0
         const t = tri * tri * (3 - 2 * tri); // smoothstep ease
-        driftCache = lerpConfig(target, driftTarget, t);
-        // Drift is NOT a section transition — leave `_transition` undefined so
-        // the renderer's field-buffer crossfade (plan §2.6) stays disarmed.
+        // Drift is NOT a section transition — lerpConfigInto never touches
+        // `_transition` (verified by the operators test), so it stays absent
+        // here just like the old lerpConfig()-based path.
+        lerpConfigInto(driftCache, target, driftTarget, t);
       }
       live = driftCache;
     } else if (fade <= 0) {

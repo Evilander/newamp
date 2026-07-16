@@ -11,6 +11,7 @@ import {
 } from '../butterchurn-iframe/protocol';
 import { createParticleFlowRenderer } from '../visualizer/particle-flow';
 import { createEvilandRenderer, type EvilandPalette } from '../visualizer/eviland';
+import { createGovernor } from '../visualizer/eviland-governor';
 import { createEvilandReactor } from '../visualizer/eviland-audio';
 import { createReactorOverlay, type ReactorOverlay } from '../visualizer/reactor-overlay';
 import { createSceneOverlay, type SceneOverlay } from '../visualizer/scene-overlay';
@@ -115,13 +116,19 @@ interface Props {
   reactivity?: VizReactivity;
 }
 
-function createFrameGate(canvasRef: RefObject<HTMLCanvasElement>, frameIntervalMs: number): (now: number) => boolean {
+function createFrameGate(
+  canvasRef: RefObject<HTMLCanvasElement>,
+  frameIntervalMs: number | (() => number),
+): (now: number) => boolean {
   let lastPaintAt = 0;
   return (now: number) => {
     const node = canvasRef.current;
     if (!node || !node.isConnected || document.hidden) return false;
     if (node.clientWidth <= 0 || node.clientHeight <= 0) return false;
-    if (now - lastPaintAt < frameIntervalMs) return false;
+    // A function interval re-reads per frame so the Auto-Pilot governor can
+    // stretch the cadence live without tearing down the render loop.
+    const interval = typeof frameIntervalMs === 'function' ? frameIntervalMs() : frameIntervalMs;
+    if (now - lastPaintAt < interval) return false;
     lastPaintAt = now;
     return true;
   };
@@ -295,6 +302,15 @@ export function Visualizer({
       if (liveMode && overlayCanvasRef.current) {
         overlay = createReactorOverlay(overlayCanvasRef.current);
       }
+      // Auto-Pilot governor for the overlay stack (reactor events + scene
+      // layer). The MilkDrop field self-governs inside its iframe; this
+      // watches the measured cost of OUR layers and trims the scene canvas
+      // resolution — and at its floor, paints the scene every other frame.
+      // The reactor overlay stays full-res: it's the cheap causal layer and
+      // its punch is the identity of Eviland Live.
+      const ovGov = liveMode ? createGovernor({ costBudgetMs: 6 }) : null;
+      let sceneSkipDt = 0;
+      let scenePhase = false;
       // Scene overlay: skipped entirely on 'low' so weak GPUs keep their
       // frame budget — MilkDrop + reactor events still run.
       let sceneOverlay: SceneOverlay | null = null;
@@ -358,7 +374,8 @@ export function Visualizer({
           if (sceneNode) {
             const cssW = sceneNode.clientWidth || 100;
             const cssH = sceneNode.clientHeight || 100;
-            const odpr = Math.min(window.devicePixelRatio || 1, dprCap);
+            const odpr =
+              Math.min(window.devicePixelRatio || 1, dprCap) * (ovGov ? ovGov.scale() : 1);
             if (cssW !== sceneW || cssH !== sceneH || odpr !== sceneDpr) {
               sceneW = cssW;
               sceneH = cssH;
@@ -371,7 +388,16 @@ export function Visualizer({
           // generation). No-op when unchanged.
           refreshSceneSeed();
           sceneOverlay.setSeedKey(sceneSeedValue);
-          sceneOverlay.render(frame, ovPalette, dt);
+          scenePhase = !scenePhase;
+          if (ovGov && ovGov.intervalMul() > 1 && scenePhase) {
+            // Governor floor: paint the scene layer every other frame.
+            // MilkDrop underneath still carries full-rate motion; the skipped
+            // dt is handed to the next paint so scene animation speed holds.
+            sceneSkipDt += dt;
+          } else {
+            sceneOverlay.render(frame, ovPalette, dt + sceneSkipDt);
+            sceneSkipDt = 0;
+          }
         }
       };
 
@@ -433,7 +459,12 @@ export function Visualizer({
         }
         // The reactor overlay is independent of iframe readiness — run it on the
         // same frame cadence so the events stay in sync with the audio.
-        if (paint) updateOverlay(now);
+        // (`performance` is the tier prop here — the clock is window.performance.)
+        if (paint) {
+          const overlayStart = window.performance.now();
+          updateOverlay(now);
+          ovGov?.endFrame(now, window.performance.now() - overlayStart);
+        }
         raf = requestAnimationFrame(pump);
       };
       raf = requestAnimationFrame(pump);
@@ -478,7 +509,15 @@ export function Visualizer({
       const smoke = Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke);
       const evilandQuality: 'high' | 'medium' | 'low' =
         performance === 'low' ? 'low' : isFullscreen ? 'high' : 'medium';
-      const canPaint = createFrameGate(canvasRef, frameIntervalMs);
+      // Auto-Pilot governor: detectPerformanceTier()'s one-shot hardware sniff
+      // can't see thermal throttling, battery savers, or a GPU busy elsewhere.
+      // The governor watches the MEASURED per-frame render cost and steps the
+      // internal resolution (then, at its floor, the paint cadence) down when
+      // this machine sustainably can't hold budget — and back up when headroom
+      // returns. Steps are discrete with dwell + cooldown, so FBO reallocation
+      // from resize stays rare.
+      const gov = createGovernor({ costBudgetMs: isFullscreen ? 12 : 8 });
+      const canPaint = createFrameGate(canvasRef, () => gov.intervalMs(frameIntervalMs));
       const baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
       let raf = 0;
       const renderer = createEvilandRenderer(canvas, { quality: evilandQuality, smoke });
@@ -618,12 +657,15 @@ export function Visualizer({
       const loop = (now: number) => {
         raf = requestAnimationFrame(loop);
         if (!canPaint(now)) return;
+        // NOTE: `performance` is the component's tier prop in this scope —
+        // the clock must be window.performance.
+        const renderStart = window.performance.now();
         const node = canvasRef.current;
         if (node) {
           const cssW = node.clientWidth || 100;
           const cssH = node.clientHeight || 100;
           const fit = Math.min(1, Math.sqrt(maxPixels / Math.max(1, cssW * baseDpr * cssH * baseDpr)));
-          renderer.resize(cssW, cssH, baseDpr * fit);
+          renderer.resize(cssW, cssH, baseDpr * fit * gov.scale());
         }
         engine.getFreqData(freq);
         engine.getOnsetFreqData(onsetFreq);
@@ -718,8 +760,17 @@ export function Visualizer({
         // else: director off + no pending change → renderer keeps its last
         // config (default or last manual look). No per-frame setConfig.
 
-        if (paletteTick++ % 30 === 0) palette = readPalette();
+        if (paletteTick++ % 30 === 0) {
+          palette = readPalette();
+          // Observability breadcrumb (~1x/sec): smokes and bug reports can
+          // read the governor's live verdict straight off the DOM.
+          if (node) {
+            const snap = gov.snapshot();
+            node.setAttribute('data-newamp-gov', `${snap.verdict}@${snap.scale}`);
+          }
+        }
         renderer.render(evFrame, palette, dtMs);
+        gov.endFrame(now, window.performance.now() - renderStart);
       };
       raf = requestAnimationFrame(loop);
 

@@ -1,14 +1,15 @@
 // Detached Eviland window controller for the fullscreen visualizer UI.
 //
 // Owns the open/closed state of the detached (pop-out) visualizer window and
-// surfaces failures the main process reports. Critically, on close / crash /
-// open-failure it calls frameBus.detachPort() so the producer side stops
-// believing a (now-dead) consumer is attached — otherwise, with playback
-// paused, the bus would never discover the window is gone (it only self-heals
-// on the next failed postMessage).
+// surfaces failures the main process reports for display (toggle state,
+// busy spinner, error banner). The close/crash/open-failed → producer
+// teardown (frameBus.detachPort()) lives in App.tsx's always-mounted effect
+// instead of here, because this hook only mounts via Sidebar/
+// FullscreenVisualizer — neither is mounted in compact mini-player mode, so
+// a projector that dies while compact would otherwise never tell the
+// producer to stop.
 
 import { useCallback, useEffect, useState } from 'react';
-import { frameBus } from '../visualizer/frame-bus';
 
 export interface DetachedDisplayInfo {
   id: number;
@@ -69,18 +70,15 @@ export function useDetachedVisualizer(): DetachedVisualizerControls {
     const offClosed = bridge.onClosed(() => {
       setIsOpen(false);
       setBusy(false);
-      frameBus.detachPort();
     });
     const offCrashed = bridge.onCrashed((reason) => {
       setIsOpen(false);
       setBusy(false);
-      frameBus.detachPort();
       setError(`Detached window crashed (${reason}).`);
     });
     const offFailed = bridge.onOpenFailed((reason) => {
       setIsOpen(false);
       setBusy(false);
-      frameBus.detachPort();
       setError(`Couldn't open the detached window: ${reason}.`);
     });
     const offDisplays = bridge.onDisplaysChanged(refreshDisplays);

@@ -229,8 +229,13 @@ export function FullscreenVisualizer(): JSX.Element {
   // recording isn't composited.
   const evilandCompositorStopRef = useRef<(() => void) | null>(null);
   // Retroactive replay ring ("save what just happened") — armed while the
-  // Eviland Live stage is up on a non-low tier. Shift+R saves the last 15s.
+  // Eviland Live stage is up on a non-low tier AND actually playing/visible.
+  // Shift+R saves the last 15s.
   const replayRef = useRef<{ ring: ReplayRing; compositor: LiveCompositor; audioDest: MediaStreamAudioDestinationNode | null } | null>(null);
+  // Pending debounced teardown (see the arming effect below) — a plain
+  // setTimeout id, kept in a ref so it survives that effect re-running when
+  // isPlaying/recording change without re-declaring a fresh timer each time.
+  const replayDisarmTimerRef = useRef<number>(0);
   const [replayReady, setReplayReady] = useState(false);
   const [savingClip, setSavingClip] = useState(false);
   const [clipStatus, setClipStatus] = useState<string | null>(null);
@@ -606,7 +611,12 @@ export function FullscreenVisualizer(): JSX.Element {
     return () => window.cancelAnimationFrame(raf);
   }, [autoVjEnabled, engine]);
 
-  // Stop an in-flight recording if the visualizer is closed mid-capture.
+  // Stop an in-flight recording — and the replay ring, if still armed — if the
+  // visualizer is closed mid-capture. This is the final safety net for the
+  // replay ring specifically: the arming effect below deliberately doesn't
+  // hard-teardown on every cleanup (that's what makes its debounce work), so
+  // a genuine unmount needs to be the one place that unconditionally closes
+  // it out.
   useEffect(() => () => {
     try {
       recorderRef.current?.stop();
@@ -628,14 +638,64 @@ export function FullscreenVisualizer(): JSX.Element {
       try { engine.visualizerNode.disconnect(audioDest); } catch { /* ignore */ }
       evilandRecorderAudioRef.current = null;
     }
+    if (replayDisarmTimerRef.current) {
+      window.clearTimeout(replayDisarmTimerRef.current);
+      replayDisarmTimerRef.current = 0;
+    }
+    const replayEntry = replayRef.current;
+    if (replayEntry) {
+      replayRef.current = null;
+      replayEntry.ring.disarm();
+      replayEntry.compositor.stop();
+      if (replayEntry.audioDest) {
+        try { engine.visualizerNode.disconnect(replayEntry.audioDest); } catch { /* ignore */ }
+      }
+    }
   }, [engine]);
 
-  // Arm the replay ring whenever the Eviland Live stage is visible. The
-  // MilkDrop iframe's internal canvas mounts late (preset catalog parse), so
-  // arming retries until the real field canvas exists — falling back to the
-  // 2D painter only after butterchurn has clearly failed (~25s).
+  // Arm the replay ring only while Eviland Live is the active preset, tier is
+  // above Lite, playback is actually running, the window is visible, and no
+  // clip recording is competing for the layer compositor. Without this it ran
+  // constantly for as long as the stage was up — paused, occluded, whatever —
+  // which is the single biggest perf cost in the app (two more captureStream
+  // taps + <video> decodes + a continuous WebCodecs encode, on top of
+  // whatever else is on screen). The MilkDrop iframe's internal canvas also
+  // mounts late (preset catalog parse), so arming retries until the real
+  // field canvas exists — falling back to the 2D painter only after
+  // butterchurn has clearly failed (~25s).
+  //
+  // Pausing or hiding debounces the actual teardown by ~3s (via
+  // replayDisarmTimerRef, which survives this effect re-running) so a quick
+  // pause/resume tap doesn't pay for tearing down and renegotiating the
+  // encoder; `isPlaying`/`recording` re-entering this effect on change is
+  // exactly what lets it re-evaluate. Recording is different: toggleRecord's
+  // eviland-live branch needs sole use of the compositor pipeline right now,
+  // so that case disarms immediately instead of debouncing (see evaluate()).
   useEffect(() => {
-    if (activePreset !== 'eviland-live' || perfTier === 'low') return undefined;
+    const hardTeardown = (): void => {
+      if (replayDisarmTimerRef.current) {
+        window.clearTimeout(replayDisarmTimerRef.current);
+        replayDisarmTimerRef.current = 0;
+      }
+      const entry = replayRef.current;
+      replayRef.current = null;
+      setReplayReady(false);
+      if (entry) {
+        entry.ring.disarm();
+        entry.compositor.stop();
+        if (entry.audioDest) {
+          try { engine.visualizerNode.disconnect(entry.audioDest); } catch { /* ignore */ }
+        }
+      }
+    };
+
+    if (activePreset !== 'eviland-live' || perfTier === 'low') {
+      // Left Eviland Live (or dropped to Lite tier) — no reason to keep a
+      // debounce warm; tear down for good.
+      hardTeardown();
+      return undefined;
+    }
+
     let cancelled = false;
     let retryTimer = 0;
     let attempts = 0;
@@ -679,22 +739,43 @@ export function FullscreenVisualizer(): JSX.Element {
       replayRef.current = { ring, compositor, audioDest };
       setReplayReady(true);
     };
-    tryArm();
-    return () => {
-      cancelled = true;
-      if (retryTimer) window.clearTimeout(retryTimer);
-      const entry = replayRef.current;
-      replayRef.current = null;
-      setReplayReady(false);
-      if (entry) {
-        entry.ring.disarm();
-        entry.compositor.stop();
-        if (entry.audioDest) {
-          try { engine.visualizerNode.disconnect(entry.audioDest); } catch { /* ignore */ }
+
+    const evaluate = (): void => {
+      if (isPlaying && !recording && !document.hidden) {
+        if (replayDisarmTimerRef.current) {
+          window.clearTimeout(replayDisarmTimerRef.current);
+          replayDisarmTimerRef.current = 0;
         }
+        tryArm();
+        return;
+      }
+      if (!replayRef.current) return; // nothing armed to tear down
+      if (recording) {
+        // Recording owns the compositor pipeline right now (see toggleRecord's
+        // eviland-live branch) — disarm immediately so at most one runs.
+        hardTeardown();
+        return;
+      }
+      if (!replayDisarmTimerRef.current) {
+        replayDisarmTimerRef.current = window.setTimeout(hardTeardown, 3000);
       }
     };
-  }, [activePreset, perfTier, engine]);
+
+    const onVisibilityChange = (): void => evaluate();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    evaluate();
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      if (retryTimer) window.clearTimeout(retryTimer);
+      // Deliberately NOT tearing the ring down here — a dep change while
+      // still eligible (isPlaying/recording toggling) re-enters this effect
+      // and evaluate() decides fresh; the pending debounce timer (if any)
+      // survives across that boundary since it lives in a ref. Genuine
+      // unmount is handled by the dedicated cleanup effect above.
+    };
+  }, [activePreset, perfTier, engine, isPlaying, recording]);
 
   const flashClipStatus = (message: string): void => {
     setClipStatus(message);
@@ -1598,7 +1679,11 @@ export function FullscreenVisualizer(): JSX.Element {
                   title={
                     replayReady
                       ? 'Save the last 15 seconds as an MP4 (Shift+R)'
-                      : 'Replay arms once the Eviland Live stage is up (not on Lite tier)'
+                      : perfTier === 'low'
+                        ? 'Replay is unavailable on Lite tier'
+                        : !isPlaying
+                          ? 'Replay arms once playback starts'
+                          : 'Replay arms once the Eviland Live stage is up'
                   }
                   data-newamp-viz-replay-button
                 >

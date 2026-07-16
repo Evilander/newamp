@@ -80,15 +80,23 @@ export function createEvilandLiveCompositor(root: HTMLElement): LiveCompositor |
   };
   const paint = (): void => {
     if (!running) return;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, w, h);
-    drawLayer(fieldVideo);
-    drawLayer(sceneVideo);
-    if (reactorCanvas) {
-      try {
-        ctx.drawImage(reactorCanvas, 0, 0, w, h);
-      } catch {
-        /* 2D layer mid-resize */
+    // rAF is already throttled by Chromium while the window is hidden, but
+    // skip the composite work outright rather than rely on that alone —
+    // callers (the recording path in particular) keep this loop running for
+    // the full duration regardless of visibility. Reschedule instead of
+    // returning early so the loop resumes drawing the moment it's visible
+    // again, without any caller having to re-arm it.
+    if (!document.hidden) {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, w, h);
+      drawLayer(fieldVideo);
+      drawLayer(sceneVideo);
+      if (reactorCanvas) {
+        try {
+          ctx.drawImage(reactorCanvas, 0, 0, w, h);
+        } catch {
+          /* 2D layer mid-resize */
+        }
       }
     }
     requestAnimationFrame(paint);

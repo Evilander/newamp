@@ -8,6 +8,7 @@ import {
   type BcFrameMessage,
   type BcParentMessage,
 } from './protocol';
+import { createGovernor } from '../visualizer/eviland-governor';
 
 interface ButterchurnVisualizer {
   loadPreset(preset: Record<string, unknown>, blendSeconds?: number): void;
@@ -78,10 +79,30 @@ let haveAudio = false;
 let pageVisible = typeof document === 'undefined' ? true : !document.hidden;
 const latestTime = new Uint8Array(BUTTERCHURN_FFT_SIZE);
 
+// ── Self-governance ─────────────────────────────────────────────────────────
+// This loop used to render on every rAF tick — the monitor's full refresh
+// rate. On a 144Hz display that's 3–5x more MilkDrop work than the parent's
+// 30–45fps paint cadence can even show, and it kept burning at full rate
+// while playback was paused. Now: a 45fps cap while audio is live, a 20fps
+// idle glide when the analyser has been byte-flat for a few seconds (the
+// parent keeps posting flatline bytes while paused, so "no messages" never
+// fires — flatness is the real pause signal), and a measured-cost governor
+// that steps the render DPR down when this machine can't hold the cadence.
+let lastPaintAt = 0;
+// performance.now() when byte-flat audio began; -1 while audio is live.
+let silentSince = -1;
+const IDLE_AFTER_MS = 3000;
+const LIVE_FRAME_MS = 1000 / 45;
+const IDLE_FRAME_MS = 1000 / 20;
+// MilkDrop is the star of this mode — give it a bigger budget than the
+// overlay layers get in the parent before trimming resolution.
+const gov = createGovernor({ costBudgetMs: 10 });
+
 function sizeCanvas(): void {
   if (!canvas) return;
-  const w = Math.max(8, Math.floor((canvas.clientWidth || 640) * dpr));
-  const h = Math.max(8, Math.floor((canvas.clientHeight || 360) * dpr));
+  const effDpr = dpr * gov.scale();
+  const w = Math.max(8, Math.floor((canvas.clientWidth || 640) * effDpr));
+  const h = Math.max(8, Math.floor((canvas.clientHeight || 360) * effDpr));
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
@@ -200,7 +221,11 @@ async function start(sampleRate: number): Promise<void> {
       // wasted CPU.
       presetTimer = window.setInterval(() => {
         if (!pageVisible) return;
-        if (performance.now() - lastAudioPostAt > 1500) return; // parent paused
+        if (performance.now() - lastAudioPostAt > 1500) return; // parent gone
+        // Paused playback: the parent still posts (flatline) audio, so the
+        // check above never fires — but compiling a preset nobody hears is a
+        // 50–80MB allocation storm + GC pause every 22s. Skip while silent.
+        if (silentSince >= 0 && performance.now() - silentSince > IDLE_AFTER_MS) return;
         loadRandomPreset(2.0);
       }, 22000);
     };
@@ -220,16 +245,23 @@ async function start(sampleRate: number): Promise<void> {
     // data-newamp-butterchurn-mounted='true' boot signal the UI smoke checks).
     post({ type: 'mounted' });
 
-    const frame = (): void => {
+    const frame = (now: number): void => {
       if (disposed) return;
+      raf = requestAnimationFrame(frame);
+      // Cadence cap: 45fps while audio is live, 20fps idle glide once the
+      // analyser has been byte-flat for a while (paused/stopped). The
+      // governor stretches the interval further at its fps-trim floor.
+      const idle = silentSince >= 0 && now - silentSince > IDLE_AFTER_MS;
+      if (now - lastPaintAt < gov.intervalMs(idle ? IDLE_FRAME_MS : LIVE_FRAME_MS)) return;
+      lastPaintAt = now;
       sizeCanvas();
       if (skipRenderFrames > 0) {
         // Hold the last painted frame one tick so a just-loaded preset's compile
         // + GC settle off the critical paint path.
         skipRenderFrames -= 1;
-        raf = requestAnimationFrame(frame);
         return;
       }
+      const renderStart = performance.now();
       try {
         visualizer?.render(
           haveAudio
@@ -245,7 +277,7 @@ async function start(sampleRate: number): Promise<void> {
       } catch {
         /* keep the loop alive across a transient preset/render hiccup */
       }
-      raf = requestAnimationFrame(frame);
+      gov.endFrame(now, performance.now() - renderStart);
     };
     raf = requestAnimationFrame(frame);
   } catch (err) {
@@ -264,6 +296,16 @@ window.addEventListener('message', (event: MessageEvent) => {
       latestTime.set(message.samples.subarray(0, BUTTERCHURN_FFT_SIZE));
       haveAudio = true;
       lastAudioPostAt = performance.now();
+      // Pause detection: a paused/stopped analyser emits exactly-flat bytes
+      // (128 ±1). Real music — even a whisper-quiet passage — wobbles more.
+      // Track when flatness began; frame() idles the cadence after a dwell,
+      // so a brief digital-silence gap inside a track never drops frames.
+      let flat = true;
+      for (let i = 0; i < BUTTERCHURN_FFT_SIZE; i += 1) {
+        const b = latestTime[i]!;
+        if (b < 127 || b > 129) { flat = false; break; }
+      }
+      silentSince = flat ? (silentSince >= 0 ? silentSince : lastAudioPostAt) : -1;
     }
   } else if (message.type === 'dispose') {
     disposed = true;
