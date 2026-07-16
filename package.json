@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "A local-first, Winamp-inspired music player for Windows, macOS, and Linux — your files, no cloud, no telemetry.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
@@ -39,6 +39,7 @@
     "test:eviland-audio": "node scripts/eviland-audio-test.mjs",
     "test:eviland-director": "node scripts/eviland-director-test.mjs",
     "test:eviland-fluid": "node scripts/eviland-fluid-test.mjs",
+    "test:eviland-governor": "node scripts/eviland-governor-test.mjs",
     "test:eviland-memory": "node scripts/eviland-memory-test.mjs",
     "test:eviland-memory-bridge": "node scripts/eviland-memory-bridge-test.mjs",
     "test:eviland-operators": "node scripts/eviland-operators-test.mjs",

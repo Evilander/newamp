@@ -3,6 +3,91 @@
 All notable changes to NewAmp will be documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-07-16
+
+Featherweight — the performance release. A 71-agent adversarial audit hunted
+down every reason NewAmp "gets heavy" on long sessions, and the visualizer
+learned to fly by its instruments instead of a hardware sniff.
+
+### Added
+
+- **Auto-Pilot.** Every Eviland surface now governs itself by *measured*
+  frame cost instead of a one-shot hardware guess: sustained over-budget
+  frames step internal resolution down (then frame rate, at the floor), and
+  proven headroom steps back up — discrete steps with dwell and cooldown, so
+  it never sawtooths and never churns GPU reallocation. The MilkDrop frame
+  self-governs the same way and finally respects a 45fps cadence cap instead
+  of rendering at full monitor refresh (144Hz displays were paying 3-5x the
+  useful GPU cost); paused playback drops it to a 20fps idle glide and skips
+  the 22s preset rotation (each rotation was a 50-80MB allocation storm
+  nobody could hear). New `test:eviland-governor` suite locks the
+  ladder/hysteresis/paint-gap behavior.
+- **Two new scenes (31 total).** *Phosphor Scope* — a dual-trace vintage
+  oscilloscope whose beams are resynthesized live from the spectrum, stereo
+  width splitting the traces; *VU Cathedral* — a wall of twelve warm-backlit
+  analog VU meters, each needle wired to its own band slice, red zones
+  lighting when pinned.
+
+### Fixed — the "gets heavy" audit
+
+- **Instant Replay no longer taxes every session.** The 15s replay ring — a
+  second compositor plus a continuous VP9+audio encode pipeline — used to
+  run the entire time fullscreen Eviland Live was open, even paused, even
+  hidden. It now arms only while playing and visible (a 3s grace window
+  survives quick pauses), and clip recording disarms it for the duration so
+  at most one capture pipeline ever runs.
+- **Track changes no longer rewrite the whole library database.** Play/skip
+  stats batch on a 30s flush tier instead of forcing a full multi-MB
+  synchronous DB export + write on the main thread every track change;
+  debounced flushes are now async and atomic (tmp + rename, staleness
+  guards), and quit still flushes synchronously so nothing is lost.
+- **ffmpeg can't hang or orphan anymore.** DNA analysis, ReplayGain, and
+  batch-export ffmpeg children got the same 180s watchdog the transcode
+  cache always had, and app quit now reaps every live child.
+- **Queue, playlist, and history lists are virtualized.** The active-queue
+  and playlist track lists rendered every row as live DOM — thousands of
+  nodes after an Auto DJ session — and Listening History grew 500 rows per
+  "Load More" forever. All three now window with the same virtualizer the
+  Library and Albums views use, with drag-reorder and every control intact.
+- **Auto DJ keeps refilling on long sessions.** Refill sizing counted played
+  history against the lookahead target, so once a session ran long it
+  silently stopped adding tracks while still paying the candidate-scan cost.
+  Sizing now counts only what's ahead of the playhead.
+- **The AI Director stopped allocating.** Intra-section drift was building
+  ~20 fresh Maps 10x/sec for the life of every session (the documented
+  zero-alloc fast path was unreachable); drift now lerps into a persistent
+  scratch config — byte-identical output, zero steady-state allocation.
+- **Eviland's memory-bridge registry can't leak.** Switching visualizer
+  modes mid-track used to orphan the track's bridge (plus a permanent
+  visibilitychange listener) forever; the registry now runs a small LRU
+  sweep that flushes learning before evicting, never touching the active
+  bridge.
+- **The detached projector's producer can't outlive its window.** In
+  compact mini-player mode, a closed or crashed projector left the headless
+  33ms analysis tick running for the rest of the session; the detach wiring
+  now lives at the app root, mounted in every layout.
+- **OS media controls stopped churning.** MediaSession metadata and all six
+  action handlers were rebuilt 10x/sec during playback; identity now syncs
+  only on real track/play-state changes, and only the position updates per
+  tick.
+- **The transport footer stopped re-rendering 10x/sec** — the elapsed-time
+  readout and scrub bar are now leaf subscribers, so the mini visualizer,
+  buttons, and badges no longer reconcile on every clock tick.
+- **Audio automation hygiene.** Volume, EQ, preamp, and ReplayGain now use
+  the same cancel+pin idiom as the crossfade and limiter paths, so
+  wheel-speed volume changes can't stack automation events on the
+  AudioContext's timeline.
+- **Settings writes got a hot path.** The every-3s playback-position
+  autosave now debounces through an async atomic write instead of
+  synchronously rewriting settings JSON on the main thread; user-toggled
+  settings still persist immediately, and quit/restore flush first.
+- **Small caps everywhere something grew forever:** the audio probe cache
+  (LRU, 500), the bit-perfect gapless segment log (200), the diagnostic
+  events.jsonl (5MB rotation), and the reactor overlay's bass-glow gradient
+  (cached, not rebuilt per frame). The Retro TV static and Jukebox gel/bubble
+  animations now pause with playback like every other deck, with
+  reduced-motion still winning the cascade.
+
 ## [2.0.0] - 2026-07-08
 
 Reference Grade — the design-led major. The app that always looked like
