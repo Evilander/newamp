@@ -1420,7 +1420,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
               })
               .catch(() => []);
           })();
-      const additions = selectAutoDjAdditions(state.queue, candidates, state.autoDjTarget);
+      const remainingAhead = Math.max(0, state.queue.length - state.index - 1);
+      const additions = selectAutoDjAdditions(state.queue, candidates, state.autoDjTarget, remainingAhead);
       if (!additions.length) return [];
       set({ queue: [...state.queue, ...additions] });
       schedulePersistPlaybackSession(get(), true);

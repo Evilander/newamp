@@ -60,7 +60,9 @@
 /* gel arch: the rotating gel cylinders oscillate warm — red through amber to
    magenta and back. A full hue rotation would pass through green/cyan, which
    no Wurlitzer gel wheel ever showed. */
-.deck-jb-gel {
+/* gel hue-cycle only animates while playing, matching the .is-playing gate
+   the disc spin and lamp breathe use below */
+.deck-jukebox.is-playing .deck-jb-gel {
   animation: jb-gel-cycle 13s ease-in-out infinite;
 }
 @keyframes jb-gel-cycle {
@@ -86,10 +88,16 @@
 }
 .deck-jb-bubble.is-left {
   offset-path: path('M 63 510 L 63 252 A 147 147 0 0 1 210 105');
-  animation: jb-bubble-ride 4200ms linear infinite;
 }
 .deck-jb-bubble.is-right {
   offset-path: path('M 357 510 L 357 252 A 147 147 0 0 1 210 105');
+}
+/* bubble ride only animates while playing; paused bubbles stay at their
+   base opacity: 0 (below) since the ride animation is what fades them in */
+.deck-jukebox.is-playing .deck-jb-bubble.is-left {
+  animation: jb-bubble-ride 4200ms linear infinite;
+}
+.deck-jukebox.is-playing .deck-jb-bubble.is-right {
   animation: jb-bubble-ride 4700ms linear infinite;
 }
 .deck-jb-bubble:nth-child(2n) { width: 6px; height: 6px; }
@@ -430,8 +438,12 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .deck-jb-gel,
-  .deck-jb-bubble,
+  /* the gel/bubble overrides below match the gated rules' own specificity
+     (3 classes) — bare .deck-jb-gel/.deck-jb-bubble would lose to them
+     while playing and reduced motion would silently stop applying. */
+  .deck-jukebox.is-playing .deck-jb-gel,
+  .deck-jukebox.is-playing .deck-jb-bubble.is-left,
+  .deck-jukebox.is-playing .deck-jb-bubble.is-right,
   .deck-jukebox.is-playing .deck-jb-disc,
   .deck-jukebox.is-playing .deck-jb-lamp {
     animation: none;

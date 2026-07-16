@@ -14,6 +14,7 @@ import { pushToast } from '../../lib/toast';
 import { ViewHeader } from '../ViewHeader';
 import { ConfirmAction } from '../ConfirmAction';
 import { ArtistLink, AlbumLink } from '../EntityLink';
+import { useVirtualRows } from '../../hooks/useVirtualRows';
 
 type SetMood = SmartPlaylistMood;
 
@@ -109,6 +110,23 @@ export function PlaylistView(): JSX.Element {
         ),
     [queue, queueFilter],
   );
+
+  // Auto-DJ/play-all can push queues into the thousands; both the saved-
+  // playlist editor and the active queue list only mount the rows in view
+  // (± overscan) instead of every <li>. Only one of the two lists is ever
+  // rendered at once (selectedPlaylist ternary below), but hooks can't be
+  // called conditionally, so both windows are computed and the inactive one
+  // is simply unused.
+  const selectedPlaylistWindow = useVirtualRows({
+    rowCount: visibleSelectedPlaylistTracks.length,
+    rowHeight: PLAYLIST_ROW_HEIGHT,
+    enabled: !!selectedPlaylist && visibleSelectedPlaylistTracks.length > 0,
+  });
+  const queueWindow = useVirtualRows({
+    rowCount: visibleQueueTracks.length,
+    rowHeight: PLAYLIST_ROW_HEIGHT,
+    enabled: !selectedPlaylist && visibleQueueTracks.length > 0,
+  });
 
   useEffect(() => {
     void refreshPlaylists();
@@ -958,7 +976,11 @@ export function PlaylistView(): JSX.Element {
             </button>
           </div>
         </aside>
-        <div className="min-h-0 overflow-auto">
+        <div
+          className="min-h-0 overflow-auto"
+          ref={selectedPlaylist ? selectedPlaylistWindow.scrollRef : queueWindow.scrollRef}
+          onScroll={selectedPlaylist ? selectedPlaylistWindow.onScroll : queueWindow.onScroll}
+        >
           {selectedPlaylist ? (
             selectedPlaylistTracks.length === 0 ? (
               <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
@@ -988,7 +1010,12 @@ export function PlaylistView(): JSX.Element {
                   </div>
                 ) : (
                   <ol className="m-0 list-none p-0" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                    {visibleSelectedPlaylistTracks.map(({ track: t, index: i }) => (
+                    {selectedPlaylistWindow.topPad > 0 && (
+                      <li aria-hidden style={{ height: selectedPlaylistWindow.topPad }} />
+                    )}
+                    {visibleSelectedPlaylistTracks
+                      .slice(selectedPlaylistWindow.startIndex, selectedPlaylistWindow.endIndex + 1)
+                      .map(({ track: t, index: i }) => (
                       <li
                         key={`${selectedPlaylist.id}-${t.id}-${i}`}
                         className="flex cursor-pointer items-center gap-2 border-b px-3 py-1.5"
@@ -1072,6 +1099,9 @@ export function PlaylistView(): JSX.Element {
                         </span>
                       </li>
                     ))}
+                    {selectedPlaylistWindow.bottomPad > 0 && (
+                      <li aria-hidden style={{ height: selectedPlaylistWindow.bottomPad }} />
+                    )}
                   </ol>
                 )}
               </>
@@ -1105,7 +1135,12 @@ export function PlaylistView(): JSX.Element {
                 </div>
               ) : (
                 <ol className="m-0 list-none p-0" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
-                  {visibleQueueTracks.map(({ track: t, index: i }) => (
+                  {queueWindow.topPad > 0 && (
+                    <li aria-hidden style={{ height: queueWindow.topPad }} />
+                  )}
+                  {visibleQueueTracks
+                    .slice(queueWindow.startIndex, queueWindow.endIndex + 1)
+                    .map(({ track: t, index: i }) => (
                     <li
                       key={`${t.id}-${i}`}
                       className="flex cursor-pointer items-center gap-2 border-b px-3 py-1.5"
@@ -1189,6 +1224,9 @@ export function PlaylistView(): JSX.Element {
                       </span>
                     </li>
                   ))}
+                  {queueWindow.bottomPad > 0 && (
+                    <li aria-hidden style={{ height: queueWindow.bottomPad }} />
+                  )}
                 </ol>
               )}
             </>
@@ -1198,6 +1236,11 @@ export function PlaylistView(): JSX.Element {
     </div>
   );
 }
+
+// Every row in both lists shares identical markup: a pxbtn cluster (22px
+// tall) plus py-1.5 padding (12px) and a 1px bottom border, matching the
+// system --row-height (tokens.css) used for Library rows.
+const PLAYLIST_ROW_HEIGHT = 36;
 
 function moodLabel(mood: SetMood): string {
   if (mood === 'deep-cuts') return 'deep cuts';

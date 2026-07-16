@@ -13,7 +13,11 @@ import { SignalPathBadge } from './SignalPathBadge';
 export function Transport(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
-  const currentTime = usePlayerStore((s) => s.currentTime);
+  // NOTE: deliberately NOT subscribing to s.currentTime here — it updates
+  // 10x/sec during playback and used to reconcile the whole footer (mini
+  // Visualizer, links, badges, volume, buttons) on every tick. The two
+  // clock-driven leaves below (TransportElapsed, TransportScrubBar)
+  // subscribe to it themselves instead.
   const duration = usePlayerStore((s) => s.duration);
   const playbackError = usePlayerStore((s) => s.playbackError);
   const volume = usePlayerStore((s) => s.volume);
@@ -86,9 +90,7 @@ export function Transport(): JSX.Element {
       <div className="flex flex-1 flex-col gap-1">
         <div className="display flex h-[42px] items-center gap-3 px-3">
           <div className="flex w-[64px] flex-col items-end leading-none">
-            <div className="lcd-text text-[20px]" data-newamp-current-time={currentTime.toFixed(3)}>
-              {formatTime(currentTime)}
-            </div>
+            <TransportElapsed />
             <div className="lcd-text text-[10px]" style={{ color: 'var(--ink-2)' }}>
               {formatTime(duration)}
             </div>
@@ -164,20 +166,9 @@ export function Transport(): JSX.Element {
             <NextIcon />
           </button>
           {/* amp-scrub-wrap: hook for the Resonance progress glow tail (tokens.css
-              reactive block). --scrub-progress feeds the tail's scaleX from state
-              this component already re-renders on every playhead tick — no new JS. */}
-          <div
-            className="amp-scrub-wrap relative min-w-0 flex-1"
-            style={{ '--scrub-progress': duration > 0 ? Math.min(1, currentTime / duration) : 0 } as CSSProperties}
-          >
-            <ScrubBar
-              value={currentTime}
-              max={duration || 1}
-              onSeek={(v) => seek(v)}
-              className="nslider block w-full"
-              data-newamp-scrub
-            />
-          </div>
+              reactive block). --scrub-progress feeds the tail's scaleX from the
+              clock-subscribed leaf below, not this component. */}
+          <TransportScrubBar duration={duration} seek={seek} />
           <button
             className={`pxbtn pxbtn-icon ${mode === 'shuffle' ? 'is-active' : ''}`}
             onClick={() => setMode(mode === 'shuffle' ? 'normal' : 'shuffle')}
@@ -208,5 +199,40 @@ export function Transport(): JSX.Element {
         </div>
       </div>
     </footer>
+  );
+}
+
+/** Clock-subscribed leaf: the elapsed-time LCD readout. */
+function TransportElapsed(): JSX.Element {
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  return (
+    <div className="lcd-text text-[20px]" data-newamp-current-time={currentTime.toFixed(3)}>
+      {formatTime(currentTime)}
+    </div>
+  );
+}
+
+/** Clock-subscribed leaf: the Resonance progress-glow wrapper + scrub bar. */
+function TransportScrubBar({
+  duration,
+  seek,
+}: {
+  duration: number;
+  seek: (seconds: number) => void;
+}): JSX.Element {
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  return (
+    <div
+      className="amp-scrub-wrap relative min-w-0 flex-1"
+      style={{ '--scrub-progress': duration > 0 ? Math.min(1, currentTime / duration) : 0 } as CSSProperties}
+    >
+      <ScrubBar
+        value={currentTime}
+        max={duration || 1}
+        onSeek={(v) => seek(v)}
+        className="nslider block w-full"
+        data-newamp-scrub
+      />
+    </div>
   );
 }
