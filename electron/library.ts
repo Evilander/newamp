@@ -622,7 +622,17 @@ export class LibraryStore {
   private artDir: string;
   private playlistArtDir: string;
   private persistTimer: NodeJS.Timeout | null = null;
+  private persistTimerSlow = false;
   private dirty = false;
+  // Guards the async (tmp+rename) flush path: at most one write in flight, with
+  // a flag to re-run immediately after if more changes land while it's writing.
+  private flushInFlight: Promise<void> | null = null;
+  private flushAgain = false;
+  // Bumped by every flush (sync or async) that captures a db.export() snapshot.
+  // An in-flight async write checks this before its rename so a synchronous
+  // quit-path flush (newer data) can never be clobbered by a slower async
+  // write (older data) landing after it.
+  private flushSeq = 0;
   // Cache of the full track DNA index. Building it walks the entire DNA table
   // and JSON.parses every blob; for a 50k-track library that's a real cost on
   // every Harmonic / Taste mix call. We cache after first build and invalidate
@@ -744,20 +754,79 @@ export class LibraryStore {
     }
   }
 
-  private scheduleFlush(): void {
+  // recordPlay/recordSkip call this with `slow: true` — they fire on every
+  // track change/skip, and a full db.export() + write on that cadence is real
+  // main-thread cost. Every other mutation keeps the tight 800ms debounce.
+  private scheduleFlush(opts?: { slow?: boolean }): void {
     this.dirty = true;
-    if (this.persistTimer) return;
+    const slow = !!opts?.slow;
+    if (this.persistTimer) {
+      // A fast-tier write arriving while a slow-tier flush is pending must not
+      // sit behind the full 30s window — cancel and rearm at the fast delay.
+      if (!slow && this.persistTimerSlow) {
+        clearTimeout(this.persistTimer);
+        this.persistTimer = null;
+      } else {
+        return;
+      }
+    }
+    this.persistTimerSlow = slow;
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
-      try {
-        this.flushSync();
-      } catch (err) {
-        console.error('library flush failed', err);
-      }
-    }, 800);
+      this.persistTimerSlow = false;
+      void this.flushAsync();
+    }, slow ? 30_000 : 800);
   }
 
+  // Async atomic flush for the debounced path: db.export() is sql.js's only
+  // API and stays synchronous, but the write itself goes through a tmp file +
+  // rename so the (potentially multi-MB, 60k-track-library) serialization
+  // doesn't block the main thread's event loop.
+  private async flushAsync(): Promise<void> {
+    if (!this.dirty) return;
+    if (this.flushInFlight) {
+      this.flushAgain = true;
+      return;
+    }
+    this.dirty = false;
+    const seq = ++this.flushSeq;
+    const data = this.db.export();
+    const tmp = `${this.file}.tmp`;
+    this.flushInFlight = (async () => {
+      try {
+        await fsp.writeFile(tmp, Buffer.from(data));
+        if (seq !== this.flushSeq) {
+          // A synchronous quit-path flush captured newer state while this
+          // write was in flight — drop the stale copy instead of racing it.
+          await fsp.unlink(tmp).catch(() => {});
+          return;
+        }
+        await fsp.rename(tmp, this.file);
+      } catch (err) {
+        console.error('library flush failed', err);
+        this.dirty = true; // retry on the next scheduled flush
+      }
+    })();
+    try {
+      await this.flushInFlight;
+    } finally {
+      this.flushInFlight = null;
+      if (this.flushAgain) {
+        this.flushAgain = false;
+        void this.flushAsync();
+      }
+    }
+  }
+
+  // Truly synchronous flush for the quit path (close()) — the process may
+  // exit immediately after, so this cannot rely on an async write completing.
   private flushSync(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+      this.persistTimerSlow = false;
+    }
+    this.flushSeq += 1;
     const data = this.db.export();
     writeFileSync(this.file, Buffer.from(data));
     this.dirty = false;
@@ -3037,7 +3106,9 @@ export class LibraryStore {
       this.db.run('ROLLBACK');
       throw err;
     }
-    this.scheduleFlush();
+    // Fires on every track change — slow tier so this never drives the 800ms
+    // full-DB flush cadence on its own.
+    this.scheduleFlush({ slow: true });
   }
 
   recordSkip(id: number, skippedAt = Date.now(), position = 0): void {
@@ -3060,7 +3131,8 @@ export class LibraryStore {
       this.db.run('ROLLBACK');
       throw err;
     }
-    this.scheduleFlush();
+    // Fires on every skip — same slow tier as recordPlay, see there.
+    this.scheduleFlush({ slow: true });
   }
 
   getListeningHistory(opts: { limit?: number; offset?: number } = {}): ListeningHistoryItem[] {

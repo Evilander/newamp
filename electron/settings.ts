@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { writeFile, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { AppSettings, RecoveryEvent } from '../shared/types.js';
 import { normalizePlaybackRate } from '../shared/tempo-trainer.js';
@@ -143,6 +144,17 @@ function normalizeAmbientReactivity(value: unknown): AppSettings['ambientReactiv
 export class SettingsStore {
   public readonly recoveryEvents: RecoveryEvent[] = [];
   private state: AppSettings;
+  private persistTimer: NodeJS.Timeout | null = null;
+  private dirty = false;
+  // Guards the async (tmp+rename) persist path: at most one write in flight,
+  // with a flag to re-run immediately after if more changes land while it's
+  // writing (same pattern as LibraryStore's flushAsync).
+  private persistInFlight: Promise<void> | null = null;
+  private persistAgain = false;
+  // Bumped by every persist (sync or async) that captures a state snapshot, so
+  // a synchronous quit-path flush (newer data) can never be clobbered by a
+  // slower async write (older data) landing after it.
+  private persistSeq = 0;
 
   constructor(private readonly file: string) {
     mkdirSync(dirname(file), { recursive: true });
@@ -267,12 +279,103 @@ export class SettingsStore {
         : normalizeAmbientReactivity(patch.ambientReactivity),
     };
     this.state = next;
-    this.persist();
+    // resumeState is the ~3s playback-position autosave (see
+    // schedulePersistPlaybackSession in usePlayerStore.ts) — the only setting
+    // written on a hot, high-frequency cadence, and always as a lone key in
+    // its own patch. That one gets debounced/async. Every other setting keeps
+    // writing synchronously and immediately, same as before: callers (and
+    // smoke:audio-limiter) depend on a setting being on disk the instant
+    // set() returns, and losing a rare user-toggled setting to a crash-window
+    // debounce isn't an acceptable trade for a save that isn't hot anyway.
+    if (this.isResumeStateOnlyPatch(patch)) {
+      this.schedulePersist();
+    } else {
+      this.persist();
+    }
     return this.get();
   }
 
+  private isResumeStateOnlyPatch(patch: Partial<AppSettings>): boolean {
+    const keys = Object.keys(patch);
+    return keys.length === 1 && keys[0] === 'resumeState';
+  }
+
+  // Immediate, synchronous, unconditional write. Also cancels any pending
+  // debounced resumeState write and bumps persistSeq so that write's rename
+  // (if already in flight) drops itself as stale instead of clobbering this
+  // fresher, synchronously-written state — see persistAsync.
   private persist(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    this.persistSeq += 1;
+    this.dirty = false;
     writeFileSync(this.file, JSON.stringify(this.state, null, 2), 'utf-8');
+  }
+
+  // Debounced path for the resumeState autosave only — writing the full
+  // settings JSON synchronously every ~3s during playback was a real
+  // main-thread cost.
+  private schedulePersist(): void {
+    this.dirty = true;
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      void this.persistAsync();
+    }, 800);
+  }
+
+  private async persistAsync(): Promise<void> {
+    if (!this.dirty) return;
+    if (this.persistInFlight) {
+      this.persistAgain = true;
+      return;
+    }
+    this.dirty = false;
+    const seq = ++this.persistSeq;
+    const payload = JSON.stringify(this.state, null, 2);
+    const tmp = `${this.file}.tmp`;
+    this.persistInFlight = (async () => {
+      try {
+        await writeFile(tmp, payload, 'utf-8');
+        if (seq !== this.persistSeq) {
+          // A synchronous quit-path flush captured newer state while this
+          // write was in flight — drop the stale copy instead of racing it.
+          await unlink(tmp).catch(() => {});
+          return;
+        }
+        await rename(tmp, this.file);
+      } catch (err) {
+        console.error('settings persist failed', err);
+        this.dirty = true; // retry on the next scheduled persist
+      }
+    })();
+    try {
+      await this.persistInFlight;
+    } finally {
+      this.persistInFlight = null;
+      if (this.persistAgain) {
+        this.persistAgain = false;
+        void this.persistAsync();
+      }
+    }
+  }
+
+  // Truly synchronous flush for the quit path — the process may exit
+  // immediately after, so this cannot rely on an async write completing.
+  // Also used before file-level operations (e.g. backup restore) that would
+  // otherwise race a pending debounced write.
+  flushSync(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    this.persistSeq += 1;
+    if (this.dirty) {
+      writeFileSync(this.file, JSON.stringify(this.state, null, 2), 'utf-8');
+      this.dirty = false;
+    }
   }
 
   private normalizeResume(value: AppSettings['resumeState'] | undefined): AppSettings['resumeState'] {

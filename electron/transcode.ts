@@ -1,5 +1,5 @@
 import ffmpegStaticImport from 'ffmpeg-static';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
@@ -44,6 +44,25 @@ const FFMPEG_FALLBACK_EXTS = new Set([
 ]);
 
 const ffmpegStatic = ffmpegStaticImport as unknown as string | null;
+
+// Watchdog for runFfmpeg/runFfmpegCapture below (same pattern/threshold as
+// transcode-cache.ts's runFfmpegToFile): batch export and ReplayGain analysis
+// can otherwise hang forever on a malformed/truncated source.
+const FFMPEG_TIMEOUT_MS = 180_000;
+
+// Tracks every live child spawned by runFfmpeg/runFfmpegCapture so app quit
+// can kill any orphan ffmpeg.exe instead of leaving it running after exit.
+const liveTranscodeFfmpeg = new Set<ChildProcess>();
+
+export function killAllTranscodeFfmpeg(): void {
+  for (const child of liveTranscodeFfmpeg) {
+    try {
+      child.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+}
 
 export function playbackMode(filePath: string): 'native' | 'ffmpeg' {
   const ext = extname(filePath).toLowerCase();
@@ -334,16 +353,34 @@ export function resolveFfmpegPath(): string {
 export function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    liveTranscodeFfmpeg.add(child);
     let stderr = '';
+    let settled = false;
+    const settle = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      liveTranscodeFfmpeg.delete(child);
+      if (err) reject(err);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      settle(new Error(`ffmpeg timed out after ${FFMPEG_TIMEOUT_MS}ms`));
+    }, FFMPEG_TIMEOUT_MS);
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
       if (stderr.length > 6000) stderr = stderr.slice(-6000);
     });
-    child.on('error', reject);
+    child.on('error', (err) => settle(err));
     child.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
+      if (code === 0) settle();
+      else settle(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
     });
   });
 }
@@ -351,16 +388,34 @@ export function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
 function runFfmpegCapture(args: string[], ffmpeg: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+    liveTranscodeFfmpeg.add(child);
     let stderr = '';
+    let settled = false;
+    const settle = (err: Error | undefined, out?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      liveTranscodeFfmpeg.delete(child);
+      if (err) reject(err);
+      else resolve(out ?? '');
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      settle(new Error(`ffmpeg timed out after ${FFMPEG_TIMEOUT_MS}ms`));
+    }, FFMPEG_TIMEOUT_MS);
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
       if (stderr.length > 30000) stderr = stderr.slice(-30000);
     });
-    child.on('error', reject);
+    child.on('error', (err) => settle(err));
     child.on('close', (code) => {
-      if (code === 0) resolve(stderr);
-      else reject(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
+      if (code === 0) settle(undefined, stderr);
+      else settle(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
     });
   });
 }

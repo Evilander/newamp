@@ -18,7 +18,7 @@ import {
 } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { LibraryStore } from './library.js';
@@ -50,12 +50,13 @@ import {
   transcodeTrackToWavFile,
   transcodeTracksToAudioFolder,
   transcodeTracksToWavFolder,
+  killAllTranscodeFfmpeg,
 } from './transcode.js';
 import { fileRangeResponse, seekableTranscodeResponse } from './audio-serve.js';
 import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac, transcodeCacheStatus } from './transcode-cache.js';
 import { finishWebmToMp4 } from './video-mux.js';
 import { isAllowedAudioPath } from './audio-path-policy.js';
-import { analyzeTrackDna } from './dna-analyzer.js';
+import { analyzeTrackDna, killAllDnaFfmpeg } from './dna-analyzer.js';
 import { RadioBrain } from './radio-brain.js';
 import { ExclusiveOutput, classifyTrackSource } from './exclusive-output.js';
 import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
@@ -286,6 +287,21 @@ function writeStartupSmokeMarker(payload: Record<string, unknown>): void {
   }
 }
 
+// This diagnostic log is appended to on every tracked event for the lifetime
+// of the install; without a cap it grows forever.
+const DIAGNOSTIC_LOG_MAX_BYTES = 5 * 1024 * 1024;
+
+function rotateDiagnosticLogIfNeeded(eventsPath: string): void {
+  try {
+    if (statSync(eventsPath).size <= DIAGNOSTIC_LOG_MAX_BYTES) return;
+    const rotatedPath = `${eventsPath}.1`;
+    if (existsSync(rotatedPath)) rmSync(rotatedPath);
+    renameSync(eventsPath, rotatedPath);
+  } catch {
+    // events.jsonl doesn't exist yet (first run) — nothing to rotate.
+  }
+}
+
 function writeDiagnosticEvent(kind: string, payload: Record<string, unknown> = {}): void {
   try {
     mkdirSync(diagnosticsDir, { recursive: true });
@@ -304,7 +320,9 @@ function writeDiagnosticEvent(kind: string, payload: Record<string, unknown> = {
       payload: normalizeDiagnosticValue(payload),
     };
     const line = `${JSON.stringify(event)}\n`;
-    appendFileSync(join(diagnosticsDir, 'events.jsonl'), line, 'utf8');
+    const eventsPath = join(diagnosticsDir, 'events.jsonl');
+    rotateDiagnosticLogIfNeeded(eventsPath);
+    appendFileSync(eventsPath, line, 'utf8');
     if (/crash|gone|exception|rejection|unresponsive/i.test(kind)) {
       writeFileSync(join(diagnosticsDir, 'latest-crash.json'), `${JSON.stringify(event, null, 2)}\n`, 'utf8');
     }
@@ -2199,6 +2217,10 @@ function registerIpc(): void {
     scanner?.cancel();
     libraryWatcher?.stop();
     library?.close();
+    // Now that settings.json writes are debounced/async, a pending write on
+    // the old store could otherwise land after restoreSupportBackup replaces
+    // the file — flush it out first so that race can't happen.
+    settings?.flushSync();
     try {
       return await restoreSupportBackup({
         userDataPath: userData,
@@ -4895,12 +4917,16 @@ app.on('will-quit', () => {
   exclusiveOutput?.dispose();
   tray?.destroy();
   tray = null;
+  // No orphan ffmpeg.exe should outlive the app.
+  killAllDnaFfmpeg();
+  killAllTranscodeFfmpeg();
 });
 
 app.on('window-all-closed', () => {
   if (!isQuitting && tray && process.platform !== 'darwin') return;
   scanner?.cancel();
   library?.close();
+  settings?.flushSync();
   if (process.platform !== 'darwin') app.quit();
 });
 
