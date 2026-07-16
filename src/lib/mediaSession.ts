@@ -15,19 +15,21 @@ interface MediaSessionActions {
   seek: (position: number) => void;
 }
 
-export function syncMediaSession({
+/**
+ * Sync everything that only changes on track change / play-pause: playback
+ * state, the six OS action handlers, and metadata (title/artist/art). Split
+ * out from position sync (below) so callers can gate this behind an effect
+ * keyed on track identity + isPlaying instead of the 10Hz currentTime tick —
+ * rebuilding a MediaMetadata + re-registering six action handlers 10x/sec for
+ * the whole session was pure churn.
+ */
+export function syncMediaSessionIdentity({
   current,
   isPlaying,
-  currentTime,
-  duration,
-  playbackRate,
   actions,
 }: {
   current: Track | null;
   isPlaying: boolean;
-  currentTime: number;
-  duration: number;
-  playbackRate: number;
   actions: MediaSessionActions;
 }): void {
   if (!('mediaSession' in navigator)) return;
@@ -52,11 +54,31 @@ export function syncMediaSession({
   if (typeof MediaMetadata !== 'undefined') {
     session.metadata = new MediaMetadata(buildMediaSessionMetadata(current, artUrl));
   }
+}
+
+/**
+ * Sync the OS scrub-bar position. Called from the 10Hz currentTime tick —
+ * kept separate from syncMediaSessionIdentity so the metadata/action-handler
+ * work above doesn't redo itself every tick alongside this one.
+ */
+export function syncMediaSessionPosition({
+  current,
+  currentTime,
+  duration,
+  playbackRate,
+}: {
+  current: Track | null;
+  currentTime: number;
+  duration: number;
+  playbackRate: number;
+}): void {
+  if (!('mediaSession' in navigator)) return;
+  if (!current) return;
 
   const position = mediaSessionPositionState({ duration, currentTime, playbackRate });
   if (position) {
     try {
-      session.setPositionState(position);
+      navigator.mediaSession.setPositionState(position);
     } catch {
       // Chromium can reject stale position states during rapid track switches.
     }

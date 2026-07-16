@@ -470,6 +470,72 @@ function makeDirector(initialPlan) {
   log.push('flushAndDispose: persists once, idempotent on second call ✓');
 }
 
+// ─── 12. LRU cap sweep: over-cap acquire evicts the oldest unprotected entry ─
+//
+// Leak regression: the Visualizer's cleanup deliberately never releases the
+// bridge on unmount (finding #6's same-track-remount survival), so switching
+// visualizer MODE away from eviland used to orphan the current track's
+// bridge forever. This proves acquireBridgeForTrack caps the registry at
+// MAX_CACHED_BRIDGES, evicting the least-recently-acquired entry — but never
+// the one just acquired, and never whichever bridge is currently published
+// as active — and that the evicted entry's buffered learning still persists
+// (flushAndDispose, not a bare drop).
+{
+  const reg = await import(pathToFileURL(resolve('tmp/eviland-memory-bridge-registry-bundle.mjs')).href);
+  const { MAX_CACHED_BRIDGES } = reg;
+  reg.__resetBridgeRegistryForTests();
+
+  const { api, store, writeCount } = makeMockApi();
+  const base = 500;
+
+  // Oldest entry is published as ACTIVE — it must survive the sweep even
+  // though it's the least-recently-acquired when the cap is breached.
+  const bActive = reg.acquireBridgeForTrack({ trackId: base, api });
+  reg.publishActiveBridge(bActive);
+
+  // Fill the rest of the cap. trackId base+1 gets buffered (dirty) learning
+  // so we can prove eviction flushes it rather than silently dropping it.
+  const bVictim = reg.acquireBridgeForTrack({ trackId: base + 1, api });
+  const victimPlan = createEmptyPlan(base + 1, `track-${base + 1}`, hashSeed(`track-${base + 1}`));
+  const victimDirector = makeDirector(victimPlan);
+  bVictim.attachDirector(victimDirector);
+  victimDirector.setSections([fakeSection(0, 0xf00d)]);
+  bVictim.observeSection(fakeSection(0, 0xf00d));
+
+  for (let i = 2; i < MAX_CACHED_BRIDGES; i++) {
+    reg.acquireBridgeForTrack({ trackId: base + i, api });
+  }
+  // Cache is now exactly at cap (MAX_CACHED_BRIDGES entries) — no eviction yet.
+
+  const writesBeforeOverflow = writeCount();
+  // One more DISTINCT trackId pushes the cache over cap and triggers the sweep.
+  const overflowTrackId = base + MAX_CACHED_BRIDGES;
+  reg.acquireBridgeForTrack({ trackId: overflowTrackId, api });
+  // flushAndDispose is fire-and-forget; let its promise chain settle.
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  if (writeCount() !== writesBeforeOverflow + 1) {
+    fail(`LRU sweep: evicted bridge should have flushed its buffered learning (writes ${writeCount() - writesBeforeOverflow})`);
+  }
+  if (store.get(base + 1) === undefined) {
+    fail('LRU sweep: evicted bridge (base+1) was not persisted before disposal');
+  }
+
+  // The evicted trackId (base+1) must mint a FRESH bridge on next acquire.
+  const bVictimAgain = reg.acquireBridgeForTrack({ trackId: base + 1, api });
+  if (bVictimAgain === bVictim) fail('LRU sweep: evicted trackId should mint a fresh bridge, got the disposed instance');
+
+  // The ACTIVE trackId (base) must be untouched — same instance, never evicted.
+  const bActiveAgain = reg.acquireBridgeForTrack({ trackId: base, api });
+  if (bActiveAgain !== bActive) fail('LRU sweep: active bridge was evicted despite protection');
+
+  reg.publishActiveBridge(null);
+  reg.__resetBridgeRegistryForTests();
+  log.push(`LRU sweep: over-cap acquire evicted oldest non-active entry (flushed), active entry protected ✓`);
+}
+
 const report = log.join('\n') + '\n' + (pass ? '[eviland-memory-bridge-test] PASS' : '[eviland-memory-bridge-test] FAIL') + '\n';
 writeFileSync(RESULT, report);
 console.log(report);

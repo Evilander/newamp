@@ -149,6 +149,24 @@ if (!passthrough) fail('disabled director did not passthrough');
   if (moved <= 1e-4) fail('drift on: held look did not move');
   if (moved > 0.5) fail('drift on: held look moved too far (runaway, not breathing)');
 
+  // Perf regression: driftCache must be a PERSISTENT scratch object mutated
+  // in place via lerpConfigInto, not a fresh lerpConfig() allocation every
+  // ~100ms tick. Hold the raw reference across many ticks and assert its
+  // IDENTITY stays stable while the breathing values still move — a fresh
+  // allocation per tick would fail the identity check.
+  const driftRef = don.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+  const driftRefZoomStart = driftRef.zoom.base;
+  let sameRefThroughout = true;
+  let driftRefMoved = false;
+  for (let i = 0; i < 60; i++) { // ~1s — spans several DRIFT_TICK_MS recomputes
+    const c = don.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+    if (c !== driftRef) sameRefThroughout = false;
+    if (Math.abs(c.zoom.base - driftRefZoomStart) > 1e-6) driftRefMoved = true;
+  }
+  log.push(`drift on: scratch reused (same identity across ticks): ${sameRefThroughout}, values still moved: ${driftRefMoved}`);
+  if (!sameRefThroughout) fail('drift on: driftCache is being reallocated instead of reused via lerpConfigInto (perf regression)');
+  if (!driftRefMoved) fail('drift on: driftCache values froze (breathing broke)');
+
   // Drift OFF: live must be referentially stable frame-to-frame in steady state.
   const doff = createDirector({ songId: 'drift-off', enabled: true, drift: 0, rotateMs: 0 });
   doff.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.5 }), 16.7);

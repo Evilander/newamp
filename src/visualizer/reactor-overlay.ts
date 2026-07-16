@@ -91,6 +91,20 @@ export function createReactorOverlay(canvas: HTMLCanvasElement): ReactorOverlay 
 
   const events: OverlayEvent[] = [];
   let bassGlow = 0;
+  // Bass-floor glow gradient cache. createLinearGradient allocates a fresh
+  // CanvasGradient every call, and the glow renders on every frame while
+  // bassGlow stays above the floor — i.e. continuously during playback.
+  // Keyed on canvas height + the glow height bucketed to ~4px + the resolved
+  // kick RGB — NOT the palette object reference: the detached/projector path
+  // receives a freshly postMessage-cloned palette object every frame even
+  // when its color values haven't changed, so reference identity would never
+  // hit there. The alpha (which tracks bassGlow continuously, independent of
+  // the ~4px bucket) is applied via globalAlpha at draw time instead of being
+  // baked into the gradient, so the cached gradient's stops stay fixed at
+  // full/zero alpha and the effective per-frame alpha stays byte-identical
+  // to the old per-frame gradient.
+  let bassGradCache: CanvasGradient | null = null;
+  let bassGradKey = '';
 
   function resize(cssW: number, cssH: number, nextDpr: number): void {
     w = Math.max(2, cssW);
@@ -201,11 +215,22 @@ export function createReactorOverlay(canvas: HTMLCanvasElement): ReactorOverlay 
     if (bassGlow > 0.02) {
       const bh = h * (0.10 + bassGlow * 0.22);
       const [br, bg, bb] = colorForGroup('kick', palette);
-      const grad = c.createLinearGradient(0, h, 0, h - bh);
-      grad.addColorStop(0, `rgba(${br}, ${bg}, ${bb}, ${Math.min(0.5, bassGlow * 0.5)})`);
-      grad.addColorStop(1, `rgba(${br}, ${bg}, ${bb}, 0)`);
-      c.fillStyle = grad;
+      const bucket = Math.round(bh / 4);
+      const key = `${h}|${bucket}|${br}|${bg}|${bb}`;
+      if (key !== bassGradKey || !bassGradCache) {
+        bassGradKey = key;
+        const grad = c.createLinearGradient(0, h, 0, h - bh);
+        // Baked at full/zero alpha — globalAlpha below applies the actual
+        // bassGlow-driven intensity so this gradient stays reusable across
+        // frames where only the intensity (not the shape) changed.
+        grad.addColorStop(0, `rgba(${br}, ${bg}, ${bb}, 1)`);
+        grad.addColorStop(1, `rgba(${br}, ${bg}, ${bb}, 0)`);
+        bassGradCache = grad;
+      }
+      c.fillStyle = bassGradCache;
+      c.globalAlpha = Math.min(0.5, bassGlow * 0.5);
       c.fillRect(0, h - bh, w, bh);
+      c.globalAlpha = 1;
     }
 
     // Spawn this frame's onsets, then advance + draw the live pool.

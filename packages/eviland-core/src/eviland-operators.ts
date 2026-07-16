@@ -750,8 +750,9 @@ export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): Ope
  * the same frame and `from = cloneConfig(live)` (in startFade) takes a deep
  * copy — neither pattern aliases `out` past the call.
  *
- * The drift path keeps using `lerpConfig` (allocating) because driftCache is
- * read across frames; reuse there would alias the live config.
+ * The Director's drift path also lerps into a persistent scratch (its
+ * driftCache) under the same contract — safe because `live` is only ever
+ * consumed synchronously within the tick and startFade deep-clones it.
  */
 function lerpOptionalInto(
   out: OperatorConfig,
