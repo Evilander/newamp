@@ -101,6 +101,10 @@ const POSITION_INTERVAL_MS = 250;
 const IDLE_RELEASE_MS = 15000;
 const PUMP_INTERVAL_MS = 40;
 const RING_MS = 2000;
+// play()/seek() reset segments to a single entry, but an unbroken same-format
+// gapless chain only ever pushes — cap it so a long chain (radio mode, an
+// all-FLAC album marathon) can't grow this array unbounded.
+const SEGMENT_LOG_CAP = 200;
 
 // NOTE: .mka is deliberately absent — Matroska audio is a container that can
 // hold lossy Opus/AAC/MP3; it only counts as lossless when music-metadata
@@ -712,6 +716,9 @@ export class ExclusiveOutput {
           offsetSec: 0,
           durationSec: next.durationSec,
         });
+        if (this.segments.length > SEGMENT_LOG_CAP) {
+          this.segments.splice(0, this.segments.length - SEGMENT_LOG_CAP);
+        }
         this.current = { source: next, negotiated: { ...nextChoice, deviceName: this.openFormat.deviceName } };
         this.spawnDecoder(next, 0, gen);
         return;

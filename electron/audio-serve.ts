@@ -132,6 +132,29 @@ interface PcmStreamInfo {
 }
 
 const probeCache = new Map<string, PcmStreamInfo>();
+// Simple LRU cap: without one, every unique ffmpeg-fallback source probed over
+// an app session accumulates here forever. Map preserves insertion order, so
+// the oldest (first) key is the least-recently-touched entry.
+const PROBE_CACHE_MAX_ENTRIES = 500;
+
+function probeCacheSet(key: string, info: PcmStreamInfo): void {
+  probeCache.set(key, info);
+  if (probeCache.size > PROBE_CACHE_MAX_ENTRIES) {
+    const oldest = probeCache.keys().next().value;
+    if (oldest !== undefined) probeCache.delete(oldest);
+  }
+}
+
+function probeCacheGet(key: string): PcmStreamInfo | undefined {
+  const hit = probeCache.get(key);
+  if (hit) {
+    // Refresh recency: delete + re-set moves this key to the end of Map's
+    // insertion order, the newest position.
+    probeCache.delete(key);
+    probeCache.set(key, hit);
+  }
+  return hit;
+}
 
 function isDsdPath(filePath: string): boolean {
   const ext = extname(filePath).toLowerCase();
@@ -151,7 +174,7 @@ export async function probePcmStreamInfo(filePath: string): Promise<PcmStreamInf
   } catch {
     return null;
   }
-  const cached = probeCache.get(cacheKey);
+  const cached = probeCacheGet(cacheKey);
   if (cached) return cached;
 
   const stderr = await new Promise<string | null>((resolve) => {
@@ -210,7 +233,7 @@ export async function probePcmStreamInfo(filePath: string): Promise<PcmStreamInf
     durationSec,
     sampleRate: isDsdPath(filePath) ? 88200 : sourceRate,
   };
-  probeCache.set(cacheKey, info);
+  probeCacheSet(cacheKey, info);
   return info;
 }
 
