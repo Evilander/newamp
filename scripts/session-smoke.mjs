@@ -26,6 +26,12 @@ assert.equal(saved.resumeState?.index, 1);
 assert.equal(saved.resumeState?.currentTime, 87.25);
 assert.equal(saved.resumeState?.mode, 'shuffle');
 
+// resumeState-only patches ride the debounced hot path by design (they fire
+// every ~3s during playback and were rewriting the whole settings file
+// synchronously each time). Durability is guaranteed by the quit path's
+// synchronous flush — mirror that here before asserting the disk round-trip.
+settings.flushSync();
+
 const reloaded = new SettingsStore(settingsPath).get();
 assert.deepEqual(reloaded.resumeState?.queueTrackIds, [11, 12, 13]);
 assert.equal(reloaded.resumeState?.index, 1);
