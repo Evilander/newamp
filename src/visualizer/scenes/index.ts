@@ -1,4 +1,4 @@
-// Eviland scene registry — the 25 audio-reactive overlay scenes composited
+// Eviland scene registry — the 31 audio-reactive overlay scenes composited
 // over the MilkDrop field in 'eviland-live' mode (see scene-overlay.ts).
 //
 // CONTRACT for every scene file in this directory:
@@ -59,6 +59,8 @@ import { spiralGalaxy } from './spiral-galaxy';
 import { cityPulse } from './city-pulse';
 import { laserStorm } from './laser-storm';
 import { deepJelly } from './deep-jelly';
+import { phosphorScope } from './phosphor-scope';
+import { vuCathedral } from './vu-cathedral';
 
 export const SCENES: SceneDef[] = [
   starfieldWarp,
@@ -90,4 +92,6 @@ export const SCENES: SceneDef[] = [
   cityPulse,
   laserStorm,
   deepJelly,
+  phosphorScope,
+  vuCathedral,
 ];
