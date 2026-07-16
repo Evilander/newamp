@@ -40,8 +40,16 @@ export function selectAutoDjAdditions(
   queue: Track[],
   candidates: Track[],
   targetQueueLength: number,
+  remainingAhead: number,
 ): Track[] {
-  const needed = Math.max(0, Math.trunc(Number(targetQueueLength) || 0) - queue.length);
+  // `queue` holds played history AND upcoming tracks — sizing against
+  // queue.length (as this used to) means a long-played session whose total
+  // length reaches the target permanently reads as "full" even though only
+  // one or two tracks remain ahead. Size against what's actually left to
+  // play instead.
+  const target = Math.max(0, Math.trunc(Number(targetQueueLength) || 0));
+  const ahead = Math.max(0, Math.trunc(Number(remainingAhead) || 0));
+  const needed = Math.max(0, target - ahead);
   if (!needed) return [];
 
   const seen = new Set(queue.map((track) => track.id));

@@ -8,8 +8,12 @@ import { LoadMoreFooter } from './LoadMoreFooter';
 import { ViewHeader } from '../ViewHeader';
 import { ConfirmAction } from '../ConfirmAction';
 import { ArtistLink, AlbumLink } from '../EntityLink';
+import { useVirtualRows } from '../../hooks/useVirtualRows';
 
 const HISTORY_PAGE_SIZE = 500;
+// py-[5px] cell padding (10px) plus ~18px line height for the text-[12px]
+// mono rows — same derivation as LibraryView's LIBRARY_ROW_HEIGHT.
+const HISTORY_ROW_HEIGHT = 28;
 
 export function HistoryView(): JSX.Element {
   const [items, setItems] = useState<ListeningHistoryItem[]>([]);
@@ -49,6 +53,12 @@ export function HistoryView(): JSX.Element {
   }, []);
 
   const tracks = useMemo(() => items.map((item) => item.track), [items]);
+
+  const historyWindow = useVirtualRows({
+    rowCount: items.length,
+    rowHeight: HISTORY_ROW_HEIGHT,
+    enabled: !loading && items.length > 0,
+  });
 
   async function clearHistory(): Promise<void> {
     const cleared = items.length;
@@ -116,7 +126,7 @@ export function HistoryView(): JSX.Element {
         }
       />
       {insights && insights.total.plays > 0 && <HistoryInsights insights={insights} />}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto" ref={historyWindow.scrollRef} onScroll={historyWindow.onScroll}>
         {loading ? (
           <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
             Loading...
@@ -126,6 +136,7 @@ export function HistoryView(): JSX.Element {
             <HistoryTable
               items={items}
               onPlay={(index) => void playQueue(tracks, index)}
+              virtualWindow={historyWindow}
             />
             <LoadMoreFooter
               shown={items.length}
@@ -274,10 +285,14 @@ function InsightList({
 function HistoryTable({
   items,
   onPlay,
+  virtualWindow,
 }: {
   items: ListeningHistoryItem[];
   onPlay: (index: number) => void;
+  virtualWindow: { startIndex: number; endIndex: number; topPad: number; bottomPad: number };
 }): JSX.Element {
+  const { startIndex, endIndex, topPad, bottomPad } = virtualWindow;
+  const COLS = 6;
   return (
     <table
       className="w-full table-fixed text-[12px]"
@@ -294,7 +309,11 @@ function HistoryTable({
         </tr>
       </thead>
       <tbody>
-        {items.map((item, index) => {
+        {topPad > 0 && (
+          <tr aria-hidden><td colSpan={COLS} style={{ height: topPad, padding: 0, border: 0 }} /></tr>
+        )}
+        {items.slice(startIndex, endIndex + 1).map((item, sliceIdx) => {
+          const index = startIndex + sliceIdx;
           const track = item.track;
           const zebra = index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)';
           return (
@@ -325,6 +344,9 @@ function HistoryTable({
             </tr>
           );
         })}
+        {bottomPad > 0 && (
+          <tr aria-hidden><td colSpan={COLS} style={{ height: bottomPad, padding: 0, border: 0 }} /></tr>
+        )}
       </tbody>
     </table>
   );

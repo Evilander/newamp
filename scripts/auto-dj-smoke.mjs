@@ -7,6 +7,7 @@ import {
   AUTO_DJ_REFILL_THRESHOLD,
   AUTO_DJ_SMART_RULE_LOOKAHEAD,
   autoDjSmartRuleCandidateCount,
+  DEFAULT_AUTO_DJ_TARGET,
   MAX_AUTO_DJ_SMART_RULE_CANDIDATES,
   normalizeAutoDjTarget,
   selectAutoDjAdditions,
@@ -37,14 +38,37 @@ assert.equal(autoDjSmartRuleCandidateCount(10, 24, 2), 106);
 assert.equal(autoDjSmartRuleCandidateCount(180, 24, 2), 180);
 assert.equal(autoDjSmartRuleCandidateCount(20, 80, 200), MAX_AUTO_DJ_SMART_RULE_CANDIDATES);
 assert.deepEqual(
-  selectAutoDjAdditions(queue, candidates, 5).map((item) => item.id),
+  selectAutoDjAdditions(queue, candidates, 5, queue.length).map((item) => item.id),
   [3, 4, 5],
   'Auto DJ additions should skip duplicates and fill to the target queue length',
 );
 assert.deepEqual(
-  selectAutoDjAdditions(queue, candidates, 3).map((item) => item.id),
+  selectAutoDjAdditions(queue, candidates, 3, queue.length).map((item) => item.id),
   [3],
   'Auto DJ additions should only add what is needed to reach target length',
+);
+
+// Regression: `queue` holds played history AND upcoming tracks. Sizing
+// against queue.length (the old behavior) meant that once a session's total
+// queue length reached the target, `needed` clamped to 0 forever — Auto DJ
+// silently stopped refilling even with the index deep into a long-played
+// session and almost nothing left ahead. Sizing against the actual
+// remaining-ahead count fixes this.
+const deepQueue = Array.from({ length: DEFAULT_AUTO_DJ_TARGET }, (_, i) => track(100 + i, `History ${i}`));
+const deepCandidates = [track(200, 'Fresh A'), track(201, 'Fresh B'), track(202, 'Fresh C')];
+const deepIndex = 20;
+const deepRemainingAhead = deepQueue.length - deepIndex - 1;
+assert.equal(deepQueue.length, DEFAULT_AUTO_DJ_TARGET, 'deep queue should already be at the default target length');
+assert.equal(deepRemainingAhead, 3, 'only a few tracks should remain ahead of a deep index');
+assert.deepEqual(
+  selectAutoDjAdditions(deepQueue, deepCandidates, DEFAULT_AUTO_DJ_TARGET, deepRemainingAhead).map((item) => item.id),
+  [200, 201, 202],
+  'Auto DJ should keep refilling once queue.length reaches target as long as few tracks remain ahead of a deep index',
+);
+assert.deepEqual(
+  selectAutoDjAdditions(deepQueue, deepCandidates, DEFAULT_AUTO_DJ_TARGET, deepQueue.length).map((item) => item.id),
+  [],
+  'no refill is needed when remaining-ahead already meets the target',
 );
 
 const settingsDir = await mkdtemp(fileURLToPath(new URL('../.tmp-auto-dj-', import.meta.url)));
@@ -72,6 +96,7 @@ assert.match(settingsSource, /autoDjTarget/, 'settings defaults should include A
 assert.match(settingsSource, /autoDjSmartRuleId/, 'settings should persist Auto DJ smart rule source');
 assert.match(storeSource, /refillAutoDjQueue/, 'player store should refill queue through Auto DJ');
 assert.match(storeSource, /!state\.queue\.length && !state\.autoDjSmartRuleId/, 'Auto DJ should allow Smart Rule sources to seed an empty queue');
+assert.match(storeSource, /remainingAhead/, 'Auto DJ refill should size additions against the remaining-ahead count, not total queue length');
 assert.match(storeSource, /buildHarmonicMix/, 'player store should use Harmonic Mix for Auto DJ candidates');
 assert.match(storeSource, /setAutoDjSmartRuleId/, 'player store should select Auto DJ smart rule source');
 assert.match(storeSource, /runSmartPlaylistRule/, 'Auto DJ should use saved smart rules as candidate sources');
