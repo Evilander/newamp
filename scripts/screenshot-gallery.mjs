@@ -11,7 +11,7 @@ import electronPath from 'electron';
 import ffmpeg from 'ffmpeg-static';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
-import { copyFile, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,15 +56,8 @@ export const GALLERY_ALBUMS = [
   },
 ];
 
-const contributedScreenshots = [
-  ['contributed-home-pink-floyd.png', 'C:\\Users\\evela\\OneDrive\\Pictures\\Screenshots\\Screenshot 2026-05-18 095226.png'],
-  ['contributed-albums-built-to-spill.png', 'C:\\Users\\evela\\OneDrive\\Pictures\\Screenshots\\Screenshot 2026-05-18 095318.png'],
-  ['contributed-now-playing-facts.png', 'C:\\Users\\evela\\OneDrive\\Pictures\\Screenshots\\Screenshot 2026-05-18 095354.png'],
-  ['contributed-now-playing-lyrics.png', 'C:\\Users\\evela\\OneDrive\\Pictures\\Screenshots\\Screenshot 2026-05-18 095406.png'],
-  ['contributed-windowshade-deck.png', 'C:\\Users\\evela\\OneDrive\\Pictures\\Screenshots\\Screenshot 2026-05-18 095443.png'],
-  ['contributed-record-player-deck.png', 'C:\\Users\\evela\\OneDrive\\Pictures\\Screenshots\\Screenshot 2026-05-18 095526.png'],
-  ['contributed-jukebox-deck.png', 'C:\\Users\\evela\\OneDrive\\Pictures\\Screenshots\\Screenshot 2026-05-18 095540.png'],
-];
+// Manually contributed screenshots (pre-2.0 design) were retired 2026-07-17 —
+// real-library-shots.mjs and deck-shots.mjs now produce the marketing set.
 
 export function assertFfmpegAvailable() {
   if (!ffmpeg) {
@@ -233,13 +226,6 @@ export function runElectronScreenshots({ env = {}, timeoutMs = 70000, onOutput }
   });
 }
 
-async function copyContributedScreenshots(screenshotRoot) {
-  for (const [targetName, source] of contributedScreenshots) {
-    if (!existsSync(source)) continue;
-    await copyFile(source, join(screenshotRoot, targetName));
-  }
-}
-
 function run(command, args) {
   const result = spawnSync(command, args, { encoding: 'utf8', windowsHide: true });
   if (result.status !== 0) {
@@ -307,7 +293,6 @@ async function main() {
   await mkdir(screenshotRoot, { recursive: true });
 
   for (const album of GALLERY_ALBUMS) await createAlbumFixture(mediaDir, album);
-  await copyContributedScreenshots(screenshotRoot);
   await writeSmokeSettings(userData, mediaDir);
 
   const result = await runElectronScreenshots({

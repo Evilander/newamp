@@ -48,23 +48,23 @@ Point it at your music folder, and it just starts playing — first launch even 
 
 | Home | Albums |
 | --- | --- |
-| <img src="assets/screenshots/contributed-home-pink-floyd.png" alt="NewAmp Home — greeting hero with blurred album backdrop and smart rails" width="420"> | <img src="assets/screenshots/contributed-albums-built-to-spill.png" alt="NewAmp Albums — dense cover grid that scales to thousands of albums" width="420"> |
+| <img src="assets/screenshots/real/real-home.png" alt="NewAmp 2.1 Home — Evening rotation hero, Today's Pick scored 96/100, Highest Rated shelf, and live listening stats over a 59,573-track library" width="420"> | <img src="assets/screenshots/real/real-albums.png" alt="NewAmp 2.1 Albums — dense real cover grid with alphabet rail, filter, and Surprise Me" width="420"> |
 
-| Now Playing | Synced lyrics |
+| Now Playing | Library |
 | --- | --- |
-| <img src="assets/screenshots/contributed-now-playing-facts.png" alt="NewAmp Now Playing — artist facts, live spectrum, waveform overview" width="420"> | <img src="assets/screenshots/contributed-now-playing-lyrics.png" alt="NewAmp lyrics scrolling in sync with playback" width="420"> |
+| <img src="assets/screenshots/real/real-now-playing.png" alt="NewAmp 2.1 Now Playing stage — ON AIR lamp, live spectrum, Signal Bay readout, and an honest 44.1K to 48K resample badge" width="420"> | <img src="assets/screenshots/real/real-library.png" alt="NewAmp 2.1 Library — Library Health, Archive Radar, duplicate clusters, and a search DSL over 59,573 tracks" width="420"> |
 
 **The decks** — compact modes that reshape the window into a little machine:
 
 | Record Player | Jukebox |
 | --- | --- |
-| <img src="assets/screenshots/contributed-record-player-deck.png" alt="Record player deck — spinning vinyl and a swinging tonearm" width="420"> | <img src="assets/screenshots/contributed-jukebox-deck.png" alt="Jukebox deck — chrome arch and animated bubble tubes" width="420"> |
+| <img src="assets/screenshots/decks/deck--record-player.png" alt="RP-1200 record player deck — spinning vinyl, weighted tonearm, pitch fader" width="420"> | <img src="assets/screenshots/decks/deck--jukebox.png" alt="Bandstand jukebox deck — chrome arch, A-01 title strip, coin slot" width="420"> |
 
-**The visualizers:**
+**Eviland Live** — 31 scenes, painted from the actual signal by an AI Director:
 
-| Tempo Pulse | Aurora |
+| Filament ribbons | Ember drift |
 | --- | --- |
-| <img src="assets/screenshots/visualizer-tempo-pulse-deerhoof.png" alt="Tempo Pulse visualizer — beat-locked pulse rings" width="420"> | <img src="assets/screenshots/visualizer-aurora-hella.png" alt="Aurora visualizer — flowing ribbons" width="420"> |
+| <img src="assets/screenshots/real/real-viz-eviland-1.png" alt="Eviland Live — amber filament ribbons woven live from the playing track" width="420"> | <img src="assets/screenshots/real/real-viz-eviland-2.png" alt="Eviland Live — an ember starfield with cyan waveform traces, seconds later in the same song" width="420"> |
 
 More screenshots live in `assets/screenshots/`.
 

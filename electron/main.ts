@@ -3239,6 +3239,12 @@ function screenshotGalleryActionSource(action: string): string {
           const stage = await waitFor('fullscreen visualizer stage', () =>
             document.querySelector('[data-newamp-fullscreen-visualizer]'),
           );
+          // 2.x moved presets into a popover — open the picker before the
+          // preset buttons exist in the DOM.
+          const pickerToggle = await waitFor('preset picker toggle', () =>
+            document.querySelector('[data-newamp-viz-preset-picker-toggle]'),
+          );
+          pickerToggle.click();
           const presetButton = await waitFor('visualizer preset ' + preset, () =>
             Array.from(document.querySelectorAll('[data-newamp-viz-preset-button]'))
               .find((item) => item.getAttribute('data-newamp-viz-preset-button') === preset),
