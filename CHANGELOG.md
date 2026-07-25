@@ -1056,7 +1056,7 @@ Both methods used to return `null` for three semantically distinct outcomes: mis
 
 ### Improved — Canonical `albumKey()` in `shared/album-key.ts`
 
-The same `(albumArtist, album) → string` composite key was inlined in four places with subtle inconsistencies (one had a `'Unknown Artist'` fallback, others didn't). Three other album-key conventions exist elsewhere in the codebase (`shared/discover.ts`, `getStats`, `albumFacts.ts`) with different separators and normalization. One canonical helper now lives in `shared/album-key.ts`; the four 1.5.4-era rating sites use it. NUL (` `) separator survives every printable character the user can put in a tag.
+The same `(albumArtist, album) → string` composite key was inlined in four places with subtle inconsistencies (one had a `'Unknown Artist'` fallback, others didn't). Three other album-key conventions exist elsewhere in the codebase (`shared/discover.ts`, `getStats`, `albumFacts.ts`) with different separators and normalization. One canonical helper now lives in `shared/album-key.ts`; the four 1.5.4-era rating sites use it. NUL (`\0`) separator survives every printable character the user can put in a tag.
 
 ### Improved — `getAlbums` failure visibility (already in 1.5.6, extended)
 

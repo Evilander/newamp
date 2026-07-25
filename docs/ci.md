@@ -74,4 +74,4 @@ of `release.yml` when signing secrets are configured.
 This is now **fixed**: Butterchurn runs in a sandboxed `butterchurn-iframe.html`
 that scopes `'unsafe-eval'` to just that frame, and the main renderer is back on
 `script-src 'self'`. `smoke:security` verifies both halves and is part of the
-CI-safe set above. See `docs/butterchurn-csp-iframe-plan.md` for the original plan.
+CI-safe set above.

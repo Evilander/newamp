@@ -30,7 +30,7 @@ The complete tour. The [README](../README.md) is the landing page; this is the e
 - **Magazine-style Home** — greeting hero with blurred album backdrop, Today's Pick (with a reason chip), Your Highest Rated, NewAmp News, weekly listening stats, and the Harmonic / Taste / Loved / Heavy Rotation / Fresh Imports rails.
 - **Bloomberg-density Now Playing** — tabbed side panel (On Air / Album / Lyrics), draggable spectrum split, selectable spectrum styles, VU + waveform overview, LRCLIB-synced lyrics with karaoke mode and a custom-lyrics editor, tempo trainer, practice A/B loop, track bookmarks.
 - **Resonance** — the whole UI reacts to live audio through one cheap CSS-variable loop that self-throttles on weak hardware and respects `prefers-reduced-motion`.
-- **Eviland** — 24-band per-instrument onset detection, GPU feedback field, real Navier-Stokes fluid, structural memory, tempo anticipation, per-track persistent visual lineage, 26 morphing looks. See [eviland-spec.md](eviland-spec.md).
+- **Eviland** — 24-band per-instrument onset detection, GPU feedback field, fluid simulation, structural memory, tempo anticipation, per-track persistent visual lineage, 26 morphing looks.
 - **MilkDrop via Butterchurn** (sandboxed, prewarmed preset swaps) + **Particle Flow** (~140k GPU particles) + 24 in-house fullscreen modes with real spectral-flux beat detection and an auto hardware tier.
 - **Save the moment** — a WebCodecs ring buffer holds the last 15 seconds of Eviland Live; `Shift+R` mints a shareable MP4 with audio. Plus a general clip recorder and PNG stills.
 - **Nine deck skins** — Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Hotdog, Retro TV — each declaring its own native window size.
