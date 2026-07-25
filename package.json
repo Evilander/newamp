@@ -237,8 +237,11 @@
     "directories": {
       "output": "release"
     },
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US"
+    ],
     "files": [
-      "dist/**/*",
       "dist-electron/**/*",
       "build/logo.png",
       "build/logo-app.webp",
@@ -247,7 +250,21 @@
       "native/newamp-audio/prebuilt/**/*",
       "node_modules/ffmpeg-static/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm",
-      "package.json"
+      "package.json",
+      "!node_modules/butterchurn/**/*",
+      "!node_modules/butterchurn-presets/**/*",
+      "!node_modules/mediabunny/**/*",
+      "!node_modules/qrcode/**/*",
+      "!node_modules/core-js/**/*",
+      "!node_modules/lodash/**/*",
+      "!node_modules/pngjs/**/*",
+      "!node_modules/@babel/**/*",
+      "!node_modules/yargs/**/*",
+      "!node_modules/yargs-parser/**/*",
+      "!node_modules/sql.js/dist/sql-asm*",
+      "!node_modules/sql.js/dist/*-debug*",
+      "!node_modules/sql.js/dist/*-browser*",
+      "!node_modules/sql.js/dist/worker.*"
     ],
     "extraResources": [
       {
@@ -270,7 +287,7 @@
       "node_modules/ffmpeg-static/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm"
     ],
-    "afterPack": "scripts/afterpack-verify-ffmpeg-arch.mjs",
+    "afterPack": "scripts/afterpack.mjs",
     "mac": {
       "icon": "build/icon.icns",
       "category": "public.app-category.music",
