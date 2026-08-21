@@ -74,6 +74,7 @@
     "smoke:scanner-queue": "npm run build:electron && node scripts/scanner-queue-smoke.mjs",
     "smoke:music-folders": "npm run build:electron && node scripts/music-folder-suggestions-smoke.mjs",
     "smoke:library-paging": "npm run build:electron && node scripts/library-paging-smoke.mjs",
+    "smoke:library-corruption": "npm run build:electron && node scripts/library-corruption-smoke.mjs",
     "smoke:home": "npm run build:electron && node scripts/home-smoke.mjs",
     "smoke:folders": "npm run build:electron && node scripts/folder-browser-smoke.mjs",
     "smoke:quick-play": "npm run build:electron && node scripts/quick-play-smoke.mjs",

@@ -697,6 +697,17 @@ export class LibraryStore {
       try {
         const buf = readFileSync(this.file);
         this.db = new this.SQL.Database(buf);
+        // Page-level corruption leaves the file header and the schema intact,
+        // so neither the open above nor applySchema() below throws — it only
+        // surfaces on the first real read, long after startup has committed to
+        // this file. quick_check walks the btree pages (~50ms on a 60k-track
+        // library) so a bad DB lands in the recovery path below instead of
+        // taking down the main process mid-launch.
+        const verdict = this.db.exec('PRAGMA quick_check')[0]?.values?.[0]?.[0];
+        if (verdict !== 'ok') {
+          const detail = String(verdict ?? 'no result').split('\n')[0]!.slice(0, 200);
+          throw new Error(`database failed integrity check (${detail})`);
+        }
       } catch (err) {
         const event = quarantineCorruptFile(this.file, 'library', recoveryReason(err));
         if (event) this.recoveryEvents.push(event);

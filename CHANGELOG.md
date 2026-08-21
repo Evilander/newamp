@@ -5,6 +5,21 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- A corrupted library database stopped NewAmp from starting at all. Opening the
+  database only checked that the file loaded and its schema applied, and
+  page-level corruption passes both of those — the header and schema stay
+  intact, and the damage only shows up on the first real read. That read
+  happened during startup, before the window was shown, so the app exited with
+  no window and no error. Reinstalling didn't help, because the database lives
+  in your user data folder and an uninstall leaves it there. NewAmp now runs an
+  integrity check when it opens the database, sets a corrupt one aside with a
+  `.corrupt-` suffix instead of failing, and rebuilds the library from a rescan.
+  A library that can't be read can no longer keep the app from opening.
+
 ## [2.1.0] - 2026-07-16
 
 A performance release. NewAmp got heavier the longer you left it running, and
