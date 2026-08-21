@@ -4816,10 +4816,19 @@ async function bootstrap(): Promise<void> {
 
   // Auto-scan on launch if the library is empty and roots are configured
   mainWin.webContents.once('did-finish-load', () => {
-    const stats = library.getStats();
+    // This runs before the window is ever shown, so anything that throws here
+    // escapes as an uncaught exception and kills the app with no window and no
+    // dialog — it just never opens. Treat an unreadable library as an empty one
+    // and let the auto-scan below rebuild it.
+    let trackCount = 0;
+    try {
+      trackCount = library.getStats().tracks;
+    } catch (err) {
+      writeDiagnosticEvent('library-stats-unavailable', { error: String(err) });
+    }
     const roots = settings.get().libraryRoots;
     let scanPromise = Promise.resolve();
-    if (roots.length && (stats.tracks === 0 || settings.get().libraryAutoWatch)) {
+    if (roots.length && (trackCount === 0 || settings.get().libraryAutoWatch)) {
       scanPromise = scanner.start(roots);
     }
     if (uiPlaybackSmoke && mainWin) {
