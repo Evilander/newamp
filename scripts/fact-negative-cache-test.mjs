@@ -76,6 +76,49 @@ async function bundle(entry, outfile) {
   if (fetchCallCount !== 0) fail(`the second lookup for the same never-found album should be served entirely from the negative cache (0 fetch calls), got ${fetchCallCount}`);
 }
 
+// --- An outage must NOT be recorded as a confirmed miss. Every candidate comes
+// back empty when Wikipedia is down, rate-limiting, or unreachable, which looks
+// exactly like "not found" unless the code tracks whether a request actually
+// landed. Caching that would hide real facts until the entry expired. ---
+{
+  const { fetchArtistFacts } = await bundle('src/api/artistFacts.ts', 'tmp/artist-facts-outage-bundle.mjs');
+  localStorage.clear();
+
+  fetchCallCount = 0;
+  globalThis.fetch = async () => {
+    fetchCallCount += 1;
+    throw new Error('network down');
+  };
+  const during = await fetchArtistFacts('Outage Test Artist');
+  log.push(`artistFacts: during outage made ${fetchCallCount} fetch call(s), result=${during}`);
+  if (during !== null) fail('an outage should still resolve to null for the caller');
+  if (fetchCallCount === 0) fail('test setup: the outage case should have attempted at least one request');
+
+  // Connectivity returns. The next lookup must retry rather than serve a
+  // "miss" that was only ever an outage.
+  fetchCallCount = 0;
+  globalThis.fetch = async () => {
+    fetchCallCount += 1;
+    return { ok: true, json: async () => ({ query: { pages: {} } }) };
+  };
+  await fetchArtistFacts('Outage Test Artist');
+  log.push(`artistFacts: after recovery made ${fetchCallCount} fetch call(s)`);
+  if (fetchCallCount === 0) {
+    fail('a lookup after an outage must retry, not read a negative-cache entry written during the outage');
+  }
+
+  // A genuine miss (server answered, no pages) must still be negative-cached.
+  localStorage.clear();
+  fetchCallCount = 0;
+  await fetchArtistFacts('Genuinely Absent Artist Xyzzy');
+  const firstMiss = fetchCallCount;
+  fetchCallCount = 0;
+  await fetchArtistFacts('Genuinely Absent Artist Xyzzy');
+  log.push(`artistFacts: genuine miss cached (${firstMiss} calls, then ${fetchCallCount})`);
+  if (firstMiss === 0) fail('test setup: the genuine-miss lookup should have made requests');
+  if (fetchCallCount !== 0) fail('a genuine miss must still be negative-cached');
+}
+
 // --- Source assertions ---
 const artistSource = readFileSync(resolve('src/api/artistFacts.ts'), 'utf8');
 const albumSource = readFileSync(resolve('src/api/albumFacts.ts'), 'utf8');

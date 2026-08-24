@@ -1,4 +1,11 @@
-import { fetchWikipediaPages, localStorageSafe, normalizeForMatch, setItemWithPrune, type WikiPage } from '../lib/wiki.ts';
+import {
+  fetchWikipediaPages,
+  localStorageSafe,
+  normalizeForMatch,
+  setItemWithPrune,
+  type WikiPage,
+  type WikiReachability,
+} from '../lib/wiki.ts';
 
 export interface AlbumFact {
   title: string;
@@ -39,9 +46,10 @@ export async function fetchAlbumFacts(
 
   const cached = readCachedAlbumFact(cleanAlbum, cleanArtist);
   if (cached !== undefined) return cached;
+  const reachability: WikiReachability = { reachedServer: false };
 
   for (const title of directTitleCandidates(cleanAlbum, cleanArtist)) {
-    const candidates = await fetchWikiCandidates({
+    const candidates = await fetchWikiCandidates(reachability, {
       origin: '*',
       action: 'query',
       redirects: '1',
@@ -64,7 +72,7 @@ export async function fetchAlbumFacts(
     const query = cleanArtist
       ? `"${lookupAlbum}" "${cleanArtist}" album OR "studio album" OR EP -film -song -single -novel -software`
       : `"${lookupAlbum}" album OR "studio album" OR EP -film -song -single -novel -software`;
-    const candidates = await fetchWikiCandidates({
+    const candidates = await fetchWikiCandidates(reachability, {
       origin: '*',
       action: 'query',
       generator: 'search',
@@ -87,7 +95,10 @@ export async function fetchAlbumFacts(
   // Every candidate exhausted — negative-cache the miss so the next lookup
   // for this album doesn't re-run the full serial chain (or the artist-fact
   // fallback chain NowPlayingView triggers on a null result) for nothing.
-  writeCachedAlbumFact(cleanAlbum, cleanArtist, null);
+  // Only record a confirmed miss if Wikipedia actually answered. An outage,
+  // a 5xx, or rate-limiting makes every candidate come back empty too, and
+  // caching that as "no such album" would hide real data until the entry expires.
+  if (reachability.reachedServer) writeCachedAlbumFact(cleanAlbum, cleanArtist, null);
   return null;
 }
 
@@ -274,10 +285,11 @@ function directTitleCandidates(album: string, artist: string): string[] {
 }
 
 async function fetchWikiCandidates(
+  reachability: WikiReachability,
   query: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<AlbumFact[]> {
-  return fetchWikipediaPages(query, pageToAlbumFact, signal, 'wiki album');
+  return fetchWikipediaPages(query, pageToAlbumFact, signal, 'wiki album', reachability);
 }
 
 function pageToAlbumFact(page: WikiPage): AlbumFact | null {
