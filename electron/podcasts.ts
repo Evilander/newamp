@@ -160,7 +160,7 @@ export class PodcastStore {
 
 export async function fetchPodcastSubscription(url: string): Promise<PodcastSubscription> {
   const normalized = normalizeFeedUrl(url);
-  const response = await fetch(normalized, {
+  const response = await fetchWithHostGuard(normalized, {
     headers: {
       Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1',
       'User-Agent': `${NEWAMP_USER_AGENT} podcast client`,
@@ -188,7 +188,7 @@ export async function downloadPodcastEpisode(
     ?.episodes.find((item) => item.id === input.episodeId);
   if (!episode) return null;
 
-  const response = await fetch(episode.audioUrl, {
+  const response = await fetchWithHostGuard(episode.audioUrl, {
     headers: { 'User-Agent': `${NEWAMP_USER_AGENT} podcast downloader` },
   });
   if (!response.ok) throw new Error(`Podcast episode download failed: HTTP ${response.status}`);
@@ -423,6 +423,38 @@ export function isBlockedPodcastHost(hostname: string): boolean {
     if (a === 192 && b === 168) return true;
   }
   return false;
+}
+
+const MAX_PODCAST_REDIRECTS = 5;
+
+// isBlockedPodcastHost only guards the URL a caller passes in. Node's fetch
+// follows redirects by default and never re-validates the hop, so a feed
+// hosted at an innocuous public URL could 302 to 127.0.0.1 or the cloud
+// metadata endpoint and the guard above would never see it. Fetch with
+// redirect: 'manual' and re-validate every hop (and the initial URL) against
+// the same host guard, capping the number of hops so a redirect loop can't
+// hang the request.
+// Exported for scripts/podcast-redirect-guard-test.mjs.
+export async function fetchWithHostGuard(url: string, init: RequestInit = {}): Promise<Response> {
+  let current = new URL(url);
+  for (let hop = 0; ; hop += 1) {
+    if (current.protocol !== 'https:' && current.protocol !== 'http:') {
+      throw new Error('Podcast request URL must use http:// or https://');
+    }
+    if (isBlockedPodcastHost(current.hostname)) {
+      throw new Error('Podcast request host is not allowed (private or local address)');
+    }
+    const response = await fetch(current, { ...init, redirect: 'manual' });
+    if (!isRedirectStatus(response.status)) return response;
+    if (hop >= MAX_PODCAST_REDIRECTS) throw new Error('Podcast request redirected too many times');
+    const location = response.headers.get('location');
+    if (!location) throw new Error('Podcast request redirected with no Location header');
+    current = new URL(location, current);
+  }
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
 function normalizeFeedUrl(url: string): string {
