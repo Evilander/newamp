@@ -3,8 +3,13 @@
 // main at an arbitrary local file: main copies it into the playlist-art
 // cache and serves it back over newplaylistart://, an arbitrary-file-read
 // primitive. Only a path playlist:pick-cover itself just returned from a
-// real dialog.showOpenDialog() result is accepted; approval expires after
-// ttlMs so the allowlist can't grow without bound across a long session.
+// real dialog.showOpenDialog() result is accepted.
+//
+// Bounded by count, not by time: a picked cover stays approved for the life of
+// the process. An earlier version expired approvals after ten minutes, which
+// rejected a perfectly legitimate save from a user who picked an icon and then
+// took their time over the rest of the playlist. Keeping the last few dozen
+// picks bounds memory just as well without inventing a deadline for the user.
 import { resolve } from 'node:path';
 
 export interface PlaylistCoverGuard {
@@ -12,29 +17,25 @@ export interface PlaylistCoverGuard {
   isApproved(filePath: string): boolean;
 }
 
-const DEFAULT_APPROVAL_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_MAX_APPROVALS = 32;
 
-export function createPlaylistCoverGuard(ttlMs = DEFAULT_APPROVAL_TTL_MS): PlaylistCoverGuard {
-  const approvedAt = new Map<string, number>();
-
-  function prune(now: number): void {
-    const cutoff = now - ttlMs;
-    for (const [path, at] of approvedAt) {
-      if (at < cutoff) approvedAt.delete(path);
-    }
-  }
+export function createPlaylistCoverGuard(maxApprovals = DEFAULT_MAX_APPROVALS): PlaylistCoverGuard {
+  // insertion-ordered: the oldest approval is the first key
+  const approved = new Set<string>();
 
   return {
     approve(filePath: string): void {
-      const now = Date.now();
-      prune(now);
-      approvedAt.set(resolve(filePath), now);
+      const key = resolve(filePath);
+      approved.delete(key); // re-approving moves it to the newest position
+      approved.add(key);
+      while (approved.size > maxApprovals) {
+        const oldest = approved.values().next().value as string | undefined;
+        if (oldest === undefined) break;
+        approved.delete(oldest);
+      }
     },
     isApproved(filePath: string): boolean {
-      const now = Date.now();
-      prune(now);
-      const at = approvedAt.get(resolve(filePath));
-      return at !== undefined && now - at <= ttlMs;
+      return approved.has(resolve(filePath));
     },
   };
 }
