@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { writeFile, rename, unlink } from 'node:fs/promises';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { AppSettings, RecoveryEvent } from '../shared/types.js';
 import { normalizePlaybackRate } from '../shared/tempo-trainer.js';
@@ -7,7 +7,7 @@ import { normalizeAutoDjTarget } from '../shared/auto-dj.js';
 import { normalizeAudioOutputDeviceId } from '../shared/audio-output.js';
 import { normalizeLimiterEnabled, normalizePreampDb } from '../shared/audio-limiter.js';
 import { FLAT_EQ_VALUES, normalizeEqValues } from '../shared/eq-presets.js';
-import { quarantineCorruptFile, recoveryReason } from './recovery.js';
+import { atomicWriteFileSync, durableWriteFileAsync, quarantineCorruptFile, recoveryReason, renameOverExistingAsync } from './recovery.js';
 
 const DEFAULTS: AppSettings = {
   libraryRoots: [],
@@ -303,15 +303,17 @@ export class SettingsStore {
   // Immediate, synchronous, unconditional write. Also cancels any pending
   // debounced resumeState write and bumps persistSeq so that write's rename
   // (if already in flight) drops itself as stale instead of clobbering this
-  // fresher, synchronously-written state — see persistAsync.
+  // fresher, synchronously-written state — see persistAsync. Lands via tmp
+  // file + fsync + rename so a crash mid-write can never truncate
+  // settings.json back to defaults (losing library roots, Last.fm session…).
   private persist(): void {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
     this.persistSeq += 1;
+    atomicWriteFileSync(this.file, JSON.stringify(this.state, null, 2));
     this.dirty = false;
-    writeFileSync(this.file, JSON.stringify(this.state, null, 2), 'utf-8');
   }
 
   // Debounced path for the resumeState autosave only — writing the full
@@ -335,20 +337,22 @@ export class SettingsStore {
     this.dirty = false;
     const seq = ++this.persistSeq;
     const payload = JSON.stringify(this.state, null, 2);
-    const tmp = `${this.file}.tmp`;
+    const tmp = `${this.file}.tmp-${process.pid}`;
     this.persistInFlight = (async () => {
       try {
-        await writeFile(tmp, payload, 'utf-8');
+        await durableWriteFileAsync(tmp, payload);
         if (seq !== this.persistSeq) {
           // A synchronous quit-path flush captured newer state while this
           // write was in flight — drop the stale copy instead of racing it.
           await unlink(tmp).catch(() => {});
           return;
         }
-        await rename(tmp, this.file);
+        await renameOverExistingAsync(tmp, this.file);
       } catch (err) {
         console.error('settings persist failed', err);
         this.dirty = true; // retry on the next scheduled persist
+      } finally {
+        await unlink(tmp).catch(() => {});
       }
     })();
     try {
@@ -373,7 +377,7 @@ export class SettingsStore {
     }
     this.persistSeq += 1;
     if (this.dirty) {
-      writeFileSync(this.file, JSON.stringify(this.state, null, 2), 'utf-8');
+      atomicWriteFileSync(this.file, JSON.stringify(this.state, null, 2));
       this.dirty = false;
     }
   }
