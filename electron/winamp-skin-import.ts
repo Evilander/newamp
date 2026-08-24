@@ -1,5 +1,5 @@
 import { inflateRawSync } from 'node:zlib';
-import { basename, extname } from 'node:path';
+import { basename, extname, isAbsolute } from 'node:path';
 import type { CustomSkin } from '../shared/types.js';
 
 interface ZipEntry {
@@ -26,8 +26,37 @@ const ZIP_LOCAL_SIGNATURE = 0x04034b50;
 const WINAMP_ARCHIVE_EXTENSIONS = new Set(['.wsz', '.zip']);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 
+// Classic Winamp skin bitmaps are tiny (skin assets are well under 1MB
+// each). A crafted archive that inflates to hundreds of MB/GB would run
+// inflateRawSync synchronously on the main process, blocking IPC/UI/audio
+// for the duration and risking OOM — cap both per-entry and total
+// decompressed size. maxOutputLength aborts decompression before it exceeds
+// the per-entry cap; the running total in readZipEntries catches many
+// entries that individually stay under that cap but sum to something huge.
+const MAX_SKIN_ENTRY_INFLATED_BYTES = 24 * 1024 * 1024;
+const MAX_SKIN_ARCHIVE_INFLATED_BYTES = 64 * 1024 * 1024;
+
+// Import IPC hardening: settings:skin-import-file is wired to app-wide
+// drag/drop, but it's also exposed directly on window.newamp, so any
+// renderer script — not just the drop handler — can call it with an
+// arbitrary path. Restrict to plausible skin files of a bounded size before
+// any read happens; content still has to parse as a real custom skin or
+// classic skin archive (parseCustomSkinFile / parseWinampClassicSkinArchive
+// both throw on anything that doesn't match).
+const SKIN_IMPORT_EXTENSIONS = new Set(['.json', '.wsz', '.zip']);
+export const MAX_SKIN_IMPORT_FILE_BYTES = 20 * 1024 * 1024;
+
 export function isWinampClassicSkinArchiveName(fileName: string): boolean {
   return WINAMP_ARCHIVE_EXTENSIONS.has(extname(fileName).toLowerCase());
+}
+
+export function assertSkinImportPathAllowed(filePath: string): void {
+  if (typeof filePath !== 'string' || !filePath.trim() || !isAbsolute(filePath)) {
+    throw new Error('Skin file path is invalid.');
+  }
+  if (!SKIN_IMPORT_EXTENSIONS.has(extname(filePath).toLowerCase())) {
+    throw new Error('Skins must be a .json, .wsz, or .zip file.');
+  }
 }
 
 export function parseWinampClassicSkinArchive(input: Uint8Array, fileName = 'Winamp Skin.wsz'): CustomSkin {
@@ -92,6 +121,7 @@ function readZipEntries(input: Uint8Array): ZipEntry[] {
   if (centralOffset + centralSize > buffer.length) throw new Error('Invalid Winamp skin archive.');
 
   const entries: ZipEntry[] = [];
+  let totalInflatedBytes = 0;
   let offset = centralOffset;
   for (let i = 0; i < entryCount; i += 1) {
     if (buffer.readUInt32LE(offset) !== ZIP_CENTRAL_SIGNATURE) throw new Error('Invalid Winamp skin archive.');
@@ -104,7 +134,12 @@ function readZipEntries(input: Uint8Array): ZipEntry[] {
     const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString('utf8').replace(/\\/g, '/');
     offset += 46 + nameLength + extraLength + commentLength;
     if (!name || name.endsWith('/')) continue;
-    entries.push({ name, data: readZipEntryData(buffer, localOffset, compressedSize, method) });
+    const data = readZipEntryData(buffer, localOffset, compressedSize, method);
+    totalInflatedBytes += data.length;
+    if (totalInflatedBytes > MAX_SKIN_ARCHIVE_INFLATED_BYTES) {
+      throw new Error('This Winamp skin archive is too large when decompressed.');
+    }
+    entries.push({ name, data });
   }
   return entries;
 }
@@ -124,7 +159,16 @@ function readZipEntryData(buffer: Buffer, localOffset: number, compressedSize: n
   const dataOffset = localOffset + 30 + nameLength + extraLength;
   const compressed = buffer.subarray(dataOffset, dataOffset + compressedSize);
   if (method === 0) return Buffer.from(compressed);
-  if (method === 8) return inflateRawSync(compressed);
+  if (method === 8) {
+    try {
+      return inflateRawSync(compressed, { maxOutputLength: MAX_SKIN_ENTRY_INFLATED_BYTES });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ERR_BUFFER_TOO_LARGE') {
+        throw new Error('This Winamp skin archive contains an entry that is too large when decompressed.');
+      }
+      throw err;
+    }
+  }
   throw new Error('Unsupported compression method in Winamp skin archive.');
 }
 

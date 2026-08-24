@@ -75,7 +75,7 @@ const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {
   libraryPath: '',
   generatedAt: Date.now(),
   libraryStats: { tracks: 0, albums: 0, artists: 0, duration: 0 },
-  lastfmOutbox: { pending: 0, oldestCreatedAt: null, lastError: null },
+  lastfmOutbox: { pending: 0, oldestCreatedAt: null, lastError: null, needsReconnect: false },
   recoveryEvents: [],
 };
 
@@ -292,8 +292,8 @@ const stub: NewAmpAPI = {
   lastfmDisconnect: async () => DEFAULT_SETTINGS,
   lastfmUpdateNowPlaying: async () => undefined,
   lastfmScrobble: async () => undefined,
-  lastfmGetOutboxStatus: async () => ({ pending: 0, oldestCreatedAt: null, lastError: null }),
-  lastfmFlushOutbox: async () => ({ pending: 0, oldestCreatedAt: null, lastError: null }),
+  lastfmGetOutboxStatus: async () => ({ pending: 0, oldestCreatedAt: null, lastError: null, needsReconnect: false }),
+  lastfmFlushOutbox: async () => ({ pending: 0, oldestCreatedAt: null, lastError: null, needsReconnect: false }),
   getLocalLyrics: async () => null,
   saveCustomLyrics: async (input) => {
     const plainLyrics = input.plainLyrics?.trim() || null;

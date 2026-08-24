@@ -702,6 +702,10 @@ export interface LastfmOutboxStatus {
   pending: number;
   oldestCreatedAt: number | null;
   lastError: string | null;
+  // True when the outbox is stalled behind an invalid Last.fm session
+  // (revoked access, expired key) rather than a transient outage — the UI
+  // should prompt the user to reconnect instead of just showing "pending".
+  needsReconnect: boolean;
 }
 
 export type LocalLyricsSource = 'sidecar' | 'custom';

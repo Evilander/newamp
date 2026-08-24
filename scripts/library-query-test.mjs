@@ -126,6 +126,58 @@ log.push(`B2c manual-edit invalidates health: ${h5 !== h4b}`);
   log.push('LIKE escaping: literal %/_ matching verified');
 }
 
+// LIKE escaping, genre filters: buildHarmonicMix's genreQuery and
+// runSmartPlaylistRule's genreQuery (via smartRuleWhere) build their own
+// LIKE clauses directly, bypassing the pushTextFilter/trackSearchWhere
+// helpers the block above covers. They were missed by both the original
+// ESCAPE fix and the finding that prompted it — found while verifying that
+// fix's coverage. Unescaped, a literal '%' or '_' in a genre query acts as a
+// wildcard, so a query like "100%" would falsely match "1000" (no percent
+// sign at all) and "chill_hop" would falsely match "chillXhop" for any X.
+{
+  const genreTrack = (n, genre) => ({
+    path: `/music/genre-guard-${n}.flac`,
+    title: `Genre Guard ${n}`,
+    artist: 'Genre Guard Artist',
+    album: 'Genre Guard Album',
+    albumArtist: 'Genre Guard Artist',
+    trackNo: 1, discNo: 1, year: 2022, genre,
+    duration: 100, bitrate: 1000, sampleRate: 44100,
+    replayGainTrackDb: null, replayGainAlbumDb: null,
+    size: 5000 + n, mtime: 1700000000 + n, art: null,
+  });
+  lib.upsertTracks([
+    genreTrack(1, '100% Chill'),        // literal '%' — should match genreQuery "100%"
+    genreTrack(2, '1000 Beats Only'),   // no '%' at all — must NOT match "100%" unescaped
+    genreTrack(3, 'Chill_Hop Beats'),   // literal '_' — should match genreQuery "chill_hop"
+    genreTrack(4, 'ChillXHop Beats'),   // no '_' — must NOT match "chill_hop" unescaped
+  ]);
+
+  const harmonicPaths = (genreQuery) =>
+    lib.buildHarmonicMix({ genreQuery }).map((t) => t.path);
+
+  const pctMix = harmonicPaths('100%');
+  if (!pctMix.includes('/music/genre-guard-1.flac')) fail('buildHarmonicMix "100%" should match the literal "100% Chill" genre');
+  if (pctMix.includes('/music/genre-guard-2.flac')) fail('buildHarmonicMix "100%" must not wildcard-match "1000 Beats Only"');
+
+  const underscoreMix = harmonicPaths('chill_hop');
+  if (!underscoreMix.includes('/music/genre-guard-3.flac')) fail('buildHarmonicMix "chill_hop" should match the literal "Chill_Hop Beats" genre');
+  if (underscoreMix.includes('/music/genre-guard-4.flac')) fail('buildHarmonicMix "chill_hop" must not wildcard-match "ChillXHop Beats"');
+
+  const smartPaths = (genreQuery) =>
+    lib.runSmartPlaylistRule({ name: 'Genre Guard Rule', mood: 'focus', count: 50, genreQuery }).map((t) => t.path);
+
+  const pctSmart = smartPaths('100%');
+  if (!pctSmart.includes('/music/genre-guard-1.flac')) fail('runSmartPlaylistRule "100%" should match the literal "100% Chill" genre');
+  if (pctSmart.includes('/music/genre-guard-2.flac')) fail('runSmartPlaylistRule "100%" must not wildcard-match "1000 Beats Only"');
+
+  const underscoreSmart = smartPaths('chill_hop');
+  if (!underscoreSmart.includes('/music/genre-guard-3.flac')) fail('runSmartPlaylistRule "chill_hop" should match the literal "Chill_Hop Beats" genre');
+  if (underscoreSmart.includes('/music/genre-guard-4.flac')) fail('runSmartPlaylistRule "chill_hop" must not wildcard-match "ChillXHop Beats"');
+
+  log.push('genre LIKE escaping verified for buildHarmonicMix and runSmartPlaylistRule');
+}
+
 // Album search matchedTrackTitles: GROUP_CONCAT joins with char(31); the
 // split must use that unit separator so multi-title results render as whole
 // titles ("A · B"), never as loose characters.

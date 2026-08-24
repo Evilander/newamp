@@ -2605,8 +2605,8 @@ export class LibraryStore {
     const params: unknown[] = [];
     const genreQuery = input.genreQuery?.trim();
     if (genreQuery) {
-      where.push('genre IS NOT NULL AND lower(genre) LIKE ?');
-      params.push(`%${genreQuery.toLowerCase()}%`);
+      where.push(`genre IS NOT NULL AND lower(genre) LIKE ? ESCAPE '|'`);
+      params.push(likeParam(genreQuery));
     }
     let candidates = this.many<RawRow>(
       `SELECT * FROM tracks
@@ -5001,8 +5001,8 @@ function smartRuleWhere(rule: SmartPlaylistRule): { where: string; params: unkno
     .filter(Boolean);
 
   if (genreWords.length) {
-    where.push(`(${genreWords.map(() => 'lower(COALESCE(genre, "")) LIKE ?').join(' OR ')})`);
-    params.push(...genreWords.map((word) => `%${word}%`));
+    where.push(`(${genreWords.map(() => `lower(COALESCE(genre, "")) LIKE ? ESCAPE '|'`).join(' OR ')})`);
+    params.push(...genreWords.map((word) => likeParam(word)));
   }
   if (rule.searchQuery) {
     const searchWhere = trackSearchWhere(parseTrackSearchQuery(rule.searchQuery));
