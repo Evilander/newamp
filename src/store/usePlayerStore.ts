@@ -1235,7 +1235,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const state = get();
       const result = removeQueueItem(state.queue, state.index, removeIndex);
       if (!result.queue.length) {
-        engine.stop();
+        // Removing the last track is also a removed-current case, so it needs
+        // the same unload() as the branch below: stop() leaves src/trackId on
+        // the deck, and a later Play would resume the track just removed.
+        engine.unload();
         set({ queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], activePodcastEpisode: null });
         schedulePersistPlaybackSession(get(), true);
         return;
