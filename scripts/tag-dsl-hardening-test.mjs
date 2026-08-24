@@ -63,6 +63,32 @@ const nonCapturingAltMs = Date.now() - t2;
 assert.ok(nonCapturingAltMs < 100, `(?:a|a)+ must be refused fast, took ${nonCapturingAltMs}ms`);
 assert.equal(nonCapturingAltEval.matched, false, '(?:a|a)+ should be treated as an unsafe pattern (matched: false)');
 
+// The same alternation-of-equivalents wrapped in the other group forms: a named
+// group and an inline-modifier group. Both were bypasses, because the prefix the
+// guard skipped over covered only `(?:` and lookarounds, so the capture ate the
+// marker and the backreference could never re-match.
+for (const [tagName, label, pattern] of [
+  ['alt_named', 'named group', '(?<dup>a|a)+b'],
+  ['alt_inline', 'inline modifier', '(?i:a|a)+b'],
+]) {
+  const parsed = parseRule(`tag(${tagName}) when title matches "${pattern}"`);
+  assert.ok(parsed.rule, `${label} alternation-repeat should still parse`);
+  const started = Date.now();
+  const evaluated = evaluateRule(parsed.rule, stubContext({ title: 'a'.repeat(40) }), buildEvalEnvironment());
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 100, `${pattern} must be refused fast, took ${elapsed}ms`);
+  assert.equal(evaluated.matched, false, `${pattern} should be treated as an unsafe pattern`);
+}
+
+// A named group with genuinely distinct branches is legitimate and must still work.
+const safeNamedAlt = parseRule('tag(safe_named) when title matches "(?<pet>cat|dog)"');
+assert.ok(safeNamedAlt.rule);
+assert.equal(
+  evaluateRule(safeNamedAlt.rule, stubContext({ title: 'my dog' }), buildEvalEnvironment()).matched,
+  true,
+  'a named group with distinct branches must not be flagged unsafe',
+);
+
 // Distinct-branch alternation under a non-capturing group is legitimate and must still work.
 const safeNonCapturingAlt = parseRule('tag(safe_noncap) when title matches "(?:cat|dog)"');
 assert.ok(safeNonCapturingAlt.rule);
