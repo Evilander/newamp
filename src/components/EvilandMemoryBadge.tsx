@@ -131,7 +131,20 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
 
   function togglePin(): void {
     setShowPopover((open) => !open);
-    setPhase((current) => (current === 'pinned' ? 'fade-out' : 'pinned'));
+    setPhase((current) => {
+      if (current !== 'pinned') return 'pinned';
+      // Unpinning after the natural fade-in/visible/fade-out/hidden cycle
+      // has already run its course (it's keyed on the (trackId, hasPlan)
+      // signature via armedFor, so it won't reschedule once fired — routine
+      // by the time a user pins then unpins, which is normally >10s after
+      // the plan loaded) would otherwise leave 'fade-out' as a dead end:
+      // nothing else advances it, so the badge stays mounted (and
+      // clickable) forever. Mirror the original chain's own final step.
+      window.setTimeout(() => {
+        setPhase((p) => (p === 'pinned' ? p : 'hidden'));
+      }, 800);
+      return 'fade-out';
+    });
   }
 
   async function resetMemory(): Promise<void> {

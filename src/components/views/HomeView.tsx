@@ -4,6 +4,7 @@ import { buildArchiveCompass, duplicateExactTotal, legacyFormatTotal, missingMet
 import { api } from '../../lib/api';
 import { hiddenReviewLine } from '../../lib/easterEggs';
 import { formatDuration, formatNumber, formatTime } from '../../lib/format';
+import { pushToast } from '../../lib/toast';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { BrandLogo } from '../BrandLogo';
 import { ArtistLink, AlbumLink } from '../EntityLink';
@@ -145,6 +146,14 @@ export function HomeView(): JSX.Element {
         heavy,
         playlists: playlists.slice(0, 8),
       }));
+    } catch (err) {
+      if (generation === refreshGenerationRef.current) {
+        pushToast({
+          tone: 'error',
+          title: 'Could not load Home',
+          detail: err instanceof Error ? err.message : 'Unknown error. Click Refresh to retry.',
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -192,63 +201,87 @@ export function HomeView(): JSX.Element {
   async function saveSet(name: string, tracks: Track[]): Promise<void> {
     if (!tracks.length) return;
     const date = new Date().toISOString().slice(0, 10);
-    const playlist = await api.savePlaylist({
-      name: `${name} ${date}`,
-      trackIds: tracks.map((track) => track.id),
-    });
-    setStatus(`Saved ${playlist.name} with ${playlist.trackCount.toLocaleString()} tracks.`);
-    void refreshHome();
+    try {
+      const playlist = await api.savePlaylist({
+        name: `${name} ${date}`,
+        trackIds: tracks.map((track) => track.id),
+      });
+      setStatus(`Saved ${playlist.name} with ${playlist.trackCount.toLocaleString()} tracks.`);
+      void refreshHome();
+    } catch (err) {
+      pushToast({ tone: 'error', title: `Could not save ${name}`, detail: err instanceof Error ? err.message : 'Unknown error' });
+    }
   }
 
   async function playSavedPlaylist(playlist: SavedPlaylist): Promise<void> {
-    const tracks = await api.getPlaylistTracks(playlist.id);
-    if (!tracks.length) {
-      setStatus(`${playlist.name} has no playable tracks.`);
-      return;
+    try {
+      const tracks = await api.getPlaylistTracks(playlist.id);
+      if (!tracks.length) {
+        setStatus(`${playlist.name} has no playable tracks.`);
+        return;
+      }
+      await playQueue(tracks, 0);
+    } catch (err) {
+      pushToast({ tone: 'error', title: `Could not play ${playlist.name}`, detail: err instanceof Error ? err.message : 'Unknown error' });
     }
-    await playQueue(tracks, 0);
   }
 
   async function playSmartRule(rule: SmartPlaylistRule): Promise<void> {
-    const tracks = await api.runSmartPlaylistRule(rule.id);
-    if (!tracks.length) {
-      setStatus(`${rule.name} generated no playable tracks.`);
-      return;
+    try {
+      const tracks = await api.runSmartPlaylistRule(rule.id);
+      if (!tracks.length) {
+        setStatus(`${rule.name} generated no playable tracks.`);
+        return;
+      }
+      await playQueue(tracks, 0);
+    } catch (err) {
+      pushToast({ tone: 'error', title: `Could not run ${rule.name}`, detail: err instanceof Error ? err.message : 'Unknown error' });
     }
-    await playQueue(tracks, 0);
   }
 
   async function startSmartRuleRadio(rule: SmartPlaylistRule): Promise<void> {
-    const tracks = await api.runSmartPlaylistRule(rule.id);
-    if (!tracks.length) {
-      setStatus(`${rule.name} generated no playable tracks.`);
-      return;
+    try {
+      const tracks = await api.runSmartPlaylistRule(rule.id);
+      if (!tracks.length) {
+        setStatus(`${rule.name} generated no playable tracks.`);
+        return;
+      }
+      await playQueue(tracks, 0);
+      await setAutoDjSmartRuleId(rule.id);
+      await setAutoDjEnabled(true);
+      setStatus(`Smart Rule Radio started from ${rule.name}.`);
+    } catch (err) {
+      pushToast({ tone: 'error', title: 'Could not start Smart Rule Radio', detail: err instanceof Error ? err.message : 'Unknown error' });
     }
-    await playQueue(tracks, 0);
-    await setAutoDjSmartRuleId(rule.id);
-    await setAutoDjEnabled(true);
-    setStatus(`Smart Rule Radio started from ${rule.name}.`);
   }
 
   async function startSuggestedStation(suggestion: SmartPlaylistSuggestion): Promise<void> {
-    const existing = data.smartRules.find((rule) => sameSmartRule(rule, suggestion.rule));
-    const rule = existing ?? await api.saveSmartPlaylistRule(suggestion.rule);
-    const tracks = await api.runSmartPlaylistRule(rule.id);
-    if (!tracks.length) {
-      setStatus(`${suggestion.title} generated no playable tracks.`);
-      return;
+    try {
+      const existing = data.smartRules.find((rule) => sameSmartRule(rule, suggestion.rule));
+      const rule = existing ?? await api.saveSmartPlaylistRule(suggestion.rule);
+      const tracks = await api.runSmartPlaylistRule(rule.id);
+      if (!tracks.length) {
+        setStatus(`${suggestion.title} generated no playable tracks.`);
+        return;
+      }
+      await playQueue(tracks, 0);
+      await setAutoDjSmartRuleId(rule.id);
+      await setAutoDjEnabled(true);
+      setStatus(`Station started: ${rule.name}.`);
+      if (!existing) void refreshHome();
+    } catch (err) {
+      pushToast({ tone: 'error', title: `Could not start ${suggestion.title}`, detail: err instanceof Error ? err.message : 'Unknown error' });
     }
-    await playQueue(tracks, 0);
-    await setAutoDjSmartRuleId(rule.id);
-    await setAutoDjEnabled(true);
-    setStatus(`Station started: ${rule.name}.`);
-    if (!existing) void refreshHome();
   }
 
   async function stopStation(): Promise<void> {
-    await setAutoDjEnabled(false);
-    await setAutoDjSmartRuleId(null);
-    setStatus('Station stopped. Current queue stays loaded.');
+    try {
+      await setAutoDjEnabled(false);
+      await setAutoDjSmartRuleId(null);
+      setStatus('Station stopped. Current queue stays loaded.');
+    } catch (err) {
+      pushToast({ tone: 'error', title: 'Could not stop the station', detail: err instanceof Error ? err.message : 'Unknown error' });
+    }
   }
 
   return (

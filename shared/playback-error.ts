@@ -46,7 +46,9 @@ export function resolvePlaybackErrorAdvance(input: PlaybackErrorAdvanceInput): P
   }
   if (queueLength === 1) return { key, shouldAdvance: false, shouldStop: true };
   if (index < queueLength - 1) return { key, shouldAdvance: true, shouldStop: false };
-  if (input.mode === 'repeat-all' || input.mode === 'repeat-one' || input.mode === 'shuffle') {
+  // Any mode other than plain 'normal' (repeat-one/-all, shuffle, or a
+  // shuffle+repeat combo) keeps playing past the end of the queue.
+  if (input.mode !== 'normal') {
     return { key, shouldAdvance: true, shouldStop: false };
   }
   return { key, shouldAdvance: false, shouldStop: true };

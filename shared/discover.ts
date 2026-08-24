@@ -82,11 +82,12 @@ export function buildDiscoverSurface(input: BuildDiscoverSurfaceInput): Discover
   const deepAlbum = albumClusters[0] ?? null;
   const deepAlbumTracks = deepAlbum?.tracks.slice(0, Math.max(3, limit)) ?? [];
 
+  const genreCounts = buildGenreCounts(tracks);
   const weirdShelf = tracks
     .filter((track) => track.playCount <= 1)
     .map((track) => ({
       track,
-      score: weirdnessScore(track, tracks, generatedAt) + stableTrackJitter(track, seed),
+      score: weirdnessScore(track, genreCounts, generatedAt) + stableTrackJitter(track, seed),
     }))
     .sort((a, b) => b.score - a.score || compareTrack(a.track, b.track))
     .slice(0, limit)
@@ -328,10 +329,23 @@ function positiveSignalScore(track: Track): number {
   return ratingScore(track) + (track.loved ? 25 : 0) + Math.min(20, track.playCount * 3);
 }
 
-function weirdnessScore(track: Track, tracks: Track[], now: number): number {
-  const genreCount = track.genre
-    ? tracks.filter((item) => (item.genre ?? '').toLowerCase() === track.genre!.toLowerCase()).length
-    : 1;
+// Genre popularity per track used to be an O(n) tracks.filter() scan called
+// once per track being scored — O(n^2) over the whole library (weirdShelf
+// scores every track with playCount <= 1, which on a large, mostly-unplayed
+// library is a big fraction of n). buildGenreCounts precomputes it once in
+// O(n) so weirdnessScore is an O(1) map lookup per track.
+function buildGenreCounts(tracks: Track[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const item of tracks) {
+    if (!item.genre) continue;
+    const key = item.genre.toLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function weirdnessScore(track: Track, genreCounts: Map<string, number>, now: number): number {
+  const genreCount = track.genre ? (genreCounts.get(track.genre.toLowerCase()) ?? 1) : 1;
   const yearDistance = track.year ? Math.min(20, Math.abs(new Date(now).getUTCFullYear() - track.year) / 2) : 8;
   const privateLibrarySignal = /home|demo|private|field|basement|recording|voice|memo/i.test(`${track.genre ?? ''} ${track.album} ${track.artist}`) ? 18 : 0;
   return 30 - Math.min(18, genreCount) + yearDistance + privateLibrarySignal + (track.playCount <= 0 ? 10 : 0);

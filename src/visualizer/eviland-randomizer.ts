@@ -1779,6 +1779,13 @@ const SAFE_RANGES: Record<string, SafeRange> = {
   liquidMix: { min: 0, max: 1 },
   dyeDissipation: { min: -0.3, max: 0.05 },
   bloom: { min: 0, max: 1.1 },
+  // waveform.intensity's real valid range (matches evalConfig's hard clamp
+  // in eviland-operators.ts: clamp(..., 0, 3)) — mutate() used to reuse the
+  // much narrower 'bloom' range for this channel, which permanently cut any
+  // archetype seeded above 1.1 (phosphor, wireframe, tunnel, ribbonfall,
+  // mosaic all seed intensity well above that) down to 1.1 on the very first
+  // mutate() call, even a near-no-op one, and re-clamped it there forever.
+  waveIntensity: { min: 0, max: 3 },
   emitterScale: { min: 0.3, max: 2.8 },
   emitterGain: { min: 0.1, max: 2.3 },
   // Plan §2.2–§2.5 new primitives. Mutate ranges sit comfortably inside the
@@ -1872,7 +1879,7 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
   // Waveform: jitter scalars, occasionally flip mode (rare; modes are characterful).
   next.waveform = {
     mode: next.waveform.mode,
-    intensity: mutateChannel(rng, 'bloom', next.waveform.intensity, a), // share bloom range
+    intensity: mutateChannel(rng, 'waveIntensity', next.waveform.intensity, a),
     thickness: Math.max(0.0025, Math.min(0.05, next.waveform.thickness + rng.gaussian(0, 0.003) * a)),
     scale: Math.max(0.05, Math.min(0.7, next.waveform.scale + rng.gaussian(0, 0.05) * a)),
   };
