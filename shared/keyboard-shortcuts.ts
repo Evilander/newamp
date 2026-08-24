@@ -29,6 +29,15 @@ export interface PlayerShortcutInput {
   shiftKey?: boolean;
   repeat?: boolean;
   targetEditable?: boolean;
+  /**
+   * Focus is on a <button> or role="button" element — the browser (native
+   * buttons) or the element's own onKeyDown (custom role="button" rows, used
+   * throughout the track lists) already turns Space into a click on that
+   * element. Letting the global toggle-play shortcut also resolve on the
+   * same keydown double-fires: a focused track row both starts its track
+   * AND immediately toggles playback of whatever just started.
+   */
+  targetIsButton?: boolean;
   fullscreenVisualizer?: boolean;
 }
 
@@ -37,6 +46,8 @@ export function resolvePlayerShortcut(input: PlayerShortcutInput): PlayerShortcu
 
   const code = input.code ?? '';
   const key = (input.key ?? '').toLowerCase();
+  const isSpace = code === 'Space' || key === ' ';
+  if (isSpace && input.targetIsButton) return null;
   const command = input.ctrlKey
     ? resolveControlShortcut(code)
     : resolveUnmodifiedShortcut(code, key, !!input.shiftKey, !!input.fullscreenVisualizer);

@@ -84,6 +84,48 @@ export function localStorageSafe(): Storage | null {
 }
 
 /**
+ * Best-effort localStorage write with quota-exceeded recovery, shared by the
+ * lyrics/album-fact/artist-fact caches. Each of those caches wrapped
+ * setItem in a try/catch with an empty catch body — once localStorage fills
+ * up (no size accounting, LRU, or periodic prune anywhere), every future
+ * write across all three silently failed forever with zero diagnostics.
+ * This prunes the oldest entries under `prefix` (read via `parseTimestamp`,
+ * which decodes each cache's own JSON envelope) and retries once before
+ * giving up — bounding growth instead of just going permanently dark.
+ */
+export function setItemWithPrune(
+  storage: Storage,
+  key: string,
+  value: string,
+  prefix: string,
+  parseTimestamp: (raw: string) => number | null,
+  pruneCount = 20,
+): void {
+  try {
+    storage.setItem(key, value);
+    return;
+  } catch {
+    /* fall through to prune + retry */
+  }
+  try {
+    const entries: { key: string; ts: number }[] = [];
+    for (let i = 0; i < storage.length; i++) {
+      const k = storage.key(i);
+      if (!k || !k.startsWith(prefix)) continue;
+      const raw = storage.getItem(k);
+      if (!raw) continue;
+      const ts = parseTimestamp(raw);
+      if (ts != null) entries.push({ key: k, ts });
+    }
+    entries.sort((a, b) => a.ts - b.ts);
+    for (const entry of entries.slice(0, pruneCount)) storage.removeItem(entry.key);
+    storage.setItem(key, value);
+  } catch {
+    /* still failing after pruning — give up silently, matching the existing best-effort contract */
+  }
+}
+
+/**
  * Normalize a metadata string for fuzzy match comparison.
  *   - Strip diacritics
  *   - Lowercase

@@ -28,6 +28,17 @@ export function RadioView(): JSX.Element {
     };
   }, []);
 
+  // playStation() below pauses the library engine when a station starts, but
+  // that was one-directional: nothing stopped the radio stream when library
+  // playback became active from elsewhere (Transport, Space, a media key, a
+  // detached remote) — the two playback pipelines could run simultaneously.
+  useEffect(() => {
+    if (isPlayingLibrary && audio.current && !audio.current.paused) {
+      stopRadio();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlayingLibrary]);
+
   useEffect(() => {
     topTags(40)
       .then((t) => setTags(t))
@@ -40,7 +51,13 @@ export function RadioView(): JSX.Element {
     setLoading(true);
     searchStations({ name: query || undefined, tag: tag || undefined, limit: 80 })
       .then((rows) => !cancelled && setStations(rows))
-      .catch(() => undefined)
+      .catch(() => {
+        // fetchWithFailover already tries every mirror with a timeout before
+        // rejecting, so reaching here means the whole directory is
+        // unreachable right now — worth telling the user, not just silently
+        // showing an empty result list.
+        if (!cancelled) pushToast({ tone: 'error', title: 'Station search failed', detail: 'All radio-browser mirrors are unreachable right now.' });
+      })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;

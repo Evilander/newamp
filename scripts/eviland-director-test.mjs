@@ -197,7 +197,12 @@ if (!passthrough) fail('disabled director did not passthrough');
   const exported = a.exportPlan(123_456);
   if (exported.sections.length !== 4) fail(`exportPlan: expected 4 sections, got ${exported.sections.length}`);
   if (exported.songId !== songId) fail(`exportPlan: songId mismatch`);
-  if (exported.algoVersion !== 1) fail(`exportPlan: algoVersion expected 1, got ${exported.algoVersion}`);
+  // Not pinned to a literal: bumping VISUAL_MEMORY_ALGO_VERSION is the correct
+  // response to a randomizer/director change and algo-version-guard enforces it.
+  // What matters here is that an exported plan is stamped with a real version.
+  if (!Number.isInteger(exported.algoVersion) || exported.algoVersion < 1) {
+    fail(`exportPlan: algoVersion should be a positive integer, got ${exported.algoVersion}`);
+  }
   if (exported.updatedAt !== 123_456) fail('exportPlan: updatedAt did not pass through');
   // Lineage at generation 0 — the round-trip path doesn't bump generations.
   if (exported.lineage.generation !== 0) fail(`exportPlan: lineage.generation expected 0, got ${exported.lineage.generation}`);

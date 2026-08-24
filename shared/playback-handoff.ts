@@ -1,4 +1,4 @@
-import type { PlaybackMode } from './types.js';
+import { isShuffleMode, repeatModeOf, type PlaybackMode } from './types.js';
 
 export interface HandoffIndexInput {
   queueLength: number;
@@ -18,8 +18,8 @@ export interface HandoffDecisionInput extends HandoffIndexInput {
 export function nextHandoffIndex(input: HandoffIndexInput): number | null {
   const queueLength = Math.trunc(Number(input.queueLength) || 0);
   const index = Math.trunc(Number(input.index) || 0);
-  if (queueLength <= 1 || index < 0 || input.mode === 'repeat-one' || input.mode === 'shuffle') return null;
-  if (input.mode === 'repeat-all' && index >= queueLength - 1) return 0;
+  if (queueLength <= 1 || index < 0 || isShuffleMode(input.mode) || repeatModeOf(input.mode) === 'one') return null;
+  if (repeatModeOf(input.mode) === 'all' && index >= queueLength - 1) return 0;
   if (index >= queueLength - 1) return null;
   return index + 1;
 }

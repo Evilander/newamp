@@ -5,8 +5,18 @@ import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
+import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
 
 type WinampVariant = 'classic' | 'industrial';
+
+function modeStatusLabel(mode: DeckProps['mode']): string {
+  const parts: string[] = [];
+  if (isShuffleMode(mode)) parts.push('shuffle');
+  const repeat = repeatModeOf(mode);
+  if (repeat === 'all') parts.push('repeat all');
+  else if (repeat === 'one') parts.push('repeat one');
+  return parts.length ? parts.join(' + ') : 'linear';
+}
 
 export function WinampClassicDeck(props: DeckProps): JSX.Element {
   return <WinampDeck {...props} currentSkin="winamp-classic" variant="classic" />;
@@ -92,14 +102,14 @@ function WinampDeck({
           <button className="deck-wa-transport" onClick={onStop} title="Stop">[]</button>
           <button className="deck-wa-transport" onClick={onNext} title="Next">&gt;&gt;</button>
           <button
-            className={`deck-wa-toggle ${mode === 'shuffle' ? 'is-active' : ''}`}
-            onClick={() => onSetMode(mode === 'shuffle' ? 'normal' : 'shuffle')}
+            className={`deck-wa-toggle ${isShuffleMode(mode) ? 'is-active' : ''}`}
+            onClick={() => onSetMode(combinePlaybackMode(!isShuffleMode(mode), repeatModeOf(mode)))}
           >
             SHUF
           </button>
           <button
-            className={`deck-wa-toggle ${mode !== 'normal' ? 'is-active' : ''}`}
-            onClick={() => onSetMode(mode === 'repeat-all' ? 'normal' : 'repeat-all')}
+            className={`deck-wa-toggle ${repeatModeOf(mode) !== 'off' ? 'is-active' : ''}`}
+            onClick={() => onSetMode(combinePlaybackMode(isShuffleMode(mode), repeatModeOf(mode) === 'all' ? 'off' : 'all'))}
           >
             REP
           </button>
@@ -118,7 +128,7 @@ function WinampDeck({
         <div className="deck-wa-status-bank">
           <span>{variant === 'industrial' ? 'RACK' : 'MAIN'}</span>
           <strong title={album}>{album}</strong>
-          <em>{isPlaying ? 'playing' : 'paused'} / {mode === 'normal' ? 'linear' : mode.replace('-', ' ')}</em>
+          <em>{isPlaying ? 'playing' : 'paused'} / {modeStatusLabel(mode)}</em>
         </div>
         <div className="deck-wa-volume">
           <VolumeSlider value={volume} onChange={onSetVolume} width={116} showLabel={false} compact />

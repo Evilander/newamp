@@ -27,7 +27,12 @@ export function nextSmartShuffle(
 
   const currentIndex = clampIndex(input.currentIndex, length);
   let history = sanitizeHistory(input.history, length, currentIndex);
-  let candidates = indexes(length).filter((index) => !history.includes(index));
+  // history.includes(index) inside this filter used to make picking the next
+  // candidate O(queueLength x history.length) — a multi-second main-thread
+  // stall on large queues once history has grown close to queueLength. A Set
+  // makes the membership check O(1), so this is O(queueLength) overall.
+  let historySet = new Set(history);
+  let candidates = indexes(length).filter((index) => !historySet.has(index));
 
   if (!candidates.length) {
     history = [currentIndex];
@@ -53,11 +58,14 @@ export function previousSmartShuffle(input: SmartShuffleInput): SmartShuffleResu
 }
 
 function sanitizeHistory(history: number[], queueLength: number, currentIndex: number): number[] {
+  const seen = new Set<number>();
   const clean: number[] = [];
   for (const raw of Array.isArray(history) ? history : []) {
     const index = Math.trunc(Number(raw));
     if (!Number.isFinite(index) || index < 0 || index >= queueLength) continue;
-    if (!clean.includes(index)) clean.push(index);
+    if (seen.has(index)) continue;
+    seen.add(index);
+    clean.push(index);
   }
   if (clean[clean.length - 1] !== currentIndex) {
     const withoutCurrent = clean.filter((index) => index !== currentIndex);

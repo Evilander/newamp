@@ -9,6 +9,7 @@ import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
+import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
 
 export function ClassicBentoDeck(props: DeckProps): JSX.Element {
   const {
@@ -57,7 +58,7 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
             </button>
             <div className="compact-leds" aria-hidden="true">
               <span className={isPlaying ? 'on' : ''} />
-              <span className={mode === 'shuffle' ? 'on' : ''} />
+              <span className={isShuffleMode(mode) ? 'on' : ''} />
               <span className={mode !== 'normal' ? 'on' : ''} />
             </div>
             <div className="compact-window titlebar-nodrag">
@@ -95,8 +96,8 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
             <button onClick={onNext} title="Next">&gt;&gt;</button>
             <ScrubBar className="nslider compact-seek" value={currentTime} max={duration || 1} onSeek={onSeek} />
             <button
-              className={mode === 'shuffle' ? 'active' : ''}
-              onClick={() => onSetMode(mode === 'shuffle' ? 'normal' : 'shuffle')}
+              className={isShuffleMode(mode) ? 'active' : ''}
+              onClick={() => onSetMode(combinePlaybackMode(!isShuffleMode(mode), repeatModeOf(mode)))}
               title="Shuffle"
             >
               SHUF

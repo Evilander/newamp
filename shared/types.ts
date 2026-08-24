@@ -758,7 +758,40 @@ export interface AiLinerNotesResult {
   model: string;
 }
 
-export type PlaybackMode = 'normal' | 'repeat-one' | 'repeat-all' | 'shuffle';
+// Shuffle and repeat are two independent toggles in the UI (Transport and
+// every deck skin render them as separate buttons with their own
+// active/inactive state), so the mode has to be able to carry both at once —
+// 'shuffle-repeat-all'/'shuffle-repeat-one' cover that. The four original
+// values are kept byte-identical so persisted settings (electron/settings.ts
+// normalizeResume) keep validating old and new saves the same way; a
+// shuffle+repeat combo just doesn't survive an app restart until that
+// whitelist is extended, same as any other value it doesn't recognize.
+export type PlaybackMode =
+  | 'normal'
+  | 'repeat-one'
+  | 'repeat-all'
+  | 'shuffle'
+  | 'shuffle-repeat-one'
+  | 'shuffle-repeat-all';
+
+export type RepeatMode = 'off' | 'one' | 'all';
+
+export function isShuffleMode(mode: PlaybackMode): boolean {
+  return mode === 'shuffle' || mode === 'shuffle-repeat-one' || mode === 'shuffle-repeat-all';
+}
+
+export function repeatModeOf(mode: PlaybackMode): RepeatMode {
+  if (mode === 'repeat-one' || mode === 'shuffle-repeat-one') return 'one';
+  if (mode === 'repeat-all' || mode === 'shuffle-repeat-all') return 'all';
+  return 'off';
+}
+
+/** Inverse of isShuffleMode/repeatModeOf — recombine the two independent toggles into one PlaybackMode. */
+export function combinePlaybackMode(shuffle: boolean, repeat: RepeatMode): PlaybackMode {
+  if (repeat === 'one') return shuffle ? 'shuffle-repeat-one' : 'repeat-one';
+  if (repeat === 'all') return shuffle ? 'shuffle-repeat-all' : 'repeat-all';
+  return shuffle ? 'shuffle' : 'normal';
+}
 
 export interface PlaybackResumeState {
   queueTrackIds: number[];

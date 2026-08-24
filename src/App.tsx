@@ -238,6 +238,7 @@ export default function App(): JSX.Element {
         shiftKey: e.shiftKey,
         repeat: e.repeat,
         targetEditable: isEditableShortcutTarget(e.target),
+        targetIsButton: isButtonShortcutTarget(e.target),
         fullscreenVisualizer: store.fullscreenViz,
       });
       if (!command) return;
@@ -524,6 +525,11 @@ function runPlayerShortcut(command: PlayerShortcutCommand, store: PlayerStoreSna
 function isEditableShortcutTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   return !!target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="textbox"]');
+}
+
+function isButtonShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return !!target.closest('button, [role="button"]');
 }
 
 function clampShortcutNumber(value: number, min: number, max: number): number {
