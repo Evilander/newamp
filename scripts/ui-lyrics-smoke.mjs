@@ -23,6 +23,27 @@ await writeSmokeSettings();
 
 const result = await runElectronSmoke();
 console.log(JSON.stringify(result, null, 2));
+assertLyrics(result);
+
+function assertLyrics(r) {
+  const problems = [];
+  if (r.ok !== true) problems.push(`probe reported ok=${r.ok}`);
+  // Real synced lyrics arrived and were parsed into lines, not an empty panel.
+  if (!(Number.isFinite(r.lineCount) && r.lineCount > 1)) {
+    problems.push(`expected parsed lyric lines, got lineCount=${r.lineCount}`);
+  }
+  if (!(typeof r.activeLine === 'string' && r.activeLine.trim().length > 0)) {
+    problems.push(`expected a highlighted active line, got ${JSON.stringify(r.activeLine)}`);
+  }
+  if (r.lyricSource !== 'lrclib') {
+    problems.push(`expected lyrics from lrclib, got ${JSON.stringify(r.lyricSource)}`);
+  }
+  if (problems.length) {
+    console.error(`[ui-lyrics-smoke] FAIL: ${problems.join('; ')}`);
+    process.exit(1);
+  }
+  console.error('[ui-lyrics-smoke] PASS');
+}
 
 async function resetSmokeRoot() {
   await rm(smokeRoot, { recursive: true, force: true });

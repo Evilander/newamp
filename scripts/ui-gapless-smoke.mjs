@@ -23,6 +23,26 @@ await writeSmokeSettings();
 
 const result = await runElectronSmoke();
 console.log(JSON.stringify(result, null, 2));
+assertGapless(result);
+
+function assertGapless(r) {
+  const problems = [];
+  if (r.ok !== true) problems.push(`probe reported ok=${r.ok}`);
+  // The point of the test: playback advanced to the SECOND fixture on its own.
+  if (!/Gapless Second/.test(String(r.currentTitle))) {
+    problems.push(`expected the second track to be playing, got ${JSON.stringify(r.currentTitle)}`);
+  }
+  // A pre-buffered handoff lands in well under a second; a regression that reloads
+  // the next track from scratch shows up as seconds of silence between them.
+  if (!(Number.isFinite(r.transitionMs) && r.transitionMs < 1500)) {
+    problems.push(`transition took ${r.transitionMs}ms, expected a gapless handoff under 1500ms`);
+  }
+  if (problems.length) {
+    console.error(`[ui-gapless-smoke] FAIL: ${problems.join('; ')}`);
+    process.exit(1);
+  }
+  console.error('[ui-gapless-smoke] PASS');
+}
 
 async function resetSmokeRoot() {
   await rm(smokeRoot, { recursive: true, force: true });
