@@ -558,7 +558,7 @@ export function SettingsView(): JSX.Element {
                   key={t.id}
                   onClick={() => {
                     void setTheme(t.id);
-                    setSettings({ ...settings, theme: t.id });
+                    setSettings((prev) => (prev ? { ...prev, theme: t.id } : prev));
                   }}
                   className="flex flex-col gap-2 rounded-card p-3 text-left transition-all"
                   style={{
@@ -585,7 +585,7 @@ export function SettingsView(): JSX.Element {
                 <button
                   onClick={() => {
                     void setTheme('custom');
-                    setSettings({ ...settings, theme: 'custom' });
+                    setSettings((prev) => (prev ? { ...prev, theme: 'custom' } : prev));
                   }}
                   className="flex flex-col gap-2 rounded-card p-3 text-left transition-all"
                   style={{
@@ -634,7 +634,7 @@ export function SettingsView(): JSX.Element {
                 onChange={(e) => {
                   const v = parseInt(e.target.value, 10);
                   setCrossfadeMs(v).then(() => {
-                    setSettings({ ...settings, crossfadeMs: v });
+                    setSettings((prev) => (prev ? { ...prev, crossfadeMs: v } : prev));
                   });
                 }}
                 className={`bevel-in px-2 py-1 text-base${dspBypassed ? ' opacity-50' : ''}`}
@@ -652,7 +652,7 @@ export function SettingsView(): JSX.Element {
                 onChange={(e) => {
                   const replayGain = e.target.value as AppSettings['replayGain'];
                   setReplayGainMode(replayGain).then(() => {
-                    setSettings({ ...settings, replayGain });
+                    setSettings((prev) => (prev ? { ...prev, replayGain } : prev));
                   });
                 }}
                 className={`bevel-in px-2 py-1 text-base${dspBypassed ? ' opacity-50' : ''}`}
@@ -671,7 +671,7 @@ export function SettingsView(): JSX.Element {
                   onChange={(e) => {
                     const limiterEnabled = e.target.checked;
                     setLimiterEnabled(limiterEnabled).then(() => {
-                      setSettings({ ...settings, limiterEnabled });
+                      setSettings((prev) => (prev ? { ...prev, limiterEnabled } : prev));
                     });
                   }}
                 />
@@ -690,7 +690,7 @@ export function SettingsView(): JSX.Element {
                   onChange={(e) => {
                     const preampDb = normalizePreampDb(e.target.valueAsNumber);
                     setPreampDb(preampDb).then(() => {
-                      setSettings({ ...settings, preampDb });
+                      setSettings((prev) => (prev ? { ...prev, preampDb } : prev));
                     });
                   }}
                   className={`w-[220px]${dspBypassed ? ' opacity-50' : ''}`}

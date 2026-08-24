@@ -54,6 +54,8 @@ assert.match(appSource, /isEditableShortcutTarget/, 'App should protect inputs a
 assert.match(storeSource, /current: state\.current\?\.id === id \? \{ \.\.\.state\.current, loved: nextLoved \}/, 'love shortcut should update current track state');
 assert.match(packageSource, /"smoke:keyboard"/, 'package scripts should expose keyboard shortcut smoke');
 assert.match(gateSource, /smoke:keyboard/, 'release gate should include keyboard shortcut smoke');
-assert.match(readmeSource, /Winamp-style keyboard controls/, 'README should advertise power-user keyboard controls');
+// Matches "control" and "controls" so an ordinary README rewording does not
+// fail the gate; the point is that the feature stays documented at all.
+assert.match(readmeSource, /Winamp-style keyboard control/, 'README should advertise power-user keyboard controls');
 
 console.log(JSON.stringify({ ok: true }, null, 2));
