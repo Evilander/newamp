@@ -58,14 +58,33 @@ const attackerPath = join(repoRoot, 'tmp', 'secrets', 'not-picked.png');
   log.push('resolve()-equivalent path accepted: ok');
 }
 
-// 5. Approval expires after the configured TTL.
+// 5. Approval does NOT expire with time: a user who picks an icon and then
+// spends a while on the rest of the playlist must still be able to save.
 {
-  const guard = createPlaylistCoverGuard(30);
+  const guard = createPlaylistCoverGuard();
   guard.approve(pickedPath);
-  if (!guard.isApproved(pickedPath)) fail('path should be approved immediately after approve()');
   await sleep(80);
-  if (guard.isApproved(pickedPath)) fail('approval must expire after ttlMs elapses');
-  log.push('TTL expiry enforced: ok');
+  if (!guard.isApproved(pickedPath)) fail('approval must not expire just because time passed');
+  log.push('approval survives elapsed time: ok');
+}
+
+// 6. The allowlist is bounded by count, so it cannot grow without limit.
+{
+  const guard = createPlaylistCoverGuard(3);
+  guard.approve(`${pickedPath}-1`);
+  guard.approve(`${pickedPath}-2`);
+  guard.approve(`${pickedPath}-3`);
+  guard.approve(`${pickedPath}-4`); // evicts -1
+  if (guard.isApproved(`${pickedPath}-1`)) fail('the oldest approval should have been evicted');
+  for (const n of [2, 3, 4]) {
+    if (!guard.isApproved(`${pickedPath}-${n}`)) fail(`approval ${n} should still be held`);
+  }
+  // re-approving refreshes position rather than duplicating
+  guard.approve(`${pickedPath}-2`);
+  guard.approve(`${pickedPath}-5`); // evicts -3, not -2
+  if (!guard.isApproved(`${pickedPath}-2`)) fail('re-approval should refresh an entry');
+  if (guard.isApproved(`${pickedPath}-3`)) fail('the now-oldest approval should have been evicted');
+  log.push('bounded by count, re-approval refreshes: ok');
 }
 
 const report = log.join('\n') + '\n' + (pass ? '[playlist-cover-guard-test] PASS' : '[playlist-cover-guard-test] FAIL') + '\n';
