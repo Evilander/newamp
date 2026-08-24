@@ -1469,9 +1469,31 @@ function createScannerService(store: LibraryStore): Scanner {
 function createLibraryWatcherService(): LibraryWatcher {
   return new LibraryWatcher((targets) => {
     if (!settings.get().libraryAutoWatch || !targets.length) return;
-    library.pruneMissingTracks(targets);
+    void reconcileWatchedTargets(targets);
+  });
+}
+
+// A watched path can vanish for a moment without being deleted — editor
+// save-by-rename, sync clients, network drives. Pruning on first sight
+// destroyed the track and all of its play history/ratings for a file that
+// came right back. Re-check after a short debounce: only prune what is still
+// gone, and let anything that reappeared go through the rescan below as an
+// ordinary modification.
+const PRUNE_RECHECK_DELAY_MS = 1500;
+
+let watcherReconcile: Promise<void> = Promise.resolve();
+
+function reconcileWatchedTargets(targets: string[]): Promise<void> {
+  const run = watcherReconcile.then(async () => {
+    await new Promise((resolve) => setTimeout(resolve, PRUNE_RECHECK_DELAY_MS));
+    const stillMissing = targets.filter((target) => !existsSync(target));
+    if (stillMissing.length) library.pruneMissingTracks(stillMissing);
     void scanner.start(targets, { force: true });
   });
+  watcherReconcile = run.catch((err) => {
+    console.warn(`[newamp] library watcher reconcile failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+  return run;
 }
 
 async function reloadRuntimeStores(userData: string): Promise<void> {

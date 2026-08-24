@@ -87,7 +87,21 @@ import {
 } from '../shared/audio-quality.js';
 import { buildDiscoverSurface } from '../shared/discover.js';
 import { buildHarmonicMix as buildHarmonicMixSequence } from '../shared/harmonic-mix.js';
-import { quarantineCorruptFile, recoveryReason } from './recovery.js';
+import {
+  atomicWriteFileSync,
+  durableWriteFileAsync,
+  isTransientIoError,
+  quarantineCorruptFile,
+  recoveryReason,
+  renameOverExistingAsync,
+} from './recovery.js';
+
+const SQLITE_HEADER = 'SQLite format 3\0';
+
+// Thrown when the database file stays locked/unreadable after retries — a
+// transient IO problem, deliberately NOT treated as corruption, so init()
+// surfaces it instead of quarantining a healthy-but-busy file.
+class LibraryUnavailableError extends Error {}
 
 const require = createRequire(import.meta.url);
 const LEGACY_FORMATS = new Set([
@@ -695,20 +709,9 @@ export class LibraryStore {
     let recovered = false;
     if (hadExistingDb) {
       try {
-        const buf = readFileSync(this.file);
-        this.db = new this.SQL.Database(buf);
-        // Page-level corruption leaves the file header and the schema intact,
-        // so neither the open above nor applySchema() below throws — it only
-        // surfaces on the first real read, long after startup has committed to
-        // this file. quick_check walks the btree pages (~50ms on a 60k-track
-        // library) so a bad DB lands in the recovery path below instead of
-        // taking down the main process mid-launch.
-        const verdict = this.db.exec('PRAGMA quick_check')[0]?.values?.[0]?.[0];
-        if (verdict !== 'ok') {
-          const detail = String(verdict ?? 'no result').split('\n')[0]!.slice(0, 200);
-          throw new Error(`database failed integrity check (${detail})`);
-        }
+        this.db = await this.loadExistingDatabase();
       } catch (err) {
+        if (err instanceof LibraryUnavailableError) throw err;
         const event = quarantineCorruptFile(this.file, 'library', recoveryReason(err));
         if (event) this.recoveryEvents.push(event);
         this.db = new this.SQL.Database();
@@ -753,6 +756,48 @@ export class LibraryStore {
       applySchema();
     }
     if (recovered) this.flushSync();
+  }
+
+  // Loads an existing database file. Transient IO failures (a locked file on
+  // a network share, an antivirus or sync client holding it) are retried with
+  // backoff and then surfaced as a LibraryUnavailableError — quarantining on
+  // those silently reset whole libraries. Only genuine SQLite failures (bad
+  // header, unparseable pages, failed integrity check) propagate to init()'s
+  // quarantine path.
+  private async loadExistingDatabase(): Promise<Database> {
+    const attempts = 4;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const buf = readFileSync(this.file);
+        // A non-SQLite header means a truncated/garbage file: real corruption.
+        // An empty file is fine — SQLite treats it as a fresh database.
+        if (buf.length > 0 && buf.subarray(0, SQLITE_HEADER.length).toString('latin1') !== SQLITE_HEADER) {
+          throw new Error('database file header is corrupt (not a SQLite database)');
+        }
+        const db = new this.SQL.Database(buf);
+        // Page-level corruption leaves the file header and the schema intact,
+        // so neither the open above nor applySchema() below throws — it only
+        // surfaces on the first real read, long after startup has committed to
+        // this file. quick_check walks the btree pages (~50ms on a 60k-track
+        // library) so a bad DB lands in the recovery path below instead of
+        // taking down the main process mid-launch.
+        const verdict = db.exec('PRAGMA quick_check')[0]?.values?.[0]?.[0];
+        if (verdict !== 'ok') {
+          const detail = String(verdict ?? 'no result').split('\n')[0]!.slice(0, 200);
+          throw new Error(`database failed integrity check (${detail})`);
+        }
+        return db;
+      } catch (err) {
+        if (!isTransientIoError(err)) throw err;
+        if (attempt >= attempts) {
+          const code = (err as NodeJS.ErrnoException).code;
+          throw new LibraryUnavailableError(
+            `library database stayed ${code} after ${attempts} attempts — close other apps using it and restart NewAmp`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+      }
+    }
   }
 
   close(): void {
@@ -802,20 +847,22 @@ export class LibraryStore {
     this.dirty = false;
     const seq = ++this.flushSeq;
     const data = this.db.export();
-    const tmp = `${this.file}.tmp`;
+    const tmp = `${this.file}.tmp-${process.pid}`;
     this.flushInFlight = (async () => {
       try {
-        await fsp.writeFile(tmp, Buffer.from(data));
+        await durableWriteFileAsync(tmp, Buffer.from(data));
         if (seq !== this.flushSeq) {
           // A synchronous quit-path flush captured newer state while this
           // write was in flight — drop the stale copy instead of racing it.
           await fsp.unlink(tmp).catch(() => {});
           return;
         }
-        await fsp.rename(tmp, this.file);
+        await renameOverExistingAsync(tmp, this.file);
       } catch (err) {
         console.error('library flush failed', err);
         this.dirty = true; // retry on the next scheduled flush
+      } finally {
+        await fsp.unlink(tmp).catch(() => {});
       }
     })();
     try {
@@ -831,6 +878,8 @@ export class LibraryStore {
 
   // Truly synchronous flush for the quit path (close()) — the process may
   // exit immediately after, so this cannot rely on an async write completing.
+  // The write lands via tmp file + fsync + rename so a crash mid-write can
+  // never leave a truncated library.db behind.
   private flushSync(): void {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
@@ -838,8 +887,7 @@ export class LibraryStore {
       this.persistTimerSlow = false;
     }
     this.flushSeq += 1;
-    const data = this.db.export();
-    writeFileSync(this.file, Buffer.from(data));
+    atomicWriteFileSync(this.file, Buffer.from(this.db.export()));
     this.dirty = false;
   }
 
@@ -855,6 +903,10 @@ export class LibraryStore {
 
     this.db.run('BEGIN');
     try {
+      // Art applied through the UI (applyAlbumArtToAlbum) has no provenance
+      // column, so a rescan can't distinguish it from embedded art — instead
+      // any EXISTING art is kept whenever the rescanned file itself carries
+      // none, rather than being overwritten with null.
       const stmt = this.db.prepare(
         `INSERT INTO tracks
          (path, title, artist, album, album_artist, track_no, disc_no, year, genre,
@@ -878,8 +930,8 @@ export class LibraryStore {
            replaygain_album_db=excluded.replaygain_album_db,
            size=excluded.size,
            mtime=excluded.mtime,
-           has_art=excluded.has_art,
-           art_hash=excluded.art_hash`,
+           has_art=CASE WHEN excluded.art_hash IS NULL THEN tracks.has_art ELSE excluded.has_art END,
+           art_hash=COALESCE(excluded.art_hash, tracks.art_hash)`,
       );
       const artHashCache = new WeakMap<Buffer, string>();
       const writtenArtHashes = new Set<string>();
@@ -1426,9 +1478,9 @@ export class LibraryStore {
     if (search) {
       const q = likeParam(search);
       matchSelect = `,
-              MAX(CASE WHEN lower(album) LIKE ? OR lower(COALESCE(NULLIF(album_artist,''), artist)) LIKE ? OR CAST(year AS TEXT) LIKE ? THEN 1 ELSE 0 END) AS matched_meta,
-              MAX(CASE WHEN lower(title) LIKE ? THEN 1 ELSE 0 END) AS matched_track,
-              GROUP_CONCAT(CASE WHEN lower(title) LIKE ? THEN title ELSE NULL END, char(31)) AS matched_titles`;
+              MAX(CASE WHEN lower(album) LIKE ? ESCAPE '|' OR lower(COALESCE(NULLIF(album_artist,''), artist)) LIKE ? ESCAPE '|' OR CAST(year AS TEXT) LIKE ? ESCAPE '|' THEN 1 ELSE 0 END) AS matched_meta,
+              MAX(CASE WHEN lower(title) LIKE ? ESCAPE '|' THEN 1 ELSE 0 END) AS matched_track,
+              GROUP_CONCAT(CASE WHEN lower(title) LIKE ? ESCAPE '|' THEN title ELSE NULL END, char(31)) AS matched_titles`;
       matchSelectParams.push(q, q, q, q, q);
       having.push('(matched_meta = 1 OR matched_track = 1)');
     }
@@ -1524,7 +1576,7 @@ export class LibraryStore {
         // — chosen because it cannot occur inside a song title.
         matchedTrackTitles:
           search && r.matched_titles
-            ? Array.from(new Set(r.matched_titles.split(''))).slice(0, 4).join(' · ')
+            ? Array.from(new Set(r.matched_titles.split(String.fromCharCode(31)))).slice(0, 4).join(' · ')
             : null,
       };
     });
@@ -1588,7 +1640,7 @@ export class LibraryStore {
 
     if (search) {
       const q = likeParam(search);
-      where.push('(lower(artist) LIKE ? OR lower(album) LIKE ?)');
+      where.push(`(lower(artist) LIKE ? ESCAPE '|' OR lower(album) LIKE ? ESCAPE '|')`);
       params.push(q, q);
     }
 
@@ -4385,7 +4437,7 @@ function trackSearchWhere(search: ParsedTrackSearch): { where: string[]; params:
   for (const term of search.terms) {
     const q = likeParam(term);
     where.push(
-      '(lower(title) LIKE ? OR lower(artist) LIKE ? OR lower(album) LIKE ? OR lower(COALESCE(genre, "")) LIKE ? OR lower(path) LIKE ?)',
+      `(lower(title) LIKE ? ESCAPE '|' OR lower(artist) LIKE ? ESCAPE '|' OR lower(album) LIKE ? ESCAPE '|' OR lower(COALESCE(genre, "")) LIKE ? ESCAPE '|' OR lower(path) LIKE ? ESCAPE '|')`,
     );
     params.push(q, q, q, q, q);
   }
@@ -4410,7 +4462,7 @@ function applyTrackSearchFilter(
   if (field === 'path') return pushTextFilter(where, params, 'path', value);
   if (field === 'format' || field === 'ext') {
     const ext = value.startsWith('.') ? value.toLowerCase() : `.${value.toLowerCase()}`;
-    where.push('lower(path) LIKE ?');
+    where.push(`lower(path) LIKE ? ESCAPE '|'`);
     params.push(`%${escapeLike(ext)}`);
     return;
   }
@@ -4444,7 +4496,7 @@ function applyTrackSearchFilter(
 }
 
 function pushTextFilter(where: string[], params: unknown[], column: string, value: string): void {
-  where.push(`lower(${column}) LIKE ?`);
+  where.push(`lower(${column}) LIKE ? ESCAPE '|'`);
   params.push(likeParam(value));
 }
 
@@ -4538,7 +4590,7 @@ function pushExtensionSetFilter(
 function extensionSetSql(extensions: readonly string[]): { sql: string; params: string[] } {
   const unique = [...new Set(extensions.map((ext) => ext.toLowerCase().replace(/^\./, '')))];
   return {
-    sql: `(${unique.map(() => 'lower(path) LIKE ?').join(' OR ')})`,
+    sql: `(${unique.map(() => `lower(path) LIKE ? ESCAPE '|'`).join(' OR ')})`,
     params: unique.map((ext) => `%.${escapeLike(ext)}`),
   };
 }
@@ -4798,7 +4850,10 @@ function summaryQueryOffset(value: number | undefined): number {
 }
 
 function escapeLike(value: string): string {
-  return value.replace(/[%_]/g, (ch) => `\\${ch}`);
+  // Escape with '|' (the folder browser's convention) so every consumer can
+  // pair its pattern with an `ESCAPE '|'` clause. Without that clause SQLite
+  // treats the escape character literally and '%'/'_' stay wildcards.
+  return value.replace(/[|%_]/g, (ch) => `|${ch}`);
 }
 
 function isUnknownArtistName(value: string): boolean {
