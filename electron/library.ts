@@ -847,7 +847,10 @@ export class LibraryStore {
     this.dirty = false;
     const seq = ++this.flushSeq;
     const data = this.db.export();
-    const tmp = `${this.file}.tmp-${process.pid}`;
+    // Unique per flush: a quit-path flushSync must never share this path (see
+    // atomicWriteFileSync) or its rename can adopt the inode this write is
+    // still filling.
+    const tmp = `${this.file}.tmp-${process.pid}-${seq}`;
     this.flushInFlight = (async () => {
       try {
         await durableWriteFileAsync(tmp, Buffer.from(data));

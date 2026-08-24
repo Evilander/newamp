@@ -51,7 +51,11 @@ function stamp(ms: number): string {
 // target, which is what the old in-place writeFileSync did to library.db and
 // settings.json.
 export function atomicWriteFileSync(filePath: string, data: Buffer | string): void {
-  const tmp = `${filePath}.tmp-${process.pid}`;
+  // The "-sync" suffix matters: an async flush of the same file may have an open
+  // fd on its own temp file right now. Sharing one temp path would let this
+  // write truncate that inode, rename it into place, and then have the async
+  // write's pending bytes land inside the live file at its old offset.
+  const tmp = `${filePath}.tmp-${process.pid}-sync`;
   try {
     durableWriteFileSync(tmp, data);
     renameOverExistingSync(tmp, filePath);
