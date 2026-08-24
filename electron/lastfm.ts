@@ -324,6 +324,13 @@ export function shouldRetryLastfmError(err: unknown): boolean {
   return true;
 }
 
+// Terminal credential failure: retrying is pointless, but callers still need to
+// tell it apart from an ordinary rejection so the play can be preserved and the
+// "reconnect Last.fm" state can surface.
+export function isLastfmAuthFailure(err: unknown): boolean {
+  return err instanceof LastfmApiError && err.authFailure;
+}
+
 // Authentication Failed / Invalid session key / Invalid API key: the
 // credentials themselves are bad, not the service. Retrying with the same
 // session key can never succeed — every scrobble will fail identically

@@ -39,6 +39,7 @@ import {
   LastfmScrobbleOutbox,
   scrobbleLastfmTrack,
   shouldRetryLastfmError,
+  isLastfmAuthFailure,
   startLastfmAuth,
   updateLastfmNowPlaying,
   type LastfmOutboxFlushResult,
@@ -2311,7 +2312,11 @@ function registerIpc(): void {
     try {
       await scrobbleLastfmTrack(settings.get(), track, timestamp);
     } catch (err) {
-      if (shouldRetryLastfmError(err)) {
+      // An auth failure is not retryable, but the play still has to be kept:
+      // dropping it here would lose every scrobble made while the session key
+      // is dead, and with nothing queued the outbox could never report that a
+      // reconnect is needed. Queue it so it survives and stays visible.
+      if (shouldRetryLastfmError(err) || isLastfmAuthFailure(err)) {
         await lastfmOutbox.enqueue(track, timestamp, errorMessage(err));
       }
     }
