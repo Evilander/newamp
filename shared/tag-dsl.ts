@@ -38,7 +38,11 @@ export const MAX_REGEX_INPUT_LENGTH = 4096;
 // alternation like (?:a|a)+ slips through: without it, [^|()]+ greedily
 // swallows the "?:" marker itself into the backreference, so \1 becomes
 // "?:a" instead of "a" and never re-matches — letting the pattern through.
-const REDOS_ALT_REPEAT = /\((?:\?(?:[:=!]|<[=!]))?([^|()]+)\|[^)]*\1[^)]*\)\s*[+*]/;
+// The optional prefix must cover every group form, not just `(?:` and lookarounds:
+// a named group `(?<n>a|a)+` or an inline-modifier group `(?i:a|a)+` would
+// otherwise let the capture swallow the marker, so the backreference never
+// re-matches and the pattern passes.
+const REDOS_ALT_REPEAT = /\((?:\?(?:[:=!]|<[=!]|<[A-Za-z_$][\w$]*>|[a-zA-Z]*(?:-[a-zA-Z]+)?:))?([^|()]+)\|[^)]*\1[^)]*\)\s*[+*]/;
 
 function hasNestedUnboundedQuantifier(pattern: string): boolean {
   // Walk the pattern with a stack. For each `(...)` group, record whether
