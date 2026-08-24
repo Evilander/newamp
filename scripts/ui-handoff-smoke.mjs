@@ -23,6 +23,23 @@ await writeSmokeSettings();
 
 const result = await runElectronSmoke();
 console.log(JSON.stringify(result, null, 2));
+assertHandoff(result);
+
+function assertHandoff(r) {
+  const problems = [];
+  if (r.ok !== true) problems.push(`probe reported ok=${r.ok}`);
+  if (!/Handoff Second/.test(String(r.currentTitle))) {
+    problems.push(`expected the second track to be playing, got ${JSON.stringify(r.currentTitle)}`);
+  }
+  if (!(Number.isFinite(r.transitionMs) && r.transitionMs < 1500)) {
+    problems.push(`transition took ${r.transitionMs}ms, expected a crossfade handoff under 1500ms`);
+  }
+  if (problems.length) {
+    console.error(`[ui-handoff-smoke] FAIL: ${problems.join('; ')}`);
+    process.exit(1);
+  }
+  console.error('[ui-handoff-smoke] PASS');
+}
 
 async function resetSmokeRoot() {
   await rm(smokeRoot, { recursive: true, force: true });
