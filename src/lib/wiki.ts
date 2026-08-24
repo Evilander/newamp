@@ -44,11 +44,22 @@ export interface WikiResponse {
  *
  * AbortError is re-thrown so React effects' AbortController cleanup works.
  */
+/**
+ * Collects whether any request in a lookup chain actually reached the server.
+ * An empty page list means "nothing found" OR "the request failed", and a
+ * caller that negative-caches a miss must be able to tell those apart: caching
+ * an outage as a confirmed miss hides real data until the entry expires.
+ */
+export interface WikiReachability {
+  reachedServer: boolean;
+}
+
 export async function fetchWikipediaPages<T>(
   query: Record<string, string>,
   mapPage: (page: WikiPage) => T | null,
   signal?: AbortSignal,
   context = 'wiki',
+  reachability?: WikiReachability,
 ): Promise<T[]> {
   const params = new URLSearchParams(query);
   try {
@@ -60,6 +71,7 @@ export async function fetchWikipediaPages<T>(
       console.warn(`[newamp] ${context} lookup non-ok status`, res.status, params.toString().slice(0, 200));
       return [];
     }
+    if (reachability) reachability.reachedServer = true;
     const data = (await res.json()) as WikiResponse;
     return Object.values(data.query?.pages ?? {})
       .map(mapPage)

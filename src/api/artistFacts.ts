@@ -1,4 +1,11 @@
-import { fetchWikipediaPages, localStorageSafe, normalizeForMatch, setItemWithPrune, type WikiPage } from '../lib/wiki.ts';
+import {
+  fetchWikipediaPages,
+  localStorageSafe,
+  normalizeForMatch,
+  setItemWithPrune,
+  type WikiPage,
+  type WikiReachability,
+} from '../lib/wiki.ts';
 export interface ArtistFact {
   title: string;
   description: string | null;
@@ -55,9 +62,10 @@ export async function fetchArtistFacts(
   if (isSkippableArtistLookup(cleanArtist)) return null;
   const cached = readCachedArtistFact(cleanArtist);
   if (cached !== undefined) return cached;
+  const reachability: WikiReachability = { reachedServer: false };
 
   for (const title of directTitleCandidates(cleanArtist)) {
-    const direct = await fetchWikiCandidates({
+    const direct = await fetchWikiCandidates(reachability, {
       origin: '*',
       action: 'query',
       redirects: '1',
@@ -78,7 +86,7 @@ export async function fetchArtistFacts(
 
   for (const lookupName of lookupArtistNames(cleanArtist)) {
     const q = `"${lookupName}" musician OR band OR singer OR rapper OR composer OR "record producer" OR "musical artist" -species -animal -film -novel -software`;
-    const fallback = await fetchWikiCandidates({
+    const fallback = await fetchWikiCandidates(reachability, {
       origin: '*',
       action: 'query',
       generator: 'search',
@@ -100,7 +108,10 @@ export async function fetchArtistFacts(
   // Every candidate exhausted — negative-cache the miss so the next lookup
   // for this artist (every track change, every app open) doesn't re-run the
   // full serial chain again for nothing.
-  writeCachedArtistFact(cleanArtist, null);
+  // Only record a confirmed miss if Wikipedia actually answered. An outage,
+  // a 5xx, or rate-limiting makes every candidate come back empty too, and
+  // caching that as "no such artist" would hide real data until the entry expires.
+  if (reachability.reachedServer) writeCachedArtistFact(cleanArtist, null);
   return null;
 }
 
@@ -265,10 +276,11 @@ function escapeRegExp(value: string): string {
 }
 
 async function fetchWikiCandidates(
+  reachability: WikiReachability,
   query: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<ArtistFact[]> {
-  return fetchWikipediaPages(query, pageToArtistFact, signal, 'wiki artist');
+  return fetchWikipediaPages(query, pageToArtistFact, signal, 'wiki artist', reachability);
 }
 
 function pageToArtistFact(page: WikiPage): ArtistFact | null {
