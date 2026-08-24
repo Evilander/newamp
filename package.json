@@ -64,6 +64,7 @@
     "test:css-color": "node scripts/css-color-test.mjs",
     "test:query-intent": "node scripts/query-intent-test.mjs",
     "test:playback-mode": "npm run build:electron && node scripts/playback-mode-independence-test.mjs",
+    "test:shuffle-handoff": "npm run build:electron && node scripts/shuffle-handoff-test.mjs",
     "test:session-restore-integrity": "npm run build:electron && node scripts/session-restore-integrity-test.mjs",
     "test:discover-weirdness-perf": "node scripts/discover-weirdness-perf-test.mjs",
     "test:smart-shuffle-perf": "npm run build:electron && node scripts/smart-shuffle-perf-test.mjs",
