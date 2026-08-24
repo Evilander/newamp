@@ -107,4 +107,43 @@ const tmpSiblings = () => readdirSync(smokeRoot).filter((f) => f.includes('.tmp'
 }
 
 await rm(smokeRoot, { recursive: true, force: true });
-console.log('[library-flush-test] PASS: atomic flush verified, recovery classification verified');
+// A quit while an async flush is still writing must not corrupt the database.
+// The two writers used to share one `.tmp-<pid>` path, so the synchronous
+// write could truncate the inode the async write still held, rename it into
+// place, and let the async bytes land inside the live library.db.
+{
+  const raceRoot = join(repoRoot, 'tmp', 'library-flush-race');
+  await rm(raceRoot, { recursive: true, force: true });
+  await mkdir(raceRoot, { recursive: true });
+  const racePath = join(raceRoot, 'library.db');
+
+  const store = new LibraryStore(racePath);
+  await store.init();
+  store.upsertTracks(seedRows('race-a', 400));
+
+  // Start the async flush, then quit mid-write without awaiting it.
+  const inFlight = store.flushAsync?.();
+  store.upsertTracks(seedRows('race-b', 40));
+  store.close();
+  await Promise.resolve(inFlight).catch(() => {});
+  await new Promise((r) => setTimeout(r, 250)); // let any stray threadpool write land
+
+  const header = readFileSync(racePath).subarray(0, 16).toString('binary');
+  assert.equal(header, 'SQLite format 3\0', 'a quit during an async flush must leave a valid database');
+  const strays = readdirSync(raceRoot).filter((f) => f.includes('.tmp-'));
+  assert.deepEqual(strays, [], `no temp files should survive, found ${strays.join(', ')}`);
+
+  // The two writers must not be able to pick the same temp path in the first
+  // place - that is the property the race above can only sample.
+  const librarySrc = readFileSync(join(repoRoot, 'electron', 'library.ts'), 'utf8');
+  const settingsSrc = readFileSync(join(repoRoot, 'electron', 'settings.ts'), 'utf8');
+  const recoverySrc = readFileSync(join(repoRoot, 'electron', 'recovery.ts'), 'utf8');
+  assert.match(recoverySrc, /\.tmp-\$\{process\.pid\}-sync/, 'the synchronous writer needs its own temp suffix');
+  for (const [name, src] of [['library', librarySrc], ['settings', settingsSrc]]) {
+    assert.match(src, /\.tmp-\$\{process\.pid\}-\$\{seq\}/, `${name} async flush must use a per-flush temp path`);
+    assert.doesNotMatch(src, /\.tmp-\$\{process\.pid\}`/, `${name} must not share the bare per-pid temp path`);
+  }
+  await rm(raceRoot, { recursive: true, force: true });
+}
+
+console.log('[library-flush-test] PASS: atomic flush verified, recovery classification verified, quit-during-flush safe');

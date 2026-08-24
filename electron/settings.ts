@@ -337,7 +337,9 @@ export class SettingsStore {
     this.dirty = false;
     const seq = ++this.persistSeq;
     const payload = JSON.stringify(this.state, null, 2);
-    const tmp = `${this.file}.tmp-${process.pid}`;
+    // Unique per persist, for the same reason as the library flush: the
+    // quit-path synchronous write uses its own "-sync" temp path.
+    const tmp = `${this.file}.tmp-${process.pid}-${seq}`;
     this.persistInFlight = (async () => {
       try {
         await durableWriteFileAsync(tmp, payload);
