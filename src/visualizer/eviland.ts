@@ -781,19 +781,36 @@ export function createEvilandRenderer(
   canvas: HTMLCanvasElement,
   options: EvilandOptions = {},
 ): EvilandRenderer | null {
-  const ctx = canvas.getContext('webgl2', {
+  // canvas.getContext('webgl2', ...) permanently binds this canvas element to
+  // WebGL2 per the Canvas spec — a later getContext('2d') on the SAME element
+  // returns null forever, even after we return null ourselves here. The two
+  // checks right below (context creation itself, then EXT_color_buffer_float)
+  // used to run AFTER that binding already happened on the caller's real
+  // canvas, so failing either one permanently blocked the caller's 2D
+  // fallback (paintMilkdropFallback) on that same element — the renderer
+  // returned null "so it never goes dark", but the fallback that promise
+  // depends on could no longer get a 2D context. Probe both on a throwaway
+  // detached canvas first; only bind the real canvas once we know it'll work.
+  const contextOptions: WebGLContextAttributes = {
     alpha: false,
     antialias: false,
     depth: false,
     stencil: false,
     preserveDrawingBuffer: Boolean(options.smoke),
     powerPreference: 'high-performance',
-  });
+  };
+  const probe = document.createElement('canvas').getContext('webgl2', contextOptions);
+  if (!probe || !probe.getExtension('EXT_color_buffer_float')) return null;
+
+  const ctx = canvas.getContext('webgl2', contextOptions);
   if (!ctx) return null;
   const gl: WebGL2RenderingContext = ctx;
 
   // Required for RGBA16F render targets. Without this, framebuffer status will
   // never be COMPLETE and the field stays black — fall back to butterchurn.
+  // (Already verified on the probe above; re-checked here as a defensive
+  // belt-and-suspenders in case the real canvas's context genuinely differs
+  // from the probe's, e.g. a driver quirk tied to canvas size or backing.)
   const floatExt = gl.getExtension('EXT_color_buffer_float');
   if (!floatExt) {
     return null;
@@ -833,6 +850,12 @@ export function createEvilandRenderer(
   const echoProg = link(gl, QUAD_VERT, ECHO_FRAG);
   const blitProg = link(gl, QUAD_VERT, BLIT_FRAG);
 
+  // Note: unlike context-creation/EXT_color_buffer_float above, a link
+  // failure here is not probed ahead of time — the real canvas is already
+  // bound to WebGL2 by this point, so the caller's 2D fallback is lost in
+  // this narrow case. These are fixed, shipped shader sources (not
+  // user input), so this is a driver/spec-bug-only path, not the realistic
+  // "no GPU support" scenario the probe above targets.
   if (!fieldProg || !emitterProg || !terrainProg || !spectrumProg || !waveProg || !thresholdProg || !downProg || !upProg || !postProg || !echoProg || !blitProg) {
     return null;
   }

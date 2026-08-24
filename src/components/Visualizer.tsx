@@ -696,6 +696,15 @@ export function Visualizer({
           void releaseBridgeForTrack(previousTrackId, 'track-change');
           lastTrackId = ui.trackId;
           lastSectionReturn = -1;
+          // The reactor's own structural memory (novelty baseline, section
+          // fingerprints/ids, tempo tracking) otherwise survives every track
+          // change for the life of this effect: the old track's spectrum and
+          // timestamps make the new track's first analyze() read as a huge
+          // jump, likely firing a spurious sectionChanged before the
+          // deferPrimingFrames guard below even applies (that guard only
+          // covers the no-boundary-yet priming path, not a genuine
+          // sectionChanged from stale memory).
+          reactor.reset();
           director.reset(ui.trackId != null ? `track-${ui.trackId}` : 'eviland');
           bridge = acquireBridgeForTrack({ trackId: ui.trackId, api });
           bridge.attachDirector(director);
@@ -1859,6 +1868,18 @@ export function Visualizer({
           ctx.fillStyle = flare;
           ctx.fillRect(cx - flareR, cy - flareR, flareR * 2, flareR * 2);
         }
+      } else {
+        // Catch-all for any mode that reaches this canvas-2D path with no
+        // branch above matching it — in practice the 5 shader-only modes
+        // (kaleido-bloom, liquid-aurora-storm, fractal-pulse, starfield-warp,
+        // spectral-tunnel) that have no hand-written 2D reimplementation:
+        // startShaderVisualizer() only returns null (falling through to this
+        // canvas-2D setup at all) when WebGL2/EXT_color_buffer_float is
+        // unavailable, and this if/else chain used to have no final else, so
+        // those 5 modes stayed blank forever with the rAF loop still
+        // spinning. Every other GPU-dependent mode already falls back to
+        // this same painter — these were the exception.
+        paintMilkdropFallback(c, engine);
       }
 
       raf = requestAnimationFrame(frame);

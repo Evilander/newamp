@@ -56,6 +56,17 @@ export function GuitarTabCompanion({
   const [semitones, setSemitones] = useState(0);
   const [autoscroll, setAutoscroll] = useState(true);
   const [scrollSpeed, setScrollSpeed] = useState(1.2);
+  // loadTab/openCachedTab/savePastedTab are independent async functions with
+  // no guard of their own (unlike the top-level effect below, which resets
+  // on current.id via its own `cancelled` flag) — a slow/blocked Ultimate
+  // Guitar request that resolves after the user has skipped to another
+  // track would otherwise unconditionally setTab/setWindowOpen(true),
+  // reopening the OLD track's chords over the new one. Read via ref (not
+  // `current.id` directly) so a stale closure still sees the live value.
+  const currentIdRef = useRef(current.id);
+  useEffect(() => {
+    currentIdRef.current = current.id;
+  }, [current.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -116,26 +127,31 @@ export function GuitarTabCompanion({
 
   async function loadTab(url: string, target: 'overlay' | 'native' = 'overlay'): Promise<void> {
     if (!url.trim()) return;
+    const trackId = current.id;
     setStatus('loading-tab');
     setError(null);
     try {
       const next = await api.getGuitarTab(url.trim());
+      if (currentIdRef.current !== trackId) return;
       setTab(next);
       if (target === 'native') {
         await api.openGuitarTabWindow(next, isPlaying);
+        if (currentIdRef.current !== trackId) return;
       } else {
         setWindowOpen(true);
       }
       setStatus('ready');
       api
-        .saveCachedGuitarTab(current.id, next)
+        .saveCachedGuitarTab(trackId, next)
         .then((saved) => {
+          if (currentIdRef.current !== trackId) return;
           setCachedTabs((rows) =>
             [saved, ...rows.filter((row) => row.url !== saved.url)].sort((a, b) => b.updatedAt - a.updatedAt),
           );
         })
         .catch(() => undefined);
     } catch (err) {
+      if (currentIdRef.current !== trackId) return;
       const message = err instanceof Error ? err.message : 'Could not load this Ultimate Guitar tab';
       setError(message);
       setStatus(/blocked|Cloudflare|challenge/i.test(message) ? 'blocked' : 'error');
@@ -143,9 +159,11 @@ export function GuitarTabCompanion({
   }
 
   async function openCachedTab(cached: CachedGuitarTab, target: 'overlay' | 'native' = 'overlay'): Promise<void> {
+    const trackId = current.id;
     setTab(cached.document);
     if (target === 'native') {
       await api.openGuitarTabWindow(cached.document, isPlaying);
+      if (currentIdRef.current !== trackId) return;
     } else {
       setWindowOpen(true);
     }
@@ -156,16 +174,18 @@ export function GuitarTabCompanion({
   async function savePastedTab(target: 'overlay' | 'native' = 'overlay'): Promise<void> {
     const content = manualText.trim();
     if (!content) return;
+    const trackId = current.id;
     setStatus('loading-tab');
     setError(null);
     try {
-      const saved = await api.saveLocalGuitarTab(current.id, {
+      const saved = await api.saveLocalGuitarTab(trackId, {
         artist: current.artist,
         title: current.title,
         content,
         kind: 'Pasted Tab',
         key: current.key,
       });
+      if (currentIdRef.current !== trackId) return;
       setTab(saved.document);
       setCachedTabs((rows) =>
         [saved, ...rows.filter((row) => row.url !== saved.url)].sort((a, b) => b.updatedAt - a.updatedAt),
@@ -173,11 +193,13 @@ export function GuitarTabCompanion({
       setManualText('');
       if (target === 'native') {
         await api.openGuitarTabWindow(saved.document, isPlaying);
+        if (currentIdRef.current !== trackId) return;
       } else {
         setWindowOpen(true);
       }
       setStatus('ready');
     } catch (err) {
+      if (currentIdRef.current !== trackId) return;
       const message = err instanceof Error ? err.message : 'Could not save pasted tab';
       setError(message);
       setStatus('error');

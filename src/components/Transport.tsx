@@ -5,6 +5,7 @@ import { formatTime, playbackCodecLabel } from '../lib/format';
 import { api } from '../lib/api';
 import { VolumeSlider } from './VolumeSlider';
 import { spectralArtDataUrl } from '@shared/spectral-art';
+import { isShuffleMode, repeatModeOf } from '@shared/types';
 import { PrevIcon, NextIcon, StopIcon, PlayPauseIcon, ShuffleIcon, RepeatIcon } from './TransportIcons';
 import { ScrubBar } from './ScrubBar';
 import { ArtistLink, AlbumLink } from './EntityLink';
@@ -22,7 +23,8 @@ export function Transport(): JSX.Element {
   const playbackError = usePlayerStore((s) => s.playbackError);
   const volume = usePlayerStore((s) => s.volume);
   const mode = usePlayerStore((s) => s.mode);
-  const setMode = usePlayerStore((s) => s.setMode);
+  const toggleShuffle = usePlayerStore((s) => s.toggleShuffle);
+  const cycleRepeat = usePlayerStore((s) => s.cycleRepeat);
   const setVolume = usePlayerStore((s) => s.setVolume);
   const seek = usePlayerStore((s) => s.seek);
   const togglePlay = usePlayerStore((s) => s.togglePlay);
@@ -170,30 +172,28 @@ export function Transport(): JSX.Element {
               clock-subscribed leaf below, not this component. */}
           <TransportScrubBar duration={duration} seek={seek} />
           <button
-            className={`pxbtn pxbtn-icon ${mode === 'shuffle' ? 'is-active' : ''}`}
-            onClick={() => setMode(mode === 'shuffle' ? 'normal' : 'shuffle')}
+            className={`pxbtn pxbtn-icon ${isShuffleMode(mode) ? 'is-active' : ''}`}
+            onClick={toggleShuffle}
             title="Shuffle"
             aria-label="Shuffle"
-            aria-pressed={mode === 'shuffle'}
+            aria-pressed={isShuffleMode(mode)}
           >
             <ShuffleIcon />
           </button>
           <button
-            className={`pxbtn pxbtn-icon ${mode === 'repeat-all' || mode === 'repeat-one' ? 'is-active' : ''}`}
-            data-state={mode === 'repeat-all' ? 'all' : mode === 'repeat-one' ? 'one' : 'off'}
-            onClick={() =>
-              setMode(mode === 'repeat-all' ? 'repeat-one' : mode === 'repeat-one' ? 'normal' : 'repeat-all')
-            }
+            className={`pxbtn pxbtn-icon ${repeatModeOf(mode) !== 'off' ? 'is-active' : ''}`}
+            data-state={repeatModeOf(mode)}
+            onClick={cycleRepeat}
             title="Repeat mode"
             aria-label={
-              mode === 'repeat-one'
+              repeatModeOf(mode) === 'one'
                 ? 'Repeat one. Press to turn repeat off.'
-                : mode === 'repeat-all'
+                : repeatModeOf(mode) === 'all'
                   ? 'Repeat all. Press to switch to repeat one.'
                   : 'Repeat off. Press to repeat all.'
             }
           >
-            <RepeatIcon one={mode === 'repeat-one'} />
+            <RepeatIcon one={repeatModeOf(mode) === 'one'} />
           </button>
           <VolumeSlider value={volume} onChange={(v) => void setVolume(v)} width={120} />
         </div>
