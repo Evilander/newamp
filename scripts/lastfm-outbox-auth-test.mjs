@@ -17,7 +17,12 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileSync, mkdirSync } from 'node:fs';
-import { LastfmScrobbleOutbox, LastfmApiError } from '../dist-electron/electron/lastfm.js';
+import {
+  LastfmScrobbleOutbox,
+  LastfmApiError,
+  shouldRetryLastfmError,
+  isLastfmAuthFailure,
+} from '../dist-electron/electron/lastfm.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 mkdirSync(resolve(repoRoot, 'tmp'), { recursive: true });
@@ -113,6 +118,37 @@ const track = (n) => ({ artist: `Artist ${n}`, title: `Track ${n}`, album: null,
   if (result.needsReconnect !== false) fail('a non-auth permanent failure must not report needsReconnect');
   if (!sent.includes('Track 2')) fail('item 2 should still be attempted after item 1 is dropped as non-retryable');
   log.push('non-auth permanent failure dropped without blocking later items: ok');
+}
+
+// --- An auth failure on the LIVE send path must preserve the play. Marking
+// code 9 non-retryable is right for flush(), but the live scrobble handler
+// decides whether to queue by asking the same question. If it only queues
+// retryable errors, a dead session key means every scrobble is dropped, the
+// outbox stays empty, and needsReconnect can never become true - silent,
+// permanent loss that is worse than the queue jam this all started from. ---
+{
+  const authErr = new LastfmApiError('Invalid session key', { code: 9, status: 200 });
+  const otherErr = new LastfmApiError('Invalid parameters', { code: 6, status: 200 });
+  const transientErr = new LastfmApiError('Service Offline', { code: 11, status: 200 });
+
+  if (shouldRetryLastfmError(authErr)) fail('code 9 should not be retryable');
+  if (!isLastfmAuthFailure(authErr)) fail('code 9 should be recognised as an auth failure');
+  if (isLastfmAuthFailure(otherErr)) fail('code 6 is not an auth failure');
+  if (isLastfmAuthFailure(transientErr)) fail('code 11 is transient, not an auth failure');
+
+  // the live handler's exact predicate
+  const wouldQueue = (err) => shouldRetryLastfmError(err) || isLastfmAuthFailure(err);
+  if (!wouldQueue(authErr)) fail('an auth failure must still be queued so the play is not lost');
+  if (!wouldQueue(transientErr)) fail('a transient failure must still be queued');
+  if (wouldQueue(otherErr)) fail('a permanently-invalid scrobble should still be dropped');
+
+  // and once queued, the outbox reports that a reconnect is needed
+  const outboxPath = join(smokeRoot, 'outbox-live-auth.json');
+  const outbox = new LastfmScrobbleOutbox(outboxPath);
+  await outbox.enqueue(track(9), 4000, 'Invalid session key');
+  const status = await outbox.status();
+  if (status.pending !== 1) fail(`the dropped-live scrobble should be queued, got pending=${status.pending}`);
+  log.push('live-path auth failure is queued, not dropped: ok');
 }
 
 const report = log.join('\n') + '\n' + (pass ? '[lastfm-outbox-auth-test] PASS' : '[lastfm-outbox-auth-test] FAIL') + '\n';
