@@ -391,7 +391,11 @@ export class SettingsStore {
       .filter((id) => Number.isFinite(id) && id > 0)
       .slice(0, 5000);
     if (!queueTrackIds.length) return null;
-    const mode = ['normal', 'repeat-one', 'repeat-all', 'shuffle'].includes(value.mode)
+    // Shuffle and repeat are independent, so the combined modes are real states
+    // the transport produces on an ordinary click. Leaving them out of this
+    // whitelist silently reset BOTH toggles on the next launch.
+    const mode = ['normal', 'repeat-one', 'repeat-all', 'shuffle', 'shuffle-repeat-one', 'shuffle-repeat-all']
+      .includes(value.mode)
       ? value.mode
       : 'normal';
     return {

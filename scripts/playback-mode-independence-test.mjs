@@ -125,4 +125,20 @@ assert.match(winampSource, /repeatModeOf\(mode\) === 'all' \? 'off' : 'all'/, 'W
 
 assert.match(packageSource, /"test:playback-mode"/, 'package.json should expose the playback mode independence test');
 
+// The settings whitelist must accept every mode the transport can produce. It
+// previously listed only the four original values, so turning on shuffle AND
+// repeat persisted a mode it rejected on load — both toggles came back off.
+const settingsSource = await readFile(new URL('../electron/settings.ts', import.meta.url), 'utf8');
+for (const mode of ['shuffle-repeat-one', 'shuffle-repeat-all']) {
+  assert.match(settingsSource, new RegExp(`'${mode}'`), `electron/settings.ts must accept the persisted mode ${mode}`);
+}
+
+// Removing the LAST queued track is a removed-current case too, so it has to
+// unload the engine; stop() alone leaves the removed track resumable.
+// anchor on the implementation, not the interface declaration of the same name
+const removeAction = storeSource.slice(storeSource.indexOf('removeQueuedTrack: async'));
+const emptyQueueBranch = removeAction.slice(0, removeAction.indexOf('if (result.removedCurrent)'));
+assert.doesNotMatch(emptyQueueBranch, /engine\.stop\(\)/, 'the empty-queue removal branch must not leave a stale src via stop()');
+assert.match(emptyQueueBranch, /engine\.unload\(\)/, 'the empty-queue removal branch should unload the engine');
+
 console.log(JSON.stringify({ ok: true }, null, 2));
