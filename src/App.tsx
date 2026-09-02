@@ -10,6 +10,7 @@ import { ToastHost } from './components/StatusToast';
 import { StartupSplash } from './components/StartupSplash';
 import { usePlayerStore } from './store/usePlayerStore';
 import { api, inElectron, winctl } from './lib/api';
+import { pushToast } from './lib/toast';
 import { syncMediaSessionIdentity, syncMediaSessionPosition } from './lib/mediaSession';
 import { resolvePlayerShortcut, type PlayerShortcutCommand } from '@shared/keyboard-shortcuts';
 import { applyShell, loadInitialShell } from './components/ShellPicker';
@@ -224,6 +225,18 @@ export default function App(): JSX.Element {
       .then(async () => {
         const pending = await api.consumePendingOpenFiles();
         if (!cancelled) await handleOpenFiles(pending);
+        // A tag rule that stopped compiling (an upgrade narrowed the pattern
+        // grammar) silently drops every tag it assigned. Say so once at start
+        // instead of waiting for the user to open the Tags view.
+        const rules = await api.listTagRules().catch(() => []);
+        const broken = rules.filter((rule) => rule.enabled && rule.lastError);
+        if (!cancelled && broken.length) {
+          pushToast({
+            tone: 'error',
+            title: broken.length === 1 ? 'A tag rule is not running' : `${broken.length} tag rules are not running`,
+            detail: `${broken.map((rule) => rule.name).join(', ')} — open Tags to see why. Their tags are missing until fixed.`,
+          });
+        }
       })
       .catch((err) => console.error('init failed', err));
 

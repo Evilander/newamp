@@ -63,6 +63,10 @@ export function TagsView(): JSX.Element {
   const [previewTracks, setPreviewTracks] = useState<Track[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Rules whose last recompute failed — typically a pattern the matcher no
+  // longer accepts after an upgrade. Their tags are missing library-wide, so
+  // this is called out at the top of the view, not only in the sidebar.
+  const brokenRules = rules.filter((rule) => rule.enabled && rule.lastError);
   const [busy, setBusy] = useState(false);
   const playQueue = usePlayerStore((s) => s.playQueue);
 
@@ -182,8 +186,10 @@ export function TagsView(): JSX.Element {
     setBusy(true);
     try {
       const result = await api.recomputeTags();
+      const failed = Object.keys(result.errors);
       setStatus(
-        `Recomputed ${result.rulesEvaluated} rule${result.rulesEvaluated === 1 ? '' : 's'} over ${result.tracksEvaluated.toLocaleString()} tracks — ${result.tagsAssigned.toLocaleString()} tag assignments.`,
+        `Recomputed ${result.rulesEvaluated} rule${result.rulesEvaluated === 1 ? '' : 's'} over ${result.tracksEvaluated.toLocaleString()} tracks — ${result.tagsAssigned.toLocaleString()} tag assignments.`
+          + (failed.length ? ` ${failed.length} rule${failed.length === 1 ? '' : 's'} did not run: ${failed.join(', ')}.` : ''),
       );
       await refresh();
     } catch (err) {
@@ -228,6 +234,17 @@ export function TagsView(): JSX.Element {
         }
       />
       <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+        {brokenRules.length > 0 && (
+          <div
+            className="rounded px-3 py-2 text-[11px]"
+            style={{ border: '1px solid var(--error)', color: 'var(--error)' }}
+            data-newamp-tag-rule-errors={brokenRules.length}
+          >
+            {brokenRules.length === 1 ? 'One rule is not running' : `${brokenRules.length} rules are not running`}, so
+            the tags it assigned are gone until it is fixed:{' '}
+            {brokenRules.map((rule) => `${rule.name} (${rule.lastError})`).join('; ')}
+          </div>
+        )}
         <ViewOnboarding
           viewId="tags"
           title="Living Tags"
