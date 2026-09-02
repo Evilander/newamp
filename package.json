@@ -59,6 +59,7 @@
     "test:playlist-cover-guard": "npm run build:electron && node scripts/playlist-cover-guard-test.mjs",
     "test:skin-import-guard": "npm run build:electron && node scripts/skin-import-guard-test.mjs",
     "test:lastfm-outbox-auth": "npm run build:electron && node scripts/lastfm-outbox-auth-test.mjs",
+    "test:lastfm-outbox-race": "npm run build:electron && node scripts/lastfm-outbox-race-test.mjs",
     "test:window-lifecycle-policy": "npm run build:electron && node scripts/window-lifecycle-policy-test.mjs",
     "test:virtual-rows": "node scripts/virtual-rows-test.mjs",
     "test:css-color": "node scripts/css-color-test.mjs",
