@@ -36,6 +36,16 @@ const HEX_COLOR = /^#[0-9a-f]{6}$/i;
 const MAX_SKIN_ENTRY_INFLATED_BYTES = 24 * 1024 * 1024;
 const MAX_SKIN_ARCHIVE_INFLATED_BYTES = 64 * 1024 * 1024;
 
+// A crafted zip can be nearly empty on disk (a STORED, i.e. uncompressed,
+// entry sidesteps the inflate caps above entirely) while declaring metadata
+// that's expensive to process. Bound both the archive's structure and any
+// bitmap's declared dimensions before doing real work with either.
+const MAX_SKIN_ARCHIVE_ENTRIES = 4096;
+const MAX_SKIN_ENTRY_NAME_BYTES = 1024;
+const MAX_SKIN_BMP_PIXELS = 4096 * 4096;
+const ZIP_GENERAL_FLAG_ENCRYPTED = 0x0001;
+const ZIP_GENERAL_FLAG_DATA_DESCRIPTOR = 0x0008;
+
 // Import IPC hardening: settings:skin-import-file is wired to app-wide
 // drag/drop, but it's also exposed directly on window.newamp, so any
 // renderer script — not just the drop handler — can call it with an
@@ -115,24 +125,45 @@ export function parseWinampClassicSkinArchive(input: Uint8Array, fileName = 'Win
 function readZipEntries(input: Uint8Array): ZipEntry[] {
   const buffer = Buffer.from(input);
   const eocdOffset = findEndOfCentralDirectory(buffer);
+  requireBytes(buffer, eocdOffset, 22);
   const entryCount = buffer.readUInt16LE(eocdOffset + 10);
   const centralSize = buffer.readUInt32LE(eocdOffset + 12);
   const centralOffset = buffer.readUInt32LE(eocdOffset + 16);
+  // 0xffff/0xffffffff sentinels mean "see the ZIP64 extension" — we don't
+  // parse that extension, so refuse rather than mis-read the real values.
+  if (entryCount === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff) {
+    throw new Error('ZIP64 Winamp skin archives are not supported.');
+  }
+  if (entryCount > MAX_SKIN_ARCHIVE_ENTRIES) throw new Error('This Winamp skin archive has too many entries.');
   if (centralOffset + centralSize > buffer.length) throw new Error('Invalid Winamp skin archive.');
 
   const entries: ZipEntry[] = [];
   let totalInflatedBytes = 0;
   let offset = centralOffset;
   for (let i = 0; i < entryCount; i += 1) {
+    requireBytes(buffer, offset, 46);
     if (buffer.readUInt32LE(offset) !== ZIP_CENTRAL_SIGNATURE) throw new Error('Invalid Winamp skin archive.');
+    const flags = buffer.readUInt16LE(offset + 8);
+    if (flags & ZIP_GENERAL_FLAG_ENCRYPTED) throw new Error('Encrypted Winamp skin archives are not supported.');
+    if (flags & ZIP_GENERAL_FLAG_DATA_DESCRIPTOR) throw new Error('This Winamp skin archive uses an unsupported format.');
     const method = buffer.readUInt16LE(offset + 10);
     const compressedSize = buffer.readUInt32LE(offset + 20);
+    const uncompressedSize = buffer.readUInt32LE(offset + 24);
     const nameLength = buffer.readUInt16LE(offset + 28);
     const extraLength = buffer.readUInt16LE(offset + 30);
     const commentLength = buffer.readUInt16LE(offset + 32);
     const localOffset = buffer.readUInt32LE(offset + 42);
+    if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) {
+      throw new Error('ZIP64 Winamp skin archives are not supported.');
+    }
+    if (nameLength > MAX_SKIN_ENTRY_NAME_BYTES) throw new Error('This Winamp skin archive has an implausibly long entry name.');
+    // buffer.subarray silently clamps an out-of-range end instead of
+    // throwing, which would otherwise truncate the name to something that
+    // happens to still parse rather than surfacing the corruption.
+    requireBytes(buffer, offset + 46, nameLength + extraLength + commentLength);
+    const headerEnd = offset + 46 + nameLength + extraLength + commentLength;
     const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString('utf8').replace(/\\/g, '/');
-    offset += 46 + nameLength + extraLength + commentLength;
+    offset = headerEnd;
     if (!name || name.endsWith('/')) continue;
     const data = readZipEntryData(buffer, localOffset, compressedSize, method);
     totalInflatedBytes += data.length;
@@ -144,7 +175,14 @@ function readZipEntries(input: Uint8Array): ZipEntry[] {
   return entries;
 }
 
+function requireBytes(buffer: Buffer, offset: number, length: number): void {
+  if (offset < 0 || length < 0 || offset + length > buffer.length) {
+    throw new Error('Invalid Winamp skin archive.');
+  }
+}
+
 function findEndOfCentralDirectory(buffer: Buffer): number {
+  if (buffer.length < 22) throw new Error('This is not a readable Winamp skin archive.');
   const minOffset = Math.max(0, buffer.length - 0xffff - 22);
   for (let offset = buffer.length - 22; offset >= minOffset; offset -= 1) {
     if (buffer.readUInt32LE(offset) === ZIP_EOCD_SIGNATURE) return offset;
@@ -153,10 +191,12 @@ function findEndOfCentralDirectory(buffer: Buffer): number {
 }
 
 function readZipEntryData(buffer: Buffer, localOffset: number, compressedSize: number, method: number): Buffer {
+  requireBytes(buffer, localOffset, 30);
   if (buffer.readUInt32LE(localOffset) !== ZIP_LOCAL_SIGNATURE) throw new Error('Invalid Winamp skin archive.');
   const nameLength = buffer.readUInt16LE(localOffset + 26);
   const extraLength = buffer.readUInt16LE(localOffset + 28);
   const dataOffset = localOffset + 30 + nameLength + extraLength;
+  requireBytes(buffer, dataOffset, compressedSize);
   const compressed = buffer.subarray(dataOffset, dataOffset + compressedSize);
   if (method === 0) return Buffer.from(compressed);
   if (method === 8) {
@@ -166,7 +206,7 @@ function readZipEntryData(buffer: Buffer, localOffset: number, compressedSize: n
       if ((err as NodeJS.ErrnoException)?.code === 'ERR_BUFFER_TOO_LARGE') {
         throw new Error('This Winamp skin archive contains an entry that is too large when decompressed.');
       }
-      throw err;
+      throw new Error('Invalid Winamp skin archive.');
     }
   }
   throw new Error('Unsupported compression method in Winamp skin archive.');
@@ -187,12 +227,20 @@ function readBmpColors(buffer: Buffer): Rgb[] {
   const planes = buffer.readUInt16LE(26);
   const bpp = buffer.readUInt16LE(28);
   const compression = buffer.readUInt32LE(30);
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(rawHeight)) return [];
   if (planes !== 1 || width <= 0 || rawHeight === 0 || compression !== 0) return [];
   if (![4, 8, 24, 32].includes(bpp)) return [];
 
   const height = Math.abs(rawHeight);
   const topDown = rawHeight < 0;
+  // A crafted header can declare dimensions the actual pixel buffer doesn't
+  // back at all (e.g. 100000x100000 in a 55-byte file) — sampling that would
+  // run the loop below billions of times on the main process before ever
+  // touching real bytes. Reject implausible sizes and any row/height math
+  // that would reach past the end of the buffer before looping at all.
+  if (width * height > MAX_SKIN_BMP_PIXELS) return [];
   const rowStride = Math.floor((bpp * width + 31) / 32) * 4;
+  if (pixelOffset + rowStride * height > buffer.length) return [];
   const palette = bpp <= 8 ? readBmpPalette(buffer, dibSize, bpp) : [];
   const colors: Rgb[] = [];
   const sampleEvery = Math.max(1, Math.floor((width * height) / 12000));
