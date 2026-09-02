@@ -222,6 +222,11 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
   // capture, and performFlush loops for a trailing round rather than letting
   // the stale snapshot clobber the live plan (the lost-update bug this guards).
   let mutationVersion = 0;
+  // The mutationVersion the last successful write covered. While these two
+  // agree and nothing is buffered there is nothing to persist — which is what
+  // lets a restarted bridge that only ever loaded its plan dispose without
+  // writing the plan straight back.
+  let persistedVersion = 0;
   /** Sections buffered since the last flush. We dedupe by sectionId so a chorus return doesn't double-flush. */
   const bufferedSections = new Map<number, VisualMemorySection>();
   let visibilityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -433,6 +438,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
           if (bufferedSections.get(sectionId) === snapshotted) bufferedSections.delete(sectionId);
         }
         dirty = bufferedSections.size;
+        persistedVersion = snapshotVersion;
         // Only adopt the composed snapshot wholesale when nothing mutated the
         // live plan while we were writing. If it did (a love/skip/lineage
         // tick landed mid-flight), the live plan is already ahead of what we
@@ -562,11 +568,14 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     }
     listeners.clear();
     if (trackId == null) return false;
-    // Delegate to flush()'s own "anything to do" guard rather than duplicating
-    // it here — that guard also covers a plan-only mutation (e.g. a love
-    // recorded with no buffered sections) which this dispose-time check used
-    // to miss, silently dropping it. flush() also transparently waits out any
-    // trailing round if something mutated during an already-in-flight write.
+    // Nothing buffered and nothing mutated since the last successful write:
+    // there is nothing to persist, and a bridge that only ever loaded its plan
+    // must not write that plan straight back on dispose. A plan-only mutation
+    // (a love recorded with no buffered sections) moves mutationVersion, so
+    // it still gets through — the old dirty/buffered-only check dropped it.
+    if (bufferedSections.size === 0 && mutationVersion === persistedVersion) return false;
+    // flush() waits out any trailing round if something mutated during an
+    // already-in-flight write.
     return flush(reason);
   }
 

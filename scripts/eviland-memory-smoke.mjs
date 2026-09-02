@@ -197,7 +197,9 @@ assert.ok(persisted, 'plan should be persisted after flush');
 assert.equal(persisted.trackId, trackId);
 assert.equal(persisted.songId, `track-${trackId}`);
 assert.ok(persisted.sections.length >= 1, `persisted plan should have ≥1 section, got ${persisted.sections.length}`);
-assert.equal(persisted.algoVersion, 1);
+// The algorithm version moves whenever the randomizer's safe ranges change (see
+// test:algo-version-guard); the smoke only cares that a real one was stamped.
+assert.ok(Number.isInteger(persisted.algoVersion) && persisted.algoVersion >= 1, `persisted plan should carry a positive algoVersion, got ${persisted.algoVersion}`);
 assert.ok(persisted.updatedAt > 0);
 const firstSection = persisted.sections[0];
 assert.ok(typeof firstSection.seed === 'number');
