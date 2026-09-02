@@ -69,6 +69,7 @@
     "test:discover-weirdness-perf": "node scripts/discover-weirdness-perf-test.mjs",
     "test:smart-shuffle-perf": "npm run build:electron && node scripts/smart-shuffle-perf-test.mjs",
     "test:tag-dsl-hardening": "npm run build:electron && node scripts/tag-dsl-hardening-test.mjs",
+    "test:safe-regex": "npm run build:electron && node scripts/safe-regex-test.mjs",
     "test:space-button-shortcut": "npm run build:electron && node scripts/space-button-shortcut-test.mjs",
     "test:radio-library-exclusivity": "node scripts/radio-library-exclusivity-test.mjs",
     "test:boot-volume-taper": "node scripts/boot-volume-taper-test.mjs",
