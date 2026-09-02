@@ -89,6 +89,8 @@
     "test:home-view-error-handling": "node scripts/home-view-error-handling-test.mjs",
     "test:settings-view-stale-closure": "node scripts/settings-view-stale-closure-test.mjs",
     "test:visual-memory-schema-parity": "node scripts/visual-memory-schema-parity-test.mjs",
+    "test:custom-skin-guard": "npm run build:electron && node scripts/custom-skin-guard-test.mjs",
+    "test:pending-album-nav": "node scripts/pending-album-nav-test.mjs",
     "smoke:butterchurn-sandbox": "npm run build && electron scripts/butterchurn-sandbox-smoke-app",
     "smoke:particle-flow": "electron scripts/particle-flow-smoke-app",
     "smoke:viz-capture": "node scripts/viz-capture-smoke.mjs",
