@@ -56,6 +56,7 @@
     "test:transcode-peek": "npm run build:electron && node scripts/transcode-peek-test.mjs",
     "test:podcast-host-guard": "node scripts/podcast-host-guard-test.mjs",
     "test:podcast-redirect-guard": "node scripts/podcast-redirect-guard-test.mjs",
+    "test:podcast-http-boundary": "node scripts/podcast-http-boundary-test.mjs",
     "test:playlist-cover-guard": "npm run build:electron && node scripts/playlist-cover-guard-test.mjs",
     "test:skin-import-guard": "npm run build:electron && node scripts/skin-import-guard-test.mjs",
     "test:lastfm-outbox-auth": "npm run build:electron && node scripts/lastfm-outbox-auth-test.mjs",
