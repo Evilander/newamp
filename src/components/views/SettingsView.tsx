@@ -15,6 +15,7 @@ import { engine, usePlayerStore } from '../../store/usePlayerStore';
 import { api, inElectron, DEFAULT_SETTINGS, exclusiveBackendLabel } from '../../lib/api';
 import { AI_ASSIST_OPTIONS } from '../../lib/aiAssist';
 import { SKIN_VARIABLES, THEME_REGISTRY, readCurrentSkinVariables } from '../../lib/skins';
+import { normalizeSkinVariableValue } from '@shared/custom-skin';
 import { normalizeAudioOutputDeviceId, uniqueAudioOutputDevices } from '@shared/audio-output';
 import type { AudioOutputDeviceOption } from '@shared/audio-output';
 import { MAX_PREAMP_DB, MIN_PREAMP_DB, PREAMP_STEP_DB, normalizePreampDb } from '@shared/audio-limiter';
@@ -1092,7 +1093,10 @@ function SkinWorkshop({
 
   function setVar(key: string, value: string): void {
     setDraft((cur) => ({ ...cur, [key]: value }));
-    document.documentElement.style.setProperty(key, value);
+    // Preview only what the skin grammar accepts; a half-typed or unsupported
+    // value stays in the draft box without reaching the page.
+    const safe = normalizeSkinVariableValue(key, value);
+    if (safe !== null) document.documentElement.style.setProperty(key, safe);
   }
 
   function buildSkin(): CustomSkin {

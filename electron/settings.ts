@@ -7,6 +7,7 @@ import { normalizeAutoDjTarget } from '../shared/auto-dj.js';
 import { normalizeAudioOutputDeviceId } from '../shared/audio-output.js';
 import { normalizeLimiterEnabled, normalizePreampDb } from '../shared/audio-limiter.js';
 import { FLAT_EQ_VALUES, normalizeEqValues } from '../shared/eq-presets.js';
+import { normalizeCustomSkin } from '../shared/custom-skin.js';
 import { atomicWriteFileSync, durableWriteFileAsync, quarantineCorruptFile, recoveryReason, renameOverExistingAsync } from './recovery.js';
 
 const DEFAULTS: AppSettings = {
@@ -167,6 +168,7 @@ export class SettingsStore {
           ...parsed,
           libraryAutoWatch: parsed.libraryAutoWatch !== false,
           equalizer: normalizeEqValues(parsed.equalizer),
+          customSkin: normalizeCustomSkin(parsed.customSkin),
           resumeState: this.normalizeResume(parsed.resumeState),
           playbackRate: normalizePlaybackRate(parsed.playbackRate ?? DEFAULTS.playbackRate),
           audioOutputDeviceId: normalizeAudioOutputDeviceId(parsed.audioOutputDeviceId),
@@ -262,6 +264,11 @@ export class SettingsStore {
       resumeState: patch.resumeState === undefined
         ? this.state.resumeState
         : this.normalizeResume(patch.resumeState),
+      // Skin values are re-checked at the DOM write too, but a hand-edited or
+      // crafted settings patch should never land an unsafe value on disk.
+      customSkin: patch.customSkin === undefined
+        ? this.state.customSkin
+        : normalizeCustomSkin(patch.customSkin),
       bitPerfectExclusive: patch.bitPerfectExclusive === undefined
         ? this.state.bitPerfectExclusive
         : patch.bitPerfectExclusive === true,
