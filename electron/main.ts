@@ -21,7 +21,7 @@ import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
-import { LibraryStore } from './library.js';
+import { LibraryStore, LibraryUnavailableError } from './library.js';
 import { LibraryWatcher } from './library-watcher.js';
 import { findLocalLyricsForTrack } from './local-lyrics.js';
 import { SettingsStore } from './settings.js';
@@ -96,6 +96,7 @@ import type {
   SavedPlaylist,
   SavePlaylistInput,
   ScanProgress,
+  SupportBackupResult,
   SupportDiagnostics,
   Track,
   TrackMetadataPatchInput,
@@ -1480,9 +1481,15 @@ function createScannerService(store: LibraryStore): Scanner {
   });
 }
 
+// Set while the support-backup coordinator is taking an in-memory snapshot,
+// so a filesystem event that lands mid-capture doesn't kick off a rescan that
+// mutates the library out from under it. Cleared again in
+// resumeLibraryMutations() / reloadRuntimeStores().
+let libraryMutationsQuiesced = false;
+
 function createLibraryWatcherService(): LibraryWatcher {
   return new LibraryWatcher((targets) => {
-    if (!settings.get().libraryAutoWatch || !targets.length) return;
+    if (libraryMutationsQuiesced || !settings.get().libraryAutoWatch || !targets.length) return;
     void reconcileWatchedTargets(targets);
   });
 }
@@ -1510,7 +1517,40 @@ function reconcileWatchedTargets(targets: string[]): Promise<void> {
   return run;
 }
 
+// Quiesces the two automatic sources of library mutation — the watcher's
+// reconcile and the scanner — before the support-backup coordinator captures
+// an in-memory snapshot. Cancelling the scanner and immediately re-starting
+// it with an empty root list is a way to await "whatever is currently
+// running" without Scanner exposing that directly: start() always queues
+// behind its internal scanQueue, so our empty-root call only resolves once
+// anything already in flight (including one the reconcile just kicked off)
+// has finished.
+async function quiesceLibraryMutations(): Promise<void> {
+  libraryMutationsQuiesced = true;
+  await watcherReconcile.catch(() => {});
+  scanner?.cancel();
+  await scanner?.start([]).catch(() => {});
+}
+
+function resumeLibraryMutations(): void {
+  libraryMutationsQuiesced = false;
+}
+
+// Builds a support backup from the live stores' in-memory state rather than
+// from library.db/settings.json on disk — see createSupportBackup's
+// librarySnapshot/settingsSnapshot for why that distinction matters.
+async function createBackupFromLiveStores(userData: string): Promise<SupportBackupResult> {
+  return createSupportBackup({
+    userDataPath: userData,
+    settingsPath: join(userData, 'settings.json'),
+    libraryPath: join(userData, 'library.db'),
+    librarySnapshot: library.exportSnapshot(),
+    settingsSnapshot: settings.snapshotJson(),
+  });
+}
+
 async function reloadRuntimeStores(userData: string): Promise<void> {
+  libraryMutationsQuiesced = false;
   settings = new SettingsStore(join(userData, 'settings.json'));
   lastfmOutbox = new LastfmScrobbleOutbox(join(userData, 'lastfm-scrobbles.json'));
   podcastStore = new PodcastStore(join(userData, 'podcasts.json'));
@@ -2229,11 +2269,17 @@ function registerIpc(): void {
   ipcMain.handle('app:support-diagnostics', async () => buildSupportDiagnostics());
   ipcMain.handle('app:create-backup', async () => {
     const userData = app.getPath('userData');
-    return createSupportBackup({
-      userDataPath: userData,
-      settingsPath: join(userData, 'settings.json'),
-      libraryPath: join(userData, 'library.db'),
-    });
+    // library.db/settings.json on disk can lag behind the live stores by up
+    // to their batching window (30s for play/skip stats, 800ms for the
+    // resumeState autosave) — quiesce the watcher/scanner and read the
+    // snapshot straight out of memory instead of copying a possibly-stale
+    // file. Resume even if the backup itself throws.
+    await quiesceLibraryMutations();
+    try {
+      return await createBackupFromLiveStores(userData);
+    } finally {
+      resumeLibraryMutations();
+    }
   });
   ipcMain.handle('app:restore-backup', async () => {
     const userData = app.getPath('userData');
@@ -2251,18 +2297,25 @@ function registerIpc(): void {
     const picked = mainWin ? await dialog.showOpenDialog(mainWin, options) : await dialog.showOpenDialog(options);
     if (picked.canceled || !picked.filePaths.length) return null;
     const backupPath = picked.filePaths[0]!;
-    const safety = await createSupportBackup({
-      userDataPath: userData,
-      settingsPath: join(userData, 'settings.json'),
-      libraryPath: join(userData, 'library.db'),
-    });
 
+    // Stop the two automatic mutation sources FIRST, then take the pre-restore
+    // safety snapshot from the live stores — taking it before quiescing (the
+    // old order) could miss whatever a scan or a batched flush hadn't written
+    // to disk yet.
     scanner?.cancel();
     libraryWatcher?.stop();
+    await scanner?.start([]).catch(() => {});
+    const safety = await createBackupFromLiveStores(userData);
+
+    // Drain any write already in flight before either store's file gets
+    // replaced below. close()/flushSync() alone can return while an async
+    // flush's rename is still pending on the libuv thread pool — the
+    // in-flight write's own sequence check only stops it from starting a
+    // rename late, it can't stop one already dispatched from racing a rename
+    // this process issues afterwards. Waiting it out removes that race.
+    await library?.waitForPendingWrites();
     library?.close();
-    // Now that settings.json writes are debounced/async, a pending write on
-    // the old store could otherwise land after restoreSupportBackup replaces
-    // the file — flush it out first so that race can't happen.
+    await settings?.waitForPendingWrites();
     settings?.flushSync();
     try {
       return await restoreSupportBackup({
@@ -4971,6 +5024,15 @@ if (!singleInstanceLock) {
 
   app.whenReady().then(bootstrap).catch((err) => {
     console.error('Bootstrap failed:', err);
+    const message = err instanceof Error ? err.message : String(err);
+    writeDiagnosticEvent('bootstrap-failed', { error: message });
+    // A packaged app has no console — without this, a failure here (e.g. a
+    // locked library.db that stayed busy through every retry) just closes
+    // silently and looks like the app never launched at all.
+    dialog.showErrorBox(
+      'NewAmp could not start',
+      err instanceof LibraryUnavailableError ? message : `NewAmp could not start: ${message}`,
+    );
     app.exit(1);
   });
 }
