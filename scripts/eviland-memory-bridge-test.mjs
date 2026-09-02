@@ -60,13 +60,44 @@ function makeMockApi() {
   const store = new Map(); // trackId -> plan
   const similar = new Map(); // trackId -> SimilarTrack[]
   let writes = 0;
+  // Test-controllable write timing/outcome — both default to off, so existing
+  // tests that never call these are unaffected (immediate resolve, always ok).
+  let writeGate = null; // Promise | null — the NEXT write awaits it once, then clears itself
+  let failNext = false; // the NEXT write rejects instead of persisting, then clears itself
   const api = {
     async getTrackVisualMemory(id) { return store.get(id) ?? null; },
-    async setTrackVisualMemory(id, plan) { store.set(id, plan); writes++; return true; },
+    async setTrackVisualMemory(id, plan) {
+      if (writeGate) {
+        const gate = writeGate;
+        writeGate = null;
+        await gate;
+      }
+      if (failNext) {
+        failNext = false;
+        throw new Error('simulated write failure');
+      }
+      store.set(id, plan);
+      writes++;
+      return true;
+    },
     async clearTrackVisualMemory(id) { store.delete(id); return true; },
     async findSimilarTracks(id /*, limit */) { return similar.get(id) ?? []; },
   };
-  return { api, store, similar, writeCount: () => writes };
+  return {
+    api, store, similar,
+    writeCount: () => writes,
+    /** Delay the NEXT setTrackVisualMemory call until `promise` settles. */
+    gateNextWrite(promise) { writeGate = promise; },
+    /** Make the NEXT setTrackVisualMemory call reject instead of persisting. */
+    failNextWrite() { failNext = true; },
+  };
+}
+
+/** A promise plus its external resolve fn, for pinning write timing in tests. */
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => { resolve = res; });
+  return { promise, resolve };
 }
 
 function fakeSection(sectionId, seed) {
@@ -534,6 +565,181 @@ function makeDirector(initialPlan) {
   reg.publishActiveBridge(null);
   reg.__resetBridgeRegistryForTests();
   log.push(`LRU sweep: over-cap acquire evicted oldest non-active entry (flushed), active entry protected ✓`);
+}
+
+// ─── 13. A love recorded during an in-flight flush is not lost ─────────────
+//
+// Lost-update repro: flush() takes a snapshot of the plan and, on success,
+// used to unconditionally overwrite the live plan with that stale snapshot —
+// discarding any counter/lineage mutation that arrived while the write was
+// in flight. This proves recordLove() during an in-flight write survives
+// in memory AND makes it into the persisted payload via a trailing flush.
+{
+  const { api, store, similar, writeCount, gateNextWrite } = makeMockApi();
+  const trackId = 101;
+  similar.set(trackId, []);
+  const initial = createEmptyPlan(trackId, `track-${trackId}`, hashSeed(`track-${trackId}`));
+  store.set(trackId, initial);
+  const b = createMemoryBridge({ trackId, api });
+  await b.loadOrSeed();
+  const director = makeDirector(initial);
+  b.attachDirector(director);
+
+  const gate = deferred();
+  gateNextWrite(gate.promise);
+  const flushPromise = b.flush('manual'); // dispatches a write now blocked on the gate
+
+  b.recordLove(); // mutate WHILE the write above is in flight
+  if (b.getState().generation !== 1) fail('lost-love: recordLove should tick generation in memory immediately');
+
+  gate.resolve();
+  const ok = await flushPromise;
+  if (!ok) fail('lost-love: flush should report success (including any trailing round)');
+  const persisted = store.get(trackId);
+  if (!persisted || persisted.counters.loves !== 1) {
+    fail(`lost-love: persisted loves expected 1, got ${persisted?.counters.loves}`);
+  }
+  if (writeCount() < 2) {
+    fail(`lost-love: expected a trailing write to capture the in-flight love (writes=${writeCount()})`);
+  }
+  log.push('love recorded mid-flush survives in memory and in the persisted payload ✓');
+}
+
+// ─── 14. A section observed during an in-flight write is not lost ──────────
+{
+  const { api, store, similar, writeCount, gateNextWrite } = makeMockApi();
+  const trackId = 102;
+  similar.set(trackId, []);
+  const initial = createEmptyPlan(trackId, `track-${trackId}`, hashSeed(`track-${trackId}`));
+  store.set(trackId, initial);
+  const b = createMemoryBridge({ trackId, api });
+  await b.loadOrSeed();
+  const director = makeDirector(initial);
+  b.attachDirector(director);
+
+  const gate = deferred();
+  gateNextWrite(gate.promise);
+  const flushPromise = b.flush('manual');
+
+  // A new section arrives mid-flight — Director learns it and the bridge is
+  // told, same as production wiring (Director.onSectionLearn → bridge.observeSection).
+  const lateSection = fakeSection(9, 0x9999);
+  director.setSections([lateSection]);
+  b.observeSection(lateSection);
+
+  gate.resolve();
+  const ok = await flushPromise;
+  if (!ok) fail('late-section: flush should report success (including any trailing round)');
+  const persisted = store.get(trackId);
+  const hasLateSection = persisted?.sections.some((s) => s.sectionId === 9);
+  if (!hasLateSection) fail('late-section: trailing flush should have persisted the section observed mid-flight');
+  if (writeCount() < 2) fail(`late-section: expected a trailing write (writes=${writeCount()})`);
+  log.push('section observed mid-flush is captured by a trailing write ✓');
+}
+
+// ─── 15. Failed write, then a mutation, then a retry — nothing lost ────────
+{
+  const { api, store, similar, failNextWrite } = makeMockApi();
+  const trackId = 103;
+  similar.set(trackId, []);
+  const initial = createEmptyPlan(trackId, `track-${trackId}`, hashSeed(`track-${trackId}`));
+  store.set(trackId, initial);
+  const b = createMemoryBridge({ trackId, api });
+  await b.loadOrSeed();
+  const director = makeDirector(initial);
+  b.attachDirector(director);
+  director.setSections([fakeSection(0, 0xaaaa)]);
+  b.observeSection(fakeSection(0, 0xaaaa));
+
+  failNextWrite();
+  const first = await b.flush('manual');
+  if (first) fail('retry-after-failure: first flush should report failure');
+  if (!b.getState().hasPlan) fail('retry-after-failure: plan should survive a failed write');
+
+  b.recordSkip(); // mutate again after the failed write settles
+  const second = await b.flush('manual');
+  if (!second) fail('retry-after-failure: retry should succeed');
+  const persisted = store.get(trackId);
+  if (!persisted || persisted.counters.skips !== 1) {
+    fail(`retry-after-failure: persisted skips expected 1, got ${persisted?.counters.skips}`);
+  }
+  const hasSection = persisted?.sections.some((s) => s.sectionId === 0);
+  if (!hasSection) fail('retry-after-failure: section buffered before the failed write should still persist');
+  log.push('failed write followed by a mutation and a retry loses nothing ✓');
+}
+
+// ─── 16. discard() during an in-flight write blocks resurrection + trailing writes ─
+{
+  const { api, store, similar, writeCount, gateNextWrite } = makeMockApi();
+  const trackId = 104;
+  similar.set(trackId, []);
+  const initial = createEmptyPlan(trackId, `track-${trackId}`, hashSeed(`track-${trackId}`));
+  initial.counters.plays = 3;
+  store.set(trackId, initial);
+  const b = createMemoryBridge({ trackId, api });
+  await b.loadOrSeed();
+  const director = makeDirector(initial);
+  b.attachDirector(director);
+  director.setSections([fakeSection(0, 0xbbbb)]);
+  b.observeSection(fakeSection(0, 0xbbbb));
+
+  const gate = deferred();
+  gateNextWrite(gate.promise);
+  const flushPromise = b.flush('manual'); // dispatched, now blocked on the gate
+
+  const writesBeforeDiscard = writeCount();
+  b.discard();
+  if (b.getState().hasPlan) fail('discard-in-flight: state should read no-plan immediately');
+
+  gate.resolve(); // let the ALREADY-dispatched write settle
+  const result = await flushPromise;
+  if (result) fail('discard-in-flight: the settling write must not report as a bridge success post-discard');
+  if (writeCount() !== writesBeforeDiscard + 1) {
+    fail(`discard-in-flight: expected exactly the one already-dispatched write, got ${writeCount() - writesBeforeDiscard}`);
+  }
+  if (b.getState().hasPlan) fail('discard-in-flight: plan must not be resurrected once the in-flight write resolves');
+
+  // Any further explicit flush is a no-op — no second write, no resurrection.
+  const after = await b.flush('manual');
+  if (after) fail('discard-in-flight: flush after discard must stay a no-op');
+  if (writeCount() !== writesBeforeDiscard + 1) fail('discard-in-flight: no additional write after discard');
+  log.push('discard during an in-flight write blocks resurrection and any trailing write ✓');
+}
+
+// ─── 17. flushAndDispose during an in-flight write waits for a trailing persist ─
+{
+  const { api, store, similar, writeCount, gateNextWrite } = makeMockApi();
+  const trackId = 105;
+  similar.set(trackId, []);
+  const initial = createEmptyPlan(trackId, `track-${trackId}`, hashSeed(`track-${trackId}`));
+  store.set(trackId, initial);
+  const b = createMemoryBridge({ trackId, api });
+  await b.loadOrSeed();
+  const director = makeDirector(initial);
+  b.attachDirector(director);
+  director.setSections([fakeSection(0, 0xcccc)]);
+  b.observeSection(fakeSection(0, 0xcccc));
+
+  const gate = deferred();
+  gateNextWrite(gate.promise);
+  const flushPromise = b.flush('dirty-threshold'); // simulate the auto-flush already running
+
+  // A mutation lands after the in-flight write's snapshot but before disposal.
+  b.recordSkip();
+
+  const disposePromise = b.flushAndDispose('unmount');
+  gate.resolve();
+
+  const flushResult = await flushPromise;
+  const disposeResult = await disposePromise;
+  if (!flushResult) fail('dispose-mid-flight: original flush should succeed');
+  if (!disposeResult) fail('dispose-mid-flight: flushAndDispose should report success (waited for the trailing round)');
+  const persisted = store.get(trackId);
+  if (!persisted || persisted.counters.skips !== 1) {
+    fail(`dispose-mid-flight: persisted skips expected 1, got ${persisted?.counters.skips}`);
+  }
+  if (writeCount() < 2) fail(`dispose-mid-flight: expected a trailing write to persist the skip (writes=${writeCount()})`);
+  log.push('flushAndDispose during an in-flight write waits for the trailing persist ✓');
 }
 
 const report = log.join('\n') + '\n' + (pass ? '[eviland-memory-bridge-test] PASS' : '[eviland-memory-bridge-test] FAIL') + '\n';
