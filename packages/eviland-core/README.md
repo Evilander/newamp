@@ -30,9 +30,9 @@ Zero dependencies, framework-agnostic, WebGL2.
 > NewAmp: the engine source lives in `src/visualizer/` and this package's `src/`
 > is a verified, build-isolated copy kept in lockstep by `sync.mjs` (NewAmp's
 > `prebuild` fails on drift). The standalone npm release — and NewAmp importing
-> *from* this package as the single source of truth — is the tracked follow-up
-> in `EXTRACTION-STATUS.md`. The API below is stable and what that release will
-> ship; the `npm install` line will start working when it's published.
+> *from* this package as the single source of truth — comes later. The API below
+> is stable and what that release will ship; the `npm install` line will start
+> working when it's published.
 
 ## Install (after publish)
 
