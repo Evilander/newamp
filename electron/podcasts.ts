@@ -17,7 +17,10 @@ interface PodcastStoreFile {
   subscriptions: PodcastSubscription[];
 }
 
-const MAX_FEED_BYTES = 5 * 1024 * 1024;
+// Long-running shows on the big networks publish feeds well past 5 MB (a
+// Simplecast feed measured at 20 MB in September 2026), and the body is
+// capped while it streams now, so the ceiling can afford to be generous.
+const MAX_FEED_BYTES = 32 * 1024 * 1024;
 const MAX_EPISODE_BYTES = 750 * 1024 * 1024;
 
 export class PodcastStore {
