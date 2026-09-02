@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [indexHtml, mainSource, packageSource] = await Promise.all([
+const [indexHtml, mainSource, packageSource, customSkinSource] = await Promise.all([
   readFile(new URL('../index.html', import.meta.url), 'utf8'),
   readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
   readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  readFile(new URL('../shared/custom-skin.ts', import.meta.url), 'utf8'),
 ]);
 
 const cspMeta = indexHtml.match(/<meta\s+[^>]*http-equiv=["']Content-Security-Policy["'][^>]*>/i);
@@ -61,6 +62,39 @@ const iframeScriptSrc = iframeCsp
 assert.ok(
   iframeScriptSrc?.includes("'unsafe-eval'"),
   'butterchurn-iframe.html must scope unsafe-eval to the sandboxed frame',
+);
+
+// Custom skin values reach document.documentElement.style.setProperty, and
+// the renderer CSP above allows https: images/media — so a skin value that
+// merely blocks a denylist of bad characters (the old cleanCssVariableValue)
+// isn't enough: `url(https://host/id)` has none of those characters. The fix
+// replaced that denylist with a positive allowlist grammar per variable kind
+// (hex/rgb()/hsl()/named colors, or a bounded number+unit for lengths).
+// Assert the denylist function is gone and the allowlist grammar is in place.
+assert.doesNotMatch(
+  customSkinSource,
+  /function cleanCssVariableValue/,
+  'custom-skin.ts should not gate skin values through a bad-character denylist — see normalizeSkinVariableValue',
+);
+assert.match(
+  customSkinSource,
+  /HEX_COLOR_RE/,
+  'custom-skin.ts should validate skin colors against a hex allowlist regex',
+);
+assert.match(
+  customSkinSource,
+  /RGB_COLOR_RE/,
+  'custom-skin.ts should validate skin colors against an rgb()/rgba() allowlist regex',
+);
+assert.match(
+  customSkinSource,
+  /LENGTH_RE/,
+  'custom-skin.ts should validate skin lengths against a bounded number+unit allowlist regex',
+);
+assert.match(
+  customSkinSource,
+  /BANNED_VALUE_TOKENS[\s\S]*url\(/,
+  'custom-skin.ts should still explicitly reject url() as defense in depth alongside the allowlist',
 );
 
 console.log(JSON.stringify({ ok: true, directives: directives.size, iframeScoped: true }, null, 2));
