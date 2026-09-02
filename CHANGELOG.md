@@ -5,7 +5,10 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
-## [Unreleased]
+## [2.2.1] - 2026-09-02
+
+Follow-ups to 2.2.0 found by a review of the shipped build, plus two limits
+real feeds and real rules ran into.
 
 ### Fixed
 
@@ -31,6 +34,18 @@ Release notes for every version, including everything before 2.0, are on the
   cannot prune tracks from the restored library.
 - Winamp skin archives written by streaming zip tools (entries flagged with a
   data descriptor) import again; 2.2.0 refused them without needing to.
+- Custom skins saved under 2.1.0 that used space-separated `rgb()` or `hsl()`
+  colours, or a bare `0` radius, lost those values silently on the next
+  settings change under 2.2.0. The grammar accepts them now, and any value it
+  still refuses is named in the main-process log instead of vanishing quietly.
+- A tag rule whose pattern the 2.2.0 matcher refuses was skipped with only a
+  truncated note in the Tags sidebar, while every tag it had assigned
+  disappeared. The Tags view now shows a banner naming the rules that are not
+  running, Recompute-all reports them, and the app posts a notice at startup.
+- The tag-rule matcher now folds case for accented letters (`café` matches
+  `CAFÉ`), `.` no longer matches the Unicode line and paragraph separators, and
+  a pattern that repeats a group name is refused, all matching what the regular
+  expression engine did before 2.2.0.
 
 ## [2.2.0] - 2026-09-02
 
