@@ -43,6 +43,9 @@ yes('\\bremix\\b', 'the remix edit'); no('\\bmix\\b', 'remixed');
 yes('\\.flac$', 'song.FLAC'); no('\\.flac$', 'songxflac');
 yes('\\\\Compilations\\\\', 'K:\\Compilations\\x'); yes('\\/live\\/', '/live/'); yes('\\[live\\]', 'Song [Live]');
 yes('é', 'café'); no('é', 'cafe');
+// Unicode case folding and line terminators behave like RegExp's i flag.
+yes('café', 'CAFÉ'); yes('CAFÉ', 'café'); yes('[à-ö]+', 'ÀÖ'); yes('[^à-ö]', 'a'); no('[^à-ö]', 'À');
+yes('straße', 'STRASSE'.toLowerCase().replace('ss', 'ß')); no('a.b', 'a\u2028b'); no('a.b', 'a\u2029b'); yes('a.b', 'a\tb');
 
 // The pattern that hung the main process before this matcher existed.
 yes('.*.*.*=', 'a=b'); no('.*.*.*=', 'aaaa');
@@ -50,7 +53,7 @@ yes('.*.*.*=', 'a=b'); no('.*.*.*=', 'aaaa');
 // Everything outside the grammar is refused with a named reason.
 rejects('', 'empty'); rejects('a'.repeat(201), 'too-long');
 rejects('(a', 'syntax'); rejects('a)', 'syntax'); rejects('*a', 'syntax'); rejects('[a', 'syntax');
-rejects('[z-a]', 'syntax'); rejects('^*', 'syntax'); rejects('a{3,1}', 'syntax'); rejects('(?<n', 'syntax');
+rejects('[z-a]', 'syntax'); rejects('^*', 'syntax'); rejects('a{3,1}', 'syntax'); rejects('(?<n', 'syntax'); rejects('(?<a>x)(?<a>y)', 'syntax'); rejects('(?<>x)', 'syntax');
 rejects('a*?', 'unsupported'); rejects('a++', 'unsupported'); rejects('(?=a)', 'unsupported'); rejects('(?!a)', 'unsupported');
 rejects('(?<=a)', 'unsupported'); rejects('(?<!a)', 'unsupported'); rejects('(?i:a)', 'unsupported');
 rejects('(a)\\1', 'unsupported'); rejects('\\B', 'unsupported'); rejects('\\p{L}', 'unsupported'); rejects('\\x41', 'unsupported');

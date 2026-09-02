@@ -20,8 +20,9 @@
 //   `\s` `\S`, classes `[abc]` `[^a-z]` (with the same escapes inside),
 //   groups `( )`, `(?: )` and `(?<name> )`, alternation `|`, anchors `^` `$`, word boundary
 //   `\b`, quantifiers `*` `+` `?` `{n}` `{n,}` `{n,m}` (n, m ≤ 64).
-// Matching is always case-insensitive (the DSL's existing contract) and
-// searches for the pattern anywhere in the input unless anchored.
+// Matching is always case-insensitive (the DSL's existing contract, with
+// simple Unicode folding so accented letters match too) and searches for the
+// pattern anywhere in the input unless anchored.
 
 export const MAX_SAFE_REGEX_PATTERN_LENGTH = 200;
 export const MAX_SAFE_REGEX_REPEAT = 64;
@@ -70,6 +71,7 @@ const SPACE: Array<[number, number]> = [
 class Parser {
   private pos = 0;
   private readonly cps: number[];
+  private readonly groupNames = new Set<string>();
 
   constructor(pattern: string) {
     this.cps = Array.from(pattern, (ch) => ch.codePointAt(0)!);
@@ -182,8 +184,13 @@ class Parser {
             // A named group `(?<name>...)` matches exactly like a plain group;
             // the name is accepted and ignored since nothing here captures.
             this.pos++;
+            const nameStart = this.pos;
             while (this.peek() !== undefined && this.peek() !== 0x3e /* > */) this.pos++;
             if (this.peek() !== 0x3e) this.fail('syntax', 'unterminated group name');
+            const name = String.fromCodePoint(...this.cps.slice(nameStart, this.pos));
+            if (!name) this.fail('syntax', 'empty group name');
+            if (this.groupNames.has(name)) this.fail('syntax', `duplicate group name "${name}"`);
+            this.groupNames.add(name);
             this.pos++;
           } else if (marker === 0x3d || marker === 0x21 || marker === 0x3c) {
             this.fail('unsupported', 'lookahead and lookbehind are not supported');
@@ -298,9 +305,22 @@ function pushFoldedRange(into: Array<[number, number]>, lo: number, hi: number):
 }
 
 function foldCase(cp: number): number {
-  // Simple case folding for the Basic Latin block; other scripts compare
-  // exactly. Matches how the DSL's other string operators behave.
-  return cp >= 0x41 && cp <= 0x5a ? cp + 0x20 : cp;
+  if (cp < 0x80) return cp >= 0x41 && cp <= 0x5a ? cp + 0x20 : cp;
+  // Simple (single code point) case folding for everything else, so `café`
+  // matches `CAFÉ` the way RegExp's i flag does. Characters whose lower case
+  // is more than one code point (a few special cases) compare exactly.
+  const lower = String.fromCodePoint(cp).toLowerCase();
+  const first = lower.codePointAt(0)!;
+  return lower.length === String.fromCodePoint(first).length ? first : cp;
+}
+
+// The other case of a folded (lower-case) code point, for class membership:
+// a class written `[À-Ö]` has to admit an input `à` that folding produced.
+function upperCase(cp: number): number {
+  if (cp < 0x80) return cp >= 0x61 && cp <= 0x7a ? cp - 0x20 : cp;
+  const upper = String.fromCodePoint(cp).toUpperCase();
+  const first = upper.codePointAt(0)!;
+  return upper.length === String.fromCodePoint(first).length ? first : cp;
 }
 
 // ---------------------------------------------------------------------------
@@ -513,8 +533,8 @@ export class SafeRegex {
         const s = this.states[idx]!;
         let consumes = false;
         if (s.kind === 'char') consumes = s.code === cp;
-        else if (s.kind === 'any') consumes = cp !== 0x0a && cp !== 0x0d;
-        else if (s.kind === 'class') consumes = inRanges(s.ranges, cp) !== s.negate;
+        else if (s.kind === 'any') consumes = cp !== 0x0a && cp !== 0x0d && cp !== 0x2028 && cp !== 0x2029;
+        else if (s.kind === 'class') consumes = (inRanges(s.ranges, cp) || inRanges(s.ranges, upperCase(cp))) !== s.negate;
         if (consumes) addState(following, (s as { out: number }).out, pos + 1);
       }
       [current, following] = [following, current];
