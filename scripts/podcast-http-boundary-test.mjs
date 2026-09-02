@@ -15,6 +15,7 @@ import { build } from 'esbuild';
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { gzipSync } from 'node:zlib';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -62,6 +63,16 @@ const server = createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'audio/mpeg' });
     for (let i = 0; i < (CAP / chunk.length) * 3; i += 1) res.write(chunk);
     res.end();
+  } else if (req.url === '/gzip-feed') {
+    // Compressed the way a static feed host serves it. The client must undo it
+    // before parsing, whatever Accept-Encoding it sent.
+    const gz = gzipSync(Buffer.from('<rss><channel><title>Zipped</title></channel></rss>'));
+    res.writeHead(200, { 'content-type': 'application/rss+xml', 'content-encoding': 'gzip', 'content-length': String(gz.length) }).end(gz);
+  } else if (req.url === '/gzip-bomb') {
+    // A few KB compressed that inflate far past the cap: the cap has to count
+    // decoded bytes, not bytes on the wire.
+    const gz = gzipSync(Buffer.alloc(CAP * 40, 0x20));
+    res.writeHead(200, { 'content-type': 'application/rss+xml', 'content-encoding': 'gzip', 'content-length': String(gz.length) }).end(gz);
   } else if (req.url === '/never-answers') {
     // Accepts the connection and never sends headers.
   } else if (req.url === '/feed.xml') {
@@ -158,6 +169,26 @@ try {
     } catch (err) {
       if (!/not allowed/i.test(err.message)) fail(`expected a host-not-allowed error for the mixed answer, got: ${err.message}`);
       else log.push('mixed public/private DNS answer refused');
+    }
+  }
+
+  // 4b. Compressed responses are decoded transparently, and the cap is enforced
+  //     on the decoded size so a small compressed body cannot inflate past it.
+  {
+    const zipped = await guarded('/gzip-feed');
+    if (zipped.headers.get('content-encoding') !== 'gzip') fail('test server should have sent gzip');
+    const xml = await zipped.text(CAP);
+    if (!xml.includes('<title>Zipped</title>')) fail(`a gzip feed should read back decoded, got ${JSON.stringify(xml.slice(0, 40))}`);
+    else log.push('gzip feed decoded transparently');
+    const bomb = await guarded('/gzip-bomb');
+    const wire = Number(bomb.headers.get('content-length'));
+    if (!(wire < CAP)) fail(`bomb fixture should be small on the wire, got ${wire}`);
+    try {
+      await bomb.text(CAP);
+      fail('a compressed body that inflates past the cap must be refused');
+    } catch (err) {
+      if (!/too large/i.test(err.message)) fail(`expected a too-large error for the bomb, got: ${err.message}`);
+      else log.push(`gzip bomb refused on decoded size (${wire} bytes on the wire)`);
     }
   }
 

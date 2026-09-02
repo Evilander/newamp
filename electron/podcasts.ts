@@ -5,6 +5,8 @@ import { createHash } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import type { Readable } from 'node:stream';
+import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import type { PodcastEpisode, PodcastFeed, PodcastProgressInput, PodcastSubscription } from '../shared/types.js';
 import { NEWAMP_USER_AGENT } from '../shared/app-version.js';
 
@@ -667,7 +669,9 @@ function dialGuarded(
     const transport = target.protocol === 'https:' ? https : http;
     const req = transport.request(target, {
       method: 'GET',
-      headers,
+      // node:http neither asks for nor undoes compression (global fetch did
+      // both). Ask for it, and decodedBody() below undoes whatever comes back.
+      headers: { 'Accept-Encoding': 'gzip, deflate, br', ...headers },
       lookup: pinnedLookup(addresses),
       signal: controller.signal,
       ...(target.protocol === 'https:' ? { servername: target.hostname } : {}),
@@ -701,6 +705,7 @@ function wrapGuardedResponse(
   totalTimer: NodeJS.Timeout,
 ): GuardedResponse {
   const status = res.statusCode ?? 0;
+  const body = decodedBody(res);
   return {
     status,
     ok: status >= 200 && status < 300,
@@ -713,14 +718,14 @@ function wrapGuardedResponse(
     },
     async text(maxBytes: number): Promise<string> {
       try {
-        return await readBodyText(res, maxBytes, controller);
+        return await readBodyText(res, body, maxBytes, controller);
       } finally {
         clearTimeout(totalTimer);
       }
     },
     async saveToFile(destPath: string, maxBytes: number): Promise<number> {
       try {
-        return await streamBodyToFile(res, destPath, maxBytes, controller);
+        return await streamBodyToFile(res, body, destPath, maxBytes, controller);
       } finally {
         clearTimeout(totalTimer);
       }
@@ -728,16 +733,33 @@ function wrapGuardedResponse(
   };
 }
 
-function readBodyText(res: http.IncomingMessage, maxBytes: number, controller: AbortController): Promise<string> {
+// The response body as the bytes the server meant to send: gzip, deflate and
+// brotli are undone here so the size caps in readBodyText/streamBodyToFile
+// count decoded bytes — a small compressed body that inflates past the cap is
+// refused the same way an uncompressed one is.
+function decodedBody(res: http.IncomingMessage): Readable {
+  const encoding = String(res.headers['content-encoding'] ?? '').trim().toLowerCase();
+  const decoder =
+    encoding === 'gzip' || encoding === 'x-gzip' ? createGunzip()
+      : encoding === 'deflate' ? createInflate()
+      : encoding === 'br' ? createBrotliDecompress()
+      : null;
+  if (!decoder) return res;
+  res.on('error', (err) => decoder.destroy(err));
+  res.on('aborted', () => decoder.destroy(new Error('Podcast request was aborted')));
+  return res.pipe(decoder);
+}
+
+function readBodyText(res: http.IncomingMessage, body: Readable, maxBytes: number, controller: AbortController): Promise<string> {
   return new Promise((resolvePromise, rejectPromise) => {
     const chunks: Buffer[] = [];
     let total = 0;
     let settled = false;
 
     const cleanup = () => {
-      res.off('data', onData);
-      res.off('end', onEnd);
-      res.off('error', onError);
+      body.off('data', onData);
+      body.off('end', onEnd);
+      body.off('error', onError);
       res.off('aborted', onAborted);
     };
     const fail = (err: Error) => {
@@ -755,6 +777,7 @@ function readBodyText(res: http.IncomingMessage, maxBytes: number, controller: A
         // fires 'aborted', and the abort message must not win the race.
         fail(new Error('Podcast feed is too large.'));
         res.destroy();
+        if (body !== res) body.destroy();
         return;
       }
       chunks.push(chunk);
@@ -766,15 +789,16 @@ function readBodyText(res: http.IncomingMessage, maxBytes: number, controller: A
       resolvePromise(Buffer.concat(chunks, total).toString('utf8'));
     };
 
-    res.on('data', onData);
-    res.on('end', onEnd);
-    res.on('error', onError);
+    body.on('data', onData);
+    body.on('end', onEnd);
+    body.on('error', onError);
     res.on('aborted', onAborted);
   });
 }
 
 async function streamBodyToFile(
   res: http.IncomingMessage,
+  body: Readable,
   destPath: string,
   maxBytes: number,
   controller: AbortController,
@@ -787,9 +811,9 @@ async function streamBodyToFile(
       let settled = false;
 
       const cleanup = () => {
-        res.off('data', onData);
-        res.off('end', onEnd);
-        res.off('error', onResError);
+        body.off('data', onData);
+        body.off('end', onEnd);
+        body.off('error', onResError);
         res.off('aborted', onAborted);
         writeStream.off('error', onWriteError);
       };
@@ -799,6 +823,7 @@ async function streamBodyToFile(
         failed = true;
         cleanup();
         res.destroy();
+        if (body !== res) body.destroy();
         writeStream.destroy();
         rejectPromise(err);
       };
@@ -822,9 +847,9 @@ async function streamBodyToFile(
 
       writeStream.on('drain', () => res.resume());
       writeStream.on('error', onWriteError);
-      res.on('data', onData);
-      res.on('end', onEnd);
-      res.on('error', onResError);
+      body.on('data', onData);
+      body.on('end', onEnd);
+      body.on('error', onResError);
       res.on('aborted', onAborted);
     });
     // Reopen briefly just to fsync — createWriteStream's own fd is already
