@@ -82,26 +82,39 @@ assert.ok(protoAttempt.rule);
 const protoEval = evaluateRule(protoAttempt.rule, makeStubContext(), buildEvalEnvironment());
 assert.ok(protoEval.errors.length > 0, 'host object fields should not be reachable');
 
-// ReDoS guards — pathological regexes must short-circuit, not hang the evaluator.
-const redos1 = parseRule('tag(redos1) when title matches "(a+)+b"');
-assert.ok(redos1.rule, 'pattern with nested quantifier should still parse');
-const evilTitle = 'a'.repeat(40) + '!';
-const tRedos = Date.now();
-const redos1Eval = evaluateRule(redos1.rule, makeStubContext({ title: evilTitle }), buildEvalEnvironment());
-const redosMs = Date.now() - tRedos;
-assert.ok(redosMs < 100, `nested-quantifier regex must be refused fast, took ${redosMs}ms`);
-assert.equal(redos1Eval.matched, false, 'unsafe regex should evaluate to null/false');
+// `matches` runs on a linear-time matcher, so the classic catastrophic
+// backtracking shapes are just ordinary patterns now: they parse, they give
+// the right answer, and they finish in milliseconds against a hostile input.
+// Just under MAX_REGEX_INPUT_LENGTH so the trailing '!' survives the input cap.
+const evilTitle = 'a'.repeat(4000) + '!';
+for (const [name, pattern, expected] of [
+  ['redos_nested', '(a+)+b', false],
+  ['redos_alt', '(a|a)*b', false],
+  ['redos_sequential', '.*.*.*=', false],
+  ['redos_sequential_hit', '.*.*.*!', true],
+]) {
+  const parsed = parseRule(`tag(${name}) when title matches "${pattern}"`);
+  assert.ok(parsed.rule, `${pattern} should compile`);
+  const started = Date.now();
+  const result = evaluateRule(parsed.rule, makeStubContext({ title: evilTitle }), buildEvalEnvironment());
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 100, `${pattern} must run in linear time against a 4 KB title, took ${elapsed}ms`);
+  assert.equal(result.matched, expected, `${pattern} against the hostile title`);
+}
 
-const redos2 = parseRule('tag(redos2) when title matches "(a|a)*b"');
-assert.ok(redos2.rule);
-const tRedos2 = Date.now();
-evaluateRule(redos2.rule, makeStubContext({ title: 'a'.repeat(40) }), buildEvalEnvironment());
-assert.ok((Date.now() - tRedos2) < 100, 'alternation-of-equivalents regex must be refused fast');
-
+// Patterns the matcher cannot run in linear time are refused when the rule is
+// compiled, with a message the Tags view can show, instead of silently never
+// matching at evaluation.
 const bigPattern = parseRule(`tag(bigpat) when title matches "${'a'.repeat(250)}"`);
-assert.ok(bigPattern.rule);
-const bigPatternEval = evaluateRule(bigPattern.rule, makeStubContext({ title: 'a'.repeat(250) }), buildEvalEnvironment());
-assert.equal(bigPatternEval.matched, false, 'oversized regex pattern should be refused');
+assert.equal(bigPattern.rule, null, 'oversized regex pattern should fail to compile');
+assert.match(bigPattern.errors[0]?.message ?? '', /unsupported pattern .*longer than 200/);
+const lookaround = parseRule('tag(look) when title matches "(?=live)remix"');
+assert.equal(lookaround.rule, null, 'lookaround should fail to compile');
+assert.match(lookaround.errors[0]?.message ?? '', /lookahead and lookbehind are not supported/);
+// DSL string literals consume one level of backslash, so a regex escape is written doubled.
+const backref = parseRule('tag(back) when title matches "(a)\\\\1"');
+assert.equal(backref.rule, null, 'a backreference should fail to compile');
+assert.match(backref.errors[0]?.message ?? '', /backreferences are not supported/);
 
 // Three-valued null
 const nullRule = parseRule('tag(missing) when bpm > 100');
