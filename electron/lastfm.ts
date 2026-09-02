@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { durableWriteFileAsync, renameOverExistingAsync } from './recovery.js';
 import type {
   AppSettings,
   LastfmAuthStart,
@@ -100,9 +101,38 @@ export function shouldScrobble({
 }
 
 export class LastfmScrobbleOutbox {
+  // The one authoritative copy of the queue once loaded. Every mutation
+  // (enqueue, flush's reconcile step, and any future destructive op) reads
+  // and writes THIS array — never a fresh read of the file. That's what
+  // closes the old data-loss race: enqueue() and flush() used to each do
+  // their own read-file -> mutate -> write-file round trip, so an item
+  // enqueue()d while an earlier flush() was still awaiting send() got
+  // silently erased when that flush finished and wrote its now-stale
+  // snapshot back over it.
+  private state: LastfmCachedScrobble[] | null = null;
+  private loading: Promise<LastfmCachedScrobble[]> | null = null;
+  // Serializes every mutation against `state` behind a promise chain so
+  // overlapping enqueue()/flush() calls can never interleave their
+  // read-modify-write. Deliberately NOT held across the network wait in
+  // flush() (see below) — that would stall every enqueue() for as long as a
+  // Last.fm request takes.
+  private mutex: Promise<void> = Promise.resolve();
+  // Ids a flush() call is currently sending. A second flush that starts
+  // while the first is still in its network phase skips these, so the same
+  // scrobble can never be POSTed to Last.fm twice.
+  private readonly sending = new Set<string>();
+  private writeSeq = 0;
+
   constructor(private readonly file: string) {}
 
-  async list(): Promise<LastfmCachedScrobble[]> {
+  private async ensureLoaded(): Promise<LastfmCachedScrobble[]> {
+    if (this.state) return this.state;
+    if (!this.loading) this.loading = this.readFromDisk();
+    this.state = await this.loading;
+    return this.state;
+  }
+
+  private async readFromDisk(): Promise<LastfmCachedScrobble[]> {
     try {
       const raw = await readFile(this.file, 'utf8');
       const parsed = JSON.parse(raw) as unknown;
@@ -116,14 +146,37 @@ export class LastfmScrobbleOutbox {
     }
   }
 
+  // Runs `fn` with exclusive access to `state`, queued behind whatever
+  // mutation (if any) is already in progress.
+  private async withState<T>(fn: () => Promise<T> | T): Promise<T> {
+    const prior = this.mutex;
+    let release: () => void = () => {};
+    this.mutex = new Promise((resolve) => {
+      release = resolve;
+    });
+    await prior;
+    try {
+      await this.ensureLoaded();
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+
+  async list(): Promise<LastfmCachedScrobble[]> {
+    return this.withState(() => [...this.state!]);
+  }
+
   async status(): Promise<LastfmOutboxStatus> {
-    const items = await this.list();
-    return {
-      pending: items.length,
-      oldestCreatedAt: items[0]?.createdAt ?? null,
-      lastError: [...items].reverse().find((item) => item.lastError)?.lastError ?? null,
-      needsReconnect: items.some((item) => item.authFailure),
-    };
+    return this.withState(() => {
+      const items = this.state!;
+      return {
+        pending: items.length,
+        oldestCreatedAt: items[0]?.createdAt ?? null,
+        lastError: [...items].reverse().find((item) => item.lastError)?.lastError ?? null,
+        needsReconnect: items.some((item) => item.authFailure),
+      };
+    });
   }
 
   async enqueue(
@@ -131,82 +184,134 @@ export class LastfmScrobbleOutbox {
     timestamp: number,
     lastError: string | null = null,
   ): Promise<LastfmCachedScrobble> {
-    const items = await this.list();
-    const item: LastfmCachedScrobble = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-      track: sanitizeTrack(track),
-      timestamp: Math.max(0, Math.trunc(timestamp)),
-      attempts: 0,
-      createdAt: Date.now(),
-      lastAttemptAt: null,
-      lastError,
-      authFailure: false,
-    };
-    items.push(item);
-    await this.write(items.slice(-500));
-    return item;
+    return this.withState(async () => {
+      const item: LastfmCachedScrobble = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        track: sanitizeTrack(track),
+        timestamp: Math.max(0, Math.trunc(timestamp)),
+        attempts: 0,
+        createdAt: Date.now(),
+        lastAttemptAt: null,
+        lastError,
+        authFailure: false,
+      };
+      // Bounded from the current authoritative state, not a stale snapshot.
+      this.state = [...this.state!, item].slice(-500);
+      await this.persist();
+      return item;
+    });
   }
 
   async flush(
     send: (item: LastfmCachedScrobble) => Promise<void>,
   ): Promise<LastfmOutboxFlushResult> {
-    const items = await this.list();
-    const remaining: LastfmCachedScrobble[] = [];
-    let sent = 0;
-    let blocked = false;
-    let needsReconnect = false;
+    // Phase 1: snapshot the batch to send and mark it as in-flight, then
+    // release the lock immediately. Items already claimed by another
+    // in-progress flush are excluded so they're never sent twice; anything
+    // enqueued after this snapshot is simply not part of this flush's batch
+    // and is left alone.
+    const batch = await this.withState(() => {
+      const candidates = this.state!.filter((item) => !this.sending.has(item.id));
+      for (const item of candidates) this.sending.add(item.id);
+      return candidates;
+    });
 
-    for (const item of items) {
-      if (blocked) {
-        remaining.push(item);
-        continue;
-      }
-      try {
-        await send(item);
-        sent += 1;
-      } catch (err) {
-        const authFailure = err instanceof LastfmApiError && err.authFailure;
-        if (authFailure) {
-          // The session itself is invalid (revoked access, expired key) —
-          // every later item would fail the exact same way, so there's no
-          // point burning requests on them. Keep this item (and everything
-          // behind it) queued rather than dropping it, stop the flush, and
-          // tell the caller to prompt a reconnect instead of quietly
-          // blocking forever with no way for the user to find out. Once the
-          // user reconnects, the next flush retries from the top as usual.
-          remaining.push({
-            ...item,
-            attempts: item.attempts + 1,
-            lastAttemptAt: Date.now(),
+    const sentIds = new Set<string>();
+    // Permanently-invalid, non-auth failures (e.g. malformed request) are
+    // dropped outright rather than retried — tracked separately from
+    // `failures` because a dropped item is removed from the queue, not kept
+    // with a bumped attempt count.
+    const droppedIds = new Set<string>();
+    const failures = new Map<string, { lastError: string; authFailure: boolean }>();
+    let sent = 0;
+    let needsReconnect = false;
+    let blocked = false;
+    let remaining = 0;
+
+    try {
+      // Phase 2: the actual network sends, entirely OUTSIDE the mutex, so
+      // enqueue() (and any concurrent flush's phase 1) can run freely while
+      // this is in flight.
+      for (const item of batch) {
+        if (blocked) continue;
+        try {
+          await send(item);
+          sentIds.add(item.id);
+          sent += 1;
+        } catch (err) {
+          const authFailure = err instanceof LastfmApiError && err.authFailure;
+          if (authFailure) {
+            // The session itself is invalid (revoked access, expired key) —
+            // every later item would fail the exact same way, so there's no
+            // point burning requests on them. Keep this item (and everything
+            // behind it) queued rather than dropping it, stop the flush, and
+            // tell the caller to prompt a reconnect instead of quietly
+            // blocking forever with no way for the user to find out. Once
+            // the user reconnects, the next flush retries from the top.
+            failures.set(item.id, { lastError: errorMessage(err), authFailure: true });
+            needsReconnect = true;
+            blocked = true;
+            continue;
+          }
+          if (!shouldRetryLastfmError(err)) {
+            droppedIds.add(item.id); // permanently invalid: drop it
+            continue;
+          }
+          failures.set(item.id, {
             lastError: errorMessage(err),
-            authFailure: true,
+            // A transient failure this time clears any stale auth-failure
+            // flag from an earlier round, so needsReconnect always reflects
+            // the most recent reason this item didn't send.
+            authFailure: false,
           });
           blocked = true;
-          needsReconnect = true;
-          continue;
         }
-        if (!shouldRetryLastfmError(err)) continue;
-        remaining.push({
-          ...item,
-          attempts: item.attempts + 1,
-          lastAttemptAt: Date.now(),
-          lastError: errorMessage(err),
-          // A transient failure this time clears any stale auth-failure
-          // flag from an earlier round, so needsReconnect always reflects
-          // the most recent reason this item didn't send.
-          authFailure: false,
-        });
-        blocked = true;
       }
+    } finally {
+      // Phase 3: reconcile against whatever the CURRENT authoritative state
+      // is — which may now include items enqueued while phase 2 was
+      // running — instead of overwriting it with a stale snapshot. Only ids
+      // this flush actually sent or failed are touched; everything else
+      // (untouched batch items behind a block, and anything enqueued
+      // meanwhile) passes through unchanged.
+      await this.withState(async () => {
+        for (const item of batch) this.sending.delete(item.id);
+        const next = this.state!.flatMap((item) => {
+          if (sentIds.has(item.id) || droppedIds.has(item.id)) return [];
+          const failure = failures.get(item.id);
+          if (!failure) return [item];
+          return [
+            {
+              ...item,
+              attempts: item.attempts + 1,
+              lastAttemptAt: Date.now(),
+              lastError: failure.lastError,
+              authFailure: failure.authFailure,
+            },
+          ];
+        });
+        this.state = next.slice(-500);
+        remaining = this.state.length;
+        await this.persist();
+      });
     }
 
-    await this.write(remaining);
-    return { sent, remaining: remaining.length, needsReconnect };
+    return { sent, remaining, needsReconnect };
   }
 
-  private async write(items: LastfmCachedScrobble[]): Promise<void> {
+  // Crash-safe write: tmp file + fsync + atomic rename over the target (see
+  // electron/recovery.ts), so a crash mid-write can only ever lose the temp
+  // file, never truncate or corrupt the last good outbox on disk.
+  private async persist(): Promise<void> {
     await mkdir(dirname(this.file), { recursive: true });
-    await writeFile(this.file, JSON.stringify(items, null, 2), 'utf8');
+    const payload = JSON.stringify(this.state, null, 2);
+    const tmp = `${this.file}.tmp-${process.pid}-${++this.writeSeq}`;
+    try {
+      await durableWriteFileAsync(tmp, payload);
+      await renameOverExistingAsync(tmp, this.file);
+    } finally {
+      await unlink(tmp).catch(() => {});
+    }
   }
 }
 

@@ -831,11 +831,19 @@ export function SettingsView(): JSX.Element {
                   : 'Checking...'}
               </span>
             </Row>
+            {lastfmOutbox?.needsReconnect && (
+              <div className="text-xs text-warn">
+                Last.fm session expired - reconnect with Open Last.fm auth to resume scrobbling.
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <button className="pxbtn" onClick={() => void saveLastfmCredentials()}>
                 Save credentials
               </button>
-              <button className="pxbtn" onClick={() => void lastfmStartAuth()}>
+              <button
+                className={`pxbtn${lastfmOutbox?.needsReconnect ? ' is-active' : ''}`}
+                onClick={() => void lastfmStartAuth()}
+              >
                 Open Last.fm auth
               </button>
               <button className="pxbtn is-active" onClick={() => void completeLastfmAuth()}>
