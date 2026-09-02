@@ -15,6 +15,22 @@ Release notes for every version, including everything before 2.0, are on the
 - Podcast feeds up to 32 MB can be subscribed to. The previous 5 MB ceiling
   refused the feeds of some long-running shows on the larger networks; one
   Simplecast feed measured 20 MB.
+- Podcast feeds served compressed are decoded again. The 2.2.0 HTTP path
+  stopped asking for compression and did not undo it when a host sent it
+  anyway, which would have handed compressed bytes to the feed parser. The size
+  cap now counts decoded bytes, so a small compressed body cannot inflate past
+  it.
+- If replacing `library.db` or `settings.json` fails outright, the complete
+  copy stays on disk next to the target and the error names it. The 2.2.0 code
+  deleted its temp file even when the replace had failed, which could turn a
+  failed save into a lost one. The synchronous retry backoff is also shorter,
+  so a locked file cannot freeze the app for most of a second on an ordinary
+  settings change.
+- Restoring a backup now pauses the library watcher's pending rescan the same
+  way creating one does, so a folder change noticed just before the restore
+  cannot prune tracks from the restored library.
+- Winamp skin archives written by streaming zip tools (entries flagged with a
+  data descriptor) import again; 2.2.0 refused them without needing to.
 
 ## [2.2.0] - 2026-09-02
 
