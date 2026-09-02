@@ -5,6 +5,17 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- Tag rules can call `matches(field, "pattern")` and `contains(field, "text")`
+  as functions, the way the Tags view lists them. The parser only knew the
+  infix forms and rejected the call with "unexpected token".
+- Podcast feeds up to 32 MB can be subscribed to. The previous 5 MB ceiling
+  refused the feeds of some long-running shows on the larger networks; one
+  Simplecast feed measured 20 MB.
+
 ## [2.2.0] - 2026-09-02
 
 A correctness release. Nothing here is a new feature; it is the app doing what
