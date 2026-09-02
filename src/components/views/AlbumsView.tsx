@@ -14,6 +14,7 @@ import { EmptyState } from '../EmptyState';
 import { ViewSkeleton } from '../ViewSkeleton';
 import { Note } from '../Icons';
 import { computeGridColumnCount, useVirtualRows } from '../../hooks/useVirtualRows';
+import { beginPendingAlbumNav, createPendingAlbumNavSeq, isCurrentPendingAlbumNav } from '../../lib/pending-album-nav';
 
 const ALBUM_PAGE_SIZE = 240;
 const CATALOG_SEARCH_DEBOUNCE_MS = 180;
@@ -156,9 +157,16 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
   // One-shot row highlight consumed by the album detail's TrackTable after an
   // 'album-with-track' navigation (TrackLink / ♪ matched-song click).
   const [highlightTrack, setHighlightTrack] = useState<{ id: number | null; title: string | null } | null>(null);
+  // Two pending-navigation requests (e.g. clicking one album link, then
+  // another before the first's tracks land) can resolve out of order — this
+  // sequence guard makes sure only the MOST RECENT request's result is ever
+  // applied, not just whichever async chain happens to finish last.
+  const pendingNavSeqRef = useRef(createPendingAlbumNavSeq());
   useEffect(() => {
     if (!pendingNavigation || (pendingNavigation.kind !== 'album' && pendingNavigation.kind !== 'album-with-track')) return;
     const target = pendingNavigation;
+    const requestId = beginPendingAlbumNav(pendingNavSeqRef.current);
+    const isStale = () => !isCurrentPendingAlbumNav(pendingNavSeqRef.current, requestId);
     void (async () => {
       let tracks: Track[] = [];
       let lookupFailed = false;
@@ -166,12 +174,15 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
         tracks = await api.getAlbumTracks(target.albumArtist, target.album);
       } catch (err) {
         lookupFailed = true;
-        pushToast({
-          tone: 'error',
-          title: `Could not open ${target.album}`,
-          detail: `${err instanceof Error ? err.message : 'Unknown error'}. Click again to retry.`,
-        });
+        if (!isStale()) {
+          pushToast({
+            tone: 'error',
+            title: `Could not open ${target.album}`,
+            detail: `${err instanceof Error ? err.message : 'Unknown error'}. Click again to retry.`,
+          });
+        }
       }
+      if (isStale()) return; // superseded by a newer navigation request
       if (lookupFailed || tracks.length === 0) {
         // Don't consume on partial failure — a retry click on the same album
         // link in Now Playing should be able to fire again. Leave the pending
@@ -197,6 +208,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
       } catch (err) {
         console.error('[newamp] getAlbumRating failed during pending navigation:', err);
       }
+      if (isStale()) return; // a newer request landed while the rating lookup was in flight
       const albumSummary: AlbumSummary = {
         album: target.album,
         albumArtist,
@@ -209,7 +221,10 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
       };
       setSelected(albumSummary);
       setTracks(tracks);
-      setFilter(target.album);
+      // Programmatic navigation must not touch the grid search filter — doing
+      // so used to debounce into a query change that reloaded the album list
+      // ~180ms later, and that reload effect unconditionally clears the
+      // selected album, snapping the user straight back to the grid.
       setHighlightTrack(
         target.kind === 'album-with-track'
           ? { id: target.trackId, title: target.trackTitle }
