@@ -1963,3 +1963,12 @@ export function decode(code: string): OperatorConfig | null {
   return generate(state).config;
 }
 
+// ---------------------------------------------------------------------------
+// Convenience: classic fallback (kept exported so callers can ask for "the
+// canonical Eviland look" without importing two modules).
+// ---------------------------------------------------------------------------
+
+export function classic(): OperatorConfig {
+  return defaultConfig();
+}
+
