@@ -813,6 +813,9 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
       bindQuad(splatUni.aPos);
       for (let i = 0; i < forceCount; i++) {
         const f = forces[i];
+        // forceCount is clamped to forces.length above, so this index is
+        // always in range; the guard just satisfies noUncheckedIndexedAccess.
+        if (!f) continue;
         // Skip dye-only entries (dx=dy=0): they don't move the fluid, only
         // tint it. Saves a no-op fullscreen draw on every busy frame.
         if (f.dx === 0 && f.dy === 0) continue;
@@ -898,6 +901,8 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
       bindQuad(dyeSplatUni.aPos);
       for (let i = 0; i < forceCount; i++) {
         const f = forces[i];
+        // Same in-range guarantee as the velocity-splat loop above.
+        if (!f) continue;
         const color = f.color;
         const amt = f.dye;
         if (!color || !amt || amt <= 0) continue;

@@ -11,7 +11,7 @@ Run on every push/PR in `ci.yml`:
 
 | Step | Command | What it locks down |
 | --- | --- | --- |
-| Typecheck | `npm run typecheck` | renderer + electron `tsc --noEmit` |
+| Typecheck | `npm run typecheck` | renderer + electron `tsc --noEmit`, plus the standalone `@eviland/core` package's own (stricter) `tsc --noEmit` |
 | Build | `npm run build` | vite renderer + electron main compile |
 | Build lock | `npm run smoke:build-lock` | concurrent-build lock + stale-lock recovery |
 | Library | `npm run smoke:library` | SQLite scan + query over fixtures |
@@ -24,6 +24,7 @@ Run on every push/PR in `ci.yml`:
 | Release secrets | `npm run smoke:release-secrets` | no secrets leak into release artifacts |
 | Reliability | `npm run smoke:reliability` | DB corruption backup + recovery |
 | Completion audit | `npm run smoke:completion-audit` | release-readiness audit (reports blockers, exits 0) |
+| `@eviland/core` package | `npm run test:eviland-core-package` | builds `packages/eviland-core` for real (declaration emit) and imports every value `src/index.ts` exports from the built `dist/index.js`, so the package's hand-maintained public surface can't drift from what the mirrored engine modules actually export |
 
 ## Display-required (need an X11/Wayland/macOS display + WebGL)
 
