@@ -433,6 +433,11 @@ let libraryWatcher: LibraryWatcher;
 let lastfmOutbox: LastfmScrobbleOutbox;
 let podcastStore: PodcastStore;
 let radioBrain: RadioBrain | null = null;
+// Serializes calls into syncRadioBrain() so an enable/port/reload change
+// that arrives while a previous one is still (dis)connecting can't race it
+// into starting two servers or stranding one on an abandoned port.
+let radioBrainSyncChain: Promise<void> = Promise.resolve();
+let radioBrainShutdownStarted = false;
 let exclusiveOutput: ExclusiveOutput | null = null;
 
 function getExclusiveOutput(): ExclusiveOutput {
@@ -1383,11 +1388,30 @@ function registerMediaShortcuts(): void {
   }
 }
 
+// Radio Brain settings fields — a settings:set patch only needs to poke the
+// reconciler when one of these actually changed, not on every keystroke
+// elsewhere in Settings.
+const RADIO_BRAIN_SETTINGS_KEYS = ['radioBrainEnabled', 'radioBrainPort'] as const;
+
+function patchTouchesRadioBrain(patch: unknown): boolean {
+  if (!patch || typeof patch !== 'object') return false;
+  return RADIO_BRAIN_SETTINGS_KEYS.some((key) => key in (patch as Record<string, unknown>));
+}
+
+// Funnels every enable/port/reload change through one chain so overlapping
+// callers converge in order instead of racing separate syncRadioBrain() runs
+// into starting or stopping the same server twice.
+function queueRadioBrainSync(): Promise<void> {
+  radioBrainSyncChain = radioBrainSyncChain.then(syncRadioBrain, syncRadioBrain);
+  return radioBrainSyncChain;
+}
+
 async function syncRadioBrain(): Promise<void> {
   const current = settings.get();
   if (!current.radioBrainEnabled) {
     if (radioBrain) {
-      await radioBrain.stop();
+      const status = await radioBrain.stop();
+      if (status.error) console.warn('[newamp] radio brain failed to stop cleanly:', status.error);
       radioBrain = null;
     }
     return;
@@ -1446,7 +1470,8 @@ async function syncRadioBrain(): Promise<void> {
         return true;
       },
     });
-    await radioBrain.start();
+    const status = await radioBrain.start();
+    if (status.error) console.warn('[newamp] radio brain failed to start:', status.error);
   }
 }
 
@@ -1482,7 +1507,7 @@ async function reloadRuntimeStores(userData: string): Promise<void> {
   scanner = createScannerService(library);
   libraryWatcher = createLibraryWatcherService();
   syncLibraryWatcher();
-  void syncRadioBrain();
+  await queueRadioBrainSync();
 }
 
 function registerAudioProtocol(): void {
@@ -2021,7 +2046,9 @@ function registerIpc(): void {
   ipcMain.handle('settings:set', async (_e, patch) => {
     const updated = settings.set(patch);
     syncLibraryWatcher();
-    void syncRadioBrain();
+    if (patchTouchesRadioBrain(patch)) {
+      await queueRadioBrainSync();
+    }
     // Turning exclusive mode off releases the WASAPI device immediately so
     // system audio (and the Web Audio path) come back without a restart.
     if (patch && typeof patch === 'object' && (patch as Partial<AppSettings>).bitPerfectExclusive === false) {
@@ -4925,7 +4952,7 @@ app.on('before-quit', () => {
   isQuitting = true;
 });
 
-app.on('will-quit', () => {
+app.on('will-quit', (event) => {
   globalShortcut.unregisterAll();
   closeStartupSplashWindow();
   libraryWatcher?.stop();
@@ -4935,6 +4962,17 @@ app.on('will-quit', () => {
   // No orphan ffmpeg.exe should outlive the app.
   killAllDnaFfmpeg();
   killAllTranscodeFfmpeg();
+  // radioBrain.stop() is async but bounded (a few hundred ms even with a
+  // connected /now/events client) — hold the quit open just long enough to
+  // release its listening socket instead of leaving it bound past exit.
+  if (radioBrain && !radioBrainShutdownStarted) {
+    radioBrainShutdownStarted = true;
+    event.preventDefault();
+    radioBrain
+      .stop()
+      .catch((err) => console.warn('[newamp] radio brain failed to stop on quit:', err))
+      .finally(() => app.quit());
+  }
 });
 
 app.on('window-all-closed', () => {

@@ -16,6 +16,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { createReadStream, statSync } from 'node:fs';
 import { extname } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { Socket } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import type { LibraryStore } from './library.js';
 import { remotePageHtml } from './remote-page.js';
@@ -80,56 +81,137 @@ export interface RadioBrainStatus {
   error: string | null;
 }
 
+type LifecycleState = 'stopped' | 'starting' | 'running' | 'stopping';
+
 export class RadioBrain {
   private server: Server | null = null;
+  private state: LifecycleState = 'stopped';
   private startedAt: number | null = null;
   private lastError: string | null = null;
+  private readonly sockets = new Set<Socket>();
+  private readonly sseCleanups = new Map<ServerResponse, () => void>();
+  // The single source of truth for what the server should be doing. start()
+  // and stop() just flip this and nudge the reconciler; they never touch
+  // `server` directly, so overlapping calls can never leave two listeners
+  // or a listener stranded on an abandoned port.
+  private wantRunning = false;
+  private reconcileWaiters: Array<() => void> = [];
+  private reconciling = false;
 
   constructor(private readonly opts: RadioBrainOptions) {}
 
   start(): Promise<RadioBrainStatus> {
-    if (this.server) {
-      return Promise.resolve(this.status());
+    this.wantRunning = true;
+    return this.kickReconcile();
+  }
+
+  stop(): Promise<RadioBrainStatus> {
+    this.wantRunning = false;
+    return this.kickReconcile();
+  }
+
+  private kickReconcile(): Promise<RadioBrainStatus> {
+    const settled = new Promise<void>((resolve) => this.reconcileWaiters.push(resolve));
+    if (!this.reconciling) {
+      this.reconciling = true;
+      void this.reconcile();
     }
+    return settled.then(() => this.status());
+  }
+
+  /**
+   * Converges the live server toward `wantRunning`, looping until nothing
+   * changed underneath it while it worked. A start immediately followed by
+   * a stop (or vice versa) just gets resolved by the next pass instead of
+   * racing an in-flight one — this is the only place that ever creates or
+   * tears down `server`.
+   */
+  private async reconcile(): Promise<void> {
+    for (;;) {
+      const target = this.wantRunning;
+      const waiters = this.reconcileWaiters.splice(0, this.reconcileWaiters.length);
+      try {
+        if (target && !this.server) {
+          await this.bringUp();
+        } else if (!target && this.server) {
+          await this.teardown();
+        }
+      } catch (err) {
+        this.lastError = err instanceof Error ? err.message : String(err);
+      }
+      for (const resolve of waiters) resolve();
+      if (this.wantRunning === target && this.reconcileWaiters.length === 0) break;
+    }
+    this.reconciling = false;
+  }
+
+  private bringUp(): Promise<void> {
+    this.state = 'starting';
     return new Promise((resolve) => {
       const server = createServer((req, res) => this.handle(req, res));
+      // Recorded before listen() resolves so a stop that lands mid-start
+      // still has a server object to close instead of leaking one.
+      this.server = server;
+      server.on('connection', (socket) => {
+        this.sockets.add(socket);
+        socket.on('close', () => this.sockets.delete(socket));
+      });
       const onError = (err: Error & { code?: string }) => {
         this.lastError = `${err.code ?? 'error'}: ${err.message}`;
-        server.close();
         this.server = null;
-        this.startedAt = null;
-        resolve(this.status());
+        this.state = 'stopped';
+        resolve();
       };
       server.once('error', onError);
       server.listen(this.opts.port, '0.0.0.0', () => {
-        this.server = server;
-        this.startedAt = Date.now();
-        this.lastError = null;
         server.off('error', onError);
         server.on('error', (err) => {
           this.lastError = err instanceof Error ? err.message : String(err);
         });
-        resolve(this.status());
+        this.startedAt = Date.now();
+        this.lastError = null;
+        this.state = 'running';
+        resolve();
       });
     });
   }
 
-  stop(): Promise<RadioBrainStatus> {
-    return new Promise((resolve) => {
-      if (!this.server) {
-        resolve(this.status());
+  private async teardown(): Promise<void> {
+    const server = this.server;
+    if (!server) {
+      this.state = 'stopped';
+      return;
+    }
+    this.state = 'stopping';
+    // server.close() waits for every open connection to end on its own,
+    // and /now/events clients are deliberately long-lived — left alone this
+    // hangs forever. End the SSE streams and drop any remaining sockets
+    // ourselves first so close() has nothing left to wait on.
+    for (const [res, cleanup] of this.sseCleanups) {
+      cleanup();
+      try {
+        res.end();
+      } catch {
+        /* client already gone */
+      }
+    }
+    this.sseCleanups.clear();
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
+    await new Promise<void>((resolve) => {
+      if (!server.listening) {
+        resolve();
         return;
       }
-      this.server.close(() => {
-        this.server = null;
-        this.startedAt = null;
-        resolve(this.status());
-      });
+      server.close(() => resolve());
     });
+    this.server = null;
+    this.startedAt = null;
+    this.state = 'stopped';
   }
 
   status(): RadioBrainStatus {
-    const enabled = !!this.server;
+    const enabled = this.state === 'running';
     const baseUrl = enabled ? `http://${localAddress()}:${this.opts.port}` : null;
     return {
       enabled,
@@ -142,6 +224,11 @@ export class RadioBrain {
       startedAt: this.startedAt,
       error: this.lastError,
     };
+  }
+
+  /** Test-only window into live connection bookkeeping — not used at runtime. */
+  debugConnectionCounts(): { sockets: number; sseClients: number } {
+    return { sockets: this.sockets.size, sseClients: this.sseCleanups.size };
   }
 
   /**
@@ -269,10 +356,15 @@ export class RadioBrain {
     // Heartbeat keeps proxies/phone radios from reaping the idle socket.
     const heartbeat = setInterval(() => res.write(': hb\n\n'), 25_000);
     heartbeat.unref?.();
-    req.on('close', () => {
+    const cleanup = (): void => {
       clearInterval(heartbeat);
       off();
-    });
+      this.sseCleanups.delete(res);
+    };
+    // Tracked so stop() can end these deliberately-long-lived streams
+    // itself instead of waiting on the client to disconnect.
+    this.sseCleanups.set(res, cleanup);
+    req.on('close', cleanup);
   }
 
   private async respondControl(req: IncomingMessage, res: ServerResponse): Promise<void> {
