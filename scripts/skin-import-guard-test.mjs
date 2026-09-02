@@ -243,7 +243,10 @@ function createBmp24(width, height, getPixel) {
   else log.push(`excessive entry count rejected: ${err.message}`);
 }
 
-// Encrypted and data-descriptor entries are refused with a clear message.
+// Encrypted entries are refused with a clear message. Data-descriptor entries
+// (general-purpose bit 3, set by streaming zip writers) are fine: sizes are read
+// from the central directory, never from the local header, so nothing about
+// them needs the descriptor.
 {
   const good = createZipArchive([{ name: 'main.bmp', content: createBmp24(4, 4, () => [1, 2, 3]) }]);
   const eocd = good.length - 22;
@@ -255,9 +258,12 @@ function createBmp24(width, height, getPixel) {
   else log.push(`encrypted entry refused: ${encErr.message}`);
   const descriptor = Buffer.from(good);
   descriptor.writeUInt16LE(0x0008, centralOffset + 8);
-  const descErr = throws(() => parseWinampClassicSkinArchive(descriptor, 'desc.wsz'));
-  if (!descErr || !/unsupported format/i.test(descErr.message)) fail(`a data-descriptor entry must be refused, got: ${descErr ? descErr.message : 'no error'}`);
-  else log.push(`data-descriptor entry refused: ${descErr.message}`);
+  const descErr = throws(() => {
+    const skin = parseWinampClassicSkinArchive(descriptor, 'desc.wsz');
+    if (!skin || !Object.keys(skin.variables ?? {}).length) throw new Error('data-descriptor skin produced no palette');
+  });
+  if (descErr) fail(`a data-descriptor entry must still import: ${descErr.message}`);
+  else log.push('data-descriptor entry imports normally');
 }
 
 // A well-formed STORED skin still parses and yields its palette.
