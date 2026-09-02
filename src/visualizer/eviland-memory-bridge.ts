@@ -216,6 +216,12 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
   // forbidden for this bridge's lifetime" and IS checked by flush().
   let discarded = false;
   let dirty = 0;
+  // Bumped on every section observation and every counter/lineage mutation.
+  // A flush snapshots this at write-start; if it's moved on by the time the
+  // write resolves, something landed mid-flight that the snapshot didn't
+  // capture, and performFlush loops for a trailing round rather than letting
+  // the stale snapshot clobber the live plan (the lost-update bug this guards).
+  let mutationVersion = 0;
   /** Sections buffered since the last flush. We dedupe by sectionId so a chorus return doesn't double-flush. */
   const bufferedSections = new Map<number, VisualMemorySection>();
   let visibilityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -322,6 +328,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     if (trackId == null) return; // non-library: never persist
     bufferedSections.set(section.sectionId, section);
     dirty++;
+    mutationVersion++;
     refreshStateFromPlan();
     notify();
     if (dirty >= LEARN_FLUSH_THRESHOLD) {
@@ -379,43 +386,84 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
   }
 
   let flushInFlight: Promise<boolean> | null = null;
+
+  /**
+   * The single owner of the async persistence cycle. Loops: snapshot
+   * mutationVersion + the buffered-section identities this round covers,
+   * compose + write, then — if anything mutated the live plan while the
+   * write was in flight — loop again with a fresh snapshot. This is what
+   * makes overlapping flush()/flushAndDispose() callers all eventually
+   * observe a fully up-to-date persisted state instead of racing a stale one.
+   */
+  async function performFlush(): Promise<boolean> {
+    let ok = false;
+    for (;;) {
+      if (discarded) return ok;
+
+      const snapshotVersion = mutationVersion;
+      const snapshotSections = new Map(bufferedSections);
+
+      const composed = composePlanForWrite();
+      if (!validatePlan(composed)) {
+        // Director output failed our own validator — bail rather than write garbage.
+        return ok;
+      }
+
+      let writeOk: boolean;
+      try {
+        writeOk = await api.setTrackVisualMemory(trackId as number, composed);
+      } catch {
+        writeOk = false;
+      }
+
+      if (discarded) {
+        // discard() fired while this write was in flight. The caller asked us
+        // to drop everything — don't resurrect `plan`, don't clear buffered
+        // state, don't loop for a trailing round on its behalf.
+        return ok;
+      }
+
+      if (writeOk) {
+        ok = true;
+        // Clear only the buffered entries THIS write actually covered — a
+        // fresh observeSection() for the same sectionId during the await
+        // replaced the map entry, so it's newer than what we just wrote and
+        // must stay pending.
+        for (const [sectionId, snapshotted] of snapshotSections) {
+          if (bufferedSections.get(sectionId) === snapshotted) bufferedSections.delete(sectionId);
+        }
+        dirty = bufferedSections.size;
+        // Only adopt the composed snapshot wholesale when nothing mutated the
+        // live plan while we were writing. If it did (a love/skip/lineage
+        // tick landed mid-flight), the live plan is already ahead of what we
+        // just persisted — keep it, and loop below to persist the newer state.
+        if (mutationVersion === snapshotVersion) {
+          plan = composed;
+        }
+        refreshStateFromPlan();
+        notify();
+      }
+
+      if (mutationVersion === snapshotVersion) return ok;
+      // Something mutated during the write (new section, love, skip, lineage
+      // tick, or just a failed write worth retrying against fresher state) —
+      // loop immediately for a trailing round.
+    }
+  }
+
   async function flush(reason: FlushReason): Promise<boolean> {
+    void reason; // informational only — the loop coalesces regardless of why it was called.
     if (discarded) return false;
     if (trackId == null) return false;
     if (!director && !plan) return false;
     if (dirty === 0 && bufferedSections.size === 0 && !plan) return false;
 
-    // Coalesce overlapping flushes. The trailing caller gets a fresh one after
-    // the in-flight one resolves so we don't lose a late observeSection.
-    if (flushInFlight) {
-      // eslint-disable-next-line no-void
-      void reason;
-      return flushInFlight;
+    if (!flushInFlight) {
+      flushInFlight = performFlush().finally(() => {
+        flushInFlight = null;
+      });
     }
-
-    const composed = composePlanForWrite();
-    if (!validatePlan(composed)) {
-      // Director output failed our own validator — bail rather than write garbage.
-      return false;
-    }
-    flushInFlight = api.setTrackVisualMemory(trackId, composed).then(
-      (ok) => {
-        if (ok) {
-          plan = composed;
-          dirty = 0;
-          bufferedSections.clear();
-          refreshStateFromPlan();
-          notify();
-        }
-        return ok;
-      },
-      () => false,
-    );
-    try {
-      return await flushInFlight;
-    } finally {
-      flushInFlight = null;
-    }
+    return flushInFlight;
   }
 
   function appendEvolution(entry: VisualMemoryEvolutionEntry): void {
@@ -443,6 +491,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     if (disposed) return;
     if (!plan || trackId == null) return;
     plan.counters.plays++;
+    mutationVersion++;
     // The ladder is [8, 32, 96, 256]. nextGenerationAt returns the threshold
     // we're about to cross (or null). We tick when `plays` HITS a threshold
     // (so plays=8 triggers gen 1, plays=32 triggers gen 2, etc).
@@ -458,6 +507,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     if (disposed) return;
     if (!plan || trackId == null) return;
     plan.counters.loves++;
+    mutationVersion++;
     // Love forces an immediate generation tick when generation < 3 — the
     // blueprint §1.6.4 rule. Stabilised tracks (generation ≥ 3) don't snap.
     if (plan.lineage.generation < 3) {
@@ -471,6 +521,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     if (disposed) return;
     if (!plan || trackId == null) return;
     plan.counters.skips++;
+    mutationVersion++;
     refreshStateFromPlan();
     notify();
   }
@@ -479,6 +530,7 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     if (disposed) return;
     if (!plan || trackId == null) return;
     plan.counters.sectionReturns++;
+    mutationVersion++;
     refreshStateFromPlan();
     notify();
   }
@@ -510,7 +562,11 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     }
     listeners.clear();
     if (trackId == null) return false;
-    if (dirty === 0 && bufferedSections.size === 0) return false;
+    // Delegate to flush()'s own "anything to do" guard rather than duplicating
+    // it here — that guard also covers a plan-only mutation (e.g. a love
+    // recorded with no buffered sections) which this dispose-time check used
+    // to miss, silently dropping it. flush() also transparently waits out any
+    // trailing round if something mutated during an already-in-flight write.
     return flush(reason);
   }
 
