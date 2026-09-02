@@ -84,19 +84,21 @@ More in `assets/screenshots/`.
 This comes up a lot, and it's a fair criticism, so here are the real numbers
 instead of a defense.
 
-NewAmp is an Electron app. The Windows installer is about **98 MB** and unpacks to
-**368 MB**. Winamp 5.9 was around 12 MB. That gap is real and I can't close it.
-Of the unpacked size, 216 MB is Chromium itself and 79 MB is the bundled ffmpeg
-binary that handles decoding and transcoding. Roughly 30 MB is actually NewAmp.
+NewAmp is an Electron app. The 2.2.0 Windows installer is **115 MB** and unpacks
+to **376 MB**. Winamp 5.9 was around 12 MB. That gap is real and I can't close it.
+Of the unpacked size, 235 MB is the Electron binary (Chromium and Node), 83 MB
+is the bundled ffmpeg that handles decoding and transcoding, and about 12 MB is
+NewAmp itself. The rest is Chromium's support files.
 
 Memory is heavier than a native player too. With my 60,000-track library it sits
 around 400 MB in the main process, and Task Manager will show something like
 800 MB across all of its processes.
 
-I did recently cut 122 MB of genuine waste out of the build — duplicate copies of
-libraries that were already bundled, 54 languages of Chromium locale files the app
-never uses, and a DirectX shader compiler only WebGPU needs. That was my sloppiness,
-not Electron's, and it's fixed. Shrinking the bundled ffmpeg is the next real target.
+The 2.1.0 installer was 136 MB and unpacked to 488 MB. 2.2.0 drops 112 MB of
+that: duplicate copies of libraries that were already bundled into the app, 54
+languages of Chromium locale files the app never uses, and a DirectX shader
+compiler only WebGPU needs. That was my sloppiness, not Electron's. Shrinking the
+bundled ffmpeg is the next real target.
 
 But the honest summary is: if a small, native, low-memory player is what you want,
 NewAmp is not it, and foobar2000 or Winamp itself will serve you better. Electron is

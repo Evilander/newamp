@@ -159,6 +159,11 @@ it already claimed to do, with a regression test behind each fix.
 
 ### Other
 
+- The Windows installer is 115 MB, down from 136 MB for 2.1.0, and the unpacked
+  app is 376 MB, down from 488 MB. The difference is duplicate library copies
+  that were already bundled, 54 unused Chromium locale files, and a DirectX
+  shader compiler that only WebGPU needs. Measured on the release machine
+  against the published 2.1.0 installer.
 - On macOS, closing the last window keeps NewAmp running, as Mac apps do,
   instead of tearing the library down.
 - The release workflow now runs the typecheck and the headless smokes before it
