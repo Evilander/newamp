@@ -4,7 +4,11 @@ dist
 dist-electron
 release
 tmp
-studio/renders
+
+# Skin design workspace and the helper scripts that drive it. Local only.
+studio/
+scripts/design-call.sh
+scripts/design-mcp.mjs
 
 # craft regression matrix output (current shots, machine-local baselines, diff reports)
 craft-matrix/
@@ -35,8 +39,8 @@ npm-debug.log*
 *.crt
 
 # Private working notes. These stay on my disk and out of the repo: planning
-# docs, roadmaps, marketing drafts, and AI-assistant scratch files are working
-# material, not documentation anyone else should have to read.
+# docs, roadmaps, marketing drafts, status logs, and editor scratch files are
+# working material, not documentation anyone else should have to read.
 codex.md
 AGENTS.md
 CLAUDE.md
@@ -52,6 +56,8 @@ docs/*-plan.md
 docs/*-roadmap.md
 docs/*-audit.md
 docs/eviland-spec.md
+*HANDOFF*.md
+packages/eviland-core/EXTRACTION-STATUS.md
 
 # native addon build artifacts (prebuilt/ IS committed; these are not)
 native/newamp-audio/build/

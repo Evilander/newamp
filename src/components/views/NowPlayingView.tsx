@@ -1,6 +1,6 @@
-// Bloomberg-density Now Playing view, ported from claude-design reference
-// 346c1cdba95b. Three-column main layout: album+queue / spectrum+VU+waveform /
-// LRC lyrics. Top status strip carries the real signal path + track stats.
+// Bloomberg-density Now Playing view. Three-column main layout: album+queue /
+// spectrum+VU+waveform / LRC lyrics. Top status strip carries the real signal
+// path + track stats.
 // Everything pulls live state from the audio engine.
 
 import { Fragment, memo, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
