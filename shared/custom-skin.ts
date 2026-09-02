@@ -122,10 +122,17 @@ const NAMED_COLORS = new Set([
 // Numeric token shared by the color-function and length grammars: an
 // integer or decimal, optionally followed by a percent sign.
 const NUM = '(?:\\d+\\.?\\d*|\\.\\d+)%?';
+// Components may be separated by commas (legacy syntax) or a single space
+// (CSS Color 4, which is what browser dev tools copy out), with the alpha
+// after a comma or a slash. normalizeSkinVariableValue collapses runs of
+// whitespace to one space and strips it around punctuation before matching.
+const SEP = '(?:,| )';
+const ALPHA = `(?:(?:,|/)${NUM})?`;
 const HEX_COLOR_RE = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/;
-const RGB_COLOR_RE = new RegExp(`^rgba?\\(${NUM},${NUM},${NUM}(?:,${NUM})?\\)$`);
-const HSL_COLOR_RE = new RegExp(`^hsla?\\(${NUM}(?:deg)?,${NUM},${NUM}(?:,${NUM})?\\)$`);
-const LENGTH_RE = /^(-?(?:\d+\.?\d*|\.\d+))(px|rem|em|%)$/;
+const RGB_COLOR_RE = new RegExp(`^rgba?\\(${NUM}${SEP}${NUM}${SEP}${NUM}${ALPHA}\\)$`);
+const HSL_COLOR_RE = new RegExp(`^hsla?\\(${NUM}(?:deg)?${SEP}${NUM}${SEP}${NUM}${ALPHA}\\)$`);
+// A unit is required except for a bare 0, which CSS itself allows.
+const LENGTH_RE = /^(-?(?:\d+\.?\d*|\.\d+))(px|rem|em|%)?$/;
 // Generous upper bounds — big enough for any real skin, small enough that a
 // stray value can't blow up layout. 512px maps to the same ceiling in rem/em
 // terms at the default 16px root font size.
@@ -162,7 +169,7 @@ export function normalizeSkinVariableValue(key: string, raw: unknown): string | 
   // return `stripped`, not this collapsed form, so a value that already
   // matches (e.g. every built-in skin's "rgba(57, 255, 20, 0.55)") round-trips
   // byte-for-byte instead of being reformatted.
-  const collapsed = stripped.toLowerCase().replace(/\s+/g, '');
+  const collapsed = stripped.toLowerCase().replace(/\s+/g, ' ').replace(/ ?([(),/]) ?/g, '$1');
   if (!collapsed || BANNED_VALUE_TOKENS.some((token) => collapsed.includes(token))) return null;
 
   if (COLOR_VARIABLE_SET.has(key)) {
@@ -177,7 +184,9 @@ export function normalizeSkinVariableValue(key: string, raw: unknown): string | 
     if (!match) return null;
     const amount = Number(match[1]);
     const unit = match[2];
-    if (!Number.isFinite(amount) || amount < 0 || amount > LENGTH_MAX_BY_UNIT[unit]) return null;
+    if (!Number.isFinite(amount) || amount < 0) return null;
+    if (unit === undefined) return amount === 0 ? stripped : null;
+    if (amount > LENGTH_MAX_BY_UNIT[unit]!) return null;
     return stripped;
   }
 

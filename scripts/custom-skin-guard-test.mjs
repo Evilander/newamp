@@ -66,4 +66,26 @@ while ((block = blockRe.exec(tokensCss))) {
 assert.ok(checkedBlocks >= 13, `expected to check :root plus every [data-theme] block, only found ${checkedBlocks}`);
 assert.ok(checkedValues > 100, `expected to check every skin variable across every built-in theme, only found ${checkedValues}`);
 
+// Modern colour syntax (what browser dev tools copy) and a bare 0 length are
+// valid CSS and were accepted by 2.1.0's blacklist; the grammar admits them too.
+for (const [key, value] of [
+  ['--accent', 'rgb(255 255 255)'],
+  ['--accent', 'rgb(255 255 255 / 0.5)'],
+  ['--accent', 'rgba(255, 255, 255, .5)'],
+  ['--accent', 'hsl(120deg 50% 50%)'],
+  ['--accent', 'hsl(120 50% 50% / 40%)'],
+  ['--radius', '0'],
+  ['--radius', '12px'],
+]) {
+  if (normalizeSkinVariableValue(key, value) !== value) fail(`${key}=${JSON.stringify(value)} should be accepted unchanged`);
+}
+for (const [key, value] of [
+  ['--accent', 'rgb(255 255)'],
+  ['--accent', 'rgb(255 255 255 255 255)'],
+  ['--accent', 'url( https://x )'],
+  ['--radius', '0 0'],
+  ['--radius', '5'],
+]) {
+  if (normalizeSkinVariableValue(key, value) !== null) fail(`${key}=${JSON.stringify(value)} should be rejected`);
+}
 console.log(JSON.stringify({ ok: true, checkedBlocks, checkedValues }, null, 2));

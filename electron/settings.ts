@@ -53,6 +53,22 @@ const DEFAULTS: AppSettings = {
   ambientReactivity: 'auto',
 };
 
+// A stored skin written by an older build can hold values the current grammar
+// refuses (anything that is not a colour or a bounded length). They are
+// dropped, but never silently: the log names each one so a user whose skin
+// changed after an upgrade can find out why.
+function loadCustomSkin(raw: unknown): AppSettings['customSkin'] {
+  const skin = normalizeCustomSkin(raw);
+  const rawVariables = (raw as { variables?: unknown } | null)?.variables;
+  if (skin && rawVariables && typeof rawVariables === 'object') {
+    const dropped = Object.keys(rawVariables as Record<string, unknown>).filter((key) => !(key in skin.variables));
+    if (dropped.length) {
+      console.warn(`[newamp] custom skin: ${dropped.length} value(s) are not valid colours or lengths and were removed: ${dropped.join(', ')}`);
+    }
+  }
+  return skin;
+}
+
 function normalizePreferredSampleRate(value: unknown): number | null {
   if (value == null) return null;
   const rate = Math.trunc(Number(value));
@@ -168,7 +184,7 @@ export class SettingsStore {
           ...parsed,
           libraryAutoWatch: parsed.libraryAutoWatch !== false,
           equalizer: normalizeEqValues(parsed.equalizer),
-          customSkin: normalizeCustomSkin(parsed.customSkin),
+          customSkin: loadCustomSkin(parsed.customSkin),
           resumeState: this.normalizeResume(parsed.resumeState),
           playbackRate: normalizePlaybackRate(parsed.playbackRate ?? DEFAULTS.playbackRate),
           audioOutputDeviceId: normalizeAudioOutputDeviceId(parsed.audioOutputDeviceId),
