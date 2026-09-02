@@ -11,6 +11,17 @@
 - **Public API boundary defined** in `src/index.ts` (see README for the surface).
 - NewAmp's own typecheck is unaffected (root tsconfig includes only
   `src`/`shared`/`electron`, not `packages`).
+- **Gated so it can't silently rot again.** The package's own stricter
+  typecheck (`noUncheckedIndexedAccess`, etc.) is now a step of the root
+  `npm run typecheck`, and `scripts/eviland-core-package-test.mjs` builds the
+  package and imports every symbol `dist/index.js` exports. Both run in CI
+  next to the other Eviland smokes. Previously the package could go stale
+  (an engine edit could break the package's stricter build, or the package's
+  public `index.ts`/README could drift from what `src/visualizer` actually
+  exports) with nothing catching it — that happened once already (the
+  `classic` helper was pruned from the engine source without updating the
+  package's `index.ts`/README, and a `noUncheckedIndexedAccess` regression in
+  the fluid solver went unnoticed for several releases).
 
 ## Staging model (current)
 

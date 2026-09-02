@@ -55,7 +55,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck (renderer + electron)
+      - name: Typecheck (renderer + electron + @eviland/core package)
         run: npm run typecheck
 
       - name: Build (vite renderer + electron main)
@@ -101,6 +101,9 @@ jobs:
         run: |
           npm run test:eviland-fluid
           npm run test:eviland-operators
+
+      - name: Test — @eviland/core package build + export surface
+        run: npm run test:eviland-core-package
 
       - name: Test — algoVersion guard (randomizer/director changes bump VISUAL_MEMORY_ALGO_VERSION)
         run: npm run test:algo-version-guard
