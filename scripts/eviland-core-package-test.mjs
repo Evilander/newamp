@@ -29,7 +29,9 @@ const fail = (m) => { pass = false; log.push('FAIL: ' + m); };
 
 // 1) Build for real (declaration-emitting), not just --noEmit. This is what a
 // consumer would actually run before publishing/installing the package.
-const built = spawnSync('npm run build', { cwd: pkgDir, stdio: 'inherit', shell: true });
+// Built from the repo root so tsc resolves from the root node_modules; the
+// package has no node_modules of its own on a clean checkout or CI runner.
+const built = spawnSync('npx tsc -p packages/eviland-core/tsconfig.json', { cwd: resolve('.'), stdio: 'inherit', shell: true });
 if (built.status !== 0) {
   fail(`package build exited with ${built.status}`);
   writeFileSync(RESULT, log.join('\n') + '\n[eviland-core-package-test] FAIL\n');
