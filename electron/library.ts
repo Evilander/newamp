@@ -101,7 +101,7 @@ const SQLITE_HEADER = 'SQLite format 3\0';
 // Thrown when the database file stays locked/unreadable after retries — a
 // transient IO problem, deliberately NOT treated as corruption, so init()
 // surfaces it instead of quarantining a healthy-but-busy file.
-class LibraryUnavailableError extends Error {}
+export class LibraryUnavailableError extends Error {}
 
 const require = createRequire(import.meta.url);
 const LEGACY_FORMATS = new Set([
@@ -797,6 +797,30 @@ export class LibraryStore {
         }
         await new Promise((resolve) => setTimeout(resolve, attempt * 250));
       }
+    }
+  }
+
+  // Immutable snapshot of the database exactly as it stands in memory right
+  // now. Every mutation method runs against `this.db` synchronously — only
+  // the write to library.db is batched (800ms, or 30s for the recordPlay/
+  // recordSkip "slow" tier) — so this is always current regardless of what a
+  // pending flush has or hasn't landed on disk yet. The support-backup
+  // coordinator uses this instead of reading library.db off disk, which can
+  // lag behind by up to that batching window.
+  exportSnapshot(): Buffer {
+    return Buffer.from(this.db.export());
+  }
+
+  // Waits out any async flush already in flight. A caller that is about to
+  // replace library.db out from under this store (support-backup restore)
+  // needs this before doing so: flushAsync's flushSeq check only stops a
+  // stale write from starting its rename late — it can't stop one that was
+  // already dispatched to the OS from racing a rename issued afterwards by
+  // this process. Draining the in-flight write removes that race instead of
+  // relying on the sequence check to win it.
+  async waitForPendingWrites(): Promise<void> {
+    while (this.flushInFlight) {
+      await this.flushInFlight.catch(() => {});
     }
   }
 

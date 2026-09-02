@@ -7,6 +7,15 @@ export interface SupportBackupInput {
   settingsPath: string;
   libraryPath: string;
   now?: Date | number;
+  // In-memory snapshots that must be used instead of reading the live file
+  // off disk. LibraryStore batches library.db writes (800ms, 30s for play/
+  // skip stats) and SettingsStore debounces the resumeState autosave, so a
+  // plain file copy can be stale relative to what's actually committed in
+  // memory. The support-backup coordinator in main.ts pulls these straight
+  // out of the live stores (LibraryStore.exportSnapshot() /
+  // SettingsStore.snapshotJson()) right before calling createSupportBackup.
+  librarySnapshot?: Buffer;
+  settingsSnapshot?: string;
 }
 
 export interface SupportRestoreInput extends SupportBackupInput {
@@ -39,7 +48,7 @@ export async function createSupportBackup(input: SupportBackupInput): Promise<Su
   let filesCopied = 0;
   const included: string[] = [];
   for (const candidate of candidates) {
-    const copied = await copyCandidate(userDataPath, backupsRoot, candidate);
+    const copied = await writeCandidate(userDataPath, backupsRoot, candidate, input);
     if (copied > 0) {
       filesCopied += copied;
       included.push(candidate.label);
@@ -113,6 +122,28 @@ async function uniqueBackupPath(backupsRoot: string, baseName: string): Promise<
     }
   }
   throw new Error('Unable to create a unique backup folder.');
+}
+
+// Writes one backup candidate: settings.json/library.db use an in-memory
+// snapshot when the caller supplied one (see SupportBackupInput), everything
+// else always copies from disk.
+async function writeCandidate(
+  userDataPath: string,
+  backupsRoot: string,
+  candidate: BackupCandidate,
+  input: SupportBackupInput,
+): Promise<number> {
+  if (candidate.label === 'library.db' && input.librarySnapshot) {
+    await mkdir(dirname(candidate.target), { recursive: true });
+    await writeFile(candidate.target, input.librarySnapshot);
+    return 1;
+  }
+  if (candidate.label === 'settings.json' && input.settingsSnapshot !== undefined) {
+    await mkdir(dirname(candidate.target), { recursive: true });
+    await writeFile(candidate.target, input.settingsSnapshot, 'utf8');
+    return 1;
+  }
+  return copyCandidate(userDataPath, backupsRoot, candidate);
 }
 
 async function copyCandidate(userDataPath: string, backupsRoot: string, candidate: BackupCandidate): Promise<number> {
