@@ -5,6 +5,15 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- Uninstalling on Windows now clears the file-type entries the installer
+  wrote. Before, `.mp3`, `.flac`, `.m3u` and the other registered extensions
+  were left pointing at a NewAmp file class that no longer existed, so Windows
+  treated them as unknown types until another player claimed them.
+
 ## [2.2.1] - 2026-09-02
 
 Follow-ups to 2.2.0 found by a review of the shipped build, plus two limits
