@@ -76,6 +76,15 @@ jobs:
       - name: Smoke — library (scan + query)
         run: npm run smoke:library
 
+      - name: Smoke — corrupt library recovery
+        run: npm run smoke:library-corruption
+
+      - name: Smoke — tag DSL sandbox / ReDoS / cycles
+        run: npm run smoke:tags
+
+      - name: Test — every test:* script (scripts/run-all-tests.mjs)
+        run: npm run test:all
+
       - name: Smoke — Wrapped stats (day/week/month/year/all) + wiring
         run: npm run smoke:wrapped
 

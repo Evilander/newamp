@@ -34,6 +34,9 @@ const acceptedBlockers = [];
 
 if (!skipSmokes) {
   for (const script of [
+    // Every test:* script in package.json, in one shot. Regression tests used
+    // to be added without anything running them; this makes that impossible.
+    'test:all',
     'smoke:library',
     // Guards the 2.1.0 bug where a corrupt library.db bricked startup, and the
     // recovery path that must not quarantine a merely-locked file.
@@ -102,6 +105,12 @@ if (!skipSmokes) {
     'smoke:exclusive-ui',
     'smoke:audio-limiter',
     'smoke:ui-playback',
+    // These three launched the app, printed a result and exited 0 for a long
+    // time; they assert now (second track playing, handoff under 1500 ms, real
+    // synced lyric lines) so they belong in the gate with their siblings.
+    'smoke:ui-gapless',
+    'smoke:ui-handoff',
+    'smoke:ui-lyrics',
     // Proves Range serving really returns the bytes at the requested offset;
     // the original regression made every track a non-seekable stream.
     'smoke:playback-seek',

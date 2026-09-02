@@ -15,6 +15,7 @@ Run on every push/PR in `ci.yml`:
 | Build | `npm run build` | vite renderer + electron main compile |
 | Build lock | `npm run smoke:build-lock` | concurrent-build lock + stale-lock recovery |
 | Library | `npm run smoke:library` | SQLite scan + query over fixtures |
+| All unit tests | `npm run test:all` | every `test:*` script in package.json, run through `scripts/run-all-tests.mjs` so a new test is exercised the moment it is registered |
 | Wrapped | `npm run smoke:wrapped` | Wrapped stats math across all 5 ranges + IPC/view wiring |
 | Social | `npm run smoke:social` | reviews/lists/profile CRUD, ordering, privacy, reopen persistence, export bundle |
 | Visualizer | `npm run smoke:visualizer` | butterchurn/presets module exports + sandbox wiring |
