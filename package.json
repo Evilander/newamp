@@ -118,6 +118,7 @@
     "smoke:tags": "npm run build:electron && node scripts/tag-dsl-smoke.mjs",
     "smoke:spectral-art": "npm run build:electron && node scripts/spectral-art-smoke.mjs",
     "smoke:radio-brain": "npm run build:electron && node scripts/radio-brain-smoke.mjs",
+    "test:radio-brain-lifecycle": "npm run build:electron && node scripts/radio-brain-lifecycle-test.mjs",
     "smoke:perf-bench": "npm run build:electron && node scripts/perf-bench-smoke.mjs",
     "smoke:seed-vibe": "npm run build:electron && node scripts/seed-vibe-smoke.mjs",
     "smoke:album-random-sort": "npm run build:electron && node scripts/album-random-sort-smoke.mjs",
