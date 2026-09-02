@@ -116,6 +116,22 @@ const backref = parseRule('tag(back) when title matches "(a)\\\\1"');
 assert.equal(backref.rule, null, 'a backreference should fail to compile');
 assert.match(backref.errors[0]?.message ?? '', /backreferences are not supported/);
 
+// `matches` and `contains` also work in their function form, which the Tags
+// view lists; the tokenizer used to reject them because the same words are
+// infix keywords.
+const fnMatches = parseRule('tag(fn_matches) when matches(title, "^live")');
+assert.ok(fnMatches.rule, 'matches(...) as a function call should compile');
+assert.equal(evaluateRule(fnMatches.rule, makeStubContext({ title: 'Live at Leeds' }), buildEvalEnvironment()).matched, true);
+assert.equal(evaluateRule(fnMatches.rule, makeStubContext({ title: 'Studio' }), buildEvalEnvironment()).matched, false);
+const fnContains = parseRule('tag(fn_contains) when contains(title, "remix") and not matches(title, "instrumental")');
+assert.ok(fnContains.rule, 'contains(...) as a function call should compile alongside infix operators');
+assert.equal(evaluateRule(fnContains.rule, makeStubContext({ title: 'Song (Club Remix)' }), buildEvalEnvironment()).matched, true);
+const fnBadPattern = parseRule('tag(fn_bad) when matches(title, "(?=live)")');
+assert.equal(fnBadPattern.rule, null, 'an unsupported pattern in the function form is refused at compile time too');
+assert.match(fnBadPattern.errors[0]?.message ?? '', /lookahead and lookbehind are not supported/);
+const infixStill = parseRule('tag(infix) when title matches "^live"');
+assert.ok(infixStill.rule, 'the infix form still compiles');
+
 // Three-valued null
 const nullRule = parseRule('tag(missing) when bpm > 100');
 assert.ok(nullRule.rule);
