@@ -11,6 +11,8 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SettingsStore } from '../dist-electron/electron/settings.js';
+import { atomicWriteFileSync } from '../dist-electron/electron/recovery.js';
+import { mkdirSync, existsSync } from 'node:fs';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const smokeRoot = join(repoRoot, 'tmp', 'settings-atomic-test');
@@ -133,6 +135,31 @@ const tmpSiblings = () => readdirSync(smokeRoot).filter((f) => f.includes('.tmp'
   // And a rename that keeps failing must never fall back to an unsynced in-place write.
   assert.doesNotMatch(recoverySrc, /writeFileSync\(toPath, readFileSync\(fromPath\)\)/, 'the rename fallback must not be a plain in-place writeFileSync');
   assert.match(recoverySrc, /durableWriteFileSync\(toPath, readFileSync\(fromPath\)\)/, 'the last-resort in-place write must be fsynced');
+}
+
+// 8. When the replace cannot complete at all, the complete copy survives. The
+//    destination here is a directory, so every rename fails and the last-resort
+//    in-place write fails too; the temp file must still be there afterwards
+//    and the error must say where it is.
+{
+  const stuckRoot = join(smokeRoot, 'stuck');
+  const target = join(stuckRoot, 'settings.json');
+  mkdirSync(target, { recursive: true }); // a directory where the file should be
+  const payload = JSON.stringify({ volume: 0.33, libraryRoots: ['K:/music'] });
+  let thrown = null;
+  const started = Date.now();
+  try {
+    atomicWriteFileSync(target, payload);
+  } catch (err) {
+    thrown = err;
+  }
+  const elapsed = Date.now() - started;
+  assert.ok(thrown, 'replacing a path that cannot be replaced must throw');
+  assert.match(thrown.message, /complete copy is at/, 'the error must name the surviving copy');
+  const survivor = `${target}.tmp-${process.pid}-sync`;
+  assert.ok(existsSync(survivor), 'the temp file with the complete data must survive a failed replace');
+  assert.equal(readFileSync(survivor, 'utf-8'), payload, 'the surviving copy must be the complete payload');
+  assert.ok(elapsed < 3000, `the synchronous retry backoff must stay short, took ${elapsed}ms`);
 }
 
 await rm(smokeRoot, { recursive: true, force: true });

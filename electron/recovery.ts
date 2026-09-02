@@ -59,12 +59,17 @@ export function atomicWriteFileSync(filePath: string, data: Buffer | string): vo
   try {
     durableWriteFileSync(tmp, data);
     renameOverExistingSync(tmp, filePath);
-  } finally {
-    try {
-      unlinkSync(tmp);
-    } catch {
-      /* gone with the rename, or nothing left to clean up */
-    }
+  } catch (err) {
+    // The temp file is the only complete copy of this state if the replace
+    // failed part-way; deleting it here would turn a failed save into data
+    // loss. Leave it beside the target, named so it can be found, and say so.
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`could not replace ${filePath} (${reason}); the complete copy is at ${tmp}`);
+  }
+  try {
+    unlinkSync(tmp);
+  } catch {
+    /* gone with the rename */
   }
 }
 
@@ -102,7 +107,10 @@ export async function durableWriteFileAsync(filePath: string, data: Buffer | str
 }
 
 export function renameOverExistingSync(fromPath: string, toPath: string): void {
-  for (const delay of RENAME_RETRY_DELAYS_MS) {
+  // The synchronous writer runs on the main thread for ordinary settings
+  // writes, not only at quit, so its backoff is shorter than the async one:
+  // a locked file must not freeze the UI for close to a second.
+  for (const delay of RENAME_RETRY_DELAYS_MS_SYNC) {
     if (delay) sleepSync(delay);
     try {
       renameSync(fromPath, toPath);
@@ -111,7 +119,7 @@ export function renameOverExistingSync(fromPath: string, toPath: string): void {
       if (!isTransientRenameError(err)) throw err;
     }
   }
-  // The target is still locked (antivirus/indexer/OneDrive) after ~900ms of
+  // The target is still locked (antivirus/indexer/OneDrive) after the
   // backoff. Give the atomic path one more chance through a fresh temp file
   // before reaching for an in-place write — an in-place writeFileSync with no
   // fsync and no atomicity is the exact truncation-on-crash hazard this
@@ -129,6 +137,9 @@ export function renameOverExistingSync(fromPath: string, toPath: string): void {
     }
     if (!isTransientRenameError(retryErr)) throw retryErr;
     console.warn(`[newamp] atomic replace of ${toPath} failed after retries; writing in place`, retryErr);
+    // Last resort. Opening the target for write truncates it, so if this
+    // write fails too the caller must keep `fromPath` — it is the only
+    // complete copy left (atomicWriteFileSync does exactly that).
     durableWriteFileSync(toPath, readFileSync(fromPath));
   }
 }
@@ -156,9 +167,10 @@ export async function renameOverExistingAsync(fromPath: string, toPath: string):
   }
 }
 
-// First attempt is immediate (delay 0); the rest back off, for ~900ms total
-// before either function gives up on a clean atomic rename.
+// First attempt is immediate (delay 0); the rest back off. The async writer
+// can afford ~900 ms; the synchronous one blocks the main thread, so ~240 ms.
 const RENAME_RETRY_DELAYS_MS = [0, 150, 300, 450];
+const RENAME_RETRY_DELAYS_MS_SYNC = [0, 40, 80, 120];
 
 // Windows rename-over-existing fails transiently with EPERM/EBUSY while the
 // target is briefly held open by another process.
