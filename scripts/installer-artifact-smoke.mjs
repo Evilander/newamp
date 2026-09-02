@@ -167,7 +167,10 @@ const splashLogo = artifact(packagedSplashLogo, 1_000);
 const splashLogoWebp = artifact(packagedSplashLogoWebp, 1_000);
 const asarEntries = listPackage(appAsarPath).map((entry) => entry.replaceAll('\\', '/'));
 
-for (const entry of ['/dist/index.html', '/dist-electron/electron/main.js', '/package.json']) {
+// The renderer is not in the asar: the build copies dist/ beside it as an
+// extra resource and main.ts serves newamp-app:// from process.resourcesPath
+// (see `distIndex` above for that check).
+for (const entry of ['/dist-electron/electron/main.js', '/package.json']) {
   assert.ok(asarEntries.includes(entry), `app.asar should include ${entry}`);
   assert.ok(statFile(appAsarPath, entry.slice(1).replaceAll('/', '\\')), `app.asar should stat ${entry}`);
 }
@@ -215,7 +218,7 @@ const report = {
   },
   asar: {
     entries: asarEntries.length,
-    required: ['/dist/index.html', '/dist-electron/electron/main.js', '/package.json'],
+    required: ['/dist-electron/electron/main.js', '/package.json'],
   },
 };
 
