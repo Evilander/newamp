@@ -36,6 +36,14 @@ const WATCHED_FILES = [
   'src/visualizer/eviland-director.ts',
 ];
 const VERSION_FILE = 'src/visualizer/eviland-memory-types.ts';
+// The same constant is declared in three places. Two are kept byte-identical by
+// packages/eviland-core/sync.mjs; shared/visual-memory.ts is a hand-maintained
+// third copy that nothing watched, so a bump here could silently leave the
+// renderer and the shared validator disagreeing about what a stale plan is.
+const VERSION_MIRRORS = [
+  'packages/eviland-core/src/eviland-memory-types.ts',
+  'shared/visual-memory.ts',
+];
 const VERSION_CONST = 'VISUAL_MEMORY_ALGO_VERSION';
 const WATCHED_SYMBOLS = ['ARCHETYPES', 'TIER_ARCHETYPE_WEIGHTS', 'SAFE_RANGES'];
 
@@ -147,6 +155,8 @@ for (const file of WATCHED_FILES) {
   }
 }
 
+checkVersionMirrors();
+
 if (changedDecls.length === 0) {
   console.log(`[algo-version-guard] no algorithm-defining declarations changed since ${base} — OK`);
   process.exit(0);
@@ -161,6 +171,29 @@ function readVersionLiteral(source) {
   const re = new RegExp(`${VERSION_CONST}\\s*=\\s*(\\d+)`);
   const m = source.match(re);
   return m ? Number(m[1]) : null;
+}
+
+// Every copy of the constant must agree, whatever the value is, and this runs
+// whether or not any declaration changed. A bump that lands in one file and not
+// another is worse than no bump: the renderer would treat a plan as current
+// while the shared validator called it stale.
+function checkVersionMirrors() {
+  const current = readVersionLiteral(readFileSync(resolve(VERSION_FILE), 'utf8'));
+  for (const mirror of VERSION_MIRRORS) {
+    const mirrorPath = resolve(mirror);
+    if (!existsSync(mirrorPath)) {
+      console.error(`[algo-version-guard] FAIL: expected ${VERSION_CONST} mirror ${mirror} to exist`);
+      process.exit(1);
+    }
+    const mirrorVersion = readVersionLiteral(readFileSync(mirrorPath, 'utf8'));
+    if (mirrorVersion !== current) {
+      console.error(
+        `[algo-version-guard] FAIL: ${VERSION_CONST} is ${current} in ${VERSION_FILE} ` +
+        `but ${mirrorVersion} in ${mirror}. Every copy must carry the same version.`,
+      );
+      process.exit(1);
+    }
+  }
 }
 const baseVersion = readVersionLiteral(baseTypes);
 const headVersion = readVersionLiteral(headTypes);

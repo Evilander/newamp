@@ -39,7 +39,7 @@ const [storeSource, handoffSource, packageSource] = await Promise.all([
 
 assert.match(storeSource, /nextSmartShuffle/, 'player store should use smart shuffle for next track selection');
 assert.match(storeSource, /previousSmartShuffle/, 'player store should use smart shuffle history for previous track selection');
-assert.match(handoffSource, /mode === 'shuffle'/, 'handoff helper should special-case shuffle mode');
+assert.match(handoffSource, /isShuffleMode\(input\.mode\)/, 'handoff helper should special-case shuffle mode (including shuffle+repeat combos)');
 assert.match(packageSource, /smoke:smart-shuffle/, 'package scripts should include smart shuffle smoke');
 
 console.log(JSON.stringify({ ok: true, played, nextCycle, previous }, null, 2));

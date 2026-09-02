@@ -38,7 +38,7 @@
 // ---------------------------------------------------------------------------
 
 export const VISUAL_MEMORY_SCHEMA_VERSION = 1;
-export const VISUAL_MEMORY_ALGO_VERSION = 1;
+export const VISUAL_MEMORY_ALGO_VERSION = 2;
 
 /**
  * Per-section memory: the look the Director chose for one boundary in a song,
@@ -205,31 +205,40 @@ export function createEmptyPlan(
  * REQUIRED structure — unknown extra fields are accepted (forward-compat) and
  * preserved by the caller on the in-memory object.
  */
+// Plain `typeof v === 'number'` admits NaN/Infinity/-Infinity (typeof NaN is
+// "number" in JS). JSON.stringify turns any of those into `null`, and on the
+// next read that `null` fails a bare `typeof === 'number'` check anyway — so
+// a single non-finite value anywhere in a plan gets it silently written as
+// corrupt, then rejected wholesale on the very next read.
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
 export function validatePlan(x: unknown): x is VisualMemoryPlan {
   if (!x || typeof x !== 'object') return false;
   const p = x as Partial<VisualMemoryPlan>;
-  if (typeof p.schema !== 'number') return false;
-  if (typeof p.algoVersion !== 'number') return false;
-  if (typeof p.trackId !== 'number' || !Number.isFinite(p.trackId)) return false;
+  if (!isFiniteNumber(p.schema)) return false;
+  if (!isFiniteNumber(p.algoVersion)) return false;
+  if (!isFiniteNumber(p.trackId)) return false;
   if (typeof p.songId !== 'string' || !p.songId) return false;
-  if (typeof p.updatedAt !== 'number' || !Number.isFinite(p.updatedAt)) return false;
+  if (!isFiniteNumber(p.updatedAt)) return false;
 
   const c = p.counters;
   if (!c || typeof c !== 'object') return false;
-  if (typeof c.plays !== 'number' || typeof c.skips !== 'number') return false;
-  if (typeof c.loves !== 'number' || typeof c.sectionReturns !== 'number') return false;
+  if (!isFiniteNumber(c.plays) || !isFiniteNumber(c.skips)) return false;
+  if (!isFiniteNumber(c.loves) || !isFiniteNumber(c.sectionReturns)) return false;
 
   const ln = p.lineage;
   if (!ln || typeof ln !== 'object') return false;
-  if (typeof ln.rootSeed !== 'number') return false;
-  if (typeof ln.generation !== 'number') return false;
+  if (!isFiniteNumber(ln.rootSeed)) return false;
+  if (!isFiniteNumber(ln.generation)) return false;
   if (!Array.isArray(ln.ancestors)) return false;
-  if (!ln.ancestors.every((s) => typeof s === 'number')) return false;
+  if (!ln.ancestors.every((s) => isFiniteNumber(s))) return false;
   if (!Array.isArray(ln.evolutionLog)) return false;
   for (const e of ln.evolutionLog) {
     if (!e || typeof e !== 'object') return false;
-    if (typeof e.at !== 'number') return false;
-    if (typeof e.fromSeed !== 'number' || typeof e.toSeed !== 'number') return false;
+    if (!isFiniteNumber(e.at)) return false;
+    if (!isFiniteNumber(e.fromSeed) || !isFiniteNumber(e.toSeed)) return false;
     const t = e.trigger;
     if (t !== 'play-count' && t !== 'love' && t !== 'section-return' && t !== 'neighbor-seed') {
       return false;
@@ -239,18 +248,18 @@ export function validatePlan(x: unknown): x is VisualMemoryPlan {
   if (!Array.isArray(p.sections)) return false;
   for (const s of p.sections) {
     if (!s || typeof s !== 'object') return false;
-    if (typeof s.sectionId !== 'number') return false;
-    if (typeof s.seed !== 'number') return false;
+    if (!isFiniteNumber(s.sectionId)) return false;
+    if (!isFiniteNumber(s.seed)) return false;
     if (typeof s.archetype !== 'string') return false;
-    if (typeof s.rotationIndex !== 'number') return false;
-    if (typeof s.observedCount !== 'number') return false;
-    if (typeof s.firstSeenAt !== 'number' || typeof s.lastSeenAt !== 'number') return false;
+    if (!isFiniteNumber(s.rotationIndex)) return false;
+    if (!isFiniteNumber(s.observedCount)) return false;
+    if (!isFiniteNumber(s.firstSeenAt) || !isFiniteNumber(s.lastSeenAt)) return false;
     if (!Array.isArray(s.fingerprint)) return false;
     // Length-24 is the contract from the reactor. Reject other lengths so a
     // corrupted blob never silently feeds the wrong-shaped vector into the
     // recall path.
     if (s.fingerprint.length !== 24) return false;
-    for (const v of s.fingerprint) if (typeof v !== 'number') return false;
+    for (const v of s.fingerprint) if (!isFiniteNumber(v)) return false;
     const tier = s.tier;
     if (
       tier !== 'calm' && tier !== 'steady' && tier !== 'lift' &&
@@ -263,9 +272,9 @@ export function validatePlan(x: unknown): x is VisualMemoryPlan {
   if (p.neighborSeed != null) {
     const n = p.neighborSeed;
     if (typeof n !== 'object') return false;
-    if (typeof n.fromTrackId !== 'number') return false;
-    if (typeof n.score !== 'number') return false;
-    if (typeof n.at !== 'number') return false;
+    if (!isFiniteNumber(n.fromTrackId)) return false;
+    if (!isFiniteNumber(n.score)) return false;
+    if (!isFiniteNumber(n.at)) return false;
   }
 
   return true;

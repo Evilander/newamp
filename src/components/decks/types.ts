@@ -2,7 +2,7 @@
 // window to its own native size, so the user never sees a generic empty border
 // around the skin chrome.
 
-import type { Track } from '@shared/types';
+import type { PlaybackMode, Track } from '@shared/types';
 
 export type DeckSkin =
   | 'bento'
@@ -37,7 +37,7 @@ export interface DeckProps {
   currentTime: number;
   duration: number;
   volume: number;
-  mode: 'normal' | 'shuffle' | 'repeat-all' | 'repeat-one';
+  mode: PlaybackMode;
   alwaysOnTop: boolean;
   artUrl: string | null;
   /** Skin picked by user; passed in so each skin can show a skin-select chip. */
@@ -50,7 +50,7 @@ export interface DeckProps {
   onPrev: () => void;
   onSeek: (t: number) => void;
   onSetVolume: (v: number) => void;
-  onSetMode: (m: 'normal' | 'shuffle' | 'repeat-all' | 'repeat-one') => void;
+  onSetMode: (m: PlaybackMode) => void;
   onSetAlwaysOnTop: (on: boolean) => void;
   onExitDeck: () => void;
   onMinimize: () => void;

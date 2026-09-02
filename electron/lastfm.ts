@@ -37,17 +37,23 @@ export interface LastfmCachedScrobble {
   createdAt: number;
   lastAttemptAt: number | null;
   lastError: string | null;
+  // Set when the item's last attempt failed because the Last.fm session
+  // itself is invalid (revoked access, expired key), not because of a
+  // transient outage. See flush() below.
+  authFailure: boolean;
 }
 
 export interface LastfmOutboxFlushResult {
   sent: number;
   remaining: number;
+  needsReconnect: boolean;
 }
 
 export class LastfmApiError extends Error {
   readonly code: number | null;
   readonly status: number;
   readonly retryable: boolean;
+  readonly authFailure: boolean;
 
   constructor(message: string, { code, status }: { code: number | null; status: number }) {
     super(code ? `Last.fm ${code}: ${message}` : message);
@@ -55,6 +61,7 @@ export class LastfmApiError extends Error {
     this.code = code;
     this.status = status;
     this.retryable = isRetryableLastfmFailure(code, status);
+    this.authFailure = isAuthLastfmFailure(code);
   }
 }
 
@@ -115,6 +122,7 @@ export class LastfmScrobbleOutbox {
       pending: items.length,
       oldestCreatedAt: items[0]?.createdAt ?? null,
       lastError: [...items].reverse().find((item) => item.lastError)?.lastError ?? null,
+      needsReconnect: items.some((item) => item.authFailure),
     };
   }
 
@@ -132,6 +140,7 @@ export class LastfmScrobbleOutbox {
       createdAt: Date.now(),
       lastAttemptAt: null,
       lastError,
+      authFailure: false,
     };
     items.push(item);
     await this.write(items.slice(-500));
@@ -145,6 +154,7 @@ export class LastfmScrobbleOutbox {
     const remaining: LastfmCachedScrobble[] = [];
     let sent = 0;
     let blocked = false;
+    let needsReconnect = false;
 
     for (const item of items) {
       if (blocked) {
@@ -155,19 +165,43 @@ export class LastfmScrobbleOutbox {
         await send(item);
         sent += 1;
       } catch (err) {
+        const authFailure = err instanceof LastfmApiError && err.authFailure;
+        if (authFailure) {
+          // The session itself is invalid (revoked access, expired key) —
+          // every later item would fail the exact same way, so there's no
+          // point burning requests on them. Keep this item (and everything
+          // behind it) queued rather than dropping it, stop the flush, and
+          // tell the caller to prompt a reconnect instead of quietly
+          // blocking forever with no way for the user to find out. Once the
+          // user reconnects, the next flush retries from the top as usual.
+          remaining.push({
+            ...item,
+            attempts: item.attempts + 1,
+            lastAttemptAt: Date.now(),
+            lastError: errorMessage(err),
+            authFailure: true,
+          });
+          blocked = true;
+          needsReconnect = true;
+          continue;
+        }
         if (!shouldRetryLastfmError(err)) continue;
         remaining.push({
           ...item,
           attempts: item.attempts + 1,
           lastAttemptAt: Date.now(),
           lastError: errorMessage(err),
+          // A transient failure this time clears any stale auth-failure
+          // flag from an earlier round, so needsReconnect always reflects
+          // the most recent reason this item didn't send.
+          authFailure: false,
         });
         blocked = true;
       }
     }
 
     await this.write(remaining);
-    return { sent, remaining: remaining.length };
+    return { sent, remaining: remaining.length, needsReconnect };
   }
 
   private async write(items: LastfmCachedScrobble[]): Promise<void> {
@@ -290,8 +324,28 @@ export function shouldRetryLastfmError(err: unknown): boolean {
   return true;
 }
 
+// Terminal credential failure: retrying is pointless, but callers still need to
+// tell it apart from an ordinary rejection so the play can be preserved and the
+// "reconnect Last.fm" state can surface.
+export function isLastfmAuthFailure(err: unknown): boolean {
+  return err instanceof LastfmApiError && err.authFailure;
+}
+
+// Authentication Failed / Invalid session key / Invalid API key: the
+// credentials themselves are bad, not the service. Retrying with the same
+// session key can never succeed — every scrobble will fail identically
+// until the user reconnects — so these are terminal, not transient.
+const LASTFM_AUTH_FAILURE_CODES = new Set([4, 9, 10]);
+
+function isAuthLastfmFailure(code: number | null): boolean {
+  return code !== null && LASTFM_AUTH_FAILURE_CODES.has(code);
+}
+
 function isRetryableLastfmFailure(code: number | null, status: number): boolean {
-  if (code !== null) return code === 9 || code === 11 || code === 16 || code === 29;
+  if (code !== null) {
+    if (LASTFM_AUTH_FAILURE_CODES.has(code)) return false;
+    return code === 11 || code === 16 || code === 29;
+  }
   return status === 200 || status === 408 || status === 429 || status >= 500;
 }
 
@@ -354,6 +408,10 @@ function normalizeCachedScrobble(item: unknown): LastfmCachedScrobble | null {
     createdAt: Number.isFinite(raw.createdAt) ? Number(raw.createdAt) : Date.now(),
     lastAttemptAt: Number.isFinite(raw.lastAttemptAt) ? Number(raw.lastAttemptAt) : null,
     lastError: typeof raw.lastError === 'string' ? raw.lastError : null,
+    // Outbox files written before this field existed default to false —
+    // treated as "unknown, not currently known to be an auth problem",
+    // which is exactly right: the next flush attempt re-classifies it.
+    authFailure: raw.authFailure === true,
   };
 }
 

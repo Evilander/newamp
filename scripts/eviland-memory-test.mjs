@@ -49,7 +49,12 @@ const fail = (m) => { pass = false; log.push('FAIL: ' + m); };
 
 // ─── 1. Module surface sanity ───────────────────────────────────────────────
 if (VISUAL_MEMORY_SCHEMA_VERSION !== 1) fail(`schema version expected 1, got ${VISUAL_MEMORY_SCHEMA_VERSION}`);
-if (VISUAL_MEMORY_ALGO_VERSION !== 1) fail(`algo version expected 1, got ${VISUAL_MEMORY_ALGO_VERSION}`);
+// Pinned to the constant, not a literal: bumping it is the correct response to a
+// randomizer/director change (algo-version-guard enforces that), and this test
+// exists to prove minted plans carry whatever the current version is.
+if (!Number.isInteger(VISUAL_MEMORY_ALGO_VERSION) || VISUAL_MEMORY_ALGO_VERSION < 1) {
+  fail(`algo version should be a positive integer, got ${VISUAL_MEMORY_ALGO_VERSION}`);
+}
 if (!Array.isArray(LINEAGE_PLAY_LADDER) || LINEAGE_PLAY_LADDER.join(',') !== '8,32,96,256') {
   fail(`LINEAGE_PLAY_LADDER expected [8,32,96,256], got ${LINEAGE_PLAY_LADDER}`);
 }

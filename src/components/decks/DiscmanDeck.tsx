@@ -6,12 +6,15 @@ import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
+import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
 
 const MODE_LABELS: Record<DeckProps['mode'], string> = {
   normal: 'NORMAL',
   shuffle: 'SHUFFLE',
   'repeat-all': 'REPEAT ALL',
   'repeat-one': 'REPEAT 1',
+  'shuffle-repeat-all': 'SHUF + REPEAT ALL',
+  'shuffle-repeat-one': 'SHUF + REPEAT 1',
 };
 
 export function DiscmanDeck(props: DeckProps): JSX.Element {
@@ -315,8 +318,8 @@ export function DiscmanDeck(props: DeckProps): JSX.Element {
           </button>
           <button
             type="button"
-            className={`pxbtn ${mode === 'shuffle' ? 'is-active' : ''}`}
-            onClick={() => onSetMode(mode === 'shuffle' ? 'normal' : 'shuffle')}
+            className={`pxbtn ${isShuffleMode(mode) ? 'is-active' : ''}`}
+            onClick={() => onSetMode(combinePlaybackMode(!isShuffleMode(mode), repeatModeOf(mode)))}
             title="Shuffle"
           >
             <span className="deck-dm-control-icon is-shuffle" aria-hidden="true">RND</span>

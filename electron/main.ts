@@ -20,7 +20,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { readFile, realpath, writeFile } from 'node:fs/promises';
+import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { LibraryStore } from './library.js';
 import { LibraryWatcher } from './library-watcher.js';
 import { findLocalLyricsForTrack } from './local-lyrics.js';
@@ -39,8 +39,10 @@ import {
   LastfmScrobbleOutbox,
   scrobbleLastfmTrack,
   shouldRetryLastfmError,
+  isLastfmAuthFailure,
   startLastfmAuth,
   updateLastfmNowPlaying,
+  type LastfmOutboxFlushResult,
 } from './lastfm.js';
 import {
   playbackMode,
@@ -63,7 +65,14 @@ import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
 import { exportPlaylistFolder } from './playlist-export.js';
 import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
 import { generateOpenAiLinerNotes } from './openai-assist.js';
-import { isWinampClassicSkinArchiveName, parseWinampClassicSkinArchive } from './winamp-skin-import.js';
+import {
+  assertSkinImportPathAllowed,
+  isWinampClassicSkinArchiveName,
+  MAX_SKIN_IMPORT_FILE_BYTES,
+  parseWinampClassicSkinArchive,
+} from './winamp-skin-import.js';
+import { createPlaylistCoverGuard } from './playlist-cover-guard.js';
+import { shouldStayResidentOnWindowAllClosed } from './window-lifecycle-policy.js';
 import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
 import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
@@ -85,6 +94,7 @@ import type {
   OpenFilesResult,
   PlayerCommand,
   SavedPlaylist,
+  SavePlaylistInput,
   ScanProgress,
   SupportDiagnostics,
   Track,
@@ -454,6 +464,10 @@ function getExclusiveOutput(): ExclusiveOutput {
 // Per-file format probe cache (bit depth / channel count aren't in the library
 // DB). Keyed on path+mtime so edits invalidate naturally.
 const exclusiveSourceCache = new Map<string, ExclusiveTrackSource>();
+// playlist:save only accepts a coverImagePath that playlist:pick-cover just
+// approved via a real dialog.showOpenDialog() result — see
+// electron/playlist-cover-guard.ts.
+const playlistCoverGuard = createPlaylistCoverGuard();
 
 async function resolveExclusiveSource(trackId: number): Promise<ExclusiveTrackSource | null> {
   // The library lookup IS the access gate: only real DB rows resolve, same
@@ -1469,9 +1483,31 @@ function createScannerService(store: LibraryStore): Scanner {
 function createLibraryWatcherService(): LibraryWatcher {
   return new LibraryWatcher((targets) => {
     if (!settings.get().libraryAutoWatch || !targets.length) return;
-    library.pruneMissingTracks(targets);
+    void reconcileWatchedTargets(targets);
+  });
+}
+
+// A watched path can vanish for a moment without being deleted — editor
+// save-by-rename, sync clients, network drives. Pruning on first sight
+// destroyed the track and all of its play history/ratings for a file that
+// came right back. Re-check after a short debounce: only prune what is still
+// gone, and let anything that reappeared go through the rescan below as an
+// ordinary modification.
+const PRUNE_RECHECK_DELAY_MS = 1500;
+
+let watcherReconcile: Promise<void> = Promise.resolve();
+
+function reconcileWatchedTargets(targets: string[]): Promise<void> {
+  const run = watcherReconcile.then(async () => {
+    await new Promise((resolve) => setTimeout(resolve, PRUNE_RECHECK_DELAY_MS));
+    const stillMissing = targets.filter((target) => !existsSync(target));
+    if (stillMissing.length) library.pruneMissingTracks(stillMissing);
     void scanner.start(targets, { force: true });
   });
+  watcherReconcile = run.catch((err) => {
+    console.warn(`[newamp] library watcher reconcile failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+  return run;
 }
 
 async function reloadRuntimeStores(userData: string): Promise<void> {
@@ -1780,7 +1816,12 @@ function registerIpc(): void {
     return library.getTracksByIdsInOrder(cleanIds);
   });
   ipcMain.handle('playlist:list', async () => library.getPlaylists());
-  ipcMain.handle('playlist:save', async (_e, input) => library.savePlaylist(input));
+  ipcMain.handle('playlist:save', async (_e, input: SavePlaylistInput) => {
+    if (input?.coverImagePath && !playlistCoverGuard.isApproved(input.coverImagePath)) {
+      throw new Error('Choose the playlist icon with the picker before saving.');
+    }
+    return library.savePlaylist(input);
+  });
   ipcMain.handle('playlist:add-tracks', async (_e, input) => library.addTracksToPlaylist(input));
   ipcMain.handle('playlist:delete', async (_e, id: number) => library.deletePlaylist(id));
   ipcMain.handle('playlist:get-tracks', async (_e, id: number) =>
@@ -1795,7 +1836,9 @@ function registerIpc(): void {
       ],
     };
     const result = mainWin ? await dialog.showOpenDialog(mainWin, options) : await dialog.showOpenDialog(options);
-    return result.canceled ? null : result.filePaths[0] ?? null;
+    if (result.canceled || !result.filePaths[0]) return null;
+    playlistCoverGuard.approve(result.filePaths[0]);
+    return result.filePaths[0];
   });
   ipcMain.handle('playlist:export-m3u', async (_e, id: number) => {
     const result = await choosePlaylistExportPath(id, 'm3u8', [{ name: 'M3U playlist', extensions: ['m3u8', 'm3u'] }]);
@@ -2269,7 +2312,11 @@ function registerIpc(): void {
     try {
       await scrobbleLastfmTrack(settings.get(), track, timestamp);
     } catch (err) {
-      if (shouldRetryLastfmError(err)) {
+      // An auth failure is not retryable, but the play still has to be kept:
+      // dropping it here would lose every scrobble made while the session key
+      // is dead, and with nothing queued the outbox could never report that a
+      // reconnect is needed. Queue it so it survives and stays visible.
+      if (shouldRetryLastfmError(err) || isLastfmAuthFailure(err)) {
         await lastfmOutbox.enqueue(track, timestamp, errorMessage(err));
       }
     }
@@ -4233,6 +4280,13 @@ function safeFileStem(name: string): string {
 }
 
 async function importSkinFile(skinPath: string): Promise<CustomSkin> {
+  // settings:skin-import-file is wired to app-wide drag/drop, but it's also
+  // exposed directly on window.newamp, so any renderer script can call it
+  // with an arbitrary path — validate before touching the filesystem.
+  assertSkinImportPathAllowed(skinPath);
+  const info = await stat(skinPath);
+  if (!info.isFile()) throw new Error('Skin path must be a file.');
+  if (info.size > MAX_SKIN_IMPORT_FILE_BYTES) throw new Error('Skin file is too large.');
   const content = await readFile(skinPath);
   return isWinampClassicSkinArchiveName(skinPath)
     ? parseWinampClassicSkinArchive(content, skinPath)
@@ -4731,7 +4785,7 @@ function normalizeOpenTargets(paths: string[]): Array<{ path: string; kind: 'fil
   return out;
 }
 
-async function flushLastfmOutbox(): Promise<{ sent: number; remaining: number }> {
+async function flushLastfmOutbox(): Promise<LastfmOutboxFlushResult> {
   return lastfmOutbox.flush((item) =>
     scrobbleLastfmTrack(settings.get(), item.track, item.timestamp),
   );
@@ -4938,7 +4992,7 @@ app.on('will-quit', () => {
 });
 
 app.on('window-all-closed', () => {
-  if (!isQuitting && tray && process.platform !== 'darwin') return;
+  if (shouldStayResidentOnWindowAllClosed({ isQuitting, hasTray: !!tray, platform: process.platform })) return;
   scanner?.cancel();
   library?.close();
   settings?.flushSync();

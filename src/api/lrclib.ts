@@ -2,6 +2,7 @@
 // Docs: https://lrclib.net/docs
 
 import { NEWAMP_REPO_USER_AGENT } from '@shared/app-version';
+import { localStorageSafe, setItemWithPrune } from '../lib/wiki.ts';
 
 const BASE = 'https://lrclib.net/api';
 const CACHE_PREFIX = 'newamp:lyrics:v1:';
@@ -50,7 +51,7 @@ export async function fetchLyrics(opts: {
     /* fall through to search */
   }
 
-  // fallback: search and return the first credible result
+  // fallback: search and return the most credible result
   try {
     const res = await fetch(
       `${BASE}/search?artist_name=${encodeURIComponent(opts.artist)}&track_name=${encodeURIComponent(opts.title)}`,
@@ -58,12 +59,37 @@ export async function fetchLyrics(opts: {
     );
     if (!res.ok) return null;
     const arr = (await res.json()) as LrclibResult[];
-    const result = arr[0] ?? null;
+    const result = pickBestSearchResult(arr, opts);
     if (result) writeCachedLyrics(cacheKey, result);
     return result;
   } catch {
     return null;
   }
+}
+
+// The search endpoint has no exact-match guarantee (unlike /get), so arr[0]
+// can be a same-titled but different song. Prefer a result that actually
+// matches the track's duration or album — those two are the identity
+// signals the caller already has — before falling back to the first hit.
+// A wrong pick here used to get cached for CACHE_TTL_MS (30 days).
+const DURATION_TOLERANCE_S = 3;
+function pickBestSearchResult(
+  arr: LrclibResult[],
+  opts: { album?: string; duration?: number },
+): LrclibResult | null {
+  if (!arr.length) return null;
+  if (opts.duration != null) {
+    const durationMatch = arr.find(
+      (r) => typeof r.duration === 'number' && Math.abs(r.duration - opts.duration!) <= DURATION_TOLERANCE_S,
+    );
+    if (durationMatch) return durationMatch;
+  }
+  if (opts.album) {
+    const wantAlbum = normalizeCachePart(opts.album);
+    const albumMatch = arr.find((r) => r.albumName && normalizeCachePart(r.albumName) === wantAlbum);
+    if (albumMatch) return albumMatch;
+  }
+  return arr[0] ?? null;
 }
 
 export function lyricsCacheKey(opts: { artist: string; title: string; album?: string }): string {
@@ -76,28 +102,36 @@ function normalizeCachePart(value: string): string {
 }
 
 function readCachedLyrics(key: string): LrclibResult | null {
-  if (typeof localStorage === 'undefined') return null;
+  const storage = localStorageSafe();
+  if (!storage) return null;
   try {
-    const raw = localStorage.getItem(key);
+    const raw = storage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { cachedAt?: number; result?: LrclibResult };
     if (!parsed.cachedAt || Date.now() - parsed.cachedAt > CACHE_TTL_MS) {
-      localStorage.removeItem(key);
+      storage.removeItem(key);
       return null;
     }
     return parsed.result ?? null;
   } catch {
-    localStorage.removeItem(key);
+    storage.removeItem(key);
     return null;
   }
 }
 
 function writeCachedLyrics(key: string, result: LrclibResult): void {
-  if (typeof localStorage === 'undefined' || !hasLyricPayload(result)) return;
+  if (!hasLyricPayload(result)) return;
+  const storage = localStorageSafe();
+  if (!storage) return;
+  setItemWithPrune(storage, key, JSON.stringify({ cachedAt: Date.now(), result }), CACHE_PREFIX, parseCachedAt);
+}
+
+function parseCachedAt(raw: string): number | null {
   try {
-    localStorage.setItem(key, JSON.stringify({ cachedAt: Date.now(), result }));
+    const parsed = JSON.parse(raw) as { cachedAt?: number };
+    return typeof parsed.cachedAt === 'number' ? parsed.cachedAt : null;
   } catch {
-    /* storage can be full or blocked; lyrics still render from the network response */
+    return null;
   }
 }
 
