@@ -91,10 +91,10 @@ assert.ok(
   'Last.fm proof should discover the current NewAmp app settings path',
 );
 
-const [packageSource, gateSource, readmeSource, liveProofSource] = await Promise.all([
+const [packageSource, gateSource, featuresSource, liveProofSource] = await Promise.all([
   readFile(new URL('../package.json', import.meta.url), 'utf8'),
   readFile(new URL('./release-gate.mjs', import.meta.url), 'utf8'),
-  readFile(new URL('../README.md', import.meta.url), 'utf8'),
+  readFile(new URL('../docs/features.md', import.meta.url), 'utf8'),
   readFile(new URL('./lastfm-live-proof.mjs', import.meta.url), 'utf8'),
 ]);
 
@@ -103,7 +103,7 @@ assert.match(packageSource, /release:start-lastfm-proof/, 'package scripts shoul
 assert.match(packageSource, /release:record-lastfm-proof/, 'package scripts should expose Last.fm proof recorder');
 assert.match(packageSource, /release:check-lastfm-proof/, 'package scripts should expose Last.fm proof checker');
 assert.match(gateSource, /smoke:lastfm-live-proof/, 'release gate should run Last.fm live proof helper smoke');
-assert.match(readmeSource, /release:start-lastfm-proof/, 'README should document Last.fm live proof flow');
+assert.match(featuresSource, /release:start-lastfm-proof/, 'the features doc should document the Last.fm live proof flow for maintainers');
 assert.doesNotMatch(liveProofSource, /writeFileSync\([^)]*sharedSecret/, 'proof writer must not write the raw shared secret');
 assert.match(liveProofSource, /sessionKeySha256/, 'proof should hash the session key instead of storing it');
 

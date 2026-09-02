@@ -72,6 +72,6 @@ assert.match(mainSource, /settings\.set\(\{ libraryRoots: targets \}\)/, 'main p
 assert.match(emptyLibrarySource, /getSuggestedMusicFolders/, 'empty library onboarding should load detected folders');
 assert.match(emptyLibrarySource, /data-music-folder-suggestion/, 'empty library onboarding should render one-click suggestion actions');
 assert.match(emptyLibrarySource, /scanSuggestedFolder\(bestSuggestion\.path\)/, 'primary empty-library scan should use the best detected root');
-assert.match(readmeSource, /one-click music folder suggestions/i, 'README should document first-run folder suggestions');
+assert.match(readmeSource, /offer to scan your Music folder/i, 'README should document first-run folder suggestions');
 
 console.log(JSON.stringify({ ok: true, suggestions, defaultRoots, fallbackRoots }, null, 2));

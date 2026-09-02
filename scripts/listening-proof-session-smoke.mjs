@@ -31,16 +31,16 @@ assert.match(report.recordCommand, /confirm-output-switching/);
 assert.match(report.recordCommand, /confirm-crossfade/);
 assert.match(report.recordCommand, /confirm-gapless/);
 
-const [packageSource, gateSource, readmeSource] = await Promise.all([
+const [packageSource, gateSource, featuresSource] = await Promise.all([
   readFile('package.json', 'utf8'),
   readFile('scripts/release-gate.mjs', 'utf8'),
-  readFile('README.md', 'utf8'),
+  readFile('docs/features.md', 'utf8'),
 ]);
 
 assert.match(packageSource, /smoke:listening-proof-session/, 'package scripts should expose listening proof session smoke');
 assert.match(packageSource, /release:start-listening-proof/, 'package scripts should expose listening proof session launcher');
 assert.match(gateSource, /smoke:listening-proof-session/, 'release gate should cover the listening proof session helper');
-assert.match(readmeSource, /release:start-listening-proof/, 'README should document the listening proof helper');
+assert.match(featuresSource, /release:start-listening-proof/, 'the features doc should document the listening proof helper for maintainers');
 
 console.log(JSON.stringify({
   ok: true,
