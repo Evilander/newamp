@@ -2328,10 +2328,11 @@ function registerIpc(): void {
     // Stop the two automatic mutation sources FIRST, then take the pre-restore
     // safety snapshot from the live stores — taking it before quiescing (the
     // old order) could miss whatever a scan or a batched flush hadn't written
-    // to disk yet.
-    scanner?.cancel();
+    // to disk yet. quiesceLibraryMutations also drains the watcher's pending
+    // reconcile, so a prune queued before the restore cannot land on the
+    // restored library; reloadRuntimeStores below lifts the quiesce.
     libraryWatcher?.stop();
-    await scanner?.start([]).catch(() => {});
+    await quiesceLibraryMutations();
     const safety = await createBackupFromLiveStores(userData);
 
     // Drain any write already in flight before either store's file gets
