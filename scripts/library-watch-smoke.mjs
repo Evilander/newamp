@@ -60,7 +60,7 @@ assert.match(settingsSource, /libraryAutoWatch/, 'SettingsStore should default a
 assert.match(mainSource, /LibraryWatcher/, 'main process should own the filesystem watcher');
 assert.match(mainSource, /syncLibraryWatcher/, 'main process should restart watcher when settings change');
 assert.match(mainSource, /scanner\.start\(targets, \{ force: true \}\)/, 'watcher rescans should force metadata and folder-art refresh');
-assert.match(mainSource, /stats\.tracks === 0 \|\| settings\.get\(\)\.libraryAutoWatch/, 'startup should refresh configured roots when auto-watch is enabled');
+assert.match(mainSource, /trackCount === 0 \|\| settings\.get\(\)\.libraryAutoWatch/, 'startup should refresh configured roots when auto-watch is enabled');
 assert.match(settingsViewSource, /Auto-watch library/, 'Settings should expose the auto-watch toggle');
 assert.match(packageSource, /"smoke:library-watch"/, 'package.json should expose library watch smoke');
 
