@@ -38,6 +38,11 @@ The builds aren't code-signed, so Windows SmartScreen will want "More info → R
 anyway", and macOS will want a right-click → Open the first time. Checksums for
 every file are in `SHA256SUMS.txt`.
 
+The Linux tarball expects the libraries every Electron app needs. A desktop
+install already has them; a bare Debian or Ubuntu image is missing `libnss3`,
+`libasound2`, and GTK 3. If it exits with a sandbox error, run
+`./newamp --no-sandbox`, or make `chrome-sandbox` root-owned with mode 4755.
+
 ## What it does
 
 - Plays MP3, FLAC, OGG, Opus, WAV, M4A, AAC, WMA, AIFF, APE, WV, DSF and a few
