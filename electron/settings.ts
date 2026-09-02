@@ -368,10 +368,34 @@ export class SettingsStore {
     }
   }
 
+  // Immutable JSON snapshot of the live settings object. this.state is always
+  // current — only the write to settings.json is debounced (the resumeState
+  // autosave) — so this reflects the newest value regardless of what a
+  // pending persist has or hasn't landed on disk yet. The support-backup
+  // coordinator uses this instead of reading settings.json off disk, which
+  // can lag behind by up to that debounce window.
+  snapshotJson(): string {
+    return JSON.stringify(this.state, null, 2);
+  }
+
+  // Waits out any async persist already in flight. A caller that is about to
+  // replace settings.json out from under this store (support-backup restore)
+  // needs this before doing so: persistAsync's persistSeq check only stops a
+  // stale write from starting its rename late — it can't stop one that was
+  // already dispatched to the OS from racing a rename issued afterwards by
+  // this process. Draining the in-flight write removes that race instead of
+  // relying on the sequence check to win it.
+  async waitForPendingWrites(): Promise<void> {
+    while (this.persistInFlight) {
+      await this.persistInFlight.catch(() => {});
+    }
+  }
+
   // Truly synchronous flush for the quit path — the process may exit
   // immediately after, so this cannot rely on an async write completing.
   // Also used before file-level operations (e.g. backup restore) that would
-  // otherwise race a pending debounced write.
+  // otherwise race a pending debounced write — pair with waitForPendingWrites()
+  // first if an in-flight persist may already be running (see there).
   flushSync(): void {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);

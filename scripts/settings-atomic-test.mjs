@@ -93,5 +93,47 @@ const tmpSiblings = () => readdirSync(smokeRoot).filter((f) => f.includes('.tmp'
   assert.ok(store.recoveryEvents[0].backupPath.includes('.corrupt-'), 'bad file must be quarantined, kept as backup');
 }
 
+// 6. A quit-path synchronous persist while the debounced async persist is
+//    still writing must not corrupt settings.json or strand a temp file. The two
+//    writers used to share one `.tmp-<pid>` path (same collision library.db had):
+//    the sync write could truncate the inode the async write still held, rename
+//    it into place, and let the async bytes land inside the live file.
+{
+  const raceRoot = join(smokeRoot, 'race');
+  await mkdir(raceRoot, { recursive: true });
+  const racePath = join(raceRoot, 'settings.json');
+  const store = new SettingsStore(racePath);
+  store.set({ resumeState: { queueTrackIds: [7, 8, 9], index: 2, currentTime: 99.5, mode: 'normal', updatedAt: Date.now() } });
+  const inFlight = store.persistAsync?.(); // start the debounced write now instead of waiting for its timer
+  store.set({ volume: 0.42, lastfmSessionKey: 'race-key' }); // quit-path style synchronous write
+  store.flushSync();
+  await Promise.resolve(inFlight).catch(() => {});
+  await sleep(250); // let any stray threadpool write land
+
+  const onDisk = JSON.parse(readFileSync(racePath, 'utf-8')); // throws if the file is torn
+  assert.equal(onDisk.volume, 0.42, 'the synchronous write must win');
+  assert.equal(onDisk.lastfmSessionKey, 'race-key');
+  assert.equal(onDisk.resumeState?.currentTime, 99.5, 'the earlier resumeState must not be lost either');
+  const strays = readdirSync(raceRoot).filter((f) => f.includes('.tmp'));
+  assert.deepEqual(strays, [], `no temp files should survive the race, found ${strays.join(', ')}`);
+
+  // The property the race above can only sample: the two writers cannot pick
+  // the same temp path in the first place.
+  const settingsSrc = readFileSync(join(repoRoot, 'electron', 'settings.ts'), 'utf-8');
+  const recoverySrc = readFileSync(join(repoRoot, 'electron', 'recovery.ts'), 'utf-8');
+  assert.match(recoverySrc, /\.tmp-\$\{process\.pid\}-sync/, 'the synchronous writer needs its own temp suffix');
+  assert.match(settingsSrc, /\.tmp-\$\{process\.pid\}-\$\{seq\}/, 'the async persist must use a per-persist temp path');
+}
+
+// 7. A short write from the OS must not be treated as complete: the durable
+//    sync writer loops until every byte is on disk before it fsyncs.
+{
+  const recoverySrc = readFileSync(join(repoRoot, 'electron', 'recovery.ts'), 'utf-8');
+  assert.match(recoverySrc, /while \(written < buf\.length\) \{\s*written \+= writeSync\(fd, buf, written, buf\.length - written\);/, 'durableWriteFileSync must loop on the bytes actually written');
+  // And a rename that keeps failing must never fall back to an unsynced in-place write.
+  assert.doesNotMatch(recoverySrc, /writeFileSync\(toPath, readFileSync\(fromPath\)\)/, 'the rename fallback must not be a plain in-place writeFileSync');
+  assert.match(recoverySrc, /durableWriteFileSync\(toPath, readFileSync\(fromPath\)\)/, 'the last-resort in-place write must be fsynced');
+}
+
 await rm(smokeRoot, { recursive: true, force: true });
 console.log('[settings-atomic-test] PASS: atomic settings persistence verified');
