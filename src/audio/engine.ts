@@ -30,6 +30,9 @@ export type EngineListener = (e: EngineState) => void;
  * unchanged. `play` returning false means "this track can't go external —
  * use the normal deck path" (podcasts, missing ids, device failure).
  */
+/** See AudioEngine.play — whether a request is the one now playing, or was superseded in flight. */
+export type PlayOutcome = 'started' | 'stale';
+
 export interface ExternalTransport {
   play(trackId: number, startAt: number): Promise<boolean>;
   pause(): void;
@@ -619,7 +622,15 @@ export class AudioEngine {
     this.notify();
   }
 
-  async play(src: string, trackId: number | null, startAt = 0): Promise<void> {
+  /**
+   * Starts `src`. Resolves 'started' when this request is the one now
+   * playing, or 'stale' when a newer play() superseded it while it was in
+   * flight — the engine has already left its state alone in that case, and
+   * callers must leave theirs alone too (no play count, no scrobble, no
+   * queue side effects for a track the user already moved past). A failure
+   * of the current request still rejects with the playback error.
+   */
+  async play(src: string, trackId: number | null, startAt = 0): Promise<PlayOutcome> {
     const seq = ++this.playSeq;
     // A new play attempt cancels any terminal ended state immediately — the
     // external path resolves asynchronously, and a stuck ended:true across
@@ -627,13 +638,14 @@ export class AudioEngine {
     if (this.state.ended) this.patch({ ended: false });
     if (this.externalTransport && trackId != null) {
       const outcome = await this.tryExternalPlay(src, trackId, startAt, seq);
-      if (outcome !== 'declined') return;
+      if (outcome === 'accepted') return 'started';
+      if (outcome === 'stale') return 'stale';
     } else if (this.externalActive) {
       // Current track is external but the next one can't be (no track id) —
       // release the exclusive device before the deck path starts.
       this.deactivateExternal(true);
     }
-    if (seq !== this.playSeq) return;
+    if (seq !== this.playSeq) return 'stale';
     const graph = this.ensureGraph();
     if (graph.ctx.state === 'suspended') {
       try {
@@ -641,30 +653,21 @@ export class AudioEngine {
       } catch {
         /* ignore */
       }
+      if (seq !== this.playSeq) return 'stale';
     }
 
     const current = this.activeDeck;
     if (current.el.src === src || current.el.currentSrc === src) {
       this.patch({ trackId, ended: false, error: null });
       this.applyStartPosition(current, startAt);
-      try {
-        await current.el.play();
-      } catch (err) {
-        this.patch({ error: (err as Error).message ?? 'Playback failed' });
-        throw err;
-      }
-      return;
+      return this.awaitDeckPlay(current, seq);
     }
 
     const preparedDeck = this.findPreparedDeck(src);
-    if (preparedDeck) {
-      await this.playPreparedDeck(preparedDeck, src, trackId);
-      return;
-    }
+    if (preparedDeck) return this.playPreparedDeck(preparedDeck, src, trackId, seq);
 
     if (this.crossfadeMs > 0 && current.el.src && !current.el.paused) {
-      await this.crossfadeTo(src, trackId, startAt);
-      return;
+      return this.crossfadeTo(src, trackId, startAt, seq);
     }
 
     this.clearFadeTimer();
@@ -674,12 +677,21 @@ export class AudioEngine {
     this.patch({ src, trackId, currentTime: 0, duration: 0, ended: false, error: null });
     current.el.src = src;
     this.applyStartPosition(current, startAt);
+    return this.awaitDeckPlay(current, seq);
+  }
+
+  // Awaits the element's play() and reports whether request `seq` is still
+  // the newest one afterwards. A failure only becomes the engine's error when
+  // the request is current; a superseded request's failure is noise.
+  private async awaitDeckPlay(deck: Deck, seq: number): Promise<PlayOutcome> {
     try {
-      await current.el.play();
+      await deck.el.play();
     } catch (err) {
+      if (seq !== this.playSeq) return 'stale';
       this.patch({ error: (err as Error).message ?? 'Playback failed' });
       throw err;
     }
+    return seq === this.playSeq ? 'started' : 'stale';
   }
 
   prepareNext(src: string, trackId: number | null, startAt = 0): void {
@@ -719,7 +731,7 @@ export class AudioEngine {
     return deck;
   }
 
-  private async playPreparedDeck(deck: Deck, src: string, trackId: number | null): Promise<void> {
+  private async playPreparedDeck(deck: Deck, src: string, trackId: number | null, seq: number): Promise<PlayOutcome> {
     const graph = this.ensureGraph();
     const from = this.activeDeck;
     this.clearFadeTimer();
@@ -729,15 +741,10 @@ export class AudioEngine {
     this.activeDeckIndex = deck.id;
     this.preparedNext = null;
     this.patch({ src, trackId, currentTime: 0, duration: 0, ended: false, error: null, buffering: true });
-    try {
-      await deck.el.play();
-    } catch (err) {
-      this.patch({ error: (err as Error).message ?? 'Playback failed' });
-      throw err;
-    }
+    return this.awaitDeckPlay(deck, seq);
   }
 
-  private async crossfadeTo(src: string, trackId: number | null, startAt = 0): Promise<void> {
+  private async crossfadeTo(src: string, trackId: number | null, startAt: number, seq: number): Promise<PlayOutcome> {
     const graph = this.ensureGraph();
     this.clearFadeTimer();
     this.preparedNext = null;
@@ -770,10 +777,16 @@ export class AudioEngine {
     try {
       await to.el.play();
     } catch (err) {
+      // A newer play() owns the decks now — don't hand them back to `from`.
+      if (seq !== this.playSeq) return 'stale';
       this.activeDeckIndex = from.id;
       this.patch({ error: (err as Error).message ?? 'Playback failed' });
       throw err;
     }
+    // Same after a successful start: the ramps and the fade timer belong to
+    // whichever request is current, and a superseded one must not schedule
+    // them over the newer track's gains.
+    if (seq !== this.playSeq) return 'stale';
 
     to.gain.gain.linearRampToValueAtTime(1, now + seconds);
     from.gain.gain.linearRampToValueAtTime(0, now + seconds);
@@ -781,6 +794,7 @@ export class AudioEngine {
       if (this.activeDeckIndex !== from.id) this.silenceDeck(from, true);
       this.fadeTimer = null;
     }, this.crossfadeMs + 120);
+    return 'started';
   }
 
   private silenceDeck(deck: Deck, clearSrc: boolean): void {

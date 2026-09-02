@@ -422,9 +422,18 @@ export class SettingsStore {
       .includes(value.mode)
       ? value.mode
       : 'normal';
+    // -1 is a real value here (queue loaded, nothing current) and must survive
+    // the round trip; clamping it to 0 is what made an idle queue come back
+    // with its first track selected.
+    const rawIndex = Math.trunc(Number(value.index));
+    const index = Number.isFinite(rawIndex) ? Math.max(-1, Math.min(queueTrackIds.length - 1, rawIndex)) : 0;
+    const rawCurrent = value.currentTrackId;
+    const currentTrackId =
+      rawCurrent === undefined ? undefined : Number.isInteger(rawCurrent) && (rawCurrent as number) > 0 ? (rawCurrent as number) : null;
     return {
       queueTrackIds,
-      index: Math.max(0, Math.min(queueTrackIds.length - 1, Math.trunc(Number(value.index) || 0))),
+      index,
+      ...(currentTrackId !== undefined ? { currentTrackId } : {}),
       currentTime: Math.max(0, Number(value.currentTime) || 0),
       mode,
       updatedAt: Math.max(0, Number(value.updatedAt) || Date.now()),
