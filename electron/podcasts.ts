@@ -1,7 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
+import { lookup as dnsLookup } from 'node:dns/promises';
+import * as http from 'node:http';
+import * as https from 'node:https';
 import type { PodcastEpisode, PodcastFeed, PodcastProgressInput, PodcastSubscription } from '../shared/types.js';
 import { NEWAMP_USER_AGENT } from '../shared/app-version.js';
 
@@ -169,8 +172,10 @@ export async function fetchPodcastSubscription(url: string): Promise<PodcastSubs
   if (!response.ok) throw new Error(`Podcast feed request failed: HTTP ${response.status}`);
   const contentLength = Number(response.headers.get('content-length') ?? 0);
   if (contentLength > MAX_FEED_BYTES) throw new Error('Podcast feed is too large.');
-  const xml = await response.text();
-  if (xml.length > MAX_FEED_BYTES) throw new Error('Podcast feed is too large.');
+  // response.text() enforces MAX_FEED_BYTES itself while the body streams in,
+  // so a server that lies about (or omits) Content-Length can't get the
+  // whole feed fully materialized before we notice — see fetchWithHostGuard.
+  const xml = await response.text(MAX_FEED_BYTES);
   return parsePodcastFeed(xml, normalized);
 }
 
@@ -188,21 +193,33 @@ export async function downloadPodcastEpisode(
     ?.episodes.find((item) => item.id === input.episodeId);
   if (!episode) return null;
 
-  const response = await fetchWithHostGuard(episode.audioUrl, {
-    headers: { 'User-Agent': `${NEWAMP_USER_AGENT} podcast downloader` },
-  });
-  if (!response.ok) throw new Error(`Podcast episode download failed: HTTP ${response.status}`);
-  const contentLength = Number(response.headers.get('content-length') ?? 0);
-  if (contentLength > MAX_EPISODE_BYTES) throw new Error('Podcast episode is too large to download.');
-  const data = Buffer.from(await response.arrayBuffer());
-  if (data.byteLength > MAX_EPISODE_BYTES) throw new Error('Podcast episode is too large to download.');
-
   const downloadsRoot = resolve(input.downloadsPath);
   const targetDir = join(downloadsRoot, stableId(input.feedUrl));
   await mkdir(targetDir, { recursive: true });
   const targetPath = join(targetDir, `${episode.id}${audioExtension(episode.audioUrl)}`);
   ensureInside(downloadsRoot, targetPath);
-  await writeFile(targetPath, data);
+  const partPath = `${targetPath}.part`;
+
+  const response = await fetchWithHostGuard(episode.audioUrl, {
+    headers: { 'User-Agent': `${NEWAMP_USER_AGENT} podcast downloader` },
+    timeoutMs: EPISODE_DOWNLOAD_TIMEOUT_MS,
+  });
+  if (!response.ok) throw new Error(`Podcast episode download failed: HTTP ${response.status}`);
+  const contentLength = Number(response.headers.get('content-length') ?? 0);
+  if (contentLength > MAX_EPISODE_BYTES) throw new Error('Podcast episode is too large to download.');
+
+  try {
+    // Streams straight to `<final>.part`, enforcing MAX_EPISODE_BYTES as
+    // bytes arrive (Content-Length above is only an early-rejection hint —
+    // a server can lie about it), and fsyncs before we ever rename it into
+    // place. Any failure here leaves nothing at partPath.
+    await response.saveToFile(partPath, MAX_EPISODE_BYTES);
+    await rename(partPath, targetPath);
+  } catch (err) {
+    await unlink(partPath).catch(() => {});
+    throw err;
+  }
+
   const info = await stat(targetPath);
   return store.markDownloaded({
     feedUrl: input.feedUrl,
@@ -387,22 +404,37 @@ function parseDate(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+// Explicit test escape: the podcast smokes serve fixture feeds from a local
+// http server. Never set outside test harnesses. Shared by the hostname-shape
+// guard below and the DNS-answer guard in resolveGuardedAddresses, so a
+// smoke that opts out gets past both layers, not just the first one.
+function podcastPrivateHostsAllowedForTesting(): boolean {
+  return process.env.NEWAMP_ALLOW_PRIVATE_PODCAST_HOSTS === '1';
+}
+
 /**
  * SSRF guard: block podcast fetches to loopback/private/link-local hosts so a
  * malicious feed can't probe the user's machine or LAN (e.g. 127.0.0.1,
- * 169.254.169.254, fridge.local). Hostname-literal check only — DNS-rebinding
- * defenses are out of scope for a single-user desktop app.
+ * 169.254.169.254, fridge.local). This only catches hosts that are already
+ * IP-literal-shaped (or the localhost/.local hostname patterns); a plain DNS
+ * name is caught later, once resolved, by resolveGuardedAddresses.
  * Exported for scripts/podcast-host-guard-test.mjs.
  */
 export function isBlockedPodcastHost(hostname: string): boolean {
-  // Explicit test escape: the podcast smokes serve fixture feeds from a local
-  // http server. Never set outside test harnesses.
-  if (process.env.NEWAMP_ALLOW_PRIVATE_PODCAST_HOSTS === '1') return false;
+  if (podcastPrivateHostsAllowedForTesting()) return false;
   let host = String(hostname).trim().toLowerCase();
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
   if (!host) return true;
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
+  return isBlockedIpLiteral(host);
+}
 
+// Byte-level classifier for a single IPv4/IPv6 literal (not a hostname): used
+// both for URL hostnames that are already IP-literal-shaped, and for the
+// addresses a hostname actually resolves to (see resolveGuardedAddresses) —
+// the latter is what stops a DNS name from reaching a private/link-local
+// address that the URL text never mentioned.
+function isBlockedIpLiteral(host: string): boolean {
   // IPv6 literals. Matching on the text shape is not enough: the URL parser
   // rewrites an IPv4-mapped literal like [::ffff:169.254.169.254] to
   // ::ffff:a9fe:a9fe, which starts with none of the blocked prefixes while
@@ -414,6 +446,7 @@ export function isBlockedPodcastHost(hostname: string): boolean {
     if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return true; // ::1
     if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true; // fe80::/10 link-local
     if ((bytes[0]! & 0xfe) === 0xfc) return true; // fc00::/7 unique-local
+    if (bytes[0] === 0xff) return true; // ff00::/8 multicast
     // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible) reach the v4 address.
     const mapped = bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
     const compatible = bytes.slice(0, 12).every((b) => b === 0);
@@ -433,9 +466,11 @@ export function isBlockedPodcastHost(hostname: string): boolean {
 function isBlockedIpv4(octets: number[]): boolean {
   const [a, b] = octets;
   if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 100 && b! >= 64 && b! <= 127) return true; // 100.64.0.0/10 carrier-grade NAT
   if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
   if (a === 172 && b! >= 16 && b! <= 31) return true;
   if (a === 192 && b === 168) return true;
+  if (a! >= 224) return true; // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved + broadcast
   return false;
 }
 
@@ -471,31 +506,337 @@ function ipv6ToBytes(literal: string): number[] | null {
 }
 
 const MAX_PODCAST_REDIRECTS = 5;
+const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+const DEFAULT_TOTAL_TIMEOUT_MS = 60_000; // plenty for a feed capped at MAX_FEED_BYTES
+const EPISODE_DOWNLOAD_TIMEOUT_MS = 30 * 60_000; // generous ceiling for a 750MB cap on a slow link
 
-// isBlockedPodcastHost only guards the URL a caller passes in. Node's fetch
-// follows redirects by default and never re-validates the hop, so a feed
+interface ResolvedAddress {
+  address: string;
+  family: number;
+}
+
+// Test-only escape hatch: lets a test point a "public-looking" hostname at a
+// local server (lookup) and vouch for the resulting loopback/private address
+// (allowAddress) without weakening the guard for anything else. Production
+// call sites (fetchPodcastSubscription, downloadPodcastEpisode) never pass
+// this. See scripts/podcast-http-boundary-test.mjs and
+// scripts/podcast-redirect-guard-test.mjs.
+export interface HostGuardOverrides {
+  lookup?: (hostname: string) => Promise<ResolvedAddress[]>;
+  allowAddress?: (address: string, family: number, hostname: string) => boolean;
+}
+
+export interface GuardedRequestInit {
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  /** Total operation timeout, covering every redirect hop plus the full body read. */
+  timeoutMs?: number;
+  /** How long to wait for response headers on a single hop before giving up. */
+  connectTimeoutMs?: number;
+}
+
+export interface GuardedResponse {
+  status: number;
+  ok: boolean;
+  headers: { get(name: string): string | null };
+  /** Reads the whole body as utf8, aborting the instant more than maxBytes has arrived. */
+  text(maxBytes: number): Promise<string>;
+  /** Streams the body straight to destPath, capping bytes read and removing destPath on any failure. */
+  saveToFile(destPath: string, maxBytes: number): Promise<number>;
+}
+
+// isBlockedPodcastHost only guards the URL text a caller passes in. A feed
 // hosted at an innocuous public URL could 302 to 127.0.0.1 or the cloud
-// metadata endpoint and the guard above would never see it. Fetch with
-// redirect: 'manual' and re-validate every hop (and the initial URL) against
-// the same host guard, capping the number of hops so a redirect loop can't
-// hang the request.
-// Exported for scripts/podcast-redirect-guard-test.mjs.
-export async function fetchWithHostGuard(url: string, init: RequestInit = {}): Promise<Response> {
-  let current = new URL(url);
-  for (let hop = 0; ; hop += 1) {
-    if (current.protocol !== 'https:' && current.protocol !== 'http:') {
-      throw new Error('Podcast request URL must use http:// or https://');
+// metadata endpoint, or its DNS name could simply resolve to one — neither
+// is visible in the URL string. This helper re-validates every hop (and the
+// address each hop actually resolves to, not just its hostname) with a real
+// node:http/https request instead of the global fetch, so it can also
+// enforce byte caps while the body streams in rather than after the fact.
+// Exported for scripts/podcast-redirect-guard-test.mjs and
+// scripts/podcast-http-boundary-test.mjs.
+export async function fetchWithHostGuard(
+  url: string,
+  init: GuardedRequestInit = {},
+  overrides?: HostGuardOverrides,
+): Promise<GuardedResponse> {
+  const connectTimeoutMs = init.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const controller = new AbortController();
+  const totalTimer = setTimeout(
+    () => controller.abort(new Error('Podcast request took too long')),
+    init.timeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS,
+  );
+  const onExternalAbort = () => controller.abort(init.signal?.reason ?? new Error('Podcast request was aborted'));
+  if (init.signal) {
+    if (init.signal.aborted) controller.abort(init.signal.reason);
+    else init.signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
+
+  let handedOffToResponse = false;
+  try {
+    let current = new URL(url);
+    for (let hop = 0; ; hop += 1) {
+      if (current.protocol !== 'https:' && current.protocol !== 'http:') {
+        throw new Error('Podcast request URL must use http:// or https://');
+      }
+      if (isBlockedPodcastHost(current.hostname)) {
+        throw new Error('Podcast request host is not allowed (private or local address)');
+      }
+      // Resolve and validate the DNS answer BEFORE dialling anything, then
+      // dial only those validated addresses (see pinnedLookup) — otherwise a
+      // second resolution during connect could swap in a private address
+      // (DNS rebinding) after the check above already passed.
+      const addresses = await resolveGuardedAddresses(current.hostname, overrides);
+      const res = await dialGuarded(current, addresses, init.headers, controller, connectTimeoutMs);
+      if (isRedirectStatus(res.statusCode ?? 0)) {
+        res.resume(); // discard the (usually empty) redirect body without buffering it
+        if (hop >= MAX_PODCAST_REDIRECTS) throw new Error('Podcast request redirected too many times');
+        const location = res.headers.location;
+        if (!location || Array.isArray(location)) throw new Error('Podcast request redirected with no Location header');
+        current = new URL(location, current);
+        continue;
+      }
+      handedOffToResponse = true;
+      return wrapGuardedResponse(res, controller, totalTimer);
     }
-    if (isBlockedPodcastHost(current.hostname)) {
+  } finally {
+    if (init.signal) init.signal.removeEventListener('abort', onExternalAbort);
+    // Once we hand a response back, wrapGuardedResponse's text()/saveToFile()
+    // own clearing the timer — it has to keep running through the body read.
+    if (!handedOffToResponse) clearTimeout(totalTimer);
+  }
+}
+
+async function resolveGuardedAddresses(hostname: string, overrides?: HostGuardOverrides): Promise<ResolvedAddress[]> {
+  const answers = overrides?.lookup ? await overrides.lookup(hostname) : await defaultDnsLookupAll(hostname);
+  if (!answers.length) throw new Error('Podcast request host did not resolve to any address');
+  if (podcastPrivateHostsAllowedForTesting()) return answers;
+  for (const { address, family } of answers) {
+    if (overrides?.allowAddress?.(address, family, hostname)) continue;
+    if (isBlockedIpLiteral(address.toLowerCase())) {
       throw new Error('Podcast request host is not allowed (private or local address)');
     }
-    const response = await fetch(current, { ...init, redirect: 'manual' });
-    if (!isRedirectStatus(response.status)) return response;
-    if (hop >= MAX_PODCAST_REDIRECTS) throw new Error('Podcast request redirected too many times');
-    const location = response.headers.get('location');
-    if (!location) throw new Error('Podcast request redirected with no Location header');
-    current = new URL(location, current);
   }
+  return answers;
+}
+
+async function defaultDnsLookupAll(hostname: string): Promise<ResolvedAddress[]> {
+  const results = await dnsLookup(hostname, { all: true, verbatim: true });
+  return results.map((result) => ({ address: result.address, family: result.family }));
+}
+
+// A custom dns-lookup function for http(s).request that always hands back
+// the address list we already validated, regardless of whether Node's
+// internals ask for one address or all of them (Happy Eyeballs / dual-stack
+// requests {all: true}). This is what actually binds the TCP connection to
+// the validated answer instead of letting the request re-resolve the
+// hostname itself.
+function pinnedLookup(addresses: ResolvedAddress[]): http.RequestOptions['lookup'] {
+  return ((hostname: string, options: any, callback: any) => {
+    if (typeof options === 'function') {
+      callback = options;
+      options = {};
+    }
+    if (options?.all) {
+      callback(null, addresses.map((a) => ({ address: a.address, family: a.family })));
+    } else {
+      const [first] = addresses;
+      callback(null, first!.address, first!.family);
+    }
+  }) as http.RequestOptions['lookup'];
+}
+
+function dialGuarded(
+  target: URL,
+  addresses: ResolvedAddress[],
+  headers: Record<string, string> | undefined,
+  controller: AbortController,
+  connectTimeoutMs: number,
+): Promise<http.IncomingMessage> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    if (controller.signal.aborted) {
+      rejectPromise(describeAbort(controller, controller.signal.reason));
+      return;
+    }
+    const connectTimer = setTimeout(
+      () => controller.abort(new Error('Podcast request timed out waiting for a response')),
+      connectTimeoutMs,
+    );
+    const transport = target.protocol === 'https:' ? https : http;
+    const req = transport.request(target, {
+      method: 'GET',
+      headers,
+      lookup: pinnedLookup(addresses),
+      signal: controller.signal,
+      ...(target.protocol === 'https:' ? { servername: target.hostname } : {}),
+    });
+    req.on('error', (err) => {
+      clearTimeout(connectTimer);
+      rejectPromise(describeAbort(controller, err));
+    });
+    req.on('response', (res) => {
+      clearTimeout(connectTimer);
+      resolvePromise(res);
+    });
+    req.end();
+  });
+}
+
+// Once the request/response has been destroyed by our own AbortController,
+// the error Node hands back is not reliably the friendly message we set —
+// prefer signal.reason, which is exactly what we passed to controller.abort().
+function describeAbort(controller: AbortController, err: unknown): Error {
+  if (controller.signal.aborted) {
+    const reason = controller.signal.reason;
+    if (reason instanceof Error) return reason;
+  }
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+function wrapGuardedResponse(
+  res: http.IncomingMessage,
+  controller: AbortController,
+  totalTimer: NodeJS.Timeout,
+): GuardedResponse {
+  const status = res.statusCode ?? 0;
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: {
+      get(name: string): string | null {
+        const value = res.headers[name.toLowerCase()];
+        if (value === undefined) return null;
+        return Array.isArray(value) ? (value[0] ?? null) : value;
+      },
+    },
+    async text(maxBytes: number): Promise<string> {
+      try {
+        return await readBodyText(res, maxBytes, controller);
+      } finally {
+        clearTimeout(totalTimer);
+      }
+    },
+    async saveToFile(destPath: string, maxBytes: number): Promise<number> {
+      try {
+        return await streamBodyToFile(res, destPath, maxBytes, controller);
+      } finally {
+        clearTimeout(totalTimer);
+      }
+    },
+  };
+}
+
+function readBodyText(res: http.IncomingMessage, maxBytes: number, controller: AbortController): Promise<string> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+
+    const cleanup = () => {
+      res.off('data', onData);
+      res.off('end', onEnd);
+      res.off('error', onError);
+      res.off('aborted', onAborted);
+    };
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectPromise(err);
+    };
+    const onError = (err: Error) => fail(describeAbort(controller, err));
+    const onAborted = () => fail(describeAbort(controller, new Error('Podcast request was aborted')));
+    const onData = (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        // Settle with the size error BEFORE tearing the socket down — destroy()
+        // fires 'aborted', and the abort message must not win the race.
+        fail(new Error('Podcast feed is too large.'));
+        res.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise(Buffer.concat(chunks, total).toString('utf8'));
+    };
+
+    res.on('data', onData);
+    res.on('end', onEnd);
+    res.on('error', onError);
+    res.on('aborted', onAborted);
+  });
+}
+
+async function streamBodyToFile(
+  res: http.IncomingMessage,
+  destPath: string,
+  maxBytes: number,
+  controller: AbortController,
+): Promise<number> {
+  let total = 0;
+  let failed = false;
+  try {
+    await new Promise<void>((resolvePromise, rejectPromise) => {
+      const writeStream = createWriteStream(destPath);
+      let settled = false;
+
+      const cleanup = () => {
+        res.off('data', onData);
+        res.off('end', onEnd);
+        res.off('error', onResError);
+        res.off('aborted', onAborted);
+        writeStream.off('error', onWriteError);
+      };
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        failed = true;
+        cleanup();
+        res.destroy();
+        writeStream.destroy();
+        rejectPromise(err);
+      };
+      const onResError = (err: Error) => fail(describeAbort(controller, err));
+      const onAborted = () => fail(describeAbort(controller, new Error('Podcast request was aborted')));
+      const onWriteError = (err: Error) => fail(err);
+      const onData = (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > maxBytes) {
+          fail(new Error('Podcast episode is too large to download.'));
+          return;
+        }
+        if (!writeStream.write(chunk)) res.pause();
+      };
+      const onEnd = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        writeStream.end(() => resolvePromise());
+      };
+
+      writeStream.on('drain', () => res.resume());
+      writeStream.on('error', onWriteError);
+      res.on('data', onData);
+      res.on('end', onEnd);
+      res.on('error', onResError);
+      res.on('aborted', onAborted);
+    });
+    // Reopen briefly just to fsync — createWriteStream's own fd is already
+    // closed (autoClose) by the time 'finish' fires, and podcasts.ts renames
+    // this file into place immediately after, so it needs to be durable now.
+    const handle = await open(destPath, 'r+');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    if (failed) await unlink(destPath).catch(() => {});
+  }
+  return total;
 }
 
 function isRedirectStatus(status: number): boolean {
