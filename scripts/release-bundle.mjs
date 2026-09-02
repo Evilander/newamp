@@ -88,7 +88,8 @@ export function createReleaseBundle({
     version,
     createdAt: new Date().toISOString(),
     gitHead: gitHead(root),
-    files: files.map(({ ok, ...file }) => file),
+    // The manifest is published; keep the build machine's paths out of it.
+    files: files.map(({ ok, absolutePath, ...file }) => file),
   };
   writeFileSync(paths.manifest, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
