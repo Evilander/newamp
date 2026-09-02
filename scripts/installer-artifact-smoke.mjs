@@ -155,7 +155,11 @@ const linuxExecutable = artifact(linuxExecutablePath, 150_000_000);
 const releaseChecksums = checkReleaseChecksums({ root: repoRoot, version: releaseVersion });
 assert.equal(releaseChecksums.ok, true, releaseChecksums.reason);
 const blockmap = parseBlockmap(blockmapPath);
-const appAsar = artifact(appAsarPath, 25_000_000);
+// The asar holds the compiled main process, package.json and a few icons; the
+// renderer ships beside it in resources/dist and the big binaries are unpacked.
+// It was 55 MB before the 2.2 build stopped bundling duplicate library copies
+// and is about 5 MB now — the floor only has to catch an empty or broken one.
+const appAsar = artifact(appAsarPath, 2_000_000);
 const distIndex = artifact(extraDistIndex, 1_000);
 const ffmpeg = artifact(unpackedFfmpeg, 50_000_000);
 const sqlWasm = artifact(unpackedSqlWasm, 500_000);
