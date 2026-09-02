@@ -23,8 +23,13 @@ if (!fnMatch) {
   fail('togglePin should exist in EvilandMemoryBadge.tsx');
 } else {
   const fn = fnMatch[0];
-  if (!/window\.setTimeout\(\(\) => \{\s*setPhase\(\(p\) => \(p === 'pinned' \? p : 'hidden'\)\);\s*\}, 800\);/.test(fn)) {
-    fail('unpinning should schedule a timer that lands on \'hidden\' (mirroring the natural fade chain\'s own final step)');
+  if (!/unpinTimer\.current = setTimeout\(\(\) => \{[\s\S]*?setPhase\(\(p\) => \(p === 'pinned' \? p : 'hidden'\)\);\s*\}, 800\);/.test(fn)) {
+    fail('unpinning should schedule a ref-tracked timer that lands on \'hidden\' (mirroring the natural fade chain\'s own final step)');
+  }
+  // The timer lives in a ref so a track change during the 800ms window can
+  // cancel it instead of letting it hide the next track's badge mid-entrance.
+  if (!/const unpinTimer = useRef</.test(source) || !/if \(unpinTimer\.current\) clearTimeout\(unpinTimer\.current\);/.test(source)) {
+    fail('the unpin timer should be held in a ref and cleared by the entrance effect');
   }
   if (/current === 'pinned' \? 'fade-out' : 'pinned'/.test(fn)) {
     fail('the old dead-end assignment (straight to fade-out, nothing to advance it) should be gone');
