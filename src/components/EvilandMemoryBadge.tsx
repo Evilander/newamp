@@ -33,6 +33,10 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
   const [borrowedTitle, setBorrowedTitle] = useState<string | null>(null);
   const fadeInTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const visibleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The unpin fade-out's trailing hide, kept so a track change during that
+  // 800ms window can cancel it instead of letting it hide the next track's
+  // badge mid-entrance.
+  const unpinTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track which (trackId, hasPlan) signature has already armed an entrance so
   // we don't restart the fade on every counter tick.
   const armedFor = useRef<string | null>(null);
@@ -57,8 +61,10 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
       // Tear down any in-flight timers + reset.
       if (fadeInTimer.current) clearTimeout(fadeInTimer.current);
       if (visibleTimer.current) clearTimeout(visibleTimer.current);
+      if (unpinTimer.current) clearTimeout(unpinTimer.current);
       fadeInTimer.current = null;
       visibleTimer.current = null;
+      unpinTimer.current = null;
       if (phase !== 'pinned') setPhase('hidden');
       return;
     }
@@ -68,6 +74,11 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
     armedFor.current = sig;
 
     if (phase === 'pinned') return; // user has it open; leave it
+    // A new track's entrance supersedes any unpin fade-out still winding down.
+    if (unpinTimer.current) {
+      clearTimeout(unpinTimer.current);
+      unpinTimer.current = null;
+    }
     setPhase('fade-in');
     // Match the 4s fade-in window from the blueprint.
     fadeInTimer.current = setTimeout(() => {
@@ -91,6 +102,7 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
     return () => {
       if (fadeInTimer.current) clearTimeout(fadeInTimer.current);
       if (visibleTimer.current) clearTimeout(visibleTimer.current);
+      if (unpinTimer.current) clearTimeout(unpinTimer.current);
     };
     // We intentionally key on the (trackId, hasPlan) signature only — counters
     // changing shouldn't re-run the fade. armedFor.current guards that.
@@ -140,7 +152,9 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
       // the plan loaded) would otherwise leave 'fade-out' as a dead end:
       // nothing else advances it, so the badge stays mounted (and
       // clickable) forever. Mirror the original chain's own final step.
-      window.setTimeout(() => {
+      if (unpinTimer.current) clearTimeout(unpinTimer.current);
+      unpinTimer.current = setTimeout(() => {
+        unpinTimer.current = null;
         setPhase((p) => (p === 'pinned' ? p : 'hidden'));
       }, 800);
       return 'fade-out';
