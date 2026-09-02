@@ -1,7 +1,9 @@
-// Three Tag DSL hardening fixes, each verified behaviorally against the
-// compiled shared module (not just source pattern matches):
-//   1. ReDoS guard gap: (a{3,})+ and (?:a|a)+ are catastrophic-backtracking
-//      shapes that slipped past safeRegex before this fix.
+// Tag DSL hardening checks, each verified behaviorally against the compiled
+// shared module (not just source pattern matches):
+//   1. `matches` patterns run on a linear-time matcher, so the
+//      catastrophic-backtracking shapes that used to slip past the old
+//      heuristic guard are simply ordinary patterns now, and syntax the
+//      matcher cannot run in linear time is refused when the rule compiles.
 //   2. Cross-tag references were case-sensitive against a declaration
 //      grammar that only allows lower-case names, so any differently-cased
 //      reference silently never resolved.
@@ -33,52 +35,41 @@ function stubContext(overrides = {}) {
   };
 }
 
-// ---------- 1. ReDoS guard: {n,}-nested quantifier ----------
+// ---------- 1. Catastrophic-backtracking shapes are ordinary patterns now ----------
+//
+// `matches` compiles to a linear-time NFA (shared/safe-regex.ts), so the shapes
+// that used to need a heuristic pre-screen — (a{3,})+, (?:a|a)+, a named-group
+// alternation — parse, answer correctly and finish fast on a hostile input.
 
-const nestedBrace = parseRule('tag(nested_brace) when title matches "(a{3,})+b"');
-assert.ok(nestedBrace.rule, 'a {n,}-nested pattern should still parse (rejection happens at eval, like the existing (a+)+ case)');
-const evilTitle = 'a'.repeat(40) + '!';
-const t1 = Date.now();
-const nestedBraceEval = evaluateRule(nestedBrace.rule, stubContext({ title: evilTitle }), buildEvalEnvironment());
-const nestedBraceMs = Date.now() - t1;
-assert.ok(nestedBraceMs < 100, `(a{3,})+ must be refused fast like (a+)+, took ${nestedBraceMs}ms`);
-assert.equal(nestedBraceEval.matched, false, '(a{3,})+ should be treated as an unsafe pattern (matched: false)');
+const evilTitle = 'a'.repeat(4096) + '!';
+for (const [tagName, pattern] of [
+  ['nested_brace', '(a{3,})+b'],
+  ['noncap_alt', '(?:a|a)+b'],
+  ['alt_named', '(?<dup>a|a)+b'],
+]) {
+  const parsed = parseRule(`tag(${tagName}) when title matches "${pattern}"`);
+  assert.ok(parsed.rule, `${pattern} should compile`);
+  const started = Date.now();
+  const evaluated = evaluateRule(parsed.rule, stubContext({ title: evilTitle }), buildEvalEnvironment());
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 100, `${pattern} must finish in linear time, took ${elapsed}ms`);
+  assert.equal(evaluated.matched, false, `${pattern} does not match a title with no "b"`);
+}
 
-// Bounded {n,m} on its own is NOT the nested-unbounded shape and must still work normally.
+// Bounded {n,m} still works normally.
 const boundedBrace = parseRule('tag(bounded_brace) when title matches "^a{2,4}$"');
 assert.ok(boundedBrace.rule);
 assert.equal(
   evaluateRule(boundedBrace.rule, stubContext({ title: 'aaa' }), buildEvalEnvironment()).matched,
   true,
-  'a plain bounded {n,m} quantifier should not be treated as unsafe',
+  'a plain bounded {n,m} quantifier should match normally',
 );
 
-// ---------- 2. ReDoS guard: non-capturing alternation-of-equivalents ----------
+// ---------- 2. Syntax outside the linear-time grammar is refused at compile time ----------
 
-const nonCapturingAlt = parseRule('tag(noncap_alt) when title matches "(?:a|a)+b"');
-assert.ok(nonCapturingAlt.rule, 'a non-capturing alternation-repeat pattern should still parse');
-const t2 = Date.now();
-const nonCapturingAltEval = evaluateRule(nonCapturingAlt.rule, stubContext({ title: 'a'.repeat(40) }), buildEvalEnvironment());
-const nonCapturingAltMs = Date.now() - t2;
-assert.ok(nonCapturingAltMs < 100, `(?:a|a)+ must be refused fast, took ${nonCapturingAltMs}ms`);
-assert.equal(nonCapturingAltEval.matched, false, '(?:a|a)+ should be treated as an unsafe pattern (matched: false)');
-
-// The same alternation-of-equivalents wrapped in the other group forms: a named
-// group and an inline-modifier group. Both were bypasses, because the prefix the
-// guard skipped over covered only `(?:` and lookarounds, so the capture ate the
-// marker and the backreference could never re-match.
-for (const [tagName, label, pattern] of [
-  ['alt_named', 'named group', '(?<dup>a|a)+b'],
-  ['alt_inline', 'inline modifier', '(?i:a|a)+b'],
-]) {
-  const parsed = parseRule(`tag(${tagName}) when title matches "${pattern}"`);
-  assert.ok(parsed.rule, `${label} alternation-repeat should still parse`);
-  const started = Date.now();
-  const evaluated = evaluateRule(parsed.rule, stubContext({ title: 'a'.repeat(40) }), buildEvalEnvironment());
-  const elapsed = Date.now() - started;
-  assert.ok(elapsed < 100, `${pattern} must be refused fast, took ${elapsed}ms`);
-  assert.equal(evaluated.matched, false, `${pattern} should be treated as an unsafe pattern`);
-}
+const inlineModifier = parseRule('tag(alt_inline) when title matches "(?i:a|a)+b"');
+assert.equal(inlineModifier.rule, null, 'inline modifiers are outside the supported grammar');
+assert.match(inlineModifier.errors[0]?.message ?? '', /inline modifiers .* not supported/);
 
 // A named group with genuinely distinct branches is legitimate and must still work.
 const safeNamedAlt = parseRule('tag(safe_named) when title matches "(?<pet>cat|dog)"');
@@ -86,7 +77,7 @@ assert.ok(safeNamedAlt.rule);
 assert.equal(
   evaluateRule(safeNamedAlt.rule, stubContext({ title: 'my dog' }), buildEvalEnvironment()).matched,
   true,
-  'a named group with distinct branches must not be flagged unsafe',
+  'a named group with distinct branches must match',
 );
 
 // Distinct-branch alternation under a non-capturing group is legitimate and must still work.
@@ -95,7 +86,7 @@ assert.ok(safeNonCapturingAlt.rule);
 assert.equal(
   evaluateRule(safeNonCapturingAlt.rule, stubContext({ title: 'my cat' }), buildEvalEnvironment()).matched,
   true,
-  'a non-capturing group with genuinely distinct branches must not be flagged unsafe',
+  'a non-capturing group with genuinely distinct branches must match',
 );
 
 // ---------- 3. Cross-tag references are case-insensitive ----------
@@ -147,6 +138,8 @@ assert.ok(
 // --- Source assertions ---
 const tagDslSource = await readFile(new URL('../shared/tag-dsl.ts', import.meta.url), 'utf8');
 assert.match(tagDslSource, /topologicalSortSafe/, 'a non-throwing sort variant should exist for the recompute path');
+assert.match(tagDslSource, /from '\.\/safe-regex\.js'/, 'matches must go through the linear-time matcher');
+assert.doesNotMatch(tagDslSource, /new RegExp\(/, 'no user-authored pattern may reach the backtracking RegExp engine');
 assert.match(tagDslSource, /\.toLowerCase\(\)/, 'tag() reference parsing should normalize case');
 
 const packageSource = await readFile(new URL('../package.json', import.meta.url), 'utf8');

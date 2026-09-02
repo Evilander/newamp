@@ -15,123 +15,80 @@
 // operators). Evaluator walks the AST against a TrackContext bag.
 
 import type { TrackDna } from './audio-dna.js';
+import { MAX_SAFE_REGEX_PATTERN_LENGTH, SafeRegex, SafeRegexError } from './safe-regex.js';
 
 export const TAG_DSL_VERSION = 1;
 export const MAX_TAG_NAME_LENGTH = 48;
 export const MAX_RULE_BODY_LENGTH = 4000;
-export const MAX_REGEX_PATTERN_LENGTH = 200;
+export const MAX_REGEX_PATTERN_LENGTH = MAX_SAFE_REGEX_PATTERN_LENGTH;
 export const MAX_REGEX_INPUT_LENGTH = 4096;
 
-// Reject patterns that the JS engine evaluates with catastrophic
-// backtracking. We don't ship a real DFA matcher (would mean re2), so we
-// pre-screen for the two structural shapes that produce exponential blowup
-// in NFA backtrackers:
-//   1. Any group that itself contains an unbounded quantifier AND is then
-//      followed by another unbounded quantifier — e.g. (a+)+, (a*)*, (.+)+,
-//      (([a-z])+.)+ . This walks balanced parens so it catches nested cases.
-//   2. Alternations of overlapping branches under a + or *, e.g. (a|a)*,
-//      (a|aa)*, (.|a)+.
-// This is conservative — some legitimate patterns are blocked — but rule
-// authors can always rewrite into a safer shape.
-// The optional (?:...)/(?=...)/(?!...)/(?<=...)/(?<!...) prefix has to be
-// consumed before the branch-content capture starts, or a non-capturing
-// alternation like (?:a|a)+ slips through: without it, [^|()]+ greedily
-// swallows the "?:" marker itself into the backreference, so \1 becomes
-// "?:a" instead of "a" and never re-matches — letting the pattern through.
-// The optional prefix must cover every group form, not just `(?:` and lookarounds:
-// a named group `(?<n>a|a)+` or an inline-modifier group `(?i:a|a)+` would
-// otherwise let the capture swallow the marker, so the backreference never
-// re-matches and the pattern passes.
-const REDOS_ALT_REPEAT = /\((?:\?(?:[:=!]|<[=!]|<[A-Za-z_$][\w$]*>|[a-zA-Z]*(?:-[a-zA-Z]+)?:))?([^|()]+)\|[^)]*\1[^)]*\)\s*[+*]/;
+// `matches` patterns go through shared/safe-regex.ts, a Thompson-NFA matcher
+// that runs in time linear in the input no matter how the pattern is shaped.
+// Rules are evaluated for every track in the library on the main process, so
+// a backtracking RegExp with a pattern like `(a+)+$` or `.*.*.*=` would stall
+// the whole app; the old heuristic pre-screen could only reject the shapes it
+// had been taught. Patterns outside the supported grammar (backreferences,
+// lookaround, lazy quantifiers) are rejected when the rule is compiled so the
+// author sees the reason instead of a rule that silently never matches.
+const REGEX_CACHE_LIMIT = 256;
+const regexCache = new Map<string, SafeRegex | null>();
 
-function hasNestedUnboundedQuantifier(pattern: string): boolean {
-  // Walk the pattern with a stack. For each `(...)` group, record whether
-  // the group's interior contains a `+` or `*` quantifier (excluding ones
-  // inside character classes, escapes, or deeper groups). When the group
-  // closes, if the closing `)` is followed by `+`, `*`, `{N,}`, or `+?`/`*?`
-  // AND the interior had its own unbounded quantifier, the pattern is
-  // unsafe.
-  const stack: boolean[] = []; // hasUnboundedQuant per open group
-  let i = 0;
-  while (i < pattern.length) {
-    const ch = pattern[i]!;
-    if (ch === '\\') { i += 2; continue; }
-    if (ch === '[') {
-      i++;
-      while (i < pattern.length && pattern[i] !== ']') {
-        if (pattern[i] === '\\') i++;
-        i++;
-      }
-      i++;
-      continue;
-    }
-    if (ch === '(') {
-      // skip non-capturing markers like (?: (?= (?! (?<= (?<!
-      let j = i + 1;
-      if (pattern[j] === '?') {
-        j++;
-        if (pattern[j] === '<') j++;
-        if (pattern[j] === ':' || pattern[j] === '=' || pattern[j] === '!') j++;
-      }
-      stack.push(false);
-      i = j;
-      continue;
-    }
-    if (ch === ')') {
-      const inner = stack.pop() ?? false;
-      // look at the quantifier immediately following the close paren
-      const next = pattern[i + 1];
-      const isUnboundedAfter = next === '+' || next === '*'
-        || (next === '{' && /\{\s*\d+\s*,\s*\}/.test(pattern.slice(i + 1, i + 12)));
-      if (inner && isUnboundedAfter) return true;
-      // The closed group itself is "unbounded" from the perspective of its
-      // parent if it has a +/* quantifier after it.
-      if (isUnboundedAfter && stack.length > 0) {
-        stack[stack.length - 1] = true;
-      }
-      i++;
-      continue;
-    }
-    if ((ch === '+' || ch === '*') && stack.length > 0) {
-      stack[stack.length - 1] = true;
-    }
-    if (ch === '{' && stack.length > 0) {
-      // {n,} is an unbounded quantifier too (same ReDoS shape as + and *) —
-      // (a{3,})+ backtracks catastrophically exactly like (a+)+ does, but the
-      // checks above only ever looked at literal +/* characters, so this
-      // shape walked straight through. {n,m}/{n} are bounded and don't
-      // create the nested-unbounded blowup by themselves, so they're left
-      // alone.
-      const closeIdx = pattern.indexOf('}', i + 1);
-      if (closeIdx !== -1 && /^\{\s*\d+\s*,\s*\}$/.test(pattern.slice(i, closeIdx + 1))) {
-        stack[stack.length - 1] = true;
-      }
-    }
-    i++;
+function compileMatchPattern(pattern: string): SafeRegex | null {
+  const cached = regexCache.get(pattern);
+  if (cached !== undefined) return cached;
+  const compiled = SafeRegex.tryCompile(pattern);
+  if (regexCache.size >= REGEX_CACHE_LIMIT) {
+    regexCache.delete(regexCache.keys().next().value!);
   }
-  return false;
-}
-
-function safeRegex(pattern: string): RegExp | null {
-  if (typeof pattern !== 'string') return null;
-  if (pattern.length === 0 || pattern.length > MAX_REGEX_PATTERN_LENGTH) return null;
-  if (hasNestedUnboundedQuantifier(pattern)) return null;
-  if (REDOS_ALT_REPEAT.test(pattern)) return null;
-  try {
-    return new RegExp(pattern, 'i');
-  } catch {
-    return null;
-  }
+  regexCache.set(pattern, compiled);
+  return compiled;
 }
 
 function safeRegexTest(pattern: string, input: string): boolean | null {
-  const re = safeRegex(pattern);
+  if (typeof pattern !== 'string') return null;
+  const re = compileMatchPattern(pattern);
   if (!re) return null;
   const slice = input.length > MAX_REGEX_INPUT_LENGTH ? input.slice(0, MAX_REGEX_INPUT_LENGTH) : input;
+  return re.test(slice);
+}
+
+// Every `matches` whose pattern is a string literal is checked at compile time
+// so an unsupported pattern fails the rule with a message the Tags view can
+// show. Patterns built dynamically at runtime are still checked on evaluation
+// and yield null (three-valued unknown) when they do not compile.
+function collectPatternErrors(node: AstNode, errors: CompileError[]): void {
+  switch (node.kind) {
+    case 'binary':
+      if (node.op === 'matches' && node.right.kind === 'literal' && typeof node.right.value === 'string') {
+        checkPattern(node.right.value, errors);
+      }
+      collectPatternErrors(node.left, errors);
+      collectPatternErrors(node.right, errors);
+      return;
+    case 'call': {
+      const pattern = node.name === 'matches' ? node.args[1] : undefined;
+      if (pattern && pattern.kind === 'literal' && typeof pattern.value === 'string') {
+        checkPattern(pattern.value, errors);
+      }
+      for (const arg of node.args) collectPatternErrors(arg, errors);
+      return;
+    }
+    case 'unary':
+      collectPatternErrors(node.argument, errors);
+      return;
+    default:
+      return;
+  }
+}
+
+function checkPattern(pattern: string, errors: CompileError[]): void {
   try {
-    return re.test(slice);
-  } catch {
-    return null;
+    SafeRegex.compile(pattern);
+  } catch (err) {
+    if (!(err instanceof SafeRegexError)) throw err;
+    const shown = pattern.length > 40 ? `${pattern.slice(0, 40)}…` : pattern;
+    errors.push({ message: `unsupported pattern "${shown}": ${err.message}`, line: 1, column: 1 });
   }
 }
 
@@ -240,6 +197,9 @@ export function parseRule(source: string): CompileResult {
     const tokens = tokenize(source);
     const parser = new Parser(tokens);
     const rule = parser.parseRule();
+    const patternErrors: CompileError[] = [];
+    collectPatternErrors(rule.ast, patternErrors);
+    if (patternErrors.length) return { rule: null, errors: patternErrors };
     return { rule, errors: [] };
   } catch (err) {
     const compileErr = err instanceof CompileException
