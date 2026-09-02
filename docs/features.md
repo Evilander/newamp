@@ -33,7 +33,7 @@ The complete tour. The [README](../README.md) is the landing page; this is the e
 - **Eviland** — 24-band per-instrument onset detection, GPU feedback field, fluid simulation, structural memory, tempo anticipation, per-track persistent visual lineage, 26 morphing looks.
 - **MilkDrop via Butterchurn** (sandboxed, prewarmed preset swaps) + **Particle Flow** (~140k GPU particles) + 24 in-house fullscreen modes with real spectral-flux beat detection and an auto hardware tier.
 - **Save the moment** — a WebCodecs ring buffer holds the last 15 seconds of Eviland Live; `Shift+R` mints a shareable MP4 with audio. Plus a general clip recorder and PNG stills.
-- **Nine deck skins** — Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Hotdog, Retro TV — each declaring its own native window size.
+- **Eight deck skins** — Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Retro TV — each declaring its own native window size.
 - **Detached projector** — throw the visualizer onto a second monitor while you work.
 
 ## Yours

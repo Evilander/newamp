@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "A local-first, Winamp-inspired music player for Windows, macOS, and Linux — your files, no cloud, no telemetry.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
