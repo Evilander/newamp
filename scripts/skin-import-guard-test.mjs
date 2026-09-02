@@ -64,12 +64,15 @@ function createZipArchive(entries) {
   for (const entry of entries) {
     const name = Buffer.from(entry.name, 'utf8');
     const source = entry.content;
-    const compressed = deflateRawSync(source);
+    // `stored: true` writes the entry uncompressed (method 0) — the shape a
+    // crafted archive uses to bypass every inflate-based cap.
+    const method = entry.stored ? 0 : 8;
+    const compressed = entry.stored ? Buffer.from(source) : deflateRawSync(source);
     const local = Buffer.alloc(30 + name.length);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
     local.writeUInt16LE(0, 6);
-    local.writeUInt16LE(8, 8);
+    local.writeUInt16LE(method, 8);
     local.writeUInt32LE(0, 10);
     local.writeUInt32LE(0, 14);
     local.writeUInt32LE(compressed.length, 18);
@@ -83,7 +86,7 @@ function createZipArchive(entries) {
     central.writeUInt16LE(20, 4);
     central.writeUInt16LE(20, 6);
     central.writeUInt16LE(0, 8);
-    central.writeUInt16LE(8, 10);
+    central.writeUInt16LE(method, 10);
     central.writeUInt32LE(0, 12);
     central.writeUInt32LE(0, 16);
     central.writeUInt32LE(compressed.length, 20);
@@ -174,6 +177,99 @@ function createBmp24(width, height, getPixel) {
   });
   if (err) fail(`a normal small skin archive should still import, got: ${err.message}`);
   else log.push('legitimate small skin archive still imports: ok');
+}
+
+// --- structural bounds: STORED entries and crafted headers ---------------
+//
+// A 169-byte archive whose single STORED main.bmp is 55 bytes long but declares
+// 100000x100000 pixels used to run the colour-sampling loop ten billion times
+// on the main process. None of the inflate caps apply because nothing inflates.
+{
+  const bogusBmp = Buffer.alloc(55);
+  bogusBmp.write('BM', 0, 'ascii');
+  bogusBmp.writeUInt32LE(bogusBmp.length, 2);
+  bogusBmp.writeUInt32LE(54, 10);      // pixel data offset
+  bogusBmp.writeUInt32LE(40, 14);      // BITMAPINFOHEADER
+  bogusBmp.writeInt32LE(100000, 18);   // width
+  bogusBmp.writeInt32LE(100000, 22);   // height
+  bogusBmp.writeUInt16LE(1, 26);       // planes
+  bogusBmp.writeUInt16LE(24, 28);      // bpp
+  bogusBmp.writeUInt32LE(0, 30);       // BI_RGB
+  const archive = createZipArchive([{ name: 'main.bmp', content: bogusBmp, stored: true }]);
+  if (archive.length > 512) fail(`the huge-dimension fixture should be tiny on disk, got ${archive.length} bytes`);
+  const started = Date.now();
+  const outcome = throws(() => parseWinampClassicSkinArchive(archive, 'huge.wsz'));
+  const elapsed = Date.now() - started;
+  if (elapsed > 200) fail(`a BMP declaring 100000x100000 in ${archive.length} bytes took ${elapsed}ms to reject — the pixel loop ran`);
+  else log.push(`huge-dimension stored BMP handled in ${elapsed}ms (${outcome ? 'rejected: ' + outcome.message : 'ignored'})`);
+}
+
+// A truncated central directory surfaces as the friendly archive error, never
+// as a raw RangeError from an unchecked header read.
+{
+  const good = createZipArchive([{ name: 'main.bmp', content: createBmp24(4, 4, () => [1, 2, 3]) }]);
+  const eocd = good.length - 22;
+  const truncated = Buffer.concat([good.subarray(0, eocd - 20), good.subarray(eocd)]);
+  // Keep the EOCD's central-directory offset/size pointing past what is left.
+  const err = throws(() => parseWinampClassicSkinArchive(truncated, 'truncated.wsz'));
+  if (!err) fail('a truncated central directory must be rejected');
+  else if (/RangeError|out of range/i.test(err.message) || err instanceof RangeError) fail(`truncated archive leaked a raw error: ${err.message}`);
+  else if (!/winamp skin archive/i.test(err.message)) fail(`unexpected error for a truncated archive: ${err.message}`);
+  else log.push(`truncated central directory rejected cleanly: ${err.message}`);
+}
+
+// An entry whose local header points past the end of the file is rejected the
+// same way instead of reading whatever happens to be there.
+{
+  const good = createZipArchive([{ name: 'main.bmp', content: createBmp24(4, 4, () => [1, 2, 3]) }]);
+  const eocd = good.length - 22;
+  const centralOffset = good.readUInt32LE(eocd + 16);
+  good.writeUInt32LE(good.length + 4096, centralOffset + 42); // local header offset -> beyond EOF
+  const err = throws(() => parseWinampClassicSkinArchive(good, 'past-eof.wsz'));
+  if (!err || !/winamp skin archive/i.test(err.message) || err instanceof RangeError) {
+    fail(`an entry pointing past EOF must be rejected cleanly, got: ${err ? err.message : 'no error'}`);
+  } else log.push(`entry data past EOF rejected cleanly: ${err.message}`);
+}
+
+// A central directory claiming more entries than the cap is refused before any
+// entry is read.
+{
+  const good = createZipArchive([{ name: 'main.bmp', content: createBmp24(4, 4, () => [1, 2, 3]) }]);
+  const eocd = good.length - 22;
+  good.writeUInt16LE(60000, eocd + 8);
+  good.writeUInt16LE(60000, eocd + 10);
+  const err = throws(() => parseWinampClassicSkinArchive(good, 'many.wsz'));
+  if (!err || !/too many entries/i.test(err.message)) fail(`an implausible entry count must be rejected, got: ${err ? err.message : 'no error'}`);
+  else log.push(`excessive entry count rejected: ${err.message}`);
+}
+
+// Encrypted and data-descriptor entries are refused with a clear message.
+{
+  const good = createZipArchive([{ name: 'main.bmp', content: createBmp24(4, 4, () => [1, 2, 3]) }]);
+  const eocd = good.length - 22;
+  const centralOffset = good.readUInt32LE(eocd + 16);
+  const encrypted = Buffer.from(good);
+  encrypted.writeUInt16LE(0x0001, centralOffset + 8);
+  const encErr = throws(() => parseWinampClassicSkinArchive(encrypted, 'enc.wsz'));
+  if (!encErr || !/encrypted/i.test(encErr.message)) fail(`an encrypted entry must be refused, got: ${encErr ? encErr.message : 'no error'}`);
+  else log.push(`encrypted entry refused: ${encErr.message}`);
+  const descriptor = Buffer.from(good);
+  descriptor.writeUInt16LE(0x0008, centralOffset + 8);
+  const descErr = throws(() => parseWinampClassicSkinArchive(descriptor, 'desc.wsz'));
+  if (!descErr || !/unsupported format/i.test(descErr.message)) fail(`a data-descriptor entry must be refused, got: ${descErr ? descErr.message : 'no error'}`);
+  else log.push(`data-descriptor entry refused: ${descErr.message}`);
+}
+
+// A well-formed STORED skin still parses and yields its palette.
+{
+  const bmp = createBmp24(8, 8, (x) => (x < 4 ? [200, 30, 30] : [30, 30, 200]));
+  const archive = createZipArchive([{ name: 'main.bmp', content: bmp, stored: true }]);
+  const err = throws(() => {
+    const skin = parseWinampClassicSkinArchive(archive, 'stored-ok.wsz');
+    if (!skin || !skin.variables || !Object.keys(skin.variables).length) throw new Error('stored skin produced no palette');
+  });
+  if (err) fail(`a valid stored-entry skin should still parse: ${err.message}`);
+  else log.push('valid stored-entry skin parses to a palette');
 }
 
 const report = log.join('\n') + '\n' + (pass ? '[skin-import-guard-test] PASS' : '[skin-import-guard-test] FAIL') + '\n';
