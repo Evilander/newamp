@@ -43,7 +43,8 @@ import {
   resolveShuffleHandoffPick,
   type ShuffleHandoffCache,
 } from '@shared/shuffle-handoff';
-import { remapResumeIndex, resolvePlaybackStartIndex } from '@shared/playback-start';
+import { resolvePlaybackStartIndex, resolveResumePosition } from '@shared/playback-start';
+import { createPlayIntentGate } from '@shared/play-intent';
 import {
   shouldStopAfterCurrent,
   shouldStopForSleepTimer,
@@ -370,17 +371,25 @@ async function restorePlaybackSession(
   const byId = new Map(fetched.map((track) => [track.id, track]));
   const tracks = ids.map((id) => byId.get(id)).filter((track): track is Track => !!track);
   if (!tracks.length) return;
-  const index = remapResumeIndex(ids, resumeState.index, new Set(byId.keys()));
-  const current = tracks[index] ?? null;
+  const { index, currentSurvived } = resolveResumePosition(
+    ids,
+    resumeState.index,
+    resumeState.currentTrackId,
+    new Set(byId.keys()),
+  );
+  const current = index >= 0 ? tracks[index] ?? null : null;
+  // The saved position only means anything on the track it was saved for; a
+  // nearest-survivor fallback starts from the top, and an idle queue has none.
+  const resumeTime = current && currentSurvived ? resumeState.currentTime : 0;
   setState({
     queue: tracks,
     index,
     current,
-    currentTime: resumeState.currentTime,
+    currentTime: resumeTime,
     duration: current?.duration ?? 0,
     mode: resumeState.mode,
     shuffleHistory: isShuffleMode(resumeState.mode) ? resetSmartShuffleHistory(tracks.length, index) : [],
-    resumeAt: resumeState.currentTime,
+    resumeAt: current ? resumeTime : null,
   });
   applyReplayGain(current, settings);
 }
@@ -391,6 +400,7 @@ async function persistPlaybackSession(state: PlayerState): Promise<void> {
     ? {
         queueTrackIds: state.queue.map((track) => track.id),
         index: Math.max(-1, state.index),
+        currentTrackId: state.current?.id ?? null,
         currentTime: Math.max(0, state.currentTime),
         mode: state.mode,
         updatedAt: Date.now(),
@@ -485,7 +495,7 @@ async function advanceAfterPlaybackError(
   applyReplayGain(nextTrack, state.settings);
   schedulePersistPlaybackSession(getState(), true);
   try {
-    await playEngineTrack(nextTrack);
+    if (!(await playEngineTrack(nextTrack))) return;
     lastPlaybackErrorKey = null;
     startLastfmNowPlaying(nextTrack);
     recordLibraryPlay(nextTrack);
@@ -565,9 +575,23 @@ function cueEndKey(track: Track | null, index: number): string | null {
   return track && end ? `${track.id}:${index}:${end}` : null;
 }
 
-async function playEngineTrack(track: Track): Promise<void> {
+// Every request to start a track takes a ticket here; only the newest ticket
+// gets to run the store's side effects once the engine answers. Without it,
+// clicking A then B before A had started recorded and scrobbled both.
+const playIntents = createPlayIntentGate();
+
+/**
+ * Starts `track` and reports whether it is now the live one: false when a
+ * newer request superseded it while the engine was working (or the engine
+ * itself reported the request stale). Callers run Last.fm, play-count,
+ * podcast-progress and Auto DJ side effects only on true. A playback failure
+ * of the current request still throws, as before.
+ */
+async function playEngineTrack(track: Track): Promise<boolean> {
   lastCueEndKey = null;
-  await engine.play(toAudioUrl(track.path), track.id, cueStart(track));
+  const intent = playIntents.begin();
+  const outcome = await engine.play(toAudioUrl(track.path), track.id, cueStart(track));
+  return outcome === 'started' && playIntents.isCurrent(intent);
 }
 
 /**
@@ -592,6 +616,9 @@ async function restartCurrentTrackThroughActivePath(
   const { current, currentTime, isPlaying } = get();
   if (!current || !isPlaying) return;
   const resumeAt = cueStart(current) + Math.max(0, currentTime);
+  // A route restart is a new play request like any other: it must invalidate
+  // an older request that is still waiting on the engine.
+  playIntents.begin();
   await engine.play(toAudioUrl(current.path), current.id, resumeAt).catch(() => undefined);
 }
 
@@ -618,7 +645,7 @@ async function commitPlaybackAdvance(
   });
   applyReplayGain(t, getState().settings);
   schedulePersistPlaybackSession(getState(), true);
-  await playEngineTrack(t);
+  if (!(await playEngineTrack(t))) return;
   lastPlaybackErrorKey = null;
   startLastfmNowPlaying(t);
   recordLibraryPlay(t);
@@ -1131,7 +1158,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(track, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      await playEngineTrack(track);
+      if (!(await playEngineTrack(track))) return;
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(track);
       recordLibraryPlay(track);
@@ -1157,7 +1184,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(null, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      await playEngineTrack(track);
+      if (!(await playEngineTrack(track))) return;
       const resumeAt = episode.completed ? 0 : Math.max(0, episode.progressSeconds);
       if (resumeAt > 0) engine.seek(resumeAt);
       persistPodcastProgress(get(), true, false);
@@ -1186,7 +1213,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(t, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      await playEngineTrack(t);
+      if (!(await playEngineTrack(t))) return;
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
       recordLibraryPlay(t);
@@ -1384,7 +1411,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(t, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      await playEngineTrack(t);
+      if (!(await playEngineTrack(t))) return;
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
     },

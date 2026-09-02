@@ -795,7 +795,13 @@ export function combinePlaybackMode(shuffle: boolean, repeat: RepeatMode): Playb
 
 export interface PlaybackResumeState {
   queueTrackIds: number[];
+  // -1 means the queue was loaded but nothing was current (a playlist opened
+  // without pressing Play); a restore keeps it idle instead of selecting track 0.
   index: number;
+  // The current track by identity, so a restore lands on the same track even
+  // when entries before it were deleted. null is the idle case above. Absent on
+  // records written before the field existed — those fall back to `index`.
+  currentTrackId?: number | null;
   currentTime: number;
   mode: PlaybackMode;
   updatedAt: number;

@@ -16,6 +16,39 @@ export function resolvePlaybackStartIndex(queueLength: number, index: number): n
  * Falls back to the count of surviving entries before the saved position
  * when the saved track itself no longer exists.
  */
+export interface ResumePosition {
+  /** Index into the surviving track list, or -1 for a loaded-but-idle queue. */
+  index: number;
+  /** True only when the track that was current is the one selected, so its saved position can be applied. */
+  currentSurvived: boolean;
+}
+
+/**
+ * Where a restored queue should land. A saved `currentTrackId` is followed by
+ * identity; a saved index of -1 (or a null id) means nothing was current and
+ * the queue comes back idle rather than with track 0 selected; a record from
+ * before `currentTrackId` existed falls back to remapResumeIndex.
+ */
+export function resolveResumePosition(
+  ids: readonly number[],
+  savedIndex: number,
+  currentTrackId: number | null | undefined,
+  survivingTrackIds: ReadonlySet<number>,
+): ResumePosition {
+  const survivingIds = ids.filter((id) => survivingTrackIds.has(id));
+  if (!survivingIds.length) return { index: -1, currentSurvived: false };
+  if (savedIndex < 0 || currentTrackId === null) return { index: -1, currentSurvived: false };
+  if (typeof currentTrackId === 'number') {
+    const direct = survivingIds.indexOf(currentTrackId);
+    if (direct >= 0) return { index: direct, currentSurvived: true };
+    return { index: remapResumeIndex(ids, savedIndex, survivingTrackIds), currentSurvived: false };
+  }
+  const clampedSavedIndex = Math.max(0, Math.min(Math.trunc(savedIndex), ids.length - 1));
+  const target = ids[clampedSavedIndex];
+  const index = remapResumeIndex(ids, savedIndex, survivingTrackIds);
+  return { index, currentSurvived: target !== undefined && survivingIds[index] === target };
+}
+
 export function remapResumeIndex(
   ids: readonly number[],
   savedIndex: number,

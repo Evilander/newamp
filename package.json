@@ -71,6 +71,7 @@
     "test:playback-mode": "npm run build:electron && node scripts/playback-mode-independence-test.mjs",
     "test:shuffle-handoff": "npm run build:electron && node scripts/shuffle-handoff-test.mjs",
     "test:session-restore-integrity": "npm run build:electron && node scripts/session-restore-integrity-test.mjs",
+    "test:play-intent": "npm run build:electron && node scripts/play-intent-test.mjs",
     "test:discover-weirdness-perf": "node scripts/discover-weirdness-perf-test.mjs",
     "test:smart-shuffle-perf": "npm run build:electron && node scripts/smart-shuffle-perf-test.mjs",
     "test:tag-dsl-hardening": "npm run build:electron && node scripts/tag-dsl-hardening-test.mjs",

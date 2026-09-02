@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { remapResumeIndex } from '../dist-electron/shared/playback-start.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { remapResumeIndex, resolveResumePosition } from '../dist-electron/shared/playback-start.js';
+import { SettingsStore } from '../dist-electron/electron/settings.js';
 
 // Reproduces the exact A/B/C/D scenario from the audit: queue was
 // [A, B, C, D] with the saved index pointing at C (index 2). Track A gets
@@ -38,6 +42,80 @@ assert.equal(
 // No survivors at all: -1 (caller treats this as "nothing to restore").
 assert.equal(remapResumeIndex(ids, 1, new Set()), -1, 'no surviving tracks should report -1');
 
+// ---- resolveResumePosition: identity first, idle stays idle -----------------
+
+// The saved current track is followed by id, even when the saved index no
+// longer points at it.
+assert.deepEqual(
+  resolveResumePosition(ids, 2, 103, survivingAfterADeleted),
+  { index: 1, currentSurvived: true },
+  'the current track is found by id after an earlier deletion',
+);
+// The saved position is only meaningful when that exact track survived.
+assert.deepEqual(
+  resolveResumePosition(ids, 2, 103, survivingWithCurrentGone),
+  { index: 2, currentSurvived: false },
+  'when the current track is gone, fall back to the nearest survivor and drop the saved position',
+);
+// A queue that was loaded but idle (index -1 / null id) comes back idle instead
+// of with track 0 selected.
+assert.deepEqual(
+  resolveResumePosition(ids, -1, null, new Set(ids)),
+  { index: -1, currentSurvived: false },
+  'an idle queue must restore idle',
+);
+assert.deepEqual(
+  resolveResumePosition(ids, 0, null, new Set(ids)),
+  { index: -1, currentSurvived: false },
+  'a null current id means idle even if an index was saved',
+);
+// A record written before currentTrackId existed still follows the saved index.
+assert.deepEqual(
+  resolveResumePosition(ids, 2, undefined, survivingAfterADeleted),
+  { index: 1, currentSurvived: true },
+  'legacy records resolve through the saved index and keep their position when that track survived',
+);
+assert.deepEqual(
+  resolveResumePosition(ids, 2, undefined, survivingWithCurrentGone),
+  { index: 2, currentSurvived: false },
+  'legacy records lose the saved position when the indexed track is gone',
+);
+assert.deepEqual(
+  resolveResumePosition(ids, 1, 102, new Set()),
+  { index: -1, currentSurvived: false },
+  'no survivors at all restores nothing',
+);
+
+// ---- normalizeResume keeps -1 and currentTrackId through settings.json -------
+
+{
+  const dir = mkdtempSync(join(tmpdir(), 'newamp-resume-'));
+  try {
+    const store = new SettingsStore(join(dir, 'settings.json'));
+    store.set({ resumeState: { queueTrackIds: [11, 12, 13], index: -1, currentTrackId: null, currentTime: 0, mode: 'normal', updatedAt: 1 } });
+    const idle = store.get().resumeState;
+    assert.equal(idle.index, -1, 'settings must keep an idle -1 index instead of clamping it to 0');
+    assert.equal(idle.currentTrackId, null, 'settings must keep a null current id');
+
+    store.set({ resumeState: { queueTrackIds: [11, 12, 13], index: 1, currentTrackId: 12, currentTime: 30, mode: 'normal', updatedAt: 1 } });
+    const active = store.get().resumeState;
+    assert.equal(active.index, 1);
+    assert.equal(active.currentTrackId, 12, 'settings must round-trip the current track id');
+
+    store.set({ resumeState: { queueTrackIds: [11, 12, 13], index: 1, currentTime: 30, mode: 'normal', updatedAt: 1 } });
+    const legacy = store.get().resumeState;
+    assert.equal(legacy.index, 1);
+    assert.equal('currentTrackId' in legacy, false, 'a record without currentTrackId stays without it, so restore takes the legacy path');
+
+    store.set({ resumeState: { queueTrackIds: [11, 12, 13], index: 7, currentTrackId: -4, currentTime: 30, mode: 'normal', updatedAt: 1 } });
+    const clamped = store.get().resumeState;
+    assert.equal(clamped.index, 2, 'an index past the end is still clamped');
+    assert.equal(clamped.currentTrackId, null, 'a nonsense current id normalizes to idle rather than a bogus id');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // Empty saved queue: -1.
 assert.equal(remapResumeIndex([], 0, new Set()), -1, 'an empty saved queue should report -1');
 
@@ -49,7 +127,12 @@ const [storeSource, engineSource, packageSource] = await Promise.all([
   readFile(new URL('../package.json', import.meta.url), 'utf8'),
 ]);
 
-assert.match(storeSource, /remapResumeIndex\(ids, resumeState\.index, new Set\(byId\.keys\(\)\)\)/, 'restorePlaybackSession should remap the resume index by id');
+assert.match(
+  storeSource,
+  /resolveResumePosition\(\s*ids,\s*resumeState\.index,\s*resumeState\.currentTrackId,\s*new Set\(byId\.keys\(\)\),?\s*\)/,
+  'restorePlaybackSession should resolve the resume position by track id (idle stays idle)',
+);
+assert.match(storeSource, /currentTrackId: state\.current\?\.id \?\? null,/, 'persistPlaybackSession should save the current track id');
 assert.match(storeSource, /api\.getTracksByIds\(ids\)/, 'restorePlaybackSession should fetch the resumed queue with the batch API');
 assert.doesNotMatch(
   storeSource,
