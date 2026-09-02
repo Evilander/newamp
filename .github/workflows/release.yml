@@ -19,8 +19,43 @@ permissions:
   contents: write
 
 jobs:
+  # A version tag used to package, sign and publish without running a single
+  # test: the only check in the pipeline was a non-blocking macOS launch. This
+  # job blocks the whole matrix on the same typecheck and headless smokes CI
+  # runs on every push, so a tag cannot ship something a normal PR would fail.
+  verify:
+    name: Verify before packaging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Typecheck (renderer + electron)
+        run: npm run typecheck
+      - name: Build (vite renderer + electron main)
+        run: npm run build
+      - name: Smoke — library (scan + query)
+        run: npm run smoke:library
+      - name: Smoke — corrupt library recovery
+        run: npm run smoke:library-corruption
+      - name: Smoke — tag DSL sandbox / ReDoS / cycles
+        run: npm run smoke:tags
+      - name: Smoke — build lock
+        run: npm run smoke:build-lock
+      - name: Smoke — security (CSP + window options)
+        run: npm run smoke:security
+      - name: Smoke — release secret hygiene
+        run: npm run smoke:release-secrets
+
   build:
     name: Package (${{ matrix.os }})
+    needs: verify
     runs-on: ${{ matrix.os }}
     # Map signing/notarization secrets to job-level env so step `if:` conditions
     # can see them (a step's own `env:` is NOT visible to its own `if:`). Absent

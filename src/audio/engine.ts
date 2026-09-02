@@ -116,7 +116,7 @@ type SinkAudioElement = HTMLAudioElement & {
 // ~15%" complaint). Cubic taper below unity makes equal slider movement ~=
 // equal perceived loudness; the 1.0-2.0 boost zone stays linear (limiter
 // catches >0dBFS). Unity (1.0) preserved exactly.
-function volumePositionToGain(position: number): number {
+export function volumePositionToGain(position: number): number {
   const p = Math.max(0, Math.min(2, position));
   if (p <= 1) return p * p * p;
   return p;
@@ -267,7 +267,13 @@ export class AudioEngine {
     });
 
     const masterGain = ctx.createGain();
-    masterGain.gain.value = this.volume;
+    // Apply the same perceptual taper setVolume() uses. this.volume may
+    // already reflect a setVolume() call made before the graph existed (its
+    // `if (!this.graph) return;` guard makes that a no-op on the gain node,
+    // not on this.volume) — build the graph with a raw, untapered gain.value
+    // here and first playback would run louder than every later volume
+    // change until the user next touched the slider.
+    masterGain.gain.value = volumePositionToGain(this.volume);
     const replayGain = ctx.createGain();
     replayGain.gain.value = this.replayGainLinear;
     const limiter = ctx.createDynamicsCompressor();
@@ -1099,6 +1105,36 @@ export class AudioEngine {
       deck.gain.gain.setValueAtTime(deck.id === this.activeDeckIndex ? 1 : 0, this.graph.ctx.currentTime);
     }
     this.patch({ playing: false, currentTime: 0, ended: false, buffering: false, error: null });
+  }
+
+  /**
+   * Like stop(), but also releases src/trackId and clears the deck's src
+   * attribute — stop() intentionally leaves those so the same track can be
+   * resumed, but that means a caller that has stopped holding a track (e.g.
+   * the store removing the current-but-paused queue entry) can't use stop()
+   * alone: togglePlayPause() would still see a truthy src/trackId and a deck
+   * with .el.src still set, and resume the released track instead of routing
+   * through a fresh play() of whatever is current now. Call this whenever the
+   * loaded track is being discarded, not just paused.
+   */
+  unload(): void {
+    this.clearFadeTimer();
+    this.preparedNext = null;
+    if (this.externalActive) {
+      this.deactivateExternal(true);
+    } else if (this.graph) {
+      for (const deck of this.graph.decks) this.silenceDeck(deck, true);
+    }
+    this.patch({
+      playing: false,
+      currentTime: 0,
+      duration: 0,
+      ended: false,
+      buffering: false,
+      error: null,
+      src: null,
+      trackId: null,
+    });
   }
 
   seek(seconds: number): void {

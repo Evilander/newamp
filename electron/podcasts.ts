@@ -160,7 +160,7 @@ export class PodcastStore {
 
 export async function fetchPodcastSubscription(url: string): Promise<PodcastSubscription> {
   const normalized = normalizeFeedUrl(url);
-  const response = await fetch(normalized, {
+  const response = await fetchWithHostGuard(normalized, {
     headers: {
       Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.1',
       'User-Agent': `${NEWAMP_USER_AGENT} podcast client`,
@@ -188,7 +188,7 @@ export async function downloadPodcastEpisode(
     ?.episodes.find((item) => item.id === input.episodeId);
   if (!episode) return null;
 
-  const response = await fetch(episode.audioUrl, {
+  const response = await fetchWithHostGuard(episode.audioUrl, {
     headers: { 'User-Agent': `${NEWAMP_USER_AGENT} podcast downloader` },
   });
   if (!response.ok) throw new Error(`Podcast episode download failed: HTTP ${response.status}`);
@@ -403,26 +403,103 @@ export function isBlockedPodcastHost(hostname: string): boolean {
   if (!host) return true;
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) return true;
 
-  // IPv6 literals.
+  // IPv6 literals. Matching on the text shape is not enough: the URL parser
+  // rewrites an IPv4-mapped literal like [::ffff:169.254.169.254] to
+  // ::ffff:a9fe:a9fe, which starts with none of the blocked prefixes while
+  // still dialling the embedded IPv4 address. Parse to bytes instead.
   if (host.includes(':')) {
-    if (host === '::' || host === '::1') return true;
-    if (host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb')) {
-      return true; // fe80::/10 link-local
-    }
-    if (host.startsWith('fc') || host.startsWith('fd')) return true; // fc00::/7 unique-local
+    const bytes = ipv6ToBytes(host);
+    if (!bytes) return true; // unparseable literal: refuse rather than guess
+    if (bytes.every((b) => b === 0)) return true; // ::
+    if (bytes.slice(0, 15).every((b) => b === 0) && bytes[15] === 1) return true; // ::1
+    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true; // fe80::/10 link-local
+    if ((bytes[0]! & 0xfe) === 0xfc) return true; // fc00::/7 unique-local
+    // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (compatible) reach the v4 address.
+    const mapped = bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff;
+    const compatible = bytes.slice(0, 12).every((b) => b === 0);
+    if (mapped || compatible) return isBlockedIpv4(bytes.slice(12));
     return false;
   }
 
   // IPv4 literals (numeric octet parse — regex alone can't express the ranges).
   const octets = host.split('.');
   if (octets.length === 4 && octets.every((o) => /^\d{1,3}$/.test(o))) {
-    const [a, b] = octets.map((o) => Number(o));
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b! >= 16 && b! <= 31) return true;
-    if (a === 192 && b === 168) return true;
+    const parts = octets.map((o) => Number(o));
+    if (parts.every((n) => n <= 255)) return isBlockedIpv4(parts);
   }
   return false;
+}
+
+function isBlockedIpv4(octets: number[]): boolean {
+  const [a, b] = octets;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
+  if (a === 172 && b! >= 16 && b! <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+}
+
+// Expand an IPv6 literal to its 16 bytes, handling `::` compression, a trailing
+// dotted-quad, and a zone id. Returns null when the literal is not valid.
+function ipv6ToBytes(literal: string): number[] | null {
+  let addr = literal.split('%')[0]!;
+  const dotted = addr.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (dotted) {
+    const quad = [dotted[2], dotted[3], dotted[4], dotted[5]].map((o) => Number(o));
+    if (quad.some((n) => n > 255)) return null;
+    const hi = ((quad[0]! << 8) | quad[1]!).toString(16);
+    const lo = ((quad[2]! << 8) | quad[3]!).toString(16);
+    addr = `${dotted[1]}${hi}:${lo}`;
+  }
+  const halves = addr.split('::');
+  if (halves.length > 2) return null;
+  const toGroups = (part: string) =>
+    part ? part.split(':').filter((g) => g !== '').map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN)) : [];
+  const head = toGroups(halves[0]!);
+  const tail = halves.length === 2 ? toGroups(halves[1]!) : [];
+  if ([...head, ...tail].some((g) => Number.isNaN(g))) return null;
+  let groups: number[];
+  if (halves.length === 2) {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 1) return null;
+    groups = [...head, ...Array(fill).fill(0), ...tail];
+  } else {
+    groups = head;
+  }
+  if (groups.length !== 8) return null;
+  return groups.flatMap((g) => [(g >> 8) & 0xff, g & 0xff]);
+}
+
+const MAX_PODCAST_REDIRECTS = 5;
+
+// isBlockedPodcastHost only guards the URL a caller passes in. Node's fetch
+// follows redirects by default and never re-validates the hop, so a feed
+// hosted at an innocuous public URL could 302 to 127.0.0.1 or the cloud
+// metadata endpoint and the guard above would never see it. Fetch with
+// redirect: 'manual' and re-validate every hop (and the initial URL) against
+// the same host guard, capping the number of hops so a redirect loop can't
+// hang the request.
+// Exported for scripts/podcast-redirect-guard-test.mjs.
+export async function fetchWithHostGuard(url: string, init: RequestInit = {}): Promise<Response> {
+  let current = new URL(url);
+  for (let hop = 0; ; hop += 1) {
+    if (current.protocol !== 'https:' && current.protocol !== 'http:') {
+      throw new Error('Podcast request URL must use http:// or https://');
+    }
+    if (isBlockedPodcastHost(current.hostname)) {
+      throw new Error('Podcast request host is not allowed (private or local address)');
+    }
+    const response = await fetch(current, { ...init, redirect: 'manual' });
+    if (!isRedirectStatus(response.status)) return response;
+    if (hop >= MAX_PODCAST_REDIRECTS) throw new Error('Podcast request redirected too many times');
+    const location = response.headers.get('location');
+    if (!location) throw new Error('Podcast request redirected with no Location header');
+    current = new URL(location, current);
+  }
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
 function normalizeFeedUrl(url: string): string {

@@ -8,6 +8,7 @@ import type {
   PodcastEpisode,
   Track,
 } from '@shared/types';
+import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
 import { AudioEngine } from '../audio/engine';
 import { api, inElectron, toAudioUrl, winctl, DEFAULT_SETTINGS } from '../lib/api';
 import { decode as decodeEvilandCode } from '../visualizer/eviland-randomizer';
@@ -37,7 +38,12 @@ import {
   insertTrackNext,
 } from '@shared/queue-insert';
 import { handoffKey, shouldPrepareTrackHandoff, shouldStartTrackHandoff } from '@shared/playback-handoff';
-import { resolvePlaybackStartIndex } from '@shared/playback-start';
+import {
+  isShuffleHandoffCacheValid,
+  resolveShuffleHandoffPick,
+  type ShuffleHandoffCache,
+} from '@shared/shuffle-handoff';
+import { remapResumeIndex, resolvePlaybackStartIndex } from '@shared/playback-start';
 import {
   shouldStopAfterCurrent,
   shouldStopForSleepTimer,
@@ -185,6 +191,10 @@ interface PlayerState {
   clearSleepTimer: () => void;
   refillAutoDjQueue: (force?: boolean) => Promise<Track[]>;
   setMode: (m: PlaybackMode) => void;
+  /** Toggles shuffle without disturbing the current repeat setting — shuffle and repeat are independent. */
+  toggleShuffle: () => void;
+  /** Cycles repeat off -> all -> one -> off, preserving whatever shuffle is currently set to. */
+  cycleRepeat: () => void;
   setEqBand: (i: number, dB: number) => Promise<void>;
   setEqPreset: (values: number[]) => Promise<void>;
   setEqEnabled: (on: boolean) => Promise<void>;
@@ -305,6 +315,12 @@ let lastSessionPersistAt = 0;
 let lastPodcastProgressPersistAt = 0;
 let lastHandoffKey: string | null = null;
 let lastPreparedHandoffKey: string | null = null;
+// Populated by the gapless-prepare branch below when it picks a shuffle
+// candidate ahead of time; consumed by autoAdvance() so the automatic
+// advance commits the exact track the engine already decoded into the idle
+// deck. A manual next() always clears this instead of trusting it — see
+// shared/shuffle-handoff.ts for why a stale pick cannot just be reused.
+let cachedShuffleHandoff: ShuffleHandoffCache | null = null;
 let lastStopAfterCurrentKey: string | null = null;
 let lastPlaybackErrorKey: string | null = null;
 // Dedup for the auto-advance-on-end branch. The exclusive bridge patches
@@ -347,11 +363,14 @@ async function restorePlaybackSession(
   setState: (partial: Partial<PlayerState>) => void,
 ): Promise<void> {
   if (!resumeState?.queueTrackIds.length) return;
-  const tracks = (
-    await Promise.all(resumeState.queueTrackIds.map((id) => api.getTrack(id).catch(() => null)))
-  ).filter((track): track is Track => !!track);
+  const ids = resumeState.queueTrackIds;
+  // Single batch IPC call instead of one getTrack() round trip per queued
+  // track — the batch endpoint already exists and is preload-wired.
+  const fetched = await api.getTracksByIds(ids).catch(() => []);
+  const byId = new Map(fetched.map((track) => [track.id, track]));
+  const tracks = ids.map((id) => byId.get(id)).filter((track): track is Track => !!track);
   if (!tracks.length) return;
-  const index = Math.max(0, Math.min(resumeState.index, tracks.length - 1));
+  const index = remapResumeIndex(ids, resumeState.index, new Set(byId.keys()));
   const current = tracks[index] ?? null;
   setState({
     queue: tracks,
@@ -360,7 +379,7 @@ async function restorePlaybackSession(
     currentTime: resumeState.currentTime,
     duration: current?.duration ?? 0,
     mode: resumeState.mode,
-    shuffleHistory: resumeState.mode === 'shuffle' ? resetSmartShuffleHistory(tracks.length, index) : [],
+    shuffleHistory: isShuffleMode(resumeState.mode) ? resetSmartShuffleHistory(tracks.length, index) : [],
     resumeAt: resumeState.currentTime,
   });
   applyReplayGain(current, settings);
@@ -433,7 +452,7 @@ async function advanceAfterPlaybackError(
 
   let nextIndex = state.index + 1;
   let nextShuffleHistory = state.shuffleHistory;
-  if (state.mode === 'shuffle') {
+  if (isShuffleMode(state.mode)) {
     const decision = nextSmartShuffle({
       queueLength: state.queue.length,
       currentIndex: state.index,
@@ -441,7 +460,7 @@ async function advanceAfterPlaybackError(
     });
     nextIndex = decision.index;
     nextShuffleHistory = decision.history;
-  } else if (nextIndex >= state.queue.length && (state.mode === 'repeat-all' || state.mode === 'repeat-one')) {
+  } else if (nextIndex >= state.queue.length && repeatModeOf(state.mode) !== 'off') {
     nextIndex = 0;
   }
 
@@ -580,6 +599,71 @@ function prepareEngineTrack(track: Track): void {
   engine.prepareNext(toAudioUrl(track.path), track.id, cueStart(track));
 }
 
+async function commitPlaybackAdvance(
+  getState: () => PlayerState,
+  setState: (partial: Partial<PlayerState>) => void,
+  nextIdx: number,
+  nextShuffleHistory: number[],
+): Promise<void> {
+  const latestQueue = getState().queue;
+  const t = latestQueue[nextIdx]!;
+  setState({
+    index: nextIdx,
+    current: t,
+    currentTime: 0,
+    duration: t.duration ?? 0,
+    resumeAt: null,
+    activePodcastEpisode: null,
+    shuffleHistory: nextShuffleHistory,
+  });
+  applyReplayGain(t, getState().settings);
+  schedulePersistPlaybackSession(getState(), true);
+  await playEngineTrack(t);
+  lastPlaybackErrorKey = null;
+  startLastfmNowPlaying(t);
+  recordLibraryPlay(t);
+  if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: nextIdx })) {
+    void getState().refillAutoDjQueue();
+  }
+}
+
+/**
+ * Automatic advance — natural end-of-track, a cued segment ending, or an
+ * early crossfade start — as opposed to a direct user/UI call to next().
+ * Consumes a cached shuffle handoff pick when the gapless-prepare step
+ * already computed and validated one for this exact position, so the
+ * commit matches whatever the engine decoded into the idle deck; otherwise
+ * falls through to the normal (and, for shuffle, freshly-randomized)
+ * next(). Keeping this split — rather than branching inside next() on a
+ * "how was I called" flag — is what lets a manual next() unconditionally
+ * invalidate the cache without also having to guess whether the call in
+ * flight was really automatic.
+ */
+async function autoAdvance(
+  getState: () => PlayerState,
+  setState: (partial: Partial<PlayerState>) => void,
+): Promise<void> {
+  const state = getState();
+  if (
+    state.current &&
+    isShuffleHandoffCacheValid(cachedShuffleHandoff, {
+      trackId: state.current.id,
+      index: state.index,
+      queueLength: state.queue.length,
+      history: state.shuffleHistory,
+    })
+  ) {
+    const { index: nextIdx, history: nextShuffleHistory } = cachedShuffleHandoff;
+    cachedShuffleHandoff = null;
+    clearPlaybackErrorAdvanceTimer();
+    recordManualSkip(state);
+    await commitPlaybackAdvance(getState, setState, nextIdx, nextShuffleHistory);
+    return;
+  }
+  cachedShuffleHandoff = null;
+  await getState().next();
+}
+
 function recordLibraryPlay(track: Track): void {
   if (track.id > 0) void api.recordPlay(track.id).catch(() => undefined);
 }
@@ -693,10 +777,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         if (state.stopAfterCurrent) {
           set({ stopAfterCurrent: false });
           engine.stop();
-        } else if (state.mode === 'repeat-one' && state.current) {
+        } else if (repeatModeOf(state.mode) === 'one' && state.current) {
           void playEngineTrack(state.current);
         } else {
-          window.setTimeout(() => void get().next(), 0);
+          window.setTimeout(() => void autoAdvance(get, set), 0);
         }
         return;
       }
@@ -733,8 +817,22 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         }) &&
         state.current
       ) {
-        const nextIndex = state.mode === 'repeat-all' && state.index >= queueLength - 1 ? 0 : state.index + 1;
-        const nextTrack = state.queue[nextIndex] ?? null;
+        let nextTrack: Track | null;
+        if (isShuffleMode(state.mode)) {
+          // Cache the pick so autoAdvance() commits the exact track decoded
+          // into the idle deck here — otherwise the prepare is wasted and
+          // gapless playback silently falls back to today's hard cut.
+          cachedShuffleHandoff = resolveShuffleHandoffPick(cachedShuffleHandoff, {
+            trackId: state.current.id,
+            index: state.index,
+            queueLength: state.queue.length,
+            history: state.shuffleHistory,
+          });
+          nextTrack = state.queue[cachedShuffleHandoff.index] ?? null;
+        } else {
+          const nextIndex = repeatModeOf(state.mode) === 'all' && state.index >= queueLength - 1 ? 0 : state.index + 1;
+          nextTrack = state.queue[nextIndex] ?? null;
+        }
         if (nextTrack) {
           lastPreparedHandoffKey = handoffKey(state.current.id, state.index);
           prepareEngineTrack(nextTrack);
@@ -756,7 +854,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         state.current
       ) {
         lastHandoffKey = handoffKey(state.current.id, state.index);
-        void state.next();
+        void autoAdvance(get, set);
         return;
       }
       if (
@@ -783,14 +881,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         const endedKey = `${state.current?.id ?? 'x'}:${state.index}`;
         if (lastEndedKey !== endedKey) {
           lastEndedKey = endedKey;
-          if (get().mode !== 'repeat-one') {
+          if (repeatModeOf(get().mode) !== 'one') {
             // The engine reached the end of this track. Notify the eviland
             // memory bridge so the play counter ticks (drives the 8/32/96/256
             // generation ladder). The registry routes to the active bridge IFF
             // its trackId matches — wrong-track and no-bridge are cheap no-ops.
             notifyPlayCompleted(state.current?.id ?? null);
             // small delay to avoid re-entry
-            setTimeout(() => void get().next(), 0);
+            setTimeout(() => void autoAdvance(get, set), 0);
           } else if (get().current) {
             // repeat-one: the same track is about to play again. From the
             // player's POV that's a completed play, so the counter ticks too.
@@ -1029,7 +1127,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         resumeAt: null,
         playbackError: null,
         activePodcastEpisode: null,
-        shuffleHistory: get().mode === 'shuffle' ? resetSmartShuffleHistory(q.length, nextIndex) : [],
+        shuffleHistory: isShuffleMode(get().mode) ? resetSmartShuffleHistory(q.length, nextIndex) : [],
       });
       applyReplayGain(track, get().settings);
       schedulePersistPlaybackSession(get(), true);
@@ -1084,7 +1182,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         resumeAt: null,
         playbackError: null,
         activePodcastEpisode: null,
-        shuffleHistory: get().mode === 'shuffle' ? resetSmartShuffleHistory(q.length, i) : [],
+        shuffleHistory: isShuffleMode(get().mode) ? resetSmartShuffleHistory(q.length, i) : [],
       });
       applyReplayGain(t, get().settings);
       schedulePersistPlaybackSession(get(), true);
@@ -1137,7 +1235,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const state = get();
       const result = removeQueueItem(state.queue, state.index, removeIndex);
       if (!result.queue.length) {
-        engine.stop();
+        // Removing the last track is also a removed-current case, so it needs
+        // the same unload() as the branch below: stop() leaves src/trackId on
+        // the deck, and a later Play would resume the track just removed.
+        engine.unload();
         set({ queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], activePodcastEpisode: null });
         schedulePersistPlaybackSession(get(), true);
         return;
@@ -1148,6 +1249,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           await get().playQueue(result.queue, result.index);
           return;
         }
+        // Paused: playQueue() above won't run to hand the engine a fresh
+        // src, so without this the engine keeps holding the just-removed
+        // track (stop() alone doesn't clear src/trackId) — a later Play
+        // would resume the removed track instead of loading nextCurrent.
+        engine.unload();
         set({
           queue: result.queue,
           index: result.index,
@@ -1208,17 +1314,23 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       clearPlaybackErrorAdvanceTimer();
       const state = get();
       recordManualSkip(state);
+      // A direct call to next() — user skip, keyboard/media shortcut, or
+      // autoAdvance()'s own fallback when no cached pick applies — always
+      // computes its own fresh pick rather than trusting a background
+      // prepare; see shared/shuffle-handoff.ts for why a stale one cannot
+      // just be reused.
+      cachedShuffleHandoff = null;
       const { queue, index, mode, shuffleHistory } = state;
       if (!queue.length) return;
       let nextIdx = index + 1;
       let nextShuffleHistory = shuffleHistory;
-      if (mode === 'shuffle') {
+      if (isShuffleMode(mode)) {
         const decision = nextSmartShuffle({ queueLength: queue.length, currentIndex: index, history: shuffleHistory });
         nextIdx = decision.index;
         nextShuffleHistory = decision.history;
       }
       if (nextIdx >= queue.length) {
-        if (mode === 'repeat-all') nextIdx = 0;
+        if (repeatModeOf(mode) === 'all') nextIdx = 0;
         else {
           const additions = await get().refillAutoDjQueue(true);
           if (!additions.length) {
@@ -1230,7 +1342,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
               return;
             }
             nextIdx = expanded.index + 1;
-            const contextShuffleHistory = mode === 'shuffle'
+            const contextShuffleHistory = isShuffleMode(mode)
               ? resetSmartShuffleHistory(expanded.queue.length, expanded.index)
               : [];
             set({
@@ -1244,18 +1356,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           }
         }
       }
-      const latestQueue = get().queue;
-      const t = latestQueue[nextIdx]!;
-      set({ index: nextIdx, current: t, currentTime: 0, duration: t.duration ?? 0, resumeAt: null, activePodcastEpisode: null, shuffleHistory: nextShuffleHistory });
-      applyReplayGain(t, get().settings);
-      schedulePersistPlaybackSession(get(), true);
-      await playEngineTrack(t);
-      lastPlaybackErrorKey = null;
-      startLastfmNowPlaying(t);
-      recordLibraryPlay(t);
-      if (shouldAutoDjRefill({ enabled: get().autoDjEnabled, queueLength: get().queue.length, index: nextIdx })) {
-        void get().refillAutoDjQueue();
-      }
+      await commitPlaybackAdvance(get, set, nextIdx, nextShuffleHistory);
     },
 
     prev: async () => {
@@ -1267,7 +1368,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         get().seek(0);
         return;
       }
-      const shuffleDecision = mode === 'shuffle'
+      const shuffleDecision = isShuffleMode(mode)
         ? previousSmartShuffle({ queueLength: queue.length, currentIndex: index, history: shuffleHistory })
         : null;
       const prevIdx = shuffleDecision ? shuffleDecision.index : Math.max(0, index - 1);
@@ -1420,10 +1521,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
               })
               .catch(() => []);
           })();
-      const remainingAhead = Math.max(0, state.queue.length - state.index - 1);
-      const additions = selectAutoDjAdditions(state.queue, candidates, state.autoDjTarget, remainingAhead);
+      // Re-read state after the await instead of reusing the pre-await
+      // snapshot: the candidate IPC can take a while, and a Clear Queue (or
+      // any other queue edit) that lands during that window must not be
+      // silently undone by committing onto the stale queue captured above.
+      const fresh = get();
+      if (!fresh.autoDjEnabled) return [];
+      const remainingAhead = Math.max(0, fresh.queue.length - fresh.index - 1);
+      const additions = selectAutoDjAdditions(fresh.queue, candidates, fresh.autoDjTarget, remainingAhead);
       if (!additions.length) return [];
-      set({ queue: [...state.queue, ...additions] });
+      set({ queue: [...fresh.queue, ...additions] });
       schedulePersistPlaybackSession(get(), true);
       return additions;
     },
@@ -1432,11 +1539,27 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const state = get();
       set({
         mode: m,
-        shuffleHistory: m === 'shuffle'
+        shuffleHistory: isShuffleMode(m)
           ? resetSmartShuffleHistory(state.queue.length, state.index)
           : [],
       });
       schedulePersistPlaybackSession(get(), true);
+    },
+
+    // Shuffle and repeat are rendered as two independent buttons (Transport
+    // and every deck skin), so toggling one must never clobber the other —
+    // combinePlaybackMode/isShuffleMode/repeatModeOf keep them orthogonal
+    // while still funneling through the single persisted PlaybackMode.
+    toggleShuffle: () => {
+      const state = get();
+      get().setMode(combinePlaybackMode(!isShuffleMode(state.mode), repeatModeOf(state.mode)));
+    },
+
+    cycleRepeat: () => {
+      const state = get();
+      const repeat = repeatModeOf(state.mode);
+      const nextRepeat = repeat === 'all' ? 'one' : repeat === 'one' ? 'off' : 'all';
+      get().setMode(combinePlaybackMode(isShuffleMode(state.mode), nextRepeat));
     },
 
     setEqBand: async (i, dB) => {

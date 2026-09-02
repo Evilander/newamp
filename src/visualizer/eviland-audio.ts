@@ -119,6 +119,16 @@ export interface EvilandReactor {
     dtMs: number,
     nowMs: number,
   ): EvilandFrame;
+  /**
+   * Clears tempo/phase tracking and structural memory (novelty baseline,
+   * section boundaries, fingerprints). Call this whenever the track changes
+   * — without it, the previous track's recentAvg/timestamps make the first
+   * analyze() of a new track read as a huge spectral jump, very likely
+   * firing a spurious sectionChanged, and fingerprints/sectionId keep
+   * accumulating across every track in the session instead of starting
+   * fresh per track.
+   */
+  reset(): void;
 }
 
 export function createEvilandReactor(config: EvilandReactorConfig): EvilandReactor {
@@ -189,7 +199,13 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
   let sectionStartAt = 0;
   const sectionAccum = new Float32Array(EVILAND_BANDS);
   let sectionFrames = 0;
-  const fingerprints: Float32Array[] = [];
+  // Each entry remembers which real sectionId it was fingerprinted from —
+  // sectionId is an unbounded, ever-incrementing counter, but this array is
+  // FIFO-capped at 24, so its own index stops matching sectionId once more
+  // than 24 sections have ever been fingerprinted (routine within one song).
+  // sectionReturn must report the real sectionId (the Director keys its
+  // `sections` map by sectionId), not this array's position.
+  const fingerprints: { sectionId: number; fp: Float32Array }[] = [];
   let lastNoveltyAt = 0;
 
   const out: EvilandFrame = {
@@ -235,6 +251,29 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
   }
 
   return {
+    reset(): void {
+      // Tempo/phase.
+      lastKickAt = 0;
+      ioi.length = 0;
+      bpm = 0;
+      beatConfidence = 0;
+      lastDownbeatAt = 0;
+      // Structural memory.
+      lastStructAt = 0;
+      recentAvg.fill(0);
+      recentInit = false;
+      sectionId = 0;
+      sectionStartAt = 0;
+      sectionAccum.fill(0);
+      sectionFrames = 0;
+      fingerprints.length = 0;
+      lastNoveltyAt = 0;
+      // out.novelty is only recomputed on struct-ticks (every ~500ms) — since
+      // this reset itself doesn't count as one, leaving it alone would let the
+      // old track's decayed novelty value leak into frames returned before the
+      // next tick.
+      out.novelty = 0;
+    },
     analyze(freq, onsetFreq, leftFreq, rightFreq, dtMs, nowMs): EvilandFrame {
       const dt = Math.max(1, Math.min(100, dtMs));
       out.onsets.length = 0;
@@ -430,23 +469,25 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
           const fp = new Float32Array(EVILAND_BANDS);
           if (sectionFrames > 0) for (let b = 0; b < EVILAND_BANDS; b++) fp[b] = sectionAccum[b]! / sectionFrames;
           // Does it match a stored section? (visual rhyme — returning chorus)
-          let bestIdx = -1;
+          let bestMatchSectionId = -1;
           let bestSim = 0.86; // threshold to call it a "return"
           for (let i = 0; i < fingerprints.length; i++) {
-            const s = cosine(fp, fingerprints[i]!);
+            const s = cosine(fp, fingerprints[i]!.fp);
             if (s > bestSim) {
               bestSim = s;
-              bestIdx = i;
+              bestMatchSectionId = fingerprints[i]!.sectionId;
             }
           }
-          fingerprints.push(fp);
+          // Tag with the section that's ending (sectionId before the
+          // increment below), matching the section fingerprints are taken of.
+          fingerprints.push({ sectionId, fp });
           if (fingerprints.length > 24) fingerprints.shift();
           sectionId++;
           sectionStartAt = nowMs;
           sectionFrames = 0;
           sectionAccum.fill(0);
           out.sectionChanged = true;
-          out.sectionReturn = bestIdx;
+          out.sectionReturn = bestMatchSectionId;
           // Surface the just-fingerprinted section so the renderer-side memory
           // bridge can persist it. The one Float32Array(24) allocation per real
           // boundary (~every 10-30s) is the entire per-frame cost — the rest of

@@ -1,4 +1,11 @@
-import { fetchWikipediaPages, localStorageSafe, normalizeForMatch, type WikiPage } from '../lib/wiki.ts';
+import {
+  fetchWikipediaPages,
+  localStorageSafe,
+  normalizeForMatch,
+  setItemWithPrune,
+  type WikiPage,
+  type WikiReachability,
+} from '../lib/wiki.ts';
 
 export interface AlbumFact {
   title: string;
@@ -10,6 +17,10 @@ export interface AlbumFact {
 
 const ALBUM_FACT_CACHE_PREFIX = 'newamp:album-facts:v1:';
 const ALBUM_FACT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Shorter than the positive TTL — see the identical note in artistFacts.ts.
+// A confirmed miss still avoids re-running the up-to-16-request serial
+// lookup chain (plus its artist-fact fallback chain) on every replay.
+const NEGATIVE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const ALBUM_FACT_SEARCH_LIMIT = '6';
 
 const ALBUM_TITLE_PATTERN = /\((?:album|ep|extended play|mixtape|soundtrack)\)/i;
@@ -20,7 +31,8 @@ const NON_ALBUM_CREATIVE_WORK_PATTERN = /\b(?:song by|single by|film directed|no
 
 interface CachedAlbumFact {
   fetchedAt: number;
-  fact: AlbumFact;
+  /** null = confirmed "not found" (negative cache). */
+  fact: AlbumFact | null;
 }
 
 export async function fetchAlbumFacts(
@@ -33,10 +45,11 @@ export async function fetchAlbumFacts(
   if (isSkippableAlbumLookup(cleanAlbum)) return null;
 
   const cached = readCachedAlbumFact(cleanAlbum, cleanArtist);
-  if (cached) return cached;
+  if (cached !== undefined) return cached;
+  const reachability: WikiReachability = { reachedServer: false };
 
   for (const title of directTitleCandidates(cleanAlbum, cleanArtist)) {
-    const candidates = await fetchWikiCandidates({
+    const candidates = await fetchWikiCandidates(reachability, {
       origin: '*',
       action: 'query',
       redirects: '1',
@@ -59,7 +72,7 @@ export async function fetchAlbumFacts(
     const query = cleanArtist
       ? `"${lookupAlbum}" "${cleanArtist}" album OR "studio album" OR EP -film -song -single -novel -software`
       : `"${lookupAlbum}" album OR "studio album" OR EP -film -song -single -novel -software`;
-    const candidates = await fetchWikiCandidates({
+    const candidates = await fetchWikiCandidates(reachability, {
       origin: '*',
       action: 'query',
       generator: 'search',
@@ -79,39 +92,65 @@ export async function fetchAlbumFacts(
     return fact;
   }
 
+  // Every candidate exhausted — negative-cache the miss so the next lookup
+  // for this album doesn't re-run the full serial chain (or the artist-fact
+  // fallback chain NowPlayingView triggers on a null result) for nothing.
+  // Only record a confirmed miss if Wikipedia actually answered. An outage,
+  // a 5xx, or rate-limiting makes every candidate come back empty too, and
+  // caching that as "no such album" would hide real data until the entry expires.
+  if (reachability.reachedServer) writeCachedAlbumFact(cleanAlbum, cleanArtist, null);
   return null;
 }
 
-function readCachedAlbumFact(album: string, artist: string): AlbumFact | null {
+// undefined = no cache entry (caller should look up); null = a confirmed
+// negative-cache hit; AlbumFact = a confirmed positive hit.
+function readCachedAlbumFact(album: string, artist: string): AlbumFact | null | undefined {
   const storage = localStorageSafe();
-  if (!storage) return null;
+  if (!storage) return undefined;
   const key = albumFactCacheKey(album, artist);
   try {
     const raw = storage.getItem(key);
-    if (!raw) return null;
+    if (!raw) return undefined;
     const cached = JSON.parse(raw) as Partial<CachedAlbumFact>;
-    if (!cached.fetchedAt || !cached.fact || Date.now() - cached.fetchedAt > ALBUM_FACT_CACHE_TTL_MS) {
+    if (!cached.fetchedAt) {
       storage.removeItem(key);
-      return null;
+      return undefined;
     }
+    const ttl = cached.fact ? ALBUM_FACT_CACHE_TTL_MS : NEGATIVE_CACHE_TTL_MS;
+    if (Date.now() - cached.fetchedAt > ttl) {
+      storage.removeItem(key);
+      return undefined;
+    }
+    if (cached.fact == null) return null;
     if (!isAlbumFact(cached.fact) || !isLikelyAlbumFact(album, artist, cached.fact)) {
       storage.removeItem(key);
-      return null;
+      return undefined;
     }
     return cached.fact;
   } catch {
     storage.removeItem(key);
-    return null;
+    return undefined;
   }
 }
 
-function writeCachedAlbumFact(album: string, artist: string, fact: AlbumFact): void {
+function writeCachedAlbumFact(album: string, artist: string, fact: AlbumFact | null): void {
   const storage = localStorageSafe();
   if (!storage) return;
+  setItemWithPrune(
+    storage,
+    albumFactCacheKey(album, artist),
+    JSON.stringify({ fetchedAt: Date.now(), fact }),
+    ALBUM_FACT_CACHE_PREFIX,
+    parseFetchedAt,
+  );
+}
+
+function parseFetchedAt(raw: string): number | null {
   try {
-    storage.setItem(albumFactCacheKey(album, artist), JSON.stringify({ fetchedAt: Date.now(), fact }));
+    const parsed = JSON.parse(raw) as { fetchedAt?: number };
+    return typeof parsed.fetchedAt === 'number' ? parsed.fetchedAt : null;
   } catch {
-    /* ignore quota or privacy-mode failures */
+    return null;
   }
 }
 
@@ -246,10 +285,11 @@ function directTitleCandidates(album: string, artist: string): string[] {
 }
 
 async function fetchWikiCandidates(
+  reachability: WikiReachability,
   query: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<AlbumFact[]> {
-  return fetchWikipediaPages(query, pageToAlbumFact, signal, 'wiki album');
+  return fetchWikipediaPages(query, pageToAlbumFact, signal, 'wiki album', reachability);
 }
 
 function pageToAlbumFact(page: WikiPage): AlbumFact | null {

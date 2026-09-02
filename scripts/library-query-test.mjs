@@ -83,6 +83,192 @@ const h5 = lib.getLibraryHealth();
 if (h5 === h4b) fail('B2 applyManualMetadataPatch should invalidate the health cache');
 log.push(`B2c manual-edit invalidates health: ${h5 !== h4b}`);
 
+// LIKE escaping: a '%' or '_' in the search term must match itself literally,
+// not act as a wildcard. Depends on every LIKE consuming an escapeLike()
+// pattern carrying a matching ESCAPE clause.
+{
+  const special = [
+    { n: 9001, title: 'Song 100% Live' },
+    { n: 9002, title: 'under_score' },
+    { n: 9003, title: 'underXscore' },
+    { n: 9004, title: 'Plain Song' },
+  ].map(({ n, title }) => ({
+    path: `/music/special-${n}.flac`,
+    title,
+    artist: 'Escape Artist',
+    album: 'Escape Album',
+    albumArtist: 'Escape Artist',
+    trackNo: 1, discNo: 1, year: 2020, genre: 'Test',
+    duration: 100, bitrate: 1000, sampleRate: 44100,
+    replayGainTrackDb: null, replayGainAlbumDb: null,
+    size: 1000 + n, mtime: 1700000000 + n, art: null,
+  }));
+  lib.upsertTracks(special);
+
+  const titlesFor = (search) =>
+    lib.getTracks({ search, limit: 500 }).map((t) => t.title).sort();
+
+  // Without ESCAPE '\' the escaped pattern degenerates and either matches
+  // everything or nothing — here it must match ONLY the literal "100%".
+  const pct = titlesFor('100%');
+  if (JSON.stringify(pct) !== JSON.stringify(['Song 100% Live'])) {
+    fail(`searching "100%" must match only the literal title, got ${JSON.stringify(pct)}`);
+  }
+  // '_' must not become a single-char wildcard: under_score != underXscore.
+  const underscore = titlesFor('under_score');
+  if (JSON.stringify(underscore) !== JSON.stringify(['under_score'])) {
+    fail(`searching "under_score" must not match underXscore, got ${JSON.stringify(underscore)}`);
+  }
+  const albumHit = lib.getAlbums({ search: 'under_score' });
+  if (albumHit.length !== 1 || albumHit[0].album !== 'Escape Album') {
+    fail(`album search for "under_score" should surface Escape Album once, got ${JSON.stringify(albumHit.map((a) => a.album))}`);
+  }
+  log.push('LIKE escaping: literal %/_ matching verified');
+}
+
+// LIKE escaping, genre filters: buildHarmonicMix's genreQuery and
+// runSmartPlaylistRule's genreQuery (via smartRuleWhere) build their own
+// LIKE clauses directly, bypassing the pushTextFilter/trackSearchWhere
+// helpers the block above covers. They were missed by both the original
+// ESCAPE fix and the finding that prompted it — found while verifying that
+// fix's coverage. Unescaped, a literal '%' or '_' in a genre query acts as a
+// wildcard, so a query like "100%" would falsely match "1000" (no percent
+// sign at all) and "chill_hop" would falsely match "chillXhop" for any X.
+{
+  const genreTrack = (n, genre) => ({
+    path: `/music/genre-guard-${n}.flac`,
+    title: `Genre Guard ${n}`,
+    artist: 'Genre Guard Artist',
+    album: 'Genre Guard Album',
+    albumArtist: 'Genre Guard Artist',
+    trackNo: 1, discNo: 1, year: 2022, genre,
+    duration: 100, bitrate: 1000, sampleRate: 44100,
+    replayGainTrackDb: null, replayGainAlbumDb: null,
+    size: 5000 + n, mtime: 1700000000 + n, art: null,
+  });
+  lib.upsertTracks([
+    genreTrack(1, '100% Chill'),        // literal '%' — should match genreQuery "100%"
+    genreTrack(2, '1000 Beats Only'),   // no '%' at all — must NOT match "100%" unescaped
+    genreTrack(3, 'Chill_Hop Beats'),   // literal '_' — should match genreQuery "chill_hop"
+    genreTrack(4, 'ChillXHop Beats'),   // no '_' — must NOT match "chill_hop" unescaped
+  ]);
+
+  const harmonicPaths = (genreQuery) =>
+    lib.buildHarmonicMix({ genreQuery }).map((t) => t.path);
+
+  const pctMix = harmonicPaths('100%');
+  if (!pctMix.includes('/music/genre-guard-1.flac')) fail('buildHarmonicMix "100%" should match the literal "100% Chill" genre');
+  if (pctMix.includes('/music/genre-guard-2.flac')) fail('buildHarmonicMix "100%" must not wildcard-match "1000 Beats Only"');
+
+  const underscoreMix = harmonicPaths('chill_hop');
+  if (!underscoreMix.includes('/music/genre-guard-3.flac')) fail('buildHarmonicMix "chill_hop" should match the literal "Chill_Hop Beats" genre');
+  if (underscoreMix.includes('/music/genre-guard-4.flac')) fail('buildHarmonicMix "chill_hop" must not wildcard-match "ChillXHop Beats"');
+
+  const smartPaths = (genreQuery) =>
+    lib.runSmartPlaylistRule({ name: 'Genre Guard Rule', mood: 'focus', count: 50, genreQuery }).map((t) => t.path);
+
+  const pctSmart = smartPaths('100%');
+  if (!pctSmart.includes('/music/genre-guard-1.flac')) fail('runSmartPlaylistRule "100%" should match the literal "100% Chill" genre');
+  if (pctSmart.includes('/music/genre-guard-2.flac')) fail('runSmartPlaylistRule "100%" must not wildcard-match "1000 Beats Only"');
+
+  const underscoreSmart = smartPaths('chill_hop');
+  if (!underscoreSmart.includes('/music/genre-guard-3.flac')) fail('runSmartPlaylistRule "chill_hop" should match the literal "Chill_Hop Beats" genre');
+  if (underscoreSmart.includes('/music/genre-guard-4.flac')) fail('runSmartPlaylistRule "chill_hop" must not wildcard-match "ChillXHop Beats"');
+
+  log.push('genre LIKE escaping verified for buildHarmonicMix and runSmartPlaylistRule');
+}
+
+// Album search matchedTrackTitles: GROUP_CONCAT joins with char(31); the
+// split must use that unit separator so multi-title results render as whole
+// titles ("A · B"), never as loose characters.
+{
+  const sep = String.fromCharCode(31);
+  const multi = [1, 2].map((k) => ({
+    path: `/music/sep-${k}.flac`,
+    title: k === 1 ? 'Midnight Lullaby' : 'Sweet Lullaby',
+    artist: 'Separator Artist',
+    album: 'Separator Album',
+    albumArtist: 'Separator Artist',
+    trackNo: k, discNo: 1, year: 1999, genre: 'Test',
+    duration: 200, bitrate: 1000, sampleRate: 44100,
+    replayGainTrackDb: null, replayGainAlbumDb: null,
+    size: 3000 + k, mtime: 1700000000 + k, art: null,
+  }));
+  lib.upsertTracks(multi);
+  const hit = lib.getAlbums({ search: 'lullaby' }).find((a) => a.album === 'Separator Album');
+  if (!hit) {
+    fail('separator album should be found when searching its track titles');
+  } else if (!hit.matchedOnTrack) {
+    fail('Separator Album should report matchedOnTrack');
+  } else if (
+    !hit.matchedTrackTitles ||
+    !hit.matchedTrackTitles.includes('Midnight Lullaby') ||
+    !hit.matchedTrackTitles.includes('Sweet Lullaby') ||
+    hit.matchedTrackTitles.includes(sep)
+  ) {
+    fail(
+      'matchedTrackTitles must contain whole titles separated by " · ", got ' +
+        JSON.stringify(hit.matchedTrackTitles),
+    );
+  } else {
+    log.push(`matchedTrackTitles separator: "${hit.matchedTrackTitles}"`);
+  }
+}
+
+// Rescan must not wipe UI-applied album art: upserting a changed file that
+// has NO embedded art keeps the existing art instead of nulling it, while a
+// file that DOES carry embedded art still replaces what was there.
+{
+  const uiArt = {
+    mime: 'image/png',
+    data: Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=',
+      'base64',
+    ),
+  };
+  const embeddedArt = {
+    mime: 'image/png',
+    data: Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    ),
+  };
+  const base = (over) => ({
+    path: '/music/art-carrier.flac',
+    title: 'Art Carrier',
+    artist: 'Art Artist',
+    album: 'Art Album',
+    albumArtist: 'Art Artist',
+    trackNo: 1, discNo: 1, year: 2021, genre: 'Test',
+    duration: 90, bitrate: 1000, sampleRate: 44100,
+    replayGainTrackDb: null, replayGainAlbumDb: null,
+    size: 4001, mtime: 1700000010, art: null,
+    ...over,
+  });
+  lib.upsertTracks([base()]);
+  const uiApplied = lib.applyAlbumArtToAlbum('Art Album', 'Art Artist', uiArt, 'test-ui');
+  if (!uiApplied) {
+    fail('UI art apply should succeed');
+  } else {
+    const withUiArt = lib.getTracks({ search: 'art carrier' })[0];
+    if (withUiArt?.hasArt !== 1) fail('UI-applied art should mark the track as having art');
+  }
+
+  // "Rescan" the changed file — it still carries no embedded art.
+  lib.upsertTracks([base({ mtime: 1700009999, title: 'Art Carrier v2' })]);
+  const afterRescan = lib.getTracks({ search: 'art carrier v2' })[0];
+  if (afterRescan?.hasArt !== 1) fail('rescan of an art-less file must preserve UI-applied art');
+  const kept = afterRescan ? lib.getArt(afterRescan.id) : null;
+  if (!kept || !kept.data.equals(uiArt.data)) fail('preserved art must be the UI-applied image');
+
+  // A rescan where the file NOW embeds art replaces the preserved art.
+  lib.upsertTracks([base({ mtime: 1700010000, art: embeddedArt })]);
+  const afterEmbedded = lib.getTracks({ search: 'art carrier' })[0];
+  const replaced = afterEmbedded ? lib.getArt(afterEmbedded.id) : null;
+  if (!replaced || !replaced.data.equals(embeddedArt.data)) fail('embedded art from the file must win on rescan');
+  log.push('rescan preserves UI-applied art; embedded art still wins');
+}
+
 const report = log.join('\n') + '\n' + (pass ? '[library-query-test] PASS' : '[library-query-test] FAIL') + '\n';
 writeFileSync(RESULT, report);
 console.log(report);

@@ -104,16 +104,41 @@ function keyCompatibility(a: string | null, b: string | null): number {
   return 0.24;
 }
 
+const parseKeyCache = new Map<string, ParsedKey | null>();
+
 function parseKey(value: string | null): ParsedKey | null {
   if (!value) return null;
   const raw = value.trim();
   if (!raw) return null;
+  // harmonicTransitionScore re-parses both tracks' key strings on every
+  // (previous, candidate) pairing buildHarmonicMix scores — `previous` is
+  // constant across the whole inner loop, so this was redundant regex work
+  // repeated once per candidate. Key strings are few and fixed (~24-48
+  // standard notations), and parseKey is a pure function of the string, so
+  // caching indefinitely at module scope is safe and never goes stale.
+  const cached = parseKeyCache.get(raw);
+  if (cached !== undefined) return cached;
+  const result = parseKeyUncached(raw);
+  parseKeyCache.set(raw, result);
+  return result;
+}
 
+function parseKeyUncached(raw: string): ParsedKey | null {
   const camelot = raw.match(/^([1-9]|1[0-2])([ab])$/i);
   if (camelot) {
     const number = Number(camelot[1]);
     const mode = camelot[2]!.toUpperCase() === 'A' ? 'minor' : 'major';
-    return { root: `camelot-${number}${mode}`, circleIndex: number - 1, mode };
+    // Camelot numbers already follow the circle of fifths (8B=C major,
+    // 9B=G major, ...) but offset from CIRCLE's own C-rooted index — 8B (C
+    // major) must land on the SAME circleIndex parsing "C" would produce, or
+    // keyCompatibility can never recognise them as the same key. The minor
+    // (A) row needs another +3: circleIndex always represents the literal
+    // root note regardless of mode (mirroring the letter-name path below,
+    // where "Am" and "A" share circleIndex — they differ only in `mode`),
+    // and A minor's root (A) sits 3 positions from its relative major's
+    // root (C) on the circle of fifths.
+    const circleIndex = mod(number - 8 + (mode === 'minor' ? 3 : 0), CIRCLE.length);
+    return { root: `camelot-${number}${mode}`, circleIndex, mode };
   }
 
   const normalized = raw

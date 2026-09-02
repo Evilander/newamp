@@ -35,6 +35,9 @@ const acceptedBlockers = [];
 if (!skipSmokes) {
   for (const script of [
     'smoke:library',
+    // Guards the 2.1.0 bug where a corrupt library.db bricked startup, and the
+    // recovery path that must not quarantine a merely-locked file.
+    'smoke:library-corruption',
     'smoke:build-lock',
     'smoke:startup-bundle',
     'smoke:transcode',
@@ -49,6 +52,9 @@ if (!skipSmokes) {
     'smoke:folders',
     'smoke:search',
     'smoke:smart',
+    // Tag DSL sandbox-escape, ReDoS and rule-cycle guards: user-authored rules
+    // run in the main process, so these are security checks, not nice-to-haves.
+    'smoke:tags',
     'smoke:suggested-stations',
     'smoke:discover',
     'smoke:harmonic',
@@ -96,6 +102,11 @@ if (!skipSmokes) {
     'smoke:exclusive-ui',
     'smoke:audio-limiter',
     'smoke:ui-playback',
+    // Proves Range serving really returns the bytes at the requested offset;
+    // the original regression made every track a non-seekable stream.
+    'smoke:playback-seek',
+    'smoke:particle-flow',
+    'smoke:perf-bench',
     'smoke:audio-proof',
     'smoke:manual-listening-proof',
     'smoke:ai-assist',

@@ -33,7 +33,16 @@ export const MAX_REGEX_INPUT_LENGTH = 4096;
 //      (a|aa)*, (.|a)+.
 // This is conservative — some legitimate patterns are blocked — but rule
 // authors can always rewrite into a safer shape.
-const REDOS_ALT_REPEAT = /\(([^|()]+)\|[^)]*\1[^)]*\)\s*[+*]/;
+// The optional (?:...)/(?=...)/(?!...)/(?<=...)/(?<!...) prefix has to be
+// consumed before the branch-content capture starts, or a non-capturing
+// alternation like (?:a|a)+ slips through: without it, [^|()]+ greedily
+// swallows the "?:" marker itself into the backreference, so \1 becomes
+// "?:a" instead of "a" and never re-matches — letting the pattern through.
+// The optional prefix must cover every group form, not just `(?:` and lookarounds:
+// a named group `(?<n>a|a)+` or an inline-modifier group `(?i:a|a)+` would
+// otherwise let the capture swallow the marker, so the backreference never
+// re-matches and the pattern passes.
+const REDOS_ALT_REPEAT = /\((?:\?(?:[:=!]|<[=!]|<[A-Za-z_$][\w$]*>|[a-zA-Z]*(?:-[a-zA-Z]+)?:))?([^|()]+)\|[^)]*\1[^)]*\)\s*[+*]/;
 
 function hasNestedUnboundedQuantifier(pattern: string): boolean {
   // Walk the pattern with a stack. For each `(...)` group, record whether
@@ -85,6 +94,18 @@ function hasNestedUnboundedQuantifier(pattern: string): boolean {
     }
     if ((ch === '+' || ch === '*') && stack.length > 0) {
       stack[stack.length - 1] = true;
+    }
+    if (ch === '{' && stack.length > 0) {
+      // {n,} is an unbounded quantifier too (same ReDoS shape as + and *) —
+      // (a{3,})+ backtracks catastrophically exactly like (a+)+ does, but the
+      // checks above only ever looked at literal +/* characters, so this
+      // shape walked straight through. {n,m}/{n} are bounded and don't
+      // create the nested-unbounded blowup by themselves, so they're left
+      // alone.
+      const closeIdx = pattern.indexOf('}', i + 1);
+      if (closeIdx !== -1 && /^\{\s*\d+\s*,\s*\}$/.test(pattern.slice(i, closeIdx + 1))) {
+        stack[stack.length - 1] = true;
+      }
     }
     i++;
   }
@@ -252,9 +273,19 @@ export interface TagEvaluationOutput {
 export const MAX_TAG_BOOST_PRODUCT = 1e6;
 
 export function evaluateRulesForTrack(input: TagEvaluationInput): TagEvaluationOutput {
-  const ordered = topologicalSort(input.rules);
+  // topologicalSort() throws on a cycle — exactly right for the save-time
+  // validation gate, which wants to reject a cycle-introducing rule outright.
+  // But a per-track recompute pass can't afford that: a single
+  // mutually-referencing pair (however it ended up persisted — a save-time
+  // gap, a future bulk import, a direct DB edit) would throw on the very
+  // first track and abort the whole batch. topologicalSortSafe() never
+  // throws; it excludes just the cyclic rule(s) from this pass instead.
+  const { ordered, cyclic } = topologicalSortSafe(input.rules);
   const matched = new Set<string>();
   const errors = new Map<string, string[]>();
+  for (const name of cyclic) {
+    errors.set(name, [`tag rule "${name}" is part of a reference cycle and was skipped`]);
+  }
   let boost = 1;
   for (const rule of ordered) {
     const context: TrackContext = { ...input.context, tags: matched };
@@ -295,6 +326,47 @@ export function topologicalSort(rules: ParsedRule[]): ParsedRule[] {
   };
   for (const rule of rules) visit(rule);
   return ordered;
+}
+
+/**
+ * Same dependency ordering as topologicalSort(), but never throws: any rule
+ * that forms a reference cycle is left out of `ordered` and reported in
+ * `cyclic` instead of aborting the whole sort. Rules that merely reference a
+ * cyclic rule (without being part of the cycle themselves) are unaffected —
+ * that reference just resolves to "tag not present", the same as any other
+ * unresolved/unknown tag() reference.
+ */
+export function topologicalSortSafe(rules: ParsedRule[]): { ordered: ParsedRule[]; cyclic: string[] } {
+  const byName = new Map<string, ParsedRule>();
+  for (const rule of rules) byName.set(rule.name, rule);
+  const state = new Map<string, 'visiting' | 'done' | 'cyclic'>();
+  const ordered: ParsedRule[] = [];
+  const cyclic: string[] = [];
+  const visit = (rule: ParsedRule): void => {
+    const current = state.get(rule.name);
+    if (current === 'done' || current === 'cyclic') return;
+    if (current === 'visiting') {
+      // Re-entered a rule that's still being resolved higher up this same
+      // dependency chain — a back-edge, i.e. a cycle. Exclude just this one;
+      // whichever rules reference it simply see it as never having matched.
+      state.set(rule.name, 'cyclic');
+      cyclic.push(rule.name);
+      return;
+    }
+    state.set(rule.name, 'visiting');
+    for (const ref of rule.references) {
+      const next = byName.get(ref);
+      if (next) visit(next);
+    }
+    // A descendant call may have reached back and marked this rule cyclic
+    // while its own references were being resolved above — don't finalize
+    // it as ordered in that case.
+    if (state.get(rule.name) === 'cyclic') return;
+    state.set(rule.name, 'done');
+    ordered.push(rule);
+  };
+  for (const rule of rules) visit(rule);
+  return { ordered, cyclic };
 }
 
 export function buildEvalEnvironment(now = Date.now()): EvalEnvironment {
@@ -636,7 +708,13 @@ class Parser {
       if (nameTok.type !== 'ident' && nameTok.type !== 'string') {
         throw new CompileException('expected tag name', nameTok.line, nameTok.column);
       }
-      const name = this.next().value;
+      // Declared rule names are constrained to lower-case slugs by
+      // validateTagName below, but this reference was taken verbatim from
+      // the token — tag(Energy_High) referencing a rule declared
+      // energy_high would silently never resolve (byName lookups and
+      // ctx.tags.has() are both exact-match). Lower-casing here keeps
+      // references case-insensitive to how the target rule was declared.
+      const name = this.next().value.toLowerCase();
       this.expect('rparen');
       return { kind: 'tag', name };
     }

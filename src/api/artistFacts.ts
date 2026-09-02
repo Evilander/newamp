@@ -1,4 +1,11 @@
-import { fetchWikipediaPages, localStorageSafe, normalizeForMatch, type WikiPage } from '../lib/wiki.ts';
+import {
+  fetchWikipediaPages,
+  localStorageSafe,
+  normalizeForMatch,
+  setItemWithPrune,
+  type WikiPage,
+  type WikiReachability,
+} from '../lib/wiki.ts';
 export interface ArtistFact {
   title: string;
   description: string | null;
@@ -11,6 +18,11 @@ export interface ArtistFact {
 
 const ARTIST_FACT_CACHE_PREFIX = 'newamp:artist-facts:v3:';
 const ARTIST_FACT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Shorter than the positive TTL — an artist genuinely not on Wikipedia today
+// could appear later, but a confirmed miss is still worth NOT re-running the
+// full up-to-~60-request serial lookup chain on every track change for the
+// rest of the day.
+const NEGATIVE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const ARTIST_FACT_SEARCH_LIMIT = '6';
 
 const MUSIC_DISAMBIGUATORS = [
@@ -38,7 +50,8 @@ const CREATIVE_WORK_DESCRIPTION_PATTERN = /\b(?:studio album|live album|compilat
 
 interface CachedArtistFact {
   fetchedAt: number;
-  fact: ArtistFact;
+  /** null = confirmed "not found" (negative cache). */
+  fact: ArtistFact | null;
 }
 
 export async function fetchArtistFacts(
@@ -48,10 +61,11 @@ export async function fetchArtistFacts(
   const cleanArtist = artist.trim();
   if (isSkippableArtistLookup(cleanArtist)) return null;
   const cached = readCachedArtistFact(cleanArtist);
-  if (cached) return cached;
+  if (cached !== undefined) return cached;
+  const reachability: WikiReachability = { reachedServer: false };
 
   for (const title of directTitleCandidates(cleanArtist)) {
-    const direct = await fetchWikiCandidates({
+    const direct = await fetchWikiCandidates(reachability, {
       origin: '*',
       action: 'query',
       redirects: '1',
@@ -72,7 +86,7 @@ export async function fetchArtistFacts(
 
   for (const lookupName of lookupArtistNames(cleanArtist)) {
     const q = `"${lookupName}" musician OR band OR singer OR rapper OR composer OR "record producer" OR "musical artist" -species -animal -film -novel -software`;
-    const fallback = await fetchWikiCandidates({
+    const fallback = await fetchWikiCandidates(reachability, {
       origin: '*',
       action: 'query',
       generator: 'search',
@@ -91,39 +105,66 @@ export async function fetchArtistFacts(
     writeCachedArtistFact(cleanArtist, direct);
     return direct;
   }
+  // Every candidate exhausted — negative-cache the miss so the next lookup
+  // for this artist (every track change, every app open) doesn't re-run the
+  // full serial chain again for nothing.
+  // Only record a confirmed miss if Wikipedia actually answered. An outage,
+  // a 5xx, or rate-limiting makes every candidate come back empty too, and
+  // caching that as "no such artist" would hide real data until the entry expires.
+  if (reachability.reachedServer) writeCachedArtistFact(cleanArtist, null);
   return null;
 }
 
-function readCachedArtistFact(artist: string): ArtistFact | null {
+// undefined = no cache entry (caller should look up); null = a confirmed
+// negative-cache hit (caller should treat as "not found" without a lookup);
+// ArtistFact = a confirmed positive hit.
+function readCachedArtistFact(artist: string): ArtistFact | null | undefined {
   const storage = localStorageSafe();
-  if (!storage) return null;
+  if (!storage) return undefined;
   const key = artistFactCacheKey(artist);
   try {
     const raw = storage.getItem(key);
-    if (!raw) return null;
+    if (!raw) return undefined;
     const cached = JSON.parse(raw) as Partial<CachedArtistFact>;
-    if (!cached.fetchedAt || !cached.fact || Date.now() - cached.fetchedAt > ARTIST_FACT_CACHE_TTL_MS) {
+    if (!cached.fetchedAt) {
       storage.removeItem(key);
-      return null;
+      return undefined;
     }
+    const ttl = cached.fact ? ARTIST_FACT_CACHE_TTL_MS : NEGATIVE_CACHE_TTL_MS;
+    if (Date.now() - cached.fetchedAt > ttl) {
+      storage.removeItem(key);
+      return undefined;
+    }
+    if (cached.fact == null) return null;
     if (!isArtistFact(cached.fact) || !isLikelyMusicArtistFact(artist, cached.fact)) {
       storage.removeItem(key);
-      return null;
+      return undefined;
     }
     return cached.fact;
   } catch {
     storage.removeItem(key);
-    return null;
+    return undefined;
   }
 }
 
-function writeCachedArtistFact(artist: string, fact: ArtistFact): void {
+function writeCachedArtistFact(artist: string, fact: ArtistFact | null): void {
   const storage = localStorageSafe();
   if (!storage) return;
+  setItemWithPrune(
+    storage,
+    artistFactCacheKey(artist),
+    JSON.stringify({ fetchedAt: Date.now(), fact }),
+    ARTIST_FACT_CACHE_PREFIX,
+    parseFetchedAt,
+  );
+}
+
+function parseFetchedAt(raw: string): number | null {
   try {
-    storage.setItem(artistFactCacheKey(artist), JSON.stringify({ fetchedAt: Date.now(), fact }));
+    const parsed = JSON.parse(raw) as { fetchedAt?: number };
+    return typeof parsed.fetchedAt === 'number' ? parsed.fetchedAt : null;
   } catch {
-    /* ignore quota or privacy-mode failures */
+    return null;
   }
 }
 
@@ -235,10 +276,11 @@ function escapeRegExp(value: string): string {
 }
 
 async function fetchWikiCandidates(
+  reachability: WikiReachability,
   query: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<ArtistFact[]> {
-  return fetchWikipediaPages(query, pageToArtistFact, signal, 'wiki artist');
+  return fetchWikipediaPages(query, pageToArtistFact, signal, 'wiki artist', reachability);
 }
 
 function pageToArtistFact(page: WikiPage): ArtistFact | null {
