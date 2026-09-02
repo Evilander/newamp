@@ -679,7 +679,13 @@ class Parser {
       return { kind: 'tag', name };
     }
 
-    if (tok.type === 'ident') {
+    // `matches` and `contains` are infix keywords, but the function table
+    // offers them as calls too (matches(title, "..."), listed by listFunctions
+    // for the Tags view). The tokenizer cannot tell the two apart, so a
+    // keyword directly followed by "(" is the call form.
+    const callableKeyword = tok.type === 'keyword' && (tok.value === 'matches' || tok.value === 'contains') && this.peek(1).type === 'lparen';
+
+    if (tok.type === 'ident' || callableKeyword) {
       this.next();
       if (this.accept('lparen')) {
         const args: AstNode[] = [];
