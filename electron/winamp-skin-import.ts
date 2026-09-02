@@ -44,7 +44,6 @@ const MAX_SKIN_ARCHIVE_ENTRIES = 4096;
 const MAX_SKIN_ENTRY_NAME_BYTES = 1024;
 const MAX_SKIN_BMP_PIXELS = 4096 * 4096;
 const ZIP_GENERAL_FLAG_ENCRYPTED = 0x0001;
-const ZIP_GENERAL_FLAG_DATA_DESCRIPTOR = 0x0008;
 
 // Import IPC hardening: settings:skin-import-file is wired to app-wide
 // drag/drop, but it's also exposed directly on window.newamp, so any
@@ -145,7 +144,6 @@ function readZipEntries(input: Uint8Array): ZipEntry[] {
     if (buffer.readUInt32LE(offset) !== ZIP_CENTRAL_SIGNATURE) throw new Error('Invalid Winamp skin archive.');
     const flags = buffer.readUInt16LE(offset + 8);
     if (flags & ZIP_GENERAL_FLAG_ENCRYPTED) throw new Error('Encrypted Winamp skin archives are not supported.');
-    if (flags & ZIP_GENERAL_FLAG_DATA_DESCRIPTOR) throw new Error('This Winamp skin archive uses an unsupported format.');
     const method = buffer.readUInt16LE(offset + 10);
     const compressedSize = buffer.readUInt32LE(offset + 20);
     const uncompressedSize = buffer.readUInt32LE(offset + 24);
