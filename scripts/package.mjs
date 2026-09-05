@@ -17,11 +17,10 @@ await pruneObsoleteReleaseArtifacts(releaseVersion);
 await mkdir(packageTemp, { recursive: true });
 
 run('npm', ['run', 'build']);
-// Bit-Perfect Exclusive addon (WASAPI on win32, ALSA direct on linux; darwin
-// compiles for build-health only): no-ops when the staged prebuilt binary is
-// already newer than its sources. Plain 'node' (not process.execPath): run()
-// shells out, and a quoted spaces-in-path executable breaks cmd.exe parsing.
-run('node', [join(repoRoot, 'scripts', 'build-native.mjs')]);
+// Rebuild from the release sources: Git checkout timestamps cannot establish
+// whether a tracked prebuilt addon contains the latest native fixes.
+// Plain 'node' avoids quoted spaces-in-path executables breaking cmd.exe.
+run('node', [join(repoRoot, 'scripts', 'build-native.mjs'), '--force']);
 
 const electronBuilder = join(
   repoRoot,

@@ -816,6 +816,7 @@ export class AudioEngine {
   }
 
   private applyStartPosition(deck: Deck, startAt: number): void {
+    this.cancelPendingSeek(deck);
     const target = normalizeStartAt(startAt);
     if (target <= 0) {
       try {
@@ -844,10 +845,12 @@ export class AudioEngine {
    */
   private scheduleMetadataSeek(deck: Deck, target: number): void {
     this.cancelPendingSeek(deck);
-    const scheduledSrc = deck.el.currentSrc;
+    // currentSrc changes during normal resource selection; the assigned src
+    // is stable from the moment this request selects its resource.
+    const scheduledSrc = deck.el.src;
     const handler = (): void => {
       deck.pendingSeek = null;
-      if (deck.el.currentSrc !== scheduledSrc) return; // src changed — stale seek
+      if (deck.el.src !== scheduledSrc) return; // src changed — stale seek
       try {
         const max = Number.isFinite(deck.el.duration) && deck.el.duration > 0 ? deck.el.duration : target;
         deck.el.currentTime = Math.max(0, Math.min(max, target));
@@ -1101,18 +1104,18 @@ export class AudioEngine {
   }
 
   stop(): void {
+    this.playSeq++;
     this.clearFadeTimer();
     this.preparedNext = null;
-    if (this.externalActive) {
-      this.deactivateExternal(true);
-      this.patch({ playing: false, currentTime: 0, ended: false, buffering: false, error: null });
-      return;
-    }
+    // Stop even before external acceptance: source resolution may still be
+    // pending in main, where stop invalidates that request as well.
+    this.deactivateExternal(true);
     if (!this.graph) {
       this.patch({ playing: false, currentTime: 0, ended: false, buffering: false, error: null });
       return;
     }
     for (const deck of this.graph.decks) {
+      this.cancelPendingSeek(deck);
       deck.el.pause();
       deck.el.currentTime = 0;
       deck.gain.gain.cancelScheduledValues(this.graph.ctx.currentTime);
@@ -1132,11 +1135,11 @@ export class AudioEngine {
    * loaded track is being discarded, not just paused.
    */
   unload(): void {
+    this.playSeq++;
     this.clearFadeTimer();
     this.preparedNext = null;
-    if (this.externalActive) {
-      this.deactivateExternal(true);
-    } else if (this.graph) {
+    this.deactivateExternal(true);
+    if (this.graph) {
       for (const deck of this.graph.decks) this.silenceDeck(deck, true);
     }
     this.patch({

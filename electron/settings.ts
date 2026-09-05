@@ -1,14 +1,15 @@
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { AppSettings, RecoveryEvent } from '../shared/types.js';
+import type { AppSettings, PlaybackResumeQueueEntry, PlaybackResumeServerTrack, RecoveryEvent } from '../shared/types.js';
 import { normalizePlaybackRate } from '../shared/tempo-trainer.js';
 import { normalizeAutoDjTarget } from '../shared/auto-dj.js';
 import { normalizeAudioOutputDeviceId } from '../shared/audio-output.js';
 import { normalizeLimiterEnabled, normalizePreampDb } from '../shared/audio-limiter.js';
 import { FLAT_EQ_VALUES, normalizeEqValues } from '../shared/eq-presets.js';
 import { normalizeCustomSkin } from '../shared/custom-skin.js';
-import { atomicWriteFileSync, durableWriteFileAsync, quarantineCorruptFile, recoveryReason, renameOverExistingAsync } from './recovery.js';
+import { parseMusicServerStreamUrl } from '../shared/music-servers.js';
+import { atomicWriteFileSync, durableWriteFileAsync, quarantineCorruptFile, recoveryReason, renameOverExistingSync } from './recovery.js';
 
 const DEFAULTS: AppSettings = {
   libraryRoots: [],
@@ -156,6 +157,102 @@ function normalizePerformanceTier(value: unknown): AppSettings['performanceTier'
 
 function normalizeAmbientReactivity(value: unknown): AppSettings['ambientReactivity'] {
   return value === 'on' || value === 'off' ? value : 'auto';
+}
+
+const MAX_RESUME_QUEUE_LENGTH = 5000;
+
+function normalizeResumeTrackId(value: unknown, allowServerTrack = false): number | null {
+  const id = Math.trunc(Number(value));
+  if (!Number.isSafeInteger(id)) return null;
+  if (id > 0) return id;
+  return allowServerTrack && id < 0 ? id : null;
+}
+
+function normalizeResumeText(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback;
+  const text = value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 500);
+  return text || fallback;
+}
+
+function normalizeResumeNullableText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 500);
+  return text || null;
+}
+
+function normalizeResumeOptionalNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const num = Number(value);
+  return Number.isFinite(num) && num >= 0 ? num : null;
+}
+
+function normalizeResumeOptionalInteger(value: unknown): number | null {
+  if (value == null) return null;
+  const num = Math.trunc(Number(value));
+  return Number.isFinite(num) && num >= 0 ? num : null;
+}
+
+function parseResumeMusicServerPath(value: unknown): { path: string; connectionId: string; itemId: string } | null {
+  if (typeof value !== 'string') return null;
+  const path = value.trim();
+  if (!path) return null;
+  try {
+    const url = new URL(path);
+    if (url.search || url.hash) return null;
+    const parsed = parseMusicServerStreamUrl(path);
+    return { path, connectionId: parsed.connectionId, itemId: parsed.itemId };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeResumeServerTrack(value: unknown, parsedPath: { path: string; connectionId: string; itemId: string }): PlaybackResumeServerTrack | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const id = normalizeResumeTrackId(raw.id, true);
+  if (id === null || id > 0) return null;
+  return {
+    id,
+    path: parsedPath.path,
+    title: normalizeResumeText(raw.title, 'Unknown Title'),
+    artist: normalizeResumeText(raw.artist, 'Unknown Artist'),
+    album: normalizeResumeText(raw.album, 'Unknown Album'),
+    albumArtist: normalizeResumeText(raw.albumArtist, 'Unknown Artist'),
+    trackNo: normalizeResumeOptionalInteger(raw.trackNo),
+    discNo: normalizeResumeOptionalInteger(raw.discNo),
+    year: normalizeResumeOptionalInteger(raw.year),
+    genre: normalizeResumeNullableText(raw.genre),
+    duration: normalizeResumeOptionalNumber(raw.duration),
+    bitrate: normalizeResumeOptionalNumber(raw.bitrate),
+    sampleRate: normalizeResumeOptionalNumber(raw.sampleRate),
+    size: normalizeResumeOptionalNumber(raw.size),
+  };
+}
+
+function normalizeResumeQueueEntry(value: unknown): PlaybackResumeQueueEntry | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind === 'local') {
+    const trackId = normalizeResumeTrackId(raw.trackId);
+    return trackId === null ? null : { kind: 'local', trackId };
+  }
+  if (raw.kind !== 'music-server') return null;
+  const parsedPath = parseResumeMusicServerPath((raw.track as Record<string, unknown> | null | undefined)?.path);
+  if (!parsedPath || raw.connectionId !== parsedPath.connectionId || raw.itemId !== parsedPath.itemId) return null;
+  const track = normalizeResumeServerTrack(raw.track, parsedPath);
+  return track ? { kind: 'music-server', connectionId: parsedPath.connectionId, itemId: parsedPath.itemId, track } : null;
+}
+
+function resumeEntryTrackId(entry: PlaybackResumeQueueEntry): number {
+  return entry.kind === 'local' ? entry.trackId : entry.track.id;
 }
 
 export class SettingsStore {
@@ -363,21 +460,31 @@ export class SettingsStore {
     // Unique per persist, for the same reason as the library flush: the
     // quit-path synchronous write uses its own "-sync" temp path.
     const tmp = `${this.file}.tmp-${process.pid}-${seq}`;
+    let tmpHasCompleteSnapshot = false;
+    let tmpHandled = false;
     this.persistInFlight = (async () => {
       try {
         await durableWriteFileAsync(tmp, payload);
+        tmpHasCompleteSnapshot = true;
         if (seq !== this.persistSeq) {
           // A synchronous quit-path flush captured newer state while this
           // write was in flight — drop the stale copy instead of racing it.
+          tmpHandled = true;
           await unlink(tmp).catch(() => {});
           return;
         }
-        await renameOverExistingAsync(tmp, this.file);
+        // Keep the final replace synchronous after the sequence check so an
+        // immediate flushSync() cannot land newer settings while this async
+        // path is suspended inside the replace.
+        renameOverExistingSync(tmp, this.file);
+        tmpHandled = true;
       } catch (err) {
         console.error('settings persist failed', err);
         this.dirty = true; // retry on the next scheduled persist
       } finally {
-        await unlink(tmp).catch(() => {});
+        if (!tmpHandled && !tmpHasCompleteSnapshot) {
+          await unlink(tmp).catch(() => {});
+        }
       }
     })();
     try {
@@ -425,19 +532,29 @@ export class SettingsStore {
       this.persistTimer = null;
     }
     this.persistSeq += 1;
-    if (this.dirty) {
+    // The async writer clears dirty before its snapshot reaches disk. Once
+    // invalidated above, an in-flight write must be replaced synchronously.
+    if (this.dirty || this.persistInFlight) {
       atomicWriteFileSync(this.file, JSON.stringify(this.state, null, 2));
       this.dirty = false;
     }
   }
 
   private normalizeResume(value: AppSettings['resumeState'] | undefined): AppSettings['resumeState'] {
-    if (!value || !Array.isArray(value.queueTrackIds)) return null;
-    const queueTrackIds = value.queueTrackIds
-      .map((id) => Math.trunc(Number(id)))
-      .filter((id) => Number.isFinite(id) && id > 0)
-      .slice(0, 5000);
-    if (!queueTrackIds.length) return null;
+    if (!value) return null;
+    const queue = Array.isArray(value.queue)
+      ? value.queue.map(normalizeResumeQueueEntry).filter((entry): entry is PlaybackResumeQueueEntry => !!entry).slice(0, MAX_RESUME_QUEUE_LENGTH)
+      : [];
+    const legacyQueue = !queue.length && Array.isArray(value.queueTrackIds)
+      ? value.queueTrackIds
+          .map((id) => normalizeResumeTrackId(id))
+          .filter((id): id is number => id !== null)
+          .slice(0, MAX_RESUME_QUEUE_LENGTH)
+          .map((trackId) => ({ kind: 'local' as const, trackId }))
+      : [];
+    const resumeQueue = queue.length ? queue : legacyQueue;
+    if (!resumeQueue.length) return null;
+    const queueTrackIds = resumeQueue.map(resumeEntryTrackId);
     // Shuffle and repeat are independent, so the combined modes are real states
     // the transport produces on an ordinary click. Leaving them out of this
     // whitelist silently reset BOTH toggles on the next launch.
@@ -451,10 +568,16 @@ export class SettingsStore {
     const rawIndex = Math.trunc(Number(value.index));
     const index = Number.isFinite(rawIndex) ? Math.max(-1, Math.min(queueTrackIds.length - 1, rawIndex)) : 0;
     const rawCurrent = value.currentTrackId;
+    const normalizedCurrent = normalizeResumeTrackId(rawCurrent, true);
     const currentTrackId =
-      rawCurrent === undefined ? undefined : Number.isInteger(rawCurrent) && (rawCurrent as number) > 0 ? (rawCurrent as number) : null;
+      rawCurrent === undefined
+        ? undefined
+        : normalizedCurrent !== null && queueTrackIds.includes(normalizedCurrent)
+          ? normalizedCurrent
+          : null;
     return {
       queueTrackIds,
+      queue: resumeQueue,
       index,
       ...(currentTrackId !== undefined ? { currentTrackId } : {}),
       currentTime: Math.max(0, Number(value.currentTime) || 0),

@@ -9,6 +9,7 @@ import { ViewHeader } from '../ViewHeader';
 import { ConfirmAction } from '../ConfirmAction';
 import { ArtistLink, AlbumLink } from '../EntityLink';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
+import { HistoryImport } from '../HistoryImport';
 
 const HISTORY_PAGE_SIZE = 500;
 // py-[5px] cell padding (10px) plus ~18px line height for the text-[12px]
@@ -21,6 +22,8 @@ export function HistoryView(): JSX.Element {
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const [importing, setImporting] = useState(false);
   const playQueue = usePlayerStore((s) => s.playQueue);
 
   useEffect(() => {
@@ -50,7 +53,7 @@ export function HistoryView(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [revision]);
 
   const tracks = useMemo(() => items.map((item) => item.track), [items]);
 
@@ -118,13 +121,14 @@ export function HistoryView(): JSX.Element {
               label="CLEAR"
               confirmLabel="SURE?"
               tone="error"
-              disabled={!items.length}
+              disabled={!items.length || importing}
               title="Erase all listening history"
               onConfirm={() => void clearHistory()}
             />
           </>
         }
       />
+      <HistoryImport onImported={() => setRevision((current) => current + 1)} onBusy={setImporting} />
       {insights && insights.total.plays > 0 && <HistoryInsights insights={insights} />}
       <div className="flex-1 overflow-auto" ref={historyWindow.scrollRef} onScroll={historyWindow.onScroll}>
         {loading ? (

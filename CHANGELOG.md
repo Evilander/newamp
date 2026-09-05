@@ -5,9 +5,35 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
-## [Unreleased]
+## [2.3.0] - 2026-09-05
+
+### Added
+
+- Connect to Navidrome/Subsonic and Jellyfin music servers, browse and search
+  their libraries, and play server tracks through NewAmp's queue and visualizers.
+  Remembered connections restore their queued tracks after restarting.
+- Import listening history from Last.fm, CSV or JSON, with a preview before
+  applying changes and duplicate detection when repeating an import.
+- **Undo clear queue**: restore a cleared queue and its playback position from
+  the notification, paused. The action is available for ten seconds, with expiry
+  paused while hovering or using keyboard focus.
 
 ### Fixed
+
+- Explicit Quit saves pending library changes and playback settings, including
+  a settings save already in flight.
+- Exclusive gapless playback keeps its active decoder after a track transition;
+  a previous track's idle timer can no longer close a newly playing stream.
+- Native PCM output retains incomplete frames across decoder chunks and ring
+  underruns, preserving sample/channel alignment and position accounting.
+- Stop, queue replacement and queue clearing cancel pending playback requests
+  and release the previous source.
+- CUE/start offsets survive metadata loading, and seeking a restored paused
+  track updates the position used when playback starts.
+- Editing an idle queue keeps it idle; repeated songs retain their queue slots.
+- Large-library benchmark cleanup finishes reporting before removing its files.
+- Release packaging rebuilds the native addon from the current source instead
+  of trusting checkout timestamps on a tracked binary.
 
 - Uninstalling on Windows now clears the file-type entries the installer
   wrote. Before, `.mp3`, `.flac`, `.m3u` and the other registered extensions

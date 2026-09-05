@@ -261,6 +261,7 @@ export class ExclusiveOutput {
   // of the DAC, so the tap reads at framesRendered, not at the write head.
   private tapRing: Float32Array = new Float32Array(0);
   private tapRingFrames = 0;
+  private tapRemainder: Buffer = Buffer.alloc(0);
 
   constructor(
     private readonly deps: {
@@ -310,7 +311,7 @@ export class ExclusiveOutput {
    */
   async play(source: ExclusiveTrackSource, startAt: number, deviceId: string | null): Promise<{ negotiated: ExclusiveNegotiated; chained: boolean }> {
     if (!this.addon) throw new Error('Exclusive output addon is not available.');
-    const gen = ++this.generation;
+    this.clearIdleTimer();
 
     // Chained continuation: the store advanced its queue after our boundary
     // event; the stream is already playing this track. Ack without touching it.
@@ -330,6 +331,9 @@ export class ExclusiveOutput {
     if (!chosen) throw new Error(`No usable exclusive format on ${probe.name}.`);
     const negotiated: ExclusiveNegotiated = { ...chosen, deviceName: probe.name };
 
+    // Only a replacement decoder gets a new generation; a chain ack keeps
+    // the callbacks of the already-running decoder valid.
+    const gen = ++this.generation;
     this.killFfmpeg();
     this.stopTimers();
     this.pausedAtSec = null;
@@ -674,7 +678,12 @@ export class ExclusiveOutput {
     if (!this.openFormat || bytes.length === 0 || this.tapRing.length === 0) return;
     const { format, channels } = this.openFormat;
     const bps = BYTES_PER_SAMPLE[format];
-    const frames = Math.floor(bytes.length / (bps * channels));
+    // Both stdout chunks and native backpressure can split a PCM frame.
+    // Count and decode it only after all its bytes have been accepted.
+    if (this.tapRemainder.length) bytes = Buffer.concat([this.tapRemainder, bytes]);
+    const frameBytes = bps * channels;
+    const frames = Math.floor(bytes.length / frameBytes);
+    this.tapRemainder = Buffer.from(bytes.subarray(frames * frameBytes));
     const ring = this.tapRing;
     const cap = this.tapRingFrames;
     for (let f = 0; f < frames; f++) {
@@ -859,6 +868,7 @@ export class ExclusiveOutput {
   }
 
   private killFfmpeg(): void {
+    this.tapRemainder = Buffer.alloc(0);
     this.stopPump(false);
     this.pendingChunk = null;
     if (this.ffmpeg && !this.ffmpeg.killed) {

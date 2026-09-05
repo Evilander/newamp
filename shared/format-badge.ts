@@ -66,7 +66,9 @@ export function formatBadgesForTrack(
       kind: 'dsd',
       label: dsdLabel,
       tone: 'accent',
-      title: `${signal.displayExt} · ${dsdRateHumanLabel(input.sampleRate)}. Plays via FFmpeg → PCM in Chromium.`,
+      title: signal.decodePath === 'ffmpeg-pcm-fallback'
+        ? `${signal.displayExt} · ${dsdRateHumanLabel(input.sampleRate)}. Plays via FFmpeg → PCM in Chromium.`
+        : `${signal.displayExt} · ${dsdRateHumanLabel(input.sampleRate)}. Raw DSD server streams are not playable in the browser. Enable conversion to PCM or another browser-compatible format on your music server.`,
     });
     return badges;
   }

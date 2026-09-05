@@ -120,10 +120,10 @@ export function renameOverExistingSync(fromPath: string, toPath: string): void {
     }
   }
   // The target is still locked (antivirus/indexer/OneDrive) after the
-  // backoff. Give the atomic path one more chance through a fresh temp file
-  // before reaching for an in-place write — an in-place writeFileSync with no
-  // fsync and no atomicity is the exact truncation-on-crash hazard this
-  // module exists to eliminate.
+  // backoff. Give the atomic path one more chance through a fresh temp file.
+  // If that also fails, leave `fromPath` intact as the complete snapshot;
+  // opening the live target for write would truncate it before durability is
+  // guaranteed, which is the crash-corruption path this module avoids.
   const retryTmp = `${toPath}.tmp-${process.pid}-retry`;
   try {
     durableWriteFileSync(retryTmp, readFileSync(fromPath));
@@ -136,11 +136,7 @@ export function renameOverExistingSync(fromPath: string, toPath: string): void {
       /* gone with the rename, or nothing left to clean up */
     }
     if (!isTransientRenameError(retryErr)) throw retryErr;
-    console.warn(`[newamp] atomic replace of ${toPath} failed after retries; writing in place`, retryErr);
-    // Last resort. Opening the target for write truncates it, so if this
-    // write fails too the caller must keep `fromPath` — it is the only
-    // complete copy left (atomicWriteFileSync does exactly that).
-    durableWriteFileSync(toPath, readFileSync(fromPath));
+    throw new Error(`atomic replace of ${toPath} failed after retries; complete copy remains at ${fromPath}`);
   }
 }
 
@@ -162,8 +158,7 @@ export async function renameOverExistingAsync(fromPath: string, toPath: string):
   } catch (retryErr) {
     await fsUnlink(retryTmp).catch(() => {});
     if (!isTransientRenameError(retryErr)) throw retryErr;
-    console.warn(`[newamp] atomic replace of ${toPath} failed after retries; writing in place`, retryErr);
-    await durableWriteFileAsync(toPath, await fsReadFile(fromPath));
+    throw new Error(`atomic replace of ${toPath} failed after retries; complete copy remains at ${fromPath}`);
   }
 }
 

@@ -40,6 +40,10 @@ jobs:
         run: npm run typecheck
       - name: Build (vite renderer + electron main)
         run: npm run build
+      - name: Test — all regressions
+        run: npm run test:all
+      - name: Test — native PCM frame alignment
+        run: npm run smoke:native-pcm
       - name: Smoke — library (scan + query)
         run: npm run smoke:library
       - name: Smoke — corrupt library recovery

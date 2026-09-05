@@ -77,6 +77,9 @@ import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } 
 import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import { buildAppMenuTemplate } from './app-menu.js';
+import { assertHistoryImportIdle, registerHistoryImportIpc } from './history-ipc.js';
+import { registerMusicServerIpc } from './music-server-ipc.js';
+import type { MusicServerRegistry } from './music-servers.js';
 import type {
   AppSettings,
   CustomSkin,
@@ -214,7 +217,9 @@ const sessionData = sessionDataOverride
   ? resolve(sessionDataOverride)
   : userDataOverride || smokeMode
     ? resolve(app.getPath('userData'), 'session-data')
-    : resolve(process.env.LOCALAPPDATA || process.env.APPDATA || appRoot, 'NewAmp', 'session-data');
+    : process.platform === 'win32' && (process.env.LOCALAPPDATA || process.env.APPDATA)
+      ? resolve(process.env.LOCALAPPDATA || process.env.APPDATA!, 'NewAmp', 'session-data')
+      : resolve(app.getPath('userData'), 'session-data');
 mkdirSync(sessionData, { recursive: true });
 app.setPath('sessionData', sessionData);
 app.commandLine.appendSwitch('disk-cache-dir', join(sessionData, 'Cache'));
@@ -438,6 +443,7 @@ let startupSplashWin: BrowserWindow | null = null;
 let startupSplashStartedAt = 0;
 let isQuitting = false;
 let library: LibraryStore;
+let musicServers: MusicServerRegistry;
 let settings: SettingsStore;
 let scanner: Scanner;
 let libraryWatcher: LibraryWatcher;
@@ -1618,6 +1624,7 @@ function registerAudioProtocol(): void {
   protocol.handle('newamp', async (request) => {
     try {
       const url = new URL(request.url);
+      if (url.hostname === 'server') return await musicServers.stream(request);
       // host is "track" or "file", pathname holds the encoded path
       const raw = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
       // On Windows we get something like "K:/music/foo/bar.mp3"
@@ -1786,6 +1793,8 @@ function rendererMimeType(filePath: string): string {
 }
 
 function registerIpc(): void {
+  musicServers = registerMusicServerIpc(app.getPath('userData'));
+  registerHistoryImportIpc(() => library, () => settings.get().lastfmApiKey?.trim() ?? '');
   ipcMain.handle('library:scan', async (_e, roots?: string[]) => {
     const configuredRoots = settings.get().libraryRoots;
     const fallbackRoots = roots && roots.length
@@ -2097,7 +2106,7 @@ function registerIpc(): void {
     await writeFile(result.filePath, html, 'utf8');
     return result.filePath;
   });
-  ipcMain.handle('history:clear', async () => library.clearListeningHistory());
+  ipcMain.handle('history:clear', async () => { assertHistoryImportIdle(); library.clearListeningHistory(); });
   ipcMain.handle('bookmark:list', async (_e, trackId: number) => library.getTrackBookmarks(trackId));
   ipcMain.handle('bookmark:save', async (_e, input) => library.saveTrackBookmark(input));
   ipcMain.handle('bookmark:delete', async (_e, id: number) => library.deleteTrackBookmark(id));
@@ -2135,6 +2144,7 @@ function registerIpc(): void {
     // Turning exclusive mode off releases the WASAPI device immediately so
     // system audio (and the Web Audio path) come back without a restart.
     if (patch && typeof patch === 'object' && (patch as Partial<AppSettings>).bitPerfectExclusive === false) {
+      exclusivePlaySeq++;
       exclusiveOutput?.stop();
     }
     return updated;
@@ -2148,9 +2158,11 @@ function registerIpc(): void {
   // than track B's) — without this, the STALE play would win and the audible
   // track would not match the UI.
   let exclusivePlaySeq = 0;
+  let exclusivePrepareSeq = 0;
   ipcMain.handle('exclusive:play', async (_e, trackId: number, startAt?: number) => {
     const requestSeq = ++exclusivePlaySeq;
     try {
+      if (Number(trackId) < 0) return { ok: false, error: 'Streamed tracks use shared audio output. Exclusive output requires a local library track.' };
       const source = await resolveExclusiveSource(Math.trunc(Number(trackId)));
       if (requestSeq !== exclusivePlaySeq) return { ok: false, error: 'Superseded by a newer play request.' };
       if (!source) return { ok: false, error: 'Track not found or not playable.' };
@@ -2165,16 +2177,22 @@ function registerIpc(): void {
   ipcMain.handle('exclusive:resume', async () =>
     getExclusiveOutput().resume(settings.get().bitPerfectExclusiveDeviceId),
   );
-  ipcMain.handle('exclusive:stop', async () => getExclusiveOutput().stop());
+  ipcMain.handle('exclusive:stop', async () => {
+    exclusivePlaySeq++;
+    getExclusiveOutput().stop();
+  });
   ipcMain.handle('exclusive:seek', async (_e, seconds: number) =>
     getExclusiveOutput().seek(Number(seconds) || 0),
   );
   ipcMain.handle('exclusive:prepare-next', async (_e, trackId: number | null) => {
+    const prepareSeq = ++exclusivePrepareSeq;
+    const playSeq = exclusivePlaySeq;
     if (trackId == null) {
       getExclusiveOutput().prepareNext(null);
       return;
     }
     const source = await resolveExclusiveSource(Math.trunc(Number(trackId)));
+    if (prepareSeq !== exclusivePrepareSeq || playSeq !== exclusivePlaySeq) return;
     getExclusiveOutput().prepareNext(source);
   });
 
@@ -5073,6 +5091,11 @@ app.on('will-quit', (event) => {
   globalShortcut.unregisterAll();
   closeStartupSplashWindow();
   libraryWatcher?.stop();
+  scanner?.cancel();
+  // Explicit Quit / Cmd+Q bypass window-all-closed. Flush on the actual quit
+  // path, after renderer windows have had their final chance to save state.
+  library?.close();
+  settings?.flushSync();
   exclusiveOutput?.dispose();
   tray?.destroy();
   tray = null;
@@ -5094,9 +5117,6 @@ app.on('will-quit', (event) => {
 
 app.on('window-all-closed', () => {
   if (shouldStayResidentOnWindowAllClosed({ isQuitting, hasTray: !!tray, platform: process.platform })) return;
-  scanner?.cancel();
-  library?.close();
-  settings?.flushSync();
   if (process.platform !== 'darwin') app.quit();
 });
 

@@ -93,8 +93,16 @@ import {
   isTransientIoError,
   quarantineCorruptFile,
   recoveryReason,
-  renameOverExistingAsync,
+  renameOverExistingSync,
 } from './recovery.js';
+import {
+  normalizeHistoryImportPath,
+  normalizeHistoryImportText,
+  HISTORY_IMPORT_MAX_ENTRIES,
+  type HistoryImportEntry,
+  type HistoryImportIssue,
+  type HistoryImportReport,
+} from '../shared/history-import.js';
 
 const SQLITE_HEADER = 'SQLite format 3\0';
 
@@ -173,6 +181,7 @@ CREATE TABLE IF NOT EXISTS play_history (
 );
 CREATE INDEX IF NOT EXISTS idx_play_history_played ON play_history(played_at DESC);
 CREATE INDEX IF NOT EXISTS idx_play_history_track ON play_history(track_id);
+CREATE INDEX IF NOT EXISTS idx_play_history_track_played ON play_history(track_id, played_at);
 
 CREATE TABLE IF NOT EXISTS skip_history (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -629,6 +638,25 @@ interface TrackFileStateRow {
   art_hash: string | null;
 }
 
+interface HistoryImportTrackRow {
+  id: number;
+  path: string;
+  artist: string | null;
+  title: string | null;
+  album: string | null;
+}
+
+interface HistoryImportIndex {
+  pathExact: Map<string, HistoryImportTrackRow[]>;
+  pathNormalized: Map<string, HistoryImportTrackRow[]>;
+  identity: Map<string, HistoryImportTrackRow[]>;
+}
+
+interface MatchedHistoryImportEntry {
+  trackId: number;
+  playedAt: number;
+}
+
 export class LibraryStore {
   public readonly recoveryEvents: RecoveryEvent[] = [];
   private db!: Database;
@@ -647,6 +675,7 @@ export class LibraryStore {
   // quit-path flush (newer data) can never be clobbered by a slower async
   // write (older data) landing after it.
   private flushSeq = 0;
+  private closed = false;
   // Cache of the full track DNA index. Building it walks the entire DNA table
   // and JSON.parses every blob; for a 50k-track library that's a real cost on
   // every Harmonic / Taste mix call. We cache after first build and invalidate
@@ -824,9 +853,34 @@ export class LibraryStore {
     }
   }
 
+  async flushPendingWrites(): Promise<void> {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+      this.persistTimerSlow = false;
+    }
+    if (this.closed) {
+      await this.waitForPendingWrites();
+      return;
+    }
+    const hadInFlight = !!this.flushInFlight;
+    if (this.dirty || this.flushInFlight) {
+      this.flushSync();
+    }
+    await this.waitForPendingWrites();
+    if (!this.closed && (this.dirty || hadInFlight)) this.flushSync();
+  }
+
   close(): void {
-    if (this.persistTimer) clearTimeout(this.persistTimer);
-    if (this.dirty) this.flushSync();
+    if (this.closed) return;
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+      this.persistTimerSlow = false;
+    }
+    if (this.dirty || this.flushInFlight) this.flushSync();
+    this.closed = true;
+    this.flushAgain = false;
     try {
       this.db.close();
     } catch {
@@ -838,6 +892,7 @@ export class LibraryStore {
   // track change/skip, and a full db.export() + write on that cadence is real
   // main-thread cost. Every other mutation keeps the tight 800ms debounce.
   private scheduleFlush(opts?: { slow?: boolean }): void {
+    if (this.closed) return;
     this.dirty = true;
     const slow = !!opts?.slow;
     if (this.persistTimer) {
@@ -863,9 +918,9 @@ export class LibraryStore {
   // rename so the (potentially multi-MB, 60k-track-library) serialization
   // doesn't block the main thread's event loop.
   private async flushAsync(): Promise<void> {
-    if (!this.dirty) return;
+    if (this.closed || !this.dirty) return;
     if (this.flushInFlight) {
-      this.flushAgain = true;
+      if (!this.closed) this.flushAgain = true;
       return;
     }
     this.dirty = false;
@@ -875,29 +930,40 @@ export class LibraryStore {
     // atomicWriteFileSync) or its rename can adopt the inode this write is
     // still filling.
     const tmp = `${this.file}.tmp-${process.pid}-${seq}`;
+    let tmpHasCompleteSnapshot = false;
+    let tmpHandled = false;
     this.flushInFlight = (async () => {
       try {
         await durableWriteFileAsync(tmp, Buffer.from(data));
-        if (seq !== this.flushSeq) {
+        tmpHasCompleteSnapshot = true;
+        if (seq !== this.flushSeq || this.closed) {
           // A synchronous quit-path flush captured newer state while this
           // write was in flight — drop the stale copy instead of racing it.
+          tmpHandled = true;
           await fsp.unlink(tmp).catch(() => {});
           return;
         }
-        await renameOverExistingAsync(tmp, this.file);
+        // Keep the final replace synchronous after the sequence/closed check:
+        // there must be no await point where close() can write a newer
+        // snapshot, close the DB, then let this stale rename land afterward.
+        renameOverExistingSync(tmp, this.file);
+        tmpHandled = true;
       } catch (err) {
         console.error('library flush failed', err);
-        this.dirty = true; // retry on the next scheduled flush
+        if (!this.closed) this.dirty = true; // retry on the next scheduled flush
       } finally {
-        await fsp.unlink(tmp).catch(() => {});
+        if (!tmpHandled && !tmpHasCompleteSnapshot) {
+          await fsp.unlink(tmp).catch(() => {});
+        }
       }
     })();
     try {
       await this.flushInFlight;
     } finally {
       this.flushInFlight = null;
-      if (this.flushAgain) {
-        this.flushAgain = false;
+      const shouldFlushAgain = this.flushAgain && !this.closed;
+      this.flushAgain = false;
+      if (shouldFlushAgain) {
         void this.flushAsync();
       }
     }
@@ -908,6 +974,7 @@ export class LibraryStore {
   // The write lands via tmp file + fsync + rename so a crash mid-write can
   // never leave a truncated library.db behind.
   private flushSync(): void {
+    if (this.closed) return;
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
@@ -3225,6 +3292,98 @@ export class LibraryStore {
     this.scheduleFlush({ slow: true });
   }
 
+  importListeningHistory(entries: HistoryImportEntry[]): HistoryImportReport {
+    if (entries.length > HISTORY_IMPORT_MAX_ENTRIES) {
+      throw new Error(`History import is limited to ${HISTORY_IMPORT_MAX_ENTRIES.toLocaleString()} entries per batch.`);
+    }
+    const report: HistoryImportReport = {
+      imported: 0,
+      duplicates: 0,
+      unmatched: 0,
+      ambiguous: 0,
+      invalid: 0,
+      total: entries.length,
+      unmatchedSamples: [],
+      ambiguousSamples: [],
+      invalidSamples: [],
+    };
+    const index = this.buildHistoryImportIndex();
+    const matched: MatchedHistoryImportEntry[] = [];
+
+    entries.forEach((entry, indexInInput) => {
+      const issueBase = entryToIssue(entry, entry.row ?? indexInInput + 1);
+      const playedAt = Math.trunc(Number(entry.playedAt));
+      if (!Number.isFinite(playedAt) || playedAt < 0) {
+        report.invalid += 1;
+        pushIssue(report.invalidSamples, { ...issueBase, reason: 'missing-or-invalid-timestamp', playedAt: null });
+        return;
+      }
+      const match = matchHistoryImportEntry(entry, index);
+      if (match.kind === 'missing') {
+        report.unmatched += 1;
+        pushIssue(report.unmatchedSamples, { ...issueBase, reason: 'no-library-match', playedAt });
+        return;
+      }
+      if (match.kind === 'ambiguous') {
+        report.ambiguous += 1;
+        pushIssue(report.ambiguousSamples, { ...issueBase, reason: 'ambiguous-library-match', playedAt });
+        return;
+      }
+      matched.push({ trackId: match.trackId, playedAt });
+    });
+
+    const existing = this.getExistingPlayImportKeys(matched);
+    const pending = new Set<string>();
+    const toInsert: MatchedHistoryImportEntry[] = [];
+    for (const item of matched) {
+      const key = historyImportPlayKey(item);
+      if (existing.has(key) || pending.has(key)) {
+        report.duplicates += 1;
+        continue;
+      }
+      pending.add(key);
+      toInsert.push(item);
+    }
+
+    if (!toInsert.length) return report;
+
+    const byTrack = new Map<number, { count: number; lastPlayed: number }>();
+    for (const item of toInsert) {
+      const current = byTrack.get(item.trackId);
+      if (!current) byTrack.set(item.trackId, { count: 1, lastPlayed: item.playedAt });
+      else {
+        current.count += 1;
+        current.lastPlayed = Math.max(current.lastPlayed, item.playedAt);
+      }
+    }
+
+    this.db.run('BEGIN');
+    try {
+      for (const item of toInsert) {
+        this.db.run(`INSERT INTO play_history (track_id, played_at) VALUES (?, ?)`, [item.trackId, item.playedAt]);
+      }
+      for (const [trackId, summary] of byTrack) {
+        this.db.run(
+          `UPDATE tracks
+              SET play_count = play_count + ?,
+                  last_played = CASE
+                    WHEN last_played IS NULL OR last_played < ? THEN ?
+                    ELSE last_played
+                  END
+            WHERE id = ?`,
+          [summary.count, summary.lastPlayed, summary.lastPlayed, trackId],
+        );
+      }
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    report.imported = toInsert.length;
+    this.scheduleFlush({ slow: true });
+    return report;
+  }
+
   getListeningHistory(opts: { limit?: number; offset?: number } = {}): ListeningHistoryItem[] {
     const limit = Math.max(1, Math.min(opts.limit ?? 200, 1000));
     const offset = Math.max(0, opts.offset ?? 0);
@@ -4054,6 +4213,46 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
     );
   }
 
+  private buildHistoryImportIndex(): HistoryImportIndex {
+    const rows = this.many<HistoryImportTrackRow>(
+      `SELECT id, path, artist, title, album FROM tracks WHERE path IS NOT NULL`,
+    );
+    const pathExact = new Map<string, HistoryImportTrackRow[]>();
+    const pathNormalized = new Map<string, HistoryImportTrackRow[]>();
+    const identity = new Map<string, HistoryImportTrackRow[]>();
+    for (const row of rows) {
+      const exactPath = historyImportExactPathKey(row.path);
+      if (exactPath) addHistoryImportIndexBucket(pathExact, exactPath, row);
+      const normalizedPath = normalizeHistoryImportPath(row.path);
+      if (normalizedPath) addHistoryImportIndexBucket(pathNormalized, normalizedPath, row);
+      const key = historyImportIdentityKey(row.artist, row.title);
+      if (!key) continue;
+      const bucket = identity.get(key);
+      if (bucket) bucket.push(row);
+      else identity.set(key, [row]);
+    }
+    return { pathExact, pathNormalized, identity };
+  }
+
+  private getExistingPlayImportKeys(entries: MatchedHistoryImportEntry[]): Set<string> {
+    const out = new Set<string>();
+    for (let i = 0; i < entries.length; i += 250) {
+      const slice = entries.slice(i, i + 250);
+      if (!slice.length) continue;
+      const params: unknown[] = [];
+      const where = slice.map((entry) => {
+        params.push(entry.trackId, entry.playedAt);
+        return '(track_id = ? AND played_at = ?)';
+      });
+      const rows = this.many<{ track_id: number; played_at: number }>(
+        `SELECT track_id, played_at FROM play_history WHERE ${where.join(' OR ')}`,
+        params,
+      );
+      for (const row of rows) out.add(historyImportPlayKey({ trackId: row.track_id, playedAt: row.played_at }));
+    }
+    return out;
+  }
+
   // Cover buffers keyed by content hash — the hash IS the file name, so a
   // cached entry can never go stale; eviction is purely a memory cap.
   private readonly artBufferCache = new Map<string, { mime: string; data: Buffer }>();
@@ -4249,6 +4448,76 @@ function playlistCoverMime(path: string): string | null {
 function normalizePlaylistName(name: string): string {
   const trimmed = name.replace(/\s+/g, ' ').trim();
   return trimmed || `Playlist ${new Date().toLocaleString()}`;
+}
+
+function matchHistoryImportEntry(
+  entry: HistoryImportEntry,
+  index: HistoryImportIndex,
+): { kind: 'matched'; trackId: number } | { kind: 'missing' } | { kind: 'ambiguous' } {
+  const exactPath = historyImportExactPathKey(entry.path);
+  if (exactPath) {
+    const exactMatches = index.pathExact.get(exactPath) ?? [];
+    if (exactMatches.length === 1) return { kind: 'matched', trackId: exactMatches[0]!.id };
+    if (exactMatches.length > 1) return { kind: 'ambiguous' };
+
+    const normalizedPath = normalizeHistoryImportPath(entry.path);
+    const normalizedMatches = normalizedPath ? index.pathNormalized.get(normalizedPath) ?? [] : [];
+    if (normalizedMatches.length === 1) return { kind: 'matched', trackId: normalizedMatches[0]!.id };
+    if (normalizedMatches.length > 1) return { kind: 'ambiguous' };
+  }
+
+  const identityKey = historyImportIdentityKey(entry.artist, entry.title);
+  if (!identityKey) return { kind: 'missing' };
+  const candidates = index.identity.get(identityKey) ?? [];
+  if (!candidates.length) return { kind: 'missing' };
+  const albumKey = normalizeHistoryImportText(entry.album);
+  const narrowed = albumKey
+    ? candidates.filter((candidate) => normalizeHistoryImportText(candidate.album) === albumKey)
+    : candidates;
+  if (narrowed.length === 1) return { kind: 'matched', trackId: narrowed[0]!.id };
+  if (narrowed.length > 1 || candidates.length > 1) return { kind: 'ambiguous' };
+  return { kind: 'missing' };
+}
+
+function historyImportExactPathKey(value: string | null | undefined): string | null {
+  const path = String(value ?? '').trim().replace(/\\/g, '/');
+  return path || null;
+}
+
+function addHistoryImportIndexBucket(
+  index: Map<string, HistoryImportTrackRow[]>,
+  key: string,
+  row: HistoryImportTrackRow,
+): void {
+  const bucket = index.get(key);
+  if (bucket) bucket.push(row);
+  else index.set(key, [row]);
+}
+
+function historyImportIdentityKey(artist: string | null | undefined, title: string | null | undefined): string | null {
+  const normalizedArtist = normalizeHistoryImportText(artist);
+  const normalizedTitle = normalizeHistoryImportText(title);
+  return normalizedArtist && normalizedTitle ? `${normalizedArtist}\0${normalizedTitle}` : null;
+}
+
+function historyImportPlayKey(entry: MatchedHistoryImportEntry): string {
+  return `${entry.trackId}\0${entry.playedAt}`;
+}
+
+function entryToIssue(entry: HistoryImportEntry, row: number): HistoryImportIssue {
+  return {
+    row,
+    reason: 'unknown',
+    artist: entry.artist ?? null,
+    title: entry.title ?? null,
+    album: entry.album ?? null,
+    path: entry.path ?? null,
+    playedAt: Number.isFinite(Number(entry.playedAt)) ? Math.trunc(Number(entry.playedAt)) : null,
+  };
+}
+
+function pushIssue(samples: HistoryImportIssue[], issue: HistoryImportIssue): void {
+  if (samples.length < 10) samples.push(issue);
 }
 
 function trackSortOrder(sort: string | undefined): string {

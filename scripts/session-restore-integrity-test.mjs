@@ -111,6 +111,82 @@ assert.deepEqual(
     const clamped = store.get().resumeState;
     assert.equal(clamped.index, 2, 'an index past the end is still clamped');
     assert.equal(clamped.currentTrackId, null, 'a nonsense current id normalizes to idle rather than a bogus id');
+
+    const serverTrack = {
+      id: -44,
+      path: 'newamp://server/remembered/remote%2F1/Remote.flac',
+      title: 'Remote',
+      artist: 'Remote Artist',
+      album: 'Remote Album',
+      albumArtist: 'Remote Album Artist',
+      trackNo: null,
+      discNo: null,
+      year: null,
+      genre: null,
+      duration: 200,
+      bitrate: 1411000,
+      sampleRate: 48000,
+      size: 34_000_000,
+    };
+    store.set({
+      resumeState: {
+        queueTrackIds: [11, -44],
+        queue: [
+          { kind: 'local', trackId: 11 },
+          { kind: 'music-server', connectionId: 'remembered', itemId: 'remote/1', track: serverTrack },
+        ],
+        index: 1,
+        currentTrackId: -44,
+        currentTime: 12,
+        mode: 'shuffle-repeat-all',
+        updatedAt: 1,
+      },
+    });
+    const serverResume = store.get().resumeState;
+    assert.deepEqual(serverResume.queueTrackIds, [11, -44], 'settings must preserve mixed local/server resume order');
+    assert.equal(serverResume.currentTrackId, -44, 'settings must keep a server currentTrackId that belongs to the queue');
+    assert.equal(serverResume.queue[1].kind, 'music-server');
+    assert.equal(serverResume.queue[1].connectionId, 'remembered');
+    assert.equal(serverResume.queue[1].itemId, 'remote/1');
+    assert.deepEqual(
+      Object.keys(serverResume.queue[1].track).sort(),
+      [
+        'album',
+        'albumArtist',
+        'artist',
+        'bitrate',
+        'discNo',
+        'duration',
+        'genre',
+        'id',
+        'path',
+        'sampleRate',
+        'size',
+        'title',
+        'trackNo',
+        'year',
+      ],
+      'server resume descriptors should stay credential-free metadata, not full connection/session state',
+    );
+
+    store.set({
+      resumeState: {
+        queueTrackIds: [-45],
+        queue: [{
+          kind: 'music-server',
+          connectionId: 'remembered',
+          itemId: 'remote/1',
+          track: { ...serverTrack, id: -45, path: 'file:///C:/Users/evela/Music/secret.flac' },
+        }],
+        index: 0,
+        currentTrackId: -45,
+        currentTime: 12,
+        mode: 'normal',
+        updatedAt: 1,
+      },
+    });
+    assert.equal(store.get().resumeState, null, 'settings must reject server resume entries that point at arbitrary paths');
+    store.flushSync();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -121,24 +197,29 @@ assert.equal(remapResumeIndex([], 0, new Set()), -1, 'an empty saved queue shoul
 
 // --- Source assertions for the two glue-code fixes that can't run outside
 // a DOM/Electron renderer (batch IPC call + engine release-on-remove).
-const [storeSource, engineSource, packageSource] = await Promise.all([
+const [storeSource, settingsSource, engineSource, packageSource] = await Promise.all([
   readFile(new URL('../src/store/usePlayerStore.ts', import.meta.url), 'utf8'),
+  readFile(new URL('../electron/settings.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/audio/engine.ts', import.meta.url), 'utf8'),
   readFile(new URL('../package.json', import.meta.url), 'utf8'),
 ]);
 
 assert.match(
   storeSource,
-  /resolveResumePosition\(\s*ids,\s*resumeState\.index,\s*resumeState\.currentTrackId,\s*new Set\(byId\.keys\(\)\),?\s*\)/,
+  /resolveResumePosition\(\s*savedIds,\s*resumeState\.index,\s*resumeState\.currentTrackId,\s*new Set\(tracks\.map\(\(track\) => track\.id\)\),?\s*\)/,
   'restorePlaybackSession should resolve the resume position by track id (idle stays idle)',
 );
-assert.match(storeSource, /currentTrackId: state\.current\?\.id \?\? null,/, 'persistPlaybackSession should save the current track id');
-assert.match(storeSource, /api\.getTracksByIds\(ids\)/, 'restorePlaybackSession should fetch the resumed queue with the batch API');
+assert.match(storeSource, /playbackResumeStateForQueueSnapshot/, 'persistPlaybackSession should build a sanitized resume snapshot');
+assert.match(storeSource, /currentTrackId = currentId !== null && queueTrackIds\.includes\(currentId\)/, 'persisted currentTrackId should belong to the saved queue');
+assert.match(storeSource, /localIds\.length \? api\.getTracksByIds\(localIds\)/, 'restorePlaybackSession should batch-fetch only local tracks');
+assert.match(storeSource, /hasServerEntries \? api\.getMusicServers\(\)/, 'restorePlaybackSession should read available remembered server connections');
 assert.doesNotMatch(
   storeSource,
   /queueTrackIds\.map\(\(id\) => api\.getTrack\(id\)/,
   'restorePlaybackSession should no longer fire one getTrack() IPC call per queued track',
 );
+assert.match(settingsSource, /normalizeResumeQueueEntry/, 'settings should normalize structured resume queue entries');
+assert.match(settingsSource, /parseMusicServerStreamUrl/, 'settings should reject arbitrary paths for server resume entries');
 
 assert.match(engineSource, /unload\(\): void \{/, 'AudioEngine should expose an unload() that releases src/trackId');
 assert.match(
