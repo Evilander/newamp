@@ -5,11 +5,12 @@
 // old or the new complete JSON.
 // Run: npm run build:electron && node scripts/settings-atomic-test.mjs
 import assert from 'node:assert/strict';
+import { build } from 'esbuild';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { watch } from 'node:fs';
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SettingsStore } from '../dist-electron/electron/settings.js';
 import { atomicWriteFileSync } from '../dist-electron/electron/recovery.js';
 import { mkdirSync, existsSync } from 'node:fs';
@@ -74,6 +75,19 @@ const tmpSiblings = () => readdirSync(smokeRoot).filter((f) => f.includes('.tmp'
   assert.deepEqual(tmpSiblings(), [], 'async persist must remove its temp sibling');
 }
 
+// A quit flush must preserve the only snapshot even when async persistence has
+// already cleared dirty and no newer set() call happens before quitting.
+{
+  const file = join(smokeRoot, 'in-flight-only.json');
+  const store = new SettingsStore(file);
+  store.set({ resumeState: { queueTrackIds: [1], index: 0, currentTime: 123, mode: 'normal', updatedAt: 1 } });
+  const pending = store.persistAsync();
+  store.flushSync();
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).resumeState.currentTime, 123);
+  await pending;
+  assert.equal(JSON.parse(readFileSync(file, 'utf8')).resumeState.currentTime, 123, 'stale async completion cannot erase the final snapshot');
+}
+
 // 4. A stale temp sibling left by a simulated crashed process must be ignored
 //    on startup (settings.json itself stays authoritative).
 {
@@ -132,15 +146,17 @@ const tmpSiblings = () => readdirSync(smokeRoot).filter((f) => f.includes('.tmp'
 {
   const recoverySrc = readFileSync(join(repoRoot, 'electron', 'recovery.ts'), 'utf-8');
   assert.match(recoverySrc, /while \(written < buf\.length\) \{\s*written \+= writeSync\(fd, buf, written, buf\.length - written\);/, 'durableWriteFileSync must loop on the bytes actually written');
-  // And a rename that keeps failing must never fall back to an unsynced in-place write.
+  // And a rename that keeps failing must never fall back to truncating the
+  // live target. The complete temp is the recovery artifact.
+  assert.doesNotMatch(recoverySrc, /writing in place/, 'atomic replace must not fall back to writing the live target');
   assert.doesNotMatch(recoverySrc, /writeFileSync\(toPath, readFileSync\(fromPath\)\)/, 'the rename fallback must not be a plain in-place writeFileSync');
-  assert.match(recoverySrc, /durableWriteFileSync\(toPath, readFileSync\(fromPath\)\)/, 'the last-resort in-place write must be fsynced');
+  assert.doesNotMatch(recoverySrc, /durableWriteFile(?:Sync|Async)\(toPath/, 'the rename fallback must not open the live target for write');
+  assert.match(recoverySrc, /complete copy remains at \${fromPath}/, 'failed atomic replace should report the preserved complete temp');
 }
 
 // 8. When the replace cannot complete at all, the complete copy survives. The
-//    destination here is a directory, so every rename fails and the last-resort
-//    in-place write fails too; the temp file must still be there afterwards
-//    and the error must say where it is.
+//    destination here is a directory, so the replace fails; the temp file must
+//    still be there afterwards and the error must say where it is.
 {
   const stuckRoot = join(smokeRoot, 'stuck');
   const target = join(stuckRoot, 'settings.json');
@@ -160,6 +176,96 @@ const tmpSiblings = () => readdirSync(smokeRoot).filter((f) => f.includes('.tmp'
   assert.ok(existsSync(survivor), 'the temp file with the complete data must survive a failed replace');
   assert.equal(readFileSync(survivor, 'utf-8'), payload, 'the surviving copy must be the complete payload');
   assert.ok(elapsed < 3000, `the synchronous retry backoff must stay short, took ${elapsed}ms`);
+}
+
+// 9. The debounced settings path must preserve its completed temp snapshot
+//    when the final replace exhausts transient rename retries. This catches an
+//    unconditional `finally unlink(tmp)`, which deletes the only complete copy
+//    of the failed async save.
+{
+  const failRoot = await mkdtemp(join(smokeRoot, 'settings-rename-fail-'));
+  await build({
+    entryPoints: ['electron/settings.ts'],
+    outfile: join(failRoot, 'settings.mjs'),
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    packages: 'external',
+    logLevel: 'silent',
+    plugins: [{ name: 'rename-overrides', setup(builder) {
+      builder.onLoad({ filter: /recovery\.ts$/ }, async ({ path }) => {
+        const source = readFileSync(path, 'utf8')
+          .replace('renameSync, unlinkSync', 'renameSync as realRenameSync, unlinkSync')
+          .replace('rename as fsRename', 'rename as realFsRename')
+          .replace(
+            "import type { RecoveryEvent } from '../shared/types.js';",
+            `import type { RecoveryEvent } from '../shared/types.js';
+const renameSync = (fromPath: string, toPath: string): void => {
+  const override = (globalThis as any).__renameSyncOverride;
+  if (override) return override(fromPath, toPath, realRenameSync);
+  return realRenameSync(fromPath, toPath);
+};
+const fsRename = async (fromPath: string, toPath: string): Promise<void> => {
+  const override = (globalThis as any).__fsRenameOverride;
+  if (override) return override(fromPath, toPath, realFsRename);
+  return realFsRename(fromPath, toPath);
+};`,
+          );
+        return { contents: source, loader: 'ts' };
+      });
+    } }],
+  });
+
+  const { SettingsStore: FailingSettingsStore } = await import(pathToFileURL(join(failRoot, 'settings.mjs')));
+  const failPath = join(failRoot, 'settings.json');
+  const store = new FailingSettingsStore(failPath);
+  store.set({
+    resumeState: { queueTrackIds: [11, 12], index: 1, currentTime: 321.5, mode: 'normal', updatedAt: Date.now() },
+  });
+  if (store.persistTimer) {
+    clearTimeout(store.persistTimer);
+    store.persistTimer = null;
+  }
+
+  const transient = (target) => {
+    const err = new Error(`locked ${target}`);
+    err.code = 'EPERM';
+    return err;
+  };
+  globalThis.__renameSyncOverride = (from, to, realRenameSync) => {
+    if (to === failPath) throw transient(failPath);
+    return realRenameSync(from, to);
+  };
+  globalThis.__fsRenameOverride = async (from, to, realFsRename) => {
+    if (to === failPath) throw transient(failPath);
+    return realFsRename(from, to);
+  };
+
+  const loggedErrors = [];
+  const originalConsoleError = console.error;
+  console.error = (...args) => {
+    loggedErrors.push(args);
+  };
+  try {
+    await Promise.resolve(store.persistAsync?.()).catch(() => {});
+  } finally {
+    console.error = originalConsoleError;
+    delete globalThis.__renameSyncOverride;
+    delete globalThis.__fsRenameOverride;
+  }
+
+  const onDisk = JSON.parse(readFileSync(failPath, 'utf-8'));
+  assert.equal(onDisk.resumeState, null, 'failed async replace must leave the live settings file untouched');
+  assert.match(
+    String(loggedErrors[0]?.[1]?.message ?? loggedErrors[0]?.join(' ') ?? ''),
+    /complete copy remains/,
+    'failed async replace should surface the preserved temp path in its error',
+  );
+  const survivors = readdirSync(failRoot).filter((file) => file.startsWith(`settings.json.tmp-${process.pid}-`) && !file.endsWith('-retry'));
+  assert.equal(survivors.length, 1, `failed async replace should preserve exactly one complete temp, found ${survivors.join(', ')}`);
+  const survivor = JSON.parse(readFileSync(join(failRoot, survivors[0]), 'utf-8'));
+  assert.equal(survivor.resumeState?.currentTime, 321.5, 'the preserved async temp must contain the complete failed payload');
+  assert.equal(existsSync(`${failPath}.tmp-${process.pid}-retry`), false, 'failed async retry temp should be cleaned');
 }
 
 await rm(smokeRoot, { recursive: true, force: true });

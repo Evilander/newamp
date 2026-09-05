@@ -4,11 +4,15 @@ import type {
   CustomSkin,
   LastfmTrackPayload,
   PlaybackMode as SharedPlaybackMode,
+  PlaybackResumeQueueEntry,
   PlaybackResumeState,
+  PlaybackResumeServerTrack,
   PodcastEpisode,
+  SavedMusicServer,
   Track,
 } from '@shared/types';
 import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
+import { parseMusicServerStreamUrl } from '@shared/music-servers';
 import { AudioEngine } from '../audio/engine';
 import { api, inElectron, toAudioUrl, winctl, DEFAULT_SETTINGS } from '../lib/api';
 import { decode as decodeEvilandCode } from '../visualizer/eviland-randomizer';
@@ -76,6 +80,7 @@ export type ViewMode =
   | 'tags'
   | 'podcasts'
   | 'radio'
+  | 'music-servers'
   | 'now-playing'
   | 'about'
   | 'settings';
@@ -165,7 +170,7 @@ interface PlayerState {
   setSearchQuery: (q: string) => void;
   playTrack: (track: Track, queue?: Track[]) => Promise<void>;
   playPodcastEpisode: (episode: PodcastEpisode) => Promise<void>;
-  playQueue: (tracks: Track[], startIndex?: number) => Promise<void>;
+  playQueue: (tracks: Track[], startIndex?: number, startAt?: number) => Promise<void>;
   loadQueue: (tracks: Track[]) => void;
   queueTrackNext: (track: Track) => void;
   addTrackToQueue: (track: Track) => void;
@@ -330,6 +335,170 @@ let lastPlaybackErrorKey: string | null = null;
 // next() and skip tracks without this key. Cleared whenever ended is false.
 let lastEndedKey: string | null = null;
 
+export interface PlaybackSessionPersistSnapshot {
+  currentTrackId: number | null;
+  currentTime: number;
+  isPlaying: boolean;
+}
+
+export function shouldForcePlaybackSessionPersist(
+  previous: PlaybackSessionPersistSnapshot,
+  next: PlaybackSessionPersistSnapshot,
+): boolean {
+  if (previous.currentTrackId === null || previous.currentTrackId !== next.currentTrackId) return false;
+  if (previous.isPlaying && !next.isPlaying) return true;
+  return !previous.isPlaying && !next.isPlaying && Math.abs(next.currentTime - previous.currentTime) >= 0.25;
+}
+
+function playbackResumeEntryTrackId(entry: PlaybackResumeQueueEntry): number {
+  return entry.kind === 'local' ? entry.trackId : entry.track.id;
+}
+
+function isValidResumeServerPath(path: string, connectionId: string, itemId: string): boolean {
+  try {
+    const url = new URL(path);
+    if (url.search || url.hash) return false;
+    const parsed = parseMusicServerStreamUrl(path);
+    return parsed.connectionId === connectionId && parsed.itemId === itemId;
+  } catch {
+    return false;
+  }
+}
+
+function playbackResumeServerTrackPayload(track: Track): PlaybackResumeServerTrack {
+  return {
+    id: track.id,
+    path: track.path,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    albumArtist: track.albumArtist,
+    trackNo: track.trackNo,
+    discNo: track.discNo,
+    year: track.year,
+    genre: track.genre,
+    duration: track.duration,
+    bitrate: track.bitrate,
+    sampleRate: track.sampleRate,
+    size: track.size,
+  };
+}
+
+export function playbackResumeQueueEntryForTrack(track: Track): PlaybackResumeQueueEntry | null {
+  if (Number.isSafeInteger(track.id) && track.id > 0) return { kind: 'local', trackId: track.id };
+  if (!Number.isSafeInteger(track.id) || track.id >= 0) return null;
+  try {
+    const url = new URL(track.path);
+    if (url.search || url.hash) return null;
+    const parsed = parseMusicServerStreamUrl(track.path);
+    return {
+      kind: 'music-server',
+      connectionId: parsed.connectionId,
+      itemId: parsed.itemId,
+      track: playbackResumeServerTrackPayload(track),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function playbackResumeStateForQueueSnapshot(input: {
+  queue: Track[];
+  index: number;
+  current: Track | null;
+  currentTime: number;
+  mode: PlaybackMode;
+  updatedAt?: number;
+}): PlaybackResumeState | null {
+  const queue = input.queue
+    .map(playbackResumeQueueEntryForTrack)
+    .filter((entry): entry is PlaybackResumeQueueEntry => entry !== null);
+  if (!queue.length) return null;
+  const queueTrackIds = queue.map(playbackResumeEntryTrackId);
+  const rawIndex = Math.trunc(Number(input.index));
+  const index = Number.isFinite(rawIndex) ? Math.max(-1, Math.min(queue.length - 1, rawIndex)) : 0;
+  const currentId = input.current?.id ?? null;
+  const currentTrackId = currentId !== null && queueTrackIds.includes(currentId) ? currentId : null;
+  const updatedAt = Number(input.updatedAt ?? Date.now());
+  return {
+    queueTrackIds,
+    queue,
+    index,
+    currentTrackId,
+    currentTime: Math.max(0, Number(input.currentTime) || 0),
+    mode: input.mode,
+    updatedAt: Number.isFinite(updatedAt) ? Math.max(0, updatedAt) : Date.now(),
+  };
+}
+
+function playbackResumeQueueEntries(resumeState: PlaybackResumeState): PlaybackResumeQueueEntry[] {
+  if (resumeState.queue?.length) return resumeState.queue;
+  return resumeState.queueTrackIds
+    .filter((id) => Number.isSafeInteger(id) && id > 0)
+    .map((trackId) => ({ kind: 'local' as const, trackId }));
+}
+
+function trackFromPlaybackResumeServerEntry(entry: PlaybackResumeQueueEntry): Track | null {
+  if (entry.kind !== 'music-server') return null;
+  const track = entry.track;
+  if (!Number.isSafeInteger(track.id) || track.id >= 0) return null;
+  if (!isValidResumeServerPath(track.path, entry.connectionId, entry.itemId)) return null;
+  return {
+    id: track.id,
+    path: track.path,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    albumArtist: track.albumArtist,
+    trackNo: track.trackNo,
+    discNo: track.discNo,
+    year: track.year,
+    genre: track.genre,
+    duration: track.duration,
+    bitrate: track.bitrate,
+    sampleRate: track.sampleRate,
+    size: track.size,
+    mtime: 0,
+    hasArt: 0,
+    loved: 0,
+    rating: 0,
+    ratingScore: null,
+    avoidAutoPlay: 0,
+    playCount: 0,
+    lastPlayed: null,
+    skipCount: 0,
+    lastSkipped: null,
+    bpm: null,
+    key: null,
+    replayGainTrackDb: null,
+    replayGainAlbumDb: null,
+  };
+}
+
+export function restoreTracksFromPlaybackResumeState(
+  resumeState: PlaybackResumeState | null,
+  localTracks: Track[],
+  musicServers: Pick<SavedMusicServer, 'id' | 'remembered'>[],
+): { savedIds: number[]; tracks: Track[] } {
+  if (!resumeState) return { savedIds: [], tracks: [] };
+  const entries = playbackResumeQueueEntries(resumeState);
+  const savedIds = entries.map(playbackResumeEntryTrackId);
+  const localById = new Map(localTracks.map((track) => [track.id, track]));
+  const rememberedConnections = new Set(musicServers.filter((server) => server.remembered).map((server) => server.id));
+  const tracks: Track[] = [];
+  for (const entry of entries) {
+    if (entry.kind === 'local') {
+      const track = localById.get(entry.trackId);
+      if (track) tracks.push(track);
+      continue;
+    }
+    if (!rememberedConnections.has(entry.connectionId)) continue;
+    const track = trackFromPlaybackResumeServerEntry(entry);
+    if (track) tracks.push(track);
+  }
+  return { savedIds, tracks };
+}
+
 // Shell integration (Windows thumbar, tray tooltip, NewAmp Remote): push a
 // playback snapshot to the main process when the (playing, track) pair
 // changes, when volume moves, on seek jumps, and otherwise at most every 5s
@@ -363,19 +532,26 @@ async function restorePlaybackSession(
   settings: AppSettings,
   setState: (partial: Partial<PlayerState>) => void,
 ): Promise<void> {
-  if (!resumeState?.queueTrackIds.length) return;
-  const ids = resumeState.queueTrackIds;
+  if (!resumeState) return;
+  const entries = playbackResumeQueueEntries(resumeState);
+  if (!entries.length) return;
+  const localIds = entries
+    .filter((entry): entry is Extract<PlaybackResumeQueueEntry, { kind: 'local' }> => entry.kind === 'local')
+    .map((entry) => entry.trackId);
+  const hasServerEntries = entries.some((entry) => entry.kind === 'music-server');
   // Single batch IPC call instead of one getTrack() round trip per queued
   // track — the batch endpoint already exists and is preload-wired.
-  const fetched = await api.getTracksByIds(ids).catch(() => []);
-  const byId = new Map(fetched.map((track) => [track.id, track]));
-  const tracks = ids.map((id) => byId.get(id)).filter((track): track is Track => !!track);
+  const [fetched, musicServers] = await Promise.all([
+    localIds.length ? api.getTracksByIds(localIds).catch(() => []) : Promise.resolve([]),
+    hasServerEntries ? api.getMusicServers().catch(() => []) : Promise.resolve([]),
+  ]);
+  const { savedIds, tracks } = restoreTracksFromPlaybackResumeState(resumeState, fetched, musicServers);
   if (!tracks.length) return;
   const { index, currentSurvived } = resolveResumePosition(
-    ids,
+    savedIds,
     resumeState.index,
     resumeState.currentTrackId,
-    new Set(byId.keys()),
+    new Set(tracks.map((track) => track.id)),
   );
   const current = index >= 0 ? tracks[index] ?? null : null;
   // The saved position only means anything on the track it was saved for; a
@@ -396,16 +572,13 @@ async function restorePlaybackSession(
 
 async function persistPlaybackSession(state: PlayerState): Promise<void> {
   if (!state.settings) return;
-  const resumeState: PlaybackResumeState | null = state.queue.length
-    ? {
-        queueTrackIds: state.queue.map((track) => track.id),
-        index: Math.max(-1, state.index),
-        currentTrackId: state.current?.id ?? null,
-        currentTime: Math.max(0, state.currentTime),
-        mode: state.mode,
-        updatedAt: Date.now(),
-      }
-    : null;
+  const resumeState = playbackResumeStateForQueueSnapshot({
+    queue: state.queue,
+    index: state.index,
+    current: state.current,
+    currentTime: state.currentTime,
+    mode: state.mode,
+  });
   await api.setSettings({ resumeState }).catch(() => state.settings!);
 }
 
@@ -587,10 +760,10 @@ const playIntents = createPlayIntentGate();
  * podcast-progress and Auto DJ side effects only on true. A playback failure
  * of the current request still throws, as before.
  */
-async function playEngineTrack(track: Track): Promise<boolean> {
+async function playEngineTrack(track: Track, startAt = 0): Promise<boolean> {
   lastCueEndKey = null;
   const intent = playIntents.begin();
-  const outcome = await engine.play(toAudioUrl(track.path), track.id, cueStart(track));
+  const outcome = await engine.play(toAudioUrl(track.path), track.id, cueStart(track) + startAt);
   return outcome === 'started' && playIntents.isCurrent(intent);
 }
 
@@ -759,9 +932,22 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   // AudioEngine.subscribe emits immediately; defer until Zustand has installed the initial state.
   queueMicrotask(() => {
     engine.subscribe((s) => {
-      const activeTrack = get().current;
+      const previousState = get();
+      const activeTrack = previousState.current;
       const relativeTime = cueRelativeTime(activeTrack, s.currentTime);
       const displayDuration = cueDuration(activeTrack, s.duration);
+      const forceSessionPersist = shouldForcePlaybackSessionPersist(
+        {
+          currentTrackId: activeTrack?.id ?? null,
+          currentTime: previousState.currentTime,
+          isPlaying: previousState.isPlaying,
+        },
+        {
+          currentTrackId: activeTrack?.id ?? s.trackId ?? null,
+          currentTime: relativeTime,
+          isPlaying: s.playing,
+        },
+      );
       set({
         isPlaying: s.playing,
         currentTime: relativeTime,
@@ -769,7 +955,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         playbackError: s.error,
       });
       maybeScrobbleToLastfm(get(), relativeTime, s.playing);
-      schedulePersistPlaybackSession(get());
+      schedulePersistPlaybackSession(get(), forceSessionPersist);
       persistPodcastProgress(get(), s.ended, s.ended);
       notifyShellPlayback(get());
       const state = get();
@@ -1190,7 +1376,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       persistPodcastProgress(get(), true, false);
     },
 
-    playQueue: async (tracks, startIndex = 0) => {
+    playQueue: async (tracks, startIndex = 0, startAt = 0) => {
       if (!tracks.length) return;
       clearPlaybackErrorAdvanceTimer();
       recordManualSkip(get());
@@ -1200,11 +1386,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const q = [...tracks];
       const i = Math.max(0, Math.min(startIndex, q.length - 1));
       const t = q[i]!;
+      const position = Number.isFinite(startAt) ? Math.max(0, Math.min(t.duration || Infinity, startAt)) : 0;
       set({
         queue: q,
         index: i,
         current: t,
-        currentTime: 0,
+        currentTime: position,
         duration: t.duration ?? 0,
         resumeAt: null,
         playbackError: null,
@@ -1213,7 +1400,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(t, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      if (!(await playEngineTrack(t))) return;
+      if (!(await playEngineTrack(t, position))) return;
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
       recordLibraryPlay(t);
@@ -1221,7 +1408,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     loadQueue: (tracks) => {
       clearPlaybackErrorAdvanceTimer();
-      set({ queue: [...tracks], index: -1, current: null, resumeAt: null, currentTime: 0, duration: 0, playbackError: null, shuffleHistory: [], activePodcastEpisode: null });
+      playIntents.begin();
+      lastPreparedHandoffKey = null;
+      lastStopAfterCurrentKey = null;
+      lastPlaybackErrorKey = null;
+      cachedShuffleHandoff = null;
+      engine.unload();
+      set({ isPlaying: false, stopAfterCurrent: false, queue: [...tracks], index: -1, current: null, resumeAt: null, currentTime: 0, duration: 0, playbackError: null, shuffleHistory: [], activePodcastEpisode: null });
       schedulePersistPlaybackSession(get(), true);
       if (get().autoDjEnabled) void get().refillAutoDjQueue(true);
     },
@@ -1299,14 +1492,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     clearQueue: () => {
+      const previous = get();
+      const emptyQueue: Track[] = [];
       clearPlaybackErrorAdvanceTimer();
       recordManualSkip(get());
       lastPreparedHandoffKey = null;
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
-      engine.stop();
+      playIntents.begin();
+      cachedShuffleHandoff = null;
+      engine.unload();
       set({
-        queue: [],
+        isPlaying: false,
+        queue: emptyQueue,
         index: -1,
         current: null,
         currentTime: 0,
@@ -1319,6 +1517,39 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         activePodcastEpisode: null,
       });
       schedulePersistPlaybackSession(get(), true);
+      if (previous.queue.length) {
+        pushToast({
+          title: 'Queue cleared',
+          detail: `${previous.queue.length.toLocaleString()} tracks removed. Undo restores your place, paused.`,
+          durationMs: 10000,
+          action: {
+            label: 'Undo clear',
+            onClick: () => {
+              // A queue edit or new play takes precedence over this old undo.
+              if (get().queue !== emptyQueue || get().current) {
+                pushToast({ title: 'Queue has changed', detail: 'The cleared queue was not restored.' });
+                return;
+              }
+              const position = previous.current ? previous.resumeAt ?? previous.currentTime : 0;
+              set({
+                queue: previous.queue,
+                index: previous.index,
+                current: previous.current,
+                currentTime: position,
+                duration: previous.duration,
+                resumeAt: previous.current ? position : null,
+                isPlaying: false,
+                mode: previous.mode,
+                shuffleHistory: previous.shuffleHistory,
+                activePodcastEpisode: previous.activePodcastEpisode,
+              });
+              applyReplayGain(previous.current, get().settings);
+              schedulePersistPlaybackSession(get(), true);
+              notifyShellPlayback(get());
+            },
+          },
+        });
+      }
     },
 
     togglePlay: () => {
@@ -1328,10 +1559,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         if (startIndex < 0) return;
         const resumeAt = state.resumeAt;
         const playbackQueue = state.queue.length ? state.queue : state.current ? [state.current] : [];
-        void state.playQueue(playbackQueue, startIndex).then(() => {
-          if (resumeAt && resumeAt > 0) get().seek(resumeAt);
-          set({ resumeAt: null });
-        });
+        // Carry the saved position in the play request itself. A late
+        // completion must never seek a newer track after Stop/queue changes.
+        void state.playQueue(playbackQueue, startIndex, resumeAt ?? 0);
         return;
       }
       engine.togglePlayPause();
@@ -1416,7 +1646,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       startLastfmNowPlaying(t);
     },
 
-    seek: (t) => engine.seek(cueStart(get().current) + Math.max(0, t)),
+    seek: (t) => {
+      if (!Number.isFinite(t)) return;
+      const state = get();
+      const current = state.current;
+      const duration = cueDuration(current, state.duration);
+      const target = Math.max(0, duration > 0 ? Math.min(duration, t) : t);
+      engine.seek(cueStart(current) + target);
+      if (!current) return;
+      set({ currentTime: target, ...(!engine.getState().src ? { resumeAt: target } : {}) });
+      if (!state.isPlaying) schedulePersistPlaybackSession(get(), true);
+    },
 
     setVolume: async (v) => {
       // Real-time path: gain ramp + in-memory store update fire immediately

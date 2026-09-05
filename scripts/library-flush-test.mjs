@@ -139,6 +139,9 @@ await rm(smokeRoot, { recursive: true, force: true });
   const settingsSrc = readFileSync(join(repoRoot, 'electron', 'settings.ts'), 'utf8');
   const recoverySrc = readFileSync(join(repoRoot, 'electron', 'recovery.ts'), 'utf8');
   assert.match(recoverySrc, /\.tmp-\$\{process\.pid\}-sync/, 'the synchronous writer needs its own temp suffix');
+  assert.doesNotMatch(recoverySrc, /writing in place/, 'atomic replace must never fall back to truncating the live target');
+  assert.doesNotMatch(recoverySrc, /durableWriteFile(?:Sync|Async)\(toPath/, 'rename failure must preserve the complete temp snapshot');
+  assert.match(recoverySrc, /complete copy remains at \${fromPath}/, 'failed replace should identify the preserved complete temp');
   for (const [name, src] of [['library', librarySrc], ['settings', settingsSrc]]) {
     assert.match(src, /\.tmp-\$\{process\.pid\}-\$\{seq\}/, `${name} async flush must use a per-flush temp path`);
     assert.doesNotMatch(src, /\.tmp-\$\{process\.pid\}`/, `${name} must not share the bare per-pid temp path`);

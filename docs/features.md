@@ -8,6 +8,7 @@ The complete tour. The [README](../README.md) is the landing page; this is the e
 - **10-band EQ** with custom presets, software peak limiter with preamp control, ReplayGain (per-track + per-album), crossfade and gapless playback, lossless WAV export of any track, output-device picker with test tone.
 - **Bit-Perfect Exclusive** — WASAPI-exclusive on Windows through a first-party native engine; experimental CoreAudio hog-mode (macOS) and ALSA-direct (Linux) lanes. Honest format negotiation, explicit labeled resampling, gapless ring splicing, per-track fallback. See [audio-quality.md](audio-quality.md).
 - **Format & signal-path honesty** — FLAC / 24-96 hi-res / DSD badges derived from real sample rates, plus a live transport badge showing pass-through vs resampling.
+- **Undo clear queue** — the clear notification offers **Undo clear** for ten seconds. It restores the queue and playback position, paused. Hovering or focusing the notification keeps it available; subsequent queue edits take precedence.
 - **CUE sheet playback** — one-file albums split into playable, seekable tracks with full metadata.
 - **Formats**: MP3, FLAC, OGG, Opus, WAV, M4A, AAC, WMA, AIFF, APE, WV, MPC, TTA, MKA, AC3, DTS, DSF, DFF (+ M3U/M3U8/PLS/CUE playlists).
 - Winamp-style keyboard control everywhere: Space, arrows, `L` to love, `0–5` stars, `F` fullscreen visualizer, `Ctrl+K` palette, `Ctrl+M` deck mode.
@@ -61,6 +62,61 @@ Two independent axes plus deck shapes:
 | **Deck** | Compact-window shape | Picker in deck view |
 
 Drop a Winamp 2.x `.wsz` onto the window to import it (palette derived from the bitmap), or author your own in the Skin Workshop and export `.newampskin.json`.
+
+## Listening-history import
+
+Open **History → Import listening history** after scanning your music.
+
+- **Last.fm:** enter a public username and configure your API key in
+  Settings → Last.fm. Scrobbling and account authorization are not required.
+  The importer fetches completed plays across pages up to a fixed cutoff time,
+  shows progress, and supports cancellation before applying the import. Up to
+  500,000 plays can be imported at once; larger histories need a file export
+  divided into smaller files.
+- **Files:** choose a CSV or JSON export, up to 64 MB and 500,000 plays per file.
+  CSV uses a header row. JSON accepts an array of play objects or a Last.fm
+  `recenttracks` response. Each row represents one play event.
+- Required data: `played_at` plus either `path`, or both `artist` and `title`.
+  `album` helps distinguish releases. Timestamps accept Unix seconds, Unix
+  milliseconds, or ISO timestamps with a timezone. Common alternatives such as
+  `timestamp`, `playedAt`, `track`, and `file_path` are also accepted.
+- Tracks match by file path first, then exact normalized artist/title, with
+  album disambiguation. Ambiguous and unmatched rows are skipped and reported.
+  Matching preserves Unicode text and accents; it does not guess approximate
+  song titles. Duplicate track/timestamp pairs are skipped on reimport.
+- Imports update play counts, most-recent-play timestamps, History, Mixes, and
+  listening insights. Existing history is preserved. Play-count totals alone
+  cannot recover individual play dates and are not expanded into invented plays.
+
+```csv
+artist,title,album,played_at
+Example Artist,Example Track,Example Album,2025-08-12T19:30:00Z
+```
+
+## Music servers
+
+**Music Servers** connects to Jellyfin and Navidrome / compatible Subsonic
+servers with your server URL, username, and password. LAN HTTP URLs and
+reverse-proxy subpaths are supported; HTTPS protects credentials in transit.
+Saved connections use the OS credential store. Turn off **Remember connection**
+to keep credentials only for the session; these disappear when NewAmp exits.
+
+Tracks from remembered connections can resume in the queue after restarting.
+Session-only and disconnected servers are skipped when restoring the queue.
+
+Browse or search tracks in pages of 100, then play a track, queue it next, or
+queue a page. Playback uses the normal transport and visualizers, with seeking
+when the server supports byte ranges. The player requests original audio;
+unsupported browser codecs require conversion on the server. Native exclusive
+output, local playlists, offline downloads, and server library synchronization
+are not part of this connection feature. Credentials stay in the main process
+and are not placed in renderer playback URLs. Redirects are refused, so enter
+the final server URL directly.
+
+Developer checks: `npm run test:music-servers`, `npm run test:history-import`,
+and `npm run smoke:community-ui` (Python with Playwright installed). The UI check
+uses isolated profiles and local protocol fixtures for both servers; it tests
+history reimport, playback, seeking, visualizer input, and exact byte ranges.
 
 ## Keyboard shortcuts
 

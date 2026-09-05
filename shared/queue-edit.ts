@@ -24,8 +24,11 @@ export function moveQueueItem(
   const [item] = next.splice(from, 1);
   next.splice(to, 0, item!);
 
-  const currentId = queue[normalizeCurrentIndex(currentIndex, queue.length)]?.id ?? null;
-  const index = currentId == null ? -1 : next.findIndex((track) => track.id === currentId);
+  // Map the queue slot, not the track id: repeats may contain the same song.
+  let index = normalizeCurrentIndex(currentIndex, queue.length);
+  if (index === from) index = to;
+  else if (from < index && to >= index) index--;
+  else if (from > index && to <= index) index++;
   return { queue: next, index };
 }
 
@@ -44,16 +47,16 @@ export function removeQueueItem(
   if (removedCurrent) {
     return { queue: next, index: Math.min(remove, next.length - 1), removedCurrent };
   }
-  const currentId = queue[normalizedCurrent]?.id ?? null;
-  const index = currentId == null ? -1 : next.findIndex((track) => track.id === currentId);
+  const index = remove < normalizedCurrent ? normalizedCurrent - 1 : normalizedCurrent;
   return { queue: next, index, removedCurrent };
 }
 
 function normalizeCurrentIndex(index: number, length: number): number {
-  if (!length) return -1;
-  return Math.max(0, Math.min(length - 1, Math.trunc(index)));
+  if (!length || !Number.isFinite(index) || index < 0) return -1;
+  return Math.min(length - 1, Math.trunc(index));
 }
 
 function clampIndex(index: number, length: number): number {
+  if (!Number.isFinite(index)) return 0;
   return Math.max(0, Math.min(length - 1, Math.trunc(index)));
 }

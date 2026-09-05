@@ -42,6 +42,7 @@ const NowPlayingView = lazy(() =>
 );
 const LovedView = lazy(() => import('./components/views/LovedView').then((module) => ({ default: module.LovedView })));
 const HistoryView = lazy(() => import('./components/views/HistoryView').then((module) => ({ default: module.HistoryView })));
+const MusicServersView = lazy(() => import('./components/views/MusicServersView').then((module) => ({ default: module.MusicServersView })));
 const WrappedView = lazy(() => import('./components/views/WrappedView').then((module) => ({ default: module.WrappedView })));
 const ProfileView = lazy(() => import('./components/views/ProfileView').then((module) => ({ default: module.ProfileView })));
 const PlaylistView = lazy(() =>
@@ -389,6 +390,7 @@ export default function App(): JSX.Element {
                 {view === 'now-playing' && <NowPlayingView />}
                 {view === 'podcasts' && <PodcastView />}
                 {view === 'radio' && <RadioView />}
+                {view === 'music-servers' && <MusicServersView />}
                 {view === 'about' && <AboutView />}
                 {view === 'settings' && <SettingsView />}
               </Suspense>

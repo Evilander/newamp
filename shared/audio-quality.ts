@@ -80,6 +80,15 @@ export function audioExtension(path: string): string {
   return path.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() ?? '';
 }
 
+export function isMusicServerStreamPath(path: string): boolean {
+  try {
+    const url = new URL(path);
+    return url.protocol === 'newamp:' && url.hostname === 'server';
+  } catch {
+    return false;
+  }
+}
+
 export function isFfmpegFallbackExtension(ext: string): boolean {
   return ffmpegFallbackSet.has(ext.toLowerCase().replace(/^\./, ''));
 }
@@ -88,7 +97,7 @@ export function playbackCodecLabel(path: string): string {
   const ext = audioExtension(path);
   if (!ext) return 'AUDIO';
   const display = ext.toUpperCase();
-  return isFfmpegFallbackExtension(ext) ? `${display}->WAV` : display;
+  return isFfmpegFallbackExtension(ext) && !isMusicServerStreamPath(path) ? `${display}->WAV` : display;
 }
 
 export function classifyAudioQuality(track: AudioQualityTrackInput): AudioQualitySignal {
@@ -98,7 +107,8 @@ export function classifyAudioQuality(track: AudioQualityTrackInput): AudioQualit
   const isPcmLossless = pcmLosslessSet.has(ext);
   const isLossy = lossySet.has(ext);
   const isContainer = containerSet.has(ext);
-  const decodePath: AudioDecodePath = ffmpegFallbackSet.has(ext) ? 'ffmpeg-pcm-fallback' : 'native';
+  const serverStream = isMusicServerStreamPath(track.path);
+  const decodePath: AudioDecodePath = ffmpegFallbackSet.has(ext) && !serverStream ? 'ffmpeg-pcm-fallback' : 'native';
   const sampleRate = finitePositive(track.sampleRate);
   const bitrate = finitePositive(track.bitrate);
   const densityBytesPerSecond = track.size && track.duration && track.size > 0 && track.duration > 0

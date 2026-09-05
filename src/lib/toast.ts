@@ -8,10 +8,16 @@
 
 export type ToastTone = 'info' | 'ok' | 'warn' | 'error';
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface ToastOptions {
   tone?: ToastTone;
   title: string;
   detail?: string;
+  action?: ToastAction;
   /** Auto-expire delay. <= 0 or non-finite makes the toast sticky until clicked. */
   durationMs?: number;
 }
@@ -21,6 +27,7 @@ export interface Toast {
   tone: ToastTone;
   title: string;
   detail?: string;
+  action?: ToastAction;
   durationMs: number;
 }
 
@@ -45,6 +52,7 @@ export function pushToast(options: ToastOptions): number {
     tone: options.tone ?? 'info',
     title: options.title,
     detail: options.detail,
+    action: options.action,
     durationMs: options.durationMs ?? TOAST_DEFAULT_DURATION_MS,
   };
   // Oldest toasts fall off the back when the stack is full — a burst of

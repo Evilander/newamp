@@ -235,11 +235,13 @@ struct Ring {
     return n;
   }
 
-  // Consumer side (audio callback).
-  uint64_t pop(unsigned char* dst, uint64_t len) {
+  // Consumer side (audio callback). Leave incomplete PCM frames queued so
+  // an underrun cannot split a sample/channel pair across callbacks.
+  uint64_t pop(unsigned char* dst, uint64_t len, uint32_t bytesPerFrame) {
     const uint64_t r = readPos.load(std::memory_order_relaxed);
     const uint64_t avail = writePos.load(std::memory_order_acquire) - r;
-    const uint64_t n = len < avail ? len : avail;
+    const uint64_t bytes = len < avail ? len : avail;
+    const uint64_t n = bytes - (bytes % bytesPerFrame);
     for (uint64_t i = 0; i < n;) {
       const uint64_t idx = (r + i) & (capacity - 1);
       const uint64_t run = (capacity - idx) < (n - i) ? (capacity - idx) : (n - i);
@@ -273,7 +275,7 @@ void DataCallback(ma_device* device, void* output, const void*, ma_uint32 frameC
   auto* p = static_cast<Player*>(device->pUserData);
   auto* out = static_cast<unsigned char*>(output);
   const uint64_t wanted = static_cast<uint64_t>(frameCount) * p->bytesPerFrame;
-  const uint64_t got = p->ring.pop(out, wanted);
+  const uint64_t got = p->ring.pop(out, wanted, p->bytesPerFrame);
   if (got < wanted) {
     std::memset(out + got, 0, wanted - got);
     // Silence before the first byte ever arrives is pre-roll, not an underrun.

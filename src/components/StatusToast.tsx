@@ -16,6 +16,8 @@ export function ToastHost(): JSX.Element | null {
   // rendered with data-state="leaving" until the transition finishes.
   const [leaving, setLeaving] = useState<ReadonlySet<number>>(() => new Set());
   const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const hostRef = useRef<HTMLDivElement>(null);
   // Remaining lifetime per toast id — lets hover pause/resume the clock.
   const remainingRef = useRef(new Map<number, number>());
 
@@ -46,7 +48,18 @@ export function ToastHost(): JSX.Element | null {
     for (const id of [...remainingRef.current.keys()]) {
       if (!live.has(id)) remainingRef.current.delete(id);
     }
-    if (hovered) return undefined;
+    // Removing a focused action may not dispatch blur. Reset its pause so
+    // dismissing one toast cannot leave every later notification sticky.
+    if (!toasts.length) {
+      setHovered(false);
+      setFocused(false);
+      return undefined;
+    }
+    if (focused && !hostRef.current?.contains(document.activeElement)) {
+      setFocused(false);
+      return undefined;
+    }
+    if (hovered || focused) return undefined;
     const armedAt = Date.now();
     const handles = new Map<number, number>();
     for (const toast of toasts) {
@@ -64,16 +77,21 @@ export function ToastHost(): JSX.Element | null {
         if (remaining !== undefined) remainingRef.current.set(id, Math.max(0, remaining - elapsed));
       }
     };
-  }, [toasts, hovered, leaving, beginLeave]);
+  }, [toasts, hovered, focused, leaving, beginLeave]);
 
   if (!toasts.length) return null;
 
   return (
     <div
+      ref={hostRef}
       className="toast-host"
       data-newamp-toast-host
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onFocusCapture={() => setFocused(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false);
+      }}
     >
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} leaving={leaving.has(toast.id)} onDismiss={beginLeave} />
@@ -97,12 +115,28 @@ function ToastCard({
       className={`status-toast bevel-out status-toast-${toast.tone}`}
       data-state={leaving ? 'leaving' : 'shown'}
       data-newamp-toast={toast.tone}
-      title="Dismiss"
+      title={toast.action ? undefined : 'Dismiss'}
       onClick={() => onDismiss(toast.id)}
     >
       <div className="status-toast-copy">
         <div className="status-toast-title">{toast.title}</div>
         {toast.detail ? <div className="status-toast-detail">{toast.detail}</div> : null}
+        {toast.action ? (
+          <button
+            type="button"
+            className="pxbtn mt-2 px-2 py-1 text-[11px]"
+            disabled={leaving}
+            onClick={(event) => {
+              event.stopPropagation();
+              // Remove first so the same action cannot be invoked twice.
+              if (!getToasts().some((item) => item.id === toast.id)) return;
+              dismissToast(toast.id);
+              toast.action?.onClick();
+            }}
+          >
+            {toast.action.label}
+          </button>
+        ) : null}
       </div>
     </div>
   );

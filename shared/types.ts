@@ -2,6 +2,8 @@
 
 import type { TrackDna as TrackDnaPublic } from './audio-dna.js';
 import type { VisualMemoryPlan as VisualMemoryPlanPublic, VisualMemoryStats as VisualMemoryStatsPublic } from './visual-memory.js';
+import type { HistoryImportReport, LastfmHistoryProgress } from './history-import.js';
+import type { MusicServerConnectionInput, MusicServerConnectionPublic } from './music-servers.js';
 
 export interface TagRule {
   id: number;
@@ -793,8 +795,41 @@ export function combinePlaybackMode(shuffle: boolean, repeat: RepeatMode): Playb
   return shuffle ? 'shuffle' : 'normal';
 }
 
+export interface PlaybackResumeLocalQueueEntry {
+  kind: 'local';
+  trackId: number;
+}
+
+export type PlaybackResumeServerTrack = Pick<
+  Track,
+  | 'id'
+  | 'path'
+  | 'title'
+  | 'artist'
+  | 'album'
+  | 'albumArtist'
+  | 'trackNo'
+  | 'discNo'
+  | 'year'
+  | 'genre'
+  | 'duration'
+  | 'bitrate'
+  | 'sampleRate'
+  | 'size'
+>;
+
+export interface PlaybackResumeMusicServerQueueEntry {
+  kind: 'music-server';
+  connectionId: string;
+  itemId: string;
+  track: PlaybackResumeServerTrack;
+}
+
+export type PlaybackResumeQueueEntry = PlaybackResumeLocalQueueEntry | PlaybackResumeMusicServerQueueEntry;
+
 export interface PlaybackResumeState {
   queueTrackIds: number[];
+  queue?: PlaybackResumeQueueEntry[];
   // -1 means the queue was loaded but nothing was current (a playlist opened
   // without pressing Play); a restore keeps it idle instead of selecting track 0.
   index: number;
@@ -1183,7 +1218,25 @@ export interface ExclusivePlayResult {
   error?: string;
 }
 
+export interface SavedMusicServer extends MusicServerConnectionPublic {
+  remembered: boolean;
+}
+
+export interface MusicServerTrackPage {
+  tracks: Track[];
+  total: number | null;
+  nextOffset: number | null;
+}
+
 export interface NewAmpAPI {
+  getMusicServers: () => Promise<SavedMusicServer[]>;
+  connectMusicServer: (input: MusicServerConnectionInput & { remember: boolean }) => Promise<SavedMusicServer>;
+  disconnectMusicServer: (id: string) => Promise<void>;
+  getMusicServerTracks: (id: string, options?: { query?: string; offset?: number; limit?: number }) => Promise<MusicServerTrackPage>;
+  importHistoryFile: () => Promise<HistoryImportReport | null>;
+  importLastfmHistory: (username: string) => Promise<HistoryImportReport>;
+  cancelHistoryImport: () => Promise<void>;
+  onHistoryImportProgress: (cb: (progress: LastfmHistoryProgress) => void) => () => void;
   // library
   scanLibrary: (roots?: string[]) => Promise<void>;
   cancelScan: () => Promise<void>;

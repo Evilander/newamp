@@ -106,7 +106,7 @@ assert.match(engineSource, /if \(outcome === 'accepted'\) return 'started';\s*if
 
 const storeSource = await readFile(new URL('../src/store/usePlayerStore.ts', import.meta.url), 'utf8');
 assert.match(storeSource, /const playIntents = createPlayIntentGate\(\);/, 'the store must own one intent gate');
-assert.match(storeSource, /async function playEngineTrack\(track: Track\): Promise<boolean> \{[\s\S]*?const intent = playIntents\.begin\(\);[\s\S]*?return outcome === 'started' && playIntents\.isCurrent\(intent\);/, 'playEngineTrack must take a ticket before the await and check it after');
+assert.match(storeSource, /async function playEngineTrack\(track: Track, startAt = 0\): Promise<boolean> \{[\s\S]*?const intent = playIntents\.begin\(\);[\s\S]*?return outcome === 'started' && playIntents\.isCurrent\(intent\);/, 'playEngineTrack must take a ticket before the await and check it after');
 
 // Every awaited play must be guarded: the only allowed awaited form is the
 // `if (!(await playEngineTrack(x))) return;` guard. Fire-and-forget `void`

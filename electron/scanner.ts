@@ -326,9 +326,6 @@ export class Scanner {
 
       const total = discovered.length;
       let scanned = 0;
-      const existing = options.force
-        ? new Map<string, TrackFileState>()
-        : this.library.getTrackFileStates(discovered.map((f) => f.full));
       const folderArtPathCache = new Map<string, Promise<string | null>>();
       const folderArtBlobCache = new Map<string, Promise<ArtBlob | null>>();
       const folderArtPathForFile = (filePath: string): Promise<string | null> => {
@@ -355,6 +352,9 @@ export class Scanner {
       for (let i = 0; i < discovered.length; i += METADATA_BATCH_SIZE) {
         if (this.cancelled) return;
         const slice = discovered.slice(i, i + METADATA_BATCH_SIZE);
+        const existing = options.force
+          ? new Map<string, TrackFileState>()
+          : this.library.getTrackFileStates(slice.map((f) => f.full));
         const changed = options.force
           ? slice
           : await pMap(slice, METADATA_CONCURRENCY, async (f) =>

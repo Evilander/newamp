@@ -47,7 +47,8 @@ install already has them; a bare Debian or Ubuntu image is missing `libnss3`,
 
 - Plays MP3, FLAC, OGG, Opus, WAV, M4A, AAC, WMA, AIFF, APE, WV, DSF and a few
   others.
-- Handles large libraries. Mine is about 60,000 tracks.
+- Paged browsing for large libraries. The database benchmark also exercises
+  350,000 synthetic tracks; see the limits below.
 - Winamp-style keyboard control: space, arrows, `L` to love, `0`–`5` to rate,
   `Q` to queue, `F` for fullscreen visuals, `Ctrl+K` for search.
 - Visualizers — real MilkDrop presets through Butterchurn, plus Eviland, my own
@@ -57,6 +58,10 @@ install already has them; a bare Debian or Ubuntu image is missing `libnss3`,
 - Smart playlists, an Auto DJ, ratings, and a search language
   (`loved AND bpm > 120 AND not played this month`).
 - Synced lyrics, podcasts, CUE sheets, and Last.fm scrobbling if you set it up.
+- Jellyfin and Navidrome / compatible Subsonic servers: connect, browse, search,
+  and play through the queue and visualizers.
+- Listening-history import from Last.fm or CSV/JSON exports, with duplicate
+  detection and a report of tracks that could not be matched.
 - A year-in-review built from your own play history, since nobody else has it.
 - A phone remote over your own Wi-Fi, via a QR code.
 
@@ -80,9 +85,30 @@ More in `assets/screenshots/`.
 
 1. Open it. It'll offer to scan your Music folder, or you can drop any folder on
    the window.
-2. Scanning takes roughly ten seconds per thousand tracks.
+2. Scan time depends on your disk, file formats, artwork, and library size.
+   Subsequent scans skip unchanged files, and a scan can be cancelled.
 3. `Ctrl+K` searches. `F` goes fullscreen. `Ctrl+M` shrinks it to a deck.
 4. Settings → Shell and Settings → Skin change how it looks.
+
+Music Servers in the sidebar connects to Jellyfin and Navidrome. Include any
+reverse-proxy subpath in the server URL. Connections can last for this session
+or be saved with the OS credential store. Music streams from the server;
+server tracks are not copied into the local library or saved playlists.
+
+History → Import listening history accepts a Last.fm username (using your API
+key from Settings → Last.fm) or a CSV/JSON file. Scan your local music first so
+plays can be matched. Imported plays feed Mixes, History, and listening stats.
+The [feature reference](docs/features.md#listening-history-import) documents
+file columns and matching behavior.
+
+### Large libraries
+
+Run `npm run bench:library-scale` for a reproducible 350,000-track synthetic
+database benchmark. It reports import, search, paging, reopen, memory use,
+and time spent blocking the main thread. Generated metadata rows do not measure
+audio-file parsing, artwork reads, or end-to-end responsiveness with a real
+350,000-track collection. This is still an in-memory SQLite database: large
+libraries use substantial memory, and some searches can block the main process.
 
 ## Size, memory, and Electron
 
@@ -117,12 +143,12 @@ That's the trade I made, with my eyes open.
   update pings.
 - The only network calls are ones attached to a feature you can see, and all are
   optional: lyric lookups (LRCLIB), cover art and metadata repair (MusicBrainz /
-  Cover Art Archive), podcast feeds you added, and Last.fm scrobbling with your
-  own credentials.
+  Cover Art Archive), podcast feeds you added, Last.fm scrobbling/history import,
+  and music servers you connect to, using your own credentials.
 - The phone remote binds to your local network and requires a token unique to
   your install.
 - Your library is a SQLite file in your OS profile (`%APPDATA%/NewAmp`,
-  `~/Library/Application Support/NewAmp`, or `~/.config/NewAmp`). Delete that
+  `~/Library/Application Support/NewAmp`, or `~/.config/newamp`). Delete that
   folder and there's no trace left.
 
 ## Build from source

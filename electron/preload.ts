@@ -84,6 +84,18 @@ import type { TrackDna } from '../shared/audio-dna.js';
 import type { VisualMemoryPlan, VisualMemoryStats } from '../shared/visual-memory.js';
 
 const api: NewAmpAPI = {
+  getMusicServers: () => ipcRenderer.invoke('music-servers:list'),
+  connectMusicServer: (input) => ipcRenderer.invoke('music-servers:connect', input),
+  disconnectMusicServer: (id) => ipcRenderer.invoke('music-servers:disconnect', id),
+  getMusicServerTracks: (id, options) => ipcRenderer.invoke('music-servers:tracks', id, options),
+  importHistoryFile: () => ipcRenderer.invoke('history:import-file'),
+  importLastfmHistory: (username) => ipcRenderer.invoke('history:import-lastfm', username),
+  cancelHistoryImport: () => ipcRenderer.invoke('history:cancel-import'),
+  onHistoryImportProgress: (cb) => {
+    const handler = (_e: unknown, progress: Parameters<typeof cb>[0]) => cb(progress);
+    ipcRenderer.on('history:import-progress', handler);
+    return () => ipcRenderer.removeListener('history:import-progress', handler);
+  },
   scanLibrary: (roots) => ipcRenderer.invoke('library:scan', roots),
   cancelScan: () => ipcRenderer.invoke('library:cancel-scan'),
   onScanProgress: (cb) => {

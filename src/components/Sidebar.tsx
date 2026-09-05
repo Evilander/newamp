@@ -56,6 +56,7 @@ const GROUPS: NavGroup[] = [
   {
     label: 'Streaming',
     items: [
+      { id: 'music-servers', label: 'Music Servers', icon: 'M3 3h14v5H3zM3 12h14v5H3zM6 5v1M6 14v1', hint: 'Connect to Jellyfin or Navidrome / Subsonic' },
       { id: 'podcasts', label: 'Podcasts', icon: 'M5 15v-3a5 5 0 0110 0v3M8 15v-3a2 2 0 114 0v3M10 4v3M6 5l2 2M14 5l-2 2', hint: 'Subscribe, download, and pick up where you left off' },
       { id: 'radio', label: 'Radio', icon: 'M2 8h16v9H2zM2 8L14 4v4M5 13h2M9 13h2', hint: 'Internet radio stations' },
     ],

@@ -27,6 +27,7 @@ class ExclusiveBridge implements ExternalTransport {
   // Set when ended/boundary was forwarded; stray position events for the
   // terminal stream must not re-notify the store against a stuck ended state.
   private endedPending = false;
+  private playSeq = 0;
 
   isEnabled(): boolean {
     return this.enabled;
@@ -63,6 +64,7 @@ class ExclusiveBridge implements ExternalTransport {
 
   private teardown(): void {
     this.enabled = false;
+    this.playSeq++;
     this.unsubEvent?.();
     this.unsubEvent = null;
     this.unsubTap?.();
@@ -75,7 +77,9 @@ class ExclusiveBridge implements ExternalTransport {
   // ---- ExternalTransport ----------------------------------------------------
 
   async play(trackId: number, startAt: number): Promise<boolean> {
+    const seq = ++this.playSeq;
     const result = await api.exclusivePlay(trackId, startAt);
+    if (seq !== this.playSeq || !this.enabled) return false;
     if (!result.ok) {
       // Throw so the engine records the honest fallback reason before it
       // routes this track through the normal deck path.
@@ -98,6 +102,8 @@ class ExclusiveBridge implements ExternalTransport {
   }
 
   stop(): void {
+    this.playSeq++;
+    this.tap.silence();
     void api.exclusiveStop().catch(() => undefined);
   }
 

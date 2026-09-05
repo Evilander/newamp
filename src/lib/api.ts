@@ -141,6 +141,14 @@ function emptyDiscoverSurface(input: DiscoverSurfaceInput = {}): DiscoverSurface
 }
 
 const stub: NewAmpAPI = {
+  getMusicServers: async () => [],
+  connectMusicServer: async () => { throw new Error('Music servers are available in the desktop app.'); },
+  disconnectMusicServer: async () => undefined,
+  getMusicServerTracks: async () => { throw new Error('Music servers are available in the desktop app.'); },
+  importHistoryFile: async () => { throw new Error('History import is available in the desktop app.'); },
+  importLastfmHistory: async () => { throw new Error('History import is available in the desktop app.'); },
+  cancelHistoryImport: async () => undefined,
+  onHistoryImportProgress: () => () => undefined,
   scanLibrary: async () => undefined,
   cancelScan: async () => undefined,
   onScanProgress: () => () => undefined,
