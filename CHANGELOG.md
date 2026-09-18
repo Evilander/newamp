@@ -24,6 +24,11 @@ Release notes for every version, including everything before 2.0, are on the
   analysis as before. Turn it off under Visualizer settings, Look-ahead.
 - Two new Eviland sources: a reaction–diffusion simulation that grows out of
   whatever is bright in the picture, and a raymarched volume scene.
+- The queue in Now Playing can be edited in place. Drag a row to reorder it,
+  or use the move and remove buttons that appear on hover; from the keyboard,
+  Alt+Up/Down moves the focused row and Delete removes it. Clear empties the
+  queue (with the usual undo). Editing around the playing track does not
+  interrupt it.
 
 ### Changed
 

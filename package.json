@@ -233,6 +233,7 @@
     "smoke:portable-app": "node scripts/portable-app-smoke.mjs",
     "smoke:ui-handoff": "npm run build && node scripts/ui-handoff-smoke.mjs",
     "smoke:ui-gapless": "npm run build && node scripts/ui-gapless-smoke.mjs",
+    "smoke:ui-queue-edit": "npm run build && node scripts/ui-queue-edit-smoke.mjs",
     "smoke:ui-lyrics": "npm run build && node scripts/ui-lyrics-smoke.mjs",
     "smoke:local-lyrics": "npm run build:electron && node scripts/local-lyrics-smoke.mjs",
     "smoke:ui-local-lyrics": "npm run build && node scripts/ui-local-lyrics-smoke.mjs",
