@@ -156,6 +156,12 @@ That's the trade I made, with my eyes open.
   and music servers you connect to, using your own credentials.
 - The phone remote binds to your local network and requires a token unique to
   your install.
+- Your music files are never written to. Scanning and playback open them
+  read-only. Ratings, play counts, tags (including Living Tags), lyrics,
+  metadata and album art rescues, and bookmarks are rows in the library
+  database, not edits to the files, so seeding, checksums, and backups are
+  unaffected. Exports (WAV/FLAC conversion, playlist folders) create new files
+  in a folder you choose.
 - Your library is a SQLite file in your OS profile (`%APPDATA%/NewAmp`,
   `~/Library/Application Support/NewAmp`, or `~/.config/newamp`). Delete that
   folder and there's no trace left.
