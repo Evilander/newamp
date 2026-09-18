@@ -37,7 +37,7 @@ vec4 scene(vec2 uv, vec2 p) {
   float seedOff = floor(u_seed * 977.0);
   float breath = 1.0 + u_bass * 0.18 + u_kickPulse * 0.12;
   vec2 drift = vec2(
-    u_globalTime * (0.06 + u_pan * 0.04),
+    (u_globalTime * 0.06 + u_panTime * 0.04),
     u_globalTime * 0.045 + u_width * 0.1);
   float rot = u_seed * 6.28 + u_globalTime * 0.02;
   vec2 q = (rot2(rot) * p) * (SCALE / breath) + drift;

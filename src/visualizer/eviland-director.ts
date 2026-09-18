@@ -471,6 +471,10 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   // ── helpers ───────────────────────────────────────────────────────────────
 
   function tierFor(frame: EvilandFrame): EnergyTier {
+    // A scored track already knows the tier of the section that is starting —
+    // measured against the rest of the song, and available on its first frame.
+    // The estimate below can only describe the section that just ENDED.
+    if (frame.score) return frame.score.tier;
     // Use the slow average so a single loud frame doesn't promote us to climax,
     // but blend in the in-section peak so an obvious drop still registers fast.
     const sustained = energyAvg;
@@ -537,6 +541,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     const amount = TIER_MUTATE_AMOUNT[tier];
     const mutateSeed = (baseSeed ^ 0x85ebca6b) >>> 0;
     const tuned = amount > 0 ? mutate(config, amount, mutateSeed) : config;
+    tuneComposition(tuned, tier);
     // Stamp section info onto the config for downstream tooling/UI.
     tuned.name = `${tuned.archetype ?? 'look'} • s${sectionId} • ${tier}`;
     return { config: tuned, archetype, seed: baseSeed };
@@ -608,6 +613,15 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       nextConfig = cloneConfig(stored.config);
       storedSeed = stored.seed;
       storedArchetype = stored.archetype;
+      if (frame.score && tier !== stored.tier) {
+        // The score says this repeat sits at a different intensity than the
+        // one we remember (the last chorus is usually the biggest). Keep the
+        // look — archetype, scene, palette — and re-tune it for the new tier
+        // instead of replaying the first chorus note for note.
+        nextConfig = mutate(nextConfig, TIER_MUTATE_AMOUNT[tier], (storedSeed ^ hashSeed(tier)) >>> 0);
+        tuneComposition(nextConfig, tier);
+        nextConfig.name = `${storedArchetype} • s${frame.sectionId} • ${tier}`;
+      }
       const fp = frame.sectionFingerprint;
       sections.set(frame.sectionId, {
         config: cloneConfig(nextConfig),
@@ -797,6 +811,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       const amount = TIER_MUTATE_AMOUNT[tier];
       const mutateSeed = (baseSeed ^ 0x85ebca6b) >>> 0;
       const tuned = amount > 0 ? mutate(config, amount, mutateSeed) : config;
+      tuneComposition(tuned, tier);
       tuned.name = `${tuned.archetype ?? 'look'} • s${s.sectionId} • ${tier}`;
       sections.set(s.sectionId, {
         config: tuned,
@@ -837,7 +852,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       energyAvg += (frame.energy - energyAvg) * alpha;
       if (frame.energy > energyPeak) energyPeak = frame.energy;
       // Novelty accumulates with decay, peaks ~1.
-      noveltyAccum = Math.min(1, noveltyAccum * 0.985 + frame.novelty * 0.05);
+      noveltyAccum = Math.min(1, noveltyAccum * Math.pow(0.985, dt * 0.06) + frame.novelty * 0.05 * (1 - Math.pow(0.985, dt * 0.06)) / 0.015);
 
       if (frame.sectionChanged && frame.sectionId !== lastSectionId) {
         lastSectionId = frame.sectionId;
@@ -889,7 +904,14 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       // Timer floor: if structure hasn't changed the look in a while, force a
       // fresh rotation (MilkDrop-style). Only when settled, never mid-fade.
       msSinceSwitch += dt;
-      if (rotateMs > 0 && fade >= 1 && msSinceSwitch >= effectiveRotateMs()) {
+      // On a scored track a timer rotation waits for the next bar line (at
+      // most a few seconds) and never starts inside a build or the second
+      // before a section change — structure is about to change the look anyway.
+      const cues = frame.score;
+      const rotationHeld = cues
+        ? msSinceSwitch < effectiveRotateMs() + 6000 && (!cues.downbeat || cues.anticipation > 0 || cues.toBoundary < 2)
+        : false;
+      if (rotateMs > 0 && fade >= 1 && msSinceSwitch >= effectiveRotateMs() && !rotationHeld) {
         onForcedRotation(frame);
         advanceFade(frame, dtMs);
       }
@@ -1064,5 +1086,15 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       driftPhaseMs = 0;
       driftAccumMs = 0;
     },
+  };
+}
+
+/** Section-scale art direction: quiet passages leave space, drops sharpen form. */
+function tuneComposition(config: OperatorConfig, tier: EnergyTier): void {
+  if (!config.composition) return;
+  const density = { calm: 0.55, steady: 0.75, lift: 0.95, drop: 1.2, climax: 1.05 }[tier];
+  const contrast = { calm: 0.95, steady: 1.05, lift: 1.15, drop: 1.5, climax: 1.3 }[tier];
+  config.composition = { ...config.composition,
+    density: Math.min(0.85, config.composition.density * density), contrast,
   };
 }

@@ -2,6 +2,7 @@
 
 import type { TrackDna as TrackDnaPublic } from './audio-dna.js';
 import type { VisualMemoryPlan as VisualMemoryPlanPublic, VisualMemoryStats as VisualMemoryStatsPublic } from './visual-memory.js';
+import type { SongScore as SongScorePublic } from '../src/visualizer/eviland-score.js';
 import type { HistoryImportReport, LastfmHistoryProgress } from './history-import.js';
 import type { MusicServerConnectionInput, MusicServerConnectionPublic } from './music-servers.js';
 
@@ -1301,6 +1302,12 @@ export interface NewAmpAPI {
   clearTrackVisualMemory: (id: number) => Promise<boolean>;
   getVisualMemoryStats: () => Promise<VisualMemoryStatsPublic>;
   clearAllVisualMemory: () => Promise<number>;
+  /**
+   * Whole-track analysis the Eviland visualizers conduct from (beat grid,
+   * sections, builds, keys). Analysed on first request, cached after; null
+   * when the track can't have one. Takes a second or two uncached.
+   */
+  getSongScore: (id: number) => Promise<SongScorePublic | null>;
   getRadioBrainStatus: () => Promise<RadioBrainStatus>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;

@@ -1,31 +1,41 @@
-// Eviland scene overlay — the "25 visuals MilkDrop can't have" layer.
+// Eviland scene runtime — the procedural source library.
 //
-// A transparent WebGL2 canvas stacked between the butterchurn (MilkDrop)
-// iframe and the reactor-overlay event canvas in 'eviland-live' mode. Each
-// scene is a self-contained fragment shader implementing
+// Each scene is a self-contained fragment shader implementing
 //
 //   vec4 scene(vec2 uv, vec2 p)   // uv: 0..1, p: centered, aspect-corrected
 //
 // against a standard audio-feature uniform contract (see PRELUDE). The
 // runtime owns the quad, compilation, caching, scene rotation, and a beat-
-// aware crossfade between scenes. Output is premultiplied alpha so the
-// MilkDrop field below shows through wherever a scene leaves alpha low.
+// aware crossfade between scenes. Output is premultiplied alpha.
+//
+// Two ways to host it:
+//   - Borrowed context (options.gl + a SceneTarget per render): the scene is
+//     drawn INTO a host framebuffer — the Eviland engine's feedback field, or
+//     MilkDrop's feedback texture in Eviland Live — so it is warped, echoed
+//     and decayed with everything else. The host picks the scene
+//     (setScene) and the runtime never clears, resizes or owns the canvas.
+//   - Standalone canvas (no options.gl): the runtime owns a transparent
+//     WebGL2 canvas and rotates scenes itself. Only the scene smoke uses this
+//     now; it is how every scene gets compiled, lit and motion-checked.
 //
 // On the 'high' quality tier a second, independent ACCENT scene runs on top
 // of the base scene, its opacity played live by the drums (kick/snare/vocal
-// onset envelopes) — two full presets composited per-instrument, which a
-// single MilkDrop preset structurally cannot do.
+// onset envelopes) — two procedural looks composited per instrument.
 //
-// "Could never be replicated": scene choice is a seeded walk keyed on
+// Clocks: a scene must never write `time * speed(audio)` — after a minute, a
+// small change in the audio moves the animation by seconds in one frame. The
+// runtime integrates each scene's `speed(frame)` into u_phase, plus shared
+// integrals of energy, pan and the 24 bands (u_energyTime, u_panTime,
+// u_bandTime), so audio changes velocity and position stays continuous.
+//
+// Scene choice in standalone mode is a seeded walk keyed on
 // (seedKey × sectionId) — seedKey carries the track + the user's evolved
 // visual-memory lineage, so the same song on two machines (or two play
-// histories) picks different scenes at different sections, on top of
-// MilkDrop's own randomized preset rotation and the lineage-evolved operator
-// look. The combination is effectively unique per user per listen history.
+// histories) walks different scenes.
 //
 // Failure posture: ANY GL failure (context, compile, link) disables only this
-// layer — MilkDrop + reactor events keep running. A scene that fails to
-// compile is blacklisted for the session and the rotation moves on.
+// source — the host keeps running. A scene that fails to compile is
+// blacklisted for the session and the rotation moves on.
 
 import type { EvilandFrame } from './eviland-audio';
 import type { EvilandPalette } from './eviland';
@@ -33,7 +43,7 @@ import { SCENES, type SceneDef } from './scenes/index';
 
 export interface SceneOverlay {
   resize(cssW: number, cssH: number, dpr: number): void;
-  render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number): void;
+  render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number, target?: SceneTarget): void;
   /** Force a specific scene (null returns to the seeded auto-rotation). */
   setScene(id: string | null): void;
   /** Re-seed the rotation walk (track change / lineage update). */
@@ -42,7 +52,17 @@ export interface SceneOverlay {
   dispose(): void;
 }
 
+export interface SceneTarget {
+  framebuffer: WebGLFramebuffer | null;
+  width: number;
+  height: number;
+  opacity?: number;
+  contrast?: number;
+}
+
 export interface SceneOverlayOptions {
+  /** Borrow a host context; never resize or clear its canvas. */
+  gl?: WebGL2RenderingContext;
   quality?: 'high' | 'medium' | 'low';
   seedKey?: string;
 }
@@ -56,6 +76,11 @@ precision highp float;
 uniform vec2  u_res;        // framebuffer pixels
 uniform float u_time;       // scene-local seconds (resets on scene switch)
 uniform float u_globalTime; // seconds since overlay start (never resets)
+uniform float u_phase;      // integral of the scene's audio-driven speed
+uniform float u_energyTime; // integral of energy, seconds
+uniform float u_panTime;    // integral of pan, seconds
+uniform float u_bandTime[24]; // integrals of individual band envelopes
+uniform float u_contrast;
 uniform float u_dt;         // last frame delta, seconds
 uniform float u_seed;       // 0..1 stable per scene instance
 uniform float u_fade;       // 0..1 crossfade envelope (apply to output alpha)
@@ -134,6 +159,7 @@ void main() {
   vec2 p = (gl_FragCoord.xy * 2.0 - u_res) / min(u_res.x, u_res.y);
   vec4 c = scene(uv, p);
   c = clamp(c, 0.0, 1.0);
+  c.rgb = pow(c.rgb, vec3(u_contrast));
   // Premultiply + fade so crossfades and MilkDrop show-through compose cleanly.
   fragColor = vec4(c.rgb * c.a * u_fade, c.a * u_fade);
 }
@@ -148,7 +174,7 @@ void main() {
 `;
 
 const UNIFORM_NAMES = [
-  'u_res', 'u_time', 'u_globalTime', 'u_dt', 'u_seed', 'u_fade',
+  'u_res', 'u_time', 'u_globalTime', 'u_phase', 'u_energyTime', 'u_panTime', 'u_bandTime', 'u_contrast', 'u_dt', 'u_seed', 'u_fade',
   'u_energy', 'u_kick', 'u_bass', 'u_snare', 'u_hat', 'u_vocal',
   'u_kickPulse', 'u_snarePulse', 'u_hatPulse', 'u_vocalPulse',
   'u_centroid', 'u_flatness', 'u_crest', 'u_beatPhase', 'u_beatConf',
@@ -192,7 +218,7 @@ export function createSceneOverlay(
   canvas: HTMLCanvasElement,
   options: SceneOverlayOptions = {},
 ): SceneOverlay | null {
-  const gl = canvas.getContext('webgl2', {
+  const gl = options.gl ?? canvas.getContext('webgl2', {
     alpha: true,
     premultipliedAlpha: true,
     antialias: false,
@@ -206,6 +232,12 @@ export function createSceneOverlay(
   let seedKey = options.seedKey ?? 'eviland';
   let disposed = false;
 
+  let targetWidth = canvas.width, targetHeight = canvas.height;
+  let targetOpacity = 1, targetContrast = 1;
+  const phases = new Map<string, number>();
+  let energyTime = 0, panTime = 0;
+  const bandTime = new Float32Array(24);
+  const vao = gl.createVertexArray();
   const compiled = new Map<string, CompiledScene>();
   const blacklisted = new Set<string>();
 
@@ -397,12 +429,17 @@ void main() { fragColor = u_color; }
     if (!scene) return false;
     gl!.useProgram(scene.program);
     const u = scene.uniforms;
-    if (u.u_res) gl!.uniform2f(u.u_res, canvas.width, canvas.height);
+    if (u.u_res) gl!.uniform2f(u.u_res, targetWidth, targetHeight);
+    if (u.u_phase) gl!.uniform1f(u.u_phase, phases.get(def.id) ?? 0);
+    if (u.u_energyTime) gl!.uniform1f(u.u_energyTime, energyTime);
+    if (u.u_panTime) gl!.uniform1f(u.u_panTime, panTime);
+    if (u.u_bandTime) gl!.uniform1fv(u.u_bandTime, bandTime);
+    if (u.u_contrast) gl!.uniform1f(u.u_contrast, targetContrast);
     if (u.u_time) gl!.uniform1f(u.u_time, timeMs / 1000);
     if (u.u_globalTime) gl!.uniform1f(u.u_globalTime, globalTimeMs / 1000);
     if (u.u_dt) gl!.uniform1f(u.u_dt, dtSec);
     if (u.u_seed) gl!.uniform1f(u.u_seed, seed);
-    if (u.u_fade) gl!.uniform1f(u.u_fade, fade);
+    if (u.u_fade) gl!.uniform1f(u.u_fade, fade * targetOpacity);
     if (u.u_energy) gl!.uniform1f(u.u_energy, frame.energy);
     if (u.u_kick) gl!.uniform1f(u.u_kick, frame.kick);
     if (u.u_bass) gl!.uniform1f(u.u_bass, frame.bass);
@@ -465,6 +502,7 @@ void main() { fragColor = u_color; }
 
   return {
     resize(cssW, cssH, dpr) {
+      if (options.gl) return;
       // Scene shaders are full-screen per-pixel work; cap the internal
       // resolution by quality so weak GPUs keep their frame budget.
       const scale = quality === 'high' ? 1 : quality === 'medium' ? 0.75 : 0.5;
@@ -474,7 +512,7 @@ void main() { fragColor = u_color; }
       gl.viewport(0, 0, canvas.width, canvas.height);
     },
 
-    render(frame, palette, dtMs) {
+    render(frame, palette, dtMs, target) {
       if (disposed) return;
       const dt = Math.min(100, Math.max(0, dtMs));
       sceneTimeMs += dt;
@@ -484,6 +522,16 @@ void main() { fragColor = u_color; }
       accentDwellMs += dt;
       if (outgoingIndex >= 0) fadeMs = Math.min(fadeDurMs, fadeMs + dt);
       updatePulses(frame, dt);
+      const seconds = dt / 1000;
+      energyTime += frame.energy * seconds;
+      panTime += frame.pan * seconds;
+      for (let i = 0; i < 24; i++) bandTime[i] = bandTime[i]! + (frame.bands[i] ?? 0) * seconds;
+      // Integrate every registered clock once per render, including outgoing
+      // and accent scenes. Fades never share or double-advance mutable clocks.
+      for (const def of SCENES) {
+        const speed = def.speed?.(frame, pulses) ?? 1;
+        phases.set(def.id, (phases.get(def.id) ?? 0) + speed * seconds);
+      }
 
       // Slow energy baseline for drop detection (τ ≈ 4s) + flash decay.
       energyEma += (frame.energy - energyEma) * (1 - Math.exp(-dt / 4000));
@@ -527,9 +575,20 @@ void main() { fragColor = u_color; }
         }
       }
 
-      gl.viewport(0, 0, canvas.width, canvas.height);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
+      targetWidth = target?.width ?? canvas.width;
+      targetHeight = target?.height ?? canvas.height;
+      targetOpacity = Math.max(0, Math.min(1, target?.opacity ?? 1));
+      targetContrast = Math.max(0.25, Math.min(3, target?.contrast ?? 1));
+      gl.bindVertexArray(vao);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target?.framebuffer ?? null);
+      gl.viewport(0, 0, targetWidth, targetHeight);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.SCISSOR_TEST);
+      gl.blendEquation(gl.FUNC_ADD);
+      if (!target) {
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
       gl.enable(gl.BLEND);
       // Premultiplied-alpha source-over: scenes self-composite; the page
       // compositor then blends the canvas over the MilkDrop iframe.
@@ -592,6 +651,12 @@ void main() { fragColor = u_color; }
     },
 
     setScene(id) {
+      if (forcedSceneId === id) return;
+      if (globalTimeMs > 0 && id && SCENES.some(scene => scene.id === id)) {
+        outgoingIndex = resolveSceneIndex();
+        fadeMs = 0;
+        fadeDurMs = CROSSFADE_MS;
+      }
       forcedSceneId = id;
       sceneTimeMs = 0;
     },
@@ -615,6 +680,8 @@ void main() { fragColor = u_color; }
 
     dispose() {
       disposed = true;
+      gl.deleteVertexArray(vao);
+      if (!options.gl) gl.getExtension('WEBGL_lose_context')?.loseContext();
       for (const { program } of compiled.values()) {
         try {
           gl.deleteProgram(program);

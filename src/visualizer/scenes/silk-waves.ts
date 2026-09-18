@@ -8,10 +8,11 @@ export const silkWaves: SceneDef = {
   id: 'silk-waves',
   name: 'Silk Waves',
   mood: 'calm',
+  speed: (f, p) => 0.12 + f.energy * 0.25,
   frag: `
 vec4 scene(vec2 uv, vec2 p) {
   vec3 col = vec3(0.0);
-  float drift = u_globalTime * (0.12 + u_energy * 0.25);
+  float drift = u_phase;
 
   for (int i = 0; i < 5; i++) {
     float fi = float(i);

@@ -1,5 +1,6 @@
-// Eviland scene registry — the 31 audio-reactive overlay scenes composited
-// over the MilkDrop field in 'eviland-live' mode (see scene-overlay.ts).
+// Eviland scene registry — the procedural scenes the scene runtime
+// (scene-overlay.ts) draws as sources: into the Eviland engine's feedback
+// field, and into MilkDrop's feedback texture in 'eviland-live'.
 //
 // CONTRACT for every scene file in this directory:
 //  - export a single `SceneDef` whose `frag` implements
@@ -8,19 +9,29 @@
 //  - The shader body may ONLY declare functions/constants — the runtime
 //    provides the uniforms + helpers (see PRELUDE in scene-overlay.ts):
 //    hash11/hash21/hash22, vnoise, fbm, rot2, hsv2rgb, paletteRamp, bandAvg,
-//    u_time/u_globalTime/u_dt/u_seed/u_fade, u_energy, u_kick/u_bass/u_snare/
+//    u_time/u_globalTime/u_dt/u_seed/u_fade, u_phase (this scene's integrated
+//    `speed`), u_energyTime/u_panTime/u_bandTime[24] (integrals of energy, pan
+//    and each band), u_contrast, u_energy, u_kick/u_bass/u_snare/
 //    u_hat/u_vocal (envelopes), u_kickPulse/u_snarePulse/u_hatPulse/
 //    u_vocalPulse (decaying onset impulses), u_centroid, u_flatness, u_crest,
 //    u_beatPhase, u_beatConf, u_novelty, u_pan, u_width, u_bands[24],
 //    u_accent/u_light/u_dark/u_bg, u_res.
 //  - Output: vec4 straight (non-premultiplied) color; alpha is the scene's
-//    coverage over the MilkDrop field below. Favor alpha < 0.85 overall so
-//    the field stays visible; pure black (alpha 0) areas show MilkDrop raw.
+//    coverage over the feedback it is drawn into. Favor alpha < 0.85 overall
+//    so the field stays visible; alpha 0 leaves the feedback untouched.
+//  - Colour comes from the palette uniforms (paletteRamp, u_accent, u_light,
+//    u_dark). A scene that brings its own hues fights whatever palette the
+//    user picked; test:eviland-diversity fails it.
+//  - NEVER animate with `time * speed(audio)`: once a track has been playing
+//    a while, a small change in the audio jumps the animation by seconds.
+//    Declare `speed` below and animate with u_phase, or use the integrals.
 //  - DO NOT apply u_fade yourself — the runtime multiplies it into output.
 //  - Must visibly react to audio: silence (all audio uniforms 0) should look
 //    dim/sparse; an energetic frame should be obviously alive. The scene
 //    smoke (scripts/scene-overlay-smoke.mjs) enforces both.
 //  - mood: 'calm' | 'mid' | 'high' | 'any' — rotation affinity by energy.
+
+import type { EvilandFrame } from '../eviland-audio';
 
 export interface SceneDef {
   id: string;
@@ -28,8 +39,14 @@ export interface SceneDef {
   mood: 'calm' | 'mid' | 'high' | 'any';
   /** Fragment shader body: helper functions + `vec4 scene(vec2 uv, vec2 p)`. */
   frag: string;
+  /**
+   * Animation speed for this frame (1 = real time). The runtime integrates it
+   * into u_phase, so audio changes how fast the scene moves, never where it is.
+   */
+  speed?: (frame: EvilandFrame, pulses: { kick: number; snare: number; hat: number; vocal: number }) => number;
 }
 
+import { volumeGarden } from './volume-garden';
 import { starfieldWarp } from './starfield-warp';
 import { silkWaves } from './silk-waves';
 import { spectroRain } from './spectro-rain';
@@ -63,6 +80,7 @@ import { phosphorScope } from './phosphor-scope';
 import { vuCathedral } from './vu-cathedral';
 
 export const SCENES: SceneDef[] = [
+  volumeGarden,
   starfieldWarp,
   silkWaves,
   spectroRain,

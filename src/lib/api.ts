@@ -226,6 +226,7 @@ const stub: NewAmpAPI = {
   getAllTrackDna: async () => [],
   findSimilarTracks: async () => [],
   getTrackVisualMemory: async () => null,
+  getSongScore: async () => null,
   setTrackVisualMemory: async () => false,
   clearTrackVisualMemory: async () => false,
   getVisualMemoryStats: async () => ({ tracksWithMemory: 0, totalSections: 0, oldestAt: null }),

@@ -30,7 +30,7 @@ function fixture(platform, hasTray, radio = false) {
     settings: { flushSync() { calls.push('settings-flush'); } },
     exclusiveOutput: { dispose() {} },
     tray: hasTray ? { destroy() {} } : null,
-    killAllDnaFfmpeg() {}, killAllTranscodeFfmpeg() {},
+    killAllDnaFfmpeg() {}, killAllScoreFfmpeg() {}, killAllTranscodeFfmpeg() {},
     radioBrain: radio ? { async stop() { calls.push('radio-stop'); } } : null,
     shouldStayResidentOnWindowAllClosed,
   };

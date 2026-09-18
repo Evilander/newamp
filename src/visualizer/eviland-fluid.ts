@@ -26,6 +26,7 @@
 //     unsupported so callers fall back to the procedural-only path.
 
 import type { EvilandFrame } from './eviland-audio';
+import type { PaletteConfig } from './eviland-operators';
 
 // ---------------------------------------------------------------------------
 // Pure audio → impulse seam (no GL; unit-tested by scripts/eviland-fluid-test).
@@ -51,6 +52,12 @@ const BASS_SHEAR = 0.05;
 const PAN_BIAS = 0.04;
 const INHALE_STRENGTH = 0.10;
 const INHALE_SPOKES = 4;
+// Score-driven forces (frame.score): the whole tank draws toward the centre
+// through a build, and a ring of jets throws it back out when the drop lands.
+const BUILD_PULL_STRENGTH = 0.16;
+const BUILD_PULL_SPOKES = 6;
+const IMPACT_STRENGTH = 1.1;
+const IMPACT_SPOKES = 10;
 
 // Per-voice dye amounts. Tuned so a busy mix reads bright without ever clipping
 // every channel to white (that produced the cream-blob complaint in eviland.ts).
@@ -111,7 +118,7 @@ function hueForBand(band: number): number {
  * separate factories per call.
  */
 export interface FluidForceSource {
-  forces(frame: EvilandFrame): FluidForce[];
+  forces(frame: EvilandFrame, palette?: PaletteConfig, dt?: number): FluidForce[];
   /** Reset internal state (snare alternator). Useful for deterministic tests. */
   reset(): void;
 }
@@ -165,8 +172,9 @@ export function createFluidForceSource(): FluidForceSource {
     out.push(slot);
   }
 
-  function forces(frame: EvilandFrame): FluidForce[] {
+  function forces(frame: EvilandFrame, palette?: PaletteConfig, dt = 1 / 60): FluidForce[] {
     out.length = 0;
+    const steps = Math.max(0, Math.min(0.1, dt)) * 60;
 
     // Baseline: bass shear along the bottom + pan bias (spatial truth).
     if (frame.bass > 0.05) {
@@ -181,6 +189,11 @@ export function createFluidForceSource(): FluidForceSource {
         tmp[0], tmp[1], tmp[2],
         0.06 * Math.abs(frame.pan) * (0.4 + frame.width * 0.6),
       );
+    }
+
+    for (const f of out) {
+      f.dx *= steps; f.dy *= steps;
+      if (f.dye) f.dye *= steps;
     }
 
     for (const onset of frame.onsets) {
@@ -253,10 +266,45 @@ export function createFluidForceSource(): FluidForceSource {
         const a = (i / INHALE_SPOKES) * Math.PI * 2 + 0.4;
         const px = 0.5 + Math.cos(a) * 0.3;
         const py = 0.5 + Math.sin(a) * 0.3;
-        writeVel(px, py, -Math.cos(a) * INHALE_STRENGTH, -Math.sin(a) * INHALE_STRENGTH, 0.18);
+        writeVel(px, py, -Math.cos(a) * INHALE_STRENGTH * steps, -Math.sin(a) * INHALE_STRENGTH * steps, 0.18);
       }
     }
 
+    // Look-ahead cues. Only a scored track carries them; the beat-level inhale
+    // above reacts to the last kick, these know the drop is coming.
+    const cues = frame.score;
+    if (cues) {
+      if (cues.anticipation > 0.02) {
+        const pull = BUILD_PULL_STRENGTH * cues.anticipation * steps;
+        for (let i = 0; i < BUILD_PULL_SPOKES; i++) {
+          const a = (i / BUILD_PULL_SPOKES) * Math.PI * 2 + 0.2;
+          writeVel(0.5 + Math.cos(a) * 0.36, 0.5 + Math.sin(a) * 0.36, -Math.cos(a) * pull, -Math.sin(a) * pull, 0.22);
+        }
+      }
+      if (cues.impactStart) {
+        const s = IMPACT_STRENGTH * cues.impact;
+        for (let i = 0; i < IMPACT_SPOKES; i++) {
+          const a = (i / IMPACT_SPOKES) * Math.PI * 2;
+          writeDyed(
+            0.5 + Math.cos(a) * 0.05, 0.5 + Math.sin(a) * 0.05,
+            Math.cos(a) * s, Math.sin(a) * s, 0.14,
+            1, 1, 1, 1.2 * cues.impact,
+          );
+        }
+      }
+    }
+
+    if (palette) {
+      // The same palette owns dye, procedural geometry, and feedback. Position
+      // retains a colour relationship without introducing an independent wheel.
+      for (const f of out) if (f.color) {
+        const t = Math.max(0, Math.min(1, f.y));
+        const a = t < 0.5 ? palette.dark : palette.accent;
+        const b = t < 0.5 ? palette.accent : palette.light;
+        const mix = t < 0.5 ? t * 2 : t * 2 - 1;
+        for (let i = 0; i < 3; i++) f.color[i] = a[i]! + (b[i]! - a[i]!) * mix;
+      }
+    }
     return out;
   }
 
@@ -782,7 +830,7 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     if (!targets) return;
     // Clamp dt so tab-switch hitches can't fling the field and high-Hz
     // displays can't starve the advection.
-    const stepDt = Math.min(1 / 30, Math.max(1 / 240, dt));
+    const stepDt = Math.min(0.1, Math.max(0, dt));
     const tx = 1 / width;
     const ty = 1 / height;
     // Default dye dissipation is just under 1 — most callers (the renderer)
@@ -798,7 +846,7 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     gl.useProgram(advectProg);
     bindQuad(advectUni.aPos);
     gl.uniform1f(advectUni.dt, stepDt);
-    gl.uniform1f(advectUni.dissipation, params.dissipation);
+    gl.uniform1f(advectUni.dissipation, Math.pow(params.dissipation, stepDt * 60));
     bindTex(0, velRead.tex);
     drawTo(velWrite);
     swapVel();
@@ -886,7 +934,7 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     gl.useProgram(dyeAdvectProg);
     bindQuad(dyeAdvectUni.aPos);
     gl.uniform1f(dyeAdvectUni.dt, stepDt);
-    gl.uniform1f(dyeAdvectUni.dissipation, dyeDiss);
+    gl.uniform1f(dyeAdvectUni.dissipation, Math.pow(dyeDiss, stepDt * 60));
     bindTex(0, velRead.tex);
     bindTex(1, dyeRead.tex);
     drawTo(dyeWrite);

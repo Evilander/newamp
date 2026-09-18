@@ -23,7 +23,7 @@ export interface LiveCompositor {
  */
 export function createEvilandLiveCompositor(root: HTMLElement): LiveCompositor | null {
   const iframe = root.querySelector('iframe') as HTMLIFrameElement | null;
-  const bcCanvas = iframe?.contentDocument?.getElementById('bc') as HTMLCanvasElement | null;
+  const bcCanvas = (iframe?.style.display !== 'none' ? iframe?.contentDocument : null)?.getElementById('bc') as HTMLCanvasElement | null;
   const baseCanvas = root.querySelector('canvas[data-newamp-visualizer-canvas]') as HTMLCanvasElement | null;
   const sceneCanvas = root.querySelector('canvas[data-newamp-scene-overlay]') as HTMLCanvasElement | null;
   const reactorCanvas = root.querySelector('canvas[data-newamp-reactor-overlay]') as HTMLCanvasElement | null;

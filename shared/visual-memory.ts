@@ -14,7 +14,7 @@
 // these helpers re-validate it on read.
 
 export const VISUAL_MEMORY_SCHEMA_VERSION = 1;
-export const VISUAL_MEMORY_ALGO_VERSION = 2;
+export const VISUAL_MEMORY_ALGO_VERSION = 3;
 
 export type VisualMemoryTier = 'calm' | 'steady' | 'lift' | 'drop' | 'climax';
 export type VisualMemoryEvolutionTrigger =

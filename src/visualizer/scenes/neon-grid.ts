@@ -7,6 +7,7 @@ export const neonGrid: SceneDef = {
   id: 'neon-grid',
   name: 'Neon Grid',
   mood: 'high',
+  speed: (f, p) => 1.0 + f.energy * 2.2 + p.kick * 1.5,
   frag: `
 vec4 scene(vec2 uv, vec2 p) {
   // Horizon position varies per seed.
@@ -52,7 +53,7 @@ vec4 scene(vec2 uv, vec2 p) {
     float z = (horizon - p.y);
     z = max(z, 0.001);
     // Scroll grid forward (toward camera) at beat speed.
-    float scroll = u_globalTime * (1.0 + u_energy * 2.2 + u_kickPulse * 1.5);
+    float scroll = u_phase;
     float worldY = 1.0 / z + scroll;
     float worldX = p.x / z;
     // Line thickness pulses with bass; thinner with depth for aliasing safety.

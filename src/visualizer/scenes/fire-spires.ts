@@ -1,5 +1,6 @@
 // Vertical flame columns rising from the bottom, each tied to a band group.
-// Warm hsv ramp blended with theme paletteRamp; sparks fly on hat impulses.
+// Flame colour runs the palette by heat (dark at the tips, light at the core),
+// so the fire takes whatever palette is active; sparks fly on hat impulses.
 
 import type { SceneDef } from './index';
 
@@ -7,6 +8,7 @@ export const fireSpires: SceneDef = {
   id: 'fire-spires',
   name: 'Fire Spires',
   mood: 'high',
+  speed: (f, p) => 0.9 + f.energy * 1.6 + f.bass * 0.8,
   frag: `
 float spireMask(vec2 q, float cx, float width, float height) {
   // Soft column centered at cx, with flame body distorted by fbm.
@@ -22,7 +24,7 @@ vec4 scene(vec2 uv, vec2 p) {
   vec3 col = vec3(0.0);
 
   // Vertical fbm advection — flames "flow" upward with time + bass push.
-  float lift = u_globalTime * (0.9 + u_energy * 1.6 + u_bass * 0.8);
+  float lift = u_phase;
 
   // Each spire owns a band slice (low bands = tall flames in center, hi bands shorter at edges).
   for (int i = 0; i < 12; i++) {
@@ -54,23 +56,21 @@ vec4 scene(vec2 uv, vec2 p) {
     float intensity = flame * taper * topMask;
     intensity = pow(intensity, 1.6) * (0.7 + band * 1.4);
 
-    // Warm hsv tint shifted by band brightness, blended with theme ramp.
-    float hueShift = 0.02 + band * 0.07 - q.y * 0.04;
-    vec3 warm = hsv2rgb(vec3(clamp(hueShift, 0.0, 0.13), 0.9, 1.0));
-    vec3 themeTint = paletteRamp(0.85 - q.y * 0.4 + u_centroid * 0.15);
-    vec3 tint = mix(warm, themeTint, 0.35);
-    col += tint * intensity;
+    // Heat ramp through the palette: hot and loud near the base, cooling
+    // toward the tips.
+    float heat = 0.8 - q.y * 0.4 + band * 0.25 + u_centroid * 0.1;
+    col += paletteRamp(heat) * intensity;
 
     // Hot core near base.
     float core = smoothstep(width * 0.6, 0.0, abs(q.x)) * smoothstep(0.6, 0.0, q.y) * (0.5 + band * 0.8);
-    col += vec3(1.0, 0.85, 0.5) * core * 0.4;
+    col += u_light * core * 0.4;
   }
 
   // Sparks: hash points high up, only show when hatPulse fires.
   vec2 sg = uv * vec2(120.0, 200.0);
   float sparkH = hash21(floor(sg) + floor(u_globalTime * 24.0));
   float spark = step(0.992, sparkH) * smoothstep(0.0, 0.7, 1.0 - uv.y * 0.4) * u_hatPulse;
-  col += vec3(1.0, 0.9, 0.6) * spark * 0.7;
+  col += u_light * spark * 0.7;
 
   // Smoke at top — slight haze that dims everything above mid-frame.
   float haze = smoothstep(0.4, 1.0, uv.y) * 0.12 * u_energy;

@@ -16,6 +16,7 @@ import { parseMusicServerStreamUrl } from '@shared/music-servers';
 import { AudioEngine } from '../audio/engine';
 import { api, inElectron, toAudioUrl, winctl, DEFAULT_SETTINGS } from '../lib/api';
 import { decode as decodeEvilandCode } from '../visualizer/eviland-randomizer';
+import { prefetchSongScore } from '../visualizer/eviland-score-feed';
 import {
   notifyPlayCompleted,
   notifyLove,
@@ -124,7 +125,7 @@ interface PlayerState {
    */
   evilandConfigNonce: number;
   /** Optional waveform-layer override applied on top of the active config. */
-  evilandWaveMode: 'off' | 'line' | 'radial' | 'bars';
+  evilandWaveMode: 'auto' | 'off' | 'line' | 'radial' | 'bars';
   searchQuery: string;
   showEq: boolean;
   /** One-shot navigation request consumed by destination views on mount/render. */
@@ -166,7 +167,7 @@ interface PlayerState {
   randomizeEviland: (seed?: string) => void;
   /** Apply a shared seed code (e.g. "K7Q2-9XMF"). Returns true on decode success. */
   applyEvilandCode: (code: string) => boolean;
-  setEvilandWaveMode: (mode: 'off' | 'line' | 'radial' | 'bars') => void;
+  setEvilandWaveMode: (mode: 'auto' | 'off' | 'line' | 'radial' | 'bars') => void;
   setSearchQuery: (q: string) => void;
   playTrack: (track: Track, queue?: Track[]) => Promise<void>;
   playPodcastEpisode: (episode: PodcastEpisode) => Promise<void>;
@@ -797,6 +798,8 @@ async function restartCurrentTrackThroughActivePath(
 
 function prepareEngineTrack(track: Track): void {
   engine.prepareNext(toAudioUrl(track.path), track.id, cueStart(track));
+  // The visualizer's look-ahead needs the next track analysed before it starts.
+  prefetchSongScore(track.id);
 }
 
 async function commitPlaybackAdvance(
@@ -1144,7 +1147,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     evilandDirector: true,
     evilandSeed: null,
     evilandConfigNonce: 0,
-    evilandWaveMode: 'off',
+    evilandWaveMode: 'auto',
     searchQuery: '',
     showEq: false,
     pendingNavigation: null,

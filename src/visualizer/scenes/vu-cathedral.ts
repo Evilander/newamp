@@ -40,14 +40,16 @@ vec4 scene(vec2 uv, vec2 p) {
   float tick = smoothstep(0.16, 0.9, abs(fract(theta * 3.5 + 0.5) - 0.5) * 2.0);
   float ticks = smoothstep(0.028, 0.0, abs(r - 0.40)) * onArc * step(0.86, tick) * 0.8;
 
-  // Warm backlight breathing with bass; red peak zone past ~0.78 drive.
-  vec3 warm = mix(vec3(1.0, 0.7, 0.34), u_accent, 0.28);
+  // Backlight breathing with bass; peak zone past ~0.78 drive. Both come from
+  // the palette: the backlight sits between accent and light, the peak zone
+  // is the light stop at full strength.
+  vec3 warm = mix(u_accent, u_light, 0.35);
   float back = smoothstep(0.62, 0.0, r) * (0.035 + u_bass * 0.11 + u_kickPulse * 0.07);
   float redZone = step(0.55, theta) * arc * (0.25 + step(0.78, drive) * 1.2);
 
   col += warm * back;
   col += warm * (arc * 0.22 + ticks * 0.3);
-  col += vec3(1.0, 0.16, 0.1) * redZone * 0.35;
+  col += u_light * redZone * 0.35;
   col += (u_light * 0.7 + warm * 0.3) * needleGlow * (0.3 + drive * 0.7);
 
   // Faint cell frames so the wall reads as separate units.

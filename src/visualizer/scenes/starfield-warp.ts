@@ -9,11 +9,11 @@ export const starfieldWarp: SceneDef = {
   id: 'starfield-warp',
   name: 'Starfield Warp',
   mood: 'high',
+  speed: (f, p) => 0.22 + f.energy * 1.1 + p.kick * 1.5,
   frag: `
 const float TAU = 6.28318530718;
 
 vec4 scene(vec2 uv, vec2 p) {
-  float speed = 0.22 + u_energy * 1.1 + u_kickPulse * 1.5;
   float r = length(p);
   float a = atan(p.y, p.x);
   vec3 col = vec3(0.0);
@@ -26,7 +26,7 @@ vec4 scene(vec2 uv, vec2 p) {
     float cell = floor(an * segs);
     float fa = fract(an * segs) - 0.5; // -0.5..0.5 across the wedge
     float rnd = hash21(vec2(cell, fi * 7.31 + floor(u_seed * 911.0)));
-    float z = fract(rnd + u_time * speed * (0.35 + rnd * 0.65));
+    float z = fract(rnd + u_phase * (0.35 + rnd * 0.65));
     float starR = mix(0.02, 1.8, z * z); // accelerates outward — warp feel
     float streak = (0.015 + u_energy * 0.08 + u_kickPulse * 0.16) * (0.3 + z);
     float dash = smoothstep(0.42, 0.0, abs(fa)) * smoothstep(streak, 0.0, abs(r - starR));

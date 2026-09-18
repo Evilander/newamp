@@ -7,6 +7,7 @@ export const ribbonFlow: SceneDef = {
   id: 'ribbon-flow',
   name: 'Ribbon Flow',
   mood: 'mid',
+  speed: (f, p) => 0.35 + f.energy * 1.2 + p.kick * 0.8,
   frag: `
 const float TAU_RIB = 6.28318530718;
 
@@ -23,7 +24,6 @@ vec2 flowField(vec2 q, float t) {
 vec4 scene(vec2 uv, vec2 p) {
   vec3 col = vec3(0.0);
   float seedOff = u_seed * 71.0;
-  float speed = 0.35 + u_energy * 1.2 + u_kickPulse * 0.8;
 
   // 4 ribbons. Each marches a fixed-step polyline along the flow field,
   // accumulating a smooth distance to p.
@@ -41,7 +41,7 @@ vec4 scene(vec2 uv, vec2 p) {
     float headD = 1e3;
     float tailFade = 1.0;
     vec2 pos = head;
-    float t0 = u_globalTime * speed * (0.6 + rnd * 0.4) + fr * 3.7;
+    float t0 = u_phase * (0.6 + rnd * 0.4) + fr * 3.7;
 
     // 22 segments — constant bound, modest cost. Step length scales with width.
     for (int s = 0; s < 22; s++) {

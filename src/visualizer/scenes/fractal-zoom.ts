@@ -8,12 +8,13 @@ export const fractalZoom: SceneDef = {
   id: 'fractal-zoom',
   name: 'Fractal Zoom',
   mood: 'any',
+  speed: (f, p) => 0.07 + f.energy * 0.05,
   frag: `
 const int MAX_ITER = 48;
 
 vec4 scene(vec2 uv, vec2 p) {
   float seedAng = u_seed * 6.28318;
-  float zoomT = u_globalTime * (0.07 + u_energy * 0.05);
+  float zoomT = u_phase;
   float zoom = 0.85 * exp(-mod(zoomT, 4.0) * 0.5);
   float rot = u_seed * 1.3 + u_globalTime * 0.04 + u_pan * 0.2;
 

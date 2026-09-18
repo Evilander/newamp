@@ -8,6 +8,7 @@ export const plasmaAurora: SceneDef = {
   id: 'plasma-aurora',
   name: 'Plasma Aurora',
   mood: 'calm',
+  speed: (f, p) => 0.05 + f.energy * 0.18,
   frag: `
 const float TAU_AUR = 6.28318530718;
 
@@ -25,7 +26,7 @@ vec4 scene(vec2 uv, vec2 p) {
 
   float mids = bandAvg(8, 16);
   float lows = bandAvg(2, 7);
-  float drift = u_globalTime * (0.05 + u_energy * 0.18);
+  float drift = u_phase;
   float seedOff = u_seed * 53.0;
 
   // Three to five curtains; sway slowly, warp horizontally via fbm.

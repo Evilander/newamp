@@ -59,6 +59,7 @@ import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac, transcodeCach
 import { finishWebmToMp4 } from './video-mux.js';
 import { isAllowedAudioPath } from './audio-path-policy.js';
 import { analyzeTrackDna, killAllDnaFfmpeg } from './dna-analyzer.js';
+import { getSongScore, initScoreCache, killAllScoreFfmpeg } from './score-analyzer.js';
 import { RadioBrain } from './radio-brain.js';
 import { ExclusiveOutput, classifyTrackSource } from './exclusive-output.js';
 import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
@@ -1595,6 +1596,7 @@ async function reloadRuntimeStores(userData: string): Promise<void> {
 function registerAudioProtocol(): void {
   // Seekable transcode cache lives on the user-data drive (not the library drive).
   initTranscodeCache(join(app.getPath('userData'), 'transcode-cache'));
+  initScoreCache(join(app.getPath('userData'), 'score-cache'));
   protocol.handle('newamp-app', async (request) => {
     try {
       const rendererBase = rendererDistPath();
@@ -2023,6 +2025,12 @@ function registerIpc(): void {
   );
   ipcMain.handle('tracks:visual-memory-stats', async () => library.getVisualMemoryStats());
   ipcMain.handle('tracks:visual-memory-clear-all', async () => library.clearAllVisualMemory());
+  ipcMain.handle('tracks:song-score', async (_e, id: number) => {
+    const track = library.getTrack(Number(id));
+    // Only local files: a remote-server track has no path ffmpeg can read here.
+    if (!track?.path || /^[a-z][a-z0-9+.-]*:\/\//i.test(track.path)) return null;
+    return getSongScore({ path: track.path, cueStart: track.cueStart, cueEnd: track.cueEnd });
+  });
   ipcMain.handle('tags:list-rules', async () => library.listTagRules());
   ipcMain.handle('tags:save-rule', async (_e, input) => {
     const saved = library.saveTagRule(input);
@@ -3010,9 +3018,10 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
     }
     // capturePage waits for a compositor frame and HANGS FOREVER when the
     // window is occluded (e.g. the user's other windows cover the smoke run).
-    // Raise the window, race the capture, and fall back to an in-renderer
-    // readback of the reactor-overlay 2D canvas — which paints regardless of
-    // compositor frames because the whole pipeline is timer/message driven.
+    // Raise the window, race the capture, and fall back to asking the
+    // MilkDrop iframe for the lit fraction of its last composed Live frame.
+    // That frame exists without compositor frames: the iframe paints from
+    // the timer-driven audio messages whenever rAF has been starved.
     try {
       detachedVizWin.moveTop();
       detachedVizWin.focus();
@@ -3037,23 +3046,37 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
       }
       capture = { width, height, lit, sampled, litFraction: sampled ? lit / sampled : 0, source: 'capturePage' };
     } else {
-      capture = (await detachedVizWin.webContents.executeJavaScript(
-        `(() => {
-          const c = document.getElementById('reactor-overlay');
-          const ctx = c.getContext('2d');
-          const { width, height } = c;
-          const d = ctx.getImageData(0, 0, Math.max(1, width), Math.max(1, height)).data;
-          let lit = 0, sampled = 0;
-          for (let i = 0; i < d.length; i += 64) {
-            if ((d[i] + d[i + 1] + d[i + 2]) > 36 && d[i + 3] > 0) lit++;
-            sampled++;
-          }
-          return { width, height, lit, sampled, litFraction: sampled ? lit / sampled : 0, source: 'reactor-overlay-readback' };
-        })()`,
-        true,
-      )) as typeof capture;
+      // An occluded window also throttles the iframe's timers, so the preset
+      // catalog can still be parsing here. Poll until a frame has been
+      // composed instead of sampling a pipeline that doesn't exist yet.
+      let litFraction = 0;
+      for (let attempt = 0; attempt < 40 && litFraction <= 0; attempt += 1) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 500));
+        if (!detachedVizWin || detachedVizWin.isDestroyed()) break;
+        litFraction = Number(
+          await detachedVizWin.webContents.executeJavaScript(
+            `(() => {
+              const frame = document.getElementById('milkdrop-frame');
+              const sample = frame && frame.contentWindow && frame.contentWindow.__newampLiveSample;
+              return typeof sample === 'function' ? sample() : 0;
+            })()`,
+            true,
+          ),
+        ) || 0;
+      }
+      capture = { width: 48, height: 27, lit: Math.round(litFraction * 1296), sampled: 1296, litFraction, source: 'live-composition-readback' };
     }
     const finalStats = await detachedVizWin.webContents.executeJavaScript('window.__newampDetachedStats', true);
+
+    // Look-ahead, end to end: the projector's producer asked for the fixture's
+    // song score over IPC, ffmpeg decoded it, and frames now carry its cues.
+    // First-play analysis takes a second or two, so give it a little room.
+    let lookAhead: unknown = null;
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      lookAhead = await win.webContents.executeJavaScript('window.__newampScoreFeed || null', true);
+      if ((lookAhead as { status?: string } | null)?.status === 'scored') break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
 
     const result = {
       ok: true,
@@ -3061,6 +3084,7 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
       detached: finalStats,
       firstStats: stats,
       capture,
+      lookAhead,
     };
     console.log(`[newamp-ui-detached-viz-smoke] ${JSON.stringify(result)}`);
     isQuitting = true;
@@ -5101,6 +5125,7 @@ app.on('will-quit', (event) => {
   tray = null;
   // No orphan ffmpeg.exe should outlive the app.
   killAllDnaFfmpeg();
+  killAllScoreFfmpeg();
   killAllTranscodeFfmpeg();
   // radioBrain.stop() is async but bounded (a few hundred ms even with a
   // connected /now/events client) — hold the quit open just long enough to

@@ -38,8 +38,8 @@ vec4 scene(vec2 uv, vec2 p) {
     float pa = rnd * TAU;
     float pb = rnd2 * TAU + u_seed;
     vec2 amp = vec2(0.85 + rnd * 0.25, 0.65 + rnd2 * 0.25);
-    float speed = 0.35 + rnd * 0.45 + u_energy * 0.25;
-    float t = u_globalTime * speed + fi * 1.7;
+    float speed = 0.35 + rnd * 0.45;
+    float t = (u_globalTime * speed + u_energyTime * 0.25) + fi * 1.7;
 
     int bandIdx = int(mod(fi * 3.0, 24.0));
     float level = 0.0;

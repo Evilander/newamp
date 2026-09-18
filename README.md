@@ -62,6 +62,8 @@ install already has them; a bare Debian or Ubuntu image is missing `libnss3`,
   `Q` to queue, `F` for fullscreen visuals, `Ctrl+K` for search.
 - Visualizers — real MilkDrop presets through Butterchurn, plus Eviland, my own
   engine that reacts to separate frequency bands instead of one lumped envelope.
+  For local files it also reads the song ahead of time, so looks change on the
+  bar line, a build dims the picture, and the drop lands on its downbeat.
 - Skins, including imported Winamp 2.x `.wsz` files, and compact "deck" modes
   that shrink the window into something resembling a physical device.
 - Smart playlists, an Auto DJ, ratings, and a search language

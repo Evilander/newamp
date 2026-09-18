@@ -25,6 +25,33 @@ export interface EvilandOnset {
   sharpness: number; // 0..1 (attack steepness)
 }
 
+/**
+ * Look-ahead cues for one frame, stamped on by the conductor when the playing
+ * track has a song score (eviland-score.ts). Everything else on the frame is
+ * causal — it describes audio that has already happened. These describe what
+ * the song is ABOUT to do, so the Director and renderers can prepare for it.
+ */
+export interface ScoreCues {
+  /** 0..1 — climbs through a build toward the downbeat of the next section. */
+  anticipation: number;
+  /** 0..1 — the held silence right before a drop. */
+  blackout: number;
+  /** 0..1 — set when a built-up section lands, then decays over about a second. */
+  impact: number;
+  /** True only on the frame the impact starts (fire one-shot effects here). */
+  impactStart: boolean;
+  /** The CURRENT section's intensity tier, known from its first frame. */
+  tier: 'calm' | 'steady' | 'lift' | 'drop' | 'climax';
+  /** Palette hue rotation in turns (20° per fifth): how far this section's key sits from the song's home key. */
+  keyShift: number;
+  /** 0..1 position in the track. */
+  arc: number;
+  /** A bar line was crossed this frame. */
+  downbeat: boolean;
+  /** Seconds until the next section starts (Infinity on the last one). */
+  toBoundary: number;
+}
+
 export interface EvilandFrame {
   bands: Float32Array; // BANDS smoothed band magnitudes, 0..1
   onsets: EvilandOnset[]; // onsets detected THIS frame
@@ -59,6 +86,12 @@ export interface EvilandFrame {
    * already gets section identity from sectionId + sectionReturn.
    */
   sectionFingerprint: Float32Array | null;
+  /**
+   * Present only while a scored track is playing. When it is, sectionId /
+   * sectionChanged / sectionReturn and the beat fields above come from the
+   * score too (exact, and known in advance) instead of the live estimators.
+   */
+  score?: ScoreCues;
 }
 
 export interface EvilandReactorConfig {
@@ -74,7 +107,9 @@ const MAX_HZ = 16000;
 const hzToMel = (hz: number): number => 2595 * Math.log10(1 + hz / 700);
 const melToHz = (mel: number): number => 700 * (10 ** (mel / 2595) - 1);
 
-// Which raw bands belong to each semantic voice (see spec §Part 1).
+// These are fixed frequency-band proxies, not instrument recognition or stem
+// separation. The historical ids are retained for saved presets and replays.
+// Overlapping instruments can excite any of these groups.
 // Inclusive [lo, hi] band ranges; kept non-overlapping so groupPeak() and
 // groupForBand() classify every boundary band identically.
 const GROUP_BANDS: Record<Exclude<VoiceGroup, 'other'>, [number, number]> = {

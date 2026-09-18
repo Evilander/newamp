@@ -9,20 +9,22 @@ Zero dependencies, framework-agnostic, WebGL2.
 
 ## What makes it different
 
-- **Causal, per-instrument reactivity.** A 24-band mel spectral-flux onset
-  detector classifies *which instrument* fired (kick / snare / hat / vocal /
-  bass) and gives each its own visual event — not a bass/mid/treble average.
-- **Generative, not preset packs.** Looks are *data* (`OperatorConfig`): a base
-  value plus audio-feature bindings per visual channel. The randomizer mints
-  endless musically-coherent looks, each reproducible from a short shareable
-  seed (`K7Q2-9XMF`).
-- **A Director that conducts itself.** Reads song structure (sections, energy,
-  novelty) and crossfades looks on the beat — building into drops, settling into
-  breakdowns, and *recalling a section's earlier look when it returns* so the
-  visuals rhyme with the song.
-- **Native MilkDrop-class rendering.** Feedback-field warp (zoom / rotate /
-  swirl / kaleidoscope / hue-cycle) + a reactive waveform oscilloscope, all on a
-  WebGL2 RGBA16F ping-pong field with dual-Kawase bloom and ACES tone-mapping.
+- Reactivity per frequency range, not one lumped envelope. A 24-band mel
+  spectral-flux onset detector groups onsets into kick, bass, snare, hat and
+  vocal ranges and gives each its own visual event. These are band ranges, not
+  instrument recognition: a tom can land in the kick group.
+- Looks are data (`OperatorConfig`): which sources a look draws (a procedural
+  scene, fluid, reaction–diffusion, ridge, spectrum, emitters, waveform), plus
+  a base value and audio-feature bindings per visual channel. The randomizer
+  mints looks that are reproducible from a short shareable seed (`K7Q2-9XMF`).
+- A Director reads song structure and crossfades looks on the beat, and gives
+  a section its earlier look back when it returns.
+- With a song score (below) the Director and renderer work ahead of the music
+  instead of reacting to it: looks change on the bar line, a build draws the
+  picture inward and dims it, and a drop lands on its downbeat.
+- Rendering is a WebGL2 RGBA16F ping-pong feedback field (zoom, rotate, swirl,
+  kaleidoscope, hue cycle, all frame-rate independent) with dual-Kawase bloom,
+  metered exposure and a tone curve that keeps highlights at their own hue.
 
 ## Status
 
@@ -88,6 +90,36 @@ const director = createDirector({ songId: 'my-track' });
 renderer.setConfig(director.update(frame, dt));
 ```
 
+## Look ahead with a song score
+
+Everything above is causal: it only knows the audio that has already played.
+If you have the whole track (a file, not a stream), analyse it once and the
+engine can act on what is coming.
+
+```ts
+import { computeSongScore, createConductor, SONG_SCORE_SAMPLE_RATE } from '@eviland/core';
+
+// Mono Float32 PCM at SONG_SCORE_SAMPLE_RATE (22050 Hz), e.g. from
+// OfflineAudioContext or ffmpeg. About 2 s of work for a 5-minute track;
+// the result is ~10 KB of JSON, so cache it.
+const score = await computeSongScore(pcm, { sampleRate: SONG_SCORE_SAMPLE_RATE });
+
+const conductor = createConductor();
+conductor.setScore(score); // null is fine: frames then pass through untouched
+
+// inside the loop, before director.update():
+conductor.conduct(frame, audioElement.currentTime, dt);
+renderer.setConfig(director.update(frame, dt));
+```
+
+The score holds the beat grid and bar phase, section boundaries with repeat
+labels, each section's intensity relative to the rest of the track, the
+lead-in to each section (build length, strength, and any held silence before
+it), and each section's key relative to the track's home key. `conduct()`
+stamps `frame.score` with `anticipation`, `blackout`, `impact`, the current
+section's tier, a palette `keyShift`, and replaces the live beat and section
+estimates with the analysed ones.
+
 ## Record a clip
 
 ```ts
@@ -106,6 +138,8 @@ const webm = await rec.stop();       // → Blob
 | `createEvilandReactor(cfg)` | 24-band causal onset reactor → `EvilandFrame` per `analyze()`. |
 | `generate / mutate / encode / decode / classic / ARCHETYPES` | Seedable generative looks. |
 | `createDirector(opts)` | Autonomous conductor → `OperatorConfig` per `update()`. |
+| `computeSongScore(pcm, opts)` | Whole-track analysis → `SongScore` (or `null` under ~20 s). Pure math, no DOM; runs in node too. |
+| `createConductor()` | `SongScore` + playback position → look-ahead cues on each `EvilandFrame`. |
 | `evalConfig / defaultConfig / lerpConfig / cloneConfig` | Operator-config evaluation + interpolation. |
 | `Rng / encodeSeedCode / decodeSeedCode` | Deterministic RNG + shareable seed codes. |
 | `createCanvasRecorder(canvas, opts)` | Canvas + audio → WebM (VP9/Opus). |

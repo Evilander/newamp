@@ -8,6 +8,8 @@ import {
   type BcFrameMessage,
   type BcParentMessage,
 } from './protocol';
+import { createEvilandLivePipeline, type LiveCompositionFrame } from '../visualizer/eviland-live-pipeline';
+import { hashSeed } from '../visualizer/eviland-rng';
 import { createGovernor } from '../visualizer/eviland-governor';
 
 interface ButterchurnVisualizer {
@@ -57,6 +59,12 @@ function presetSwitchCost(preset: Record<string, unknown>): number {
 }
 
 let visualizer: ButterchurnVisualizer | null = null;
+let liveMode = false;
+let liveQuality: 'high' | 'medium' | 'low' = 'high';
+let livePipeline: ReturnType<typeof createEvilandLivePipeline> = null;
+let latestComposition: LiveCompositionFrame | null = null;
+let loadLivePreset: (() => void) | null = null;
+let lastCompositionKey = '';
 let presets: Array<[string, Record<string, unknown>]> = [];
 // Lightweight presets only — the heaviest entries in the full preset pack are
 // the ones with sprawling per_pixel / per_frame equation bodies that JIT-compile
@@ -72,6 +80,15 @@ let presetTimer: number | null = null;
 // clear slot instead of colliding with an active paint (the inter-preset judder).
 let skipRenderFrames = 0;
 let raf = 0;
+// One paint at the governed cadence. Normally driven by rAF; the audio message
+// handler calls it too when rAF has been starved (see STARVED_PAINT_MS).
+let paintTick: ((now: number) => void) | null = null;
+// Chromium stops rAF for an occluded window. The detached projector keeps
+// receiving timer-driven audio while covered, so paint from the message at a
+// slow rate: MilkDrop's feedback keeps evolving and the window is never a
+// stale frame when it is uncovered again.
+const STARVED_PAINT_MS = 250;
+let mountedAt = 0;
 let dpr = 1;
 let disposed = false;
 let started = false;
@@ -212,7 +229,42 @@ async function start(sampleRate: number): Promise<void> {
       skipRenderFrames = 1;
       try { visualizer.loadPreset(preset, blendSeconds); } catch { /* bad preset, skip */ }
     };
-    loadRandomPreset(0);
+    if (liveMode) {
+      livePipeline = createEvilandLivePipeline(visualizer, liveQuality);
+      if (!livePipeline) {
+        // Butterchurn's private renderer isn't shaped the way the adapter
+        // expects. Plain MilkDrop with its own rotation beats a dead frame.
+        console.warn('[butterchurn-iframe] Eviland feedback integration unavailable; running plain MilkDrop');
+        liveMode = false;
+      }
+    }
+    if (liveMode && livePipeline) {
+      // In Live the Director owns preset changes: one preset per look, chosen
+      // by hash so a track's sections map to the same presets on every play.
+      // Same light-half bias as the random rotation (see pickIndex).
+      loadLivePreset = () => {
+        if (!latestComposition || !visualizer) return;
+        const key = `${latestComposition.seed}::${latestComposition.config.seed ?? latestComposition.config.archetype}`;
+        if (key === lastCompositionKey) return;
+        lastCompositionKey = key;
+        const hash = hashSeed(key);
+        const halfBoundary = Math.max(1, Math.floor(presetOrder.length / 2));
+        const fromLight = hash % 100 < 85;
+        const lo = fromLight ? 0 : halfBoundary;
+        const span = fromLight ? halfBoundary : Math.max(1, presetOrder.length - halfBoundary);
+        const index = presetOrder[lo + ((hash >>> 8) % span)] ?? presetOrder[0]!;
+        skipRenderFrames = 1;
+        try { visualizer.loadPreset(presets[index]![1], 2); } catch { loadRandomPreset(2); }
+      };
+      if (latestComposition) {
+        livePipeline.update(latestComposition);
+        loadLivePreset();
+      } else {
+        loadRandomPreset(0);
+      }
+    } else {
+      loadRandomPreset(0);
+    }
 
     const scheduleRotation = (): void => {
       if (presetTimer != null) window.clearInterval(presetTimer);
@@ -229,7 +281,7 @@ async function start(sampleRate: number): Promise<void> {
         loadRandomPreset(2.0);
       }, 22000);
     };
-    scheduleRotation();
+    if (!liveMode) scheduleRotation();
 
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => {
@@ -243,16 +295,16 @@ async function start(sampleRate: number): Promise<void> {
 
     // Tell the parent butterchurn really mounted (mirrors the old
     // data-newamp-butterchurn-mounted='true' boot signal the UI smoke checks).
+    mountedAt = performance.now();
     post({ type: 'mounted' });
 
-    const frame = (now: number): void => {
-      if (disposed) return;
-      raf = requestAnimationFrame(frame);
+    paintTick = (now: number): void => {
       // Cadence cap: 45fps while audio is live, 20fps idle glide once the
       // analyser has been byte-flat for a while (paused/stopped). The
       // governor stretches the interval further at its fps-trim floor.
       const idle = silentSince >= 0 && now - silentSince > IDLE_AFTER_MS;
       if (now - lastPaintAt < gov.intervalMs(idle ? IDLE_FRAME_MS : LIVE_FRAME_MS)) return;
+      const dtMs = lastPaintAt ? now - lastPaintAt : 1000 / 45;
       lastPaintAt = now;
       sizeCanvas();
       if (skipRenderFrames > 0) {
@@ -263,6 +315,7 @@ async function start(sampleRate: number): Promise<void> {
       }
       const renderStart = performance.now();
       try {
+        livePipeline?.advance(dtMs);
         visualizer?.render(
           haveAudio
             ? {
@@ -279,6 +332,11 @@ async function start(sampleRate: number): Promise<void> {
       }
       gov.endFrame(now, performance.now() - renderStart);
     };
+    const frame = (now: number): void => {
+      if (disposed) return;
+      raf = requestAnimationFrame(frame);
+      paintTick?.(now);
+    };
     raf = requestAnimationFrame(frame);
   } catch (err) {
     post({ type: 'failed', error: err instanceof Error ? err.message : String(err) });
@@ -288,10 +346,18 @@ async function start(sampleRate: number): Promise<void> {
 window.addEventListener('message', (event: MessageEvent) => {
   const message = event.data as BcParentMessage | undefined;
   if (!message || typeof message !== 'object') return;
+  if (event.source !== parent) return;
   if (message.type === 'init') {
+    liveMode = Boolean(message.eviland);
+    liveQuality = message.quality ?? 'high';
     dpr = message.dpr > 0 ? message.dpr : 1;
     void start(message.sampleRate);
   } else if (message.type === 'audio') {
+    if (liveMode && message.eviland) {
+      latestComposition = message.eviland;
+      livePipeline?.update(latestComposition);
+      loadLivePreset?.();
+    }
     if (message.samples && message.samples.length) {
       latestTime.set(message.samples.subarray(0, BUTTERCHURN_FFT_SIZE));
       haveAudio = true;
@@ -306,12 +372,23 @@ window.addEventListener('message', (event: MessageEvent) => {
         if (b < 127 || b > 129) { flat = false; break; }
       }
       silentSince = flat ? (silentSince >= 0 ? silentSince : lastAudioPostAt) : -1;
+      if (paintTick && lastAudioPostAt - (lastPaintAt || mountedAt) > STARVED_PAINT_MS) paintTick(lastAudioPostAt);
     }
   } else if (message.type === 'dispose') {
     disposed = true;
+    paintTick = null;
+    livePipeline?.dispose();
+    livePipeline = null;
     cancelAnimationFrame(raf);
     if (presetTimer != null) window.clearInterval(presetTimer);
   }
+});
+
+// Read by the detached-projector smoke when capturePage can't get a
+// compositor frame: lit fraction of the last composed Live image.
+Object.defineProperty(window, '__newampLiveSample', {
+  configurable: true,
+  value: (): number => livePipeline?.sample() ?? 0,
 });
 
 // Signal readiness so the parent posts the init payload (sampleRate, dpr).

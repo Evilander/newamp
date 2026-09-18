@@ -30,7 +30,7 @@
 
 import type { EvilandFrame } from './eviland-audio';
 import type { EvilandPalette } from './eviland';
-import type { OperatorConfig } from './eviland-operators';
+import type { OperatorConfig, WaveOverride } from './eviland-operators';
 
 export type EvilandFrameListener = (
   frame: EvilandFrame,
@@ -59,6 +59,10 @@ export interface DetachedFramePayload {
    * flagship eviland-live composition.
    */
   wave?: Uint8Array;
+  /** Waveform control for the Live composition ('auto' follows the preset). */
+  waveMode?: WaveOverride;
+  /** How firmly Live's final image is graded onto `palette` (0..1). */
+  grade?: number;
   /** Engine sample rate — the butterchurn iframe needs it once at init. */
   sampleRate?: number;
   /** Current track id — seeds the detached window's scene-overlay walk. */
@@ -117,6 +121,8 @@ export interface FrameBus {
     operator?: OperatorConfig,
     extras?: {
       wave?: Uint8Array;
+      waveMode?: WaveOverride;
+      grade?: number;
       sampleRate?: number;
       trackId?: number | null;
       sceneSeed?: string | null;
@@ -201,6 +207,8 @@ export const frameBus: FrameBus = {
       dtMs,
     };
     if (operator) payload.operator = operator;
+    if (extras?.waveMode) payload.waveMode = extras.waveMode;
+    if (extras?.grade !== undefined) payload.grade = extras.grade;
     if (extras?.wave) payload.wave = extras.wave; // structured-clone copies it
     if (extras?.sampleRate) payload.sampleRate = extras.sampleRate;
     if (extras?.trackId !== undefined) payload.trackId = extras.trackId;

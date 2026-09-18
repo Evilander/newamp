@@ -9,6 +9,7 @@ export const laserStorm: SceneDef = {
   id: 'laser-storm',
   name: 'Laser Storm',
   mood: 'high',
+  speed: (f, p) => 0.5 + f.energy * 0.9,
   frag: `
 const float TAU = 6.28318530718;
 
@@ -32,7 +33,7 @@ vec4 scene(vec2 uv, vec2 p) {
   float fog = fbm(p * 2.2 + vec2(u_globalTime * 0.10, -u_globalTime * 0.05));
   fog = 0.35 + 0.65 * fog * (0.7 + u_bass * 0.6);
 
-  float sweep = u_globalTime * (0.5 + u_energy * 0.9);
+  float sweep = u_phase;
   float strobe = 1.0 + u_snarePulse * 2.4;
 
   for (int i = 0; i < 6; i++) {

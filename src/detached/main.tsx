@@ -2,8 +2,9 @@
 //
 // This window reproduces the flagship 'eviland-live' composition: the REAL
 // MilkDrop field (butterchurn, in the same sandboxed iframe the main window
-// uses) underneath, with NewAmp's causal reactor-overlay events composited on
-// top. Frames + pre-emphasized time-domain audio bytes arrive over a
+// uses) with NewAmp's scenes, fluid and causal reactor events drawn into its
+// feedback by the iframe's Live pipeline (src/visualizer/eviland-live-pipeline.ts).
+// Frames + pre-emphasized time-domain audio bytes arrive over a
 // MessagePort from the main renderer's headless producer
 // (src/visualizer/eviland-producer.ts). No AudioContext, no React, no zustand
 // — audio plays from the main NewAmp window; this window is a pure consumer.
@@ -23,8 +24,6 @@
 // drop the port forever — the original "black screen" bug.
 
 import { createEvilandRenderer, type EvilandRenderer } from '../visualizer/eviland';
-import { createReactorOverlay, type ReactorOverlay } from '../visualizer/reactor-overlay';
-import { createSceneOverlay, type SceneOverlay } from '../visualizer/scene-overlay';
 import type { DetachedAckPayload, DetachedFramePayload } from '../visualizer/frame-bus';
 import type {
   BcAudioMessage,
@@ -35,8 +34,6 @@ import type {
 
 const canvas = document.getElementById('eviland-canvas') as HTMLCanvasElement | null;
 const milkdropFrame = document.getElementById('milkdrop-frame') as HTMLIFrameElement | null;
-const sceneCanvas = document.getElementById('scene-overlay') as HTMLCanvasElement | null;
-const overlayCanvas = document.getElementById('reactor-overlay') as HTMLCanvasElement | null;
 
 // Compact, semi-transparent status pill (bottom-centre) — it must NOT use the
 // full-screen opaque `.eviland-msg` style, or it would black out the canvas it
@@ -87,7 +84,7 @@ function fatal(message: string): void {
   document.body.replaceChildren(div);
 }
 
-if (!canvas || !milkdropFrame || !overlayCanvas) {
+if (!canvas || !milkdropFrame) {
   fatal('Detached visualizer: missing layer elements.');
   throw new Error('eviland-detached: missing layer elements');
 }
@@ -478,8 +475,8 @@ function toggleFullscreen(): void {
 }
 
 // 'medium' is the common tier now (the producer pushes the user's real tier
-// with the first frame; 'high' is the explicit 4K opt-in) — starting here
-// avoids a wasted high-res scene-overlay build on most machines.
+// with the first frame; 'high' is the explicit 4K opt-in). The iframe's Live
+// pipeline is built at this tier when init is sent, right after that frame.
 let currentQuality: 'high' | 'medium' | 'low' = 'medium';
 
 // --- MilkDrop (butterchurn) field — flagship layer -------------------------
@@ -492,30 +489,6 @@ let lastSampleRate = 44100;
 // --- WebGL fallback renderer (created only if the iframe can't host) -------
 let renderer: EvilandRenderer | null = null;
 let rendererFailed = false;
-
-// --- Reactor overlay (causal per-instrument events over the field) ---------
-let overlay: ReactorOverlay | null = createReactorOverlay(overlayCanvas);
-
-// --- Scene overlay (the 25 audio-reactive scenes between field and events) -
-// Tracks the last applied rotation seed so a quality-driven recreate resumes
-// the same walk instead of resetting to the boot default.
-let lastSceneKey = 'detached';
-let sceneOverlay: SceneOverlay | null = sceneCanvas
-  ? createSceneOverlay(sceneCanvas, { quality: 'medium', seedKey: lastSceneKey })
-  : null;
-
-// Mirror the main window's performance floor: on 'low' the scene layer is
-// skipped entirely (the projector previously ran it at hardcoded 'high'
-// forever, so the low-quality tier never actually reduced projector GPU
-// cost); on higher tiers it renders at the tier's internal resolution.
-function applySceneOverlayQuality(next: 'high' | 'medium' | 'low'): void {
-  if (!sceneCanvas) return;
-  sceneOverlay?.dispose();
-  sceneOverlay = null;
-  if (next !== 'low') {
-    sceneOverlay = createSceneOverlay(sceneCanvas, { quality: next, seedKey: lastSceneKey });
-  }
-}
 
 function dprCap(): number {
   // Tier-scaled: the projector often lands on a 4K TV where full-DPR
@@ -532,8 +505,6 @@ function fitLayers(): void {
   const h = Math.max(2, window.innerHeight);
   const dpr = dprCap();
   renderer?.resize(w, h, dpr);
-  overlay?.resize(w, h, dpr);
-  sceneOverlay?.resize(w, h, dpr);
 }
 
 window.addEventListener('resize', fitLayers);
@@ -579,7 +550,7 @@ window.addEventListener('message', onBcMessage);
 function maybeInitButterchurn(): void {
   if (bcInitSent || !bcReady || bcFailed) return;
   bcInitSent = true;
-  const init: BcInitMessage = { type: 'init', sampleRate: lastSampleRate, dpr: dprCap() };
+  const init: BcInitMessage = { type: 'init', sampleRate: lastSampleRate, dpr: dprCap(), eviland: true, quality: currentQuality };
   milkdropFrame!.contentWindow?.postMessage(init, '*');
 }
 
@@ -600,7 +571,6 @@ const bcMountTimeout = window.setTimeout(() => {
 function applyQuality(next: 'high' | 'medium' | 'low'): void {
   if (next === currentQuality) return;
   currentQuality = next;
-  applySceneOverlayQuality(next);
   if (renderer && canvas) {
     try {
       renderer.dispose();
@@ -644,16 +614,27 @@ function handlePayload(payload: DetachedFramePayload): void {
     // absent — producer had no opinion) is skipped.
     if (payload.transport !== undefined) applyTransportState(payload.transport);
 
-    // MilkDrop field: forward the pre-emphasized time-domain bytes. The iframe
-    // runs its own rAF render loop and preset rotation — it only needs audio.
+    // MilkDrop field: forward the pre-emphasized time-domain bytes plus the
+    // producer's look for this frame. The iframe runs its own render loop and
+    // draws the whole Live composition; it keeps painting from these messages
+    // when the window is occluded and rAF stops.
     if (!bcFailed && bcReady && payload.wave && payload.wave.length) {
-      const audio: BcAudioMessage = { type: 'audio', samples: payload.wave };
+      const audio: BcAudioMessage = {
+        type: 'audio',
+        samples: payload.wave,
+        eviland: payload.operator
+          ? {
+              frame: payload.frame,
+              palette: payload.palette,
+              config: payload.operator,
+              seed: payload.sceneSeed ?? `track-${payload.trackId ?? 'idle'}`,
+              waveMode: payload.waveMode ?? 'auto',
+              grade: payload.grade,
+            }
+          : undefined,
+      };
       milkdropFrame!.contentWindow?.postMessage(audio, '*');
     }
-
-    // Reactor overlay: 2D canvas — cheap, never GPU-blocks, renders on every
-    // payload so the projector stays demonstrably alive even when occluded.
-    overlay?.render(payload.frame, payload.palette, payload.dtMs);
 
     // GL layers are deferred to the rAF pass below — see renderGlLayers().
     glPayload = payload;
@@ -682,23 +663,6 @@ function renderGlLayers(): void {
   glPayload = null;
   if (payload) {
     try {
-      if (sceneOverlay) {
-        // Prefer the producer's lineage-aware seed (track × visual-memory
-        // generation) so the projector's scene walk matches — and evolves
-        // with — the on-screen composition. Bare trackId is the fallback for
-        // payloads that predate the seed.
-        const seed =
-          payload.sceneSeed !== undefined
-            ? (payload.sceneSeed ?? 'detached')
-            : payload.trackId !== undefined
-              ? `track-${payload.trackId ?? 'idle'}`
-              : null;
-        if (seed) {
-          lastSceneKey = seed;
-          sceneOverlay.setSeedKey(seed);
-        }
-        sceneOverlay.render(payload.frame, payload.palette, payload.dtMs);
-      }
       if (renderer) {
         // The producer ships the Director/manual operator look alongside each
         // frame; apply it so the projector is choreographed, not the
@@ -706,7 +670,7 @@ function renderGlLayers(): void {
         // render loop.
         if (payload.operator) renderer.setConfig(payload.operator);
         if (payload.wave && payload.wave.length) renderer.setWaveform(payload.wave);
-        renderer.render(payload.frame, payload.palette, payload.dtMs);
+        renderer.render(payload.frame, payload.palette, payload.dtMs, 'host');
       }
     } catch (err) {
       lastRenderError = String((err as Error)?.message ?? err);
@@ -877,10 +841,6 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener('beforeunload', () => {
   try {
     renderer?.dispose();
-    overlay?.dispose();
-    overlay = null;
-    sceneOverlay?.dispose();
-    sceneOverlay = null;
     const dispose: BcDisposeMessage = { type: 'dispose' };
     milkdropFrame.contentWindow?.postMessage(dispose, '*');
     window.clearTimeout(bcMountTimeout);
@@ -901,7 +861,7 @@ Object.defineProperty(window, '__newampDetachedStats', {
     bcMounted,
     bcFailed,
     webglFallback: renderer !== null,
-    overlayActive: overlay !== null,
+    compositionActive: bcMounted,
   }),
 });
 

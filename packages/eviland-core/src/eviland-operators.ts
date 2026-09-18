@@ -93,6 +93,8 @@ export interface QSlot {
   bindings?: Binding[];
 }
 
+export type WaveOverride = 'auto' | 'off' | 'line' | 'radial' | 'bars';
+
 export type WaveMode = 'off' | 'line' | 'radial' | 'lissajous' | 'bars';
 
 export interface WaveformConfig {
@@ -115,7 +117,34 @@ export interface PaletteConfig {
  * A complete Eviland "preset". Plain JSON: serializable, hashable, lerp-able.
  * Every field has a sane default in DEFAULT_CONFIG.
  */
+/** Source selection is separate from feedback motion and colour. */
+export interface CompositionConfig {
+  scene: string | null;
+  simulation?: 'reaction-diffusion';
+  terrain: boolean;
+  spectrum: boolean;
+  emitters: 'bands' | 'rings' | 'sparks' | 'blobs' | 'off';
+  density: number;
+  contrast: number;
+}
+
+export const CLASSIC_COMPOSITION: Readonly<CompositionConfig> = {
+  scene: null, terrain: true, spectrum: true, emitters: 'bands', density: 1, contrast: 1,
+};
+
+export function applyWaveformOverride(config: OperatorConfig, mode: WaveOverride): OperatorConfig {
+  if (mode === 'auto') return config;
+  return { ...config, waveform: { ...config.waveform, mode,
+    // An explicit visible mode also needs a nonzero source in presets that mute it.
+    intensity: mode === 'off' ? config.waveform.intensity : {
+      ...config.waveform.intensity, base: Math.max(0.4, config.waveform.intensity.base),
+    },
+  } };
+}
+
 export interface OperatorConfig {
+  /** Omitted on legacy saved looks; those retain the classic source stack. */
+  composition?: CompositionConfig;
   version: 1;
   name?: string;
   seed?: string;
@@ -429,6 +458,7 @@ export function evalConfig(
   frame: FrameLike,
   sectionSeed: number,
   out: EvilandDynamics,
+  dtMs = 1000 / 60,
 ): EvilandDynamics {
   // ── Q-VARS FIRST (plan §2.1). Computed before any channel so downstream
   // bindings with feature:'q1'..'q8' can read this frame's value. q's see
@@ -456,7 +486,7 @@ export function evalConfig(
     // EMA smoothing: out = smooth * prev + (1-smooth) * v.
     const smooth = slot.smooth;
     if (smooth && smooth > 0) {
-      const s = smooth > 0.99 ? 0.99 : smooth;
+      const s = Math.pow(Math.min(0.99, smooth), Math.max(0, dtMs) * 0.06);
       v = s * q[i]! + (1 - s) * v;
     }
     q[i] = clampQ(v);
@@ -678,6 +708,7 @@ export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): Ope
     name: pick.name,
     seed: pick.seed,
     archetype: pick.archetype,
+    composition: lerpComposition(a.composition, b.composition, t),
     zoom: lerpChannel(a.zoom, b.zoom, t),
     rotate: lerpChannel(a.rotate, b.rotate, t),
     swirl: lerpChannel(a.swirl, b.swirl, t),
@@ -808,6 +839,7 @@ export function lerpConfigInto(
   out.name = pick.name;
   out.seed = pick.seed;
   out.archetype = pick.archetype;
+  out.composition = lerpComposition(a.composition, b.composition, t);
   // Required channels — reuse out's channel slots + bindings arrays.
   lerpChannelInto(out.zoom, a.zoom, b.zoom, t);
   lerpChannelInto(out.rotate, a.rotate, b.rotate, t);
@@ -907,4 +939,11 @@ export function lerpConfigInto(
   // Director stamps _transition AFTER this call on the fade path; leave it
   // untouched here to match lerpConfig's behavior (verified by the operators
   // test: lerpConfig must not stamp _transition itself).
+}
+
+function lerpComposition(a: CompositionConfig | undefined, b: CompositionConfig | undefined, t: number): CompositionConfig | undefined {
+  if (!a && !b) return undefined;
+  const from = a ?? CLASSIC_COMPOSITION, to = b ?? CLASSIC_COMPOSITION;
+  return { ...(t < 0.5 ? from : to), density: lerp(from.density, to.density, t),
+    contrast: lerp(from.contrast, to.contrast, t) };
 }

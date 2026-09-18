@@ -7,6 +7,7 @@ export const tunnelRings: SceneDef = {
   id: 'tunnel-rings',
   name: 'Tunnel Rings',
   mood: 'high',
+  speed: (f, p) => 0.5 + f.energy * 1.4 + p.kick * 1.2,
   frag: `
 const float TR_TAU = 6.28318530718;
 
@@ -19,9 +20,8 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Perspective: z = 1/r maps near=center bright to far=edge faint.
   // Ring "depth" coordinate; rings march outward (toward viewer) over time.
-  float speed = 0.5 + u_energy * 1.4 + u_kickPulse * 1.2;
-  float kickStamp = floor(u_globalTime * (1.0 + u_energy * 2.0)) + step(0.5, u_kickPulse) * 999.0;
-  float depth = log(max(r, 0.02)) * 1.6 + u_globalTime * speed;
+  float kickStamp = floor((u_globalTime + u_energyTime * 2.0)) + step(0.5, u_kickPulse) * 999.0;
+  float depth = log(max(r, 0.02)) * 1.6 + u_phase;
   float ring = fract(depth);
   float idx = floor(depth);
 

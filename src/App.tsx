@@ -200,6 +200,7 @@ export default function App(): JSX.Element {
         nonce: s.evilandConfigNonce,
         waveMode: s.evilandWaveMode,
         trackId: s.current?.id ?? null,
+        cueStart: s.current?.cueStart ?? null,
         projectorQuality: projectorQualityTier(),
         transport,
       };

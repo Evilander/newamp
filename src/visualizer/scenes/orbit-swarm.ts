@@ -14,7 +14,7 @@ const float TAU = 6.28318530718;
 vec4 scene(vec2 uv, vec2 p) {
   vec3 col = vec3(0.0);
   float scatter = u_snarePulse * 0.55 + u_kickPulse * 0.25;
-  float precess = u_globalTime * (0.07 + u_energy * 0.12);
+  float precess = (u_globalTime * 0.07 + u_energyTime * 0.12);
   vec2 center = vec2(u_pan * 0.25, sin(u_globalTime * 0.21) * 0.08);
 
   for (int i = 0; i < 32; i++) {
@@ -28,8 +28,8 @@ vec4 scene(vec2 uv, vec2 p) {
 
     float a = 0.32 + rnd * 0.55;
     float b = a * (0.55 + rnd2 * 0.4);
-    float speed = 0.28 + rnd * 0.55 + u_energy * 0.3;
-    float phase = rnd * TAU + u_globalTime * speed * ((rnd2 < 0.5) ? 1.0 : -1.0);
+    float speed = 0.28 + rnd * 0.55;
+    float phase = rnd * TAU + (u_globalTime * speed + u_energyTime * 0.3) * ((rnd2 < 0.5) ? 1.0 : -1.0);
     float tilt = rnd2 * TAU + precess * (0.5 + rnd);
 
     vec2 orb = vec2(a * cos(phase), b * sin(phase));

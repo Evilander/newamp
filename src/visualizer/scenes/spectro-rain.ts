@@ -20,8 +20,8 @@ vec4 scene(vec2 uv, vec2 p) {
   for (int d = 0; d < 3; d++) {
     float fd = float(d);
     float rnd = hash21(vec2(float(band) * 3.1 + fd * 17.7, floor(u_seed * 733.0)));
-    float speed = 0.12 + level * 0.9 + u_energy * 0.25 + rnd * 0.2;
-    float y = fract(rnd * 7.0 - u_globalTime * speed); // 1 → 0 falls down… uv.y up
+    float speed = 0.12 + rnd * 0.2;
+    float y = fract(rnd * 7.0 - (u_globalTime * speed + u_bandTime[band] * 0.9 + u_energyTime * 0.25)); // 1 → 0 falls down… uv.y up
     float dy = uv.y - (1.0 - y);
     float trail = smoothstep(0.0, 0.18 + level * 0.2, -dy) * step(dy, 0.0);
     float head = smoothstep(0.012 + level * 0.01, 0.0, abs(dy));
