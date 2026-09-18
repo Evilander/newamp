@@ -34,9 +34,18 @@ Grab your platform from the [latest release](https://github.com/evilander/newamp
 | macOS | `NewAmp <version> arm64.dmg` (Apple Silicon) or `x64.dmg` (Intel) |
 | Linux | `NewAmp Linux <version> x64.tar.gz` — extract and run `./newamp` |
 
-The builds aren't code-signed, so Windows SmartScreen will want "More info → Run
-anyway", and macOS will want a right-click → Open the first time. Checksums for
-every file are in `SHA256SUMS.txt`.
+The builds aren't signed with a Windows or Apple developer certificate. Windows
+SmartScreen will want "More info → Run anyway". On macOS, open the app once,
+dismiss the "Apple could not verify" dialog, then go to System Settings →
+Privacy & Security and click Open Anyway. If you get "NewAmp is damaged and
+can't be opened" instead (builds up to 2.3.0), clear the quarantine flag and
+open it again:
+
+```sh
+xattr -cr /Applications/NewAmp.app
+```
+
+Checksums for every file are in `SHA256SUMS.txt`.
 
 The Linux tarball expects the libraries every Electron app needs. A desktop
 install already has them; a bare Debian or Ubuntu image is missing `libnss3`,
