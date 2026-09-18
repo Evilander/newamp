@@ -51,14 +51,24 @@ assert.ok(
     (result.detached.bcReady && !result.detached.bcFailed),
   `projector MilkDrop layer is dead with no fallback: ${JSON.stringify(result.detached)}`,
 );
-// The literal regression: a black projector. capturePage (full composite —
-// MilkDrop + scenes + events) requires >1.5% lit; the occluded-window fallback
-// reads only the sparse reactor-event canvas, so any lit pixels prove life.
-const litFloor = result.capture.source === 'capturePage' ? 0.015 : 0.0005;
+// The literal regression: a black projector. Both capture sources see the
+// whole Live composition (MilkDrop + scenes + fluid + events in one image):
+// capturePage off the compositor, or — when the window is occluded and the
+// compositor never produces a frame — a readback of the iframe's last
+// composed frame.
+const litFloor = 0.015;
 assert.ok(
   result.capture.litFraction > litFloor,
   `projector must paint non-black pixels (litFraction=${result.capture.litFraction}, ${JSON.stringify(result.capture)})`,
 );
+// The fixture is a 45 s local file, so the projector must be conducting from
+// its song score (analysed by the real ffmpeg path), not running causal-only.
+assert.equal(
+  result.lookAhead?.status,
+  'scored',
+  `look-ahead should be conducting the fixture from its score: ${JSON.stringify(result.lookAhead)}`,
+);
+assert.ok(result.lookAhead.tier, 'scored frames must carry the current section tier');
 console.log(JSON.stringify(result, null, 2));
 
 async function resetSmokeRoot() {

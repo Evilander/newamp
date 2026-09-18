@@ -161,6 +161,8 @@ export class AudioEngine {
   private externalTransport: ExternalTransport | null = null;
   private externalTap: ExternalAnalysisSource | null = null;
   private externalActive = false;
+  // performance.now() of the exclusive backend's last position report.
+  private externalPositionAt = 0;
   private exclusiveNegotiated: ExclusiveNegotiated | null = null;
   private exclusiveFallbackReason: string | null = null;
   // Monotonic play-request counter (mirrors seekSeq): tryExternalPlay awaits
@@ -516,6 +518,24 @@ export class AudioEngine {
     return this.state;
   }
 
+  /**
+   * Playback position in seconds (file time), read straight from the active
+   * deck. `state.currentTime` only moves on the 100 ms tick, which is plenty
+   * for the scrub bar and far too coarse for visuals that land on a beat.
+   * The exclusive backend reports position in coarse patches, so between
+   * patches the position is carried forward on the wall clock (capped, so a
+   * stalled backend can't run the visuals away from the audio).
+   */
+  getPlaybackPosition(): number {
+    if (this.externalActive) {
+      if (!this.state.playing || !this.externalPositionAt) return this.state.currentTime;
+      return this.state.currentTime + Math.min(0.25, Math.max(0, (performance.now() - this.externalPositionAt) / 1000));
+    }
+    if (!this.graph) return this.state.currentTime;
+    const el = this.graph.decks[this.activeDeckIndex]!.el;
+    return el.src && Number.isFinite(el.currentTime) ? el.currentTime : this.state.currentTime;
+  }
+
   // ---- Bit-Perfect Exclusive seam -----------------------------------------
 
   setExternalTransport(transport: ExternalTransport | null): void {
@@ -535,6 +555,7 @@ export class AudioEngine {
   /** State push channel for the external backend (position/ended/errors). */
   patchExternal(p: Partial<EngineState>): void {
     if (!this.externalActive) return;
+    if (p.currentTime !== undefined) this.externalPositionAt = performance.now();
     this.patch(p);
   }
 

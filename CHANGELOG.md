@@ -5,6 +5,57 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## Unreleased
+
+### Added
+
+- Eviland look-ahead. NewAmp plays local files, so it can read a whole track
+  before you hear it: the beat grid and bar lines, where the sections are and
+  which ones repeat, how intense each section is compared with the rest of
+  that song, the builds and the beat of silence before a drop, and key
+  changes. Eviland and Eviland Live now change looks on the bar line, with the
+  look chosen for the section that is starting rather than the one that just
+  ended. A repeated chorus gets its look back. Through a build the picture
+  draws inward and dims, it goes dark for the held beat, and the drop lands on
+  its downbeat. When the song modulates, the palette shifts with it.
+  A track is analysed the first time it plays with an Eviland visualizer
+  open: about 2 s for a 5-minute MP3 here, then cached as a ~10 KB file.
+  Streams, podcasts, server tracks and anything under 20 s run on live
+  analysis as before. Turn it off under Visualizer settings, Look-ahead.
+- Two new Eviland sources: a reaction–diffusion simulation that grows out of
+  whatever is bright in the picture, and a raymarched volume scene.
+
+### Changed
+
+- Eviland Live is one image now. Scenes, the fluid and the per-band events are
+  drawn into MilkDrop's feedback texture instead of sitting on top of it as
+  separate canvases, so the preset warps and trails them like its own shapes,
+  and one palette grades the result.
+- Each Eviland look picks its own sources. All 26 used to draw the same bass
+  ridge, spectrum sun and emitters and differ only in how the feedback
+  distorted them; now a look selects a scene from the scene library and
+  decides whether the ridge, sun and emitters appear at all.
+- The palette and reactivity controls apply to both Eviland modes and to the
+  detached projector. Waveform has an Auto setting that follows the look, and
+  Off now turns the waveform off.
+- Director, seed and waveform controls show for Eviland Live as well as
+  Eviland (engine).
+- Eviland meters its own exposure, so sparse looks are no longer nearly black
+  and dense ones no longer wash out. Highlights keep their hue instead of
+  clipping to white.
+- Fire Spires and VU Cathedral take their colours from the active palette.
+
+### Fixed
+
+- Bloom, emitter size and emitter intensity were generated for every look but
+  never reached the renderer.
+- Bright fluid dye disappeared wherever the feedback field behind it was dark.
+- Several scenes jumped when the music's energy changed, more the longer a
+  track had been playing.
+- Trail length and motion speed changed with frame rate, so a look moved
+  differently on the low-quality tier or when the frame governor stepped in.
+- The detached projector ignored the palette and reactivity settings.
+
 ## [2.3.0] - 2026-09-05
 
 ### Added

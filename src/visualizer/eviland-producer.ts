@@ -17,13 +17,16 @@
 // the on-screen Eviland branch already does.
 
 import type { AudioEngine } from '../audio/engine';
+import { liveGradeFor, resolveEvilandPalette, tuneEvilandFrame } from './eviland-appearance';
+import { readEvilandTuning } from '../lib/vizPrefs';
 import { createEvilandReactor, type EvilandReactor } from './eviland-audio';
 import { createDirector, type Director } from './eviland-director';
 import { generate as generateEvilandConfig, decode as decodeEvilandConfig } from './eviland-randomizer';
-import type { OperatorConfig, WaveMode } from './eviland-operators';
+import { applyWaveformOverride, type OperatorConfig, type WaveOverride } from './eviland-operators';
 import type { EvilandPalette } from './eviland';
 import { frameBus } from './frame-bus';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from './eviland-memory-bridge';
+import { createEngineScoreFeed, type ScoreFeed } from './eviland-score-feed';
 import { blendPaletteWithArt, extractArtPalette, type ArtPalette } from './art-palette';
 import { api } from '../lib/api';
 import { BUTTERCHURN_FFT_SIZE } from '../butterchurn-iframe/protocol';
@@ -42,9 +45,11 @@ export interface EvilandProducerUiState {
   /** Bumped on every manual config request so the producer re-applies the seed. */
   nonce: number;
   /** Waveform-layer override applied on top of the active config. */
-  waveMode: 'off' | 'line' | 'radial' | 'bars';
+  waveMode: WaveOverride;
   /** Current track id (re-arms the director's section memory on change). */
   trackId: number | null;
+  /** Cue-sheet offset of the current track into its file, seconds (song-score clock). */
+  cueStart?: number | null;
   /**
    * Render tier for the detached projector (derived from the user's
    * visualizer prefs — see lib/vizPrefs). Pushed to the consumer on change;
@@ -88,13 +93,6 @@ function applyManualSeed(seed: string | null): OperatorConfig | null {
   return generateEvilandConfig(seed).config;
 }
 
-function applyWaveformOverride(
-  config: OperatorConfig,
-  waveMode: 'off' | 'line' | 'radial' | 'bars',
-): OperatorConfig {
-  if (waveMode === 'off') return config;
-  return { ...config, waveform: { ...config.waveform, mode: waveMode as WaveMode } };
-}
 
 let activeStop: (() => void) | null = null;
 
@@ -159,11 +157,16 @@ export function startEvilandProducer(
   let loopActive = false;
   let reactor: EvilandReactor | null = null;
   let director: Director | null = null;
+  // Lives only while a projector is attached, so an idle producer never makes
+  // the app analyse tracks nobody is watching.
+  let scoreFeed: ScoreFeed | null = null;
   let lastNow = 0;
   let lastTrackId: number | null = null;
   let sceneSeed: string | null = null;
   let lastAppliedNonce = -1;
   let manualConfig: OperatorConfig | null = null;
+  let tuning = readEvilandTuning();
+  let tuningReadAt = 0;
   let paletteTick = 0;
   let palette = readPalette();
   // Album-art tint for the projector: extracted once per track (async,
@@ -242,6 +245,8 @@ export function startEvilandProducer(
     const dtMs = lastNow ? now - lastNow : 16.7;
     lastNow = now;
     const frame = reactor.analyze(freq!, onsetFreq!, leftFreq!, rightFreq!, dtMs, now);
+    // Look-ahead cues from the track's song score; a no-op without one.
+    scoreFeed?.conduct(frame, dtMs);
 
     // Refresh the palette ~2x/sec so theme changes reach the projector without
     // forcing a style recalc every frame.
@@ -286,15 +291,29 @@ export function startEvilandProducer(
     }
 
     fillWaveSamples();
-    frameBus.publish(frame, blendPaletteWithArt(palette, artPalette), dtMs, config, {
-      wave: waveSamples,
-      sampleRate: engine.getSampleRate(),
-      trackId: ui.trackId,
-      sceneSeed,
-      // null (not undefined) when nothing is playing — the projector's
-      // control bar resets to its idle state on this explicit signal.
-      transport: ui.transport ?? null,
-    });
+    // Palette/reactivity are the user's visualizer tuning; re-read them about
+    // twice a second rather than hitting localStorage on every publish.
+    if (now - tuningReadAt > 500) {
+      tuningReadAt = now;
+      tuning = readEvilandTuning();
+    }
+    frameBus.publish(
+      tuneEvilandFrame(frame, tuning.reactivity),
+      resolveEvilandPalette(tuning.palette, blendPaletteWithArt(palette, artPalette), now / 1000, frame.score?.keyShift),
+      dtMs,
+      config,
+      {
+        wave: waveSamples,
+        waveMode: ui.waveMode,
+        grade: liveGradeFor(tuning.palette),
+        sampleRate: engine.getSampleRate(),
+        trackId: ui.trackId,
+        sceneSeed,
+        // null (not undefined) when nothing is playing — the projector's
+        // control bar resets to its idle state on this explicit signal.
+        transport: ui.transport ?? null,
+      },
+    );
   };
 
   // setInterval, NOT requestAnimationFrame: rAF is tied to the compositor's
@@ -310,6 +329,10 @@ export function startEvilandProducer(
     if (loopActive) return;
     loopActive = true;
     lastNow = 0;
+    scoreFeed = createEngineScoreFeed(engine, () => {
+      const ui = getUiState();
+      return ui.trackId != null ? { id: ui.trackId, cueStart: ui.cueStart } : null;
+    });
     timer = window.setInterval(tick, TICK_MS);
   }
 
@@ -319,6 +342,8 @@ export function startEvilandProducer(
     timer = 0;
     reactor = null;
     director = null;
+    scoreFeed?.dispose();
+    scoreFeed = null;
   }
 
   const offConsumer = frameBus.onConsumerChange((hasDetached) => {

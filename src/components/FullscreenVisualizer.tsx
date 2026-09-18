@@ -11,8 +11,16 @@ import {
 } from './Visualizer';
 import { formatTime } from '../lib/format';
 import { ArtistLink, AlbumLink } from './EntityLink';
-// Shared with the headless producer (projector tier) via lib/vizPrefs.
-import { VIZ_QUALITY_KEY, VIZ_PERFORMANCE_KEY } from '../lib/vizPrefs';
+// Shared with the headless producer (projector tier + tuning) via lib/vizPrefs.
+import {
+  VIZ_QUALITY_KEY,
+  VIZ_PERFORMANCE_KEY,
+  VIZ_PALETTE_KEY,
+  VIZ_REACTIVITY_KEY,
+  VIZ_LOOKAHEAD_KEY,
+  lookAheadEnabled,
+} from '../lib/vizPrefs';
+import { songScoreStatus, type SongScoreStatus } from '../visualizer/eviland-score-feed';
 import { api, winctl } from '../lib/api';
 import type { VisualizerPreset } from '@shared/types';
 import { volumeLabel } from './VolumeSlider';
@@ -72,8 +80,6 @@ type CanvasVisualizerPreset = Exclude<VisualizerPreset, 'album-breathe'>;
 
 const VIZ_SHOW_ART_KEY = 'newamp:viz:showArt';
 const VIZ_CHROME_KEY = 'newamp:viz:chrome';
-const VIZ_PALETTE_KEY = 'newamp:viz:palette';
-const VIZ_REACTIVITY_KEY = 'newamp:viz:reactivity';
 const VIZ_AUTO_VJ_KEY = 'newamp:viz:autoVj';
 
 const PALETTES = [
@@ -1393,7 +1399,7 @@ export function FullscreenVisualizer(): JSX.Element {
             </button>
           </div>
 
-          {activePreset === 'eviland' && (
+          {(activePreset === 'eviland' || activePreset === 'eviland-live') && (
             <>
               <div className="viz-setting-row" data-newamp-viz-eviland-randomize-row>
                 <div className="viz-setting-label">
@@ -1431,6 +1437,8 @@ export function FullscreenVisualizer(): JSX.Element {
                   {evilandDirector ? 'On' : 'Off'}
                 </button>
               </div>
+
+              <LookAheadRow />
 
               <div className="viz-setting-row" data-newamp-viz-eviland-seed-row>
                 <div className="viz-setting-label">
@@ -1517,7 +1525,7 @@ export function FullscreenVisualizer(): JSX.Element {
                   </div>
                 </div>
                 <div className="viz-segmented" role="group" aria-label="Eviland waveform mode">
-                  {(['off', 'line', 'radial', 'bars'] as const).map((mode) => (
+                  {(['auto', 'off', 'line', 'radial', 'bars'] as const).map((mode) => (
                     <button
                       key={mode}
                       type="button"
@@ -1526,7 +1534,7 @@ export function FullscreenVisualizer(): JSX.Element {
                       aria-pressed={evilandWaveMode === mode}
                       data-newamp-viz-eviland-wave={mode}
                     >
-                      {mode === 'off' ? 'Off' : mode === 'line' ? 'Line' : mode === 'radial' ? 'Radial' : 'Bars'}
+                      {mode === 'auto' ? 'Auto' : mode === 'off' ? 'Off' : mode === 'line' ? 'Line' : mode === 'radial' ? 'Radial' : 'Bars'}
                     </button>
                   ))}
                 </div>
@@ -1840,6 +1848,57 @@ export function FullscreenVisualizer(): JSX.Element {
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+const LOOKAHEAD_STATUS_TEXT: Record<SongScoreStatus, string> = {
+  off: 'Off — looks react to the audio as it arrives',
+  idle: 'Reads each song ahead: looks change on the bar line, builds and drops are anticipated',
+  analysing: 'Reading this track (a second or two, first play only)…',
+  scored: 'Conducting from this track’s score',
+  unavailable: 'This source can’t be read ahead (stream, very short, or unreadable) — running live',
+};
+
+/**
+ * Eviland look-ahead toggle + what it is doing for the current track. Its own
+ * component so the once-a-second status poll only runs while the settings
+ * panel is open.
+ */
+function LookAheadRow(): JSX.Element {
+  const [enabled, setEnabled] = useState(lookAheadEnabled);
+  const [status, setStatus] = useState<SongScoreStatus>(songScoreStatus);
+  useEffect(() => {
+    const timer = window.setInterval(() => setStatus(songScoreStatus()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const toggle = (): void => {
+    const next = !enabled;
+    setEnabled(next);
+    try {
+      window.localStorage.setItem(VIZ_LOOKAHEAD_KEY, next ? 'on' : 'off');
+    } catch {
+      /* private mode — the toggle still holds for this session's UI */
+    }
+    setStatus(next ? 'analysing' : 'off');
+  };
+  return (
+    <div className="viz-setting-row" data-newamp-viz-eviland-lookahead-row>
+      <div className="viz-setting-label">
+        Look-ahead
+        <div className="viz-setting-hint" data-newamp-viz-eviland-lookahead-status={status}>
+          {LOOKAHEAD_STATUS_TEXT[enabled ? status : 'off']}
+        </div>
+      </div>
+      <button
+        type="button"
+        className={`pxbtn ${enabled ? 'is-active' : ''}`}
+        onClick={toggle}
+        aria-pressed={enabled}
+        data-newamp-viz-eviland-lookahead
+      >
+        {enabled ? 'On' : 'Off'}
+      </button>
     </div>
   );
 }

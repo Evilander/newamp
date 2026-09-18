@@ -38,7 +38,7 @@
 // ---------------------------------------------------------------------------
 
 export const VISUAL_MEMORY_SCHEMA_VERSION = 1;
-export const VISUAL_MEMORY_ALGO_VERSION = 2;
+export const VISUAL_MEMORY_ALGO_VERSION = 3;
 
 /**
  * Per-section memory: the look the Director chose for one boundary in a song,

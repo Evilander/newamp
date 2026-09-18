@@ -1,28 +1,40 @@
 // Eviland flagship visualizer — WebGL2 renderer.
 //
-// The renderer's job is to make the audio reactor's per-instrument event bus
-// VISIBLE. Four pillars, each implemented as a distinct stage of the pass graph
-// below — anyone watching should be able to point at the screen and say "that
-// was the kick, that was the hi-hat" because each voice has its own colour,
-// position, and shape, not because they're all pulsing on the same envelope.
+// The renderer's job is to make the audio reactor's per-band event bus
+// VISIBLE, and to make each look a different PICTURE rather than a different
+// distortion of one picture. A look (OperatorConfig) therefore chooses its
+// sources (config.composition) as well as its feedback motion and palette.
 //
 // Pass graph (high quality, 60fps target at 1080p on a mid GPU):
 //
-//   prevField (RGBA16F) ──► [advect+decay+warp]   ─┐
-//   onsets (CPU pool)  ──► [splat emitters]       ├─► nextField (RGBA16F)
-//   bands[24]          ──► [terrain/ridge splat]  ─┘
+//   prevField (RGBA16F) ──► [advect + decay + warp, scaled by elapsed time] ─┐
+//   selected sources, all additive into the same field:                     │
+//     terrain ridge · spectrum sun · emitters (per-band or one forced kind) ├─► nextField
+//     waveform · procedural scene (scene-overlay) · reaction–diffusion      │
+//                                  │ (ping-pong swap)                       ─┘
+//                                  ▼
+//        [compose: field + echo + section snapshot + fluid dye]  ──► composed (HDR)
 //                                  │
-//                       (ping-pong swap)
-//                                  │
-//                                  ▼
-//                          [threshold → bright]
-//                                  │ down/up Kawase pyramid (3 levels)
-//                                  ▼
-//                       [composite: field + bloom + post]
-//                                  │ chromatic-aberration (snare+hat only)
-//                                  │ ACES tone-map + vignette
-//                                  ▼
-//                              backbuffer
+//                  ┌───────────────┼──────────────────┐
+//                  ▼               ▼                  ▼
+//           [meter 16×9]   [threshold → Kawase   (composed)
+//           [expose 1×1]    down/up pyramid]          │
+//                  └───────────────┴──────────────────┤
+//                                                     ▼
+//               [post: exposure · bloom · saturation · vignette ·
+//                      hue-preserving shoulder] ──► backbuffer
+//
+// Three rules the graph exists to keep:
+//   - Everything that decides visibility (dark-ground, bloom, exposure) reads
+//     the COMPOSED image. Masking by the raw field hid bright dye wherever the
+//     unrelated feedback happened to be dark.
+//   - Sources arrive already coloured by the active palette, and nothing
+//     downstream remaps brightness to colour again; two ramps in series was
+//     what flattened every look toward the same pale highlights.
+//   - Every per-frame quantity (zoom, rotation, hue cycle, decay, continuous
+//     injection, envelopes) is expressed per 1/60 s and raised to the elapsed
+//     frame count, so quality tiers and the governor's cadence changes don't
+//     change how a look moves or how long its trails are.
 //
 // Quality tiers (options.quality):
 //   'high'   – 1.0× field, 3-level bloom, aberration on, ≤32 emitters
@@ -33,8 +45,12 @@
 // or EXT_color_buffer_float — fall back to butterchurn / canvas downstream.
 
 import type { EvilandFrame } from './eviland-audio';
-import { evalConfig, createDynamics, defaultConfig, type OperatorConfig } from './eviland-operators';
-import { createFluidSim, fluidForcesFromFrame, dyeDissipationFromFrame, type FluidSim } from './eviland-fluid';
+import { evalConfig, createDynamics, defaultConfig, CLASSIC_COMPOSITION, type OperatorConfig } from './eviland-operators';
+import { createReactionDiffusion } from './eviland-reaction-diffusion';
+import { createSceneOverlay } from './scene-overlay';
+import { mulberry32, hashSeed } from './eviland-rng';
+import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame, type FluidSim } from './eviland-fluid';
+import { applyScoreCues } from './eviland-conductor';
 
 export interface EvilandPalette {
   accent: [number, number, number]; // each channel 0..1
@@ -45,7 +61,7 @@ export interface EvilandPalette {
 
 export interface EvilandRenderer {
   resize(cssWidth: number, cssHeight: number, dpr: number): void;
-  render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number): void;
+  render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number, paletteSource?: 'preset' | 'host'): void;
   /** Swap the active operator config (the "look"). Default reproduces classic Eviland. */
   setConfig(config: OperatorConfig): void;
   /** Read the active operator config. */
@@ -58,12 +74,20 @@ export interface EvilandRenderer {
 export interface EvilandOptions {
   smoke?: boolean;
   quality?: 'high' | 'medium' | 'low';
+  /** Isolated emitter randomness for replay and deterministic visual tests. */
+  seed?: string;
 }
 
 // ---------------------------------------------------------------------------
 // Shaders. Versioned (#version 300 es) per WebGL2; all sources compile/link
 // guarded so a failure returns null instead of throwing.
 // ---------------------------------------------------------------------------
+
+// Auto-exposure meter grid, and the exposure a fresh renderer starts from
+// (slightly hot: most looks open quiet, and falling is fast).
+const METER_W = 16;
+const METER_H = 9;
+const INITIAL_EXPOSURE = 1.6;
 
 const QUAD_VERT = `#version 300 es
 precision highp float;
@@ -117,6 +141,7 @@ precision highp float;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_prev;
+uniform float u_steps;      // elapsed reference frames (60 Hz)
 uniform vec3  u_decay;       // plan §2.3 per-channel RGB decay
 uniform float u_warpAmp;
 uniform float u_warpScale;
@@ -189,13 +214,13 @@ void main(){
   float zoomEff = u_zoom + u_zoomRadGain * r2;
   float rotEff = u_rotate + u_rotateRadGain * r2;
   float swirlEff = u_swirl + u_swirlRadGain * r2;
-  float ang = rotEff + swirlEff * radius;
+  float ang = (rotEff + swirlEff * radius) * u_steps;
   float ca = cos(ang); float sa = sin(ang);
   p = mat2(ca, -sa, sa, ca) * p;
 
   // Zoom: multiply by inverse zoom so positive u_zoom pulls UV inward
   // (trails appear to march OUT from the centre as a tunnel rush).
-  float invZ = 1.0 / (1.0 + zoomEff);
+  float invZ = pow(max(0.1, 1.0 + zoomEff), -u_steps);
   p *= invZ;
 
   // Kaleidoscope fold — optional. When u_mirror >= 2 we blend in a folded
@@ -204,7 +229,7 @@ void main(){
   vec2 pFinal = p;
   if (u_mirror >= 1.5 && u_mirrorMix > 0.001) {
     vec2 folded = kaleidoFold(p, u_mirror);
-    pFinal = mix(p, folded, clamp(u_mirrorMix, 0.0, 1.0));
+    pFinal = mix(p, folded, 1.0 - pow(1.0 - clamp(u_mirrorMix, 0.0, 1.0), u_steps));
   }
 
   // Re-centre + organic curl detail (small) modulated by treble/novelty.
@@ -218,16 +243,16 @@ void main(){
   // channel * scale * dt, so this composes with the procedural warp. When
   // u_fluid = 0 the subtraction is a zero vector — bit-identical to before.
   vec2 simFlow = texture(u_velocity, src).xy * u_fluid;
-  src = clamp(src - u_flow + w - simFlow, 0.001, 0.999);
+  src = clamp(src + (w - u_flow) * u_steps - simFlow, 0.001, 0.999);
   vec3 prev = texture(u_prev, src).rgb;
 
   // Hue cycle: shift colour every frame so trails drift across the palette.
-  prev = rotateHue(prev, u_hueCycle);
+  prev = rotateHue(prev, u_hueCycle * u_steps);
   // Plan §2.3: per-RGB decay. u_decay is a vec3; default = (d,d,d) reproduces
   // the scalar decay exactly. Plan §2.2 radial decay bias adds r²-scaled gain
   // before clamp so the trail length can change with distance from centre.
   vec3 decayRGB = clamp(u_decay + vec3(u_decayRadGain * r2), vec3(0.65), vec3(0.99));
-  prev *= decayRGB;
+  prev *= pow(decayRGB, vec3(u_steps));
   o = vec4(prev, 1.0);
 }`;
 
@@ -447,15 +472,67 @@ void main(){
   o = vec4(u_color * a, a);
 }`;
 
-// Bloom — threshold pass extracts bright pixels.
+// Exposure metering, step 1: shrink the composed image to a METER_W×METER_H
+// grid. Each cell is the mean peak-channel brightness of its block of the
+// frame (6×6 taps spread across the block).
+const METER_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o;
+uniform sampler2D u_src;
+uniform vec2 u_cell;      // size of one meter cell in uv
+void main(){
+  float total = 0.0;
+  for (int y = 0; y < 6; y++) {
+    for (int x = 0; x < 6; x++) {
+      vec2 offset = (vec2(float(x), float(y)) + 0.5) / 6.0 - 0.5;
+      vec3 c = texture(u_src, v_uv + offset * u_cell).rgb;
+      total += max(c.r, max(c.g, c.b));
+    }
+  }
+  o = vec4(total / 36.0, 0.0, 0.0, 1.0);
+}`;
+
+// Exposure metering, step 2: one texel of state. The key mixes the frame's
+// mean with its brightest block, so a sparse look (stars on black) is judged
+// by its stars and a full-frame look by its body. Exposure rises slowly and
+// falls fast: a drop lands with punch, then the picture settles.
+const EXPOSE_FRAG = `#version 300 es
+precision highp float;
+out vec4 o;
+uniform sampler2D u_meter;
+uniform sampler2D u_prev;
+uniform float u_targetKey;
+uniform float u_dt;
+void main(){
+  ivec2 size = textureSize(u_meter, 0);
+  float total = 0.0;
+  float brightest = 0.0;
+  for (int y = 0; y < size.y; y++) {
+    for (int x = 0; x < size.x; x++) {
+      float v = texelFetch(u_meter, ivec2(x, y), 0).r;
+      total += v;
+      brightest = max(brightest, v);
+    }
+  }
+  float key = mix(total / float(size.x * size.y), brightest, 0.7);
+  float wanted = clamp(u_targetKey / max(key, 0.02), 0.85, 4.5);
+  float prev = texelFetch(u_prev, ivec2(0), 0).r;
+  float tau = wanted > prev ? 1.6 : 0.3;
+  o = vec4(mix(prev, wanted, 1.0 - exp(-u_dt / tau)), 0.0, 0.0, 1.0);
+}`;
+
+// Bloom — threshold pass extracts bright pixels (after exposure, so a dim
+// look still blooms once the meter has lifted it).
 const THRESHOLD_FRAG = `#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_src;
+uniform sampler2D u_exposure;
 uniform float u_threshold;
 void main(){
-  vec3 c = texture(u_src, v_uv).rgb;
+  vec3 c = texture(u_src, v_uv).rgb * texelFetch(u_exposure, ivec2(0), 0).r;
   float b = max(c.r, max(c.g, c.b));
   float k = smoothstep(u_threshold, u_threshold + 0.4, b);
   o = vec4(c * k, 1.0);
@@ -524,6 +601,7 @@ uniform float u_zoom;
 uniform float u_rot;
 uniform float u_flipX;        // 0 or 1
 uniform float u_flipY;        // 0 or 1
+uniform float u_injection;
 uniform float u_feedback;     // how much of last echo bleeds in (≈0.55)
 uniform vec2  u_centre;
 void main(){
@@ -542,7 +620,7 @@ void main(){
   vec3 echoC = texture(u_prevEcho, src).rgb * u_feedback;
   // Echo target keeps the bright field + decayed feedback so the repeat is
   // visible as ghost trails fading over multiple frames.
-  vec3 outC = fieldC * 0.92 + echoC;
+  vec3 outC = fieldC * 0.92 * u_injection + echoC;
   o = vec4(outC, 1.0);
 }`;
 
@@ -550,18 +628,15 @@ void main(){
 // so the image has REAL COLOUR not a brightness-to-white ramp; mix bloom in at
 // reduced weight; chromatic aberration on snare+hat only; ACES tone-map +
 // vignette. This is the difference between "white cloud" and "vivid scene".
-const POST_FRAG = `#version 300 es
+export const COMPOSE_FRAG = `#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_field;
-uniform sampler2D u_bloom;
 uniform sampler2D u_dye;     // simulated-fluid dye (RGBA16F)
 uniform sampler2D u_echo;    // video-echo target (plan §2.5)
 uniform sampler2D u_snapshot;// pre-fade field snapshot (plan §2.6)
-uniform float u_bloomIntensity;
 uniform float u_aberration; // 0 off .. 1 strong
-uniform float u_saturation; // 0..1 (1 = full, 0 = monochrome)
 uniform float u_liquidMix;   // 0 dye invisible (legacy look) .. 1 dye-dominant
 uniform float u_echoAlpha;   // 0 = echo pass off (plan §2.5)
 uniform float u_snapshotMix; // 0 = no crossfade in flight; 1 = full from-snapshot
@@ -569,28 +644,6 @@ uniform vec3  u_bg;
 uniform vec3  u_accent;
 uniform vec3  u_dark;
 uniform vec3  u_light;
-uniform vec3  u_hueShift;   // mild centroid tint
-
-vec3 aces(vec3 x){
-  const float a=2.51; const float b=0.03; const float c=2.43;
-  const float d=0.59; const float e=0.14;
-  return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
-}
-
-// Three-stop palette ramp by intensity: dark grounds the image, accent fills
-// the body, light caps the highlights. The field's own hue (from the cycled
-// feedback) tints the ramp so each instrument's colour still reads through.
-vec3 paletteRamp(float t, vec3 fieldTint){
-  vec3 lo = mix(u_dark, u_accent, smoothstep(0.0, 0.55, t));
-  // Highlights only lean PART-WAY to the warm "light" stop (full reach was the
-  // root of the cream blow-out — every bright region became cream). Mostly they
-  // brighten along the accent, so loud events read as the instrument colour.
-  vec3 hi = mix(u_accent, u_light, smoothstep(0.45, 1.0, t) * 0.5);
-  vec3 ramp = mix(lo, hi, smoothstep(0.40, 0.65, t));
-  // Tint HARD by the field's own hue so per-instrument colour dominates the
-  // palette, not the other way round (was 0.55 → palette won → monochrome).
-  return mix(ramp, ramp * (0.45 + fieldTint * 1.7), 0.7);
-}
 
 void main(){
   vec2 uv = v_uv;
@@ -622,21 +675,10 @@ void main(){
     fieldC = mix(fieldC, echoC, clamp(u_echoAlpha, 0.0, 0.9));
   }
 
-  // Intensity drives the palette ramp; chroma from the field tints it so the
-  // hue-cycled feedback shows through as colour drift instead of being lost.
-  float intensity = clamp(dot(fieldC, vec3(0.34, 0.42, 0.24)), 0.0, 1.4);
-  vec3 chroma = (fieldC + 1e-4) / (max(max(fieldC.r, fieldC.g), fieldC.b) + 0.05);
-  vec3 colour = paletteRamp(intensity, chroma);
+  // Sources already carry the chosen palette. Keep their HDR values and
+  // local contrast; a second brightness-to-palette map would flatten them.
+  vec3 colour = max(vec3(0.0), fieldC);
 
-  // Eviland Liquid: the simulated dye is the picture. At u_liquidMix = 0 the
-  // entire dye block below is gated out by the shader (the if(u_liquidMix>0)
-  // branch never executes), so the dye contribution is strictly zero and the
-  // composite is byte-identical to the pre-dye look — every existing
-  // archetype keeps its exact output, matching the README's backward-compat
-  // claim. At u_liquidMix = 1 the palette ramp is fully replaced by the dye
-  // color (with a gentle floor mixed back in for unlit regions so empty zones
-  // aren't pitch black). Sampling happens BEFORE bloom/aberration so bloom
-  // still glows on the brightest dye streaks.
   if (u_liquidMix > 0.0) {
     vec3 dye = texture(u_dye, uv).rgb;
     // Saturate via tanh-ish: dye stays bright but never blows past ~1 without
@@ -651,43 +693,36 @@ void main(){
     colour = mix(colour, dyeFull, clamp(u_liquidMix, 0.0, 1.0));
   }
 
-  // Soft additive bloom on top — at HALF the previous weight so highlights
-  // glow rather than clip the whole frame white.
-  vec3 bloomC = texture(u_bloom, uv).rgb * u_bloomIntensity * 0.5;
-  colour += bloomC;
+  o = vec4(colour, 1.0);
+}`;
 
-  // KILL the cream/white blow-out. Where the feedback over-accumulates, every
-  // channel clips high → a desaturated cream/white blob (the whole "gold/cream
-  // smoke" complaint). A white pixel has no hue left to preserve, so we detect
-  // bright-AND-desaturated regions and pull them back toward the accent hue at
-  // the same brightness. Already-coloured areas (pink rings, cyan bursts) have
-  // high saturation → untouched.
-  float cmax = max(max(colour.r, colour.g), colour.b);
-  float cmin = min(min(colour.r, colour.g), colour.b);
-  float csat = (cmax - cmin) / max(cmax, 1e-3);
-  float washed = smoothstep(0.62, 1.05, cmax) * (1.0 - smoothstep(0.10, 0.36, csat));
-  // Pull washed-out highlights back toward accent, but gently (was 0.75 — that
-  // strongly repainted every bright region in the accent hue, reinforcing the
-  // monochrome look). 0.40 still kills cream blow-out without flattening colour.
-  colour = mix(colour, u_accent * (cmax * 0.92 + 0.08), washed * 0.40);
-
-  // Centroid hue tilt — gentle (the field already drifts; this is a static bias).
+const POST_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o;
+uniform sampler2D u_field;
+uniform sampler2D u_bloom;
+uniform sampler2D u_exposure;
+uniform float u_bloomIntensity;
+uniform float u_saturation;
+uniform float u_gain;        // score cues: <1 dims into a build / blackout, >1 flashes a drop
+uniform vec3 u_bg;
+uniform vec3 u_hueShift;
+void main() {
+  // Bloom was extracted from the exposed image, so only the field is scaled.
+  vec3 colour = max(vec3(0.0), texture(u_field, v_uv).rgb * texelFetch(u_exposure, ivec2(0), 0).r
+    + texture(u_bloom, v_uv).rgb * u_bloomIntensity * 0.5) * u_gain;
+  // Visibility now follows all sources, including dye and its bloom.
+  float light = max(colour.r, max(colour.g, colour.b));
+  colour = mix(u_bg * 0.12, colour, smoothstep(0.0, 0.08, light));
   colour *= u_hueShift;
-
-  // Saturation falls in noisy/percussive passages.
   float luma = dot(colour, vec3(0.299, 0.587, 0.114));
   colour = mix(vec3(luma), colour, u_saturation);
-
-  // Dark-ground: bg shows everywhere the field is quiet, but DIMLY — the
-  // whole frame should read as a near-black scene with coloured events in it,
-  // not a flat bg-coloured wash. Multiply bg down so empty zones are nearly
-  // black (a tiny bg tint at most).
-  float darkness = 1.0 - smoothstep(0.0, 0.18, intensity);
-  colour = mix(colour, u_bg * 0.12, darkness);
-
-  float vig = smoothstep(1.0, 0.45, length(dir));
-  colour *= 0.88 + vig * 0.18;
-  colour = aces(colour);
+  colour *= 0.88 + (1.0 - smoothstep(0.45, 1.0, length(v_uv - 0.5))) * 0.18;
+  // Shoulder on the peak channel, then scale RGB together: highlights roll
+  // off toward full brightness at their own hue instead of clipping to white.
+  float peak = max(colour.r, max(colour.g, colour.b));
+  colour *= (1.0 - exp(-peak * 1.35)) / max(peak, 1e-4);
   o = vec4(colour, 1.0);
 }`;
 
@@ -800,7 +835,9 @@ export function createEvilandRenderer(
     powerPreference: 'high-performance',
   };
   const probe = document.createElement('canvas').getContext('webgl2', contextOptions);
-  if (!probe || !probe.getExtension('EXT_color_buffer_float')) return null;
+  const supported = !!(probe && probe.getExtension('EXT_color_buffer_float'));
+  probe?.getExtension('WEBGL_lose_context')?.loseContext();
+  if (!probe || !supported) return null;
 
   const ctx = canvas.getContext('webgl2', contextOptions);
   if (!ctx) return null;
@@ -847,6 +884,9 @@ export function createEvilandRenderer(
   const downProg = link(gl, QUAD_VERT, KAWASE_DOWN_FRAG);
   const upProg = link(gl, QUAD_VERT, KAWASE_UP_FRAG);
   const postProg = link(gl, QUAD_VERT, POST_FRAG);
+  const composeProg = link(gl, QUAD_VERT, COMPOSE_FRAG);
+  const meterProg = link(gl, QUAD_VERT, METER_FRAG);
+  const exposeProg = link(gl, QUAD_VERT, EXPOSE_FRAG);
   const echoProg = link(gl, QUAD_VERT, ECHO_FRAG);
   const blitProg = link(gl, QUAD_VERT, BLIT_FRAG);
 
@@ -856,7 +896,7 @@ export function createEvilandRenderer(
   // this narrow case. These are fixed, shipped shader sources (not
   // user input), so this is a driver/spec-bug-only path, not the realistic
   // "no GPU support" scenario the probe above targets.
-  if (!fieldProg || !emitterProg || !terrainProg || !spectrumProg || !waveProg || !thresholdProg || !downProg || !upProg || !postProg || !echoProg || !blitProg) {
+  if (!fieldProg || !emitterProg || !terrainProg || !spectrumProg || !waveProg || !thresholdProg || !downProg || !upProg || !postProg || !composeProg || !meterProg || !exposeProg || !echoProg || !blitProg) {
     return null;
   }
   // Narrow once so the inner closures don't need null guards on every use.
@@ -869,6 +909,9 @@ export function createEvilandRenderer(
   const DOWN: WebGLProgram = downProg;
   const UP: WebGLProgram = upProg;
   const POST: WebGLProgram = postProg;
+  const COMPOSE: WebGLProgram = composeProg;
+  const METER: WebGLProgram = meterProg;
+  const EXPOSE: WebGLProgram = exposeProg;
   const ECHO: WebGLProgram = echoProg;
   const BLIT: WebGLProgram = blitProg;
   const blitUni = { src: gl.getUniformLocation(blitProg, 'u_src') };
@@ -918,6 +961,12 @@ export function createEvilandRenderer(
   // Field FBOs (ping-pong) sized at render-time.
   let fieldA: Fbo | null = null;
   let fieldB: Fbo | null = null;
+  let composed: Fbo | null = null;
+  // Auto-exposure state: a small brightness grid and a 1×1 ping-pong holding
+  // the adapted exposure. Size-independent, so they survive resizes.
+  let meter: Fbo | null = null;
+  let exposureA: Fbo | null = null;
+  let exposureB: Fbo | null = null;
   // Bloom ping-pongs: one per pyramid level (only used at level count > 0).
   const bloomDown: Fbo[] = [];
   const bloomUp: Fbo[] = [];
@@ -997,6 +1046,22 @@ export function createEvilandRenderer(
     disposeFbo(fieldB);
     fieldA = makeFbo(fieldW, fieldH);
     fieldB = makeFbo(fieldW, fieldH);
+    disposeFbo(composed);
+    composed = makeFbo(fieldW, fieldH);
+    if (!meter) meter = makeFbo(METER_W, METER_H);
+    if (!exposureA || !exposureB) {
+      disposeFbo(exposureA);
+      disposeFbo(exposureB);
+      exposureA = makeFbo(1, 1);
+      exposureB = makeFbo(1, 1);
+      for (const target of [exposureA, exposureB]) {
+        if (!target) continue;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+        gl.clearColor(INITIAL_EXPOSURE, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
     fluid?.resize(Math.max(64, Math.round(fieldW * fluidGrid)), Math.max(64, Math.round(fieldH * fluidGrid)));
     for (const f of bloomDown) disposeFbo(f);
     for (const f of bloomUp) disposeFbo(f);
@@ -1057,6 +1122,7 @@ export function createEvilandRenderer(
 
   // ---- Cached uniform locations (avoid getUniformLocation per frame) ----
   const fieldUni = {
+    steps: gl.getUniformLocation(fieldProg, 'u_steps'),
     prev: gl.getUniformLocation(fieldProg, 'u_prev'),
     decay: gl.getUniformLocation(fieldProg, 'u_decay'),
     warpAmp: gl.getUniformLocation(fieldProg, 'u_warpAmp'),
@@ -1087,6 +1153,7 @@ export function createEvilandRenderer(
     flipX: gl.getUniformLocation(echoProg, 'u_flipX'),
     flipY: gl.getUniformLocation(echoProg, 'u_flipY'),
     feedback: gl.getUniformLocation(echoProg, 'u_feedback'),
+    injection: gl.getUniformLocation(echoProg, 'u_injection'),
     centre: gl.getUniformLocation(echoProg, 'u_centre'),
   };
   const spectrumUni = {
@@ -1113,6 +1180,7 @@ export function createEvilandRenderer(
   };
   const thresholdUni = {
     src: gl.getUniformLocation(thresholdProg, 'u_src'),
+    exposure: gl.getUniformLocation(thresholdProg, 'u_exposure'),
     threshold: gl.getUniformLocation(thresholdProg, 'u_threshold'),
   };
   const downUni = {
@@ -1123,22 +1191,38 @@ export function createEvilandRenderer(
     src: gl.getUniformLocation(upProg, 'u_src'),
     texel: gl.getUniformLocation(upProg, 'u_texel'),
   };
+  const composeUni = {
+    field: gl.getUniformLocation(composeProg, 'u_field'),
+    dye: gl.getUniformLocation(composeProg, 'u_dye'),
+    echo: gl.getUniformLocation(composeProg, 'u_echo'),
+    snapshot: gl.getUniformLocation(composeProg, 'u_snapshot'),
+    aberration: gl.getUniformLocation(composeProg, 'u_aberration'),
+    liquidMix: gl.getUniformLocation(composeProg, 'u_liquidMix'),
+    echoAlpha: gl.getUniformLocation(composeProg, 'u_echoAlpha'),
+    snapshotMix: gl.getUniformLocation(composeProg, 'u_snapshotMix'),
+    bg: gl.getUniformLocation(composeProg, 'u_bg'),
+    accent: gl.getUniformLocation(composeProg, 'u_accent'),
+    dark: gl.getUniformLocation(composeProg, 'u_dark'),
+    light: gl.getUniformLocation(composeProg, 'u_light'),
+  };
+  const meterUni = {
+    src: gl.getUniformLocation(meterProg, 'u_src'),
+    cell: gl.getUniformLocation(meterProg, 'u_cell'),
+  };
+  const exposeUni = {
+    meter: gl.getUniformLocation(exposeProg, 'u_meter'),
+    prev: gl.getUniformLocation(exposeProg, 'u_prev'),
+    targetKey: gl.getUniformLocation(exposeProg, 'u_targetKey'),
+    dt: gl.getUniformLocation(exposeProg, 'u_dt'),
+  };
   const postUni = {
     field: gl.getUniformLocation(postProg, 'u_field'),
     bloom: gl.getUniformLocation(postProg, 'u_bloom'),
-    dye: gl.getUniformLocation(postProg, 'u_dye'),
-    echo: gl.getUniformLocation(postProg, 'u_echo'),
-    snapshot: gl.getUniformLocation(postProg, 'u_snapshot'),
+    exposure: gl.getUniformLocation(postProg, 'u_exposure'),
+    gain: gl.getUniformLocation(postProg, 'u_gain'),
     bloomIntensity: gl.getUniformLocation(postProg, 'u_bloomIntensity'),
-    aberration: gl.getUniformLocation(postProg, 'u_aberration'),
     saturation: gl.getUniformLocation(postProg, 'u_saturation'),
-    liquidMix: gl.getUniformLocation(postProg, 'u_liquidMix'),
-    echoAlpha: gl.getUniformLocation(postProg, 'u_echoAlpha'),
-    snapshotMix: gl.getUniformLocation(postProg, 'u_snapshotMix'),
     bg: gl.getUniformLocation(postProg, 'u_bg'),
-    accent: gl.getUniformLocation(postProg, 'u_accent'),
-    dark: gl.getUniformLocation(postProg, 'u_dark'),
-    light: gl.getUniformLocation(postProg, 'u_light'),
     hueShift: gl.getUniformLocation(postProg, 'u_hueShift'),
   };
 
@@ -1148,6 +1232,9 @@ export function createEvilandRenderer(
 
   const emitters: Emitter[] = Array.from({ length: maxEmitters }, makeEmitter);
   function spawn(kind: number, x: number, y: number, radius: number, r: number, g: number, b: number, life: number, thickness: number, intensity: number): void {
+    const mode = currentConfig.composition?.emitters ?? 'bands';
+    if (mode === 'off') return;
+    if (mode !== 'bands') kind = mode === 'rings' ? 0 : mode === 'sparks' ? 2 : 3;
     // Re-use the oldest dead slot (else the closest-to-dead slot).
     let best = -1;
     let bestAge = -1;
@@ -1174,7 +1261,7 @@ export function createEvilandRenderer(
     e.g = g;
     e.b = b;
     e.kind = kind;
-    e.jitter = Math.random();
+    e.jitter = random();
     e.thickness = thickness;
     e.intensity = intensity;
   }
@@ -1191,7 +1278,13 @@ export function createEvilandRenderer(
   // The default config re-expresses the original hardcoded warp formulas, so
   // until setConfig() swaps it the visualizer is byte-identical to before.
   let currentConfig: OperatorConfig = defaultConfig();
+  const random = mulberry32(hashSeed(options.seed ?? 'eviland-renderer'));
+  const forceSource = createFluidForceSource();
+  const scenes = createSceneOverlay(canvas, { gl, quality, seedKey: options.seed ?? 'eviland' });
+  let sourceGain = 1;
+  let anticipationClock = 0;
   const dyn = createDynamics();
+  let chemistry: ReturnType<typeof createReactionDiffusion> = null;
 
   // ---------------------------------------------------------------------------
   // Public API.
@@ -1228,7 +1321,7 @@ export function createEvilandRenderer(
       const bandY = on.band / 23; // 0..1
       const y = -1 + bandY * 2;
       // Stereo pan → horizontal, with a per-onset jitter.
-      const px = frame.pan * 0.6 + (Math.random() - 0.5) * (0.18 + on.sharpness * 0.18);
+      const px = frame.pan * 0.6 + (random() - 0.5) * (0.18 + on.sharpness * 0.18);
       const x = Math.max(-0.95, Math.min(0.95, px));
       const intensity = 0.55 + on.intensity * 0.55;
       switch (on.group) {
@@ -1245,11 +1338,11 @@ export function createEvilandRenderer(
           break;
         case 'snare':
           // Off-centre white burst.
-          spawn(1, x, 0.05 + Math.random() * 0.18 - 0.09, 0.30 + on.intensity * 0.10, palette.light[0], palette.light[1], palette.light[2], 0.35, 0, intensity);
+          spawn(1, x, 0.05 + random() * 0.18 - 0.09, 0.30 + on.intensity * 0.10, palette.light[0], palette.light[1], palette.light[2], 0.35, 0, intensity);
           break;
         case 'hat':
           // Fine sparkle high.
-          spawn(2, x + (Math.random() - 0.5) * 0.4, 0.55 + Math.random() * 0.30, 0.12 + on.intensity * 0.06, palette.accent[0], palette.accent[1], palette.accent[2], 0.28, 0, intensity * 0.9);
+          spawn(2, x + (random() - 0.5) * 0.4, 0.55 + random() * 0.30, 0.12 + on.intensity * 0.06, palette.accent[0], palette.accent[1], palette.accent[2], 0.28, 0, intensity * 0.9);
           break;
         case 'vocal': {
           // Coherent blob mid-screen — y tracks centroid, x tracks pan.
@@ -1267,7 +1360,8 @@ export function createEvilandRenderer(
     // "windup" core that grows as beatPhase nears 1 so the kick resolves *on*
     // the beat instead of after. Cheap: just modulate the core kind via a
     // continuous emitter whose intensity rises with phase.
-    if (frame.energy > 0.04 && frame.beatConfidence > 0.35 && frame.beatPhase > 0.78) {
+    if (frame.energy > 0.04 && frame.beatConfidence > 0.35 && frame.beatPhase > 0.78 && anticipationClock >= 1 / 60) {
+      anticipationClock %= 1 / 60;
       const lead = (frame.beatPhase - 0.78) / 0.22; // 0..1
       spawn(4, 0, -0.15, 0.10 + lead * 0.10, palette.dark[0], palette.dark[1] * 0.7, palette.dark[2] * 0.5, 0.18, 0, lead * 0.7 * frame.beatConfidence);
     }
@@ -1284,7 +1378,7 @@ export function createEvilandRenderer(
       // i_posSize
       instanceData[base + 0] = e.x;
       instanceData[base + 1] = e.y;
-      instanceData[base + 2] = e.baseRadius;
+      instanceData[base + 2] = e.baseRadius * dyn.emitterScale;
       instanceData[base + 3] = age01;
       // i_color
       instanceData[base + 4] = e.r;
@@ -1295,7 +1389,7 @@ export function createEvilandRenderer(
       instanceData[base + 8] = e.kind;
       instanceData[base + 9] = e.jitter;
       instanceData[base + 10] = e.thickness;
-      instanceData[base + 11] = e.intensity;
+      instanceData[base + 11] = e.intensity * dyn.emitterGain * sourceGain;
       active++;
     }
     return active;
@@ -1359,20 +1453,28 @@ export function createEvilandRenderer(
     }
   }
 
-  function render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number): void {
-    if (!fieldA || !fieldB) {
+  function render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number, paletteSource: 'preset' | 'host' = 'preset'): void {
+    if (!fieldA || !fieldB || !composed || !meter || !exposureA || !exposureB) {
       // Resize hasn't run yet — skip; caller will resize on first paint.
       return;
     }
     const dt = Math.max(0.0005, Math.min(0.1, dtMs / 1000));
     time += dt;
+    anticipationClock += dt;
+    const steps = dt * 60;
+    const composition = currentConfig.composition ?? CLASSIC_COMPOSITION;
+    evalConfig(currentConfig, frame, sectionSeed, dyn, dt * 1000);
+    const cueGain = applyScoreCues(dyn, frame.score);
+    // Integral of a continuous source through exponential decay.
+    sourceGain = (1 - Math.pow(dyn.decay, steps)) / Math.max(1e-6, 1 - dyn.decay);
+    gl.bindVertexArray(null);
 
     // Use the active config's generated palette (the randomizer/Director mints a
     // real multi-hue HSV palette per look) instead of the single-hue CSS theme
     // accent. Falling back to the host palette only when the config has none
     // (the "Classic" default). This is what stops every bright pixel collapsing
     // onto the theme accent — the root of the "everything is pink" complaint.
-    if (currentConfig.palette) palette = currentConfig.palette;
+    if (paletteSource === 'preset' && currentConfig.palette) palette = currentConfig.palette;
 
     // Pillar 3: structural memory. New section → record/replay a seed; this
     // makes the field's warp signature recognisable when the chorus returns.
@@ -1401,9 +1503,9 @@ export function createEvilandRenderer(
     // CPU envelopes for bloom / aberration. Bloom lingers (slow release) on
     // energy+crest; aberration is gated to snare+hat only.
     const targetBloom = Math.min(1, frame.energy * 0.7 + frame.crest * 0.5);
-    bloomEnv += (targetBloom - bloomEnv) * (targetBloom > bloomEnv ? 0.18 : 0.05);
+    bloomEnv += (targetBloom - bloomEnv) * (1 - Math.pow(1 - (targetBloom > bloomEnv ? 0.18 : 0.05), steps));
     const targetAberr = Math.min(1, frame.snare * 0.8 + frame.hat * 0.5);
-    aberrEnv += (targetAberr - aberrEnv) * (targetAberr > aberrEnv ? 0.35 : 0.06);
+    aberrEnv += (targetAberr - aberrEnv) * (1 - Math.pow(1 - (targetAberr > aberrEnv ? 0.35 : 0.06), steps));
 
     // Upload instance data + advance ages.
     const active = packEmitters();
@@ -1415,7 +1517,7 @@ export function createEvilandRenderer(
     // mint and morph configs to change the look. evalConfig clamps every output
     // to a GPU-safe range so no config can crash or white-out the field.
     // Runs BEFORE the fluid step because the sim needs dyn.vorticity/dyn.fluid.
-    evalConfig(currentConfig, frame, sectionSeed, dyn);
+
 
     // ---- PASS 0: stable-fluids velocity + dye step. The sim binds its own
     // FBOs/programs, so it runs before the field pass establishes its state;
@@ -1425,7 +1527,7 @@ export function createEvilandRenderer(
     if (fluid) {
       const baseDyeDiss = dyeDissipationFromFrame(frame) + dyn.dyeDissipation;
       const dyeDiss = baseDyeDiss < 0.6 ? 0.6 : baseDyeDiss > 1 ? 1 : baseDyeDiss;
-      fluid.step(dt, fluidForcesFromFrame(frame), {
+      fluid.step(dt, forceSource.forces(frame, palette, dt), {
         vorticity: dyn.vorticity,
         dissipation: 0.985,
         dyeDissipation: dyeDiss,
@@ -1457,6 +1559,7 @@ export function createEvilandRenderer(
     const dr = clampDecayChannel(dyn.decay + dyn.decayR);
     const dg = clampDecayChannel(dyn.decay + dyn.decayG);
     const db = clampDecayChannel(dyn.decay + dyn.decayB);
+    gl.uniform1f(fieldUni.steps, steps);
     gl.uniform3f(fieldUni.decay, dr, dg, db);
     gl.uniform1f(fieldUni.warpAmp, dyn.warpAmp);
     gl.uniform1f(fieldUni.warpScale, dyn.warpScale);
@@ -1481,6 +1584,7 @@ export function createEvilandRenderer(
     drawFullscreen();
 
     // ---- PASS 2: terrain (bass horizon) drawn into the field ----
+    if (composition.terrain) {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
     gl.useProgram(TERRAIN);
@@ -1488,11 +1592,13 @@ export function createEvilandRenderer(
     gl.uniform1f(terrainUni.bass, frame.bass);
     gl.uniform1f(terrainUni.time, time);
     gl.uniform1f(terrainUni.pan, frame.pan);
-    gl.uniform3f(terrainUni.color, palette.dark[0] * 0.8 + palette.accent[0] * 0.2, palette.dark[1] * 0.7, palette.dark[2] * 0.9);
+    gl.uniform3f(terrainUni.color, (palette.dark[0] * 0.8 + palette.accent[0] * 0.2) * sourceGain, palette.dark[1] * 0.7 * sourceGain, palette.dark[2] * 0.9 * sourceGain);
     drawFullscreen();
 
+    }
+    gl.enable(gl.BLEND);
     // ---- PASS 3: emitter splats (additive) ----
-    if (active > 0) {
+    if (active > 0 && composition.emitters !== 'off') {
       gl.bindBuffer(gl.ARRAY_BUFFER, instanceBuf);
       gl.bufferData(gl.ARRAY_BUFFER, instanceData.subarray(0, active * 12), gl.DYNAMIC_DRAW);
       gl.useProgram(EMITTER);
@@ -1506,7 +1612,8 @@ export function createEvilandRenderer(
     // draws each frame). Upload the 24 bands → R32F texture, draw the "sun".
     // Still inside fieldB + additive blend so the feedback advect captures it
     // next frame and the rays leave swirling trails.
-    {
+    if (composition.spectrum) {
+      gl.blendFunc(gl.ONE, gl.ONE);
       const bands = frame.bands;
       const n = Math.min(24, bands.length);
       for (let i = 0; i < n; i++) bandsScratch[i] = bands[i]!;
@@ -1536,7 +1643,7 @@ export function createEvilandRenderer(
       // Energy carries sustained material; voice peaks keep transients crisp.
       const voicePeak = Math.max(frame.kick, frame.snare, frame.hat, frame.vocal);
       const intensity = frame.energy * 1.05 + voicePeak * 0.65;
-      gl.uniform1f(spectrumUni.intensity, Math.min(1.8, intensity));
+      gl.uniform1f(spectrumUni.intensity, Math.min(1.8, intensity) * sourceGain);
       gl.uniform1f(spectrumUni.time, time);
       gl.uniform1f(spectrumUni.aspect, fieldH / Math.max(1, fieldW));
       drawFullscreen();
@@ -1554,13 +1661,33 @@ export function createEvilandRenderer(
       gl.uniform1i(waveUni.wave, 0);
       gl.uniform1f(waveUni.mode, dyn.waveMode);
       gl.uniform3f(waveUni.color, palette.accent[0], palette.accent[1], palette.accent[2]);
-      gl.uniform1f(waveUni.intensity, dyn.waveIntensity);
+      gl.uniform1f(waveUni.intensity, dyn.waveIntensity * sourceGain);
       gl.uniform1f(waveUni.thickness, dyn.waveThickness);
       gl.uniform1f(waveUni.scale, dyn.waveScale);
       gl.uniform1f(waveUni.aspect, fieldH / Math.max(1, fieldW));
       drawFullscreen();
     }
     gl.disable(gl.BLEND);
+
+    if (composition.scene && scenes) {
+      scenes.setSeedKey(currentConfig.seed ?? options.seed ?? 'eviland');
+      scenes.setScene(composition.scene);
+      scenes.render(frame, palette, dt * 1000, {
+        framebuffer: fieldB.fbo, width: fieldW, height: fieldH,
+        opacity: 1 - Math.pow(1 - Math.max(0, Math.min(0.95, composition.density)), steps),
+        contrast: composition.contrast,
+      });
+      gl.bindVertexArray(null);
+      gl.disable(gl.BLEND);
+    }
+
+    if (composition.simulation === 'reaction-diffusion') {
+      if (!chemistry) chemistry = createReactionDiffusion(gl, hashSeed(currentConfig.seed ?? 'chemistry'));
+      chemistry?.render(frame, palette, dt * 1000, fieldA.tex, {
+        framebuffer: fieldB.fbo, width: fieldW, height: fieldH, opacity: composition.density,
+      });
+      gl.bindVertexArray(null); gl.disable(gl.BLEND);
+    }
 
     // Swap field ping-pong.
     const tmp = fieldA;
@@ -1591,11 +1718,12 @@ export function createEvilandRenderer(
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, echoA.tex);
         gl.uniform1i(echoUni.prevEcho, 1);
-        gl.uniform1f(echoUni.zoom, dyn.echoZoom);
-        gl.uniform1f(echoUni.rot, dyn.echoRotate);
+        gl.uniform1f(echoUni.zoom, Math.pow(1 + dyn.echoZoom, steps) - 1);
+        gl.uniform1f(echoUni.rot, dyn.echoRotate * steps);
         gl.uniform1f(echoUni.flipX, dyn.echoFlipX);
         gl.uniform1f(echoUni.flipY, dyn.echoFlipY);
-        gl.uniform1f(echoUni.feedback, 0.55);
+        gl.uniform1f(echoUni.feedback, Math.pow(0.55, steps));
+        gl.uniform1f(echoUni.injection, (1 - Math.pow(0.55, steps)) / 0.45);
         gl.uniform2f(echoUni.centre, dyn.centreX, dyn.centreY);
         drawFullscreen();
         // Swap echo ping-pong so next frame reads the result we just wrote.
@@ -1611,7 +1739,7 @@ export function createEvilandRenderer(
       // release after the alpha has stayed sub-threshold for ECHO_FREE_FRAMES
       // consecutive rendered frames. A one-shot echo still pays only ~0.5s of
       // residency past its last audible frame.
-      echoIdleFrames++;
+      echoIdleFrames += steps;
       if (echoIdleFrames >= ECHO_FREE_FRAMES) {
         disposeFbo(echoA); disposeFbo(echoB);
         echoA = null; echoB = null;
@@ -1647,6 +1775,77 @@ export function createEvilandRenderer(
       snapshotActive = false;
     }
 
+    // Compose all sources BEFORE bloom extraction.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, composed.fbo);
+    gl.viewport(0, 0, fieldW, fieldH);
+    gl.useProgram(COMPOSE);
+    bindFullscreenQuad(COMPOSE);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fieldA.tex);
+    gl.uniform1i(composeUni.field, 0);
+    // Dye field on unit 2 — when the sim is unavailable (low tier / GPU
+    // doesn't support RGBA16F render targets) bind fieldA as a placeholder
+    // and force liquidMix to 0 below so the shader's `if (u_liquidMix > 0)`
+    // branch skips the sample entirely.
+    const dyeTex = fluid ? fluid.dyeTexture() : null;
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, dyeTex ?? fieldA.tex);
+    gl.uniform1i(composeUni.dye, 2);
+    // Plan §2.5 echo source — when alpha=0 the shader skips the texture
+    // entirely, so binding fieldA as a placeholder is safe (any valid
+    // texture is fine; the sample is gated by `u_echoAlpha > 0`).
+    const echoSrcTex = echoA ? echoA.tex : fieldA.tex;
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, echoSrcTex);
+    gl.uniform1i(composeUni.echo, 3);
+    // Plan §2.6 snapshot source — same trick: fall back to the live field
+    // when there's no snapshot, and gate the sample shader-side with
+    // `u_snapshotMix > 0`. snapshotMix = 1 - transition, so a freshly
+    // started fade (transition≈0) gives mix≈1 (full from-snapshot), then
+    // marches to 0 as transition→1.
+    const snapTex = fieldSnapshot ? fieldSnapshot.tex : fieldA.tex;
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, snapTex);
+    gl.uniform1i(composeUni.snapshot, 4);
+    gl.uniform1f(composeUni.aberration, aberrationOn ? aberrEnv * 0.9 : 0);
+    gl.uniform1f(composeUni.liquidMix, dyeTex ? dyn.liquidMix : 0);
+    gl.uniform1f(composeUni.echoAlpha, echoA ? dyn.echoAlpha : 0);
+    gl.uniform1f(composeUni.snapshotMix, snapshotActive && fieldSnapshot ? Math.max(0, 1 - dyn.transition) : 0);
+    gl.uniform3f(composeUni.bg, palette.bg[0], palette.bg[1], palette.bg[2]);
+    gl.uniform3f(composeUni.accent, palette.accent[0], palette.accent[1], palette.accent[2]);
+    gl.uniform3f(composeUni.dark, palette.dark[0], palette.dark[1], palette.dark[2]);
+    gl.uniform3f(composeUni.light, palette.light[0], palette.light[1], palette.light[2]);
+    drawFullscreen();
+
+    // ---- Auto-exposure: meter the composed image, adapt one texel of state.
+    // Quiet passages aim for a lower key than loud ones, so the meter evens
+    // out dim LOOKS without flattening the dynamics of the song itself.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, meter.fbo);
+    gl.viewport(0, 0, METER_W, METER_H);
+    gl.useProgram(METER);
+    bindFullscreenQuad(METER);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, composed.tex);
+    gl.uniform1i(meterUni.src, 0);
+    gl.uniform2f(meterUni.cell, 1 / METER_W, 1 / METER_H);
+    drawFullscreen();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, exposureB.fbo);
+    gl.viewport(0, 0, 1, 1);
+    gl.useProgram(EXPOSE);
+    bindFullscreenQuad(EXPOSE);
+    gl.bindTexture(gl.TEXTURE_2D, meter.tex);
+    gl.uniform1i(exposeUni.meter, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, exposureA.tex);
+    gl.uniform1i(exposeUni.prev, 1);
+    const loudness = Math.max(0, Math.min(1, (frame.energy - 0.05) / 0.45));
+    gl.uniform1f(exposeUni.targetKey, 0.55 + 0.4 * loudness);
+    gl.uniform1f(exposeUni.dt, dt);
+    drawFullscreen();
+    const exposureSwap = exposureA;
+    exposureA = exposureB;
+    exposureB = exposureSwap;
+
     // ---- PASS 4: bloom pyramid (threshold → kawase down → kawase up) ----
     let bloomSrc: WebGLTexture | null = null;
     if (bloomLevels > 0 && bloomDown.length === bloomLevels && bloomUp.length === bloomLevels) {
@@ -1656,8 +1855,12 @@ export function createEvilandRenderer(
       gl.useProgram(THRESHOLD);
       bindFullscreenQuad(THRESHOLD);
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, fieldA.tex);
+      gl.bindTexture(gl.TEXTURE_2D, composed.tex);
       gl.uniform1i(thresholdUni.src, 0);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, exposureA.tex);
+      gl.uniform1i(thresholdUni.exposure, 1);
+      gl.activeTexture(gl.TEXTURE0);
       gl.uniform1f(thresholdUni.threshold, 0.18);
       drawFullscreen();
       // Down levels 1..N-1
@@ -1687,62 +1890,25 @@ export function createEvilandRenderer(
       bloomSrc = bloomUp[0]!.tex;
     }
 
-    // ---- PASS 5: final composite to screen ----
+    // Tone-map the same image that supplied the bloom pyramid.
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, viewW, viewH);
     gl.useProgram(POST);
     bindFullscreenQuad(POST);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, fieldA.tex);
+    gl.bindTexture(gl.TEXTURE_2D, composed.tex);
     gl.uniform1i(postUni.field, 0);
     gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, bloomSrc ?? fieldA.tex);
+    gl.bindTexture(gl.TEXTURE_2D, bloomSrc ?? composed.tex);
     gl.uniform1i(postUni.bloom, 1);
-    // Dye field on unit 2 — when the sim is unavailable (low tier / GPU
-    // doesn't support RGBA16F render targets) bind fieldA as a placeholder
-    // and force liquidMix to 0 below so the shader's `if (u_liquidMix > 0)`
-    // branch skips the sample entirely.
-    const dyeTex = fluid ? fluid.dyeTexture() : null;
     gl.activeTexture(gl.TEXTURE2);
-    gl.bindTexture(gl.TEXTURE_2D, dyeTex ?? fieldA.tex);
-    gl.uniform1i(postUni.dye, 2);
-    // Plan §2.5 echo source — when alpha=0 the shader skips the texture
-    // entirely, so binding fieldA as a placeholder is safe (any valid
-    // texture is fine; the sample is gated by `u_echoAlpha > 0`).
-    const echoSrcTex = echoA ? echoA.tex : fieldA.tex;
-    gl.activeTexture(gl.TEXTURE3);
-    gl.bindTexture(gl.TEXTURE_2D, echoSrcTex);
-    gl.uniform1i(postUni.echo, 3);
-    // Plan §2.6 snapshot source — same trick: fall back to the live field
-    // when there's no snapshot, and gate the sample shader-side with
-    // `u_snapshotMix > 0`. snapshotMix = 1 - transition, so a freshly
-    // started fade (transition≈0) gives mix≈1 (full from-snapshot), then
-    // marches to 0 as transition→1.
-    const snapTex = fieldSnapshot ? fieldSnapshot.tex : fieldA.tex;
-    gl.activeTexture(gl.TEXTURE4);
-    gl.bindTexture(gl.TEXTURE_2D, snapTex);
-    gl.uniform1i(postUni.snapshot, 4);
-    // Pull bloom intensity DOWN (the post shader already halves it again);
-    // bloom now glows around bright parts instead of dominating the whole frame.
-    gl.uniform1f(postUni.bloomIntensity, bloomSrc ? 0.30 + bloomEnv * 0.45 : 0);
-    gl.uniform1f(postUni.aberration, aberrationOn ? aberrEnv * 0.9 : 0);
-    gl.uniform1f(postUni.saturation, Math.max(0.35, 1 - frame.flatness * 0.55));
-    gl.uniform1f(postUni.liquidMix, dyeTex ? dyn.liquidMix : 0);
-    gl.uniform1f(postUni.echoAlpha, echoA ? dyn.echoAlpha : 0);
-    gl.uniform1f(postUni.snapshotMix, snapshotActive && fieldSnapshot ? Math.max(0, 1 - dyn.transition) : 0);
-    gl.uniform3f(postUni.bg, palette.bg[0], palette.bg[1], palette.bg[2]);
-    gl.uniform3f(postUni.accent, palette.accent[0], palette.accent[1], palette.accent[2]);
-    gl.uniform3f(postUni.dark, palette.dark[0], palette.dark[1], palette.dark[2]);
-    gl.uniform3f(postUni.light, palette.light[0], palette.light[1], palette.light[2]);
-    // Gentle centroid tilt — most of the colour now comes from the palette
-    // ramp + field tint, so this stays a quiet bias (≈±10%).
-    const c = frame.centroid;
-    gl.uniform3f(
-      postUni.hueShift,
-      0.95 + (1 - c) * 0.12,
-      0.96 + c * 0.04,
-      0.95 + c * 0.12,
-    );
+    gl.bindTexture(gl.TEXTURE_2D, exposureA.tex);
+    gl.uniform1i(postUni.exposure, 2);
+    gl.uniform1f(postUni.bloomIntensity, bloomSrc ? Math.max(0, 0.30 + bloomEnv * 0.45 + dyn.bloom) : 0);
+    gl.uniform1f(postUni.saturation, Math.max(0.35, 1 - frame.flatness * 0.55) * cueGain.saturation);
+    gl.uniform1f(postUni.gain, cueGain.output);
+    gl.uniform3fv(postUni.bg, palette.bg);
+    gl.uniform3f(postUni.hueShift, 1, 1, 1);
     drawFullscreen();
   }
 
@@ -1755,6 +1921,15 @@ export function createEvilandRenderer(
     if (downProg) gl.deleteProgram(downProg);
     if (upProg) gl.deleteProgram(upProg);
     if (postProg) gl.deleteProgram(postProg);
+    gl.deleteProgram(composeProg);
+    gl.deleteProgram(meterProg);
+    gl.deleteProgram(exposeProg);
+    scenes?.dispose();
+    chemistry?.dispose();
+    disposeFbo(composed);
+    disposeFbo(meter);
+    disposeFbo(exposureA);
+    disposeFbo(exposureB);
     if (waveProg) gl.deleteProgram(waveProg);
     if (echoProg) gl.deleteProgram(echoProg);
     if (blitProg) gl.deleteProgram(blitProg);

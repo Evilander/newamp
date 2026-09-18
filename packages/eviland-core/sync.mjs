@@ -12,7 +12,7 @@
 // The --check mode runs in NewAmp's `prebuild` so a release can never ship a
 // stale duplicate: edit an engine module without re-syncing and the build fails
 // loudly instead of silently packaging divergent copies.
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,7 +21,17 @@ const repo = resolve(here, '..', '..');
 const checkOnly = process.argv.includes('--check');
 const FILES = [
   'eviland.ts',
+  'scene-overlay.ts',
+  'eviland-gl.ts',
+  'eviland-reaction-diffusion.ts',
+  'eviland-appearance.ts',
+  // Every scene module: the renderer draws them as selectable sources.
+  ...readdirSync(resolve(repo, 'src/visualizer/scenes'))
+    .filter((name) => name.endsWith('.ts'))
+    .map((name) => `scenes/${name}`),
   'eviland-audio.ts',
+  'eviland-score.ts',
+  'eviland-conductor.ts',
   'eviland-fluid.ts',
   'eviland-operators.ts',
   'eviland-randomizer.ts',
@@ -59,6 +69,7 @@ for (const f of FILES) {
       drifted.push(f);
     }
   } else {
+    mkdirSync(dirname(to), { recursive: true });
     copyFileSync(from, to);
     ok++;
   }

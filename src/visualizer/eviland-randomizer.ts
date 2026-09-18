@@ -83,6 +83,42 @@ export const ARCHETYPES = [
 
 export type Archetype = (typeof ARCHETYPES)[number];
 
+// Which procedural scene gives each archetype its geometry. The feedback
+// operators (zoom, swirl, decay, mirrors…) used to be the ONLY thing that
+// differed between archetypes, all drawn over the same ridge + spectrum sun +
+// emitters, so every look read as a variation of one picture. A scene per
+// archetype makes the source itself part of the look. Where two scenes suit
+// an archetype the seed picks between them; no scene serves two archetypes,
+// so archetypes stay recognisably different from each other.
+const COMPOSITION_SCENES: Record<Archetype, readonly string[]> = {
+  tunnel: ['tunnel-rings'],
+  kaleidoscope: ['kaleido-bloom', 'fractal-zoom'],
+  liquid: ['liquid-metal'],
+  lattice: ['hex-pulse'],
+  nebula: ['volume-garden', 'plasma-aurora'],
+  strobe: ['glitch-bars', 'laser-storm'],
+  vortex: ['eye-of-storm'],
+  inkwell: ['smoke-ink'],
+  supernova: ['starfield-warp', 'spiral-galaxy'],
+  cathedral: ['vu-cathedral'],
+  phosphor: ['phosphor-scope'],
+  ribbonfall: ['ribbon-flow'],
+  pulsar: ['supershape-pulse'],
+  mosaic: ['voronoi-pulse', 'pixel-bloom'],
+  deepfield: ['deep-jelly'],
+  solarflare: ['fire-spires'],
+  glasshouse: ['crystal-shards'],
+  stormfront: ['lightning-veins'],
+  heartbeat: ['silk-waves'],
+  carousel: ['orbit-swarm'],
+  firefly: ['constellation'],
+  tidal: ['spectro-rain'],
+  prism: ['moire-weave'],
+  echochamber: ['comet-trails'],
+  wireframe: ['neon-grid', 'city-pulse'],
+  emberveil: ['particle-fountain'],
+};
+
 interface NumRange { min: number; max: number }
 interface BindingSpec {
   feature: AudioFeature;
@@ -1694,6 +1730,16 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     name: `${chosen[0]!.toUpperCase()}${chosen.slice(1)} ${code}`,
     seed: code,
     archetype: chosen,
+    composition: {
+      scene: new Rng(hashSeed(`${code}::scene`)).pick(COMPOSITION_SCENES[chosen]),
+      simulation: chosen === 'inkwell' || chosen === 'mosaic' ? 'reaction-diffusion' : undefined,
+      terrain: chosen === 'wireframe',
+      spectrum: chosen === 'pulsar',
+      emitters: chosen === 'strobe' || chosen === 'stormfront' ? 'sparks'
+        : chosen === 'echochamber' ? 'rings' : 'off',
+      density: new Rng(hashSeed(`${code}::density`)).range(0.25, 0.65),
+      contrast: new Rng(hashSeed(`${code}::contrast`)).range(0.85, 1.5),
+    },
     zoom: sampleChannel(rng, template.zoom),
     rotate: sampleChannel(rng, template.rotate),
     swirl: sampleChannel(rng, template.swirl),
@@ -1710,7 +1756,7 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     liquidMix,
     dyeDissipation,
     spinFromSection: template.spinFromSection,
-    waveform: sampleWaveform(rng, template),
+    waveform: { ...sampleWaveform(rng, template), mode: chosen === 'phosphor' ? 'line' : 'off' },
     palette,
     bloom: sampleChannel(rng, template.bloom),
     emitterScale: sampleNum(rng, template.emitterScale),

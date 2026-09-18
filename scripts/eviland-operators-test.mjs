@@ -308,107 +308,33 @@ log.push('default/clone/lerp/mutate plumbing OK');
   log.push('lerpConfigInto: palette never aliases an input config (section-recall safety)');
 }
 
-// ─── PLAN §3 ARCHETYPE DISTINCTNESS ────────────────────────────────────────
-// Every archetype must produce a representative dynamics vector that no other
-// archetype lives epsilon-close to. This catches lazy near-duplicates forever:
-// if a future "carousel" gets retuned to look like "vortex", THIS test fails.
-//
-// We project to dynamics (the actual GPU-uniform space the renderer reacts to)
-// because that's the surface the eye sees. Bindings collapse to base+typical
-// audio contribution, q-LFOs evaluate at a fixed phase, etc.
+// Configuration coverage only. Visual distinctness is measured on rendered
+// pixels by test:eviland-diversity (fixed palette, spatial + motion
+// comparisons) — parameter distance here used to pass recoloured twins and
+// counted knobs the renderer never read.
 {
   // Determinism: same seed → byte-identical config every run.
   const s1 = JSON.stringify(generate(98765).config);
   const s2 = JSON.stringify(generate(98765).config);
   if (s1 !== s2) fail('determinism broken: same seed produced different configs');
 
-  // Build a representative frame that exercises every audio path.
-  const rep = mockFrame({
-    kick: 0.6, bass: 0.55, snare: 0.4, hat: 0.35, vocal: 0.4,
-    energy: 0.55, centroid: 0.5, flatness: 0.3, crest: 0.45, rolloff: 0.55,
-    width: 0.5, pan: 0.2, novelty: 0.35, beatPhase: 0.25, beatConfidence: 0.7,
-  });
-  const dyn = createDynamics();
-  function archetypeVector(name) {
-    // Seed each archetype with the same hash so cousins under different seeds
-    // don't drown out the archetype-level identity; we want to catch templates
-    // that bias toward the same look-space region, not RNG noise.
+  for (const name of ARCHETYPES) {
     const { config } = generate(`distinct::${name}`, name);
-    evalConfig(config, rep, 0.5, dyn);
-    // Vector: every visible knob normalised to roughly comparable scale.
-    return [
-      dyn.zoom * 10,
-      dyn.rotate * 30,
-      dyn.swirl * 8,
-      dyn.hueCycle * 40,
-      (dyn.decay - 0.88) * 30,            // re-centre around the typical mid-point
-      dyn.warpAmp * 600,
-      dyn.warpScale * 0.25,
-      dyn.mirror * 0.15,
-      dyn.mirrorMix * 3,
-      dyn.flowX * 800,
-      dyn.flowY * 800,
-      dyn.fluid * 2.5,
-      dyn.vorticity * 0.1,
-      dyn.liquidMix * 4,
-      dyn.dyeDissipation * 25,
-      dyn.bloom * 4,
-      dyn.waveMode * 0.5,
-      dyn.waveIntensity * 2,
-      dyn.waveScale * 4,
-      dyn.emitterScale * 1.2,
-      dyn.emitterGain * 1.5,
-      dyn.radialZoom * 6,
-      dyn.radialRotate * 18,
-      dyn.radialSwirl * 4,
-      dyn.radialDecay * 25,
-      dyn.decayR * 30,
-      dyn.decayG * 30,
-      dyn.decayB * 30,
-      (dyn.centreX - 0.5) * 10,
-      (dyn.centreY - 0.5) * 10,
-      dyn.echoZoom * 6,
-      dyn.echoRotate * 6,
-      dyn.echoAlpha * 5,
-      dyn.echoFlipX * 3,
-      dyn.echoFlipY * 3,
-      // Palette accent hue, projected to a 2D unit-circle point so wraparound
-      // doesn't collapse identical accents at h=0 and h=1.
-      ...(() => {
-        const p = config.palette;
-        if (!p) return [0, 0, 0, 0, 0, 0];
-        return [p.accent[0] * 2, p.accent[1] * 2, p.accent[2] * 2, p.dark[0], p.dark[1], p.dark[2]];
-      })(),
-    ];
-  }
-  const vecs = ARCHETYPES.map((name) => ({ name, v: archetypeVector(name) }));
-  let minD = Infinity;
-  let minPair = ['', ''];
-  for (let i = 0; i < vecs.length; i++) {
-    for (let j = i + 1; j < vecs.length; j++) {
-      let sum = 0;
-      const a = vecs[i].v, b = vecs[j].v;
-      for (let k = 0; k < a.length; k++) sum += (a[k] - b[k]) ** 2;
-      const d = Math.sqrt(sum);
-      if (d < minD) { minD = d; minPair = [vecs[i].name, vecs[j].name]; }
+    if (config.archetype !== name) fail(`archetype tag drift: requested ${name}, got ${config.archetype}`);
+    if (config.decay.base < 0.78 || config.decay.base > 0.97) fail(`${name}: decay.base out of safe range (${config.decay.base})`);
+    const independent = createDynamics();
+    evalConfig(config, mockFrame({ energy: 0.55 }), 0.5, independent);
+    for (const [key, value] of Object.entries(independent)) {
+      if (typeof value === 'number' && !Number.isFinite(value)) fail(`${name}: ${key} is not finite`);
     }
+    if (!config.composition?.scene) fail(`${name}: missing selectable source`);
+    if (config.composition?.terrain && config.composition?.spectrum) fail(`${name}: universal ridge/sun stack returned`);
+    const cloned = cloneConfig(config);
+    if (cloned.composition === config.composition) fail(`${name}: composition clone aliases input`);
+    const roundtrip = lerpConfig(config, generate('other', 'nebula').config, 0);
+    if (JSON.stringify(roundtrip.composition) !== JSON.stringify(config.composition)) fail(`${name}: composition interpolation lost endpoint`);
   }
-  // Empirically the closest pairs (cousin looks like nebula↔inkwell) sit
-  // around d~1.5. 0.9 leaves real room for tuning while still catching lazy
-  // near-duplicates (twins would collapse to d<0.3).
-  const EPS = 0.9;
-  log.push(`archetype distinctness: ${ARCHETYPES.length} looks, closest pair (${minPair.join(' vs ')}) d=${minD.toFixed(3)} (threshold ${EPS})`);
-  if (minD < EPS) fail(`two archetypes are visually too close: ${minPair.join(' vs ')} (d=${minD.toFixed(3)} < ${EPS})`);
-
-  // Every archetype must be reachable in at least one tier of the Director
-  // is asserted by the director test; here we at least verify every archetype
-  // generates a valid config and stamps its own archetype field.
-  for (const a of ARCHETYPES) {
-    const { config } = generate(`reach::${a}`, a);
-    if (config.archetype !== a) fail(`archetype tag drift: requested ${a}, got ${config.archetype}`);
-    if (config.decay.base < 0.78 || config.decay.base > 0.97) fail(`${a}: decay.base out of safe range (${config.decay.base})`);
-  }
-  log.push(`every archetype generates + tags + clamps OK (${ARCHETYPES.length} looks)`);
+  log.push(`source configuration coverage: ${ARCHETYPES.length} archetypes (visual diversity tested separately)`);
 }
 
 const report = log.join('\n') + '\n' + (pass ? '[eviland-operators-test] PASS' : '[eviland-operators-test] FAIL') + '\n';

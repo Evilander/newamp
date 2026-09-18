@@ -82,6 +82,7 @@ import type {
 } from '../shared/types.js';
 import type { TrackDna } from '../shared/audio-dna.js';
 import type { VisualMemoryPlan, VisualMemoryStats } from '../shared/visual-memory.js';
+import type { SongScore } from '../src/visualizer/eviland-score.js';
 
 const api: NewAmpAPI = {
   getMusicServers: () => ipcRenderer.invoke('music-servers:list'),
@@ -196,6 +197,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tracks:visual-memory-stats') as Promise<VisualMemoryStats>,
   clearAllVisualMemory: () =>
     ipcRenderer.invoke('tracks:visual-memory-clear-all') as Promise<number>,
+  getSongScore: (id: number) =>
+    ipcRenderer.invoke('tracks:song-score', id) as Promise<SongScore | null>,
   getRadioBrainStatus: () => ipcRenderer.invoke('radio-brain:status') as Promise<RadioBrainStatus>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,

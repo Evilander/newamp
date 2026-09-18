@@ -1,3 +1,4 @@
+import type { LiveCompositionFrame } from '../visualizer/eviland-live-pipeline';
 // postMessage contract between the main renderer (Visualizer.tsx) and the
 // sandboxed Butterchurn iframe (butterchurn-iframe.html / ./main.ts).
 //
@@ -14,10 +15,13 @@ export interface BcInitMessage {
   type: 'init';
   sampleRate: number;
   dpr: number;
+  eviland?: boolean;
+  quality?: 'high' | 'medium' | 'low';
 }
 export interface BcAudioMessage {
   type: 'audio';
   samples: Uint8Array;
+  eviland?: LiveCompositionFrame;
 }
 export interface BcDisposeMessage {
   type: 'dispose';

@@ -11,17 +11,17 @@ import {
 } from '../butterchurn-iframe/protocol';
 import { createParticleFlowRenderer } from '../visualizer/particle-flow';
 import { createEvilandRenderer, type EvilandPalette } from '../visualizer/eviland';
+import { liveGradeFor, resolveEvilandPalette, tuneEvilandFrame } from '../visualizer/eviland-appearance';
 import { createGovernor } from '../visualizer/eviland-governor';
 import { createEvilandReactor } from '../visualizer/eviland-audio';
-import { createReactorOverlay, type ReactorOverlay } from '../visualizer/reactor-overlay';
-import { createSceneOverlay, type SceneOverlay } from '../visualizer/scene-overlay';
 import { createDirector } from '../visualizer/eviland-director';
 import {
   generate as generateEvilandConfig,
   decode as decodeEvilandConfig,
 } from '../visualizer/eviland-randomizer';
-import type { OperatorConfig, WaveMode } from '../visualizer/eviland-operators';
+import { applyWaveformOverride, type OperatorConfig } from '../visualizer/eviland-operators';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from '../visualizer/eviland-memory-bridge';
+import { createEngineScoreFeed } from '../visualizer/eviland-score-feed';
 import { blendPaletteWithArt, extractArtPalette, type ArtPalette } from '../visualizer/art-palette';
 import {
   publishActiveBridge,
@@ -146,12 +146,6 @@ export function Visualizer({
 }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const butterchurnIframeRef = useRef<HTMLIFrameElement>(null);
-  // Eviland Live overlay: the transparent reactor canvas stacked over the
-  // butterchurn (MilkDrop) iframe.
-  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
-  // Eviland Live scene layer: the WebGL2 scene overlay (25 audio-reactive
-  // scenes) sandwiched between the MilkDrop iframe and the reactor events.
-  const sceneCanvasRef = useRef<HTMLCanvasElement>(null);
   const engine = usePlayerStore((s) => s.engine);
   // Eviland-only state mirrored into a ref so the rAF loop can read live values
   // without restarting on every toggle. The loop reads `evilandStateRef.current`
@@ -214,9 +208,6 @@ export function Visualizer({
     if (!canvas || suspendedByFullscreen) return;
 
     if (mode === 'butterchurn' || mode === 'eviland-live') {
-      // 'eviland-live' reuses this exact butterchurn (MilkDrop) iframe as its
-      // warp/field base, then composites NewAmp's causal reactor events on a
-      // transparent overlay canvas on top (set up further down, gated on mode).
       // Butterchurn runs inside a sandboxed iframe (butterchurn-iframe.html) so
       // its preset-shader eval is scoped to a frame whose CSP permits
       // 'unsafe-eval' — the main renderer stays on script-src 'self'. Web Audio
@@ -224,6 +215,12 @@ export function Visualizer({
       // each frame and the iframe feeds them to butterchurn's render({ audioLevels })
       // path. If the frame can't host butterchurn (load error / missing feature /
       // timeout) we drop to the non-eval canvas-2D fallback so it never goes dark.
+      //
+      // 'eviland-live' uses the same iframe, and the iframe owns the WHOLE
+      // image: scenes, fluid, chemistry and reactor events are drawn into
+      // MilkDrop's feedback texture there (eviland-live-pipeline.ts) and one
+      // palette grades the result. This side only analyses audio, runs the
+      // Director and posts the look for each frame.
       const iframe = butterchurnIframeRef.current;
       if (!iframe) return;
       let raf = 0;
@@ -245,7 +242,7 @@ export function Visualizer({
       // noticeably less to transients than every other visualizer mode.
       const PREEMPHASIS = 1.4;
 
-      // --- Eviland Live overlay (reactor events composited over MilkDrop) ---
+      // --- Eviland Live: audio analysis + Director for the iframe's pipeline ---
       const liveMode = mode === 'eviland-live';
       const binCount = engine.frequencyBinCount;
       const ovFreq = liveMode ? new Uint8Array(new ArrayBuffer(binCount)) : null;
@@ -255,17 +252,21 @@ export function Visualizer({
       const ovReactor = liveMode
         ? createEvilandReactor({ sampleRate: engine.getSampleRate(), fftSize: engine.fftSize, binCount })
         : null;
-      let overlay: ReactorOverlay | null = null;
+      const liveDirector = liveMode ? createDirector({ songId: 'eviland-live' }) : null;
+      // Look-ahead cues from the track's song score (sections on the bar
+      // line, builds, drops, key changes). No-op until a score is available.
+      const liveScoreFeed = liveMode ? createEngineScoreFeed(engine, () => usePlayerStore.getState().current) : null;
+      let liveConfig: OperatorConfig | null = null;
+      let liveNonce = -1;
+      let latestLive: BcAudioMessage['eviland'];
       let overlayLastNow = 0;
-      // Palette for the overlay events — theme base re-read ~1x/sec on the
-      // paint cadence and change-gated (the same hoisted-refresh pattern the
-      // 2D modes use), so a skin change re-tints the running overlay + scene
-      // layers WITHOUT tearing down the stage. Blended per-track with the
-      // album art's dominant colors (async, best-effort) so scenes and
-      // reactor events glow in the sleeve's colors; the extracted art palette
-      // is cached so a theme change re-blends instead of refetching. The
-      // MilkDrop field below keeps its own preset palette by design — it was
-      // never theme-driven.
+      // One palette for the whole composition — theme base re-read ~1x/sec on
+      // the paint cadence and change-gated, so a skin change re-tints the
+      // running image WITHOUT tearing down the stage. Blended per-track with
+      // the album art's dominant colors (async, best-effort); the extracted
+      // art palette is cached so a theme change re-blends instead of
+      // refetching. The toolbar's palette choice is applied on top of this in
+      // updateComposition().
       const readThemePalette = (): EvilandPalette => ({
         accent: parseRgbVec(getCssVar('--accent')),
         dark: parseRgbVec(getCssVar('--accent-dim', getCssVar('--accent'))),
@@ -299,30 +300,6 @@ export function Visualizer({
           }
         });
       };
-      if (liveMode && overlayCanvasRef.current) {
-        overlay = createReactorOverlay(overlayCanvasRef.current);
-      }
-      // Auto-Pilot governor for the overlay stack (reactor events + scene
-      // layer). The MilkDrop field self-governs inside its iframe; this
-      // watches the measured cost of OUR layers and trims the scene canvas
-      // resolution — and at its floor, paints the scene every other frame.
-      // The reactor overlay stays full-res: it's the cheap causal layer and
-      // its punch is the identity of Eviland Live.
-      const ovGov = liveMode ? createGovernor({ costBudgetMs: 6 }) : null;
-      let sceneSkipDt = 0;
-      let scenePhase = false;
-      // Scene overlay: skipped entirely on 'low' so weak GPUs keep their
-      // frame budget — MilkDrop + reactor events still run.
-      let sceneOverlay: SceneOverlay | null = null;
-      let sceneW = 0;
-      let sceneH = 0;
-      let sceneDpr = 0;
-      if (liveMode && performance !== 'low' && sceneCanvasRef.current) {
-        sceneOverlay = createSceneOverlay(sceneCanvasRef.current, {
-          quality: 'high',
-          seedKey: `track-${usePlayerStore.getState().current?.id ?? 'idle'}`,
-        });
-      }
       // Lineage-aware scene seed. The bare `track-<id>` key applies instantly
       // on track change; a read-only bridge (same pattern as the headless
       // producer — loadOrSeed then dispose, never observe/flush, so the
@@ -336,6 +313,8 @@ export function Visualizer({
         const tid = usePlayerStore.getState().current?.id ?? null;
         if (tid === sceneSeedTrackId) return;
         sceneSeedTrackId = tid;
+        ovReactor?.reset();
+        liveDirector?.reset(`track-${tid ?? 'idle'}`);
         sceneSeedValue = sceneSeedForTrack(tid, null) ?? 'idle';
         if (tid == null) return;
         const captured = tid;
@@ -343,65 +322,43 @@ export function Visualizer({
         void readOnlyBridge.loadOrSeed().then((plan) => {
           if (sceneSeedTrackId === captured && plan) {
             sceneSeedValue = sceneSeedForTrack(captured, plan) ?? sceneSeedValue;
+            liveDirector?.loadPlan(plan);
           }
           void readOnlyBridge.flushAndDispose('manual');
         });
       };
 
-      const updateOverlay = (now: number): void => {
-        if (!overlay || !ovReactor || !ovFreq || !ovOnsetFreq || !ovLeftFreq || !ovRightFreq) return;
-        const node = overlayCanvasRef.current;
-        if (node) {
-          const cssW = node.clientWidth || 100;
-          const cssH = node.clientHeight || 100;
-          const odpr = Math.min(window.devicePixelRatio || 1, dprCap);
-          if (node.width !== Math.round(cssW * odpr) || node.height !== Math.round(cssH * odpr)) {
-            overlay.resize(cssW, cssH, odpr);
-          }
-        }
+      const updateComposition = (now: number): void => {
+        if (!ovReactor || !liveDirector || !ovFreq || !ovOnsetFreq || !ovLeftFreq || !ovRightFreq) return;
+        refreshSceneSeed();
         engine.getFreqData(ovFreq);
         engine.getOnsetFreqData(ovOnsetFreq);
         engine.getLeftFreqData(ovLeftFreq);
         engine.getRightFreqData(ovRightFreq);
-        const dt = overlayLastNow ? now - overlayLastNow : 16.7;
+        const dt = overlayLastNow ? now - overlayLastNow : 1000 / 60;
         overlayLastNow = now;
         refreshThemePalette();
         refreshArtPalette();
-        const frame = ovReactor.analyze(ovFreq, ovOnsetFreq, ovLeftFreq, ovRightFreq, dt, now);
-        overlay.render(frame, ovPalette, dt);
-        if (sceneOverlay) {
-          const sceneNode = sceneCanvasRef.current;
-          if (sceneNode) {
-            const cssW = sceneNode.clientWidth || 100;
-            const cssH = sceneNode.clientHeight || 100;
-            const odpr =
-              Math.min(window.devicePixelRatio || 1, dprCap) * (ovGov ? ovGov.scale() : 1);
-            if (cssW !== sceneW || cssH !== sceneH || odpr !== sceneDpr) {
-              sceneW = cssW;
-              sceneH = cssH;
-              sceneDpr = odpr;
-              sceneOverlay.resize(cssW, cssH, odpr);
-            }
-          }
-          // Re-seed on track change so the scene walk is per-track and
-          // lineage-aware (evolves with the track's visual-memory
-          // generation). No-op when unchanged.
-          refreshSceneSeed();
-          sceneOverlay.setSeedKey(sceneSeedValue);
-          scenePhase = !scenePhase;
-          if (ovGov && ovGov.intervalMul() > 1 && scenePhase) {
-            // Governor floor: paint the scene layer every other frame.
-            // MilkDrop underneath still carries full-rate motion; the skipped
-            // dt is handed to the next paint so scene animation speed holds.
-            sceneSkipDt += dt;
-          } else {
-            sceneOverlay.render(frame, ovPalette, dt + sceneSkipDt);
-            sceneSkipDt = 0;
-          }
+        const rawFrame = ovReactor.analyze(ovFreq, ovOnsetFreq, ovLeftFreq, ovRightFreq, dt, now);
+        liveScoreFeed?.conduct(rawFrame, dt);
+        const ui = evilandStateRef.current;
+        if (!liveConfig || liveNonce !== ui.nonce) {
+          liveNonce = ui.nonce;
+          liveConfig = (ui.seed && decodeEvilandConfig(ui.seed)) || generateEvilandConfig(ui.seed ?? sceneSeedValue).config;
         }
+        const config = ui.director ? liveDirector.update(rawFrame, dt) : liveConfig;
+        latestLive = {
+          frame: tuneEvilandFrame(rawFrame, tuningRef.current.reactivity),
+          palette: resolveEvilandPalette(tuningRef.current.palette, ovPalette, now / 1000, rawFrame.score?.keyShift),
+          config: applyWaveformOverride(config, ui.waveMode),
+          seed: sceneSeedValue,
+          waveMode: ui.waveMode,
+          grade: liveGradeFor(tuningRef.current.palette),
+        };
       };
 
       const startFallback = () => {
+        if (fallbackRaf) return;
         iframe.style.display = 'none';
         const node = canvasRef.current;
         if (!node) return;
@@ -419,7 +376,13 @@ export function Visualizer({
         if (!msg || typeof msg !== 'object') return;
         if (msg.type === 'ready') {
           ready = true;
-          const init: BcInitMessage = { type: 'init', sampleRate: engine.getSampleRate(), dpr };
+          const init: BcInitMessage = {
+            type: 'init',
+            sampleRate: engine.getSampleRate(),
+            dpr,
+            eviland: liveMode,
+            quality: performance === 'low' ? 'low' : quality === '4k' ? 'high' : 'medium',
+          };
           iframe.contentWindow?.postMessage(init, '*');
         } else if (msg.type === 'mounted') {
           mounted = true;
@@ -439,6 +402,7 @@ export function Visualizer({
       const pump = (now: number) => {
         if (disposed) return;
         const paint = canPaint(now);
+        if (paint && liveMode) updateComposition(now);
         if (ready && paint) {
           // Read from the unsmoothed onset analyser tap so transients reach
           // butterchurn on the same frame they happen (the smoothed analyser
@@ -447,23 +411,19 @@ export function Visualizer({
           // Result: kicks punch harder inside butterchurn's internal FFT
           // without distortion artifacts.
           engine.getOnsetTimeData(wave);
+          // The reactivity control reaches MilkDrop through this gain: 'truth'
+          // is the raw signal, 'wild' drives its FFT harder.
+          const reactivityNow = tuningRef.current.reactivity;
+          const preemphasis = reactivityNow === 'truth' ? 1 : reactivityNow === 'wild' ? 2 : PREEMPHASIS;
           for (let i = 0; i < BUTTERCHURN_FFT_SIZE; i++) {
             const centered = ((wave[i * stride] ?? 128) - 128) / 128;
-            const lifted = centered * PREEMPHASIS;
+            const lifted = centered * preemphasis;
             // Soft-clip via x / (1 + |x|) — keeps the waveform shape, no harsh wrap.
             const clipped = lifted / (1 + Math.abs(lifted));
             samples[i] = 128 + Math.round(clipped * 127);
           }
-          const audio: BcAudioMessage = { type: 'audio', samples };
+          const audio: BcAudioMessage = { type: 'audio', samples, eviland: latestLive };
           iframe.contentWindow?.postMessage(audio, '*');
-        }
-        // The reactor overlay is independent of iframe readiness — run it on the
-        // same frame cadence so the events stay in sync with the audio.
-        // (`performance` is the tier prop here — the clock is window.performance.)
-        if (paint) {
-          const overlayStart = window.performance.now();
-          updateOverlay(now);
-          ovGov?.endFrame(now, window.performance.now() - overlayStart);
         }
         raf = requestAnimationFrame(pump);
       };
@@ -489,8 +449,7 @@ export function Visualizer({
         cancelAnimationFrame(fallbackRaf);
         window.clearTimeout(mountTimeout);
         window.removeEventListener('message', onMessage);
-        overlay?.dispose();
-        sceneOverlay?.dispose();
+        liveScoreFeed?.dispose();
         try {
           const dispose: BcDisposeMessage = { type: 'dispose' };
           iframe.contentWindow?.postMessage(dispose, '*');
@@ -545,6 +504,7 @@ export function Visualizer({
         fftSize: engine.fftSize,
         binCount,
       });
+      const scoreFeed = createEngineScoreFeed(engine, () => usePlayerStore.getState().current);
       let lastNow = 0;
       if (engine.ctx.state === 'suspended') void engine.ctx.resume().catch(() => {});
 
@@ -638,21 +598,7 @@ export function Visualizer({
         return generateEvilandConfig(seed).config;
       }
 
-      function applyWaveformOverride(
-        config: OperatorConfig,
-        waveMode: 'off' | 'line' | 'radial' | 'bars',
-      ): OperatorConfig {
-        // Cheap shallow clone of the waveform sub-object only — the rest of the
-        // config stays referentially identical so the renderer's setConfig call
-        // doesn't have to re-clone anything else. waveMode === 'off' leaves the
-        // config's own waveform mode in place so a randomized look that wants
-        // bars/radial waveforms still shows them.
-        if (waveMode === 'off') return config;
-        return {
-          ...config,
-          waveform: { ...config.waveform, mode: waveMode as WaveMode },
-        };
-      }
+
 
       const loop = (now: number) => {
         raf = requestAnimationFrame(loop);
@@ -677,6 +623,8 @@ export function Visualizer({
         const dtMs = lastNow ? now - lastNow : 16.7;
         const evFrame = reactor.analyze(freq, onsetFreq, leftFreq, rightFreq, dtMs, now);
         lastNow = now;
+        // Look-ahead cues from the track's song score; a no-op without one.
+        scoreFeed.conduct(evFrame, dtMs);
 
         // The detached/projector window is fed by the headless producer
         // (src/visualizer/eviland-producer.ts), NOT from here — that keeps the
@@ -778,7 +726,12 @@ export function Visualizer({
             node.setAttribute('data-newamp-gov', `${snap.verdict}@${snap.scale}`);
           }
         }
-        renderer.render(evFrame, palette, dtMs);
+        renderer.render(
+          tuneEvilandFrame(evFrame, tuningRef.current.reactivity),
+          resolveEvilandPalette(tuningRef.current.palette, palette, now / 1000, evFrame.score?.keyShift),
+          dtMs,
+          'host',
+        );
         gov.endFrame(now, window.performance.now() - renderStart);
       };
       raf = requestAnimationFrame(loop);
@@ -795,6 +748,7 @@ export function Visualizer({
         // (LEARN_FLUSH_THRESHOLD and VISIBILITY_FLUSH_DEBOUNCE_MS), and on
         // true track-change via releaseBridgeForTrack() above.
         publishActiveBridge(null);
+        scoreFeed.dispose();
         renderer.dispose();
       };
     }
@@ -1896,8 +1850,8 @@ export function Visualizer({
   // Butterchurn mode layers a sandboxed iframe (the actual Milkdrop render)
   // over a placeholder canvas. The canvas keeps the smoke selector + mount flag
   // and is the surface the canvas-2D fallback paints to if the iframe can't host.
-  // 'eviland-live' uses the same stack and adds a transparent reactor-overlay
-  // canvas on top (the causal per-instrument events drawn over the MilkDrop field).
+  // 'eviland-live' uses the same stack: the iframe carries the complete Live
+  // composition, so there are no extra overlay canvases to keep in sync.
   if (mode === 'butterchurn' || mode === 'eviland-live') {
     return (
       <div
@@ -1922,22 +1876,6 @@ export function Visualizer({
           tabIndex={-1}
           style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 'none', borderRadius: 'var(--radius)', display: 'block', pointerEvents: 'none' }}
         />
-        {mode === 'eviland-live' && (
-          <canvas
-            ref={sceneCanvasRef}
-            data-newamp-scene-overlay
-            aria-hidden="true"
-            style={{ position: 'absolute', inset: 0, display: 'block', width: '100%', height: '100%', borderRadius: 'var(--radius)', pointerEvents: 'none', zIndex: 1 }}
-          />
-        )}
-        {mode === 'eviland-live' && (
-          <canvas
-            ref={overlayCanvasRef}
-            data-newamp-reactor-overlay
-            aria-hidden="true"
-            style={{ position: 'absolute', inset: 0, display: 'block', width: '100%', height: '100%', borderRadius: 'var(--radius)', pointerEvents: 'none', zIndex: 2 }}
-          />
-        )}
       </div>
     );
   }

@@ -32,6 +32,27 @@ export {
   type VoiceGroup,
 } from './eviland-audio';
 
+// ── Song score + conductor (whole-track look-ahead) ────────────────────────
+// Optional. Decode a track to mono PCM at SONG_SCORE_SAMPLE_RATE, run
+// computeSongScore once, then call conductor.conduct(frame, positionSeconds,
+// dtMs) before director.update() each frame. Frames then carry `score` cues
+// and the Director and renderer act on the song's structure ahead of time.
+export {
+  computeSongScore,
+  isValidSongScore,
+  SONG_SCORE_VERSION,
+  SONG_SCORE_SAMPLE_RATE,
+  SONG_SCORE_MAX_SECONDS,
+  type SongScore,
+  type ScoreSection,
+  type ScoreBuild,
+  type ScoreKey,
+  type ScoreTier,
+  type ComputeScoreOptions,
+} from './eviland-score';
+export { createConductor, applyScoreCues, type Conductor } from './eviland-conductor';
+export type { ScoreCues } from './eviland-audio';
+
 // ── Operator engine (data-driven, serializable looks) ──────────────────────
 export {
   evalConfig,
@@ -40,6 +61,9 @@ export {
   cloneConfig,
   lerpConfig,
   type OperatorConfig,
+  type CompositionConfig,
+  type WaveOverride,
+  applyWaveformOverride,
   type EvilandDynamics,
   type Channel,
   type Binding,
