@@ -19,7 +19,8 @@ import { FormatBadges } from '../FormatBadges';
 import { SignalPathBadge } from '../SignalPathBadge';
 import { Chip } from '../Chip';
 import { EmptyState } from '../EmptyState';
-import { Star, StarOutline, Note } from '../Icons';
+import { Star, StarOutline, Note, Close } from '../Icons';
+import { ConfirmAction } from '../ConfirmAction';
 import { spectralArtDataUrl } from '@shared/spectral-art';
 import { classifyAudioQuality } from '@shared/audio-quality';
 
@@ -68,6 +69,34 @@ export function NowPlayingView(): JSX.Element {
   const toggleAvoidAutoPlay = usePlayerStore((s) => s.toggleAvoidAutoPlay);
   const setFs = usePlayerStore((s) => s.setFullscreenViz);
   const playQueue = usePlayerStore((s) => s.playQueue);
+  const moveQueuedTrack = usePlayerStore((s) => s.moveQueuedTrack);
+  const removeQueuedTrack = usePlayerStore((s) => s.removeQueuedTrack);
+  const clearQueue = usePlayerStore((s) => s.clearQueue);
+  const queueListRef = useRef<HTMLDivElement>(null);
+  const [draggedQueueIndex, setDraggedQueueIndex] = useState<number | null>(null);
+  const [dropQueueIndex, setDropQueueIndex] = useState<number | null>(null);
+  const endQueueDrag = (): void => {
+    setDraggedQueueIndex(null);
+    setDropQueueIndex(null);
+  };
+  // Rows are keyed by slot, so after a keyboard edit the focused element is a
+  // different track. Put focus back on the row the listener was working with.
+  const focusQueueRow = (index: number): void => {
+    window.requestAnimationFrame(() => {
+      queueListRef.current?.querySelector<HTMLElement>(`[data-newamp-queue-row="${index}"]`)?.focus();
+    });
+  };
+  const moveQueueRow = (from: number, to: number, keepFocus: boolean): void => {
+    const target = Math.max(0, Math.min(queue.length - 1, to));
+    if (target === from) return;
+    moveQueuedTrack(from, target);
+    if (keepFocus) focusQueueRow(target);
+  };
+  const removeQueueRow = (index: number): void => {
+    const remaining = queue.length - 1;
+    void removeQueuedTrack(index);
+    if (remaining > 0) focusQueueRow(Math.min(index, remaining - 1));
+  };
   const seek = usePlayerStore((s) => s.seek);
   const playbackRate = usePlayerStore((s) => s.playbackRate);
   const setPlaybackRate = usePlayerStore((s) => s.setPlaybackRate);
@@ -502,11 +531,24 @@ export function NowPlayingView(): JSX.Element {
             </div>
           </div>
 
-          {/* Queue */}
-          <div className="flex-1 overflow-y-auto">
-            <div className="sticky top-0 z-[1] flex items-center justify-between border-b border-line bg-panel px-[14px] py-[7px] text-[9px] uppercase tracking-[0.1em] text-ink2">
+          {/* Queue — editable in place: drag a row (or Alt+↑/↓) to reorder,
+              ✕ / Delete to remove, Clear to empty it (undo is offered by the
+              store's clear-queue notification). */}
+          <div className="flex-1 overflow-y-auto" ref={queueListRef} data-newamp-now-playing-queue>
+            <div className="sticky top-0 z-[1] flex items-center justify-between gap-2 border-b border-line bg-panel px-[14px] py-[7px] text-[9px] uppercase tracking-[0.1em] text-ink2">
               <span>Queue · {queue.length} tracks</span>
-              <span>{queueIndex >= 0 ? `${queueIndex + 1}/${queue.length}` : '—'}</span>
+              <span className="flex items-center gap-2">
+                <span>{queueIndex >= 0 ? `${queueIndex + 1}/${queue.length}` : '—'}</span>
+                <ConfirmAction
+                  label="Clear"
+                  confirmLabel="Sure?"
+                  tone="warn"
+                  size="sm"
+                  disabled={queue.length === 0}
+                  title="Empty the queue"
+                  onConfirm={clearQueue}
+                />
+              </span>
             </div>
             {queue.length === 0 ? (
               <div className="px-[14px] py-3 text-[11px] text-muted">
@@ -518,8 +560,25 @@ export function NowPlayingView(): JSX.Element {
                   key={`${t.id}-${i}`}
                   track={t}
                   index={i}
+                  count={queue.length}
                   active={i === queueIndex}
+                  dragging={draggedQueueIndex === i}
+                  dropEdge={
+                    draggedQueueIndex !== null && dropQueueIndex === i && draggedQueueIndex !== i
+                      ? draggedQueueIndex < i ? 'below' : 'above'
+                      : null
+                  }
                   onPlay={() => void playQueue(queue, i)}
+                  onMove={(to) => moveQueueRow(i, to, true)}
+                  onRemove={() => removeQueueRow(i)}
+                  onDragStart={() => setDraggedQueueIndex(i)}
+                  onDragOverRow={() => setDropQueueIndex(i)}
+                  onDropRow={(transferIndex) => {
+                    const from = draggedQueueIndex ?? transferIndex;
+                    if (from !== null) moveQueueRow(from, i, false);
+                    endQueueDrag();
+                  }}
+                  onDragEnd={endQueueDrag}
                 />
               ))
             )}
@@ -1241,34 +1300,88 @@ function Stat({
 function QueueRow({
   track,
   index,
+  count,
   active,
+  dragging,
+  dropEdge,
   onPlay,
+  onMove,
+  onRemove,
+  onDragStart,
+  onDragOverRow,
+  onDropRow,
+  onDragEnd,
 }: {
   track: Track;
   index: number;
+  count: number;
   active: boolean;
+  dragging: boolean;
+  /** Where the dragged row would land relative to this one, if it is the drop target. */
+  dropEdge: 'above' | 'below' | null;
   onPlay: () => void;
+  onMove: (toIndex: number) => void;
+  onRemove: () => void;
+  onDragStart: () => void;
+  onDragOverRow: () => void;
+  onDropRow: (transferIndex: number | null) => void;
+  onDragEnd: () => void;
 }): JSX.Element {
+  const dropShadow =
+    dropEdge === 'above' ? 'inset 0 2px 0 var(--accent)' : dropEdge === 'below' ? 'inset 0 -2px 0 var(--accent)' : undefined;
   return (
     // role=button div (not <button>): the artist is a real ArtistLink button
     // and interactive elements may not nest inside a native button. Row click
-    // still plays; the artist link stops propagation and navigates.
+    // still plays; the artist link and the edit buttons stop propagation.
     <div
       role="button"
       tabIndex={0}
+      data-newamp-queue-row={index}
+      draggable
+      aria-grabbed={dragging}
+      aria-keyshortcuts="Delete Alt+ArrowUp Alt+ArrowDown"
       onClick={onPlay}
       onDoubleClick={onPlay}
       onKeyDown={(event) => {
+        // Keys pressed on a nested control (artist link, edit buttons) are theirs.
+        if (event.target !== event.currentTarget) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           onPlay();
+        } else if (event.key === 'Delete' || event.key === 'Backspace') {
+          event.preventDefault();
+          onRemove();
+        } else if (event.altKey && event.key === 'ArrowUp') {
+          event.preventDefault();
+          onMove(index - 1);
+        } else if (event.altKey && event.key === 'ArrowDown') {
+          event.preventDefault();
+          onMove(index + 1);
         }
       }}
-      className="grid w-full cursor-pointer items-center gap-2 px-[14px] py-[7px] text-left transition-colors"
+      onDragStart={(event) => {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', String(index));
+        onDragStart();
+      }}
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        onDragOverRow();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        const transferIndex = Number(event.dataTransfer.getData('text/plain'));
+        onDropRow(Number.isInteger(transferIndex) ? transferIndex : null);
+      }}
+      onDragEnd={onDragEnd}
+      className="group grid w-full cursor-pointer items-center gap-2 px-[14px] py-[7px] text-left transition-colors"
       style={{
         gridTemplateColumns: '20px 1fr auto',
         background: active ? 'color-mix(in srgb, var(--accent) 8%, transparent)' : 'transparent',
         borderBottom: '1px solid color-mix(in srgb, var(--line) 45%, transparent)',
+        boxShadow: dropShadow,
+        opacity: dragging ? 0.55 : 1,
       }}
     >
       <span
@@ -1290,10 +1403,54 @@ function QueueRow({
           </span>
         ) : null}
       </span>
-      <span className="text-[10px] tabular-nums text-ink2">
+      {/* The column is narrow, so the edit controls take the duration's place
+          while the row is hovered or holds focus. */}
+      <span className="text-[10px] tabular-nums text-ink2 group-hover:hidden group-focus-within:hidden">
         {track.duration ? formatTime(track.duration) : '—'}
       </span>
+      <span className="hidden items-center gap-[2px] group-hover:flex group-focus-within:flex">
+        <QueueRowButton label="Move up" shortcut="Alt+↑" disabled={index === 0} onClick={() => onMove(index - 1)}>
+          ▲
+        </QueueRowButton>
+        <QueueRowButton label="Move down" shortcut="Alt+↓" disabled={index === count - 1} onClick={() => onMove(index + 1)}>
+          ▼
+        </QueueRowButton>
+        <QueueRowButton label="Remove from queue" shortcut="Delete" onClick={onRemove}>
+          <Close size={9} />
+        </QueueRowButton>
+      </span>
     </div>
+  );
+}
+
+function QueueRowButton({
+  label,
+  shortcut,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  shortcut: string;
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      className="pxbtn flex h-[16px] w-[18px] items-center justify-center p-0 text-[8px] leading-none"
+      title={`${label} (${shortcut})`}
+      aria-label={label}
+      disabled={disabled}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick();
+      }}
+      onDoubleClick={(event) => event.stopPropagation()}
+    >
+      {children}
+    </button>
   );
 }
 

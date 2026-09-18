@@ -120,6 +120,7 @@ const uiPlaybackSmoke = process.env.NEWAMP_UI_PLAYBACK_SMOKE === '1';
 const uiQuickPlaySmoke = process.env.NEWAMP_UI_QUICK_PLAY_SMOKE === '1';
 const uiHandoffSmoke = process.env.NEWAMP_UI_HANDOFF_SMOKE === '1';
 const uiGaplessSmoke = process.env.NEWAMP_UI_GAPLESS_SMOKE === '1';
+const uiQueueEditSmoke = process.env.NEWAMP_UI_QUEUE_EDIT_SMOKE === '1';
 const uiLyricsSmoke = process.env.NEWAMP_UI_LYRICS_SMOKE === '1';
 const uiOpenFileSmoke = process.env.NEWAMP_UI_OPEN_FILE_SMOKE === '1';
 const uiVisualizerSmoke = process.env.NEWAMP_UI_VISUALIZER_SMOKE === '1';
@@ -135,6 +136,7 @@ const smokeMode =
   uiQuickPlaySmoke ||
   uiHandoffSmoke ||
   uiGaplessSmoke ||
+  uiQueueEditSmoke ||
   uiLyricsSmoke ||
   uiOpenFileSmoke ||
   uiVisualizerSmoke ||
@@ -2873,6 +2875,30 @@ async function runUiGaplessSmoke(win: BrowserWindow, scanPromise: Promise<void>)
   }
 }
 
+async function runUiQueueEditSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
+  try {
+    await Promise.race([
+      scanPromise,
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for UI queue-edit smoke scan')), 15000),
+      ),
+    ]);
+    await reloadForSmoke(win);
+    const result = await Promise.race([
+      win.webContents.executeJavaScript(uiQueueEditProbeSource(), true),
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error('Timed out waiting for UI queue-edit probe')), 25000),
+      ),
+    ]);
+    console.log(`[newamp-ui-queue-edit-smoke] ${JSON.stringify(result)}`);
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    console.error('[newamp-ui-queue-edit-smoke] failed:', err);
+    app.exit(1);
+  }
+}
+
 async function runUiLyricsSmoke(win: BrowserWindow, scanPromise: Promise<void>): Promise<void> {
   try {
     await Promise.race([
@@ -4181,6 +4207,102 @@ function uiGaplessProbeSource(): string {
   `;
 }
 
+// Edits the queue from the Now Playing panel while a track plays: keyboard
+// move, button move, drag-and-drop, Delete, then Clear. Every step records the
+// row order plus which track the transport says is playing, so the smoke can
+// assert the edits landed AND that none of them interrupted playback.
+function uiQueueEditProbeSource(): string {
+  return `
+    (async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const waitFor = async (label, fn, timeout = 10000) => {
+        const start = performance.now();
+        while (performance.now() - start < timeout) {
+          const value = fn();
+          if (value) return value;
+          await sleep(50);
+        }
+        throw new Error('Timed out waiting for ' + label);
+      };
+      const nav = async (name) => {
+        const button = await waitFor(name + ' navigation', () =>
+          Array.from(document.querySelectorAll('button')).find((item) => (item.textContent || '').includes(name)),
+        );
+        button.click();
+      };
+      const rows = () => Array.from(document.querySelectorAll('[data-newamp-now-playing-queue] [data-newamp-queue-row]'));
+      const order = () => rows().map((row) => (/Queue (One|Two|Three)/.exec(row.textContent || '') || [])[1] || '?').join(',');
+      const playing = () => document.querySelector('[data-newamp-current-title]')?.getAttribute('data-newamp-current-title') || '';
+      const activeRow = () => (/Queue (One|Two|Three)/.exec(rows().find((row) => (row.textContent || '').includes('▶'))?.textContent || '') || [])[1] || null;
+      const clock = () => Number(document.querySelector('[data-newamp-current-time]')?.getAttribute('data-newamp-current-time') || '0');
+      const rowOf = (name) => rows().find((row) => (row.textContent || '').includes('Queue ' + name));
+      const waitOrder = (expected) => waitFor('queue order ' + expected, () => (order() === expected ? expected : null), 4000);
+
+      await nav('Library');
+      const libraryRows = await waitFor('queue-edit library rows', () => {
+        const items = Array.from(document.querySelectorAll('[data-newamp-track-row]'));
+        return items.length >= 3 ? items : null;
+      });
+      const first = libraryRows.find((item) => /Queue One/.test(item.textContent || ''));
+      if (!first) throw new Error('First fixture row was not found');
+      first.scrollIntoView({ block: 'center' });
+      first.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window }));
+      await waitFor('first track playing', () =>
+        document.querySelector('[data-newamp-transport][data-newamp-playing="true"]') && /Queue One/.test(playing()),
+      );
+
+      await nav('Now Playing');
+      await waitFor('now playing queue rows', () => (rows().length === 3 ? true : null));
+      const steps = { initial: order() };
+      const startedAt = clock();
+
+      // Keyboard: Alt+ArrowUp on the last row; focus must follow the track.
+      const last = rowOf('Three');
+      last.focus();
+      last.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', altKey: true, bubbles: true, cancelable: true }));
+      steps.afterKeyboardMove = await waitOrder('One,Three,Two');
+      await sleep(80);
+      steps.focusFollowed = /Queue Three/.test(document.activeElement?.textContent || '');
+
+      // Button: move the PLAYING track down. It must keep playing.
+      rowOf('One').querySelector('button[aria-label="Move down"]').click();
+      steps.afterButtonMove = await waitOrder('Three,One,Two');
+      steps.activeAfterButtonMove = activeRow();
+
+      // Drag the last row onto the first.
+      const dragged = rowOf('Two');
+      const target = rowOf('Three');
+      const dataTransfer = new DataTransfer();
+      dragged.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer }));
+      target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer }));
+      target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer }));
+      dragged.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer }));
+      steps.afterDrag = await waitOrder('Two,Three,One');
+
+      // Delete removes a row that is not playing.
+      const doomed = rowOf('Three');
+      doomed.focus();
+      doomed.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true, cancelable: true }));
+      steps.afterDelete = await waitOrder('Two,One');
+      steps.activeAfterDelete = activeRow();
+      steps.playingAfterEdits = playing();
+      await sleep(400);
+      steps.clockAdvanced = clock() > startedAt;
+      steps.stillPlaying = !!document.querySelector('[data-newamp-transport][data-newamp-playing="true"]');
+
+      // Clear is two-step (arm, then confirm).
+      const clear = () => document.querySelector('[data-newamp-now-playing-queue] [data-newamp-confirm]');
+      clear().click();
+      await sleep(80);
+      steps.rowsWhileArmed = rows().length;
+      clear().click();
+      await waitFor('empty queue', () => (rows().length === 0 ? true : null), 4000);
+      steps.afterClear = rows().length;
+      return { ok: true, ...steps };
+    })()
+  `;
+}
+
 function uiHandoffProbeSource(): string {
   return `
     (async () => {
@@ -5018,6 +5140,8 @@ async function bootstrap(): Promise<void> {
       void runUiHandoffSmoke(mainWin, scanPromise);
     } else if (uiGaplessSmoke && mainWin) {
       void runUiGaplessSmoke(mainWin, scanPromise);
+    } else if (uiQueueEditSmoke && mainWin) {
+      void runUiQueueEditSmoke(mainWin, scanPromise);
     } else if (uiLyricsSmoke && mainWin) {
       void runUiLyricsSmoke(mainWin, scanPromise);
     } else if (uiVisualizerSmoke && mainWin) {
