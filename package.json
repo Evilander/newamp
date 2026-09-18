@@ -40,6 +40,7 @@
     "smoke:visualizer": "node scripts/visualizer-smoke.mjs",
     "test:all": "node scripts/run-all-tests.mjs",
     "test:playback-lifecycle": "node scripts/playback-lifecycle-test.mjs",
+    "test:eq-toggle": "node scripts/eq-toggle-test.mjs",
     "test:exclusive-output-lifecycle": "npm run build:electron && node scripts/exclusive-output-lifecycle-test.mjs",
     "test:exclusive-ipc-cancellation": "node scripts/exclusive-ipc-cancellation-test.mjs",
     "test:quit-persistence": "npm run build:electron && node scripts/quit-persistence-test.mjs",
