@@ -1185,7 +1185,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       engine.setCrossfadeMs(settings.crossfadeMs);
       engine.setLimiterEnabled(settings.limiterEnabled);
       engine.setPreampDb(settings.preampDb);
-      settings.equalizer.forEach((v, i) => engine.setEqBand(i, settings.eqEnabled ? v : 0));
+      engine.setEqBands(settings.equalizer);
+      engine.setEqEnabled(settings.eqEnabled);
       set({
         settings,
         volume: settings.volume,
@@ -1846,6 +1847,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     setEqPreset: async (values) => {
       const next = normalizeEqValues(values);
       engine.setEqBands(next);
+      engine.setEqEnabled(true); // a preset picked while the EQ is off turns it on
       const settings = await api.setSettings({ equalizer: next, eqEnabled: true });
       set({ settings });
     },
@@ -1853,8 +1855,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     setEqEnabled: async (on) => {
       const cur = get().settings;
       if (!cur) return;
-      if (on) engine.setEqBands(cur.equalizer);
-      else engine.setEqEnabled(false);
+      // The engine ignores band values while it is disabled, so the flag has
+      // to flip in the engine too, not just in settings — "on" used to only
+      // push the bands, which left the EQ dead after the first off.
+      engine.setEqBands(cur.equalizer);
+      engine.setEqEnabled(on);
       const settings = await api.setSettings({ eqEnabled: on });
       set({ settings });
     },

@@ -60,6 +60,9 @@ Release notes for every version, including everything before 2.0, are on the
 - Trail length and motion speed changed with frame rate, so a look moved
   differently on the low-quality tier or when the frame governor stepped in.
 - The detached projector ignored the palette and reactivity settings.
+- Turning the equalizer off and back on did nothing until the next restart;
+  the bands were saved but never re-applied. Picking a preset while the
+  equalizer was off had the same problem.
 
 ## [2.3.0] - 2026-09-05
 
