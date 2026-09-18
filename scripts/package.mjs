@@ -35,11 +35,22 @@ for (const args of electronBuilderTargetArgs(requestedTargets)) {
   if (args.includes('--mac') && macArch) {
     run(process.execPath, [join(repoRoot, 'scripts', 'stage-ffmpeg-for-arch.mjs'), macArch]);
   }
+  // Without a Developer ID certificate electron-builder skips macOS signing
+  // entirely and the packaged bundle ends up with no signature seal at all
+  // (Electron's own _CodeSignature directories are dropped). A quarantined
+  // download then fails Gatekeeper's integrity check and macOS reports the app
+  // as "damaged" with no way to open it. Ad-hoc signing (identity "-") writes
+  // a valid seal, so Gatekeeper offers Privacy & Security → Open Anyway
+  // instead. The entitlements already disable library validation, which
+  // ad-hoc signing under the hardened runtime requires.
+  const signingArgs = args.includes('--mac') && !hasMacSigningCertificate(process.env)
+    ? ['--config.mac.identity=-']
+    : [];
   // `--publish never`: NewAmp manages its own release publishing (release
   // bundle + the CI release job + publish-github-release). Without this,
   // electron-builder auto-publishes when it sees a git tag and aborts with
   // "GitHub Personal Access Token is not set" on tagged CI builds.
-  run(electronBuilder, [...args, '--publish', 'never'], {
+  run(electronBuilder, [...args, ...signingArgs, '--publish', 'never'], {
     env: {
       ...process.env,
       TEMP: packageTemp,
@@ -58,6 +69,10 @@ if (shouldWriteChecksums) {
   console.log(`release checksums: ${checksums.path}`);
   const provenance = writeBuildProvenance({ root: repoRoot });
   console.log(`build provenance: ${provenance.path}`);
+}
+
+function hasMacSigningCertificate(env) {
+  return Boolean(env.CSC_LINK || env.CSC_NAME);
 }
 
 function electronBuilderTargetArgs(args) {
