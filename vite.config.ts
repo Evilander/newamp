@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { butterchurnMegabufVitePlugin } from './scripts/butterchurn-megabuf.mjs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -7,7 +8,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const emitSourceMaps = process.env.NEWAMP_SOURCE_MAPS === '1';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), butterchurnMegabufVitePlugin()],
   base: './',
   resolve: {
     alias: {

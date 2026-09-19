@@ -26,7 +26,7 @@
 // when the fields it needs are missing; the iframe then runs plain MilkDrop.
 
 import type { EvilandFrame } from './eviland-audio';
-import { createReactionDiffusion } from './eviland-reaction-diffusion';
+import { createReactionDiffusion, warmReactionDiffusion } from './eviland-reaction-diffusion';
 import { createReactorOverlay } from './reactor-overlay';
 import { createSceneOverlay } from './scene-overlay';
 import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame } from './eviland-fluid';
@@ -170,6 +170,7 @@ export function createEvilandLivePipeline(
   // 'low' keeps MilkDrop + reactor events + the grade and skips every
   // full-screen source, matching the old stack's weak-GPU floor.
   const scenes = quality === 'low' ? null : createSceneOverlay(gl.canvas as HTMLCanvasElement, { gl, quality });
+  if (quality !== 'low') warmReactionDiffusion(gl);
   const fluid = quality === 'low'
     ? null
     : createFluidSim(gl, { width: 96, height: 64, pressureIterations: quality === 'high' ? 10 : 6 });

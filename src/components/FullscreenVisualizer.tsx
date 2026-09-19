@@ -31,6 +31,7 @@ import { useDetachedVisualizer } from './useDetachedVisualizer';
 import { ScrubBar } from './ScrubBar';
 import { EvilandMemoryBadge } from './EvilandMemoryBadge';
 import { Gear, Dice } from './Icons';
+import { requestPacedFrame } from '../lib/pacedFrame';
 
 // Preset registry. `group` drives the labeled sections in the new preset
 // picker popover so users can scan by category instead of one long rail. The
@@ -593,9 +594,11 @@ export function FullscreenVisualizer(): JSX.Element {
   useEffect(() => {
     if (!autoVjEnabled) return undefined;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
-    let raf = 0;
+    let cancelTick = () => {};
     let lastSwitchAt = window.performance.now();
 
+    // Decides every 14-30 s; checking four times a second is plenty, and
+    // doesn't keep a loop waking on every vsync.
     const tick = (now: number) => {
       if (autoVjIsPlayingRef.current) {
         engine.getFreqData(freq);
@@ -610,11 +613,11 @@ export function FullscreenVisualizer(): JSX.Element {
           }
         }
       }
-      raf = window.requestAnimationFrame(tick);
+      cancelTick = requestPacedFrame(tick, 250);
     };
 
-    raf = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(raf);
+    cancelTick = requestPacedFrame(tick, 250);
+    return () => cancelTick();
   }, [autoVjEnabled, engine]);
 
   // Stop an in-flight recording — and the replay ring, if still armed — if the

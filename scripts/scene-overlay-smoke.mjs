@@ -59,7 +59,11 @@ async function run() {
     if (problems.length) failures.push(`${scene.id}: ${problems.join('; ')}`);
   }
 
-  console.log(JSON.stringify({ ok: failures.length === 0, sceneCount: result.scenes.length, scenes: result.scenes, failures }, null, 2));
+  if (result.asyncCompile?.drewWithinMs == null) {
+    failures.push(`async compile: the forced scene never reached the screen (${JSON.stringify(result.asyncCompile)})`);
+  }
+
+  console.log(JSON.stringify({ ok: failures.length === 0, sceneCount: result.scenes.length, asyncCompile: result.asyncCompile, scenes: result.scenes, failures }, null, 2));
   clearTimeout(hardTimeout);
   app.quit();
   process.exit(failures.length === 0 ? 0 : 1);
