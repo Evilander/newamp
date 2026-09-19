@@ -214,11 +214,38 @@ function gitCleanStatus(root) {
       reason: result.error?.message || (result.stderr || result.stdout || 'git status failed').trim(),
     };
   }
-  const changed = result.stdout.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return { ok: true, ...classifyGitStatusLines(result.stdout) };
+}
+
+// `npm run package` rebuilds the tracked prebuilt addon from the release
+// sources on every run (--force, because checkout timestamps cannot say
+// whether it is current), and the compiler does not produce the same bytes
+// twice. Packaging therefore always leaves that one file modified, which made
+// this check impossible to satisfy in the same pass that builds the artifacts:
+// package, commit the addon, run again. A modified prebuilt is the output of
+// the step we just ran. A new, deleted or renamed one still blocks, as does
+// any other change, including the native sources it is built from.
+export function classifyGitStatusLines(stdout) {
+  // Split without trimming the whole output: an unstaged change leads with a
+  // space, which is the first status column, and trimming would shift every
+  // path one character left.
+  const lines = String(stdout ?? '').split(/\r?\n/).filter((line) => line.trim());
+  // Porcelain lines are two status columns, a space, then the path.
+  const isRebuiltPrebuilt = (line) => {
+    const status = line.slice(0, 2);
+    const path = line.slice(3).replace(/\\/g, '/');
+    return /^(M |[ M]M)$/.test(status) && /^native\/[^/]+\/prebuilt\/[^/]+\/[^/]+\.node$/.test(path);
+  };
+  const rebuiltPrebuilts = [];
+  const changed = [];
+  for (const line of lines) {
+    if (isRebuiltPrebuilt(line)) rebuiltPrebuilts.push(line.trim());
+    else changed.push(line.trim());
+  }
   return {
-    ok: true,
     clean: changed.length === 0,
     changed,
+    rebuiltPrebuilts,
     reason: changed.length ? `working tree has uncommitted changes: ${changed.slice(0, 8).join(', ')}` : null,
   };
 }

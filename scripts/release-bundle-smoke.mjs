@@ -14,6 +14,7 @@ assert.equal(pkg.scripts?.['smoke:release-bundle'], 'node scripts/release-bundle
 assert.ok(existsSync(bundleScriptPath), 'scripts/release-bundle.mjs should exist');
 
 const {
+  classifyGitStatusLines,
   checkReleaseBundle,
   checkSourceArchiveHygiene,
   createReleaseBundle,
@@ -162,6 +163,25 @@ function compressDirectoryToZip(sourceDir, outputPath) {
     timeout: 30_000,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
+}
+
+// Packaging rebuilds the tracked prebuilt addon every time and the bytes
+// differ each run, so a modified one cannot block the bundle built in that
+// same pass. Everything else about it still does.
+{
+  const prebuilt = 'native/newamp-audio/prebuilt/win32-x64/newamp_audio.node';
+  const rebuilt = classifyGitStatusLines(` M ${prebuilt}`);
+  assert.equal(rebuilt.clean, true, 'a rebuilt prebuilt addon should not block the release bundle');
+  assert.deepEqual(rebuilt.rebuiltPrebuilts, [`M ${prebuilt}`], 'the rebuilt addon should still be reported');
+  assert.equal(classifyGitStatusLines(`?? ${prebuilt}`).clean, false, 'an untracked prebuilt addon should block');
+  assert.equal(classifyGitStatusLines(` D ${prebuilt}`).clean, false, 'a deleted prebuilt addon should block');
+  assert.equal(
+    classifyGitStatusLines(' M native/newamp-audio/binding.cpp').clean,
+    false,
+    'the native sources the addon is built from should block',
+  );
+  assert.equal(classifyGitStatusLines(' M src/App.tsx').clean, false, 'ordinary changes should block');
+  assert.equal(classifyGitStatusLines('').clean, true, 'a clean tree is clean');
 }
 
 function run(command, args) {
