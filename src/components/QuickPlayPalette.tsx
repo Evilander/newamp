@@ -72,8 +72,9 @@ const LEGEND_KBD_STYLE = {
   whiteSpace: 'nowrap',
 } as const;
 
-export function QuickPlayPalette(): JSX.Element | null {
-  const [open, setOpen] = useState(false);
+// Mounted by QuickPlayLauncher, which owns the chords and loads this on the
+// first open. `open` stays a prop so the effects below keep their shape.
+export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose: () => void }): JSX.Element | null {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<PaletteItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -94,48 +95,6 @@ export function QuickPlayPalette(): JSX.Element | null {
   const current = usePlayerStore((s) => s.current);
   const trimmedQuery = query.trim();
   const selected = results[selectedIndex] ?? null;
-
-  useEffect(() => {
-    function onKeyDown(event: globalThis.KeyboardEvent): void {
-      const key = event.key.toLowerCase();
-      if ((event.ctrlKey || event.metaKey) && (key === 'k' || key === 'j')) {
-        event.preventDefault();
-        setOpen((next) => !next);
-      } else if ((event.ctrlKey || event.metaKey) && key === 'm' && !event.altKey && !event.shiftKey) {
-        // Ctrl+M — deck mode. Documented in the README and taught by the
-        // first-launch tour; this listener is the app's global chord home.
-        // One-way by design: the deck view unmounts this component, so exit
-        // stays on the deck's own controls.
-        event.preventDefault();
-        usePlayerStore.getState().setCompactMode(true);
-        setOpen(false);
-      } else if (event.key === 'Escape') {
-        setOpen(false);
-      }
-    }
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, []);
-
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('newamp-smoke') !== '1') return undefined;
-    const target = window as unknown as {
-      __newampSmoke?: {
-        seek?: (seconds: number) => void;
-        openQuickPlay?: () => void;
-        setFullscreenVisualizer?: (on: boolean) => void;
-      };
-    };
-    const previous = target.__newampSmoke;
-    target.__newampSmoke = {
-      ...previous,
-      openQuickPlay: () => setOpen(true),
-    };
-    return () => {
-      if (previous) target.__newampSmoke = previous;
-      else delete target.__newampSmoke;
-    };
-  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -214,12 +173,12 @@ export function QuickPlayPalette(): JSX.Element | null {
       const store = usePlayerStore.getState();
       if (!store.isPlaying) store.togglePlay();
       setView('now-playing');
-      setOpen(false);
+      onClose();
       return;
     }
     if (item.kind === 'view') {
       setView(item.view);
-      setOpen(false);
+      onClose();
       return;
     }
     if (item.kind === 'command') {
@@ -231,7 +190,7 @@ export function QuickPlayPalette(): JSX.Element | null {
       const index = Math.max(0, queueContext.findIndex((candidate) => candidate.id === item.track.id));
       await playQueue(queueContext, index);
       setView('now-playing');
-      setOpen(false);
+      onClose();
       return;
     }
     const tracks = await playableTracksFor(item);
@@ -241,7 +200,7 @@ export function QuickPlayPalette(): JSX.Element | null {
     }
     await playQueue(tracks, 0);
     setView('now-playing');
-    setOpen(false);
+    onClose();
   }
 
   async function playNext(item = selected): Promise<void> {
@@ -281,7 +240,7 @@ export function QuickPlayPalette(): JSX.Element | null {
     await setAutoDjSmartRuleId(item.rule.id);
     await setAutoDjEnabled(true);
     setView('now-playing');
-    setOpen(false);
+    onClose();
   }
 
   async function toggleLove(item = selected): Promise<void> {
@@ -308,10 +267,10 @@ export function QuickPlayPalette(): JSX.Element | null {
       setStatus('Toggled equalizer.');
     } else if (command === 'fullscreen-viz') {
       setFullscreenViz(true);
-      setOpen(false);
+      onClose();
     } else if (command === 'compact-deck') {
       setCompactMode(true);
-      setOpen(false);
+      onClose();
     }
   }
 
@@ -340,7 +299,7 @@ export function QuickPlayPalette(): JSX.Element | null {
       void startSmartRuleRadio();
     } else if (event.key === 'Escape') {
       event.preventDefault();
-      setOpen(false);
+      onClose();
     }
   }
 
@@ -349,7 +308,7 @@ export function QuickPlayPalette(): JSX.Element | null {
       className="fixed inset-0 z-[80] flex items-start justify-center bg-black/55 px-4 pt-[10vh]"
       data-newamp-quick-play
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) setOpen(false);
+        if (event.target === event.currentTarget) onClose();
       }}
     >
       <div
@@ -372,7 +331,7 @@ export function QuickPlayPalette(): JSX.Element | null {
             className="bevel-in lcd-text min-w-0 flex-1 px-3 py-2 text-[16px] outline-none"
             style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
           />
-          <button className="pxbtn" onClick={() => setOpen(false)}>
+          <button className="pxbtn" onClick={() => onClose()}>
             Close
           </button>
         </div>

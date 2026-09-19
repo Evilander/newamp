@@ -53,7 +53,9 @@ assert.ok(mainScripts.length >= 1, 'production build should emit a main index ch
 const largestMain = mainScripts.sort((a, b) => b.bytes - a.bytes)[0];
 // Budget history: 420KB through 1.17; raised to 440KB for 2.0 Reference Grade
 // (toast host, THEME_REGISTRY, token bridge, and shared primitives live in the
-// main chunk by design — 422.4KB actual at release, ~132KB gzipped).
+// main chunk by design — 422.4KB actual at release, ~132KB gzipped). It had
+// crept back to 440.9KB by 2.3.0's successor commits; 2.4.0 moved the command
+// palette behind its own chunk and measures 426.2KB.
 assert.ok(largestMain.bytes < 440_000, `main renderer chunk should stay below 440KB, got ${largestMain.bytes}`);
 
 assert.match(packageSource, /"smoke:startup-bundle"/, 'package.json must expose startup bundle smoke');

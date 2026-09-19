@@ -4,7 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { Transport } from './components/Transport';
 import { ScanBanner } from './components/ScanBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { QuickPlayPalette } from './components/QuickPlayPalette';
+import { QuickPlayPalette } from './components/QuickPlayLauncher';
 import { FirstRunHints } from './components/FirstRunHints';
 import { ToastHost } from './components/StatusToast';
 import { StartupSplash } from './components/StartupSplash';

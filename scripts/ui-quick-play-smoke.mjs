@@ -23,6 +23,13 @@ await writeSmokeSettings();
 
 const result = await runElectronSmoke();
 console.log(JSON.stringify(result, null, 2));
+// The palette is loaded on demand, so Ctrl+K has to both reach the listener
+// and wait for the chunk. The probe falls back to its own hook; that fallback
+// is not a pass.
+if (!result.chordOpened) {
+  console.error('Ctrl+K did not open the Quick Play palette');
+  process.exit(1);
+}
 
 async function resetSmokeRoot() {
   await rm(smokeRoot, { recursive: true, force: true });
