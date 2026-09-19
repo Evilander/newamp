@@ -15,7 +15,7 @@ The complete tour. The [README](../README.md) is the landing page; this is the e
 
 ## Library
 
-- **Scales to 60k+ tracks** — virtualized tables, paged queries, incremental scanning, and a watchful auto-rescan mode.
+- **Scales to 60k+ tracks** — virtualized tables, incremental scanning, and a watchful auto-rescan mode.
 - **0–100 decimal track scoring** — drag, scroll, keyboard-nudge, or type `88.3`. Stars stay in sync for legacy sorts and smart rules.
 - **Power search** (`Ctrl+F`) with field filters, plus **Ask Your Library** in the `Ctrl+K` palette: plain-English queries compiled — fully offline — into year ranges, tempo caps, rating/loved filters, recency exclusions, and DNA-based re-ranking, with interpretation chips showing exactly what ran.
 - **Audio DNA + Sounds Like** — per-track perceptual fingerprints (brightness, dynamic range, band energies, onset density) extracted via local FFT, surfaced as a cosine-similarity panel on Now Playing.

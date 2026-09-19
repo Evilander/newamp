@@ -19,7 +19,7 @@ Release notes for every version, including everything before 2.0, are on the
   draws inward and dims, it goes dark for the held beat, and the drop lands on
   its downbeat. When the song modulates, the palette shifts with it.
   A track is analysed the first time it plays with an Eviland visualizer
-  open: about 2 s for a 5-minute MP3 here, then cached as a ~10 KB file.
+  open, then cached beside the library.
   Streams, podcasts, server tracks and anything under 20 s run on live
   analysis as before. Turn it off under Visualizer settings, Look-ahead.
 - Two new Eviland sources: a reaction–diffusion simulation that grows out of
@@ -68,25 +68,33 @@ Release notes for every version, including everything before 2.0, are on the
   composites in software (common on Linux when it blocklists the GPU driver).
   It now uses about a quarter of one core either way, and an idle window
   dropped from 12% of a core (38% in software) to under 3%. Measured with
-  `npm run bench:cpu` on Windows 11. Most of the cost was the interface
+  `npm run bench:cpu` (27,000 tracks; percent of one core, summed over every
+  process) on Windows 11 with a 165 Hz display, the software figures taken
+  with `--disable-gpu` rather than on a Linux machine, and the before figures
+  from the same script run against 2.3.0. Most of the cost was the interface
   reacting to the music: the variables it animates were written for the
   whole page 165 times a second on a 165 Hz display, several loops woke on
   every display refresh only to skip the frame, and a few animations never
   stopped. Everything that moves with the music now shares one 30 Hz clock
-  and touches only the elements it animates.
+  and touches only the elements it animates. Some of the reactive chrome is
+  quieter for it: the play button pulses its icon instead of glowing, and the
+  full-window wash is dimmer and no longer screen-blended.
 - The title-bar equalizer is four real band meters instead of a looping
   animation.
 - When Chromium composites in software, the interface stops reacting to the
   music and stays still, the way it already did on low-end hardware.
 - Artists load as one list and draw only the rows on screen, so the A to Z
-  rail reaches every letter. Before, the view loaded 320 artists at a time and
+  rail reaches every letter (the list stops at 100,000 artists, and says so).
+  Before, the view loaded 320 artists at a time and
   letters past the first few were greyed out until you clicked "Load more"
   enough times.
 - Editing an open playlist (moving or removing tracks) saves immediately, and
   the playlist header shows its total running time.
 - Eviland Live preset switches are cheaper: a switch that took 8 ms at the
   median and 17 ms at worst now takes 2.5 ms and 8 ms. Butterchurn built
-  several 8 MB arrays element by element on every switch, used or not.
+  several million-element arrays element by element on every switch, used or
+  not. `npm run bench:eviland-switch` measures it; the before figure predates
+  the change, which is applied when the app is built.
 
 ### Fixed
 
@@ -119,7 +127,28 @@ Release notes for every version, including everything before 2.0, are on the
   playback position saved every few seconds. Changes it had noticed but not
   yet scanned were thrown away, so new or edited files were never picked up
   while music played. On Linux, each restart also re-read the whole library
-  tree. On Linux the watcher now watches folders rather than every file.
+  tree. On Linux the watcher now holds one watch per folder instead of one per
+  file.
+- A folder whose name carried a capital outside A-Z matched nothing. A folder
+  playlist for "Ólafur Arnalds" came out empty, Show in Library found nothing
+  there, and `path:` and ordinary searches missed those names. SQLite folds
+  only A-Z, and the search text was being folded further than that before the
+  two were compared.
+- On Linux, two folders whose names differ only in case are two folders. They
+  were being treated as one: merged in the Folders view, and a folder playlist
+  for one pulled in the other's tracks. Windows and macOS keep treating them
+  as the same folder, which is what those filesystems do.
+- A folder created inside a watched folder on Linux was picked up through a
+  symlink the first scan would have skipped.
+- Auto DJ on a folder rule carried every track under that folder across to the
+  interface each time it topped the queue up, to keep a handful. It asks for
+  the handful now.
+- The playing position was sent to the operating system ten times a second
+  until a track's duration was known, instead of when something changed.
+- Choosing a smart rule meant editing that rule with no way out: Save Smart
+  overwrote it, and a rule made from a folder stayed tied to that folder.
+  Save as New keeps the settings and leaves the original alone.
+- Long entries in the Library health panel ran underneath the next column.
 - `path:` searches ignored a typed Windows path in quotes (the backslashes
   were treated as escapes), and a forward-slash path never matched a
   backslash one or the other way round.
