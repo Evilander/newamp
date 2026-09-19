@@ -50,7 +50,11 @@ export function normalizeLibraryWatchRoots(roots: string[]): string[] {
   for (const root of roots) {
     if (typeof root !== 'string' || !root.trim()) continue;
     const resolved = resolve(root);
-    const key = resolved.toLowerCase();
+    // Two roots differing only in case are one folder on Windows and macOS,
+    // and two real folders on Linux; dropping one there loses its tracks.
+    const key = process.platform === 'win32' || process.platform === 'darwin'
+      ? resolved.toLowerCase()
+      : resolved;
     if (seen.has(key)) continue;
     try {
       if (!existsSync(resolved) || !statSync(resolved).isDirectory()) continue;

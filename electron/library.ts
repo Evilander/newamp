@@ -5139,7 +5139,10 @@ function trackPathIsInFolder(path: string, folder: string, recursive: boolean): 
 }
 
 function folderTrackPathPrefixParam(folder: string): string {
-  return `${escapeFolderLikePattern(folderKey(folder))}\\%`;
+  // sqlLower, not folderKey: this one is handed to SQL. trackPathIsInFolder
+  // still makes the final call on every row the prefix lets through.
+  const normalized = trimFolderTrailingSlash(normalizeFolderPath(folder) ?? folder);
+  return `${escapeFolderLikePattern(sqlLower(normalized))}\\%`;
 }
 
 function folderOfTrackPath(path: string): string | null {
@@ -5172,8 +5175,15 @@ function foldersEqual(a: string, b: string): boolean {
   return folderKey(a) === folderKey(b);
 }
 
+// Windows and macOS treat "Rock" and "rock" as one folder. Linux does not:
+// they are two directories, with two sets of tracks, and folding them here
+// merged them in the Folders view and made a folder playlist for one pull the
+// other's tracks too.
+const FOLDER_PATHS_ARE_CASE_SENSITIVE = process.platform !== 'win32' && process.platform !== 'darwin';
+
 function folderKey(path: string): string {
-  return trimFolderTrailingSlash(normalizeFolderPath(path) ?? path).toLowerCase();
+  const normalized = trimFolderTrailingSlash(normalizeFolderPath(path) ?? path);
+  return FOLDER_PATHS_ARE_CASE_SENSITIVE ? normalized : normalized.toLowerCase();
 }
 
 function normalizeFolderPath(value?: string | null): string | null {
@@ -5209,8 +5219,18 @@ function sortFolders(folders: FolderSummary[]): FolderSummary[] {
   return folders.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 }
 
+// SQLite's lower() folds A-Z and nothing else, so a parameter folded in JS
+// can never match a row that lower() left alone: searching for a folder named
+// "Olafur Arnalds" works and "Ólafur Arnalds" returns nothing at all, because
+// the query became "ólafur" while the column stayed "Ólafur". Fold parameters
+// the way SQLite does. Comparisons made in JS (trackPathIsInFolder, folderKey)
+// keep full case folding; they see both sides.
+function sqlLower(value: string): string {
+  return value.replace(/[A-Z]+/g, (run) => run.toLowerCase());
+}
+
 function likeParam(value: string): string {
-  return `%${escapeLike(value.toLowerCase())}%`;
+  return `%${escapeLike(sqlLower(value))}%`;
 }
 
 function escapeFolderLikePattern(value: string): string {

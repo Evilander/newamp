@@ -49,6 +49,35 @@ assert.deepEqual([...seen].sort(), ['a-first.mp3', 'b-second.mp3', 'c-third.mp3'
 assert.equal(lib.runSmartPlaylistRule(folderRule, 99).length, 3, 'a sample larger than the folder returns it all');
 assert.equal(lib.runSmartPlaylistRule(folderRule, 0).length, 3, 'no sample means the whole folder');
 
+// SQLite's lower() folds ASCII only. A folder whose name carries a non-ASCII
+// capital used to match nothing at all: the LIKE parameter had been folded in
+// JS, the column had not.
+lib.upsertTracks([
+  '/music/Ólafur Arnalds/island.mp3',
+  '/music/Édith Piaf/regrette.mp3',
+  '/music/Rock/loud.mp3',
+  '/music/rock/quiet.mp3',
+].map((path, i) => ({
+  ...base, path, title: path.split('/').pop(), artist: `Accent ${i}`, trackNo: 90 + i,
+})));
+assert.deepEqual(
+  titles(lib.runSmartPlaylistRule({ name: 'O', mood: 'focus', count: 50, folderPath: '/music/Ólafur Arnalds' })),
+  ['island.mp3'],
+  'a folder with a non-ASCII capital is still a folder',
+);
+assert.deepEqual(
+  titles(lib.getTracks({ search: 'path:"/music/Édith Piaf"', limit: 50, offset: 0 })),
+  ['regrette.mp3'],
+  'path: search reaches a non-ASCII capital',
+);
+// Case is a real distinction on Linux and not on Windows or macOS.
+const caseFolds = process.platform === 'win32' || process.platform === 'darwin';
+assert.deepEqual(
+  titles(lib.runSmartPlaylistRule({ name: 'R', mood: 'focus', count: 50, folderPath: '/music/Rock' })).sort(),
+  caseFolds ? ['loud.mp3', 'quiet.mp3'] : ['loud.mp3'],
+  caseFolds ? 'Rock and rock are one folder here' : 'Rock and rock are two folders here',
+);
+
 const saved = lib.saveSmartPlaylistRule(folderRule);
 assert.equal(saved.folderPath, '/music/To Listen');
 await lib.close();

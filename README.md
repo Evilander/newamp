@@ -56,7 +56,7 @@ install already has them; a bare Debian or Ubuntu image is missing `libnss3`,
 
 - Plays MP3, FLAC, OGG, Opus, WAV, M4A, AAC, WMA, AIFF, APE, WV, DSF and a few
   others.
-- Paged browsing for large libraries. The database benchmark also exercises
+- Virtualized browsing for large libraries. The database benchmark also exercises
   350,000 synthetic tracks; see the limits below.
 - Winamp-style keyboard control: space, arrows, `L` to love, `0`–`5` to rate,
   `Q` to queue, `F` for fullscreen visuals, `Ctrl+K` for search.
