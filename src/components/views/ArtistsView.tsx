@@ -18,7 +18,10 @@ import { computeGridColumnCount, useVirtualRows } from '../../hooks/useVirtualRo
 // 320 cost most of what the full list does (27k tracks: 12 ms vs 20 ms; 200k
 // tracks / 40k artists: 93 ms vs 160 ms), and paging left the A-Z rail able
 // to reach only the letters already loaded.
-const ARTIST_LIST_LIMIT = 1_000_000;
+// The library clamps catalog queries to 100,000 rows. Asking for more would
+// be silently cut to this anyway, so ask for exactly it and say "100,000+"
+// when the list comes back full.
+const ARTIST_LIST_LIMIT = 100_000;
 const ARTIST_ROW_HEIGHT = 37;
 const ARTIST_MIN_WIDTH = 220;
 const CATALOG_SEARCH_DEBOUNCE_MS = 180;
@@ -235,7 +238,7 @@ export function ArtistsView(): JSX.Element {
       <ViewHeader
         eyebrow="Explore"
         title="Artists"
-        count={`${artists.length.toLocaleString()} artists`}
+        count={`${artists.length.toLocaleString()}${artists.length >= ARTIST_LIST_LIMIT ? '+' : ''} artists`}
         status={
           scanBusy ? (
             <Chip tone="accent" size="sm">

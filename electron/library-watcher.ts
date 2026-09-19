@@ -1,5 +1,5 @@
 import { existsSync, statSync, watch, type Dirent, type FSWatcher } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { lstat, readdir } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 
 const AUDIO_EXTS = new Set([
@@ -214,7 +214,10 @@ export class LibraryWatcher {
   private async adoptDirectory(path: string, generation: number): Promise<void> {
     if (this.watchers.has(path) || basename(path).startsWith('.')) return;
     try {
-      if (!(await stat(path)).isDirectory()) return;
+      // lstat, not stat: the tree walk lists directories with Dirent, which
+      // does not follow symlinks, so adopting one here would watch a tree the
+      // initial walk skipped.
+      if (!(await lstat(path)).isDirectory()) return;
     } catch {
       return;
     }

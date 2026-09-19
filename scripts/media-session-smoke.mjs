@@ -60,6 +60,19 @@ assert.equal(
 assert.equal(mediaSessionPositionNeedsSync(snap, { ...snap, playing: false }), true, 'pause is pushed');
 assert.equal(mediaSessionPositionNeedsSync(snap, { ...snap, trackId: 8 }), true, 'track change is pushed');
 assert.equal(mediaSessionPositionNeedsSync(snap, { ...snap, playbackRate: 1.25 }), true, 'rate change is pushed');
+// duration is NaN until a track's metadata lands. NaN !== NaN, so a plain
+// comparison would report a change on every tick through that window.
+const unknownDuration = { ...snap, duration: Number.NaN };
+assert.equal(
+  mediaSessionPositionNeedsSync(unknownDuration, { ...unknownDuration, position: 42, atMs: 12_000 }),
+  false,
+  'an unknown duration on both sides is not a change',
+);
+assert.equal(
+  mediaSessionPositionNeedsSync(unknownDuration, { ...unknownDuration, duration: 367 }),
+  true,
+  'a duration arriving is pushed',
+);
 const pausedSnap = { ...snap, playing: false };
 assert.equal(
   mediaSessionPositionNeedsSync(pausedSnap, { ...pausedSnap, atMs: 60_000 }),

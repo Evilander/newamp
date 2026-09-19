@@ -8,6 +8,7 @@ import { spectralArtDataUrl } from '@shared/spectral-art';
 import { TrackTable } from './LibraryView';
 import { useSavedPlaylists } from '../../hooks/useSavedPlaylists';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
+import { uniqueSmartRuleName } from './PlaylistView';
 import { LoadMoreFooter } from './LoadMoreFooter';
 import { ViewHeader } from '../ViewHeader';
 import { Chip } from '../Chip';
@@ -162,8 +163,7 @@ export function FoldersView(): JSX.Element {
     try {
       const rules = await api.getSmartPlaylistRules();
       const sameFolder = rules.find((rule) => rule.folderPath === folderPath);
-      let name = sameFolder?.name ?? folder.name;
-      for (let n = 2; !sameFolder && rules.some((rule) => rule.name === name); n += 1) name = `${folder.name} ${n}`;
+      const name = sameFolder?.name ?? uniqueSmartRuleName(folder.name, rules);
       const rule = await api.saveSmartPlaylistRule({ id: sameFolder?.id, name, mood: 'focus', count: 200, folderPath });
       pushToast({
         tone: 'ok',

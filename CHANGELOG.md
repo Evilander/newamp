@@ -40,6 +40,9 @@ Release notes for every version, including everything before 2.0, are on the
   Library to that folder, and the folder list has a filter box.
 - `npm run bench:cpu` measures the app's CPU use per process with a large
   synthetic library (27,000 tracks by default), with or without the GPU.
+- Save as New in the smart rule panel. With a rule selected, Save Smart reads
+  Update Smart and overwrites that rule; Save as New keeps the settings as a
+  separate rule and leaves the original alone.
 
 ### Changed
 

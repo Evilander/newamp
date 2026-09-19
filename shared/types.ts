@@ -1340,7 +1340,12 @@ export interface NewAmpAPI {
   getDiscoverSurface: (input?: DiscoverSurfaceInput) => Promise<DiscoverSurface>;
   saveSmartPlaylistRule: (input: SmartPlaylistRuleInput) => Promise<SmartPlaylistRule>;
   deleteSmartPlaylistRule: (id: number) => Promise<void>;
-  runSmartPlaylistRule: (input: number | SmartPlaylistRuleInput) => Promise<Track[]>;
+  /**
+   * `sampleCount` bounds a folder rule to that many tracks picked at random
+   * (Auto DJ wants candidates, not the whole folder). Other rules already
+   * return at most their own count and ignore it.
+   */
+  runSmartPlaylistRule: (input: number | SmartPlaylistRuleInput, sampleCount?: number) => Promise<Track[]>;
   listTagRules: () => Promise<TagRule[]>;
   saveTagRule: (input: TagRuleInput) => Promise<TagRule>;
   deleteTagRule: (id: number) => Promise<void>;

@@ -484,10 +484,15 @@ void main() { fragColor = u_color; }
       if (!def || blacklisted.has(def.id) || idx === activeIndex) continue;
       if (want === null || def.mood === 'any' || def.mood === want) candidates.push(idx);
     }
-    const pool = candidates.length ? candidates : rotation.filter((i) => i !== activeIndex);
+    const pool = candidates.length
+      ? candidates
+      : rotation.filter((i) => i !== activeIndex && !blacklisted.has(SCENES[i]?.id ?? ''));
     if (!pool.length) return;
     const next = pool[Math.floor(walk() * pool.length)]!;
-    outgoingIndex = activeIndex;
+    // A scene blacklisted while it was on screen has no program to fade out
+    // with; cut to the incoming one instead of holding a frame that never draws.
+    const leaving = SCENES[activeIndex];
+    outgoingIndex = leaving && !blacklisted.has(leaving.id) ? activeIndex : -1;
     activeIndex = next;
     fadeMs = 0;
     sceneTimeMs = 0;

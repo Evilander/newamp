@@ -1782,10 +1782,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
             .then((rules) => rules.find((rule) => rule.id === state.autoDjSmartRuleId) ?? null)
             .then((rule) =>
               rule
-                ? api.runSmartPlaylistRule({
-                    ...rule,
-                    count: autoDjSmartRuleCandidateCount(rule.count, state.autoDjTarget, state.queue.length),
-                  })
+                ? (() => {
+                    const candidateCount = autoDjSmartRuleCandidateCount(
+                      rule.count,
+                      state.autoDjTarget,
+                      state.queue.length,
+                    );
+                    // A folder rule ignores `count` (it is the whole folder),
+                    // so bound it with the sample instead.
+                    return api.runSmartPlaylistRule({ ...rule, count: candidateCount }, candidateCount);
+                  })()
                 : api.runSmartPlaylistRule(state.autoDjSmartRuleId!),
             )
             .catch(() => [])

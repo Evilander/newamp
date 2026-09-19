@@ -2139,7 +2139,9 @@ function registerIpc(): void {
   );
   ipcMain.handle('smart:save', async (_e, input) => library.saveSmartPlaylistRule(input));
   ipcMain.handle('smart:delete', async (_e, id: number) => library.deleteSmartPlaylistRule(id));
-  ipcMain.handle('smart:run', async (_e, input) => library.runSmartPlaylistRule(input));
+  ipcMain.handle('smart:run', async (_e, input, sampleCount) =>
+    library.runSmartPlaylistRule(input, typeof sampleCount === 'number' ? sampleCount : 0),
+  );
   ipcMain.handle('smart:harmonic-mix', async (_e, input) => library.buildHarmonicMix(input));
   ipcMain.handle('smart:taste-mix', async (_e, input) => library.buildTasteMix(input));
   ipcMain.handle('metadata:lookup', async (_e, id: number) => {

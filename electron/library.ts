@@ -2649,12 +2649,14 @@ export class LibraryStore {
     }
   }
 
-  runSmartPlaylistRule(input: number | SmartPlaylistRuleInput): Track[] {
+  runSmartPlaylistRule(input: number | SmartPlaylistRuleInput, sampleCount = 0): Track[] {
     const rule = typeof input === 'number'
       ? this.getSmartRule(Math.trunc(input))
       : { ...normalizeSmartRuleInput(input), id: 0, createdAt: 0, updatedAt: 0 };
     if (!rule) return [];
-    if (rule.folderPath) return this.runFolderRule(rule).map(rowToTrack);
+    if (rule.folderPath) {
+      return this.runFolderRule(rule, Math.max(0, Math.trunc(sampleCount))).map(rowToTrack);
+    }
 
     const { where, params } = smartRuleWhere(rule);
     const candidates = this.many<RawRow>(
@@ -2695,23 +2697,44 @@ export class LibraryStore {
       .map((item) => item.track);
   }
 
-  // A folder rule is the folder itself: every track under it, in the same
-  // order the Folders view lists them, narrowed by the rule's other filters.
-  private runFolderRule(rule: SmartPlaylistRule): RawRow[] {
+  // The LIKE prefix is a cheap first pass; trackPathIsInFolder decides, so a
+  // sibling folder whose name starts the same ("To Listen Later") is dropped.
+  private folderRuleStatement(rule: SmartPlaylistRule, columns: string): import('sql.js').Statement | null {
     const folder = normalizeFolderPath(rule.folderPath);
-    if (!folder) return [];
+    if (!folder) return null;
     const { where, params } = smartRuleWhere(rule);
-    const rows: RawRow[] = [];
     const stmt = this.db.prepare(
-      `SELECT * FROM tracks
+      `SELECT ${columns} FROM tracks
         ${where ? `${where} AND` : 'WHERE'} lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'
         ORDER BY lower(replace(path, '/', '\\')) COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE, id`,
     );
+    stmt.bind([...params, folderTrackPathPrefixParam(folder)] as unknown as import('sql.js').BindParams);
+    return stmt;
+  }
+
+  // A folder rule is the folder itself: every track under it, in the same
+  // order the Folders view lists them, narrowed by the rule's other filters.
+  // `sample` takes that many at random instead (Auto DJ asks for a handful of
+  // candidates; it would otherwise carry the whole folder over IPC to drop
+  // nearly all of it). Sampling as we step keeps the rows we hold bounded too.
+  private runFolderRule(rule: SmartPlaylistRule, sample = 0): RawRow[] {
+    const folder = normalizeFolderPath(rule.folderPath);
+    const stmt = this.folderRuleStatement(rule, '*');
+    if (!folder || !stmt) return [];
+    const rows: RawRow[] = [];
+    let matched = 0;
     try {
-      stmt.bind([...params, folderTrackPathPrefixParam(folder)] as unknown as import('sql.js').BindParams);
-      while (stmt.step() && rows.length < 100000) {
+      while (stmt.step() && matched < 100000) {
         const row = stmt.getAsObject() as unknown as RawRow;
-        if (trackPathIsInFolder(row.path, folder, true)) rows.push(row);
+        if (!trackPathIsInFolder(row.path, folder, true)) continue;
+        matched += 1;
+        if (sample <= 0 || rows.length < sample) {
+          rows.push(row);
+          continue;
+        }
+        // Reservoir: every matching track keeps an equal chance of the slot.
+        const slot = Math.floor(Math.random() * matched);
+        if (slot < sample) rows[slot] = row;
       }
       return rows;
     } finally {
@@ -2719,8 +2742,24 @@ export class LibraryStore {
     }
   }
 
+  private countFolderRuleMatches(rule: SmartPlaylistRule): number {
+    const folder = normalizeFolderPath(rule.folderPath);
+    const stmt = this.folderRuleStatement(rule, 'path');
+    if (!folder || !stmt) return 0;
+    let matched = 0;
+    try {
+      while (stmt.step() && matched < 100000) {
+        const { path } = stmt.getAsObject() as unknown as { path: string };
+        if (trackPathIsInFolder(path, folder, true)) matched += 1;
+      }
+      return matched;
+    } finally {
+      stmt.free();
+    }
+  }
+
   private countSmartPlaylistRuleMatches(rule: SmartPlaylistRule): number {
-    if (rule.folderPath) return this.runFolderRule(rule).length;
+    if (rule.folderPath) return this.countFolderRuleMatches(rule);
     const { where, params } = smartRuleWhere(rule);
     const row = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks ${where}`, params);
     return Math.min(rule.count, Math.max(0, row?.n ?? 0));

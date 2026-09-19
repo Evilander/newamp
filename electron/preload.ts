@@ -237,8 +237,8 @@ const api: NewAmpAPI = {
   saveSmartPlaylistRule: (input: SmartPlaylistRuleInput) =>
     ipcRenderer.invoke('smart:save', input) as Promise<SmartPlaylistRule>,
   deleteSmartPlaylistRule: (id: number) => ipcRenderer.invoke('smart:delete', id) as Promise<void>,
-  runSmartPlaylistRule: (input: number | SmartPlaylistRuleInput) =>
-    ipcRenderer.invoke('smart:run', input) as Promise<Track[]>,
+  runSmartPlaylistRule: (input: number | SmartPlaylistRuleInput, sampleCount?: number) =>
+    ipcRenderer.invoke('smart:run', input, sampleCount) as Promise<Track[]>,
   listTagRules: () => ipcRenderer.invoke('tags:list-rules') as Promise<TagRule[]>,
   saveTagRule: (input: TagRuleInput) => ipcRenderer.invoke('tags:save-rule', input) as Promise<TagRule>,
   deleteTagRule: (id: number) => ipcRenderer.invoke('tags:delete-rule', id) as Promise<void>,

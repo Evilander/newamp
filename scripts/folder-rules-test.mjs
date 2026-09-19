@@ -39,6 +39,16 @@ const loved = lib.getTracks({ limit: 50, offset: 0 }).find((t) => t.title === 'b
 lib.toggleLove(loved.id);
 assert.deepEqual(titles(lib.runSmartPlaylistRule({ ...folderRule, lovedOnly: true })), ['b-second.mp3'], 'other filters still narrow');
 
+// Auto DJ asks for a bounded sample instead of carrying a whole folder over
+// IPC. Every track under the folder stays eligible; only the count is capped.
+const sampled = lib.runSmartPlaylistRule(folderRule, 2);
+assert.equal(sampled.length, 2, 'a sample returns the requested count');
+const seen = new Set();
+for (let i = 0; i < 40; i += 1) for (const t of lib.runSmartPlaylistRule(folderRule, 2)) seen.add(t.title);
+assert.deepEqual([...seen].sort(), ['a-first.mp3', 'b-second.mp3', 'c-third.mp3'], 'sampling reaches every track');
+assert.equal(lib.runSmartPlaylistRule(folderRule, 99).length, 3, 'a sample larger than the folder returns it all');
+assert.equal(lib.runSmartPlaylistRule(folderRule, 0).length, 3, 'no sample means the whole folder');
+
 const saved = lib.saveSmartPlaylistRule(folderRule);
 assert.equal(saved.folderPath, '/music/To Listen');
 await lib.close();
