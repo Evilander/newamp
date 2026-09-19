@@ -65,6 +65,12 @@ export interface SceneOverlayOptions {
   gl?: WebGL2RenderingContext;
   quality?: 'high' | 'medium' | 'low';
   seedKey?: string;
+  /**
+   * Compile each scene on first use, blocking, with no background warm-up:
+   * every render is then a pure function of its inputs, which pixel tests
+   * need. The app uses the asynchronous path.
+   */
+  syncCompile?: boolean;
 }
 
 // Shared GLSL prelude: every scene compiles against these uniforms + helpers.
@@ -189,6 +195,22 @@ interface CompiledScene {
   uniforms: UniformMap;
 }
 
+interface PendingScene {
+  program: WebGLProgram;
+  vs: WebGLShader;
+  fs: WebGLShader;
+  frames: number;
+}
+
+// Background warm-up: start one scene's compile every this many frames.
+const WARM_EVERY_FRAMES = 8;
+// Without KHR_parallel_shader_compile there is no "done" signal; read the
+// status after this many frames, by when the GPU process has usually finished.
+const UNSIGNALED_COMPILE_FRAMES = 3;
+// A scene needed on screen stops waiting after this many frames (~1 s); the
+// crossfade holds the outgoing scene until then.
+const MAX_COMPILE_WAIT_FRAMES = 45;
+
 const CROSSFADE_MS = 1400;
 // Scene dwell: rotate on section change after MIN, force-rotate after MAX.
 const MIN_DWELL_MS = 24_000;
@@ -241,36 +263,52 @@ export function createSceneOverlay(
   const compiled = new Map<string, CompiledScene>();
   const blacklisted = new Set<string>();
 
-  function compileScene(def: SceneDef): CompiledScene | null {
-    if (disposed) return null;
-    const cached = compiled.get(def.id);
-    if (cached) return cached;
-    if (blacklisted.has(def.id)) return null;
-    const fragSrc = PRELUDE + def.frag + MAIN;
+  // Scene programs compile in two steps so the switch frame never waits on the
+  // driver: issue compile + link (asynchronous in the GPU process), then read
+  // the status a few frames later. Reading it right away blocked the frame for
+  // the whole compile, up to ~70 ms per scene on a cold shader cache. With
+  // KHR_parallel_shader_compile the driver says when it is done; without it,
+  // a few frames is normally enough. The rest of the library warms one scene
+  // at a time in the background, so most looks are ready before they're used.
+  const parallelCompile = gl.getExtension('KHR_parallel_shader_compile') as { COMPLETION_STATUS_KHR: number } | null;
+  const pending = new Map<string, PendingScene>();
+  let warmCountdown = WARM_EVERY_FRAMES;
+
+  function beginCompile(def: SceneDef): void {
+    if (disposed || compiled.has(def.id) || pending.has(def.id) || blacklisted.has(def.id)) return;
     const vs = gl!.createShader(gl!.VERTEX_SHADER);
     const fs = gl!.createShader(gl!.FRAGMENT_SHADER);
     const program = gl!.createProgram();
-    if (!vs || !fs || !program) return null;
+    if (!vs || !fs || !program) return;
     gl!.shaderSource(vs, VERT);
     gl!.compileShader(vs);
-    gl!.shaderSource(fs, fragSrc);
+    gl!.shaderSource(fs, PRELUDE + def.frag + MAIN);
     gl!.compileShader(fs);
-    if (!gl!.getShaderParameter(fs, gl!.COMPILE_STATUS)) {
-      console.error(`[scene-overlay] scene '${def.id}' failed to compile:`, gl!.getShaderInfoLog(fs));
-      blacklisted.add(def.id);
-      gl!.deleteShader(vs);
-      gl!.deleteShader(fs);
-      gl!.deleteProgram(program);
-      return null;
-    }
     gl!.attachShader(program, vs);
     gl!.attachShader(program, fs);
     gl!.linkProgram(program);
+    pending.set(def.id, { program, vs, fs, frames: 0 });
+  }
+
+  function compileReady(entry: PendingScene): boolean {
+    if (parallelCompile) return !!gl!.getProgramParameter(entry.program, parallelCompile.COMPLETION_STATUS_KHR);
+    return entry.frames >= UNSIGNALED_COMPILE_FRAMES;
+  }
+
+  function finishCompile(def: SceneDef, entry: PendingScene): CompiledScene | null {
+    pending.delete(def.id);
+    const { program, vs, fs } = entry;
+    const linked = !!gl!.getProgramParameter(program, gl!.LINK_STATUS);
+    if (!linked) {
+      const log = gl!.getShaderParameter(fs, gl!.COMPILE_STATUS)
+        ? `failed to link: ${gl!.getProgramInfoLog(program)}`
+        : `failed to compile: ${gl!.getShaderInfoLog(fs)}`;
+      console.error(`[scene-overlay] scene '${def.id}' ${log}`);
+      blacklisted.add(def.id);
+    }
     gl!.deleteShader(vs);
     gl!.deleteShader(fs);
-    if (!gl!.getProgramParameter(program, gl!.LINK_STATUS)) {
-      console.error(`[scene-overlay] scene '${def.id}' failed to link:`, gl!.getProgramInfoLog(program));
-      blacklisted.add(def.id);
+    if (!linked) {
       gl!.deleteProgram(program);
       return null;
     }
@@ -282,6 +320,40 @@ export function createSceneOverlay(
     const result = { program, uniforms };
     compiled.set(def.id, result);
     return result;
+  }
+
+  // The program for a scene about to be drawn: compiled, still compiling
+  // ('pending': skip it this frame), or failed (null). A scene that has kept
+  // a fade waiting too long is finished even if that has to block.
+  function compileScene(def: SceneDef): CompiledScene | 'pending' | null {
+    if (disposed) return null;
+    const cached = compiled.get(def.id);
+    if (cached) return cached;
+    if (blacklisted.has(def.id)) return null;
+    beginCompile(def);
+    const entry = pending.get(def.id);
+    if (!entry) return null;
+    if (options.syncCompile || compileReady(entry) || entry.frames >= MAX_COMPILE_WAIT_FRAMES) {
+      return finishCompile(def, entry);
+    }
+    return 'pending';
+  }
+
+  // Once per render: age in-flight compiles, finish the ones that are done,
+  // and start the next background warm-up while no crossfade is running.
+  function tickCompiles(fading: boolean): void {
+    if (options.syncCompile) return;
+    for (const [id, entry] of pending) {
+      entry.frames += 1;
+      if (compileReady(entry)) {
+        const def = SCENES.find((scene) => scene.id === id);
+        if (def) finishCompile(def, entry);
+      }
+    }
+    if (fading || pending.size > 0 || --warmCountdown > 0) return;
+    warmCountdown = WARM_EVERY_FRAMES;
+    const next = SCENES.find((scene) => !compiled.has(scene.id) && !blacklisted.has(scene.id));
+    if (next) beginCompile(next);
   }
 
   // --- scene rotation state -------------------------------------------------
@@ -426,6 +498,10 @@ void main() { fragColor = u_color; }
 
   function bindAndDraw(def: SceneDef, frame: EvilandFrame, palette: EvilandPalette, dtSec: number, fade: number, seed: number, timeMs: number): boolean {
     const scene = compileScene(def);
+    // Still compiling: skip this frame. An incoming scene is near zero
+    // opacity at the start of its fade, so a frame or two without it is
+    // invisible, and it keeps its slot.
+    if (scene === 'pending') return true;
     if (!scene) return false;
     gl!.useProgram(scene.program);
     const u = scene.uniforms;
@@ -520,7 +596,14 @@ void main() { fragColor = u_color; }
       dwellMs += dt;
       accentTimeMs += dt;
       accentDwellMs += dt;
-      if (outgoingIndex >= 0) fadeMs = Math.min(fadeDurMs, fadeMs + dt);
+      if (outgoingIndex >= 0) {
+        // Hold the crossfade until the incoming scene's program is ready, so
+        // the outgoing scene stays whole instead of fading into a gap.
+        const incoming = SCENES[resolveSceneIndex()];
+        if (!incoming || compiled.has(incoming.id) || blacklisted.has(incoming.id)) {
+          fadeMs = Math.min(fadeDurMs, fadeMs + dt);
+        }
+      }
       updatePulses(frame, dt);
       const seconds = dt / 1000;
       energyTime += frame.energy * seconds;
@@ -574,6 +657,8 @@ void main() { fragColor = u_color; }
           pickAccentScene();
         }
       }
+
+      tickCompiles(outgoingIndex >= 0);
 
       targetWidth = target?.width ?? canvas.width;
       targetHeight = target?.height ?? canvas.height;
@@ -690,6 +775,16 @@ void main() { fragColor = u_color; }
         }
       }
       compiled.clear();
+      for (const { program, vs, fs } of pending.values()) {
+        try {
+          gl.deleteShader(vs);
+          gl.deleteShader(fs);
+          gl.deleteProgram(program);
+        } catch {
+          /* context lost */
+        }
+      }
+      pending.clear();
       if (flashProgram) {
         try {
           gl.deleteProgram(flashProgram);

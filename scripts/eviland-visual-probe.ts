@@ -286,7 +286,7 @@ async function controls() {
   let worstJump = 0;
   for (const def of SCENES) {
     const canvas = document.createElement('canvas');
-    const scene = createSceneOverlay(canvas, { quality: 'high' });
+    const scene = createSceneOverlay(canvas, { quality: 'high', syncCompile: true });
     if (!scene) throw new Error('scene overlay unavailable');
     scene.resize(W, H, 1);
     scene.setScene(def.id);

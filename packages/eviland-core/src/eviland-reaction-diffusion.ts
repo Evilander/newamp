@@ -53,6 +53,15 @@ void main() {
   o = vec4(color * alpha, alpha);
 }`;
 
+// Compiles and discards the simulation's two programs so the GPU process holds
+// them in its program cache. The simulation itself is created lazily, on the
+// first look that uses it; with the cache warm, that no longer compiles on the
+// switch frame. Call where the other programs compile, at renderer start.
+export function warmReactionDiffusion(gl: WebGL2RenderingContext): void {
+  if (!gl.getExtension('EXT_color_buffer_float')) return;
+  for (const fragment of [STEP, DRAW]) gl.deleteProgram(sourceProgram(gl, fragment));
+}
+
 export function createReactionDiffusion(gl: WebGL2RenderingContext, seed = 1) {
   if (!gl.getExtension('EXT_color_buffer_float')) return null;
   const step = sourceProgram(gl, STEP), draw = sourceProgram(gl, DRAW);

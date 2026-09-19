@@ -38,6 +38,7 @@
     "smoke:playback": "npm run build:electron && electron scripts/playback-smoke-app",
     "smoke:transcode": "npm run build:electron && node scripts/transcode-smoke.mjs",
     "smoke:visualizer": "node scripts/visualizer-smoke.mjs",
+    "bench:eviland-switch": "electron scripts/eviland-switch-bench.mjs",
     "test:all": "node scripts/run-all-tests.mjs",
     "test:playback-lifecycle": "node scripts/playback-lifecycle-test.mjs",
     "test:eq-toggle": "node scripts/eq-toggle-test.mjs",

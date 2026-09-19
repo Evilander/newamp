@@ -96,7 +96,37 @@ function meanDelta(a: Uint8Array, b: Uint8Array): number {
   return n ? sum / n : 0;
 }
 
-async function probe(): Promise<{ webgl2: boolean; scenes: SceneResult[] }> {
+// The app's path: compiles are issued asynchronously and finished on later
+// frames. Paced like the real loop, a forced scene must reach the screen, and
+// the frame that finally uses it must not block on the compile.
+async function asyncCompile(): Promise<{ drewWithinMs: number | null; worstFrameMs: number }> {
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const overlay = createSceneOverlay(canvas, { quality: 'high', seedKey: 'scene-smoke-async' });
+  if (!overlay) return { drewWithinMs: null, worstFrameMs: 0 };
+  const gl = canvas.getContext('webgl2')!;
+  overlay.resize(W, H, 1);
+  overlay.setScene(SCENES[SCENES.length - 1]!.id);
+  const start = performance.now();
+  let worstFrameMs = 0;
+  let drewWithinMs: number | null = null;
+  try {
+    for (let i = 0; drewWithinMs === null && performance.now() - start < 5000; i++) {
+      const t0 = performance.now();
+      overlay.render(makeFrame(true, i * 0.13), PALETTE, 22);
+      gl.finish();
+      worstFrameMs = Math.max(worstFrameMs, performance.now() - t0);
+      if (litFraction(readPixels(gl)) > 0.002) drewWithinMs = Math.round(performance.now() - start);
+      await new Promise((r) => setTimeout(r, 22));
+    }
+  } finally {
+    overlay.dispose();
+  }
+  return { drewWithinMs, worstFrameMs: Math.round(worstFrameMs) };
+}
+
+async function probe(): Promise<{ webgl2: boolean; scenes: SceneResult[]; asyncCompile?: Awaited<ReturnType<typeof asyncCompile>> }> {
   const results: SceneResult[] = [];
 
   for (const def of SCENES) {
@@ -105,7 +135,7 @@ async function probe(): Promise<{ webgl2: boolean; scenes: SceneResult[] }> {
     const canvas = document.createElement('canvas');
     canvas.width = W;
     canvas.height = H;
-    const overlay = createSceneOverlay(canvas, { quality: 'high', seedKey: 'scene-smoke' });
+    const overlay = createSceneOverlay(canvas, { quality: 'high', seedKey: 'scene-smoke', syncCompile: true });
     if (!overlay) {
       return { webgl2: false, scenes: results };
     }
@@ -138,7 +168,7 @@ async function probe(): Promise<{ webgl2: boolean; scenes: SceneResult[] }> {
     }
     results.push(result);
   }
-  return { webgl2: true, scenes: results };
+  return { webgl2: true, scenes: results, asyncCompile: await asyncCompile() };
 }
 
 (window as unknown as { __sceneProbe: () => Promise<unknown> }).__sceneProbe = probe;

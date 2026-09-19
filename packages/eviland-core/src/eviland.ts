@@ -46,7 +46,7 @@
 
 import type { EvilandFrame } from './eviland-audio';
 import { evalConfig, createDynamics, defaultConfig, CLASSIC_COMPOSITION, type OperatorConfig } from './eviland-operators';
-import { createReactionDiffusion } from './eviland-reaction-diffusion';
+import { createReactionDiffusion, warmReactionDiffusion } from './eviland-reaction-diffusion';
 import { createSceneOverlay } from './scene-overlay';
 import { mulberry32, hashSeed } from './eviland-rng';
 import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame, type FluidSim } from './eviland-fluid';
@@ -1280,7 +1280,8 @@ export function createEvilandRenderer(
   let currentConfig: OperatorConfig = defaultConfig();
   const random = mulberry32(hashSeed(options.seed ?? 'eviland-renderer'));
   const forceSource = createFluidForceSource();
-  const scenes = createSceneOverlay(canvas, { gl, quality, seedKey: options.seed ?? 'eviland' });
+  const scenes = createSceneOverlay(canvas, { gl, quality, seedKey: options.seed ?? 'eviland', syncCompile: options.smoke });
+  warmReactionDiffusion(gl);
   let sourceGain = 1;
   let anticipationClock = 0;
   const dyn = createDynamics();

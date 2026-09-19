@@ -16,6 +16,7 @@
 // Playwright install and run this file with plain node.
 
 import { build } from 'esbuild';
+import { butterchurnMegabufEsbuildPlugin } from './butterchurn-megabuf.mjs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -51,6 +52,7 @@ async function bundleProbe() {
     format: 'iife',
     outfile: bundlePath,
     logLevel: 'silent',
+    plugins: [butterchurnMegabufEsbuildPlugin()],
   });
   const htmlPath = join(outRoot, `${mode}-probe.html`);
   await writeFile(

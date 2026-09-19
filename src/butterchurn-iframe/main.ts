@@ -75,10 +75,6 @@ let presetWeights: number[] = [];
 let presetOrder: number[] = [];
 let lastAudioPostAt = 0;
 let presetTimer: number | null = null;
-// When >0, frame() holds the last painted frame for this many ticks. Used to
-// give butterchurn's synchronous loadPreset() shader-compile + megabuf GC a
-// clear slot instead of colliding with an active paint (the inter-preset judder).
-let skipRenderFrames = 0;
 let raf = 0;
 // One paint at the governed cadence. Normally driven by rAF; the audio message
 // handler calls it too when rAF has been starved (see STARVED_PAINT_MS).
@@ -216,17 +212,14 @@ async function start(sampleRate: number): Promise<void> {
       return presetOrder[lo + Math.floor(Math.random() * (hi - lo))]!;
     };
 
-    // loadPreset() does its heavy work (GLSL compile + ~8 MB/shape megabuf
-    // allocation) SYNCHRONOUSLY on this thread. requestIdleCallback was tried
-    // here but is a no-op: the continuous rAF render loop below never yields a
-    // real idle window, so ric just falls through to its setTimeout(0) deadline
-    // and the compile still lands on a paint frame. Instead we hold the next
-    // paint (skipRenderFrames) so the compile + first heavy render + GC get a
-    // clear frame, then the loop resumes smoothly.
+    // loadPreset() runs synchronously on this thread. Its megabufs used to be
+    // built element by element (8 MB each, several per preset); the build now
+    // swaps them for zero-copy typed arrays (scripts/butterchurn-megabuf.mjs),
+    // which took a preset switch from ~8-30 ms to ~2-3 ms, so the switch no
+    // longer needs a held paint to hide in.
     const loadRandomPreset = (blendSeconds: number): void => {
       if (disposed || !visualizer) return;
       const [, preset] = presets[pickIndex()]!;
-      skipRenderFrames = 1;
       try { visualizer.loadPreset(preset, blendSeconds); } catch { /* bad preset, skip */ }
     };
     if (liveMode) {
@@ -253,7 +246,6 @@ async function start(sampleRate: number): Promise<void> {
         const lo = fromLight ? 0 : halfBoundary;
         const span = fromLight ? halfBoundary : Math.max(1, presetOrder.length - halfBoundary);
         const index = presetOrder[lo + ((hash >>> 8) % span)] ?? presetOrder[0]!;
-        skipRenderFrames = 1;
         try { visualizer.loadPreset(presets[index]![1], 2); } catch { loadRandomPreset(2); }
       };
       if (latestComposition) {
@@ -307,12 +299,6 @@ async function start(sampleRate: number): Promise<void> {
       const dtMs = lastPaintAt ? now - lastPaintAt : 1000 / 45;
       lastPaintAt = now;
       sizeCanvas();
-      if (skipRenderFrames > 0) {
-        // Hold the last painted frame one tick so a just-loaded preset's compile
-        // + GC settle off the critical paint path.
-        skipRenderFrames -= 1;
-        return;
-      }
       const renderStart = performance.now();
       try {
         livePipeline?.advance(dtMs);
