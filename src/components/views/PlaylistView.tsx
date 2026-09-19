@@ -11,6 +11,7 @@ import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime } from '../../lib/format';
 import { api } from '../../lib/api';
 import { pushToast } from '../../lib/toast';
+import { uniqueSmartRuleName } from '../../lib/smartRuleNames';
 import { ViewHeader } from '../ViewHeader';
 import { ConfirmAction } from '../ConfirmAction';
 import { ArtistLink, AlbumLink } from '../EntityLink';
@@ -269,6 +270,16 @@ export function PlaylistView(): JSX.Element {
       applySmartRuleToDraft(saved);
       pushToast({ tone: 'ok', title: 'Smart rule saved', detail: saved.name });
       await refreshPlaylists();
+    } catch (err) {
+      // Rule names are unique, so renaming one onto another's name fails.
+      // Without this the save did nothing and said nothing.
+      pushToast({
+        tone: 'error',
+        title: 'Smart rule was not saved',
+        detail: /unique/i.test(err instanceof Error ? err.message : '')
+          ? 'Another smart rule already has that name.'
+          : err instanceof Error ? err.message : undefined,
+      });
     } finally {
       setBusy(false);
     }
@@ -1382,25 +1393,6 @@ const PLAYLIST_ROW_HEIGHT = 36;
 function moodLabel(mood: SetMood): string {
   if (mood === 'deep-cuts') return 'deep cuts';
   return mood;
-}
-
-// "Late Night" next to an existing "Late Night" becomes "Late Night 2".
-// Compared the way a name is stored: saving collapses runs of whitespace, and
-// a save with no id and a name that already exists overwrites that rule, so
-// "Late  Night" has to count as taken or Save as New would replace the
-// original instead of copying it.
-function storedNameOf(name: string): string {
-  return name.replace(/\s+/g, ' ').trim();
-}
-
-export function uniqueSmartRuleName(base: string, rules: Array<{ name: string }>): string {
-  const taken = new Set(rules.map((rule) => storedNameOf(rule.name)));
-  const stem = storedNameOf(base);
-  if (!taken.has(stem)) return stem;
-  for (let n = 2; ; n += 1) {
-    const candidate = `${stem} ${n}`;
-    if (!taken.has(candidate)) return candidate;
-  }
 }
 
 function parseOptionalNumber(value: string): number | null {
