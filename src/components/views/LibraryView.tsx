@@ -18,6 +18,8 @@ import { FormatBadges } from '../FormatBadges';
 import { ViewHeader } from '../ViewHeader';
 import { Star, StarOutline } from '../Icons';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
+import { useSavedPlaylists } from '../../hooks/useSavedPlaylists';
+import { defaultPlaylistName, openTrackContextMenu } from '../../lib/trackMenu';
 
 type Sort =
   | 'artist'
@@ -1094,6 +1096,7 @@ interface LibraryRowProps {
   onToggleAvoid: (id: number) => void;
   onMetadataLookup: ((track: Track) => void) | undefined;
   onShowInFolder: (path: string) => void;
+  onContextMenu: (track: Track) => void;
 }
 
 const LibraryRow = memo(function LibraryRow({
@@ -1115,6 +1118,7 @@ const LibraryRow = memo(function LibraryRow({
   onToggleAvoid,
   onMetadataLookup,
   onShowInFolder,
+  onContextMenu,
 }: LibraryRowProps): JSX.Element {
   const zebra = absoluteIndex % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)';
   return (
@@ -1133,6 +1137,10 @@ const LibraryRow = memo(function LibraryRow({
         color: isActive ? 'var(--accent)' : 'var(--ink)',
       }}
       onDoubleClick={() => onPlay(absoluteIndex)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu(t);
+      }}
       onKeyDown={(e) => {
         // View-local queueing grammar: Enter plays, Q queues, Shift+Q plays
         // next, arrows walk rows. Only when the row itself has focus — keys
@@ -1432,7 +1440,7 @@ export function TrackTable({
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
   const showMetadataLookup = !!onMetadataLookup;
   const showQueueActions = !!onPlayNext || !!onAddToQueue;
-  const [playlistTargets, setPlaylistTargets] = useState<SavedPlaylist[]>([]);
+  const playlistTargets = useSavedPlaylists();
   const [playlistStatus, setPlaylistStatus] = useState<string | null>(null);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [bulkAlbumArtist, setBulkAlbumArtist] = useState('');
@@ -1467,18 +1475,6 @@ export function TrackTable({
     [playlistTargets.length, showMetadataLookup, showQueueActions],
   );
   const tableMinWidth = activeColumnKeys.reduce((sum, key) => sum + columnWidths[key], 0);
-
-  useEffect(() => {
-    let cancelled = false;
-    api.getPlaylists()
-      .then((next) => {
-        if (!cancelled) setPlaylistTargets(next);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   // Scroll-to + flash for track navigation. The rows are memoized and carry
   // data-track-id/data-track-title already, so this is a scoped DOM effect
@@ -1640,20 +1636,16 @@ export function TrackTable({
       setPlaylistStatus('Playlist was not found.');
       return;
     }
-    setPlaylistTargets((current) =>
-      current.map((playlist) => (playlist.id === updated.id ? updated : playlist)),
-    );
     setPlaylistStatus(`Added ${track.title} to ${updated.name}.`);
   }
 
   async function saveSelectedAsPlaylist(): Promise<void> {
     if (!selectedTracks.length) return;
-    const name = newPlaylistName.trim() || selectedPlaylistDefaultName(selectedTracks);
+    const name = newPlaylistName.trim() || defaultPlaylistName(selectedTracks);
     const saved = await api.savePlaylist({
       name,
       trackIds: selectedTracks.map((track) => track.id),
     });
-    setPlaylistTargets((current) => [saved, ...current.filter((playlist) => playlist.id !== saved.id)]);
     setPlaylistStatus(`Created ${saved.name} with ${saved.trackCount.toLocaleString()} tracks.`);
     setNewPlaylistName('');
     setSelectedIds(new Set());
@@ -1844,6 +1836,16 @@ export function TrackTable({
 
   const stableOnShowInFolder = useCallback((path: string) => {
     void api.showInFolder(path);
+  }, []);
+
+  // Right-clicking a row that is part of a multi-selection acts on the whole
+  // selection; any other row acts on itself.
+  const selectionRef = useRef({ selectedIds, visible });
+  selectionRef.current = { selectedIds, visible };
+  const stableOnContextMenu = useCallback((track: Track) => {
+    const { selectedIds: ids, visible: rows } = selectionRef.current;
+    const targets = ids.size > 1 && ids.has(track.id) ? rows.filter((row) => ids.has(row.id)) : [track];
+    void openTrackContextMenu(targets);
   }, []);
 
   return (
@@ -2072,6 +2074,7 @@ export function TrackTable({
               onToggleAvoid={stableOnToggleAvoid}
               onMetadataLookup={onMetadataLookup ? stableOnMetadataLookup : undefined}
               onShowInFolder={stableOnShowInFolder}
+              onContextMenu={stableOnContextMenu}
             />
           );
         })}
@@ -2093,20 +2096,8 @@ export function PlaylistAppendPicker({
   label: string;
   disabled?: boolean;
 }): JSX.Element | null {
-  const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
+  const playlists = useSavedPlaylists();
   const [status, setStatus] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    api.getPlaylists()
-      .then((next) => {
-        if (!cancelled) setPlaylists(next);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   async function appendToPlaylist(playlistId: number): Promise<void> {
     const trackIds = tracks.map((track) => track.id);
@@ -2115,9 +2106,6 @@ export function PlaylistAppendPicker({
       setStatus('Playlist was not found.');
       return;
     }
-    setPlaylists((current) =>
-      current.map((playlist) => (playlist.id === updated.id ? updated : playlist)),
-    );
     setStatus(`Added ${trackIds.length.toLocaleString()} tracks to ${updated.name}.`);
   }
 
@@ -2351,8 +2339,3 @@ function readBulkMetadataPatch(input: {
   return Object.keys(patch).length ? { value: patch, error: null } : { value: null, error: null };
 }
 
-function selectedPlaylistDefaultName(tracks: Track[]): string {
-  const date = new Date().toISOString().slice(0, 10);
-  const firstArtist = tracks.find((track) => track.artist.trim())?.artist.trim();
-  return firstArtist ? `${firstArtist} Selection ${date}` : `Selected Tracks ${date}`;
-}

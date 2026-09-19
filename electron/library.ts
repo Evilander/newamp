@@ -260,6 +260,7 @@ CREATE TABLE IF NOT EXISTS smart_rules (
   min_rating     INTEGER,
   loved_only     INTEGER NOT NULL DEFAULT 0,
   unplayed_only  INTEGER NOT NULL DEFAULT 0,
+  folder_path    TEXT,
   created_at     INTEGER NOT NULL,
   updated_at     INTEGER NOT NULL
 );
@@ -414,6 +415,7 @@ interface SmartRuleRow {
   min_rating: number | null;
   loved_only: number;
   unplayed_only: number;
+  folder_path: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -569,6 +571,7 @@ function rowToSmartRule(row: SmartRuleRow): SmartPlaylistRule {
     notPlayedSinceMs: null,
     dnaEnergyTarget: null,
     dnaBrightnessTarget: null,
+    folderPath: row.folder_path ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -762,6 +765,7 @@ export class LibraryStore {
       this.ensureColumn('tracks', 'dna_analyzed_at', 'INTEGER');
       this.ensureColumn('smart_rules', 'min_rating', 'INTEGER');
       this.ensureColumn('smart_rules', 'search_query', 'TEXT');
+      this.ensureColumn('smart_rules', 'folder_path', 'TEXT');
       this.ensureColumn('playlists', 'cover_art_path', 'TEXT');
       this.ensureColumn('playlists', 'cover_art_updated_at', 'INTEGER');
       this.db.exec('PRAGMA foreign_keys = ON');
@@ -2284,7 +2288,8 @@ export class LibraryStore {
         this.db.run(
           `UPDATE smart_rules
               SET name = ?, mood = ?, count = ?, genre_query = ?, search_query = ?, min_year = ?, max_year = ?,
-                  min_bpm = ?, max_bpm = ?, min_rating = ?, loved_only = ?, unplayed_only = ?, updated_at = ?
+                  min_bpm = ?, max_bpm = ?, min_rating = ?, loved_only = ?, unplayed_only = ?, folder_path = ?,
+                  updated_at = ?
             WHERE id = ?`,
           [...params, now, id],
         );
@@ -2298,19 +2303,20 @@ export class LibraryStore {
           this.db.run(
             `UPDATE smart_rules
                 SET mood = ?, count = ?, genre_query = ?, search_query = ?, min_year = ?, max_year = ?,
-                    min_bpm = ?, max_bpm = ?, min_rating = ?, loved_only = ?, unplayed_only = ?, updated_at = ?
+                    min_bpm = ?, max_bpm = ?, min_rating = ?, loved_only = ?, unplayed_only = ?, folder_path = ?,
+                    updated_at = ?
               WHERE id = ?`,
             [normalized.mood, normalized.count, normalized.genreQuery, normalized.searchQuery,
               normalized.minYear, normalized.maxYear,
               normalized.minBpm, normalized.maxBpm, normalized.minRating, normalized.lovedOnly ? 1 : 0,
-              normalized.unplayedOnly ? 1 : 0, now, id],
+              normalized.unplayedOnly ? 1 : 0, normalized.folderPath, now, id],
           );
         } else {
           this.db.run(
             `INSERT INTO smart_rules
              (name, mood, count, genre_query, search_query, min_year, max_year, min_bpm, max_bpm,
-              min_rating, loved_only, unplayed_only, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              min_rating, loved_only, unplayed_only, folder_path, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [...params, now, now],
           );
           id = this.one<{ id: number }>(`SELECT last_insert_rowid() AS id`)?.id ?? 0;
@@ -2648,6 +2654,7 @@ export class LibraryStore {
       ? this.getSmartRule(Math.trunc(input))
       : { ...normalizeSmartRuleInput(input), id: 0, createdAt: 0, updatedAt: 0 };
     if (!rule) return [];
+    if (rule.folderPath) return this.runFolderRule(rule).map(rowToTrack);
 
     const { where, params } = smartRuleWhere(rule);
     const candidates = this.many<RawRow>(
@@ -2688,7 +2695,32 @@ export class LibraryStore {
       .map((item) => item.track);
   }
 
+  // A folder rule is the folder itself: every track under it, in the same
+  // order the Folders view lists them, narrowed by the rule's other filters.
+  private runFolderRule(rule: SmartPlaylistRule): RawRow[] {
+    const folder = normalizeFolderPath(rule.folderPath);
+    if (!folder) return [];
+    const { where, params } = smartRuleWhere(rule);
+    const rows: RawRow[] = [];
+    const stmt = this.db.prepare(
+      `SELECT * FROM tracks
+        ${where ? `${where} AND` : 'WHERE'} lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'
+        ORDER BY lower(replace(path, '/', '\\')) COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE, id`,
+    );
+    try {
+      stmt.bind([...params, folderTrackPathPrefixParam(folder)] as unknown as import('sql.js').BindParams);
+      while (stmt.step() && rows.length < 100000) {
+        const row = stmt.getAsObject() as unknown as RawRow;
+        if (trackPathIsInFolder(row.path, folder, true)) rows.push(row);
+      }
+      return rows;
+    } finally {
+      stmt.free();
+    }
+  }
+
   private countSmartPlaylistRuleMatches(rule: SmartPlaylistRule): number {
+    if (rule.folderPath) return this.runFolderRule(rule).length;
     const { where, params } = smartRuleWhere(rule);
     const row = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks ${where}`, params);
     return Math.min(rule.count, Math.max(0, row?.n ?? 0));
@@ -4691,6 +4723,9 @@ function tokenizeSearch(input: string): string[] {
 
   for (const ch of input.trim()) {
     if (escaping) {
+      // Only \" and \\ are escapes; any other backslash is literal, so a
+      // typed Windows path like path:"D:\Music\To Listen" keeps its separators.
+      if (ch !== quote && ch !== '\\') current += '\\';
       current += ch;
       escaping = false;
       continue;
@@ -4718,6 +4753,7 @@ function tokenizeSearch(input: string): string[] {
     current += ch;
   }
 
+  if (escaping) current += '\\';
   if (current) tokens.push(current);
   return tokens;
 }
@@ -4755,7 +4791,12 @@ function applyTrackSearchFilter(
   if (field === 'album') return pushTextFilter(where, params, 'album', value);
   if (field === 'albumartist') return pushTextFilter(where, params, 'album_artist', value);
   if (field === 'genre') return pushTextFilter(where, params, 'COALESCE(genre, "")', value);
-  if (field === 'path') return pushTextFilter(where, params, 'path', value);
+  if (field === 'path') {
+    // Either separator matches either: stored paths are native to the OS.
+    where.push(`replace(lower(path), '\\', '/') LIKE ? ESCAPE '|'`);
+    params.push(likeParam(value.replace(/\\/g, '/')));
+    return;
+  }
   if (field === 'format' || field === 'ext') {
     const ext = value.startsWith('.') ? value.toLowerCase() : `.${value.toLowerCase()}`;
     where.push(`lower(path) LIKE ? ESCAPE '|'`);
@@ -5232,6 +5273,8 @@ function normalizeSmartRuleInput(input: SmartPlaylistRuleInput): Omit<SmartPlayl
     minRating: minRating == null ? null : normalizeTrackRating(minRating),
     lovedOnly: !!input.lovedOnly,
     unplayedOnly: !!input.unplayedOnly,
+    // Stored as the OS writes it (shown in the UI); runFolderRule normalizes.
+    folderPath: typeof input.folderPath === 'string' && input.folderPath.trim() ? input.folderPath.trim() : null,
     notPlayedSinceMs: finiteNumber(input.notPlayedSinceMs),
     dnaEnergyTarget: clamp01OrNull(input.dnaEnergyTarget),
     dnaBrightnessTarget: clamp01OrNull(input.dnaBrightnessTarget),
@@ -5285,6 +5328,7 @@ function smartRuleParams(rule: Omit<SmartPlaylistRule, 'id' | 'createdAt' | 'upd
     rule.minRating,
     rule.lovedOnly ? 1 : 0,
     rule.unplayedOnly ? 1 : 0,
+    rule.folderPath,
   ];
 }
 

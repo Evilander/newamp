@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { FolderSummary, SavedPlaylist, Track } from '@shared/types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { FolderSummary, Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatDuration } from '../../lib/format';
 import { api } from '../../lib/api';
 import { pushToast } from '../../lib/toast';
 import { spectralArtDataUrl } from '@shared/spectral-art';
 import { TrackTable } from './LibraryView';
+import { useSavedPlaylists } from '../../hooks/useSavedPlaylists';
+import { useVirtualRows } from '../../hooks/useVirtualRows';
 import { LoadMoreFooter } from './LoadMoreFooter';
 import { ViewHeader } from '../ViewHeader';
 import { Chip } from '../Chip';
@@ -14,6 +16,17 @@ import { ViewSkeleton } from '../ViewSkeleton';
 import { Queue } from '../Icons';
 
 const FOLDER_TRACK_LIMIT = 600;
+const FOLDER_ROW_HEIGHT = 48;
+
+// The folder index keeps paths in one normalized form (backslashes) for
+// matching; show them the way this OS writes them.
+function displayFolderPath(path: string): string {
+  return api.platform === 'win32' ? path : path.replace(/\\/g, '/');
+}
+
+function searchLiteral(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
 
 export function FoldersView(): JSX.Element {
   const [stack, setStack] = useState<FolderSummary[]>([]);
@@ -25,7 +38,11 @@ export function FoldersView(): JSX.Element {
   const [indexError, setIndexError] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
   const [refreshSeed, setRefreshSeed] = useState(0);
+  const [folderFilter, setFolderFilter] = useState('');
+  const folderListRef = useRef<HTMLDivElement>(null);
   const selected = stack[stack.length - 1] ?? null;
+  const setView = usePlayerStore((s) => s.setView);
+  const setSearchQuery = usePlayerStore((s) => s.setSearchQuery);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
@@ -82,6 +99,24 @@ export function FoldersView(): JSX.Element {
     };
   }, [selected?.path, selected?.trackCount]);
 
+  useEffect(() => {
+    setFolderFilter('');
+    folderListRef.current?.scrollTo({ top: 0 });
+  }, [selected?.path]);
+
+  const visibleFolders = useMemo(() => {
+    const needle = folderFilter.trim().toLowerCase();
+    return needle ? folders.filter((folder) => folder.name.toLowerCase().includes(needle)) : folders;
+  }, [folders, folderFilter]);
+  // An Artist/Album library puts thousands of folders at the root level; only
+  // the rows in view are mounted.
+  const folderRows = useVirtualRows({
+    rowCount: visibleFolders.length,
+    rowHeight: FOLDER_ROW_HEIGHT,
+    scrollRef: folderListRef,
+    enabled: visibleFolders.length > 0,
+  });
+
   const totalTracks = useMemo(
     () => (selected ? selected.totalTrackCount : folders.reduce((sum, folder) => sum + folder.totalTrackCount, 0)),
     [folders, selected],
@@ -118,6 +153,44 @@ export function FoldersView(): JSX.Element {
         detail: err instanceof Error ? err.message : undefined,
       });
     }
+  }
+
+  // A smart playlist that is this folder: it plays every track under it, in
+  // folder order, and follows the folder as files come and go.
+  async function saveFolderSmartRule(folder: FolderSummary): Promise<void> {
+    const folderPath = displayFolderPath(folder.path);
+    try {
+      const rules = await api.getSmartPlaylistRules();
+      const sameFolder = rules.find((rule) => rule.folderPath === folderPath);
+      let name = sameFolder?.name ?? folder.name;
+      for (let n = 2; !sameFolder && rules.some((rule) => rule.name === name); n += 1) name = `${folder.name} ${n}`;
+      const rule = await api.saveSmartPlaylistRule({ id: sameFolder?.id, name, mood: 'focus', count: 200, folderPath });
+      pushToast({
+        tone: 'ok',
+        title: `Smart playlist: ${rule.name}`,
+        detail: 'Saved under Playlists. It keeps up with the folder as tracks come and go.',
+        action: {
+          label: 'PLAY',
+          onClick: () => {
+            void api.runSmartPlaylistRule(rule.id).then((ruleTracks) => {
+              if (ruleTracks.length) void playQueue(ruleTracks, 0);
+            });
+          },
+        },
+      });
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: `Couldn't save ${folder.name} as a smart playlist`,
+        detail: err instanceof Error ? err.message : undefined,
+      });
+    }
+  }
+
+  function showFolderInLibrary(folder: FolderSummary): void {
+    // The trailing separator keeps "Rock" from also matching "Rock Classics".
+    setSearchQuery(`path:"${searchLiteral(`${displayFolderPath(folder.path).replace(/[\\/]+$/, '')}/`)}"`);
+    setView('library');
   }
 
   async function loadMoreDirectTracks(): Promise<void> {
@@ -179,6 +252,16 @@ export function FoldersView(): JSX.Element {
             </span>
           )
         }
+        actions={
+          <input
+            value={folderFilter}
+            onChange={(e) => setFolderFilter(e.target.value)}
+            placeholder="Filter folders…"
+            aria-label="Filter folders"
+            className="catalog-header-filter bevel-in lcd-text px-3 py-1.5 text-[14px] outline-none"
+            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+          />
+        }
       />
 
       {stack.length > 0 && (
@@ -191,7 +274,7 @@ export function FoldersView(): JSX.Element {
               key={`${folder.path}-${index}`}
               className={`pxbtn ${index === stack.length - 1 ? 'is-active' : ''}`}
               onClick={() => jumpTo(index)}
-              title={folder.path}
+              title={displayFolderPath(folder.path)}
             >
               {folder.name}
             </button>
@@ -204,8 +287,8 @@ export function FoldersView(): JSX.Element {
           <FolderArt folder={selected} size={44} />
           <div className="min-w-0 flex-1">
             <div className="truncate text-[15px] font-semibold">{selected.name}</div>
-            <div className="truncate text-[11px]" style={{ color: 'var(--ink-2)' }} title={selected.path}>
-              {selected.path}
+            <div className="truncate text-[11px]" style={{ color: 'var(--ink-2)' }} title={displayFolderPath(selected.path)}>
+              {displayFolderPath(selected.path)}
             </div>
           </div>
           <button
@@ -232,6 +315,22 @@ export function FoldersView(): JSX.Element {
             Queue
           </button>
           <FolderPlaylistAppendPicker folder={selected} />
+          <button
+            className="pxbtn"
+            disabled={!selected.totalTrackCount}
+            title="Save a smart playlist that always holds this folder's tracks"
+            onClick={() => void saveFolderSmartRule(selected)}
+          >
+            Smart playlist
+          </button>
+          <button
+            className="pxbtn"
+            disabled={!selected.totalTrackCount}
+            title="Filter the Library to this folder"
+            onClick={() => showFolderInLibrary(selected)}
+          >
+            Show in Library
+          </button>
         </div>
       )}
 
@@ -244,9 +343,25 @@ export function FoldersView(): JSX.Element {
         className={`grid min-h-0 flex-1 ${selected ? 'grid-rows-[minmax(180px,0.42fr)_minmax(0,1fr)]' : 'grid-rows-[minmax(0,1fr)]'}`}
         data-newamp-folders-layout={selected ? 'split' : 'list-full'}
       >
-        <div className="overflow-auto border-b" style={{ borderColor: 'var(--line)' }}>
+        <div
+          ref={folderListRef}
+          onScroll={folderRows.onScroll}
+          className="overflow-auto border-b"
+          style={{ borderColor: 'var(--line)' }}
+        >
           {loading ? (
             <ViewSkeleton variant="rows" count={selected ? 5 : 12} />
+          ) : folders.length > 0 && visibleFolders.length === 0 ? (
+            <EmptyState
+              size={selected ? 'panel' : 'view'}
+              title="No folders match"
+              body={`No folder here has "${folderFilter.trim()}" in its name.`}
+              actions={
+                <button className="pxbtn" onClick={() => setFolderFilter('')}>
+                  Clear filter
+                </button>
+              }
+            />
           ) : folders.length === 0 ? (
             indexError ? (
               <EmptyState
@@ -293,17 +408,29 @@ export function FoldersView(): JSX.Element {
                 </tr>
               </thead>
               <tbody>
-                {folders.map((folder) => (
-                  <tr key={folder.path} className="cursor-pointer" onDoubleClick={() => openFolder(folder)}>
+                {folderRows.topPad > 0 && (
+                  <tr aria-hidden><td colSpan={6} style={{ height: folderRows.topPad, padding: 0, border: 0 }} /></tr>
+                )}
+                {visibleFolders.slice(folderRows.startIndex, folderRows.endIndex + 1).map((folder) => (
+                  <tr
+                    key={folder.path}
+                    className="cursor-pointer"
+                    style={{ height: FOLDER_ROW_HEIGHT }}
+                    onDoubleClick={() => openFolder(folder)}
+                  >
                     <td className="px-3 py-[6px]">
                       <FolderArt folder={folder} size={34} />
                     </td>
                     <td className="min-w-0 px-2 py-[6px]">
-                      <button className="block max-w-full truncate text-left font-semibold" onClick={() => openFolder(folder)} title={folder.path}>
+                      <button
+                        className="block max-w-full truncate text-left font-semibold"
+                        onClick={() => openFolder(folder)}
+                        title={displayFolderPath(folder.path)}
+                      >
                         {folder.name}
                       </button>
-                      <div className="truncate text-[10px]" style={{ color: 'var(--muted)' }} title={folder.path}>
-                        {folder.path}
+                      <div className="truncate text-[10px]" style={{ color: 'var(--muted)' }} title={displayFolderPath(folder.path)}>
+                        {displayFolderPath(folder.path)}
                       </div>
                     </td>
                     <td className="px-2 py-[6px] text-right tabular-nums">{folder.totalTrackCount.toLocaleString()}</td>
@@ -318,6 +445,9 @@ export function FoldersView(): JSX.Element {
                     </td>
                   </tr>
                 ))}
+                {folderRows.bottomPad > 0 && (
+                  <tr aria-hidden><td colSpan={6} style={{ height: folderRows.bottomPad, padding: 0, border: 0 }} /></tr>
+                )}
               </tbody>
             </table>
           )}
@@ -384,19 +514,7 @@ function FolderArt({ folder, size }: { folder: FolderSummary; size: number }): J
 }
 
 function FolderPlaylistAppendPicker({ folder }: { folder: FolderSummary }): JSX.Element | null {
-  const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
-
-  useEffect(() => {
-    let cancelled = false;
-    api.getPlaylists()
-      .then((next) => {
-        if (!cancelled) setPlaylists(next);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const playlists = useSavedPlaylists();
 
   async function appendToPlaylist(playlistId: number): Promise<void> {
     try {
@@ -410,7 +528,6 @@ function FolderPlaylistAppendPicker({ folder }: { folder: FolderSummary }): JSX.
         pushToast({ tone: 'error', title: 'Playlist was not found' });
         return;
       }
-      setPlaylists((current) => current.map((playlist) => (playlist.id === updated.id ? updated : playlist)));
       pushToast({
         tone: 'ok',
         title: `Added to ${updated.name}`,

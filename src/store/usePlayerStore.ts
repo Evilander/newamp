@@ -132,6 +132,7 @@ interface PlayerState {
   pendingNavigation:
     | null
     | { kind: 'artist'; name: string }
+    | { kind: 'playlist'; playlistId: number }
     | { kind: 'album'; album: string; albumArtist: string }
     | {
         kind: 'album-with-track';
@@ -145,6 +146,7 @@ interface PlayerState {
   setView: (v: ViewMode) => void;
   navigateToArtist: (name: string) => void;
   navigateToAlbum: (album: string, albumArtist: string) => void;
+  navigateToPlaylist: (playlistId: number) => void;
   navigateToTrack: (track: {
     id?: number;
     title?: string | null;
@@ -1219,6 +1221,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         view: 'albums',
         pendingNavigation: { kind: 'album', album: a, albumArtist: (albumArtist ?? '').trim() },
       });
+    },
+    navigateToPlaylist: (playlistId) => {
+      if (!(playlistId > 0)) return;
+      set({ view: 'playlist', pendingNavigation: { kind: 'playlist', playlistId } });
     },
     navigateToTrack: (track) => {
       // Track navigation lands on the album detail with the row highlighted;
