@@ -8,7 +8,7 @@ import { spectralArtDataUrl } from '@shared/spectral-art';
 import { TrackTable } from './LibraryView';
 import { useSavedPlaylists } from '../../hooks/useSavedPlaylists';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
-import { uniqueSmartRuleName } from './PlaylistView';
+import { uniqueSmartRuleName } from '../../lib/smartRuleNames';
 import { LoadMoreFooter } from './LoadMoreFooter';
 import { ViewHeader } from '../ViewHeader';
 import { Chip } from '../Chip';
