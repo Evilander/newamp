@@ -245,6 +245,19 @@ export interface AddTracksToPlaylistInput {
   trackIds: number[];
 }
 
+export interface TrackContextMenuRequest {
+  trackCount: number;
+  playlists: Array<{ id: number; name: string }>;
+  canShowInFolder: boolean;
+}
+
+export type TrackContextMenuChoice =
+  | { action: 'play-next' }
+  | { action: 'add-to-queue' }
+  | { action: 'add-to-playlist'; playlistId: number }
+  | { action: 'new-playlist' }
+  | { action: 'show-in-folder' };
+
 export interface PlaylistM3uImportResult {
   playlist: SavedPlaylist;
   matched: number;
@@ -574,6 +587,12 @@ export interface SmartPlaylistRuleInput {
   dnaEnergyTarget?: number | null;
   /** DNA re-rank target 0..1 (spectral brightness) — boosts ordering, never filters. */
   dnaBrightnessTarget?: number | null;
+  /**
+   * Makes the rule a folder playlist: every track under this folder
+   * (subfolders included) in folder order, narrowed by the other filters.
+   * No mood scoring and no count cap.
+   */
+  folderPath?: string | null;
 }
 
 export interface SmartPlaylistRule extends Required<Omit<SmartPlaylistRuleInput, 'id'>> {
@@ -1269,6 +1288,10 @@ export interface NewAmpAPI {
   savePlaylist: (input: SavePlaylistInput) => Promise<SavedPlaylist>;
   addTracksToPlaylist: (input: AddTracksToPlaylistInput) => Promise<SavedPlaylist | null>;
   deletePlaylist: (id: number) => Promise<void>;
+  // Fires after any playlist is created, renamed, filled, emptied or deleted.
+  onPlaylistsChanged: (cb: () => void) => () => void;
+  // Native right-click menu for one or more tracks; resolves null if dismissed.
+  showTrackContextMenu: (request: TrackContextMenuRequest) => Promise<TrackContextMenuChoice | null>;
   getPlaylistTracks: (id: number) => Promise<Track[]>;
   getPlaylistCoverUrl: (id: number, updatedAt?: number | null) => string;
   pickPlaylistCoverImage: () => Promise<string | null>;

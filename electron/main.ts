@@ -73,6 +73,7 @@ import {
   parseWinampClassicSkinArchive,
 } from './winamp-skin-import.js';
 import { createPlaylistCoverGuard } from './playlist-cover-guard.js';
+import { trackContextMenuTemplate } from './track-context-menu.js';
 import { shouldStayResidentOnWindowAllClosed } from './window-lifecycle-policy.js';
 import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
 import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
@@ -99,6 +100,8 @@ import type {
   PlayerCommand,
   SavedPlaylist,
   SavePlaylistInput,
+  TrackContextMenuChoice,
+  TrackContextMenuRequest,
   ScanProgress,
   SupportBackupResult,
   SupportDiagnostics,
@@ -1508,6 +1511,33 @@ function patchTouchesLibraryWatch(patch: unknown): boolean {
   return LIBRARY_WATCH_SETTINGS_KEYS.some((key) => key in (patch as Record<string, unknown>));
 }
 
+// Views and pickers that list saved playlists refetch on this instead of
+// holding whatever list they loaded when they mounted.
+function notifyPlaylistsChanged(): void {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('playlists:changed');
+}
+
+function showTrackContextMenu(
+  win: BrowserWindow | null,
+  request: TrackContextMenuRequest,
+): Promise<TrackContextMenuChoice | null> {
+  return new Promise((resolveChoice) => {
+    let chosen = false;
+    const choose = (choice: TrackContextMenuChoice) => () => {
+      chosen = true;
+      resolveChoice(choice);
+    };
+    Menu.buildFromTemplate(trackContextMenuTemplate(request, choose)).popup({
+      window: win ?? undefined,
+      // Fires on close, which on Windows can come before the click handler.
+      // A dismissal changes nothing on screen, so report it unhurried.
+      callback: () => setTimeout(() => {
+        if (!chosen) resolveChoice(null);
+      }, 500),
+    });
+  });
+}
+
 // Chromium reports software compositing until the GPU process has finished
 // starting, so the status only means something after 'gpu-info-update' (or a
 // few seconds after launch, for setups where that event never fires).
@@ -1928,10 +1958,22 @@ function registerIpc(): void {
     if (input?.coverImagePath && !playlistCoverGuard.isApproved(input.coverImagePath)) {
       throw new Error('Choose the playlist icon with the picker before saving.');
     }
-    return library.savePlaylist(input);
+    const saved = library.savePlaylist(input);
+    notifyPlaylistsChanged();
+    return saved;
   });
-  ipcMain.handle('playlist:add-tracks', async (_e, input) => library.addTracksToPlaylist(input));
-  ipcMain.handle('playlist:delete', async (_e, id: number) => library.deletePlaylist(id));
+  ipcMain.handle('playlist:add-tracks', async (_e, input) => {
+    const updated = library.addTracksToPlaylist(input);
+    notifyPlaylistsChanged();
+    return updated;
+  });
+  ipcMain.handle('playlist:delete', async (_e, id: number) => {
+    library.deletePlaylist(id);
+    notifyPlaylistsChanged();
+  });
+  ipcMain.handle('menu:track-context', (e, request: TrackContextMenuRequest) =>
+    showTrackContextMenu(BrowserWindow.fromWebContents(e.sender), request),
+  );
   ipcMain.handle('playlist:get-tracks', async (_e, id: number) =>
     library.getPlaylistTracks(id),
   );
@@ -2015,7 +2057,9 @@ function registerIpc(): void {
     const filePath = result.filePaths[0]!;
     const content = await readFile(filePath, 'utf8');
     const name = basename(filePath).replace(/\.(m3u8?|pls|txt)$/i, '');
-    return library.importPlaylistM3u({ name, content, baseDir: dirname(filePath) });
+    const imported = library.importPlaylistM3u({ name, content, baseDir: dirname(filePath) });
+    notifyPlaylistsChanged();
+    return imported;
   });
   ipcMain.handle('track:export-wav', async (_e, id: number) => {
     const track = library.getTrack(id);

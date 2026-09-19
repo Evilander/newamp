@@ -64,6 +64,8 @@ import type {
   TagSummary,
   TracksDnaAnalysisResult,
   SavePlaylistInput,
+  TrackContextMenuChoice,
+  TrackContextMenuRequest,
   SaveTrackBookmarkInput,
   ScanProgress,
   SmartPlaylistRule,
@@ -134,6 +136,13 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('playlist:save', input) as Promise<SavedPlaylist>,
   addTracksToPlaylist: (input: AddTracksToPlaylistInput) =>
     ipcRenderer.invoke('playlist:add-tracks', input) as Promise<SavedPlaylist | null>,
+  onPlaylistsChanged: (cb: () => void) => {
+    const handler = () => cb();
+    ipcRenderer.on('playlists:changed', handler);
+    return () => ipcRenderer.off('playlists:changed', handler);
+  },
+  showTrackContextMenu: (request: TrackContextMenuRequest) =>
+    ipcRenderer.invoke('menu:track-context', request) as Promise<TrackContextMenuChoice | null>,
   deletePlaylist: (id: number) => ipcRenderer.invoke('playlist:delete', id) as Promise<void>,
   getPlaylistTracks: (id: number) =>
     ipcRenderer.invoke('playlist:get-tracks', id) as Promise<Track[]>,

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import type {
   SavedPlaylist,
   SmartPlaylistMood,
@@ -15,6 +15,7 @@ import { ViewHeader } from '../ViewHeader';
 import { ConfirmAction } from '../ConfirmAction';
 import { ArtistLink, AlbumLink } from '../EntityLink';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
+import { openTrackContextMenu } from '../../lib/trackMenu';
 
 type SetMood = SmartPlaylistMood;
 
@@ -39,6 +40,8 @@ export function PlaylistView(): JSX.Element {
   const setSleepTimerMinutes = usePlayerStore((s) => s.setSleepTimerMinutes);
   const clearSleepTimer = usePlayerStore((s) => s.clearSleepTimer);
   const current = usePlayerStore((s) => s.current);
+  const pendingNavigation = usePlayerStore((s) => s.pendingNavigation);
+  const consumePendingNavigation = usePlayerStore((s) => s.consumePendingNavigation);
   const [mood, setMood] = useState<SetMood>('focus');
   const [building, setBuilding] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -51,7 +54,7 @@ export function PlaylistView(): JSX.Element {
   const [queueFilter, setQueueFilter] = useState('');
   const [smartRules, setSmartRules] = useState<SmartPlaylistRule[]>([]);
   const [selectedSmartRule, setSelectedSmartRule] = useState<SmartPlaylistRule | null>(null);
-  const [playlistName, setPlaylistName] = useState('NewAmp Set');
+  const [playlistName, setPlaylistName] = useState('');
   const [playlistCoverPath, setPlaylistCoverPath] = useState<string | null>(null);
   const [clearPlaylistCover, setClearPlaylistCover] = useState(false);
   const [smartCount, setSmartCount] = useState(30);
@@ -130,7 +133,41 @@ export function PlaylistView(): JSX.Element {
 
   useEffect(() => {
     void refreshPlaylists();
+    // Tracks added from a right-click menu elsewhere, an import, or another
+    // view all land here; refresh the list (and the open playlist) to match.
+    return api.onPlaylistsChanged(() => void refreshPlaylists());
   }, []);
+
+  // "SHOW" on a playlist toast, or anything else that opens a given playlist.
+  useEffect(() => {
+    if (!pendingNavigation || pendingNavigation.kind !== 'playlist') return;
+    const target = playlists.find((playlist) => playlist.id === pendingNavigation.playlistId);
+    if (!target) return; // the list may still be loading; this re-runs when it lands
+    consumePendingNavigation();
+    void loadPlaylist(target, false, true);
+  }, [pendingNavigation, playlists, consumePendingNavigation]);
+
+  // Edits to an open playlist save as they happen; saves run one at a time so
+  // a burst of moves lands in order.
+  const persistQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const pendingSaves = useRef(0);
+  const openTracks = useRef(selectedPlaylistTracks);
+  openTracks.current = selectedPlaylistTracks;
+  function persistPlaylistTracks(playlist: SavedPlaylist, tracks: Track[]): void {
+    pendingSaves.current += 1;
+    persistQueue.current = persistQueue.current
+      .then(() => api.savePlaylist({ id: playlist.id, name: playlist.name, trackIds: tracks.map((track) => track.id) }))
+      .catch((err) => {
+        pushToast({
+          tone: 'error',
+          title: `Couldn't save ${playlist.name}`,
+          detail: err instanceof Error ? err.message : undefined,
+        });
+      })
+      .finally(() => {
+        pendingSaves.current -= 1;
+      });
+  }
 
   useEffect(() => {
     if (!sleepTimerEndsAt) return;
@@ -145,9 +182,17 @@ export function PlaylistView(): JSX.Element {
     ]);
     setPlaylists(next);
     setSmartRules(nextRules);
-    setSelectedPlaylist((selected) =>
-      selected ? next.find((playlist) => playlist.id === selected.id) ?? null : null,
-    );
+    setSelectedPlaylist((selected) => {
+      if (!selected) return null;
+      const fresh = next.find((playlist) => playlist.id === selected.id) ?? null;
+      // Tracks were added or removed somewhere else: reload the open list.
+      // Not while this view's own edits are still saving; the local list is
+      // already ahead of the database then.
+      if (fresh && pendingSaves.current === 0 && fresh.trackCount !== openTracks.current.length) {
+        void api.getPlaylistTracks(fresh.id).then(setSelectedPlaylistTracks, () => undefined);
+      }
+      return fresh;
+    });
     setSelectedSmartRule((selected) =>
       selected ? nextRules.find((rule) => rule.id === selected.id) ?? null : null,
     );
@@ -273,7 +318,7 @@ export function PlaylistView(): JSX.Element {
 
   function readSmartDraft(): SmartPlaylistRuleInput {
     return {
-      name: playlistName,
+      name: playlistName.trim() || `${moodLabel(mood)} rule`,
       mood,
       count: smartCount,
       genreQuery: genreQuery.trim() || null,
@@ -285,6 +330,8 @@ export function PlaylistView(): JSX.Element {
       minRating: parseOptionalNumber(minRating),
       lovedOnly,
       unplayedOnly,
+      // Editing a folder playlist keeps it a folder playlist.
+      folderPath: selectedSmartRule?.folderPath ?? null,
     };
   }
 
@@ -303,11 +350,9 @@ export function PlaylistView(): JSX.Element {
     setUnplayedOnly(rule.unplayedOnly);
   }
 
+  // With a playlist open: saves its name and icon (its tracks save as they
+  // change). With none open: saves the queue as a new playlist.
   async function saveQueue(): Promise<void> {
-    if (!playlistName.trim()) {
-      pushToast({ tone: 'warn', title: 'Name the playlist first' });
-      return;
-    }
     setBusy(true);
     try {
       const wasNew = !selectedPlaylist;
@@ -316,7 +361,7 @@ export function PlaylistView(): JSX.Element {
         : queue.map((track) => track.id);
       const saved = await api.savePlaylist({
         id: selectedPlaylist?.id,
-        name: playlistName,
+        name: playlistName.trim() || selectedPlaylist?.name || 'Saved Queue',
         trackIds,
         coverImagePath: playlistCoverPath,
         clearCoverImage: clearPlaylistCover,
@@ -337,7 +382,32 @@ export function PlaylistView(): JSX.Element {
     }
   }
 
-  async function loadPlaylist(playlist: SavedPlaylist, play = false): Promise<void> {
+  // Creates the playlist right away, empty, under the name in the field (or
+  // "New Playlist"; the library numbers duplicates), and opens it.
+  async function createNewPlaylist(): Promise<void> {
+    const typed = playlistName.trim();
+    const name = typed && typed !== selectedPlaylist?.name ? typed : 'New Playlist';
+    setBusy(true);
+    try {
+      const saved = await api.savePlaylist({ name, trackIds: [], coverImagePath: playlistCoverPath });
+      setSelectedPlaylist(saved);
+      setSelectedPlaylistTracks([]);
+      setPlaylistTrackFilter('');
+      setPlaylistName(saved.name);
+      setPlaylistCoverPath(null);
+      setClearPlaylistCover(false);
+      pushToast({
+        tone: 'ok',
+        title: `Created ${saved.name}`,
+        detail: 'Right-click any track, or tick several, and choose Add to Playlist.',
+      });
+      await refreshPlaylists();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadPlaylist(playlist: SavedPlaylist, play = false, quiet = false): Promise<void> {
     setBusy(true);
     try {
       const tracks = await api.getPlaylistTracks(playlist.id);
@@ -350,6 +420,7 @@ export function PlaylistView(): JSX.Element {
       if (play && tracks.length) {
         await playQueue(tracks, 0);
       } else {
+        if (quiet) return;
         pushToast({
           tone: 'info',
           title: 'Playlist selected',
@@ -376,13 +447,17 @@ export function PlaylistView(): JSX.Element {
   }
 
   function moveSelectedPlaylistTrack(fromIndex: number, toIndex: number): void {
+    if (!selectedPlaylist) return;
     const result = moveQueueItem(selectedPlaylistTracks, -1, fromIndex, toIndex);
     setSelectedPlaylistTracks(result.queue);
+    persistPlaylistTracks(selectedPlaylist, result.queue);
   }
 
   function removeSelectedPlaylistTrack(index: number): void {
+    if (!selectedPlaylist) return;
     const result = removeQueueItem(selectedPlaylistTracks, -1, index);
     setSelectedPlaylistTracks(result.queue);
+    persistPlaylistTracks(selectedPlaylist, result.queue);
   }
 
   async function deleteSelected(): Promise<void> {
@@ -532,11 +607,12 @@ export function PlaylistView(): JSX.Element {
     pushToast({ tone: 'info', title: 'Playlist icon selected', detail: 'Create or update the playlist to apply it.' });
   }
 
-  function startNewPlaylist(): void {
+  // Back to the active queue, with the name field cleared for a new playlist.
+  function closePlaylist(): void {
     setSelectedPlaylist(null);
     setSelectedPlaylistTracks([]);
     setPlaylistTrackFilter('');
-    setPlaylistName('NewAmp Set');
+    setPlaylistName('');
     setPlaylistCoverPath(null);
     setClearPlaylistCover(false);
   }
@@ -546,6 +622,10 @@ export function PlaylistView(): JSX.Element {
     : selectedPlaylist?.hasCoverArt
       ? api.getPlaylistCoverUrl(selectedPlaylist.id, selectedPlaylist.coverArtUpdatedAt)
       : null;
+  const selectedPlaylistDuration = useMemo(
+    () => selectedPlaylistTracks.reduce((sum, track) => sum + (track.duration ?? 0), 0),
+    [selectedPlaylistTracks],
+  );
   const sleepRemaining = sleepTimerEndsAt ? formatSleepRemaining(sleepTimerEndsAt, timerNow) : null;
   const playingIndicator = !selectedPlaylist && queue.length > 0 && index >= 0 ? `playing ${index + 1}` : null;
 
@@ -559,7 +639,7 @@ export function PlaylistView(): JSX.Element {
         title="Playlists"
         count={
           selectedPlaylist
-            ? `${selectedPlaylistTracks.length.toLocaleString()} playlist · ${queue.length.toLocaleString()} queue`
+            ? `${selectedPlaylistTracks.length.toLocaleString()} tracks · ${formatTime(selectedPlaylistDuration)}`
             : `${queue.length.toLocaleString()} queued`
         }
         status={playingIndicator ?? undefined}
@@ -770,6 +850,10 @@ export function PlaylistView(): JSX.Element {
           <input
             value={playlistName}
             onChange={(e) => setPlaylistName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !busy) void (selectedPlaylist ? saveQueue() : createNewPlaylist());
+            }}
+            placeholder="Playlist name"
             className="bevel-in min-w-[180px] px-2 py-1 text-[11px] outline-none"
             style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
             aria-label="Playlist name"
@@ -794,12 +878,23 @@ export function PlaylistView(): JSX.Element {
           <button className="pxbtn" onClick={clearPlaylistIcon} disabled={busy || (!playlistIconSrc && !selectedPlaylist?.hasCoverArt)}>
             CLEAR ICON
           </button>
-          <button className="pxbtn" onClick={() => void saveQueue()} disabled={busy || !playlistName.trim()}>
-            {selectedPlaylist ? 'UPDATE PLAYLIST' : queue.length ? 'SAVE QUEUE AS PLAYLIST' : 'CREATE EMPTY PLAYLIST'}
-          </button>
-          <button className="pxbtn" onClick={startNewPlaylist} disabled={busy}>
+          <button className="pxbtn is-active" onClick={() => void createNewPlaylist()} disabled={busy}>
             NEW PLAYLIST
           </button>
+          {selectedPlaylist ? (
+            <>
+              <button className="pxbtn" onClick={() => void saveQueue()} disabled={busy}>
+                SAVE NAME & ICON
+              </button>
+              <button className="pxbtn" onClick={closePlaylist} disabled={busy} title="Back to the active queue">
+                SHOW QUEUE
+              </button>
+            </>
+          ) : (
+            <button className="pxbtn" onClick={() => void saveQueue()} disabled={busy || queue.length === 0}>
+              SAVE QUEUE AS PLAYLIST
+            </button>
+          )}
         </div>
         {moreOpen && (
           <div className="toolbar-group" role="group" aria-label="Import and export">
@@ -842,7 +937,8 @@ export function PlaylistView(): JSX.Element {
           <div className="min-h-0 flex-1 overflow-auto">
             {playlists.length === 0 ? (
               <div className="px-3 py-4 text-[11px] leading-5" style={{ color: 'var(--muted)' }}>
-                Create a named playlist, attach an icon, save the queue, or import an M3U/PLS file.
+                Type a name and press NEW PLAYLIST, save the queue, or import an M3U/PLS file. Then
+                right-click tracks anywhere in NewAmp and choose Add to Playlist.
               </div>
             ) : filteredPlaylists.length === 0 ? (
               <div className="px-3 py-4 text-[11px] leading-5" style={{ color: 'var(--muted)' }}>
@@ -917,8 +1013,9 @@ export function PlaylistView(): JSX.Element {
                   <span className="truncate text-[12px]" style={{ color: selectedSmartRule?.id === rule.id ? 'var(--accent)' : 'var(--ink)' }}>
                     {rule.name}
                   </span>
-                  <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
-                    {moodLabel(rule.mood)} - {rule.count} tracks{rule.genreQuery ? ` - ${rule.genreQuery}` : ''}
+                  <span className="text-[10px]" style={{ color: 'var(--muted)' }} title={rule.folderPath ?? undefined}>
+                    {rule.folderPath ? `folder - ${rule.folderPath}` : `${moodLabel(rule.mood)} - ${rule.count} tracks`}
+                    {rule.genreQuery ? ` - ${rule.genreQuery}` : ''}
                     {rule.searchQuery ? ` - ${rule.searchQuery}` : ''}
                     {rule.minYear || rule.maxYear ? ` - ${rule.minYear ?? 'any'}-${rule.maxYear ?? 'any'}` : ''}
                     {rule.minRating ? ` - ${rule.minRating}+ stars` : ''}
@@ -983,8 +1080,15 @@ export function PlaylistView(): JSX.Element {
         >
           {selectedPlaylist ? (
             selectedPlaylistTracks.length === 0 ? (
-              <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
-                {selectedPlaylist.name} is empty. Add tracks from Library, Albums, Artists, or Loved.
+              <div
+                className="flex h-full flex-col items-center justify-center gap-1 px-6 text-center text-[12px]"
+                style={{ color: 'var(--muted)' }}
+              >
+                <span>{selectedPlaylist.name} is empty.</span>
+                <span>
+                  Right-click a track in Library, Albums, Artists or Folders and choose Add to Playlist ›{' '}
+                  {selectedPlaylist.name}. Tick several tracks first to add them all at once.
+                </span>
               </div>
             ) : (
               <>
@@ -1045,6 +1149,10 @@ export function PlaylistView(): JSX.Element {
                         }}
                         onDragEnd={() => setDraggedPlaylistTrackIndex(null)}
                         onDoubleClick={() => void playQueue(selectedPlaylistTracks, i)}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          void openTrackContextMenu([t]);
+                        }}
                       >
                         <span className="w-[28px] shrink-0" style={{ color: 'var(--muted)' }}>
                           {(i + 1).toString().padStart(2, '0')}
@@ -1170,6 +1278,10 @@ export function PlaylistView(): JSX.Element {
                       }}
                       onDragEnd={() => setDraggedQueueIndex(null)}
                       onDoubleClick={() => void playQueue(queue, i)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        void openTrackContextMenu([t]);
+                      }}
                     >
                       <span className="w-[28px] shrink-0" style={{ color: 'var(--muted)' }}>
                         {(i + 1).toString().padStart(2, '0')}
@@ -1261,7 +1373,7 @@ function playlistTextMatches(query: string, values: Array<string | null | undefi
 
 function queueExportName(value: string): string {
   const trimmed = value.trim();
-  if (trimmed && trimmed !== 'NewAmp Set') return trimmed;
+  if (trimmed) return trimmed;
   return `NewAmp Queue ${new Date().toISOString().slice(0, 10)}`;
 }
 

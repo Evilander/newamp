@@ -226,9 +226,10 @@ assert.match(playlistViewSource, /Insert image/, 'Now Queue should let users ins
 assert.match(playlistViewSource, /data-playlist-icon-dropzone/, 'playlist icon well should accept dragged image files');
 assert.match(playlistViewSource, /handlePlaylistIconDrop/, 'playlist icon drop zone should route dropped images into the playlist draft');
 assert.match(playlistViewSource, /isPlaylistImagePath/, 'playlist icon drop zone should reject non-image drops');
-assert.match(playlistViewSource, /CREATE EMPTY PLAYLIST/, 'Playlists view should allow creating an empty named playlist');
+assert.match(playlistViewSource, /savePlaylist\(\{ name, trackIds: \[\]/, 'NEW PLAYLIST should create the named playlist right away, empty');
 assert.match(playlistViewSource, /SAVE QUEUE AS PLAYLIST/, 'Playlists view should frame queue saves as playlist creation');
-assert.match(playlistViewSource, /UPDATE PLAYLIST/, 'Now Queue should frame selected saves as playlist edits');
+assert.match(playlistViewSource, /SAVE NAME & ICON/, 'with a playlist open, the save button should save its name and icon');
+assert.match(playlistViewSource, /persistPlaylistTracks\(selectedPlaylist, result\.queue\)/, 'moving or removing tracks in an open playlist should save immediately');
 assert.match(playlistViewSource, /selectedPlaylistTracks/, 'Playlists view should keep saved playlist tracks separate from the active queue');
 assert.match(playlistViewSource, /setSelectedPlaylistTracks\(tracks\)/, 'selecting a saved playlist should load editor tracks without replacing the queue');
 assert.match(playlistViewSource, /loadSelectedPlaylistToQueue/, 'saved playlists should require an explicit load-to-queue action');
