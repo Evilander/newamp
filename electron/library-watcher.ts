@@ -93,7 +93,10 @@ export class LibraryWatcher {
   private timer: NodeJS.Timeout | null = null;
   // Bumped by stop() so an in-flight async tree walk abandons itself.
   private generation = 0;
-  private warnedWatchFailure = false;
+  // One warning per failure reason per run, and a count, so a library that is
+  // only half watched can be told apart from one that is watched.
+  private readonly warnedWatchFailures = new Set<string>();
+  private watchFailures = 0;
 
   constructor(
     private readonly onChange: LibraryWatchCallback,
@@ -127,10 +130,28 @@ export class LibraryWatcher {
     this.watchers.clear();
     this.pendingTargets.clear();
     this.roots = [];
+    // A new set of roots gets a fresh accounting, and its warnings again.
+    this.warnedWatchFailures.clear();
+    this.watchFailures = 0;
   }
 
   isWatching(): boolean {
     return this.watchers.size > 0;
+  }
+
+  watchFailureCount(): number {
+    return this.watchFailures;
+  }
+
+  private reportWatchFailure(path: string, err: unknown): void {
+    this.watchFailures += 1;
+    const code = (err as { code?: string } | null)?.code ?? errorMessage(err);
+    if (this.warnedWatchFailures.has(code)) return;
+    this.warnedWatchFailures.add(code);
+    const hint = code === 'ENOSPC'
+      ? ' (the system ran out of watches; raise fs.inotify.max_user_watches)'
+      : '';
+    console.warn(`[newamp] library watcher failed for ${path}: ${errorMessage(err)}${hint}`);
   }
 
   watchedPathCount(): number {
@@ -176,18 +197,16 @@ export class LibraryWatcher {
         // stays honest and a later start() with the same roots can rebuild.
         watcher.close();
         if (this.watchers.get(path) === watcher) this.watchers.delete(path);
-        if (this.roots.includes(path)) {
-          console.warn(`[newamp] library watcher failed for ${path}: ${errorMessage(err)}`);
-        }
+        // Warn for any watcher, not just a root: watching per directory means
+        // a library's roots are a handful of thousands of watchers, so a root
+        // test would silence almost everything that can go wrong.
+        this.reportWatchFailure(path, err);
       });
       this.watchers.set(path, watcher);
       return true;
     } catch (err) {
-      // ENOSPC here is the inotify watch limit; one warning is enough.
-      if (!this.warnedWatchFailure) {
-        this.warnedWatchFailure = true;
-        console.warn(`[newamp] library watcher unavailable for ${path}: ${errorMessage(err)}`);
-      }
+      // ENOSPC here is the inotify watch limit (fs.inotify.max_user_watches).
+      this.reportWatchFailure(path, err);
       return false;
     }
   }
@@ -198,11 +217,16 @@ export class LibraryWatcher {
     while (pending.length) {
       if (generation !== this.generation) return;
       const current = pending.pop()!;
-      if (!this.watchPath(current, false, generation)) continue;
+      // Keep descending even when this folder could not be watched. Stopping
+      // here would leave everything under it unwatched because one folder hit
+      // the system's limit, and the walk is depth-first, so which subtree that
+      // is would be arbitrary.
+      this.watchPath(current, false, generation);
       let entries: Dirent[];
       try {
         entries = await readdir(current, { withFileTypes: true });
-      } catch {
+      } catch (err) {
+        this.reportWatchFailure(current, err);
         continue;
       }
       for (const entry of entries) {

@@ -140,6 +140,16 @@ Release notes for every version, including everything before 2.0, are on the
   as the same folder, which is what those filesystems do.
 - A folder created inside a watched folder on Linux was picked up through a
   symlink the first scan would have skipped.
+- Watching folders on Linux reported almost nothing when it went wrong. One
+  folder that could not be watched stopped the walk from going any deeper, so
+  an arbitrary part of the library quietly stopped being watched, and only
+  failures on a library root were logged at all, which under one watch per
+  folder is a handful out of thousands. Every distinct failure is now logged
+  once, running out of system watches says so by name, and a folder that
+  cannot be watched no longer hides the folders inside it.
+- With no music folders configured, the Folders view was empty on Linux and
+  macOS even with a full library, because the root it worked out from the
+  track paths dropped their leading slash.
 - Auto DJ on a folder rule carried every track under that folder across to the
   interface each time it topped the queue up, to keep a handful. It asks for
   the handful now.
