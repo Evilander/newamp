@@ -900,7 +900,7 @@ function LibraryHealthPanel({
         <div className="text-[9px] uppercase tracking-[0.12em]" style={{ color: 'var(--ink-2)' }}>
           Compass Moves
         </div>
-        <div className="mt-1 grid gap-[3px]">
+        <div className="mt-1 grid grid-cols-[minmax(0,1fr)] gap-[3px]">
           {compass.moves.slice(0, 4).map((move) => (
             <div key={move.label} className="bevel-in px-2 py-[5px]" title={move.detail}>
               <div className="flex gap-2">
@@ -920,7 +920,7 @@ function LibraryHealthPanel({
           Top Duplicate Clusters
         </div>
         {health.duplicateGroups.length ? (
-          <div className="mt-1 grid gap-[2px]">
+          <div className="mt-1 grid grid-cols-[minmax(0,1fr)] gap-[2px]">
             {health.duplicateGroups.slice(0, 3).map((group) => (
               <div key={`${group.artist}:${group.title}`} className="flex gap-2">
                 <span className="w-8 tabular-nums" style={{ color: 'var(--warn)' }}>{group.count}x</span>
