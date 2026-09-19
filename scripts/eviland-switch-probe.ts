@@ -27,7 +27,15 @@ function stats(values: number[]) {
 
 async function engine() {
   const canvas = document.createElement('canvas');
-  const renderer = createEvilandRenderer(canvas, { quality: 'high', smoke: true, seed: 'switch-bench' });
+  // smoke:true for a deterministic, readable canvas — but NOT its synchronous
+  // compiles: this bench exists to measure the path the app actually runs.
+  // Pass syncCompile to compare the two.
+  const renderer = createEvilandRenderer(canvas, {
+    quality: 'high',
+    smoke: true,
+    seed: 'switch-bench',
+    syncCompile: new URLSearchParams(location.search).get('sync-compile') === '1',
+  });
   if (!renderer) throw new Error('WebGL2 renderer unavailable');
   renderer.resize(W, H, 1);
   const gl = canvas.getContext('webgl2')!;

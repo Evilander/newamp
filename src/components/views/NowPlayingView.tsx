@@ -41,6 +41,7 @@ import {
   playbackRateLabel,
 } from '@shared/tempo-trainer';
 import { AMBIENT_FRAME_MS, requestPacedFrame } from '../../lib/pacedFrame';
+import { openTrackContextMenu } from '../../lib/trackMenu';
 
 type LyricPayload = Partial<Pick<LocalLyricsResult, 'plainLyrics' | 'syncedLyrics'>> & {
   instrumental?: boolean;
@@ -1343,6 +1344,10 @@ function QueueRow({
       aria-keyshortcuts="Delete Alt+ArrowUp Alt+ArrowDown"
       onClick={onPlay}
       onDoubleClick={onPlay}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        void openTrackContextMenu([track]);
+      }}
       onKeyDown={(event) => {
         // Keys pressed on a nested control (artist link, edit buttons) are theirs.
         if (event.target !== event.currentTarget) return;
