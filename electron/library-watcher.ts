@@ -1,4 +1,5 @@
-import { existsSync, statSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, statSync, watch, type Dirent, type FSWatcher } from 'node:fs';
+import { readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve } from 'node:path';
 
 const AUDIO_EXTS = new Set([
@@ -32,6 +33,12 @@ const FOLDER_ART_NAMES = new Set(['cover', 'folder', 'front', 'art', 'album']);
 
 export interface LibraryWatcherOptions {
   debounceMs?: number;
+  // 'recursive' is one fs.watch({ recursive: true }) per root, native on
+  // Windows and macOS. Linux has no native recursive watch: Node's fallback
+  // walks the tree synchronously, stats every file and holds an inotify watch
+  // per FILE. 'per-directory' watches each folder instead (inotify reports
+  // changes to a folder's entries), walking the tree asynchronously.
+  strategy?: 'recursive' | 'per-directory';
 }
 
 export type LibraryWatchCallback = (targets: string[]) => void | Promise<void>;
@@ -74,52 +81,56 @@ export function resolveLibraryWatchTarget(root: string, fileName: string | Buffe
 
 export class LibraryWatcher {
   private readonly debounceMs: number;
+  private readonly strategy: 'recursive' | 'per-directory';
   private readonly pendingTargets = new Map<string, string>();
-  private watchers: FSWatcher[] = [];
+  // Keyed by the watched path: one entry per root ('recursive') or per folder.
+  private readonly watchers = new Map<string, FSWatcher>();
   private roots: string[] = [];
   private timer: NodeJS.Timeout | null = null;
+  // Bumped by stop() so an in-flight async tree walk abandons itself.
+  private generation = 0;
+  private warnedWatchFailure = false;
 
   constructor(
     private readonly onChange: LibraryWatchCallback,
     options: LibraryWatcherOptions = {},
   ) {
     this.debounceMs = Math.max(50, Math.round(options.debounceMs ?? 5000));
+    this.strategy = options.strategy ?? (process.platform === 'linux' ? 'per-directory' : 'recursive');
   }
 
   start(roots: string[]): void {
+    const next = normalizeLibraryWatchRoots(roots);
+    // Settings saves reach here on every patch. Rebuilding unchanged watchers
+    // threw away pending changes and, on Linux, re-walked the whole library.
+    if (this.watchers.size > 0 && sameRoots(next, this.roots)) return;
     this.stop();
-    this.roots = normalizeLibraryWatchRoots(roots);
-
+    this.roots = next;
+    const generation = this.generation;
     for (const root of this.roots) {
-      try {
-        const watcher = watch(root, { recursive: true }, (_eventType, fileName) => {
-          const target = resolveLibraryWatchTarget(root, fileName);
-          if (!target) return;
-          this.queueTarget(target);
-        });
-        watcher.on('error', (err) => {
-          console.warn(`[newamp] library watcher failed for ${root}: ${errorMessage(err)}`);
-        });
-        this.watchers.push(watcher);
-      } catch (err) {
-        console.warn(`[newamp] library watcher unavailable for ${root}: ${errorMessage(err)}`);
-      }
+      if (this.strategy === 'per-directory') void this.watchTree(root, generation);
+      else this.watchPath(root, true);
     }
   }
 
   stop(): void {
+    this.generation += 1;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    for (const watcher of this.watchers) watcher.close();
-    this.watchers = [];
+    for (const watcher of this.watchers.values()) watcher.close();
+    this.watchers.clear();
     this.pendingTargets.clear();
     this.roots = [];
   }
 
   isWatching(): boolean {
-    return this.watchers.length > 0;
+    return this.watchers.size > 0;
+  }
+
+  watchedPathCount(): number {
+    return this.watchers.size;
   }
 
   getWatchedRoots(): string[] {
@@ -144,6 +155,77 @@ export class LibraryWatcher {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.flushNow(), this.debounceMs);
   }
+
+  private watchPath(path: string, recursive: boolean, generation = this.generation): boolean {
+    if (this.watchers.has(path)) return true;
+    try {
+      const watcher = watch(path, { recursive }, (eventType, fileName) => {
+        // Events are relative to the watched path, so it doubles as the root.
+        const target = resolveLibraryWatchTarget(path, fileName);
+        if (target) this.queueTarget(target);
+        if (!recursive && eventType === 'rename' && fileName) {
+          void this.adoptDirectory(join(path, fileName.toString()), generation);
+        }
+      });
+      watcher.on('error', (err) => {
+        // Deleting a watched folder errors its watcher. Drop it so the map
+        // stays honest and a later start() with the same roots can rebuild.
+        watcher.close();
+        if (this.watchers.get(path) === watcher) this.watchers.delete(path);
+        if (this.roots.includes(path)) {
+          console.warn(`[newamp] library watcher failed for ${path}: ${errorMessage(err)}`);
+        }
+      });
+      this.watchers.set(path, watcher);
+      return true;
+    } catch (err) {
+      // ENOSPC here is the inotify watch limit; one warning is enough.
+      if (!this.warnedWatchFailure) {
+        this.warnedWatchFailure = true;
+        console.warn(`[newamp] library watcher unavailable for ${path}: ${errorMessage(err)}`);
+      }
+      return false;
+    }
+  }
+
+  // Same folders the scanner descends into (scanner.ts skips dot-folders).
+  private async watchTree(dir: string, generation: number): Promise<void> {
+    const pending = [dir];
+    while (pending.length) {
+      if (generation !== this.generation) return;
+      const current = pending.pop()!;
+      if (!this.watchPath(current, false, generation)) continue;
+      let entries: Dirent[];
+      try {
+        entries = await readdir(current, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith('.') || entry.name === 'System Volume Information') continue;
+        pending.push(join(current, entry.name));
+      }
+    }
+  }
+
+  // A folder created or moved in under a per-directory watch: watch it, and
+  // rescan it, since files may have landed before its watcher existed.
+  private async adoptDirectory(path: string, generation: number): Promise<void> {
+    if (this.watchers.has(path) || basename(path).startsWith('.')) return;
+    try {
+      if (!(await stat(path)).isDirectory()) return;
+    } catch {
+      return;
+    }
+    if (generation !== this.generation) return;
+    await this.watchTree(path, generation);
+    this.queueTarget(path);
+  }
+}
+
+function sameRoots(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((root, i) => root === b[i]);
 }
 
 function errorMessage(err: unknown): string {

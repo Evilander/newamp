@@ -220,17 +220,13 @@ svg[data-playing='false'] .pp-play  { opacity: 1; transform: none; }
 svg[data-playing='true']  .pp-play  { opacity: 0; transform: scale(0.55); }
 svg[data-playing='true']  .pp-pause { opacity: 1; transform: none; }
 
-/* The primary play button breathes with the live audio — drop-shadow blur only
-   (not size/position, which would break the hit target). Tight 3–12px range so
-   it pulses without becoming chaotic. Gated on the Resonance master toggle. */
-html[data-amp-reactive='on'] .pxbtn-icon.is-primary[aria-pressed='true'] {
-  filter: drop-shadow(0 0 calc(3px + var(--amp-energy) * 9px) var(--accent-glow));
-}
+/* The primary play button pulses on the beat through .amp-beat-scale
+   (transform only). A glow whose blur radius tracked the audio used to sit
+   here; animating a filter re-rasterizes the button on every tick. */
 @media (prefers-reduced-motion: reduce) {
   .pxbtn-icon,
   .pxbtn-icon:active,
   .pp-glyph { transition: none; }
-  html[data-amp-reactive='on'] .pxbtn-icon.is-primary[aria-pressed='true'] { filter: none; }
 }
 
 .track-action-cluster {

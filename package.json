@@ -64,6 +64,7 @@
     "test:algo-version-guard": "node scripts/algo-version-guard.mjs",
     "test:device-change": "node scripts/device-change-test.mjs",
     "test:music-folders": "node scripts/music-folders-test.mjs",
+    "test:library-watch": "npm run build:electron && node scripts/library-watch-smoke.mjs",
     "test:cache-key-casing": "node scripts/cache-key-casing-test.mjs",
     "test:audio-path-policy": "node scripts/audio-path-policy-test.mjs",
     "test:app-menu": "node scripts/app-menu-test.mjs",

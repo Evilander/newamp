@@ -1124,6 +1124,7 @@ const LibraryRow = memo(function LibraryRow({
       data-track-id={t.id}
       data-track-title={t.title}
       className={`cursor-pointer transition-colors${isActive ? ' track-row-playing' : ''}`}
+      data-amp={isActive ? '' : undefined}
       tabIndex={0}
       style={{
         // Playing-row background/accent bar comes from .track-row-playing

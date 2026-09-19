@@ -43,9 +43,36 @@ assert.deepEqual(watcher.getWatchedRoots(), [smokeRoot]);
 
 const changedTrack = join(smokeRoot, 'artist', 'new-watch-track.mp3');
 await writeFile(changedTrack, Buffer.from('not a real mp3; watcher only needs the path event'));
+// Settings saves call start() again with the same roots every few seconds
+// during playback. That must not rebuild the watchers or drop the pending
+// change that is still inside its debounce window.
+watcher.start([smokeRoot]);
 await waitFor(() => calls.flat().some((target) => target === changedTrack));
 watcher.stop();
 assert.equal(watcher.isWatching(), false, 'watcher should release filesystem handles');
+
+// Per-directory strategy (the Linux default): one watch per folder, nested
+// changes still arrive, and a folder created later is adopted and rescanned.
+await mkdir(join(smokeRoot, 'artist', 'album'), { recursive: true });
+await mkdir(join(smokeRoot, '.hidden'), { recursive: true });
+const dirCalls = [];
+const dirWatcher = new LibraryWatcher((targets) => {
+  dirCalls.push(targets);
+}, { debounceMs: 50, strategy: 'per-directory' });
+dirWatcher.start([smokeRoot]);
+await waitFor(() => dirWatcher.watchedPathCount() === 3); // root, artist, artist/album; not .hidden
+const nestedTrack = join(smokeRoot, 'artist', 'album', 'nested-track.flac');
+await writeFile(nestedTrack, Buffer.from('path event only'));
+await waitFor(() => dirCalls.flat().some((target) => target === nestedTrack));
+const newAlbum = join(smokeRoot, 'artist', 'new-album');
+await mkdir(newAlbum);
+await waitFor(() => dirCalls.flat().some((target) => target === newAlbum));
+await waitFor(() => dirWatcher.watchedPathCount() === 4);
+const adoptedTrack = join(newAlbum, 'adopted-track.mp3');
+await writeFile(adoptedTrack, Buffer.from('path event only'));
+await waitFor(() => dirCalls.flat().some((target) => target === adoptedTrack));
+dirWatcher.stop();
+assert.equal(dirWatcher.watchedPathCount(), 0, 'per-directory watcher should release every folder watch');
 
 const [typesSource, settingsSource, mainSource, settingsViewSource, packageSource] = await Promise.all([
   readText('../shared/types.ts'),
@@ -59,6 +86,11 @@ assert.match(typesSource, /libraryAutoWatch/, 'AppSettings should persist the li
 assert.match(settingsSource, /libraryAutoWatch/, 'SettingsStore should default and normalize auto-watch');
 assert.match(mainSource, /LibraryWatcher/, 'main process should own the filesystem watcher');
 assert.match(mainSource, /syncLibraryWatcher/, 'main process should restart watcher when settings change');
+assert.match(
+  mainSource,
+  /if \(patchTouchesLibraryWatch\(patch\)\) syncLibraryWatcher\(\);/,
+  'only folder/auto-watch setting changes should resync the watcher',
+);
 assert.match(mainSource, /scanner\.start\(targets, \{ force: true \}\)/, 'watcher rescans should force metadata and folder-art refresh');
 assert.match(mainSource, /trackCount === 0 \|\| settings\.get\(\)\.libraryAutoWatch/, 'startup should refresh configured roots when auto-watch is enabled');
 assert.match(settingsViewSource, /Auto-watch library/, 'Settings should expose the auto-watch toggle');

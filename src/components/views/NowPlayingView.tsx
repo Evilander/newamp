@@ -40,6 +40,7 @@ import {
   nudgePlaybackRate,
   playbackRateLabel,
 } from '@shared/tempo-trainer';
+import { AMBIENT_FRAME_MS, requestPacedFrame } from '../../lib/pacedFrame';
 
 type LyricPayload = Partial<Pick<LocalLyricsResult, 'plainLyrics' | 'syncedLyrics'>> & {
   instrumental?: boolean;
@@ -481,7 +482,7 @@ export function NowPlayingView(): JSX.Element {
                 Sits under the cover, so it carries the no-art / failed-art
                 placeholder; breathes with --amp-energy only in reactive mode
                 (opacity-only — see nowplaying.css). */}
-            <div aria-hidden className="np-stage-spotlight" data-newamp-stage-spotlight />
+            <div aria-hidden data-amp className="np-stage-spotlight" data-newamp-stage-spotlight />
             {artUrl ? (
               <img
                 src={artUrl}
@@ -766,7 +767,7 @@ function StatusPill({ on, text }: { on: boolean; text: string }): JSX.Element {
 function OnAirLamp({ on }: { on: boolean }): JSX.Element {
   return (
     <span className="np-onair-lamp" data-newamp-onair={on ? 'on' : 'off'}>
-      <span className="np-onair-dot" aria-hidden="true" />
+      <span data-amp className="np-onair-dot" aria-hidden="true" />
       ON AIR
     </span>
   );
@@ -846,7 +847,7 @@ function NowPlayingAttract({ onOpenLibrary }: { onOpenLibrary: () => void }): JS
       className="relative flex h-full flex-col overflow-hidden"
       style={{ isolation: 'isolate' }}
     >
-      <div aria-hidden className="np-stage-spotlight np-attract-spotlight" />
+      <div aria-hidden data-amp className="np-stage-spotlight np-attract-spotlight" />
       <EmptyState
         size="view"
         icon={
@@ -1676,52 +1677,61 @@ function SpectrumPanel({
     // Don't run the analyser rAF while paused — there's no signal to draw and
     // it was burning a frame budget on the Now Playing screen indefinitely.
     // Park the bars low so they don't freeze mid-spectrum.
+    // Bars are full-height and scaled from the bottom (transform, no layout),
+    // except 'stacked', whose fixed-pixel segments would squash under a scale;
+    // it moves in 10% steps, so its height changes rarely.
+    const scaled = spectrumStyle !== 'stacked';
+    const setLevel = (bar: HTMLElement, level: number) => {
+      if (scaled) bar.style.transform = `scaleY(${(level / 100).toFixed(3)})`;
+      else bar.style.height = `${level}%`;
+    };
     if (!isPlaying) {
       const container = barsRef.current;
       if (container) {
         for (let i = 0; i < bars; i++) {
           const bar = container.children.item(i) as HTMLElement | null;
-          if (bar) bar.style.height = '2%';
+          if (bar) setLevel(bar, 2);
         }
       }
       return;
     }
     const freq = new Uint8Array(engine.frequencyBinCount);
     const peaks = new Float32Array(bars);
-    let raf = 0;
-    const tick = (): void => {
+    // Peak fall speed per second (was per frame at ~60 Hz).
+    const fallPerSec = spectrumStyle === 'needles' ? 1.32 : 0.72;
+    let lastTick = 0;
+    let cancel = () => {};
+    const tick = (now: number): void => {
+      const dt = lastTick ? Math.min(0.25, (now - lastTick) / 1000) : 1 / 30;
+      lastTick = now;
       engine.getFreqData(freq as Uint8Array<ArrayBuffer>);
       const container = barsRef.current;
       const peakContainer = peakRef.current;
-      if (!container) {
-        raf = requestAnimationFrame(tick);
-        return;
-      }
-      for (let i = 0; i < bars; i++) {
-        const curve = spectrumStyle === 'wide' ? 1.35 : 2;
-        const lo = Math.floor(Math.pow(i / bars, curve) * freq.length);
-        const hi = Math.floor(Math.pow((i + 1) / bars, curve) * freq.length);
-        let max = 0;
-        for (let k = lo; k < hi && k < freq.length; k++) {
-          if ((freq[k] ?? 0) > max) max = freq[k] ?? 0;
+      if (container) {
+        for (let i = 0; i < bars; i++) {
+          const curve = spectrumStyle === 'wide' ? 1.35 : 2;
+          const lo = Math.floor(Math.pow(i / bars, curve) * freq.length);
+          const hi = Math.floor(Math.pow((i + 1) / bars, curve) * freq.length);
+          let max = 0;
+          for (let k = lo; k < hi && k < freq.length; k++) {
+            if ((freq[k] ?? 0) > max) max = freq[k] ?? 0;
+          }
+          const norm = max / 255;
+          peaks[i] = Math.max(peaks[i]! - fallPerSec * dt, norm);
+          const bar = container.children.item(i) as HTMLElement | null;
+          if (bar) {
+            setLevel(bar, spectrumStyle === 'stacked'
+              ? Math.max(4, Math.round(norm * 10) * 10)
+              : Math.max(2, norm * 100));
+          }
+          const peak = peakContainer?.children.item(i) as HTMLElement | null;
+          if (peak) peak.style.transform = `translateY(${(-Math.max(0, peaks[i]! * 100 - 1)).toFixed(1)}cqh)`;
         }
-        const norm = max / 255;
-        const falloff = spectrumStyle === 'needles' ? 0.022 : 0.012;
-        peaks[i] = Math.max(peaks[i]! - falloff, norm);
-        const bar = container.children.item(i) as HTMLElement | null;
-        if (bar) {
-          const nextHeight = spectrumStyle === 'stacked'
-            ? Math.max(4, Math.round(norm * 10) * 10)
-            : Math.max(2, norm * 100);
-          bar.style.height = `${nextHeight}%`;
-        }
-        const peak = peakContainer?.children.item(i) as HTMLElement | null;
-        if (peak) peak.style.bottom = `${Math.max(0, peaks[i]! * 100 - 1)}%`;
       }
-      raf = requestAnimationFrame(tick);
+      cancel = requestPacedFrame(tick, AMBIENT_FRAME_MS - (performance.now() - now), true);
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    cancel = requestPacedFrame(tick, 0, true);
+    return () => cancel();
   }, [spectrumStyle, isPlaying]);
 
   return (
@@ -1753,17 +1763,18 @@ function SpectrumPanel({
             <div
               key={i}
               className="spectrum-bar flex-1"
-              style={{
-                minHeight: 2,
-                height: '2%',
-                transition: 'height 80ms ease-out',
-              }}
+              style={
+                spectrumStyle === 'stacked'
+                  ? { minHeight: 2, height: '2%' }
+                  : { height: '100%', transform: 'scaleY(0.02)', transformOrigin: 'bottom' }
+              }
             />
           ))}
         </div>
         <div
           ref={peakRef}
           className="pointer-events-none absolute inset-0 flex items-end gap-[2px]"
+          style={{ containerType: 'size' }}
         >
           {Array.from({ length: barCount }, (_, i) => (
             <div key={i} className="relative flex-1">
@@ -2269,15 +2280,16 @@ function VuMeter(): JSX.Element {
     if (!isPlaying) {
       // Drain to zero and stop — no point polling a silent analyser, and
       // querySelector-per-frame against a paused signal was pure waste.
-      if (lRef.current) lRef.current.style.width = '0%';
-      if (rRef.current) rRef.current.style.width = '0%';
+      if (lRef.current) lRef.current.style.transform = 'scaleX(0)';
+      if (rRef.current) rRef.current.style.transform = 'scaleX(0)';
       return;
     }
     const left = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     const right = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     let l = 0;
     let r = 0;
-    let raf = 0;
+    let lastTick = 0;
+    let cancel = () => {};
     // Real per-channel level from the engine's dedicated L/R analysers (no more
     // faked *0.96 / *1.02 mono split). Mean bin energy, lightly gained so
     // typical music sits mid-scale.
@@ -2286,17 +2298,21 @@ function VuMeter(): JSX.Element {
       for (let i = 0; i < buf.length; i++) sum += buf[i]!;
       return Math.min(1, (sum / (buf.length * 255)) * 3.2);
     };
-    const tick = (): void => {
+    // Level bars scale from the left (transform, no layout) on the shared
+    // 30 Hz grid; the 0.86 release was tuned per ~60 Hz frame.
+    const tick = (now: number): void => {
+      const release = Math.pow(0.86, (lastTick ? Math.min(250, now - lastTick) : AMBIENT_FRAME_MS) / (1000 / 60));
+      lastTick = now;
       engine.getLeftFreqData(left as Uint8Array<ArrayBuffer>);
       engine.getRightFreqData(right as Uint8Array<ArrayBuffer>);
-      l = Math.max(l * 0.86, channelLevel(left));
-      r = Math.max(r * 0.86, channelLevel(right));
-      if (lRef.current) lRef.current.style.width = `${Math.min(100, l * 100)}%`;
-      if (rRef.current) rRef.current.style.width = `${Math.min(100, r * 100)}%`;
-      raf = requestAnimationFrame(tick);
+      l = Math.max(l * release, channelLevel(left));
+      r = Math.max(r * release, channelLevel(right));
+      if (lRef.current) lRef.current.style.transform = `scaleX(${Math.min(1, l).toFixed(3)})`;
+      if (rRef.current) rRef.current.style.transform = `scaleX(${Math.min(1, r).toFixed(3)})`;
+      cancel = requestPacedFrame(tick, AMBIENT_FRAME_MS - (performance.now() - now), true);
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    cancel = requestPacedFrame(tick, 0, true);
+    return () => cancel();
   }, [isPlaying]);
 
   return (
@@ -2312,7 +2328,9 @@ function VuMeter(): JSX.Element {
               data-vu={side}
               className="h-full"
               style={{
-                width: 0,
+                width: '100%',
+                transform: 'scaleX(0)',
+                transformOrigin: 'left',
                 background:
                   'linear-gradient(to right, var(--accent-dim), var(--accent), var(--warn), var(--error))',
               }}

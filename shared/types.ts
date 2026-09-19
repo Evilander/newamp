@@ -1424,6 +1424,12 @@ export interface NewAmpAPI {
     cb: (tap: { pcm: Float32Array; channels: number; sampleRate: number }) => void,
   ) => () => void;
 
+  // False when Chromium composites the window in software (a blocklisted or
+  // missing GPU driver, common on Linux, or --disable-gpu): every animated
+  // pixel is then CPU work. null until the GPU process has reported in.
+  getGpuCompositing: () => Promise<boolean | null>;
+  onGpuCompositing: (cb: (enabled: boolean) => void) => () => void;
+
   platform: string;
   appVersion: string;
 }

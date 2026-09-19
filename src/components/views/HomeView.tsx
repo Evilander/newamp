@@ -79,7 +79,6 @@ export function HomeView(): JSX.Element {
   const refreshGenerationRef = useRef(0);
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
-  const currentTime = usePlayerStore((s) => s.currentTime);
   const duration = usePlayerStore((s) => s.duration);
   const queue = usePlayerStore((s) => s.queue);
   const index = usePlayerStore((s) => s.index);
@@ -324,7 +323,6 @@ export function HomeView(): JSX.Element {
           <div className="home-magazine flex flex-col gap-3">
             <HomeHero
               current={current}
-              currentTime={currentTime}
               duration={duration}
               isPlaying={isPlaying}
               queueLength={queue.length}
@@ -810,9 +808,21 @@ function PlaylistPanel({
   );
 }
 
+// The playhead ticks at 10 Hz. Only these two leaves subscribe to it, so the
+// rest of Home (the default view) doesn't re-render on every tick.
+function HomeHeroProgressFill({ duration }: { duration: number }): JSX.Element {
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const progress = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
+  return <div className="home-hero-progress-fill" style={{ width: `${progress}%` }} />;
+}
+
+function HomeHeroElapsed(): JSX.Element {
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  return <span>{formatTime(currentTime)}</span>;
+}
+
 function HomeHero({
   current,
-  currentTime,
   duration,
   isPlaying,
   queueLength,
@@ -828,7 +838,6 @@ function HomeHero({
   onPlayPick,
 }: {
   current: Track | null;
-  currentTime: number;
   duration: number;
   isPlaying: boolean;
   queueLength: number;
@@ -843,7 +852,6 @@ function HomeHero({
   onStopStation: () => void;
   onPlayPick: (track: Track) => void;
 }): JSX.Element {
-  const progress = duration > 0 ? Math.max(0, Math.min(100, (currentTime / duration) * 100)) : 0;
   const heroArt = current ? api.getArtUrl(current.id) : null;
   const topRatedSeed = todayPick?.track ?? null;
   const pickArt = topRatedSeed ? api.getArtUrl(topRatedSeed.id) : null;
@@ -920,10 +928,10 @@ function HomeHero({
               )}
             </p>
             <div className="home-hero-progress">
-              <div className="home-hero-progress-fill" style={{ width: `${progress}%` }} />
+              <HomeHeroProgressFill duration={duration} />
             </div>
             <div className="home-hero-progress-meta">
-              <span>{formatTime(currentTime)}</span>
+              <HomeHeroElapsed />
               <span className="home-hero-progress-stat">
                 {queueLength ? `${queueRemaining} left in queue` : 'no queue · build one from a rail below'}
               </span>

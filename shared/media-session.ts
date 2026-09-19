@@ -53,3 +53,35 @@ export function mediaSessionPositionState({
   const rate = Number.isFinite(playbackRate) && playbackRate > 0 ? playbackRate : 1;
   return { duration: safeDuration, position, playbackRate: rate };
 }
+
+export interface MediaSessionPositionSnapshot {
+  trackId: number;
+  duration: number;
+  position: number;
+  playbackRate: number;
+  playing: boolean;
+  atMs: number;
+}
+
+// The OS extrapolates the scrub position from the last state it was given,
+// so it only needs a new one when that extrapolation goes wrong: track,
+// duration, rate or play/pause changed, or the playhead jumped (a seek).
+// Pushing it on every 10 Hz tick was an IPC hop (and on Linux, MPRIS D-Bus
+// traffic) ten times a second for the whole session.
+export function mediaSessionPositionNeedsSync(
+  prev: MediaSessionPositionSnapshot | null,
+  next: MediaSessionPositionSnapshot,
+  toleranceSec = 1,
+): boolean {
+  if (!prev) return true;
+  if (
+    prev.trackId !== next.trackId ||
+    prev.duration !== next.duration ||
+    prev.playbackRate !== next.playbackRate ||
+    prev.playing !== next.playing
+  ) {
+    return true;
+  }
+  const elapsedSec = prev.playing ? ((next.atMs - prev.atMs) / 1000) * prev.playbackRate : 0;
+  return Math.abs(next.position - (prev.position + elapsedSec)) > toleranceSec;
+}
