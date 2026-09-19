@@ -243,10 +243,17 @@ assert.match(
   /const fresh = get\(\);/,
   'refillAutoDjQueue should re-read state after its await instead of committing onto the pre-await snapshot',
 );
-assert.match(
-  refillBody,
-  /set\(\{ queue: \[\.\.\.fresh\.queue, \.\.\.additions\] \}\)/,
-  'refillAutoDjQueue should commit its additions onto the freshly re-read queue',
+// The queue it commits onto must come from a get() taken after the last
+// await, whatever that snapshot is called. A folder rule can await twice.
+const committedSnapshot = refillBody.match(/set\(\{ queue: \[\.\.\.(\w+)\.queue, \.\.\.additions\] \}\)/)?.[1] ?? '';
+assert.ok(committedSnapshot, 'refillAutoDjQueue should commit additions onto a named queue snapshot');
+const snapshotReadAt = refillBody.indexOf(`const ${committedSnapshot} = get();`);
+const commitAt = refillBody.indexOf('set({ queue:');
+const lastAwaitAt = refillBody.lastIndexOf('await ', commitAt);
+assert.ok(snapshotReadAt >= 0, `refillAutoDjQueue should read ${committedSnapshot} from get()`);
+assert.ok(
+  snapshotReadAt > lastAwaitAt && snapshotReadAt < commitAt,
+  'refillAutoDjQueue should commit onto a queue re-read after its last await, not a pre-await snapshot',
 );
 
 assert.match(packageSource, /"test:session-restore-integrity"/, 'package.json should expose the session restore integrity test');

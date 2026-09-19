@@ -1385,11 +1385,20 @@ function moodLabel(mood: SetMood): string {
 }
 
 // "Late Night" next to an existing "Late Night" becomes "Late Night 2".
+// Compared the way a name is stored: saving collapses runs of whitespace, and
+// a save with no id and a name that already exists overwrites that rule, so
+// "Late  Night" has to count as taken or Save as New would replace the
+// original instead of copying it.
+function storedNameOf(name: string): string {
+  return name.replace(/\s+/g, ' ').trim();
+}
+
 export function uniqueSmartRuleName(base: string, rules: Array<{ name: string }>): string {
-  const taken = new Set(rules.map((rule) => rule.name));
-  if (!taken.has(base)) return base;
+  const taken = new Set(rules.map((rule) => storedNameOf(rule.name)));
+  const stem = storedNameOf(base);
+  if (!taken.has(stem)) return stem;
   for (let n = 2; ; n += 1) {
-    const candidate = `${base} ${n}`;
+    const candidate = `${stem} ${n}`;
     if (!taken.has(candidate)) return candidate;
   }
 }

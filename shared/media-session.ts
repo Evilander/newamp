@@ -74,8 +74,8 @@ export function mediaSessionPositionNeedsSync(
   toleranceSec = 1,
 ): boolean {
   if (!prev) return true;
-  // Object.is, not !==: duration is NaN until the track's metadata lands, and
-  // NaN !== NaN would report a change on every tick through that window.
+  // Object.is, not !==: an unknown duration reaches this as 0 today, but a
+  // NaN would compare unequal to itself and report a change on every tick.
   if (
     prev.trackId !== next.trackId ||
     !Object.is(prev.duration, next.duration) ||

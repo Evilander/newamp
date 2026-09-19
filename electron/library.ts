@@ -2699,16 +2699,32 @@ export class LibraryStore {
 
   // The LIKE prefix is a cheap first pass; trackPathIsInFolder decides, so a
   // sibling folder whose name starts the same ("To Listen Later") is dropped.
-  private folderRuleStatement(rule: SmartPlaylistRule, columns: string): import('sql.js').Statement | null {
+  private folderRuleStatement(
+    rule: SmartPlaylistRule,
+    columns: string,
+    ordered = true,
+  ): import('sql.js').Statement | null {
     const folder = normalizeFolderPath(rule.folderPath);
     if (!folder) return null;
     const { where, params } = smartRuleWhere(rule);
+    // Counting does not need folder order, and sorting every matching row to
+    // then throw the order away is most of the work for a large folder.
+    const order = ordered
+      ? `ORDER BY lower(replace(path, '/', '\\')) COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE, id`
+      : '';
     const stmt = this.db.prepare(
       `SELECT ${columns} FROM tracks
         ${where ? `${where} AND` : 'WHERE'} lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'
-        ORDER BY lower(replace(path, '/', '\\')) COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE, id`,
+        ${order}`,
     );
-    stmt.bind([...params, folderTrackPathPrefixParam(folder)] as unknown as import('sql.js').BindParams);
+    try {
+      stmt.bind([...params, folderTrackPathPrefixParam(folder)] as unknown as import('sql.js').BindParams);
+    } catch (err) {
+      // An unbound statement still holds wasm memory, and leaking one here
+      // can fail the next close().
+      stmt.free();
+      throw err;
+    }
     return stmt;
   }
 
@@ -2744,7 +2760,7 @@ export class LibraryStore {
 
   private countFolderRuleMatches(rule: SmartPlaylistRule): number {
     const folder = normalizeFolderPath(rule.folderPath);
-    const stmt = this.folderRuleStatement(rule, 'path');
+    const stmt = this.folderRuleStatement(rule, 'path', false);
     if (!folder || !stmt) return 0;
     let matched = 0;
     try {
