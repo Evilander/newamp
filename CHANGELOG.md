@@ -151,10 +151,10 @@ Release notes for every version, including everything before 2.0, are on the
   macOS even with a full library, because the root it worked out from the
   track paths dropped their leading slash.
 - Auto DJ on a folder rule carried every track under that folder across to the
-  interface each time it topped the queue up, to keep a handful. It asks for
-  the handful now.
-- The playing position was sent to the operating system ten times a second
-  until a track's duration was known, instead of when something changed.
+  interface each time it topped the queue up, to keep a handful. It now asks
+  for a handful, picked at random from anywhere in the folder rather than
+  taken in folder order, and falls back to the whole folder if everything it
+  drew has been played already.
 - Choosing a smart rule meant editing that rule with no way out: Save Smart
   overwrote it, and a rule made from a folder stayed tied to that folder.
   Save as New keeps the settings and leaves the original alone.

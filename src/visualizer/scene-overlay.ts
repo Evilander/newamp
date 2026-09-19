@@ -473,7 +473,12 @@ void main() { fragColor = u_color; }
 
   function pickNextScene(frame: EvilandFrame): void {
     const avail = availableScenes();
-    if (avail.length <= 1) return;
+    // One scene left is nothing to switch to, unless the one on screen is the
+    // scene that just failed to compile: then that one is worth switching to.
+    const activeDef = SCENES[activeIndex];
+    const activeIsDead = !activeDef || blacklisted.has(activeDef.id);
+    if (avail.length <= 1 && !activeIsDead) return;
+    if (!avail.length) return;
     // Energy-affine pick: prefer scenes whose mood matches the moment, but a
     // seeded 25% wildcard keeps it surprising.
     const tier = frame.energy > 0.55 ? 'high' : frame.energy > 0.22 ? 'mid' : 'calm';

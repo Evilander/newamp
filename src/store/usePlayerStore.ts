@@ -1776,25 +1776,27 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       ) {
         return [];
       }
+      // A folder rule ignores `count` (it is the whole folder), so it is
+      // bounded with a random sample instead. Deep into a folder that has
+      // mostly been played, a sample can come back entirely made of tracks
+      // already in the queue, so a starved refill asks again for all of it.
+      let sampledFolderRule = false;
+      const runRule = async (sample: boolean): Promise<Track[]> => {
+        const rules = await api.getSmartPlaylistRules().catch(() => []);
+        const rule = rules.find((item) => item.id === state.autoDjSmartRuleId) ?? null;
+        if (!rule) return api.runSmartPlaylistRule(state.autoDjSmartRuleId!).catch(() => []);
+        const candidateCount = autoDjSmartRuleCandidateCount(
+          rule.count,
+          state.autoDjTarget,
+          state.queue.length,
+        );
+        sampledFolderRule = sample && !!rule.folderPath;
+        return api
+          .runSmartPlaylistRule({ ...rule, count: candidateCount }, sample ? candidateCount : 0)
+          .catch(() => []);
+      };
       const candidates = state.autoDjSmartRuleId
-        ? await api
-            .getSmartPlaylistRules()
-            .then((rules) => rules.find((rule) => rule.id === state.autoDjSmartRuleId) ?? null)
-            .then((rule) =>
-              rule
-                ? (() => {
-                    const candidateCount = autoDjSmartRuleCandidateCount(
-                      rule.count,
-                      state.autoDjTarget,
-                      state.queue.length,
-                    );
-                    // A folder rule ignores `count` (it is the whole folder),
-                    // so bound it with the sample instead.
-                    return api.runSmartPlaylistRule({ ...rule, count: candidateCount }, candidateCount);
-                  })()
-                : api.runSmartPlaylistRule(state.autoDjSmartRuleId!),
-            )
-            .catch(() => [])
+        ? await runRule(true)
         : await (() => {
             const seed = state.current ?? state.queue[Math.max(0, state.index)] ?? state.queue[state.queue.length - 1]!;
             return api
@@ -1811,9 +1813,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const fresh = get();
       if (!fresh.autoDjEnabled) return [];
       const remainingAhead = Math.max(0, fresh.queue.length - fresh.index - 1);
-      const additions = selectAutoDjAdditions(fresh.queue, candidates, fresh.autoDjTarget, remainingAhead);
+      let additions = selectAutoDjAdditions(fresh.queue, candidates, fresh.autoDjTarget, remainingAhead);
+      if (!additions.length && sampledFolderRule) {
+        const everything = await runRule(false);
+        if (!get().autoDjEnabled) return [];
+        const latest = get();
+        additions = selectAutoDjAdditions(
+          latest.queue,
+          everything,
+          latest.autoDjTarget,
+          Math.max(0, latest.queue.length - latest.index - 1),
+        );
+      }
       if (!additions.length) return [];
-      set({ queue: [...fresh.queue, ...additions] });
+      // Same reason as above, and the retry above is a second window: commit
+      // onto the queue as it stands now, not the one the additions were
+      // chosen against.
+      const atCommit = get();
+      if (!atCommit.autoDjEnabled) return [];
+      set({ queue: [...atCommit.queue, ...additions] });
       schedulePersistPlaybackSession(get(), true);
       return additions;
     },
