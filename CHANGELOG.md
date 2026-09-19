@@ -5,7 +5,7 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
-## Unreleased
+## [2.4.0] - 2026-09-19
 
 ### Added
 

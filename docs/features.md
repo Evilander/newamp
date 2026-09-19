@@ -25,12 +25,18 @@ The complete tour. The [README](../README.md) is the landing page; this is the e
 - **Spectral Cover Art** — albums without art get a stable, unique procedural SVG cover seeded by `artist::album`.
 - **Library health** — duplicate/missing/bitrate audits with one-click actions.
 - **Custom playlists** with reordering, portable folder export, and playlist artwork.
+  Right-click any track list for Play Next, Add to Queue, Add to Playlist (any
+  playlist, or a new one) and Show in Folder; a right-click inside a selection
+  acts on the whole selection.
+- **Folder playlists** — in Folders, save the open folder as a smart playlist:
+  every track under it, subfolders included, in folder order, kept current as
+  files come and go. Show in Library filters the Library to that folder.
 
 ## The stage
 
 - **Magazine-style Home** — greeting hero with blurred album backdrop, Today's Pick (with a reason chip), Your Highest Rated, NewAmp News, weekly listening stats, and the Harmonic / Taste / Loved / Heavy Rotation / Fresh Imports rails.
 - **Bloomberg-density Now Playing** — tabbed side panel (On Air / Album / Lyrics), draggable spectrum split, selectable spectrum styles, VU + waveform overview, LRCLIB-synced lyrics with karaoke mode and a custom-lyrics editor, tempo trainer, practice A/B loop, track bookmarks.
-- **Resonance** — the whole UI reacts to live audio through one cheap CSS-variable loop that self-throttles on weak hardware and respects `prefers-reduced-motion`.
+- **Resonance** — the whole UI reacts to live audio through one CSS-variable loop, shared by everything that moves with the music at 30 Hz, written only to the elements that animate. It self-throttles on weak hardware, stops entirely when the GPU is unavailable, and respects `prefers-reduced-motion`.
 - **Eviland** — 24-band onset detection grouped into kick, bass, snare, hat and vocal frequency ranges (band ranges, not instrument recognition), a GPU feedback field, fluid and reaction–diffusion simulations, 32 procedural scenes, per-track persistent visual lineage, and 26 looks that each choose their own sources. **Eviland Live** draws all of that into MilkDrop's own feedback so the preset warps it, under one palette.
 - **Look-ahead** — local tracks are read ahead of time (beat grid, bar lines, sections and repeats, builds, drops, key changes), so looks change on the bar line, a build dims and draws inward, the held beat goes dark and the drop lands on its downbeat. First play of a track costs about two seconds of analysis; it can be turned off in the visualizer settings.
 - **MilkDrop via Butterchurn** (sandboxed, prewarmed preset swaps) + **Particle Flow** (~140k GPU particles) + 24 in-house fullscreen modes with real spectral-flux beat detection and an auto hardware tier.
