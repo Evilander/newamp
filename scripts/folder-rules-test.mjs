@@ -78,6 +78,15 @@ assert.deepEqual(
   caseFolds ? 'Rock and rock are one folder here' : 'Rock and rock are two folders here',
 );
 
+// With no configured roots the view derives them from the tracks. A POSIX
+// path has to keep its leading separator or the root holds none of them.
+const derived = lib.getFolders(null);
+assert.ok(derived.length > 0, 'a library with only POSIX paths still has folder roots');
+assert.ok(
+  derived.every((folder) => folder.totalTrackCount > 0),
+  'a derived root contains its own tracks',
+);
+
 const saved = lib.saveSmartPlaylistRule(folderRule);
 assert.equal(saved.folderPath, '/music/To Listen');
 await lib.close();

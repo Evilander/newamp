@@ -5128,7 +5128,11 @@ function catalogRootForTrackPath(path: string): string | null {
     return first ? `${drive[1]}\\${first}` : `${drive[1]}\\`;
   }
   const first = compact.split('\\').filter(Boolean)[0];
-  return first || null;
+  if (!first) return null;
+  // A POSIX path keeps its leading separator. Without it the derived root is
+  // "home" rather than "/home", which contains none of its own tracks, and
+  // the Folders view comes up empty for a library with no configured roots.
+  return compact.startsWith('\\') ? `\\${first}` : first;
 }
 
 function trackPathIsInFolder(path: string, folder: string, recursive: boolean): boolean {
