@@ -252,12 +252,18 @@ export function PlaylistView(): JSX.Element {
     }
   }
 
-  async function saveSmartRule(): Promise<void> {
+  // Saving with a rule selected overwrites it; asNew keeps the settings but
+  // leaves the original alone (and drops its folder scope, since a folder rule
+  // only ever comes from the Folders view).
+  async function saveSmartRule(asNew = false): Promise<void> {
     setBusy(true);
     try {
+      const draft = readSmartDraft();
       const saved = await api.saveSmartPlaylistRule({
-        ...readSmartDraft(),
-        id: selectedSmartRule?.id,
+        ...draft,
+        folderPath: asNew ? null : draft.folderPath,
+        name: asNew ? uniqueSmartRuleName(draft.name, smartRules) : draft.name,
+        id: asNew ? undefined : selectedSmartRule?.id,
       });
       setSelectedSmartRule(saved);
       applySmartRuleToDraft(saved);
@@ -718,9 +724,28 @@ export function PlaylistView(): JSX.Element {
             style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
             title='Examples: artist:radiohead path:"Live" missing:art format:wma'
           />
-          <button className="pxbtn" onClick={() => void saveSmartRule()} disabled={busy}>
-            SAVE SMART
+          <button
+            className="pxbtn"
+            onClick={() => void saveSmartRule()}
+            disabled={busy}
+            title={
+              selectedSmartRule
+                ? `Overwrite ${selectedSmartRule.name} with these settings`
+                : 'Save these settings as a new smart rule'
+            }
+          >
+            {selectedSmartRule ? 'UPDATE SMART' : 'SAVE SMART'}
           </button>
+          {selectedSmartRule && (
+            <button
+              className="pxbtn"
+              onClick={() => void saveSmartRule(true)}
+              disabled={busy}
+              title={`Keep these settings as a new rule and leave ${selectedSmartRule.name} alone`}
+            >
+              SAVE AS NEW
+            </button>
+          )}
         </div>
         <div className="toolbar-group" role="group" aria-label="Recipe limits">
           <span className="toolbar-group-label">Limits</span>
@@ -1357,6 +1382,16 @@ const PLAYLIST_ROW_HEIGHT = 36;
 function moodLabel(mood: SetMood): string {
   if (mood === 'deep-cuts') return 'deep cuts';
   return mood;
+}
+
+// "Late Night" next to an existing "Late Night" becomes "Late Night 2".
+export function uniqueSmartRuleName(base: string, rules: Array<{ name: string }>): string {
+  const taken = new Set(rules.map((rule) => rule.name));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const candidate = `${base} ${n}`;
+    if (!taken.has(candidate)) return candidate;
+  }
 }
 
 function parseOptionalNumber(value: string): number | null {
