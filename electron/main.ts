@@ -4361,8 +4361,8 @@ function uiQueueEditProbeSource(): string {
       steps.afterDelete = await waitOrder('Two,One');
       steps.activeAfterDelete = activeRow();
       steps.playingAfterEdits = playing();
-      await sleep(400);
-      steps.clockAdvanced = clock() > startedAt;
+      // The clock can sit at zero for a moment while the audio element starts.
+      steps.clockAdvanced = !!(await waitFor('clock advancing', () => (clock() > startedAt ? true : null), 4000).catch(() => false));
       steps.stillPlaying = !!document.querySelector('[data-newamp-transport][data-newamp-playing="true"]');
 
       // Clear is two-step (arm, then confirm).
