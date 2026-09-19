@@ -9,10 +9,18 @@ import { ViewHeader } from '../ViewHeader';
 import { Chip } from '../Chip';
 import { EmptyState } from '../EmptyState';
 import { ViewSkeleton } from '../ViewSkeleton';
-import { AlphabetRail, CatalogLoadMore, catalogScrollBehavior } from './AlbumsView';
+import { AlphabetRail, catalogScrollBehavior } from './AlbumsView';
 import { Sparkle } from '../Icons';
+import { computeGridColumnCount, useVirtualRows } from '../../hooks/useVirtualRows';
 
-const ARTIST_PAGE_SIZE = 320;
+// The whole (filtered) artist list loads at once and the grid only mounts the
+// rows in view. The artist query is a GROUP BY over every track, so a page of
+// 320 cost most of what the full list does (27k tracks: 12 ms vs 20 ms; 200k
+// tracks / 40k artists: 93 ms vs 160 ms), and paging left the A-Z rail able
+// to reach only the letters already loaded.
+const ARTIST_LIST_LIMIT = 1_000_000;
+const ARTIST_ROW_HEIGHT = 37;
+const ARTIST_MIN_WIDTH = 220;
 const CATALOG_SEARCH_DEBOUNCE_MS = 180;
 
 export function ArtistsView(): JSX.Element {
@@ -23,12 +31,20 @@ export function ArtistsView(): JSX.Element {
   const [factStatus, setFactStatus] = useState<'idle' | 'loading' | 'none' | 'ok'>('idle');
   const [filter, setFilter] = useState('');
   const artistQuery = useDebouncedValue(filter, CATALOG_SEARCH_DEBOUNCE_MS);
-  const [hasMoreArtists, setHasMoreArtists] = useState(false);
   const [loadingArtists, setLoadingArtists] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
   const [refreshSeed, setRefreshSeed] = useState(0);
   const artistListRef = useRef<HTMLDivElement>(null);
   const [restoreArtistScrollTop, setRestoreArtistScrollTop] = useState(0);
+  const [artistListWidth, setArtistListWidth] = useState(0);
+  const listMounted = !selected && artists.length > 0;
+  const columns = computeGridColumnCount({ containerWidth: artistListWidth, minItemWidth: ARTIST_MIN_WIDTH, gap: 0 });
+  const artistRows = useVirtualRows({
+    rowCount: Math.ceil(artists.length / columns),
+    rowHeight: ARTIST_ROW_HEIGHT,
+    scrollRef: artistListRef,
+    enabled: listMounted,
+  });
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
@@ -40,18 +56,14 @@ export function ArtistsView(): JSX.Element {
     let cancelled = false;
     setLoadingArtists(true);
     api
-      .getArtists({ search: artistQuery, limit: ARTIST_PAGE_SIZE + 1, offset: 0 })
+      .getArtists({ search: artistQuery, limit: ARTIST_LIST_LIMIT, offset: 0 })
       .then((rows) => {
         if (cancelled) return;
-        setArtists(rows.slice(0, ARTIST_PAGE_SIZE));
-        setHasMoreArtists(rows.length > ARTIST_PAGE_SIZE);
+        setArtists(rows);
         setRestoreArtistScrollTop(0);
       })
       .catch(() => {
-        if (!cancelled) {
-          setArtists([]);
-          setHasMoreArtists(false);
-        }
+        if (!cancelled) setArtists([]);
       })
       .finally(() => {
         if (!cancelled) setLoadingArtists(false);
@@ -89,6 +101,15 @@ export function ArtistsView(): JSX.Element {
     return () => ctrl.abort();
   }, [selected]);
 
+  useEffect(() => {
+    const list = artistListRef.current;
+    if (!listMounted || !list) return;
+    setArtistListWidth(list.clientWidth);
+    const ro = new ResizeObserver(() => setArtistListWidth(list.clientWidth));
+    ro.observe(list);
+    return () => ro.disconnect();
+  }, [listMounted]);
+
   useLayoutEffect(() => {
     if (selected) return;
     const list = artistListRef.current;
@@ -98,22 +119,6 @@ export function ArtistsView(): JSX.Element {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [selected, restoreArtistScrollTop, filter]);
-
-  async function loadMoreArtists(): Promise<void> {
-    if (loadingArtists || !hasMoreArtists) return;
-    setLoadingArtists(true);
-    try {
-      const rows = await api.getArtists({
-        search: artistQuery,
-        limit: ARTIST_PAGE_SIZE + 1,
-        offset: artists.length,
-      });
-      setArtists((currentArtists) => [...currentArtists, ...rows.slice(0, ARTIST_PAGE_SIZE)]);
-      setHasMoreArtists(rows.length > ARTIST_PAGE_SIZE);
-    } finally {
-      setLoadingArtists(false);
-    }
-  }
 
   async function scanLibraryNow(): Promise<void> {
     setScanBusy(true);
@@ -158,15 +163,16 @@ export function ArtistsView(): JSX.Element {
     return set;
   }, [artists]);
 
+  // Rows past the viewport aren't mounted, so the jump is computed from the
+  // list itself rather than looked up in the DOM.
   function jumpToArtistLetter(letter: string): void {
     const container = artistListRef.current;
-    if (!container) return;
-    const target = container.querySelector<HTMLElement>(`[data-newamp-artist-letter="${letter}"]`);
-    if (!target) return;
-    const containerRect = container.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    const offset = targetRect.top - containerRect.top + container.scrollTop - 12;
-    container.scrollTo({ top: Math.max(0, offset), behavior: catalogScrollBehavior() });
+    const index = artists.findIndex((artist) => artistFirstLetter(artist.artist) === letter);
+    if (!container || index < 0) return;
+    const top = Math.floor(index / columns) * ARTIST_ROW_HEIGHT;
+    // Smooth-scrolling across thousands of rows reads as lag; only glide short hops.
+    const behavior = Math.abs(top - container.scrollTop) > container.clientHeight * 3 ? 'auto' : catalogScrollBehavior();
+    container.scrollTo({ top, behavior });
   }
 
   const filterActive = artistQuery.trim().length > 0;
@@ -229,7 +235,7 @@ export function ArtistsView(): JSX.Element {
       <ViewHeader
         eyebrow="Explore"
         title="Artists"
-        count={`${artists.length.toLocaleString()}${hasMoreArtists ? '+' : ''} artists`}
+        count={`${artists.length.toLocaleString()} artists`}
         status={
           scanBusy ? (
             <Chip tone="accent" size="sm">
@@ -282,17 +288,20 @@ export function ArtistsView(): JSX.Element {
           </div>
         ) : (
           <>
-            <div ref={artistListRef} data-newamp-artists-scroll className="flex-1 overflow-auto">
-              <div
-                className="grid"
-                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))' }}
-              >
-                {artists.map((a) => (
+            <div
+              ref={artistListRef}
+              data-newamp-artists-scroll
+              className="flex-1 overflow-auto"
+              onScroll={artistRows.onScroll}
+            >
+              <div style={{ height: artistRows.topPad }} />
+              <div className="grid" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+                {artists.slice(artistRows.startIndex * columns, (artistRows.endIndex + 1) * columns).map((a) => (
                   <button
                     key={a.artist}
                     onClick={() => openArtist(a.artist)}
-                    className="flex items-center justify-between gap-2 border-b px-4 py-2 text-left transition-colors hover:bg-[var(--panel-2)]"
-                    style={{ borderColor: 'var(--line)' }}
+                    className="flex items-center justify-between gap-2 border-b px-4 text-left transition-colors hover:bg-[var(--panel-2)]"
+                    style={{ borderColor: 'var(--line)', height: ARTIST_ROW_HEIGHT }}
                     data-newamp-artist-letter={artistFirstLetter(a.artist)}
                   >
                     <span className="truncate text-[13px]">{a.artist}</span>
@@ -302,15 +311,7 @@ export function ArtistsView(): JSX.Element {
                   </button>
                 ))}
               </div>
-              <CatalogLoadMore
-                shown={artists.length}
-                noun="artists"
-                hasMore={hasMoreArtists}
-                loading={loadingArtists}
-                onLoadMore={() => void loadMoreArtists()}
-                loadLabel="Load more artists"
-                marker={{ 'data-newamp-artists-load-more': '' }}
-              />
+              <div style={{ height: artistRows.bottomPad }} />
             </div>
             <AlphabetRail available={artistLetters} onJump={jumpToArtistLetter} />
           </>

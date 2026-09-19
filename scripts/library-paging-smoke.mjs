@@ -121,17 +121,17 @@ try {
   assert.match(albumsViewSource, /onScroll=\{handleAlbumsScroll\}/, 'AlbumsView should bind album-page loading to its scroll container');
   assert.match(albumsViewSource, /albumPageRequestRef/, 'AlbumsView should guard auto-load pagination from duplicate scroll bursts');
   assert.doesNotMatch(albumsViewSource, /api\.getAlbums\(\)\.then\(setAlbums\)/, 'AlbumsView should not load every album on mount');
-  assert.match(artistsViewSource, /const ARTIST_PAGE_SIZE = (\d+)/, 'ArtistsView should centralize the artist page size');
-  const artistPageSizeMatch = artistsViewSource.match(/const ARTIST_PAGE_SIZE = (\d+)/);
-  assert.ok(Number(artistPageSizeMatch?.[1] ?? 9999) <= 400, 'ArtistsView should keep initial artist rows light for huge libraries');
+  // Artists load as one list and render through a virtualized grid: the artist
+  // query is a GROUP BY over every track, so a 320-row page cost most of what
+  // the whole list does, and paging left the A-Z rail unable to reach letters
+  // past the first page.
   assert.match(artistsViewSource, /useDebouncedValue\(filter, CATALOG_SEARCH_DEBOUNCE_MS\)/, 'ArtistsView should debounce artist search');
   assert.match(artistsViewSource, /search: artistQuery/, 'ArtistsView should query artist summaries with the debounced search');
-  assert.match(artistsViewSource, /offset: artists\.length/, 'ArtistsView should request later artist pages by loaded row count');
-  assert.match(artistsViewSource, /Load more artists/, 'ArtistsView should expose explicit artist pagination');
-  assert.match(artistsViewSource, /data-newamp-artists-load-more/, 'ArtistsView should expose a stable load-more marker');
+  assert.match(artistsViewSource, /limit: ARTIST_LIST_LIMIT/, 'ArtistsView should load the whole filtered artist list');
+  assert.match(artistsViewSource, /useVirtualRows\(\{/, 'ArtistsView should only mount the artist rows in view');
+  assert.match(artistsViewSource, /artists\.findIndex\(/, 'the A-Z rail should jump by list position, not by DOM lookup');
   assert.match(artistsViewSource, /data-newamp-artists-scroll/, 'ArtistsView should expose a stable scroll container marker');
   assert.match(artistsViewSource, /restoreArtistScrollTop/, 'ArtistsView should restore list scroll after artist drill-in');
-  assert.doesNotMatch(artistsViewSource, /api\.getArtists\(\)\.then\(setArtists\)/, 'ArtistsView should not load every artist on mount');
   assert.match(lovedViewSource, /const LOVED_PAGE_SIZE = 600/, 'LovedView should centralize the loved-track page size');
   assert.match(lovedViewSource, /getTrackCount\(\{ sort: 'loved' \}\)/, 'LovedView should fetch exact favorite totals');
   assert.match(lovedViewSource, /const offset = tracks\.length/, 'LovedView should page favorites by loaded row count');
