@@ -29,6 +29,17 @@ Release notes for every version, including everything before 2.0, are on the
   Alt+Up/Down moves the focused row and Delete removes it. Clear empties the
   queue (with the usual undo). Editing around the playing track does not
   interrupt it.
+- Right-click any track, in the Library, album, artist, folder, Loved,
+  queue and playlist lists, for Play Next, Add to Queue, Add to Playlist and
+  Show in Folder. Add to Playlist lists every playlist and starts with New
+  Playlist. On a row that is part of a multi-selection, the menu acts on the
+  whole selection.
+- Folder playlists. In Folders, Smart playlist saves the open folder as a
+  smart playlist: every track under it, subfolders included, in folder order,
+  kept up to date as files are added or removed. Show in Library filters the
+  Library to that folder, and the folder list has a filter box.
+- `npm run bench:cpu` measures the app's CPU use per process with a large
+  synthetic library (27,000 tracks by default), with or without the GPU.
 
 ### Changed
 
@@ -49,6 +60,30 @@ Release notes for every version, including everything before 2.0, are on the
   and dense ones no longer wash out. Highlights keep their hue instead of
   clipping to white.
 - Fire Spires and VU Cathedral take their colours from the active palette.
+- Playing music costs far less CPU. With a 27,000-track library, playing a
+  track on the Library view used about 1.3 CPU cores, or 1.5 when Chromium
+  composites in software (common on Linux when it blocklists the GPU driver).
+  It now uses about a quarter of one core either way, and an idle window
+  dropped from 12% of a core (38% in software) to under 3%. Measured with
+  `npm run bench:cpu` on Windows 11. Most of the cost was the interface
+  reacting to the music: the variables it animates were written for the
+  whole page 165 times a second on a 165 Hz display, several loops woke on
+  every display refresh only to skip the frame, and a few animations never
+  stopped. Everything that moves with the music now shares one 30 Hz clock
+  and touches only the elements it animates.
+- The title-bar equalizer is four real band meters instead of a looping
+  animation.
+- When Chromium composites in software, the interface stops reacting to the
+  music and stays still, the way it already did on low-end hardware.
+- Artists load as one list and draw only the rows on screen, so the A to Z
+  rail reaches every letter. Before, the view loaded 320 artists at a time and
+  letters past the first few were greyed out until you clicked "Load more"
+  enough times.
+- Editing an open playlist (moving or removing tracks) saves immediately, and
+  the playlist header shows its total running time.
+- Eviland Live preset switches are cheaper: a switch that took 8 ms at the
+  median and 17 ms at worst now takes 2.5 ms and 8 ms. Butterchurn built
+  several 8 MB arrays element by element on every switch, used or not.
 
 ### Fixed
 
@@ -63,6 +98,29 @@ Release notes for every version, including everything before 2.0, are on the
 - Turning the equalizer off and back on did nothing until the next restart;
   the bands were saved but never re-applied. Picking a preset while the
   equalizer was off had the same problem.
+- New Playlist created nothing. It cleared the form and put "NewAmp Set" back
+  in the name field. It now creates the playlist under the name you typed and
+  opens it.
+- "Add to playlist" pickers never showed playlists created after the view
+  was opened.
+- Moving or removing tracks in an open playlist was lost unless you pressed
+  Update Playlist before leaving the view.
+- Eviland and Eviland Live stuttered when they changed look. Each look's
+  shader compiled on the frame it first appeared; on a fresh shader cache the
+  worst frame after a switch was 42 ms at the median and up to 335 ms. Scenes
+  now compile ahead of time in the background and the crossfade waits for
+  them; the worst frame is under 1 ms (`npm run bench:eviland-switch`).
+- The library watcher was restarted on every settings save, including the
+  playback position saved every few seconds. Changes it had noticed but not
+  yet scanned were thrown away, so new or edited files were never picked up
+  while music played. On Linux, each restart also re-read the whole library
+  tree. On Linux the watcher now watches folders rather than every file.
+- `path:` searches ignored a typed Windows path in quotes (the backslashes
+  were treated as escapes), and a forward-slash path never matched a
+  backslash one or the other way round.
+- Folder paths showed backslashes on Linux and macOS.
+- A GPU process that exited normally, or during quit, counted as a crash and
+  made the next launch start with software rendering.
 
 ## [2.3.0] - 2026-09-05
 
