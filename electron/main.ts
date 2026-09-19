@@ -4138,15 +4138,27 @@ function uiQuickPlayProbeSource(): string {
         throw new Error('Timed out waiting for ' + label);
       };
       await waitFor('app transport', () => document.querySelector('[data-newamp-transport]'));
-      document.body.dispatchEvent(new KeyboardEvent('keydown', {
-        key: 'k',
-        code: 'KeyK',
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true,
-      }));
-      await sleep(100);
-      if (!document.querySelector('[data-newamp-quick-play]')) {
+      // Ctrl+K toggles, and its listener attaches a beat after the transport
+      // appears, so a single early press can be lost. Press again only while
+      // the palette is closed, and give each press time to fetch the palette,
+      // which loads on first open. chordOpened is asserted by the smoke; the
+      // hook below is a fallback for the rest of the run, not a pass.
+      let chordOpened = false;
+      for (let attempt = 0; attempt < 5 && !chordOpened; attempt += 1) {
+        document.body.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'k',
+          code: 'KeyK',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }));
+        chordOpened = !!(await waitFor(
+          'Quick Play palette from Ctrl+K',
+          () => document.querySelector('[data-newamp-quick-play]'),
+          1500,
+        ).catch(() => null));
+      }
+      if (!chordOpened) {
         if (!window.__newampSmoke?.openQuickPlay) throw new Error('Quick Play smoke hook is unavailable');
         window.__newampSmoke.openQuickPlay();
       }
@@ -4182,6 +4194,7 @@ function uiQuickPlayProbeSource(): string {
       const currentTime = Number(timeEl.getAttribute('data-newamp-current-time') || '0');
       return {
         ok: true,
+        chordOpened,
         currentTitle,
         currentTime,
         rowText: (row.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 180),
