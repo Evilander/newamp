@@ -126,21 +126,23 @@ libraries use substantial memory, and some searches can block the main process.
 This comes up a lot, and it's a fair criticism, so here are the real numbers
 instead of a defense.
 
-NewAmp is an Electron app. The 2.2.0 Windows installer is **115 MB** and unpacks
-to **376 MB**. Winamp 5.9 was around 12 MB. That gap is real and I can't close it.
-Of the unpacked size, 235 MB is the Electron binary (Chromium and Node), 83 MB
-is the bundled ffmpeg that handles decoding and transcoding, and about 12 MB is
-NewAmp itself. The rest is Chromium's support files.
+NewAmp is an Electron app. The 2.4.0 Windows installer is **115 MB**, the
+portable build is 102 MB, and installed it takes **393 MB** on disk (375 MiB,
+which is the number Explorer shows). Winamp 5.9 was around 12 MB. That gap is
+real and I can't close it. Of what's installed, 298 MB is Chromium and Node,
+83 MB is the bundled ffmpeg that handles decoding and transcoding, and 9 MB is
+NewAmp's own code. Measured on the build this release ships from, with
+`du -sb release/win-unpacked` after `npm run package`.
 
 Memory is heavier than a native player too. With my 60,000-track library it sits
 around 400 MB in the main process, and Task Manager will show something like
 800 MB across all of its processes.
 
-The 2.1.0 installer was 136 MB and unpacked to 488 MB. 2.2.0 drops 112 MB of
-that: duplicate copies of libraries that were already bundled into the app, 54
+It was worse. The 2.1.0 installer was 136 MB; 2.2.0 cut it to 115 MB by
+dropping duplicate copies of libraries already bundled into the app, 54
 languages of Chromium locale files the app never uses, and a DirectX shader
-compiler only WebGPU needs. That was my sloppiness, not Electron's. Shrinking the
-bundled ffmpeg is the next real target.
+compiler only WebGPU needs. That was my sloppiness, not Electron's. It has
+stayed there since. Shrinking the bundled ffmpeg is the next real target.
 
 But the honest summary is: if a small, native, low-memory player is what you want,
 NewAmp is not it, and foobar2000 or Winamp itself will serve you better. Electron is
