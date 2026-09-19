@@ -33,11 +33,15 @@ void app.whenReady().then(async () => {
     const html = join(outRoot, 'probe.html');
     await writeFile(html, '<!doctype html><meta charset="utf-8"><body><script src="./probe.js"></script></body>', 'utf8');
     const win = new BrowserWindow({ show: false, webPreferences: { backgroundThrottling: false, sandbox: false } });
-    await win.loadURL(pathToFileURL(html).toString());
+    // --sync-compile measures the old behaviour (compile on the frame that
+    // first draws a scene) for comparison; without it the bench runs the
+    // asynchronous path the app ships.
+    const syncCompile = process.argv.includes('--sync-compile');
+    await win.loadURL(`${pathToFileURL(html).toString()}${syncCompile ? '?sync-compile=1' : ''}`);
     const engine = await win.webContents.executeJavaScript('window.__evilandSwitchBench.engine()', true);
     const live = await win.webContents.executeJavaScript('window.__evilandSwitchBench.live()', true);
     win.destroy();
-    console.log(JSON.stringify({ engine, live }, null, 2));
+    console.log(JSON.stringify({ syncCompile, engine, live }, null, 2));
     clearTimeout(hardTimeout);
     app.exit(0);
   } catch (err) {

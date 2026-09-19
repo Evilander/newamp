@@ -109,10 +109,12 @@ Release notes for every version, including everything before 2.0, are on the
 - Moving or removing tracks in an open playlist was lost unless you pressed
   Update Playlist before leaving the view.
 - Eviland and Eviland Live stuttered when they changed look. Each look's
-  shader compiled on the frame it first appeared; on a fresh shader cache the
-  worst frame after a switch was 42 ms at the median and up to 335 ms. Scenes
-  now compile ahead of time in the background and the crossfade waits for
-  them; the worst frame is under 1 ms (`npm run bench:eviland-switch`).
+  shader compiled on the frame it first appeared, and on a fresh shader cache
+  that frame took 42.5 ms at the median and 337.9 ms at worst. Scenes now
+  compile in the background and the crossfade waits for them, which brings the
+  worst frame after a switch to 0.3 ms at the median and 0.8 ms.
+  `npm run bench:eviland-switch` measures it; adding `-- --sync-compile`
+  reproduces the old behaviour on the same build.
 - The library watcher was restarted on every settings save, including the
   playback position saved every few seconds. Changes it had noticed but not
   yet scanned were thrown away, so new or edited files were never picked up

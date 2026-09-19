@@ -80,15 +80,21 @@ try {
     'zero-query resume row should lead with the most recent play',
   );
 
-  const [paletteSource, appSource, packageSource] = await Promise.all([
+  const [paletteSource, launcherSource, appSource, packageSource] = await Promise.all([
     readText('../src/components/QuickPlayPalette.tsx'),
+    // The chords live in the launcher, which keeps them in the startup chunk
+    // while the palette itself is fetched on first open.
+    readText('../src/components/QuickPlayLauncher.tsx'),
     readText('../src/App.tsx'),
     readText('../package.json'),
   ]);
 
+  assert.match(launcherSource, /ctrlKey \|\| event\.metaKey/, 'Quick Play should open from keyboard shortcuts');
+  assert.match(launcherSource, /key === 'k' \|\| key === 'j'/, 'Quick Play should support Ctrl+K and Ctrl+J');
+  assert.match(launcherSource, /lazy\(/, 'the palette itself should load on demand');
+  assert.match(launcherSource, /openQuickPlay/, 'the smoke hook should open the palette');
+
   assert.match(paletteSource, /data-newamp-quick-play/, 'Quick Play overlay should be queryable by smoke/UI tests');
-  assert.match(paletteSource, /ctrlKey \|\| event\.metaKey/, 'Quick Play should open from keyboard shortcuts');
-  assert.match(paletteSource, /key === 'k' \|\| key === 'j'/, 'Quick Play should support Ctrl+K and Ctrl+J');
   assert.match(paletteSource, /api\.getTracks/, 'Quick Play should search the real catalog API');
   assert.match(paletteSource, /api\.getPlaylists/, 'Quick Play should search saved playlists');
   assert.match(paletteSource, /api\.getSmartPlaylistRules/, 'Quick Play should search saved smart playlist rules');

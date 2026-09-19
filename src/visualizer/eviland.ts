@@ -76,6 +76,12 @@ export interface EvilandOptions {
   quality?: 'high' | 'medium' | 'low';
   /** Isolated emitter randomness for replay and deterministic visual tests. */
   seed?: string;
+  /**
+   * Compile scene shaders on the frame that first draws them, which pixel
+   * tests need so a scene is on screen the moment they ask for it. Defaults
+   * to `smoke`. The app, and the switch bench, use the asynchronous path.
+   */
+  syncCompile?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,7 +1286,12 @@ export function createEvilandRenderer(
   let currentConfig: OperatorConfig = defaultConfig();
   const random = mulberry32(hashSeed(options.seed ?? 'eviland-renderer'));
   const forceSource = createFluidForceSource();
-  const scenes = createSceneOverlay(canvas, { gl, quality, seedKey: options.seed ?? 'eviland', syncCompile: options.smoke });
+  const scenes = createSceneOverlay(canvas, {
+    gl,
+    quality,
+    seedKey: options.seed ?? 'eviland',
+    syncCompile: options.syncCompile ?? options.smoke,
+  });
   warmReactionDiffusion(gl);
   let sourceGain = 1;
   let anticipationClock = 0;
