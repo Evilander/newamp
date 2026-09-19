@@ -142,7 +142,12 @@
   border-radius: 8px;
 }
 
-/* Small reactive equalizer bar (animated when playing) */
+/* "Now playing" equalizer: four real band meters (bass to treble) fed by the
+   Resonance loop at 30 Hz through --amp-b1..--amp-b4 on the [data-amp]
+   container. Full-height bars scaled from the bottom, so a level change is a
+   transform, never layout. With reactivity off (or reduced motion) they rest
+   as a static glyph; a looping keyframe animation used to keep the compositor
+   drawing on every vsync for as long as anything played. */
 .eq-bars {
   display: inline-flex;
   align-items: flex-end;
@@ -152,17 +157,22 @@
 .eq-bars span {
   display: block;
   width: 3px;
+  height: 14px;
   background: var(--accent);
   border-radius: 1px;
   box-shadow: 0 0 4px var(--accent-glow);
-  animation: bar 1.1s infinite ease-in-out;
+  transform-origin: bottom;
+  transform: scaleY(var(--eq-rest));
 }
-.eq-bars span:nth-child(1) { animation-delay: 0s; }
-.eq-bars span:nth-child(2) { animation-delay: 0.15s; }
-.eq-bars span:nth-child(3) { animation-delay: 0.3s; }
-.eq-bars span:nth-child(4) { animation-delay: 0.45s; }
-@keyframes bar {
-  0%, 100% { height: 4px; }
-  50%      { height: 14px; }
+.eq-bars span:nth-child(1) { --eq-rest: 0.55; }
+.eq-bars span:nth-child(2) { --eq-rest: 0.9; }
+.eq-bars span:nth-child(3) { --eq-rest: 0.4; }
+.eq-bars span:nth-child(4) { --eq-rest: 0.7; }
+html[data-amp-reactive='on'] .eq-bars span:nth-child(1) { transform: scaleY(calc(0.2 + var(--amp-b1) * 0.8)); }
+html[data-amp-reactive='on'] .eq-bars span:nth-child(2) { transform: scaleY(calc(0.2 + var(--amp-b2) * 0.8)); }
+html[data-amp-reactive='on'] .eq-bars span:nth-child(3) { transform: scaleY(calc(0.2 + var(--amp-b3) * 0.8)); }
+html[data-amp-reactive='on'] .eq-bars span:nth-child(4) { transform: scaleY(calc(0.2 + var(--amp-b4) * 0.8)); }
+@media (prefers-reduced-motion: reduce) {
+  html[data-amp-reactive='on'] .eq-bars span { transform: scaleY(var(--eq-rest)); }
 }
 

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import {
   buildMediaSessionMetadata,
   mediaSessionPlaybackState,
+  mediaSessionPositionNeedsSync,
   mediaSessionPositionState,
 } from '../dist-electron/shared/media-session.js';
 
@@ -42,6 +43,29 @@ assert.equal(metadata.album, 'Windowlicker');
 assert.deepEqual(metadata.artwork, [
   { src: 'newart://track/7/art', sizes: '512x512', type: 'image/jpeg' },
 ]);
+
+// OS position pushes: only when the OS's own extrapolation would be wrong.
+const snap = { trackId: 7, duration: 367, position: 40, playbackRate: 1, playing: true, atMs: 10_000 };
+assert.equal(mediaSessionPositionNeedsSync(null, snap), true, 'first state is always pushed');
+assert.equal(
+  mediaSessionPositionNeedsSync(snap, { ...snap, position: 42, atMs: 12_000 }),
+  false,
+  'steady playback is extrapolated by the OS',
+);
+assert.equal(
+  mediaSessionPositionNeedsSync(snap, { ...snap, position: 120, atMs: 12_000 }),
+  true,
+  'a seek is pushed',
+);
+assert.equal(mediaSessionPositionNeedsSync(snap, { ...snap, playing: false }), true, 'pause is pushed');
+assert.equal(mediaSessionPositionNeedsSync(snap, { ...snap, trackId: 8 }), true, 'track change is pushed');
+assert.equal(mediaSessionPositionNeedsSync(snap, { ...snap, playbackRate: 1.25 }), true, 'rate change is pushed');
+const pausedSnap = { ...snap, playing: false };
+assert.equal(
+  mediaSessionPositionNeedsSync(pausedSnap, { ...pausedSnap, atMs: 60_000 }),
+  false,
+  'a paused playhead does not drift',
+);
 
 assert.equal(mediaSessionPlaybackState(true, track), 'playing');
 assert.equal(mediaSessionPlaybackState(false, track), 'paused');

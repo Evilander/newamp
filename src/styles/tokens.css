@@ -133,7 +133,10 @@
      Kept out of SKIN_VARIABLES so theme switches never wipe them. */
   --amp-energy: 0;
   --amp-beat: 0;
-  --amp-bright: 0.5;
+  --amp-b1: 0;
+  --amp-b2: 0;
+  --amp-b3: 0;
+  --amp-b4: 0;
 }
 
 /* A11y: one honest keyboard focus ring everywhere. Components with a
@@ -145,17 +148,27 @@
 
 /* =========================================================
    Resonance — the live audio drives the chrome itself.
-   One rAF loop writes --amp-energy / --amp-beat on :root; the
-   rules below consume them with compositor-only opacity/transform.
+   One loop (src/lib/resonance.ts) writes --amp-energy / --amp-beat
+   at 30 Hz onto elements marked [data-amp] only. A consumer must
+   read the vars on a tagged element or its pseudo-elements; writing
+   them on :root would restyle the whole document every tick.
    Active only when [data-amp-reactive='on'] (set by the adaptive
    tier + Ambient setting). Reduced motion / weak HW => static.
    ========================================================= */
 @property --amp-energy { syntax: '<number>'; inherits: true; initial-value: 0; }
 @property --amp-beat { syntax: '<number>'; inherits: true; initial-value: 0; }
-@property --amp-bright { syntax: '<number>'; inherits: true; initial-value: 0.5; }
+@property --amp-b1 { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --amp-b2 { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --amp-b3 { syntax: '<number>'; inherits: true; initial-value: 0; }
+@property --amp-b4 { syntax: '<number>'; inherits: true; initial-value: 0; }
 
-html[data-amp-reactive='on'] body::after {
-  content: '';
+/* Full-window art-palette wash. Plain alpha on its own compositor layer:
+   a full-window mix-blend-mode forced the compositor to re-blend every
+   pixel of the app on every tick (and on the CPU where GPU compositing
+   is unavailable, as on many Linux drivers). */
+.amp-ambient { display: none; }
+html[data-amp-reactive='on'] .amp-ambient {
+  display: block;
   position: fixed;
   inset: 0;
   z-index: 40;
@@ -163,14 +176,15 @@ html[data-amp-reactive='on'] body::after {
   background:
     radial-gradient(58% 48% at 28% 16%, var(--amp-bg1, transparent), transparent 70%),
     radial-gradient(54% 46% at 82% 88%, var(--amp-bg2, transparent), transparent 72%);
-  mix-blend-mode: screen;
-  opacity: calc(0.05 + var(--amp-energy) * 0.11 + var(--amp-beat) * 0.05);
-  transition: opacity var(--dur-base) linear; /* linear: tracks a continuous signal */
+  opacity: calc(0.04 + var(--amp-energy) * 0.09 + var(--amp-beat) * 0.04);
   will-change: opacity;
 }
 
-html[data-amp-reactive='on'] .amp-beat-scale {
-  transform: scale(calc(1 + var(--amp-beat) * 0.05));
+/* Scales the icon inside, not the element: the transport buttons carry a
+   spring transition on their own transform (press feedback), and a beat
+   written 30 times a second would restart it forever. */
+html[data-amp-reactive='on'] .amp-beat-scale > svg {
+  transform: scale(calc(1 + var(--amp-beat) * 0.08));
   transform-origin: center;
 }
 html[data-amp-reactive='on'] .amp-energy-glow {
@@ -181,8 +195,8 @@ html[data-amp-accent='on'] .amp-accent {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html[data-amp-reactive='on'] body::after { display: none; }
-  html[data-amp-reactive='on'] .amp-beat-scale { transform: none; }
+  html[data-amp-reactive='on'] .amp-ambient { display: none; }
+  html[data-amp-reactive='on'] .amp-beat-scale > svg { transform: none; }
 }
 
 /* =========================================================
@@ -197,7 +211,8 @@ html[data-amp-accent='on'] .amp-accent {
    (transform / opacity / filter — zero layout properties).
    No new rAF/JS: the only input beyond the Resonance loop is
    --scrub-progress, an inline var Transport sets from state it
-   already re-renders on every playhead tick.
+   already re-renders on every playhead tick. Each consumer's
+   element carries [data-amp] so the loop writes to it directly.
    ========================================================= */
 
 /* 1. Scrub glow tail — a gradient sheen over the played portion of the
@@ -216,7 +231,8 @@ html[data-amp-reactive='on'] .amp-scrub-wrap::after {
   background: linear-gradient(90deg, transparent 0%, var(--accent-glow) 88%, var(--accent) 100%);
   transform: scaleX(var(--scrub-progress, 0));
   transform-origin: left center;
-  transition: transform var(--dur-base) linear; /* smooths between playhead ticks */
+  /* No transition: the playhead ticks at 10 Hz, a sub-pixel step on any
+     real track, and a transition restarted every tick never finished. */
   opacity: calc(var(--amp-energy) * 0.5 + var(--amp-beat) * 0.15);
   will-change: transform, opacity;
 }

@@ -387,6 +387,12 @@ const api: NewAmpAPI = {
     ipcRenderer.on('exclusive:tap', handler);
     return () => ipcRenderer.off('exclusive:tap', handler);
   },
+  getGpuCompositing: () => ipcRenderer.invoke('app:get-gpu-compositing') as Promise<boolean | null>,
+  onGpuCompositing: (cb: (enabled: boolean) => void) => {
+    const handler = (_e: unknown, enabled: boolean) => cb(enabled);
+    ipcRenderer.on('app:gpu-compositing', handler);
+    return () => ipcRenderer.off('app:gpu-compositing', handler);
+  },
   ...readAppInfo(),
 };
 

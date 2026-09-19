@@ -63,7 +63,7 @@ export function Transport(): JSX.Element {
     >
       {/* amp-art-frame: hook for the Resonance breathing ring (tokens.css
           reactive block) — a ::after halo, so it needs a positioned parent. */}
-      <div className="amp-art-frame relative flex w-[88px] shrink-0 flex-col items-center justify-center gap-1 bevel-in p-1">
+      <div data-amp className="amp-art-frame relative flex w-[88px] shrink-0 flex-col items-center justify-center gap-1 bevel-in p-1">
         {shownArtUrl ? (
           <img
             src={shownArtUrl}
@@ -153,6 +153,7 @@ export function Transport(): JSX.Element {
             <PrevIcon />
           </button>
           <button
+            data-amp
             className="pxbtn pxbtn-icon is-primary amp-beat-scale"
             onClick={togglePlay}
             title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
@@ -223,6 +224,7 @@ function TransportScrubBar({
   const currentTime = usePlayerStore((s) => s.currentTime);
   return (
     <div
+      data-amp
       className="amp-scrub-wrap relative min-w-0 flex-1"
       style={{ '--scrub-progress': duration > 0 ? Math.min(1, currentTime / duration) : 0 } as CSSProperties}
     >

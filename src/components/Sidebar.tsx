@@ -99,6 +99,7 @@ export function Sidebar(): JSX.Element {
               <button
                 key={item.id}
                 className={`nav-item ${view === item.id ? 'active' : ''}`}
+                data-amp={view === item.id ? '' : undefined}
                 onClick={() => setView(item.id)}
                 title={item.hint ?? item.label}
               >

@@ -33,6 +33,7 @@ import { createEmptyPlan } from '../visualizer/eviland-memory-types';
 import { hashSeed } from '../visualizer/eviland-rng';
 import { parseCssRgbVec as parseRgbVec } from '../visualizer/css-color';
 import { api } from '../lib/api';
+import { AMBIENT_FRAME_MS, PACED_FRAME_SLACK_MS, requestPacedFrame } from '../lib/pacedFrame';
 
 export type VizMode =
   | 'mini'
@@ -116,22 +117,37 @@ interface Props {
   reactivity?: VizReactivity;
 }
 
+type FrameGate = ((now: number) => boolean) & {
+  // Milliseconds until the next paint is due, for loops that sleep between
+  // paints (requestPacedFrame) instead of spinning on every vsync.
+  msUntilDue(now: number): number;
+};
+
 function createFrameGate(
   canvasRef: RefObject<HTMLCanvasElement>,
   frameIntervalMs: number | (() => number),
-): (now: number) => boolean {
+  // Paced loops wake slightly before they are due; accept frames that early.
+  slackMs = 0,
+): FrameGate {
   let lastPaintAt = 0;
-  return (now: number) => {
+  const intervalOf = () =>
+    (typeof frameIntervalMs === 'function' ? frameIntervalMs() : frameIntervalMs) - slackMs;
+  const gate = (now: number) => {
+    // A function interval re-reads per frame so the Auto-Pilot governor can
+    // stretch the cadence live without tearing down the render loop. Checked
+    // before any layout read: rAF runs at display refresh (up to 165 Hz+), and
+    // clientWidth on a frame where style is dirty forces a synchronous
+    // style+layout pass for the whole document.
+    if (now - lastPaintAt < intervalOf()) return false;
     const node = canvasRef.current;
     if (!node || !node.isConnected || document.hidden) return false;
     if (node.clientWidth <= 0 || node.clientHeight <= 0) return false;
-    // A function interval re-reads per frame so the Auto-Pilot governor can
-    // stretch the cadence live without tearing down the render loop.
-    const interval = typeof frameIntervalMs === 'function' ? frameIntervalMs() : frameIntervalMs;
-    if (now - lastPaintAt < interval) return false;
     lastPaintAt = now;
     return true;
   };
+  return Object.assign(gate, {
+    msUntilDue: (now: number) => Math.max(0, intervalOf() - (now - lastPaintAt)),
+  });
 }
 
 export function Visualizer({
@@ -840,12 +856,15 @@ export function Visualizer({
     }
 
     const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
-    let raf = 0;
+    let cancelNext = () => {};
     let ctx: CanvasRenderingContext2D | null = null;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     const onsetFreq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
-    const canPaint = createFrameGate(canvasRef, frameIntervalMs);
+    // At the ambient rate this loop shares Resonance's 30 Hz grid, so both
+    // land in the same animation frame.
+    const onAmbientGrid = frameIntervalMs >= AMBIENT_FRAME_MS - 1;
+    const canPaint = createFrameGate(canvasRef, frameIntervalMs, onAmbientGrid ? PACED_FRAME_SLACK_MS : 0);
     const analyzeFeatures = createAudioFeatureAnalyzer({
       sampleRate: engine.getSampleRate(),
       fftSize: engine.fftSize,
@@ -932,22 +951,42 @@ export function Visualizer({
     let themeAccent = getCssVar('--accent') || '#39ff14';
     let themeAccentDim = getCssVar('--accent-dim') || '#1aa30a';
     let themeTick = 0;
+    // The bar modes live permanently in the transport and decks. Once playback
+    // has stopped long enough for the bars to fall, the canvas stops changing,
+    // so stop repainting it instead of recompositing a still image at 30 fps.
+    const restsWhenStopped = mode === 'mini' || mode === 'spectrum';
+    let stoppedSince = 0;
+
+    function scheduleNext(delayMs = canPaint.msUntilDue(window.performance.now())) {
+      cancelNext = requestPacedFrame(frame, delayMs, onAmbientGrid);
+    }
 
     function frame(now: number) {
       if (!canPaint(now)) {
-        raf = requestAnimationFrame(frame);
+        // Not due yet: sleep the remainder. Due but unpaintable (zero-size or
+        // detached canvas): look again an interval later, not every vsync.
+        const wait = canPaint.msUntilDue(now);
+        scheduleNext(wait > 0 ? wait : frameIntervalMs);
         return;
+      }
+      if (restsWhenStopped) {
+        if (engine.getState().playing) stoppedSince = 0;
+        else if (!stoppedSince) stoppedSince = now;
+        else if (now - stoppedSince > 1500) {
+          scheduleNext(250); // resumes within a quarter second of play
+          return;
+        }
       }
       ensureSize();
       const c = canvasRef.current;
       if (!c) {
-        raf = requestAnimationFrame(frame);
+        scheduleNext();
         return;
       }
       const w = c.clientWidth || c.width;
       const h = c.clientHeight || c.height;
       if (!ctx) {
-        raf = requestAnimationFrame(frame);
+        scheduleNext();
         return;
       }
 
@@ -1836,11 +1875,11 @@ export function Visualizer({
         paintMilkdropFallback(c, engine);
       }
 
-      raf = requestAnimationFrame(frame);
+      scheduleNext();
     }
 
-    raf = requestAnimationFrame(frame);
-    return () => cancelAnimationFrame(raf);
+    cancelNext = requestPacedFrame(frame, 0);
+    return () => cancelNext();
   }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode, suspendedByFullscreen]);
 
   const style: CSSProperties = {};

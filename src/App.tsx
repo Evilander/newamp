@@ -12,6 +12,7 @@ import { usePlayerStore } from './store/usePlayerStore';
 import { api, inElectron, winctl } from './lib/api';
 import { pushToast } from './lib/toast';
 import { syncMediaSessionIdentity, syncMediaSessionPosition } from './lib/mediaSession';
+import { mediaSessionPositionNeedsSync, type MediaSessionPositionSnapshot } from '@shared/media-session';
 import { resolvePlayerShortcut, type PlayerShortcutCommand } from '@shared/keyboard-shortcuts';
 import { applyShell, loadInitialShell } from './components/ShellPicker';
 import { useAdaptiveQuality } from './lib/adaptiveQuality';
@@ -341,6 +342,8 @@ export default function App(): JSX.Element {
   return (
     <>
       <MediaSessionSync />
+      {/* Resonance's full-window art-palette wash (tokens.css .amp-ambient). */}
+      <div aria-hidden data-amp className="amp-ambient" />
       <div
         data-newamp-drop-zone
         aria-hidden={fullscreen || undefined}
@@ -459,10 +462,31 @@ function MediaSessionSync(): null {
     });
   }, [current, isPlaying]);
 
-  // Position sync runs on the 10Hz tick — it's just one setPositionState call.
+  // Lets CSS freeze decorative "now playing" animations while paused.
   useEffect(() => {
+    document.documentElement.dataset.playing = isPlaying ? 'true' : 'false';
+  }, [isPlaying]);
+
+  // Checked on the 10Hz tick, but only pushed to the OS when its own
+  // extrapolation would be wrong (track/rate/play state change or a seek).
+  const lastPositionSync = useRef<MediaSessionPositionSnapshot | null>(null);
+  useEffect(() => {
+    if (!current) {
+      lastPositionSync.current = null;
+      return;
+    }
+    const snapshot: MediaSessionPositionSnapshot = {
+      trackId: current.id,
+      duration,
+      position: currentTime,
+      playbackRate,
+      playing: isPlaying,
+      atMs: performance.now(),
+    };
+    if (!mediaSessionPositionNeedsSync(lastPositionSync.current, snapshot)) return;
+    lastPositionSync.current = snapshot;
     syncMediaSessionPosition({ current, currentTime, duration, playbackRate });
-  }, [current, currentTime, duration, playbackRate]);
+  }, [current, currentTime, duration, isPlaying, playbackRate]);
 
   return null;
 }

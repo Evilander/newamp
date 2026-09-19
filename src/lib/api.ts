@@ -503,6 +503,8 @@ const stub: NewAmpAPI = {
   exclusivePrepareNext: async () => undefined,
   onExclusiveEvent: () => () => undefined,
   onExclusiveTap: () => () => undefined,
+  getGpuCompositing: async () => true,
+  onGpuCompositing: () => () => undefined,
   platform: 'browser',
   appVersion: NEWAMP_VERSION,
 };

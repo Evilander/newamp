@@ -1499,6 +1499,36 @@ async function syncRadioBrain(): Promise<void> {
   }
 }
 
+const LIBRARY_WATCH_SETTINGS_KEYS = ['libraryRoots', 'libraryAutoWatch'] as const;
+
+// The renderer saves the resume position every few seconds during playback;
+// only folder and auto-watch changes should reach the watcher.
+function patchTouchesLibraryWatch(patch: unknown): boolean {
+  if (!patch || typeof patch !== 'object') return false;
+  return LIBRARY_WATCH_SETTINGS_KEYS.some((key) => key in (patch as Record<string, unknown>));
+}
+
+// Chromium reports software compositing until the GPU process has finished
+// starting, so the status only means something after 'gpu-info-update' (or a
+// few seconds after launch, for setups where that event never fires).
+let gpuCompositingSettled = false;
+
+function publishGpuCompositing(): void {
+  gpuCompositingSettled = true;
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('app:gpu-compositing', gpuCompositingEnabled());
+}
+
+// 'enabled' / 'enabled_on' mean the GPU composites; anything else
+// ('disabled_software', 'unavailable_software', ...) is a software fallback.
+function gpuCompositingEnabled(): boolean {
+  try {
+    const status = (app.getGPUFeatureStatus() as unknown as Record<string, string | undefined>).gpu_compositing;
+    return !status || status.startsWith('enabled');
+  } catch {
+    return true;
+  }
+}
+
 function syncLibraryWatcher(): void {
   if (!libraryWatcher) return;
   const current = settings.get();
@@ -2147,7 +2177,7 @@ function registerIpc(): void {
   ipcMain.handle('settings:get', async () => settings.get());
   ipcMain.handle('settings:set', async (_e, patch) => {
     const updated = settings.set(patch);
-    syncLibraryWatcher();
+    if (patchTouchesLibraryWatch(patch)) syncLibraryWatcher();
     if (patchTouchesRadioBrain(patch)) {
       await queueRadioBrainSync();
     }
@@ -2536,6 +2566,7 @@ function registerIpc(): void {
       platform: process.platform,
     };
   });
+  ipcMain.handle('app:get-gpu-compositing', () => (gpuCompositingSettled ? gpuCompositingEnabled() : null));
 
   // window controls
   ipcMain.handle('win:minimize', () => mainWin?.minimize());
@@ -5179,14 +5210,22 @@ app.on('child-process-gone', (_event, details) => {
   writeDiagnosticEvent('child-process-gone', details as unknown as Record<string, unknown>);
   // A crashed GPU process means hardware acceleration is unstable on this
   // machine. Drop the recovery sentinel so the next launch falls back to
-  // software rendering instead of crash-looping on the GPU.
-  if (details.type === 'GPU' && !smokeMode) {
+  // software rendering instead of crash-looping on the GPU. A clean exit, or
+  // one during quit, is not a crash and must not cost the next launch its GPU.
+  if (details.type === 'GPU' && !smokeMode && !isQuitting && details.reason !== 'clean-exit') {
     try {
       writeFileSync(gpuCrashSentinel, `${new Date().toISOString()} ${details.reason}\n`, 'utf8');
     } catch {
       /* best effort */
     }
   }
+});
+
+app.on('gpu-info-update', publishGpuCompositing);
+void app.whenReady().then(() => {
+  setTimeout(() => {
+    if (!gpuCompositingSettled) publishGpuCompositing();
+  }, 5000);
 });
 
 app.on('render-process-gone', (_event, webContents, details) => {

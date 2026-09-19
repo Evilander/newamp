@@ -39,7 +39,7 @@ export function TitleBar(): JSX.Element {
 
       <div className="pointer-events-none absolute left-1/2 top-0 flex h-full -translate-x-1/2 items-center gap-2">
         {isPlaying && (
-          <span className="eq-bars">
+          <span className="eq-bars" data-amp>
             <span />
             <span />
             <span />
