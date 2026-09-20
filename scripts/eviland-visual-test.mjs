@@ -35,6 +35,15 @@ if (playwrightModule) {
   const { app } = await import('electron');
   electronApp = app;
   app.commandLine.appendSwitch('no-sandbox');
+  // A machine with no usable GPU blocklists WebGL2 outright, and these probes
+  // exist to read pixels back out of a real GL context. Ask for SwiftShader
+  // there, the way the Playwright path already does. A machine with a working
+  // GPU keeps using it, which is what the captures are compared against.
+  if (process.env.CI || process.env.NEWAMP_SOFTWARE_GL === '1') {
+    app.commandLine.appendSwitch('use-gl', 'angle');
+    app.commandLine.appendSwitch('use-angle', 'swiftshader');
+    app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+  }
   // Closing the probe window must not quit the app before finish() has
   // written the captures and chosen the exit code.
   app.on('window-all-closed', () => {});
