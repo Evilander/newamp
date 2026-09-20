@@ -25,6 +25,7 @@ const mode = process.argv.includes('--live') ? 'live' : process.argv.includes('-
 const outRoot = resolve('tmp', 'eviland-visual-tests');
 const probeCall = mode === 'live' ? 'window.__evilandLiveProbe()' : `window.__evilandVisualProbe.${mode}()`;
 const playwrightModule = process.env.NEWAMP_PLAYWRIGHT_MODULE;
+const softwareGl = Boolean(process.env.CI) || process.env.NEWAMP_SOFTWARE_GL === '1';
 
 let electronApp = null;
 const hardTimeout = setTimeout(() => fail(new Error(`eviland visual ${mode} test timed out`)), 240000);
@@ -39,7 +40,7 @@ if (playwrightModule) {
   // exist to read pixels back out of a real GL context. Ask for SwiftShader
   // there, the way the Playwright path already does. A machine with a working
   // GPU keeps using it, which is what the captures are compared against.
-  if (process.env.CI || process.env.NEWAMP_SOFTWARE_GL === '1') {
+  if (softwareGl) {
     app.commandLine.appendSwitch('use-gl', 'angle');
     app.commandLine.appendSwitch('use-angle', 'swiftshader');
     app.commandLine.appendSwitch('enable-unsafe-swiftshader');
@@ -69,7 +70,8 @@ async function bundleProbe() {
     `<!doctype html><meta charset="utf-8"><title>eviland ${mode} probe</title><body><script src="./${mode}-probe.js"></script></body>`,
     'utf8',
   );
-  return pathToFileURL(htmlPath).toString();
+  const url = pathToFileURL(htmlPath).toString();
+  return softwareGl ? `${url}?software-gl=1` : url;
 }
 
 async function runElectron() {

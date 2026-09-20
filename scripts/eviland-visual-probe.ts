@@ -14,6 +14,13 @@ import { sourceProgram } from '../src/visualizer/eviland-gl';
 import { resolveEvilandPalette, tuneEvilandFrame } from '../src/visualizer/eviland-appearance';
 import type { EvilandFrame, ScoreCues } from '../src/visualizer/eviland-audio';
 
+// A phase that accumulates costs the same at any age, which is what the
+// settle loop below measures. Sixty seconds of it per scene, across every
+// scene, outruns the GPU command buffer's timeout under SwiftShader and takes
+// the GPU process with it, so a machine without a GPU measures the same
+// property over a shorter run. A machine with one still does the full sixty.
+const SOFTWARE_GL = new URLSearchParams(globalThis.location?.search ?? '').has('software-gl');
+const SETTLE_FRAMES = SOFTWARE_GL ? 110 : 590;
 const W = 160;
 const H = 112;
 // Neutral on purpose: with one grey palette for every look, recolouring can
@@ -299,7 +306,7 @@ async function controls() {
     };
     for (let i = 0; i < 10; i++) scene.render(stable, PALETTE, 100);
     const early = stepCost();
-    for (let i = 0; i < 590; i++) scene.render(stable, PALETTE, 100);
+    for (let i = 0; i < SETTLE_FRAMES; i++) scene.render(stable, PALETTE, 100);
     const late = stepCost();
     worstJump = Math.max(worstJump, late - early);
     assert(late < early * 2 + 1.5, `${def.id}: an audio change teleports the animation after 60s (step costs ${early.toFixed(2)} at 1s, ${late.toFixed(2)} at 60s)`);
