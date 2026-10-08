@@ -24,6 +24,7 @@
 // drop the port forever — the original "black screen" bug.
 
 import { createEvilandRenderer, type EvilandRenderer } from '../visualizer/eviland';
+import { attachFlashGuard, type AttachedFlashGuard } from '../visualizer/flash-guard-host';
 import type { DetachedAckPayload, DetachedFramePayload } from '../visualizer/frame-bus';
 import type {
   BcAudioMessage,
@@ -489,6 +490,20 @@ let lastSampleRate = 44100;
 // --- WebGL fallback renderer (created only if the iframe can't host) -------
 let renderer: EvilandRenderer | null = null;
 let rendererFailed = false;
+// The iframe guards the MilkDrop field itself; this guards the fallback.
+let flashGuard: AttachedFlashGuard | null = null;
+let lastGuardedAt = 0;
+
+// A renderer whose output can't be guarded doesn't run: it is dropped here
+// and the caller treats it like a renderer that failed to start.
+function guardRenderer(): void {
+  flashGuard?.dispose();
+  flashGuard = renderer && canvas ? attachFlashGuard(canvas.getContext('webgl2'), canvas) : null;
+  if (renderer && !flashGuard) {
+    renderer.dispose();
+    renderer = null;
+  }
+}
 
 function dprCap(): number {
   // Tier-scaled: the projector often lands on a 4K TV where full-DPR
@@ -514,6 +529,7 @@ function startWebglFallback(): void {
   if (renderer || rendererFailed || !canvas) return;
   milkdropFrame!.style.display = 'none';
   renderer = createEvilandRenderer(canvas, { quality: currentQuality });
+  guardRenderer();
   if (!renderer) {
     rendererFailed = true;
     fatal(
@@ -572,12 +588,15 @@ function applyQuality(next: 'high' | 'medium' | 'low'): void {
   if (next === currentQuality) return;
   currentQuality = next;
   if (renderer && canvas) {
+    flashGuard?.dispose();
+    flashGuard = null;
     try {
       renderer.dispose();
     } catch (err) {
       console.error('[eviland-detached] dispose during quality swap failed', err);
     }
     renderer = createEvilandRenderer(canvas, { quality: next });
+    guardRenderer();
     if (!renderer) {
       rendererFailed = true;
       if (bcFailed) fatal('Detached visualizer lost its GL context during a quality change.');
@@ -626,7 +645,14 @@ function handlePayload(payload: DetachedFramePayload): void {
           ? {
               frame: payload.frame,
               palette: payload.palette,
-              config: payload.operator,
+              // The iframe blends presets itself; the fade's two full looks
+              // (kept on the bus for the Eviland renderer) would only bloat
+              // every message. It still gets the slim look the fade is
+              // heading to, so it prepares that look as the fade begins.
+              config: payload.operator._from ? { ...payload.operator, _from: undefined, _to: undefined } : payload.operator,
+              next: payload.operator._to
+                ? { seed: payload.operator._to.seed, archetype: payload.operator._to.archetype, composition: payload.operator._to.composition }
+                : undefined,
               seed: payload.sceneSeed ?? `track-${payload.trackId ?? 'idle'}`,
               waveMode: payload.waveMode ?? 'auto',
               grade: payload.grade,
@@ -664,13 +690,23 @@ function renderGlLayers(): void {
   if (payload) {
     try {
       if (renderer) {
-        // The producer ships the Director/manual operator look alongside each
-        // frame; apply it so the projector is choreographed, not the
-        // renderer's flat default. Guarded — a bad config must never stop the
-        // render loop.
-        if (payload.operator) renderer.setConfig(payload.operator);
-        if (payload.wave && payload.wave.length) renderer.setWaveform(payload.wave);
-        renderer.render(payload.frame, payload.palette, payload.dtMs, 'host');
+        try {
+          // The producer ships the Director/manual operator look alongside
+          // each frame; apply it so the projector is choreographed, not the
+          // renderer's flat default. Guarded — a bad config must never stop
+          // the render loop.
+          if (payload.operator) renderer.setConfig(payload.operator);
+          if (payload.wave && payload.wave.length) renderer.setWaveform(payload.wave);
+          renderer.render(payload.frame, payload.palette, payload.dtMs, 'host');
+        } finally {
+          // Even when render throws after drawing, whatever reached the
+          // backbuffer is guarded. Wall time since the last guarded frame:
+          // payloads can be skipped between two GL passes, and the guard's
+          // window is in real seconds.
+          const guardedAt = performance.now();
+          flashGuard?.apply(lastGuardedAt ? guardedAt - lastGuardedAt : payload.dtMs);
+          lastGuardedAt = guardedAt;
+        }
       }
     } catch (err) {
       lastRenderError = String((err as Error)?.message ?? err);

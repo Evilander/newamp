@@ -83,7 +83,10 @@ const VIZ_SHOW_ART_KEY = 'newamp:viz:showArt';
 const VIZ_CHROME_KEY = 'newamp:viz:chrome';
 const VIZ_AUTO_VJ_KEY = 'newamp:viz:autoVj';
 
+// 'look' gives each Eviland look its own colours; the other visualizers
+// treat it as Theme.
 const PALETTES = [
+  { id: 'look', label: 'Per look' },
   { id: 'theme', label: 'Theme' },
   { id: 'phosphor', label: 'Phosphor' },
   { id: 'ice', label: 'Ice' },
@@ -155,9 +158,9 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 function loadVisualizerPalette(): VizPalette {
-  if (typeof window === 'undefined') return 'theme';
+  if (typeof window === 'undefined') return 'look';
   const raw = window.localStorage.getItem(VIZ_PALETTE_KEY);
-  return PALETTES.some((item) => item.id === raw) ? raw as VizPalette : 'theme';
+  return PALETTES.some((item) => item.id === raw) ? raw as VizPalette : 'look';
 }
 
 function loadVisualizerPerformance(): VizPerformance {

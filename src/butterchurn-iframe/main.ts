@@ -9,8 +9,10 @@ import {
   type BcParentMessage,
 } from './protocol';
 import { createEvilandLivePipeline, type LiveCompositionFrame } from '../visualizer/eviland-live-pipeline';
+import { createLivePresetLoader } from '../visualizer/eviland-live-presets';
 import { hashSeed } from '../visualizer/eviland-rng';
 import { createGovernor } from '../visualizer/eviland-governor';
+import { attachFlashGuard, type AttachedFlashGuard } from '../visualizer/flash-guard-host';
 
 interface ButterchurnVisualizer {
   loadPreset(preset: Record<string, unknown>, blendSeconds?: number): void;
@@ -35,12 +37,9 @@ function unwrapDefault<T>(module: unknown): T {
   return ((first as { default?: unknown }).default ?? first) as T;
 }
 
-// Estimate the main-thread cost of switching TO a preset. The dominant cost is
-// butterchurn allocating an ~8 MB megabuffer per ENABLED shape and wave inside
-// loadPreset() (plus running their init equations + compiling their shaders) —
-// a 50–80 MB allocation storm and a major GC pause that reads as a stutter.
-// Equation-body length is a minor secondary factor. Bias rotation toward cheap
-// presets and the inter-animation hitch largely disappears.
+// A static estimate of equation/allocation work and shape/wave complexity.
+// Eviland Live separately prepares GPU programs before switching; this bias
+// still avoids routinely pairing the most expensive presets with its sources.
 function presetSwitchCost(preset: Record<string, unknown>): number {
   const countEnabled = (arr: unknown): number => {
     if (!Array.isArray(arr)) return 0;
@@ -53,24 +52,30 @@ function presetSwitchCost(preset: Record<string, unknown>): number {
   };
   const shapes = countEnabled((preset as { shapes?: unknown }).shapes);
   const waves = countEnabled((preset as { waves?: unknown }).waves);
-  let cost = (shapes + waves) * 100_000; // each ≈ one 8 MB megabuf alloc
+  let cost = (shapes + waves) * 100_000; // each enabled voice owns a megabuffer
   try { cost += JSON.stringify(preset).length; } catch { /* circular — ignore */ }
   return cost;
 }
 
 let visualizer: ButterchurnVisualizer | null = null;
+// Photosensitivity limiter on every frame this canvas shows, plain MilkDrop
+// and Eviland Live alike, in the main window and the projector. It follows
+// the Settings toggle through this origin's localStorage.
+let flashGuard: AttachedFlashGuard | null = null;
 let liveMode = false;
 let liveQuality: 'high' | 'medium' | 'low' = 'high';
 let livePipeline: ReturnType<typeof createEvilandLivePipeline> = null;
+let livePresetLoader: ReturnType<typeof createLivePresetLoader> = null;
 let latestComposition: LiveCompositionFrame | null = null;
+// Seconds Butterchurn blends two presets when the Live Director changes look.
+const LIVE_BLEND_SECONDS = 4.5;
 let loadLivePreset: (() => void) | null = null;
 let lastCompositionKey = '';
 let presets: Array<[string, Record<string, unknown>]> = [];
-// Lightweight presets only — the heaviest entries in the full preset pack are
-// the ones with sprawling per_pixel / per_frame equation bodies that JIT-compile
-// slowly inside loadPreset(), which is what users perceive as "lag between
-// animations". Sorted-by-weight ascending; rotation picks from the lighter
-// portion most of the time with an occasional excursion into a heavier one.
+// Equation and shader source length provide a cheap preset-cost estimate.
+// Rotation usually picks from the lighter half, with occasional heavier looks.
+// Live prepares GPU programs separately; their compile/location queries were
+// the dominant measured switch cost, beyond equation construction alone.
 let presetWeights: number[] = [];
 let presetOrder: number[] = [];
 let lastAudioPostAt = 0;
@@ -187,17 +192,24 @@ async function start(sampleRate: number): Promise<void> {
       meshWidth: 24,
       meshHeight: 18,
     });
+    // Same context Butterchurn just created. A MilkDrop that can't be
+    // guarded doesn't run: the parent's guarded 2D fallback takes over, and
+    // Butterchurn's context is released rather than left alive in a frame
+    // the parent hides.
+    const context = canvas.getContext('webgl2');
+    flashGuard = attachFlashGuard(context, canvas);
+    if (!flashGuard) {
+      visualizer = null;
+      context?.getExtension('WEBGL_lose_context')?.loseContext();
+      throw new Error('flash guard unavailable in this WebGL2 context');
+    }
 
     presets = Object.entries(presetCatalog).filter(
       (entry): entry is [string, Record<string, unknown>] => !!entry[1] && typeof entry[1] === 'object',
     );
     if (!presets.length) throw new Error('No Butterchurn presets loaded');
 
-    // The real cost of a preset switch is NOT equation-body length — it's the
-    // ~8 MB `new Array(1048576).fill(0)` megabuffer butterchurn allocates per
-    // ENABLED shape and wave inside loadPreset (a 50–80 MB allocation storm +
-    // major GC pause). So weight primarily by enabled shape/wave count; JSON
-    // length is only a minor tiebreaker for equation JIT cost.
+    // Prefer fewer enabled shapes/waves, using source length as a tiebreaker.
     presetWeights = presets.map(([, preset]) => presetSwitchCost(preset));
     presetOrder = presets.map((_, i) => i).sort((a, b) => presetWeights[a]! - presetWeights[b]!);
 
@@ -212,11 +224,8 @@ async function start(sampleRate: number): Promise<void> {
       return presetOrder[lo + Math.floor(Math.random() * (hi - lo))]!;
     };
 
-    // loadPreset() runs synchronously on this thread. Its megabufs used to be
-    // built element by element (8 MB each, several per preset); the build now
-    // swaps them for zero-copy typed arrays (scripts/butterchurn-megabuf.mjs),
-    // which took a preset switch from ~8-30 ms to ~2-3 ms, so the switch no
-    // longer needs a held paint to hide in.
+    // Plain MilkDrop retains its existing load path. Live uses the same typed
+    // megabuffer build patch plus the asynchronous shader loader below.
     const loadRandomPreset = (blendSeconds: number): void => {
       if (disposed || !visualizer) return;
       const [, preset] = presets[pickIndex()]!;
@@ -232,12 +241,16 @@ async function start(sampleRate: number): Promise<void> {
       }
     }
     if (liveMode && livePipeline) {
+      livePresetLoader = createLivePresetLoader(visualizer, () => loadRandomPreset(LIVE_BLEND_SECONDS));
       // In Live the Director owns preset changes: one preset per look, chosen
       // by hash so a track's sections map to the same presets on every play.
       // Same light-half bias as the random rotation (see pickIndex).
       loadLivePreset = () => {
         if (!latestComposition || !visualizer) return;
-        const key = `${latestComposition.seed}::${latestComposition.config.seed ?? latestComposition.config.archetype}`;
+        // Keyed on the look a fade is heading to, so the long blend starts
+        // with the fade instead of at its midpoint.
+        const look = latestComposition.next ?? latestComposition.config._to ?? latestComposition.config;
+        const key = `${latestComposition.seed}::${look.seed ?? look.archetype}`;
         if (key === lastCompositionKey) return;
         lastCompositionKey = key;
         const hash = hashSeed(key);
@@ -246,7 +259,10 @@ async function start(sampleRate: number): Promise<void> {
         const lo = fromLight ? 0 : halfBoundary;
         const span = fromLight ? halfBoundary : Math.max(1, presetOrder.length - halfBoundary);
         const index = presetOrder[lo + ((hash >>> 8) % span)] ?? presetOrder[0]!;
-        try { visualizer.loadPreset(presets[index]![1], 2); } catch { loadRandomPreset(2); }
+        // A long blend is where MilkDrop's transitions come from: both presets
+        // run while a wipe, plasma or radial pattern hands the frame over.
+        if (livePresetLoader) livePresetLoader.request(presets[index]![1], key, LIVE_BLEND_SECONDS);
+        else try { visualizer.loadPreset(presets[index]![1], LIVE_BLEND_SECONDS); } catch { loadRandomPreset(LIVE_BLEND_SECONDS); }
       };
       if (latestComposition) {
         livePipeline.update(latestComposition);
@@ -301,6 +317,7 @@ async function start(sampleRate: number): Promise<void> {
       sizeCanvas();
       const renderStart = performance.now();
       try {
+        livePresetLoader?.advance();
         livePipeline?.advance(dtMs);
         visualizer?.render(
           haveAudio
@@ -316,6 +333,10 @@ async function start(sampleRate: number): Promise<void> {
       } catch {
         /* keep the loop alive across a transient preset/render hiccup */
       }
+      // After Butterchurn's last draw (the Live grade included) and inside
+      // the governed cost: the governor can trim the DPR it runs at, never
+      // switch it off.
+      flashGuard?.apply(dtMs);
       gov.endFrame(now, performance.now() - renderStart);
     };
     const frame = (now: number): void => {
@@ -363,8 +384,12 @@ window.addEventListener('message', (event: MessageEvent) => {
   } else if (message.type === 'dispose') {
     disposed = true;
     paintTick = null;
+    livePresetLoader?.dispose();
+    livePresetLoader = null;
     livePipeline?.dispose();
     livePipeline = null;
+    flashGuard?.dispose();
+    flashGuard = null;
     cancelAnimationFrame(raf);
     if (presetTimer != null) window.clearInterval(presetTimer);
   }

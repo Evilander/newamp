@@ -42,8 +42,10 @@ for (const mode of SHADER_MODES) {
 
 // The fix: a final else on the canvas-2D mode chain that paints something
 // instead of leaving the canvas blank for whichever mode reached here
-// unhandled — the 5 modes above are exactly the case this covers.
-const frameBody = source.match(/mode === 'burning-cloud'\) \{[\s\S]*?\n {6}\} else \{[\s\S]*?paintMilkdropFallback\(c, engine\);[\s\S]*?\n {6}\}/);
+// unhandled — the 5 modes above are exactly the case this covers. It draws
+// on the paint surface (ctx), since under the GPU flash guard the visible
+// canvas has no 2D context.
+const frameBody = source.match(/mode === 'burning-cloud'\) \{[\s\S]*?\n {6}\} else \{[\s\S]*?drawMilkdropFallback\(ctx, w, h, engine\);[\s\S]*?\n {6}\}/);
 if (!frameBody) {
   fail('the canvas-2D mode if/else chain should end with a catch-all else that paints a fallback instead of leaving unmatched modes blank');
 }

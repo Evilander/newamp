@@ -74,7 +74,7 @@ assert.equal(result.qualityToggle, '4k', 'fullscreen visualizer should expose an
 assert.ok(['armed', 'pulse'].includes(result.artToggle), 'fullscreen visualizer should expose random album-art pulse mode');
 assert.equal(result.screenToggle, true, 'fullscreen visualizer should expose native full-screen screen takeover');
 assert.equal(result.chromeMode, 'clean', 'fullscreen visualizer should expose a clean cinema mode');
-assert.notEqual(result.palette, 'theme', 'fullscreen visualizer should apply color palette changes');
+assert.notEqual(result.palette, 'look', 'fullscreen visualizer should apply color palette changes');
 assert.notEqual(result.reactivityMode, 'punch', 'fullscreen visualizer should apply reactivity mode changes');
 assert.equal(result.autoVjMode, 'on', 'fullscreen visualizer should expose Auto VJ mode');
 assert.equal(result.navMode, 'visible', 'fullscreen visualizer top nav should hide and restore cleanly');

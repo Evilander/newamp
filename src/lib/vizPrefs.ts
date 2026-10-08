@@ -12,6 +12,49 @@ export const VIZ_PERFORMANCE_KEY = 'newamp:viz:performance';
 export const VIZ_PALETTE_KEY = 'newamp:viz:palette';
 export const VIZ_REACTIVITY_KEY = 'newamp:viz:reactivity';
 export const VIZ_LOOKAHEAD_KEY = 'newamp:viz:lookahead';
+export const VIZ_FLASH_GUARD_KEY = 'newamp:viz:flash-guard';
+// Same-window change signal; other windows and frames hear the storage event.
+const FLASH_GUARD_EVENT = 'newamp:flash-guard';
+
+/**
+ * Flash protection: the photosensitivity limiter on every visualizer output
+ * (visualizer/flash-guard.ts). On unless the user explicitly turned it off;
+ * anything unreadable counts as on.
+ */
+export function flashGuardEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(VIZ_FLASH_GUARD_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+export function setFlashGuardEnabled(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(VIZ_FLASH_GUARD_KEY, enabled ? 'on' : 'off');
+  } catch {
+    /* private mode — protection stays on, the safe side */
+  }
+  window.dispatchEvent(new Event(FLASH_GUARD_EVENT));
+}
+
+/**
+ * Follow the setting live. The projector window and the MilkDrop frames share
+ * this origin's localStorage, so a change in Settings reaches their render
+ * loops through the storage event without any IPC.
+ */
+export function watchFlashGuard(onChange: (enabled: boolean) => void): () => void {
+  const read = (): void => onChange(flashGuardEnabled());
+  const onStorage = (event: StorageEvent): void => {
+    if (event.key === VIZ_FLASH_GUARD_KEY || event.key === null) read();
+  };
+  window.addEventListener(FLASH_GUARD_EVENT, read);
+  window.addEventListener('storage', onStorage);
+  return () => {
+    window.removeEventListener(FLASH_GUARD_EVENT, read);
+    window.removeEventListener('storage', onStorage);
+  };
+}
 
 /**
  * Eviland look-ahead (song scores). On unless the user turned it off: it
@@ -56,10 +99,10 @@ export function readEvilandTuning(): { palette: EvilandPaletteMode; reactivity: 
     const reactivity = window.localStorage.getItem(VIZ_REACTIVITY_KEY);
     return {
       palette:
-        palette === 'phosphor' || palette === 'ice' || palette === 'sunset' || palette === 'rainbow' ? palette : 'theme',
+        palette === 'theme' || palette === 'phosphor' || palette === 'ice' || palette === 'sunset' || palette === 'rainbow' ? palette : 'look',
       reactivity: reactivity === 'truth' || reactivity === 'wild' ? reactivity : 'punch',
     };
   } catch {
-    return { palette: 'theme', reactivity: 'punch' };
+    return { palette: 'look', reactivity: 'punch' };
   }
 }
