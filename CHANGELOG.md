@@ -5,6 +5,163 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [Unreleased]
+
+### Added
+
+- Eviland looks can now move in eight new ways, not only zoom, spin and fold.
+  Cells: the picture divides into cells that each bloom out of their own
+  nucleus, and the seams between them read as membranes. Coral: patterns
+  like labyrinths, spots and brain folds grow out of whatever is lit. Marble:
+  bands of the picture shear past each other and get combed into streaks.
+  Chroma: each colour drifts in its own direction. Droste: a smaller, turned
+  copy of the frame keeps feeding back into itself. Mobius: the picture
+  streams out of one moving pole into another. Tendril: the picture gets
+  dragged outward into curling arms. Peristalsis: squeeze-and-release waves
+  pump outward on the kick. Most existing looks now carry one of these.
+- Eleven new looks built around living things: Mycelium, Mitosis, Synapse,
+  Radiolarian, Reef, Hyperbloom, Medusa, Chromatin, Anemone, Plankton and
+  Myofibril. They draw on ten new scenes (a dividing cell colony, firing
+  neurons, radiolarian skeletons, a cilia carpet, a capillary tree,
+  jellyfish, twisting DNA strands, a feather-star crown, swimming plankton,
+  contracting muscle fibres) and on a new slime-mould simulation. The mould
+  senses the picture it grows into, so its veins crawl along whatever the
+  rest of the look draws. Eviland Live grows it into MilkDrop's feedback too.
+- A "Per look" palette, now the default if you never picked one. Each Eviland
+  look keeps the colours it was generated with instead of every look using
+  your skin's accent, and the colours blend across a look change. The other
+  visualizers treat it as Theme.
+- Gapless playback of local files. NewAmp decodes the queue itself, trims
+  each file's encoder delay and padding, and plays the result as one
+  continuous stream. At a 48 kHz output the old player left 923 samples
+  (about 19 ms) of silence between FLAC or MP3 tracks and 1,947 (about
+  41 ms) between AAC tracks. The new path leaves none for FLAC, MP3, AAC,
+  ALAC, Opus, Vorbis, WAV, AIFF and WavPack, and repeat-one loops without a
+  gap too. An MP3 whose own gapless header is wrong still plays what the
+  header says. `npm run smoke:gapless-pcm` measures both paths. It's on by
+  default under Settings > Playback > Gapless. Crossfade, speeds other than
+  1x, A-B loops, CUE sheets, DSD, podcasts, radio and server tracks still
+  use the old player.
+- Flash protection for the visualizers. A last stage on every output
+  (Eviland, Eviland Live, MilkDrop, the shader looks, the projector window,
+  recordings) keeps any patch of the picture covering 1% of the screen or
+  more from flashing more than three times a second, the WCAG limit for
+  photosensitive viewers. That includes flicker where neighbouring pixels
+  flash out of step, like stripes or a reversing checkerboard. Calm visuals
+  pass through essentially unchanged. A strobing passage is held down
+  rather than blacked out, so dense, bright-on-black looks run noticeably
+  darker with it on, some at about half their usual brightness. On an RTX
+  4080 it costs about half a millisecond a frame at 4K. It's on by
+  default, and turning it off asks you to confirm.
+  `npm run smoke:flash-guard-render` counts the flashes with it off and on.
+- Your tag edits are now stored apart from the file's own tags, so a rescan
+  no longer puts back the old title or genre. Edited fields are marked in
+  the metadata panel, and each one can be reset to what the file says.
+- ChatGPT Assist can use another OpenAI-compatible endpoint. Set
+  `NEWAMP_OPENAI_BASE_URL`, `NEWAMP_OPENAI_API_KEY` and optionally
+  `NEWAMP_OPENAI_MODEL` before starting NewAmp; Settings shows when one is in
+  use.
+
+### Changed
+
+- Look changes in Eviland no longer dissolve a frozen still into the new
+  look. The old and new looks both keep moving while a front crosses the
+  screen between them. The front can take several shapes: cells converting
+  one by one, a mould-like front fingering outward, an iris opening, a
+  plasma edge, spiral arms, or the old picture's brightest parts going
+  first. It glows as it moves and pushes the old picture aside. Changes take
+  about four beats, up from two.
+- Eviland Live's colour grade reads each MilkDrop preset's hues as well as
+  its brightness, so a preset's differently coloured parts stay different
+  colours of your palette. MilkDrop's own blend between presets in Live now
+  runs 4.5 s, up from 2 s. The new motion kinds also bend Live's MilkDrop
+  feedback, at a lower strength so the preset stays recognisable.
+- Visual memory from earlier versions keeps its section fingerprints, but
+  its looks are regenerated, since the look generator changed. For the same
+  reason, a look code shared from an earlier version now opens a different
+  look.
+- A file that disappears from your library folders is marked missing
+  instead of deleted. It keeps its plays, rating, history and playlist
+  places, shows dimmed with the date it went missing, and comes back as the
+  same track when the file or drive returns. Auto DJ, mixes, smart playlists
+  and Discover skip missing tracks.
+- "Clean missing files" now shows how many tracks, plays and playlist
+  entries it would remove, and makes a backup before removing anything. It
+  never removes tracks from a drive or share that is offline.
+- Older versions stored your edits in the same place as the file's tags. On
+  the first scan after upgrading, a field that differs from an unchanged
+  file is kept as your edit; a file that changed since the last scan (a
+  retag in another program, say) takes the file's tags. Library health can
+  reset all of these carried-over edits at once.
+- The signal path badge and Settings name the resampler that actually ran,
+  SoX or FFmpeg's own, instead of always saying SoX.
+- Two-step buttons like Clear queue, Delete playlist and Restore backup
+  no longer arm and confirm in one double-click or a held Enter. The
+  confirming press has to be a separate one.
+- Building from source needs Node 22.12 or newer, which is what Electron 42
+  requires.
+
+### Fixed
+
+- A library from NewAmp 1.0 opened empty after upgrading. The upgrade built
+  an index before adding the column it indexes. Columns now come first, and
+  a library that fails to upgrade is left as it was instead of being set
+  aside.
+- If the settings file was briefly locked at startup (by antivirus or a sync
+  client, for example), NewAmp treated it as corrupt and saved default
+  settings over it. It now retries. If the file stays unreadable, NewAmp
+  runs on defaults for that session, never writes over the file, and tells
+  you.
+- A podcast save that failed partway, on a full disk for example, could
+  leave the podcast list empty. Podcast changes are now written in one step
+  and only take effect once saved.
+- The drop highlight could stay on screen after a drop, Escape or switching
+  windows, and a drop on the Library imported the files twice. Dropping
+  files on a playlist row no longer reorders the playlist.
+- On macOS and Linux, local files didn't play when NewAmp was started from a
+  terminal anywhere but `/`. A `?` in a file name broke playback on every
+  platform.
+- Bit-Perfect Exclusive stopped with "Decode failed" on any track that
+  needed a sample-rate change, and DSD files played silence the first time.
+  The bundled FFmpeg has no SoX resampler; NewAmp now checks, and uses
+  FFmpeg's own when SoX isn't there.
+- A request for a file on a network share made Windows connect to that
+  share before NewAmp refused it. Paths are now checked before anything
+  touches the disk or network.
+- In Bit-Perfect Exclusive, seeking in the last couple of seconds of a song
+  could play the next song while the display still showed the old one. A
+  device that listed some rates only for mono or multichannel use could be
+  opened at one of them in stereo and wrongly shown as bit-perfect. A slow
+  source could be reported as a lost device before its first sound.
+- During a crossfade the outgoing song switched to the incoming song's
+  ReplayGain before it finished. Each song now keeps its own. A next track
+  that took a while to start could also jump into a fade that had already
+  run; the fade now starts when the track does.
+- A backup restore that failed partway could leave some settings changed
+  and the library watcher stopped until restart. Restore now checks every
+  file first, rolls back completely if anything fails, and always restarts
+  scanning.
+- On Linux, when two files' names differed only in case, the folder watcher
+  and some lookups mixed them up, so a change to one could leave the other
+  out of date. Case now only folds on Windows and macOS, where the file
+  system does the same. CUE sheets still match file names without regard
+  to case.
+- A CUE sheet that spans several files played them in alphabetical order
+  instead of the order the sheet lists them.
+- Turning Eviland's Director off partway through a look change left the
+  half-finished blend frozen on screen.
+- If the video encoder failed during a visualizer recording, pressing stop
+  did nothing: no file and no message. It now says the recording failed.
+- Clicking quickly between artists or albums could leave the previous
+  one's tracks on screen. Changing the Radio Brain token now also
+  disconnects clients that were already connected with the old one.
+- In Quick Play and the first-launch tour, Tab could move focus to the
+  controls behind the dialog. Focus now stays in the dialog and goes back
+  where it was when it closes.
+- The Intel and Apple Silicon Mac downloads each get the exclusive-output
+  addon built for their own processor. Before, one of the two could ship
+  with an addon it couldn't load.
+
 ## [2.4.0] - 2026-09-19
 
 ### Added

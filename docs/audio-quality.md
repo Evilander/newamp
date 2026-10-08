@@ -27,8 +27,10 @@ through an ffmpeg transcode.
    forced downsample, no bit-depth truncation). 32-bit float is the only lossless
    PCM-in-WAV format Chromium's `<audio>` decodes — **24-bit int WAV is NOT
    supported**, so f32le (not s24le) is the correct choice. DSD gets a pinned
-   high-precision SoX resampler (`soxr:precision=28`) to 88.2 kHz instead of
-   ffmpeg's uncontrolled default DSD→PCM filter.
+   high-precision resampler to 88.2 kHz instead of ffmpeg's uncontrolled default
+   DSD→PCM filter: SoX (`soxr:precision=28`) when the ffmpeg build includes it,
+   otherwise a long Kaiser-windowed swr filter (the bundled Windows ffmpeg has no
+   SoX).
 2. **True limiter bypass** (`src/audio/engine.ts`). "Limiter off" now **disconnects**
    the `DynamicsCompressor` from the graph (`masterGain → destination`) instead of
    leaving a unity-ratio compressor + its ~6 ms lookahead in the path. Off means off.
@@ -89,7 +91,8 @@ Settings → Playback → **Bit-Perfect Exclusive**.
   16-bit FLAC leaves ffmpeg as the same s16 words the encoder stored.
 - **Probe-driven honest negotiation**: the stream format is chosen from the device's
   *native* exclusive formats (`probeDevice()`). If the source rate isn't natively
-  supported, NewAmp resamples **explicitly** (soxr, precision 28) and *says so* —
+  supported, NewAmp resamples **explicitly** (SoX where the ffmpeg build has it,
+  the swr filter above otherwise; the badge names which one ran) and *says so* —
   the badge shows `EXCLUSIVE*` instead of gold, because miniaudio would otherwise
   insert a hidden converter (observed live: a Focusrite clocked at 48 kHz silently
   resampled a 44.1 kHz exclusive stream; `internalSampleRate` exposes it and the
@@ -120,9 +123,29 @@ Settings → Playback → **Bit-Perfect Exclusive**.
 This is the foobar2000/Audirvana/Roon bar, and "bit-perfect available" is now on
 the box honestly.
 
-**Second-highest (still no native code):** replace `MediaElementSource` with
-**WebCodecs `AudioDecoder` → AudioWorklet** for sample-accurate **gapless** (trim
-encoder delay/padding) and one fewer implicit resample.
+## Sample-accurate gapless (shared output)
+
+With **Sample-accurate gapless** on (Settings → Playback; on by default), local
+library tracks don't play through the two `<audio>` decks. ffmpeg decodes each
+track in the main process, the next track's first frame follows the previous
+track's last frame in the same stream, and an AudioWorklet plays that stream
+(`electron/gapless-transport.ts`, `src/audio/gapless-processor.js`). The deck
+path can only start the next element after the current one fires `ended`,
+which leaves digital silence at every boundary however early it preloads.
+`npm run smoke:gapless-pcm` captures the output of both paths and measures
+the boundaries.
+
+- The rate the decoder actually produces decides whether a track is resampled,
+  not its tags: Opus always decodes at 48 kHz, and HE-AAC's SBR doubles the
+  core rate a container may report. A rate change inside the queue drains one
+  resampler and starts the next track on a fresh one.
+- ReplayGain switches on the new track's first frame.
+- A pause longer than 5 s releases the decoder and its open file (Windows won't
+  let anything rename or delete a file ffmpeg holds); resume restarts it at the
+  paused position.
+- Crossfade, playback speed other than 1x, an active A-B practice loop, CUE sheet
+  segments, DSD, missing files, streams, podcasts and music-server tracks stay on
+  the decks, as does any track the transport can't decode or that stalls.
 
 ## Known remaining limitations / follow-ups
 

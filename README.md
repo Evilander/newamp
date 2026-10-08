@@ -172,7 +172,7 @@ That's the trade I made, with my eyes open.
 
 ## Build from source
 
-Node 20 or newer:
+Node 22.12 or newer:
 
 ```bash
 git clone https://github.com/evilander/newamp.git
