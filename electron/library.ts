@@ -808,7 +808,10 @@ export class LibraryStore {
   // we read change: insert/update of path/duration/has_art, or delete.
   private folderTrackRowsCache: FolderTrackRow[] | null = null;
   private libraryHealthCache: LibraryHealth | null = null;
-  private windowsUnicodePaths: Map<string, string[]> | null = null;
+  // Windows only: every stored path, keyed by its case-folded form, so
+  // upsertTracks finds a file's existing spelling without a query per file.
+  // Built on first use, extended by upsertTracks, dropped by prune.
+  private windowsPathIdentities: Map<string, string[]> | null = null;
   // getVisualMemoryStats() needs totalSections, which requires reading and
   // JSON.parsing every plan_json blob across track_visual_memory. For a 60k
   // library with ~5KB plans that's 150MB of string churn + JSON parsing on
@@ -1135,6 +1138,20 @@ export class LibraryStore {
     this.scheduleFlush();
   }
 
+  private pathIdentitiesForWindows(): Map<string, string[]> {
+    if (!this.windowsPathIdentities) {
+      const identities = new Map<string, string[]>();
+      for (const row of this.many<{ path: string }>('SELECT path FROM tracks')) {
+        const key = normalizeFileStatePath(row.path);
+        const bucket = identities.get(key) ?? [];
+        bucket.push(row.path);
+        identities.set(key, bucket);
+      }
+      this.windowsPathIdentities = identities;
+    }
+    return this.windowsPathIdentities;
+  }
+
   upsertTracks(items: IncomingTrack[]): void {
     if (!items.length) return;
     // One reading per path, the last one winning. Overlapping roots, a watcher
@@ -1147,28 +1164,15 @@ export class LibraryStore {
       const key = normalizeFileStatePath(item.path);
       let path = paths.get(key);
       if (!path) {
-        const exact = this.one<{ path: string }>('SELECT path FROM tracks WHERE path = ?', [item.path]);
-        let matches = exact ? [exact] : this.many<{ path: string }>(
-          `SELECT path FROM tracks WHERE lower(replace(path, '\\', '/')) = ? LIMIT 2`,
-          [item.path.replace(/\\/g, '/').replace(/[A-Z]/g, (ch) => ch.toLowerCase())],
-        );
-        // SQLite's built-in lower() folds ASCII only. Cache the uncommon
-        // Unicode fallback once so international libraries stay linear.
-        if (!matches.length && /[^\x00-\x7f]/.test(item.path)) {
-          if (!this.windowsUnicodePaths) {
-            this.windowsUnicodePaths = new Map();
-            for (const row of this.many<{ path: string }>('SELECT path FROM tracks')) {
-              const unicodeKey = normalizeFileStatePath(row.path);
-              const bucket = this.windowsUnicodePaths.get(unicodeKey) ?? [];
-              bucket.push(row.path);
-              this.windowsUnicodePaths.set(unicodeKey, bucket);
-            }
-          }
-          matches = (this.windowsUnicodePaths.get(normalizeFileStatePath(item.path)) ?? []).map((path) => ({ path }));
-        }
-        // Do not merge pre-existing ambiguous identities without an explicit
+        // Two indexed queries per file still cost a statement round trip
+        // through sql.js each, which was seconds for a 60k first scan; the map
+        // answers in constant time. It folds the same way as key (Unicode
+        // included, which SQLite's lower() doesn't).
+        const matches = this.pathIdentitiesForWindows().get(key) ?? [];
+        // The exact spelling wins. Otherwise adopt the one stored case variant;
+        // do not merge pre-existing ambiguous identities without an explicit
         // migration. A unique filesystem spelling keeps all its annotations.
-        path = matches.length === 1 ? matches[0]!.path : item.path;
+        path = matches.includes(item.path) ? item.path : matches.length === 1 ? matches[0]! : item.path;
         paths.set(key, path);
       }
       return path === item.path ? item : { ...item, path };
@@ -1259,12 +1263,12 @@ export class LibraryStore {
       this.db.run('ROLLBACK');
       throw err;
     }
-    if (this.windowsUnicodePaths) {
+    if (this.windowsPathIdentities) {
       for (const item of unique) {
         const key = normalizeFileStatePath(item.path);
-        const bucket = this.windowsUnicodePaths.get(key) ?? [];
+        const bucket = this.windowsPathIdentities.get(key) ?? [];
         if (!bucket.includes(item.path)) bucket.push(item.path);
-        this.windowsUnicodePaths.set(key, bucket);
+        this.windowsPathIdentities.set(key, bucket);
       }
     }
     // upsertTracks writes path/duration/has_art — cached folder-row columns.
@@ -2108,7 +2112,7 @@ export class LibraryStore {
         this.db.run(`DELETE FROM track_visual_memory WHERE track_id = ?`, [id]);
         this.db.run(`DELETE FROM tracks WHERE id = ?`, [id]);
       }
-      this.windowsUnicodePaths = null;
+      this.windowsPathIdentities = null;
       this.invalidateDnaIndexCache();
       this.invalidateFolderTrackRowsCache();
       this.invalidateLibraryHealthCache();

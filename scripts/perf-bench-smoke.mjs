@@ -19,6 +19,7 @@ const { mkdir } = await import('node:fs/promises');
 await mkdir(smokeDir, { recursive: true });
 
 const TRACK_COUNT = 60_000;
+const NEWCOMER_COUNT = 2_000;
 const DNA_COUNT = 12_000;
 
 // Budgets are intentionally loose enough for ~2× slowdown on weaker
@@ -27,6 +28,7 @@ const DNA_COUNT = 12_000;
 // regressed.
 const BUDGETS_MS = {
   insertTracks: 2500,
+  addToLargeLibrary: 1000,
   stampDna: 4000,
   getAllTrackDna: 250,
   findSimilar: 500,
@@ -64,6 +66,16 @@ const measured = {};
 
 measured.insertTracks = await time(() => library.upsertTracks(fixtures));
 assertBudget('insertTracks', measured.insertTracks);
+
+// New files arriving in a library that is already large: a scan of a new
+// folder, or the watcher picking up an import. Matching each against the
+// stored paths must stay a lookup, never a pass over the table per file.
+const newcomers = fixtures.slice(0, NEWCOMER_COUNT).map((track, i) => ({
+  ...track,
+  path: `B:/perf-bench/new/Track-${String(i).padStart(5, '0')}.flac`,
+}));
+measured.addToLargeLibrary = await time(() => library.upsertTracks(newcomers));
+assertBudget('addToLargeLibrary', measured.addToLargeLibrary);
 
 const ids = library.getTrackIds({ limit: DNA_COUNT, sort: 'artist' });
 measured.stampDna = await time(() => {
@@ -111,7 +123,7 @@ let recomputeResult = null;
 measured.recomputeTags = await time(() => {
   recomputeResult = library.recomputeTags();
 });
-assert.equal(recomputeResult.tracksEvaluated, TRACK_COUNT);
+assert.equal(recomputeResult.tracksEvaluated, TRACK_COUNT + NEWCOMER_COUNT);
 assert.equal(recomputeResult.rulesEvaluated, 2);
 assertBudget('recomputeTags', measured.recomputeTags);
 
@@ -127,7 +139,7 @@ library.close();
 
 console.log(JSON.stringify({
   ok: true,
-  trackCount: TRACK_COUNT,
+  trackCount: TRACK_COUNT + NEWCOMER_COUNT,
   dnaCount: DNA_COUNT,
   durations_ms: measured,
   budgets_ms: BUDGETS_MS,
