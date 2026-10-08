@@ -7,6 +7,7 @@ import { api } from '../lib/api';
 import { formatDuration, formatTime } from '../lib/format';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { ArtistLink, AlbumLink } from './EntityLink';
+import { useModalFocus } from '../hooks/useModalFocus';
 
 const RESULT_LIMIT = 48;
 const TRACK_LIMIT = 24;
@@ -81,6 +82,8 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
   const [status, setStatus] = useState<string | null>(null);
   const [askChips, setAskChips] = useState<string[] | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useModalFocus(dialogRef, inputRef, open);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
@@ -95,12 +98,6 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
   const current = usePlayerStore((s) => s.current);
   const trimmedQuery = query.trim();
   const selected = results[selectedIndex] ?? null;
-
-  useEffect(() => {
-    if (!open) return;
-    const id = window.setTimeout(() => inputRef.current?.focus(), 0);
-    return () => window.clearTimeout(id);
-  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -275,6 +272,7 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
   }
 
   function onPaletteKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
+    if (event.target !== inputRef.current) return;
     const key = event.key.toLowerCase();
     if (event.key === 'ArrowDown') {
       event.preventDefault();
@@ -315,6 +313,8 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
         className="bevel-out w-full max-w-[900px] overflow-hidden"
         style={{ background: 'var(--panel)', borderColor: 'var(--line)', boxShadow: '0 22px 70px rgba(0,0,0,0.55)' }}
         role="dialog"
+        ref={dialogRef}
+        tabIndex={-1}
         aria-modal="true"
         aria-label="Quick Play"
         onKeyDown={onPaletteKeyDown}
@@ -325,6 +325,7 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
           </div>
           <input
             ref={inputRef}
+            aria-label="Search Quick Play"
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
             placeholder="Search — or just ask: warm slow stuff from the 70s I haven't played this year"

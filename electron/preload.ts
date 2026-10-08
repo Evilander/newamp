@@ -18,6 +18,9 @@ import type {
   ExclusiveDeviceInfo,
   ExclusiveEventPayload,
   ExclusivePlayResult,
+  GaplessSegmentRequest,
+  GaplessStartRequest,
+  GaplessStartResult,
   ExportTracksFolderInput,
   GuitarTabDocument,
   GuitarTabSearchQuery,
@@ -28,6 +31,7 @@ import type {
   LastfmSession,
   LastfmTrackPayload,
   LibraryHealth,
+  LibraryPruneMissingPreview,
   LibraryPruneMissingResult,
   LocalGuitarTabInput,
   LocalLyricsResult,
@@ -293,6 +297,9 @@ const api: NewAmpAPI = {
   getLibraryHealth: () => ipcRenderer.invoke('library:get-health') as Promise<LibraryHealth>,
   pruneMissingTracks: (targets?: string[]) =>
     ipcRenderer.invoke('library:prune-missing', targets) as Promise<LibraryPruneMissingResult>,
+  previewPruneMissingTracks: (targets?: string[]) =>
+    ipcRenderer.invoke('library:prune-missing-preview', targets) as Promise<LibraryPruneMissingPreview>,
+  resetAdoptedMetadata: () => ipcRenderer.invoke('metadata:reset-adopted') as Promise<number>,
   getListeningHistory: (opts) =>
     ipcRenderer.invoke('history:get', opts) as Promise<ListeningHistoryItem[]>,
   getListeningInsights: (opts) =>
@@ -385,6 +392,12 @@ const api: NewAmpAPI = {
   exclusiveSeek: (seconds: number) => ipcRenderer.invoke('exclusive:seek', seconds) as Promise<void>,
   exclusivePrepareNext: (trackId: number | null) =>
     ipcRenderer.invoke('exclusive:prepare-next', trackId) as Promise<void>,
+  gaplessOpen: () => ipcRenderer.invoke('gapless:open') as Promise<number>,
+  gaplessStart: (request: GaplessStartRequest) =>
+    ipcRenderer.invoke('gapless:start', request) as Promise<GaplessStartResult>,
+  gaplessPrepareNext: (gen: number, after: number, next: GaplessSegmentRequest | null) =>
+    ipcRenderer.invoke('gapless:prepare-next', gen, after, next) as Promise<void>,
+  gaplessStop: (gen: number) => ipcRenderer.invoke('gapless:stop', gen) as Promise<void>,
   onExclusiveEvent: (cb) => {
     const handler = (_e: unknown, payload: ExclusiveEventPayload) => cb(payload);
     ipcRenderer.on('exclusive:event', handler);
@@ -562,9 +575,27 @@ ipcRenderer.on('eviland:frame-port', (event) => {
   );
 });
 
+// Sample-accurate gapless PCM port, same hand-off: the engine moves it
+// straight into its AudioWorklet (src/audio/sample-transport.ts).
+ipcRenderer.on('gapless:port', (event, data: unknown) => {
+  if (!event.ports || event.ports.length === 0) return;
+  // `id` matches what gaplessOpen() resolved to, so a port from an earlier
+  // open can't be mistaken for the current one.
+  window.dispatchEvent(
+    new MessageEvent('newamp:gapless-port', { data, ports: event.ports as unknown as MessagePort[] }),
+  );
+});
+
 // Helper that turns a local file path into a newamp:// URL the renderer can play.
 contextBridge.exposeInMainWorld('toAudioUrl', (filePath: string) => {
   if (/^(https?:|blob:|newamp:)/i.test(filePath)) return filePath;
   const normalized = filePath.replace(/\\/g, '/');
-  return `newamp://track/${encodeURI(normalized).replace(/#/g, '%23')}`;
+  // The whole path is one opaque path component, not a sequence of URL path
+  // segments: encodeURI leaves `/` unescaped, so a POSIX absolute path's
+  // leading slash collapses with the newamp://track/ separator into a
+  // double slash, and a bare `?`/`#` in a filename gets read as the URL's
+  // query/fragment delimiter instead of part of the path. encodeURIComponent
+  // escapes all of that, so the handler's single decodeURIComponent()
+  // recovers the exact original path regardless of platform or characters.
+  return `newamp://track/${encodeURIComponent(normalized)}`;
 });

@@ -14,6 +14,7 @@ import type {
 import { engine, usePlayerStore } from '../../store/usePlayerStore';
 import { api, inElectron, DEFAULT_SETTINGS, exclusiveBackendLabel } from '../../lib/api';
 import { AI_ASSIST_OPTIONS } from '../../lib/aiAssist';
+import { resamplerName } from '../../lib/resampler-name';
 import { SKIN_VARIABLES, THEME_REGISTRY, readCurrentSkinVariables } from '../../lib/skins';
 import { normalizeSkinVariableValue } from '@shared/custom-skin';
 import { normalizeAudioOutputDeviceId, uniqueAudioOutputDevices } from '@shared/audio-output';
@@ -25,6 +26,7 @@ import { Chip } from '../Chip';
 import { ConfirmAction } from '../ConfirmAction';
 import { ViewSkeleton } from '../ViewSkeleton';
 import { ShellPicker } from '../ShellPicker';
+import { flashGuardEnabled, setFlashGuardEnabled, watchFlashGuard } from '../../lib/vizPrefs';
 
 // Skin cards (labels / taglines / swatches / order) come from the single
 // THEME_REGISTRY in @shared/custom-skin — do not redeclare them here.
@@ -51,6 +53,25 @@ function scrollToSection(id: string): void {
   el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
 }
 
+let settingsWrites: Promise<unknown> = Promise.resolve();
+
+function publishSavedSettings(saved: AppSettings, keys: readonly (keyof AppSettings)[]): void {
+  const patch = Object.fromEntries(keys.map((key) => [key, saved[key]]));
+  usePlayerStore.setState((state) => ({ settings: { ...(state.settings ?? saved), ...patch } }));
+}
+
+function saveSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
+  const write = settingsWrites.then(() => api.setSettings(patch)).then((saved) => {
+    const keys = Object.keys(patch) as (keyof AppSettings)[];
+    if (keys.some((key) => key === 'radioBrainEnabled' || key === 'radioBrainPort' || key === 'radioBrainToken')) keys.push('radioBrainToken');
+    if (keys.some((key) => key === 'openaiApiKey' || key === 'openaiModel')) keys.push('aiAssistRuntime');
+    publishSavedSettings(saved, keys);
+    return saved;
+  });
+  settingsWrites = write.catch(() => undefined);
+  return write;
+}
+
 export function SettingsView(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [stats, setStats] = useState<{ tracks: number; albums: number; artists: number; duration: number } | null>(null);
@@ -66,14 +87,19 @@ export function SettingsView(): JSX.Element {
   const [audioOutputStatus, setAudioOutputStatus] = useState<string | null>(null);
   const setTheme = usePlayerStore((s) => s.setTheme);
   const setCrossfadeMs = usePlayerStore((s) => s.setCrossfadeMs);
+  const setSampleAccurateGapless = usePlayerStore((s) => s.setSampleAccurateGapless);
   const setReplayGainMode = usePlayerStore((s) => s.setReplayGainMode);
   const setLimiterEnabled = usePlayerStore((s) => s.setLimiterEnabled);
   const setPreampDb = usePlayerStore((s) => s.setPreampDb);
   const setAudioOutputDevice = usePlayerStore((s) => s.setAudioOutputDevice);
   const playOutputTestTone = usePlayerStore((s) => s.playOutputTestTone);
 
+  function acceptSettings(saved: AppSettings): void {
+    setSettings(saved);
+  }
+
   useEffect(() => {
-    api.getSettings().then(setSettings).catch(() => setSettings(DEFAULT_SETTINGS));
+    api.getSettings().then(acceptSettings).catch(() => setSettings(DEFAULT_SETTINGS));
     api.getStats().then(setStats).catch(() => undefined);
     api.lastfmGetOutboxStatus().then(setLastfmOutbox).catch(() => undefined);
     void refreshAudioOutputs();
@@ -108,24 +134,32 @@ export function SettingsView(): JSX.Element {
   async function pickAndAddFolder(): Promise<void> {
     const dir = await api.pickFolder();
     if (!dir) return;
-    const next = Array.from(new Set([...settings!.libraryRoots, dir]));
-    const updated = await api.setSettings({ libraryRoots: next });
-    setSettings(updated);
+    // The same folder written another way, or one inside a library folder,
+    // would be scanned twice. A new folder that holds existing ones replaces
+    // them.
+    const covering = settings!.libraryRoots.find((root) => folderIsSameOrInside(dir, root));
+    if (covering) {
+      pushToast({ tone: 'info', title: 'Already in your library', detail: covering });
+      return;
+    }
+    const next = [...settings!.libraryRoots.filter((root) => !folderIsSameOrInside(root, dir)), dir];
+    const updated = await saveSettings({ libraryRoots: next });
+    acceptSettings(updated);
   }
 
   async function removeRoot(p: string): Promise<void> {
     const next = settings!.libraryRoots.filter((r) => r !== p);
-    const updated = await api.setSettings({ libraryRoots: next });
-    setSettings(updated);
+    const updated = await saveSettings({ libraryRoots: next });
+    acceptSettings(updated);
     pushToast({ tone: 'ok', title: 'Folder removed', detail: p });
   }
 
   async function saveLastfmCredentials(): Promise<AppSettings> {
-    const updated = await api.setSettings({
+    const updated = await saveSettings({
       lastfmApiKey: settings!.lastfmApiKey?.trim() || null,
       lastfmSharedSecret: settings!.lastfmSharedSecret?.trim() || null,
     });
-    setSettings(updated);
+    acceptSettings(updated);
     setLastfmStatus('Last.fm credentials saved.');
     return updated;
   }
@@ -136,7 +170,8 @@ export function SettingsView(): JSX.Element {
       await saveLastfmCredentials();
       await api.lastfmStartAuth();
       const updated = await api.getSettings();
-      setSettings(updated);
+      acceptSettings(updated);
+      publishSavedSettings(updated, ['lastfmAuthToken']);
       setLastfmStatus('Browser opened. Approve NewAmp, then complete the connection.');
     } catch (err) {
       setLastfmStatus(err instanceof Error ? err.message : 'Last.fm authorization failed.');
@@ -148,7 +183,8 @@ export function SettingsView(): JSX.Element {
     try {
       const session = await api.lastfmCompleteAuth();
       const updated = await api.getSettings();
-      setSettings(updated);
+      acceptSettings(updated);
+      publishSavedSettings(updated, ['lastfmSessionKey', 'lastfmUsername', 'lastfmAuthToken', 'lastfmEnabled']);
       setLastfmOutbox(await api.lastfmFlushOutbox().catch(() => lastfmOutbox));
       setLastfmStatus(`Connected as ${session.username}.`);
     } catch (err) {
@@ -158,7 +194,8 @@ export function SettingsView(): JSX.Element {
 
   async function disconnectLastfm(): Promise<void> {
     const updated = await api.lastfmDisconnect();
-    setSettings(updated);
+    acceptSettings(updated);
+    publishSavedSettings(updated, ['lastfmSessionKey', 'lastfmUsername', 'lastfmAuthToken', 'lastfmEnabled']);
     setLastfmOutbox(await api.lastfmGetOutboxStatus().catch(() => lastfmOutbox));
     setLastfmStatus('Last.fm disconnected.');
     pushToast({ tone: 'ok', title: 'Last.fm disconnected' });
@@ -195,12 +232,14 @@ export function SettingsView(): JSX.Element {
 
   async function saveOpenAiSettings(): Promise<void> {
     if (!settings) return;
-    const updated = await api.setSettings({
+    const updated = await saveSettings({
       openaiApiKey: settings.openaiApiKey?.trim() || null,
       openaiModel: settings.openaiModel?.trim() || DEFAULT_SETTINGS.openaiModel,
     });
-    setSettings(updated);
-    setOpenAiStatus(updated.openaiApiKey ? 'ChatGPT assist key saved locally.' : 'ChatGPT assist disabled.');
+    acceptSettings(updated);
+    setOpenAiStatus(updated.aiAssistRuntime?.mode === 'gateway'
+      ? 'API settings saved. The endpoint from NEWAMP_OPENAI_BASE_URL stays in use for this session.'
+      : updated.openaiApiKey ? 'ChatGPT assist key saved locally.' : 'ChatGPT assist disabled.');
   }
 
   async function showTutorialOnNextLaunch(): Promise<void> {
@@ -261,7 +300,7 @@ export function SettingsView(): JSX.Element {
       const updated = await api
         .getSettings()
         .catch(() => ({ ...settings!, audioOutputDeviceId }));
-      setSettings(updated);
+      acceptSettings(updated);
       setAudioOutputStatus(audioOutputDeviceId ? 'Audio output switched.' : 'Using system default output.');
     } catch (err) {
       setAudioOutputStatus(err instanceof Error ? err.message : 'Audio output switch failed.');
@@ -306,14 +345,14 @@ export function SettingsView(): JSX.Element {
       }
       setSupportRestore(result);
       setSupportBackupStatus(
-        `Restored ${result.restored.length.toLocaleString()} item(s). Restart NewAmp to refresh every view.`,
+        `Restored ${result.restored.length.toLocaleString()} item(s). Reloading NewAmp...`,
       );
       pushToast({
         tone: 'ok',
         title: 'Backup restored',
-        detail: 'Restart NewAmp to refresh every view.',
+        detail: 'Reloading the library and saved playback session.',
       });
-      await refreshSupportDiagnostics();
+      window.location.reload();
     } catch (err) {
       setSupportBackupStatus(err instanceof Error ? err.message : 'Restore failed.');
     }
@@ -388,7 +427,7 @@ export function SettingsView(): JSX.Element {
                   type="checkbox"
                   checked={settings.libraryAutoWatch}
                   onChange={(e) => {
-                    api.setSettings({ libraryAutoWatch: e.target.checked }).then(setSettings).catch(() => undefined);
+                    saveSettings({ libraryAutoWatch: e.target.checked }).then(acceptSettings).catch(() => undefined);
                   }}
                 />
                 Refresh when music files or cover art change
@@ -439,7 +478,7 @@ export function SettingsView(): JSX.Element {
             </Row>
             <RadioBrainRow
               settings={settings}
-              onChange={(patch) => api.setSettings(patch).then(setSettings).catch(() => undefined)}
+              onChange={(patch) => saveSettings(patch).then(acceptSettings).catch(() => undefined)}
             />
           </section>
 
@@ -453,6 +492,7 @@ export function SettingsView(): JSX.Element {
             <Row label="Text size">
               <div className="flex min-w-[260px] items-center gap-3">
                 <input
+                  aria-label="Text size"
                   type="range"
                   min={0.85}
                   max={1.35}
@@ -460,7 +500,7 @@ export function SettingsView(): JSX.Element {
                   value={settings.textScale}
                   onChange={(e) => {
                     const textScale = Number(e.target.value);
-                    api.setSettings({ textScale }).then(setSettings).catch(() => undefined);
+                    saveSettings({ textScale }).then(acceptSettings).catch(() => undefined);
                   }}
                   className="nslider flex-1"
                 />
@@ -470,7 +510,7 @@ export function SettingsView(): JSX.Element {
                 <button
                   className="pxbtn"
                   onClick={() => {
-                    api.setSettings({ textScale: 1 }).then(setSettings).catch(() => undefined);
+                    saveSettings({ textScale: 1 }).then(acceptSettings).catch(() => undefined);
                   }}
                 >
                   Reset
@@ -480,10 +520,11 @@ export function SettingsView(): JSX.Element {
             <Row label="Close button (X)">
               <label className="flex items-center gap-3 text-sm text-ink2">
                 <select
+                  aria-label="Close button (X)"
                   value={settings.closeButtonBehavior}
                   onChange={(event) => {
                     const closeButtonBehavior = event.target.value === 'close-app' ? 'close-app' : 'minimize-to-tray';
-                    api.setSettings({ closeButtonBehavior }).then(setSettings).catch(() => undefined);
+                    saveSettings({ closeButtonBehavior }).then(acceptSettings).catch(() => undefined);
                   }}
                   className="bevel-in px-2 py-1"
                   data-newamp-close-button-behavior
@@ -503,13 +544,14 @@ export function SettingsView(): JSX.Element {
             <Row label="Performance">
               <label className="flex flex-col gap-1 text-sm text-ink2">
                 <select
+                  aria-label="Performance"
                   value={settings.performanceTier}
                   onChange={(event) => {
                     const performanceTier =
                       event.target.value === 'high' || event.target.value === 'lite'
                         ? (event.target.value as 'high' | 'lite')
                         : 'auto';
-                    api.setSettings({ performanceTier }).then(setSettings).catch(() => undefined);
+                    saveSettings({ performanceTier }).then(acceptSettings).catch(() => undefined);
                   }}
                   className="bevel-in px-2 py-1"
                   data-newamp-performance-tier
@@ -526,13 +568,14 @@ export function SettingsView(): JSX.Element {
             <Row label="Resonance">
               <label className="flex flex-col gap-1 text-sm text-ink2">
                 <select
+                  aria-label="Resonance"
                   value={settings.ambientReactivity}
                   onChange={(event) => {
                     const ambientReactivity =
                       event.target.value === 'on' || event.target.value === 'off'
                         ? (event.target.value as 'on' | 'off')
                         : 'auto';
-                    api.setSettings({ ambientReactivity }).then(setSettings).catch(() => undefined);
+                    saveSettings({ ambientReactivity }).then(acceptSettings).catch(() => undefined);
                   }}
                   className="bevel-in px-2 py-1"
                   data-newamp-ambient-reactivity
@@ -545,6 +588,9 @@ export function SettingsView(): JSX.Element {
                   The whole interface breathes with the music — a colored glow from the album art and a beat pulse on the controls.
                 </span>
               </label>
+            </Row>
+            <Row label="Flash protection">
+              <FlashProtectionRow />
             </Row>
             <Row label="Eviland memory">
               <EvilandMemoryRow />
@@ -618,7 +664,7 @@ export function SettingsView(): JSX.Element {
             </div>
           </section>
 
-          <SkinWorkshop settings={settings} onSaved={setSettings} />
+          <SkinWorkshop settings={settings} onSaved={acceptSettings} />
 
           <section id="settings-playback" className="bevel-out flex flex-col gap-4 p-6">
             <h2 className="eyebrow">Playback</h2>
@@ -630,6 +676,7 @@ export function SettingsView(): JSX.Element {
             )}
             <Row label="Crossfade">
               <select
+                aria-label="Crossfade"
                 value={settings.crossfadeMs}
                 disabled={dspBypassed}
                 onChange={(e) => {
@@ -646,8 +693,25 @@ export function SettingsView(): JSX.Element {
                 <option value={8000}>8 s</option>
               </select>
             </Row>
+            <Row label="Gapless">
+              <label
+                className={`flex items-center gap-2 text-base text-ink${dspBypassed ? ' opacity-50' : ''}`}
+                title="Local tracks play as one continuous stream, so an album's next track starts on the next sample. Crossfade and speed changes use the standard path."
+              >
+                <input
+                  type="checkbox"
+                  checked={settings.sampleAccurateGapless}
+                  disabled={dspBypassed}
+                  onChange={(e) => {
+                    setSampleAccurateGapless(e.target.checked).then((updated) => setSettings(updated));
+                  }}
+                />
+                Sample-accurate
+              </label>
+            </Row>
             <Row label="ReplayGain">
               <select
+                aria-label="ReplayGain"
                 value={settings.replayGain}
                 disabled={dspBypassed}
                 onChange={(e) => {
@@ -682,6 +746,7 @@ export function SettingsView(): JSX.Element {
             <Row label="Preamp">
               <div className="flex max-w-[360px] flex-1 items-center justify-end gap-3">
                 <input
+                  aria-label="Preamp"
                   type="range"
                   min={MIN_PREAMP_DB}
                   max={MAX_PREAMP_DB}
@@ -718,12 +783,13 @@ export function SettingsView(): JSX.Element {
                 )}
               </div>
             </Row>
-            <BitPerfectRow settings={settings} onChange={(patch) => api.setSettings(patch).then(setSettings)} />
-            <ExclusiveModeRow settings={settings} onSettings={setSettings} />
+            <BitPerfectRow settings={settings} onChange={(patch) => saveSettings(patch).then(acceptSettings)} />
+            <ExclusiveModeRow settings={settings} onSettings={acceptSettings} />
 
             <Row label="Audio Output">
               <div className="flex max-w-[560px] flex-wrap items-center justify-end gap-2">
                 <select
+                  aria-label="Audio Output"
                   value={settings.audioOutputDeviceId ?? ''}
                   onChange={(e) => void changeAudioOutput(e.target.value)}
                   className="bevel-in min-w-[220px] px-2 py-1 text-base"
@@ -794,6 +860,7 @@ export function SettingsView(): JSX.Element {
             </div>
             <Row label="API key">
               <input
+                aria-label="Last.fm API key"
                 value={settings.lastfmApiKey ?? ''}
                 onChange={(e) => setSettings({ ...settings, lastfmApiKey: e.target.value || null })}
                 className="bevel-in w-[320px] px-2 py-1 text-base outline-none"
@@ -801,6 +868,7 @@ export function SettingsView(): JSX.Element {
             </Row>
             <Row label="Shared secret">
               <input
+                aria-label="Shared secret"
                 type="password"
                 value={settings.lastfmSharedSecret ?? ''}
                 onChange={(e) => setSettings({ ...settings, lastfmSharedSecret: e.target.value || null })}
@@ -819,7 +887,7 @@ export function SettingsView(): JSX.Element {
                   checked={settings.lastfmEnabled}
                   disabled={!settings.lastfmSessionKey}
                   onChange={(e) => {
-                    api.setSettings({ lastfmEnabled: e.target.checked }).then(setSettings).catch(() => undefined);
+                    saveSettings({ lastfmEnabled: e.target.checked }).then(acceptSettings).catch(() => undefined);
                   }}
                 />
                 Enabled
@@ -876,6 +944,12 @@ export function SettingsView(): JSX.Element {
               Optional local enrichments for real On Air liner notes, artist context, review prompts, and discussion seeds.
               The key is stored in NewAmp settings on this machine and is never needed for basic playback.
             </div>
+            {settings.aiAssistRuntime?.mode === 'gateway' && (
+              <div className="text-sm leading-relaxed text-ink2">
+                Custom endpoint from NEWAMP_OPENAI_BASE_URL: {settings.aiAssistRuntime.ready ? 'configured' : 'NEWAMP_OPENAI_API_KEY missing'}.
+                {' '}Active model: {settings.aiAssistRuntime.model}. The API settings below are saved separately.
+              </div>
+            )}
             <div className="ai-assist-option-grid">
               {AI_ASSIST_OPTIONS.map((option) => (
                 <div key={option.id} className="ai-assist-option">
@@ -884,8 +958,9 @@ export function SettingsView(): JSX.Element {
                 </div>
               ))}
             </div>
-            <Row label="API key">
+            <Row label={settings.aiAssistRuntime?.mode === 'gateway' ? 'Saved API key' : 'API key'}>
               <input
+                aria-label="OpenAI API key"
                 type="password"
                 value={settings.openaiApiKey ?? ''}
                 onChange={(e) => setSettings({ ...settings, openaiApiKey: e.target.value || null })}
@@ -893,8 +968,9 @@ export function SettingsView(): JSX.Element {
                 className="bevel-in w-[320px] px-2 py-1 text-base outline-none"
               />
             </Row>
-            <Row label="Model">
+            <Row label={settings.aiAssistRuntime?.mode === 'gateway' ? 'Saved API model' : 'Model'}>
               <input
+                aria-label="OpenAI model"
                 value={settings.openaiModel ?? DEFAULT_SETTINGS.openaiModel}
                 onChange={(e) => setSettings({ ...settings, openaiModel: e.target.value || DEFAULT_SETTINGS.openaiModel })}
                 className="bevel-in w-[220px] px-2 py-1 text-base outline-none"
@@ -907,8 +983,10 @@ export function SettingsView(): JSX.Element {
               <button className="pxbtn" onClick={() => void showTutorialOnNextLaunch()}>
                 Show first-launch tutorial
               </button>
-              <span className={`text-xs ${settings.openaiApiKey ? 'text-accent' : 'text-muted'}`}>
-                {settings.openaiApiKey ? `Ready: ${settings.openaiModel || DEFAULT_SETTINGS.openaiModel}` : 'Local metadata mode only'}
+              <span className={`text-xs ${(settings.aiAssistRuntime?.ready ?? !!settings.openaiApiKey) ? 'text-accent' : 'text-muted'}`}>
+                {(settings.aiAssistRuntime?.ready ?? !!settings.openaiApiKey)
+                  ? `Ready: ${settings.aiAssistRuntime?.model || settings.openaiModel || DEFAULT_SETTINGS.openaiModel}`
+                  : 'Local metadata mode only'}
               </span>
               {openAiStatus && (
                 <span className="text-xs text-ink2">
@@ -990,14 +1068,19 @@ export function SettingsView(): JSX.Element {
                 <DiagnosticRow label="Crash dumps">{supportDiagnostics.crashDumpsPath || 'n/a'}</DiagnosticRow>
                 <DiagnosticRow label="Recovery">
                   {supportDiagnostics.recoveryEvents.length
-                    ? `${supportDiagnostics.recoveryEvents.length} quarantined file(s)`
+                    ? `${supportDiagnostics.recoveryEvents.length} notice(s)`
                     : 'No recoveries recorded this launch'}
                 </DiagnosticRow>
                 {supportDiagnostics.recoveryEvents.length > 0 && (
                   <div className="bevel-in space-y-1 px-3 py-2">
                     {supportDiagnostics.recoveryEvents.map((event) => (
-                      <div key={`${event.store}:${event.backupPath}`} className="truncate">
-                        {event.store}: {event.backupPath}
+                      // A quarantined file was renamed away (backupPath differs
+                      // from filePath); an untouched notice (a locked file left
+                      // exactly as it was, or a failed library upgrade) shares
+                      // the same path for both, so labeling every event
+                      // "quarantined" overstated what actually happened to it.
+                      <div key={`${event.store}:${event.backupPath}:${event.recoveredAt}`} className="truncate">
+                        {event.store} ({event.backupPath === event.filePath ? 'untouched' : 'quarantined'}): {event.reason}
                       </div>
                     ))}
                   </div>
@@ -1165,6 +1248,7 @@ function SkinWorkshop({
       <div className="flex items-center gap-3">
         <h2 className="eyebrow">Skin Workshop</h2>
         <input
+          aria-label="Skin name"
           value={name}
           onChange={(e) => setName(e.target.value)}
           className="bevel-in ml-auto px-2 py-1 text-sm"
@@ -1185,7 +1269,7 @@ function SkinWorkshop({
           const value = draft[key] ?? '';
           const canColorPick = /^#[0-9a-f]{6}$/i.test(value);
           return (
-            <label
+            <div
               key={key}
               className="grid grid-cols-[120px_26px_minmax(0,1fr)] items-center gap-2 text-xs text-ink2"
             >
@@ -1194,6 +1278,7 @@ function SkinWorkshop({
               <span className="flex items-center gap-2">
                 {canColorPick && (
                   <input
+                    aria-label={`${key.replace('--', '')} color`}
                     type="color"
                     value={value}
                     onChange={(e) => setVar(key, e.target.value)}
@@ -1201,12 +1286,13 @@ function SkinWorkshop({
                   />
                 )}
                 <input
+                  aria-label={`${key.replace('--', '')} value`}
                   value={value}
                   onChange={(e) => setVar(key, e.target.value)}
                   className="bevel-in min-w-0 flex-1 px-2 py-1"
                 />
               </span>
-            </label>
+            </div>
           );
         })}
       </div>
@@ -1262,6 +1348,7 @@ function BitPerfectRow({
         <span className="ml-auto flex items-center gap-2 text-sm text-ink2">
           <span>Preferred</span>
           <select
+            aria-label="Preferred sample rate"
             value={preferred == null ? '' : String(preferred)}
             disabled={!settings.audioBitPerfectPath}
             onChange={(e) => {
@@ -1423,6 +1510,7 @@ function ExclusiveModeRow({
         <span className="ml-auto flex items-center gap-2 text-sm text-ink2">
           <span>Device</span>
           <select
+            aria-label="Exclusive output device"
             value={settings.bitPerfectExclusiveDeviceId ?? ''}
             disabled={!enabled || busy}
             onChange={(e) => void changeDevice(e.target.value)}
@@ -1462,8 +1550,8 @@ function ExclusiveModeRow({
             <span className="text-warn">
               {negotiated.resampled &&
                 (negotiated.sourceSampleRate
-                  ? ` · resampled ${(negotiated.sourceSampleRate / 1000).toFixed(1)} → ${(negotiated.sampleRate / 1000).toFixed(1)} kHz by NewAmp (SoX)${negotiated.dsd ? ' (DSD → PCM)' : ' — set the device clock to the source rate for bit-perfect'}`
-                  : ` · source rate unknown — conservatively resampled to ${(negotiated.sampleRate / 1000).toFixed(1)} kHz (SoX)`)}
+                  ? ` · resampled ${(negotiated.sourceSampleRate / 1000).toFixed(1)} → ${(negotiated.sampleRate / 1000).toFixed(1)} kHz by NewAmp (${resamplerName(negotiated.resampler)})${negotiated.dsd ? ' (DSD → PCM)' : ' — set the device clock to the source rate for bit-perfect'}`
+                  : ` · source rate unknown — conservatively resampled to ${(negotiated.sampleRate / 1000).toFixed(1)} kHz (${resamplerName(negotiated.resampler)})`)}
               {!negotiated.resampled && negotiated.upmixed && ' · channel layout adapted'}
               {!negotiated.resampled && !negotiated.upmixed && negotiated.channelsUnknown && ' · channel layout unverified (metadata probe failed) — treated conservatively'}
               {!negotiated.resampled && !negotiated.upmixed && !negotiated.channelsUnknown && !negotiated.lossless && ' · lossy source (decoder output delivered untouched)'}
@@ -1533,6 +1621,7 @@ function RadioBrainRow({
         <span className="ml-auto flex items-center gap-2">
           <span className="text-xs text-muted">Port</span>
           <input
+            aria-label="Radio Brain port"
             type="number"
             min={1024}
             max={65535}
@@ -1619,6 +1708,18 @@ function RemoteQr({ url }: { url: string }): JSX.Element {
   );
 }
 
+// Folder paths compared the way the OS does: either slash, no trailing one,
+// and without case on Windows and macOS (not Linux, where case matters).
+function folderIsSameOrInside(path: string, folder: string): boolean {
+  const key = (value: string) => {
+    const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+    return api.platform === 'win32' || api.platform === 'darwin' ? normalized.toLowerCase() : normalized;
+  };
+  const p = key(path);
+  const f = key(folder);
+  return p === f || p.startsWith(`${f}/`);
+}
+
 function Row({ label, children }: { label: string; children: React.ReactNode }): JSX.Element {
   return (
     <div className="flex items-center justify-between gap-3">
@@ -1626,6 +1727,40 @@ function Row({ label, children }: { label: string; children: React.ReactNode }):
         {label}
       </span>
       {children}
+    </div>
+  );
+}
+
+/**
+ * Visualizer flash protection (visualizer/flash-guard.ts). On by default;
+ * turning it off takes the two-step confirm and states why it's there.
+ */
+function FlashProtectionRow(): JSX.Element {
+  const [enabled, setEnabled] = useState(flashGuardEnabled);
+  useEffect(() => watchFlashGuard(setEnabled), []);
+  return (
+    <div className="flex flex-col items-end gap-2 text-sm text-ink2" data-newamp-flash-protection={enabled ? 'on' : 'off'}>
+      <span>
+        {enabled
+          ? 'On — bright flashes in visualizers and their recordings are held to three a second.'
+          : 'Off — visualizers can flash as fast as the music drives them.'}
+      </span>
+      {enabled ? (
+        <>
+          <span className="text-xs text-muted">Turning this off can expose viewers with photosensitive epilepsy to seizure-triggering flashes.</span>
+          <ConfirmAction
+            label="Turn off"
+            confirmLabel="Turn off anyway?"
+            tone="warn"
+            size="sm"
+            onConfirm={() => setFlashGuardEnabled(false)}
+          />
+        </>
+      ) : (
+        <button type="button" className="pxbtn is-active" onClick={() => setFlashGuardEnabled(true)}>
+          Turn on
+        </button>
+      )}
     </div>
   );
 }

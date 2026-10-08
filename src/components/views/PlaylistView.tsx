@@ -48,8 +48,17 @@ export function PlaylistView(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [playlists, setPlaylists] = useState<SavedPlaylist[]>([]);
-  const [selectedPlaylist, setSelectedPlaylist] = useState<SavedPlaylist | null>(null);
+  const [selectedPlaylist, setSelectedPlaylistState] = useState<SavedPlaylist | null>(null);
   const [selectedPlaylistTracks, setSelectedPlaylistTracks] = useState<Track[]>([]);
+  const selectedPlaylistRef = useRef<SavedPlaylist | null>(null);
+  const trackRequestRef = useRef(0);
+  const playlistLoadRef = useRef<number | null>(null);
+  const listRequestRef = useRef(0);
+  function setSelectedPlaylist(playlist: SavedPlaylist | null): void {
+    if (selectedPlaylistRef.current?.id !== playlist?.id) trackRequestRef.current += 1;
+    selectedPlaylistRef.current = playlist;
+    setSelectedPlaylistState(playlist);
+  }
   const [playlistListFilter, setPlaylistListFilter] = useState('');
   const [playlistTrackFilter, setPlaylistTrackFilter] = useState('');
   const [queueFilter, setQueueFilter] = useState('');
@@ -136,7 +145,13 @@ export function PlaylistView(): JSX.Element {
     void refreshPlaylists();
     // Tracks added from a right-click menu elsewhere, an import, or another
     // view all land here; refresh the list (and the open playlist) to match.
-    return api.onPlaylistsChanged(() => void refreshPlaylists());
+    const unsubscribe = api.onPlaylistsChanged(() => void refreshPlaylists());
+    return () => {
+      listRequestRef.current += 1;
+      trackRequestRef.current += 1;
+      playlistLoadRef.current = null;
+      unsubscribe();
+    };
   }, []);
 
   // "SHOW" on a playlist toast, or anything else that opens a given playlist.
@@ -177,23 +192,34 @@ export function PlaylistView(): JSX.Element {
   }, [sleepTimerEndsAt]);
 
   async function refreshPlaylists(): Promise<void> {
+    const request = ++listRequestRef.current;
     const [next, nextRules] = await Promise.all([
       api.getPlaylists().catch(() => []),
       api.getSmartPlaylistRules().catch(() => []),
     ]);
+    if (request !== listRequestRef.current) return;
     setPlaylists(next);
     setSmartRules(nextRules);
-    setSelectedPlaylist((selected) => {
-      if (!selected) return null;
+    const selected = selectedPlaylistRef.current;
+    if (selected) {
       const fresh = next.find((playlist) => playlist.id === selected.id) ?? null;
       // Tracks were added or removed somewhere else: reload the open list.
       // Not while this view's own edits are still saving; the local list is
       // already ahead of the database then.
-      if (fresh && pendingSaves.current === 0 && fresh.trackCount !== openTracks.current.length) {
-        void api.getPlaylistTracks(fresh.id).then(setSelectedPlaylistTracks, () => undefined);
+      if (fresh && playlistLoadRef.current === null && pendingSaves.current === 0 && fresh.trackCount !== openTracks.current.length) {
+        const tracksRequest = ++trackRequestRef.current;
+        void api.getPlaylistTracks(fresh.id).then((tracks) => {
+          if (tracksRequest !== trackRequestRef.current || selectedPlaylistRef.current?.id !== fresh.id || pendingSaves.current > 0) return;
+          openTracks.current = tracks;
+          setSelectedPlaylistTracks(tracks);
+        }, () => undefined);
       }
-      return fresh;
-    });
+      setSelectedPlaylist(fresh);
+      if (!fresh) {
+        openTracks.current = [];
+        setSelectedPlaylistTracks([]);
+      }
+    }
     setSelectedSmartRule((selected) =>
       selected ? nextRules.find((rule) => rule.id === selected.id) ?? null : null,
     );
@@ -370,6 +396,7 @@ export function PlaylistView(): JSX.Element {
   // With a playlist open: saves its name and icon (its tracks save as they
   // change). With none open: saves the queue as a new playlist.
   async function saveQueue(): Promise<void> {
+    const request = ++trackRequestRef.current;
     setBusy(true);
     try {
       const wasNew = !selectedPlaylist;
@@ -383,6 +410,7 @@ export function PlaylistView(): JSX.Element {
         coverImagePath: playlistCoverPath,
         clearCoverImage: clearPlaylistCover,
       });
+      if (request !== trackRequestRef.current) return;
       setSelectedPlaylist(saved);
       if (wasNew) setSelectedPlaylistTracks(queue);
       setPlaylistName(saved.name);
@@ -402,11 +430,13 @@ export function PlaylistView(): JSX.Element {
   // Creates the playlist right away, empty, under the name in the field (or
   // "New Playlist"; the library numbers duplicates), and opens it.
   async function createNewPlaylist(): Promise<void> {
+    const request = ++trackRequestRef.current;
     const typed = playlistName.trim();
     const name = typed && typed !== selectedPlaylist?.name ? typed : 'New Playlist';
     setBusy(true);
     try {
       const saved = await api.savePlaylist({ name, trackIds: [], coverImagePath: playlistCoverPath });
+      if (request !== trackRequestRef.current) return;
       setSelectedPlaylist(saved);
       setSelectedPlaylistTracks([]);
       setPlaylistTrackFilter('');
@@ -425,10 +455,16 @@ export function PlaylistView(): JSX.Element {
   }
 
   async function loadPlaylist(playlist: SavedPlaylist, play = false, quiet = false): Promise<void> {
+    setSelectedPlaylist(playlist);
+    const request = ++trackRequestRef.current;
+    playlistLoadRef.current = request;
+    openTracks.current = [];
+    setSelectedPlaylistTracks([]);
     setBusy(true);
     try {
       const tracks = await api.getPlaylistTracks(playlist.id);
-      setSelectedPlaylist(playlist);
+      if (request !== trackRequestRef.current || selectedPlaylistRef.current?.id !== playlist.id) return;
+      openTracks.current = tracks;
       setSelectedPlaylistTracks(tracks);
       setPlaylistTrackFilter('');
       setPlaylistName(playlist.name);
@@ -446,8 +482,13 @@ export function PlaylistView(): JSX.Element {
         return;
       }
       pushToast({ tone: 'ok', title: 'Playing playlist', detail: `${tracks.length} tracks from ${playlist.name}.` });
+    } catch (err) {
+      if (request === trackRequestRef.current) pushToast({ tone: 'error', title: 'Could not load playlist', detail: err instanceof Error ? err.message : undefined });
     } finally {
-      setBusy(false);
+      if (playlistLoadRef.current === request) {
+        playlistLoadRef.current = null;
+        setBusy(false);
+      }
     }
   }
 
@@ -465,23 +506,29 @@ export function PlaylistView(): JSX.Element {
 
   function moveSelectedPlaylistTrack(fromIndex: number, toIndex: number): void {
     if (!selectedPlaylist) return;
-    const result = moveQueueItem(selectedPlaylistTracks, -1, fromIndex, toIndex);
+    trackRequestRef.current += 1;
+    const result = moveQueueItem(openTracks.current, -1, fromIndex, toIndex);
+    openTracks.current = result.queue;
     setSelectedPlaylistTracks(result.queue);
     persistPlaylistTracks(selectedPlaylist, result.queue);
   }
 
   function removeSelectedPlaylistTrack(index: number): void {
     if (!selectedPlaylist) return;
-    const result = removeQueueItem(selectedPlaylistTracks, -1, index);
+    trackRequestRef.current += 1;
+    const result = removeQueueItem(openTracks.current, -1, index);
+    openTracks.current = result.queue;
     setSelectedPlaylistTracks(result.queue);
     persistPlaylistTracks(selectedPlaylist, result.queue);
   }
 
   async function deleteSelected(): Promise<void> {
     if (!selectedPlaylist) return;
+    const request = ++trackRequestRef.current;
     setBusy(true);
     try {
       await api.deletePlaylist(selectedPlaylist.id);
+      if (request !== trackRequestRef.current) return;
       pushToast({ tone: 'ok', title: 'Playlist deleted', detail: selectedPlaylist.name });
       setSelectedPlaylist(null);
       setSelectedPlaylistTracks([]);
@@ -558,6 +605,7 @@ export function PlaylistView(): JSX.Element {
   }
 
   async function importM3u(): Promise<void> {
+    const request = ++trackRequestRef.current;
     setBusy(true);
     try {
       const result = await api.importPlaylistM3u();
@@ -566,6 +614,7 @@ export function PlaylistView(): JSX.Element {
         return;
       }
       const tracks = await api.getPlaylistTracks(result.playlist.id).catch(() => []);
+      if (request !== trackRequestRef.current) return;
       setSelectedPlaylist(result.playlist);
       setSelectedPlaylistTracks(tracks);
       setPlaylistTrackFilter('');
@@ -626,6 +675,9 @@ export function PlaylistView(): JSX.Element {
 
   // Back to the active queue, with the name field cleared for a new playlist.
   function closePlaylist(): void {
+    trackRequestRef.current += 1;
+    playlistLoadRef.current = null;
+    setBusy(false);
     setSelectedPlaylist(null);
     setSelectedPlaylistTracks([]);
     setPlaylistTrackFilter('');
@@ -1158,11 +1210,13 @@ export function PlaylistView(): JSX.Element {
                       .map(({ track: t, index: i }) => (
                       <li
                         key={`${selectedPlaylist.id}-${t.id}-${i}`}
+                        data-newamp-playlist-track-row={i}
                         className="flex cursor-pointer items-center gap-2 border-b px-3 py-1.5"
+                        title={missingFileTitle(t)}
                         style={{
                           borderColor: 'var(--line)',
                           color: current?.id === t.id ? 'var(--accent)' : 'var(--ink)',
-                          opacity: draggedPlaylistTrackIndex === i ? 0.55 : 1,
+                          opacity: draggedPlaylistTrackIndex === i ? 0.55 : t.missingSince != null ? 0.5 : 1,
                         }}
                         draggable={true}
                         aria-grabbed={draggedPlaylistTrackIndex === i}
@@ -1172,12 +1226,24 @@ export function PlaylistView(): JSX.Element {
                           event.dataTransfer.setData('text/plain', String(i));
                         }}
                         onDragOver={(event) => {
+                          // Let a file drag fall through uncaught: App's own
+                          // dropzone (which does preventDefault) is an
+                          // ancestor, so the event still resolves to a drop
+                          // there — this row just declines to be its target.
+                          if (hasDraggedFiles(event.dataTransfer)) return;
                           event.preventDefault();
                           event.dataTransfer.dropEffect = 'move';
                         }}
                         onDrop={(event) => {
+                          // Same fallthrough: a dropped OS file must open/
+                          // play via App, not reorder this playlist. An
+                          // empty text/plain (which a file drag also has)
+                          // reads as Number('') === 0, a valid index, so
+                          // getData is checked for content before parsing.
+                          if (hasDraggedFiles(event.dataTransfer)) return;
                           event.preventDefault();
-                          const transferIndex = Number(event.dataTransfer.getData('text/plain'));
+                          const transferData = event.dataTransfer.getData('text/plain');
+                          const transferIndex = transferData ? Number(transferData) : NaN;
                           const fromIndex = draggedPlaylistTrackIndex
                             ?? (Number.isInteger(transferIndex) ? transferIndex : null);
                           if (fromIndex !== null && fromIndex !== i) moveSelectedPlaylistTrack(fromIndex, i);
@@ -1287,12 +1353,14 @@ export function PlaylistView(): JSX.Element {
                     .map(({ track: t, index: i }) => (
                     <li
                       key={`${t.id}-${i}`}
+                      data-newamp-queue-track-row={i}
                       className="flex cursor-pointer items-center gap-2 border-b px-3 py-1.5"
+                      title={missingFileTitle(t)}
                       style={{
                         borderColor: 'var(--line)',
                         background: current?.id === t.id ? 'var(--panel-2)' : 'transparent',
                         color: current?.id === t.id ? 'var(--accent)' : 'var(--ink)',
-                        opacity: draggedQueueIndex === i ? 0.55 : 1,
+                        opacity: draggedQueueIndex === i ? 0.55 : t.missingSince != null ? 0.5 : 1,
                       }}
                       draggable={true}
                       aria-grabbed={draggedQueueIndex === i}
@@ -1302,12 +1370,24 @@ export function PlaylistView(): JSX.Element {
                         event.dataTransfer.setData('text/plain', String(i));
                       }}
                       onDragOver={(event) => {
+                        // Let a file drag fall through uncaught: App's own
+                        // dropzone (which does preventDefault) is an
+                        // ancestor, so the event still resolves to a drop
+                        // there — this row just declines to be its target.
+                        if (hasDraggedFiles(event.dataTransfer)) return;
                         event.preventDefault();
                         event.dataTransfer.dropEffect = 'move';
                       }}
                       onDrop={(event) => {
+                        // Same fallthrough: a dropped OS file must open/play
+                        // via App, not reorder the queue. An empty
+                        // text/plain (which a file drag also has) reads as
+                        // Number('') === 0, a valid index, so getData is
+                        // checked for content before parsing.
+                        if (hasDraggedFiles(event.dataTransfer)) return;
                         event.preventDefault();
-                        const transferIndex = Number(event.dataTransfer.getData('text/plain'));
+                        const transferData = event.dataTransfer.getData('text/plain');
+                        const transferIndex = transferData ? Number(transferData) : NaN;
                         const fromIndex = draggedQueueIndex ?? (Number.isInteger(transferIndex) ? transferIndex : null);
                         if (fromIndex !== null && fromIndex !== i) moveQueuedTrack(fromIndex, i);
                         setDraggedQueueIndex(null);
@@ -1390,9 +1470,24 @@ export function PlaylistView(): JSX.Element {
 // system --row-height (tokens.css) used for Library rows.
 const PLAYLIST_ROW_HEIGHT = 36;
 
+// An OS file drag (e.g. from Windows Explorer) carries no text/plain — only
+// an internal row drag sets that via onDragStart below. Row reorder must
+// never treat a file drop as a reorder gesture: see hasDraggedFiles() call
+// sites on the row drag handlers.
+function hasDraggedFiles(dataTransfer: DataTransfer): boolean {
+  return Array.from(dataTransfer.types).includes('Files');
+}
+
 function moodLabel(mood: SetMood): string {
   if (mood === 'deep-cuts') return 'deep cuts';
   return mood;
+}
+
+// Unavailable tracks keep their playlist place; say why they read as dimmed.
+function missingFileTitle(track: Track): string | undefined {
+  return track.missingSince != null
+    ? `File not found since ${new Date(track.missingSince).toLocaleString()}`
+    : undefined;
 }
 
 function parseOptionalNumber(value: string): number | null {

@@ -3,9 +3,10 @@
 // and teach the three keys that matter. AI setup is a single optional line
 // that links to Settings — no key is ever typed here.
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { AppSettings } from '@shared/types';
 import { BrandLogo } from './BrandLogo';
+import { useModalFocus } from '../hooks/useModalFocus';
 
 const TOUR_STEPS: Array<{ keys: string; title: string; detail: string }> = [
   {
@@ -47,6 +48,9 @@ export function FirstLaunchTutorial({
 }): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const startRef = useRef<HTMLButtonElement>(null);
+  useModalFocus(dialogRef, startRef);
 
   async function finish(): Promise<void> {
     setBusy(true);
@@ -61,12 +65,12 @@ export function FirstLaunchTutorial({
 
   return (
     <div className="first-launch-overlay" data-newamp-first-launch-tutorial>
-      <section className="first-launch-panel bevel-out">
+      <section ref={dialogRef} className="first-launch-panel bevel-out" role="dialog" aria-modal="true" aria-labelledby="first-launch-title" tabIndex={-1}>
         <header className="first-launch-header">
           <BrandLogo size={72} title="NewAmp" />
           <div>
             <div className="first-launch-kicker">First launch</div>
-            <h1>Scan your Music folder</h1>
+            <h1 id="first-launch-title">Scan your Music folder</h1>
             <p>
               NewAmp plays the files already on this machine — no cloud, no account, no telemetry.
               The scan button is waiting right behind this card: one click and your library builds
@@ -115,7 +119,7 @@ export function FirstLaunchTutorial({
         </p>
 
         <footer className="first-launch-actions">
-          <button className="pxbtn is-active" onClick={() => void finish()} disabled={busy}>
+          <button ref={startRef} className="pxbtn is-active" onClick={() => void finish()} disabled={busy}>
             Start listening
           </button>
           {status && <span>{status}</span>}

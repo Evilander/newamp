@@ -96,7 +96,7 @@ export function ProfileView(): JSX.Element {
   const exportBundle = async (): Promise<void> => {
     const saved = await api.exportProfileBundle();
     if (saved) {
-      pushToast({ tone: 'ok', title: 'Profile page exported', detail: 'One HTML file — post it anywhere.' });
+      pushToast({ tone: 'ok', title: 'Profile page exported', detail: 'Includes public lists and reviews, your profile, favorites, and top artists. Review the file before sharing.' });
     }
   };
 
@@ -118,14 +118,14 @@ export function ProfileView(): JSX.Element {
           <button
             className="pxbtn"
             onClick={() => void exportBundle()}
-            title="Export your profile page — a single HTML file you can post anywhere"
+            title="Export your profile, favorites, top artists, and public lists and reviews"
           >
             SHARE PROFILE PAGE
           </button>
         </header>
         <p className="text-xs" style={{ color: 'var(--muted)' }}>
-          Local-first and private by default — nothing leaves your machine. The privacy flag on each item only governs what a
-          future export or sync would include.
+          Nothing is uploaded. The exported page includes your profile, favorites, top artists, and only lists and reviews marked public.
+          Local and friends-only items stay out of the export. Review the file before sharing it.
         </p>
 
         {freshProfile && (

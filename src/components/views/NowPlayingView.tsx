@@ -618,8 +618,8 @@ export function NowPlayingView(): JSX.Element {
             <SpectrumPanel
               current={current}
               duration={current.duration ?? 0}
-              aiAssistReady={!!settings?.openaiApiKey}
-              aiModel={settings?.openaiModel ?? null}
+              aiAssistReady={settings?.aiAssistRuntime?.ready ?? !!settings?.openaiApiKey}
+              aiModel={settings?.aiAssistRuntime?.model ?? settings?.openaiModel ?? null}
               spectrumStyle={spectrumStyle}
               onSpectrumStyleChange={setSpectrumStyle}
             />
@@ -653,8 +653,8 @@ export function NowPlayingView(): JSX.Element {
                   <LinerNotesPanel
                     track={current}
                     lyrics={{ lines: lyrics.lines, plain: lyrics.plain }}
-                    aiAssistReady={!!settings?.openaiApiKey}
-                    aiModel={settings?.openaiModel ?? null}
+                    aiAssistReady={settings?.aiAssistRuntime?.ready ?? !!settings?.openaiApiKey}
+                    aiModel={settings?.aiAssistRuntime?.model ?? settings?.openaiModel ?? null}
                   />
                 ) : sideTab === 'album' ? (
                   <div className="flex min-h-0 flex-col overflow-y-auto">
@@ -917,6 +917,14 @@ function PracticeLoopWatcher({ practiceLoop }: { practiceLoop: PracticeLoop }): 
   const currentTime = usePlayerStore((s) => s.currentTime);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const seek = usePlayerStore((s) => s.seek);
+  const engine = usePlayerStore((s) => s.engine);
+  const looping = practiceLoop.enabled && canEnablePracticeLoop(practiceLoop);
+  // Each wrap is a seek; the engine keeps a looping track on the decks,
+  // which seek in place instead of restarting a decoder every pass.
+  useEffect(() => {
+    engine.setPracticeLoopActive(looping);
+    return () => engine.setPracticeLoopActive(false);
+  }, [engine, looping]);
   useEffect(() => {
     if (!isPlaying || !shouldRestartPracticeLoop(practiceLoop, currentTime)) return;
     seek(practiceLoop.start ?? 0);
@@ -1299,6 +1307,13 @@ function Stat({
   );
 }
 
+// An OS file drag (e.g. from Windows Explorer) carries no text/plain — only
+// an internal row drag sets that via onDragStart below. Row reorder must
+// never treat a file drop as a reorder gesture.
+function hasDraggedFiles(dataTransfer: DataTransfer): boolean {
+  return Array.from(dataTransfer.types).includes('Files');
+}
+
 function QueueRow({
   track,
   index,
@@ -1371,13 +1386,23 @@ function QueueRow({
         onDragStart();
       }}
       onDragOver={(event) => {
+        // Let a file drag fall through uncaught: App's own dropzone (which
+        // does preventDefault) is an ancestor, so the event still resolves
+        // to a drop there — this row just declines to be its target.
+        if (hasDraggedFiles(event.dataTransfer)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'move';
         onDragOverRow();
       }}
       onDrop={(event) => {
+        // Same fallthrough: a dropped OS file must open/play via App, not
+        // reorder the queue. An empty text/plain (which a file drag also
+        // has) reads as Number('') === 0, a valid index, so getData is
+        // checked for content before parsing.
+        if (hasDraggedFiles(event.dataTransfer)) return;
         event.preventDefault();
-        const transferIndex = Number(event.dataTransfer.getData('text/plain'));
+        const transferData = event.dataTransfer.getData('text/plain');
+        const transferIndex = transferData ? Number(transferData) : NaN;
         onDropRow(Number.isInteger(transferIndex) ? transferIndex : null);
       }}
       onDragEnd={onDragEnd}

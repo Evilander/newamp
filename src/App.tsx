@@ -71,6 +71,39 @@ export default function App(): JSX.Element {
   const [showSplash, setShowSplash] = useState(() => !inElectron);
   const [tutorialDismissed, setTutorialDismissed] = useState(false);
 
+  // Drag chrome belongs to the gesture, not to whatever async import/scan it
+  // triggers. A drop outside every dropzone, Escape, alt-tab/window blur, and
+  // a cancelled OS-level drag all reach no in-app dropzone handler, so the
+  // border that gesture raised would otherwise never clear. Catch all of
+  // those terminal paths globally instead of trusting bubbling.
+  useEffect(() => {
+    const clearDrag = () => setDropActive(false);
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setDropActive(false);
+      setDropMessage(null);
+    };
+    window.addEventListener('drop', clearDrag, true);
+    window.addEventListener('dragend', clearDrag, true);
+    window.addEventListener('blur', clearDrag);
+    window.addEventListener('keydown', onEscape);
+    return () => {
+      window.removeEventListener('drop', clearDrag, true);
+      window.removeEventListener('dragend', clearDrag, true);
+      window.removeEventListener('blur', clearDrag);
+      window.removeEventListener('keydown', onEscape);
+    };
+  }, []);
+
+  // Every dropMessage is a temporary status readout, never a state the user
+  // has to dismiss themselves — expire it here instead of scattering a
+  // setTimeout after every setDropMessage call site.
+  useEffect(() => {
+    if (!dropMessage) return undefined;
+    const timer = window.setTimeout(() => setDropMessage(null), 3600);
+    return () => window.clearTimeout(timer);
+  }, [dropMessage]);
+
   async function handleOpenFiles(paths: string[]) {
     if (!paths.length) return null;
     try {
@@ -116,7 +149,6 @@ export default function App(): JSX.Element {
       setDropMessage(appliedSkins.length
         ? `Applied skin ${appliedSkins[appliedSkins.length - 1]}.`
         : 'Could not apply the dropped skin.');
-      window.setTimeout(() => setDropMessage(null), 3600);
       return;
     }
 
@@ -133,7 +165,6 @@ export default function App(): JSX.Element {
     } else {
       setDropMessage(appliedSkins.length ? `Applied skin ${appliedSkins[appliedSkins.length - 1]}.` : 'No playable audio was found in the dropped items.');
     }
-    window.setTimeout(() => setDropMessage(null), 3600);
   }
 
   useEffect(() => {
@@ -368,7 +399,10 @@ export default function App(): JSX.Element {
           if (!hasDraggedFiles(e.dataTransfer)) return;
           e.preventDefault();
           setDropActive(false);
-          void handleDroppedFiles(e.dataTransfer);
+          void handleDroppedFiles(e.dataTransfer).catch((error) => {
+            console.error('drop failed', error);
+            setDropMessage('Could not read this drop. Try File > Open.');
+          });
         }}
       >
         <TitleBar />
@@ -407,7 +441,17 @@ export default function App(): JSX.Element {
           </Suspense>
         )}
         <Transport />
-        {(dropActive || dropMessage) && <AppDropOverlay message={dropMessage} active={dropActive} />}
+        {dropActive && <AppDropOverlay />}
+        {dropMessage && (
+          <div
+            role="status"
+            data-newamp-drop-status
+            className="pointer-events-none absolute bottom-3 left-3 right-3 z-50 rounded px-3 py-2 text-center text-[13px]"
+            style={{ background: 'var(--panel)', color: 'var(--ink)', border: '1px solid var(--line)' }}
+          >
+            {dropMessage}
+          </div>
+        )}
         <QuickPlayPalette />
         <FirstRunHints />
       </div>
@@ -576,21 +620,18 @@ function clampShortcutNumber(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function AppDropOverlay({ active, message }: { active: boolean; message: string | null }): JSX.Element {
+function AppDropOverlay(): JSX.Element {
   return (
     <div
       data-newamp-app-drop-overlay
-      data-newamp-app-drop-active={active ? 'true' : 'false'}
       className="pointer-events-none absolute inset-3 z-50 flex items-center justify-center"
       style={{
         border: '1px dashed var(--accent)',
-        background: active ? 'rgba(0,0,0,0.74)' : 'rgba(0,0,0,0.58)',
+        background: 'rgba(0,0,0,0.74)',
         boxShadow: '0 0 28px var(--accent-glow)',
       }}
     >
-      <div className="lcd-text text-[18px]">
-        {message ?? 'Drop music, playlists, folders, or skins'}
-      </div>
+      <div className="lcd-text text-[18px]">Drop music, playlists, folders, or skins</div>
     </div>
   );
 }

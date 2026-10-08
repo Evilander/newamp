@@ -1,4 +1,4 @@
-// Pure allowlist decision for the `newamp:` audio protocol (todo 005).
+// Pure allowlist decision for the `newamp:` audio protocol.
 // A path is legitimately playable only when it arrived through one of the
 // app's own flows: library scanning (roots / DB), session open-with /
 // drag-drop, or a podcast download. Everything else is denied so the

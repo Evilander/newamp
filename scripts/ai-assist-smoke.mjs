@@ -81,6 +81,27 @@ assert.equal(result.model, 'gpt-5.4-mini');
 assert.equal(result.headline, 'A brittle local-library classic');
 assert.equal(result.contextCards.length, 2);
 
+const savedEndpoint = process.env.NEWAMP_OPENAI_BASE_URL;
+const savedKey = process.env.NEWAMP_OPENAI_API_KEY;
+const savedModel = process.env.NEWAMP_OPENAI_MODEL;
+try {
+  process.env.NEWAMP_OPENAI_BASE_URL = 'http://127.0.0.1:47831/v1/';
+  process.env.NEWAMP_OPENAI_API_KEY = 'local-gateway-key';
+  process.env.NEWAMP_OPENAI_MODEL = 'endpoint-model';
+  await generateOpenAiLinerNotes({ openaiApiKey: 'paid-key', openaiModel: 'gpt-5.4-mini' }, input, {
+    fetchImpl: async (url, init) => {
+      assert.equal(url, 'http://127.0.0.1:47831/v1/responses');
+      assert.equal(init.headers.Authorization, 'Bearer local-gateway-key');
+      assert.equal(JSON.parse(init.body).model, 'endpoint-model');
+      return fakeResponse({ output_text: JSON.stringify({ headline: 'local', summary: 'local', listeningNotes: [], contextCards: [], caution: null }) }, 200);
+    },
+  });
+} finally {
+  for (const [name, value] of [['NEWAMP_OPENAI_BASE_URL', savedEndpoint], ['NEWAMP_OPENAI_API_KEY', savedKey], ['NEWAMP_OPENAI_MODEL', savedModel]]) {
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
+}
+
 console.log(JSON.stringify({ ok: true, model: result.model, structured: true }, null, 2));
 
 function fakeResponse(body, status) {

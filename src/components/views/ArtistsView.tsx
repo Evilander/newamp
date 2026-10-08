@@ -77,11 +77,17 @@ export function ArtistsView(): JSX.Element {
   }, [artistQuery, refreshSeed]);
 
   useEffect(() => {
+    let cancelled = false;
+    setTracks([]);
     if (!selected) {
-      setTracks([]);
       return;
     }
-    api.getArtistTracks(selected).then(setTracks).catch(() => undefined);
+    api.getArtistTracks(selected).then((rows) => {
+      if (!cancelled) setTracks(rows);
+    }).catch((err) => {
+      if (!cancelled) pushToast({ tone: 'error', title: 'Could not load artist tracks', detail: err instanceof Error ? err.message : undefined });
+    });
+    return () => { cancelled = true; };
   }, [selected]);
 
   useEffect(() => {
@@ -95,6 +101,7 @@ export function ArtistsView(): JSX.Element {
     setFactStatus('loading');
     fetchArtistFacts(selected, ctrl.signal)
       .then((next) => {
+        if (ctrl.signal.aborted) return;
         setArtistFact(next);
         setFactStatus(next ? 'ok' : 'none');
       })

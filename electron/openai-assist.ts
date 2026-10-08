@@ -70,17 +70,18 @@ export async function generateOpenAiLinerNotes(
   input: AiLinerNotesInput,
   options: OpenAiAssistOptions = {},
 ): Promise<AiLinerNotesResult> {
-  const apiKey = settings.openaiApiKey?.trim();
+  const baseUrl = (process.env.NEWAMP_OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+  const apiKey = (process.env.NEWAMP_OPENAI_BASE_URL ? process.env.NEWAMP_OPENAI_API_KEY : settings.openaiApiKey)?.trim();
   if (!apiKey) throw new Error('ChatGPT assist key is not configured.');
 
-  const model = normalizeModel(settings.openaiModel);
+  const model = normalizeModel(process.env.NEWAMP_OPENAI_BASE_URL ? process.env.NEWAMP_OPENAI_MODEL || settings.openaiModel : settings.openaiModel);
   const cleanInput = normalizeLinerNotesInput(input);
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 18_000);
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? (process.env.NEWAMP_OPENAI_BASE_URL ? 120_000 : 18_000));
 
   try {
-    const response = await fetchImpl('https://api.openai.com/v1/responses', {
+    const response = await fetchImpl(`${baseUrl}/responses`, {
       method: 'POST',
       signal: controller.signal,
       headers: {
