@@ -127,6 +127,8 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
   const [scanBusy, setScanBusy] = useState(false);
   const albumListRef = useRef<HTMLDivElement>(null);
   const albumPageRequestRef = useRef(false);
+  const albumRequestGeneration = useRef(0);
+  useEffect(() => () => { albumRequestGeneration.current += 1; }, []);
   const albumScrollTopRef = useRef(albumViewSnapshot.scrollTop);
   const hydratedSnapshotRef = useRef(albumViewSnapshot.albums.length > 0 || !!albumViewSnapshot.selected);
   const [albumGridColumns, setAlbumGridColumns] = useState(1);
@@ -287,6 +289,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
       return undefined;
     }
     let cancelled = false;
+    const generation = ++albumRequestGeneration.current;
     albumPageRequestRef.current = false;
     albumScrollTopRef.current = 0;
     albumViewSnapshot.scrollTop = 0;
@@ -306,7 +309,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
         offset: 0,
       })
       .then((rows) => {
-        if (cancelled) return;
+        if (cancelled || generation !== albumRequestGeneration.current) return;
         setAlbums(rows.slice(0, ALBUM_PAGE_SIZE));
         setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
       })
@@ -316,7 +319,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
         // UI showed an empty album list with no clue why. Surface the
         // failure to the console and as an error toast so the next backend
         // bug is visible instead of looking like an empty library.
-        if (!cancelled) {
+        if (!cancelled && generation === albumRequestGeneration.current) {
           console.error('[newamp] getAlbums failed:', err);
           setAlbums([]);
           setHasMoreAlbums(false);
@@ -328,10 +331,11 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
         }
       })
       .finally(() => {
-        if (!cancelled) setLoadingAlbums(false);
+        if (!cancelled && generation === albumRequestGeneration.current) setLoadingAlbums(false);
       });
     return () => {
       cancelled = true;
+      albumRequestGeneration.current += 1;
     };
   }, [albumQuery, showMissingArtOnly, albumSort, randomSeed]);
 
@@ -394,6 +398,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
 
   async function loadMoreAlbums(): Promise<void> {
     if (loadingAlbums || albumPageRequestRef.current || !hasMoreAlbums) return;
+    const generation = albumRequestGeneration.current;
     albumPageRequestRef.current = true;
     setLoadingAlbums(true);
     try {
@@ -405,15 +410,22 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
         limit: ALBUM_PAGE_SIZE + 1,
         offset: albums.length,
       });
+      if (generation !== albumRequestGeneration.current) return;
       setAlbums((currentAlbums) => [...currentAlbums, ...rows.slice(0, ALBUM_PAGE_SIZE)]);
       setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
+    } catch (err) {
+      if (generation === albumRequestGeneration.current) pushToast({ tone: 'error', title: 'Could not load more albums', detail: err instanceof Error ? err.message : undefined });
     } finally {
-      albumPageRequestRef.current = false;
-      setLoadingAlbums(false);
+      if (generation === albumRequestGeneration.current) {
+        albumPageRequestRef.current = false;
+        setLoadingAlbums(false);
+      }
     }
   }
 
   async function reloadAlbumsAfterScan(): Promise<void> {
+    const generation = ++albumRequestGeneration.current;
+    albumPageRequestRef.current = false;
     setLoadingAlbums(true);
     try {
       const pageSize = Math.max(ALBUM_PAGE_SIZE, albums.length || ALBUM_PAGE_SIZE);
@@ -425,10 +437,11 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
         limit: pageSize + 1,
         offset: 0,
       });
+      if (generation !== albumRequestGeneration.current) return;
       setAlbums(rows.slice(0, pageSize));
       setHasMoreAlbums(rows.length > pageSize);
     } finally {
-      setLoadingAlbums(false);
+      if (generation === albumRequestGeneration.current) setLoadingAlbums(false);
     }
   }
 

@@ -231,6 +231,13 @@ export class RadioBrain {
     return { sockets: this.sockets.size, sseClients: this.sseCleanups.size };
   }
 
+  revokeClients(): void {
+    for (const [res, cleanup] of this.sseCleanups) {
+      cleanup();
+      res.end();
+    }
+  }
+
   /**
    * Constant-time token check. Accepts `?token=` (playlist/audio URLs — VLC
    * cannot send headers) or the `x-newamp-token` header (the remote page).
@@ -306,12 +313,14 @@ export class RadioBrain {
       if (path === '/' || path === '/index.html') {
         return this.respondStatusPage(res);
       }
+      // Generated lists for another player: a track whose file is missing
+      // could only fail there, so it is left out (has:file).
       if (path === '/library.m3u') {
-        const ids = this.opts.library.getTrackIds({ sort: 'artist', limit: M3U_LIMIT_TRACKS });
+        const ids = this.opts.library.getTrackIds({ search: 'has:file', sort: 'artist', limit: M3U_LIMIT_TRACKS });
         return this.respondM3u(res, req, ids, 'library');
       }
       if (path === '/random.m3u') {
-        const all = this.opts.library.getTrackIds({ sort: 'artist', limit: M3U_LIMIT_TRACKS });
+        const all = this.opts.library.getTrackIds({ search: 'has:file', sort: 'artist', limit: M3U_LIMIT_TRACKS });
         shuffleInPlace(all);
         return this.respondM3u(res, req, all.slice(0, 200), 'random');
       }
@@ -343,20 +352,35 @@ export class RadioBrain {
   }
 
   private respondNowEvents(req: IncomingMessage, res: ServerResponse): void {
+    const admittedToken = this.opts.getToken();
+    let closed = false;
     res.statusCode = 200;
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders?.();
     const send = (state: RemoteNowPlaying | null): void => {
+      if (closed) return;
+      if (!admittedToken || this.opts.getToken() !== admittedToken) {
+        this.sseCleanups.get(res)?.();
+        res.end();
+        return;
+      }
       res.write(`data: ${JSON.stringify(state)}\n\n`);
     };
     send(this.opts.getNowPlaying());
     const off = this.opts.onNowPlaying(send);
     // Heartbeat keeps proxies/phone radios from reaping the idle socket.
-    const heartbeat = setInterval(() => res.write(': hb\n\n'), 25_000);
+    const heartbeat = setInterval(() => {
+      if (this.opts.getToken() !== admittedToken) {
+        this.sseCleanups.get(res)?.();
+        res.end();
+      } else res.write(': hb\n\n');
+    }, 25_000);
     heartbeat.unref?.();
     const cleanup = (): void => {
+      if (closed) return;
+      closed = true;
       clearInterval(heartbeat);
       off();
       this.sseCleanups.delete(res);

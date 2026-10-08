@@ -24,8 +24,8 @@ import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { LibraryStore, LibraryUnavailableError } from './library.js';
 import { LibraryWatcher } from './library-watcher.js';
 import { findLocalLyricsForTrack } from './local-lyrics.js';
-import { SettingsStore } from './settings.js';
-import { Scanner } from './scanner.js';
+import { SettingsStore, withAiAssistRuntime } from './settings.js';
+import { readTrackFile, Scanner } from './scanner.js';
 import {
   buildLocalGuitarTabDocument,
   fetchUltimateGuitarTab,
@@ -57,7 +57,8 @@ import {
 import { fileRangeResponse, seekableTranscodeResponse } from './audio-serve.js';
 import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac, transcodeCacheStatus } from './transcode-cache.js';
 import { finishWebmToMp4 } from './video-mux.js';
-import { isAllowedAudioPath } from './audio-path-policy.js';
+import { authorizeAudioProtocolPath } from './audio-protocol-authorize.js';
+import { closeAllGaplessSessions, registerGaplessTransport } from './gapless-transport.js';
 import { analyzeTrackDna, killAllDnaFfmpeg } from './dna-analyzer.js';
 import { getSongScore, initScoreCache, killAllScoreFfmpeg } from './score-analyzer.js';
 import { RadioBrain } from './radio-brain.js';
@@ -149,6 +150,11 @@ const smokeMode =
   uiDiscoverSmoke ||
   exclusiveUiSmoke ||
   screenshotGallery;
+// Smokes play real audio to prove the clock moves and track changes are clean,
+// and nobody at the machine needs to hear the test tones. Muted, Chromium
+// still renders and times the audio; it just never reaches the speakers.
+// NEWAMP_SMOKE_AUDIBLE=1 to listen in.
+if (smokeMode && process.env.NEWAMP_SMOKE_AUDIBLE !== '1') app.commandLine.appendSwitch('mute-audio');
 // Hardware acceleration defaults ON. NewAmp is a real-time WebGL visualizer
 // (Butterchurn) plus GPU-composited, audio-reactive chrome — it MUST run on the
 // GPU to feel light. The historical default of software rendering was a
@@ -523,9 +529,9 @@ async function resolveExclusiveSource(trackId: number): Promise<ExclusiveTrackSo
 }
 let pendingOpenFiles = collectOpenFileArgs(process.argv);
 
-// Session opened-files allowlist for the `newamp:` protocol (todo 005). Every
+// Session opened-files allowlist for the `newamp:` protocol. Every
 // open-file entry point (CLI argv, macOS open-file event, second-instance
-// argv, drag-drop via the open:files IPC) registers its realpathed targets so
+// argv, drag-drop via the open:files IPC) registers its targets so
 // the protocol handler can serve them even when they live outside the library.
 const openedAudioFiles = new Set<string>();
 // Lazily realpathed podcast downloads root. Cached on first success only —
@@ -533,11 +539,17 @@ const openedAudioFiles = new Set<string>();
 // cached null would 403 podcast playback forever.
 let podcastDownloadsRealRoot: string | null = null;
 
+// Both spellings of an opened file are authorized. The renderer asks for the
+// path it was handed, and the first check compares that as written, before
+// anything touches the disk or network; the second compares the real path.
+// A file opened through a symlink or junction (macOS /tmp is /private/tmp)
+// only matches the first check by the path it was opened as.
 async function allowOpenedAudioFile(path: string): Promise<void> {
+  openedAudioFiles.add(resolve(path).replace(/\\/g, '/'));
   try {
     openedAudioFiles.add((await realpath(path)).replace(/\\/g, '/'));
   } catch {
-    /* vanished/unreadable — stays unauthorized */
+    /* vanished/unreadable — the request 404s at the existence check */
   }
 }
 
@@ -1418,7 +1430,7 @@ function registerMediaShortcuts(): void {
 // Radio Brain settings fields — a settings:set patch only needs to poke the
 // reconciler when one of these actually changed, not on every keystroke
 // elsewhere in Settings.
-const RADIO_BRAIN_SETTINGS_KEYS = ['radioBrainEnabled', 'radioBrainPort'] as const;
+const RADIO_BRAIN_SETTINGS_KEYS = ['radioBrainEnabled', 'radioBrainPort', 'radioBrainToken'] as const;
 
 function patchTouchesRadioBrain(patch: unknown): boolean {
   if (!patch || typeof patch !== 'object') return false;
@@ -1580,35 +1592,61 @@ function createScannerService(store: LibraryStore): Scanner {
 // mutates the library out from under it. Cleared again in
 // resumeLibraryMutations() / reloadRuntimeStores().
 let libraryMutationsQuiesced = false;
+let restoreInProgress = false;
+let backupInProgress = false;
 
 function createLibraryWatcherService(): LibraryWatcher {
-  return new LibraryWatcher((targets) => {
-    if (libraryMutationsQuiesced || !settings.get().libraryAutoWatch || !targets.length) return;
-    void reconcileWatchedTargets(targets);
-  });
+  return new LibraryWatcher(
+    (targets) => {
+      if (libraryMutationsQuiesced || !settings.get().libraryAutoWatch || !targets.length) return;
+      void reconcileWatchedTargets(targets);
+    },
+    {
+      // A drive or share that comes back: an ordinary (incremental) scan of it
+      // clears the missing marks its tracks got while it was away.
+      onRootAvailable: (root) => {
+        if (libraryMutationsQuiesced || !settings.get().libraryAutoWatch) return;
+        void scanner.start([root]);
+      },
+    },
+  );
 }
 
-// A watched path can vanish for a moment without being deleted — editor
-// save-by-rename, sync clients, network drives. Pruning on first sight
-// destroyed the track and all of its play history/ratings for a file that
-// came right back. Re-check after a short debounce: only prune what is still
-// gone, and let anything that reappeared go through the rescan below as an
-// ordinary modification.
-const PRUNE_RECHECK_DELAY_MS = 1500;
+// A watched path can vanish for a while without being deleted — editor
+// save-by-rename, sync clients, remounts, network drives. Deleting what was
+// gone destroyed the track with its history, ratings and playlist places, and
+// the file came back as a new track with none of them. Absence is never
+// permission to delete: whatever is still gone after a short re-check is only
+// marked unavailable, and the rescan below clears the mark (same id) for
+// anything that is back. Deleting stays an explicit user action.
+const MISSING_RECHECK_DELAY_MS = 1500;
 
 let watcherReconcile: Promise<void> = Promise.resolve();
 
 function reconcileWatchedTargets(targets: string[]): Promise<void> {
   const run = watcherReconcile.then(async () => {
-    await new Promise((resolve) => setTimeout(resolve, PRUNE_RECHECK_DELAY_MS));
+    await new Promise((resolve) => setTimeout(resolve, MISSING_RECHECK_DELAY_MS));
     const stillMissing = targets.filter((target) => !existsSync(target));
-    if (stillMissing.length) library.pruneMissingTracks(stillMissing);
+    if (stillMissing.length) library.markTracksMissing(stillMissing);
     void scanner.start(targets, { force: true });
   });
   watcherReconcile = run.catch((err) => {
     console.warn(`[newamp] library watcher reconcile failed: ${err instanceof Error ? err.message : String(err)}`);
   });
   return run;
+}
+
+// A track that predates tracked edits (still queued for adoption), or holds an
+// edit whose file value isn't known yet, has its file read before a metadata
+// edit or lookup lands on it, so the edit records what the file really says
+// and "reset to file" has something to go back to. Outside the scan queue: a
+// library scan can hold that for minutes. An unreadable file just means the
+// file value stays unknown for now.
+async function readTrackBeforeMetadataEdit(id: number): Promise<void> {
+  const path = library.pathNeedingFileRead(id);
+  if (!path) return;
+  const reading = await readTrackFile(path);
+  if (reading) library.upsertTracks([reading]);
 }
 
 // Quiesces the two automatic sources of library mutation — the watcher's
@@ -1634,6 +1672,10 @@ function resumeLibraryMutations(): void {
 // from library.db/settings.json on disk — see createSupportBackup's
 // librarySnapshot/settingsSnapshot for why that distinction matters.
 async function createBackupFromLiveStores(userData: string): Promise<SupportBackupResult> {
+  // podcasts.json is copied straight off disk by createSupportBackup (it has
+  // no in-memory snapshot input like settings/library do) — land any pending
+  // debounced progress write first so the backup isn't up to ~800ms stale.
+  podcastStore.flushProgressSync();
   return createSupportBackup({
     userDataPath: userData,
     settingsPath: join(userData, 'settings.json'),
@@ -1644,6 +1686,11 @@ async function createBackupFromLiveStores(userData: string): Promise<SupportBack
 }
 
 async function reloadRuntimeStores(userData: string): Promise<void> {
+  // The server captures the library instance, so it must not survive a store swap.
+  if (radioBrain) {
+    await radioBrain.stop();
+    radioBrain = null;
+  }
   libraryMutationsQuiesced = false;
   settings = new SettingsStore(join(userData, 'settings.json'));
   lastfmOutbox = new LastfmScrobbleOutbox(join(userData, 'lastfm-scrobbles.json'));
@@ -1689,56 +1736,30 @@ function registerAudioProtocol(): void {
     try {
       const url = new URL(request.url);
       if (url.hostname === 'server') return await musicServers.stream(request);
-      // host is "track" or "file", pathname holds the encoded path
-      const raw = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
-      // On Windows we get something like "K:/music/foo/bar.mp3"
-      const filePath = resolve(raw);
-      if (!existsSync(filePath)) {
-        return new Response('Not found', { status: 404 });
-      }
-      // Allowlist gate (todo 005): only paths that arrived through the app's
-      // own flows — library roots, library DB, session open-with/drag-drop,
-      // podcast downloads — may be served. Decided BEFORE any ffmpeg/cache
-      // work so an unauthorized path never reaches the persistent cache.
-      // TOCTOU: every downstream consumer gets `real`, the exact validated
-      // target, so a symlink swap cannot cache another file under this key.
-      let real: string;
-      try {
-        real = await realpath(filePath);
-      } catch {
-        return new Response('Not found', { status: 404 });
-      }
-      const libraryRoots: string[] = [];
-      for (const root of settings.get().libraryRoots) {
-        try {
-          libraryRoots.push(await realpath(root));
-        } catch {
-          /* missing/unreadable root contributes nothing */
-        }
-      }
-      let isLibraryTrack = false;
-      try {
-        isLibraryTrack = (library?.getTracksByPaths?.([filePath, real])?.length ?? 0) > 0;
-      } catch {
-        /* library DB not open yet → not a library track */
-      }
-      const allowed = isAllowedAudioPath({
-        realPath: real,
-        libraryRoots,
+      // Decode + resolve + two-phase allowlist authorization lives in
+      // audio-protocol-authorize.ts, extracted so it's directly
+      // unit-testable (scripts/audio-url-roundtrip-test.mjs) rather than
+      // only reachable by booting Electron. Phase one runs on pure strings
+      // BEFORE any fs call: existsSync/realpath on an unvalidated UNC path
+      // alone opens an SMB session to whatever host it names — see that
+      // module's header for why the ordering, not just the final verdict,
+      // is what's load-bearing here.
+      const authResult = await authorizeAudioProtocolPath(url, {
+        libraryRoots: settings.get().libraryRoots,
         openedFiles: openedAudioFiles,
-        podcastRoot: await getPodcastDownloadsRealRoot(),
-        isLibraryTrack,
+        getPodcastDownloadsRealRoot,
+        getTracksByPaths: (paths) => library?.getTracksByPaths?.(paths),
       });
-      if (!allowed) {
-        return new Response('Forbidden', {
-          status: 403,
-          headers: { 'X-Newamp-Reason': 'path-not-allowed' },
-        });
+      if (!authResult.ok) {
+        return authResult.status === 404
+          ? new Response('Not found', { status: 404 })
+          : new Response('Forbidden', { status: 403, headers: { 'X-Newamp-Reason': 'path-not-allowed' } });
       }
+      const { real } = authResult;
       if (playbackMode(real) === 'ffmpeg') {
         // Seekable path: serve the finalized cached FLAC (range-capable) when it
         // already exists. First play streams a SEEKABLE synthesized WAV instead
-        // of awaiting the full encode (todo 001) — audio starts in tens of ms
+        // of awaiting the full encode — audio starts in tens of ms
         // AND scrubbing works (PCM byte offsets map linearly to seconds, so a
         // Range request becomes an `ffmpeg -ss` spawn) — while the FLAC cache
         // warms in the background for cheap repeat plays.
@@ -1858,7 +1879,10 @@ function rendererMimeType(filePath: string): string {
 
 function registerIpc(): void {
   musicServers = registerMusicServerIpc(app.getPath('userData'));
-  registerHistoryImportIpc(() => library, () => settings.get().lastfmApiKey?.trim() ?? '');
+  registerHistoryImportIpc(() => {
+    if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
+    return library;
+  }, () => settings.get().lastfmApiKey?.trim() ?? '');
   ipcMain.handle('library:scan', async (_e, roots?: string[]) => {
     const configuredRoots = settings.get().libraryRoots;
     const fallbackRoots = roots && roots.length
@@ -2149,17 +2173,35 @@ function registerIpc(): void {
     if (!track) return [];
     return searchMusicBrainzMetadata(track);
   });
-  ipcMain.handle('metadata:apply', async (_e, id: number, candidate: MetadataLookupCandidate) =>
-    library.applyMetadataPatch(id, candidate),
-  );
-  ipcMain.handle('metadata:edit', async (_e, id: number, patch: TrackMetadataPatchInput) =>
-    library.applyManualMetadataPatch(id, patch),
-  );
+  ipcMain.handle('metadata:apply', async (_e, id: number, candidate: MetadataLookupCandidate) => {
+    await readTrackBeforeMetadataEdit(id);
+    return library.applyMetadataPatch(id, candidate);
+  });
+  ipcMain.handle('metadata:edit', async (_e, id: number, patch: TrackMetadataPatchInput) => {
+    await readTrackBeforeMetadataEdit(id);
+    return library.applyManualMetadataPatch(id, patch);
+  });
+  ipcMain.handle('metadata:reset-adopted', async () => library.resetAdoptedMetadataOverrides());
   ipcMain.handle('library:get-stats', async () => library.getStats());
   ipcMain.handle('library:get-health', async () => library.getLibraryHealth());
-  ipcMain.handle('library:prune-missing', async (_e, targets?: string[]) =>
-    library.pruneMissingTracks(targets),
+  ipcMain.handle('library:prune-missing-preview', async (_e, targets?: string[]) =>
+    library.previewPruneMissingTracks(Array.isArray(targets) ? targets : undefined, settings.get().libraryRoots),
   );
+  ipcMain.handle('library:prune-missing', async (_e, targets?: string[]) => {
+    const scope = Array.isArray(targets) ? targets : undefined;
+    const roots = settings.get().libraryRoots;
+    if (!library.previewPruneMissingTracks(scope, roots).tracks) return library.pruneMissingTracks(scope, roots);
+    // Removing a track takes its plays, ratings, bookmarks, edits and playlist
+    // places with it. Back the live stores up first, the same way the Support
+    // backup does, and delete nothing if that fails.
+    await quiesceLibraryMutations();
+    try {
+      const backup = await createBackupFromLiveStores(app.getPath('userData'));
+      return { ...library.pruneMissingTracks(scope, roots), backupPath: backup.backupPath };
+    } finally {
+      resumeLibraryMutations();
+    }
+  });
   ipcMain.handle('history:get', async (_e, opts) => library.getListeningHistory(opts ?? {}));
   ipcMain.handle('history:insights', async (_e, opts) => library.getListeningInsights(opts ?? {}));
   ipcMain.handle('history:wrapped', async (_e, opts) => library.getWrappedStats(opts ?? {}));
@@ -2220,9 +2262,19 @@ function registerIpc(): void {
     library.recordSkip(id, Date.now(), position ?? 0),
   );
 
-  ipcMain.handle('settings:get', async () => settings.get());
+  // Sample-accurate gapless for the shared output: same library-row gate and
+  // format probe as exclusive playback.
+  registerGaplessTransport(
+    ipcMain,
+    resolveExclusiveSource,
+    (sender) => !!mainWin && !mainWin.isDestroyed() && sender === mainWin.webContents,
+  );
+
+  ipcMain.handle('settings:get', async () => withAiAssistRuntime(settings.get()));
   ipcMain.handle('settings:set', async (_e, patch) => {
-    const updated = settings.set(patch);
+    if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
+    settings.set(patch);
+    if (patch && typeof patch === 'object' && 'radioBrainToken' in patch) radioBrain?.revokeClients();
     if (patchTouchesLibraryWatch(patch)) syncLibraryWatcher();
     if (patchTouchesRadioBrain(patch)) {
       await queueRadioBrainSync();
@@ -2233,7 +2285,7 @@ function registerIpc(): void {
       exclusivePlaySeq++;
       exclusiveOutput?.stop();
     }
-    return updated;
+    return withAiAssistRuntime(settings.get());
   });
 
   // ---- Bit-Perfect Exclusive output (native WASAPI, Windows) ----------------
@@ -2399,20 +2451,26 @@ function registerIpc(): void {
   ipcMain.handle('settings:skin-import-file', async (_e, skinPath: string) => importSkinFile(skinPath));
   ipcMain.handle('app:support-diagnostics', async () => buildSupportDiagnostics());
   ipcMain.handle('app:create-backup', async () => {
+    if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
+    if (backupInProgress) throw new Error('A backup is already running.');
+    backupInProgress = true;
     const userData = app.getPath('userData');
     // library.db/settings.json on disk can lag behind the live stores by up
     // to their batching window (30s for play/skip stats, 800ms for the
     // resumeState autosave) — quiesce the watcher/scanner and read the
     // snapshot straight out of memory instead of copying a possibly-stale
     // file. Resume even if the backup itself throws.
-    await quiesceLibraryMutations();
     try {
+      await quiesceLibraryMutations();
       return await createBackupFromLiveStores(userData);
     } finally {
       resumeLibraryMutations();
+      backupInProgress = false;
     }
   });
   ipcMain.handle('app:restore-backup', async () => {
+    if (restoreInProgress) throw new Error('A backup restoration is already running.');
+    if (backupInProgress) throw new Error('Wait for the current backup to finish.');
     const userData = app.getPath('userData');
     if (mainWin) {
       if (mainWin.isMinimized()) mainWin.restore();
@@ -2428,6 +2486,10 @@ function registerIpc(): void {
     const picked = mainWin ? await dialog.showOpenDialog(mainWin, options) : await dialog.showOpenDialog(options);
     if (picked.canceled || !picked.filePaths.length) return null;
     const backupPath = picked.filePaths[0]!;
+    if (restoreInProgress) throw new Error('A backup restoration is already running.');
+    if (backupInProgress) throw new Error('Wait for the current backup to finish.');
+    assertHistoryImportIdle();
+    restoreInProgress = true;
 
     // Stop the two automatic mutation sources FIRST, then take the pre-restore
     // safety snapshot from the live stores — taking it before quiescing (the
@@ -2435,21 +2497,29 @@ function registerIpc(): void {
     // to disk yet. quiesceLibraryMutations also drains the watcher's pending
     // reconcile, so a prune queued before the restore cannot land on the
     // restored library; reloadRuntimeStores below lifts the quiesce.
-    libraryWatcher?.stop();
-    await quiesceLibraryMutations();
-    const safety = await createBackupFromLiveStores(userData);
-
-    // Drain any write already in flight before either store's file gets
-    // replaced below. close()/flushSync() alone can return while an async
-    // flush's rename is still pending on the libuv thread pool — the
-    // in-flight write's own sequence check only stops it from starting a
-    // rename late, it can't stop one already dispatched from racing a rename
-    // this process issues afterwards. Waiting it out removes that race.
-    await library?.waitForPendingWrites();
-    library?.close();
-    await settings?.waitForPendingWrites();
-    settings?.flushSync();
+    let storesClosed = false;
     try {
+      libraryWatcher?.stop();
+      await quiesceLibraryMutations();
+      const safety = await createBackupFromLiveStores(userData);
+
+      // Drain pending renames before replacing store files. Keep the live
+      // stores if the safety snapshot or either drain fails.
+      await library?.waitForPendingWrites();
+      await settings?.waitForPendingWrites();
+      exclusiveOutput?.stop();
+      closeAllGaplessSessions();
+      if (radioBrain) {
+        await radioBrain.stop();
+        radioBrain = null;
+      }
+      // The podcast store outlives this function until the reload below. Land
+      // its pending progress now and cancel the timer, or that write fires
+      // after the restored podcasts.json is in place and puts the old one back.
+      podcastStore.flushProgressSync();
+      storesClosed = true;
+      library?.close();
+      settings?.flushSync();
       return await restoreSupportBackup({
         userDataPath: userData,
         settingsPath: join(userData, 'settings.json'),
@@ -2458,7 +2528,17 @@ function registerIpc(): void {
         safetyBackupPath: safety.backupPath,
       });
     } finally {
-      await reloadRuntimeStores(userData);
+      try {
+        if (storesClosed) {
+          await reloadRuntimeStores(userData);
+        } else {
+          resumeLibraryMutations();
+          syncLibraryWatcher();
+          await queueRadioBrainSync();
+        }
+      } finally {
+        restoreInProgress = false;
+      }
     }
   });
   ipcMain.handle('lastfm:start-auth', async () => {
@@ -2511,29 +2591,46 @@ function registerIpc(): void {
     await flushLastfmOutbox();
     return lastfmOutbox.status();
   });
+  // While a backup is being restored, a change to the outgoing podcast store
+  // would either be lost with it or be written over the restored file.
+  const assertPodcastsWritable = (): void => {
+    if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
+  };
   ipcMain.handle('podcasts:list', async () => podcastStore.listSubscriptions());
   ipcMain.handle('podcasts:subscribe', async (_e, url: string) => {
+    assertPodcastsWritable();
     const subscription = await fetchPodcastSubscription(url);
+    assertPodcastsWritable();
     return podcastStore.upsert(subscription.feed, subscription.episodes);
   });
   ipcMain.handle('podcasts:refresh', async (_e, url: string) => {
+    assertPodcastsWritable();
     const subscription = await fetchPodcastSubscription(url);
+    assertPodcastsWritable();
     return podcastStore.upsert(subscription.feed, subscription.episodes);
   });
   ipcMain.handle('podcasts:remove', async (_e, url: string) => {
+    assertPodcastsWritable();
     podcastStore.remove(url);
   });
-  ipcMain.handle('podcasts:progress', async (_e, input) => podcastStore.updateProgress(input));
-  ipcMain.handle('podcasts:download', async (_e, feedUrl: string, episodeId: string) =>
-    downloadPodcastEpisode(podcastStore, {
+  // Progress ticks arrive every few seconds during playback; dropping the ones
+  // that land mid-restore is better than failing them into the renderer.
+  ipcMain.handle('podcasts:progress', async (_e, input) => {
+    if (restoreInProgress) return null;
+    return podcastStore.updateProgress(input);
+  });
+  ipcMain.handle('podcasts:download', async (_e, feedUrl: string, episodeId: string) => {
+    assertPodcastsWritable();
+    return downloadPodcastEpisode(podcastStore, {
       feedUrl,
       episodeId,
       downloadsPath: join(app.getPath('userData'), 'podcast-downloads'),
-    }),
-  );
-  ipcMain.handle('podcasts:remove-download', async (_e, feedUrl: string, episodeId: string) =>
-    podcastStore.clearDownload(feedUrl, episodeId),
-  );
+    });
+  });
+  ipcMain.handle('podcasts:remove-download', async (_e, feedUrl: string, episodeId: string) => {
+    assertPodcastsWritable();
+    return podcastStore.clearDownload(feedUrl, episodeId);
+  });
   ipcMain.handle('lyrics:local', async (_e, trackId: number) => {
     const id = Math.trunc(Number(trackId));
     if (!Number.isFinite(id) || id <= 0) return null;
@@ -3132,12 +3229,18 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
       /* window manager refused; the fallback still proves pixels */
     }
     await new Promise((r) => setTimeout(r, 400));
-    const shot = await Promise.race([
-      detachedVizWin.webContents.capturePage(),
-      new Promise<null>((r) => setTimeout(() => r(null), 8000)),
-    ]);
-    let capture: { width: number; height: number; lit: number; sampled: number; litFraction: number; source: string };
-    if (shot) {
+    // MilkDrop picks a random preset, and some sit near black for a moment,
+    // so one shot can catch a dark beat. Take up to five and keep the
+    // brightest: a projector that really paints nothing is black in all of them.
+    let capture: { width: number; height: number; lit: number; sampled: number; litFraction: number; source: string; shots?: number } | null = null;
+    for (let shotIndex = 0; shotIndex < 5; shotIndex += 1) {
+      if (shotIndex > 0) await new Promise((r) => setTimeout(r, 700));
+      if (!detachedVizWin || detachedVizWin.isDestroyed()) break;
+      const shot = await Promise.race([
+        detachedVizWin.webContents.capturePage(),
+        new Promise<null>((r) => setTimeout(() => r(null), 8000)),
+      ]);
+      if (!shot) break;
       const { width, height } = shot.getSize();
       const bitmap = shot.toBitmap(); // BGRA
       let lit = 0;
@@ -3147,8 +3250,14 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
         if (lum > 36) lit += 1;
         sampled += 1;
       }
-      capture = { width, height, lit, sampled, litFraction: sampled ? lit / sampled : 0, source: 'capturePage' };
-    } else {
+      const litFraction = sampled ? lit / sampled : 0;
+      if (!capture || litFraction > capture.litFraction) {
+        capture = { width, height, lit, sampled, litFraction, source: 'capturePage' };
+      }
+      capture.shots = shotIndex + 1;
+      if (litFraction > 0.05) break;
+    }
+    if (!capture) {
       // An occluded window also throttles the iframe's timers, so the preset
       // catalog can still be parsing here. Poll until a frame has been
       // composed instead of sampling a pipeline that doesn't exist yet.
@@ -3697,7 +3806,7 @@ function uiVisualizerProbeSource(): string {
         const height = canvas.height;
         if (width < 120 || height < 80) return null;
         const context = canvas.getContext('2d', { willReadFrequently: true });
-        const gl = context ? null : (canvas.getContext('webgl') || canvas.getContext('experimental-webgl'));
+        const gl = context ? null : (canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl'));
         const data = new Uint8Array(width * height * 4);
         if (context) data.set(context.getImageData(0, 0, width, height).data);
         else if (gl) gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
@@ -3905,7 +4014,7 @@ function uiVisualizerProbeSource(): string {
       );
       pressKey('p');
       await waitFor('visualizer palette state', () =>
-        stage.getAttribute('data-newamp-visualizer-palette') !== 'theme',
+        stage.getAttribute('data-newamp-visualizer-palette') !== 'look',
       );
       pressKey('r');
       await waitFor('visualizer reactivity state', () =>
@@ -4380,11 +4489,16 @@ function uiQueueEditProbeSource(): string {
       steps.clockAdvanced = !!(await waitFor('clock advancing', () => (clock() > startedAt ? true : null), 4000).catch(() => false));
       steps.stillPlaying = !!document.querySelector('[data-newamp-transport][data-newamp-playing="true"]');
 
-      // Clear is two-step (arm, then confirm).
+      // Clear is two-step (arm, then confirm). A second click inside the
+      // double-click time is part of the arming gesture and must not confirm.
       const clear = () => document.querySelector('[data-newamp-now-playing-queue] [data-newamp-confirm]');
       clear().click();
       await sleep(80);
       steps.rowsWhileArmed = rows().length;
+      clear().click();
+      await sleep(80);
+      steps.rowsAfterDoubleClick = rows().length;
+      await sleep(600);
       clear().click();
       await waitFor('empty queue', () => (rows().length === 0 ? true : null), 4000);
       steps.afterClear = rows().length;
@@ -5148,7 +5262,7 @@ async function buildSupportDiagnostics(): Promise<SupportDiagnostics> {
     generatedAt: Date.now(),
     libraryStats: library.getStats(),
     lastfmOutbox: await lastfmOutbox.status(),
-    recoveryEvents: [...settings.recoveryEvents, ...library.recoveryEvents],
+    recoveryEvents: [...settings.recoveryEvents, ...library.recoveryEvents, ...podcastStore.recoveryEvents],
   };
 }
 
@@ -5162,7 +5276,13 @@ async function bootstrap(): Promise<void> {
   // candidate when nothing is configured (macOS: ~/Music + /Volumes/*; Windows:
   // K:/C: drive paths).
   const current = settings.get();
-  if (!smokeMode && !current.libraryRoots.length) {
+  // A suppressed store (see SettingsStore.isSuppressed()) is running on
+  // in-memory defaults because settings.json could not be read — its empty
+  // libraryRoots is not "nothing configured", it's "unknown". Auto-seeding
+  // here would scan a default folder straight into the real library.db
+  // (a completely different, unsuppressed store) even though the user's
+  // real settings.json was never actually read this launch.
+  if (!smokeMode && !settings.isSuppressed() && !current.libraryRoots.length) {
     const candidates = process.platform === 'darwin'
       ? [app.getPath('music'), ...safeListMacVolumesMusic()]
       : ['K:/music', 'K:\\music', 'C:/Music', 'C:/Users/Public/Music'];
@@ -5193,6 +5313,36 @@ async function bootstrap(): Promise<void> {
   registerMediaShortcuts();
   syncLibraryWatcher();
 
+  // A valid library this build could not upgrade is left untouched and the
+  // session runs on a temporary one. Say so up front: anything done this
+  // session is not saved.
+  if (library.upgradeError && !smokeMode) {
+    void dialog.showMessageBox(mainWin, {
+      type: 'warning',
+      title: 'Library not upgraded',
+      message: 'NewAmp could not upgrade your library.',
+      detail: `${library.upgradeError}\n\nThis session uses a temporary library and nothing in it will be saved. NewAmp will try the upgrade again the next time it starts.`,
+    });
+  }
+
+  // Same idea as the library-upgrade notice above, for a settings/podcasts
+  // file that could not be read at all this launch (see isSuppressed() on
+  // each store) — silent degradation here is what let a locked file quietly
+  // reset volume, library roots and subscriptions in memory with nobody the
+  // wiser until they noticed something was missing.
+  if ((settings.isSuppressed() || podcastStore.isSuppressed()) && !smokeMode) {
+    const detail = [
+      settings.isSuppressed() ? `Settings: ${settings.recoveryEvents.at(-1)?.reason ?? 'file unavailable'}` : null,
+      podcastStore.isSuppressed() ? `Podcasts: ${podcastStore.recoveryEvents.at(-1)?.reason ?? 'file unavailable'}` : null,
+    ].filter((line): line is string => !!line).join('\n');
+    void dialog.showMessageBox(mainWin, {
+      type: 'warning',
+      title: 'Some data could not be read',
+      message: 'NewAmp could not read part of your saved data this launch.',
+      detail: `${detail}\n\nThis session uses defaults for the affected data. Changing it will start saving again automatically once the file is readable; nothing already on disk has been touched.`,
+    });
+  }
+
   // If the main renderer reloads (crash recovery, dev hot-reload) while a
   // detached visualizer window is open, the old MessageChannel port dies with
   // the previous renderer and the projector feed would go permanently static.
@@ -5217,7 +5367,11 @@ async function bootstrap(): Promise<void> {
     }
     const roots = settings.get().libraryRoots;
     let scanPromise = Promise.resolve();
-    if (roots.length && (trackCount === 0 || settings.get().libraryAutoWatch)) {
+    // A suppressed settings store never has real roots to scan (its roots
+    // are always the empty default) — this guard is defense in depth against
+    // scanning a phantom root into the real library.db, matching the
+    // auto-seed guard above.
+    if (!settings.isSuppressed() && roots.length && (trackCount === 0 || settings.get().libraryAutoWatch)) {
       scanPromise = scanner.start(roots);
     }
     if (uiPlaybackSmoke && mainWin) {
@@ -5342,6 +5496,7 @@ app.on('will-quit', (event) => {
   // path, after renderer windows have had their final chance to save state.
   library?.close();
   settings?.flushSync();
+  podcastStore?.flushProgressSync();
   exclusiveOutput?.dispose();
   tray?.destroy();
   tray = null;
@@ -5349,6 +5504,7 @@ app.on('will-quit', (event) => {
   killAllDnaFfmpeg();
   killAllScoreFfmpeg();
   killAllTranscodeFfmpeg();
+  closeAllGaplessSessions();
   // radioBrain.stop() is async but bounded (a few hundred ms even with a
   // connected /now/events client) — hold the quit open just long enough to
   // release its listening socket instead of leaving it bound past exit.

@@ -96,6 +96,18 @@ export interface Track {
   cuePath?: string | null;
   cueStart?: number | null;
   cueEnd?: number | null;
+  /**
+   * Epoch ms when the file was last found missing; null/absent while it is
+   * available. An unavailable track keeps its id, history, ratings and
+   * playlist membership. Auto DJ and generated mixes skip it.
+   */
+  missingSince?: number | null;
+  /**
+   * Fields whose value is the user's (typed in or accepted from MusicBrainz)
+   * rather than the file's. Only single-track reads (getTrack, and the result
+   * of a metadata edit or lookup) fill this in.
+   */
+  editedFields?: TrackMetadataField[];
 }
 
 export interface MetadataLookupCandidate {
@@ -123,7 +135,19 @@ export interface TrackMetadataPatchInput {
   year?: number | null;
   trackNo?: number | null;
   discNo?: number | null;
+  /** Drop the user's value for these fields and go back to what the file says. */
+  resetToFile?: TrackMetadataField[];
 }
+
+export type TrackMetadataField =
+  | 'title'
+  | 'artist'
+  | 'album'
+  | 'albumArtist'
+  | 'genre'
+  | 'year'
+  | 'trackNo'
+  | 'discNo';
 
 export interface TrackQueryOptions {
   search?: string;
@@ -375,12 +399,36 @@ export interface LibraryHealth {
   duplicateGroups: LibraryDuplicateGroup[];
   legacyFormats: LibraryFormatCount[];
   recentlyAdded: Track[];
+  /**
+   * Fields kept from before edits were tracked because they differed from an
+   * unchanged file. Some are real edits, some an older scanner's reading.
+   */
+  adoptedEdits: number;
   generatedAt: number;
 }
 
 export interface LibraryPruneMissingResult {
   checked: number;
   removed: number;
+  /** Missing tracks kept because their folder, library root or drive is unreachable. */
+  offline: number;
+  /** Support backup taken before anything was deleted; null when nothing was. */
+  backupPath?: string | null;
+}
+
+/** What "Clean missing files" would delete, for the confirmation. */
+export interface LibraryPruneMissingPreview {
+  checked: number;
+  /** Tracks whose files are confirmed gone and would be removed. */
+  tracks: number;
+  /** Missing tracks that would be kept because their storage is unreachable. */
+  offline: number;
+  plays: number;
+  skips: number;
+  playlistEntries: number;
+  bookmarks: number;
+  /** Metadata edits (overrides) on those tracks. */
+  edits: number;
 }
 
 export interface ListeningHistoryItem {
@@ -964,6 +1012,11 @@ export interface AppSettings {
   lastfmAuthToken: string | null;
   openaiApiKey: string | null;
   openaiModel: string;
+  readonly aiAssistRuntime?: {
+    readonly ready: boolean;
+    readonly mode: 'api' | 'gateway';
+    readonly model: string;
+  };
   firstLaunchTutorialSeen: boolean;
   textScale: number;
   crossfadeMs: number;
@@ -1000,6 +1053,14 @@ export interface AppSettings {
    * audioOutputDeviceId (which is Chromium's virtualized device list).
    */
   bitPerfectExclusiveDeviceId: string | null;
+  /**
+   * Sample-accurate gapless: local tracks play through one decoded PCM
+   * timeline (ffmpeg → AudioWorklet) instead of two media elements, so the
+   * next track starts on the frame after the last one ends. Crossfade,
+   * non-1x playback speed, streams, podcasts and cue segments keep the deck
+   * path.
+   */
+  sampleAccurateGapless: boolean;
   /**
    * What the window's X (close) button should do. `minimize-to-tray` (default)
    * preserves the legacy behavior — hides the window so playback continues
@@ -1120,7 +1181,7 @@ export interface CachedGuitarTab {
 }
 
 export interface RecoveryEvent {
-  store: 'settings' | 'library';
+  store: 'settings' | 'library' | 'podcasts';
   filePath: string;
   backupPath: string;
   reason: string;
@@ -1207,7 +1268,16 @@ export interface ExclusiveNegotiated {
   channelsUnknown: boolean;
   dsd: boolean;
   lossless: boolean;
+  /**
+   * The ffmpeg resampler that did the conversion when `resampled`: soxr where
+   * the build has it, otherwise a high-precision swr filter. Null when nothing
+   * was resampled.
+   */
+  resampler: ResamplerKind | null;
 }
+
+/** The engine behind an explicit ffmpeg rate conversion (electron/resampler.ts). */
+export type ResamplerKind = 'soxr' | 'swr';
 
 export type ExclusiveEventPayload =
   | {
@@ -1236,6 +1306,36 @@ export interface ExclusivePlayResult {
   chained?: boolean;
   negotiated?: ExclusiveNegotiated;
   error?: string;
+}
+
+/** One track the shared sample transport should decode (electron/gapless-transport.ts). */
+export interface GaplessSegmentRequest {
+  /** Renderer-assigned id, echoed in-band so the worklet can name the segment it is playing. */
+  token: number;
+  trackId: number;
+  /** Seconds into the file. */
+  startAt: number;
+  /** Linear ReplayGain the worklet applies from the segment's first frame. */
+  gain: number;
+}
+
+export interface GaplessStartRequest extends GaplessSegmentRequest {
+  /** Renderer-assigned generation; data for older generations is dropped on both sides. */
+  gen: number;
+  /** The renderer AudioContext rate — every frame on the wire is at this rate. */
+  sampleRate: number;
+  next: GaplessSegmentRequest | null;
+}
+
+export interface GaplessStartResult {
+  ok: boolean;
+  error?: string;
+  durationSec?: number | null;
+  sourceSampleRate?: number | null;
+  /** What converted the first track's rate ('none' when it already matched). */
+  resampler?: 'none' | ResamplerKind;
+  /** What converts any track in this stream whose rate differs from the context's. */
+  resamplerKind?: ResamplerKind;
 }
 
 export interface SavedMusicServer extends MusicServerConnectionPublic {
@@ -1378,6 +1478,9 @@ export interface NewAmpAPI {
   getStats: () => Promise<{ tracks: number; albums: number; artists: number; duration: number }>;
   getLibraryHealth: () => Promise<LibraryHealth>;
   pruneMissingTracks: (targets?: string[]) => Promise<LibraryPruneMissingResult>;
+  previewPruneMissingTracks: (targets?: string[]) => Promise<LibraryPruneMissingPreview>;
+  /** Hands every adopted metadata field back to the file's tags; returns how many. */
+  resetAdoptedMetadata: () => Promise<number>;
   getListeningHistory: (opts?: { limit?: number; offset?: number }) => Promise<ListeningHistoryItem[]>;
   getListeningInsights: (opts?: { now?: number }) => Promise<ListeningInsights>;
   getWrappedStats: (opts?: { range?: WrappedRange; now?: number }) => Promise<WrappedStats>;
@@ -1447,6 +1550,14 @@ export interface NewAmpAPI {
   exclusiveStop: () => Promise<void>;
   exclusiveSeek: (seconds: number) => Promise<void>;
   exclusivePrepareNext: (trackId: number | null) => Promise<void>;
+  // sample-accurate gapless transport for the shared output; the PCM itself
+  // arrives on a MessagePort dispatched to window as 'newamp:gapless-port',
+  // with data { id } equal to what gaplessOpen resolved to (0: refused)
+  gaplessOpen: () => Promise<number>;
+  gaplessStart: (request: GaplessStartRequest) => Promise<GaplessStartResult>;
+  /** What follows segment `after` in generation `gen`; replaces anything already spliced there. */
+  gaplessPrepareNext: (gen: number, after: number, next: GaplessSegmentRequest | null) => Promise<void>;
+  gaplessStop: (gen: number) => Promise<void>;
   onExclusiveEvent: (cb: (payload: ExclusiveEventPayload) => void) => () => void;
   onExclusiveTap: (
     cb: (tap: { pcm: Float32Array; channels: number; sampleRate: number }) => void,
