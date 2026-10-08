@@ -4156,6 +4156,22 @@ function uiDeckProbeSource(): string {
         const box = measure();
         return Math.abs(box.width - 550) <= 12 && Math.abs(box.height - 232) <= 12 ? box : null;
       });
+      // Back to the full window, then in again the way Discover's Deck button
+      // does it: skin written first, deck code already loaded. A second sizing
+      // call used to land after the deck's own and shrink it to 720x152, so
+      // the size has to still hold a moment after it first matches.
+      window.__newampSmoke.setCompactDeck(false);
+      await waitFor('full window again', () => !document.querySelector('.compact-root, .deck-winamp-classic') && window.innerWidth >= 960);
+      localStorage.setItem('newamp:deck:skinSchema', '2');
+      localStorage.setItem('newamp:deck:skin', 'retro-tv');
+      window.__newampSmoke.setCompactDeck(true);
+      await waitFor('retro-tv deck on re-entry', () => document.querySelector('.deck-retro-tv'));
+      await waitFor('retro-tv size on re-entry', () => {
+        const box = measure();
+        return Math.abs(box.width - 520) <= 12 && Math.abs(box.height - 430) <= 12 ? box : null;
+      });
+      await sleep(600);
+      const tvReentry = measure();
       await pickSkin('bento');
       await waitFor('windowshade deck returns', () => document.querySelector('.compact-root'));
       const shadeAgain = await waitFor('windowshade size after shape switch', () => {
@@ -4177,6 +4193,7 @@ function uiDeckProbeSource(): string {
         discman,
         tv,
         winamp,
+        tvReentry,
         shadeAgain,
       };
     })()

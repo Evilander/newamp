@@ -152,6 +152,9 @@ Release notes for every version, including everything before 2.0, are on the
   half-finished blend frozen on screen.
 - If the video encoder failed during a visualizer recording, pressing stop
   did nothing: no file and no message. It now says the recording failed.
+- Opening a deck after one had already been open that session, from
+  Discover's Visual Set for example, could leave the window stuck at a
+  720x152 strip with most of the deck cut off and no way to resize it.
 - Clicking quickly between artists or albums could leave the previous
   one's tracks on screen. Changing the Radio Brain token now also
   disconnects clients that were already connected with the old one.
