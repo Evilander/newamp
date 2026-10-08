@@ -162,7 +162,9 @@ for (const { name, url } of unauthorizedUncRequests) {
 
 // A UNC share the user actually configured as a library root must still
 // work — the gate is "exactly matches the allowlist", not "deny all UNC".
-{
+// Windows only: elsewhere //host/share isn't a network path, and POSIX
+// resolve() folds the leading // into one slash.
+if (process.platform === 'win32') {
   const configuredRoot = '//trusted-nas/music';
   const { deps, calls } = denyDeps({ libraryRoots: [configuredRoot] });
   const result = await authorizeAudioProtocolPath(new URL('newamp://track/%2F%2Ftrusted-nas%2Fmusic%2Ftrack.flac'), deps);
@@ -205,4 +207,4 @@ for (const { name, url } of unauthorizedUncRequests) {
   assert.match(mainSource, /openedAudioFiles\.add\(resolve\(path\)/, 'main must register the path a file was opened as');
 }
 
-console.log('PASS newamp:// UNC requests are allowlist-checked before any fs call (%d denied + 2 allowlist-boundary cases), and files opened through a link authorize', unauthorizedUncRequests.length);
+console.log('PASS newamp:// UNC requests are allowlist-checked before any fs call (%d denied + %d allowlist-boundary cases), and files opened through a link authorize', unauthorizedUncRequests.length, process.platform === 'win32' ? 2 : 1);

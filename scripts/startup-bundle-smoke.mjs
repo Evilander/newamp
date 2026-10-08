@@ -58,7 +58,9 @@ const largestMain = mainScripts.sort((a, b) => b.bytes - a.bytes)[0];
 // (toast host, THEME_REGISTRY, token bridge, and shared primitives live in the
 // main chunk by design — 422.4KB actual at release, ~132KB gzipped). It had
 // crept back to 440.9KB by 2.3.0's successor commits; 2.4.0 moved the command
-// palette behind its own chunk and measures 426.2KB.
+// palette behind its own chunk and measures 426.2KB. 2.5.0 loads the
+// transport's mini visualizer (and the Eviland stack behind it) on its own
+// and measures 389.7KB.
 assert.ok(largestMain.bytes < 440_000, `main renderer chunk should stay below 440KB, got ${largestMain.bytes}`);
 
 assert.match(packageSource, /"smoke:startup-bundle"/, 'package.json must expose startup bundle smoke');

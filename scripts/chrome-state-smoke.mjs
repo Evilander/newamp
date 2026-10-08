@@ -140,7 +140,9 @@ assert.match(fullscreenSource, /Cycle/, 'fullscreen visualizer should include a 
 assert.match(typesSource, /generateLinerNotes: \(input: AiLinerNotesInput\)/, 'shared API should expose native ChatGPT liner notes');
 assert.match(preloadSource, /ai:liner-notes/, 'preload should expose native ChatGPT liner notes IPC');
 assert.match(mainSource, /generateOpenAiLinerNotes/, 'main process should own ChatGPT assist calls');
-assert.match(openAiAssistSource, /https:\/\/api\.openai\.com\/v1\/responses/, 'ChatGPT assist should use the Responses API');
+// The base URL can be replaced by NEWAMP_OPENAI_BASE_URL; the default is OpenAI's.
+assert.match(openAiAssistSource, /'https:\/\/api\.openai\.com\/v1'/, 'ChatGPT assist should default to the OpenAI API');
+assert.match(openAiAssistSource, /`\$\{baseUrl\}\/responses`/, 'ChatGPT assist should use the Responses API');
 assert.match(openAiAssistSource, /store: false/, 'ChatGPT assist should disable response storage');
 assert.match(openAiAssistSource, /type: 'json_schema'/, 'ChatGPT assist should request structured liner notes');
 assert.match(linerNotesSource, /data-newamp-ai-liner-notes/, 'On Air liner notes should render ChatGPT assist output');

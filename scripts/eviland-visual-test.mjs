@@ -46,7 +46,8 @@ const playwrightModule = process.env.NEWAMP_PLAYWRIGHT_MODULE;
 const softwareGl = Boolean(process.env.CI) || process.env.NEWAMP_SOFTWARE_GL === '1';
 
 let electronApp = null;
-const hardTimeout = setTimeout(() => fail(new Error(`eviland visual ${mode} test timed out`)), 240000);
+// Software GL on a CI runner is several times slower than a GPU.
+const hardTimeout = setTimeout(() => fail(new Error(`eviland visual ${mode} test timed out`)), softwareGl ? 480000 : 240000);
 
 if (playwrightModule) {
   void runPlaywright().then(finish).catch(fail);

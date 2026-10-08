@@ -35,6 +35,11 @@ const dist = (path) => pathToFileURL(resolve('dist-electron', 'electron', path))
 const { ExclusiveOutput } = await import(dist('exclusive-output.js'));
 const { buildPlaybackFlacArgs, transcodeToWavResponse } = await import(dist('transcode.js'));
 const { seekableTranscodeResponse } = await import(dist('audio-serve.js'));
+const { probeResampler } = await import(dist('resampler.js'));
+// The app warms this probe at startup (transcode-cache.ts); until it answers,
+// synchronous callers get swr. Warm it here the same way, or the first case
+// negotiates before the answer on a build that has soxr.
+await probeResampler(ffmpeg);
 
 // Source levels: ffmpeg's sine generator is 1/8 full scale and its mono →
 // stereo upmix is -3 dB; the DSD modulator runs at half scale.
