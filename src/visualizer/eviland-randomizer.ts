@@ -19,6 +19,8 @@ import {
   type Binding,
   type Channel,
   type Curve,
+  type MorphConfig,
+  type MorphKind,
   type OperatorConfig,
   type PaletteConfig,
   type QSlot,
@@ -79,6 +81,20 @@ export const ARCHETYPES = [
   'echochamber',
   'wireframe',
   'emberveil',
+  // Living looks: each pairs a biological scene or simulation with a morph
+  // species, so the picture grows, divides and branches instead of only
+  // being zoomed and spun.
+  'mycelium',
+  'mitosis',
+  'synapse',
+  'radiolarian',
+  'reef',
+  'hyperbloom',
+  'medusa',
+  'chromatin',
+  'anemone',
+  'plankton',
+  'myofibril',
 ] as const;
 
 export type Archetype = (typeof ARCHETYPES)[number];
@@ -117,7 +133,118 @@ const COMPOSITION_SCENES: Record<Archetype, readonly string[]> = {
   echochamber: ['comet-trails'],
   wireframe: ['neon-grid', 'city-pulse'],
   emberveil: ['particle-fountain'],
+  mycelium: ['capillary-bloom'],
+  mitosis: ['cell-colony'],
+  synapse: ['neural-bloom'],
+  radiolarian: ['radiolaria'],
+  reef: ['cilia-reef'],
+  // The slime mould is the whole picture; a scene would only cover it.
+  hyperbloom: [],
+  medusa: ['medusa-bloom'],
+  chromatin: ['chromatin-flow'],
+  anemone: ['feather-polyp'],
+  plankton: ['plankton-drift'],
+  myofibril: ['muscle-fibres'],
 };
+
+// Which archetypes grow a Physarum network as a source. The mould senses the
+// feedback image, so it crawls along whatever the rest of the look draws.
+const PHYSARUM_ARCHETYPES: ReadonlySet<Archetype> = new Set<Archetype>(['mycelium', 'synapse', 'hyperbloom']);
+
+// ---------------------------------------------------------------------------
+// Morph species per archetype
+// ---------------------------------------------------------------------------
+//
+// Before morphs every archetype moved with the same zoom/rotate/swirl/fold
+// warp and differed only in its numbers. Each archetype now names the kinds
+// of motion that suit it and how often it carries one; the seed picks. Drawn
+// on a derived stream, so a seed's other channels are unchanged.
+
+const MORPH_SPECS: Record<Exclude<MorphKind, 'none'>, { amount: ChannelSpec; scale: NumRange }> = {
+  cells: {
+    amount: { base: { min: 0.12, max: 0.28 }, bindings: [{ feature: 'kick', gain: { min: 0.12, max: 0.3 }, chance: 0.85 }, { feature: 'bass', gain: { min: 0.05, max: 0.15 }, chance: 0.5 }] },
+    scale: { min: 0.7, max: 1.6 },
+  },
+  coral: {
+    amount: { base: { min: 0.2, max: 0.4 }, bindings: [{ feature: 'bass', gain: { min: 0.08, max: 0.2 }, chance: 0.8 }] },
+    scale: { min: 0.6, max: 1.6 },
+  },
+  marble: {
+    amount: { base: { min: 0.3, max: 0.55 }, bindings: [{ feature: 'energy', gain: { min: 0.1, max: 0.2 }, chance: 0.7 }] },
+    scale: { min: 0.6, max: 1.4 },
+  },
+  chroma: {
+    amount: { base: { min: 0.3, max: 0.55 }, bindings: [{ feature: 'centroid', gain: { min: 0.1, max: 0.3 }, chance: 0.7 }] },
+    scale: { min: 0.8, max: 2 },
+  },
+  droste: {
+    // The nested copy flares on the kick, so the regress pulses with the beat.
+    amount: { base: { min: 0.03, max: 0.08 }, bindings: [{ feature: 'kick', gain: { min: 0.05, max: 0.12 }, chance: 0.85, curve: 'sqrt' }] },
+    scale: { min: 0.3, max: 1.5 },
+  },
+  mobius: {
+    amount: { base: { min: 0.25, max: 0.5 }, bindings: [{ feature: 'energy', gain: { min: 0.1, max: 0.3 }, chance: 0.7 }] },
+    scale: { min: 0.6, max: 1.4 },
+  },
+  tendril: {
+    amount: { base: { min: 0.2, max: 0.45 }, bindings: [{ feature: 'vocal', gain: { min: 0.1, max: 0.3 }, chance: 0.7 }] },
+    scale: { min: 0.3, max: 1.2 },
+  },
+  peristalsis: {
+    // Mostly still between hits; the kick pumps it.
+    amount: { base: { min: 0.06, max: 0.15 }, bindings: [{ feature: 'kick', gain: { min: 0.3, max: 0.6 }, chance: 0.9 }] },
+    scale: { min: 0.6, max: 1.5 },
+  },
+};
+
+const ARCHETYPE_MORPHS: Record<Archetype, { kinds: Exclude<MorphKind, 'none'>[]; chance: number }> = {
+  tunnel: { kinds: ['droste'], chance: 0.75 },
+  kaleidoscope: { kinds: ['droste', 'chroma'], chance: 0.75 },
+  liquid: { kinds: ['marble', 'chroma'], chance: 0.75 },
+  lattice: { kinds: ['cells'], chance: 0.75 },
+  nebula: { kinds: ['tendril', 'marble'], chance: 0.75 },
+  strobe: { kinds: ['peristalsis'], chance: 0.5 },
+  vortex: { kinds: ['mobius', 'tendril'], chance: 0.75 },
+  inkwell: { kinds: ['coral'], chance: 1 },
+  supernova: { kinds: ['droste', 'peristalsis'], chance: 0.75 },
+  cathedral: { kinds: ['peristalsis', 'droste'], chance: 0.75 },
+  phosphor: { kinds: ['coral'], chance: 0.5 },
+  ribbonfall: { kinds: ['marble'], chance: 0.75 },
+  pulsar: { kinds: ['peristalsis'], chance: 0.75 },
+  mosaic: { kinds: ['cells'], chance: 0.75 },
+  deepfield: { kinds: ['tendril', 'peristalsis'], chance: 0.75 },
+  solarflare: { kinds: ['coral', 'tendril'], chance: 0.75 },
+  glasshouse: { kinds: ['chroma', 'cells'], chance: 0.75 },
+  stormfront: { kinds: ['coral'], chance: 0.75 },
+  heartbeat: { kinds: ['peristalsis'], chance: 0.75 },
+  carousel: { kinds: ['mobius'], chance: 0.75 },
+  firefly: { kinds: ['mobius', 'coral'], chance: 0.75 },
+  tidal: { kinds: ['marble', 'peristalsis'], chance: 0.75 },
+  prism: { kinds: ['chroma'], chance: 0.75 },
+  echochamber: { kinds: ['droste'], chance: 0.75 },
+  wireframe: { kinds: ['droste'], chance: 0.5 },
+  emberveil: { kinds: ['coral', 'tendril'], chance: 0.75 },
+  mycelium: { kinds: ['coral', 'tendril'], chance: 1 },
+  mitosis: { kinds: ['cells'], chance: 1 },
+  synapse: { kinds: ['tendril', 'coral'], chance: 1 },
+  radiolarian: { kinds: ['droste', 'chroma'], chance: 1 },
+  reef: { kinds: ['peristalsis', 'tendril'], chance: 1 },
+  hyperbloom: { kinds: ['mobius', 'chroma', 'marble'], chance: 1 },
+  medusa: { kinds: ['tendril'], chance: 1 },
+  chromatin: { kinds: ['marble'], chance: 1 },
+  anemone: { kinds: ['peristalsis'], chance: 1 },
+  plankton: { kinds: ['marble'], chance: 1 },
+  myofibril: { kinds: ['peristalsis'], chance: 1 },
+};
+
+function sampleMorph(code: string, archetype: Archetype): MorphConfig | undefined {
+  const rng = new Rng(hashSeed(`${code}::morph`));
+  const plan = ARCHETYPE_MORPHS[archetype];
+  if (!rng.bool(plan.chance)) return undefined;
+  const kind = rng.pick(plan.kinds);
+  const spec = MORPH_SPECS[kind];
+  return { kind, amount: sampleChannel(rng, spec.amount), scale: { base: sampleNum(rng, spec.scale) } };
+}
 
 interface NumRange { min: number; max: number }
 interface BindingSpec {
@@ -261,6 +388,30 @@ function baseSpec(): ArchetypeTemplate {
     paletteSat: { min: 0.6, max: 0.9 },
     paletteVal: { min: 0.7, max: 0.95 },
     paletteBgVal: { min: 0.02, max: 0.07 },
+  };
+}
+
+// Quiet field motion keeps the anatomy legible. The sources supply their own
+// swimming, growth and contraction; feedback adds a wake around those forms.
+function livingSpec(): ArchetypeTemplate {
+  return {
+    ...baseSpec(),
+    zoom: { base: { min: -0.001, max: 0.003 }, bindings: [] },
+    rotate: { base: { min: -0.0006, max: 0.0006 }, bindings: [] },
+    swirl: { base: { min: 0, max: 0.012 }, bindings: [] },
+    warpAmp: { base: { min: 0.0002, max: 0.0006 }, bindings: [] },
+    decay: { base: { min: 0.9, max: 0.935 }, bindings: [] },
+    mirror: { base: { min: 1, max: 1 }, bindings: [] },
+    mirrorMix: { base: { min: 0, max: 0 }, bindings: [] },
+    mirrorSetChance: 0,
+    fluid: { base: { min: 0.08, max: 0.2 }, bindings: [] },
+    hueCycle: { base: { min: 0.0006, max: 0.002 }, bindings: [] },
+    bloom: { base: { min: 0.3, max: 0.55 }, bindings: [{ feature: 'vocal', gain: { min: 0.08, max: 0.2 }, chance: 0.7 }] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 2 }, { scheme: 'splitComplementary', weight: 2 }],
+    paletteSat: { min: 0.65, max: 0.95 },
+    paletteVal: { min: 0.8, max: 1 },
+    paletteBgVal: { min: 0.003, max: 0.015 },
+    waveModes: [{ mode: 'off', weight: 1 }],
   };
 }
 
@@ -1522,6 +1673,156 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     fluid: { base: { min: 0.55, max: 0.9 }, bindings: [] },
     liquidMix: { base: { min: 0.25, max: 0.5 }, bindings: [] },
   },
+
+  // ── mycelium ────────────────────────────────────────────────────────────
+  // A slime-mould network grown over a capillary tree. Slow, deep decay so
+  // the veins persist; coral morph grows labyrinths out of lit tissue.
+  mycelium: {
+    ...baseSpec(),
+    zoom: { base: { min: -0.002, max: 0.003 }, bindings: [{ feature: 'kick', gain: { min: 0.006, max: 0.014 }, chance: 0.6, curve: 'sqrt' }] },
+    rotate: { base: { min: -0.0008, max: 0.0008 }, bindings: [] },
+    swirl: { base: { min: 0, max: 0.015 }, bindings: [] },
+    decay: { base: { min: 0.93, max: 0.955 }, bindings: [{ feature: 'snare', gain: { min: -0.03, max: -0.012 }, chance: 0.6 }] },
+    warpAmp: { base: { min: 0.0002, max: 0.0007 }, bindings: [] },
+    mirror: { base: { min: 1, max: 1 }, bindings: [] },
+    mirrorMix: { base: { min: 0, max: 0.08 }, bindings: [] },
+    mirrorSetChance: 0,
+    hueCycle: { base: { min: 0.0008, max: 0.002 }, bindings: [{ feature: 'centroid', gain: { min: 0.002, max: 0.005 }, chance: 0.6 }] },
+    bloom: { base: { min: 0.35, max: 0.6 }, bindings: [{ feature: 'bass', gain: { min: 0.1, max: 0.25 }, chance: 0.7 }] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 2 }, { scheme: 'splitComplementary', weight: 2 }],
+    paletteSat: { min: 0.7, max: 0.95 },
+    paletteVal: { min: 0.75, max: 0.95 },
+    paletteBgVal: { min: 0.004, max: 0.018 },
+    waveModes: [{ mode: 'off', weight: 1 }],
+  },
+
+  // ── mitosis ─────────────────────────────────────────────────────────────
+  // A tissue of dividing cells; the cells morph makes every cell of the
+  // feedback bloom out of its own nucleus, so the old image divides too.
+  mitosis: {
+    ...baseSpec(),
+    zoom: { base: { min: -0.002, max: 0.002 }, bindings: [{ feature: 'kick', gain: { min: 0.004, max: 0.01 }, chance: 0.5 }] },
+    rotate: { base: { min: -0.001, max: 0.001 }, bindings: [] },
+    swirl: { base: { min: 0, max: 0.02 }, bindings: [] },
+    decay: { base: { min: 0.9, max: 0.935 }, bindings: [{ feature: 'flatness', gain: { min: -0.03, max: -0.01 }, chance: 0.5 }] },
+    mirror: { base: { min: 1, max: 1 }, bindings: [] },
+    mirrorMix: { base: { min: 0, max: 0.05 }, bindings: [] },
+    mirrorSetChance: 0,
+    fluid: { base: { min: 0.1, max: 0.3 }, bindings: [] },
+    hueCycle: { base: { min: 0.001, max: 0.003 }, bindings: [{ feature: 'vocal', gain: { min: 0.003, max: 0.008 }, chance: 0.6 }] },
+    paletteSchemes: [{ scheme: 'complementary', weight: 2 }, { scheme: 'triadic', weight: 1 }],
+    paletteSat: { min: 0.65, max: 0.9 },
+    paletteVal: { min: 0.75, max: 0.95 },
+    waveModes: [{ mode: 'off', weight: 1 }],
+  },
+
+  // ── synapse ─────────────────────────────────────────────────────────────
+  // Neurons firing, with a mould network routing between them. Snare and
+  // hats fire; tendrils drag the discharge out into dendrites.
+  synapse: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.002, max: 0.008 }, bindings: [{ feature: 'kick', gain: { min: 0.012, max: 0.024 }, chance: 0.8, curve: 'pulse' }] },
+    rotate: { base: { min: -0.002, max: 0.002 }, bindings: [{ feature: 'energy', gain: { min: 0.002, max: 0.005 }, chance: 0.5 }] },
+    swirl: { base: { min: 0.01, max: 0.04 }, bindings: [{ feature: 'novelty', gain: { min: 0.01, max: 0.03 }, chance: 0.6 }] },
+    decay: { base: { min: 0.89, max: 0.925 }, bindings: [{ feature: 'crest', gain: { min: -0.03, max: -0.01 }, chance: 0.6 }] },
+    mirror: { base: { min: 2, max: 4 }, bindings: [] },
+    mirrorMix: { base: { min: 0.1, max: 0.35 }, bindings: [{ feature: 'energy', gain: { min: 0.05, max: 0.15 }, chance: 0.5 }] },
+    mirrorSets: [[2, 3, 2, 4]],
+    mirrorSetChance: 0.3,
+    bloom: { base: { min: 0.4, max: 0.7 }, bindings: [{ feature: 'snare', gain: { min: 0.15, max: 0.3 }, chance: 0.8, curve: 'pulse' }] },
+    hueCycle: { base: { min: 0.002, max: 0.005 }, bindings: [{ feature: 'hat', gain: { min: 0.004, max: 0.01 }, chance: 0.7 }] },
+    paletteSchemes: [{ scheme: 'triadic', weight: 2 }, { scheme: 'splitComplementary', weight: 1 }],
+    paletteSat: { min: 0.75, max: 1 },
+    paletteVal: { min: 0.8, max: 1 },
+    paletteBgVal: { min: 0.004, max: 0.02 },
+    waveModes: [{ mode: 'off', weight: 3 }, { mode: 'radial', weight: 1 }],
+  },
+
+  // ── radiolarian ─────────────────────────────────────────────────────────
+  // Silica skeletons under the microscope, folded into a slow kaleidoscope
+  // and fed back into themselves (droste) or split by hue (chroma).
+  radiolarian: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.004, max: 0.01 }, bindings: [{ feature: 'bass', gain: { min: 0.006, max: 0.014 }, chance: 0.6, curve: 'sqrt' }] },
+    rotate: { base: { min: -0.003, max: 0.003 }, bindings: [{ feature: 'beatPhase', gain: { min: 0.0006, max: 0.0016 }, chance: 0.5 }] },
+    swirl: { base: { min: 0, max: 0.02 }, bindings: [] },
+    decay: { base: { min: 0.9, max: 0.935 }, bindings: [] },
+    mirror: { base: { min: 5, max: 9 }, bindings: [] },
+    mirrorMix: { base: { min: 0.45, max: 0.75 }, bindings: [{ feature: 'energy', gain: { min: 0.05, max: 0.15 }, chance: 0.5 }] },
+    mirrorSets: [[5, 6, 7, 9], [6, 8, 10, 12]],
+    mirrorSetChance: 0.6,
+    hueCycle: { base: { min: 0.003, max: 0.007 }, bindings: [{ feature: 'centroid', gain: { min: 0.004, max: 0.01 }, chance: 0.7 }] },
+    paletteSchemes: [{ scheme: 'tetradic', weight: 1 }, { scheme: 'triadic', weight: 2 }],
+    paletteSat: { min: 0.6, max: 0.9 },
+    paletteVal: { min: 0.8, max: 1 },
+    waveModes: [{ mode: 'off', weight: 2 }, { mode: 'radial', weight: 1 }],
+  },
+
+  // ── reef ────────────────────────────────────────────────────────────────
+  // A cilia carpet beating in waves. Peristalsis pumps the whole field on
+  // the kick; tendrils comb it into currents.
+  reef: {
+    ...baseSpec(),
+    zoom: { base: { min: -0.003, max: 0.002 }, bindings: [] },
+    rotate: { base: { min: -0.0008, max: 0.0008 }, bindings: [] },
+    swirl: { base: { min: 0, max: 0.02 }, bindings: [{ feature: 'width', gain: { min: 0.005, max: 0.015 }, chance: 0.5 }] },
+    decay: { base: { min: 0.9, max: 0.94 }, bindings: [] },
+    flowY: { base: { min: -0.0008, max: -0.0002 }, bindings: [{ feature: 'bass', gain: { min: -0.0008, max: -0.0003 }, chance: 0.6 }] },
+    mirror: { base: { min: 1, max: 1 }, bindings: [] },
+    mirrorMix: { base: { min: 0, max: 0.05 }, bindings: [] },
+    mirrorSetChance: 0,
+    fluid: { base: { min: 0.3, max: 0.6 }, bindings: [{ feature: 'energy', gain: { min: 0.1, max: 0.2 }, chance: 0.6 }] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 3 }, { scheme: 'complementary', weight: 1 }],
+    paletteSat: { min: 0.6, max: 0.9 },
+    paletteVal: { min: 0.7, max: 0.95 },
+    waveModes: [{ mode: 'off', weight: 3 }, { mode: 'line', weight: 1 }],
+  },
+
+  // ── hyperbloom ──────────────────────────────────────────────────────────
+  // The psychedelic one: a slime-mould network with no scene over it,
+  // streamed between Möbius poles or split into colour rivers, hue running.
+  hyperbloom: {
+    ...baseSpec(),
+    zoom: { base: { min: 0.002, max: 0.01 }, bindings: [{ feature: 'kick', gain: { min: 0.01, max: 0.022 }, chance: 0.7 }] },
+    rotate: { base: { min: -0.004, max: 0.004 }, bindings: [{ feature: 'energy', gain: { min: 0.003, max: 0.008 }, chance: 0.6 }] },
+    swirl: { base: { min: 0.02, max: 0.08 }, bindings: [{ feature: 'novelty', gain: { min: 0.015, max: 0.04 }, chance: 0.6 }] },
+    decay: { base: { min: 0.915, max: 0.945 }, bindings: [{ feature: 'flatness', gain: { min: -0.03, max: -0.01 }, chance: 0.5 }] },
+    hueCycle: { base: { min: 0.008, max: 0.016 }, bindings: [{ feature: 'energy', gain: { min: 0.006, max: 0.014 }, chance: 0.8 }] },
+    mirror: { base: { min: 2, max: 6 }, bindings: [] },
+    mirrorMix: { base: { min: 0.15, max: 0.45 }, bindings: [] },
+    mirrorSets: [[2, 3, 4, 6]],
+    mirrorSetChance: 0.4,
+    bloom: { base: { min: 0.4, max: 0.75 }, bindings: [{ feature: 'energy', gain: { min: 0.1, max: 0.25 }, chance: 0.7 }] },
+    paletteSchemes: [{ scheme: 'tetradic', weight: 2 }, { scheme: 'triadic', weight: 2 }],
+    paletteSat: { min: 0.85, max: 1 },
+    paletteVal: { min: 0.85, max: 1 },
+    paletteBgVal: { min: 0.004, max: 0.015 },
+    waveModes: [{ mode: 'off', weight: 3 }, { mode: 'lissajous', weight: 1 }],
+  },
+  medusa: {
+    ...livingSpec(),
+    flowY: { base: { min: -0.0004, max: -0.0001 }, bindings: [] },
+  },
+  chromatin: {
+    ...livingSpec(),
+    paletteSchemes: [{ scheme: 'complementary', weight: 2 }, { scheme: 'triadic', weight: 1 }],
+    flowY: { base: { min: -0.0003, max: 0.0003 }, bindings: [] },
+  },
+  anemone: {
+    ...livingSpec(),
+    zoom: { base: { min: 0.001, max: 0.004 }, bindings: [{ feature: 'kick', gain: { min: 0.004, max: 0.009 }, chance: 0.7 }] },
+    paletteSchemes: [{ scheme: 'triadic', weight: 2 }, { scheme: 'splitComplementary', weight: 1 }],
+  },
+  plankton: {
+    ...livingSpec(),
+    flowX: { base: { min: -0.0005, max: 0.0005 }, bindings: [] },
+    decay: { base: { min: 0.925, max: 0.945 }, bindings: [] },
+  },
+  myofibril: {
+    ...livingSpec(),
+    decay: { base: { min: 0.87, max: 0.91 }, bindings: [] },
+    paletteSchemes: [{ scheme: 'analogous', weight: 3 }, { scheme: 'complementary', weight: 1 }],
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -1586,9 +1887,12 @@ function generatePalette(rng: Rng, template: ArchetypeTemplate): PaletteConfig {
   // Saturation/value envelopes — accent/light are the brightest, dark is muted.
   const satA = rng.range(template.paletteSat.min, template.paletteSat.max);
   const valA = rng.range(template.paletteVal.min, template.paletteVal.max);
-  const satL = clamp01(satA * rng.range(0.55, 0.85));
+  // Light and dark keep most of the accent's saturation. Nearer white or grey
+  // and the light colour washed every look out: most looks draw their
+  // brightest structure in it, and noisy music desaturates the output again.
+  const satL = clamp01(satA * rng.range(0.72, 0.95));
   const valL = clamp01(rng.range(0.9, 1));
-  const satD = clamp01(satA * rng.range(0.45, 0.8));
+  const satD = clamp01(satA * rng.range(0.6, 0.95));
   const valD = clamp01(rng.range(0.18, 0.38));
 
   const bgHue = wrap01(rootHue + (offsets[0] ?? 0));
@@ -1731,8 +2035,9 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     seed: code,
     archetype: chosen,
     composition: {
-      scene: new Rng(hashSeed(`${code}::scene`)).pick(COMPOSITION_SCENES[chosen]),
-      simulation: chosen === 'inkwell' || chosen === 'mosaic' ? 'reaction-diffusion' : undefined,
+      scene: COMPOSITION_SCENES[chosen].length > 0 ? new Rng(hashSeed(`${code}::scene`)).pick(COMPOSITION_SCENES[chosen]) : null,
+      simulation: chosen === 'inkwell' || chosen === 'mosaic' ? 'reaction-diffusion'
+        : PHYSARUM_ARCHETYPES.has(chosen) ? 'physarum' : undefined,
       terrain: chosen === 'wireframe',
       spectrum: chosen === 'pulsar',
       emitters: chosen === 'strobe' || chosen === 'stormfront' ? 'sparks'
@@ -1792,6 +2097,9 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     const spec = (template as ArchetypeTemplate)[key];
     if (spec) configRec[key] = sampleChannel(primRng, spec);
   }
+
+  const morph = sampleMorph(code, chosen);
+  if (morph) config.morph = morph;
 
   return { config, seed: code };
 }

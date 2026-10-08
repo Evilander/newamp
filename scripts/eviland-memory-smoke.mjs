@@ -331,7 +331,7 @@ assert.equal(track2Export.counters.loves, 0, 'track 2 counters must be virgin');
 
 // Critical assertion: no section in track 2's export may share a seed with
 // track 1's persisted plan. This is the "track A's chorus visually rhymes
-// with track B's chorus" regression for finding #3.
+// with track B's chorus" cross-track plan bleed regression.
 const track1Seeds = new Set(persisted.sections.map((s) => s.seed >>> 0));
 for (const s of track2Export.sections) {
   assert.ok(

@@ -30,6 +30,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { algorithmComparisonBase } from './lib/algo-base.mjs';
 
 const WATCHED_FILES = [
   'src/visualizer/eviland-randomizer.ts',
@@ -48,8 +49,7 @@ const VERSION_CONST = 'VISUAL_MEMORY_ALGO_VERSION';
 const WATCHED_SYMBOLS = ['ARCHETYPES', 'TIER_ARCHETYPE_WEIGHTS', 'SAFE_RANGES'];
 
 const argv = process.argv.slice(2);
-const baseIdx = argv.indexOf('--base');
-const base = baseIdx >= 0 ? argv[baseIdx + 1] : 'HEAD';
+const base = algorithmComparisonBase(argv, process.env, tryGit);
 
 function tryGit(args) {
   try {
@@ -63,6 +63,10 @@ const inGit = tryGit(['rev-parse', '--is-inside-work-tree']);
 if (!inGit || inGit.trim() !== 'true') {
   console.log('[algo-version-guard] not a git checkout — skipping');
   process.exit(0);
+}
+if (!tryGit(['rev-parse', '--verify', `${base}^{commit}`])) {
+  console.error(`[algo-version-guard] comparison base ${base} is unavailable; fetch its history or pass --base.`);
+  process.exit(1);
 }
 
 for (const f of [...WATCHED_FILES, VERSION_FILE]) {

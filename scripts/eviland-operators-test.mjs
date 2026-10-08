@@ -1,6 +1,7 @@
-// Channel plumbing + SEED-CODE STABILITY for the fluid channels. The goldens
-// were captured from the randomizer BEFORE fluid/vorticity were added; they
-// must never change, proving shared seed codes keep their exact look.
+// Channel plumbing + SEED-CODE STABILITY. New channels (fluid, dye, morph…)
+// draw from derived RNG streams, so adding one must not move these goldens.
+// They only change when the archetype list itself changes, which moves seeds
+// to other archetypes on purpose; each such regeneration is logged below.
 // Run: node scripts/eviland-operators-test.mjs
 import { build } from 'esbuild';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -39,8 +40,10 @@ let pass = true;
 const fail = (m) => { pass = false; log.push('FAIL: ' + m); };
 const close = (a, b) => Math.abs(a - b) < 1e-9;
 
-// --- GOLDENS — DELIBERATELY REGENERATED 2026-06-10 for the 20-archetype
-// expansion (plan §3 MilkDrop-variety rotation). The original goldens were
+// --- GOLDENS — regenerated 2026-09-27 for five additional living forms
+// (visual-memory algorithm v5). Previously regenerated 2026-09-22 for six living
+// archetypes, and before that 2026-06-10 for the 20-archetype expansion
+// (plan §3 MilkDrop-variety rotation). The original goldens were
 // captured against a 6-archetype rng.pick(ARCHETYPES); growing the list moves
 // the same seed to a different archetype, which is the WHOLE POINT of the
 // look-space expansion. Determinism itself (same seed → same config every
@@ -48,9 +51,13 @@ const close = (a, b) => Math.abs(a - b) < 1e-9;
 // regression. Bake-down lineage:
 //   seed   42 lattice      → solarflare  (20-archetype expansion, 2026-06-10)
 //   seed 1337 kaleidoscope → nebula      (20-archetype expansion, 2026-06-10)
+//   seed   42 solarflare   → carousel    (living archetypes, 2026-09-22)
+//   seed 1337 nebula       → strobe      (living archetypes, 2026-09-22)
+//   seed   42 carousel     → prism       (living forms, 2026-09-27)
+//   seed 1337 strobe       → vortex      (living forms, 2026-09-27)
 const GOLDEN = {
-  42:   { zoom: 0.012179508161265402, rotate: -0.002692744402214885, swirl: 0.05601735921110958,  hueCycle: 0.00435064187948592,  decay: 0.868650261722505,  warpAmp: 0.0019754798347130418, mirrorMix: 0.5093598034000024, archetype: 'solarflare' },
-  1337: { zoom: 0.0023478210328612484, rotate: 0.0005239231539890172, swirl: 0.03044383018743247, hueCycle: 0.005059137693140656, decay: 0.9176422854047269,  warpAmp: 0.0012012546863406897, mirrorMix: 0.2102690623374656, archetype: 'nebula' },
+  42: { zoom: 0.009492896143347026, rotate: -0.00017530845757573847, swirl: 0.02256046331487596, hueCycle: 0.005601735921110958, decay: 0.9013418917264789, warpAmp: 0.0007773020456777885, mirrorMix: 0.6219349793391302, archetype: 'prism' },
+  1337: { zoom: 0.007652170025277883, rotate: 0.009047846307978034, swirl: 0.08323417570441961, hueCycle: 0.004179944368312136, decay: 0.9069616165943444, warpAmp: 0.00046414964441210025, mirrorMix: 0.7346152465022169, archetype: 'vortex' },
 };
 for (const seed of [42, 1337]) {
   const c = generate(seed).config;
@@ -327,7 +334,8 @@ log.push('default/clone/lerp/mutate plumbing OK');
     for (const [key, value] of Object.entries(independent)) {
       if (typeof value === 'number' && !Number.isFinite(value)) fail(`${name}: ${key} is not finite`);
     }
-    if (!config.composition?.scene) fail(`${name}: missing selectable source`);
+    // A look's source is a scene, or a simulation that is the whole picture.
+    if (!config.composition?.scene && !config.composition?.simulation) fail(`${name}: missing selectable source`);
     if (config.composition?.terrain && config.composition?.spectrum) fail(`${name}: universal ridge/sun stack returned`);
     const cloned = cloneConfig(config);
     if (cloned.composition === config.composition) fail(`${name}: composition clone aliases input`);

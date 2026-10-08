@@ -9,6 +9,8 @@
 //   MilkDrop warp + shapes + waves ──► targetTexture (this frame's feedback)
 //        │
 //        ├─ fluid advection + dye        (medium/high)
+//        ├─ morph species (cells, growth, marble, droste…) bending the
+//        │  preset's own feedback, so a MilkDrop preset moves organically
 //        ├─ procedural scene             (medium/high)
 //        ├─ reaction–diffusion chemistry (looks that ask for it)
 //        └─ reactor events: kick rings, snare spikes, hat sparkles, vocal blobs
@@ -26,13 +28,16 @@
 // when the fields it needs are missing; the iframe then runs plain MilkDrop.
 
 import type { EvilandFrame } from './eviland-audio';
-import { createReactionDiffusion, warmReactionDiffusion } from './eviland-reaction-diffusion';
+import { createReactionDiffusion, prepareReactionDiffusion } from './eviland-reaction-diffusion';
+import { createPhysarum, preparePhysarum } from './eviland-physarum';
+import { hashSeed } from './eviland-rng';
 import { createReactorOverlay } from './reactor-overlay';
 import { createSceneOverlay } from './scene-overlay';
 import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame } from './eviland-fluid';
 import { createDynamics, evalConfig, type OperatorConfig, type PaletteConfig, type WaveOverride } from './eviland-operators';
 import { sourceProgram, sourceTarget, disposeSourceTarget, type SourceTarget } from './eviland-gl';
 import { applyScoreCues } from './eviland-conductor';
+import { NOISE_GLSL, MORPH_GLSL } from './eviland-morph';
 
 type WaveDraw = (...args: unknown[]) => void;
 interface WaveRenderer {
@@ -60,10 +65,22 @@ export interface MilkdropFeedbackHost {
 }
 
 /** Everything the parent decides for one frame of the Live composition. */
+/**
+ * What Live needs of the look a fade is heading to: enough to seed its
+ * simulation, compile its scene and start its preset blend. Posters send this
+ * instead of the fade's two full looks, which keeps every frame's message small.
+ */
+export type LiveLookAhead = Pick<OperatorConfig, 'seed' | 'archetype' | 'composition'>;
+
 export interface LiveCompositionFrame {
   frame: EvilandFrame;
   palette: PaletteConfig;
   config: OperatorConfig;
+  /**
+   * During a Director fade, the look it is heading to: prepared as the fade
+   * begins, not at the midpoint where the composition switches.
+   */
+  next?: LiveLookAhead;
   seed: string;
   waveMode: WaveOverride;
   /**
@@ -83,7 +100,8 @@ export interface EvilandLivePipeline {
 }
 
 // Pass A (dynamics): bends the feedback image along the simulated fluid and
-// folds dye into it. Pass B (grade): palette + bloom on the preset's composite.
+// the look's morph species, and folds dye into it. Pass B (grade): palette +
+// bloom on the preset's composite.
 const COMPOSE = `#version 300 es
 precision highp float;
 in vec2 v_uv;
@@ -91,19 +109,53 @@ out vec4 o;
 uniform sampler2D u_image, u_velocity, u_dye;
 uniform vec3 u_dark, u_accent, u_light, u_bg;
 uniform float u_dt, u_fluid, u_dyeMix, u_grade, u_bloom, u_gain, u_saturation;
-// Saturated pixels land between dark and accent, washed-out ones between
-// accent and light; brightness is kept, so the preset's detail survives.
+uniform float u_morph, u_morphAmt, u_morphScale, u_time, u_aspect;
+${NOISE_GLSL}
+${MORPH_GLSL}
+vec3 unit(vec3 c) { return c / max(0.001, max(c.r, max(c.g, c.b))); }
+// Two readings of the preset's colour, both brightness-preserving:
+//  - by saturation: saturated pixels land between dark and accent, washed-out
+//    ones between accent and light (greys have no hue to go by);
+//  - by hue: the colour wheel is laid round the palette (dark → accent →
+//    light → dark), so a preset's differently coloured parts stay different
+//    colours of the palette instead of collapsing onto one ramp.
+// Saturated pixels take the hue reading. Every preset used to come out as
+// the same three-colour gradient; now each keeps its own colour layout.
 vec3 grade(vec3 c) {
   float peak = max(c.r, max(c.g, c.b));
+  float sat = (peak - min(c.r, min(c.g, c.b))) / max(peak, 0.001);
   float position = clamp(dot(c, vec3(0.22, 0.55, 0.23)) / max(peak, 0.001), 0.0, 1.0);
-  vec3 tint = position < 0.55 ? mix(u_dark, u_accent, position / 0.55)
+  vec3 byValue = position < 0.55 ? mix(u_dark, u_accent, position / 0.55)
     : mix(u_accent, u_light, (position - 0.55) / 0.45);
-  tint /= max(0.001, max(tint.r, max(tint.g, tint.b)));
+  // atan(0, 0) is undefined; greys carry no hue and take the value reading.
+  vec2 iq = vec2(dot(c, vec3(0.596, -0.274, -0.322)), dot(c, vec3(0.211, -0.523, 0.312)));
+  float hue = dot(iq, iq) > 1e-10 ? fract(atan(iq.y, iq.x) / 6.28318530718) : 0.0;
+  vec3 dark = unit(u_dark);
+  vec3 byHue = hue < 0.3333 ? mix(dark, u_accent, hue * 3.0)
+    : hue < 0.6667 ? mix(u_accent, u_light, hue * 3.0 - 1.0)
+    : mix(u_light, dark, hue * 3.0 - 2.0);
+  vec3 tint = mix(unit(byValue), unit(byHue), smoothstep(0.2, 0.55, sat));
   return mix(u_bg * 0.08, tint * peak, smoothstep(0.0, 0.08, peak));
 }
 void main() {
   vec2 uv = clamp(v_uv - texture(u_velocity, v_uv).xy * u_dt * u_fluid, 0.001, 0.999);
+  int kind = int(u_morph + 0.5);
+  // Same split as the Eviland field: droste compounds, the rest scale
+  // linearly with elapsed reference frames.
+  float k = kind > 0 ? min(3.0, u_morphAmt * u_dt * 60.0) : 0.0;
+  vec2 texel = 1.0 / vec2(textureSize(u_image, 0));
+  vec2 alt = uv;
+  float altMix = 0.0;
+  if (kind == 5) {
+    float inside;
+    alt = drosteTap(uv, u_morphScale, vec2(0.5), u_time, u_aspect, inside);
+    altMix = (1.0 - pow(1.0 - u_morphAmt, u_dt * 60.0)) * inside;
+  } else if (kind > 0 && kind != 2) {
+    uv = clamp(uv + (morphTarget(u_image, uv, kind, u_morphScale, vec2(0.5), u_time, u_aspect, texel) - uv) * k, 0.001, 0.999);
+  }
   vec3 c = texture(u_image, uv).rgb;
+  if (altMix > 0.0) c = mix(c, textureLod(u_image, clamp(alt, 0.001, 0.999), 0.0).rgb, altMix);
+  if (kind == 2 && k > 0.0) c = coralApply(u_image, c, uv, k, u_morphScale, texel, u_time, u_aspect);
   vec3 dye = texture(u_dye, v_uv).rgb;
   c = mix(c, c * 0.55 + dye / (1.0 + max(dye.r, max(dye.g, dye.b))), u_dyeMix);
   if (u_bloom > 0.0) {
@@ -134,6 +186,7 @@ void main() {
 }`;
 
 const REACTOR_MAX_WIDTH = 960;
+const LIVE_MORPH_SHARE = 0.6;
 const SAMPLE_W = 48;
 const SAMPLE_H = 27;
 
@@ -164,19 +217,26 @@ export function createEvilandLivePipeline(
     Object.fromEntries(names.map((name) => [name, gl.getUniformLocation(program, `u_${name}`)])) as Record<N, WebGLUniformLocation | null>;
   const composeUni = uniformsOf(compose, [
     'image', 'velocity', 'dye', 'dark', 'accent', 'light', 'bg', 'dt', 'fluid', 'dyeMix', 'grade', 'bloom', 'gain', 'saturation',
+    'morph', 'morphAmt', 'morphScale', 'time', 'aspect',
   ] as const);
   const stampUni = uniformsOf(stamp, ['src', 'gain', 'flipY', 'useAlpha'] as const);
 
   // 'low' keeps MilkDrop + reactor events + the grade and skips every
   // full-screen source, matching the old stack's weak-GPU floor.
   const scenes = quality === 'low' ? null : createSceneOverlay(gl.canvas as HTMLCanvasElement, { gl, quality });
-  if (quality !== 'low') warmReactionDiffusion(gl);
+  let chemistryPrograms = quality === 'low' ? null : prepareReactionDiffusion(gl);
+  let mouldPrograms = quality === 'low' ? null : preparePhysarum(gl);
   const fluid = quality === 'low'
     ? null
     : createFluidSim(gl, { width: 96, height: 64, pressureIterations: quality === 'high' ? 10 : 6 });
   const forceSource = createFluidForceSource();
   const dyn = createDynamics();
   let chemistry: ReturnType<typeof createReactionDiffusion> = null;
+  let mould: ReturnType<typeof createPhysarum> = null;
+  // A simulation that failed to build stays off instead of retrying per frame.
+  let chemistryFailed = false;
+  let mouldFailed = false;
+  let clock = 0;
 
   // Reactor events are drawn with the 2D API (cheap, and already tuned) on a
   // capped-size canvas, then stamped into the feedback additively.
@@ -259,9 +319,12 @@ export function createEvilandLivePipeline(
     gl.disable(gl.SCISSOR_TEST);
   }
 
-  /** Pass A: advect the feedback along the fluid and fold dye in. */
+  /** Pass A: advect the feedback along the fluid and morph, and fold dye in. */
   function applyFluid(h: MilkdropFeedbackHost, dt: number): void {
-    if (!fluid || (dyn.fluid <= 0.0005 && dyn.liquidMix <= 0.0005)) return;
+    // 'low' skips the morph with every other full-screen pass.
+    const morphOn = quality !== 'low' && dyn.morph > 0 && dyn.morphAmount > 0.0005;
+    const fluidOn = !!fluid && (dyn.fluid > 0.0005 || dyn.liquidMix > 0.0005);
+    if (!morphOn && !fluidOn) return;
     if (!scratch || scratch.width !== h.texsizeX || scratch.height !== h.texsizeY) {
       disposeSourceTarget(gl, scratch);
       scratch = sourceTarget(gl, h.texsizeX, h.texsizeY);
@@ -276,8 +339,17 @@ export function createEvilandLivePipeline(
     gl.disable(gl.BLEND);
     bindComposeInputs(scratch.texture);
     gl.uniform1f(composeUni.dt, dt);
-    gl.uniform1f(composeUni.fluid, dyn.fluid);
-    gl.uniform1f(composeUni.dyeMix, dyn.liquidMix);
+    // Without a sim the velocity/dye inputs are the image itself, so both
+    // must read as off.
+    gl.uniform1f(composeUni.fluid, fluidOn ? dyn.fluid : 0);
+    gl.uniform1f(composeUni.dyeMix, fluidOn ? dyn.liquidMix : 0);
+    gl.uniform1f(composeUni.morph, morphOn ? dyn.morph : 0);
+    // The preset keeps its own warp; the morph rides on top at a lower
+    // strength than in Eviland, so the preset stays recognisable.
+    gl.uniform1f(composeUni.morphAmt, dyn.morphAmount * LIVE_MORPH_SHARE);
+    gl.uniform1f(composeUni.morphScale, dyn.morphScale);
+    gl.uniform1f(composeUni.time, clock);
+    gl.uniform1f(composeUni.aspect, h.texsizeX / Math.max(1, h.texsizeY));
     gl.uniform1f(composeUni.grade, 0);
     gl.uniform1f(composeUni.bloom, 0);
     gl.uniform1f(composeUni.gain, 1);
@@ -294,6 +366,9 @@ export function createEvilandLivePipeline(
       reactorW = w;
       reactorH = height;
       reactor.resize(w, height, 1);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, reactorTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     }
     reactor.render(frame, palette, dt * 1000);
     beginFullscreen(h.targetFrameBuffer, h.texsizeX, h.texsizeY);
@@ -303,7 +378,7 @@ export function createEvilandLivePipeline(
     // Butterchurn only ever sets this to true right before its own title
     // upload, so pinning the default here can't disturb it.
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, reactorCanvas);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, reactorCanvas);
     gl.uniform1i(stampUni.src, 0);
     gl.uniform1f(stampUni.flipY, 1);
     gl.uniform1f(stampUni.useAlpha, 1);
@@ -323,6 +398,7 @@ export function createEvilandLivePipeline(
     gl.uniform1f(composeUni.dt, 0);
     gl.uniform1f(composeUni.fluid, 0);
     gl.uniform1f(composeUni.dyeMix, 0);
+    gl.uniform1f(composeUni.morph, 0);
     gl.uniform1f(composeUni.grade, Math.max(0, Math.min(1, current.grade ?? 1)));
     gl.uniform1f(composeUni.bloom, Math.max(0, dyn.bloom));
     gl.uniform1f(composeUni.gain, gain);
@@ -339,6 +415,7 @@ export function createEvilandLivePipeline(
     }
     const dt = pendingDt;
     pendingDt = 0;
+    clock += dt;
     // MilkDrop leaves mipmapped sampler objects bound. Our single-level
     // textures sample black through them, so unbind for our passes and hand
     // them back before Butterchurn draws again.
@@ -368,6 +445,23 @@ export function createEvilandLivePipeline(
     const outputSaturation = cueGain.saturation;
     const sourceFade = frame.score ? (1 - 0.5 * frame.score.anticipation) * (1 - frame.score.blackout) : 1;
 
+    const upcoming = current.next ?? current.config._to ?? current.config;
+    const simulation = upcoming.composition?.simulation;
+    if (quality !== 'low' && (simulation === 'reaction-diffusion' || current.config.composition?.simulation === 'reaction-diffusion')) {
+      if (!chemistry && !chemistryFailed) {
+        chemistry = createReactionDiffusion(gl, hashSeed(upcoming.seed ?? current.seed), chemistryPrograms);
+        chemistryPrograms = null;
+        chemistryFailed = !chemistry;
+      }
+    }
+    if (quality !== 'low' && (simulation === 'physarum' || current.config.composition?.simulation === 'physarum')) {
+      if (!mould && !mouldFailed) {
+        mould = createPhysarum(gl, hashSeed(upcoming.seed ?? current.seed), quality, mouldPrograms);
+        mouldPrograms = null;
+        mouldFailed = !mould;
+      }
+    }
+
     gl.bindVertexArray(vao);
     fluid?.step(dt, forceSource.forces(frame, current.palette, dt), {
       vorticity: dyn.vorticity,
@@ -388,11 +482,14 @@ export function createEvilandLivePipeline(
         contrast: composition.contrast,
       });
     }
-    if (composition?.simulation === 'reaction-diffusion') {
-      if (!chemistry) chemistry = createReactionDiffusion(gl);
+    if (composition?.simulation === 'reaction-diffusion' && quality !== 'low') {
       // The chemistry nucleates on last frame's image, so bright geometry
       // grows patterns that then re-enter the feedback.
       chemistry?.render(frame, current.palette, dt * 1000, this.prevTexture, { ...target, opacity: composition.density });
+    }
+    if (composition?.simulation === 'physarum' && quality !== 'low') {
+      // The mould senses last frame's image, so it crawls along the preset.
+      mould?.render(frame, current.palette, dt * 1000, this.prevTexture, { ...target, opacity: composition.density * sourceFade });
     }
     if (composition?.emitters !== 'off') stampReactor(this, frame, current.palette, dt);
 
@@ -424,6 +521,7 @@ export function createEvilandLivePipeline(
   return {
     update(next) {
       state = next;
+      scenes?.prepareScene((next.next ?? next.config._to ?? next.config).composition?.scene ?? null);
       onsets.push(...next.frame.onsets);
       if (onsets.length > 64) onsets.splice(0, onsets.length - 64);
       if (next.frame.score?.impactStart) impactStartPending = true;
@@ -473,6 +571,9 @@ export function createEvilandLivePipeline(
       scenes?.dispose();
       fluid?.dispose();
       chemistry?.dispose();
+      mould?.dispose();
+      for (const program of [...(chemistryPrograms ?? []), ...(mouldPrograms ?? [])]) gl.deleteProgram(program);
+      chemistryPrograms = null; mouldPrograms = null;
       reactor?.dispose();
       gl.deleteTexture(reactorTexture);
       disposeSourceTarget(gl, scratch);

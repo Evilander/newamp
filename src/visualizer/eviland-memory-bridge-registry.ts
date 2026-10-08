@@ -6,7 +6,7 @@
 // correct shape — it matches the pattern eviland-producer.ts uses for its
 // activeStop singleton.
 //
-// SAME-TRACK REMOUNT SURVIVAL (finding #6 from the pre-release review):
+// SAME-TRACK REMOUNT SURVIVAL:
 // The Visualizer effect deps include palette/quality/performance/reactivity.
 // Toggling any of those mid-song re-runs the effect: cleanup fires
 // flushAndDispose('unmount') and the new effect immediately constructs a
@@ -134,7 +134,7 @@ export function notifySectionReturn(trackId: number | null): void {
 }
 
 // ---------------------------------------------------------------------------
-// Keyed bridge cache (finding #6).
+// Keyed bridge cache.
 //
 // acquireBridgeForTrack:
 //   - trackId null → returns a fresh, uncached bridge (non-library play).

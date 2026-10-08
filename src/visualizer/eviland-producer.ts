@@ -22,7 +22,7 @@ import { readEvilandTuning } from '../lib/vizPrefs';
 import { createEvilandReactor, type EvilandReactor } from './eviland-audio';
 import { createDirector, type Director } from './eviland-director';
 import { generate as generateEvilandConfig, decode as decodeEvilandConfig } from './eviland-randomizer';
-import { applyWaveformOverride, type OperatorConfig, type WaveOverride } from './eviland-operators';
+import { applyWaveformOverride, cloneConfig, stripTransitionMeta, type OperatorConfig, type WaveOverride } from './eviland-operators';
 import type { EvilandPalette } from './eviland';
 import { frameBus } from './frame-bus';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from './eviland-memory-bridge';
@@ -107,7 +107,7 @@ let activeStop: (() => void) | null = null;
  * changed mid-flight, the loaded plan is discarded (loadPlan is NOT called)
  * so the now-reset director for the new track isn't repopulated with stale
  * sections. This is the producer-side mirror of the on-screen Visualizer's
- * captured-bridge identity guard (finding #5 from the pre-release review).
+ * captured-bridge identity guard.
  *
  * The `getCurrentTrackId` getter reads the producer's `lastTrackId` closure
  * variable lazily — it's the source of truth for the producer's current track,
@@ -165,6 +165,8 @@ export function startEvilandProducer(
   let sceneSeed: string | null = null;
   let lastAppliedNonce = -1;
   let manualConfig: OperatorConfig | null = null;
+  // The Director's look at the moment it was switched off, minus any half-done fade.
+  let heldDirectorLook: OperatorConfig | null = null;
   let tuning = readEvilandTuning();
   let tuningReadAt = 0;
   let paletteTick = 0;
@@ -282,12 +284,16 @@ export function startEvilandProducer(
     let config: OperatorConfig;
     if (ui.director) {
       config = applyWaveformOverride(director.update(frame, dtMs), ui.waveMode);
+      heldDirectorLook = null;
     } else {
       if (ui.nonce !== lastAppliedNonce) {
         lastAppliedNonce = ui.nonce;
         manualConfig = applyManualSeed(ui.seed);
       }
-      config = applyWaveformOverride(manualConfig ?? director.current(), ui.waveMode);
+      // Without a manual look, hold the Director's current one, minus any
+      // half-done fade, which would otherwise stay frozen on screen.
+      if (!manualConfig && !heldDirectorLook) heldDirectorLook = stripTransitionMeta(cloneConfig(director.current()));
+      config = applyWaveformOverride(manualConfig ?? heldDirectorLook!, ui.waveMode);
     }
 
     fillWaveSamples();
@@ -299,7 +305,7 @@ export function startEvilandProducer(
     }
     frameBus.publish(
       tuneEvilandFrame(frame, tuning.reactivity),
-      resolveEvilandPalette(tuning.palette, blendPaletteWithArt(palette, artPalette), now / 1000, frame.score?.keyShift),
+      resolveEvilandPalette(tuning.palette, blendPaletteWithArt(palette, artPalette), now / 1000, frame.score?.keyShift, config.palette),
       dtMs,
       config,
       {

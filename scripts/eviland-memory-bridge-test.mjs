@@ -315,7 +315,7 @@ function makeDirector(initialPlan) {
 
 // ─── 8. discard() drops in-memory state + short-circuits future writes ─────
 //
-// Repro for finding #1/#2 of the pre-release review: badge "Reset visual
+// Repro: badge "Reset visual
 // memory" used to call api.clearTrackVisualMemory then flushAndDispose, but
 // the bridge's still-resident in-memory plan + buffered sections caused
 // flushAndDispose to re-write the row that was just deleted. discard() is
@@ -369,7 +369,7 @@ function makeDirector(initialPlan) {
 //
 // Coverage for the notifyPlayCompleted / notifyLove / notifySkip /
 // notifySectionReturn fns that wire usePlayerStore into the bridge in
-// production (finding #1 of the regression-and-claims dimension). Loads
+// production. Loads
 // the registry as a separate bundle since its exports are independent.
 {
   await build({
@@ -442,7 +442,7 @@ function makeDirector(initialPlan) {
 
 // ─── 10. acquireBridgeForTrack returns cached bridge for same trackId ──────
 //
-// Same-track remount fast path (finding #6). On a palette/quality/etc remount
+// Same-track remount fast path. On a palette/quality/etc remount
 // the Visualizer re-runs its effect: acquireBridgeForTrack({trackId: 42})
 // returns the SAME bridge instance, preserving in-memory plan + buffered
 // learning + counters. releaseBridgeForTrack flushes-and-disposes + drops.
@@ -504,7 +504,7 @@ function makeDirector(initialPlan) {
 // ─── 12. LRU cap sweep: over-cap acquire evicts the oldest unprotected entry ─
 //
 // Leak regression: the Visualizer's cleanup deliberately never releases the
-// bridge on unmount (finding #6's same-track-remount survival), so switching
+// bridge on unmount (same-track remount survival), so switching
 // visualizer MODE away from eviland used to orphan the current track's
 // bridge forever. This proves acquireBridgeForTrack caps the registry at
 // MAX_CACHED_BRIDGES, evicting the least-recently-acquired entry — but never

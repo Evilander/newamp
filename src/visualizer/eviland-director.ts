@@ -24,8 +24,8 @@
 // music is structurally quiet, MilkDrop-style), the gentle intra-section
 // drift, and a bounded priming-defer window (deferPrimingFrames) that lets the
 // Visualizer ask the Director to hold its first-ever fresh-mint until a
-// loadPlan() call arrives OR a small frame budget expires (finding #9 from
-// the pre-release review). The defer fixes the "first ~500ms of a known song
+// loadPlan() call arrives OR a small frame budget expires.
+// The defer fixes the "first ~500ms of a known song
 // renders a fresh-mint look under the WRONG lineage, then snaps to the right
 // look when the async loadOrSeed lands" race; with deferPrimingFrames=0 the
 // Director's behavior is byte-identical to the pre-defer code.
@@ -39,6 +39,7 @@ import {
   cloneConfig,
   defaultConfig,
   lerpConfigInto,
+  stripTransitionMeta,
 } from './eviland-operators';
 import {
   ARCHETYPES,
@@ -100,6 +101,17 @@ const TIER_ARCHETYPE_WEIGHTS: Record<EnergyTier, Record<Archetype, number>> = {
     echochamber: 1.5,
     wireframe: 2,
     emberveil: 3.5,
+    mycelium: 3.5,
+    mitosis: 2,
+    synapse: 1,
+    radiolarian: 3,
+    reef: 3.5,
+    hyperbloom: 1,
+    medusa: 4,
+    chromatin: 2,
+    anemone: 1,
+    plankton: 4,
+    myofibril: 1.5,
   },
   steady: {
     // Original six — liquid weight preserved.
@@ -130,6 +142,17 @@ const TIER_ARCHETYPE_WEIGHTS: Record<EnergyTier, Record<Archetype, number>> = {
     echochamber: 3,
     wireframe: 2,
     emberveil: 2,
+    mycelium: 3,
+    mitosis: 3,
+    synapse: 2.5,
+    radiolarian: 2.5,
+    reef: 2.5,
+    hyperbloom: 2,
+    medusa: 3,
+    chromatin: 3,
+    anemone: 2,
+    plankton: 3,
+    myofibril: 2.5,
   },
   lift: {
     // Original six — liquid weight preserved.
@@ -160,6 +183,17 @@ const TIER_ARCHETYPE_WEIGHTS: Record<EnergyTier, Record<Archetype, number>> = {
     echochamber: 3,
     wireframe: 1,
     emberveil: 0.8,
+    mycelium: 2,
+    mitosis: 3,
+    synapse: 3,
+    radiolarian: 2,
+    reef: 1,
+    hyperbloom: 3,
+    medusa: 2,
+    chromatin: 3,
+    anemone: 4,
+    plankton: 2,
+    myofibril: 3,
   },
   drop: {
     // Original six — liquid weight preserved.
@@ -190,6 +224,17 @@ const TIER_ARCHETYPE_WEIGHTS: Record<EnergyTier, Record<Archetype, number>> = {
     echochamber: 2,
     wireframe: 0.6,
     emberveil: 0.5,
+    mycelium: 1,
+    mitosis: 2,
+    synapse: 3.5,
+    radiolarian: 1.5,
+    reef: 0.5,
+    hyperbloom: 4,
+    medusa: 1,
+    chromatin: 2,
+    anemone: 4,
+    plankton: 1,
+    myofibril: 3,
   },
   climax: {
     // Original six — liquid weight preserved.
@@ -220,6 +265,17 @@ const TIER_ARCHETYPE_WEIGHTS: Record<EnergyTier, Record<Archetype, number>> = {
     echochamber: 1.5,
     wireframe: 0.4,
     emberveil: 0.3,
+    mycelium: 1,
+    mitosis: 1.5,
+    synapse: 3.5,
+    radiolarian: 1,
+    reef: 0.5,
+    hyperbloom: 4,
+    medusa: 0.5,
+    chromatin: 2,
+    anemone: 4,
+    plankton: 1,
+    myofibril: 3,
   },
 };
 
@@ -255,6 +311,11 @@ function transitionSpeedFor(prev: EnergyTier | null, next: EnergyTier): number {
 // Timer-rotation + drift tuning (MilkDrop-like variety floor).
 // ---------------------------------------------------------------------------
 
+// Transition front shapes, indices into the renderer's flipTime():
+// 0 cells · 1 infection · 2 iris · 3 plasma · 4 spiral · 5 the old picture's light.
+const PUNCHY_FRONTS = [0, 2, 4, 1] as const;
+const GLIDING_FRONTS = [1, 3, 5, 0, 2] as const;
+
 /** Default ms between forced look rotations when structure stays quiet. */
 const ROTATE_INTERVAL_MS = 20000;
 /** Default deterministic ±jitter on the rotation interval so it isn't metronomic. */
@@ -273,9 +334,9 @@ const DRIFT_TICK_MS = 100;
 export interface DirectorOptions {
   /** Stable identifier for the song; seeds all generation. Defaults to "song". */
   songId?: string;
-  /** Beats over which a new section's config crossfades in. Defaults to ~2. */
+  /** Beats over which a new section's config crossfades in. Defaults to 4. */
   transitionBeats?: number;
-  /** Fallback transition duration in ms when BPM is unknown. Defaults to 1800. */
+  /** Fallback transition duration in ms when BPM is unknown. Defaults to 2800. */
   transitionMsFallback?: number;
   /** Initial config to display before any section fires. Defaults to defaultConfig(). */
   initial?: OperatorConfig;
@@ -308,7 +369,7 @@ export interface DirectorOptions {
   onSectionLearn?: (section: VisualMemorySection) => void;
   /**
    * Bounded "wait for loadPlan() before priming the first look" window
-   * (finding #9 from the pre-release review). When > 0, the first-update
+   *. When > 0, the first-update
    * fresh-mint priming branch is suppressed until EITHER loadPlan() is called
    * (the plan landed) OR `deferPrimingFrames` updates have ticked through
    * the update loop (the bound expired and we proceed plan-less). Default 0:
@@ -369,8 +430,10 @@ interface SectionMemory {
 
 export function createDirector(opts: DirectorOptions = {}): Director {
   const songId = opts.songId ?? 'song';
-  const transitionBeats = Math.max(0.25, opts.transitionBeats ?? 2);
-  const transitionMsFallback = Math.max(150, opts.transitionMsFallback ?? 1800);
+  // Long enough for the renderer's transition front to be seen crossing the
+  // frame: MilkDrop's own blends run 2-3 s, and a two-beat fade read as a cut.
+  const transitionBeats = Math.max(0.25, opts.transitionBeats ?? 4);
+  const transitionMsFallback = Math.max(150, opts.transitionMsFallback ?? 2800);
   const initial = opts.initial ? cloneConfig(opts.initial) : defaultConfig();
   const rotateMs = Math.max(0, opts.rotateMs ?? ROTATE_INTERVAL_MS);
   const rotateJitterPct = Math.max(0, Math.min(0.9, opts.rotateJitterPct ?? ROTATE_JITTER_PCT));
@@ -400,6 +463,9 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   // The total duration of the in-flight fade in ms (locked at start so a
   // mid-fade BPM change doesn't warp progress).
   let fadeDurationMs = transitionMsFallback;
+  // Shape and seed of the in-flight fade's front (see the renderer's flipTime).
+  let fadePattern = 0;
+  let fadePatternSeed = 0;
 
   // Section memory: sectionId -> stored config + tier + seed lineage.
   const sections = new Map<number, SectionMemory>();
@@ -457,7 +523,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   let noveltyAccum = 0;
   let framesSinceSection = 0;
 
-  // ── bounded priming defer (finding #9) ────────────────────────────────────
+  // ── bounded priming defer ────────────────────────────────────
   // primingDeferRemaining counts how many more update() calls will suppress
   // the first-update fresh-mint priming branch. Starts at deferPrimingFrames
   // when no plan was supplied at construction; loadPlan() forces it to 0 (the
@@ -581,9 +647,16 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     // collapses into that snapshot (because live IS the lerp(from,target,fade)
     // we just produced last frame), so the new fade starts from where the eye
     // already is — no visual jump.
-    from = cloneConfig(live);
-    target = cloneConfig(next);
+    from = stripTransitionMeta(cloneConfig(live));
+    target = stripTransitionMeta(cloneConfig(next));
     fade = 0;
+    // Front shape. A hard energy jump gets a front with edges you can see
+    // land (cells, iris, spiral); a glide gets one that grows through the
+    // picture (infection, plasma, the old picture's own light).
+    const frontHash = hashSeed(`${activeSongId}::front::${target.seed ?? 'x'}::${rotationIndex}`) >>> 0;
+    const fronts = speedMul >= 1.5 ? PUNCHY_FRONTS : GLIDING_FRONTS;
+    fadePattern = fronts[frontHash % fronts.length]!;
+    fadePatternSeed = ((frontHash >>> 8) % 997) / 97;
     const beatMs = bpm > 1 ? 60000 / bpm : 0;
     const beats = transitionBeats / Math.max(0.25, speedMul);
     fadeDurationMs = beatMs > 0 ? beatMs * beats : transitionMsFallback / Math.max(0.25, speedMul);
@@ -596,6 +669,11 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       driftTarget = mutate(target, driftAmount, driftSeed);
       driftPhaseMs = 0;
       driftAccumMs = 0;
+      // The drift branch takes over the frame this fade ends, but only
+      // recomputes driftCache every DRIFT_TICK_MS. Left stale it still held
+      // the previous look, which flashed back for a few frames after every
+      // fade (and made Live reload the old preset).
+      lerpConfigInto(driftCache, target, driftTarget, 0);
     }
   }
 
@@ -750,10 +828,15 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       // deep-copies it via `from = cloneConfig(live)` before the next fade.
       lerpConfigInto(fadeScratch, from, target, t);
       live = fadeScratch;
-      // Section fade — stamp the eased transition value so the renderer
-      // captures a field snapshot at fade start and crossfades against it.
-      // Falls back to undefined the instant fade reaches 1 (see above).
+      // Section fade — stamp the eased transition value plus both sides, so
+      // the renderer runs the outgoing and incoming warps together and moves
+      // a front between them. Falls back to undefined the instant fade
+      // reaches 1 (see above).
       live._transition = t;
+      live._from = from;
+      live._to = target;
+      live._pattern = fadePattern;
+      live._patternSeed = fadePatternSeed;
     }
   }
 
@@ -867,7 +950,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
         // confirmed. The first real boundary that follows will overwrite this
         // entry with a fingerprint-bearing one and fire the learn callback.
         //
-        // Bounded priming defer (finding #9): when the caller knows a
+        // Bounded priming defer: when the caller knows a
         // loadPlan IPC is in flight, primingDeferRemaining was seeded > 0 at
         // construction. We DEFER the priming mint until either the plan
         // lands (loadPlan() zeroes primingDeferRemaining) or the budget
@@ -941,16 +1024,16 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       msSinceSwitch = 0;
       rotationIndex = 0;
       cachedRotateThresholdMs = null;
-      driftTarget = cloneConfig(live);
+      driftTarget = stripTransitionMeta(cloneConfig(live));
       driftPhaseMs = 0;
       driftAccumMs = 0;
       // Collapse any in-flight fade to the current live config so we don't
       // start the next song mid-blend with the previous one.
-      from = cloneConfig(live);
-      target = cloneConfig(live);
+      from = stripTransitionMeta(cloneConfig(live));
+      target = stripTransitionMeta(cloneConfig(live));
       fade = 1;
       fadeDurationMs = transitionMsFallback;
-      // CROSS-TRACK PLAN BLEED FIX (finding #3 from the pre-release review):
+      // CROSS-TRACK PLAN BLEED FIX:
       // Drop the previous track's pendingPlan + lineage + counters + neighbor
       // seed BEFORE attempting any repopulation. The previous code's
       // closure-scoped pendingPlan persisted across reset() calls, so a track
@@ -981,7 +1064,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       neighborSeed = undefined;
       activeTrackId = 0;
       staleAlgo = false;
-      // Re-arm the bounded priming defer (finding #9). After reset() the
+      // Re-arm the bounded priming defer. After reset() the
       // bridge will issue a fresh loadOrSeed IPC; until that lands we want
       // the priming branch suppressed so the first ~30 frames don't render
       // the new song under default lineage when a persisted plan might be
@@ -993,7 +1076,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
 
     loadPlan(nextPlan): void {
       // A plan landed — open the bounded-priming-defer gate so the next
-      // update() can mint the opening look immediately (finding #9). Without
+      // update() can mint the opening look immediately. Without
       // this, the defer window would idle the visualizer at the default
       // config until the budget expired even when the plan arrived sooner.
       primingDeferRemaining = 0;
@@ -1070,9 +1153,9 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       // External override (e.g. user picked a preset, or the Director is
       // disabled and the host is feeding configs through). Snap state so the
       // next enabled update() doesn't lurch back to the prior look.
-      live = cloneConfig(config);
-      from = cloneConfig(config);
-      target = cloneConfig(config);
+      live = stripTransitionMeta(cloneConfig(config));
+      from = stripTransitionMeta(cloneConfig(config));
+      target = stripTransitionMeta(cloneConfig(config));
       fade = 1;
       // Reset the timer-rotation clock too, so a user-set preset gets its full
       // dwell before the next forced rotation rather than lurching away if
@@ -1082,7 +1165,7 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       cachedRotateThresholdMs = null;
       // Start drift neutral for the new look (no drift until the next switch
       // computes a real driftTarget).
-      driftTarget = cloneConfig(config);
+      driftTarget = stripTransitionMeta(cloneConfig(config));
       driftPhaseMs = 0;
       driftAccumMs = 0;
     },
