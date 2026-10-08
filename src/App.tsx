@@ -348,8 +348,12 @@ export default function App(): JSX.Element {
     };
   }, [init]);
 
+  // CompactPlayer sizes the window for its deck when it mounts. Entering deck
+  // mode from here as well, with no size, raced it: once the deck code was
+  // loaded, React ran this parent effect after the child's and shrank every
+  // deck to the 720x152 default, fixed and unresizable.
   useEffect(() => {
-    void winctl.setCompact(compact);
+    if (!compact) void winctl.setCompact(false);
   }, [compact]);
 
   useEffect(() => {
