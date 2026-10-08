@@ -70,7 +70,12 @@ console.log(
   probe.formats.map((f) => `${f.format}/${f.channels}ch@${f.sampleRate || 'any'}`).join(', ') || '(none reported)',
 )
 
-function makeS16Sine(rate, seconds, freq = 440, amp = 0.03) {
+// The addon writes to the real device, which Chromium's mute can't reach.
+// Frame accounting doesn't depend on content, so push silence unless
+// NEWAMP_SMOKE_AUDIBLE=1 asks to hear it.
+const SINE_AMP = process.env.NEWAMP_SMOKE_AUDIBLE === '1' ? 0.03 : 0
+
+function makeS16Sine(rate, seconds, freq = 440, amp = SINE_AMP) {
   const frames = Math.floor(rate * seconds)
   const buf = Buffer.alloc(frames * 2 * 2)
   for (let i = 0; i < frames; i++) {

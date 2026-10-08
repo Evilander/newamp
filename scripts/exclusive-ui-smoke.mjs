@@ -8,9 +8,10 @@
 //      mode, so ANY analyser energy proves the 30Hz native PCM tap →
 //      AnalyserNode-emulation path that keeps every visualizer alive.
 //
-// Takes over the default audio device for ~3 quiet seconds (fixture is a
-// -26dB sine). Windows-only: exits 0 as a no-op elsewhere. Audio-hardware
-// tier — local release gate, never CI.
+// Takes over the default audio device for ~3 seconds (fixture is a 19 kHz
+// sine at -44 dBFS, or 523 Hz at -26 dB with NEWAMP_SMOKE_AUDIBLE=1).
+// Windows-only: exits 0 as a no-op elsewhere. Audio-hardware tier — local
+// release gate, never CI.
 
 import assert from 'node:assert/strict';
 import electronPath from 'electron';
@@ -25,6 +26,7 @@ if (process.platform !== 'win32' && process.platform !== 'linux') {
   process.exit(0);
 }
 
+const AUDIBLE = process.env.NEWAMP_SMOKE_AUDIBLE === '1';
 const appRoot = resolve('.');
 const smokeRoot = resolve('tmp', 'exclusive-ui-smoke');
 const userData = join(smokeRoot, 'user-data');
@@ -71,12 +73,16 @@ async function createFixture() {
     '-f',
     'lavfi',
     '-i',
-    'sine=frequency=523.25:duration=8:sample_rate=48000',
+    // Exclusive output goes straight to the device, past Chromium's mute. So
+    // unless NEWAMP_SMOKE_AUDIBLE=1, the tone is 19 kHz at -44 dBFS: well
+    // under what adult ears pick up at that frequency, but still well above
+    // the analyser's -86 dB floor for the check below.
+    `sine=frequency=${AUDIBLE ? '523.25' : '19000'}:duration=8:sample_rate=48000`,
     '-af',
     // Stereo: lavfi sine is mono, and a mono source honestly disqualifies the
     // strict bit-perfect claim (channel upmix) — duplicate to stereo so this
     // gate exercises the gold path on rate-matched devices.
-    'volume=0.05,aformat=channel_layouts=stereo',
+    `volume=${AUDIBLE ? '0.05' : '0.0063'},aformat=channel_layouts=stereo`,
     '-metadata',
     'title=Exclusive Smoke',
     '-metadata',
