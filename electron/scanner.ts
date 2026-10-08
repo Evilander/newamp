@@ -47,17 +47,34 @@ function isAudioPath(p: string): boolean {
   return AUDIO_EXTS.has(extname(p).toLowerCase());
 }
 
-async function* walk(root: string): AsyncGenerator<{ full: string; size: number; mtime: number }> {
+interface DiscoveredFile {
+  full: string;
+  size: number;
+  mtime: number;
+  dev: number;
+}
+
+// What a walk learned about its root besides the files: whether the root was
+// there at all, and which folders under it could not be listed. A scan only
+// treats "not found" as meaningful where it actually looked.
+interface WalkReport {
+  reachable: boolean;
+  unreadable: string[];
+}
+
+async function* walk(root: string, report: WalkReport = { reachable: false, unreadable: [] }): AsyncGenerator<DiscoveredFile> {
   try {
     const stat = await fs.stat(root);
     if (stat.isFile()) {
-      if (isAudioPath(root)) yield { full: root, size: stat.size, mtime: stat.mtimeMs };
+      report.reachable = true;
+      if (isAudioPath(root)) yield { full: root, size: stat.size, mtime: stat.mtimeMs, dev: Number(stat.dev) };
       return;
     }
     if (!stat.isDirectory()) return;
   } catch {
     return;
   }
+  report.reachable = true;
 
   const stack: string[] = [root];
   while (stack.length) {
@@ -66,6 +83,7 @@ async function* walk(root: string): AsyncGenerator<{ full: string; size: number;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch {
+      report.unreadable.push(dir);
       continue; // skip permission denied / unreadable
     }
     for (const e of entries) {
@@ -77,7 +95,7 @@ async function* walk(root: string): AsyncGenerator<{ full: string; size: number;
         if (!isAudioPath(e.name)) continue;
         try {
           const stat = await fs.stat(full);
-          yield { full, size: stat.size, mtime: stat.mtimeMs };
+          yield { full, size: stat.size, mtime: stat.mtimeMs, dev: Number(stat.dev) };
         } catch {
           /* skip */
         }
@@ -137,6 +155,7 @@ async function readMeta(
   full: string,
   size: number,
   mtime: number,
+  dev: number | null,
   folderArtForFile: (filePath: string) => Promise<ArtBlob | null> = (filePath) => readFolderArtFile(dirname(filePath)),
 ): Promise<IncomingTrack> {
   let title = basename(full, extname(full));
@@ -155,6 +174,7 @@ async function readMeta(
   let replayGainTrackDb: number | null = null;
   let replayGainAlbumDb: number | null = null;
   let art: ArtBlob | null = null;
+  let parseFailed = false;
 
   try {
     const meta = await parseMetadata(full);
@@ -181,7 +201,9 @@ async function readMeta(
       }
     }
   } catch {
-    // metadata parsing failed; we still keep the row using filename heuristic
+    // Metadata parsing failed. A new file still gets a row from the filename;
+    // a known one keeps what it has (LibraryStore.upsertTracks).
+    parseFailed = true;
   }
 
   if (!art) {
@@ -208,7 +230,21 @@ async function readMeta(
     size,
     mtime: Math.round(mtime),
     art,
+    dev,
+    parseFailed,
   };
+}
+
+// Reads one file's tags the way a scan would, outside the scan queue (which
+// a long library scan can hold for minutes). Null when the file isn't there.
+export async function readTrackFile(path: string): Promise<IncomingTrack | null> {
+  try {
+    const stat = await fs.stat(path);
+    if (!stat.isFile()) return null;
+    return await readMeta(path, stat.size, stat.mtimeMs, Number(stat.dev));
+  } catch {
+    return null;
+  }
 }
 
 async function readFolderArtFile(dir: string): Promise<ArtBlob | null> {
@@ -230,7 +266,7 @@ async function parseMetadata(full: string): Promise<IAudioMetadata> {
   return parseFile(full, METADATA_OPTIONS);
 }
 
-function fallbackTrack(full: string, size: number, mtime: number): IncomingTrack {
+function fallbackTrack(full: string, size: number, mtime: number, dev: number): IncomingTrack {
   const artist = 'Unknown Artist';
   return {
     path: full,
@@ -252,6 +288,8 @@ function fallbackTrack(full: string, size: number, mtime: number): IncomingTrack
     size,
     mtime: Math.round(mtime),
     art: null,
+    dev,
+    parseFailed: true,
   };
 }
 
@@ -304,10 +342,19 @@ export class Scanner {
     let skipped = 0;
 
     try {
-      const discovered: Array<{ full: string; size: number; mtime: number }> = [];
+      const discovered: DiscoveredFile[] = [];
+      // Overlapping roots (a folder and one inside it, the same folder written
+      // two ways) walk the same files twice; each is read and upserted once.
+      const seen = new Set<string>();
+      const walkedRoots: string[] = [];
+      const unreadableFolders: string[] = [];
       await pMap(roots, DISCOVERY_CONCURRENCY, async (root) => {
-        for await (const f of walk(root)) {
+        const report: WalkReport = { reachable: false, unreadable: [] };
+        for await (const f of walk(root, report)) {
           if (this.cancelled) break;
+          const key = discoveredPathKey(f.full);
+          if (seen.has(key)) continue;
+          seen.add(key);
           discovered.push(f);
           if (discovered.length % DISCOVERY_PROGRESS_INTERVAL === 0) {
             this.onProgress({
@@ -321,8 +368,21 @@ export class Scanner {
             });
           }
         }
+        if (report.reachable) {
+          walkedRoots.push(root);
+          unreadableFolders.push(...report.unreadable);
+        }
       });
+      // A cancelled walk stopped part-way, so what it didn't find says nothing.
       if (this.cancelled) return;
+      // Everything just found is on disk, including files skipped below as
+      // unchanged, so any of them marked missing are available again.
+      const found = discovered.map((f) => f.full);
+      this.library.markTracksPresent(found);
+      // And the other way round: a file deleted while NewAmp was closed left no
+      // watcher event behind. Only roots that were there and walked to the end
+      // count; an unplugged drive or dropped share marks nothing.
+      this.library.markUnfoundTracksMissing(walkedRoots, found, unreadableFolders);
 
       const total = discovered.length;
       let scanned = 0;
@@ -360,16 +420,24 @@ export class Scanner {
           : await pMap(slice, METADATA_CONCURRENCY, async (f) =>
               (await needsMetadataRefresh(f, existing.get(f.full), hasFolderArt)) ? f : null,
             ).then((rows) =>
-              rows.filter((row): row is { full: string; size: number; mtime: number } => !!row),
+              rows.filter((row): row is DiscoveredFile => !!row),
             );
         skipped += slice.length - changed.length;
+        // Unchanged files aren't read, but their device is known now; explicit
+        // cleanup needs it to tell a deleted file from an unmounted drive.
+        const changedPaths = new Set(changed.map((f) => f.full));
+        const devices = slice.flatMap((f) => {
+          const state = existing.get(f.full);
+          return state && !changedPaths.has(f.full) && state.fileDev !== f.dev ? [{ id: state.id, dev: f.dev }] : [];
+        });
+        this.library.setTrackDevices(devices);
 
         const incoming = await pMap(changed, METADATA_CONCURRENCY, async (f) => {
           try {
-            return await readMeta(f.full, f.size, f.mtime, folderArtForFile);
+            return await readMeta(f.full, f.size, f.mtime, f.dev, folderArtForFile);
           } catch (err) {
             console.warn(`[newamp] metadata parse failed for ${f.full}: ${errorMessage(err)}`);
-            return fallbackTrack(f.full, f.size, f.mtime);
+            return fallbackTrack(f.full, f.size, f.mtime, f.dev);
           }
         });
         parsed += incoming.length;
@@ -391,6 +459,13 @@ export class Scanner {
       this.running = false;
     }
   }
+}
+
+// Same case policy as library-watcher.ts: Windows and macOS volumes compare
+// names without case, Linux ones don't.
+function discoveredPathKey(path: string): string {
+  const key = path.replace(/\\/g, '/');
+  return process.platform === 'win32' || process.platform === 'darwin' ? key.toLowerCase() : key;
 }
 
 function sameFileState(

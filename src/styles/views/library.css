@@ -85,3 +85,9 @@ svg.library-th-star {
   height: var(--text-2xs);
   vertical-align: text-bottom;
 }
+/* Files dragged over Library get Library's overlay (add to the library). The
+   app-wide one (open and play) stays active from the drag crossing the app
+   chrome and would otherwise sit on top of it, so both showed. */
+[data-newamp-drop-zone]:has([data-newamp-library-drop-overlay]) [data-newamp-app-drop-overlay] {
+  display: none;
+}

@@ -4,6 +4,19 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createSupportBackup, restoreSupportBackup } from '../dist-electron/electron/support-backup.js';
+import initSqlJs from 'sql.js';
+
+const SQL = await initSqlJs();
+function libraryFixture(value) {
+  const database = new SQL.Database();
+  database.run('CREATE TABLE fixture(value TEXT)');
+  database.run('INSERT INTO fixture VALUES (?)', [value]);
+  const bytes = Buffer.from(database.export());
+  database.close();
+  return bytes;
+}
+const originalLibrary = libraryFixture('original');
+const mutatedLibrary = libraryFixture('mutated');
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const smokeRoot = join(repoRoot, 'tmp', 'support-restore-smoke');
@@ -16,7 +29,7 @@ await mkdir(join(userDataPath, 'art'), { recursive: true });
 await mkdir(join(userDataPath, 'playlist-art'), { recursive: true });
 
 await writeFile(settingsPath, JSON.stringify({ theme: 'oxide', libraryRoots: ['K:/music'] }), 'utf8');
-await writeFile(libraryPath, Buffer.from('original library'));
+await writeFile(libraryPath, originalLibrary);
 await writeFile(join(userDataPath, 'art', 'cover.bin'), Buffer.from('original cover'));
 await writeFile(join(userDataPath, 'playlist-art', 'icon.bin'), Buffer.from('original icon'));
 await writeFile(join(userDataPath, 'lastfm-scrobbles.json'), JSON.stringify({ queue: ['original'] }), 'utf8');
@@ -29,7 +42,7 @@ const backup = await createSupportBackup({
 });
 
 await writeFile(settingsPath, JSON.stringify({ theme: 'mono', libraryRoots: [] }), 'utf8');
-await writeFile(libraryPath, Buffer.from('mutated library'));
+await writeFile(libraryPath, mutatedLibrary);
 await writeFile(join(userDataPath, 'art', 'cover.bin'), Buffer.from('mutated cover'));
 await writeFile(join(userDataPath, 'art', 'extra.bin'), Buffer.from('remove me'));
 await writeFile(join(userDataPath, 'playlist-art', 'icon.bin'), Buffer.from('mutated icon'));
@@ -60,7 +73,7 @@ assert.deepEqual(
   ['settings.json', 'library.db', 'art', 'playlist-art', 'lastfm-scrobbles.json'],
 );
 assert.match(await readFile(settingsPath, 'utf8'), /oxide/);
-assert.equal(String(await readFile(libraryPath)), 'original library');
+assert.deepEqual(await readFile(libraryPath), originalLibrary);
 assert.equal(String(await readFile(join(userDataPath, 'art', 'cover.bin'))), 'original cover');
 assert.equal(existsSync(join(userDataPath, 'art', 'extra.bin')), false, 'restored art dir should replace stale files');
 assert.equal(String(await readFile(join(userDataPath, 'playlist-art', 'icon.bin'))), 'original icon');

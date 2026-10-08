@@ -41,7 +41,6 @@ export const PCM_LOSSLESS_EXTENSIONS = [
 
 export const LOSSY_EXTENSIONS = [
   'mp3',
-  'm4a',
   'aac',
   'ogg',
   'oga',
@@ -52,7 +51,7 @@ export const LOSSY_EXTENSIONS = [
   'dts',
 ] as const;
 
-export const CONTAINER_AUDIO_EXTENSIONS = ['mka'] as const;
+export const CONTAINER_AUDIO_EXTENSIONS = ['mka', 'm4a'] as const;
 
 export const FFMPEG_FALLBACK_EXTENSIONS = [
   'wma',

@@ -2,9 +2,12 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type PointerEv
 import type {
   AudioExportFormat,
   LibraryHealth,
+  LibraryPruneMissingPreview,
+  LibraryPruneMissingResult,
   MetadataLookupCandidate,
   SavedPlaylist,
   Track,
+  TrackMetadataField,
   TrackMetadataPatchInput,
 } from '@shared/types';
 import { buildArchiveCompass, duplicateExactTotal, missingMetadataTotal } from '@shared/archive-compass';
@@ -16,6 +19,7 @@ import { EmptyLibrary } from './EmptyLibrary';
 import { ArtistLink, AlbumLink } from '../EntityLink';
 import { FormatBadges } from '../FormatBadges';
 import { ViewHeader } from '../ViewHeader';
+import { ConfirmAction } from '../ConfirmAction';
 import { Star, StarOutline } from '../Icons';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
 import { useSavedPlaylists } from '../../hooks/useSavedPlaylists';
@@ -47,12 +51,20 @@ export function LibraryView(): JSX.Element {
   const [sort, setSort] = useState<Sort>('artist');
   const [dropActive, setDropActive] = useState(false);
   const [dropMessage, setDropMessage] = useState<string | null>(null);
+  // True while a dropped scan runs: its "Scanning..." line stays up until the
+  // scan answers instead of expiring like a finished status.
+  const [dropScanning, setDropScanning] = useState(false);
   const [metadataPanel, setMetadataPanel] = useState<{
     track: Track;
     candidates: MetadataLookupCandidate[];
     loading: boolean;
     status: string | null;
+    // Bumped when a lookup match replaces every field, which remounts the form
+    // with the new values. Saving or resetting one field doesn't, so text
+    // typed into the other fields survives.
+    formRevision?: number;
   } | null>(null);
+  const [prunePreview, setPrunePreview] = useState<LibraryPruneMissingPreview | null>(null);
   const [stats, setStats] = useState<{
     tracks: number;
     albums: number;
@@ -125,16 +137,60 @@ export function LibraryView(): JSX.Element {
 
   const hasLibrary = stats.tracks > 0;
 
+  // Same terminal-gesture safety net as App.tsx: a drop outside this pane, an
+  // Escape, or an alt-tab/window blur mid-drag reaches no handler here, so
+  // without this the highlighted border would stick until the next drag.
+  useEffect(() => {
+    const clearDrag = () => setDropActive(false);
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setDropActive(false);
+      setDropMessage(null);
+    };
+    window.addEventListener('drop', clearDrag, true);
+    window.addEventListener('dragend', clearDrag, true);
+    window.addEventListener('blur', clearDrag);
+    window.addEventListener('keydown', onEscape);
+    return () => {
+      window.removeEventListener('drop', clearDrag, true);
+      window.removeEventListener('dragend', clearDrag, true);
+      window.removeEventListener('blur', clearDrag);
+      window.removeEventListener('keydown', onEscape);
+    };
+  }, []);
+
+  // dropMessage is always a temporary status line, never a state that needs
+  // manual dismissal — expire it so an empty/failed drop doesn't leave it
+  // parked under the command bar forever.
+  useEffect(() => {
+    if (!dropMessage || dropScanning) return undefined;
+    const timer = window.setTimeout(() => setDropMessage(null), 3600);
+    return () => window.clearTimeout(timer);
+  }, [dropMessage, dropScanning]);
+
   async function scanDropped(dataTransfer: DataTransfer): Promise<void> {
-    const paths = droppedPaths(dataTransfer);
-    if (!paths.length) {
-      setDropMessage('Drop folders or audio files from Windows Explorer.');
-      return;
+    try {
+      const paths = droppedPaths(dataTransfer);
+      if (!paths.length) {
+        setDropMessage('Drop folders or audio files from Windows Explorer.');
+        return;
+      }
+      const items = `${paths.length.toLocaleString()} dropped item${paths.length === 1 ? '' : 's'}`;
+      setDropScanning(true);
+      setDropMessage(`Scanning ${items}...`);
+      try {
+        await api.scanLibrary(paths);
+      } finally {
+        setDropScanning(false);
+      }
+      setDropMessage(`Scanned ${items}.`);
+      // The scan went through; a failed page refresh isn't a failed scan.
+      await reloadLibraryPage().catch((error) => console.error('library reload after drop failed', error));
+      refreshLibrarySummary();
+    } catch (error) {
+      console.error('dropped scan failed', error);
+      setDropMessage('Could not scan these items. Check the files are available and retry.');
     }
-    setDropMessage(`Scanning ${paths.length.toLocaleString()} dropped item${paths.length === 1 ? '' : 's'}...`);
-    await api.scanLibrary(paths);
-    await reloadLibraryPage();
-    refreshLibrarySummary();
   }
 
   async function loadMoreTracks(): Promise<void> {
@@ -211,7 +267,10 @@ export function LibraryView(): JSX.Element {
     api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
-  async function lookupMetadata(track: Track): Promise<void> {
+  async function lookupMetadata(row: Track): Promise<void> {
+    // List rows don't carry editedFields; the single-track read does, and the
+    // panel needs it to offer "reset to file" on fields the user owns.
+    const track = (await api.getTrack(row.id).catch(() => null)) ?? row;
     setMetadataPanel({ track, candidates: [], loading: true, status: 'Searching MusicBrainz...' });
     try {
       const candidates = await api.lookupTrackMetadata(track.id);
@@ -244,23 +303,47 @@ export function LibraryView(): JSX.Element {
       candidates: [],
       loading: false,
       status: `Applied ${updated.artist} - ${updated.title}.`,
+      formRevision: (metadataPanel.formRevision ?? 0) + 1,
     });
     api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
-  async function applyManualMetadataEdit(patch: TrackMetadataPatchInput): Promise<void> {
-    if (!metadataPanel) return;
+  async function applyManualMetadataEdit(patch: TrackMetadataPatchInput): Promise<Track | null> {
+    if (!metadataPanel) return null;
     const updated = await api.applyTrackMetadataEdit(metadataPanel.track.id, patch);
-    if (!updated) return;
+    if (!updated) return null;
     setTracks((rows) => rows.map((track) => (track.id === updated.id ? updated : track)));
     refreshLibrarySummary();
+    // A field whose file value isn't known yet (its file couldn't be read)
+    // stays edited; say so rather than claim it was restored.
+    const stillEdited = (patch.resetToFile ?? []).filter((field) => updated.editedFields?.includes(field));
+    const restored = (patch.resetToFile ?? []).filter((field) => !stillEdited.includes(field));
     setMetadataPanel({
       track: updated,
       candidates: metadataPanel.candidates,
       loading: false,
-      status: `Saved manual edits for ${updated.artist} - ${updated.title}.`,
+      status: patch.resetToFile?.length
+        ? [
+            restored.length ? `Restored ${restored.join(', ')} from the file's tags.` : '',
+            stillEdited.length ? `Couldn't read the file for ${stillEdited.join(', ')}; try again when it's available.` : '',
+          ].filter(Boolean).join(' ')
+        : `Saved manual edits for ${updated.artist} - ${updated.title}.`,
+      formRevision: metadataPanel.formRevision,
     });
     api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
+    return updated;
+  }
+
+  async function resetAdoptedEdits(): Promise<void> {
+    setCleanupStatus('Restoring adopted fields from the files...');
+    try {
+      const count = await api.resetAdoptedMetadata();
+      setCleanupStatus(`Restored ${count.toLocaleString()} field${count === 1 ? '' : 's'} from the files' tags.`);
+      await reloadLibraryPage().catch(() => undefined);
+      refreshLibrarySummary();
+    } catch (error) {
+      setCleanupStatus(`Could not reset adopted edits: ${errorText(error)}`);
+    }
   }
 
   function applyBulkMetadataResults(updated: Track[]): void {
@@ -271,25 +354,64 @@ export function LibraryView(): JSX.Element {
     api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
-  async function cleanMissingFiles(): Promise<void> {
+  // "Clean missing files" first only looks: the preview says what removing
+  // would take with it, and nothing is deleted until the user confirms it.
+  async function checkMissingFiles(): Promise<void> {
+    setPrunePreview(null);
     setCleanupStatus('Checking file paths...');
-    const result = await api.pruneMissingTracks();
-    const [nextTracks, nextCount, nextStats, nextHealth] = await Promise.all([
-      api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
-      api.getTrackCount({ search: libraryQuery, sort }),
-      api.getStats(),
-      api.getLibraryHealth(),
-    ]);
-    setTracks(nextTracks);
-    setMatchingTrackCount(nextCount);
-    setHasMoreTracks(nextTracks.length < nextCount);
-    setStats(nextStats);
-    setHealth(nextHealth);
+    try {
+      const preview = await api.previewPruneMissingTracks();
+      if (preview.tracks) {
+        setPrunePreview(preview);
+        setCleanupStatus(null);
+        return;
+      }
+      // Tracks whose folder or drive is unreachable are kept, not pruned — say
+      // so, or an unplugged drive reads as "no missing files".
+      setCleanupStatus(
+        preview.offline
+          ? `No files confirmed gone. ${keptOfflineText(preview.offline)}`
+          : `Checked ${preview.checked.toLocaleString()} track${preview.checked === 1 ? '' : 's'}; no missing files.`,
+      );
+    } catch (error) {
+      setCleanupStatus(`Could not check file paths: ${errorText(error)}`);
+    }
+  }
+
+  async function removeMissingFiles(): Promise<void> {
+    setPrunePreview(null);
+    setCleanupStatus('Backing up the library, then removing missing tracks...');
+    let result: LibraryPruneMissingResult;
+    try {
+      result = await api.pruneMissingTracks();
+    } catch (error) {
+      // The backup comes first and a failed removal rolls back, so a
+      // rejection here means nothing was deleted.
+      setCleanupStatus(`Cleanup stopped and nothing was removed: ${errorText(error)}`);
+      return;
+    }
+    const kept = result.offline ? ` ${keptOfflineText(result.offline)}` : '';
+    const backup = result.backupPath ? ` Backup: ${result.backupPath}` : '';
     setCleanupStatus(
       result.removed
-        ? `Removed ${result.removed.toLocaleString()} stale track${result.removed === 1 ? '' : 's'}.`
-        : `Checked ${result.checked.toLocaleString()} track${result.checked === 1 ? '' : 's'}; no missing files.`,
+        ? `Removed ${result.removed.toLocaleString()} stale track${result.removed === 1 ? '' : 's'}.${kept}${backup}`
+        : `Nothing was removed.${kept}`,
     );
+    try {
+      const [nextTracks, nextCount, nextStats, nextHealth] = await Promise.all([
+        api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
+        api.getTrackCount({ search: libraryQuery, sort }),
+        api.getStats(),
+        api.getLibraryHealth(),
+      ]);
+      setTracks(nextTracks);
+      setMatchingTrackCount(nextCount);
+      setHasMoreTracks(nextTracks.length < nextCount);
+      setStats(nextStats);
+      setHealth(nextHealth);
+    } catch (error) {
+      console.error('library refresh after cleanup failed', error);
+    }
   }
 
   async function createDuplicateReviewPlaylist(): Promise<void> {
@@ -414,10 +536,12 @@ export function LibraryView(): JSX.Element {
       className="relative flex h-full flex-col"
       style={{ fontFamily: 'var(--font-mono)' }}
       onDragEnter={(e) => {
+        if (!hasDraggedFiles(e.dataTransfer)) return;
         e.preventDefault();
         setDropActive(true);
       }}
       onDragOver={(e) => {
+        if (!hasDraggedFiles(e.dataTransfer)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'copy';
         setDropActive(true);
@@ -426,8 +550,14 @@ export function LibraryView(): JSX.Element {
         const next = e.relatedTarget as Node | null;
         if (!next || !e.currentTarget.contains(next)) setDropActive(false);
       }}
+      onDropCapture={() => setDropActive(false)}
+      onDragEnd={() => setDropActive(false)}
       onDrop={(e) => {
+        if (!hasDraggedFiles(e.dataTransfer)) return;
         e.preventDefault();
+        // Library owns import for drops here; stop the event so App's
+        // window-level drop handler doesn't also open/play the same paths.
+        e.stopPropagation();
         setDropActive(false);
         void scanDropped(e.dataTransfer);
       }}
@@ -465,7 +595,14 @@ export function LibraryView(): JSX.Element {
         <LibraryHealthPanel
           health={health}
           cleanupStatus={cleanupStatus}
-          onCleanMissingFiles={() => void cleanMissingFiles()}
+          prunePreview={prunePreview}
+          onCleanMissingFiles={() => void checkMissingFiles()}
+          onConfirmPrune={() => void removeMissingFiles()}
+          onCancelPrune={() => {
+            setPrunePreview(null);
+            setCleanupStatus('Cleanup cancelled; nothing was removed.');
+          }}
+          onResetAdoptedEdits={() => void resetAdoptedEdits()}
           onCreateDuplicateReviewPlaylist={() => void createDuplicateReviewPlaylist()}
           onCreateMissingReviewPlaylist={() => void createMissingReviewPlaylist()}
           onCreateLegacyReviewPlaylist={() => void createLegacyReviewPlaylist()}
@@ -492,6 +629,7 @@ export function LibraryView(): JSX.Element {
       </div>
       {dropMessage && (
         <div
+          data-newamp-library-drop-status
           className="border-b px-3 py-1 text-[11px]"
           style={{ borderColor: 'var(--line)', color: 'var(--ink-2)', background: 'var(--panel)' }}
         >
@@ -508,11 +646,14 @@ export function LibraryView(): JSX.Element {
       )}
       {metadataPanel && (
         <MetadataRescuePanel
-          key={metadataPanel.track.id}
+          // Remounts (and so re-reads every field) only for another track or an
+          // applied lookup match; a save or a single-field reset keeps what is
+          // typed in the other fields.
+          key={`${metadataPanel.track.id}:${metadataPanel.formRevision ?? 0}`}
           panel={metadataPanel}
           onClose={() => setMetadataPanel(null)}
           onApply={(candidate) => void applyMetadataCandidate(candidate)}
-          onManualSave={(patch) => void applyManualMetadataEdit(patch)}
+          onManualSave={applyManualMetadataEdit}
         />
       )}
       <LibraryTrackPane
@@ -609,6 +750,31 @@ function LibraryPagingFooter({
 
 function droppedPaths(dataTransfer: DataTransfer): string[] {
   return api.getDroppedFilePaths(Array.from(dataTransfer.files));
+}
+
+function countText(count: number, one: string, many: string): string {
+  return `${count.toLocaleString()} ${count === 1 ? one : many}`;
+}
+
+function keptOfflineText(offline: number): string {
+  return `Keeping ${countText(offline, 'track', 'tracks')} whose folder or drive is offline.`;
+}
+
+function prunePreviewText(preview: LibraryPruneMissingPreview): string {
+  const text =
+    `Remove ${countText(preview.tracks, 'track', 'tracks')} whose files are gone? This also deletes ` +
+    `${countText(preview.plays, 'play', 'plays')}, ${countText(preview.playlistEntries, 'playlist entry', 'playlist entries')}, ` +
+    `${countText(preview.bookmarks, 'bookmark', 'bookmarks')} and ${countText(preview.edits, 'metadata edit', 'metadata edits')}. ` +
+    'The library is backed up first.';
+  return preview.offline ? `${text} ${keptOfflineText(preview.offline)}` : text;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function hasDraggedFiles(dataTransfer: DataTransfer): boolean {
+  return Array.from(dataTransfer.types).includes('Files');
 }
 
 /**
@@ -715,6 +881,7 @@ function LibraryTrackPane({
 function DropOverlay(): JSX.Element {
   return (
     <div
+      data-newamp-library-drop-overlay
       className="pointer-events-none absolute inset-3 z-30 flex items-center justify-center"
       style={{
         border: '1px dashed var(--accent)',
@@ -782,7 +949,11 @@ function StatsStrip({
 function LibraryHealthPanel({
   health,
   cleanupStatus,
+  prunePreview,
   onCleanMissingFiles,
+  onConfirmPrune,
+  onCancelPrune,
+  onResetAdoptedEdits,
   onCreateDuplicateReviewPlaylist,
   onCreateMissingReviewPlaylist,
   onCreateLegacyReviewPlaylist,
@@ -790,7 +961,11 @@ function LibraryHealthPanel({
 }: {
   health: LibraryHealth;
   cleanupStatus: string | null;
+  prunePreview: LibraryPruneMissingPreview | null;
   onCleanMissingFiles: () => void;
+  onConfirmPrune: () => void;
+  onCancelPrune: () => void;
+  onResetAdoptedEdits: () => void;
   onCreateDuplicateReviewPlaylist: () => void;
   onCreateMissingReviewPlaylist: () => void;
   onCreateLegacyReviewPlaylist: () => void;
@@ -857,10 +1032,32 @@ function LibraryHealthPanel({
           <span>ReplayGain missing</span>
           <span className="text-right">{health.quality.replayGainMissing.toLocaleString()}</span>
         </div>
+        {prunePreview && (
+          <div data-newamp-prune-preview className="bevel-in mt-2 grid gap-2 px-2 py-2" style={{ color: 'var(--ink-2)' }}>
+            <div>{prunePreviewText(prunePreview)}</div>
+            <div className="flex gap-2">
+              <button className="pxbtn is-active" onClick={onConfirmPrune}>
+                Back up and remove
+              </button>
+              <button className="pxbtn" onClick={onCancelPrune}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          <button className="pxbtn" onClick={onCleanMissingFiles}>
+          <button className="pxbtn" onClick={onCleanMissingFiles} disabled={!!prunePreview}>
             Clean missing files
           </button>
+          {health.adoptedEdits > 0 && (
+            <ConfirmAction
+              label={`Reset ${health.adoptedEdits.toLocaleString()} adopted edit${health.adoptedEdits === 1 ? '' : 's'}`}
+              confirmLabel="Sure? Use file tags"
+              tone="warn"
+              title="Fields kept from before edits were tracked, because they differed from the file. Some are real edits; some are just how an older version read the tags. This puts every one back to the file's tags."
+              onConfirm={onResetAdoptedEdits}
+            />
+          )}
           <button
             className="pxbtn"
             onClick={onCreateMissingReviewPlaylist}
@@ -1121,12 +1318,17 @@ const LibraryRow = memo(function LibraryRow({
   onContextMenu,
 }: LibraryRowProps): JSX.Element {
   const zebra = absoluteIndex % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)';
+  // An unavailable track keeps its row, history and ratings; it just reads as
+  // absent until its drive or folder comes back.
+  const missing = t.missingSince != null;
   return (
     <tr
       key={t.id}
       data-newamp-track-row
       data-track-id={t.id}
       data-track-title={t.title}
+      data-track-missing={missing ? '' : undefined}
+      title={missing ? `File not found since ${new Date(t.missingSince!).toLocaleString()}` : undefined}
       className={`cursor-pointer transition-colors${isActive ? ' track-row-playing' : ''}`}
       data-amp={isActive ? '' : undefined}
       tabIndex={0}
@@ -1135,6 +1337,7 @@ const LibraryRow = memo(function LibraryRow({
         // (styles/views/library.css) so Resonance can ride it via CSS vars.
         background: isActive ? undefined : zebra,
         color: isActive ? 'var(--accent)' : 'var(--ink)',
+        opacity: missing ? 0.5 : undefined,
       }}
       onDoubleClick={() => onPlay(absoluteIndex)}
       onContextMenu={(e) => {
@@ -2184,27 +2387,60 @@ function MetadataRescuePanel({
   };
   onClose: () => void;
   onApply: (candidate: MetadataLookupCandidate) => void;
-  onManualSave: (patch: TrackMetadataPatchInput) => void;
+  onManualSave: (patch: TrackMetadataPatchInput) => Promise<Track | null>;
 }): JSX.Element {
-  const [title, setTitle] = useState(panel.track.title);
-  const [artist, setArtist] = useState(panel.track.artist);
-  const [album, setAlbum] = useState(panel.track.album);
-  const [albumArtist, setAlbumArtist] = useState(panel.track.albumArtist);
-  const [genre, setGenre] = useState(panel.track.genre ?? '');
-  const [year, setYear] = useState(panel.track.year == null ? '' : String(panel.track.year));
-  const [trackNo, setTrackNo] = useState(panel.track.trackNo == null ? '' : String(panel.track.trackNo));
-  const [discNo, setDiscNo] = useState(panel.track.discNo == null ? '' : String(panel.track.discNo));
+  const [title, setTitle] = useState(metadataInputValue(panel.track, 'title'));
+  const [artist, setArtist] = useState(metadataInputValue(panel.track, 'artist'));
+  const [album, setAlbum] = useState(metadataInputValue(panel.track, 'album'));
+  const [albumArtist, setAlbumArtist] = useState(metadataInputValue(panel.track, 'albumArtist'));
+  const [genre, setGenre] = useState(metadataInputValue(panel.track, 'genre'));
+  const [year, setYear] = useState(metadataInputValue(panel.track, 'year'));
+  const [trackNo, setTrackNo] = useState(metadataInputValue(panel.track, 'trackNo'));
+  const [discNo, setDiscNo] = useState(metadataInputValue(panel.track, 'discNo'));
+  const setters: Record<TrackMetadataField, (value: string) => void> = {
+    title: setTitle,
+    artist: setArtist,
+    album: setAlbum,
+    albumArtist: setAlbumArtist,
+    genre: setGenre,
+    year: setYear,
+    trackNo: setTrackNo,
+    discNo: setDiscNo,
+  };
+  const values: Record<TrackMetadataField, string> = { title, artist, album, albumArtist, genre, year, trackNo, discNo };
+  // What each field held when the form loaded it (or last saved or reset
+  // it). A save sends only the fields typed away from that: sending the whole
+  // form would make every untouched field an edit, pinning it against the
+  // file's tags, including values that were stale by the time it was saved.
+  const loaded = useRef<Record<TrackMetadataField, string>>({ ...values });
+  const edited = new Set(panel.track.editedFields ?? []);
+  const resetProps = (field: TrackMetadataField) =>
+    edited.has(field) ? { onReset: () => void resetField(field) } : {};
+
+  // Only the reset field takes the file's value; whatever is typed into the
+  // others stays, saved or not.
+  async function resetField(field: TrackMetadataField): Promise<void> {
+    const updated = await onManualSave({ resetToFile: [field] }).catch(() => null);
+    if (!updated || updated.editedFields?.includes(field)) return;
+    const value = metadataInputValue(updated, field);
+    loaded.current = { ...loaded.current, [field]: value };
+    setters[field](value);
+  }
 
   function saveManualEdit(): void {
-    onManualSave({
-      title,
-      artist,
-      album,
-      albumArtist,
-      genre,
-      year: metadataOptionalInteger(year),
-      trackNo: metadataOptionalInteger(trackNo),
-      discNo: metadataOptionalInteger(discNo),
+    const changed = (Object.keys(values) as TrackMetadataField[]).filter((field) => values[field] !== loaded.current[field]);
+    if (!changed.length) return;
+    const patch: TrackMetadataPatchInput = {};
+    for (const field of changed) {
+      if (field === 'year' || field === 'trackNo' || field === 'discNo') patch[field] = metadataOptionalInteger(values[field]);
+      else patch[field] = values[field];
+    }
+    const sent = { ...values };
+    void onManualSave(patch).then((updated) => {
+      if (!updated) return;
+      const saved: Partial<Record<TrackMetadataField, string>> = {};
+      for (const field of changed) saved[field] = sent[field];
+      loaded.current = { ...loaded.current, ...saved };
     });
   }
 
@@ -2234,14 +2470,14 @@ function MetadataRescuePanel({
           Manual edit
         </div>
         <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(136px, 1fr))' }}>
-          <MetadataInput label="Title" value={title} onChange={setTitle} />
-          <MetadataInput label="Artist" value={artist} onChange={setArtist} />
-          <MetadataInput label="Album" value={album} onChange={setAlbum} />
-          <MetadataInput label="Album artist" value={albumArtist} onChange={setAlbumArtist} />
-          <MetadataInput label="Genre" value={genre} onChange={setGenre} />
-          <MetadataInput label="Year" value={year} onChange={setYear} inputMode="numeric" />
-          <MetadataInput label="Track" value={trackNo} onChange={setTrackNo} inputMode="numeric" />
-          <MetadataInput label="Disc" value={discNo} onChange={setDiscNo} inputMode="numeric" />
+          <MetadataInput label="Title" value={title} onChange={setTitle} {...resetProps('title')} />
+          <MetadataInput label="Artist" value={artist} onChange={setArtist} {...resetProps('artist')} />
+          <MetadataInput label="Album" value={album} onChange={setAlbum} {...resetProps('album')} />
+          <MetadataInput label="Album artist" value={albumArtist} onChange={setAlbumArtist} {...resetProps('albumArtist')} />
+          <MetadataInput label="Genre" value={genre} onChange={setGenre} {...resetProps('genre')} />
+          <MetadataInput label="Year" value={year} onChange={setYear} inputMode="numeric" {...resetProps('year')} />
+          <MetadataInput label="Track" value={trackNo} onChange={setTrackNo} inputMode="numeric" {...resetProps('trackNo')} />
+          <MetadataInput label="Disc" value={discNo} onChange={setDiscNo} inputMode="numeric" {...resetProps('discNo')} />
         </div>
         <div className="flex justify-end">
           <button className="pxbtn is-active" onClick={saveManualEdit} disabled={!title.trim() || !artist.trim()}>
@@ -2285,15 +2521,36 @@ function MetadataInput({
   value,
   onChange,
   inputMode,
+  onReset,
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   inputMode?: 'numeric';
+  /** Present only when the field holds the user's value rather than the file's. */
+  onReset?: () => void;
 }): JSX.Element {
   return (
     <label className="grid gap-1 text-[10px] uppercase tracking-[0.08em]" style={{ color: 'var(--muted)' }}>
-      <span>{label}</span>
+      <span className="flex items-center justify-between gap-1">
+        <span>
+          {label}
+          {onReset && <span style={{ color: 'var(--accent-text, var(--accent))' }}> · edited</span>}
+        </span>
+        {onReset && (
+          <button
+            type="button"
+            className="normal-case tracking-[0] underline opacity-70 hover:opacity-100"
+            title="Discard your edit and use the value from the file's tags"
+            onClick={(event) => {
+              event.preventDefault();
+              onReset();
+            }}
+          >
+            reset to file
+          </button>
+        )}
+      </span>
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -2307,6 +2564,11 @@ function MetadataInput({
 
 function needsMetadataRescue(track: Track): boolean {
   return !track.album.trim() || !track.year || !track.artist.trim() || /^unknown artist$/i.test(track.artist);
+}
+
+function metadataInputValue(track: Track, field: TrackMetadataField): string {
+  const value = track[field];
+  return value == null ? '' : String(value);
 }
 
 function metadataOptionalInteger(value: string): number | null {

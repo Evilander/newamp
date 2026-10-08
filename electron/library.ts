@@ -5,9 +5,9 @@
 
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, createWriteStream } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, writeFileSync, statSync, createWriteStream, type Stats } from 'node:fs';
 import { promises as fsp } from 'node:fs';
-import { dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import type {
@@ -25,6 +25,7 @@ import type {
   GuitarTabDocument,
   HarmonicMixInput,
   LibraryHealth,
+  LibraryPruneMissingPreview,
   LibraryPruneMissingResult,
   ListeningHistoryItem,
   ListeningInsights,
@@ -59,6 +60,7 @@ import type {
   TagSummary,
   TasteMixInput,
   TrackQueryOptions,
+  TrackMetadataField,
   TrackMetadataPatchInput,
   TrackBookmark,
   Track,
@@ -163,7 +165,14 @@ CREATE TABLE IF NOT EXISTS tracks (
   key          TEXT,
   replaygain_track_db REAL,
   replaygain_album_db REAL,
-  art_hash     TEXT
+  art_hash     TEXT,
+  dna_json     TEXT,
+  dna_analyzed_at INTEGER,
+  -- Set when an automatic check found the file gone; cleared when the scanner
+  -- sees it again. The row, its id and everything hanging off it are kept.
+  missing_since INTEGER,
+  -- fs.Stats.dev of the file when last scanned (see missingFileIsConfirmedGone).
+  file_dev     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album);
@@ -172,6 +181,8 @@ CREATE INDEX IF NOT EXISTS idx_tracks_loved  ON tracks(loved);
 CREATE INDEX IF NOT EXISTS idx_tracks_rating ON tracks(rating DESC);
 CREATE INDEX IF NOT EXISTS idx_tracks_avoid_auto_play ON tracks(avoid_auto_play);
 CREATE INDEX IF NOT EXISTS idx_tracks_play   ON tracks(play_count DESC);
+CREATE INDEX IF NOT EXISTS idx_tracks_path_normalized ON tracks(lower(replace(path, '\\', '/')));
+CREATE INDEX IF NOT EXISTS idx_tracks_missing ON tracks(missing_since) WHERE missing_since IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS play_history (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -319,6 +330,39 @@ CREATE TABLE IF NOT EXISTS track_visual_memory (
   updated_at   INTEGER NOT NULL
 );
 
+-- User-owned metadata. NewAmp never writes tags into music files, so an edit
+-- (typed in, or accepted from a MusicBrainz lookup) exists only here. One row
+-- per edited field, kept only while the user's value differs from the file's.
+-- The tracks columns always hold the effective value, so every query, sort
+-- and search sees the edit without joining this table; the scanner refreshes
+-- source_json and leaves the column alone while a row exists.
+-- value_json is the user's value (JSON null = deliberately cleared),
+-- source_json what the file said at the last scan, which is what "reset to
+-- file" restores. source_known is 0 while the file hasn't been read since the
+-- override was made on a track still queued for adoption, whose column could
+-- have held an old edit rather than the file's value. origin is 'manual',
+-- 'musicbrainz' or 'adopted'.
+CREATE TABLE IF NOT EXISTS track_metadata_overrides (
+  track_id     INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,
+  field        TEXT    NOT NULL,
+  value_json   TEXT    NOT NULL,
+  source_json  TEXT    NOT NULL,
+  source_known INTEGER NOT NULL DEFAULT 1,
+  origin       TEXT    NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  PRIMARY KEY (track_id, field)
+);
+
+-- Tracks that predate track_metadata_overrides. Their columns may hold edits
+-- that were never recorded as edits. The first time the scanner reads each
+-- one, if the file is unchanged since it was last scanned, any editable field
+-- that differs from it can only be an in-app edit (or parser drift) and
+-- becomes an 'adopted' override; if the file changed, it was retagged outside
+-- NewAmp and its tags win. The row goes either way.
+CREATE TABLE IF NOT EXISTS track_metadata_adoption (
+  track_id INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE
+);
+
 -- One-shot migration flags. Keeps schema-migration state next to the DB
 -- so it travels with the data instead of living in settings.json.
 CREATE TABLE IF NOT EXISTS library_meta (
@@ -369,6 +413,59 @@ CREATE TABLE IF NOT EXISTS profile (
 );
 `;
 
+// Columns added to a table after it first shipped. applySchema adds whichever
+// an existing library lacks BEFORE it runs SCHEMA, because SCHEMA's indexes
+// can name them: a v1.0 library had no avoid_auto_play, creating its index
+// first failed the open, and the library was quarantined as corrupt. Each
+// entry must also be in SCHEMA's CREATE TABLE, which is where a new library
+// gets it from.
+const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, definition: string]> = [
+  ['tracks', 'rating', 'INTEGER NOT NULL DEFAULT 0'],
+  ['tracks', 'rating_score', 'REAL'],
+  ['tracks', 'avoid_auto_play', 'INTEGER NOT NULL DEFAULT 0'],
+  ['tracks', 'skip_count', 'INTEGER NOT NULL DEFAULT 0'],
+  ['tracks', 'last_skipped', 'INTEGER'],
+  ['tracks', 'replaygain_track_db', 'REAL'],
+  ['tracks', 'replaygain_album_db', 'REAL'],
+  ['tracks', 'dna_json', 'TEXT'],
+  ['tracks', 'dna_analyzed_at', 'INTEGER'],
+  ['tracks', 'missing_since', 'INTEGER'],
+  ['tracks', 'file_dev', 'INTEGER'],
+  ['track_metadata_overrides', 'source_known', 'INTEGER NOT NULL DEFAULT 1'],
+  ['smart_rules', 'min_rating', 'INTEGER'],
+  ['smart_rules', 'search_query', 'TEXT'],
+  ['smart_rules', 'folder_path', 'TEXT'],
+  ['playlists', 'cover_art_path', 'TEXT'],
+  ['playlists', 'cover_art_updated_at', 'INTEGER'],
+];
+
+// The editable metadata fields (TrackMetadataPatchInput keys) and the tracks
+// column behind each. These are the fields track_metadata_overrides can own.
+const METADATA_FIELD_COLUMNS: Readonly<Record<TrackMetadataField, keyof RawRow>> = {
+  title: 'title',
+  artist: 'artist',
+  album: 'album',
+  albumArtist: 'album_artist',
+  genre: 'genre',
+  year: 'year',
+  trackNo: 'track_no',
+  discNo: 'disc_no',
+};
+const METADATA_FIELDS = Object.keys(METADATA_FIELD_COLUMNS) as TrackMetadataField[];
+// NOT NULL text columns store an empty string where the others store NULL.
+const NOT_NULL_TEXT_FIELDS = new Set<TrackMetadataField>(['title', 'artist', 'album', 'albumArtist']);
+
+type MetadataValue = string | number | null;
+type MetadataOverrideOrigin = 'manual' | 'musicbrainz' | 'adopted';
+
+interface MetadataOverrideRow {
+  track_id: number;
+  field: string;
+  value_json: string;
+  source_json: string;
+  source_known: number;
+}
+
 interface RawRow {
   id: number;
   path: string;
@@ -399,6 +496,8 @@ interface RawRow {
   replaygain_track_db: number | null;
   replaygain_album_db: number | null;
   art_hash: string | null;
+  missing_since: number | null;
+  file_dev: number | null;
 }
 
 interface SmartRuleRow {
@@ -465,6 +564,8 @@ interface CachedGuitarTabRow {
 interface PruneTarget {
   kind: 'file' | 'dir';
   key: string;
+  // The path stat'ed when the target was normalized.
+  exists: boolean;
 }
 
 interface FolderTrackRow {
@@ -536,6 +637,7 @@ function rowToTrack(r: RawRow): Track {
     key: r.key,
     replayGainTrackDb: r.replaygain_track_db,
     replayGainAlbumDb: r.replaygain_album_db,
+    missingSince: r.missing_since ?? null,
   };
 }
 
@@ -622,23 +724,33 @@ export interface IncomingTrack {
   size: number;
   mtime: number;
   art: ArtBlob | null;
+  // The file's device (fs.Stats.dev) as the scanner found it. Explicit
+  // cleanup uses it to tell a deleted file from one on an unmounted drive.
+  dev?: number | null;
+  // The tags could not be read and the metadata fields are a filename guess.
+  // A track the library already has keeps what it has (see upsertTracks).
+  parseFailed?: boolean;
 }
 
 export interface TrackFileState {
+  id: number;
   path: string;
   size: number | null;
   mtime: number;
   hasArt: number;
   artHash: string | null;
   artExists: boolean;
+  fileDev: number | null;
 }
 
 interface TrackFileStateRow {
+  id: number;
   path: string;
   size: number | null;
   mtime: number;
   has_art: number;
   art_hash: string | null;
+  file_dev: number | null;
 }
 
 interface HistoryImportTrackRow {
@@ -662,6 +774,11 @@ interface MatchedHistoryImportEntry {
 
 export class LibraryStore {
   public readonly recoveryEvents: RecoveryEvent[] = [];
+  // Set when library.db is valid but this build could not upgrade it. The
+  // file is left untouched and this session runs on a temporary library.
+  public upgradeError: string | null = null;
+  // Nothing may be written over library.db while upgradeError is set.
+  private persistBlocked = false;
   private db!: Database;
   private SQL!: SqlJsStatic;
   private artDir: string;
@@ -691,6 +808,7 @@ export class LibraryStore {
   // we read change: insert/update of path/duration/has_art, or delete.
   private folderTrackRowsCache: FolderTrackRow[] | null = null;
   private libraryHealthCache: LibraryHealth | null = null;
+  private windowsUnicodePaths: Map<string, string[]> | null = null;
   // getVisualMemoryStats() needs totalSections, which requires reading and
   // JSON.parsing every plan_json blob across track_visual_memory. For a 60k
   // library with ~5KB plans that's 150MB of string churn + JSON parsing on
@@ -753,25 +871,25 @@ export class LibraryStore {
       this.db = new this.SQL.Database();
     }
     const applySchema = () => {
-      this.db.exec(SCHEMA);
-      this.ensureColumn('tracks', 'rating', 'INTEGER NOT NULL DEFAULT 0');
-      this.ensureColumn('tracks', 'rating_score', 'REAL');
-      this.ensureColumn('tracks', 'avoid_auto_play', 'INTEGER NOT NULL DEFAULT 0');
-      this.ensureColumn('tracks', 'skip_count', 'INTEGER NOT NULL DEFAULT 0');
-      this.ensureColumn('tracks', 'last_skipped', 'INTEGER');
-      this.ensureColumn('tracks', 'replaygain_track_db', 'REAL');
-      this.ensureColumn('tracks', 'replaygain_album_db', 'REAL');
-      this.ensureColumn('tracks', 'dna_json', 'TEXT');
-      this.ensureColumn('tracks', 'dna_analyzed_at', 'INTEGER');
-      this.ensureColumn('smart_rules', 'min_rating', 'INTEGER');
-      this.ensureColumn('smart_rules', 'search_query', 'TEXT');
-      this.ensureColumn('smart_rules', 'folder_path', 'TEXT');
-      this.ensureColumn('playlists', 'cover_art_path', 'TEXT');
-      this.ensureColumn('playlists', 'cover_art_updated_at', 'INTEGER');
+      // One transaction, so an upgrade that fails part-way leaves the
+      // database exactly as it was loaded.
+      this.db.run('BEGIN');
+      try {
+        for (const [table, column, definition] of ADDED_COLUMNS) this.ensureColumn(table, column, definition);
+        this.db.exec(SCHEMA);
+        // One-shot DB migrations gated by flags in library_meta.
+        this.runOneShotMigrations();
+        this.db.run('COMMIT');
+      } catch (err) {
+        try {
+          this.db.run('ROLLBACK');
+        } catch {
+          /* some failures end the transaction themselves */
+        }
+        throw err;
+      }
+      // A no-op inside a transaction.
       this.db.exec('PRAGMA foreign_keys = ON');
-      // One-shot DB migrations gated by flags in library_meta. Currently:
-      // backfill album_ratings from pre-1.5.4 cascaded track rating_score.
-      this.runOneShotMigrations();
     };
     try {
       applySchema();
@@ -782,10 +900,27 @@ export class LibraryStore {
       } catch {
         /* ignore */
       }
-      const event = quarantineCorruptFile(this.file, 'library', recoveryReason(err));
-      if (event) this.recoveryEvents.push(event);
+      // The file passed its integrity check, so this is a bug in the upgrade,
+      // not damage in the library. Quarantining it here used to hand the user
+      // an empty library in place of their history, ratings and playlists.
+      // Leave library.db byte-for-byte as it is, run this session on an
+      // in-memory library that is never written anywhere, and try the upgrade
+      // again on the next launch.
+      const reason = recoveryReason(err);
+      this.upgradeError = `NewAmp could not upgrade your library (${reason}). The library file was not changed: ${this.file}`;
+      console.error(`[newamp] library upgrade failed; leaving ${this.file} untouched:`, err);
+      this.recoveryEvents.push({
+        store: 'library',
+        filePath: this.file,
+        backupPath: this.file,
+        reason: `upgrade failed, file left untouched: ${reason}`,
+        recoveredAt: Date.now(),
+      });
+      this.persistBlocked = true;
+      if (this.persistTimer) clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+      this.dirty = false;
       this.db = new this.SQL.Database();
-      recovered = true;
       applySchema();
     }
     if (recovered) this.flushSync();
@@ -841,6 +976,9 @@ export class LibraryStore {
   // coordinator uses this instead of reading library.db off disk, which can
   // lag behind by up to that batching window.
   exportSnapshot(): Buffer {
+    // After a failed upgrade the user's library is the untouched file, not
+    // this session's temporary one.
+    if (this.persistBlocked) return readFileSync(this.file);
     return Buffer.from(this.db.export());
   }
 
@@ -896,7 +1034,7 @@ export class LibraryStore {
   // track change/skip, and a full db.export() + write on that cadence is real
   // main-thread cost. Every other mutation keeps the tight 800ms debounce.
   private scheduleFlush(opts?: { slow?: boolean }): void {
-    if (this.closed) return;
+    if (this.closed || this.persistBlocked) return;
     this.dirty = true;
     const slow = !!opts?.slow;
     if (this.persistTimer) {
@@ -922,7 +1060,7 @@ export class LibraryStore {
   // rename so the (potentially multi-MB, 60k-track-library) serialization
   // doesn't block the main thread's event loop.
   private async flushAsync(): Promise<void> {
-    if (this.closed || !this.dirty) return;
+    if (this.closed || this.persistBlocked || !this.dirty) return;
     if (this.flushInFlight) {
       if (!this.closed) this.flushAgain = true;
       return;
@@ -978,7 +1116,7 @@ export class LibraryStore {
   // The write lands via tmp file + fsync + rename so a crash mid-write can
   // never leave a truncated library.db behind.
   private flushSync(): void {
-    if (this.closed) return;
+    if (this.closed || this.persistBlocked) return;
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
@@ -991,25 +1129,70 @@ export class LibraryStore {
 
   private ensureColumn(table: string, column: string, definition: string): void {
     const rows = this.many<{ name: string }>(`PRAGMA table_info(${table})`);
-    if (rows.some((row) => row.name === column)) return;
+    // No rows: the table doesn't exist yet, and SCHEMA creates it complete.
+    if (!rows.length || rows.some((row) => row.name === column)) return;
     this.db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     this.scheduleFlush();
   }
 
   upsertTracks(items: IncomingTrack[]): void {
     if (!items.length) return;
+    // One reading per path, the last one winning. Overlapping roots, a watcher
+    // batch holding a folder and a file inside it, or a .cue dropped with its
+    // audio all hand the same file over twice, and the ownership bookkeeping
+    // below has to see each track once.
+    const paths = new Map<string, string>();
+    const normalized = items.map((item) => {
+      if (process.platform !== 'win32') return item;
+      const key = normalizeFileStatePath(item.path);
+      let path = paths.get(key);
+      if (!path) {
+        const exact = this.one<{ path: string }>('SELECT path FROM tracks WHERE path = ?', [item.path]);
+        let matches = exact ? [exact] : this.many<{ path: string }>(
+          `SELECT path FROM tracks WHERE lower(replace(path, '\\', '/')) = ? LIMIT 2`,
+          [item.path.replace(/\\/g, '/').replace(/[A-Z]/g, (ch) => ch.toLowerCase())],
+        );
+        // SQLite's built-in lower() folds ASCII only. Cache the uncommon
+        // Unicode fallback once so international libraries stay linear.
+        if (!matches.length && /[^\x00-\x7f]/.test(item.path)) {
+          if (!this.windowsUnicodePaths) {
+            this.windowsUnicodePaths = new Map();
+            for (const row of this.many<{ path: string }>('SELECT path FROM tracks')) {
+              const unicodeKey = normalizeFileStatePath(row.path);
+              const bucket = this.windowsUnicodePaths.get(unicodeKey) ?? [];
+              bucket.push(row.path);
+              this.windowsUnicodePaths.set(unicodeKey, bucket);
+            }
+          }
+          matches = (this.windowsUnicodePaths.get(normalizeFileStatePath(item.path)) ?? []).map((path) => ({ path }));
+        }
+        // Do not merge pre-existing ambiguous identities without an explicit
+        // migration. A unique filesystem spelling keeps all its annotations.
+        path = matches.length === 1 ? matches[0]!.path : item.path;
+        paths.set(key, path);
+      }
+      return path === item.path ? item : { ...item, path };
+    });
+    const unique = [...new Map(normalized.map((item) => [item.path, item])).values()];
 
     this.db.run('BEGIN');
     try {
+      // Fields the user owns keep the user's value; for those the file's
+      // reading only refreshes source_json.
+      const rows = this.resolveOwnedMetadata(this.skipFailedRereads(unique));
       // Art applied through the UI (applyAlbumArtToAlbum) has no provenance
       // column, so a rescan can't distinguish it from embedded art — instead
       // any EXISTING art is kept whenever the rescanned file itself carries
-      // none, rather than being overwritten with null.
+      // none, rather than being overwritten with null. Duration likewise: a
+      // MusicBrainz lookup fills it in when the file yields none, and a file
+      // that still yields none must not erase it. Reading the file at all
+      // proves it is there, so the missing mark goes.
       const stmt = this.db.prepare(
         `INSERT INTO tracks
          (path, title, artist, album, album_artist, track_no, disc_no, year, genre,
-          duration, bitrate, sample_rate, bpm, key, replaygain_track_db, replaygain_album_db, size, mtime, has_art, art_hash)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          duration, bitrate, sample_rate, bpm, key, replaygain_track_db, replaygain_album_db, size, mtime, has_art, art_hash,
+          file_dev)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(path) DO UPDATE SET
            title=excluded.title,
            artist=excluded.artist,
@@ -1019,7 +1202,7 @@ export class LibraryStore {
            disc_no=excluded.disc_no,
            year=excluded.year,
            genre=excluded.genre,
-           duration=excluded.duration,
+           duration=COALESCE(excluded.duration, tracks.duration),
            bitrate=excluded.bitrate,
            sample_rate=excluded.sample_rate,
            bpm=excluded.bpm,
@@ -1029,11 +1212,13 @@ export class LibraryStore {
            size=excluded.size,
            mtime=excluded.mtime,
            has_art=CASE WHEN excluded.art_hash IS NULL THEN tracks.has_art ELSE excluded.has_art END,
-           art_hash=COALESCE(excluded.art_hash, tracks.art_hash)`,
+           art_hash=COALESCE(excluded.art_hash, tracks.art_hash),
+           missing_since=NULL,
+           file_dev=COALESCE(excluded.file_dev, tracks.file_dev)`,
       );
       const artHashCache = new WeakMap<Buffer, string>();
       const writtenArtHashes = new Set<string>();
-      for (const r of items) {
+      for (const r of rows) {
         let artHash: string | null = null;
         if (r.art && r.art.data.length) {
           const cachedHash = artHashCache.get(r.art.data);
@@ -1065,6 +1250,7 @@ export class LibraryStore {
           r.mtime,
           artHash ? 1 : 0,
           artHash,
+          r.dev ?? null,
         ]);
       }
       stmt.free();
@@ -1073,10 +1259,289 @@ export class LibraryStore {
       this.db.run('ROLLBACK');
       throw err;
     }
+    if (this.windowsUnicodePaths) {
+      for (const item of unique) {
+        const key = normalizeFileStatePath(item.path);
+        const bucket = this.windowsUnicodePaths.get(key) ?? [];
+        if (!bucket.includes(item.path)) bucket.push(item.path);
+        this.windowsUnicodePaths.set(key, bucket);
+      }
+    }
     // upsertTracks writes path/duration/has_art — cached folder-row columns.
     this.invalidateFolderTrackRowsCache();
     this.invalidateLibraryHealthCache();
     this.scheduleFlush();
+  }
+
+  // A reading whose tags failed to parse is a filename guess ("Unknown
+  // Artist", title from the file name). For a track the library already has,
+  // that guess must not replace its metadata, source values or adoption
+  // state: only the missing mark goes, and size/mtime stay as they were so
+  // the next scan tries the file again. A new file still gets its guessed row.
+  private skipFailedRereads(items: IncomingTrack[]): IncomingTrack[] {
+    const failed = items.filter((item) => item.parseFailed).map((item) => item.path);
+    if (!failed.length) return items;
+    const known = new Set<string>();
+    const chunkSize = 500;
+    for (let i = 0; i < failed.length; i += chunkSize) {
+      const chunk = failed.slice(i, i + chunkSize);
+      const rows = this.many<{ path: string }>(
+        `SELECT path FROM tracks WHERE path IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
+      );
+      for (const row of rows) known.add(row.path);
+    }
+    if (!known.size) return items;
+    for (const path of known) {
+      this.db.run(`UPDATE tracks SET missing_since = NULL WHERE path = ?`, [path]);
+    }
+    return items.filter((item) => !(item.parseFailed && known.has(item.path)));
+  }
+
+  // Runs inside upsertTracks' transaction. Returns the rows to write: for each
+  // already-known track, fields with an override carry the user's value (and
+  // the override's source_json takes the file's). A track still queued for
+  // adoption is settled first: if the file is unchanged since its last scan,
+  // every field that really differs from it (not just a reading variant, see
+  // isReadingVariant) becomes an override; if the file changed, it was
+  // retagged and its tags win. Matching is on the exact path, as the upsert's
+  // conflict is; callers pass each path once.
+  private resolveOwnedMetadata(items: IncomingTrack[]): IncomingTrack[] {
+    const anyOwned = this.one<{ n: number }>(
+      `SELECT EXISTS (SELECT 1 FROM track_metadata_overrides)
+           OR EXISTS (SELECT 1 FROM track_metadata_adoption) AS n`,
+    );
+    if (!anyOwned?.n) return items;
+
+    const stored = new Map<string, RawRow & { adopt: number }>();
+    const overrides = new Map<number, Map<TrackMetadataField, MetadataValue>>();
+    const chunkSize = 500;
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const paths = items.slice(i, i + chunkSize).map((item) => item.path);
+      const placeholders = paths.map(() => '?').join(',');
+      const rows = this.many<RawRow & { adopt: number }>(
+        `SELECT t.id, t.path, t.title, t.artist, t.album, t.album_artist, t.genre, t.year, t.track_no, t.disc_no,
+                t.size, t.mtime, a.track_id IS NOT NULL AS adopt
+           FROM tracks t
+           LEFT JOIN track_metadata_adoption a ON a.track_id = t.id
+          WHERE t.path IN (${placeholders})
+            AND (a.track_id IS NOT NULL
+                 OR EXISTS (SELECT 1 FROM track_metadata_overrides o WHERE o.track_id = t.id))`,
+        paths,
+      );
+      for (const row of rows) stored.set(row.path, row);
+      if (!rows.length) continue;
+      const ids = rows.map((row) => row.id);
+      const overrideRows = this.many<MetadataOverrideRow>(
+        `SELECT track_id, field, value_json, source_json, source_known FROM track_metadata_overrides
+          WHERE track_id IN (${ids.map(() => '?').join(',')})`,
+        ids,
+      );
+      for (const row of overrideRows) {
+        if (!isTrackMetadataField(row.field)) continue;
+        const fields = overrides.get(row.track_id) ?? new Map<TrackMetadataField, MetadataValue>();
+        fields.set(row.field, parseMetadataJson(row.field, row.value_json));
+        overrides.set(row.track_id, fields);
+      }
+    }
+    if (!stored.size) return items;
+
+    const now = Date.now();
+    return items.map((item) => {
+      const row = stored.get(item.path);
+      if (!row) return item;
+      const owned = overrides.get(row.id) ?? new Map<TrackMetadataField, MetadataValue>();
+      overrides.set(row.id, owned);
+      // Only an unchanged file can show that a stored value was an edit: a
+      // changed one was retagged (Picard, Mp3tag), and its new tags win. A row
+      // that is itself a failed-parse guess holds no edits at all.
+      const adopt = !!row.adopt
+        && row.size === item.size
+        && row.mtime === item.mtime
+        && !isFallbackRow(row);
+      for (const field of METADATA_FIELDS) {
+        const fromFile = item[field] ?? null;
+        if (owned.has(field)) {
+          // An override only exists while the user's value differs from the
+          // file's. Once the file says the same thing (retagged to match, or
+          // an adopted value that was the file's all along), the field goes
+          // back to following the file.
+          if (sameMetadataValue(owned.get(field), fromFile)) {
+            this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ? AND field = ?`, [row.id, field]);
+            owned.delete(field);
+          } else {
+            this.db.run(
+              `UPDATE track_metadata_overrides SET source_json = ?, source_known = 1 WHERE track_id = ? AND field = ?`,
+              [JSON.stringify(fromFile), row.id, field],
+            );
+          }
+          continue;
+        }
+        if (!adopt) continue;
+        const kept = (row[METADATA_FIELD_COLUMNS[field]] ?? null) as MetadataValue;
+        // A reading variant isn't adopted either: the field takes the file's value.
+        if (
+          sameMetadataValue(kept, fromFile)
+          || isReadingVariant(field, kept, fromFile)
+          || isFallbackValue(field, kept, row.path)
+        ) continue;
+        this.db.run(
+          `INSERT INTO track_metadata_overrides (track_id, field, value_json, source_json, source_known, origin, updated_at)
+           VALUES (?, ?, ?, ?, 1, 'adopted', ?)
+           ON CONFLICT(track_id, field) DO NOTHING`,
+          [row.id, field, JSON.stringify(kept), JSON.stringify(fromFile), now],
+        );
+        owned.set(field, kept);
+      }
+      if (row.adopt) {
+        this.db.run(`DELETE FROM track_metadata_adoption WHERE track_id = ?`, [row.id]);
+        row.adopt = 0;
+      }
+      if (!owned.size) return item;
+      const next: IncomingTrack = { ...item };
+      for (const [field, value] of owned) assignMetadataValue(next, field, value);
+      return next;
+    });
+  }
+
+  // Owned-field bookkeeping shared by the manual editor and the MusicBrainz
+  // rescue, inside their transaction. Only fields present in `next` whose
+  // value actually changes are touched: a value that differs from the file
+  // becomes (or updates) an override, and a value set back to exactly what
+  // the file says drops the override, so the field follows the file again.
+  private writeMetadataFields(
+    trackId: number,
+    current: Track,
+    next: Partial<Record<TrackMetadataField, MetadataValue>>,
+    origin: MetadataOverrideOrigin,
+  ): void {
+    const existing = new Map(
+      this.many<MetadataOverrideRow>(
+        `SELECT track_id, field, value_json, source_json, source_known FROM track_metadata_overrides WHERE track_id = ?`,
+        [trackId],
+      ).map((row) => [row.field, row]),
+    );
+    // A track still queued for adoption hasn't been read since edits became
+    // tracked, so its columns may hold an old edit instead of the file's value.
+    const columnIsFile = !this.one(`SELECT 1 FROM track_metadata_adoption WHERE track_id = ?`, [trackId]);
+    const now = Date.now();
+    const sets: string[] = [];
+    const params: MetadataValue[] = [];
+    for (const field of METADATA_FIELDS) {
+      if (!(field in next)) continue;
+      const value = next[field] ?? null;
+      const currentValue = current[field] ?? null;
+      if (sameMetadataValue(value, currentValue)) continue;
+      const row = existing.get(field);
+      const sourceKnown = row ? row.source_known === 1 : columnIsFile;
+      const fromFile = row ? parseMetadataJson(field, row.source_json) : currentValue;
+      if (sourceKnown && sameMetadataValue(value, fromFile)) {
+        this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ? AND field = ?`, [trackId, field]);
+      } else {
+        this.db.run(
+          `INSERT INTO track_metadata_overrides (track_id, field, value_json, source_json, source_known, origin, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(track_id, field) DO UPDATE SET
+             value_json = excluded.value_json,
+             origin = excluded.origin,
+             updated_at = excluded.updated_at`,
+          [
+            trackId,
+            field,
+            JSON.stringify(value),
+            JSON.stringify(sourceKnown ? fromFile : null),
+            sourceKnown ? 1 : 0,
+            origin,
+            now,
+          ],
+        );
+      }
+      sets.push(`${METADATA_FIELD_COLUMNS[field]} = ?`);
+      params.push(metadataColumnValue(field, value));
+    }
+    if (sets.length) this.db.run(`UPDATE tracks SET ${sets.join(', ')} WHERE id = ?`, [...params, trackId]);
+  }
+
+  // "Reset to file": the override goes and the column takes the value the
+  // file had at the last scan. A field with no override already follows the
+  // file and is left alone; one whose file value isn't known yet (see
+  // source_known) stays as it is until the file has been read.
+  private resetMetadataFields(trackId: number, fields: TrackMetadataField[]): void {
+    for (const field of fields) {
+      const row = this.one<MetadataOverrideRow>(
+        `SELECT track_id, field, value_json, source_json, source_known FROM track_metadata_overrides
+          WHERE track_id = ? AND field = ?`,
+        [trackId, field],
+      );
+      if (!row || row.source_known !== 1) continue;
+      this.db.run(`UPDATE tracks SET ${METADATA_FIELD_COLUMNS[field]} = ? WHERE id = ?`, [
+        metadataColumnValue(field, parseMetadataJson(field, row.source_json)),
+        trackId,
+      ]);
+      this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ? AND field = ?`, [trackId, field]);
+    }
+  }
+
+  // The file behind a track that a metadata edit should read first: one still
+  // queued for adoption, or holding an override whose file value is unknown.
+  // Main reads it (readTrackFile) and upserts the reading before the edit, so
+  // the edit and any reset work from what the file actually says.
+  pathNeedingFileRead(trackId: number): string | null {
+    const row = this.one<{ path: string }>(
+      `SELECT t.path FROM tracks t
+        WHERE t.id = ?
+          AND (EXISTS (SELECT 1 FROM track_metadata_adoption a WHERE a.track_id = t.id)
+               OR EXISTS (SELECT 1 FROM track_metadata_overrides o WHERE o.track_id = t.id AND o.source_known = 0))`,
+      [Math.trunc(trackId)],
+    );
+    return row?.path ?? null;
+  }
+
+  // Library Health's "reset adopted edits". Adoption keeps any stored value
+  // that really differs from an unchanged file, which can still pin a value
+  // an older scanner read differently, or a retag that kept the file's size
+  // and date; this hands every adopted field back to the file. Edits made in
+  // NewAmp since the upgrade are 'manual' and stay.
+  countAdoptedMetadataOverrides(): number {
+    return this.one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM track_metadata_overrides WHERE origin = 'adopted' AND source_known = 1`,
+    )?.n ?? 0;
+  }
+
+  resetAdoptedMetadataOverrides(): number {
+    const rows = this.many<MetadataOverrideRow>(
+      `SELECT track_id, field, value_json, source_json, source_known FROM track_metadata_overrides
+        WHERE origin = 'adopted' AND source_known = 1`,
+    );
+    if (!rows.length) return 0;
+    this.db.run('BEGIN');
+    try {
+      for (const row of rows) {
+        if (isTrackMetadataField(row.field)) {
+          this.db.run(`UPDATE tracks SET ${METADATA_FIELD_COLUMNS[row.field]} = ? WHERE id = ?`, [
+            metadataColumnValue(row.field, parseMetadataJson(row.field, row.source_json)),
+            row.track_id,
+          ]);
+        }
+        this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ? AND field = ?`, [row.track_id, row.field]);
+      }
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    this.invalidateLibraryHealthCache();
+    this.scheduleFlush();
+    return rows.length;
+  }
+
+  private getEditedFields(trackId: number): TrackMetadataField[] {
+    const owned = new Set(
+      this.many<{ field: string }>(`SELECT field FROM track_metadata_overrides WHERE track_id = ?`, [trackId]).map(
+        (row) => row.field,
+      ),
+    );
+    return METADATA_FIELDS.filter((field) => owned.has(field));
   }
 
   private writeArtIfMissing(hash: string, art: ArtBlob): void {
@@ -1129,6 +1594,9 @@ export class LibraryStore {
     key: string | null;
     replaygainTrackDb: number | null;
     replaygainAlbumDb: number | null;
+    // Semicolon-separated fields holding the user's value, not the file's.
+    // The edits exist nowhere else, so an export has to say which they are.
+    editedFields: string | null;
   }> {
     return this.many(
       `SELECT
@@ -1141,7 +1609,8 @@ export class LibraryStore {
          skip_count AS skipCount,
          bpm, key,
          replaygain_track_db AS replaygainTrackDb,
-         replaygain_album_db AS replaygainAlbumDb
+         replaygain_album_db AS replaygainAlbumDb,
+         (SELECT group_concat(o.field, ';') FROM track_metadata_overrides o WHERE o.track_id = tracks.id) AS editedFields
        FROM tracks
        ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE`,
     );
@@ -1246,8 +1715,10 @@ export class LibraryStore {
       .map(([ext, count]) => ({ ext, count }))
       .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
 
+    // Offered for playing, so a track whose file is missing is left out.
     const recentlyAdded = this.many<RawRow>(
-      `SELECT * FROM tracks ORDER BY mtime DESC, artist COLLATE NOCASE, title COLLATE NOCASE LIMIT 12`,
+      `SELECT * FROM tracks WHERE missing_since IS NULL
+        ORDER BY mtime DESC, artist COLLATE NOCASE, title COLLATE NOCASE LIMIT 12`,
     ).map(rowToTrack);
 
     const health: LibraryHealth = {
@@ -1257,6 +1728,7 @@ export class LibraryStore {
       duplicateGroups,
       legacyFormats,
       recentlyAdded,
+      adoptedEdits: this.countAdoptedMetadataOverrides(),
       generatedAt: Date.now(),
     };
     this.libraryHealthCache = health;
@@ -1315,7 +1787,8 @@ export class LibraryStore {
 
   getTrack(id: number): Track | null {
     const row = this.one<RawRow>(`SELECT * FROM tracks WHERE id = ?`, [id]);
-    return row ? rowToTrack(row) : null;
+    if (!row) return null;
+    return { ...rowToTrack(row), editedFields: this.getEditedFields(row.id) };
   }
 
   getTracksByIdsInOrder(ids: number[]): Track[] {
@@ -1414,7 +1887,7 @@ export class LibraryStore {
       const chunk = unique.slice(i, i + chunkSize);
       const placeholders = chunk.map(() => '?').join(',');
       const rows = this.many<TrackFileStateRow>(
-        `SELECT path, size, mtime, has_art, art_hash FROM tracks WHERE path IN (${placeholders})`,
+        `SELECT id, path, size, mtime, has_art, art_hash, file_dev FROM tracks WHERE path IN (${placeholders})`,
         chunk,
       );
       for (const row of rows) out.set(row.path, this.rowToTrackFileState(row));
@@ -1422,7 +1895,7 @@ export class LibraryStore {
 
     if (out.size < unique.length) {
       const normalizedRows = new Map(
-        this.many<TrackFileStateRow>(`SELECT path, size, mtime, has_art, art_hash FROM tracks`).map((row) => [
+        this.many<TrackFileStateRow>(`SELECT id, path, size, mtime, has_art, art_hash, file_dev FROM tracks`).map((row) => [
           normalizeFileStatePath(row.path),
           row,
         ]),
@@ -1439,30 +1912,184 @@ export class LibraryStore {
 
   private rowToTrackFileState(row: TrackFileStateRow): TrackFileState {
     return {
+      id: row.id,
       path: row.path,
       size: row.size,
       mtime: row.mtime,
       hasArt: row.has_art ? 1 : 0,
       artHash: row.art_hash,
       artExists: row.art_hash ? this.artFileExists(row.art_hash) : false,
+      fileDev: row.file_dev ?? null,
     };
+  }
+
+  // The scanner skips unchanged files without reading them, but still learns
+  // their device; record it so explicit cleanup can judge them later.
+  setTrackDevices(entries: Array<{ id: number; dev: number }>): void {
+    if (!entries.length) return;
+    this.db.run('BEGIN');
+    try {
+      for (const entry of entries) {
+        this.db.run(`UPDATE tracks SET file_dev = ? WHERE id = ?`, [entry.dev, entry.id]);
+      }
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    this.scheduleFlush();
   }
 
   private artFileExists(hash: string): boolean {
     return ['.jpg', '.jpeg', '.png', '.webp'].some((ext) => existsSync(join(this.artDir, `${hash}${ext}`)));
   }
 
-  pruneMissingTracks(targets?: string[]): LibraryPruneMissingResult {
-    const tracks = this.many<RawRow>(`SELECT * FROM tracks`).map(rowToTrack);
+  // Automatic path (the library watcher): a file that has gone is marked, never
+  // deleted. The row keeps its id, history, ratings, bookmarks, edits and
+  // playlist places, and the scanner clears the mark when the file is back.
+  // A target that is itself gone answers for everything under it without a
+  // stat per file: when a network share drops, the watcher hands over its
+  // root, and tens of thousands of stats on a dead SMB path would hang the
+  // main process. Returns how many tracks were newly marked.
+  markTracksMissing(targets: string[]): number {
+    const normalizedTargets = normalizePruneTargets(targets);
+    if (!normalizedTargets.length) return 0;
+    const goneTargets = normalizedTargets.filter((target) => !target.exists);
+    const ids: number[] = [];
+    const toCheck: Array<{ id: number; path: string }> = [];
+    for (const row of this.many<{ id: number; path: string }>(`SELECT id, path FROM tracks WHERE missing_since IS NULL`)) {
+      if (!matchesPruneTargets(row.path, normalizedTargets)) continue;
+      if (matchesPruneTargets(row.path, goneTargets)) ids.push(row.id);
+      else toCheck.push(row);
+    }
+    ids.push(...absentTrackIds(toCheck));
+    if (!ids.length) return 0;
+    this.setMissingSince(ids, Date.now());
+    return ids.length;
+  }
+
+  // After a scan has walked these roots to the end: tracks under them that
+  // the walk didn't find, and whose file isn't there, are marked missing —
+  // never deleted. A file deleted while NewAmp was closed has no watcher
+  // event, so without this it stayed undimmed and Auto DJ, mixes and smart
+  // rules kept queueing it. Folders the walk couldn't list are left alone:
+  // not finding a file there proves nothing. A root that has gone since the
+  // walk marks nothing. Returns how many tracks were newly marked.
+  markUnfoundTracksMissing(walkedRoots: string[], found: string[], unreadableFolders: string[] = []): number {
+    // A file handed over as a root (the watcher's rescan of one changed
+    // file) has nothing under it, and it was found, so it can't add anything.
+    const roots = normalizePruneTargets(walkedRoots).filter((root) => root.exists && root.kind === 'dir');
+    if (!roots.length) return 0;
+    const unread = normalizePruneTargets(unreadableFolders);
+    const foundKeys = new Set(found.map(normalizeFileStatePath));
+    const candidates = this.many<{ id: number; path: string }>(`SELECT id, path FROM tracks WHERE missing_since IS NULL`)
+      .filter((row) =>
+        !foundKeys.has(normalizeFileStatePath(row.path))
+        && matchesPruneTargets(row.path, roots)
+        && !(unread.length && matchesPruneTargets(row.path, unread)));
+    const ids = absentTrackIds(candidates);
+    if (!ids.length) return 0;
+    this.setMissingSince(ids, Date.now());
+    return ids.length;
+  }
+
+  // The scanner found these files, so any of them marked missing are back.
+  // Same exact-then-normalized path matching as getTrackFileStates, so a file
+  // the scanner skips as unchanged is still recognized.
+  markTracksPresent(paths: string[]): number {
+    const missing = this.many<{ id: number; path: string }>(
+      `SELECT id, path FROM tracks WHERE missing_since IS NOT NULL`,
+    );
+    if (!missing.length) return 0;
+    const exact = new Map(missing.map((row) => [row.path, row.id]));
+    const normalized = new Map(missing.map((row) => [normalizeFileStatePath(row.path), row.id]));
+    const ids = new Set<number>();
+    for (const path of paths) {
+      const id = exact.get(path) ?? normalized.get(normalizeFileStatePath(path));
+      if (id != null) ids.add(id);
+    }
+    if (!ids.size) return 0;
+    this.setMissingSince([...ids], null);
+    return ids.size;
+  }
+
+  private setMissingSince(ids: number[], value: number | null): void {
+    const chunkSize = 500;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+      const chunk = ids.slice(i, i + chunkSize);
+      this.db.run(
+        `UPDATE tracks SET missing_since = ? WHERE id IN (${chunk.map(() => '?').join(',')})`,
+        [value, ...chunk],
+      );
+    }
+    // Health's recently-added list leaves missing tracks out.
+    this.invalidateLibraryHealthCache();
+    this.scheduleFlush();
+  }
+
+  // What "Clean missing files" would delete, without deleting it: the renderer
+  // shows these counts and asks before anything goes.
+  previewPruneMissingTracks(targets?: string[], roots: string[] = []): LibraryPruneMissingPreview {
+    const { checked, ids, offline } = this.collectPrunableTracks(targets, roots);
+    const count = (table: string): number => {
+      let total = 0;
+      const chunkSize = 500;
+      for (let i = 0; i < ids.length; i += chunkSize) {
+        const chunk = ids.slice(i, i + chunkSize);
+        total += this.one<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM ${table} WHERE track_id IN (${chunk.map(() => '?').join(',')})`,
+          chunk,
+        )?.n ?? 0;
+      }
+      return total;
+    };
+    return {
+      checked,
+      tracks: ids.length,
+      offline,
+      plays: count('play_history'),
+      skips: count('skip_history'),
+      playlistEntries: count('playlist_tracks'),
+      bookmarks: count('track_bookmarks'),
+      edits: count('track_metadata_overrides'),
+    };
+  }
+
+  // Missing tracks whose deletion is proven (see missingFileIsConfirmedGone);
+  // the rest of the missing ones are counted as offline.
+  private collectPrunableTracks(
+    targets: string[] | undefined,
+    roots: string[],
+  ): { checked: number; ids: number[]; offline: number } {
+    const tracks = this.many<{ id: number; path: string; file_dev: number | null }>(
+      `SELECT id, path, file_dev FROM tracks`,
+    );
     const normalizedTargets = normalizePruneTargets(targets);
     const candidates = normalizedTargets.length
       ? tracks.filter((track) => matchesPruneTargets(track.path, normalizedTargets))
       : tracks;
-    const missingIds = candidates
-      .filter((track) => !existsSync(track.path))
-      .map((track) => track.id);
+    const probes = new Map<string, DirectoryProbe | null>();
+    const ids: number[] = [];
+    let offline = 0;
+    for (const track of candidates) {
+      if (existsSync(track.path)) continue;
+      if (missingFileIsConfirmedGone({ path: track.path, fileDev: track.file_dev ?? null }, roots, probes)) {
+        ids.push(track.id);
+      } else {
+        offline += 1;
+      }
+    }
+    return { checked: candidates.length, ids, offline };
+  }
 
-    if (!missingIds.length) return { checked: candidates.length, removed: 0 };
+  // Destructive, and only ever run by an explicit user action (Library
+  // Health's "Clean missing files", after its preview and a backup). A
+  // missing file whose storage can't be reached is kept and counted as
+  // offline: an unplugged drive must not erase the history of everything on
+  // it.
+  pruneMissingTracks(targets?: string[], roots: string[] = []): LibraryPruneMissingResult {
+    const { checked, ids: missingIds, offline } = this.collectPrunableTracks(targets, roots);
+    if (!missingIds.length) return { checked, removed: 0, offline };
 
     this.db.run('BEGIN');
     try {
@@ -1473,12 +2100,15 @@ export class LibraryStore {
         this.db.run(`DELETE FROM track_bookmarks WHERE track_id = ?`, [id]);
         this.db.run(`DELETE FROM guitar_tab_cache WHERE track_id = ?`, [id]);
         this.db.run(`DELETE FROM custom_lyrics WHERE track_id = ?`, [id]);
+        this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ?`, [id]);
+        this.db.run(`DELETE FROM track_metadata_adoption WHERE track_id = ?`, [id]);
         // sql.js does not enforce ON DELETE CASCADE foreign keys; we have to
         // delete the visual memory row explicitly so a vanished track doesn't
         // strand a plan blob in the database.
         this.db.run(`DELETE FROM track_visual_memory WHERE track_id = ?`, [id]);
         this.db.run(`DELETE FROM tracks WHERE id = ?`, [id]);
       }
+      this.windowsUnicodePaths = null;
       this.invalidateDnaIndexCache();
       this.invalidateFolderTrackRowsCache();
       this.invalidateLibraryHealthCache();
@@ -1493,7 +2123,7 @@ export class LibraryStore {
     }
 
     this.scheduleFlush();
-    return { checked: candidates.length, removed: missingIds.length };
+    return { checked, removed: missingIds.length, offline };
   }
 
   applyMetadataPatch(trackId: number, candidate: MetadataLookupCandidate): Track | null {
@@ -1510,13 +2140,21 @@ export class LibraryStore {
     const discNo = finitePositiveInteger(candidate.discNo) ?? current.discNo;
     const duration = current.duration ?? finitePositiveNumber(candidate.duration);
 
-    this.db.run(
-      `UPDATE tracks
-          SET title = ?, artist = ?, album = ?, album_artist = ?,
-              track_no = ?, disc_no = ?, year = ?, duration = ?
-        WHERE id = ?`,
-      [title, artist, album, albumArtist, trackNo, discNo, year, duration, id],
-    );
+    this.db.run('BEGIN');
+    try {
+      // The accepted match is the user's choice, so it is owned like a manual
+      // edit and a rescan can't revert it.
+      this.writeMetadataFields(id, current, { title, artist, album, albumArtist, trackNo, discNo, year }, 'musicbrainz');
+      // Duration is a measurement, not an edit: the lookup only fills a gap,
+      // and upsertTracks keeps it for as long as the file yields none.
+      if (duration !== current.duration) {
+        this.db.run(`UPDATE tracks SET duration = ? WHERE id = ?`, [duration, id]);
+      }
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
     // duration is one of the cached folder-row columns.
     this.invalidateFolderTrackRowsCache();
     this.invalidateLibraryHealthCache();
@@ -1541,14 +2179,29 @@ export class LibraryStore {
     const year = patch.year === undefined ? current.year : finiteYear(patch.year);
     const trackNo = patch.trackNo === undefined ? current.trackNo : finitePositiveInteger(patch.trackNo);
     const discNo = patch.discNo === undefined ? current.discNo : finitePositiveInteger(patch.discNo);
+    const next: Partial<Record<TrackMetadataField, MetadataValue>> = {
+      title,
+      artist,
+      album,
+      albumArtist,
+      genre,
+      year,
+      trackNo,
+      discNo,
+    };
+    // A field being reset takes the file's value, whatever else the patch says.
+    const reset = Array.isArray(patch.resetToFile) ? patch.resetToFile.filter(isTrackMetadataField) : [];
+    for (const field of reset) delete next[field];
 
-    this.db.run(
-      `UPDATE tracks
-          SET title = ?, artist = ?, album = ?, album_artist = ?,
-              track_no = ?, disc_no = ?, year = ?, genre = ?
-        WHERE id = ?`,
-      [title, artist, album, albumArtist, trackNo, discNo, year, genre, id],
-    );
+    this.db.run('BEGIN');
+    try {
+      this.resetMetadataFields(id, reset);
+      this.writeMetadataFields(id, current, next, 'manual');
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
     // artist/album/year feed getLibraryHealth's missing-metadata + duplicate
     // detection — a manual edit must not leave the health card stale.
     this.invalidateLibraryHealthCache();
@@ -2227,6 +2880,7 @@ export class LibraryStore {
       `SELECT * FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
+          AND missing_since IS NULL
         ORDER BY
           loved DESC,
           rating_score DESC,
@@ -2244,6 +2898,7 @@ export class LibraryStore {
       `SELECT * FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
+          AND missing_since IS NULL
         ORDER BY mtime DESC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
         LIMIT 3000`,
     ).map(rowToTrack);
@@ -2251,6 +2906,7 @@ export class LibraryStore {
       `SELECT * FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
+          AND missing_since IS NULL
           AND play_count <= 1
         ORDER BY mtime ASC, year IS NULL, year ASC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
         LIMIT 4000`,
@@ -2259,10 +2915,11 @@ export class LibraryStore {
       `SELECT * FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
+          AND missing_since IS NULL
         ORDER BY album_artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
         LIMIT 6000`,
     ).map(rowToTrack);
-    const tracks = currentTrack && !currentTrack.avoidAutoPlay
+    const tracks = currentTrack && !currentTrack.avoidAutoPlay && !currentTrack.missingSince
       ? uniqueTracksById([currentTrack, ...highSignalCandidates, ...freshCandidates, ...underplayedCandidates, ...albumCandidates])
       : uniqueTracksById([...highSignalCandidates, ...freshCandidates, ...underplayedCandidates, ...albumCandidates]);
     return buildDiscoverSurface({
@@ -2433,8 +3090,12 @@ export class LibraryStore {
   getTrackIdsByTag(name: string): number[] {
     const tag = String(name || '').toLowerCase();
     if (!tag) return [];
+    // Tag playlists are generated sets (tags come from rules), so a track whose
+    // file is missing is left out like it is from every other generated pool.
     const rows = this.many<{ track_id: number }>(
-      `SELECT track_id FROM track_tags WHERE tag_name = ?`,
+      `SELECT tt.track_id FROM track_tags tt
+         JOIN tracks t ON t.id = tt.track_id
+        WHERE tt.tag_name = ? AND t.missing_since IS NULL`,
       [tag],
     );
     return rows.map((row) => row.track_id);
@@ -2461,7 +3122,9 @@ export class LibraryStore {
     }
     const rules: ParsedRule[] = [...parsedOthers, compiled.rule];
     const limit = Math.max(1, Math.min(10000, Math.trunc(input.limit ?? 2000)));
-    const rows = this.many<RawRow>(`SELECT * FROM tracks LIMIT ${limit}`);
+    // The preview stands for the tag playlist, which leaves missing tracks
+    // out (getTrackIdsByTag), so its count and samples do too.
+    const rows = this.many<RawRow>(`SELECT * FROM tracks WHERE missing_since IS NULL LIMIT ${limit}`);
     const dnaIndex = this.buildDnaIndex();
     let matchCount = 0;
     const samples: number[] = [];
@@ -2782,7 +3445,7 @@ export class LibraryStore {
   }
 
   buildHarmonicMix(input: HarmonicMixInput = {}): Track[] {
-    const where: string[] = ['path IS NOT NULL', 'avoid_auto_play = 0'];
+    const where: string[] = ['path IS NOT NULL', 'avoid_auto_play = 0', 'missing_since IS NULL'];
     const params: unknown[] = [];
     const genreQuery = input.genreQuery?.trim();
     if (genreQuery) {
@@ -2803,7 +3466,7 @@ export class LibraryStore {
     ).map(rowToTrack);
 
     const seed = input.seedTrackId ? this.getTrack(input.seedTrackId) : null;
-    if (seed && !candidates.some((track) => track.id === seed.id) && !seed.avoidAutoPlay) {
+    if (seed && !candidates.some((track) => track.id === seed.id) && !seed.avoidAutoPlay && !seed.missingSince) {
       candidates.unshift(seed);
     }
 
@@ -2831,6 +3494,7 @@ export class LibraryStore {
       `SELECT * FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
+          AND missing_since IS NULL
         ORDER BY loved DESC, rating DESC, play_count DESC, last_played DESC, title COLLATE NOCASE
         LIMIT 10000`,
     ).map(rowToTrack);
@@ -2918,6 +3582,29 @@ export class LibraryStore {
    */
   private runOneShotMigrations(): void {
     this.maybeBackfillAlbumRatingsFromTracks();
+    this.maybeQueueMetadataAdoption();
+  }
+
+  /**
+   * Migration: before track_metadata_overrides existed, a manual edit or a
+   * MusicBrainz rescue overwrote the tracks columns directly, and the next
+   * forced scan put the file's tags back. Nothing recorded which values were
+   * edits, so every track already in the library is queued for adoption: the
+   * first time the scanner reads it, any editable field that differs from the
+   * file is kept as an override rather than overwritten (see upsertTracks).
+   * Differences that are only case, spacing, Unicode form or empty-vs-missing
+   * are taken as an older reading and go to the file. Others may still be,
+   * and Library Health can hand every adopted field back to its file.
+   * A new library queues nothing; the flag makes this run once either way.
+   */
+  private maybeQueueMetadataAdoption(): void {
+    const flagKey = 'metadata_overrides_adoption_v1';
+    if (this.one(`SELECT 1 FROM library_meta WHERE key = ?`, [flagKey])) return;
+    this.db.run(`INSERT OR IGNORE INTO track_metadata_adoption (track_id) SELECT id FROM tracks`);
+    const queued = this.db.getRowsModified();
+    this.db.run(`INSERT OR REPLACE INTO library_meta (key, value) VALUES (?, ?)`, [flagKey, String(Date.now())]);
+    if (queued > 0) console.log(`[newamp] queued ${queued} tracks for one-time metadata edit adoption`);
+    this.scheduleFlush();
   }
 
   /**
@@ -3111,8 +3798,11 @@ export class LibraryStore {
 
   getTrackIdsMissingDna(limit = 100): number[] {
     const cap = Math.max(1, Math.min(5000, Math.trunc(Number(limit) || 100)));
+    // Analysis decodes the file with ffmpeg; one that is missing would only
+    // fail, and come back at the head of the queue every time.
     const rows = this.many<{ id: number }>(
-      `SELECT id FROM tracks WHERE dna_json IS NULL ORDER BY (loved + rating + (rating_score IS NOT NULL)) DESC, mtime DESC LIMIT ?`,
+      `SELECT id FROM tracks WHERE dna_json IS NULL AND missing_since IS NULL
+        ORDER BY (loved + rating + (rating_score IS NOT NULL)) DESC, mtime DESC LIMIT ?`,
       [cap],
     );
     return rows.map((row) => row.id);
@@ -3189,8 +3879,7 @@ export class LibraryStore {
       this.db.run(`DELETE FROM track_visual_memory WHERE track_id = ?`, [trackId]);
       if (this.db.getRowsModified() <= 0) return false;
       // Stats cache is computed from track_visual_memory contents — any
-      // write/clear here invalidates it (finding #8 from the pre-release
-      // review). Mirrors the libraryHealthCache pattern.
+      // write/clear here invalidates it. Mirrors the libraryHealthCache pattern.
       this.invalidateVisualMemoryStatsCache();
       this.scheduleFlush();
       return true;
@@ -3254,7 +3943,7 @@ export class LibraryStore {
   }
 
   getVisualMemoryStats(): VisualMemoryStats {
-    // Cached result (finding #8): SettingsView opens this with no debounce,
+    // Cached result: SettingsView opens this with no debounce,
     // and the underlying scan is O(rows * blob size) of synchronous JSON
     // parsing on the main process. Same invalidation pattern as
     // libraryHealthCache and dnaIndexCache — null = recompute, otherwise
@@ -3340,10 +4029,12 @@ export class LibraryStore {
     const played = Math.max(0, Math.trunc(playedAt));
     this.db.run('BEGIN');
     try {
-      this.db.run(`UPDATE tracks SET play_count = play_count + 1, last_played = ? WHERE id = ?`, [
-        played,
-        trackId,
-      ]);
+      // It just played, so the file is there: a missing mark from an earlier
+      // outage goes now instead of waiting for a scan.
+      this.db.run(
+        `UPDATE tracks SET play_count = play_count + 1, last_played = ?, missing_since = NULL WHERE id = ?`,
+        [played, trackId],
+      );
       this.db.run(`INSERT INTO play_history (track_id, played_at) VALUES (?, ?)`, [trackId, played]);
       this.db.run('COMMIT');
     } catch (err) {
@@ -3495,7 +4186,7 @@ export class LibraryStore {
     const requestedNow = Number(opts.now);
     const now = Number.isFinite(requestedNow) ? Math.max(0, Math.trunc(requestedNow)) : Date.now();
     const todayStart = startOfLocalDay(now);
-    const weekStart = todayStart - 6 * 24 * 60 * 60 * 1000;
+    const weekStart = startOfLocalDay(now, -6);
     const playRows = this.many<{
       track_id: number;
       played_at: number;
@@ -3753,7 +4444,7 @@ export class LibraryStore {
     let run = 0;
     let prevKey: string | null = null;
     for (const key of sortedDays) {
-      if (prevKey && new Date(`${key}T00:00:00`).getTime() - new Date(`${prevKey}T00:00:00`).getTime() === 86_400_000) {
+      if (prevKey && Date.parse(`${key}T00:00:00Z`) - Date.parse(`${prevKey}T00:00:00Z`) === 86_400_000) {
         run += 1;
       } else {
         run = 1;
@@ -4052,8 +4743,9 @@ export class LibraryStore {
   // any account service exists.
   buildProfileBundleHtml(opts: { now?: number } = {}): string {
     const profile = this.getProfile();
-    const lists = this.getLists().map((l) => ({ ...l, items: this.listItems(l.id) }));
-    const reviews = this.getReviews();
+    const lists = this.getLists().filter((list) => list.privacy === 'public')
+      .map((l) => ({ ...l, items: this.listItems(l.id) }));
+    const reviews = this.getReviews().filter((review) => review.privacy === 'public');
     const insights = this.getListeningInsights({ now: opts.now });
     const esc = htmlEscape;
     const topArtists = insights.topArtists
@@ -4493,9 +5185,11 @@ function normalizePruneTargets(targets: string[] | undefined): PruneTarget[] {
     if (typeof target !== 'string' || !target.trim()) continue;
     const resolved = resolvePath(target);
     let kind: PruneTarget['kind'] = extname(resolved) ? 'file' : 'dir';
+    let exists = false;
     try {
       const stat = statSync(resolved);
       kind = stat.isDirectory() ? 'dir' : 'file';
+      exists = true;
     } catch {
       // Deleted watcher events often point at paths that no longer stat.
     }
@@ -4503,7 +5197,7 @@ function normalizePruneTargets(targets: string[] | undefined): PruneTarget[] {
     const seenKey = `${kind}:${key}`;
     if (seen.has(seenKey)) continue;
     seen.add(seenKey);
-    out.push({ kind, key });
+    out.push({ kind, key, exists });
   }
 
   return out;
@@ -4512,13 +5206,232 @@ function normalizePruneTargets(targets: string[] | undefined): PruneTarget[] {
 function matchesPruneTargets(path: string, targets: PruneTarget[]): boolean {
   const key = normalizedPruneKey(path);
   return targets.some((target) => {
-    if (target.kind === 'file') return key === target.key;
+    // A vanished directory can contain a dot and look like a filename. A
+    // path-segment prefix is safe for both: real files have no descendants.
     return key === target.key || key.startsWith(`${target.key}/`);
   });
 }
 
+// The ids among these tracks whose file isn't there. Each folder is checked
+// once before its files: a folder that is gone answers for every track in
+// it, so a dropped share costs one stat per folder rather than one per file.
+function absentTrackIds(rows: Array<{ id: number; path: string }>): number[] {
+  const folderPresent = new Map<string, boolean>();
+  const out: number[] = [];
+  for (const row of rows) {
+    const folder = dirname(row.path);
+    let present = folderPresent.get(folder);
+    if (present === undefined) {
+      present = existsSync(folder);
+      folderPresent.set(folder, present);
+    }
+    if (!present || !existsSync(row.path)) out.push(row.id);
+  }
+  return out;
+}
+
 function normalizedPruneKey(path: string): string {
-  return resolvePath(path).replace(/\\/g, '/').replace(/\/+$/g, '').toLowerCase();
+  return foldPathCase(resolvePath(path).replace(/\\/g, '/').replace(/\/+$/g, ''));
+}
+
+// Windows and macOS volumes compare names without case by default; Linux
+// ones don't, and folding there points one file's key at another file.
+// Same policy as library-watcher.ts.
+function foldPathCase(path: string): string {
+  return process.platform === 'win32' || process.platform === 'darwin' ? path.toLowerCase() : path;
+}
+
+// A missing file only proves it was deleted when the storage it lived on is
+// reachable at that path now. Unplugged drives, dropped shares, empty Linux
+// mount points and junctions to an offline NAS all look like missing
+// folders, so anything short of that proof is kept and counted offline:
+//  - a library root that isn't there at all is an unplugged drive or dropped
+//    share far more often than a deleted library: nothing under it counts;
+//  - the file's own folder is still there, a real folder with other things
+//    in it, on the device the file was on when last scanned (file_dev): the
+//    file itself went. The same folder on another device is a drive letter
+//    or mount point now used by a different volume, and a copy of a library
+//    can have the same folder names without the file;
+//  - a track under no configured library root can only be proven deleted by
+//    its own folder, there and on the file's device: with nothing to bound
+//    the search below, a folder further up (often the drive itself) proves
+//    nothing. Renaming a root folder and pointing the root at the new name
+//    leaves every track under the old name with no folder of its own;
+//  - otherwise the nearest folder above it that still exists must not be a
+//    link or junction, and must be on the device the file was on when last
+//    scanned. A root that holds a separate mount (/media/$USER, /mnt) fails
+//    this while that mount is gone, because what is left at the path belongs
+//    to the parent filesystem;
+//  - a track scanned before devices were recorded falls back to its library
+//    root's device, and only for a populated folder strictly inside the root.
+function missingFileIsConfirmedGone(
+  track: { path: string; fileDev: number | null },
+  roots: string[],
+  cache: Map<string, DirectoryProbe | null>,
+): boolean {
+  const root = containingRoot(track.path, roots);
+  const rootProbe = root ? probeDirectory(root, cache) : null;
+  if (root && !rootProbe?.isDirectory) return false;
+
+  const parent = dirname(track.path);
+  const own = probeDirectory(parent, cache);
+  if (own?.realDirectory && own.hasEntries && (track.fileDev == null || own.dev === track.fileDev)) return true;
+  if (!root || !rootProbe) return !!own?.realDirectory && track.fileDev != null && own.dev === track.fileDev;
+
+  let ancestor: DirectoryProbe | null = own;
+  let dir = parent;
+  while (!ancestor) {
+    const up = dirname(dir);
+    if (up === dir) return false;
+    dir = up;
+    ancestor = probeDirectory(dir, cache);
+  }
+  // A link (or junction) whose target is gone reads as an existing entry with
+  // nothing behind it: that is an offline target, not a deletion.
+  if (!ancestor.realDirectory) return false;
+  if (track.fileDev != null) return ancestor.dev === track.fileDev;
+
+  return ancestor.hasEntries
+    && ancestor.dev === rootProbe.dev
+    && normalizedPruneKey(ancestor.path).startsWith(`${normalizedPruneKey(root)}/`);
+}
+
+interface DirectoryProbe {
+  path: string;
+  dev: number;
+  // Resolves to a directory, links followed.
+  isDirectory: boolean;
+  // Not a symlink or junction, and it resolves.
+  realDirectory: boolean;
+  hasEntries: boolean;
+}
+
+// Null when nothing is at `dir` at all. A dangling link or junction is an
+// entry that isn't a real directory.
+function probeDirectory(dir: string, cache: Map<string, DirectoryProbe | null>): DirectoryProbe | null {
+  if (cache.has(dir)) return cache.get(dir)!;
+  let probe: DirectoryProbe | null = null;
+  try {
+    const link = lstatSync(dir);
+    let stat: Stats | null = null;
+    try {
+      stat = statSync(dir);
+    } catch {
+      // dangling link
+    }
+    probe = {
+      path: dir,
+      dev: stat ? Number(stat.dev) : Number(link.dev),
+      isDirectory: !!stat?.isDirectory(),
+      realDirectory: !link.isSymbolicLink() && !!stat?.isDirectory(),
+      hasEntries: false,
+    };
+    if (probe.realDirectory) {
+      const handle = opendirSync(dir);
+      try {
+        probe.hasEntries = handle.readSync() !== null;
+      } finally {
+        handle.closeSync();
+      }
+    }
+  } catch {
+    probe = null;
+  }
+  cache.set(dir, probe);
+  return probe;
+}
+
+function containingRoot(path: string, roots: string[]): string | null {
+  const key = normalizedPruneKey(path);
+  let best: string | null = null;
+  let bestLength = -1;
+  for (const candidate of roots) {
+    if (typeof candidate !== 'string' || !candidate.trim()) continue;
+    const rootKey = normalizedPruneKey(candidate);
+    if ((key === rootKey || key.startsWith(`${rootKey}/`)) && rootKey.length > bestLength) {
+      best = candidate;
+      bestLength = rootKey.length;
+    }
+  }
+  return best;
+}
+
+function isTrackMetadataField(value: unknown): value is TrackMetadataField {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(METADATA_FIELD_COLUMNS, value);
+}
+
+const NUMERIC_METADATA_FIELDS = new Set<TrackMetadataField>(['year', 'trackNo', 'discNo']);
+
+function parseMetadataJson(field: TrackMetadataField, json: string): MetadataValue {
+  let value: unknown = null;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (NUMERIC_METADATA_FIELDS.has(field)) return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  return typeof value === 'string' ? value : null;
+}
+
+// What the scanner writes when a file's tags can't be read (scanner.ts
+// readMeta/fallbackTrack): the title from the file name, 'Unknown Artist'.
+// Adoption never takes such a value for an edit.
+const FALLBACK_ARTIST = 'Unknown Artist';
+
+function isFallbackValue(field: TrackMetadataField, value: MetadataValue, path: string): boolean {
+  if (field === 'title') return value === basename(path, extname(path));
+  if (field === 'artist' || field === 'albumArtist') return value === FALLBACK_ARTIST;
+  return false;
+}
+
+function isFallbackRow(row: RawRow): boolean {
+  return isFallbackValue('title', row.title, row.path)
+    && row.artist === FALLBACK_ARTIST
+    && !row.album
+    && (row.album_artist === FALLBACK_ARTIST || !row.album_artist)
+    && row.genre == null
+    && row.year == null
+    && row.track_no == null
+    && row.disc_no == null;
+}
+
+// An empty text field reads as null from some tags and '' from others, and
+// the NOT NULL columns store '' for a cleared value: all of them mean
+// "nothing". The numeric fields never hold ''.
+function sameMetadataValue(a: MetadataValue | undefined, b: MetadataValue | undefined): boolean {
+  return emptyAsNull(a) === emptyAsNull(b);
+}
+
+function emptyAsNull(value: MetadataValue | undefined): MetadataValue {
+  return value === '' || value == null ? null : value;
+}
+
+// Adoption can't tell an old edit from a value an older reader (or another
+// tagger) spelled differently, so it sets aside differences that are only
+// letter case, surrounding or repeated whitespace, Unicode normalization form
+// (decomposed accents, as macOS and some taggers write them), empty versus
+// missing, and for genres the separator between several ("Rock/Pop",
+// "Rock; Pop"). Those are far more often the reader than the user, and
+// pinning one as an edit would stop the field following its file for good.
+function isReadingVariant(field: TrackMetadataField, a: MetadataValue, b: MetadataValue): boolean {
+  if (NUMERIC_METADATA_FIELDS.has(field)) return false;
+  return readingKey(field, a) === readingKey(field, b);
+}
+
+function readingKey(field: TrackMetadataField, value: MetadataValue): string {
+  const key = String(value ?? '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
+  return field === 'genre' ? key.replace(/\s*[;,/|]\s*/g, ';') : key;
+}
+
+// What the tracks column stores for a field's value: the NOT NULL text
+// columns hold '' where a cleared value is null.
+function metadataColumnValue(field: TrackMetadataField, value: MetadataValue): MetadataValue {
+  if (NOT_NULL_TEXT_FIELDS.has(field)) return value == null ? '' : String(value);
+  return value;
+}
+
+function assignMetadataValue(target: IncomingTrack, field: TrackMetadataField, value: MetadataValue): void {
+  (target as unknown as Record<TrackMetadataField, MetadataValue>)[field] = metadataColumnValue(field, value);
 }
 
 function playlistCoverMime(path: string): string | null {
@@ -4999,6 +5912,8 @@ function pushMissingFilter(where: string[], value: string, has: boolean): void {
     bpm: `bpm IS NULL`,
     key: `(key IS NULL OR trim(key) = '')`,
     replaygain: `(replaygain_track_db IS NULL AND replaygain_album_db IS NULL)`,
+    // missing:file lists what the library watcher found gone; has:file the rest.
+    file: `missing_since IS NOT NULL`,
   };
   const clause = clauses[key];
   if (!clause) return;
@@ -5031,7 +5946,7 @@ function normalizeReplayGainDb(value: unknown): number | null {
 }
 
 function normalizeFileStatePath(path: string): string {
-  return path.replace(/\\/g, '/').toLowerCase();
+  return foldPathCase(path.replace(/\\/g, '/'));
 }
 
 function uniqueNormalizedFolders(paths: string[]): string[] {
@@ -5412,7 +6327,8 @@ function smartRuleParams(rule: Omit<SmartPlaylistRule, 'id' | 'createdAt' | 'upd
 }
 
 function smartRuleWhere(rule: SmartPlaylistRule): { where: string; params: unknown[] } {
-  const where: string[] = ['avoid_auto_play = 0'];
+  // Generated sets feed Auto DJ and queues: an unavailable file can't play.
+  const where: string[] = ['avoid_auto_play = 0', 'missing_since IS NULL'];
   const params: unknown[] = [];
   const genreWords = (rule.genreQuery ?? '')
     .split(/[,\s]+/)
@@ -5565,7 +6481,7 @@ function uniqueTracksById(tracks: Track[]): Track[] {
 }
 
 function isTasteMixCandidate(track: Track): boolean {
-  return !track.avoidAutoPlay && !!track.path && (track.duration == null || track.duration > 20);
+  return !track.avoidAutoPlay && !track.missingSince && !!track.path && (track.duration == null || track.duration > 20);
 }
 
 function normalizeMixCount(value: number | null | undefined): number {
@@ -5614,9 +6530,9 @@ function sortInsightBuckets<T extends { plays: number; duration: number; skips: 
   return b.plays - a.plays || b.duration - a.duration || b.skips - a.skips;
 }
 
-function startOfLocalDay(value: number): number {
+function startOfLocalDay(value: number, dayOffset = 0): number {
   const date = new Date(value);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + dayOffset).getTime();
 }
 
 function wrappedWindow(range: WrappedRange, now: number): { start: number; end: number; label: string } {
@@ -5626,7 +6542,7 @@ function wrappedWindow(range: WrappedRange, now: number): { start: number; end: 
     case 'day':
       return { start: startOfLocalDay(now), end: now, label: 'Today' };
     case 'week':
-      return { start: startOfLocalDay(now) - 6 * 86_400_000, end: now, label: 'This Week' };
+      return { start: startOfLocalDay(now, -6), end: now, label: 'This Week' };
     case 'month':
       return { start: new Date(d.getFullYear(), d.getMonth(), 1).getTime(), end: now, label: `${months[d.getMonth()]} ${d.getFullYear()}` };
     case 'year':

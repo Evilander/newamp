@@ -130,7 +130,9 @@ assert.equal(health.missing.art, 2);
 assert.equal(health.missing.duration, 1);
 assert.equal(health.legacyFormats.find((item) => item.ext === '.wma')?.count, 1);
 assert.equal(health.quality.lossless, 2);
-assert.equal(health.quality.lossy, 3);
+// .m4a holds AAC or Apple Lossless and the library doesn't store the codec,
+// so the m4a fixture counts as neither lossless nor lossy.
+assert.equal(health.quality.lossy, 2);
 assert.equal(health.quality.hiRes, 2);
 assert.equal(health.quality.dsd, 1);
 assert.equal(health.quality.ffmpegFallback, 2);
