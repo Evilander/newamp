@@ -1,8 +1,11 @@
 // ConfirmAction — two-step arm-then-fire for destructive buttons, in place of
 // blocking confirm() dialogs. First activation swaps the label to the danger
-// tone; a second activation within 3s fires onConfirm. Disarms on blur,
-// mouseleave, Escape, or the 3s timer. Renders a .pxbtn so every shell dresses
-// it natively; the armed tone lives in styles/components/primitives.css.
+// tone; a second activation within 3s fires onConfirm, as long as it is a
+// separate decision: one that lands within CONFIRM_DELAY_MS of arming (the
+// second click of a double-click) or comes from a held key's auto-repeat is
+// ignored. Disarms on blur, mouseleave, Escape, or the 3s timer. Renders a
+// .pxbtn so every shell dresses it natively; the armed tone lives in
+// styles/components/primitives.css.
 
 import { useEffect, useRef, useState } from 'react';
 
@@ -20,6 +23,9 @@ export interface ConfirmActionProps {
 
 /** How long the armed state stays live before it stands down. */
 const ARM_WINDOW_MS = 3000;
+/** How soon after arming a press still counts as the arming gesture:
+ *  Windows' default double-click time. */
+const CONFIRM_DELAY_MS = 500;
 
 export function ConfirmAction({
   label,
@@ -33,6 +39,7 @@ export function ConfirmAction({
 }: ConfirmActionProps): JSX.Element {
   const [armed, setArmed] = useState(false);
   const disarmHandle = useRef<number | null>(null);
+  const armedAt = useRef(0);
 
   function clearDisarmTimer(): void {
     if (disarmHandle.current !== null) {
@@ -49,11 +56,13 @@ export function ConfirmAction({
   function activate(): void {
     if (disabled) return;
     if (armed) {
+      if (performance.now() - armedAt.current < CONFIRM_DELAY_MS) return;
       disarm();
       onConfirm();
       return;
     }
     setArmed(true);
+    armedAt.current = performance.now();
     clearDisarmTimer();
     disarmHandle.current = window.setTimeout(() => {
       disarmHandle.current = null;
@@ -88,6 +97,12 @@ export function ConfirmAction({
         if (armed) disarm();
       }}
       onKeyDown={(e) => {
+        // A held Enter repeats the button's activation; only a fresh press
+        // can confirm.
+        if (e.repeat && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          return;
+        }
         if (e.key === 'Escape' && armed) {
           e.stopPropagation();
           disarm();

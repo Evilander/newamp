@@ -19,7 +19,7 @@ import {
   generate as generateEvilandConfig,
   decode as decodeEvilandConfig,
 } from '../visualizer/eviland-randomizer';
-import { applyWaveformOverride, type OperatorConfig } from '../visualizer/eviland-operators';
+import { applyWaveformOverride, cloneConfig, stripTransitionMeta, type OperatorConfig } from '../visualizer/eviland-operators';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from '../visualizer/eviland-memory-bridge';
 import { createEngineScoreFeed } from '../visualizer/eviland-score-feed';
 import { blendPaletteWithArt, extractArtPalette, type ArtPalette } from '../visualizer/art-palette';
@@ -32,6 +32,14 @@ import {
 import { createEmptyPlan } from '../visualizer/eviland-memory-types';
 import { hashSeed } from '../visualizer/eviland-rng';
 import { parseCssRgbVec as parseRgbVec } from '../visualizer/css-color';
+import { HAZARD_AREA } from '../visualizer/flash-guard';
+import {
+  attachFlashGuard,
+  createGuarded2dSurface,
+  gpuFlashGuardSupported,
+  guardCanvas2d,
+  type AttachedFlashGuard,
+} from '../visualizer/flash-guard-host';
 import { api } from '../lib/api';
 import { AMBIENT_FRAME_MS, PACED_FRAME_SLACK_MS, requestPacedFrame } from '../lib/pacedFrame';
 
@@ -103,7 +111,7 @@ export function detectPerformanceTier(): VizPerformance {
   }
   return (detectedTier = score >= 2 ? 'balanced' : 'low');
 }
-export type VizPalette = 'theme' | 'phosphor' | 'ice' | 'sunset' | 'rainbow';
+export type VizPalette = 'look' | 'theme' | 'phosphor' | 'ice' | 'sunset' | 'rainbow';
 export type VizReactivity = 'truth' | 'punch' | 'wild';
 
 interface Props {
@@ -157,7 +165,7 @@ export function Visualizer({
   className,
   quality = 'auto',
   performance = 'balanced',
-  palette = 'theme',
+  palette = 'look',
   reactivity = 'punch',
 }: Props): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -218,6 +226,11 @@ export function Visualizer({
       ? 1_050_000
       : quality === '4k' ? 4_200_000 : 2_100_000
     : 2_000_000;
+  // Whether this surface can ever cover enough of the screen for a flash to
+  // be a hazard (HAZARD_AREA in visualizer/flash-guard.ts). The transport
+  // meter and the smallest deck windows can't, and skip the flash guard.
+  const screenArea = typeof screen === 'undefined' ? 0 : screen.width * screen.height;
+  const mayFlashLarge = width == null || height == null || width * height >= HAZARD_AREA * screenArea;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -365,22 +378,31 @@ export function Visualizer({
         const config = ui.director ? liveDirector.update(rawFrame, dt) : liveConfig;
         latestLive = {
           frame: tuneEvilandFrame(rawFrame, tuningRef.current.reactivity),
-          palette: resolveEvilandPalette(tuningRef.current.palette, ovPalette, now / 1000, rawFrame.score?.keyShift),
-          config: applyWaveformOverride(config, ui.waveMode),
+          palette: resolveEvilandPalette(tuningRef.current.palette, ovPalette, now / 1000, rawFrame.score?.keyShift, config.palette),
+          // The iframe blends presets itself; the fade's two full looks would
+          // only triple every frame's message. It still gets the slim look the
+          // fade is heading to, so it prepares that look as the fade begins.
+          config: applyWaveformOverride(config._from ? { ...config, _from: undefined, _to: undefined } : config, ui.waveMode),
+          next: config._to ? { seed: config._to.seed, archetype: config._to.archetype, composition: config._to.composition } : undefined,
           seed: sceneSeedValue,
           waveMode: ui.waveMode,
           grade: liveGradeFor(tuningRef.current.palette),
         };
       };
 
+      // The iframe guards its own output (butterchurn-iframe/main.ts); this
+      // painter only runs when the frame couldn't host MilkDrop.
+      let fallbackPainter: ReturnType<typeof createFallbackPainter> | null = null;
       const startFallback = () => {
         if (fallbackRaf) return;
         iframe.style.display = 'none';
         const node = canvasRef.current;
         if (!node) return;
+        const painter = createFallbackPainter(node, engine);
+        fallbackPainter = painter;
         const fb = (now: number) => {
           if (disposed) return;
-          if (canPaint(now)) paintMilkdropFallback(node, engine);
+          if (canPaint(now)) painter.paint(now);
           fallbackRaf = requestAnimationFrame(fb);
         };
         fallbackRaf = requestAnimationFrame(fb);
@@ -465,6 +487,7 @@ export function Visualizer({
         cancelAnimationFrame(fallbackRaf);
         window.clearTimeout(mountTimeout);
         window.removeEventListener('message', onMessage);
+        fallbackPainter?.dispose();
         liveScoreFeed?.dispose();
         try {
           const dispose: BcDisposeMessage = { type: 'dispose' };
@@ -495,15 +518,25 @@ export function Visualizer({
       const canPaint = createFrameGate(canvasRef, () => gov.intervalMs(frameIntervalMs));
       const baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
       let raf = 0;
-      const renderer = createEvilandRenderer(canvas, { quality: evilandQuality, smoke });
+      // Only where its output can be flash-guarded: asked before the renderer
+      // binds this canvas, so the guarded 2D fallback can still draw on it.
+      const renderer = gpuFlashGuardSupported() ? createEvilandRenderer(canvas, { quality: evilandQuality, smoke }) : null;
+      // Photosensitivity limiter on the finished frame, in the renderer's own
+      // context. A renderer whose output can't be guarded doesn't run.
+      const flashGuard = renderer ? attachFlashGuard(canvas.getContext('webgl2'), canvas) : null;
 
-      if (!renderer) {
+      if (!renderer || !flashGuard) {
+        renderer?.dispose();
+        const painter = createFallbackPainter(canvas, engine);
         const fb = (now: number) => {
-          if (canPaint(now)) paintMilkdropFallback(canvas, engine);
+          if (canPaint(now)) painter.paint(now);
           raf = requestAnimationFrame(fb);
         };
         raf = requestAnimationFrame(fb);
-        return () => cancelAnimationFrame(raf);
+        return () => {
+          cancelAnimationFrame(raf);
+          painter.dispose();
+        };
       }
 
       const binCount = engine.frequencyBinCount;
@@ -553,8 +586,8 @@ export function Visualizer({
       //
       // Bridge ownership: we ask the registry's keyed cache for the bridge
       // matching the current trackId. The cache survives same-track remounts
-      // (quality/performance changes re-run this effect mid-song — finding #6
-      // from the pre-release review; palette/reactivity are live-tuned via
+      // (quality/performance changes re-run this effect mid-song;
+      // palette/reactivity are live-tuned via
       // tuningRef and no longer remount at all). On track change we
       // explicitly releaseBridgeForTrack(oldId), which flushes + drops the
       // cache entry. On effect cleanup we DO NOT release: a remount caused by
@@ -567,7 +600,7 @@ export function Visualizer({
         // reads the current value — so the Director keeps writing into
         // whatever bridge is active after a track change, not the original.
         onSectionLearn: (section) => bridge.observeSection(section),
-        // Bounded priming defer (finding #9): hold the first-ever fresh-mint
+        // Bounded priming defer: hold the first-ever fresh-mint
         // for ~30 frames (~500ms @ 60fps) while loadOrSeed's IPC resolves,
         // so a track with a persisted plan doesn't render its opening
         // moments under the default lineage. loadPlan() opens the gate the
@@ -578,7 +611,7 @@ export function Visualizer({
       });
       bridge.attachDirector(director);
       publishActiveBridge(bridge);
-      // Same-track remount fast path (finding #6): if the cached bridge
+      // Same-track remount fast path: if the cached bridge
       // already has an in-memory plan (we just re-attached an existing
       // bridge across a quality/performance remount), prime the fresh
       // Director from that plan synchronously. No IPC round-trip.
@@ -726,7 +759,9 @@ export function Visualizer({
           // Rebuild + apply the look exactly once, then idle the setConfig
           // path until the next nonce bump.
           const base = ui.seed ? applyManualSeed(ui.seed) : null;
-          manualConfig = base ?? renderer.getConfig();
+          // Turning the Director off mid-fade must not freeze its half-done
+          // transition: keep the look, drop the fade.
+          manualConfig = base ?? stripTransitionMeta(cloneConfig(renderer.getConfig()));
           renderer.setConfig(applyWaveformOverride(manualConfig, ui.waveMode));
           lastAppliedNonce = ui.nonce;
         }
@@ -742,18 +777,27 @@ export function Visualizer({
             node.setAttribute('data-newamp-gov', `${snap.verdict}@${snap.scale}`);
           }
         }
-        renderer.render(
-          tuneEvilandFrame(evFrame, tuningRef.current.reactivity),
-          resolveEvilandPalette(tuningRef.current.palette, palette, now / 1000, evFrame.score?.keyShift),
-          dtMs,
-          'host',
-        );
+        try {
+          renderer.render(
+            tuneEvilandFrame(evFrame, tuningRef.current.reactivity),
+            resolveEvilandPalette(tuningRef.current.palette, palette, now / 1000, evFrame.score?.keyShift, renderer.getConfig().palette),
+            dtMs,
+            'host',
+          );
+        } finally {
+          // Even when render throws after drawing: whatever reached the
+          // backbuffer is shown, so it is guarded. Inside the governed cost on
+          // purpose: the governor may trim the resolution the guard runs at,
+          // never the guard itself.
+          flashGuard?.apply(dtMs);
+        }
         gov.endFrame(now, window.performance.now() - renderStart);
       };
       raf = requestAnimationFrame(loop);
 
       return () => {
         cancelAnimationFrame(raf);
+        flashGuard?.dispose();
         // Finding #6 fix: do NOT flushAndDispose here. The registry's keyed
         // cache holds the bridge across same-track remounts (quality/
         // performance changes mid-song re-run this effect). The
@@ -782,15 +826,23 @@ export function Visualizer({
       const canPaint = createFrameGate(canvasRef, frameIntervalMs);
       const baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
       let raf = 0;
-      const renderer = createParticleFlowRenderer(canvas, { particles: particleBudget, smoke });
+      // Only where its output can be flash-guarded; the guarded 2D fallback
+      // below is the alternative.
+      const renderer = gpuFlashGuardSupported() ? createParticleFlowRenderer(canvas, { particles: particleBudget, smoke }) : null;
+      const flashGuard = renderer ? attachFlashGuard(canvas.getContext('webgl2'), canvas) : null;
 
-      if (!renderer) {
+      if (!renderer || !flashGuard) {
+        renderer?.dispose();
+        const painter = createFallbackPainter(canvas, engine);
         const fb = (now: number) => {
-          if (canPaint(now)) paintMilkdropFallback(canvas, engine);
+          if (canPaint(now)) painter.paint(now);
           raf = requestAnimationFrame(fb);
         };
         raf = requestAnimationFrame(fb);
-        return () => cancelAnimationFrame(raf);
+        return () => {
+          cancelAnimationFrame(raf);
+          painter.dispose();
+        };
       }
 
       const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
@@ -825,11 +877,15 @@ export function Visualizer({
           const dt = lastNow ? (now - lastNow) / 1000 : 1 / 60;
           lastNow = now;
           if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
-          renderer.render(
-            { bass: f.bass, mid: f.mid, treble: f.treble, rms: f.rms, beat: f.beat, kick: f.kick, beatEdge: f.beatEdge },
-            accentVec,
-            dt,
-          );
+          try {
+            renderer.render(
+              { bass: f.bass, mid: f.mid, treble: f.treble, rms: f.rms, beat: f.beat, kick: f.kick, beatEdge: f.beatEdge },
+              accentVec,
+              dt,
+            );
+          } finally {
+            flashGuard?.apply(dt * 1000);
+          }
         }
         raf = requestAnimationFrame(frame);
       };
@@ -837,6 +893,7 @@ export function Visualizer({
 
       return () => {
         cancelAnimationFrame(raf);
+        flashGuard?.dispose();
         renderer.dispose();
       };
     }
@@ -858,6 +915,10 @@ export function Visualizer({
     const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
     let cancelNext = () => {};
     let ctx: CanvasRenderingContext2D | null = null;
+    // The painters draw on `surface.paint`: offscreen when the frame is
+    // presented through the GPU flash guard on this canvas, else this canvas.
+    const surface = createGuarded2dSurface(canvas, mayFlashLarge, Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke));
+    let lastShownAt = 0;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     const onsetFreq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
@@ -880,11 +941,12 @@ export function Visualizer({
       const scale = Math.min(1, Math.sqrt(maxPixels / Math.max(1, scaledW * scaledH)));
       const targetW = Math.max(2, Math.floor(scaledW * scale));
       const targetH = Math.max(2, Math.floor(scaledH * scale));
-      if (node.width !== targetW || node.height !== targetH) {
-        node.width = targetW;
-        node.height = targetH;
+      const paint = surface.paint;
+      if (paint.width !== targetW || paint.height !== targetH) {
+        paint.width = targetW;
+        paint.height = targetH;
       }
-      ctx = node.getContext('2d', { alpha: false });
+      ctx = paint.getContext('2d', { alpha: false });
       if (ctx) ctx.setTransform(targetW / Math.max(1, w), 0, 0, targetH / Math.max(1, h), 0, 0);
     }
 
@@ -1871,16 +1933,23 @@ export function Visualizer({
         // unavailable, and this if/else chain used to have no final else, so
         // those 5 modes stayed blank forever with the rAF loop still
         // spinning. Every other GPU-dependent mode already falls back to
-        // this same painter — these were the exception.
-        paintMilkdropFallback(c, engine);
+        // this same painter — these were the exception. It draws on the
+        // paint surface like every mode here: when the frame is presented
+        // through the GPU guard, the visible canvas has no 2D context.
+        drawMilkdropFallback(ctx, w, h, engine);
       }
 
+      surface.show(lastShownAt ? now - lastShownAt : frameIntervalMs);
+      lastShownAt = now;
       scheduleNext();
     }
 
     cancelNext = requestPacedFrame(frame, 0);
-    return () => cancelNext();
-  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mode, suspendedByFullscreen]);
+    return () => {
+      cancelNext();
+      surface.dispose();
+    };
+  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mayFlashLarge, mode, suspendedByFullscreen]);
 
   const style: CSSProperties = {};
   if (width != null) style.width = `${width}px`;
@@ -1979,9 +2048,16 @@ function isShaderVisualizerMode(mode: VizMode): boolean {
     mode === 'spectral-tunnel';
 }
 
-function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) | null {
+// Exported for scripts/flash-guard-probe.ts, which drives the real shader
+// painters on a fixed clock.
+export function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) | null {
   const smokeReadback = Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke);
-  const context = options.canvas.getContext('webgl', {
+  // A WebGL2 context (these GLSL ES 1.00 shaders run in it unchanged) so the
+  // flash guard can finish each frame in the same context. Probed first: a
+  // machine that can't host the guard leaves this canvas free for the
+  // guarded 2D painters.
+  if (!gpuFlashGuardSupported()) return null;
+  const context = options.canvas.getContext('webgl2', {
     alpha: false,
     antialias: false,
     depth: false,
@@ -1990,10 +2066,15 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
     powerPreference: 'high-performance',
   });
   if (!context) return null;
-  const gl: WebGLRenderingContext = context;
+  const gl: WebGL2RenderingContext = context;
 
   const program = createShaderProgram(gl, SHADER_VERTEX_SOURCE, SHADER_FRAGMENT_SOURCE);
   if (!program) return null;
+  const flashGuard: AttachedFlashGuard | null = attachFlashGuard(gl, options.canvas);
+  if (!flashGuard) {
+    gl.deleteProgram(program);
+    return null;
+  }
 
   const positionBuffer = gl.createBuffer();
   if (!positionBuffer) return null;
@@ -2032,6 +2113,7 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
   let raf = 0;
   let lastWidth = 0;
   let lastHeight = 0;
+  let lastPaintAt = 0;
 
   function ensureSize(): void {
     const node = options.canvasRef.current;
@@ -2091,6 +2173,8 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
       gl.uniform4f(uniforms.bands2, bands[8]!, bands[9]!, bands[10]!, bands[11]!);
       gl.uniform4f(uniforms.bands3, bands[12]!, bands[13]!, bands[14]!, bands[15]!);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      flashGuard?.apply(lastPaintAt ? now - lastPaintAt : options.frameIntervalMs);
+      lastPaintAt = now;
     }
     raf = requestAnimationFrame(frame);
   }
@@ -2098,23 +2182,46 @@ function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) |
   raf = requestAnimationFrame(frame);
   return () => {
     cancelAnimationFrame(raf);
+    flashGuard?.dispose();
     gl.deleteBuffer(positionBuffer);
     gl.deleteProgram(program);
+  };
+}
+
+/**
+ * paintMilkdropFallback behind the flash guard. The fallback runs when a GPU
+ * renderer couldn't start, so it is guarded on the CPU (flash-guard-2d.ts).
+ */
+function createFallbackPainter(canvas: HTMLCanvasElement, engine: AudioEngine): { paint(now: number): void; dispose(): void } {
+  const guard = guardCanvas2d(canvas);
+  let lastPaintAt = 0;
+  return {
+    paint(now) {
+      paintMilkdropFallback(canvas, engine);
+      guard.apply(lastPaintAt ? now - lastPaintAt : 1000 / 30);
+      lastPaintAt = now;
+    },
+    dispose: () => guard.dispose(),
   };
 }
 
 function paintMilkdropFallback(canvas: HTMLCanvasElement, engine: AudioEngine): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
-  engine.getFreqData(freq);
-  boostFrequencyData(freq, 'punch');
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cssW = canvas.clientWidth || 640;
   const cssH = canvas.clientHeight || 360;
   canvas.width = Math.floor(cssW * dpr);
   canvas.height = Math.floor(cssH * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawMilkdropFallback(ctx, cssW, cssH, engine);
+}
+
+/** The fallback picture on a context already scaled to cssW x cssH. */
+function drawMilkdropFallback(ctx: CanvasRenderingContext2D, cssW: number, cssH: number, engine: AudioEngine): void {
+  const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+  engine.getFreqData(freq);
+  boostFrequencyData(freq, 'punch');
   const time = Date.now();
   const gradient = ctx.createRadialGradient(cssW / 2, cssH / 2, 0, cssW / 2, cssH / 2, Math.max(cssW, cssH) * 0.7);
   gradient.addColorStop(0, '#07130f');
