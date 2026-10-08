@@ -174,7 +174,7 @@ export interface MemoryBridge {
 
   /**
    * Snapshot of the bridge's current in-memory plan, or null if no plan is
-   * loaded. Used by the Visualizer's same-track remount path (finding #6) to
+   * loaded. Used by the Visualizer's same-track remount path to
    * re-prime a freshly-constructed Director with the cached bridge's plan
    * WITHOUT a fresh IPC round-trip. Read-only — callers must not mutate.
    */

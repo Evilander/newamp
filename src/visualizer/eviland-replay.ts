@@ -307,6 +307,7 @@ export function createReplayRing(
     // start on a keyframe; trim to the first key at or after (newest - window).
     const video = videoRing.slice();
     if (!video.length || !videoDecoderConfig) return null;
+    const decoderConfig = { ...videoDecoderConfig };
     const newest = video[video.length - 1]!.ts;
     let startIdx = 0;
     for (let i = 0; i < video.length; i++) {
@@ -325,7 +326,7 @@ export function createReplayRing(
 
     const target = new BufferTarget();
     const output = new Output({ format: new WebMOutputFormat(), target });
-    const videoSource = new EncodedVideoPacketSource('vp9');
+    const videoSource = new EncodedVideoPacketSource(decoderConfig.codec === 'vp8' ? 'vp8' : 'vp9');
     output.addVideoTrack(videoSource);
     let audioSource: EncodedAudioPacketSource | null = null;
     if (audio.length && audioDecoderConfig) {
@@ -357,7 +358,7 @@ export function createReplayRing(
       if (nextVideo <= nextAudio) {
         await videoSource.add(
           toPacket(retained[vi]!),
-          firstVideo ? { decoderConfig: videoDecoderConfig } : undefined,
+          firstVideo ? { decoderConfig } : undefined,
         );
         firstVideo = false;
         vi += 1;

@@ -53,18 +53,21 @@ void main() {
   o = vec4(color * alpha, alpha);
 }`;
 
-// Compiles and discards the simulation's two programs so the GPU process holds
-// them in its program cache. The simulation itself is created lazily, on the
-// first look that uses it; with the cache warm, that no longer compiles on the
-// switch frame. Call where the other programs compile, at renderer start.
-export function warmReactionDiffusion(gl: WebGL2RenderingContext): void {
-  if (!gl.getExtension('EXT_color_buffer_float')) return;
-  for (const fragment of [STEP, DRAW]) gl.deleteProgram(sourceProgram(gl, fragment));
+// Keep the actual programs until first use; compiling and deleting only warms
+// an optional driver cache and still makes the first look link them again.
+export function prepareReactionDiffusion(gl: WebGL2RenderingContext) {
+  if (!gl.getExtension('EXT_color_buffer_float')) return null;
+  return [sourceProgram(gl, STEP), sourceProgram(gl, DRAW)] as const;
 }
 
-export function createReactionDiffusion(gl: WebGL2RenderingContext, seed = 1) {
+/** Warm the driver cache without transferring resource ownership (legacy API). */
+export function warmReactionDiffusion(gl: WebGL2RenderingContext): void {
+  for (const program of prepareReactionDiffusion(gl) ?? []) gl.deleteProgram(program);
+}
+
+export function createReactionDiffusion(gl: WebGL2RenderingContext, seed = 1, prepared?: readonly [WebGLProgram | null, WebGLProgram | null] | null) {
   if (!gl.getExtension('EXT_color_buffer_float')) return null;
-  const step = sourceProgram(gl, STEP), draw = sourceProgram(gl, DRAW);
+  const [step, draw] = prepared ?? [sourceProgram(gl, STEP), sourceProgram(gl, DRAW)];
   const a = sourceTarget(gl, 128, 96, true), b = sourceTarget(gl, 128, 96, true);
   const vao = gl.createVertexArray();
   if (!step || !draw || !a || !b || !vao) {
@@ -90,8 +93,11 @@ export function createReactionDiffusion(gl: WebGL2RenderingContext, seed = 1) {
       gl.uniform1f(s.feed ?? null, feed); gl.uniform1f(s.kill ?? null, kill); gl.uniform1f(s.seed ?? null, seed % 997);
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, feedback);
       // Four stable chemical updates per 60 Hz tick, independent of render cadence.
-      const ticks = Math.floor((pending + 1e-6) / (1000 / 60));
-      pending -= ticks * (1000 / 60);
+      const elapsedTicks = Math.floor((pending + 1e-6) / (1000 / 60));
+      pending -= elapsedTicks * (1000 / 60);
+      // A delayed frame must not trigger 24 chemistry passes and delay the
+      // next one too. Two ticks preserve normal 30/60/120 Hz behaviour.
+      const ticks = Math.min(2, elapsedTicks);
       const iterations = ticks * 4 + (initialized ? 0 : 1);
       for (let i = 0; i < iterations; i++) {
         gl.uniform1f(s.init ?? null, initialized ? 0 : 1);

@@ -48,6 +48,8 @@ export interface SceneOverlay {
   setScene(id: string | null): void;
   /** Re-seed the rotation walk (track change / lineage update). */
   setSeedKey(key: string): void;
+  /** Compile an incoming look before its crossfade reaches the midpoint. */
+  prepareScene(id: string | null): void;
   currentSceneId(): string;
   dispose(): void;
 }
@@ -75,7 +77,7 @@ export interface SceneOverlayOptions {
 
 // Shared GLSL prelude: every scene compiles against these uniforms + helpers.
 // Scenes must ONLY add functions and implement scene(); the runtime appends
-// main(). Keep this contract stable — 25 scene files depend on it.
+// main(). Keep this contract stable for every registered scene.
 const PRELUDE = `#version 300 es
 precision highp float;
 
@@ -207,9 +209,8 @@ const WARM_EVERY_FRAMES = 8;
 // Without KHR_parallel_shader_compile there is no "done" signal; read the
 // status after this many frames, by when the GPU process has usually finished.
 const UNSIGNALED_COMPILE_FRAMES = 3;
-// A scene needed on screen stops waiting after this many frames (~1 s); the
-// crossfade holds the outgoing scene until then.
-const MAX_COMPILE_WAIT_FRAMES = 45;
+// Keep a small working set instead of compiling the entire library.
+const MAX_SCENE_PROGRAMS = 8;
 
 const CROSSFADE_MS = 1400;
 // Scene dwell: rotate on section change after MIN, force-rotate after MAX.
@@ -268,18 +269,23 @@ export function createSceneOverlay(
   // the status a few frames later. Reading it right away blocked the frame for
   // the whole compile, up to ~70 ms per scene on a cold shader cache. With
   // KHR_parallel_shader_compile the driver says when it is done; without it,
-  // a few frames is normally enough. The rest of the library warms one scene
-  // at a time in the background, so most looks are ready before they're used.
+  // a few frames is normally enough. Hosts prepare the incoming scene early;
+  // standalone rotation warms only a bounded working set.
   const parallelCompile = gl.getExtension('KHR_parallel_shader_compile') as { COMPLETION_STATUS_KHR: number } | null;
   const pending = new Map<string, PendingScene>();
   let warmCountdown = WARM_EVERY_FRAMES;
+  let preparedId: string | null = null;
 
   function beginCompile(def: SceneDef): void {
     if (disposed || compiled.has(def.id) || pending.has(def.id) || blacklisted.has(def.id)) return;
     const vs = gl!.createShader(gl!.VERTEX_SHADER);
     const fs = gl!.createShader(gl!.FRAGMENT_SHADER);
     const program = gl!.createProgram();
-    if (!vs || !fs || !program) return;
+    if (!vs || !fs || !program) {
+      gl!.deleteShader(vs); gl!.deleteShader(fs); gl!.deleteProgram(program);
+      blacklisted.add(def.id);
+      return;
+    }
     gl!.shaderSource(vs, VERT);
     gl!.compileShader(vs);
     gl!.shaderSource(fs, PRELUDE + def.frag + MAIN);
@@ -319,21 +325,28 @@ export function createSceneOverlay(
     }
     const result = { program, uniforms };
     compiled.set(def.id, result);
+    for (const [id, old] of compiled) {
+      if (compiled.size <= MAX_SCENE_PROGRAMS) break;
+      if (id === def.id || id === preparedId || id === SCENES[resolveSceneIndex()]?.id
+        || id === SCENES[outgoingIndex]?.id || id === SCENES[accentIndex]?.id) continue;
+      gl!.deleteProgram(old.program);
+      compiled.delete(id);
+    }
     return result;
   }
 
   // The program for a scene about to be drawn: compiled, still compiling
-  // ('pending': skip it this frame), or failed (null). A scene that has kept
-  // a fade waiting too long is finished even if that has to block.
+  // ('pending': keep the outgoing scene), or failed (null). Never force a
+  // blocking status query when the driver has explicitly said it isn't ready.
   function compileScene(def: SceneDef): CompiledScene | 'pending' | null {
     if (disposed) return null;
     const cached = compiled.get(def.id);
-    if (cached) return cached;
+    if (cached) { compiled.delete(def.id); compiled.set(def.id, cached); return cached; }
     if (blacklisted.has(def.id)) return null;
     beginCompile(def);
     const entry = pending.get(def.id);
     if (!entry) return null;
-    if (options.syncCompile || compileReady(entry) || entry.frames >= MAX_COMPILE_WAIT_FRAMES) {
+    if (options.syncCompile || compileReady(entry)) {
       return finishCompile(def, entry);
     }
     return 'pending';
@@ -350,7 +363,7 @@ export function createSceneOverlay(
         if (def) finishCompile(def, entry);
       }
     }
-    if (fading || pending.size > 0 || --warmCountdown > 0) return;
+    if (fading || forcedSceneId || compiled.size >= MAX_SCENE_PROGRAMS || pending.size > 0 || --warmCountdown > 0) return;
     warmCountdown = WARM_EVERY_FRAMES;
     const next = SCENES.find((scene) => !compiled.has(scene.id) && !blacklisted.has(scene.id));
     if (next) beginCompile(next);
@@ -360,6 +373,8 @@ export function createSceneOverlay(
   let forcedSceneId: string | null = null;
   let activeIndex = 0;
   let outgoingIndex = -1; // -1 = no crossfade in progress
+  let outgoingSeedKey = seedKey;
+  let outgoingTimeMs = 0;
   let fadeMs = CROSSFADE_MS; // start fully faded in
   let sceneTimeMs = 0;
   let globalTimeMs = 0;
@@ -498,6 +513,8 @@ void main() { fragColor = u_color; }
     // with; cut to the incoming one instead of holding a frame that never draws.
     const leaving = SCENES[activeIndex];
     outgoingIndex = leaving && !blacklisted.has(leaving.id) ? activeIndex : -1;
+    outgoingSeedKey = seedKey;
+    outgoingTimeMs = sceneTimeMs;
     activeIndex = next;
     fadeMs = 0;
     sceneTimeMs = 0;
@@ -602,6 +619,7 @@ void main() { fragColor = u_color; }
       if (disposed) return;
       const dt = Math.min(100, Math.max(0, dtMs));
       sceneTimeMs += dt;
+      outgoingTimeMs += dt;
       globalTimeMs += dt;
       dwellMs += dt;
       accentTimeMs += dt;
@@ -692,13 +710,17 @@ void main() { fragColor = u_color; }
       const idx = resolveSceneIndex();
       const def = SCENES[idx];
       if (!def) return;
-      const fadeT = outgoingIndex >= 0 ? fadeMs / fadeDurMs : 1;
+      const hasOutgoing = outgoingIndex >= 0 && (outgoingIndex !== idx || outgoingSeedKey !== seedKey);
+      // A rapid A → B → A request can return to the displayed instance before
+      // B was painted. Cancel that fade instead of fading A in from zero.
+      if (!hasOutgoing) outgoingIndex = -1;
+      const fadeT = hasOutgoing ? fadeMs / fadeDurMs : 1;
 
-      if (outgoingIndex >= 0 && outgoingIndex !== idx) {
+      if (hasOutgoing) {
         const out = SCENES[outgoingIndex];
         if (out) {
-          const outSeed = hash01(seedKey, out.id);
-          bindAndDraw(out, frame, palette, dt / 1000, 1 - fadeT, outSeed, globalTimeMs);
+          const outSeed = hash01(outgoingSeedKey, out.id);
+          bindAndDraw(out, frame, palette, dt / 1000, 1 - fadeT, outSeed, outgoingTimeMs);
         }
         if (fadeT >= 1) outgoingIndex = -1;
       }
@@ -748,7 +770,14 @@ void main() { fragColor = u_color; }
     setScene(id) {
       if (forcedSceneId === id) return;
       if (globalTimeMs > 0 && id && SCENES.some(scene => scene.id === id)) {
-        outgoingIndex = resolveSceneIndex();
+        // setSeedKey and setScene commonly arrive together. Keep the original
+        // outgoing instance when both change before the next paint, or an
+        // early fade is interrupted while that instance still dominates.
+        if (outgoingIndex < 0 || fadeMs >= fadeDurMs * 0.5) {
+          outgoingIndex = resolveSceneIndex();
+          outgoingSeedKey = seedKey;
+          outgoingTimeMs = sceneTimeMs;
+        }
         fadeMs = 0;
         fadeDurMs = CROSSFADE_MS;
       }
@@ -758,15 +787,37 @@ void main() { fragColor = u_color; }
 
     setSeedKey(key) {
       if (key === seedKey) return;
+      const oldIndex = resolveSceneIndex();
+      const oldSeed = seedKey;
+      const oldTime = sceneTimeMs;
       seedKey = key;
       rebuildRotation();
-      outgoingIndex = -1;
+      if (globalTimeMs > 0) {
+        if (outgoingIndex < 0 || fadeMs >= fadeDurMs * 0.5) {
+          outgoingIndex = oldIndex;
+          outgoingSeedKey = oldSeed;
+          outgoingTimeMs = oldTime;
+        }
+        fadeMs = 0;
+      }
       fadeDurMs = CROSSFADE_MS;
-      fadeMs = fadeDurMs;
       sceneTimeMs = 0;
       dwellMs = 0;
       accentLevel = 0;
       flashLevel = 0;
+    },
+
+    prepareScene(id) {
+      if (disposed || id === preparedId) return;
+      preparedId = id;
+      // Rapid dice/track changes should not leave an entire catalog compiling.
+      for (const [key, entry] of pending) {
+        if (key === id || key === SCENES[resolveSceneIndex()]?.id || key === SCENES[outgoingIndex]?.id) continue;
+        gl.deleteShader(entry.vs); gl.deleteShader(entry.fs); gl.deleteProgram(entry.program);
+        pending.delete(key);
+      }
+      const def = SCENES.find(scene => scene.id === id);
+      if (def) beginCompile(def);
     },
 
     currentSceneId() {

@@ -45,12 +45,14 @@
 // or EXT_color_buffer_float — fall back to butterchurn / canvas downstream.
 
 import type { EvilandFrame } from './eviland-audio';
-import { evalConfig, createDynamics, defaultConfig, CLASSIC_COMPOSITION, type OperatorConfig } from './eviland-operators';
-import { createReactionDiffusion, warmReactionDiffusion } from './eviland-reaction-diffusion';
+import { evalConfig, createDynamics, defaultConfig, CLASSIC_COMPOSITION, type EvilandDynamics, type OperatorConfig } from './eviland-operators';
+import { createReactionDiffusion, prepareReactionDiffusion } from './eviland-reaction-diffusion';
+import { createPhysarum, preparePhysarum } from './eviland-physarum';
 import { createSceneOverlay } from './scene-overlay';
 import { mulberry32, hashSeed } from './eviland-rng';
 import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame, type FluidSim } from './eviland-fluid';
 import { applyScoreCues } from './eviland-conductor';
+import { NOISE_GLSL, MORPH_GLSL } from './eviland-morph';
 
 export interface EvilandPalette {
   accent: [number, number, number]; // each channel 0..1
@@ -104,73 +106,66 @@ void main(){
   gl_Position = vec4(a_pos, 0.0, 1.0);
 }`;
 
-// Ashima 2D simplex — lifted (public domain) and used as our potential field.
-const NOISE_GLSL = `
-vec3 mod289_3(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec2 mod289_2(vec2 x){return x-floor(x*(1.0/289.0))*289.0;}
-vec3 permute(vec3 x){return mod289_3(((x*34.0)+1.0)*x);}
-float snoise(vec2 v){
-  const vec4 C=vec4(0.211324865405187,0.366025403784439,-0.577350269189626,0.024390243902439);
-  vec2 i=floor(v+dot(v,C.yy));
-  vec2 x0=v-i+dot(i,C.xx);
-  vec2 i1=(x0.x>x0.y)?vec2(1.0,0.0):vec2(0.0,1.0);
-  vec4 x12=x0.xyxy+C.xxzz; x12.xy-=i1;
-  i=mod289_2(i);
-  vec3 p=permute(permute(i.y+vec3(0.0,i1.y,1.0))+i.x+vec3(0.0,i1.x,1.0));
-  vec3 m=max(0.5-vec3(dot(x0,x0),dot(x12.xy,x12.xy),dot(x12.zw,x12.zw)),0.0);
-  m=m*m; m=m*m;
-  vec3 x=2.0*fract(p*C.www)-1.0;
-  vec3 h=abs(x)-0.5; vec3 ox=floor(x+0.5); vec3 a0=x-ox;
-  m*=1.79284291400159-0.85373472095314*(a0*a0+h*h);
-  vec3 g;
-  g.x=a0.x*x0.x+h.x*x0.y;
-  g.yz=a0.yz*x12.xz+h.yz*x12.yw;
-  return 130.0*dot(m,g);
-}
-vec2 curl(vec2 p){
-  float e=0.012;
-  float n1=snoise(p+vec2(0.0,e));
-  float n2=snoise(p-vec2(0.0,e));
-  float n3=snoise(p+vec2(e,0.0));
-  float n4=snoise(p-vec2(e,0.0));
-  return vec2(n1-n2, -(n3-n4))/(2.0*e);
-}
-`;
-
 // Pillar 2: feedback field — MilkDrop-style per-frame transform of the previous
 // frame. Each frame we (optionally) FOLD the sampling coord into N-fold mirror
 // symmetry, ZOOM in around centre (tunnel rush), ROTATE+SWIRL around centre,
 // add curl-noise organic detail, then sample the prev field and HUE-CYCLE the
 // colour. The mirror fold is the single most "MilkDrop" trick — kaleidoscope.
+//
+// A look's motion is one `Warp`. On top of the classic transforms a look may
+// carry a morph species (MORPH_KINDS in eviland-operators.ts): a different
+// kind of movement rather than a different amount of the same one.
+//
+// Transitions run BOTH looks' warps. A front shaped by u_pattern crosses the
+// frame as u_morphT goes 0→1; behind it pixels move the new way, ahead of it
+// the old way, and inside it the two sample coordinates blend — MilkDrop's
+// per-vertex preset blend, done per pixel. The front itself injects light
+// (u_membrane) and shoves the old picture outward (u_bulge), so the feedback
+// smears it into a living edge instead of a flat dissolve.
 const FIELD_FRAG = `#version 300 es
 precision highp float;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_prev;
-uniform float u_steps;      // elapsed reference frames (60 Hz)
-uniform vec3  u_decay;       // plan §2.3 per-channel RGB decay
-uniform float u_warpAmp;
-uniform float u_warpScale;
-uniform vec2  u_flow;
+uniform sampler2D u_velocity; // stable-fluids sim velocity (RG16F, UV/s)
+uniform float u_steps;        // elapsed reference frames (60 Hz)
 uniform float u_time;
 uniform float u_novelty;
 uniform float u_sectionSeed;
-uniform float u_zoom;        // 0 = static, positive = zoom IN (tunnel toward centre)
-uniform float u_rotate;      // radians per frame of central rotation
-uniform float u_hueCycle;    // radians to rotate the sampled colour's hue (0..~0.1)
-uniform float u_swirl;       // swirl strength (rotation falls off with radius)
-uniform float u_mirror;      // segment count (0 = off; 2..8 active)
-uniform float u_mirrorMix;   // 0..1 blend between unfolded and folded sample
-uniform sampler2D u_velocity; // stable-fluids sim velocity (RG16F, UV/s)
-uniform float u_fluid;       // sim influence, premultiplied by dt CPU-side (0 = off)
-// Plan §2.2 radial warp profile gains (multiply radius² for per-pixel character).
-uniform float u_zoomRadGain;
-uniform float u_rotateRadGain;
-uniform float u_swirlRadGain;
-uniform float u_decayRadGain;
-// Plan §2.4 centre offset (default vec2(0.5)). Clamped CPU-side to [0.2,0.8].
-uniform vec2  u_centre;
+uniform float u_aspect;       // field width / height
+uniform vec2  u_texel;        // one field texel in uv
+// u_morphT < 0: settled, only u_w[0] runs. Otherwise u_w[0] is the incoming
+// look, u_w[1] the outgoing one, and u_morphT is the eased progress.
+uniform float u_morphT;
+uniform float u_pattern;      // front shape, see flipTime()
+uniform float u_patternSeed;
+uniform vec3  u_membrane;     // light injected along the front
+uniform float u_bulge;        // uv per frame the front pushes the old picture
+
+struct Warp {
+  vec3  decay;      // plan §2.3 per-channel RGB decay
+  float warpAmp;
+  float warpScale;
+  vec2  flow;
+  float zoom;       // 0 = static, positive = zoom IN (tunnel toward centre)
+  float rotate;     // radians per frame of central rotation
+  float hueCycle;   // radians to rotate the sampled colour's hue (0..~0.1)
+  float swirl;      // swirl strength (rotation falls off with radius)
+  float mirror;     // segment count (0 = off; 2..8 active)
+  float mirrorMix;  // 0..1 blend between unfolded and folded sample
+  float fluid;      // sim influence, premultiplied by dt CPU-side (0 = off)
+  float zoomRad;    // plan §2.2 radial gains (multiply radius²)
+  float rotateRad;
+  float swirlRad;
+  float decayRad;
+  vec2  centre;     // plan §2.4, clamped CPU-side to [0.2,0.8]
+  float morph;      // MORPH_KINDS index, 0 = none
+  float morphAmt;   // per-frame strength 0..0.9
+  float morphScale; // per-kind size multiplier around 1
+};
+uniform Warp u_w[2];
 ${NOISE_GLSL}
+${MORPH_GLSL}
 
 const float TAU = 6.28318530718;
 
@@ -203,11 +198,16 @@ vec2 kaleidoFold(vec2 p, float segments){
   return vec2(cos(folded), sin(folded)) * r;
 }
 
-void main(){
-  vec2 uv = v_uv;
-  // Plan §2.4: centre is now a moving uniform. Defaults to vec2(0.5) so the
+// One look's sample: where to read the previous field, plus the two morph
+// kinds that act on colour rather than position — droste's nested copy (a
+// jump, not a small move, so it can't be reached by blending coordinates)
+// and coral's ring-mean difference.
+struct Tap { vec2 src; float r2; vec2 alt; float altMix; float coral; float coralScale; };
+
+Tap warpSource(vec2 uv, Warp w){
+  // Plan §2.4: centre is a moving uniform. Defaults to vec2(0.5) so the
   // fold/zoom axis matches the pre-2.4 behaviour exactly.
-  vec2 centre = u_centre;
+  vec2 centre = w.centre;
   vec2 p = uv - centre;
 
   // MilkDrop motion: rotate around the centre, with stronger spin near the
@@ -217,48 +217,184 @@ void main(){
   // Plan §2.2: each transform gets a radius² gain so the channel's strength
   // varies with distance from centre. Gains default to 0 → bit-identical to
   // pre-2.2 (the additive term vanishes everywhere).
-  float zoomEff = u_zoom + u_zoomRadGain * r2;
-  float rotEff = u_rotate + u_rotateRadGain * r2;
-  float swirlEff = u_swirl + u_swirlRadGain * r2;
+  float zoomEff = w.zoom + w.zoomRad * r2;
+  float rotEff = w.rotate + w.rotateRad * r2;
+  float swirlEff = w.swirl + w.swirlRad * r2;
   float ang = (rotEff + swirlEff * radius) * u_steps;
   float ca = cos(ang); float sa = sin(ang);
   p = mat2(ca, -sa, sa, ca) * p;
 
-  // Zoom: multiply by inverse zoom so positive u_zoom pulls UV inward
+  // Zoom: multiply by inverse zoom so positive zoom pulls UV inward
   // (trails appear to march OUT from the centre as a tunnel rush).
   float invZ = pow(max(0.1, 1.0 + zoomEff), -u_steps);
   p *= invZ;
 
-  // Kaleidoscope fold — optional. When u_mirror >= 2 we blend in a folded
-  // copy of the same sample coord; u_mirrorMix=1 = full kaleidoscope,
-  // u_mirrorMix=0 = off. Cheap (a single atan/cos/sin).
+  // Kaleidoscope fold — optional. When mirror >= 2 we blend in a folded
+  // copy of the same sample coord; mirrorMix=1 = full kaleidoscope,
+  // mirrorMix=0 = off. Cheap (a single atan/cos/sin).
   vec2 pFinal = p;
-  if (u_mirror >= 1.5 && u_mirrorMix > 0.001) {
-    vec2 folded = kaleidoFold(p, u_mirror);
-    pFinal = mix(p, folded, 1.0 - pow(1.0 - clamp(u_mirrorMix, 0.0, 1.0), u_steps));
+  if (w.mirror >= 1.5 && w.mirrorMix > 0.001) {
+    vec2 folded = kaleidoFold(p, w.mirror);
+    pFinal = mix(p, folded, 1.0 - pow(1.0 - clamp(w.mirrorMix, 0.0, 1.0), u_steps));
   }
 
   // Re-centre + organic curl detail (small) modulated by treble/novelty.
   vec2 src = pFinal + centre;
-  vec2 base = src * u_warpScale + vec2(u_time * 0.018, -u_time * 0.014)
+  vec2 base = src * w.warpScale + vec2(u_time * 0.018, -u_time * 0.014)
             + vec2(u_sectionSeed, -u_sectionSeed*0.7);
-  vec2 w = curl(base) * u_warpAmp;
-  w += curl(base * 2.1 + 11.7) * (u_warpAmp * 0.45 + u_novelty * 0.6);
+  vec2 cw = curl(base) * w.warpAmp;
+  cw += curl(base * 2.1 + 11.7) * (w.warpAmp * 0.45 + u_novelty * 0.6);
 
-  // Simulated fluid displacement: velocity is UV/s and u_fluid carries
+  // Simulated fluid displacement: velocity is UV/s and fluid carries
   // channel * scale * dt, so this composes with the procedural warp. When
-  // u_fluid = 0 the subtraction is a zero vector — bit-identical to before.
-  vec2 simFlow = texture(u_velocity, src).xy * u_fluid;
-  src = clamp(src + (w - u_flow) * u_steps - simFlow, 0.001, 0.999);
+  // fluid = 0 the subtraction is a zero vector — bit-identical to before.
+  vec2 simFlow = textureLod(u_velocity, src, 0.0).xy * w.fluid;
+  src = src + (cw - w.flow) * u_steps - simFlow;
+
+  Tap t;
+  t.r2 = r2;
+  t.alt = src;
+  t.altMix = 0.0;
+  t.coral = 0.0;
+  t.coralScale = w.morphScale;
+  int kind = int(w.morph + 0.5);
+  if (kind > 0 && w.morphAmt > 0.0005) {
+    // Droste blends toward a fixed sample, so it compounds per frame; the
+    // others take incremental steps and scale linearly with elapsed frames.
+    float rate = min(3.0, w.morphAmt * u_steps);
+    if (kind == 5) {
+      float inside;
+      t.alt = drosteTap(src, w.morphScale, centre, u_time, u_aspect, inside);
+      t.altMix = (1.0 - pow(1.0 - w.morphAmt, u_steps)) * inside;
+    } else if (kind == 2) {
+      t.coral = rate;
+    } else {
+      src += (morphTarget(u_prev, src, kind, w.morphScale, centre, u_time, u_aspect, u_texel) - src) * rate;
+    }
+  }
+  t.src = src;
+  return t;
+}
+
+vec3 coralStep(vec3 c, vec2 src, float k, float s){ return coralApply(u_prev, c, src, k, s, u_texel, u_time, u_aspect); }
+
+// When each pixel changes over to the incoming look: 0 = first, 1 = last.
+float flipTime(vec2 uv){
+  vec2 p = (uv - 0.5) * vec2(u_aspect, 1.0);
+  float s = u_patternSeed;
+  int kind = int(u_pattern + 0.5);
+  if (kind == 0) {
+    // cells: each cell converts from its nucleus outward, cells in random order.
+    vec2 g = p * 4.5 + s * 7.0;
+    vec2 id = floor(g), f = fract(g);
+    float best = 9.0; vec2 bestId = id;
+    for (int y = -1; y <= 1; y++) {
+      for (int x = -1; x <= 1; x++) {
+        vec2 o = vec2(float(x), float(y));
+        vec2 d = o + hash2(id + o + s) - f;
+        float dd = dot(d, d);
+        if (dd < best) { best = dd; bestId = id + o; }
+      }
+    }
+    return clamp(hash1(bestId + s * 3.1) * 0.72 + sqrt(best) * 0.36, 0.0, 1.0);
+  }
+  if (kind == 1) {
+    // infection: fronts grow from three seeds, racing ahead along ridges so
+    // the edge fingers out like mould.
+    float d = 9.0;
+    for (int i = 0; i < 3; i++) {
+      vec2 c = (hash2(vec2(float(i) * 3.7, s)) - 0.5) * vec2(u_aspect, 1.0) * 0.9;
+      d = min(d, length(p - c) + float(i) * 0.12);
+    }
+    float ridge = 1.0 - abs(snoise(p * 5.0 + s * 11.0));
+    float rough = snoise(p * 3.0 + s) * 0.5 + snoise(p * 6.1 - s) * 0.25;
+    return clamp(d * 0.62 + rough * 0.18 - ridge * ridge * 0.16, 0.0, 1.0);
+  }
+  if (kind == 2) {
+    // iris: petals open from the centre (or close in on it).
+    float r = length(p);
+    float a = atan(p.y, p.x);
+    float petals = 5.0 + floor(hash1(vec2(s, 2.0)) * 5.0);
+    float f = r * 0.95 + 0.07 * sin(a * petals + s * 6.0) + snoise(p * 4.0 + s) * 0.05;
+    return clamp(fract(s * 3.7) > 0.5 ? f : 1.0 - f * 1.05, 0.0, 1.0);
+  }
+  if (kind == 3) {
+    // plasma, MilkDrop's own blend pattern.
+    float n = snoise(p * 2.2 + s * 5.0) * 0.5 + snoise(p * 4.6 - s * 3.0) * 0.25 + snoise(p * 9.3 + s) * 0.12;
+    // Kept inside (0, 1): a clamped region would all flip in the same frame.
+    return 0.5 + n * 0.55;
+  }
+  if (kind == 4) {
+    // spiral arms sweeping outward.
+    float r = length(p);
+    float a = atan(p.y, p.x);
+    float arms = 2.0 + floor(hash1(vec2(s, 4.0)) * 3.0);
+    return clamp(fract(a / TAU * arms + r * 1.6 + s) * 0.55 + r * 0.5, 0.0, 1.0);
+  }
+  // The old picture's own light changes over first; the dark ground follows
+  // in slow noise-shaped waves through the second half. (Giving all of it
+  // one flip time lit the whole background with the front at once.)
+  float bright = smoothstep(0.05, 0.6, luma(textureLod(u_prev, uv, 0.0).rgb));
+  float ground = 0.45 + 0.25 * (1.0 + snoise(p * 2.3 + s));
+  return mix(ground, 0.3 * (1.0 - bright), bright);
+}
+
+float revealAt(vec2 uv){
+  const float W = 0.08;
+  float t = u_morphT * (1.0 + 2.0 * W) - W;
+  return 1.0 - smoothstep(t - W, t + W, flipTime(uv));
+}
+
+void main(){
+  vec2 uv = v_uv;
+  float rev = 1.0;
+  float edge = 0.0;
+  vec2 push = vec2(0.0);
+  if (u_morphT >= 0.0) {
+    rev = revealAt(uv);
+    edge = 4.0 * rev * (1.0 - rev);
+    // The front's normal points into the incoming look; sampling from that
+    // side moves the picture out of it, so the new look shoulders the old aside.
+    vec2 g = vec2(dFdx(rev), dFdy(rev));
+    push = g / (length(g) + 1e-5) * edge * u_bulge * u_steps;
+  }
+
+  Tap t;
+  vec3 decay;
+  float decayRad;
+  float hue;
+  if (rev >= 0.999) {
+    t = warpSource(uv, u_w[0]);
+    decay = u_w[0].decay; decayRad = u_w[0].decayRad; hue = u_w[0].hueCycle;
+  } else if (rev <= 0.001) {
+    t = warpSource(uv, u_w[1]);
+    decay = u_w[1].decay; decayRad = u_w[1].decayRad; hue = u_w[1].hueCycle;
+  } else {
+    Tap a = warpSource(uv, u_w[0]);
+    Tap b = warpSource(uv, u_w[1]);
+    t.src = mix(b.src, a.src, rev);
+    t.r2 = mix(b.r2, a.r2, rev);
+    t.alt = rev >= 0.5 ? a.alt : b.alt;
+    t.altMix = mix(b.altMix, a.altMix, rev);
+    t.coral = mix(b.coral, a.coral, rev);
+    t.coralScale = rev >= 0.5 ? a.coralScale : b.coralScale;
+    decay = mix(u_w[1].decay, u_w[0].decay, rev);
+    decayRad = mix(u_w[1].decayRad, u_w[0].decayRad, rev);
+    hue = mix(u_w[1].hueCycle, u_w[0].hueCycle, rev);
+  }
+
+  vec2 src = clamp(t.src + push, 0.001, 0.999);
   vec3 prev = texture(u_prev, src).rgb;
+  if (t.altMix > 0.0) prev = mix(prev, textureLod(u_prev, clamp(t.alt, 0.001, 0.999), 0.0).rgb, t.altMix);
+  if (t.coral > 0.0) prev = coralStep(prev, src, t.coral, t.coralScale);
 
   // Hue cycle: shift colour every frame so trails drift across the palette.
-  prev = rotateHue(prev, u_hueCycle * u_steps);
-  // Plan §2.3: per-RGB decay. u_decay is a vec3; default = (d,d,d) reproduces
-  // the scalar decay exactly. Plan §2.2 radial decay bias adds r²-scaled gain
+  prev = rotateHue(prev, hue * u_steps);
+  // Plan §2.3: per-RGB decay; plan §2.2 radial decay bias adds r²-scaled gain
   // before clamp so the trail length can change with distance from centre.
-  vec3 decayRGB = clamp(u_decay + vec3(u_decayRadGain * r2), vec3(0.65), vec3(0.99));
+  vec3 decayRGB = clamp(decay + vec3(decayRad * t.r2), vec3(0.65), vec3(0.99));
   prev *= pow(decayRGB, vec3(u_steps));
+  prev += u_membrane * edge * edge;
   o = vec4(prev, 1.0);
 }`;
 
@@ -814,6 +950,11 @@ function clampDecayChannel(v: number): number {
   return v < 0.70 ? 0.70 : v > 0.99 ? 0.99 : v;
 }
 
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
 // ---------------------------------------------------------------------------
 // Factory.
 // ---------------------------------------------------------------------------
@@ -1130,27 +1271,31 @@ export function createEvilandRenderer(
   const fieldUni = {
     steps: gl.getUniformLocation(fieldProg, 'u_steps'),
     prev: gl.getUniformLocation(fieldProg, 'u_prev'),
-    decay: gl.getUniformLocation(fieldProg, 'u_decay'),
-    warpAmp: gl.getUniformLocation(fieldProg, 'u_warpAmp'),
-    warpScale: gl.getUniformLocation(fieldProg, 'u_warpScale'),
-    flow: gl.getUniformLocation(fieldProg, 'u_flow'),
     time: gl.getUniformLocation(fieldProg, 'u_time'),
     novelty: gl.getUniformLocation(fieldProg, 'u_novelty'),
     sectionSeed: gl.getUniformLocation(fieldProg, 'u_sectionSeed'),
-    zoom: gl.getUniformLocation(fieldProg, 'u_zoom'),
-    rotate: gl.getUniformLocation(fieldProg, 'u_rotate'),
-    hueCycle: gl.getUniformLocation(fieldProg, 'u_hueCycle'),
-    swirl: gl.getUniformLocation(fieldProg, 'u_swirl'),
-    mirror: gl.getUniformLocation(fieldProg, 'u_mirror'),
-    mirrorMix: gl.getUniformLocation(fieldProg, 'u_mirrorMix'),
     velocity: gl.getUniformLocation(fieldProg, 'u_velocity'),
-    fluid: gl.getUniformLocation(fieldProg, 'u_fluid'),
-    zoomRadGain: gl.getUniformLocation(fieldProg, 'u_zoomRadGain'),
-    rotateRadGain: gl.getUniformLocation(fieldProg, 'u_rotateRadGain'),
-    swirlRadGain: gl.getUniformLocation(fieldProg, 'u_swirlRadGain'),
-    decayRadGain: gl.getUniformLocation(fieldProg, 'u_decayRadGain'),
-    centre: gl.getUniformLocation(fieldProg, 'u_centre'),
+    aspect: gl.getUniformLocation(fieldProg, 'u_aspect'),
+    texel: gl.getUniformLocation(fieldProg, 'u_texel'),
+    morphT: gl.getUniformLocation(fieldProg, 'u_morphT'),
+    pattern: gl.getUniformLocation(fieldProg, 'u_pattern'),
+    patternSeed: gl.getUniformLocation(fieldProg, 'u_patternSeed'),
+    membrane: gl.getUniformLocation(fieldProg, 'u_membrane'),
+    bulge: gl.getUniformLocation(fieldProg, 'u_bulge'),
   };
+  // One Warp struct per side: [0] the active (incoming) look, [1] the
+  // outgoing look while a transition is in flight.
+  const warpUni = [0, 1].map((slot) => {
+    const at = (field: string) => gl.getUniformLocation(fieldProg, `u_w[${slot}].${field}`);
+    return {
+      decay: at('decay'), warpAmp: at('warpAmp'), warpScale: at('warpScale'), flow: at('flow'),
+      zoom: at('zoom'), rotate: at('rotate'), hueCycle: at('hueCycle'), swirl: at('swirl'),
+      mirror: at('mirror'), mirrorMix: at('mirrorMix'), fluid: at('fluid'),
+      zoomRad: at('zoomRad'), rotateRad: at('rotateRad'), swirlRad: at('swirlRad'), decayRad: at('decayRad'),
+      centre: at('centre'), morph: at('morph'), morphAmt: at('morphAmt'), morphScale: at('morphScale'),
+    };
+  });
+  type WarpUniforms = (typeof warpUni)[number];
   const echoUni = {
     field: gl.getUniformLocation(echoProg, 'u_field'),
     prevEcho: gl.getUniformLocation(echoProg, 'u_prevEcho'),
@@ -1292,11 +1437,23 @@ export function createEvilandRenderer(
     seedKey: options.seed ?? 'eviland',
     syncCompile: options.syncCompile ?? options.smoke,
   });
-  warmReactionDiffusion(gl);
+  let chemistryPrograms = prepareReactionDiffusion(gl);
+  let mouldPrograms = preparePhysarum(gl);
   let sourceGain = 1;
   let anticipationClock = 0;
   const dyn = createDynamics();
+  // Each side of an in-flight transition evaluated on its own, so the field
+  // can run both warps (the lerped `dyn` still drives every source).
+  const dynFrom = createDynamics();
+  const dynTo = createDynamics();
+  let wasMorphing = false;
+  let morphingTo: OperatorConfig | null = null;
   let chemistry: ReturnType<typeof createReactionDiffusion> = null;
+  let mould: ReturnType<typeof createPhysarum> = null;
+  // A simulation that failed to build (compile or allocation) stays off
+  // rather than recompiling and logging every frame.
+  let chemistryFailed = false;
+  let mouldFailed = false;
 
   // ---------------------------------------------------------------------------
   // Public API.
@@ -1417,6 +1574,35 @@ export function createEvilandRenderer(
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
+  // Push one look's motion into a Warp slot of the field shader. `fluidScale`
+  // is 0 when the velocity sim is off, which keeps u_fluid at exactly zero.
+  function pushWarp(u: WarpUniforms, d: EvilandDynamics, fluidScale: number): void {
+    // Plan §2.3: per-RGB decay. d.decay + d.decayR/G/B biases. Clamped
+    // CPU-side to the GPU-safe envelope so a runaway audio gain can't push
+    // past the shader's outer clamp band.
+    gl.uniform3f(u.decay, clampDecayChannel(d.decay + d.decayR), clampDecayChannel(d.decay + d.decayG), clampDecayChannel(d.decay + d.decayB));
+    gl.uniform1f(u.warpAmp, d.warpAmp);
+    gl.uniform1f(u.warpScale, d.warpScale);
+    gl.uniform2f(u.flow, d.flowX, d.flowY);
+    gl.uniform1f(u.zoom, d.zoom);
+    gl.uniform1f(u.rotate, d.rotate);
+    gl.uniform1f(u.hueCycle, d.hueCycle);
+    gl.uniform1f(u.swirl, d.swirl);
+    gl.uniform1f(u.mirror, d.mirror);
+    gl.uniform1f(u.mirrorMix, d.mirrorMix);
+    gl.uniform1f(u.fluid, d.fluid * fluidScale);
+    // Plan §2.2/§2.4: radial gains + centre offset. Defaults are 0 / (0.5,0.5)
+    // → bit-identical to pre-§2.2.
+    gl.uniform1f(u.zoomRad, d.radialZoom);
+    gl.uniform1f(u.rotateRad, d.radialRotate);
+    gl.uniform1f(u.swirlRad, d.radialSwirl);
+    gl.uniform1f(u.decayRad, d.radialDecay);
+    gl.uniform2f(u.centre, d.centreX, d.centreY);
+    gl.uniform1f(u.morph, d.morph);
+    gl.uniform1f(u.morphAmt, d.morphAmount);
+    gl.uniform1f(u.morphScale, d.morphScale);
+  }
+
   // Bind 3-vec4 instance attribs starting at attribute location offset.
   function bindEmitterAttribs(): void {
     const aPos = attribLoc(EMITTER, 'a_quad');
@@ -1476,6 +1662,43 @@ export function createEvilandRenderer(
     const steps = dt * 60;
     const composition = currentConfig.composition ?? CLASSIC_COMPOSITION;
     evalConfig(currentConfig, frame, sectionSeed, dyn, dt * 1000);
+    // Allocate the small simulations as soon as a fade names its destination,
+    // before the composition flips at the midpoint. Reuse them thereafter.
+    const upcoming = currentConfig._to ?? currentConfig;
+    const simulation = upcoming.composition?.simulation;
+    if (simulation === 'reaction-diffusion' || composition.simulation === 'reaction-diffusion') {
+      if (!chemistry && !chemistryFailed) {
+        chemistry = createReactionDiffusion(gl, hashSeed(upcoming.seed ?? 'chemistry'), chemistryPrograms);
+        chemistryPrograms = null;
+        chemistryFailed = !chemistry;
+      }
+    }
+    if (simulation === 'physarum' || composition.simulation === 'physarum') {
+      if (!mould && !mouldFailed) {
+        mould = createPhysarum(gl, hashSeed(upcoming.seed ?? 'mould'), quality, mouldPrograms);
+        mouldPrograms = null;
+        mouldFailed = !mould;
+      }
+    }
+    // Run both warps and move a front between them during a Director fade.
+    const fromConfig = currentConfig._from;
+    const toConfig = currentConfig._to;
+    const morphing = dyn.transition < 0.999 && !!fromConfig && !!toConfig;
+    if (morphing) {
+      // A new fade can start mid-fade (a section change during a transition);
+      // the Director then hands over a new pair, so re-seed on either edge.
+      if (!wasMorphing || toConfig !== morphingTo) {
+        // Smoothed q-slots carry state; start both sides from where the
+        // lerped look already is so neither side jumps on the first frame.
+        dynFrom.q.set(dyn.q);
+        dynTo.q.set(dyn.q);
+        morphingTo = toConfig!;
+      }
+      evalConfig(fromConfig!, frame, sectionSeed, dynFrom, dt * 1000);
+      evalConfig(toConfig!, frame, sectionSeed, dynTo, dt * 1000);
+    }
+    wasMorphing = morphing;
+    if (!morphing) morphingTo = null;
     const cueGain = applyScoreCues(dyn, frame.score);
     // Integral of a continuous source through exponential decay.
     sourceGain = (1 - Math.pow(dyn.decay, steps)) / Math.max(1e-6, 1 - dyn.decay);
@@ -1563,36 +1786,35 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, velTex ?? fieldA.tex);
     gl.uniform1i(fieldUni.velocity, 1);
-    gl.uniform1f(fieldUni.fluid, velTex ? dyn.fluid * FLUID_ADVECT_SCALE * dt : 0);
     gl.activeTexture(gl.TEXTURE0);
-    // Plan §2.3: per-RGB decay. dyn.decay + dyn.decayR/G/B biases. Clamped
-    // CPU-side to the GPU-safe envelope so a runaway audio gain can't push
-    // past the shader's outer clamp band.
-    const dr = clampDecayChannel(dyn.decay + dyn.decayR);
-    const dg = clampDecayChannel(dyn.decay + dyn.decayG);
-    const db = clampDecayChannel(dyn.decay + dyn.decayB);
+    const fluidScale = velTex ? FLUID_ADVECT_SCALE * dt : 0;
     gl.uniform1f(fieldUni.steps, steps);
-    gl.uniform3f(fieldUni.decay, dr, dg, db);
-    gl.uniform1f(fieldUni.warpAmp, dyn.warpAmp);
-    gl.uniform1f(fieldUni.warpScale, dyn.warpScale);
-    gl.uniform2f(fieldUni.flow, dyn.flowX, dyn.flowY);
     gl.uniform1f(fieldUni.time, time);
     gl.uniform1f(fieldUni.novelty, frame.novelty);
     gl.uniform1f(fieldUni.sectionSeed, sectionSeed);
-    gl.uniform1f(fieldUni.zoom, dyn.zoom);
-    gl.uniform1f(fieldUni.rotate, dyn.rotate);
-    gl.uniform1f(fieldUni.hueCycle, dyn.hueCycle);
-    gl.uniform1f(fieldUni.swirl, dyn.swirl);
-    gl.uniform1f(fieldUni.mirror, dyn.mirror);
-    gl.uniform1f(fieldUni.mirrorMix, dyn.mirrorMix);
-    // Plan §2.2/§2.4: radial gains + centre offset. Defaults are 0 / (0.5,0.5)
-    // → bit-identical to pre-§2.2 (the additive radial term vanishes and the
-    // centre uniform matches the hardcoded vec2(0.5)).
-    gl.uniform1f(fieldUni.zoomRadGain, dyn.radialZoom);
-    gl.uniform1f(fieldUni.rotateRadGain, dyn.radialRotate);
-    gl.uniform1f(fieldUni.swirlRadGain, dyn.radialSwirl);
-    gl.uniform1f(fieldUni.decayRadGain, dyn.radialDecay);
-    gl.uniform2f(fieldUni.centre, dyn.centreX, dyn.centreY);
+    gl.uniform1f(fieldUni.aspect, fieldW / Math.max(1, fieldH));
+    gl.uniform2f(fieldUni.texel, 1 / fieldW, 1 / fieldH);
+    if (morphing) {
+      pushWarp(warpUni[0]!, dynTo, fluidScale);
+      pushWarp(warpUni[1]!, dynFrom, fluidScale);
+      const t = dyn.transition;
+      // The front glows hardest mid-transition and on the kick, then lets go.
+      const swell = Math.sin(Math.PI * t);
+      const glow = (0.05 + frame.kick * 0.10 + frame.energy * 0.05) * swell * sourceGain;
+      gl.uniform1f(fieldUni.morphT, t);
+      gl.uniform1f(fieldUni.pattern, currentConfig._pattern ?? 3);
+      gl.uniform1f(fieldUni.patternSeed, currentConfig._patternSeed ?? 0);
+      gl.uniform3f(fieldUni.membrane,
+        (palette.light[0] * 0.6 + palette.accent[0] * 0.4) * glow,
+        (palette.light[1] * 0.6 + palette.accent[1] * 0.4) * glow,
+        (palette.light[2] * 0.6 + palette.accent[2] * 0.4) * glow);
+      gl.uniform1f(fieldUni.bulge, 0.0022 * (1 + frame.kick * 1.5));
+    } else {
+      pushWarp(warpUni[0]!, dyn, fluidScale);
+      gl.uniform1f(fieldUni.morphT, -1);
+      gl.uniform3f(fieldUni.membrane, 0, 0, 0);
+      gl.uniform1f(fieldUni.bulge, 0);
+    }
     drawFullscreen();
 
     // ---- PASS 2: terrain (bass horizon) drawn into the field ----
@@ -1681,12 +1903,19 @@ export function createEvilandRenderer(
     }
     gl.disable(gl.BLEND);
 
-    if (composition.scene && scenes) {
-      scenes.setSeedKey(currentConfig.seed ?? options.seed ?? 'eviland');
-      scenes.setScene(composition.scene);
+    // A fade into a look without a scene (the composition switches at the
+    // midpoint) keeps drawing the outgoing look's own scene, with that look's
+    // seed, and lets it go over the second half rather than cutting it. An
+    // outgoing look with no scene has nothing to let go of.
+    const outgoing = !composition.scene && morphing ? fromConfig : null;
+    const sceneId = composition.scene ?? outgoing?.composition?.scene ?? null;
+    if (sceneId && scenes) {
+      const letGo = composition.scene ? 1 : 1 - smoothstep(0.5, 1, dyn.transition);
+      scenes.setSeedKey((outgoing ?? currentConfig).seed ?? options.seed ?? 'eviland');
+      scenes.setScene(sceneId);
       scenes.render(frame, palette, dt * 1000, {
         framebuffer: fieldB.fbo, width: fieldW, height: fieldH,
-        opacity: 1 - Math.pow(1 - Math.max(0, Math.min(0.95, composition.density)), steps),
+        opacity: (1 - Math.pow(1 - Math.max(0, Math.min(0.95, composition.density)), steps)) * letGo,
         contrast: composition.contrast,
       });
       gl.bindVertexArray(null);
@@ -1694,8 +1923,16 @@ export function createEvilandRenderer(
     }
 
     if (composition.simulation === 'reaction-diffusion') {
-      if (!chemistry) chemistry = createReactionDiffusion(gl, hashSeed(currentConfig.seed ?? 'chemistry'));
       chemistry?.render(frame, palette, dt * 1000, fieldA.tex, {
+        framebuffer: fieldB.fbo, width: fieldW, height: fieldH, opacity: composition.density,
+      });
+      gl.bindVertexArray(null); gl.disable(gl.BLEND);
+    }
+
+    if (composition.simulation === 'physarum') {
+      // The mould senses the field it is drawn into, so it crawls along
+      // whatever the look's other sources leave behind.
+      mould?.render(frame, palette, dt * 1000, fieldA.tex, {
         framebuffer: fieldB.fbo, width: fieldW, height: fieldH, opacity: composition.density,
       });
       gl.bindVertexArray(null); gl.disable(gl.BLEND);
@@ -1765,7 +2002,9 @@ export function createEvilandRenderer(
     // FROM look so mid-fade discrete-channel snaps (mirrorSet, waveMode) don't
     // tear the picture. When transition settles back to 1 the snapshot is
     // freed. Off on `low` quality per plan launch gate.
-    if (snapshotEnabled && dyn.transition < 0.999) {
+    // A transition that carries both looks is handled per pixel in the field
+    // pass; the frozen snapshot only covers fades that arrive without them.
+    if (snapshotEnabled && dyn.transition < 0.999 && !morphing) {
       if (!fieldSnapshot) fieldSnapshot = makeFbo(fieldW, fieldH);
       if (fieldSnapshot && !snapshotActive) {
         gl.bindFramebuffer(gl.FRAMEBUFFER, fieldSnapshot.fbo);
@@ -1779,7 +2018,7 @@ export function createEvilandRenderer(
         drawFullscreen();
         snapshotActive = true;
       }
-    } else if (fieldSnapshot && snapshotActive && dyn.transition >= 0.999) {
+    } else if (fieldSnapshot && snapshotActive && (dyn.transition >= 0.999 || morphing)) {
       // Transition settled. Free the snapshot FBO so it doesn't hold ~16MB
       // between fades. Sub-second re-allocation is fine — fades are rare.
       disposeFbo(fieldSnapshot);
@@ -1938,6 +2177,9 @@ export function createEvilandRenderer(
     gl.deleteProgram(exposeProg);
     scenes?.dispose();
     chemistry?.dispose();
+    mould?.dispose();
+    for (const program of [...(chemistryPrograms ?? []), ...(mouldPrograms ?? [])]) gl.deleteProgram(program);
+    chemistryPrograms = null; mouldPrograms = null;
     disposeFbo(composed);
     disposeFbo(meter);
     disposeFbo(exposureA);
@@ -1972,6 +2214,7 @@ export function createEvilandRenderer(
 
   function setConfig(config: OperatorConfig): void {
     currentConfig = config;
+    scenes?.prepareScene((config._to ?? config).composition?.scene ?? null);
   }
   function getConfig(): OperatorConfig {
     return currentConfig;

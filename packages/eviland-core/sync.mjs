@@ -24,6 +24,8 @@ const FILES = [
   'scene-overlay.ts',
   'eviland-gl.ts',
   'eviland-reaction-diffusion.ts',
+  'eviland-morph.ts',
+  'eviland-physarum.ts',
   'eviland-appearance.ts',
   // Every scene module: the renderer draws them as selectable sources.
   ...readdirSync(resolve(repo, 'src/visualizer/scenes'))

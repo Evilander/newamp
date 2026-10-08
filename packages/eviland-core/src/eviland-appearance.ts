@@ -1,7 +1,7 @@
 import type { EvilandFrame } from './eviland-audio';
 import type { PaletteConfig, RGB } from './eviland-operators';
 
-export type EvilandPaletteMode = 'theme' | 'phosphor' | 'ice' | 'sunset' | 'rainbow';
+export type EvilandPaletteMode = 'look' | 'theme' | 'phosphor' | 'ice' | 'sunset' | 'rainbow';
 export type EvilandReactivity = 'truth' | 'punch' | 'wild';
 
 // The last key-shifted theme palette. The shift only moves for a couple of
@@ -31,8 +31,20 @@ function rotateHue(rgb: RGB, turns: number): RGB {
  * `keyShift` (turns, from the song score) rotates the palette when the music
  * modulates away from its home key. It applies to 'theme' and 'rainbow' only:
  * a palette the user picked by name stays exactly that palette.
+ *
+ * 'look' paints each look in the palette it was generated with (`look`, the
+ * active config's palette), so looks differ in colour as well as in motion;
+ * the Director lerps it across a fade. A look without one falls back to the
+ * theme.
  */
-export function resolveEvilandPalette(mode: EvilandPaletteMode, theme: PaletteConfig, seconds = 0, keyShift = 0): PaletteConfig {
+export function resolveEvilandPalette(
+  mode: EvilandPaletteMode,
+  theme: PaletteConfig,
+  seconds = 0,
+  keyShift = 0,
+  look?: PaletteConfig | null,
+): PaletteConfig {
+  if (mode === 'look') return look ?? resolveEvilandPalette('theme', theme, seconds, keyShift);
   if (mode === 'theme') {
     const turns = Math.round(keyShift * 720) / 720;
     if (turns === 0) return theme;
@@ -55,9 +67,12 @@ export function resolveEvilandPalette(mode: EvilandPaletteMode, theme: PaletteCo
  * How firmly Eviland Live's final image is pulled onto the resolved palette.
  * A palette the user picked by name owns the picture outright. 'theme' (skin +
  * album art) leaves part of the MilkDrop preset's own hue variation in, and
- * 'rainbow' leaves most of it — its whole point is colour travel.
+ * 'rainbow' leaves most of it — its whole point is colour travel. 'look'
+ * matches it: the look's palette changes with every look, and the preset's
+ * own colours are a large part of why MilkDrop looks the way it does.
  */
 export function liveGradeFor(mode: EvilandPaletteMode): number {
+  if (mode === 'look') return 0.45;
   if (mode === 'theme') return 0.72;
   if (mode === 'rainbow') return 0.45;
   return 1;

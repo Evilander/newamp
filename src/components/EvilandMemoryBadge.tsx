@@ -82,7 +82,7 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
     setPhase('fade-in');
     // Match the 4s fade-in window from the blueprint.
     fadeInTimer.current = setTimeout(() => {
-      // Pin-aware (finding #7): if the user clicked the badge during the
+      // Pin-aware: if the user clicked the badge during the
       // 4s fade-in window, togglePin set phase to 'pinned'. Without this
       // guard, this in-flight timer would stomp the pinned phase back to
       // 'visible' and the chain below would fade the popover out from
@@ -165,7 +165,7 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
     const bridge = getActiveBridge();
     const tid = bridge?.getState().trackId ?? state?.trackId ?? null;
     if (tid == null) return;
-    // Order matters (finding #1 / #2 from the pre-release review):
+    // Order matters:
     //   1. bridge.discard() FIRST — drop the in-memory plan + counters +
     //      buffered sections + dirty flag and short-circuit every future
     //      flush() / observeSection() / record* call for this bridge's

@@ -84,6 +84,12 @@ const plan = [
     file: 'real-viz-eviland-3.png',
     action: "await shot.sleep(14000); return shot.summary('eviland-3');",
   },
+  // The Eviland engine itself (no MilkDrop underneath), two looks apart.
+  { file: 'real-viz-eviland-engine-1.png', action: openViz('eviland') },
+  {
+    file: 'real-viz-eviland-engine-2.png',
+    action: "await shot.sleep(14000); return shot.summary('eviland-engine-2');",
+  },
 ];
 
 const staticsOnly = process.argv.includes('--statics-only');

@@ -9,9 +9,17 @@
 //                archetypes share both geometry and motion under one palette
 //   --live       Eviland sources persist in MilkDrop's feedback, the selected
 //                palette owns the final image, resize keeps the frame intact
+//   --species    every morph species visibly changes how the same sources
+//                move, and none blacks out or blows out the frame
+//   --transitions every transition front keeps the frame readable mid-fade
+// Review sheets (they only fail if nothing renders; look at the captures):
+//   --showcase       every archetype in its own palette
+//   --live-showcase  real MilkDrop presets, plain and under Eviland Live
+//   --perf           GPU ms per frame at 1080p: settled, mid-transition, coral, mould
 // Captures and a contact sheet land in tmp/eviland-visual-tests/.
 //
 // Run with: npm run test:eviland-visual | test:eviland-diversity | test:eviland-live
+//   | test:eviland-species | test:eviland-transitions
 // Headless hosts without Electron can point NEWAMP_PLAYWRIGHT_MODULE at a
 // Playwright install and run this file with plain node.
 
@@ -21,9 +29,19 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const mode = process.argv.includes('--live') ? 'live' : process.argv.includes('--diversity') ? 'diversity' : 'controls';
+const mode = process.argv.includes('--live-showcase') ? 'live-showcase'
+  : process.argv.includes('--live') ? 'live'
+  : process.argv.includes('--diversity') ? 'diversity'
+  : process.argv.includes('--species') ? 'species'
+  : process.argv.includes('--transitions') ? 'transitions'
+  : process.argv.includes('--showcase') ? 'showcase'
+  : process.argv.includes('--perf') ? 'perf'
+  : 'controls';
 const outRoot = resolve('tmp', 'eviland-visual-tests');
-const probeCall = mode === 'live' ? 'window.__evilandLiveProbe()' : `window.__evilandVisualProbe.${mode}()`;
+const liveFamily = mode === 'live' || mode === 'live-showcase';
+const probeCall = mode === 'live' ? 'window.__evilandLiveProbe()'
+  : mode === 'live-showcase' ? 'window.__evilandLiveShowcase()'
+  : `window.__evilandVisualProbe.${mode}()`;
 const playwrightModule = process.env.NEWAMP_PLAYWRIGHT_MODULE;
 const softwareGl = Boolean(process.env.CI) || process.env.NEWAMP_SOFTWARE_GL === '1';
 
@@ -57,7 +75,7 @@ async function bundleProbe() {
   await mkdir(outRoot, { recursive: true });
   const bundlePath = join(outRoot, `${mode}-probe.js`);
   await build({
-    entryPoints: [resolve('scripts', mode === 'live' ? 'eviland-live-probe.ts' : 'eviland-visual-probe.ts')],
+    entryPoints: [resolve('scripts', liveFamily ? 'eviland-live-probe.ts' : 'eviland-visual-probe.ts')],
     bundle: true,
     format: 'iife',
     outfile: bundlePath,

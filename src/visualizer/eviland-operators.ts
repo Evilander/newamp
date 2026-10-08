@@ -120,13 +120,44 @@ export interface PaletteConfig {
 /** Source selection is separate from feedback motion and colour. */
 export interface CompositionConfig {
   scene: string | null;
-  simulation?: 'reaction-diffusion';
+  simulation?: 'reaction-diffusion' | 'physarum';
   terrain: boolean;
   spectrum: boolean;
   emitters: 'bands' | 'rings' | 'sparks' | 'blobs' | 'off';
   density: number;
   contrast: number;
 }
+
+/**
+ * Organic motion layered on top of the classic warp. Each kind is a different
+ * way of moving, not a different amount of the same movement:
+ *   cells       – every Voronoi cell blooms out of its own nucleus and turns;
+ *                 the seams where neighbouring cells meet become membranes.
+ *   coral       – a Turing instability on the feedback: labyrinths, spots
+ *                 and brain folds grow out of whatever the look draws.
+ *   marble      – parallel bands shear against each other and slowly turn,
+ *                 combing the picture like paper marbling.
+ *   chroma      – every colour flows in the direction of its own hue.
+ *   droste      – log-polar spiral; the frame keeps repeating inside itself.
+ *   mobius      – a loxodromic flow streaming out of one pole into another.
+ *   tendril     – angular noise drags the picture out into curling arms.
+ *   peristalsis – radial waves travel outward like a pumping bell.
+ * `amount` is the per-frame strength (0..0.9), `scale` a per-kind size
+ * multiplier around 1.
+ */
+export type MorphKind =
+  | 'none' | 'cells' | 'coral' | 'marble' | 'chroma'
+  | 'droste' | 'mobius' | 'tendril' | 'peristalsis';
+
+export interface MorphConfig {
+  kind: MorphKind;
+  amount: Channel;
+  scale: Channel;
+}
+
+export const MORPH_KINDS: readonly MorphKind[] = [
+  'none', 'cells', 'coral', 'marble', 'chroma', 'droste', 'mobius', 'tendril', 'peristalsis',
+];
 
 export const CLASSIC_COMPOSITION: Readonly<CompositionConfig> = {
   scene: null, terrain: true, spectrum: true, emitters: 'bands', density: 1, contrast: 1,
@@ -241,12 +272,36 @@ export interface OperatorConfig {
   echoFlipX?: Channel;
   echoFlipY?: Channel;
 
+  /** Organic motion species (see MorphKind). Omitted = classic warp only. */
+  morph?: MorphConfig;
+
   /**
    * Transition meta — set by lerpConfig when the Director is mid-fade. The
    * renderer reads this to drive the field-buffer crossfade (plan §2.6):
    * <1 = transition in progress; >=1 or absent = settled. Not a channel.
    */
   _transition?: number;
+  /**
+   * Transition meta, mid-fade only: the looks on either side of the fade. The
+   * renderer runs both warps and blends them per pixel behind a moving front
+   * instead of dissolving one flat picture into the other. Never part of a
+   * saved look; stripTransitionMeta removes them.
+   */
+  _from?: OperatorConfig;
+  _to?: OperatorConfig;
+  /** Shape of the transition front (renderer's flipTime) and its seed. */
+  _pattern?: number;
+  _patternSeed?: number;
+}
+
+/** Drop the Director's mid-fade meta so a snapshot of `live` never nests configs. */
+export function stripTransitionMeta(config: OperatorConfig): OperatorConfig {
+  delete config._transition;
+  delete config._from;
+  delete config._to;
+  delete config._pattern;
+  delete config._patternSeed;
+  return config;
 }
 
 /** Concrete per-frame uniform values produced by evalConfig (scratch object). */
@@ -296,6 +351,10 @@ export interface EvilandDynamics {
   echoAlpha: number;
   echoFlipX: number; // 0 or 1
   echoFlipY: number; // 0 or 1
+  /** Morph species index into MORPH_KINDS (0 = none), strength and size. */
+  morph: number;
+  morphAmount: number;
+  morphScale: number;
   /** Crossfade progress (plan §2.6). 1 = settled, <1 = mid-transition. */
   transition: number;
 }
@@ -439,6 +498,7 @@ export function createDynamics(): EvilandDynamics {
     decayR: 0, decayG: 0, decayB: 0,
     centreX: 0.5, centreY: 0.5,
     echoZoom: 0, echoRotate: 0, echoAlpha: 0, echoFlipX: 0, echoFlipY: 0,
+    morph: 0, morphAmount: 0, morphScale: 1,
     transition: 1,
   };
 }
@@ -561,6 +621,12 @@ export function evalConfig(
   out.echoAlpha = clamp(evalOptional(config.echoAlpha, frame, sectionSeed, q, 0), 0, 0.9);
   out.echoFlipX = evalOptional(config.echoFlipX, frame, sectionSeed, q, 0) > 0.5 ? 1 : 0;
   out.echoFlipY = evalOptional(config.echoFlipY, frame, sectionSeed, q, 0) > 0.5 ? 1 : 0;
+
+  const morph = config.morph;
+  const morphIndex = morph ? MORPH_KINDS.indexOf(morph.kind) : 0;
+  out.morph = morphIndex > 0 ? morphIndex : 0;
+  out.morphAmount = out.morph > 0 ? clamp(evalChannel(morph!.amount, frame, sectionSeed, q), 0, 0.9) : 0;
+  out.morphScale = out.morph > 0 ? clamp(evalChannel(morph!.scale, frame, sectionSeed, q), 0.25, 4) : 1;
 
   // ── Plan §2.6 crossfade meta. lerpConfig stamps `_transition` on the live
   // config when the Director is mid-fade; absent or >=1 means "settled".
@@ -763,6 +829,7 @@ export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): Ope
     echoAlpha: lerpOptional(a.echoAlpha, b.echoAlpha, t, 0),
     echoFlipX: lerpOptional(a.echoFlipX, b.echoFlipX, t, 0),
     echoFlipY: lerpOptional(a.echoFlipY, b.echoFlipY, t, 0),
+    morph: lerpMorph(a.morph, b.morph, t),
   };
   return out;
 }
@@ -936,9 +1003,34 @@ export function lerpConfigInto(
   lerpOptionalInto(out, 'echoAlpha', a.echoAlpha, b.echoAlpha, t, 0);
   lerpOptionalInto(out, 'echoFlipX', a.echoFlipX, b.echoFlipX, t, 0);
   lerpOptionalInto(out, 'echoFlipY', a.echoFlipY, b.echoFlipY, t, 0);
+  out.morph = lerpMorph(a.morph, b.morph, t, out.morph);
   // Director stamps _transition AFTER this call on the fade path; leave it
   // untouched here to match lerpConfig's behavior (verified by the operators
   // test: lerpConfig must not stamp _transition itself).
+}
+
+const NO_MORPH: MorphConfig = { kind: 'none', amount: { base: 0 }, scale: { base: 1 } };
+const ZERO_CHANNEL: Channel = { base: 0 };
+
+// Two different kinds of motion can't be interpolated. The outgoing kind
+// drains over the first half and the incoming one fills over the second, so
+// the lerped look never runs a half-strength hybrid of both. (The renderer's
+// per-pixel transition runs each side's own morph at full strength instead.)
+function lerpMorph(a: MorphConfig | undefined, b: MorphConfig | undefined, t: number, out?: MorphConfig): MorphConfig | undefined {
+  if (!a && !b) return undefined;
+  const from = a ?? NO_MORPH, to = b ?? NO_MORPH;
+  const slot: MorphConfig = out ?? { kind: 'none', amount: { base: 0, bindings: [] }, scale: { base: 1, bindings: [] } };
+  if (from.kind === to.kind) {
+    slot.kind = from.kind;
+    lerpChannelInto(slot.amount, from.amount, to.amount, t);
+    lerpChannelInto(slot.scale, from.scale, to.scale, t);
+  } else {
+    const side = t < 0.5 ? from : to;
+    slot.kind = side.kind;
+    lerpChannelInto(slot.amount, ZERO_CHANNEL, side.amount, t < 0.5 ? 1 - t * 2 : t * 2 - 1);
+    lerpChannelInto(slot.scale, side.scale, side.scale, 1);
+  }
+  return slot;
 }
 
 function lerpComposition(a: CompositionConfig | undefined, b: CompositionConfig | undefined, t: number): CompositionConfig | undefined {

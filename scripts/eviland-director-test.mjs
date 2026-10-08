@@ -108,6 +108,42 @@ if (!passthrough) fail('disabled director did not passthrough');
   const drifted = dd.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
   if (drifted._transition !== undefined) fail(`drift cache must not carry _transition, got ${drifted._transition}`);
   log.push('crossfade meta: drift never triggers crossfade');
+
+  // Both sides ride along mid-fade so the renderer can run both warps, and a
+  // fade restarted mid-fade must not nest one fade's meta inside the next.
+  const ds = createDirector({ songId: 'transition-sides', enabled: true, drift: 0, rotateMs: 0 });
+  let s = ds.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.2 }), 16.7);
+  for (let i = 0; i < 6; i++) s = ds.update(mockFrame({ sectionId: 0, energy: 0.2 }), 16.7);
+  if (!(s._transition < 1) || !s._from || !s._to) fail('mid-fade live config must carry _from and _to');
+  if (!Number.isInteger(s._pattern) || s._pattern < 0 || s._pattern > 5) fail(`front pattern out of range: ${s._pattern}`);
+  if (s._to && s._to.seed !== s.seed && s._transition >= 0.5) fail('_to is not the look being faded to');
+  s = ds.update(mockFrame({ sectionChanged: true, sectionId: 1, energy: 0.9, novelty: 0.7 }), 16.7);
+  for (let i = 0; i < 6; i++) s = ds.update(mockFrame({ sectionId: 1, energy: 0.9 }), 16.7);
+  const nested = (cfg) => !!(cfg && (cfg._from || cfg._to || cfg._transition !== undefined));
+  if (nested(s._from) || nested(s._to)) fail('a restarted fade nested the previous fade meta');
+  for (let i = 0; i < 400; i++) s = ds.update(mockFrame({ sectionId: 1, energy: 0.9 }), 16.7);
+  if (s._from || s._to || s._pattern !== undefined) fail('settled live config must not carry fade sides');
+  log.push('crossfade meta: both sides stamped mid-fade, never nested, absent when settled');
+
+  // With the default drift, the frame a fade ends must already be the new
+  // look. A stale drift cache used to put the old look back for ~5 frames.
+  const dp = createDirector({ songId: 'fade-end-drift', enabled: true, rotateMs: 0 });
+  dp.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.2 }), 16.7);
+  let settledA = null;
+  for (let i = 0; i < 400; i++) settledA = dp.update(mockFrame({ sectionId: 0, energy: 0.2 }), 16.7);
+  const oldSeed = settledA.seed;
+  dp.update(mockFrame({ sectionChanged: true, sectionId: 1, energy: 0.9, novelty: 0.7 }), 16.7);
+  let sawNew = false;
+  let lastTo = null;
+  for (let i = 0; i < 400; i++) {
+    const f = dp.update(mockFrame({ sectionId: 1, energy: 0.9 }), 16.7);
+    if (f._to) lastTo = f._to.seed;
+    if (f.seed !== oldSeed) sawNew = true;
+    else if (sawNew) { fail(`old look ${oldSeed} came back after the new one appeared (frame ${i})`); break; }
+    if (!f._to && lastTo && f.seed !== lastTo) { fail(`first settled frame shows ${f.seed}, fade was to ${lastTo}`); break; }
+  }
+  if (!sawNew) fail('fade with default drift never reached the new look');
+  log.push('fade end with drift: no flash back to the previous look');
 }
 
 // --- timer rotation: with no section changes, the look still rotates ---
@@ -356,7 +392,7 @@ if (!passthrough) fail('disabled director did not passthrough');
 
 // ─── reset() without subsequent loadPlan must produce virgin-track behavior ─
 //
-// Regression test for finding #3 of the pre-release review. The previous
+// Regression test for cross-track plan bleed. The previous
 // reset() implementation re-ran repopulateFromPlan() using the closure-scoped
 // pendingPlan from the prior track, leaking the prior song's seeds into the
 // new song's sections map and salting the new song's seeds with the prior
@@ -448,7 +484,7 @@ if (!passthrough) fail('disabled director did not passthrough');
   if (seedPlanned !== seedVirgin) {
     fail(
       `reset: plan-bleed leaked into reset Director (seed=${seedPlanned} vs virgin=${seedVirgin}). ` +
-      `This is the regression for finding #3.`,
+      `This is the cross-track plan bleed regression.`,
     );
   }
   log.push(`reset: virgin behavior after reset without loadPlan (rootSeed=${exportedAfterReset.lineage.rootSeed}, seed0=${seedPlanned})`);
@@ -456,7 +492,7 @@ if (!passthrough) fail('disabled director did not passthrough');
 
 // ─── deferPrimingFrames suppresses first-update mint until loadPlan or budget ─
 //
-// Coverage for finding #9: when the caller knows a loadPlan IPC is in flight,
+// Coverage for the bounded priming defer: when the caller knows a loadPlan IPC is in flight,
 // it can ask the Director to hold the first-ever fresh-mint for a bounded
 // number of frames. loadPlan() opens the gate immediately. Budget expiry
 // proceeds with the fresh mint as before.

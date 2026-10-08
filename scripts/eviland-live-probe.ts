@@ -10,9 +10,10 @@
 // Every GL call is wrapped to throw on the first GL error, so shared-state
 // leaks between Butterchurn and the pipeline fail loudly.
 import butterchurn from 'butterchurn';
+import { createLivePresetLoader } from '../src/visualizer/eviland-live-presets';
 import { createEvilandLivePipeline, type MilkdropFeedbackHost } from '../src/visualizer/eviland-live-pipeline';
 import { generate } from '../src/visualizer/eviland-randomizer';
-import { resolveEvilandPalette } from '../src/visualizer/eviland-appearance';
+import { liveGradeFor, resolveEvilandPalette } from '../src/visualizer/eviland-appearance';
 import type { CompositionConfig } from '../src/visualizer/eviland-operators';
 import { syntheticFrame } from './eviland-visual-probe';
 
@@ -146,6 +147,22 @@ async function live() {
   const resizeError = gl.getError();
   if (resizeError) throw new Error(`Shared GL state error after resize: ${resizeError}`);
 
+  // Shader preparation and adoption must coexist with the borrowed-context
+  // pipeline, including its samplers, VAO, palette grade and feedback target.
+  const loader = createLivePresetLoader(bc);
+  if (!loader) throw new Error('Live preset loader refused the pinned renderer');
+  loader.request({ ...bare, baseVals: { ...bare.baseVals, zoom: 1.003 } }, 'prepared-preset', 1.4);
+  let preparedPreset = false;
+  for (let i = 0; i < 240; i++) {
+    preparedPreset = loader.advance();
+    render(1);
+    if (preparedPreset) break;
+    await new Promise(resolve => setTimeout(resolve, 8));
+  }
+  loader.dispose();
+  if (!preparedPreset) throw new Error('Prepared Live preset never reached the renderer');
+  if (api.sample() < 0.005) throw new Error('Prepared Live preset lost the feedback image');
+
   api.dispose();
   gl.getExtension('WEBGL_lose_context')?.loseContext();
   return {
@@ -157,8 +174,56 @@ async function live() {
     eventsMean: events,
     blueRedRatio: blue / Math.max(1, red),
     resizeError,
+    preparedPreset,
     snapshot,
   };
 }
 
+/**
+ * Review sheet: real MilkDrop presets, plain and under Eviland Live with a
+ * living look in its own palette. Nothing asserted beyond "renders".
+ */
+async function liveShowcase() {
+  const presetModule = await import('butterchurn-presets');
+  const presetApi = ((presetModule as unknown as { default?: unknown }).default ?? presetModule) as { getPresets(): Record<string, unknown> };
+  const catalog = presetApi.getPresets();
+  const names = Object.keys(catalog).sort();
+  const looks = ['mycelium', 'mitosis', 'hyperbloom', 'radiolarian', 'synapse', 'reef',
+    'medusa', 'chromatin', 'anemone', 'plankton', 'myofibril'] as const;
+  const picks = looks.map((_, i) => names[Math.floor((i + 0.5) / looks.length * names.length)]!);
+  const width = 320;
+  const height = 180;
+  const wave = new Uint8Array(1024);
+  const captures = [];
+  for (let k = 0; k < picks.length; k++) {
+    const row: string[] = [];
+    for (const withLive of [false, true]) {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const factory = ((butterchurn as unknown as { default?: unknown }).default ?? butterchurn) as {
+        createVisualizer(ctx: BaseAudioContext, canvas: HTMLCanvasElement, opts: unknown): ProbeVisualizer;
+      };
+      const bc = factory.createVisualizer(new OfflineAudioContext(1, 48000, 48000), canvas, { width, height, meshWidth: 32, meshHeight: 24 });
+      const api = withLive ? createEvilandLivePipeline(bc, 'high') : null;
+      bc.loadPreset(catalog[picks[k]!], 0);
+      const config = generate(`live-showcase::${k}`, looks[k]!).config;
+      const palette = resolveEvilandPalette('look', config.palette!, 0, 0, config.palette);
+      for (let step = 0; step < 240; step++) {
+        const t = step / 60;
+        for (let i = 0; i < wave.length; i++) wave[i] = 128 + Math.round(Math.sin(i * 0.1 + t * 3) * 70 * (0.5 + 0.5 * Math.sin(t * 4)));
+        api?.update({ frame: syntheticFrame(t, step, 60), palette, config, seed: `live-showcase::${k}`, waveMode: 'auto', grade: liveGradeFor('look') });
+        api?.advance(1000 / 60);
+        bc.render({ elapsedTime: 1 / 60, audioLevels: { timeByteArray: wave, timeByteArrayL: wave, timeByteArrayR: wave } });
+      }
+      row.push(canvas.toDataURL());
+      api?.dispose();
+      bc.renderer.gl.getExtension('WEBGL_lose_context')?.loseContext();
+    }
+    captures.push({ name: `live-${k}-${looks[k]}`, pngs: row });
+  }
+  return { failures: [], caption: `Presets: ${picks.join(' | ')}. Left plain MilkDrop, right Eviland Live.`, captures };
+}
+
 (window as unknown as { __evilandLiveProbe: typeof live }).__evilandLiveProbe = live;
+(window as unknown as { __evilandLiveShowcase: typeof liveShowcase }).__evilandLiveShowcase = liveShowcase;

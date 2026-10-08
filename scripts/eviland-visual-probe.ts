@@ -9,7 +9,7 @@ import { createEvilandRenderer, COMPOSE_FRAG } from '../src/visualizer/eviland';
 import { createSceneOverlay } from '../src/visualizer/scene-overlay';
 import { SCENES } from '../src/visualizer/scenes/index';
 import { generate, ARCHETYPES } from '../src/visualizer/eviland-randomizer';
-import { defaultConfig, applyWaveformOverride, type OperatorConfig, type PaletteConfig } from '../src/visualizer/eviland-operators';
+import { defaultConfig, applyWaveformOverride, lerpConfig, MORPH_KINDS, type OperatorConfig, type PaletteConfig } from '../src/visualizer/eviland-operators';
 import { sourceProgram } from '../src/visualizer/eviland-gl';
 import { resolveEvilandPalette, tuneEvilandFrame } from '../src/visualizer/eviland-appearance';
 import type { EvilandFrame, ScoreCues } from '../src/visualizer/eviland-audio';
@@ -407,4 +407,195 @@ async function diversity() {
   };
 }
 
-(window as unknown as { __evilandVisualProbe: unknown }).__evilandVisualProbe = { controls, diversity };
+// A colourful palette for the review sheets; the grey one above hides what
+// the species and fronts do to colour.
+const VIVID: PaletteConfig = { bg: [0.01, 0.005, 0.02], dark: [0.35, 0.02, 0.4], accent: [0.05, 0.75, 1], light: [1, 0.85, 0.35] };
+
+/** Run a config (or a scripted sequence of configs) and capture at `times`. */
+function captureSequence(
+  configAt: (t: number) => OperatorConfig,
+  times: number[],
+  width: number,
+  height: number,
+  palette: PaletteConfig,
+  paletteSource: 'preset' | 'host' = 'host',
+  fps = 60,
+) {
+  const canvas = document.createElement('canvas');
+  const renderer = createEvilandRenderer(canvas, { quality: 'high', smoke: true, seed: 'visual-regression' });
+  if (!renderer) throw new Error('WebGL2 renderer unavailable');
+  renderer.resize(width, height, 1);
+  const gl = canvas.getContext('webgl2')!;
+  const images: Uint8Array[] = [];
+  const pngs: string[] = [];
+  const wave = new Uint8Array(256);
+  try {
+    const frames = Math.round(times[times.length - 1]! * fps);
+    for (let i = 0; i < frames; i++) {
+      const t = i / fps;
+      for (let j = 0; j < wave.length; j++) wave[j] = 128 + Math.round(70 * Math.sin(j * 0.12 + t * 2));
+      renderer.setWaveform(wave);
+      renderer.setConfig(configAt(t));
+      renderer.render(syntheticFrame(t, i, fps), palette, 1000 / fps, paletteSource);
+      if (times.some((time) => Math.round(time * fps) === i + 1)) {
+        images.push(readPixels(gl, width, height));
+        pngs.push(canvas.toDataURL());
+      }
+    }
+  } finally {
+    renderer.dispose();
+  }
+  return { images, pngs };
+}
+
+/**
+ * Every morph species must visibly change how the same sources move, and
+ * none may black out or blow out the frame.
+ */
+async function species() {
+  const failures: string[] = [];
+  const base = quietConfig();
+  base.composition = { scene: null, terrain: false, spectrum: true, emitters: 'bands', density: 0.5, contrast: 1 };
+  base.waveform = { mode: 'radial', intensity: { base: 0.8 }, thickness: 0.01, scale: 0.3 };
+  base.decay = { base: 0.93 };
+  base.hueCycle = { base: 0.004 };
+  const times = [1, 3];
+  const baseline = captureSequence(() => base, times, W, H, VIVID);
+  const captures = [{ name: 'none', pngs: baseline.pngs }];
+  const results = [];
+  // Frame-rate independence: the same look at 30 and 120 fps must land on
+  // (nearly) the same picture. The no-morph look sets how close "nearly" is.
+  const fpsGap = (config: OperatorConfig): number => distance(
+    shape(captureSequence(() => config, [3], W, H, VIVID, 'host', 30).images[0]!),
+    shape(captureSequence(() => config, [3], W, H, VIVID, 'host', 120).images[0]!),
+  );
+  const baseGap = fpsGap(base);
+  for (const kind of MORPH_KINDS) {
+    if (kind === 'none') continue;
+    const config: OperatorConfig = { ...structuredClone(base), morph: { kind, amount: { base: kind === 'droste' ? 0.12 : 0.45 }, scale: { base: 1 } } };
+    const result = captureSequence(() => config, times, W, H, VIVID);
+    const change = delta(result.images[1]!, baseline.images[1]!);
+    const { mean, deviation } = gridStats(brightnessGrid(result.images[1]!));
+    if (change < 3) failures.push(`${kind}: barely differs from no morph (mean |Δ| ${change.toFixed(2)})`);
+    if (mean < 5) failures.push(`${kind}: nearly black (mean ${mean.toFixed(1)}/255)`);
+    if (mean > 225) failures.push(`${kind}: blown out (mean ${mean.toFixed(1)}/255)`);
+    if (deviation < 4) failures.push(`${kind}: no structure (deviation ${deviation.toFixed(1)})`);
+    // Checked at a strong setting, where a frame-rate-dependent blend drifts
+    // furthest from the linear one.
+    const gap = fpsGap({ ...config, morph: { ...config.morph!, amount: { base: kind === 'droste' ? 0.2 : 0.8 } } });
+    if (gap > baseGap + 0.12) failures.push(`${kind}: moves differently at 30 and 120 fps (${gap.toFixed(2)} vs ${baseGap.toFixed(2)} without a morph)`);
+    results.push({ kind, change: Math.round(change * 100) / 100, mean: Math.round(mean), deviation: Math.round(deviation), fpsGap: Math.round(gap * 100) / 100 });
+    captures.push({ name: kind, pngs: result.pngs });
+  }
+  return { failures, results, baseFpsGap: Math.round(baseGap * 100) / 100, caption: 'Same sources and audio, one morph species each. 1 s and 3 s.', captures };
+}
+
+/**
+ * Review sheet for the transition fronts: look A runs, then a fade to look B
+ * carrying both sides (as the Director stamps it), captured through the fade.
+ */
+async function transitions() {
+  const failures: string[] = [];
+  const from = generate('showcase-from', 'kaleidoscope').config;
+  const to = generate('showcase-to', 'mitosis').config;
+  const start = 2;
+  const length = 2.5;
+  const times = [1.9, 2.4, 2.9, 3.4, 3.9, 4.3, 5.2];
+  const captures = [];
+  const means: number[][] = [];
+  for (let pattern = 0; pattern < 6; pattern++) {
+    const configAt = (t: number): OperatorConfig => {
+      if (t < start) return from;
+      const p = Math.min(1, (t - start) / length);
+      if (p >= 1) return to;
+      const eased = p * p * (3 - 2 * p);
+      return { ...lerpConfig(from, to, eased), _transition: eased, _from: from, _to: to, _pattern: pattern, _patternSeed: 1.7 };
+    };
+    const result = captureSequence(configAt, times, 320, 180, VIVID);
+    const settled = gridStatsFor(result.images[6]!, 320, 180).mean;
+    for (let i = 1; i < 6; i++) {
+      const px = result.images[i]!;
+      const lit = gridStatsFor(px, 320, 180).mean;
+      if (lit < 4 || lit > 230) failures.push(`front ${pattern}: frame ${i} unreadable (mean ${lit.toFixed(1)})`);
+      // The front may glow, but it must not wash the whole frame.
+      if (lit > settled * 1.8 + 25) failures.push(`front ${pattern}: frame ${i} floods (mean ${lit.toFixed(1)} vs settled ${settled.toFixed(1)})`);
+      means[pattern] = [...(means[pattern] ?? []), Math.round(lit)];
+    }
+    means[pattern] = [...(means[pattern] ?? []), Math.round(settled)];
+    captures.push({ name: `front-${pattern}`, pngs: result.pngs });
+  }
+  return { failures, means, caption: 'Kaleidoscope → mitosis, one row per front. Before, 20/40/60/80/98% through, settled.', captures };
+}
+
+/** Review sheet: archetypes in their own generated palettes, larger than the gates use. */
+async function showcase() {
+  const captures = [];
+  for (const archetype of ARCHETYPES) {
+    const config = generate(`showcase::${archetype}`, archetype).config;
+    const label = `${archetype}${config.morph ? `+${config.morph.kind}` : ''}`;
+    const result = captureSequence(() => config, [2.5, 6], 320, 180, VIVID, 'preset');
+    captures.push({ name: label, pngs: result.pngs });
+  }
+  return { failures: [], caption: 'Each archetype in its own palette, 2.5 s and 6 s.', captures };
+}
+
+/**
+ * GPU cost per frame at 1080p for the heavier paths: a settled look, a look
+ * mid-transition (both warps run), the coral morph, and the slime mould.
+ * gl.finish() after each frame so the number is GPU time, not submission.
+ */
+async function perf() {
+  const width = 1920;
+  const height = 1080;
+  const plain = generate('perf::plain', 'kaleidoscope').config;
+  const coral = { ...generate('perf::coral', 'inkwell').config };
+  const mould = generate('perf::mould', 'mycelium').config;
+  const target = generate('perf::target', 'mitosis').config;
+  const midFade = (): OperatorConfig => ({ ...lerpConfig(plain, target, 0.5), _transition: 0.5, _from: plain, _to: target, _pattern: 1, _patternSeed: 1 });
+  const cases: Array<[string, () => OperatorConfig]> = [
+    ['settled', () => plain], ['transition', midFade], ['coral', () => coral], ['physarum', () => mould],
+  ];
+  const results: Record<string, { median: number; p90: number }> = {};
+  for (const [name, configAt] of cases) {
+    const canvas = document.createElement('canvas');
+    const renderer = createEvilandRenderer(canvas, { quality: 'high', smoke: true, seed: 'perf' });
+    if (!renderer) throw new Error('WebGL2 renderer unavailable');
+    renderer.resize(width, height, 1);
+    const gl = canvas.getContext('webgl2')!;
+    const pixel = new Uint8Array(4);
+    // gl.finish() does not block under ANGLE/D3D11, so time batches of frames
+    // closed by a readPixels, which has to wait for the GPU.
+    const batches: number[] = [];
+    try {
+      let step = 0;
+      const run = (frames: number): void => {
+        for (let i = 0; i < frames; i++, step++) {
+          renderer.setConfig(configAt());
+          renderer.render(syntheticFrame(step / 60, step, 60), VIVID, 1000 / 60, 'preset');
+        }
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      };
+      run(30);
+      for (let b = 0; b < 5; b++) {
+        const start = performance.now();
+        run(24);
+        batches.push((performance.now() - start) / 24);
+      }
+    } finally {
+      renderer.dispose();
+    }
+    batches.sort((a, b) => a - b);
+    results[name] = { median: Math.round(batches[2]! * 100) / 100, p90: Math.round(batches[4]! * 100) / 100 };
+  }
+  const debug = document.createElement('canvas').getContext('webgl2')!;
+  const info = debug.getExtension('WEBGL_debug_renderer_info');
+  return { failures: [], resolution: `${width}x${height}`, gpu: info ? debug.getParameter(info.UNMASKED_RENDERER_WEBGL) : 'unknown', msPerFrame: results };
+}
+
+function gridStatsFor(px: Uint8Array, width: number, height: number): { mean: number } {
+  let sum = 0;
+  for (let i = 0; i < width * height; i++) sum += Math.max(px[i * 4]!, px[i * 4 + 1]!, px[i * 4 + 2]!);
+  return { mean: sum / (width * height) };
+}
+
+(window as unknown as { __evilandVisualProbe: unknown }).__evilandVisualProbe = { controls, diversity, species, transitions, showcase, perf };

@@ -58,8 +58,8 @@ export interface CanvasRecorder {
   start: (audioStream?: MediaStream) => void;
   /**
    * Stop recording. Resolves with the final WebM Blob once MediaRecorder has
-   * flushed its last chunk. Idempotent: calling stop() while not recording
-   * resolves with an empty Blob of the recorder's mime type.
+   * flushed its last chunk. Repeated calls observe the last take's result or
+   * failure; before any take, resolves with an empty Blob.
    */
   stop: () => Promise<Blob>;
   /** True while MediaRecorder.state === 'recording' or 'paused'. */
@@ -242,6 +242,9 @@ export function createCanvasRecorder(
       stopResolve = resolve;
       stopReject = reject;
     });
+    // An encoder can fail before the caller asks to stop. Observe rejection
+    // now while preserving the original promise for the caller to inspect.
+    void stopPromise.catch(() => {});
 
     rec.ondataavailable = (event): void => {
       const data = event.data;
@@ -256,14 +259,14 @@ export function createCanvasRecorder(
         inner ?? event,
       );
       recording = false;
-      try { rec.stop(); } catch { /* noop */ }
-      teardownTracks();
       if (stopReject) {
         const reject = stopReject;
         stopResolve = null;
         stopReject = null;
         reject(err);
       }
+      try { rec.stop(); } catch { /* noop */ }
+      teardownTracks();
     };
 
     rec.onstop = (): void => {
@@ -304,6 +307,7 @@ export function createCanvasRecorder(
 
   const stop = (): Promise<Blob> => {
     if (!recording || !recorder) {
+      if (stopPromise) return stopPromise;
       // Nothing to flush — return an empty Blob in the right mime so callers
       // can branch on size without null checks.
       return Promise.resolve(new Blob([], { type: baseMime(mimeType) }));

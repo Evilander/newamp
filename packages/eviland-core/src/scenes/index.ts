@@ -78,6 +78,17 @@ import { laserStorm } from './laser-storm';
 import { deepJelly } from './deep-jelly';
 import { phosphorScope } from './phosphor-scope';
 import { vuCathedral } from './vu-cathedral';
+import { cellColony } from './cell-colony';
+import { neuralBloom } from './neural-bloom';
+import { radiolaria } from './radiolaria';
+import { ciliaReef } from './cilia-reef';
+import { capillaryBloom } from './capillary-bloom';
+
+import { medusaBloom } from './medusa-bloom';
+import { chromatinFlow } from './chromatin-flow';
+import { featherPolyp } from './feather-polyp';
+import { planktonDrift } from './plankton-drift';
+import { muscleFibres } from './muscle-fibres';
 
 export const SCENES: SceneDef[] = [
   volumeGarden,
@@ -112,4 +123,14 @@ export const SCENES: SceneDef[] = [
   deepJelly,
   phosphorScope,
   vuCathedral,
+  cellColony,
+  neuralBloom,
+  radiolaria,
+  ciliaReef,
+  capillaryBloom,
+  medusaBloom,
+  chromatinFlow,
+  featherPolyp,
+  planktonDrift,
+  muscleFibres,
 ];

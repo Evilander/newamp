@@ -38,7 +38,7 @@ void app.whenReady().then(async () => {
     // asynchronous path the app ships.
     const syncCompile = process.argv.includes('--sync-compile');
     await win.loadURL(`${pathToFileURL(html).toString()}${syncCompile ? '?sync-compile=1' : ''}`);
-    const engine = await win.webContents.executeJavaScript('window.__evilandSwitchBench.engine()', true);
+    const engine = process.argv.includes('--live-only') ? undefined : await win.webContents.executeJavaScript('window.__evilandSwitchBench.engine()', true);
     const live = await win.webContents.executeJavaScript('window.__evilandSwitchBench.live()', true);
     win.destroy();
     console.log(JSON.stringify({ syncCompile, engine, live }, null, 2));

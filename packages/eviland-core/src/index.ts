@@ -77,7 +77,16 @@ export {
   type QSlot,
   type QLfo,
   type LfoShape,
+  type MorphKind,
+  type MorphConfig,
+  MORPH_KINDS,
+  stripTransitionMeta,
 } from './eviland-operators';
+
+// ── Physarum (slime-mould network source) ──────────────────────────────────
+// The renderer creates it for looks whose composition asks for it; exported
+// for hosts that want to grow a network into their own feedback texture.
+export { createPhysarum, warmPhysarum } from './eviland-physarum';
 
 // ── Deterministic RNG + shareable seed codes ───────────────────────────────
 export {

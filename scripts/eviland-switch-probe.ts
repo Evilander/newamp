@@ -4,6 +4,7 @@
 //   live    Butterchurn loadPreset for real presets, and the frames after it
 // Each measurement ends with gl.finish() so GPU-side compile time counts.
 import butterchurn from 'butterchurn';
+import { createLivePresetLoader } from '../src/visualizer/eviland-live-presets';
 import butterchurnPresets from 'butterchurn-presets';
 import { createEvilandRenderer } from '../src/visualizer/eviland';
 import { SCENES } from '../src/visualizer/scenes/index';
@@ -100,6 +101,7 @@ async function live() {
   };
   const bc = factory.createVisualizer(context, canvas, { width: W, height: H });
   const gl = bc.renderer.gl;
+  const loader = new URLSearchParams(location.search).get('sync-compile') === '1' ? null : createLivePresetLoader(bc);
   const presetsModule = (butterchurnPresets as unknown as { default?: unknown }).default ?? butterchurnPresets;
   const catalog = (presetsModule as { getPresets(): Record<string, unknown> }).getPresets();
   const entries = Object.entries(catalog);
@@ -119,6 +121,8 @@ async function live() {
     try { return new NativeFunction(...args); } finally { split.fn += performance.now() - t0; }
   } as unknown as FunctionConstructor;
   const load: number[] = [];
+  const preparation: number[] = [];
+  const waitingFrames: number[] = [];
   const afterLoad: number[] = [];
   const steady: number[] = [];
   const renderMs = (): number => {
@@ -131,7 +135,26 @@ async function live() {
   const sample = entries.filter((_, i) => i % 7 === 0).slice(0, 40);
   bc.loadPreset(sample[0]![1], 0);
   for (let i = 0; i < 20; i++) renderMs();
-  for (const [, preset] of sample) {
+  for (const [name, preset] of sample) {
+    if (loader) {
+      const prepareStart = performance.now();
+      loader.request(preset as Record<string, unknown>, name, 2);
+      preparation.push(performance.now() - prepareStart);
+      let switched = false;
+      for (let wait = 0; wait < 500; wait++) {
+        const start = performance.now();
+        switched = loader.advance();
+        if (switched) gl.finish(); // same measurement boundary as synchronous loadPreset
+        const cost = performance.now() - start;
+        if (switched) { load.push(cost); break; }
+        waitingFrames.push(renderMs());
+        await new Promise(r => setTimeout(r, 16));
+      }
+      if (!switched) throw new Error(`Preset never became ready: ${name}`);
+      afterLoad.push(renderMs());
+      for (let i = 0; i < 5; i++) steady.push(renderMs());
+      continue;
+    }
     for (let i = 0; i < 5; i++) steady.push(renderMs());
     const t0 = performance.now();
     (window as unknown as { Function: FunctionConstructor }).Function = TimedFunction;
@@ -142,11 +165,16 @@ async function live() {
     split.total += performance.now() - t0;
     afterLoad.push(renderMs());
   }
+  loader?.dispose();
   const share = (v: number) => `${((100 * v) / split.total).toFixed(0)}%`;
   return {
     presets: sample.length,
+    asyncPresets: !!loader,
+    parallelCompile: !!gl.getExtension('KHR_parallel_shader_compile'),
+    preparePrograms: stats(preparation),
+    framesWhileCompiling: stats(waitingFrames),
     loadPreset: stats(load),
-    loadPresetSplit: { glCompileAndQueries: share(split.gl), equationFunctions: share(split.fn) },
+    loadPresetSplit: loader ? undefined : { glCompileAndQueries: share(split.gl), equationFunctions: share(split.fn) },
     firstFrameAfter: stats(afterLoad),
     steadyFrame: stats(steady),
   };
