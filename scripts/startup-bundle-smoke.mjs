@@ -3,6 +3,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { readStyleBundle } from './style-bundle.mjs';
 
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const transportSource = await readFile(new URL('../src/components/Transport.tsx', import.meta.url), 'utf8');
 const brandLogoSource = await readFile(new URL('../src/components/BrandLogo.tsx', import.meta.url), 'utf8');
 const startupSplashSource = await readFile(new URL('../src/components/StartupSplash.tsx', import.meta.url), 'utf8');
 const styleSource = await readStyleBundle();
@@ -17,6 +18,8 @@ assert.match(appSource, /lazy\(\(\) =>[\s\S]*?import\('\.\/components\/CompactPl
 assert.match(appSource, /lazy\(\(\) =>[\s\S]*?import\('\.\/components\/FullscreenVisualizer'\)/, 'Fullscreen visualizer should be lazy-loaded');
 assert.doesNotMatch(appSource, /import \{ HomeView \} from '\.\/components\/views\/HomeView'/, 'HomeView should not be imported eagerly');
 assert.doesNotMatch(appSource, /import \{ NowPlayingView \} from '\.\/components\/views\/NowPlayingView'/, 'NowPlayingView should not be imported eagerly');
+assert.match(transportSource, /lazy\(\(\) => import\('\.\/Visualizer'\)/, 'transport mini visualizer should be lazy-loaded');
+assert.doesNotMatch(transportSource, /import \{ Visualizer \} from '\.\/Visualizer'/, 'the visualizer stack should not load with the startup shell');
 
 assert.match(brandLogoSource, /logo-app\.webp/, 'Renderer should use the display-sized app logo');
 assert.match(brandLogoSource, /<img[\s\S]*data-newamp-brand-logo/, 'brand logo should render the original image');

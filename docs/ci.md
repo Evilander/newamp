@@ -73,7 +73,7 @@ of `release.yml` when signing secrets are configured.
 — and therefore the strict `npm run release:gate` — was red from 1.5.2 through
 1.5.7; those releases shipped via the `:local` gate variants.
 
-This is now **fixed**: Butterchurn runs in a sandboxed `butterchurn-iframe.html`
-that scopes `'unsafe-eval'` to just that frame, and the main renderer is back on
+This is now **fixed**: Butterchurn runs in its own frame, `butterchurn-iframe.html`,
+whose CSP scopes `'unsafe-eval'` to just that frame, and the main renderer is back on
 `script-src 'self'`. `smoke:security` verifies both halves and is part of the
 CI-safe set above.

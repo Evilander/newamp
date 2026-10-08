@@ -114,6 +114,16 @@ if (!skipSmokes) {
     // Proves Range serving really returns the bytes at the requested offset;
     // the original regression made every track a non-seekable stream.
     'smoke:playback-seek',
+    // Measures the samples at every track boundary, per codec and rate, for
+    // the old player and the gapless transport. Gapless is on by default, so
+    // this is the proof behind it.
+    'smoke:gapless-pcm',
+    // The gapless transport plays through Web Audio, which the OS media
+    // controls don't see; a silent element keeps NewAmp listed. Windows only.
+    'smoke:gapless-smtc',
+    // Renders the harshest looks on the GPU and counts flashes after the
+    // flash guard. Flash protection is on by default and is a safety claim.
+    'smoke:flash-guard-render',
     'smoke:particle-flow',
     'smoke:perf-bench',
     'smoke:audio-proof',
@@ -173,7 +183,11 @@ if (realLibrary) {
 }
 
 if (!skipPackage) {
-  run('npm', ['run', 'package'], 'npm run package');
+  // --all: the Windows installer and portable build plus the Linux tarball,
+  // and the checksum manifest the checks below compare against. A bare
+  // `npm run package` builds only for the host platform and writes no
+  // manifest.
+  run('npm', ['run', 'package', '--', '--all'], 'npm run package -- --all');
   checks.push({ name: 'package', ok: true });
   run('npm', ['run', 'smoke:installer-artifact'], 'npm run smoke:installer-artifact');
   checks.push({ name: 'smoke:installer-artifact', ok: true });

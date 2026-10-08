@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeBuildProvenance } from './build-provenance.mjs';
 import { writeReleaseChecksums } from './release-checksums.mjs';
+import { electronBuilderTargetArgs, nativeBuildArgs } from './lib/package-targets.mjs';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const releaseVersion = String(JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8')).version ?? '').trim() || '0.0.0';
@@ -20,7 +21,6 @@ run('npm', ['run', 'build']);
 // Rebuild from the release sources: Git checkout timestamps cannot establish
 // whether a tracked prebuilt addon contains the latest native fixes.
 // Plain 'node' avoids quoted spaces-in-path executables breaking cmd.exe.
-run('node', [join(repoRoot, 'scripts', 'build-native.mjs'), '--force']);
 
 const electronBuilder = join(
   repoRoot,
@@ -31,6 +31,7 @@ const electronBuilder = join(
 
 const requestedTargets = process.argv.slice(2);
 for (const args of electronBuilderTargetArgs(requestedTargets)) {
+  run('node', [join(repoRoot, 'scripts', 'build-native.mjs'), ...nativeBuildArgs(args)]);
   const macArch = args.includes('--arm64') ? 'arm64' : args.includes('--x64') ? 'x64' : null;
   if (args.includes('--mac') && macArch) {
     run(process.execPath, [join(repoRoot, 'scripts', 'stage-ffmpeg-for-arch.mjs'), macArch]);
@@ -63,7 +64,7 @@ for (const args of electronBuilderTargetArgs(requestedTargets)) {
   }
 }
 
-const shouldWriteChecksums = requestedTargets.length === 0 || requestedTargets.includes('--all');
+const shouldWriteChecksums = requestedTargets.includes('--all');
 if (shouldWriteChecksums) {
   const checksums = writeReleaseChecksums({ root: repoRoot });
   console.log(`release checksums: ${checksums.path}`);
@@ -73,19 +74,6 @@ if (shouldWriteChecksums) {
 
 function hasMacSigningCertificate(env) {
   return Boolean(env.CSC_LINK || env.CSC_NAME);
-}
-
-function electronBuilderTargetArgs(args) {
-  if (args.includes('--portable')) return [['--win=portable']];
-  if (args.includes('--installer') || args.includes('--nsis')) return [['--win=nsis']];
-  if (args.includes('--linux')) return [['--linux=tar.gz']];
-  // Build each mac arch separately so we can stage the matching ffmpeg-static
-  // binary before each electron-builder invocation (ffmpeg-static only installs
-  // the host-arch binary; cross-arch DMGs would otherwise get a wrong-arch
-  // ffmpeg → spawn fails → 503 for all transcoded formats).
-  if (args.includes('--mac')) return [['--mac', '--arm64'], ['--mac', '--x64']];
-  if (args.includes('--win')) return [['--win=nsis'], ['--win=portable']];
-  return [['--win=nsis'], ['--win=portable'], ['--linux=tar.gz']];
 }
 
 async function resetPackageTemp() {

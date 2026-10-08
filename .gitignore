@@ -58,6 +58,7 @@ docs/*-audit.md
 docs/eviland-spec.md
 *HANDOFF*.md
 packages/eviland-core/EXTRACTION-STATUS.md
+REVIEW/
 
 # native addon build artifacts (prebuilt/ IS committed; these are not)
 native/newamp-audio/build/

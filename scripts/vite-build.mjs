@@ -7,14 +7,18 @@ const holdMs = readNumberArg('--hold-ms', 0);
 const smokeLockOnly = args.includes('--smoke-lock-only');
 const viteArgs = args.filter((arg) => arg !== '--smoke-lock-only' && !arg.startsWith('--hold-ms='));
 
-await withBuildLock(async (lock) => {
+const status = await withBuildLock(async (lock) => {
   console.error(`[newamp-build] renderer build lock acquired after ${lock.waitedMs}ms`);
   if (smokeLockOnly) {
     await sleep(holdMs);
-    return;
+    return 0;
   }
-  runViteBuild(viteArgs);
+  return runViteBuild(viteArgs);
 });
+// Fail only once withBuildLock has released the lock. Exiting inside the
+// callback skipped its release and left tmp/vite-build.lock blocking every
+// other build until the 30-minute stale window ran out.
+if (status !== 0) process.exitCode = status;
 
 function runViteBuild(extraArgs) {
   const viteBin = join(repoRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite');
@@ -28,9 +32,8 @@ function runViteBuild(extraArgs) {
     env: process.env,
   });
 
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
+  if (result.error) console.error('[newamp-build] vite could not be started:', result.error);
+  return result.status ?? 1;
 }
 
 function readNumberArg(name, fallback) {

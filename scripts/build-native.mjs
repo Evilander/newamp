@@ -9,9 +9,8 @@
 //   linux  — ALSA direct (miniaudio opens `hw:` devices for exclusive share
 //            mode, bypassing dmix/PulseAudio). miniaudio dlopens libasound at
 //            runtime, so only -ldl/-lpthread/-lm are linked.
-//   darwin — compiles (plain CoreAudio shared output), but exclusive/hog-mode
-//            is NOT implemented by miniaudio; the app does not expose the
-//            toggle on macOS yet. Building here is CI-compile-health only.
+//   darwin — CoreAudio hog mode, with hardware verification still required.
+//            --arch=arm64|x64 stages each macOS target separately.
 //
 // Usage: node scripts/build-native.mjs [--force]
 
@@ -20,11 +19,15 @@ import { existsSync, mkdirSync, copyFileSync, writeFileSync, rmSync, statSync } 
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import os from 'node:os'
+import { detectMachOArch } from './lib/macho-arch.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const addonDir = join(root, 'native', 'newamp-audio')
 const builtNode = join(addonDir, 'build', 'Release', 'newamp_audio.node')
-const platformArch = `${process.platform}-${process.arch}`
+const targetArch = process.argv.find((arg) => arg.startsWith('--arch='))?.slice(7) ?? process.arch
+if (!['x64', 'arm64'].includes(targetArch)) throw new Error(`Unsupported native architecture: ${targetArch}`)
+if (targetArch !== process.arch && process.platform !== 'darwin') throw new Error('Cross-architecture native builds require macOS.')
+const platformArch = `${process.platform}-${targetArch}`
 const prebuiltDir = join(addonDir, 'prebuilt', platformArch)
 const prebuiltNode = join(prebuiltDir, 'newamp_audio.node')
 const force = process.argv.includes('--force')
@@ -54,7 +57,7 @@ if (process.platform === 'win32') {
   buildWindows()
 } else {
   console.log(`[build-native] compiling for ${platformArch} with node-gyp`)
-  execFileSync('npx', ['node-gyp', 'rebuild'], { cwd: addonDir, stdio: 'inherit' })
+  execFileSync('npx', ['node-gyp', 'rebuild', `--arch=${targetArch}`], { cwd: addonDir, stdio: 'inherit' })
 }
 
 function findVcvars() {
@@ -103,9 +106,17 @@ if (!existsSync(builtNode)) {
   console.error('[build-native] FATAL: build completed but', builtNode, 'is missing.')
   process.exit(1)
 }
+if (process.platform === 'darwin') {
+  const arch = detectMachOArch(builtNode)
+  if (arch !== targetArch && arch !== 'universal') throw new Error(`Native addon architecture ${arch} does not match ${targetArch}`)
+}
 mkdirSync(prebuiltDir, { recursive: true })
 copyFileSync(builtNode, prebuiltNode)
 console.log('[build-native] staged', prebuiltNode)
+if (targetArch !== process.arch) {
+  console.log('[build-native] cross-architecture binary verified; runtime load requires the target architecture')
+  process.exit(0)
+}
 
 // Load-sanity: require the binary and enumerate devices in this process.
 // Headless environments (CI containers) legitimately report zero devices —
