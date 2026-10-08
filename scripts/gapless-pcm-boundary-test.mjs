@@ -247,9 +247,10 @@ await build({
 });
 copyFileSync(resolve('src', 'audio', 'gapless-processor.js'), join(pageDir, 'gapless-processor.js'));
 copyFileSync(resolve('scripts', 'gapless-pcm-capture.js'), join(pageDir, 'gapless-pcm-capture.js'));
+// media-src matches the app's: the engine's media-session anchor plays a blob: URL.
 writeFileSync(
   join(pageDir, 'probe.html'),
-  `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; media-src 'self' newamp:; connect-src 'self' newamp:"><title>gapless pcm probe</title><script type="module" src="./probe.js"></script>`,
+  `<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; media-src 'self' blob: newamp:; connect-src 'self' newamp:"><title>gapless pcm probe</title><script type="module" src="./probe.js"></script>`,
 );
 
 // ---------------------------------------------------------------- cases

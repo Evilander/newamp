@@ -135,7 +135,8 @@ if (!skipSmokes) {
     'smoke:release-secrets',
     'smoke:signing-workflow',
     'smoke:build-provenance',
-    'smoke:release-checksums',
+    // smoke:release-checksums runs after packaging below: it checks this
+    // version's artifacts, which don't exist yet at this point.
     'smoke:release-bundle',
     'smoke:completion-audit',
     'smoke:publish-github',
@@ -201,6 +202,11 @@ if (!skipPackage) {
   checks.push({ name: 'smoke:installed-app', ok: true });
   run('npm', ['run', 'release:bundle'], 'npm run release:bundle');
   checks.push({ name: 'release:bundle', ok: true });
+}
+
+if (!skipSmokes) {
+  run('npm', ['run', 'smoke:release-checksums'], 'npm run smoke:release-checksums');
+  checks.push({ name: 'smoke:release-checksums', ok: true });
 }
 
 const artifactCheck = checkArtifacts();
