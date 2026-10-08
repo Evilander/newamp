@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { statSync } from 'node:fs';
 import { mkdir, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { LibraryStore } from '../dist-electron/electron/library.js';
@@ -33,7 +34,7 @@ await unlink(outsideMissingPath);
 const targeted = library.pruneMissingTracks([musicRoot]);
 assert.deepEqual(
   targeted,
-  { checked: 2, removed: 1 },
+  { checked: 2, removed: 1, offline: 0 },
   'targeted prune should remove only missing files below the requested root',
 );
 assert.equal(library.getStats().tracks, 2);
@@ -42,7 +43,7 @@ assert.equal(library.getTracksByPaths([missingPath]).length, 0);
 assert.equal(library.getTracksByPaths([outsideMissingPath]).length, 1);
 
 const global = library.pruneMissingTracks();
-assert.deepEqual(global, { checked: 2, removed: 1 });
+assert.deepEqual(global, { checked: 2, removed: 1, offline: 0 });
 assert.equal(library.getStats().tracks, 1);
 library.close();
 
@@ -62,7 +63,9 @@ assert.match(typesSource, /LibraryPruneMissingResult/, 'shared types should expo
 assert.match(typesSource, /pruneMissingTracks/, 'renderer API should type stale-track cleanup');
 assert.match(librarySource, /pruneMissingTracks/, 'LibraryStore should remove missing track rows');
 assert.match(mainSource, /library:prune-missing/, 'main process should expose prune IPC');
-assert.match(mainSource, /pruneMissingTracks\(targets\)/, 'auto-watch should prune stale watched targets');
+// Auto-watch only marks missing files; deleting them is the explicit cleanup
+// above (see scripts/library-availability-test.mjs).
+assert.match(mainSource, /markTracksMissing\(stillMissing\)/, 'auto-watch should mark stale watched targets unavailable');
 assert.match(preloadSource, /pruneMissingTracks/, 'preload should expose prune API');
 assert.match(apiSource, /pruneMissingTracks/, 'browser-safe API should expose prune stub');
 assert.match(viewSource, /Clean missing files/, 'Library Health UI should expose stale file cleanup');
@@ -92,5 +95,8 @@ function incoming(path, title) {
     size: 1,
     mtime: Date.now(),
     art: null,
+    // The scanner records each file's device; cleanup uses it to tell a
+    // deleted file from one on a drive that is gone.
+    dev: Number(statSync(path).dev),
   };
 }

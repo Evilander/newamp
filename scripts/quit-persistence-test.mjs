@@ -13,6 +13,7 @@ function fixture(platform, hasTray, radio = false) {
   const calls = [];
   const app = new EventEmitter();
   let quitCount = 0;
+  let gaplessClosed = 0;
   app.quit = () => {
     quitCount++;
     assert.ok(quitCount < 4, 'quit must finish after bounded radio shutdown');
@@ -28,14 +29,16 @@ function fixture(platform, hasTray, radio = false) {
     scanner: { cancel() { calls.push('scanner-cancel'); } },
     library: { close() { calls.push('library-close'); } },
     settings: { flushSync() { calls.push('settings-flush'); } },
+    podcastStore: { flushProgressSync() { calls.push('podcast-flush'); } },
     exclusiveOutput: { dispose() {} },
     tray: hasTray ? { destroy() {} } : null,
     killAllDnaFfmpeg() {}, killAllScoreFfmpeg() {}, killAllTranscodeFfmpeg() {},
+    closeAllGaplessSessions() { gaplessClosed++; },
     radioBrain: radio ? { async stop() { calls.push('radio-stop'); } } : null,
     shouldStayResidentOnWindowAllClosed,
   };
   vm.runInNewContext(handlers, context);
-  return { app, calls };
+  return { app, calls, gaplessClosed: () => gaplessClosed };
 }
 
 for (const platform of ['win32', 'darwin', 'linux']) {
@@ -43,13 +46,15 @@ for (const platform of ['win32', 'darwin', 'linux']) {
   f.app.emit('window-all-closed');
   assert.deepEqual(f.calls, [], 'closing a resident window must not close its stores');
   f.app.quit();
-  assert.deepEqual(f.calls, ['watcher-stop', 'scanner-cancel', 'library-close', 'settings-flush'], `${platform} explicit Quit saves both stores`);
+  assert.deepEqual(f.calls, ['watcher-stop', 'scanner-cancel', 'library-close', 'settings-flush', 'podcast-flush'], `${platform} explicit Quit saves every store`);
+  assert.equal(f.gaplessClosed(), 1, `${platform} explicit Quit stops the gapless decoders`);
 }
 for (const platform of ['win32', 'linux']) {
   const f = fixture(platform, false);
   f.app.emit('window-all-closed');
   assert.ok(f.calls.includes('library-close'));
   assert.ok(f.calls.includes('settings-flush'));
+  assert.ok(f.calls.includes('podcast-flush'));
 }
 const radio = fixture('linux', false, true);
 radio.app.quit();

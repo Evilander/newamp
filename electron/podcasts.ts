@@ -1,4 +1,4 @@
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -7,8 +7,18 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import type { Readable } from 'node:stream';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
-import type { PodcastEpisode, PodcastFeed, PodcastProgressInput, PodcastSubscription } from '../shared/types.js';
+import type { PodcastEpisode, PodcastFeed, PodcastProgressInput, PodcastSubscription, RecoveryEvent } from '../shared/types.js';
 import { NEWAMP_USER_AGENT } from '../shared/app-version.js';
+import {
+  atomicWriteFileSync,
+  durableWriteFileAsync,
+  isUnreadableFileError,
+  quarantineCorruptFile,
+  readFileSyncRetrying,
+  recoveryReason,
+  renameOverExistingSync,
+  suppressedRecoveryEvent,
+} from './recovery.js';
 
 export interface ParsedPodcastFeed {
   feed: PodcastFeed;
@@ -24,9 +34,38 @@ interface PodcastStoreFile {
 // capped while it streams now, so the ceiling can afford to be generous.
 const MAX_FEED_BYTES = 32 * 1024 * 1024;
 const MAX_EPISODE_BYTES = 750 * 1024 * 1024;
+const SUPPRESSION_RETRY_INTERVAL_MS = 10_000;
 
 export class PodcastStore {
+  public readonly recoveryEvents: RecoveryEvent[] = [];
   private data: PodcastStoreFile = { subscriptions: [] };
+  // Set when the file stayed locked through the whole startup retry budget
+  // in load(): it was never actually read, so `data` is in-memory defaults
+  // only. Mutations still land in memory for the rest of the session so the
+  // UI stays usable, but persist()/commit() must never write them out — that
+  // would bury the untouched original under a state that never really
+  // loaded it.
+  private persistenceSuppressed = false;
+  // The lock that caused the above may have cleared by the time the user
+  // does anything, so mutations try tryLiftSuppression() again — at most once
+  // per SUPPRESSION_RETRY_INTERVAL_MS, so a session that stays locked doesn't
+  // pay for it on every ~5s progress update. A single attempt used to leave
+  // the whole session unsaved when the first mutation came too early.
+  private lastSuppressionRetryAt: number | null = null;
+  // Debounced async persist path for updateProgress only (see there):
+  // playback calls it roughly every 5s, and a synchronous fsync'd atomic
+  // write of the whole file on the main thread that often — with its own
+  // transient-lock retry sleeps on top — is a real stall risk. Every other
+  // mutation keeps going through commit() below, fully synchronous.
+  private progressPersistTimer: NodeJS.Timeout | null = null;
+  private progressDirty = false;
+  private progressPersistInFlight: Promise<void> | null = null;
+  private progressPersistAgain = false;
+  // Bumped by every persist (commit()'s sync write or the async progress
+  // write) that captures a snapshot, so a synchronous mutation can never be
+  // clobbered by a slower, now-stale async progress write landing after it —
+  // same pattern as SettingsStore's persistSeq.
+  private persistSeq = 0;
 
   constructor(private readonly file: string) {
     mkdirSync(dirname(file), { recursive: true });
@@ -45,7 +84,15 @@ export class PodcastStore {
     return this.listSubscriptions().find((subscription) => subscription.feed.url === normalized) ?? null;
   }
 
+  // True while this store is running on in-memory defaults because the file
+  // could not be read at startup — bootstrap uses this to avoid acting on
+  // defaults (auto-seed, auto-scan) as if they were the user's real state.
+  isSuppressed(): boolean {
+    return this.persistenceSuppressed;
+  }
+
   upsert(feed: PodcastFeed, episodes: PodcastEpisode[]): PodcastSubscription {
+    this.maybeRetrySuppressed();
     const existing = this.data.subscriptions.find((subscription) => subscription.feed.url === feed.url);
     const progressById = new Map(
       (existing?.episodes ?? []).map((episode) => [
@@ -64,10 +111,11 @@ export class PodcastStore {
       feed: { ...feed, episodeCount: episodes.length },
       episodes: episodes.map((episode) => ({ ...episode, ...progressById.get(episode.id) })),
     };
-    const index = this.data.subscriptions.findIndex((subscription) => subscription.feed.url === feed.url);
-    if (index >= 0) this.data.subscriptions[index] = next;
-    else this.data.subscriptions.unshift(next);
-    this.persist();
+    const subscriptions = this.data.subscriptions.slice();
+    const index = subscriptions.findIndex((subscription) => subscription.feed.url === feed.url);
+    if (index >= 0) subscriptions[index] = next;
+    else subscriptions.unshift(next);
+    this.commit({ subscriptions });
     return {
       feed: { ...next.feed },
       episodes: next.episodes.map((episode) => ({ ...episode })),
@@ -75,12 +123,14 @@ export class PodcastStore {
   }
 
   remove(url: string): void {
+    this.maybeRetrySuppressed();
     const normalized = normalizeFeedUrl(url);
-    this.data.subscriptions = this.data.subscriptions.filter((subscription) => subscription.feed.url !== normalized);
-    this.persist();
+    const subscriptions = this.data.subscriptions.filter((subscription) => subscription.feed.url !== normalized);
+    this.commit({ subscriptions });
   }
 
   updateProgress(input: PodcastProgressInput & { updatedAt?: number }): PodcastEpisode | null {
+    this.maybeRetrySuppressed();
     const feedUrl = normalizeFeedUrl(input.feedUrl);
     const subscription = this.data.subscriptions.find((item) => item.feed.url === feedUrl);
     if (!subscription) return null;
@@ -95,12 +145,23 @@ export class PodcastStore {
       duration > 0 &&
       Math.max(0, Number(input.position) || 0) >= duration * 0.98
     );
-    episode.completed = completed;
-    episode.progressSeconds = completed ? 0 : Math.max(0, Math.trunc(Number(input.position) || 0));
-    episode.lastPlayedAt = Math.max(0, Math.trunc(Number(input.updatedAt ?? Date.now()) || Date.now()));
-    if (duration && !episode.duration) episode.duration = Math.trunc(duration);
-    this.persist();
-    return { ...episode };
+    const updated: PodcastEpisode = {
+      ...episode,
+      completed,
+      progressSeconds: completed ? 0 : Math.max(0, Math.trunc(Number(input.position) || 0)),
+      lastPlayedAt: Math.max(0, Math.trunc(Number(input.updatedAt ?? Date.now()) || Date.now())),
+      duration: duration && !episode.duration ? Math.trunc(duration) : episode.duration,
+    };
+    // Progress is a hot autosave — playback calls this roughly every 5s.
+    // Update memory immediately (resume position/UI is always current) but
+    // debounce the actual write instead of a synchronous fsync'd atomic
+    // replace of the whole file on the main thread every single call — same
+    // split as SettingsStore's resumeState autosave. Every other mutation
+    // above still goes through commit(), fully synchronous, keeping the
+    // staged-commit guarantee (persist before swap, error surfaces to caller).
+    this.data = { subscriptions: this.replaceEpisode(feedUrl, updated) };
+    this.schedulePersistProgress();
+    return { ...updated };
   }
 
   markDownloaded(input: {
@@ -110,23 +171,28 @@ export class PodcastStore {
     downloadBytes: number;
     downloadedAt?: number;
   }): PodcastEpisode | null {
-    const episode = this.findEpisode(input.feedUrl, input.episodeId);
+    this.maybeRetrySuppressed();
+    const feedUrl = normalizeFeedUrl(input.feedUrl);
+    const episode = this.findEpisode(feedUrl, input.episodeId);
     if (!episode) return null;
-    episode.downloadPath = input.downloadPath;
-    episode.downloadBytes = Math.max(0, Math.trunc(Number(input.downloadBytes) || 0));
-    episode.downloadedAt = Math.max(0, Math.trunc(Number(input.downloadedAt ?? Date.now()) || Date.now()));
-    this.persist();
-    return { ...episode };
+    const updated: PodcastEpisode = {
+      ...episode,
+      downloadPath: input.downloadPath,
+      downloadBytes: Math.max(0, Math.trunc(Number(input.downloadBytes) || 0)),
+      downloadedAt: Math.max(0, Math.trunc(Number(input.downloadedAt ?? Date.now()) || Date.now())),
+    };
+    this.commit({ subscriptions: this.replaceEpisode(feedUrl, updated) });
+    return { ...updated };
   }
 
   clearDownload(feedUrl: string, episodeId: string): PodcastEpisode | null {
-    const episode = this.findEpisode(feedUrl, episodeId);
+    this.maybeRetrySuppressed();
+    const normalized = normalizeFeedUrl(feedUrl);
+    const episode = this.findEpisode(normalized, episodeId);
     if (!episode) return null;
     const downloadPath = episode.downloadPath;
-    episode.downloadPath = null;
-    episode.downloadBytes = null;
-    episode.downloadedAt = null;
-    this.persist();
+    const updated: PodcastEpisode = { ...episode, downloadPath: null, downloadBytes: null, downloadedAt: null };
+    this.commit({ subscriptions: this.replaceEpisode(normalized, updated) });
     if (downloadPath) {
       try {
         rmSync(downloadPath, { force: true });
@@ -134,13 +200,27 @@ export class PodcastStore {
         /* ignore */
       }
     }
-    return { ...episode };
+    return { ...updated };
   }
 
-  private findEpisode(feedUrl: string, episodeId: string): PodcastEpisode | null {
-    const normalized = normalizeFeedUrl(feedUrl);
-    const subscription = this.data.subscriptions.find((item) => item.feed.url === normalized);
+  private findEpisode(normalizedFeedUrl: string, episodeId: string): PodcastEpisode | null {
+    const subscription = this.data.subscriptions.find((item) => item.feed.url === normalizedFeedUrl);
     return subscription?.episodes.find((episode) => episode.id === episodeId) ?? null;
+  }
+
+  // Returns a new subscriptions array with one episode swapped for an
+  // updated copy; every other subscription/episode reference is untouched.
+  // The mutation methods above never write through `this.data` directly —
+  // that is what let a failed persist still leave the live in-memory state
+  // wrong. commit() below only swaps this result in after a successful save.
+  private replaceEpisode(normalizedFeedUrl: string, updated: PodcastEpisode): PodcastSubscription[] {
+    return this.data.subscriptions.map((subscription) => {
+      if (subscription.feed.url !== normalizedFeedUrl) return subscription;
+      return {
+        ...subscription,
+        episodes: subscription.episodes.map((episode) => (episode.id === updated.id ? updated : episode)),
+      };
+    });
   }
 
   private load(): void {
@@ -148,21 +228,234 @@ export class PodcastStore {
       this.persist();
       return;
     }
+    let raw: string;
     try {
-      const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<PodcastStoreFile>;
-      this.data = {
-        subscriptions: Array.isArray(parsed.subscriptions)
-          ? parsed.subscriptions.map(normalizeSubscription).filter((item): item is PodcastSubscription => !!item)
-          : [],
-      };
-    } catch {
+      raw = readFileSyncRetrying(this.file, 'utf8');
+    } catch (err) {
+      if (!isUnreadableFileError(err)) throw err;
+      // The file stayed locked (EBUSY/EPERM/EAGAIN/EACCES/EMFILE), or is
+      // unreadable for a filesystem reason that won't clear on retry
+      // (EIO/EISDIR). Neither is evidence of corruption — quarantining here
+      // is what used to reset subscriptions to zero on an ordinary transient
+      // lock, or crash bootstrap outright on EIO/EISDIR. Run this session on
+      // in-memory defaults and never persist over the untouched original.
+      console.warn(`[newamp] podcasts: ${this.file} could not be read; running this session without saving.`, err);
+      this.persistenceSuppressed = true;
+      this.recoveryEvents.push(suppressedRecoveryEvent('podcasts', this.file, err));
+      return;
+    }
+    try {
+      const { data, droppedCount } = this.parsePodcastsJson(raw);
+      this.data = data;
+      if (droppedCount > 0) this.reportDroppedSubscriptions(droppedCount);
+    } catch (err) {
+      // Reaching here means the bytes were actually read — this is confirmed
+      // invalid content (bad JSON, or a shape that isn't even an array),
+      // not an I/O error, so quarantining is the right call.
+      const event = quarantineCorruptFile(this.file, 'podcasts', recoveryReason(err));
+      if (event) this.recoveryEvents.push(event);
       this.data = { subscriptions: [] };
       this.persist();
     }
   }
 
+  // Shared by load() and tryLiftSuppression() below. Drops only the entries
+  // that are individually invalid — wrong shape, or a URL normalizeFeedUrl
+  // rejects — instead of failing the whole file over one bad subscription: a
+  // literal `null` in the array used to throw inside the per-item normalizer
+  // and quarantine everything. Throws only when the top-level shape isn't
+  // even an array; that is the genuine-corruption case the caller quarantines.
+  private parsePodcastsJson(raw: string): { data: PodcastStoreFile; droppedCount: number } {
+    const parsed = JSON.parse(raw) as Partial<PodcastStoreFile>;
+    if (!Array.isArray(parsed.subscriptions)) throw new Error('podcasts.json subscriptions is not an array');
+    let droppedCount = 0;
+    const subscriptions = parsed.subscriptions
+      .map((entry) => {
+        try {
+          const normalized = normalizeSubscription(entry);
+          if (!normalized) droppedCount += 1;
+          return normalized;
+        } catch {
+          droppedCount += 1;
+          return null;
+        }
+      })
+      .filter((item): item is PodcastSubscription => !!item);
+    return { data: { subscriptions }, droppedCount };
+  }
+
+  // Not a quarantine — the file itself is left exactly as it was (backupPath
+  // === filePath) and every valid subscription still loaded. This just makes
+  // the drop visible instead of silent, the same way loadCustomSkin() warns
+  // when it drops values it can't make sense of.
+  private reportDroppedSubscriptions(count: number): void {
+    const reason = `dropped ${count} invalid subscription entr${count === 1 ? 'y' : 'ies'}; the rest of the file loaded normally`;
+    console.warn(`[newamp] podcasts: ${reason} (${this.file}).`);
+    this.recoveryEvents.push({
+      store: 'podcasts',
+      filePath: this.file,
+      backupPath: this.file,
+      reason,
+      recoveredAt: Date.now(),
+    });
+  }
+
+  // Called on mutations while suppressed (see lastSuppressionRetryAt): the
+  // lock that blocked startup may have cleared. A successful re-read replaces
+  // `data` with the real file BEFORE the caller reads it to build its staged
+  // mutation — so upsert/remove/etc. compute their result against the real
+  // subscriptions instead of the empty in-memory defaults, and commit()
+  // persists that as usual.
+  private maybeRetrySuppressed(): void {
+    if (!this.persistenceSuppressed) return;
+    // Monotonic, so a wall-clock change can't stop the retries.
+    const now = performance.now();
+    if (this.lastSuppressionRetryAt !== null && now - this.lastSuppressionRetryAt < SUPPRESSION_RETRY_INTERVAL_MS) return;
+    this.lastSuppressionRetryAt = now;
+    this.tryLiftSuppression();
+  }
+
+  // One read, no backoff: the cooldown above does the waiting.
+  private tryLiftSuppression(): void {
+    let raw: string;
+    try {
+      raw = readFileSync(this.file, 'utf8');
+    } catch {
+      return; // still unavailable — try again after the cooldown
+    }
+    try {
+      const { data, droppedCount } = this.parsePodcastsJson(raw);
+      this.data = data;
+      if (droppedCount > 0) this.reportDroppedSubscriptions(droppedCount);
+    } catch (err) {
+      // Now readable but genuinely corrupt — quarantine exactly as load()
+      // would. There is no longer an untouched original to protect once
+      // that happens, so suppression lifts either way.
+      const event = quarantineCorruptFile(this.file, 'podcasts', recoveryReason(err));
+      if (event) this.recoveryEvents.push(event);
+      this.data = { subscriptions: [] };
+    }
+    this.persistenceSuppressed = false;
+    console.warn(`[newamp] podcasts: ${this.file} is readable again; resuming normal saves.`);
+  }
+
+  // Unconditional immediate write of the current in-memory data — used only
+  // to seed a fresh or just-quarantined file. Mutation methods use commit()
+  // below instead, which stages the new state and only swaps it in once the
+  // write actually lands.
   private persist(): void {
-    writeFileSync(this.file, JSON.stringify(this.data, null, 2), 'utf8');
+    if (this.persistenceSuppressed) return;
+    atomicWriteFileSync(this.file, JSON.stringify(this.data, null, 2));
+  }
+
+  // Stages a full replacement of `data`, persists it durably, and only then
+  // swaps it into memory — a failed write throws to the caller (atomic write
+  // failures propagate) with both disk and memory left at the prior state.
+  // When persistence is suppressed for the session (see load()), the
+  // mutation still lands in memory so the UI stays usable, but it is never
+  // written over the untouched original.
+  private commit(next: PodcastStoreFile): void {
+    if (this.progressPersistTimer) {
+      // This synchronous write is about to persist `next`, which was built
+      // from the current (already progress-updated) `this.data` — it
+      // supersedes whatever the debounced progress write would have sent.
+      clearTimeout(this.progressPersistTimer);
+      this.progressPersistTimer = null;
+      this.progressDirty = false;
+    }
+    this.persistSeq += 1;
+    if (this.persistenceSuppressed) {
+      this.data = next;
+      return;
+    }
+    atomicWriteFileSync(this.file, JSON.stringify(next, null, 2));
+    this.data = next;
+  }
+
+  // Debounced path for the progress autosave only (see updateProgress).
+  private schedulePersistProgress(): void {
+    this.progressDirty = true;
+    if (this.progressPersistTimer) return;
+    this.progressPersistTimer = setTimeout(() => {
+      this.progressPersistTimer = null;
+      void this.persistProgressAsync();
+    }, 800);
+  }
+
+  private async persistProgressAsync(): Promise<void> {
+    if (!this.progressDirty) return;
+    if (this.persistenceSuppressed) {
+      this.progressDirty = false;
+      return;
+    }
+    if (this.progressPersistInFlight) {
+      this.progressPersistAgain = true;
+      return;
+    }
+    this.progressDirty = false;
+    const seq = ++this.persistSeq;
+    const payload = JSON.stringify(this.data, null, 2);
+    // Unique per persist, for the same reason as SettingsStore's async
+    // resumeState writer: a synchronous commit() uses its own "-sync" path.
+    const tmp = `${this.file}.tmp-${process.pid}-${seq}`;
+    let tmpHasCompleteSnapshot = false;
+    let tmpHandled = false;
+    this.progressPersistInFlight = (async () => {
+      try {
+        await durableWriteFileAsync(tmp, payload);
+        tmpHasCompleteSnapshot = true;
+        if (seq !== this.persistSeq) {
+          // A synchronous commit() (or a fresher progress write) landed
+          // newer data while this write was in flight — drop the stale copy.
+          tmpHandled = true;
+          await unlink(tmp).catch(() => {});
+          return;
+        }
+        // Keep the final replace synchronous after the sequence check, as
+        // SettingsStore and LibraryStore do. An async replace that is still
+        // retrying a locked file would let a subscribe/unsubscribe commit()
+        // land in between, and then put this older snapshot back over it.
+        renameOverExistingSync(tmp, this.file);
+        tmpHandled = true;
+      } catch (err) {
+        console.error('podcast progress persist failed', err);
+        this.progressDirty = true; // retry on the next scheduled persist
+      } finally {
+        if (!tmpHandled && !tmpHasCompleteSnapshot) {
+          await unlink(tmp).catch(() => {});
+        }
+      }
+    })();
+    try {
+      await this.progressPersistInFlight;
+    } finally {
+      this.progressPersistInFlight = null;
+      if (this.progressPersistAgain) {
+        this.progressPersistAgain = false;
+        void this.persistProgressAsync();
+      }
+    }
+  }
+
+  // Forces a pending debounced progress write to land now. Call on quit and
+  // before a backup/safety snapshot copies podcasts.json off disk, so
+  // progress is never more than momentarily behind memory — without paying
+  // the synchronous cost on every ~5s playback tick.
+  flushProgressSync(): void {
+    if (this.progressPersistTimer) {
+      clearTimeout(this.progressPersistTimer);
+      this.progressPersistTimer = null;
+    }
+    // The async writer clears progressDirty before its snapshot is on disk.
+    // A write still in flight is superseded here (the sequence bump makes it
+    // drop itself), so this one has to land the same state synchronously, or
+    // a restore that replaces podcasts.json next could have that older write
+    // put the old file back afterwards.
+    if (!this.progressDirty && !this.progressPersistInFlight) return;
+    this.progressDirty = false;
+    this.persistSeq += 1;
+    if (this.persistenceSuppressed) return;
+    atomicWriteFileSync(this.file, JSON.stringify(this.data, null, 2));
   }
 }
 

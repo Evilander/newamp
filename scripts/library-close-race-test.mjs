@@ -76,10 +76,30 @@ function caseTrack(path, title) {
     albumArtist: 'Case Fixture',
   };
 }
+// On Windows a scan now treats paths that differ only in case as one file, so
+// a case-renamed track keeps its id and history; elsewhere they are two files.
+const caseRenameStore = await LibraryStore.open(join(root, 'case-rename-library.db'));
+caseRenameStore.upsertTracks([caseTrack('C:/Music/Bar.mp3', 'Before Rename')]);
+const renamedFrom = caseRenameStore.getTracks({ limit: 10 })[0].id;
+caseRenameStore.upsertTracks([caseTrack('C:/Music/bar.mp3', 'After Rename')]);
+const afterRename = caseRenameStore.getTracks({ limit: 10 });
+if (process.platform === 'win32') {
+  assert.equal(afterRename.length, 1, 'a case-only rename on Windows is the same file');
+  assert.equal(afterRename[0].id, renamedFrom, 'a case-only rename on Windows keeps the track id');
+} else {
+  assert.equal(afterRename.length, 2, 'paths that differ only in case are two files here');
+}
+caseRenameStore.close();
+
+// Libraries written before that, on any platform, can already hold two rows
+// whose paths differ only in case. Seed that directly (a scan can no longer
+// produce it on Windows): history import must still prefer an exact path and
+// call a case-only match ambiguous.
 collisionStore.upsertTracks([
   caseTrack('C:/Music/Foo.mp3', 'Upper Case Path'),
-  caseTrack('C:/Music/foo.mp3', 'Lower Case Path'),
+  caseTrack('C:/Music/Placeholder.mp3', 'Lower Case Path'),
 ]);
+collisionStore.db.run(`UPDATE tracks SET path = 'C:/Music/foo.mp3' WHERE path = 'C:/Music/Placeholder.mp3'`);
 const exactImport = collisionStore.importListeningHistory([{
   path: 'C:/Music/foo.mp3',
   artist: 'Case Fixture',

@@ -126,7 +126,8 @@ assert.equal(existsSync(join(duplicateSecond.backupPath, 'backups', 'old-backup'
 {
   const mainSource = await readFile(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const createHandler = mainSource.slice(mainSource.indexOf("ipcMain.handle('app:create-backup'"), mainSource.indexOf("ipcMain.handle('app:restore-backup'"));
-  assert.match(createHandler, /await quiesceLibraryMutations\(\);\s*try \{\s*return await createBackupFromLiveStores\(userData\);\s*\} finally \{\s*resumeLibraryMutations\(\);/, 'create-backup must quiesce, snapshot from live stores, and always resume');
+  // Quiesce sits inside the try so a failed quiesce still resumes.
+  assert.match(createHandler, /try \{\s*await quiesceLibraryMutations\(\);\s*return await createBackupFromLiveStores\(userData\);\s*\} finally \{\s*resumeLibraryMutations\(\);/, 'create-backup must quiesce, snapshot from live stores, and always resume');
   const restoreHandler = mainSource.slice(mainSource.indexOf("ipcMain.handle('app:restore-backup'"), mainSource.indexOf("ipcMain.handle('app:restore-backup'") + 4000);
   const stopIdx = restoreHandler.indexOf('libraryWatcher?.stop()');
   const safetyIdx = restoreHandler.indexOf('createBackupFromLiveStores(userData)');

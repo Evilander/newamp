@@ -26,7 +26,7 @@ export function quarantineCorruptFile(
   return { store, filePath, backupPath, reason, recoveredAt };
 }
 
-const TRANSIENT_IO_CODES = new Set(['EBUSY', 'EPERM', 'EAGAIN']);
+const TRANSIENT_IO_CODES = new Set(['EBUSY', 'EPERM', 'EAGAIN', 'EACCES', 'EMFILE']);
 
 // A locked/unavailable file is not corruption — quarantining on those errors
 // silently reset whole libraries. Callers retry these with backoff and then
@@ -36,9 +36,74 @@ export function isTransientIoError(err: unknown): boolean {
   return typeof code === 'string' && TRANSIENT_IO_CODES.has(code);
 }
 
+// EIO (a failing disk/drive) and EISDIR (something replaced the file with a
+// directory) never clear on retry the way a lock does — readFileSyncRetrying
+// already rethrows them on the first attempt instead of wasting the retry
+// budget — but they are still not evidence of corrupt JSON content. A caller
+// deciding "suppress + notify" vs "let it crash bootstrap" should treat them
+// the same as a lock that outlasted every retry, not as an unknown error.
+const UNREADABLE_FILE_CODES = new Set([...TRANSIENT_IO_CODES, 'EIO', 'EISDIR']);
+
+export function isUnreadableFileError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === 'string' && UNREADABLE_FILE_CODES.has(code);
+}
+
 export function recoveryReason(err: unknown): string {
   if (err instanceof Error && err.message) return err.message;
   return String(err || 'Unknown recovery error');
+}
+
+// Bounded, synchronous retry for reading a store's file at startup. A
+// locked/unavailable file (antivirus, indexer, OneDrive, a second process
+// mid-write) is transient, not corruption — this gives it a short window to
+// clear before the caller decides the original is unavailable for the
+// session. Rethrows the same transient error once the budget runs out, and
+// rethrows immediately on anything that isn't a transient I/O error.
+export function readFileSyncRetrying(filePath: string, encoding: BufferEncoding = 'utf-8'): string {
+  let lastErr: unknown;
+  for (const delay of RENAME_RETRY_DELAYS_MS_SYNC) {
+    if (delay) sleepSync(delay);
+    try {
+      return readFileSync(filePath, encoding);
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientIoError(err)) throw err;
+    }
+  }
+  throw lastErr;
+}
+
+// EBUSY/EPERM/EAGAIN/EMFILE plausibly clear on their own — another process
+// briefly holding the file, a sync client, a full fd table. EACCES usually
+// doesn't: it means a real permissions problem on the file or its folder,
+// and "will retry next launch" is a false promise for it. EIO/EISDIR are the
+// same story (failing drive, or the file got replaced by a directory) — say
+// so plainly instead of implying the user just needs to wait.
+function describeUnreadableFile(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  const reason = recoveryReason(err);
+  if (code === 'EACCES') {
+    return `permission denied (${reason}) — check file and folder permissions; this will not clear on its own`;
+  }
+  if (code === 'EIO' || code === 'EISDIR') {
+    return `${reason} — this will not clear on its own; check the drive and the file`;
+  }
+  return `${reason} — may clear on its own; will retry next launch`;
+}
+
+// A locked/unreadable file that outlasted the retry budget above. The
+// original was never actually read, so there is nothing to quarantine —
+// backupPath names the file itself, and the caller must run the session on
+// in-memory defaults without ever writing over it.
+export function suppressedRecoveryEvent(store: RecoveryEvent['store'], filePath: string, err: unknown): RecoveryEvent {
+  return {
+    store,
+    filePath,
+    backupPath: filePath,
+    reason: describeUnreadableFile(err),
+    recoveredAt: Date.now(),
+  };
 }
 
 function stamp(ms: number): string {
@@ -140,7 +205,14 @@ export function renameOverExistingSync(fromPath: string, toPath: string): void {
   }
 }
 
-export async function renameOverExistingAsync(fromPath: string, toPath: string): Promise<void> {
+// A plain rename with the same backoff as the async writer, for moves that
+// must stay moves: directories, and files whose source and target are both
+// being swapped (support-backup's restore). Windows antivirus and indexers
+// hold a file for a moment after it is closed, which fails the rename with
+// EPERM/EBUSY even though nothing is wrong. Rethrows the last transient error
+// once the budget runs out.
+export async function renameRetryingAsync(fromPath: string, toPath: string): Promise<void> {
+  let lastErr: unknown;
   for (const delay of RENAME_RETRY_DELAYS_MS) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
     try {
@@ -148,7 +220,18 @@ export async function renameOverExistingAsync(fromPath: string, toPath: string):
       return;
     } catch (err) {
       if (!isTransientRenameError(err)) throw err;
+      lastErr = err;
     }
+  }
+  throw lastErr;
+}
+
+export async function renameOverExistingAsync(fromPath: string, toPath: string): Promise<void> {
+  try {
+    await renameRetryingAsync(fromPath, toPath);
+    return;
+  } catch (err) {
+    if (!isTransientRenameError(err)) throw err;
   }
   const retryTmp = `${toPath}.tmp-${process.pid}-retry`;
   try {
