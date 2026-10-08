@@ -1,0 +1,5 @@
+{
+  "name": "newamp-gapless-pcm-test",
+  "type": "module",
+  "main": "../gapless-pcm-harness.mjs"
+}

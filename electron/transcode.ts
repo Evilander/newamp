@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { Readable } from 'node:stream';
+import { resamplerFilter, resamplerKindNow } from './resampler.js';
 import type {
   AudioExportFormat,
   Track,
@@ -82,10 +83,11 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
   // supported) — at the SOURCE sample rate (no forced -ar), so no bit-depth
   // truncation and no pre-resample before Chromium's own output stage.
   // DSD has no native browser path and ffmpeg's default DSD→PCM filter is
-  // uncontrolled, so we pin a high-precision SoX resampler to a DSD-friendly
+  // uncontrolled, so we pin a high-precision resampler (soxr where the build
+  // has it, a long swr filter otherwise; see resampler.ts) to a DSD-friendly
   // 88.2 kHz instead of leaving the modulator/decimation to chance.
   const codecArgs = isDsd
-    ? ['-af', 'aresample=resampler=soxr:precision=28', '-ar', '88200', '-acodec', 'pcm_f32le']
+    ? ['-af', resamplerFilter(resamplerKindNow(ffmpeg)), '-ar', '88200', '-acodec', 'pcm_f32le']
     : ['-acodec', 'pcm_f32le'];
   const child = spawn(
     ffmpeg,
@@ -160,7 +162,8 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
 //    source would encode 32-bit FLAC; if any such file fails to decode in
 //    Chromium, drop this to s16/24-bit — not expected in practice.)
 //  - No forced `-ar` outside DSD: source sample rate is preserved.
-//  - DSD keeps the high-precision soxr→88.2 kHz step (no lossless DSD→PCM exists).
+//  - DSD keeps the high-precision resample to 88.2 kHz (no lossless DSD→PCM
+//    exists): soxr where the build has it, the swr filter otherwise.
 //  - `-ac 2` matches the stereo deck graph, downmixing rare multichannel sources.
 export function buildPlaybackFlacArgs(inputPath: string, outputPath: string): string[] {
   const ext = extname(inputPath).toLowerCase();
@@ -170,7 +173,7 @@ export function buildPlaybackFlacArgs(inputPath: string, outputPath: string): st
   // which directly cuts the first-play wait (the handler awaits the full encode).
   // Disk is cheap relative to the 8 GB LRU cap; encode wall-clock is what hurts.
   const codecArgs = isDsd
-    ? ['-af', 'aresample=resampler=soxr:precision=28', '-ar', '88200', '-c:a', 'flac', '-compression_level', '1', '-sample_fmt', 's32']
+    ? ['-af', resamplerFilter(resamplerKindNow(resolveFfmpegPath())), '-ar', '88200', '-c:a', 'flac', '-compression_level', '1', '-sample_fmt', 's32']
     : ['-c:a', 'flac', '-compression_level', '1', '-sample_fmt', 's32'];
   return [
     '-hide_banner',

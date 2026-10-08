@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { engine, usePlayerStore } from '../store/usePlayerStore';
 import { exclusiveBackendLabel } from '../lib/api';
+import { resamplerName } from '../lib/resampler-name';
 
 /**
  * Always-visible signal-path readout in the transport. Tells the user, in one
@@ -30,17 +31,18 @@ export function SignalPathBadge(): JSX.Element | null {
         const actual = engine.getActualSampleRate();
         const fb = engine.getSampleRateFallback?.() ?? null;
         const ex = engine.getExclusiveInfo();
+        const transport = engine.getSampleTransportInfo();
         // Composite signature: source rate | engine rate | fallback shape |
-        // exclusive state. Anything that changes the rendered label/title
-        // (rate transitions, fallback appearing/disappearing, the exclusive
-        // path engaging/dropping) flips this string; the time-bucket ticks
-        // every ~100ms do not.
+        // exclusive state | which resampler the gapless transport runs.
+        // Anything that changes the rendered label/title (rate transitions,
+        // fallback appearing/disappearing, the exclusive path engaging/
+        // dropping) flips this string; the time-bucket ticks every ~100ms do not.
         const exSig = ex.active && ex.negotiated
-          ? `e:${ex.negotiated.format}@${ex.negotiated.sampleRate}:${ex.negotiated.bitPerfect ? 1 : 0}:${ex.negotiated.resampled ? 1 : 0}`
+          ? `e:${ex.negotiated.format}@${ex.negotiated.sampleRate}:${ex.negotiated.bitPerfect ? 1 : 0}:${ex.negotiated.resampled ? 1 : 0}:${ex.negotiated.resampler ?? '-'}`
           : ex.fallbackReason
             ? 'ef'
             : 'n';
-        const sig = `${src ?? 'x'}|${actual ?? 'x'}|${fb ? `${fb.requested}>${fb.actual}` : 'n'}|${exSig}`;
+        const sig = `${src ?? 'x'}|${actual ?? 'x'}|${fb ? `${fb.requested}>${fb.actual}` : 'n'}|${exSig}|${transport.active ? `${transport.sourceSampleRate ?? '?'}:${transport.resampler ?? '?'}` : 'd'}`;
         if (sig !== lastSigRef.current) {
           lastSigRef.current = sig;
           bumpTick((n) => n + 1);
@@ -49,7 +51,10 @@ export function SignalPathBadge(): JSX.Element | null {
     [],
   );
 
-  const sourceRate = current?.sampleRate ?? null;
+  // The sample transport knows the rate its decoder actually ran at, which
+  // the library's metadata can miss (Opus always decodes at 48 kHz).
+  const transport = engine.getSampleTransportInfo();
+  const sourceRate = (transport.active ? transport.sourceSampleRate : null) ?? current?.sampleRate ?? null;
   const actualRate = engine.getActualSampleRate();
   const fallback = engine.getSampleRateFallback?.() ?? null;
   const exclusive = engine.getExclusiveInfo();
@@ -88,8 +93,8 @@ export function SignalPathBadge(): JSX.Element | null {
         `${backend} → ${neg.deviceName}: ${neg.format} @ ${rate}. OS mixer bypassed.`,
         neg.resampled
           ? neg.sourceSampleRate
-            ? `Resampled from ${formatKhz(neg.sourceSampleRate)} by NewAmp (SoX) — the device clock doesn't support the source rate.${neg.dsd ? ' (DSD → PCM conversion.)' : ''}`
-            : 'Source sample rate unknown — conservatively resampled to the device rate (SoX).'
+            ? `Resampled from ${formatKhz(neg.sourceSampleRate)} by NewAmp (${resamplerName(neg.resampler)}) — the device clock doesn't support the source rate.${neg.dsd ? ' (DSD → PCM conversion.)' : ''}`
+            : `Source sample rate unknown — conservatively resampled to the device rate (${resamplerName(neg.resampler)}).`
           : !neg.lossless
             ? 'Lossy source: the decoder output is delivered untouched.'
             : neg.upmixed
@@ -117,9 +122,13 @@ export function SignalPathBadge(): JSX.Element | null {
     ].join('\n');
     tone = 'ok';
   } else {
+    // With sample-accurate gapless the conversion happens in NewAmp's own
+    // ffmpeg stream, not in Chromium's media pipeline.
     label = `${sourceKhz}→${actualKhz} RESAMPLED`;
     title = [
-      `Chromium is resampling this track from ${sourceKhz} to ${actualKhz} before it reaches the device.`,
+      transport.active && transport.resampler && transport.resampler !== 'none'
+        ? `NewAmp is resampling this track from ${sourceKhz} to ${actualKhz} (${resamplerName(transport.resampler)}) before it reaches the device.`
+        : `Chromium is resampling this track from ${sourceKhz} to ${actualKhz} before it reaches the device.`,
       fallback
         ? `(${formatKhz(fallback.requested)} rejected by the output device; engine fell back to ${formatKhz(fallback.actual)}.)`
         : 'Pin the engine to the source rate in Settings → Audio for a clean signal path.',

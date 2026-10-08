@@ -13,6 +13,12 @@ export interface HandoffDecisionInput extends HandoffIndexInput {
   crossfadeMs: number;
   currentTrackId: number | null;
   lastHandoffKey: string | null;
+  /**
+   * Repeat-one replays the track by chaining it to itself, which the sample
+   * transport can do without a gap. Without this, repeat-one prepares
+   * nothing and the decks rewind in place.
+   */
+  loopsCurrent?: boolean;
 }
 
 export function nextHandoffIndex(input: HandoffIndexInput): number | null {
@@ -64,7 +70,8 @@ export function shouldPrepareTrackHandoff(input: HandoffDecisionInput): boolean 
   if (!Number.isFinite(input.duration) || input.duration <= 0) return false;
   if (!Number.isFinite(input.currentTime) || input.currentTime <= 0) return false;
   if (Math.max(0, Math.round(input.crossfadeMs)) > 0) return false;
-  if (!hasHandoffTarget(input)) return false;
+  const loops = input.loopsCurrent === true && repeatModeOf(input.mode) === 'one';
+  if (!loops && !hasHandoffTarget(input)) return false;
   const key = handoffKey(input.currentTrackId, input.index);
   if (input.lastHandoffKey === key) return false;
   const remaining = input.duration - input.currentTime;

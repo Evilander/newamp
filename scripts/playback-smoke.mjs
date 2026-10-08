@@ -96,7 +96,9 @@ async function run() {
   for (const target of targets) {
     const filePath = target.path;
     const normalized = filePath.replace(/\\/g, '/');
-    const url = `newamp://track/${encodeURI(normalized).replace(/#/g, '%23')}`;
+    // Mirrors electron/preload.ts's toAudioUrl: the whole path is one opaque
+    // component (see scripts/audio-url-roundtrip-test.mjs for why).
+    const url = `newamp://track/${encodeURIComponent(normalized)}`;
     console.error(`[newamp] probing ${target.name}`);
     const result = await win.webContents.executeJavaScript(playbackProbeSource(url), true);
     console.error(`[newamp] ${target.name} currentTime=${result.currentTime} ok=${result.ok}`);

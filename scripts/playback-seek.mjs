@@ -49,6 +49,9 @@ const hardTimeout = setTimeout(() => fail(new Error('playback-seek smoke timed o
 
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+// The seek checks read playback state, not the speakers. NEWAMP_SMOKE_AUDIBLE=1
+// to hear the test tones.
+if (process.env.NEWAMP_SMOKE_AUDIBLE !== '1') app.commandLine.appendSwitch('mute-audio');
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('no-sandbox');
 
@@ -69,7 +72,7 @@ async function run() {
   protocol.handle('newamp', async (request) => {
     try {
       const url = new URL(request.url);
-      const filePath = resolve(decodeURIComponent(url.pathname.replace(/^\/+/, '')));
+      const filePath = resolve(decodeURIComponent(url.pathname.replace(/^\//, '')));
       if (!existsSync(filePath)) return new Response('Not found', { status: 404 });
       if (playbackMode(filePath) === 'ffmpeg') {
         const ready = await peekCachedFlac(filePath);
@@ -108,7 +111,9 @@ async function run() {
       }
     }
     const normalized = c.path.replace(/\\/g, '/');
-    const url = `newamp://track/${encodeURI(normalized).replace(/#/g, '%23')}`;
+    // Mirrors electron/preload.ts's toAudioUrl: the whole path is one opaque
+    // component (see scripts/audio-url-roundtrip-test.mjs for why).
+    const url = `newamp://track/${encodeURIComponent(normalized)}`;
     const mode = playbackMode(c.path);
     console.error(`[newamp] seek-probing ${c.name} (mode=${mode})`);
 

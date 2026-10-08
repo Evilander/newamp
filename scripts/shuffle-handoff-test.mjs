@@ -12,7 +12,7 @@ import {
 } from '../dist-electron/shared/playback-handoff.js';
 import { nextSmartShuffle } from '../dist-electron/shared/smart-shuffle.js';
 
-// Regression test for finding #19: shuffle mode got neither crossfade nor
+// Regression test: shuffle mode once got neither crossfade nor
 // gapless pre-buffering because nextHandoffIndex returned null for every
 // shuffle variant, so shouldPrepareTrackHandoff/shouldStartTrackHandoff
 // never fired at all. The fix adds a separate eligibility check
@@ -54,7 +54,7 @@ const baseInput = {
 assert.equal(
   shouldPrepareTrackHandoff({ ...baseInput, mode: 'shuffle' }),
   true,
-  'gapless prepare should now fire in shuffle mode (this is finding #19)',
+  'gapless prepare should now fire in shuffle mode',
 );
 assert.equal(
   shouldPrepareTrackHandoff({ ...baseInput, mode: 'shuffle-repeat-one' }),
@@ -64,7 +64,7 @@ assert.equal(
 assert.equal(
   shouldStartTrackHandoff({ ...baseInput, mode: 'shuffle', crossfadeMs: 4000, currentTime: 236.2 }),
   true,
-  'crossfade should now start in shuffle mode (this is finding #19)',
+  'crossfade should now start in shuffle mode',
 );
 assert.equal(
   shouldStartTrackHandoff({ ...baseInput, mode: 'shuffle-repeat-one', crossfadeMs: 4000, currentTime: 236.2 }),
@@ -248,9 +248,27 @@ assert.doesNotMatch(storeSource, /void state\.next\(\)/, 'the crossfade-start br
 const nextActionStart = storeSource.indexOf('next: async () => {');
 assert.ok(nextActionStart >= 0, 'store should still define a next() action');
 const nextActionOpening = storeSource.slice(nextActionStart, nextActionStart + 600);
-assert.match(nextActionOpening, /clearPlaybackErrorAdvanceTimer\(\);\s*\r?\n\s*const state = get\(\);\s*\r?\n\s*recordManualSkip\(state\);/, 'next() should keep its existing manual-skip bookkeeping');
-assert.match(nextActionOpening, /cachedShuffleHandoff = null;/, 'next() should unconditionally invalidate the shuffle handoff cache before computing a fresh pick');
-assert.match(nextActionOpening, /const \{ queue, index, mode, shuffleHistory \} = state;/, 'the cache invalidation should happen before next() reads queue/index/mode for its own fresh pick');
+// next() opens a play intent before reading state: a skip still waiting on an
+// Auto DJ refill or a context expansion must stand down if the user has since
+// picked another track or edited the queue.
+assert.match(
+  nextActionOpening,
+  /clearPlaybackErrorAdvanceTimer\(\);\s*\r?\n\s*const intent = playIntents\.begin\(\);[\s\S]*?const state = get\(\);\s*\r?\n\s*recordManualSkip\(state\);/,
+  'next() should keep its existing manual-skip bookkeeping, after opening its play intent',
+);
+const nextActionBody = storeSource.slice(nextActionStart, nextActionStart + 2400);
+assert.match(
+  nextActionBody,
+  /await get\(\)\.refillAutoDjQueue\(true\);\s*\r?\n\s*if \(!isCurrent\(\)\) return;/,
+  'next() should stand down after its refill await if a newer play intent or queue edit landed',
+);
+// Ordering, not a fixed window: the invalidation has to come before next()
+// reads queue/index/mode for its own pick, however long the opening grows.
+const invalidatesAt = nextActionBody.indexOf('cachedShuffleHandoff = null;');
+const readsQueueAt = nextActionBody.indexOf('const { queue, index, mode, shuffleHistory } = state;');
+assert.ok(invalidatesAt >= 0, 'next() should unconditionally invalidate the shuffle handoff cache before computing a fresh pick');
+assert.ok(readsQueueAt >= 0, 'next() should read queue/index/mode from state for its own fresh pick');
+assert.ok(invalidatesAt < readsQueueAt, 'the cache invalidation should happen before next() reads queue/index/mode for its own fresh pick');
 
 assert.match(packageSource, /"test:shuffle-handoff"/, 'package.json should expose the shuffle handoff regression test');
 
