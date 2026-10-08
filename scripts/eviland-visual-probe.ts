@@ -357,8 +357,12 @@ async function diversity() {
     return stray / Math.max(1, total);
   };
 
+  // Under software GL every scene variant of every look outruns the test's
+  // time limit, so render each look once there (its first composition). A
+  // GPU still renders them all.
+  const rendered = SOFTWARE_GL ? compositions.filter(({ name }) => !name.includes(' (')) : compositions;
   const captures = [];
-  for (const { name, config } of compositions) {
+  for (const { name, config } of rendered) {
     const result = capture(config);
     // Legibility on the settled (last) frame: a look nobody can see, a
     // blown-out frame, or a flat wash is a failure even if it is "distinct".
