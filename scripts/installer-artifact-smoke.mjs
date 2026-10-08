@@ -39,6 +39,7 @@ const requiredExtensions = [...requiredAudioExtensions, ...requiredPlaylistExten
 const gateSource = readFileSync(gatePath, 'utf8');
 const mainSource = readFileSync(mainPath, 'utf8');
 const packageScriptSource = readFileSync(packageScriptPath, 'utf8');
+const packageTargetsSource = readFileSync(resolve(repoRoot, 'scripts', 'lib', 'package-targets.mjs'), 'utf8');
 const installerIncludeSource = readRequiredText(installerIncludePath);
 const builderDebug = readRequiredText(builderDebugPath);
 
@@ -106,7 +107,7 @@ assert.match(gateSource, /NEWAMP_FULL_SCAN_SKIP_ART_STORAGE/, 'release gate real
 assert.match(gateSource, /cleanFullLibrarySmokeRoot/, 'release gate real-library proof should clean heavyweight smoke data after probing it');
 assert.match(packageScriptSource, /resetPackageTemp/, 'package script should clear its temp directory before building');
 assert.match(packageScriptSource, /pruneObsoleteReleaseArtifacts/, 'package script should prune stale versioned release artifacts before building');
-assert.match(packageScriptSource, /--linux=tar\.gz/, 'package script should build the Linux tarball target');
+assert.match(packageTargetsSource, /--linux=tar\.gz/, 'package targets should include the Linux tarball');
 assert.match(packageScriptSource, /Refusing to remove outside repo/, 'package cleanup should refuse paths outside the repo');
 assert.match(mainSource, /--newamp-startup-smoke/, 'packaged app should accept a startup smoke command-line switch');
 assert.match(mainSource, /NEWAMP_STARTUP_SMOKE_MARKER/, 'packaged app should be able to write startup smoke marker files');
