@@ -46,6 +46,7 @@ function assertQueueEdit(r) {
   expect('stillPlaying', true);
   expect('clockAdvanced', true);
   expect('rowsWhileArmed', 2); // the first Clear click only arms
+  expect('rowsAfterDoubleClick', 2); // a double-click doesn't arm and confirm at once
   expect('afterClear', 0);
   if (problems.length) {
     console.error(`[ui-queue-edit-smoke] FAIL: ${problems.join('; ')}`);
@@ -100,6 +101,9 @@ async function writeSmokeSettings() {
       {
         libraryRoots: [mediaDir],
         libraryAutoWatch: false,
+        // A fresh profile opens the first-launch tour, which is modal: it makes
+        // the rest of the app inert, so focus could never reach a queue row.
+        firstLaunchTutorialSeen: true,
         theme: 'classic',
         customSkin: null,
         lastfmEnabled: false,

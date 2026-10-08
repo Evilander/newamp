@@ -1,11 +1,16 @@
 // NewAmp audio engine. Two HTMLAudioElement decks feed one EQ/master/analyser
 // chain so track changes can overlap for real crossfade instead of muting and
-// swapping a single element.
+// swapping a single element. With sample-accurate gapless on, local tracks
+// play through a third source at the same point in the graph: one decoded PCM
+// timeline in an AudioWorklet (sample-transport.ts), where the next track's
+// first frame follows the last one's without the media elements' `ended`
+// round trip.
 
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
 import { planDeviceChange } from './device-change';
 import { normalizeLimiterEnabled, preampDbToLinear } from '@shared/audio-limiter';
-import type { ExclusiveNegotiated } from '@shared/types';
+import type { ExclusiveNegotiated, ResamplerKind } from '@shared/types';
+import type { SampleTransport, SampleTransportEvent } from './sample-transport';
 
 export interface EngineState {
   duration: number;
@@ -64,6 +69,28 @@ export interface ExclusiveInfo {
   fallbackReason: string | null;
 }
 
+export interface SampleTransportInfo {
+  /** The current track plays through the sample-accurate transport. */
+  active: boolean;
+  /** Why the last local track fell back to the deck path, if it did. */
+  fallbackReason: string | null;
+  underruns: number;
+  /** What converted the audible track ('none' when its decoder rate matched the context's). */
+  resampler: 'none' | ResamplerKind | null;
+  /** What converts any transport track whose rate differs from the context's. */
+  resamplerKind: ResamplerKind | null;
+  /** The rate the audible track's decoder produced, which the library's metadata may not match. */
+  sourceSampleRate: number | null;
+}
+
+/** What the store knows about a track that decides whether the sample transport may take it. */
+export interface TrackRouting {
+  /** A CUE sheet segment: a slice of a larger file that ends at a cue point, not at EOF. */
+  cue?: boolean;
+  /** The library last found the file missing. */
+  missing?: boolean;
+}
+
 const EQ_FREQS = [60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000];
 const DEFAULT_FFT_SIZE = 2048;
 const DEFAULT_FREQUENCY_BIN_COUNT = DEFAULT_FFT_SIZE / 2;
@@ -79,6 +106,7 @@ interface Deck {
   el: HTMLAudioElement;
   source: MediaElementAudioSourceNode;
   gain: GainNode;
+  replayGain: GainNode;
   /** Pending deferred seek listener (loadedmetadata) so it can be cancelled
    *  when the deck is silenced or a newer deferred seek replaces it. */
   pendingSeek?: { handler: () => void } | null;
@@ -97,6 +125,12 @@ interface AudioGraph {
   decks: [Deck, Deck];
   inputGain: GainNode;
   replayGain: GainNode;
+}
+
+interface SampleStart {
+  seq: number;
+  at: number;
+  playing: boolean;
 }
 
 interface PreparedNextDeck {
@@ -123,6 +157,11 @@ export function volumePositionToGain(position: number): number {
   const p = Math.max(0, Math.min(2, position));
   if (p <= 1) return p * p * p;
   return p;
+}
+
+function replayGainDbToLinear(db: number | null): number {
+  const clampedDb = db == null || !Number.isFinite(db) ? 0 : Math.max(-18, Math.min(12, db));
+  return Math.pow(10, clampedDb / 20);
 }
 
 export class AudioEngine {
@@ -169,6 +208,29 @@ export class AudioEngine {
   // an IPC round-trip, so a rapid skip can otherwise let a STALE acceptance
   // clobber the newer track's state.
   private playSeq = 0;
+  // Sample-accurate gapless transport. Like `externalActive`, `sampleActive`
+  // is per-track: true while the CURRENT track plays through it; streams,
+  // podcasts, cue segments, crossfade and non-1x speed stay on the decks.
+  private sampleTransport: SampleTransport | null = null;
+  private sampleActive = false;
+  private sampleFallbackReason: string | null = null;
+  // One-shot: the next play() of this src skips the transport, because the
+  // transport already failed to decode it.
+  private sampleSkipSrc: string | null = null;
+  // The play() currently being routed to the transport, before it has a
+  // stream; seek() and pause() adjust it instead of touching the empty decks.
+  private sampleStarting: SampleStart | null = null;
+  // An A-B practice loop is running (NowPlayingView). It wraps by seeking
+  // every pass: the decks do that in place from buffered audio, while the
+  // transport would restart ffmpeg and re-prime each time.
+  private practiceLoop = false;
+  // The OS media controls (the Windows flyout and lock screen, macOS Now
+  // Playing, MPRIS) list this window only while one of its media elements
+  // plays; Web Audio output alone doesn't count, and that is all the sample
+  // transport makes. While it plays, this hidden element loops a second of
+  // silence to hold the place. Volume 0, not muted: a muted element doesn't
+  // count either. It never joins the graph, so none of it reaches the output.
+  private sessionAnchor: HTMLAudioElement | null = null;
 
   private state: EngineState = {
     duration: 0,
@@ -280,7 +342,7 @@ export class AudioEngine {
     // change until the user next touched the slider.
     masterGain.gain.value = volumePositionToGain(this.volume);
     const replayGain = ctx.createGain();
-    replayGain.gain.value = this.replayGainLinear;
+    replayGain.gain.value = 1;
     const limiter = ctx.createDynamicsCompressor();
 
     const analyser = ctx.createAnalyser();
@@ -314,7 +376,8 @@ export class AudioEngine {
 
     const decks = [this.createDeck(0, ctx), this.createDeck(1, ctx)] as [Deck, Deck];
     for (const deck of decks) {
-      deck.source.connect(deck.gain);
+      deck.source.connect(deck.replayGain);
+      deck.replayGain.connect(deck.gain);
       deck.gain.connect(inputGain);
     }
     decks[0].gain.gain.value = 1;
@@ -326,7 +389,7 @@ export class AudioEngine {
       node = band;
     }
     // Signal chain:
-    //   source → eq → replayGain ─┬─→ masterGain (volume) → limiter → destination
+    //   per-deck ReplayGain → fade → eq ─┬─→ masterGain (volume) → limiter → destination
     //                             ├─→ analyser (visualization tap)
     //                             └─→ onsetAnalyser (unsmoothed onset tap)
     //                                  ↓
@@ -396,9 +459,11 @@ export class AudioEngine {
     const source = ctx.createMediaElementSource(el);
     const gain = ctx.createGain();
     gain.gain.value = 0;
+    const replayGain = ctx.createGain();
+    replayGain.gain.value = this.replayGainLinear;
 
     this.attachElementListeners(el, id);
-    return { id, el, source, gain };
+    return { id, el, source, gain, replayGain };
   }
 
   private get activeDeck(): Deck {
@@ -406,8 +471,11 @@ export class AudioEngine {
   }
 
   private attachElementListeners(el: HTMLAudioElement, deckId: number): void {
+    // While the sample transport owns the track, both decks are silenced
+    // leftovers: their late pause/emptied events must not rewrite its state.
+    const isActive = () => deckId === this.activeDeckIndex && !this.sampleActive;
     const patchIfActive = (p: Partial<EngineState>) => {
-      if (deckId === this.activeDeckIndex) this.patch(p);
+      if (isActive()) this.patch(p);
     };
     el.addEventListener('play', () => {
       patchIfActive({ playing: true, ended: false });
@@ -422,7 +490,7 @@ export class AudioEngine {
       this.startTick();
     });
     el.addEventListener('seeked', () => {
-      if (deckId !== this.activeDeckIndex) return;
+      if (!isActive()) return;
       // Reflect the seeked position right away — while paused the rAF poll is
       // suspended, so without this the scrubber/clock would not move until the
       // next play. Re-arm the poll if we're actually playing.
@@ -433,7 +501,7 @@ export class AudioEngine {
       patchIfActive({ duration: Number.isFinite(el.duration) ? el.duration : 0 }),
     );
     el.addEventListener('error', () => {
-      if (deckId !== this.activeDeckIndex) return;
+      if (!isActive()) return;
       const code = el.error?.code ?? 0;
       this.patch({
         playing: false,
@@ -445,7 +513,20 @@ export class AudioEngine {
 
   private patch(p: Partial<EngineState>): void {
     this.state = { ...this.state, ...p };
+    this.syncSessionAnchor();
     this.notify();
+  }
+
+  /** The session anchor plays exactly while the sample transport owns a playing track. */
+  private syncSessionAnchor(): void {
+    const anchor = this.sessionAnchor;
+    if (!this.sampleActive || !this.state.playing) {
+      if (anchor && !anchor.paused) anchor.pause();
+      return;
+    }
+    if (anchor && !anchor.paused) return;
+    const el = anchor ?? (this.sessionAnchor = createSessionAnchor());
+    void el.play().catch(() => undefined);
   }
 
   private notify(): void {
@@ -479,26 +560,13 @@ export class AudioEngine {
       this.stopTick();
       return;
     }
+    if (this.sampleActive) {
+      this.tickSample();
+      return;
+    }
     const el = this.graph.decks[this.activeDeckIndex]!.el;
     if (el.src) {
-      const nextTime = el.currentTime;
-      const nextDuration = Number.isFinite(el.duration) ? el.duration : this.state.duration;
-      // Notification granularity: the React tree only needs a refresh every
-      // ~100 ms — plenty for the time display, scrub bar, and waveform
-      // overhead, and it keeps NowPlayingView re-renders from degrading long
-      // playback sessions.
-      const prevTimeBucket = Math.floor(this.state.currentTime * 10);
-      const nextTimeBucket = Math.floor(nextTime * 10);
-      const seekOrJump = Math.abs(nextTime - this.state.currentTime) > 0.5;
-      const durationChanged = nextDuration !== this.state.duration;
-      this.state = {
-        ...this.state,
-        currentTime: nextTime,
-        duration: nextDuration,
-      };
-      if (nextTimeBucket !== prevTimeBucket || seekOrJump || durationChanged) {
-        this.notify();
-      }
+      this.publishPosition(el.currentTime, Number.isFinite(el.duration) ? el.duration : this.state.duration);
     }
     // Only keep polling while audio is actually advancing. A poll running with
     // playback paused/ended/idle burns CPU + battery for the whole app
@@ -507,6 +575,39 @@ export class AudioEngine {
       this.stopTick();
     }
   };
+
+  private tickSample(): void {
+    const transport = this.sampleTransport;
+    if (!transport || !this.state.playing) {
+      this.stopTick();
+      return;
+    }
+    // Between a chained boundary and the store's play() for the new track the
+    // transport already reports the new track's clock; publishing it under
+    // the old track's identity would read as a restart.
+    if (this.state.ended) return;
+    const { currentTime, duration } = transport.position();
+    this.publishPosition(currentTime, duration && duration > 0 ? duration : this.state.duration);
+  }
+
+  private publishPosition(nextTime: number, nextDuration: number): void {
+    // Notification granularity: the React tree only needs a refresh every
+    // ~100 ms — plenty for the time display, scrub bar, and waveform
+    // overhead, and it keeps NowPlayingView re-renders from degrading long
+    // playback sessions.
+    const prevTimeBucket = Math.floor(this.state.currentTime * 10);
+    const nextTimeBucket = Math.floor(nextTime * 10);
+    const seekOrJump = Math.abs(nextTime - this.state.currentTime) > 0.5;
+    const durationChanged = nextDuration !== this.state.duration;
+    this.state = {
+      ...this.state,
+      currentTime: nextTime,
+      duration: nextDuration,
+    };
+    if (nextTimeBucket !== prevTimeBucket || seekOrJump || durationChanged) {
+      this.notify();
+    }
+  }
 
   subscribe(fn: EngineListener): () => void {
     this.listeners.add(fn);
@@ -530,6 +631,9 @@ export class AudioEngine {
     if (this.externalActive) {
       if (!this.state.playing || !this.externalPositionAt) return this.state.currentTime;
       return this.state.currentTime + Math.min(0.25, Math.max(0, (performance.now() - this.externalPositionAt) / 1000));
+    }
+    if (this.sampleActive) {
+      return this.sampleTransport?.hasStream() ? this.sampleTransport.position().currentTime : this.state.currentTime;
     }
     if (!this.graph) return this.state.currentTime;
     const el = this.graph.decks[this.activeDeckIndex]!.el;
@@ -620,6 +724,7 @@ export class AudioEngine {
     if (this.graph) {
       for (const deck of this.graph.decks) this.silenceDeck(deck, true);
     }
+    if (this.sampleActive || this.sampleTransport?.hasStream()) this.deactivateSample();
     this.clearFadeTimer();
     this.preparedNext = null;
     this.externalActive = true;
@@ -643,6 +748,230 @@ export class AudioEngine {
     this.notify();
   }
 
+  // ---- Sample-accurate gapless seam ---------------------------------------
+
+  /**
+   * Attach or detach the sample transport. Detaching while it owns the current
+   * track stops that audio; the caller restarts the track through whatever
+   * path is left.
+   */
+  setSampleTransport(transport: SampleTransport | null): void {
+    if (transport === this.sampleTransport) return;
+    if (this.sampleActive || this.sampleTransport?.hasStream()) this.deactivateSample();
+    this.sampleTransport?.setListener(null);
+    this.sampleTransport?.detach();
+    this.sampleTransport = transport;
+    this.sampleFallbackReason = null;
+    transport?.setListener(this.onSampleEvent);
+  }
+
+  isSampleTransportActive(): boolean {
+    return this.sampleActive;
+  }
+
+  getSampleTransportInfo(): SampleTransportInfo {
+    const transport = this.sampleActive ? this.sampleTransport : null;
+    // A chained track reports its own rate once audible; until then, the
+    // start result describes the first one.
+    const signal = transport?.audibleSignal() ?? null;
+    const result = transport?.lastResult ?? null;
+    return {
+      active: this.sampleActive,
+      fallbackReason: this.sampleFallbackReason,
+      underruns: this.sampleTransport?.underruns ?? 0,
+      resampler: signal?.resampler ?? result?.resampler ?? null,
+      resamplerKind: result?.resamplerKind ?? null,
+      sourceSampleRate: signal?.sourceRate ?? result?.sourceSampleRate ?? null,
+    };
+  }
+
+  /** Un-chain whatever the transport spliced in after the current track. */
+  clearPreparedNext(): void {
+    if (this.sampleActive) this.sampleTransport?.prepareNext(null);
+  }
+
+  /** An A-B practice loop started or stopped; a running one moves the track to the decks. */
+  setPracticeLoopActive(active: boolean): void {
+    if (active === this.practiceLoop) return;
+    this.practiceLoop = active;
+    if (active && this.sampleActive) this.handOffSampleToDecks();
+  }
+
+  private canSample(src: string, trackId: number | null, routing?: TrackRouting): trackId is number {
+    if (!this.sampleTransport || trackId == null || trackId <= 0) return false;
+    // The worklet plays at 1x and cannot overlap two tracks.
+    if (this.crossfadeMs > 0 || this.playbackRate !== 1 || this.practiceLoop) return false;
+    // A CUE segment ends at a cue point the store watches, not at the end of
+    // its file, so it stays on the decks. A missing file would only fail.
+    if (routing?.cue || routing?.missing) return false;
+    // Local library files only; server streams and podcasts keep the decks,
+    // and DSD plays through the transcode path.
+    return src.startsWith('newamp://track/') && !/\.(dsf|dff)$/i.test(src);
+  }
+
+  private async trySamplePlay(
+    src: string,
+    trackId: number,
+    starting: SampleStart,
+  ): Promise<'accepted' | 'declined' | 'stale'> {
+    const transport = this.sampleTransport!;
+    const { seq } = starting;
+    // Chained continuation: this track has been audible since its first frame
+    // and the store advanced its queue after our boundary event. Ack without
+    // touching the stream.
+    if (this.sampleActive && starting.at <= 0.5 && transport.isUnackedChain(trackId, src)) {
+      transport.ack();
+      transport.setAudibleGain(this.replayGainLinear);
+      const { currentTime, duration } = transport.position();
+      // A chained track short enough to play out before the store got here
+      // has already ended; say so, or nothing ever advances past it.
+      const playedOut = !transport.hasStream();
+      const playing = !playedOut && transport.isPlaying();
+      this.patch({
+        src,
+        trackId,
+        currentTime,
+        duration: duration ?? 0,
+        playing,
+        buffering: false,
+        ended: playedOut,
+        error: null,
+      });
+      if (playing) this.startTick();
+      return 'accepted';
+    }
+    const graph = this.ensureGraph();
+    // Until the transport has a stream, a seek or pause for this play lands
+    // here instead of on the empty decks, and shapes the start.
+    this.sampleStarting = starting;
+    try {
+      if (graph.ctx.state === 'suspended') {
+        try {
+          await graph.ctx.resume();
+        } catch {
+          /* ignore */
+        }
+        if (seq !== this.playSeq) return 'stale';
+      }
+      if (!(await transport.attach(graph.ctx, graph.inputGain))) {
+        if (seq !== this.playSeq) return 'stale';
+        this.sampleFallbackReason = transport.unavailableReason;
+        return 'declined';
+      }
+      if (seq !== this.playSeq) return 'stale';
+    } finally {
+      if (this.sampleStarting === starting) this.sampleStarting = null;
+    }
+    // The same moment the deck path swaps sources: the old audio stops now,
+    // not when the transport's first frames land. A deck that preloaded this
+    // track keeps it until the transport accepts, so a decline still starts
+    // from the preload.
+    this.clearFadeTimer();
+    const prepared = this.findPreparedDeck(src);
+    if (!prepared) this.preparedNext = null;
+    for (const deck of graph.decks) {
+      if (deck !== prepared) this.silenceDeck(deck, true);
+    }
+    this.activateSample();
+    this.patch({ src, trackId, currentTime: starting.at, duration: 0, ended: false, error: null, buffering: true });
+    const result = await transport.start({
+      trackId,
+      src,
+      startAt: starting.at,
+      gain: this.replayGainLinear,
+      playing: starting.playing,
+    });
+    if (seq !== this.playSeq) return 'stale';
+    // A seek inside this same play moved the stream to a newer generation: it
+    // owns the position (and reports its own failure), so this play stands.
+    if (!result.ok && !result.superseded) {
+      this.sampleFallbackReason = result.error ?? 'Sample-accurate playback failed.';
+      console.warn('[newamp] sample-accurate gapless declined a track; using the deck path:', this.sampleFallbackReason);
+      return 'declined';
+    }
+    if (prepared) {
+      this.silenceDeck(prepared, true);
+      this.preparedNext = null;
+    }
+    this.sampleFallbackReason = null;
+    // A pause that landed while the first frames were on their way holds;
+    // don't report playback the transport isn't doing.
+    const playing = transport.isPlaying();
+    this.patch({
+      src,
+      trackId,
+      currentTime: result.ok ? starting.at : this.state.currentTime,
+      duration: result.durationSec ?? this.state.duration,
+      playing,
+      buffering: false,
+      ended: false,
+      error: null,
+    });
+    if (playing) this.startTick();
+    return 'accepted';
+  }
+
+  private activateSample(): void {
+    this.sampleActive = true;
+    // The worklet applies ReplayGain per segment so a chained track switches
+    // on its first frame; the graph's node sits at unity meanwhile.
+    if (this.graph) {
+      const param = this.graph.replayGain.gain;
+      param.cancelScheduledValues(this.graph.ctx.currentTime);
+      param.setValueAtTime(1, this.graph.ctx.currentTime);
+    }
+  }
+
+  private deactivateSample(): void {
+    this.sampleActive = false;
+    if (this.sampleTransport?.hasStream()) this.sampleTransport.stop();
+    // The decks hold the OS media session themselves.
+    this.syncSessionAnchor();
+  }
+
+  /** Move the current track onto a deck at its current position (speed/crossfade change, decode loss). */
+  private handOffSampleToDecks(): void {
+    const { src, trackId, playing } = this.state;
+    const at = this.getPlaybackPosition();
+    this.deactivateSample();
+    if (!src) return;
+    if (playing) void this.play(src, trackId, at).catch(() => undefined);
+    else this.patch({ currentTime: at });
+  }
+
+  private readonly onSampleEvent = (event: SampleTransportEvent): void => {
+    if (!this.sampleActive) return;
+    switch (event.type) {
+      case 'boundary':
+        // The chained track has been audible since its first frame. Mirror
+        // the deck `ended` event so the store advances its queue (and with it
+        // scrobbling, play counts, the sleep timer) and calls play() for the
+        // new track, which the chained-continuation branch acks. `playing`
+        // stays true: the audio never stopped.
+        if (event.failed) {
+          console.warn(`[newamp] sample-accurate gapless could not decode track ${event.to.trackId}; the deck path will try it:`, event.failed);
+          this.sampleFallbackReason = event.failed;
+          this.sampleSkipSrc = event.to.src;
+        }
+        this.patch({ ended: true });
+        break;
+      case 'drained':
+        this.stopTick();
+        this.patch({ playing: false, ended: true, currentTime: event.positionSec });
+        break;
+      case 'failed':
+        console.warn('[newamp] sample-accurate gapless lost the audible track; continuing on the deck path:', event.message);
+        this.sampleFallbackReason = event.message;
+        this.sampleSkipSrc = event.segment.src;
+        this.patch({ currentTime: event.positionSec });
+        this.handOffSampleToDecks();
+        break;
+      case 'buffering':
+        this.patch({ buffering: event.on });
+        break;
+    }
+  };
+
   /**
    * Starts `src`. Resolves 'started' when this request is the one now
    * playing, or 'stale' when a newer play() superseded it while it was in
@@ -651,12 +980,14 @@ export class AudioEngine {
    * queue side effects for a track the user already moved past). A failure
    * of the current request still rejects with the playback error.
    */
-  async play(src: string, trackId: number | null, startAt = 0): Promise<PlayOutcome> {
+  async play(src: string, trackId: number | null, startAt = 0, routing?: TrackRouting): Promise<PlayOutcome> {
     const seq = ++this.playSeq;
     // A new play attempt cancels any terminal ended state immediately — the
     // external path resolves asynchronously, and a stuck ended:true across
-    // notifies is what let the store's auto-advance re-fire.
-    if (this.state.ended) this.patch({ ended: false });
+    // notifies is what let the store's auto-advance re-fire. The store has
+    // already moved to the new track, so the time goes with it: the old
+    // track's end position would read as the new one being nearly over.
+    if (this.state.ended) this.patch({ ended: false, currentTime: normalizeStartAt(startAt) });
     if (this.externalTransport && trackId != null) {
       const outcome = await this.tryExternalPlay(src, trackId, startAt, seq);
       if (outcome === 'accepted') return 'started';
@@ -667,6 +998,17 @@ export class AudioEngine {
       this.deactivateExternal(true);
     }
     if (seq !== this.playSeq) return 'stale';
+    const skipSample = this.sampleSkipSrc === src;
+    this.sampleSkipSrc = null;
+    if (!skipSample && this.canSample(src, trackId, routing)) {
+      const starting: SampleStart = { seq, at: normalizeStartAt(startAt), playing: true };
+      const outcome = await this.trySamplePlay(src, trackId, starting);
+      if (outcome === 'accepted') return 'started';
+      if (outcome === 'stale') return 'stale';
+      // A seek that landed while the transport was being tried still counts.
+      startAt = starting.at;
+    }
+    if (this.sampleActive || this.sampleTransport?.hasStream()) this.deactivateSample();
     const graph = this.ensureGraph();
     if (graph.ctx.state === 'suspended') {
       try {
@@ -678,7 +1020,10 @@ export class AudioEngine {
     }
 
     const current = this.activeDeck;
-    if (current.el.src === src || current.el.currentSrc === src) {
+    // A silenced deck (src attribute removed) still reports its last
+    // currentSrc; resuming it would await a play() that can never start.
+    if (current.el.src && (current.el.src === src || current.el.currentSrc === src)) {
+      this.setDeckReplayGain(current);
       this.patch({ trackId, ended: false, error: null });
       this.applyStartPosition(current, startAt);
       return this.awaitDeckPlay(current, seq);
@@ -695,6 +1040,7 @@ export class AudioEngine {
     this.silenceDeck(graph.decks[1 - this.activeDeckIndex]!, true);
     current.gain.gain.cancelScheduledValues(graph.ctx.currentTime);
     current.gain.gain.setValueAtTime(1, graph.ctx.currentTime);
+    this.setDeckReplayGain(current);
     this.patch({ src, trackId, currentTime: 0, duration: 0, ended: false, error: null });
     current.el.src = src;
     this.applyStartPosition(current, startAt);
@@ -715,12 +1061,32 @@ export class AudioEngine {
     return seq === this.playSeq ? 'started' : 'stale';
   }
 
-  prepareNext(src: string, trackId: number | null, startAt = 0): void {
+  /**
+   * `replayGainDb` is the upcoming track's gain: the sample transport applies
+   * it from that track's first frame. Omitted, the current gain carries over.
+   */
+  prepareNext(
+    src: string,
+    trackId: number | null,
+    startAt = 0,
+    replayGainDb?: number | null,
+    routing?: TrackRouting,
+  ): void {
     if (this.externalActive) {
       // Gapless chaining happens in the main process; deck preloading would
       // just double-decode the file for a deck that never plays.
       this.externalTransport?.prepareNext(trackId, normalizeStartAt(startAt));
       return;
+    }
+    if (this.sampleActive && this.sampleTransport) {
+      if (this.canSample(src, trackId, routing) && normalizeStartAt(startAt) <= 0.01) {
+        const gain = replayGainDb === undefined ? this.replayGainLinear : replayGainDbToLinear(replayGainDb);
+        this.sampleTransport.prepareNext({ trackId, src, gain });
+        return;
+      }
+      // Not transport material (a stream, a cue segment): nothing is spliced,
+      // and the deck below preloads it the way it always has.
+      this.sampleTransport.prepareNext(null);
     }
     if (!src || !this.graph) return;
     if (this.activeDeck.el.src === src || this.activeDeck.el.currentSrc === src) return;
@@ -759,6 +1125,7 @@ export class AudioEngine {
     this.silenceDeck(from, true);
     deck.gain.gain.cancelScheduledValues(graph.ctx.currentTime);
     deck.gain.gain.setValueAtTime(1, graph.ctx.currentTime);
+    this.setDeckReplayGain(deck);
     this.activeDeckIndex = deck.id;
     this.preparedNext = null;
     this.patch({ src, trackId, currentTime: 0, duration: 0, ended: false, error: null, buffering: true });
@@ -777,6 +1144,7 @@ export class AudioEngine {
     const seconds = Math.max(0.08, this.crossfadeMs / 1000);
 
     this.silenceDeck(to, true);
+    this.setDeckReplayGain(to);
     to.el.src = src;
     this.applyStartPosition(to, startAt);
     to.gain.gain.cancelScheduledValues(now);
@@ -809,8 +1177,11 @@ export class AudioEngine {
     // them over the newer track's gains.
     if (seq !== this.playSeq) return 'stale';
 
-    to.gain.gain.linearRampToValueAtTime(1, now + seconds);
-    from.gain.gain.linearRampToValueAtTime(0, now + seconds);
+    const fadeAt = graph.ctx.currentTime;
+    to.gain.gain.setValueAtTime(0, fadeAt);
+    from.gain.gain.setValueAtTime(from.gain.gain.value, fadeAt);
+    to.gain.gain.linearRampToValueAtTime(1, fadeAt + seconds);
+    from.gain.gain.linearRampToValueAtTime(0, fadeAt + seconds);
     this.fadeTimer = window.setTimeout(() => {
       if (this.activeDeckIndex !== from.id) this.silenceDeck(from, true);
       this.fadeTimer = null;
@@ -898,6 +1269,9 @@ export class AudioEngine {
 
   setCrossfadeMs(ms: number): void {
     this.crossfadeMs = Math.max(0, Math.min(12000, Math.round(ms)));
+    // A crossfade needs two decks to overlap; move the current track onto one
+    // now so the next boundary can fade instead of hard-cutting early.
+    if (this.crossfadeMs > 0 && this.sampleActive) this.handOffSampleToDecks();
   }
 
   setPlaybackRate(rate: number): void {
@@ -905,6 +1279,8 @@ export class AudioEngine {
     this.playbackRate = Math.max(0.5, Math.min(1.5, Math.round(rate * 20) / 20));
     if (!this.graph) return;
     for (const deck of this.graph.decks) this.configurePlaybackRate(deck.el);
+    // The transport plays at 1x; the decks do pitch-preserving speed.
+    if (this.playbackRate !== 1 && this.sampleActive) this.handOffSampleToDecks();
   }
 
   async setOutputDevice(deviceId: string | null): Promise<void> {
@@ -1076,6 +1452,21 @@ export class AudioEngine {
       this.patch({ playing: false });
       return;
     }
+    if (this.sampleStarting?.seq === this.playSeq) {
+      this.sampleStarting.playing = false;
+      if (this.graph) for (const deck of this.graph.decks) deck.el.pause();
+      this.patch({ playing: false });
+      return;
+    }
+    if (this.sampleActive && this.sampleTransport) {
+      const currentTime = this.sampleTransport.hasStream()
+        ? this.sampleTransport.position().currentTime
+        : this.state.currentTime;
+      this.sampleTransport.pause();
+      this.stopTick();
+      this.patch({ playing: false, currentTime });
+      return;
+    }
     if (!this.graph) {
       this.patch({ playing: false });
       return;
@@ -1095,6 +1486,25 @@ export class AudioEngine {
         }
         this.patch({ playing: true, ended: false });
       }
+      return;
+    }
+    // Paused with Bit-Perfect Exclusive attached falls through to the re-route
+    // below, so exclusive gets first refusal on the resume.
+    if (this.sampleActive && this.sampleTransport && !(this.externalTransport && !this.state.playing)) {
+      const transport = this.sampleTransport;
+      if (this.state.playing) {
+        this.pause();
+        return;
+      }
+      if (!transport.hasStream()) {
+        // Stopped or played out: restart where the state says.
+        const { src, trackId } = this.state;
+        if (src) void this.play(src, trackId, this.state.ended ? 0 : Math.max(0, this.state.currentTime)).catch(() => undefined);
+        return;
+      }
+      transport.resume();
+      this.patch({ playing: true, ended: false });
+      this.startTick();
       return;
     }
     // Re-route through play() (which gives the external transport first
@@ -1131,6 +1541,9 @@ export class AudioEngine {
     // Stop even before external acceptance: source resolution may still be
     // pending in main, where stop invalidates that request as well.
     this.deactivateExternal(true);
+    // sampleActive stays set: a later play/toggle restarts this track through
+    // the transport, the way a stopped deck keeps its src.
+    if (this.sampleTransport?.hasStream()) this.sampleTransport.stop();
     if (!this.graph) {
       this.patch({ playing: false, currentTime: 0, ended: false, buffering: false, error: null });
       return;
@@ -1160,6 +1573,7 @@ export class AudioEngine {
     this.clearFadeTimer();
     this.preparedNext = null;
     this.deactivateExternal(true);
+    if (this.sampleActive || this.sampleTransport?.hasStream()) this.deactivateSample();
     if (this.graph) {
       for (const deck of this.graph.decks) this.silenceDeck(deck, true);
     }
@@ -1185,6 +1599,20 @@ export class AudioEngine {
         /* surfaced via events */
       }
       this.patch({ currentTime: target });
+      return;
+    }
+    if (this.sampleStarting?.seq === this.playSeq) {
+      this.sampleStarting.at = Math.max(0, seconds);
+      this.patch({ currentTime: this.sampleStarting.at });
+      return;
+    }
+    if (this.sampleActive && this.sampleTransport) {
+      const target = Math.max(0, seconds);
+      // A live stream restarts at the audible track; a stopped or played-out
+      // one just moves the position the next play starts from.
+      const live = this.sampleTransport.hasStream();
+      if (live) this.sampleTransport.seek(target);
+      this.patch(live ? { currentTime: target } : { currentTime: target, ended: false });
       return;
     }
     if (!this.graph) return;
@@ -1280,13 +1708,35 @@ export class AudioEngine {
   }
 
   setReplayGainDb(db: number | null): void {
-    const clampedDb = db == null || !Number.isFinite(db) ? 0 : Math.max(-18, Math.min(12, db));
-    this.replayGainLinear = Math.pow(10, clampedDb / 20);
+    this.replayGainLinear = replayGainDbToLinear(db);
     if (!this.graph) return;
-    // Short time-constant (~6ms): ReplayGain changes at track boundaries, and a
-    // 20ms ramp was audible as a brief loudness "swell" on the first beat. Still
-    // smoothed enough to avoid a zipper/click.
-    this.retargetParam(this.graph.replayGain.gain, this.replayGainLinear, 0.006);
+    if (this.sampleActive) {
+      // The worklet applies ReplayGain per segment, so a chained track
+      // switches on its first frame. The store sets an upcoming track's gain
+      // just before play(), which carries it in its own request; deferring
+      // lets that play() win, so only a mid-track change (a settings toggle)
+      // retargets the audible segment.
+      const seq = this.playSeq;
+      queueMicrotask(() => {
+        if (seq === this.playSeq && this.sampleActive) this.sampleTransport?.setAudibleGain(this.replayGainLinear);
+      });
+      return;
+    }
+    // The store sets the incoming gain immediately before play(). Let that
+    // request assign its own deck; never retarget the outgoing fade's gain.
+    const seq = this.playSeq;
+    queueMicrotask(() => {
+      if (seq === this.playSeq && this.graph && !this.sampleActive) {
+        this.retargetParam(this.activeDeck.replayGain.gain, this.replayGainLinear, 0.006);
+      }
+    });
+  }
+
+  private setDeckReplayGain(deck: Deck): void {
+    if (!this.graph) return;
+    const now = this.graph.ctx.currentTime;
+    deck.replayGain.gain.cancelScheduledValues(now);
+    deck.replayGain.gain.setValueAtTime(this.replayGainLinear, now);
   }
 
   setPreampDb(db: number): void {
@@ -1518,6 +1968,15 @@ export class AudioEngine {
       navigator.mediaDevices.removeEventListener('devicechange', this.deviceChangeHandler);
     }
     this.deviceChangeHandler = null;
+    this.sampleActive = false;
+    this.sampleTransport?.detach();
+    if (this.sessionAnchor) {
+      const anchor = this.sessionAnchor;
+      this.sessionAnchor = null;
+      anchor.pause();
+      URL.revokeObjectURL(anchor.src);
+      anchor.removeAttribute('src');
+    }
     if (!this.graph) return;
     for (const deck of this.graph.decks) {
       try {
@@ -1533,6 +1992,36 @@ export class AudioEngine {
 }
 
 export const EQ_BAND_FREQS = EQ_FREQS;
+
+/** A hidden <audio> looping one second of 8 kHz silence, at volume 0 and never muted. */
+function createSessionAnchor(): HTMLAudioElement {
+  const rate = 8000;
+  const bytes = new ArrayBuffer(44 + rate * 2);
+  const view = new DataView(bytes);
+  const ascii = (at: number, text: string): void => {
+    for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i));
+  };
+  ascii(0, 'RIFF');
+  view.setUint32(4, 36 + rate * 2, true);
+  ascii(8, 'WAVE');
+  ascii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  ascii(36, 'data');
+  view.setUint32(40, rate * 2, true);
+  const el = new Audio();
+  el.loop = true;
+  el.volume = 0;
+  el.muted = false;
+  el.preload = 'auto';
+  el.src = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+  return el;
+}
 
 function normalizeStartAt(value: number): number {
   return Number.isFinite(value) && value > 0 ? Math.max(0, value) : 0;

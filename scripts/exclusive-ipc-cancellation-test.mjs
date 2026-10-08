@@ -14,6 +14,8 @@ const output = { stop() {}, pause() {}, resume() {}, seek() {}, prepareNext: (so
 vm.runInNewContext(code, {
   ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
   settings: { get: () => ({}), set: (patch) => patch },
+  withAiAssistRuntime: (settings) => settings,
+  restoreInProgress: false, radioBrain: null,
   syncLibraryWatcher() {}, patchTouchesLibraryWatch: () => false, patchTouchesRadioBrain: () => false, queueRadioBrainSync: async () => {},
   exclusiveOutput: output, getExclusiveOutput: () => output,
   resolveExclusiveSource: (trackId) => new Promise((resolve) => resolutions.push(() => resolve({ trackId }))),

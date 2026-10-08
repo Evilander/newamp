@@ -13,7 +13,8 @@ import type {
 } from '@shared/types';
 import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
 import { parseMusicServerStreamUrl } from '@shared/music-servers';
-import { AudioEngine } from '../audio/engine';
+import { AudioEngine, type TrackRouting } from '../audio/engine';
+import type { SampleTransport } from '../audio/sample-transport';
 import { api, inElectron, toAudioUrl, winctl, DEFAULT_SETTINGS } from '../lib/api';
 import { decode as decodeEvilandCode } from '../visualizer/eviland-randomizer';
 import { prefetchSongScore } from '../visualizer/eviland-score-feed';
@@ -42,7 +43,13 @@ import {
   insertTracksNext,
   insertTrackNext,
 } from '@shared/queue-insert';
-import { handoffKey, shouldPrepareTrackHandoff, shouldStartTrackHandoff } from '@shared/playback-handoff';
+import {
+  handoffKey,
+  hasHandoffTarget,
+  nextHandoffIndex,
+  shouldPrepareTrackHandoff,
+  shouldStartTrackHandoff,
+} from '@shared/playback-handoff';
 import {
   isShuffleHandoffCacheValid,
   resolveShuffleHandoffPick,
@@ -190,6 +197,7 @@ interface PlayerState {
   setPlaybackRate: (rate: number) => Promise<void>;
   setAudioOutputDevice: (deviceId: string | null) => Promise<void>;
   setBitPerfectExclusive: (enabled: boolean) => Promise<AppSettings>;
+  setSampleAccurateGapless: (enabled: boolean) => Promise<AppSettings>;
   setBitPerfectExclusiveDevice: (deviceId: string | null) => Promise<AppSettings>;
   playOutputTestTone: () => Promise<void>;
   setAutoDjEnabled: (enabled: boolean) => Promise<void>;
@@ -324,6 +332,9 @@ let lastSessionPersistAt = 0;
 let lastPodcastProgressPersistAt = 0;
 let lastHandoffKey: string | null = null;
 let lastPreparedHandoffKey: string | null = null;
+// The track the last prepare handed the engine, so the sample transport's
+// splice can be re-pointed when the queue changes inside the prepare window.
+let lastPreparedNextTrackId: number | null = null;
 // Populated by the gapless-prepare branch below when it picks a shuffle
 // candidate ahead of time; consumed by autoAdvance() so the automatic
 // advance commits the exact track the engine already decoded into the idle
@@ -534,6 +545,7 @@ async function restorePlaybackSession(
   resumeState: PlaybackResumeState | null,
   settings: AppSettings,
   setState: (partial: Partial<PlayerState>) => void,
+  canRestore: () => boolean,
 ): Promise<void> {
   if (!resumeState) return;
   const entries = playbackResumeQueueEntries(resumeState);
@@ -548,6 +560,7 @@ async function restorePlaybackSession(
     localIds.length ? api.getTracksByIds(localIds).catch(() => []) : Promise.resolve([]),
     hasServerEntries ? api.getMusicServers().catch(() => []) : Promise.resolve([]),
   ]);
+  if (!canRestore()) return;
   const { savedIds, tracks } = restoreTracksFromPlaybackResumeState(resumeState, fetched, musicServers);
   if (!tracks.length) return;
   const { index, currentSurvived } = resolveResumePosition(
@@ -739,6 +752,12 @@ function cueRelativeTime(track: Track | null, engineTime: number): number {
 }
 
 function cueDuration(track: Track | null, engineDuration: number): number {
+  // The sample transport reports the length its decoder found, which a
+  // missing or stale library row can't match; the prepare window for the
+  // next track is timed off this too.
+  if (track && engineDuration > 0 && engine.isSampleTransportActive() && engine.getState().trackId === track.id) {
+    return engineDuration;
+  }
   if (track?.duration && track.duration > 0) return track.duration;
   const end = cueEnd(track);
   const start = cueStart(track);
@@ -751,10 +770,20 @@ function cueEndKey(track: Track | null, index: number): string | null {
   return track && end ? `${track.id}:${index}:${end}` : null;
 }
 
+/** What the engine needs to know to keep CUE segments and missing files off the sample transport. */
+function trackRouting(track: Track): TrackRouting {
+  return {
+    cue: !!track.cuePath || cueStart(track) > 0 || cueEnd(track) != null,
+    missing: track.missingSince != null,
+  };
+}
+
 // Every request to start a track takes a ticket here; only the newest ticket
 // gets to run the store's side effects once the engine answers. Without it,
 // clicking A then B before A had started recorded and scrobbled both.
 const playIntents = createPlayIntentGate();
+let queueRevision = 0;
+let eqRevision = 0;
 
 /**
  * Starts `track` and reports whether it is now the live one: false when a
@@ -764,9 +793,10 @@ const playIntents = createPlayIntentGate();
  * of the current request still throws, as before.
  */
 async function playEngineTrack(track: Track, startAt = 0): Promise<boolean> {
+  queueRevision++;
   lastCueEndKey = null;
   const intent = playIntents.begin();
-  const outcome = await engine.play(toAudioUrl(track.path), track.id, cueStart(track) + startAt);
+  const outcome = await engine.play(toAudioUrl(track.path), track.id, cueStart(track) + startAt, trackRouting(track));
   return outcome === 'started' && playIntents.isCurrent(intent);
 }
 
@@ -779,6 +809,15 @@ async function loadExclusiveBridge(): Promise<
 > {
   const module = await import('../audio/exclusive-bridge');
   return module.exclusiveBridge;
+}
+
+let sampleTransport: SampleTransport | null = null;
+
+/** Sample-accurate gapless gets its own chunk too; it only loads when the setting is on. */
+async function loadSampleTransport(): Promise<SampleTransport> {
+  const module = await import('../audio/sample-transport');
+  sampleTransport ??= new module.SampleTransport();
+  return sampleTransport;
 }
 
 /**
@@ -795,11 +834,46 @@ async function restartCurrentTrackThroughActivePath(
   // A route restart is a new play request like any other: it must invalidate
   // an older request that is still waiting on the engine.
   playIntents.begin();
-  await engine.play(toAudioUrl(current.path), current.id, resumeAt).catch(() => undefined);
+  await engine.play(toAudioUrl(current.path), current.id, resumeAt, trackRouting(current)).catch(() => undefined);
 }
 
-function prepareEngineTrack(track: Track): void {
-  engine.prepareNext(toAudioUrl(track.path), track.id, cueStart(track));
+/**
+ * Repeat-one on the sample transport chains the track to itself, so each
+ * loop starts on the sample after the last one ended. The decks rewind in
+ * place instead.
+ */
+function loopsOnTransport(state: PlayerState): boolean {
+  return repeatModeOf(state.mode) === 'one' && engine.isSampleTransportActive();
+}
+
+/** What an automatic advance from the current position would play next, if anything. */
+function desiredHandoffTrack(state: PlayerState): Track | null {
+  if (loopsOnTransport(state)) return state.current;
+  const queueLength = state.queue.length;
+  if (isShuffleMode(state.mode)) {
+    if (!state.current || !hasHandoffTarget({ queueLength, index: state.index, mode: state.mode })) return null;
+    // Same cached pick autoAdvance() will commit; re-picked only when the
+    // queue or history it was validated against has changed.
+    cachedShuffleHandoff = resolveShuffleHandoffPick(cachedShuffleHandoff, {
+      trackId: state.current.id,
+      index: state.index,
+      queueLength,
+      history: state.shuffleHistory,
+    });
+    return state.queue[cachedShuffleHandoff.index] ?? null;
+  }
+  const nextIndex = nextHandoffIndex({ queueLength, index: state.index, mode: state.mode });
+  return nextIndex == null ? null : state.queue[nextIndex] ?? null;
+}
+
+function prepareEngineTrack(track: Track, settings: AppSettings | null): void {
+  engine.prepareNext(
+    toAudioUrl(track.path),
+    track.id,
+    cueStart(track),
+    replayGainDbForTrack(track, settings),
+    trackRouting(track),
+  );
   // The visualizer's look-ahead needs the next track analysed before it starts.
   prefetchSongScore(track.id);
 }
@@ -1020,6 +1094,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const effectiveCrossfadeMs = engine.getExclusiveInfo().active
         ? 0
         : state.settings?.crossfadeMs ?? 0;
+      const loops = loopsOnTransport(state);
       if (
         !state.stopAfterCurrent &&
         shouldPrepareTrackHandoff({
@@ -1032,11 +1107,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           mode: state.mode ?? 'normal',
           currentTrackId: state.current?.id ?? null,
           lastHandoffKey: lastPreparedHandoffKey,
+          loopsCurrent: loops,
         }) &&
         state.current
       ) {
         let nextTrack: Track | null;
-        if (isShuffleMode(state.mode)) {
+        if (loops) {
+          nextTrack = state.current;
+        } else if (isShuffleMode(state.mode)) {
           // Cache the pick so autoAdvance() commits the exact track decoded
           // into the idle deck here — otherwise the prepare is wasted and
           // gapless playback silently falls back to today's hard cut.
@@ -1053,7 +1131,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         }
         if (nextTrack) {
           lastPreparedHandoffKey = handoffKey(state.current.id, state.index);
-          prepareEngineTrack(nextTrack);
+          lastPreparedNextTrackId = nextTrack.id;
+          prepareEngineTrack(nextTrack, state.settings);
+        }
+      }
+      // The sample transport splices the prepared track into its stream ahead
+      // of the boundary, so a queue edit, Stop after current, or a mode change
+      // inside the prepare window has to re-point it; otherwise the stale pick
+      // is heard for a moment before the store moves on. A stale deck preload
+      // is simply never played, so the deck path doesn't need this.
+      if (
+        engine.isSampleTransportActive() &&
+        state.current &&
+        lastPreparedHandoffKey === handoffKey(state.current.id, state.index)
+      ) {
+        const desired = state.stopAfterCurrent ? null : desiredHandoffTrack(state);
+        if ((desired?.id ?? null) !== lastPreparedNextTrackId) {
+          lastPreparedNextTrackId = desired?.id ?? null;
+          if (desired) prepareEngineTrack(desired, state.settings);
+          else engine.clearPreparedNext();
         }
       }
       if (
@@ -1111,6 +1207,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
             // repeat-one: the same track is about to play again. From the
             // player's POV that's a completed play, so the counter ticks too.
             notifyPlayCompleted(state.current?.id ?? null);
+            // Every loop has its own prepare window: the next one chains the
+            // track to itself again on the sample transport.
+            lastPreparedHandoffKey = null;
+            lastPreparedNextTrackId = null;
             const c = get().current!;
             void playEngineTrack(c);
           }
@@ -1155,6 +1255,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     pendingNavigation: null,
 
     init: async () => {
+      const initialRevision = queueRevision;
       let settings = inElectron
         ? await api.getSettings().catch(() => DEFAULT_SETTINGS)
         : DEFAULT_SETTINGS;
@@ -1182,6 +1283,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           }
         });
       }
+      if (inElectron && settings.sampleAccurateGapless) {
+        void loadSampleTransport().then((transport) => {
+          if (get().settings?.sampleAccurateGapless !== false) engine.setSampleTransport(transport);
+        });
+      }
       engine.setVolume(settings.volume);
       engine.setPlaybackRate(settings.playbackRate);
       engine.setCrossfadeMs(settings.crossfadeMs);
@@ -1203,7 +1309,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       });
       applyReplayGain(get().current, settings);
       applyTheme(settings.theme, settings.customSkin);
-      await restorePlaybackSession(settings.resumeState, settings, set);
+      await restorePlaybackSession(settings.resumeState, settings, set, () => queueRevision === initialRevision);
     },
 
     persistPlaybackSession: async () => persistPlaybackSession(get()),
@@ -1417,6 +1523,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     loadQueue: (tracks) => {
+      queueRevision++;
       clearPlaybackErrorAdvanceTimer();
       playIntents.begin();
       lastPreparedHandoffKey = null;
@@ -1430,12 +1537,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     queueTrackNext: (track) => {
+      queueRevision++;
       const result = insertTrackNext(get().queue, get().index, track);
       set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
       schedulePersistPlaybackSession(get(), true);
     },
 
     addTrackToQueue: (track) => {
+      queueRevision++;
       const result = appendTrackToQueue(get().queue, get().index, track);
       set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
       schedulePersistPlaybackSession(get(), true);
@@ -1443,6 +1552,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     queueTracksNext: (tracks) => {
       if (!tracks.length) return;
+      queueRevision++;
       const result = insertTracksNext(get().queue, get().index, tracks);
       set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
       schedulePersistPlaybackSession(get(), true);
@@ -1450,18 +1560,21 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     addTracksToQueue: (tracks) => {
       if (!tracks.length) return;
+      queueRevision++;
       const result = appendTracksToQueue(get().queue, get().index, tracks);
       set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
       schedulePersistPlaybackSession(get(), true);
     },
 
     moveQueuedTrack: (fromIndex, toIndex) => {
+      queueRevision++;
       const result = moveQueueItem(get().queue, get().index, fromIndex, toIndex);
       set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
       schedulePersistPlaybackSession(get(), true);
     },
 
     removeQueuedTrack: async (removeIndex) => {
+      queueRevision++;
       const state = get();
       const result = removeQueueItem(state.queue, state.index, removeIndex);
       if (!result.queue.length) {
@@ -1502,6 +1615,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     clearQueue: () => {
+      queueRevision++;
       const previous = get();
       const emptyQueue: Track[] = [];
       clearPlaybackErrorAdvanceTimer();
@@ -1541,6 +1655,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
                 return;
               }
               const position = previous.current ? previous.resumeAt ?? previous.currentTime : 0;
+              queueRevision++;
               set({
                 queue: previous.queue,
                 index: previous.index,
@@ -1579,6 +1694,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     next: async () => {
       clearPlaybackErrorAdvanceTimer();
+      const intent = playIntents.begin();
+      const revision = queueRevision;
+      const isCurrent = () => playIntents.isCurrent(intent) && queueRevision === revision;
       const state = get();
       recordManualSkip(state);
       // A direct call to next() — user skip, keyboard/media shortcut, or
@@ -1600,8 +1718,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         if (repeatModeOf(mode) === 'all') nextIdx = 0;
         else {
           const additions = await get().refillAutoDjQueue(true);
+          if (!isCurrent()) return;
           if (!additions.length) {
             const expanded = await expandQueueFromCurrentContext(state);
+            if (!isCurrent()) return;
             if (!expanded || expanded.index >= expanded.queue.length - 1) {
               engine.pause();
               set({ isPlaying: false });
@@ -1623,6 +1743,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           }
         }
       }
+      if (!isCurrent()) return;
       await commitPlaybackAdvance(get, set, nextIdx, nextShuffleHistory);
     },
 
@@ -1709,6 +1830,21 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       return settings;
     },
 
+    setSampleAccurateGapless: async (enabled) => {
+      const settings = await api.setSettings({ sampleAccurateGapless: enabled });
+      set({ settings });
+      if (settings.sampleAccurateGapless) {
+        const transport = await loadSampleTransport();
+        // Takes over from the next track change; the playing one carries on.
+        if (get().settings?.sampleAccurateGapless) engine.setSampleTransport(transport);
+      } else {
+        const wasActive = engine.isSampleTransportActive();
+        engine.setSampleTransport(null);
+        if (wasActive) await restartCurrentTrackThroughActivePath(get);
+      }
+      return settings;
+    },
+
     setBitPerfectExclusiveDevice: async (deviceId) => {
       const settings = await api.setSettings({ bitPerfectExclusiveDeviceId: deviceId });
       set({ settings });
@@ -1765,6 +1901,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     refillAutoDjQueue: async (force = false) => {
       const state = get();
+      const revision = queueRevision;
+      const isCurrent = () => queueRevision === revision && get().autoDjSmartRuleId === state.autoDjSmartRuleId;
       if (!state.autoDjEnabled || (!state.queue.length && !state.autoDjSmartRuleId)) return [];
       if (
         !force &&
@@ -1811,12 +1949,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // any other queue edit) that lands during that window must not be
       // silently undone by committing onto the stale queue captured above.
       const fresh = get();
-      if (!fresh.autoDjEnabled) return [];
+      if (!fresh.autoDjEnabled || !isCurrent()) return [];
       const remainingAhead = Math.max(0, fresh.queue.length - fresh.index - 1);
       let additions = selectAutoDjAdditions(fresh.queue, candidates, fresh.autoDjTarget, remainingAhead);
       if (!additions.length && sampledFolderRule) {
         const everything = await runRule(false);
-        if (!get().autoDjEnabled) return [];
+        if (!get().autoDjEnabled || !isCurrent()) return [];
         const latest = get();
         additions = selectAutoDjAdditions(
           latest.queue,
@@ -1830,13 +1968,14 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // onto the queue as it stands now, not the one the additions were
       // chosen against.
       const atCommit = get();
-      if (!atCommit.autoDjEnabled) return [];
+      if (!atCommit.autoDjEnabled || !isCurrent()) return [];
       set({ queue: [...atCommit.queue, ...additions] });
       schedulePersistPlaybackSession(get(), true);
       return additions;
     },
 
     setMode: (m) => {
+      queueRevision++;
       const state = get();
       set({
         mode: m,
@@ -1869,29 +2008,35 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const next = [...cur.equalizer];
       next[i] = dB;
       const normalized = normalizeEqValues(next);
+      const revision = ++eqRevision;
+      set({ settings: { ...cur, equalizer: normalized } });
       engine.setEqBand(i, normalized[i] ?? 0);
       const settings = await api.setSettings({ equalizer: normalized });
-      set({ settings });
+      if (revision === eqRevision) set({ settings: { ...get().settings!, equalizer: settings.equalizer } });
     },
 
     setEqPreset: async (values) => {
       const next = normalizeEqValues(values);
+      const revision = ++eqRevision;
+      if (get().settings) set({ settings: { ...get().settings!, equalizer: next, eqEnabled: true } });
       engine.setEqBands(next);
       engine.setEqEnabled(true); // a preset picked while the EQ is off turns it on
       const settings = await api.setSettings({ equalizer: next, eqEnabled: true });
-      set({ settings });
+      if (revision === eqRevision) set({ settings: { ...get().settings!, equalizer: settings.equalizer, eqEnabled: settings.eqEnabled } });
     },
 
     setEqEnabled: async (on) => {
       const cur = get().settings;
       if (!cur) return;
+      const revision = ++eqRevision;
+      set({ settings: { ...cur, eqEnabled: on } });
       // The engine ignores band values while it is disabled, so the flag has
       // to flip in the engine too, not just in settings — "on" used to only
       // push the bands, which left the EQ dead after the first off.
       engine.setEqBands(cur.equalizer);
       engine.setEqEnabled(on);
       const settings = await api.setSettings({ eqEnabled: on });
-      set({ settings });
+      if (revision === eqRevision) set({ settings: { ...get().settings!, eqEnabled: settings.eqEnabled } });
     },
 
     toggleLove: async (id) => {
@@ -1968,6 +2113,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const settings = await api.setSettings({ replayGain: mode });
       set({ settings });
       applyReplayGain(get().current, settings);
+      // The sample transport spliced the next track in with the old mode's
+      // gain; hand it the new one before its first frame plays.
+      const state = get();
+      if (
+        engine.isSampleTransportActive() &&
+        state.current &&
+        lastPreparedHandoffKey === handoffKey(state.current.id, state.index)
+      ) {
+        const next = desiredHandoffTrack(state);
+        if (next && next.id === lastPreparedNextTrackId) prepareEngineTrack(next, settings);
+      }
     },
 
     setLimiterEnabled: async (enabled) => {
@@ -2007,6 +2163,7 @@ if (typeof window !== 'undefined') {
         analyserFftSum: () => number;
         engineCurrentTime: () => number;
         exclusiveInfo: () => ReturnType<AudioEngine['getExclusiveInfo']>;
+        sampleTransportInfo: () => ReturnType<AudioEngine['getSampleTransportInfo']>;
       };
     }).__newampSmoke = {
       seek: (seconds: number) => {
@@ -2051,6 +2208,8 @@ if (typeof window !== 'undefined') {
       // native path engaged and (via analyserFftSum) that the external tap
       // feeds visualizers while the Web Audio graph is silent.
       exclusiveInfo: () => usePlayerStore.getState().engine.getExclusiveInfo(),
+      // Sample-accurate gapless status: which path the current track took.
+      sampleTransportInfo: () => usePlayerStore.getState().engine.getSampleTransportInfo(),
     };
   }
 }

@@ -108,9 +108,16 @@ export function parseCueSheet(content: string, cuePath: string): CueSheetEntry[]
 
   finishTrack();
 
+  // Files keep the sheet's order (a multi-FILE album plays as written); within
+  // a file, tracks go by their INDEX time, so each one ends where the next
+  // starts even when the sheet lists them out of order.
+  const fileOrder = new Map<string, number>();
+  for (const entry of entries) {
+    if (!fileOrder.has(entry.filePath)) fileOrder.set(entry.filePath, fileOrder.size);
+  }
   const out = entries
     .filter((entry) => entry.filePath && Number.isFinite(entry.start) && existsSync(entry.filePath))
-    .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.start - b.start || (a.trackNo ?? 0) - (b.trackNo ?? 0));
+    .sort((a, b) => fileOrder.get(a.filePath)! - fileOrder.get(b.filePath)! || a.start - b.start || (a.trackNo ?? 0) - (b.trackNo ?? 0));
 
   for (let i = 0; i < out.length; i += 1) {
     const current = out[i]!;

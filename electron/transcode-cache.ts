@@ -33,6 +33,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, open, readdir, realpath, rename, stat, unlink, utimes, copyFile } from 'node:fs/promises';
 import { cpus } from 'node:os';
 import { join } from 'node:path';
+import { probeResampler } from './resampler.js';
 import { resolveFfmpegPath, buildPlaybackFlacArgs } from './transcode.js';
 import { caseFoldCachePath } from './cache-key-casing.js';
 
@@ -87,7 +88,9 @@ export function initTranscodeCache(dir: string): void {
       console.error('[newamp] transcode cache dir unavailable; seekable transcode disabled:', err);
       cacheEnabled = false;
     }
-    ffmpegOk = await probeFfmpeg();
+    // Also learn which resampler this ffmpeg runs, so the DSD recipes (which
+    // build their arguments synchronously) never have to probe inline.
+    [ffmpegOk] = await Promise.all([probeFfmpeg(), probeResampler(resolveFfmpegPath())]);
     if (cacheEnabled) {
       await sweepPartFiles().catch(() => {});
       await evictIfNeeded().catch(() => {});

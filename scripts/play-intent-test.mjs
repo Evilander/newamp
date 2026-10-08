@@ -98,7 +98,7 @@ function makePlayEngineTrack(engine, gate) {
 
 const engineSource = await readFile(new URL('../src/audio/engine.ts', import.meta.url), 'utf8');
 assert.match(engineSource, /export type PlayOutcome = 'started' \| 'stale';/, 'the engine must export the PlayOutcome contract');
-assert.match(engineSource, /async play\(src: string, trackId: number \| null, startAt = 0\): Promise<PlayOutcome>/, 'AudioEngine.play must report started/stale');
+assert.match(engineSource, /async play\(src: string, trackId: number \| null, startAt = 0(?:, \w+\?: \w+)?\): Promise<PlayOutcome>/, 'AudioEngine.play must report started/stale');
 assert.match(engineSource, /private async awaitDeckPlay\(deck: Deck, seq: number\): Promise<PlayOutcome>/, 'deck starts must recheck the request sequence after the await');
 assert.match(engineSource, /private async crossfadeTo\([^)]*seq: number\): Promise<PlayOutcome>/, 'the crossfade path must carry the request sequence');
 assert.match(engineSource, /private async playPreparedDeck\([^)]*seq: number\): Promise<PlayOutcome>/, 'the prepared-deck path must carry the request sequence');
@@ -118,7 +118,7 @@ for (const line of awaited) {
   assert.match(line, /^if \(!\(await playEngineTrack\([^)]*\)\)\) return;$/, `unguarded play await in the store: ${line}`);
 }
 // The exclusive-route restart bypasses playEngineTrack and must still invalidate older tickets.
-assert.match(storeSource, /playIntents\.begin\(\);\s*await engine\.play\(toAudioUrl\(current\.path\), current\.id, resumeAt\)/, 'the route restart must take a ticket too');
+assert.match(storeSource, /playIntents\.begin\(\);\s*await engine\.play\(toAudioUrl\(current\.path\), current\.id, resumeAt(?:, trackRouting\(current\))?\)/, 'the route restart must take a ticket too');
 // No side-effect call may follow a bare (unguarded) play.
 for (const fn of ['startLastfmNowPlaying', 'recordLibraryPlay']) {
   const bareFollow = new RegExp(`await playEngineTrack\\([^)]*\\);\\s*(?:lastPlaybackErrorKey = null;\\s*)?${fn}\\(`);

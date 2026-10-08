@@ -18,7 +18,9 @@ import { extname } from 'node:path';
 import { Readable } from 'node:stream';
 
 type PcmChild = ChildProcessByStdio<null, Readable, Readable>;
+import { resamplerFilter, resamplerKindNow } from './resampler.js';
 import { resolveFfmpegPath, transcodeToWavResponse } from './transcode.js';
+import { killChild } from './kill-child.js';
 
 const AUDIO_CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -192,11 +194,7 @@ export async function probePcmStreamInfo(filePath: string): Promise<PcmStreamInf
         windowsHide: true,
       });
       const timer = setTimeout(() => {
-        try {
-          child.kill();
-        } catch {
-          /* gone */
-        }
+        killChild(child);
         done(null);
       }, 15_000);
       child.stderr.setEncoding('utf8');
@@ -274,7 +272,7 @@ function spawnPcmDecoder(filePath: string, seekSec: number): PcmChild {
   const args = ['-hide_banner', '-nostdin', '-loglevel', 'error'];
   if (seekSec > 0) args.push('-ss', seekSec.toFixed(3));
   args.push('-i', filePath, '-map', '0:a:0', '-vn');
-  if (dsd) args.push('-af', 'aresample=resampler=soxr:precision=28', '-ar', '88200');
+  if (dsd) args.push('-af', resamplerFilter(resamplerKindNow(resolveFfmpegPath())), '-ar', '88200');
   args.push('-acodec', 'pcm_f32le', '-ac', '2', '-f', 'f32le', 'pipe:1');
   return spawn(resolveFfmpegPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
 }
@@ -299,13 +297,7 @@ function pcmBodyStream(
   let closed = false;
 
   const kill = () => {
-    if (child && !child.killed) {
-      try {
-        child.kill();
-      } catch {
-        /* gone */
-      }
-    }
+    if (child && !child.killed) killChild(child);
   };
 
   return new ReadableStream<Uint8Array>({

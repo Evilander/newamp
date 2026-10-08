@@ -39,6 +39,49 @@ assert.equal(entries[0].genre, 'Post-Punk');
 assert.equal(entries[0].year, 1981);
 assert.deepEqual(cueAudioPaths(entries), [albumPath]);
 
+// Tracks listed out of INDEX order within one FILE still end where the next
+// one starts; nothing is left to play on to the end of the file.
+const shuffledCue = `
+FILE "archive-album.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "First Index"
+    INDEX 01 00:00:00
+  TRACK 03 AUDIO
+    TITLE "Last Index"
+    INDEX 01 03:05:00
+  TRACK 02 AUDIO
+    TITLE "Second Index"
+    INDEX 01 01:31:00
+`;
+const shuffled = parseCueSheet(shuffledCue, cuePath);
+assert.deepEqual(shuffled.map((entry) => entry.title), ['First Index', 'Second Index', 'Last Index'], 'tracks within a FILE play in INDEX order');
+assert.deepEqual(shuffled.map((entry) => entry.end == null ? null : Math.round(entry.end)), [91, 185, null], 'each track ends where the next INDEX starts');
+
+// Several FILEs play in the sheet's order, not their names' order.
+const sideB = join(smokeRoot, 'b-side.flac');
+const sideA = join(smokeRoot, 'a-side.flac');
+await writeFile(sideB, 'cue source placeholder', 'utf8');
+await writeFile(sideA, 'cue source placeholder', 'utf8');
+const multiFileCue = `
+FILE "b-side.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "B1"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "B2"
+    INDEX 01 02:00:00
+FILE "a-side.flac" WAVE
+  TRACK 03 AUDIO
+    TITLE "A1"
+    INDEX 01 00:00:00
+  TRACK 04 AUDIO
+    TITLE "A2"
+    INDEX 01 01:00:00
+`;
+const multi = parseCueSheet(multiFileCue, join(smokeRoot, 'two-files.cue'));
+assert.deepEqual(multi.map((entry) => entry.title), ['B1', 'B2', 'A1', 'A2'], 'FILEs keep the sheet order');
+assert.deepEqual(multi.map((entry) => entry.end == null ? null : Math.round(entry.end)), [120, null, 60, null], 'a track never ends at a cue point in another FILE');
+
 const baseTrack = {
   id: 42,
   path: albumPath,

@@ -26,7 +26,7 @@ const timeout = setTimeout(() => {
 }, 15000);
 
 const controller = new AbortController();
-const request = new Request(`newamp://track/${encodeURI(filePath.replace(/\\/g, '/'))}`, {
+const request = new Request(`newamp://track/${encodeURIComponent(filePath.replace(/\\/g, '/'))}`, {
   signal: controller.signal,
 });
 const res = transcodeToWavResponse(filePath, request);

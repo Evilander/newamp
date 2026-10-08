@@ -3,9 +3,10 @@
 // Owns the native addon (native/newamp-audio): resolves a track's source
 // format, negotiates a device-NATIVE exclusive format from probeDevice()
 // (never trusting miniaudio's hidden converter — if the source rate isn't
-// natively supported we resample EXPLICITLY in ffmpeg with soxr and report it
-// honestly), decodes with ffmpeg to raw PCM, and pushes it into the addon's
-// lock-free ring with backpressure.
+// natively supported we resample EXPLICITLY in ffmpeg, soxr where the build has
+// it and a high-precision swr filter otherwise, and report which one ran),
+// decodes with ffmpeg to raw PCM, and pushes it into the addon's lock-free ring
+// with backpressure.
 //
 // Position model: the addon's framesRendered counter is monotonic for the
 // lifetime of an open device and NEVER reset mid-session. A segment list maps
@@ -25,7 +26,9 @@ import { join, dirname, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import type { Readable } from 'node:stream';
+import { resamplerFilter, resamplerKindNow } from './resampler.js';
 import { resolveFfmpegPath } from './transcode.js';
+import { killChild } from './kill-child.js';
 import type {
   ExclusiveDeviceInfo,
   ExclusiveEventPayload,
@@ -74,10 +77,10 @@ interface NativeAddon {
 }
 
 interface Segment {
-  trackId: number;
+  source: ExclusiveTrackSource;
+  negotiated: ExclusiveNegotiated;
   startFrame: number;
   offsetSec: number;
-  durationSec: number | null;
 }
 
 interface OpenFormat {
@@ -101,6 +104,7 @@ const POSITION_INTERVAL_MS = 250;
 const IDLE_RELEASE_MS = 15000;
 const PUMP_INTERVAL_MS = 40;
 const RING_MS = 2000;
+const FIRST_AUDIO_TIMEOUT_MS = 15000;
 // play()/seek() reset segments to a single entry, but an unbroken same-format
 // gapless chain only ever pushes — cap it so a long chain (radio mode, an
 // all-FLAC album marathon) can't grow this array unbounded.
@@ -147,22 +151,24 @@ export function classifyTrackSource(path: string): { lossless: boolean; dsd: boo
  * Pick a device-native exclusive format for a source. Honesty rules:
  * - the chosen (format, rate, channels) MUST come from the probe list, so the
  *   device runs it natively and nothing converts behind our back;
- * - any rate change is done explicitly in ffmpeg (soxr) and flagged;
+ * - any rate change is done explicitly in ffmpeg and flagged (the caller
+ *   records which resampler, see electron/resampler.ts);
  * - bitPerfect is the strict claim: lossless source, rate preserved, bit depth
  *   preserved, stereo-to-stereo, no DSD conversion.
  */
 export function chooseExclusiveFormat(
   source: ExclusiveTrackSource,
   formats: Array<{ format: string; channels: number; sampleRate: number }>,
-): Omit<ExclusiveNegotiated, 'deviceName'> | null {
+): Omit<ExclusiveNegotiated, 'deviceName' | 'resampler'> | null {
   const usable = formats.filter(
     (f): f is { format: PcmFormat; channels: number; sampleRate: number } =>
-      (f.format === 's16' || f.format === 's24' || f.format === 's32' || f.format === 'f32') && f.channels >= 1,
+      (f.format === 's16' || f.format === 's24' || f.format === 's32' || f.format === 'f32') &&
+      (f.channels === 2 || f.channels === 0),
   );
   if (usable.length === 0) return null;
 
   const channels = 2;
-  // DSD has no PCM rate; the app-wide policy converts it at 88.2k (soxr).
+  // DSD has no PCM rate; the app-wide policy converts it at 88.2k.
   const sourceRate = source.dsd ? 88200 : source.sampleRate && source.sampleRate > 0 ? source.sampleRate : null;
 
   const rates = [...new Set(usable.map((f) => f.sampleRate))];
@@ -236,6 +242,11 @@ export function chooseExclusiveFormat(
   };
 }
 
+/** Which resampler a negotiated conversion runs on; asks ffmpeg only when there is one. */
+function resamplerFor(choice: { resampled: boolean }): ExclusiveNegotiated['resampler'] {
+  return choice.resampled ? resamplerKindNow(resolveFfmpegPath()) : null;
+}
+
 export class ExclusiveOutput {
   private readonly addon: NativeAddon | null;
   private generation = 0;
@@ -253,7 +264,9 @@ export class ExclusiveOutput {
   private started = false;
   private eosSent = false;
   private endedEmitted = false;
-  private lastEmittedTrackId: number | null = null;
+  private lastEmittedSegment: Segment | null = null;
+  private pendingChain: Segment | null = null;
+  private waitingSince = 0;
   private framesWrittenTotal = 0;
   private pausedAtSec: number | null = null;
 
@@ -297,10 +310,11 @@ export class ExclusiveOutput {
   }
 
   status(): { active: boolean; trackId: number | null; negotiated: ExclusiveNegotiated | null } {
+    const audible = this.audibleSource();
     return {
       active: this.current != null,
       trackId: this.currentTrackIdAtPlayhead(),
-      negotiated: this.current?.negotiated ?? null,
+      negotiated: audible?.negotiated ?? null,
     };
   }
 
@@ -315,21 +329,23 @@ export class ExclusiveOutput {
 
     // Chained continuation: the store advanced its queue after our boundary
     // event; the stream is already playing this track. Ack without touching it.
+    const audible = this.openFormat && this.addon ? this.activeSegmentAt(this.addon.stats().framesRendered) : null;
     if (
       this.current &&
       this.playing &&
-      source.trackId === this.currentTrackIdAtPlayhead() &&
-      this.segments.some((s) => s.trackId === source.trackId) &&
+      audible && this.pendingChain === audible &&
+      source.trackId === audible.source.trackId &&
       startAt <= 0.5
     ) {
-      return { negotiated: this.current.negotiated, chained: true };
+      this.pendingChain = null;
+      return { negotiated: audible.negotiated, chained: true };
     }
 
     const probe = this.probeDevice(deviceId);
     if (!probe) throw new Error('Exclusive device probe failed.');
     const chosen = chooseExclusiveFormat(source, probe.formats);
     if (!chosen) throw new Error(`No usable exclusive format on ${probe.name}.`);
-    const negotiated: ExclusiveNegotiated = { ...chosen, deviceName: probe.name };
+    const negotiated: ExclusiveNegotiated = { ...chosen, deviceName: probe.name, resampler: resamplerFor(chosen) };
 
     // Only a replacement decoder gets a new generation; a chain ack keeps
     // the callbacks of the already-running decoder valid.
@@ -337,6 +353,8 @@ export class ExclusiveOutput {
     this.killFfmpeg();
     this.stopTimers();
     this.pausedAtSec = null;
+    this.pendingChain = null;
+    this.prepared = null;
 
     const sameOpen =
       this.openFormat &&
@@ -393,17 +411,18 @@ export class ExclusiveOutput {
     this.eosSent = false;
     this.endedEmitted = false;
     this.started = false;
+    this.waitingSince = Date.now();
     this.playing = true;
     this.current = { source, negotiated };
-    this.lastEmittedTrackId = source.trackId;
     this.segments = [
       {
-        trackId: source.trackId,
+        source,
+        negotiated,
         startFrame: this.framesWrittenTotal,
         offsetSec: Math.max(0, startAt),
-        durationSec: source.durationSec,
       },
     ];
+    this.lastEmittedSegment = this.segments[0]!;
 
     this.spawnDecoder(source, Math.max(0, startAt), gen);
     this.startTimers();
@@ -433,22 +452,32 @@ export class ExclusiveOutput {
     this.clearIdleTimer();
     if (this.openFormat) {
       this.playing = true;
-      this.addon.start();
+      this.waitingSince = Date.now();
+      if (this.started || this.addon.stats().bufferedFrames > 0) {
+        this.started = true;
+        this.addon.start();
+      }
       this.resumePump();
       this.startTimers();
       this.emitState();
       return;
     }
     // Device was relinquished during the pause — reopen and reseek.
-    const source = this.current.source;
+    const source = this.audibleSource()!.source;
     const at = this.pausedAtSec ?? 0;
     await this.play(source, at, deviceId);
   }
 
   seek(seconds: number): void {
     if (!this.addon || !this.current) return;
+    const audible = this.audibleSource()!;
+    this.current = audible;
+    if (!this.openFormat) {
+      this.pausedAtSec = Math.max(0, Math.min(seconds, audible.source.durationSec ?? seconds));
+      return;
+    }
     const gen = ++this.generation;
-    const source = this.current.source;
+    const { source, negotiated } = audible;
     const target = Math.max(0, Math.min(seconds, source.durationSec ?? seconds));
     this.killFfmpeg();
     this.addon.stopDevice();
@@ -457,15 +486,19 @@ export class ExclusiveOutput {
     this.eosSent = false;
     this.endedEmitted = false;
     this.started = false;
+    this.waitingSince = Date.now();
+    this.pendingChain = null;
+    this.prepared = null;
     this.framesWrittenTotal = this.addon.stats().framesRendered;
     this.segments = [
       {
-        trackId: source.trackId,
+        source,
+        negotiated,
         startFrame: this.framesWrittenTotal,
         offsetSec: target,
-        durationSec: source.durationSec,
       },
     ];
+    this.lastEmittedSegment = this.segments[0]!;
     this.spawnDecoder(source, target, gen);
     if (this.playing) {
       this.startTimers();
@@ -482,6 +515,8 @@ export class ExclusiveOutput {
     this.clearIdleTimer();
     this.playing = false;
     this.current = null;
+    this.lastEmittedSegment = null;
+    this.pendingChain = null;
     this.prepared = null;
     this.segments = [];
     this.pausedAtSec = null;
@@ -496,6 +531,8 @@ export class ExclusiveOutput {
 
   private releaseDevice(): void {
     if (!this.addon) return;
+    this.current = this.audibleSource();
+    this.pendingChain = null;
     // A paused/ended decode is useless once the device is relinquished —
     // resume always respawns ffmpeg at the saved position. Without this the
     // idle-release path would keep a suspended ffmpeg child alive forever.
@@ -531,9 +568,15 @@ export class ExclusiveOutput {
   }
 
   private currentTrackIdAtPlayhead(rendered?: number): number | null {
-    if (!this.addon || this.segments.length === 0) return this.current?.source.trackId ?? null;
+    if (!this.addon || !this.openFormat || this.segments.length === 0) return this.current?.source.trackId ?? null;
     const frames = rendered ?? this.addon.stats().framesRendered;
-    return (this.activeSegmentAt(frames) ?? this.segments[0]!).trackId;
+    return (this.activeSegmentAt(frames) ?? this.segments[0]!).source.trackId;
+  }
+
+  private audibleSource(rendered?: number): { source: ExclusiveTrackSource; negotiated: ExclusiveNegotiated } | null {
+    if (!this.addon || !this.openFormat) return this.current;
+    const segment = this.activeSegmentAt(rendered ?? this.addon.stats().framesRendered);
+    return segment ? { source: segment.source, negotiated: segment.negotiated } : this.current;
   }
 
   private positionSec(rendered?: number): number {
@@ -552,8 +595,10 @@ export class ExclusiveOutput {
       source.dsd ||
       (source.sampleRate != null && source.sampleRate > 0 && source.sampleRate !== this.openFormat.sampleRate) ||
       source.sampleRate == null;
+    // The same resampler the negotiated format reports, even if the probe
+    // has answered differently since.
     const resampleArgs = needsResample
-      ? ['-af', 'aresample=resampler=soxr:precision=28', '-ar', String(this.openFormat.sampleRate)]
+      ? ['-af', resamplerFilter(this.current?.negotiated.resampler ?? resamplerKindNow(ffmpegPath)), '-ar', String(this.openFormat.sampleRate)]
       : [];
     const args = [
       '-hide_banner',
@@ -720,15 +765,18 @@ export class ExclusiveOutput {
         // Splice the next track into the same ring at the exact frame boundary.
         this.prepared = null;
         this.segments.push({
-          trackId: next.trackId,
+          source: next,
+          negotiated: { ...nextChoice, deviceName: this.openFormat.deviceName, resampler: resamplerFor(nextChoice) },
           startFrame: this.framesWrittenTotal,
           offsetSec: 0,
-          durationSec: next.durationSec,
         });
         if (this.segments.length > SEGMENT_LOG_CAP) {
           this.segments.splice(0, this.segments.length - SEGMENT_LOG_CAP);
         }
-        this.current = { source: next, negotiated: { ...nextChoice, deviceName: this.openFormat.deviceName } };
+        this.current = {
+          source: next,
+          negotiated: { ...nextChoice, deviceName: this.openFormat.deviceName, resampler: resamplerFor(nextChoice) },
+        };
         this.spawnDecoder(next, 0, gen);
         return;
       }
@@ -767,15 +815,15 @@ export class ExclusiveOutput {
 
     // Track-boundary crossing (chained gapless): the playhead entered the next
     // segment — tell the renderer so the queue/UI advance while audio never gaps.
-    const playheadTrack = this.currentTrackIdAtPlayhead(stats.framesRendered);
-    if (playheadTrack != null && playheadTrack !== this.lastEmittedTrackId) {
-      this.lastEmittedTrackId = playheadTrack;
-      const seg = this.segments.find((s) => s.trackId === playheadTrack);
+    const seg = this.activeSegmentAt(stats.framesRendered);
+    if (seg && seg !== this.lastEmittedSegment) {
+      this.lastEmittedSegment = seg;
+      this.pendingChain = seg;
       this.deps.send({
         type: 'boundary',
-        trackId: playheadTrack,
+        trackId: seg.source.trackId,
         positionSec: this.positionSec(stats.framesRendered),
-        durationSec: seg?.durationSec ?? null,
+        durationSec: seg.source.durationSec,
       });
       // No position event this tick: a 'position' arriving in the same beat
       // as the boundary/ended state change is what made the renderer's stuck
@@ -798,7 +846,16 @@ export class ExclusiveOutput {
       return;
     }
 
-    if (this.playing && !stats.running && !stats.drained) {
+    if (this.playing && !this.started && Date.now() - this.waitingSince >= FIRST_AUDIO_TIMEOUT_MS) {
+      const trackId = this.currentTrackIdAtPlayhead(stats.framesRendered) ?? this.current.source.trackId;
+      this.generation++;
+      this.playing = false;
+      this.releaseDevice();
+      this.deps.send({ type: 'error', trackId, message: 'Timed out waiting for decoded audio.' });
+      return;
+    }
+
+    if (this.playing && this.started && !stats.running && !stats.drained) {
       // Expected running but the stream halted — device lost (unplugged, taken
       // by another exclusive app, rate changed externally). Invalidate the
       // generation FIRST so any straggling ffmpeg stdout data is dropped by
@@ -807,7 +864,7 @@ export class ExclusiveOutput {
       this.playing = false;
       this.deps.send({
         type: 'device-lost',
-        trackId: this.current.source.trackId,
+        trackId: this.currentTrackIdAtPlayhead(stats.framesRendered) ?? this.current.source.trackId,
         positionSec: this.positionSec(stats.framesRendered),
       });
       this.stopTimers();
@@ -827,7 +884,7 @@ export class ExclusiveOutput {
       trackId,
       positionSec: this.positionSec(stats.framesRendered),
       durationSec:
-        this.segments.find((s) => s.trackId === trackId)?.durationSec ??
+        this.activeSegmentAt(stats.framesRendered)?.source.durationSec ??
         this.current.source.durationSec,
       underruns: stats.underruns,
       bufferedFrames: stats.bufferedFrames,
@@ -835,14 +892,15 @@ export class ExclusiveOutput {
   }
 
   private emitState(): void {
-    if (!this.current) return;
+    const audible = this.audibleSource();
+    if (!audible) return;
     this.deps.send({
       type: 'state',
-      trackId: this.current.source.trackId,
+      trackId: audible.source.trackId,
       playing: this.playing,
-      negotiated: this.current.negotiated,
+      negotiated: audible.negotiated,
       positionSec: this.positionSec(),
-      durationSec: this.current.source.durationSec,
+      durationSec: audible.source.durationSec,
     });
   }
 
@@ -871,13 +929,7 @@ export class ExclusiveOutput {
     this.tapRemainder = Buffer.alloc(0);
     this.stopPump(false);
     this.pendingChunk = null;
-    if (this.ffmpeg && !this.ffmpeg.killed) {
-      try {
-        this.ffmpeg.kill();
-      } catch {
-        /* already gone */
-      }
-    }
+    if (this.ffmpeg && !this.ffmpeg.killed) killChild(this.ffmpeg);
     this.ffmpeg = null;
   }
 }

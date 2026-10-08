@@ -4,17 +4,30 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { readFileSync } from 'node:fs';
+import { build } from 'esbuild';
+
+// Compile current source in memory; substitute only native/process boundaries.
+const sourceCode = readFileSync(new URL('../electron/exclusive-output.ts', import.meta.url), 'utf8')
+  .replace('this.addon = loadAddon();', 'this.addon = null;')
+  .replace("import { resamplerFilter, resamplerKindNow } from './resampler.js';", "const resamplerFilter = () => 'aresample'; const resamplerKindNow = () => 'swr';")
+  .replace("import { resolveFfmpegPath } from './transcode.js';", "const resolveFfmpegPath = () => 'fixture-ffmpeg';")
+  .replace("import { killChild } from './kill-child.js';", 'const killChild = (child) => child.kill();');
+const compiled = await build({ stdin: { contents: sourceCode, loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
 
 const originalSpawn = cp.spawn;
 const originalTimeout = globalThis.setTimeout;
 const originalClearTimeout = globalThis.clearTimeout;
+const deadline = originalTimeout(() => { console.error('Exclusive lifecycle regressions timed out'); process.exit(1); }, 10000);
+deadline.unref();
 const timers = new Map();
 const children = [];
-cp.spawn = () => {
+cp.spawn = (_path, args) => {
   const child = new EventEmitter();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.kill = () => { child.killed = true; };
+  child.args = args;
   children.push(child);
   return child;
 };
@@ -25,7 +38,7 @@ globalThis.setTimeout = (callback, ms) => {
   return handle;
 };
 globalThis.clearTimeout = (handle) => timers.delete(handle);
-const { ExclusiveOutput } = await import('../dist-electron/electron/exclusive-output.js');
+const { ExclusiveOutput, chooseExclusiveFormat } = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
 
 function fixture(format = 's16') {
   let written = 0, rendered = 0, running = false, eos = false, maxWrite = Infinity;
@@ -42,10 +55,85 @@ function fixture(format = 's16') {
     clear: () => { written = rendered * bpf; }, setEos: (value) => { eos = value; },
   };
   const source = { trackId: 1, path: '/a.flac', sampleRate: 44100, channels: 2, bitDepth: format === 's24' ? 24 : 16, durationSec: 30, lossless: true, dsd: false };
-  return { output, source, events, written: () => written, render: (n) => { rendered = n; }, limitWrite: (n) => { maxWrite = n; } };
+  return { output, source, events, written: () => written, render: (n) => { rendered = n; }, halt: () => { running = false; }, limitWrite: (n) => { maxWrite = n; } };
 }
 
 try {
+  {
+    const f = fixture();
+    try {
+      await f.output.play(f.source, 0, null);
+      f.output.pollPlayback();
+      assert.equal(f.events.some((e) => e.type === 'device-lost'), false, 'waiting for first PCM is not device loss');
+      children.at(-1).stdout.emit('data', Buffer.alloc(40));
+      f.output.pollPlayback();
+      f.halt();
+      f.output.pollPlayback();
+      assert.equal(f.events.filter((e) => e.type === 'device-lost').length, 1, 'a stopped device after startup is still detected');
+    } finally { f.output.dispose(); }
+  }
+  {
+    const f = fixture();
+    try {
+      await f.output.play(f.source, 0, null);
+      f.output.waitingSince -= 15001;
+      f.output.pollPlayback();
+      assert.match(f.events.at(-1).message, /Timed out waiting/);
+      assert.equal(children.at(-1).killed, true, 'startup timeout releases decoder');
+    } finally { f.output.dispose(); }
+  }
+  for (const action of ['seek', 'pause-release']) {
+    const f = fixture();
+    try {
+      await f.output.play(f.source, 0, null);
+      children.at(-1).stdout.emit('data', Buffer.alloc(40));
+      f.output.prepareNext({ ...f.source, trackId: 2, path: '/b.flac', durationSec: 70 });
+      children.at(-1).stdout.emit('end');
+      assert.equal(f.output.status().trackId, 1);
+      if (action === 'seek') f.output.seek(5);
+      else {
+        f.output.pause();
+        assert.equal(f.events.at(-1).trackId, 1, 'pause state describes the audible source');
+        assert.equal(f.events.at(-1).durationSec, 30);
+        const timer = f.output.idleTimer;
+        timers.delete(timer);
+        timer.callback();
+        await f.output.resume(null);
+      }
+      const args = children.at(-1).args;
+      assert.equal(args[args.indexOf('-i') + 1], '/a.flac', `${action} acts on the audible source`);
+    } finally { f.output.dispose(); }
+  }
+  {
+    const f = fixture();
+    try {
+      await f.output.play(f.source, 0, null);
+      children.at(-1).stdout.emit('data', Buffer.alloc(40));
+      const repeat = { ...f.source, durationSec: 70 };
+      f.output.prepareNext(repeat);
+      children.at(-1).stdout.emit('end');
+      children.at(-1).stdout.emit('data', Buffer.alloc(40));
+      f.render(10);
+      f.output.pollPlayback();
+      assert.equal(f.events.at(-1).type, 'boundary', 'repeated track IDs still cross segment boundaries');
+      assert.equal(f.events.at(-1).durationSec, 70);
+      assert.equal((await f.output.play(repeat, 0, null)).chained, true);
+      f.output.pollPlayback();
+      assert.equal(f.events.at(-1).durationSec, 70, 'position uses this occurrence of a repeated track');
+    } finally { f.output.dispose(); }
+  }
+  {
+    const source = fixture().source;
+    assert.equal(chooseExclusiveFormat(source, [{ format: 's16', channels: 1, sampleRate: 44100 }]), null);
+    const chosen = chooseExclusiveFormat(source, [
+      { format: 's16', channels: 6, sampleRate: 44100 },
+      { format: 's24', channels: 2, sampleRate: 48000 },
+    ]);
+    assert.equal(chosen.format, 's24');
+    assert.equal(chosen.sampleRate, 48000);
+    assert.equal(chosen.resampled, true);
+    assert.equal(chooseExclusiveFormat(source, [{ format: 's16', channels: 0, sampleRate: 0 }]).sampleRate, 44100);
+  }
   {
     const f = fixture();
     try {
@@ -116,10 +204,11 @@ try {
     } finally { f.output.dispose(); }
   }
   assert.equal(timers.size, 0);
-  console.log('PASS exclusive output: gapless acknowledgement, idle release, split PCM frames');
+  console.log('PASS exclusive output: startup, audible-source transport, repeated segments, format tuples, idle release, split PCM frames');
 } finally {
   cp.spawn = originalSpawn;
   syncBuiltinESMExports();
   globalThis.setTimeout = originalTimeout;
   globalThis.clearTimeout = originalClearTimeout;
+  originalClearTimeout(deadline);
 }
