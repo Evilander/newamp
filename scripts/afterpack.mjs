@@ -40,6 +40,13 @@ function verifyMacFfmpegArch(context) {
     throw new Error(`afterPack: bundled ffmpeg arch ${got} does not match packaged arch ${want} (${ffmpeg})`);
   }
   console.log(`afterPack: ffmpeg arch OK (${got}) for ${want}`);
+  const addon = join(context.appOutDir, 'NewAmp.app', 'Contents', 'Resources', 'app.asar.unpacked',
+    'native', 'newamp-audio', 'prebuilt', `darwin-${want}`, 'newamp_audio.node');
+  if (!existsSync(addon)) throw new Error(`afterPack: native audio addon missing for ${want}`);
+  const addonArch = detectMachOArch(addon);
+  if (addonArch !== want && addonArch !== 'universal') {
+    throw new Error(`afterPack: native audio addon ${addonArch} does not match ${want}`);
+  }
 }
 
 function dropWebGpuBinaries(context) {

@@ -42,9 +42,13 @@ jobs:
   verify:
     name: Typecheck · Build · Smokes
     runs-on: ubuntu-latest
+    env:
+      NEWAMP_ALGO_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4

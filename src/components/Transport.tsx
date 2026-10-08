@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
-import { Visualizer } from './Visualizer';
 import { formatTime, playbackCodecLabel } from '../lib/format';
 import { api } from '../lib/api';
 import { VolumeSlider } from './VolumeSlider';
@@ -10,6 +9,12 @@ import { PrevIcon, NextIcon, StopIcon, PlayPauseIcon, ShuffleIcon, RepeatIcon } 
 import { ScrubBar } from './ScrubBar';
 import { ArtistLink, AlbumLink } from './EntityLink';
 import { SignalPathBadge } from './SignalPathBadge';
+
+// The mini spectrum is the only thing in the startup shell that needs the
+// visualizer module, and that module drags the whole Eviland stack in with
+// it. Loading it on its own keeps all of that out of the main chunk; the
+// window stays hidden behind the splash long enough that it arrives first.
+const Visualizer = lazy(() => import('./Visualizer').then((module) => ({ default: module.Visualizer })));
 
 export function Transport(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
@@ -145,7 +150,9 @@ export function Transport(): JSX.Element {
               )}
             </div>
           </div>
-          <Visualizer mode="mini" width={120} height={36} />
+          <Suspense fallback={<div style={{ width: 120, height: 36 }} />}>
+            <Visualizer mode="mini" width={120} height={36} />
+          </Suspense>
         </div>
 
         <div className="flex items-center gap-2">
