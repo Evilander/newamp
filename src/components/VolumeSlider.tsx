@@ -5,7 +5,8 @@
 // The slider is a native <input type="range"> on top of a gradient track div
 // so we keep accessibility and keyboard control while showing the danger zone.
 
-import type { CSSProperties } from 'react';
+import { useEffect, useRef, type CSSProperties } from 'react';
+import { clampVolume, wheelVolumeDelta } from '../lib/wheel-volume';
 
 export const VOLUME_BOOST_MAX = 2;
 
@@ -46,6 +47,23 @@ export function VolumeSlider({
 }: VolumeSliderProps): JSX.Element {
   const safe = Math.max(0, Math.min(VOLUME_BOOST_MAX, value));
   const boost = safe > 1;
+  const rootRef = useRef<HTMLDivElement>(null);
+  const latest = useRef({ value: safe, onChange });
+  latest.current = { value: safe, onChange };
+  // Wheel over the slider nudges the volume. Bound by hand because React's
+  // onWheel is passive and couldn't stop the view behind it from scrolling.
+  useEffect(() => {
+    const node = rootRef.current;
+    if (!node) return;
+    const onWheel = (event: WheelEvent): void => {
+      const delta = wheelVolumeDelta(event);
+      if (delta === 0) return;
+      event.preventDefault();
+      latest.current.onChange(clampVolume(latest.current.value + delta));
+    };
+    node.addEventListener('wheel', onWheel, { passive: false });
+    return () => node.removeEventListener('wheel', onWheel);
+  }, []);
   const fillPct = (safe / VOLUME_BOOST_MAX) * 100;
   // Unity gain (100%) sits at exactly 50% of the track.
   const unityPct = 50;
@@ -68,7 +86,7 @@ export function VolumeSlider({
           color-mix(in srgb, var(--error) 35%, var(--panel-2)) 100%)`,
   };
   return (
-    <div className={`volume-slider ${boost ? 'is-boosted' : ''} ${className ?? ''}`}>
+    <div ref={rootRef} className={`volume-slider ${boost ? 'is-boosted' : ''} ${className ?? ''}`}>
       {showLabel ? (
         <span
           className="volume-slider-label"

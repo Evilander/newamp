@@ -32,6 +32,7 @@ import { ScrubBar } from './ScrubBar';
 import { EvilandMemoryBadge } from './EvilandMemoryBadge';
 import { Gear, Dice } from './Icons';
 import { requestPacedFrame } from '../lib/pacedFrame';
+import { clampVolume, wheelVolumeDelta } from '../lib/wheel-volume';
 
 // Preset registry. `group` drives the labeled sections in the new preset
 // picker popover so users can scan by category instead of one long rail. The
@@ -567,10 +568,9 @@ export function FullscreenVisualizer(): JSX.Element {
         event.target.closest('input, select, [data-newamp-viz-volume-input]')
       ) return;
       event.preventDefault();
-      const step = event.shiftKey ? 0.12 : 0.04;
-      const delta = event.deltaY > 0 ? -step : step;
-      const next = Math.max(0, Math.min(2, wheelVolumeRef.current + delta));
-      void wheelSetVolumeRef.current(next);
+      const delta = wheelVolumeDelta(event);
+      if (delta === 0) return;
+      void wheelSetVolumeRef.current(clampVolume(wheelVolumeRef.current + delta));
     }
     // Bind on the root via ref — keeps the listener attached to the
     // exact DOM node React owns instead of a CSS-selector lookup that
@@ -1845,9 +1845,8 @@ export function FullscreenVisualizer(): JSX.Element {
               if (Number.isFinite(raw)) void setVolume(Math.max(0, Math.min(2, raw / 100)));
             }}
             onWheel={(event) => {
-              event.preventDefault();
-              const delta = event.deltaY > 0 ? -0.05 : 0.05;
-              void setVolume(Math.max(0, Math.min(2, volume + delta)));
+              const delta = wheelVolumeDelta(event);
+              if (delta !== 0) void setVolume(clampVolume(volume + delta));
             }}
             aria-label="Visualizer volume"
             title={`Volume ${volumeLabel(volume)} — drag or scroll to change`}

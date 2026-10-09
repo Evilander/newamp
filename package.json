@@ -52,6 +52,7 @@
     "test:support-restore-transaction": "node scripts/support-restore-transaction-test.mjs",
     "test:audio-state-regressions": "node scripts/audio-state-regressions-test.mjs",
     "test:ui-regressions": "node scripts/ui-regressions-test.mjs",
+    "test:wheel-volume": "node scripts/wheel-volume-test.mjs",
     "test:settings-ai-runtime": "npm run build:electron && node scripts/settings-ai-runtime-test.mjs",
     "test:playback-lifecycle": "node scripts/playback-lifecycle-test.mjs",
     "test:eq-toggle": "node scripts/eq-toggle-test.mjs",
