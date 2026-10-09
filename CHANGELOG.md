@@ -5,6 +5,27 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- The Pin button in deck mode now works. A deck floats over other windows
+  only while it's pinned, which is what the button showed all along.
+- Scrolling the wheel over the volume slider in the fullscreen visualizer
+  moved the volume a fixed step per event, so a trackpad or Magic Mouse
+  flick, which sends dozens of events, could jump it by half the range. It
+  now follows how far the wheel moved. The main volume slider answers the
+  wheel too.
+- The projector window's mouse pointer never came back once it had hidden.
+  It shows on any movement and hides again after two seconds of rest.
+- Skin Workshop: a colour written as rgba() or hsl() had no colour picker.
+  Every colour has one now and keeps its transparency, each setting says
+  what it changes, and a value the skin can't accept is marked instead of
+  being ignored.
+- Text size now applies to text in the app's standard sizes as well, not
+  only the sidebar and transport. Panels with fixed sizes still don't follow
+  it.
+
 ## [2.5.0] - 2026-10-08
 
 ### Added

@@ -356,8 +356,11 @@ export default function App(): JSX.Element {
     if (!compact) void winctl.setCompact(false);
   }, [compact]);
 
+  // The Pin button decides this in both modes. Forcing it on in deck mode
+  // left the deck floating with its own Pin button showing off and doing
+  // nothing. Re-asserted on a mode switch so the main process can't drift.
   useEffect(() => {
-    void winctl.setAlwaysOnTop(compact || alwaysOnTop);
+    void winctl.setAlwaysOnTop(alwaysOnTop);
   }, [compact, alwaysOnTop]);
 
   if (compact) {

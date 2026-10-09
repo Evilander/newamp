@@ -2743,11 +2743,10 @@ function registerIpc(): void {
       mainWin.setMinimumSize(Math.min(280, width), Math.min(100, height));
       mainWin.setSize(width, height, true);
       mainWin.setResizable(false);
-      mainWin.setAlwaysOnTop(true, 'floating');
+      // Always-on-top is the renderer's call (the Pin button), in both modes.
       return;
     }
     mainWin.setResizable(true);
-    mainWin.setAlwaysOnTop(false);
     mainWin.setMinimumSize(980, 640);
     // Pull the window above the minimum first if it is currently smaller, then
     // restore. Without this, Electron silently grows it to (980,640) on
@@ -3279,6 +3278,16 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
       capture = { width: 48, height: 27, lit: Math.round(litFraction * 1296), sampled: 1296, litFraction, source: 'live-composition-readback' };
     }
     const finalStats = await detachedVizWin.webContents.executeJavaScript('window.__newampDetachedStats', true);
+    // The pointer hides when idle and must come back on any movement.
+    const cursor = await detachedVizWin.webContents.executeJavaScript(
+      `(async () => {
+        const before = getComputedStyle(document.body).cursor;
+        window.dispatchEvent(new MouseEvent('mousemove', { clientX: 20, clientY: 20 }));
+        await new Promise((r) => setTimeout(r, 50));
+        return { before, afterMove: getComputedStyle(document.body).cursor };
+      })()`,
+      true,
+    );
 
     // Look-ahead, end to end: the projector's producer asked for the fixture's
     // song score over IPC, ffmpeg decoded it, and frames now carry its cues.
@@ -3296,6 +3305,7 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
       detached: finalStats,
       firstStats: stats,
       capture,
+      cursor,
       lookAhead,
     };
     console.log(`[newamp-ui-detached-viz-smoke] ${JSON.stringify(result)}`);
@@ -3520,10 +3530,24 @@ async function runUiDeckSmoke(win: BrowserWindow): Promise<void> {
       ),
     ]);
     const bounds = win.getBounds();
+    // A deck floats only while pinned; the Pin button must be what pins it.
+    const alwaysOnTopUnpinned = win.isAlwaysOnTop();
+    await win.webContents.executeJavaScript(
+      `(() => {
+        const pin = Array.from(document.querySelectorAll('button')).find((el) => (el.textContent || '').trim() === 'PIN');
+        if (!pin) throw new Error('deck has no PIN button');
+        pin.click();
+      })()`,
+      true,
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    const alwaysOnTopPinned = win.isAlwaysOnTop();
     console.log(`[newamp-ui-deck-smoke] ${JSON.stringify({
       ...result,
       nativeBounds: { width: bounds.width, height: bounds.height },
       resizable: win.isResizable(),
+      alwaysOnTopUnpinned,
+      alwaysOnTopPinned,
     })}`);
     isQuitting = true;
     app.quit();
