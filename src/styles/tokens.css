@@ -634,3 +634,17 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --font-lcd: 'JetBrains Mono', monospace;
   color-scheme: dark;
 }
+
+/* Settings > Text size scales the named type sizes too (text-xs through
+   text-3xl); the arbitrary px classes are scaled in views/home.css. */
+[data-text-scale='custom'] {
+  --text-2xs: calc(0.625rem * var(--newamp-text-scale));
+  --text-xs: calc(0.6875rem * var(--newamp-text-scale));
+  --text-sm: calc(0.75rem * var(--newamp-text-scale));
+  --text-base: calc(0.8125rem * var(--newamp-text-scale));
+  --text-md: calc(0.875rem * var(--newamp-text-scale));
+  --text-lg: calc(1rem * var(--newamp-text-scale));
+  --text-xl: calc(1.25rem * var(--newamp-text-scale));
+  --text-2xl: calc(1.5rem * var(--newamp-text-scale));
+  --text-3xl: calc(2rem * var(--newamp-text-scale));
+}
