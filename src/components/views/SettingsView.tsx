@@ -16,7 +16,7 @@ import { api, inElectron, DEFAULT_SETTINGS, exclusiveBackendLabel } from '../../
 import { AI_ASSIST_OPTIONS } from '../../lib/aiAssist';
 import { resamplerName } from '../../lib/resampler-name';
 import { SKIN_VARIABLES, THEME_REGISTRY, readCurrentSkinVariables } from '../../lib/skins';
-import { normalizeSkinVariableValue } from '@shared/custom-skin';
+import { COLOR_SKIN_VARIABLES, normalizeSkinVariableValue } from '@shared/custom-skin';
 import { normalizeAudioOutputDeviceId, uniqueAudioOutputDevices } from '@shared/audio-output';
 import type { AudioOutputDeviceOption } from '@shared/audio-output';
 import { MAX_PREAMP_DB, MIN_PREAMP_DB, PREAMP_STEP_DB, normalizePreampDb } from '@shared/audio-limiter';
@@ -1267,29 +1267,48 @@ function SkinWorkshop({
       <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
         {SKIN_VARIABLES.map((key) => {
           const value = draft[key] ?? '';
-          const canColorPick = /^#[0-9a-f]{6}$/i.test(value);
+          const name = key.replace('--', '');
+          const meta = SKIN_VARIABLE_HINTS[key];
+          const isColor = (COLOR_SKIN_VARIABLES as readonly string[]).includes(key);
+          const accepted = value === '' || normalizeSkinVariableValue(key, value) !== null;
+          const picker = isColor && accepted ? parseSkinColor(value) : null;
           return (
             <div
               key={key}
-              className="grid grid-cols-[120px_26px_minmax(0,1fr)] items-center gap-2 text-xs text-ink2"
+              className="grid grid-cols-[150px_26px_minmax(0,1fr)] items-center gap-2 text-xs text-ink2"
             >
-              <span>{key.replace('--', '')}</span>
-              <span className="workshop-swatch" style={{ background: value || 'transparent' }} />
+              <span title={key}>
+                <span className="block">{meta?.label ?? name}</span>
+                {meta?.hint && <span className="block text-[10px] text-muted">{meta.hint}</span>}
+              </span>
+              {isColor ? (
+                <span className="workshop-swatch" aria-hidden="true">
+                  <i style={{ background: accepted ? value : 'transparent' }} />
+                </span>
+              ) : (
+                <span />
+              )}
               <span className="flex items-center gap-2">
-                {canColorPick && (
+                {picker && (
                   <input
-                    aria-label={`${key.replace('--', '')} color`}
+                    aria-label={`${meta?.label ?? name} color`}
                     type="color"
-                    value={value}
-                    onChange={(e) => setVar(key, e.target.value)}
+                    value={picker.hex}
+                    onChange={(e) => setVar(key, pickedSkinColor(e.target.value, picker.alpha))}
                     className="h-6 w-8"
                   />
                 )}
                 <input
-                  aria-label={`${key.replace('--', '')} value`}
+                  aria-label={`${meta?.label ?? name} value`}
                   value={value}
                   onChange={(e) => setVar(key, e.target.value)}
-                  className="bevel-in min-w-0 flex-1 px-2 py-1"
+                  aria-invalid={accepted ? undefined : 'true'}
+                  title={
+                    accepted
+                      ? key
+                      : `${key}: not a value the skin accepts (${isColor ? 'hex, rgb(), hsl() or a colour name' : 'a length like 4px'})`
+                  }
+                  className="workshop-value bevel-in min-w-0 flex-1 px-2 py-1"
                 />
               </span>
             </div>
@@ -1298,6 +1317,52 @@ function SkinWorkshop({
       </div>
     </section>
   );
+}
+
+// What each Skin Workshop variable changes, in the words of the interface.
+const SKIN_VARIABLE_HINTS: Record<string, { label: string; hint: string }> = {
+  '--bg': { label: 'Background', hint: 'Behind everything' },
+  '--panel': { label: 'Panels', hint: 'Sidebar, cards, transport' },
+  '--panel-2': { label: 'Raised panels', hint: 'Buttons, inputs, rows' },
+  '--panel-3': { label: 'Hover', hint: 'Hovered and pressed surfaces' },
+  '--line': { label: 'Lines', hint: 'Borders and dividers' },
+  '--accent': { label: 'Accent', hint: 'Highlights, active controls, lit text' },
+  '--accent-dim': { label: 'Accent, dimmed', hint: 'Fills under the accent' },
+  '--accent-glow': { label: 'Accent glow', hint: 'Halo around lit text and lamps' },
+  '--ink': { label: 'Text', hint: 'Main text' },
+  '--ink-2': { label: 'Text, secondary', hint: 'Details and artist lines' },
+  '--muted': { label: 'Muted', hint: 'Labels and hints' },
+  '--warn': { label: 'Warning', hint: 'Cautions and amber badges' },
+  '--error': { label: 'Error', hint: 'Errors, volume past 0 dB' },
+  '--display-bg': { label: 'LCD background', hint: 'Transport readout' },
+  '--display-fg': { label: 'LCD text', hint: 'Time, title and bitrate readout' },
+  '--bevel-light': { label: 'Bevel highlight', hint: 'Top and left edges' },
+  '--bevel-dark': { label: 'Bevel shadow', hint: 'Bottom and right edges' },
+  '--radius': { label: 'Corner radius', hint: 'Buttons and inputs' },
+  '--radius-card': { label: 'Card radius', hint: 'Panels and cards' },
+};
+
+// Any colour the skin grammar accepts, as the hex the colour picker needs,
+// plus its alpha so a pick can keep it. The browser does the parsing.
+function parseSkinColor(value: string): { hex: string; alpha: number } | null {
+  if (!value.trim() || typeof document === 'undefined') return null;
+  const probe = document.createElement('span');
+  probe.style.color = value;
+  if (!probe.style.color) return null;
+  probe.style.display = 'none';
+  document.body.appendChild(probe);
+  const computed = getComputedStyle(probe).color;
+  probe.remove();
+  const match = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/.exec(computed);
+  if (!match) return null;
+  const hex = `#${[match[1], match[2], match[3]].map((c) => Number(c).toString(16).padStart(2, '0')).join('')}`;
+  return { hex, alpha: match[4] === undefined ? 1 : Number(match[4]) };
+}
+
+function pickedSkinColor(hex: string, alpha: number): string {
+  if (alpha >= 1) return hex;
+  const channel = (at: number): number => parseInt(hex.slice(at, at + 2), 16);
+  return `rgba(${channel(1)}, ${channel(3)}, ${channel(5)}, ${alpha})`;
 }
 
 const PREFERRED_SAMPLE_RATES: Array<{ value: number | null; label: string; rationale: string }> = [
