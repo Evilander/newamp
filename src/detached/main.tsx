@@ -805,7 +805,9 @@ window.setInterval(() => {
 // vanishing under the pointer.
 let cursorTimer = 0;
 function poke(): void {
-  document.body.style.cursor = '';
+  // The stylesheet hides the cursor until the first move, so clearing the
+  // inline style here ('') fell back to that and the cursor never came back.
+  document.body.style.cursor = 'default';
   showControls();
   if (cursorTimer) window.clearTimeout(cursorTimer);
   cursorTimer = window.setTimeout(() => {

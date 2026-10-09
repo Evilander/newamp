@@ -27,6 +27,8 @@ assertWindow(result.tvReentry, 520, 430, 'retro TV deck entered again from the f
 assertWindow(result.shadeAgain, 820, 112, 'windowshade deck after skin switch');
 assertWindow(result.nativeBounds, 820, 112, 'native BrowserWindow after returning to windowshade');
 assert.equal(result.resizable, false, 'compact deck BrowserWindow should not be user-resizable');
+assert.equal(result.alwaysOnTopUnpinned, false, 'a deck floats over other windows only while pinned');
+assert.equal(result.alwaysOnTopPinned, true, 'the deck Pin button must pin the window');
 console.log(JSON.stringify(result, null, 2));
 
 async function resetSmokeRoot() {

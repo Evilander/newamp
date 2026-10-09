@@ -61,6 +61,9 @@ assert.ok(
   result.capture.litFraction > litFloor,
   `projector must paint non-black pixels (litFraction=${result.capture.litFraction}, ${JSON.stringify(result.capture)})`,
 );
+// The pointer hides when idle; a move has to bring it back, or the projector
+// window has no usable cursor at all.
+assert.equal(result.cursor?.afterMove, 'default', `projector cursor must return on mouse movement (${JSON.stringify(result.cursor)})`);
 // The fixture is a 45 s local file, so the projector must be conducting from
 // its song score (analysed by the real ffmpeg path), not running causal-only.
 assert.equal(
