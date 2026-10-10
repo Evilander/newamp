@@ -24,7 +24,7 @@ interface GeneratedMix {
 const MIX_SIZE = 30;
 
 export function MixesView(): JSX.Element {
-  const help = useViewHelp();
+  const help = useViewHelp('mixes');
   const [mixes, setMixes] = useState<GeneratedMix[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);

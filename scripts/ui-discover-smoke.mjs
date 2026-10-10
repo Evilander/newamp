@@ -23,6 +23,9 @@ assert.equal(result.hasSave, true, 'Discover should expose Save as Playlist');
 assert.equal(result.hasStepAction, true, 'Discover should expose mission step actions');
 assert.equal(result.hasFullVisualizer, true, 'Discover should expose Full Vis');
 assert.equal(result.hasDeck, true, 'Discover should expose Deck');
+assert.equal(result.helpCardBefore, true, 'a fresh profile opens Discover with its intro card');
+assert.equal(result.helpCardAfterFirstClick, false, 'the ? hides the intro card while it is showing');
+assert.equal(result.helpCardAfterSecondClick, true, 'the ? brings the intro card back');
 assert.match(result.missionText, /Daily Crate|Visual Night|Album Session/, 'Discover mission text should describe a Living Library mission');
 console.log(JSON.stringify(result, null, 2));
 

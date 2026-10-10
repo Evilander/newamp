@@ -55,7 +55,7 @@ const FRESH_DRAFT: DraftState = {
 };
 
 export function TagsView(): JSX.Element {
-  const help = useViewHelp();
+  const help = useViewHelp('tags');
   const [rules, setRules] = useState<TagRule[]>([]);
   const [summaries, setSummaries] = useState<TagSummary[]>([]);
   const [draft, setDraft] = useState<DraftState>(FRESH_DRAFT);

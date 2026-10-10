@@ -58,7 +58,9 @@ export function ViewOnboarding({
   onClose,
 }: ViewOnboardingProps): JSX.Element | null {
   const [dismissed, setDismissed] = useState(() => readDismissed(viewId));
-  if (dismissed && !forceVisible) return null;
+  // Controlled by useViewHelp when forceVisible is given; on its own
+  // otherwise.
+  if (forceVisible === undefined ? dismissed : !forceVisible) return null;
   return (
     <section
       className="view-onboarding"
@@ -98,19 +100,24 @@ export function ViewOnboarding({
 /**
  * The "?" affordance for view titles. Drops next to any header and toggles
  * the view's ViewOnboarding card, so "what is this view?" always has a
- * one-click answer — not just on first run. Render the card wherever the
- * view wants it:
+ * one-click answer — not just on first run. The card starts open until the
+ * user has dismissed it once, so the "?" hides it as well as shows it;
+ * hiding counts as dismissing. Render the card wherever the view wants it:
  *
- *   const help = useViewHelp();
+ *   const help = useViewHelp('discover');
  *   <HelpDot help={help} label="About Discover" />
  *   <ViewOnboarding {...content} forceVisible={help.open} onClose={help.close} />
  */
-export function useViewHelp(): { open: boolean; close: () => void; toggle: () => void } {
-  const [open, setOpen] = useState(false);
+export function useViewHelp(viewId: string): { open: boolean; close: () => void; toggle: () => void } {
+  const [open, setOpen] = useState(() => !readDismissed(viewId));
+  const close = (): void => {
+    writeDismissed(viewId);
+    setOpen(false);
+  };
   return {
     open,
-    close: () => setOpen(false),
-    toggle: () => setOpen((v) => !v),
+    close,
+    toggle: () => (open ? close() : setOpen(true)),
   };
 }
 

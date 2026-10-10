@@ -7,7 +7,7 @@ import { TrackTable } from './LibraryView';
 import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
 
 export function DiscoverView(): JSX.Element {
-  const help = useViewHelp();
+  const help = useViewHelp('discover');
   const [surface, setSurface] = useState<DiscoverSurface | null>(null);
   const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
