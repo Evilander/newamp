@@ -4,7 +4,7 @@ The complete tour. The [README](../README.md) is the landing page; this is the e
 
 ## Player
 
-- **0–200% volume** with a red-zone past unity — VLC-style amp boost with full `0 dB / +6 dB` tick labels, running after the master limiter so it amplifies without clipping. A perceptual (cubic) taper makes equal slider travel feel like an equal loudness change.
+- **0–200% volume** with a red-zone past unity — VLC-style amp boost with full `0 dB / +6 dB` tick labels, running after the master limiter so it amplifies without clipping. A perceptual (cubic) taper makes equal slider travel feel like an equal loudness change. Scroll over the slider to nudge it by how far the wheel moved; double-click it for 100%.
 - **10-band EQ** with custom presets, software peak limiter with preamp control, ReplayGain (per-track + per-album), crossfade and gapless playback, lossless WAV export of any track, output-device picker with test tone.
 - **Sample-accurate gapless** — local tracks play as one decoded stream with each file's encoder delay and padding trimmed (iTunes AAC included), so the next track starts on the next sample, and repeat-one loops without a gap. Crossfade, speeds other than 1x, A-B loops, CUE sheets, DSD and streams use the standard players. See [audio-quality.md](audio-quality.md).
 - **Bit-Perfect Exclusive** — WASAPI-exclusive on Windows through a first-party native engine; experimental CoreAudio hog-mode (macOS) and ALSA-direct (Linux) lanes. Honest format negotiation, explicit labeled resampling, gapless ring splicing, per-track fallback. See [audio-quality.md](audio-quality.md).
@@ -29,8 +29,13 @@ The complete tour. The [README](../README.md) is the landing page; this is the e
 - **Your edits stay yours** — tag edits are stored apart from the file's own tags, so rescans never undo them. Edited fields are marked, and each can be reset to the file's value.
 - **Custom playlists** with reordering, portable folder export, and playlist artwork.
   Right-click any track list for Play Next, Add to Queue, Add to Playlist (any
-  playlist, or a new one) and Show in Folder; a right-click inside a selection
-  acts on the whole selection.
+  playlist, or a new one), Show in Folder and Move to Recycle Bin / Trash; a
+  right-click inside a selection acts on the whole selection. Moving files to
+  the bin asks first and backs the library up; the tracks leave the library
+  with their plays, ratings and playlist places.
+- **Columns you choose** — the ⋯ at the left of a track table's header, or a
+  right-click on the header row, hides, shows and reorders columns. One layout
+  for every track table, kept with the column widths.
 - **Folder playlists** — in Folders, save the open folder as a smart playlist:
   every track under it, subfolders included, in folder order, kept current as
   files come and go. Show in Library filters the Library to that folder.
@@ -42,10 +47,10 @@ The complete tour. The [README](../README.md) is the landing page; this is the e
 - **Resonance** — the whole UI reacts to live audio through one CSS-variable loop, shared by everything that moves with the music at 30 Hz, written only to the elements that animate. It self-throttles on weak hardware, stops entirely when the GPU is unavailable, and respects `prefers-reduced-motion`.
 - **Eviland** — 24-band onset detection grouped into kick, bass, snare, hat and vocal frequency ranges (band ranges, not instrument recognition), a GPU feedback field with eight organic motion kinds (cells, coral, marble, chroma, droste, Möbius, tendril, peristalsis), fluid, reaction–diffusion and slime-mould simulations, 42 procedural scenes, per-track persistent visual lineage, and 37 looks that each choose their own sources, motion and palette. Look changes run both looks at once behind a moving front instead of crossfading a still. **Eviland Live** draws all of that into MilkDrop's own feedback so the preset warps it, under one palette.
 - **Look-ahead** — local tracks are read ahead of time (beat grid, bar lines, sections and repeats, builds, drops, key changes), so looks change on the bar line, a build dims and draws inward, the held beat goes dark and the drop lands on its downbeat. First play of a track costs about two seconds of analysis; it can be turned off in the visualizer settings.
-- **MilkDrop via Butterchurn** (preset code runs in its own frame so the main window never allows eval; prewarmed preset swaps) + **Particle Flow** (~140k GPU particles) + 24 in-house fullscreen modes with real spectral-flux beat detection and an auto hardware tier.
+- **MilkDrop via Butterchurn** (preset code runs in its own frame so the main window never allows eval; prewarmed preset swaps) + **Particle Flow** (~140k GPU particles) + 24 in-house fullscreen modes with real spectral-flux beat detection and an auto hardware tier. Right-click the stage for the visualizer menu.
 - **Flash protection** — on by default for every visualizer, the projector and recordings: no patch of 1% of the screen or more flashes more than three times a second (the WCAG photosensitivity limit), including out-of-step flicker like stripes or reversing checkerboards. Dense bright-on-black looks run darker with it on. Turning it off asks you to confirm.
 - **Save the moment** — a WebCodecs ring buffer holds the last 15 seconds of Eviland Live; `Shift+R` mints a shareable MP4 with audio. Plus a general clip recorder and PNG stills.
-- **Eight deck skins** — Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Retro TV — each declaring its own native window size.
+- **Eight deck skins** — Windowshade, Winamp Classic, Winamp Industrial, Record Player, Jukebox, Cassette Deck, Discman, Retro TV — each declaring its own native window size. The Retro TV's volume knob is the volume: drag it, scroll over it, or use the arrow keys.
 - **Detached projector** — throw the visualizer onto a second monitor while you work.
 
 ## Yours
@@ -144,7 +149,7 @@ history reimport, playback, seeking, visualizer input, and exact byte ranges.
 | Ctrl+K | Command palette |
 | Ctrl+F | Search |
 | Ctrl+M | Compact deck mode |
-| Esc | Exit fullscreen / close overlay |
+| Esc | Close an open popover, then exit fullscreen |
 
 ## Release proof tooling (maintainers)
 

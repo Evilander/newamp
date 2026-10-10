@@ -5,6 +5,43 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [2.5.2] - 2026-10-10
+
+### Added
+
+- Track tables have a column chooser: the ⋯ at the left of the header, or a
+  right-click on the header row, hides, shows and reorders columns. One
+  layout for the Library, playlists and mixes, remembered with the column
+  widths.
+- Move to Recycle Bin / Trash in the track right-click menu. It asks first,
+  takes a library backup, moves the files, and the tracks leave the library
+  with their plays, ratings and playlist places. A queued track drops out of
+  the queue; a playing one hands over to the next.
+- Double-click the volume slider for 100%.
+- The Retro TV deck's volume knob is the volume now: drag it, scroll over it,
+  or use the arrow keys.
+- Right-click in the fullscreen visualizer opens the visualizer menu. Esc and
+  the ✕ button exit.
+
+### Fixed
+
+- The ? next to Discover, Mixes and Living Tags did nothing while their intro
+  card was showing. It now hides the card, and brings it back on the next
+  click.
+- In a short window, the Library view's search bar and track table could fall
+  off the bottom with no way to reach them. The view scrolls now, and the
+  table keeps a usable height.
+- The transport's title box had a fixed height, so the codec line sank into
+  its bottom edge at any Text size above the smallest. It grows with the text
+  now.
+- Esc with a visualizer popover open closed the popover and left the
+  visualizer at once. It closes the popover first now.
+- Scrolling over the volume slider holds its distance when the app is busy:
+  each step builds on the value the wheel last sent rather than the one last
+  painted, and a merged wheel event (which a busy renderer produces) counts
+  in full instead of being capped at one notch. On macOS, Shift+wheel arrives
+  on the horizontal axis; it counts now.
+
 ## [2.5.1] - 2026-10-08
 
 ### Fixed
