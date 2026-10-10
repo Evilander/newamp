@@ -33,6 +33,18 @@ function assertQueueEdit(r) {
     if (r[key] !== value) problems.push(`${key}: expected ${JSON.stringify(value)}, got ${JSON.stringify(r[key])}`);
   };
   expect('ok', true);
+  const columns = r.columns ?? {};
+  const before = String(columns.initial ?? '').split(',');
+  const hidden = String(columns.afterHideYear ?? '').split(',');
+  const moved = String(columns.afterMoveRating ?? '').split(',');
+  if (!before.includes('year')) problems.push(`columns.initial should include year, got ${columns.initial}`);
+  if (hidden.includes('year')) problems.push(`columns.afterHideYear should not include year, got ${columns.afterHideYear}`);
+  if (!(moved.indexOf('rating') > moved.indexOf('album') && moved.indexOf('rating') < moved.indexOf('time'))) {
+    problems.push(`columns.afterMoveRating should put rating between album and time, got ${columns.afterMoveRating}`);
+  }
+  if (columns.rowCellsFollow !== true) problems.push('row cells should follow the header columns');
+  if (columns.persisted !== true) problems.push('the column layout should be saved');
+  if (columns.menuClosed !== true) problems.push('Escape should close the column chooser');
   expect('initial', 'One,Two,Three');
   expect('afterKeyboardMove', 'One,Three,Two'); // Alt+ArrowUp on the last row
   expect('focusFollowed', true); // focus stays on the track that moved

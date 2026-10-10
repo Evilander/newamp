@@ -91,3 +91,89 @@ svg.library-th-star {
 [data-newamp-drop-zone]:has([data-newamp-library-drop-overlay]) [data-newamp-app-drop-overlay] {
   display: none;
 }
+
+/* ------------------------------------------------------------------
+   Column chooser: the ⋯ in the header's play column, or a right-click on
+   the header row. A fixed popover; the layout lives in useTrackColumns.
+   ------------------------------------------------------------------ */
+.track-columns-btn {
+  display: inline-grid;
+  width: 18px;
+  height: 16px;
+  place-items: center;
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.track-columns-btn:hover,
+.track-columns-btn:focus-visible {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.track-columns-menu {
+  position: fixed;
+  z-index: 80;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+}
+.track-columns-menu-head {
+  margin-bottom: 8px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.track-columns-menu-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.track-columns-menu-list li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.track-columns-menu-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.track-columns-menu-toggle:hover {
+  background: var(--panel-2);
+}
+.track-columns-menu-move {
+  width: 22px;
+  height: 20px;
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  font-size: 9px;
+  line-height: 1;
+}
+.track-columns-menu-move:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--panel-2);
+}
+.track-columns-menu-move:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.track-columns-menu-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 10px;
+}

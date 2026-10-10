@@ -4728,6 +4728,38 @@ function uiQueueEditProbeSource(): string {
         const items = Array.from(document.querySelectorAll('[data-newamp-track-row]'));
         return items.length >= 3 ? items : null;
       });
+      // Column chooser: hide Year, walk Rating left of Time, and check the
+      // header follows and the layout is remembered.
+      const headerKeys = () =>
+        Array.from(document.querySelectorAll('th[data-newamp-track-column]')).map((th) => th.getAttribute('data-newamp-track-column'));
+      const columns = { initial: headerKeys().join(',') };
+      document.querySelector('[data-newamp-track-columns-open]').click();
+      const columnsMenu = await waitFor('columns menu', () => document.querySelector('[data-newamp-track-columns-menu]'));
+      columnsMenu.querySelector('[data-newamp-track-columns-row="year"] input').click();
+      await sleep(120);
+      columns.afterHideYear = headerKeys().join(',');
+      for (let i = 0; i < 3; i += 1) {
+        columnsMenu.querySelector('[data-newamp-track-columns-row="rating"] [data-newamp-track-columns-left]').click();
+        await sleep(60);
+      }
+      await sleep(120);
+      columns.afterMoveRating = headerKeys().join(',');
+      columns.rowCellsFollow = (() => {
+        const row = document.querySelector('[data-newamp-track-row]');
+        return row ? row.children.length === headerKeys().length : false;
+      })();
+      columns.persisted = (() => {
+        try {
+          const saved = JSON.parse(localStorage.getItem('newamp:track-table:columns') || 'null');
+          return !!saved && saved.hidden.includes('year') && saved.order.indexOf('rating') < saved.order.indexOf('time');
+        } catch {
+          return false;
+        }
+      })();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await sleep(120);
+      columns.menuClosed = !document.querySelector('[data-newamp-track-columns-menu]');
+
       const first = libraryRows.find((item) => /Queue One/.test(item.textContent || ''));
       if (!first) throw new Error('First fixture row was not found');
       first.scrollIntoView({ block: 'center' });
@@ -4738,7 +4770,7 @@ function uiQueueEditProbeSource(): string {
 
       await nav('Now Playing');
       await waitFor('now playing queue rows', () => (rows().length === 3 ? true : null));
-      const steps = { initial: order() };
+      const steps = { initial: order(), columns };
       const startedAt = clock();
 
       // Keyboard: Alt+ArrowUp on the last row; focus must follow the track.
