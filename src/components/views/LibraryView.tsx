@@ -533,7 +533,10 @@ export function LibraryView(): JSX.Element {
 
   return (
     <div
-      className="relative flex h-full flex-col"
+      // The dashboard above the table is tall. In a short window the table
+      // keeps a usable height and the whole view scrolls instead of the
+      // search bar and table falling off the bottom edge.
+      className="relative flex h-full flex-col overflow-y-auto"
       style={{ fontFamily: 'var(--font-mono)' }}
       onDragEnter={(e) => {
         if (!hasDraggedFiles(e.dataTransfer)) return;
@@ -859,7 +862,7 @@ function LibraryTrackPane({
     <div
       ref={scrollRef}
       onScroll={onScroll}
-      className="flex-1 overflow-auto"
+      className="min-h-[240px] flex-1 overflow-auto"
     >
       <TrackTable
         tracks={tracks}
