@@ -24,6 +24,8 @@ import { Star, StarOutline } from '../Icons';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
 import { useSavedPlaylists } from '../../hooks/useSavedPlaylists';
 import { defaultPlaylistName, openTrackContextMenu } from '../../lib/trackMenu';
+import { TrackColumnsMenu } from '../TrackColumnsMenu';
+import { useTrackColumns, type TrackColumnKey } from '../../store/useTrackColumns';
 
 type Sort =
   | 'artist'
@@ -1192,23 +1194,6 @@ function SortPicker({ value, onChange }: { value: Sort; onChange: (s: Sort) => v
   );
 }
 
-type TrackColumnKey =
-  | 'play'
-  | 'select'
-  | 'queue'
-  | 'playlist'
-  | 'number'
-  | 'title'
-  | 'artist'
-  | 'album'
-  | 'year'
-  | 'time'
-  | 'plays'
-  | 'rating'
-  | 'mix'
-  | 'tag'
-  | 'love';
-
 const TRACK_TABLE_COLUMN_WIDTH_KEY = 'newamp:track-table:column-widths';
 const TRACK_TABLE_COLUMN_DEFAULTS: Record<TrackColumnKey, number> = {
   play: 34,
@@ -1283,8 +1268,8 @@ interface LibraryRowProps {
   selected: boolean;
   isActive: boolean;
   search: string | undefined;
-  showQueueActions: boolean;
-  showMetadataLookup: boolean;
+  /** The visible columns, in order; the table decides, the row just follows. */
+  columns: readonly TrackColumnKey[];
   playlistTargets: SavedPlaylist[];
   onPlay: (absoluteIndex: number) => void;
   onToggleSelect: (id: number, checked: boolean) => void;
@@ -1305,8 +1290,7 @@ const LibraryRow = memo(function LibraryRow({
   selected,
   isActive,
   search,
-  showQueueActions,
-  showMetadataLookup,
+  columns,
   playlistTargets,
   onPlay,
   onToggleSelect,
@@ -1324,6 +1308,259 @@ const LibraryRow = memo(function LibraryRow({
   // An unavailable track keeps its row, history and ratings; it just reads as
   // absent until its drive or folder comes back.
   const missing = t.missingSince != null;
+  const cell = (key: TrackColumnKey): JSX.Element | null => {
+    switch (key) {
+      case 'select':
+        return (
+          <td key={key} className="px-2 py-[5px]">
+            <input
+              type="checkbox"
+              aria-label={`Select ${t.title}`}
+              checked={selected}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => onToggleSelect(t.id, event.currentTarget.checked)}
+            />
+          </td>
+        );
+      case 'play':
+        return (
+          <td key={key} className="px-2 py-[5px]">
+            {isActive ? (
+              <span className="eq-bars">
+                <span /><span /><span /><span />
+              </span>
+            ) : (
+              <button
+                className="opacity-50 hover:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onPlay(absoluteIndex);
+                }}
+                title="Play"
+              >
+                ▶
+              </button>
+            )}
+          </td>
+        );
+      case 'queue':
+        return (
+          <td key={key} className="px-2 py-[5px]">
+            <div className="track-action-cluster">
+              {onPlayNext && (
+                <button
+                  className="track-icon-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onPlayNext(t);
+                  }}
+                  aria-label="Play next"
+                  title="Play next"
+                >
+                  ⤴
+                </button>
+              )}
+              {onAddToQueue && (
+                <button
+                  className="track-icon-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAddToQueue(t);
+                  }}
+                  aria-label="Add to queue"
+                  title="Add to queue"
+                >
+                  ≡
+                </button>
+              )}
+            </div>
+          </td>
+        );
+      case 'playlist':
+        return (
+          <td key={key} className="px-2 py-[5px]">
+            <select
+              aria-label="Add to playlist"
+              title="Add to playlist"
+              value=""
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => {
+                event.stopPropagation();
+                const playlistId = Number(event.currentTarget.value);
+                if (playlistId > 0) onAddToPlaylist(playlistId, t);
+              }}
+              className="bevel-in w-full px-1 py-[2px] text-[10px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+            >
+              <option value="">Add to playlist</option>
+              {playlistTargets.map((playlist) => (
+                <option key={playlist.id} value={playlist.id}>
+                  {playlist.name}
+                </option>
+              ))}
+            </select>
+          </td>
+        );
+      case 'number':
+        return (
+          <td
+            key={key}
+            className="px-2 py-[5px] text-right tabular-nums"
+            style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }}
+          >
+            {t.trackNo ?? absoluteIndex + 1}
+          </td>
+        );
+      case 'title':
+        return (
+          <td key={key} className="px-2 py-[5px]">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="min-w-0 flex-1 truncate" title={t.title}>
+                {search ? highlight(t.title, search) : t.title}
+              </span>
+              <FormatBadges track={t} density="compact" />
+              <button
+                className="track-icon-btn track-folder-btn"
+                data-show-in-folder
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onShowInFolder(t.path);
+                }}
+                aria-label="Show in folder"
+                title="Show in folder"
+              >
+                ⌕
+              </button>
+            </div>
+          </td>
+        );
+      case 'artist':
+        return (
+          <td
+            key={key}
+            className="truncate px-2 py-[5px]"
+            style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
+            title={t.artist}
+          >
+            <ArtistLink artist={t.artist} color="inherit">
+              {search ? highlight(t.artist, search) : t.artist}
+            </ArtistLink>
+          </td>
+        );
+      case 'album':
+        return (
+          <td
+            key={key}
+            className="truncate px-2 py-[5px]"
+            style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
+            title={t.album}
+          >
+            <AlbumLink
+              album={t.album}
+              albumArtist={t.albumArtist || t.artist}
+              color="inherit"
+            >
+              {search ? highlight(t.album, search) : t.album}
+            </AlbumLink>
+          </td>
+        );
+      case 'year':
+        return (
+          <td
+            key={key}
+            className="px-2 py-[5px] text-right tabular-nums"
+            style={{ color: 'var(--muted)' }}
+          >
+            {t.year ?? '—'}
+          </td>
+        );
+      case 'time':
+        return (
+          <td
+            key={key}
+            className="px-2 py-[5px] text-right tabular-nums"
+            style={{ color: 'var(--ink-2)' }}
+          >
+            {formatTime(t.duration ?? 0)}
+          </td>
+        );
+      case 'plays':
+        return (
+          <td
+            key={key}
+            className="px-2 py-[5px] text-right tabular-nums"
+            style={{ color: t.playCount > 0 ? 'var(--ink-2)' : 'var(--muted)' }}
+          >
+            {t.playCount > 0 ? t.playCount.toLocaleString() : ''}
+          </td>
+        );
+      case 'rating':
+        return (
+          <td key={key} className="px-2 py-[5px] text-right" data-newamp-rating={t.rating}>
+            <RatingStars
+              value={t.rating}
+              onChange={(rating) => Promise.resolve(onSetRating(t.id, rating))}
+            />
+          </td>
+        );
+      case 'mix':
+        return (
+          <td key={key} className="px-2 py-[5px] text-right">
+            <button
+              className="pxbtn px-1.5 py-[1px] text-[9px]"
+              data-avoid-autoplay
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleAvoid(t.id);
+              }}
+              style={{
+                color: t.avoidAutoPlay ? 'var(--warn)' : 'var(--muted)',
+                borderColor: t.avoidAutoPlay ? 'var(--warn)' : 'var(--line)',
+              }}
+              title={t.avoidAutoPlay ? 'Excluded from continuous mix and generated sets' : 'Allowed in continuous mix and generated sets'}
+            >
+              {t.avoidAutoPlay ? 'NO DJ' : 'DJ OK'}
+            </button>
+          </td>
+        );
+      case 'tag':
+        return (
+          <td key={key} className="px-2 py-[5px] text-right">
+            {needsMetadataRescue(t) && (
+              <button
+                className="pxbtn px-1.5 py-[1px] text-[9px]"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onMetadataLookup?.(t);
+                }}
+                title="Search MusicBrainz"
+              >
+                TAG
+              </button>
+            )}
+          </td>
+        );
+      case 'love':
+        return (
+          <td key={key} className="px-2 py-[5px] text-right">
+            <button
+              className="track-love-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleLove(t.id);
+              }}
+              style={{ color: t.loved ? 'var(--accent)' : 'var(--muted)' }}
+              title="Love"
+              aria-label={t.loved ? 'Unlove' : 'Love'}
+            >
+              {t.loved ? <Star /> : <StarOutline />}
+            </button>
+          </td>
+        );
+      default:
+        return null;
+    }
+  };
   return (
     <tr
       key={t.id}
@@ -1385,208 +1622,7 @@ const LibraryRow = memo(function LibraryRow({
       }
       onMouseLeave={(e) => !isActive && (e.currentTarget.style.background = zebra)}
     >
-      <td className="px-2 py-[5px]">
-        <input
-          type="checkbox"
-          aria-label={`Select ${t.title}`}
-          checked={selected}
-          onClick={(event) => event.stopPropagation()}
-          onChange={(event) => onToggleSelect(t.id, event.currentTarget.checked)}
-        />
-      </td>
-      <td className="px-2 py-[5px]">
-        {isActive ? (
-          <span className="eq-bars">
-            <span /><span /><span /><span />
-          </span>
-        ) : (
-          <button
-            className="opacity-50 hover:opacity-100"
-            onClick={(e) => {
-              e.stopPropagation();
-              onPlay(absoluteIndex);
-            }}
-            title="Play"
-          >
-            ▶
-          </button>
-        )}
-      </td>
-      {showQueueActions && (
-        <td className="px-2 py-[5px]">
-          <div className="track-action-cluster">
-            {onPlayNext && (
-              <button
-                className="track-icon-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onPlayNext(t);
-                }}
-                aria-label="Play next"
-                title="Play next"
-              >
-                ⤴
-              </button>
-            )}
-            {onAddToQueue && (
-              <button
-                className="track-icon-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onAddToQueue(t);
-                }}
-                aria-label="Add to queue"
-                title="Add to queue"
-              >
-                ≡
-              </button>
-            )}
-          </div>
-        </td>
-      )}
-      {playlistTargets.length > 0 && (
-        <td className="px-2 py-[5px]">
-          <select
-            aria-label="Add to playlist"
-            title="Add to playlist"
-            value=""
-            onClick={(event) => event.stopPropagation()}
-            onChange={(event) => {
-              event.stopPropagation();
-              const playlistId = Number(event.currentTarget.value);
-              if (playlistId > 0) onAddToPlaylist(playlistId, t);
-            }}
-            className="bevel-in w-full px-1 py-[2px] text-[10px] outline-none"
-            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-          >
-            <option value="">Add to playlist</option>
-            {playlistTargets.map((playlist) => (
-              <option key={playlist.id} value={playlist.id}>
-                {playlist.name}
-              </option>
-            ))}
-          </select>
-        </td>
-      )}
-      <td
-        className="px-2 py-[5px] text-right tabular-nums"
-        style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }}
-      >
-        {t.trackNo ?? absoluteIndex + 1}
-      </td>
-      <td className="px-2 py-[5px]">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="min-w-0 flex-1 truncate" title={t.title}>
-            {search ? highlight(t.title, search) : t.title}
-          </span>
-          <FormatBadges track={t} density="compact" />
-          <button
-            className="track-icon-btn track-folder-btn"
-            data-show-in-folder
-            onClick={(e) => {
-              e.stopPropagation();
-              onShowInFolder(t.path);
-            }}
-            aria-label="Show in folder"
-            title="Show in folder"
-          >
-            ⌕
-          </button>
-        </div>
-      </td>
-      <td
-        className="truncate px-2 py-[5px]"
-        style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
-        title={t.artist}
-      >
-        <ArtistLink artist={t.artist} color="inherit">
-          {search ? highlight(t.artist, search) : t.artist}
-        </ArtistLink>
-      </td>
-      <td
-        className="truncate px-2 py-[5px]"
-        style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
-        title={t.album}
-      >
-        <AlbumLink
-          album={t.album}
-          albumArtist={t.albumArtist || t.artist}
-          color="inherit"
-        >
-          {search ? highlight(t.album, search) : t.album}
-        </AlbumLink>
-      </td>
-      <td
-        className="px-2 py-[5px] text-right tabular-nums"
-        style={{ color: 'var(--muted)' }}
-      >
-        {t.year ?? '—'}
-      </td>
-      <td
-        className="px-2 py-[5px] text-right tabular-nums"
-        style={{ color: 'var(--ink-2)' }}
-      >
-        {formatTime(t.duration ?? 0)}
-      </td>
-      <td
-        className="px-2 py-[5px] text-right tabular-nums"
-        style={{ color: t.playCount > 0 ? 'var(--ink-2)' : 'var(--muted)' }}
-      >
-        {t.playCount > 0 ? t.playCount.toLocaleString() : ''}
-      </td>
-      <td className="px-2 py-[5px] text-right" data-newamp-rating={t.rating}>
-        <RatingStars
-          value={t.rating}
-          onChange={(rating) => Promise.resolve(onSetRating(t.id, rating))}
-        />
-      </td>
-      <td className="px-2 py-[5px] text-right">
-        <button
-          className="pxbtn px-1.5 py-[1px] text-[9px]"
-          data-avoid-autoplay
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleAvoid(t.id);
-          }}
-          style={{
-            color: t.avoidAutoPlay ? 'var(--warn)' : 'var(--muted)',
-            borderColor: t.avoidAutoPlay ? 'var(--warn)' : 'var(--line)',
-          }}
-          title={t.avoidAutoPlay ? 'Excluded from continuous mix and generated sets' : 'Allowed in continuous mix and generated sets'}
-        >
-          {t.avoidAutoPlay ? 'NO DJ' : 'DJ OK'}
-        </button>
-      </td>
-      {showMetadataLookup && (
-        <td className="px-2 py-[5px] text-right">
-          {needsMetadataRescue(t) && (
-            <button
-              className="pxbtn px-1.5 py-[1px] text-[9px]"
-              onClick={(e) => {
-                e.stopPropagation();
-                onMetadataLookup?.(t);
-              }}
-              title="Search MusicBrainz"
-            >
-              TAG
-            </button>
-          )}
-        </td>
-      )}
-      <td className="px-2 py-[5px] text-right">
-        <button
-          className="track-love-btn"
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleLove(t.id);
-          }}
-          style={{ color: t.loved ? 'var(--accent)' : 'var(--muted)' }}
-          title="Love"
-          aria-label={t.loved ? 'Unlove' : 'Love'}
-        >
-          {t.loved ? <Star /> : <StarOutline />}
-        </button>
-      </td>
+      {columns.map(cell)}
     </tr>
   );
 });
@@ -1660,26 +1696,26 @@ export function TrackTable({
   );
   const allVisibleSelected = visible.length > 0 && visible.every((track) => selectedIds.has(track.id));
   const [columnWidths, setColumnWidths] = useState<Record<TrackColumnKey, number>>(() => loadTrackTableColumnWidths());
-  const activeColumnKeys = useMemo<TrackColumnKey[]>(
-    () => [
-      'select',
-      'play',
-      ...(showQueueActions ? ['queue' as TrackColumnKey] : []),
-      ...(playlistTargets.length > 0 ? ['playlist' as TrackColumnKey] : []),
-      'number',
-      'title',
-      'artist',
-      'album',
-      'year',
-      'time',
-      'plays',
-      'rating',
-      'mix',
-      ...(showMetadataLookup ? ['tag' as TrackColumnKey] : []),
-      'love',
-    ],
-    [playlistTargets.length, showMetadataLookup, showQueueActions],
+  // Columns and their order are shared by every track table; the ones a
+  // particular table can offer depend on what its host wired up.
+  const columnOrder = useTrackColumns((s) => s.order);
+  const hiddenColumns = useTrackColumns((s) => s.hidden);
+  const availableColumnKeys = useMemo<TrackColumnKey[]>(
+    () =>
+      columnOrder.filter((key) => {
+        if (key === 'queue') return showQueueActions;
+        if (key === 'playlist') return playlistTargets.length > 0;
+        if (key === 'tag') return showMetadataLookup;
+        return true;
+      }),
+    [columnOrder, playlistTargets.length, showMetadataLookup, showQueueActions],
   );
+  const activeColumnKeys = useMemo<TrackColumnKey[]>(
+    () => availableColumnKeys.filter((key) => !hiddenColumns.includes(key)),
+    [availableColumnKeys, hiddenColumns],
+  );
+  const [columnsMenu, setColumnsMenu] = useState<{ x: number; y: number } | null>(null);
+  const closeColumnsMenu = useCallback(() => setColumnsMenu(null), []);
   const tableMinWidth = activeColumnKeys.reduce((sum, key) => sum + columnWidths[key], 0);
 
   // Scroll-to + flash for track navigation. The rows are memoized and carry
@@ -1795,6 +1831,7 @@ export function TrackTable({
   ): JSX.Element {
     return (
       <th
+        key={column}
         className={`track-table-resizable-th px-2 py-[6px] ${className}`}
         style={{ width: columnWidths[column] }}
         data-newamp-track-column={column}
@@ -1811,6 +1848,64 @@ export function TrackTable({
         />
       </th>
     );
+  }
+
+  function headerFor(column: TrackColumnKey): JSX.Element {
+    switch (column) {
+      case 'select':
+        return headerCell('select', (
+          <input
+            type="checkbox"
+            aria-label="Select all visible tracks"
+            checked={allVisibleSelected}
+            onChange={(event) => setAllVisibleSelected(event.currentTarget.checked)}
+          />
+        ), '', 'select');
+      case 'play':
+        return headerCell('play', (
+          <button
+            type="button"
+            className="track-columns-btn"
+            data-newamp-track-columns-open
+            aria-label="Choose columns"
+            title="Choose and order the columns"
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setColumnsMenu({ x: rect.left, y: rect.bottom + 4 });
+            }}
+          >
+            ⋯
+          </button>
+        ));
+      case 'queue':
+        return headerCell('queue', 'Queue');
+      case 'playlist':
+        return headerCell('playlist', 'Playlist');
+      case 'number':
+        return headerCell('number', '#', 'text-right tabular-nums', 'track number');
+      case 'title':
+        return headerCell('title', 'Title');
+      case 'artist':
+        return headerCell('artist', 'Artist');
+      case 'album':
+        return headerCell('album', 'Album');
+      case 'year':
+        return headerCell('year', 'Year', 'text-right tabular-nums');
+      case 'time':
+        return headerCell('time', 'Time', 'text-right tabular-nums');
+      case 'plays':
+        return headerCell('plays', 'Plays', 'text-right tabular-nums');
+      case 'rating':
+        return headerCell('rating', 'Rating', 'text-right');
+      case 'mix':
+        return headerCell('mix', 'Mix', 'text-right');
+      case 'tag':
+        return headerCell('tag', 'Tag', 'text-right');
+      case 'love':
+        return headerCell('love', <Star className="library-th-star" />, 'text-right', 'love');
+      default:
+        return headerCell(column, column);
+    }
   }
 
   function patchLocalTrack(id: number, patch: Partial<Track>): void {
@@ -2228,29 +2323,13 @@ export function TrackTable({
         <tr
           className="text-left text-[9px] uppercase tracking-[0.12em]"
           style={{ borderBottom: '1px solid var(--line)' }}
+          // Right-click the header for the column chooser.
+          onContextMenu={(event) => {
+            event.preventDefault();
+            setColumnsMenu({ x: event.clientX, y: event.clientY });
+          }}
         >
-          {headerCell('select', (
-            <input
-              type="checkbox"
-              aria-label="Select all visible tracks"
-              checked={allVisibleSelected}
-              onChange={(event) => setAllVisibleSelected(event.currentTarget.checked)}
-            />
-          ), '', 'select')}
-          {headerCell('play', '')}
-          {showQueueActions && headerCell('queue', 'Queue')}
-          {playlistTargets.length > 0 && headerCell('playlist', 'Playlist')}
-          {headerCell('number', '#', 'text-right tabular-nums', 'track number')}
-          {headerCell('title', 'Title')}
-          {headerCell('artist', 'Artist')}
-          {headerCell('album', 'Album')}
-          {headerCell('year', 'Year', 'text-right tabular-nums')}
-          {headerCell('time', 'Time', 'text-right tabular-nums')}
-          {headerCell('plays', 'Plays', 'text-right tabular-nums')}
-          {headerCell('rating', 'Rating', 'text-right')}
-          {headerCell('mix', 'Mix', 'text-right')}
-          {showMetadataLookup && headerCell('tag', 'Tag', 'text-right')}
-          {headerCell('love', <Star className="library-th-star" />, 'text-right', 'love')}
+          {activeColumnKeys.map(headerFor)}
         </tr>
       </thead>
       <tbody>
@@ -2267,8 +2346,7 @@ export function TrackTable({
               selected={selectedIds.has(t.id)}
               isActive={currentId === t.id}
               search={search}
-              showQueueActions={showQueueActions}
-              showMetadataLookup={showMetadataLookup}
+              columns={activeColumnKeys}
               playlistTargets={playlistTargets}
               onPlay={stableOnPlay}
               onToggleSelect={stableOnToggleSelect}
@@ -2289,6 +2367,9 @@ export function TrackTable({
         )}
       </tbody>
       </table>
+      {columnsMenu && (
+        <TrackColumnsMenu at={columnsMenu} available={availableColumnKeys} onClose={closeColumnsMenu} />
+      )}
     </>
   );
 }
