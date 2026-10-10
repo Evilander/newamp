@@ -2160,6 +2160,7 @@ if (typeof window !== 'undefined') {
         seek: (seconds: number) => void;
         setFullscreenVisualizer: (on: boolean) => void;
         setCompactDeck: (on: boolean) => void;
+        volume: () => number;
         analyserFftSum: () => number;
         engineCurrentTime: () => number;
         exclusiveInfo: () => ReturnType<AudioEngine['getExclusiveInfo']>;
@@ -2186,6 +2187,9 @@ if (typeof window !== 'undefined') {
       setCompactDeck: (on: boolean) => {
         usePlayerStore.getState().setCompactMode(on);
       },
+      // The live slider position, read straight from the store so a wheel
+      // smoke sees every change, not only the ones the UI has painted.
+      volume: () => usePlayerStore.getState().volume,
       // Sum of byte-frequency-data over all bins. Returns 0 when the
       // analyser subtree is culled by Chrome's audio graph optimizer
       // (the 1.5.3-1.5.4 silent-sink bug) AND when no audio is playing.

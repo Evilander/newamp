@@ -264,6 +264,7 @@
     "build:icon": "node scripts/rebuild-icon.mjs",
     "smoke:ui-discover": "npm run build && node scripts/ui-discover-smoke.mjs",
     "smoke:ui-deck": "npm run build && node scripts/ui-deck-smoke.mjs",
+    "smoke:ui-wheel-volume": "npm run build && node scripts/ui-wheel-volume-smoke.mjs",
     "smoke:ui-art": "npm run build && node scripts/ui-art-smoke.mjs",
     "smoke:installer-artifact": "node scripts/installer-artifact-smoke.mjs",
     "smoke:installed-associations": "node scripts/installed-associations-smoke.mjs",
