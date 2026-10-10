@@ -153,6 +153,8 @@ const stub: NewAmpAPI = {
   scanLibrary: async () => undefined,
   cancelScan: async () => undefined,
   onScanProgress: () => () => undefined,
+  trashTracks: async () => ({ trashed: 0, removed: 0, failed: [], cancelled: true }),
+  onTracksRemoved: () => () => undefined,
   getTracks: async () => [],
   getTrackIds: async () => [],
   getTrackCount: async () => 0,

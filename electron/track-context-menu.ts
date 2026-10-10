@@ -33,6 +33,16 @@ export function trackContextMenuTemplate(
   if (request?.canShowInFolder) {
     template.push({ type: 'separator' }, { label: 'Show in Folder', click: choose({ action: 'show-in-folder' }) });
   }
+  if (request?.canTrash) {
+    const bin = process.platform === 'win32' ? 'Recycle Bin' : 'Trash';
+    template.push(
+      { type: 'separator' },
+      {
+        label: count === 1 ? `Move to ${bin}` : `Move ${count.toLocaleString('en-US')} Files to ${bin}`,
+        click: choose({ action: 'trash' }),
+      },
+    );
+  }
   return template;
 }
 

@@ -46,6 +46,16 @@ function assertQueueEdit(r) {
   if (columns.persisted !== true) problems.push('the column layout should be saved');
   if (columns.menuClosed !== true) problems.push('Escape should close the column chooser');
   expect('initial', 'One,Two,Three');
+  const trash = r.trash ?? {};
+  if (trash.trashed !== 1) problems.push(`trash.trashed: expected 1, got ${trash.trashed}`);
+  if (trash.removed !== 1) problems.push(`trash.removed: expected 1, got ${trash.removed}`);
+  if (trash.failed !== 0) problems.push(`trash.failed: expected 0, got ${trash.failed}`);
+  if (trash.cancelled !== false) problems.push('trash should not report cancelled');
+  if (trash.libraryRowsAfter !== 2) problems.push(`library rows after trash: expected 2, got ${trash.libraryRowsAfter}`);
+  if (trash.queueAfter !== 'One') problems.push(`queue after trash: expected One, got ${trash.queueAfter}`);
+  if (!/Queue One/.test(String(trash.playingAfter))) problems.push(`still playing Queue One after trash, got ${trash.playingAfter}`);
+  if (trash.stillPlayingAfter !== true) problems.push('playback should carry on after a queued track is trashed');
+  if (r.trashFileGone !== true) problems.push(`the trashed file should be gone from disk (${trash.path})`);
   expect('afterKeyboardMove', 'One,Three,Two'); // Alt+ArrowUp on the last row
   expect('focusFollowed', true); // focus stays on the track that moved
   expect('afterButtonMove', 'Three,One,Two'); // "Move down" on the playing row
@@ -57,8 +67,8 @@ function assertQueueEdit(r) {
   if (!/Queue One/.test(String(r.playingAfterEdits))) problems.push(`playback jumped to ${JSON.stringify(r.playingAfterEdits)}`);
   expect('stillPlaying', true);
   expect('clockAdvanced', true);
-  expect('rowsWhileArmed', 2); // the first Clear click only arms
-  expect('rowsAfterDoubleClick', 2); // a double-click doesn't arm and confirm at once
+  expect('rowsWhileArmed', 1); // the first Clear click only arms
+  expect('rowsAfterDoubleClick', 1); // a double-click doesn't arm and confirm at once
   expect('afterClear', 0);
   if (problems.length) {
     console.error(`[ui-queue-edit-smoke] FAIL: ${problems.join('; ')}`);
@@ -152,6 +162,7 @@ function runElectronSmoke() {
         ...process.env,
         NODE_ENV: 'production',
         NEWAMP_UI_QUEUE_EDIT_SMOKE: '1',
+        NEWAMP_SMOKE_TRASH_CONFIRM: 'yes',
         NEWAMP_SMOKE_USER_DATA: userData,
       },
       windowsHide: true,

@@ -273,6 +273,8 @@ export interface TrackContextMenuRequest {
   trackCount: number;
   playlists: Array<{ id: number; name: string }>;
   canShowInFolder: boolean;
+  /** Every track is a local file, so they can go to the Recycle Bin / Trash. */
+  canTrash?: boolean;
 }
 
 export type TrackContextMenuChoice =
@@ -280,7 +282,20 @@ export type TrackContextMenuChoice =
   | { action: 'add-to-queue' }
   | { action: 'add-to-playlist'; playlistId: number }
   | { action: 'new-playlist' }
-  | { action: 'show-in-folder' };
+  | { action: 'show-in-folder' }
+  | { action: 'trash' };
+
+export interface TrashTracksResult {
+  /** Files moved to the Recycle Bin / Trash. */
+  trashed: number;
+  /** Library rows removed afterwards, with their plays, ratings and playlist places. */
+  removed: number;
+  failed: Array<{ path: string; error: string }>;
+  /** The user said no at the confirmation, so nothing happened. */
+  cancelled: boolean;
+  /** Support backup taken before anything was deleted; null when nothing was. */
+  backupPath?: string | null;
+}
 
 export interface PlaylistM3uImportResult {
   playlist: SavedPlaylist;
@@ -1479,6 +1494,10 @@ export interface NewAmpAPI {
   getLibraryHealth: () => Promise<LibraryHealth>;
   pruneMissingTracks: (targets?: string[]) => Promise<LibraryPruneMissingResult>;
   previewPruneMissingTracks: (targets?: string[]) => Promise<LibraryPruneMissingPreview>;
+  /** Asks first, moves the files to the Recycle Bin / Trash, then removes their library rows. */
+  trashTracks: (ids: number[]) => Promise<TrashTracksResult>;
+  /** Tracks that just left the library (trashed or cleaned up), by id. */
+  onTracksRemoved: (cb: (ids: number[]) => void) => () => void;
   /** Hands every adopted metadata field back to the file's tags; returns how many. */
   resetAdoptedMetadata: () => Promise<number>;
   getListeningHistory: (opts?: { limit?: number; offset?: number }) => Promise<ListeningHistoryItem[]>;

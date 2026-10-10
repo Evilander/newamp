@@ -188,6 +188,8 @@ interface PlayerState {
   addTracksToQueue: (tracks: Track[]) => void;
   moveQueuedTrack: (fromIndex: number, toIndex: number) => void;
   removeQueuedTrack: (index: number) => Promise<void>;
+  /** Tracks that left the library: out of the queue, and off the deck if one is up. */
+  dropTracks: (ids: number[]) => Promise<void>;
   clearQueue: () => void;
   togglePlay: () => void;
   next: () => Promise<void>;
@@ -1308,6 +1310,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         vizPreset: settings.visualizerPreset,
       });
       applyReplayGain(get().current, settings);
+      api.onTracksRemoved((ids) => void get().dropTracks(ids));
       applyTheme(settings.theme, settings.customSkin);
       await restorePlaybackSession(settings.resumeState, settings, set, () => queueRevision === initialRevision);
     },
@@ -1611,6 +1614,48 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       } else {
         set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
       }
+      schedulePersistPlaybackSession(get(), true);
+    },
+
+    dropTracks: async (ids) => {
+      const gone = new Set(ids);
+      const state = get();
+      const currentGone = !!state.current && gone.has(state.current.id);
+      if (!currentGone && !state.queue.some((track) => gone.has(track.id))) return;
+      queueRevision++;
+      const queue = state.queue.filter((track) => !gone.has(track.id));
+      if (!queue.length) {
+        engine.unload();
+        set({ queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], activePodcastEpisode: null });
+        schedulePersistPlaybackSession(get(), true);
+        return;
+      }
+      // The current track's place among the survivors, or the survivor
+      // right after it when it went too.
+      const before = state.queue.slice(0, Math.max(0, state.index)).filter((track) => !gone.has(track.id)).length;
+      const index = Math.min(queue.length - 1, before);
+      if (!currentGone) {
+        set({ queue, index, shuffleHistory: resetSmartShuffleHistory(queue.length, index) });
+        schedulePersistPlaybackSession(get(), true);
+        return;
+      }
+      const nextCurrent = queue[index] ?? null;
+      if (state.isPlaying && nextCurrent) {
+        await get().playQueue(queue, index);
+        return;
+      }
+      engine.unload();
+      set({
+        queue,
+        index,
+        current: nextCurrent,
+        currentTime: 0,
+        duration: nextCurrent?.duration ?? 0,
+        resumeAt: null,
+        activePodcastEpisode: null,
+        shuffleHistory: resetSmartShuffleHistory(queue.length, index),
+      });
+      applyReplayGain(nextCurrent, get().settings);
       schedulePersistPlaybackSession(get(), true);
     },
 

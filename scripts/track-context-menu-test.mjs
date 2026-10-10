@@ -8,11 +8,12 @@ const chosen = [];
 const choose = (choice) => () => chosen.push(choice);
 const labels = (items) => items.map((item) => (item.type === 'separator' ? '---' : item.label));
 
+const bin = process.platform === 'win32' ? 'Recycle Bin' : 'Trash';
 const one = trackContextMenuTemplate(
-  { trackCount: 1, playlists: [{ id: 4, name: 'CD Mix' }, { id: 9, name: 'Rock & Roll' }], canShowInFolder: true },
+  { trackCount: 1, playlists: [{ id: 4, name: 'CD Mix' }, { id: 9, name: 'Rock & Roll' }], canShowInFolder: true, canTrash: true },
   choose,
 );
-assert.deepEqual(labels(one), ['Play Next', 'Add to Queue', '---', 'Add to Playlist', '---', 'Show in Folder']);
+assert.deepEqual(labels(one), ['Play Next', 'Add to Queue', '---', 'Add to Playlist', '---', 'Show in Folder', '---', `Move to ${bin}`]);
 const submenu = one[3].submenu;
 assert.deepEqual(labels(submenu), ['New Playlist', '---', 'CD Mix', 'Rock && Roll'], "'&' is escaped so Windows shows it");
 
@@ -20,15 +21,19 @@ submenu[2].click();
 submenu[0].click();
 one[0].click();
 one[5].click();
+one[7].click();
 assert.deepEqual(chosen, [
   { action: 'add-to-playlist', playlistId: 4 },
   { action: 'new-playlist' },
   { action: 'play-next' },
   { action: 'show-in-folder' },
+  { action: 'trash' },
 ]);
 
 const many = trackContextMenuTemplate({ trackCount: 1200, playlists: [], canShowInFolder: false }, choose);
-assert.deepEqual(labels(many), ['Play Next', 'Add to Queue', '---', 'Add to Playlist']);
+assert.deepEqual(labels(many), ['Play Next', 'Add to Queue', '---', 'Add to Playlist'], 'no trash item for streams');
+const manyLocal = trackContextMenuTemplate({ trackCount: 1200, playlists: [], canShowInFolder: false, canTrash: true }, choose);
+assert.equal(labels(manyLocal).at(-1), `Move 1,200 Files to ${bin}`);
 assert.deepEqual(labels(many[3].submenu), ['New Playlist from 1,200 Tracks'], 'no separator without playlists');
 
 const junk = trackContextMenuTemplate(
