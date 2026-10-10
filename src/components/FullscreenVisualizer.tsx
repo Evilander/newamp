@@ -555,8 +555,8 @@ export function FullscreenVisualizer(): JSX.Element {
   // Outside the viz this has no effect — wheel still scrolls the page
   // normally. Tyler wants this restricted to fullscreen viz so it doesn't
   // hijack scrolling in the library views.
-  const wheelVolumeRef = useLatestRef(volume);
-  const wheelSetVolumeRef = useLatestRef(setVolume);
+  // The base is read from the store at event time, not from the last
+  // render: wheel events outrun React, and adding to a stale value stalls.
   useEffect(() => {
     function onWheel(event: WheelEvent): void {
       if (isEditableTarget(event.target)) return;
@@ -570,7 +570,8 @@ export function FullscreenVisualizer(): JSX.Element {
       event.preventDefault();
       const delta = wheelVolumeDelta(event);
       if (delta === 0) return;
-      void wheelSetVolumeRef.current(clampVolume(wheelVolumeRef.current + delta));
+      const store = usePlayerStore.getState();
+      void store.setVolume(clampVolume(store.volume + delta));
     }
     // Bind on the root via ref — keeps the listener attached to the
     // exact DOM node React owns instead of a CSS-selector lookup that
@@ -579,10 +580,6 @@ export function FullscreenVisualizer(): JSX.Element {
     if (!root) return;
     root.addEventListener('wheel', onWheel, { passive: false });
     return () => root.removeEventListener('wheel', onWheel);
-    // useLatestRef returns a stable MutableRefObject — listing them in
-    // the deps array would never re-run the effect, so we omit them and
-    // let the closure read .current fresh on each wheel event.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // AutoVJ loop. Depend only on the stable handles (engine, autoVjEnabled);
@@ -1846,7 +1843,9 @@ export function FullscreenVisualizer(): JSX.Element {
             }}
             onWheel={(event) => {
               const delta = wheelVolumeDelta(event);
-              if (delta !== 0) void setVolume(clampVolume(volume + delta));
+              if (delta === 0) return;
+              const store = usePlayerStore.getState();
+              void store.setVolume(clampVolume(store.volume + delta));
             }}
             aria-label="Visualizer volume"
             title={`Volume ${volumeLabel(volume)} — drag or scroll to change`}

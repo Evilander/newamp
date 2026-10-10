@@ -6,7 +6,7 @@
 // so we keep accessibility and keyboard control while showing the danger zone.
 
 import { useEffect, useRef, type CSSProperties } from 'react';
-import { clampVolume, wheelVolumeDelta } from '../lib/wheel-volume';
+import { WheelVolumeAccumulator, wheelVolumeDelta } from '../lib/wheel-volume';
 
 export const VOLUME_BOOST_MAX = 2;
 
@@ -50,6 +50,8 @@ export function VolumeSlider({
   const rootRef = useRef<HTMLDivElement>(null);
   const latest = useRef({ value: safe, onChange });
   latest.current = { value: safe, onChange };
+  const wheelAccumulator = useRef(new WheelVolumeAccumulator());
+  wheelAccumulator.current.observe(safe);
   // Wheel over the slider nudges the volume. Bound by hand because React's
   // onWheel is passive and couldn't stop the view behind it from scrolling.
   useEffect(() => {
@@ -59,7 +61,7 @@ export function VolumeSlider({
       const delta = wheelVolumeDelta(event);
       if (delta === 0) return;
       event.preventDefault();
-      latest.current.onChange(clampVolume(latest.current.value + delta));
+      latest.current.onChange(wheelAccumulator.current.next(latest.current.value, delta));
     };
     node.addEventListener('wheel', onWheel, { passive: false });
     return () => node.removeEventListener('wheel', onWheel);
@@ -86,7 +88,12 @@ export function VolumeSlider({
           color-mix(in srgb, var(--error) 35%, var(--panel-2)) 100%)`,
   };
   return (
-    <div ref={rootRef} className={`volume-slider ${boost ? 'is-boosted' : ''} ${className ?? ''}`}>
+    <div
+      ref={rootRef}
+      className={`volume-slider ${boost ? 'is-boosted' : ''} ${className ?? ''}`}
+      // Double-click anywhere on the control: back to 100%.
+      onDoubleClick={() => onChange(1)}
+    >
       {showLabel ? (
         <span
           className="volume-slider-label"
@@ -107,7 +114,7 @@ export function VolumeSlider({
           step={0.01}
           value={safe}
           onChange={(e) => onChange(parseFloat(e.target.value))}
-          title={title ?? volumeLabel(safe)}
+          title={`${title ?? volumeLabel(safe)} — scroll to nudge, double-click for 100%`}
           aria-label={`Volume ${volumeLabel(safe)}`}
           // Mark the unity tick so we can render a hairline at 100%.
           data-newamp-volume-boost={boost ? 'true' : 'false'}

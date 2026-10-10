@@ -130,6 +130,7 @@ const uiOpenFileSmoke = process.env.NEWAMP_UI_OPEN_FILE_SMOKE === '1';
 const uiVisualizerSmoke = process.env.NEWAMP_UI_VISUALIZER_SMOKE === '1';
 const uiDetachedVizSmoke = process.env.NEWAMP_UI_DETACHED_VIZ_SMOKE === '1';
 const uiDeckSmoke = process.env.NEWAMP_UI_DECK_SMOKE === '1';
+const uiWheelVolumeSmoke = process.env.NEWAMP_UI_WHEEL_VOLUME_SMOKE === '1';
 const uiArtSmoke = process.env.NEWAMP_UI_ART_SMOKE === '1';
 const uiDiscoverSmoke = process.env.NEWAMP_UI_DISCOVER_SMOKE === '1';
 const exclusiveUiSmoke = process.env.NEWAMP_EXCLUSIVE_UI_SMOKE === '1';
@@ -146,6 +147,7 @@ const smokeMode =
   uiVisualizerSmoke ||
   uiDetachedVizSmoke ||
   uiDeckSmoke ||
+  uiWheelVolumeSmoke ||
   uiArtSmoke ||
   uiDiscoverSmoke ||
   exclusiveUiSmoke ||
@@ -3433,7 +3435,10 @@ async function runScreenshotGallery(win: BrowserWindow, scanPromise: Promise<voi
     await reloadForSmoke(win);
     win.setResizable(true);
     win.setMinimumSize(980, 640);
-    win.setSize(1440, 940, true);
+    // NEWAMP_SCREENSHOT_SIZE=WxH shoots at another window size (short
+    // windows are where views clip).
+    const sizeMatch = /^(\d+)x(\d+)$/.exec(process.env.NEWAMP_SCREENSHOT_SIZE ?? '');
+    win.setSize(sizeMatch ? Number(sizeMatch[1]) : 1440, sizeMatch ? Number(sizeMatch[2]) : 940, true);
     win.center();
     win.show();
     win.focus();
@@ -3553,6 +3558,231 @@ async function runUiDeckSmoke(win: BrowserWindow): Promise<void> {
     app.quit();
   } catch (err) {
     console.error('[newamp-ui-deck-smoke] failed:', err);
+    app.exit(1);
+  }
+}
+
+// Trusted wheel events over the transport volume slider, first with the
+// renderer idle and then with its CPU throttled so React paints well behind
+// the events (the Mac tester's "stops working after a while"). The volume
+// must move by the distance scrolled either way. Ends with a double-click,
+// which resets the slider to 100%.
+async function runUiWheelVolumeSmoke(win: BrowserWindow): Promise<void> {
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const wc = win.webContents;
+  const readVolume = (): Promise<number> =>
+    wc.executeJavaScript('window.__newampSmoke.volume()', true) as Promise<number>;
+  const locateSlider = (): Promise<{ left: number; width: number; y: number } | null> =>
+    wc.executeJavaScript(
+      `(() => {
+        const el = document.querySelector('[data-newamp-transport] .volume-slider-input');
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { left: r.left, width: r.width, y: r.top + r.height / 2 };
+      })()`,
+      true,
+    ) as Promise<{ left: number; width: number; y: number } | null>;
+  const wheel = (x: number, y: number, deltaY: number): void => {
+    wc.sendInputEvent({ type: 'mouseWheel', x, y, deltaX: 0, deltaY, canScroll: true });
+  };
+  // Sends the burst, then waits until the page has received every pixel
+  // of it (a throttled renderer takes a while, and merges queued events),
+  // so the volume read afterwards is final.
+  const burst = async (
+    x: number,
+    y: number,
+    deltaY: number,
+    count: number,
+  ): Promise<{ volume: number; events: number; pixels: number }> => {
+    const before = (await wc.executeJavaScript('window.__wheelLog.length', true)) as number;
+    for (let i = 0; i < count; i += 1) {
+      wheel(x, y, deltaY);
+      await sleep(2);
+    }
+    const wanted = Math.abs(deltaY) * count;
+    const started = Date.now();
+    let delivered = { events: 0, pixels: 0 };
+    while (Date.now() - started < 20000) {
+      delivered = (await wc.executeJavaScript(
+        `(() => { const l = window.__wheelLog.slice(${before}); return { events: l.length, pixels: l.reduce((s, e) => s + Math.abs(e.deltaY), 0) }; })()`,
+        true,
+      )) as { events: number; pixels: number };
+      if (delivered.pixels >= wanted) break;
+      await sleep(100);
+    }
+    await sleep(400);
+    return { volume: await readVolume(), ...delivered };
+  };
+  let throttled = false;
+  try {
+    const slider = await (async () => {
+      const start = Date.now();
+      while (Date.now() - start < 15000) {
+        const found = await locateSlider().catch(() => null);
+        if (found && found.width > 0) return found;
+        await sleep(100);
+      }
+      throw new Error('Timed out waiting for the transport volume slider');
+    })();
+    const x = slider.left + slider.width / 2;
+    const y = slider.y;
+    // sendInputEvent only reaches a focused window.
+    win.show();
+    win.focus();
+    wc.focus();
+    await sleep(300);
+    await wc.executeJavaScript(
+      `window.__wheelLog = []; document.addEventListener('wheel', (e) => window.__wheelLog.push({ deltaY: e.deltaY, deltaMode: e.deltaMode, target: (e.target && e.target.className) || String(e.target), trusted: e.isTrusted, x: e.clientX, y: e.clientY }), { capture: true, passive: true });`,
+      true,
+    );
+    wc.sendInputEvent({ type: 'mouseMove', x, y });
+    await sleep(200);
+    const start = await readVolume();
+    // One event of a quarter notch tells us which sign raises the volume
+    // in this Chromium's wheel-delta convention.
+    wheel(x, y, 25);
+    await sleep(300);
+    const afterOne = await readVolume();
+    if (afterOne === start) {
+      const log = await wc.executeJavaScript('JSON.stringify(window.__wheelLog)', true);
+      throw new Error('A wheel event over the slider did not change the volume. point=' + JSON.stringify({ x, y, slider, bounds: win.getContentBounds(), zoom: wc.getZoomFactor() }) + ' wheelLog=' + log);
+    }
+    const raise = afterOne > start ? 25 : -25;
+    const count = 40;
+    const fastStart = afterOne;
+    const fast = await burst(x, y, raise, count);
+    wc.debugger.attach('1.3');
+    throttled = true;
+    await wc.debugger.sendCommand('Emulation.setCPUThrottlingRate', { rate: 16 });
+    const throttledStart = fast.volume;
+    const slow = await burst(x, y, -raise, count);
+    await wc.debugger.sendCommand('Emulation.setCPUThrottlingRate', { rate: 1 });
+    wc.debugger.detach();
+    throttled = false;
+    // A main thread that is busy most of the time: queued wheel events
+    // merge into fewer, larger ones and React paints well behind them.
+    await wc.executeJavaScript(
+      `window.__jank = setInterval(() => { const t = performance.now(); while (performance.now() - t < 120) {} }, 150);`,
+      true,
+    );
+    const jankStart = slow.volume;
+    const jank = await burst(x, y, raise, count);
+    await wc.executeJavaScript('clearInterval(window.__jank)', true);
+    // The tester's path: Settings open, the visualizer opened and closed,
+    // then the Retro TV deck. Each is a burst over whichever volume slider
+    // is on screen; in deck mode that is the deck's own.
+    const sliderAnywhere = (): Promise<{ left: number; width: number; y: number } | null> =>
+      wc.executeJavaScript(
+        `(() => {
+          const el = document.querySelector('.volume-slider-input');
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return r.width > 0 ? { left: r.left, width: r.width, y: r.top + r.height / 2 } : null;
+        })()`,
+        true,
+      ) as Promise<{ left: number; width: number; y: number } | null>;
+    const burstAnywhere = async (
+      label: string,
+      sign: number,
+    ): Promise<{ volume: number; events: number; pixels: number; start: number }> => {
+      const started = Date.now();
+      let found: { left: number; width: number; y: number } | null = null;
+      while (!found && Date.now() - started < 15000) {
+        found = await sliderAnywhere().catch(() => null);
+        if (!found) await sleep(100);
+      }
+      if (!found) throw new Error('No volume slider on screen for ' + label);
+      const px = found.left + found.width / 2;
+      wc.sendInputEvent({ type: 'mouseMove', x: px, y: found.y });
+      await sleep(150);
+      const start = await readVolume();
+      return { start, ...(await burst(px, found.y, sign * raise, count)) };
+    };
+    const navigate = (name: string): Promise<void> =>
+      wc.executeJavaScript(
+        `(() => {
+          const b = Array.from(document.querySelectorAll('button')).find((el) => (el.textContent || '').trim() === ${JSON.stringify(name)});
+          if (!b) throw new Error('no nav button ' + ${JSON.stringify(name)});
+          b.click();
+        })()`,
+        true,
+      ) as Promise<void>;
+    await navigate('Settings');
+    await sleep(800);
+    const settings = await burstAnywhere('settings', -1);
+    await wc.executeJavaScript('window.__newampSmoke.setFullscreenVisualizer(true)', true);
+    await sleep(1500);
+    await wc.executeJavaScript('window.__newampSmoke.setFullscreenVisualizer(false)', true);
+    await sleep(800);
+    const afterVisualizer = await burstAnywhere('after visualizer', 1);
+    await wc.executeJavaScript(
+      `localStorage.setItem('newamp:deck:skinSchema', '2'); localStorage.setItem('newamp:deck:skin', 'retro-tv'); window.__newampSmoke.setCompactDeck(true);`,
+      true,
+    );
+    await sleep(1500);
+    const deck = await burstAnywhere('retro-tv deck', -1);
+    await wc.executeJavaScript('window.__newampSmoke.setCompactDeck(false)', true);
+    await sleep(1200);
+    const sliderAgain = await (async () => {
+      const started = Date.now();
+      while (Date.now() - started < 15000) {
+        const found = await locateSlider().catch(() => null);
+        if (found && found.width > 0) return found;
+        await sleep(100);
+      }
+      throw new Error('Timed out waiting for the transport slider after deck mode');
+    })();
+    // Double-click a quarter of the way along: the clicks alone would land
+    // the thumb at 50%, so 100% afterwards is the reset, not the position.
+    const clickX = sliderAgain.left + sliderAgain.width * 0.25;
+    for (const clickCount of [1, 2]) {
+      wc.sendInputEvent({ type: 'mouseDown', x: clickX, y: sliderAgain.y, button: 'left', clickCount });
+      wc.sendInputEvent({ type: 'mouseUp', x: clickX, y: sliderAgain.y, button: 'left', clickCount });
+      await sleep(60);
+    }
+    await sleep(400);
+    const afterDoubleClick = await readVolume();
+    console.log(
+      `[newamp-ui-wheel-volume-smoke] ${JSON.stringify({
+        ok: true,
+        start,
+        afterOne,
+        count,
+        stepPerEvent: 0.01,
+        fastStart,
+        afterFast: fast.volume,
+        fastEvents: fast.events,
+        fastPixels: fast.pixels,
+        throttledStart,
+        afterThrottled: slow.volume,
+        throttledEvents: slow.events,
+        throttledPixels: slow.pixels,
+        jankStart,
+        afterJank: jank.volume,
+        jankEvents: jank.events,
+        jankPixels: jank.pixels,
+        settingsStart: settings.start,
+        afterSettings: settings.volume,
+        visualizerStart: afterVisualizer.start,
+        afterVisualizer: afterVisualizer.volume,
+        deckStart: deck.start,
+        afterDeck: deck.volume,
+        deckEvents: deck.events,
+        afterDoubleClick,
+      })}`,
+    );
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    if (throttled) {
+      try {
+        await wc.debugger.sendCommand('Emulation.setCPUThrottlingRate', { rate: 1 });
+        wc.debugger.detach();
+      } catch {
+        /* the window may already be gone */
+      }
+    }
+    console.error('[newamp-ui-wheel-volume-smoke] failed:', err);
     app.exit(1);
   }
 }
@@ -4260,8 +4490,23 @@ function uiDiscoverProbeSource(): string {
       );
       saveButton.click();
       await waitFor('Discover save status', () => /Saved /.test(view.textContent || '') ? view : null);
+      // The "?" next to the view title toggles the intro card: a fresh
+      // profile starts with the card open, so the first click hides it and
+      // the second brings it back.
+      const helpCard = () => !!document.querySelector('[data-newamp-view-onboarding="discover"]');
+      const helpDot = await waitFor('Discover help dot', () => document.querySelector('[data-newamp-view-help]'));
+      const helpCardBefore = helpCard();
+      helpDot.click();
+      await sleep(150);
+      const helpCardAfterFirstClick = helpCard();
+      helpDot.click();
+      await sleep(150);
+      const helpCardAfterSecondClick = helpCard();
       return {
         ok: true,
+        helpCardBefore,
+        helpCardAfterFirstClick,
+        helpCardAfterSecondClick,
         missionCount: document.querySelectorAll('[data-newamp-discover-mission]').length,
         trackRows: document.querySelectorAll('[data-newamp-track-row]').length,
         hasSave: !!saveButton,
@@ -5435,6 +5680,8 @@ async function bootstrap(): Promise<void> {
       void runUiDetachedVizSmoke(mainWin, scanPromise);
     } else if (uiDeckSmoke && mainWin) {
       void runUiDeckSmoke(mainWin);
+    } else if (uiWheelVolumeSmoke && mainWin) {
+      void runUiWheelVolumeSmoke(mainWin);
     } else if (uiArtSmoke && mainWin) {
       void runUiArtSmoke(mainWin, scanPromise);
     } else if (uiDiscoverSmoke && mainWin) {
