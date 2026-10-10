@@ -95,7 +95,9 @@ export function Transport(): JSX.Element {
       </div>
 
       <div className="flex flex-1 flex-col gap-1">
-        <div className="display flex h-[42px] items-center gap-3 px-3">
+        {/* min-height, not height: the two lines inside follow Text size,
+            and at 42px fixed the codec line sank into the bottom bevel. */}
+        <div className="display flex min-h-[42px] items-center gap-3 px-3">
           <div className="flex w-[64px] flex-col items-end leading-none">
             <TransportElapsed />
             <div className="lcd-text text-[10px]" style={{ color: 'var(--ink-2)' }}>
@@ -105,7 +107,7 @@ export function Transport(): JSX.Element {
           <div className="relative flex-1 overflow-hidden">
             <div
               data-newamp-current-title={current ? `${current.artist} - ${current.title}` : ''}
-              className="lcd-text text-[18px]"
+              className="lcd-text text-[18px] leading-tight"
               style={{ whiteSpace: 'nowrap', maxWidth: '100%', textOverflow: 'ellipsis', overflow: 'hidden' }}
               title={current ? `${current.artist} — ${current.title}` : ''}
             >
