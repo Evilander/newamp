@@ -59,6 +59,7 @@ api.recordPlay = async () => {};
 api.recordSkip = async () => {};
 api.lastfmUpdateNowPlaying = async () => {};
 api.lastfmScrobble = async () => {};
+api.onTracksRemoved = () => () => {};
 const plays = [];
 engine.setExternalTransport({ play: async id => { plays.push(id); return true; }, pause() {}, resume() {}, stop() {}, seek() {}, prepareNext() {} });
 store.setState({ settings: saved, autoDjEnabled: false });
