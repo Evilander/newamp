@@ -33,6 +33,7 @@ import type {
   LibraryHealth,
   LibraryPruneMissingPreview,
   LibraryPruneMissingResult,
+  TrashTracksResult,
   LocalGuitarTabInput,
   LocalLyricsResult,
   ListeningHistoryItem,
@@ -297,6 +298,12 @@ const api: NewAmpAPI = {
   getLibraryHealth: () => ipcRenderer.invoke('library:get-health') as Promise<LibraryHealth>,
   pruneMissingTracks: (targets?: string[]) =>
     ipcRenderer.invoke('library:prune-missing', targets) as Promise<LibraryPruneMissingResult>,
+  trashTracks: (ids: number[]) => ipcRenderer.invoke('tracks:trash', ids) as Promise<TrashTracksResult>,
+  onTracksRemoved: (cb: (ids: number[]) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, ids: number[]) => cb(Array.isArray(ids) ? ids : []);
+    ipcRenderer.on('library:tracks-removed', handler);
+    return () => ipcRenderer.off('library:tracks-removed', handler);
+  },
   previewPruneMissingTracks: (targets?: string[]) =>
     ipcRenderer.invoke('library:prune-missing-preview', targets) as Promise<LibraryPruneMissingPreview>,
   resetAdoptedMetadata: () => ipcRenderer.invoke('metadata:reset-adopted') as Promise<number>,

@@ -28,6 +28,7 @@ export async function openTrackContextMenu(tracks: Track[]): Promise<void> {
     trackCount: tracks.length,
     playlists: playlists.map((playlist) => ({ id: playlist.id, name: playlist.name })),
     canShowInFolder: tracks.length === 1 && isLocalPath(tracks[0]!.path),
+    canTrash: tracks.every((track) => isLocalPath(track.path)),
   });
   if (!choice) return;
   const store = usePlayerStore.getState();
@@ -68,5 +69,27 @@ export async function openTrackContextMenu(tracks: Track[]): Promise<void> {
     case 'show-in-folder':
       void api.showInFolder(tracks[0]!.path);
       return;
+    case 'trash': {
+      // The main process asks first; the files and their library rows go
+      // together, and the player drops them on the tracks-removed event.
+      const result = await api.trashTracks(trackIds);
+      if (result.cancelled) return;
+      const bin = /^win/i.test(navigator.platform) ? 'Recycle Bin' : 'Trash';
+      if (result.failed.length) {
+        pushToast({
+          tone: 'warn',
+          title: `${result.failed.length === 1 ? 'One file' : `${result.failed.length} files`} could not be moved to the ${bin}`,
+          detail: result.failed[0]!.error,
+        });
+      }
+      if (result.trashed) {
+        pushToast({
+          tone: 'ok',
+          title: `Moved to the ${bin}`,
+          detail: `${result.trashed === 1 ? tracks[0]!.title : `${result.trashed.toLocaleString()} files`}. Gone from the library too.`,
+        });
+      }
+      return;
+    }
   }
 }

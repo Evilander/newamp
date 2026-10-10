@@ -275,6 +275,9 @@ export default function App(): JSX.Element {
       .catch((err) => console.error('init failed', err));
 
     function onKey(e: KeyboardEvent): void {
+      // A surface that already took the key (the visualizer's own handler,
+      // for one) keeps it.
+      if (e.defaultPrevented) return;
       const store = usePlayerStore.getState();
       const command = resolvePlayerShortcut({
         key: e.key,

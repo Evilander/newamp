@@ -380,6 +380,11 @@ export function LibraryView(): JSX.Element {
     }
   }
 
+  // Tracks trashed from a right-click menu anywhere: refresh the list and
+  // the summary the same way the cleanup does.
+  const refreshAfterRemovalRef = useRef<() => Promise<void>>(async () => undefined);
+  useEffect(() => api.onTracksRemoved(() => void refreshAfterRemovalRef.current()), []);
+
   async function removeMissingFiles(): Promise<void> {
     setPrunePreview(null);
     setCleanupStatus('Backing up the library, then removing missing tracks...');
@@ -399,6 +404,10 @@ export function LibraryView(): JSX.Element {
         ? `Removed ${result.removed.toLocaleString()} stale track${result.removed === 1 ? '' : 's'}.${kept}${backup}`
         : `Nothing was removed.${kept}`,
     );
+    await refreshAfterRemoval();
+  }
+
+  async function refreshAfterRemoval(): Promise<void> {
     try {
       const [nextTracks, nextCount, nextStats, nextHealth] = await Promise.all([
         api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
@@ -415,6 +424,7 @@ export function LibraryView(): JSX.Element {
       console.error('library refresh after cleanup failed', error);
     }
   }
+  refreshAfterRemovalRef.current = refreshAfterRemoval;
 
   async function createDuplicateReviewPlaylist(): Promise<void> {
     if (!health?.duplicateGroups.length) {

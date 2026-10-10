@@ -22,6 +22,7 @@ assertNear(result.afterJank, result.jankStart + span, 'the same burst with the m
 assertNear(result.afterSettings, result.settingsStart - span, 'a burst with the Settings view open');
 assertNear(result.afterVisualizer, result.visualizerStart + span, 'a burst after the visualizer was opened and closed');
 assertNear(result.afterDeck, result.deckStart - span, "a burst over the Retro TV deck's own slider");
+assertNear(result.afterKnobDrag, result.knobStart + 0.3, 'dragging the Retro TV volume knob up 30 px');
 assertNear(result.afterDoubleClick, 1, 'a double-click on the slider resets the volume to 100%');
 
 async function resetSmokeRoot() {

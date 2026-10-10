@@ -251,7 +251,22 @@
   height: 52px;
 }
 .deck-tv-knob-ch { left: 406px; top: 72px; }
-.deck-tv-knob-vol { left: 406px; top: 146px; }
+.deck-tv-knob-vol {
+  left: 406px;
+  top: 146px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+.deck-tv-knob-vol:active { cursor: grabbing; }
+.deck-tv-knob-vol:focus-visible .deck-tv-knob-face {
+  box-shadow:
+    0 0 0 2px var(--accent),
+    inset 0 1px 1px rgba(255, 255, 255, 0.3),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.6),
+    0 3px 6px rgba(0, 0, 0, 0.5);
+}
 .deck-tv-knob-face {
   position: absolute;
   inset: 0;

@@ -103,6 +103,7 @@ import type {
   SavePlaylistInput,
   TrackContextMenuChoice,
   TrackContextMenuRequest,
+  TrashTracksResult,
   ScanProgress,
   SupportBackupResult,
   SupportDiagnostics,
@@ -1527,6 +1528,10 @@ function patchTouchesLibraryWatch(patch: unknown): boolean {
 
 // Views and pickers that list saved playlists refetch on this instead of
 // holding whatever list they loaded when they mounted.
+function notifyTracksRemoved(ids: number[]): void {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('library:tracks-removed', ids);
+}
+
 function notifyPlaylistsChanged(): void {
   if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('playlists:changed');
 }
@@ -2200,6 +2205,64 @@ function registerIpc(): void {
     try {
       const backup = await createBackupFromLiveStores(app.getPath('userData'));
       return { ...library.pruneMissingTracks(scope, roots), backupPath: backup.backupPath };
+    } finally {
+      resumeLibraryMutations();
+    }
+  });
+  // Files go to the Recycle Bin / Trash, then their rows leave the library
+  // the way "Clean missing files" does: a backup first, and a file that
+  // could not be moved stays in both places.
+  ipcMain.handle('tracks:trash', async (e, ids: unknown): Promise<TrashTracksResult> => {
+    const wanted = Array.isArray(ids) ? ids.map((id) => Math.trunc(Number(id))).filter((id) => id > 0) : [];
+    const isLocal = (p: string): boolean => !!p && !/^[a-z][a-z0-9+.-]+:\/\//i.test(p);
+    const tracks = wanted
+      .map((id) => library.getTrack(id))
+      .filter((track): track is Track => !!track && isLocal(track.path));
+    const nothing: TrashTracksResult = { trashed: 0, removed: 0, failed: [], cancelled: false };
+    if (!tracks.length) return nothing;
+    const bin = process.platform === 'win32' ? 'Recycle Bin' : 'Trash';
+    const owner = BrowserWindow.fromWebContents(e.sender);
+    const options: Electron.MessageBoxOptions = {
+      type: 'warning',
+      buttons: [`Move to ${bin}`, 'Cancel'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+      message:
+        tracks.length === 1
+          ? `Move "${tracks[0]!.title}" to the ${bin}?`
+          : `Move ${tracks.length.toLocaleString('en-US')} files to the ${bin}?`,
+      detail: `The files leave the library too, with their plays, ratings and playlist places. A library backup is taken first, and the files can be restored from the ${bin}.`,
+    };
+    // A smoke can't press a native dialog's button; it says yes up front.
+    const autoConfirm = smokeMode && process.env.NEWAMP_SMOKE_TRASH_CONFIRM === 'yes';
+    const { response } = autoConfirm
+      ? { response: 0 }
+      : owner
+        ? await dialog.showMessageBox(owner, options)
+        : await dialog.showMessageBox(options);
+    if (response !== 0) return { ...nothing, cancelled: true };
+    await quiesceLibraryMutations();
+    try {
+      const backup = await createBackupFromLiveStores(app.getPath('userData'));
+      const trashed: Track[] = [];
+      const failed: Array<{ path: string; error: string }> = [];
+      for (const track of tracks) {
+        try {
+          await shell.trashItem(track.path);
+          trashed.push(track);
+        } catch (err) {
+          failed.push({ path: track.path, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      const removed = trashed.length
+        ? library.pruneMissingTracks(trashed.map((track) => track.path), settings.get().libraryRoots).removed
+        : 0;
+      if (removed) {
+        notifyTracksRemoved(trashed.map((track) => track.id));
+        notifyPlaylistsChanged();
+      }
+      return { trashed: trashed.length, removed, failed, cancelled: false, backupPath: backup.backupPath };
     } finally {
       resumeLibraryMutations();
     }
@@ -3065,7 +3128,9 @@ async function runUiQueueEditSmoke(win: BrowserWindow, scanPromise: Promise<void
         setTimeout(() => reject(new Error('Timed out waiting for UI queue-edit probe')), 25000),
       ),
     ]);
-    console.log(`[newamp-ui-queue-edit-smoke] ${JSON.stringify(result)}`);
+    const trashedPath = (result as { trash?: { path?: string | null } }).trash?.path;
+    const trashFileGone = typeof trashedPath === 'string' ? !existsSync(trashedPath) : null;
+    console.log(`[newamp-ui-queue-edit-smoke] ${JSON.stringify({ ...(result as object), trashFileGone })}`);
     isQuitting = true;
     app.quit();
   } catch (err) {
@@ -3721,6 +3786,29 @@ async function runUiWheelVolumeSmoke(win: BrowserWindow): Promise<void> {
     );
     await sleep(1500);
     const deck = await burstAnywhere('retro-tv deck', -1);
+    // The Retro TV volume knob turns by dragging it: up is louder, 100 px
+    // per 100%.
+    const knob = (await wc.executeJavaScript(
+      `(() => {
+        const el = document.querySelector('[data-newamp-deck-volume-knob]');
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      })()`,
+      true,
+    )) as { x: number; y: number } | null;
+    if (!knob) throw new Error('The Retro TV deck has no volume knob');
+    wc.sendInputEvent({ type: 'mouseMove', x: knob.x, y: knob.y });
+    await sleep(150);
+    const knobStart = await readVolume();
+    wc.sendInputEvent({ type: 'mouseDown', x: knob.x, y: knob.y, button: 'left', clickCount: 1 });
+    for (let step = 1; step <= 6; step += 1) {
+      wc.sendInputEvent({ type: 'mouseMove', x: knob.x, y: knob.y - step * 5, modifiers: ['leftbuttondown'] });
+      await sleep(30);
+    }
+    wc.sendInputEvent({ type: 'mouseUp', x: knob.x, y: knob.y - 30, button: 'left', clickCount: 1 });
+    await sleep(400);
+    const afterKnobDrag = await readVolume();
     await wc.executeJavaScript('window.__newampSmoke.setCompactDeck(false)', true);
     await sleep(1200);
     const sliderAgain = await (async () => {
@@ -3768,6 +3856,8 @@ async function runUiWheelVolumeSmoke(win: BrowserWindow): Promise<void> {
         deckStart: deck.start,
         afterDeck: deck.volume,
         deckEvents: deck.events,
+        knobStart,
+        afterKnobDrag,
         afterDoubleClick,
       })}`,
     );
@@ -4307,6 +4397,32 @@ function uiVisualizerProbeSource(): string {
       await waitFor('fullscreen visualizer reopens', () =>
         document.querySelector('[data-newamp-fullscreen-visualizer]'),
       );
+      // Right-click on the stage opens the visualizer menu; Escape closes it
+      // and leaves the stage up. Synthetic keys must be cancelable, like
+      // real ones, or the visualizer's preventDefault means nothing to the
+      // app-wide shortcuts behind it.
+      const escape = () =>
+        document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      document
+        .querySelector('[data-newamp-fullscreen-visualizer]')
+        .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 300 }));
+      const rightClickMenu = !!(await waitFor('visualizer menu from right-click', () =>
+        document.querySelector('[data-newamp-viz-preset-picker]'), 4000).catch(() => null));
+      await sleep(200);
+      escape();
+      await sleep(300);
+      const rightClickMenuClosed = !document.querySelector('[data-newamp-viz-preset-picker]');
+      const stageSurvivedRightClick = !!document.querySelector('[data-newamp-fullscreen-visualizer]');
+      // The same popover from the toolbar button: Escape closes the popover
+      // first and only a second Escape leaves the visualizer.
+      const toolbarToggle = await waitFor('preset toggle', () => document.querySelector('[data-newamp-viz-preset-picker-toggle]'));
+      toolbarToggle.click();
+      const toolbarMenu = !!(await waitFor('picker via toolbar', () => document.querySelector('[data-newamp-viz-preset-picker]'), 4000).catch(() => null));
+      await sleep(200);
+      escape();
+      await sleep(300);
+      const toolbarMenuClosed = !document.querySelector('[data-newamp-viz-preset-picker]');
+      const stageSurvivedToolbarEscape = !!document.querySelector('[data-newamp-fullscreen-visualizer]');
       window.__newampSmoke?.setCompactDeck?.(true);
       await waitFor('compact deck opens and clears fullscreen visualizer', () => {
         const deck = document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv');
@@ -4315,6 +4431,12 @@ function uiVisualizerProbeSource(): string {
       });
       return {
         ok: true,
+        rightClickMenu,
+        rightClickMenuClosed,
+        stageSurvivedRightClick,
+        toolbarMenu,
+        toolbarMenuClosed,
+        stageSurvivedToolbarEscape,
         currentTitle,
         currentTime,
         preset: 'spectrum',
@@ -4806,6 +4928,32 @@ function uiQueueEditProbeSource(): string {
       // The clock can sit at zero for a moment while the audio element starts.
       steps.clockAdvanced = !!(await waitFor('clock advancing', () => (clock() > startedAt ? true : null), 4000).catch(() => false));
       steps.stillPlaying = !!document.querySelector('[data-newamp-transport][data-newamp-playing="true"]');
+
+      // Move a queued file to the Recycle Bin / Trash from the library (the
+      // right-click menu's action, called directly: the menu is native). The
+      // row leaves the table, the queue drops it, and playback carries on.
+      await nav('Library');
+      const doomedRow = await waitFor('library row for Queue Two', () =>
+        document.querySelector('[data-newamp-track-row][data-track-title="Queue Two"]'),
+      );
+      const doomedId = Number(doomedRow.getAttribute('data-track-id'));
+      const doomedTrack = await window.newamp.getTrack(doomedId);
+      const trashResult = await window.newamp.trashTracks([doomedId]);
+      await waitFor('library row gone', () =>
+        (document.querySelector('[data-newamp-track-row][data-track-title="Queue Two"]') ? null : true), 6000);
+      steps.trash = {
+        path: doomedTrack ? doomedTrack.path : null,
+        trashed: trashResult.trashed,
+        removed: trashResult.removed,
+        failed: trashResult.failed.length,
+        cancelled: trashResult.cancelled,
+        libraryRowsAfter: document.querySelectorAll('[data-newamp-track-row]').length,
+      };
+      await nav('Now Playing');
+      await waitFor('queue without Queue Two', () => (rows().length === 1 ? true : null), 6000);
+      steps.trash.queueAfter = order();
+      steps.trash.playingAfter = playing();
+      steps.trash.stillPlayingAfter = !!document.querySelector('[data-newamp-transport][data-newamp-playing="true"]');
 
       // Clear is two-step (arm, then confirm). A second click inside the
       // double-click time is part of the arming gesture and must not confirm.

@@ -538,7 +538,7 @@ export function FullscreenVisualizer(): JSX.Element {
         setOpenPanel((p) => (p === 'help' ? null : 'help'));
       } else if (event.key === 'Escape') {
         // Progressive Esc: close an open popover first; otherwise exit the
-        // visualizer entirely (alongside right-click as the documented way out).
+        // visualizer entirely.
         event.preventDefault();
         if (openPanel) {
           setOpenPanel(null);
@@ -547,8 +547,11 @@ export function FullscreenVisualizer(): JSX.Element {
         }
       }
     }
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    // Capture phase, so the keys this handler owns (and prevents) are
+    // settled before the app-wide shortcuts see them: Esc with a popover
+    // open closes the popover, not the whole visualizer.
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [activeIndex, openPanel]);
 
   // Mouse wheel anywhere over the fullscreen visualizer drives volume.
@@ -1113,9 +1116,10 @@ export function FullscreenVisualizer(): JSX.Element {
       className="fullscreen-viz-root fixed inset-0 z-[90] flex items-center justify-center bg-black"
       onDoubleClick={toggleNativeFullscreen}
       onContextMenu={(e) => {
-        // Right-click anywhere is a fast exit out of the visualizer.
+        // Right-click anywhere: the visualizer menu, like a Winamp vis
+        // window. Esc and the ✕ are the way out.
         e.preventDefault();
-        exitVisualizer();
+        setOpenPanel((p) => (p ? null : 'preset'));
       }}
     >
       {activePreset === 'album-breathe' ? (
@@ -1754,7 +1758,8 @@ export function FullscreenVisualizer(): JSX.Element {
             <div><dt><kbd>Esc</kbd></dt><dd>Close popover, then exit visualizer</dd></div>
             <div><dt>Scroll wheel</dt><dd>Volume up / down (Shift = bigger steps)</dd></div>
             <div><dt>Double-click</dt><dd>Toggle fullscreen / windowed</dd></div>
-            <div><dt>Right-click <span className="viz-help-or">or</span> <kbd>Esc</kbd></dt><dd>Exit visualizer</dd></div>
+            <div><dt>Right-click</dt><dd>Visualizer menu</dd></div>
+            <div><dt><kbd>Esc</kbd></dt><dd>Exit visualizer</dd></div>
           </dl>
         </div>
       )}

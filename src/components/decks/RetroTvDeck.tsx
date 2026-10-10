@@ -4,10 +4,12 @@
 // album art / visualizer under phosphor, scanline, vignette and grain layers.
 // Changing tracks "retunes" the set: a one-shot channel-flip animation with a
 // rolling bar plus a green OSD channel number, and the CH knob physically
-// advances. The VOL knob tracks the real volume value.
+// advances. The VOL knob is the real volume: drag it, scroll it, or give it
+// the arrow keys.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import type { DeckProps } from './types';
+import { WheelVolumeAccumulator, clampVolume, wheelVolumeDelta } from '../../lib/wheel-volume';
 import { Visualizer } from '../Visualizer';
 import { formatTime } from '../../lib/format';
 import { VolumeSlider } from '../VolumeSlider';
@@ -37,6 +39,50 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
   }, [track?.id]);
 
   const channel = track?.trackNo ?? null;
+
+  // Volume knob: a vertical drag of 100 px is 100%, so the whole 0..200%
+  // sweep is a long turn. Horizontal movement counts the same way (right is
+  // louder), which makes a rotary flick feel right.
+  const knobWheel = useRef(new WheelVolumeAccumulator());
+  knobWheel.current.observe(volume);
+  const onKnobPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const target = event.currentTarget;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startVolume = volume;
+    target.setPointerCapture(event.pointerId);
+    const onMove = (move: PointerEvent): void => {
+      onSetVolume(clampVolume(startVolume + (startY - move.clientY + (move.clientX - startX)) / 100));
+    };
+    const onUp = (): void => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  };
+  const onKnobKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    const steps: Record<string, number> = {
+      ArrowUp: 0.02,
+      ArrowRight: 0.02,
+      ArrowDown: -0.02,
+      ArrowLeft: -0.02,
+      PageUp: 0.1,
+      PageDown: -0.1,
+    };
+    let next: number | null = null;
+    if (event.key in steps) next = clampVolume(volume + steps[event.key]!);
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = 2;
+    if (next == null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSetVolume(next);
+  };
 
   return (
     <div className={`deck-retro-tv ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
@@ -103,8 +149,26 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
           <span className="deck-tv-knob-face" style={{ transform: `rotate(${chSpin}deg)` }} />
           <span className="deck-tv-knob-tag">CHANNEL</span>
         </div>
-        <div className="deck-tv-knob deck-tv-knob-vol" aria-hidden="true">
-          <span className="deck-tv-knob-face" style={{ transform: `rotate(${-135 + volume * 270}deg)` }} />
+        <div
+          className="deck-tv-knob deck-tv-knob-vol"
+          role="slider"
+          tabIndex={0}
+          aria-label="Volume"
+          aria-valuemin={0}
+          aria-valuemax={200}
+          aria-valuenow={Math.round(volume * 100)}
+          aria-valuetext={`${Math.round(volume * 100)}%`}
+          title={`Volume ${Math.round(volume * 100)}% — drag or scroll, double-click for 100%`}
+          data-newamp-deck-volume-knob
+          onPointerDown={onKnobPointerDown}
+          onKeyDown={onKnobKeyDown}
+          onDoubleClick={() => onSetVolume(1)}
+          onWheel={(event) => {
+            const delta = wheelVolumeDelta(event);
+            if (delta !== 0) onSetVolume(knobWheel.current.next(volume, delta));
+          }}
+        >
+          <span className="deck-tv-knob-face" style={{ transform: `rotate(${-135 + (volume / 2) * 270}deg)` }} />
           <span className="deck-tv-knob-tag">VOLUME</span>
         </div>
 
