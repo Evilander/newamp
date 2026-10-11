@@ -1,18 +1,20 @@
 // Package gate for @eviland/core (packages/eviland-core): builds the
-// standalone package for real (declaration-emitting tsc, not just a
-// typecheck) and imports every value the public src/index.ts promises to
-// export, asserting each one actually made it into dist/index.js.
+// standalone package the way its `npm run build` does and imports the result
+// with nothing but Node, asserting every value the public src/index.ts
+// promises to export is really in dist/index.js.
 //
 // This exists because the package's public surface (src/index.ts + README)
 // is hand-maintained, separate from the byte-for-byte src/visualizer mirror
 // that sync.mjs enforces: an engine module can drop an export that index.ts
 // still re-exports, and nothing else catches that until a real consumer's
-// `import` throws `undefined is not a function`.
+// `import` throws `undefined is not a function`. The import is deliberately
+// not routed through a bundler: tsc's per-module output has extensionless
+// relative imports, so a bundler-only check passed while Node could not load
+// the package at all.
 //
 // Run: node scripts/eviland-core-package-test.mjs
 import { spawnSync } from 'node:child_process';
-import { build } from 'esbuild';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -27,17 +29,17 @@ const log = [];
 let pass = true;
 const fail = (m) => { pass = false; log.push('FAIL: ' + m); };
 
-// 1) Build for real (declaration-emitting), not just --noEmit. This is what a
-// consumer would actually run before publishing/installing the package.
-// Built from the repo root so tsc resolves from the root node_modules; the
-// package has no node_modules of its own on a clean checkout or CI runner.
-const built = spawnSync('npx tsc -p packages/eviland-core/tsconfig.json', { cwd: resolve('.'), stdio: 'inherit', shell: true });
+// 1) Build for real, with the package's own build script (bundle + declarations).
+// The package has no node_modules of its own; npm finds esbuild and tsc in the
+// repo root's.
+const built = spawnSync('npm run build', { cwd: pkgDir, stdio: 'inherit', shell: true });
 if (built.status !== 0) {
   fail(`package build exited with ${built.status}`);
   writeFileSync(RESULT, log.join('\n') + '\n[eviland-core-package-test] FAIL\n');
+  console.log(log.join('\n'));
   process.exit(1);
 }
-log.push('build: dist/ emitted with 0 tsc errors');
+log.push('build: dist/ emitted with 0 errors');
 
 // 2) Derive the expected public value exports from src/index.ts itself
 // (rather than hardcoding a list here), so a newly added export is covered
@@ -59,27 +61,31 @@ if (expectedExports.length === 0) {
 }
 log.push(`expected ${expectedExports.length} value exports from src/index.ts: ${expectedExports.join(', ')}`);
 
-// 3) Import the actual built output and check each one is really there. The
-// package targets bundlers (moduleResolution: bundler, extensionless relative
-// imports), so a bare Node import of dist/index.js cannot resolve its own
-// modules; bundle it the way a consumer's toolchain would and import that.
-const bundlePath = resolve('tmp/eviland-core-package-bundle.mjs');
-await build({
-  entryPoints: [resolve(pkgDir, 'dist/index.js')],
-  bundle: true, format: 'esm', platform: 'browser', target: 'es2022',
-  outfile: bundlePath, logLevel: 'silent',
-});
-const dist = await import(pathToFileURL(bundlePath).href);
-for (const name of expectedExports) {
-  if (!(name in dist)) {
-    fail(`dist/index.js is missing export "${name}" (promised by src/index.ts)`);
-    continue;
-  }
-  if (dist[name] === undefined) {
-    fail(`dist/index.js exports "${name}" but its value is undefined`);
-  }
+// 3) Import dist/index.js in a fresh Node process, no bundler, and list what it exports.
+const entry = resolve(pkgDir, 'dist/index.js');
+const bundled = readFileSync(entry, 'utf8');
+if (/(?:from|import)\s*\(?\s*['"]\.\.?\//.test(bundled)) {
+  fail('dist/index.js still has relative imports; it is meant to be one self-contained module');
 }
-if (pass) log.push(`all ${expectedExports.length} exports present and defined in dist/index.js`);
+const probe = spawnSync(process.execPath, [
+  '--input-type=module',
+  '-e',
+  `const m = await import(${JSON.stringify(pathToFileURL(entry).href)}); console.log(JSON.stringify(Object.keys(m).filter((k) => m[k] !== undefined)));`,
+], { encoding: 'utf8' });
+if (probe.status !== 0) {
+  fail(`plain Node could not import dist/index.js:\n${probe.stderr}`);
+} else {
+  const present = new Set(JSON.parse(probe.stdout));
+  for (const name of expectedExports) {
+    if (!present.has(name)) fail(`dist/index.js is missing export "${name}" (promised by src/index.ts) or exports it undefined`);
+  }
+  if (pass) log.push(`all ${expectedExports.length} exports present and defined, imported by plain Node`);
+}
+
+// 4) The declarations the package.json points consumers at.
+for (const file of ['dist/index.d.ts', 'dist/eviland.d.ts']) {
+  if (!existsSync(resolve(pkgDir, file))) fail(`${file} was not emitted`);
+}
 
 const report = log.join('\n') + '\n' + (pass ? '[eviland-core-package-test] PASS' : '[eviland-core-package-test] FAIL') + '\n';
 writeFileSync(RESULT, report);

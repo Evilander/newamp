@@ -13,6 +13,7 @@ function sessionPath(platform, env, userData, overrides = {}) {
     appRoot: '/opt/NewAmp/resources/app.asar',
     sessionDataOverride: undefined,
     userDataOverride: undefined,
+    portableDataDecision: null,
     smokeMode: false,
     ...overrides,
   });
@@ -26,4 +27,22 @@ assert.equal(sessionPath('win32', {}, 'C:\\profile\\NewAmp'), 'C:\\profile\\NewA
 assert.equal(sessionPath('linux', {}, '/tmp/profile', { userDataOverride: '/tmp/profile' }), '/tmp/profile/session-data');
 assert.equal(sessionPath('linux', {}, '/tmp/profile', { sessionDataOverride: '/tmp/session' }), '/tmp/session');
 assert.equal(sessionPath('linux', {}, '/tmp/smoke', { smokeMode: true }), '/tmp/smoke/session-data');
+
+// The portable build keeps its Chromium profile with the library, next to the exe.
+const portableDir = 'D:\\usb\\NewAmp Data';
+assert.equal(
+  sessionPath('win32', { LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local' }, portableDir, { portableDataDecision: { dir: portableDir, reason: 'fresh-install' } }),
+  'D:\\usb\\NewAmp Data\\session-data',
+  'a portable data folder carries its session data with it',
+);
+assert.equal(
+  sessionPath('win32', { LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local' }, 'C:\\profile\\NewAmp', { portableDataDecision: { dir: null, reason: 'existing-profile' } }),
+  'C:\\Users\\test\\AppData\\Local\\NewAmp\\session-data',
+  'a portable build that keeps the default profile keeps the default session data',
+);
+assert.equal(
+  sessionPath('win32', { LOCALAPPDATA: 'C:\\Users\\test\\AppData\\Local' }, portableDir, { portableDataDecision: { dir: portableDir, reason: 'fresh-install' }, sessionDataOverride: 'E:\\session' }),
+  'E:\\session',
+  'an explicit session data override still wins',
+);
 console.log('Session data paths: Linux, macOS, Windows, overrides and smoke profiles passed.');

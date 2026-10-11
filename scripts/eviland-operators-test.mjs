@@ -345,6 +345,92 @@ log.push('default/clone/lerp/mutate plumbing OK');
   log.push(`source configuration coverage: ${ARCHETYPES.length} archetypes (visual diversity tested separately)`);
 }
 
+// ─── LFOs run on the beat clock ─────────────────────────────────────────────
+// A quarter-rate sine is one cycle per bar. On a per-beat sawtooth it restarted
+// every beat with a jump 19x the largest in-beat step; on the clock it is
+// continuous. Frames without a clock keep the old behaviour.
+{
+  const cfg = {
+    ...defaultConfig(),
+    q: [{ base: 0, lfo: { rate: 0.25, shape: 'sine' } }, { base: 0 }, { base: 0 }, { base: 0 }, { base: 0 }, { base: 0 }, { base: 0 }, { base: 0 }],
+  };
+  const clocked = createDynamics();
+  const sawtoothed = createDynamics();
+  let prevClocked = null;
+  let prevSaw = null;
+  let stepClocked = 0;
+  let stepSaw = 0;
+  let atBar = 0;
+  for (let f = 0; f <= 240; f++) {
+    const clock = (f / 60) * 2; // 120 BPM: 8 beats over 4 s
+    evalConfig(cfg, mockFrame({ beatPhase: clock % 1, beatClock: clock }), 0.5, clocked, 1000 / 60);
+    evalConfig(cfg, mockFrame({ beatPhase: clock % 1 }), 0.5, sawtoothed, 1000 / 60);
+    if (prevClocked !== null) stepClocked = Math.max(stepClocked, Math.abs(clocked.q[0] - prevClocked));
+    if (prevSaw !== null) stepSaw = Math.max(stepSaw, Math.abs(sawtoothed.q[0] - prevSaw));
+    prevClocked = clocked.q[0];
+    prevSaw = sawtoothed.q[0];
+    if (f === 30) atBar = clocked.q[0]; // one beat in: a quarter cycle, sin(π/2)
+  }
+  log.push(`quarter-rate LFO: largest frame step ${stepClocked.toFixed(4)} on the beat clock, ${stepSaw.toFixed(3)} on the beat phase`);
+  if (stepClocked > 0.06) fail(`a quarter-rate LFO jumped ${stepClocked.toFixed(3)} between frames on the beat clock`);
+  if (Math.abs(atBar - 1) > 1e-6) fail(`a quarter-rate sine one beat in should read 1, got ${atBar}`);
+  if (stepSaw < 0.5) fail('the beat-phase fallback no longer restarts per beat (expected for frames without a clock)');
+}
+
+// ─── Palettes blend in OKLCh ────────────────────────────────────────────────
+// The RGB midpoint of two saturated colours is grey. Chroma at the midpoint
+// of the blend must stay close to the endpoints', its lightness must sit
+// halfway between theirs, and endpoints come back exact. Measured through
+// the sRGB transfer, since OKLab is defined on linear light: a blend of the
+// encoded values keeps chroma but lands the midpoint's lightness off.
+{
+  const toLinear = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  const oklch = (rgb) => {
+    const [r, g, b] = rgb.map(toLinear);
+    const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+    const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+    const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+    const A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+    const B = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+    return { L: 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, C: Math.hypot(A, B) };
+  };
+  let ratioSum = 0;
+  let rgbRatioSum = 0;
+  let lightnessErr = 0;
+  let rgbLightnessErr = 0;
+  let worst = Infinity;
+  let pairs = 0;
+  for (let i = 0; i < 500; i++) {
+    const a = generate(`oklch-a-${i}`).config;
+    const b = generate(`oklch-b-${i}`).config;
+    if (!a.palette || !b.palette) continue;
+    const ca = oklch(a.palette.accent);
+    const cb = oklch(b.palette.accent);
+    const endpoints = (ca.C + cb.C) / 2;
+    if (endpoints < 0.05) continue;
+    const mid = lerpConfig(a, b, 0.5).palette.accent;
+    const rgbMid = a.palette.accent.map((v, k) => (v + b.palette.accent[k]) / 2);
+    const cm = oklch(mid);
+    const ratio = cm.C / endpoints;
+    ratioSum += ratio;
+    rgbRatioSum += oklch(rgbMid).C / endpoints;
+    lightnessErr += Math.abs(cm.L - (ca.L + cb.L) / 2);
+    rgbLightnessErr += Math.abs(oklch(rgbMid).L - (ca.L + cb.L) / 2);
+    worst = Math.min(worst, ratio);
+    pairs++;
+    const start = lerpConfig(a, b, 0).palette.accent;
+    const end = lerpConfig(a, b, 1).palette.accent;
+    if (start.some((v, k) => Math.abs(v - a.palette.accent[k]) > 1e-9) || end.some((v, k) => Math.abs(v - b.palette.accent[k]) > 1e-9)) fail(`palette lerp endpoints are not exact for pair ${i}`);
+    for (const v of mid) if (!(v >= 0 && v <= 1)) fail(`palette midpoint out of gamut for pair ${i}: ${mid}`);
+  }
+  const meanRatio = ratioSum / pairs;
+  const meanLightnessErr = lightnessErr / pairs;
+  log.push(`palette blend: midpoint accent chroma ${meanRatio.toFixed(3)} of the endpoint mean over ${pairs} pairs (RGB lerp ${(rgbRatioSum / pairs).toFixed(3)}), worst pair ${worst.toFixed(3)}; midpoint lightness off by ${meanLightnessErr.toFixed(4)} (RGB lerp ${(rgbLightnessErr / pairs).toFixed(4)})`);
+  if (meanRatio < 0.8) fail(`midpoint chroma is only ${meanRatio.toFixed(3)} of the endpoints'`);
+  if (meanRatio <= rgbRatioSum / pairs) fail('the OKLCh blend keeps no more chroma than an RGB lerp');
+  if (meanLightnessErr > 0.005) fail(`midpoint lightness is ${meanLightnessErr.toFixed(4)} off the endpoints' mean (the blend is skipping the sRGB transfer)`);
+}
+
 const report = log.join('\n') + '\n' + (pass ? '[eviland-operators-test] PASS' : '[eviland-operators-test] FAIL') + '\n';
 writeFileSync(RESULT, report);
 console.log(report);

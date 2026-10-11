@@ -52,8 +52,8 @@ let now = 0;
 let sawBoundary = false;
 let boundarySectionId = -1;
 let boundarySectionReturn = -2;
-for (; now <= 8000; now += DT) {
-  const highHalf = now >= 4000;
+for (; now <= 26000; now += DT) {
+  const highHalf = now >= 12000;
   const f = spectrum(highHalf);
   const frame = reactor.analyze(f, f, f, f, DT, now);
   if (frame.sectionChanged && !sawBoundary) {

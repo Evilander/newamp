@@ -88,6 +88,8 @@ async function writeSmokeSettings() {
         volume: 0,
         equalizer: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         eqEnabled: false,
+        // Ctrl+K deliberately does nothing while the first-launch tour is up.
+        firstLaunchTutorialSeen: true,
       },
       null,
       2,

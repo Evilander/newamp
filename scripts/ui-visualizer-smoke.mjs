@@ -27,11 +27,67 @@ assert.equal(result.ok, true, 'UI visualizer smoke should report success');
 assert.match(result.currentTitle, /Visualizer Smoke/, 'visualizer smoke should play the generated fixture');
 assert.equal(result.preset, 'spectrum', 'fullscreen visualizer should render the stable spectrum preset');
 assert.equal(result.rightClickMenu, true, 'right-click on the stage should open the visualizer menu');
+assert.equal(result.rightClickMenuRole, 'menu', 'the right-click menu should be a role=menu');
+assert.equal(
+  result.rightClickMenuAtCursor,
+  true,
+  `the right-click menu should open at the pointer, within 8 px (${JSON.stringify(result.rightClickMenuRect)})`,
+);
+assert.equal(result.rightClickMenuFocused, true, 'focus should move into the right-click menu when it opens');
+assert.equal(result.rightClickMenuArrowMoved, true, 'ArrowDown should move focus to another menu item');
 assert.equal(result.rightClickMenuClosed, true, 'Escape should close the visualizer menu');
 assert.equal(result.stageSurvivedRightClick, true, 'right-click must not exit the visualizer');
-assert.equal(result.toolbarMenu, true, 'the toolbar button should open the visualizer menu');
+assert.equal(result.menuRightOpensSubmenu, true, 'Right on Mode should open its submenu with focus on the first entry');
+assert.equal(result.menuWheelKept, true, 'the wheel over a menu taller than the window scrolls it instead of changing the volume');
+assert.equal(result.menuLeftClosesSubmenu, true, 'Left should close the submenu and put focus back on Mode');
+assert.equal(result.menuEndFocusesLast, true, 'End should focus the last menu item');
+assert.equal(result.menuHomeFocusesFirst, true, 'Home should focus the first menu item');
+assert.equal(result.menuTabCloses, true, 'Tab should close the menu');
+assert.equal(result.menuModePicked, true, 'picking a mode from the Mode submenu should switch to it');
+assert.equal(result.menuModeClosed, true, 'picking a mode should close the menu');
+assert.equal(result.menuLockToggles, true, 'Lock look should switch Auto-VJ off, and back on the second time');
+// Focus. The stage takes it on open; a popover or the stage hands it back only to a
+// control the keyboard had focused, never to one a mouse press left focused.
+assert.equal(result.stageFocusedOnOpen, true, 'the stage should take focus when the visualizer opens');
+assert.equal(result.stageFocusedOnReopen, true, 'and when it opens from the transport');
+assert.equal(
+  result.stageFocusReturned,
+  true,
+  'closing the stage should hand focus back to the control that opened it when that was keyboard-focused, else leave it on the page',
+);
+assert.equal(
+  result.popoverMouseOpenFocusOnStage,
+  true,
+  'closing a popover opened with the mouse should leave focus on the stage, not on the button (the next Space would press it again)',
+);
+assert.equal(result.toolbarMenu, true, 'the toolbar button should open the preset picker');
+assert.equal(result.popoverFocusIn, true, 'opening a popover should move focus into it');
 assert.equal(result.toolbarMenuClosed, true, 'Escape should close an open popover first');
+assert.equal(
+  result.popoverFocusReturned,
+  true,
+  `closing a popover should return focus to the button that opened it when the keyboard had focused it (focus-visible: ${result.popoverOpenerFocusVisible})`,
+);
 assert.equal(result.stageSurvivedToolbarEscape, true, 'Escape with a popover open must not exit the visualizer');
+// Keys. The visualizer owns plain letters and the arrows only: modifiers go to the
+// app, plain L and V stay the app-wide love and stop keys, and held keys do not repeat.
+assert.equal(result.ctrlArrowKeepsPreset, true, 'Ctrl+ArrowRight must not cycle visualizer presets');
+assert.equal(result.plainLKeepsTier, true, `plain L is the app-wide love key and must not toggle Lite (${JSON.stringify(result.plainLDebug)})`);
+assert.equal(result.plainVKeepsAutoVj, true, 'plain V is the app-wide stop key and must not toggle Auto-VJ');
+assert.equal(result.heldKeyIgnored, true, 'a held key (repeat) must not fire its toggle again');
+assert.equal(result.heldArrowSteps, true, 'a held arrow key keeps stepping presets');
+assert.equal(result.sameTickArrowSteps, true, 'two arrow presses in one tick are two steps');
+assert.equal(
+  result.liteBurstQuality,
+  'auto',
+  'Shift+L, Q, Shift+L inside one frame must leave quality at auto (Q is ignored while Lite is on)',
+);
+// Pointer. Double-click flips the window on the bare stage only, and the hover meter resets to 100%.
+assert.equal(result.dblclickOnControlKeepsWindow, true, 'double-clicking a control must not toggle native fullscreen');
+assert.equal(result.dblclickOnStageFlips, true, 'double-clicking the bare stage should toggle native fullscreen');
+assert.equal(result.dblclickOnStageFlipsBack, true, 'and a second double-click should toggle it back');
+assert.equal(result.meterDblclickVolume, 100, 'double-clicking the hover volume meter should set 100%');
+assert.equal(result.artDefault, 'hidden', 'the album cover overlay should be off for a profile that never touched it');
 assert.ok(result.stageRect.width >= result.viewport.width * 0.9, 'fullscreen visualizer should cover viewport width');
 assert.ok(result.stageRect.height >= result.viewport.height * 0.9, 'fullscreen visualizer should cover viewport height');
 assert.ok(result.render.width >= 120, `visualizer canvas width is too small: ${result.render.width}`);

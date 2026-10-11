@@ -11,7 +11,7 @@ import { build } from 'esbuild';
 const sourceCode = readFileSync(new URL('../electron/exclusive-output.ts', import.meta.url), 'utf8')
   .replace('this.addon = loadAddon();', 'this.addon = null;')
   .replace("import { resamplerFilter, resamplerKindNow } from './resampler.js';", "const resamplerFilter = () => 'aresample'; const resamplerKindNow = () => 'swr';")
-  .replace("import { resolveFfmpegPath } from './transcode.js';", "const resolveFfmpegPath = () => 'fixture-ffmpeg';")
+  .replace("import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';", "const resolveFfmpegPath = () => 'fixture-ffmpeg'; const watchFfmpegInput = () => {};")
   .replace("import { killChild } from './kill-child.js';", 'const killChild = (child) => child.kill();');
 const compiled = await build({ stdin: { contents: sourceCode, loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
 

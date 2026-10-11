@@ -9,8 +9,9 @@ const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'ut
 const handlers = source.slice(source.indexOf("app.on('before-quit'"), source.indexOf("app.on('activate'"));
 assert.ok(handlers.includes("app.on('will-quit'"));
 
-function fixture(platform, hasTray, radio = false) {
+function fixture(platform, hasTray, radio = false, displaySleepBlockerId = null) {
   const calls = [];
+  const stoppedBlockers = [];
   const app = new EventEmitter();
   let quitCount = 0;
   let gaplessClosed = 0;
@@ -24,6 +25,8 @@ function fixture(platform, hasTray, radio = false) {
   const context = {
     app, process: { platform }, console,
     isQuitting: false, radioBrainShutdownStarted: false,
+    displaySleepBlockerId,
+    powerSaveBlocker: { stop(id) { stoppedBlockers.push(id); } },
     globalShortcut: { unregisterAll() {} }, closeStartupSplashWindow() {},
     libraryWatcher: { stop() { calls.push('watcher-stop'); } },
     scanner: { cancel() { calls.push('scanner-cancel'); } },
@@ -32,13 +35,13 @@ function fixture(platform, hasTray, radio = false) {
     podcastStore: { flushProgressSync() { calls.push('podcast-flush'); } },
     exclusiveOutput: { dispose() {} },
     tray: hasTray ? { destroy() {} } : null,
-    killAllDnaFfmpeg() {}, killAllScoreFfmpeg() {}, killAllTranscodeFfmpeg() {},
+    killAllDnaFfmpeg() {}, killAllScoreFfmpeg() {}, killAllWaveformFfmpeg() {}, killAllTranscodeFfmpeg() {},
     closeAllGaplessSessions() { gaplessClosed++; },
     radioBrain: radio ? { async stop() { calls.push('radio-stop'); } } : null,
     shouldStayResidentOnWindowAllClosed,
   };
   vm.runInNewContext(handlers, context);
-  return { app, calls, gaplessClosed: () => gaplessClosed };
+  return { app, calls, context, stoppedBlockers, gaplessClosed: () => gaplessClosed };
 }
 
 for (const platform of ['win32', 'darwin', 'linux']) {
@@ -48,6 +51,14 @@ for (const platform of ['win32', 'darwin', 'linux']) {
   f.app.quit();
   assert.deepEqual(f.calls, ['watcher-stop', 'scanner-cancel', 'library-close', 'settings-flush', 'podcast-flush'], `${platform} explicit Quit saves every store`);
   assert.equal(f.gaplessClosed(), 1, `${platform} explicit Quit stops the gapless decoders`);
+  assert.deepEqual(f.stoppedBlockers, [], `${platform} explicit Quit has no display-sleep blocker to release`);
+}
+{
+  // The display-sleep blocker held for an ambient visualizer is released on quit.
+  const f = fixture('darwin', true, false, 7);
+  f.app.quit();
+  assert.deepEqual(f.stoppedBlockers, [7], 'explicit Quit releases the display-sleep blocker');
+  assert.equal(f.context.displaySleepBlockerId, null, 'the released blocker is forgotten');
 }
 for (const platform of ['win32', 'linux']) {
   const f = fixture(platform, false);

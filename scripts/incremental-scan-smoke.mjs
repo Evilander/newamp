@@ -68,7 +68,8 @@ try {
   assert.match(typesSource, /skipped\?: number/, 'ScanProgress should expose skipped tracks');
   assert.match(typesSource, /parsed\?: number/, 'ScanProgress should expose parsed tracks');
   assert.match(scannerSource, /getTrackFileStates/, 'scanner should compare discovered files to catalog file state');
-  assert.match(scannerSource, /needsMetadataRefresh/, 'scanner should refresh unchanged rows when missing folder art becomes available');
+  assert.match(scannerSource, /async function metadataRefresh\(/, 'scanner should decide per file whether an unchanged row needs its tags read again');
+  assert.match(scannerSource, /!existing\.hasArt && \(await hasFolderArt\(discovered\.full\)\)\) return 'full'/, 'scanner should refresh unchanged rows when missing folder art becomes available');
   assert.match(librarySource, /getTrackFileStates/, 'library should expose catalog file state for scanner');
   assert.match(scanBannerSource, /skipped/, 'scan banner should surface skipped-file counts for large rescans');
   assert.match(packageSource, /smoke:incremental-scan/, 'package scripts should expose incremental scan smoke');

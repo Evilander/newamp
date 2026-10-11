@@ -80,13 +80,14 @@ try {
     'zero-query resume row should lead with the most recent play',
   );
 
-  const [paletteSource, launcherSource, appSource, packageSource] = await Promise.all([
+  const [paletteSource, launcherSource, appSource, packageSource, storeSource] = await Promise.all([
     readText('../src/components/QuickPlayPalette.tsx'),
     // The chords live in the launcher, which keeps them in the startup chunk
     // while the palette itself is fetched on first open.
     readText('../src/components/QuickPlayLauncher.tsx'),
     readText('../src/App.tsx'),
     readText('../package.json'),
+    readText('../src/store/usePlayerStore.ts'),
   ]);
 
   assert.match(launcherSource, /ctrlKey \|\| event\.metaKey/, 'Quick Play should open from keyboard shortcuts');
@@ -113,7 +114,9 @@ try {
   assert.match(paletteSource, /addTrackToQueue/, 'Quick Play should support queue append');
   assert.match(paletteSource, /queueTracksNext/, 'Quick Play should support play-next for result sets');
   assert.match(paletteSource, /addTracksToQueue/, 'Quick Play should support queue append for result sets');
-  assert.match(paletteSource, /api\.toggleLove/, 'Quick Play should support love toggling');
+  assert.match(paletteSource, /usePlayerStore\.getState\(\)\.toggleLove\(item\.track\.id\)/, 'Quick Play should support love toggling through the store, so the playing track and queue follow');
+  assert.doesNotMatch(paletteSource, /api\.toggleLove/, 'Quick Play must not bypass the store when it loves a track');
+  assert.match(storeSource, /toggleLove: async \(id\) => \{\s*const loved = await api\.toggleLove\(id\);/, 'the store love toggle should call the catalog toggle');
   assert.match(paletteSource, /\{ keys: 'Ctrl\+Enter', label: 'play next' \}/, 'Quick Play should expose a play-next keyboard chord');
   assert.match(paletteSource, /\{ keys: 'Shift\+Enter', label: 'queue' \}/, 'Quick Play should expose a queue keyboard chord');
   assert.match(paletteSource, /\{ keys: 'Ctrl\+L', label: 'love' \}/, 'Quick Play should expose a love keyboard chord');

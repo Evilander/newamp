@@ -551,6 +551,139 @@ if (!passthrough) fail('disabled director did not passthrough');
   log.push(`defer: priming suppressed during window, opens on loadPlan or budget expiry`);
 }
 
+// ─── Unscored tiers are relative to the track, not to the meter ─────────────
+// The same song at a different gain must get the same tiers, and a song with
+// real dynamics must not sit in one tier.
+{
+  const tiersAt = (scale) => {
+    const d = createDirector({ songId: 'tier-range', enabled: true, drift: 0, rotateMs: 0 });
+    const plan = [0.3, 0.5, 0.9, 0.5, 0.2, 0.95, 0.4];
+    plan.forEach((energy, sectionId) => {
+      for (let f = 0; f < 600; f++) {
+        d.update(mockFrame({ sectionId, sectionChanged: f === 0, energy: energy * scale, beatConfidence: 0.8 }), 16.7);
+      }
+    });
+    return d.exportPlan(0).sections.map((s) => s.tier);
+  };
+  const loud = tiersAt(1);
+  const quiet = tiersAt(0.3);
+  log.push(`tiers at full level: ${loud.join(' ')}; at 0.3x: ${quiet.join(' ')}`);
+  if (loud.join() !== quiet.join()) fail('scaling the frames by 0.3 changed the tier sequence');
+  if (new Set(loud).size < 3) fail(`a song with real dynamics used only ${new Set(loud).size} tiers`);
+  const calmest = loud[5];
+  if (calmest !== 'calm') fail(`the quietest passage was tiered ${calmest}`);
+  if (loud[3] !== 'climax' && loud[3] !== 'drop') fail(`the first chorus was tiered ${loud[3]}`);
+
+  // A flat master moves a few hundredths at most. Its tiers are read within
+  // that range, so they still vary, and the same track at a lower gain gets
+  // the same ones.
+  const flatAt = (scale) => {
+    const d = createDirector({ songId: 'flat-master', enabled: true, drift: 0, rotateMs: 0 });
+    const plan = [0.8, 0.9, 0.92, 0.89, 0.93, 0.9, 0.94, 0.91, 0.93, 0.9, 0.92];
+    plan.forEach((energy, sectionId) => {
+      for (let f = 0; f < 600; f++) {
+        d.update(mockFrame({ sectionId, sectionChanged: f === 0, energy: energy * scale, beatConfidence: 0.8 }), 16.7);
+      }
+    });
+    return d.exportPlan(0).sections.map((s) => s.tier).slice(2);
+  };
+  const flat = flatAt(1);
+  const counts = {};
+  for (const t of flat) counts[t] = (counts[t] ?? 0) + 1;
+  const [topTier, topCount] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  log.push(`flat master tiers: ${flat.join(' ')} (${topTier} ${topCount} of ${flat.length}); at 0.3x: ${flatAt(0.3).join(' ')}`);
+  if (flat.join() !== flatAt(0.3).join()) fail('scaling a flat master by 0.3 changed its tier sequence');
+  if (topCount > 0.8 * flat.length) fail(`a flat master sat on ${topTier} for ${topCount} of ${flat.length} looks`);
+  if (new Set(flat).size < 2) fail('a flat master got one tier for every look');
+}
+
+// ─── Unscored timer rotations land on a phrase line, or a beat ──────────────
+{
+  const rotationStarts = (frameAt) => {
+    const d = createDirector({ songId: 'phrase-rotation', enabled: true, drift: 0, rotateMs: 20000 });
+    const starts = [];
+    let lastSeed = null;
+    for (let f = 0; f < 60 * 130; f++) {
+      const t = f / 60;
+      const c = d.update(mockFrame({ energy: 0.5, bpm: 120, ...frameAt(t) }), 1000 / 60);
+      const seed = c._to ? c._to.seed : c.seed;
+      if (seed !== lastSeed) {
+        lastSeed = seed;
+        starts.push(t);
+      }
+    }
+    return starts.slice(1);
+  };
+  // A locked beat with a clock: every rotation starts on a 16-beat line.
+  const phrased = rotationStarts((t) => ({ beatPhase: (t * 2) % 1, beatClock: t * 2, beatConfidence: 0.9 }));
+  const offPhrase = phrased.filter((t) => ((t * 2) % 16) > 0.15);
+  log.push(`phrase-locked rotations at ${phrased.map((t) => t.toFixed(2)).join(' ')}s (16 beats = 8 s)`);
+  if (phrased.length < 4) fail(`only ${phrased.length} rotations in 130 s`);
+  if (offPhrase.length) fail(`rotations started off the phrase line at ${offPhrase.map((t) => t.toFixed(2)).join(', ')}s`);
+  for (let i = 1; i < phrased.length; i++) {
+    const gap = phrased[i] - phrased[i - 1];
+    if (gap < 15.9 || gap > 31.1) fail(`rotation gap of ${gap.toFixed(1)} s is outside the 16-31 s window`);
+  }
+  // A locked beat without a clock still lands on a beat line.
+  const beaten = rotationStarts((t) => ({ beatPhase: (t * 2) % 1, beatConfidence: 0.9 }));
+  const offBeat = beaten.filter((t) => ((t * 2) % 1) > 0.15);
+  if (offBeat.length) fail(`clockless rotations started off the beat at ${offBeat.map((t) => t.toFixed(2)).join(', ')}s`);
+  // No beat to speak of: the jittered timer alone.
+  const unsure = rotationStarts((t) => ({ beatPhase: (t * 2) % 1, beatClock: t * 2, beatConfidence: 0.3 }));
+  if (unsure.length < 4) fail(`with an unsure beat only ${unsure.length} timer rotations happened in 130 s`);
+  log.push(`beat-locked rotations without a clock: ${beaten.length}; unsure beat: ${unsure.length} timer rotations`);
+}
+
+// ─── Skip and previous ──────────────────────────────────────────────────────
+{
+  const d = createDirector({ songId: 'skip-test', enabled: true, drift: 0, rotateMs: 0 });
+  d.update(mockFrame({ sectionChanged: true, sectionId: 0, energy: 0.5 }), 16.7);
+  const first = settle(d, { sectionId: 0, energy: 0.5 });
+  d.skip();
+  const fading = d.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+  if (!fading._to || fading._to.seed === first.seed) fail('skip() did not start a fade to a new look');
+  if (!d.isEnabled()) fail('skip() turned the Director off');
+  const second = settle(d, { sectionId: 0, energy: 0.5 });
+  if (second.seed === first.seed) fail('the look did not change after skip()');
+  if (!d.previous()) fail('previous() reported no earlier look');
+  const back = settle(d, { sectionId: 0, energy: 0.5 });
+  if (back.seed !== first.seed) fail('previous() did not bring the earlier look back');
+  if (d.previous()) fail('previous() with nothing earlier should return false');
+  d.setEnabled(false);
+  d.skip();
+  d.setEnabled(true);
+  const unchanged = d.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+  if (unchanged._to) fail('a skip asked for while disabled fired after re-enabling');
+  // A skip asked for just before the Director is turned off is dropped too.
+  d.skip();
+  d.setEnabled(false);
+  d.setEnabled(true);
+  const dropped = d.update(mockFrame({ sectionId: 0, energy: 0.5 }), 16.7);
+  if (dropped._to) fail('a skip asked for before disabling fired after re-enabling');
+  log.push(`skip: ${first.seed} -> ${second.seed}, previous -> ${back.seed}, Director stayed on`);
+}
+
+// ─── A returning beat lock does not read its first position as a phrase line ─
+{
+  const d = createDirector({ songId: 'relock-phrase', enabled: true, drift: 0, rotateMs: 20000, rotateJitterPct: 0 });
+  const locked = (clock) => ({ energy: 0.5, bpm: 120, beatPhase: clock % 1, beatClock: clock, beatConfidence: 0.9 });
+  const unsure = { energy: 0.5, bpm: 120, beatPhase: 0, beatClock: 0, beatConfidence: 0.3 };
+  const seedOf = (c) => (c._to ? c._to.seed : c.seed);
+  // Settle the opening look, then sit late in a phrase for 17 s so the timer
+  // is due but no line has been crossed; lose the lock for a second; come
+  // back early in a phrase.
+  let c = d.update(mockFrame({ sectionChanged: true, sectionId: 0, ...locked(15.9) }), 16.7);
+  for (let f = 0; f < 60 * 17; f++) c = d.update(mockFrame(locked(15.9)), 1000 / 60);
+  const before = seedOf(c);
+  for (let f = 0; f < 60; f++) c = d.update(mockFrame(unsure), 1000 / 60);
+  for (let f = 0; f < 30; f++) c = d.update(mockFrame(locked(0.5 + f / 120)), 1000 / 60);
+  if (seedOf(c) !== before) fail('a rotation fired on the first frame of a returning lock, as if a phrase line had been crossed');
+  // A real line still rotates.
+  for (let f = 0; f < 60 * 8; f++) c = d.update(mockFrame(locked(0.75 + f / 30)), 1000 / 60);
+  if (seedOf(c) === before) fail('no rotation after the next phrase line');
+  log.push('returning lock: no rotation until a phrase line is crossed');
+}
+
 const report = log.join('\n') + '\n' + (pass ? '[director-test] PASS' : '[director-test] FAIL') + '\n';
 writeFileSync(RESULT, report);
 console.log(report);

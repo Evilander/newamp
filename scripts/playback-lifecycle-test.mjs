@@ -163,7 +163,52 @@ try {
   assert.equal(removeQueueItem([a, b], -1, 0).index, -1);
   assert.equal(moveQueueItem([a, a, b], 1, 2, 0).index, 2, 'repeated songs keep their specific queue slot');
   assert.equal(removeQueueItem([a, a, b], 1, 2).index, 1);
-  console.log('PASS playback lifecycle: cancellation, metadata, queue reset, paused seek, idle edits, Undo');
+  {
+    // The sleep timer pauses where it is; stop() would rewind to 0:00 and save that.
+    let pauses = 0;
+    let stops = 0;
+    engine.setExternalTransport({ ...transport(async () => true), pause() { pauses++; }, stop() { stops++; } });
+    await store.getState().playQueue([a, b]);
+    engine.patchExternal({ playing: true, currentTime: 300, duration: 3600 });
+    stops = 0;
+    store.setState({ sleepTimerEndsAt: Date.now() - 1 });
+    engine.patchExternal({ currentTime: 301 });
+    assert.equal(pauses, 1, 'the sleep timer pauses');
+    assert.equal(stops, 0, 'and does not stop');
+    assert.equal(store.getState().sleepTimerEndsAt, null);
+    assert.equal(store.getState().isPlaying, false);
+    assert.equal(Math.round(store.getState().currentTime), 301);
+    await settle();
+    assert.equal(Math.round(saves.at(-1).resumeState.currentTime), 301, 'the place is what gets saved');
+    engine.setExternalTransport(transport(async (id, at) => { plays.push([id, at]); return true; }));
+  }
+
+  {
+    // Undo clear brings the queue back, not the shuffle and repeat the listener has since changed.
+    clearToasts();
+    store.setState({ mode: 'normal' });
+    await store.getState().playQueue([a, b]);
+    store.getState().clearQueue();
+    const undoNormal = getToasts().find((toast) => toast.action?.label === 'Undo clear');
+    store.getState().toggleShuffle();
+    undoNormal.action.onClick();
+    assert.deepEqual(store.getState().queue, [a, b]);
+    assert.equal(store.getState().mode, 'shuffle', 'shuffle chosen after the clear stays on');
+
+    clearToasts();
+    store.getState().cycleRepeat();
+    await store.getState().playQueue([a, b]);
+    assert.equal(store.getState().mode, 'shuffle-repeat-all');
+    store.getState().clearQueue();
+    const undoShuffled = getToasts().find((toast) => toast.action?.label === 'Undo clear');
+    store.getState().setMode('normal');
+    undoShuffled.action.onClick();
+    assert.deepEqual(store.getState().queue, [a, b]);
+    assert.equal(store.getState().mode, 'normal', 'turning both off after the clear sticks');
+    assert.deepEqual(store.getState().shuffleHistory, []);
+  }
+
+  console.log('PASS playback lifecycle: cancellation, metadata, queue reset, paused seek, idle edits, Undo, sleep timer');
 } finally {
   clearToasts();
   engine.dispose();

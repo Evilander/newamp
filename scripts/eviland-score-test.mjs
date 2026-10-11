@@ -5,6 +5,7 @@ import { build } from 'esbuild';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { makeForm, makeSynth } from './lib/eviland-synth.mjs';
 
 mkdirSync(resolve('tmp'), { recursive: true });
 const RESULT = resolve('tmp/eviland-score-test-result.txt');
@@ -140,6 +141,17 @@ if (!score) {
   const broken = nonFinitePaths(score);
   if (broken.length) fail(`non-finite values in the score: ${broken.slice(0, 5).join(', ')}`);
   if (!isValidSongScore(JSON.parse(JSON.stringify(score)))) fail('score does not survive a JSON round trip');
+  // A cached score with a bad bar length would make the conductor's bar test
+  // NaN and silently stop every bar pulse.
+  for (const beatsPerBar of [undefined, 3, 4]) {
+    if (!isValidSongScore({ ...score, beatsPerBar })) fail(`a score with beatsPerBar ${beatsPerBar} should validate`);
+  }
+  for (const beatsPerBar of [0, 5, '4', null, NaN]) {
+    if (isValidSongScore({ ...score, beatsPerBar })) fail(`a score with beatsPerBar ${String(beatsPerBar)} should not validate`);
+  }
+  for (const key of ['downbeat', 'downbeatConfidence', 'beatConfidence']) {
+    if (isValidSongScore({ ...score, [key]: undefined })) fail(`a score without ${key} should not validate`);
+  }
   if (pauses < 4) fail(`pause() was only offered ${pauses} times — a long track would block its host`);
 
   // Tempo + grid.
@@ -252,6 +264,171 @@ for (const [name, fill] of [['silence', () => 0], ['noise', () => noise() * 0.5]
     if (bad.length) fail(`${name}: non-finite values at ${bad.slice(0, 5).join(', ')}`);
   }
   log.push(`${name}: ${s ? `${s.sections.length} sections, beat conf ${s.beatConfidence}` : 'no score'}`);
+}
+
+// ── Metrical level ──────────────────────────────────────────────────────────
+// The comb alone halved any backbeat and doubled anything with hats on the
+// eighths; the grid chooser then doubled syncopated and swung grooves, whose
+// off-beats carry nearly as much as their beats. Every grid here must come
+// out at the true tempo.
+{
+  const drums = ({ bpm, seconds = 45, strongWeak = false, hats = 'none', kickOn = [0, 1, 2, 3], snareOn = [1, 3] }) => {
+    const s = makeSynth(SR, seconds);
+    const beat = 60 / bpm;
+    for (let b = 0; b * beat < seconds; b++) {
+      const at = b * beat;
+      const inBar = b % 4;
+      if (kickOn.includes(inBar)) s.kick(at, strongWeak ? (inBar === 0 || inBar === 2 ? 0.75 : 0.3) : inBar === 0 ? 0.75 : 0.6);
+      if (snareOn.includes(inBar)) s.snare(at, 0.35);
+      if (hats === 'offbeat' || hats === 'eighths') s.hat(at + beat / 2, hats === 'eighths' ? 0.14 : 0.1);
+      if (hats === 'eighths') s.hat(at, 0.14);
+      if (inBar === 0) for (const m of [57, 60, 64]) s.tone(at, beat * 4, s.midiHz(m), 0.06, 2);
+    }
+    s.normalise(0.9);
+    return s;
+  };
+  // Kick on 1, the and of 2, 3 and the and of 4 under a backbeat and eighth hats.
+  const syncopated = (bpm, seconds = 45) => {
+    const s = makeSynth(SR, seconds);
+    const beat = 60 / bpm;
+    for (let b = 0; b * beat < seconds; b++) {
+      const at = b * beat;
+      const inBar = b % 4;
+      if (inBar === 0 || inBar === 2) s.kick(at, 0.75);
+      else { s.kick(at + beat / 2, 0.7); s.snare(at, 0.35); }
+      s.hat(at, 0.12);
+      s.hat(at + beat / 2, 0.12);
+      if (inBar === 0) for (const m of [57, 60, 64]) s.tone(at, beat * 4, s.midiHz(m), 0.06, 2);
+    }
+    s.normalise(0.9);
+    return s;
+  };
+  // Jazz ride with the skip note on 2 and 4, a hat on 2 and 4, walking bass, no kick.
+  const swing = (bpm, seconds = 45) => {
+    const s = makeSynth(SR, seconds);
+    const beat = 60 / bpm;
+    const walk = [45, 47, 48, 50, 52, 50, 48, 47];
+    for (let b = 0; b * beat < seconds; b++) {
+      const at = b * beat;
+      const inBar = b % 4;
+      s.ride(at, 0.14);
+      if (inBar === 1 || inBar === 3) { s.ride(at + (beat * 2) / 3, 0.1); s.noiseHit(at, 0.05, 0.08, 60, -0.3); }
+      s.bass(at, beat * 0.9, s.midiHz(walk[b % 8]), 0.35);
+    }
+    s.normalise(0.9);
+    return s;
+  };
+  const cases = [
+    ['strong/weak kick + snare @80', drums({ bpm: 80, strongWeak: true }), 80],
+    ['strong/weak kick + snare @100', drums({ bpm: 100, strongWeak: true }), 100],
+    ['strong/weak kick + snare @128', drums({ bpm: 128, strongWeak: true }), 128],
+    ['strong/weak kick + snare @140', drums({ bpm: 140, strongWeak: true }), 140],
+    ['strong/weak kick + snare @160', drums({ bpm: 160, strongWeak: true }), 160],
+    ['four-on-floor, offbeat hats @120', drums({ bpm: 120, hats: 'offbeat' }), 120],
+    ['ballad, equal eighth hats @72', drums({ bpm: 72, hats: 'eighths', kickOn: [0, 2] }), 72],
+    ['half-time, eighth hats @90', drums({ bpm: 90, hats: 'eighths', kickOn: [0], snareOn: [2] }), 90],
+    ['syncopated kick, backbeat, eighth hats @100', syncopated(100), 100],
+    ['swing ride + walking bass @96', swing(96), 96],
+    ['swing ride + walking bass @140', swing(140), 140],
+  ];
+  for (const [name, s, bpm] of cases) {
+    const result = await computeSongScore(s.mono(), { sampleRate: SR });
+    if (!result) { fail(`${name}: no score`); continue; }
+    const ratio = result.bpm / bpm;
+    log.push(`grid: ${name} -> ${result.bpm} BPM (ratio ${ratio.toFixed(3)}, confidence ${result.beatConfidence})`);
+    if (Math.abs(ratio - 1) > 0.02) fail(`${name}: scored ${result.bpm} BPM for ${bpm}`);
+    if (result.beatConfidence < 0.35) fail(`${name}: confidence ${result.beatConfidence} on a drum-machine grid`);
+  }
+}
+
+// ── Meter: a waltz gets bars of three ───────────────────────────────────────
+{
+  const bpm = 150;
+  const beat = 60 / bpm;
+  const s = makeSynth(SR, 60);
+  for (let b = 0; b * beat < 60; b++) {
+    const at = b * beat;
+    if (b % 3 === 0) {
+      s.kick(at, 0.75);
+      const root = [57, 62, 64, 59][Math.floor(b / 3) % 4];
+      for (const m of [root, root + 3, root + 7]) s.tone(at, beat * 3, s.midiHz(m), 0.08, 3);
+    } else {
+      s.snare(at, 0.25);
+    }
+  }
+  s.normalise(0.9);
+  const waltz = await computeSongScore(s.mono(), { sampleRate: SR });
+  if (!waltz) fail('waltz: no score');
+  else {
+    let onBar = 0;
+    let lines = 0;
+    const perBar = waltz.beatsPerBar ?? 4;
+    for (let i = waltz.downbeat; i < waltz.beats.length; i += perBar) {
+      const t = waltz.beats[i];
+      if (t < 2) continue;
+      lines++;
+      if (Math.abs(t - Math.round(t / (3 * beat)) * 3 * beat) < 0.08) onBar++;
+    }
+    log.push(`waltz: ${waltz.bpm} BPM, ${perBar} beats per bar (confidence ${waltz.downbeatConfidence}), ${onBar} of ${lines} bar lines on true bar starts`);
+    if (perBar !== 3) fail(`waltz scored ${perBar} beats per bar`);
+    if (onBar < 0.9 * lines) fail(`only ${onBar} of ${lines} waltz bar lines fall on true bar starts`);
+  }
+}
+
+// ── Repeats and keys ────────────────────────────────────────────────────────
+{
+  // A final chorus lifted a semitone is still the chorus, and its colour is
+  // the lift: +7 fifths, i.e. -5.
+  const lifted = makeForm(SR, { tonicOf: (index) => (index === 5 ? 61 : 60) });
+  const modulated = await computeSongScore(lifted.synth.mono(), { sampleRate: SR });
+  if (!modulated) fail('modulated form: no score');
+  else {
+    const at = (t) => modulated.sections.find((x) => t >= x.start && t < x.end);
+    const choruses = [24, 56, 88].map(at);
+    log.push(`modulated final chorus: labels ${choruses.map((c) => c?.label).join('/')}, final keyShift ${choruses[2]?.keyShift}`);
+    if (!choruses.every((c) => c && c.label === choruses[0].label)) fail('a chorus lifted a semitone was not recognised as the chorus');
+    if (choruses[2]?.keyShift !== -5) fail(`the lifted chorus should sit -5 fifths from home, got ${choruses[2]?.keyShift}`);
+  }
+
+  // A chorus leaning on the dominant is not a modulation: one fifth up, for
+  // one section at a time, repaints nothing.
+  const dominant = makeForm(SR, { form: ['A', 'B', 'A', 'B'], tonicOf: (_index, kind) => (kind === 'B' ? 67 : 60) });
+  const leaning = await computeSongScore(dominant.synth.mono(), { sampleRate: SR });
+  if (!leaning) fail('dominant form: no score');
+  else {
+    const shifts = leaning.sections.map((x) => x.keyShift);
+    log.push(`choruses a fifth up: keyShifts ${shifts.join(' ')}`);
+    if (shifts.some((k) => k !== 0)) fail(`a one-fifth excursion shifted the palette: ${shifts.join(' ')}`);
+  }
+}
+
+// ── A loop is one section; nothing fires inside a fade-out ──────────────────
+{
+  const bpm = 128;
+  const beat = 60 / bpm;
+  const s = makeSynth(SR, 180);
+  for (let b = 0; b * beat < 180; b++) {
+    const at = b * beat;
+    const inBar = b % 4;
+    s.kick(at, inBar === 0 ? 0.75 : 0.6);
+    if (inBar === 1 || inBar === 3) s.snare(at, 0.35);
+    s.hat(at + beat / 2, 0.1);
+    if (b % 16 === 0) for (const m of [57, 60, 64]) s.tone(at, beat * 16, s.midiHz(m), 0.05, 2);
+  }
+  s.normalise(0.9);
+  const loop = await computeSongScore(s.mono(), { sampleRate: SR });
+  log.push(`3 min loop with a pad every 4 bars: ${loop ? loop.sections.length : 'no'} sections`);
+  if (!loop) fail('loop: no score');
+  else if (loop.sections.length > 4) fail(`a structureless loop was cut into ${loop.sections.length} sections`);
+
+  const fading = makeForm(SR, { form: ['A', 'B', 'A', 'B', 'B', 'B'], fadeOutSeconds: 24 });
+  const faded = await computeSongScore(fading.synth.mono(), { sampleRate: SR });
+  if (!faded) fail('fade-out form: no score');
+  else {
+    const inFade = faded.sections.filter((x) => x.start > fading.fadeAt);
+    log.push(`24 s fade-out: sections start at ${faded.sections.map((x) => x.start.toFixed(1)).join(', ')} (fade from ${fading.fadeAt}s)`);
+    if (inFade.length) fail(`a section starts inside the fade-out at ${inFade.map((x) => x.start).join(', ')}s`);
+  }
 }
 
 const report = log.join('\n') + '\n' + (pass ? '[eviland-score-test] PASS' : '[eviland-score-test] FAIL') + '\n';
