@@ -83,7 +83,7 @@ async function engine() {
     renderer.setConfig(structuredClone(config));
     cached.push(await worstAfter());
   }
-  renderer.dispose();
+  renderer.dispose({ releaseContext: true });
   return { scenes: SCENES.length, firstUseWorstFrame: stats(first), cachedWorstFrame: stats(cached), perScene };
 }
 
