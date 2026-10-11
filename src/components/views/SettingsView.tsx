@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import QRCode from 'qrcode';
 import type {
   AppSettings,
-  BuiltInTheme,
   CustomSkin,
   ExclusiveDeviceInfo,
   LastfmOutboxStatus,
@@ -15,8 +14,13 @@ import { engine, usePlayerStore } from '../../store/usePlayerStore';
 import { api, inElectron, DEFAULT_SETTINGS, exclusiveBackendLabel } from '../../lib/api';
 import { AI_ASSIST_OPTIONS } from '../../lib/aiAssist';
 import { resamplerName } from '../../lib/resampler-name';
-import { SKIN_VARIABLES, THEME_REGISTRY, readCurrentSkinVariables } from '../../lib/skins';
-import { COLOR_SKIN_VARIABLES, normalizeSkinVariableValue } from '@shared/custom-skin';
+import { closeButtonCopy } from '../../lib/close-button-copy';
+import { SKIN_VARIABLES, THEME_REGISTRY } from '../../lib/skins';
+import { openColourEditor } from '../../lib/colour-editor-open';
+import { applyImportedSkin } from '../../lib/skin-import';
+import { getSkinShelf, removeFromShelf, subscribeSkinShelf } from '../../lib/skin-shelf';
+import { useSkinDraft } from '../../store/useSkinDraft';
+import { ColourRow, ContrastReadout, TintControls, onAccentNote, useEffectiveColours } from '../ColourEditor';
 import { normalizeAudioOutputDeviceId, uniqueAudioOutputDevices } from '@shared/audio-output';
 import type { AudioOutputDeviceOption } from '@shared/audio-output';
 import { MAX_PREAMP_DB, MIN_PREAMP_DB, PREAMP_STEP_DB, normalizePreampDb } from '@shared/audio-limiter';
@@ -27,6 +31,7 @@ import { ConfirmAction } from '../ConfirmAction';
 import { ViewSkeleton } from '../ViewSkeleton';
 import { ShellPicker } from '../ShellPicker';
 import { flashGuardEnabled, setFlashGuardEnabled, watchFlashGuard } from '../../lib/vizPrefs';
+import { wheelInputLog } from '../../lib/wheel-volume';
 
 // Skin cards (labels / taglines / swatches / order) come from the single
 // THEME_REGISTRY in @shared/custom-skin — do not redeclare them here.
@@ -517,10 +522,10 @@ export function SettingsView(): JSX.Element {
                 </button>
               </div>
             </Row>
-            <Row label="Close button (X)">
+            <Row label={CLOSE_BUTTON_COPY.label}>
               <label className="flex items-center gap-3 text-sm text-ink2">
                 <select
-                  aria-label="Close button (X)"
+                  aria-label={CLOSE_BUTTON_COPY.label}
                   value={settings.closeButtonBehavior}
                   onChange={(event) => {
                     const closeButtonBehavior = event.target.value === 'close-app' ? 'close-app' : 'minimize-to-tray';
@@ -529,12 +534,10 @@ export function SettingsView(): JSX.Element {
                   className="bevel-in px-2 py-1"
                   data-newamp-close-button-behavior
                 >
-                  <option value="minimize-to-tray">Minimize to tray</option>
-                  <option value="close-app">Close the app</option>
+                  <option value="minimize-to-tray">{CLOSE_BUTTON_COPY.keepRunning}</option>
+                  <option value="close-app">{CLOSE_BUTTON_COPY.quit}</option>
                 </select>
-                <span className="text-xs text-muted">
-                  Choose what happens when you click the X button in the title bar.
-                </span>
+                <span className="text-xs text-muted">{CLOSE_BUTTON_COPY.hint}</span>
               </label>
             </Row>
           </section>
@@ -586,6 +589,24 @@ export function SettingsView(): JSX.Element {
                 </select>
                 <span className="text-xs text-muted">
                   The whole interface breathes with the music — a colored glow from the album art and a beat pulse on the controls.
+                </span>
+              </label>
+            </Row>
+            <Row label="Seek bar">
+              <label className="flex flex-col gap-1 text-sm text-ink2">
+                <span className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={settings.waveformSeekBar !== false}
+                    data-newamp-waveform-setting
+                    onChange={(e) => {
+                      saveSettings({ waveformSeekBar: e.target.checked }).then(acceptSettings).catch(() => undefined);
+                    }}
+                  />
+                  Draw the track's waveform as the seek bar
+                </span>
+                <span className="text-xs text-muted">
+                  Built once per track in the background and kept in the cache. Off gives back the plain slider and stops that work.
                 </span>
               </label>
             </Row>
@@ -664,7 +685,7 @@ export function SettingsView(): JSX.Element {
             </div>
           </section>
 
-          <SkinWorkshop settings={settings} onSaved={acceptSettings} />
+          <SkinWorkshop onSkinChanged={(skin) => setSettings((prev) => (prev ? { ...prev, ...skin } : prev))} />
 
           <section id="settings-playback" className="bevel-out flex flex-col gap-4 p-6">
             <h2 className="eyebrow">Playback</h2>
@@ -1114,6 +1135,32 @@ export function SettingsView(): JSX.Element {
                   >
                     Show crash dumps
                   </button>
+                  <button
+                    className="pxbtn"
+                    title="Copies the last 200 wheel events over the volume controls, for a bug report"
+                    onClick={() => {
+                      const text = wheelInputLog.format({
+                        app: `NewAmp v${supportDiagnostics.appVersion} / Electron ${supportDiagnostics.electronVersion}`,
+                        userAgent: navigator.userAgent,
+                      });
+                      const recorded = wheelInputLog.totalRecorded;
+                      void Promise.resolve()
+                        .then(() => navigator.clipboard.writeText(text))
+                        .then(
+                          () =>
+                            pushToast({
+                              tone: 'ok',
+                              title: 'Input log copied',
+                              detail: recorded
+                                ? `${recorded} wheel event${recorded === 1 ? '' : 's'} recorded since launch`
+                                : 'No wheel events yet: scroll over the volume slider first, then copy again.',
+                            }),
+                          () => pushToast({ tone: 'warn', title: 'Could not copy the input log' }),
+                        );
+                    }}
+                  >
+                    Copy input log
+                  </button>
                   <button className="pxbtn" onClick={() => void createBackup()}>
                     Create backup
                   </button>
@@ -1155,60 +1202,53 @@ export function SettingsView(): JSX.Element {
   );
 }
 
-function SkinWorkshop({
-  settings,
-  onSaved,
-}: {
-  settings: AppSettings;
-  onSaved: (settings: AppSettings) => void;
-}): JSX.Element {
-  const saveCustomSkin = usePlayerStore((s) => s.saveCustomSkin);
-  const [name, setName] = useState(settings.customSkin?.name ?? 'NewAmp Custom');
-  const [draft, setDraft] = useState<Record<string, string>>({});
+function SkinWorkshop({ onSkinChanged }: { onSkinChanged: (skin: Pick<AppSettings, 'theme' | 'customSkin'>) => void }): JSX.Element {
+  const active = useSkinDraft((s) => s.active);
+  const dirty = useSkinDraft((s) => s.dirty);
+  const name = useSkinDraft((s) => s.name);
+  const draft = useSkinDraft((s) => s.draft);
+  const savedRev = useSkinDraft((s) => s.savedRev);
+  const begin = useSkinDraft((s) => s.begin);
+  const setVar = useSkinDraft((s) => s.setVar);
+  const setName = useSkinDraft((s) => s.setName);
+  const save = useSkinDraft((s) => s.save);
+  const discard = useSkinDraft((s) => s.discard);
+  const buildSkin = useSkinDraft((s) => s.buildSkin);
+  const effective = useEffectiveColours();
+  const shelf = useSyncExternalStore(subscribeSkinShelf, getSkinShelf, getSkinShelf);
   const [skinFileStatus, setSkinFileStatus] = useState<string | null>(null);
 
+  // The draft lives in a store, so it is already here when the page opens
+  // again. A session that ended (the saved skin changed) starts anew.
   useEffect(() => {
-    setName(settings.customSkin?.name ?? 'NewAmp Custom');
-    setDraft(settings.theme === 'custom' && settings.customSkin
-      ? settings.customSkin.variables
-      : readCurrentSkinVariables());
-  }, [settings.customSkin, settings.theme]);
+    if (!active) begin();
+  }, [active, begin]);
 
-  function setVar(key: string, value: string): void {
-    setDraft((cur) => ({ ...cur, [key]: value }));
-    // Preview only what the skin grammar accepts; a half-typed or unsupported
-    // value stays in the draft box without reaching the page.
-    const safe = normalizeSkinVariableValue(key, value);
-    if (safe !== null) document.documentElement.style.setProperty(key, safe);
+  // The saved skin can change under this page: a save from the floating
+  // editor, an import, a dropped file. The page's copy of the settings follows.
+  function syncSavedSkin(): void {
+    const latest = usePlayerStore.getState().settings;
+    if (latest) onSkinChanged({ theme: latest.theme, customSkin: latest.customSkin });
   }
+  useEffect(() => {
+    if (savedRev > 0) syncSavedSkin();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedRev]);
 
-  function buildSkin(): CustomSkin {
-    const baseTheme: BuiltInTheme =
-      settings.theme === 'custom'
-        ? settings.customSkin?.baseTheme ?? 'classic'
-        : settings.theme;
-    const variables = Object.fromEntries(
-      SKIN_VARIABLES.map((key) => [key, draft[key] || readCurrentSkinVariables()[key] || '']),
-    );
-    return {
-      name: name.trim() || 'NewAmp Custom',
-      baseTheme,
-      variables,
-      updatedAt: Date.now(),
-    };
-  }
-
-  async function save(): Promise<void> {
-    const skin = buildSkin();
-    await saveCustomSkin(skin);
-    setSkinFileStatus(`Saved ${skin.name}.`);
-    onSaved({ ...settings, theme: 'custom', customSkin: skin });
+  async function saveSkin(): Promise<void> {
+    try {
+      const skin = await save();
+      if (skin) setSkinFileStatus(`Saved ${skin.name}.`);
+    } catch (err) {
+      setSkinFileStatus(err instanceof Error ? err.message : 'Skin save failed.');
+    }
   }
 
   async function exportSkin(): Promise<void> {
     setSkinFileStatus(null);
     try {
       const skin = buildSkin();
+      if (!skin) return;
       const filePath = await api.exportCustomSkin(skin);
       setSkinFileStatus(filePath ? `Exported ${skin.name}.` : 'Export canceled.');
     } catch (err) {
@@ -1224,28 +1264,33 @@ function SkinWorkshop({
         setSkinFileStatus('Import canceled.');
         return;
       }
-      await saveCustomSkin(skin);
-      setName(skin.name);
-      setDraft(skin.variables);
+      await applyImportedSkin(skin);
+      syncSavedSkin();
       setSkinFileStatus(`Imported ${skin.name}.`);
-      onSaved({ ...settings, theme: 'custom', customSkin: skin });
     } catch (err) {
       setSkinFileStatus(err instanceof Error ? err.message : 'Skin import failed.');
     }
   }
 
-  function reset(): void {
-    const vars = readCurrentSkinVariables();
-    setDraft(vars);
-    for (const [key, value] of Object.entries(vars)) {
-      document.documentElement.style.setProperty(key, value);
+  async function useShelvedSkin(skin: CustomSkin): Promise<void> {
+    setSkinFileStatus(null);
+    try {
+      await applyImportedSkin(skin, { fromShelf: true });
+      syncSavedSkin();
+      setSkinFileStatus(`Using ${skin.name}.`);
+    } catch (err) {
+      setSkinFileStatus(err instanceof Error ? err.message : 'Could not use that skin.');
     }
+  }
+
+  function reset(): void {
+    discard();
     pushToast({ tone: 'ok', title: 'Workshop reset', detail: 'Draft matches the current skin again.' });
   }
 
   return (
     <section id="settings-workshop" className="bevel-out flex flex-col gap-4 p-6">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <h2 className="eyebrow">Skin Workshop</h2>
         <input
           aria-label="Skin name"
@@ -1253,10 +1298,19 @@ function SkinWorkshop({
           onChange={(e) => setName(e.target.value)}
           className="bevel-in ml-auto px-2 py-1 text-sm"
         />
-        <ConfirmAction label="Reset" confirmLabel="Discard edits?" tone="warn" onConfirm={reset} />
+        <ConfirmAction label="Reset" confirmLabel="Discard edits?" tone="warn" disabled={!dirty} onConfirm={reset} />
         <button className="pxbtn" onClick={() => void importSkin()}>Import skin</button>
         <button className="pxbtn" onClick={() => void exportSkin()}>Export skin</button>
-        <button className="pxbtn is-active" onClick={() => void save()}>Save skin</button>
+        <button className="pxbtn is-active" onClick={() => void saveSkin()}>Save skin</button>
+      </div>
+      <div className="flex flex-wrap items-center gap-3 text-xs text-ink2">
+        <button className="pxbtn" onClick={openColourEditor} data-newamp-open-colour-editor>Edit over the app</button>
+        <span className="text-muted">A floating editor that stays over any view, the visualizer included.</span>
+        {dirty && (
+          <span className="ml-auto" data-newamp-skin-unsaved>
+            Unsaved changes. Save skin keeps them; Reset goes back.
+          </span>
+        )}
       </div>
       {skinFileStatus && (
         <div className="text-xs text-ink2">
@@ -1264,105 +1318,47 @@ function SkinWorkshop({
         </div>
       )}
 
-      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-        {SKIN_VARIABLES.map((key) => {
-          const value = draft[key] ?? '';
-          const name = key.replace('--', '');
-          const meta = SKIN_VARIABLE_HINTS[key];
-          const isColor = (COLOR_SKIN_VARIABLES as readonly string[]).includes(key);
-          const accepted = value === '' || normalizeSkinVariableValue(key, value) !== null;
-          const picker = isColor && accepted ? parseSkinColor(value) : null;
-          return (
-            <div
-              key={key}
-              className="grid grid-cols-[150px_26px_minmax(0,1fr)] items-center gap-2 text-xs text-ink2"
-            >
-              <span title={key}>
-                <span className="block">{meta?.label ?? name}</span>
-                {meta?.hint && <span className="block text-[10px] text-muted">{meta.hint}</span>}
-              </span>
-              {isColor ? (
-                <span className="workshop-swatch" aria-hidden="true">
-                  <i style={{ background: accepted ? value : 'transparent' }} />
-                </span>
-              ) : (
-                <span />
-              )}
-              <span className="flex items-center gap-2">
-                {picker && (
-                  <input
-                    aria-label={`${meta?.label ?? name} color`}
-                    type="color"
-                    value={picker.hex}
-                    onChange={(e) => setVar(key, pickedSkinColor(e.target.value, picker.alpha))}
-                    className="h-6 w-8"
-                  />
-                )}
-                <input
-                  aria-label={`${meta?.label ?? name} value`}
-                  value={value}
-                  onChange={(e) => setVar(key, e.target.value)}
-                  aria-invalid={accepted ? undefined : 'true'}
-                  title={
-                    accepted
-                      ? key
-                      : `${key}: not a value the skin accepts (${isColor ? 'hex, rgb(), hsl() or a colour name' : 'a length like 4px'})`
-                  }
-                  className="workshop-value bevel-in min-w-0 flex-1 px-2 py-1"
-                />
-              </span>
-            </div>
-          );
-        })}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <TintControls />
+        <ContrastReadout values={effective} />
       </div>
+
+      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+        {SKIN_VARIABLES.map((key) => (
+          <ColourRow
+            key={key}
+            variable={key}
+            value={draft[key] ?? ''}
+            note={onAccentNote(key, draft[key] ?? '', effective)}
+            onChange={(value) => setVar(key, value)}
+          />
+        ))}
+      </div>
+
+      {shelf.length > 0 && (
+        <div className="flex flex-col gap-2" data-newamp-skin-shelf>
+          <h3 className="eyebrow">Previous skins</h3>
+          <p className="text-xs text-muted">
+            Skins that an import, a dropped file or a save under a new name replaced.
+          </p>
+          <ul className="flex flex-col gap-1">
+            {shelf.map((skin) => (
+              <li key={skin.name} className="flex items-center gap-2 text-xs text-ink2">
+                <span className="flex gap-1" aria-hidden="true">
+                  {['--bg', '--accent', '--ink'].map((key) => (
+                    <span key={key} className="skin-swatch-dot" style={{ background: skin.variables[key] || 'var(--panel)' }} />
+                  ))}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{skin.name}</span>
+                <button className="pxbtn" onClick={() => void useShelvedSkin(skin)}>Use</button>
+                <ConfirmAction label="Remove" confirmLabel="Remove?" size="sm" onConfirm={() => removeFromShelf(skin.name)} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </section>
   );
-}
-
-// What each Skin Workshop variable changes, in the words of the interface.
-const SKIN_VARIABLE_HINTS: Record<string, { label: string; hint: string }> = {
-  '--bg': { label: 'Background', hint: 'Behind everything' },
-  '--panel': { label: 'Panels', hint: 'Sidebar, cards, transport' },
-  '--panel-2': { label: 'Raised panels', hint: 'Buttons, inputs, rows' },
-  '--panel-3': { label: 'Hover', hint: 'Hovered and pressed surfaces' },
-  '--line': { label: 'Lines', hint: 'Borders and dividers' },
-  '--accent': { label: 'Accent', hint: 'Highlights, active controls, lit text' },
-  '--accent-dim': { label: 'Accent, dimmed', hint: 'Fills under the accent' },
-  '--accent-glow': { label: 'Accent glow', hint: 'Halo around lit text and lamps' },
-  '--ink': { label: 'Text', hint: 'Main text' },
-  '--ink-2': { label: 'Text, secondary', hint: 'Details and artist lines' },
-  '--muted': { label: 'Muted', hint: 'Labels and hints' },
-  '--warn': { label: 'Warning', hint: 'Cautions and amber badges' },
-  '--error': { label: 'Error', hint: 'Errors, volume past 0 dB' },
-  '--display-bg': { label: 'LCD background', hint: 'Transport readout' },
-  '--display-fg': { label: 'LCD text', hint: 'Time, title and bitrate readout' },
-  '--bevel-light': { label: 'Bevel highlight', hint: 'Top and left edges' },
-  '--bevel-dark': { label: 'Bevel shadow', hint: 'Bottom and right edges' },
-  '--radius': { label: 'Corner radius', hint: 'Buttons and inputs' },
-  '--radius-card': { label: 'Card radius', hint: 'Panels and cards' },
-};
-
-// Any colour the skin grammar accepts, as the hex the colour picker needs,
-// plus its alpha so a pick can keep it. The browser does the parsing.
-function parseSkinColor(value: string): { hex: string; alpha: number } | null {
-  if (!value.trim() || typeof document === 'undefined') return null;
-  const probe = document.createElement('span');
-  probe.style.color = value;
-  if (!probe.style.color) return null;
-  probe.style.display = 'none';
-  document.body.appendChild(probe);
-  const computed = getComputedStyle(probe).color;
-  probe.remove();
-  const match = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)$/.exec(computed);
-  if (!match) return null;
-  const hex = `#${[match[1], match[2], match[3]].map((c) => Number(c).toString(16).padStart(2, '0')).join('')}`;
-  return { hex, alpha: match[4] === undefined ? 1 : Number(match[4]) };
-}
-
-function pickedSkinColor(hex: string, alpha: number): string {
-  if (alpha >= 1) return hex;
-  const channel = (at: number): number => parseInt(hex.slice(at, at + 2), 16);
-  return `rgba(${channel(1)}, ${channel(3)}, ${channel(5)}, ${alpha})`;
 }
 
 const PREFERRED_SAMPLE_RATES: Array<{ value: number | null; label: string; rationale: string }> = [
@@ -1784,6 +1780,8 @@ function folderIsSameOrInside(path: string, folder: string): boolean {
   const f = key(folder);
   return p === f || p.startsWith(`${f}/`);
 }
+
+const CLOSE_BUTTON_COPY = closeButtonCopy(api.platform);
 
 function Row({ label, children }: { label: string; children: React.ReactNode }): JSX.Element {
   return (

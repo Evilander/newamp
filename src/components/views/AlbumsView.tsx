@@ -639,7 +639,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)}>
+            <button className="pxbtn is-primary" onClick={() => void playQueue(tracks, 0)}>
               Play album
             </button>
             <button className="pxbtn" onClick={() => queueTracksNext(tracks)} disabled={!tracks.length} title="Play album next">
@@ -782,6 +782,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
             <HeaderOverflow>
               <button
                 className={`pxbtn ${showMissingArtOnly ? 'is-active' : ''}`}
+                aria-pressed={showMissingArtOnly}
                 onClick={() => setShowMissingArtOnly((value) => !value)}
                 title="Show albums that still need cover art"
               >
@@ -836,7 +837,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
                   </>
                 ) : (
                   <>
-                    <button className="pxbtn is-active" onClick={() => void scanLibraryNow()} disabled={scanBusy}>
+                    <button className="pxbtn is-primary" onClick={() => void scanLibraryNow()} disabled={scanBusy}>
                       Scan library
                     </button>
                     <button className="pxbtn" onClick={() => void addFolderAndScan()} disabled={scanBusy}>

@@ -8,12 +8,13 @@ import { formatDuration, formatTime } from '../lib/format';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { ArtistLink, AlbumLink } from './EntityLink';
 import { useModalFocus } from '../hooks/useModalFocus';
+import { openColourEditor } from '../lib/colour-editor-open';
 
 const RESULT_LIMIT = 48;
 const TRACK_LIMIT = 24;
 const CATALOG_LIMIT = 8;
 
-type PaletteCommand = 'scan-library' | 'toggle-eq' | 'fullscreen-viz' | 'compact-deck';
+type PaletteCommand = 'scan-library' | 'toggle-eq' | 'fullscreen-viz' | 'compact-deck' | 'edit-colours';
 
 type PaletteItem =
   | { kind: 'resume'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; track: Track }
@@ -49,6 +50,7 @@ const COMMAND_ITEMS: Array<{ command: PaletteCommand; title: string; subtitle: s
   { command: 'toggle-eq', title: 'Toggle Equalizer', subtitle: 'Show or hide the 10-band EQ' },
   { command: 'fullscreen-viz', title: 'Fullscreen Visualizer', subtitle: 'Open the visualizer stage' },
   { command: 'compact-deck', title: 'Compact Deck', subtitle: 'Switch to windowshade deck mode' },
+  { command: 'edit-colours', title: 'Edit Colours', subtitle: 'Tune the skin live in a floating editor (colour, color, accent, theme)' },
 ];
 
 // The five chords worth teaching. Escape, arrows, and the opener itself are
@@ -92,6 +94,7 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
   const setAutoDjEnabled = usePlayerStore((s) => s.setAutoDjEnabled);
   const setAutoDjSmartRuleId = usePlayerStore((s) => s.setAutoDjSmartRuleId);
   const setView = usePlayerStore((s) => s.setView);
+  const openView = usePlayerStore((s) => s.openView);
   const toggleEq = usePlayerStore((s) => s.toggleEq);
   const setFullscreenViz = usePlayerStore((s) => s.setFullscreenViz);
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
@@ -174,7 +177,9 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
       return;
     }
     if (item.kind === 'view') {
-      setView(item.view);
+      // From a deck or the fullscreen visualizer the new view would open
+      // unseen behind them, so a jump here leaves them first.
+      openView(item.view);
       onClose();
       return;
     }
@@ -242,7 +247,7 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
 
   async function toggleLove(item = selected): Promise<void> {
     if (!item || item.kind !== 'track') return;
-    const loved = await api.toggleLove(item.track.id);
+    const loved = await usePlayerStore.getState().toggleLove(item.track.id);
     setResults((next) => next.map((candidate) => (
       candidate.kind === 'track' && candidate.track.id === item.track.id
         ? {
@@ -267,6 +272,9 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
       onClose();
     } else if (command === 'compact-deck') {
       setCompactMode(true);
+      onClose();
+    } else if (command === 'edit-colours') {
+      openColourEditor();
       onClose();
     }
   }

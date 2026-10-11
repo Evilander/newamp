@@ -108,12 +108,12 @@ export function MusicServersView(): JSX.Element {
               <input className="bevel-in px-2 py-1" type="password" value={password} autoComplete="current-password" onChange={(e) => setPassword(e.target.value)} disabled={connecting} />
             </label>
             <label className="flex items-center gap-2"><input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} disabled={connecting} />Remember connection</label>
-            <button className="pxbtn is-active" type="submit" disabled={connecting || !baseUrl || !username}>{connecting ? 'Connecting…' : 'Connect'}</button>
+            <button className="pxbtn is-primary" type="submit" disabled={connecting || !baseUrl || !username}>{connecting ? 'Connecting…' : 'Connect'}</button>
           </form>
           <p className="mt-2" style={{ color: 'var(--muted)' }}>Include any server subpath in the URL. Saved credentials use your system keyring. Uncheck Remember connection to use this session only.</p>
-          {baseUrl.trim().startsWith('http:') && <p className="mt-2" style={{ color: 'var(--warn)' }}>HTTP sends login and music traffic without encryption. Use HTTPS outside a trusted local network.</p>}
+          {baseUrl.trim().startsWith('http:') && <p className="mt-2" style={{ color: 'var(--warn-text)' }}>HTTP sends login and music traffic without encryption. Use HTTPS outside a trusted local network.</p>}
         </details>
-        {error && <p role="alert" style={{ color: 'var(--error)' }}>{error}</p>}
+        {error && <p role="alert" style={{ color: 'var(--error-text)' }}>{error}</p>}
         {servers.length > 0 && <>
           <div className="flex flex-wrap items-center gap-3">
             <label>Connection <select className="bevel-in px-2 py-1" value={selected} onChange={(e) => { setSelected(e.target.value); setOffset(0); }}>

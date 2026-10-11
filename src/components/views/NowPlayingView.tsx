@@ -8,7 +8,7 @@ import { usePlayerStore, engine } from '../../store/usePlayerStore';
 import { fetchLyrics, parseLrc, type LrcLine } from '../../api/lrclib';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
 import { fetchAlbumFacts, type AlbumFact } from '../../api/albumFacts';
-import { formatTime, playbackCodecLabel } from '../../lib/format';
+import { formatTime, playbackCodecLabel, shortcutLabel } from '../../lib/format';
 import { api, winctl } from '../../lib/api';
 import { aiAssistSummary } from '../../lib/aiAssist';
 import { musicEntitySearchText, wikipediaSearchUrl } from '../../lib/wiki';
@@ -41,7 +41,11 @@ import {
   playbackRateLabel,
 } from '@shared/tempo-trainer';
 import { AMBIENT_FRAME_MS, requestPacedFrame } from '../../lib/pacedFrame';
+import { createSampleRateWatch, logBandEdges } from '../../visualizer/band-edges';
+import { bandPeak } from './spectrumBands';
 import { openTrackContextMenu } from '../../lib/trackMenu';
+import { waveformKey } from '../../hooks/useWaveform';
+import { ScrubBar } from '../ScrubBar';
 
 type LyricPayload = Partial<Pick<LocalLyricsResult, 'plainLyrics' | 'syncedLyrics'>> & {
   instrumental?: boolean;
@@ -836,6 +840,7 @@ function NowPlayingAttract({ onOpenLibrary }: { onOpenLibrary: () => void }): JS
     };
   }, [covers.length]);
 
+  const quickPlayChord = shortcutLabel('Mod+K');
   // Same chord QuickPlayPalette listens for on window (capture) — one code
   // path for opening the palette, no new store surface.
   function openQuickPlay(): void {
@@ -878,10 +883,10 @@ function NowPlayingAttract({ onOpenLibrary }: { onOpenLibrary: () => void }): JS
             <Chip
               interactive
               tone="muted"
-              title="Search and play anything (Ctrl+K)"
+              title={`Search and play anything (${quickPlayChord})`}
               onClick={openQuickPlay}
             >
-              Quick Play · Ctrl+K
+              Quick Play · {quickPlayChord}
             </Chip>
           </>
         }
@@ -1010,7 +1015,7 @@ function TrackInfoHeader({
             type="button"
             data-newamp-now-playing-artist-nav
             className="truncate underline-offset-2 hover:underline"
-            style={{ color: 'var(--accent)', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
+            style={{ color: 'var(--accent-text, var(--accent))', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
             onClick={() => navigateToArtist(current.artist)}
             title={`Show all ${current.artist} albums in your library`}
           >
@@ -1081,8 +1086,8 @@ function TrackInfoHeader({
             <span className="chip-label">{current.avoidAutoPlay ? 'avoid Auto DJ' : 'Auto DJ ok'}</span>
           </button>
           <TrackRating value={current.rating} onChange={onSetRating} />
-          <div className="score-rating-shell">
-            <span className="score-rating-shell-label">Song</span>
+          <div className="score-rating-shell" role="group" aria-label="Song score">
+            <span className="score-rating-shell-label" aria-hidden="true">Song</span>
             <ScoreRating
               value={current.ratingScore}
               stars={current.rating}
@@ -1209,8 +1214,8 @@ function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
   }
 
   return (
-    <div className="score-rating-shell" data-newamp-now-playing-album-rating>
-      <span className="score-rating-shell-label">Album</span>
+    <div className="score-rating-shell" role="group" aria-label="Album score" data-newamp-now-playing-album-rating>
+      <span className="score-rating-shell-label" aria-hidden="true">Album</span>
       <ScoreRating
         value={albumRating?.ratingScore ?? null}
         stars={albumRating?.rating ?? 0}
@@ -1231,18 +1236,22 @@ function TrackRating({
   return (
     <div
       className="flex items-center gap-[2px] border px-[6px] py-[2px]"
+      role="group"
+      aria-label="Star rating"
       data-newamp-now-playing-rating={rating}
       style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}
     >
-      <span className="mr-1 text-[9px] uppercase tracking-[0.1em]">Rating</span>
+      <span className="mr-1 text-[9px] uppercase tracking-[0.1em]" aria-hidden="true">Rating</span>
       {[1, 2, 3, 4, 5].map((star) => (
         <button
           key={star}
           type="button"
           onClick={() => onChange(rating === star ? 0 : star)}
           title={`${star} star${star === 1 ? '' : 's'}`}
+          aria-label={`${star} star${star === 1 ? '' : 's'}`}
+          aria-pressed={star === rating}
           className="leading-none"
-          style={{ color: star <= rating ? 'var(--accent)' : 'var(--muted)' }}
+          style={{ color: star <= rating ? 'var(--accent-text, var(--accent))' : 'var(--muted)' }}
         >
           {star <= rating ? '★' : '☆'}
         </button>
@@ -1275,7 +1284,7 @@ function Tag({
       className="border px-[6px] py-[2px] text-[9px] uppercase tracking-[0.1em]"
       style={{
         borderColor: accent ? 'var(--accent-dim)' : 'var(--line)',
-        color: accent ? 'var(--accent)' : 'var(--ink-2)',
+        color: accent ? 'var(--accent-text, var(--accent))' : 'var(--ink-2)',
       }}
     >
       {children}
@@ -1299,7 +1308,7 @@ function Stat({
       </div>
       <div
         className="text-[13px] font-bold tabular-nums"
-        style={{ color: good ? 'var(--accent)' : 'var(--ink)' }}
+        style={{ color: good ? 'var(--accent-text, var(--accent))' : 'var(--ink)' }}
       >
         {value}
       </div>
@@ -1417,13 +1426,13 @@ function QueueRow({
     >
       <span
         className="text-right text-[10px] tabular-nums"
-        style={{ color: active ? 'var(--accent)' : 'var(--ink-2)' }}
+        style={{ color: active ? 'var(--accent-text, var(--accent))' : 'var(--ink-2)' }}
       >
         {active ? '▶' : String(index + 1).padStart(2, '0')}
       </span>
       <span
         className="truncate text-[11px]"
-        style={{ color: active ? 'var(--accent)' : 'var(--ink)' }}
+        style={{ color: active ? 'var(--accent-text, var(--accent))' : 'var(--ink)' }}
         title={`${track.title} — ${track.artist}`}
       >
         {track.title}
@@ -1727,6 +1736,10 @@ function SpectrumPanel({
     }
     const freq = new Uint8Array(engine.frequencyBinCount);
     const peaks = new Float32Array(bars);
+    // Bands are log-spaced over 30 Hz - 16 kHz, so a bar means the same
+    // frequencies at any sample rate (Bit-Perfect output changes the rate).
+    let edges = logBandEdges(engine.getSampleRate(), engine.fftSize, bars);
+    const rateChanged = createSampleRateWatch(() => engine.getSampleRate(), engine.getSampleRate());
     // Peak fall speed per second (was per frame at ~60 Hz).
     const fallPerSec = spectrumStyle === 'needles' ? 1.32 : 0.72;
     let lastTick = 0;
@@ -1734,19 +1747,14 @@ function SpectrumPanel({
     const tick = (now: number): void => {
       const dt = lastTick ? Math.min(0.25, (now - lastTick) / 1000) : 1 / 30;
       lastTick = now;
+      const newRate = rateChanged(now);
+      if (newRate) edges = logBandEdges(newRate, engine.fftSize, bars);
       engine.getFreqData(freq as Uint8Array<ArrayBuffer>);
       const container = barsRef.current;
       const peakContainer = peakRef.current;
       if (container) {
         for (let i = 0; i < bars; i++) {
-          const curve = spectrumStyle === 'wide' ? 1.35 : 2;
-          const lo = Math.floor(Math.pow(i / bars, curve) * freq.length);
-          const hi = Math.floor(Math.pow((i + 1) / bars, curve) * freq.length);
-          let max = 0;
-          for (let k = lo; k < hi && k < freq.length; k++) {
-            if ((freq[k] ?? 0) > max) max = freq[k] ?? 0;
-          }
-          const norm = max / 255;
+          const norm = bandPeak(freq, edges, i);
           peaks[i] = Math.max(peaks[i]! - fallPerSec * dt, norm);
           const bar = container.children.item(i) as HTMLElement | null;
           if (bar) {
@@ -1833,13 +1841,7 @@ function SpectrumPanel({
 
       <SoundsLikePanel trackId={current.id} />
 
-      <div>
-        <div className="mb-[6px] flex items-center justify-between text-[9px] uppercase tracking-[0.1em] text-ink2">
-          <span>Overview</span>
-          <ProgressPercent duration={duration} />
-        </div>
-        <WaveformOverview duration={duration} onSeek={seek} />
-      </div>
+      <WaveformOverview duration={duration} onSeek={seek} />
     </div>
   );
 }
@@ -2372,103 +2374,42 @@ function VuMeter(): JSX.Element {
   );
 }
 
+/**
+ * The Now Playing strip under the track panels: the playing track's waveform,
+ * seekable. Hidden for tracks that can't have one (streams, server tracks) and
+ * when Settings has the waveform seek bar off, rather than drawing a stand-in.
+ * A local file stays on screen whatever the decode comes to, as a flat bar, so
+ * the column doesn't change height when a track turns out to have no waveform.
+ */
 function WaveformOverview({
   duration,
   onSeek,
 }: {
   duration: number;
   onSeek: (seconds: number) => void;
-}): JSX.Element {
+}): JSX.Element | null {
   // Clock-subscribed leaf: the playhead is the only continuously moving part.
   const currentTime = usePlayerStore((s) => s.currentTime);
-  // Decorative pseudo-waveform — real PCM peak data would require off-thread
-  // decode at scan time; this gives the right "shape signature" for now.
-  const path = useMemo(() => {
-    const N = 64;
-    let d = `M 0 20`;
-    for (let i = 0; i < N; i++) {
-      const x = (i / (N - 1)) * 100;
-      const seed = Math.sin(i * 1.7) * Math.cos(i * 0.31) + Math.sin(i * 5.3) * 0.4;
-      const y = 20 - Math.abs(seed) * 14 - 1.5;
-      d += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-    }
-    for (let i = N - 1; i >= 0; i--) {
-      const x = (i / (N - 1)) * 100;
-      const seed = Math.sin(i * 1.7) * Math.cos(i * 0.31) + Math.sin(i * 5.3) * 0.4;
-      const y = 20 + Math.abs(seed) * 14 + 1.5;
-      d += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-    }
-    return d + ' Z';
-  }, []);
-
-  const pct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
-
-  // Click or drag anywhere on the waveform to seek. Previously this big,
-  // scrubber-looking surface was purely decorative — the user could only seek
-  // from the small transport bar. Pointer capture keeps the drag tracking even
-  // when the cursor leaves the 40px-tall strip.
-  const draggingRef = useRef(false);
-  const seekFromPointer = (clientX: number, target: Element): void => {
-    if (duration <= 0) return;
-    const rect = target.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    onSeek(frac * duration);
-  };
-
+  const current = usePlayerStore((s) => s.current);
+  const enabled = usePlayerStore((s) => s.settings?.waveformSeekBar !== false);
+  if (!enabled || !waveformKey(current)) return null;
   return (
-    <svg
-      width="100%"
-      height={40}
-      viewBox="0 0 100 40"
-      preserveAspectRatio="none"
-      data-newamp-waveform-seek
-      style={{ cursor: duration > 0 ? 'pointer' : 'default', touchAction: 'none' }}
-      onPointerDown={(e) => {
-        draggingRef.current = true;
-        e.currentTarget.setPointerCapture(e.pointerId);
-        seekFromPointer(e.clientX, e.currentTarget);
-      }}
-      onPointerMove={(e) => {
-        if (draggingRef.current) seekFromPointer(e.clientX, e.currentTarget);
-      }}
-      onPointerUp={(e) => {
-        draggingRef.current = false;
-        try {
-          e.currentTarget.releasePointerCapture(e.pointerId);
-        } catch {
-          /* pointer already released */
-        }
-      }}
-    >
-      <defs>
-        <linearGradient id="wave-played" x1="0" x2="1">
-          <stop offset="0%" stopColor="var(--accent)" />
-          <stop offset="100%" stopColor="var(--accent-dim)" />
-        </linearGradient>
-        <linearGradient id="wave-unplayed">
-          <stop offset="0%" stopColor="var(--panel-3)" />
-          <stop offset="100%" stopColor="var(--panel-3)" />
-        </linearGradient>
-        <clipPath id="wave-clip-played">
-          <rect x="0" y="0" width={pct} height="40" />
-        </clipPath>
-        <clipPath id="wave-clip-unplayed">
-          <rect x={pct} y="0" width={100 - pct} height="40" />
-        </clipPath>
-      </defs>
-      <path d={path} fill="url(#wave-unplayed)" clipPath="url(#wave-clip-unplayed)" />
-      <path d={path} fill="url(#wave-played)" clipPath="url(#wave-clip-played)" />
-      <line
-        x1={pct}
-        y1="0"
-        x2={pct}
-        y2="40"
-        stroke="var(--ink)"
-        strokeWidth="0.3"
-        strokeDasharray="1 1"
+    <div>
+      <div className="mb-[6px] flex items-center justify-between text-[9px] uppercase tracking-[0.1em] text-ink2">
+        <span>Overview</span>
+        <ProgressPercent duration={duration} />
+      </div>
+      <ScrubBar
+        className="nslider block w-full"
+        value={currentTime}
+        max={duration || 1}
+        onSeek={onSeek}
+        ariaLabel="Seek in waveform"
+        waveform
+        waveformSize="overview"
+        data-newamp-waveform-seek
       />
-    </svg>
+    </div>
   );
 }
 
@@ -2675,7 +2616,7 @@ function LyricsPanel({
         <button className="pxbtn" onClick={onClearCustom}>
           CLEAR SAVED
         </button>
-        {message && <span style={{ color: 'var(--accent)' }}>{message}</span>}
+        {message && <span style={{ color: 'var(--accent-text, var(--accent))' }}>{message}</span>}
       </div>
       {editorOpen && (
         <div
@@ -2684,7 +2625,7 @@ function LyricsPanel({
           style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}
         >
           <div className="mb-2 flex items-center gap-2">
-            <div className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+            <div className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent-text, var(--accent))' }}>
               Custom Lyrics
             </div>
             <button
@@ -2748,7 +2689,7 @@ function LyricsPanel({
                 <span
                   className="lyric-line-time tabular-nums"
                   style={{
-                    color: state === 'current' ? 'var(--accent)' : 'var(--ink-2)',
+                    color: state === 'current' ? 'var(--accent-text, var(--accent))' : 'var(--ink-2)',
                     opacity: state === 'current' ? 1 : 0.55,
                   }}
                 >
@@ -2756,7 +2697,7 @@ function LyricsPanel({
                 </span>
                 <span
                   style={{
-                    color: state === 'current' ? 'var(--accent)' : undefined,
+                    color: state === 'current' ? 'var(--accent-text, var(--accent))' : undefined,
                     fontWeight: state === 'current' ? 500 : 400,
                   }}
                 >

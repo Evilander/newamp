@@ -118,7 +118,7 @@ export function DiscoverView(): JSX.Element {
           Discover
           <HelpDot help={help} label="What is Discover?" />
         </div>
-        <button className="pxbtn is-active" onClick={() => selectedMission && void playQueue(selectedMission.tracks, 0)} disabled={!selectedMission}>
+        <button className="pxbtn is-primary" onClick={() => selectedMission && void playQueue(selectedMission.tracks, 0)} disabled={!selectedMission}>
           Start Session
         </button>
         <button className="pxbtn" onClick={() => void refreshDiscover(`${dailySeed()}:${Date.now()}`)} disabled={loading}>
@@ -126,6 +126,7 @@ export function DiscoverView(): JSX.Element {
         </button>
         <button
           className={`pxbtn ${lowEndMode ? 'is-active' : ''}`}
+          aria-pressed={lowEndMode}
           onClick={toggleLowEnd}
           title="Use lighter visualizers and skip heavy effects (helps on older GPUs)"
         >
@@ -206,7 +207,7 @@ export function DiscoverView(): JSX.Element {
                     <p className="text-[12px]" style={{ color: 'var(--ink-2)' }}>{selectedMission.reason}</p>
                   </div>
                   <div className="flex flex-wrap justify-end gap-1">
-                    <button className="pxbtn is-active" onClick={() => void playQueue(selectedMission.tracks, 0)} data-newamp-discover-play>Play</button>
+                    <button className="pxbtn is-primary" onClick={() => void playQueue(selectedMission.tracks, 0)} data-newamp-discover-play>Play</button>
                     <button className="pxbtn" onClick={() => queueTracksNext(selectedMission.tracks)}>Play Next</button>
                     <button className="pxbtn" onClick={() => addTracksToQueue(selectedMission.tracks)}>Queue</button>
                     <button className="pxbtn" onClick={() => void saveMission(selectedMission)} data-newamp-discover-save>Save as Playlist</button>
@@ -284,7 +285,7 @@ export function DiscoverView(): JSX.Element {
                 <div className="text-[13px] font-bold">{selectedCard.title}</div>
                 <div className="mt-1 text-[11px]" style={{ color: 'var(--ink-2)' }}>{selectedCard.reason}</div>
                 <div className="mt-3 flex flex-wrap gap-1">
-                  <button className="pxbtn is-active" onClick={() => void playQueue(selectedCard.tracks, 0)}>Play</button>
+                  <button className="pxbtn is-primary" onClick={() => void playQueue(selectedCard.tracks, 0)}>Play</button>
                   <button className="pxbtn" onClick={() => queueTracksNext(selectedCard.tracks)}>Next</button>
                   <button className="pxbtn" onClick={() => addTracksToQueue(selectedCard.tracks)}>Queue</button>
                   <button className="pxbtn" onClick={() => void saveCard(selectedCard)}>Save</button>
@@ -353,7 +354,7 @@ function VisualPlanCard({
       </div>
       <div className="mt-3 flex gap-1">
         <button className="pxbtn" onClick={onDeck} data-newamp-discover-deck>Deck</button>
-        <button className="pxbtn is-active" onClick={() => onVisual(plan.presets[0])} data-newamp-discover-full-vis>Full Vis</button>
+        <button className="pxbtn is-primary" onClick={() => onVisual(plan.presets[0])} data-newamp-discover-full-vis>Full Vis</button>
       </div>
     </div>
   );

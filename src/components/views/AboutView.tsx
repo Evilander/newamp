@@ -1,7 +1,34 @@
+import { useEffect, useState } from 'react';
 import { BrandLogo } from '../BrandLogo';
 import { api } from '../../lib/api';
 
+/** Where NewAmp keeps its library and settings. Empty in the browser preview, where there is no data folder. */
+export function AboutDataRow({ path }: { path: string }): JSX.Element | null {
+  if (!path) return null;
+  return (
+    <div data-newamp-about-data-path>
+      <span>Data folder</span>
+      <strong title={path}>{path}</strong>
+    </div>
+  );
+}
+
 export function AboutView(): JSX.Element {
+  const [dataPath, setDataPath] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getSupportDiagnostics()
+      .then((diagnostics) => {
+        if (!cancelled) setDataPath(diagnostics.userDataPath);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div className="about-view flex h-full items-center justify-center overflow-auto p-8">
       <section className="about-panel bevel-out">
@@ -26,6 +53,7 @@ export function AboutView(): JSX.Element {
             <span>Build</span>
             <strong>NewAmp v{api.appVersion} / {api.platform}</strong>
           </div>
+          <AboutDataRow path={dataPath} />
         </div>
       </section>
     </div>

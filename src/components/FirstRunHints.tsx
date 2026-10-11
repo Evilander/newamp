@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { deckModeShortcutLabel, shortcutLabel } from '../lib/format';
 
 // First-session hints — three one-shot nudges spread across the first minutes
 // of listening: the palette, the visualizer, the deck. Each hint persists its
@@ -10,7 +11,7 @@ import { useEffect, useState } from 'react';
 
 interface FirstRunHint {
   storageKey: string;
-  text: string;
+  text: () => string;
   delayMs: number;
   durationMs: number;
 }
@@ -18,9 +19,9 @@ interface FirstRunHint {
 const HINTS: FirstRunHint[] = [
   // Key kept from 1.x so users who already saw the single Ctrl+K tip
   // never see it again.
-  { storageKey: 'newamp:firstrun:quickPlayTip', text: 'Press Ctrl+K to search anything.', delayMs: 3_000, durationMs: 6_000 },
-  { storageKey: 'newamp:firstrun:fullscreenVizTip', text: 'Press F for the fullscreen visualizer.', delayMs: 90_000, durationMs: 7_000 },
-  { storageKey: 'newamp:firstrun:compactDeckTip', text: 'Press Ctrl+M to shrink into the deck.', delayMs: 210_000, durationMs: 7_000 },
+  { storageKey: 'newamp:firstrun:quickPlayTip', text: () => `Press ${shortcutLabel('Mod+K')} to search anything.`, delayMs: 3_000, durationMs: 6_000 },
+  { storageKey: 'newamp:firstrun:fullscreenVizTip', text: () => 'Press F for the fullscreen visualizer.', delayMs: 90_000, durationMs: 7_000 },
+  { storageKey: 'newamp:firstrun:compactDeckTip', text: () => `Press ${deckModeShortcutLabel()} to shrink into the deck, and again to come back.`, delayMs: 210_000, durationMs: 7_000 },
 ];
 
 export function FirstRunHints(): JSX.Element | null {
@@ -33,11 +34,12 @@ export function FirstRunHints(): JSX.Element | null {
       if (window.localStorage.getItem(hint.storageKey) === 'shown') continue;
       timers.push(
         window.setTimeout(() => {
+          const text = hint.text();
           window.localStorage.setItem(hint.storageKey, 'shown');
-          setMessage(hint.text);
+          setMessage(text);
           timers.push(
             window.setTimeout(() => {
-              setMessage((current) => (current === hint.text ? null : current));
+              setMessage((current) => (current === text ? null : current));
             }, hint.durationMs),
           );
         }, hint.delayMs),
