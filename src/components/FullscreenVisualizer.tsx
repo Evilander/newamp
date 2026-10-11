@@ -31,8 +31,30 @@ import { useDetachedVisualizer } from './useDetachedVisualizer';
 import { ScrubBar } from './ScrubBar';
 import { EvilandMemoryBadge } from './EvilandMemoryBadge';
 import { Gear, Dice } from './Icons';
+import { VisualizerMenu, type VisualizerMenuEntry } from './VisualizerMenu';
+import { usePopoverFocus, useScrollKeepsWheel, useStageFocus } from './usePopoverFocus';
+import {
+  fullscreenToRestore,
+  isInsideMenu,
+  isLookLocked,
+  isRepeatableVisualizerAction,
+  isStageTarget,
+  keyTargetInStage,
+  keyTargetKind,
+  opensVisualizerMenu,
+  pickRandomPreset,
+  presetStepBase,
+  resolveVisualizerKey,
+  toggleFourK,
+  toggleLite,
+  toggleLookLock,
+  visualizerTakesKey,
+  type RenderMode,
+} from './visualizer-input';
 import { requestPacedFrame } from '../lib/pacedFrame';
-import { clampVolume, wheelVolumeDelta } from '../lib/wheel-volume';
+import { handlePlayerWheel } from '../lib/player-wheel';
+import { visualizerEnergy } from './visualizer-energy';
+import { stepLook as stepLookFor } from './look-step';
 
 // Preset registry. `group` drives the labeled sections in the new preset
 // picker popover so users can scan by category instead of one long rail. The
@@ -41,7 +63,7 @@ import { clampVolume, wheelVolumeDelta } from '../lib/wheel-volume';
 const PRESETS = [
   { id: 'eviland-live', label: 'Eviland Live', group: 'milkdrop' },
   { id: 'butterchurn', label: 'Milkdrop', group: 'milkdrop' },
-  { id: 'eviland', label: 'Eviland (engine)', group: 'gpu' },
+  { id: 'eviland', label: 'Eviland', group: 'gpu' },
   { id: 'kaleido-bloom', label: 'Kaleido Bloom', group: 'crazy' },
   { id: 'liquid-aurora-storm', label: 'Aurora Storm', group: 'crazy' },
   { id: 'fractal-pulse', label: 'Fractal Pulse', group: 'crazy' },
@@ -71,7 +93,7 @@ const PRESETS = [
 type PresetGroup = 'milkdrop' | 'crazy' | 'gpu' | 'reactive' | 'classic' | 'art';
 const PRESET_GROUPS: ReadonlyArray<{ id: PresetGroup; label: string }> = [
   { id: 'milkdrop', label: 'Milkdrop' },
-  { id: 'crazy', label: 'Crazy GPU shaders' },
+  { id: 'crazy', label: 'Shaders' },
   { id: 'gpu', label: 'GPU particles' },
   { id: 'reactive', label: 'Reactive' },
   { id: 'classic', label: 'Classic' },
@@ -204,7 +226,10 @@ export function FullscreenVisualizer(): JSX.Element {
   const evilandWaveMode = usePlayerStore((s) => s.evilandWaveMode);
   const setEvilandWaveMode = usePlayerStore((s) => s.setEvilandWaveMode);
   const [quality, setQuality] = useState<VizQuality>(() => loadVisualizerQuality());
-  const [artPulseEnabled, setArtPulseEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_SHOW_ART_KEY, true));
+  // Off until asked for: a cover popping up over the visuals every few
+  // seconds is the opposite of what most people open the visualizer for. Only
+  // an explicit on/off is stored, so anyone who never touched it gets this.
+  const [artPulseEnabled, setArtPulseEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_SHOW_ART_KEY, false));
   const [artPulseVisible, setArtPulseVisible] = useState(false);
   const [chromeVisible, setChromeVisible] = useState<boolean>(() => loadStoredBoolean(VIZ_CHROME_KEY, true));
   const [palette, setPalette] = useState<VizPalette>(() => loadVisualizerPalette());
@@ -229,6 +254,10 @@ export function FullscreenVisualizer(): JSX.Element {
   // a time. Esc closes the open one before falling through to exitVisualizer.
   type OpenPanel = 'preset' | 'settings' | 'help' | null;
   const [openPanel, setOpenPanel] = useState<OpenPanel>(null);
+  // The right-click menu, at the pointer. It and the popovers are never up
+  // together: opening one closes the other.
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   // Eviland recorder uses createCanvasRecorder (vp9/opus WebM with engine
   // audio muxed in parallel). Kept as a separate ref so the legacy
@@ -252,6 +281,21 @@ export function FullscreenVisualizer(): JSX.Element {
   const [clipStatus, setClipStatus] = useState<string | null>(null);
   const levelMeterRef = useRef<HTMLSpanElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  // Live copies of what the toggles read. State only reaches a closure on the
+  // next render, so two keys inside one frame (L then Q) would both see the old
+  // tier, and a second Shift+R would start a second save.
+  const perfTierRef = useRef(perfTier);
+  const qualityRef = useRef(quality);
+  const savingClipRef = useRef(false);
+  // Whether the window was in OS fullscreen when the visualizer opened.
+  const openingFullscreenRef = useRef<boolean | null>(null);
+  // Set when the visualizer closes to hand over to the projector window.
+  const toProjectorRef = useRef(false);
+  // The preset last asked for, and when (see presetStepBase).
+  const lastPickRef = useRef<{ id: VisualizerPreset; at: number } | null>(null);
+  usePopoverFocus(panelRef, openPanel, rootRef);
+  useScrollKeepsWheel(panelRef, openPanel);
+  useStageFocus(rootRef);
   // Eviland popover scratch state: paste-input value, decode-failure flash,
   // and a transient "Copied!" hint on the seed display. Local to this
   // component — they're conversational UI, not durable settings.
@@ -264,7 +308,6 @@ export function FullscreenVisualizer(): JSX.Element {
   const [detachedDisplayId, setDetachedDisplayId] = useState<number | null>(null);
 
   const activePreset = PRESETS.some((p) => p.id === preset) ? preset : 'neon-waves';
-  const activeIndex = Math.max(0, PRESETS.findIndex((p) => p.id === activePreset));
 
   const artUrl = useMemo(
     () => (current ? api.getArtUrl(current.id) : null),
@@ -273,21 +316,45 @@ export function FullscreenVisualizer(): JSX.Element {
   const volumePct = Math.max(0, Math.min(100, Math.round((volume / 2) * 100)));
 
   function pickPreset(id: VisualizerPreset): void {
+    lastPickRef.current = { id, at: window.performance.now() };
     setPreset(id);
   }
 
+  // Steps from the preset last asked for, not this render's: a held arrow key
+  // outruns React, and stepping from a stale index repeats the same preset.
   function cyclePreset(direction: -1 | 1): void {
-    const nextIndex = (activeIndex + direction + PRESETS.length) % PRESETS.length;
-    pickPreset(PRESETS[nextIndex]!.id);
+    const live = presetStepBase(lastPickRef.current, window.performance.now(), usePlayerStore.getState().vizPreset);
+    const index = Math.max(0, PRESETS.findIndex((p) => p.id === live));
+    pickPreset(PRESETS[(index + direction + PRESETS.length) % PRESETS.length]!.id);
+  }
+
+  function stepLook(direction: -1 | 1): void {
+    const { skipEvilandLook, previousEvilandLook } = usePlayerStore.getState();
+    stepLookFor(activePreset, direction, { cyclePreset, skipEvilandLook, previousEvilandLook });
+  }
+
+  function randomizeLook(): void {
+    if (activePreset === 'eviland' || activePreset === 'eviland-live') randomizeEviland();
+    else pickPreset(pickRandomPreset(PRESETS.map((p) => p.id), activePreset));
+  }
+
+  // The tier and quality are written to their refs here, at once, as well as to
+  // state: a second key in the same frame has to see the first one's result.
+  function applyRenderMode(next: RenderMode): void {
+    if (next.tier !== perfTierRef.current) {
+      perfTierRef.current = next.tier;
+      window.localStorage.setItem(VIZ_PERFORMANCE_KEY, next.tier);
+      setPerfTier(next.tier);
+    }
+    if (next.quality !== qualityRef.current) {
+      qualityRef.current = next.quality;
+      window.localStorage.setItem(VIZ_QUALITY_KEY, next.quality);
+      setQuality(next.quality);
+    }
   }
 
   function toggleQuality(): void {
-    if (perfTier === 'low') return;
-    setQuality((value) => {
-      const next: VizQuality = value === '4k' ? 'auto' : '4k';
-      window.localStorage.setItem(VIZ_QUALITY_KEY, next);
-      return next;
-    });
+    applyRenderMode(toggleFourK({ tier: perfTierRef.current, quality: qualityRef.current }));
   }
 
   function toggleArt(): void {
@@ -306,10 +373,19 @@ export function FullscreenVisualizer(): JSX.Element {
     });
   }
 
+  // The window goes back to the fullscreen state it had before the visualizer
+  // opened when this unmounts (see the effect below), so leaving is just this.
   function exitVisualizer(): void {
-    void winctl.setFullscreen(false);
-    setNativeFullscreen(false);
     setFs(false);
+  }
+
+  // The projector opens in its own window; leave the overlay, and OS fullscreen
+  // with it, or on a single monitor the new window opens behind this one. The
+  // producer keeps feeding the projector after the exit.
+  function openProjector(): void {
+    detached.open(detachedDisplayId ?? undefined);
+    toProjectorRef.current = true;
+    exitVisualizer();
   }
 
   // Render-quality is a single conceptual axis with three values (Auto | 4K |
@@ -325,9 +401,9 @@ export function FullscreenVisualizer(): JSX.Element {
       return;
     }
     // Leaving Lite: flip perfTier back to balanced first so toggleQuality is allowed.
-    if (perfTier === 'low') togglePerfTier();
+    if (perfTierRef.current === 'low') togglePerfTier();
     const wantsFourK = mode === '4k';
-    if ((quality === '4k') !== wantsFourK) toggleQuality();
+    if ((qualityRef.current === '4k') !== wantsFourK) toggleQuality();
   }
 
   function toggleChrome(): void {
@@ -348,15 +424,7 @@ export function FullscreenVisualizer(): JSX.Element {
   }
 
   function togglePerfTier(): void {
-    setPerfTier((value) => {
-      const next: VizPerformance = value === 'low' ? 'balanced' : 'low';
-      window.localStorage.setItem(VIZ_PERFORMANCE_KEY, next);
-      if (next === 'low') {
-        window.localStorage.setItem(VIZ_QUALITY_KEY, 'auto');
-        setQuality('auto');
-      }
-      return next;
-    });
+    applyRenderMode(toggleLite({ tier: perfTierRef.current, quality: qualityRef.current }));
   }
 
   function cycleReactivity(): void {
@@ -379,11 +447,20 @@ export function FullscreenVisualizer(): JSX.Element {
   useEffect(() => {
     let cancelled = false;
     void winctl.isFullscreen().then((value) => {
-      if (!cancelled) setNativeFullscreen(value);
+      if (cancelled) return;
+      openingFullscreenRef.current = value;
+      setNativeFullscreen(value);
     });
     return () => {
       cancelled = true;
-      void winctl.setFullscreen(false);
+      // Back to how the window was before the visualizer, not always windowed:
+      // an app that was already fullscreen stays that way.
+      const restore = fullscreenToRestore(
+        openingFullscreenRef.current,
+        usePlayerStore.getState().compactMode,
+        toProjectorRef.current,
+      );
+      if (restore !== null) void winctl.setFullscreen(restore);
     };
   }, []);
 
@@ -497,84 +574,83 @@ export function FullscreenVisualizer(): JSX.Element {
     return () => window.cancelAnimationFrame(raf);
   }, [engine]);
 
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent): void {
-      if (isEditableTarget(event.target)) return;
-      if (event.key === 'ArrowRight' || event.key === ']') {
-        event.preventDefault();
-        cyclePreset(1);
-      } else if (event.key === 'ArrowLeft' || event.key === '[') {
-        event.preventDefault();
-        cyclePreset(-1);
-      } else if (event.key.toLowerCase() === 'q') {
-        event.preventDefault();
-        toggleQuality();
-      } else if (event.key.toLowerCase() === 'a') {
-        event.preventDefault();
-        toggleArt();
-      } else if (event.key.toLowerCase() === 'h') {
-        event.preventDefault();
-        toggleChrome();
-      } else if (event.key.toLowerCase() === 'p') {
-        event.preventDefault();
-        cyclePalette();
-      } else if (event.key.toLowerCase() === 'r' && event.shiftKey) {
-        event.preventDefault();
-        void saveReplayClip();
-      } else if (event.key.toLowerCase() === 'r') {
-        event.preventDefault();
-        cycleReactivity();
-      } else if (event.key.toLowerCase() === 'v') {
-        event.preventDefault();
-        toggleAutoVj();
-      } else if (event.key.toLowerCase() === 'l') {
-        event.preventDefault();
-        togglePerfTier();
-      } else if (event.key.toLowerCase() === 'f') {
-        event.preventDefault();
-        toggleNativeFullscreen();
-      } else if (event.key === '?') {
-        event.preventDefault();
+  // The handler is rebuilt every render and called through a ref, so the
+  // toggles it reaches never run on a stale closure.
+  function handleKeyDown(event: KeyboardEvent): void {
+    const target = event.target;
+    const kind = keyTargetKind(target);
+    // ArrowLeft and ArrowRight step the presets, except where something else
+    // is using them: a focused slider, or the right-click menu.
+    const action = resolveVisualizerKey({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      altKey: event.altKey,
+      altGraph: event.getModifierState('AltGraph'),
+      arrowsOwned: isInsideMenu(target) || kind === 'slider',
+    });
+    if (!action) return;
+    const inStage = keyTargetInStage(target, rootRef.current, [document.body, document.documentElement]);
+    if (!visualizerTakesKey(action, kind, inStage)) return;
+    event.preventDefault();
+    // Holding a key down repeats it; only the arrows are meant to.
+    if (event.repeat && !isRepeatableVisualizerAction(action)) return;
+    switch (action) {
+      // The arrows step the modes; the brackets are the menu's Next and
+      // Previous look.
+      case 'preset-next': if (event.key === ']') stepLook(1); else cyclePreset(1); break;
+      case 'preset-previous': if (event.key === '[') stepLook(-1); else cyclePreset(-1); break;
+      case 'quality': toggleQuality(); break;
+      case 'art': toggleArt(); break;
+      case 'chrome': toggleChrome(); break;
+      case 'palette': cyclePalette(); break;
+      case 'reactivity': cycleReactivity(); break;
+      case 'replay-clip': void saveReplayClip(); break;
+      case 'lite': togglePerfTier(); break;
+      case 'auto-vj': toggleAutoVj(); break;
+      case 'native-fullscreen': toggleNativeFullscreen(); break;
+      case 'help':
+        setMenu(null);
         setOpenPanel((p) => (p === 'help' ? null : 'help'));
-      } else if (event.key === 'Escape') {
-        // Progressive Esc: close an open popover first; otherwise exit the
-        // visualizer entirely.
-        event.preventDefault();
-        if (openPanel) {
-          setOpenPanel(null);
-        } else {
-          exitVisualizer();
-        }
-      }
+        break;
+      case 'escape':
+        // Progressive Esc: the menu, then an open popover, then the
+        // visualizer itself.
+        if (menu) setMenu(null);
+        else if (openPanel) setOpenPanel(null);
+        else exitVisualizer();
+        break;
     }
+  }
+  const keyHandlerRef = useLatestRef(handleKeyDown);
+  useEffect(() => {
     // Capture phase, so the keys this handler owns (and prevents) are
     // settled before the app-wide shortcuts see them: Esc with a popover
-    // open closes the popover, not the whole visualizer.
+    // open closes the popover, not the whole visualizer. Keys with a
+    // modifier, and the app-wide L (love) and V (stop), are not ours.
+    const onKeyDown = (event: KeyboardEvent): void => keyHandlerRef.current(event);
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [activeIndex, openPanel]);
+  }, []);
 
   // Mouse wheel anywhere over the fullscreen visualizer drives volume.
   // Outside the viz this has no effect — wheel still scrolls the page
   // normally. Restricted to the fullscreen viz so it doesn't hijack
   // scrolling in the library views.
-  // The base is read from the store at event time, not from the last
-  // render: wheel events outrun React, and adding to a stale value stalls.
+  // The shared handler reads the volume from the store at event time, so
+  // events that outrun React still add up.
   useEffect(() => {
     function onWheel(event: WheelEvent): void {
-      if (isEditableTarget(event.target)) return;
-      // Don't fight existing wheel handlers (preset rail, volume slider
-      // input). If the event target is inside an interactive control that
-      // already wheel-binds, let it own the event.
-      if (
-        event.target instanceof Element &&
-        event.target.closest('input, select, [data-newamp-viz-volume-input]')
-      ) return;
-      event.preventDefault();
-      const delta = wheelVolumeDelta(event);
-      if (delta === 0) return;
-      const store = usePlayerStore.getState();
-      void store.setVolume(clampVolume(store.volume + delta));
+      // Don't fight existing wheel handlers (preset rail, other inputs). If
+      // the event target is inside an interactive control that already
+      // wheel-binds, let it own the event. The hover meter's volume input is
+      // the exception: it has no handler of its own, so this non-passive one
+      // owns its wheel too.
+      const meter =
+        event.target instanceof Element ? event.target.closest('[data-newamp-viz-volume-input]') : null;
+      if (!meter && isEditableTarget(event.target)) return;
+      handlePlayerWheel(event, meter ? 'fullscreen-meter' : 'fullscreen');
     }
     // Bind on the root via ref — keeps the listener attached to the
     // exact DOM node React owns instead of a CSS-selector lookup that
@@ -593,7 +669,7 @@ export function FullscreenVisualizer(): JSX.Element {
   const autoVjActivePresetRef = useLatestRef(activePreset);
   const autoVjIsPlayingRef = useLatestRef(isPlaying);
   const autoVjPerfTierRef = useLatestRef(perfTier);
-  const autoVjSetPresetRef = useLatestRef(setPreset);
+  const autoVjSetPresetRef = useLatestRef(pickPreset);
   useEffect(() => {
     if (!autoVjEnabled) return undefined;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
@@ -605,7 +681,7 @@ export function FullscreenVisualizer(): JSX.Element {
     const tick = (now: number) => {
       if (autoVjIsPlayingRef.current) {
         engine.getFreqData(freq);
-        const energy = visualizerEnergy(freq);
+        const energy = visualizerEnergy(freq, engine.getSampleRate(), engine.fftSize);
         const elapsed = now - lastSwitchAt;
         if (elapsed > 14000 && (energy > 0.42 || elapsed > 30000)) {
           const currentPreset = autoVjActivePresetRef.current;
@@ -800,7 +876,8 @@ export function FullscreenVisualizer(): JSX.Element {
       flashClipStatus('Replay is only armed on the Eviland Live preset (and above Lite tier).');
       return;
     }
-    if (savingClip) return;
+    if (savingClipRef.current) return;
+    savingClipRef.current = true;
     setSavingClip(true);
     try {
       const blob = await entry.ring.saveClip();
@@ -830,6 +907,7 @@ export function FullscreenVisualizer(): JSX.Element {
       console.error('[newamp] replay clip save failed:', err);
       flashClipStatus('Saving the clip failed — see the console for details.');
     } finally {
+      savingClipRef.current = false;
       setSavingClip(false);
     }
   }
@@ -1099,6 +1177,67 @@ export function FullscreenVisualizer(): JSX.Element {
     setRecording(true);
   };
 
+  // Look controls for the right-click menu. "Look" is whatever is on screen:
+  // on the Eviland modes Next and Previous ask the Director, elsewhere they
+  // step between modes, as does the mode list; Randomize mints a fresh
+  // Eviland look, or picks another mode elsewhere; Lock holds the look by
+  // switching off what would change it on its own (the Director on the Eviland
+  // modes, Auto-VJ everywhere).
+  const lookState = {
+    eviland: activePreset === 'eviland' || activePreset === 'eviland-live',
+    director: evilandDirector,
+    autoVj: autoVjEnabled,
+  };
+  const lookLocked = isLookLocked(lookState);
+
+  function menuEntries(): VisualizerMenuEntry[] {
+    const modes = PRESET_GROUPS.flatMap((group): VisualizerMenuEntry[] => [
+      { type: 'heading', label: group.label },
+      ...PRESETS.filter((p) => p.group === group.id).map(
+        (p): VisualizerMenuEntry => ({
+          type: 'item',
+          id: `mode:${p.id}`,
+          label: p.label,
+          checked: activePreset === p.id,
+          radio: true,
+          onSelect: () => pickPreset(p.id),
+        }),
+      ),
+    ]);
+    return [
+      { type: 'heading', label: PRESETS.find((p) => p.id === activePreset)?.label ?? 'Visualizer' },
+      { type: 'item', id: 'next', label: 'Next look', hint: ']', onSelect: () => stepLook(1) },
+      // Only the Director keeps a history to go back through.
+      {
+        type: 'item',
+        id: 'previous',
+        label: 'Previous look',
+        hint: '[',
+        disabled: lookState.eviland && !evilandDirector,
+        onSelect: () => stepLook(-1),
+      },
+      { type: 'item', id: 'randomize', label: 'Randomize', onSelect: randomizeLook },
+      {
+        type: 'item',
+        id: 'lock',
+        label: 'Lock look',
+        hint: lookLocked ? undefined : autoVjEnabled ? 'Auto-VJ on' : 'Director on',
+        checked: lookLocked,
+        onSelect: () => {
+          const next = toggleLookLock(lookState);
+          if (next.autoVj !== autoVjEnabled) toggleAutoVj();
+          if (next.director !== evilandDirector) toggleEvilandDirector();
+        },
+      },
+      { type: 'separator' },
+      { type: 'submenu', id: 'mode', label: 'Mode', entries: modes },
+      { type: 'item', id: 'browse', label: 'Browse all modes…', onSelect: () => setOpenPanel('preset') },
+      { type: 'item', id: 'settings', label: 'Settings…', onSelect: () => setOpenPanel('settings') },
+      { type: 'separator' },
+      { type: 'item', id: 'exit', label: 'Exit visualizer', hint: 'Esc', onSelect: exitVisualizer },
+    ];
+  }
+
   return (
     <div
       ref={rootRef}
@@ -1114,12 +1253,21 @@ export function FullscreenVisualizer(): JSX.Element {
       data-newamp-visualizer-art={artPulseEnabled ? (artPulseVisible ? 'pulse' : 'armed') : 'hidden'}
       data-newamp-native-fullscreen={nativeFullscreen ? 'true' : 'false'}
       className="fullscreen-viz-root fixed inset-0 z-[90] flex items-center justify-center bg-black"
-      onDoubleClick={toggleNativeFullscreen}
+      role="region"
+      aria-label="Visualizer"
+      tabIndex={-1}
+      // Only the bare stage: a double-click on the buttons, sliders, bars or
+      // panels (the hover meter resets to 100% instead) must not flip the window.
+      onDoubleClick={(e) => {
+        if (isStageTarget(e.target)) toggleNativeFullscreen();
+      }}
       onContextMenu={(e) => {
-        // Right-click anywhere: the visualizer menu, like a Winamp vis
-        // window. Esc and the ✕ are the way out.
+        // Right-click anywhere but on a control: the visualizer menu, at the
+        // pointer, like a Winamp vis window. Esc and the ✕ are the way out.
         e.preventDefault();
-        setOpenPanel((p) => (p ? null : 'preset'));
+        if (!opensVisualizerMenu(e.target)) return;
+        setOpenPanel(null);
+        setMenu({ x: e.clientX, y: e.clientY });
       }}
     >
       {activePreset === 'album-breathe' ? (
@@ -1213,11 +1361,7 @@ export function FullscreenVisualizer(): JSX.Element {
               } else {
                 // The headless producer feeds the projector regardless of which
                 // preset is on-screen, so we no longer force-switch to 'eviland'.
-                // Also drop the fullscreen overlay: on a single monitor the new
-                // window otherwise opens BEHIND NewAmp's fullscreen viz and looks
-                // like nothing happened. The producer keeps feeding it after exit.
-                detached.open(detachedDisplayId ?? undefined);
-                exitVisualizer();
+                openProjector();
               }
             }}
             disabled={detached.busy}
@@ -1281,8 +1425,20 @@ export function FullscreenVisualizer(): JSX.Element {
         />
       )}
 
+      {menu !== null && (
+        <VisualizerMenu
+          key={`${menu.x},${menu.y}`}
+          at={menu}
+          entries={menuEntries()}
+          onClose={() => setMenu(null)}
+          fallbackFocus={rootRef}
+        />
+      )}
+
       {openPanel === 'preset' && (
         <div
+          ref={panelRef}
+          tabIndex={-1}
           className="viz-popover viz-preset-picker pointer-events-auto"
           role="dialog"
           aria-label="Pick visualizer preset"
@@ -1332,6 +1488,8 @@ export function FullscreenVisualizer(): JSX.Element {
 
       {openPanel === 'settings' && (
         <div
+          ref={panelRef}
+          tabIndex={-1}
           className="viz-popover viz-settings-panel pointer-events-auto"
           role="dialog"
           aria-label="Visualizer settings"
@@ -1381,13 +1539,22 @@ export function FullscreenVisualizer(): JSX.Element {
           </div>
 
           <div className="viz-setting-row">
-            <div className="viz-setting-label">Reactivity</div>
+            <div className="viz-setting-label">
+              {activePreset === 'butterchurn' ? (
+                <>
+                  Signal gain
+                  <div className="viz-setting-hint">On plain MilkDrop this scales the drawn waveform only</div>
+                </>
+              ) : (
+                'Reactivity'
+              )}
+            </div>
             <button
               type="button"
               className="pxbtn viz-setting-cycle"
               onClick={cycleReactivity}
               title="Cycle visualizer signal response (R)"
-              aria-label={`Reactivity ${REACTIVITY_MODES.find((item) => item.id === reactivity)?.label ?? 'Punch'} — click to cycle`}
+              aria-label={`${activePreset === 'butterchurn' ? 'Signal gain' : 'Reactivity'} ${REACTIVITY_MODES.find((item) => item.id === reactivity)?.label ?? 'Punch'} — click to cycle`}
             >
               <span>{REACTIVITY_MODES.find((item) => item.id === reactivity)?.label ?? 'Punch'}</span>
               <span className="viz-setting-hint">cycle</span>
@@ -1546,68 +1713,6 @@ export function FullscreenVisualizer(): JSX.Element {
                   ))}
                 </div>
               </div>
-
-              {detached.available && (
-                <div className="viz-setting-row" data-newamp-viz-eviland-detach-row>
-                  <div className="viz-setting-label">
-                    Detached window
-                    <div className="viz-setting-hint">
-                      {detached.error
-                        ? detached.error
-                        : detached.isOpen
-                          ? 'Eviland is playing in its own window — drag it to a 2nd monitor or projector'
-                          : 'Pop Eviland out into its own window for a second monitor'}
-                    </div>
-                  </div>
-                  <div className="viz-setting-capture-buttons">
-                    {detached.displays.length > 1 && (
-                      <select
-                        className="pxbtn"
-                        value={detachedDisplayId ?? ''}
-                        onChange={(e) => {
-                          const id = e.target.value ? Number(e.target.value) : null;
-                          setDetachedDisplayId(id);
-                          if (detached.isOpen && id !== null) detached.moveToDisplay(id);
-                        }}
-                        aria-label="Detached visualizer display"
-                        data-newamp-viz-eviland-detach-display
-                      >
-                        <option value="">Auto (2nd display)</option>
-                        {detached.displays.map((d) => (
-                          <option key={d.id} value={d.id}>
-                            {d.label}
-                            {d.primary ? ' (primary)' : ''}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    <button
-                      type="button"
-                      className={`pxbtn ${detached.isOpen ? 'is-active' : ''}`}
-                      onClick={() => {
-                        if (detached.isOpen) {
-                          detached.close();
-                        } else {
-                          // Exit the fullscreen overlay so the projector is
-                          // visible (single-monitor); the producer keeps feeding it.
-                          detached.open(detachedDisplayId ?? undefined);
-                          exitVisualizer();
-                        }
-                      }}
-                      disabled={detached.busy}
-                      title={
-                        detached.isOpen
-                          ? 'Close the detached visualizer window'
-                          : 'Open Eviland in its own window'
-                      }
-                      aria-pressed={detached.isOpen}
-                      data-newamp-viz-eviland-detach
-                    >
-                      {detached.busy ? '…' : detached.isOpen ? 'Close' : '⧉ Detach'}
-                    </button>
-                  </div>
-                </div>
-              )}
             </>
           )}
 
@@ -1637,6 +1742,61 @@ export function FullscreenVisualizer(): JSX.Element {
               {nativeFullscreen ? 'On' : 'Off'}
             </button>
           </div>
+
+          {detached.available && (
+            <div className="viz-setting-row" data-newamp-viz-projector-row>
+              <div className="viz-setting-label">
+                Projector
+                <div className="viz-setting-hint">
+                  {detached.error
+                    ? detached.error
+                    : detached.isOpen
+                      ? 'Eviland Live is playing in its own window — drag it to a 2nd monitor or projector'
+                      : 'Eviland Live in its own window, for a second monitor or projector'}
+                </div>
+              </div>
+              <div className="viz-setting-capture-buttons">
+                {detached.displays.length > 1 && (
+                  <select
+                    className="pxbtn"
+                    value={detachedDisplayId ?? ''}
+                    onChange={(e) => {
+                      const id = e.target.value ? Number(e.target.value) : null;
+                      setDetachedDisplayId(id);
+                      if (detached.isOpen && id !== null) detached.moveToDisplay(id);
+                    }}
+                    aria-label="Projector display"
+                    data-newamp-viz-projector-display
+                  >
+                    <option value="">Auto (2nd display)</option>
+                    {detached.displays.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.label}
+                        {d.primary ? ' (primary)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <button
+                  type="button"
+                  className={`pxbtn ${detached.isOpen ? 'is-active' : ''}`}
+                  onClick={() => {
+                    if (detached.isOpen) {
+                      detached.close();
+                    } else {
+                      openProjector();
+                    }
+                  }}
+                  disabled={detached.busy}
+                  title={detached.isOpen ? 'Close the projector window' : 'Open Eviland Live in its own window'}
+                  aria-pressed={detached.isOpen}
+                  data-newamp-viz-projector-toggle
+                >
+                  {detached.busy ? '…' : detached.isOpen ? 'Close' : '⧉ Detach'}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="viz-setting-row">
             <div className="viz-setting-label">
@@ -1727,6 +1887,8 @@ export function FullscreenVisualizer(): JSX.Element {
 
       {openPanel === 'help' && (
         <div
+          ref={panelRef}
+          tabIndex={-1}
           className="viz-popover viz-help-panel pointer-events-auto"
           role="dialog"
           aria-label="Keyboard shortcuts"
@@ -1744,28 +1906,31 @@ export function FullscreenVisualizer(): JSX.Element {
             </button>
           </div>
           <dl className="viz-help-list">
-            <div><dt><kbd>‹</kbd> <kbd>›</kbd> <span className="viz-help-or">or</span> <kbd>[</kbd> <kbd>]</kbd></dt><dd>Previous / next preset</dd></div>
+            <div><dt><kbd>←</kbd> <kbd>→</kbd> <span className="viz-help-or">or</span> <kbd>[</kbd> <kbd>]</kbd></dt><dd>Previous / next mode</dd></div>
             <div><dt><kbd>Q</kbd></dt><dd>Toggle 4K render quality</dd></div>
-            <div><dt><kbd>L</kbd></dt><dd>Toggle Lite (low-end) mode</dd></div>
+            <div><dt><kbd>Shift</kbd> <kbd>L</kbd></dt><dd>Toggle Lite (low-end) mode</dd></div>
             <div><dt><kbd>A</kbd></dt><dd>Album-art overlay</dd></div>
             <div><dt><kbd>P</kbd></dt><dd>Cycle color palette</dd></div>
             <div><dt><kbd>R</kbd></dt><dd>Cycle reactivity (Truth / Punch / Wild)</dd></div>
+            <div><dt><kbd>Shift</kbd> <kbd>R</kbd></dt><dd>Save the last 15 seconds (Eviland Live)</dd></div>
+            <div><dt><kbd>Shift</kbd> <kbd>V</kbd></dt><dd>Auto-VJ (auto-switch scenes)</dd></div>
             <div><dt><kbd>Shift</kbd> <kbd>S</kbd></dt><dd>Surf app skins (visuals re-tint live)</dd></div>
-            <div><dt><kbd>V</kbd></dt><dd>Auto-VJ (auto-switch scenes)</dd></div>
             <div><dt><kbd>F</kbd></dt><dd>Native fullscreen</dd></div>
             <div><dt><kbd>H</kbd></dt><dd>Hide controls (cinema mode)</dd></div>
+            <div><dt><kbd>L</kbd></dt><dd>Love / unlove the current track</dd></div>
+            <div><dt><kbd>V</kbd></dt><dd>Stop playback</dd></div>
             <div><dt><kbd>?</kbd></dt><dd>This help</dd></div>
-            <div><dt><kbd>Esc</kbd></dt><dd>Close popover, then exit visualizer</dd></div>
+            <div><dt><kbd>Esc</kbd></dt><dd>Close the menu or popover, then exit the visualizer</dd></div>
             <div><dt>Scroll wheel</dt><dd>Volume up / down (Shift = bigger steps)</dd></div>
-            <div><dt>Double-click</dt><dd>Toggle fullscreen / windowed</dd></div>
+            <div><dt>Double-click</dt><dd>Toggle fullscreen / windowed (on the volume meter: 100%)</dd></div>
             <div><dt>Right-click</dt><dd>Visualizer menu</dd></div>
-            <div><dt><kbd>Esc</kbd></dt><dd>Exit visualizer</dd></div>
           </dl>
         </div>
       )}
 
       <div
         className={`fullscreen-viz-now pointer-events-auto absolute inset-x-0 bottom-0 flex flex-col gap-2 px-8 pb-8 pt-16 ${chromeVisible ? '' : `is-cinema ${nowActive ? 'is-revealed' : ''}`}`}
+        data-newamp-viz-now
         onMouseEnter={() => setNowActive(true)}
         style={{
           background: 'linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.85) 100%)',
@@ -1820,6 +1985,9 @@ export function FullscreenVisualizer(): JSX.Element {
       <div
         className="fullscreen-viz-hover-meter pointer-events-auto absolute right-6 top-1/2 w-[160px] -translate-y-1/2"
         data-newamp-viz-hover-meter
+        // Double-click anywhere on the meter: back to 100%, like every other
+        // volume control.
+        onDoubleClick={() => void setVolume(1)}
       >
         <div className="fullscreen-viz-hover-meter-label">
           <span>VOL</span>
@@ -1846,14 +2014,8 @@ export function FullscreenVisualizer(): JSX.Element {
               const raw = Number(event.target.value);
               if (Number.isFinite(raw)) void setVolume(Math.max(0, Math.min(2, raw / 100)));
             }}
-            onWheel={(event) => {
-              const delta = wheelVolumeDelta(event);
-              if (delta === 0) return;
-              const store = usePlayerStore.getState();
-              void store.setVolume(clampVolume(store.volume + delta));
-            }}
             aria-label="Visualizer volume"
-            title={`Volume ${volumeLabel(volume)} — drag or scroll to change`}
+            title={`Volume ${volumeLabel(volume)} — drag or scroll to change, double-click for 100%`}
           />
         </div>
       </div>
@@ -1971,24 +2133,6 @@ async function stampCaptureWordmark(dataUrl: string): Promise<string> {
   } catch {
     return dataUrl;
   }
-}
-
-function visualizerEnergy(freq: Uint8Array): number {
-  if (!freq.length) return 0;
-  const low = averageBand(freq, 0, 36) / 255;
-  const mid = averageBand(freq, 36, 180) / 255;
-  const high = averageBand(freq, 180, 420) / 255;
-  return Math.min(1, Math.pow(low * 0.48 + mid * 0.36 + high * 0.16, 0.72));
-}
-
-function averageBand(freq: Uint8Array, from: number, to: number): number {
-  let total = 0;
-  let count = 0;
-  for (let index = from; index < to && index < freq.length; index += 1) {
-    total += freq[index]!;
-    count += 1;
-  }
-  return count ? total / count : 0;
 }
 
 function pickAutoVjPreset(current: VisualizerPreset, energy: number, perfTier: VizPerformance): VisualizerPreset {

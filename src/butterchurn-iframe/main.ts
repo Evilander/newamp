@@ -8,11 +8,14 @@ import {
   type BcFrameMessage,
   type BcParentMessage,
 } from './protocol';
+import { retuneButterchurnBands } from './band-tuning';
+import { applyConfig, createActivityTracker, fitCanvasSize, paintsFromMessage, type HostConfig } from './host-policy';
 import { createEvilandLivePipeline, type LiveCompositionFrame } from '../visualizer/eviland-live-pipeline';
 import { createLivePresetLoader } from '../visualizer/eviland-live-presets';
 import { hashSeed } from '../visualizer/eviland-rng';
 import { createGovernor } from '../visualizer/eviland-governor';
 import { attachFlashGuard, type AttachedFlashGuard } from '../visualizer/flash-guard-host';
+import { createCadenceGate, measureDisplayRefresh, requestPacedFrame } from '../lib/pacedFrame';
 
 interface ButterchurnVisualizer {
   loadPreset(preset: Record<string, unknown>, blendSeconds?: number): void;
@@ -57,19 +60,31 @@ function presetSwitchCost(preset: Record<string, unknown>): number {
   return cost;
 }
 
+// Butterchurn rejects rates outside this range (its audio context is offline
+// and exists only to report a rate), so a rate is clamped before it is used.
+function clampRate(sampleRate: number): number {
+  return Math.max(8000, Math.min(96000, Math.round(sampleRate) || 44100));
+}
+
 let visualizer: ButterchurnVisualizer | null = null;
 // Photosensitivity limiter on every frame this canvas shows, plain MilkDrop
 // and Eviland Live alike, in the main window and the projector. It follows
 // the Settings toggle through this origin's localStorage.
 let flashGuard: AttachedFlashGuard | null = null;
 let liveMode = false;
-let liveQuality: 'high' | 'medium' | 'low' = 'high';
+// What the parent last said about the display, the tier and the sample rate.
+// Changes after init arrive as 'config' messages.
+const hostConfig: HostConfig = { dpr: 1, maxPixels: Infinity, quality: 'high', sampleRate: 44100 };
 let livePipeline: ReturnType<typeof createEvilandLivePipeline> = null;
+// Compiles the next preset's shaders without stalling the page, for plain
+// MilkDrop rotation and Eviland Live alike. Null when Butterchurn's renderer
+// is not shaped the way it expects, and presets then load synchronously.
 let livePresetLoader: ReturnType<typeof createLivePresetLoader> = null;
 let latestComposition: LiveCompositionFrame | null = null;
 // Seconds Butterchurn blends two presets when the Live Director changes look.
 const LIVE_BLEND_SECONDS = 4.5;
 let loadLivePreset: (() => void) | null = null;
+let rebuildLivePipeline: (() => void) | null = null;
 let lastCompositionKey = '';
 let presets: Array<[string, Record<string, unknown>]> = [];
 // Equation and shader source length provide a cheap preset-cost estimate.
@@ -80,17 +95,15 @@ let presetWeights: number[] = [];
 let presetOrder: number[] = [];
 let lastAudioPostAt = 0;
 let presetTimer: number | null = null;
-let raf = 0;
-// One paint at the governed cadence. Normally driven by rAF; the audio message
-// handler calls it too when rAF has been starved (see STARVED_PAINT_MS).
-let paintTick: ((now: number) => void) | null = null;
-// Chromium stops rAF for an occluded window. The detached projector keeps
-// receiving timer-driven audio while covered, so paint from the message at a
-// slow rate: MilkDrop's feedback keeps evolving and the window is never a
-// stale frame when it is uncovered again.
-const STARVED_PAINT_MS = 250;
+let cancelFrame: () => void = () => {};
+// One paint at the governed cadence, if one is due. Driven by the paced
+// animation-frame loop and by the audio message handler (see
+// paintsFromMessage). Returns whether it painted.
+let paintTick: (() => boolean) | null = null;
+// performance.now() of the last animation frame this loop ran in. While they
+// keep arriving the compositor is presenting this page.
+let lastFrameAt = 0;
 let mountedAt = 0;
-let dpr = 1;
 let disposed = false;
 let started = false;
 let haveAudio = false;
@@ -102,25 +115,31 @@ const latestTime = new Uint8Array(BUTTERCHURN_FFT_SIZE);
 // rate. On a 144Hz display that's 3–5x more MilkDrop work than the parent's
 // 30–45fps paint cadence can even show, and it kept burning at full rate
 // while playback was paused. Now: a 45fps cap while audio is live, a 20fps
-// idle glide when the analyser has been byte-flat for a few seconds (the
-// parent keeps posting flatline bytes while paused, so "no messages" never
-// fires — flatness is the real pause signal), and a measured-cost governor
-// that steps the render DPR down when this machine can't hold the cadence.
+// idle glide once the track has been quiet for a few seconds (the parent keeps
+// posting flatline bytes while paused, so "no messages" never fires), and a
+// measured-cost governor that steps the render DPR down when this machine
+// can't hold the cadence.
 let lastPaintAt = 0;
-// performance.now() when byte-flat audio began; -1 while audio is live.
-let silentSince = -1;
 const IDLE_AFTER_MS = 3000;
 const LIVE_FRAME_MS = 1000 / 45;
 const IDLE_FRAME_MS = 1000 / 20;
+const activity = createActivityTracker(IDLE_AFTER_MS);
 // MilkDrop is the star of this mode — give it a bigger budget than the
 // overlay layers get in the parent before trimming resolution.
 const gov = createGovernor({ costBudgetMs: 10 });
+const cadence = createCadenceGate(() =>
+  gov.intervalMs(activity.idle(performance.now()) ? IDLE_FRAME_MS : LIVE_FRAME_MS),
+);
 
 function sizeCanvas(): void {
   if (!canvas) return;
-  const effDpr = dpr * gov.scale();
-  const w = Math.max(8, Math.floor((canvas.clientWidth || 640) * effDpr));
-  const h = Math.max(8, Math.floor((canvas.clientHeight || 360) * effDpr));
+  const { width: w, height: h } = fitCanvasSize(
+    canvas.clientWidth || 640,
+    canvas.clientHeight || 360,
+    hostConfig.dpr,
+    hostConfig.maxPixels,
+    gov.scale(),
+  );
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
@@ -128,7 +147,7 @@ function sizeCanvas(): void {
   }
 }
 
-async function start(sampleRate: number): Promise<void> {
+async function start(): Promise<void> {
   if (started || disposed || !canvas) return;
   started = true;
   try {
@@ -174,7 +193,9 @@ async function start(sampleRate: number): Promise<void> {
     const OfflineCtx =
       window.OfflineAudioContext ||
       (window as unknown as { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext;
-    const rate = Math.max(8000, Math.min(96000, Math.round(sampleRate) || 44100));
+    // The rate may have changed while the catalog loaded, before there was a
+    // renderer to retune.
+    const rate = clampRate(hostConfig.sampleRate);
     const audioCtx = new OfflineCtx(1, rate, rate);
 
     sizeCanvas();
@@ -224,15 +245,31 @@ async function start(sampleRate: number): Promise<void> {
       return presetOrder[lo + Math.floor(Math.random() * (hi - lo))]!;
     };
 
-    // Plain MilkDrop retains its existing load path. Live uses the same typed
-    // megabuffer build patch plus the asynchronous shader loader below.
+    // Loads at once, compiling on this thread. For the first preset (nothing
+    // is on screen yet) and as the recovery when the asynchronous loader's
+    // switch fails half way.
     const loadRandomPreset = (blendSeconds: number): void => {
       if (disposed || !visualizer) return;
       const [, preset] = presets[pickIndex()]!;
       try { visualizer.loadPreset(preset, blendSeconds); } catch { /* bad preset, skip */ }
     };
+    // Rotation: the loader compiles the next preset's shaders without
+    // stalling the page while the current one keeps drawing, and the paint
+    // loop adopts it once it is ready. A warp and comp compile on the page's
+    // own thread freezes the UI for tens to hundreds of ms.
+    let rotationSerial = 0;
+    const rotateToRandomPreset = (blendSeconds: number): void => {
+      if (disposed || !visualizer) return;
+      if (!livePresetLoader) {
+        loadRandomPreset(blendSeconds);
+        return;
+      }
+      const [name, preset] = presets[pickIndex()]!;
+      livePresetLoader.request(preset, `${name}#${rotationSerial++}`, blendSeconds);
+    };
+    livePresetLoader = createLivePresetLoader(visualizer, () => loadRandomPreset(LIVE_BLEND_SECONDS));
     if (liveMode) {
-      livePipeline = createEvilandLivePipeline(visualizer, liveQuality);
+      livePipeline = createEvilandLivePipeline(visualizer, hostConfig.quality);
       if (!livePipeline) {
         // Butterchurn's private renderer isn't shaped the way the adapter
         // expects. Plain MilkDrop with its own rotation beats a dead frame.
@@ -241,7 +278,6 @@ async function start(sampleRate: number): Promise<void> {
       }
     }
     if (liveMode && livePipeline) {
-      livePresetLoader = createLivePresetLoader(visualizer, () => loadRandomPreset(LIVE_BLEND_SECONDS));
       // In Live the Director owns preset changes: one preset per look, chosen
       // by hash so a track's sections map to the same presets on every play.
       // Same light-half bias as the random rotation (see pickIndex).
@@ -264,6 +300,20 @@ async function start(sampleRate: number): Promise<void> {
         if (livePresetLoader) livePresetLoader.request(presets[index]![1], key, LIVE_BLEND_SECONDS);
         else try { visualizer.loadPreset(presets[index]![1], LIVE_BLEND_SECONDS); } catch { loadRandomPreset(LIVE_BLEND_SECONDS); }
       };
+      // The tier changed after init (the projector moved to another display):
+      // the pipeline's passes and simulations are sized by it, so it is built
+      // again. Falls back to plain MilkDrop like a failed init does.
+      rebuildLivePipeline = () => {
+        if (!visualizer) return;
+        livePipeline?.dispose();
+        livePipeline = createEvilandLivePipeline(visualizer, hostConfig.quality);
+        if (livePipeline) {
+          if (latestComposition) livePipeline.update(latestComposition);
+        } else {
+          console.warn('[butterchurn-iframe] Eviland feedback integration lost on a tier change; running plain MilkDrop');
+          liveMode = false;
+        }
+      };
       if (latestComposition) {
         livePipeline.update(latestComposition);
         loadLivePreset();
@@ -274,22 +324,24 @@ async function start(sampleRate: number): Promise<void> {
       loadRandomPreset(0);
     }
 
+    // Plain MilkDrop rotates on a timer. In Live the Director owns changes.
     const scheduleRotation = (): void => {
       if (presetTimer != null) window.clearInterval(presetTimer);
       // Skip a rotation tick when the page is hidden OR the parent stopped
       // sending audio (track paused) — compiling a preset nobody can see is
       // wasted CPU.
       presetTimer = window.setInterval(() => {
+        if (liveMode && livePipeline) return;
         if (!pageVisible) return;
         if (performance.now() - lastAudioPostAt > 1500) return; // parent gone
         // Paused playback: the parent still posts (flatline) audio, so the
         // check above never fires — but compiling a preset nobody hears is a
-        // 50–80MB allocation storm + GC pause every 22s. Skip while silent.
-        if (silentSince >= 0 && performance.now() - silentSince > IDLE_AFTER_MS) return;
-        loadRandomPreset(2.0);
+        // 50–80MB allocation storm + GC pause every 22s. Skip while quiet.
+        if (activity.idle(performance.now())) return;
+        rotateToRandomPreset(2.0);
       }, 22000);
     };
-    if (!liveMode) scheduleRotation();
+    scheduleRotation();
 
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => {
@@ -306,12 +358,21 @@ async function start(sampleRate: number): Promise<void> {
     mountedAt = performance.now();
     post({ type: 'mounted' });
 
-    paintTick = (now: number): void => {
+    // The next animation frame is booked for when the next paint is due, and
+    // again after every paint, so a paint made from a message does not leave
+    // the earlier booking to wake the page for nothing.
+    const bookFrame = (): void => {
+      if (disposed) return;
+      cancelFrame();
+      cancelFrame = requestPacedFrame(frame, cadence.msUntilDue(performance.now()));
+    };
+    paintTick = (): boolean => {
       // Cadence cap: 45fps while audio is live, 20fps idle glide once the
-      // analyser has been byte-flat for a while (paused/stopped). The
-      // governor stretches the interval further at its fps-trim floor.
-      const idle = silentSince >= 0 && now - silentSince > IDLE_AFTER_MS;
-      if (now - lastPaintAt < gov.intervalMs(idle ? IDLE_FRAME_MS : LIVE_FRAME_MS)) return;
+      // track has been quiet for a while (paused/stopped). The governor
+      // stretches the interval further at its fps-trim floor.
+      const now = performance.now();
+      if (!cadence.due(now)) return false;
+      cadence.commit(now);
       const dtMs = lastPaintAt ? now - lastPaintAt : 1000 / 45;
       lastPaintAt = now;
       sizeCanvas();
@@ -338,13 +399,18 @@ async function start(sampleRate: number): Promise<void> {
       // switch it off.
       flashGuard?.apply(dtMs);
       gov.endFrame(now, performance.now() - renderStart);
+      bookFrame();
+      return true;
     };
-    const frame = (now: number): void => {
+    // Sleeps between paints instead of waking on every vsync to skip most of
+    // them.
+    measureDisplayRefresh();
+    function frame(): void {
       if (disposed) return;
-      raf = requestAnimationFrame(frame);
-      paintTick?.(now);
-    };
-    raf = requestAnimationFrame(frame);
+      lastFrameAt = performance.now();
+      if (!paintTick?.()) bookFrame();
+    }
+    cancelFrame = requestPacedFrame(frame, 0);
   } catch (err) {
     post({ type: 'failed', error: err instanceof Error ? err.message : String(err) });
   }
@@ -356,9 +422,18 @@ window.addEventListener('message', (event: MessageEvent) => {
   if (event.source !== parent) return;
   if (message.type === 'init') {
     liveMode = Boolean(message.eviland);
-    liveQuality = message.quality ?? 'high';
-    dpr = message.dpr > 0 ? message.dpr : 1;
-    void start(message.sampleRate);
+    hostConfig.quality = message.quality ?? 'high';
+    hostConfig.dpr = message.dpr > 0 ? message.dpr : 1;
+    hostConfig.maxPixels = message.maxPixels && message.maxPixels > 0 ? message.maxPixels : Infinity;
+    hostConfig.sampleRate = message.sampleRate;
+    void start();
+  } else if (message.type === 'config') {
+    const change = applyConfig(hostConfig, message);
+    // A new display usually has another refresh rate too.
+    if (change.dpr) measureDisplayRefresh(true);
+    if (change.dpr || change.maxPixels) sizeCanvas();
+    if (change.sampleRate) retuneButterchurnBands(visualizer, clampRate(hostConfig.sampleRate));
+    if (change.quality && liveMode) rebuildLivePipeline?.();
   } else if (message.type === 'audio') {
     if (liveMode && message.eviland) {
       latestComposition = message.eviland;
@@ -369,17 +444,18 @@ window.addEventListener('message', (event: MessageEvent) => {
       latestTime.set(message.samples.subarray(0, BUTTERCHURN_FFT_SIZE));
       haveAudio = true;
       lastAudioPostAt = performance.now();
-      // Pause detection: a paused/stopped analyser emits exactly-flat bytes
-      // (128 ±1). Real music — even a whisper-quiet passage — wobbles more.
-      // Track when flatness began; frame() idles the cadence after a dwell,
-      // so a brief digital-silence gap inside a track never drops frames.
+      // A paused analyser emits exactly-flat bytes (128 ±1), but so does a
+      // passage quieter than the 8-bit quantisation (about -39 dBFS). The
+      // parent says whether the track is playing; flat bytes only decide for
+      // a parent that doesn't. The quiet dwell is what slows the cadence, so
+      // a brief digital-silence gap inside a track never drops frames.
       let flat = true;
       for (let i = 0; i < BUTTERCHURN_FFT_SIZE; i += 1) {
         const b = latestTime[i]!;
         if (b < 127 || b > 129) { flat = false; break; }
       }
-      silentSince = flat ? (silentSince >= 0 ? silentSince : lastAudioPostAt) : -1;
-      if (paintTick && lastAudioPostAt - (lastPaintAt || mountedAt) > STARVED_PAINT_MS) paintTick(lastAudioPostAt);
+      activity.observe(lastAudioPostAt, flat, message.playing);
+      if (paintTick && paintsFromMessage(lastAudioPostAt, lastFrameAt, lastPaintAt || mountedAt)) paintTick();
     }
   } else if (message.type === 'dispose') {
     disposed = true;
@@ -390,8 +466,11 @@ window.addEventListener('message', (event: MessageEvent) => {
     livePipeline = null;
     flashGuard?.dispose();
     flashGuard = null;
-    cancelAnimationFrame(raf);
+    cancelFrame();
     if (presetTimer != null) window.clearInterval(presetTimer);
+    // This frame is about to navigate away; hand its GL context back now
+    // rather than when the document is collected.
+    try { canvas?.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext(); } catch { /* already gone */ }
   }
 });
 

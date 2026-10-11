@@ -50,8 +50,10 @@ export function WrappedLiveExport({ stats }: { stats: WrappedStats }): JSX.Eleme
     }
     sceneRef.current = scene;
 
-    // Audio bed: play the top track from the start and tap the engine's
-    // parallel visualizer node — the master graph is never touched.
+    // Audio bed: preview the top track from the start and tap the engine's
+    // parallel visualizer node — the master graph is never touched. The
+    // preview borrows the player without counting a play or replacing the
+    // queue; the finally block below puts the listener's queue back.
     let audioDest: MediaStreamAudioDestinationNode | null = null;
     let audioStream: MediaStream | undefined;
     const exclusiveConfigured =
@@ -73,7 +75,7 @@ export function WrappedLiveExport({ stats }: { stats: WrappedStats }): JSX.Eleme
       if (topId) {
         try {
           const track = await api.getTrack(topId);
-          if (track) await usePlayerStore.getState().playTrack(track);
+          if (track) await usePlayerStore.getState().previewTrack(track);
         } catch (err) {
           console.warn('[newamp] wrapped-live: top track playback failed, exporting silent', err);
         }
@@ -130,6 +132,7 @@ export function WrappedLiveExport({ stats }: { stats: WrappedStats }): JSX.Eleme
       setMessage('Export failed — see the console for details.');
     } finally {
       releaseAudio();
+      usePlayerStore.getState().endPreview();
       sceneRef.current = null;
       setPhase('idle');
       setProgress(0);
@@ -179,6 +182,7 @@ export function WrappedLiveExport({ stats }: { stats: WrappedStats }): JSX.Eleme
               visible is what keeps captureStream fed. */}
           <canvas
             ref={canvasRef}
+            aria-hidden="true"
             width={1080}
             height={1920}
             style={{
@@ -195,7 +199,7 @@ export function WrappedLiveExport({ stats }: { stats: WrappedStats }): JSX.Eleme
               Six chapters · 30 seconds · 1080×1920 — scored to
               {stats.topTracks[0] ? ` “${stats.topTracks[0].title}”` : ' your top track'} unless silent.
             </span>
-            <span>Starts playing your top track when export begins.</span>
+            <span>Plays your top track while it records, then puts your queue back.</span>
             {message && <span style={{ color: 'var(--ink-2)' }}>{message}</span>}
           </div>
         </div>

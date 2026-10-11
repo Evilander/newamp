@@ -1,18 +1,22 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import type { AudioEngine } from '../audio/engine';
 import {
   BUTTERCHURN_FFT_SIZE,
   type BcAudioMessage,
+  type BcConfigMessage,
   type BcDisposeMessage,
   type BcFrameMessage,
   type BcInitMessage,
 } from '../butterchurn-iframe/protocol';
+import { feedSampleRate, fillButterchurnSamples, waveGainFor } from '../butterchurn-iframe/feed';
 import { createParticleFlowRenderer } from '../visualizer/particle-flow';
 import { createEvilandRenderer, type EvilandPalette } from '../visualizer/eviland';
-import { liveGradeFor, resolveEvilandPalette, tuneEvilandFrame } from '../visualizer/eviland-appearance';
-import { createGovernor } from '../visualizer/eviland-governor';
+import { liveGradeFor, resolveEvilandPalette, sleeveFor, tuneEvilandFrame, type Sleeve } from '../visualizer/eviland-appearance';
+import { watchContextFallback } from '../visualizer/context-fallback';
+import { createLookRequestCursor } from '../visualizer/look-requests';
+import { createGovernor, type Governor } from '../visualizer/eviland-governor';
 import { createEvilandReactor } from '../visualizer/eviland-audio';
 import { createDirector } from '../visualizer/eviland-director';
 import {
@@ -22,7 +26,7 @@ import {
 import { applyWaveformOverride, cloneConfig, stripTransitionMeta, type OperatorConfig } from '../visualizer/eviland-operators';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from '../visualizer/eviland-memory-bridge';
 import { createEngineScoreFeed } from '../visualizer/eviland-score-feed';
-import { blendPaletteWithArt, extractArtPalette, type ArtPalette } from '../visualizer/art-palette';
+import { extractArtPalette } from '../visualizer/art-palette';
 import {
   publishActiveBridge,
   acquireBridgeForTrack,
@@ -40,8 +44,24 @@ import {
   guardCanvas2d,
   type AttachedFlashGuard,
 } from '../visualizer/flash-guard-host';
+import { bandEnd, logBandEdges, createSampleRateWatch } from '../visualizer/band-edges';
+import {
+  LATTICE_BASE_DIVISOR,
+  avg,
+  boostFrequencyData,
+  createAudioFeatureAnalyzer,
+  createPhaseClock,
+  settleLatticeDivisor,
+  type SpectrumReactivity,
+} from '../visualizer/viz-features';
 import { api } from '../lib/api';
-import { AMBIENT_FRAME_MS, PACED_FRAME_SLACK_MS, requestPacedFrame } from '../lib/pacedFrame';
+import {
+  AMBIENT_FRAME_MS,
+  PACED_FRAME_SLACK_MS,
+  createCadenceGate,
+  startPacedLoop,
+  watchDisplayChange,
+} from '../lib/pacedFrame';
 
 export type VizMode =
   | 'mini'
@@ -112,7 +132,7 @@ export function detectPerformanceTier(): VizPerformance {
   return (detectedTier = score >= 2 ? 'balanced' : 'low');
 }
 export type VizPalette = 'look' | 'theme' | 'phosphor' | 'ice' | 'sunset' | 'rainbow';
-export type VizReactivity = 'truth' | 'punch' | 'wild';
+export type VizReactivity = SpectrumReactivity;
 
 interface Props {
   mode: VizMode;
@@ -131,30 +151,47 @@ type FrameGate = ((now: number) => boolean) & {
   msUntilDue(now: number): number;
 };
 
+// How often the achieved paint rate is written to the canvas.
+const FPS_WINDOW_MS = 2000;
+
 function createFrameGate(
   canvasRef: RefObject<HTMLCanvasElement>,
   frameIntervalMs: number | (() => number),
   // Paced loops wake slightly before they are due; accept frames that early.
   slackMs = 0,
+  // Loops that wake on the shared 30 Hz grid book their frames on it.
+  gridMs?: number,
 ): FrameGate {
-  let lastPaintAt = 0;
-  const intervalOf = () =>
-    (typeof frameIntervalMs === 'function' ? frameIntervalMs() : frameIntervalMs) - slackMs;
+  // The cadence gate books frames from a schedule and takes them up to half a
+  // refresh early, so 45 fps lands on 45 on a 60 Hz display instead of 30.
+  const cadence = createCadenceGate(frameIntervalMs, { slackMs, gridMs });
+  let fpsFrames = 0;
+  let fpsSince = 0;
   const gate = (now: number) => {
     // A function interval re-reads per frame so the Auto-Pilot governor can
     // stretch the cadence live without tearing down the render loop. Checked
     // before any layout read: rAF runs at display refresh (up to 165 Hz+), and
     // clientWidth on a frame where style is dirty forces a synchronous
     // style+layout pass for the whole document.
-    if (now - lastPaintAt < intervalOf()) return false;
+    if (!cadence.due(now)) return false;
     const node = canvasRef.current;
     if (!node || !node.isConnected || document.hidden) return false;
     if (node.clientWidth <= 0 || node.clientHeight <= 0) return false;
-    lastPaintAt = now;
+    cadence.commit(now);
+    // Observability breadcrumb: the rate this canvas is really painting at.
+    if (!fpsSince) fpsSince = now;
+    else {
+      fpsFrames += 1;
+      if (now - fpsSince >= FPS_WINDOW_MS) {
+        node.setAttribute('data-newamp-fps', ((fpsFrames * 1000) / (now - fpsSince)).toFixed(1));
+        fpsFrames = 0;
+        fpsSince = now;
+      }
+    }
     return true;
   };
   return Object.assign(gate, {
-    msUntilDue: (now: number) => Math.max(0, intervalOf() - (now - lastPaintAt)),
+    msUntilDue: (now: number) => cadence.msUntilDue(now),
   });
 }
 
@@ -171,6 +208,12 @@ export function Visualizer({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const butterchurnIframeRef = useRef<HTMLIFrameElement>(null);
   const engine = usePlayerStore((s) => s.engine);
+  // The renderer's GPU context was taken and did not come back (see
+  // watchContextFallback): the surface it happened on. That surface paints with
+  // the 2D fallback from then on, until the mode or tier changes.
+  const surfaceKey = `${mode}-${quality}-${performance}`;
+  const [fellBackFrom, setFellBackFrom] = useState<string | null>(null);
+  const glFellBack = fellBackFrom === surfaceKey;
   // Eviland-only state mirrored into a ref so the rAF loop can read live values
   // without restarting on every toggle. The loop reads `evilandStateRef.current`
   // each frame; the ref updates in a tiny effect below. This is the same
@@ -216,16 +259,24 @@ export function Visualizer({
       ? 1000 / 30
       : quality === '4k' ? 1000 / 30 : 1000 / 45
     : 1000 / 30;
+  // '4K' is the 3840x2160 budget at the display's own pixel ratio, up to 2x.
+  // Every renderer at this tier runs under a cost governor that trims it back
+  // on a machine that cannot hold the cadence: Eviland's and the MilkDrop
+  // frame's own, and the one the other modes are given below. The MilkDrop
+  // frame is also told the pixel budget, since it sizes itself.
   const dprCap = isFullscreen
     ? performance === 'low'
       ? 0.75
-      : quality === '4k' ? 1.25 : 1
+      : quality === '4k' ? 2 : 1
     : 2;
   const maxPixels = isFullscreen
     ? performance === 'low'
       ? 1_050_000
-      : quality === '4k' ? 4_200_000 : 2_100_000
+      : quality === '4k' ? 8_300_000 : 2_100_000
     : 2_000_000;
+  // The other modes have no governor of their own at the lower budgets, which
+  // they stay within; at this one they get the same trim as Eviland.
+  const fourK = isFullscreen && performance !== 'low' && quality === '4k';
   // Whether this surface can ever cover enough of the screen for a flash to
   // be a hazard (HAZARD_AREA in visualizer/flash-guard.ts). The transport
   // meter and the smallest deck windows can't, and skip the flash guard.
@@ -252,24 +303,16 @@ export function Visualizer({
       // Director and posts the look for each frame.
       const iframe = butterchurnIframeRef.current;
       if (!iframe) return;
-      let raf = 0;
-      let fallbackRaf = 0;
+      let fallbackCancel = () => {};
       let disposed = false;
       let ready = false;
       let mounted = false;
 
-      const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
+      const currentDpr = (): number => Math.min(window.devicePixelRatio || 1, dprCap);
+      const dpr = currentDpr();
       const canPaint = createFrameGate(canvasRef, frameIntervalMs);
       const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
       const samples = new Uint8Array(BUTTERCHURN_FFT_SIZE);
-      // butterchurn wants 1024 time-domain samples; the engine analyser is 2048.
-      // Decimate by an integer stride to cover the same window at half rate.
-      const stride = Math.max(1, Math.floor(engine.fftSize / BUTTERCHURN_FFT_SIZE));
-      // Mild pre-emphasis (~1.4x with soft-clip) so butterchurn's internal FFT
-      // sees the same hotter signal the canvas modes get via boostFrequencyData.
-      // Without this butterchurn reads raw -86..-10 dBFS bytes and reacts
-      // noticeably less to transients than every other visualizer mode.
-      const PREEMPHASIS = 1.4;
 
       // --- Eviland Live: audio analysis + Director for the iframe's pipeline ---
       const liveMode = mode === 'eviland-live';
@@ -278,10 +321,13 @@ export function Visualizer({
       const ovOnsetFreq = liveMode ? new Uint8Array(new ArrayBuffer(binCount)) : null;
       const ovLeftFreq = liveMode ? new Uint8Array(new ArrayBuffer(binCount)) : null;
       const ovRightFreq = liveMode ? new Uint8Array(new ArrayBuffer(binCount)) : null;
-      const ovReactor = liveMode
+      let ovReactor = liveMode
         ? createEvilandReactor({ sampleRate: engine.getSampleRate(), fftSize: engine.fftSize, binCount })
         : null;
+      // Bit-Perfect output can move the device to another rate between tracks.
+      const rateChanged = createSampleRateWatch(() => engine.getSampleRate(), engine.getSampleRate());
       const liveDirector = liveMode ? createDirector({ songId: 'eviland-live' }) : null;
+      const lookRequests = createLookRequestCursor();
       // Look-ahead cues from the track's song score (sections on the bar
       // line, builds, drops, key changes). No-op until a score is available.
       const liveScoreFeed = liveMode ? createEngineScoreFeed(engine, () => usePlayerStore.getState().current) : null;
@@ -291,11 +337,11 @@ export function Visualizer({
       let overlayLastNow = 0;
       // One palette for the whole composition — theme base re-read ~1x/sec on
       // the paint cadence and change-gated, so a skin change re-tints the
-      // running image WITHOUT tearing down the stage. Blended per-track with
-      // the album art's dominant colors (async, best-effort); the extracted
-      // art palette is cached so a theme change re-blends instead of
-      // refetching. The toolbar's palette choice is applied on top of this in
-      // updateComposition().
+      // running image WITHOUT tearing down the stage. The album art's dominant
+      // colors (async, best-effort, cached by URL) go in through the sleeve:
+      // resolveEvilandPalette blends them into the theme and turns half the
+      // looks toward them. The toolbar's palette choice is applied on top of
+      // this in updateComposition().
       const readThemePalette = (): EvilandPalette => ({
         accent: parseRgbVec(getCssVar('--accent')),
         dark: parseRgbVec(getCssVar('--accent-dim', getCssVar('--accent'))),
@@ -303,30 +349,25 @@ export function Visualizer({
         bg: parseRgbVec(getCssVar('--bg', '#05060a'), [0.02, 0.024, 0.04]),
       });
       let themePalette = readThemePalette();
-      let ovPalette = themePalette;
-      let ovArt: ArtPalette | null = null;
+      const sleeve: Sleeve = { art: null, seed: '' };
+      let sleeveArt: Sleeve['art'] = null;
       let themeTick = 0;
       const refreshThemePalette = (): void => {
         if (themeTick++ % 30 !== 0) return;
         const next = readThemePalette();
         if (evilandPaletteEquals(next, themePalette)) return;
         themePalette = next;
-        ovPalette = ovArt ? blendPaletteWithArt(themePalette, ovArt) : themePalette;
       };
       let artTrackId: number | null | undefined = undefined;
       const refreshArtPalette = (): void => {
         const tid = usePlayerStore.getState().current?.id ?? null;
         if (tid === artTrackId) return;
         artTrackId = tid;
-        ovArt = null;
-        ovPalette = themePalette;
+        sleeveArt = null;
         if (tid == null) return;
         const captured = tid;
         void extractArtPalette(api.getArtUrl(tid)).then((art) => {
-          if (artTrackId === captured && art) {
-            ovArt = art;
-            ovPalette = blendPaletteWithArt(themePalette, art);
-          }
+          if (artTrackId === captured && art) sleeveArt = art;
         });
       };
       // Lineage-aware scene seed. The bare `track-<id>` key applies instantly
@@ -375,10 +416,18 @@ export function Visualizer({
           liveNonce = ui.nonce;
           liveConfig = (ui.seed && decodeEvilandConfig(ui.seed)) || generateEvilandConfig(ui.seed ?? sceneSeedValue).config;
         }
+        lookRequests.drain(liveDirector, ui.director);
         const config = ui.director ? liveDirector.update(rawFrame, dt) : liveConfig;
         latestLive = {
           frame: tuneEvilandFrame(rawFrame, tuningRef.current.reactivity),
-          palette: resolveEvilandPalette(tuningRef.current.palette, ovPalette, now / 1000, rawFrame.score?.keyShift, config.palette),
+          palette: resolveEvilandPalette(
+            tuningRef.current.palette,
+            themePalette,
+            now / 1000,
+            rawFrame.score?.keyShift,
+            config.palette,
+            sleeveFor(config, sleeveArt, sleeve),
+          ),
           // The iframe blends presets itself; the fade's two full looks would
           // only triple every frame's message. It still gets the slim look the
           // fade is heading to, so it prepares that look as the fade begins.
@@ -393,19 +442,22 @@ export function Visualizer({
       // The iframe guards its own output (butterchurn-iframe/main.ts); this
       // painter only runs when the frame couldn't host MilkDrop.
       let fallbackPainter: ReturnType<typeof createFallbackPainter> | null = null;
+      let fallbackStarted = false;
       const startFallback = () => {
-        if (fallbackRaf) return;
-        iframe.style.display = 'none';
+        if (fallbackStarted) return;
         const node = canvasRef.current;
         if (!node) return;
+        fallbackStarted = true;
+        iframe.style.display = 'none';
         const painter = createFallbackPainter(node, engine);
         fallbackPainter = painter;
-        const fb = (now: number) => {
-          if (disposed) return;
-          if (canPaint(now)) painter.paint(now);
-          fallbackRaf = requestAnimationFrame(fb);
-        };
-        fallbackRaf = requestAnimationFrame(fb);
+        // The frame is gone, so there is nobody to feed. The painter gets its
+        // own gate: sharing the pump's would leave it every slot already taken.
+        stopPump();
+        fallbackCancel = startPacedLoop(createFrameGate(canvasRef, frameIntervalMs), (now) => painter.paint(now), {
+          retryMs: frameIntervalMs,
+          rescue: true,
+        });
       };
 
       const onMessage = (event: MessageEvent) => {
@@ -416,8 +468,11 @@ export function Visualizer({
           ready = true;
           const init: BcInitMessage = {
             type: 'init',
-            sampleRate: engine.getSampleRate(),
+            // The rate of the samples the pump sends, which is the device
+            // rate unless it is above what the iframe accepts.
+            sampleRate: feedSampleRate(engine.getSampleRate()),
             dpr,
+            maxPixels,
             eviland: liveMode,
             quality: performance === 'low' ? 'low' : quality === '4k' ? 'high' : 'medium',
           };
@@ -437,35 +492,35 @@ export function Visualizer({
       // Resume the AudioContext so the analyser produces real bytes.
       if (engine.ctx.state === 'suspended') void engine.ctx.resume().catch(() => {});
 
-      const pump = (now: number) => {
-        if (disposed) return;
-        const paint = canPaint(now);
-        if (paint && liveMode) updateComposition(now);
-        if (ready && paint) {
-          // Read from the unsmoothed onset analyser tap so transients reach
-          // butterchurn on the same frame they happen (the smoothed analyser
-          // would lag ~1.3 frames). Then apply mild pre-emphasis: center,
-          // amplify by PREEMPHASIS, tanh-style soft clip back into 0..255.
-          // Result: kicks punch harder inside butterchurn's internal FFT
-          // without distortion artifacts.
-          engine.getOnsetTimeData(wave);
-          // The reactivity control reaches MilkDrop through this gain: 'truth'
-          // is the raw signal, 'wild' drives its FFT harder.
-          const reactivityNow = tuningRef.current.reactivity;
-          const preemphasis = reactivityNow === 'truth' ? 1 : reactivityNow === 'wild' ? 2 : PREEMPHASIS;
-          for (let i = 0; i < BUTTERCHURN_FFT_SIZE; i++) {
-            const centered = ((wave[i * stride] ?? 128) - 128) / 128;
-            const lifted = centered * preemphasis;
-            // Soft-clip via x / (1 + |x|) — keeps the waveform shape, no harsh wrap.
-            const clipped = lifted / (1 + Math.abs(lifted));
-            samples[i] = 128 + Math.round(clipped * 127);
-          }
-          const audio: BcAudioMessage = { type: 'audio', samples, eviland: latestLive };
-          iframe.contentWindow?.postMessage(audio, '*');
-        }
-        raf = requestAnimationFrame(pump);
+      const postConfig = (config: Omit<BcConfigMessage, 'type'>): void => {
+        if (ready) iframe.contentWindow?.postMessage({ type: 'config', ...config } satisfies BcConfigMessage, '*');
       };
-      raf = requestAnimationFrame(pump);
+      // A window dragged onto a display with another pixel ratio renders at
+      // the new one instead of keeping the ratio it started with.
+      const stopDisplayWatch = watchDisplayChange(() => postConfig({ dpr: currentDpr() }));
+
+      const pump = (now: number) => {
+        // The reactor's band map and MilkDrop's band edges both follow the
+        // sample rate; both are told when Bit-Perfect output changes it.
+        const newRate = rateChanged(now);
+        if (newRate) {
+          if (liveMode) ovReactor = createEvilandReactor({ sampleRate: newRate, fftSize: engine.fftSize, binCount });
+          postConfig({ sampleRate: feedSampleRate(newRate) });
+        }
+        if (liveMode) updateComposition(now);
+        if (!ready) return;
+        // The window comes from the unsmoothed onset analyser tap so
+        // transients reach butterchurn on the same frame they happen (the
+        // smoothed analyser would lag ~1.3 frames). The reactivity control
+        // reaches MilkDrop as a linear gain on it, limited at full scale.
+        engine.getOnsetTimeData(wave);
+        fillButterchurnSamples(wave, samples, waveGainFor(tuningRef.current.reactivity), engine.getSampleRate());
+        const audio: BcAudioMessage = { type: 'audio', samples, eviland: latestLive, playing: engine.getState().playing };
+        iframe.contentWindow?.postMessage(audio, '*');
+      };
+      // Feeds the frame from a timer if animation frames stop while the page
+      // still reports itself visible: the iframe paints from these messages.
+      const stopPump = startPacedLoop(canPaint, pump, { retryMs: frameIntervalMs, rescue: true });
 
       // dev: http://localhost:5173/butterchurn-iframe.html
       // prod: newamp-app://app/butterchurn-iframe.html
@@ -483,8 +538,9 @@ export function Visualizer({
 
       return () => {
         disposed = true;
-        cancelAnimationFrame(raf);
-        cancelAnimationFrame(fallbackRaf);
+        stopPump();
+        stopDisplayWatch();
+        fallbackCancel();
         window.clearTimeout(mountTimeout);
         window.removeEventListener('message', onMessage);
         fallbackPainter?.dispose();
@@ -516,25 +572,32 @@ export function Visualizer({
       // from resize stays rare.
       const gov = createGovernor({ costBudgetMs: isFullscreen ? 12 : 8 });
       const canPaint = createFrameGate(canvasRef, () => gov.intervalMs(frameIntervalMs));
-      const baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
-      let raf = 0;
+      let baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
+      const stopDisplayWatch = watchDisplayChange(() => {
+        baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
+      });
+      // A context the GPU takes is asked back and the renderer rebuilds on it.
+      // If it has not come back in a few seconds the surface paints with the
+      // 2D fallback instead (the canvas stays bound to WebGL, so React swaps it
+      // for a new one: see surfaceKey).
+      const contextWatch = watchContextFallback(() => setFellBackFrom(surfaceKey));
       // Only where its output can be flash-guarded: asked before the renderer
       // binds this canvas, so the guarded 2D fallback can still draw on it.
-      const renderer = gpuFlashGuardSupported() ? createEvilandRenderer(canvas, { quality: evilandQuality, smoke }) : null;
+      const renderer = gpuFlashGuardSupported() && !glFellBack
+        ? createEvilandRenderer(canvas, { quality: evilandQuality, smoke, onContextEvent: contextWatch.onEvent })
+        : null;
       // Photosensitivity limiter on the finished frame, in the renderer's own
       // context. A renderer whose output can't be guarded doesn't run.
       const flashGuard = renderer ? attachFlashGuard(canvas.getContext('webgl2'), canvas) : null;
 
       if (!renderer || !flashGuard) {
         renderer?.dispose();
+        contextWatch.dispose();
         const painter = createFallbackPainter(canvas, engine);
-        const fb = (now: number) => {
-          if (canPaint(now)) painter.paint(now);
-          raf = requestAnimationFrame(fb);
-        };
-        raf = requestAnimationFrame(fb);
+        const stopFallback = startPacedLoop(canPaint, (now) => painter.paint(now), { retryMs: frameIntervalMs, rescue: true });
         return () => {
-          cancelAnimationFrame(raf);
+          stopFallback();
+          stopDisplayWatch();
           painter.dispose();
         };
       }
@@ -548,11 +611,13 @@ export function Visualizer({
       // tap size the renderer expects; reuse one buffer across the lifetime of
       // the effect to keep the hot path allocation-free.
       const evWave = new Uint8Array(256);
-      const reactor = createEvilandReactor({
+      let reactor = createEvilandReactor({
         sampleRate: engine.getSampleRate(),
         fftSize: engine.fftSize,
         binCount,
       });
+      // Bit-Perfect output can move the device to another rate between tracks.
+      const rateChanged = createSampleRateWatch(() => engine.getSampleRate(), engine.getSampleRate());
       const scoreFeed = createEngineScoreFeed(engine, () => usePlayerStore.getState().current);
       let lastNow = 0;
       if (engine.ctx.state === 'suspended') void engine.ctx.resume().catch(() => {});
@@ -572,6 +637,21 @@ export function Visualizer({
       });
       let palette = readPalette();
       let paletteTick = 0;
+      // The cover's colours for the current track (async, best-effort, cached
+      // by URL). resolveEvilandPalette takes them through the sleeve, the same
+      // way Eviland Live and the projector do.
+      const sleeve: Sleeve = { art: null, seed: '' };
+      let sleeveArt: Sleeve['art'] = null;
+      let artTrackId: number | null | undefined = undefined;
+      const refreshArtPalette = (trackId: number | null): void => {
+        if (trackId === artTrackId) return;
+        artTrackId = trackId;
+        sleeveArt = null;
+        if (trackId == null) return;
+        void extractArtPalette(api.getArtUrl(trackId)).then((art) => {
+          if (artTrackId === trackId && art) sleeveArt = art;
+        });
+      };
 
       // ── Eviland AI Director + manual look state ───────────────────────────
       // The Director morphs the operator config across song sections; manual
@@ -630,6 +710,7 @@ export function Visualizer({
         if (bridge !== originalBridge) return;
         if (plan) director.loadPlan(plan);
       });
+      const lookRequests = createLookRequestCursor();
       let lastAppliedNonce = -1;
       let lastTrackId: number | null = initial.trackId;
       let manualConfig: OperatorConfig | null = null;
@@ -650,11 +731,11 @@ export function Visualizer({
 
 
       const loop = (now: number) => {
-        raf = requestAnimationFrame(loop);
-        if (!canPaint(now)) return;
         // NOTE: `performance` is the component's tier prop in this scope —
         // the clock must be window.performance.
         const renderStart = window.performance.now();
+        const newRate = rateChanged(now);
+        if (newRate) reactor = createEvilandReactor({ sampleRate: newRate, fftSize: engine.fftSize, binCount });
         const node = canvasRef.current;
         if (node) {
           const cssW = node.clientWidth || 100;
@@ -683,6 +764,7 @@ export function Visualizer({
         // Live UI state (director toggle, randomize nonce, waveform override).
         // Read via ref — no per-frame React subscription, no rAF restart.
         const ui = evilandStateRef.current;
+        refreshArtPalette(ui.trackId);
         if (ui.trackId !== lastTrackId) {
           // Track change: release the OLD bridge from the keyed cache (this
           // flushes-and-disposes it asynchronously — we don't await), reset
@@ -744,10 +826,13 @@ export function Visualizer({
         }
         lastSectionReturn = evFrame.sectionReturn;
 
+        // Skips pressed while a manual look is up are dropped, not saved.
+        if (!ui.director) lookRequests.drain(director, false);
         if (ui.director) {
           // Director owns the config: it produces a fresh OperatorConfig each
           // frame (a smoothstep crossfade between section looks). Push it to
           // the renderer every frame so live audio reactivity stays current.
+          lookRequests.drain(director, true);
           const directed = director.update(evFrame, dtMs);
           renderer.setConfig(applyWaveformOverride(directed, ui.waveMode));
           // Reset manual tracking so the next director→off flip re-applies
@@ -775,12 +860,14 @@ export function Visualizer({
           if (node) {
             const snap = gov.snapshot();
             node.setAttribute('data-newamp-gov', `${snap.verdict}@${snap.scale}`);
+            node.setAttribute('data-newamp-render-size', `${node.width}x${node.height}`);
           }
         }
         try {
+          const look = renderer.getConfig();
           renderer.render(
             tuneEvilandFrame(evFrame, tuningRef.current.reactivity),
-            resolveEvilandPalette(tuningRef.current.palette, palette, now / 1000, evFrame.score?.keyShift, renderer.getConfig().palette),
+            resolveEvilandPalette(tuningRef.current.palette, palette, now / 1000, evFrame.score?.keyShift, look.palette, sleeveFor(look, sleeveArt, sleeve)),
             dtMs,
             'host',
           );
@@ -793,10 +880,13 @@ export function Visualizer({
         }
         gov.endFrame(now, window.performance.now() - renderStart);
       };
-      raf = requestAnimationFrame(loop);
+      // Sleeps between paints instead of waking on every vsync to skip most of
+      // them. The next wake-up is booked before a frame is drawn.
+      const stopLoop = startPacedLoop(canPaint, loop, { retryMs: frameIntervalMs });
 
       return () => {
-        cancelAnimationFrame(raf);
+        stopLoop();
+        stopDisplayWatch();
         flashGuard?.dispose();
         // Finding #6 fix: do NOT flushAndDispose here. The registry's keyed
         // cache holds the bridge across same-track remounts (quality/
@@ -809,7 +899,9 @@ export function Visualizer({
         // true track-change via releaseBridgeForTrack() above.
         publishActiveBridge(null);
         scoreFeed.dispose();
+        contextWatch.dispose();
         renderer.dispose();
+        releaseGlContext(canvas);
       };
     }
 
@@ -823,9 +915,12 @@ export function Visualizer({
         : isFullscreen
           ? quality === '4k' ? 140_000 : 110_000
           : 60_000;
-      const canPaint = createFrameGate(canvasRef, frameIntervalMs);
-      const baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
-      let raf = 0;
+      const gov = fourK ? createGovernor({ costBudgetMs: 12 }) : null;
+      const canPaint = createFrameGate(canvasRef, gov ? () => gov.intervalMs(frameIntervalMs) : frameIntervalMs);
+      let baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
+      const stopDisplayWatch = watchDisplayChange(() => {
+        baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
+      });
       // Only where its output can be flash-guarded; the guarded 2D fallback
       // below is the alternative.
       const renderer = gpuFlashGuardSupported() ? createParticleFlowRenderer(canvas, { particles: particleBudget, smoke }) : null;
@@ -834,13 +929,10 @@ export function Visualizer({
       if (!renderer || !flashGuard) {
         renderer?.dispose();
         const painter = createFallbackPainter(canvas, engine);
-        const fb = (now: number) => {
-          if (canPaint(now)) painter.paint(now);
-          raf = requestAnimationFrame(fb);
-        };
-        raf = requestAnimationFrame(fb);
+        const stopFallback = startPacedLoop(canPaint, (now) => painter.paint(now), { retryMs: frameIntervalMs, rescue: true });
         return () => {
-          cancelAnimationFrame(raf);
+          stopFallback();
+          stopDisplayWatch();
           painter.dispose();
         };
       }
@@ -848,10 +940,12 @@ export function Visualizer({
       const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
       const onsetFreq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
       const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
-      const analyze = createAudioFeatureAnalyzer({
-        sampleRate: engine.getSampleRate(),
+      let analyzedRate = engine.getSampleRate();
+      let analyze = createAudioFeatureAnalyzer({
+        sampleRate: analyzedRate,
         fftSize: engine.fftSize,
       });
+      const rateChanged = createSampleRateWatch(() => engine.getSampleRate(), analyzedRate);
       let lastNow = 0;
       if (engine.ctx.state === 'suspended') void engine.ctx.resume().catch(() => {});
 
@@ -861,40 +955,47 @@ export function Visualizer({
       let accentTick = 0;
 
       const frame = (now: number) => {
-        if (canPaint(now)) {
-          const node = canvasRef.current;
-          if (node) {
-            const cssW = node.clientWidth || 100;
-            const cssH = node.clientHeight || 100;
-            const fit = Math.min(1, Math.sqrt(maxPixels / Math.max(1, cssW * baseDpr * cssH * baseDpr)));
-            renderer.resize(cssW, cssH, baseDpr * fit);
-          }
-          engine.getFreqData(freq);
-          engine.getOnsetFreqData(onsetFreq);
-          engine.getTimeData(wave);
-          boostFrequencyData(freq, tuningRef.current.reactivity);
-          const f = analyze(freq, wave, onsetFreq);
-          const dt = lastNow ? (now - lastNow) / 1000 : 1 / 60;
-          lastNow = now;
-          if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
-          try {
-            renderer.render(
-              { bass: f.bass, mid: f.mid, treble: f.treble, rms: f.rms, beat: f.beat, kick: f.kick, beatEdge: f.beatEdge },
-              accentVec,
-              dt,
-            );
-          } finally {
-            flashGuard?.apply(dt * 1000);
-          }
+        // `performance` is the component's tier prop in this scope.
+        const renderStart = window.performance.now();
+        const node = canvasRef.current;
+        if (node) {
+          const cssW = node.clientWidth || 100;
+          const cssH = node.clientHeight || 100;
+          const fit = Math.min(1, Math.sqrt(maxPixels / Math.max(1, cssW * baseDpr * cssH * baseDpr)));
+          renderer.resize(cssW, cssH, baseDpr * fit * (gov?.scale() ?? 1));
         }
-        raf = requestAnimationFrame(frame);
+        const newRate = rateChanged(now);
+        if (newRate) {
+          analyzedRate = newRate;
+          analyze = createAudioFeatureAnalyzer({ sampleRate: newRate, fftSize: engine.fftSize });
+        }
+        engine.getFreqData(freq);
+        engine.getOnsetFreqData(onsetFreq);
+        engine.getTimeData(wave);
+        boostFrequencyData(freq, tuningRef.current.reactivity, analyzedRate / engine.fftSize);
+        const f = analyze(freq, wave, onsetFreq);
+        const dt = lastNow ? (now - lastNow) / 1000 : 1 / 60;
+        lastNow = now;
+        if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
+        try {
+          renderer.render(
+            { bass: f.bass, mid: f.mid, treble: f.treble, rms: f.rms, beat: f.beat, kick: f.kick, beatEdge: f.beatEdge },
+            accentVec,
+            dt,
+          );
+        } finally {
+          flashGuard?.apply(dt * 1000);
+          gov?.endFrame(now, window.performance.now() - renderStart);
+        }
       };
-      raf = requestAnimationFrame(frame);
+      const stopLoop = startPacedLoop(canPaint, frame, { retryMs: frameIntervalMs });
 
       return () => {
-        cancelAnimationFrame(raf);
+        stopLoop();
+        stopDisplayWatch();
         flashGuard?.dispose();
         renderer.dispose();
+        releaseGlContext(canvas);
       };
     }
 
@@ -908,12 +1009,16 @@ export function Visualizer({
         frameIntervalMs,
         dprCap,
         maxPixels,
+        governor: fourK ? createGovernor({ costBudgetMs: 12 }) : null,
+        paced: true,
       });
       if (cleanup) return cleanup;
     }
 
-    const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
-    let cancelNext = () => {};
+    let dpr = Math.min(window.devicePixelRatio || 1, dprCap);
+    const stopDisplayWatch = watchDisplayChange(() => {
+      dpr = Math.min(window.devicePixelRatio || 1, dprCap);
+    });
     let ctx: CanvasRenderingContext2D | null = null;
     // The painters draw on `surface.paint`: offscreen when the frame is
     // presented through the GPU flash guard on this canvas, else this canvas.
@@ -925,19 +1030,39 @@ export function Visualizer({
     // At the ambient rate this loop shares Resonance's 30 Hz grid, so both
     // land in the same animation frame.
     const onAmbientGrid = frameIntervalMs >= AMBIENT_FRAME_MS - 1;
-    const canPaint = createFrameGate(canvasRef, frameIntervalMs, onAmbientGrid ? PACED_FRAME_SLACK_MS : 0);
-    const analyzeFeatures = createAudioFeatureAnalyzer({
-      sampleRate: engine.getSampleRate(),
+    const gov = fourK ? createGovernor({ costBudgetMs: 12 }) : null;
+    const canPaint = createFrameGate(
+      canvasRef,
+      gov ? () => gov.intervalMs(frameIntervalMs) : frameIntervalMs,
+      onAmbientGrid ? PACED_FRAME_SLACK_MS : 0,
+      onAmbientGrid ? AMBIENT_FRAME_MS : undefined,
+    );
+    // The analysis and the bar edges are built for the sample rate in use, and
+    // again when Bit-Perfect output moves the device to another one.
+    let analyzedRate = engine.getSampleRate();
+    let analyzeFeatures = createAudioFeatureAnalyzer({
+      sampleRate: analyzedRate,
       fftSize: engine.fftSize,
     });
+    const rateChanged = createSampleRateWatch(() => engine.getSampleRate(), analyzedRate);
+    const barEdgeCache = new Map<number, Int32Array>();
+    const barEdges = (count: number): Int32Array => {
+      let edges = barEdgeCache.get(count);
+      if (!edges) {
+        edges = logBandEdges(analyzedRate, engine.fftSize, count);
+        barEdgeCache.set(count, edges);
+      }
+      return edges;
+    };
 
     function ensureSize() {
       const node = canvasRef.current;
       if (!node) return;
       const w = node.clientWidth || node.width || 100;
       const h = node.clientHeight || node.height || 40;
-      const scaledW = Math.max(2, Math.floor(w * dpr));
-      const scaledH = Math.max(2, Math.floor(h * dpr));
+      const drawDpr = dpr * (gov?.scale() ?? 1);
+      const scaledW = Math.max(2, Math.floor(w * drawDpr));
+      const scaledH = Math.max(2, Math.floor(h * drawDpr));
       const scale = Math.min(1, Math.sqrt(maxPixels / Math.max(1, scaledW * scaledH)));
       const targetW = Math.max(2, Math.floor(scaledW * scale));
       const targetH = Math.max(2, Math.floor(scaledH * scale));
@@ -945,6 +1070,7 @@ export function Visualizer({
       if (paint.width !== targetW || paint.height !== targetH) {
         paint.width = targetW;
         paint.height = targetH;
+        node.setAttribute('data-newamp-render-size', `${targetW}x${targetH}`);
       }
       ctx = paint.getContext('2d', { alpha: false });
       if (ctx) ctx.setTransform(targetW / Math.max(1, w), 0, 0, targetH / Math.max(1, h), 0, 0);
@@ -971,6 +1097,14 @@ export function Visualizer({
     let latticeFlip = 0;
     let latticeStrobe = 0;
     let lastLatticeBeat = 0;
+    let latticeDivisor = LATTICE_BASE_DIVISOR;
+
+    // Confetti: sweep angles integrated from real elapsed time. Multiplying a
+    // clock by the beat envelope moves every angle by clock x the change each
+    // frame, which is a scatter once the clock is large.
+    let confettiTime = 0;
+    let confettiBeatTime = 0;
+    let confettiLastAt = 0;
 
     // Radial / Tunnel / Orbital rotation accumulators — beat-driven instead of
     // wall-clock so the spin speed scales with the music, not real time.
@@ -1019,43 +1153,34 @@ export function Visualizer({
     const restsWhenStopped = mode === 'mini' || mode === 'spectrum';
     let stoppedSince = 0;
 
-    function scheduleNext(delayMs = canPaint.msUntilDue(window.performance.now())) {
-      cancelNext = requestPacedFrame(frame, delayMs, onAmbientGrid);
-    }
-
-    function frame(now: number) {
-      if (!canPaint(now)) {
-        // Not due yet: sleep the remainder. Due but unpaintable (zero-size or
-        // detached canvas): look again an interval later, not every vsync.
-        const wait = canPaint.msUntilDue(now);
-        scheduleNext(wait > 0 ? wait : frameIntervalMs);
-        return;
-      }
+    // Returns the delay before the next wake-up when it is not the cadence
+    // (the resting meter); the paced loop below books the rest.
+    function frame(now: number): number | void {
+      const renderStart = window.performance.now();
       if (restsWhenStopped) {
         if (engine.getState().playing) stoppedSince = 0;
         else if (!stoppedSince) stoppedSince = now;
         else if (now - stoppedSince > 1500) {
-          scheduleNext(250); // resumes within a quarter second of play
-          return;
+          return 250; // resumes within a quarter second of play
         }
       }
       ensureSize();
       const c = canvasRef.current;
-      if (!c) {
-        scheduleNext();
-        return;
-      }
+      if (!c) return;
       const w = c.clientWidth || c.width;
       const h = c.clientHeight || c.height;
-      if (!ctx) {
-        scheduleNext();
-        return;
-      }
+      if (!ctx) return;
 
+      const newRate = rateChanged(now);
+      if (newRate) {
+        analyzedRate = newRate;
+        barEdgeCache.clear();
+        analyzeFeatures = createAudioFeatureAnalyzer({ sampleRate: newRate, fftSize: engine.fftSize });
+      }
       engine.getFreqData(freq);
       engine.getOnsetFreqData(onsetFreq);
       engine.getTimeData(wave);
-      boostFrequencyData(freq, tuningRef.current.reactivity);
+      boostFrequencyData(freq, tuningRef.current.reactivity, analyzedRate / engine.fftSize);
       const features = analyzeFeatures(freq, wave, onsetFreq);
 
       if (themeTick++ % 30 === 0) {
@@ -1069,15 +1194,14 @@ export function Visualizer({
         ctx.fillStyle = 'rgba(0,0,0,0.45)';
         ctx.fillRect(0, 0, w, h);
 
-        // Band reduce — 32 bars from 64 lower bins
+        // Log-spaced bars over 30 Hz - 16 kHz, so the meter shows the whole
+        // spectrum instead of spending its first bars on bass, at any sample rate.
         const bars = mode === 'mini' ? 18 : 56;
-        const step = Math.floor(freq.length / 2 / bars);
+        const edges = barEdges(bars);
         const gap = mode === 'mini' ? 1 : 2;
         const bw = (w - gap * (bars - 1)) / bars;
         for (let i = 0; i < bars; i++) {
-          let sum = 0;
-          for (let j = 0; j < step; j++) sum += freq[i * step + j]!;
-          const v = sum / step / 255;
+          const v = avg(freq, edges[i]!, bandEnd(edges, i)) / 255;
           const bh = Math.max(1, v * h);
           const x = i * (bw + gap);
           const g = ctx.createLinearGradient(0, h - bh, 0, h);
@@ -1110,7 +1234,7 @@ export function Visualizer({
         ctx.fillRect(0, 0, w, h);
 
         // Compute energy bands
-        const bass = avg(freq, 0, 12) / 255;
+        const bass = avg(freq, 1, 12) / 255;
         const mid = avg(freq, 12, 60) / 255;
         const treble = avg(freq, 60, 180) / 255;
 
@@ -1118,7 +1242,7 @@ export function Visualizer({
         // shared analyzer — get an extra burst on top of the running average.
         const galaxyBeatBurst = features.beatEdge ? 14 : 0;
         const spawn = Math.floor(bass * 6 + mid * 2 + features.beat * 8 + galaxyBeatBurst);
-        const galaxyHueBase = (features.bass * 360 + features.beat * 140 + Date.now() / 120) % 360;
+        const galaxyHueBase = (features.bass * 360 + features.beat * 140 + now / 120) % 360;
         for (let i = 0; i < spawn; i++) {
           const angle = Math.random() * Math.PI * 2;
           const speed = 1 + bass * 8 + features.beat * 4 + Math.random() * 3;
@@ -1166,25 +1290,25 @@ export function Visualizer({
         if (treble > 0.08) {
           ctx.fillStyle = `rgba(255,255,255,${0.08 + treble * 0.32})`;
           for (let i = 0; i < 18; i += 1) {
-            const x = (Math.sin(Date.now() / 700 + i * 12.989) * 0.5 + 0.5) * w;
-            const y = (Math.sin(Date.now() / 920 + i * 78.233) * 0.5 + 0.5) * h;
+            const x = (Math.sin(now / 700 + i * 12.989) * 0.5 + 0.5) * w;
+            const y = (Math.sin(now / 920 + i * 78.233) * 0.5 + 0.5) * h;
             ctx.fillRect(x, y, 1 + treble * 3, 1 + treble * 3);
           }
         }
       } else if (mode === 'aurora') {
         ctx.fillStyle = 'rgba(0,0,0,0.16)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 22) / 255;
+        const bass = avg(freq, 1, 22) / 255;
         const mid = avg(freq, 22, 110) / 255;
         const treble = avg(freq, 110, 240) / 255;
         const bands = 9;
-        const t = Date.now() / 900;
+        const t = now / 900;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
         for (let b = 0; b < bands; b++) {
           const energy = avg(freq, b * 10, b * 10 + 18) / 255;
           const yc = h * (0.16 + 0.082 * b) + Math.sin(t + b * 0.78) * (18 + bass * 80);
-          const hue = (b * 36 + Date.now() / 34 + bass * 110) % 360;
+          const hue = (b * 36 + now / 34 + bass * 110) % 360;
           ctx.beginPath();
           for (let x = -12; x <= w + 12; x += 10) {
             const phase = x / (80 + b * 8) + t + b * 0.62;
@@ -1210,7 +1334,7 @@ export function Visualizer({
       } else if (mode === 'radial') {
         ctx.fillStyle = 'rgba(0,0,0,0.24)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 18) / 255;
+        const bass = avg(freq, 1, 18) / 255;
         const mid = avg(freq, 18, 86) / 255;
         const cx = w / 2;
         const cy = h / 2;
@@ -1248,7 +1372,7 @@ export function Visualizer({
       } else if (mode === 'tunnel') {
         ctx.fillStyle = 'rgba(0,0,0,0.2)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 24) / 255;
+        const bass = avg(freq, 1, 24) / 255;
         const cx = w / 2;
         const cy = h / 2;
         const rings = 26;
@@ -1280,7 +1404,7 @@ export function Visualizer({
         // anchor instead of drifting on the smoothed RMS curve.
         ctx.fillStyle = features.beat > 0.55 ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.18)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 14) / 255;
+        const bass = avg(freq, 1, 14) / 255;
         const mid = avg(freq, 14, 72) / 255;
         const treble = avg(freq, 72, 180) / 255;
         const cells = 14;
@@ -1289,7 +1413,7 @@ export function Visualizer({
         for (let y = -1; y < h / cellH + 1; y++) {
           for (let x = -1; x < cells + 1; x++) {
             const dist = Math.hypot(x - cells / 2, y - h / cellH / 2);
-            const wavePhase = Math.sin(dist * 0.9 - Date.now() / 180);
+            const wavePhase = Math.sin(dist * 0.9 - now / 180);
             const level = Math.max(0, wavePhase * 0.5 + 0.5) * (0.25 + bass * 0.55 + mid * 0.25);
             ctx.fillStyle = `rgba(${parseRgb(accent)}, ${0.05 + level * 0.42})`;
             ctx.fillRect(x * cellW + 1, y * cellH + 1, cellW - 2, cellH - 2);
@@ -1300,21 +1424,21 @@ export function Visualizer({
         ctx.beginPath();
         ctx.moveTo(0, h * (0.52 - bass * 0.18));
         for (let x = 0; x <= w; x += 8) {
-          const y = h / 2 + Math.sin(x / 28 + Date.now() / 140) * (18 + mid * 70);
+          const y = h / 2 + Math.sin(x / 28 + now / 140) * (18 + mid * 70);
           ctx.lineTo(x, y);
         }
         ctx.stroke();
       } else if (mode === 'orbital-rings') {
         ctx.fillStyle = 'rgba(0,0,0,0.15)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 22) / 255;
+        const bass = avg(freq, 1, 22) / 255;
         const lowMid = avg(freq, 22, 86) / 255;
         const highMid = avg(freq, 86, 168) / 255;
         const treble = avg(freq, 168, 280) / 255;
         const cx = w / 2;
         const cy = h / 2;
         const minSide = Math.min(w, h);
-        const time = Date.now();
+        const time = now;
         // Beat drives the master rotation so the rings push outward on kicks.
         orbitalRotation = (orbitalRotation + 0.002 + features.bass * 0.022 + (features.beatEdge ? 0.06 : 0)) % (Math.PI * 2);
 
@@ -1398,17 +1522,17 @@ export function Visualizer({
       } else if (mode === 'neon-waves') {
         ctx.fillStyle = 'rgba(0,0,0,0.16)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 18) / 255;
+        const bass = avg(freq, 1, 18) / 255;
         const mid = avg(freq, 18, 90) / 255;
         const treble = avg(freq, 90, 180) / 255;
-        const time = Date.now() / 420;
+        const time = now / 420;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
         for (let band = 0; band < 18; band += 1) {
           const energy = avg(freq, band * 6, band * 6 + 10) / 255;
           const yBase = h * (0.18 + band * 0.038);
           const amp = 10 + energy * 54 + bass * 52 + treble * 18;
-          const hue = (band * 13 + Date.now() / 55) % 360;
+          const hue = (band * 13 + now / 55) % 360;
           ctx.strokeStyle = `hsla(${hue}, 96%, ${58 + energy * 18}%, ${0.2 + energy * 0.64})`;
           ctx.lineWidth = 0.9 + energy * 3.2 + bass * 1.2;
           ctx.shadowColor = `hsl(${hue}, 96%, 62%)`;
@@ -1429,16 +1553,16 @@ export function Visualizer({
       } else if (mode === 'neon-ribbons') {
         ctx.fillStyle = 'rgba(0,0,0,0.11)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 20) / 255;
+        const bass = avg(freq, 1, 20) / 255;
         const mid = avg(freq, 20, 90) / 255;
         const treble = avg(freq, 90, 190) / 255;
         const cx = w / 2;
         const cy = h / 2;
-        const time = Date.now() / 1000;
+        const time = now / 1000;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
         for (let ribbon = 0; ribbon < 7; ribbon += 1) {
-          const hue = (ribbon * 42 + Date.now() / 28 + bass * 90) % 360;
+          const hue = (ribbon * 42 + now / 28 + bass * 90) % 360;
           const orbitX = w * (0.2 + ribbon * 0.033) + bass * w * 0.09;
           const orbitY = h * (0.18 + ribbon * 0.026) + mid * h * 0.12;
           ctx.beginPath();
@@ -1469,7 +1593,7 @@ export function Visualizer({
         }
         for (let ring = 0; ring < 5; ring += 1) {
           const radius = 42 + ring * 38 + bass * 160;
-          ctx.strokeStyle = `hsla(${(Date.now() / 36 + ring * 54) % 360}, 96%, 66%, ${0.12 + bass * 0.28})`;
+          ctx.strokeStyle = `hsla(${(now / 36 + ring * 54) % 360}, 96%, 66%, ${0.12 + bass * 0.28})`;
           ctx.lineWidth = 1 + bass * 4;
           ctx.beginPath();
           ctx.arc(cx, cy, radius, 0, Math.PI * 2);
@@ -1479,11 +1603,11 @@ export function Visualizer({
       } else if (mode === 'plasma-grid') {
         ctx.fillStyle = 'rgba(0,0,0,0.22)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 22) / 255;
+        const bass = avg(freq, 1, 22) / 255;
         const mid = avg(freq, 22, 100) / 255;
         const treble = avg(freq, 100, 210) / 255;
         const step = Math.max(18, Math.min(44, Math.floor(Math.min(w, h) / 14)));
-        const time = Date.now() / 520;
+        const time = now / 520;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
         for (let y = -step; y <= h + step; y += step) {
@@ -1499,7 +1623,7 @@ export function Visualizer({
             if (x <= -step) ctx.moveTo(px, py);
             else ctx.lineTo(px, py);
           }
-          const hue = (y * 0.23 + Date.now() / 46 + bass * 110) % 360;
+          const hue = (y * 0.23 + now / 46 + bass * 110) % 360;
           ctx.strokeStyle = `hsla(${hue}, 96%, 62%, ${0.12 + mid * 0.35})`;
           ctx.lineWidth = 0.8 + bass * 2.8;
           ctx.shadowColor = `hsl(${hue}, 96%, 62%)`;
@@ -1519,7 +1643,7 @@ export function Visualizer({
             if (y <= -step) ctx.moveTo(px, py);
             else ctx.lineTo(px, py);
           }
-          const hue = (x * 0.32 + Date.now() / 52 + treble * 120) % 360;
+          const hue = (x * 0.32 + now / 52 + treble * 120) % 360;
           ctx.strokeStyle = `hsla(${hue}, 96%, 58%, ${0.08 + treble * 0.34 + bass * 0.18})`;
           ctx.lineWidth = 0.8 + treble * 2.4;
           ctx.stroke();
@@ -1534,14 +1658,15 @@ export function Visualizer({
         ctx.fillStyle = 'rgba(0,0,0,0.34)';
         ctx.fillRect(0, 0, w, h);
         const bars = 72;
+        const edges = barEdges(bars);
         const gap = Math.max(1, Math.floor(w / 320));
         const bw = (w - gap * (bars - 1)) / bars;
         for (let i = 0; i < bars; i += 1) {
-          const bin = avg(freq, i * 2, i * 2 + 4) / 255;
+          const bin = avg(freq, edges[i]!, bandEnd(edges, i)) / 255;
           const lift = Math.pow(bin, 0.82);
           const bh = Math.max(2, lift * h * 0.92);
           const x = i * (bw + gap);
-          const hue = (i * 5.4 + Date.now() / 80) % 360;
+          const hue = (i * 5.4 + now / 80) % 360;
           const g = ctx.createLinearGradient(0, h - bh, 0, h);
           g.addColorStop(0, `hsla(${hue}, 96%, 66%, 0.95)`);
           g.addColorStop(0.58, `hsla(${(hue + 28) % 360}, 96%, 52%, 0.82)`);
@@ -1556,14 +1681,17 @@ export function Visualizer({
       } else if (mode === 'confetti') {
         ctx.fillStyle = 'rgba(0,0,0,0.24)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 18) / 255;
+        const bass = avg(freq, 1, 18) / 255;
         const mid = avg(freq, 18, 92) / 255;
         const pieces = 96;
-        const time = Date.now() / 1000;
         // Beat-locked orbital sweep — silence keeps pieces faint; a kick
         // throws everything bright + larger so the rhythm is legible even
         // when the underlying spectrum is uniform.
         const beatBoost = features.beat;
+        const confettiDt = confettiLastAt ? Math.max(0, Math.min(0.1, (now - confettiLastAt) / 1000)) : 0;
+        confettiLastAt = now;
+        confettiTime += confettiDt;
+        confettiBeatTime += confettiDt * beatBoost;
         const beatHueShift = features.beatEdge ? 120 : 0;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
@@ -1571,13 +1699,13 @@ export function Visualizer({
           const bin = freq[(i * 5) % Math.max(1, freq.length)]! / 255;
           const lane = i / pieces;
           const orbit = 18 + lane * Math.max(w, h) * 0.58 + bass * 40 + beatBoost * 30;
-          const angle = time * (0.35 + lane + beatBoost * 0.6) + i * 2.399;
+          const angle = confettiTime * (0.35 + lane) + confettiBeatTime * 0.6 + i * 2.399;
           const x = w / 2 + Math.cos(angle) * orbit * (0.72 + mid * 0.18);
           const y = h / 2 + Math.sin(angle * 1.18) * orbit * 0.48;
           const size = 2 + bin * 13 + beatBoost * 8;
           const baseAlpha = 0.18 + bin * 0.72;
           const beatedAlpha = baseAlpha * (0.45 + beatBoost * 0.85);
-          ctx.fillStyle = `hsla(${(i * 11 + Date.now() / 34 + beatHueShift) % 360}, 92%, 62%, ${beatedAlpha})`;
+          ctx.fillStyle = `hsla(${(i * 11 + now / 34 + beatHueShift) % 360}, 92%, 62%, ${beatedAlpha})`;
           ctx.beginPath();
           ctx.arc(x, y, size, 0, Math.PI * 2);
           ctx.fill();
@@ -1586,10 +1714,10 @@ export function Visualizer({
       } else if (mode === 'burning-cloud') {
         ctx.fillStyle = 'rgba(0,0,0,0.18)';
         ctx.fillRect(0, 0, w, h);
-        const bass = avg(freq, 0, 20) / 255;
+        const bass = avg(freq, 1, 20) / 255;
         const mid = avg(freq, 20, 96) / 255;
         const cell = Math.max(18, Math.floor(Math.min(w, h) / 22));
-        const time = Date.now() / 580;
+        const time = now / 580;
         for (let y = -cell; y < h + cell; y += cell) {
           for (let x = -cell; x < w + cell; x += cell) {
             const nx = x / Math.max(1, w);
@@ -1602,7 +1730,7 @@ export function Visualizer({
               bass * 0.42 +
               mid * 0.18;
             const alpha = Math.max(0.05, Math.min(0.78, heat));
-            const hue = 18 + heat * 54 + Date.now() / 110;
+            const hue = 18 + heat * 54 + now / 110;
             const g = ctx.createRadialGradient(x + cell / 2, y + cell / 2, 0, x + cell / 2, y + cell / 2, cell * 1.7);
             g.addColorStop(0, `hsla(${hue}, 98%, 62%, ${alpha})`);
             g.addColorStop(0.5, `hsla(${(hue + 24) % 360}, 90%, 44%, ${alpha * 0.46})`);
@@ -1620,7 +1748,6 @@ export function Visualizer({
         const cx = w / 2;
         const cy = h / 2;
         const minSide = Math.min(w, h);
-        const now = Date.now();
 
         // True rising-edge spawn: kick onset (beatEdge) triggers instantly,
         // not when the smoothed beat envelope decays past a threshold. The
@@ -1686,7 +1813,6 @@ export function Visualizer({
         // 2026 club-style lattice. A grid of dots that flashes palette and
         // shifts scale on each beat. The strobe is short and sharp so even at
         // 30fps the kick reads clearly.
-        const now = Date.now();
         if (features.beat > 0.4 && now - lastLatticeBeat > 90) {
           latticeFlip = 1 - latticeFlip;
           latticeStrobe = 1;
@@ -1698,7 +1824,8 @@ export function Visualizer({
         ctx.fillStyle = latticeStrobe > 0.5 ? `hsla(${baseHue}, 90%, 18%, 1)` : 'rgba(0,0,0,0.32)';
         ctx.fillRect(0, 0, w, h);
 
-        const cell = Math.max(22, Math.floor(Math.min(w, h) / (16 + features.treble * 6)));
+        latticeDivisor = settleLatticeDivisor(latticeDivisor, LATTICE_BASE_DIVISOR + features.treble * 6);
+        const cell = Math.max(22, Math.floor(Math.min(w, h) / latticeDivisor));
         const cx = w / 2;
         const cy = h / 2;
         const scaleK = 1 + features.bass * 0.18 + latticeStrobe * 0.16;
@@ -1743,7 +1870,6 @@ export function Visualizer({
         // whole cluster collapses on the kick and explodes back out. Hue
         // drift is bass-driven, not wall-clock, so silent passages freeze the
         // palette and a heavy track sets it spinning through every color.
-        const now = Date.now();
         const cx = w / 2;
         const cy = h / 2;
         const minSide = Math.min(w, h);
@@ -1941,15 +2067,26 @@ export function Visualizer({
 
       surface.show(lastShownAt ? now - lastShownAt : frameIntervalMs);
       lastShownAt = now;
-      scheduleNext();
+      gov?.endFrame(now, window.performance.now() - renderStart);
     }
 
-    cancelNext = requestPacedFrame(frame, 0);
+    // Sleeps between paints. Painting in place is rescued from a timer if
+    // animation frames stop arriving while the page still reports itself
+    // visible; a surface presented through the GPU guard is not, because
+    // submitting GL to a window the compositor is not presenting blocks the
+    // renderer.
+    const stopLoop = startPacedLoop(canPaint, frame, {
+      retryMs: frameIntervalMs,
+      snapToGrid: onAmbientGrid,
+      rescue: surface.paint === canvas,
+    });
     return () => {
-      cancelNext();
+      stopLoop();
+      stopDisplayWatch();
       surface.dispose();
+      releaseGlContext(canvas);
     };
-  }, [dprCap, engine, frameIntervalMs, isFullscreen, maxPixels, mayFlashLarge, mode, suspendedByFullscreen]);
+  }, [dprCap, engine, frameIntervalMs, glFellBack, isFullscreen, maxPixels, mayFlashLarge, mode, suspendedByFullscreen, surfaceKey]);
 
   const style: CSSProperties = {};
   if (width != null) style.width = `${width}px`;
@@ -1967,12 +2104,13 @@ export function Visualizer({
         // (or the effect deps) — they flow into the live render loops via
         // tuningRef, and skin colors via the tick-gated getCssVar refresh.
         // Only mode/quality/performance rebuild the renderer.
-        key={`${mode}-${quality}-${performance}`}
+        key={`${surfaceKey}${glFellBack ? '-2d' : ''}`}
         className={className ?? 'h-full w-full'}
         style={{ position: 'relative', overflow: 'hidden', borderRadius: 'var(--radius)', ...style }}
       >
         <canvas
           ref={canvasRef}
+          aria-hidden="true"
           data-newamp-visualizer-canvas
           data-newamp-visualizer-mode={mode}
           style={{ position: 'absolute', inset: 0, display: 'block', width: '100%', height: '100%', borderRadius: 'var(--radius)' }}
@@ -1992,8 +2130,11 @@ export function Visualizer({
     <canvas
       // Zero-hitch theming: palette/reactivity deliberately NOT in the key —
       // see the identical note on the butterchurn/eviland-live wrapper above.
-      key={`${mode}-${quality}-${performance}`}
+      // A canvas that has held WebGL cannot give a 2D context, so the fallback
+      // after a lost context gets a new one.
+      key={`${surfaceKey}${glFellBack ? '-2d' : ''}`}
       ref={canvasRef}
+      aria-hidden="true"
       data-newamp-visualizer-canvas
       data-newamp-visualizer-mode={mode}
       className={className ?? 'h-full w-full'}
@@ -2017,22 +2158,14 @@ interface ShaderVisualizerOptions {
   frameIntervalMs: number;
   dprCap: number;
   maxPixels: number;
-}
-
-interface AudioFeatures {
-  bass: number;
-  lowMid: number;
-  mid: number;
-  treble: number;
-  rms: number;
-  beat: number;
-  /** Narrow-band low-frequency energy (0-140 Hz, sample-rate-aware). Read from
-   * the unsmoothed onset analyser tap, so transient gates fire on the actual
-   * frame a kick lands instead of ~1.3 frames late. */
-  kick: number;
-  /** True exactly on the frame the kick band crosses the adaptive floor. */
-  beatEdge: boolean;
-  bands: number[];
+  /** Trims the render scale and the cadence when a frame costs more than it should. */
+  governor?: Governor | null;
+  /**
+   * Sleep between paints (requestPacedFrame) instead of waking on every
+   * animation frame to skip most of them. Off by default: callers that drive
+   * the loop with their own animation-frame stub need the bare request.
+   */
+  paced?: boolean;
 }
 
 function isShaderVisualizerMode(mode: VizMode): boolean {
@@ -2094,34 +2227,53 @@ export function startShaderVisualizer(options: ShaderVisualizerOptions): (() => 
     treble: gl.getUniformLocation(program, 'u_treble'),
     rms: gl.getUniformLocation(program, 'u_rms'),
     beat: gl.getUniformLocation(program, 'u_beat'),
+    bassTime: gl.getUniformLocation(program, 'u_bassTime'),
+    midTime: gl.getUniformLocation(program, 'u_midTime'),
+    beatTime: gl.getUniformLocation(program, 'u_beatTime'),
     bands0: gl.getUniformLocation(program, 'u_bands0'),
     bands1: gl.getUniformLocation(program, 'u_bands1'),
     bands2: gl.getUniformLocation(program, 'u_bands2'),
     bands3: gl.getUniformLocation(program, 'u_bands3'),
+    bandTime0: gl.getUniformLocation(program, 'u_bandTime0'),
+    bandTime1: gl.getUniformLocation(program, 'u_bandTime1'),
+    bandTime2: gl.getUniformLocation(program, 'u_bandTime2'),
+    bandTime3: gl.getUniformLocation(program, 'u_bandTime3'),
   };
 
   const freq = new Uint8Array(new ArrayBuffer(options.engine.frequencyBinCount));
   const onsetFreq = new Uint8Array(new ArrayBuffer(options.engine.frequencyBinCount));
   const wave = new Uint8Array(new ArrayBuffer(options.engine.fftSize));
   const bands = new Float32Array(16);
-  const canPaint = createFrameGate(options.canvasRef, options.frameIntervalMs);
-  const analyze = createAudioFeatureAnalyzer({
-    sampleRate: options.engine.getSampleRate(),
+  const governor = options.governor ?? null;
+  const canPaint = createFrameGate(
+    options.canvasRef,
+    governor ? () => governor.intervalMs(options.frameIntervalMs) : options.frameIntervalMs,
+  );
+  let analyzedRate = options.engine.getSampleRate();
+  let analyze = createAudioFeatureAnalyzer({
+    sampleRate: analyzedRate,
     fftSize: options.engine.fftSize,
   });
-  const dpr = Math.min(window.devicePixelRatio || 1, options.dprCap);
-  let raf = 0;
+  const rateChanged = createSampleRateWatch(() => options.engine.getSampleRate(), analyzedRate);
+  let dpr = Math.min(window.devicePixelRatio || 1, options.dprCap);
+  const stopDisplayWatch = watchDisplayChange(() => {
+    dpr = Math.min(window.devicePixelRatio || 1, options.dprCap);
+  });
   let lastWidth = 0;
   let lastHeight = 0;
   let lastPaintAt = 0;
+  // The shaders take anything that speeds up with the music from these
+  // integrated phases, never from u_time times a level.
+  const phases = createPhaseClock();
 
   function ensureSize(): void {
     const node = options.canvasRef.current;
     if (!node) return;
     const cssW = node.clientWidth || node.width || 100;
     const cssH = node.clientHeight || node.height || 100;
-    const scaledW = Math.max(2, Math.floor(cssW * dpr));
-    const scaledH = Math.max(2, Math.floor(cssH * dpr));
+    const drawDpr = dpr * (governor?.scale() ?? 1);
+    const scaledW = Math.max(2, Math.floor(cssW * drawDpr));
+    const scaledH = Math.max(2, Math.floor(cssH * drawDpr));
     const scale = Math.min(1, Math.sqrt(options.maxPixels / Math.max(1, scaledW * scaledH)));
     const targetW = Math.max(2, Math.floor(scaledW * scale));
     const targetH = Math.max(2, Math.floor(scaledH * scale));
@@ -2130,6 +2282,7 @@ export function startShaderVisualizer(options: ShaderVisualizerOptions): (() => 
     lastHeight = targetH;
     node.width = targetW;
     node.height = targetH;
+    node.setAttribute('data-newamp-render-size', `${targetW}x${targetH}`);
     gl.viewport(0, 0, targetW, targetH);
   }
 
@@ -2138,53 +2291,80 @@ export function startShaderVisualizer(options: ShaderVisualizerOptions): (() => 
   let accentVec = parseRgbVec(getCssVar('--accent'));
   let accentTick = 0;
 
-  function frame(now: number): void {
-    if (canPaint(now)) {
-      ensureSize();
-      options.engine.getFreqData(freq);
-      options.engine.getOnsetFreqData(onsetFreq);
-      options.engine.getTimeData(wave);
-      const tuning = options.tuning.current;
-      boostFrequencyData(freq, tuning.reactivity);
-      const features = analyze(freq, wave, onsetFreq);
-      bands.set(features.bands);
-      if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
-      const accent = accentVec;
-
-      gl.useProgram(program);
-      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-      gl.enableVertexAttribArray(position);
-      gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
-      gl.uniform2f(uniforms.resolution, Math.max(1, lastWidth), Math.max(1, lastHeight));
-      gl.uniform1f(uniforms.time, now / 1000);
-      gl.uniform1i(uniforms.mode, shaderModeIndex(options.mode));
-      // u_palette is uploaded every frame, so a palette change is just the
-      // next frame's uniform value — no program rebuild, no canvas remount.
-      gl.uniform1i(uniforms.palette, paletteIndex(tuning.palette));
-      gl.uniform3f(uniforms.accent, accent[0], accent[1], accent[2]);
-      gl.uniform1f(uniforms.bass, features.bass);
-      gl.uniform1f(uniforms.lowMid, features.lowMid);
-      gl.uniform1f(uniforms.mid, features.mid);
-      gl.uniform1f(uniforms.treble, features.treble);
-      gl.uniform1f(uniforms.rms, features.rms);
-      gl.uniform1f(uniforms.beat, features.beat);
-      gl.uniform4f(uniforms.bands0, bands[0]!, bands[1]!, bands[2]!, bands[3]!);
-      gl.uniform4f(uniforms.bands1, bands[4]!, bands[5]!, bands[6]!, bands[7]!);
-      gl.uniform4f(uniforms.bands2, bands[8]!, bands[9]!, bands[10]!, bands[11]!);
-      gl.uniform4f(uniforms.bands3, bands[12]!, bands[13]!, bands[14]!, bands[15]!);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      flashGuard?.apply(lastPaintAt ? now - lastPaintAt : options.frameIntervalMs);
-      lastPaintAt = now;
+  function paint(now: number): void {
+    const renderStart = performance.now();
+    ensureSize();
+    const newRate = rateChanged(now);
+    if (newRate) {
+      analyzedRate = newRate;
+      analyze = createAudioFeatureAnalyzer({ sampleRate: newRate, fftSize: options.engine.fftSize });
     }
-    raf = requestAnimationFrame(frame);
+    options.engine.getFreqData(freq);
+    options.engine.getOnsetFreqData(onsetFreq);
+    options.engine.getTimeData(wave);
+    const tuning = options.tuning.current;
+    boostFrequencyData(freq, tuning.reactivity, analyzedRate / options.engine.fftSize);
+    const features = analyze(freq, wave, onsetFreq);
+    bands.set(features.bands);
+    if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
+    const accent = accentVec;
+
+    phases.advance(now, features);
+    const bandTime = phases.bandTime;
+
+    gl.useProgram(program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.enableVertexAttribArray(position);
+    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform2f(uniforms.resolution, Math.max(1, lastWidth), Math.max(1, lastHeight));
+    gl.uniform1f(uniforms.time, phases.seconds);
+    gl.uniform1i(uniforms.mode, shaderModeIndex(options.mode));
+    // u_palette is uploaded every frame, so a palette change is just the
+    // next frame's uniform value — no program rebuild, no canvas remount.
+    gl.uniform1i(uniforms.palette, paletteIndex(tuning.palette));
+    gl.uniform3f(uniforms.accent, accent[0], accent[1], accent[2]);
+    gl.uniform1f(uniforms.bass, features.bass);
+    gl.uniform1f(uniforms.lowMid, features.lowMid);
+    gl.uniform1f(uniforms.mid, features.mid);
+    gl.uniform1f(uniforms.treble, features.treble);
+    gl.uniform1f(uniforms.rms, features.rms);
+    gl.uniform1f(uniforms.beat, features.beat);
+    gl.uniform1f(uniforms.bassTime, phases.bassTime);
+    gl.uniform1f(uniforms.midTime, phases.midTime);
+    gl.uniform1f(uniforms.beatTime, phases.beatTime);
+    gl.uniform4f(uniforms.bands0, bands[0]!, bands[1]!, bands[2]!, bands[3]!);
+    gl.uniform4f(uniforms.bands1, bands[4]!, bands[5]!, bands[6]!, bands[7]!);
+    gl.uniform4f(uniforms.bands2, bands[8]!, bands[9]!, bands[10]!, bands[11]!);
+    gl.uniform4f(uniforms.bands3, bands[12]!, bands[13]!, bands[14]!, bands[15]!);
+    gl.uniform4f(uniforms.bandTime0, bandTime[0]!, bandTime[1]!, bandTime[2]!, bandTime[3]!);
+    gl.uniform4f(uniforms.bandTime1, bandTime[4]!, bandTime[5]!, bandTime[6]!, bandTime[7]!);
+    gl.uniform4f(uniforms.bandTime2, bandTime[8]!, bandTime[9]!, bandTime[10]!, bandTime[11]!);
+    gl.uniform4f(uniforms.bandTime3, bandTime[12]!, bandTime[13]!, bandTime[14]!, bandTime[15]!);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    flashGuard?.apply(lastPaintAt ? now - lastPaintAt : options.frameIntervalMs);
+    lastPaintAt = now;
+    governor?.endFrame(now, performance.now() - renderStart);
   }
 
-  raf = requestAnimationFrame(frame);
+  let stopLoop: () => void;
+  if (options.paced) {
+    stopLoop = startPacedLoop(canPaint, paint, { retryMs: options.frameIntervalMs });
+  } else {
+    let raf = 0;
+    const frame = (now: number): void => {
+      raf = requestAnimationFrame(frame);
+      if (canPaint(now)) paint(now);
+    };
+    raf = requestAnimationFrame(frame);
+    stopLoop = () => cancelAnimationFrame(raf);
+  }
   return () => {
-    cancelAnimationFrame(raf);
+    stopLoop();
+    stopDisplayWatch();
     flashGuard?.dispose();
     gl.deleteBuffer(positionBuffer);
     gl.deleteProgram(program);
+    releaseGlContext(options.canvas);
   };
 }
 
@@ -2229,7 +2409,7 @@ function drawMilkdropFallback(ctx: CanvasRenderingContext2D, cssW: number, cssH:
   gradient.addColorStop(1, '#000');
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, cssW, cssH);
-  const energy = avg(freq, 0, Math.min(96, freq.length)) / 255;
+  const energy = avg(freq, 1, Math.min(96, freq.length)) / 255;
   for (let i = 0; i < 24; i++) {
     const y = (cssH / 24) * i;
     const hue = (i * 12 + time / 42) % 360;
@@ -2253,145 +2433,18 @@ function drawMilkdropFallback(ctx: CanvasRenderingContext2D, cssW: number, cssH:
   }
 }
 
-function avg(arr: Uint8Array, from: number, to: number): number {
-  let sum = 0;
-  let count = 0;
-  for (let i = from; i < to && i < arr.length; i++) {
-    sum += arr[i]!;
-    count++;
+// A canvas that has left the page keeps its WebGL context until the garbage
+// collector gets to it, and Chromium drops the oldest of about 16 live
+// contexts per process, so cycling through GPU modes eventually blanks one
+// that is still on screen. Only for a canvas that is gone: an effect that
+// re-runs on the same canvas asks for its context again.
+function releaseGlContext(canvas: HTMLCanvasElement): void {
+  if (canvas.isConnected) return;
+  try {
+    (canvas.getContext('webgl2') as WebGL2RenderingContext | null)?.getExtension('WEBGL_lose_context')?.loseContext();
+  } catch {
+    /* the context is already gone */
   }
-  return count ? sum / count : 0;
-}
-
-function boostFrequencyData(arr: Uint8Array, reactivity: VizReactivity = 'punch'): void {
-  const settings = reactivitySettings(reactivity);
-  for (let i = 0; i < arr.length; i += 1) {
-    const normalized = arr[i]! / 255;
-    // Band-aware lift: bass (bins <36) still gets the biggest boost, but
-    // low-mid + mid + treble now each get a meaningful lift too so the canvas
-    // modes' upper-spectrum response catches up to the low-end (which has
-    // always read as "more alive" by virtue of being the only band lifted).
-    const lowBandLift =
-      i < 36 ? settings.bassLift
-      : i < 120 ? settings.lowMidLift
-      : i < 280 ? settings.midLift
-      : settings.trebleLift;
-    const shaped = Math.pow(normalized, settings.curve) * settings.gain * lowBandLift;
-    arr[i] = Math.max(0, Math.min(255, Math.round(shaped * 255)));
-  }
-}
-
-interface ReactivityCurve {
-  curve: number;
-  gain: number;
-  bassLift: number;
-  lowMidLift: number;
-  midLift: number;
-  trebleLift: number;
-}
-
-function reactivitySettings(reactivity: VizReactivity): ReactivityCurve {
-  if (reactivity === 'truth') return { curve: 0.92, gain: 1.08, bassLift: 1.06, lowMidLift: 1.04, midLift: 1.03, trebleLift: 1.02 };
-  if (reactivity === 'wild') return { curve: 0.52, gain: 1.58, bassLift: 1.3, lowMidLift: 1.22, midLift: 1.20, trebleLift: 1.18 };
-  return { curve: 0.68, gain: 1.34, bassLift: 1.18, lowMidLift: 1.14, midLift: 1.12, trebleLift: 1.10 };
-}
-
-interface AnalyzerConfig {
-  sampleRate: number;
-  fftSize: number;
-}
-
-function createAudioFeatureAnalyzer(config: AnalyzerConfig): (freq: Uint8Array, wave: Uint8Array, onsetFreq: Uint8Array) => AudioFeatures {
-  // Compute Hz-accurate bin counts so the same band labels mean the same
-  // perceptual range whether the source is 44.1, 48, 96, or 192 kHz.
-  // binWidth = sampleRate / fftSize. Floor + max 1 keeps a single-bin minimum
-  // so high-rate sources (192k) don't collapse to zero-width bands.
-  const binWidth = config.sampleRate / config.fftSize;
-  const binFor = (hz: number): number => Math.max(1, Math.floor(hz / binWidth));
-  const kickBins = Math.max(4, Math.ceil(140 / binWidth)); // kick drum fundamental ~50-140 Hz
-  const bassEnd = binFor(250);
-  const lowMidEnd = binFor(500);
-  const midEnd = binFor(2000);
-  const trebleEnd = binFor(8000);
-
-  let bassFloor = 0.08;
-  let rmsFloor = 0.04;
-  let kickFloor = 0.06;
-  let beat = 0;
-  let prevKick = 0;
-
-  return (freq, wave, onsetFreq) => {
-    const bass = bandValue(freq, 0, bassEnd);
-    const lowMid = bandValue(freq, bassEnd, lowMidEnd);
-    const mid = bandValue(freq, lowMidEnd, midEnd);
-    const treble = bandValue(freq, midEnd, trebleEnd);
-    const rms = waveRms(wave);
-    // Kick band: 0-140 Hz, derived from the actual sample rate. Read from the
-    // unsmoothed onset analyser so transient detection isn't lagged by the
-    // visualizer's 1.3-frame smoothing window.
-    const kick = Math.min(1, avg(onsetFreq, 0, kickBins) / 255);
-
-    const bassOnset = Math.max(0, bass - bassFloor * 1.12);
-    const rmsOnset = Math.max(0, rms - rmsFloor * 1.08);
-    const kickOnset = Math.max(0, kick - kickFloor * 1.18);
-    beat = Math.max(beat * 0.5, Math.min(1, bassOnset * 5.2 + rmsOnset * 3.4 + kickOnset * 2.4));
-    // True same-frame rising edge: prev frame below adaptive floor, this frame
-    // above. With the unsmoothed onset analyser this fires on the exact frame
-    // a kick lands instead of ~1.3 frames late.
-    const beatEdge = prevKick < kickFloor * 1.18 && kick >= kickFloor * 1.18;
-
-    prevKick = kick;
-
-    bassFloor = bass > bassFloor
-      ? bassFloor * 0.94 + bass * 0.06
-      : bassFloor * 0.985 + bass * 0.015;
-    rmsFloor = rms > rmsFloor
-      ? rmsFloor * 0.94 + rms * 0.06
-      : rmsFloor * 0.985 + rms * 0.015;
-    kickFloor = kick > kickFloor
-      ? kickFloor * 0.92 + kick * 0.08
-      : kickFloor * 0.98 + kick * 0.02;
-
-    return {
-      bass,
-      lowMid,
-      mid,
-      treble,
-      rms,
-      beat,
-      kick,
-      beatEdge,
-      bands: logBands(freq, 16),
-    };
-  };
-}
-
-function bandValue(arr: Uint8Array, from: number, to: number): number {
-  return Math.min(1, Math.pow(avg(arr, from, to) / 255, 0.72) * 1.22);
-}
-
-function waveRms(arr: Uint8Array): number {
-  if (!arr.length) return 0;
-  let sum = 0;
-  const stride = Math.max(1, Math.floor(arr.length / 768));
-  let count = 0;
-  for (let i = 0; i < arr.length; i += stride) {
-    const centered = (arr[i]! - 128) / 128;
-    sum += centered * centered;
-    count += 1;
-  }
-  return Math.min(1, Math.sqrt(sum / Math.max(1, count)) * 1.85);
-}
-
-function logBands(arr: Uint8Array, count: number): number[] {
-  const out: number[] = [];
-  const usable = Math.max(2, Math.min(arr.length, 760));
-  for (let i = 0; i < count; i += 1) {
-    const start = Math.floor(Math.pow(i / count, 1.72) * usable);
-    const end = Math.max(start + 2, Math.floor(Math.pow((i + 1) / count, 1.72) * usable));
-    out.push(bandValue(arr, start, end));
-  }
-  return out;
 }
 
 function getCssVar(name: string, fallback = '#39ff14'): string {
@@ -2510,10 +2563,20 @@ uniform float u_mid;
 uniform float u_treble;
 uniform float u_rms;
 uniform float u_beat;
+// Integrals of the audio levels over time (advanced on the CPU by each
+// frame's real duration). Anything that moves faster with the music takes its
+// phase from these, never from u_time times a level.
+uniform float u_bassTime;
+uniform float u_midTime;
+uniform float u_beatTime;
 uniform vec4 u_bands0;
 uniform vec4 u_bands1;
 uniform vec4 u_bands2;
 uniform vec4 u_bands3;
+uniform vec4 u_bandTime0;
+uniform vec4 u_bandTime1;
+uniform vec4 u_bandTime2;
+uniform vec4 u_bandTime3;
 
 float sat(float v) { return clamp(v, 0.0, 1.0); }
 
@@ -2541,6 +2604,26 @@ float bandAt(float x) {
   if (idx < 13.5) return u_bands3.y;
   if (idx < 14.5) return u_bands3.z;
   return u_bands3.w;
+}
+
+float bandTimeAt(float x) {
+  float idx = floor(clamp(x, 0.0, 0.999) * 16.0);
+  if (idx < 0.5) return u_bandTime0.x;
+  if (idx < 1.5) return u_bandTime0.y;
+  if (idx < 2.5) return u_bandTime0.z;
+  if (idx < 3.5) return u_bandTime0.w;
+  if (idx < 4.5) return u_bandTime1.x;
+  if (idx < 5.5) return u_bandTime1.y;
+  if (idx < 6.5) return u_bandTime1.z;
+  if (idx < 7.5) return u_bandTime1.w;
+  if (idx < 8.5) return u_bandTime2.x;
+  if (idx < 9.5) return u_bandTime2.y;
+  if (idx < 10.5) return u_bandTime2.z;
+  if (idx < 11.5) return u_bandTime2.w;
+  if (idx < 12.5) return u_bandTime3.x;
+  if (idx < 13.5) return u_bandTime3.y;
+  if (idx < 14.5) return u_bandTime3.z;
+  return u_bandTime3.w;
 }
 
 vec3 palette(float t) {
@@ -2595,7 +2678,7 @@ void main() {
       float fi = float(i);
       float b = bandAt(fi / 8.0);
       float y = 0.15 + fi * 0.083 + sin(u_time * (0.65 + fi * 0.035) + fi + u_bass * 4.0) * (0.018 + b * 0.075);
-      float xphase = uv.x * (5.0 + fi * 0.34) + u_time * (0.74 + b * 0.95) + fi * 0.83;
+      float xphase = uv.x * (5.0 + fi * 0.34) + u_time * 0.74 + bandTimeAt(fi / 8.0) * 0.95 + fi * 0.83;
       float wave = y + sin(xphase) * (0.035 + b * 0.12 + u_bass * 0.04) + sin(xphase * 0.47 + u_mid * 5.0) * (0.025 + u_treble * 0.05);
       float line = exp(-abs(uv.y - wave) * (92.0 - b * 34.0));
       color += palette(fi * 0.095 + b * 0.32 + u_time * 0.02) * line * (0.26 + b * 1.45 + u_beat * 0.9);
@@ -2643,7 +2726,7 @@ void main() {
     // music. Switch to palette-driven hues so the cloud actually shifts color
     // with the beat instead of looking like a static brown plume.
     vec2 q = p * (2.1 - u_bass * 0.35);
-    float heat = fbm(q * (2.0 + u_mid * 3.0) + vec2(0.0, -u_time * (0.38 + u_bass)));
+    float heat = fbm(q * (2.0 + u_mid * 3.0) + vec2(0.0, -(u_time * 0.38 + u_bassTime)));
     heat += fbm(q * 4.2 + vec2(u_time * 0.15, u_time * 0.22)) * 0.5;
     heat += u_bass * 0.85 + u_beat * 0.7;
     float plume = smoothstep(0.18, 1.58, heat - length(p) * (0.48 - u_rms * 0.16));
@@ -2658,17 +2741,25 @@ void main() {
     // KALEIDO-BLOOM — N-fold mirror kaleidoscope. Petal count breathes with
     // treble (4..10 petals), spin pulled by mids, bloom radius pumped by bass,
     // beat fires a halo ring through the whole field.
-    float petals = floor(4.0 + u_treble * 6.0);
+    float petalsF = 4.0 + u_treble * 6.0;
+    float petalsLo = floor(petalsF);
+    float petalsMix = smoothstep(0.0, 1.0, fract(petalsF));
     float theta = atan(p.y, p.x);
     float r = length(p);
-    float sector = 6.2831853 / petals;
-    // Fold the angle into one petal slice and mirror.
-    float a = mod(theta + u_time * (0.12 + u_mid * 0.6), sector);
-    a = abs(a - sector * 0.5);
-    vec2 q = vec2(cos(a), sin(a)) * r;
+    float spin = theta + u_time * 0.12 + u_midTime * 0.6;
     float bloom = exp(-pow(r * (3.2 - u_bass * 1.3 - u_beat * 0.6), 2.0));
-    float petalCurve = sin(q.x * (5.5 + u_treble * 5.0)) * sin(q.y * (4.5 + u_mid * 4.0));
-    float petalIntensity = smoothstep(-0.25, 0.85, petalCurve);
+    // Fold the angle into one petal slice and mirror. The petal count moves
+    // with treble, and a whole-image re-fold at every integer would flicker,
+    // so the folds either side of it are cross-faded.
+    float petalIntensity = 0.0;
+    for (int k = 0; k < 2; k += 1) {
+      float sector = 6.2831853 / (petalsLo + float(k));
+      float a = mod(spin, sector);
+      a = abs(a - sector * 0.5);
+      vec2 q = vec2(cos(a), sin(a)) * r;
+      float petalCurve = sin(q.x * (5.5 + u_treble * 5.0)) * sin(q.y * (4.5 + u_mid * 4.0));
+      petalIntensity += smoothstep(-0.25, 0.85, petalCurve) * (k == 0 ? 1.0 - petalsMix : petalsMix);
+    }
     vec3 petalCol = palette(u_time * 0.04 + r * 1.4 + u_bass * 0.5);
     color += petalCol * (petalIntensity * (0.6 + bloom * 1.1 + u_beat * 0.6));
     // Beat halo ring expanding outward.
@@ -2686,7 +2777,7 @@ void main() {
       float fi = float(i);
       float b = bandAt(0.12 + fi * 0.18);
       float center = 0.18 + fi * 0.16;
-      float xphase = uv.x * (3.0 + fi * 0.45) + u_time * (0.62 + b * 1.4) + fi * 0.9 + wind;
+      float xphase = uv.x * (3.0 + fi * 0.45) + u_time * 0.62 + bandTimeAt(0.12 + fi * 0.18) * 1.4 + fi * 0.9 + wind;
       float ribbonY = center
         + sin(xphase) * (0.04 + b * 0.13 + u_bass * 0.05)
         + sin(xphase * 0.43 + u_mid * 5.0) * (0.02 + u_treble * 0.04);
@@ -2734,7 +2825,7 @@ void main() {
     float r = length(p);
     float theta = atan(p.y, p.x);
     // Stream rings outward over time + bass speed.
-    float warp = u_time * (0.6 + u_bass * 1.4 + u_beat * 0.8);
+    float warp = u_time * 0.6 + u_bassTime * 1.4 + u_beatTime * 0.8;
     float ringIdx = floor(r * 14.0 + warp);
     float ringFrac = fract(r * 14.0 + warp);
     // Discretize angle into 64 wedges, hash by (ring,wedge) for stable stars.
@@ -2747,7 +2838,8 @@ void main() {
     float streakProfile = exp(-pow((ringFrac - 0.5) / streakLen, 2.0));
     // Per-wedge sub-angle jitter so stars aren't perfectly aligned.
     float wedgeAngle = wedge / 10.18 + (starSeed - 0.5) * 0.04;
-    float angleProfile = exp(-pow((theta - wedgeAngle) * 80.0, 2.0));
+    float starWidth = max(0.0125, 1.3 / (u_resolution.y * max(r, 0.004)));
+    float angleProfile = exp(-pow((theta - wedgeAngle) / starWidth, 2.0)) * (0.0125 / starWidth);
     float star = exists * streakProfile * angleProfile * (0.5 + r * 1.6);
     vec3 starCol = palette(starSeed + u_time * 0.05);
     color += starCol * star * (0.8 + u_treble * 0.6 + u_beat * 0.5);
@@ -2763,9 +2855,11 @@ void main() {
     float theta = atan(p.y, p.x);
     // Wall depth modulated by the spectrum bands wrapped around the tunnel.
     float spectrum = bandAt(fract(theta / 6.2831853 + 0.5));
-    float depth = 1.0 / max(0.04, r * (1.0 - spectrum * 0.4));
+    float depth = 1.0 / max(0.12, r * (1.0 - spectrum * 0.4));
     // Vertical ribbing from treble; horizontal banding from spectrum samples.
-    float rib = sin(depth * (4.0 + u_treble * 6.0)) * 0.5 + 0.5;
+    // The ribs are packed too tightly to resolve near the vanishing point,
+    // so they fade out there instead of aliasing.
+    float rib = mix(0.5, sin(depth * (4.0 + u_treble * 6.0)) * 0.5 + 0.5, smoothstep(0.03, 0.2, r));
     float wallShade = mix(0.12, 1.0, rib * (0.4 + spectrum * 0.9));
     vec3 wallCol = palette(depth * 0.22 + theta * 0.08 + u_time * 0.04);
     color += wallCol * wallShade * (0.45 + u_bass * 0.4);
