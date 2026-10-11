@@ -83,7 +83,7 @@
 [data-shell='liquid-glass'] #root {
   /* OKLCH color-mix keeps the backdrop perceptually uniform across every skin
      accent — a deep emerald and a warm coral get equally lit halos without
-     re-tuning per palette. Pattern lifted from Claude Design MCP 66c1dbdf8625. */
+     re-tuning per palette. */
   background:
     radial-gradient(1100px 700px at 18% 22%, color-mix(in oklch, var(--accent) 32%, transparent), transparent 60%),
     radial-gradient(900px 600px at 82% 78%, color-mix(in oklch, var(--accent-dim) 28%, transparent), transparent 65%),

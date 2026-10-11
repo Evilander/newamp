@@ -4743,8 +4743,7 @@ export class LibraryStore {
   }
 
   // Build a self-contained, offline-shareable HTML profile page from local
-  // data. No network, no upload — the export the social roadmap requires before
-  // any account service exists.
+  // data. No network, no upload, no account service needed.
   buildProfileBundleHtml(opts: { now?: number } = {}): string {
     const profile = this.getProfile();
     const lists = this.getLists().filter((list) => list.privacy === 'public')

@@ -101,21 +101,21 @@ export function DiscoverView(): JSX.Element {
     <div className="flex h-full flex-col" data-newamp-discover>
       <ViewOnboarding
         viewId="discover"
-        title="Discover · Living Library"
-        lede="A native mode that builds playable missions from your own listening history — no streaming required."
+        title="Discover"
+        lede="Playlists built from your own listening history."
         bullets={[
           'New Download Radar surfaces tracks added to your library since the last session.',
           'Forgotten Favorites resurfaces loved tracks that haven\'t played in a while.',
           'Deep Album Run picks an album you should listen to end-to-end again.',
           'Each card opens as a saveable playlist or jumps straight into Auto VJ.',
         ]}
-        cta="Click PLAY MISSION on any card below to start. Save as Playlist to keep one."
+        cta="Pick an item on the left and press Start Session. Save as Playlist keeps it."
         forceVisible={help.open}
         onClose={help.close}
       />
       <div className="flex items-center gap-2 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
         <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
-          Living Library
+          Discover
           <HelpDot help={help} label="What is Discover?" />
         </div>
         <button className="pxbtn is-active" onClick={() => selectedMission && void playQueue(selectedMission.tracks, 0)} disabled={!selectedMission}>

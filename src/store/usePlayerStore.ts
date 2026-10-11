@@ -2092,7 +2092,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         queue: state.queue.map((track) => (track.id === id ? { ...track, loved: nextLoved } : track)),
       }));
       // Eviland memory bridge: love-tick forces a generation evolution when
-      // the lineage is < gen 3 (per the blueprint §1.6.4 rule). Only fire on
+      // the lineage is < gen 3. Only fire on
       // the rising edge (toggling loved ON) — un-loving must not advance.
       if (loved) notifyLove(id);
       return loved;

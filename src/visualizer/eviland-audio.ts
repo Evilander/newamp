@@ -130,7 +130,7 @@ function groupForBand(band: number): VoiceGroup {
 }
 
 // One-pole asymmetric envelope follower (fast attack / slow release is the
-// single biggest "alive vs seizure" lever — see research §1.9).
+// single biggest "alive vs seizure" lever).
 class Env {
   value = 0;
   constructor(

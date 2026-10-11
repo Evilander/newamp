@@ -54,7 +54,7 @@ for (const asset of assets) {
 }
 assert.ok(mainScripts.length >= 1, 'production build should emit a main index chunk');
 const largestMain = mainScripts.sort((a, b) => b.bytes - a.bytes)[0];
-// Budget history: 420KB through 1.17; raised to 440KB for 2.0 Reference Grade
+// Budget history: 420KB through 1.17; raised to 440KB in 2.0
 // (toast host, THEME_REGISTRY, token bridge, and shared primitives live in the
 // main chunk by design — 422.4KB actual at release, ~132KB gzipped). It had
 // crept back to 440.9KB by 2.3.0's successor commits; 2.4.0 moved the command

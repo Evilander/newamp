@@ -1,7 +1,7 @@
 // End-to-end smoke for "Eviland Remembers Your Library" — proves the bridge
 // learns sections, persists through LibraryStore (real sql.js), and recalls
 // the same lineage + seeds after a LibraryStore close/reopen (the persistence
-// equivalent of an app restart — the blueprint's "restart-and-recall" gate).
+// equivalent of an app restart).
 //
 // Why not a full Electron-UI smoke? The on-screen visualizer needs a real
 // audio output device + 30s of audible playback to fire reactor boundaries —
@@ -185,7 +185,7 @@ assert.equal(flushed, true, 'flushAndDispose should succeed when sections were l
 const writesThisPlay = writeCount - initialWriteCount;
 // Bridge must NOT write more than once per completed play in the simple case
 // (no visibility-hidden + no LEARN_FLUSH_THRESHOLD interactions — boundaries are
-// few). One write per completed track is the upper bound asserted by §1.10.
+// few). One write per completed track is the upper bound asserted here.
 // However an auto-flush at the dirty threshold can land mid-play. We assert
 // ≤2 to allow that, ≥1 to prove we wrote at all.
 assert.ok(writesThisPlay >= 1, 'at least one DB write per completed track');

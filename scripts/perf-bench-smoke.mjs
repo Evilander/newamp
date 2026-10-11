@@ -23,7 +23,7 @@ const NEWCOMER_COUNT = 2_000;
 const DNA_COUNT = 12_000;
 
 // Budgets are intentionally loose enough for ~2× slowdown on weaker
-// hardware (we test against actual Tyler-class numbers locally; CI may be
+// hardware (measured on a fast desktop; CI may be
 // slower). If something blows past these, the recompute or DNA cache
 // regressed.
 const BUDGETS_MS = {

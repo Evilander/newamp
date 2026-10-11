@@ -34,7 +34,7 @@ import { hashSeed as defaultHashSeed } from './eviland-rng';
 import type { Director } from './eviland-director';
 
 // ---------------------------------------------------------------------------
-// Constants. Tuned to match blueprint §1.6.
+// Constants.
 // ---------------------------------------------------------------------------
 
 /**
@@ -514,8 +514,8 @@ export function createMemoryBridge(opts: MemoryBridgeOptions): MemoryBridge {
     if (!plan || trackId == null) return;
     plan.counters.loves++;
     mutationVersion++;
-    // Love forces an immediate generation tick when generation < 3 — the
-    // blueprint §1.6.4 rule. Stabilised tracks (generation ≥ 3) don't snap.
+    // Love forces an immediate generation tick when generation < 3.
+    // Stabilised tracks (generation ≥ 3) don't snap.
     if (plan.lineage.generation < 3) {
       tickGeneration('love');
     }

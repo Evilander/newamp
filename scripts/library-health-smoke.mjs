@@ -143,7 +143,7 @@ assert.equal(health.quality.unknown, 0);
 const compass = buildArchiveCompass(health);
 assert.equal(typeof compass.score, 'number');
 assert.ok(['S', 'A', 'B', 'C', 'D', 'F'].includes(compass.grade), 'archive compass should grade the library');
-assert.ok(compass.moves.some((move) => /ReplayGain|fossils|DSD/.test(`${move.label} ${move.detail}`)), 'archive compass should turn quality signals into next moves');
+assert.ok(compass.moves.some((move) => /ReplayGain|low-bitrate|DSD/.test(`${move.label} ${move.detail}`)), 'archive compass should turn quality signals into next moves');
 assert.equal(health.duplicateGroups.length, 1);
 assert.equal(health.duplicateGroups[0].artist, 'Twin');
 assert.equal(health.duplicateGroups[0].title, 'Same Song');

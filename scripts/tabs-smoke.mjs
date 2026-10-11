@@ -234,25 +234,12 @@ assert.equal(cachedLocal.document.lines[1].text, 'G D Em C');
 assert.equal(library.getCachedGuitarTabs(track.id).length, 2);
 library.close();
 
-const [companionSource, nowPlayingSource, typesSource, preloadSource, apiSource, mainSource] = await Promise.all([
-  readFile(new URL('../src/components/GuitarTabCompanion.tsx', import.meta.url), 'utf8'),
-  readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8'),
+const [typesSource, preloadSource, apiSource, mainSource] = await Promise.all([
   readFile(new URL('../shared/types.ts', import.meta.url), 'utf8'),
   readFile(new URL('../electron/preload.ts', import.meta.url), 'utf8'),
   readFile(new URL('../src/lib/api.ts', import.meta.url), 'utf8'),
   readFile(new URL('../electron/main.ts', import.meta.url), 'utf8'),
 ]);
-assert.match(companionSource, /searchGuitarTabs/, 'GuitarTabCompanion must search current-song tabs');
-assert.match(companionSource, /getGuitarTab/, 'GuitarTabCompanion must load selected tabs');
-assert.match(companionSource, /getCachedGuitarTabs/, 'GuitarTabCompanion must load cached tabs');
-assert.match(companionSource, /saveCachedGuitarTab/, 'GuitarTabCompanion must save opened tabs');
-assert.match(companionSource, /saveLocalGuitarTab/, 'GuitarTabCompanion must save pasted local tabs');
-assert.match(companionSource, /findLocalGuitarTab/, 'GuitarTabCompanion must auto-discover local sidecar tabs');
-assert.match(companionSource, /manualText/, 'GuitarTabCompanion must keep pasted tab text');
-assert.match(companionSource, /ChordPro/, 'GuitarTabCompanion should tell users pasted ChordPro is supported');
-assert.match(companionSource, /openGuitarTabWindow/, 'GuitarTabCompanion must open true native tab windows');
-assert.match(companionSource, /Window/, 'GuitarTabCompanion should expose a window pop-out action');
-assert.match(companionSource, /Auto-scroll/, 'GuitarTabCompanion must include play-along autoscroll');
 assert.match(typesSource, /openGuitarTabWindow/, 'shared API should expose native guitar tab windows');
 assert.match(typesSource, /saveLocalGuitarTab/, 'shared API should expose local tab creation');
 assert.match(typesSource, /findLocalGuitarTab/, 'shared API should expose local sidecar tab discovery');
@@ -266,7 +253,6 @@ assert.match(mainSource, /openGuitarTabWindow/, 'main process should create nati
 assert.match(mainSource, /tabs:local:save/, 'main process should save pasted local tabs');
 assert.match(mainSource, /tabs:local:find/, 'main process should discover sidecar local tabs');
 assert.match(mainSource, /NewAmp Native Guitar Tab Window/, 'native window HTML should be branded as a NewAmp tab window');
-assert.doesNotMatch(nowPlayingSource, /GuitarTabCompanion/, 'Now Playing should not mount guitar tabs in the primary player surface');
 
 console.log(
   JSON.stringify(

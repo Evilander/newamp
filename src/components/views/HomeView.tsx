@@ -422,8 +422,8 @@ export function HomeView(): JSX.Element {
                     onQueue={() => addTracksToQueue(recentTracks)}
                   />
                   <HomeRail
-                    title="Loved Signal"
-                    subtitle="Your strongest manual taste signal"
+                    title="Loved Tracks"
+                    subtitle="Tracks you have loved"
                     tracks={data.loved}
                     pending={loading}
                     compact
@@ -431,7 +431,7 @@ export function HomeView(): JSX.Element {
                     onPlay={(start) => void playQueue(data.loved, start)}
                     onNext={() => queueTracksNext(data.loved)}
                     onQueue={() => addTracksToQueue(data.loved)}
-                    onAction={() => void saveSet('Loved Signal', data.loved)}
+                    onAction={() => void saveSet('Loved Tracks', data.loved)}
                   />
                 </div>
               </div>

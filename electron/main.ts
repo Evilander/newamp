@@ -4278,7 +4278,7 @@ function uiVisualizerProbeSource(): string {
       //    butterchurn produces non-zero pixels here; software WebGL
       //    (which the smoke runs under) drops shader paint and returns
       //    zero pixels regardless of render-loop liveness. So this
-      //    succeeds on Tyler's hardware but never on the smoke.
+      //    succeeds on real GPU hardware but never on the smoke.
       // 2. Sample the engine's FFT sum twice ~600ms apart. This is the
       //    actually load-bearing signal — the silent-sink fix exists to
       //    make these bytes non-zero. If the analyser subtree is alive

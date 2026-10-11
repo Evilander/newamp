@@ -5,10 +5,6 @@ name: Release
 # (skips cleanly when absent — mirrors scripts/sign-artifacts.mjs env-gating),
 # and uploads its artifacts. A final job recomputes the cross-platform checksum
 # manifest + release bundle and drafts a GitHub release.
-#
-# NOTE: the macOS leg uses `npm run package:mac`, added in Phase 1 alongside the
-# package.json `mac` target and entitlements. This workflow only fires on a
-# version tag, so it is safe to land ahead of that.
 
 on:
   push:

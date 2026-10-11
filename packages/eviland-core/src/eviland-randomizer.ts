@@ -57,10 +57,9 @@ export const ARCHETYPES = [
   'lattice',
   'nebula',
   'strobe',
-  // 20 new MilkDrop-variety archetypes (plan §3 archetype expansion). Each
-  // leans on the §2.1–§2.5 primitives (q-slots, radial warp, decayRGB, centre,
-  // echo) so the morphing rotation reads as preset-grade variety, not just
-  // recoloured versions of the same six looks.
+  // 20 new MilkDrop-variety archetypes. Each leans on the q-slot, radial warp,
+  // decayRGB, centre and echo primitives so the morphing rotation reads as
+  // preset-grade variety, not just recoloured versions of the same six looks.
   'vortex',
   'inkwell',
   'supernova',
@@ -310,7 +309,7 @@ interface ArchetypeTemplate {
    * cousin-rhyme rather than twin. Up to 8 slots referenceable as q1..q8.
    */
   qSlots?: QSlotSpec[];
-  // ── Optional §2.2–§2.5 primitive channel specs. Absent = neutral default
+  // ── Optional primitive channel specs. Absent = neutral default
   // (no radial effect, decayRGB balanced, centre 0.5, echo off). When present
   // the sampler emits the matching OperatorConfig Channel — that's how an
   // archetype "owns" a primitive (e.g. supernova has radialZoom + echoZoom).
@@ -2074,7 +2073,7 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     config.mirrorSet = set.slice();
   }
 
-  // ── New primitives (plan §2.1–§2.5). All on derived RNG streams so they
+  // ── New primitives. All on derived RNG streams so they
   // never disturb the main-channel draws above; existing seed→config mappings
   // for the original six archetypes stay stable per-channel even as we add
   // new look-defining knobs. (The archetype *list* itself grew, which is what
@@ -2142,7 +2141,7 @@ const SAFE_RANGES: Record<string, SafeRange> = {
   waveIntensity: { min: 0, max: 3 },
   emitterScale: { min: 0.3, max: 2.8 },
   emitterGain: { min: 0.1, max: 2.3 },
-  // Plan §2.2–§2.5 new primitives. Mutate ranges sit comfortably inside the
+  // New primitives. Mutate ranges sit comfortably inside the
   // evalConfig hard clamps so audio drive can still push past mutate's drift
   // without ever exiting the safe envelope. Keeping mutate's emergence safe
   // matters because the Director invokes it both at section start and during
@@ -2245,7 +2244,7 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
   next.emitterScale = clampSafe('emitterScale', next.emitterScale + rng.gaussian(0, 0.2) * a);
   next.emitterGain = clampSafe('emitterGain', next.emitterGain + rng.gaussian(0, 0.2) * a);
 
-  // ── Mutate the §2.1–§2.5 primitives only when present. Drift respects
+  // ── Mutate the new primitives only when present. Drift respects
   // archetype identity: a tunnel that DOESN'T template echo never grows one
   // mid-drift; an inkwell that DOES template decayB lingering only nudges
   // around that bias. Each clamped via its SAFE_RANGE.

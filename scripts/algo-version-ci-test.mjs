@@ -17,11 +17,15 @@ assert.equal(
 assert.equal(algorithmComparisonBase([], { CI: 'true', NEWAMP_ALGO_BASE: '00000', GITHUB_REF_TYPE: 'tag' }, () => 'v1.0.0\n'), 'v1.0.0');
 
 const code = readFileSync(new URL('./algo-version-guard.mjs', import.meta.url), 'utf8').replace(/^import .*\r?\n/gm, '');
-function runGuard({ version = 1, baseAvailable = true } = {}) {
+function runGuard({ version = 1, baseAvailable = true, commentOnly = false } = {}) {
   const output = [];
   const read = (path, old = false) => path.includes('memory-types') || path.includes('visual-memory')
     ? `export const VISUAL_MEMORY_ALGO_VERSION = ${old ? 1 : version};`
-    : path.includes('randomizer') ? `const ARCHETYPES = [{ gain: ${old ? 1 : 2} }];` : '';
+    : path.includes('randomizer')
+      ? commentOnly
+        ? `const ARCHETYPES = [\n  // ${old ? 'old note' : 'new note'}\n  { gain: 2 /* ${old ? 'a' : 'b'} */ },\n];`
+        : `const ARCHETYPES = [{ gain: ${old ? 1 : 2} }];`
+      : '';
   const sandbox = {
     algorithmComparisonBase, createHash, resolve: (path) => path, existsSync: () => true,
     readFileSync: (path) => read(path),
@@ -44,5 +48,6 @@ function runGuard({ version = 1, baseAvailable = true } = {}) {
 }
 assert.equal(runGuard().status, 1, 'clean CI algorithm change without version bump must fail');
 assert.equal(runGuard({ version: 2 }).status, 0);
+assert.equal(runGuard({ commentOnly: true }).status, 0, 'a comment-only edit must not demand a version bump');
 assert.match(runGuard({ baseAvailable: false }).output, /unavailable/);
 console.log('PASS CI algorithm baseline detects committed changes and fails closed on missing history');

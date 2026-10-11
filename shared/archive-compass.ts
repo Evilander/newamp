@@ -57,17 +57,17 @@ export function buildArchiveCompass(health: LibraryHealth): ArchiveCompass {
   );
   const grade = gradeForScore(score);
   const strengths = topSignals([
-    { label: 'Lossless shelf', value: quality.lossless, tone: 'good' },
-    { label: 'Hi-res masters', value: quality.hiRes, tone: 'good' },
-    { label: 'DSD shelf', value: quality.dsd, tone: quality.dsd ? 'good' : 'neutral' },
+    { label: 'Lossless files', value: quality.lossless, tone: 'good' },
+    { label: 'Hi-res files', value: quality.hiRes, tone: 'good' },
+    { label: 'DSD files', value: quality.dsd, tone: quality.dsd ? 'good' : 'neutral' },
     { label: 'ReplayGain ready', value: quality.replayGainReady, tone: 'good' },
   ]);
   const risks = topSignals([
     { label: 'ReplayGain missing', value: quality.replayGainMissing, tone: quality.replayGainMissing ? 'warn' : 'good' },
-    { label: 'Low bitrate fossils', value: quality.lowBitrate, tone: quality.lowBitrate ? 'bad' : 'good' },
+    { label: 'Low-bitrate files', value: quality.lowBitrate, tone: quality.lowBitrate ? 'bad' : 'good' },
     { label: 'Unknown codecs', value: quality.unknown, tone: quality.unknown ? 'bad' : 'good' },
-    { label: 'Exact duplicate signal', value: duplicateExact, tone: duplicateExact ? 'warn' : 'good' },
-    { label: 'Metadata holes', value: missingTotal, tone: missingTotal ? 'warn' : 'good' },
+    { label: 'Exact duplicates', value: duplicateExact, tone: duplicateExact ? 'warn' : 'good' },
+    { label: 'Missing metadata', value: missingTotal, tone: missingTotal ? 'warn' : 'good' },
   ]);
   const moves = buildMoves(health, { missingTotal, duplicateExact, legacyTotal });
   const profile = profileFor(health, score);
@@ -109,50 +109,50 @@ function buildMoves(
   const moves: ArchiveCompassMove[] = [];
   if (health.quality.replayGainMissing) {
     moves.push({
-      label: 'Level the archive',
-      detail: `${formatCount(health.quality.replayGainMissing)} tracks need ReplayGain before shuffle feels album-safe.`,
+      label: 'Add ReplayGain',
+      detail: `${formatCount(health.quality.replayGainMissing)} tracks have no ReplayGain data, so loudness jumps between albums on shuffle.`,
       query: 'rg:missing',
     });
   }
   if (health.quality.lowBitrate) {
     moves.push({
-      label: 'Audit the fossils',
-      detail: `${formatCount(health.quality.lowBitrate)} low-bitrate files are worth replacing or quarantining.`,
+      label: 'Review low-bitrate files',
+      detail: `${formatCount(health.quality.lowBitrate)} low-bitrate files may be worth replacing.`,
       query: 'quality:low-bitrate',
     });
   }
   if (health.quality.dsd) {
     moves.push({
-      label: 'Mark the DSD shelf',
-      detail: `${formatCount(health.quality.dsd)} DSD files are playable through FFmpeg PCM fallback; native DSD output is a future audiophile lane.`,
+      label: 'Show DSD files',
+      detail: `${formatCount(health.quality.dsd)} DSD files play as PCM through ffmpeg.`,
       query: 'quality:dsd',
     });
   }
   if (health.quality.unknown) {
     moves.push({
-      label: 'Decode the unknowns',
-      detail: `${formatCount(health.quality.unknown)} tracks have codec signals NewAmp cannot classify yet.`,
+      label: 'Show unknown formats',
+      detail: `${formatCount(health.quality.unknown)} tracks use a codec NewAmp cannot classify.`,
       query: 'quality:unknown',
     });
   }
   if (counts.duplicateExact) {
     moves.push({
-      label: 'Collapse mirror copies',
-      detail: `${formatCount(counts.duplicateExact)} exact-looking duplicate signals are ready for review.`,
+      label: 'Review duplicates',
+      detail: `${formatCount(counts.duplicateExact)} tracks look like exact duplicates.`,
       query: null,
     });
   }
   if (counts.missingTotal) {
     moves.push({
-      label: 'Patch the sleeve notes',
-      detail: `${formatCount(counts.missingTotal)} metadata/art gaps are holding back discovery and presentation.`,
+      label: 'Fix missing tags and art',
+      detail: `${formatCount(counts.missingTotal)} tags or covers are missing across the library.`,
       query: 'missing:art',
     });
   }
   if (!moves.length) {
     moves.push({
-      label: 'Curate the crown shelf',
-      detail: 'The obvious archive debts are clean. Build a high-score listening set or a hi-res showcase next.',
+      label: 'Browse hi-res tracks',
+      detail: 'Nothing needs fixing. Browse your hi-res tracks next.',
       query: 'quality:hires',
     });
   }
@@ -160,26 +160,26 @@ function buildMoves(
 }
 
 function profileFor(health: LibraryHealth, score: number): string {
-  if (!health.totals.tracks) return 'Empty Shelf';
+  if (!health.totals.tracks) return 'Empty library';
   const q = health.quality;
-  if (score >= 92 && q.hiRes >= 12) return 'Reference Vault';
-  if (q.dsd >= 1 && q.lossless >= q.lossy) return 'DSD Cabinet';
-  if (q.lossless >= q.lossy * 2 && q.replayGainReady >= q.replayGainMissing) return 'Lossless Library';
-  if (q.lowBitrate + q.unknown + missingMetadataTotal(health) > health.totals.tracks * 0.35) return 'Rescue Crate';
-  if (q.replayGainMissing > q.replayGainReady) return 'Normalization Debt';
-  if (score >= 82) return 'Clean Collector Shelf';
-  return 'Crate-Digger Workbench';
+  if (score >= 92 && q.hiRes >= 12) return 'Hi-res library';
+  if (q.dsd >= 1 && q.lossless >= q.lossy) return 'Lossless with DSD';
+  if (q.lossless >= q.lossy * 2 && q.replayGainReady >= q.replayGainMissing) return 'Mostly lossless';
+  if (q.lowBitrate + q.unknown + missingMetadataTotal(health) > health.totals.tracks * 0.35) return 'Needs cleanup';
+  if (q.replayGainMissing > q.replayGainReady) return 'Needs ReplayGain';
+  if (score >= 82) return 'Mostly clean';
+  return 'Mixed library';
 }
 
 function headlineFor(health: LibraryHealth, score: number): string {
   const q = health.quality;
-  if (!health.totals.tracks) return 'Load a library and NewAmp will read the archive shape.';
-  if (score >= 92) return 'This library is close to reference-grade.';
-  if (q.dsd) return 'There is a DSD shelf here; NewAmp can see it and play it through PCM fallback.';
-  if (q.replayGainMissing > q.replayGainReady) return 'The archive is playable, but loudness normalization is the main drag.';
-  if (q.lowBitrate) return 'The weak signal is not taste; it is old encodes hiding in the shelf.';
-  if (missingMetadataTotal(health)) return 'The collection has enough music; the next win is presentation metadata.';
-  return 'The archive is coherent. Now it is ready for deeper discovery.';
+  if (!health.totals.tracks) return 'Add a music folder to see how healthy your library is.';
+  if (score >= 92) return 'Very few problems found.';
+  if (q.dsd) return 'Your library includes DSD files, which NewAmp plays as PCM.';
+  if (q.replayGainMissing > q.replayGainReady) return 'More tracks lack ReplayGain data than have it, so loudness varies between albums.';
+  if (q.lowBitrate) return 'Some files are low-bitrate and may be worth replacing.';
+  if (missingMetadataTotal(health)) return 'Some tracks are missing tags or cover art.';
+  return 'No problems found.';
 }
 
 function detailFor(
@@ -191,7 +191,7 @@ function detailFor(
     `${formatCount(q.lossless)} lossless`,
     `${formatCount(q.hiRes)} hi-res`,
     `${formatCount(q.ffmpegFallback)} fallback codecs`,
-    `${formatCount(counts.duplicateExact)} exact duplicate signals`,
+    `${formatCount(counts.duplicateExact)} exact duplicates`,
     `${formatCount(counts.missingTotal)} metadata gaps`,
   ].join(' / ');
 }

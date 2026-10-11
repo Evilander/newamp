@@ -6,7 +6,7 @@
 // functions protocol.handle('newamp') uses in main.ts) across all four
 // production paths:
 //   1. native MP3      → fileRangeResponse        (hand-rolled 206s)
-//   2. native FLAC     → fileRangeResponse        (Tyler's library majority)
+//   2. native FLAC     → fileRangeResponse
 //   3. cold-cache .wma → seekableTranscodeResponse (first play, ffmpeg -ss)
 //   4. warm-cache .wma → fileRangeResponse on the finalized cached FLAC
 //

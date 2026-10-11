@@ -176,7 +176,7 @@ assert.deepEqual(
           kind: 'music-server',
           connectionId: 'remembered',
           itemId: 'remote/1',
-          track: { ...serverTrack, id: -45, path: 'file:///C:/Users/evela/Music/secret.flac' },
+          track: { ...serverTrack, id: -45, path: 'file:///C:/Users/someone/Music/secret.flac' },
         }],
         index: 0,
         currentTrackId: -45,
