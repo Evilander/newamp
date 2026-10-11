@@ -1,4 +1,10 @@
-import type { PlaybackMode } from './types.js';
+import { isShuffleMode, repeatModeOf, type PlaybackMode } from './types.js';
+
+/**
+ * With a drive or server offline every queued track fails the same way, and
+ * repeat-all or shuffle would otherwise skip through them forever.
+ */
+export const MAX_CONSECUTIVE_PLAYBACK_FAILURES = 8;
 
 export interface PlaybackErrorAdvanceInput {
   error: string | null;
@@ -7,12 +13,24 @@ export interface PlaybackErrorAdvanceInput {
   queueLength: number;
   mode: PlaybackMode;
   lastErrorKey: string | null;
+  /** Shuffle with repeat off plays each track once; a finished cycle ends the queue. */
+  shuffleCycleComplete?: boolean;
+  /** Failures in a row before this one; the caller resets it once a track plays. */
+  consecutiveFailures?: number;
 }
 
 export interface PlaybackErrorAdvanceDecision {
   key: string | null;
   shouldAdvance: boolean;
   shouldStop: boolean;
+  /** Set only when the run of failures hit the limit and playback gave up. */
+  gaveUp?: true;
+}
+
+export function playbackFailureLimit(queueLength: number): number {
+  const length = Math.trunc(Number(queueLength));
+  if (!Number.isFinite(length) || length < 1) return 1;
+  return Math.min(length, MAX_CONSECUTIVE_PLAYBACK_FAILURES);
 }
 
 export function playbackErrorKey(input: {
@@ -45,6 +63,17 @@ export function resolvePlaybackErrorAdvance(input: PlaybackErrorAdvanceInput): P
     return { key, shouldAdvance: false, shouldStop: true };
   }
   if (queueLength === 1) return { key, shouldAdvance: false, shouldStop: true };
+  const failuresInARow = Math.max(0, Math.trunc(Number(input.consecutiveFailures) || 0)) + 1;
+  if (failuresInARow >= playbackFailureLimit(queueLength)) {
+    return { key, shouldAdvance: false, shouldStop: true, gaveUp: true };
+  }
+  if (
+    isShuffleMode(input.mode) &&
+    repeatModeOf(input.mode) === 'off' &&
+    input.shuffleCycleComplete === true
+  ) {
+    return { key, shouldAdvance: false, shouldStop: true };
+  }
   if (index < queueLength - 1) return { key, shouldAdvance: true, shouldStop: false };
   // Any mode other than plain 'normal' (repeat-one/-all, shuffle, or a
   // shuffle+repeat combo) keeps playing past the end of the queue.

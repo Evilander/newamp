@@ -20,10 +20,16 @@ export function insertTracksNext(
 ): QueueInsertResult {
   const normalizedIndex = normalizeCurrentIndex(currentIndex, queue.length);
   if (!tracks.length) return { queue: [...queue], index: normalizedIndex };
-  const insertAt = normalizedIndex >= 0 ? normalizedIndex + 1 : 0;
+  const insertAt = playNextInsertAt(queue.length, currentIndex);
   const next = [...queue];
   next.splice(insertAt, 0, ...tracks);
   return { queue: next, index: normalizedIndex };
+}
+
+/** Where Play Next puts new tracks: right after the current one, or first in an idle queue. */
+export function playNextInsertAt(queueLength: number, currentIndex: number): number {
+  const normalizedIndex = normalizeCurrentIndex(currentIndex, queueLength);
+  return normalizedIndex >= 0 ? normalizedIndex + 1 : 0;
 }
 
 export function appendTrackToQueue(
