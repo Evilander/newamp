@@ -27,6 +27,7 @@
 
 import type { EvilandFrame } from './eviland-audio';
 import type { PaletteConfig } from './eviland-operators';
+import { NAN_GLSL } from './eviland-gl';
 
 // ---------------------------------------------------------------------------
 // Pure audio → impulse seam (no GL; unit-tested by scripts/eviland-fluid-test).
@@ -331,10 +332,25 @@ export function fluidForcesFromFrame(frame: EvilandFrame): FluidForce[] {
  */
 export function dyeDissipationFromFrame(frame: EvilandFrame): number {
   // Curve: at energy 0 we hold ~0.94 (heavy decay), at energy 1 ~0.995 (almost
-  // none). Tuned so a sustained loud passage keeps dye coherent for a few
-  // seconds but never piles up to white.
+  // none). A look's bias is added on top, and clampDyeDissipation keeps the
+  // sum below 1 so a sustained loud passage stays coherent for a few seconds
+  // and then drains instead of piling up to white.
   const e = frame.energy < 0 ? 0 : frame.energy > 1 ? 1 : frame.energy;
   return 0.94 + e * 0.055;
+}
+
+/**
+ * Dye drains by this factor per 1/60 s step. Exactly 1 drains nothing while
+ * the splats keep adding, so the field's total dye grows for as long as the
+ * music plays; just under 1 settles at a fixed level within about a minute.
+ */
+export const MAX_DYE_DISSIPATION = 0.997;
+const MIN_DYE_DISSIPATION = 0.6;
+
+/** Bound a dissipation value to the range the solver accepts; NaN drains hard. */
+export function clampDyeDissipation(value: number): number {
+  if (!(value >= MIN_DYE_DISSIPATION)) return MIN_DYE_DISSIPATION;
+  return value <= MAX_DYE_DISSIPATION ? value : MAX_DYE_DISSIPATION;
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +396,25 @@ void main(){
   gl_Position = vec4(a_pos, 0.0, 1.0);
 }`;
 
+// A NaN or Inf texel in a ping-pong target is advected into its neighbours on
+// every pass and never leaves. A component that is NaN (found by its bits) or
+// out of range is replaced with zero instead of passed on.
+const FINITE_GLSL = `
+${NAN_GLSL}
+float finite1(float x){ return (notNumber(x) || abs(x) >= 1e4) ? 0.0 : x; }
+vec2 finite2(vec2 v){ return vec2(finite1(v.x), finite1(v.y)); }
+vec3 finite3(vec3 v){ return vec3(finite1(v.x), finite1(v.y), finite1(v.z)); }
+vec4 finite4(vec4 v){ return vec4(finite3(v.xyz), finite1(v.w)); }
+`;
+
+// Resamples a grid into one of another size when the field is resized.
+const COPY_FRAG = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 o;
+uniform sampler2D u_src;
+void main(){ o = texture(u_src, v_uv); }`;
+
 // Pass 1 — semi-Lagrangian self-advection (Stam). Velocity is in UV/s, so the
 // backtrace offset is simply v*dt (no texel conversion). Dissipation is the
 // per-step decay that keeps total energy bounded.
@@ -390,9 +425,10 @@ out vec4 o;
 uniform sampler2D u_velocity;
 uniform float u_dt;
 uniform float u_dissipation;
+${FINITE_GLSL}
 void main(){
-  vec2 coord = v_uv - texture(u_velocity, v_uv).xy * u_dt;
-  o = vec4(texture(u_velocity, coord).xy * u_dissipation, 0.0, 1.0);
+  vec2 coord = v_uv - finite2(texture(u_velocity, v_uv).xy) * u_dt;
+  o = vec4(finite2(texture(u_velocity, coord).xy * u_dissipation), 0.0, 1.0);
 }`;
 
 // Pass 2 — force splat. Additive Gaussian impulse: base + force·exp(−|p|²/r²).
@@ -444,6 +480,7 @@ uniform sampler2D u_curl;
 uniform vec2 u_texelSize;
 uniform float u_vorticity;
 uniform float u_dt;
+${FINITE_GLSL}
 void main(){
   float L = texture(u_curl, v_uv - vec2(u_texelSize.x, 0.0)).x;
   float R = texture(u_curl, v_uv + vec2(u_texelSize.x, 0.0)).x;
@@ -453,7 +490,7 @@ void main(){
   vec2 grad = 0.5 * vec2(abs(R) - abs(L), abs(T) - abs(B)); // ∇|ω|
   vec2 N = grad / (length(grad) + 1e-5);
   vec2 force = u_vorticity * c * vec2(N.y, -N.x);           // ε(N × ω)
-  o = vec4(texture(u_velocity, v_uv).xy + force * u_dt, 0.0, 1.0);
+  o = vec4(finite2(texture(u_velocity, v_uv).xy + force * u_dt), 0.0, 1.0);
 }`;
 
 // Pass 5 — divergence of velocity: ∇·u with half-rdx = 0.5, h = 1 texel.
@@ -503,10 +540,10 @@ uniform sampler2D u_velocity;
 uniform sampler2D u_dye;
 uniform float u_dt;
 uniform float u_dissipation;
+${FINITE_GLSL}
 void main(){
-  vec2 coord = v_uv - texture(u_velocity, v_uv).xy * u_dt;
-  vec4 d = texture(u_dye, coord) * u_dissipation;
-  o = d;
+  vec2 coord = v_uv - finite2(texture(u_velocity, v_uv).xy) * u_dt;
+  o = finite4(texture(u_dye, coord) * u_dissipation);
 }`;
 
 // Dye splat — same Gaussian profile as the velocity splat, with the impulse
@@ -521,11 +558,17 @@ uniform vec2 u_point;
 uniform vec3 u_color;   // dye RGB, pre-multiplied by amount
 uniform float u_amount; // dye scalar (additive scale)
 uniform float u_radius;
+${FINITE_GLSL}
 void main(){
   vec2 p = v_uv - u_point;
   float g = exp(-dot(p, p) / (u_radius * u_radius));
-  vec4 prev = texture(u_dye, v_uv);
-  o = vec4(prev.rgb + u_color * u_amount * g, max(prev.a, u_amount * g));
+  vec4 prev = finite4(texture(u_dye, v_uv));
+  vec3 dye = prev.rgb + u_color * u_amount * g;
+  // Past a few units of brightness new dye eases the field back down, so
+  // splats that keep landing level off instead of growing without bound.
+  float peak = max(dye.r, max(dye.g, dye.b));
+  dye /= 1.0 + 0.02 * max(0.0, peak - 4.0);
+  o = vec4(finite3(dye), max(prev.a, u_amount * g));
 }`;
 
 // Pass 7 — projection: u' = u − ∇p with the same half-rdx = 0.5 stencil as
@@ -538,13 +581,14 @@ out vec4 o;
 uniform sampler2D u_pressure;
 uniform sampler2D u_velocity;
 uniform vec2 u_texelSize;
+${FINITE_GLSL}
 void main(){
   float L = texture(u_pressure, v_uv - vec2(u_texelSize.x, 0.0)).x;
   float R = texture(u_pressure, v_uv + vec2(u_texelSize.x, 0.0)).x;
   float B = texture(u_pressure, v_uv - vec2(0.0, u_texelSize.y)).x;
   float T = texture(u_pressure, v_uv + vec2(0.0, u_texelSize.y)).x;
   vec2 v = texture(u_velocity, v_uv).xy - 0.5 * vec2(R - L, T - B);
-  o = vec4(v, 0.0, 1.0);
+  o = vec4(finite2(v), 0.0, 1.0);
 }`;
 
 // ---- GL helpers (small local copies; module is self-contained like particle-flow.ts) ----
@@ -654,7 +698,10 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
   // renderer composites it into the visible output via a `liquidMix` channel.
   const dyeAdvectProg = link(gl, QUAD_VERT, DYE_ADVECT_FRAG);
   const dyeSplatProg = link(gl, QUAD_VERT, DYE_SPLAT_FRAG);
-  const allProgs = [advectProg, splatProg, curlProg, vorticityProg, divergenceProg, pressureProg, gradientProg, dyeAdvectProg, dyeSplatProg];
+  // Only used to carry the old grids across a resize; without it the new
+  // ones start from rest.
+  const copyProg = link(gl, QUAD_VERT, COPY_FRAG);
+  const allProgs = [advectProg, splatProg, curlProg, vorticityProg, divergenceProg, pressureProg, gradientProg, dyeAdvectProg, dyeSplatProg, copyProg];
   if (!advectProg || !splatProg || !curlProg || !vorticityProg || !divergenceProg || !pressureProg || !gradientProg || !dyeAdvectProg || !dyeSplatProg) {
     for (const p of allProgs) if (p) gl.deleteProgram(p);
     return null;
@@ -728,6 +775,10 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     amount: gl.getUniformLocation(dyeSplatProg, 'u_amount'),
     radius: gl.getUniformLocation(dyeSplatProg, 'u_radius'),
   };
+  const copyUni = copyProg ? {
+    aPos: gl.getAttribLocation(copyProg, 'a_pos'),
+    src: gl.getUniformLocation(copyProg, 'u_src'),
+  } : null;
 
   // Sampler→unit assignments are static; set them once.
   gl.useProgram(advectProg); gl.uniform1i(advectUni.velocity, 0);
@@ -739,6 +790,7 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
   gl.useProgram(gradientProg); gl.uniform1i(gradientUni.pressure, 0); gl.uniform1i(gradientUni.velocity, 1);
   gl.useProgram(dyeAdvectProg); gl.uniform1i(dyeAdvectUni.velocity, 0); gl.uniform1i(dyeAdvectUni.dye, 1);
   gl.useProgram(dyeSplatProg); gl.uniform1i(dyeSplatUni.dye, 0);
+  if (copyProg && copyUni) { gl.useProgram(copyProg); gl.uniform1i(copyUni.src, 0); }
 
   // ---- Render targets ----
   let width = Math.max(2, Math.floor(opts.width));
@@ -830,12 +882,15 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     if (!targets) return;
     // Clamp dt so tab-switch hitches can't fling the field and high-Hz
     // displays can't starve the advection.
-    const stepDt = Math.min(0.1, Math.max(0, dt));
+    const stepDt = Number.isFinite(dt) ? Math.min(0.1, Math.max(0, dt)) : 0;
     const tx = 1 / width;
     const ty = 1 / height;
     // Default dye dissipation is just under 1 — most callers (the renderer)
     // override this from dyeDissipationFromFrame so silence drains the field.
-    const dyeDiss = params.dyeDissipation ?? 0.985;
+    const dyeDiss = clampDyeDissipation(params.dyeDissipation ?? 0.985);
+    // A NaN parameter would write NaN into the velocity grid every step.
+    const velocityDiss = Number.isFinite(params.dissipation) ? params.dissipation : 0.985;
+    const vorticity = Number.isFinite(params.vorticity) ? params.vorticity : 0;
 
     // The solver owns blend/viewport/framebuffer state for its passes; the
     // renderer re-establishes its own viewport per pass as eviland already does.
@@ -846,7 +901,7 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     gl.useProgram(advectProg);
     bindQuad(advectUni.aPos);
     gl.uniform1f(advectUni.dt, stepDt);
-    gl.uniform1f(advectUni.dissipation, Math.pow(params.dissipation, stepDt * 60));
+    gl.uniform1f(advectUni.dissipation, Math.pow(velocityDiss, stepDt * 60));
     bindTex(0, velRead.tex);
     drawTo(velWrite);
     swapVel();
@@ -863,7 +918,7 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
         const f = forces[i];
         // forceCount is clamped to forces.length above, so this index is
         // always in range; the guard just satisfies noUncheckedIndexedAccess.
-        if (!f) continue;
+        if (!f || !Number.isFinite(f.x + f.y + f.dx + f.dy + f.radius)) continue;
         // Skip dye-only entries (dx=dy=0): they don't move the fluid, only
         // tint it. Saves a no-op fullscreen draw on every busy frame.
         if (f.dx === 0 && f.dy === 0) continue;
@@ -887,7 +942,7 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     gl.useProgram(vorticityProg);
     bindQuad(vorticityUni.aPos);
     gl.uniform2f(vorticityUni.texelSize, tx, ty);
-    gl.uniform1f(vorticityUni.vorticity, params.vorticity);
+    gl.uniform1f(vorticityUni.vorticity, vorticity);
     gl.uniform1f(vorticityUni.dt, stepDt);
     bindTex(0, velRead.tex);
     bindTex(1, targets.curl.tex);
@@ -954,6 +1009,7 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
         const color = f.color;
         const amt = f.dye;
         if (!color || !amt || amt <= 0) continue;
+        if (!Number.isFinite(f.x + f.y + f.radius + amt + color[0] + color[1] + color[2])) continue;
         gl.uniform2f(dyeSplatUni.point, f.x, f.y);
         gl.uniform3f(dyeSplatUni.color, color[0], color[1], color[2]);
         gl.uniform1f(dyeSplatUni.amount, amt);
@@ -987,6 +1043,19 @@ export function createFluidSim(gl: WebGL2RenderingContext, opts: FluidSimOptions
     if (!next) {
       console.error('[newamp] eviland-fluid resize failed; keeping previous grid');
       return;
+    }
+    // Velocity and dye are in UV units, so the old grids stretch straight
+    // onto the new ones and the motion carries on across the resize.
+    if (targets && copyProg && copyUni) {
+      gl.disable(gl.BLEND);
+      gl.useProgram(copyProg);
+      bindQuad(copyUni.aPos);
+      gl.viewport(0, 0, nw, nh);
+      bindTex(0, velRead.tex);
+      drawTo(next.velA);
+      bindTex(0, dyeRead.tex);
+      drawTo(next.dyeA);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
     if (targets) disposeTargets(targets);
     targets = next;

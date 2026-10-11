@@ -43,16 +43,20 @@
 //
 // Caller responsibility: createEvilandRenderer returns null on missing WebGL2
 // or EXT_color_buffer_float — fall back to butterchurn / canvas downstream.
+// The renderer asks the browser to restore a lost context and rebuilds itself
+// on it; options.onContextEvent says when, for hosts that would rather paint
+// something else if the context never comes back.
 
 import type { EvilandFrame } from './eviland-audio';
-import { evalConfig, createDynamics, defaultConfig, CLASSIC_COMPOSITION, type EvilandDynamics, type OperatorConfig } from './eviland-operators';
+import { evalConfig, createDynamics, defaultConfig, sectionSeedFor, CLASSIC_COMPOSITION, type EvilandDynamics, type OperatorConfig } from './eviland-operators';
 import { createReactionDiffusion, prepareReactionDiffusion } from './eviland-reaction-diffusion';
 import { createPhysarum, preparePhysarum } from './eviland-physarum';
 import { createSceneOverlay } from './scene-overlay';
 import { mulberry32, hashSeed } from './eviland-rng';
-import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame, type FluidSim } from './eviland-fluid';
+import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame, clampDyeDissipation, type FluidSim } from './eviland-fluid';
 import { applyScoreCues } from './eviland-conductor';
 import { NOISE_GLSL, MORPH_GLSL } from './eviland-morph';
+import { holdThroughContextLoss, NAN_GLSL } from './eviland-gl';
 
 export interface EvilandPalette {
   accent: [number, number, number]; // each channel 0..1
@@ -70,12 +74,29 @@ export interface EvilandRenderer {
   getConfig(): OperatorConfig;
   /** Upload time-domain samples (Uint8, 128 = silence) for the waveform layer. */
   setWaveform(samples: Uint8Array): void;
-  dispose(): void;
+  /**
+   * Free the renderer's GPU resources. The canvas and its context belong to
+   * the caller and stay usable (a new renderer can be made on the same
+   * canvas); pass releaseContext to give the context up too when the canvas
+   * is being thrown away.
+   */
+  dispose(options?: { releaseContext?: boolean }): void;
 }
 
 export interface EvilandOptions {
   smoke?: boolean;
   quality?: 'high' | 'medium' | 'low';
+  /**
+   * Most pixels the canvas may hold, whatever size and pixel ratio resize()
+   * is given. Defaults to 2.5 MP on high, 1.6 MP on medium, 0.8 MP on low.
+   */
+  maxPixels?: number;
+  /**
+   * The GPU took the context away ('lost'), the renderer is running again on
+   * the restored one ('restored'), or the restored context could not be built
+   * on ('failed'). Frames are skipped while it is gone.
+   */
+  onContextEvent?: (event: 'lost' | 'restored' | 'failed') => void;
   /** Isolated emitter randomness for replay and deterministic visual tests. */
   seed?: string;
   /**
@@ -96,6 +117,43 @@ export interface EvilandOptions {
 const METER_W = 16;
 const METER_H = 9;
 const INITIAL_EXPOSURE = 1.6;
+const WAVE_SAMPLES = 256;
+
+// The spectrum-bars waveform is a filled band where the line and the ring are
+// hairlines, so the same intensity lights ten times the area or more and the
+// feedback sums it into a flat wash that exposure cannot pull back (it floors
+// at 0.85). Two things keep the bars readable. WAVE_BARS_GAIN draws a bars
+// intensity at the strength a line of that number reads at. And what the loop
+// settles at, fill x drive / (1 - decay), is held to WAVE_BARS_BUDGET, which
+// is what stops a loud passage, a long trail or an explicit Bars choice on a
+// feedback-heavy look from washing the frame out.
+const WAVE_MODE_BARS = 4;
+const WAVE_BARS = 64;
+const WAVE_BARS_GAIN = 0.1;
+const WAVE_BARS_BUDGET = 0.12;
+// A quiet passage still gets budgeted as if the bars covered this much of the
+// frame, so a thin band of short bars cannot burn in at a high drive.
+const WAVE_BARS_MIN_FILL = 0.2;
+
+/** Share of the frame the bars cover at the current samples, as the bars shader draws them. */
+function waveBarsFill(samples: Uint8Array, scale: number): number {
+  const per = WAVE_SAMPLES / WAVE_BARS;
+  const mid = per >> 1;
+  let sum = 0;
+  for (let b = 0; b < WAVE_BARS; b++) {
+    // The shader reads the bar's centre, halfway between two texels.
+    const level = ((samples[b * per + mid - 1]! + samples[b * per + mid]!) / 2 - 127.5) / 255;
+    sum += Math.min(1, 4 * Math.abs(level) * scale);
+  }
+  // 7% of each bar's width is gap.
+  return (sum / WAVE_BARS) * 0.93;
+}
+
+/** The strength the bars are drawn at: the look's intensity, held inside the feedback budget. */
+function waveBarsDrive(intensity: number, samples: Uint8Array, scale: number, decay: number): number {
+  const fill = Math.max(WAVE_BARS_MIN_FILL, waveBarsFill(samples, scale));
+  return Math.min(intensity * WAVE_BARS_GAIN, (WAVE_BARS_BUDGET * (1 - decay)) / fill);
+}
 
 const QUAD_VERT = `#version 300 es
 precision highp float;
@@ -181,11 +239,19 @@ vec3 rotateHue(vec3 col, float ang){
   float i2 = c*i - s*q;
   float q2 = s*i + c*q;
   // YIQ → RGB
-  return vec3(
+  vec3 rot = vec3(
     y + 0.956*i2 + 0.621*q2,
     y - 0.272*i2 - 0.647*q2,
     y - 1.106*i2 + 1.703*q2
   );
+  // Constant luma is not constant peak: a rotated saturated colour can come
+  // out well above the channel it started from, with the others below zero,
+  // and a long trail feeds that back every frame. Drop the negative lobes
+  // and hold the peak where it was.
+  rot = max(rot, vec3(0.0));
+  float was = max(col.r, max(col.g, col.b));
+  float now = max(rot.r, max(rot.g, rot.b));
+  return rot * (max(was, 0.0) / max(now, 1e-4));
 }
 
 // Fold polar angle into 1/N of the circle then mirror — classic kaleidoscope.
@@ -345,6 +411,13 @@ float revealAt(vec2 uv){
   return 1.0 - smoothstep(t - W, t + W, flipTime(uv));
 }
 
+// Neither a NaN nor an Inf survives into the next frame's feedback, and
+// neither does a negative lobe or a runaway highlight. NaN is found by its
+// bits and goes to zero with the negatives; Inf is held at the cap.
+${NAN_GLSL}
+float settle1(float x){ return notNumber(x) ? 0.0 : clamp(x, 0.0, 1024.0); }
+vec3 settle(vec3 c){ return vec3(settle1(c.r), settle1(c.g), settle1(c.b)); }
+
 void main(){
   vec2 uv = v_uv;
   float rev = 1.0;
@@ -353,10 +426,16 @@ void main(){
   if (u_morphT >= 0.0) {
     rev = revealAt(uv);
     edge = 4.0 * rev * (1.0 - rev);
-    // The front's normal points into the incoming look; sampling from that
-    // side moves the picture out of it, so the new look shoulders the old aside.
-    vec2 g = vec2(dFdx(rev), dFdy(rev));
-    push = g / (length(g) + 1e-5) * edge * u_bulge * u_steps;
+    if (edge > 1e-4) {
+      // The front's normal points into the incoming look; sampling from that
+      // side moves the picture out of it, so the new look shoulders the old
+      // aside. Central differences one texel out: dFdx and dFdy hold one
+      // value per 2x2 quad, which printed as square blocks along the front.
+      vec2 g = vec2(
+        revealAt(uv + vec2(u_texel.x, 0.0)) - revealAt(uv - vec2(u_texel.x, 0.0)),
+        revealAt(uv + vec2(0.0, u_texel.y)) - revealAt(uv - vec2(0.0, u_texel.y)));
+      push = g / (length(g) + 1e-5) * edge * u_bulge * u_steps;
+    }
   }
 
   Tap t;
@@ -395,7 +474,7 @@ void main(){
   vec3 decayRGB = clamp(decay + vec3(decayRad * t.r2), vec3(0.65), vec3(0.99));
   prev *= pow(decayRGB, vec3(u_steps));
   prev += u_membrane * edge * edge;
-  o = vec4(prev, 1.0);
+  o = vec4(settle(prev), 1.0);
 }`;
 
 // Pillar 1: causal emitters. One instanced quad per active emitter; the
@@ -597,7 +676,7 @@ void main(){
     a = smoothstep(th, 0.0, abs(r - r0));
   } else if (mode == 4) {
     // Spectrum bars: vertical bars whose height tracks |sample|.
-    float bars = 64.0;
+    float bars = ${WAVE_BARS.toFixed(1)};
     float bx = (floor(uv.x * bars) + 0.5) / bars;
     float w = abs(samp(bx)) * 2.0 * u_scale;
     float inBar = step(0.5 - w, uv.y) * step(uv.y, 0.5 + w);
@@ -623,13 +702,17 @@ in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_src;
 uniform vec2 u_cell;      // size of one meter cell in uv
+${NAN_GLSL}
+float tap(float x){ return notNumber(x) ? 0.0 : x; }
 void main(){
   float total = 0.0;
   for (int y = 0; y < 6; y++) {
     for (int x = 0; x < 6; x++) {
       vec2 offset = (vec2(float(x), float(y)) + 0.5) / 6.0 - 0.5;
       vec3 c = texture(u_src, v_uv + offset * u_cell).rgb;
-      total += max(c.r, max(c.g, c.b));
+      // A NaN tap would hold the exposure state at NaN; count it as dark.
+      float peak = max(tap(c.r), max(tap(c.g), tap(c.b)));
+      total += (peak >= 0.0 && peak < 1e4) ? peak : 0.0;
     }
   }
   o = vec4(total / 36.0, 0.0, 0.0, 1.0);
@@ -646,6 +729,7 @@ uniform sampler2D u_meter;
 uniform sampler2D u_prev;
 uniform float u_targetKey;
 uniform float u_dt;
+${NAN_GLSL}
 void main(){
   ivec2 size = textureSize(u_meter, 0);
   float total = 0.0;
@@ -660,12 +744,18 @@ void main(){
   float key = mix(total / float(size.x * size.y), brightest, 0.7);
   float wanted = clamp(u_targetKey / max(key, 0.02), 0.85, 4.5);
   float prev = texelFetch(u_prev, ivec2(0), 0).r;
+  // One bad value in the state texel would otherwise be the exposure for good.
+  if (notNumber(prev) || prev <= 0.0 || prev >= 64.0) prev = ${INITIAL_EXPOSURE.toFixed(2)};
   float tau = wanted > prev ? 1.6 : 0.3;
   o = vec4(mix(prev, wanted, 1.0 - exp(-u_dt / tau)), 0.0, 0.0, 1.0);
 }`;
 
 // Bloom — threshold pass extracts bright pixels (after exposure, so a dim
-// look still blooms once the meter has lifted it).
+// look still blooms once the meter has lifted it). Exposure aims the brightest
+// block at 0.55 to 0.95, so the knee sits near the top of that range: a lower
+// one passes most of the structure and the blur lays a grey veil over it.
+const BLOOM_THRESHOLD = 0.6;
+const BLOOM_KNEE = 0.35;
 const THRESHOLD_FRAG = `#version 300 es
 precision highp float;
 in vec2 v_uv;
@@ -676,7 +766,7 @@ uniform float u_threshold;
 void main(){
   vec3 c = texture(u_src, v_uv).rgb * texelFetch(u_exposure, ivec2(0), 0).r;
   float b = max(c.r, max(c.g, c.b));
-  float k = smoothstep(u_threshold, u_threshold + 0.4, b);
+  float k = smoothstep(u_threshold, u_threshold + ${BLOOM_KNEE.toFixed(2)}, b);
   o = vec4(c * k, 1.0);
 }`;
 
@@ -766,6 +856,9 @@ void main(){
   o = vec4(outC, 1.0);
 }`;
 
+/** Dye below this liquidMix is laid over the field; above it the dye is mixed in (see COMPOSE_FRAG). */
+export const DYE_LAID_BELOW = 0.3;
+
 // Final composite: map the field through a palette ramp (bg → accent → light)
 // so the image has REAL COLOUR not a brightness-to-white ramp; mix bloom in at
 // reduced weight; chromatic aberration on snare+hat only; ACES tone-map +
@@ -783,9 +876,11 @@ uniform float u_liquidMix;   // 0 dye invisible (legacy look) .. 1 dye-dominant
 uniform float u_echoAlpha;   // 0 = echo pass off
 uniform float u_snapshotMix; // 0 = no crossfade in flight; 1 = full from-snapshot
 uniform vec3  u_bg;
-uniform vec3  u_accent;
-uniform vec3  u_dark;
-uniform vec3  u_light;
+
+const float DYE_LAID_BELOW = ${DYE_LAID_BELOW.toFixed(2)};
+
+${NAN_GLSL}
+float settle1(float x){ return notNumber(x) ? 0.0 : clamp(x, 0.0, 1024.0); }
 
 void main(){
   vec2 uv = v_uv;
@@ -819,7 +914,9 @@ void main(){
 
   // Sources already carry the chosen palette. Keep their HDR values and
   // local contrast; a second brightness-to-palette map would flatten them.
-  vec3 colour = max(vec3(0.0), fieldC);
+  // (NaN and Inf from a source pass are cut here, before the meter and the
+  // bloom pyramid can spread them over the frame.)
+  vec3 colour = vec3(settle1(fieldC.r), settle1(fieldC.g), settle1(fieldC.b));
 
   if (u_liquidMix > 0.0) {
     vec3 dye = texture(u_dye, uv).rgb;
@@ -832,7 +929,14 @@ void main(){
     // the dye itself had drained.
     vec3 floorCol = u_bg * 0.08;
     vec3 dyeFull = max(dyeSat, floorCol);
-    colour = mix(colour, dyeFull, clamp(u_liquidMix, 0.0, 1.0));
+    float m = clamp(u_liquidMix, 0.0, 1.0);
+    // A look with a trace of dye lays it over the picture. Mixing toward the
+    // dye would swap that share of the field's own light for the dye's near
+    // empty ground and darken the whole look. Dye-led looks still mix, and the
+    // two blend over a short range so a fade across it does not step.
+    vec3 laid = colour + dyeSat * m;
+    vec3 mixed = mix(colour, dyeFull, m);
+    colour = mix(laid, mixed, smoothstep(DYE_LAID_BELOW, DYE_LAID_BELOW + 0.15, m));
   }
 
   o = vec4(colour, 1.0);
@@ -840,6 +944,7 @@ void main(){
 
 const POST_FRAG = `#version 300 es
 precision highp float;
+precision highp int;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_field;
@@ -848,24 +953,46 @@ uniform sampler2D u_exposure;
 uniform float u_bloomIntensity;
 uniform float u_saturation;
 uniform float u_gain;        // score cues: <1 dims into a build / blackout, >1 flashes a drop
+uniform float u_frame;       // frame counter, moves the dither pattern
 uniform vec3 u_bg;
-uniform vec3 u_hueShift;
+
+${NAN_GLSL}
+float settle1(float x){ return notNumber(x) ? 0.0 : clamp(x, 0.0, 1024.0); }
+
+uint lowbias(uint x) {
+  x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+  return x;
+}
+
 void main() {
   // Bloom was extracted from the exposed image, so only the field is scaled.
-  vec3 colour = max(vec3(0.0), texture(u_field, v_uv).rgb * texelFetch(u_exposure, ivec2(0), 0).r
-    + texture(u_bloom, v_uv).rgb * u_bloomIntensity * 0.5) * u_gain;
-  // Visibility now follows all sources, including dye and its bloom.
+  vec3 lit = texture(u_field, v_uv).rgb * texelFetch(u_exposure, ivec2(0), 0).r
+    + texture(u_bloom, v_uv).rgb * u_bloomIntensity * 0.5;
+  vec3 colour = vec3(settle1(lit.r), settle1(lit.g), settle1(lit.b)) * u_gain;
+  // Visibility now follows all sources, including dye and its bloom. The
+  // ground is added under the picture rather than blended with it, so the
+  // faint end of a trail keeps every level it has.
   float light = max(colour.r, max(colour.g, colour.b));
-  colour = mix(u_bg * 0.12, colour, smoothstep(0.0, 0.08, light));
-  colour *= u_hueShift;
+  colour += u_bg * 0.12 * (1.0 - smoothstep(0.0, 0.08, light));
   float luma = dot(colour, vec3(0.299, 0.587, 0.114));
   colour = mix(vec3(luma), colour, u_saturation);
   colour *= 0.88 + (1.0 - smoothstep(0.45, 1.0, length(v_uv - 0.5))) * 0.18;
   // Shoulder on the peak channel, then scale RGB together: highlights roll
   // off toward full brightness at their own hue instead of clipping to white.
+  // The very hottest pixels first give up some of their colour toward the
+  // peak, so a kick or snare burst has a white-hot centre, not a flat disc.
   float peak = max(colour.r, max(colour.g, colour.b));
+  colour = mix(colour, vec3(peak), smoothstep(1.3, 4.0, peak) * 0.65);
   colour *= (1.0 - exp(-peak * 1.35)) / max(peak, 1e-4);
-  o = vec4(colour, 1.0);
+  // Triangular dither one 8-bit step wide: a slow gradient (the long end of
+  // a trail on a dark ground) otherwise lands on a few levels and shows as
+  // contour lines. It is at full width from two levels up and fades out below
+  // that, so exact black stays still.
+  uvec2 cell = uvec2(gl_FragCoord.xy);
+  uint seed = lowbias(cell.x + cell.y * 4099u + uint(u_frame) * 7919u);
+  float grain = float(seed >> 8) / 16777216.0 + float(lowbias(seed ^ 0x9e3779b9u) >> 8) / 16777216.0 - 1.0;
+  float amount = smoothstep(0.0, 2.0 / 255.0, max(colour.r, max(colour.g, colour.b)));
+  o = vec4(colour + grain * amount / 255.0, 1.0);
 }`;
 
 // ---------------------------------------------------------------------------
@@ -955,6 +1082,64 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
+/** A NaN or infinite input must not reach an accumulator that never forgets it. */
+function finite(v: number, fallback = 0): number {
+  return Number.isFinite(v) ? v : fallback;
+}
+
+/**
+ * Seconds before the clock the shaders see starts over. A float32 uniform that
+ * keeps growing has about 8 ms of resolution after a day, which is coarse
+ * enough to band the noise hashes and make drift step. Every oscillator in the
+ * field, morph and spectrum shaders turns at a whole multiple of 0.01 rad per
+ * second, so any whole multiple of 200 pi seconds is a whole number of turns
+ * for each and the wrap is invisible to them. The slow noise drifts (warp,
+ * terrain, tendrils) are not periodic: they land on a different part of the
+ * noise once per wrap, so the wrap is long: 4000 pi seconds is about 3.5 hours,
+ * where a float32 clock still resolves a millisecond.
+ */
+export const SHADER_TIME_WRAP = Math.PI * 4000;
+
+// The field warp's noise offset spreads the 0..1 section seed over this range.
+export { sectionSeedFor };
+const SECTION_WARP_RANGE = 9.97;
+
+/**
+ * How much of the picture's colour the final pass keeps, from the frame's
+ * noisiness (0 tone .. 1 noise). Music reads 0.3 to 0.85 there: sparse and
+ * tonal material keeps all of its palette, a dense mix gives up about a
+ * quarter of it, and white noise would sit at 0.7. A frame without a reading
+ * takes the middle of the range.
+ */
+export function postSaturation(noisiness: number): number {
+  return 1 - 0.3 * smoothstep(0.3, 0.9, finite(noisiness, 0.5));
+}
+
+/**
+ * Drawing-buffer size for a CSS size and pixel ratio: the ratio is capped per
+ * tier, then the area is held to a pixel budget and each side to what the GPU
+ * can allocate. Null for a size that is not a number.
+ */
+export function fitDrawingBuffer(
+  cssWidth: number,
+  cssHeight: number,
+  dpr: number,
+  maxDpr: number,
+  maxPixels: number,
+  maxSide: number,
+): { width: number; height: number } | null {
+  if (!Number.isFinite(cssWidth) || !Number.isFinite(cssHeight) || !Number.isFinite(dpr)) return null;
+  const eff = Math.min(dpr, maxDpr);
+  let width = Math.max(2, Math.floor(cssWidth * eff));
+  let height = Math.max(2, Math.floor(cssHeight * eff));
+  const scale = Math.min(1, Math.sqrt(maxPixels / (width * height)), maxSide / Math.max(width, height));
+  if (scale < 1) {
+    width = Math.max(2, Math.floor(width * scale));
+    height = Math.max(2, Math.floor(height * scale));
+  }
+  return { width, height };
+}
+
 // ---------------------------------------------------------------------------
 // Factory.
 // ---------------------------------------------------------------------------
@@ -988,8 +1173,72 @@ export function createEvilandRenderer(
 
   const ctx = canvas.getContext('webgl2', contextOptions);
   if (!ctx) return null;
-  const gl: WebGL2RenderingContext = ctx;
+  const first = buildRenderer(canvas, ctx, options);
+  if (!first) return null;
+  return surviveContextLoss(canvas, first, () => buildRenderer(canvas, ctx, options), options.onContextEvent);
+}
 
+/**
+ * Wraps a renderer so it outlives a lost context. The loss event is cancelled
+ * (which is what makes the browser restore the context); the dead renderer is
+ * dropped, frames are skipped until the context is back, and a new renderer
+ * is built on it with the caller's size, look and waveform put back.
+ */
+function surviveContextLoss(
+  canvas: HTMLCanvasElement,
+  first: EvilandRenderer,
+  rebuild: () => EvilandRenderer | null,
+  notify?: EvilandOptions['onContextEvent'],
+): EvilandRenderer {
+  let size: [number, number, number] | null = null;
+  let config = first.getConfig();
+  const wave = new Uint8Array(WAVE_SAMPLES).fill(128);
+  let haveWave = false;
+  const hold = holdThroughContextLoss(canvas, first, rebuild, {
+    onLost: () => notify?.('lost'),
+    onRestored(next) {
+      if (size) next.resize(size[0], size[1], size[2]);
+      next.setConfig(config);
+      if (haveWave) next.setWaveform(wave);
+      notify?.('restored');
+    },
+    onFailed: () => notify?.('failed'),
+  });
+  return {
+    resize(cssWidth, cssHeight, dpr) {
+      size = [cssWidth, cssHeight, dpr];
+      hold.current()?.resize(cssWidth, cssHeight, dpr);
+    },
+    render(frame, palette, dtMs, paletteSource) {
+      hold.current()?.render(frame, palette, dtMs, paletteSource);
+    },
+    setConfig(next) {
+      config = next;
+      hold.current()?.setConfig(next);
+    },
+    getConfig: () => config,
+    setWaveform(samples) {
+      const n = Math.min(WAVE_SAMPLES, samples.length);
+      for (let i = 0; i < n; i++) wave[i] = samples[i]!;
+      wave.fill(128, n);
+      haveWave = true;
+      hold.current()?.setWaveform(samples);
+    },
+    dispose(options) {
+      hold.stop();
+      hold.current()?.dispose();
+      if (options?.releaseContext) {
+        canvas.getContext('webgl2')?.getExtension('WEBGL_lose_context')?.loseContext();
+      }
+    },
+  };
+}
+
+function buildRenderer(
+  canvas: HTMLCanvasElement,
+  gl: WebGL2RenderingContext,
+  options: EvilandOptions,
+): EvilandRenderer | null {
   // Required for RGBA16F render targets. Without this, framebuffer status will
   // never be COMPLETE and the field stays black — fall back to butterchurn.
   // (Already verified on the probe above; re-checked here as a defensive
@@ -1011,6 +1260,15 @@ export function createEvilandRenderer(
   const bloomLevels = quality === 'high' ? 3 : quality === 'medium' ? 2 : 0;
   const aberrationOn = quality !== 'low';
   const maxEmitters = quality === 'high' ? 32 : quality === 'medium' ? 20 : 10;
+  // The field, its echo and the bloom pyramid are RGBA16F: a 4K window at
+  // pixel ratio 1 would want about 400 MB of them, so the drawing buffer
+  // gets a pixel budget per tier, and never more than the GPU can allocate.
+  const pixelBudget = Math.max(4, options.maxPixels ?? (quality === 'high' ? 2_500_000 : quality === 'medium' ? 1_600_000 : 800_000));
+  const viewportDims = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as ArrayLike<number> | null;
+  const maxSide = Math.max(2, Math.min(
+    Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096,
+    Number(viewportDims?.[0]) || 4096,
+  ));
   // Stable-fluids sim: grid as a fraction of the field resolution (0 = no sim
   // on the low tier) + Jacobi pressure iterations per step.
   // The velocity field is intentionally coarser than the visible feedback
@@ -1092,8 +1350,7 @@ export function createEvilandRenderer(
   // Scratch buffer for per-frame band uploads (avoid per-frame allocations).
   const bandsScratch = new Float32Array(24);
 
-  // Waveform sample texture (256x1 R8) for the reactive oscilloscope layer.
-  const WAVE_SAMPLES = 256;
+  // Waveform sample texture (WAVE_SAMPLES x 1 R8) for the reactive oscilloscope layer.
   const waveScratch = new Uint8Array(WAVE_SAMPLES).fill(128);
   const waveTex = gl.createTexture();
   if (!waveTex) return null;
@@ -1145,10 +1402,24 @@ export function createEvilandRenderer(
   let fieldW = 1;
   let fieldH = 1;
 
+  // Set below 1 when the field's targets could not be allocated, so a GPU
+  // short on memory draws a smaller picture rather than none.
+  let fieldShrink = 1;
+  let reportedAllocFailure = false;
+  // With the targets gone the host's per-frame resize() would retry the
+  // allocation on every call. `waited` counts the seconds rendered with no
+  // targets, and a failed attempt is not repeated before `retryAt`.
+  let waited = 0;
+  let retryAt = 0;
+
   function makeFbo(w: number, h: number): Fbo | null {
     const tex = gl.createTexture();
     const fbo = gl.createFramebuffer();
-    if (!tex || !fbo) return null;
+    if (!tex || !fbo) {
+      if (tex) gl.deleteTexture(tex);
+      if (fbo) gl.deleteFramebuffer(fbo);
+      return null;
+    }
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filterMode);
@@ -1176,6 +1447,20 @@ export function createEvilandRenderer(
     gl.deleteFramebuffer(f.fbo);
   }
 
+  /** Whether three field-sized targets can be made at this scale. Frees them again. */
+  function fieldFits(scale: number): boolean {
+    const w = Math.max(2, Math.floor(viewW * fieldScale * scale));
+    const h = Math.max(2, Math.floor(viewH * fieldScale * scale));
+    const trial: Fbo[] = [];
+    for (let i = 0; i < 3; i++) {
+      const target = makeFbo(w, h);
+      if (!target) break;
+      trial.push(target);
+    }
+    for (const target of trial) disposeFbo(target);
+    return trial.length === 3;
+  }
+
   // Stable-fluids velocity sim (tiered off entirely on 'low'; null when the
   // GPU can't do RG16F targets — both cases render exactly as before because
   // u_fluid is forced to 0). Sized as a fraction of the field; resize() below
@@ -1188,13 +1473,47 @@ export function createEvilandRenderer(
       })
     : null;
 
-  function rebuildTargets(): void {
-    disposeFbo(fieldA);
+  /**
+   * A new target of the given size with `old` stretched into it, so what a
+   * picture has built up carries across a resize instead of restarting from
+   * black. `old` is freed on success; null means the new target could not be
+   * made and `old` is untouched.
+   */
+  function resampleFbo(old: Fbo, w: number, h: number): Fbo | null {
+    const next = makeFbo(w, h);
+    if (!next) return null;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, next.fbo);
+    gl.viewport(0, 0, w, h);
+    gl.disable(gl.BLEND);
+    gl.useProgram(BLIT);
+    bindFullscreenQuad(BLIT);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, old.tex);
+    gl.uniform1i(blitUni.src, 0);
+    drawFullscreen();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    disposeFbo(old);
+    return next;
+  }
+
+  /** False when the field's own targets could not be allocated. */
+  function rebuildTargets(): boolean {
+    // Only the newest field, the echo and a frozen snapshot hold anything
+    // worth keeping; the other field target and the composed image are
+    // rewritten whole on every frame.
+    const stretched = fieldA ? resampleFbo(fieldA, fieldW, fieldH) : makeFbo(fieldW, fieldH);
+    if (!stretched) disposeFbo(fieldA);
+    fieldA = stretched;
     disposeFbo(fieldB);
-    fieldA = makeFbo(fieldW, fieldH);
-    fieldB = makeFbo(fieldW, fieldH);
+    fieldB = fieldA ? makeFbo(fieldW, fieldH) : null;
     disposeFbo(composed);
-    composed = makeFbo(fieldW, fieldH);
+    composed = fieldB ? makeFbo(fieldW, fieldH) : null;
+    if (!fieldA || !fieldB || !composed) {
+      for (const f of [fieldA, fieldB, composed, echoA, echoB, fieldSnapshot]) disposeFbo(f);
+      fieldA = fieldB = composed = echoA = echoB = fieldSnapshot = null;
+      snapshotActive = false;
+      return false;
+    }
     if (!meter) meter = makeFbo(METER_W, METER_H);
     if (!exposureA || !exposureB) {
       disposeFbo(exposureA);
@@ -1214,12 +1533,20 @@ export function createEvilandRenderer(
     for (const f of bloomUp) disposeFbo(f);
     bloomDown.length = 0;
     bloomUp.length = 0;
-    // If echo/snapshot FBOs exist, rebuild them at the new
-    // field resolution. Allocation stays lazy on first use; resize never
+    // If echo/snapshot FBOs exist, carry them over at the new field
+    // resolution. Allocation stays lazy on first use; resize never
     // creates them speculatively.
-    if (echoA) { disposeFbo(echoA); echoA = makeFbo(fieldW, fieldH); }
-    if (echoB) { disposeFbo(echoB); echoB = makeFbo(fieldW, fieldH); }
-    if (fieldSnapshot) { disposeFbo(fieldSnapshot); fieldSnapshot = makeFbo(fieldW, fieldH); snapshotActive = false; }
+    const echo = echoA ? resampleFbo(echoA, fieldW, fieldH) : null;
+    if (echoA && !echo) disposeFbo(echoA);
+    disposeFbo(echoB);
+    echoA = echo;
+    echoB = echo ? makeFbo(fieldW, fieldH) : null;
+    if (echoA && !echoB) { disposeFbo(echoA); echoA = null; }
+    if (fieldSnapshot) {
+      const frozen = resampleFbo(fieldSnapshot, fieldW, fieldH);
+      if (!frozen) { disposeFbo(fieldSnapshot); snapshotActive = false; }
+      fieldSnapshot = frozen;
+    }
     let bw = Math.max(8, Math.floor(viewW / 2));
     let bh = Math.max(8, Math.floor(viewH / 2));
     for (let i = 0; i < bloomLevels; i++) {
@@ -1242,6 +1569,7 @@ export function createEvilandRenderer(
       bw = Math.max(4, Math.floor(bw / 2));
       bh = Math.max(4, Math.floor(bh / 2));
     }
+    return true;
   }
 
   // ---- Cached attribute locations (avoid getAttribLocation per frame) ----
@@ -1352,9 +1680,6 @@ export function createEvilandRenderer(
     echoAlpha: gl.getUniformLocation(composeProg, 'u_echoAlpha'),
     snapshotMix: gl.getUniformLocation(composeProg, 'u_snapshotMix'),
     bg: gl.getUniformLocation(composeProg, 'u_bg'),
-    accent: gl.getUniformLocation(composeProg, 'u_accent'),
-    dark: gl.getUniformLocation(composeProg, 'u_dark'),
-    light: gl.getUniformLocation(composeProg, 'u_light'),
   };
   const meterUni = {
     src: gl.getUniformLocation(meterProg, 'u_src'),
@@ -1374,7 +1699,7 @@ export function createEvilandRenderer(
     bloomIntensity: gl.getUniformLocation(postProg, 'u_bloomIntensity'),
     saturation: gl.getUniformLocation(postProg, 'u_saturation'),
     bg: gl.getUniformLocation(postProg, 'u_bg'),
-    hueShift: gl.getUniformLocation(postProg, 'u_hueShift'),
+    frame: gl.getUniformLocation(postProg, 'u_frame'),
   };
 
   // ---------------------------------------------------------------------------
@@ -1422,7 +1747,7 @@ export function createEvilandRenderer(
   let aberrEnv = 0;
   let time = 0;
   let lastSectionId = -1;
-  let sectionSeed = 0; // re-derived per section for the field warp
+  let sectionSeed = 0; // 0..1, re-derived per section (see sectionSeedFor)
   const sectionSeeds: number[] = []; // store per sectionId so returns rhyme
 
   // Active operator config (the "look") + a reusable dynamics scratch object.
@@ -1460,26 +1785,46 @@ export function createEvilandRenderer(
   // ---------------------------------------------------------------------------
 
   function resize(cssWidth: number, cssHeight: number, dpr: number): void {
-    // Cap internal render resolution sensibly: 2.5 MP at high tier, scaled
-    // down per quality, and trim DPR so a 4K monitor doesn't murder the GPU.
+    // Cap internal render resolution: trim the pixel ratio per tier so a 4K
+    // monitor doesn't murder the GPU, then hold the area to the tier's budget.
     const dprClamp = quality === 'low' ? 1 : quality === 'medium' ? 1.5 : 2;
-    const eff = Math.min(dpr, dprClamp);
-    const w = Math.max(2, Math.floor(cssWidth * eff));
-    const h = Math.max(2, Math.floor(cssHeight * eff));
+    const fit = fitDrawingBuffer(cssWidth, cssHeight, dpr, dprClamp, pixelBudget, maxSide);
+    if (!fit) return;
+    const { width: w, height: h } = fit;
     // No-op unless the pixel dimensions actually changed. Rebuilding the
     // RGBA16F field + bloom FBOs every frame destroys the feedback persistence
     // (decay/curl/trails go dead) and churns GPU memory. Initial viewW=1 means
-    // the first real call still triggers a build.
-    if (w === viewW && h === viewH) return;
+    // the first real call still triggers a build, and so does a call after the
+    // targets failed to allocate.
+    const sameSize = w === viewW && h === viewH;
+    if (sameSize && fieldA) return;
+    // The targets are gone and the size is what it was at the last attempt.
+    if (sameSize && waited < retryAt) return;
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
     }
     viewW = w;
     viewH = h;
-    fieldW = Math.max(2, Math.floor(w * fieldScale));
-    fieldH = Math.max(2, Math.floor(h * fieldScale));
-    rebuildTargets();
+    // A GPU that refused a size earlier may have room again: take the largest
+    // scale that fits now. The trial leaves any working targets alone.
+    for (let up = 1; up > fieldShrink; up /= 2) {
+      if (fieldFits(up)) {
+        fieldShrink = up;
+        break;
+      }
+    }
+    for (;;) {
+      fieldW = Math.max(2, Math.floor(w * fieldScale * fieldShrink));
+      fieldH = Math.max(2, Math.floor(h * fieldScale * fieldShrink));
+      if (rebuildTargets() || fieldShrink <= 0.25) break;
+      if (!reportedAllocFailure) {
+        reportedAllocFailure = true;
+        console.error(`[newamp] eviland could not allocate ${fieldW}x${fieldH} render targets; drawing at a smaller size`);
+      }
+      fieldShrink /= 2;
+    }
+    if (!fieldA) retryAt = waited + 1;
   }
 
   // Pillar 1 spawn router — translate one EvilandFrame.onsets[] into emitters.
@@ -1653,12 +1998,15 @@ export function createEvilandRenderer(
 
   function render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number, paletteSource: 'preset' | 'host' = 'preset'): void {
     if (!fieldA || !fieldB || !composed || !meter || !exposureA || !exposureB) {
-      // Resize hasn't run yet — skip; caller will resize on first paint.
+      // Resize hasn't run yet, or the targets could not be allocated — skip;
+      // the caller resizes on first paint, and again as time passes.
+      waited += finite(dtMs, 1000 / 60) / 1000;
       return;
     }
-    const dt = Math.max(0.0005, Math.min(0.1, dtMs / 1000));
+    const dt = Math.max(0.0005, Math.min(0.1, finite(dtMs, 1000 / 60) / 1000));
     time += dt;
     anticipationClock += dt;
+    const shaderTime = time % SHADER_TIME_WRAP;
     const steps = dt * 60;
     const composition = currentConfig.composition ?? CLASSIC_COMPOSITION;
     evalConfig(currentConfig, frame, sectionSeed, dyn, dt * 1000);
@@ -1718,7 +2066,7 @@ export function createEvilandRenderer(
         sectionSeed = sectionSeeds[frame.sectionReturn]!;
       } else {
         // Stable but unique per-section pseudo-random seed.
-        sectionSeed = ((frame.sectionId * 4099 + 17) % 997) / 100;
+        sectionSeed = sectionSeedFor(frame.sectionId);
       }
       sectionSeeds[frame.sectionId] = sectionSeed;
       // Spawn a full-field flash by injecting a bright burst at centre.
@@ -1737,10 +2085,11 @@ export function createEvilandRenderer(
 
     // CPU envelopes for bloom / aberration. Bloom lingers (slow release) on
     // energy+crest; aberration is gated to snare+hat only.
+    // (An envelope that took a NaN once would keep it; start it over instead.)
     const targetBloom = Math.min(1, frame.energy * 0.7 + frame.crest * 0.5);
-    bloomEnv += (targetBloom - bloomEnv) * (1 - Math.pow(1 - (targetBloom > bloomEnv ? 0.18 : 0.05), steps));
+    bloomEnv = finite(bloomEnv + (targetBloom - bloomEnv) * (1 - Math.pow(1 - (targetBloom > bloomEnv ? 0.18 : 0.05), steps)));
     const targetAberr = Math.min(1, frame.snare * 0.8 + frame.hat * 0.5);
-    aberrEnv += (targetAberr - aberrEnv) * (1 - Math.pow(1 - (targetAberr > aberrEnv ? 0.35 : 0.06), steps));
+    aberrEnv = finite(aberrEnv + (targetAberr - aberrEnv) * (1 - Math.pow(1 - (targetAberr > aberrEnv ? 0.35 : 0.06), steps)));
 
     // Upload instance data + advance ages.
     const active = packEmitters();
@@ -1760,12 +2109,10 @@ export function createEvilandRenderer(
     // dissipation is silence-gated (dyeDissipationFromFrame) plus the active
     // config's bias so an archetype can let dye linger longer or drain it.
     if (fluid) {
-      const baseDyeDiss = dyeDissipationFromFrame(frame) + dyn.dyeDissipation;
-      const dyeDiss = baseDyeDiss < 0.6 ? 0.6 : baseDyeDiss > 1 ? 1 : baseDyeDiss;
       fluid.step(dt, forceSource.forces(frame, palette, dt), {
         vorticity: dyn.vorticity,
         dissipation: 0.985,
-        dyeDissipation: dyeDiss,
+        dyeDissipation: clampDyeDissipation(dyeDissipationFromFrame(frame) + dyn.dyeDissipation),
       });
     }
 
@@ -1789,9 +2136,9 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE0);
     const fluidScale = velTex ? FLUID_ADVECT_SCALE * dt : 0;
     gl.uniform1f(fieldUni.steps, steps);
-    gl.uniform1f(fieldUni.time, time);
+    gl.uniform1f(fieldUni.time, shaderTime);
     gl.uniform1f(fieldUni.novelty, frame.novelty);
-    gl.uniform1f(fieldUni.sectionSeed, sectionSeed);
+    gl.uniform1f(fieldUni.sectionSeed, sectionSeed * SECTION_WARP_RANGE);
     gl.uniform1f(fieldUni.aspect, fieldW / Math.max(1, fieldH));
     gl.uniform2f(fieldUni.texel, 1 / fieldW, 1 / fieldH);
     if (morphing) {
@@ -1824,7 +2171,7 @@ export function createEvilandRenderer(
     gl.useProgram(TERRAIN);
     bindFullscreenQuad(TERRAIN);
     gl.uniform1f(terrainUni.bass, frame.bass);
-    gl.uniform1f(terrainUni.time, time);
+    gl.uniform1f(terrainUni.time, shaderTime);
     gl.uniform1f(terrainUni.pan, frame.pan);
     gl.uniform3f(terrainUni.color, (palette.dark[0] * 0.8 + palette.accent[0] * 0.2) * sourceGain, palette.dark[1] * 0.7 * sourceGain, palette.dark[2] * 0.9 * sourceGain);
     drawFullscreen();
@@ -1878,7 +2225,7 @@ export function createEvilandRenderer(
       const voicePeak = Math.max(frame.kick, frame.snare, frame.hat, frame.vocal);
       const intensity = frame.energy * 1.05 + voicePeak * 0.65;
       gl.uniform1f(spectrumUni.intensity, Math.min(1.8, intensity) * sourceGain);
-      gl.uniform1f(spectrumUni.time, time);
+      gl.uniform1f(spectrumUni.time, shaderTime);
       gl.uniform1f(spectrumUni.aspect, fieldH / Math.max(1, fieldW));
       drawFullscreen();
     }
@@ -1895,7 +2242,10 @@ export function createEvilandRenderer(
       gl.uniform1i(waveUni.wave, 0);
       gl.uniform1f(waveUni.mode, dyn.waveMode);
       gl.uniform3f(waveUni.color, palette.accent[0], palette.accent[1], palette.accent[2]);
-      gl.uniform1f(waveUni.intensity, dyn.waveIntensity * sourceGain);
+      const waveIntensity = dyn.waveMode === WAVE_MODE_BARS
+        ? waveBarsDrive(dyn.waveIntensity, waveScratch, dyn.waveScale, dyn.decay)
+        : dyn.waveIntensity;
+      gl.uniform1f(waveUni.intensity, waveIntensity * sourceGain);
       gl.uniform1f(waveUni.thickness, dyn.waveThickness);
       gl.uniform1f(waveUni.scale, dyn.waveScale);
       gl.uniform1f(waveUni.aspect, fieldH / Math.max(1, fieldW));
@@ -2063,9 +2413,6 @@ export function createEvilandRenderer(
     gl.uniform1f(composeUni.echoAlpha, echoA ? dyn.echoAlpha : 0);
     gl.uniform1f(composeUni.snapshotMix, snapshotActive && fieldSnapshot ? Math.max(0, 1 - dyn.transition) : 0);
     gl.uniform3f(composeUni.bg, palette.bg[0], palette.bg[1], palette.bg[2]);
-    gl.uniform3f(composeUni.accent, palette.accent[0], palette.accent[1], palette.accent[2]);
-    gl.uniform3f(composeUni.dark, palette.dark[0], palette.dark[1], palette.dark[2]);
-    gl.uniform3f(composeUni.light, palette.light[0], palette.light[1], palette.light[2]);
     drawFullscreen();
 
     // ---- Auto-exposure: meter the composed image, adapt one texel of state.
@@ -2089,7 +2436,7 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, exposureA.tex);
     gl.uniform1i(exposeUni.prev, 1);
-    const loudness = Math.max(0, Math.min(1, (frame.energy - 0.05) / 0.45));
+    const loudness = Math.max(0, Math.min(1, (finite(frame.energy) - 0.05) / 0.45));
     gl.uniform1f(exposeUni.targetKey, 0.55 + 0.4 * loudness);
     gl.uniform1f(exposeUni.dt, dt);
     drawFullscreen();
@@ -2112,7 +2459,7 @@ export function createEvilandRenderer(
       gl.bindTexture(gl.TEXTURE_2D, exposureA.tex);
       gl.uniform1i(thresholdUni.exposure, 1);
       gl.activeTexture(gl.TEXTURE0);
-      gl.uniform1f(thresholdUni.threshold, 0.18);
+      gl.uniform1f(thresholdUni.threshold, BLOOM_THRESHOLD);
       drawFullscreen();
       // Down levels 1..N-1
       for (let i = 1; i < bloomLevels; i++) {
@@ -2155,11 +2502,13 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, exposureA.tex);
     gl.uniform1i(postUni.exposure, 2);
-    gl.uniform1f(postUni.bloomIntensity, bloomSrc ? Math.max(0, 0.30 + bloomEnv * 0.45 + dyn.bloom) : 0);
-    gl.uniform1f(postUni.saturation, Math.max(0.35, 1 - frame.flatness * 0.55) * cueGain.saturation);
+    gl.uniform1f(postUni.bloomIntensity, bloomSrc ? Math.max(0, 0.18 + bloomEnv * 0.35 + finite(dyn.bloom) * 0.6) : 0);
+    gl.uniform1f(postUni.saturation, postSaturation(frame.noisiness) * cueGain.saturation);
     gl.uniform1f(postUni.gain, cueGain.output);
     gl.uniform3fv(postUni.bg, palette.bg);
-    gl.uniform3f(postUni.hueShift, 1, 1, 1);
+    // The dither pattern moves 60 times a second of elapsed time, not once per
+    // render, so a 30 fps and a 120 fps run lay down the same noise.
+    gl.uniform1f(postUni.frame, Math.round(time * 60) % 65536);
     drawFullscreen();
   }
 
@@ -2208,8 +2557,8 @@ export function createEvilandRenderer(
     bloomUp.length = 0;
     fluid?.dispose();
     fluid = null;
-    const lose = gl.getExtension('WEBGL_lose_context');
-    if (lose) lose.loseContext();
+    // The context is the caller's, as is the canvas: it stays usable for the
+    // next renderer made on it (surviveContextLoss gives it up on request).
   }
 
   function setConfig(config: OperatorConfig): void {

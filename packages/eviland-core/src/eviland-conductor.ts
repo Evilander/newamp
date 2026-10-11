@@ -9,8 +9,8 @@
 //     loud the verse was, a few seconds late)
 //   - sections that repeat share an id, so a chorus gets its look back however
 //     the listener got there — played through, skipped ahead, or seeked back
-//   - the beat phase comes from the analysed grid, not from guessing the tempo
-//     out of the last few kicks
+//   - the beat phase and the beat clock come from the analysed grid, not from
+//     guessing the tempo out of the last few kicks
 //   - through a build, `anticipation` climbs; in the held silence before a
 //     drop, `blackout` rises; when the drop lands, `impact` fires on the
 //     downbeat itself
@@ -37,6 +37,11 @@ export interface Conductor {
   conduct(frame: EvilandFrame, seconds: number, dtMs: number): EvilandFrame;
 }
 
+/** Clamp to 0..1; NaN reads as 0, so a cue that is not a number is no cue. */
+function unit(x: number): number {
+  return x > 0 ? (x < 1 ? x : 1) : 0;
+}
+
 const NO_CUE_GAIN = { output: 1, saturation: 1 } as const;
 const cueGainScratch = { output: 1, saturation: 1 };
 
@@ -53,8 +58,9 @@ const cueGainScratch = { output: 1, saturation: 1 };
  */
 export function applyScoreCues(dyn: EvilandDynamics, cues: ScoreCues | undefined): { output: number; saturation: number } {
   if (!cues) return NO_CUE_GAIN;
-  const build = cues.anticipation;
-  const hit = cues.impact;
+  const build = unit(cues.anticipation);
+  const hit = unit(cues.impact);
+  const blackout = unit(cues.blackout);
   if (build > 0) {
     dyn.zoom -= 0.012 * build;
     dyn.decay = Math.min(0.985, dyn.decay + 0.035 * build);
@@ -68,24 +74,27 @@ export function applyScoreCues(dyn: EvilandDynamics, cues: ScoreCues | undefined
     dyn.emitterGain *= 1 + 1.2 * hit;
     dyn.emitterScale *= 1 + 0.6 * hit;
   }
-  const dark = 1 - cues.blackout;
+  const dark = 1 - blackout;
   dyn.emitterGain *= dark;
   dyn.waveIntensity *= dark;
-  cueGainScratch.output = (1 - 0.45 * build) * (1 - 0.94 * cues.blackout) * (1 + 1.5 * hit);
+  cueGainScratch.output = (1 - 0.45 * build) * (1 - 0.94 * blackout) * (1 + 1.5 * hit);
   cueGainScratch.saturation = 1 - 0.4 * build;
   return cueGainScratch;
 }
 
 /** Below this the analysed beat grid is not trusted over the live estimate. */
 const MIN_GRID_CONFIDENCE = 0.35;
+/** Below this the bar phase is a guess, and the pulse falls on every beat rather than a bar line of unknown truth. */
+const MIN_DOWNBEAT_CONFIDENCE = 0.2;
 /** A build weaker than this gets a crossfade, not a cut-and-flash. */
 const MIN_IMPACT_STRENGTH = 0.3;
 const IMPACT_DECAY_SECONDS = 0.9;
 const KEY_GLIDE_SECONDS = 1.2;
-// 20° of hue per step round the circle of fifths, capped at four steps: a
-// modulation should read as the same palette travelling, not a new skin.
+// 20° of hue per step round the circle of fifths, capped at five steps: a
+// modulation should read as the same palette travelling, not a new skin. Five
+// reaches the semitone lift of a final chorus (+7 fifths, i.e. −5) uncut.
 const TURNS_PER_FIFTH = 1 / 18;
-const MAX_KEY_STEPS = 4;
+const MAX_KEY_STEPS = 5;
 /** However long the silence is, the screen is only held dark for this long. */
 const MAX_BLACKOUT_SECONDS = 1.2;
 /** A position change larger than this between frames is a seek, not playback. */
@@ -167,7 +176,7 @@ export function createConductor(): Conductor {
         lastSection = -1;
         return frame;
       }
-      const dt = Math.max(0, Math.min(0.25, dtMs / 1000));
+      const dt = Number.isFinite(dtMs) ? Math.max(0, Math.min(0.25, dtMs / 1000)) : 1 / 60;
       const seeked = lastSeconds < 0 || seconds < lastSeconds - 0.05 || seconds - lastSeconds > SEEK_JUMP_SECONDS;
 
       // ── Sections ─────────────────────────────────────────────────────────
@@ -192,6 +201,7 @@ export function createConductor(): Conductor {
       let downbeat = false;
       if (gridTrusted) {
         const beats = score.beats;
+        const beatsPerBar = score.beatsPerBar ?? 4;
         const previousBeat = beatIndex;
         if (seeked || seconds < beats[beatIndex]!) beatIndex = 0;
         while (beatIndex + 1 < beats.length && beats[beatIndex + 1]! <= seconds) beatIndex++;
@@ -201,12 +211,16 @@ export function createConductor(): Conductor {
           frame.beatPhase = Math.min(0.999, (seconds - from) / Math.max(0.05, to - from));
           frame.bpm = 60 / Math.max(0.05, to - from);
           frame.beatConfidence = Math.max(frame.beatConfidence, score.beatConfidence);
+          // Counted from the analysed downbeat, so bar lines sit on multiples
+          // of beatsPerBar; it jumps only with a seek.
+          frame.beatClock = beatIndex - score.downbeat + frame.beatPhase;
         }
         if (!seeked && beatIndex !== previousBeat) {
-          // Bars of four from the analysed downbeat. When the bar phase is
-          // unsure this is still a steady four-beat pulse, which is all the
-          // Director's rotation gate needs.
-          downbeat = (((beatIndex - score.downbeat) % 4) + 4) % 4 === 0;
+          // Bars from the analysed downbeat. When the bar phase is unsure
+          // every beat pulses instead: a look change on a beat reads right, a
+          // bar line that is wrong three times in four does not.
+          downbeat = score.downbeatConfidence < MIN_DOWNBEAT_CONFIDENCE
+            || (((beatIndex - score.downbeat) % beatsPerBar) + beatsPerBar) % beatsPerBar === 0;
         }
       }
 
@@ -221,20 +235,20 @@ export function createConductor(): Conductor {
         if (seconds >= rampFrom && seconds < next.start) {
           const progress = Math.min(1, (seconds - rampFrom) / Math.max(0.1, silenceAt - rampFrom));
           // Slow start, steep finish: tension is felt most in the last bar.
-          anticipation = progress * progress * build.strength;
+          anticipation = progress * progress * unit(build.strength);
           if (build.gapSeconds > 0 && seconds >= silenceAt) blackout = Math.min(1, (seconds - silenceAt) / 0.04);
         }
       }
 
       // ── Impact: a built-up section landing, on its own downbeat ──────────
       const landed = changed && !seeked && lastSection >= 0 && index === lastSection + 1 && lands(section);
-      if (landed) impact = section.build!.strength;
+      if (landed) impact = unit(section.build!.strength);
       else impact *= Math.exp(-dt / IMPACT_DECAY_SECONDS);
       if (seeked) impact = 0;
       if (impact < 0.004) impact = 0;
 
       // ── Harmonic colour ──────────────────────────────────────────────────
-      const wantedShift = Math.max(-MAX_KEY_STEPS, Math.min(MAX_KEY_STEPS, section.keyShift)) * TURNS_PER_FIFTH;
+      const wantedShift = (Number.isFinite(section.keyShift) ? Math.max(-MAX_KEY_STEPS, Math.min(MAX_KEY_STEPS, section.keyShift)) : 0) * TURNS_PER_FIFTH;
       keyShift = seeked ? wantedShift : keyShift + (wantedShift - keyShift) * (1 - Math.exp(-dt / KEY_GLIDE_SECONDS));
 
       cues.anticipation = anticipation;

@@ -12,6 +12,7 @@ export const ciliaReef: SceneDef = {
   id: 'cilia-reef',
   name: 'Cilia Reef',
   mood: 'mid',
+  occlusion: 0.85,
   speed: f => 0.35 + f.bass * 1.2 + f.energy * 0.8,
   frag: `
 const float CR_TAU = 6.28318530718;

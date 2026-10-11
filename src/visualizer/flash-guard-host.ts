@@ -18,7 +18,8 @@
 import { flashGuardEnabled, watchFlashGuard } from '../lib/vizPrefs';
 import { HAZARD_AREA } from './flash-guard';
 import { createCanvasFlashGuard } from './flash-guard-2d';
-import { createFlashGuardGL, screenFractionOf } from './flash-guard-gl';
+import { createFlashGuardGL, screenFractionOf, type FlashGuardGL } from './flash-guard-gl';
+import { holdThroughContextLoss, type ContextHold } from './eviland-gl';
 
 export interface FlashSetting {
   readonly on: boolean;
@@ -84,16 +85,29 @@ export interface AttachedFlashGuard {
  * route.
  */
 export function attachFlashGuard(gl: WebGL2RenderingContext | null, surface: HTMLElement): AttachedFlashGuard | null {
-  const guard = gl ? createFlashGuardGL(gl) : null;
-  if (!guard) return null;
-  const setting = followFlashGuard(() => guard.reset());
+  const first = gl ? createFlashGuardGL(gl) : null;
+  if (!gl || !first) return null;
+  // A lost context takes the guard's programs and history with it; it is
+  // rebuilt on the restored one (and starts from a clean history).
+  const held = holdThroughContextLoss(gl.canvas, first, () => createFlashGuardGL(gl));
+  const setting = followFlashGuard(() => held.current()?.reset());
   return {
     apply(dtMs) {
-      guard.apply(dtMs, setting.on ? screenFractionOf(surface) : 0);
+      const guard = held.current();
+      if (guard) {
+        guard.apply(dtMs, setting.on ? screenFractionOf(surface) : 0);
+      } else if (setting.on && !gl.isContextLost()) {
+        // The context is back but the guard could not be rebuilt on it: show
+        // nothing rather than an unguarded frame.
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
     },
     dispose() {
       setting.stop();
-      guard.dispose();
+      held.stop();
+      held.current()?.dispose();
     },
   };
 }
@@ -125,10 +139,11 @@ export function createGuarded2dSurface(visible: HTMLCanvasElement, mayMatter: bo
     ? visible.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: smoke })
     : null;
   const gpu = gl ? createFlashGuardGL(gl) : null;
+  const held: ContextHold<FlashGuardGL> | null = gl && gpu ? holdThroughContextLoss(gl.canvas, gpu, () => createFlashGuardGL(gl)) : null;
   const offscreen = gpu ? document.createElement('canvas') : null;
   const cpu = gpu ? null : createCanvasFlashGuard();
   const setting = followFlashGuard(() => {
-    gpu?.reset();
+    held?.current()?.reset();
     cpu?.reset();
   });
   const paint = offscreen ?? visible;
@@ -136,12 +151,15 @@ export function createGuarded2dSurface(visible: HTMLCanvasElement, mayMatter: bo
     paint,
     show(dtMs) {
       const fraction = setting.on ? screenFractionOf(visible) : 0;
-      if (gpu && offscreen) gpu.present(offscreen, dtMs, fraction);
+      // Once this route chose the GPU guard it never falls back to showing
+      // unguarded frames: while the guard is gone nothing is presented.
+      if (held && offscreen) held.current()?.present(offscreen, dtMs, fraction);
       else if (fraction >= HAZARD_AREA) cpu?.apply(visible, dtMs, fraction);
     },
     dispose() {
       setting.stop();
-      gpu?.dispose();
+      held?.stop();
+      held?.current()?.dispose();
     },
   };
 }

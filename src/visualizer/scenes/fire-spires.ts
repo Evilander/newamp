@@ -35,6 +35,7 @@ vec4 scene(vec2 uv, vec2 p) {
     // Band group: spread 24 bands across spires, group of ~2.
     int bLo = int(t * 22.0);
     float band = bandAvg(bLo, bLo + 2);
+    float bandRun = bandClock(bLo, bLo + 2);
 
     // Height + jitter from seed; sway with vocal envelope.
     float seed = u_seed * 97.0 + fi * 13.31;
@@ -47,8 +48,9 @@ vec4 scene(vec2 uv, vec2 p) {
     // Local coords relative to column base (bottom-center of screen).
     vec2 q = vec2(p.x - colX, p.y + 1.0);
 
-    // Flame fbm: tall, advected upward.
-    vec2 nuv = vec2(q.x * 4.0 + seed, q.y * 2.2 - lift * (0.6 + band * 0.6));
+    // Flame fbm: tall, advected upward. A louder band lifts its flame faster
+    // because its own integral runs faster, not because it scales the clock.
+    vec2 nuv = vec2(q.x * 4.0 + seed, q.y * 2.2 - lift * 0.6 - bandRun * 0.9);
     float flame = fbm(nuv);
     // Carve the flame shape: tapered, height-limited.
     float taper = smoothstep(width * (1.5 + q.y * 0.4), 0.0, abs(q.x));

@@ -75,7 +75,9 @@ vec2 morphTarget(sampler2D img, vec2 src, int kind, float s, vec2 centre, float 
       for (int x = -1; x <= 1; x++) {
         vec2 o = vec2(float(x), float(y));
         vec2 h = hash2(id + o);
-        vec2 pos = o + 0.5 + 0.36 * sin(time * (0.2 + h * 0.35) + h * MORPH_TAU);
+        // Rates in whole hundredths of a radian per second, so the shader
+        // clock's wrap lands each nucleus on a whole turn.
+        vec2 pos = o + 0.5 + 0.36 * sin(time * (0.2 + floor(h * 35.0) * 0.01) + h * MORPH_TAU);
         vec2 d = pos - f;
         float dd = dot(d, d);
         if (dd < best) { best = dd; bestPos = pos; bestId = id + o; }
@@ -99,8 +101,15 @@ vec2 morphTarget(sampler2D img, vec2 src, int kind, float s, vec2 centre, float 
     // chroma: each colour flows in the direction of its own hue.
     vec3 c = textureLod(img, src, 0.0).rgb;
     vec2 iq = vec2(dot(c, vec3(0.596, -0.274, -0.322)), dot(c, vec3(0.211, -0.523, 0.312)));
-    // Grey has no hue (and atan(0, 0) is undefined), so it stays put.
-    float sat = smoothstep(0.01, 0.12, length(iq));
+    // Grey has no hue (and atan(0, 0) is undefined), so it stays put. That is
+    // judged against the pixel's own brightness as well as absolutely: a hot
+    // near-white pixel has a large chroma from a tiny tint, and its angle
+    // changes from pixel to pixel, which printed as square blocks around
+    // bright bursts. Past full scale a pixel stops flowing altogether.
+    float peak = max(c.r, max(c.g, c.b));
+    float sat = smoothstep(0.01, 0.12, length(iq))
+      * smoothstep(0.02, 0.24, length(iq) / max(luma(c), 0.05))
+      * (1.0 - smoothstep(1.0, 3.0, peak));
     if (sat <= 0.0) return src;
     float ang = atan(iq.y, iq.x) + time * 0.15;
     return src + vec2(cos(ang), sin(ang)) / asp * (0.0028 * s) * sat;

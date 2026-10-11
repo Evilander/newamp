@@ -35,6 +35,11 @@ Zero dependencies, framework-agnostic, WebGL2.
 > *from* this package as the single source of truth — comes later. The API below
 > is stable and what that release will ship; the `npm install` line will start
 > working when it's published.
+>
+> Until then NewAmp's `src/visualizer/` is the canonical side: edit it there, not
+> here. `sync.mjs` refuses to overwrite a file in this package's `src/` that was
+> edited here since the last sync, and tells you how to diff it (`--force`
+> discards the edit).
 
 ## Install (after publish)
 
@@ -134,7 +139,7 @@ const webm = await rec.stop();       // → Blob
 
 | Export | What |
 |---|---|
-| `createEvilandRenderer(canvas, opts)` | WebGL2 renderer → `{ resize, render, setConfig, getConfig, setWaveform, dispose }` (or `null` if WebGL2 float is unavailable — fall back to your own canvas). |
+| `createEvilandRenderer(canvas, opts)` | WebGL2 renderer → `{ resize, render, setConfig, getConfig, setWaveform, dispose }` (or `null` if WebGL2 float is unavailable — fall back to your own canvas). See Lifetime below for `dispose`, `maxPixels` and `onContextEvent`. |
 | `createEvilandReactor(cfg)` | 24-band causal onset reactor → `EvilandFrame` per `analyze()`. |
 | `generate / mutate / encode / decode / classic / ARCHETYPES` | Seedable generative looks. |
 | `createDirector(opts)` | Autonomous conductor → `OperatorConfig` per `update()`. |
@@ -143,6 +148,24 @@ const webm = await rec.stop();       // → Blob
 | `evalConfig / defaultConfig / lerpConfig / cloneConfig` | Operator-config evaluation + interpolation. |
 | `Rng / encodeSeedCode / decodeSeedCode` | Deterministic RNG + shareable seed codes. |
 | `createCanvasRecorder(canvas, opts)` | Canvas + audio → WebM (VP9/Opus). |
+
+## Lifetime
+
+`renderer.dispose()` frees what the renderer allocated and leaves the canvas and
+its WebGL context alone, so you can make another renderer on the same canvas (at
+a different `quality`, say). Pass `{ releaseContext: true }` when the canvas
+itself is going away.
+
+If the GPU takes the context away, the renderer cancels the loss event so the
+browser restores the context, skips frames until it does, then rebuilds itself
+with your size, look and waveform put back. `onContextEvent` reports `'lost'`,
+`'restored'` and `'failed'` (the restored context could not be built on), for a
+host that would rather paint something else when it does not come back.
+
+The drawing buffer is held to a pixel budget per quality tier (2.5 MP on `high`,
+1.6 MP on `medium`, 0.8 MP on `low`; `maxPixels` overrides it) and to the GPU's
+texture size limit, however large the canvas and pixel ratio you pass to
+`resize()`. A resize keeps the trails already on screen.
 
 ## Requirements
 

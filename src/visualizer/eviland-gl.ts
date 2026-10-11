@@ -53,3 +53,109 @@ export function sourceTarget(gl: WebGL2RenderingContext, width: number, height: 
 export function disposeSourceTarget(gl: WebGL2RenderingContext, target: SourceTarget | null): void {
   if (target) { gl.deleteTexture(target.texture); gl.deleteFramebuffer(target.framebuffer); }
 }
+
+/**
+ * GLSL that tells a NaN from a number by its encoding. A comparison with NaN
+ * is unspecified in GLSL ES 3.00, and a compiler that assumes its inputs are
+ * numbers may fold `x >= 0.0` or `!(x < 1.0)` away, which would let one bad
+ * texel stay in a feedback loop. An integer test on the bits can't be folded:
+ * a NaN of either sign has an all-ones exponent and a non-zero mantissa, so
+ * its encoding without the sign sits above that of infinity.
+ */
+export const NAN_GLSL = `
+bool notNumber(float x){
+  highp uint bits = floatBitsToUint(x);
+  return (bits & 0x7fffffffu) > 0x7f800000u;
+}
+`;
+
+export interface ContextLossHandlers {
+  onLost?(): void;
+  onRestored?(): void;
+}
+
+/**
+ * Keep a canvas' WebGL context recoverable. A context lost to a GPU reset or
+ * driver restart is only restored by the browser if the page cancels the lost
+ * event, and nothing on it survives either way: every program, texture and
+ * buffer made before the loss is gone, so `onRestored` has to rebuild them.
+ * Returns the function that stops watching.
+ */
+export function watchContextLoss(canvas: HTMLCanvasElement | OffscreenCanvas, handlers: ContextLossHandlers): () => void {
+  const lost = (event: Event): void => {
+    event.preventDefault();
+    handlers.onLost?.();
+  };
+  const restored = (): void => handlers.onRestored?.();
+  canvas.addEventListener('webglcontextlost', lost);
+  canvas.addEventListener('webglcontextrestored', restored);
+  return () => {
+    canvas.removeEventListener('webglcontextlost', lost);
+    canvas.removeEventListener('webglcontextrestored', restored);
+  };
+}
+
+export interface ContextHold<T> {
+  /** The live object, or null while the context is gone (or could not be rebuilt). */
+  current(): T | null;
+  stop(): void;
+}
+
+// A context that was just restored can still be busy after a GPU reset, so the
+// first build on it may fail where one a moment later works.
+const REBUILD_TRIES = 3;
+const REBUILD_RETRY_MS = 250;
+
+/**
+ * Hold something built on a canvas' context across a loss. The old object is
+ * dropped the moment the context goes (what it owned is already gone with
+ * it), and `build` makes a new one once the browser restores the context. A
+ * build that fails is tried again a few times, spaced out, before `onFailed`;
+ * the next loss starts the cycle over.
+ */
+export function holdThroughContextLoss<T extends { dispose(): void }>(
+  canvas: HTMLCanvasElement | OffscreenCanvas,
+  first: T,
+  build: () => T | null,
+  hooks: { onLost?(): void; onRestored?(next: T): void; onFailed?(): void } = {},
+): ContextHold<T> {
+  let live: T | null = first;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  const cancelRetry = (): void => {
+    if (retry !== null) clearTimeout(retry);
+    retry = null;
+  };
+  const attempt = (triesLeft: number): void => {
+    retry = null;
+    if (live) return;
+    try {
+      live = build();
+    } catch (err) {
+      console.error('[eviland] rebuild after context loss failed:', err);
+      live = null;
+    }
+    if (live) hooks.onRestored?.(live);
+    else if (triesLeft > 1) retry = setTimeout(() => attempt(triesLeft - 1), REBUILD_RETRY_MS);
+    else hooks.onFailed?.();
+  };
+  const stopWatching = watchContextLoss(canvas, {
+    onLost() {
+      cancelRetry();
+      const old = live;
+      live = null;
+      try { old?.dispose(); } catch { /* its context is already gone */ }
+      hooks.onLost?.();
+    },
+    onRestored() {
+      cancelRetry();
+      attempt(REBUILD_TRIES);
+    },
+  });
+  return {
+    current: () => live,
+    stop() {
+      cancelRetry();
+      stopWatching();
+    },
+  };
+}

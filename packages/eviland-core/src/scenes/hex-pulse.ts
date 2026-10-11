@@ -40,8 +40,8 @@ vec4 scene(vec2 uv, vec2 p) {
   float band = u_bands[bandIdx];
 
   // Pressure wave: kicks launch lit rings that travel outward.
-  float waveSpeed = 4.0 + u_energy * 6.0;
-  float wavePhase = u_globalTime * waveSpeed - ringR;
+  // Speed 4 + 6 * energy, integrated: energy changes the pace, not the position.
+  float wavePhase = u_globalTime * 4.0 + u_energyTime * 6.0 - ringR;
   float wave = exp(-abs(fract(wavePhase * 0.15) - 0.5) * 9.0) *
                (0.4 + u_kick * 0.5 + u_kickPulse * 0.7);
 

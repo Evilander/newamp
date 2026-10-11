@@ -34,7 +34,7 @@ import { hashSeed } from './eviland-rng';
 import { createReactorOverlay } from './reactor-overlay';
 import { createSceneOverlay } from './scene-overlay';
 import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame } from './eviland-fluid';
-import { createDynamics, evalConfig, type OperatorConfig, type PaletteConfig, type WaveOverride } from './eviland-operators';
+import { createDynamics, evalConfig, sectionSeedFor, type OperatorConfig, type PaletteConfig, type WaveOverride } from './eviland-operators';
 import { sourceProgram, sourceTarget, disposeSourceTarget, type SourceTarget } from './eviland-gl';
 import { applyScoreCues } from './eviland-conductor';
 import { NOISE_GLSL, MORPH_GLSL } from './eviland-morph';
@@ -436,7 +436,7 @@ export function createEvilandLivePipeline(
     };
     onsets = [];
     impactStartPending = false;
-    evalConfig(current.config, frame, frame.sectionId, dyn, dt * 1000);
+    evalConfig(current.config, frame, sectionSeedFor(frame.sectionId), dyn, dt * 1000);
     // MilkDrop's own warp isn't ours to bend, so in Live the cues act through
     // what is: the fluid (inward pull, then the shockwave), how much of the
     // scene is laid in, the reactor events, and the final grade.

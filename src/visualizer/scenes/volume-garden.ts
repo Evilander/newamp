@@ -2,6 +2,7 @@
 import type { SceneDef } from './index';
 export const volumeGarden: SceneDef = {
   id: 'volume-garden', name: 'Volume Garden', mood: 'calm',
+  occlusion: 0.85,
   speed: f => 0.12 + f.energy * 0.22,
   frag: `
 float sculpture(vec3 p) {
@@ -33,7 +34,7 @@ vec4 scene(vec2 uv, vec2 p) {
   if (surface) {
     vec2 e = vec2(0.004, 0);
     vec3 normal = normalize(vec3(sculpture(hit + e.xyy) - sculpture(hit - e.xyy),
-      sculpture(hit + e.yxy) - sculpture(hit - e.yxy), sculpture(hit + e.yyx) - sculpture(hit - e.yyx)));
+      sculpture(hit + e.yxy) - sculpture(hit - e.yxy), sculpture(hit + e.yyx) - sculpture(hit - e.yyx)) + vec3(1e-4));
     float diffuse = max(0.0, dot(normal, normalize(vec3(-1, 2, 3))));
     float rim = pow(1.0 - abs(dot(normal, -ray)), 2.0);
     float tint = 0.5 + 0.3 * sin(hit.y * 2.0 + hit.x + u_phase * 0.2);

@@ -7,7 +7,7 @@
 import type { EvilandFrame } from './eviland-audio';
 import type { PaletteConfig, RGB } from './eviland-operators';
 import type { SceneTarget } from './scene-overlay';
-import { sourceProgram, sourceTarget, disposeSourceTarget, type SourceTarget } from './eviland-gl';
+import { sourceProgram, sourceTarget, disposeSourceTarget, NAN_GLSL, type SourceTarget } from './eviland-gl';
 import { mulberry32 } from './eviland-rng';
 
 const STEP = `#version 300 es
@@ -20,6 +20,7 @@ uniform float u_speed, u_reach, u_angle, u_turn, u_jitter, u_repel;
 uniform vec2 u_appetite; // feedback brightness: multiplies the smell (x), adds to it (y)
 uniform vec4 u_sprout; // x, y, radius, share of agents re-seeded there this tick
 uniform uint u_tick, u_seed;
+${NAN_GLSL}
 // Trail level an agent is happiest in. Crowding past it stands in for Jones'
 // one-agent-per-cell exclusion: without that, every species collapses into a
 // few fat loops, and a response that plateaus lets them settle into sheets.
@@ -48,12 +49,18 @@ float smell(vec2 p, int species) {
 void main() {
   ivec2 cell = ivec2(gl_FragCoord.xy);
   vec4 agent = texelFetch(u_agents, cell, 0);
-  int species = int(agent.w);
+  bool kindKnown = !notNumber(agent.w) && agent.w >= 0.0 && agent.w < 3.0;
+  float kind = kindKnown ? agent.w : float((cell.x + cell.y) % 3) + 0.5;
+  int species = int(kind);
   uint state = hash(uint(cell.x) | uint(cell.y) << 12u) ^ hash(u_tick * 0x9e3779b9u + u_seed);
   vec2 size = vec2(textureSize(u_trail, 0));
-  if (random(state) < u_sprout.w) {
+  // An agent whose state went NaN or ran off starts over like a sprout,
+  // instead of wandering the map as NaN for good.
+  bool astray = notNumber(agent.x) || notNumber(agent.y) || notNumber(agent.z)
+    || abs(agent.x) >= 2.0 || abs(agent.y) >= 2.0 || abs(agent.z) >= 1e4;
+  if (astray || random(state) < u_sprout.w) {
     float a = random(state) * 6.2831853, r = u_sprout.z * sqrt(random(state));
-    o = vec4(fract(u_sprout.xy + vec2(cos(a) * size.y / size.x, sin(a)) * r), random(state) * 6.2831853, agent.w);
+    o = vec4(fract(u_sprout.xy + vec2(cos(a) * size.y / size.x, sin(a)) * r), random(state) * 6.2831853, kind);
     return;
   }
   vec2 reach = u_reach * REACH[species] / size;
@@ -67,9 +74,9 @@ void main() {
   else if (l > r) h += turn;
   else if (r > l) h -= turn;
   h += (random(state) - 0.5) * u_jitter;
-  float pace = u_speed * PACE[species] * (0.8 + 0.4 * fract(agent.w));
+  float pace = u_speed * PACE[species] * (0.8 + 0.4 * fract(kind));
   vec2 p = fract(agent.xy + vec2(cos(h), sin(h)) * pace / size);
-  o = vec4(p, mod(h, 6.2831853), agent.w);
+  o = vec4(p, mod(h, 6.2831853), kind);
 }`;
 // One point per agent, fetched by gl_VertexID; no attributes.
 const DEPOSIT_VERTEX = `#version 300 es
@@ -97,12 +104,17 @@ in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_trail;
 uniform float u_decay, u_diffuse;
+${NAN_GLSL}
+float settle1(float x){ return notNumber(x) ? 0.0 : clamp(x, 0.0, 64.0); }
 void main() {
   vec2 h = 0.5 / vec2(textureSize(u_trail, 0));
   vec3 c = texture(u_trail, v_uv).rgb;
   vec3 blur = 0.25 * (texture(u_trail, v_uv + h).rgb + texture(u_trail, v_uv - h).rgb
     + texture(u_trail, v_uv + vec2(h.x, -h.y)).rgb + texture(u_trail, v_uv + vec2(-h.x, h.y)).rgb);
-  o = vec4(min(mix(c, blur, u_diffuse) * u_decay, vec3(64)), 1);
+  vec3 next = mix(c, blur, u_diffuse) * u_decay;
+  // NaN falls to zero, so one bad texel cannot spread through the blur and
+  // sit in the map for good.
+  o = vec4(settle1(next.r), settle1(next.g), settle1(next.b), 1);
 }`;
 const DRAW = `#version 300 es
 precision highp float;
@@ -259,7 +271,7 @@ export function createPhysarum(gl: WebGL2RenderingContext, seed = 1, quality: Qu
   const d = Object.fromEntries(['trail','colors','low','gain','flash','opacity'].map(n => [n, gl.getUniformLocation(draw, `u_${n}`)]));
   return {
     render(frame: EvilandFrame, palette: PaletteConfig, dtMs: number, feedback: WebGLTexture, target: SceneTarget) {
-      const dt = Math.max(0, Math.min(100, dtMs));
+      const dt = Number.isFinite(dtMs) ? Math.max(0, Math.min(100, dtMs)) : 0;
       pending += dt;
       const k = 1 - Math.exp(-dt / 180), slow = 1 - Math.exp(-dt / 600);
       energy += (frame.energy - energy) * k; bass += (frame.bass - bass) * k;
@@ -273,6 +285,10 @@ export function createPhysarum(gl: WebGL2RenderingContext, seed = 1, quality: Qu
         else if (onset.group === 'snare') flash = Math.max(flash, 0.4 + onset.intensity * 0.6);
       }
       flinch = Math.min(1, flinch); flash = Math.min(1, flash);
+      // These are running averages; a NaN frame value would stay in them.
+      if (!Number.isFinite(energy + bass + hat + vocal + kickSlow + snareSlow + flinch + flash)) {
+        energy = bass = hat = vocal = kickSlow = snareSlow = flinch = flash = 0;
+      }
       sproutIn -= dt;
       if (frame.sectionChanged) sprout = Math.max(sprout, 0.15);
       else if (sproutIn <= 0) sprout = Math.max(sprout, 0.06);

@@ -11,7 +11,11 @@
 // across ANGLE/Metal/D3D/GL.
 //
 // createParticleFlowRenderer returns null when WebGL2 (or transform feedback)
-// is unavailable so the caller can fall back to a canvas-2D path.
+// is unavailable so the caller can fall back to a canvas-2D path. A context
+// lost to a GPU reset is restored by the browser and the particles restart on
+// it; frames are skipped in between.
+
+import { holdThroughContextLoss, NAN_GLSL } from './eviland-gl';
 
 export interface ParticleFlowFeatures {
   bass: number;
@@ -26,7 +30,12 @@ export interface ParticleFlowFeatures {
 export interface ParticleFlowRenderer {
   resize(cssWidth: number, cssHeight: number, dpr: number): void;
   render(features: ParticleFlowFeatures, accentRgb: [number, number, number], dtSeconds: number): void;
-  dispose(): void;
+  /**
+   * Free the renderer's GPU resources. The canvas and its context belong to
+   * the caller and stay usable; pass releaseContext to give the context up
+   * too when the canvas is being thrown away.
+   */
+  dispose(options?: { releaseContext?: boolean }): void;
   readonly particleCount: number;
 }
 
@@ -78,6 +87,7 @@ float snoise(vec2 v){
   return 130.0*dot(m,g);
 }
 float rand(float n){return fract(sin(n*12.9898)*43758.5453);}
+${NAN_GLSL}
 
 vec2 curl(vec2 p){
   float e=0.12;
@@ -115,7 +125,9 @@ void main(){
   age += u_dt;
 
   float lifespan=2.2+seed*3.0;
-  bool dead = age>lifespan || abs(pos.x)>1.25 || abs(pos.y)>1.25;
+  // A NaN position or age respawns instead of flying on forever.
+  bool dead = notNumber(pos.x) || notNumber(pos.y) || notNumber(age)
+    || age>lifespan || abs(pos.x)>1.25 || abs(pos.y)>1.25;
   if(dead){
     // Respawn near center on a seeded ring so the field keeps feeding.
     float ang=rand(seed+floor(u_time))*6.2831853;
@@ -235,9 +247,36 @@ export function createParticleFlowRenderer(
     powerPreference: 'high-performance',
   });
   if (!ctx) return null;
-  // Non-nullable binding so the render/resize/dispose closures don't trip
-  // TS's "possibly null" on a closed-over context.
-  const gl: WebGL2RenderingContext = ctx;
+  const first = buildParticleFlow(canvas, ctx, options);
+  if (!first) return null;
+  let size: [number, number, number] | null = null;
+  const hold = holdThroughContextLoss(canvas, first, () => buildParticleFlow(canvas, ctx, options), {
+    onRestored(next) {
+      if (size) next.resize(size[0], size[1], size[2]);
+    },
+  });
+  return {
+    resize(cssWidth, cssHeight, nextDpr) {
+      size = [cssWidth, cssHeight, nextDpr];
+      hold.current()?.resize(cssWidth, cssHeight, nextDpr);
+    },
+    render(features, accentRgb, dt) {
+      hold.current()?.render(features, accentRgb, dt);
+    },
+    dispose(disposeOptions) {
+      hold.stop();
+      hold.current()?.dispose();
+      if (disposeOptions?.releaseContext) ctx.getExtension('WEBGL_lose_context')?.loseContext();
+    },
+    particleCount: first.particleCount,
+  };
+}
+
+function buildParticleFlow(
+  canvas: HTMLCanvasElement,
+  gl: WebGL2RenderingContext,
+  options: ParticleFlowOptions,
+): ParticleFlowRenderer | null {
   if (typeof gl.createTransformFeedback !== 'function') return null;
 
   const count = Math.max(4096, Math.min(1_000_000, Math.floor(options.particles ?? 96_000)));
@@ -309,6 +348,9 @@ export function createParticleFlowRenderer(
 
   let time = 0;
   let dpr = 1;
+  // The shaders get the clock wrapped: a float32 uniform that keeps growing
+  // loses the resolution the noise and hash terms need after a few hours.
+  const TIME_WRAP = 1024;
 
   function bindAttrib(loc: number, buf: WebGLBuffer): void {
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -328,14 +370,14 @@ export function createParticleFlowRenderer(
   }
 
   function render(features: ParticleFlowFeatures, accentRgb: [number, number, number], dt: number): void {
-    const step = Math.min(0.05, Math.max(0.001, dt));
+    const step = Math.min(0.05, Math.max(0.001, Number.isFinite(dt) ? dt : 1 / 60));
     time += step;
     const aspect = Math.max(0.0001, canvas.width / Math.max(1, canvas.height));
 
     // 1) Simulation step via transform feedback (rasterization off).
     gl.useProgram(simProg);
     gl.uniform1f(simLoc.dt, step * 60); // normalize to ~per-60fps-frame units
-    gl.uniform1f(simLoc.time, time);
+    gl.uniform1f(simLoc.time, time % TIME_WRAP);
     gl.uniform1f(simLoc.aspect, aspect);
     gl.uniform1f(simLoc.bass, features.bass);
     gl.uniform1f(simLoc.mid, features.mid);
@@ -399,8 +441,6 @@ export function createParticleFlowRenderer(
     gl.deleteBuffer(nxt.age);
     gl.deleteBuffer(quadBuf);
     gl.deleteTransformFeedback(tf);
-    const lose = gl.getExtension('WEBGL_lose_context');
-    if (lose) lose.loseContext();
   }
 
   return { resize, render, dispose, particleCount: count };

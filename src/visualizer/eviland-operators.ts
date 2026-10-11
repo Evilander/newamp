@@ -59,7 +59,7 @@ export interface Channel {
 //
 // A QSlot is a declarative per-frame scalar named q1..q8 (max 8 slots).
 // Each slot mixes three pieces: a constant `base`, an optional tempo-locked
-// LFO (`rate * frame.beatPhase`), and optional audio bindings. The combined
+// LFO (`rate * frame.beatClock`), and optional audio bindings. The combined
 // value can also be smoothed (EMA over previous frames) so a noisy feature
 // drives a slow scalar. Channels reference q's via {feature:'q1'..'q8'}.
 //
@@ -70,7 +70,11 @@ export interface Channel {
 
 export type LfoShape = 'sine' | 'tri' | 'saw' | 'square';
 
-/** A tempo-locked LFO. Phase = TAU * rate * frame.beatPhase. */
+/**
+ * A tempo-locked LFO. Phase = TAU * rate * frame.beatClock: the clock counts
+ * beats without resetting, so a rate under 1 runs one continuous cycle across
+ * several beats instead of restarting on every beat line.
+ */
 export interface QLfo {
   /** Cycles per beat. 1 = one full cycle per beat, 0.25 = one per bar (4/4). */
   rate: number;
@@ -365,6 +369,8 @@ export interface FrameLike {
   energy: number; centroid: number; flatness: number; crest: number; rolloff: number;
   width: number; pan: number; novelty: number;
   beatPhase: number; beatConfidence: number;
+  /** Continuous beat count for LFOs; frames without one fall back to beatPhase. */
+  beatClock?: number;
 }
 
 const WAVE_MODE_INDEX: Record<WaveMode, number> = {
@@ -432,7 +438,9 @@ function evalChannel(
       v += applyCurve(featureValue(bind.feature, frame, sectionSeed, q), bind.curve) * bind.gain;
     }
   }
-  return v;
+  // One bad feature poisons the sum. Hold the channel at its base for this
+  // frame instead of handing the clamp a NaN.
+  return v === v ? v : ch.base === ch.base ? ch.base : 0;
 }
 
 /** Optional-channel eval: missing channel resolves to `defaultBase`. */
@@ -449,11 +457,11 @@ function evalOptional(
 
 const TAU = Math.PI * 2;
 
-/** Evaluate one LFO at the current beat phase. Output in [-1, 1] before amp. */
-function evalLfo(lfo: QLfo, beatPhase: number): number {
-  // Phase locked to beatPhase * rate. Modulo to [0, 1) for triangle/saw/square
+/** Evaluate one LFO at the current beat count. Output in [-1, 1] before amp. */
+function evalLfo(lfo: QLfo, beats: number): number {
+  // Phase locked to beats * rate. Modulo to [0, 1) for triangle/saw/square
   // shapes; sine takes the raw angle so harmonic rates (rate > 1) still cycle.
-  const phase = beatPhase * lfo.rate;
+  const phase = beats * lfo.rate;
   let v: number;
   switch (lfo.shape) {
     case 'sine':
@@ -480,8 +488,20 @@ function evalLfo(lfo: QLfo, beatPhase: number): number {
   return v * (lfo.amp ?? 1);
 }
 
+/** NaN reads as 0, so a bad value lands inside the range instead of passing through it. */
 function clamp(v: number, lo: number, hi: number): number {
+  if (v !== v) v = 0;
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/**
+ * A stable 0..1 value per section, so a section that returns gets the same
+ * one. evalConfig reads it as the rotation base, hue direction and mirror
+ * choice; the field warp spreads it over a wider range for its noise offset.
+ */
+export function sectionSeedFor(sectionId: number): number {
+  const id = Number.isFinite(sectionId) ? Math.floor(sectionId) : 0;
+  return ((((id * 4099 + 17) % 997) + 997) % 997) / 997;
 }
 
 /** Allocate a reusable dynamics scratch object. */
@@ -503,9 +523,9 @@ export function createDynamics(): EvilandDynamics {
   };
 }
 
-/** Q-var safety clamp: bound to [-8, 8] so a runaway LFO can't NaN downstream. */
+/** Q-var safety clamp: bound to [-8, 8] so a runaway LFO can't NaN downstream. NaN resets the slot to 0. */
 function clampQ(v: number): number {
-  return v < -8 ? -8 : v > 8 ? 8 : v;
+  return v < -8 ? -8 : v > 8 ? 8 : v === v ? v : 0;
 }
 
 /**
@@ -520,6 +540,10 @@ export function evalConfig(
   out: EvilandDynamics,
   dtMs = 1000 / 60,
 ): EvilandDynamics {
+  // A frame time that is not a number (or not a plausible one) must not reach
+  // the smoothing below: pow(smooth, NaN) would stick every q slot at NaN.
+  const stepMs = Number.isFinite(dtMs) ? (dtMs < 0 ? 0 : dtMs > 1000 ? 1000 : dtMs) : 1000 / 60;
+  if (sectionSeed !== sectionSeed) sectionSeed = 0;
   // ── Q-VARS FIRST. Computed before any channel so downstream
   // bindings with feature:'q1'..'q8' can read this frame's value. q's see
   // themselves as 0 (their previous value isn't visible — only the *smoothed*
@@ -535,7 +559,7 @@ export function evalConfig(
     // frame's value — that's intentional: it lets a slot reference its own
     // prior value via 'q{i+1}' for hand-rolled feedback if desired).
     let v = slot.base;
-    if (slot.lfo) v += evalLfo(slot.lfo, frame.beatPhase);
+    if (slot.lfo) v += evalLfo(slot.lfo, frame.beatClock ?? frame.beatPhase);
     const b = slot.bindings;
     if (b) {
       for (let j = 0; j < b.length; j++) {
@@ -546,7 +570,7 @@ export function evalConfig(
     // EMA smoothing: out = smooth * prev + (1-smooth) * v.
     const smooth = slot.smooth;
     if (smooth && smooth > 0) {
-      const s = Math.pow(Math.min(0.99, smooth), Math.max(0, dtMs) * 0.06);
+      const s = Math.pow(Math.min(0.99, smooth), stepMs * 0.06);
       v = s * q[i]! + (1 - s) * v;
     }
     q[i] = clampQ(v);
@@ -741,8 +765,99 @@ function lerpChannelInto(out: Channel, a: Channel, b: Channel, t: number): void 
   }
 }
 
+// ── Colour interpolation in OKLCh ─────────────────────────────────────────
+// Palettes blend in OKLCh rather than RGB: a straight RGB line between two
+// saturated colours passes through grey, so every fade went muddy in the
+// middle. Lightness and chroma move linearly and hue takes the short way
+// round; a result outside the RGB cube has its chroma pulled in. Endpoints
+// come back exactly, so a settled look is untouched. Allocation-free: the
+// conversions work in module scratch.
+const oklchA = new Float64Array(3);
+const oklchB = new Float64Array(3);
+const rgbScratch = new Float64Array(3);
+
+// OKLab is defined on linear light; palettes are sRGB. Blending the encoded
+// values keeps the chroma but lands the midpoint's lightness off.
+const toLinear = (v: number): number => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+const fromLinear = (v: number): number => (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
+
+function rgbToOklch(sr: number, sg: number, sb: number, out: Float64Array): void {
+  const r = toLinear(sr);
+  const g = toLinear(sg);
+  const b = toLinear(sb);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  const L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
+  const a = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+  const bb = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+  out[0] = L;
+  out[1] = Math.hypot(a, bb);
+  out[2] = Math.atan2(bb, a);
+}
+
+/** OKLCh → linear RGB, unclamped; the caller checks the gamut and encodes. */
+function oklchToRgb(L: number, C: number, h: number, out: Float64Array): void {
+  const a = C * Math.cos(h);
+  const bb = C * Math.sin(h);
+  const l = (L + 0.3963377774 * a + 0.2158037573 * bb) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * bb) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * bb) ** 3;
+  out[0] = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+  out[1] = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+  out[2] = -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s;
+}
+
+function inGamut(rgb: Float64Array): boolean {
+  return rgb[0]! >= -0.002 && rgb[0]! <= 1.002 && rgb[1]! >= -0.002 && rgb[1]! <= 1.002 && rgb[2]! >= -0.002 && rgb[2]! <= 1.002;
+}
+
+/** Interpolate two colours in OKLCh, writing the RGB result into `out`. */
+function lerpColorInto(out: RGB, a: RGB, b: RGB, t: number): void {
+  if (t <= 0) {
+    out[0] = a[0]; out[1] = a[1]; out[2] = a[2];
+    return;
+  }
+  if (t >= 1) {
+    out[0] = b[0]; out[1] = b[1]; out[2] = b[2];
+    return;
+  }
+  rgbToOklch(a[0], a[1], a[2], oklchA);
+  rgbToOklch(b[0], b[1], b[2], oklchB);
+  const L = lerp(oklchA[0]!, oklchB[0]!, t);
+  const C = lerp(oklchA[1]!, oklchB[1]!, t);
+  // A near-grey colour has no hue of its own; take the other side's.
+  let h: number;
+  if (oklchA[1]! < 1e-4) h = oklchB[2]!;
+  else if (oklchB[1]! < 1e-4) h = oklchA[2]!;
+  else {
+    let dh = oklchB[2]! - oklchA[2]!;
+    if (dh > Math.PI) dh -= TAU;
+    else if (dh < -Math.PI) dh += TAU;
+    h = oklchA[2]! + dh * t;
+  }
+  oklchToRgb(L, C, h, rgbScratch);
+  if (!inGamut(rgbScratch)) {
+    // Pull the chroma in until the colour fits, keeping its lightness and hue.
+    let lo = 0;
+    let hi = C;
+    for (let i = 0; i < 8; i++) {
+      const mid = (lo + hi) * 0.5;
+      oklchToRgb(L, mid, h, rgbScratch);
+      if (inGamut(rgbScratch)) lo = mid;
+      else hi = mid;
+    }
+    oklchToRgb(L, lo, h, rgbScratch);
+  }
+  out[0] = fromLinear(clamp(rgbScratch[0]!, 0, 1));
+  out[1] = fromLinear(clamp(rgbScratch[1]!, 0, 1));
+  out[2] = fromLinear(clamp(rgbScratch[2]!, 0, 1));
+}
+
 function lerpRGB(a: RGB, b: RGB, t: number): RGB {
-  return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+  const out: RGB = [0, 0, 0];
+  lerpColorInto(out, a, b, t);
+  return out;
 }
 
 /** Interpolate an optional Channel; missing inputs treated as {base: defaultBase}. */
@@ -945,18 +1060,10 @@ export function lerpConfigInto(
   ensureOwnedPalette(out);
   const opal = out.palette!;
   if (a.palette && b.palette) {
-    opal.bg[0] = lerp(a.palette.bg[0], b.palette.bg[0], t);
-    opal.bg[1] = lerp(a.palette.bg[1], b.palette.bg[1], t);
-    opal.bg[2] = lerp(a.palette.bg[2], b.palette.bg[2], t);
-    opal.dark[0] = lerp(a.palette.dark[0], b.palette.dark[0], t);
-    opal.dark[1] = lerp(a.palette.dark[1], b.palette.dark[1], t);
-    opal.dark[2] = lerp(a.palette.dark[2], b.palette.dark[2], t);
-    opal.accent[0] = lerp(a.palette.accent[0], b.palette.accent[0], t);
-    opal.accent[1] = lerp(a.palette.accent[1], b.palette.accent[1], t);
-    opal.accent[2] = lerp(a.palette.accent[2], b.palette.accent[2], t);
-    opal.light[0] = lerp(a.palette.light[0], b.palette.light[0], t);
-    opal.light[1] = lerp(a.palette.light[1], b.palette.light[1], t);
-    opal.light[2] = lerp(a.palette.light[2], b.palette.light[2], t);
+    lerpColorInto(opal.bg, a.palette.bg, b.palette.bg, t);
+    lerpColorInto(opal.dark, a.palette.dark, b.palette.dark, t);
+    lerpColorInto(opal.accent, a.palette.accent, b.palette.accent, t);
+    lerpColorInto(opal.light, a.palette.light, b.palette.light, t);
   } else if (pick.palette) {
     // Snap-pick semantics, but COPY values (not the reference) so out.palette
     // remains independent of pick.palette.
