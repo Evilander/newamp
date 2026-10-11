@@ -63,6 +63,10 @@ if (playwrightModule) {
     app.commandLine.appendSwitch('use-gl', 'angle');
     app.commandLine.appendSwitch('use-angle', 'swiftshader');
     app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+    // SwiftShader on a busy runner can spend longer on one shader compile
+    // than the GPU watchdog allows; it then kills the GPU process as hung
+    // (exit code 2) partway through a run that was still progressing.
+    app.commandLine.appendSwitch('disable-gpu-watchdog');
   }
   // Closing the probe window must not quit the app before finish() has
   // written the captures and chosen the exit code.

@@ -33,6 +33,9 @@ if (playwrightModule) {
     app.commandLine.appendSwitch('use-gl', 'angle');
     app.commandLine.appendSwitch('use-angle', 'swiftshader');
     app.commandLine.appendSwitch('enable-unsafe-swiftshader');
+    // See eviland-visual-test.mjs: the GPU watchdog kills slow SwiftShader
+    // compiles on CI runners as hangs.
+    app.commandLine.appendSwitch('disable-gpu-watchdog');
   }
   app.on('window-all-closed', () => {});
   // No top-level await on ready: Electron holds `ready` until this module
