@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.tsx';
+import { FloatingPanelHost } from './components/FloatingPanelHost';
 import './styles/index.css';
 
 if (new URLSearchParams(window.location.search).has('newamp-smoke')) {
@@ -12,5 +13,6 @@ if (new URLSearchParams(window.location.search).has('newamp-smoke')) {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <App />
+    <FloatingPanelHost />
   </React.StrictMode>,
 );

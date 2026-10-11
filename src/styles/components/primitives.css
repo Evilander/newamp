@@ -120,7 +120,7 @@
   font-size: var(--text-2xs);
 }
 .chip-md {
-  height: 22px; /* matches .pxbtn height so mixed rows sit on one line */
+  height: var(--chip-h); /* matches .pxbtn height so mixed rows sit on one line */
   padding: 0 8px;
   font-size: var(--text-xs);
 }
@@ -144,18 +144,18 @@
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .chip-ok {
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
   background: color-mix(in srgb, var(--accent) 8%, transparent);
   text-shadow: 0 0 6px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 .chip-warn {
-  color: var(--warn);
+  color: var(--warn-text);
   border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
   background: color-mix(in srgb, var(--warn) 8%, transparent);
 }
 .chip-error {
-  color: var(--error);
+  color: var(--error-text);
   border-color: color-mix(in srgb, var(--error) 55%, var(--line));
   background: color-mix(in srgb, var(--error) 8%, transparent);
 }
@@ -517,7 +517,8 @@
 }
 .confirm-action.is-armed {
   --confirm-tone: var(--error);
-  color: var(--confirm-tone);
+  --confirm-text: var(--error-text);
+  color: var(--confirm-text);
   text-shadow: 0 0 6px color-mix(in srgb, var(--confirm-tone) 45%, transparent);
   background: linear-gradient(
     180deg,
@@ -534,6 +535,7 @@
 }
 .confirm-action.confirm-tone-warn.is-armed {
   --confirm-tone: var(--warn);
+  --confirm-text: var(--warn-text);
 }
 @media (prefers-reduced-motion: reduce) {
   .confirm-action {

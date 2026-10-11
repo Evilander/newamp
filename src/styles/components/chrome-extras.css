@@ -4,6 +4,13 @@
 .titlebar-nodrag {
   -webkit-app-region: no-drag;
 }
+/* Wordmark and track title, worn on top of .lcd-text. The lit LCD colour is
+   unreadable on the light skins' title bars, so colour and glow come from the
+   title bar tokens instead. */
+.titlebar-text {
+  color: var(--titlebar-fg);
+  text-shadow: var(--titlebar-shadow);
+}
 
 @keyframes blink {
   0%, 100% { opacity: 1; }
@@ -19,8 +26,14 @@
 }
 .pulse-soft { animation: pulse-soft 2.6s ease-in-out infinite; }
 
-/* Inset display window */
+/* Inset display window. It carries its own colour pair (dark glass on most
+   skins, paper on Mono), so text inside it takes the display-tuned secondary
+   colours; the panel-tuned --ink-2 and --muted fail on it for the light skins. */
 .display {
+  --ink-2: var(--display-dim);
+  --muted: var(--display-dim);
+  --warn-text: var(--warn);
+  --error-text: var(--error);
   position: relative;
   overflow: hidden;
   background: var(--display-bg);
@@ -52,14 +65,19 @@
     0 1px 0 var(--bevel-dark); /* was hardcoded rgba(0,0,0,.4); midnight's bevel-dark ≈ .5 */
 }
 
-[data-theme='midnight'] .pxbtn {
+/* Midnight's taller, rounder buttons. The height rides --pxbtn-h so the
+   dense surfaces (table rows, decks) and .pxbtn-xs keep their own; padding
+   and radius skip those too. The exclusions sit in :where() so this stays
+   (0,2,0): a plain :not() would take its argument's specificity and outrank
+   the shells' .pxbtn.is-active fill. */
+[data-theme='midnight'] { --pxbtn-h: 32px; }
+[data-theme='midnight'] .pxbtn:not(:where(.pxbtn-xs, [data-newamp-compact-deck-root] .pxbtn)) {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0));
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
   border-radius: 8px;
-  height: 32px;
   padding: 0 12px;
 }
-[data-theme='midnight'] .pxbtn:hover {
+[data-theme='midnight'] .pxbtn:hover:not(:where(.is-active)) {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
 }
 
@@ -140,6 +158,147 @@
   color: var(--accent-text);
   box-shadow: inset 3px 0 0 var(--accent);
   border-radius: 8px;
+}
+
+/* Sidebar group heading: a button that collapses its group. */
+.sidebar-group-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 24px;
+  padding: 0 8px;
+  text-align: left;
+  font-size: calc(9px * var(--newamp-text-scale, 1));
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-radius: var(--radius);
+}
+.sidebar-group-head:hover {
+  color: var(--ink-2);
+}
+.sidebar-group-head:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  color: var(--ink);
+}
+.sidebar-group-chevron {
+  flex: none;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.sidebar-group-head[aria-expanded='false'] .sidebar-group-chevron {
+  transform: rotate(-90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-group-chevron {
+    transition: none;
+  }
+}
+.sidebar-customise {
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: calc(9px * var(--newamp-text-scale, 1));
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-radius: var(--radius);
+}
+.sidebar-customise:hover {
+  color: var(--ink);
+  background: var(--panel-2);
+}
+.sidebar-customise:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The Customise popover: one row per sidebar item, grouped as the sidebar is. */
+.sidebar-menu {
+  position: fixed;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  /* No higher than 44px (PANEL_TOP_LIMIT), 8px clear below. */
+  max-height: calc(100vh - 52px);
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  font-family: var(--font-mono);
+  font-size: calc(11px * var(--newamp-text-scale, 1));
+  color: var(--ink);
+  /* Frameless window: a press over the title bar's drag region would move the window. */
+  -webkit-app-region: no-drag;
+}
+.sidebar-menu-head {
+  margin-bottom: 8px;
+  font-size: calc(9px * var(--newamp-text-scale, 1));
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sidebar-menu-body {
+  display: grid;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.sidebar-menu-group h3 {
+  margin: 0 0 2px;
+  font-size: calc(9px * var(--newamp-text-scale, 1));
+  font-weight: 400;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sidebar-menu-group ul {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sidebar-menu-group li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sidebar-menu-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.sidebar-menu-toggle:hover {
+  background: var(--panel-2);
+}
+.sidebar-menu-move {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  font-size: calc(8px * var(--newamp-text-scale, 1));
+  line-height: 1;
+}
+.sidebar-menu-move:hover:not(:disabled) {
+  color: var(--accent);
+  background: var(--panel-2);
+}
+.sidebar-menu-move:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.sidebar-menu-foot {
+  display: flex;
+  flex: none;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 10px;
 }
 
 /* "Now playing" equalizer: four real band meters (bass to treble) fed by the

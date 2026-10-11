@@ -34,6 +34,7 @@
 @import './views/nowplaying.css'; /* Now Playing side tabs, split handle, liner notes */
 @import './components/rating.css'; /* 0-100 decimal score rating */
 @import './components/volume.css'; /* VLC-style boost volume slider */
+@import './components/scrub.css'; /* waveform seek bar */
 @import './components/chrome-extras.css'; /* titlebar drag, display, marquee, nav, eq-bars */
 @import './views/visualizer.css'; /* fullscreen visualizer command layer */
 @import './views/extras.css'; /* album letter rail, liner-note tag chips, view onboarding */
@@ -42,6 +43,7 @@
 @import './components/primitives.css'; /* 2.0 primitives: ViewHeader, Chip, EmptyState, Skeleton, Toast, ConfirmAction */
 @import './views/library.css'; /* Library: playing-row accent, queue affordances */
 @import './views/settings.css'; /* Settings view polish */
+@import './components/colour-editor.css'; /* floating panel + colour editor */
 @import './views/catalog.css'; /* Albums / Artists / Folders / Tags / Loved polish */
 @import './views/content.css'; /* Home / History / Mixes / Discover / Profile / Radio / Podcast / Playlist / Wrapped polish */
 @import './misc.css'; /* track highlight flash, help dot, ambient art wash */

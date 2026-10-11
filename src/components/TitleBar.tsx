@@ -27,7 +27,7 @@ export function TitleBar(): JSX.Element {
       >
         <BrandLogo size={28} title="NewAmp" />
         <span
-          className="lcd-text font-bold tracking-[0.3em]"
+          className="lcd-text titlebar-text font-bold tracking-[0.3em]"
           style={{ fontFamily: 'var(--font-display)', fontSize: 11 }}
         >
           NEWAMP
@@ -47,7 +47,7 @@ export function TitleBar(): JSX.Element {
           </span>
         )}
         <span
-          className="lcd-text max-w-[460px] truncate text-center text-[14px]"
+          className="lcd-text titlebar-text max-w-[460px] truncate text-center text-[14px]"
           title={current ? `${current.artist} - ${current.title}` : ''}
         >
           {current ? (
@@ -71,6 +71,7 @@ export function TitleBar(): JSX.Element {
           className={`pxbtn !min-w-[36px] ${alwaysOnTop ? 'is-active' : ''}`}
           onClick={() => setAlwaysOnTop(!alwaysOnTop)}
           aria-label="Pin window on top"
+          aria-pressed={alwaysOnTop}
           title={alwaysOnTop ? 'Unpin window' : 'Pin window on top'}
         >
           PIN
@@ -106,7 +107,7 @@ export function TitleBar(): JSX.Element {
               onClick={() => void winctl.close()}
               aria-label="Close"
               title="Close"
-              style={{ color: 'var(--error)' }}
+              style={{ color: 'var(--error-text)' }}
             >
               X
             </button>
