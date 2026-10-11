@@ -72,6 +72,15 @@ textarea.bevel-in {
   letter-spacing: 0.05em;
 }
 
+/* A placeholder is a hint, not a lit readout: no glow, dimmed, italic, so an
+   example query doesn't read as an active filter. */
+.lcd-text::placeholder {
+  color: var(--display-dim);
+  opacity: 1;
+  font-style: italic;
+  text-shadow: none;
+}
+
 .scanlines::before {
   content: '';
   pointer-events: none;
@@ -123,13 +132,26 @@ button {
   padding: 0;
 }
 
+/* Button height is --pxbtn-h: 24px, the WCAG 2.5.8 target size. Surfaces laid
+   out around the old 22px (fixed-height table rows, and the hardware decks,
+   which size their own buttons) keep it. */
+:root { --pxbtn-h: 24px; --chip-h: 24px; }
+td, th,
+[data-newamp-playlist-track-row], [data-newamp-queue-track-row], [data-newamp-queue-row],
+[data-newamp-compact-deck-root], .compact-root,
+.deck-record-player, .deck-jukebox, .deck-cassette,
+.deck-discman, .deck-winamp-classic, .deck-retro-tv {
+  --pxbtn-h: 22px;
+  --chip-h: 22px;
+}
+
 /* a small ASCII-style pixel button */
 .pxbtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-width: 24px;
-  height: 22px;
+  height: var(--pxbtn-h);
   padding: 0 8px;
   font-size: 11px;
   letter-spacing: 0.04em;
@@ -175,7 +197,7 @@ button {
 .pxbtn.is-primary {
   min-width: 30px;
   padding: 0 11px;
-  color: var(--accent);
+  color: var(--accent-text);
   text-shadow: 0 0 6px var(--accent-glow);
   background: linear-gradient(180deg,
     color-mix(in srgb, var(--accent) 22%, var(--panel-2)) 0%,
@@ -189,6 +211,70 @@ button {
     0 0 12px color-mix(in srgb, var(--accent) 24%, transparent);
 }
 .pxbtn.is-primary:hover { filter: brightness(1.2); }
+
+/* Labels stay on one line. Buttons inside table cells keep wrapping until the
+   markup moves them to .pxbtn-xs, which sets its own width. */
+.pxbtn:not(:where(td, th) .pxbtn),
+.pxbtn-xs {
+  white-space: nowrap;
+}
+
+/* Dense variant for buttons that live inside table cells and other tight
+   rows; each shell restates its padding for it (shells.css). */
+.pxbtn-xs {
+  --pxbtn-h: 22px;
+  min-width: 0;
+  padding: 0 6px;
+  font-size: 9px;
+}
+
+/* Disabled: dimmed and flat, with no hover, press or lit state, so an empty
+   view's PLAY or an exhausted NEXT reads as unavailable. Shells that paint
+   is-active as a fill drop it again in shells.css. */
+.pxbtn:disabled,
+.pxbtn[aria-disabled='true'] {
+  opacity: 0.42;
+  cursor: default;
+  filter: none;
+  text-shadow: none;
+}
+.pxbtn:disabled:hover,
+.pxbtn[aria-disabled='true']:hover {
+  filter: none;
+}
+.pxbtn:disabled:active,
+.pxbtn[aria-disabled='true']:active {
+  transform: none;
+  box-shadow:
+    inset 0 1px 0 var(--bevel-light),
+    inset 0 -1px 0 var(--bevel-dark),
+    inset 1px 0 0 var(--bevel-light),
+    inset -1px 0 0 var(--bevel-dark);
+}
+.pxbtn.is-active:disabled,
+.pxbtn.is-active[aria-disabled='true'],
+.pxbtn.is-primary:disabled,
+.pxbtn.is-primary[aria-disabled='true'] {
+  color: var(--ink-2);
+  text-shadow: none;
+}
+.pxbtn.is-primary:disabled,
+.pxbtn.is-primary[aria-disabled='true'] {
+  background: linear-gradient(180deg, var(--panel-2) 0%, var(--panel) 100%);
+  box-shadow:
+    inset 0 1px 0 var(--bevel-light),
+    inset 0 -1px 0 var(--bevel-dark),
+    inset 1px 0 0 var(--bevel-light),
+    inset -1px 0 0 var(--bevel-dark);
+}
+.pxbtn.is-primary:disabled:hover,
+.pxbtn.is-primary[aria-disabled='true']:hover {
+  filter: none;
+}
+.pxbtn-icon:disabled:active,
+.pxbtn-icon[aria-disabled='true']:active {
+  transform: none;
+}
 
 /* === Transport control icons (inline SVG, theme-colored, animated) =========
    Scoped to .pxbtn-icon so the rest of the app's pixel buttons are untouched.
@@ -250,7 +336,7 @@ svg[data-playing='true']  .pp-pause { opacity: 1; transform: none; }
   line-height: 1;
 }
 .track-icon-btn:hover {
-  color: var(--accent);
+  color: var(--accent-text);
   filter: brightness(1.12);
   text-shadow: 0 0 6px var(--accent-glow);
 }

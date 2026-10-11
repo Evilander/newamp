@@ -1,0 +1,316 @@
+/* colour-editor.css: the floating panel and the colour editor in it.
+
+   Everything reads the --ce-* roles. On the Settings page they follow the skin,
+   like any other Settings section. In the floating panel they are fixed: the
+   panel edits the skin's own tokens, and one that turned unreadable with the
+   colour being dragged could not be used to put it back. */
+
+:root {
+  --ce-ink: var(--ink);
+  --ce-dim: var(--ink-2);
+  --ce-line: var(--line);
+  --ce-raised: var(--panel-2);
+  --ce-accent: var(--accent-text);
+  --ce-low: var(--warn-text);
+  /* The editor's three type sizes follow Settings > Text size. */
+  --ce-text: calc(12px * var(--newamp-text-scale, 1));
+  --ce-text-sm: calc(11px * var(--newamp-text-scale, 1));
+  --ce-text-xs: calc(10px * var(--newamp-text-scale, 1));
+}
+
+/* ------------------------------------------------------------------
+   Floating panel
+   ------------------------------------------------------------------ */
+.floating-panel {
+  --ce-bg: #161a21;
+  --ce-ink: #e8ecf3;
+  --ce-dim: #aeb7c6;
+  --ce-line: #343c4a;
+  --ce-raised: #1f242d;
+  --ce-accent: #9a88ff;
+  --ce-on-accent: #0d0a1f;
+  --ce-low: #ffb454;
+  position: fixed;
+  /* Over the fullscreen visualizer's command layer (96); the toasts and the
+     palette (100) still sit above it. */
+  z-index: 98;
+  display: flex;
+  flex-direction: column;
+  max-width: calc(100vw - 16px);
+  /* The panel sits no higher than 44px (PANEL_TOP_LIMIT) and keeps 8px below. */
+  max-height: calc(100vh - 52px);
+  background: var(--ce-bg);
+  color: var(--ce-ink);
+  border: 1px solid var(--ce-line);
+  border-radius: 6px;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+  font-size: var(--ce-text);
+  line-height: 1.35;
+  user-select: none;
+  /* The window is frameless and the title bar is its drag region, which
+     ignores stacking: without this a press on the panel's own title bar,
+     where it overlaps the app's, would move the window. */
+  -webkit-app-region: no-drag;
+}
+.floating-panel:focus-visible {
+  outline: 2px solid var(--ce-accent);
+  outline-offset: -2px;
+}
+.floating-panel-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--ce-line);
+  cursor: grab;
+  touch-action: none;
+}
+.floating-panel-head:active {
+  cursor: grabbing;
+}
+.floating-panel-title {
+  flex: 1;
+  font-size: var(--ce-text-sm);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ce-dim);
+}
+.floating-panel-grip,
+.floating-panel-close {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  color: var(--ce-dim);
+}
+.floating-panel-grip:hover,
+.floating-panel-close:hover {
+  color: var(--ce-ink);
+  background: var(--ce-raised);
+}
+.floating-panel-grip:focus-visible,
+.floating-panel-close:focus-visible {
+  outline: 2px solid var(--ce-accent);
+  outline-offset: -2px;
+}
+.floating-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 10px;
+}
+.floating-panel-foot {
+  flex: none;
+  padding: 8px 10px;
+  border-top: 1px solid var(--ce-line);
+}
+
+/* The app's buttons and fields, in the panel's fixed colours. */
+.floating-panel .pxbtn {
+  color: var(--ce-ink);
+  background: var(--ce-raised);
+  box-shadow: inset 0 0 0 1px var(--ce-line);
+  border-radius: 4px;
+  text-shadow: none;
+}
+.floating-panel .pxbtn:hover {
+  filter: brightness(1.25);
+}
+.floating-panel .pxbtn:focus-visible {
+  outline: 2px solid var(--ce-accent);
+  outline-offset: 1px;
+}
+.floating-panel .pxbtn.is-active {
+  color: var(--ce-on-accent);
+  background: var(--ce-accent);
+  box-shadow: none;
+  text-shadow: none;
+}
+.floating-panel .pxbtn:disabled {
+  opacity: 0.45;
+  filter: none;
+}
+.floating-panel .workshop-value,
+.floating-panel input.bevel-in {
+  color: var(--ce-ink);
+  background: var(--ce-raised);
+  box-shadow: inset 0 0 0 1px var(--ce-line);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--ce-text-sm);
+}
+.floating-panel .workshop-value:focus-visible {
+  outline: 2px solid var(--ce-accent);
+  outline-offset: 0;
+}
+.floating-panel .workshop-value[aria-invalid='true'] {
+  box-shadow: inset 0 0 0 1px #ff7b7b;
+}
+.floating-panel .workshop-swatch {
+  border-color: var(--ce-line);
+}
+.floating-panel input[type='range'],
+.floating-panel input[type='color'] {
+  accent-color: var(--ce-accent);
+}
+
+/* ------------------------------------------------------------------
+   The editor: rows, tint, contrast
+   ------------------------------------------------------------------ */
+.colour-editor {
+  display: grid;
+  gap: 14px;
+}
+.colour-editor-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ce-dim);
+}
+.colour-editor-section {
+  display: grid;
+  gap: 4px;
+}
+.colour-editor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+}
+.colour-editor-heading h3 {
+  margin: 0;
+  font-size: var(--ce-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ce-dim);
+}
+.colour-editor-note {
+  margin: 4px 0 0;
+  font-size: var(--ce-text-sm);
+  color: var(--ce-dim);
+}
+
+.colour-row {
+  display: grid;
+  grid-template-columns: 124px 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  font-size: var(--ce-text);
+  color: var(--ce-dim);
+}
+.colour-row.is-compact {
+  grid-template-columns: 104px 22px minmax(0, 1fr);
+  gap: 6px;
+  color: var(--ce-ink);
+}
+.colour-row-label {
+  min-width: 0;
+}
+.colour-row-name {
+  display: block;
+}
+.colour-row-hint {
+  display: block;
+  font-size: var(--ce-text-xs);
+  color: var(--ce-dim);
+}
+.colour-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.colour-row-picker {
+  flex: none;
+  width: 32px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.colour-row-alpha {
+  flex: none;
+  width: 56px;
+}
+
+.tint-controls,
+.contrast-readout {
+  font-size: var(--ce-text);
+}
+.tint-controls {
+  display: grid;
+  gap: 4px;
+}
+.tint-slider {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 8px;
+  color: var(--ce-dim);
+}
+.tint-slider input[type='range'] {
+  width: 100%;
+}
+.tint-slider output {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--ce-text-sm);
+}
+
+.contrast-readout ul {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.contrast-readout li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: 8px;
+  font-size: var(--ce-text-sm);
+  color: var(--ce-dim);
+}
+.contrast-ratio {
+  font-family: var(--font-mono);
+  text-align: right;
+}
+.contrast-need {
+  grid-column: 1 / -1;
+  text-align: right;
+}
+.contrast-readout li[data-state='low'] .contrast-ratio,
+.contrast-readout li[data-state='low'] .contrast-need {
+  color: var(--ce-low);
+}
+
+.colour-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.colour-editor-state {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--ce-text-sm);
+  color: var(--ce-dim);
+  overflow-wrap: anywhere;
+}
+.colour-editor-state[data-tone='dirty'],
+.colour-editor-state[data-tone='error'] {
+  color: var(--ce-low);
+}
+.colour-editor-prompt {
+  display: grid;
+  gap: 8px;
+  font-size: var(--ce-text-sm);
+}
+.colour-editor-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

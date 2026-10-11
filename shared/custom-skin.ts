@@ -12,6 +12,7 @@ export const COLOR_SKIN_VARIABLES = [
   '--accent',
   '--accent-dim',
   '--accent-glow',
+  '--on-accent',
   '--ink',
   '--ink-2',
   '--muted',
@@ -48,7 +49,7 @@ export interface ThemeRegistryEntry {
  * CSS blocks live in src/styles/tokens.css under the same ids.
  */
 export const THEME_REGISTRY: ThemeRegistryEntry[] = [
-  { id: 'classic', label: 'Classic', tagline: 'Vintage Winamp 2.x — cast-metal chrome, green LCD', swatches: ['#2c3438', '#00ff66', '#c8d4d8'] },
+  { id: 'classic', label: 'Classic', tagline: 'Vintage Winamp 2.x — cast-metal chrome, green LCD', swatches: ['#2c3438', '#00ff66', '#d3dee2'] },
   { id: 'ops', label: 'Ops', tagline: 'Trader-dashboard density — emerald cyan, hex grid', swatches: ['#0b1014', '#34d399', '#e2e8ee'] },
   { id: 'midnight', label: 'Midnight', tagline: 'Clean modern dark with violet accents', swatches: ['#11141b', '#7c5cff', '#e8ecf3'] },
   { id: 'neon', label: 'Neon', tagline: 'Cyberpunk magenta with scanlines', swatches: ['#160a26', '#ff36e0', '#ffe9fe'] },
@@ -191,6 +192,74 @@ export function normalizeSkinVariableValue(key: string, raw: unknown): string | 
   }
 
   return null;
+}
+
+type Rgb = [number, number, number];
+
+// WCAG 2.x relative luminance of an sRGB colour given as 0-255 channels.
+function relativeLuminance([r, g, b]: Rgb): number {
+  const linear = (channel: number): number => {
+    const c = channel / 255;
+    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+}
+
+export function contrastRatio(a: Rgb, b: Rgb): number {
+  const first = relativeLuminance(a);
+  const second = relativeLuminance(b);
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+}
+
+/**
+ * Reads the colour forms the skin grammar accepts (hex, rgb(), hsl()) into
+ * 0-255 channels, ignoring alpha. Named colours return null; the renderer
+ * resolves those through the DOM (see src/lib/skins.ts).
+ */
+export function parseSkinColorRgb(value: string): Rgb | null {
+  const text = value.trim().toLowerCase();
+  const hex = /^#([0-9a-f]{3,8})$/.exec(text);
+  if (hex) {
+    let digits = hex[1]!;
+    if (digits.length === 3 || digits.length === 4) digits = [...digits].map((d) => d + d).join('');
+    if (digits.length !== 6 && digits.length !== 8) return null;
+    return [0, 2, 4].map((at) => parseInt(digits.slice(at, at + 2), 16)) as Rgb;
+  }
+  const fn = /^(rgba?|hsla?)\(([^)]*)\)$/.exec(text);
+  if (!fn) return null;
+  const parts = fn[2]!.replace(/\s*[,/]\s*/g, ' ').trim().split(/\s+/);
+  if (parts.length < 3 || parts.length > 4) return null;
+  const numbers = parts.slice(0, 3).map((part) => Number.parseFloat(part));
+  if (numbers.some((n) => !Number.isFinite(n))) return null;
+  const clamp = (n: number, min: number, max: number): number => Math.min(max, Math.max(min, n));
+  if (fn[1]!.startsWith('rgb')) {
+    return numbers.map((n, i) => clamp(parts[i]!.endsWith('%') ? (n / 100) * 255 : n, 0, 255)) as Rgb;
+  }
+  const hue = ((numbers[0]! % 360) + 360) % 360;
+  const saturation = clamp(numbers[1]! / 100, 0, 1);
+  const lightness = clamp(numbers[2]! / 100, 0, 1);
+  const spread = saturation * Math.min(lightness, 1 - lightness);
+  const channel = (n: number): number => {
+    const k = (n + hue / 30) % 12;
+    return (lightness - spread * Math.max(-1, Math.min(k - 3, 9 - k, 1))) * 255;
+  };
+  return [channel(0), channel(8), channel(4)];
+}
+
+const ON_ACCENT_DARK = '#000000';
+const ON_ACCENT_LIGHT = '#ffffff';
+
+/**
+ * The label colour for text drawn on an accent fill: black or white,
+ * whichever has the higher WCAG contrast against the accent (never below
+ * 4.5:1, whatever the accent). Null when the accent isn't a hex/rgb/hsl colour.
+ */
+export function deriveOnAccent(accent: string): string | null {
+  const rgb = parseSkinColorRgb(accent);
+  if (!rgb) return null;
+  const dark = contrastRatio(parseSkinColorRgb(ON_ACCENT_DARK)!, rgb);
+  const light = contrastRatio(parseSkinColorRgb(ON_ACCENT_LIGHT)!, rgb);
+  return dark >= light ? ON_ACCENT_DARK : ON_ACCENT_LIGHT;
 }
 
 export interface NewAmpSkinFile {

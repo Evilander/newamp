@@ -91,6 +91,25 @@
   --display-bg: #051005;
   --display-fg: #39ff14;
   --accent-text: var(--accent);
+  /* Text on accent fills (pressed pills, primary buttons). Its own token so
+     the label never depends on --bg; src/lib/skins.ts derives it from the
+     accent for custom skins that don't set one. */
+  --on-accent: #0a0a0a;
+  /* Warning and error as text on --bg, --panel and --panel-2. Skins whose
+     --warn / --error are too light for that override these; inside .display,
+     which has its own surface, they fall back to the plain tokens. */
+  --warn-text: var(--warn);
+  --error-text: var(--error);
+  /* Secondary text on the .display surface (its --ink-2 and --muted). */
+  --display-dim: color-mix(in srgb, var(--display-fg) 75%, var(--display-bg));
+  /* Title bar text: --titlebar-fg sits on the --titlebar gradient (Retro,
+     Concourse), --titlebar-fg-flat on the flat --bg the Modern shell paints. */
+  --titlebar-fg: var(--display-fg);
+  --titlebar-fg-flat: var(--titlebar-fg);
+  --titlebar-shadow: 0 0 4px var(--accent-glow), 0 0 1px var(--titlebar-fg);
+  --titlebar-shadow-wide: 0 0 8px var(--accent-glow);
+  /* How much of --panel the Liquid Glass title bar keeps over the blurred body. */
+  --titlebar-glass-mix: 60%;
   --titlebar: linear-gradient(to bottom, #2c3a2c, #0e160e);
   --bevel-light: rgba(255, 255, 255, 0.08);
   --bevel-dark: rgba(0, 0, 0, 0.55);
@@ -280,13 +299,15 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent: #00ff66;
   --accent-dim: #00b340;
   --accent-glow: rgba(0, 255, 102, 0.55);
-  --ink: #c8d4d8;
-  --ink-2: #8e9aa0;
-  --muted: #8a949a;
+  --ink: #d3dee2;
+  --ink-2: #bac4c9;
+  --muted: #a9b0b4;
   --warn: #ffaa00;
   --error: #ff4444;
+  --error-text: #ff9191;
   --display-bg: #0a1408;
   --display-fg: #00ff66;
+  --on-accent: #0a0a0a;
   --titlebar: linear-gradient(to bottom,
     #4a5258 0%, #3a4248 35%, #2a3034 65%, #1c2024 100%);
   --bevel-light: rgba(255, 255, 255, 0.18);
@@ -308,6 +329,8 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent: #7c5cff;
   --accent-dim: #5a3fd6;
   --accent-glow: rgba(124, 92, 255, 0.55);
+  --accent-text: #9b85ff;
+  --on-accent: #0a0a0a;
   --ink: #e8ecf3;
   --ink-2: #a8b0c2;
   --muted: #8a92a6;
@@ -332,6 +355,7 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent: #ff36e0;
   --accent-dim: #b81d9f;
   --accent-glow: rgba(255, 54, 224, 0.65);
+  --on-accent: #0a0a0a;
   --ink: #ffe9fe;
   --ink-2: #cca0d8;
   --muted: #a684b6;
@@ -357,6 +381,7 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent: #34d399;
   --accent-dim: #0f9a6e;
   --accent-glow: rgba(52, 211, 153, 0.45);
+  --on-accent: #0a0a0a;
   --warn: #f5b350;
   --error: #ff3b6a;
   --ink: #e2e8ee;
@@ -384,6 +409,7 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent: #ffb000;
   --accent-dim: #b87c00;
   --accent-glow: rgba(255, 176, 0, 0.55);
+  --on-accent: #0a0a0a;
   --ink: #ffe2a1;
   --ink-2: #c6a16a;
   --muted: #a48052;
@@ -408,6 +434,7 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent: #51e6d8;
   --accent-dim: #188f91;
   --accent-glow: rgba(81, 230, 216, 0.42);
+  --on-accent: #0a0a0a;
   --warn: #f38d3c;
   --error: #ff4f4f;
   --ink: #e6eef0;
@@ -436,15 +463,27 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent-text: #14336a;
   --accent-dim: #183984;
   --accent-glow: rgba(35, 87, 216, 0.38);
+  --on-accent: #ffffff;
   --warn: #d88a13;
+  --warn-text: #5e3c08;
   --error: #bd2534;
+  --error-text: #861a25;
   --ink: #111821;
   --ink-2: #31414f;
   /* AA fix: #475660 fell below 4.5:1 on --panel-2 (#ccd2d8). */
-  --muted: #3b4a54;
+  --muted: #36444e;
   --display-bg: #07111e;
   --display-fg: #77c8ff;
   --titlebar: linear-gradient(180deg, #eff3f6 0%, #aeb6bf 48%, #74808c 100%);
+  /* The Modern shell paints this skin's dark --bg behind the title, so the flat
+     text is the light LCD colour while the gradient takes dark ink. */
+  --titlebar-fg: var(--ink);
+  --titlebar-fg-flat: var(--display-fg);
+  --titlebar-shadow: none;
+  --titlebar-shadow-wide: none;
+  /* Dark ink on a light panel over this skin's dark background, so at 60% the
+     glass bar lands mid-grey and falls short of 4.5:1. */
+  --titlebar-glass-mix: 75%;
   --bevel-light: rgba(255, 255, 255, 0.85);
   --bevel-dark: rgba(13, 22, 30, 0.5);
   --radius: 2px;
@@ -468,11 +507,13 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent: #f0a629;
   --accent-dim: #b16c18;
   --accent-glow: rgba(240, 166, 41, 0.42);
+  --on-accent: #0a0a0a;
   --warn: #ffd15c;
   --error: #dc3f34;
+  --error-text: #e46c64;
   --ink: #f1debf;
   --ink-2: #c59f72;
-  --muted: #a98562;
+  --muted: #ad8a69;
   --display-bg: #090807;
   --display-fg: #ffc35a;
   --titlebar: linear-gradient(180deg, #5b3720 0%, #24160d 52%, #0c0805 100%);
@@ -494,6 +535,7 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent: #ffcf4a;
   --accent-dim: #d34e6a;
   --accent-glow: rgba(255, 207, 74, 0.46);
+  --on-accent: #0a0a0a;
   --warn: #ff9b36;
   --error: #ff4b64;
   --ink: #fff0d2;
@@ -502,6 +544,7 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --display-bg: #1a0910;
   --display-fg: #52f0d0;
   --titlebar: linear-gradient(180deg, #efe8d9 0%, #9b8a80 18%, #451621 58%, #16070d 100%);
+  --titlebar-fg: var(--ink);
   --bevel-light: rgba(255, 244, 210, 0.45);
   --bevel-dark: rgba(0, 0, 0, 0.8);
   --radius: 8px;
@@ -524,7 +567,9 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent-text: #0c5224;
   --accent-dim: #0e6128;
   --accent-glow: rgba(89, 255, 133, 0.45);
+  --on-accent: #000000;
   --warn: #8a4a02;
+  --warn-text: #673701;
   --error: #8b1818;
   --ink: #0c130c;
   --ink-2: #1f2c20;
@@ -532,6 +577,9 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --display-bg: #041006;
   --display-fg: #59ff85;
   --titlebar: linear-gradient(180deg, #ded9be 0%, #b8b49d 50%, #7a7a68 100%);
+  --titlebar-fg: var(--ink);
+  --titlebar-shadow: none;
+  --titlebar-shadow-wide: none;
   --bevel-light: rgba(255, 255, 230, 0.72);
   --bevel-dark: rgba(26, 30, 22, 0.48);
   --radius: 4px;
@@ -556,14 +604,20 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent-text: #045f7a;
   --accent-dim: #05789d;
   --accent-glow: rgba(0, 166, 214, 0.34);
+  --on-accent: #0a0a0a;
   --warn: #c27600;
+  --warn-text: #8a5400;
   --error: #c91f42;
+  --error-text: #bc1d3e;
   --ink: #10202a;
   --ink-2: #3c5664;
   --muted: #4d626c;
   --display-bg: #071923;
   --display-fg: #8ff3ff;
   --titlebar: linear-gradient(180deg, #ffffff 0%, #d9e3e8 50%, #9fb5c0 100%);
+  --titlebar-fg: var(--ink);
+  --titlebar-shadow: none;
+  --titlebar-shadow-wide: none;
   --bevel-light: rgba(255, 255, 255, 0.95);
   --bevel-dark: rgba(41, 62, 74, 0.35);
   --radius: 5px;
@@ -588,14 +642,20 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent-text: #a3133f;
   --accent-dim: #c42d52;
   --accent-glow: rgba(255, 79, 121, 0.34);
+  --on-accent: #0a0a0a;
   --warn: #d97904;
+  --warn-text: #985503;
   --error: #c9184a;
+  --error-text: #c41748;
   --ink: #172022;
   --ink-2: #40585a;
   --muted: #4e6766;
   --display-bg: #10282e;
   --display-fg: #66f7d7;
   --titlebar: linear-gradient(180deg, #fffaf2 0%, #dbe7e3 48%, #a8cbc7 100%);
+  --titlebar-fg: var(--ink);
+  --titlebar-shadow: none;
+  --titlebar-shadow-wide: none;
   --bevel-light: rgba(255, 255, 255, 0.9);
   --bevel-dark: rgba(47, 74, 77, 0.38);
   --radius: 4px;
@@ -618,6 +678,7 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --accent: #f5f5f0;
   --accent-dim: #b8b8b1;
   --accent-glow: rgba(245, 245, 240, 0.28);
+  --on-accent: #0a0a0a;
   --warn: #ffd447;
   --error: #ff3d3d;
   --ink: #f5f5f0;
@@ -626,6 +687,7 @@ html[data-amp-reactive='on'] .nav-item.active > svg {
   --display-bg: #f5f5f0;
   --display-fg: #080808;
   --titlebar: linear-gradient(180deg, #222 0%, #050505 100%);
+  --titlebar-fg: var(--ink);
   --bevel-light: rgba(255, 255, 255, 0.2);
   --bevel-dark: rgba(0, 0, 0, 0.85);
   --radius: 0px;

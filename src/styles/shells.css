@@ -40,11 +40,24 @@
 }
 [data-shell='modern'] .pxbtn.is-active {
   background: var(--accent);
-  color: color-mix(in srgb, var(--bg) 80%, #000);
+  color: var(--on-accent);
   text-shadow: none;
+}
+[data-shell='modern'] .pxbtn.pxbtn-xs {
+  padding: 0 6px;
+  letter-spacing: 0.02em;
+}
+[data-shell='modern'] .pxbtn.is-active:disabled,
+[data-shell='modern'] .pxbtn.is-active[aria-disabled='true'] {
+  background: linear-gradient(180deg, var(--panel-2) 0%, var(--panel) 100%);
+  color: var(--ink-2);
 }
 [data-shell='modern'] .scanlines::before { display: none; }
 [data-shell='modern'] .lcd-text { text-shadow: 0 0 8px var(--accent-glow); }
+[data-shell='modern'] .titlebar-text {
+  color: var(--titlebar-fg-flat);
+  text-shadow: var(--titlebar-shadow-wide);
+}
 [data-shell='modern'] .display { border-radius: 12px; }
 [data-shell='modern'] [data-newamp-transport] {
   margin: 6px 12px 10px;
@@ -116,7 +129,7 @@
   z-index: 1;
 }
 [data-shell='liquid-glass'] .titlebar-drag {
-  background: color-mix(in srgb, var(--panel) 60%, transparent) !important;
+  background: color-mix(in srgb, var(--panel) var(--titlebar-glass-mix), transparent) !important;
   backdrop-filter: blur(20px) saturate(1.4);
   -webkit-backdrop-filter: blur(20px) saturate(1.4);
   border-bottom: 1px solid color-mix(in srgb, var(--line) 50%, transparent);
@@ -152,8 +165,19 @@
 }
 [data-shell='liquid-glass'] .pxbtn.is-active {
   background: var(--accent);
-  color: color-mix(in srgb, var(--bg) 80%, #000);
+  color: var(--on-accent);
   box-shadow: 0 0 18px var(--accent-glow);
+}
+[data-shell='liquid-glass'] .pxbtn:disabled:hover,
+[data-shell='liquid-glass'] .pxbtn[aria-disabled='true']:hover,
+[data-shell='liquid-glass'] .pxbtn.is-active:disabled,
+[data-shell='liquid-glass'] .pxbtn.is-active[aria-disabled='true'] {
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
+}
+[data-shell='liquid-glass'] .pxbtn.is-active:disabled,
+[data-shell='liquid-glass'] .pxbtn.is-active[aria-disabled='true'] {
+  color: var(--ink-2);
+  box-shadow: none;
 }
 [data-shell='liquid-glass'] .scanlines::before { display: none; }
 [data-shell='liquid-glass'] [data-newamp-transport] {
@@ -211,8 +235,15 @@
 }
 [data-shell='concourse'] .pxbtn.is-active {
   background: var(--accent);
-  color: var(--bg);
+  color: var(--on-accent);
   border-color: var(--accent);
+}
+[data-shell='concourse'] .pxbtn.pxbtn-xs { letter-spacing: 0.06em; }
+[data-shell='concourse'] .pxbtn.is-active:disabled,
+[data-shell='concourse'] .pxbtn.is-active[aria-disabled='true'] {
+  background: var(--panel-2);
+  color: var(--ink-2);
+  border-color: var(--line);
 }
 [data-shell='concourse'] .display { border-radius: 0; }
 [data-shell='concourse'] [data-newamp-transport] {
