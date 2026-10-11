@@ -139,7 +139,6 @@ if (!skipSmokes) {
     // smoke:release-checksums runs after packaging below: it checks this
     // version's artifacts, which don't exist yet at this point.
     'smoke:release-bundle',
-    'smoke:completion-audit',
     'smoke:publish-github',
     'smoke:reliability',
     'smoke:support-backup',

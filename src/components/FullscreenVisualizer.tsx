@@ -556,8 +556,8 @@ export function FullscreenVisualizer(): JSX.Element {
 
   // Mouse wheel anywhere over the fullscreen visualizer drives volume.
   // Outside the viz this has no effect — wheel still scrolls the page
-  // normally. Tyler wants this restricted to fullscreen viz so it doesn't
-  // hijack scrolling in the library views.
+  // normally. Restricted to the fullscreen viz so it doesn't hijack
+  // scrolling in the library views.
   // The base is read from the store at event time, not from the last
   // render: wheel events outrun React, and adding to a stale value stalls.
   useEffect(() => {

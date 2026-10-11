@@ -1,131 +1,88 @@
-# NewAmp Audio Quality — How We Make It Sound Right (and the honest limits)
+# Audio signal path
 
-Synthesized from a two-expert pass (audio-path review + SOTA research, 2026-06-07).
-This documents the signal path, what we ship, and — bluntly — the ceiling of a
-Web-Audio/Electron player and what it would take to break through it.
+NewAmp has three ways to turn a file into sound. Shared output is the default:
+audio goes through Chromium's Web Audio and the operating system's mixer.
+Sample-accurate gapless is a transport inside shared output that plays local
+tracks as one continuous stream. Bit-Perfect Exclusive is an opt-in native
+output that opens the device directly and skips the mixer. This page describes
+each one and what it can and cannot promise.
 
-## The signal path (renderer)
+## Shared output
 
 ```
-HTMLAudioElement (deck) → MediaElementSource → inputGain(preamp)
-  → 10× BiquadFilter (peaking EQ) → replayGain → masterGain(volume)
-  → [DynamicsCompressor limiter] → AudioContext.destination
-                                         ↓ (parallel, 0-gain silent sink)
-                                    analysers (visualizer taps)
+<audio> deck (two, alternating) -> per-deck ReplayGain -> fade gain -> preamp
+gapless worklet ---------------------------------------------------^
+  -> 10 peaking EQ bands -> tap point -> volume -> [limiter] -> output
+                              |
+                        analysers (visualizers), routed to the output
+                        through a gain node fixed at 0
 ```
 
-Native formats (mp3 / m4a / aac / **flac, incl. 24/96 & 24/192** / ogg / opus / wav)
-are served **raw** through the `newamp:` protocol and decoded by Chromium.
-Exotic lossless (alac / aiff / ape / wv / tta / wma / mka) and DSD (dsf / dff) go
-through an ffmpeg transcode.
+Volume sits before the limiter, so boost past 100% (the slider goes to 200%)
+is caught by it. Below 100% the slider follows a cubic taper; above it the gain
+is linear. The analysers read the signal before volume, which keeps the
+visualizers moving when you listen quietly. They are wired to the output
+through a silent gain node because Chromium can drop analyser subtrees that
+never reach the destination, which freezes the spectrum at zero.
 
-## What we ship (honest wins, no native code)
+### Formats
 
-1. **Hi-res-preserving transcode** (`electron/transcode.ts`). The fallback path used
-   to hardcode `pcm_s16le -ar 48000` — it **crushed every 24/96 ALAC/AIFF/APE/WV to
-   16-bit/48 kHz on every play**. Now: **`pcm_f32le` at the source sample rate** (no
-   forced downsample, no bit-depth truncation). 32-bit float is the only lossless
-   PCM-in-WAV format Chromium's `<audio>` decodes — **24-bit int WAV is NOT
-   supported**, so f32le (not s24le) is the correct choice. DSD gets a pinned
-   high-precision resampler to 88.2 kHz instead of ffmpeg's uncontrolled default
-   DSD→PCM filter: SoX (`soxr:precision=28`) when the ffmpeg build includes it,
-   otherwise a long Kaiser-windowed swr filter (the bundled Windows ffmpeg has no
-   SoX).
-2. **True limiter bypass** (`src/audio/engine.ts`). "Limiter off" now **disconnects**
-   the `DynamicsCompressor` from the graph (`masterGain → destination`) instead of
-   leaving a unity-ratio compressor + its ~6 ms lookahead in the path. Off means off.
-   The toggle is **click-free** (an ~8 ms master dip across the rewire so the
-   limited↔raw amplitude step can't pop) and **mute-safe** (the rewire is guarded;
-   a `connect()` failure force-restores `masterGain → destination` and surfaces an
-   error rather than silently killing all audio).
-2b. **Hi-res WAV *export* too.** "Export to WAV" now writes **24-bit at the source
-   rate** (`pcm_s24le`, no forced 48k) instead of crushing to 16/48 — matching the
-   playback fidelity policy. (Export writes a file for other tools, so 24-bit int
-   is the right interchange format; the streaming path uses float for Chromium.)
-2c. **Rejected sample rates no longer fail silently.** If the device rejects the
-   requested Bit-Perfect rate, the engine records it and the Settings UI says
-   "X kHz not supported — running at Y kHz" instead of showing the wrong rate.
-3. **Faster track-boundary gain ramps**. ReplayGain/preamp `setTargetAtTime` time
-   constants dropped 20 ms → 6 ms so a gain change at a track boundary no longer
-   "swells" the first beat (still smoothed enough to avoid a zipper click).
-4. **Honest rate readout** (Settings → Audio). Shows the **playing track's source
-   rate vs the live engine rate** and flags "Chromium resamples this track" when they
-   differ — auditable, like foobar2000's status bar.
+Files Chromium decodes (mp3, m4a, m4b, mp4, aac, flac, ogg, oga, opus, wav) are
+served unchanged through the `newamp:` protocol. Everything else goes through
+ffmpeg first: wma, alac, aiff, ape, wv, mpc, tta, mka, ac3, dts, and DSD (dsf,
+dff). See `electron/transcode.ts`.
 
-## The ceiling of a Web-Audio player (don't oversell it)
+- The first play of a transcoded file streams 32-bit float PCM at the source
+  sample rate, with no forced downsample and no bit-depth truncation. Float is
+  used because Chromium's `<audio>` does not decode 24-bit integer WAV. It is a
+  transport choice, not a quality claim.
+- A lossless FLAC copy at the source rate is written to the transcode cache for
+  later plays. Cache hits are served like any native file.
+- DSD has no native path in the browser. It is converted to PCM at 88.2 kHz with
+  soxr (precision 28) when the ffmpeg build has it, and with a long
+  Kaiser-windowed swr filter otherwise. The ffmpeg bundled on Windows has no
+  soxr. See `electron/resampler.ts`.
+- Export to WAV writes 24-bit PCM at the source sample rate.
 
-- **You cannot be bit-perfect through vanilla Electron.** Web Audio → Chromium →
-  **WASAPI shared mode** (Windows) / shared CoreAudio (macOS). The OS mixer is always
-  in the path and resamples to the device format. Chrome's `--enable-exclusive-audio`
-  flag has been broken for years. (This ceiling is exactly why Bit-Perfect Exclusive
-  below bypasses the Web Audio path entirely with a native addon.)
-- **Matching the AudioContext sample rate to the source per track buys nothing.** The
-  Web Audio spec *mandates* the UA resample AudioContext → device when they differ,
-  and the device rate is whatever the OS picked. Per-track context recreation just
-  moves the same resampler around and costs a graph rebuild + gap. **Do not do it.**
-  The right Web-Audio move is what the Bit-Perfect setting already does: pin the
-  context to one rate and have the user set their DAC to match.
-- **Resampler quality:** Chromium uses a WebRTC Kaiser-windowed sinc — genuinely
-  transparent for music (artifacts < ~-110 dB), just not bit-identical.
-- **Dither is not our job** in the float32 graph. Requantization happens in Chromium's
-  output thread; gain applied in float32 adds noise at ~-150 dBFS (inaudible).
+### Seeking
 
-**Realistic verdict:** "Indistinguishable from a good shared-mode app." Above ~-110 dB
-this is transparent to ears and DACs. We are NOT bit-perfect and should not claim it
-without the native path below.
+Every playback path is byte-range addressable. Native files and cached FLACs are
+served with `206 Partial Content` responses from `electron/audio-serve.ts`,
+because Electron's `net.fetch(file://)` answers range requests with a bare
+`200`, which Chromium treats as a non-seekable stream. The live first-play
+transcode sends a synthesized WAV header, so a byte range maps to an
+`ffmpeg -ss` seek. `npm run smoke:playback-seek` scrubs a real `<audio>` element
+across all four paths.
 
-## The real bit-perfect path (SHIPPED — Bit-Perfect Exclusive, Windows)
+### Limiter, ReplayGain and gain changes
 
-**v1.17.0 ships an opt-in native output backend** (default users stay on Web Audio):
-Settings → Playback → **Bit-Perfect Exclusive**.
+- The limiter is a Web Audio `DynamicsCompressor`: threshold -1 dB, knee 0,
+  ratio 20, attack 3 ms, release 120 ms. It is a compressor-based limiter, not a
+  true-peak limiter.
+- Turning it off disconnects the node (volume goes straight to the output). It
+  is not left in the path at a unity ratio. The switch mutes the master gain for
+  about 8 ms on each side of the rewire so it does not click. If the reconnect
+  throws, the direct path is forced and the error is shown, so a failed toggle
+  cannot leave playback silent.
+- ReplayGain is clamped to -18..+12 dB. A change at a track boundary uses a 6 ms
+  time constant, short enough that the first beat of the next track does not
+  swell and long enough to avoid a zipper click.
 
-- **NOT `audify`/RtAudio** — the plan above this section used to recommend it, but
-  RtAudio's WASAPI backend hardcodes `AUDCLNT_SHAREMODE_SHARED`; exclusive mode is a
-  literal unimplemented `TODO` in its source (verified against master, 2026-07-02).
-  Instead: **vendored `miniaudio`** in a first-party N-API addon
-  (`native/newamp-audio/`, NAPI_VERSION=8 → ABI-stable across Node/Electron, loads
-  in Electron 42 with no electron-rebuild).
-- **Decode in the main process**: `ffmpeg → raw PCM ints/floats` piped straight into
-  a lock-free ring drained by the WASAPI callback (`electron/exclusive-output.ts`).
-  No WebCodecs, no renderer round-trip, no float detour for integer sources — a
-  16-bit FLAC leaves ffmpeg as the same s16 words the encoder stored.
-- **Probe-driven honest negotiation**: the stream format is chosen from the device's
-  *native* exclusive formats (`probeDevice()`). If the source rate isn't natively
-  supported, NewAmp resamples **explicitly** (SoX where the ffmpeg build has it,
-  the swr filter above otherwise; the badge names which one ran) and *says so* —
-  the badge shows `EXCLUSIVE*` instead of gold, because miniaudio would otherwise
-  insert a hidden converter (observed live: a Focusrite clocked at 48 kHz silently
-  resampled a 44.1 kHz exclusive stream; `internalSampleRate` exposes it and the
-  driver refuses dishonest opens).
-- **No DSP, structurally**: EQ, ReplayGain, crossfade, limiter, preamp and software
-  volume are out of the path (and grayed in the UI). Volume is your DAC's knob.
-  Visualizers stay live via a 30 Hz playhead-aligned PCM tap → spec-faithful
-  AnalyserNode emulation (`src/audio/exclusive-tap.ts`).
-- **Gapless over exclusive**: when the next track negotiates the identical device
-  format it is spliced into the same ring at the exact frame boundary. Rate changes
-  re-open the device with a deliberate audible micro-gap (same behavior as
-  foobar2000). Pause relinquishes the device after ~15 s so system audio returns.
-- The gold `EXCLUSIVE` badge = strict claim: lossless source, rate + bit depth +
-  channel layout preserved, no DSD conversion. Anything less shows `EXCLUSIVE*`
-  with the exact reason in the tooltip and Settings.
-- **Platform status:** Windows (WASAPI Exclusive) is the fully verified path.
-  Linux (ALSA direct — miniaudio opens `hw:` devices for exclusive share mode,
-  bypassing dmix/PulseAudio) and macOS (CoreAudio **hog mode** implemented in
-  the addon itself: `kAudioDevicePropertyHogMode` device ownership + pinned
-  nominal sample rate, since miniaudio has no hog-mode of its own) both ship
-  **experimental**: compile+load verified on CI (ubuntu + macos runners) and,
-  for Linux, in a Debian container — real-hardware listening verification is
-  still pending and the UI says so. Podcasts / non-library sources / cue
-  sheets fall back to the shared path automatically, per-track. Gate:
-  `npm run smoke:exclusive-output` (+ manual `NEWAMP_EXCLUSIVE_SMOKE_HW=1`
-  full exclusive pass).
+### Sample rate
 
-This is the foobar2000/Audirvana/Roon bar, and "bit-perfect available" is now on
-the box honestly.
+Settings > Playback > Bit-Perfect Path pins the AudioContext to a chosen rate.
+The row shows the live engine rate next to the playing track's source rate and
+says "Chromium resamples this track" when they differ. If the output device
+rejects the requested rate, the row says so and shows the rate it is running at.
 
-## Sample-accurate gapless (shared output)
+NewAmp pins one rate instead of recreating the context per track. The Web Audio
+spec requires the browser to resample between the context and the device when
+their rates differ, so recreating the context per track would move the same
+resampler around and add a gap at every rate change.
 
-With **Sample-accurate gapless** on (Settings → Playback; on by default), local
+## Sample-accurate gapless
+
+With Sample-accurate gapless on (Settings > Playback; on by default), local
 library tracks don't play through the two `<audio>` decks. ffmpeg decodes each
 track in the main process, the next track's first frame follows the previous
 track's last frame in the same stream, and an AudioWorklet plays that stream
@@ -147,34 +104,58 @@ the boundaries.
   segments, DSD, missing files, streams, podcasts and music-server tracks stay on
   the decks, as does any track the transport can't decode or that stalls.
 
-## Known remaining limitations / follow-ups
+## Bit-Perfect Exclusive
 
-- ~~Transcoded formats still aren't seekable~~ **FIXED.** All playback paths are now
-  range-addressable: native files and finalized cached FLACs are served with
-  hand-rolled `206 Partial Content` responses (`electron/audio-serve.ts` —
-  Electron's `net.fetch(file://)` slices Range bodies but answers a bare `200`,
-  which Chromium reads as non-seekable), and the first-play live transcode is a
-  synthesized-header f32le WAV whose constant bitrate maps byte ranges to
-  `ffmpeg -ss` seeks. Gate: `npm run smoke:playback-seek` (4 paths, real `<audio>`
-  scrub assertions).
-- **No null-test in CI.** To claim "bit-perfect verified", add an `OfflineAudioContext`
-  harness that renders a known WAV through the real engine graph and asserts peak
-  error < 2^-23 with all DSP bypassed. (Refactor `engine.ts` to expose
-  `buildGraph(ctx)`; ~half a day.)
-- **ReplayGain 2.0 / true-peak**: limiter ceiling is -1 dBFS (close to the -1 dBTP
-  target); consider 2× true-peak detection and the Opus +5 dB R128 offset.
+An opt-in native output backend (Settings > Playback > Bit-Perfect Exclusive).
+The default stays on shared output. It is a first-party N-API addon around
+vendored miniaudio (`native/newamp-audio/`, built against NAPI_VERSION 8, so it
+loads in Electron without a rebuild).
 
-## Snake oil we are NOT shipping
+- Decoding happens in the main process. ffmpeg writes raw PCM into a lock-free
+  ring that the device callback drains (`electron/exclusive-output.ts`). Integer
+  sources stay integer where the device accepts their format, so a 16-bit FLAC
+  reaches the device as 16-bit samples.
+- The stream format is chosen from the formats the device reports as natively
+  supported for exclusive use. If the device cannot take the source rate,
+  NewAmp resamples in ffmpeg (soxr or the swr filter above) and says which one
+  ran. miniaudio would otherwise insert its own converter without telling
+  anyone, so after opening the device the driver compares the rate and format it
+  got with the ones it asked for and refuses the open if they differ.
+- The Web Audio DSP stages are out of the path: crossfade, ReplayGain, limiter,
+  preamp, EQ and software volume are bypassed and disabled in Settings. Use the
+  device's own volume. Visualizers keep running from a roughly 30 Hz tap of the
+  PCM being played (`src/audio/exclusive-tap.ts`).
+- Gapless: when the next track negotiates the same device format, its PCM is
+  spliced into the same ring at the exact frame boundary. A rate change reopens
+  the device and leaves a short audible gap. Pausing releases the device after
+  15 s so other audio can use it again.
+- Streamed tracks (podcasts, radio, music-server tracks) and anything else that
+  is not a local library track play through shared output, one track at a time.
 
-- "Set AudioContext rate to source rate = no resampling." False unless the device rate
-  also matches.
-- "Upsample everything to 192 kHz improves quality." False; source-rate is the target.
-- "32-bit float is higher quality than 24-bit int for playback." False; 24-bit already
-  exceeds any DAC's noise floor. (We use f32le only because Chromium won't decode 24-bit
-  int WAV — it's a transport choice, not a quality claim.)
-- Replacing `DynamicsCompressorNode` with a custom AudioWorklet to reclaim 6 ms — the
-  delay doesn't affect transparency and our analyser tap is already pre-limiter.
+The signal-path badge reports what happened. Gold `EXCLUSIVE` means the source
+is lossless and not DSD, the rate, bit depth and channel layout reach the device
+unchanged, and nothing was resampled. `EXCLUSIVE*` means the OS mixer is still
+bypassed but something changed, and the tooltip names it: resampled by NewAmp,
+lossy source, bit depth adapted, or channel layout adapted.
 
-_Sources: W3C Web Audio API 1.1; Chromium issues 40524559 / 40176358; Chromium
-audio-video format docs; foobar2000 foo_out_wasapi; audify/RtAudio; loudgain /
-Hydrogenaudio ReplayGain 2.0; EBU R128 / BS.1770._
+Platform status: Windows (WASAPI exclusive) is the verified path. Linux (ALSA
+`hw:` devices, which bypass dmix and PulseAudio) and macOS (CoreAudio hog mode,
+implemented in the addon because miniaudio has none) are marked experimental in
+the UI. Both build and load on CI, and real-hardware listening checks are still
+pending.
+
+`npm run smoke:exclusive-output` covers the driver without a device. Setting
+`NEWAMP_EXCLUSIVE_SMOKE_HW=1` adds a pass that opens a real exclusive stream,
+which takes over the audio device while it runs.
+
+## Limits
+
+- Shared output is not bit-perfect. Web Audio goes through Chromium to the OS
+  mixer (WASAPI shared mode on Windows, CoreAudio on macOS), and the mixer
+  resamples to the device format when the rates differ. Only Bit-Perfect
+  Exclusive bypasses it.
+- There is no dither stage. The shared graph runs in 32-bit float and Chromium
+  requantizes at the output.
+- The shared graph has no automated bit-exactness test (render a known file with
+  all processing off and compare). Exclusive mode checks the negotiated format
+  when it opens the device instead.

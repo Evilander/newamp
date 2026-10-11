@@ -120,7 +120,7 @@ const arbitraryPathRemote = serverTrack({
   id: -987,
   connectionId: 'remembered',
   itemId: 'secret',
-  path: 'file:///C:/Users/evela/Music/secret.flac',
+  path: 'file:///C:/Users/someone/Music/secret.flac',
 });
 
 assert.deepEqual(playbackResumeQueueEntryForTrack(local), { kind: 'local', trackId: 11 });
@@ -240,7 +240,7 @@ try {
         itemId: 'secret',
         track: {
           id: -987,
-          path: 'file:///C:/Users/evela/Music/secret.flac',
+          path: 'file:///C:/Users/someone/Music/secret.flac',
           title: 'Secret',
           artist: 'Secret',
           album: 'Secret',

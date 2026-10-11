@@ -12,10 +12,10 @@ import { useEffect, useState } from 'react';
 export type Shell = 'retro' | 'modern' | 'liquid-glass' | 'concourse';
 
 export const SHELLS: { id: Shell; label: string; tagline: string }[] = [
-  { id: 'retro',        label: 'Retro',        tagline: 'Bloomberg-density Winamp 2 homage' },
-  { id: 'modern',       label: 'Modern',       tagline: 'Soft shadows, content-forward, big covers' },
-  { id: 'liquid-glass', label: 'Liquid Glass', tagline: 'Apple-style translucent stacked panes' },
-  { id: 'concourse',    label: 'Concourse',    tagline: 'Operator console / split-pane mission control' },
+  { id: 'retro',        label: 'Retro',        tagline: 'Dense, Winamp 2 style layout' },
+  { id: 'modern',       label: 'Modern',       tagline: 'Rounded, large covers' },
+  { id: 'liquid-glass', label: 'Liquid Glass', tagline: 'Translucent panes' },
+  { id: 'concourse',    label: 'Concourse',    tagline: 'Split panes' },
 ];
 
 const SHELL_KEY = 'newamp:shell';

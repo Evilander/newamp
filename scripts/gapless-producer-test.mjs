@@ -30,7 +30,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { makeItunesStyle } from './lib/itunes-aac.mjs';
 
-// Per process: two runs at once (different agents, or a person and CI) must
+// Per process: two runs at once (two shells, or a person and CI) must
 // not delete each other's fixtures. Removed again on exit.
 const root = resolve('tmp', 'gapless-producer-test', String(process.pid));
 const media = join(root, 'media');

@@ -64,8 +64,8 @@ export interface Channel {
 // drives a slow scalar. Channels reference q's via {feature:'q1'..'q8'}.
 //
 // MilkDrop's q1..q8 are a programmable register file; this is the same idea
-// turned into JSON so it survives serialization. No expression language —
-// that's tracked separately (plan §2 Tier C).
+// turned into JSON so it survives serialization. There is no expression
+// language.
 // ---------------------------------------------------------------------------
 
 export type LfoShape = 'sine' | 'tri' | 'saw' | 'square';
@@ -235,11 +235,11 @@ export interface OperatorConfig {
   emitterScale: number; // global emitter radius multiplier
   emitterGain: number;  // global emitter intensity multiplier
 
-  // ── Programmable q-variables (plan §2.1). Up to 8; reference as 'q1'..'q8'.
+  // ── Programmable q-variables. Up to 8; reference as 'q1'..'q8'.
   /** Preset-internal scratch slots evaluated FIRST each frame. */
   q?: QSlot[];
 
-  // ── Radial warp profile (plan §2.2). Each is a small gain on `radius*radius`
+  // ── Radial warp profile. Each is a small gain on `radius*radius`
   // (radius in [0..√2/2] from screen centre) so the channel's effect scales
   // with distance from `centre`. All optional, default 0 → byte-identical to
   // pre-2.2 behaviour. The shader applies `effectiveZoom = zoom + zoomRad * r²`.
@@ -248,7 +248,7 @@ export interface OperatorConfig {
   radialSwirl?: Channel;
   radialDecay?: Channel;
 
-  // ── Per-channel RGB decay (plan §2.3). Biases ADDED on top of base decay.
+  // ── Per-channel RGB decay. Biases ADDED on top of base decay.
   // Default 0 → all three channels identical (current behaviour). Letting R
   // decay slightly slower than G/B is the classic MilkDrop "everything turns
   // warm" feel. Clamped per-channel so the sum can't fall outside [0.78,0.97].
@@ -256,13 +256,13 @@ export interface OperatorConfig {
   decayG?: Channel;
   decayB?: Channel;
 
-  // ── Centre offset (plan §2.4). Replaces the hardcoded vec2(0.5) in the
+  // ── Centre offset. Replaces the hardcoded vec2(0.5) in the
   // field warp / kaleidoscope fold. Range-clamped to [0.2, 0.8] so the fold
   // axis never marches off-screen. Default centre 0.5,0.5 = current behaviour.
   centreX?: Channel;
   centreY?: Channel;
 
-  // ── Video-echo pass (plan §2.5). One extra RGBA16F FBO between field swap
+  // ── Video-echo pass. One extra RGBA16F FBO between field swap
   // and bloom; alpha=0 (default) → pass skipped entirely, no FBO allocated.
   // zoom/rotate/alpha drive the echo transform; flipX/flipY (0 or 1) mirror
   // the echo sample. The MilkDrop "echo" signature in declarative form.
@@ -277,7 +277,7 @@ export interface OperatorConfig {
 
   /**
    * Transition meta — set by lerpConfig when the Director is mid-fade. The
-   * renderer reads this to drive the field-buffer crossfade (plan §2.6):
+   * renderer reads this to drive the field-buffer crossfade:
    * <1 = transition in progress; >=1 or absent = settled. Not a channel.
    */
   _transition?: number;
@@ -333,19 +333,19 @@ export interface EvilandDynamics {
   // Q-variable scratch — q[i] is the value of slot q(i+1). Persists across
   // frames so smoothed slots have access to their previous value (EMA state).
   q: Float64Array;
-  // Radial warp profile gains (plan §2.2). 0 = no radial effect.
+  // Radial warp profile gains. 0 = no radial effect.
   radialZoom: number;
   radialRotate: number;
   radialSwirl: number;
   radialDecay: number;
-  // Per-channel RGB decay biases (plan §2.3). Final per-channel decay = clamp(decay + decayR/G/B).
+  // Per-channel RGB decay biases. Final per-channel decay = clamp(decay + decayR/G/B).
   decayR: number;
   decayG: number;
   decayB: number;
-  // Centre offset (plan §2.4). Default 0.5, 0.5; clamped to [0.2, 0.8].
+  // Centre offset. Default 0.5, 0.5; clamped to [0.2, 0.8].
   centreX: number;
   centreY: number;
-  // Video-echo pass (plan §2.5). alpha=0 = pass skipped.
+  // Video-echo pass. alpha=0 = pass skipped.
   echoZoom: number;
   echoRotate: number;
   echoAlpha: number;
@@ -355,7 +355,7 @@ export interface EvilandDynamics {
   morph: number;
   morphAmount: number;
   morphScale: number;
-  /** Crossfade progress (plan §2.6). 1 = settled, <1 = mid-transition. */
+  /** Crossfade progress. 1 = settled, <1 = mid-transition. */
   transition: number;
 }
 
@@ -520,7 +520,7 @@ export function evalConfig(
   out: EvilandDynamics,
   dtMs = 1000 / 60,
 ): EvilandDynamics {
-  // ── Q-VARS FIRST (plan §2.1). Computed before any channel so downstream
+  // ── Q-VARS FIRST. Computed before any channel so downstream
   // bindings with feature:'q1'..'q8' can read this frame's value. q's see
   // themselves as 0 (their previous value isn't visible — only the *smoothed*
   // tail through `smooth` carries memory). Eval order is slot index, so an
@@ -596,7 +596,7 @@ export function evalConfig(
   out.emitterScale = clamp(config.emitterScale, 0.2, 3);
   out.emitterGain = clamp(config.emitterGain, 0, 2.5);
 
-  // ── Plan §2.2 radial warp profile. Gains scale `radius²` in the shader so
+  // ── Radial warp profile. Gains scale `radius²` in the shader so
   // each channel's effect changes with distance from centre. Clamped to keep
   // GPU-safe even with audio-driven push. Defaults are 0 (no radial effect).
   out.radialZoom = clamp(evalOptional(config.radialZoom, frame, sectionSeed, q, 0), -0.4, 0.4);
@@ -604,18 +604,18 @@ export function evalConfig(
   out.radialSwirl = clamp(evalOptional(config.radialSwirl, frame, sectionSeed, q, 0), -0.5, 0.5);
   out.radialDecay = clamp(evalOptional(config.radialDecay, frame, sectionSeed, q, 0), -0.08, 0.08);
 
-  // ── Plan §2.3 RGB decay biases. Each kept small so the final per-channel
+  // ── RGB decay biases. Each kept small so the final per-channel
   // decay (clamped in the shader) stays inside the safe 0.78..0.97 envelope.
   out.decayR = clamp(evalOptional(config.decayR, frame, sectionSeed, q, 0), -0.08, 0.08);
   out.decayG = clamp(evalOptional(config.decayG, frame, sectionSeed, q, 0), -0.08, 0.08);
   out.decayB = clamp(evalOptional(config.decayB, frame, sectionSeed, q, 0), -0.08, 0.08);
 
-  // ── Plan §2.4 centre offset. Clamped to [0.2, 0.8] so the warp/fold axis
+  // ── Centre offset. Clamped to [0.2, 0.8] so the warp/fold axis
   // can't march off-screen (the kaleidoscope sample fold blows up at edges).
   out.centreX = clamp(evalOptional(config.centreX, frame, sectionSeed, q, 0.5), 0.2, 0.8);
   out.centreY = clamp(evalOptional(config.centreY, frame, sectionSeed, q, 0.5), 0.2, 0.8);
 
-  // ── Plan §2.5 video-echo channels. Alpha=0 (default) signals "pass off".
+  // ── Video-echo channels. Alpha=0 (default) signals "pass off".
   out.echoZoom = clamp(evalOptional(config.echoZoom, frame, sectionSeed, q, 0), -0.5, 0.5);
   out.echoRotate = clamp(evalOptional(config.echoRotate, frame, sectionSeed, q, 0), -0.5, 0.5);
   out.echoAlpha = clamp(evalOptional(config.echoAlpha, frame, sectionSeed, q, 0), 0, 0.9);
@@ -628,7 +628,7 @@ export function evalConfig(
   out.morphAmount = out.morph > 0 ? clamp(evalChannel(morph!.amount, frame, sectionSeed, q), 0, 0.9) : 0;
   out.morphScale = out.morph > 0 ? clamp(evalChannel(morph!.scale, frame, sectionSeed, q), 0.25, 4) : 1;
 
-  // ── Plan §2.6 crossfade meta. lerpConfig stamps `_transition` on the live
+  // ── Crossfade meta. lerpConfig stamps `_transition` on the live
   // config when the Director is mid-fade; absent or >=1 means "settled".
   const tx = config._transition;
   out.transition = typeof tx === 'number' && tx < 1 ? (tx < 0 ? 0 : tx) : 1;
@@ -765,7 +765,7 @@ function lerpOptional(
  *
  * Does NOT stamp `_transition`: the Director sets that ONLY for real section
  * fades. Intra-section drift uses lerpConfig too and must not trigger the
- * field-buffer crossfade (plan §2.6).
+ * field-buffer crossfade.
  */
 export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): OperatorConfig {
   const pick = t < 0.5 ? a : b;

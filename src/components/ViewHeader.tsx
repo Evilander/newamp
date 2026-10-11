@@ -1,7 +1,7 @@
 // ViewHeader — the one header voice for every view: a tracked-out mono eyebrow
 // above the title row (title + count chip + status slot), actions right-aligned.
 // Dense but breathing; all metrics come from the token ramps via
-// styles/components/primitives.css (.view-header). Stage-2 view owners render
+// styles/components/primitives.css (.view-header). Views render
 // this instead of hand-rolled header divs.
 
 import type { ReactNode } from 'react';

@@ -143,7 +143,7 @@ uniform vec3  u_membrane;     // light injected along the front
 uniform float u_bulge;        // uv per frame the front pushes the old picture
 
 struct Warp {
-  vec3  decay;      // plan §2.3 per-channel RGB decay
+  vec3  decay;      // per-channel RGB decay
   float warpAmp;
   float warpScale;
   vec2  flow;
@@ -154,11 +154,11 @@ struct Warp {
   float mirror;     // segment count (0 = off; 2..8 active)
   float mirrorMix;  // 0..1 blend between unfolded and folded sample
   float fluid;      // sim influence, premultiplied by dt CPU-side (0 = off)
-  float zoomRad;    // plan §2.2 radial gains (multiply radius²)
+  float zoomRad;    // radial gains (multiply radius²)
   float rotateRad;
   float swirlRad;
   float decayRad;
-  vec2  centre;     // plan §2.4, clamped CPU-side to [0.2,0.8]
+  vec2  centre;     // centre, clamped CPU-side to [0.2,0.8]
   float morph;      // MORPH_KINDS index, 0 = none
   float morphAmt;   // per-frame strength 0..0.9
   float morphScale; // per-kind size multiplier around 1
@@ -205,7 +205,7 @@ vec2 kaleidoFold(vec2 p, float segments){
 struct Tap { vec2 src; float r2; vec2 alt; float altMix; float coral; float coralScale; };
 
 Tap warpSource(vec2 uv, Warp w){
-  // Plan §2.4: centre is a moving uniform. Defaults to vec2(0.5) so the
+  // Centre is a moving uniform. Defaults to vec2(0.5) so the
   // fold/zoom axis matches the pre-2.4 behaviour exactly.
   vec2 centre = w.centre;
   vec2 p = uv - centre;
@@ -214,7 +214,7 @@ Tap warpSource(vec2 uv, Warp w){
   // edge (swirl) so the image rolls instead of rigidly rotating.
   float radius = length(p);
   float r2 = radius * radius;
-  // Plan §2.2: each transform gets a radius² gain so the channel's strength
+  // Each transform gets a radius² gain so the channel's strength
   // varies with distance from centre. Gains default to 0 → bit-identical to
   // pre-2.2 (the additive term vanishes everywhere).
   float zoomEff = w.zoom + w.zoomRad * r2;
@@ -390,7 +390,7 @@ void main(){
 
   // Hue cycle: shift colour every frame so trails drift across the palette.
   prev = rotateHue(prev, hue * u_steps);
-  // Plan §2.3: per-RGB decay; plan §2.2 radial decay bias adds r²-scaled gain
+  // Per-RGB decay; radial decay bias adds r²-scaled gain
   // before clamp so the trail length can change with distance from centre.
   vec3 decayRGB = clamp(decay + vec3(decayRad * t.r2), vec3(0.65), vec3(0.99));
   prev *= pow(decayRGB, vec3(u_steps));
@@ -716,7 +716,7 @@ void main(){
   o = vec4(s / 12.0, 1.0);
 }`;
 
-// Plan §2.6 identity blit — copies a texture into the bound FBO with no math.
+// Identity blit — copies a texture into the bound FBO with no math.
 // Used to capture the field snapshot at the start of a crossfade. Cheap one-
 // off; allocates no per-frame work when no transition is in flight.
 const BLIT_FRAG = `#version 300 es
@@ -726,7 +726,7 @@ out vec4 o;
 uniform sampler2D u_src;
 void main(){ o = texture(u_src, v_uv); }`;
 
-// Plan §2.5 video-echo pass. Reads the previous frame's field, samples it at a
+// Video-echo pass. Reads the previous frame's field, samples it at a
 // zoom/rotation/flip offset, and writes that into a separate echo target. The
 // composite then blends echo on top of the live field with `u_echoAlpha`. The
 // echo's prev-frame state is kept in the echo target itself so it feeds back
@@ -776,11 +776,11 @@ in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_field;
 uniform sampler2D u_dye;     // simulated-fluid dye (RGBA16F)
-uniform sampler2D u_echo;    // video-echo target (plan §2.5)
-uniform sampler2D u_snapshot;// pre-fade field snapshot (plan §2.6)
+uniform sampler2D u_echo;    // video-echo target
+uniform sampler2D u_snapshot;// pre-fade field snapshot
 uniform float u_aberration; // 0 off .. 1 strong
 uniform float u_liquidMix;   // 0 dye invisible (legacy look) .. 1 dye-dominant
-uniform float u_echoAlpha;   // 0 = echo pass off (plan §2.5)
+uniform float u_echoAlpha;   // 0 = echo pass off
 uniform float u_snapshotMix; // 0 = no crossfade in flight; 1 = full from-snapshot
 uniform vec3  u_bg;
 uniform vec3  u_accent;
@@ -798,7 +798,7 @@ void main(){
   fieldC.g = texture(u_field, uv).g;
   fieldC.b = texture(u_field, uv - dir * amt * 1.3).b;
 
-  // Plan §2.6 field-buffer crossfade. When the Director starts a fade the
+  // Field-buffer crossfade. When the Director starts a fade the
   // renderer snapshots the field into u_snapshot; this mix smoothly walks
   // from the FROM look's frozen field over to the TO look's live one,
   // killing the mid-fade tear caused by discrete-channel snapping (mirrorSet,
@@ -808,7 +808,7 @@ void main(){
     fieldC = mix(fieldC, snap, clamp(u_snapshotMix, 0.0, 1.0));
   }
 
-  // Plan §2.5 video-echo composite. Default alpha=0 = no echo, no FBO touch.
+  // Video-echo composite. Default alpha=0 = no echo, no FBO touch.
   // The echo target keeps a self-feeding decayed copy so trails repeat
   // visibly. Blended on top of the field BEFORE palette ramp + bloom so the
   // echo participates in tone-mapping like a real feedback layer would.
@@ -941,7 +941,7 @@ function makeEmitter(): Emitter {
 }
 
 /**
- * Per-channel decay clamp (plan §2.3). The base scalar is already clamped to
+ * Per-channel decay clamp. The base scalar is already clamped to
  * [0.78, 0.97] by evalConfig; per-channel biases are at most ±0.08 each, so
  * the sum can fall into [0.70, 1.05]. Re-clamp here to [0.70, 0.99] so the
  * shader's outer guard stays untriggered and channel imbalance can't blow up.
@@ -1117,7 +1117,7 @@ export function createEvilandRenderer(
   // Bloom ping-pongs: one per pyramid level (only used at level count > 0).
   const bloomDown: Fbo[] = [];
   const bloomUp: Fbo[] = [];
-  // Plan §2.5 video-echo. Ping-pong because echo self-feeds (each frame writes
+  // Video-echo. Ping-pong because echo self-feeds (each frame writes
   // into echoB after reading echoA). Allocated LAZILY on first nonzero alpha —
   // an archetype that never sets echo never pays the ~16MB cost. Force-off on
   // the `low` quality tier (per plan launch gate).
@@ -1133,7 +1133,7 @@ export function createEvilandRenderer(
   // echo frame is never delayed.
   const ECHO_FREE_FRAMES = 30; // ~0.5s @60fps — quieter than typical hysteresis intervals on the pulse curve
   let echoIdleFrames = 0;
-  // Plan §2.6 field-buffer snapshot. Allocated on the FIRST frame of a fade,
+  // Field-buffer snapshot. Allocated on the FIRST frame of a fade,
   // freed when the fade settles. Off on `low` too — the projector running on
   // a weak GPU should not double its peak RGBA16F footprint mid-fade.
   const snapshotEnabled = quality !== 'low';
@@ -1214,7 +1214,7 @@ export function createEvilandRenderer(
     for (const f of bloomUp) disposeFbo(f);
     bloomDown.length = 0;
     bloomUp.length = 0;
-    // Plan §2.5/§2.6: if echo/snapshot FBOs exist, rebuild them at the new
+    // If echo/snapshot FBOs exist, rebuild them at the new
     // field resolution. Allocation stays lazy on first use; resize never
     // creates them speculatively.
     if (echoA) { disposeFbo(echoA); echoA = makeFbo(fieldW, fieldH); }
@@ -1577,7 +1577,7 @@ export function createEvilandRenderer(
   // Push one look's motion into a Warp slot of the field shader. `fluidScale`
   // is 0 when the velocity sim is off, which keeps u_fluid at exactly zero.
   function pushWarp(u: WarpUniforms, d: EvilandDynamics, fluidScale: number): void {
-    // Plan §2.3: per-RGB decay. d.decay + d.decayR/G/B biases. Clamped
+    // Per-RGB decay. d.decay + d.decayR/G/B biases. Clamped
     // CPU-side to the GPU-safe envelope so a runaway audio gain can't push
     // past the shader's outer clamp band.
     gl.uniform3f(u.decay, clampDecayChannel(d.decay + d.decayR), clampDecayChannel(d.decay + d.decayG), clampDecayChannel(d.decay + d.decayB));
@@ -1591,8 +1591,8 @@ export function createEvilandRenderer(
     gl.uniform1f(u.mirror, d.mirror);
     gl.uniform1f(u.mirrorMix, d.mirrorMix);
     gl.uniform1f(u.fluid, d.fluid * fluidScale);
-    // Plan §2.2/§2.4: radial gains + centre offset. Defaults are 0 / (0.5,0.5)
-    // → bit-identical to pre-§2.2.
+    // Radial gains + centre offset. Defaults are 0 / (0.5,0.5)
+    // → output is bit-identical to before these gains existed.
     gl.uniform1f(u.zoomRad, d.radialZoom);
     gl.uniform1f(u.rotateRad, d.radialRotate);
     gl.uniform1f(u.swirlRad, d.radialSwirl);
@@ -1943,7 +1943,7 @@ export function createEvilandRenderer(
     fieldA = fieldB;
     fieldB = tmp;
 
-    // ---- PASS 3d: video-echo (plan §2.5). Ping-pong self-feeding pass that
+    // ---- PASS 3d: video-echo. Ping-pong self-feeding pass that
     // samples the live field through a zoom/rotate/flip transform and blends
     // it with last frame's echo. Lazily allocated on first nonzero alpha;
     // never present on `low` quality. Per plan: ~16MB at 1080p.
@@ -1996,7 +1996,7 @@ export function createEvilandRenderer(
       }
     }
 
-    // ---- PASS 3e: snapshot capture (plan §2.6). When a transition starts
+    // ---- PASS 3e: snapshot capture. When a transition starts
     // (dyn.transition < 1 and we haven't captured yet), blit the live fieldA
     // into fieldSnapshot. The composite then crossfades against this frozen
     // FROM look so mid-fade discrete-channel snaps (mirrorSet, waveMode) don't
@@ -2042,14 +2042,14 @@ export function createEvilandRenderer(
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, dyeTex ?? fieldA.tex);
     gl.uniform1i(composeUni.dye, 2);
-    // Plan §2.5 echo source — when alpha=0 the shader skips the texture
+    // Echo source — when alpha=0 the shader skips the texture
     // entirely, so binding fieldA as a placeholder is safe (any valid
     // texture is fine; the sample is gated by `u_echoAlpha > 0`).
     const echoSrcTex = echoA ? echoA.tex : fieldA.tex;
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, echoSrcTex);
     gl.uniform1i(composeUni.echo, 3);
-    // Plan §2.6 snapshot source — same trick: fall back to the live field
+    // Snapshot source — same trick: fall back to the live field
     // when there's no snapshot, and gate the sample shader-side with
     // `u_snapshotMix > 0`. snapshotMix = 1 - transition, so a freshly
     // started fade (transition≈0) gives mix≈1 (full from-snapshot), then

@@ -43,7 +43,7 @@ const close = (a, b) => Math.abs(a - b) < 1e-9;
 // --- GOLDENS — regenerated 2026-09-27 for five additional living forms
 // (visual-memory algorithm v5). Previously regenerated 2026-09-22 for six living
 // archetypes, and before that 2026-06-10 for the 20-archetype expansion
-// (plan §3 MilkDrop-variety rotation). The original goldens were
+// (MilkDrop-variety rotation). The original goldens were
 // captured against a 6-archetype rng.pick(ARCHETYPES); growing the list moves
 // the same seed to a different archetype, which is the WHOLE POINT of the
 // look-space expansion. Determinism itself (same seed → same config every
@@ -94,7 +94,7 @@ const m = mutate(a, 1, 99);
 if (m.fluid.base < 0 || m.fluid.base > 1) fail('mutate pushed fluid out of range');
 log.push('default/clone/lerp/mutate plumbing OK');
 
-// ─── PLAN §2.1 Q-VARS ──────────────────────────────────────────────────────
+// ─── Q-VARS ──────────────────────────────────────────────────────
 {
   // Build a config that uses every q-var feature: base, LFO, smooth, bindings,
   // and a channel that reads q1. Determinism: same beatPhase → same q[0].
@@ -157,7 +157,7 @@ log.push('default/clone/lerp/mutate plumbing OK');
   log.push('q-vars: shapes correct, determinism + EMA convergence + clamp OK');
 }
 
-// ─── PLAN §2.2–§2.5 NEW CHANNELS: clamp ranges + defaults ──────────────────
+// ─── NEW CHANNELS: clamp ranges + defaults ──────────────────
 {
   const cfg = defaultConfig();
   const out = createDynamics();
@@ -199,7 +199,7 @@ log.push('default/clone/lerp/mutate plumbing OK');
   log.push('new channels: defaults neutral, clamps enforced');
 }
 
-// ─── PLAN §2.6 CROSSFADE STAMPING ──────────────────────────────────────────
+// ─── CROSSFADE STAMPING ──────────────────────────────────────────
 {
   const a2 = generate(42).config;
   const b2 = generate(1337).config;

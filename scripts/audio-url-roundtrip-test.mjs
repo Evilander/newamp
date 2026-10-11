@@ -85,14 +85,14 @@ const permissiveDeps = () => {
 };
 
 const roundTripCases = [
-  { name: 'POSIX absolute', path: '/home/tyler/Music/Track.flac' },
+  { name: 'POSIX absolute', path: '/home/user/Music/Track.flac' },
   { name: 'Windows drive (backslash input)', path: 'K:\\Music\\Artist\\Track.flac' },
   { name: 'UNC share', path: '\\\\nas\\share\\Music\\Track.flac' },
-  { name: 'spaces', path: '/home/tyler/My Music/Track One.flac' },
-  { name: 'unicode', path: '/home/tyler/Música/Ünïcode Track.flac' },
-  { name: 'percent sign', path: '/home/tyler/50% Off.flac' },
-  { name: 'question mark', path: '/home/tyler/what?.flac' },
-  { name: 'hash', path: '/home/tyler/track#1.flac' },
+  { name: 'spaces', path: '/home/user/My Music/Track One.flac' },
+  { name: 'unicode', path: '/home/user/Música/Ünïcode Track.flac' },
+  { name: 'percent sign', path: '/home/user/50% Off.flac' },
+  { name: 'question mark', path: '/home/user/what?.flac' },
+  { name: 'hash', path: '/home/user/track#1.flac' },
 ];
 
 for (const { name, path } of roundTripCases) {
@@ -120,9 +120,9 @@ for (const { name, path } of roundTripCases) {
 }
 {
   const { deps } = permissiveDeps();
-  const result = await authorizeAudioProtocolPath(new URL('newamp://track//home/tyler/legacy.flac'), deps);
+  const result = await authorizeAudioProtocolPath(new URL('newamp://track//home/user/legacy.flac'), deps);
   assert.ok(result.ok, 'a pre-existing double-slash POSIX newamp:// URL must now authorize as an absolute path');
-  assert.equal(result.filePath, resolve('/home/tyler/legacy.flac'));
+  assert.equal(result.filePath, resolve('/home/user/legacy.flac'));
 }
 
 console.log('PASS newamp://track URL round-trip (%d cases + 2 backward-compat checks)', roundTripCases.length);

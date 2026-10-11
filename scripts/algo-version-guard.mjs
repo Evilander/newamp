@@ -126,10 +126,39 @@ function extractDeclaration(source, name) {
   return null;
 }
 
+// Drop // and /* */ comments so editing a comment inside a watched declaration
+// is not mistaken for an algorithm change. String and template literals are
+// copied through untouched, so a '//' inside a string survives.
+function stripComments(text) {
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === '/' && next === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+    } else if (ch === '/' && next === '*') {
+      const end = text.indexOf('*/', i + 2);
+      i = end === -1 ? text.length : end + 2;
+      out += ' ';
+    } else if (ch === '"' || ch === "'" || ch === '`') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== ch) j += text[j] === '\\' ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else {
+      out += ch;
+      i++;
+    }
+  }
+  return out;
+}
+
 function fingerprint(text) {
-  // Whitespace-normalised hash so cosmetic reformatting doesn't trigger the
-  // guard. We collapse runs of whitespace and strip line-leading whitespace.
-  const normalized = text.replace(/\s+/g, ' ').trim();
+  // Whitespace- and comment-normalised hash so cosmetic reformatting and
+  // comment edits don't trigger the guard. We drop comments, then collapse runs
+  // of whitespace and strip line-leading whitespace.
+  const normalized = stripComments(text).replace(/\s+/g, ' ').trim();
   return createHash('sha256').update(normalized).digest('hex');
 }
 

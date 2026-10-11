@@ -1,4 +1,4 @@
-/* views/library.css — added for the 2.0 Reference Grade pass. Owned by its stage-2 workstream; keep rules scoped to this surface. */
+/* views/library.css: track table rows, ratings, column chooser and Library drop overlay. */
 
 /* ------------------------------------------------------------------
    Playing row — 2px left accent bar + a whisper of accent tint.

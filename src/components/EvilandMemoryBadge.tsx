@@ -9,7 +9,7 @@ import { api } from '../lib/api';
 
 // "REMEMBERS THIS SONG" badge for the fullscreen eviland visualizer.
 //
-// Rules (blueprint §1.8):
+// Rules:
 //   - Only shown when activePreset === 'eviland' AND a plan was loaded for the
 //     current track. Parent guards on activePreset; this component subscribes
 //     to the bridge registry and renders nothing when state.hasPlan is false.
@@ -80,7 +80,7 @@ export function EvilandMemoryBadge({ enabled }: BadgeProps): JSX.Element | null 
       unpinTimer.current = null;
     }
     setPhase('fade-in');
-    // Match the 4s fade-in window from the blueprint.
+    // Fade-in window is ~4s.
     fadeInTimer.current = setTimeout(() => {
       // Pin-aware: if the user clicked the badge during the
       // 4s fade-in window, togglePin set phase to 'pinned'. Without this

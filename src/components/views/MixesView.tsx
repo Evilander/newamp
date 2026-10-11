@@ -114,7 +114,7 @@ export function MixesView(): JSX.Element {
         },
         {
           id: 'loved',
-          title: 'Loved Signal',
+          title: 'Loved Tracks',
           subtitle: 'Your loved tracks, ready as a set',
           tracks: loved,
           tone: 'warn',
@@ -186,9 +186,9 @@ export function MixesView(): JSX.Element {
         title="Mixes"
         lede="Eight live mixes regenerated from your library every time you open this view or play a new seed track."
         bullets={[
-          'Harmonic chains tracks by BPM + key + seed-vibe similarity for smooth DJ-style transitions.',
+          'Harmonic chains tracks by BPM and key, favoring tracks similar to the seed, for smooth DJ-style transitions.',
           'Taste Match weighs plays, loves, ratings, and skips around whatever you\'re listening to.',
-          'Loved Signal / Heavy Rotation / Recently Played are fast paths back into your favorites.',
+          'Loved Tracks / Heavy Rotation / Recently Played are fast paths back into your favorites.',
           'Click SAVE on any mix card to keep it as a normal playlist.',
         ]}
         forceVisible={help.open}

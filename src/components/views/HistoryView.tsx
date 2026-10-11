@@ -106,8 +106,6 @@ export function HistoryView(): JSX.Element {
 
   return (
     <div className="flex h-full flex-col" style={{ fontFamily: 'var(--font-mono)' }}>
-      {/* Reference ViewHeader implementation — stage 2 rolls this voice out
-          to the other views. */}
       <ViewHeader
         eyebrow="Yours"
         title="Listening History"

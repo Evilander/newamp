@@ -82,7 +82,7 @@ const passthrough = JSON.stringify(cp?.zoom) === JSON.stringify(c1?.zoom);
 log.push(`disabled passthrough keeps set config: ${passthrough}`);
 if (!passthrough) fail('disabled director did not passthrough');
 
-// --- plan §2.6: live config carries _transition during section fades, ---
+// --- crossfade: live config carries _transition during section fades, ---
 // --- absent/1 when settled, and absent during intra-section drift ---
 {
   const dt = createDirector({ songId: 'transition-test', enabled: true, drift: 0, rotateMs: 0 });
@@ -213,7 +213,7 @@ if (!passthrough) fail('disabled director did not passthrough');
   if (a !== b) fail('drift off: steady-state config is not referentially stable (GC fast path broken)');
 }
 
-// ─── Plan §1.10 — exportPlan→loadPlan round-trip ────────────────────────────
+// ─── exportPlan→loadPlan round-trip ────────────────────────────
 // Builds a few real boundary configs, exports the plan, replays it on a fresh
 // Director, and asserts the first 4 stored seeds + replayed configs match.
 {

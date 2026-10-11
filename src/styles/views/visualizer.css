@@ -343,8 +343,8 @@
   background: rgba(0,0,0,0.48);
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 8px;
-  /* Hidden by default — Tyler wants the visualizer to be the only thing
-     on screen until the user actually reaches for the volume. Cursor
+  /* Hidden by default so the visualizer is the only thing on screen
+     until the user actually reaches for the volume. Cursor
      proximity to the meter (or anywhere on the viz root via hover)
      reveals it. opacity:0 elements still receive pointer events, so the
      slider stays grabbable even when invisible.

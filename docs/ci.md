@@ -24,7 +24,6 @@ Run on every push/PR in `ci.yml`:
 | Provenance | `npm run smoke:build-provenance` | `BUILD-PROVENANCE.json` shape |
 | Release secrets | `npm run smoke:release-secrets` | no secrets leak into release artifacts |
 | Reliability | `npm run smoke:reliability` | DB corruption backup + recovery |
-| Completion audit | `npm run smoke:completion-audit` | release-readiness audit (reports blockers, exits 0) |
 | `@eviland/core` package | `npm run test:eviland-core-package` | builds `packages/eviland-core` for real (declaration emit) and imports every value `src/index.ts` exports from the built `dist/index.js`, so the package's hand-maintained public surface can't drift from what the mirrored engine modules actually export |
 
 ## Display-required (need an X11/Wayland/macOS display + WebGL)

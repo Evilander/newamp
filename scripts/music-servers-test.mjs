@@ -112,7 +112,7 @@ const server = createServer((req, res) => {
     }
     res
       .writeHead(200, { 'content-type': 'application/json' })
-      .end(JSON.stringify({ ServerName: 'Tyler Jellyfin', Version: '10.11.0' }));
+      .end(JSON.stringify({ ServerName: 'Test Jellyfin', Version: '10.11.0' }));
     return;
   }
 
@@ -392,7 +392,7 @@ try {
   }, { timeoutMs: 5000 });
 
   if (jf.connection.baseUrl !== `http://127.0.0.1:${port}/jellyfin`) fail(`Jellyfin base URL should be normalized, got ${jf.connection.baseUrl}`);
-  if (jf.connection.serverName !== 'Tyler Jellyfin') fail('Jellyfin server name should come from System/Info');
+  if (jf.connection.serverName !== 'Test Jellyfin') fail('Jellyfin server name should come from System/Info');
   if (jf.connection.username !== 'jf-user') fail('Jellyfin public connection should keep username');
   if ('password' in jf.connection || JSON.stringify(jf.connection).includes('jf-pass') || JSON.stringify(jf.connection).includes('jf-token')) {
     fail('Jellyfin public connection must not expose password or token');

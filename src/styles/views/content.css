@@ -1,6 +1,4 @@
-/* views/content.css — added for the 2.0 Reference Grade pass. Owned by its stage-2 workstream; keep rules scoped to this surface. */
-
-/* === content-2: profile / radio / podcast / playlist / wrapped === */
+/* views/content.css: playlist toolbar. */
 
 /* PlaylistView toolbar regroup — the former single wrapping row of ~30
    controls, clustered into labeled groups under the ViewHeader. Primary
