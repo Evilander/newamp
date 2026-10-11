@@ -5,42 +5,441 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
-## [2.5.2] - 2026-10-10
+## [2.6.0] - 2026-10-11
+
+The seek bar now draws the track's waveform, the colour editor can stay open
+over any view, and the sidebar's groups collapse while its items hide and
+reorder. Apple Lossless files in .m4a play and are labelled ALAC. Track
+tables have a column chooser, Move to Recycle Bin / Trash is in the track
+menu, and library search ignores accents. The visualizer has three new
+scenes, reacts relative to each track's loudness, and recovers when the GPU
+takes its graphics context. Several defaults changed too, and each one is
+listed under Changed.
+
+Thanks to u/mojsterr, whose detailed reports from testing 2.5.0 and 2.5.1 on a
+Mac mini led to the column chooser, Move to Recycle Bin, the waveform seek bar,
+the floating colour editor, the rearrangeable sidebar and the pressed-button
+text colour that had been tied to the Background.
 
 ### Added
 
-- Track tables have a column chooser: the ⋯ at the left of the header, or a
-  right-click on the header row, hides, shows and reorders columns. One
-  layout for the Library, playlists and mixes, remembered with the column
-  widths.
-- Move to Recycle Bin / Trash in the track right-click menu. It asks first,
-  takes a library backup, moves the files, and the tracks leave the library
-  with their plays, ratings and playlist places. A queued track drops out of
-  the queue; a playing one hands over to the next.
-- Double-click the volume slider for 100%.
-- The Retro TV deck's volume knob is the volume now: drag it, scroll over it,
-  or use the arrow keys.
-- Right-click in the fullscreen visualizer opens the visualizer menu. Esc and
-  the ✕ button exit.
+#### Playback and formats
+
+- The transport's seek bar is the playing track's waveform, and Now Playing's
+  overview shows the real waveform instead of one shape for every track. The
+  Windowshade deck's seek strip draws it as well. NewAmp builds the waveform
+  once per local file in the background and keeps it in `waveform-cache`.
+  Until it is ready, and for streams, server tracks and podcast episodes, the
+  bar stays plain. Hovering the bar shows the time under the pointer.
+  Settings > Performance has a Seek bar row after Resonance. Turning it off
+  gives back the plain slider and stops the background decoding, including
+  any already running or queued.
+- In the main window, the mouse wheel over a seek bar seeks 5 seconds per
+  notch.
+- Play with an empty queue and a scanned library starts a taste mix led by
+  today's pick, and a toast says so. This covers Space, the media keys and the
+  tray.
+- The transport shows Buffering while a slow source loads.
+
+#### Library and search
+
+- Track tables have a column chooser: the Columns button above the header, the
+  ⋯ at the left of the header, or a right-click on the header row. It hides,
+  shows and reorders columns, so Stars can sit next to the title. One layout
+  serves every track table and is remembered with the column widths.
+- Move to Recycle Bin (Trash on macOS and Linux) is in the track right-click
+  menu. It asks first, takes a backup, then moves the files. The tracks leave
+  the library along with their play history, ratings and playlist entries. A
+  track that was on one of your Lists (in Profile) stays there as a plain text
+  entry with the track's title. A queued track drops out of the queue. NewAmp
+  stops its own audio decoders that have the file open before moving it, so
+  the track that is playing can be moved on Windows too, and playback carries
+  on with the next track. A selection of more than 25 files shows a progress
+  toast. A file that is in use, or on a drive with no Recycle Bin (network
+  shares, some removable drives), stays where it is with a plain message. CUE
+  and podcast entries don't offer the item.
+- Library search ignores case and accents the way people type: `bjork` finds
+  Björk, `ÓLAFUR` finds Ólafur, and Cyrillic and Greek work too. It applies to
+  track search, the `title:`, `artist:`, `album:`, `albumartist:` and `genre:`
+  filters, Albums and Artists. The path part of a search is still matched as
+  typed. Existing libraries are backfilled once on first open. `library.db`
+  gets larger because it now stores a folded copy of the searchable text.
+- Scans read star ratings and play counts stored inside files (ID3 POPM and
+  PCNT, Vorbis RATING and FMPS tags, iTunes ratings, WMA) for tracks that have
+  neither yet. A rating you set in NewAmp, clearing one included, is never
+  overwritten. Files that haven't changed aren't re-read, so this applies to
+  new and changed files, and to the .m4a, .m4b, .mp4 and .mka files read once
+  more for the ALAC label. There is no rescan button for the rest yet.
+- MusicBrainz recording, release and artist ids, ISRC and AcoustID are stored
+  from file tags, and the metadata export includes them along with codec and
+  bit depth.
+
+#### Volume and keyboard
+
+- In the main window, double-click a volume slider for 100%.
+- Ctrl+F (Cmd+F on macOS) focuses the Library search from any view, and `/`
+  does the same inside the Library. Esc clears the box, then leaves it.
+- Ctrl+M toggles deck mode both ways; it used to only enter it. On macOS the
+  chord is Cmd+Shift+M, because Cmd+M is Minimize. Ctrl+M still works there.
+- With a track row focused, `0` to `5` rate that row and `L` loves it. With no
+  row focused they act on the playing track.
+- Settings > Support Diagnostics has a Copy input log button. It copies the
+  last 200 wheel events over the volume controls, with the app version, so a
+  report about the wheel can say what the wheel actually sent.
+
+#### Visualizer and Eviland
+
+- Right-click in the fullscreen visualizer opens a menu at the pointer, in
+  place of the big preset grid. Esc closes the menu, then a popover, then the
+  visualizer.
+- Three new scenes: Spectral Strata, Bokeh Field and Data Raster.
+- Eviland measures energy, kick and band levels against the track's own
+  loudness, so a quietly mastered track reacts about as strongly as a loud one
+  and a verse reads lower than its chorus. Very quiet recordings can still fall
+  below what the analyser sees. The live section detector fires on verse and
+  chorus changes and recognises a section that comes back, so a chorus gets its
+  look back. It stays quiet during fade-outs and on loops, and never fires in
+  the first 10 seconds of a track.
+- Song scores get the tempo right more often: a backbeat track is less likely
+  to come out at half tempo and a hi-hat pattern at double. Some syncopated
+  tracks still read at double tempo. Scores also detect 3/4, recognise a final
+  chorus raised a semitone as the chorus, and no longer cut fade-outs or
+  constant loops into sections. Scores from earlier versions are recomputed the
+  next time a track plays. Motion runs on a continuous beat clock, so it no
+  longer twitches at each beat line, and look rotations land on a beat line or
+  a 16-beat phrase line.
+- Eviland keeps its colour in step with the music instead of greying every
+  track. Where a look uses only a little of the liquid effect, its colour is
+  now added on top of the picture, where it used to darken it. Album cover
+  colours reach the on-screen Eviland, Eviland Live and the projector the same
+  way, and a fade between a look that follows the cover and one that doesn't is
+  smooth.
+- Randomizing an Eviland look puts a seed code you can paste in the box. It
+  used to say `seed-1`, `seed-2`, and so on.
+- If the GPU takes Eviland's graphics context and it doesn't come back within
+  about three seconds, the visualizer and the projector switch to a simple 2D
+  picture instead of freezing.
+- The projector takes Cmd+Left/Right and Cmd+Up/Down on macOS, and Up and Down
+  change its volume everywhere. Right-arrow seeking works on streams. Its
+  sliders use the skin's accent colour, its pixel ratio, quality tier and
+  sample rate follow display and output changes, and MilkDrop there knows
+  whether a track is playing.
+
+#### Decks
+
+- The Retro TV's volume knob is the volume: drag it, scroll over it, use the
+  arrow keys, or double-click for 100%. Its channel knob changes track when
+  clicked or dragged (up or right is next), with Shift+click for previous, the
+  wheel, or the arrow keys, PageUp, PageDown, Enter and Space when focused.
+- The Jukebox's selector keys play queue entries, twelve to a page, with the
+  page letter in the readout (A-01 to A-12, then B-01) and the playing entry
+  lit. Unused keys are disabled. The keys cover the page that holds the playing
+  entry, so entries on other pages of a long queue can't be reached from the
+  cabinet.
+
+#### Skins, colours and sidebar
+
+- A colour editor that floats over the app. Edit over the app in the Skin
+  Workshop, or Edit Colours in Quick Play (Ctrl/Cmd+K), opens a panel that stays
+  over every view, the fullscreen visualizer included. Drag its title bar, press
+  Esc to close it, and it remembers where you left it. It steps aside in deck
+  mode and returns afterwards.
+- Every colour row has a picker and a value field, and an opacity slider
+  except for solid surfaces such as Background and Panels. Tint everything
+  shifts hue, saturation and brightness for the whole skin at once, and keeps
+  the warning and error hues. A Contrast list checks text pairs against 4.5:1
+  and the accent on panels against 3:1, measured on what is on screen, and says
+  in words when a pair is low.
+- Text on accent is a new Skin Workshop colour: the label on pressed buttons
+  and other accent fills. It is independent of Background. A skin that doesn't
+  set it, such as an older saved or imported one, gets black or white,
+  whichever reads better on its accent. Exported skins include it, and older
+  versions ignore the unknown key.
+- A skin you import, drop on the window or save over no longer replaces your
+  custom skin without a trace. The replaced skin goes under Previous skins in
+  the Skin Workshop (the last 8, kept on this computer), with an Undo on the
+  toast. Unsaved edits are kept there too if the skin changes under them.
+- Sidebar groups collapse and expand, and the choice is remembered. Right-click
+  the sidebar, or press Customise at the bottom, to show, hide and reorder the
+  items in a group. Settings always stays, and the view you are on shows even
+  if it is hidden or its group is collapsed. Reset restores the default.
+  Streaming starts collapsed and opens by default once the library has a music
+  server or podcast feed, or once you open Radio. Radio sits inside it, and
+  Quick Play still reaches it.
+
+#### macOS
+
+- The NewAmp menu has Settings, with Cmd+, as its shortcut. It also brings the
+  window back if it was closed to the Dock.
+- The Dock menu has Previous, Play or Pause, Next and Stop. The Help menu links
+  to the GitHub page and the issue tracker.
+- Cmd+Left/Right is previous and next, and Cmd+Up/Down is volume. The deck
+  snapshot is Cmd+Shift+S. Tooltips and hints show the Cmd forms. Ctrl+Left and
+  Ctrl+Right still work.
+- The visualizer's fullscreen no longer creates a new Space, and the display
+  stays awake while the visualizer is up and music plays.
+
+#### Windows
+
+- The portable build keeps its data in a `NewAmp Data` folder next to the exe
+  when no profile exists in the default location. If you have run a portable
+  build before, it keeps using `%APPDATA%\NewAmp`, and so does a portable exe
+  in a read-only folder. About shows a Data folder row with the path.
+- Opening several files from Explorer within about 400 ms queues all of them.
+  Each used to replace the queue.
+- Listing output devices no longer starts a separate Video Capture process, a
+  camera helper NewAmp never uses, so there is one process fewer in memory.
+
+#### All platforms
+
+- The window opens where you left it. Position, size and maximized state are
+  remembered, the deck's position separately, and a window whose display is
+  gone reopens on screen.
+- If the interface process crashes, NewAmp reloads the window from the saved
+  session, up to twice a minute, then asks.
+
+### Changed
+
+#### Playback and formats
+
+- Shuffle with Repeat off now ends after every track has played once. Repeat
+  all starts a new shuffle cycle that doesn't open with the track that just
+  played. Auto DJ refills in shuffle too. Queue edits no longer reset the
+  shuffle history.
+- Shuffle and repeat are remembered, even with an empty queue.
+- NewAmp opens on the last view you were on. Settings and About are left out,
+  and a first run, a start with no library and the first-launch tour open on
+  Home.
+- The sleep timer pauses instead of stopping, so a podcast keeps its place.
+- Previous counts as a play and wraps with Repeat all. Replaying a track at
+  the same spot re-arms crossfade and gapless. Removing or deleting the last
+  track while it plays stops playback instead of restarting the one before it,
+  and records no skip.
+- Playback stops with a toast after 8 failed tracks in a row (or the queue
+  length, if smaller), and Next skips tracks the library knows are missing.
+- Wrapped Live export no longer replaces the queue, counts a play or scrobbles.
+  The queue comes back paused afterwards.
+- The transport title shows a heart for loved tracks only, in place of a star
+  before every title.
+- The main window appears as soon as it is ready, after a 0.6 s minimum splash,
+  instead of after a fixed 5.6 s.
+
+#### Library and search
+
+- The Library opens on the track list. The stats and health report is a
+  one-row Library health summary (grade, profile, counts, missing tags,
+  duplicate groups) that expands on click and remembers whether it was open.
+  Opened, it starts with an explainer card you can dismiss, and Compass Moves
+  that carry a search query filter the list when clicked.
+- Playlist, Mix and Tag columns are hidden on a fresh install, and default
+  widths fit a 1280 px window. Turn them on from Columns. The DJ OK / NO DJ
+  toggle and the TAG metadata-rescue button live in the Mix and Tag columns,
+  so they stay out of sight until those columns are shown. Saved layouts are
+  kept, and saved widths that still sat at the old defaults follow the new
+  narrower ones.
+- The Library search isn't focused on arrival, so Space, `L`, `0` to `5` and
+  the arrow keys control the player right away. Track rows are a single Tab
+  stop: arrows walk the rows, Enter plays, `Q` and Shift+`Q` queue, and Tab
+  steps through the row's buttons. Column resize handles take Left and Right.
+- Scrolling over a score bar changes only the score, and Shift+wheel moves it
+  by whole points, on macOS too.
+- Trashing tracks, and Clean missing files, remove just those rows. The list
+  keeps its scroll position and loaded pages, and the queue, Now Playing and
+  playlist views update at once. Clean missing files no longer cancels a scan
+  in progress. A removed track that was on one of your Lists (in Profile)
+  stays there as a plain text entry titled after the track.
+- The safety copy taken before Move to Recycle Bin or Clean missing files now
+  holds only `library.db` and `settings.json`. It used to copy the whole
+  album-art folder every time, which filled drives. These copies are named
+  `newamp-auto-backup-<time>` and the newest five are kept. Backups you make
+  from Settings still copy everything and are never deleted automatically.
+  Both restore from Settings.
+- Editing a track's tags (MusicBrainz match, manual edit, bulk edit, ReplayGain
+  analysis, reset of adopted edits) updates the queue, the transport and the
+  scrobble payload without re-queuing.
+
+#### Volume and keyboard
+
+- The wheel over any volume control (the transport slider, the Retro TV knob,
+  the visualizer's volume meter) stops at exactly 100%. Keep scrolling after a
+  short pause, or hold Shift, to boost past it. Up and Down (Cmd+Up and
+  Cmd+Down on a Mac) step 5% and stop at 100% the same way, and Shift+Up goes
+  straight through.
+- A slow single wheel click always moves the volume at least 2%. A trackpad
+  pinch or a sideways drift no longer changes it, and the distance one flick
+  can travel is capped so momentum can't run away. The volume track isn't
+  tinted red until you boost past 100%.
+- In the fullscreen visualizer, Lite is Shift+L and Auto-VJ is Shift+V, so `L`
+  loves the track and `V` stops playback as they do everywhere else. The
+  visualizer never takes a key held with Ctrl, Cmd or Alt, so Ctrl+Left and
+  Ctrl+Right skip tracks there too.
+
+#### Visualizer and Eviland
+
+- The album cover overlay in the visualizer is off until you turn it on, from
+  Settings or with `A`.
+- Look palettes are rebuilt in OKLCh, so an Eviland seed code gives the same
+  scene in new colours. The light colour is always lighter than the accent,
+  and there are no olive or brown shadows. Half of the looks follow the
+  cover's hue in look mode, and the album-art shadow is the cover's hue, dark.
+- The liquid effect, the soft flowing blobs of colour, appears only in the
+  liquid, nebula, inkwell, tidal, glasshouse, stormfront and emberveil looks.
+  Several looks now draw their waveform, the lissajous waveform is no longer
+  picked, and every look has some audio drive, so a seed code can differ in
+  more than colour. Scenes composite with partial occlusion, so trails carry
+  on through strokes.
+- The 4K render option allows up to 2x the display's pixel ratio and about
+  8.3 megapixels, up from 1.25x and 4.2 megapixels. The performance governors
+  still trim it on slower machines.
+- MilkDrop's reactivity sets the waveform gain with a hard limit instead of a
+  soft clip, and the control reads Signal gain on plain MilkDrop.
+- The spectrum meters on the transport, the decks and Now Playing, and the
+  reading Auto-VJ uses, are log-spaced from 30 Hz to 16 kHz and follow the
+  sample rate. The low bands no longer read the DC bin as bass.
+
+#### Decks
+
+- On the Record Player, SPEED and PITCH are printed panel text rather than
+  controls. The Discman's thumbwheel is a printed speaker mark, and its slider
+  is the volume.
+
+#### Skins and colours
+
+- Edits in the Skin Workshop belong to the Workshop now, not the Settings page.
+  They stay when you leave Settings, are marked Unsaved changes, and end with
+  Save skin or Reset. Closing the floating editor with unsaved edits asks
+  whether to save, discard, keep the preview or keep editing.
+- Buttons and medium chips are 24 px tall, 22 px in table rows and on the
+  hardware decks. Button labels no longer wrap.
+- Calls to action use the primary button style, and the lit style is kept for
+  toggles and selections.
+
+#### macOS
+
+- Closing the window hides it and playback continues. Click the Dock icon to
+  bring it back, and Cmd+Q quits. Settings > Shell words the choice as Keep
+  playing in the Dock or Quit NewAmp.
+- The decks use the window's own traffic lights in place of their minimize and
+  close buttons. PIN and FULL stay.
+
+#### Windows
+
+- Without a tray icon, the close button minimizes to the taskbar instead of
+  quitting, and closing the minimized window quits. With a tray icon the
+  choices read Minimize to tray and Close the app.
 
 ### Fixed
 
+#### Playback and formats
+
+- Apple Lossless in .m4a, .m4b and .mp4 files now plays, including with
+  crossfade, playback speed, an A-B loop, CUE sheets and gapless off. NewAmp
+  reads the file's codec and decodes ALAC with the bundled ffmpeg instead of
+  the browser decoder. AAC, FLAC and Opus inside MP4 stay native. No rescan is
+  needed for playback.
+- Apple Lossless is badged ALAC, and counted as lossless in Library health and
+  in `quality:lossless`, where it used to be called AAC. The codec is read at
+  scan time. Existing .m4a, .m4b, .mp4 and .mka rows are read once more on the
+  next scan, and show a neutral M4A chip until then.
+- Quick Play items and navigation links (SHOW toasts, artist and album links)
+  leave deck mode and the fullscreen visualizer, so the view is visible. Quick
+  Play opens over the fullscreen visualizer instead of invisibly behind it.
+- An OS play command no longer pauses a track that is already playing.
+- The seek bar thumb keeps following playback after a click.
+- The transport's title box had a fixed height, so the codec line sank into its
+  bottom edge at any Text size above the smallest. It grows with the text now.
+
+#### Library and search
+
+- Copying a lot of files into a watched folder no longer re-reads the whole
+  library, and new files appear at least every 30 seconds during a long copy
+  instead of after it finishes. The first scan of a large library no longer
+  re-reads the whole tracks table for every batch that has a new file.
+- Tag counts included tracks that no longer exist. Those leftovers are dropped
+  on open. A skip recorded for a track that was removed is ignored.
+- In a short window, the Library's search bar and track table could fall off
+  the bottom with no way to reach them. The view scrolls now, and the table
+  keeps a usable height.
 - The ? next to Discover, Mixes and Living Tags did nothing while their intro
-  card was showing. It now hides the card, and brings it back on the next
+  card was showing. It hides the card now, and brings it back on the next
   click.
-- In a short window, the Library view's search bar and track table could fall
-  off the bottom with no way to reach them. The view scrolls now, and the
-  table keeps a usable height.
-- The transport's title box had a fixed height, so the codec line sank into
-  its bottom edge at any Text size above the smallest. It grows with the text
-  now.
-- Esc with a visualizer popover open closed the popover and left the
-  visualizer at once. It closes the popover first now.
-- Scrolling over the volume slider holds its distance when the app is busy:
-  each step builds on the value the wheel last sent rather than the one last
-  painted, and a merged wheel event (which a busy renderer produces) counts
-  in full instead of being capped at one notch. On macOS, Shift+wheel arrives
-  on the horizontal axis; it counts now.
+
+#### Volume and keyboard
+
+- Scrolling over a volume control no longer loses distance when the app is
+  busy. On macOS, Shift+wheel arrives on the horizontal axis and now counts. If
+  the wheel still misbehaves, Settings > Support Diagnostics > Copy input log
+  shows what the wheel sent.
+- Shortcuts keep working after you touch a slider or the seek bar: Space,
+  Ctrl or Cmd with the arrows, `L`, `F` and `0` to `5`. Plain arrows stay with
+  a focused slider. Space after clicking a toolbar button plays or pauses
+  instead of pressing that button again.
+- In the fullscreen visualizer, `V`, `L` and `F` each ran a visualizer action
+  and the app's own action for the same key (stop, love, and closing the
+  visualizer). Each key does one thing now. Holding an arrow key through
+  visualizer modes no longer jumps back when the saves return, and a
+  double-click on a control no longer flips fullscreen. A double-click on the
+  hover volume meter sets 100%.
+- Leaving the visualizer keeps the app in fullscreen if it was already. Esc
+  with a popover open closes the popover first, and popovers take keyboard
+  focus and give it back.
+- Scrolling over the Retro TV volume knob or the visualizer's volume meter no
+  longer scrolls the page behind it.
+
+#### Visualizer and Eviland
+
+- After the GPU takes its graphics context and gives it back, the visualizer
+  recovers instead of freezing.
+- The visualizer keeps its trails when you resize the window, and a bad value
+  in the audio analysis no longer leaves it black. Banding in dark trails is
+  reduced.
+- Colour in the fluid looks drains away instead of building up, hot spots go
+  white at the centre, and the bloom no longer veils the whole frame.
+- Eviland's Bars waveform is drawn at a limited strength. A loud passage, a
+  long trail, or picking Bars under Waveform layer on a look with heavy
+  feedback could wash the whole picture out to white.
+- Eye of the Storm, Hex Pulse, Pixel Bloom, Smoke & Ink and Fire Spires no
+  longer jump after they have been running for a while. Phosphor Scope, City
+  Pulse and Deep Jelly follow the palette, and Tunnel Rings and Glitch Bars
+  re-roll on counted kicks instead of a timer. Shader modes and Confetti no
+  longer jitter the longer the app has been open.
+- MilkDrop's bass, mid and treble bands were an octave low, because every
+  second sample was fed at the full rate. The feed is contiguous now, so
+  presets react to the right frequencies. In plain MilkDrop mode, presets
+  compile off the paint path.
+- The 45 fps option holds 45 fps on a 60 Hz display instead of dropping to 30.
+- The projector's Eviland reactor resets on a track change, and both windows
+  follow the output device's sample rate when Bit-Perfect output changes it.
+
+#### Skins and colours
+
+- Pressed buttons keep a readable label whatever the Background colour is, in
+  Modern, Liquid Glass and Concourse.
+- On the light skins (Steel, Terminal, Ice and Miami), warning and error text,
+  title bar text and the transport's codec and duration line are readable.
+  Accent-coloured text in the Library, Now Playing and the deck skin chips uses
+  a darker shade there. Classic's secondary text is brighter, disabled buttons
+  look disabled, and the Library search hint no longer glows like an active
+  filter.
+
+### Accessibility
+
+- Deck transport and window buttons have accessible names, and the Retro TV
+  screen button announces the current track.
+- The volume slider and the Retro TV knob announce a value such as
+  `120% · +1.6 dB` in place of renaming themselves at every step. The score
+  input is named Score out of 100, and the Now Playing stars are labelled.
+- Library row play buttons are named after the track. PIN, Light Viz, Missing
+  art and the Library sort chips report whether they are on.
+
+### For contributors
+
+- The default session denies web permissions apart from audio checks, output
+  device selection, fullscreen and clipboard writes from the app's own origin.
+  A feature that needs another (MIDI, notifications) has to add it in
+  `electron/permissions.ts`.
+- The Retro TV volume knob releases its drag listeners if the deck closes
+  mid-drag.
 
 ## [2.5.1] - 2026-10-08
 
