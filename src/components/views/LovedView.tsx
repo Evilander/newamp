@@ -97,7 +97,7 @@ export function LovedView(): JSX.Element {
             ? `${tracks.length.toLocaleString()}${hasMoreLoved ? '+' : ''} of ${totalLoved.toLocaleString()} tracks`
             : `${tracks.length.toLocaleString()} tracks`}
         </span>
-        <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)} disabled={!tracks.length}>
+        <button className="pxbtn is-primary" onClick={() => void playQueue(tracks, 0)} disabled={!tracks.length}>
           ▶ Play loaded
         </button>
         <button className="pxbtn" onClick={() => queueTracksNext(tracks)} disabled={!tracks.length} title="Play loaded loved tracks next">

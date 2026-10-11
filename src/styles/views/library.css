@@ -93,28 +93,50 @@ svg.library-th-star {
 }
 
 /* ------------------------------------------------------------------
-   Column chooser: the ⋯ in the header's play column, or a right-click on
-   the header row. A fixed popover; the layout lives in useTrackColumns.
+   Column chooser: the Columns button above the table, the ⋯ in the header's
+   play column, or a right-click on the header row. A fixed popover; the
+   layout lives in useTrackColumns.
    ------------------------------------------------------------------ */
+.track-table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 3px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.track-columns-toolbar-btn {
+  height: 24px;
+}
+/* A 24px target in a 34px column: the negative margins give back the space
+   the extra size would take, so the header row keeps its height. */
 .track-columns-btn {
   display: inline-grid;
-  width: 18px;
-  height: 16px;
+  width: 24px;
+  height: 24px;
+  margin: -4px -3px;
   place-items: center;
+  vertical-align: middle;
   border-radius: var(--radius);
-  color: var(--muted);
-  font-size: 12px;
+  color: var(--ink-2);
+  font-size: 14px;
   line-height: 1;
   letter-spacing: 0;
 }
 .track-columns-btn:hover,
 .track-columns-btn:focus-visible {
-  color: var(--accent);
+  color: var(--accent-text);
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 .track-columns-menu {
   position: fixed;
   z-index: 80;
+  display: flex;
+  flex-direction: column;
+  /* Tall rows (a large Text size) or many columns scroll the list; the Reset
+     and Done footer stays on screen. */
+  max-height: calc(100vh - 16px);
   padding: 10px;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -134,6 +156,8 @@ svg.library-th-star {
 .track-columns-menu-list {
   display: grid;
   gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -156,15 +180,15 @@ svg.library-th-star {
   background: var(--panel-2);
 }
 .track-columns-menu-move {
-  width: 22px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   border-radius: var(--radius);
   color: var(--ink-2);
   font-size: 9px;
   line-height: 1;
 }
 .track-columns-menu-move:hover:not(:disabled) {
-  color: var(--accent);
+  color: var(--accent-text);
   background: var(--panel-2);
 }
 .track-columns-menu-move:disabled {
@@ -173,7 +197,89 @@ svg.library-th-star {
 }
 .track-columns-menu-foot {
   display: flex;
+  flex: none;
   justify-content: space-between;
   gap: 6px;
   margin-top: 10px;
+}
+
+/* ------------------------------------------------------------------
+   Library overview: stats and health behind one summary row. Closed by
+   default so the track list is what the view opens on; open, it is capped
+   so the list stays in view below it.
+   ------------------------------------------------------------------ */
+.library-overview {
+  flex: none;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.library-overview-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 12px;
+  text-align: left;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+.library-overview-toggle:hover {
+  background: var(--panel-2);
+}
+.library-overview-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.library-overview-caret {
+  flex: none;
+  width: 10px;
+  color: var(--accent-text);
+}
+.library-overview-label {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+}
+.library-overview-grade {
+  flex: none;
+  min-width: 20px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-align: center;
+  font-weight: 800;
+}
+.library-overview-profile {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+  color: var(--ink);
+}
+.library-overview-summary {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.library-overview-panel {
+  max-height: 45vh;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+}
+
+/* decks-compact.css fades the placeholder to 42% of the readout colour, too
+   faint to read on most skins. The dimmed readout colour holds up on all of
+   them; italics and no glow (.lcd-text) keep it from reading as a live filter. */
+.library-search-command input::placeholder {
+  color: var(--display-dim);
+  opacity: 1;
 }

@@ -1,5 +1,16 @@
+import { lazy, Suspense, useMemo, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
 import { usePlayerStore, type ViewMode } from '../store/usePlayerStore';
+import {
+  SIDEBAR_LAYOUT_VERSION,
+  resolveSidebar,
+  sidebarGroupShown,
+  useSidebarLayout,
+  visibleSidebarItems,
+} from '../store/useSidebarLayout';
+import { useStreamingPresence } from '../hooks/useStreamingPresence';
 import { useDetachedVisualizer } from './useDetachedVisualizer';
+import { deckModeShortcutLabel, shortcutLabel } from '../lib/format';
 
 interface NavItem {
   id: ViewMode;
@@ -70,6 +81,24 @@ const GROUPS: NavGroup[] = [
   },
 ];
 
+const groupId = (group: NavGroup): string => group.label.toLowerCase();
+const CATALOG = GROUPS.map((group) => ({ id: groupId(group), items: group.items.map((item) => item.id) }));
+const GROUP_BY_ID = new Map(GROUPS.map((group) => [groupId(group), group]));
+const ITEM_BY_ID = new Map(GROUPS.flatMap((group) => group.items).map((item) => [item.id, item]));
+
+// Lazy: the menu only matters to someone who goes looking for it.
+const SidebarCustomizeMenu = lazy(() =>
+  import('./SidebarCustomizeMenu').then((module) => ({ default: module.SidebarCustomizeMenu })),
+);
+
+// Where a context menu opens: the pointer, or the focused item for a key press
+// (which reports no position).
+function menuPointOf(event: ReactMouseEvent<HTMLElement>): { x: number; y: number } {
+  if (event.clientX || event.clientY) return { x: event.clientX, y: event.clientY };
+  const box = (event.target as HTMLElement).getBoundingClientRect();
+  return { x: box.left, y: box.bottom };
+}
+
 export function Sidebar(): JSX.Element {
   const view = usePlayerStore((s) => s.view);
   const setView = usePlayerStore((s) => s.setView);
@@ -78,6 +107,26 @@ export function Sidebar(): JSX.Element {
   const toggleEq = usePlayerStore((s) => s.toggleEq);
   const showEq = usePlayerStore((s) => s.showEq);
   const detached = useDetachedVisualizer();
+  const collapsed = useSidebarLayout((s) => s.collapsed);
+  const hidden = useSidebarLayout((s) => s.hidden);
+  const order = useSidebarLayout((s) => s.order);
+  const streamingUsed = useSidebarLayout((s) => s.streamingUsed);
+  const setCollapsed = useSidebarLayout((s) => s.setCollapsed);
+  const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
+  useStreamingPresence(view);
+
+  const groups = useMemo(
+    () => resolveSidebar(CATALOG, { v: SIDEBAR_LAYOUT_VERSION, collapsed, hidden, order, streamingUsed }),
+    [collapsed, hidden, order, streamingUsed],
+  );
+  const shown = groups.filter((group) => sidebarGroupShown(group, view));
+  const menuGroups = menuAt
+    ? groups.map((group) => ({
+        id: group.id,
+        label: GROUP_BY_ID.get(group.id)?.label ?? group.id,
+        items: group.items.map((item) => ({ id: item.id, label: ITEM_BY_ID.get(item.id as ViewMode)?.label ?? item.id, hidden: item.hidden })),
+      }))
+    : [];
 
   return (
     <aside
@@ -89,36 +138,75 @@ export function Sidebar(): JSX.Element {
           footer becomes inaccessible when the window is short. The nav
           itself drops its inner overflow so we get one unified scrollbar
           instead of two competing scroll regions. */}
-      <nav className="flex flex-col px-3 py-2">
-        {GROUPS.map((group, groupIdx) => (
-          <div key={group.label} className={groupIdx === 0 ? '' : 'mt-2'}>
-            <div className="mb-0.5 px-2 text-[9px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
-              {group.label}
-            </div>
-            {group.items.map((item) => (
+      <nav
+        className="flex flex-col px-3 py-2"
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenuAt(menuPointOf(event));
+        }}
+      >
+        {shown.map((group, groupIdx) => {
+          const open = !group.collapsed;
+          const listId = `sidebar-group-${group.id}`;
+          return (
+            <div key={group.id} className={groupIdx === 0 ? '' : 'mt-2'} data-newamp-sidebar-group={group.id}>
               <button
-                key={item.id}
-                className={`nav-item ${view === item.id ? 'active' : ''}`}
-                data-amp={view === item.id ? '' : undefined}
-                onClick={() => setView(item.id)}
-                title={item.hint ?? item.label}
+                type="button"
+                className="sidebar-group-head"
+                aria-expanded={open}
+                aria-controls={listId}
+                onClick={() => setCollapsed(group.id, open)}
               >
-                <svg width="14" height="14" viewBox="0 0 20 20" aria-hidden="true">
-                  <path d={item.icon} stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="square" />
+                <svg className="sidebar-group-chevron" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
+                  <path d="M1 2.5l3 3 3-3" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="square" />
                 </svg>
-                <span>{item.label}</span>
+                <span>{GROUP_BY_ID.get(group.id)?.label}</span>
               </button>
-            ))}
-          </div>
-        ))}
+              <div id={listId}>
+                {visibleSidebarItems(group, view).map(({ id }) => {
+                  const item = ITEM_BY_ID.get(id as ViewMode);
+                  if (!item) return null;
+                  return (
+                    <button
+                      key={item.id}
+                      className={`nav-item ${view === item.id ? 'active' : ''}`}
+                      data-amp={view === item.id ? '' : undefined}
+                      data-newamp-nav={item.id}
+                      onClick={() => setView(item.id)}
+                      title={item.hint ?? item.label}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 20 20" aria-hidden="true">
+                        <path d={item.icon} stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="square" />
+                      </svg>
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
       </nav>
 
       <div
         className="mt-auto shrink-0 border-t px-3 py-3"
         style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}
       >
-        <div className="mb-2 px-2 text-[9px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
-          Tools
+        <div className="mb-2 flex items-center justify-between pl-2 text-[9px] uppercase tracking-[0.2em]" style={{ color: 'var(--muted)' }}>
+          <span>Tools</span>
+          <button
+            type="button"
+            className="sidebar-customise"
+            title="Show, hide and reorder the sidebar. Right-click it for the same."
+            data-newamp-sidebar-customise-open
+            aria-haspopup="dialog"
+            onClick={(event) => {
+              const box = event.currentTarget.getBoundingClientRect();
+              setMenuAt((current) => (current ? null : { x: box.right + 8, y: box.top }));
+            }}
+          >
+            Customise
+          </button>
         </div>
         <div className="mb-2 flex gap-1 px-2">
           <button
@@ -136,7 +224,7 @@ export function Sidebar(): JSX.Element {
           >
             VIZ
           </button>
-          <button className="pxbtn flex-1" onClick={() => setCompactMode(true)} title="Compact deck window">
+          <button className="pxbtn flex-1" onClick={() => setCompactMode(true)} title={`Compact deck window (${deckModeShortcutLabel()})`}>
             DECK
           </button>
         </div>
@@ -163,9 +251,14 @@ export function Sidebar(): JSX.Element {
           <span className="ml-2"><kbd className="kbd-hint">F</kbd>viz</span>
           <span className="ml-2"><kbd className="kbd-hint">Esc</kbd>exit</span>
           <br />
-          <kbd className="kbd-hint">Ctrl K</kbd>quick play
+          <kbd className="kbd-hint">{shortcutLabel('Mod+K', ' ')}</kbd>quick play
         </div>
       </div>
+      {menuAt && (
+        <Suspense fallback={null}>
+          <SidebarCustomizeMenu at={menuAt} groups={menuGroups} onClose={() => setMenuAt(null)} />
+        </Suspense>
+      )}
     </aside>
   );
 }

@@ -1,4 +1,16 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import type {
   AudioExportFormat,
   LibraryHealth,
@@ -12,20 +24,35 @@ import type {
 } from '@shared/types';
 import { buildArchiveCompass, duplicateExactTotal, missingMetadataTotal } from '@shared/archive-compass';
 import { usePlayerStore } from '../../store/usePlayerStore';
-import { formatTime, highlight } from '../../lib/format';
+import { formatTime, highlight, shortcutLabel } from '../../lib/format';
 import { api } from '../../lib/api';
 import { pushToast } from '../../lib/toast';
 import { EmptyLibrary } from './EmptyLibrary';
 import { ArtistLink, AlbumLink } from '../EntityLink';
 import { FormatBadges } from '../FormatBadges';
 import { ViewHeader } from '../ViewHeader';
+import { HelpDot, ViewOnboarding, useViewHelp } from '../ViewOnboarding';
 import { ConfirmAction } from '../ConfirmAction';
 import { Star, StarOutline } from '../Icons';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
 import { useSavedPlaylists } from '../../hooks/useSavedPlaylists';
 import { defaultPlaylistName, openTrackContextMenu } from '../../lib/trackMenu';
-import { TrackColumnsMenu } from '../TrackColumnsMenu';
-import { useTrackColumns, type TrackColumnKey } from '../../store/useTrackColumns';
+import { TrackColumnsMenu, type ColumnsMenuCloseReason } from '../TrackColumnsMenu';
+import {
+  TRACK_COLUMN_WIDTH_MAX,
+  TRACK_COLUMN_WIDTH_MINS,
+  clampTrackColumnWidth,
+  fitTrackColumnWidths,
+  normalizeTrackColumnWidths,
+  trackColumnResizeStep,
+  trackColumnWidthsRecord,
+  trackTableMinWidth,
+  useTrackColumns,
+  type TrackColumnKey,
+} from '../../store/useTrackColumns';
+import { nextResizeHandle, resizeHandleStop, rovingRowId, slashFocusesSearch, withoutTracks } from './libraryTableState';
+import { freshPlayerTracks } from './libraryStoreSync';
+import { isTextEntryTarget, runRowShortcut } from './libraryRowKeys';
 
 type Sort =
   | 'artist'
@@ -40,11 +67,39 @@ type Sort =
   | 'loved'
   | 'rating';
 
+// Measuring before paint avoids a frame of the unfitted table; the server
+// render the tests use has no layout to measure and warns about the layout hook.
+const useMeasureEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+
 const LIBRARY_PAGE_SIZE = 600;
+// Rows drawn above and below the visible ones. The table needs to know it to
+// find the first row actually on screen.
+const LIBRARY_ROW_OVERSCAN = 6;
 const LIBRARY_SEARCH_DEBOUNCE_MS = 180;
+const LIBRARY_OVERVIEW_OPEN_KEY = 'newamp:library:overview-open';
+
+// The stats and health report is closed until asked for, so the track list is
+// what Library opens on. Whatever the user picks is remembered.
+function readOverviewOpen(): boolean {
+  try {
+    return window.localStorage.getItem(LIBRARY_OVERVIEW_OPEN_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function writeOverviewOpen(open: boolean): void {
+  try {
+    window.localStorage.setItem(LIBRARY_OVERVIEW_OPEN_KEY, open ? '1' : '0');
+  } catch {
+    /* ignore storage failures */
+  }
+}
 
 export function LibraryView(): JSX.Element {
   const [tracks, setTracks] = useState<Track[]>([]);
+  const tracksRef = useRef(tracks);
+  tracksRef.current = tracks;
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMoreTracks, setHasMoreTracks] = useState(false);
@@ -77,6 +132,10 @@ export function LibraryView(): JSX.Element {
   const [cleanupStatus, setCleanupStatus] = useState<string | null>(null);
   const [smartRuleName, setSmartRuleName] = useState('');
   const [searchRuleStatus, setSearchRuleStatus] = useState<string | null>(null);
+  const [overviewOpen, setOverviewOpen] = useState(readOverviewOpen);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const commandBarRef = useRef<HTMLDivElement>(null);
+  const healthHelp = useViewHelp('library-health');
   const search = usePlayerStore((s) => s.searchQuery);
   const libraryQuery = useDebouncedValue(search, LIBRARY_SEARCH_DEBOUNCE_MS);
   const setSearch = usePlayerStore((s) => s.setSearchQuery);
@@ -89,6 +148,7 @@ export function LibraryView(): JSX.Element {
   const setTrackRating = usePlayerStore((s) => s.setTrackRating);
   const toggleAvoidAutoPlay = usePlayerStore((s) => s.toggleAvoidAutoPlay);
   const current = usePlayerStore((s) => s.current);
+  const searchChord = shortcutLabel('Mod+F');
 
   // Bumped every time the active query/sort changes so an in-flight "load more"
   // can detect it resolved against a stale query and drop its page instead of
@@ -159,6 +219,24 @@ export function LibraryView(): JSX.Element {
       window.removeEventListener('blur', clearDrag);
       window.removeEventListener('keydown', onEscape);
     };
+  }, []);
+
+  // `/` jumps to the search box. Ctrl/Cmd+F does the same from anywhere (it is
+  // handled with the other global chords) and lands in this same input. The
+  // box is not focused on arrival, so Space, L and the arrow keys still reach
+  // the player until the user asks to search.
+  useEffect(() => {
+    const onSlash = (event: KeyboardEvent): void => {
+      const overlay = usePlayerStore.getState().fullscreenViz || !!document.querySelector('[aria-modal="true"]');
+      if (!slashFocusesSearch(event, { typing: isTextEntryTarget(event.target), overlay })) return;
+      const input = searchInputRef.current;
+      if (!input) return;
+      event.preventDefault();
+      input.focus();
+      input.select();
+    };
+    window.addEventListener('keydown', onSlash);
+    return () => window.removeEventListener('keydown', onSlash);
   }, []);
 
   // dropMessage is always a temporary status line, never a state that needs
@@ -299,6 +377,7 @@ export function LibraryView(): JSX.Element {
     const updated = await api.applyTrackMetadataPatch(metadataPanel.track.id, candidate);
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === updated.id ? updated : track)));
+    usePlayerStore.getState().refreshTracks([updated]);
     refreshLibrarySummary();
     setMetadataPanel({
       track: updated,
@@ -315,6 +394,7 @@ export function LibraryView(): JSX.Element {
     const updated = await api.applyTrackMetadataEdit(metadataPanel.track.id, patch);
     if (!updated) return null;
     setTracks((rows) => rows.map((track) => (track.id === updated.id ? updated : track)));
+    usePlayerStore.getState().refreshTracks([updated]);
     refreshLibrarySummary();
     // A field whose file value isn't known yet (its file couldn't be read)
     // stays edited; say so rather than claim it was restored.
@@ -343,6 +423,7 @@ export function LibraryView(): JSX.Element {
       setCleanupStatus(`Restored ${count.toLocaleString()} field${count === 1 ? '' : 's'} from the files' tags.`);
       await reloadLibraryPage().catch(() => undefined);
       refreshLibrarySummary();
+      usePlayerStore.getState().refreshTracks(await freshPlayerTracks(usePlayerStore.getState(), api.getTracksByIds));
     } catch (error) {
       setCleanupStatus(`Could not reset adopted edits: ${errorText(error)}`);
     }
@@ -380,10 +461,11 @@ export function LibraryView(): JSX.Element {
     }
   }
 
-  // Tracks trashed from a right-click menu anywhere: refresh the list and
-  // the summary the same way the cleanup does.
-  const refreshAfterRemovalRef = useRef<() => Promise<void>>(async () => undefined);
-  useEffect(() => api.onTracksRemoved(() => void refreshAfterRemovalRef.current()), []);
+  // Tracks removed from the library anywhere (a trash from a right-click menu,
+  // the missing-files cleanup): the event names them, so drop just those rows.
+  // Without ids there is nothing to name, and the first page is refetched.
+  const refreshAfterRemovalRef = useRef<(removedIds?: number[]) => Promise<void>>(async () => undefined);
+  useEffect(() => api.onTracksRemoved((ids) => void refreshAfterRemovalRef.current(ids)), []);
 
   async function removeMissingFiles(): Promise<void> {
     setPrunePreview(null);
@@ -404,10 +486,27 @@ export function LibraryView(): JSX.Element {
         ? `Removed ${result.removed.toLocaleString()} stale track${result.removed === 1 ? '' : 's'}.${kept}${backup}`
         : `Nothing was removed.${kept}`,
     );
-    await refreshAfterRemoval();
+    // The result names the rows that went when it can; without them, refetch.
+    await refreshAfterRemoval(result.removedIds);
   }
 
-  async function refreshAfterRemoval(): Promise<void> {
+  async function refreshAfterRemoval(removedIds?: number[]): Promise<void> {
+    if (removedIds?.length) {
+      // Refetching page one would throw away every loaded page, the scroll
+      // position and the selection over a handful of rows.
+      const generation = loadGenerationRef.current;
+      setTracks((rows) => withoutTracks(rows, removedIds));
+      refreshLibrarySummary();
+      try {
+        const count = await api.getTrackCount({ search: libraryQuery, sort });
+        if (generation !== loadGenerationRef.current) return;
+        setMatchingTrackCount(count);
+        setHasMoreTracks(tracksRef.current.length < count);
+      } catch (error) {
+        console.error('library count after removal failed', error);
+      }
+      return;
+    }
     try {
       const [nextTracks, nextCount, nextStats, nextHealth] = await Promise.all([
         api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
@@ -543,11 +642,19 @@ export function LibraryView(): JSX.Element {
     setSearchRuleStatus(`Saved dynamic rule ${saved.name}.`);
   }
 
+  // The open overview can fill most of a short window, with the search box and
+  // the list below it. Bring them up, or the click seems to do nothing.
+  function showCompassMove(query: string): void {
+    setSearch(query);
+    commandBarRef.current?.scrollIntoView({ block: 'start' });
+  }
+
   return (
     <div
-      // The dashboard above the table is tall. In a short window the table
-      // keeps a usable height and the whole view scrolls instead of the
-      // search bar and table falling off the bottom edge.
+      // The header, search bar and an opened overview sit above the table. In
+      // a short window the table keeps a usable height and the whole view
+      // scrolls instead of the search bar and table falling off the bottom
+      // edge.
       className="relative flex h-full flex-col overflow-y-auto"
       style={{ fontFamily: 'var(--font-mono)' }}
       onDragEnter={(e) => {
@@ -578,15 +685,19 @@ export function LibraryView(): JSX.Element {
       }}
     >
       {dropActive && <DropOverlay />}
+      {hasLibrary && <LibraryHealthIntro help={healthHelp} />}
       <ViewHeader
         className="library-view-header"
         eyebrow="Main"
         title="Library"
         count={stats.tracks}
         status={
-          search !== libraryQuery
-            ? 'Updating...'
-            : libraryCountLabel(tracks.length, matchingTrackCount, hasMoreTracks, !!libraryQuery)
+          <>
+            {hasLibrary && <HelpDot help={healthHelp} label="What is Library health?" />}
+            {search !== libraryQuery
+              ? 'Updating...'
+              : libraryCountLabel(tracks.length, matchingTrackCount, hasMoreTracks, !!libraryQuery)}
+          </>
         }
         actions={
           <>
@@ -605,40 +716,62 @@ export function LibraryView(): JSX.Element {
           </>
         }
       />
-      {hasLibrary && <StatsStrip stats={stats} />}
-      {hasLibrary && health && (
-        <LibraryHealthPanel
-          health={health}
-          cleanupStatus={cleanupStatus}
-          prunePreview={prunePreview}
-          onCleanMissingFiles={() => void checkMissingFiles()}
-          onConfirmPrune={() => void removeMissingFiles()}
-          onCancelPrune={() => {
-            setPrunePreview(null);
-            setCleanupStatus('Cleanup cancelled; nothing was removed.');
+      {hasLibrary && (
+        <LibraryOverview
+          open={overviewOpen}
+          onToggle={() => {
+            setOverviewOpen(!overviewOpen);
+            writeOverviewOpen(!overviewOpen);
           }}
-          onResetAdoptedEdits={() => void resetAdoptedEdits()}
-          onCreateDuplicateReviewPlaylist={() => void createDuplicateReviewPlaylist()}
-          onCreateMissingReviewPlaylist={() => void createMissingReviewPlaylist()}
-          onCreateLegacyReviewPlaylist={() => void createLegacyReviewPlaylist()}
-          onCreateQualityReviewPlaylist={() => void createQualityReviewPlaylist()}
-        />
+          stats={stats}
+          health={health}
+        >
+          <StatsStrip stats={stats} />
+          {health && (
+            <LibraryHealthPanel
+              health={health}
+              cleanupStatus={cleanupStatus}
+              prunePreview={prunePreview}
+              onCleanMissingFiles={() => void checkMissingFiles()}
+              onConfirmPrune={() => void removeMissingFiles()}
+              onCancelPrune={() => {
+                setPrunePreview(null);
+                setCleanupStatus('Cleanup cancelled; nothing was removed.');
+              }}
+              onResetAdoptedEdits={() => void resetAdoptedEdits()}
+              onCreateDuplicateReviewPlaylist={() => void createDuplicateReviewPlaylist()}
+              onCreateMissingReviewPlaylist={() => void createMissingReviewPlaylist()}
+              onCreateLegacyReviewPlaylist={() => void createLegacyReviewPlaylist()}
+              onCreateQualityReviewPlaylist={() => void createQualityReviewPlaylist()}
+              onSearchCompassMove={showCompassMove}
+            />
+          )}
+        </LibraryOverview>
       )}
       <div
+        ref={commandBarRef}
         className="library-commandbar flex flex-wrap items-center gap-2 border-b px-3 py-2"
         style={{ borderColor: 'var(--line)' }}
       >
         <label className="library-search-command" data-newamp-library-search-command>
           <span>SEARCH LIBRARY</span>
           <input
+            ref={searchInputRef}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder='artist:radiohead album:"in rainbows" year:2007 format:wma missing:art'
+            onKeyDown={(e) => {
+              // Escape empties the box, and leaves it once it is empty.
+              if (e.key !== 'Escape') return;
+              e.preventDefault();
+              e.stopPropagation();
+              if (search) setSearch('');
+              else e.currentTarget.blur();
+            }}
+            placeholder="Search (try artist:radiohead year:2007)"
             className="lcd-text min-w-[260px] flex-1 text-[14px] outline-none"
             style={{ background: 'transparent', color: 'var(--display-fg)' }}
-            autoFocus
           />
-          <kbd>Ctrl K</kbd>
+          <kbd title={`Press / or ${searchChord} to jump to the search box`}>{searchChord}</kbd>
         </label>
         <SortPicker value={sort} onChange={setSort} />
       </div>
@@ -833,6 +966,7 @@ function LibraryTrackPane({
   const { startIndex, endIndex, topPad, bottomPad, onScroll, scrollRef } = useVirtualRows({
     rowCount: tracks.length,
     rowHeight: LIBRARY_ROW_HEIGHT,
+    overscan: LIBRARY_ROW_OVERSCAN,
     enabled: !loading && tracks.length > 0,
   });
 
@@ -909,6 +1043,94 @@ function DropOverlay(): JSX.Element {
   );
 }
 
+/**
+ * The stats and health report behind a one-row summary. Closed it costs the
+ * track list a single line; open it is capped so the list stays in view.
+ */
+export function LibraryOverview({
+  open,
+  onToggle,
+  stats,
+  health,
+  children,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  stats: { tracks: number; albums: number; artists: number; duration: number };
+  health: LibraryHealth | null;
+  children: ReactNode;
+}): JSX.Element {
+  const compass = health ? buildArchiveCompass(health) : null;
+  const missingTotal = health ? missingMetadataTotal(health) : 0;
+  const duplicateGroups = health?.duplicateGroups.length ?? 0;
+  const summary = [
+    countText(stats.tracks, 'track', 'tracks'),
+    countText(stats.albums, 'album', 'albums'),
+    countText(stats.artists, 'artist', 'artists'),
+    formatRuntime(stats.duration),
+    missingTotal ? `${missingTotal.toLocaleString()} missing tags` : null,
+    duplicateGroups ? countText(duplicateGroups, 'duplicate group', 'duplicate groups') : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return (
+    <div className="library-overview" data-newamp-library-overview>
+      <button
+        type="button"
+        className="library-overview-toggle"
+        aria-expanded={open}
+        aria-controls="library-overview-panel"
+        title={open ? 'Hide the library stats and health report' : 'Show the library stats and health report'}
+        onClick={onToggle}
+      >
+        <span className="library-overview-caret" aria-hidden="true">
+          {open ? '▾' : '▸'}
+        </span>
+        <span className="library-overview-label">Library health</span>
+        {compass && (
+          <span
+            className="library-overview-grade"
+            style={{ color: compass.score >= 86 ? 'var(--accent-text, var(--accent))' : 'var(--warn-text, var(--warn))' }}
+            title={`Archive score ${compass.score}/100`}
+          >
+            {compass.grade}
+          </span>
+        )}
+        {compass && <span className="library-overview-profile">{compass.profile}</span>}
+        <span className="library-overview-summary">{summary}</span>
+      </button>
+      {open && (
+        <div id="library-overview-panel" className="library-overview-panel">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The card that explains the health report. It sits at the top of the view
+ * rather than inside the overview, which starts closed, so the first visit sees
+ * it; the "?" beside the title brings it back.
+ */
+export function LibraryHealthIntro({ help }: { help: { open: boolean; close: () => void } }): JSX.Element {
+  return (
+    <ViewOnboarding
+      viewId="library-health"
+      title="Library health"
+      lede="A read on how well your files are tagged and how good they sound."
+      bullets={[
+        'The Library health row above the list opens the report. Its letter grade weighs tags, cover art, duplicates and audio quality across the whole library. Compass Moves are suggested clean-ups, and most open the matching tracks when clicked.',
+        'Archive Radar counts files by quality. Lossless and hi-res are the best, DSD and fallback codecs need extra decoding to play, and low-bitrate files are candidates to replace.',
+        'ReplayGain is a loudness tag. Tracks without it play at their own volume, so levels jump between albums on shuffle.',
+        'Clean missing files removes tracks whose files are gone. It shows what it will remove first and backs up the library.',
+      ]}
+      forceVisible={help.open}
+      onClose={help.close}
+    />
+  );
+}
+
 function StatsStrip({
   stats,
 }: {
@@ -947,9 +1169,9 @@ function StatsStrip({
             style={{
               color:
                 t.tone === 'accent'
-                  ? 'var(--accent)'
+                  ? 'var(--accent-text, var(--accent))'
                   : t.tone === 'warn'
-                    ? 'var(--warn)'
+                    ? 'var(--warn-text, var(--warn))'
                     : 'var(--ink)',
             }}
           >
@@ -961,7 +1183,7 @@ function StatsStrip({
   );
 }
 
-function LibraryHealthPanel({
+export function LibraryHealthPanel({
   health,
   cleanupStatus,
   prunePreview,
@@ -973,6 +1195,7 @@ function LibraryHealthPanel({
   onCreateMissingReviewPlaylist,
   onCreateLegacyReviewPlaylist,
   onCreateQualityReviewPlaylist,
+  onSearchCompassMove,
 }: {
   health: LibraryHealth;
   cleanupStatus: string | null;
@@ -985,6 +1208,8 @@ function LibraryHealthPanel({
   onCreateMissingReviewPlaylist: () => void;
   onCreateLegacyReviewPlaylist: () => void;
   onCreateQualityReviewPlaylist: () => void;
+  /** Run a Compass Move's power-search query in the Library list. */
+  onSearchCompassMove: (query: string) => void;
 }): JSX.Element {
   const compass = buildArchiveCompass(health);
   const missingTotal = missingMetadataTotal(health);
@@ -1004,7 +1229,7 @@ function LibraryHealthPanel({
       }}
     >
       <div>
-        <div className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+        <div className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent-text, var(--accent))' }}>
           Library Health
         </div>
         <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums" style={{ color: 'var(--ink-2)' }}>
@@ -1016,7 +1241,7 @@ function LibraryHealthPanel({
         <div className="mt-2 grid grid-cols-[52px_minmax(0,1fr)] gap-2">
           <div
             className="bevel-in flex h-[52px] items-center justify-center text-[24px] font-black"
-            style={{ color: compass.score >= 86 ? 'var(--accent)' : 'var(--warn)' }}
+            style={{ color: compass.score >= 86 ? 'var(--accent-text, var(--accent))' : 'var(--warn-text, var(--warn))' }}
             title={`Archive score ${compass.score}/100`}
           >
             {compass.grade}
@@ -1030,21 +1255,21 @@ function LibraryHealthPanel({
             </div>
           </div>
         </div>
-        <div className="mt-2 text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+        <div className="mt-2 text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent-text, var(--accent))' }}>
           Archive Radar
         </div>
         <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums" style={{ color: 'var(--ink-2)' }}>
-          <span>Lossless / hi-res</span>
+          <span title="Files in a lossless format, and how many of those are above CD quality">Lossless / hi-res</span>
           <span className="text-right">{health.quality.lossless.toLocaleString()} / {health.quality.hiRes.toLocaleString()}</span>
-          <span>DSD / fallback</span>
+          <span title="DSD files, and files in formats NewAmp can only play by decoding them with ffmpeg">DSD / fallback</span>
           <span className="text-right">{health.quality.dsd.toLocaleString()} / {health.quality.ffmpegFallback.toLocaleString()}</span>
-          <span>Low bitrate</span>
+          <span title="Lossy files below 192 kbps, which may be worth replacing">Low bitrate</span>
           <span className="text-right">{health.quality.lowBitrate.toLocaleString()}</span>
-          <span>Lossy / unknown</span>
+          <span title="Lossy files, and files whose codec NewAmp cannot classify">Lossy / unknown</span>
           <span className="text-right">{health.quality.lossy.toLocaleString()} / {health.quality.unknown.toLocaleString()}</span>
-          <span>ReplayGain ready</span>
+          <span title="Tracks that carry a loudness tag, so volume is evened out between them">ReplayGain ready</span>
           <span className="text-right">{health.quality.replayGainReady.toLocaleString()}</span>
-          <span>ReplayGain missing</span>
+          <span title="Tracks with no loudness tag; they play at their own volume">ReplayGain missing</span>
           <span className="text-right">{health.quality.replayGainMissing.toLocaleString()}</span>
         </div>
         {prunePreview && (
@@ -1113,18 +1338,37 @@ function LibraryHealthPanel({
           Compass Moves
         </div>
         <div className="mt-1 grid grid-cols-[minmax(0,1fr)] gap-[3px]">
-          {compass.moves.slice(0, 4).map((move) => (
-            <div key={move.label} className="bevel-in px-2 py-[5px]" title={move.detail}>
-              <div className="flex gap-2">
-                <span className="w-24 shrink-0 truncate font-bold" style={{ color: 'var(--accent)' }}>
+          {compass.moves.slice(0, 4).map((move) => {
+            const body = (
+              <>
+                <span className="block font-bold" style={{ color: 'var(--accent-text, var(--accent))' }}>
                   {move.label}
                 </span>
-                <span className="min-w-0 truncate" style={{ color: 'var(--ink-2)' }}>
+                <span className="mt-[1px] line-clamp-2 block leading-snug" style={{ color: 'var(--ink-2)' }}>
                   {move.detail}
                 </span>
+              </>
+            );
+            // A move with a query is a real button that shows the tracks it is
+            // about; one without (duplicates, listed in the next column) is
+            // plain text rather than a bevelled lookalike.
+            return move.query ? (
+              <button
+                key={move.label}
+                type="button"
+                data-newamp-compass-move
+                className="bevel-in block w-full px-2 py-[5px] text-left"
+                title={`${move.detail} Click to list these tracks.`}
+                onClick={() => onSearchCompassMove(move.query!)}
+              >
+                {body}
+              </button>
+            ) : (
+              <div key={move.label} className="px-2 py-[5px]" title={move.detail}>
+                {body}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
       <div className="min-w-0">
@@ -1135,12 +1379,12 @@ function LibraryHealthPanel({
           <div className="mt-1 grid grid-cols-[minmax(0,1fr)] gap-[2px]">
             {health.duplicateGroups.slice(0, 3).map((group) => (
               <div key={`${group.artist}:${group.title}`} className="flex gap-2">
-                <span className="w-8 tabular-nums" style={{ color: 'var(--warn)' }}>{group.count}x</span>
+                <span className="w-8 tabular-nums" style={{ color: 'var(--warn-text, var(--warn))' }}>{group.count}x</span>
                 <span className="truncate" title={`${group.artist} - ${group.title}`}>
                   {group.artist} - {group.title}
                 </span>
                 {group.exactMatchCount >= 2 && (
-                  <span className="shrink-0 tabular-nums" style={{ color: 'var(--accent)' }}>
+                  <span className="shrink-0 tabular-nums" style={{ color: 'var(--accent-text, var(--accent))' }}>
                     {group.exactMatchCount} exact matches
                   </span>
                 )}
@@ -1158,7 +1402,7 @@ function LibraryHealthPanel({
         <div className="mt-1 grid gap-[2px]">
           {recent.map((track) => (
             <div key={track.id} className="truncate" title={`${track.artist} - ${track.title}`}>
-              <ArtistLink artist={track.artist} color="inherit" /> - {track.title}
+              <ArtistLink artist={track.artist} color="inherit" truncate /> - {track.title}
             </div>
           ))}
         </div>
@@ -1195,6 +1439,7 @@ function SortPicker({ value, onChange }: { value: Sort; onChange: (s: Sort) => v
         <button
           key={o.id}
           className={`pxbtn ${value === o.id ? 'is-active' : ''}`}
+          aria-pressed={value === o.id}
           onClick={() => onChange(o.id)}
         >
           {o.label}
@@ -1205,65 +1450,20 @@ function SortPicker({ value, onChange }: { value: Sort; onChange: (s: Sort) => v
 }
 
 const TRACK_TABLE_COLUMN_WIDTH_KEY = 'newamp:track-table:column-widths';
-const TRACK_TABLE_COLUMN_DEFAULTS: Record<TrackColumnKey, number> = {
-  play: 34,
-  select: 34,
-  queue: 74,
-  playlist: 154,
-  number: 44,
-  title: 340,
-  artist: 210,
-  album: 220,
-  year: 62,
-  time: 70,
-  plays: 62,
-  rating: 96,
-  mix: 70,
-  tag: 56,
-  love: 44,
-};
-const TRACK_TABLE_COLUMN_MINS: Record<TrackColumnKey, number> = {
-  play: 28,
-  select: 28,
-  queue: 58,
-  playlist: 112,
-  number: 36,
-  title: 160,
-  artist: 120,
-  album: 130,
-  year: 48,
-  time: 54,
-  plays: 48,
-  rating: 82,
-  mix: 58,
-  tag: 46,
-  love: 36,
-};
 
 function loadTrackTableColumnWidths(): Record<TrackColumnKey, number> {
-  if (typeof window === 'undefined') return { ...TRACK_TABLE_COLUMN_DEFAULTS };
+  if (typeof window === 'undefined') return normalizeTrackColumnWidths(null);
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(TRACK_TABLE_COLUMN_WIDTH_KEY) ?? '{}') as Partial<Record<TrackColumnKey, unknown>>;
-    return normalizeTrackTableColumnWidths(parsed);
+    return normalizeTrackColumnWidths(JSON.parse(window.localStorage.getItem(TRACK_TABLE_COLUMN_WIDTH_KEY) ?? '{}'));
   } catch {
-    return { ...TRACK_TABLE_COLUMN_DEFAULTS };
+    return normalizeTrackColumnWidths(null);
   }
-}
-
-function normalizeTrackTableColumnWidths(input: Partial<Record<TrackColumnKey, unknown>>): Record<TrackColumnKey, number> {
-  const widths = { ...TRACK_TABLE_COLUMN_DEFAULTS };
-  for (const key of Object.keys(TRACK_TABLE_COLUMN_DEFAULTS) as TrackColumnKey[]) {
-    const raw = Number(input[key]);
-    if (!Number.isFinite(raw)) continue;
-    widths[key] = Math.max(TRACK_TABLE_COLUMN_MINS[key], Math.min(680, Math.round(raw)));
-  }
-  return widths;
 }
 
 function saveTrackTableColumnWidths(widths: Record<TrackColumnKey, number>): void {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(TRACK_TABLE_COLUMN_WIDTH_KEY, JSON.stringify(widths));
+    window.localStorage.setItem(TRACK_TABLE_COLUMN_WIDTH_KEY, JSON.stringify(trackColumnWidthsRecord(widths)));
   } catch {
     /* ignore storage failures */
   }
@@ -1280,6 +1480,12 @@ interface LibraryRowProps {
   search: string | undefined;
   /** The visible columns, in order; the table decides, the row just follows. */
   columns: readonly TrackColumnKey[];
+  /**
+   * The table's one Tab stop. Every other row, and the controls inside it, is
+   * reached with the arrow keys, so a long list does not cost a Tab press per
+   * row.
+   */
+  tabStop: boolean;
   playlistTargets: SavedPlaylist[];
   onPlay: (absoluteIndex: number) => void;
   onToggleSelect: (id: number, checked: boolean) => void;
@@ -1292,6 +1498,7 @@ interface LibraryRowProps {
   onMetadataLookup: ((track: Track) => void) | undefined;
   onShowInFolder: (path: string) => void;
   onContextMenu: (track: Track) => void;
+  onFocusRow: (id: number) => void;
 }
 
 const LibraryRow = memo(function LibraryRow({
@@ -1301,6 +1508,7 @@ const LibraryRow = memo(function LibraryRow({
   isActive,
   search,
   columns,
+  tabStop,
   playlistTargets,
   onPlay,
   onToggleSelect,
@@ -1313,7 +1521,10 @@ const LibraryRow = memo(function LibraryRow({
   onMetadataLookup,
   onShowInFolder,
   onContextMenu,
+  onFocusRow,
 }: LibraryRowProps): JSX.Element {
+  // Left alone, a control is tabbable; -1 takes it out of the Tab order.
+  const controlTab = tabStop ? undefined : -1;
   const zebra = absoluteIndex % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)';
   // An unavailable track keeps its row, history and ratings; it just reads as
   // absent until its drive or folder comes back.
@@ -1326,6 +1537,7 @@ const LibraryRow = memo(function LibraryRow({
             <input
               type="checkbox"
               aria-label={`Select ${t.title}`}
+              tabIndex={controlTab}
               checked={selected}
               onClick={(event) => event.stopPropagation()}
               onChange={(event) => onToggleSelect(t.id, event.currentTarget.checked)}
@@ -1342,10 +1554,12 @@ const LibraryRow = memo(function LibraryRow({
             ) : (
               <button
                 className="opacity-50 hover:opacity-100"
+                tabIndex={controlTab}
                 onClick={(e) => {
                   e.stopPropagation();
                   onPlay(absoluteIndex);
                 }}
+                aria-label={`Play ${t.title}`}
                 title="Play"
               >
                 ▶
@@ -1360,6 +1574,7 @@ const LibraryRow = memo(function LibraryRow({
               {onPlayNext && (
                 <button
                   className="track-icon-btn"
+                  tabIndex={controlTab}
                   onClick={(e) => {
                     e.stopPropagation();
                     onPlayNext(t);
@@ -1373,6 +1588,7 @@ const LibraryRow = memo(function LibraryRow({
               {onAddToQueue && (
                 <button
                   className="track-icon-btn"
+                  tabIndex={controlTab}
                   onClick={(e) => {
                     e.stopPropagation();
                     onAddToQueue(t);
@@ -1392,6 +1608,7 @@ const LibraryRow = memo(function LibraryRow({
             <select
               aria-label="Add to playlist"
               title="Add to playlist"
+              tabIndex={controlTab}
               value=""
               onClick={(event) => event.stopPropagation()}
               onChange={(event) => {
@@ -1416,7 +1633,7 @@ const LibraryRow = memo(function LibraryRow({
           <td
             key={key}
             className="px-2 py-[5px] text-right tabular-nums"
-            style={{ color: isActive ? 'var(--accent)' : 'var(--muted)' }}
+            style={{ color: isActive ? 'var(--accent-text, var(--accent))' : 'var(--muted)' }}
           >
             {t.trackNo ?? absoluteIndex + 1}
           </td>
@@ -1432,6 +1649,7 @@ const LibraryRow = memo(function LibraryRow({
               <button
                 className="track-icon-btn track-folder-btn"
                 data-show-in-folder
+                tabIndex={controlTab}
                 onClick={(e) => {
                   e.stopPropagation();
                   onShowInFolder(t.path);
@@ -1449,10 +1667,10 @@ const LibraryRow = memo(function LibraryRow({
           <td
             key={key}
             className="truncate px-2 py-[5px]"
-            style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
+            style={{ color: isActive ? 'var(--accent-text, var(--accent))' : 'var(--ink-2)' }}
             title={t.artist}
           >
-            <ArtistLink artist={t.artist} color="inherit">
+            <ArtistLink artist={t.artist} color="inherit" truncate tabIndex={controlTab}>
               {search ? highlight(t.artist, search) : t.artist}
             </ArtistLink>
           </td>
@@ -1462,13 +1680,15 @@ const LibraryRow = memo(function LibraryRow({
           <td
             key={key}
             className="truncate px-2 py-[5px]"
-            style={{ color: isActive ? 'var(--accent)' : 'var(--ink-2)' }}
+            style={{ color: isActive ? 'var(--accent-text, var(--accent))' : 'var(--ink-2)' }}
             title={t.album}
           >
             <AlbumLink
               album={t.album}
               albumArtist={t.albumArtist || t.artist}
               color="inherit"
+              truncate
+              tabIndex={controlTab}
             >
               {search ? highlight(t.album, search) : t.album}
             </AlbumLink>
@@ -1509,6 +1729,7 @@ const LibraryRow = memo(function LibraryRow({
           <td key={key} className="px-2 py-[5px] text-right" data-newamp-rating={t.rating}>
             <RatingStars
               value={t.rating}
+              tabIndex={controlTab}
               onChange={(rating) => Promise.resolve(onSetRating(t.id, rating))}
             />
           </td>
@@ -1517,14 +1738,15 @@ const LibraryRow = memo(function LibraryRow({
         return (
           <td key={key} className="px-2 py-[5px] text-right">
             <button
-              className="pxbtn px-1.5 py-[1px] text-[9px]"
+              className="pxbtn pxbtn-xs"
               data-avoid-autoplay
+              tabIndex={controlTab}
               onClick={(e) => {
                 e.stopPropagation();
                 onToggleAvoid(t.id);
               }}
               style={{
-                color: t.avoidAutoPlay ? 'var(--warn)' : 'var(--muted)',
+                color: t.avoidAutoPlay ? 'var(--warn-text, var(--warn))' : 'var(--muted)',
                 borderColor: t.avoidAutoPlay ? 'var(--warn)' : 'var(--line)',
               }}
               title={t.avoidAutoPlay ? 'Excluded from continuous mix and generated sets' : 'Allowed in continuous mix and generated sets'}
@@ -1538,7 +1760,8 @@ const LibraryRow = memo(function LibraryRow({
           <td key={key} className="px-2 py-[5px] text-right">
             {needsMetadataRescue(t) && (
               <button
-                className="pxbtn px-1.5 py-[1px] text-[9px]"
+                className="pxbtn pxbtn-xs"
+                tabIndex={controlTab}
                 onClick={(e) => {
                   e.stopPropagation();
                   onMetadataLookup?.(t);
@@ -1555,11 +1778,12 @@ const LibraryRow = memo(function LibraryRow({
           <td key={key} className="px-2 py-[5px] text-right">
             <button
               className="track-love-btn"
+              tabIndex={controlTab}
               onClick={(e) => {
                 e.stopPropagation();
                 onToggleLove(t.id);
               }}
-              style={{ color: t.loved ? 'var(--accent)' : 'var(--muted)' }}
+              style={{ color: t.loved ? 'var(--accent-text, var(--accent))' : 'var(--muted)' }}
               title="Love"
               aria-label={t.loved ? 'Unlove' : 'Love'}
             >
@@ -1578,15 +1802,18 @@ const LibraryRow = memo(function LibraryRow({
       data-track-id={t.id}
       data-track-title={t.title}
       data-track-missing={missing ? '' : undefined}
+      aria-label={t.artist ? `${t.title} by ${t.artist}` : t.title}
+      aria-current={isActive ? 'true' : undefined}
       title={missing ? `File not found since ${new Date(t.missingSince!).toLocaleString()}` : undefined}
       className={`cursor-pointer transition-colors${isActive ? ' track-row-playing' : ''}`}
       data-amp={isActive ? '' : undefined}
-      tabIndex={0}
+      tabIndex={tabStop ? 0 : -1}
+      onFocus={() => onFocusRow(t.id)}
       style={{
         // Playing-row background/accent bar comes from .track-row-playing
         // (styles/views/library.css) so Resonance can ride it via CSS vars.
         background: isActive ? undefined : zebra,
-        color: isActive ? 'var(--accent)' : 'var(--ink)',
+        color: isActive ? 'var(--accent-text, var(--accent))' : 'var(--ink)',
         opacity: missing ? 0.5 : undefined,
       }}
       onDoubleClick={() => onPlay(absoluteIndex)}
@@ -1595,6 +1822,14 @@ const LibraryRow = memo(function LibraryRow({
         onContextMenu(t);
       }}
       onKeyDown={(e) => {
+        // 0-5 and L rate and love this row, from the row or any control in it
+        // that is not a text field. With no row focused they reach the playing
+        // track through the window-level map.
+        const handled = runRowShortcut(e, api.platform, {
+          onToggleLove: () => onToggleLove(t.id),
+          onSetRating: (rating) => onSetRating(t.id, rating),
+        });
+        if (handled) return;
         // View-local queueing grammar: Enter plays, Q queues, Shift+Q plays
         // next, arrows walk rows. Only when the row itself has focus — keys
         // inside row-hosted inputs/selects pass through untouched — and
@@ -1681,6 +1916,12 @@ export function TrackTable({
   const storeToggleLove = usePlayerStore((s) => s.toggleLove);
   const storeSetTrackRating = usePlayerStore((s) => s.setTrackRating);
   const storeToggleAvoidAutoPlay = usePlayerStore((s) => s.toggleAvoidAutoPlay);
+  // Every host gets the retagged rows into the queue and the transport, not
+  // only the ones that also keep their own list.
+  const saveBulkResults = (rows: Track[]): void => {
+    usePlayerStore.getState().refreshTracks(rows);
+    onBulkMetadataSaved?.(rows);
+  };
   const [localPatches, setLocalPatches] = useState<Map<number, Partial<Track>>>(() => new Map());
   const visible = useMemo(
     () => tracks.map((track) => {
@@ -1706,6 +1947,11 @@ export function TrackTable({
   );
   const allVisibleSelected = visible.length > 0 && visible.every((track) => selectedIds.has(track.id));
   const [columnWidths, setColumnWidths] = useState<Record<TrackColumnKey, number>>(() => loadTrackTableColumnWidths());
+  // The row that last had focus is the table's one Tab stop, and the resize
+  // handle that last had focus is the header's.
+  const [focusedRowId, setFocusedRowId] = useState<number | null>(null);
+  const [focusedHandle, setFocusedHandle] = useState<TrackColumnKey | null>(null);
+  const [paneWidth, setPaneWidth] = useState(0);
   // Columns and their order are shared by every track table; the ones a
   // particular table can offer depend on what its host wired up.
   const columnOrder = useTrackColumns((s) => s.order);
@@ -1724,9 +1970,43 @@ export function TrackTable({
     () => availableColumnKeys.filter((key) => !hiddenColumns.includes(key)),
     [availableColumnKeys, hiddenColumns],
   );
+  const hiddenAvailableCount = availableColumnKeys.length - activeColumnKeys.length;
   const [columnsMenu, setColumnsMenu] = useState<{ x: number; y: number } | null>(null);
-  const closeColumnsMenu = useCallback(() => setColumnsMenu(null), []);
-  const tableMinWidth = activeColumnKeys.reduce((sum, key) => sum + columnWidths[key], 0);
+  // Everything behind the open menu is inert, so a press on an opener normally
+  // lands on the page, closes the menu through the outside handler and never
+  // clicks the button. Should a press reach the opener anyway, the click that
+  // follows must not open the menu again.
+  const columnsMenuClosedByPress = useRef(-Infinity);
+  const closeColumnsMenu = useCallback((reason: ColumnsMenuCloseReason) => {
+    if (reason === 'outside') columnsMenuClosedByPress.current = performance.now();
+    setColumnsMenu(null);
+  }, []);
+  const toggleColumnsMenu = (event: ReactMouseEvent<HTMLElement>): void => {
+    if (columnsMenu) {
+      setColumnsMenu(null);
+      return;
+    }
+    if (performance.now() - columnsMenuClosedByPress.current < 400) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    setColumnsMenu({ x: rect.left, y: rect.bottom + 4 });
+  };
+  // The pane is measured through the toolbar, a block as wide as the table's
+  // 100%. Columns nobody has resized squeeze to fit it before the table scrolls.
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  useMeasureEffect(() => {
+    const toolbar = toolbarRef.current;
+    if (!toolbar || typeof ResizeObserver === 'undefined') return undefined;
+    const measure = (): void => setPaneWidth(toolbar.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  }, []);
+  const shownWidths = useMemo(
+    () => fitTrackColumnWidths(activeColumnKeys, columnWidths, paneWidth),
+    [activeColumnKeys, columnWidths, paneWidth],
+  );
+  const tableMinWidth = trackTableMinWidth(activeColumnKeys, shownWidths);
 
   // Scroll-to + flash for track navigation. The rows are memoized and carry
   // data-track-id/data-track-title already, so this is a scoped DOM effect
@@ -1799,25 +2079,41 @@ export function TrackTable({
     });
   }
 
+  function setColumnWidth(column: TrackColumnKey, width: number): void {
+    const nextWidth = clampTrackColumnWidth(column, width);
+    setColumnWidths((current) => {
+      if (current[column] === nextWidth) return current;
+      const next = { ...current, [column]: nextWidth };
+      saveTrackTableColumnWidths(next);
+      return next;
+    });
+  }
+
+  function resizeColumnByKey(column: TrackColumnKey, event: ReactKeyboardEvent<HTMLElement>): void {
+    const goTo = nextResizeHandle(activeColumnKeys, column, event.key);
+    if (goTo) {
+      event.preventDefault();
+      event.stopPropagation();
+      tableRef.current?.querySelector<HTMLElement>(`[data-newamp-track-column-resizer="${goTo}"]`)?.focus();
+      return;
+    }
+    const step = trackColumnResizeStep(event.key, event.shiftKey);
+    if (!step) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setColumnWidth(column, shownWidths[column] + step);
+  }
+
   function startColumnResize(column: TrackColumnKey, event: ReactPointerEvent<HTMLElement>): void {
     event.preventDefault();
     event.stopPropagation();
     const startX = event.clientX;
-    const startWidth = columnWidths[column];
+    const startWidth = shownWidths[column];
     const target = event.currentTarget;
     target.setPointerCapture(event.pointerId);
 
     const onMove = (moveEvent: PointerEvent): void => {
-      const nextWidth = Math.max(
-        TRACK_TABLE_COLUMN_MINS[column],
-        Math.min(680, Math.round(startWidth + moveEvent.clientX - startX)),
-      );
-      setColumnWidths((current) => {
-        if (current[column] === nextWidth) return current;
-        const next = { ...current, [column]: nextWidth };
-        saveTrackTableColumnWidths(next);
-        return next;
-      });
+      setColumnWidth(column, startWidth + moveEvent.clientX - startX);
     };
     const onUp = (upEvent: PointerEvent): void => {
       try {
@@ -1833,6 +2129,8 @@ export function TrackTable({
     window.addEventListener('pointerup', onUp);
   }
 
+  const handleStop = resizeHandleStop(activeColumnKeys, focusedHandle);
+
   function headerCell(
     column: TrackColumnKey,
     content: ReactNode,
@@ -1843,7 +2141,7 @@ export function TrackTable({
       <th
         key={column}
         className={`track-table-resizable-th px-2 py-[6px] ${className}`}
-        style={{ width: columnWidths[column] }}
+        style={{ width: shownWidths[column] }}
         data-newamp-track-column={column}
       >
         {content}
@@ -1851,10 +2149,16 @@ export function TrackTable({
           role="separator"
           aria-orientation="vertical"
           aria-label={`Resize ${label} column`}
-          tabIndex={0}
+          aria-valuenow={shownWidths[column]}
+          aria-valuemin={TRACK_COLUMN_WIDTH_MINS[column]}
+          aria-valuemax={TRACK_COLUMN_WIDTH_MAX}
+          title="Drag, or press the left and right arrow keys, to resize. Up and down move to another column's handle."
+          tabIndex={column === handleStop ? 0 : -1}
           className="track-table-resize-handle"
           data-newamp-track-column-resizer={column}
           onPointerDown={(event) => startColumnResize(column, event)}
+          onFocus={() => setFocusedHandle(column)}
+          onKeyDown={(event) => resizeColumnByKey(column, event)}
         />
       </th>
     );
@@ -1877,12 +2181,14 @@ export function TrackTable({
             type="button"
             className="track-columns-btn"
             data-newamp-track-columns-open
+            // The Columns button above the table does the same and is the one
+            // in the Tab order; this is the pointer's shortcut.
+            tabIndex={-1}
             aria-label="Choose columns"
-            title="Choose and order the columns"
-            onClick={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect();
-              setColumnsMenu({ x: rect.left, y: rect.bottom + 4 });
-            }}
+            aria-haspopup="dialog"
+            aria-expanded={!!columnsMenu}
+            title="Choose, order and hide the columns. Right-clicking the header opens the same menu."
+            onClick={toggleColumnsMenu}
           >
             ⋯
           </button>
@@ -1987,7 +2293,7 @@ export function TrackTable({
         const next = await api.applyTrackMetadataEdit(track.id, patch);
         if (next) updated.push(next);
       }
-      onBulkMetadataSaved?.(updated);
+      saveBulkResults(updated);
       setPlaylistStatus(`Updated metadata for ${updated.length.toLocaleString()} selected track${updated.length === 1 ? '' : 's'}.`);
       setBulkAlbumArtist('');
       setBulkAlbum('');
@@ -2007,7 +2313,7 @@ export function TrackTable({
         const next = await api.applyTrackMetadataEdit(track.id, { trackNo: index + 1 });
         if (next) updated.push(next);
       }
-      onBulkMetadataSaved?.(updated);
+      saveBulkResults(updated);
       setPlaylistStatus(`Numbered ${updated.length.toLocaleString()} selected track${updated.length === 1 ? '' : 's'} in visible order.`);
     } finally {
       setBulkBusy(false);
@@ -2051,7 +2357,7 @@ export function TrackTable({
     setBulkBusy(true);
     try {
       const result = await api.analyzeReplayGain(selectedTracks.map((track) => track.id));
-      onBulkMetadataSaved?.(result.tracks);
+      saveBulkResults(result.tracks);
       const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
       setPlaylistStatus(`Analyzed ReplayGain for ${result.analyzed.toLocaleString()} selected track${result.analyzed === 1 ? '' : 's'}${skipped}.`);
     } finally {
@@ -2064,7 +2370,7 @@ export function TrackTable({
     setBulkBusy(true);
     try {
       const result = await api.analyzeAlbumReplayGain(selectedTracks.map((track) => track.id));
-      onBulkMetadataSaved?.(result.tracks);
+      saveBulkResults(result.tracks);
       const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
       const groups = result.albumGroups == null ? '' : ` across ${result.albumGroups.toLocaleString()} album group${result.albumGroups === 1 ? '' : 's'}`;
       setPlaylistStatus(`Analyzed album ReplayGain for ${result.analyzed.toLocaleString()} selected track${result.analyzed === 1 ? '' : 's'}${groups}${skipped}.`);
@@ -2081,6 +2387,14 @@ export function TrackTable({
   const winTopPad = virtualWindow?.topPad ?? 0;
   const winBottomPad = virtualWindow?.bottomPad ?? 0;
   const COLS = activeColumnKeys.length;
+  const renderedRows = visible.slice(winStart, winEnd + 1);
+  // With no focused row to return to, Tab lands on the first row on screen
+  // rather than on an overscan row above it, which would scroll the list.
+  const tabStopId = rovingRowId(
+    renderedRows.map((track) => track.id),
+    focusedRowId,
+    winStart > 0 ? LIBRARY_ROW_OVERSCAN : 0,
+  );
 
   // ── stable row callbacks ────────────────────────────────────────────────────
   // Keyed only on state setters (stable) so LibraryRow.memo never re-renders
@@ -2174,7 +2488,7 @@ export function TrackTable({
           className="flex flex-wrap items-center gap-2 border-b px-3 py-2 text-[11px]"
           style={{ borderColor: 'var(--line)', color: 'var(--ink-2)', background: 'var(--panel)' }}
         >
-          <span style={{ color: 'var(--accent)' }}>
+          <span style={{ color: 'var(--accent-text, var(--accent))' }}>
             {selectedTracks.length.toLocaleString()} selected
           </span>
           {onPlayTracks && (
@@ -2310,6 +2624,19 @@ export function TrackTable({
           </button>
         </div>
       )}
+      <div ref={toolbarRef} className="track-table-toolbar" data-newamp-track-table-toolbar>
+        <button
+          type="button"
+          className="pxbtn track-columns-toolbar-btn"
+          data-newamp-track-columns-open
+          aria-haspopup="dialog"
+          aria-expanded={!!columnsMenu}
+          title="Choose, order and hide the columns. Right-clicking the table header opens the same menu."
+          onClick={toggleColumnsMenu}
+        >
+          Columns{hiddenAvailableCount > 0 ? ` (${hiddenAvailableCount} hidden)` : ''}
+        </button>
+      </div>
       <table
         ref={tableRef}
         className="table-fixed text-[12px]"
@@ -2323,7 +2650,7 @@ export function TrackTable({
       >
       <colgroup>
         {activeColumnKeys.map((column) => (
-          <col key={column} style={{ width: columnWidths[column] }} />
+          <col key={column} style={{ width: shownWidths[column] }} />
         ))}
       </colgroup>
       <thead
@@ -2334,6 +2661,7 @@ export function TrackTable({
           className="text-left text-[9px] uppercase tracking-[0.12em]"
           style={{ borderBottom: '1px solid var(--line)' }}
           // Right-click the header for the column chooser.
+          title="Right-click a column header to choose and order the columns"
           onContextMenu={(event) => {
             event.preventDefault();
             setColumnsMenu({ x: event.clientX, y: event.clientY });
@@ -2346,7 +2674,7 @@ export function TrackTable({
         {winTopPad > 0 && (
           <tr aria-hidden><td colSpan={COLS} style={{ height: winTopPad, padding: 0, border: 0 }} /></tr>
         )}
-        {visible.slice(winStart, winEnd + 1).map((t, sliceIdx) => {
+        {renderedRows.map((t, sliceIdx) => {
           const absoluteIndex = winStart + sliceIdx;
           return (
             <LibraryRow
@@ -2357,6 +2685,7 @@ export function TrackTable({
               isActive={currentId === t.id}
               search={search}
               columns={activeColumnKeys}
+              tabStop={t.id === tabStopId}
               playlistTargets={playlistTargets}
               onPlay={stableOnPlay}
               onToggleSelect={stableOnToggleSelect}
@@ -2369,6 +2698,7 @@ export function TrackTable({
               onMetadataLookup={onMetadataLookup ? stableOnMetadataLookup : undefined}
               onShowInFolder={stableOnShowInFolder}
               onContextMenu={stableOnContextMenu}
+              onFocusRow={setFocusedRowId}
             />
           );
         })}
@@ -2441,9 +2771,11 @@ export function PlaylistAppendPicker({
 function RatingStars({
   value,
   onChange,
+  tabIndex,
 }: {
   value: number;
   onChange: (rating: number) => Promise<void>;
+  tabIndex?: number;
 }): JSX.Element {
   const rating = Math.max(0, Math.min(5, Math.round(value || 0)));
   return (
@@ -2453,12 +2785,13 @@ function RatingStars({
           key={star}
           type="button"
           className="rating-star-btn leading-none"
+          tabIndex={tabIndex}
           onClick={(e) => {
             e.stopPropagation();
             void onChange(rating === star ? 0 : star);
           }}
           title={`${star} star${star === 1 ? '' : 's'}`}
-          style={{ color: star <= rating ? 'var(--accent)' : 'var(--muted)' }}
+          style={{ color: star <= rating ? 'var(--accent-text, var(--accent))' : 'var(--muted)' }}
         >
           {star <= rating ? <Star /> : <StarOutline />}
         </button>
@@ -2544,7 +2877,7 @@ function MetadataRescuePanel({
       style={{ borderColor: 'var(--line)', background: 'var(--panel)', color: 'var(--ink)' }}
     >
       <div className="mb-2 flex items-center gap-2">
-        <div className="text-[10px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+        <div className="text-[10px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent-text, var(--accent))' }}>
           Metadata Rescue
         </div>
         <div className="min-w-0 flex-1 truncate text-[11px]" style={{ color: 'var(--ink-2)' }}>

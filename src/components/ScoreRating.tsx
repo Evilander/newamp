@@ -23,19 +23,39 @@ function clampScore(value: number): number {
   return Math.max(0, Math.min(SCORE_MAX, Math.round(value * 10) / 10));
 }
 
+/**
+ * Score change for one wheel event: up raises, down lowers, Shift takes the
+ * coarse step. macOS turns Shift+wheel into a sideways scroll, so with Shift
+ * held the vertical intent is read from deltaX. A plain sideways swipe moves
+ * nothing and still scrolls the page.
+ */
+export function wheelScoreDelta(event: { deltaY: number; deltaX?: number; shiftKey?: boolean }): number {
+  const travel = event.deltaY || (event.shiftKey ? (event.deltaX ?? 0) : 0);
+  if (!travel || !Number.isFinite(travel)) return 0;
+  const step = event.shiftKey ? SCORE_STEP_COARSE : SCORE_STEP_FINE;
+  return travel < 0 ? step : -step;
+}
+
 function formatScore(value: number | null): string {
   if (value == null) return '\u2014';
   return value.toFixed(1);
 }
 
-function scoreTier(value: number | null): { label: string; color: string } {
-  if (value == null) return { label: 'unrated', color: 'var(--muted)' };
-  if (value >= 95) return { label: 'desert island', color: 'var(--accent)' };
-  if (value >= 85) return { label: 'top tier', color: 'var(--accent)' };
-  if (value >= 70) return { label: 'great', color: 'var(--accent-dim)' };
-  if (value >= 50) return { label: 'solid', color: 'var(--ink-2)' };
-  if (value >= 30) return { label: 'okay', color: 'var(--warn)' };
-  return { label: 'skip', color: 'var(--error)' };
+/** `color` paints the bar; `text` is the same tone for the number and the label, which sit on a panel. */
+export function scoreTier(value: number | null): { label: string; color: string; text: string } {
+  if (value == null) return { label: 'unrated', color: 'var(--muted)', text: 'var(--muted)' };
+  if (value >= 95) return { label: 'desert island', color: 'var(--accent)', text: 'var(--accent-text)' };
+  if (value >= 85) return { label: 'top tier', color: 'var(--accent)', text: 'var(--accent-text)' };
+  if (value >= 70) return { label: 'great', color: 'var(--accent-dim)', text: 'color-mix(in srgb, var(--accent-text) 75%, var(--ink))' };
+  if (value >= 50) return { label: 'solid', color: 'var(--ink-2)', text: 'var(--ink-2)' };
+  if (value >= 30) return { label: 'okay', color: 'var(--warn)', text: 'var(--warn-text)' };
+  return { label: 'skip', color: 'var(--error)', text: 'var(--error-text)' };
+}
+
+/** What a screen reader says for the score: the number out of 100 and the tier. */
+export function scoreValueText(value: number | null): string {
+  if (value == null) return 'Unrated';
+  return `${formatScore(value)} out of 100, ${scoreTier(value).label}`;
 }
 
 interface ScoreRatingProps {
@@ -50,6 +70,8 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
   const [draft, setDraft] = useState<string>('');
   const [editingInput, setEditingInput] = useState(false);
   const [pointerActive, setPointerActive] = useState(false);
+  const latest = useRef({ value, onChange });
+  latest.current = { value, onChange };
   const tier = scoreTier(value);
   const display = value ?? 0;
   const fillPct = (display / SCORE_MAX) * 100;
@@ -58,6 +80,23 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
   useEffect(() => {
     if (!editingInput) setDraft(value != null ? value.toFixed(1) : '');
   }, [value, editingInput]);
+
+  // Wheel over the bar nudges the score. Bound by hand because React's onWheel
+  // is passive: its preventDefault did nothing, so the list behind the bar
+  // scrolled along with every nudge.
+  useEffect(() => {
+    const bar = barRef.current;
+    if (!bar) return undefined;
+    const onWheel = (event: WheelEvent): void => {
+      const delta = wheelScoreDelta(event);
+      if (delta === 0) return;
+      event.preventDefault();
+      const { value: current, onChange: commit } = latest.current;
+      commit(clampScore((current ?? 0) + delta));
+    };
+    bar.addEventListener('wheel', onWheel, { passive: false });
+    return () => bar.removeEventListener('wheel', onWheel);
+  }, []);
 
   function commitFromPointer(clientX: number): void {
     const bar = barRef.current;
@@ -104,6 +143,7 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
       >
         <input
           type="number"
+          aria-label="Score out of 100"
           min={0}
           max={SCORE_MAX}
           step={SCORE_STEP_FINE}
@@ -130,7 +170,7 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
           }}
           className="score-rating-input"
           data-newamp-score-rating-input
-          style={{ color: tier.color }}
+          style={{ color: tier.text }}
         />
         <span className="score-rating-divider">/ 100</span>
       </div>
@@ -143,7 +183,8 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
         aria-valuemin={0}
         aria-valuemax={SCORE_MAX}
         aria-valuenow={value ?? 0}
-        aria-label={`Rating ${formatScore(value)} of 100`}
+        aria-valuetext={scoreValueText(value)}
+        aria-label="Rating"
         onPointerDown={(event) => {
           event.currentTarget.setPointerCapture(event.pointerId);
           setPointerActive(true);
@@ -157,11 +198,6 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
           setPointerActive(false);
         }}
         onPointerCancel={() => setPointerActive(false)}
-        onWheel={(event) => {
-          event.preventDefault();
-          const delta = event.shiftKey ? SCORE_STEP_COARSE : SCORE_STEP_FINE;
-          nudge(event.deltaY < 0 ? delta : -delta);
-        }}
         onKeyDown={(event) => {
           const step = event.altKey
             ? SCORE_STEP_LEAP
@@ -205,10 +241,10 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
       </div>
 
       <div className="score-rating-meta">
-        <span className="score-rating-tier" style={{ color: tier.color }}>
+        <span className="score-rating-tier" style={{ color: tier.text }}>
           {tier.label}
         </span>
-        <span className="score-rating-stars" aria-label={`${stars} of 5 stars`}>
+        <span className="score-rating-stars" role="img" aria-label={`${stars} of 5 stars`}>
           {'\u2605'.repeat(stars).padEnd(5, '\u2606')}
         </span>
         <button

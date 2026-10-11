@@ -112,7 +112,7 @@ export function HistoryView(): JSX.Element {
         count={`${items.length.toLocaleString()}${hasMoreHistory ? '+' : ''} play${items.length === 1 ? '' : 's'}`}
         actions={
           <>
-            <button className="pxbtn is-active" onClick={() => void playQueue(tracks, 0)} disabled={!tracks.length}>
+            <button className="pxbtn is-primary" onClick={() => void playQueue(tracks, 0)} disabled={!tracks.length}>
               PLAY FROM TOP
             </button>
             <ConfirmAction

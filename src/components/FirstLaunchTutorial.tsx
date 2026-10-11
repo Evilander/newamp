@@ -7,24 +7,28 @@ import { useRef, useState } from 'react';
 import type { AppSettings } from '@shared/types';
 import { BrandLogo } from './BrandLogo';
 import { useModalFocus } from '../hooks/useModalFocus';
+import { deckModeShortcutLabel, shortcutLabel } from '../lib/format';
 
-const TOUR_STEPS: Array<{ keys: string; title: string; detail: string }> = [
-  {
-    keys: 'Ctrl+K',
-    title: 'Anything',
-    detail: 'One box for tracks, albums, playlists, views, and commands — or just ask in plain words.',
-  },
-  {
-    keys: 'F',
-    title: 'Fullscreen visualizer',
-    detail: 'Take the stage full screen. Esc brings the library back.',
-  },
-  {
-    keys: 'Ctrl+M',
-    title: 'Deck mode',
-    detail: 'Shrink into the slim windowshade deck; the skin menu holds the larger shapes.',
-  },
-];
+// Built on render: the chords read differently on a Mac.
+function tourSteps(): Array<{ keys: string; title: string; detail: string }> {
+  return [
+    {
+      keys: shortcutLabel('Mod+K'),
+      title: 'Anything',
+      detail: 'One box for tracks, albums, playlists, views, and commands — or just ask in plain words.',
+    },
+    {
+      keys: 'F',
+      title: 'Fullscreen visualizer',
+      detail: 'Take the stage full screen. Esc brings the library back.',
+    },
+    {
+      keys: deckModeShortcutLabel(),
+      title: 'Deck mode',
+      detail: 'Shrink into the slim windowshade deck, and press it again to come back; the skin menu holds the larger shapes.',
+    },
+  ];
+}
 
 const KBD_STYLE = {
   display: 'inline-block',
@@ -80,7 +84,7 @@ export function FirstLaunchTutorial({
         </header>
 
         <div className="first-launch-steps">
-          {TOUR_STEPS.map((step) => (
+          {tourSteps().map((step) => (
             <div key={step.keys}>
               <strong>
                 <kbd style={KBD_STYLE}>{step.keys}</kbd> {step.title}

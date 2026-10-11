@@ -4,6 +4,7 @@ import { buildArchiveCompass, duplicateExactTotal, legacyFormatTotal, missingMet
 import { api } from '../../lib/api';
 import { hiddenReviewLine } from '../../lib/easterEggs';
 import { formatDuration, formatNumber, formatTime } from '../../lib/format';
+import { pickToday, trackScorePercent, type TodayPick } from '../../lib/today-pick';
 import { pushToast } from '../../lib/toast';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { BrandLogo } from '../BrandLogo';
@@ -311,7 +312,7 @@ export function HomeView(): JSX.Element {
               Scan your music folder, then Home becomes the command center for fresh imports, mixes, history, playlists, and library health.
             </div>
             <div className="flex gap-2">
-              <button className="pxbtn is-active" onClick={() => void api.scanLibrary()}>
+              <button className="pxbtn is-primary" onClick={() => void api.scanLibrary()}>
                 SCAN DEFAULT LIBRARY
               </button>
               <button className="pxbtn" onClick={() => setView('settings')}>
@@ -648,7 +649,7 @@ function HomeRail({
         </div>
       </div>
       <div className="flex flex-wrap gap-1 pb-2">
-        <button className="pxbtn is-active" onClick={() => onPlay(0)} disabled={!tracks.length}>
+        <button className="pxbtn is-primary" onClick={() => onPlay(0)} disabled={!tracks.length}>
           PLAY
         </button>
         <button className="pxbtn" onClick={onNext} disabled={!tracks.length}>
@@ -938,7 +939,7 @@ function HomeHero({
               <span>{formatTime(duration)}</span>
             </div>
             <div className="home-hero-actions">
-              <button className="pxbtn is-active" onClick={onTogglePlay} disabled={!current}>
+              <button className="pxbtn is-primary" onClick={onTogglePlay} disabled={!current}>
                 {isPlaying ? 'PAUSE' : 'PLAY'}
               </button>
               <button className="pxbtn" onClick={onNowPlaying} disabled={!current}>
@@ -1018,7 +1019,7 @@ function RatedHighlightRail({
           Sorted by score · top-of-library
         </div>
         <div className="ml-auto flex gap-1">
-          <button className="pxbtn is-active" onClick={() => onPlay(0)} disabled={!visible.length}>PLAY</button>
+          <button className="pxbtn is-primary" onClick={() => onPlay(0)} disabled={!visible.length}>PLAY</button>
           <button className="pxbtn" onClick={onNext} disabled={!visible.length}>NEXT</button>
           <button className="pxbtn" onClick={onQueue} disabled={!visible.length}>QUEUE</button>
           <button className="pxbtn" onClick={onAction} disabled={!visible.length}>SAVE</button>
@@ -1157,37 +1158,6 @@ function ScoreBadge({ track, compact = false }: { track: Track; compact?: boolea
 
 function scoreLabel(track: Track): string {
   return `${Math.round(trackScorePercent(track))}/100`;
-}
-
-function trackScorePercent(track: Track): number {
-  if (track.ratingScore != null) return Math.max(0, Math.min(100, track.ratingScore));
-  return Math.max(0, Math.min(100, (track.rating || 0) * 20));
-}
-
-interface TodayPick {
-  track: Track;
-  reason: string;
-}
-
-function pickToday(rated: Track[], recent: Track[], currentId: number | null): TodayPick | null {
-  const now = Date.now();
-  const thirtyDays = 30 * 24 * 60 * 60 * 1000;
-  const recentIds = new Set(recent.map((track) => track.id));
-  const scored = rated.filter((track) => (track.ratingScore ?? track.rating * 20) >= 80);
-  const qualified = scored.find((track) =>
-    track.id !== currentId &&
-    (track.lastPlayed == null || now - track.lastPlayed > thirtyDays),
-  );
-  const fallback = rated[0] ?? null;
-  const track = qualified ?? fallback;
-  if (!track) return null;
-  const scoreLabel = 'Top-rated';
-  if (track.lastPlayed == null) return { track, reason: `${scoreLabel} · never played` };
-  const weeks = Math.max(1, Math.round((now - track.lastPlayed) / (7 * 24 * 60 * 60 * 1000)));
-  if (qualified) return { track, reason: `${scoreLabel} · hasn't played in ${weeks} ${weeks === 1 ? 'week' : 'weeks'}` };
-  if (track.id === currentId) return { track, reason: `${scoreLabel} · currently loaded` };
-  if (recentIds.has(track.id)) return { track, reason: `${scoreLabel} · recent favorite` };
-  return { track, reason: `${scoreLabel} · highest score available` };
 }
 
 function topGenreFromTracks(tracks: Track[]): string {

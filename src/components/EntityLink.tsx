@@ -11,6 +11,15 @@ const LINK_STYLE: CSSProperties = {
   cursor: 'pointer',
 };
 
+// A td's text-overflow cannot reach into a <button> (it is an atomic inline), so
+// a link in a narrow table cell is cut off mid-letter. `truncate` makes the
+// button its own ellipsis box instead.
+const TRUNCATE_CLASS = 'inline-block max-w-full truncate align-bottom text-left';
+
+function linkClass(className: string | undefined, truncate: boolean | undefined): string {
+  return `underline-offset-2 hover:underline ${truncate ? `${TRUNCATE_CLASS} ` : ''}${className ?? ''}`;
+}
+
 function isUnknown(name: string | null | undefined): boolean {
   const trimmed = (name ?? '').trim();
   return !trimmed || trimmed.toLowerCase() === 'unknown' || trimmed.toLowerCase().startsWith('unknown ');
@@ -22,6 +31,8 @@ export function ArtistLink({
   title,
   color,
   children,
+  truncate,
+  tabIndex,
   onBeforeNavigate,
 }: {
   artist: string;
@@ -29,6 +40,10 @@ export function ArtistLink({
   title?: string;
   color?: string;
   children?: ReactNode;
+  /** Ellipsize inside a narrow cell instead of overflowing it. */
+  truncate?: boolean;
+  /** -1 takes the link out of the Tab order (rows in a roving-focus table). */
+  tabIndex?: number;
   /** Escape hatch for links inside overlays: close the overlay first so the
    * navigation is actually visible (e.g. fullscreen viz, karaoke). */
   onBeforeNavigate?: () => void;
@@ -40,7 +55,8 @@ export function ArtistLink({
     <button
       type="button"
       data-newamp-artist-link
-      className={`underline-offset-2 hover:underline ${className ?? ''}`}
+      className={linkClass(className, truncate)}
+      tabIndex={tabIndex}
       style={{ ...LINK_STYLE, color: color ?? 'var(--accent)' }}
       title={title ?? `Show all ${artist} albums in your library`}
       onClick={(event) => {
@@ -60,6 +76,8 @@ export function TrackLink({
   title,
   color,
   children,
+  truncate,
+  tabIndex,
 }: {
   track: {
     id?: number;
@@ -72,6 +90,8 @@ export function TrackLink({
   title?: string;
   color?: string;
   children?: ReactNode;
+  truncate?: boolean;
+  tabIndex?: number;
 }): JSX.Element {
   // A track with neither an album to land on nor an artist to fall back to
   // has nowhere to navigate — render plain text instead of a dead link.
@@ -82,7 +102,8 @@ export function TrackLink({
     <button
       type="button"
       data-newamp-track-link
-      className={`underline-offset-2 hover:underline ${className ?? ''}`}
+      className={linkClass(className, truncate)}
+      tabIndex={tabIndex}
       style={{ ...LINK_STYLE, color: color ?? 'inherit' }}
       title={
         title ??
@@ -107,6 +128,8 @@ export function AlbumLink({
   title,
   color,
   children,
+  truncate,
+  tabIndex,
   onBeforeNavigate,
 }: {
   album: string;
@@ -115,6 +138,10 @@ export function AlbumLink({
   title?: string;
   color?: string;
   children?: ReactNode;
+  /** See ArtistLink.truncate. */
+  truncate?: boolean;
+  /** See ArtistLink.tabIndex. */
+  tabIndex?: number;
   /** See ArtistLink.onBeforeNavigate. */
   onBeforeNavigate?: () => void;
 }): JSX.Element {
@@ -125,7 +152,8 @@ export function AlbumLink({
     <button
       type="button"
       data-newamp-album-link
-      className={`underline-offset-2 hover:underline ${className ?? ''}`}
+      className={linkClass(className, truncate)}
+      tabIndex={tabIndex}
       style={{ ...LINK_STYLE, color: color ?? 'var(--ink-2)' }}
       title={title ?? `Show ${album} in Albums`}
       onClick={(event) => {
