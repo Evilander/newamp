@@ -25,13 +25,26 @@
 
 import { createEvilandRenderer, type EvilandRenderer } from '../visualizer/eviland';
 import { attachFlashGuard, type AttachedFlashGuard } from '../visualizer/flash-guard-host';
+import { watchContextFallback, type ContextEvent, type ContextFallbackWatch } from '../visualizer/context-fallback';
+import { createFrameFallbackPainter, type FrameFallbackPainter } from '../visualizer/frame-fallback';
 import type { DetachedAckPayload, DetachedFramePayload } from '../visualizer/frame-bus';
 import type {
   BcAudioMessage,
+  BcConfigMessage,
   BcDisposeMessage,
   BcFrameMessage,
   BcInitMessage,
 } from '../butterchurn-iframe/protocol';
+import { watchDisplayChange } from '../lib/pacedFrame';
+import { projectorKeyAction } from './projector-keys';
+import {
+  PROJECTOR_ACCENT_FALLBACK,
+  PROJECTOR_SEEK_STEP,
+  projectorAccent,
+  projectorSeekTarget,
+  projectorVolumeTarget,
+  type ProjectorTransport,
+} from './projector-controls';
 
 const canvas = document.getElementById('eviland-canvas') as HTMLCanvasElement | null;
 const milkdropFrame = document.getElementById('milkdrop-frame') as HTMLIFrameElement | null;
@@ -254,7 +267,7 @@ Object.assign(scrubEl.style, {
   width: '160px',
   pointerEvents: 'auto',
   cursor: 'pointer',
-  accentColor: '#7aa8ff',
+  accentColor: PROJECTOR_ACCENT_FALLBACK,
 });
 let scrubbing = false;
 scrubEl.addEventListener('pointerdown', () => {
@@ -296,7 +309,7 @@ Object.assign(volEl.style, {
   width: '72px',
   pointerEvents: 'auto',
   cursor: 'pointer',
-  accentColor: '#7aa8ff',
+  accentColor: PROJECTOR_ACCENT_FALLBACK,
 });
 volWrapEl.append(volIconEl, volEl);
 
@@ -411,8 +424,12 @@ function hideControls(): void {
   }
 }
 
-let lastTransport: Exclude<DetachedFramePayload['transport'], undefined | null> | null = null;
-function applyTransportState(transport: DetachedFramePayload['transport']): void {
+let lastTransport: ProjectorTransport | null = null;
+let lastAccent = PROJECTOR_ACCENT_FALLBACK;
+// A volume key press moves the slider at once; the mirrored value that comes
+// back a round trip later is stale until it catches up, so it is held off.
+let volHoldUntil = 0;
+function applyTransportState(transport: ProjectorTransport | null | undefined): void {
   if (!transport) {
     // Explicit idle signal (queue cleared / playback fully stopped): reset the
     // bar instead of freezing on the last track forever.
@@ -429,6 +446,12 @@ function applyTransportState(transport: DetachedFramePayload['transport']): void
     return;
   }
   lastTransport = transport;
+  const accent = projectorAccent(transport);
+  if (accent !== lastAccent) {
+    lastAccent = accent;
+    scrubEl.style.accentColor = accent;
+    volEl.style.accentColor = accent;
+  }
   const title = transport.title || 'Unknown track';
   const artist = transport.artist || '';
   if (titleEl.textContent !== title) titleEl.textContent = title;
@@ -445,7 +468,7 @@ function applyTransportState(transport: DetachedFramePayload['transport']): void
   } else if (!scrubbing && dur <= 0) {
     scrubEl.value = '0';
   }
-  if (!volDragging && Number.isFinite(transport.volume)) {
+  if (!volDragging && performance.now() >= volHoldUntil && Number.isFinite(transport.volume)) {
     const mirrored = Math.max(0, Math.min(2, transport.volume));
     if (Math.abs(Number(volEl.value) - mirrored) > 0.005) volEl.value = String(mirrored);
   }
@@ -494,6 +517,39 @@ let rendererFailed = false;
 let flashGuard: AttachedFlashGuard | null = null;
 let lastGuardedAt = 0;
 
+// The fallback renderer asks the browser for a lost context back and rebuilds
+// on it. If that has not happened within a few seconds the window paints from
+// the frames in 2D instead, behind the CPU flash guard.
+let contextWatch: ContextFallbackWatch | null = null;
+let frameFallback: FrameFallbackPainter | null = null;
+
+function watchRendererContext(): (event: ContextEvent) => void {
+  contextWatch?.dispose();
+  contextWatch = watchContextFallback(startFrameFallback);
+  return contextWatch.onEvent;
+}
+
+function startFrameFallback(): void {
+  if (frameFallback || !canvas) return;
+  flashGuard?.dispose();
+  flashGuard = null;
+  try {
+    renderer?.dispose({ releaseContext: true });
+  } catch (err) {
+    console.error('[eviland-detached] dispose after context loss failed', err);
+  }
+  renderer = null;
+  rendererFailed = true;
+  // A canvas that has held WebGL cannot give a 2D context, so the picture goes
+  // on a new one above it.
+  const surface = document.createElement('canvas');
+  surface.setAttribute('data-newamp-detached-fallback', '');
+  Object.assign(surface.style, { position: 'fixed', left: '0', top: '0', width: '100%', height: '100%', zIndex: '1' });
+  canvas.style.display = 'none';
+  canvas.after(surface);
+  frameFallback = createFrameFallbackPainter(surface);
+}
+
 // A renderer whose output can't be guarded doesn't run: it is dropped here
 // and the caller treats it like a renderer that failed to start.
 function guardRenderer(): void {
@@ -528,7 +584,7 @@ fitLayers();
 function startWebglFallback(): void {
   if (renderer || rendererFailed || !canvas) return;
   milkdropFrame!.style.display = 'none';
-  renderer = createEvilandRenderer(canvas, { quality: currentQuality });
+  renderer = createEvilandRenderer(canvas, { quality: currentQuality, onContextEvent: watchRendererContext() });
   guardRenderer();
   if (!renderer) {
     rendererFailed = true;
@@ -561,6 +617,19 @@ const onBcMessage = (event: MessageEvent): void => {
 };
 window.addEventListener('message', onBcMessage);
 
+// Changes after init (display, tier, sample rate). Nothing to send before init:
+// that message carries the current values.
+function postBcConfig(config: Omit<BcConfigMessage, 'type'>): void {
+  if (!bcInitSent || bcFailed) return;
+  milkdropFrame!.contentWindow?.postMessage({ type: 'config', ...config } satisfies BcConfigMessage, '*');
+}
+
+// A window dragged onto a display with another pixel ratio renders at the new one.
+const stopDisplayWatch = watchDisplayChange(() => {
+  postBcConfig({ dpr: dprCap() });
+  fitLayers();
+});
+
 // The init message needs the engine's sample rate, which arrives with the
 // first frame payload — init is sent once both are available.
 function maybeInitButterchurn(): void {
@@ -587,6 +656,8 @@ const bcMountTimeout = window.setTimeout(() => {
 function applyQuality(next: 'high' | 'medium' | 'low'): void {
   if (next === currentQuality) return;
   currentQuality = next;
+  // The tier sets the pixel ratio too (dprCap), so the frame gets both.
+  postBcConfig({ quality: next, dpr: dprCap() });
   if (renderer && canvas) {
     flashGuard?.dispose();
     flashGuard = null;
@@ -595,7 +666,7 @@ function applyQuality(next: 'high' | 'medium' | 'low'): void {
     } catch (err) {
       console.error('[eviland-detached] dispose during quality swap failed', err);
     }
-    renderer = createEvilandRenderer(canvas, { quality: next });
+    renderer = createEvilandRenderer(canvas, { quality: next, onContextEvent: watchRendererContext() });
     guardRenderer();
     if (!renderer) {
       rendererFailed = true;
@@ -623,6 +694,8 @@ function handlePayload(payload: DetachedFramePayload): void {
   }
   if (payload.sampleRate && payload.sampleRate !== lastSampleRate) {
     lastSampleRate = payload.sampleRate;
+    // Bit-Perfect output can move the device to another rate between tracks.
+    postBcConfig({ sampleRate: lastSampleRate });
   }
   maybeInitButterchurn();
 
@@ -641,6 +714,8 @@ function handlePayload(payload: DetachedFramePayload): void {
       const audio: BcAudioMessage = {
         type: 'audio',
         samples: payload.wave,
+        // Whether a track is playing, so a quiet passage does not read as stopped.
+        playing: payload.transport ? payload.transport.isPlaying : payload.transport === null ? false : undefined,
         eviland: payload.operator
           ? {
               frame: payload.frame,
@@ -707,6 +782,8 @@ function renderGlLayers(): void {
           flashGuard?.apply(lastGuardedAt ? guardedAt - lastGuardedAt : payload.dtMs);
           lastGuardedAt = guardedAt;
         }
+      } else {
+        frameFallback?.paint(payload.frame, payload.palette, performance.now());
       }
     } catch (err) {
       lastRenderError = String((err as Error)?.message ?? err);
@@ -837,11 +914,25 @@ window.addEventListener('dblclick', (event) => {
 
 // F11 TOGGLES (was: only exited). Escape always exits — it's the universal
 // "give me out of fullscreen" gesture.
+// Cmd, not Ctrl, is the transport modifier on a Mac, so the chord rules are
+// the main window's own. Ctrl+Left/Right keep working there.
+const hostPlatform = /mac/i.test(navigator.platform || navigator.userAgent) ? 'darwin' : undefined;
+
+// Stepping from the slider's own value keeps a held key adding up between the
+// mirrored updates.
+function stepVolume(direction: 1 | -1): void {
+  const target = projectorVolumeTarget(Number(volEl.value), direction);
+  volEl.value = String(target);
+  volHoldUntil = performance.now() + 600;
+  void detachedBridge?.transportCommand?.('setVolume', target).catch(() => undefined);
+}
+
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'F11') {
+  const action = projectorKeyAction(event, hostPlatform);
+  if (action === 'toggle-fullscreen') {
     event.preventDefault();
     toggleFullscreen();
-  } else if (event.key === 'Escape') {
+  } else if (action === 'exit-fullscreen') {
     event.preventDefault();
     if (detachedBridge?.setFullscreen) {
       void detachedBridge.setFullscreen(false).then(() => {
@@ -852,32 +943,31 @@ window.addEventListener('keydown', (event) => {
         console.error('[eviland-detached] setFullscreen(false) failed', err);
       });
     }
-  } else if (event.key === ' ' || event.code === 'Space') {
-    // Space = play/pause — the projector is "the player" while it's on a
-    // second monitor and you've alt-tabbed away from the main window.
+  } else if (action === 'toggle-play') {
     event.preventDefault();
     void detachedBridge?.transportCommand?.('togglePlay').catch(() => undefined);
-  } else if (event.key === 'ArrowRight' && event.ctrlKey) {
+  } else if (action === 'next') {
     event.preventDefault();
     void detachedBridge?.transportCommand?.('next').catch(() => undefined);
-  } else if (event.key === 'ArrowLeft' && event.ctrlKey) {
+  } else if (action === 'previous') {
     event.preventDefault();
     void detachedBridge?.transportCommand?.('prev').catch(() => undefined);
-  } else if (event.key === 'ArrowRight') {
+  } else if (action === 'seek-forward' || action === 'seek-backward') {
     if (!lastTransport) return;
     event.preventDefault();
-    const target = Math.min(lastTransport.duration, lastTransport.currentTime + 5);
+    const target = projectorSeekTarget(lastTransport, action === 'seek-forward' ? PROJECTOR_SEEK_STEP : -PROJECTOR_SEEK_STEP);
     void detachedBridge?.transportCommand?.('seek', target).catch(() => undefined);
-  } else if (event.key === 'ArrowLeft') {
-    if (!lastTransport) return;
+  } else if (action === 'volume-up' || action === 'volume-down') {
     event.preventDefault();
-    const target = Math.max(0, lastTransport.currentTime - 5);
-    void detachedBridge?.transportCommand?.('seek', target).catch(() => undefined);
+    stepVolume(action === 'volume-up' ? 1 : -1);
   }
 });
 
 window.addEventListener('beforeunload', () => {
   try {
+    stopDisplayWatch();
+    contextWatch?.dispose();
+    frameFallback?.dispose();
     renderer?.dispose();
     const dispose: BcDisposeMessage = { type: 'dispose' };
     milkdropFrame.contentWindow?.postMessage(dispose, '*');
