@@ -61,6 +61,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   closeButtonBehavior: 'minimize-to-tray',
   performanceTier: 'auto',
   ambientReactivity: 'auto',
+  waveformSeekBar: true,
 };
 
 const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {
@@ -155,6 +156,7 @@ const stub: NewAmpAPI = {
   onScanProgress: () => () => undefined,
   trashTracks: async () => ({ trashed: 0, removed: 0, failed: [], cancelled: true }),
   onTracksRemoved: () => () => undefined,
+  onTrashProgress: () => () => undefined,
   getTracks: async () => [],
   getTrackIds: async () => [],
   getTrackCount: async () => 0,
@@ -232,6 +234,7 @@ const stub: NewAmpAPI = {
   findSimilarTracks: async () => [],
   getTrackVisualMemory: async () => null,
   getSongScore: async () => null,
+  getTrackWaveform: async () => null,
   setTrackVisualMemory: async () => false,
   clearTrackVisualMemory: async () => false,
   getVisualMemoryStats: async () => ({ tracksWithMemory: 0, totalSections: 0, oldestAt: null }),
@@ -466,6 +469,7 @@ const stub: NewAmpAPI = {
   showInFolder: async () => undefined,
   onPlayerCommand: () => () => undefined,
   onOpenFiles: () => () => undefined,
+  onOpenSettings: () => () => undefined,
   searchGuitarTabs: async () => [],
   getGuitarTab: async () => {
     throw new Error('Guitar tabs are only available in the Electron app.');

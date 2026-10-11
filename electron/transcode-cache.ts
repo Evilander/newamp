@@ -34,7 +34,7 @@ import { mkdir, open, readdir, realpath, rename, stat, unlink, utimes, copyFile 
 import { cpus } from 'node:os';
 import { join } from 'node:path';
 import { probeResampler } from './resampler.js';
-import { resolveFfmpegPath, buildPlaybackFlacArgs } from './transcode.js';
+import { resolveFfmpegPath, buildPlaybackFlacArgs, watchFfmpegInput } from './transcode.js';
 import { caseFoldCachePath } from './cache-key-casing.js';
 
 export type TranscodeResult =
@@ -197,6 +197,7 @@ function runFfmpegToFile(inputPath: string, outputPath: string): Promise<void> {
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
     });
+    watchFfmpegInput(child, inputPath);
     let stderr = '';
     let settled = false;
     const done = (err?: Error) => {

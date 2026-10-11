@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import type { Readable } from 'node:stream';
 import { resamplerFilter, resamplerKindNow } from './resampler.js';
-import { resolveFfmpegPath } from './transcode.js';
+import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
 import { killChild } from './kill-child.js';
 import type {
   ExclusiveDeviceInfo,
@@ -621,6 +621,9 @@ export class ExclusiveOutput {
       'pipe:1',
     ];
     const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    // Holds the file open for as long as the track plays; a move to the
+    // Recycle Bin stops it first.
+    watchFfmpegInput(child, source.path);
     this.ffmpeg = child;
     this.pendingChunk = null;
 
@@ -644,6 +647,14 @@ export class ExclusiveOutput {
     });
     child.on('close', (code) => {
       if (gen !== this.generation) return;
+      // Stopped from outside (the file is about to be moved to the Recycle
+      // Bin). Its stdout was destroyed with it, and a destroyed stream never
+      // emits 'end', so the decode ends here. A seek or a new play already
+      // replaced this.ffmpeg before it killed the old one.
+      if (child.killed && this.ffmpeg === child) {
+        this.onDecoderEnd(gen);
+        return;
+      }
       if (code && code !== 0) {
         console.error(`[newamp] exclusive decode exited ${code} for ${source.path}\n${stderr}`);
         this.deps.send({ type: 'error', trackId: source.trackId, message: `Decode failed (ffmpeg ${code}).` });

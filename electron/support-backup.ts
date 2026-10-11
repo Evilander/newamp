@@ -19,7 +19,19 @@ export interface SupportBackupInput {
   // SettingsStore.snapshotJson()) right before calling createSupportBackup.
   librarySnapshot?: Buffer;
   settingsSnapshot?: string;
+  // 'full' (the default, the Settings backup) copies the whole profile, art
+  // stores included. 'library' is the safety copy taken before a trash or a
+  // prune: library.db and settings.json only, since neither operation touches
+  // art and the scanner rebuilds it anyway, and copying ~1 GB of covers per
+  // trashed track filled drives. Those are named newamp-auto-backup-* and
+  // only the newest AUTO_BACKUPS_KEPT are kept; user-made backups are never
+  // touched.
+  scope?: 'full' | 'library';
 }
+
+const AUTO_BACKUP_PREFIX = 'newamp-auto-backup-';
+const AUTO_BACKUPS_KEPT = 5;
+const LIBRARY_SCOPE_LABELS = new Set(['settings.json', 'library.db']);
 
 export interface SupportRestoreInput extends SupportBackupInput {
   backupPath: string;
@@ -36,6 +48,8 @@ interface BackupManifest {
   app: string;
   filesCopied: number;
   included: string[];
+  createdAt?: number;
+  automatic?: boolean;
 }
 
 let restoreQueue: Promise<unknown> = Promise.resolve();
@@ -45,12 +59,14 @@ const require = createRequire(import.meta.url);
 export async function createSupportBackup(input: SupportBackupInput): Promise<SupportBackupResult> {
   const userDataPath = resolve(input.userDataPath);
   const createdAt = input.now instanceof Date ? input.now.getTime() : Number(input.now ?? Date.now());
+  const automatic = input.scope === 'library';
   const backupsRoot = join(userDataPath, 'backups');
-  const backupPath = await uniqueBackupPath(backupsRoot, `newamp-backup-${formatBackupStamp(createdAt)}`);
+  const backupPath = await uniqueBackupPath(backupsRoot, `${automatic ? AUTO_BACKUP_PREFIX : 'newamp-backup-'}${formatBackupStamp(createdAt)}`);
   ensureInside(userDataPath, backupPath);
   await mkdir(backupPath, { recursive: true });
 
-  const candidates = backupCandidates(userDataPath, input.settingsPath, input.libraryPath, backupPath);
+  const candidates = backupCandidates(userDataPath, input.settingsPath, input.libraryPath, backupPath)
+    .filter((candidate) => !automatic || LIBRARY_SCOPE_LABELS.has(candidate.label));
 
   let filesCopied = 0;
   const included: string[] = [];
@@ -68,10 +84,45 @@ export async function createSupportBackup(input: SupportBackupInput): Promise<Su
     userDataPath,
     filesCopied,
     included,
+    automatic,
   };
   await writeFile(join(backupPath, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+  if (automatic) await pruneAutomaticBackups(backupsRoot, backupPath);
 
   return { backupPath, createdAt, filesCopied, included };
+}
+
+// Drops the oldest automatic backups past AUTO_BACKUPS_KEPT, never the one
+// just written. Both the folder name and the manifest have to say automatic:
+// a user-made backup copied or renamed into the folder is not deleted.
+async function pruneAutomaticBackups(backupsRoot: string, keepPath: string): Promise<void> {
+  let names: string[];
+  try {
+    names = (await readdir(backupsRoot)).filter((name) => name.startsWith(AUTO_BACKUP_PREFIX));
+  } catch {
+    return;
+  }
+  const automatic: Array<{ path: string; createdAt: number }> = [];
+  for (const name of names) {
+    const path = join(backupsRoot, name);
+    if (resolve(path) === resolve(keepPath)) continue;
+    try {
+      const manifest = await readBackupManifest(path);
+      if (manifest.automatic !== true) continue;
+      automatic.push({ path, createdAt: Number(manifest.createdAt) || 0 });
+    } catch {
+      // Not a readable backup; leave it alone.
+    }
+  }
+  automatic.sort((a, b) => b.createdAt - a.createdAt || b.path.localeCompare(a.path));
+  // The one just written is the newest and counts toward the limit.
+  for (const stale of automatic.slice(AUTO_BACKUPS_KEPT - 1)) {
+    try {
+      await rm(stale.path, { recursive: true, force: true, maxRetries: 3 });
+    } catch (err) {
+      console.warn(`[newamp] old automatic backup could not be removed: ${stale.path}`, err);
+    }
+  }
 }
 
 export function restoreSupportBackup(input: SupportRestoreInput): Promise<SupportRestoreResult> {
@@ -306,6 +357,8 @@ async function readBackupManifest(backupPath: string): Promise<BackupManifest> {
     app: String(parsed.app),
     filesCopied: Math.max(0, Math.trunc(Number(parsed.filesCopied) || 0)),
     included: parsed.included.filter((item): item is string => typeof item === 'string'),
+    createdAt: Number(parsed.createdAt) || 0,
+    automatic: parsed.automatic === true,
   };
 }
 

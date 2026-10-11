@@ -3,6 +3,7 @@ import { extname, join, basename, dirname } from 'node:path';
 import { parseFile, type IAudioMetadata, type IOptions } from 'music-metadata';
 import { FileTokenizer } from 'strtok3';
 import { LibraryStore, type IncomingTrack, type ArtBlob, type TrackFileState } from './library.js';
+import { CONTAINER_AUDIO_EXTENSIONS, codecFamilyFromCodec } from '../shared/audio-quality.js';
 import type { ScanProgress } from '../shared/types.js';
 
 const AUDIO_EXTS = new Set([
@@ -31,7 +32,12 @@ const AUDIO_EXTS = new Set([
   '.dts',
 ]);
 
+// Containers whose extension can't say lossy from lossless. A row that has
+// never had its codec read is read again once, even if the file is unchanged.
+const CODEC_PROBE_EXTS = new Set(CONTAINER_AUDIO_EXTENSIONS.map((ext) => `.${ext}`));
+
 const METADATA_OPTIONS: IOptions = { duration: true, skipCovers: false, skipPostHeaders: true };
+const CODEC_PROBE_OPTIONS: IOptions = { ...METADATA_OPTIONS, skipCovers: true };
 const DISCOVERY_CONCURRENCY = 4;
 const DISCOVERY_PROGRESS_INTERVAL = 200;
 const METADATA_BATCH_SIZE = 128;
@@ -157,6 +163,7 @@ async function readMeta(
   mtime: number,
   dev: number | null,
   folderArtForFile: (filePath: string) => Promise<ArtBlob | null> = (filePath) => readFolderArtFile(dirname(filePath)),
+  codecOnly = false,
 ): Promise<IncomingTrack> {
   let title = basename(full, extname(full));
   let artist = 'Unknown Artist';
@@ -173,11 +180,17 @@ async function readMeta(
   let key: string | null = null;
   let replayGainTrackDb: number | null = null;
   let replayGainAlbumDb: number | null = null;
+  let codec = '';
+  let codecLossless: boolean | null = null;
+  let bitsPerSample: number | null = null;
+  let fileRatingScore: number | null = null;
+  let filePlayCount: number | null = null;
+  let ids: EmbeddedIds = EMPTY_IDS;
   let art: ArtBlob | null = null;
   let parseFailed = false;
 
   try {
-    const meta = await parseMetadata(full);
+    const meta = await parseMetadata(full, codecOnly);
     const c = meta.common;
     if (c.title) title = c.title;
     if (c.artist) artist = c.artist;
@@ -194,6 +207,13 @@ async function readMeta(
     key = c.key ?? null;
     replayGainTrackDb = finiteDb(c.replaygain_track_gain?.dB);
     replayGainAlbumDb = finiteDb(c.replaygain_album_gain?.dB);
+    codec = meta.format.codec ?? '';
+    const codecFamily = codecFamilyFromCodec(meta.format.codec, meta.format.lossless);
+    codecLossless = codecFamily ? codecFamily === 'lossless' : null;
+    bitsPerSample = positiveInt(meta.format.bitsPerSample);
+    fileRatingScore = embeddedRatingScore(meta);
+    filePlayCount = embeddedPlayCount(meta);
+    ids = embeddedIds(c);
     if (c.picture && c.picture.length) {
       const pic = c.picture[0];
       if (pic.data && pic.data.length) {
@@ -206,7 +226,8 @@ async function readMeta(
     parseFailed = true;
   }
 
-  if (!art) {
+  // A codec-only read brings no art at all, so the row keeps the art it has.
+  if (!art && !codecOnly) {
     art = await folderArtForFile(full);
   }
 
@@ -232,6 +253,14 @@ async function readMeta(
     art,
     dev,
     parseFailed,
+    // '' says the file was read and named no codec, which is what keeps a
+    // container that never parses from being read again on every scan.
+    codec: parseFailed ? '' : codec,
+    codecLossless,
+    bitsPerSample,
+    fileRatingScore,
+    filePlayCount,
+    ...ids,
   };
 }
 
@@ -262,8 +291,8 @@ async function readArtBlob(path: string): Promise<ArtBlob | null> {
   }
 }
 
-async function parseMetadata(full: string): Promise<IAudioMetadata> {
-  return parseFile(full, METADATA_OPTIONS);
+async function parseMetadata(full: string, codecOnly: boolean): Promise<IAudioMetadata> {
+  return parseFile(full, codecOnly ? CODEC_PROBE_OPTIONS : METADATA_OPTIONS);
 }
 
 function fallbackTrack(full: string, size: number, mtime: number, dev: number): IncomingTrack {
@@ -290,6 +319,7 @@ function fallbackTrack(full: string, size: number, mtime: number, dev: number): 
     art: null,
     dev,
     parseFailed: true,
+    codec: '',
   };
 }
 
@@ -415,11 +445,14 @@ export class Scanner {
         const existing = options.force
           ? new Map<string, TrackFileState>()
           : this.library.getTrackFileStates(slice.map((f) => f.full));
+        const codecOnly = new Set<string>();
         const changed = options.force
           ? slice
-          : await pMap(slice, METADATA_CONCURRENCY, async (f) =>
-              (await needsMetadataRefresh(f, existing.get(f.full), hasFolderArt)) ? f : null,
-            ).then((rows) =>
+          : await pMap(slice, METADATA_CONCURRENCY, async (f) => {
+              const refresh = await metadataRefresh(f, existing.get(f.full), hasFolderArt);
+              if (refresh === 'codec') codecOnly.add(f.full);
+              return refresh ? f : null;
+            }).then((rows) =>
               rows.filter((row): row is DiscoveredFile => !!row),
             );
         skipped += slice.length - changed.length;
@@ -434,7 +467,7 @@ export class Scanner {
 
         const incoming = await pMap(changed, METADATA_CONCURRENCY, async (f) => {
           try {
-            return await readMeta(f.full, f.size, f.mtime, f.dev, folderArtForFile);
+            return await readMeta(f.full, f.size, f.mtime, f.dev, folderArtForFile, codecOnly.has(f.full));
           } catch (err) {
             console.warn(`[newamp] metadata parse failed for ${f.full}: ${errorMessage(err)}`);
             return fallbackTrack(f.full, f.size, f.mtime, f.dev);
@@ -475,16 +508,22 @@ function sameFileState(
   return !!existing && existing.size === discovered.size && existing.mtime === Math.round(discovered.mtime);
 }
 
-async function needsMetadataRefresh(
+// 'codec' is a file that has not changed and whose art is fine, only read
+// before codecs were stored: its tags are read again without the cover, which
+// is the heavy part of an audiobook's header.
+type MetadataRefresh = 'full' | 'codec';
+
+async function metadataRefresh(
   discovered: { full: string; size: number; mtime: number },
   existing: TrackFileState | undefined,
   hasFolderArt: (filePath: string) => Promise<boolean>,
-): Promise<boolean> {
-  if (!existing) return true;
-  if (!sameFileState(discovered, existing)) return true;
-  if (existing.hasArt && !existing.artExists) return true;
-  if (!existing.hasArt) return hasFolderArt(discovered.full);
-  return false;
+): Promise<MetadataRefresh | null> {
+  if (!existing) return 'full';
+  if (!sameFileState(discovered, existing)) return 'full';
+  if (existing.hasArt && !existing.artExists) return 'full';
+  if (!existing.hasArt && (await hasFolderArt(discovered.full))) return 'full';
+  if (existing.codec === null && CODEC_PROBE_EXTS.has(extname(discovered.full).toLowerCase())) return 'codec';
+  return null;
 }
 
 function errorMessage(err: unknown): string {
@@ -494,6 +533,112 @@ function errorMessage(err: unknown): string {
 
 function finiteDb(value: number | undefined): number | null {
   return Number.isFinite(value) ? Number(value!.toFixed(2)) : null;
+}
+
+function positiveInt(value: number | undefined): number | null {
+  return Number.isFinite(value) && value! > 0 ? Math.round(value!) : null;
+}
+
+interface EmbeddedIds {
+  mbRecordingId: string | null;
+  mbReleaseId: string | null;
+  mbArtistId: string | null;
+  isrc: string | null;
+  acoustidId: string | null;
+}
+
+const EMPTY_IDS: EmbeddedIds = { mbRecordingId: null, mbReleaseId: null, mbArtistId: null, isrc: null, acoustidId: null };
+
+function tagId(value: string | undefined): string | null {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text ? text.slice(0, 64) : null;
+}
+
+// Identifiers Picard and similar taggers write; the first of any that repeat.
+function embeddedIds(common: IAudioMetadata['common']): EmbeddedIds {
+  return {
+    mbRecordingId: tagId(common.musicbrainz_recordingid),
+    mbReleaseId: tagId(common.musicbrainz_albumid),
+    mbArtistId: tagId(common.musicbrainz_artistid?.[0]),
+    isrc: tagId(common.isrc?.[0]),
+    acoustidId: tagId(common.acoustid_id),
+  };
+}
+
+interface NativeTag {
+  id: string;
+  value: unknown;
+}
+
+function nativeTags(meta: IAudioMetadata): NativeTag[] {
+  return Object.values(meta.native ?? {}).flat() as NativeTag[];
+}
+
+function ratingScore(score: number): number | null {
+  const rounded = Math.round(Math.min(100, score) * 10) / 10;
+  // Under half a star is noise (an FMPS_RATING of 0.05, a POPM byte of 2).
+  return rounded >= 10 ? rounded : null;
+}
+
+// ID3's popularimeter byte as 1-5 stars: 0 is unrated and each star owns a
+// band (1-31, 32-95, 96-159, 160-223, 224-255), which is how Windows Explorer,
+// Windows Media Player and MediaMonkey write their 1, 64, 128, 196 and 255.
+// music-metadata's own (byte - 1) / 254 scaling lands those on the wrong stars.
+function popmStars(byte: number): number {
+  if (!(byte >= 1)) return 0;
+  if (byte < 32) return 1;
+  if (byte < 96) return 2;
+  if (byte < 160) return 3;
+  if (byte < 224) return 4;
+  return 5;
+}
+
+// The file's own rating on NewAmp's 0-100 score. FMPS_RATING (0..1) is
+// unambiguous. A bare Vorbis RATING is Winamp's 0-100 but foobar2000 writes
+// 1-5, so small values are stars. POPM is read from its raw byte; iTunes' rate
+// and WM/SharedUserRating reach us from music-metadata already scaled to 0..1.
+function embeddedRatingScore(meta: IAudioMetadata): number | null {
+  const tags = nativeTags(meta);
+  for (const tag of tags) {
+    if (!/(^|:)fmps_rating$/i.test(tag.id)) continue;
+    const value = Number.parseFloat(String(tag.value));
+    if (value > 0 && value <= 1) return ratingScore(value * 100);
+  }
+  const bare = tags.find((tag) => tag.id === 'RATING');
+  if (bare) {
+    const value = Number.parseFloat(String(bare.value));
+    if (value > 0 && value <= 5) return ratingScore(value * 20);
+    if (value > 5 && value <= 100) return ratingScore(value);
+  }
+  for (const tag of tags) {
+    if (tag.id !== 'POPM') continue;
+    const stars = popmStars(Number((tag.value as { rating?: unknown } | null)?.rating));
+    if (stars > 0) return ratingScore(stars * 20);
+  }
+  for (const entry of meta.common.rating ?? []) {
+    const value = entry.rating;
+    if (value != null && value > 0 && value <= 1) return ratingScore(value * 100);
+  }
+  return null;
+}
+
+// A play count the file's tags hold: FMPS_PLAYCOUNT, then ID3's PCNT, then
+// the counter inside a POPM frame.
+function embeddedPlayCount(meta: IAudioMetadata): number | null {
+  const tags = nativeTags(meta);
+  for (const tag of tags) {
+    if (!/(^|:)fmps_playcount$/i.test(tag.id)) continue;
+    const count = Number.parseFloat(String(tag.value));
+    if (count > 0) return Math.trunc(count);
+  }
+  const pcnt = meta.common.playCounter;
+  if (pcnt != null && pcnt > 0) return Math.trunc(pcnt);
+  for (const tag of tags) {
+    if (tag.id !== 'POPM') continue;
+    const counter = Number((tag.value as { counter?: unknown } | null)?.counter);
+    if (counter > 0) return Math.trunc(counter);
+  }
+  return null;
 }
 
 // Malformed APE/ID3 trailers can make music-metadata ask strtok3 to rewind via

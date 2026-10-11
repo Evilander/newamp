@@ -39,7 +39,7 @@ import type { Readable, Writable } from 'node:stream';
 import { playableLength } from './gapless-trim.js';
 import { killChild } from './kill-child.js';
 import { probeResampler, resamplerFilter } from './resampler.js';
-import { resolveFfmpegPath } from './transcode.js';
+import { awaitChildExit, ffmpegInputKey, resolveFfmpegPath } from './transcode.js';
 import type {
   ExclusiveTrackSource,
   GaplessSegmentRequest,
@@ -59,6 +59,8 @@ const END_GUARD_SEC = 0.5;
 // ffmpeg's pipe reads are coalesced into messages of at least this many frames.
 const MIN_POST_FRAMES = 4096;
 const FIRST_AUDIO_TIMEOUT_MS = 15000;
+// How long a release waits for a killed decoder to let go of its file.
+const RELEASE_EXIT_TIMEOUT_MS = 2000;
 // Only the last few segment starts can still be revoked: the producer runs at
 // most HIGH_WATER_SEC ahead of the audible playhead.
 const STARTED_LOG_CAP = 8;
@@ -226,6 +228,7 @@ class Session {
   private readonly out: FrameOutput;
   private consumed = 0;
   private decoder: ChildProcessByStdio<null, Readable, Readable> | null = null;
+  private decoderPlan: Plan | null = null;
   private resampler: Resampler | null = null;
   private readonly started: Array<{ plan: Plan; at: number }> = [];
   private next: Plan | null;
@@ -315,6 +318,46 @@ class Session {
     }
     this.stalled = null;
     this.failFirst(new Error('Superseded by a newer request.'));
+  }
+
+  /**
+   * Stop reading the files `held` names, so they can be moved: a plan on one
+   * that hasn't started is dropped, as is a decoder on one that hasn't placed
+   * its segment yet, and a decoder on one that has is killed and treated as a
+   * decode that ended early, so the stream carries on with whatever follows.
+   * Resolves once that decoder has exited.
+   */
+  releasePaths(held: (path: string) => boolean): Promise<void> {
+    if (this.next && held(this.next.source.path)) this.next = null;
+    if (this.deferredNext?.plan && held(this.deferredNext.plan.source.path)) {
+      this.deferredNext = { after: this.deferredNext.after, plan: null };
+    }
+    const decoder = this.decoder;
+    const plan = this.decoderPlan;
+    if (!decoder || !plan || !held(plan.source.path)) return Promise.resolve();
+    const exited = awaitChildExit(decoder, RELEASE_EXIT_TIMEOUT_MS);
+    if (this.phase !== 'opening') {
+      // Left in place: its close handler runs the ended-early path.
+      killChild(decoder);
+      return exited;
+    }
+    // Nothing of it has reached the stream (a chained decoder sits here,
+    // paused, through the last seconds of every track), so there is nothing
+    // to end early and nothing to fail in-band: forgotten before the kill, so
+    // what its pipe flushes on exit and its close land on a stale child, and
+    // the stream waits for whatever is named next, as after a cut. The first
+    // segment has no stream to go on with.
+    this.killDecoder();
+    if (plan === this.firstPlan) {
+      this.failFirst(new Error('The file is being moved.'));
+      return exited;
+    }
+    this.phase = 'waiting';
+    const deferred = this.deferredNext;
+    this.deferredNext = null;
+    if (deferred) this.prepareNext(deferred.after, deferred.plan);
+    this.checkEndGuard();
+    return exited;
   }
 
   // ---------------------------------------------------------------- internals
@@ -453,6 +496,7 @@ class Session {
     ];
     const child = spawn(this.ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     this.decoder = child;
+    this.decoderPlan = plan;
     // Chained while the worklet is already full: read nothing, not even the
     // header, until credit comes back.
     if (!this.stalled && this.inflight() >= this.highWater) {
@@ -931,6 +975,13 @@ class GaplessProducer {
     this.owner = null;
   }
 
+  releasePaths(held: (path: string) => boolean): Promise<void> {
+    if (this.pendingNext?.plan && held(this.pendingNext.plan.source.path)) {
+      this.pendingNext = { ...this.pendingNext, plan: null };
+    }
+    return this.session?.releasePaths(held) ?? Promise.resolve();
+  }
+
   private closeSession(): void {
     this.pendingNext = null;
     this.session?.close();
@@ -1019,4 +1070,14 @@ export function registerGaplessTransport(
 /** Kill every gapless decoder and resampler. On Windows a child ffmpeg outlives main unless killed. */
 export function closeAllGaplessSessions(): void {
   for (const producer of producers) producer.dispose();
+}
+
+/**
+ * Stop every gapless decoder reading one of these files and forget plans on
+ * them, so the files can be moved; the stream itself keeps going.
+ */
+export async function releaseGaplessPaths(paths: string[]): Promise<void> {
+  const keys = new Set(paths.map(ffmpegInputKey));
+  const held = (path: string): boolean => keys.has(ffmpegInputKey(path));
+  await Promise.all([...producers].map((producer) => producer.releasePaths(held)));
 }

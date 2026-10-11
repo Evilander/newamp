@@ -46,9 +46,25 @@ export interface LibraryWatcherOptions {
   // A configured root is reachable again and watched again. Main rescans it,
   // which clears the missing marks its tracks got while it was away.
   onRootAvailable?: (root: string) => void;
+  // The longest changes wait for a flush while events keep arriving. The
+  // debounce restarts on every event, so a long copy would otherwise import
+  // nothing until it was over.
+  maxWaitMs?: number;
 }
 
-export type LibraryWatchCallback = (targets: string[]) => void | Promise<void>;
+// What a flush hands over. force: audio files and folder art the events named,
+// read again whatever the stored size and date say. incremental: everything
+// else (a root whose event carried no name, a folder that appeared or went
+// away), where the stored size and date can skip what has not changed. A
+// target is in one list only, force winning.
+export interface LibraryWatchPlan {
+  force: string[];
+  incremental: string[];
+}
+
+export type LibraryWatchCallback = (targets: string[], plan: LibraryWatchPlan) => void | Promise<void>;
+
+type LibraryWatchScanMode = 'force' | 'incremental';
 
 // Two paths differing only in case are one folder on Windows and macOS, and
 // two real folders on Linux; folding there would lose one of them.
@@ -98,8 +114,11 @@ export function resolveLibraryWatchTarget(root: string, fileName: string | Buffe
 
 export class LibraryWatcher {
   private readonly debounceMs: number;
+  private readonly maxWaitMs: number;
   private readonly strategy: 'recursive' | 'per-directory';
-  private readonly pendingTargets = new Map<string, string>();
+  private readonly pendingTargets = new Map<string, { path: string; mode: LibraryWatchScanMode }>();
+  // When the oldest change still waiting was queued; the flush deadline counts from here.
+  private pendingSince = 0;
   // Keyed by the watched path: one entry per root ('recursive') or per folder.
   private readonly watchers = new Map<string, FSWatcher>();
   private roots: string[] = [];
@@ -122,6 +141,7 @@ export class LibraryWatcher {
     options: LibraryWatcherOptions = {},
   ) {
     this.debounceMs = Math.max(50, Math.round(options.debounceMs ?? 5000));
+    this.maxWaitMs = Math.max(this.debounceMs, Math.round(options.maxWaitMs ?? 30_000));
     this.strategy = options.strategy ?? (process.platform === 'linux' ? 'per-directory' : 'recursive');
     this.rootPollMs = Math.max(50, Math.round(options.rootPollMs ?? 15_000));
     this.onRootAvailable = options.onRootAvailable;
@@ -173,6 +193,7 @@ export class LibraryWatcher {
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear();
     this.pendingTargets.clear();
+    this.pendingSince = 0;
     this.pendingRenames.clear();
     this.roots = [];
     // A new set of roots gets a fresh accounting, and its warnings again.
@@ -209,13 +230,19 @@ export class LibraryWatcher {
 
   flushNow(): void {
     if (!this.pendingTargets.size) return;
-    const targets = [...this.pendingTargets.values()];
+    const pending = [...this.pendingTargets.values()];
+    const targets = pending.map((entry) => entry.path);
+    const plan: LibraryWatchPlan = {
+      force: pending.filter((entry) => entry.mode === 'force').map((entry) => entry.path),
+      incremental: pending.filter((entry) => entry.mode === 'incremental').map((entry) => entry.path),
+    };
     this.pendingTargets.clear();
+    this.pendingSince = 0;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    void Promise.resolve(this.onChange(targets)).catch((err) => {
+    void Promise.resolve(this.onChange(targets, plan)).catch((err) => {
       console.warn(`[newamp] library watcher scan failed: ${errorMessage(err)}`);
     });
   }
@@ -260,23 +287,23 @@ export class LibraryWatcher {
     }
   }
 
-  private queueTarget(target: string): void {
-    this.pendingTargets.set(watchKey(target), target);
+  private queueTarget(target: string, mode: LibraryWatchScanMode = 'incremental'): void {
+    const key = watchKey(target);
+    // A target asked for twice is read again if either asked for that.
+    const forced = mode === 'force' || this.pendingTargets.get(key)?.mode === 'force';
+    this.pendingTargets.set(key, { path: target, mode: forced ? 'force' : 'incremental' });
+    const now = Date.now();
+    if (!this.pendingSince) this.pendingSince = now;
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.flushNow(), this.debounceMs);
+    const untilDeadline = Math.max(0, this.pendingSince + this.maxWaitMs - now);
+    this.timer = setTimeout(() => this.flushNow(), Math.min(this.debounceMs, untilDeadline));
   }
 
   private watchPath(path: string, recursive: boolean, generation = this.generation): boolean {
     if (this.watchers.has(path)) return true;
     try {
       const watcher = watch(path, { recursive }, (eventType, fileName) => {
-        if (generation !== this.generation) return;
-        // Events are relative to the watched path, so it doubles as the root.
-        const target = resolveLibraryWatchTarget(path, fileName);
-        if (target) this.queueTarget(target);
-        if (eventType === 'rename' && fileName) {
-          void this.reconcileRenamedPath(join(path, fileName.toString()), recursive, generation);
-        }
+        this.onWatchEvent(path, recursive, generation, eventType, fileName);
       });
       watcher.on('error', (err) => {
         // Deleting a watched folder errors its watcher. Drop it so the map
@@ -294,6 +321,30 @@ export class LibraryWatcher {
       // ENOSPC here is the inotify watch limit (fs.inotify.max_user_watches).
       this.reportWatchFailure(path, err);
       return false;
+    }
+  }
+
+  private onWatchEvent(
+    path: string,
+    recursive: boolean,
+    generation: number,
+    eventType: string,
+    fileName: string | Buffer | null,
+  ): void {
+    if (generation !== this.generation) return;
+    // Events are relative to the watched path, so it doubles as the root.
+    const target = resolveLibraryWatchTarget(path, fileName);
+    if (target) {
+      // An event with no name is the watcher telling us it fell behind (a
+      // fast bulk copy overflows the native buffer): something changed under
+      // this root and it can't say what. Walk the root and let the stored
+      // size and date skip what hasn't changed; re-reading every file of a
+      // large library for it was the cost of treating that as a file event.
+      const named = fileName != null && fileName.toString().trim() !== '';
+      this.queueTarget(target, named ? 'force' : 'incremental');
+    }
+    if (eventType === 'rename' && fileName) {
+      void this.reconcileRenamedPath(join(path, fileName.toString()), recursive, generation);
     }
   }
 
@@ -367,6 +418,41 @@ export class LibraryWatcher {
       }
     } finally {
       if (generation === this.generation) this.pendingRenames.delete(path);
+    }
+  }
+}
+
+// Whole-folder walks the watcher asks for. A bulk copy that overflows the
+// watcher's buffer asks for the root again at every flush deadline, and a walk
+// of a large library can outlast that, so identical walks would stack up
+// behind each other. One scan runs at a time; whatever is asked for meanwhile
+// waits as a single batch (files may have landed behind the walk), and a
+// folder asked for again folds into it.
+export class IncrementalScanGate {
+  private readonly waiting = new Map<string, string>();
+  private draining = false;
+
+  constructor(private readonly scan: (targets: string[]) => Promise<void>) {}
+
+  request(targets: string[]): void {
+    for (const target of targets) this.waiting.set(watchKey(target), target);
+    if (!this.draining) void this.drain();
+  }
+
+  private async drain(): Promise<void> {
+    this.draining = true;
+    try {
+      while (this.waiting.size) {
+        const batch = [...this.waiting.values()];
+        this.waiting.clear();
+        try {
+          await this.scan(batch);
+        } catch (err) {
+          console.warn(`[newamp] library watcher scan failed: ${errorMessage(err)}`);
+        }
+      }
+    } finally {
+      this.draining = false;
     }
   }
 }

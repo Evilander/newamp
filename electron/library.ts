@@ -172,7 +172,28 @@ CREATE TABLE IF NOT EXISTS tracks (
   -- sees it again. The row, its id and everything hanging off it are kept.
   missing_since INTEGER,
   -- fs.Stats.dev of the file when last scanned (see missingFileIsConfirmedGone).
-  file_dev     INTEGER
+  file_dev     INTEGER,
+  -- What the file says about its own codec. NULL: no scan has read it yet (an
+  -- .m4a with NULL is read again on the next scan). '': read, and it named none.
+  codec        TEXT,
+  codec_lossless INTEGER,
+  bits_per_sample INTEGER,
+  -- Set once a rating or play count embedded in the file has been considered
+  -- for this row, so a rating cleared in NewAmp does not come back on a rescan.
+  tag_stats_imported INTEGER NOT NULL DEFAULT 0,
+  mb_recording_id TEXT,
+  mb_release_id TEXT,
+  mb_artist_id TEXT,
+  isrc         TEXT,
+  acoustid_id  TEXT,
+  -- Search text with case, accents and compatibility forms folded (see
+  -- foldSearchText). SQLite's lower() only folds A-Z, so lower(artist) never
+  -- matched "bjork" against "Björk" or "ÓLAFUR" against "Ólafur".
+  title_fold   TEXT NOT NULL DEFAULT '',
+  artist_fold  TEXT NOT NULL DEFAULT '',
+  album_fold   TEXT NOT NULL DEFAULT '',
+  album_artist_fold TEXT NOT NULL DEFAULT '',
+  genre_fold   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album);
@@ -431,6 +452,20 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, defi
   ['tracks', 'dna_analyzed_at', 'INTEGER'],
   ['tracks', 'missing_since', 'INTEGER'],
   ['tracks', 'file_dev', 'INTEGER'],
+  ['tracks', 'codec', 'TEXT'],
+  ['tracks', 'codec_lossless', 'INTEGER'],
+  ['tracks', 'bits_per_sample', 'INTEGER'],
+  ['tracks', 'tag_stats_imported', 'INTEGER NOT NULL DEFAULT 0'],
+  ['tracks', 'mb_recording_id', 'TEXT'],
+  ['tracks', 'mb_release_id', 'TEXT'],
+  ['tracks', 'mb_artist_id', 'TEXT'],
+  ['tracks', 'isrc', 'TEXT'],
+  ['tracks', 'acoustid_id', 'TEXT'],
+  ['tracks', 'title_fold', `TEXT NOT NULL DEFAULT ''`],
+  ['tracks', 'artist_fold', `TEXT NOT NULL DEFAULT ''`],
+  ['tracks', 'album_fold', `TEXT NOT NULL DEFAULT ''`],
+  ['tracks', 'album_artist_fold', `TEXT NOT NULL DEFAULT ''`],
+  ['tracks', 'genre_fold', `TEXT NOT NULL DEFAULT ''`],
   ['track_metadata_overrides', 'source_known', 'INTEGER NOT NULL DEFAULT 1'],
   ['smart_rules', 'min_rating', 'INTEGER'],
   ['smart_rules', 'search_query', 'TEXT'],
@@ -452,6 +487,14 @@ const METADATA_FIELD_COLUMNS: Readonly<Record<TrackMetadataField, keyof RawRow>>
   discNo: 'disc_no',
 };
 const METADATA_FIELDS = Object.keys(METADATA_FIELD_COLUMNS) as TrackMetadataField[];
+// The folded search copy kept beside each editable text column.
+const METADATA_FOLD_COLUMNS: Readonly<Partial<Record<TrackMetadataField, string>>> = {
+  title: 'title_fold',
+  artist: 'artist_fold',
+  album: 'album_fold',
+  albumArtist: 'album_artist_fold',
+  genre: 'genre_fold',
+};
 // NOT NULL text columns store an empty string where the others store NULL.
 const NOT_NULL_TEXT_FIELDS = new Set<TrackMetadataField>(['title', 'artist', 'album', 'albumArtist']);
 
@@ -498,6 +541,10 @@ interface RawRow {
   art_hash: string | null;
   missing_since: number | null;
   file_dev: number | null;
+  codec: string | null;
+  codec_lossless: number | null;
+  bits_per_sample: number | null;
+  mb_recording_id: string | null;
 }
 
 interface SmartRuleRow {
@@ -638,6 +685,10 @@ function rowToTrack(r: RawRow): Track {
     replayGainTrackDb: r.replaygain_track_db,
     replayGainAlbumDb: r.replaygain_album_db,
     missingSince: r.missing_since ?? null,
+    codec: r.codec || null,
+    codecLossless: r.codec_lossless == null ? null : r.codec_lossless === 1,
+    bitsPerSample: r.bits_per_sample ?? null,
+    mbRecordingId: r.mb_recording_id ?? null,
   };
 }
 
@@ -730,6 +781,22 @@ export interface IncomingTrack {
   // The tags could not be read and the metadata fields are a filename guess.
   // A track the library already has keeps what it has (see upsertTracks).
   parseFailed?: boolean;
+  // The file's own codec name ('' when it read fine but named none), its
+  // lossless flag and bit depth. A reading that carries no codec leaves the
+  // row's alone.
+  codec?: string | null;
+  codecLossless?: boolean | null;
+  bitsPerSample?: number | null;
+  // A rating embedded in the file (POPM, RATING, FMPS_RATING, iTunes rate) as
+  // a 0..100 score, and a play count from its tags. They only seed a row that
+  // has neither of its own (see upsertTracks).
+  fileRatingScore?: number | null;
+  filePlayCount?: number | null;
+  mbRecordingId?: string | null;
+  mbReleaseId?: string | null;
+  mbArtistId?: string | null;
+  isrc?: string | null;
+  acoustidId?: string | null;
 }
 
 export interface TrackFileState {
@@ -741,6 +808,8 @@ export interface TrackFileState {
   artHash: string | null;
   artExists: boolean;
   fileDev: number | null;
+  // Null until a scan has read the file's codec (see tracks.codec).
+  codec: string | null;
 }
 
 interface TrackFileStateRow {
@@ -751,6 +820,7 @@ interface TrackFileStateRow {
   has_art: number;
   art_hash: string | null;
   file_dev: number | null;
+  codec: string | null;
 }
 
 interface HistoryImportTrackRow {
@@ -1191,12 +1261,20 @@ export class LibraryStore {
       // MusicBrainz lookup fills it in when the file yields none, and a file
       // that still yields none must not erase it. Reading the file at all
       // proves it is there, so the missing mark goes.
+      //
+      // A rating or play count embedded in the file only seeds a row that has
+      // none of its own (nothing rated, never played) and has not been seeded
+      // before; whatever the user set in NewAmp wins, and a rating cleared
+      // later stays cleared. tag_stats_imported is what remembers that.
       const stmt = this.db.prepare(
         `INSERT INTO tracks
          (path, title, artist, album, album_artist, track_no, disc_no, year, genre,
           duration, bitrate, sample_rate, bpm, key, replaygain_track_db, replaygain_album_db, size, mtime, has_art, art_hash,
-          file_dev)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          file_dev, codec, codec_lossless, bits_per_sample,
+          mb_recording_id, mb_release_id, mb_artist_id, isrc, acoustid_id,
+          title_fold, artist_fold, album_fold, album_artist_fold, genre_fold,
+          rating, rating_score, play_count, tag_stats_imported)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(path) DO UPDATE SET
            title=excluded.title,
            artist=excluded.artist,
@@ -1218,7 +1296,30 @@ export class LibraryStore {
            has_art=CASE WHEN excluded.art_hash IS NULL THEN tracks.has_art ELSE excluded.has_art END,
            art_hash=COALESCE(excluded.art_hash, tracks.art_hash),
            missing_since=NULL,
-           file_dev=COALESCE(excluded.file_dev, tracks.file_dev)`,
+           file_dev=COALESCE(excluded.file_dev, tracks.file_dev),
+           codec=COALESCE(excluded.codec, tracks.codec),
+           codec_lossless=CASE WHEN excluded.codec IS NULL THEN tracks.codec_lossless ELSE excluded.codec_lossless END,
+           bits_per_sample=CASE WHEN excluded.codec IS NULL THEN tracks.bits_per_sample ELSE excluded.bits_per_sample END,
+           mb_recording_id=excluded.mb_recording_id,
+           mb_release_id=excluded.mb_release_id,
+           mb_artist_id=excluded.mb_artist_id,
+           isrc=excluded.isrc,
+           acoustid_id=excluded.acoustid_id,
+           title_fold=excluded.title_fold,
+           artist_fold=excluded.artist_fold,
+           album_fold=excluded.album_fold,
+           album_artist_fold=excluded.album_artist_fold,
+           genre_fold=excluded.genre_fold,
+           rating=CASE WHEN tracks.tag_stats_imported = 0 AND excluded.tag_stats_imported = 1
+                         AND tracks.rating = 0 AND tracks.rating_score IS NULL
+                       THEN excluded.rating ELSE tracks.rating END,
+           rating_score=CASE WHEN tracks.tag_stats_imported = 0 AND excluded.tag_stats_imported = 1
+                               AND tracks.rating = 0 AND tracks.rating_score IS NULL
+                             THEN excluded.rating_score ELSE tracks.rating_score END,
+           play_count=CASE WHEN tracks.tag_stats_imported = 0 AND excluded.tag_stats_imported = 1
+                             AND tracks.play_count = 0 AND tracks.last_played IS NULL
+                           THEN excluded.play_count ELSE tracks.play_count END,
+           tag_stats_imported=MAX(tracks.tag_stats_imported, excluded.tag_stats_imported)`,
       );
       const artHashCache = new WeakMap<Buffer, string>();
       const writtenArtHashes = new Set<string>();
@@ -1233,6 +1334,7 @@ export class LibraryStore {
             writtenArtHashes.add(artHash);
           }
         }
+        const seed = fileStatsSeed(r);
         stmt.run([
           r.path,
           r.title,
@@ -1255,6 +1357,23 @@ export class LibraryStore {
           artHash ? 1 : 0,
           artHash,
           r.dev ?? null,
+          r.codec ?? null,
+          r.codecLossless == null ? null : r.codecLossless ? 1 : 0,
+          r.bitsPerSample ?? null,
+          r.mbRecordingId ?? null,
+          r.mbReleaseId ?? null,
+          r.mbArtistId ?? null,
+          r.isrc ?? null,
+          r.acoustidId ?? null,
+          foldSearchText(r.title),
+          foldSearchText(r.artist),
+          foldSearchText(r.album),
+          foldSearchText(r.albumArtist),
+          foldSearchText(r.genre),
+          seed.rating,
+          seed.ratingScore,
+          seed.playCount,
+          seed.imported,
         ]);
       }
       stmt.free();
@@ -1296,8 +1415,10 @@ export class LibraryStore {
       for (const row of rows) known.add(row.path);
     }
     if (!known.size) return items;
+    // codec '' marks the file as tried, so a container that never parses is
+    // not read again on every scan just because its codec is still unknown.
     for (const path of known) {
-      this.db.run(`UPDATE tracks SET missing_since = NULL WHERE path = ?`, [path]);
+      this.db.run(`UPDATE tracks SET missing_since = NULL, codec = COALESCE(codec, '') WHERE path = ?`, [path]);
     }
     return items.filter((item) => !(item.parseFailed && known.has(item.path)));
   }
@@ -1462,8 +1583,29 @@ export class LibraryStore {
       }
       sets.push(`${METADATA_FIELD_COLUMNS[field]} = ?`);
       params.push(metadataColumnValue(field, value));
+      const foldColumn = METADATA_FOLD_COLUMNS[field];
+      if (foldColumn) {
+        sets.push(`${foldColumn} = ?`);
+        params.push(foldSearchText(metadataColumnValue(field, value) as string | null));
+      }
     }
     if (sets.length) this.db.run(`UPDATE tracks SET ${sets.join(', ')} WHERE id = ?`, [...params, trackId]);
+  }
+
+  // One owned column written back from an override, with the folded copy
+  // search reads kept beside it.
+  private writeTrackMetadataColumn(trackId: number, field: TrackMetadataField, value: MetadataValue): void {
+    const column = metadataColumnValue(field, value);
+    const foldColumn = METADATA_FOLD_COLUMNS[field];
+    if (foldColumn) {
+      this.db.run(`UPDATE tracks SET ${METADATA_FIELD_COLUMNS[field]} = ?, ${foldColumn} = ? WHERE id = ?`, [
+        column,
+        foldSearchText(column as string | null),
+        trackId,
+      ]);
+    } else {
+      this.db.run(`UPDATE tracks SET ${METADATA_FIELD_COLUMNS[field]} = ? WHERE id = ?`, [column, trackId]);
+    }
   }
 
   // "Reset to file": the override goes and the column takes the value the
@@ -1478,10 +1620,7 @@ export class LibraryStore {
         [trackId, field],
       );
       if (!row || row.source_known !== 1) continue;
-      this.db.run(`UPDATE tracks SET ${METADATA_FIELD_COLUMNS[field]} = ? WHERE id = ?`, [
-        metadataColumnValue(field, parseMetadataJson(field, row.source_json)),
-        trackId,
-      ]);
+      this.writeTrackMetadataColumn(trackId, field, parseMetadataJson(field, row.source_json));
       this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ? AND field = ?`, [trackId, field]);
     }
   }
@@ -1522,10 +1661,7 @@ export class LibraryStore {
     try {
       for (const row of rows) {
         if (isTrackMetadataField(row.field)) {
-          this.db.run(`UPDATE tracks SET ${METADATA_FIELD_COLUMNS[row.field]} = ? WHERE id = ?`, [
-            metadataColumnValue(row.field, parseMetadataJson(row.field, row.source_json)),
-            row.track_id,
-          ]);
+          this.writeTrackMetadataColumn(row.track_id, row.field, parseMetadataJson(row.field, row.source_json));
         }
         this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ? AND field = ?`, [row.track_id, row.field]);
       }
@@ -1598,6 +1734,13 @@ export class LibraryStore {
     key: string | null;
     replaygainTrackDb: number | null;
     replaygainAlbumDb: number | null;
+    codec: string | null;
+    bitsPerSample: number | null;
+    mbRecordingId: string | null;
+    mbReleaseId: string | null;
+    mbArtistId: string | null;
+    isrc: string | null;
+    acoustidId: string | null;
     // Semicolon-separated fields holding the user's value, not the file's.
     // The edits exist nowhere else, so an export has to say which they are.
     editedFields: string | null;
@@ -1614,6 +1757,9 @@ export class LibraryStore {
          bpm, key,
          replaygain_track_db AS replaygainTrackDb,
          replaygain_album_db AS replaygainAlbumDb,
+         NULLIF(codec, '') AS codec, bits_per_sample AS bitsPerSample,
+         mb_recording_id AS mbRecordingId, mb_release_id AS mbReleaseId, mb_artist_id AS mbArtistId,
+         isrc, acoustid_id AS acoustidId,
          (SELECT group_concat(o.field, ';') FROM track_metadata_overrides o WHERE o.track_id = tracks.id) AS editedFields
        FROM tracks
        ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE`,
@@ -1624,6 +1770,15 @@ export class LibraryStore {
     if (this.libraryHealthCache) return this.libraryHealthCache;
     const rows = this.many<LibraryHealthRow>(
       `SELECT id, path, title, artist, album, year, duration, bitrate, sample_rate, size, mtime, has_art, replaygain_track_db, replaygain_album_db FROM tracks`,
+    );
+    // Only containers (.m4a, .mka) need their codec to be told lossless from
+    // lossy, so only those rows are asked for it.
+    const containerWhere = extensionSetSql(CONTAINER_AUDIO_EXTENSIONS);
+    const containerCodecs = new Map(
+      this.many<{ id: number; codec: string; codec_lossless: number | null; bits_per_sample: number | null }>(
+        `SELECT id, codec, codec_lossless, bits_per_sample FROM tracks WHERE codec IS NOT NULL AND codec != '' AND ${containerWhere.sql}`,
+        containerWhere.params,
+      ).map((row) => [row.id, row] as const),
     );
     const totals = this.getStats();
     const missing = {
@@ -1654,6 +1809,7 @@ export class LibraryStore {
       if (!row.has_art) missing.art += 1;
       if (row.duration == null || row.duration <= 0) missing.duration += 1;
 
+      const container = containerCodecs.get(row.id);
       const signal = classifyAudioQuality({
         path: row.path,
         bitrate: row.bitrate,
@@ -1662,6 +1818,9 @@ export class LibraryStore {
         size: row.size,
         replayGainTrackDb: row.replaygain_track_db,
         replayGainAlbumDb: row.replaygain_album_db,
+        codec: container?.codec ?? null,
+        codecLossless: container?.codec_lossless == null ? null : container.codec_lossless === 1,
+        bitsPerSample: container?.bits_per_sample ?? null,
       });
       if (signal.isLossless) quality.lossless += 1;
       if (signal.family === 'lossy') quality.lossy += 1;
@@ -1891,23 +2050,40 @@ export class LibraryStore {
       const chunk = unique.slice(i, i + chunkSize);
       const placeholders = chunk.map(() => '?').join(',');
       const rows = this.many<TrackFileStateRow>(
-        `SELECT id, path, size, mtime, has_art, art_hash, file_dev FROM tracks WHERE path IN (${placeholders})`,
+        `SELECT id, path, size, mtime, has_art, art_hash, file_dev, codec FROM tracks WHERE path IN (${placeholders})`,
         chunk,
       );
       for (const row of rows) out.set(row.path, this.rowToTrackFileState(row));
     }
 
-    if (out.size < unique.length) {
-      const normalizedRows = new Map(
-        this.many<TrackFileStateRow>(`SELECT id, path, size, mtime, has_art, art_hash, file_dev FROM tracks`).map((row) => [
-          normalizeFileStatePath(row.path),
-          row,
-        ]),
-      );
+    // A path the table doesn't hold in this exact spelling may be there in
+    // another case or with other separators. That only exists where names
+    // compare without case; elsewhere a miss is a new file, and answering it
+    // used to cost a read of the whole table for every batch of a first scan.
+    if (out.size < unique.length && foldPathCase('A') !== 'A') {
+      const identities = this.pathIdentitiesForWindows();
+      const requestedBy = new Map<string, string[]>();
       for (const path of unique) {
         if (out.has(path)) continue;
-        const row = normalizedRows.get(normalizeFileStatePath(path));
-        if (row) out.set(path, { ...this.rowToTrackFileState(row), path });
+        const spellings = identities.get(normalizeFileStatePath(path));
+        const stored = spellings?.[spellings.length - 1];
+        if (!stored) continue;
+        const requested = requestedBy.get(stored);
+        if (requested) requested.push(path);
+        else requestedBy.set(stored, [path]);
+      }
+      const storedPaths = [...requestedBy.keys()];
+      for (let i = 0; i < storedPaths.length; i += chunkSize) {
+        const chunk = storedPaths.slice(i, i + chunkSize);
+        const rows = this.many<TrackFileStateRow>(
+          `SELECT id, path, size, mtime, has_art, art_hash, file_dev, codec FROM tracks WHERE path IN (${chunk.map(() => '?').join(',')})`,
+          chunk,
+        );
+        for (const row of rows) {
+          for (const path of requestedBy.get(row.path) ?? []) {
+            out.set(path, { ...this.rowToTrackFileState(row), path });
+          }
+        }
       }
     }
 
@@ -1924,6 +2100,7 @@ export class LibraryStore {
       artHash: row.art_hash,
       artExists: row.art_hash ? this.artFileExists(row.art_hash) : false,
       fileDev: row.file_dev ?? null,
+      codec: row.codec ?? null,
     };
   }
 
@@ -1958,12 +2135,13 @@ export class LibraryStore {
   markTracksMissing(targets: string[]): number {
     const normalizedTargets = normalizePruneTargets(targets);
     if (!normalizedTargets.length) return 0;
-    const goneTargets = normalizedTargets.filter((target) => !target.exists);
+    const all = indexPruneTargets(normalizedTargets);
+    const gone = indexPruneTargets(normalizedTargets.filter((target) => !target.exists));
     const ids: number[] = [];
     const toCheck: Array<{ id: number; path: string }> = [];
     for (const row of this.many<{ id: number; path: string }>(`SELECT id, path FROM tracks WHERE missing_since IS NULL`)) {
-      if (!matchesPruneTargets(row.path, normalizedTargets)) continue;
-      if (matchesPruneTargets(row.path, goneTargets)) ids.push(row.id);
+      if (!matchesPruneTargets(row.path, all)) continue;
+      if (matchesPruneTargets(row.path, gone)) ids.push(row.id);
       else toCheck.push(row);
     }
     ids.push(...absentTrackIds(toCheck));
@@ -1984,13 +2162,14 @@ export class LibraryStore {
     // file) has nothing under it, and it was found, so it can't add anything.
     const roots = normalizePruneTargets(walkedRoots).filter((root) => root.exists && root.kind === 'dir');
     if (!roots.length) return 0;
-    const unread = normalizePruneTargets(unreadableFolders);
+    const rootIndex = indexPruneTargets(roots);
+    const unread = indexPruneTargets(normalizePruneTargets(unreadableFolders));
     const foundKeys = new Set(found.map(normalizeFileStatePath));
     const candidates = this.many<{ id: number; path: string }>(`SELECT id, path FROM tracks WHERE missing_since IS NULL`)
       .filter((row) =>
         !foundKeys.has(normalizeFileStatePath(row.path))
-        && matchesPruneTargets(row.path, roots)
-        && !(unread.length && matchesPruneTargets(row.path, unread)));
+        && matchesPruneTargets(row.path, rootIndex)
+        && !matchesPruneTargets(row.path, unread));
     const ids = absentTrackIds(candidates);
     if (!ids.length) return 0;
     this.setMissingSince(ids, Date.now());
@@ -2068,8 +2247,8 @@ export class LibraryStore {
     const tracks = this.many<{ id: number; path: string; file_dev: number | null }>(
       `SELECT id, path, file_dev FROM tracks`,
     );
-    const normalizedTargets = normalizePruneTargets(targets);
-    const candidates = normalizedTargets.length
+    const normalizedTargets = indexPruneTargets(normalizePruneTargets(targets));
+    const candidates = normalizedTargets.size
       ? tracks.filter((track) => matchesPruneTargets(track.path, normalizedTargets))
       : tracks;
     const probes = new Map<string, DirectoryProbe | null>();
@@ -2094,40 +2273,8 @@ export class LibraryStore {
   pruneMissingTracks(targets?: string[], roots: string[] = []): LibraryPruneMissingResult {
     const { checked, ids: missingIds, offline } = this.collectPrunableTracks(targets, roots);
     if (!missingIds.length) return { checked, removed: 0, offline };
-
-    this.db.run('BEGIN');
-    try {
-      for (const id of missingIds) {
-        this.db.run(`DELETE FROM playlist_tracks WHERE track_id = ?`, [id]);
-        this.db.run(`DELETE FROM play_history WHERE track_id = ?`, [id]);
-        this.db.run(`DELETE FROM skip_history WHERE track_id = ?`, [id]);
-        this.db.run(`DELETE FROM track_bookmarks WHERE track_id = ?`, [id]);
-        this.db.run(`DELETE FROM guitar_tab_cache WHERE track_id = ?`, [id]);
-        this.db.run(`DELETE FROM custom_lyrics WHERE track_id = ?`, [id]);
-        this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ?`, [id]);
-        this.db.run(`DELETE FROM track_metadata_adoption WHERE track_id = ?`, [id]);
-        // sql.js does not enforce ON DELETE CASCADE foreign keys; we have to
-        // delete the visual memory row explicitly so a vanished track doesn't
-        // strand a plan blob in the database.
-        this.db.run(`DELETE FROM track_visual_memory WHERE track_id = ?`, [id]);
-        this.db.run(`DELETE FROM tracks WHERE id = ?`, [id]);
-      }
-      this.windowsPathIdentities = null;
-      this.invalidateDnaIndexCache();
-      this.invalidateFolderTrackRowsCache();
-      this.invalidateLibraryHealthCache();
-      // Pruning explicitly deletes track_visual_memory rows above; any prune
-      // pass that removed tracks also removed their plan blobs, so the cached
-      // section total is stale.
-      this.invalidateVisualMemoryStatsCache();
-      this.db.run('COMMIT');
-    } catch (err) {
-      this.db.run('ROLLBACK');
-      throw err;
-    }
-
-    this.scheduleFlush();
-    return { checked, removed: missingIds.length, offline };
+    const removedIds = this.removeTracksById(missingIds);
+    return { checked, removed: removedIds.length, removedIds, offline };
   }
 
   applyMetadataPatch(trackId: number, candidate: MetadataLookupCandidate): Track | null {
@@ -2231,11 +2378,11 @@ export class LibraryStore {
     let matchSelect = '';
     const matchSelectParams: unknown[] = [];
     if (search) {
-      const q = likeParam(search);
+      const q = foldedLikeParam(search);
       matchSelect = `,
-              MAX(CASE WHEN lower(album) LIKE ? ESCAPE '|' OR lower(COALESCE(NULLIF(album_artist,''), artist)) LIKE ? ESCAPE '|' OR CAST(year AS TEXT) LIKE ? ESCAPE '|' THEN 1 ELSE 0 END) AS matched_meta,
-              MAX(CASE WHEN lower(title) LIKE ? ESCAPE '|' THEN 1 ELSE 0 END) AS matched_track,
-              GROUP_CONCAT(CASE WHEN lower(title) LIKE ? ESCAPE '|' THEN title ELSE NULL END, char(31)) AS matched_titles`;
+              MAX(CASE WHEN album_fold LIKE ? ESCAPE '|' OR COALESCE(NULLIF(album_artist_fold,''), artist_fold) LIKE ? ESCAPE '|' OR CAST(year AS TEXT) LIKE ? ESCAPE '|' THEN 1 ELSE 0 END) AS matched_meta,
+              MAX(CASE WHEN title_fold LIKE ? ESCAPE '|' THEN 1 ELSE 0 END) AS matched_track,
+              GROUP_CONCAT(CASE WHEN title_fold LIKE ? ESCAPE '|' THEN title ELSE NULL END, char(31)) AS matched_titles`;
       matchSelectParams.push(q, q, q, q, q);
       having.push('(matched_meta = 1 OR matched_track = 1)');
     }
@@ -2394,8 +2541,8 @@ export class LibraryStore {
     const params: unknown[] = [];
 
     if (search) {
-      const q = likeParam(search);
-      where.push(`(lower(artist) LIKE ? ESCAPE '|' OR lower(album) LIKE ? ESCAPE '|')`);
+      const q = foldedLikeParam(search);
+      where.push(`(artist_fold LIKE ? ESCAPE '|' OR album_fold LIKE ? ESCAPE '|')`);
       params.push(q, q);
     }
 
@@ -3453,8 +3600,8 @@ export class LibraryStore {
     const params: unknown[] = [];
     const genreQuery = input.genreQuery?.trim();
     if (genreQuery) {
-      where.push(`genre IS NOT NULL AND lower(genre) LIKE ? ESCAPE '|'`);
-      params.push(likeParam(genreQuery));
+      where.push(`genre IS NOT NULL AND genre_fold LIKE ? ESCAPE '|'`);
+      params.push(foldedLikeParam(genreQuery));
     }
     let candidates = this.many<RawRow>(
       `SELECT * FROM tracks
@@ -3587,6 +3734,67 @@ export class LibraryStore {
   private runOneShotMigrations(): void {
     this.maybeBackfillAlbumRatingsFromTracks();
     this.maybeQueueMetadataAdoption();
+    this.maybeBackfillSearchFold();
+    this.dropOrphanedTrackRows();
+  }
+
+  /**
+   * sql.js export() reopens the connection, which turns PRAGMA foreign_keys
+   * back off, so ON DELETE CASCADE only holds for the first moments of a
+   * session and a removed track can leave rows behind. Tag rows are derived
+   * (recomputeTags rebuilds them) and inflate the tag counts, so any with no
+   * track are dropped on open. A list entry that pointed at such a track keeps
+   * its label and note and becomes a free-text entry; track ids are never reused.
+   */
+  private dropOrphanedTrackRows(): void {
+    this.db.run(`DELETE FROM track_tags WHERE track_id NOT IN (SELECT id FROM tracks)`);
+    let changed = this.db.getRowsModified() > 0;
+    this.db.run(`UPDATE list_items SET track_id = NULL WHERE track_id IS NOT NULL AND track_id NOT IN (SELECT id FROM tracks)`);
+    changed = changed || this.db.getRowsModified() > 0;
+    if (changed) this.scheduleFlush();
+  }
+
+  /**
+   * Migration: the folded search columns are new, so every track already in
+   * the library gets them computed from its current (effective) title, artist,
+   * album, album artist and genre. Upserts and metadata edits keep them
+   * current afterwards. Bump the flag if foldSearchText ever changes. Once
+   * the flag is set, only rows that were written without a fold (by an older
+   * build after a downgrade) are filled in.
+   */
+  private maybeBackfillSearchFold(): void {
+    const flagKey = 'search_fold_v2';
+    const first = !this.one(`SELECT 1 FROM library_meta WHERE key = ?`, [flagKey]);
+    try {
+      const rows = this.many<{ id: number; title: string; artist: string; album: string; album_artist: string; genre: string | null }>(
+        `SELECT id, title, artist, album, album_artist, genre FROM tracks${
+          first ? '' : ` WHERE title_fold = '' AND artist_fold = '' AND (title != '' OR artist != '')`
+        }`,
+      );
+      if (!rows.length && !first) return;
+      const stmt = this.db.prepare(
+        `UPDATE tracks SET title_fold = ?, artist_fold = ?, album_fold = ?, album_artist_fold = ?, genre_fold = ? WHERE id = ?`,
+      );
+      try {
+        for (const row of rows) {
+          stmt.run([
+            foldSearchText(row.title),
+            foldSearchText(row.artist),
+            foldSearchText(row.album),
+            foldSearchText(row.album_artist),
+            foldSearchText(row.genre),
+            row.id,
+          ]);
+        }
+      } finally {
+        stmt.free();
+      }
+      this.db.run(`INSERT OR REPLACE INTO library_meta (key, value) VALUES (?, ?)`, [flagKey, String(Date.now())]);
+      this.scheduleFlush();
+    } catch (err) {
+      // Searching falls back to whatever the columns hold; the next boot tries again.
+      console.error('[newamp] search fold backfill failed:', err);
+    }
   }
 
   /**
@@ -4030,6 +4238,8 @@ export class LibraryStore {
 
   recordPlay(id: number, playedAt = Date.now()): void {
     const trackId = Math.trunc(id);
+    // Same as recordSkip: a play can land after its track was removed.
+    if (!this.one(`SELECT 1 FROM tracks WHERE id = ?`, [trackId])) return;
     const played = Math.max(0, Math.trunc(playedAt));
     this.db.run('BEGIN');
     try {
@@ -4052,6 +4262,9 @@ export class LibraryStore {
 
   recordSkip(id: number, skippedAt = Date.now(), position = 0): void {
     const trackId = Math.trunc(id);
+    // A skip can arrive for a track that was removed in the meantime; with no
+    // row to belong to it would only leave an orphan behind.
+    if (!this.one(`SELECT 1 FROM tracks WHERE id = ?`, [trackId])) return;
     const skipped = Math.max(0, Math.trunc(skippedAt));
     const skipPosition = Math.max(0, Number(position) || 0);
     this.db.run('BEGIN');
@@ -5158,6 +5371,71 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
       stmt.free();
     }
   }
+
+  // Destructive: these tracks leave the library with their plays, skips,
+  // ratings, bookmarks, edits and playlist places. The explicit removals
+  // (a trash, "Clean missing files") come through here after their backup,
+  // by id, so no heuristic about the file's folder can keep a row the user
+  // asked to drop. Returns the ids that were actually rows.
+  removeTracksById(ids: number[]): number[] {
+    const wanted = [...new Set(ids.map((id) => Math.trunc(Number(id))).filter((id) => id > 0))];
+    const present: number[] = [];
+    const chunkSize = 500;
+    for (let i = 0; i < wanted.length; i += chunkSize) {
+      const chunk = wanted.slice(i, i + chunkSize);
+      for (const row of this.many<{ id: number }>(`SELECT id FROM tracks WHERE id IN (${chunk.map(() => '?').join(',')})`, chunk)) {
+        present.push(row.id);
+      }
+    }
+    if (!present.length) return [];
+
+    this.db.run('BEGIN');
+    try {
+      for (const id of present) {
+        this.db.run(`DELETE FROM playlist_tracks WHERE track_id = ?`, [id]);
+        this.db.run(`DELETE FROM play_history WHERE track_id = ?`, [id]);
+        this.db.run(`DELETE FROM skip_history WHERE track_id = ?`, [id]);
+        this.db.run(`DELETE FROM track_bookmarks WHERE track_id = ?`, [id]);
+        this.db.run(`DELETE FROM guitar_tab_cache WHERE track_id = ?`, [id]);
+        this.db.run(`DELETE FROM custom_lyrics WHERE track_id = ?`, [id]);
+        this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ?`, [id]);
+        this.db.run(`DELETE FROM track_metadata_adoption WHERE track_id = ?`, [id]);
+        // sql.js does not enforce ON DELETE CASCADE foreign keys; we have to
+        // delete the visual memory row explicitly so a vanished track doesn't
+        // strand a plan blob in the database.
+        this.db.run(`DELETE FROM track_visual_memory WHERE track_id = ?`, [id]);
+        // Same for its tags, which would otherwise inflate the tag counts
+        // until the next open drops them.
+        this.db.run(`DELETE FROM track_tags WHERE track_id = ?`, [id]);
+        // A list entry has no foreign key to the track. It stays in its list
+        // as a free-text entry, titled after the track when it had no label.
+        // Reviews are left alone on purpose: their target is whatever the user
+        // typed (a title as often as an id), and the text is theirs to delete.
+        this.db.run(
+          `UPDATE list_items
+              SET label = CASE WHEN label = '' THEN COALESCE((SELECT title FROM tracks WHERE id = ?), '') ELSE label END,
+                  track_id = NULL
+            WHERE track_id = ?`,
+          [id, id],
+        );
+        this.db.run(`DELETE FROM tracks WHERE id = ?`, [id]);
+      }
+      this.windowsPathIdentities = null;
+      this.invalidateDnaIndexCache();
+      this.invalidateFolderTrackRowsCache();
+      this.invalidateLibraryHealthCache();
+      // The track_visual_memory rows went with the tracks, so the cached
+      // section total is stale.
+      this.invalidateVisualMemoryStatsCache();
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+
+    this.scheduleFlush();
+    return present;
+  }
 }
 
 function mimeToExt(mime: string): string {
@@ -5179,7 +5457,9 @@ function normalizedPlaylistCoverExt(path: string): string | null {
   return null;
 }
 
-function normalizePruneTargets(targets: string[] | undefined): PruneTarget[] {
+// Exported with indexPruneTargets and matchesPruneTargets for the timing
+// test; nothing outside this module uses them otherwise.
+export function normalizePruneTargets(targets: string[] | undefined): PruneTarget[] {
   if (!targets?.length) return [];
   const out: PruneTarget[] = [];
   const seen = new Set<string>();
@@ -5206,13 +5486,25 @@ function normalizePruneTargets(targets: string[] | undefined): PruneTarget[] {
   return out;
 }
 
-function matchesPruneTargets(path: string, targets: PruneTarget[]): boolean {
-  const key = normalizedPruneKey(path);
-  return targets.some((target) => {
-    // A vanished directory can contain a dot and look like a filename. A
-    // path-segment prefix is safe for both: real files have no descendants.
-    return key === target.key || key.startsWith(`${target.key}/`);
-  });
+// Target keys as a Set, so a row costs one lookup per path segment rather
+// than one comparison per target: the watcher, a prune and a trash all run
+// this over every row, and 100k rows against a few thousand targets was
+// seconds on the main thread.
+export function indexPruneTargets(targets: PruneTarget[]): Set<string> {
+  return new Set(targets.map((target) => target.key));
+}
+
+export function matchesPruneTargets(path: string, targets: Set<string>): boolean {
+  if (!targets.size) return false;
+  // A vanished directory can contain a dot and look like a filename. A
+  // path-segment prefix is safe for both: real files have no descendants.
+  let key = normalizedPruneKey(path);
+  for (;;) {
+    if (targets.has(key)) return true;
+    const cut = key.lastIndexOf('/');
+    if (cut < 0) return false;
+    key = key.slice(0, cut);
+  }
 }
 
 // The ids among these tracks whose file isn't there. Each folder is checked
@@ -5738,11 +6030,13 @@ function trackSearchWhere(search: ParsedTrackSearch): { where: string[]; params:
   }
 
   for (const term of search.terms) {
-    const q = likeParam(term);
+    // Tags are searched in their folded columns. The path is matched as typed:
+    // LIKE already ignores ASCII case, which is all lower() ever did to it.
+    const folded = foldedLikeParam(term);
     where.push(
-      `(lower(title) LIKE ? ESCAPE '|' OR lower(artist) LIKE ? ESCAPE '|' OR lower(album) LIKE ? ESCAPE '|' OR lower(COALESCE(genre, "")) LIKE ? ESCAPE '|' OR lower(path) LIKE ? ESCAPE '|')`,
+      `(title_fold LIKE ? ESCAPE '|' OR artist_fold LIKE ? ESCAPE '|' OR album_fold LIKE ? ESCAPE '|' OR genre_fold LIKE ? ESCAPE '|' OR path LIKE ? ESCAPE '|')`,
     );
-    params.push(q, q, q, q, q);
+    params.push(folded, folded, folded, folded, likeParam(term));
   }
 
   return { where, params };
@@ -5757,11 +6051,11 @@ function applyTrackSearchFilter(
   const value = filter.value.trim();
   if (!field || !value) return;
 
-  if (field === 'title') return pushTextFilter(where, params, 'title', value);
-  if (field === 'artist') return pushTextFilter(where, params, 'artist', value);
-  if (field === 'album') return pushTextFilter(where, params, 'album', value);
-  if (field === 'albumartist') return pushTextFilter(where, params, 'album_artist', value);
-  if (field === 'genre') return pushTextFilter(where, params, 'COALESCE(genre, "")', value);
+  if (field === 'title') return pushTextFilter(where, params, 'title_fold', value);
+  if (field === 'artist') return pushTextFilter(where, params, 'artist_fold', value);
+  if (field === 'album') return pushTextFilter(where, params, 'album_fold', value);
+  if (field === 'albumartist') return pushTextFilter(where, params, 'album_artist_fold', value);
+  if (field === 'genre') return pushTextFilter(where, params, 'genre_fold', value);
   if (field === 'path') {
     // Either separator matches either: stored paths are native to the OS.
     where.push(`replace(lower(path), '\\', '/') LIKE ? ESCAPE '|'`);
@@ -5803,9 +6097,10 @@ function applyTrackSearchFilter(
   }
 }
 
+// column is one of the folded search columns.
 function pushTextFilter(where: string[], params: unknown[], column: string, value: string): void {
-  where.push(`lower(${column}) LIKE ? ESCAPE '|'`);
-  params.push(likeParam(value));
+  where.push(`${column} LIKE ? ESCAPE '|'`);
+  params.push(foldedLikeParam(value));
 }
 
 function pushYearFilter(where: string[], params: unknown[], value: string): void {
@@ -5843,23 +6138,48 @@ function pushRatingFilter(where: string[], params: unknown[], value: string): vo
 
 function pushQualityFilter(where: string[], params: unknown[], value: string): void {
   const key = value.toLowerCase().replace(/[\s_]+/g, '-');
-  if (key === 'lossless') return pushExtensionSetFilter(where, params, [...PCM_LOSSLESS_EXTENSIONS, ...DSD_EXTENSIONS]);
-  if (key === 'lossy') return pushExtensionSetFilter(where, params, LOSSY_EXTENSIONS);
+  // An .m4a or .mka can hold either family; the codec flag a scan stored
+  // settles the ones it has read (see classifyAudioQuality).
+  const containerLossless = extensionSetSql(CONTAINER_AUDIO_EXTENSIONS);
+  const containerWith = (lossless: 0 | 1): string => `(${containerLossless.sql} AND codec_lossless = ${lossless})`;
+  if (key === 'lossless') {
+    const extWhere = extensionSetSql([...PCM_LOSSLESS_EXTENSIONS, ...DSD_EXTENSIONS]);
+    where.push(`(${extWhere.sql} OR ${containerWith(1)})`);
+    params.push(...extWhere.params, ...containerLossless.params);
+    return;
+  }
+  if (key === 'lossy') {
+    const extWhere = extensionSetSql(LOSSY_EXTENSIONS);
+    where.push(`(${extWhere.sql} OR ${containerWith(0)})`);
+    params.push(...extWhere.params, ...containerLossless.params);
+    return;
+  }
   if (key === 'dsd') return pushExtensionSetFilter(where, params, DSD_EXTENSIONS);
   if (key === 'fallback' || key === 'ffmpeg' || key === 'ffmpeg-fallback') {
-    return pushExtensionSetFilter(where, params, FFMPEG_FALLBACK_EXTENSIONS);
+    // So does a container whose first track is not one Chromium decodes
+    // (Apple Lossless, AC-3, ...); see containerCodecNeedsFfmpeg.
+    const extWhere = extensionSetSql(FFMPEG_FALLBACK_EXTENSIONS);
+    const firstTrack = `lower(CASE WHEN instr(codec, '+') > 0 THEN substr(codec, 1, instr(codec, '+') - 1) ELSE codec END)`;
+    const notChromium = ['aac', 'mp4a', 'mp3', 'layer 3', 'layer3', 'flac', 'opus']
+      .map((name) => `${firstTrack} NOT LIKE '%${name}%'`)
+      .join(' AND ');
+    where.push(`(${extWhere.sql} OR (${containerLossless.sql} AND codec IS NOT NULL AND trim(${firstTrack}) != '' AND ${notChromium}))`);
+    params.push(...extWhere.params, ...containerLossless.params);
+    return;
   }
   if (key === 'low' || key === 'low-bitrate') {
     const extWhere = extensionSetSql(LOSSY_EXTENSIONS);
-    where.push(`bitrate IS NOT NULL AND bitrate > 0 AND bitrate < 192000 AND ${extWhere.sql}`);
-    params.push(...extWhere.params);
+    where.push(`bitrate IS NOT NULL AND bitrate > 0 AND bitrate < 192000 AND (${extWhere.sql} OR ${containerWith(0)})`);
+    params.push(...extWhere.params, ...containerLossless.params);
     return;
   }
   if (key === 'hires' || key === 'hi-res') {
     const dsdWhere = extensionSetSql(DSD_EXTENSIONS);
     const losslessWhere = extensionSetSql(PCM_LOSSLESS_EXTENSIONS);
-    where.push(`(${dsdWhere.sql} OR (sample_rate IS NOT NULL AND sample_rate >= 88200 AND ${losslessWhere.sql}))`);
-    params.push(...dsdWhere.params, ...losslessWhere.params);
+    where.push(
+      `(${dsdWhere.sql} OR (sample_rate IS NOT NULL AND sample_rate >= 88200 AND (${losslessWhere.sql} OR ${containerWith(1)})))`,
+    );
+    params.push(...dsdWhere.params, ...losslessWhere.params, ...containerLossless.params);
     return;
   }
   if (key === 'unknown') {
@@ -6171,6 +6491,63 @@ function likeParam(value: string): string {
   return `%${escapeLike(sqlLower(value))}%`;
 }
 
+const FOLD_MARKS = /[̀-ͯ᪰-᫿᷀-᷿⃐-⃿]+/g;
+const FOLD_LETTERS: Readonly<Record<string, string>> = {
+  ß: 'ss',
+  æ: 'ae',
+  œ: 'oe',
+  ø: 'o',
+  đ: 'd',
+  ð: 'd',
+  þ: 'th',
+  ł: 'l',
+  ħ: 'h',
+  ı: 'i',
+  // A capital sigma lower-cases to the final form at the end of a word, so a
+  // typed prefix of "ΟΔΥΣΣΕΑΣ" would end in ς where the stored word has σ.
+  ς: 'σ',
+};
+
+// Search text: compatibility forms and accents folded away and lower-cased
+// with full Unicode rules, so "bjork" finds "Björk" and "ÓLAFUR" finds
+// "Ólafur" (SQLite's lower() only folds A-Z). Marks outside the Latin,
+// Greek and Cyrillic diacritic blocks stay, so kana voicing marks and
+// Indic or Arabic vowel signs still tell words apart, and the text is put
+// back together afterwards: a decomposed が would otherwise start with a bare
+// か, and 하 would match every syllable that begins with it. Russian й is its
+// own letter ("мой" is not "мои"); ё still folds to е, as people type it.
+// Stored in the *_fold columns, and applied to the typed query the same way.
+export function foldSearchText(value: string | null | undefined): string {
+  if (!value) return '';
+  if (/^[\x00-\x7f]*$/.test(value)) return value.toLowerCase();
+  return value
+    .normalize('NFKD')
+    .replace(/([Ии])̆/g, (_, base: string) => (base === 'И' ? 'Й' : 'й'))
+    .replace(FOLD_MARKS, '')
+    .toLowerCase()
+    .replace(/[ßæœøđðþłħıς]/g, (ch) => FOLD_LETTERS[ch] ?? ch)
+    .normalize('NFC');
+}
+
+function foldedLikeParam(value: string): string {
+  return `%${escapeLike(foldSearchText(value))}%`;
+}
+
+// The rating and play count a reading carries in its tags, as the values a
+// new row starts with. imported says there was anything to consider at all.
+function fileStatsSeed(r: IncomingTrack): { rating: number; ratingScore: number | null; playCount: number; imported: 0 | 1 } {
+  const score = normalizeTrackRatingScore(r.fileRatingScore);
+  const stars = score == null ? 0 : Math.max(0, Math.min(5, Math.round(score / 20)));
+  const plays = Number(r.filePlayCount);
+  const playCount = Number.isFinite(plays) && plays > 0 ? Math.min(Math.trunc(plays), 1_000_000) : 0;
+  return {
+    rating: stars,
+    ratingScore: stars > 0 ? score : null,
+    playCount,
+    imported: stars > 0 || playCount > 0 ? 1 : 0,
+  };
+}
+
 function escapeFolderLikePattern(value: string): string {
   return value.replace(/[|%_]/g, (ch) => `|${ch}`);
 }
@@ -6339,8 +6716,8 @@ function smartRuleWhere(rule: SmartPlaylistRule): { where: string; params: unkno
     .filter(Boolean);
 
   if (genreWords.length) {
-    where.push(`(${genreWords.map(() => `lower(COALESCE(genre, "")) LIKE ? ESCAPE '|'`).join(' OR ')})`);
-    params.push(...genreWords.map((word) => likeParam(word)));
+    where.push(`(${genreWords.map(() => `genre_fold LIKE ? ESCAPE '|'`).join(' OR ')})`);
+    params.push(...genreWords.map((word) => foldedLikeParam(word)));
   }
   if (rule.searchQuery) {
     const searchWhere = trackSearchWhere(parseTrackSearchQuery(rule.searchQuery));
