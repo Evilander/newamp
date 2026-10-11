@@ -1,10 +1,11 @@
 // The right-click menu for tracks, shared by every track list. The menu itself
 // is native (built in the main process); this side supplies the playlists and
 // carries out the choice.
-import type { Track } from '@shared/types';
+import type { Track, TrashProgress, TrashTracksResult } from '@shared/types';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { api } from './api';
-import { pushToast } from './toast';
+import { dismissToast, getToasts, pushToast, subscribeToasts } from './toast';
+import { canTrashTracks, describeTrashProgress, describeTrashResult } from './trashResult';
 
 export function defaultPlaylistName(tracks: Track[]): string {
   if (tracks.length <= 1) return 'New Playlist';
@@ -21,6 +22,43 @@ function isLocalPath(path: string | null | undefined): path is string {
   return !!path && !/^[a-z][a-z0-9+.-]+:\/\//i.test(path);
 }
 
+// A large move reports as it goes. The report replaces the toast before it, so
+// one stays on screen; a toast the user closed stays closed. The stack drops
+// its oldest toast when a newer one arrives, which is this one for the whole
+// move, so a toast that vanished as another appeared is put back.
+export async function trashTracksWithProgress(trackIds: number[], bin: string): Promise<TrashTracksResult> {
+  let shown: number | null = null;
+  let closed = false;
+  let changing = false;
+  let before = getToasts();
+  const unwatch = subscribeToasts(() => {
+    const now = getToasts();
+    if (!changing && shown != null && before.some((item) => item.id === shown) && !now.some((item) => item.id === shown)) {
+      const evicted = now.some((item) => !before.some((old) => old.id === item.id));
+      if (!evicted) closed = true;
+    }
+    before = now;
+  });
+  const stop = api.onTrashProgress((progress: TrashProgress) => {
+    const toast = describeTrashProgress(progress, bin);
+    if (!toast || closed) return;
+    changing = true;
+    try {
+      if (shown != null) dismissToast(shown);
+      shown = pushToast({ ...toast, durationMs: 0 });
+    } finally {
+      changing = false;
+    }
+  });
+  try {
+    return await api.trashTracks(trackIds);
+  } finally {
+    stop();
+    unwatch();
+    if (shown != null) dismissToast(shown);
+  }
+}
+
 export async function openTrackContextMenu(tracks: Track[]): Promise<void> {
   if (!tracks.length) return;
   const playlists = await api.getPlaylists().catch(() => []);
@@ -28,7 +66,7 @@ export async function openTrackContextMenu(tracks: Track[]): Promise<void> {
     trackCount: tracks.length,
     playlists: playlists.map((playlist) => ({ id: playlist.id, name: playlist.name })),
     canShowInFolder: tracks.length === 1 && isLocalPath(tracks[0]!.path),
-    canTrash: tracks.every((track) => isLocalPath(track.path)),
+    canTrash: canTrashTracks(tracks),
   });
   if (!choice) return;
   const store = usePlayerStore.getState();
@@ -72,23 +110,9 @@ export async function openTrackContextMenu(tracks: Track[]): Promise<void> {
     case 'trash': {
       // The main process asks first; the files and their library rows go
       // together, and the player drops them on the tracks-removed event.
-      const result = await api.trashTracks(trackIds);
-      if (result.cancelled) return;
       const bin = /^win/i.test(navigator.platform) ? 'Recycle Bin' : 'Trash';
-      if (result.failed.length) {
-        pushToast({
-          tone: 'warn',
-          title: `${result.failed.length === 1 ? 'One file' : `${result.failed.length} files`} could not be moved to the ${bin}`,
-          detail: result.failed[0]!.error,
-        });
-      }
-      if (result.trashed) {
-        pushToast({
-          tone: 'ok',
-          title: `Moved to the ${bin}`,
-          detail: `${result.trashed === 1 ? tracks[0]!.title : `${result.trashed.toLocaleString()} files`}. Gone from the library too.`,
-        });
-      }
+      const result = await trashTracksWithProgress(trackIds, bin);
+      for (const toast of describeTrashResult(result, tracks, bin)) pushToast(toast);
       return;
     }
   }

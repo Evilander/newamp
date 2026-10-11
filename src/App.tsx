@@ -13,7 +13,12 @@ import { api, inElectron, winctl } from './lib/api';
 import { pushToast } from './lib/toast';
 import { syncMediaSessionIdentity, syncMediaSessionPosition } from './lib/mediaSession';
 import { mediaSessionPositionNeedsSync, type MediaSessionPositionSnapshot } from '@shared/media-session';
-import { resolvePlayerShortcut, type PlayerShortcutCommand } from '@shared/keyboard-shortcuts';
+import {
+  createShortcutTargetTracker,
+  resolvePlayerShortcut,
+  type PlayerShortcutCommand,
+  type ShortcutTargetNode,
+} from '@shared/keyboard-shortcuts';
 import { applyShell, loadInitialShell } from './components/ShellPicker';
 import { useAdaptiveQuality } from './lib/adaptiveQuality';
 import { useReducedMotion } from './hooks/useReducedMotion';
@@ -21,6 +26,8 @@ import { startResonance, stopResonance, pokeResonance, type ResonanceOpts } from
 import { startEvilandProducer } from './visualizer/eviland-producer';
 import { frameBus } from './visualizer/frame-bus';
 import { projectorQualityTier } from './lib/vizPrefs';
+import { volumeKeyInput } from './lib/volume-shortcut';
+import { applyImportedSkin } from './lib/skin-import';
 
 const EqPanel = lazy(() => import('./components/EqPanel').then((module) => ({ default: module.EqPanel })));
 const CompactPlayer = lazy(() => import('./components/CompactPlayer').then((module) => ({ default: module.CompactPlayer })));
@@ -56,6 +63,19 @@ const SettingsView = lazy(() =>
 );
 const AboutView = lazy(() => import('./components/views/AboutView').then((module) => ({ default: module.AboutView })));
 const RENDERER_STARTUP_SPLASH_MS = 5600;
+
+// The skin's --accent for the projector's sliders. The producer asks for the
+// transport about thirty times a second and a skin changes about never, so the
+// style is read a couple of times a second at most.
+const ACCENT_READ_MS = 500;
+let skinAccent: { at: number; value: string | null } = { at: -ACCENT_READ_MS, value: null };
+function currentSkinAccent(): string | null {
+  const now = performance.now();
+  if (now - skinAccent.at >= ACCENT_READ_MS) {
+    skinAccent = { at: now, value: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || null };
+  }
+  return skinAccent.value;
+}
 
 export default function App(): JSX.Element {
   const init = usePlayerStore((s) => s.init);
@@ -132,12 +152,12 @@ export default function App(): JSX.Element {
 
     if (skinPaths.length) {
       setDropMessage(`Applying ${skinPaths.length.toLocaleString()} dropped skin${skinPaths.length === 1 ? '' : 's'}...`);
-      const store = usePlayerStore.getState();
+      // Each dropped skin keeps the custom skin it replaces (see skin-shelf).
       for (const skinPath of skinPaths) {
         try {
           const skin = await api.importCustomSkinFile(skinPath);
           if (!skin) continue;
-          await store.saveCustomSkin(skin);
+          await applyImportedSkin(skin);
           appliedSkins.push(skin.name);
         } catch (err) {
           console.error('skin import failed', err);
@@ -224,6 +244,7 @@ export default function App(): JSX.Element {
             duration: s.duration,
             isPlaying: s.isPlaying,
             volume: s.volume,
+            accent: currentSkinAccent(),
           }
         : null;
       return {
@@ -254,6 +275,9 @@ export default function App(): JSX.Element {
     const offOpenFiles = api.onOpenFiles((paths) => {
       void handleOpenFiles(paths);
     });
+    const offOpenSettings = api.onOpenSettings(() => {
+      usePlayerStore.getState().openView('settings');
+    });
 
     init()
       .then(async () => {
@@ -274,7 +298,11 @@ export default function App(): JSX.Element {
       })
       .catch((err) => console.error('init failed', err));
 
+    function onPointerDown(e: PointerEvent): void {
+      shortcutTargets.pointerDown(shortcutNode(e.target));
+    }
     function onKey(e: KeyboardEvent): void {
+      shortcutTargets.keyDown(e.key);
       // A surface that already took the key (the visualizer's own handler,
       // for one) keeps it.
       if (e.defaultPrevented) return;
@@ -289,12 +317,15 @@ export default function App(): JSX.Element {
         repeat: e.repeat,
         targetEditable: isEditableShortcutTarget(e.target),
         targetIsButton: isButtonShortcutTarget(e.target),
+        targetIsSlider: isSliderShortcutTarget(e.target),
         fullscreenVisualizer: store.fullscreenViz,
+        platform: api.platform,
       });
       if (!command) return;
       e.preventDefault();
-      runPlayerShortcut(command, store);
+      runPlayerShortcut(command, store, { shiftKey: e.shiftKey, repeat: e.repeat, at: e.timeStamp });
     }
+    window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('keydown', onKey);
     const offPlayerCommand = api.onPlayerCommand((command) => {
       const store = usePlayerStore.getState();
@@ -340,9 +371,11 @@ export default function App(): JSX.Element {
     window.addEventListener('beforeunload', persistOnExit);
     return () => {
       cancelled = true;
+      window.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('beforeunload', persistOnExit);
       offOpenFiles();
+      offOpenSettings();
       offPlayerCommand();
       offTransportCommand();
       offDetachedClosed();
@@ -462,7 +495,6 @@ export default function App(): JSX.Element {
             {dropMessage}
           </div>
         )}
-        <QuickPlayPalette />
         <FirstRunHints />
       </div>
       {fullscreen && (
@@ -470,8 +502,11 @@ export default function App(): JSX.Element {
           <FullscreenVisualizer />
         </Suspense>
       )}
-      {/* Toasts sit outside .app-chrome so they overlay the fullscreen
-          visualizer too; the host is position:fixed either way. */}
+      {/* The palette and the toasts sit outside .app-chrome so they overlay
+          the fullscreen visualizer too: the chrome is visibility:hidden then,
+          and a palette inside it opened invisible and left the visualizer
+          inert behind it. */}
+      <QuickPlayPalette />
       <ToastHost />
       {showSplash && <StartupSplash />}
       {settings && !settings.firstLaunchTutorialSeen && !tutorialDismissed && (
@@ -506,7 +541,11 @@ function MediaSessionSync(): null {
       current,
       isPlaying,
       actions: {
-        play: () => usePlayerStore.getState().togglePlay(),
+        play: () => {
+          // The OS asked to play, not to flip: a stale pause must not undo it.
+          const store = usePlayerStore.getState();
+          if (!store.isPlaying) store.togglePlay();
+        },
         pause: () => usePlayerStore.getState().engine.pause(),
         previous: () => void usePlayerStore.getState().prev(),
         next: () => void usePlayerStore.getState().next(),
@@ -579,7 +618,11 @@ function isDroppedSkinFile(path: string): boolean {
 
 type PlayerStoreSnapshot = ReturnType<typeof usePlayerStore.getState>;
 
-function runPlayerShortcut(command: PlayerShortcutCommand, store: PlayerStoreSnapshot): void {
+function runPlayerShortcut(
+  command: PlayerShortcutCommand,
+  store: PlayerStoreSnapshot,
+  key: { shiftKey: boolean; repeat: boolean; at: number },
+): void {
   if (command === 'toggle-play') {
     store.togglePlay();
   } else if (command === 'play') {
@@ -597,9 +640,9 @@ function runPlayerShortcut(command: PlayerShortcutCommand, store: PlayerStoreSna
   } else if (command === 'seek-forward') {
     store.seek(clampShortcutNumber(store.currentTime + 5, 0, store.duration || store.currentTime + 5));
   } else if (command === 'volume-up') {
-    void store.setVolume(clampShortcutNumber(store.volume + 0.05, 0, 2));
+    void store.setVolume(volumeKeyInput.next('up', store.volume, key.at, { shift: key.shiftKey, repeat: key.repeat }));
   } else if (command === 'volume-down') {
-    void store.setVolume(clampShortcutNumber(store.volume - 0.05, 0, 2));
+    void store.setVolume(volumeKeyInput.next('down', store.volume, key.at, { shift: key.shiftKey, repeat: key.repeat }));
   } else if (command === 'toggle-love') {
     if (store.current?.id && store.current.id > 0) void store.toggleLove(store.current.id);
   } else if (command.startsWith('rate-')) {
@@ -616,14 +659,22 @@ function runPlayerShortcut(command: PlayerShortcutCommand, store: PlayerStoreSna
   }
 }
 
+const shortcutTargets = createShortcutTargetTracker();
+
+function shortcutNode(target: EventTarget | null): ShortcutTargetNode | null {
+  return target instanceof Element ? target : null;
+}
+
 function isEditableShortcutTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  return !!target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="textbox"]');
+  return shortcutTargets.classify(shortcutNode(target)).editable;
 }
 
 function isButtonShortcutTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  return !!target.closest('button, [role="button"]');
+  return shortcutTargets.classify(shortcutNode(target)).button;
+}
+
+function isSliderShortcutTarget(target: EventTarget | null): boolean {
+  return shortcutTargets.classify(shortcutNode(target)).slider;
 }
 
 function clampShortcutNumber(value: number, min: number, max: number): number {

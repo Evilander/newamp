@@ -16,7 +16,8 @@ import { parseMusicServerStreamUrl } from '@shared/music-servers';
 import { AudioEngine, type TrackRouting } from '../audio/engine';
 import type { SampleTransport } from '../audio/sample-transport';
 import { api, inElectron, toAudioUrl, winctl, DEFAULT_SETTINGS } from '../lib/api';
-import { decode as decodeEvilandCode } from '../visualizer/eviland-randomizer';
+import { decode as decodeEvilandCode, randomSeedCode, seedCodeFor } from '../visualizer/eviland-randomizer';
+import { requestLookBack, requestLookSkip } from '../visualizer/look-requests';
 import { prefetchSongScore } from '../visualizer/eviland-score-feed';
 import {
   notifyPlayCompleted,
@@ -37,12 +38,7 @@ import {
   shouldAutoDjRefill,
 } from '@shared/auto-dj';
 import { moveQueueItem, removeQueueItem } from '@shared/queue-edit';
-import {
-  appendTracksToQueue,
-  appendTrackToQueue,
-  insertTracksNext,
-  insertTrackNext,
-} from '@shared/queue-insert';
+import { appendTracksToQueue, insertTracksNext, playNextInsertAt } from '@shared/queue-insert';
 import {
   handoffKey,
   hasHandoffTarget,
@@ -65,10 +61,19 @@ import {
 } from '@shared/playback-controls';
 import { playbackErrorKey, resolvePlaybackErrorAdvance } from '@shared/playback-error';
 import {
+  insertionIndexMap,
+  isShuffleCycleComplete,
+  moveIndexMap,
   nextSmartShuffle,
   previousSmartShuffle,
+  remapShuffleHistory,
+  removalIndexMap,
+  removeIndexMap,
   resetSmartShuffleHistory,
+  shuffleUnplayedCount,
+  smartShuffleAfterRemoval,
 } from '@shared/smart-shuffle';
+import { STARTER_QUEUE_SIZE, buildStarterQueue, pickToday, starterQueueLead, starterQueueNeeded } from '../lib/today-pick';
 
 export type PlaybackMode = SharedPlaybackMode;
 
@@ -93,6 +98,62 @@ export type ViewMode =
   | 'about'
   | 'settings';
 
+// Utility screens are a detour from wherever the listener was, not a place to
+// come back to, so only the content views are remembered across launches.
+const RESTORABLE_VIEWS: readonly ViewMode[] = [
+  'home',
+  'library',
+  'folders',
+  'discover',
+  'mixes',
+  'albums',
+  'artists',
+  'playlist',
+  'loved',
+  'history',
+  'wrapped',
+  'profile',
+  'tags',
+  'podcasts',
+  'radio',
+  'music-servers',
+  'now-playing',
+];
+const PLAYBACK_MODES: readonly PlaybackMode[] = [
+  'normal',
+  'repeat-one',
+  'repeat-all',
+  'shuffle',
+  'shuffle-repeat-one',
+  'shuffle-repeat-all',
+];
+const VIEW_STORAGE_KEY = 'newamp:view';
+const PLAYBACK_MODE_STORAGE_KEY = 'newamp:playback-mode';
+
+export function parseStoredView(raw: string | null | undefined): ViewMode | null {
+  return RESTORABLE_VIEWS.find((view) => view === raw) ?? null;
+}
+
+export function parseStoredPlaybackMode(raw: string | null | undefined): PlaybackMode | null {
+  return PLAYBACK_MODES.find((mode) => mode === raw) ?? null;
+}
+
+function readStored(key: string): string | null {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, value: string): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(key, value);
+  } catch {
+    // Storage can be blocked or full; the setting just won't survive a restart.
+  }
+}
+
 interface PlayerState {
   engine: AudioEngine;
   queue: Track[];
@@ -103,6 +164,12 @@ interface PlayerState {
   resumeAt: number | null;
   duration: number;
   playbackError: string | null;
+  /**
+   * The engine has been waiting on data (slow source, first-play transcode) for
+   * long enough to notice; the clock is frozen until it lands. The wait that
+   * opens every track does not count.
+   */
+  isBuffering: boolean;
   volume: number;
   playbackRate: number;
   audioOutputDeviceId: string | null;
@@ -151,6 +218,8 @@ interface PlayerState {
   init: () => Promise<void>;
   persistPlaybackSession: () => Promise<void>;
   setView: (v: ViewMode) => void;
+  /** setView for a deliberate jump: leaves the deck and the fullscreen visualizer first so the view is actually seen. */
+  openView: (v: ViewMode) => void;
   navigateToArtist: (name: string) => void;
   navigateToAlbum: (album: string, albumArtist: string) => void;
   navigateToPlaylist: (playlistId: number) => void;
@@ -169,11 +238,18 @@ interface PlayerState {
   setVizPreset: (name: AppSettings['visualizerPreset']) => void;
   toggleEvilandDirector: () => void;
   /**
-   * Mint a new Eviland look. When `seed` is omitted, derive it deterministically
-   * from the current nonce so the result is reproducible across reloads (no
-   * Math.random / Date.now in the store; the randomizer hashes the string).
+   * Mint a new Eviland look. The look is kept as its seed code, so what the
+   * seed box shows pastes back to the same look: a typed seed is turned into its
+   * code, and without one a fresh code is drawn.
    */
   randomizeEviland: (seed?: string) => void;
+  /**
+   * Move Eviland on to a fresh look. With the Director driving, that is its next
+   * rotation; with a look of your own up, it is a new random one.
+   */
+  skipEvilandLook: () => void;
+  /** Fade Eviland back to the look before this one (Director only; a look of your own has no history). */
+  previousEvilandLook: () => void;
   /** Apply a shared seed code (e.g. "K7Q2-9XMF"). Returns true on decode success. */
   applyEvilandCode: (code: string) => boolean;
   setEvilandWaveMode: (mode: 'auto' | 'off' | 'line' | 'radial' | 'bars') => void;
@@ -181,6 +257,13 @@ interface PlayerState {
   playTrack: (track: Track, queue?: Track[]) => Promise<void>;
   playPodcastEpisode: (episode: PodcastEpisode) => Promise<void>;
   playQueue: (tracks: Track[], startIndex?: number, startAt?: number) => Promise<void>;
+  /**
+   * Plays a track without touching the listener's state: no queue change, no
+   * play count, no Last.fm, and the session on disk keeps the real queue.
+   * endPreview() puts the previous queue back, paused.
+   */
+  previewTrack: (track: Track) => Promise<void>;
+  endPreview: () => void;
   loadQueue: (tracks: Track[]) => void;
   queueTrackNext: (track: Track) => void;
   addTrackToQueue: (track: Track) => void;
@@ -190,6 +273,8 @@ interface PlayerState {
   removeQueuedTrack: (index: number) => Promise<void>;
   /** Tracks that left the library: out of the queue, and off the deck if one is up. */
   dropTracks: (ids: number[]) => Promise<void>;
+  /** Fresh rows for tracks whose tags changed, so the transport, Now Playing and the scrobble payload stop showing the old ones. */
+  refreshTracks: (updated: Track[]) => void;
   clearQueue: () => void;
   togglePlay: () => void;
   next: () => Promise<void>;
@@ -240,6 +325,11 @@ interface PlayerState {
 // caller path that touches disk; the in-memory store updates immediately.
 let volumePersistTimer: ReturnType<typeof setTimeout> | null = null;
 let volumePersistPending: number | null = null;
+// Two writes can be in flight at once (the timer re-arms before the first
+// settles); only the newest one's reply may replace the settings snapshot.
+let volumePersistSeq = 0;
+// The visualizer preset save in flight last: a held arrow key makes a save per step.
+let vizPresetSeq = 0;
 const VOLUME_PERSIST_DEBOUNCE_MS = 250;
 function schedulePersistVolume(
   volume: number,
@@ -252,9 +342,12 @@ function schedulePersistVolume(
     volumePersistTimer = null;
     volumePersistPending = null;
     if (pending == null) return;
+    const seq = ++volumePersistSeq;
     void api
       .setSettings({ volume: pending })
-      .then(apply)
+      .then((updated) => {
+        if (seq === volumePersistSeq) apply(updated);
+      })
       .catch((err) => console.error('[newamp] persist volume failed:', err));
   }, VOLUME_PERSIST_DEBOUNCE_MS);
 }
@@ -280,7 +373,7 @@ function startLastfmNowPlaying(track: Track): void {
 function maybeScrobbleToLastfm(state: PlayerState, currentTime: number, playing: boolean): void {
   const track = state.current;
   const duration = track?.duration ?? 0;
-  if (!track || !playing || !state.settings?.lastfmEnabled || !lastfmPlayKey) return;
+  if (!track || !playing || activePreview || !state.settings?.lastfmEnabled || !lastfmPlayKey) return;
   if (!lastfmPlayKey.startsWith(`${track.id}:`) || lastfmScrobbledKey === lastfmPlayKey) return;
   if (duration <= 30 || currentTime < Math.min(duration / 2, 240)) return;
 
@@ -350,6 +443,71 @@ let lastPlaybackErrorKey: string | null = null;
 // resolves (an async IPC round-trip), so intervening notifies would re-fire
 // next() and skip tracks without this key. Cleared whenever ended is false.
 let lastEndedKey: string | null = null;
+// Tracks that failed one after another with no audible playback between. A
+// dead drive makes every queued track fail the same way; this is what lets
+// the skip-ahead loop stop instead of cycling through them forever.
+let consecutivePlaybackFailures = 0;
+
+interface PlaybackSnapshot {
+  queue: Track[];
+  index: number;
+  current: Track | null;
+  currentTime: number;
+  duration: number;
+  resumeAt: number | null;
+  mode: PlaybackMode;
+  shuffleHistory: number[];
+  activePodcastEpisode: PlayerState['activePodcastEpisode'];
+}
+
+// While a preview plays (the Wrapped export scoring itself with a track), the
+// listener's real queue waits here: nothing the preview does is counted,
+// scrobbled or written to the saved session.
+let activePreview: { snapshot: PlaybackSnapshot } | null = null;
+let starterQueuePending = false;
+let tracksRemovedOff: (() => void) | null = null;
+
+// The view restored at launch, kept so init can fall back to Home when there
+// is no library for it to show.
+let launchView: ViewMode | null = null;
+
+/** The shuffle history after tracks were spliced into the queue: played tracks stay played. */
+function historyAfterInsert(state: PlayerState, insertAt: number, count: number): number[] {
+  return isShuffleMode(state.mode)
+    ? remapShuffleHistory(state.shuffleHistory, insertionIndexMap(insertAt, count))
+    : [];
+}
+
+/** The same history with `index` as the track now playing. */
+function historyEndingAt(history: number[], index: number): number[] {
+  return [...history.filter((entry) => entry !== index), index];
+}
+
+/**
+ * What a shuffle plays when its playing track left the queue: a track this
+ * cycle has not played, not whichever one slid into the gap. Null when the
+ * cycle is over and repeat-all is not starting another.
+ */
+function shuffleAfterRemoval(mode: PlaybackMode, queueLength: number, survivingHistory: number[]): { index: number; history: number[] } | null {
+  const pick = smartShuffleAfterRemoval({ queueLength, history: survivingHistory });
+  if (pick.index < 0 || (pick.exhausted && repeatModeOf(mode) !== 'all')) return null;
+  return { index: pick.index, history: pick.history };
+}
+
+/** A track started from scratch is eligible for its own crossfade and gapless prepare again. */
+function resetHandoffState(): void {
+  lastHandoffKey = null;
+  lastPreparedHandoffKey = null;
+  lastPreparedNextTrackId = null;
+  cachedShuffleHandoff = null;
+}
+
+/** Something else took over playback: the preview is no longer ours to put back. Reports whether one was running. */
+function abandonPreview(): boolean {
+  const wasPreviewing = activePreview !== null;
+  activePreview = null;
+  return wasPreviewing;
+}
 
 export interface PlaybackSessionPersistSnapshot {
   currentTrackId: number | null;
@@ -543,11 +701,33 @@ function notifyShellPlayback(state: PlayerState): void {
 let lastCueEndKey: string | null = null;
 let playbackErrorAdvanceTimer: number | null = null;
 
+// The engine reports buffering for the first moments of every track, so the
+// indicator only comes up when the wait outlasts this.
+const BUFFERING_NOTICE_MS = 300;
+let bufferingNoticeTimer: number | null = null;
+
+function reflectBuffering(waiting: boolean, getState: () => PlayerState, setState: (partial: Partial<PlayerState>) => void): void {
+  if (!waiting) {
+    if (bufferingNoticeTimer != null) {
+      window.clearTimeout(bufferingNoticeTimer);
+      bufferingNoticeTimer = null;
+    }
+    if (getState().isBuffering) setState({ isBuffering: false });
+    return;
+  }
+  if (bufferingNoticeTimer != null || getState().isBuffering) return;
+  bufferingNoticeTimer = window.setTimeout(() => {
+    bufferingNoticeTimer = null;
+    setState({ isBuffering: true });
+  }, BUFFERING_NOTICE_MS);
+}
+
 async function restorePlaybackSession(
   resumeState: PlaybackResumeState | null,
   settings: AppSettings,
   setState: (partial: Partial<PlayerState>) => void,
   canRestore: () => boolean,
+  storedMode: PlaybackMode | null = null,
 ): Promise<void> {
   if (!resumeState) return;
   const entries = playbackResumeQueueEntries(resumeState);
@@ -575,14 +755,15 @@ async function restorePlaybackSession(
   // The saved position only means anything on the track it was saved for; a
   // nearest-survivor fallback starts from the top, and an idle queue has none.
   const resumeTime = current && currentSurvived ? resumeState.currentTime : 0;
+  const mode = storedMode ?? resumeState.mode;
   setState({
     queue: tracks,
     index,
     current,
     currentTime: resumeTime,
     duration: current?.duration ?? 0,
-    mode: resumeState.mode,
-    shuffleHistory: isShuffleMode(resumeState.mode) ? resetSmartShuffleHistory(tracks.length, index) : [],
+    mode,
+    shuffleHistory: isShuffleMode(mode) ? resetSmartShuffleHistory(tracks.length, index) : [],
     resumeAt: current ? resumeTime : null,
   });
   applyReplayGain(current, settings);
@@ -590,12 +771,14 @@ async function restorePlaybackSession(
 
 async function persistPlaybackSession(state: PlayerState): Promise<void> {
   if (!state.settings) return;
+  // A preview borrows the queue; the saved session stays the listener's own.
+  const source = activePreview?.snapshot ?? state;
   const resumeState = playbackResumeStateForQueueSnapshot({
-    queue: state.queue,
-    index: state.index,
-    current: state.current,
-    currentTime: state.currentTime,
-    mode: state.mode,
+    queue: source.queue,
+    index: source.index,
+    current: source.current,
+    currentTime: source.currentTime,
+    mode: source.mode,
   });
   await api.setSettings({ resumeState }).catch(() => state.settings!);
 }
@@ -634,6 +817,95 @@ function playbackFailureLabel(track: Track | null, error: string): string {
   return `Skipped ${name}: ${error}`;
 }
 
+export interface QueueAdvance {
+  index: number;
+  history: number[];
+  /** Nothing follows: the queue ran out, or a shuffle cycle finished, and repeat is not wrapping. */
+  atEnd: boolean;
+}
+
+// Passing over missing tracks is bounded so a mostly-offline library cannot
+// turn one Next press into a walk through the whole queue.
+const MAX_MISSING_SKIPS = 32;
+
+/**
+ * What plays after the current track. Entries flagged missing are passed over
+ * while a playable one exists, so an unplugged drive is not walked through one
+ * failure at a time. After an error repeat-one moves on as well, since
+ * replaying the track that just failed would loop forever.
+ */
+export function resolveQueueAdvance(input: {
+  queue: ReadonlyArray<Pick<Track, 'missingSince'>>;
+  index: number;
+  mode: PlaybackMode;
+  history: number[];
+  afterError?: boolean;
+  random?: () => number;
+}): QueueAdvance {
+  const { queue, index, mode } = input;
+  const length = queue.length;
+  if (!length) return { index: -1, history: [], atEnd: true };
+  const repeat = repeatModeOf(mode);
+  const wraps = repeat === 'all' || (input.afterError === true && repeat === 'one');
+  const isMissing = (i: number): boolean => queue[i]?.missingSince != null;
+
+  if (isShuffleMode(mode)) {
+    let history = input.history;
+    let from = index;
+    let skipped: number[] = [];
+    let first: QueueAdvance | null = null;
+    for (let attempt = 0; attempt <= MAX_MISSING_SKIPS; attempt += 1) {
+      const decision = nextSmartShuffle({ queueLength: length, currentIndex: from, history }, input.random);
+      // Every track has played and repeat is not asking for another cycle. On
+      // a later attempt it only means no playable track was left.
+      if (decision.exhausted && !wraps) return first ?? { index: -1, history: input.history, atEnd: true };
+      if (decision.exhausted) skipped = [];
+      const pick: QueueAdvance = { index: decision.index, history: decision.history, atEnd: false };
+      first ??= pick;
+      if (!isMissing(decision.index)) {
+        if (!skipped.length) return pick;
+        // Passed-over tracks count as played but sit at the far end of the
+        // history, so Prev does not step back onto them.
+        const passed = new Set(skipped);
+        return { ...pick, history: [...skipped, ...pick.history.filter((i) => !passed.has(i))] };
+      }
+      skipped.push(decision.index);
+      history = decision.history;
+      from = decision.index;
+    }
+    return first ?? { index: -1, history: input.history, atEnd: true };
+  }
+
+  let next = index + 1;
+  if (next >= length) {
+    if (!wraps) return { index: -1, history: input.history, atEnd: true };
+    next = 0;
+  }
+  let candidate = next;
+  for (let step = 0; step < length; step += 1) {
+    if (!isMissing(candidate)) return { index: candidate, history: input.history, atEnd: false };
+    candidate += 1;
+    if (candidate >= length) {
+      if (!wraps) break;
+      candidate = 0;
+    }
+  }
+  return { index: next, history: input.history, atEnd: false };
+}
+
+/** Tracks still to come: what follows the index, or what a shuffle cycle has not played yet. */
+function remainingAheadOf(state: PlayerState): number {
+  if (isShuffleMode(state.mode) && state.index >= 0) {
+    return shuffleUnplayedCount(state.shuffleHistory, state.queue.length, state.index);
+  }
+  return Math.max(0, state.queue.length - state.index - 1);
+}
+
+/** shouldAutoDjRefill measures from an index; in shuffle that is however far the cycle has got. */
+function autoDjRefillIndex(state: PlayerState): number {
+  return state.queue.length - 1 - remainingAheadOf(state);
+}
+
 async function advanceAfterPlaybackError(
   getState: () => PlayerState,
   setState: (partial: Partial<PlayerState>) => void,
@@ -651,27 +923,22 @@ async function advanceAfterPlaybackError(
     return;
   }
 
-  let nextIndex = state.index + 1;
-  let nextShuffleHistory = state.shuffleHistory;
-  if (isShuffleMode(state.mode)) {
-    const decision = nextSmartShuffle({
-      queueLength: state.queue.length,
-      currentIndex: state.index,
-      history: state.shuffleHistory,
-    });
-    nextIndex = decision.index;
-    nextShuffleHistory = decision.history;
-  } else if (nextIndex >= state.queue.length && repeatModeOf(state.mode) !== 'off') {
-    nextIndex = 0;
-  }
-
-  if (nextIndex < 0 || nextIndex >= state.queue.length || nextIndex === state.index) {
+  const advance = resolveQueueAdvance({
+    queue: state.queue,
+    index: state.index,
+    mode: state.mode,
+    history: state.shuffleHistory,
+    afterError: true,
+  });
+  const nextIndex = advance.index;
+  const nextShuffleHistory = advance.history;
+  if (advance.atEnd || nextIndex < 0 || nextIndex >= state.queue.length || nextIndex === state.index) {
     engine.stop();
     return;
   }
 
   const nextTrack = state.queue[nextIndex]!;
-  lastPreparedHandoffKey = null;
+  resetHandoffState();
   lastStopAfterCurrentKey = null;
   setState({
     index: nextIndex,
@@ -690,7 +957,7 @@ async function advanceAfterPlaybackError(
     lastPlaybackErrorKey = null;
     startLastfmNowPlaying(nextTrack);
     recordLibraryPlay(nextTrack);
-    if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: nextIndex })) {
+    if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: autoDjRefillIndex(getState()) })) {
       void getState().refillAutoDjQueue();
     }
   } catch {
@@ -848,12 +1115,22 @@ function loopsOnTransport(state: PlayerState): boolean {
   return repeatModeOf(state.mode) === 'one' && engine.isSampleTransportActive();
 }
 
+/** Shuffle with repeat off plays each queued track once; true once it has. */
+function shuffleCycleDone(state: PlayerState): boolean {
+  return (
+    isShuffleMode(state.mode) &&
+    repeatModeOf(state.mode) === 'off' &&
+    isShuffleCycleComplete(state.shuffleHistory, state.queue.length, state.index)
+  );
+}
+
 /** What an automatic advance from the current position would play next, if anything. */
 function desiredHandoffTrack(state: PlayerState): Track | null {
   if (loopsOnTransport(state)) return state.current;
   const queueLength = state.queue.length;
   if (isShuffleMode(state.mode)) {
-    if (!state.current || !hasHandoffTarget({ queueLength, index: state.index, mode: state.mode })) return null;
+    const shuffleCycleComplete = shuffleCycleDone(state);
+    if (!state.current || !hasHandoffTarget({ queueLength, index: state.index, mode: state.mode, shuffleCycleComplete })) return null;
     // Same cached pick autoAdvance() will commit; re-picked only when the
     // queue or history it was validated against has changed.
     cachedShuffleHandoff = resolveShuffleHandoffPick(cachedShuffleHandoff, {
@@ -903,7 +1180,7 @@ async function commitPlaybackAdvance(
   lastPlaybackErrorKey = null;
   startLastfmNowPlaying(t);
   recordLibraryPlay(t);
-  if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: nextIdx })) {
+  if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: autoDjRefillIndex(getState()) })) {
     void getState().refillAutoDjQueue();
   }
 }
@@ -1009,6 +1286,84 @@ async function expandQueueFromCurrentContext(state: PlayerState): Promise<{ queu
   return null;
 }
 
+/**
+ * Replaces the queue and starts one of its tracks. `skipRecord` is for a
+ * track that left the library: it did not stop early, it stopped existing.
+ */
+async function startQueuePlayback(
+  getState: () => PlayerState,
+  setState: (partial: Partial<PlayerState>) => void,
+  tracks: Track[],
+  startIndex: number,
+  startAt: number,
+  options: { skipRecord?: boolean; shuffleHistory?: number[] } = {},
+): Promise<void> {
+  if (!tracks.length) return;
+  const wasPreviewing = abandonPreview();
+  clearPlaybackErrorAdvanceTimer();
+  if (!wasPreviewing && !options.skipRecord) recordManualSkip(getState());
+  resetHandoffState();
+  lastStopAfterCurrentKey = null;
+  lastPlaybackErrorKey = null;
+  consecutivePlaybackFailures = 0;
+  const q = [...tracks];
+  const i = Math.max(0, Math.min(startIndex, q.length - 1));
+  const t = q[i]!;
+  const position = Number.isFinite(startAt) ? Math.max(0, Math.min(t.duration || Infinity, startAt)) : 0;
+  setState({
+    queue: q,
+    index: i,
+    current: t,
+    currentTime: position,
+    duration: t.duration ?? 0,
+    resumeAt: null,
+    playbackError: null,
+    activePodcastEpisode: null,
+    shuffleHistory: options.shuffleHistory ?? (isShuffleMode(getState().mode) ? resetSmartShuffleHistory(q.length, i) : []),
+  });
+  applyReplayGain(t, getState().settings);
+  schedulePersistPlaybackSession(getState(), true);
+  if (!(await playEngineTrack(t, position))) return;
+  lastPlaybackErrorKey = null;
+  startLastfmNowPlaying(t);
+  recordLibraryPlay(t);
+}
+
+/**
+ * Play with nothing loaded: queue a taste mix from the library, led by
+ * today's pick when there is one, and say so. A choice the listener makes
+ * while the tracks are being fetched wins.
+ */
+async function playStarterQueue(getState: () => PlayerState): Promise<void> {
+  starterQueuePending = true;
+  const revision = queueRevision;
+  const intent = playIntents.begin();
+  try {
+    const [mix, history] = await Promise.all([
+      api.buildTasteMix({ seedTrackId: null, count: STARTER_QUEUE_SIZE }).catch((): Track[] => []),
+      api.getListeningHistory({ limit: 30 }).catch(() => []),
+    ]);
+    const candidates = mix.length
+      ? mix
+      : await api.getTracks({ sort: 'added', limit: STARTER_QUEUE_SIZE }).catch((): Track[] => []);
+    const pick = pickToday(candidates, history.map((item) => item.track), null)?.track ?? null;
+    const lead = starterQueueLead(pick);
+    const queue = buildStarterQueue(candidates, pick);
+    if (!queue.length) return;
+    const now = getState();
+    if (queueRevision !== revision || !playIntents.isCurrent(intent) || now.queue.length || now.current) return;
+    await now.playQueue(queue, 0);
+    pushToast({
+      title: 'Nothing was queued',
+      detail: lead
+        ? `Playing today's pick, ${lead.title}, then a shuffle of your library.`
+        : 'Playing a shuffle of your library.',
+    });
+  } finally {
+    starterQueuePending = false;
+  }
+}
+
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // AudioEngine.subscribe emits immediately; defer until Zustand has installed the initial state.
   queueMicrotask(() => {
@@ -1035,10 +1390,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         duration: displayDuration,
         playbackError: s.error,
       });
+      reflectBuffering(s.buffering && !s.error, get, set);
       maybeScrobbleToLastfm(get(), relativeTime, s.playing);
       schedulePersistPlaybackSession(get(), forceSessionPersist);
       persistPodcastProgress(get(), s.ended, s.ended);
       notifyShellPlayback(get());
+      // A preview only borrows the engine: it never advances, hands off, trips
+      // the sleep timer or feeds the memory bridge.
+      if (activePreview) return;
+      if (s.playing && !s.error && relativeTime >= 0.5) consecutivePlaybackFailures = 0;
       const state = get();
       if (s.error) {
         const decision = resolvePlaybackErrorAdvance({
@@ -1048,8 +1408,21 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           queueLength: state.queue.length,
           mode: state.mode,
           lastErrorKey: lastPlaybackErrorKey,
+          shuffleCycleComplete: shuffleCycleDone(state),
+          consecutiveFailures: consecutivePlaybackFailures,
         });
-        if (decision.key && (decision.shouldAdvance || decision.shouldStop)) lastPlaybackErrorKey = decision.key;
+        if (decision.key && (decision.shouldAdvance || decision.shouldStop)) {
+          lastPlaybackErrorKey = decision.key;
+          consecutivePlaybackFailures += 1;
+        }
+        if (decision.gaveUp) {
+          pushToast({
+            tone: 'error',
+            title: 'Playback stopped',
+            detail: `${consecutivePlaybackFailures.toLocaleString()} tracks in a row could not be played. If they are on a drive or a server, check that it is connected.`,
+            durationMs: 8000,
+          });
+        }
         if (decision.shouldAdvance && decision.key) {
           clearPlaybackErrorAdvanceTimer();
           playbackErrorAdvanceTimer = window.setTimeout(() => {
@@ -1072,6 +1445,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           set({ stopAfterCurrent: false });
           engine.stop();
         } else if (repeatModeOf(state.mode) === 'one' && state.current) {
+          resetHandoffState();
           void playEngineTrack(state.current);
         } else {
           window.setTimeout(() => void autoAdvance(get, set), 0);
@@ -1084,8 +1458,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           sleepTimerEndsAt: state.sleepTimerEndsAt,
         })
       ) {
+        // Pause, not stop: stop() rewinds to 0:00 and persists that, which
+        // costs a podcast listener their place.
         set({ sleepTimerEndsAt: null, stopAfterCurrent: false });
-        engine.stop();
+        engine.pause();
         return;
       }
       // Crossfade is structurally bypassed while Bit-Perfect Exclusive owns
@@ -1097,6 +1473,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         ? 0
         : state.settings?.crossfadeMs ?? 0;
       const loops = loopsOnTransport(state);
+      const shuffleCycleComplete = shuffleCycleDone(state);
       if (
         !state.stopAfterCurrent &&
         shouldPrepareTrackHandoff({
@@ -1107,6 +1484,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           queueLength,
           index: state.index ?? -1,
           mode: state.mode ?? 'normal',
+          shuffleCycleComplete,
           currentTrackId: state.current?.id ?? null,
           lastHandoffKey: lastPreparedHandoffKey,
           loopsCurrent: loops,
@@ -1164,6 +1542,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           queueLength,
           index: state.index ?? -1,
           mode: state.mode ?? 'normal',
+          shuffleCycleComplete,
           currentTrackId: state.current?.id ?? null,
           lastHandoffKey,
         }) &&
@@ -1211,8 +1590,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
             notifyPlayCompleted(state.current?.id ?? null);
             // Every loop has its own prepare window: the next one chains the
             // track to itself again on the sample transport.
-            lastPreparedHandoffKey = null;
-            lastPreparedNextTrackId = null;
+            resetHandoffState();
             const c = get().current!;
             void playEngineTrack(c);
           }
@@ -1220,6 +1598,17 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
     });
   });
+
+  // A view changes behind a deck or the fullscreen visualizer without anyone
+  // seeing it, so a deliberate jump leaves them first.
+  const leaveStage = (): void => {
+    if (get().fullscreenViz) set({ fullscreenViz: false });
+    if (get().compactMode) get().setCompactMode(false);
+  };
+  const commitView = (view: ViewMode, extra: Partial<PlayerState> = {}): void => {
+    set({ view, ...extra });
+    if (parseStoredView(view)) writeStored(VIEW_STORAGE_KEY, view);
+  };
 
   return {
     engine,
@@ -1231,6 +1620,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     resumeAt: null,
     duration: 0,
     playbackError: null,
+    isBuffering: false,
     volume: 0.75,
     playbackRate: 1,
     audioOutputDeviceId: null,
@@ -1310,30 +1700,48 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         vizPreset: settings.visualizerPreset,
       });
       applyReplayGain(get().current, settings);
-      api.onTracksRemoved((ids) => void get().dropTracks(ids));
+      // A repeated init replaces the listener instead of stacking another.
+      tracksRemovedOff?.();
+      const removedOff = api.onTracksRemoved((ids) => void get().dropTracks(ids));
+      tracksRemovedOff = typeof removedOff === 'function' ? removedOff : null;
       applyTheme(settings.theme, settings.customSkin);
-      await restorePlaybackSession(settings.resumeState, settings, set, () => queueRevision === initialRevision);
+      // The remembered view only makes sense with a library to look at, and
+      // the first-launch tour starts from Home.
+      if (launchView && get().view === launchView && (!settings.libraryRoots?.length || !settings.firstLaunchTutorialSeen)) {
+        set({ view: 'home' });
+      }
+      launchView = null;
+      // Kept apart from the resume state, which is empty whenever the queue is.
+      const storedMode = parseStoredPlaybackMode(readStored(PLAYBACK_MODE_STORAGE_KEY));
+      if (storedMode) set({ mode: storedMode });
+      await restorePlaybackSession(settings.resumeState, settings, set, () => queueRevision === initialRevision, storedMode);
     },
 
     persistPlaybackSession: async () => persistPlaybackSession(get()),
 
-    setView: (v) => set({ view: v }),
+    setView: (v) => commitView(v),
+    openView: (v) => {
+      leaveStage();
+      commitView(v);
+    },
     navigateToArtist: (name) => {
       const cleaned = (name ?? '').trim();
       if (!cleaned) return;
-      set({ view: 'artists', pendingNavigation: { kind: 'artist', name: cleaned } });
+      leaveStage();
+      commitView('artists', { pendingNavigation: { kind: 'artist', name: cleaned } });
     },
     navigateToAlbum: (album, albumArtist) => {
       const a = (album ?? '').trim();
       if (!a) return;
-      set({
-        view: 'albums',
+      leaveStage();
+      commitView('albums', {
         pendingNavigation: { kind: 'album', album: a, albumArtist: (albumArtist ?? '').trim() },
       });
     },
     navigateToPlaylist: (playlistId) => {
       if (!(playlistId > 0)) return;
-      set({ view: 'playlist', pendingNavigation: { kind: 'playlist', playlistId } });
+      leaveStage();
+      commitView('playlist', { pendingNavigation: { kind: 'playlist', playlistId } });
     },
     navigateToTrack: (track) => {
       // Track navigation lands on the album detail with the row highlighted;
@@ -1341,8 +1749,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // dead end for loose singles).
       const album = (track.album ?? '').trim();
       if (album) {
-        set({
-          view: 'albums',
+        leaveStage();
+        commitView('albums', {
           pendingNavigation: {
             kind: 'album-with-track',
             album,
@@ -1383,10 +1791,16 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         .catch(() => undefined);
     },
     setVizPreset: (name) => {
+      const seq = ++vizPresetSeq;
       set({ vizPreset: name });
       void api
         .setSettings({ visualizerPreset: name })
-        .then((settings) => set({ settings, vizPreset: settings.visualizerPreset }))
+        .then((settings) => {
+          // Each save echoes the preset it stored. With a newer pick already on
+          // screen, an older echo must not put the state back to where it was.
+          if (seq === vizPresetSeq) set({ settings, vizPreset: settings.visualizerPreset });
+          else set((s) => ({ settings: { ...settings, visualizerPreset: s.vizPreset } }));
+        })
         .catch(() => undefined);
     },
     toggleEvilandDirector: () => {
@@ -1399,23 +1813,28 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       set((s) => ({ evilandDirector: !s.evilandDirector }));
     },
     randomizeEviland: (seed) => {
-      // Derive a seed from the next nonce when none is supplied — deterministic
-      // and reproducible across reloads. The randomizer hashes the string via
-      // FNV-1a, so any non-empty value is fine. Compute the nonce inside the
-      // functional updater so two rapid calls can't both read the same value
-      // and clobber each other's bump.
-      set((s) => {
-        const nextNonce = s.evilandConfigNonce + 1;
-        const requested = seed && seed.trim() ? seed.trim() : `seed-${nextNonce}`;
-        return {
-          evilandSeed: requested,
-          evilandConfigNonce: nextNonce,
-          // Manual look — let it stick. The Director toggle is a separate axis;
-          // the user can re-enable it explicitly when they want the song back
-          // in charge.
-          evilandDirector: false,
-        };
-      });
+      // The seed is kept as a code in the randomizer's format, so the seed box
+      // shows something that pastes back to the same look. Text that is
+      // already a code stays that code; any other text is hashed into one.
+      const typed = seed?.trim();
+      const code = typed ? (decodeEvilandCode(typed)?.seed ?? seedCodeFor(typed)) : randomSeedCode();
+      // The nonce is bumped inside the functional updater so two rapid calls
+      // can't both read the same value and clobber each other's bump.
+      set((s) => ({
+        evilandSeed: code,
+        evilandConfigNonce: s.evilandConfigNonce + 1,
+        // Manual look — let it stick. The Director toggle is a separate axis;
+        // the user can re-enable it explicitly when they want the song back
+        // in charge.
+        evilandDirector: false,
+      }));
+    },
+    skipEvilandLook: () => {
+      if (get().evilandDirector) requestLookSkip();
+      else get().randomizeEviland();
+    },
+    previousEvilandLook: () => {
+      if (get().evilandDirector) requestLookBack();
     },
     applyEvilandCode: (code) => {
       const trimmed = (code ?? '').trim();
@@ -1443,10 +1862,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
 
     playTrack: async (track, queue) => {
       clearPlaybackErrorAdvanceTimer();
-      recordManualSkip(get());
-      lastPreparedHandoffKey = null;
+      if (!abandonPreview()) recordManualSkip(get());
+      resetHandoffState();
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
+      consecutivePlaybackFailures = 0;
       const q = queue && queue.length ? queue : [track];
       const idx = q.findIndex((t) => t.id === track.id);
       const nextIndex = idx >= 0 ? idx : 0;
@@ -1472,9 +1892,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     playPodcastEpisode: async (episode) => {
       clearPlaybackErrorAdvanceTimer();
       const track = podcastEpisodeToTrack(episode);
-      lastPreparedHandoffKey = null;
+      abandonPreview();
+      resetHandoffState();
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
+      consecutivePlaybackFailures = 0;
       lastPodcastProgressPersistAt = 0;
       set({
         queue: [track],
@@ -1495,84 +1917,138 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       persistPodcastProgress(get(), true, false);
     },
 
-    playQueue: async (tracks, startIndex = 0, startAt = 0) => {
-      if (!tracks.length) return;
+    playQueue: (tracks, startIndex = 0, startAt = 0) => startQueuePlayback(get, set, tracks, startIndex, startAt),
+
+    previewTrack: async (track) => {
+      const state = get();
+      // A second preview keeps the first one's snapshot: that is the real queue.
+      activePreview ??= {
+        snapshot: {
+          queue: state.queue,
+          index: state.index,
+          current: state.current,
+          currentTime: state.currentTime,
+          duration: state.duration,
+          resumeAt: state.resumeAt,
+          mode: state.mode,
+          shuffleHistory: state.shuffleHistory,
+          activePodcastEpisode: state.activePodcastEpisode,
+        },
+      };
       clearPlaybackErrorAdvanceTimer();
-      recordManualSkip(get());
-      lastPreparedHandoffKey = null;
+      resetHandoffState();
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
-      const q = [...tracks];
-      const i = Math.max(0, Math.min(startIndex, q.length - 1));
-      const t = q[i]!;
-      const position = Number.isFinite(startAt) ? Math.max(0, Math.min(t.duration || Infinity, startAt)) : 0;
       set({
-        queue: q,
-        index: i,
-        current: t,
-        currentTime: position,
-        duration: t.duration ?? 0,
+        queue: [track],
+        index: 0,
+        current: track,
+        currentTime: 0,
+        duration: track.duration ?? 0,
         resumeAt: null,
         playbackError: null,
         activePodcastEpisode: null,
-        shuffleHistory: isShuffleMode(get().mode) ? resetSmartShuffleHistory(q.length, i) : [],
+        shuffleHistory: [],
       });
-      applyReplayGain(t, get().settings);
-      schedulePersistPlaybackSession(get(), true);
-      if (!(await playEngineTrack(t, position))) return;
+      applyReplayGain(track, get().settings);
+      try {
+        if (!(await playEngineTrack(track))) return;
+      } catch (err) {
+        get().endPreview();
+        throw err;
+      }
+    },
+
+    endPreview: () => {
+      const preview = activePreview;
+      if (!preview) return;
+      const snapshot = preview.snapshot;
+      queueRevision++;
+      playIntents.begin();
+      clearPlaybackErrorAdvanceTimer();
+      resetHandoffState();
+      lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
-      startLastfmNowPlaying(t);
-      recordLibraryPlay(t);
+      // Unloading notifies the engine subscription synchronously. While the
+      // preview flag is still up it saves the real queue, not the preview's.
+      engine.unload();
+      activePreview = null;
+      // Put back the way Undo clear does: paused, at the place it was left.
+      const position = snapshot.current ? snapshot.resumeAt ?? snapshot.currentTime : 0;
+      set({
+        queue: snapshot.queue,
+        index: snapshot.index,
+        current: snapshot.current,
+        currentTime: position,
+        duration: snapshot.duration,
+        resumeAt: snapshot.current ? position : null,
+        isPlaying: false,
+        playbackError: null,
+        stopAfterCurrent: false,
+        shuffleHistory: snapshot.shuffleHistory,
+        activePodcastEpisode: snapshot.activePodcastEpisode,
+      });
+      applyReplayGain(snapshot.current, get().settings);
+      schedulePersistPlaybackSession(get(), true);
+      notifyShellPlayback(get());
     },
 
     loadQueue: (tracks) => {
       queueRevision++;
+      abandonPreview();
       clearPlaybackErrorAdvanceTimer();
       playIntents.begin();
-      lastPreparedHandoffKey = null;
+      resetHandoffState();
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
-      cachedShuffleHandoff = null;
+      consecutivePlaybackFailures = 0;
       engine.unload();
       set({ isPlaying: false, stopAfterCurrent: false, queue: [...tracks], index: -1, current: null, resumeAt: null, currentTime: 0, duration: 0, playbackError: null, shuffleHistory: [], activePodcastEpisode: null });
       schedulePersistPlaybackSession(get(), true);
       if (get().autoDjEnabled) void get().refillAutoDjQueue(true);
     },
 
-    queueTrackNext: (track) => {
-      queueRevision++;
-      const result = insertTrackNext(get().queue, get().index, track);
-      set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
-      schedulePersistPlaybackSession(get(), true);
-    },
+    queueTrackNext: (track) => get().queueTracksNext([track]),
 
-    addTrackToQueue: (track) => {
-      queueRevision++;
-      const result = appendTrackToQueue(get().queue, get().index, track);
-      set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
-      schedulePersistPlaybackSession(get(), true);
-    },
+    addTrackToQueue: (track) => get().addTracksToQueue([track]),
 
     queueTracksNext: (tracks) => {
       if (!tracks.length) return;
       queueRevision++;
-      const result = insertTracksNext(get().queue, get().index, tracks);
-      set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
+      const state = get();
+      const result = insertTracksNext(state.queue, state.index, tracks);
+      set({
+        queue: result.queue,
+        index: result.index,
+        shuffleHistory: historyAfterInsert(state, playNextInsertAt(state.queue.length, state.index), tracks.length),
+      });
       schedulePersistPlaybackSession(get(), true);
     },
 
     addTracksToQueue: (tracks) => {
       if (!tracks.length) return;
       queueRevision++;
-      const result = appendTracksToQueue(get().queue, get().index, tracks);
-      set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
+      const state = get();
+      const result = appendTracksToQueue(state.queue, state.index, tracks);
+      set({
+        queue: result.queue,
+        index: result.index,
+        shuffleHistory: historyAfterInsert(state, state.queue.length, tracks.length),
+      });
       schedulePersistPlaybackSession(get(), true);
     },
 
     moveQueuedTrack: (fromIndex, toIndex) => {
       queueRevision++;
-      const result = moveQueueItem(get().queue, get().index, fromIndex, toIndex);
-      set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
+      const state = get();
+      const result = moveQueueItem(state.queue, state.index, fromIndex, toIndex);
+      set({
+        queue: result.queue,
+        index: result.index,
+        shuffleHistory: isShuffleMode(state.mode)
+          ? remapShuffleHistory(state.shuffleHistory, moveIndexMap(state.queue.length, fromIndex, toIndex))
+          : [],
+      });
       schedulePersistPlaybackSession(get(), true);
     },
 
@@ -1580,6 +2056,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       queueRevision++;
       const state = get();
       const result = removeQueueItem(state.queue, state.index, removeIndex);
+      const shuffling = isShuffleMode(state.mode);
+      const survivingHistory = shuffling
+        ? remapShuffleHistory(state.shuffleHistory, removeIndexMap(state.queue.length, removeIndex))
+        : [];
       if (!result.queue.length) {
         // Removing the last track is also a removed-current case, so it needs
         // the same unload() as the branch below: stop() leaves src/trackId on
@@ -1591,14 +2071,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       }
       if (result.removedCurrent) {
         const nextCurrent = result.queue[result.index] ?? null;
-        if (state.isPlaying && nextCurrent) {
-          await get().playQueue(result.queue, result.index);
+        const shuffleHistory = shuffling ? historyEndingAt(survivingHistory, result.index) : [];
+        // Nothing follows the last entry unless repeat-all wraps around to the
+        // top, so playback ends rather than falling back onto the track before.
+        const nothingFollows = !shuffling && state.index >= state.queue.length - 1;
+        const wraps = repeatModeOf(state.mode) === 'all';
+        const shufflePick = shuffling && state.isPlaying ? shuffleAfterRemoval(state.mode, result.queue.length, survivingHistory) : null;
+        if (shufflePick) {
+          await startQueuePlayback(get, set, result.queue, shufflePick.index, 0, { shuffleHistory: shufflePick.history });
           return;
         }
-        // Paused: playQueue() above won't run to hand the engine a fresh
-        // src, so without this the engine keeps holding the just-removed
-        // track (stop() alone doesn't clear src/trackId) — a later Play
-        // would resume the removed track instead of loading nextCurrent.
+        if (!shuffling && state.isPlaying && nextCurrent && (!nothingFollows || wraps)) {
+          await startQueuePlayback(get, set, result.queue, nothingFollows ? 0 : result.index, 0, { shuffleHistory });
+          return;
+        }
+        // Not continuing: startQueuePlayback() above won't run to hand the
+        // engine a fresh src, so without this the engine keeps holding the
+        // just-removed track (stop() alone doesn't clear src/trackId) — a
+        // later Play would resume the removed track instead of loading
+        // nextCurrent.
         engine.unload();
         set({
           queue: result.queue,
@@ -1607,12 +2098,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           currentTime: 0,
           duration: nextCurrent?.duration ?? 0,
           resumeAt: null,
+          isPlaying: false,
           activePodcastEpisode: null,
-          shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index),
+          shuffleHistory,
         });
         applyReplayGain(nextCurrent, get().settings);
       } else {
-        set({ queue: result.queue, index: result.index, shuffleHistory: resetSmartShuffleHistory(result.queue.length, result.index) });
+        set({ queue: result.queue, index: result.index, shuffleHistory: survivingHistory });
       }
       schedulePersistPlaybackSession(get(), true);
     },
@@ -1634,14 +2126,34 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // right after it when it went too.
       const before = state.queue.slice(0, Math.max(0, state.index)).filter((track) => !gone.has(track.id)).length;
       const index = Math.min(queue.length - 1, before);
+      const shuffling = isShuffleMode(state.mode);
+      const goneAt: number[] = [];
+      state.queue.forEach((track, at) => {
+        if (gone.has(track.id)) goneAt.push(at);
+      });
+      const survivingHistory = shuffling
+        ? remapShuffleHistory(state.shuffleHistory, removalIndexMap(state.queue.length, goneAt))
+        : [];
       if (!currentGone) {
-        set({ queue, index, shuffleHistory: resetSmartShuffleHistory(queue.length, index) });
+        set({ queue, index, shuffleHistory: survivingHistory });
         schedulePersistPlaybackSession(get(), true);
         return;
       }
       const nextCurrent = queue[index] ?? null;
-      if (state.isPlaying && nextCurrent) {
-        await get().playQueue(queue, index);
+      const shuffleHistory = shuffling ? historyEndingAt(survivingHistory, index) : [];
+      // The playing track is the last one and nothing follows it: stop there
+      // instead of restarting the track before it from 0:00. Repeat-all
+      // carries on from the top.
+      const nothingFollows = !shuffling && before >= queue.length;
+      const wraps = repeatModeOf(state.mode) === 'all';
+      // The removed track did not stop early, it stopped existing, so no skip is recorded for it.
+      const shufflePick = shuffling && state.isPlaying ? shuffleAfterRemoval(state.mode, queue.length, survivingHistory) : null;
+      if (shufflePick) {
+        await startQueuePlayback(get, set, queue, shufflePick.index, 0, { skipRecord: true, shuffleHistory: shufflePick.history });
+        return;
+      }
+      if (!shuffling && state.isPlaying && nextCurrent && (!nothingFollows || wraps)) {
+        await startQueuePlayback(get, set, queue, nothingFollows ? 0 : index, 0, { skipRecord: true, shuffleHistory });
         return;
       }
       engine.unload();
@@ -1652,11 +2164,31 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         currentTime: 0,
         duration: nextCurrent?.duration ?? 0,
         resumeAt: null,
+        isPlaying: false,
         activePodcastEpisode: null,
-        shuffleHistory: resetSmartShuffleHistory(queue.length, index),
+        shuffleHistory,
       });
       applyReplayGain(nextCurrent, get().settings);
       schedulePersistPlaybackSession(get(), true);
+    },
+
+    refreshTracks: (updated) => {
+      if (!updated.length) return;
+      const byId = new Map(updated.map((track) => [track.id, track]));
+      set((state) => {
+        const fresh = state.current ? byId.get(state.current.id) : undefined;
+        const queued = state.queue.some((track) => byId.has(track.id));
+        if (!fresh && !queued) return state;
+        return {
+          current: fresh && state.current ? { ...state.current, ...fresh } : state.current,
+          queue: queued
+            ? state.queue.map((track) => {
+                const next = byId.get(track.id);
+                return next ? { ...track, ...next } : track;
+              })
+            : state.queue,
+        };
+      });
     },
 
     clearQueue: () => {
@@ -1664,12 +2196,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const previous = get();
       const emptyQueue: Track[] = [];
       clearPlaybackErrorAdvanceTimer();
-      recordManualSkip(get());
-      lastPreparedHandoffKey = null;
+      if (!abandonPreview()) recordManualSkip(get());
+      resetHandoffState();
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
+      consecutivePlaybackFailures = 0;
       playIntents.begin();
-      cachedShuffleHandoff = null;
       engine.unload();
       set({
         isPlaying: false,
@@ -1709,8 +2241,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
                 duration: previous.duration,
                 resumeAt: previous.current ? position : null,
                 isPlaying: false,
-                mode: previous.mode,
-                shuffleHistory: previous.shuffleHistory,
+                // Shuffle and repeat stay as the listener has them now; only a
+                // history from a shuffled queue is worth carrying back.
+                shuffleHistory: !isShuffleMode(get().mode)
+                  ? []
+                  : isShuffleMode(previous.mode)
+                    ? previous.shuffleHistory
+                    : resetSmartShuffleHistory(previous.queue.length, previous.index),
                 activePodcastEpisode: previous.activePodcastEpisode,
               });
               applyReplayGain(previous.current, get().settings);
@@ -1726,7 +2263,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const state = get();
       if (!engine.getState().src) {
         const startIndex = resolvePlaybackStartIndex(state.queue.length || (state.current ? 1 : 0), state.index);
-        if (startIndex < 0) return;
+        if (startIndex < 0) {
+          // Nothing loaded: with a library to draw from, Play starts something
+          // instead of doing nothing.
+          const libraryRootCount = state.settings?.libraryRoots?.length ?? 0;
+          if (starterQueueNeeded({ startIndex, libraryRootCount, pending: starterQueuePending })) {
+            void playStarterQueue(get);
+          }
+          return;
+        }
         const resumeAt = state.resumeAt;
         const playbackQueue = state.queue.length ? state.queue : state.current ? [state.current] : [];
         // Carry the saved position in the play request itself. A late
@@ -1738,6 +2283,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     next: async () => {
+      if (activePreview) return;
       clearPlaybackErrorAdvanceTimer();
       const intent = playIntents.begin();
       const revision = queueRevision;
@@ -1752,47 +2298,46 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       cachedShuffleHandoff = null;
       const { queue, index, mode, shuffleHistory } = state;
       if (!queue.length) return;
-      let nextIdx = index + 1;
-      let nextShuffleHistory = shuffleHistory;
-      if (isShuffleMode(mode)) {
-        const decision = nextSmartShuffle({ queueLength: queue.length, currentIndex: index, history: shuffleHistory });
-        nextIdx = decision.index;
-        nextShuffleHistory = decision.history;
-      }
-      if (nextIdx >= queue.length) {
-        if (repeatModeOf(mode) === 'all') nextIdx = 0;
-        else {
-          const additions = await get().refillAutoDjQueue(true);
+      consecutivePlaybackFailures = 0;
+      const advance = resolveQueueAdvance({ queue, index, mode, history: shuffleHistory });
+      let nextIdx = advance.index;
+      let nextShuffleHistory = advance.history;
+      if (advance.atEnd) {
+        // The end of the queue, or of a shuffle cycle with repeat off.
+        const additions = await get().refillAutoDjQueue(true);
+        if (!isCurrent()) return;
+        let resumed: QueueAdvance | null = null;
+        if (additions.length) {
+          const grown = get();
+          resumed = resolveQueueAdvance({ queue: grown.queue, index: grown.index, mode: grown.mode, history: grown.shuffleHistory });
+        } else {
+          const expanded = await expandQueueFromCurrentContext(state);
           if (!isCurrent()) return;
-          if (!additions.length) {
-            const expanded = await expandQueueFromCurrentContext(state);
-            if (!isCurrent()) return;
-            if (!expanded || expanded.index >= expanded.queue.length - 1) {
-              engine.pause();
-              set({ isPlaying: false });
-              schedulePersistPlaybackSession(get(), true);
-              return;
-            }
-            nextIdx = expanded.index + 1;
+          if (expanded) {
             const contextShuffleHistory = isShuffleMode(mode)
               ? resetSmartShuffleHistory(expanded.queue.length, expanded.index)
               : [];
-            set({
-              queue: expanded.queue,
-              index: expanded.index,
-              shuffleHistory: contextShuffleHistory,
-            });
-            nextShuffleHistory = contextShuffleHistory;
-          } else {
-            nextIdx = index + 1;
+            resumed = resolveQueueAdvance({ queue: expanded.queue, index: expanded.index, mode, history: contextShuffleHistory });
+            if (!resumed.atEnd) {
+              set({ queue: expanded.queue, index: expanded.index, shuffleHistory: contextShuffleHistory });
+            }
           }
         }
+        if (!resumed || resumed.atEnd) {
+          engine.pause();
+          set({ isPlaying: false });
+          schedulePersistPlaybackSession(get(), true);
+          return;
+        }
+        nextIdx = resumed.index;
+        nextShuffleHistory = resumed.history;
       }
       if (!isCurrent()) return;
       await commitPlaybackAdvance(get, set, nextIdx, nextShuffleHistory);
     },
 
     prev: async () => {
+      if (activePreview) return;
       clearPlaybackErrorAdvanceTimer();
       const { queue, index, currentTime, mode, shuffleHistory } = get();
       if (!queue.length) return;
@@ -1804,8 +2349,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const shuffleDecision = isShuffleMode(mode)
         ? previousSmartShuffle({ queueLength: queue.length, currentIndex: index, history: shuffleHistory })
         : null;
-      const prevIdx = shuffleDecision ? shuffleDecision.index : Math.max(0, index - 1);
+      // Repeat-all wraps backwards from the first track like Next wraps forwards.
+      const prevIdx = shuffleDecision
+        ? shuffleDecision.index
+        : index === 0 && repeatModeOf(mode) === 'all'
+          ? queue.length - 1
+          : Math.max(0, index - 1);
       const t = queue[prevIdx]!;
+      resetHandoffState();
+      consecutivePlaybackFailures = 0;
       set({
         index: prevIdx,
         current: t,
@@ -1820,6 +2372,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (!(await playEngineTrack(t))) return;
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
+      // Landing on another track counts as a play the same way Next does.
+      if (prevIdx !== index) recordLibraryPlay(t);
     },
 
     seek: (t) => {
@@ -1954,7 +2508,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         !shouldAutoDjRefill({
           enabled: state.autoDjEnabled,
           queueLength: state.queue.length,
-          index: state.index,
+          index: autoDjRefillIndex(state),
         })
       ) {
         return [];
@@ -1995,7 +2549,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // silently undone by committing onto the stale queue captured above.
       const fresh = get();
       if (!fresh.autoDjEnabled || !isCurrent()) return [];
-      const remainingAhead = Math.max(0, fresh.queue.length - fresh.index - 1);
+      const remainingAhead = remainingAheadOf(fresh);
       let additions = selectAutoDjAdditions(fresh.queue, candidates, fresh.autoDjTarget, remainingAhead);
       if (!additions.length && sampledFolderRule) {
         const everything = await runRule(false);
@@ -2005,7 +2559,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           latest.queue,
           everything,
           latest.autoDjTarget,
-          Math.max(0, latest.queue.length - latest.index - 1),
+          remainingAheadOf(latest),
         );
       }
       if (!additions.length) return [];
@@ -2024,10 +2578,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const state = get();
       set({
         mode: m,
-        shuffleHistory: isShuffleMode(m)
-          ? resetSmartShuffleHistory(state.queue.length, state.index)
-          : [],
+        // Changing repeat while shuffle stays on keeps what has already played
+        // (as a new array, which drops any handoff pick cached against the old one).
+        shuffleHistory: !isShuffleMode(m)
+          ? []
+          : isShuffleMode(state.mode)
+            ? [...state.shuffleHistory]
+            : resetSmartShuffleHistory(state.queue.length, state.index),
       });
+      writeStored(PLAYBACK_MODE_STORAGE_KEY, m);
       schedulePersistPlaybackSession(get(), true);
     },
 
@@ -2191,6 +2750,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
   };
 });
+
+// The last content view comes back at launch. It is applied here, before
+// anything renders, so Home is never mounted just to be replaced.
+launchView = parseStoredView(readStored(VIEW_STORAGE_KEY));
+if (launchView) usePlayerStore.setState({ view: launchView });
 
 // Dev-only: expose the store on window for visual QA / debugging.
 if (import.meta.env.DEV && typeof window !== 'undefined') {

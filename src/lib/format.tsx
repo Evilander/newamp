@@ -1,5 +1,21 @@
 import type { ReactNode } from 'react';
+import { deckModeChord, formatShortcut } from '@shared/keyboard-shortcuts';
+import { api } from './api';
 export { playbackCodecLabel } from '@shared/audio-quality';
+
+/**
+ * A chord for display, written with `Mod` for the command key: shortcutLabel('Mod+K')
+ * reads "Ctrl+K" on Windows and Linux and "⌘K" on a Mac. Pass a separator to
+ * get the spaced form ("Ctrl K"); a Mac label never takes one.
+ */
+export function shortcutLabel(chord: string, separator = '+'): string {
+  return formatShortcut(chord, api.platform, separator);
+}
+
+/** The deck-mode chord as this platform labels it. It differs on a Mac, where Cmd+M minimizes. */
+export function deckModeShortcutLabel(): string {
+  return shortcutLabel(deckModeChord(api.platform));
+}
 
 export function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';

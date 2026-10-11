@@ -4,6 +4,11 @@ export interface HandoffIndexInput {
   queueLength: number;
   index: number;
   mode: PlaybackMode;
+  /**
+   * Shuffle with repeat off plays each queued track once. When they all have,
+   * the queue is over and there is nothing to hand off to.
+   */
+  shuffleCycleComplete?: boolean;
 }
 
 export interface HandoffDecisionInput extends HandoffIndexInput {
@@ -34,8 +39,9 @@ export function nextHandoffIndex(input: HandoffIndexInput): number | null {
  * Whether a handoff has ANY valid target from this position — true whenever
  * nextHandoffIndex resolves one (sequential advance, or repeat-all wrapping
  * to 0), and also true for shuffle once the queue has more than one track
- * and repeat-one is not holding on the current track (shuffle always finds
- * a candidate: smart-shuffle resets and reuses the bag once exhausted).
+ * and repeat-one is not holding on the current track (smart-shuffle resets
+ * and reuses the bag once exhausted, which only repeat-all wants — with
+ * repeat off a finished cycle ends the queue).
  *
  * nextHandoffIndex itself stays shuffle-blind on purpose — a specific
  * shuffle pick needs RNG and play history that do not belong in this pure
@@ -48,7 +54,10 @@ export function hasHandoffTarget(input: HandoffIndexInput): boolean {
   if (nextHandoffIndex(input) != null) return true;
   const queueLength = Math.trunc(Number(input.queueLength) || 0);
   const index = Math.trunc(Number(input.index) || 0);
-  return queueLength > 1 && index >= 0 && isShuffleMode(input.mode) && repeatModeOf(input.mode) !== 'one';
+  if (queueLength <= 1 || index < 0 || !isShuffleMode(input.mode)) return false;
+  const repeat = repeatModeOf(input.mode);
+  if (repeat === 'one') return false;
+  return !(repeat === 'off' && input.shuffleCycleComplete === true);
 }
 
 export function shouldStartTrackHandoff(input: HandoffDecisionInput): boolean {
