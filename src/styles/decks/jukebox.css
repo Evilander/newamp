@@ -300,6 +300,17 @@
   font-family: var(--font-mono);
   font-size: 8px;
   font-weight: 800;
+  cursor: pointer;
+}
+.deck-jb-keycap:hover:not(:disabled) { filter: brightness(1.08); }
+.deck-jb-keycap:active:not(:disabled) {
+  transform: translateY(1px);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+/* no queue entry behind this key */
+.deck-jb-keycap:disabled {
+  cursor: default;
+  opacity: 0.4;
 }
 .deck-jb-keycap.is-lit {
   color: #10130c;

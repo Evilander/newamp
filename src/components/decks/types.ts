@@ -44,11 +44,16 @@ export interface DeckProps {
   deckSkin: DeckSkin;
   /** Whether the visualizer should expand to take the full art area. */
   vizExpanded: boolean;
+  /** How many tracks are queued and which one is playing (-1 when none). */
+  queueLength: number;
+  queueIndex: number;
   onTogglePlay: () => void;
   onStop: () => void;
   onNext: () => void;
   onPrev: () => void;
   onSeek: (t: number) => void;
+  /** Plays the queue entry at this position. */
+  onSelectQueueIndex: (index: number) => void;
   onSetVolume: (v: number) => void;
   onSetMode: (m: PlaybackMode) => void;
   onSetAlwaysOnTop: (on: boolean) => void;

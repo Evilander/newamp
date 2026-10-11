@@ -15,21 +15,29 @@ import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
+import { DeckWindowButtons } from './DeckWindowButtons';
+import { jukeboxSelection } from './deck-controls';
 
 const BUBBLES_PER_TUBE = 6;
 
 export function JukeboxDeck(props: DeckProps): JSX.Element {
   const {
     track, isPlaying, currentTime, duration, volume, alwaysOnTop, artUrl, vizExpanded,
-    onTogglePlay, onNext, onPrev, onStop, onSeek, onSetVolume, onSetAlwaysOnTop,
+    queueLength, queueIndex,
+    onTogglePlay, onNext, onPrev, onStop, onSeek, onSelectQueueIndex, onSetVolume, onSetAlwaysOnTop,
     onExitDeck, onMinimize, onClose, onToggleVizExpanded, onOpenFullscreenViz,
   } = props;
 
-  const selectionNo = String(track?.trackNo ?? 1).padStart(2, '0');
-  const selectionDemo = !track || track.trackNo == null;
-  const litKey = ((track?.trackNo ?? 1) - 1 + 12) % 12;
+  const selection = jukeboxSelection(queueLength, queueIndex);
   const progress = duration > 0 ? Math.max(0, Math.min(1, currentTime / duration)) : 0;
   const tonearmAngle = 14 + progress * 20;
+  // The lit key is the song already selected. Playing it again as a queue
+  // entry would count as a skip and reset the shuffle history, so it starts
+  // the song over instead.
+  const restartPlaying = (): void => {
+    onSeek(0);
+    if (!isPlaying) onTogglePlay();
+  };
 
   return (
     <div className={`deck-jukebox ${isPlaying ? 'is-playing' : ''} titlebar-drag`}>
@@ -44,8 +52,7 @@ export function JukeboxDeck(props: DeckProps): JSX.Element {
             title={alwaysOnTop ? 'Unpin window' : 'Pin window on top'}
           >PIN</button>
           <button className="pxbtn" onClick={onExitDeck} title="Back to full library">FULL</button>
-          <button className="pxbtn" onClick={onMinimize} title="Minimize">_</button>
-          <button className="pxbtn" onClick={onClose} title="Close" style={{ color: 'var(--error)' }}>×</button>
+          <DeckWindowButtons onMinimize={onMinimize} onClose={onClose} className="pxbtn" danger />
         </div>
       </header>
 
@@ -78,6 +85,7 @@ export function JukeboxDeck(props: DeckProps): JSX.Element {
           onClick={onToggleVizExpanded}
           onDoubleClick={onOpenFullscreenViz}
           title={vizExpanded ? 'Show the 45' : 'Show visualizer'}
+          aria-label={vizExpanded ? 'Show the 45' : 'Show visualizer'}
         >
           {vizExpanded ? (
             <div className="deck-jb-viz">
@@ -103,19 +111,27 @@ export function JukeboxDeck(props: DeckProps): JSX.Element {
         {/* typed title-strip card */}
         <div className="deck-jb-strips">
           <div className="deck-jb-strip-head">
-            <span className="deck-jb-strip-sel">A–{selectionNo}</span>
-            {selectionDemo ? <span className="deck-jb-strip-demo">DEMO</span> : null}
+            <span className="deck-jb-strip-sel">{selection.label}</span>
+            {selection.hasSelection ? null : <span className="deck-jb-strip-demo">DEMO</span>}
           </div>
           <div className="deck-jb-strip-title" title={track?.title}>{track?.title ?? 'NO SELECTION'}</div>
           <div className="deck-jb-strip-artist" title={track?.artist}>{track?.artist ?? 'insert coin'}</div>
         </div>
 
-        {/* selector keys — the current selection stays lit */}
-        <div className="deck-jb-keys" aria-hidden="true">
-          {Array.from({ length: 12 }, (_, i) => (
-            <span key={i} className={`deck-jb-keycap ${i === litKey ? 'is-lit' : ''}`}>
-              {i + 1}
-            </span>
+        {/* selector keys: each plays its place in the queue, the playing one stays lit */}
+        <div className="deck-jb-keys" role="group" aria-label="Song selection">
+          {selection.keys.map((key) => (
+            <button
+              key={key.number}
+              type="button"
+              className={`deck-jb-keycap ${key.lit ? 'is-lit' : ''}`}
+              disabled={!key.enabled}
+              aria-label={`Play queue item ${key.queueIndex + 1}`}
+              aria-current={key.lit ? 'true' : undefined}
+              onClick={() => (key.lit ? restartPlaying() : onSelectQueueIndex(key.queueIndex))}
+            >
+              {key.number}
+            </button>
           ))}
         </div>
 
@@ -124,12 +140,12 @@ export function JukeboxDeck(props: DeckProps): JSX.Element {
           <span className="deck-jb-coin" aria-hidden="true" />
           <span className="deck-jb-coin-label" aria-hidden="true">10¢</span>
           <div className="deck-jb-transport">
-            <button className="deck-jb-push" onClick={onPrev} title="Previous">◀◀</button>
-            <button className="deck-jb-push is-primary" onClick={onTogglePlay} title="Play / Pause">
+            <button className="deck-jb-push" onClick={onPrev} title="Previous" aria-label="Previous track">◀◀</button>
+            <button className="deck-jb-push is-primary" onClick={onTogglePlay} title="Play / Pause" aria-label={isPlaying ? 'Pause' : 'Play'}>
               {isPlaying ? '▮▮' : '▶'}
             </button>
-            <button className="deck-jb-push" onClick={onStop} title="Stop">◼</button>
-            <button className="deck-jb-push" onClick={onNext} title="Next">▶▶</button>
+            <button className="deck-jb-push" onClick={onStop} title="Stop" aria-label="Stop">◼</button>
+            <button className="deck-jb-push" onClick={onNext} title="Next" aria-label="Next track">▶▶</button>
           </div>
           <div className="deck-jb-volume">
             <VolumeSlider value={volume} onChange={onSetVolume} width={104} showLabel={false} compact />

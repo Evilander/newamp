@@ -6,6 +6,7 @@ import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
+import { DeckWindowButtons } from './DeckWindowButtons';
 import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
 
 const MODE_LABELS: Record<DeckProps['mode'], string> = {
@@ -214,8 +215,7 @@ export function DiscmanDeck(props: DeckProps): JSX.Element {
             PIN
           </button>
           <button type="button" className="pxbtn" onClick={onExitDeck}>FULL</button>
-          <button type="button" className="pxbtn" onClick={onMinimize}>_</button>
-          <button type="button" className="pxbtn" onClick={onClose}>×</button>
+          <DeckWindowButtons onMinimize={onMinimize} onClose={onClose} className="pxbtn" />
         </div>
       </header>
 
@@ -227,6 +227,7 @@ export function DiscmanDeck(props: DeckProps): JSX.Element {
           onDoubleClick={onOpenFullscreenViz}
           data-newamp-open-visualizer
           title="Click for deck visualizer, double-click for fullscreen"
+          aria-label={vizExpanded ? 'Show the disc' : 'Show visualizer'}
         >
           <span className="deck-dm-window-well">
             <span className="deck-dm-disc-spin">
@@ -333,7 +334,10 @@ export function DiscmanDeck(props: DeckProps): JSX.Element {
             <small>MIN · MAX</small>
           </div>
           <div className="deck-dm-volume-row">
-            <span className="deck-dm-thumbwheel" aria-hidden="true"><i /></span>
+            <svg className="deck-dm-volume-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M2 6h3l4-3v10l-4-3H2z" />
+              <path d="M11.5 5.5a3.6 3.6 0 0 1 0 5M13.2 3.8a6 6 0 0 1 0 8.4" />
+            </svg>
             <VolumeSlider
               className="deck-dm-volume-slider"
               value={volume}

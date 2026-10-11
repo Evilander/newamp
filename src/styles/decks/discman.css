@@ -1108,30 +1108,20 @@
   gap: 6px;
 }
 
-.deck-dm-thumbwheel {
-  position: relative;
+/* printed speaker mark; the slider beside it is the only volume control */
+.deck-dm-volume-icon {
   width: 15px;
-  height: 31px;
+  height: 15px;
   flex: 0 0 15px;
-  overflow: hidden;
-  background:
-    repeating-linear-gradient(180deg, #9ba19f 0 1px, #4f5655 1px 3px),
-    linear-gradient(90deg, #252a2a, #8e9593 48%, #252a2a);
-  border: 1px solid #161a1a;
-  border-radius: 6px;
-  box-shadow:
-    inset 2px 0 2px rgba(0, 0, 0, 0.44),
-    inset -2px 0 2px rgba(0, 0, 0, 0.5),
-    0 1px 0 rgba(255, 255, 255, 0.28);
+  fill: #6f7776;
+  stroke: #6f7776;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.2;
 }
 
-.deck-dm-thumbwheel i {
-  position: absolute;
-  top: 50%;
-  left: 2px;
-  right: 2px;
-  height: 1px;
-  background: rgba(255, 255, 255, 0.62);
+.deck-dm-volume-icon path:last-child {
+  fill: none;
 }
 
 .deck-dm-volume-slider {
