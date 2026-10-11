@@ -8,8 +8,10 @@ import {
   Menu,
   MessageChannelMain,
   nativeImage,
+  powerSaveBlocker,
   protocol,
   screen,
+  session,
   shell,
   dialog,
   Tray,
@@ -22,7 +24,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renam
 import { randomBytes } from 'node:crypto';
 import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { LibraryStore, LibraryUnavailableError } from './library.js';
-import { LibraryWatcher } from './library-watcher.js';
+import { IncrementalScanGate, LibraryWatcher, type LibraryWatchPlan } from './library-watcher.js';
 import { findLocalLyricsForTrack } from './local-lyrics.js';
 import { SettingsStore, withAiAssistRuntime } from './settings.js';
 import { readTrackFile, Scanner } from './scanner.js';
@@ -45,7 +47,8 @@ import {
   type LastfmOutboxFlushResult,
 } from './lastfm.js';
 import {
-  playbackMode,
+  resolvePlaybackMode,
+  stopFfmpegReading,
   calculateAlbumReplayGainDb,
   analyzeTrackReplayGain,
   transcodeToWavResponse,
@@ -58,9 +61,10 @@ import { fileRangeResponse, seekableTranscodeResponse } from './audio-serve.js';
 import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac, transcodeCacheStatus } from './transcode-cache.js';
 import { finishWebmToMp4 } from './video-mux.js';
 import { authorizeAudioProtocolPath } from './audio-protocol-authorize.js';
-import { closeAllGaplessSessions, registerGaplessTransport } from './gapless-transport.js';
+import { closeAllGaplessSessions, registerGaplessTransport, releaseGaplessPaths } from './gapless-transport.js';
 import { analyzeTrackDna, killAllDnaFfmpeg } from './dna-analyzer.js';
 import { getSongScore, initScoreCache, killAllScoreFfmpeg } from './score-analyzer.js';
+import { cancelWaveformWork, getWaveform, initWaveformCache, killAllWaveformFfmpeg } from './waveform-peaks.js';
 import { RadioBrain } from './radio-brain.js';
 import { ExclusiveOutput, classifyTrackSource } from './exclusive-output.js';
 import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
@@ -75,7 +79,18 @@ import {
 } from './winamp-skin-import.js';
 import { createPlaylistCoverGuard } from './playlist-cover-guard.js';
 import { trackContextMenuTemplate } from './track-context-menu.js';
-import { shouldStayResidentOnWindowAllClosed } from './window-lifecycle-policy.js';
+import { moveTracksToTrash, trashableTracks } from './trash-tracks.js';
+import {
+  closeAction,
+  crashRecoveryAction,
+  shouldBlockDisplaySleep,
+  shouldLeaveCompact,
+  shouldStayResidentOnWindowAllClosed,
+} from './window-lifecycle-policy.js';
+import { emptyWindowState, nextWindowState, placeOrigin, placeWindow, type WindowRect } from './window-state.js';
+import { installPermissionHandlers } from './permissions.js';
+import { choosePortableDataDir } from './portable-data.js';
+import { createOpenFileBatcher, mergeHandedOff, type HandedOffFiles } from './open-file-batcher.js';
 import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
 import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
@@ -103,6 +118,7 @@ import type {
   SavePlaylistInput,
   TrackContextMenuChoice,
   TrackContextMenuRequest,
+  TrashProgress,
   TrashTracksResult,
   ScanProgress,
   SupportBackupResult,
@@ -228,9 +244,25 @@ if (smokeMode && !userDataOverride) {
   app.setPath('userData', smokeUserData);
 }
 
+// The portable build's wrapper exports the folder the exe sits in. Data goes
+// beside it only when no profile exists in the default location yet, so users
+// of earlier portable builds keep the library they already have.
+const portableExecutableDir = process.env.PORTABLE_EXECUTABLE_DIR;
+const portableDataDecision =
+  portableExecutableDir && !userDataOverride && !smokeMode
+    ? choosePortableDataDir(portableExecutableDir, app.getPath('userData'), {
+        exists: existsSync,
+        canWrite: canWriteDirectory,
+      })
+    : null;
+if (portableDataDecision?.dir) app.setPath('userData', portableDataDecision.dir);
+if (portableDataDecision) {
+  console.log(`[newamp] portable data: ${portableDataDecision.reason}, userData=${app.getPath('userData')}`);
+}
+
 const sessionData = sessionDataOverride
   ? resolve(sessionDataOverride)
-  : userDataOverride || smokeMode
+  : userDataOverride || smokeMode || portableDataDecision?.dir
     ? resolve(app.getPath('userData'), 'session-data')
     : process.platform === 'win32' && (process.env.LOCALAPPDATA || process.env.APPDATA)
       ? resolve(process.env.LOCALAPPDATA || process.env.APPDATA!, 'NewAmp', 'session-data')
@@ -238,6 +270,15 @@ const sessionData = sessionDataOverride
 mkdirSync(sessionData, { recursive: true });
 app.setPath('sessionData', sessionData);
 app.commandLine.appendSwitch('disk-cache-dir', join(sessionData, 'Cache'));
+// The first enumerateDevices() call (the output-device picker, device-change
+// handling) otherwise starts a separate Video Capture utility process, about
+// 65 MB private for the life of the session. NewAmp never opens a camera.
+// Measured on Windows only; other platforms are left alone. A capture driver
+// that misbehaves inside the main process can be kept out of it again with
+// NEWAMP_VIDEO_CAPTURE_OUT_OF_PROCESS=1.
+if (process.platform === 'win32' && process.env.NEWAMP_VIDEO_CAPTURE_OUT_OF_PROCESS !== '1') {
+  appendEnabledFeature('RunVideoCaptureServiceInBrowserProcess');
+}
 
 const diagnosticsDir = join(app.getPath('userData'), 'diagnostics');
 const crashDumpsDir = join(diagnosticsDir, 'crash-dumps');
@@ -249,6 +290,14 @@ try {
   writeDiagnosticEvent('crash-reporter-started', { crashDumpsDir });
 } catch (err) {
   console.error('[newamp] crash reporter failed to start', err);
+}
+
+if (portableDataDecision) {
+  writeDiagnosticEvent('portable-data-location', {
+    reason: portableDataDecision.reason,
+    portableExecutableDir,
+    userData: app.getPath('userData'),
+  });
 }
 
 if (smokeMode) {
@@ -290,6 +339,27 @@ function commandLineValue(name: string): string | null {
   const prefix = `${name}=`;
   const found = process.argv.find((arg) => arg.startsWith(prefix));
   return found ? found.slice(prefix.length) : null;
+}
+
+// appendSwitch replaces a switch that is already set, so a value passed on
+// the command line would be lost; merge instead.
+function appendEnabledFeature(feature: string): void {
+  const existing = app.commandLine.getSwitchValue('enable-features');
+  const features = existing ? existing.split(',').filter(Boolean) : [];
+  if (!features.includes(feature)) features.push(feature);
+  app.commandLine.appendSwitch('enable-features', features.join(','));
+}
+
+function canWriteDirectory(dir: string): boolean {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const probe = join(dir, `.write-test-${process.pid}`);
+    writeFileSync(probe, '');
+    rmSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function applySoftwareRenderingSwitches(mode: 'normal' | 'smoke'): void {
@@ -453,6 +523,19 @@ let normalBounds: Rectangle | null = null;
 // restore that exact state when leaving compact mode. Fixes the prior bug
 // where toggling DECK while maximized stranded the window at the deck size.
 let normalWasMaximized = false;
+// True from entering the deck until leaving it. The renderer asks for
+// set-compact(false) on every load, which must not move or resize a window
+// that never went compact.
+let inCompact = false;
+// True from opening straight into the deck until the renderer first asks for
+// it. Its first render asks for the normal window before the saved compact
+// mode has loaded; that request changes nothing while this is set.
+let startupCompactPending = false;
+let windowStateTimer: NodeJS.Timeout | null = null;
+let displaySleepBlockerId: number | null = null;
+let dockPlayingLabel: boolean | null = null;
+let pinnedAcrossSpaces = false;
+let mainWindowRevealed = false;
 let tray: Tray | null = null;
 let startupSplashWin: BrowserWindow | null = null;
 let startupSplashStartedAt = 0;
@@ -572,16 +655,230 @@ for (const initialOpenFile of pendingOpenFiles) {
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL;
 const openDevTools = isDev && process.env.OPEN_DEVTOOLS === '1';
-const STARTUP_SPLASH_HOLD_MS = 5600;
+// The splash covers the gap until the main window can paint, not a fixed
+// beat: it closes as soon as the window is ready, but never sooner than this
+// after it opened so it does not flash.
+const STARTUP_SPLASH_MIN_MS = 600;
+const WINDOW_STATE_SAVE_DEBOUNCE_MS = 500;
+const DEFAULT_WINDOW_SIZE = { width: 1280, height: 820 };
 const startupSplashEnabled = !smokeMode && process.env.NEWAMP_DISABLE_STARTUP_SPLASH !== '1';
+
+function workAreas(): WindowRect[] {
+  return screen.getAllDisplays().map((display) => ({ ...display.workArea }));
+}
+
+interface StartupWindowGeometry {
+  bounds: { x?: number; y?: number; width: number; height: number };
+  minWidth: number;
+  minHeight: number;
+  maximize: boolean;
+}
+
+// Where the main window opens: its last spot if that display is still
+// connected, the default size otherwise. A relaunch into the deck opens at the
+// deck's last spot and remembers the normal window to return to. Smokes keep
+// the fixed default so their layout checks never depend on an earlier run.
+function startupWindowGeometry(): StartupWindowGeometry {
+  const fallback: StartupWindowGeometry = {
+    bounds: { ...DEFAULT_WINDOW_SIZE },
+    minWidth: NORMAL_LIMITS.minWidth,
+    minHeight: NORMAL_LIMITS.minHeight,
+    maximize: false,
+  };
+  if (smokeMode || !settings) return fallback;
+  const current = settings.get();
+  const saved = current.windowState ?? emptyWindowState();
+  const areas = workAreas();
+  const normal = placeWindow(saved.normal, areas, NORMAL_LIMITS);
+  if (!current.compactMode) {
+    return { ...fallback, bounds: normal, maximize: saved.maximized };
+  }
+  if (normal.x === undefined || normal.y === undefined) return { ...fallback, bounds: normal };
+  normalBounds = { x: normal.x, y: normal.y, width: normal.width, height: normal.height };
+  normalWasMaximized = saved.maximized;
+  startupCompactPending = true;
+  if (!saved.deck) return { ...fallback, bounds: normal };
+  // The window opens deck-sized, so size changes before the renderer asks for
+  // the deck must not be recorded as the normal window.
+  inCompact = true;
+  const deck = placeWindow(saved.deck, areas, DECK_LIMITS);
+  return { bounds: deck, minWidth: DECK_LIMITS.minWidth, minHeight: DECK_LIMITS.minHeight, maximize: false };
+}
+
+function isWindowFullScreen(win: BrowserWindow): boolean {
+  return win.isFullScreen() || (process.platform === 'darwin' && win.isSimpleFullScreen());
+}
+
+function persistWindowState(win: BrowserWindow): void {
+  if (smokeMode || restoreInProgress || win.isDestroyed()) return;
+  const prev = settings.get().windowState ?? emptyWindowState();
+  const next = nextWindowState(prev, {
+    compact: inCompact,
+    maximized: win.isMaximized(),
+    fullscreen: isWindowFullScreen(win),
+    minimized: win.isMinimized(),
+    bounds: win.getBounds(),
+    normalBounds: win.getNormalBounds(),
+  });
+  if (next) settings.set({ windowState: next });
+}
+
+function scheduleWindowStateSave(win: BrowserWindow): void {
+  if (smokeMode) return;
+  if (windowStateTimer) clearTimeout(windowStateTimer);
+  windowStateTimer = setTimeout(() => {
+    windowStateTimer = null;
+    persistWindowState(win);
+  }, WINDOW_STATE_SAVE_DEBOUNCE_MS);
+  windowStateTimer.unref?.();
+}
+
+function flushWindowState(win: BrowserWindow): void {
+  if (!windowStateTimer) return;
+  clearTimeout(windowStateTimer);
+  windowStateTimer = null;
+  persistWindowState(win);
+}
+
+// hide() on a window in native macOS fullscreen leaves an empty Space behind,
+// so leave fullscreen first. The visualizer hides the traffic lights while it
+// is fullscreen and only restores them on its own way out, which this skips.
+function hideMainWindow(win: BrowserWindow): void {
+  if (process.platform === 'darwin') {
+    if (win.isSimpleFullScreen()) {
+      win.setSimpleFullScreen(false);
+      win.setWindowButtonVisibility(!inCompact);
+    }
+    if (win.isFullScreen()) {
+      win.once('leave-full-screen', () => {
+        if (win.isDestroyed()) return;
+        win.setWindowButtonVisibility(!inCompact);
+        win.hide();
+      });
+      win.setFullScreen(false);
+      return;
+    }
+  }
+  win.hide();
+}
+
+function leaveFullScreen(win: BrowserWindow): Promise<void> {
+  return new Promise((resolve) => {
+    if (process.platform === 'darwin' && win.isSimpleFullScreen()) {
+      win.setSimpleFullScreen(false);
+      resolve();
+      return;
+    }
+    if (!win.isFullScreen()) {
+      resolve();
+      return;
+    }
+    let timer: NodeJS.Timeout | null = null;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      if (!win.isDestroyed()) win.off('leave-full-screen', done);
+      resolve();
+    };
+    // The event is the signal, the timer only keeps a missed one from
+    // stalling the deck switch.
+    timer = setTimeout(done, 1500);
+    win.on('leave-full-screen', done);
+    win.setFullScreen(false);
+  });
+}
+
+const DECK_LIMITS = { minWidth: 280, minHeight: 100, defaultWidth: 720, defaultHeight: 152 };
+const NORMAL_LIMITS = {
+  minWidth: 980,
+  minHeight: 640,
+  defaultWidth: DEFAULT_WINDOW_SIZE.width,
+  defaultHeight: DEFAULT_WINDOW_SIZE.height,
+};
+
+// Sizes the main window into the deck, or puts it back. A fullscreen window
+// leaves fullscreen first: on macOS the exit animation ignores a resize issued
+// mid-flight, and the "normal" bounds would capture the fullscreen frame.
+async function setCompactMode(on: boolean, size?: { width?: number; height?: number }): Promise<void> {
+  if (!mainWin || mainWin.isDestroyed()) return;
+  if (on) startupCompactPending = false;
+  if (isWindowFullScreen(mainWin)) await leaveFullScreen(mainWin);
+  const win = mainWin;
+  if (!win || win.isDestroyed()) return;
+  if (on) {
+    flushWindowState(win);
+    // Capture the previous shape once on the way into deck mode. Tracking
+    // the maximized state separately lets us correctly restore a maximized
+    // window — previously this was lost and the window got stuck small.
+    if (!normalBounds) {
+      normalWasMaximized = win.isMaximized();
+      normalBounds = normalWasMaximized
+        ? win.getNormalBounds?.() ?? win.getBounds()
+        : win.getBounds();
+    }
+    inCompact = true;
+    if (win.isMaximized()) win.unmaximize();
+    const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 720)));
+    const height = Math.max(100, Math.min(1000, Math.trunc(Number(size?.height) || 152)));
+    win.setResizable(true);
+    // Allow shrinking the minimum to the deck's natural size so resize cannot
+    // pad the chrome with empty border. Each skin owns its aspect ratio.
+    win.setMinimumSize(Math.min(280, width), Math.min(100, height));
+    const origin = smokeMode
+      ? null
+      : placeOrigin(settings.get().windowState?.deck, { width, height }, workAreas());
+    if (origin) win.setBounds({ ...origin, width, height }, true);
+    else win.setSize(width, height, true);
+    win.setResizable(false);
+    // The traffic lights would sit on top of each skin's own chrome.
+    if (process.platform === 'darwin') win.setWindowButtonVisibility(false);
+    // Always-on-top is the renderer's call (the Pin button), in both modes.
+    return;
+  }
+  // The renderer asks for the normal window on every load; a window that never
+  // went compact must stay exactly where the user left it.
+  if (!shouldLeaveCompact({ inCompact, hasNormalBounds: !!normalBounds, startupPending: startupCompactPending })) return;
+  flushWindowState(win);
+  inCompact = false;
+  win.setResizable(true);
+  win.setMinimumSize(NORMAL_LIMITS.minWidth, NORMAL_LIMITS.minHeight);
+  // Pull the window above the minimum first if it is currently smaller, then
+  // restore. Without this, Electron silently grows it to (980,640) on
+  // setMinimumSize and the subsequent setBounds can race with the resize.
+  if (normalBounds) {
+    // The display it came from may be gone by now.
+    const placed = smokeMode ? normalBounds : placeWindow(normalBounds, workAreas(), NORMAL_LIMITS);
+    if (placed.x !== undefined && placed.y !== undefined) {
+      win.setBounds({ x: placed.x, y: placed.y, width: placed.width, height: placed.height }, true);
+    } else {
+      win.setSize(placed.width, placed.height, true);
+      win.center();
+    }
+  } else {
+    // Fallback for the edge case where deck mode was entered without a saved
+    // pre-deck bounds (e.g. fresh app start in compactMode from settings).
+    const display = screen.getDisplayMatching(win.getBounds()).workArea;
+    const fallbackWidth = Math.min(1280, Math.max(980, display.width - 200));
+    const fallbackHeight = Math.min(820, Math.max(640, display.height - 200));
+    win.setSize(fallbackWidth, fallbackHeight, true);
+    win.center();
+  }
+  if (normalWasMaximized) win.maximize();
+  normalBounds = null;
+  normalWasMaximized = false;
+  if (process.platform === 'darwin') win.setWindowButtonVisibility(true);
+}
 
 function createWindow(): BrowserWindow {
   const isMac = process.platform === 'darwin';
+  inCompact = false;
+  normalBounds = null;
+  normalWasMaximized = false;
+  startupCompactPending = false;
+  const startup = startupWindowGeometry();
   const win = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 980,
-    minHeight: 640,
+    ...startup.bounds,
+    minWidth: startup.minWidth,
+    minHeight: startup.minHeight,
     show: false,
     frame: false,
     titleBarStyle: 'hidden',
@@ -612,40 +909,112 @@ function createWindow(): BrowserWindow {
   win.once('ready-to-show', () => {
     if (smokeMode) return;
     const reveal = () => {
+      const splashWasUp = !!startupSplashWin;
       closeStartupSplashWindow();
       if (win.isDestroyed()) return;
+      if (startup.maximize) win.maximize();
       win.show();
       win.focus();
+      mainWindowRevealed = true;
       applyThumbarButtons(win);
+      writeDiagnosticEvent('main-window-shown', { elapsedMs: Math.round(process.uptime() * 1000), splash: splashWasUp });
       if (openDevTools) win.webContents.openDevTools({ mode: 'detach' });
     };
     const remainingSplashMs = startupSplashWin
-      ? Math.max(0, STARTUP_SPLASH_HOLD_MS - (Date.now() - startupSplashStartedAt))
+      ? Math.max(0, STARTUP_SPLASH_MIN_MS - (Date.now() - startupSplashStartedAt))
       : 0;
-    setTimeout(reveal, remainingSplashMs);
+    if (remainingSplashMs > 0) setTimeout(reveal, remainingSplashMs);
+    else reveal();
   });
 
   win.on('maximize', () => win.webContents.send('window-state', { maximized: true }));
   win.on('unmaximize', () => win.webContents.send('window-state', { maximized: false }));
+  // Hiding and showing can recreate the Windows taskbar button, which drops
+  // the thumbnail toolbar; it is otherwise only refreshed on a playback
+  // snapshot, and none arrives while paused.
+  win.on('show', () => applyThumbarButtons(win));
+  win.on('restore', () => applyThumbarButtons(win));
+  win.on('resize', () => scheduleWindowStateSave(win));
+  win.on('move', () => scheduleWindowStateSave(win));
+  win.on('enter-full-screen', refreshDisplaySleepBlocker);
+  win.on('leave-full-screen', refreshDisplaySleepBlocker);
   win.on('closed', () => {
-    // On macOS (no tray) closing actually destroys the window; drop the stale
-    // reference so `activate` recreates cleanly instead of probing a dead one.
+    // A destroyed window drops the stale reference so `activate` recreates
+    // cleanly instead of probing a dead one.
     if (mainWin === win) mainWin = null;
+    if (windowStateTimer) {
+      clearTimeout(windowStateTimer);
+      windowStateTimer = null;
+    }
+    refreshDisplaySleepBlocker();
   });
   win.on('close', (event) => {
-    if (smokeMode || isQuitting) return;
-    if (!tray || tray.isDestroyed()) return;
-    // User-configurable close behavior. Default preserves the legacy
-    // minimize-to-tray flow; 'close-app' actually quits the process so the
-    // X button matches what most desktop users expect.
-    const behavior = settings.get().closeButtonBehavior;
-    if (behavior === 'close-app') {
+    if (smokeMode) return;
+    flushWindowState(win);
+    // User-configurable close behavior. Default keeps the app running with
+    // the window hidden (tray on Windows/Linux, Dock on macOS); 'close-app'
+    // quits the process so the X button matches what most desktop users
+    // expect.
+    const action = closeAction({
+      platform: process.platform,
+      hasTray: !!tray && !tray.isDestroyed(),
+      isQuitting,
+      isMinimized: win.isMinimized(),
+      behavior: settings.get().closeButtonBehavior,
+    });
+    if (action === 'close') return;
+    if (action === 'quit') {
       isQuitting = true;
       app.quit();
       return;
     }
     event.preventDefault();
-    win.hide();
+    if (action === 'minimize') win.minimize();
+    else hideMainWindow(win);
+  });
+
+  // A reload after a renderer crash or a hot reload gets a new page; the
+  // projector's frame port died with the old one. This lives here rather than
+  // in bootstrap so a window recreated later is rewired too.
+  win.webContents.on('did-finish-load', () => {
+    if (win.isMaximized()) win.webContents.send('window-state', { maximized: true });
+    if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
+    wireDetachedFramePort();
+  });
+
+  // The main renderer owns the audio engine. Reload it from the saved resume
+  // state instead of leaving a blank window that tray, thumbbar and media-key
+  // commands keep talking to; stop after repeated failures.
+  const crashReloads: number[] = [];
+  win.webContents.on('render-process-gone', (_event, details) => {
+    if (smokeMode || win.isDestroyed()) return;
+    const now = Date.now();
+    const action = crashRecoveryAction({ reason: details.reason, isQuitting, recentReloads: crashReloads, now });
+    if (action === 'ignore') return;
+    if (action === 'reload') {
+      crashReloads.push(now);
+      win.webContents.reload();
+      return;
+    }
+    void dialog
+      .showMessageBox(win, {
+        type: 'error',
+        title: 'NewAmp stopped working',
+        message: 'The NewAmp window stopped working more than once in a minute.',
+        detail: 'Your queue and position were saved. Quit and start NewAmp again, or try reloading the window.',
+        buttons: ['Reload', 'Quit NewAmp'],
+        defaultId: 0,
+        cancelId: 1,
+      })
+      .then(({ response }) => {
+        if (response === 1) {
+          isQuitting = true;
+          app.quit();
+        } else if (!win.isDestroyed()) {
+          crashReloads.length = 0;
+          win.webContents.reload();
+        }
+      });
   });
 
   if (isDev) {
@@ -1080,7 +1449,7 @@ img {
   width: 240px;
   height: 240px;
   object-fit: contain;
-  animation: logo-spin 2600ms cubic-bezier(.18,.86,.18,1) both, logo-hold 5600ms ease both;
+  animation: logo-spin 600ms cubic-bezier(.18,.86,.18,1) both, logo-hold 12000ms ease both;
 }
 @keyframes logo-spin {
   0% { transform: rotate(0deg) scale(.72); opacity: 0; filter: blur(8px); }
@@ -1122,16 +1491,31 @@ function sendPlayerCommand(command: PlayerCommand): void {
   mainWin?.webContents.send('player:command', command);
 }
 
-function enqueueOpenFiles(paths: string[]): void {
-  const clean = normalizeOpenTargets(paths).map((target) => target.path);
-  if (!clean.length) return;
-  for (const path of clean) void allowOpenedAudioFile(path);
+// How long after the renderer took the launch files a later batch still
+// belongs to the same selection (see mergeHandedOff).
+const COLD_START_MERGE_MS = 2000;
+let handedOffFiles: HandedOffFiles | null = null;
+
+// Opening several files at once reaches a running app as separate events: one
+// second-instance per file from Explorer, one open-file per file on macOS.
+// Gathering them lets the renderer replace its queue once with the whole
+// selection instead of once per file. A file opened on its own therefore
+// starts a moment after the open, not on the spot.
+const openFileBatcher = createOpenFileBatcher({
+  quietMs: 400,
+  maxWaitMs: 2000,
+  deliver: deliverOpenFiles,
+});
+
+function deliverOpenFiles(paths: string[]): void {
   if (mainWin && !mainWin.isDestroyed() && !mainWin.webContents.isLoading()) {
-    mainWin.webContents.send('app:open-files', clean);
+    const merged = mergeHandedOff(paths, handedOffFiles, Date.now(), COLD_START_MERGE_MS);
+    handedOffFiles = merged.handedOff;
+    mainWin.webContents.send('app:open-files', merged.files);
     return;
   }
   const seen = new Set(pendingOpenFiles.map((path) => path.toLowerCase()));
-  for (const path of clean) {
+  for (const path of paths) {
     const key = path.toLowerCase();
     if (!seen.has(key)) {
       seen.add(key);
@@ -1140,10 +1524,66 @@ function enqueueOpenFiles(paths: string[]): void {
   }
 }
 
+function enqueueOpenFiles(paths: string[]): void {
+  const clean = normalizeOpenTargets(paths).map((target) => target.path);
+  if (!clean.length) return;
+  for (const path of clean) void allowOpenedAudioFile(path);
+  openFileBatcher.push(clean);
+}
+
+function buildDockMenu(): Menu {
+  return Menu.buildFromTemplate([
+    { label: 'Previous', click: () => sendPlayerCommand('previous') },
+    { label: shellPlaybackState.isPlaying ? 'Pause' : 'Play', click: () => sendPlayerCommand('toggle-play') },
+    { label: 'Next', click: () => sendPlayerCommand('next') },
+    { label: 'Stop', click: () => sendPlayerCommand('stop') },
+  ]);
+}
+
+// The Dock menu is the macOS counterpart of the tray menu. Its Play/Pause
+// label follows the playback snapshots, rebuilding only when it flips.
+function refreshDockMenu(): void {
+  if (process.platform !== 'darwin' || smokeMode || !app.dock) return;
+  const playing = shellPlaybackState.isPlaying;
+  if (dockPlayingLabel === playing) return;
+  dockPlayingLabel = playing;
+  app.dock.setMenu(buildDockMenu());
+}
+
+function refreshDisplaySleepBlocker(): void {
+  if (smokeMode) return;
+  const detachedShown =
+    !!detachedVizWin && !detachedVizWin.isDestroyed() && detachedVizWin.isVisible() && !detachedVizWin.isMinimized();
+  const mainFullScreen = !!mainWin && !mainWin.isDestroyed() && isWindowFullScreen(mainWin);
+  const wanted = shouldBlockDisplaySleep({
+    visualizerShown: detachedShown || mainFullScreen,
+    isPlaying: shellPlaybackState.isPlaying,
+  });
+  const active = displaySleepBlockerId !== null && powerSaveBlocker.isStarted(displaySleepBlockerId);
+  if (wanted && !active) {
+    displaySleepBlockerId = powerSaveBlocker.start('prevent-display-sleep');
+  } else if (!wanted && displaySleepBlockerId !== null) {
+    powerSaveBlocker.stop(displaySleepBlockerId);
+    displaySleepBlockerId = null;
+  }
+}
+
 function installApplicationMenu(): void {
   const template = buildAppMenuTemplate(process.platform, {
     appName: app.getName(),
     appVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    onPreferences: () => {
+      const hadWindow = !!mainWin && !mainWin.isDestroyed();
+      showMainWindow();
+      const win = mainWin;
+      if (!win || win.isDestroyed()) return;
+      const send = (): void => win.webContents.send('app:open-settings');
+      // A window recreated from the Dock has not loaded its renderer yet.
+      if (hadWindow && !win.webContents.isLoading()) send();
+      else win.webContents.once('did-finish-load', send);
+    },
+    onOpenExternal: (url) => void shell.openExternal(url),
   });
   if (process.platform === 'darwin') {
     app.setAboutPanelOptions({
@@ -1151,6 +1591,8 @@ function installApplicationMenu(): void {
       applicationVersion: app.getVersion(),
     });
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+    dockPlayingLabel = null;
+    refreshDockMenu();
   } else {
     // Keep the existing chromeless custom-titlebar look on Windows/Linux.
     Menu.setApplicationMenu(null);
@@ -1345,6 +1787,8 @@ function applyShellPlaybackState(state: ShellPlaybackState): void {
     }
   }
   applyThumbarButtons();
+  refreshDockMenu();
+  refreshDisplaySleepBlocker();
   if (tray && !tray.isDestroyed()) {
     const label = state.title
       ? `NewAmp — ${state.artist ? `${state.artist} – ` : ''}${state.title}${state.isPlaying ? '' : ' (paused)'}`
@@ -1594,26 +2038,39 @@ function createScannerService(store: LibraryStore): Scanner {
   });
 }
 
-// Set while the support-backup coordinator is taking an in-memory snapshot,
-// so a filesystem event that lands mid-capture doesn't kick off a rescan that
-// mutates the library out from under it. Cleared again in
-// resumeLibraryMutations() / reloadRuntimeStores().
-let libraryMutationsQuiesced = false;
+// Held while a backup, a trash or a prune works on an in-memory snapshot, so
+// a filesystem event that lands mid-capture doesn't kick off a rescan that
+// mutates the library out from under it. Counts the holders: two can overlap
+// (a trash during a backup), and the watcher stays held until the last one
+// resumes. Reset in reloadRuntimeStores().
+let libraryMutationsQuiesced = 0;
 let restoreInProgress = false;
-let backupInProgress = false;
+// Operations that take a backup and then change the stores (a user backup, a
+// trash, a prune), counted the same way: a restore must not start while any
+// is in flight, and the last one to finish lifts the hold.
+let backupInProgress = 0;
+
+// Root walks the watcher asks for; see IncrementalScanGate. Reads `scanner` at
+// call time, so a swapped store is walked by its own scanner. A batch that was
+// waiting when a backup or removal took hold is dropped, as a watcher flush
+// landing then would be.
+const incrementalScans = new IncrementalScanGate(async (targets) => {
+  if (libraryMutationsQuiesced) return;
+  await scanner.start(targets);
+});
 
 function createLibraryWatcherService(): LibraryWatcher {
   return new LibraryWatcher(
-    (targets) => {
+    (targets, plan) => {
       if (libraryMutationsQuiesced || !settings.get().libraryAutoWatch || !targets.length) return;
-      void reconcileWatchedTargets(targets);
+      void reconcileWatchedTargets(targets, plan);
     },
     {
       // A drive or share that comes back: an ordinary (incremental) scan of it
       // clears the missing marks its tracks got while it was away.
       onRootAvailable: (root) => {
         if (libraryMutationsQuiesced || !settings.get().libraryAutoWatch) return;
-        void scanner.start([root]);
+        incrementalScans.request([root]);
       },
     },
   );
@@ -1630,12 +2087,19 @@ const MISSING_RECHECK_DELAY_MS = 1500;
 
 let watcherReconcile: Promise<void> = Promise.resolve();
 
-function reconcileWatchedTargets(targets: string[]): Promise<void> {
+// plan splits the targets: files and folder art the watcher named are read
+// again whatever their size and date say, while a root whose event carried no
+// name (the watcher overflowed during a bulk copy) is walked incrementally,
+// so a large library is not re-parsed top to bottom for it.
+function reconcileWatchedTargets(watched: string[], plan?: LibraryWatchPlan): Promise<void> {
   const run = watcherReconcile.then(async () => {
     await new Promise((resolve) => setTimeout(resolve, MISSING_RECHECK_DELAY_MS));
-    const stillMissing = targets.filter((target) => !existsSync(target));
+    const stillMissing = watched.filter((target) => !existsSync(target));
     if (stillMissing.length) library.markTracksMissing(stillMissing);
-    void scanner.start(targets, { force: true });
+    const targets = plan ? plan.force : watched;
+    const incremental = plan ? plan.incremental : [];
+    if (targets.length) void scanner.start(targets, { force: true });
+    if (incremental.length) incrementalScans.request(incremental);
   });
   watcherReconcile = run.catch((err) => {
     console.warn(`[newamp] library watcher reconcile failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1664,21 +2128,27 @@ async function readTrackBeforeMetadataEdit(id: number): Promise<void> {
 // behind its internal scanQueue, so our empty-root call only resolves once
 // anything already in flight (including one the reconcile just kicked off)
 // has finished.
-async function quiesceLibraryMutations(): Promise<void> {
-  libraryMutationsQuiesced = true;
+//
+// A removal (a trash, a prune) holds only the watcher: its backup snapshot
+// is synchronous and its deletes go by id, so a scan in progress carries on
+// instead of being cancelled and never resumed.
+async function quiesceLibraryMutations(options: { keepScan?: boolean } = {}): Promise<void> {
+  libraryMutationsQuiesced += 1;
   await watcherReconcile.catch(() => {});
+  if (options.keepScan) return;
   scanner?.cancel();
   await scanner?.start([]).catch(() => {});
 }
 
 function resumeLibraryMutations(): void {
-  libraryMutationsQuiesced = false;
+  libraryMutationsQuiesced = Math.max(0, libraryMutationsQuiesced - 1);
 }
 
 // Builds a support backup from the live stores' in-memory state rather than
 // from library.db/settings.json on disk — see createSupportBackup's
-// librarySnapshot/settingsSnapshot for why that distinction matters.
-async function createBackupFromLiveStores(userData: string): Promise<SupportBackupResult> {
+// librarySnapshot/settingsSnapshot for why that distinction matters. The
+// 'library' scope is the automatic safety copy before a removal.
+async function createBackupFromLiveStores(userData: string, scope: 'full' | 'library' = 'full'): Promise<SupportBackupResult> {
   // podcasts.json is copied straight off disk by createSupportBackup (it has
   // no in-memory snapshot input like settings/library do) — land any pending
   // debounced progress write first so the backup isn't up to ~800ms stale.
@@ -1689,6 +2159,7 @@ async function createBackupFromLiveStores(userData: string): Promise<SupportBack
     libraryPath: join(userData, 'library.db'),
     librarySnapshot: library.exportSnapshot(),
     settingsSnapshot: settings.snapshotJson(),
+    scope,
   });
 }
 
@@ -1698,7 +2169,7 @@ async function reloadRuntimeStores(userData: string): Promise<void> {
     await radioBrain.stop();
     radioBrain = null;
   }
-  libraryMutationsQuiesced = false;
+  libraryMutationsQuiesced = 0;
   settings = new SettingsStore(join(userData, 'settings.json'));
   lastfmOutbox = new LastfmScrobbleOutbox(join(userData, 'lastfm-scrobbles.json'));
   podcastStore = new PodcastStore(join(userData, 'podcasts.json'));
@@ -1763,7 +2234,7 @@ function registerAudioProtocol(): void {
           : new Response('Forbidden', { status: 403, headers: { 'X-Newamp-Reason': 'path-not-allowed' } });
       }
       const { real } = authResult;
-      if (playbackMode(real) === 'ffmpeg') {
+      if ((await resolvePlaybackMode(real)) === 'ffmpeg') {
         // Seekable path: serve the finalized cached FLAC (range-capable) when it
         // already exists. First play streams a SEEKABLE synthesized WAV instead
         // of awaiting the full encode — audio starts in tens of ms
@@ -2138,6 +2609,18 @@ function registerIpc(): void {
     if (!track?.path || /^[a-z][a-z0-9+.-]*:\/\//i.test(track.path)) return null;
     return getSongScore({ path: track.path, cueStart: track.cueStart, cueEnd: track.cueEnd });
   });
+  initWaveformCache(join(app.getPath('userData'), 'waveform-cache'));
+  ipcMain.handle('tracks:waveform', async (_e, id: number, options?: { prefetch?: unknown }) => {
+    // A request already on its way when the setting went off.
+    if (settings.get().waveformSeekBar === false) return null;
+    const track = library.getTrack(Number(id));
+    // Only local files, as for the song score.
+    if (!track?.path || /^[a-z][a-z0-9+.-]*:\/\//i.test(track.path)) return null;
+    return getWaveform(
+      { path: track.path, cueStart: track.cueStart, cueEnd: track.cueEnd, duration: track.duration },
+      { prefetch: options?.prefetch === true },
+    );
+  });
   ipcMain.handle('tags:list-rules', async () => library.listTagRules());
   ipcMain.handle('tags:save-rule', async (_e, input) => {
     const saved = library.saveTagRule(input);
@@ -2158,8 +2641,12 @@ function registerIpc(): void {
   ipcMain.handle('tags:preview-rule', async (_e, input) => library.previewTagRule(input));
   ipcMain.handle('tags:track-ids-by-tag', async (_e, name: string) => library.getTrackIdsByTag(name));
   ipcMain.handle('open:consume-pending-files', async () => {
+    // Files from a launch with several selected arrive as separate events;
+    // wait for the batch in flight so the renderer gets all of them at once.
+    await openFileBatcher.settled();
     const files = pendingOpenFiles;
     pendingOpenFiles = [];
+    if (files.length) handedOffFiles = { paths: [...files], at: Date.now() };
     return files;
   });
   ipcMain.handle('open:files', async (_e, paths: string[]) => openFiles(paths));
@@ -2195,76 +2682,127 @@ function registerIpc(): void {
     library.previewPruneMissingTracks(Array.isArray(targets) ? targets : undefined, settings.get().libraryRoots),
   );
   ipcMain.handle('library:prune-missing', async (_e, targets?: string[]) => {
+    if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
+    assertHistoryImportIdle();
     const scope = Array.isArray(targets) ? targets : undefined;
     const roots = settings.get().libraryRoots;
     if (!library.previewPruneMissingTracks(scope, roots).tracks) return library.pruneMissingTracks(scope, roots);
     // Removing a track takes its plays, ratings, bookmarks, edits and playlist
     // places with it. Back the live stores up first, the same way the Support
     // backup does, and delete nothing if that fails.
-    await quiesceLibraryMutations();
+    backupInProgress += 1;
     try {
-      const backup = await createBackupFromLiveStores(app.getPath('userData'));
-      return { ...library.pruneMissingTracks(scope, roots), backupPath: backup.backupPath };
-    } finally {
-      resumeLibraryMutations();
-    }
-  });
-  // Files go to the Recycle Bin / Trash, then their rows leave the library
-  // the way "Clean missing files" does: a backup first, and a file that
-  // could not be moved stays in both places.
-  ipcMain.handle('tracks:trash', async (e, ids: unknown): Promise<TrashTracksResult> => {
-    const wanted = Array.isArray(ids) ? ids.map((id) => Math.trunc(Number(id))).filter((id) => id > 0) : [];
-    const isLocal = (p: string): boolean => !!p && !/^[a-z][a-z0-9+.-]+:\/\//i.test(p);
-    const tracks = wanted
-      .map((id) => library.getTrack(id))
-      .filter((track): track is Track => !!track && isLocal(track.path));
-    const nothing: TrashTracksResult = { trashed: 0, removed: 0, failed: [], cancelled: false };
-    if (!tracks.length) return nothing;
-    const bin = process.platform === 'win32' ? 'Recycle Bin' : 'Trash';
-    const owner = BrowserWindow.fromWebContents(e.sender);
-    const options: Electron.MessageBoxOptions = {
-      type: 'warning',
-      buttons: [`Move to ${bin}`, 'Cancel'],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-      message:
-        tracks.length === 1
-          ? `Move "${tracks[0]!.title}" to the ${bin}?`
-          : `Move ${tracks.length.toLocaleString('en-US')} files to the ${bin}?`,
-      detail: `The files leave the library too, with their plays, ratings and playlist places. A library backup is taken first, and the files can be restored from the ${bin}.`,
-    };
-    // A smoke can't press a native dialog's button; it says yes up front.
-    const autoConfirm = smokeMode && process.env.NEWAMP_SMOKE_TRASH_CONFIRM === 'yes';
-    const { response } = autoConfirm
-      ? { response: 0 }
-      : owner
-        ? await dialog.showMessageBox(owner, options)
-        : await dialog.showMessageBox(options);
-    if (response !== 0) return { ...nothing, cancelled: true };
-    await quiesceLibraryMutations();
-    try {
-      const backup = await createBackupFromLiveStores(app.getPath('userData'));
-      const trashed: Track[] = [];
-      const failed: Array<{ path: string; error: string }> = [];
-      for (const track of tracks) {
-        try {
-          await shell.trashItem(track.path);
-          trashed.push(track);
-        } catch (err) {
-          failed.push({ path: track.path, error: err instanceof Error ? err.message : String(err) });
-        }
-      }
-      const removed = trashed.length
-        ? library.pruneMissingTracks(trashed.map((track) => track.path), settings.get().libraryRoots).removed
-        : 0;
-      if (removed) {
-        notifyTracksRemoved(trashed.map((track) => track.id));
+      await quiesceLibraryMutations({ keepScan: true });
+      const backup = await createBackupFromLiveStores(app.getPath('userData'), 'library');
+      const result = library.pruneMissingTracks(scope, roots);
+      // The queue and the playlist views drop what went, as after a trash.
+      if (result.removedIds?.length) {
+        notifyTracksRemoved(result.removedIds);
         notifyPlaylistsChanged();
       }
-      return { trashed: trashed.length, removed, failed, cancelled: false, backupPath: backup.backupPath };
+      return { ...result, backupPath: backup.backupPath };
     } finally {
       resumeLibraryMutations();
+      backupInProgress -= 1;
+    }
+  });
+  // Files go to the Recycle Bin / Trash, then their rows leave the library by
+  // id: a backup first, and a file that could not be moved stays in both
+  // places. A row whose file is already gone just leaves the library.
+  const LONG_TRASH_FILES = 500;
+  let trashInFlight = false;
+  ipcMain.handle('tracks:trash', async (e, ids: unknown): Promise<TrashTracksResult> => {
+    const { supplied, tracks } = trashableTracks(ids, (id) => library.getTrack(id));
+    const nothing: TrashTracksResult = { trashed: 0, removed: 0, failed: [], cancelled: false };
+    if (!supplied) return nothing;
+    const bin = process.platform === 'win32' ? 'Recycle Bin' : 'Trash';
+    // Streams, and CUE or podcast tracks (negative ids): nothing of theirs
+    // to move, and silence would read as the action doing nothing.
+    if (!tracks.length) return { ...nothing, failed: [{ path: '', error: 'Not a library file.' }] };
+    if (trashInFlight) return { ...nothing, refused: `A move to the ${bin} is still running.` };
+    // Why nothing may be moved right now. Asked again after the question: it
+    // can stay open a while, and a restore that began meanwhile is about to
+    // replace the library these rows are in.
+    const refusal = (): string | null => {
+      if (restoreInProgress) return 'Wait for backup restoration to finish.';
+      try {
+        assertHistoryImportIdle();
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+      return null;
+    };
+    const early = refusal();
+    if (early) return { ...nothing, refused: early };
+    // Held from before the question: a second request while it is open would
+    // ask again about the same files.
+    trashInFlight = true;
+    try {
+      const owner = BrowserWindow.fromWebContents(e.sender);
+      const options: Electron.MessageBoxOptions = {
+        type: 'warning',
+        buttons: [`Move to ${bin}`, 'Cancel'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+        message:
+          tracks.length === 1
+            ? `Move "${tracks[0]!.title}" to the ${bin}?`
+            : `Move ${tracks.length.toLocaleString('en-US')} files to the ${bin}?`,
+        detail: `The files leave the library too, with their plays, ratings and playlist places. A library backup is taken first, and the files can be restored from the ${bin}.${
+          tracks.length > LONG_TRASH_FILES ? ' Moving this many files can take minutes.' : ''
+        }`,
+      };
+      // A smoke can't press a native dialog's button; it says yes up front.
+      const autoConfirm = smokeMode && process.env.NEWAMP_SMOKE_TRASH_CONFIRM === 'yes';
+      const { response } = autoConfirm
+        ? { response: 0 }
+        : owner
+          ? await dialog.showMessageBox(owner, options)
+          : await dialog.showMessageBox(options);
+      if (response !== 0) return { ...nothing, cancelled: true };
+      const late = refusal();
+      if (late) return { ...nothing, refused: late };
+      backupInProgress += 1;
+      try {
+        await quiesceLibraryMutations({ keepScan: true });
+        const backup = await createBackupFromLiveStores(app.getPath('userData'), 'library');
+        // Windows won't move a file another process has open: the gapless
+        // decoder, a cache warm or a score analysis on any of these stops first,
+        // and again before each file in case playback moved on to one.
+        const paths = tracks.map((track) => track.path);
+        await Promise.all([releaseGaplessPaths(paths), stopFfmpegReading(paths)]);
+        const { trashed, gone, failed } = await moveTracksToTrash(tracks, {
+          exists: existsSync,
+          trash: (path) => shell.trashItem(path),
+          release: async (path) => {
+            await Promise.all([releaseGaplessPaths([path]), stopFfmpegReading([path])]);
+          },
+          bin,
+          onProgress: (done, total) => {
+            if (!e.sender.isDestroyed()) e.sender.send('tracks:trash-progress', { done, total } satisfies TrashProgress);
+          },
+        });
+        const removedIds = library.removeTracksById([...trashed, ...gone].map((track) => track.id));
+        if (removedIds.length) {
+          notifyTracksRemoved(removedIds);
+          notifyPlaylistsChanged();
+        }
+        return {
+          trashed: trashed.length,
+          removed: removedIds.length,
+          failed,
+          cancelled: false,
+          trashedIds: trashed.map((track) => track.id),
+          removedIds,
+          backupPath: backup.backupPath,
+        };
+      } finally {
+        resumeLibraryMutations();
+        backupInProgress -= 1;
+      }
+    } finally {
+      trashInFlight = false;
     }
   });
   ipcMain.handle('history:get', async (_e, opts) => library.getListeningHistory(opts ?? {}));
@@ -2343,6 +2881,10 @@ function registerIpc(): void {
     if (patchTouchesLibraryWatch(patch)) syncLibraryWatcher();
     if (patchTouchesRadioBrain(patch)) {
       await queueRadioBrainSync();
+    }
+    // Off means the background decode stops too, not only that nothing new is asked for.
+    if (patch && typeof patch === 'object' && 'waveformSeekBar' in patch && settings.get().waveformSeekBar === false) {
+      cancelWaveformWork();
     }
     // Turning exclusive mode off releases the WASAPI device immediately so
     // system audio (and the Web Audio path) come back without a restart.
@@ -2517,8 +3059,8 @@ function registerIpc(): void {
   ipcMain.handle('app:support-diagnostics', async () => buildSupportDiagnostics());
   ipcMain.handle('app:create-backup', async () => {
     if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
-    if (backupInProgress) throw new Error('A backup is already running.');
-    backupInProgress = true;
+    if (backupInProgress) throw new Error('Wait for the current backup, move or cleanup to finish.');
+    backupInProgress += 1;
     const userData = app.getPath('userData');
     // library.db/settings.json on disk can lag behind the live stores by up
     // to their batching window (30s for play/skip stats, 800ms for the
@@ -2530,7 +3072,7 @@ function registerIpc(): void {
       return await createBackupFromLiveStores(userData);
     } finally {
       resumeLibraryMutations();
-      backupInProgress = false;
+      backupInProgress -= 1;
     }
   });
   ipcMain.handle('app:restore-backup', async () => {
@@ -2784,54 +3326,28 @@ function registerIpc(): void {
     else mainWin.maximize();
   });
   ipcMain.handle('win:set-fullscreen', (_e, on: boolean) => {
-    mainWin?.setFullScreen(!!on);
-  });
-  ipcMain.handle('win:is-fullscreen', () => mainWin?.isFullScreen() ?? false);
-  ipcMain.handle('win:set-compact', (_e, on: boolean, size?: { width?: number; height?: number }) => {
     if (!mainWin) return;
-    if (on) {
-      // Capture the previous shape once on the way into deck mode. Tracking
-      // the maximized state separately lets us correctly restore a maximized
-      // window — previously this was lost and the window got stuck small.
-      if (!normalBounds) {
-        normalWasMaximized = mainWin.isMaximized();
-        normalBounds = normalWasMaximized
-          ? mainWin.getNormalBounds?.() ?? mainWin.getBounds()
-          : mainWin.getBounds();
+    if (process.platform === 'darwin') {
+      // Native fullscreen moves the window to its own Space with a roughly
+      // half-second swap on every toggle. The ambient visualizer wants an
+      // instant, in-place one, so use simple fullscreen and fall back to the
+      // native call only to leave a native fullscreen the user started.
+      if (on) {
+        if (!mainWin.isFullScreen()) mainWin.setSimpleFullScreen(true);
+      } else {
+        if (mainWin.isSimpleFullScreen()) mainWin.setSimpleFullScreen(false);
+        if (mainWin.isFullScreen()) mainWin.setFullScreen(false);
       }
-      if (mainWin.isMaximized()) mainWin.unmaximize();
-      const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 720)));
-      const height = Math.max(100, Math.min(1000, Math.trunc(Number(size?.height) || 152)));
-      mainWin.setResizable(true);
-      // Allow shrinking the minimum to the deck's natural size so resize cannot
-      // pad the chrome with empty border. Each skin owns its aspect ratio.
-      mainWin.setMinimumSize(Math.min(280, width), Math.min(100, height));
-      mainWin.setSize(width, height, true);
-      mainWin.setResizable(false);
-      // Always-on-top is the renderer's call (the Pin button), in both modes.
-      return;
-    }
-    mainWin.setResizable(true);
-    mainWin.setMinimumSize(980, 640);
-    // Pull the window above the minimum first if it is currently smaller, then
-    // restore. Without this, Electron silently grows it to (980,640) on
-    // setMinimumSize and the subsequent setBounds can race with the resize.
-    if (normalBounds) {
-      const bounds = { ...normalBounds };
-      mainWin.setBounds(bounds, true);
+      mainWin.setWindowButtonVisibility(!on && !inCompact);
     } else {
-      // Fallback for the edge case where deck mode was entered without a saved
-      // pre-deck bounds (e.g. fresh app start in compactMode from settings).
-      const display = screen.getDisplayMatching(mainWin.getBounds()).workArea;
-      const fallbackWidth = Math.min(1280, Math.max(980, display.width - 200));
-      const fallbackHeight = Math.min(820, Math.max(640, display.height - 200));
-      mainWin.setSize(fallbackWidth, fallbackHeight, true);
-      mainWin.center();
+      mainWin.setFullScreen(!!on);
     }
-    if (normalWasMaximized) mainWin.maximize();
-    normalBounds = null;
-    normalWasMaximized = false;
+    refreshDisplaySleepBlocker();
   });
+  ipcMain.handle('win:is-fullscreen', () => (mainWin ? isWindowFullScreen(mainWin) : false));
+  ipcMain.handle('win:set-compact', (_e, on: boolean, size?: { width?: number; height?: number }) =>
+    setCompactMode(!!on, size),
+  );
   ipcMain.handle('win:set-compact-size', (_e, size: { width: number; height: number }) => {
     if (!mainWin) return;
     const width = Math.max(280, Math.min(1600, Math.trunc(Number(size?.width) || 720)));
@@ -2842,7 +3358,15 @@ function registerIpc(): void {
     mainWin.setResizable(false);
   });
   ipcMain.handle('win:set-always-on-top', (_e, on: boolean) => {
-    mainWin?.setAlwaysOnTop(!!on, 'floating');
+    if (!mainWin) return;
+    mainWin.setAlwaysOnTop(!!on, 'floating');
+    // macOS keeps a floating window in the Space it was opened in, so a pinned
+    // deck would vanish on the first Space switch. Skipping the process-type
+    // transform avoids hiding the window and Dock icon on every toggle.
+    if (process.platform === 'darwin' && (on || pinnedAcrossSpaces)) {
+      mainWin.setVisibleOnAllWorkspaces(!!on, { visibleOnFullScreen: !!on, skipTransformProcessType: true });
+      pinnedAcrossSpaces = !!on;
+    }
   });
   ipcMain.handle('win:close', () => mainWin?.close());
 
@@ -3345,13 +3869,22 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
       capture = { width: 48, height: 27, lit: Math.round(litFraction * 1296), sampled: 1296, litFraction, source: 'live-composition-readback' };
     }
     const finalStats = await detachedVizWin.webContents.executeJavaScript('window.__newampDetachedStats', true);
-    // The pointer hides when idle and must come back on any movement.
+    // The pointer hides when idle and must come back on any movement. Left
+    // alone after that, the 2 s idle timer hides it again; it gets a few
+    // seconds' grace because timers in an unfocused window run late.
     const cursor = await detachedVizWin.webContents.executeJavaScript(
       `(async () => {
         const before = getComputedStyle(document.body).cursor;
         window.dispatchEvent(new MouseEvent('mousemove', { clientX: 20, clientY: 20 }));
         await new Promise((r) => setTimeout(r, 50));
-        return { before, afterMove: getComputedStyle(document.body).cursor };
+        const afterMove = getComputedStyle(document.body).cursor;
+        const idleStart = performance.now();
+        let afterIdle = afterMove;
+        while (afterIdle !== 'none' && performance.now() - idleStart < 6000) {
+          await new Promise((r) => setTimeout(r, 100));
+          afterIdle = getComputedStyle(document.body).cursor;
+        }
+        return { before, afterMove, afterIdle, idleMs: Math.round(performance.now() - idleStart) };
       })()`,
       true,
     );
@@ -4122,6 +4655,10 @@ function uiVisualizerProbeSource(): string {
       const stage = await waitFor('fullscreen visualizer stage', () =>
         document.querySelector('[data-newamp-fullscreen-visualizer]'),
       );
+      // The stage takes focus as it opens, so Tab starts inside it.
+      const stageFocusedOnOpen = document.activeElement === stage;
+      // A profile that never touched the album cover overlay starts with it off.
+      const artDefault = stage.getAttribute('data-newamp-visualizer-art');
       const stageRect = stage.getBoundingClientRect();
       const viewport = { width: window.innerWidth, height: window.innerHeight };
       if (stageRect.width < viewport.width * 0.9 || stageRect.height < viewport.height * 0.9) {
@@ -4327,20 +4864,96 @@ function uiVisualizerProbeSource(): string {
       // The per-control toolbar buttons were consolidated into the Settings
       // panel; each control's contract is now its keyboard shortcut, so the
       // probe drives the same path a user's fingers do.
-      const pressKey = (key) => {
-        window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+      const pressKey = (key, init = {}) => {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init }));
       };
+      // Fires a key at the stage and reports whether the visualizer took it
+      // (preventDefault). The app-wide shortcut handler sits on window in the
+      // bubble phase and takes L, V and the rest itself, so a window-level
+      // observer would read its verdict too, not the visualizer's. The
+      // visualizer decides in the window capture phase, before the event reaches
+      // the stage; the observer reads it from document and stops the event
+      // there, which also keeps a skip, love or stop key from moving playback
+      // under the probe.
+      const keyTaken = (key, init = {}) => {
+        let taken = null;
+        const observe = (event) => {
+          taken = event.defaultPrevented;
+          event.stopImmediatePropagation();
+        };
+        document.addEventListener('keydown', observe);
+        try {
+          stage.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init }));
+        } finally {
+          document.removeEventListener('keydown', observe);
+        }
+        return taken;
+      };
+      const attr = (name) => stage.getAttribute(name);
+      const settles = (label, fn, timeout = 4000) => waitFor(label, fn, timeout).then(() => true, () => false);
+      // The visualizer's keys: a chord belongs to the app, plain L and V stay
+      // the app-wide love and stop keys, and a held key repeats only the arrows.
+      const presetBefore = attr('data-newamp-visualizer-preset');
+      const ctrlArrowTaken = keyTaken('ArrowRight', { ctrlKey: true });
+      const metaArrowTaken = keyTaken('ArrowRight', { metaKey: true });
+      await sleep(150);
+      const ctrlArrowKeepsPreset =
+        ctrlArrowTaken === false && metaArrowTaken === false && attr('data-newamp-visualizer-preset') === presetBefore;
+      const tierBefore = attr('data-newamp-visualizer-performance');
+      const plainLTaken = keyTaken('l');
+      await sleep(150);
+      const tierAfterL = attr('data-newamp-visualizer-performance');
+      const plainLKeepsTier = plainLTaken === false && tierAfterL === tierBefore;
+      const plainLDebug = { plainLTaken, tierBefore, tierAfterL };
+      const autoVjBefore = attr('data-newamp-visualizer-auto-vj');
+      const plainVTaken = keyTaken('v');
+      await sleep(150);
+      const plainVKeepsAutoVj = plainVTaken === false && attr('data-newamp-visualizer-auto-vj') === autoVjBefore;
+      const paletteBefore = attr('data-newamp-visualizer-palette');
+      pressKey('p', { repeat: true });
+      await sleep(150);
+      const heldKeyIgnored = attr('data-newamp-visualizer-palette') === paletteBefore;
+      // Lite, 4K, Lite inside one frame: Q lands while Lite is on and does
+      // nothing, so quality is still auto. A toggle reading last render's tier
+      // would write 4K under the Lite badge.
+      pressKey('L', { shiftKey: true });
+      pressKey('q');
+      pressKey('L', { shiftKey: true });
+      await waitFor('balanced visualizer state after the burst', () =>
+        attr('data-newamp-visualizer-performance') === 'balanced',
+      );
+      await sleep(150);
+      const liteBurstQuality = attr('data-newamp-visualizer-quality');
+      // Holding an arrow keeps stepping presets. Last of this block: it moves
+      // the stage off the preset the rest of the probe was reading.
+      const stepFrom = attr('data-newamp-visualizer-preset');
+      pressKey('ArrowRight', { repeat: true });
+      const stepOne = await settles('first held-arrow step', () => {
+        const now = attr('data-newamp-visualizer-preset');
+        return now !== stepFrom ? now : null;
+      });
+      const stepMid = attr('data-newamp-visualizer-preset');
+      pressKey('ArrowRight', { repeat: true });
+      const stepTwo = await settles('second held-arrow step', () => attr('data-newamp-visualizer-preset') !== stepMid);
+      const heldArrowSteps = stepOne && stepTwo;
+      // Two presses inside one tick, before React has rendered or the settings
+      // write has answered, are two steps: back to where the held arrow began.
+      pressKey('ArrowLeft', { repeat: true });
+      pressKey('ArrowLeft', { repeat: true });
+      const sameTickArrowSteps = await settles('two arrow steps in one tick', () =>
+        attr('data-newamp-visualizer-preset') === stepFrom,
+      );
       pressKey('q');
       await waitFor('4K visualizer quality state', () =>
         stage.getAttribute('data-newamp-visualizer-quality') === '4k',
       );
       const appliedQuality = stage.getAttribute('data-newamp-visualizer-quality');
-      pressKey('l');
+      pressKey('L', { shiftKey: true });
       await waitFor('low-end visualizer state', () =>
         stage.getAttribute('data-newamp-visualizer-performance') === 'low' &&
         stage.getAttribute('data-newamp-visualizer-quality') === 'auto',
       );
-      pressKey('l');
+      pressKey('L', { shiftKey: true });
       await waitFor('balanced visualizer state', () =>
         stage.getAttribute('data-newamp-visualizer-performance') === 'balanced',
       );
@@ -4364,7 +4977,7 @@ function uiVisualizerProbeSource(): string {
       await waitFor('visualizer reactivity state', () =>
         stage.getAttribute('data-newamp-visualizer-reactivity') !== 'punch',
       );
-      pressKey('v');
+      pressKey('V', { shiftKey: true });
       await waitFor('auto VJ enabled state', () =>
         stage.getAttribute('data-newamp-visualizer-auto-vj') === 'on',
       );
@@ -4393,36 +5006,199 @@ function uiVisualizerProbeSource(): string {
       const transportArtButton = await waitFor('transport visualizer opener', () =>
         document.querySelector('[data-newamp-transport] [data-newamp-open-visualizer]'),
       );
+      transportArtButton.focus({ focusVisible: true });
+      const openedFromKeyboard = transportArtButton.matches(':focus-visible');
       transportArtButton.click();
       await waitFor('fullscreen visualizer reopens', () =>
         document.querySelector('[data-newamp-fullscreen-visualizer]'),
       );
-      // Right-click on the stage opens the visualizer menu; Escape closes it
-      // and leaves the stage up. Synthetic keys must be cancelable, like
-      // real ones, or the visualizer's preventDefault means nothing to the
-      // app-wide shortcuts behind it.
+      const stageFocusedOnReopen = document.activeElement === document.querySelector('[data-newamp-fullscreen-visualizer]');
+      // Right-click on the stage opens the visualizer menu at the pointer;
+      // Escape closes it and leaves the stage up. Synthetic keys must be
+      // cancelable, like real ones, or the visualizer's preventDefault means
+      // nothing to the app-wide shortcuts behind it.
       const escape = () =>
         document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-      document
-        .querySelector('[data-newamp-fullscreen-visualizer]')
-        .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 300 }));
-      const rightClickMenu = !!(await waitFor('visualizer menu from right-click', () =>
-        document.querySelector('[data-newamp-viz-preset-picker]'), 4000).catch(() => null));
-      await sleep(200);
+      const liveStage = () => document.querySelector('[data-newamp-fullscreen-visualizer]');
+      liveStage().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 300 }));
+      const menuEl = await waitFor('visualizer menu from right-click', () => {
+        const el = document.querySelector('[data-newamp-viz-menu]');
+        return el && getComputedStyle(el).visibility === 'visible' ? el : null;
+      }, 4000).catch(() => null);
+      const rightClickMenu = !!menuEl;
+      const rightClickMenuRole = menuEl ? menuEl.getAttribute('role') : null;
+      // At the pointer: a corner of the menu sits on it. One that would run off
+      // the screen flips across the pointer, so either side counts.
+      const menuBox = menuEl ? menuEl.getBoundingClientRect() : null;
+      const rightClickMenuRect = menuBox
+        ? { left: menuBox.left, top: menuBox.top, right: menuBox.right, bottom: menuBox.bottom }
+        : null;
+      const within = (a, b) => Math.abs(a - b) <= 8;
+      const rightClickMenuAtCursor =
+        !!menuBox &&
+        (within(menuBox.left, 300) || within(menuBox.right, 300)) &&
+        (within(menuBox.top, 300) || within(menuBox.bottom, 300));
+      const rightClickMenuFocused = !!menuEl && menuEl.contains(document.activeElement);
+      let rightClickMenuArrowMoved = false;
+      if (menuEl) {
+        const focusedBefore = document.activeElement;
+        (focusedBefore || menuEl).dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        await sleep(100);
+        rightClickMenuArrowMoved = document.activeElement !== focusedBefore && menuEl.contains(document.activeElement);
+      }
+      await sleep(100);
       escape();
       await sleep(300);
-      const rightClickMenuClosed = !document.querySelector('[data-newamp-viz-preset-picker]');
-      const stageSurvivedRightClick = !!document.querySelector('[data-newamp-fullscreen-visualizer]');
-      // The same popover from the toolbar button: Escape closes the popover
-      // first and only a second Escape leaves the visualizer.
+      const rightClickMenuClosed = !document.querySelector('[data-newamp-viz-menu]');
+      const stageSurvivedRightClick = !!liveStage();
+      const openMenu = () => {
+        liveStage().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 300, clientY: 300 }));
+        return waitFor('visualizer menu', () => {
+          const el = document.querySelector('[data-newamp-viz-menu]');
+          return el && getComputedStyle(el).visibility === 'visible' ? el : null;
+        }, 4000);
+      };
+      const menuKey = (target, name) =>
+        target.dispatchEvent(new KeyboardEvent('keydown', { key: name, bubbles: true, cancelable: true }));
+      const menuItem = (id) => document.querySelector('[data-newamp-viz-menu-item="' + id + '"]');
+      // Right opens the Mode submenu with focus on its first entry; a list
+      // taller than the window scrolls on the wheel instead of changing the
+      // volume; Left closes it and puts focus back on Mode; End and Home go to
+      // the last and first item; Tab closes the menu.
+      await openMenu();
+      const modeItem = menuItem('mode');
+      modeItem.focus();
+      menuKey(modeItem, 'ArrowRight');
+      const submenu = await waitFor('Mode submenu', () => document.querySelector('[data-newamp-viz-submenu]'), 2000).catch(() => null);
+      await sleep(100);
+      const menuRightOpensSubmenu =
+        !!submenu && submenu.contains(document.activeElement) && modeItem.getAttribute('aria-expanded') === 'true';
+      let menuWheelKept = true;
+      if (submenu && submenu.scrollHeight - submenu.clientHeight > 1) {
+        const wheel = new WheelEvent('wheel', { deltaY: -100, bubbles: true, cancelable: true });
+        submenu.dispatchEvent(wheel);
+        menuWheelKept = !wheel.defaultPrevented;
+      }
+      menuKey(document.activeElement, 'ArrowLeft');
+      await sleep(100);
+      const menuLeftClosesSubmenu = !document.querySelector('[data-newamp-viz-submenu]') && document.activeElement === modeItem;
+      menuKey(document.activeElement, 'End');
+      const menuEndFocusesLast = document.activeElement === menuItem('exit');
+      menuKey(document.activeElement, 'Home');
+      const menuHomeFocusesFirst = document.activeElement === menuItem('next');
+      menuKey(document.activeElement, 'Tab');
+      await sleep(150);
+      const menuTabCloses = !document.querySelector('[data-newamp-viz-menu]');
+      // Picking a mode from the submenu switches to it and closes the menu.
+      const modeTarget = liveStage().getAttribute('data-newamp-visualizer-preset') === 'aurora' ? 'spectrum' : 'aurora';
+      await openMenu();
+      menuItem('mode').focus();
+      menuKey(menuItem('mode'), 'ArrowRight');
+      const modeRadio = await waitFor('Mode entry', () => menuItem('mode:' + modeTarget), 2000);
+      modeRadio.click();
+      const menuModePicked = await settles('mode picked from the menu', () =>
+        liveStage().getAttribute('data-newamp-visualizer-preset') === modeTarget,
+      );
+      await sleep(100);
+      const menuModeClosed = !document.querySelector('[data-newamp-viz-menu]');
+      // Lock look flips Auto-VJ, and flips back. (A mode that is not Eviland has no
+      // Director, so the lock is Auto-VJ being off.)
+      await openMenu();
+      const lockedBefore = menuItem('lock').getAttribute('aria-checked') === 'true';
+      menuItem('lock').click();
+      await sleep(150);
+      const autoVjAfterFirst = liveStage().getAttribute('data-newamp-visualizer-auto-vj');
+      await openMenu();
+      const lockedAfter = menuItem('lock').getAttribute('aria-checked') === 'true';
+      menuItem('lock').click();
+      await sleep(150);
+      const autoVjAfterSecond = liveStage().getAttribute('data-newamp-visualizer-auto-vj');
+      const menuLockToggles =
+        lockedAfter !== lockedBefore &&
+        autoVjAfterFirst === (lockedBefore ? 'on' : 'off') &&
+        autoVjAfterSecond === (lockedBefore ? 'off' : 'on');
+      // The same preset dialog from the toolbar button: focus moves into it,
+      // Escape closes it first and hands focus back to the button, and only a
+      // second Escape leaves the visualizer.
       const toolbarToggle = await waitFor('preset toggle', () => document.querySelector('[data-newamp-viz-preset-picker-toggle]'));
+      // Opened from the keyboard, the toggle has focus-visible and gets focus
+      // back. (focusVisible is honoured where Chromium has it; elsewhere the
+      // script focus is what it is, and the check follows what :focus-visible says.)
+      toolbarToggle.focus({ focusVisible: true });
+      const popoverOpenerFocusVisible = toolbarToggle.matches(':focus-visible');
       toolbarToggle.click();
-      const toolbarMenu = !!(await waitFor('picker via toolbar', () => document.querySelector('[data-newamp-viz-preset-picker]'), 4000).catch(() => null));
+      const picker = await waitFor('picker via toolbar', () => document.querySelector('[data-newamp-viz-preset-picker]'), 4000).catch(() => null);
+      const toolbarMenu = !!picker;
+      const popoverFocusIn = !!picker && picker.contains(document.activeElement);
       await sleep(200);
       escape();
       await sleep(300);
       const toolbarMenuClosed = !document.querySelector('[data-newamp-viz-preset-picker]');
-      const stageSurvivedToolbarEscape = !!document.querySelector('[data-newamp-fullscreen-visualizer]');
+      const popoverFocusReturned = document.activeElement === (popoverOpenerFocusVisible ? toolbarToggle : liveStage());
+      const stageSurvivedToolbarEscape = !!liveStage();
+      // Opened with the mouse, the pressed button has focus but not focus-visible.
+      // Closing must leave focus on the stage, not the button: a focused button
+      // turns the next Space into a press of that button instead of a pause.
+      toolbarToggle.focus({ focusVisible: false });
+      if (toolbarToggle.matches(':focus-visible')) toolbarToggle.blur();
+      toolbarToggle.click();
+      await waitFor('picker via mouse', () => document.querySelector('[data-newamp-viz-preset-picker]'), 4000).catch(() => null);
+      await sleep(200);
+      escape();
+      await sleep(300);
+      const popoverMouseOpenFocusOnStage =
+        !document.querySelector('[data-newamp-viz-preset-picker]') && document.activeElement === liveStage();
+      // Double-click flips the window on the bare stage only, never on a
+      // control, and on the hover volume meter it sets 100%.
+      const nativeBefore = liveStage().getAttribute('data-newamp-native-fullscreen');
+      const doubleClick = (el) => el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }));
+      const nextButton = await waitFor('next preset button', () => document.querySelector('[data-newamp-viz-next-button]'));
+      const nowBlock = document.querySelector('[data-newamp-viz-now]');
+      const meterInput = await waitFor('hover volume input', () => document.querySelector('[data-newamp-viz-volume-input]'));
+      doubleClick(nextButton);
+      if (nowBlock) doubleClick(nowBlock);
+      // React tracks the value on the element itself, so go through the
+      // prototype setter for the change to be seen.
+      const setMeter = (value) => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(meterInput, String(value));
+        meterInput.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const volumeBefore = meterInput.value;
+      if (volumeBefore === '100') {
+        setMeter(50);
+        await settles('hover meter off 100%', () => meterInput.value === '50');
+      }
+      doubleClick(meterInput);
+      await settles('hover meter volume reset', () => meterInput.value === '100');
+      const meterDblclickVolume = Number(meterInput.value);
+      await sleep(150);
+      const dblclickOnControlKeepsWindow = liveStage().getAttribute('data-newamp-native-fullscreen') === nativeBefore;
+      // Back to where the fixture's profile had it.
+      setMeter(volumeBefore);
+      // Positive control: on the bare stage the same double-click does flip the
+      // window, and a second one flips it back.
+      const bareStage = liveStage().querySelector('[data-newamp-visualizer-canvas]') || liveStage();
+      doubleClick(bareStage);
+      const dblclickOnStageFlips = await settles('stage double-click flips the window', () =>
+        liveStage().getAttribute('data-newamp-native-fullscreen') !== nativeBefore,
+      );
+      doubleClick(bareStage);
+      const dblclickOnStageFlipsBack = await settles('second double-click flips it back', () =>
+        liveStage().getAttribute('data-newamp-native-fullscreen') === nativeBefore,
+      );
+      // Closing from the keyboard hands focus back to what opened the stage
+      // when that was a keyboard-focused control; otherwise it falls to the page.
+      escape();
+      await waitFor('fullscreen visualizer closes on Escape', () =>
+        document.querySelector('[data-newamp-fullscreen-visualizer]') ? null : true,
+      );
+      await sleep(150);
+      const stageFocusReturned =
+        document.activeElement === (openedFromKeyboard ? transportArtButton : document.body);
+      transportArtButton.click();
+      await waitFor('fullscreen visualizer reopens for the deck check', () =>
+        document.querySelector('[data-newamp-fullscreen-visualizer]'),
+      );
       window.__newampSmoke?.setCompactDeck?.(true);
       await waitFor('compact deck opens and clears fullscreen visualizer', () => {
         const deck = document.querySelector('.compact-root, .deck-winamp-classic, .deck-record-player, .deck-jukebox, .deck-cassette, .deck-discman, .deck-retro-tv');
@@ -4432,11 +5208,45 @@ function uiVisualizerProbeSource(): string {
       return {
         ok: true,
         rightClickMenu,
+        rightClickMenuRole,
+        rightClickMenuAtCursor,
+        rightClickMenuRect,
+        rightClickMenuFocused,
+        rightClickMenuArrowMoved,
         rightClickMenuClosed,
         stageSurvivedRightClick,
+        menuRightOpensSubmenu,
+        menuWheelKept,
+        menuLeftClosesSubmenu,
+        menuEndFocusesLast,
+        menuHomeFocusesFirst,
+        menuTabCloses,
+        menuModePicked,
+        menuModeClosed,
+        menuLockToggles,
         toolbarMenu,
+        popoverFocusIn,
         toolbarMenuClosed,
+        popoverOpenerFocusVisible,
+        popoverFocusReturned,
+        popoverMouseOpenFocusOnStage,
         stageSurvivedToolbarEscape,
+        stageFocusedOnOpen,
+        stageFocusedOnReopen,
+        stageFocusReturned,
+        ctrlArrowKeepsPreset,
+        plainLKeepsTier,
+        plainLDebug,
+        plainVKeepsAutoVj,
+        heldKeyIgnored,
+        heldArrowSteps,
+        sameTickArrowSteps,
+        liteBurstQuality,
+        dblclickOnControlKeepsWindow,
+        dblclickOnStageFlips,
+        dblclickOnStageFlipsBack,
+        meterDblclickVolume,
+        artDefault,
         currentTitle,
         currentTime,
         preset: 'spectrum',
@@ -4589,9 +5399,10 @@ function uiDiscoverProbeSource(): string {
         }
         throw new Error('Timed out waiting for ' + label);
       };
+      // By attribute, not label: the "Discovery" group heading is a button too,
+      // and it comes first and contains the text "Discover".
       const discoverButton = await waitFor('Discover navigation', () =>
-        Array.from(document.querySelectorAll('button'))
-          .find((item) => (item.textContent || '').includes('Discover')),
+        document.querySelector('[data-newamp-nav="discover"]'),
       );
       discoverButton.click();
       const view = await waitFor('Discover view', () => document.querySelector('[data-newamp-discover]'), 12000);
@@ -5771,6 +6582,10 @@ async function bootstrap(): Promise<void> {
   registerAudioProtocol();
   registerIpc();
   registerDisplayWatchers();
+  installPermissionHandlers(session.defaultSession, {
+    allowedOrigins: isDev ? ['newamp-app://app', 'http://localhost:5173'] : ['newamp-app://app'],
+    onDenied: (denial) => writeDiagnosticEvent('permission-denied', { ...denial }),
+  });
 
   createStartupSplashWindow();
   mainWin = createWindow();
@@ -5809,16 +6624,6 @@ async function bootstrap(): Promise<void> {
     });
   }
 
-  // If the main renderer reloads (crash recovery, dev hot-reload) while a
-  // detached visualizer window is open, the old MessageChannel port dies with
-  // the previous renderer and the projector feed would go permanently static.
-  // Re-issue a fresh port pair on every (re)load so the feed resumes. No-op on
-  // the initial load (no detached window yet) and when nothing is detached.
-  mainWin.webContents.on('did-finish-load', () => {
-    if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
-    wireDetachedFramePort();
-  });
-
   // Auto-scan on launch if the library is empty and roots are configured
   mainWin.webContents.once('did-finish-load', () => {
     // This runs before the window is ever shown, so anything that throws here
@@ -5827,7 +6632,7 @@ async function bootstrap(): Promise<void> {
     // and let the auto-scan below rebuild it.
     let trackCount = 0;
     try {
-      trackCount = library.getStats().tracks;
+      trackCount = library.getTrackCount();
     } catch (err) {
       writeDiagnosticEvent('library-stats-unavailable', { error: String(err) });
     }
@@ -5934,6 +6739,10 @@ if (!singleInstanceLock) {
   app.on('open-file', (event, path) => {
     event.preventDefault();
     enqueueOpenFiles([path]);
+    // The window is usually hidden in the Dock now; a document that starts
+    // playing should bring it forward. Not before the first reveal, though:
+    // that would skip the splash.
+    if (mainWindowRevealed) showMainWindow();
   });
 
   app.whenReady().then(bootstrap).catch((err) => {
@@ -5955,9 +6764,23 @@ app.on('before-quit', () => {
   isQuitting = true;
 });
 
+// The display-sleep blocker follows which windows are on screen, including the
+// detached projector, which is created far from here.
+app.on('browser-window-created', (_event, created) => {
+  created.on('show', refreshDisplaySleepBlocker);
+  created.on('hide', refreshDisplaySleepBlocker);
+  created.on('minimize', refreshDisplaySleepBlocker);
+  created.on('restore', refreshDisplaySleepBlocker);
+  created.on('closed', refreshDisplaySleepBlocker);
+});
+
 app.on('will-quit', (event) => {
   globalShortcut.unregisterAll();
   closeStartupSplashWindow();
+  if (displaySleepBlockerId !== null) {
+    powerSaveBlocker.stop(displaySleepBlockerId);
+    displaySleepBlockerId = null;
+  }
   libraryWatcher?.stop();
   scanner?.cancel();
   // Explicit Quit / Cmd+Q bypass window-all-closed. Flush on the actual quit
@@ -5971,6 +6794,7 @@ app.on('will-quit', (event) => {
   // No orphan ffmpeg.exe should outlive the app.
   killAllDnaFfmpeg();
   killAllScoreFfmpeg();
+  killAllWaveformFfmpeg();
   killAllTranscodeFfmpeg();
   closeAllGaplessSessions();
   // radioBrain.stop() is async but bounded (a few hundred ms even with a

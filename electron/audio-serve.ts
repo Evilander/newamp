@@ -19,7 +19,7 @@ import { Readable } from 'node:stream';
 
 type PcmChild = ChildProcessByStdio<null, Readable, Readable>;
 import { resamplerFilter, resamplerKindNow } from './resampler.js';
-import { resolveFfmpegPath, transcodeToWavResponse } from './transcode.js';
+import { resolveFfmpegPath, transcodeToWavResponse, watchFfmpegInput } from './transcode.js';
 import { killChild } from './kill-child.js';
 
 const AUDIO_CORS_HEADERS: Record<string, string> = {
@@ -274,7 +274,11 @@ function spawnPcmDecoder(filePath: string, seekSec: number): PcmChild {
   args.push('-i', filePath, '-map', '0:a:0', '-vn');
   if (dsd) args.push('-af', resamplerFilter(resamplerKindNow(resolveFfmpegPath())), '-ar', '88200');
   args.push('-acodec', 'pcm_f32le', '-ac', '2', '-f', 'f32le', 'pipe:1');
-  return spawn(resolveFfmpegPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  const child = spawn(resolveFfmpegPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  // Held open under backpressure for as long as the track plays, so a move to
+  // the Recycle Bin has to be able to stop it.
+  watchFfmpegInput(child, filePath);
+  return child;
 }
 
 /**
@@ -365,6 +369,17 @@ function pcmBodyStream(
       });
       child.stdout.on('close', () => {
         if (closed) return;
+        // Stopped from outside (its file is being moved away): padding out the
+        // rest of the track would queue the whole remainder as silence.
+        if (child?.killed) {
+          closed = true;
+          try {
+            controller.error(new Error('The decoder was stopped.'));
+          } catch {
+            /* already closed */
+          }
+          return;
+        }
         // Decode ended short of the probed duration (VBR estimate drift):
         // honor the promised length with silence so Chromium never stalls on
         // a body shorter than Content-Length.

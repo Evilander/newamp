@@ -103,6 +103,17 @@ export interface Track {
    */
   missingSince?: number | null;
   /**
+   * The codec the file reports ('ALAC', 'MPEG-4/AAC', 'FLAC'). Null until a
+   * scan has read the file with codec capture, and for files that name none.
+   * The extension alone cannot tell ALAC from AAC in an .m4a.
+   */
+  codec?: string | null;
+  /** The codec's own lossless flag; null when the file did not say. */
+  codecLossless?: boolean | null;
+  bitsPerSample?: number | null;
+  /** MusicBrainz recording id from the file's tags, when it carries one. */
+  mbRecordingId?: string | null;
+  /**
    * Fields whose value is the user's (typed in or accepted from MusicBrainz)
    * rather than the file's. Only single-track reads (getTrack, and the result
    * of a metadata edit or lookup) fill this in.
@@ -293,8 +304,20 @@ export interface TrashTracksResult {
   failed: Array<{ path: string; error: string }>;
   /** The user said no at the confirmation, so nothing happened. */
   cancelled: boolean;
+  /** Nothing was attempted, and why: another move still running, a restore in progress. */
+  refused?: string;
+  /** The tracks whose file was moved. */
+  trashedIds?: number[];
+  /** The tracks whose row left the library: those above, plus any whose file was already gone. */
+  removedIds?: number[];
   /** Support backup taken before anything was deleted; null when nothing was. */
   backupPath?: string | null;
+}
+
+/** Files handled so far by a move to the Recycle Bin / Trash, sent every few files and at the end. */
+export interface TrashProgress {
+  done: number;
+  total: number;
 }
 
 export interface PlaylistM3uImportResult {
@@ -425,6 +448,8 @@ export interface LibraryHealth {
 export interface LibraryPruneMissingResult {
   checked: number;
   removed: number;
+  /** The rows that went, for the player and the views to drop; absent when none did. */
+  removedIds?: number[];
   /** Missing tracks kept because their folder, library root or drive is unreachable. */
   offline: number;
   /** Support backup taken before anything was deleted; null when nothing was. */
@@ -1014,6 +1039,21 @@ export interface CustomSkin {
   updatedAt: number;
 }
 
+export interface SavedWindowRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SavedWindowState {
+  /** The window outside deck mode: its restored rectangle, even if it was maximized when last used. */
+  normal: SavedWindowRect | null;
+  maximized: boolean;
+  /** The compact deck, kept apart so parking it in a corner never moves the main layout. */
+  deck: SavedWindowRect | null;
+}
+
 export interface AppSettings {
   libraryRoots: string[];
   libraryAutoWatch: boolean;
@@ -1083,6 +1123,8 @@ export interface AppSettings {
    * users expect from a desktop close button.
    */
   closeButtonBehavior: 'minimize-to-tray' | 'close-app';
+  /** Where the main window and the deck were last placed. Written by the main process only. */
+  windowState?: SavedWindowState;
   /**
    * Adaptive rendering quality. `auto` measures the machine at runtime and
    * scales the visualizer + ambient reactivity; `high` forces full richness;
@@ -1094,6 +1136,25 @@ export interface AppSettings {
    * on capable hardware and disables it on weak machines; `on`/`off` force it.
    */
   ambientReactivity: 'auto' | 'on' | 'off';
+  /**
+   * Draw the track's waveform as the seek bar. Off falls back to the plain
+   * slider and stops the background decode that builds the waveform.
+   */
+  waveformSeekBar: boolean;
+}
+
+/**
+ * A track's loudness shape for the seek bar: `buckets` evenly spaced slices of
+ * the whole track, as a peak and an RMS level per slice. Levels are bytes,
+ * 255 being full scale, so a quiet track stays quiet here; the seek bar
+ * scales it for display.
+ */
+export interface WaveformData {
+  buckets: number;
+  /** Seconds of audio the slices cover. */
+  duration: number;
+  peak: Uint8Array;
+  rms: Uint8Array;
 }
 
 export interface RadioBrainStatus {
@@ -1446,6 +1507,13 @@ export interface NewAmpAPI {
    * when the track can't have one. Takes a second or two uncached.
    */
   getSongScore: (id: number) => Promise<SongScorePublic | null>;
+  /**
+   * The waveform for the seek bar, from cache or decoded once in the
+   * background (about half a second). Null for streams, server tracks and
+   * anything that can't be decoded. `prefetch` queues it behind whatever is
+   * needed right now.
+   */
+  getTrackWaveform: (id: number, options?: { prefetch?: boolean }) => Promise<WaveformData | null>;
   getRadioBrainStatus: () => Promise<RadioBrainStatus>;
   openFiles: (paths: string[]) => Promise<OpenFilesResult>;
   consumePendingOpenFiles: () => Promise<string[]>;
@@ -1498,6 +1566,8 @@ export interface NewAmpAPI {
   trashTracks: (ids: number[]) => Promise<TrashTracksResult>;
   /** Tracks that just left the library (trashed or cleaned up), by id. */
   onTracksRemoved: (cb: (ids: number[]) => void) => () => void;
+  /** Progress of a move started by trashTracks, once the user has confirmed it. */
+  onTrashProgress: (cb: (progress: TrashProgress) => void) => () => void;
   /** Hands every adopted metadata field back to the file's tags; returns how many. */
   resetAdoptedMetadata: () => Promise<number>;
   getListeningHistory: (opts?: { limit?: number; offset?: number }) => Promise<ListeningHistoryItem[]>;
@@ -1550,6 +1620,7 @@ export interface NewAmpAPI {
   showInFolder: (path: string) => Promise<void>;
   onPlayerCommand: (cb: (command: PlayerCommand) => void) => () => void;
   onOpenFiles: (cb: (paths: string[]) => void) => () => void;
+  onOpenSettings: (cb: () => void) => () => void;
 
   // play-along tabs
   searchGuitarTabs: (query: GuitarTabSearchQuery) => Promise<GuitarTabSearchResult[]>;

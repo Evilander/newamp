@@ -13,10 +13,11 @@
 import {
   audioExtension,
   classifyAudioQuality,
+  CONTAINER_AUDIO_EXTENSIONS,
   type AudioQualityTrackInput,
 } from './audio-quality.js';
 
-export type FormatBadgeKind = 'lossless' | 'hires' | 'dsd' | 'lossy';
+export type FormatBadgeKind = 'lossless' | 'hires' | 'dsd' | 'lossy' | 'container';
 export type FormatBadgeTone = 'accent' | 'warn' | 'plain' | 'muted';
 
 export interface FormatBadge {
@@ -30,11 +31,9 @@ export interface FormatBadge {
   title: string;
 }
 
-export interface FormatBadgeInput extends AudioQualityTrackInput {
-  /** Optional explicit bit depth (e.g. 16/24). Track payload doesn't carry it
-   *  today — when null we omit it from the hi-res label. */
-  bitsPerSample?: number | null;
-}
+// bitsPerSample (e.g. 16/24) rides along on the quality input; when it is
+// null the hi-res label leaves it out.
+export type FormatBadgeInput = AudioQualityTrackInput;
 
 export interface FormatBadgeOptions {
   /** When true, omit the muted "320" / "192" chip for lossy tracks unless they
@@ -74,11 +73,14 @@ export function formatBadgesForTrack(
   }
 
   if (signal.isLossless) {
+    const codecName = containerCodecName(ext, input.codec);
     badges.push({
       kind: 'lossless',
-      label: codecLabel(ext, signal.displayExt),
+      label: codecLabel(ext, signal.displayExt, codecName),
       tone: 'accent',
-      title: `${signal.displayExt} · lossless codec.`,
+      title: codecName && codecName !== signal.displayExt
+        ? `${signal.displayExt} · ${codecName}, lossless codec.`
+        : `${signal.displayExt} · lossless codec.`,
     });
     if (signal.isHiRes) {
       const bits = normalizeBits(input.bitsPerSample);
@@ -102,20 +104,40 @@ export function formatBadgesForTrack(
     return badges;
   }
 
+  // A container (.m4a, .mka) whose codec no scan has recorded yet could hold
+  // either family, so it gets a neutral chip instead of a lossy claim.
+  if (signal.family === 'container') {
+    if (verbose || density === 'comfortable') {
+      badges.push({
+        kind: 'container',
+        label: signal.displayExt,
+        tone: 'muted',
+        title: `${signal.displayExt} container · codec not read yet.`,
+      });
+      const kbps = bitrateKbps(input.bitrate);
+      if (kbps != null) {
+        badges.push({ kind: 'container', label: String(kbps), tone: 'muted', title: `${kbps} kbps ${signal.displayExt}.` });
+      }
+    }
+    return badges;
+  }
+
   // Lossy. Always surface the codec in verbose mode; in compact mode rely on
   // the row's existing context (filename / column) and only chip the bitrate
   // when it's interesting.
   if (verbose) {
+    const codecName = containerCodecName(ext, input.codec);
     badges.push({
       kind: 'lossy',
-      label: codecLabel(ext, signal.displayExt),
+      label: codecLabel(ext, signal.displayExt, codecName),
       tone: 'muted',
-      title: `${signal.displayExt} · lossy codec.`,
+      title: codecName && codecName !== signal.displayExt
+        ? `${signal.displayExt} · ${codecName}, lossy codec.`
+        : `${signal.displayExt} · lossy codec.`,
     });
   }
-  const bitrate = input.bitrate;
-  if (bitrate != null && bitrate > 0) {
-    const kbps = Math.round(bitrate / 1000);
+  const kbps = bitrateKbps(input.bitrate);
+  if (kbps != null) {
     const interesting = verbose
       || density === 'comfortable'
       || kbps < 192        // visibly compressed; surface so users notice
@@ -132,16 +154,36 @@ export function formatBadgesForTrack(
   return badges;
 }
 
+function bitrateKbps(bitrate: number | null | undefined): number | null {
+  return bitrate != null && bitrate > 0 ? Math.round(bitrate / 1000) : null;
+}
+
+const containerExtSet = new Set<string>(CONTAINER_AUDIO_EXTENSIONS);
+
+// The file's own codec name, for the containers whose extension cannot say
+// (an .m4a is ALAC or AAC). Elsewhere the extension is the label.
+function containerCodecName(ext: string, codec: string | null | undefined): string | null {
+  if (!containerExtSet.has(ext)) return null;
+  const name = (codec ?? '').toLowerCase();
+  if (name.includes('alac')) return 'ALAC';
+  if (name.includes('aac')) return 'AAC';
+  if (name.includes('flac')) return 'FLAC';
+  if (name.includes('opus')) return 'OPUS';
+  if (name.includes('vorbis')) return 'VORBIS';
+  if (/mp3|layer 3|layer3/.test(name)) return 'MP3';
+  if (/ac-?3/.test(name)) return 'AC3';
+  return null;
+}
+
 /** Short display label for the codec, with a few familiar overrides. */
-function codecLabel(ext: string, fallback: string): string {
+function codecLabel(ext: string, fallback: string, codecName: string | null = null): string {
+  if (codecName) return codecName;
   if (!ext) return fallback;
   switch (ext) {
     case 'aif':
       return 'AIFF';
     case 'oga':
       return 'OGG';
-    case 'm4a':
-      return 'AAC';
     case 'wv':
       return 'WV';
     case 'tta':

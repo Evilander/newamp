@@ -21,14 +21,13 @@
 // Anything unusual (several edits, an empty edit, a timescale that isn't the
 // sample rate, a length that disagrees with the frame table by more than two
 // frames) returns null: no trim is always safe, a wrong trim cuts music.
+// So does any sound track that isn't an mp4a entry: the frame size, the
+// priming and iTunSMPB are AAC's, and an Apple Lossless .m4a has none of them.
 
-import { open, stat, type FileHandle } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { extname } from 'node:path';
+import { MP4_EXTS, boxChild, boxChildren, boxPath, readMoov, sampleEntryType, soundTrak } from './mp4-codec.js';
 
-const MP4_EXTS = new Set(['.m4a', '.m4b', '.mp4']);
-// moov is small (sample tables for hours of AAC stay in the low megabytes);
-// anything bigger than this is not a file worth trimming.
-const MAX_MOOV_BYTES = 32 * 1024 * 1024;
 const AAC_FRAME = 1024;
 // ffmpeg's mov demuxer takes iTunSMPB's priming only below this.
 const SMPB_MAX_PRIMING = 16384;
@@ -39,13 +38,6 @@ export interface PlayableLength {
   frames: number;
   rate: number;
   source: 'itunsmpb' | 'stts' | 'elst';
-}
-
-interface Box {
-  type: string;
-  start: number;
-  end: number;
-  body: number;
 }
 
 const cache = new Map<string, PlayableLength | null>();
@@ -71,89 +63,17 @@ export async function playableLength(path: string): Promise<PlayableLength | nul
   return result;
 }
 
-async function readMoov(path: string): Promise<Buffer | null> {
-  const file = await open(path, 'r');
-  try {
-    const size = (await file.stat()).size;
-    let offset = 0;
-    const header = Buffer.alloc(16);
-    while (offset + 8 <= size) {
-      await read(file, header, 0, 16, offset);
-      let boxSize = header.readUInt32BE(0);
-      const type = header.toString('latin1', 4, 8);
-      let headerSize = 8;
-      if (boxSize === 1) {
-        boxSize = Number(header.readBigUInt64BE(8));
-        headerSize = 16;
-      } else if (boxSize === 0) {
-        boxSize = size - offset;
-      }
-      if (boxSize < headerSize) return null;
-      if (type === 'moov') {
-        if (boxSize > MAX_MOOV_BYTES) return null;
-        const moov = Buffer.alloc(boxSize - headerSize);
-        await read(file, moov, 0, moov.length, offset + headerSize);
-        return moov;
-      }
-      offset += boxSize;
-    }
-    return null;
-  } finally {
-    await file.close();
-  }
-}
-
-async function read(file: FileHandle, buffer: Buffer, at: number, length: number, position: number): Promise<void> {
-  const { bytesRead } = await file.read(buffer, at, length, position);
-  if (bytesRead < Math.min(length, 8)) throw new Error('short read');
-}
-
-function children(buf: Buffer, start: number, end: number): Box[] {
-  const out: Box[] = [];
-  let p = start;
-  while (p + 8 <= end) {
-    let size = buf.readUInt32BE(p);
-    let body = p + 8;
-    if (size === 1) {
-      if (p + 16 > end) break;
-      size = Number(buf.readBigUInt64BE(p + 8));
-      body = p + 16;
-    } else if (size === 0) {
-      size = end - p;
-    }
-    if (size < body - p || p + size > end) break;
-    out.push({ type: buf.toString('latin1', p + 4, p + 8), start: p, end: p + size, body });
-    p += size;
-  }
-  return out;
-}
-
-function child(buf: Buffer, parent: Box | { body: number; end: number }, type: string): Box | null {
-  return children(buf, parent.body, parent.end).find((b) => b.type === type) ?? null;
-}
-
-function path(buf: Buffer, parent: Box | { body: number; end: number }, ...types: string[]): Box | null {
-  let box: Box | { body: number; end: number } | null = parent;
-  for (const type of types) {
-    box = box ? child(buf, box, type) : null;
-  }
-  return box as Box | null;
-}
-
 function parseMoov(moov: Buffer): PlayableLength | null {
   const root = { body: 0, end: moov.length };
-  const mvhd = child(moov, root, 'mvhd');
+  const mvhd = boxChild(moov, root, 'mvhd');
   if (!mvhd) return null;
   const movieTimescale = moov.readUInt32BE(mvhd.body + (moov[mvhd.body] === 1 ? 20 : 12));
-  const trak = children(moov, 0, moov.length)
-    .filter((b) => b.type === 'trak')
-    .find((t) => {
-      const hdlr = path(moov, t, 'mdia', 'hdlr');
-      return hdlr != null && moov.toString('latin1', hdlr.body + 8, hdlr.body + 12) === 'soun';
-    });
+  const trak = soundTrak(moov);
   if (!trak) return null;
-  const mdhd = path(moov, trak, 'mdia', 'mdhd');
-  const stts = path(moov, trak, 'mdia', 'minf', 'stbl', 'stts');
+  const stsd = boxPath(moov, trak, 'mdia', 'minf', 'stbl', 'stsd');
+  if (!stsd || sampleEntryType(moov, stsd) !== 'mp4a') return null;
+  const mdhd = boxPath(moov, trak, 'mdia', 'mdhd');
+  const stts = boxPath(moov, trak, 'mdia', 'minf', 'stbl', 'stts');
   if (!mdhd || !stts) return null;
   const rate = moov.readUInt32BE(mdhd.body + (moov[mdhd.body] === 1 ? 20 : 12));
   if (!rate) return null;
@@ -168,7 +88,7 @@ function parseMoov(moov: Buffer): PlayableLength | null {
 
   let mediaTime = 0;
   let segmentFrames: number | null = null;
-  const elst = path(moov, trak, 'edts', 'elst');
+  const elst = boxPath(moov, trak, 'edts', 'elst');
   if (elst) {
     const version = moov[elst.body];
     const count = moov.readUInt32BE(elst.body + 4);
@@ -206,13 +126,13 @@ function parseMoov(moov: Buffer): PlayableLength | null {
 
 /** Apple's gapless info: " 00000000 PPPPPPPP EEEEEEEE LLLLLLLLLLLLLLLL ..." in hex. */
 function iTunSmpb(moov: Buffer): { priming: number; frames: number } | null {
-  const ilst = path(moov, { body: 0, end: moov.length }, 'udta', 'meta');
+  const ilst = boxPath(moov, { body: 0, end: moov.length }, 'udta', 'meta');
   // meta is a full box: its children start after 4 bytes of version/flags.
-  const list = ilst ? child(moov, { body: ilst.body + 4, end: ilst.end }, 'ilst') : null;
+  const list = ilst ? boxChild(moov, { body: ilst.body + 4, end: ilst.end }, 'ilst') : null;
   if (!list) return null;
-  for (const item of children(moov, list.body, list.end)) {
+  for (const item of boxChildren(moov, list.body, list.end)) {
     if (item.type !== '----') continue;
-    const parts = children(moov, item.body, item.end);
+    const parts = boxChildren(moov, item.body, item.end);
     const name = parts.find((p) => p.type === 'name');
     const data = parts.find((p) => p.type === 'data');
     if (!name || !data) continue;

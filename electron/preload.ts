@@ -33,6 +33,7 @@ import type {
   LibraryHealth,
   LibraryPruneMissingPreview,
   LibraryPruneMissingResult,
+  TrashProgress,
   TrashTracksResult,
   LocalGuitarTabInput,
   LocalLyricsResult,
@@ -86,6 +87,7 @@ import type {
   TrackMetadataPatchInput,
   TrackWavBatchExportResult,
   TrackWavExportResult,
+  WaveformData,
 } from '../shared/types.js';
 import type { TrackDna } from '../shared/audio-dna.js';
 import type { VisualMemoryPlan, VisualMemoryStats } from '../shared/visual-memory.js';
@@ -213,6 +215,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tracks:visual-memory-clear-all') as Promise<number>,
   getSongScore: (id: number) =>
     ipcRenderer.invoke('tracks:song-score', id) as Promise<SongScore | null>,
+  getTrackWaveform: (id: number, options?: { prefetch?: boolean }) =>
+    ipcRenderer.invoke('tracks:waveform', id, options) as Promise<WaveformData | null>,
   getRadioBrainStatus: () => ipcRenderer.invoke('radio-brain:status') as Promise<RadioBrainStatus>,
   openFiles: (paths: string[]) => ipcRenderer.invoke('open:files', paths),
   consumePendingOpenFiles: () => ipcRenderer.invoke('open:consume-pending-files') as Promise<string[]>,
@@ -304,6 +308,15 @@ const api: NewAmpAPI = {
     ipcRenderer.on('library:tracks-removed', handler);
     return () => ipcRenderer.off('library:tracks-removed', handler);
   },
+  onTrashProgress: (cb: (progress: TrashProgress) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, progress: TrashProgress) => {
+      const done = Number(progress?.done);
+      const total = Number(progress?.total);
+      if (Number.isFinite(done) && Number.isFinite(total)) cb({ done, total });
+    };
+    ipcRenderer.on('tracks:trash-progress', handler);
+    return () => ipcRenderer.off('tracks:trash-progress', handler);
+  },
   previewPruneMissingTracks: (targets?: string[]) =>
     ipcRenderer.invoke('library:prune-missing-preview', targets) as Promise<LibraryPruneMissingPreview>,
   resetAdoptedMetadata: () => ipcRenderer.invoke('metadata:reset-adopted') as Promise<number>,
@@ -373,6 +386,11 @@ const api: NewAmpAPI = {
     const handler = (_e: unknown, paths: string[]) => cb(paths);
     ipcRenderer.on('app:open-files', handler);
     return () => ipcRenderer.off('app:open-files', handler);
+  },
+  onOpenSettings: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('app:open-settings', handler);
+    return () => ipcRenderer.off('app:open-settings', handler);
   },
   searchGuitarTabs: (query: GuitarTabSearchQuery) =>
     ipcRenderer.invoke('tabs:search', query) as Promise<GuitarTabSearchResult[]>,

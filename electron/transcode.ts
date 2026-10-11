@@ -2,8 +2,11 @@ import ffmpegStaticImport from 'ffmpeg-static';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, stat } from 'node:fs/promises';
-import { basename, extname, join } from 'node:path';
+import { basename, extname, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
+import { caseFoldCachePath } from './cache-key-casing.js';
+import { killChild } from './kill-child.js';
+import { MP4_EXTS, chromiumPlaysMp4Audio, mp4SoundCodec } from './mp4-codec.js';
 import { resamplerFilter, resamplerKindNow } from './resampler.js';
 import type {
   AudioExportFormat,
@@ -72,6 +75,59 @@ export function playbackMode(filePath: string): 'native' | 'ffmpeg' {
   return 'ffmpeg';
 }
 
+// The protocol handler's routing. An MP4-family file is native only when its
+// sound track is a codec Chromium decodes (AAC, FLAC, Opus): Apple Lossless
+// ships as .m4a too, fails in the <audio> element, and plays through ffmpeg.
+// A file whose moov can't be read keeps the extension's verdict.
+export async function resolvePlaybackMode(filePath: string): Promise<'native' | 'ffmpeg'> {
+  const mode = playbackMode(filePath);
+  if (mode !== 'native' || !MP4_EXTS.has(extname(filePath).toLowerCase())) return mode;
+  const codec = await mp4SoundCodec(filePath);
+  return codec == null || chromiumPlaysMp4Audio(codec) ? 'native' : 'ffmpeg';
+}
+
+// Every ffmpeg child reading a library file, by the file it reads. Windows
+// refuses to move a file another process has open, so a move to the Recycle
+// Bin stops the children holding that file first (stopFfmpegReading).
+const ffmpegInputs = new Map<ChildProcess, string>();
+
+export function ffmpegInputKey(filePath: string): string {
+  return caseFoldCachePath(resolve(filePath).replace(/\\/g, '/'), process.platform);
+}
+
+export function watchFfmpegInput(child: ChildProcess, inputPath: string): void {
+  ffmpegInputs.set(child, ffmpegInputKey(inputPath));
+  const forget = () => ffmpegInputs.delete(child);
+  child.once('exit', forget);
+  child.once('error', forget);
+}
+
+/** Kill every watched ffmpeg reading one of these files and wait for it to exit. */
+export async function stopFfmpegReading(paths: string[], timeoutMs = 2000): Promise<void> {
+  const keys = new Set(paths.map(ffmpegInputKey));
+  const exits: Promise<void>[] = [];
+  for (const [child, key] of ffmpegInputs) {
+    if (!keys.has(key)) continue;
+    exits.push(awaitChildExit(child, timeoutMs));
+    killChild(child);
+  }
+  await Promise.all(exits);
+}
+
+/** Resolves once the child has exited, or after `timeoutMs` if it hasn't. */
+export function awaitChildExit(child: ChildProcess, timeoutMs: number): Promise<void> {
+  if (child.exitCode != null || child.signalCode != null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, timeoutMs);
+    function done(): void {
+      clearTimeout(timer);
+      child.off('exit', done);
+      resolve();
+    }
+    child.once('exit', done);
+  });
+}
+
 export function transcodeToWavResponse(filePath: string, request: Request): Response {
   const ffmpeg = resolveFfmpegPath();
   const ext = extname(filePath).toLowerCase();
@@ -113,6 +169,7 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
     ],
     { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
   );
+  watchFfmpegInput(child, filePath);
 
   let stderr = '';
   child.stderr.setEncoding('utf8');
@@ -357,6 +414,7 @@ export function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     liveTranscodeFfmpeg.add(child);
+    watchFfmpegInput(child, ffmpegInputArg(args));
     let stderr = '';
     let settled = false;
     const settle = (err?: Error) => {
@@ -392,6 +450,7 @@ function runFfmpegCapture(args: string[], ffmpeg: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
     liveTranscodeFfmpeg.add(child);
+    watchFfmpegInput(child, ffmpegInputArg(args));
     let stderr = '';
     let settled = false;
     const settle = (err: Error | undefined, out?: string) => {
@@ -421,6 +480,10 @@ function runFfmpegCapture(args: string[], ffmpeg: string): Promise<string> {
       else settle(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
     });
   });
+}
+
+function ffmpegInputArg(args: string[]): string {
+  return args[args.indexOf('-i') + 1] ?? '';
 }
 
 function parseEbur128IntegratedLufs(stderr: string): number {

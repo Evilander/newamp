@@ -27,7 +27,7 @@ import {
   type SongScore,
 } from '../src/visualizer/eviland-score.js';
 import { caseFoldCachePath } from './cache-key-casing.js';
-import { resolveFfmpegPath } from './transcode.js';
+import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
 
 export interface ScoreRequest {
   path: string;
@@ -150,6 +150,7 @@ function decodeMonoPcm(inputPath: string, start: number, seconds: number): Promi
     );
     const child = spawn(resolveFfmpegPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     liveScoreFfmpeg.add(child);
+    watchFfmpegInput(child, inputPath);
     // Starts at five minutes of audio and doubles when a longer track needs it.
     let samples = new Float32Array(SONG_SCORE_SAMPLE_RATE * 300);
     let count = 0;

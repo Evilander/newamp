@@ -9,6 +9,7 @@ import { normalizeLimiterEnabled, normalizePreampDb } from '../shared/audio-limi
 import { FLAT_EQ_VALUES, normalizeEqValues } from '../shared/eq-presets.js';
 import { normalizeCustomSkin } from '../shared/custom-skin.js';
 import { parseMusicServerStreamUrl } from '../shared/music-servers.js';
+import { emptyWindowState, normalizeWindowState } from './window-state.js';
 import {
   atomicWriteFileSync,
   durableWriteFileAsync,
@@ -60,8 +61,10 @@ const DEFAULTS: AppSettings = {
   bitPerfectExclusiveDeviceId: null,
   sampleAccurateGapless: true,
   closeButtonBehavior: 'minimize-to-tray',
+  windowState: emptyWindowState(),
   performanceTier: 'auto',
   ambientReactivity: 'auto',
+  waveformSeekBar: true,
 };
 
 // A stored skin written by an older build can hold values the current grammar
@@ -385,8 +388,10 @@ export class SettingsStore {
         ? parsed.sampleAccurateGapless
         : DEFAULTS.sampleAccurateGapless,
       closeButtonBehavior: normalizeCloseButtonBehavior(parsed.closeButtonBehavior),
+      windowState: normalizeWindowState(parsed.windowState),
       performanceTier: normalizePerformanceTier(parsed.performanceTier),
       ambientReactivity: normalizeAmbientReactivity(parsed.ambientReactivity),
+      waveformSeekBar: parsed.waveformSeekBar !== false,
     };
   }
 
@@ -512,23 +517,32 @@ export class SettingsStore {
       closeButtonBehavior: patch.closeButtonBehavior === undefined
         ? this.state.closeButtonBehavior
         : normalizeCloseButtonBehavior(patch.closeButtonBehavior),
+      windowState: patch.windowState === undefined
+        ? this.state.windowState
+        : normalizeWindowState(patch.windowState),
       performanceTier: patch.performanceTier === undefined
         ? this.state.performanceTier
         : normalizePerformanceTier(patch.performanceTier),
       ambientReactivity: patch.ambientReactivity === undefined
         ? this.state.ambientReactivity
         : normalizeAmbientReactivity(patch.ambientReactivity),
+      waveformSeekBar: patch.waveformSeekBar === undefined
+        ? this.state.waveformSeekBar
+        : patch.waveformSeekBar !== false,
     };
     this.state = next;
     // resumeState is the ~3s playback-position autosave (see
-    // schedulePersistPlaybackSession in usePlayerStore.ts) — the only setting
-    // written on a hot, high-frequency cadence, and always as a lone key in
-    // its own patch. That one gets debounced/async. Every other setting keeps
-    // writing synchronously and immediately, same as before: callers (and
-    // smoke:audio-limiter) depend on a setting being on disk the instant
-    // set() returns, and losing a rare user-toggled setting to a crash-window
-    // debounce isn't an acceptable trade for a save that isn't hot anyway.
-    if (this.isResumeStateOnlyPatch(patch)) {
+    // schedulePersistPlaybackSession in usePlayerStore.ts) and windowState
+    // follows every window move and resize — the only settings written on a
+    // hot cadence, each always as a lone key in its own patch. Those get
+    // debounced/async; a synchronous fsync after every window drag can stall
+    // the main thread for a while on a slow or removable data folder. Every
+    // other setting keeps writing synchronously and immediately, same as
+    // before: callers (and smoke:audio-limiter) depend on a setting being on
+    // disk the instant set() returns, and losing a rare user-toggled setting
+    // to a crash-window debounce isn't an acceptable trade for a save that
+    // isn't hot anyway. flushSync() on quit still lands whatever is pending.
+    if (this.isHotPatch(patch)) {
       this.schedulePersist();
     } else {
       this.persist();
@@ -536,9 +550,9 @@ export class SettingsStore {
     return this.get();
   }
 
-  private isResumeStateOnlyPatch(patch: Partial<AppSettings>): boolean {
+  private isHotPatch(patch: Partial<AppSettings>): boolean {
     const keys = Object.keys(patch);
-    return keys.length === 1 && keys[0] === 'resumeState';
+    return keys.length === 1 && (keys[0] === 'resumeState' || keys[0] === 'windowState');
   }
 
   // Immediate, synchronous, unconditional write. Also cancels any pending
@@ -561,9 +575,9 @@ export class SettingsStore {
     atomicWriteFileSync(this.file, JSON.stringify(this.state, null, 2));
   }
 
-  // Debounced path for the resumeState autosave only — writing the full
-  // settings JSON synchronously every ~3s during playback was a real
-  // main-thread cost.
+  // Debounced path for the resumeState autosave and the window geometry —
+  // writing the full settings JSON synchronously every ~3s during playback was
+  // a real main-thread cost.
   private schedulePersist(): void {
     this.dirty = true;
     if (this.persistTimer) return;
