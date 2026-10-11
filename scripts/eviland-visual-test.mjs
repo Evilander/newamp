@@ -46,8 +46,11 @@ const playwrightModule = process.env.NEWAMP_PLAYWRIGHT_MODULE;
 const softwareGl = Boolean(process.env.CI) || process.env.NEWAMP_SOFTWARE_GL === '1';
 
 let electronApp = null;
-// Software GL on a CI runner is several times slower than a GPU.
-const hardTimeout = setTimeout(() => fail(new Error(`eviland visual ${mode} test timed out`)), softwareGl ? 480000 : 240000);
+// Software GL on a CI runner is several times slower than a GPU, and runners
+// differ by about 2x. Diversity renders every look twice (about 8,400 frames):
+// 313 s on one runner, over 480 s on a slower one with the same commit.
+const softwareLimitMs = mode === 'diversity' ? 15 * 60_000 : 480000;
+const hardTimeout = setTimeout(() => fail(new Error(`eviland visual ${mode} test timed out`)), softwareGl ? softwareLimitMs : 240000);
 
 if (playwrightModule) {
   void runPlaywright().then(finish).catch(fail);
