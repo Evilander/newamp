@@ -15,7 +15,16 @@ labels: bug
 **Setup**
 - OS (Windows / macOS / Linux + version):
 - NewAmp version (Settings → About):
+- Installer or portable build (Windows):
 - Library size (rough track count):
 - Shell / skin, if it's a visual bug:
 
-**Screenshot / clip** (drag & drop here — for visual or visualizer bugs this is worth a thousand words)
+**Playback problems**
+- File format, and whether it is on a local drive, a network share or a music server:
+- Output device, and whether Bit-Perfect Exclusive is on (Settings → Playback):
+
+**Screenshot / clip** (drag a file here; for visual bugs a screenshot or clip helps most)
+
+**Logs** (optional): attach `diagnostics/events.jsonl` from the profile folder (Settings → Support → Show crash log finds it).
+
+**Volume wheel problems only:** press Copy input log in Settings → Support after reproducing it and paste the result here.

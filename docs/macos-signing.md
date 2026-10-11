@@ -33,7 +33,7 @@ For notarization (consumed by `npm run release:notarize`):
 | `NEWAMP_APPLE_PASSWORD` | the app-specific password |
 | `NEWAMP_TEAM_ID` | your 10-char Apple Team ID |
 
-In CI these are GitHub Actions secrets already referenced by `.github/workflows/release.yml`.
+The release workflow passes the notarization variables (`NEWAMP_APPLE_ID`, `NEWAMP_APPLE_PASSWORD`, `NEWAMP_TEAM_ID`) from repository secrets. It does not yet pass `CSC_LINK` and `CSC_KEY_PASSWORD`, so CI builds are ad-hoc signed, and with the Apple secrets set the notarize step stops at the signing preflight. To notarize from CI, add both signing variables to the build job's `env` in `release.yml`. Locally, export both before `npm run package:mac`.
 
 ## Verify a build
 
@@ -44,4 +44,4 @@ npm run release:notarize                        # runs the preflight, then notar
 ```
 
 `codesign --verify --deep --strict` and `spctl -a -t install` are the source of
-truth — the preflight runs both and fails if the app isn't Developer-ID-accepted.
+truth. The preflight runs both and fails if the app isn't Developer-ID-accepted.
