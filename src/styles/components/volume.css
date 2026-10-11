@@ -1,6 +1,7 @@
 /* ----------------------- VLC-style boost volume slider ----------------------- */
 /* The slider runs 0..200. The track gradient is drawn on the wrapper so the
-   accent fill + red boost zone show through the native range track. */
+   accent fill shows through the native range track, and so does the red boost
+   zone once the volume is up there. The 100% tick is where the wheel pauses. */
 .volume-slider {
   display: inline-flex;
   align-items: center;

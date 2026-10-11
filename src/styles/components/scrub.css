@@ -1,0 +1,178 @@
+/* components/scrub.css: the waveform seek bar (WaveformSeek.tsx).
+   The frame draws; the real range input inside it keeps the pointer,
+   keyboard and focus behaviour, lying over the picture invisibly. */
+
+.wfs {
+  --wfs-played: var(--accent);
+  --wfs-rest: color-mix(in srgb, var(--ink-2) 55%, var(--panel-3));
+  position: relative;
+  display: block;
+  width: 100%;
+  /* Follows Text size like the buttons beside it, within what a footer row can hold. */
+  height: clamp(18px, calc(26px * var(--newamp-text-scale, 1)), 34px);
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel-3) 38%, transparent);
+  box-shadow:
+    inset 0 1px 0 var(--bevel-dark),
+    inset 0 -1px 0 var(--bevel-light);
+  cursor: pointer;
+}
+.wfs-overview {
+  /* Grows a little with Text size, not as far as the footer bar: it is the last
+     block in the Now Playing column and the first thing a short window clips. */
+  height: clamp(32px, calc(40px * var(--newamp-text-scale, 1)), 44px);
+}
+/* The same wrapper with the waveform off: the slider is laid out as if it
+   were not there. It exists so the slider keeps its element across the switch. */
+.wfs-off {
+  display: contents;
+}
+/* The Windowshade deck's controls are 18px tall in a fixed-size window. */
+.compact-controls .wfs {
+  height: 18px;
+}
+.wfs:has(> input:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The line shown while the waveform loads or when a track has none. It stays
+   under the waveform so silence still reads as a bar, not a gap. */
+.wfs-baseline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  pointer-events: none;
+  background: linear-gradient(
+    to right,
+    var(--wfs-played) calc(var(--wfs-progress, 0) * 100%),
+    var(--wfs-rest) 0
+  );
+}
+.wfs[data-state='ready'] .wfs-baseline {
+  opacity: 0.55;
+}
+
+.wfs-svg {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+.wfs[data-state='ready'] .wfs-svg {
+  opacity: 1;
+}
+.wfs-stop-played {
+  stop-color: var(--wfs-played);
+}
+.wfs-stop-rest {
+  stop-color: var(--wfs-rest);
+}
+.wfs-peak {
+  fill-opacity: 0.5;
+}
+
+/* Higher specificity than input[type='range'].nslider: whatever classes the
+   caller gave the slider, inside the frame it is a transparent hit area. The
+   thumb is a hairline so a click lands exactly where the playhead draws. */
+.wfs.wfs > input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.wfs.wfs > input[type='range']::-webkit-slider-runnable-track {
+  height: 100%;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.wfs.wfs > input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 1px;
+  height: 100%;
+  margin-top: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.wfs-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  pointer-events: none;
+  background: var(--ink);
+  box-shadow: 0 0 4px var(--accent-glow);
+}
+/* Resonance: the wider glow is static paint on a pseudo-element; only its
+   opacity follows the music, like the art ring in tokens.css. */
+html[data-amp-reactive='on'] .wfs-playhead::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: 0 0 12px var(--accent-glow);
+  opacity: var(--amp-energy, 0);
+  will-change: opacity;
+}
+.wfs-hoverline {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--ink) 55%, transparent);
+}
+.wfs-tip {
+  position: absolute;
+  top: 2px;
+  z-index: 2;
+  transform: translateX(-50%);
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  pointer-events: none;
+  white-space: nowrap;
+  color: var(--ink);
+  background: var(--panel);
+  font-family: var(--font-mono);
+  font-size: calc(10px * var(--newamp-text-scale, 1));
+  line-height: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Resonance: the progress glow tail (.amp-scrub-wrap::after, a 5px bar sized
+   for the plain slider) gives way to the playhead, which glows with the music
+   instead. Same restraint budget: one consumer, replaced. */
+.amp-scrub-wrap:has(> .wfs)::after {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wfs-svg {
+    transition: none;
+  }
+  html[data-amp-reactive='on'] .wfs-playhead::after {
+    display: none;
+  }
+}

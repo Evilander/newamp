@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
-import { formatTime, playbackCodecLabel } from '../lib/format';
+import { formatTime, playbackCodecLabel, shortcutLabel } from '../lib/format';
 import { api } from '../lib/api';
 import { VolumeSlider } from './VolumeSlider';
 import { spectralArtDataUrl } from '@shared/spectral-art';
@@ -19,6 +19,7 @@ const Visualizer = lazy(() => import('./Visualizer').then((module) => ({ default
 export function Transport(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const isBuffering = usePlayerStore((s) => s.isBuffering);
   // NOTE: deliberately NOT subscribing to s.currentTime here — it updates
   // 10x/sec during playback and used to reconcile the whole footer (mini
   // Visualizer, links, badges, volume, buttons) on every tick. The two
@@ -31,6 +32,7 @@ export function Transport(): JSX.Element {
   const toggleShuffle = usePlayerStore((s) => s.toggleShuffle);
   const cycleRepeat = usePlayerStore((s) => s.cycleRepeat);
   const setVolume = usePlayerStore((s) => s.setVolume);
+  const toggleLove = usePlayerStore((s) => s.toggleLove);
   const seek = usePlayerStore((s) => s.seek);
   const togglePlay = usePlayerStore((s) => s.togglePlay);
   const next = usePlayerStore((s) => s.next);
@@ -113,7 +115,29 @@ export function Transport(): JSX.Element {
             >
               {current ? (
                 <>
-                  {'★ '}
+                  {/* Stays mounted for every library track so toggling it
+                      keeps keyboard focus; podcast episodes (id < 0) can't be loved. */}
+                  {current.id > 0 ? (
+                    <button
+                      type="button"
+                      className="inline-flex align-middle"
+                      style={{
+                        marginRight: 6,
+                        padding: 0,
+                        border: 0,
+                        background: 'none',
+                        color: current.loved ? 'var(--accent)' : 'var(--muted)',
+                        cursor: 'pointer',
+                      }}
+                      onClick={() => void toggleLove(current.id)}
+                      aria-pressed={!!current.loved}
+                      aria-label="Love"
+                      title={current.loved ? 'Loved. Click to remove it from your loved tracks' : 'Love this track'}
+                      data-newamp-transport-loved={current.loved ? 'true' : 'false'}
+                    >
+                      <LoveHeart filled={!!current.loved} />
+                    </button>
+                  ) : null}
                   <ArtistLink artist={current.artist} color="inherit" title={`Show all ${current.artist} albums`} />
                   {' — '}
                   {current.title}
@@ -136,7 +160,7 @@ export function Transport(): JSX.Element {
             </div>
             <div className="lcd-text flex items-center gap-2 text-[11px]" style={{ color: 'var(--ink-2)' }}>
               {playbackError ? (
-                <span data-newamp-playback-error style={{ color: 'var(--error)' }}>
+                <span data-newamp-playback-error style={{ color: 'var(--error-text)' }}>
                   {playbackError}
                 </span>
               ) : (
@@ -147,6 +171,11 @@ export function Transport(): JSX.Element {
                     {current && current.sampleRate ? `  ·  ${(current.sampleRate / 1000).toFixed(1)} kHz` : ''}
                     {current && current.year ? `  ·  ${current.year}` : ''}
                   </span>
+                  {isBuffering && (
+                    <span data-newamp-buffering role="status" style={{ color: 'var(--accent)' }}>
+                      Buffering…
+                    </span>
+                  )}
                   <SignalPathBadge />
                 </>
               )}
@@ -158,7 +187,7 @@ export function Transport(): JSX.Element {
         </div>
 
         <div className="flex items-center gap-2">
-          <button className="pxbtn pxbtn-icon" onClick={() => void prev()} title="Previous (Ctrl+←)" aria-label="Previous track">
+          <button className="pxbtn pxbtn-icon" onClick={() => void prev()} title={`Previous (${shortcutLabel('Mod+←')})`} aria-label="Previous track">
             <PrevIcon />
           </button>
           <button
@@ -168,13 +197,15 @@ export function Transport(): JSX.Element {
             title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
             aria-label={isPlaying ? 'Pause' : 'Play'}
             aria-pressed={isPlaying}
+            aria-busy={isBuffering}
+            style={isBuffering ? { cursor: 'progress', opacity: 0.7 } : undefined}
           >
             <PlayPauseIcon playing={isPlaying} />
           </button>
           <button className="pxbtn pxbtn-icon" onClick={stop} title="Stop" aria-label="Stop">
             <StopIcon />
           </button>
-          <button className="pxbtn pxbtn-icon" onClick={() => void next()} title="Next (Ctrl+→)" aria-label="Next track">
+          <button className="pxbtn pxbtn-icon" onClick={() => void next()} title={`Next (${shortcutLabel('Mod+→')})`} aria-label="Next track">
             <NextIcon />
           </button>
           {/* amp-scrub-wrap: hook for the Resonance progress glow tail (tokens.css
@@ -209,6 +240,21 @@ export function Transport(): JSX.Element {
         </div>
       </div>
     </footer>
+  );
+}
+
+/** Same heart as the Loved entry in the sidebar; an outline until loved. */
+function LoveHeart({ filled }: { filled: boolean }): JSX.Element {
+  return (
+    <svg width="14" height="14" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <path
+        d="M10 17l-6.5-6.5a4 4 0 015.66-5.66L10 6l.84-1.16a4 4 0 015.66 5.66L10 17z"
+        fill={filled ? 'currentColor' : 'none'}
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
