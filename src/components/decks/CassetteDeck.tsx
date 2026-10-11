@@ -13,6 +13,7 @@ import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
+import { DeckWindowButtons } from './DeckWindowButtons';
 
 export function CassetteDeck(props: DeckProps): JSX.Element {
   const {
@@ -40,8 +41,7 @@ export function CassetteDeck(props: DeckProps): JSX.Element {
             title={alwaysOnTop ? 'Unpin window' : 'Pin window on top'}
           >PIN</button>
           <button className="pxbtn" onClick={onExitDeck} title="Back to full library">FULL</button>
-          <button className="pxbtn" onClick={onMinimize} title="Minimize">_</button>
-          <button className="pxbtn" onClick={onClose} title="Close" style={{ color: 'var(--error)' }}>×</button>
+          <DeckWindowButtons onMinimize={onMinimize} onClose={onClose} className="pxbtn" danger />
         </div>
       </header>
 
@@ -86,12 +86,12 @@ export function CassetteDeck(props: DeckProps): JSX.Element {
           </span>
         </div>
         <div className="deck-cs-keys">
-          <button className="deck-cs-key" onClick={onPrev} title="Previous">◀◀</button>
-          <button className="deck-cs-key is-primary" onClick={onTogglePlay} title="Play / Pause">
+          <button className="deck-cs-key" onClick={onPrev} title="Previous" aria-label="Previous track">◀◀</button>
+          <button className="deck-cs-key is-primary" onClick={onTogglePlay} title="Play / Pause" aria-label={isPlaying ? 'Pause' : 'Play'}>
             {isPlaying ? '▮▮' : '▶'}
           </button>
-          <button className="deck-cs-key" onClick={onStop} title="Stop">◼</button>
-          <button className="deck-cs-key" onClick={onNext} title="Next">▶▶</button>
+          <button className="deck-cs-key" onClick={onStop} title="Stop" aria-label="Stop">◼</button>
+          <button className="deck-cs-key" onClick={onNext} title="Next" aria-label="Next track">▶▶</button>
         </div>
         <VolumeSlider value={volume} onChange={onSetVolume} width={110} showLabel={false} compact />
       </footer>

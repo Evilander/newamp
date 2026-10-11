@@ -4,18 +4,24 @@
 // album art / visualizer under phosphor, scanline, vignette and grain layers.
 // Changing tracks "retunes" the set: a one-shot channel-flip animation with a
 // rolling bar plus a green OSD channel number, and the CH knob physically
-// advances. The VOL knob is the real volume: drag it, scroll it, or give it
-// the arrow keys.
+// advances. Both knobs are real: the CH knob changes track when it is clicked,
+// dragged, scrolled or given the arrow keys, and the VOL knob is the volume.
 
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import {
+  useEffect, useRef, useState,
+  type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent,
+} from 'react';
 import type { DeckProps } from './types';
-import { WheelVolumeAccumulator, clampVolume, wheelVolumeDelta } from '../../lib/wheel-volume';
+import { clampVolume } from '../../lib/wheel-volume';
+import { handlePlayerWheel } from '../../lib/player-wheel';
 import { Visualizer } from '../Visualizer';
 import { formatTime } from '../../lib/format';
-import { VolumeSlider } from '../VolumeSlider';
+import { VolumeSlider, volumeLabel } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
+import { DeckWindowButtons } from './DeckWindowButtons';
+import { ChannelGesture, ChannelWheel, VolumeKnobGesture, channelKeyStep, tvScreenLabel } from './deck-controls';
 
 export function RetroTvDeck(props: DeckProps): JSX.Element {
   const {
@@ -40,30 +46,79 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
 
   const channel = track?.trackNo ?? null;
 
-  // Volume knob: a vertical drag of 100 px is 100%, so the whole 0..200%
-  // sweep is a long turn. Horizontal movement counts the same way (right is
-  // louder), which makes a rotary flick feel right.
-  const knobWheel = useRef(new WheelVolumeAccumulator());
-  knobWheel.current.observe(volume);
+  // Channel knob: a click or a drag turns it a detent at a time, up and right
+  // forward. The retune effect above spins it on any track change, so a turn
+  // by hand and an automatic advance look the same.
+  const channelGesture = useRef<ChannelGesture | null>(null);
+  const channelWheel = useRef<ChannelWheel | null>(null);
+  channelWheel.current ??= new ChannelWheel();
+  const turnChannel = (step: number): void => {
+    if (step > 0) onNext();
+    else if (step < 0) onPrev();
+  };
+  const endChannelGesture = (knob: HTMLDivElement): void => {
+    channelGesture.current = null;
+    // Arrow keys and Space belong to the knob only for someone who tabbed to
+    // it. After a mouse press they go back to the global shortcuts (seek,
+    // volume, play/pause) instead of skipping tracks.
+    knob.blur();
+  };
+  const onChannelPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    channelGesture.current = new ChannelGesture(event.clientX, event.clientY);
+  };
+  const onChannelPointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    turnChannel(channelGesture.current?.move(event.clientX, event.clientY) ?? 0);
+  };
+  const onChannelPointerUp = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const gesture = channelGesture.current;
+    endChannelGesture(event.currentTarget);
+    if (gesture?.isClick) turnChannel(event.shiftKey ? -1 : 1);
+  };
+  // Assistive technology activates a button with a synthesized click that has
+  // no pointer or key events behind it. A real mouse click has detail >= 1 and
+  // was already handled on release.
+  const onChannelClick = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    if (event.detail === 0) turnChannel(event.shiftKey ? -1 : 1);
+  };
+  const onChannelKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    // Chords such as Cmd+Up (volume) and Ctrl+Left (previous) stay global.
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const step = channelKeyStep(event.key);
+    if (step === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    // A held key repeats at the OS rate, and every step is a track change.
+    if (!event.repeat) turnChannel(step);
+  };
+
+  // Volume knob: the element holds the pointer while it is dragged, so its own
+  // handlers see the whole gesture and nothing is left on window if the deck
+  // goes away mid-drag.
+  const knobRef = useRef<HTMLDivElement>(null);
+  const knobGesture = useRef<VolumeKnobGesture | null>(null);
+  // Bound by hand: React's onWheel is passive and can't claim the wheel.
+  useEffect(() => {
+    const node = knobRef.current;
+    if (!node) return;
+    const onWheel = (event: WheelEvent): void => handlePlayerWheel(event, 'knob');
+    node.addEventListener('wheel', onWheel, { passive: false });
+    return () => node.removeEventListener('wheel', onWheel);
+  }, []);
   const onKnobPointerDown = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (event.button !== 0) return;
     event.preventDefault();
-    const target = event.currentTarget;
-    const startX = event.clientX;
-    const startY = event.clientY;
-    const startVolume = volume;
-    target.setPointerCapture(event.pointerId);
-    const onMove = (move: PointerEvent): void => {
-      onSetVolume(clampVolume(startVolume + (startY - move.clientY + (move.clientX - startX)) / 100));
-    };
-    const onUp = (): void => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    knobGesture.current = new VolumeKnobGesture(event.clientX, event.clientY, volume);
+  };
+  const onKnobPointerMove = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    const gesture = knobGesture.current;
+    if (gesture) onSetVolume(gesture.volumeAt(event.clientX, event.clientY));
+  };
+  const endKnobGesture = (): void => {
+    knobGesture.current = null;
   };
   const onKnobKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
     const steps: Record<string, number> = {
@@ -95,8 +150,7 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
           <DeckSkinPicker current="retro-tv" onPick={props.onPickSkin} compact />
           <button className={`pxbtn ${alwaysOnTop ? 'is-active' : ''}`} onClick={() => onSetAlwaysOnTop(!alwaysOnTop)} title="Pin on top">PIN</button>
           <button className="pxbtn" onClick={onExitDeck}>FULL</button>
-          <button className="pxbtn" onClick={onMinimize}>_</button>
-          <button className="pxbtn" onClick={onClose} style={{ color: 'var(--error)' }}>×</button>
+          <DeckWindowButtons onMinimize={onMinimize} onClose={onClose} className="pxbtn" danger />
         </div>
       </header>
 
@@ -111,6 +165,7 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
           data-newamp-open-visualizer
           data-newamp-tv-state={track ? 'tuned' : 'static'}
           title="Click for screen visualizer, double-click for fullscreen"
+          aria-label={tvScreenLabel(track)}
         >
           {vizExpanded ? (
             <Visualizer mode="mini" width={292} height={240} />
@@ -145,11 +200,27 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
         </button>
 
         {/* console column */}
-        <div className="deck-tv-knob deck-tv-knob-ch" aria-hidden="true">
+        <div
+          className="deck-tv-knob deck-tv-knob-ch"
+          role="button"
+          tabIndex={0}
+          aria-label="Channel knob"
+          title="Channel: click, drag or scroll to change track (Shift+click for previous)"
+          data-newamp-deck-channel-knob
+          onPointerDown={onChannelPointerDown}
+          onPointerMove={onChannelPointerMove}
+          onPointerUp={onChannelPointerUp}
+          onPointerCancel={(event) => endChannelGesture(event.currentTarget)}
+          onLostPointerCapture={() => { channelGesture.current = null; }}
+          onClick={onChannelClick}
+          onKeyDown={onChannelKeyDown}
+          onWheel={(event) => turnChannel(channelWheel.current!.next(event, event.timeStamp))}
+        >
           <span className="deck-tv-knob-face" style={{ transform: `rotate(${chSpin}deg)` }} />
           <span className="deck-tv-knob-tag">CHANNEL</span>
         </div>
         <div
+          ref={knobRef}
           className="deck-tv-knob deck-tv-knob-vol"
           role="slider"
           tabIndex={0}
@@ -157,26 +228,26 @@ export function RetroTvDeck(props: DeckProps): JSX.Element {
           aria-valuemin={0}
           aria-valuemax={200}
           aria-valuenow={Math.round(volume * 100)}
-          aria-valuetext={`${Math.round(volume * 100)}%`}
-          title={`Volume ${Math.round(volume * 100)}% — drag or scroll, double-click for 100%`}
+          aria-valuetext={volumeLabel(volume)}
+          title={`Volume ${volumeLabel(volume)} — drag or scroll, double-click for 100%`}
           data-newamp-deck-volume-knob
           onPointerDown={onKnobPointerDown}
+          onPointerMove={onKnobPointerMove}
+          onPointerUp={endKnobGesture}
+          onPointerCancel={endKnobGesture}
+          onLostPointerCapture={endKnobGesture}
           onKeyDown={onKnobKeyDown}
           onDoubleClick={() => onSetVolume(1)}
-          onWheel={(event) => {
-            const delta = wheelVolumeDelta(event);
-            if (delta !== 0) onSetVolume(knobWheel.current.next(volume, delta));
-          }}
         >
           <span className="deck-tv-knob-face" style={{ transform: `rotate(${-135 + (volume / 2) * 270}deg)` }} />
           <span className="deck-tv-knob-tag">VOLUME</span>
         </div>
 
         <div className="deck-tv-transport">
-          <button className="deck-tv-key" onClick={onPrev} title="Previous">◀◀</button>
-          <button className="deck-tv-key is-primary" onClick={onTogglePlay} title="Play / Pause">{isPlaying ? '▮▮' : '▶'}</button>
-          <button className="deck-tv-key" onClick={onStop} title="Stop">◼</button>
-          <button className="deck-tv-key" onClick={onNext} title="Next">▶▶</button>
+          <button className="deck-tv-key" onClick={onPrev} title="Previous" aria-label="Previous track">◀◀</button>
+          <button className="deck-tv-key is-primary" onClick={onTogglePlay} title="Play / Pause" aria-label={isPlaying ? 'Pause' : 'Play'}>{isPlaying ? '▮▮' : '▶'}</button>
+          <button className="deck-tv-key" onClick={onStop} title="Stop" aria-label="Stop">◼</button>
+          <button className="deck-tv-key" onClick={onNext} title="Next" aria-label="Next track">▶▶</button>
         </div>
 
         <div className="deck-tv-volume">

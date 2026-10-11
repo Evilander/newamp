@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { api, winctl } from '../lib/api';
 import { captureDeckSnapshot } from '../lib/deck-snapshot';
+import { shortcutLabel } from '../lib/format';
 import { Camera } from './Icons';
 import { ClassicBentoDeck } from './decks/ClassicBentoDeck';
 import { RecordPlayerDeck } from './decks/RecordPlayerDeck';
@@ -16,6 +17,7 @@ import { DiscmanDeck } from './decks/DiscmanDeck';
 import { RetroTvDeck } from './decks/RetroTvDeck';
 import { WinampClassicDeck, WinampIndustrialDeck } from './decks/WinampClassicDeck';
 import { DECK_SKINS, findDeck, type DeckProps, type DeckSkin } from './decks/types';
+import { isSnapshotChord } from './decks/deck-controls';
 
 const DECK_SKIN_KEY = 'newamp:deck:skin';
 const DECK_SKIN_SCHEMA_KEY = 'newamp:deck:skinSchema';
@@ -46,6 +48,8 @@ export function CompactPlayer(): JSX.Element {
   const duration = usePlayerStore((s) => s.duration);
   const volume = usePlayerStore((s) => s.volume);
   const mode = usePlayerStore((s) => s.mode);
+  const queueLength = usePlayerStore((s) => s.queue.length);
+  const queueIndex = usePlayerStore((s) => s.index);
   const alwaysOnTop = usePlayerStore((s) => s.alwaysOnTop);
   const setMode = usePlayerStore((s) => s.setMode);
   const setVolume = usePlayerStore((s) => s.setVolume);
@@ -112,14 +116,13 @@ export function CompactPlayer(): JSX.Element {
     }
   }
 
-  // Ctrl+Shift+S — snapshot hotkey while the compact deck is up. The listener
+  // Ctrl+Shift+S (Cmd+Shift+S on a Mac) — snapshot hotkey while the compact deck is up. The listener
   // lives and dies with CompactPlayer, so it can never fire in the full app.
   const snapshotRef = useRef<() => void>(() => undefined);
   snapshotRef.current = () => void handleSnapshot();
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.repeat || !event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) return;
-      if (event.code !== 'KeyS' && event.key.toLowerCase() !== 's') return;
+      if (!isSnapshotChord(event, api.platform)) return;
       event.preventDefault();
       snapshotRef.current();
     };
@@ -138,11 +141,17 @@ export function CompactPlayer(): JSX.Element {
     artUrl,
     deckSkin,
     vizExpanded,
+    queueLength,
+    queueIndex,
     onTogglePlay: togglePlay,
     onStop: () => usePlayerStore.getState().engine.stop(),
     onNext: () => void next(),
     onPrev: () => void prev(),
     onSeek: seek,
+    onSelectQueueIndex: (index) => {
+      const { queue, playQueue } = usePlayerStore.getState();
+      void playQueue(queue, index);
+    },
     onSetVolume: (v) => void setVolume(v),
     onSetMode: setMode,
     onSetAlwaysOnTop: setAlwaysOnTop,
@@ -206,7 +215,7 @@ export function CompactPlayer(): JSX.Element {
         type="button"
         className="pxbtn titlebar-nodrag"
         data-newamp-deck-snapshot
-        title="Snapshot this deck as a polaroid (Ctrl+Shift+S)"
+        title={`Snapshot this deck as a polaroid (${shortcutLabel('Mod+Shift+S')})`}
         aria-label="Snapshot deck as polaroid"
         onClick={() => void handleSnapshot()}
         onFocus={() => setSnapshotFocus(true)}

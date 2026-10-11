@@ -9,6 +9,7 @@ import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
+import { DeckWindowButtons } from './DeckWindowButtons';
 import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
 
 export function ClassicBentoDeck(props: DeckProps): JSX.Element {
@@ -28,6 +29,7 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
           onClick={onToggleVizExpanded}
           onDoubleClick={onOpenFullscreenViz}
           title={vizExpanded ? 'Show album art' : 'Show visualizer'}
+          aria-label={vizExpanded ? 'Show album art' : 'Show visualizer'}
         >
           {vizExpanded ? (
             <div className="compact-art-viz">
@@ -63,7 +65,7 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
             </div>
             <div className="compact-window titlebar-nodrag">
               <DeckSkinPicker current="bento" onPick={props.onPickSkin} compact />
-              <button onClick={onMinimize} title="Minimize">_</button>
+              <DeckWindowButtons show="minimize" onMinimize={onMinimize} onClose={onClose} />
               <button
                 className={alwaysOnTop ? 'active' : ''}
                 onClick={() => onSetAlwaysOnTop(!alwaysOnTop)}
@@ -72,7 +74,7 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
                 PIN
               </button>
               <button onClick={onExitDeck} title="Full library">FULL</button>
-              <button onClick={onClose} title="Close">x</button>
+              <DeckWindowButtons show="close" onMinimize={onMinimize} onClose={onClose} closeGlyph="x" />
             </div>
           </div>
 
@@ -90,11 +92,11 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
           </button>
 
           <div className="compact-controls titlebar-nodrag">
-            <button onClick={onPrev} title="Previous">&lt;&lt;</button>
-            <button onClick={onTogglePlay} title="Play / Pause">{isPlaying ? '||' : '>'}</button>
-            <button onClick={onStop} title="Stop">[]</button>
-            <button onClick={onNext} title="Next">&gt;&gt;</button>
-            <ScrubBar className="nslider compact-seek" value={currentTime} max={duration || 1} onSeek={onSeek} />
+            <button onClick={onPrev} title="Previous" aria-label="Previous track">&lt;&lt;</button>
+            <button onClick={onTogglePlay} title="Play / Pause" aria-label={isPlaying ? 'Pause' : 'Play'}>{isPlaying ? '||' : '>'}</button>
+            <button onClick={onStop} title="Stop" aria-label="Stop">[]</button>
+            <button onClick={onNext} title="Next" aria-label="Next track">&gt;&gt;</button>
+            <ScrubBar className="nslider compact-seek" value={currentTime} max={duration || 1} onSeek={onSeek} waveform />
             <button
               className={isShuffleMode(mode) ? 'active' : ''}
               onClick={() => onSetMode(combinePlaybackMode(!isShuffleMode(mode), repeatModeOf(mode)))}

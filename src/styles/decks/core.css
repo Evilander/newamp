@@ -12,7 +12,7 @@
   height: 21px;
   max-width: 124px;
   padding: 0 18px 0 5px;
-  color: var(--accent);
+  color: var(--accent-text);
   background:
     linear-gradient(180deg, var(--panel-2), var(--panel));
   border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--line));
@@ -58,7 +58,7 @@
 .deck-skin-chip:hover,
 .deck-skin-chip.is-current {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
   text-shadow: 0 0 6px var(--accent-glow);
   background: color-mix(in srgb, var(--accent) 14%, var(--panel));
 }

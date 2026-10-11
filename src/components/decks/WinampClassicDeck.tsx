@@ -5,6 +5,7 @@ import { VolumeSlider } from '../VolumeSlider';
 import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
+import { DeckWindowButtons } from './DeckWindowButtons';
 import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
 
 type WinampVariant = 'classic' | 'industrial';
@@ -71,8 +72,7 @@ function WinampDeck({
             PIN
           </button>
           <button className="pxbtn" onClick={onExitDeck}>FULL</button>
-          <button className="pxbtn" onClick={onMinimize}>_</button>
-          <button className="pxbtn" onClick={onClose}>X</button>
+          <DeckWindowButtons onMinimize={onMinimize} onClose={onClose} className="pxbtn" closeGlyph="X" />
         </div>
       </header>
 
@@ -95,12 +95,12 @@ function WinampDeck({
         </button>
 
         <div className="deck-wa-controls">
-          <button className="deck-wa-transport" onClick={onPrev} title="Previous">&lt;&lt;</button>
-          <button className="deck-wa-transport is-primary" onClick={onTogglePlay} title="Play / Pause">
+          <button className="deck-wa-transport" onClick={onPrev} title="Previous" aria-label="Previous track">&lt;&lt;</button>
+          <button className="deck-wa-transport is-primary" onClick={onTogglePlay} title="Play / Pause" aria-label={isPlaying ? 'Pause' : 'Play'}>
             {isPlaying ? '||' : '>'}
           </button>
-          <button className="deck-wa-transport" onClick={onStop} title="Stop">[]</button>
-          <button className="deck-wa-transport" onClick={onNext} title="Next">&gt;&gt;</button>
+          <button className="deck-wa-transport" onClick={onStop} title="Stop" aria-label="Stop">[]</button>
+          <button className="deck-wa-transport" onClick={onNext} title="Next" aria-label="Next track">&gt;&gt;</button>
           <button
             className={`deck-wa-toggle ${isShuffleMode(mode) ? 'is-active' : ''}`}
             onClick={() => onSetMode(combinePlaybackMode(!isShuffleMode(mode), repeatModeOf(mode)))}

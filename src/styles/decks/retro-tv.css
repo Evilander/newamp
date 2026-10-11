@@ -250,7 +250,14 @@
   width: 52px;
   height: 52px;
 }
-.deck-tv-knob-ch { left: 406px; top: 72px; }
+.deck-tv-knob-ch {
+  left: 406px;
+  top: 72px;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
 .deck-tv-knob-vol {
   left: 406px;
   top: 146px;
@@ -260,6 +267,7 @@
   outline: none;
 }
 .deck-tv-knob-vol:active { cursor: grabbing; }
+.deck-tv-knob-ch:focus-visible .deck-tv-knob-face,
 .deck-tv-knob-vol:focus-visible .deck-tv-knob-face {
   box-shadow:
     0 0 0 2px var(--accent),

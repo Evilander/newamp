@@ -606,22 +606,21 @@
   letter-spacing: 0.16em;
 }
 
+/* The speed legend is printed on the chassis, not a pair of keys: the platter
+   always turns at 33 1/3, so 33 is the one marked and nothing here presses. */
 .deck-rp-speed-bank > span:not(.deck-rp-speed-label) {
   display: grid;
   height: 17px;
   place-items: center;
-  border: 1px solid #0a0b0c;
-  border-radius: 8px;
-  color: #aeb2b3;
-  background: linear-gradient(180deg, #4d5356, #202426);
-  box-shadow: inset 1px 1px rgba(255, 255, 255, 0.12), 0 1px 1px #080909;
+  color: #7b8082;
   font: 800 7px/1 var(--font-display);
+  letter-spacing: 0.06em;
+  text-shadow: 0 -1px #0a0b0c;
 }
 
 .deck-rp-speed-bank > span.is-selected {
-  color: #ebedec;
-  box-shadow: inset 0 1px 2px #080909, 0 0 0 1px rgba(210, 214, 214, 0.22);
-  transform: translateY(1px);
+  color: #c6cacb;
+  border-bottom: 1px solid rgba(210, 214, 214, 0.45);
 }
 
 .deck-rp-speed-bank > i {
@@ -696,18 +695,15 @@
   background: #73787a;
 }
 
+/* the fader is parked at the printed zero detent, flush with the slit, so it
+   does not offer a drag it cannot answer */
 .deck-rp-pitch-slit > i {
   position: absolute;
-  top: calc(50% - 9px);
-  left: -7px;
-  width: 18px;
-  height: 18px;
-  border: 1px solid #090a0b;
-  border-radius: 2px;
-  background:
-    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.14) 0 1px, transparent 1px 3px),
-    linear-gradient(90deg, #3c4144, #909597 48%, #313638);
-  box-shadow: 1px 2px 2px rgba(0, 0, 0, 0.62), inset 1px 0 rgba(255, 255, 255, 0.18);
+  top: calc(50% - 1.5px);
+  left: 0;
+  width: 100%;
+  height: 3px;
+  background: #73787a;
 }
 
 .deck-rp-nameplate {
