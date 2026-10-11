@@ -22,9 +22,14 @@ if (process.argv.includes('--list')) {
   process.exit(0);
 }
 
+// A test that outlives its limit counts as hung. The diversity test renders
+// every Eviland look twice in software GL on CI, which took 313 s on one
+// runner and over 480 s on a slower one, so it gets more room than the rest.
+const LIMIT_MS = { 'test:eviland-diversity': 16 * 60_000 };
+
 function run(command, label) {
   const started = Date.now();
-  const result = spawnSync(command, { cwd: repoRoot, shell: true, encoding: 'utf8', timeout: 10 * 60_000 });
+  const result = spawnSync(command, { cwd: repoRoot, shell: true, encoding: 'utf8', timeout: LIMIT_MS[label] ?? 10 * 60_000 });
   const seconds = ((Date.now() - started) / 1000).toFixed(1);
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   return { ok: result.status === 0 && !result.error, seconds, output, label };
