@@ -1,11 +1,11 @@
 ---
 name: Feature request
-about: An idea that would make NewAmp better
+about: A change or addition you'd like. Check docs/features.md first; it may already be there.
 labels: enhancement
 ---
 
 **The idea**
 
-**Why it matters to you** (what were you trying to do when you wished for this?)
+**What you were trying to do** (and what stopped you)
 
 **Anything else** (mockups, examples from other players, etc.)

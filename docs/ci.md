@@ -1,78 +1,62 @@
-# Continuous Integration
+# Continuous integration
 
-NewAmp has ~120 smoke scripts. They split into tiers by what they need to run.
-CI (`.github/workflows/ci.yml`) runs only the **CI-safe** tier on every push/PR;
-the rest run in the release workflow's per-OS legs or in the local release gate
-(`npm run release:gate:local`).
+The scripts in `package.json` fall into tiers by what they need to run. `npm run` lists them. A `smoke:*` script checks one feature end to end and a `test:*` script is a narrower regression test. `npm run test:all` (`scripts/run-all-tests.mjs`) runs every `test:*` script, so a new test is exercised as soon as it is registered.
 
-## CI-safe (pure-node, no display, no audio hardware, no signing tools)
+Three things run them:
 
-Run on every push/PR in `ci.yml`:
+- `.github/workflows/ci.yml` runs the CI-safe tier on every push and pull request, and compiles the native audio addon on macOS.
+- `.github/workflows/release.yml` runs when a version tag is pushed. A verify job runs the typecheck, the build, `test:all` and a handful of smokes. If it passes, Windows, macOS and Linux are packaged in parallel. The Windows build is signed when the certificate secrets are set. The macOS build is ad-hoc signed, and the notarize step runs only when the Apple secrets are set (it needs a Developer ID certificate, see [macOS signing](macos-signing.md)). A draft GitHub release is created with a `SHA256SUMS.txt`.
+- `npm run release:gate:local` (`scripts/release-gate.mjs`) runs the long smoke list, including the tiers CI cannot run, then packages the app and checks the result. The list of smokes is in that file.
 
-| Step | Command | What it locks down |
+## CI-safe (no real display, no audio hardware, no signing tools)
+
+| Step | Command | What it covers |
 | --- | --- | --- |
-| Typecheck | `npm run typecheck` | renderer + electron `tsc --noEmit`, plus the standalone `@eviland/core` package's own (stricter) `tsc --noEmit` |
-| Build | `npm run build` | vite renderer + electron main compile |
-| Build lock | `npm run smoke:build-lock` | concurrent-build lock + stale-lock recovery |
-| Library | `npm run smoke:library` | SQLite scan + query over fixtures |
-| All unit tests | `npm run test:all` | every `test:*` script in package.json, run through `scripts/run-all-tests.mjs` so a new test is exercised the moment it is registered |
-| Wrapped | `npm run smoke:wrapped` | Wrapped stats math across all 5 ranges + IPC/view wiring |
-| Social | `npm run smoke:social` | reviews/lists/profile CRUD, ordering, privacy, reopen persistence, export bundle |
-| Visualizer | `npm run smoke:visualizer` | butterchurn/presets module exports + sandbox wiring |
-| Security (CSP) | `npm run smoke:security` | main renderer has no `unsafe-eval`; eval scoped to the Butterchurn iframe |
-| Capture wiring | `npm run smoke:viz-capture` | visualizer PNG/clip capture IPC wired main→preload→api + UI controls |
-| Provenance | `npm run smoke:build-provenance` | `BUILD-PROVENANCE.json` shape |
-| Release secrets | `npm run smoke:release-secrets` | no secrets leak into release artifacts |
-| Reliability | `npm run smoke:reliability` | DB corruption backup + recovery |
-| `@eviland/core` package | `npm run test:eviland-core-package` | builds `packages/eviland-core` for real (declaration emit) and imports every value `src/index.ts` exports from the built `dist/index.js`, so the package's hand-maintained public surface can't drift from what the mirrored engine modules actually export |
+| Typecheck | `npm run typecheck` | Renderer and Electron `tsc --noEmit`, plus the standalone `@eviland/core` package |
+| Build | `npm run build` | Vite renderer and Electron main process |
+| Native addon | `npm run build:native -- --force` | Compiles `native/newamp-audio` on Linux (ALSA lane) |
+| Exclusive output | `npm run smoke:exclusive-output` | Loads the addon, enumerates devices, and pushes PCM through shared mode with exact frame accounting. A runner with no audio device only builds, loads and enumerates |
+| Build lock | `npm run smoke:build-lock` | Concurrent-build lock and stale-lock recovery |
+| Library | `npm run smoke:library`, `npm run smoke:library-corruption` | SQLite scan and query over fixtures; recovery from a corrupt `library.db` |
+| Tags | `npm run smoke:tags` | Living Tags sandbox, regular-expression cost and rule cycles |
+| All tests | `npm run test:all` | Every `test:*` script, run under Xvfb |
+| Wrapped | `npm run smoke:wrapped` | Wrapped statistics across all five ranges, and the IPC and view wiring |
+| Social | `npm run smoke:social` | Reviews, lists and profile: ordering, privacy, persistence, export |
+| Visualizer | `npm run smoke:visualizer` | Butterchurn and preset module exports, sandbox wiring |
+| Eviland | `test:eviland-audio`, `test:eviland-director`, `test:eviland-memory`, `test:eviland-memory-bridge`, `test:eviland-fluid`, `test:eviland-operators` | Section detection, look rotation, per-track visual lineage, fluid forces, operator channels |
+| `@eviland/core` | `npm run test:eviland-core-package` | Builds `packages/eviland-core` with its own `npm run build` (one esbuild ESM bundle plus type declarations) and imports every value `src/index.ts` exports from `dist/index.js` in plain Node, so the package surface cannot drift from the engine modules |
+| Look versioning | `npm run test:algo-version-guard` | A change to look generation has to bump `VISUAL_MEMORY_ALGO_VERSION` |
+| macOS logic | `test:device-change`, `test:music-folders`, `test:cache-key-casing`, `test:app-menu`, `test:macho-arch` | Platform decisions that need no Mac to test |
+| Tables and queries | `test:virtual-rows`, `test:css-color`, `test:library-query`, `test:transcode-peek` | Virtualized row math, colour parsing, library query cost, the first-play decode path |
+| Security | `test:audio-path-policy`, `test:podcast-host-guard`, `test:safe-regex`, `test:tag-dsl-hardening`, `smoke:security` | The audio path allowlist, podcast address filtering, the rule-language regex matcher, and the renderer content security policy (no `unsafe-eval`; eval is scoped to the Butterchurn frame) |
+| Capture | `npm run smoke:viz-capture` | Visualizer PNG and clip capture is wired from main to preload to the UI |
+| Release hygiene | `smoke:build-provenance`, `smoke:release-secrets`, `smoke:reliability` | The shape of `BUILD-PROVENANCE.json`, no secrets in release artifacts, database corruption backup and recovery |
 
-## Display-required (need an X11/Wayland/macOS display + WebGL)
+## Display-required
 
-Spawn Electron with a window. Run on `macos-latest`/`ubuntu-latest` runners with a
-virtual display, or locally. Examples: every `smoke:ui-*`, `smoke:startup`,
-`smoke:playback`, `smoke:tabs`, `smoke:ui-visualizer`, `smoke:mac-launch`,
-`smoke:butterchurn-sandbox` (loads butterchurn-iframe.html under its real CSP and
-asserts the frame reports `mounted` — the deterministic, audio-free proof that the
-Butterchurn sandbox works), and `smoke:particle-flow` (esbuild-bundles the WebGL2
-particle engine, renders it to a real GL2 context, and asserts non-blank +
-audio-reactive frames).
+These open an Electron window with a GPU context, so they need an X11, Wayland or macOS display. They run in the local release gate or on any machine with a display; the macOS leg of the release workflow runs `smoke:mac-launch`, but a failure there does not block the release. Examples: every `smoke:ui-*`, `smoke:startup`, `smoke:playback`, `smoke:ui-visualizer`, `smoke:mac-launch`, `smoke:butterchurn-sandbox` (loads `butterchurn-iframe.html` under its real content security policy and checks that the frame reports it mounted), and `smoke:particle-flow` (renders the WebGL2 particle engine in a real GL2 context and checks that frames are not blank and react to audio).
 
-## Audio-hardware / human-in-the-loop
+`smoke:community-ui` runs the Jellyfin, Subsonic and history-import flows through the real app. It needs Python with Playwright installed, uses isolated profiles and local protocol fixtures for both servers, and checks history reimport, playback, seeking, visualizer input and exact byte ranges. The node-only `test:music-servers` and `test:history-import` cover the same code without a window.
 
-Need a real output device or manual confirmation; **never** CI:
-`smoke:audio-proof`, `smoke:audio-output`, `smoke:audio-hardware`,
-`smoke:manual-listening-proof`, `smoke:lastfm-live-proof`.
+## Audio hardware or a person at the machine
 
-`smoke:exclusive-output` is the exception that proves the rule: its base pass
-(device enum + probe + shared-mode push with exact frame accounting) needs a
-playback device but no human, so it runs in the local release gate; it no-ops
-cleanly on non-Windows. The full WASAPI-exclusive hardware pass (takes over
-the DAC, asserts requested == internal format) stays manual behind
-`NEWAMP_EXCLUSIVE_SMOKE_HW=1`.
+The release checks in this section and the next are run by the maintainer before tagging. Contributors do not need them.
 
-`smoke:exclusive-ui` (also gate-run, never CI, no-op off-Windows) boots the
-real app with `bitPerfectExclusive` pre-enabled and takes over the default
-device for ~3 quiet seconds: asserts the native path engaged (no silent
-fallback), the clock advances from the native frame counter, and the
-analysers carry energy while the Web Audio graph is silent — which can only
-come from the 30Hz native PCM tap that keeps visualizers alive.
+These need a real output device or someone to confirm something, and never run in CI: `smoke:audio-output`, `smoke:audio-hardware`, `smoke:audio-proof`, `smoke:manual-listening-proof`, `smoke:lastfm-live-proof`.
 
-## Platform-signing-required
+`smoke:exclusive-ui` boots the app with Bit-Perfect Exclusive enabled and takes over the default device for about three quiet seconds. It checks that the native path engaged without falling back, that the clock advances from the native frame counter, and that the analysers carry energy while the Web Audio graph is silent, which can only happen through the 30 Hz tap on the native output that keeps the visualizers running. It does nothing outside Windows and Linux. The exclusive-mode pass of `smoke:exclusive-output` (opening the device exclusively at its native format) runs only with `NEWAMP_EXCLUSIVE_SMOKE_HW=1`.
 
-Windows-only tooling (`signtool`) / a built Windows installer:
-`smoke:signing-readiness`, `smoke:signing-workflow`. These run in the Windows leg
-of `release.yml` when signing secrets are configured.
+Two release checks record the maintainer's confirmation, and the release gate reads the records:
 
-## History: `smoke:security` was red from 1.5.2 until the CSP iframe sandbox
+```bash
+npm run release:start-lastfm-proof
+npm run release:record-lastfm-proof -- --token=<token> --confirm-live-write
+npm run release:start-listening-proof
+npm run release:record-listening-proof -- --confirm-playback --confirm-output-switching --confirm-crossfade --confirm-gapless
+```
 
-`smoke:security` asserts the renderer CSP `script-src` does **not** include
-`'unsafe-eval'`. Commit `1e5228b` (1.5.2's "real Milkdrop fix") added
-`'unsafe-eval'` to `index.html` so Butterchurn could compile MilkDrop preset math,
-*after* the smoke was written. The smoke was never updated, so `smoke:security`
-— and therefore the strict `npm run release:gate` — was red from 1.5.2 through
-1.5.7; those releases shipped via the `:local` gate variants.
+`release:start-lastfm-proof` and `release:record-lastfm-proof` scrobble one test track to the maintainer's own Last.fm account and record the result. `release:start-listening-proof` and `release:record-listening-proof` record that playback, output switching, crossfade and gapless were checked by ear. `npm run release:gate:local` runs the rest of the gate.
 
-This is now **fixed**: Butterchurn runs in its own frame, `butterchurn-iframe.html`,
-whose CSP scopes `'unsafe-eval'` to just that frame, and the main renderer is back on
-`script-src 'self'`. `smoke:security` verifies both halves and is part of the
-CI-safe set above.
+## Platform signing
+
+Windows `signtool` and a built Windows installer: `smoke:signing-readiness` and `smoke:signing-workflow`. The Windows leg of `release.yml` signs when the certificate secrets are set. [macOS signing](macos-signing.md) covers the Apple side.
