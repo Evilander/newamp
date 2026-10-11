@@ -28,6 +28,7 @@ import { createCanvasFlashGuard } from '../src/visualizer/flash-guard-2d';
 import {
   FLASH_GUARD_COLS,
   FLASH_GUARD_ROWS,
+  HAZARD_AREA,
   LINEAR_BYTE,
   applyGuard,
   createFlashGuardState,
@@ -390,14 +391,24 @@ function stageCanvas(): HTMLCanvasElement {
   return canvas;
 }
 
-let rafCallback: FrameRequestCallback | null = null;
+// Every callback queued for the next frame, as a browser keeps them: the
+// frame gate's display-refresh probe queues its own beside the painter's, and
+// a single slot let it take the painter's place on a page's first run.
+const rafQueue = new Map<number, FrameRequestCallback>();
+let rafId = 0;
 window.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-  rafCallback = cb;
-  return 1;
+  rafQueue.set(++rafId, cb);
+  return rafId;
 };
-window.cancelAnimationFrame = () => {
-  rafCallback = null;
+window.cancelAnimationFrame = (id: number) => {
+  rafQueue.delete(id);
 };
+/** One animation frame: each callback queued before it runs once, at `now`. */
+function runFrame(now: number): void {
+  const due = [...rafQueue.values()];
+  rafQueue.clear();
+  for (const cb of due) cb(now);
+}
 
 interface RunResult {
   analysis: Analysis;
@@ -450,7 +461,7 @@ function shaderRun(mode: string, audio: AnalyserFrame[], guarded: boolean, refer
   const gl = canvas.getContext('webgl2')!;
   const frames: Uint8Array[] = [];
   for (at = 0; at < runFrames; at++) {
-    rafCallback?.(10_000 + (at / FPS) * 1000);
+    runFrame(10_000 + (at / FPS) * 1000);
     frames.push(readFrame(gl));
   }
   const width = gl.drawingBufferWidth;
@@ -484,7 +495,7 @@ function evilandRun(seed: string, audio: AnalyserFrame[], guarded: boolean, refe
     frames.push(readFrame(gl));
   }
   guard?.dispose();
-  renderer.dispose();
+  renderer.dispose({ releaseContext: true });
   canvas.remove();
   return finishRun(frames, reference);
 }
@@ -956,7 +967,7 @@ function measureCost(width: number, height: number): Record<string, number> {
     const gl = canvas.getContext('webgl2')!;
     const pixel = new Uint8Array(4);
     const step = () => {
-      rafCallback?.(10_000 + (at / FPS) * 1000);
+      runFrame(10_000 + (at / FPS) * 1000);
       at++;
     };
     for (let i = 0; i < 30; i++) step();
@@ -1083,7 +1094,11 @@ function judge(name: string, plain: RunResult, guarded: RunResult, failures: str
   if (a.maxFieldPairsPerSecond > 3) failures.push(`${name}: ${a.maxFieldPairsPerSecond} whole-field flashes/s after the guard`);
   if (a.maxRegionalPerSecond > 3) failures.push(`${name}: ${a.maxRegionalPerSecond} flashes/s in a 1% region after the guard`);
   const p = plain.analysis;
-  const calm = p.maxRegionalPerSecond <= 2 && p.maxFieldPairsPerSecond <= 2;
+  // Calm by every measure the guard acts on, including flicker scattered too
+  // finely to move a 1% region's mean (thin waveform lines sweeping across
+  // pixels): over HAZARD_AREA of it, the guard is meant to step in.
+  const calm = p.maxRegionalPerSecond <= 2 && p.maxFieldPairsPerSecond <= 2
+    && p.general.maxAreaWithAtLeast4PairsPerSecond < HAZARD_AREA;
   if (calm && (guarded.meanAbsDiff ?? 0) > 0.5) {
     failures.push(`${name}: changed by ${guarded.meanAbsDiff!.toFixed(3)} / 255 with nothing flashing past 2/s to limit`);
   }
