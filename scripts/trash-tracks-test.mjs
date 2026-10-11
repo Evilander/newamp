@@ -220,8 +220,14 @@ function reading(path, dev) {
   assert.equal(other.exitCode, null, 'a decoder on another file keeps running');
   await rename(wav, join(media, 'moved.wav'));
   assert.ok(existsSync(join(media, 'moved.wav')), 'the file can be moved once its reader is gone');
-  other.kill();
-  await new Promise((r) => other.once('exit', r));
+  // On Linux and macOS a plain kill() is SIGTERM, which ffmpeg answers only
+  // after its blocked write to the paused pipe returns, so it would never exit.
+  other.stdout.destroy();
+  if (other.exitCode == null && other.signalCode == null) {
+    const exited = new Promise((r) => other.once('exit', r));
+    other.kill('SIGKILL');
+    await exited;
+  }
 }
 
 // --- which of the requested tracks have a file to move ---------------------------

@@ -128,7 +128,7 @@ function capture(
       }
     }
   } finally {
-    renderer.dispose();
+    renderer.dispose({ releaseContext: true });
   }
   return { images, pngs };
 }
@@ -447,7 +447,7 @@ function captureSequence(
       }
     }
   } finally {
-    renderer.dispose();
+    renderer.dispose({ releaseContext: true });
   }
   return { images, pngs };
 }
@@ -586,7 +586,7 @@ async function perf() {
         batches.push((performance.now() - start) / 24);
       }
     } finally {
-      renderer.dispose();
+      renderer.dispose({ releaseContext: true });
     }
     batches.sort((a, b) => a - b);
     results[name] = { median: Math.round(batches[2]! * 100) / 100, p90: Math.round(batches[4]! * 100) / 100 };
