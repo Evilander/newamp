@@ -26,7 +26,10 @@
 // small change in the audio moves the animation by seconds in one frame. The
 // runtime integrates each scene's `speed(frame)` into u_phase, plus shared
 // integrals of energy, pan and the 24 bands (u_energyTime, u_panTime,
-// u_bandTime), so audio changes velocity and position stays continuous.
+// u_bandTime), so audio changes velocity and position stays continuous. The
+// clocks wrap (CLOCK_WRAP_SECONDS) before they reach the shader, which keeps
+// float32 spacing under 2 ms however long the session runs; see there for what
+// a wrap costs.
 //
 // Scene choice in standalone mode is a seeded walk keyed on
 // (seedKey × sectionId) — seedKey carries the track + the user's evolved
@@ -83,7 +86,7 @@ precision highp float;
 
 uniform vec2  u_res;        // framebuffer pixels
 uniform float u_time;       // scene-local seconds (resets on scene switch)
-uniform float u_globalTime; // seconds since overlay start (never resets)
+uniform float u_globalTime; // seconds since overlay start (never resets; wraps every ~7 h, see CLOCK_WRAP_SECONDS)
 uniform float u_phase;      // integral of the scene's audio-driven speed
 uniform float u_energyTime; // integral of energy, seconds
 uniform float u_panTime;    // integral of pan, seconds
@@ -92,6 +95,7 @@ uniform float u_contrast;
 uniform float u_dt;         // last frame delta, seconds
 uniform float u_seed;       // 0..1 stable per scene instance
 uniform float u_fade;       // 0..1 crossfade envelope (apply to output alpha)
+uniform float u_occlusion;  // how much of the field beneath the scene covers (main() applies it)
 
 uniform float u_energy;     // overall loudness 0..1
 uniform float u_kick;       // voice envelopes 0..1 (asymmetric attack/release)
@@ -103,6 +107,7 @@ uniform float u_kickPulse;  // decaying onset impulses 0..1 (punchier than envel
 uniform float u_snarePulse;
 uniform float u_hatPulse;
 uniform float u_vocalPulse;
+uniform float u_kickCount;  // kicks counted so far, at most ~3 per second (a safe re-roll clock)
 uniform float u_centroid;   // brightness 0..1
 uniform float u_flatness;   // 0 tonal .. 1 noisy
 uniform float u_crest;      // peakiness 0..1
@@ -159,6 +164,12 @@ float bandAvg(int lo, int hi) {
   for (int i = 0; i < 24; i++) { if (i >= lo && i <= hi) s += u_bands[i]; }
   return s / float(max(1, hi - lo + 1));
 }
+// The same range of the band integrals: the clock a band-driven motion rides.
+float bandClock(int lo, int hi) {
+  float s = 0.0;
+  for (int i = 0; i < 24; i++) { if (i >= lo && i <= hi) s += u_bandTime[i]; }
+  return s / float(max(1, hi - lo + 1));
+}
 `;
 
 const MAIN = `
@@ -169,7 +180,10 @@ void main() {
   c = clamp(c, 0.0, 1.0);
   c.rgb = pow(c.rgb, vec3(u_contrast));
   // Premultiply + fade so crossfades and MilkDrop show-through compose cleanly.
-  fragColor = vec4(c.rgb * c.a * u_fade, c.a * u_fade);
+  // The stored alpha is scaled by u_occlusion: 1 covers what is beneath like
+  // paint, 0 adds to it like light, so a dim stroke does not cut a hole in a
+  // bright trail.
+  fragColor = vec4(c.rgb * c.a * u_fade, c.a * u_fade * u_occlusion);
 }
 `;
 
@@ -182,9 +196,9 @@ void main() {
 `;
 
 const UNIFORM_NAMES = [
-  'u_res', 'u_time', 'u_globalTime', 'u_phase', 'u_energyTime', 'u_panTime', 'u_bandTime', 'u_contrast', 'u_dt', 'u_seed', 'u_fade',
+  'u_res', 'u_time', 'u_globalTime', 'u_phase', 'u_energyTime', 'u_panTime', 'u_bandTime', 'u_contrast', 'u_dt', 'u_seed', 'u_fade', 'u_occlusion',
   'u_energy', 'u_kick', 'u_bass', 'u_snare', 'u_hat', 'u_vocal',
-  'u_kickPulse', 'u_snarePulse', 'u_hatPulse', 'u_vocalPulse',
+  'u_kickPulse', 'u_snarePulse', 'u_hatPulse', 'u_vocalPulse', 'u_kickCount',
   'u_centroid', 'u_flatness', 'u_crest', 'u_beatPhase', 'u_beatConf',
   'u_novelty', 'u_pan', 'u_width', 'u_bands',
   'u_accent', 'u_light', 'u_dark', 'u_bg',
@@ -211,6 +225,35 @@ const WARM_EVERY_FRAMES = 8;
 const UNSIGNALED_COMPILE_FRAMES = 3;
 // Keep a small working set instead of compiling the entire library.
 const MAX_SCENE_PROGRAMS = 8;
+
+// How much of the field beneath a scene it covers when the scene does not say:
+// strokes and glows let the trails show through. Solid scenes opt up.
+const DEFAULT_OCCLUSION = 0.35;
+// A kick counts for u_kickCount at most this often, so a scene that re-rolls
+// its pattern on the count never changes faster than about 3 times a second.
+// The gap sits a little under a third of a second: kicks 343 ms apart (175 BPM)
+// reach the overlay 333 or 350 ms apart at 60 fps, and every one of them counts.
+const KICK_COUNT_MIN_GAP_MS = 320;
+
+// The clocks here are doubles and keep counting; the shader receives float32,
+// whose spacing grows with the value: past 9 hours u_globalTime moves in steps
+// of 4 ms, past 18 hours of 8 ms, and anything animated with
+// sin(u_globalTime * k) at a high k stutters. What the shader is given wraps
+// every 4096 turns, about 7.15 hours, which keeps the spacing under 2 ms.
+// Nothing differs before the first wrap.
+//
+// sin(clock * k) carries on through a wrap for every k that is a multiple of
+// 1/4096. Anything else a scene does with a clock (fract, mod, a noise offset,
+// a rotation, a sine at a fractional rate, a hue ramp) hops once per period: the
+// scene layer shows another point of its cycle for a frame while the feedback
+// field carries on. Most scenes do this somewhere; the audit in
+// scripts/eviland-scene-clock-test.mjs lists the counts and pins the scenes
+// that do not. A shorter period would hold the spacing finer and hop twice as
+// often, so this one stays.
+export const CLOCK_WRAP_SECONDS = 2 * Math.PI * 4096;
+export function wrapClock(seconds: number): number {
+  return seconds % CLOCK_WRAP_SECONDS;
+}
 
 const CROSSFADE_MS = 1400;
 // Scene dwell: rotate on section change after MIN, force-rotate after MAX.
@@ -259,7 +302,13 @@ export function createSceneOverlay(
   let targetOpacity = 1, targetContrast = 1;
   const phases = new Map<string, number>();
   let energyTime = 0, panTime = 0;
-  const bandTime = new Float32Array(24);
+  // Accumulated in double precision: a float32 sum stops moving once its step
+  // drops below half the spacing between floats, which happens within hours
+  // for a quiet band. The shader gets a float32 copy per draw.
+  const bandTime = new Float64Array(24);
+  const bandTimeUniform = new Float32Array(24);
+  let kickCount = 0;
+  let lastKickCountAtMs = -1e9;
   const vao = gl.createVertexArray();
   const compiled = new Map<string, CompiledScene>();
   const blacklisted = new Set<string>();
@@ -533,16 +582,20 @@ void main() { fragColor = u_color; }
     gl!.useProgram(scene.program);
     const u = scene.uniforms;
     if (u.u_res) gl!.uniform2f(u.u_res, targetWidth, targetHeight);
-    if (u.u_phase) gl!.uniform1f(u.u_phase, phases.get(def.id) ?? 0);
-    if (u.u_energyTime) gl!.uniform1f(u.u_energyTime, energyTime);
-    if (u.u_panTime) gl!.uniform1f(u.u_panTime, panTime);
-    if (u.u_bandTime) gl!.uniform1fv(u.u_bandTime, bandTime);
+    if (u.u_phase) gl!.uniform1f(u.u_phase, wrapClock(phases.get(def.id) ?? 0));
+    if (u.u_energyTime) gl!.uniform1f(u.u_energyTime, wrapClock(energyTime));
+    if (u.u_panTime) gl!.uniform1f(u.u_panTime, wrapClock(panTime));
+    if (u.u_bandTime) {
+      for (let i = 0; i < 24; i++) bandTimeUniform[i] = wrapClock(bandTime[i]!);
+      gl!.uniform1fv(u.u_bandTime, bandTimeUniform);
+    }
     if (u.u_contrast) gl!.uniform1f(u.u_contrast, targetContrast);
-    if (u.u_time) gl!.uniform1f(u.u_time, timeMs / 1000);
-    if (u.u_globalTime) gl!.uniform1f(u.u_globalTime, globalTimeMs / 1000);
+    if (u.u_time) gl!.uniform1f(u.u_time, wrapClock(timeMs / 1000));
+    if (u.u_globalTime) gl!.uniform1f(u.u_globalTime, wrapClock(globalTimeMs / 1000));
     if (u.u_dt) gl!.uniform1f(u.u_dt, dtSec);
     if (u.u_seed) gl!.uniform1f(u.u_seed, seed);
     if (u.u_fade) gl!.uniform1f(u.u_fade, fade * targetOpacity);
+    if (u.u_occlusion) gl!.uniform1f(u.u_occlusion, def.occlusion ?? DEFAULT_OCCLUSION);
     if (u.u_energy) gl!.uniform1f(u.u_energy, frame.energy);
     if (u.u_kick) gl!.uniform1f(u.u_kick, frame.kick);
     if (u.u_bass) gl!.uniform1f(u.u_bass, frame.bass);
@@ -553,6 +606,7 @@ void main() { fragColor = u_color; }
     if (u.u_snarePulse) gl!.uniform1f(u.u_snarePulse, pulses.snare);
     if (u.u_hatPulse) gl!.uniform1f(u.u_hatPulse, pulses.hat);
     if (u.u_vocalPulse) gl!.uniform1f(u.u_vocalPulse, pulses.vocal);
+    if (u.u_kickCount) gl!.uniform1f(u.u_kickCount, kickCount);
     if (u.u_centroid) gl!.uniform1f(u.u_centroid, frame.centroid);
     if (u.u_flatness) gl!.uniform1f(u.u_flatness, frame.flatness);
     if (u.u_crest) gl!.uniform1f(u.u_crest, frame.crest);
@@ -588,7 +642,13 @@ void main() { fragColor = u_color; }
     pulses.vocal *= decay;
     for (const onset of frame.onsets) {
       const v = Math.min(1, 0.5 + onset.intensity * 0.6);
-      if (onset.group === 'kick' || onset.group === 'bass') pulses.kick = Math.max(pulses.kick, v);
+      if (onset.group === 'kick' || onset.group === 'bass') {
+        pulses.kick = Math.max(pulses.kick, v);
+        if (globalTimeMs - lastKickCountAtMs >= KICK_COUNT_MIN_GAP_MS) {
+          kickCount += 1;
+          lastKickCountAtMs = globalTimeMs;
+        }
+      }
       else if (onset.group === 'snare') pulses.snare = Math.max(pulses.snare, v);
       else if (onset.group === 'hat' || onset.group === 'other') pulses.hat = Math.max(pulses.hat, v);
       else if (onset.group === 'vocal') pulses.vocal = Math.max(pulses.vocal, v);
@@ -668,7 +728,10 @@ void main() { fragColor = u_color; }
           globalTimeMs - lastDropAtMs > DROP_COOLDOWN_MS &&
           globalTimeMs > 6000 && // never on boot — the EMA hasn't settled yet
           frame.beatConfidence > 0.35 &&
-          frame.energy > Math.max(0.5, energyEma * 1.35);
+          // Energy is already measured against the track's own loud passages,
+          // so a drop is a jump on what this track has been doing, not on a
+          // fixed level.
+          frame.energy > energyEma * 1.35;
         if (isDrop) {
           lastDropAtMs = globalTimeMs;
           pickNextScene(frame);

@@ -7,15 +7,16 @@ export const eyeOfStorm: SceneDef = {
   id: 'eye-of-storm',
   name: 'Eye of the Storm',
   mood: 'high',
+  speed: f => 0.25 + f.energy * 1.2,
   frag: `
 const float ES_TAU = 6.28318530718;
 
 vec4 scene(vec2 uv, vec2 p) {
   // 3..7 arms, seed-driven.
   float armsF = floor(3.0 + hash11(u_seed * 7.7) * 5.0);
-  // Angular velocity rides energy + small beat-locked term.
-  float omega = 0.25 + u_energy * 1.2 + u_beatPhase * 0.4;
-  float spin = u_globalTime * omega;
+  // The spin rate rides energy (the speed hook integrates it into u_phase);
+  // the beat adds a bounded wobble instead of a rate.
+  float spin = u_phase + 0.12 * sin(u_beatPhase * ES_TAU);
 
   float r = length(p);
   float th = atan(p.y, p.x);

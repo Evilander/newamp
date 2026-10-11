@@ -37,6 +37,7 @@ import {
   hashSeed,
   toSeedState,
 } from './eviland-rng';
+import { leaveMud, maxChroma, oklchToRgb, rgbToOklch } from './eviland-appearance';
 
 // ---------------------------------------------------------------------------
 // Archetypes
@@ -145,6 +146,22 @@ const COMPOSITION_SCENES: Record<Archetype, readonly string[]> = {
   plankton: ['plankton-drift'],
   myofibril: ['muscle-fibres'],
 };
+
+// Scenes added after an archetype's original pool. Each takes a share of that
+// archetype's seeds, decided on its own stream, so a seed outside the share
+// keeps the scene it had before the scene existed.
+const ADDED_SCENES: Partial<Record<Archetype, { scene: string; share: number }>> = {
+  tidal: { scene: 'spectral-slit', share: 0.4 },
+  lattice: { scene: 'data-raster', share: 0.35 },
+  deepfield: { scene: 'bokeh-field', share: 0.6 },
+};
+
+function pickScene(code: string, archetype: Archetype): string | null {
+  const added = ADDED_SCENES[archetype];
+  if (added && new Rng(hashSeed(`${code}::scene-added`)).bool(added.share)) return added.scene;
+  const pool = COMPOSITION_SCENES[archetype];
+  return pool.length > 0 ? new Rng(hashSeed(`${code}::scene`)).pick(pool) : null;
+}
 
 // Which archetypes grow a Physarum network as a source. The mould senses the
 // feedback image, so it crawls along whatever the rest of the look draws.
@@ -373,7 +390,11 @@ function baseSpec(): ArchetypeTemplate {
     flowY: { base: { min: -0.0003, max: 0.0003 }, bindings: [] },
     fluid: { base: { min: 0.2, max: 0.6 }, bindings: [{ feature: 'energy', gain: { min: 0.05, max: 0.15 }, chance: 0.5 }] },
     vorticity: { base: { min: 6, max: 16 }, bindings: [] },
-    liquidMix: { base: { min: 0, max: 0.15 }, bindings: [] },
+    // No dye by default. At a low mix it only darkens the frame and every kick
+    // leaves a soft blob that reads as a rendering fault; the looks that are
+    // made of dye (liquid, inkwell, tidal, glasshouse, stormfront, emberveil,
+    // nebula) set their own mix.
+    liquidMix: { base: { min: 0, max: 0 }, bindings: [] },
     dyeDissipation: { base: { min: -0.05, max: 0 }, bindings: [] },
     bloom: { base: { min: 0.15, max: 0.45 }, bindings: [{ feature: 'energy', gain: { min: 0.08, max: 0.2 }, chance: 0.5 }] },
     mirrorSets: [[4, 6, 8, 12], [6, 8, 8, 12]],
@@ -496,8 +517,8 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       base: { min: 6, max: 16 },
       bindings: [],
     },
-    // tunnel: subtle dye accent only (the warp is the star).
-    liquidMix: { base: { min: 0, max: 0.15 }, bindings: [] },
+    // tunnel: the warp is the star, no dye.
+    liquidMix: { base: { min: 0, max: 0 }, bindings: [] },
     dyeDissipation: { base: { min: -0.05, max: 0 }, bindings: [] },
     bloom: {
       base: { min: 0.15, max: 0.5 },
@@ -617,8 +638,8 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       base: { min: 6, max: 16 },
       bindings: [],
     },
-    // kaleidoscope: symmetry is the show, dye stays muted.
-    liquidMix: { base: { min: 0, max: 0.12 }, bindings: [] },
+    // kaleidoscope: symmetry is the show, no dye.
+    liquidMix: { base: { min: 0, max: 0 }, bindings: [] },
     dyeDissipation: { base: { min: -0.05, max: 0 }, bindings: [] },
     bloom: {
       base: { min: 0.1, max: 0.4 },
@@ -636,7 +657,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     spinFromSection: true,
     waveModes: [
       { mode: 'radial', weight: 3 },
-      { mode: 'lissajous', weight: 2 },
+      { mode: 'line', weight: 2 },
       { mode: 'off', weight: 1 },
     ],
     waveform: {
@@ -785,8 +806,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     mirrorSetChance: 0.25,
     spinFromSection: true,
     waveModes: [
-      { mode: 'line', weight: 2 },
-      { mode: 'lissajous', weight: 3 },
+      { mode: 'line', weight: 5 },
       { mode: 'off', weight: 1.5 },
     ],
     waveform: {
@@ -881,7 +901,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       bindings: [],
     },
     // lattice: crisp/percussive — dye stays off so bars read sharp.
-    liquidMix: { base: { min: 0, max: 0.05 }, bindings: [] },
+    liquidMix: { base: { min: 0, max: 0 }, bindings: [] },
     dyeDissipation: { base: { min: -0.1, max: -0.04 }, bindings: [] },
     bloom: {
       base: { min: 0.05, max: 0.25 },
@@ -1016,8 +1036,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     spinFromSection: true,
     waveModes: [
       { mode: 'off', weight: 3 },
-      { mode: 'line', weight: 1 },
-      { mode: 'lissajous', weight: 1.5 },
+      { mode: 'line', weight: 2.5 },
     ],
     waveform: {
       intensity: { min: 0.3, max: 0.9 },
@@ -1120,7 +1139,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
       bindings: [],
     },
     // strobe: hard flashes own the look; dye stays off so hits read crisp.
-    liquidMix: { base: { min: 0, max: 0.05 }, bindings: [] },
+    liquidMix: { base: { min: 0, max: 0 }, bindings: [] },
     dyeDissipation: { base: { min: -0.1, max: -0.05 }, bindings: [] },
     bloom: {
       base: { min: 0.05, max: 0.2 },
@@ -1208,7 +1227,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSat: { min: 0.55, max: 0.85 },
     paletteVal: { min: 0.4, max: 0.7 },
     paletteBgVal: { min: 0.005, max: 0.025 },
-    waveModes: [{ mode: 'lissajous', weight: 3 }, { mode: 'line', weight: 1 }, { mode: 'off', weight: 1 }],
+    waveModes: [{ mode: 'line', weight: 4 }, { mode: 'off', weight: 1 }],
     mirrorSets: [[1, 2, 3], [2, 3, 4]],
     mirrorSetChance: 0.3,
   },
@@ -1280,7 +1299,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     decayG: { base: { min: 0.015, max: 0.028 }, bindings: [] },
     decayB: { base: { min: -0.03, max: -0.015 }, bindings: [] },
     waveform: { intensity: { min: 1.4, max: 2.2 }, intensityBindings: [{ feature: 'energy', gain: { min: 0.6, max: 1.2 }, chance: 0.9 }], thickness: { min: 0.003, max: 0.008 }, scale: { min: 0.3, max: 0.55 } },
-    waveModes: [{ mode: 'line', weight: 4 }, { mode: 'lissajous', weight: 2 }, { mode: 'bars', weight: 1 }],
+    waveModes: [{ mode: 'line', weight: 1 }],
     paletteSchemes: [{ scheme: 'monochrome', weight: 4 }],
     paletteSat: { min: 0.8, max: 1 },
     paletteVal: { min: 0.85, max: 1 },
@@ -1430,7 +1449,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     mirrorMix: { base: { min: 0.4, max: 0.7 }, bindings: [] },
     paletteSchemes: [{ scheme: 'splitComplementary', weight: 2 }, { scheme: 'tetradic', weight: 2 }],
     paletteSat: { min: 0.65, max: 0.95 },
-    waveModes: [{ mode: 'lissajous', weight: 3 }, { mode: 'line', weight: 1 }],
+    waveModes: [{ mode: 'line', weight: 4 }],
   },
 
   // ── stormfront ──────────────────────────────────────────────────────────
@@ -1457,7 +1476,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSat: { min: 0.25, max: 0.55 },
     paletteVal: { min: 0.55, max: 0.85 },
     paletteBgVal: { min: 0.005, max: 0.025 },
-    waveModes: [{ mode: 'lissajous', weight: 2 }, { mode: 'bars', weight: 2 }, { mode: 'line', weight: 1 }],
+    waveModes: [{ mode: 'line', weight: 3 }, { mode: 'bars', weight: 2 }],
   },
 
   // ── heartbeat ───────────────────────────────────────────────────────────
@@ -1509,7 +1528,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSchemes: [{ scheme: 'tetradic', weight: 3 }, { scheme: 'triadic', weight: 2 }],
     paletteSat: { min: 0.8, max: 1 },
     paletteVal: { min: 0.8, max: 1 },
-    waveModes: [{ mode: 'radial', weight: 3 }, { mode: 'lissajous', weight: 1 }],
+    waveModes: [{ mode: 'radial', weight: 3 }, { mode: 'line', weight: 1 }],
   },
 
   // ── firefly ─────────────────────────────────────────────────────────────
@@ -1568,7 +1587,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSchemes: [{ scheme: 'analogous', weight: 4 }, { scheme: 'monochrome', weight: 1 }],
     paletteSat: { min: 0.55, max: 0.85 },
     paletteVal: { min: 0.65, max: 0.95 },
-    waveModes: [{ mode: 'lissajous', weight: 3 }, { mode: 'line', weight: 1 }],
+    waveModes: [{ mode: 'line', weight: 4 }],
     emitterScale: { min: 1.2, max: 1.8 },
   },
 
@@ -1590,7 +1609,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSchemes: [{ scheme: 'tetradic', weight: 2 }, { scheme: 'splitComplementary', weight: 2 }],
     paletteSat: { min: 0.85, max: 1 },
     paletteVal: { min: 0.85, max: 1 },
-    waveModes: [{ mode: 'radial', weight: 3 }, { mode: 'lissajous', weight: 2 }],
+    waveModes: [{ mode: 'radial', weight: 3 }, { mode: 'line', weight: 2 }],
     emitterGain: { min: 1.2, max: 1.7 },
   },
 
@@ -1610,7 +1629,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     mirrorMix: { base: { min: 0.45, max: 0.68 }, bindings: [] },
     paletteSchemes: [{ scheme: 'complementary', weight: 2 }, { scheme: 'analogous', weight: 2 }],
     paletteSat: { min: 0.7, max: 1 },
-    waveModes: [{ mode: 'lissajous', weight: 3 }, { mode: 'radial', weight: 2 }],
+    waveModes: [{ mode: 'line', weight: 3 }, { mode: 'radial', weight: 2 }],
   },
 
   // ── wireframe ───────────────────────────────────────────────────────────
@@ -1796,7 +1815,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
     paletteSat: { min: 0.85, max: 1 },
     paletteVal: { min: 0.85, max: 1 },
     paletteBgVal: { min: 0.004, max: 0.015 },
-    waveModes: [{ mode: 'off', weight: 3 }, { mode: 'lissajous', weight: 1 }],
+    waveModes: [{ mode: 'off', weight: 3 }, { mode: 'line', weight: 1 }],
   },
   medusa: {
     ...livingSpec(),
@@ -1825,12 +1844,21 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
 };
 
 // ---------------------------------------------------------------------------
-// HSV → RGB palette generation
+// Palette generation
 // ---------------------------------------------------------------------------
 //
-// Eviland configs accept RGB in 0..1. We sample hues in HSV because the only
-// way to mint *harmonious* multi-hue palettes is to think in colour-wheel
-// relationships (analogous = ±30°, complementary = 180°, etc.).
+// Eviland configs accept RGB in 0..1. Hues are drawn on the HSV colour wheel,
+// because that is where the harmonies are defined (analogous = ±30°,
+// complementary = 180°, etc.), but lightness and chroma are set in OKLCh. At
+// full value an HSV blue is half as light as an HSV yellow, which left the
+// light role darker than the accent in three looks of ten and made yellows
+// and greens blow out. Each role has a lightness band of its own now, so the
+// ramp the scenes use (dark → accent → light, paletteRamp in scene-overlay)
+// always climbs.
+//
+// The draws are the same as they were, in the same order, and the archetype
+// ranges for saturation and value now set chroma and lightness inside the
+// bands: a seed keeps its hues and its character, and only the colours move.
 
 function hsvToRgb(h: number, s: number, v: number): RGB {
   // h in [0,1), s/v in [0,1]
@@ -1878,6 +1906,25 @@ function schemeOffsets(scheme: PaletteScheme, rng: Rng): [number, number, number
   }
 }
 
+// Lightness bands (OKLCh L) for the three lit roles.
+const ACCENT_L = { min: 0.7, max: 0.78 };
+const LIGHT_L = { min: 0.9, max: 0.96 };
+const DARK_L = { min: 0.36, max: 0.46 };
+
+/** OKLCh hue, in degrees, of the fully saturated HSV hue `h` (a turn). */
+function oklchHue(h: number): number {
+  return rgbToOklch(hsvToRgb(h, 1, 1)).h;
+}
+
+/** A colour at lightness `l` and hue `h` carrying `share` of the chroma sRGB can show there. */
+function oklchRole(l: number, h: number, share: number): RGB {
+  return oklchToRgb(l, maxChroma(l, h) * clamp01(share), h);
+}
+
+function between(range: NumRange, t: number): number {
+  return range.min + (range.max - range.min) * clamp01(t);
+}
+
 function generatePalette(rng: Rng, template: ArchetypeTemplate): PaletteConfig {
   const scheme = pickPaletteScheme(rng, template.paletteSchemes);
   const rootHue = rng.next();
@@ -1904,9 +1951,9 @@ function generatePalette(rng: Rng, template: ArchetypeTemplate): PaletteConfig {
 
   return {
     bg: hsvToRgb(bgHue, bgSat, bgVal),
-    dark: hsvToRgb(darkHue, satD, valD),
-    accent: hsvToRgb(accentHue, satA, valA),
-    light: hsvToRgb(lightHue, satL, valL),
+    dark: oklchRole(between(DARK_L, (valD - 0.18) / 0.2), leaveMud(oklchHue(darkHue)), 0.35 + 0.55 * satD),
+    accent: oklchRole(between(ACCENT_L, (valA - 0.55) / 0.45), oklchHue(accentHue), 0.3 + 0.65 * clamp01((satA - 0.35) / 0.65)),
+    light: oklchRole(between(LIGHT_L, (valL - 0.9) / 0.1), oklchHue(lightHue), 0.25 + 0.5 * satL),
   };
 }
 
@@ -1987,6 +2034,211 @@ const NEW_PRIMITIVE_KEYS = [
 type NewPrimitiveKey = (typeof NEW_PRIMITIVE_KEYS)[number];
 
 // ---------------------------------------------------------------------------
+// Waveform
+// ---------------------------------------------------------------------------
+//
+// Most archetypes draw their picture with a scene and keep the oscilloscope
+// off. These six are made of a line or a row of bars, so they keep the mode
+// they sampled. Past 1.2 the wave stops being a line in the picture and becomes
+// the picture, so only the phosphor scope, which is one, goes above it. The cap
+// is on the peak, base plus the audio gains at full scale: a loud passage is
+// where the line stops being one.
+
+const WAVE_ARCHETYPES: ReadonlySet<Archetype> = new Set<Archetype>([
+  'wireframe', 'ribbonfall', 'pulsar', 'mosaic', 'supernova', 'phosphor',
+]);
+const WAVE_INTENSITY_CAP = 1.2;
+const WAVE_CAPPED: ReadonlySet<Archetype> = new Set([...WAVE_ARCHETYPES].filter((a) => a !== 'phosphor'));
+
+/** The most a channel reaches when every positive binding is at full scale. */
+function channelPeak(channel: Channel): number {
+  let peak = channel.base;
+  for (const b of channel.bindings ?? []) if (b.gain > 0) peak += b.gain;
+  return peak;
+}
+
+/** The channel with base and gains scaled together so its peak is no more than `cap`; the rest/peak ratio stays. */
+function capChannelPeak(channel: Channel, cap: number): Channel {
+  const peak = channelPeak(channel);
+  if (peak <= cap) return channel;
+  const k = cap / peak;
+  const out: Channel = { base: channel.base * k };
+  if (channel.bindings && channel.bindings.length > 0) out.bindings = channel.bindings.map((b) => ({ ...b, gain: b.gain * k }));
+  return out;
+}
+
+function settleWaveform(archetype: Archetype, sampled: WaveformConfig): WaveformConfig {
+  if (!WAVE_ARCHETYPES.has(archetype)) return { ...sampled, mode: 'off' };
+  if (!WAVE_CAPPED.has(archetype)) return sampled;
+  return { ...sampled, intensity: capChannelPeak(sampled.intensity, WAVE_INTENSITY_CAP) };
+}
+
+// ---------------------------------------------------------------------------
+// Scene profiles
+// ---------------------------------------------------------------------------
+//
+// Most scenes sit well on any archetype's feedback: the field zooms, spins and
+// folds whatever they draw. Three only read as themselves over one particular
+// field. When a seed lands on one of them, the channels below replace the host
+// archetype's, along with the extras it carries (primitives, q-slots, a mirror
+// set, its morph). The host still supplies the palette family and the weight
+// the Director gives it.
+
+type ProfileChannel =
+  | 'zoom' | 'rotate' | 'swirl' | 'hueCycle' | 'decay' | 'warpAmp' | 'mirror' | 'mirrorMix'
+  | 'flowX' | 'flowY' | 'fluid' | 'vorticity' | 'liquidMix' | 'dyeDissipation' | 'bloom';
+
+interface SceneProfile {
+  channels: Partial<Record<ProfileChannel, ChannelSpec>>;
+  morph?: { kind: Exclude<MorphKind, 'none'>; amount: ChannelSpec };
+  density: NumRange;
+  palette?: (rng: Rng) => PaletteConfig;
+  /** Set to false when the section's own spin would tilt the picture the profile holds still. */
+  spinFromSection?: boolean;
+}
+
+const quiet = (min: number, max: number): ChannelSpec => ({ base: { min, max }, bindings: [] });
+
+/** Near-white ink on black: every role well under OKLCh chroma 0.02, one faint tint shared. */
+function inkPalette(rng: Rng): PaletteConfig {
+  const hue = rng.range(0, 360);
+  return {
+    bg: [0, 0, 0],
+    dark: oklchToRgb(0.32, 0.008, hue),
+    accent: oklchToRgb(0.88, 0.014, hue),
+    light: oklchToRgb(0.97, 0.01, hue),
+  };
+}
+
+const SCENE_PROFILES: Record<string, SceneProfile> = {
+  // Spectral Strata stamps one thin strip a frame and lets the field carry it
+  // away. With no zoom, spin or fold the history runs left in a straight line,
+  // so time reads left to right and a section change is a vertical seam. The
+  // decay stops at the engine's clamp (0.97); the slower the field leaves the
+  // stamp, the deeper the landscape.
+  'spectral-slit': {
+    channels: {
+      zoom: quiet(0, 0), rotate: quiet(0, 0), swirl: quiet(0, 0), warpAmp: quiet(0, 0.0002),
+      mirror: quiet(1, 1), mirrorMix: quiet(0, 0),
+      flowX: quiet(-0.0065, -0.0045), flowY: quiet(0, 0),
+      decay: quiet(0.955, 0.968), hueCycle: quiet(0.0005, 0.0015),
+      fluid: quiet(0, 0), vorticity: quiet(0, 0), liquidMix: quiet(0, 0),
+      bloom: { base: { min: 0.1, max: 0.25 }, bindings: [{ feature: 'energy', gain: { min: 0.08, max: 0.16 }, chance: 1 }] },
+    },
+    morph: { kind: 'marble', amount: quiet(0.05, 0.1) },
+    density: { min: 0.6, max: 0.7 },
+    spinFromSection: false,
+  },
+  // Bokeh Field is soft and slow: a gentle outward drift, mirror off, long
+  // enough decay for the discs to leave a little light behind them.
+  'bokeh-field': {
+    channels: {
+      zoom: { base: { min: 0.003, max: 0.005 }, bindings: [{ feature: 'bass', gain: { min: 0.003, max: 0.006 }, chance: 0.8, curve: 'sqrt' }] },
+      rotate: quiet(-0.0004, 0.0004), swirl: quiet(0, 0.008), warpAmp: quiet(0.0002, 0.0006),
+      mirror: quiet(1, 1), mirrorMix: quiet(0, 0),
+      flowX: quiet(-0.0003, 0.0003), flowY: quiet(-0.0004, 0),
+      decay: quiet(0.925, 0.935),
+      fluid: quiet(0.05, 0.15), vorticity: quiet(6, 12), liquidMix: quiet(0, 0),
+      bloom: { base: { min: 0.4, max: 0.6 }, bindings: [{ feature: 'vocal', gain: { min: 0.08, max: 0.2 }, chance: 1 }] },
+    },
+    density: { min: 0.4, max: 0.55 },
+  },
+  // Data Raster is hard-edged and monochrome: nothing moves the field, the
+  // decay is short enough that every frame is its own picture, and bloom is
+  // only a breath on the kick.
+  'data-raster': {
+    channels: {
+      zoom: quiet(0, 0), rotate: quiet(0, 0), swirl: quiet(0, 0), hueCycle: quiet(0, 0), warpAmp: quiet(0, 0),
+      mirror: quiet(1, 1), mirrorMix: quiet(0, 0), flowX: quiet(0, 0), flowY: quiet(0, 0),
+      decay: quiet(0.79, 0.81),
+      fluid: quiet(0, 0), vorticity: quiet(0, 0), liquidMix: quiet(0, 0), dyeDissipation: quiet(-0.1, -0.05),
+      bloom: { base: { min: 0, max: 0.02 }, bindings: [{ feature: 'kick', gain: { min: 0.09, max: 0.13 }, chance: 1, curve: 'pulse' }] },
+    },
+    density: { min: 0.6, max: 0.7 },
+    palette: inkPalette,
+    spinFromSection: false,
+  },
+};
+
+function applySceneProfile(config: OperatorConfig, profile: SceneProfile, code: string): void {
+  const rng = new Rng(hashSeed(`${code}::profile`));
+  const rec = config as unknown as Record<string, unknown>;
+  for (const key of NEW_PRIMITIVE_KEYS) delete rec[key];
+  delete config.q;
+  delete config.mirrorSet;
+  delete config.morph;
+  for (const [key, spec] of Object.entries(profile.channels)) rec[key] = sampleChannel(rng, spec);
+  if (profile.morph) {
+    config.morph = { kind: profile.morph.kind, amount: sampleChannel(rng, profile.morph.amount), scale: { base: rng.range(0.7, 1.2) } };
+  }
+  if (profile.spinFromSection !== undefined) config.spinFromSection = profile.spinFromSection;
+  config.waveform = { ...config.waveform, mode: 'off' };
+  config.composition = {
+    scene: config.composition?.scene ?? null,
+    terrain: false,
+    spectrum: false,
+    emitters: 'off',
+    density: sampleNum(rng, profile.density),
+    contrast: config.composition?.contrast ?? 1,
+  };
+  if (profile.palette) config.palette = profile.palette(rng);
+}
+
+// ---------------------------------------------------------------------------
+// Audio drive
+// ---------------------------------------------------------------------------
+//
+// sampleChannel drops each binding by chance, so a seed can come out with the
+// audio bound to next to nothing, and then it looks the same in silence as on
+// a drop. A look whose bindings add up to less than the floor gets some of its
+// archetype's own bindings back, picked on a derived stream so nothing else
+// about the seed moves.
+
+export const AUDIO_DRIVE_FLOOR = 0.08;
+const DRIVE_CHANNELS = [
+  'zoom', 'rotate', 'swirl', 'hueCycle', 'decay', 'warpAmp', 'warpScale', 'mirror', 'mirrorMix',
+  'flowX', 'flowY', 'fluid', 'vorticity', 'liquidMix', 'dyeDissipation', 'bloom',
+] as const;
+
+/** Sum of the gains of every audio binding that can change the picture. */
+export function audioDrive(config: OperatorConfig): number {
+  const rec = config as unknown as Record<string, Channel | undefined>;
+  let sum = 0;
+  const add = (channel: Channel | undefined): void => {
+    for (const b of channel?.bindings ?? []) sum += Math.abs(b.gain);
+  };
+  for (const key of DRIVE_CHANNELS) add(rec[key]);
+  for (const key of NEW_PRIMITIVE_KEYS) add(rec[key]);
+  if (config.waveform.mode !== 'off') add(config.waveform.intensity);
+  if (config.morph) add(config.morph.amount);
+  return sum;
+}
+
+function ensureAudioDrive(config: OperatorConfig, pool: (key: string) => ChannelSpec | undefined, code: string): void {
+  if (audioDrive(config) >= AUDIO_DRIVE_FLOOR) return;
+  const rec = config as unknown as Record<string, Channel | undefined>;
+  const open: { key: string; binding: BindingSpec }[] = [];
+  for (const key of [...DRIVE_CHANNELS, ...NEW_PRIMITIVE_KEYS]) {
+    const spec = pool(key);
+    const channel = rec[key];
+    if (!spec || !channel) continue;
+    for (const binding of spec.bindings) {
+      if (!channel.bindings?.some((b) => b.feature === binding.feature)) open.push({ key, binding });
+    }
+  }
+  const rng = new Rng(hashSeed(`${code}::drive`));
+  // Bigger drives first, so a look gets back to the floor with as few as it can.
+  while (open.length > 0 && audioDrive(config) < AUDIO_DRIVE_FLOOR) {
+    const pick = rng.weighted(open, open.map((o) => Math.max(Math.abs(o.binding.gain.min), Math.abs(o.binding.gain.max))));
+    open.splice(open.indexOf(pick), 1);
+    const channel = rec[pick.key]!;
+    const added: Binding = { feature: pick.binding.feature, gain: sampleNum(rng, pick.binding.gain) };
+    if (pick.binding.curve) added.curve = pick.binding.curve;
+    rec[pick.key] = { base: channel.base, bindings: [...(channel.bindings ?? []), added] };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -2034,7 +2286,7 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     seed: code,
     archetype: chosen,
     composition: {
-      scene: COMPOSITION_SCENES[chosen].length > 0 ? new Rng(hashSeed(`${code}::scene`)).pick(COMPOSITION_SCENES[chosen]) : null,
+      scene: pickScene(code, chosen),
       simulation: chosen === 'inkwell' || chosen === 'mosaic' ? 'reaction-diffusion'
         : PHYSARUM_ARCHETYPES.has(chosen) ? 'physarum' : undefined,
       terrain: chosen === 'wireframe',
@@ -2060,7 +2312,7 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
     liquidMix,
     dyeDissipation,
     spinFromSection: template.spinFromSection,
-    waveform: { ...sampleWaveform(rng, template), mode: chosen === 'phosphor' ? 'line' : 'off' },
+    waveform: settleWaveform(chosen, sampleWaveform(rng, template)),
     palette,
     bloom: sampleChannel(rng, template.bloom),
     emitterScale: sampleNum(rng, template.emitterScale),
@@ -2099,6 +2351,11 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
 
   const morph = sampleMorph(code, chosen);
   if (morph) config.morph = morph;
+
+  const profile = config.composition?.scene ? SCENE_PROFILES[config.composition.scene] : undefined;
+  if (profile) applySceneProfile(config, profile, code);
+  const specs = template as unknown as Record<string, ChannelSpec | undefined>;
+  ensureAudioDrive(config, profile ? (key) => profile.channels[key as ProfileChannel] : (key) => specs[key], code);
 
   return { config, seed: code };
 }
@@ -2172,10 +2429,14 @@ function jitterNum(rng: Rng, v: number, amount: number, scale: number): number {
   return v + rng.gaussian(0, 1) * amount * scale;
 }
 
-function mutateChannel(rng: Rng, key: keyof typeof SAFE_RANGES, ch: Channel, amount: number): Channel {
+// `held` replaces the safe range for a channel a scene profile defines: the
+// profile's own range is the look, and may sit outside the generic one (the
+// strata decay is above its ceiling).
+function mutateChannel(rng: Rng, key: keyof typeof SAFE_RANGES, ch: Channel, amount: number, held?: NumRange): Channel {
   const range = SAFE_RANGES[key]!;
   const span = range.max - range.min;
-  const base = clampSafe(key, jitterNum(rng, ch.base, amount, span * 0.15));
+  const jittered = jitterNum(rng, ch.base, amount, span * 0.15);
+  const base = held ? Math.min(Math.max(jittered, held.min), held.max) : clampSafe(key, jittered);
   const bindings: Binding[] | undefined = ch.bindings?.map(b => {
     // Gain jitter is proportional to the original gain (preserves sign + character).
     const gainScale = Math.max(Math.abs(b.gain), 0.001);
@@ -2212,22 +2473,31 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
   const rng = new Rng(seed ?? config.seed ?? Date.now());
   const next = cloneConfig(config);
 
-  next.zoom = mutateChannel(rng, 'zoom', next.zoom, a);
-  next.rotate = mutateChannel(rng, 'rotate', next.rotate, a);
-  next.swirl = mutateChannel(rng, 'swirl', next.swirl, a);
-  next.hueCycle = mutateChannel(rng, 'hueCycle', next.hueCycle, a);
-  next.decay = mutateChannel(rng, 'decay', next.decay, a);
-  next.warpAmp = mutateChannel(rng, 'warpAmp', next.warpAmp, a);
+  // A look built around a scene profile drifts inside the profile's ranges:
+  // the Director mutates every look it generates, and a strata look that
+  // zooms or a raster that tints is no longer the design.
+  const profile = config.composition?.scene ? SCENE_PROFILES[config.composition.scene] : undefined;
+  const held = (key: ProfileChannel): NumRange | undefined => profile?.channels[key]?.base;
+
+  next.zoom = mutateChannel(rng, 'zoom', next.zoom, a, held('zoom'));
+  next.rotate = mutateChannel(rng, 'rotate', next.rotate, a, held('rotate'));
+  next.swirl = mutateChannel(rng, 'swirl', next.swirl, a, held('swirl'));
+  next.hueCycle = mutateChannel(rng, 'hueCycle', next.hueCycle, a, held('hueCycle'));
+  next.decay = mutateChannel(rng, 'decay', next.decay, a, held('decay'));
+  next.warpAmp = mutateChannel(rng, 'warpAmp', next.warpAmp, a, held('warpAmp'));
   next.warpScale = mutateChannel(rng, 'warpScale', next.warpScale, a);
-  next.mirror = mutateChannel(rng, 'mirror', next.mirror, a);
-  next.mirrorMix = mutateChannel(rng, 'mirrorMix', next.mirrorMix, a);
-  next.flowX = mutateChannel(rng, 'flowX', next.flowX, a);
-  next.flowY = mutateChannel(rng, 'flowY', next.flowY, a);
-  next.fluid = mutateChannel(rng, 'fluid', next.fluid, a);
-  next.vorticity = mutateChannel(rng, 'vorticity', next.vorticity, a);
-  next.liquidMix = mutateChannel(rng, 'liquidMix', next.liquidMix, a);
-  next.dyeDissipation = mutateChannel(rng, 'dyeDissipation', next.dyeDissipation, a);
-  next.bloom = mutateChannel(rng, 'bloom', next.bloom, a);
+  next.mirror = mutateChannel(rng, 'mirror', next.mirror, a, held('mirror'));
+  next.mirrorMix = mutateChannel(rng, 'mirrorMix', next.mirrorMix, a, held('mirrorMix'));
+  next.flowX = mutateChannel(rng, 'flowX', next.flowX, a, held('flowX'));
+  next.flowY = mutateChannel(rng, 'flowY', next.flowY, a, held('flowY'));
+  next.fluid = mutateChannel(rng, 'fluid', next.fluid, a, held('fluid'));
+  next.vorticity = mutateChannel(rng, 'vorticity', next.vorticity, a, held('vorticity'));
+  // A look with no dye stays dyeless: jitter on a zero base would bring the
+  // soft blobs back one nudge at a time.
+  const mutatedDye = mutateChannel(rng, 'liquidMix', next.liquidMix, a, held('liquidMix'));
+  if (next.liquidMix.base > 0 || next.liquidMix.bindings?.length) next.liquidMix = mutatedDye;
+  next.dyeDissipation = mutateChannel(rng, 'dyeDissipation', next.dyeDissipation, a, held('dyeDissipation'));
+  next.bloom = mutateChannel(rng, 'bloom', next.bloom, a, held('bloom'));
 
   // Waveform: jitter scalars, occasionally flip mode (rare; modes are characterful).
   next.waveform = {
@@ -2236,9 +2506,15 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
     thickness: Math.max(0.0025, Math.min(0.05, next.waveform.thickness + rng.gaussian(0, 0.003) * a)),
     scale: Math.max(0.05, Math.min(0.7, next.waveform.scale + rng.gaussian(0, 0.05) * a)),
   };
+  if (WAVE_CAPPED.has(next.archetype as Archetype)) {
+    next.waveform.intensity = capChannelPeak(next.waveform.intensity, WAVE_INTENSITY_CAP);
+  }
   if (rng.bool(a * 0.15)) {
-    const modes: WaveMode[] = ['off', 'line', 'radial', 'lissajous', 'bars'];
-    next.waveform.mode = rng.pick(modes);
+    const modes: WaveMode[] = ['off', 'line', 'radial', 'bars'];
+    const flipped = rng.pick(modes);
+    // Only a look that already draws a wave swaps it; one drawn without a wave
+    // keeps the scene it was made around.
+    if (next.waveform.mode !== 'off') next.waveform.mode = flipped;
   }
 
   next.emitterScale = clampSafe('emitterScale', next.emitterScale + rng.gaussian(0, 0.2) * a);
@@ -2284,8 +2560,10 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
   }
 
   // Palette mutation is rarer — palette is the most identity-defining field
-  // and we don't want every nudge to lose the look's colour family.
-  if (next.palette && rng.bool(0.35 * a + 0.05)) {
+  // and we don't want every nudge to lose the look's colour family. A profile
+  // that sets its own palette (the raster's ink) keeps it: per-channel noise
+  // would tint it.
+  if (next.palette && rng.bool(0.35 * a + 0.05) && !profile?.palette) {
     next.palette = mutatePalette(rng, next.palette, a);
   }
 
@@ -2295,6 +2573,28 @@ export function mutate(config: OperatorConfig, amount: number, seed?: string | n
 // ---------------------------------------------------------------------------
 // Encode / decode
 // ---------------------------------------------------------------------------
+
+/**
+ * A seed code nobody has used: 32 bits from the platform's entropy source. A
+ * fresh session's first randomize comes from here, not from a counter that
+ * starts at the same place every launch.
+ */
+export function randomSeedCode(): string {
+  const entropy = (globalThis as { crypto?: { getRandomValues?: (a: Uint32Array) => Uint32Array } }).crypto;
+  const state = entropy?.getRandomValues
+    ? entropy.getRandomValues(new Uint32Array(1))[0]!
+    : (Date.now() ^ Math.floor(Math.random() * 0x100000000)) >>> 0;
+  return encodeSeedCode(state);
+}
+
+/**
+ * The code a seed of any shape turns into: what the box should show, and what
+ * pasting it back (see decode) regenerates. generate(seed).seed is the same
+ * code, without building the look.
+ */
+export function seedCodeFor(seed: string | number): string {
+  return encodeSeedCode(toSeedState(seed));
+}
 
 /** A look's portable identity is its seed code — that's what users share. */
 export function encode(config: OperatorConfig): string {

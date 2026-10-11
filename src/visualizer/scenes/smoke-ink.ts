@@ -8,6 +8,8 @@ export const smokeInk: SceneDef = {
   id: 'smoke-ink',
   name: 'Smoke & Ink',
   mood: 'calm',
+  occlusion: 0.85,
+  speed: f => 0.12 + f.bass * 0.45 + f.kick * 0.25,
   frag: `
 float warpField(vec2 q, float t) {
   vec2 w1 = vec2(fbm(q + vec2(t * 0.13, -t * 0.07)),
@@ -21,9 +23,9 @@ vec4 scene(vec2 uv, vec2 p) {
   float seedOff = u_seed * 91.0;
   float t = u_globalTime;
 
-  // Upward drift: shift sample y down over time so ink rises.
-  float rise = 0.12 + u_bass * 0.45 + u_kick * 0.25;
-  vec2 q = vec2(p.x * 1.3, p.y - t * rise * 0.18) + seedOff * 0.07;
+  // Upward drift: shift sample y down as the phase advances so ink rises.
+  // Bass and kick set the rise rate (speed hook), never the position.
+  vec2 q = vec2(p.x * 1.3, p.y - u_phase * 0.18) + seedOff * 0.07;
 
   // Main billow.
   float billow = warpField(q * 1.1, t);

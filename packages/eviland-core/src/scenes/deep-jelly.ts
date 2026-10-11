@@ -56,7 +56,7 @@ vec4 scene(vec2 uv, vec2 p) {
     vec2 cellId = floor(g);
     vec2 f = fract(g) - 0.5 - (hash22(cellId) - 0.5) * 0.6;
     float mote = exp(-dot(f, f) * 240.0) * step(0.82, hash21(cellId + fl * 17.0));
-    col += vec3(0.5, 0.62, 0.7) * mote * (0.05 + u_energy * 0.05);
+    col += mix(u_light, u_accent, 0.4) * mote * (0.05 + u_energy * 0.05);
   }
 
   // Abyss gradient — barely-there blue so the black has depth.

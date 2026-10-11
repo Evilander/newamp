@@ -3,7 +3,7 @@
 // (each partial's amplitude is its band slice), so the "waveform" genuinely
 // follows the music's spectral shape. Stereo width splits the traces apart,
 // pan tilts their balance, kicks flash the beam brighter, vocal presence
-// warms the lower trace toward amber burn-in. Hardware-soul: the one piece
+// burns the lower trace toward the light colour. Hardware-soul: the one piece
 // of audio gear every studio rack owes its truth to.
 
 import type { SceneDef } from './index';
@@ -15,7 +15,7 @@ export const phosphorScope: SceneDef = {
   frag: `
 vec4 scene(vec2 uv, vec2 p) {
   vec3 col = vec3(0.0);
-  vec3 phosphor = mix(vec3(0.16, 1.0, 0.45), u_accent, 0.35);
+  vec3 phosphor = mix(u_accent, u_light, 0.2);
 
   // Graticule: faint divisions + brighter center axes, waking with energy.
   vec2 g = abs(fract(p * 2.5 + 0.5) - 0.5);
@@ -49,9 +49,9 @@ vec4 scene(vec2 uv, vec2 p) {
   col += phosphor * beam * 0.16 * lit;
   col += (phosphor * 0.75 + u_light * 0.45) * core * 0.5 * lit;
 
-  // Vocal presence burns the lower trace toward amber, snare hits strobe a
-  // brief horizontal sweep-retrace ghost.
-  col += vec3(1.0, 0.6, 0.2) * smoothstep(0.007, 0.0, abs(tB)) * u_vocal * 0.35;
+  // Vocal presence burns the lower trace hot, snare hits strobe a brief
+  // horizontal sweep-retrace ghost.
+  col += paletteRamp(0.9) * smoothstep(0.007, 0.0, abs(tB)) * u_vocal * 0.35;
   float retrace = u_snarePulse * smoothstep(0.5, 0.0, abs(fract(uv.x - u_globalTime * 1.7) - 0.5));
   col += phosphor * retrace * 0.08;
 

@@ -8,6 +8,7 @@ export const liquidMetal: SceneDef = {
   id: 'liquid-metal',
   name: 'Liquid Metal',
   mood: 'mid',
+  occlusion: 0.85,
   speed: (f, p) => 0.45 + f.energy * 1.1 + f.novelty * 0.2,
   frag: `
 const float TAU_LM = 6.28318530718;

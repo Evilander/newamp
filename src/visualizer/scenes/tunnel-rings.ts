@@ -20,13 +20,13 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Perspective: z = 1/r maps near=center bright to far=edge faint.
   // Ring "depth" coordinate; rings march outward (toward viewer) over time.
-  float kickStamp = floor((u_globalTime + u_energyTime * 2.0)) + step(0.5, u_kickPulse) * 999.0;
   float depth = log(max(r, 0.02)) * 1.6 + u_phase;
   float ring = fract(depth);
   float idx = floor(depth);
 
-  // Per-ring randomness — seeded, with a kick stamp so new rings differ.
-  float rnd = hash11(idx * 3.71 + u_seed * 117.0 + kickStamp * 0.013);
+  // Per-ring randomness, seeded. A ring keeps its look for as long as it is on
+  // screen; the tunnel moving on is what brings new rings.
+  float rnd = hash11(idx * 3.71 + u_seed * 117.0);
   float bandLo = mod(rnd * 18.0, 18.0);
   float band = bandAvg(int(bandLo), int(bandLo) + 4);
 

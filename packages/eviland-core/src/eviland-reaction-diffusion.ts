@@ -4,7 +4,7 @@
 import type { EvilandFrame } from './eviland-audio';
 import type { PaletteConfig } from './eviland-operators';
 import type { SceneTarget } from './scene-overlay';
-import { sourceProgram, sourceTarget, disposeSourceTarget } from './eviland-gl';
+import { sourceProgram, sourceTarget, disposeSourceTarget, NAN_GLSL } from './eviland-gl';
 
 const STEP = `#version 300 es
 precision highp float;
@@ -12,6 +12,7 @@ in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_state, u_feedback;
 uniform float u_feed, u_kill, u_seed, u_init;
+${NAN_GLSL}
 vec2 sampleState(vec2 p) { return texture(u_state, p).rg; }
 void main() {
   vec2 p = v_uv;
@@ -33,7 +34,11 @@ void main() {
   float source = smoothstep(0.4, 0.9, max(image.r, max(image.g, image.b))) * 0.002;
   vec2 delta = vec2(lap.x - reaction + u_feed * (1.0 - c.x),
     0.5 * lap.y + reaction - (u_kill + u_feed) * c.y + source);
-  o = vec4(clamp(c + delta, 0.0, 1.0), 0, 1);
+  vec2 next = c + delta;
+  // U=1, V=0 is the chemistry at rest. A value that went NaN or ran away is
+  // put back there, instead of spreading.
+  bool sane = !notNumber(next.x) && !notNumber(next.y) && abs(next.x) < 4.0 && abs(next.y) < 4.0;
+  o = vec4(sane ? clamp(next, 0.0, 1.0) : vec2(1.0, 0.0), 0, 1);
 }`;
 const DRAW = `#version 300 es
 precision highp float;
@@ -80,11 +85,14 @@ export function createReactionDiffusion(gl: WebGL2RenderingContext, seed = 1, pr
   const d = Object.fromEntries(['state','dark','accent','light','opacity'].map(n => [n, gl.getUniformLocation(draw, `u_${n}`)]));
   return {
     render(frame: EvilandFrame, palette: PaletteConfig, dtMs: number, feedback: WebGLTexture, target: SceneTarget) {
-      const dt = Math.max(0, Math.min(100, dtMs));
+      const dt = Number.isFinite(dtMs) ? Math.max(0, Math.min(100, dtMs)) : 0;
       pending += dt;
       const k = 1 - Math.exp(-dt / 2400);
       feed += (0.026 + frame.energy * 0.02 - feed) * k;
       kill += (0.055 + frame.flatness * 0.012 - kill) * k;
+      // Both ease toward audio-driven targets; one NaN frame would keep them NaN.
+      if (!Number.isFinite(feed)) feed = 0.036;
+      if (!Number.isFinite(kill)) kill = 0.061;
       gl.bindVertexArray(vao);
       gl.disable(gl.BLEND); gl.disable(gl.SCISSOR_TEST); gl.disable(gl.DEPTH_TEST);
       gl.useProgram(step);
@@ -96,8 +104,9 @@ export function createReactionDiffusion(gl: WebGL2RenderingContext, seed = 1, pr
       const elapsedTicks = Math.floor((pending + 1e-6) / (1000 / 60));
       pending -= elapsedTicks * (1000 / 60);
       // A delayed frame must not trigger 24 chemistry passes and delay the
-      // next one too. Two ticks preserve normal 30/60/120 Hz behaviour.
-      const ticks = Math.min(2, elapsedTicks);
+      // next one too. Three ticks keep it at speed down to 20 fps, where the
+      // governor's lowest step sits; slower than that the excess is dropped.
+      const ticks = Math.min(3, elapsedTicks);
       const iterations = ticks * 4 + (initialized ? 0 : 1);
       for (let i = 0; i < iterations; i++) {
         gl.uniform1f(s.init ?? null, initialized ? 0 : 1);

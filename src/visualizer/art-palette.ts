@@ -15,19 +15,22 @@
 // missing art, decode errors).
 
 import type { EvilandPalette } from './eviland';
+import { blendThemeWithSleeve, oklchToRgb, rgbToOklch } from './eviland-appearance';
 
 export interface ArtPalette {
   /** Most vibrant dominant color — becomes the accent. */
   vibrant: [number, number, number];
   /** Second distinct hue (or a lightened vibrant when the art is one-hued). */
   secondary: [number, number, number];
-  /** Darkened overall tone — trails/shadows. */
+  /** The vibrant hue, dark and quiet — trails/shadows. */
   muted: [number, number, number];
 }
 
 const SAMPLE_SIZE = 24;
 const HUE_BUCKETS = 12;
 const CACHE_CAP = 24;
+const MUTED_LIGHTNESS = 0.38;
+const MUTED_CHROMA = 0.08;
 
 const cache = new Map<string, ArtPalette | null>();
 const inflight = new Map<string, Promise<ArtPalette | null>>();
@@ -78,23 +81,17 @@ function analyze(img: HTMLImageElement): ArtPalette | null {
     return null; // tainted canvas / decode failure
   }
 
-  // Saturation×value-weighted hue histogram, plus a whole-image mean for the
-  // muted tone. Near-black and washed-out pixels don't vote for hues.
+  // Saturation×value-weighted hue histogram. Near-black and washed-out pixels
+  // don't vote for hues.
   const weight = new Float32Array(HUE_BUCKETS);
   const sumR = new Float32Array(HUE_BUCKETS);
   const sumG = new Float32Array(HUE_BUCKETS);
   const sumB = new Float32Array(HUE_BUCKETS);
-  let meanR = 0;
-  let meanG = 0;
-  let meanB = 0;
   const pixels = SAMPLE_SIZE * SAMPLE_SIZE;
   for (let i = 0; i < pixels; i++) {
     const r = data[i * 4]! / 255;
     const g = data[i * 4 + 1]! / 255;
     const b = data[i * 4 + 2]! / 255;
-    meanR += r;
-    meanG += g;
-    meanB += b;
     const [h, s, v] = rgbToHsv(r, g, b);
     if (v < 0.12 || s < 0.14) continue;
     const bucket = Math.min(HUE_BUCKETS - 1, Math.floor(h * HUE_BUCKETS));
@@ -104,9 +101,6 @@ function analyze(img: HTMLImageElement): ArtPalette | null {
     sumG[bucket] += g * w;
     sumB[bucket] += b * w;
   }
-  meanR /= pixels;
-  meanG /= pixels;
-  meanB /= pixels;
 
   let best = -1;
   for (let i = 0; i < HUE_BUCKETS; i++) {
@@ -141,8 +135,15 @@ function analyze(img: HTMLImageElement): ArtPalette | null {
       ? lighten(bucketColor(second), 0.25)
       : lighten(vibrant, 0.45);
 
-  const muted: [number, number, number] = [meanR * 0.45, meanG * 0.45, meanB * 0.45];
-  return { vibrant, secondary, muted };
+  return { vibrant, secondary, muted: shadowTone(vibrant) };
+}
+
+/**
+ * The shadow tone for a cover: its vibrant hue at a fixed dark, quiet OKLCh.
+ * The mean of the whole image washes out to a grey-brown on most covers.
+ */
+export function shadowTone(vibrant: readonly [number, number, number]): [number, number, number] {
+  return oklchToRgb(MUTED_LIGHTNESS, MUTED_CHROMA, rgbToOklch(vibrant).h);
 }
 
 /**
@@ -170,12 +171,6 @@ export function extractArtPalette(url: string): Promise<ArtPalette | null> {
   return p;
 }
 
-const mixVec = (
-  a: [number, number, number],
-  b: [number, number, number],
-  t: number,
-): [number, number, number] => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-
 /**
  * Blend album-art colors into a theme EvilandPalette. The background stays
  * pure theme (legibility contract); accent leans hardest into the art, the
@@ -186,11 +181,5 @@ export function blendPaletteWithArt(
   art: ArtPalette | null,
   mix = 0.6,
 ): EvilandPalette {
-  if (!art) return theme;
-  return {
-    accent: mixVec(theme.accent, art.vibrant, mix),
-    dark: mixVec(theme.dark, art.muted, mix),
-    light: mixVec(theme.light, art.secondary, mix * 0.7),
-    bg: theme.bg,
-  };
+  return blendThemeWithSleeve(theme, art, mix);
 }

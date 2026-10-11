@@ -17,7 +17,7 @@
 // the on-screen Eviland branch already does.
 
 import type { AudioEngine } from '../audio/engine';
-import { liveGradeFor, resolveEvilandPalette, tuneEvilandFrame } from './eviland-appearance';
+import { liveGradeFor, resolveEvilandPalette, sleeveFor, tuneEvilandFrame, type Sleeve } from './eviland-appearance';
 import { readEvilandTuning } from '../lib/vizPrefs';
 import { createEvilandReactor, type EvilandReactor } from './eviland-audio';
 import { createDirector, type Director } from './eviland-director';
@@ -27,15 +27,13 @@ import type { EvilandPalette } from './eviland';
 import { frameBus } from './frame-bus';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from './eviland-memory-bridge';
 import { createEngineScoreFeed, type ScoreFeed } from './eviland-score-feed';
-import { blendPaletteWithArt, extractArtPalette, type ArtPalette } from './art-palette';
+import { extractArtPalette, type ArtPalette } from './art-palette';
+import { createLookRequestCursor, type LookRequestCursor } from './look-requests';
 import { api } from '../lib/api';
 import { BUTTERCHURN_FFT_SIZE } from '../butterchurn-iframe/protocol';
+import { feedSampleRate, fillButterchurnSamples, waveGainFor } from '../butterchurn-iframe/feed';
 import { parseCssRgbVec as parseRgbVec } from './css-color';
-
-// Mild pre-emphasis (~1.4x with soft-clip) so the detached window's MilkDrop
-// field reacts to transients the way the on-screen one does — same constant as
-// Visualizer.tsx's butterchurn pump.
-const WAVE_PREEMPHASIS = 1.4;
+import { createSampleRateWatch } from './band-edges';
 
 export interface EvilandProducerUiState {
   /** AI Director on → look conducts itself to the song. */
@@ -70,6 +68,8 @@ export interface EvilandProducerUiState {
     isPlaying: boolean;
     /** Perceptual volume 0..2 — drives the projector's volume slider. */
     volume: number;
+    /** The skin's accent colour (the --accent value), for the projector's sliders. Null when unknown. */
+    accent?: string | null;
   } | null;
 }
 
@@ -160,6 +160,12 @@ export function startEvilandProducer(
   // Lives only while a projector is attached, so an idle producer never makes
   // the app analyse tracks nobody is watching.
   let scoreFeed: ScoreFeed | null = null;
+  // Next-look and previous-look requests; started with the loop so a request
+  // made before the projector opened is not replayed.
+  let lookRequests: LookRequestCursor | null = null;
+  // Bit-Perfect output can move the device to another rate between tracks.
+  let rateChanged = createSampleRateWatch(() => engine.getSampleRate(), engine.getSampleRate());
+  let lastSectionId = 0;
   let lastNow = 0;
   let lastTrackId: number | null = null;
   let sceneSeed: string | null = null;
@@ -172,9 +178,11 @@ export function startEvilandProducer(
   let paletteTick = 0;
   let palette = readPalette();
   // Album-art tint for the projector: extracted once per track (async,
-  // best-effort), blended into every published palette so the detached
-  // window's scenes/reactor/fallback renderer glow in the sleeve's colors.
+  // best-effort) and handed to resolveEvilandPalette as the sleeve, so the
+  // detached window's scenes/reactor/fallback renderer glow in the sleeve's
+  // colors the same way the on-screen composition does.
   let artPalette: ArtPalette | null = null;
+  const sleeve: Sleeve = { art: null, seed: '' };
   let artTrackId: number | null = null;
   function refreshArtPalette(trackId: number | null): void {
     artTrackId = trackId;
@@ -205,19 +213,13 @@ export function startEvilandProducer(
     }
   }
 
-  // Decimate the analyser's time-domain bytes to BUTTERCHURN_FFT_SIZE and
-  // apply pre-emphasis + soft-clip — byte-identical math to the on-screen
-  // butterchurn pump so the projector's MilkDrop reacts the same way.
+  // The most recent BUTTERCHURN_FFT_SIZE contiguous samples, with the
+  // reactivity gain: the same feed as the on-screen butterchurn pump, so the
+  // projector's MilkDrop reacts the same way.
   function fillWaveSamples(): void {
     if (!rawWave) return;
     engine.getOnsetTimeData(rawWave);
-    const stride = Math.max(1, Math.floor(rawWave.length / BUTTERCHURN_FFT_SIZE));
-    for (let i = 0; i < BUTTERCHURN_FFT_SIZE; i++) {
-      const centered = ((rawWave[i * stride] ?? 128) - 128) / 128;
-      const lifted = centered * WAVE_PREEMPHASIS;
-      const clipped = lifted / (1 + Math.abs(lifted));
-      waveSamples[i] = 128 + Math.round(clipped * 127);
-    }
+    fillButterchurnSamples(rawWave, waveSamples, waveGainFor(tuning.reactivity), engine.getSampleRate());
   }
 
   let tickCount = 0;
@@ -237,6 +239,15 @@ export function startEvilandProducer(
         fftSize: engine.fftSize,
         binCount: engine.frequencyBinCount,
       });
+    } else {
+      const newRate = rateChanged(now);
+      if (newRate) {
+        reactor = createEvilandReactor({
+          sampleRate: newRate,
+          fftSize: engine.fftSize,
+          binCount: engine.frequencyBinCount,
+        });
+      }
     }
     ensureBuffers();
     engine.getFreqData(freq!);
@@ -247,6 +258,7 @@ export function startEvilandProducer(
     const dtMs = lastNow ? now - lastNow : 16.7;
     lastNow = now;
     const frame = reactor.analyze(freq!, onsetFreq!, leftFreq!, rightFreq!, dtMs, now);
+    lastSectionId = frame.sectionId;
     // Look-ahead cues from the track's song score; a no-op without one.
     scoreFeed?.conduct(frame, dtMs);
 
@@ -277,11 +289,16 @@ export function startEvilandProducer(
       lastTrackId = ui.trackId;
       sceneSeed = sceneSeedForTrack(ui.trackId, null);
       refreshArtPalette(ui.trackId);
+      // The reactor's structural memory (novelty baseline, section
+      // fingerprints, tempo tracking) belongs to the track that built it;
+      // left alone, the new track's first frames read against the old one.
+      reactor.reset();
       director.reset(ui.trackId != null ? `track-${ui.trackId}` : 'eviland');
       maybeLoadPlanIntoProducerDirector(director, ui.trackId, () => lastTrackId, setSceneSeed);
     }
 
     let config: OperatorConfig;
+    lookRequests?.drain(director, ui.director);
     if (ui.director) {
       config = applyWaveformOverride(director.update(frame, dtMs), ui.waveMode);
       heldDirectorLook = null;
@@ -296,23 +313,25 @@ export function startEvilandProducer(
       config = applyWaveformOverride(manualConfig ?? heldDirectorLook!, ui.waveMode);
     }
 
-    fillWaveSamples();
     // Palette/reactivity are the user's visualizer tuning; re-read them about
     // twice a second rather than hitting localStorage on every publish.
     if (now - tuningReadAt > 500) {
       tuningReadAt = now;
       tuning = readEvilandTuning();
     }
+    fillWaveSamples();
     frameBus.publish(
       tuneEvilandFrame(frame, tuning.reactivity),
-      resolveEvilandPalette(tuning.palette, blendPaletteWithArt(palette, artPalette), now / 1000, frame.score?.keyShift, config.palette),
+      resolveEvilandPalette(tuning.palette, palette, now / 1000, frame.score?.keyShift, config.palette, sleeveFor(config, artPalette, sleeve)),
       dtMs,
       config,
       {
         wave: waveSamples,
         waveMode: ui.waveMode,
         grade: liveGradeFor(tuning.palette),
-        sampleRate: engine.getSampleRate(),
+        // The rate of the samples in `wave`, which the projector's MilkDrop
+        // is told at init.
+        sampleRate: feedSampleRate(engine.getSampleRate()),
         trackId: ui.trackId,
         sceneSeed,
         // null (not undefined) when nothing is playing — the projector's
@@ -335,6 +354,8 @@ export function startEvilandProducer(
     if (loopActive) return;
     loopActive = true;
     lastNow = 0;
+    lookRequests = createLookRequestCursor();
+    rateChanged = createSampleRateWatch(() => engine.getSampleRate(), engine.getSampleRate());
     scoreFeed = createEngineScoreFeed(engine, () => {
       const ui = getUiState();
       return ui.trackId != null ? { id: ui.trackId, cueStart: ui.cueStart } : null;
@@ -350,6 +371,7 @@ export function startEvilandProducer(
     director = null;
     scoreFeed?.dispose();
     scoreFeed = null;
+    lookRequests = null;
   }
 
   const offConsumer = frameBus.onConsumerChange((hasDetached) => {
@@ -368,6 +390,7 @@ export function startEvilandProducer(
       loopActive,
       tickCount,
       lastTickAgoMs: lastTickAt ? Math.round(performance.now() - lastTickAt) : -1,
+      sectionId: lastSectionId,
       hasConsumer: frameBus.hasDetachedConsumer(),
       bus: frameBus.debugStats(),
     }),

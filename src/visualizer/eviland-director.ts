@@ -11,8 +11,9 @@
 // Energy tiers (calm/steady/lift/drop/climax) bias archetype + intensity, so
 // an ambient intro gets a gentle nebula with low mirrorMix and slow hue cycle,
 // while a drop gets a kaleidoscope or tunnel with bright waveform and high
-// mirrorMix. The tier is derived from a slow moving average of energy plus a
-// novelty pulse, so the Director feels the song's shape, not just its loudness.
+// mirrorMix. Without a score the tier is read against the range of levels
+// heard so far in THIS track (the score does the same over the whole track),
+// so a flat master is not all climax and a quiet one is not all calm.
 //
 // Look generation is deterministic from (songId, sectionId, rotationIndex)
 // PLUS a lineage salt (lineage.generation, lineage.rootSeed) when the track has
@@ -320,6 +321,24 @@ const GLIDING_FRONTS = [1, 3, 5, 0, 2] as const;
 const ROTATE_INTERVAL_MS = 20000;
 /** Default deterministic ±jitter on the rotation interval so it isn't metronomic. */
 const ROTATE_JITTER_PCT = 0.15;
+/**
+ * With a locked live beat, a timer rotation waits for a phrase line (four
+ * bars of four) once this share of its interval has passed, and never waits
+ * longer than one phrase past it. DJs and lighting cut on phrases; the
+ * jittered timer stays as the fallback when the beat is unsure.
+ */
+const PHRASE_BEATS = 16;
+const PHRASE_ROTATE_EARLY = 0.8;
+/** Looks kept for stepping back to an earlier one. */
+const LOOK_HISTORY = 10;
+/** Frames of audio a look decision needs before it can place the level in the track's range. */
+const TIER_MIN_FRAMES = 30;
+/** Look decisions whose levels make up the range an unscored tier is read against. */
+const TIER_RECENT = 8;
+/** A range wider than this share of its top is real dynamics (a climax can be called). */
+const TIER_DYNAMIC_SHARE = 0.15;
+/** The narrowest range a flat master is tiered within, as a share of its top. */
+const TIER_FLAT_SHARE = 0.05;
 /** Default intra-section drift strength (0 disables). */
 const DRIFT_AMOUNT = 0.12;
 /** Period of the drift "breathe out and back" triangle wave, ms. */
@@ -396,6 +415,10 @@ export interface Director {
   current(): OperatorConfig;
   /** Override the passthrough config (used when disabled, or as the "from" of next fade). */
   setCurrent(config: OperatorConfig): void;
+  /** Drop the current look: the next update() fades to a fresh rotation. The Director stays on. */
+  skip(): void;
+  /** Fade back to the look before this one, if any is remembered. Returns false when there is none. */
+  previous(): boolean;
   /**
    * Hot-load a visual memory plan mid-track. Calls reset() internally so the
    * sections map is re-derived from `plan.sections`. Mostly used by the bridge
@@ -522,6 +545,19 @@ export function createDirector(opts: DirectorOptions = {}): Director {
   let energyPeak = 0;
   let noveltyAccum = 0;
   let framesSinceSection = 0;
+  // The levels at the last few look decisions in this track, so an unscored
+  // tier is relative to the song the way a scored one is.
+  const tierRecent = new Float64Array(TIER_RECENT);
+  let tierDecisions = 0;
+  let lastTierValue = -1;
+
+  // A skip asked for by the listener, taken on the next update; and the
+  // looks shown so far (newest last), for stepping back.
+  let skipPending = false;
+  const lookHistory: OperatorConfig[] = [];
+  // Where in the phrase the previous frame sat, so a phrase line is seen as
+  // the clock wrapping past it however coarse the frames are.
+  let lastIntoPhrase = 0;
 
   // ── bounded priming defer ────────────────────────────────────
   // primingDeferRemaining counts how many more update() calls will suppress
@@ -541,21 +577,52 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     // measured against the rest of the song, and available on its first frame.
     // The estimate below can only describe the section that just ENDED.
     if (frame.score) return frame.score.tier;
-    // Use the slow average so a single loud frame doesn't promote us to climax,
-    // but blend in the in-section peak so an obvious drop still registers fast.
-    const sustained = energyAvg;
-    const peak = energyPeak;
+    // A decision made before half a second of audio has been heard (the
+    // opener, a boundary right after a reset) says nothing about the track's
+    // range.
+    if (framesSinceSection < TIER_MIN_FRAMES) return 'steady';
+    // The slow average so a single loud frame doesn't promote us to climax,
+    // with a little of the in-section peak so an obvious drop still registers.
+    const value = Math.min(1, 0.8 * energyAvg + 0.2 * energyPeak);
+    let floor = Infinity;
+    let top = -Infinity;
+    for (let i = 0; i < Math.min(tierDecisions, TIER_RECENT); i++) {
+      const v = tierRecent[i]!;
+      if (v < floor) floor = v;
+      if (v > top) top = v;
+    }
+    const previousTop = top;
+    tierRecent[tierDecisions % TIER_RECENT] = value;
+    tierDecisions++;
+    if (value < floor) floor = value;
+    if (value > top) top = value;
+    const step = lastTierValue < 0 ? 0 : value - lastTierValue;
+    lastTierValue = value;
+    // Mirrors the score's sectionTiers: the level is placed within the range
+    // of recent decisions. A flat master's range is floored at a share of
+    // its level, so its small moves still spread over the tiers while a loop
+    // with no dynamics at all reads steady rather than flipping on noise.
+    // Everything is a ratio of the level, so the same song at a different
+    // gain gets the same tiers.
+    const spread = top - floor;
+    const dynamic = spread > TIER_DYNAMIC_SHARE * top;
+    const range = Math.max(spread, TIER_FLAT_SHARE * top, 1e-6);
+    const level = 0.5 + (value - (floor + top) / 2) / range;
+    const rise = step / range;
     const novelty = Math.min(1, noveltyAccum);
-    // beatConfidence helps separate "drop" (groove locked + loud) from "climax"
-    // (loud regardless of groove — orchestral swell, vocal belt, etc.).
-    const grooved = frame.beatConfidence;
 
-    if (sustained < 0.18 && peak < 0.35) return 'calm';
-    if (sustained < 0.32 && peak < 0.55) return 'steady';
-    if (sustained < 0.5 && peak < 0.75) return novelty > 0.4 ? 'lift' : 'steady';
-    if (peak >= 0.78 && grooved > 0.55) return 'drop';
-    if (peak >= 0.82) return 'climax';
-    return 'lift';
+    // A clear new top, once the range is established, is the climax so far;
+    // a big step up into the top of the range is a drop.
+    if (dynamic && tierDecisions >= 4 && value > previousTop && rise >= 0.15) return 'climax';
+    if (level >= 0.6 && rise >= 0.2) return 'drop';
+    if (level < 0.25) return 'calm';
+    if (level >= 0.6) return 'lift';
+    return novelty > 0.4 && level >= 0.45 ? 'lift' : 'steady';
+  }
+
+  function resetTierRange(): void {
+    tierDecisions = 0;
+    lastTierValue = -1;
   }
 
   function seedFor(sectionId: number, rotation = 0): number {
@@ -640,15 +707,21 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     const speed = transitionSpeedFor(lastTier, tier);
     startFade(nextConfig, speed, frame.bpm);
     lastTier = tier;
+    // Each look decision measures its own window of the song.
+    energyPeak = 0;
   }
 
-  function startFade(next: OperatorConfig, speedMul: number, bpm: number): void {
+  function startFade(next: OperatorConfig, speedMul: number, bpm: number, remember = true): void {
     // Snapshot the live config as the new "from"; the current fade progress
     // collapses into that snapshot (because live IS the lerp(from,target,fade)
     // we just produced last frame), so the new fade starts from where the eye
     // already is — no visual jump.
     from = stripTransitionMeta(cloneConfig(live));
     target = stripTransitionMeta(cloneConfig(next));
+    if (remember) {
+      lookHistory.push(cloneConfig(target));
+      if (lookHistory.length > LOOK_HISTORY) lookHistory.shift();
+    }
     fade = 0;
     // Front shape. A hard energy jump gets a front with edges you can see
     // land (cells, iris, spiral); a glide gets one that grows through the
@@ -766,19 +839,12 @@ export function createDirector(opts: DirectorOptions = {}): Director {
     }
   }
 
-  function advanceFade(frame: EvilandFrame, dtMs: number): void {
+  function advanceFade(dtMs: number): void {
     if (fade >= 1) return;
-    // Prefer beat-phase progress when a beat is locked — fades land on a beat.
-    // Otherwise fall back to wall-clock dt so silent / arrhythmic passages
-    // still resolve their fades.
+    // The duration was set in beats when the fade started; wall-clock dt
+    // resolves it, so silent and arrhythmic passages still finish their fades.
     const dt = Math.max(0, Math.min(250, dtMs));
-    let step: number;
-    if (frame.bpm > 1 && frame.beatConfidence > 0.35 && fadeDurationMs > 0) {
-      step = dt / fadeDurationMs;
-    } else {
-      step = dt / Math.max(150, fadeDurationMs);
-    }
-    fade = Math.min(1, fade + step);
+    fade = Math.min(1, fade + dt / Math.max(150, fadeDurationMs));
   }
 
   function recomputeLive(dtMs = 0): void {
@@ -927,15 +993,8 @@ export function createDirector(opts: DirectorOptions = {}): Director {
         return live;
       }
 
-      // Track in-section energy & novelty for tier estimation.
       framesSinceSection++;
-      // EMA on energy. Time constant ~2s @ 60fps -> alpha ≈ 0.008/ms * dt.
       const dt = Math.max(0, Math.min(250, dtMs));
-      const alpha = 1 - Math.exp(-dt / 2000);
-      energyAvg += (frame.energy - energyAvg) * alpha;
-      if (frame.energy > energyPeak) energyPeak = frame.energy;
-      // Novelty accumulates with decay, peaks ~1.
-      noveltyAccum = Math.min(1, noveltyAccum * Math.pow(0.985, dt * 0.06) + frame.novelty * 0.05 * (1 - Math.pow(0.985, dt * 0.06)) / 0.015);
 
       if (frame.sectionChanged && frame.sectionId !== lastSectionId) {
         lastSectionId = frame.sectionId;
@@ -965,7 +1024,9 @@ export function createDirector(opts: DirectorOptions = {}): Director {
           // the current live config (the default/passthrough) via the
           // normal recomputeLive path below.
         } else {
-          const tier = tierFor(frame);
+          // One frame of audio says nothing about the level, so an unscored
+          // opener is the neutral tier rather than calm by default.
+          const tier = frame.score ? frame.score.tier : 'steady';
           const minted = generateForSectionFull(frame.sectionId, tier);
           sections.set(frame.sectionId, {
             config: cloneConfig(minted.config),
@@ -982,7 +1043,23 @@ export function createDirector(opts: DirectorOptions = {}): Director {
         }
       }
 
-      advanceFade(frame, dtMs);
+      // Track in-section energy & novelty for tier estimation. After the
+      // boundary handling, so the first frame of a section is counted toward
+      // the section it belongs to and not the one that just ended.
+      // EMA on energy. Time constant ~2s @ 60fps -> alpha ≈ 0.008/ms * dt.
+      const alpha = 1 - Math.exp(-dt / 2000);
+      energyAvg += (frame.energy - energyAvg) * alpha;
+      if (frame.energy > energyPeak) energyPeak = frame.energy;
+      // Novelty accumulates with decay, peaks ~1.
+      noveltyAccum = Math.min(1, noveltyAccum * Math.pow(0.985, dt * 0.06) + frame.novelty * 0.05 * (1 - Math.pow(0.985, dt * 0.06)) / 0.015);
+
+      advanceFade(dtMs);
+
+      if (skipPending) {
+        skipPending = false;
+        onForcedRotation(frame);
+        advanceFade(dtMs);
+      }
 
       // Timer floor: if structure hasn't changed the look in a while, force a
       // fresh rotation (MilkDrop-style). Only when settled, never mid-fade.
@@ -990,21 +1067,55 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       // On a scored track a timer rotation waits for the next bar line (at
       // most a few seconds) and never starts inside a build or the second
       // before a section change — structure is about to change the look anyway.
+      // With a locked live beat it waits for the next phrase line instead of
+      // cutting at a random beat phase.
       const cues = frame.score;
-      const rotationHeld = cues
-        ? msSinceSwitch < effectiveRotateMs() + 6000 && (!cues.downbeat || cues.anticipation > 0 || cues.toBoundary < 2)
-        : false;
-      if (rotateMs > 0 && fade >= 1 && msSinceSwitch >= effectiveRotateMs() && !rotationHeld) {
+      let rotationDue = msSinceSwitch >= effectiveRotateMs();
+      let rotationHeld = false;
+      if (cues) {
+        rotationHeld = msSinceSwitch < effectiveRotateMs() + 6000 && (!cues.downbeat || cues.anticipation > 0 || cues.toBoundary < 2);
+        lastIntoPhrase = 0;
+      } else if (frame.bpm > 1 && frame.beatConfidence > 0.5) {
+        // A frame without a beat clock still lands on a beat line.
+        const beatMs = 60000 / frame.bpm;
+        const clock = frame.beatClock ?? frame.beatPhase;
+        const phraseBeats = frame.beatClock === undefined ? 1 : PHRASE_BEATS;
+        const intoPhrase = ((clock % phraseBeats) + phraseBeats) % phraseBeats;
+        const onLine = intoPhrase < lastIntoPhrase;
+        lastIntoPhrase = intoPhrase;
+        rotationDue = msSinceSwitch >= effectiveRotateMs() * PHRASE_ROTATE_EARLY;
+        rotationHeld = msSinceSwitch < effectiveRotateMs() + beatMs * phraseBeats && !onLine;
+      } else {
+        // When the lock returns, its first position must not be read against
+        // a stale one as a phrase line crossed.
+        lastIntoPhrase = 0;
+      }
+      if (rotateMs > 0 && fade >= 1 && rotationDue && !rotationHeld) {
         onForcedRotation(frame);
-        advanceFade(frame, dtMs);
+        advanceFade(dtMs);
       }
 
       recomputeLive(dtMs);
       return live;
     },
 
+    skip(): void {
+      if (enabled) skipPending = true;
+    },
+
+    previous(): boolean {
+      if (!enabled || lookHistory.length < 2) return false;
+      lookHistory.pop();
+      const back = lookHistory[lookHistory.length - 1]!;
+      startFade(cloneConfig(back), 1, 0, false);
+      return true;
+    },
+
     setEnabled(on): void {
       enabled = !!on;
+      // A skip asked for before the Director was turned off must not fire
+      // when it is turned back on.
+      if (!enabled) skipPending = false;
     },
 
     isEnabled(): boolean {
@@ -1021,6 +1132,10 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       energyPeak = 0;
       noveltyAccum = 0;
       framesSinceSection = 0;
+      resetTierRange();
+      skipPending = false;
+      lookHistory.length = 0;
+      lastIntoPhrase = 0;
       msSinceSwitch = 0;
       rotationIndex = 0;
       cachedRotateThresholdMs = null;
@@ -1104,6 +1219,8 @@ export function createDirector(opts: DirectorOptions = {}): Director {
       energyPeak = 0;
       noveltyAccum = 0;
       framesSinceSection = 0;
+      resetTierRange();
+      lastIntoPhrase = 0;
       msSinceSwitch = 0;
       rotationIndex = 0;
       cachedRotateThresholdMs = null;

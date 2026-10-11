@@ -91,6 +91,8 @@ export interface DetachedFramePayload {
     isPlaying: boolean;
     /** Perceptual volume 0..2 — mirrored by the projector's volume slider. */
     volume: number;
+    /** The skin's accent colour (the --accent value), so the projector's sliders follow the skin. Null when unknown. */
+    accent?: string | null;
   } | null;
   /** Sent only on change; the consumer reapplies on each tick. */
   config?: {

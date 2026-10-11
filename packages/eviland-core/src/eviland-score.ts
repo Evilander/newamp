@@ -22,7 +22,12 @@
 // the Electron main process (where ffmpeg hands it the decoded track), in a
 // browser, and in the node test. Deterministic for a given input.
 
-export const SONG_SCORE_VERSION = 1;
+// Bumped whenever the analysis output changes; cached scores of an older
+// version are recomputed. Section ids can move between versions, so the looks
+// a visual-memory plan remembers per section may attach to different parts of
+// a song after a bump. That is accepted over discarding every plan: the plan's
+// own algoVersion tracks the look generator, not the analysis.
+export const SONG_SCORE_VERSION = 2;
 /** The rate callers must decode to. 22.05 kHz keeps every feature used here. */
 export const SONG_SCORE_SAMPLE_RATE = 22050;
 /** Longer tracks are scored up to here; the conductor goes quiet past the end. */
@@ -73,9 +78,11 @@ export interface SongScore {
   beatConfidence: number;
   /** Beat times in seconds. */
   beats: number[];
-  /** Index (0..3) of the first beat that starts a bar; bars are assumed 4 beats. */
+  /** Index of the first beat that starts a bar (0..beatsPerBar-1). */
   downbeat: number;
   downbeatConfidence: number;
+  /** Beats in a bar, 3 or 4. Absent on a score without meter detection, which means 4. */
+  beatsPerBar?: number;
   sections: ScoreSection[];
   homeKey: ScoreKey;
   /** Loudness curve, 2 values per second, 0..1 relative to the track's loud passages. */
@@ -100,6 +107,7 @@ const MEL_BANDS = 24;
 const MEL_MIN_HZ = 30;
 const MEL_MAX_HZ = 10000;
 const LOW_BANDS = 4; // mel bands under ~160 Hz: the kick's territory
+const BODY_BANDS = 8; // mel bands under ~1.1 kHz: kick, bass and snare body, but not hats
 const MIN_BPM = 60;
 const MAX_BPM = 200;
 const MIN_SECTION_BEATS = 16;
@@ -112,6 +120,10 @@ export function isValidSongScore(value: unknown): value is SongScore {
     score.v === SONG_SCORE_VERSION
     && typeof score.duration === 'number'
     && typeof score.bpm === 'number'
+    && typeof score.beatConfidence === 'number'
+    && typeof score.downbeat === 'number'
+    && typeof score.downbeatConfidence === 'number'
+    && (score.beatsPerBar === undefined || score.beatsPerBar === 3 || score.beatsPerBar === 4)
     && Array.isArray(score.beats)
     && Array.isArray(score.sections)
     && Array.isArray(score.energy)
@@ -135,6 +147,7 @@ export async function computeSongScore(samples: Float32Array, opts: ComputeScore
   const mel = new Float32Array(frames * MEL_BANDS); // log-compressed band magnitudes
   const flux = new Float32Array(frames);
   const lowFlux = new Float32Array(frames);
+  const bodyFlux = new Float32Array(frames);
   const rms = new Float32Array(frames);
   const centroid = new Float32Array(frames);
   const re = new Float32Array(FRAME);
@@ -167,6 +180,7 @@ export async function computeSongScore(samples: Float32Array, opts: ComputeScore
     centroid[t] = magTotal > 1e-9 ? magWeighted / magTotal / (FRAME / 2) : 0;
     let f = 0;
     let lf = 0;
+    let bf = 0;
     for (let band = 0; band < MEL_BANDS; band++) {
       const value = Math.log1p((40 * bandSum[band]!) / Math.max(1, bandCount[band]!));
       mel[t * MEL_BANDS + band] = value;
@@ -175,11 +189,13 @@ export async function computeSongScore(samples: Float32Array, opts: ComputeScore
         if (rise > 0) {
           f += rise;
           if (band < LOW_BANDS) lf += rise;
+          if (band < BODY_BANDS) bf += rise;
         }
       }
     }
     flux[t] = f;
     lowFlux[t] = lf;
+    bodyFlux[t] = bf;
     if (opts.pause && t % 64 === 63) await opts.pause();
   }
 
@@ -212,14 +228,15 @@ export async function computeSongScore(samples: Float32Array, opts: ComputeScore
 
   // ── 2. Beat grid ─────────────────────────────────────────────────────────
   const onset = onsetEnvelope(flux, fps);
-  const period = estimateBeatPeriod(onset, fps);
-  const beatFrames = trackBeats(onset, period);
+  const grid = chooseBeatGrid(onset, flux, bodyFlux, fps);
+  const period = grid.period;
+  const beatFrames = grid.beats;
   // Flux peaks on the frame where an attack first enters the window's heavy
   // middle, a little before the attack reaches the window centre.
   const attackLag = (FRAME / 2 + 0.65 * HOP) / sampleRate;
   const beats = beatFrames.map((frame) => refinePeak(onset, frame) / fps + attackLag);
   const bpm = (60 * fps) / period;
-  const beatConfidence = gridConfidence(onset, beatFrames);
+  const beatConfidence = gridConfidence(onset, beatFrames) * grid.certainty;
   if (opts.pause) await opts.pause();
 
   // Structure is measured on beat-length steps. When the grid is weak the
@@ -259,9 +276,9 @@ export async function computeSongScore(samples: Float32Array, opts: ComputeScore
   }
 
   // ── 4. Bar phase ─────────────────────────────────────────────────────────
-  const { phase: downbeat, confidence: downbeatConfidence } = gridTrusted
+  const { phase: downbeat, confidence: downbeatConfidence, beatsPerBar } = gridTrusted
     ? barPhase(stepLow, stepChroma, stepCount)
-    : { phase: 0, confidence: 0 };
+    : { phase: 0, confidence: 0, beatsPerBar: 4 };
   if (opts.pause) await opts.pause();
 
   // ── 5. Section boundaries ────────────────────────────────────────────────
@@ -277,11 +294,18 @@ export async function computeSongScore(samples: Float32Array, opts: ComputeScore
     novelty[i] = Math.max(novelty[i]!, fine[i]! * 0.85);
     noveltyMax = Math.max(noveltyMax, novelty[i]!);
   }
+  // Normalising to the track's own peak lets a structureless loop promote its
+  // pad changes to sections; a point has to stand clear of the curve's median
+  // in absolute terms before it counts.
+  const noveltyFloor = Math.max(NOVELTY_FLOOR, NOVELTY_FLOOR_OVER_MEDIAN * median(novelty));
+  for (let i = 0; i < stepCount; i++) if (novelty[i]! < noveltyFloor) novelty[i] = 0;
   if (noveltyMax > 0) for (let i = 0; i < stepCount; i++) novelty[i]! /= noveltyMax;
   if (opts.pause) await opts.pause();
   const snap = gridTrusted && downbeatConfidence >= 0.2;
   const boundaries = spaceBoundaries(
-    pickBoundaries(novelty, kernel).map((step) => ({ step: snap ? snapToBar(step, downbeat, stepCount) : step, weight: novelty[step]! })),
+    pickBoundaries(novelty, kernel)
+      .filter((step) => !fadingInto(step, stepRms))
+      .map((step) => ({ step: snap ? snapToBar(step, downbeat, stepCount, beatsPerBar) : step, weight: novelty[step]! })),
     stepCount,
     MIN_SECTION_BEATS,
   );
@@ -335,18 +359,30 @@ export async function computeSongScore(samples: Float32Array, opts: ComputeScore
     for (let pc = 0; pc < 12; pc++) totalChroma[pc]! += sectionChroma[k]![pc]! * weight;
   }
   const homeKey = estimateKey(totalChroma);
+  const keys = sectionChroma.map((chroma) => estimateKey(chroma));
+  const keyShifts = keys.map((key) => keyShiftBetween(homeKey, key));
+  // A section that leans on the dominant or subdominant chord correlates
+  // best with the neighbouring key, and confidently so when few pitch classes
+  // are present. One fifth is a modulation only when the home key clearly
+  // loses to it and the next section stays there.
+  for (let k = 0; k < count; k++) {
+    if (Math.abs(keyShifts[k]!) !== 1) continue;
+    const own = keyCorrelation(sectionChroma[k]!, keys[k]!);
+    const home = keyCorrelation(sectionChroma[k]!, homeKey);
+    const stays = k + 1 < count && keyShifts[k + 1] === keyShifts[k];
+    if (own - home < NEIGHBOUR_KEY_MARGIN || !stays) keyShifts[k] = 0;
+  }
 
   const sections: ScoreSection[] = [];
   for (let k = 0; k < count; k++) {
-    const key = estimateKey(sectionChroma[k]!);
     sections.push({
       start: round3(k === 0 ? 0 : stepTime(boundaries[k]!)),
       end: round3(k === count - 1 ? usable / sampleRate : stepTime(boundaries[k + 1]!)),
       label: labels[k]!,
       intensity: round3(intensity[k]!),
       tier: tiers[k]!,
-      key,
-      keyShift: keyShiftBetween(homeKey, key),
+      key: keys[k]!,
+      keyShift: keyShifts[k]!,
       fingerprint: fingerprints[k]!,
       build: k === 0 ? null : describeBuild(boundaries[k]!, boundaries[k - 1]!, stepRms, stepCentroid, stepOnsets, intensity[k]! - intensity[k - 1]!, stepTime),
     });
@@ -360,6 +396,7 @@ export async function computeSongScore(samples: Float32Array, opts: ComputeScore
     beats: beats.map(round3),
     downbeat,
     downbeatConfidence: round3(downbeatConfidence),
+    beatsPerBar,
     sections,
     homeKey,
     energy: energyCurve(rms, fps),
@@ -393,15 +430,22 @@ function onsetEnvelope(flux: Float32Array, fps: number): Float32Array {
   return out;
 }
 
-/** Beat period in frames (fractional). Autocorrelation under a log-normal tempo prior centred on 120 BPM. */
+/**
+ * Beat period in frames (fractional): the comb's best peak under a log-normal
+ * tempo prior centred on 120 BPM. The envelope is smoothed over three frames
+ * first so a period that falls between two frames is not scored under one
+ * that does not.
+ */
 function estimateBeatPeriod(onset: Float32Array, fps: number): number {
   const minLag = Math.floor((60 * fps) / MAX_BPM);
   const maxLag = Math.ceil((60 * fps) / MIN_BPM);
-  const ac = new Float64Array(maxLag * 4 + 2);
   const n = onset.length;
+  const smooth = new Float32Array(n);
+  for (let t = 0; t < n; t++) smooth[t] = 0.25 * (onset[t - 1] ?? 0) + 0.5 * onset[t]! + 0.25 * (onset[t + 1] ?? 0);
+  const ac = new Float64Array(maxLag * 4 + 2);
   for (let lag = 1; lag < ac.length; lag++) {
     let sum = 0;
-    for (let t = 0; t + lag < n; t++) sum += onset[t]! * onset[t + lag]!;
+    for (let t = 0; t + lag < n; t++) sum += smooth[t]! * smooth[t + lag]!;
     ac[lag] = sum / Math.max(1, n - lag);
   }
   let bestLag = minLag;
@@ -427,6 +471,96 @@ function estimateBeatPeriod(onset: Float32Array, fps: number): number {
   const offset = bestLag > minLag && bestLag < maxLag && Math.abs(denom) > 1e-12 ? (0.5 * (a - c)) / denom : 0;
   return bestLag + Math.max(-0.5, Math.min(0.5, offset));
 }
+
+/**
+ * The beat grid, with its metrical level settled by what sits on and between
+ * the beats. The comb alone takes the slower level whenever beats alternate
+ * strong and weak (any backbeat) and the faster one when every subdivision
+ * carries a hat. So the comb's grid is tracked and then judged: when every
+ * other beat is much weaker than its neighbours the grid is a subdivision and
+ * the period doubles; when the midpoints between beats are about as strong as
+ * the beats the grid is half the tempo and the period halves. Both are read
+ * on the body of the spectrum, where kicks and snares live and hats do not:
+ * in whole-spectrum flux a hat reads nearly as strong as a kick, so a
+ * backbeat and a row of hats look alike there. The whole spectrum is the
+ * fallback for material with no body at all. `certainty` drops when a
+ * decision was close, so the conductor does not override a sane live
+ * estimate with a coin flip.
+ */
+function chooseBeatGrid(onset: Float32Array, flux: Float32Array, bodyFlux: Float32Array, fps: number): { period: number; beats: number[]; certainty: number } {
+  const minLag = Math.floor((60 * fps) / MAX_BPM);
+  const maxLag = Math.ceil((60 * fps) / MIN_BPM);
+  let period = estimateBeatPeriod(onset, fps);
+  let beats = trackBeats(onset, period);
+  let certainty = 1;
+  for (let pass = 0; pass < 2; pass++) {
+    const all = gridLevel(flux, beats);
+    const body = gridLevel(bodyFlux, beats);
+    const level = body.strong >= BODY_SHARE * all.strong ? body : all;
+    const alternation = level.weak / Math.max(1e-6, level.strong);
+    const between = level.off / Math.max(1e-6, level.on);
+    if (Math.abs(alternation - SUBDIVISION_RATIO) < CLOSE_CALL || Math.abs(between - HALF_TEMPO_RATIO) < CLOSE_CALL) certainty = 0.6;
+    if (alternation < SUBDIVISION_RATIO && period * 2 <= maxLag) period *= 2;
+    else if (between > HALF_TEMPO_RATIO && period / 2 >= minLag && (60 * fps) / (period / 2) <= HALF_TEMPO_MAX_BPM) period /= 2;
+    else break;
+    beats = trackBeats(onset, period);
+  }
+  return { period, beats, certainty };
+}
+
+/**
+ * Mean flux on a grid's beats (`on`), on the midpoints between them (`off`),
+ * and on the stronger and weaker of its two alternating beat phases.
+ */
+function gridLevel(flux: Float32Array, beatFrames: number[]): { on: number; off: number; strong: number; weak: number } {
+  const at = (frame: number): number => {
+    let best = 0;
+    for (let t = Math.max(0, frame - 1); t <= Math.min(flux.length - 1, frame + 1); t++) best = Math.max(best, flux[t]!);
+    return best;
+  };
+  let even = 0;
+  let odd = 0;
+  let off = 0;
+  for (let i = 0; i < beatFrames.length; i++) {
+    const s = at(beatFrames[i]!);
+    if (i % 2 === 0) even += s;
+    else odd += s;
+    if (i + 1 < beatFrames.length) off += at(Math.round((beatFrames[i]! + beatFrames[i + 1]!) / 2));
+  }
+  const n = Math.max(1, beatFrames.length);
+  even /= Math.ceil(n / 2);
+  odd /= Math.max(1, Math.floor(n / 2));
+  return { on: (even + odd) / 2, off: off / Math.max(1, n - 1), strong: Math.max(even, odd), weak: Math.min(even, odd) };
+}
+
+// Alternate beats weaker than this share of their neighbours make a grid a
+// subdivision; midpoints stronger than this share of the beats make it half
+// the tempo. The body of the spectrum is read only when it carries this share
+// of the stronger beats' flux. A ratio within CLOSE_CALL of either line is a
+// close call.
+const SUBDIVISION_RATIO = 0.5;
+const HALF_TEMPO_RATIO = 0.6;
+// A swung ride or a syncopated kick puts nearly as much flux between the
+// beats as on them, which reads like a half-tempo grid at any tempo. Halving
+// the period only stands when the result is a tempo a backbeat is played at.
+const HALF_TEMPO_MAX_BPM = 170;
+const BODY_SHARE = 0.08;
+const CLOSE_CALL = 0.1;
+// Un-normalised Foote novelty has to clear this multiple of the curve's
+// median, and this much in absolute terms, to be a section candidate. A verse
+// giving way to a chorus scores 2 and more; a pad entering a loop scores
+// under 0.1, and a constant loop normalised to its own peak would make a
+// section of every one of them.
+const NOVELTY_FLOOR_OVER_MEDIAN = 2;
+const NOVELTY_FLOOR = 0.2;
+// A fade-out: from the candidate to the end of the track the level only
+// falls, by at least this much in all, every few seconds by at least the step.
+const FADE_OUT_DB = 6;
+const FADE_OUT_STEP_DB = 0.3;
+const FADE_OUT_MAX_STEPS = 128;
+// A one-fifth key shift stands only when the home key correlates this much
+// worse than the neighbouring key.
+const NEIGHBOUR_KEY_MARGIN = 0.15;
 
 /** Frame indices of beats: the path that best trades onset strength against steady spacing. */
 function trackBeats(onset: Float32Array, period: number): number[] {
@@ -506,21 +640,63 @@ function fixedGrid(frames: number, stride: number): number[] {
   return out;
 }
 
-/** Which of the four beat positions carries the bar: kick weight plus harmonic change. */
-function barPhase(stepLow: Float32Array, stepChroma: Float32Array, count: number): { phase: number; confidence: number } {
-  const weight = [0, 0, 0, 0];
+/**
+ * Which beat position carries the bar, in bars of three or four: kick weight
+ * plus harmonic change, folded onto each meter. The meter whose bar line stands
+ * clearest wins; four is kept unless three is clearly stronger, since most
+ * music is in four and a weak backbeat can fold onto three by chance.
+ */
+function barPhase(stepLow: Float32Array, stepChroma: Float32Array, count: number): { phase: number; confidence: number; beatsPerBar: number } {
   let lowMean = 0;
   for (let i = 0; i < count; i++) lowMean += stepLow[i]!;
   lowMean = lowMean / count || 1;
+  const evidence = new Float64Array(count);
   for (let i = 1; i < count; i++) {
     let dot = 0;
     for (let pc = 0; pc < 12; pc++) dot += stepChroma[i * 12 + pc]! * stepChroma[(i - 1) * 12 + pc]!;
-    weight[i % 4]! += stepLow[i]! / lowMean + 2 * (1 - dot);
+    evidence[i] = stepLow[i]! / lowMean + 2 * (1 - dot);
   }
-  let phase = 0;
-  for (let p = 1; p < 4; p++) if (weight[p]! > weight[phase]!) phase = p;
-  const others = (weight[0]! + weight[1]! + weight[2]! + weight[3]! - weight[phase]!) / 3;
-  return { phase, confidence: Math.max(0, Math.min(1, ((weight[phase]! - others) / Math.max(1e-6, weight[phase]!)) * 3)) };
+  const fold = (meter: number): { phase: number; confidence: number; beatsPerBar: number } => {
+    const weight = new Array<number>(meter).fill(0);
+    for (let i = 1; i < count; i++) weight[i % meter]! += evidence[i]!;
+    let phase = 0;
+    for (let p = 1; p < meter; p++) if (weight[p]! > weight[phase]!) phase = p;
+    const others = (weight.reduce((a, b) => a + b, 0) - weight[phase]!) / (meter - 1);
+    return { phase, confidence: Math.max(0, Math.min(1, ((weight[phase]! - others) / Math.max(1e-6, weight[phase]!)) * 3)), beatsPerBar: meter };
+  };
+  const four = fold(4);
+  const three = fold(3);
+  return three.confidence > four.confidence * 1.5 && three.confidence >= 0.3 ? three : four;
+}
+
+/**
+ * True when `step` sits inside the fade-out: from there to the end of the
+ * track the level only falls, window by window, by FADE_OUT_DB or more in
+ * all. A quiet outro that steps down and then holds is a section; a ramp to
+ * nothing is the song leaving, and gets no look change.
+ */
+function fadingInto(step: number, stepRms: Float32Array): boolean {
+  const span = 5;
+  const count = stepRms.length;
+  if (count - step > FADE_OUT_MAX_STEPS || count - step < span * 3) return false;
+  let previous = Infinity;
+  let first = 0;
+  let last = 0;
+  for (let from = step; from + span <= count; from += span) {
+    let power = 0;
+    for (let i = from; i < from + span; i++) power += stepRms[i]! * stepRms[i]!;
+    const level = 10 * Math.log10(power / span + 1e-10);
+    if (level > previous - FADE_OUT_STEP_DB) return false;
+    if (from === step) first = level;
+    last = level;
+    previous = level;
+  }
+  return first - last >= FADE_OUT_DB;
+}
+
+function median(values: Float32Array): number {
+  const sorted = Array.from(values).sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)] ?? 0;
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -654,9 +830,9 @@ function pickBoundaries(novelty: Float32Array, kernel: number): number[] {
   return [];
 }
 
-function snapToBar(step: number, downbeat: number, count: number): number {
-  const offset = (((step - downbeat) % 4) + 4) % 4;
-  const snapped = offset <= 2 ? step - offset : step + (4 - offset);
+function snapToBar(step: number, downbeat: number, count: number, beatsPerBar: number): number {
+  const offset = (((step - downbeat) % beatsPerBar) + beatsPerBar) % beatsPerBar;
+  const snapped = offset <= beatsPerBar / 2 ? step - offset : step + (beatsPerBar - offset);
   return Math.max(0, Math.min(count, snapped));
 }
 
@@ -674,7 +850,12 @@ function spaceBoundaries(candidates: Array<{ step: number; weight: number }>, co
   return [0, ...kept.sort((a, b) => a - b), count];
 }
 
-/** A section repeats the earliest earlier section whose mean feature vector it matches. */
+/**
+ * A section repeats the earliest earlier section whose mean feature vector it
+ * matches. The chroma part is matched under the best of its twelve rotations,
+ * so a chorus lifted a semitone is still the chorus; the section's own
+ * keyShift carries the colour of the lift.
+ */
 function labelSections(means: Float32Array[]): number[] {
   const labels: number[] = [];
   let next = 0;
@@ -682,16 +863,27 @@ function labelSections(means: Float32Array[]): number[] {
     let best = -1;
     let bestSim = 0.86;
     for (let i = 0; i < j; i++) {
-      let dot = 0;
-      for (let d = 0; d < means[j]!.length; d++) dot += means[i]![d]! * means[j]![d]!;
-      if (dot > bestSim) {
-        bestSim = dot;
+      const sim = sectionSimilarity(means[i]!, means[j]!);
+      if (sim > bestSim) {
+        bestSim = sim;
         best = i;
       }
     }
     labels.push(best >= 0 ? labels[best]! : next++);
   }
   return labels;
+}
+
+function sectionSimilarity(a: Float32Array, b: Float32Array): number {
+  let fixed = 0;
+  for (let d = 0; d < a.length; d++) if (d < MEL_BANDS || d >= MEL_BANDS + 12) fixed += a[d]! * b[d]!;
+  let chroma = -Infinity;
+  for (let rotation = 0; rotation < 12; rotation++) {
+    let dot = 0;
+    for (let pc = 0; pc < 12; pc++) dot += a[MEL_BANDS + pc]! * b[MEL_BANDS + ((pc + rotation) % 12)]!;
+    if (dot > chroma) chroma = dot;
+  }
+  return fixed + chroma;
 }
 
 /** 0..1 per section, relative to this track's own loudest, busiest, brightest section. */
@@ -826,6 +1018,13 @@ function estimateKey(chroma: Float32Array): ScoreKey {
   });
   const margin = best.r - (rival?.r ?? 0);
   return { tonic: best.tonic, minor: best.minor, confidence: round3(Math.max(0, Math.min(1, best.r > 0 ? margin * 3 : 0))) };
+}
+
+/** How well a chroma vector fits a key's profile, −1..1. */
+function keyCorrelation(chroma: Float32Array, key: ScoreKey): number {
+  const profile = key.minor ? MINOR_PROFILE : MAJOR_PROFILE;
+  const rotated = Array.from({ length: 12 }, (_, pc) => profile[(pc - key.tonic + 12) % 12]!);
+  return pearson(chroma, rotated);
 }
 
 /** Position on the circle of fifths (0 = C major / A minor), relative keys sharing a position. */

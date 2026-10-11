@@ -20,8 +20,8 @@ vec3 sliceColor(vec2 q, float seed) {
 }
 
 vec4 scene(vec2 uv, vec2 p) {
-  // Re-randomize per pseudo-beat: floor of beatPhase wraps.
-  float beatTick = floor(u_globalTime * 2.4) + floor(u_beatPhase * 4.0);
+  // Re-randomize on each counted kick (never more than ~3 times a second).
+  float beatTick = floor(u_kickCount);
   float seedB = u_seed * 419.0 + beatTick * 0.137;
 
   // Quantize y into bars; each bar gets a hash-driven horizontal offset.
@@ -59,8 +59,9 @@ vec4 scene(vec2 uv, vec2 p) {
   float scan = 0.5 + 0.5 * sin(uv.y * 720.0 + u_globalTime * 18.0);
   col += u_light * u_hatPulse * scan * 0.08;
 
-  // White-flash blocks on strong snare hits (rare wide bars).
-  float blockR = hash11(by * 0.27 + floor(u_globalTime * 6.0));
+  // White-flash blocks on strong snare hits (rare wide bars). Which bars flash
+  // follows the kick count, like the bar pattern, not a fixed timer.
+  float blockR = hash11(by * 0.27 + beatTick * 0.731);
   float flash = step(0.985, blockR) * u_snarePulse;
   col += vec3(1.0) * flash * 0.45;
 

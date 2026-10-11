@@ -9,6 +9,7 @@ export const cityPulse: SceneDef = {
   id: 'city-pulse',
   name: 'City Pulse',
   mood: 'high',
+  occlusion: 0.85,
   frag: `
 float bandLevel(int idx) {
   float level = 0.0;
@@ -34,7 +35,7 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Building mass with a thin gap between towers.
   float inBuilding = step(uv.y, height) * step(0.06, cell) * step(cell, 0.94);
-  vec3 wall = mix(vec3(0.015, 0.02, 0.035), paletteRamp(0.3) * 0.14, level);
+  vec3 wall = mix(u_dark * 0.12, paletteRamp(0.3) * 0.14, level);
   col = mix(col, wall, inBuilding);
 
   // Windows: grid of lit cells; probability rises with the band level and
@@ -48,7 +49,7 @@ vec4 scene(vec2 uv, vec2 p) {
   // Rooftop beacons on the tallest towers, blinking with the beat.
   float roof = smoothstep(height - 0.006, height, uv.y) * step(uv.y, height + 0.004) * step(0.55, height);
   float blink = 0.5 + 0.5 * sin(u_beatPhase * 6.28318 + rnd * 6.28318);
-  col += vec3(1.0, 0.25, 0.2) * roof * blink * u_beatConf * step(0.45, cell) * step(cell, 0.55);
+  col += u_light * roof * blink * u_beatConf * step(0.45, cell) * step(cell, 0.55);
 
   // Street glow: kick thumps warm light up from the bottom edge.
   float street = exp(-uv.y * 9.0);
