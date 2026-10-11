@@ -118,7 +118,7 @@ assert.match(fullscreenSource, /ArrowRight/, 'Fullscreen visualizer should suppo
 assert.match(fullscreenSource, /pickAutoVjPreset/, 'Auto VJ should choose presets from live audio energy');
 assert.match(fullscreenSource, /visualizerEnergy/, 'Auto VJ should inspect analyzer bins instead of cycling blindly');
 assert.match(fullscreenSource, /VIZ_AUTO_VJ_KEY/, 'Auto VJ should persist between visualizer sessions');
-assert.match(visualizerSource, /boostFrequencyData\(freq, tuningRef\.current\.reactivity\)/, 'Visualizer should expose configurable signal response');
+assert.match(visualizerSource, /boostFrequencyData\(freq, tuningRef\.current\.reactivity, analyzedRate \/ engine\.fftSize\)/, 'Visualizer should expose configurable signal response, with band edges taken from the analysed sample rate');
 assert.match(visualizerSource, /type VizPalette/, 'Visualizer should support user-selectable color palettes');
 assert.match(visualizerSource, /type VizPerformance/, 'Visualizer should support a low-end rendering mode');
 assert.match(visualizerSource, /type VizReactivity/, 'Visualizer should support truthful and boosted reactivity modes');
@@ -128,8 +128,13 @@ assert.match(visualizerSource, /u_bands0/, 'Shader visualizers should receive re
 assert.match(visualizerSource, /oscilloscopePalette/, 'Oscilloscope should support selectable and changing colors');
 assert.match(
   visualizerSource,
-  /quality === '4k' \? 4_200_000 : 2_100_000/,
-  'Fullscreen visualizer should cap render pixels for responsive full-screen playback',
+  /quality === '4k' \? 8_300_000 : 2_100_000/,
+  'Fullscreen visualizer should cap render pixels: 4K is the 3840x2160 budget, the other qualities stay at 2.1 MP',
+);
+assert.match(
+  visualizerSource,
+  /const fourK = isFullscreen && performance !== 'low' && quality === '4k'/,
+  'The 4K pixel budget should be the tier the cost governor trims back',
 );
 assert.match(
   visualizerSource,

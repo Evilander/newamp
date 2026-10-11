@@ -64,6 +64,10 @@ assert.ok(
 // The pointer hides when idle; a move has to bring it back, or the projector
 // window has no usable cursor at all.
 assert.equal(result.cursor?.afterMove, 'default', `projector cursor must return on mouse movement (${JSON.stringify(result.cursor)})`);
+// The other half of the contract: left alone for the 2 s idle timer, it goes
+// away again. Without this, dropping the hide leaves a cursor parked over the
+// picture on the projector and nothing notices.
+assert.equal(result.cursor?.afterIdle, 'none', `projector cursor must hide after the idle timeout (${JSON.stringify(result.cursor)})`);
 // The fixture is a 45 s local file, so the projector must be conducting from
 // its song score (analysed by the real ffmpeg path), not running causal-only.
 assert.equal(

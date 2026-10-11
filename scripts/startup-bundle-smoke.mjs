@@ -31,7 +31,14 @@ assert.doesNotMatch(startupSplashSource, /startup-splash-wordmark|startup-splash
 assert.match(styleSource, /\.startup-splash\s*\{[\s\S]*?background:\s*transparent;/, 'startup splash should not paint a black overlay');
 assert.doesNotMatch(styleSource, /brand-logo-themed/, 'theme-colored logo skin CSS should not ship');
 assert.doesNotMatch(styleSource, /\.startup-splash-logo\s*\{[\s\S]*?filter:/, 'startup splash should not add a color-changing logo filter');
-assert.match(mainSource, /STARTUP_SPLASH_HOLD_MS = 5600/, 'native startup splash should linger long enough to read the logo');
+assert.match(mainSource, /STARTUP_SPLASH_MIN_MS = 600/, 'native startup splash should keep only a short minimum so it does not flash');
+assert.doesNotMatch(mainSource, /STARTUP_SPLASH_HOLD_MS/, 'the main window should not wait out a fixed splash hold once it is ready');
+assert.match(
+  mainSource,
+  /Math\.max\(0,\s*STARTUP_SPLASH_MIN_MS - \(Date\.now\(\) - startupSplashStartedAt\)\)/,
+  'the splash should wait only for what is left of its minimum',
+);
+assert.match(mainSource, /writeDiagnosticEvent\('main-window-shown'/, 'the moment the main window is shown should be recorded');
 assert.match(mainSource, /show:\s*false/, 'main window should start hidden behind the native logo splash');
 assert.match(mainSource, /createStartupSplashWindow\(\);[\s\S]*?mainWin = createWindow\(\)/, 'native logo splash should open before the main window');
 assert.match(mainSource, /closeStartupSplashWindow\(\);[\s\S]*?win\.show\(\)/, 'main window should reveal only after the splash closes');

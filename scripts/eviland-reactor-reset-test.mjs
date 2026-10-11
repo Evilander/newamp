@@ -47,13 +47,13 @@ log.push(`fresh reactor first frame: sectionId=${freshFrame.sectionId} sectionCh
 const reactor = createEvilandReactor({ sampleRate: 48000, fftSize: 2048, binCount: BINS });
 let now = 0;
 let sawBoundary = false;
-for (; now <= 8000; now += DT) {
-  const f = spectrum(now >= 4000);
+for (; now <= 26000; now += DT) {
+  const f = spectrum(now >= 12000);
   const frame = reactor.analyze(f, f, f, f, DT, now);
   if (frame.sectionChanged) sawBoundary = true;
 }
 const beforeReset = reactor.analyze(spectrum(true), spectrum(true), spectrum(true), spectrum(true), DT, now);
-log.push(`before reset: sectionId=${beforeReset.sectionId} (built up over an 8s "track")`);
+log.push(`before reset: sectionId=${beforeReset.sectionId} (built up over a 26s "track")`);
 if (!sawBoundary || beforeReset.sectionId < 1) {
   fail('test setup: track 1 should have built real structural memory (sectionId >= 1) before reset() is even tested');
 }

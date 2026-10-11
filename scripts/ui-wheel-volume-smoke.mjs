@@ -16,12 +16,37 @@ const result = await runElectronSmoke();
 console.log(JSON.stringify(result, null, 2));
 assert.equal(result.ok, true, 'UI wheel-volume smoke should report success');
 const span = result.count * result.stepPerEvent;
-assertNear(result.afterFast, result.fastStart + span, 'a burst of wheel events with the renderer idle');
-assertNear(result.afterThrottled, result.throttledStart - span, 'the same burst with the renderer CPU-throttled 16x');
-assertNear(result.afterJank, result.jankStart + span, 'the same burst with the main thread busy 80% of the time');
-assertNear(result.afterSettings, result.settingsStart - span, 'a burst with the Settings view open');
-assertNear(result.afterVisualizer, result.visualizerStart + span, 'a burst after the visualizer was opened and closed');
-assertNear(result.afterDeck, result.deckStart - span, "a burst over the Retro TV deck's own slider");
+// One quarter-notch event after a pause is a slow click: it moves a whole
+// step (0.02), not the 0.01 its distance alone would give. The first event of
+// every burst below follows a pause and is floored the same way, so each burst
+// lands STEP_FLOOR_EXTRA past the distance scrolled, in the direction scrolled.
+// Under throttling or jank queued events merge, and a straggler can arrive on
+// its own after a stall and be floored too. Those two bursts get one more
+// floored step of tolerance; it is still far tighter than what a stalled or
+// reversed scroll would lose (0.4 or more).
+const STEP_FLOOR_EXTRA = 0.01;
+const MERGING_BURST_TOLERANCE = 0.02 + STEP_FLOOR_EXTRA;
+assert.ok(
+  Math.abs(result.afterOne - result.start) >= 0.019,
+  `a slow single wheel event should move at least one step, moved ${Math.abs(result.afterOne - result.start)}`,
+);
+const burstSpan = span + STEP_FLOOR_EXTRA;
+assertNear(result.afterFast, result.fastStart + burstSpan, 'a burst of wheel events with the renderer idle');
+assertNear(
+  result.afterThrottled,
+  result.throttledStart - burstSpan,
+  'the same burst with the renderer CPU-throttled 16x',
+  MERGING_BURST_TOLERANCE,
+);
+assertNear(
+  result.afterJank,
+  result.jankStart + burstSpan,
+  'the same burst with the main thread busy 80% of the time',
+  MERGING_BURST_TOLERANCE,
+);
+assertNear(result.afterSettings, result.settingsStart - burstSpan, 'a burst with the Settings view open');
+assertNear(result.afterVisualizer, result.visualizerStart + burstSpan, 'a burst after the visualizer was opened and closed');
+assertNear(result.afterDeck, result.deckStart - burstSpan, "a burst over the Retro TV deck's own slider");
 assertNear(result.afterKnobDrag, result.knobStart + 0.3, 'dragging the Retro TV volume knob up 30 px');
 assertNear(result.afterDoubleClick, 1, 'a double-click on the slider resets the volume to 100%');
 
@@ -129,10 +154,12 @@ function runElectronSmoke() {
   });
 }
 
-function assertNear(actual, expected, label) {
+function assertNear(actual, expected, label, tolerance = 0.02) {
+  // The epsilon keeps a difference of exactly one tolerance from failing on
+  // float noise (0.8200000000000001 - 0.8).
   assert.ok(
-    typeof actual === 'number' && Math.abs(actual - expected) <= 0.02,
-    `${label}: expected ${expected.toFixed(2)}, got ${actual}`,
+    typeof actual === 'number' && Math.abs(actual - expected) <= tolerance + 1e-9,
+    `${label}: expected ${expected.toFixed(2)} (within ${tolerance}), got ${actual}`,
   );
 }
 

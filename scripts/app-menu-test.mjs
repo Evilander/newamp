@@ -21,14 +21,77 @@ const log = [];
 let pass = true;
 const fail = (m) => { pass = false; log.push('FAIL: ' + m); };
 
-const mac = buildAppMenuTemplate('darwin', { appName: 'NewAmp', appVersion: '1.10.0' });
-const roles = mac.map((m) => m.role).filter(Boolean);
-log.push('darwin roles: ' + JSON.stringify(roles));
-for (const want of ['appMenu', 'editMenu', 'viewMenu', 'windowMenu']) {
-  if (!roles.includes(want)) fail(`darwin menu missing role ${want}`);
+const calls = { preferences: 0, external: [] };
+const menuOptions = (isPackaged, withPreferences = true) => ({
+  appName: 'NewAmp',
+  appVersion: '1.10.0',
+  isPackaged,
+  ...(withPreferences ? { onPreferences: () => { calls.preferences += 1; } } : {}),
+  onOpenExternal: (url) => { calls.external.push(url); },
+});
+const submenuOf = (template, label) => template.find((item) => item.label === label || item.role === label)?.submenu ?? [];
+const rolesOf = (items) => items.map((item) => item.role).filter(Boolean);
+
+const mac = buildAppMenuTemplate('darwin', menuOptions(true));
+log.push('darwin top level: ' + JSON.stringify(mac.map((m) => m.label ?? m.role)));
+for (const want of ['editMenu', 'windowMenu', 'help']) {
+  if (!mac.some((item) => item.role === want)) fail(`darwin menu missing role ${want}`);
 }
 
-const win = buildAppMenuTemplate('win32', { appName: 'NewAmp', appVersion: '1.10.0' });
+// Cmd+, opens Settings from the app menu.
+const appMenu = submenuOf(mac, 'NewAmp');
+const preferences = appMenu.find((item) => item.accelerator === 'CmdOrCtrl+,');
+if (!preferences) fail('darwin app menu has no item on CmdOrCtrl+,');
+else {
+  preferences.click?.();
+  if (calls.preferences !== 1) fail('the Settings item should call onPreferences');
+}
+for (const want of ['about', 'services', 'hide', 'hideOthers', 'unhide', 'quit']) {
+  if (!rolesOf(appMenu).includes(want)) fail(`darwin app menu missing role ${want}`);
+}
+const settingsAt = appMenu.findIndex((item) => item.accelerator === 'CmdOrCtrl+,');
+const servicesAt = appMenu.findIndex((item) => item.role === 'services');
+if (settingsAt === -1 || servicesAt === -1 || settingsAt > servicesAt) fail('Settings should come before Services');
+
+// Without a handler there is no Settings item at all: no dead Cmd+, and no
+// doubled separator where it would have been.
+const bare = submenuOf(buildAppMenuTemplate('darwin', menuOptions(true, false)), 'NewAmp');
+log.push('app menu without a Settings handler: ' + JSON.stringify(bare.map((item) => item.role ?? item.type ?? item.label)));
+if (bare.some((item) => item.accelerator === 'CmdOrCtrl+,' || item.label === 'Settings…')) {
+  fail('no Settings item should be built when onPreferences is not supplied');
+}
+if (bare.some((item, index) => item.type === 'separator' && bare[index + 1]?.type === 'separator')) {
+  fail('leaving Settings out must not leave two separators in a row');
+}
+for (const want of ['about', 'services', 'hide', 'quit']) {
+  if (!rolesOf(bare).includes(want)) fail(`app menu without Settings missing role ${want}`);
+}
+
+// A stray Cmd+R must not reload the page (and stop playback) in a shipped build.
+const packagedView = submenuOf(mac, 'View');
+log.push('packaged View roles: ' + JSON.stringify(rolesOf(packagedView)));
+for (const banned of ['reload', 'forceReload', 'toggleDevTools']) {
+  if (rolesOf(packagedView).includes(banned)) fail(`packaged View menu must not include ${banned}`);
+}
+for (const want of ['togglefullscreen', 'resetZoom', 'zoomIn', 'zoomOut']) {
+  if (!rolesOf(packagedView).includes(want)) fail(`packaged View menu missing ${want}`);
+}
+
+const devView = submenuOf(buildAppMenuTemplate('darwin', menuOptions(false)), 'View');
+log.push('development View roles: ' + JSON.stringify(rolesOf(devView)));
+for (const want of ['reload', 'forceReload', 'toggleDevTools', 'togglefullscreen']) {
+  if (!rolesOf(devView).includes(want)) fail(`development View menu missing ${want}`);
+}
+
+// Help menu links go through the opener the caller supplies.
+const help = submenuOf(mac, 'help');
+if (help.length < 1) fail('help menu should have entries');
+for (const item of help) item.click?.();
+if (!calls.external.length || !calls.external.every((url) => url.startsWith('https://github.com/'))) {
+  fail('help entries should open https://github.com links, got ' + JSON.stringify(calls.external));
+}
+
+const win = buildAppMenuTemplate('win32', menuOptions(true));
 log.push('win32 template length: ' + win.length);
 if (win.length !== 0) fail('non-darwin should return an empty template (keep current chromeless behavior)');
 

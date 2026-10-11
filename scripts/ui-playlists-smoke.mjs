@@ -102,7 +102,27 @@ async function run(body) {
   return res.result?.result?.value;
 }
 
+async function cdp(method, params = {}) {
+  const id = ++seq;
+  ws.send(JSON.stringify({ id, method, params }));
+  return new Promise((r) => pending.set(id, r));
+}
+
 const result = {};
+// The Playlist column is hidden on a fresh install and the row picker lives
+// in it. Save a layout that shows every column, then reload so the table
+// store reads it.
+const bootedAt = await run(`
+  localStorage.setItem('newamp:track-table:columns', JSON.stringify({ order: [], hidden: [] }));
+  return performance.timeOrigin;
+`);
+await cdp('Page.reload');
+for (let i = 0; i < 120; i += 1) {
+  const res = await cdp('Runtime.evaluate', { expression: `performance.timeOrigin !== ${bootedAt} && !!document.querySelector('[data-newamp-transport]')`, returnByValue: true });
+  if (res.result?.result?.value === true) break;
+  if (i === 119) fail('app did not come back after the reload');
+  await sleep(250);
+}
 // Library scanned, first-run card out of the way.
 await run(`
   await waitFor('transport', () => document.querySelector('[data-newamp-transport]'), 30000);

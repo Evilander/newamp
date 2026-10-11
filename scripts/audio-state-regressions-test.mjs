@@ -155,9 +155,57 @@ try {
       assert.equal(outgoing.replayGain.gain.value, gainA);
     } finally { subject.dispose(); }
   }
+  {
+    // Tracks that left the library did not stop early, they stopped existing: no skip is recorded for them,
+    // and when nothing follows the playing one, playback ends instead of restarting the track before it.
+    const skips = [];
+    api.recordSkip = async (id) => { skips.push(id); };
+    store.getState().loadQueue([]);
+    await store.getState().playQueue([a, b, c], 1);
+    engine.patchExternal({ playing: true, currentTime: 60 });
+    await store.getState().dropTracks([2]);
+    assert.equal(store.getState().current.id, 3, 'the next survivor takes over');
+    assert.equal(plays.at(-1), 3);
+    assert.deepEqual(skips, [], 'a deleted track is not a skipped one');
+
+    store.setState({ mode: 'normal' });
+    await store.getState().playQueue([a, b, c], 2);
+    engine.patchExternal({ playing: true, currentTime: 60 });
+    let before = plays.length;
+    await store.getState().dropTracks([3]);
+    assert.equal(plays.length, before, 'the last track going does not start the one before it');
+    assert.equal(store.getState().isPlaying, false);
+    assert.equal(store.getState().current.id, 2, 'the queue parks on its last survivor');
+    assert.equal(store.getState().index, 1);
+    assert.equal(store.getState().currentTime, 0);
+    assert.equal(engine.getState().src, null, 'the engine lets go of the removed track');
+    assert.deepEqual(skips, []);
+
+    store.setState({ mode: 'repeat-all' });
+    await store.getState().playQueue([a, b, c], 2);
+    engine.patchExternal({ playing: true, currentTime: 60 });
+    await store.getState().dropTracks([3]);
+    assert.equal(plays.at(-1), 1, 'repeat-all carries on from the top');
+    assert.equal(store.getState().index, 0);
+    assert.deepEqual(skips, []);
+
+    store.setState({ mode: 'normal' });
+    await store.getState().playQueue([a, b, c], 2);
+    engine.patchExternal({ playing: true, currentTime: 60 });
+    before = plays.length;
+    await store.getState().removeQueuedTrack(2);
+    assert.equal(plays.length, before, 'removing the playing last entry ends playback too');
+    assert.equal(store.getState().isPlaying, false);
+    assert.equal(store.getState().current.id, 2);
+    await store.getState().playQueue([a, b, c], 1);
+    engine.patchExternal({ playing: true, currentTime: 60 });
+    await store.getState().removeQueuedTrack(1);
+    assert.equal(plays.at(-1), 3, 'removing a playing entry that has a successor plays the successor');
+    api.recordSkip = async () => {};
+  }
   assert.equal(classifyAudioQuality({ path: '/alac.m4a', bitrate: 900000, sampleRate: 96000 }).family, 'container', 'M4A alone cannot identify a lossy codec');
   assert.equal(classifyAudioQuality({ path: '/track.flac', bitrate: 900000, sampleRate: 96000 }).family, 'lossless');
-  console.log('PASS current-source audio/state regressions: stale Next, Auto DJ, restore, EQ, ReplayGain, container classification');
+  console.log('PASS current-source audio/state regressions: stale Next, Auto DJ, restore, EQ, ReplayGain, dropped tracks, container classification');
 } catch (error) {
   console.error(error.stack);
   process.exitCode = 1;

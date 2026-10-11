@@ -92,8 +92,11 @@ assert.match(storeSource, /setSettings\(\{ compactMode: on \}\)/, 'player store 
 assert.match(storeSource, /setSettings\(\{ alwaysOnTop: on \}\)/, 'player store should persist always-on-top changes');
 assert.match(storeSource, /vizPreset: settings\.visualizerPreset/, 'player store should initialize visualizer preset from settings');
 assert.match(storeSource, /setSettings\(\{ visualizerPreset: name \}\)/, 'player store should persist visualizer preset changes');
-assert.match(appSource, /winctl\.setCompact\(compact\)/, 'renderer should sync compact mode to the native window');
-assert.match(appSource, /winctl\.setAlwaysOnTop\(compact \|\| alwaysOnTop\)/, 'renderer should sync pinned/native topmost state');
+assert.match(appSource, /if \(!compact\) void winctl\.setCompact\(false\)/, 'renderer should restore the native window when deck mode ends');
+assert.doesNotMatch(appSource, /winctl\.setCompact\(true/, 'only the deck sizes the native window when it enters deck mode, App must not race it with a default size');
+assert.match(compactSource, /winctl\.setCompact\(true, deck\.size\)/, 'the deck should size the native window to the chosen skin');
+assert.match(appSource, /winctl\.setAlwaysOnTop\(alwaysOnTop\)/, 'renderer should sync the pinned/native topmost state');
+assert.doesNotMatch(appSource, /winctl\.setAlwaysOnTop\(compact \|\|/, 'deck mode should not force the window on top; the Pin button decides');
 assert.match(appSource, /const FullscreenVisualizer = lazy/, 'fullscreen visualizer should be lazy-loaded off the startup path');
 assert.match(
   appSource,
@@ -150,7 +153,7 @@ assert.match(storeSource, /fullscreenViz: on \? false : get\(\)\.fullscreenViz/,
 assert.match(mainSource, /setResizable\(false\)/, 'compact deck window should lock user resizing');
 assert.match(mainSource, /setResizable\(true\)/, 'full library window should restore resizing');
 assert.match(mainSource, /NEWAMP_DISABLE_HARDWARE_ACCELERATION/, 'main process should expose explicit rendering-mode controls');
-assert.match(mainSource, /if \(!tray \|\| tray\.isDestroyed\(\)\) return/, 'closing should not hide the app when the tray is unavailable');
+assert.match(mainSource, /closeAction\(\{[\s\S]*?hasTray: !!tray && !tray\.isDestroyed\(\)/, 'closing should not hide the app when the tray is unavailable');
 assert.match(mainSource, /process\.platform === 'win32'[\s\S]+icon\.ico/, 'Windows tray icons should prefer the packaged ICO asset');
 assert.match(mainSource, /nativeImage\.createFromPath\(iconPath\)/, 'tray should create a native image from the packaged NewAmp icon');
 assert.match(mainSource, /image\.resize\(\{ width: 16, height: 16, quality: 'best' \}\)/, 'tray should use a shell-sized native image');

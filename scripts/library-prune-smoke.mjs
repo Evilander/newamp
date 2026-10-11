@@ -27,6 +27,8 @@ library.upsertTracks([
   incoming(outsideMissingPath, 'Outside Missing'),
 ]);
 assert.equal(library.getStats().tracks, 3);
+const [missingRow] = library.getTracksByPaths([missingPath]);
+const [outsideMissingRow] = library.getTracksByPaths([outsideMissingPath]);
 
 await unlink(missingPath);
 await unlink(outsideMissingPath);
@@ -34,8 +36,8 @@ await unlink(outsideMissingPath);
 const targeted = library.pruneMissingTracks([musicRoot]);
 assert.deepEqual(
   targeted,
-  { checked: 2, removed: 1, offline: 0 },
-  'targeted prune should remove only missing files below the requested root',
+  { checked: 2, removed: 1, removedIds: [missingRow.id], offline: 0 },
+  'targeted prune should remove only missing files below the requested root, and name the rows it dropped',
 );
 assert.equal(library.getStats().tracks, 2);
 assert.equal(library.getTracksByPaths([keepPath]).length, 1);
@@ -43,7 +45,7 @@ assert.equal(library.getTracksByPaths([missingPath]).length, 0);
 assert.equal(library.getTracksByPaths([outsideMissingPath]).length, 1);
 
 const global = library.pruneMissingTracks();
-assert.deepEqual(global, { checked: 2, removed: 1, offline: 0 });
+assert.deepEqual(global, { checked: 2, removed: 1, removedIds: [outsideMissingRow.id], offline: 0 });
 assert.equal(library.getStats().tracks, 1);
 library.close();
 

@@ -188,13 +188,13 @@ const idsIn = (tracks) => tracks.map((track) => track.id);
   const [b] = library.getTracksByPaths([bPath]);
   library.applyManualMetadataPatch(b.id, { title: 'Doomed edit' });
   const deletedFile = library.pruneMissingTracks(undefined, [music]);
-  assert.deepEqual(deletedFile, { checked: 3, removed: 1, offline: 0 });
+  assert.deepEqual(deletedFile, { checked: 3, removed: 1, removedIds: [b.id], offline: 0 }, 'the cleanup names the rows it dropped so the table can drop them in place');
   assert.equal(library.getTrack(b.id), null);
 
   // A whole album folder deleted inside a root that is still there.
   await rm(join(music, 'Artist'), { recursive: true });
   const deletedFolder = library.pruneMissingTracks(undefined, [music]);
-  assert.deepEqual(deletedFolder, { checked: 2, removed: 1, offline: 0 });
+  assert.deepEqual(deletedFolder, { checked: 2, removed: 1, removedIds: [a.id], offline: 0 });
   assert.equal(library.getTrack(a.id), null);
   assert.deepEqual(library.getPlaylistTracks(playlist.id), []);
   assert.equal(library.getStats().tracks, 1, 'the loose track in the root is untouched');

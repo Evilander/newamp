@@ -137,7 +137,7 @@ async function run() {
     window.__api.scanLibrary = () => { window.__dropCalls.scan++; return new Promise((r) => setTimeout(r, 60)); };
     window.__api.openFiles = () => { window.__dropCalls.open++; return new Promise((r) => setTimeout(() => r({ tracks: [], importedPlaylists: [], skipped: [] }), 60)); };
   `);
-  await drop('[placeholder^="artist:radiohead"]');
+  await drop('[placeholder*="artist:radiohead"]');
   await wait(20);
   results.libraryDrop = await observe();
   await wait(400);
