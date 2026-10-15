@@ -121,16 +121,19 @@ async function methods(path, names, bindings) {
   const read = deferred();
   let albums = ['new query'], loading = true, hasMore = true;
   const generation = { current: 1 };
+  const snapshot = { fetched: 1 };
   const ctx = await methods('src/components/views/AlbumsView.tsx', ['loadMoreAlbums'], {
     loadingAlbums: false, albumPageRequestRef: { current: false }, hasMoreAlbums: true,
     albumRequestGeneration: generation, albumQuery: 'old', showMissingArtOnly: false, albumSort: 'artist', randomSeed: 1,
     ALBUM_PAGE_SIZE: 240, albums: ['old query'], api: { getAlbums: () => read.promise },
+    albumViewSnapshot: snapshot, appendAlbumPage: (current, page) => [...current, ...page],
     setAlbums(update) { albums = update(albums); }, setHasMoreAlbums(value) { hasMore = value; },
     setLoadingAlbums(value) { loading = value; }, pushToast() {},
   });
   const pending = ctx.loadMoreAlbums(); generation.current++;
   read.resolve(['old page']); await pending;
   assert.deepEqual(albums, ['new query']); assert.equal(loading, true); assert.equal(hasMore, true);
+  assert.equal(snapshot.fetched, 1, 'a stale page does not move the next offset');
 }
 
 // Run the actual server handler without a listener or profile.

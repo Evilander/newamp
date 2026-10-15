@@ -111,7 +111,10 @@ try {
   assert.match(albumsViewSource, /useDebouncedValue\(filter, CATALOG_SEARCH_DEBOUNCE_MS\)/, 'AlbumsView should debounce album search');
   assert.match(albumsViewSource, /search: albumQuery/, 'AlbumsView should query album summaries with the debounced search');
   assert.match(albumsViewSource, /missingArtOnly: showMissingArtOnly/, 'AlbumsView should preserve missing-art filtering server-side');
-  assert.match(albumsViewSource, /offset: albums\.length/, 'AlbumsView should request later album pages by loaded row count');
+  // Rows read, not albums shown: repeats dropped after a mid-scroll scan must
+  // not hold the offset back.
+  assert.match(albumsViewSource, /offset: albumViewSnapshot\.fetched/, 'AlbumsView should request later album pages by the rows already read');
+  assert.match(albumsViewSource, /appendAlbumPage\(currentAlbums, page\)/, 'AlbumsView should append pages without repeating albums');
   assert.match(albumsViewSource, /Load more albums/, 'AlbumsView should expose explicit album pagination');
   assert.match(albumsViewSource, /data-newamp-albums-load-more/, 'AlbumsView should expose a stable load-more marker');
   assert.match(albumsViewSource, /data-newamp-albums-sort/, 'AlbumsView should expose album sort controls');
