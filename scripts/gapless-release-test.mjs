@@ -78,16 +78,16 @@ function fixture(name, seconds) {
 const a = fixture('a.wav', 120);
 const b = fixture('b.wav', 120);
 const c = fixture('c.wav', 120);
-// Exactly the producer's high-water mark (3 s): with no credit given, its
+// Exactly the producer's high-water mark (30 s): with no credit given, its
 // decoder finishes and the chained decoder spawns paused, header unread.
-const short = fixture('short.wav', 3);
+const short = fixture('short.wav', 30);
 const e = fixture('e.wav', 120);
 const f = fixture('f.wav', 120);
 const sources = new Map([
   [1, { trackId: 1, path: a, sampleRate: 44100, bitDepth: 16, channels: 2, durationSec: 120, lossless: true, dsd: false }],
   [2, { trackId: 2, path: b, sampleRate: 44100, bitDepth: 16, channels: 2, durationSec: 120, lossless: true, dsd: false }],
   [3, { trackId: 3, path: c, sampleRate: 44100, bitDepth: 16, channels: 2, durationSec: 120, lossless: true, dsd: false }],
-  [4, { trackId: 4, path: short, sampleRate: 44100, bitDepth: 16, channels: 2, durationSec: 3, lossless: true, dsd: false }],
+  [4, { trackId: 4, path: short, sampleRate: 44100, bitDepth: 16, channels: 2, durationSec: 30, lossless: true, dsd: false }],
   [5, { trackId: 5, path: e, sampleRate: 44100, bitDepth: 16, channels: 2, durationSec: 120, lossless: true, dsd: false }],
   [6, { trackId: 6, path: f, sampleRate: 44100, bitDepth: 16, channels: 2, durationSec: 120, lossless: true, dsd: false }],
 ]);
@@ -195,7 +195,7 @@ async function startShortThen(gen, token, next) {
   const started = await handlers['gapless:start']({ sender: t.sender }, { gen, token, trackId: 4, startAt: 0, gain: 1, sampleRate: 44100, next });
   assert.equal(started.ok, true, started.error);
   // Everything but the tail the producer coalesces is on the port.
-  await t.until(() => t.seen.pcm >= 44100 * 3 - 4096, 'all of short.wav');
+  await t.until(() => t.seen.pcm >= 44100 * 30 - 4096, 'all of short.wav');
   await new Promise((r) => setTimeout(r, 1000));
   return t;
 }
@@ -217,7 +217,7 @@ async function startShortThen(gen, token, next) {
   clearInterval(pump);
   assert.deepEqual(t.seen.fail, []);
   assert.deepEqual(t.seen.seg, [21]);
-  assert.equal(t.seen.pcm, 44100 * 3, `all of short.wav and nothing else played (${t.seen.pcm} frames)`);
+  assert.equal(t.seen.pcm, 44100 * 30, `all of short.wav and nothing else played (${t.seen.pcm} frames)`);
   handlers['gapless:stop']({ sender: t.sender }, 3);
 }
 

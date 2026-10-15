@@ -27,6 +27,7 @@ import {
   type SongScore,
 } from '../src/visualizer/eviland-score.js';
 import { caseFoldCachePath } from './cache-key-casing.js';
+import { onPlaybackHunger, whenPlaybackFed } from './playback-io.js';
 import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
 
 export interface ScoreRequest {
@@ -34,6 +35,16 @@ export interface ScoreRequest {
   /** Cue-sheet tracks are a slice of a longer file; both in seconds. */
   cueStart?: number | null;
   cueEnd?: number | null;
+}
+
+export interface ScoreOptions {
+  /** For the track after this one: stopped, not failed, when playback runs short of audio. */
+  prefetch?: boolean;
+}
+
+interface JobState {
+  prefetch: boolean;
+  stopped: boolean;
 }
 
 // Same watchdog reasoning as dna-analyzer.ts: a malformed source can stall
@@ -48,8 +59,9 @@ let writesSincePrune = 0;
 
 let cacheDir = '';
 let ready: Promise<void> | null = null;
-const inflight = new Map<string, Promise<SongScore | null>>();
+const inflight = new Map<string, { promise: Promise<SongScore | null>; state: JobState }>();
 const liveScoreFfmpeg = new Set<ChildProcess>();
+let decoding: { child: ChildProcess; state: JobState } | null = null;
 // One analysis at a time: it is CPU on the main thread, and the only callers
 // are the current track and a prefetch of the next one.
 let queue: Promise<unknown> = Promise.resolve();
@@ -79,7 +91,7 @@ export function killAllScoreFfmpeg(): void {
  * the track can't have one (missing file, under ~20 s, decode failure) — the
  * visualizer then simply runs on its live analysis.
  */
-export async function getSongScore(request: ScoreRequest): Promise<SongScore | null> {
+export async function getSongScore(request: ScoreRequest, options: ScoreOptions = {}): Promise<SongScore | null> {
   if (!request.path) return null;
   await ready;
   let info;
@@ -95,14 +107,19 @@ export async function getSongScore(request: ScoreRequest): Promise<SongScore | n
     .digest('hex');
 
   const pending = inflight.get(key);
-  if (pending) return pending;
+  if (pending) {
+    // The track a prefetch was for is playing now.
+    if (!options.prefetch) pending.state.prefetch = false;
+    return pending.promise;
+  }
+  const state: JobState = { prefetch: options.prefetch === true, stopped: false };
   const job = (async () => {
     const cached = await readCached(key);
     if (cached) return cached;
     // Chain onto the queue; a failed predecessor must not block this job.
     const run = queue.then(
-      () => analyse(request.path, start, end),
-      () => analyse(request.path, start, end),
+      () => analyse(request.path, start, end, state),
+      () => analyse(request.path, start, end, state),
     );
     queue = run.catch(() => undefined);
     const score = await run;
@@ -114,13 +131,28 @@ export async function getSongScore(request: ScoreRequest): Promise<SongScore | n
       return null;
     })
     .finally(() => inflight.delete(key));
-  inflight.set(key, job);
+  inflight.set(key, { promise: job, state });
   return job;
 }
 
-async function analyse(path: string, start: number, end: number | null): Promise<SongScore | null> {
+// A prefetch decoding when playback runs short is stopped and answers null;
+// the track is analysed again when the visualizer asks for it.
+onPlaybackHunger((hungry) => {
+  if (!hungry || !decoding?.state.prefetch) return;
+  decoding.state.stopped = true;
+  try {
+    decoding.child.kill();
+  } catch {
+    /* already gone */
+  }
+});
+
+async function analyse(path: string, start: number, end: number | null, state: JobState): Promise<SongScore | null> {
   const seconds = Math.min(SONG_SCORE_MAX_SECONDS, end != null ? end - start : SONG_SCORE_MAX_SECONDS);
-  const pcm = await decodeMonoPcm(path, start, seconds);
+  // A drive that is starving playback serves it first.
+  await whenPlaybackFed();
+  const pcm = await decodeMonoPcm(path, start, seconds, state);
+  if (!pcm) return null;
   return computeSongScore(pcm, {
     sampleRate: SONG_SCORE_SAMPLE_RATE,
     pause: () => new Promise<void>((resolve) => setImmediate(resolve)),
@@ -133,7 +165,7 @@ async function analyse(path: string, start: number, end: number | null): Promise
  * their concatenation and the float copy together cost ~8 bytes per sample
  * (about 200 MB for a 20-minute mix); this way it is 4.
  */
-function decodeMonoPcm(inputPath: string, start: number, seconds: number): Promise<Float32Array> {
+function decodeMonoPcm(inputPath: string, start: number, seconds: number, state: JobState): Promise<Float32Array | null> {
   return new Promise((resolve, reject) => {
     const args = ['-hide_banner', '-nostdin', '-loglevel', 'error'];
     if (start > 0) args.push('-ss', String(start));
@@ -150,6 +182,7 @@ function decodeMonoPcm(inputPath: string, start: number, seconds: number): Promi
     );
     const child = spawn(resolveFfmpegPath(), args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     liveScoreFfmpeg.add(child);
+    decoding = { child, state };
     watchFfmpegInput(child, inputPath);
     // Starts at five minutes of audio and doubles when a longer track needs it.
     let samples = new Float32Array(SONG_SCORE_SAMPLE_RATE * 300);
@@ -158,13 +191,14 @@ function decodeMonoPcm(inputPath: string, start: number, seconds: number): Promi
     let carry = -1;
     let stderr = '';
     let settled = false;
-    const settle = (err?: Error, result?: Float32Array): void => {
+    const settle = (err?: Error, result?: Float32Array | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       liveScoreFfmpeg.delete(child);
+      if (decoding?.child === child) decoding = null;
       if (err) reject(err);
-      else resolve(result!);
+      else resolve(result ?? null);
     };
     const timer = setTimeout(() => {
       try {
@@ -195,7 +229,8 @@ function decodeMonoPcm(inputPath: string, start: number, seconds: number): Promi
     });
     child.on('error', (err) => settle(err));
     child.on('close', (code) => {
-      if (code === 0) settle(undefined, samples.subarray(0, count));
+      if (state.stopped) settle(undefined, null);
+      else if (code === 0) settle(undefined, samples.subarray(0, count));
       else settle(new Error(`ffmpeg exited ${code}: ${stderr.trim().slice(0, 300)}`));
     });
   });

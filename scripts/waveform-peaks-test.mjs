@@ -26,6 +26,7 @@ await build({
     contents: `
       export * from './electron/waveform-peaks';
       export { stopFfmpegReading } from './electron/transcode';
+      export { reportPlaybackHunger } from './electron/playback-io';
     `,
     resolveDir: resolve('.'),
     loader: 'ts',
@@ -37,6 +38,7 @@ const peaks = await import(pathToFileURL(bundlePath).href);
 const {
   PeakReducer, WAVEFORM_BUCKETS, WAVEFORM_SAMPLE_RATE, activeWaveformDecodes, activeWaveformPids, cancelWaveformWork, getWaveform,
   initWaveformCache, killAllWaveformFfmpeg, stopFfmpegReading, waveformCacheKey, encodeWaveformFile, parseWaveformFile,
+  reportPlaybackHunger,
 } = peaks;
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -316,6 +318,52 @@ await whileDecoding('priorities', async (long) => {
   const needed = getWaveform({ path: files[1] });
   const [a, b] = await Promise.all([ahead, needed]);
   assert.ok(a && a === b, 'a prefetch and the urgent request for the same track share one result');
+  return true;
+});
+
+// --- Playback comes first -------------------------------------------------------------
+// While the gapless stream is short of audio, a decode waits to start, and a
+// prefetch already running is stopped without counting as a bad file.
+{
+  const stream = {};
+  const file = await freshWav(12);
+  reportPlaybackHunger(stream, true);
+  const held = getWaveform({ path: file });
+  await sleep(400);
+  assert.equal(activeWaveformDecodes(), 0, 'no decode starts while playback is short of audio');
+  reportPlaybackHunger(stream, false);
+  assert.ok(await held, 'the waiting request decodes once playback is fed');
+}
+await whileDecoding('prefetch stopped for playback', async (long) => {
+  const stream = {};
+  const prefetch = getWaveform({ path: long }, { prefetch: true });
+  if (!(await waitForDecode())) {
+    await prefetch;
+    return false;
+  }
+  reportPlaybackHunger(stream, true);
+  const stopped = await prefetch;
+  reportPlaybackHunger(stream, false);
+  if (stopped !== null) return false;
+  assert.equal(activeWaveformDecodes(), 0, 'the prefetch decode was stopped');
+  assert.ok(!(await cacheHas(long)), 'nothing was cached for it');
+  // Not remembered as a bad file: it decodes when it is the track playing.
+  assert.ok(await getWaveform({ path: long }), 'a stopped prefetch decodes when asked for again');
+  return true;
+});
+await whileDecoding('urgent decode kept', async (long) => {
+  const stream = {};
+  const urgent = getWaveform({ path: long });
+  if (!(await waitForDecode())) {
+    await urgent;
+    return false;
+  }
+  reportPlaybackHunger(stream, true);
+  await sleep(50);
+  const still = activeWaveformDecodes();
+  reportPlaybackHunger(stream, false);
+  assert.equal(still, 1, 'the decode for the track playing is not stopped');
+  assert.ok(await urgent, 'and it finishes');
   return true;
 });
 

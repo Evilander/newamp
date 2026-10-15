@@ -57,10 +57,10 @@ const C_SECONDS = 3;
 const SPLIT_EXTRA = 37;
 const RG_DB = -6.0206;
 const SILENCE = 1e-9;
-// Past its 3 s high-water mark the producer can still take one 64 KiB pipe
+// Past its 30 s high-water mark the producer can still take one 64 KiB pipe
 // read, plus what an exited decoder left in its pipe and stream buffer (see
 // scripts/gapless-producer-test.mjs).
-const QUEUE_BOUND_SEC = 3 + (4 * 8192) / CTX_RATE;
+const QUEUE_BOUND_SEC = 30 + (4 * 8192) / CTX_RATE;
 
 const SIGNALS = {
   main: (t) =>

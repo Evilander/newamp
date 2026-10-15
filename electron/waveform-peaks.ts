@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import type { WaveformData } from '../shared/types.js';
 import { caseFoldCachePath } from './cache-key-casing.js';
 import { killChild } from './kill-child.js';
+import { onPlaybackHunger, whenPlaybackFed } from './playback-io.js';
 import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
 
 export interface WaveformRequest {
@@ -308,6 +309,8 @@ interface Job {
   end: number | null;
   /** The length is known (cue range or library duration), so a decode that fills MAX_SECONDS is not a truncated long file. */
   bounded: boolean;
+  /** Asked for ahead of time (the next track); stopped when playback runs short. */
+  prefetch: boolean;
   child: ChildProcess | null;
   cancelled: boolean;
   /** The decode was stopped from outside (the Recycle Bin flow); that says nothing about the file. */
@@ -420,7 +423,7 @@ function enqueue(entry: Entry, spec: Pick<Job, 'key' | 'path' | 'start' | 'end' 
       resolve(null);
       return;
     }
-    const job: Job = { ...spec, child: null, cancelled: false, interrupted: false, settle: resolve };
+    const job: Job = { ...spec, prefetch: entry.prefetch, child: null, cancelled: false, interrupted: false, settle: resolve };
     entry.job = job;
     if (entry.prefetch) waiting.push(job);
     else makeUrgent(job);
@@ -432,6 +435,7 @@ function enqueue(entry: Entry, spec: Pick<Job, 'key' | 'path' | 'start' | 'end' 
 // the listener has moved past (the next one's prefetch is asked for after
 // this), and a decode already running for another track is wasted work.
 function makeUrgent(job: Job): void {
+  job.prefetch = false;
   for (const other of waiting.splice(0)) {
     if (other !== job) drop(other);
   }
@@ -442,6 +446,14 @@ function makeUrgent(job: Job): void {
     if (running.child) killChild(running.child);
   }
 }
+
+// A prefetch decoding when playback runs short is stopped. It isn't a failure:
+// the track decodes again once it is the one playing.
+onPlaybackHunger((hungry) => {
+  if (!hungry || !running?.prefetch) return;
+  running.cancelled = true;
+  if (running.child) killChild(running.child);
+});
 
 function drop(job: Job): void {
   job.cancelled = true;
@@ -454,9 +466,11 @@ async function pump(): Promise<void> {
   try {
     for (let job = waiting.shift(); job; job = waiting.shift()) {
       running = job;
+      // A drive that is starving playback serves it first.
+      await whenPlaybackFed();
       let result: WaveformData | null = null;
       try {
-        result = await decode(job);
+        if (!job.cancelled && !closed) result = await decode(job);
       } catch (err) {
         if (!job.cancelled && !closed) console.error('[waveform] decode failed:', err instanceof Error ? err.message : err);
       }

@@ -145,6 +145,8 @@
     "test:visual-memory-schema-parity": "node scripts/visual-memory-schema-parity-test.mjs",
     "test:custom-skin-guard": "npm run build:electron && node scripts/custom-skin-guard-test.mjs",
     "test:pending-album-nav": "node scripts/pending-album-nav-test.mjs",
+    "test:album-pages": "node scripts/album-pages-test.mjs",
+    "test:playback-io": "node scripts/playback-io-test.mjs",
     "test:audio-codec-badge": "node scripts/audio-codec-badge-test.mjs",
     "test:butterchurn-feed": "node scripts/butterchurn-feed-test.mjs",
     "test:close-button-copy": "node scripts/close-button-copy-test.mjs",

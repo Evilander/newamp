@@ -213,8 +213,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tracks:visual-memory-stats') as Promise<VisualMemoryStats>,
   clearAllVisualMemory: () =>
     ipcRenderer.invoke('tracks:visual-memory-clear-all') as Promise<number>,
-  getSongScore: (id: number) =>
-    ipcRenderer.invoke('tracks:song-score', id) as Promise<SongScore | null>,
+  getSongScore: (id: number, options?: { prefetch?: boolean }) =>
+    ipcRenderer.invoke('tracks:song-score', id, options) as Promise<SongScore | null>,
   getTrackWaveform: (id: number, options?: { prefetch?: boolean }) =>
     ipcRenderer.invoke('tracks:waveform', id, options) as Promise<WaveformData | null>,
   getRadioBrainStatus: () => ipcRenderer.invoke('radio-brain:status') as Promise<RadioBrainStatus>,

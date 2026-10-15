@@ -38,7 +38,7 @@ rmSync(root, { recursive: true, force: true });
 mkdirSync(media, { recursive: true });
 
 // Mirrors the producer's constants.
-const HIGH_WATER_SEC = 3;
+const HIGH_WATER_SEC = 30;
 // Past high water, the producer can still take the pipe read that crossed
 // it, and whatever an already-exited decoder had left: Node resumes a paused
 // child stdout once the child exits, flushing its pipe (one 64 KiB read) and
@@ -124,6 +124,7 @@ const stubs = {
 await build({
   stdin: {
     contents: `export { closeAllGaplessSessions, registerGaplessTransport } from './electron/gapless-transport.ts';
+      export { onPlaybackHunger, playbackHungry } from './electron/playback-io.ts';
       export { killChild } from './electron/kill-child.ts';
       export { seekableTranscodeResponse } from './electron/audio-serve.ts';
       export { ExclusiveOutput } from './electron/exclusive-output.ts';
@@ -140,7 +141,7 @@ await build({
   outfile: join(root, 'bundle.mjs'),
   logLevel: 'silent',
 });
-const { closeAllGaplessSessions, ExclusiveOutput, killChild, posix, registerGaplessTransport, seekableTranscodeResponse, spawn, spawned } = await import(pathToFileURL(join(root, 'bundle.mjs')).href);
+const { closeAllGaplessSessions, ExclusiveOutput, killChild, onPlaybackHunger, playbackHungry, posix, registerGaplessTransport, seekableTranscodeResponse, spawn, spawned } = await import(pathToFileURL(join(root, 'bundle.mjs')).href);
 
 // ---------------------------------------------------------------- fixtures
 
@@ -368,10 +369,10 @@ await section(async () => {
   const b60flac = flac('b60.flac', 60, 48000);
   const rows = [];
   const lengths = [
-    ...['3.00', '3.02', '3.04', '3.06', '3.08', '3.10', '3.12', '3.14', '3.16', '3.18'].map((a) => ['m4a', a]),
-    ...['3.00', '3.04', '3.08', '3.12'].map((a) => ['flac', a]),
+    ...['30.00', '30.02', '30.04', '30.06', '30.08', '30.10', '30.12', '30.14', '30.16', '30.18'].map((a) => ['m4a', a]),
+    ...['30.00', '30.04', '30.08', '30.12'].map((a) => ['flac', a]),
   ];
-  // A consumer that never credits: after A (around the 3 s high-water mark,
+  // A consumer that never credits: after A (around the 30 s high-water mark,
   // swept across a pipe read) the chained 60 s B must not stream in.
   for (const [codec, a] of lengths) {
     const aPath = codec === 'm4a' ? m4a(`a${a}.m4a`, a, 48000) : flac(`a${a}.flac`, a, 48000);
@@ -382,6 +383,8 @@ await section(async () => {
     rows.push({ a: `${codec} ${a}s`, pushedSec: Number(pushedSec.toFixed(3)) });
     check(result.ok, `no-credit ${codec} ${a}: start failed ${result.error}`);
     check(pushedSec <= pushBound(48000), `no-credit ${codec} ${a}: pushed ${pushedSec.toFixed(3)} s with no credits (bound ${pushBound(48000).toFixed(3)})`);
+    // Thirty seconds queued is fed, whether A's decoder is paused or done.
+    check(!playbackHungry(), `no-credit ${codec} ${a}: reported hungry with ${pushedSec.toFixed(3)} s queued`);
     await t.stop(2);
     t.close();
     check(await exitedAll(t.children()), `no-credit ${codec} ${a}: ffmpeg still running after stop`);
@@ -392,6 +395,8 @@ await section(async () => {
   const credited = [];
   for (const a of ['12.00', '12.10', '12.20', '12.30', '12.40']) {
     const t = await transport({ 1: source(1, flac(`a${a}.flac`, a, 48000), 48000), 2: source(2, b60flac, 48000) });
+    const hunger = [];
+    const stopWatching = onPlaybackHunger((hungry) => hunger.push(hungry));
     const result = await t.start({ next: { token: 2, trackId: 2, startAt: 0, gain: 1 } });
     check(result.ok, `credited ${a}: start failed ${result.error}`);
     if (!result.ok) console.error('START', a, result);
@@ -400,8 +405,13 @@ await section(async () => {
     credited.push({ a: `flac ${a}s`, totalSec: Number((t.w.frames / 48000).toFixed(3)), maxQueuedSec: Number(queued.toFixed(3)) });
     check(t.w.frames === Math.round((Number(a) + 60) * 48000), `credited ${a}: ${t.w.frames} frames, expected A + B`);
     check(queued <= pushBound(48000), `credited ${a}: ${queued.toFixed(3)} s queued (bound ${pushBound(48000).toFixed(3)})`);
+    // Short of audio while the first seconds decode, fed once they are queued,
+    // and nothing left hungry when the stream stops.
+    check(hunger[0] === true && hunger.includes(false), `credited ${a}: hunger went ${JSON.stringify(hunger)}`);
     await t.stop(2);
     t.close();
+    stopWatching();
+    check(!playbackHungry(), `credited ${a}: still hungry after stop`);
   }
   report.credited = { maxQueuedSec: Math.max(...credited.map((r) => r.maxQueuedSec)), rows: credited };
 });

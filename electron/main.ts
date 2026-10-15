@@ -2603,11 +2603,14 @@ function registerIpc(): void {
   );
   ipcMain.handle('tracks:visual-memory-stats', async () => library.getVisualMemoryStats());
   ipcMain.handle('tracks:visual-memory-clear-all', async () => library.clearAllVisualMemory());
-  ipcMain.handle('tracks:song-score', async (_e, id: number) => {
+  ipcMain.handle('tracks:song-score', async (_e, id: number, options?: { prefetch?: unknown }) => {
     const track = library.getTrack(Number(id));
     // Only local files: a remote-server track has no path ffmpeg can read here.
     if (!track?.path || /^[a-z][a-z0-9+.-]*:\/\//i.test(track.path)) return null;
-    return getSongScore({ path: track.path, cueStart: track.cueStart, cueEnd: track.cueEnd });
+    return getSongScore(
+      { path: track.path, cueStart: track.cueStart, cueEnd: track.cueEnd },
+      { prefetch: options?.prefetch === true },
+    );
   });
   initWaveformCache(join(app.getPath('userData'), 'waveform-cache'));
   ipcMain.handle('tracks:waveform', async (_e, id: number, options?: { prefetch?: unknown }) => {
