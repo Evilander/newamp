@@ -5,6 +5,20 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- Playback no longer stops to buffer when the music drive is busy for a few
+  seconds. Gapless playback keeps 30 seconds decoded ahead instead of 3, so a
+  drive slowed down by downloads or by another program scanning the library
+  doesn't interrupt the track.
+- The seek bar's waveform and the visualizer's song analysis wait while
+  playback is short of audio, and one already reading the next track stops,
+  so on a slow drive they no longer compete with the track that's playing.
+- Scrolling Albums sorted by Recently added while new music is being added
+  no longer shows the same albums twice.
+
 ## [2.6.0] - 2026-10-11
 
 The seek bar now draws the track's waveform, the colour editor can stay open

@@ -38,6 +38,7 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { playableLength } from './gapless-trim.js';
 import { killChild } from './kill-child.js';
+import { reportPlaybackHunger } from './playback-io.js';
 import { probeResampler, resamplerFilter } from './resampler.js';
 import { awaitChildExit, ffmpegInputKey, resolveFfmpegPath } from './transcode.js';
 import type {
@@ -50,8 +51,16 @@ import type {
 
 const CHANNELS = 2;
 const FRAME_BYTES = CHANNELS * 4;
-const HIGH_WATER_SEC = 3;
-const LOW_WATER_SEC = 2;
+// Thirty seconds decoded ahead rides out a drive that stalls for a while (one
+// busy with downloads and a media-server scan measured 450 ms per read);
+// three, as this shipped with, did not. Memory is ~11 MB at 48 kHz.
+const HIGH_WATER_SEC = 30;
+const LOW_WATER_SEC = 20;
+// Below this while still decoding, the drive is not keeping up: background
+// decodes hold off until the stream is back at LOW_WATER_SEC (see
+// playback-io.ts). Under the ~10 s left when the next track is chained, so
+// an ordinary handoff doesn't count.
+const HUNGRY_SEC = 8;
 // With nothing chained, the end-of-stream marker is held until the worklet is
 // this close to running dry, so a prepareNext that lands late (a seek into the
 // last seconds, a slow queue refill) still splices instead of gapping.
@@ -243,6 +252,8 @@ class Session {
   private firstPlayedOut = false;
   private readonly highWater: number;
   private readonly lowWater: number;
+  private readonly hungryBelow: number;
+  private hungry = false;
   private readonly endGuard: number;
 
   constructor(
@@ -258,6 +269,7 @@ class Session {
     this.next = next;
     this.highWater = Math.round(rate * HIGH_WATER_SEC);
     this.lowWater = Math.round(rate * LOW_WATER_SEC);
+    this.hungryBelow = Math.round(rate * HUNGRY_SEC);
     this.endGuard = Math.round(rate * END_GUARD_SEC);
   }
 
@@ -305,11 +317,14 @@ class Session {
       source.resume();
     }
     this.checkEndGuard();
+    this.reportPressure();
   }
 
   close(): void {
     if (this.phase === 'closed') return;
     this.phase = 'closed';
+    this.hungry = false;
+    reportPlaybackHunger(this, false);
     this.killDecoder();
     if (this.resampler) {
       this.resampler.onClose = null;
@@ -366,6 +381,18 @@ class Session {
   // can't slip a pipe read past the high-water check while they wait.
   private inflight(): number {
     return this.out.accepted - this.consumed;
+  }
+
+  // Hungry from under hungryBelow until back at lowWater, and only while a
+  // decoder is still filling: the drain after a track's last frame is not.
+  private reportPressure(): void {
+    if (this.phase === 'closed') return;
+    const filling = this.phase === 'opening' || this.phase === 'decoding' || this.phase === 'switching';
+    const queued = this.inflight();
+    const hungry = filling && queued < (this.hungry ? this.lowWater : this.hungryBelow);
+    if (hungry === this.hungry) return;
+    this.hungry = hungry;
+    reportPlaybackHunger(this, hungry);
   }
 
   private post(msg: StreamMessage): void {
@@ -700,6 +727,7 @@ class Session {
       source.pause();
       this.stalled = source;
     }
+    this.reportPressure();
   }
 
   private spawnResampler(rate: number): Resampler {

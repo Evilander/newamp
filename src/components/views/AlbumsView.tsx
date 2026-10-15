@@ -14,6 +14,7 @@ import { EmptyState } from '../EmptyState';
 import { ViewSkeleton } from '../ViewSkeleton';
 import { Note } from '../Icons';
 import { computeGridColumnCount, useVirtualRows } from '../../hooks/useVirtualRows';
+import { appendAlbumPage } from '../../lib/album-pages';
 import { beginPendingAlbumNav, createPendingAlbumNavSeq, isCurrentPendingAlbumNav } from '../../lib/pending-album-nav';
 
 const ALBUM_PAGE_SIZE = 240;
@@ -49,6 +50,8 @@ const albumViewSnapshot: {
   sort: AlbumSort;
   randomSeed: number;
   hasMoreAlbums: boolean;
+  /** Rows read from the library for this list: the next page's offset (see loadMoreAlbums). */
+  fetched: number;
   scrollTop: number;
 } = {
   albums: [],
@@ -59,6 +62,7 @@ const albumViewSnapshot: {
   sort: 'artist',
   randomSeed: Date.now(),
   hasMoreAlbums: false,
+  fetched: 0,
   scrollTop: 0,
 };
 
@@ -310,7 +314,9 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
       })
       .then((rows) => {
         if (cancelled || generation !== albumRequestGeneration.current) return;
-        setAlbums(rows.slice(0, ALBUM_PAGE_SIZE));
+        const page = rows.slice(0, ALBUM_PAGE_SIZE);
+        albumViewSnapshot.fetched = page.length;
+        setAlbums(page);
         setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
       })
       .catch((err) => {
@@ -321,6 +327,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
         // bug is visible instead of looking like an empty library.
         if (!cancelled && generation === albumRequestGeneration.current) {
           console.error('[newamp] getAlbums failed:', err);
+          albumViewSnapshot.fetched = 0;
           setAlbums([]);
           setHasMoreAlbums(false);
           pushToast({
@@ -402,16 +409,22 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
     albumPageRequestRef.current = true;
     setLoadingAlbums(true);
     try {
+      // The offset counts rows read, not albums shown. A scan that adds albums
+      // above this point (downloads under "Recently added") shifts the rest
+      // down, so a page can repeat what is already shown; appendAlbumPage
+      // drops those, and the offset still moves a whole page on.
       const rows = await api.getAlbums({
         search: albumQuery,
         missingArtOnly: showMissingArtOnly,
         sort: albumSort,
         randomSeed,
         limit: ALBUM_PAGE_SIZE + 1,
-        offset: albums.length,
+        offset: albumViewSnapshot.fetched,
       });
       if (generation !== albumRequestGeneration.current) return;
-      setAlbums((currentAlbums) => [...currentAlbums, ...rows.slice(0, ALBUM_PAGE_SIZE)]);
+      const page = rows.slice(0, ALBUM_PAGE_SIZE);
+      albumViewSnapshot.fetched += page.length;
+      setAlbums((currentAlbums) => appendAlbumPage(currentAlbums, page));
       setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
     } catch (err) {
       if (generation === albumRequestGeneration.current) pushToast({ tone: 'error', title: 'Could not load more albums', detail: err instanceof Error ? err.message : undefined });
@@ -438,7 +451,9 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
         offset: 0,
       });
       if (generation !== albumRequestGeneration.current) return;
-      setAlbums(rows.slice(0, pageSize));
+      const page = rows.slice(0, pageSize);
+      albumViewSnapshot.fetched = page.length;
+      setAlbums(page);
       setHasMoreAlbums(rows.length > pageSize);
     } finally {
       if (generation === albumRequestGeneration.current) setLoadingAlbums(false);

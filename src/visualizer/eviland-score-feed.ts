@@ -54,23 +54,37 @@ export function songScoreStatus(): SongScoreStatus {
 // whatever the listener skips back to.
 const RECENT_SCORES = 8;
 const recent = new Map<number, Promise<SongScore | null>>();
+// Of those still running, the ones asked for ahead of time. The main process
+// stops a prefetch when playback runs short of audio, but not a track that
+// is playing.
+const prefetched = new Set<number>();
 let activeFeeds = 0;
 
-function scoreFor(trackId: number): Promise<SongScore | null> {
+function scoreFor(trackId: number, prefetch = false): Promise<SongScore | null> {
   const known = recent.get(trackId);
   if (known) {
     // Re-insert so the map's insertion order stays least-recently-used first.
     recent.delete(trackId);
     recent.set(trackId, known);
+    // The prefetched track is playing now: tell main it is no longer a prefetch.
+    if (!prefetch && prefetched.delete(trackId)) void api.getSongScore(trackId).catch(() => null);
     return known;
   }
-  const request = api.getSongScore(trackId).catch(() => null);
+  const request = api.getSongScore(trackId, prefetch ? { prefetch: true } : undefined).catch(() => null);
   recent.set(trackId, request);
-  // A failed or empty answer may only mean "file was busy"; let a later play retry.
+  if (prefetch) prefetched.add(trackId);
+  // A failed or empty answer may only mean "file was busy" (or a prefetch
+  // stopped for playback); let a later play retry.
   void request.then((score) => {
-    if (!score && recent.get(trackId) === request) recent.delete(trackId);
+    if (recent.get(trackId) !== request) return;
+    prefetched.delete(trackId);
+    if (!score) recent.delete(trackId);
   });
-  while (recent.size > RECENT_SCORES) recent.delete(recent.keys().next().value as number);
+  while (recent.size > RECENT_SCORES) {
+    const oldest = recent.keys().next().value as number;
+    recent.delete(oldest);
+    prefetched.delete(oldest);
+  }
   return request;
 }
 
@@ -94,7 +108,7 @@ if (typeof window !== 'undefined') {
  * listeners who never open one never pay for the analysis.
  */
 export function prefetchSongScore(trackId: number | null | undefined): void {
-  if (activeFeeds > 0 && lookAheadEnabled() && trackId != null && trackId > 0) void scoreFor(trackId);
+  if (activeFeeds > 0 && lookAheadEnabled() && trackId != null && trackId > 0) void scoreFor(trackId, true);
 }
 
 /**

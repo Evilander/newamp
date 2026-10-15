@@ -1506,7 +1506,7 @@ export interface NewAmpAPI {
    * sections, builds, keys). Analysed on first request, cached after; null
    * when the track can't have one. Takes a second or two uncached.
    */
-  getSongScore: (id: number) => Promise<SongScorePublic | null>;
+  getSongScore: (id: number, options?: { prefetch?: boolean }) => Promise<SongScorePublic | null>;
   /**
    * The waveform for the seek bar, from cache or decoded once in the
    * background (about half a second). Null for streams, server tracks and
