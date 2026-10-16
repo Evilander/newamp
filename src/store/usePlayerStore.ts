@@ -258,6 +258,13 @@ interface PlayerState {
   playPodcastEpisode: (episode: PodcastEpisode) => Promise<void>;
   playQueue: (tracks: Track[], startIndex?: number, startAt?: number) => Promise<void>;
   /**
+   * Plays tracks that were opened from outside the app (Open with, a
+   * double-click, a drop). With a queue up they go in right after the current
+   * track and the first one starts; the rest of the queue stays. With nothing
+   * queued they become the queue.
+   */
+  playTracksNow: (tracks: Track[]) => Promise<void>;
+  /**
    * Plays a track without touching the listener's state: no queue change, no
    * play count, no Last.fm, and the session on disk keeps the real queue.
    * endPreview() puts the previous queue back, paused.
@@ -1918,6 +1925,25 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     },
 
     playQueue: (tracks, startIndex = 0, startAt = 0) => startQueuePlayback(get, set, tracks, startIndex, startAt),
+
+    playTracksNow: async (tracks) => {
+      if (!tracks.length) return;
+      const state = get();
+      // A podcast episode is not a queue the listener built, so it is replaced
+      // like an empty one rather than left behind as a track.
+      if (!state.queue.length || state.activePodcastEpisode) {
+        await startQueuePlayback(get, set, tracks, 0, 0);
+        return;
+      }
+      queueRevision++;
+      const insertAt = playNextInsertAt(state.queue.length, state.index);
+      const result = insertTracksNext(state.queue, state.index, tracks);
+      await startQueuePlayback(get, set, result.queue, insertAt, 0, {
+        shuffleHistory: isShuffleMode(state.mode)
+          ? historyEndingAt(historyAfterInsert(state, insertAt, tracks.length), insertAt)
+          : [],
+      });
+    },
 
     previewTrack: async (track) => {
       const state = get();
