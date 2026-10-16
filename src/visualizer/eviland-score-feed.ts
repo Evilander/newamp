@@ -16,6 +16,7 @@ import { lookAheadEnabled } from '../lib/vizPrefs';
 import type { EvilandFrame } from './eviland-audio';
 import { createConductor } from './eviland-conductor';
 import type { SongScore } from './eviland-score';
+import { registerScorePrefetch } from './score-prefetch';
 
 export interface ScoreFeedTrack {
   id: number;
@@ -110,6 +111,9 @@ if (typeof window !== 'undefined') {
 export function prefetchSongScore(trackId: number | null | undefined): void {
   if (activeFeeds > 0 && lookAheadEnabled() && trackId != null && trackId > 0) void scoreFor(trackId, true);
 }
+// The player store reaches this through score-prefetch, since it cannot import
+// this module without loading the Eviland stack at startup.
+registerScorePrefetch(prefetchSongScore);
 
 /**
  * The feed every NewAmp consumer wants: track identity and position both come
