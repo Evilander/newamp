@@ -138,7 +138,7 @@ const { renderToStaticMarkup } = require('react-dom/server');
     /is-active/,
     'no disabled action on Home is drawn lit',
   );
-  assert.match(home, /<button className="pxbtn is-primary" onClick=\{\(\) => void api\.scanLibrary\(\)\}>/, 'the empty-library scan is the primary action');
+  assert.match(home, /<EmptyLibrary \/>/, 'an empty Home shows the shared empty-library screen, whose scan is the primary action');
   assert.deepEqual(
     home.split('\n').filter((line) => /pxbtn is-active/.test(line)).map((line) => line.trim().replace(/^<button className="([^"]*)".*$/, '$1')),
     ['pxbtn is-active px-1.5 py-[2px] text-[10px]'],

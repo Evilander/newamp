@@ -12,6 +12,10 @@ const executable = resolve(appDir, 'newamp');
 const timeoutMs = boundedInt(process.env.NEWAMP_LINUX_STARTUP_TIMEOUT_MS, 25000, 'NEWAMP_LINUX_STARTUP_TIMEOUT_MS', 5000, 120000);
 const cleanAfter = process.env.NEWAMP_LINUX_STARTUP_CLEAN_AFTER === '1' || args.cleanAfter === true;
 const disableGpu = args.disableGpu === true || process.env.NEWAMP_LINUX_STARTUP_DISABLE_GPU === '1';
+// Runs the app on WSLg's Wayland compositor instead of leaving the backend to
+// the session. Chromium can fail to send ready-to-show there, which used to
+// leave the window invisible; the check below needs the main window shown.
+const wayland = args.wayland === true || process.env.NEWAMP_LINUX_STARTUP_WAYLAND === '1';
 const runParent = resolve(repoRoot, 'tmp', 'linux-startup-check');
 const runRoot = await createRunRoot(runParent);
 const homeDir = join(runRoot, 'home');
@@ -27,9 +31,11 @@ const report = {
   runRoot,
   timeoutMs,
   cleanAfter,
+  wayland,
   dependencyCheck: null,
   launch: null,
   cdp: null,
+  window: null,
   diagnostics: null,
   paths: null,
   stderrTail: '',
@@ -65,8 +71,9 @@ export HOME=${bashQuote(toWslPath(homeDir))}
 export XDG_CONFIG_HOME=${bashQuote(toWslPath(xdgConfigHome))}
 export ELECTRON_ENABLE_LOGGING=1
 ${disableGpu ? 'export NEWAMP_DISABLE_HARDWARE_ACCELERATION=1' : 'unset NEWAMP_DISABLE_HARDWARE_ACCELERATION'}
+${wayland ? waylandEnvScript() : ''}
 echo $$ > ${bashQuote(toWslPath(pidPath))}
-exec ./newamp --no-sandbox --remote-debugging-port=0 >${bashQuote(toWslPath(stdoutPath))} 2>${bashQuote(toWslPath(stderrPath))}
+exec ./newamp --no-sandbox --remote-debugging-port=0 ${wayland ? '--ozone-platform=wayland ' : ''}>${bashQuote(toWslPath(stdoutPath))} 2>${bashQuote(toWslPath(stderrPath))}
 `;
   child = spawn('wsl.exe', ['-d', 'Ubuntu', '--', 'bash', '-lc', launchScript], {
     cwd: repoRoot,
@@ -75,7 +82,11 @@ exec ./newamp --no-sandbox --remote-debugging-port=0 >${bashQuote(toWslPath(stdo
   });
 
   linuxPid = await waitForLinuxPid(pidPath, timeoutMs);
-  report.launch = { linuxPid, args: ['--no-sandbox', '--remote-debugging-port=0'], disableGpu };
+  report.launch = {
+    linuxPid,
+    args: ['--no-sandbox', '--remote-debugging-port=0', ...(wayland ? ['--ozone-platform=wayland'] : [])],
+    disableGpu,
+  };
 
   const cdp = await waitForCdpTarget(runRoot, timeoutMs);
   report.cdp = cdp.summary;
@@ -97,6 +108,12 @@ exec ./newamp --no-sandbox --remote-debugging-port=0 >${bashQuote(toWslPath(stdo
     windowsAppDataUnset: true,
     smokeModeUnset: true,
   };
+
+  // The window is revealed from ready-to-show or, when that never comes, a
+  // timer after the load; either way the main process records it. A window
+  // that stayed hidden has no such event.
+  const shown = await waitForWindowShown(userDataPath, timeoutMs);
+  report.window = { shown: !!shown, elapsedMs: shown?.payload?.elapsedMs ?? null, splash: shown?.payload?.splash ?? null };
 
   const events = readDiagnosticsEvents(userDataPath);
   const badEvents = events.filter((event) =>
@@ -120,6 +137,7 @@ exec ./newamp --no-sandbox --remote-debugging-port=0 >${bashQuote(toWslPath(stdo
     report.paths.sessionDataExists &&
     report.paths.sessionDataOutsideAsar &&
     report.paths.userDataUnderTempXdg &&
+    report.window.shown &&
     badEvents.length === 0 &&
     report.diagnostics.stderrStartupErrors.length === 0;
 
@@ -306,6 +324,27 @@ function readDiagnosticsEvents(userDataPath) {
     .filter(Boolean);
 }
 
+async function waitForWindowShown(userDataPath, timeout) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const event = readDiagnosticsEvents(userDataPath).find((item) => item.kind === 'main-window-shown');
+    if (event) return event;
+    await sleep(250);
+  }
+  return null;
+}
+
+// WSLg serves Wayland from /mnt/wslg; a login shell may not have exported it.
+function waylandEnvScript() {
+  return `
+export XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/mnt/wslg/runtime-dir}"
+export WAYLAND_DISPLAY="\${WAYLAND_DISPLAY:-wayland-0}"
+export XDG_SESSION_TYPE=wayland
+export ELECTRON_OZONE_PLATFORM_HINT=wayland
+if [ ! -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then echo "no Wayland socket at $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" >&2; exit 3; fi
+`;
+}
+
 function safeReadTail(path) {
   if (!existsSync(path)) return '';
   return readFileSync(path, 'utf8').trim().slice(-4000);
@@ -334,6 +373,10 @@ function parseArgs(argv) {
     }
     if (arg === '--disable-gpu') {
       out.disableGpu = true;
+      continue;
+    }
+    if (arg === '--wayland') {
+      out.wayland = true;
       continue;
     }
     if (!arg.startsWith('--')) continue;

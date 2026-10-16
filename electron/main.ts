@@ -8,6 +8,7 @@ import {
   Menu,
   MessageChannelMain,
   nativeImage,
+  powerMonitor,
   powerSaveBlocker,
   protocol,
   screen,
@@ -25,7 +26,7 @@ import { randomBytes } from 'node:crypto';
 import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { LibraryStore, LibraryUnavailableError } from './library.js';
 import { IncrementalScanGate, LibraryWatcher, type LibraryWatchPlan } from './library-watcher.js';
-import { findLocalLyricsForTrack } from './local-lyrics.js';
+import { findEmbeddedLyricsForTrack, findSidecarLyricsForTrack } from './local-lyrics.js';
 import { SettingsStore, withAiAssistRuntime } from './settings.js';
 import { readTrackFile, Scanner } from './scanner.js';
 import {
@@ -69,7 +70,7 @@ import { RadioBrain } from './radio-brain.js';
 import { ExclusiveOutput, classifyTrackSource } from './exclusive-output.js';
 import { isFfmpegFallbackExtension } from '../shared/audio-quality.js';
 import { exportPlaylistFolder } from './playlist-export.js';
-import { createSupportBackup, restoreSupportBackup } from './support-backup.js';
+import { createDailyBackupIfDue, createSupportBackup, listDailyBackups, restoreSupportBackup } from './support-backup.js';
 import { generateOpenAiLinerNotes } from './openai-assist.js';
 import {
   assertSkinImportPathAllowed,
@@ -83,16 +84,19 @@ import { moveTracksToTrash, trashableTracks } from './trash-tracks.js';
 import {
   closeAction,
   crashRecoveryAction,
+  revealWhenReady,
   shouldBlockDisplaySleep,
+  shouldExplainTrayClose,
   shouldLeaveCompact,
   shouldStayResidentOnWindowAllClosed,
+  trayCloseNotice,
 } from './window-lifecycle-policy.js';
 import { emptyWindowState, nextWindowState, placeOrigin, placeWindow, type WindowRect } from './window-state.js';
 import { installPermissionHandlers } from './permissions.js';
 import { choosePortableDataDir } from './portable-data.js';
 import { createOpenFileBatcher, mergeHandedOff, type HandedOffFiles } from './open-file-batcher.js';
 import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } from './cue.js';
-import { defaultMusicScanRoots, suggestMusicFolders } from './music-folders.js';
+import { defaultMusicScanRoots, isSeededPublicMusicRoot, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import { buildAppMenuTemplate } from './app-menu.js';
 import { assertHistoryImportIdle, registerHistoryImportIpc } from './history-ipc.js';
@@ -762,6 +766,39 @@ function hideMainWindow(win: BrowserWindow): void {
   win.hide();
 }
 
+let trayCloseNoticeOpen = false;
+
+// The first X on Windows and Linux hides the window with nothing to say the
+// app is still running. Say it once, before hiding, and let the user quit
+// right there if that was what they meant. The flag is stored before the
+// dialog opens so dismissing it any way counts as having seen it.
+async function explainTrayClose(win: BrowserWindow): Promise<void> {
+  trayCloseNoticeOpen = true;
+  settings.set({ trayNoticeShown: true });
+  const notice = trayCloseNotice(process.platform);
+  try {
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'info',
+      title: notice.title,
+      message: notice.message,
+      detail: notice.detail,
+      buttons: [notice.keepLabel, notice.quitLabel],
+      defaultId: 0,
+      cancelId: 0,
+    });
+    if (response === 1) {
+      isQuitting = true;
+      app.quit();
+      return;
+    }
+  } catch (err) {
+    console.warn('[newamp] tray close notice failed:', err);
+  } finally {
+    trayCloseNoticeOpen = false;
+  }
+  if (!win.isDestroyed()) hideMainWindow(win);
+}
+
 function leaveFullScreen(win: BrowserWindow): Promise<void> {
   return new Promise((resolve) => {
     if (process.platform === 'darwin' && win.isSimpleFullScreen()) {
@@ -906,7 +943,8 @@ function createWindow(): BrowserWindow {
     });
   }
 
-  win.once('ready-to-show', () => {
+  // ready-to-show, or on Linux a timer after the load when Wayland never sends it.
+  revealWhenReady(win, () => {
     if (smokeMode) return;
     const reveal = () => {
       const splashWasUp = !!startupSplashWin;
@@ -925,7 +963,7 @@ function createWindow(): BrowserWindow {
       : 0;
     if (remainingSplashMs > 0) setTimeout(reveal, remainingSplashMs);
     else reveal();
-  });
+  }, { platform: process.platform });
 
   win.on('maximize', () => win.webContents.send('window-state', { maximized: true }));
   win.on('unmaximize', () => win.webContents.send('window-state', { maximized: false }));
@@ -969,8 +1007,12 @@ function createWindow(): BrowserWindow {
       return;
     }
     event.preventDefault();
+    // The first-close notice is open over this window; a second X waits for it.
+    if (trayCloseNoticeOpen) return;
     if (action === 'minimize') win.minimize();
-    else hideMainWindow(win);
+    else if (shouldExplainTrayClose({ action, platform: process.platform, alreadyExplained: settings.get().trayNoticeShown === true })) {
+      void explainTrayClose(win);
+    } else hideMainWindow(win);
   });
 
   // A reload after a renderer crash or a hot reload gets a new page; the
@@ -1183,7 +1225,7 @@ function openDetachedVisualizer(opts: { displayId?: number; fullscreen?: boolean
     failDetachedOpen('loadURL failed', err);
   });
 
-  win.once('ready-to-show', () => {
+  revealWhenReady(win, () => {
     if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
     detachedVizWin.show();
     // Pull the projector to the front so it isn't lost behind the (often
@@ -1196,7 +1238,7 @@ function openDetachedVisualizer(opts: { displayId?: number; fullscreen?: boolean
     // forever (black projector stuck on "Connecting to NewAmp…"). The
     // detached renderer signals 'detached-viz:renderer-ready' once its
     // listener is installed; wireDetachedFramePort() runs then.
-  });
+  }, { platform: process.platform });
 }
 
 // Wire the per-frame transport once BOTH renderers can receive postMessage
@@ -1364,10 +1406,10 @@ function createStartupSplashWindow(): void {
       sandbox: false,
     },
   });
-  startupSplashWin.once('ready-to-show', () => {
+  revealWhenReady(startupSplashWin, () => {
     if (!startupSplashWin || startupSplashWin.isDestroyed()) return;
     startupSplashWin.showInactive();
-  });
+  }, { platform: process.platform });
   startupSplashWin.on('closed', () => {
     startupSplashWin = null;
   });
@@ -1807,9 +1849,22 @@ function applyShellPlaybackState(state: ShellPlaybackState): void {
  * (cache-prone) associated-icon path. Same mixed-format ICO the tray uses:
  * BMP frames <256 for the tray decode path, PNG at 256 for the taskbar/
  * high-res shell path (see scripts/rebuild-icon.mjs).
+ *
+ * Linux: the tarball has no desktop entry to take an icon from, so without
+ * the PNG the taskbar, Alt-Tab and dock show a generic one.
  */
 function resolveWindowIconPath(): string | undefined {
+  if (process.platform === 'linux') return resolveLinuxWindowIconPath();
   return resolveTrayIconPath() ?? undefined;
+}
+
+function resolveLinuxWindowIconPath(): string | undefined {
+  const candidates = [
+    join(process.resourcesPath, 'build', 'icon.png'),
+    join(app.getAppPath(), 'build', 'icon.png'),
+  ];
+  // The window manager reads a real file; it cannot open a path inside the asar.
+  return candidates.find((candidate) => !candidate.includes('app.asar') && existsSync(candidate));
 }
 
 /** Windows-only: the packaged/dev .ico path, for shell-native frame selection. */
@@ -1855,6 +1910,13 @@ function resolveTrayIconImage(): Electron.NativeImage | null {
 
 function registerMediaShortcuts(): void {
   if (smokeMode) return;
+  // On Windows any global media key, even one that fails to register because
+  // another app holds it, switches off Chromium's own media-key handling, and
+  // that is what feeds the system media session (volume flyout, lock screen,
+  // headset buttons). Playback there goes through a media element, so the keys
+  // reach the page's mediaSession handlers without us. Bit-Perfect Exclusive
+  // plays outside Chromium, has no session to feed, and keeps the global keys.
+  if (process.platform === 'win32' && !settings.get().bitPerfectExclusive) return;
   const shortcuts: Array<[string, PlayerCommand]> = [
     ['MediaPlayPause', 'toggle-play'],
     ['MediaNextTrack', 'next'],
@@ -2034,7 +2096,9 @@ function syncLibraryWatcher(): void {
 
 function createScannerService(store: LibraryStore): Scanner {
   return new Scanner(store, (p: ScanProgress) => {
-    mainWin?.webContents.send('library:scan-progress', p);
+    // The cancel at quit ends with an event, after the window may be gone.
+    if (!mainWin || mainWin.isDestroyed()) return;
+    mainWin.webContents.send('library:scan-progress', p);
   });
 }
 
@@ -2161,6 +2225,50 @@ async function createBackupFromLiveStores(userData: string, scope: 'full' | 'lib
     settingsSnapshot: settings.snapshotJson(),
     scope,
   });
+}
+
+// The first look is a couple of minutes in, so a launch that is quickly closed
+// again does no extra work, and then every few hours for a session that stays
+// in the tray for days. createDailyBackupIfDue decides whether a copy is due.
+const DAILY_BACKUP_FIRST_CHECK_MS = 2 * 60 * 1000;
+const DAILY_BACKUP_CHECK_MS = 6 * 60 * 60 * 1000;
+
+function scheduleDailyBackups(): void {
+  if (smokeMode) return;
+  setTimeout(() => void runDailyBackup(), DAILY_BACKUP_FIRST_CHECK_MS).unref();
+  setInterval(() => void runDailyBackup(), DAILY_BACKUP_CHECK_MS).unref();
+}
+
+// The rolling copy of library.db and settings.json that is there when a bad
+// write, a bad migration or a slip in a cleanup takes the library. Skips
+// quietly while anything else is rewriting the stores, or when the library
+// session is not the real one (a failed upgrade runs on a temporary library).
+async function runDailyBackup(): Promise<void> {
+  if (!settings.get().autoBackupEnabled) return;
+  if (restoreInProgress || backupInProgress || library.isClosed() || library.upgradeError || settings.isSuppressed()) return;
+  backupInProgress += 1;
+  try {
+    // Landing what is batched first proves the library can still be written
+    // before it is copied; a failed flush throws and no copy is made.
+    await library.flushPendingWrites();
+    const userData = app.getPath('userData');
+    const outcome = await createDailyBackupIfDue({
+      userDataPath: userData,
+      settingsPath: join(userData, 'settings.json'),
+      libraryPath: join(userData, 'library.db'),
+      snapshot: () => ({ librarySnapshot: library.exportSnapshot(), settingsSnapshot: settings.snapshotJson() }),
+    });
+    if (outcome.status === 'created') {
+      writeDiagnosticEvent('daily-backup-created', { path: outcome.backup.backupPath });
+    } else if (outcome.reason === 'invalid' || outcome.reason === 'low-disk') {
+      writeDiagnosticEvent('daily-backup-skipped', { reason: outcome.reason, detail: outcome.detail });
+    }
+  } catch (err) {
+    console.warn('[newamp] daily backup failed:', err);
+    writeDiagnosticEvent('daily-backup-failed', { error: err });
+  } finally {
+    backupInProgress -= 1;
+  }
 }
 
 async function reloadRuntimeStores(userData: string): Promise<void> {
@@ -3281,7 +3389,8 @@ function registerIpc(): void {
     if (!Number.isFinite(id) || id <= 0) return null;
     const track = library.getTrack(id);
     if (!track) return null;
-    return (await findLocalLyricsForTrack(track)) ?? library.getCustomLyrics(id);
+    // Saved lyrics outrank the ones the file carries.
+    return (await findSidecarLyricsForTrack(track)) ?? library.getCustomLyrics(id) ?? (await findEmbeddedLyricsForTrack(track));
   });
   ipcMain.handle('lyrics:custom:save', async (_e, input) => library.saveCustomLyrics(input));
   ipcMain.handle('lyrics:custom:clear', async (_e, trackId: number) => {
@@ -3326,7 +3435,7 @@ function registerIpc(): void {
         >,
         title: 'Choose your music folder',
         buttonLabel: 'Use this folder',
-        defaultPath: 'K:/',
+        defaultPath: settings.get().libraryRoots[0] ?? app.getPath('music'),
       };
       // Modal version when we have a window; fall back to non-modal otherwise.
       const res = mainWin
@@ -3378,6 +3487,10 @@ function registerIpc(): void {
       }
       mainWin.setWindowButtonVisibility(!on && !inCompact);
     } else {
+      // Asking a transparent window that is not fullscreen to leave it makes
+      // Electron resize it to a restore rectangle it never recorded: the
+      // minimum size at the top-left corner, saved as the window's bounds.
+      if (mainWin.isFullScreen() === !!on) return;
       mainWin.setFullScreen(!!on);
     }
     refreshDisplaySleepBlocker();
@@ -6081,7 +6194,7 @@ function openGuitarTabWindow(document: GuitarTabDocument, startAutoscroll: boole
   });
   attachWindowDiagnostics(win, 'guitar-tab');
   tabWindows.add(win);
-  win.once('ready-to-show', () => win.show());
+  revealWhenReady(win, () => win.show(), { platform: process.platform });
   win.on('closed', () => tabWindows.delete(win));
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//i.test(url)) void shell.openExternal(url);
@@ -6563,6 +6676,7 @@ function errorMessage(err: unknown): string {
 async function buildSupportDiagnostics(): Promise<SupportDiagnostics> {
   const userData = app.getPath('userData');
   const diagnosticsPath = join(userData, 'diagnostics');
+  const dailyBackups = await listDailyBackups(userData);
   return {
     appVersion: app.getVersion(),
     platform: process.platform,
@@ -6578,6 +6692,7 @@ async function buildSupportDiagnostics(): Promise<SupportDiagnostics> {
     libraryStats: library.getStats(),
     lastfmOutbox: await lastfmOutbox.status(),
     recoveryEvents: [...settings.recoveryEvents, ...library.recoveryEvents, ...podcastStore.recoveryEvents],
+    dailyBackups: { count: dailyBackups.length, newestAt: dailyBackups[0]?.createdAt ?? null, folder: join(userData, 'backups') },
   };
 }
 
@@ -6598,22 +6713,41 @@ async function bootstrap(): Promise<void> {
   // (a completely different, unsuppressed store) even though the user's
   // real settings.json was never actually read this launch.
   if (!smokeMode && !settings.isSuppressed() && !current.libraryRoots.length) {
-    const candidates = process.platform === 'darwin'
-      ? [app.getPath('music'), ...safeListMacVolumesMusic()]
-      : ['K:/music', 'K:\\music', 'C:/Music', 'C:/Users/Public/Music'];
-    for (const c of candidates) {
-      try {
-        if (existsSync(c) && statSync(c).isDirectory()) {
-          settings.set({ libraryRoots: [c] });
-          break;
+    if (process.platform === 'darwin') {
+      for (const c of [app.getPath('music'), ...safeListMacVolumesMusic()]) {
+        try {
+          if (existsSync(c) && statSync(c).isDirectory()) {
+            settings.set({ libraryRoots: [c] });
+            break;
+          }
+        } catch {
+          /* ignore */
         }
-      } catch {
-        /* ignore */
       }
+    } else {
+      // The same folders the empty library offers, so what is scanned first
+      // is what the screen suggests. The shared Public Music folder is never one.
+      const roots = defaultMusicScanRoots({ fallbackMusicPath: app.getPath('music') });
+      if (roots.length) settings.set({ libraryRoots: roots });
     }
   }
 
   library = await LibraryStore.open(join(userData, 'library.db'));
+
+  // Earlier builds seeded a first run with C:/Users/Public/Music, which is
+  // almost always empty. When that is all there is and nothing was ever
+  // scanned, start the choice over.
+  if (!smokeMode && !settings.isSuppressed()) {
+    let trackCount = 0;
+    try {
+      trackCount = library.getTrackCount();
+    } catch {
+      trackCount = -1;
+    }
+    if (isSeededPublicMusicRoot(settings.get().libraryRoots, trackCount)) {
+      settings.set({ libraryRoots: defaultMusicScanRoots({ fallbackMusicPath: app.getPath('music') }) });
+    }
+  }
   scanner = createScannerService(library);
   libraryWatcher = createLibraryWatcherService();
 
@@ -6631,6 +6765,9 @@ async function bootstrap(): Promise<void> {
   registerTray();
   registerMediaShortcuts();
   syncLibraryWatcher();
+  // Linux and macOS announce a shutdown through the power monitor instead.
+  powerMonitor.on('shutdown', flushAllStores);
+  scheduleDailyBackups();
 
   // A valid library this build could not upgrade is left untouched and the
   // session runs on a temporary one. Say so up front: anything done this
@@ -6719,9 +6856,38 @@ async function bootstrap(): Promise<void> {
 
 const singleInstanceLock = app.requestSingleInstanceLock();
 
+let flushingStores = false;
+
+// The stores batch their writes: edits and the resume position wait 800 ms, plays
+// and skips up to 30 s. A log-off, a shutdown or a crash does not wait for those
+// timers, so each of those paths lands everything first. One store failing must
+// not keep the others from being written, and a throw inside a flush must not
+// bring the handler that called it back here.
+function flushAllStores(): void {
+  if (flushingStores) return;
+  flushingStores = true;
+  try {
+    const flushes: Array<[string, () => void]> = [
+      ['library', () => library?.flushNow()],
+      ['settings', () => settings?.flushSync()],
+      ['podcasts', () => podcastStore?.flushProgressSync()],
+    ];
+    for (const [name, flush] of flushes) {
+      try {
+        flush();
+      } catch (err) {
+        console.error(`[newamp] ${name} flush failed`, err);
+      }
+    }
+  } finally {
+    flushingStores = false;
+  }
+}
+
 process.on('uncaughtException', (err, origin) => {
   writeDiagnosticEvent('main-uncaught-exception', { origin, error: err });
   console.error('[newamp] uncaught exception', err);
+  flushAllStores();
   process.exit(1);
 });
 
@@ -6805,6 +6971,9 @@ app.on('before-quit', () => {
 // The display-sleep blocker follows which windows are on screen, including the
 // detached projector, which is created far from here.
 app.on('browser-window-created', (_event, created) => {
+  // Windows tells each window when the user is logging off or the machine is
+  // restarting, and ends the process soon after.
+  created.on('session-end', flushAllStores);
   created.on('show', refreshDisplaySleepBlocker);
   created.on('hide', refreshDisplaySleepBlocker);
   created.on('minimize', refreshDisplaySleepBlocker);
@@ -6823,7 +6992,13 @@ app.on('will-quit', (event) => {
   scanner?.cancel();
   // Explicit Quit / Cmd+Q bypass window-all-closed. Flush on the actual quit
   // path, after renderer windows have had their final chance to save state.
-  library?.close();
+  // A library that cannot flush (its file is locked) must not take the
+  // settings and podcast writes down with it.
+  try {
+    library?.close();
+  } catch (err) {
+    console.error('[newamp] library close failed', err);
+  }
   settings?.flushSync();
   podcastStore?.flushProgressSync();
   exclusiveOutput?.dispose();

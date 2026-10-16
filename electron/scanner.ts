@@ -436,6 +436,11 @@ export class Scanner {
     let skipped = 0;
     // The scan groups the albums itself when it ends; its batches do not.
     this.library.holdRegroup();
+    // A cancelled scan still ends: the banner and the list refresh wait for a
+    // done event, and without one they sat on "Scanning" after Cancel.
+    const reportCancelled = (scanned: number): void => {
+      this.onProgress({ scanned, total: scanned, current: '', done: true, cancelled: true, startedAt, parsed, skipped });
+    };
 
     try {
       const discovered: DiscoveredFile[] = [];
@@ -470,7 +475,10 @@ export class Scanner {
         }
       });
       // A cancelled walk stopped part-way, so what it didn't find says nothing.
-      if (this.cancelled) return;
+      if (this.cancelled) {
+        reportCancelled(0);
+        return;
+      }
       // Everything just found is on disk, including files skipped below as
       // unchanged, so any of them marked missing are available again.
       const found = discovered.map((f) => f.full);
@@ -506,7 +514,10 @@ export class Scanner {
       };
 
       for (let i = 0; i < discovered.length; i += METADATA_BATCH_SIZE) {
-        if (this.cancelled) return;
+        if (this.cancelled) {
+          reportCancelled(scanned);
+          return;
+        }
         const slice = discovered.slice(i, i + METADATA_BATCH_SIZE);
         const existing = options.force
           ? new Map<string, TrackFileState>()

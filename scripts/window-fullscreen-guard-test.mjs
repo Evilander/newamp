@@ -135,5 +135,15 @@ const windowed = { x: 128, y: 0, width: 1280, height: 816 };
   assert.match(viz, /setWindowFullscreen\(restore, winctl\)/, 'closing the visualizer is guarded');
 }
 
+// ---- the main process refuses the same call when the window is already there ----
+{
+  const main = (await readFile(new URL('../electron/main.ts', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
+  const handler = main.match(/ipcMain\.handle\('win:set-fullscreen'[\s\S]*?\n  \}\);\n/)?.[0] ?? '';
+  assert.ok(handler, 'main.ts has the win:set-fullscreen handler');
+  const guardAt = handler.indexOf('if (mainWin.isFullScreen() === !!on) return;');
+  assert.ok(guardAt > 0, 'the handler returns when the window is already in the requested state');
+  assert.ok(guardAt < handler.indexOf('mainWin.setFullScreen(!!on)'), 'the guard comes before the call it protects');
+}
+
 console.log('PASS window fullscreen guard: a windowed close leaves the window alone, enter and leave stay ordered');
 clearTimeout(deadline);

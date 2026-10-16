@@ -1252,6 +1252,13 @@ export class LibraryStore {
     if (!this.closed && (this.dirty || hadInFlight)) this.flushSync();
   }
 
+  // Lands whatever is batched, synchronously, and leaves the store open. For
+  // moments the process can end without warning (the OS logging off, a crash)
+  // where waiting for the 800 ms or 30 s timer loses the last edits and plays.
+  flushNow(): void {
+    if (this.dirty || this.flushInFlight) this.flushSync();
+  }
+
   close(): void {
     if (this.closed) return;
     if (this.persistTimer) {
