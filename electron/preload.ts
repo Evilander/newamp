@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { NEWAMP_VERSION } from '../shared/app-version.js';
+import { cleanIpcError } from '../shared/ipc-error.js';
 import type {
   AddTracksToPlaylistInput,
   AiLinerNotesInput,
@@ -93,6 +94,18 @@ import type {
 import type { TrackDna } from '../shared/audio-dna.js';
 import type { VisualMemoryPlan, VisualMemoryStats } from '../shared/visual-memory.js';
 import type { SongScore } from '../src/visualizer/eviland-score.js';
+
+// A handler that throws reaches the renderer as "Error invoking remote method
+// 'x': Error: ...". Every invoke below goes through this, so the message a
+// toast shows is the real one. Only the message and name cross the context
+// bridge, so the channel goes to the console here instead.
+const invokeIpc = ipcRenderer.invoke.bind(ipcRenderer);
+ipcRenderer.invoke = (channel: string, ...args: unknown[]) =>
+  invokeIpc(channel, ...args).catch((err: unknown) => {
+    const clean = cleanIpcError(err);
+    if (clean !== err) console.warn(`[newamp] ${channel} failed:`, (clean as Error).message);
+    throw clean;
+  });
 
 const api: NewAmpAPI = {
   getMusicServers: () => ipcRenderer.invoke('music-servers:list'),
