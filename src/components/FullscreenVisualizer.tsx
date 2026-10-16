@@ -45,6 +45,7 @@ import {
   pickRandomPreset,
   presetStepBase,
   resolveVisualizerKey,
+  setWindowFullscreen,
   toggleFourK,
   toggleLite,
   toggleLookLock,
@@ -368,7 +369,7 @@ export function FullscreenVisualizer(): JSX.Element {
   function toggleNativeFullscreen(): void {
     setNativeFullscreen((value) => {
       const next = !value;
-      void winctl.setFullscreen(next);
+      void setWindowFullscreen(next, winctl);
       return next;
     });
   }
@@ -460,7 +461,7 @@ export function FullscreenVisualizer(): JSX.Element {
         usePlayerStore.getState().compactMode,
         toProjectorRef.current,
       );
-      if (restore !== null) void winctl.setFullscreen(restore);
+      if (restore !== null) void setWindowFullscreen(restore, winctl);
     };
   }, []);
 

@@ -5,6 +5,7 @@ import {
   mediaSessionPositionState,
 } from '@shared/media-session';
 import { api } from './api';
+import type { MediaArtworkImage } from './media-artwork';
 
 interface MediaSessionActions {
   play: () => void;
@@ -13,6 +14,25 @@ interface MediaSessionActions {
   next: () => void;
   stop: () => void;
   seek: (position: number) => void;
+}
+
+// The cover reader (and the canvas work behind it) is its own chunk, fetched
+// the first time a track with art plays rather than carried by every start.
+let artwork: typeof import('./media-artwork').mediaArtwork | null = null;
+// The track whose metadata the OS shows now; a cover that arrives for any
+// other one is not published.
+let activeTrackId: number | null = null;
+
+async function loadArtwork(trackId: number, coverUrl: string): Promise<MediaArtworkImage | null> {
+  artwork ??= (await import('./media-artwork')).mediaArtwork;
+  return artwork.load(trackId, coverUrl);
+}
+
+function publishMetadata(track: Track, image: MediaArtworkImage | null): void {
+  if (!('mediaSession' in navigator) || typeof MediaMetadata === 'undefined') return;
+  navigator.mediaSession.metadata = new MediaMetadata(
+    buildMediaSessionMetadata(track, image?.src ?? null, image ?? undefined),
+  );
 }
 
 /**
@@ -46,13 +66,23 @@ export function syncMediaSessionIdentity({
   });
 
   if (!current) {
+    activeTrackId = null;
+    artwork?.release();
     session.metadata = null;
     return;
   }
 
-  const artUrl = current.hasArt ? api.getArtUrl(current.id) : null;
-  if (typeof MediaMetadata !== 'undefined') {
-    session.metadata = new MediaMetadata(buildMediaSessionMetadata(current, artUrl));
+  activeTrackId = current.id;
+  const coverUrl = current.hasArt ? api.getArtUrl(current.id) : null;
+  const image = coverUrl ? (artwork?.peek(current.id) ?? null) : null;
+  publishMetadata(current, image);
+  if (coverUrl && !image) {
+    // Title and artist go out now; the cover follows once it has been read.
+    void loadArtwork(current.id, coverUrl)
+      .then((loaded) => {
+        if (loaded && activeTrackId === current.id) publishMetadata(current, loaded);
+      })
+      .catch(() => undefined);
   }
 }
 

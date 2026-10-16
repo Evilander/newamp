@@ -21,12 +21,26 @@ export interface NewAmpMediaPositionState {
 
 export type NewAmpMediaPlaybackState = 'none' | 'paused' | 'playing';
 
-export function buildMediaSessionMetadata(track: Track, artUrl: string | null): NewAmpMediaMetadata {
+export interface NewAmpMediaImageInfo {
+  width: number;
+  height: number;
+  type: string;
+}
+
+// The OS only takes http(s), data and blob URLs for artwork, so `artUrl` is
+// one of the last two; `image` is what the bytes behind it really are.
+export function buildMediaSessionMetadata(
+  track: Track,
+  artUrl: string | null,
+  image?: NewAmpMediaImageInfo,
+): NewAmpMediaMetadata {
   return {
     title: track.title.trim() || 'Unknown Track',
     artist: track.artist.trim() || 'Unknown Artist',
     album: track.album.trim(),
-    artwork: artUrl ? [{ src: artUrl, sizes: '512x512', type: 'image/jpeg' }] : [],
+    artwork: artUrl
+      ? [{ src: artUrl, sizes: image ? `${image.width}x${image.height}` : '512x512', type: image?.type ?? 'image/jpeg' }]
+      : [],
   };
 }
 
