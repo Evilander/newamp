@@ -142,6 +142,9 @@ function emptyDiscoverSurface(input: DiscoverSurfaceInput = {}): DiscoverSurface
   };
 }
 
+// Shared by the stub calls that answer with an empty list.
+const noRows = async (): Promise<never[]> => [];
+
 const stub: NewAmpAPI = {
   getMusicServers: async () => [],
   connectMusicServer: async () => { throw new Error('Music servers are available in the desktop app.'); },
@@ -157,11 +160,11 @@ const stub: NewAmpAPI = {
   trashTracks: async () => ({ trashed: 0, removed: 0, failed: [], cancelled: true }),
   onTracksRemoved: () => () => undefined,
   onTrashProgress: () => () => undefined,
-  getTracks: async () => [],
-  getTrackIds: async () => [],
+  getTracks: noRows,
+  getTrackIds: noRows,
   getTrackCount: async () => 0,
-  getAlbums: async () => [],
-  lookupAlbumArt: async () => [],
+  getAlbums: noRows,
+  lookupAlbumArt: noRows,
   applyAlbumArt: async (input, candidate) => ({
     album: input.album,
     albumArtist: input.albumArtist,
@@ -172,18 +175,21 @@ const stub: NewAmpAPI = {
     sourceUrl: candidate.imageUrl,
     appliedAt: Date.now(),
   }),
-  getArtists: async () => [],
+  getArtists: noRows,
   getFolders: async () => [],
-  getFolderTracks: async () => [],
-  getFolderTrackIds: async () => [],
-  getAlbumTracks: async () => [],
-  getArtistTracks: async () => [],
+  getFolderTracks: noRows,
+  getFolderTrackIds: noRows,
+  getAlbumTracks: noRows,
+  getAlbumTracksByKey: noRows,
+  getAlbumSummary: async () => null,
+  setAlbumSplit: async () => 0,
+  getArtistTracks: noRows,
   getTrack: async () => null,
-  getTracksByIds: async () => [],
-  lookupTrackMetadata: async () => [],
+  getTracksByIds: noRows,
+  lookupTrackMetadata: noRows,
   applyTrackMetadataPatch: async () => null,
   applyTrackMetadataEdit: async (_id: number, _patch: TrackMetadataPatchInput) => null,
-  getPlaylists: async () => [],
+  getPlaylists: noRows,
   savePlaylist: async (input) => ({
     id: input.id ?? 0,
     name: input.name,

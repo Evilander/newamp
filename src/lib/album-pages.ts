@@ -7,6 +7,10 @@ import type { AlbumSummary } from '@shared/types';
  * next page starts with albums already shown. Those are dropped here. The
  * caller advances its offset by the rows it read, not by what was kept, so
  * paging always moves on and an addition never makes it skip an album.
+ *
+ * An album is its key. Two albums can share a title and album artist (the
+ * pieces of a folder split apart, several folders under a generic title), so
+ * the text pair would drop all but the first.
  */
 export function appendAlbumPage(current: readonly AlbumSummary[], page: readonly AlbumSummary[]): AlbumSummary[] {
   const seen = new Set(current.map(albumPageKey));
@@ -19,6 +23,6 @@ export function appendAlbumPage(current: readonly AlbumSummary[], page: readonly
   return fresh.length ? [...current, ...fresh] : [...current];
 }
 
-function albumPageKey(album: Pick<AlbumSummary, 'album' | 'albumArtist'>): string {
-  return `${album.albumArtist}\u0000${album.album}`;
+function albumPageKey(album: Pick<AlbumSummary, 'albumKey'>): string {
+  return album.albumKey;
 }

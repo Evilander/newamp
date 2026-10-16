@@ -631,7 +631,7 @@ function smartRuleItem(rule: SmartPlaylistRule): PaletteItem {
 function albumItem(album: AlbumSummary): PaletteItem {
   return {
     kind: 'album',
-    id: `album:${album.albumArtist}:${album.album}`,
+    id: `album:${album.albumKey}`,
     title: album.album,
     subtitle: <ArtistLink artist={album.albumArtist} color="inherit" />,
     subtitleText: album.albumArtist,
@@ -661,7 +661,7 @@ async function playableTracksFor(item: PaletteItem): Promise<Track[]> {
   if (item.kind === 'track') return [item.track];
   if (item.kind === 'playlist') return api.getPlaylistTracks(item.playlist.id);
   if (item.kind === 'smart-rule') return api.runSmartPlaylistRule(item.rule.id);
-  if (item.kind === 'album') return api.getAlbumTracks(item.album.albumArtist, item.album.album);
+  if (item.kind === 'album') return api.getAlbumTracksByKey(item.album.albumKey);
   if (item.kind === 'artist') return api.getArtistTracks(item.artist.artist);
   return [];
 }

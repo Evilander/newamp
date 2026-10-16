@@ -7,6 +7,23 @@ Release notes for every version, including everything before 2.0, are on the
 
 ## [Unreleased]
 
+### Changed
+
+- Albums are grouped the way the files describe them, not by each track's
+  artist. Compilations, soundtracks and other various-artists releases are one
+  album instead of one fragment per performer, using the compilation flag,
+  ALBUMARTIST, the folder and disc numbers. Multi-disc sets show a heading per
+  disc. On a 58,001-track library the Albums grid went from 5,903 entries to
+  4,910. Each album page says why its tracks were grouped, and "Show as
+  separate albums" undoes a grouping you disagree with; the choice survives
+  rescans and retagging.
+- Scans now keep the album artist, sort names, compilation flag, disc and
+  track totals and MusicBrainz release group from each file. Libraries scanned
+  before this read those tags in the background, pausing while music plays.
+- Album ratings move with their albums. The first launch copies library.db
+  to library.db.before-album-keys.bak before changing the ratings table,
+  because earlier versions can't write ratings to the new one.
+
 ### Fixed
 
 - Playback no longer stops to buffer when the music drive is busy for a few

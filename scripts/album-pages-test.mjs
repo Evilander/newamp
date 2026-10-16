@@ -22,7 +22,14 @@ await build({
 });
 const { appendAlbumPage } = await import(pathToFileURL(outfile).href);
 
-const album = (n, artist = `Artist ${n}`) => ({ album: `Album ${n}`, albumArtist: artist, year: null, trackCount: 1, duration: 1 });
+const album = (n, artist = `Artist ${n}`) => ({
+  albumKey: `album ${n}|${artist.toLowerCase()}`,
+  album: `Album ${n}`,
+  albumArtist: artist,
+  year: null,
+  trackCount: 1,
+  duration: 1,
+});
 const key = (a) => `${a.albumArtist}|${a.album}`;
 
 // Plain append, and repeats within the new page or against the list dropped.
@@ -32,6 +39,18 @@ const key = (a) => `${a.albumArtist}|${a.album}`;
   // Same title, another album artist: a different album.
   const split = appendAlbumPage([album(5, 'Pixies')], [album(5, 'Melt-Banana'), album(5, 'Pixies')]);
   assert.equal(split.length, 2);
+}
+
+// Albums that share a title and album artist but not a key (the pieces of a split folder, folders under a generic
+// title) are separate albums: none is dropped, within a page or against the list.
+{
+  const piece = (suffix) => ({ ...album(7, 'Lil Yachty'), album: 'Unreleased', albumKey: 'unreleased|lil yachty|@' + suffix });
+  const list = appendAlbumPage([piece('a')], [piece('b'), piece('c'), piece('b'), piece('a')]);
+  assert.deepEqual(list.map((a) => a.albumKey), ['unreleased|lil yachty|@a', 'unreleased|lil yachty|@b', 'unreleased|lil yachty|@c']);
+  // Paging through twenty-four of them keeps all twenty-four.
+  let shown = [];
+  for (let i = 0; i < 24; i += 6) shown = appendAlbumPage(shown, Array.from({ length: 6 }, (_, j) => piece('k' + (i + j))));
+  assert.equal(shown.length, 24);
 }
 
 /** Scrolls a newest-first grid to the end; `arrivals(page)` is how many albums land on top before that page. */

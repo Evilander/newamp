@@ -43,6 +43,9 @@ const db = new SQL.Database();
 db.run(`
   CREATE TABLE tracks (
     id INTEGER PRIMARY KEY,
+    album_key TEXT,
+    album_display TEXT,
+    album_sort_key TEXT,
     album TEXT,
     album_artist TEXT,
     artist TEXT,
@@ -58,13 +61,13 @@ db.run(`
 // One track per album. Album N gets MIN(id) at the magnitudes listed above.
 const idMagnitudes = [100, 10_000, 1_000_000, 100_000_000];
 const albums = [];
-const insert = db.prepare('INSERT INTO tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const insert = db.prepare('INSERT INTO tracks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 for (let i = 0; i < idMagnitudes.length; i++) {
   const id = idMagnitudes[i];
   const album = `Album ${String.fromCharCode(65 + i)}`;
   const albumArtist = `Artist ${i}`;
   albums.push({ id, album, albumArtist });
-  insert.bind([id, album, albumArtist, albumArtist, 2020 + i, 240, 0, Date.now(), 0, null]);
+  insert.bind([id, `${album}|${albumArtist}`, album, albumArtist.toLowerCase(), album, albumArtist, albumArtist, 2020 + i, 240, 0, Date.now(), 0, null]);
   insert.step();
   insert.reset();
 }
@@ -72,9 +75,11 @@ insert.free();
 
 function orderRowsFor(seed) {
   const orderSql = albumSortOrder('random', seed);
-  const sql = `SELECT album, album_artist
+  // The same shape as LibraryStore.getAlbums: one row per album_key, the
+  // album's own fields picked off its tracks, ORDER BY naming those aliases.
+  const sql = `SELECT MAX(album_display) AS album, MAX(album_sort_key) AS sort_artist, MAX(album_artist) AS album_artist
                  FROM tracks
-             GROUP BY album, album_artist
+             GROUP BY album_key
              ORDER BY ${orderSql}
                 LIMIT 100`;
   const stmt = db.prepare(sql);
@@ -118,7 +123,7 @@ assert.equal(matchesBaseline, false, 'distinct seeds must yield distinct orderin
 
 // (4) Stress at MIN(id) ≈ 2^30 with the largest legal seed. The old XOR
 //     math would have overflowed int64 here even if `^` had parsed.
-db.run('INSERT INTO tracks VALUES (1073741800, "Album Huge", "Artist Huge", "Artist Huge", 2030, 240, 0, 0, 0, NULL)');
+db.run('INSERT INTO tracks VALUES (1073741800, "Album Huge|Artist Huge", "Album Huge", "artist huge", "Album Huge", "Artist Huge", "Artist Huge", 2030, 240, 0, 0, 0, NULL)');
 let hugeOrder;
 try {
   hugeOrder = orderRowsFor(0x7FFFFFFE);

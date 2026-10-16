@@ -8,6 +8,7 @@ import type {
   AlbumArtLookupInput,
   AlbumArtLookupResult,
   AlbumRating,
+  AlbumSummary,
   AppSettings,
   AudioExportFormat,
   CachedGuitarTab,
@@ -129,6 +130,12 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('library:get-folder-track-ids', folderPath, opts) as Promise<number[]>,
   getAlbumTracks: (albumArtist, album) =>
     ipcRenderer.invoke('library:get-album-tracks', albumArtist, album),
+  getAlbumTracksByKey: (albumKey: string) =>
+    ipcRenderer.invoke('library:get-album-tracks-by-key', albumKey) as Promise<Track[]>,
+  getAlbumSummary: (albumKey: string) =>
+    ipcRenderer.invoke('library:get-album-summary', albumKey) as Promise<AlbumSummary | null>,
+  setAlbumSplit: (albumKey: string, split: boolean) =>
+    ipcRenderer.invoke('library:set-album-split', albumKey, split) as Promise<number>,
   getArtistTracks: (artist) => ipcRenderer.invoke('library:get-artist-tracks', artist),
   getTrack: (id) => ipcRenderer.invoke('library:get-track', id),
   getTracksByIds: (ids) => ipcRenderer.invoke('library:get-tracks-by-ids', ids) as Promise<Track[]>,
@@ -351,10 +358,10 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('library:set-rating', id, rating) as Promise<Track | null>,
   setTrackRatingScore: (id: number, score: number | null) =>
     ipcRenderer.invoke('library:set-rating-score', id, score) as Promise<Track | null>,
-  setAlbumRatingScore: (albumArtist: string, album: string, score: number | null) =>
-    ipcRenderer.invoke('library:set-album-rating-score', albumArtist, album, score) as Promise<AlbumRating | null>,
-  getAlbumRating: (albumArtist: string, album: string) =>
-    ipcRenderer.invoke('library:get-album-rating', albumArtist, album) as Promise<AlbumRating | null>,
+  setAlbumRatingScore: (albumArtist: string, album: string, score: number | null, albumKey?: string | null) =>
+    ipcRenderer.invoke('library:set-album-rating-score', albumArtist, album, score, albumKey) as Promise<AlbumRating | null>,
+  getAlbumRating: (albumArtist: string, album: string, albumKey?: string | null) =>
+    ipcRenderer.invoke('library:get-album-rating', albumArtist, album, albumKey) as Promise<AlbumRating | null>,
   toggleAvoidAutoPlay: (id: number) =>
     ipcRenderer.invoke('library:toggle-avoid-autoplay', id) as Promise<Track | null>,
   recordPlay: (id) => ipcRenderer.invoke('library:record-play', id),

@@ -2420,18 +2420,27 @@ function registerIpc(): void {
   ipcMain.handle('library:get-tracks', async (_e, opts) => library.getTracks(opts ?? {}));
   ipcMain.handle('library:get-track-ids', async (_e, opts) => library.getTrackIds(opts ?? {}));
   ipcMain.handle('library:get-track-count', async (_e, opts) => library.getTrackCount(opts ?? {}));
-  ipcMain.handle('library:get-albums', async (_e, opts) => library.getAlbums(opts ?? {}));
+  // The album and artist lists group on keys the grouping pass writes; the
+  // first launch after an upgrade waits for it, every later one finds it done.
+  ipcMain.handle('library:get-albums', async (_e, opts) => {
+    await library.albumsReady();
+    return library.getAlbums(opts ?? {});
+  });
   ipcMain.handle('album-art:lookup', async (_e, input: AlbumArtLookupInput) =>
     searchAlbumArt(input),
   );
   ipcMain.handle('album-art:apply', async (_e, input: AlbumArtLookupInput, candidate: AlbumArtLookupResult) => {
     const image = await fetchAlbumArtImage(candidate);
+    await library.albumsReady();
     return library.applyAlbumArtToAlbum(input.album, input.albumArtist, {
       mime: image.mime,
       data: image.data,
     }, image.sourceUrl);
   });
-  ipcMain.handle('library:get-artists', async (_e, opts) => library.getArtists(opts ?? {}));
+  ipcMain.handle('library:get-artists', async (_e, opts) => {
+    await library.albumsReady();
+    return library.getArtists(opts ?? {});
+  });
   ipcMain.handle('library:get-folders', async (_e, parentPath?: string | null) =>
     library.getFolders(parentPath ?? null, settings.get().libraryRoots),
   );
@@ -2441,12 +2450,25 @@ function registerIpc(): void {
   ipcMain.handle('library:get-folder-track-ids', async (_e, folderPath: string, opts) =>
     library.getFolderTrackIds(folderPath, opts ?? {}),
   );
-  ipcMain.handle('library:get-album-tracks', async (_e, albumArtist: string, album: string) =>
-    library.getAlbumTracks(albumArtist, album),
+  ipcMain.handle('library:get-album-tracks', async (_e, albumArtist: string, album: string) => {
+    await library.albumsReady();
+    return library.getAlbumTracks(albumArtist, album);
+  });
+  ipcMain.handle('library:get-album-tracks-by-key', async (_e, albumKey: unknown) => {
+    await library.albumsReady();
+    return library.getAlbumTracksByKey(typeof albumKey === 'string' ? albumKey : '');
+  });
+  ipcMain.handle('library:get-album-summary', async (_e, albumKey: unknown) => {
+    await library.albumsReady();
+    return library.getAlbumSummary(typeof albumKey === 'string' ? albumKey : '');
+  });
+  ipcMain.handle('library:set-album-split', async (_e, albumKey: unknown, split: unknown) =>
+    library.setAlbumSplit(typeof albumKey === 'string' ? albumKey : '', split === true),
   );
-  ipcMain.handle('library:get-artist-tracks', async (_e, artist: string) =>
-    library.getArtistTracks(artist),
-  );
+  ipcMain.handle('library:get-artist-tracks', async (_e, artist: string) => {
+    await library.albumsReady();
+    return library.getArtistTracks(artist);
+  });
   ipcMain.handle('library:get-track', async (_e, id: number) => library.getTrack(id));
   ipcMain.handle('library:get-tracks-by-ids', async (_e, ids: unknown) => {
     if (!Array.isArray(ids)) return [];
@@ -2679,8 +2701,16 @@ function registerIpc(): void {
     return library.applyManualMetadataPatch(id, patch);
   });
   ipcMain.handle('metadata:reset-adopted', async () => library.resetAdoptedMetadataOverrides());
-  ipcMain.handle('library:get-stats', async () => library.getStats());
-  ipcMain.handle('library:get-health', async () => library.getLibraryHealth());
+  // Both count albums by key, which the first launch after an upgrade has to
+  // wait for; the wait is in slices, where counting without it would not be.
+  ipcMain.handle('library:get-stats', async () => {
+    await library.albumsReady();
+    return library.getStats();
+  });
+  ipcMain.handle('library:get-health', async () => {
+    await library.albumsReady();
+    return library.getLibraryHealth();
+  });
   ipcMain.handle('library:prune-missing-preview', async (_e, targets?: string[]) =>
     library.previewPruneMissingTracks(Array.isArray(targets) ? targets : undefined, settings.get().libraryRoots),
   );
@@ -2853,12 +2883,17 @@ function registerIpc(): void {
   );
   ipcMain.handle(
     'library:set-album-rating-score',
-    async (_e, albumArtist: string, album: string, score: number | null) =>
-      library.setAlbumRatingScore(albumArtist, album, score),
+    async (_e, albumArtist: string, album: string, score: number | null, albumKey?: string | null) => {
+      await library.albumsReady();
+      return library.setAlbumRatingScore(albumArtist, album, score, albumKey);
+    },
   );
   ipcMain.handle(
     'library:get-album-rating',
-    async (_e, albumArtist: string, album: string) => library.getAlbumRating(albumArtist, album),
+    async (_e, albumArtist: string, album: string, albumKey?: string | null) => {
+      await library.albumsReady();
+      return library.getAlbumRating(albumArtist, album, albumKey);
+    },
   );
   ipcMain.handle('library:toggle-avoid-autoplay', async (_e, id: number) =>
     library.toggleAvoidAutoPlay(id),
