@@ -69,6 +69,33 @@ export interface ComputeDnaOptions {
 }
 
 export function computeTrackDna(samples: Float32Array, opts: ComputeDnaOptions): TrackDna {
+  const run = dnaSteps(samples, opts);
+  for (;;) {
+    const step = run.next();
+    if (step.done) return step.value;
+  }
+}
+
+/**
+ * The same vector as computeTrackDna, with `pause` awaited between slices of
+ * about ten milliseconds so a host that shares its thread with the UI can
+ * yield (the Electron main process passes a setImmediate-backed one).
+ */
+export async function computeTrackDnaYielding(
+  samples: Float32Array,
+  opts: ComputeDnaOptions & { pause: () => Promise<void> },
+): Promise<TrackDna> {
+  const run = dnaSteps(samples, opts);
+  for (;;) {
+    const step = run.next();
+    if (step.done) return step.value;
+    await opts.pause();
+  }
+}
+
+const FRAMES_PER_SLICE = 96;
+
+function* dnaSteps(samples: Float32Array, opts: ComputeDnaOptions): Generator<void, TrackDna, void> {
   const sampleRate = opts.sampleRate;
   if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
     throw new Error('computeTrackDna requires a positive sampleRate.');
@@ -136,6 +163,7 @@ export function computeTrackDna(samples: Float32Array, opts: ComputeDnaOptions):
     }
     prevMagnitudes.set(magnitudes);
     frames++;
+    if (frames % FRAMES_PER_SLICE === 0) yield;
   }
 
   if (frames === 0) return emptyTrackDna();

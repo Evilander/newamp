@@ -90,6 +90,7 @@ import type {
   TrackWavExportResult,
   WaveformData,
 } from '../shared/types.js';
+import type { AnalysisProgress } from '../shared/analysis.js';
 import type { TrackDna } from '../shared/audio-dna.js';
 import type { VisualMemoryPlan, VisualMemoryStats } from '../shared/visual-memory.js';
 import type { SongScore } from '../src/visualizer/eviland-score.js';
@@ -206,6 +207,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('tracks:dna-missing-ids', limit) as Promise<number[]>,
   getDnaStats: () =>
     ipcRenderer.invoke('tracks:dna-stats') as Promise<DnaStats>,
+  getAnalysisProgress: () =>
+    ipcRenderer.invoke('analysis:progress') as Promise<AnalysisProgress>,
   getAllTrackDna: () =>
     ipcRenderer.invoke('tracks:dna-all') as Promise<Array<{ id: number; dna: TrackDna }>>,
   findSimilarTracks: (trackId: number, limit?: number) =>

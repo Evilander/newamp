@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import QRCode from 'qrcode';
+import type { AnalysisProgress } from '@shared/analysis';
+import { describeAnalysis } from '@shared/analysis';
 import type {
   AppSettings,
   CustomSkin,
@@ -444,6 +446,12 @@ export function SettingsView(): JSX.Element {
                 Refresh when music files or cover art change
               </label>
             </Row>
+            <AnalysisRow
+              enabled={settings.backgroundAnalysis !== false}
+              onChange={(backgroundAnalysis) =>
+                saveSettings({ backgroundAnalysis }).then(acceptSettings).catch(() => undefined)
+              }
+            />
             <Row label="Export metadata">
               <div className="flex flex-wrap items-center gap-2">
                 <button
@@ -1854,6 +1862,63 @@ function FlashProtectionRow(): JSX.Element {
         </button>
       )}
     </div>
+  );
+}
+
+// Progress of the background analysis. Polled while Settings is open; the work
+// itself is in the main process and does not depend on this being visible.
+function AnalysisRow({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }): JSX.Element {
+  const [progress, setProgress] = useState<AnalysisProgress | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = (): void => {
+      api.getAnalysisProgress().then((next) => alive && setProgress(next)).catch(() => undefined);
+    };
+    load();
+    const timer = window.setInterval(load, 4000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [enabled]);
+
+  const text = progress ? describeAnalysis(progress) : null;
+  return (
+    <Row label="Analyse library">
+      <div className="flex flex-col gap-2 text-sm text-ink2" data-newamp-analysis>
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={enabled}
+            data-newamp-analysis-toggle
+            onChange={(e) => onChange(e.target.checked)}
+          />
+          Work out tempo, key, loudness and sound for every track, in the background
+        </label>
+        <span className="text-xs text-muted">
+          One file at a time, at low priority. It waits while music is struggling to play, while the library scans, on
+          battery power and when the computer is busy. It only reads your files. Sounds Like, harmonic mixes, tempo
+          filters and Ask Your Library use what it finds.
+        </span>
+        {text && (
+          <div className="flex flex-col gap-1" data-newamp-analysis-progress>
+            <span>
+              {text.counts}
+              {text.eta ? ` · ${text.eta}` : ''}
+            </span>
+            <progress
+              className="w-full"
+              max={100}
+              value={Math.round(text.fraction * 100)}
+              aria-label="Library analysis progress"
+            />
+            <span className="text-xs text-muted">{text.status}</span>
+            <span className="text-xs text-muted">{text.coverage}</span>
+          </div>
+        )}
+      </div>
+    </Row>
   );
 }
 

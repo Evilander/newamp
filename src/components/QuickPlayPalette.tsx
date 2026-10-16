@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { compileQueryIntent, looksLikeNaturalQuery } from '@shared/query-intent';
+import { compileQueryIntent, looksLikeNaturalQuery, withTempoCoverage, type QueryIntent } from '@shared/query-intent';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import type { AlbumSummary, ArtistSummary, ListeningHistoryItem, SavedPlaylist, SmartPlaylistRule, Track } from '@shared/types';
 import type { ViewMode } from '../store/usePlayerStore';
@@ -128,7 +128,9 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
             : api.getListeningHistory({ limit: 8 }).catch(() => [] as ListeningHistoryItem[]),
         ]);
         if (cancelled) return;
-        setAskChips(useAsk ? askIntent.chips : null);
+        const chips = useAsk ? await tempoCoverageChips(askIntent) : null;
+        if (cancelled) return;
+        setAskChips(chips);
         const base = useAsk
           ? buildPaletteItems('', tracks, [], [], [], []).filter((item) => item.kind === 'track')
           : buildPaletteItems(trimmedQuery, tracks, playlists, smartRules, albums, artists);
@@ -651,6 +653,17 @@ function artistItem(artist: ArtistSummary): PaletteItem {
     detail: `${artist.trackCount.toLocaleString()} tracks`,
     artist,
   };
+}
+
+// A tempo filter only sees tracks whose tempo is known, so its chip says how many that is.
+async function tempoCoverageChips(intent: QueryIntent): Promise<string[]> {
+  if (intent.rule.minBpm == null && intent.rule.maxBpm == null) return intent.chips;
+  try {
+    const progress = await api.getAnalysisProgress();
+    return withTempoCoverage(intent, { known: progress.coverage.tempo, total: progress.total });
+  } catch {
+    return intent.chips;
+  }
 }
 
 function isPlayableItem(item: PaletteItem): boolean {

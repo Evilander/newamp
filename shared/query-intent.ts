@@ -206,3 +206,19 @@ export function compileQueryIntent(text: string, now = Date.now()): QueryIntent 
 
   return { rule, chips, matched };
 }
+
+/**
+ * The chips with the tempo ones saying how much of the library has a tempo. A
+ * tempo filter only sees tracks whose tempo is known; until the background
+ * analysis has been through the library that can be a small part of it, and the
+ * chip is where the listener finds that out.
+ */
+export function withTempoCoverage(intent: QueryIntent, coverage: { known: number; total: number }): string[] {
+  const filtersTempo = intent.rule.minBpm != null || intent.rule.maxBpm != null;
+  if (!filtersTempo || coverage.total <= 0) return intent.chips;
+  const known = Math.min(coverage.known, coverage.total).toLocaleString('en-US');
+  const total = coverage.total.toLocaleString('en-US');
+  const note = coverage.known >= coverage.total ? '' : `, tempo known for ${known} of ${total} tracks`;
+  // The free-text chip is quoted; a search word like "bpm" is not a tempo constraint.
+  return intent.chips.map((chip) => (/\bbpm\b/i.test(chip) && !chip.startsWith('\u201c') ? chip + note : chip));
+}

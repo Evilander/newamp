@@ -227,6 +227,12 @@ function decodeBytes(value: unknown): Uint8Array | null {
 let cacheDir = '';
 let ready: Promise<void> | null = null;
 let writesSincePrune = 0;
+// Files in the cache as of the last prune, plus what was written since.
+let cachedFiles = 0;
+// The library-wide analysis fills the cache only this far. The rest stays free
+// for waveforms the listener asks for, so a prune never has to drop one of
+// those to make room for a track nobody has played.
+const BACKGROUND_FILL = 0.8;
 
 export function initWaveformCache(dir: string): void {
   cacheDir = dir;
@@ -268,6 +274,7 @@ async function writeCached(key: string, data: WaveformData): Promise<void> {
       await writeFile(temp, encodeWaveformFile(data), 'utf8');
     }
     await rename(temp, file);
+    cachedFiles += 1;
     writesSincePrune += 1;
     if (writesSincePrune >= PRUNE_EVERY_WRITES) {
       writesSincePrune = 0;
@@ -289,14 +296,49 @@ async function pruneCache(dir: string): Promise<void> {
     if (at != null && now - at > STALE_PART_MS) void unlink(join(dir, name)).catch(() => undefined);
   }
   const files = names.filter((name) => name.endsWith('.json'));
+  cachedFiles = files.length;
   if (files.length <= MAX_CACHED_FILES) return;
   const aged = await Promise.all(
     files.map(async (name) => ({ name, at: (await stat(join(dir, name)).catch(() => null))?.mtimeMs ?? 0 })),
   );
   aged.sort((a, b) => a.at - b.at);
-  for (const { name } of aged.slice(0, Math.ceil(files.length / 5))) {
+  const dropped = aged.slice(0, Math.ceil(files.length / 5));
+  cachedFiles -= dropped.length;
+  for (const { name } of dropped) {
     void unlink(join(dir, name)).catch(() => undefined);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Waveforms built by the library-wide analysis
+
+/** Whether the cache has room for waveforms nobody asked for yet. */
+export function waveformCacheHasRoom(): boolean {
+  return cacheDir !== '' && !closed && cachedFiles < MAX_CACHED_FILES * BACKGROUND_FILL;
+}
+
+export interface WaveformFile {
+  path: string;
+  size: number;
+  mtimeMs: number;
+}
+
+/** True when this file already has a waveform in the cache. */
+export async function hasCachedWaveform(file: WaveformFile): Promise<boolean> {
+  if (!cacheDir) return false;
+  await ready;
+  const key = waveformCacheKey({ path: file.path, size: file.size, mtimeMs: file.mtimeMs, start: 0, end: null });
+  return stat(join(cacheDir, `${key}.json`)).then(() => true, () => false);
+}
+
+/**
+ * Keeps a waveform the analysis folded from a decode it made for other reasons.
+ * Keyed as a whole-file request, which is what the seek bar asks for.
+ */
+export async function storeAnalysedWaveform(file: WaveformFile, data: WaveformData): Promise<void> {
+  if (!cacheDir || closed) return;
+  await ready;
+  await writeCached(waveformCacheKey({ path: file.path, size: file.size, mtimeMs: file.mtimeMs, start: 0, end: null }), data);
 }
 
 // ---------------------------------------------------------------------------
