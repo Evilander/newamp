@@ -290,6 +290,33 @@ export function fullscreenToRestore(opening: boolean | null, deckMode: boolean, 
   return deckMode ? false : opening;
 }
 
+export interface WindowFullscreenControl {
+  isFullscreen(): Promise<boolean>;
+  setFullscreen(on: boolean): Promise<void>;
+}
+
+let fullscreenChain: Promise<void> = Promise.resolve();
+
+/**
+ * Puts the window in the given OS fullscreen state, and does nothing when it
+ * is already there. Asking a windowed Windows window to leave fullscreen is not
+ * a no-op: the main window is transparent, and for those Electron answers
+ * setFullScreen(false) by resizing to a restore rectangle it only records on the
+ * way in. Without one the window drops to its minimum size at the top-left
+ * corner, and that size is then saved as the window's normal bounds. Calls run
+ * one after another so a leave right behind an enter sees the state the enter
+ * produced.
+ */
+export function setWindowFullscreen(target: boolean, win: WindowFullscreenControl): Promise<void> {
+  const run = async (): Promise<void> => {
+    if ((await win.isFullscreen()) === target) return;
+    await win.setFullscreen(target);
+  };
+  const done = fullscreenChain.then(run, run);
+  fullscreenChain = done.catch(() => undefined);
+  return done;
+}
+
 /** A list that scrolls keeps the wheel; the stage behind it would turn it into a volume change. */
 export function scrollKeepsWheel(box: { scrollHeight: number; clientHeight: number }): boolean {
   return box.scrollHeight - box.clientHeight > 1;
