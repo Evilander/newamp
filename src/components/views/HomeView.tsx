@@ -551,20 +551,8 @@ function HealthPanel({
         </button>
       </div>
       {compass && (
-        <div className="mb-2 grid grid-cols-[58px_minmax(0,1fr)] gap-2">
-          <div
-            className="bevel-in flex h-[58px] items-center justify-center text-[26px] font-black leading-none"
-            style={{ color: compass.grade === 'S' || compass.grade === 'A' ? 'var(--accent)' : 'var(--warn)' }}
-            title={`Archive score ${compass.score}/100`}
-          >
-            {compass.grade}
-          </div>
-          <div className="min-w-0">
-            <div className="truncate text-[13px] font-bold">{compass.profile}</div>
-            <div className="mt-1 line-clamp-2 text-[10px] leading-snug" style={{ color: 'var(--ink-2)' }}>
-              {compass.headline}
-            </div>
-          </div>
+        <div className="mb-2 line-clamp-2 text-[11px] leading-snug" style={{ color: 'var(--ink-2)' }}>
+          {compass.headline}
         </div>
       )}
       <div className="grid grid-cols-3 gap-2 text-center">

@@ -35,7 +35,7 @@ export function EmptyLibrary(): JSX.Element {
       const roots = mergeRoots(settings.libraryRoots, path);
       await api.setSettings({ libraryRoots: roots });
       await api.scanLibrary([path]);
-      setStatus('Scan started. NewAmp will fill in as files are indexed.');
+      setStatus(await statusAfterScan());
     } catch (err) {
       setStatus(err instanceof Error ? err.message : 'Folder scan failed.');
     } finally {
@@ -54,7 +54,7 @@ export function EmptyLibrary(): JSX.Element {
     setStatus('Scanning default music folder...');
     try {
       await api.scanLibrary();
-      setStatus('Scan started. NewAmp will fill in as files are indexed.');
+      setStatus(await statusAfterScan());
     } catch (err) {
       setStatus(err instanceof Error ? err.message : 'Default scan failed.');
     } finally {
@@ -80,7 +80,7 @@ export function EmptyLibrary(): JSX.Element {
       const roots = mergeRoots(settings.libraryRoots, dir);
       await api.setSettings({ libraryRoots: roots });
       await api.scanLibrary([dir]);
-      setStatus('Scan started. You can keep using NewAmp while it indexes.');
+      setStatus(await statusAfterScan());
     } catch (err) {
       setStatus(err instanceof Error ? err.message : 'Folder scan failed.');
     } finally {
@@ -134,6 +134,14 @@ export function EmptyLibrary(): JSX.Element {
       </div>
     </div>
   );
+}
+
+// The scan call answers when the scan is over. If it found tracks, the Library
+// view has already replaced this screen with them, so there is only the empty
+// outcome to speak for.
+async function statusAfterScan(): Promise<string | null> {
+  const stats = await api.getStats().catch(() => null);
+  return stats && stats.tracks === 0 ? 'Nothing was added. Try a folder with music in it.' : null;
 }
 
 function mergeRoots(roots: string[], nextRoot: string): string[] {

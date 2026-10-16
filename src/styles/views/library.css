@@ -244,24 +244,6 @@ svg.library-th-star {
   text-transform: uppercase;
   color: var(--accent-text);
 }
-.library-overview-grade {
-  flex: none;
-  min-width: 20px;
-  padding: 0 4px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  text-align: center;
-  font-weight: 800;
-}
-.library-overview-profile {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 700;
-  color: var(--ink);
-}
 .library-overview-summary {
   flex: 1 1 0;
   min-width: 0;

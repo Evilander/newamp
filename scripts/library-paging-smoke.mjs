@@ -88,9 +88,13 @@ try {
   const pageSizeMatch = libraryViewSource.match(/const LIBRARY_PAGE_SIZE = (\d+)/);
   assert.ok(pageSizeMatch, 'LibraryView should declare a numeric page size');
   assert.ok(Number(pageSizeMatch[1]) <= 800, 'LibraryView should keep initial DOM row count light for huge libraries');
-  assert.match(libraryViewSource, /useDebouncedValue\(search, LIBRARY_SEARCH_DEBOUNCE_MS\)/, 'LibraryView should debounce large-library search before querying the catalog');
+  assert.match(libraryViewSource, /useDebouncedValue\(search, searchDebounceMs\(queryMsRef\.current\)\)/, 'LibraryView should debounce large-library search before querying the catalog');
   assert.match(libraryViewSource, /search: libraryQuery/, 'LibraryView should run catalog paging against the debounced search query');
-  assert.match(libraryViewSource, /offset: tracks\.length/, 'LibraryView should request subsequent pages by loaded row count');
+  // Rows read, not tracks shown: repeats dropped after a mid-scroll scan must
+  // not hold the offset back.
+  assert.match(libraryViewSource, /offset: rowsReadRef\.current/, 'LibraryView should request subsequent pages by the rows already read');
+  assert.match(libraryViewSource, /appendTrackPage\(current, rows\)/, 'LibraryView should append pages without repeating tracks');
+  assert.match(libraryViewSource, /wantsNextTrackPage\(/, 'LibraryView should load the next page as the list nears its end');
   assert.match(libraryViewSource, /Load more/, 'LibraryView should expose a load-more control');
   assert.match(libraryViewSource, /hasMoreTracks/, 'LibraryView should track whether more catalog rows are available');
   assert.match(libraryViewSource, /getTrackCount/, 'LibraryView should fetch exact filtered totals');

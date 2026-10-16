@@ -1,7 +1,5 @@
 import type { LibraryHealth } from './types.js';
 
-export type ArchiveGrade = 'S' | 'A' | 'B' | 'C' | 'D' | 'F';
-
 export interface ArchiveCompassSignal {
   label: string;
   value: number;
@@ -15,9 +13,6 @@ export interface ArchiveCompassMove {
 }
 
 export interface ArchiveCompass {
-  score: number;
-  grade: ArchiveGrade;
-  profile: string;
   headline: string;
   detail: string;
   ratios: {
@@ -42,20 +37,6 @@ export function buildArchiveCompass(health: LibraryHealth): ArchiveCompass {
   const hiResPct = pct(quality.hiRes, total);
   const replayGainPct = pct(quality.replayGainReady, total);
   const issuePct = pct(issueTotal, total);
-  const score = clampScore(
-    62 +
-      losslessPct * 0.16 +
-      hiResPct * 0.1 +
-      replayGainPct * 0.11 +
-      Math.min(quality.dsd, 12) * 0.25 -
-      pct(missingTotal, total) * 0.24 -
-      pct(duplicateExact, total) * 0.18 -
-      pct(quality.lowBitrate, total) * 0.28 -
-      pct(quality.unknown, total) * 0.34 -
-      pct(quality.replayGainMissing, total) * 0.14 -
-      pct(legacyTotal, total) * 0.04,
-  );
-  const grade = gradeForScore(score);
   const strengths = topSignals([
     { label: 'Lossless files', value: quality.lossless, tone: 'good' },
     { label: 'Hi-res files', value: quality.hiRes, tone: 'good' },
@@ -70,12 +51,8 @@ export function buildArchiveCompass(health: LibraryHealth): ArchiveCompass {
     { label: 'Missing metadata', value: missingTotal, tone: missingTotal ? 'warn' : 'good' },
   ]);
   const moves = buildMoves(health, { missingTotal, duplicateExact, legacyTotal });
-  const profile = profileFor(health, score);
   return {
-    score,
-    grade,
-    profile,
-    headline: headlineFor(health, score),
+    headline: headlineFor(health),
     detail: detailFor(health, { missingTotal, duplicateExact, legacyTotal }),
     ratios: { losslessPct, hiResPct, replayGainPct, issuePct },
     strengths,
@@ -92,6 +69,11 @@ export function missingMetadataTotal(health: LibraryHealth): number {
     health.missing.art +
     health.missing.duration
   );
+}
+
+/** Artist, album, year and length gaps; cover art is counted on its own. */
+export function missingTagTotal(health: LibraryHealth): number {
+  return health.missing.artist + health.missing.album + health.missing.year + health.missing.duration;
 }
 
 export function duplicateExactTotal(health: LibraryHealth): number {
@@ -142,11 +124,19 @@ function buildMoves(
       query: null,
     });
   }
-  if (counts.missingTotal) {
+  if (health.missing.art) {
     moves.push({
-      label: 'Fix missing tags and art',
-      detail: `${formatCount(counts.missingTotal)} tags or covers are missing across the library.`,
+      label: 'Find cover art',
+      detail: `${formatCount(health.missing.art)} tracks have no cover art.`,
       query: 'missing:art',
+    });
+  }
+  const tagGaps = missingTagGaps(health);
+  if (tagGaps.total) {
+    moves.push({
+      label: 'Fix missing tags',
+      detail: `${formatCount(tagGaps.total)} tags are missing, mostly ${tagGaps.worst.label}.`,
+      query: `missing:${tagGaps.worst.token}`,
     });
   }
   if (!moves.length) {
@@ -159,22 +149,22 @@ function buildMoves(
   return moves.slice(0, 4);
 }
 
-function profileFor(health: LibraryHealth, score: number): string {
-  if (!health.totals.tracks) return 'Empty library';
-  const q = health.quality;
-  if (score >= 92 && q.hiRes >= 12) return 'Hi-res library';
-  if (q.dsd >= 1 && q.lossless >= q.lossy) return 'Lossless with DSD';
-  if (q.lossless >= q.lossy * 2 && q.replayGainReady >= q.replayGainMissing) return 'Mostly lossless';
-  if (q.lowBitrate + q.unknown + missingMetadataTotal(health) > health.totals.tracks * 0.35) return 'Needs cleanup';
-  if (q.replayGainMissing > q.replayGainReady) return 'Needs ReplayGain';
-  if (score >= 82) return 'Mostly clean';
-  return 'Mixed library';
+// Artist, album, year and length gaps counted together, and the field with the
+// most of them, so the move can name it and open the tracks it is about.
+function missingTagGaps(health: LibraryHealth): { total: number; worst: { label: string; token: string } } {
+  const fields = [
+    { label: 'artist names', token: 'artist', count: health.missing.artist },
+    { label: 'album names', token: 'album', count: health.missing.album },
+    { label: 'years', token: 'year', count: health.missing.year },
+    { label: 'track lengths', token: 'duration', count: health.missing.duration },
+  ];
+  const worst = fields.reduce((best, field) => (field.count > best.count ? field : best));
+  return { total: missingTagTotal(health), worst };
 }
 
-function headlineFor(health: LibraryHealth, score: number): string {
+function headlineFor(health: LibraryHealth): string {
   const q = health.quality;
   if (!health.totals.tracks) return 'Add a music folder to see how healthy your library is.';
-  if (score >= 92) return 'Very few problems found.';
   if (q.dsd) return 'Your library includes DSD files, which NewAmp plays as PCM.';
   if (q.replayGainMissing > q.replayGainReady) return 'More tracks lack ReplayGain data than have it, so loudness varies between albums.';
   if (q.lowBitrate) return 'Some files are low-bitrate and may be worth replacing.';
@@ -202,19 +192,6 @@ function topSignals(signals: ArchiveCompassSignal[]): ArchiveCompassSignal[] {
 
 function pct(value: number, total: number): number {
   return Math.max(0, Math.min(100, (value / Math.max(1, total)) * 100));
-}
-
-function clampScore(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)));
-}
-
-function gradeForScore(score: number): ArchiveGrade {
-  if (score >= 94) return 'S';
-  if (score >= 86) return 'A';
-  if (score >= 76) return 'B';
-  if (score >= 66) return 'C';
-  if (score >= 52) return 'D';
-  return 'F';
 }
 
 function formatCount(value: number): string {
