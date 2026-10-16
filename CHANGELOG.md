@@ -9,6 +9,14 @@ Release notes for every version, including everything before 2.0, are on the
 
 ### Added
 
+- The whole library is analysed in the background: tempo, key, loudness
+  (ReplayGain), audio DNA and the seek-bar waveform, from one decode per
+  track. It waits while playback is short of audio, during scans, on battery
+  and when the computer is busy, picks up where it left off after a restart,
+  and never writes to music files. Settings > Library shows progress and the
+  time left, and can turn it off. On 17 test files it took 1.4 seconds per
+  track, about 22 hours for a 58,000-track library. Sounds Like, harmonic
+  mixes and tempo filters work across the library as it fills in.
 - The library and settings are copied once a day to a backups folder in the
   app's data folder. Five are kept, a copy is skipped when nothing changed or
   the drive is nearly full, and each one is checked before older ones are
@@ -47,6 +55,10 @@ Release notes for every version, including everything before 2.0, are on the
   explains how to quit and where to change it.
 - The startup script is 340 KB, down from 441 KB: the visualizer engine
   loads when a visualizer or projector opens, as it did in 2.5.
+- Home, Discover, Mixes and Folders no longer stall the app while they load.
+  On a 58,000-track library the longest single step when opening Home went
+  from 1.2 seconds to 57 ms, Folders from 1.2 seconds to 49 ms, and Discover
+  and Mixes from about 0.6 seconds to under 60 ms. Results are the same.
 
 ### Fixed
 
@@ -84,6 +96,13 @@ Release notes for every version, including everything before 2.0, are on the
   stopped.
 - The folder picker opened at a fixed drive letter instead of the Music
   folder.
+- Cover images in album folders are found under more names and layouts
+  (front, cover and folder in any case and image type, the only image in the
+  folder, or one folder up from a disc folder). On a 5,993-album library 408
+  more albums have art. Existing albums pick it up on the next scan.
+- Tracks never analysed had a tempo of 0, so a "slow" tempo filter matched
+  all of them.
+- Error messages no longer start with "Error invoking remote method".
 
 ## [2.6.0] - 2026-10-11
 
