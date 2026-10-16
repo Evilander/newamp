@@ -111,6 +111,21 @@ export function defaultMusicScanRoots({
   return [];
 }
 
+// Earlier builds seeded a first run with the shared Public Music folder when
+// nothing else was found. It exists on every Windows install and nobody keeps
+// music there, so a library whose only root is that folder and which has never
+// held a track was seeded, not chosen.
+export function isSeededPublicMusicRoot(
+  roots: readonly string[],
+  trackCount: number,
+  env: EnvLike = process.env,
+): boolean {
+  if (trackCount !== 0 || roots.length !== 1) return false;
+  const publicMusic = childPath(cleanPath(env.PUBLIC) || 'C:/Users/Public', 'Music');
+  const root = normalizeKey(cleanPath(roots[0]));
+  return root === normalizeKey(publicMusic) || root === 'c:/users/public/music';
+}
+
 function childPath(parent: string, child: string): string {
   const trimmed = parent.replace(/[\\/]+$/, '');
   const separator = trimmed.includes('\\') && !trimmed.includes('/') ? '\\' : '/';

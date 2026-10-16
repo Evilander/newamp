@@ -82,3 +82,100 @@ export function shouldLeaveCompact(input: {
   if (input.startupPending) return false;
   return input.inCompact || input.hasNormalBounds;
 }
+
+// A window created hidden is shown from ready-to-show. On native Wayland
+// Chromium sometimes never sends it for a window that has not been mapped yet
+// (electron#48859), so the main window, its splash and the projector stayed
+// invisible for good while the app ran on without them. A load that finished
+// proves the page is there, so on Linux a short timer after it shows the
+// window anyway. Whichever of the two comes first wins; the other is a no-op.
+export const LINUX_REVEAL_FALLBACK_MS = 1500;
+
+export interface RevealGate {
+  trigger(): boolean;
+  readonly revealed: boolean;
+}
+
+export function createRevealGate(reveal: () => void): RevealGate {
+  let revealed = false;
+  return {
+    trigger() {
+      if (revealed) return false;
+      revealed = true;
+      reveal();
+      return true;
+    },
+    get revealed() {
+      return revealed;
+    },
+  };
+}
+
+// The part of a BrowserWindow the reveal needs, so it can be driven by a fake.
+export interface RevealTarget {
+  once(event: 'ready-to-show', listener: () => void): unknown;
+  isDestroyed(): boolean;
+  webContents: { once(event: 'did-finish-load' | 'did-fail-load', listener: () => void): unknown };
+}
+
+export interface RevealOptions {
+  platform: NodeJS.Platform;
+  fallbackMs?: number;
+  setTimer?: (callback: () => void, ms: number) => unknown;
+}
+
+// A page that failed to load is revealed too: an empty window the user can
+// close beats an app that looks hung.
+export function revealWhenReady(target: RevealTarget, reveal: () => void, options: RevealOptions): RevealGate {
+  const gate = createRevealGate(reveal);
+  target.once('ready-to-show', () => {
+    gate.trigger();
+  });
+  if (options.platform === 'linux') {
+    const setTimer = options.setTimer ?? setTimeout;
+    let armed = false;
+    const arm = () => {
+      if (armed || gate.revealed) return;
+      armed = true;
+      setTimer(() => {
+        if (!target.isDestroyed()) gate.trigger();
+      }, options.fallbackMs ?? LINUX_REVEAL_FALLBACK_MS);
+    };
+    target.webContents.once('did-finish-load', arm);
+    target.webContents.once('did-fail-load', arm);
+  }
+  return gate;
+}
+
+// The first time the close button sends the window to the tray, nothing on
+// screen says the app is still running, and Windows 11 files a new tray icon
+// under the overflow arrow. macOS has the Dock, which says it already.
+export function shouldExplainTrayClose(input: {
+  action: CloseAction;
+  platform: NodeJS.Platform;
+  alreadyExplained: boolean;
+}): boolean {
+  return input.action === 'hide' && input.platform !== 'darwin' && !input.alreadyExplained;
+}
+
+export interface TrayCloseNotice {
+  title: string;
+  message: string;
+  detail: string;
+  keepLabel: string;
+  quitLabel: string;
+}
+
+export function trayCloseNotice(platform: NodeJS.Platform): TrayCloseNotice {
+  const overflow = platform === 'win32' ? ' It may be under the ^ arrow next to the clock.' : '';
+  return {
+    title: 'NewAmp is still running',
+    message: 'Closing the window keeps NewAmp playing in the tray.',
+    detail:
+      `Click the tray icon to bring the window back.${overflow} Starting NewAmp again does the same.\n\n` +
+      'To quit, right-click the tray icon and choose Quit NewAmp.\n\n' +
+      'To make the X button quit instead, change Close button (X) in Settings.',
+    keepLabel: 'Keep playing in the tray',
+    quitLabel: 'Quit NewAmp',
+  };
+}

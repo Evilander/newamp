@@ -59,6 +59,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   bitPerfectExclusiveDeviceId: null,
   sampleAccurateGapless: true,
   closeButtonBehavior: 'minimize-to-tray',
+  autoBackupEnabled: true,
   performanceTier: 'auto',
   ambientReactivity: 'auto',
   waveformSeekBar: true,
@@ -79,6 +80,7 @@ const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {
   libraryStats: { tracks: 0, albums: 0, artists: 0, duration: 0 },
   lastfmOutbox: { pending: 0, oldestCreatedAt: null, lastError: null, needsReconnect: false },
   recoveryEvents: [],
+  dailyBackups: { count: 0, newestAt: null, folder: '' },
 };
 
 function emptyListeningInsights(now = Date.now()): ListeningInsights {

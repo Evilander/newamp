@@ -67,8 +67,10 @@ const createWindow = functionBody(main, 'function createWindow(): BrowserWindow 
 assert.match(createWindow, /win\.on\('show', \(\) => applyThumbarButtons\(win\)\);/);
 assert.match(createWindow, /win\.on\('restore', \(\) => applyThumbarButtons\(win\)\);/);
 
-// The window is revealed on ready-to-show, after at most what is left of the splash minimum.
-assert.match(createWindow, /win\.once\('ready-to-show'/);
+// The window is revealed on ready-to-show (or, on Linux, the timer after the load that covers
+// Wayland never sending it), after at most what is left of the splash minimum.
+assert.match(createWindow, /revealWhenReady\(win, \(\) => \{/);
+assert.doesNotMatch(createWindow, /win\.once\('ready-to-show'/, 'the reveal goes through revealWhenReady');
 assert.match(createWindow, /STARTUP_SPLASH_MIN_MS - \(Date\.now\(\) - startupSplashStartedAt\)/);
 
 // Opening into the deck leaves the renderer's first set-compact(false) alone.

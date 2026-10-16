@@ -61,6 +61,8 @@ const DEFAULTS: AppSettings = {
   bitPerfectExclusiveDeviceId: null,
   sampleAccurateGapless: true,
   closeButtonBehavior: 'minimize-to-tray',
+  trayNoticeShown: false,
+  autoBackupEnabled: true,
   windowState: emptyWindowState(),
   performanceTier: 'auto',
   ambientReactivity: 'auto',
@@ -388,6 +390,12 @@ export class SettingsStore {
         ? parsed.sampleAccurateGapless
         : DEFAULTS.sampleAccurateGapless,
       closeButtonBehavior: normalizeCloseButtonBehavior(parsed.closeButtonBehavior),
+      // A profile saved before this notice existed has been closing to the
+      // tray all along, so only new profiles get the one-time explanation.
+      trayNoticeShown: parsed.trayNoticeShown === undefined
+        ? Object.keys(parsed).length > 0
+        : parsed.trayNoticeShown === true,
+      autoBackupEnabled: parsed.autoBackupEnabled !== false,
       windowState: normalizeWindowState(parsed.windowState),
       performanceTier: normalizePerformanceTier(parsed.performanceTier),
       ambientReactivity: normalizeAmbientReactivity(parsed.ambientReactivity),
@@ -517,6 +525,12 @@ export class SettingsStore {
       closeButtonBehavior: patch.closeButtonBehavior === undefined
         ? this.state.closeButtonBehavior
         : normalizeCloseButtonBehavior(patch.closeButtonBehavior),
+      trayNoticeShown: patch.trayNoticeShown === undefined
+        ? this.state.trayNoticeShown
+        : patch.trayNoticeShown === true,
+      autoBackupEnabled: patch.autoBackupEnabled === undefined
+        ? this.state.autoBackupEnabled
+        : patch.autoBackupEnabled !== false,
       windowState: patch.windowState === undefined
         ? this.state.windowState
         : normalizeWindowState(patch.windowState),

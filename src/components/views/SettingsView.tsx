@@ -1182,6 +1182,33 @@ export function SettingsView(): JSX.Element {
                     Show safety backup
                   </button>
                 </div>
+                <DiagnosticRow label="Daily backups">
+                  {dailyBackupSummary(settings.autoBackupEnabled, supportDiagnostics.dailyBackups)}
+                </DiagnosticRow>
+                <DiagnosticRow label="Backups folder">{supportDiagnostics.dailyBackups.folder || 'n/a'}</DiagnosticRow>
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="flex items-center gap-2 text-ink2">
+                    <input
+                      type="checkbox"
+                      data-newamp-auto-backup
+                      checked={settings.autoBackupEnabled}
+                      onChange={(e) => {
+                        saveSettings({ autoBackupEnabled: e.target.checked })
+                          .then(acceptSettings)
+                          .then(() => refreshSupportDiagnostics())
+                          .catch(() => undefined);
+                      }}
+                    />
+                    Keep a daily backup of the library and settings (the last five)
+                  </label>
+                  <button
+                    className="pxbtn"
+                    onClick={() => void api.showInFolder(supportDiagnostics.dailyBackups.folder)}
+                    disabled={!supportDiagnostics.dailyBackups.folder}
+                  >
+                    Show backups folder
+                  </button>
+                </div>
                 {supportBackupStatus && (
                   <div className={`text-xs ${supportBackup ? 'text-accent' : 'text-ink2'}`}>
                     {supportBackupStatus}
@@ -1915,6 +1942,12 @@ function EvilandMemoryRow(): JSX.Element {
       )}
     </div>
   );
+}
+
+function dailyBackupSummary(enabled: boolean, backups: SupportDiagnostics['dailyBackups']): string {
+  if (!backups.count) return enabled ? 'None yet' : 'Off';
+  const newest = backups.newestAt ? new Date(backups.newestAt).toLocaleString() : 'unknown time';
+  return `${backups.count} kept, newest ${newest}${enabled ? '' : ' (off)'}`;
 }
 
 function DiagnosticRow({ label, children }: { label: string; children: React.ReactNode }): JSX.Element {
