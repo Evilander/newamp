@@ -222,7 +222,8 @@ async function readMeta(
     duration = meta.format.duration ?? null;
     bitrate = meta.format.bitrate ? Math.round(meta.format.bitrate) : null;
     sampleRate = meta.format.sampleRate ?? null;
-    bpm = Number.isFinite(c.bpm) ? Number(c.bpm) : null;
+    // A BPM tag of 0 is "not set". Stored as a tempo it matched every "slow" filter.
+    bpm = Number.isFinite(c.bpm) && Number(c.bpm) > 0 ? Number(c.bpm) : null;
     key = c.key ?? null;
     replayGainTrackDb = finiteDb(c.replaygain_track_gain?.dB);
     replayGainAlbumDb = finiteDb(c.replaygain_album_gain?.dB);

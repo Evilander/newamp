@@ -16,6 +16,7 @@ import type {
   TrackMetadataPatchInput,
 } from '@shared/types';
 import { NEWAMP_VERSION } from '@shared/app-version';
+import { emptyAnalysisProgress } from '@shared/analysis';
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
 import { normalizeLimiterEnabled, normalizePreampDb } from '@shared/audio-limiter';
 
@@ -63,6 +64,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   performanceTier: 'auto',
   ambientReactivity: 'auto',
   waveformSeekBar: true,
+  backgroundAnalysis: true,
 };
 
 const DEFAULT_DIAGNOSTICS: SupportDiagnostics = {
@@ -238,6 +240,7 @@ const stub: NewAmpAPI = {
   getTrackDna: async () => null,
   getTrackIdsMissingDna: async () => [],
   getDnaStats: async () => ({ analyzed: 0, missing: 0, total: 0 }),
+  getAnalysisProgress: async () => emptyAnalysisProgress(),
   getAllTrackDna: async () => [],
   findSimilarTracks: async () => [],
   getTrackVisualMemory: async () => null,

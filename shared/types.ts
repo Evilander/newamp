@@ -1,6 +1,7 @@
 // Shared types between main and renderer. Keep this tiny and serializable.
 
 import type { TrackDna as TrackDnaPublic } from './audio-dna.js';
+import type { AnalysisProgress as AnalysisProgressPublic } from './analysis.js';
 import type { VisualMemoryPlan as VisualMemoryPlanPublic, VisualMemoryStats as VisualMemoryStatsPublic } from './visual-memory.js';
 import type { SongScore as SongScorePublic } from '../src/visualizer/eviland-score.js';
 import type { HistoryImportReport, LastfmHistoryProgress } from './history-import.js';
@@ -1179,6 +1180,11 @@ export interface AppSettings {
    * slider and stops the background decode that builds the waveform.
    */
   waveformSeekBar: boolean;
+  /**
+   * Work out tempo, key, loudness and Audio DNA for every track, a file at a
+   * time in the background, whenever that cannot get in the way of listening.
+   */
+  backgroundAnalysis: boolean;
 }
 
 /**
@@ -1538,6 +1544,7 @@ export interface NewAmpAPI {
   getTrackDna: (id: number) => Promise<TrackDnaPublic | null>;
   getTrackIdsMissingDna: (limit?: number) => Promise<number[]>;
   getDnaStats: () => Promise<DnaStats>;
+  getAnalysisProgress: () => Promise<AnalysisProgressPublic>;
   getAllTrackDna: () => Promise<Array<{ id: number; dna: TrackDnaPublic }>>;
   findSimilarTracks: (trackId: number, limit?: number) => Promise<SimilarTrack[]>;
   getTrackVisualMemory: (id: number) => Promise<VisualMemoryPlanPublic | null>;
