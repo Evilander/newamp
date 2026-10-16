@@ -149,4 +149,34 @@ await rm(smokeRoot, { recursive: true, force: true });
   await rm(raceRoot, { recursive: true, force: true });
 }
 
-console.log('[library-flush-test] PASS: atomic flush verified, recovery classification verified, quit-during-flush safe');
+// Flush tiers: a bulk write (background analysis) waits ten minutes, a slow
+// one 30 s, anything else 800 ms, and a faster write pulls a pending slower
+// flush forward instead of waiting behind it.
+{
+  const tierRoot = join(smokeRoot, 'tiers');
+  await mkdir(tierRoot, { recursive: true });
+  const store = await LibraryStore.open(join(tierRoot, 'library.db'));
+  // open() queues its own fast flush for the schema; land it first.
+  store.flushNow();
+  const delays = [];
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    delays.push(ms);
+    return realSetTimeout(() => undefined, 0);
+  };
+  try {
+    store.scheduleFlush({ bulk: true });
+    store.scheduleFlush({ bulk: true });
+    store.scheduleFlush({ slow: true });
+    store.scheduleFlush({ bulk: true });
+    store.scheduleFlush();
+    store.scheduleFlush({ slow: true });
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+  assert.deepEqual(delays, [600_000, 30_000, 800], 'bulk waits 10 min; slow and then fast writes each pull it forward; nothing slower re-arms it');
+  store.close();
+  await rm(tierRoot, { recursive: true, force: true });
+}
+
+console.log('[library-flush-test] PASS: atomic flush verified, recovery classification verified, quit-during-flush safe, flush tiers ordered');

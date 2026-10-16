@@ -8,6 +8,7 @@ import {
   pcmFromInt16,
   type TrackDna,
 } from '../shared/audio-dna.js';
+import { whenPlaybackFed } from './playback-io.js';
 
 const ffmpegStatic = ffmpegStaticImport as unknown as string | null;
 
@@ -33,6 +34,8 @@ export function killAllDnaFfmpeg(): void {
 export async function analyzeTrackDna(inputPath: string, opts?: { maxSeconds?: number }): Promise<TrackDna> {
   if (!inputPath) throw new Error('analyzeTrackDna requires an input path.');
   const maxSeconds = opts?.maxSeconds ?? AUDIO_DNA_MAX_SECONDS;
+  // A drive that is starving playback serves it first, as the waveform and score decodes do.
+  await whenPlaybackFed();
   const buffer = await decodeMonoPcm(inputPath, maxSeconds);
   const samples = pcmFromInt16(buffer);
   return computeTrackDna(samples, {

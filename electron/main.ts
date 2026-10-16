@@ -64,6 +64,10 @@ import { finishWebmToMp4 } from './video-mux.js';
 import { authorizeAudioProtocolPath } from './audio-protocol-authorize.js';
 import { closeAllGaplessSessions, registerGaplessTransport, releaseGaplessPaths } from './gapless-transport.js';
 import { analyzeTrackDna, killAllDnaFfmpeg } from './dna-analyzer.js';
+import { emptyAnalysisProgress } from '../shared/analysis.js';
+import type { AnalysisQueue } from './analysis-queue.js';
+import { createLibraryAnalysis } from './analysis-service.js';
+import { killAllAnalysisFfmpeg } from './track-analyzer.js';
 import { getSongScore, initScoreCache, killAllScoreFfmpeg } from './score-analyzer.js';
 import { cancelWaveformWork, getWaveform, initWaveformCache, killAllWaveformFfmpeg } from './waveform-peaks.js';
 import { RadioBrain } from './radio-brain.js';
@@ -2094,8 +2098,24 @@ function syncLibraryWatcher(): void {
   libraryWatcher.start(current.libraryRoots);
 }
 
+// Works out tempo, key, loudness and Audio DNA for the whole library in the
+// background (electron/analysis-queue.ts). Not started in smoke runs.
+let libraryAnalysis: AnalysisQueue | null = null;
+
+function startLibraryAnalysis(): void {
+  if (smokeMode || libraryAnalysis) return;
+  libraryAnalysis = createLibraryAnalysis({
+    library: () => library,
+    enabled: () => !settings.isSuppressed() && settings.get().backgroundAnalysis !== false,
+    waveformsEnabled: () => settings.get().waveformSeekBar !== false,
+    onBattery: () => powerMonitor.isOnBatteryPower(),
+  });
+  libraryAnalysis.start();
+}
+
 function createScannerService(store: LibraryStore): Scanner {
   return new Scanner(store, (p: ScanProgress) => {
+    libraryAnalysis?.noteScan(p);
     // The cancel at quit ends with an event, after the window may be gone.
     if (!mainWin || mainWin.isDestroyed()) return;
     mainWin.webContents.send('library:scan-progress', p);
@@ -2282,6 +2302,7 @@ async function reloadRuntimeStores(userData: string): Promise<void> {
   lastfmOutbox = new LastfmScrobbleOutbox(join(userData, 'lastfm-scrobbles.json'));
   podcastStore = new PodcastStore(join(userData, 'podcasts.json'));
   library = await LibraryStore.open(join(userData, 'library.db'));
+  libraryAnalysis?.reset();
   scanner = createScannerService(library);
   libraryWatcher = createLibraryWatcherService();
   syncLibraryWatcher();
@@ -2722,6 +2743,9 @@ function registerIpc(): void {
   ipcMain.handle('tracks:dna-get', async (_e, id: number) => library.getTrackDna(id));
   ipcMain.handle('tracks:dna-missing-ids', async (_e, limit?: number) => library.getTrackIdsMissingDna(limit ?? 100));
   ipcMain.handle('tracks:dna-stats', async () => library.getDnaStats());
+  ipcMain.handle('analysis:progress', async () =>
+    libraryAnalysis?.progress() ?? emptyAnalysisProgress(settings.get().backgroundAnalysis !== false),
+  );
   ipcMain.handle('tracks:dna-all', async () => library.getAllTrackDna());
   ipcMain.handle('tracks:dna-similar', async (_e, id: number, limit?: number) => library.findSimilarTracks(id, limit ?? 20));
   ipcMain.handle('tracks:visual-memory-get', async (_e, id: number) => library.getTrackVisualMemory(id));
@@ -3006,7 +3030,11 @@ function registerIpc(): void {
   ipcMain.handle('library:toggle-avoid-autoplay', async (_e, id: number) =>
     library.toggleAvoidAutoPlay(id),
   );
-  ipcMain.handle('library:record-play', async (_e, id: number) => library.recordPlay(id));
+  ipcMain.handle('library:record-play', async (_e, id: number) => {
+    // What is playing is what the listener may ask about next (Sounds Like, a harmonic mix).
+    libraryAnalysis?.prioritize([id]);
+    return library.recordPlay(id);
+  });
   ipcMain.handle('library:record-skip', async (_e, id: number, position?: number) =>
     library.recordSkip(id, Date.now(), position ?? 0),
   );
@@ -3032,6 +3060,7 @@ function registerIpc(): void {
     if (patch && typeof patch === 'object' && 'waveformSeekBar' in patch && settings.get().waveformSeekBar === false) {
       cancelWaveformWork();
     }
+    if (patch && typeof patch === 'object' && 'backgroundAnalysis' in patch) libraryAnalysis?.refresh();
     // Turning exclusive mode off releases the WASAPI device immediately so
     // system audio (and the Web Audio path) come back without a restart.
     if (patch && typeof patch === 'object' && (patch as Partial<AppSettings>).bitPerfectExclusive === false) {
@@ -6765,6 +6794,7 @@ async function bootstrap(): Promise<void> {
   registerTray();
   registerMediaShortcuts();
   syncLibraryWatcher();
+  startLibraryAnalysis();
   // Linux and macOS announce a shutdown through the power monitor instead.
   powerMonitor.on('shutdown', flushAllStores);
   scheduleDailyBackups();
@@ -6990,6 +7020,7 @@ app.on('will-quit', (event) => {
   }
   libraryWatcher?.stop();
   scanner?.cancel();
+  void libraryAnalysis?.stop();
   // Explicit Quit / Cmd+Q bypass window-all-closed. Flush on the actual quit
   // path, after renderer windows have had their final chance to save state.
   // A library that cannot flush (its file is locked) must not take the
@@ -7006,6 +7037,7 @@ app.on('will-quit', (event) => {
   tray = null;
   // No orphan ffmpeg.exe should outlive the app.
   killAllDnaFfmpeg();
+  killAllAnalysisFfmpeg();
   killAllScoreFfmpeg();
   killAllWaveformFfmpeg();
   killAllTranscodeFfmpeg();

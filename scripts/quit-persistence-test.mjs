@@ -30,12 +30,13 @@ function fixture(platform, hasTray, radio = false, displaySleepBlockerId = null)
     globalShortcut: { unregisterAll() {} }, closeStartupSplashWindow() {},
     libraryWatcher: { stop() { calls.push('watcher-stop'); } },
     scanner: { cancel() { calls.push('scanner-cancel'); } },
+    libraryAnalysis: { async stop() { calls.push('analysis-stop'); } },
     library: { close() { calls.push('library-close'); } },
     settings: { flushSync() { calls.push('settings-flush'); } },
     podcastStore: { flushProgressSync() { calls.push('podcast-flush'); } },
     exclusiveOutput: { dispose() {} },
     tray: hasTray ? { destroy() {} } : null,
-    killAllDnaFfmpeg() {}, killAllScoreFfmpeg() {}, killAllWaveformFfmpeg() {}, killAllTranscodeFfmpeg() {},
+    killAllDnaFfmpeg() {}, killAllAnalysisFfmpeg() {}, killAllScoreFfmpeg() {}, killAllWaveformFfmpeg() {}, killAllTranscodeFfmpeg() {},
     closeAllGaplessSessions() { gaplessClosed++; },
     radioBrain: radio ? { async stop() { calls.push('radio-stop'); } } : null,
     shouldStayResidentOnWindowAllClosed,
@@ -49,7 +50,7 @@ for (const platform of ['win32', 'darwin', 'linux']) {
   f.app.emit('window-all-closed');
   assert.deepEqual(f.calls, [], 'closing a resident window must not close its stores');
   f.app.quit();
-  assert.deepEqual(f.calls, ['watcher-stop', 'scanner-cancel', 'library-close', 'settings-flush', 'podcast-flush'], `${platform} explicit Quit saves every store`);
+  assert.deepEqual(f.calls, ['watcher-stop', 'scanner-cancel', 'analysis-stop', 'library-close', 'settings-flush', 'podcast-flush'], `${platform} explicit Quit saves every store, after the analysis queue has written its results`);
   assert.equal(f.gaplessClosed(), 1, `${platform} explicit Quit stops the gapless decoders`);
   assert.deepEqual(f.stoppedBlockers, [], `${platform} explicit Quit has no display-sleep blocker to release`);
 }
