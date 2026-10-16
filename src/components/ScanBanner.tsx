@@ -30,9 +30,11 @@ export function ScanBanner(): JSX.Element | null {
     >
       {progress.done ? (
         <>
-          <span style={{ color: 'var(--accent)' }}>● Scan complete</span>
+          <span style={{ color: 'var(--accent)' }}>{progress.cancelled ? '● Scan stopped' : '● Scan complete'}</span>
           <span style={{ color: 'var(--ink-2)' }}>
-            indexed {progress.total.toLocaleString()} files
+            {progress.cancelled
+              ? `checked ${progress.scanned.toLocaleString()} of ${progress.total.toLocaleString()} files`
+              : `indexed ${progress.total.toLocaleString()} files`}
           </span>
           {workSummary && (
             <span style={{ color: 'var(--muted)' }}>

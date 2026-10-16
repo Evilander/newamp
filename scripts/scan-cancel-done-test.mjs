@@ -84,4 +84,9 @@ async function scan(name, shouldCancel) {
 }
 
 await rm(root, { recursive: true, force: true });
+
+// The banner says the scan stopped, not that it completed.
+const banner = (await readFile(join(repoRoot, 'src/components/ScanBanner.tsx'), 'utf8')).replace(/\r\n/g, '\n');
+assert.match(banner, /progress\.cancelled \? '● Scan stopped' : '● Scan complete'/, 'a cancelled scan is not called complete');
+
 console.log('PASS scan cancel: a cancelled scan reports a final done event marked cancelled, from the walk and from a batch');
