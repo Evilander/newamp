@@ -12,7 +12,6 @@ import type {
 } from '@shared/types';
 import { engine, usePlayerStore } from '../../store/usePlayerStore';
 import { api, inElectron, DEFAULT_SETTINGS, exclusiveBackendLabel } from '../../lib/api';
-import { AI_ASSIST_OPTIONS } from '../../lib/aiAssist';
 import { resamplerName } from '../../lib/resampler-name';
 import { closeButtonCopy } from '../../lib/close-button-copy';
 import { SKIN_VARIABLES, THEME_REGISTRY } from '../../lib/skins';
@@ -45,7 +44,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'settings-workshop', label: 'Workshop' },
   { id: 'settings-playback', label: 'Playback' },
   { id: 'settings-lastfm', label: 'Last.fm' },
-  { id: 'settings-assist', label: 'Assist' },
+  { id: 'settings-assist', label: 'Liner notes' },
   { id: 'settings-about', label: 'About' },
   { id: 'settings-support', label: 'Support' },
 ];
@@ -83,6 +82,7 @@ export function SettingsView(): JSX.Element {
   const [lastfmStatus, setLastfmStatus] = useState<string | null>(null);
   const [libraryExportStatus, setLibraryExportStatus] = useState<string | null>(null);
   const [openAiStatus, setOpenAiStatus] = useState<string | null>(null);
+  const [tutorialStatus, setTutorialStatus] = useState<string | null>(null);
   const [lastfmOutbox, setLastfmOutbox] = useState<LastfmOutboxStatus | null>(null);
   const [supportDiagnostics, setSupportDiagnostics] = useState<SupportDiagnostics | null>(null);
   const [supportBackup, setSupportBackup] = useState<SupportBackupResult | null>(null);
@@ -150,6 +150,12 @@ export function SettingsView(): JSX.Element {
     const next = [...settings!.libraryRoots.filter((root) => !folderIsSameOrInside(root, dir)), dir];
     const updated = await saveSettings({ libraryRoots: next });
     acceptSettings(updated);
+    // Saving the folder does not read it. Scan just this one, so the rest of
+    // the library is not walked again; the scan banner shows the progress.
+    pushToast({ tone: 'ok', title: 'Folder added', detail: `Scanning ${dir}` });
+    api.scanLibrary([dir]).catch((err: unknown) => {
+      pushToast({ tone: 'error', title: 'Scan failed', detail: err instanceof Error ? err.message : String(err) });
+    });
   }
 
   async function removeRoot(p: string): Promise<void> {
@@ -251,7 +257,7 @@ export function SettingsView(): JSX.Element {
     if (!settings) return;
     const updated = await api.setSettings({ firstLaunchTutorialSeen: false });
     setSettings(updated);
-    setOpenAiStatus('First-launch tutorial will show the next time NewAmp opens.');
+    setTutorialStatus('The tutorial will show the next time NewAmp opens.');
   }
 
   async function refreshAudioOutputs(): Promise<void> {
@@ -850,8 +856,8 @@ export function SettingsView(): JSX.Element {
               className="text-sm leading-relaxed text-ink2"
               data-newamp-lastfm-setup-guide
             >
-              Last.fm is optional. NewAmp needs your own Last.fm API account because scrobbling is tied
-              to your Last.fm identity, not to a shared NewAmp account. Create one at{' '}
+              Last.fm is optional. Last.fm requires an API key to identify the app and a shared secret
+              to sign scrobbles. NewAmp does not include its own, so you register one at{' '}
               <a
                 href="https://www.last.fm/api/account/create"
                 target="_blank"
@@ -860,8 +866,8 @@ export function SettingsView(): JSX.Element {
               >
                 last.fm/api/account/create
               </a>
-              , use <span className="text-ink">NewAmp</span> as the application name,
-              and leave callback URL blank for desktop auth.
+              , using <span className="text-ink">NewAmp</span> as the application name and leaving
+              the callback URL blank for desktop auth.
             </div>
             <div className="grid gap-2 text-xs text-ink2 md:grid-cols-2">
               <div className="bevel-in px-3 py-2">
@@ -960,10 +966,11 @@ export function SettingsView(): JSX.Element {
           </section>
 
           <section id="settings-assist" className="bevel-out flex flex-col gap-4 p-6">
-            <h2 className="eyebrow">ChatGPT Assist</h2>
+            <h2 className="eyebrow">Liner notes (OpenAI)</h2>
             <div className="text-sm leading-relaxed text-ink2">
-              Optional local enrichments for real On Air liner notes, artist context, review prompts, and discussion seeds.
-              The key is stored in NewAmp settings on this machine and is never needed for basic playback.
+              Optional. With an OpenAI API key saved here, the AI Notes button on Now Playing drafts liner
+              notes for the playing track. Pressing it sends that track's tags and lyrics to OpenAI. The key
+              is stored in NewAmp settings on this machine and is never needed for basic playback.
             </div>
             {settings.aiAssistRuntime?.mode === 'gateway' && (
               <div className="text-sm leading-relaxed text-ink2">
@@ -971,14 +978,6 @@ export function SettingsView(): JSX.Element {
                 {' '}Active model: {settings.aiAssistRuntime.model}. The API settings below are saved separately.
               </div>
             )}
-            <div className="ai-assist-option-grid">
-              {AI_ASSIST_OPTIONS.map((option) => (
-                <div key={option.id} className="ai-assist-option">
-                  <strong>{option.label}</strong>
-                  <span>{option.detail}</span>
-                </div>
-              ))}
-            </div>
             <Row label={settings.aiAssistRuntime?.mode === 'gateway' ? 'Saved API key' : 'API key'}>
               <input
                 aria-label="OpenAI API key"
@@ -1000,9 +999,6 @@ export function SettingsView(): JSX.Element {
             <div className="flex flex-wrap items-center gap-2">
               <button className="pxbtn" onClick={() => void saveOpenAiSettings()}>
                 Save ChatGPT key
-              </button>
-              <button className="pxbtn" onClick={() => void showTutorialOnNextLaunch()}>
-                Show first-launch tutorial
               </button>
               <span className={`text-xs ${(settings.aiAssistRuntime?.ready ?? !!settings.openaiApiKey) ? 'text-accent' : 'text-muted'}`}>
                 {(settings.aiAssistRuntime?.ready ?? !!settings.openaiApiKey)
@@ -1195,6 +1191,12 @@ export function SettingsView(): JSX.Element {
             ) : (
               <div>Diagnostics unavailable in this mode.</div>
             )}
+            <div className="flex flex-wrap items-center gap-2">
+              <button className="pxbtn" onClick={() => void showTutorialOnNextLaunch()}>
+                Show first-launch tutorial
+              </button>
+              {tutorialStatus && <span className="text-xs text-ink2">{tutorialStatus}</span>}
+            </div>
           </section>
         </div>
       </div>
