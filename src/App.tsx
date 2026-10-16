@@ -131,7 +131,8 @@ export default function App(): JSX.Element {
       if (!result.tracks.length) return result;
       const store = usePlayerStore.getState();
       store.setView('now-playing');
-      await store.playQueue(result.tracks, 0);
+      // The queue the listener built stays; the opened files play first.
+      await store.playTracksNow(result.tracks);
       return result;
     } catch (err) {
       console.error('open files failed', err);
@@ -173,12 +174,14 @@ export default function App(): JSX.Element {
     }
 
     setDropMessage(`Opening ${mediaPaths.length.toLocaleString()} dropped item${mediaPaths.length === 1 ? '' : 's'}...`);
+    const before = usePlayerStore.getState();
+    const queueKept = before.queue.length > 0 && !before.activePodcastEpisode;
     const result = await handleOpenFiles(mediaPaths);
     const skinSuffix = appliedSkins.length ? ` Applied skin ${appliedSkins[appliedSkins.length - 1]}.` : '';
     if (!result) {
       setDropMessage('Could not open the dropped items.');
     } else if (result.tracks.length) {
-      setDropMessage(`Playing ${result.tracks.length.toLocaleString()} track${result.tracks.length === 1 ? '' : 's'}.${skinSuffix}`);
+      setDropMessage(`Playing ${result.tracks.length.toLocaleString()} track${result.tracks.length === 1 ? '' : 's'}${queueKept ? ', queue kept' : ''}.${skinSuffix}`);
     } else if (result.importedPlaylists.length) {
       usePlayerStore.getState().setView('playlist');
       setDropMessage(`Imported ${result.importedPlaylists.length.toLocaleString()} playlist${result.importedPlaylists.length === 1 ? '' : 's'}.${skinSuffix}`);
