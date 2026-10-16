@@ -2571,10 +2571,10 @@ function registerIpc(): void {
     return library.getArtists(opts ?? {});
   });
   ipcMain.handle('library:get-folders', async (_e, parentPath?: string | null) =>
-    library.getFolders(parentPath ?? null, settings.get().libraryRoots),
+    library.getFoldersAsync(parentPath ?? null, settings.get().libraryRoots),
   );
   ipcMain.handle('library:get-folder-tracks', async (_e, folderPath: string, opts) =>
-    library.getFolderTracks(folderPath, opts ?? {}),
+    library.getFolderTracksAsync(folderPath, opts ?? {}),
   );
   ipcMain.handle('library:get-folder-track-ids', async (_e, folderPath: string, opts) =>
     library.getFolderTrackIds(folderPath, opts ?? {}),
@@ -2808,17 +2808,17 @@ function registerIpc(): void {
   });
   ipcMain.handle('open:files', async (_e, paths: string[]) => openFiles(paths));
   ipcMain.handle('smart:list', async () => library.getSmartPlaylistRules());
-  ipcMain.handle('smart:suggestions', async () => library.getSuggestedSmartPlaylistRules());
+  ipcMain.handle('smart:suggestions', async () => library.getSuggestedSmartPlaylistRulesAsync());
   ipcMain.handle('library:get-discover-surface', async (_e, input?: DiscoverSurfaceInput) =>
-    library.getDiscoverSurface(input ?? {}),
+    library.getDiscoverSurfaceAsync(input ?? {}),
   );
   ipcMain.handle('smart:save', async (_e, input) => library.saveSmartPlaylistRule(input));
   ipcMain.handle('smart:delete', async (_e, id: number) => library.deleteSmartPlaylistRule(id));
   ipcMain.handle('smart:run', async (_e, input, sampleCount) =>
-    library.runSmartPlaylistRule(input, Number.isFinite(sampleCount) ? Number(sampleCount) : 0),
+    library.runSmartPlaylistRuleAsync(input, Number.isFinite(sampleCount) ? Number(sampleCount) : 0),
   );
-  ipcMain.handle('smart:harmonic-mix', async (_e, input) => library.buildHarmonicMix(input));
-  ipcMain.handle('smart:taste-mix', async (_e, input) => library.buildTasteMix(input));
+  ipcMain.handle('smart:harmonic-mix', async (_e, input) => library.buildHarmonicMixAsync(input));
+  ipcMain.handle('smart:taste-mix', async (_e, input) => library.buildTasteMixAsync(input));
   ipcMain.handle('metadata:lookup', async (_e, id: number) => {
     const track = library.getTrack(id);
     if (!track) return [];
@@ -2841,7 +2841,7 @@ function registerIpc(): void {
   });
   ipcMain.handle('library:get-health', async () => {
     await library.albumsReady();
-    return library.getLibraryHealth();
+    return library.getLibraryHealthAsync();
   });
   ipcMain.handle('library:prune-missing-preview', async (_e, targets?: string[]) =>
     library.previewPruneMissingTracks(Array.isArray(targets) ? targets : undefined, settings.get().libraryRoots),
@@ -6880,6 +6880,11 @@ async function bootstrap(): Promise<void> {
       void runExclusiveUiSmoke(mainWin, scanPromise);
     } else if (screenshotGallery && mainWin) {
       void runScreenshotGallery(mainWin, scanPromise);
+    } else {
+      // Home asks for the health check as soon as it opens. Once the startup
+      // scan has settled, work it out in the background so that request finds
+      // it done. It runs in slices, so nothing waits on it.
+      void scanPromise.then(() => library.getLibraryHealthAsync()).catch(() => undefined);
     }
   });
 }
