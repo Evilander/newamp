@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DiscoverMission, DiscoverMixCard, DiscoverSurface, Track, VisualizerPreset } from '@shared/types';
 import { api } from '../../lib/api';
 import { formatDuration } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { TrackTable } from './LibraryView';
 import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
+
+const TRACK_CHANGE_REBUILD_MS = 600;
 
 export function DiscoverView(): JSX.Element {
   const help = useViewHelp('discover');
@@ -24,8 +26,19 @@ export function DiscoverView(): JSX.Element {
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
   const setVizPreset = usePlayerStore((s) => s.setVizPreset);
 
+  // A new track rebuilds the picks around it, but skipping through a queue
+  // would otherwise ask for a rebuild per track. Opening the view and the Light
+  // Viz toggle build straight away.
+  const builtLowEnd = useRef<boolean | null>(null);
   useEffect(() => {
-    void refreshDiscover();
+    const immediate = builtLowEnd.current !== lowEndMode;
+    builtLowEnd.current = lowEndMode;
+    if (immediate) {
+      void refreshDiscover();
+      return;
+    }
+    const timer = setTimeout(() => void refreshDiscover(), TRACK_CHANGE_REBUILD_MS);
+    return () => clearTimeout(timer);
   }, [current?.id, lowEndMode]);
 
   const selectedMission = useMemo(

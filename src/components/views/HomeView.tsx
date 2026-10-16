@@ -66,6 +66,13 @@ const EMPTY_DATA: HomeData = {
 
 const HOME_LIMIT = 12;
 
+// The shelves below the fold, in the order they are asked for: the cheap ones
+// first, the library-wide scans last. Each is requested once the one before it
+// has landed, so the main process is never working on several at once, and
+// each drops its own skeleton as soon as it has its data.
+const BELOW_FOLD_PARTS = ['rated', 'insights', 'harmonic', 'taste', 'smartRules', 'health', 'suggestions'] as const;
+type BelowFoldPart = (typeof BELOW_FOLD_PARTS)[number];
+
 export function HomeView(): JSX.Element {
   const [data, setData] = useState<HomeData>(EMPTY_DATA);
   // True from first render so the mount-effect load never flashes the
@@ -73,8 +80,9 @@ export function HomeView(): JSX.Element {
   const [loading, setLoading] = useState(true);
   // Below-the-fold shelves (harmonic/taste/rated/health/insights/stations)
   // arrive via requestIdleCallback — honest loading means they wear skeletons
-  // until that batch lands instead of claiming "No tracks available yet".
-  const [belowFoldPending, setBelowFoldPending] = useState(true);
+  // until their data lands instead of claiming "No tracks available yet".
+  const [pendingParts, setPendingParts] = useState<ReadonlySet<BelowFoldPart>>(() => new Set(BELOW_FOLD_PARTS));
+  const pending = (part: BelowFoldPart): boolean => pendingParts.has(part);
   const [status, setStatus] = useState<string | null>(null);
   // Monotonic token so a deferred below-fold batch from an older refresh can't
   // overwrite data from a newer one (the Refresh button re-runs refreshHome).
@@ -124,7 +132,7 @@ export function HomeView(): JSX.Element {
   async function refreshHome(): Promise<void> {
     const generation = ++refreshGenerationRef.current;
     setLoading(true);
-    setBelowFoldPending(true);
+    setPendingParts(new Set(BELOW_FOLD_PARTS));
     setStatus(null);
     try {
       // Above the fold: the shelves a user sees first. Cheap queries — render
@@ -164,35 +172,36 @@ export function HomeView(): JSX.Element {
     // opening Home never blocks on them; sections keep their existing
     // empty/placeholder state until this lands.
     const seedTrackId = current?.id ?? null;
+    const loadPart: Record<BelowFoldPart, () => Promise<Partial<HomeData>>> = {
+      rated: async () => ({ rated: await api.getTracks({ sort: 'rating', limit: HOME_LIMIT, offset: 0 }) }),
+      insights: async () => ({ insights: await api.getListeningInsights({}) }),
+      harmonic: async () => ({ harmonic: await api.buildHarmonicMix({ seedTrackId, count: HOME_LIMIT }) }),
+      taste: async () => ({ taste: await api.buildTasteMix({ seedTrackId, count: HOME_LIMIT }) }),
+      smartRules: async () => ({ smartRules: (await api.getSmartPlaylistRules()).slice(0, 6) }),
+      health: async () => ({ health: await api.getLibraryHealth() }),
+      suggestions: async () => ({ suggestedStations: (await api.getSuggestedSmartPlaylistRules()).slice(0, 6) }),
+    };
     const runBelowFold = async (): Promise<void> => {
-      try {
-        const [health, insights, harmonic, taste, rated, smartRules, suggestedStations] = await Promise.all([
-          api.getLibraryHealth(),
-          api.getListeningInsights({}),
-          api.buildHarmonicMix({ seedTrackId, count: HOME_LIMIT }),
-          api.buildTasteMix({ seedTrackId, count: HOME_LIMIT }),
-          api.getTracks({ sort: 'rating', limit: HOME_LIMIT, offset: 0 }),
-          api.getSmartPlaylistRules(),
-          api.getSuggestedSmartPlaylistRules(),
-        ]);
+      for (const part of BELOW_FOLD_PARTS) {
         if (generation !== refreshGenerationRef.current) return;
-        setData((prev) => ({
-          ...prev,
-          health,
-          insights,
-          harmonic,
-          taste,
-          rated,
-          smartRules: smartRules.slice(0, 6),
-          suggestedStations: suggestedStations.slice(0, 6),
-        }));
-      } catch {
-        // Keep the already-rendered sections; below-fold shelves stay in their
-        // empty state (same outcome as the old all-or-nothing load on failure).
-      } finally {
-        // Drop the skeletons (or reveal a genuinely-empty message) only for the
-        // refresh generation the user is actually looking at.
-        if (generation === refreshGenerationRef.current) setBelowFoldPending(false);
+        try {
+          const patch = await loadPart[part]();
+          if (generation !== refreshGenerationRef.current) return;
+          setData((prev) => ({ ...prev, ...patch }));
+        } catch {
+          // Keep the already-rendered sections; this shelf stays in its empty
+          // state (same outcome as the old all-or-nothing load on failure).
+        } finally {
+          // Drop the skeleton (or reveal a genuinely-empty message) only for
+          // the refresh generation the user is actually looking at.
+          if (generation === refreshGenerationRef.current) {
+            setPendingParts((prev) => {
+              const next = new Set(prev);
+              next.delete(part);
+              return next;
+            });
+          }
+        }
       }
     };
     if (typeof requestIdleCallback === 'function') requestIdleCallback(() => void runBelowFold());
@@ -333,14 +342,14 @@ export function HomeView(): JSX.Element {
             <div className="grid gap-3 lg:grid-cols-[1.4fr_0.78fr_0.72fr]">
               <RatedHighlightRail
                 tracks={data.rated}
-                pending={belowFoldPending}
+                pending={pending('rated')}
                 onPlay={(start) => void playQueue(data.rated, start)}
                 onNext={() => queueTracksNext(data.rated)}
                 onQueue={() => addTracksToQueue(data.rated)}
                 onAction={() => void saveSet('Top Rated', data.rated)}
               />
               <NewsCard fresh={data.fresh} loved={data.loved} top={data.rated[0] ?? null} />
-              <ListeningStatsPanel insights={data.insights} history={data.history} pending={belowFoldPending} />
+              <ListeningStatsPanel insights={data.insights} history={data.history} pending={pending('insights')} />
             </div>
 
             <div className="grid gap-3 xl:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.7fr)]">
@@ -357,7 +366,7 @@ export function HomeView(): JSX.Element {
                     )
                   }
                   tracks={data.harmonic}
-                  pending={belowFoldPending}
+                  pending={pending('harmonic')}
                   actionLabel="SAVE MIX"
                   onPlay={(start) => void playQueue(data.harmonic, start)}
                   onNext={() => queueTracksNext(data.harmonic)}
@@ -369,7 +378,7 @@ export function HomeView(): JSX.Element {
                   title="Taste Match"
                   subtitle="Learns from plays, loves, ratings, and skips"
                   tracks={data.taste}
-                  pending={belowFoldPending}
+                  pending={pending('taste')}
                   actionLabel="SAVE TASTE"
                   onPlay={(start) => void playQueue(data.taste, start)}
                   onNext={() => queueTracksNext(data.taste)}
@@ -431,20 +440,20 @@ export function HomeView(): JSX.Element {
               <div className="flex min-w-0 flex-col gap-3">
                 <HealthPanel
                   health={data.health}
-                  pending={belowFoldPending}
+                  pending={pending('health')}
                   onOpenLibrary={() => setView('library')}
                 />
 
                 <SuggestedStationsPanel
                   suggestions={data.suggestedStations}
-                  pending={belowFoldPending}
+                  pending={pending('suggestions')}
                   onRadio={(suggestion) => void startSuggestedStation(suggestion)}
                 />
 
                 <PlaylistPanel
                   playlists={data.playlists}
                   smartRules={data.smartRules}
-                  pending={loading || belowFoldPending}
+                  pending={loading || pending('smartRules')}
                   onPlay={(playlist) => void playSavedPlaylist(playlist)}
                   onPlaySmartRule={(rule) => void playSmartRule(rule)}
                   onSmartRuleRadio={(rule) => void startSmartRuleRadio(rule)}

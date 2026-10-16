@@ -111,6 +111,8 @@ import {
 } from '../shared/audio-quality.js';
 import { buildDiscoverSurface } from '../shared/discover.js';
 import { buildHarmonicMix as buildHarmonicMixSequence } from '../shared/harmonic-mix.js';
+import { DerivedCache } from './derived-cache.js';
+import { runSliced, runSync, type Sliced } from './sliced.js';
 import {
   atomicWriteFileSync,
   durableWriteFileAsync,
@@ -171,6 +173,17 @@ const TRACK_COLUMNS = [
   'replaygain_album_db', 'missing_since', 'codec', 'codec_lossless', 'bits_per_sample', 'mb_recording_id',
   'album_key', 'disc_inferred', 'disc_total', 'disc_subtitle',
 ].join(', ');
+
+// How much a slice of sliced work takes on at a time (see sliced.ts). Rows
+// read per slice of the folder index, folders worked out per slice, ids whose
+// tracks are read per slice, and rows classified per slice of the health
+// check. Each is sized to a few milliseconds on the 58k-track library.
+const FOLDER_INDEX_SLICE = 12000;
+const FOLDER_DESCRIBE_SLICE = 400;
+const TRACK_FETCH_SLICE = 2000;
+const HEALTH_SLICE = 3000;
+// A folder with more tracks than this is listed the way it always was.
+const FOLDER_TRACKS_FAST_LIMIT = 3000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tracks (
@@ -752,6 +765,30 @@ interface FolderTrackRow {
   has_art: number;
 }
 
+// The Folders view's view of the library: the distinct folders tracks sit in
+// (a few thousand) and, per track row in table order, which one it is in.
+// Everything that costs (reading paths apart, case folding) is done once per
+// folder; asking for the children of a folder walks plain arrays.
+interface FolderIndex {
+  folders: Array<{ path: string; key: string }>;
+  // Index into `folders` for each track row, or -1 for a path with no folder.
+  folderOf: Int32Array;
+  ids: Float64Array;
+  // Math.max(0, duration ?? 0), the amount a track adds to its folders.
+  durations: Float64Array;
+  hasArt: Uint8Array;
+  // Finished answers by parent, dropped together with the index.
+  summaries: Map<string, FolderSummary[]>;
+}
+
+// What the health check works out by reading every track.
+interface HealthScan {
+  missing: LibraryHealth['missing'];
+  quality: LibraryHealth['quality'];
+  duplicateGroups: Array<Omit<LibraryHealth['duplicateGroups'][number], 'tracks'> & { trackIds: number[] }>;
+  legacyFormats: LibraryHealth['legacyFormats'];
+}
+
 interface LibraryHealthRow {
   id: number;
   path: string;
@@ -1019,13 +1056,25 @@ export class LibraryStore {
   // every Harmonic / Taste mix call. We cache after first build and invalidate
   // on any track DNA write (setTrackDna, upsertTracks with dna_json).
   private dnaIndexCache: Map<number, TrackDna> | null = null;
-  // Folder summarization iterates EVERY track row in JS to build the folder
-  // tree. Without this cache, every folder click re-ran SELECT id, path,
-  // duration, has_art FROM tracks on ~60k rows — single-threaded sql.js stalls
-  // the main process and freezes IPC. Cache invalidates only when the columns
-  // we read change: insert/update of path/duration/has_art, or delete.
-  private folderTrackRowsCache: FolderTrackRow[] | null = null;
-  private libraryHealthCache: LibraryHealth | null = null;
+  // The folder tree used to be worked out from every track row on each click,
+  // which stalled the main process for hundreds of milliseconds. The index
+  // (see FolderIndex) is built once and answers every folder from it. It is
+  // dropped only when a column it reads changes: insert/update of
+  // path/duration/has_art, or delete. The epoch lets a build that was running
+  // across such a write know its result is already out of date.
+  private folderIndexCache: FolderIndex | null = null;
+  private folderIndexEpoch = 0;
+  // The health check's pass over every track; dropped by the writes that change
+  // a column it reads. Same epoch idea as the folder index.
+  private healthScanCache: HealthScan | null = null;
+  private healthScanEpoch = 0;
+  // Moves whenever the database changes: every write ends in scheduleFlush,
+  // which is the one place that bumps it. What `derived` holds is only served
+  // at the version it was computed at, so a play, a rating, a tag edit or a
+  // scan batch drops it without anything listing those writes.
+  private contentVersion = 0;
+  private readonly derived = new DerivedCache(48);
+
   // Windows only: every stored path, keyed by its case-folded form, so
   // upsertTracks finds a file's existing spelling without a query per file.
   // Built on first use, extended by upsertTracks, dropped by prune.
@@ -1035,7 +1084,7 @@ export class LibraryStore {
   // library with ~5KB plans that's 150MB of string churn + JSON parsing on
   // the main process every time SettingsView opens (mounting useEffect calls
   // api.getVisualMemoryStats with no debounce). Cache the result; invalidate
-  // on any visual-memory write/clear path. Same shape as libraryHealthCache /
+  // on any visual-memory write/clear path. Same shape as healthScanCache /
   // dnaIndexCache. Null means "stale, recompute on next read".
   private visualMemoryStatsCache: VisualMemoryStats | null = null;
   // Album grouping (electron/album-identity.ts). The epoch moves whenever
@@ -1283,7 +1332,13 @@ export class LibraryStore {
   // recordPlay/recordSkip call this with `slow: true` — they fire on every
   // track change/skip, and a full db.export() + write on that cadence is real
   // main-thread cost. Every other mutation keeps the tight 800ms debounce.
+  private contentChanged(): void {
+    this.contentVersion += 1;
+    this.derived.dropKept();
+  }
+
   private scheduleFlush(opts?: { slow?: boolean }): void {
+    this.contentChanged();
     if (this.closed || this.persistBlocked) return;
     this.dirty = true;
     const slow = !!opts?.slow;
@@ -2107,116 +2162,30 @@ export class LibraryStore {
   }
 
   getLibraryHealth(): LibraryHealth {
-    if (this.libraryHealthCache) return this.libraryHealthCache;
-    const rows = this.many<LibraryHealthRow>(
-      `SELECT id, path, title, artist, album, year, duration, bitrate, sample_rate, size, mtime, has_art, replaygain_track_db, replaygain_album_db FROM tracks`,
-    );
-    // Only containers (.m4a, .mka) need their codec to be told lossless from
-    // lossy, so only those rows are asked for it.
-    const containerWhere = extensionSetSql(CONTAINER_AUDIO_EXTENSIONS);
-    const containerCodecs = new Map(
-      this.many<{ id: number; codec: string; codec_lossless: number | null; bits_per_sample: number | null }>(
-        `SELECT id, codec, codec_lossless, bits_per_sample FROM tracks WHERE codec IS NOT NULL AND codec != '' AND ${containerWhere.sql}`,
-        containerWhere.params,
-      ).map((row) => [row.id, row] as const),
-    );
+    const kept = this.derived.get<LibraryHealth>('health', this.contentVersion);
+    if (kept) return kept;
+    const health = runSync(this.healthSteps());
+    this.derived.set('health', this.contentVersion, health);
+    return health;
+  }
+
+  /** getLibraryHealth in slices, for the IPC handler; calls made while one is running share it. */
+  getLibraryHealthAsync(): Promise<LibraryHealth> {
+    return this.derived.resolve('health', () => this.contentVersion, () => this.runSlicedJob(this.healthSteps()));
+  }
+
+  // The scan over every track is what costs, and only changes when a column it
+  // reads does (invalidateLibraryHealthCache is called by those writes). The
+  // part that shows tracks and totals is put together fresh every time, so a
+  // rating or a play shows up without scanning the library again.
+  private *healthSteps(): Sliced<LibraryHealth> {
+    const scan = yield* this.healthScanSteps();
+    yield;
     const totals = this.getStats();
-    const missing = {
-      artist: 0,
-      album: 0,
-      year: 0,
-      art: 0,
-      duration: 0,
-    };
-    const quality = {
-      lossless: 0,
-      lossy: 0,
-      hiRes: 0,
-      dsd: 0,
-      ffmpegFallback: 0,
-      lowBitrate: 0,
-      replayGainReady: 0,
-      replayGainMissing: 0,
-      unknown: 0,
-    };
-
-    const duplicateMap = new Map<string, LibraryHealthRow[]>();
-    const legacyMap = new Map<string, number>();
-    for (const row of rows) {
-      if (isUnknownArtistName(row.artist)) missing.artist += 1;
-      if (!row.album.trim()) missing.album += 1;
-      if (row.year == null) missing.year += 1;
-      if (!row.has_art) missing.art += 1;
-      if (row.duration == null || row.duration <= 0) missing.duration += 1;
-
-      const container = containerCodecs.get(row.id);
-      const signal = classifyAudioQuality({
-        path: row.path,
-        bitrate: row.bitrate,
-        sampleRate: row.sample_rate,
-        duration: row.duration,
-        size: row.size,
-        replayGainTrackDb: row.replaygain_track_db,
-        replayGainAlbumDb: row.replaygain_album_db,
-        codec: container?.codec ?? null,
-        codecLossless: container?.codec_lossless == null ? null : container.codec_lossless === 1,
-        bitsPerSample: container?.bits_per_sample ?? null,
-      });
-      if (signal.isLossless) quality.lossless += 1;
-      if (signal.family === 'lossy') quality.lossy += 1;
-      if (signal.isHiRes) quality.hiRes += 1;
-      if (signal.isDsd) quality.dsd += 1;
-      if (signal.decodePath === 'ffmpeg-pcm-fallback') quality.ffmpegFallback += 1;
-      if (signal.isLowBitrate) quality.lowBitrate += 1;
-      if (signal.hasReplayGain) quality.replayGainReady += 1;
-      else quality.replayGainMissing += 1;
-      if (signal.family === 'unknown') quality.unknown += 1;
-
-      const artist = normalizeDuplicateText(row.artist);
-      const title = normalizeDuplicateText(row.title);
-      if (artist && title && !isUnknownArtistName(artist)) {
-        const key = `${artist}\u0000${title}`;
-        const group = duplicateMap.get(key) ?? [];
-        group.push(row);
-        duplicateMap.set(key, group);
-      }
-
-      const ext = extname(row.path).toLowerCase();
-      if (LEGACY_FORMATS.has(ext)) legacyMap.set(ext, (legacyMap.get(ext) ?? 0) + 1);
-    }
-
-    const duplicateGroups = [...duplicateMap.values()]
-      .filter((group) => group.length > 1)
-      .map((group) => {
-        const first = group[0]!;
-        const trackIds = [...group]
-          .sort((a, b) => (a.album || '').localeCompare(b.album || '') || a.path.localeCompare(b.path))
-          .slice(0, 8)
-          .map((row) => row.id);
-        return {
-          artist: first.artist,
-          title: first.title,
-          count: group.length,
-          exactMatchCount: duplicateExactMatchCount(group),
-          trackIds,
-        };
-      })
-      .sort(
-        (a, b) =>
-          b.exactMatchCount - a.exactMatchCount ||
-          b.count - a.count ||
-          a.artist.localeCompare(b.artist) ||
-          a.title.localeCompare(b.title),
-      )
-      .slice(0, 12)
-      .map(({ trackIds, ...group }) => ({
-        ...group,
-        tracks: this.getTracksByIdsInOrder(trackIds),
-      }));
-
-    const legacyFormats = [...legacyMap.entries()]
-      .map(([ext, count]) => ({ ext, count }))
-      .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
+    const duplicateGroups = scan.duplicateGroups.map(({ trackIds, ...group }) => ({
+      ...group,
+      tracks: this.getTracksByIdsInOrder(trackIds),
+    }));
 
     // Offered for playing, so a track whose file is missing is left out.
     const recentlyAdded = this.many<RawRow>(
@@ -2224,18 +2193,144 @@ export class LibraryStore {
         ORDER BY mtime DESC, artist COLLATE NOCASE, title COLLATE NOCASE LIMIT 12`,
     ).map(rowToTrack);
 
-    const health: LibraryHealth = {
+    return {
       totals,
-      missing,
-      quality,
+      missing: { ...scan.missing },
+      quality: { ...scan.quality },
       duplicateGroups,
-      legacyFormats,
+      legacyFormats: scan.legacyFormats.map((format) => ({ ...format })),
       recentlyAdded,
       adoptedEdits: this.countAdoptedMetadataOverrides(),
       generatedAt: Date.now(),
     };
-    this.libraryHealthCache = health;
-    return health;
+  }
+
+  private *healthScanSteps(): Sliced<HealthScan> {
+    for (let attempt = 0; ; attempt += 1) {
+      if (this.healthScanCache) return this.healthScanCache;
+      const epoch = this.healthScanEpoch;
+      // Only containers (.m4a, .mka) need their codec to be told lossless from
+      // lossy, so only those rows are asked for it.
+      const containerWhere = extensionSetSql(CONTAINER_AUDIO_EXTENSIONS);
+      const containerCodecs = new Map(
+        this.many<{ id: number; codec: string; codec_lossless: number | null; bits_per_sample: number | null }>(
+          `SELECT id, codec, codec_lossless, bits_per_sample FROM tracks WHERE codec IS NOT NULL AND codec != '' AND ${containerWhere.sql}`,
+          containerWhere.params,
+        ).map((row) => [row.id, row] as const),
+      );
+      yield;
+      const missing = {
+        artist: 0,
+        album: 0,
+        year: 0,
+        art: 0,
+        duration: 0,
+      };
+      const quality = {
+        lossless: 0,
+        lossy: 0,
+        hiRes: 0,
+        dsd: 0,
+        ffmpegFallback: 0,
+        lowBitrate: 0,
+        replayGainReady: 0,
+        replayGainMissing: 0,
+        unknown: 0,
+      };
+
+      const duplicateMap = new Map<string, LibraryHealthRow[]>();
+      const legacyMap = new Map<string, number>();
+      let afterId = 0;
+      for (;;) {
+        const rows = this.many<LibraryHealthRow>(
+          `SELECT id, path, title, artist, album, year, duration, bitrate, sample_rate, size, mtime, has_art, replaygain_track_db, replaygain_album_db FROM tracks WHERE id > ? ORDER BY id LIMIT ?`,
+          [afterId, HEALTH_SLICE],
+        );
+        if (!rows.length) break;
+        for (const row of rows) {
+          if (isUnknownArtistName(row.artist)) missing.artist += 1;
+          if (!row.album.trim()) missing.album += 1;
+          if (row.year == null) missing.year += 1;
+          if (!row.has_art) missing.art += 1;
+          if (row.duration == null || row.duration <= 0) missing.duration += 1;
+
+          const container = containerCodecs.get(row.id);
+          const signal = classifyAudioQuality({
+            path: row.path,
+            bitrate: row.bitrate,
+            sampleRate: row.sample_rate,
+            duration: row.duration,
+            size: row.size,
+            replayGainTrackDb: row.replaygain_track_db,
+            replayGainAlbumDb: row.replaygain_album_db,
+            codec: container?.codec ?? null,
+            codecLossless: container?.codec_lossless == null ? null : container.codec_lossless === 1,
+            bitsPerSample: container?.bits_per_sample ?? null,
+          });
+          if (signal.isLossless) quality.lossless += 1;
+          if (signal.family === 'lossy') quality.lossy += 1;
+          if (signal.isHiRes) quality.hiRes += 1;
+          if (signal.isDsd) quality.dsd += 1;
+          if (signal.decodePath === 'ffmpeg-pcm-fallback') quality.ffmpegFallback += 1;
+          if (signal.isLowBitrate) quality.lowBitrate += 1;
+          if (signal.hasReplayGain) quality.replayGainReady += 1;
+          else quality.replayGainMissing += 1;
+          if (signal.family === 'unknown') quality.unknown += 1;
+
+          const artist = normalizeDuplicateText(row.artist);
+          const title = normalizeDuplicateText(row.title);
+          if (artist && title && !isUnknownArtistName(artist)) {
+            const key = `${artist}\u0000${title}`;
+            const group = duplicateMap.get(key) ?? [];
+            group.push(row);
+            duplicateMap.set(key, group);
+          }
+
+          const ext = extname(row.path).toLowerCase();
+          if (LEGACY_FORMATS.has(ext)) legacyMap.set(ext, (legacyMap.get(ext) ?? 0) + 1);
+        }
+        afterId = rows[rows.length - 1]!.id;
+        yield;
+      }
+
+      const duplicateGroups = [...duplicateMap.values()]
+        .filter((group) => group.length > 1)
+        .map((group) => {
+          const first = group[0]!;
+          const trackIds = [...group]
+            .sort((a, b) => (a.album || '').localeCompare(b.album || '') || a.path.localeCompare(b.path))
+            .slice(0, 8)
+            .map((row) => row.id);
+          return {
+            artist: first.artist,
+            title: first.title,
+            count: group.length,
+            exactMatchCount: duplicateExactMatchCount(group),
+            trackIds,
+          };
+        })
+        .sort(
+          (a, b) =>
+            b.exactMatchCount - a.exactMatchCount ||
+            b.count - a.count ||
+            a.artist.localeCompare(b.artist) ||
+            a.title.localeCompare(b.title),
+        )
+        .slice(0, 12);
+
+      const legacyFormats = [...legacyMap.entries()]
+        .map(([ext, count]) => ({ ext, count }))
+        .sort((a, b) => b.count - a.count || a.ext.localeCompare(b.ext));
+
+      const scan: HealthScan = { missing, quality, duplicateGroups, legacyFormats };
+      // A write that moves what was read landed in between: use the pass for
+      // this answer but don't keep it, or go again if there is time.
+      if (epoch === this.healthScanEpoch) {
+        this.healthScanCache = scan;
+        return scan;
+      }
+      if (attempt >= 2) return scan;
+    }
   }
 
   getTrackCount(opts: Pick<TrackQueryOptions, 'search' | 'sort'> = {}): number {
@@ -3016,21 +3111,41 @@ export class LibraryStore {
   }
 
   getFolders(parentPath?: string | null, roots: string[] = []): FolderSummary[] {
-    const rows = this.getFolderTrackRows();
+    return runSync(this.folderSteps(parentPath, roots));
+  }
+
+  /** getFolders in slices, for the IPC handler: the first call after a scan builds the folder index. */
+  getFoldersAsync(parentPath?: string | null, roots: string[] = []): Promise<FolderSummary[]> {
+    return this.runSlicedJob(this.folderSteps(parentPath, roots));
+  }
+
+  private *folderSteps(parentPath: string | null | undefined, roots: string[]): Sliced<FolderSummary[]> {
+    const index = yield* this.folderIndexSteps();
     const parent = normalizeFolderPath(parentPath);
-    if (parent) return summarizeChildFolders(rows, parent);
+    const configured = parent ? [] : uniqueNormalizedFolders(roots);
+    const cacheKey = parent ? `in:${folderKey(parent)}` : `roots:${configured.map(folderKey).join('|')}`;
+    const known = index.summaries.get(cacheKey);
+    if (known) return known.map((folder) => ({ ...folder }));
 
-    const configuredRoots = uniqueNormalizedFolders(roots)
-      .map((root) => summarizeFolder(rows, root, null))
-      .filter((folder) => folder.totalTrackCount > 0);
-
-    if (configuredRoots.length) return sortFolders(configuredRoots);
-
-    return sortFolders(
-      deriveCatalogRoots(rows)
-        .map((root) => summarizeFolder(rows, root, null))
-        .filter((folder) => folder.totalTrackCount > 0),
-    );
+    let result: FolderSummary[];
+    if (parent) {
+      result = yield* summarizeChildFoldersSteps(index, parent);
+    } else {
+      const summaries: FolderSummary[] = [];
+      for (const root of configured) summaries.push(yield* summarizeFolderSteps(index, root, null));
+      const found = summaries.filter((folder) => folder.totalTrackCount > 0);
+      if (found.length) {
+        result = sortFolders(found);
+      } else {
+        const derived: FolderSummary[] = [];
+        for (const root of deriveCatalogRoots(index)) derived.push(yield* summarizeFolderSteps(index, root, null));
+        result = sortFolders(derived.filter((folder) => folder.totalTrackCount > 0));
+      }
+    }
+    // A scan that landed in the middle of this made the index stale: the
+    // answer is fine to hand back, but a newer index will want its own.
+    if (this.folderIndexCache === index) index.summaries.set(cacheKey, result);
+    return result.map((folder) => ({ ...folder }));
   }
 
   getFolderTracks(
@@ -3038,6 +3153,50 @@ export class LibraryStore {
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
   ): Track[] {
     return this.queryFolderTrackRows(folderPath, opts).map(rowToTrack);
+  }
+
+  /**
+   * getFolderTracks in slices, for the IPC handler. The folder index says which
+   * tracks sit in the folder, so only those are read and put in order; the SQL
+   * prefix test still has to agree, which keeps the answer what the full scan
+   * gave. A folder with a great many tracks takes the full scan.
+   */
+  getFolderTracksAsync(
+    folderPath: string,
+    opts: { recursive?: boolean; limit?: number; offset?: number } = {},
+  ): Promise<Track[]> {
+    return this.runSlicedJob(this.folderTracksSteps(folderPath, opts));
+  }
+
+  private *folderTracksSteps(
+    folderPath: string,
+    opts: { recursive?: boolean; limit?: number; offset?: number },
+  ): Sliced<Track[]> {
+    const folder = normalizeFolderPath(folderPath);
+    if (!folder) return [];
+    const index = yield* this.folderIndexSteps();
+    const recursive = !!opts.recursive;
+    const wanted = folderKey(folder);
+    const prefix = `${wanted}\\`;
+    const inside = index.folders.map((entry) => entry.key === wanted || (recursive && entry.key.startsWith(prefix)));
+    const ids: number[] = [];
+    for (let row = 0; row < index.folderOf.length; row += 1) {
+      const entry = index.folderOf[row]!;
+      if (entry < 0 || !inside[entry]) continue;
+      ids.push(index.ids[row]!);
+      if (ids.length > FOLDER_TRACKS_FAST_LIMIT) return this.getFolderTracks(folderPath, opts);
+    }
+    if (!ids.length) return [];
+    const limit = Math.max(1, Math.min(opts.limit ?? 100000, 100000));
+    const offset = Math.max(0, opts.offset ?? 0);
+    const rows = this.many<RawRow>(
+      `SELECT ${TRACK_COLUMNS} FROM tracks
+        WHERE id IN (${ids.map(() => '?').join(',')})
+          AND lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'
+        ORDER BY lower(replace(path, '/', '\\')) COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE, id`,
+      [...ids, folderTrackPathPrefixParam(folder)],
+    );
+    return rows.slice(offset, offset + limit).map(rowToTrack);
   }
 
   getFolderTrackIds(
@@ -3094,19 +3253,82 @@ export class LibraryStore {
     }
   }
 
-  private getFolderTrackRows(): FolderTrackRow[] {
-    if (this.folderTrackRowsCache) return this.folderTrackRowsCache;
-    const rows = this.many<FolderTrackRow>(`SELECT id, path, duration, has_art FROM tracks`);
-    this.folderTrackRowsCache = rows;
-    return rows;
+  // Reads the track rows in slices by id (table order, the order a plain scan
+  // gives) and groups them by folder. If a write that moves a path, a duration
+  // or a cover lands in between, the pass starts again; after a few tries it
+  // hands back what it has without keeping it.
+  private *folderIndexSteps(): Sliced<FolderIndex> {
+    for (let attempt = 0; ; attempt += 1) {
+      if (this.folderIndexCache) return this.folderIndexCache;
+      const epoch = this.folderIndexEpoch;
+      const folders: FolderIndex['folders'] = [];
+      const entryOfFolder = new Map<string, number>();
+      // Tracks in one directory spell it the same way, so reading a path apart
+      // once per directory is enough.
+      const entryOfDirectory = new Map<string, number>();
+      const folderOf: number[] = [];
+      const ids: number[] = [];
+      const durations: number[] = [];
+      const hasArt: number[] = [];
+      let afterId = 0;
+      for (;;) {
+        const rows = this.many<FolderTrackRow>(
+          `SELECT id, path, duration, has_art FROM tracks WHERE id > ? ORDER BY id LIMIT ?`,
+          [afterId, FOLDER_INDEX_SLICE],
+        );
+        if (!rows.length) break;
+        for (const row of rows) {
+          const cut = Math.max(row.path.lastIndexOf('\\'), row.path.lastIndexOf('/'));
+          const directory = cut < 0 ? '' : row.path.slice(0, cut);
+          let entry = entryOfDirectory.get(directory);
+          if (entry === undefined) {
+            const folder = folderOfTrackPath(row.path);
+            if (!folder) {
+              entry = -1;
+            } else {
+              entry = entryOfFolder.get(folder);
+              if (entry === undefined) {
+                entry = folders.length;
+                folders.push({ path: folder, key: folderKey(folder) });
+                entryOfFolder.set(folder, entry);
+              }
+            }
+            entryOfDirectory.set(directory, entry);
+          }
+          folderOf.push(entry);
+          ids.push(row.id);
+          durations.push(Math.max(0, row.duration ?? 0));
+          hasArt.push(row.has_art ? 1 : 0);
+        }
+        afterId = rows[rows.length - 1]!.id;
+        yield;
+      }
+      const index: FolderIndex = {
+        folders,
+        folderOf: Int32Array.from(folderOf),
+        ids: Float64Array.from(ids),
+        durations: Float64Array.from(durations),
+        hasArt: Uint8Array.from(hasArt),
+        summaries: new Map(),
+      };
+      if (epoch === this.folderIndexEpoch) {
+        this.folderIndexCache = index;
+        return index;
+      }
+      if (attempt >= 2) return index;
+    }
   }
 
   private invalidateFolderTrackRowsCache(): void {
-    this.folderTrackRowsCache = null;
+    this.folderIndexCache = null;
+    this.folderIndexEpoch += 1;
+    this.contentChanged();
   }
 
   private invalidateLibraryHealthCache(): void {
-    this.libraryHealthCache = null;
+    this.healthScanCache = null;
+    this.healthScanEpoch += 1;
+    this.contentChanged();
   }
 
   // An album's tracks, for callers that still hold the pair of strings the
@@ -3832,6 +4054,19 @@ export class LibraryStore {
   }
 
   getSuggestedSmartPlaylistRules(): SmartPlaylistSuggestion[] {
+    return runSync(this.suggestionSteps());
+  }
+
+  /** getSuggestedSmartPlaylistRules in slices, for the IPC handler. */
+  getSuggestedSmartPlaylistRulesAsync(): Promise<SmartPlaylistSuggestion[]> {
+    return this.derived
+      .resolve('suggestions', () => this.contentVersion, () => this.runSlicedJob(this.suggestionSteps()))
+      .then((suggestions) => structuredClone(suggestions));
+  }
+
+  // One count over the whole library per suggestion; the slices fall between
+  // them.
+  private *suggestionSteps(): Sliced<SmartPlaylistSuggestion[]> {
     const suggestions: SmartPlaylistSuggestion[] = [];
     const addSuggestion = (
       id: string,
@@ -3861,6 +4096,7 @@ export class LibraryStore {
         'Built from tracks you explicitly loved.',
         { name: 'Loved Radio', mood: 'focus', count: 40, lovedOnly: true },
       );
+      yield;
     }
 
     const rated = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks WHERE rating >= 4`)?.n ?? 0;
@@ -3872,6 +4108,7 @@ export class LibraryStore {
         'Prioritizes the strongest star ratings in your catalog.',
         { name: 'High Rated Radio', mood: 'drive', count: 40, minRating: 4 },
       );
+      yield;
     }
 
     const unplayed = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks WHERE play_count = 0`)?.n ?? 0;
@@ -3883,6 +4120,7 @@ export class LibraryStore {
         'Pulls from tracks NewAmp has not seen you play yet.',
         { name: 'Discovery Radio', mood: 'deep-cuts', count: 40, unplayedOnly: true },
       );
+      yield;
     }
 
     const recentArtists = this.many<{ artist: string; genre: string | null; plays: number; last_played: number }>(
@@ -3914,6 +4152,7 @@ export class LibraryStore {
           searchQuery: `artist:"${artist.replace(/"/g, '\\"')}"`,
         },
       );
+      yield;
       if (suggestions.length >= 12) break;
     }
 
@@ -3935,6 +4174,7 @@ export class LibraryStore {
         `Detected ${genre} as a strong genre cluster in your library.`,
         { name: `${genre} Radio`, mood: moodForStationText(genre), count: 40, genreQuery: genre },
       );
+      yield;
       if (suggestions.length >= 12) break;
     }
 
@@ -3956,6 +4196,7 @@ export class LibraryStore {
         `Detected a dense ${decade}s era cluster in your library.`,
         { name: `${decade}s Radio`, mood: 'drive', count: 40, minYear: decade, maxYear: decade + 9 },
       );
+      yield;
       if (suggestions.length >= 12) break;
     }
 
@@ -3963,13 +4204,35 @@ export class LibraryStore {
   }
 
   getDiscoverSurface(input: DiscoverSurfaceInput = {}): DiscoverSurface {
+    return runSync(this.discoverSteps(input));
+  }
+
+  /**
+   * getDiscoverSurface in slices, for the IPC handler. The result depends on
+   * the clock (how long ago things were played, the year), so one built for
+   * the same input is only reused within the hour.
+   */
+  getDiscoverSurfaceAsync(input: DiscoverSurfaceInput = {}): Promise<DiscoverSurface> {
+    const key = `discover:${JSON.stringify([
+      input.seed ?? null,
+      input.limit ?? null,
+      input.lowEndMode ?? null,
+      input.seedTrackId ?? null,
+      input.now ?? Math.floor(Date.now() / 3_600_000),
+    ])}`;
+    return this.derived
+      .resolve(key, () => this.contentVersion, () => this.runSlicedJob(this.discoverSteps(input)))
+      .then((surface) => structuredClone(surface));
+  }
+
+  private *discoverSteps(input: DiscoverSurfaceInput): Sliced<DiscoverSurface> {
     const limit = Math.max(4, Math.min(40, Math.trunc(Number(input.limit) || 12)));
     const currentTrack = input.seedTrackId ? this.getTrack(Math.trunc(input.seedTrackId)) : null;
-    const highSignalCandidates = this.many<RawRow>(
-      `SELECT ${TRACK_COLUMNS} FROM tracks
-        WHERE path IS NOT NULL
+    const eligible = `WHERE path IS NOT NULL
           AND avoid_auto_play = 0
-          AND missing_since IS NULL
+          AND missing_since IS NULL`;
+    const highSignalCandidates = yield* this.rankedTracksSteps(
+      `${eligible}
         ORDER BY
           loved DESC,
           rating_score DESC,
@@ -3982,40 +4245,34 @@ export class LibraryStore {
           track_no,
           title COLLATE NOCASE
         LIMIT 6000`,
-    ).map(rowToTrack);
-    const freshCandidates = this.many<RawRow>(
-      `SELECT ${TRACK_COLUMNS} FROM tracks
-        WHERE path IS NOT NULL
-          AND avoid_auto_play = 0
-          AND missing_since IS NULL
+    );
+    const freshCandidates = yield* this.rankedTracksSteps(
+      `${eligible}
         ORDER BY mtime DESC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
         LIMIT 3000`,
-    ).map(rowToTrack);
-    const underplayedCandidates = this.many<RawRow>(
-      `SELECT ${TRACK_COLUMNS} FROM tracks
-        WHERE path IS NOT NULL
-          AND avoid_auto_play = 0
-          AND missing_since IS NULL
+    );
+    const underplayedCandidates = yield* this.rankedTracksSteps(
+      `${eligible}
           AND play_count <= 1
         ORDER BY mtime ASC, year IS NULL, year ASC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
         LIMIT 4000`,
-    ).map(rowToTrack);
-    const albumCandidates = this.many<RawRow>(
-      `SELECT ${TRACK_COLUMNS} FROM tracks
-        WHERE path IS NOT NULL
-          AND avoid_auto_play = 0
-          AND missing_since IS NULL
+    );
+    const albumCandidates = yield* this.rankedTracksSteps(
+      `${eligible}
         ORDER BY album_artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
         LIMIT 6000`,
-    ).map(rowToTrack);
+    );
     const tracks = currentTrack && !currentTrack.avoidAutoPlay && !currentTrack.missingSince
       ? uniqueTracksById([currentTrack, ...highSignalCandidates, ...freshCandidates, ...underplayedCandidates, ...albumCandidates])
       : uniqueTracksById([...highSignalCandidates, ...freshCandidates, ...underplayedCandidates, ...albumCandidates]);
+    yield;
+    const stats = this.getStats();
+    yield;
     return buildDiscoverSurface({
       ...input,
       limit,
       tracks,
-      stats: this.getStats(),
+      stats,
     });
   }
 
@@ -4402,19 +4659,40 @@ export class LibraryStore {
   }
 
   runSmartPlaylistRule(input: number | SmartPlaylistRuleInput, sampleCount = 0): Track[] {
-    const rule = typeof input === 'number'
+    const rule = this.resolveSmartRule(input);
+    return rule ? runSync(this.smartRuleSteps(rule, sampleCount)) : [];
+  }
+
+  /** runSmartPlaylistRule in slices, for the IPC handler. */
+  runSmartPlaylistRuleAsync(input: number | SmartPlaylistRuleInput, sampleCount = 0): Promise<Track[]> {
+    const rule = this.resolveSmartRule(input);
+    if (!rule) return Promise.resolve([]);
+    // A folder rule asked for a sample picks at random, so each run is its own.
+    if (rule.folderPath) return this.runSlicedJob(this.smartRuleSteps(rule, sampleCount));
+    // The name and the bookkeeping fields don't change which tracks come out.
+    const key = `rule:${JSON.stringify({ ...rule, id: 0, name: '', createdAt: 0, updatedAt: 0 })}`;
+    return this.cachedTracks(key, () => this.smartRuleSteps(rule, sampleCount));
+  }
+
+  private resolveSmartRule(input: number | SmartPlaylistRuleInput): SmartPlaylistRule | null {
+    return typeof input === 'number'
       ? this.getSmartRule(Math.trunc(input))
       : { ...normalizeSmartRuleInput(input), id: 0, createdAt: 0, updatedAt: 0 };
-    if (!rule) return [];
+  }
+
+  private *smartRuleSteps(rule: SmartPlaylistRule, sampleCount: number): Sliced<Track[]> {
     if (rule.folderPath) {
       return this.runFolderRule(rule, Math.max(0, Math.trunc(sampleCount))).map(rowToTrack);
     }
 
     const { where, params } = smartRuleWhere(rule);
-    const candidates = this.many<RawRow>(
+    const rows = this.many<RawRow>(
       `SELECT ${TRACK_COLUMNS} FROM tracks ${where} LIMIT 10000`,
       params,
-    ).map(rowToTrack);
+    );
+    yield;
+    const candidates = rows.map(rowToTrack);
+    yield;
 
     // DNA re-rank ("warm", "loud", "gentle"…): proximity to the requested
     // perceptual targets boosts ordering. Deliberately a boost, never a
@@ -4534,6 +4812,22 @@ export class LibraryStore {
   }
 
   buildHarmonicMix(input: HarmonicMixInput = {}): Track[] {
+    return runSync(this.harmonicMixSteps(input));
+  }
+
+  /** buildHarmonicMix in slices, for the IPC handler. */
+  buildHarmonicMixAsync(input: HarmonicMixInput = {}): Promise<Track[]> {
+    const wanted = input ?? {};
+    const key = `harmonic:${JSON.stringify([
+      wanted.seedTrackId ?? null,
+      wanted.count ?? null,
+      wanted.genreQuery ?? null,
+      wanted.maxBpmDelta ?? null,
+    ])}`;
+    return this.cachedTracks(key, () => this.harmonicMixSteps(wanted));
+  }
+
+  private *harmonicMixSteps(input: HarmonicMixInput): Sliced<Track[]> {
     const where: string[] = ['path IS NOT NULL', 'avoid_auto_play = 0', 'missing_since IS NULL'];
     const params: unknown[] = [];
     const genreQuery = input.genreQuery?.trim();
@@ -4541,9 +4835,8 @@ export class LibraryStore {
       where.push(`genre IS NOT NULL AND genre_fold LIKE ? ESCAPE '|'`);
       params.push(foldedLikeParam(genreQuery));
     }
-    let candidates = this.many<RawRow>(
-      `SELECT ${TRACK_COLUMNS} FROM tracks
-        WHERE ${where.join(' AND ')}
+    let candidates = yield* this.rankedTracksSteps(
+      `WHERE ${where.join(' AND ')}
         ORDER BY
           CASE WHEN bpm IS NOT NULL THEN 0 ELSE 1 END,
           CASE WHEN key IS NOT NULL AND trim(key) <> '' THEN 0 ELSE 1 END,
@@ -4552,7 +4845,7 @@ export class LibraryStore {
           title COLLATE NOCASE
         LIMIT 10000`,
       params,
-    ).map(rowToTrack);
+    );
 
     const seed = input.seedTrackId ? this.getTrack(input.seedTrackId) : null;
     if (seed && !candidates.some((track) => track.id === seed.id) && !seed.avoidAutoPlay && !seed.missingSince) {
@@ -4561,6 +4854,7 @@ export class LibraryStore {
 
     if (seed) {
       const seedDnaIndex = this.buildDnaIndex();
+      yield;
       const seedDna = seedDnaIndex.get(seed.id) ?? null;
       const seedCtx = createSeedVibeContext(seed, seedDna);
       const scored = candidates
@@ -4572,21 +4866,32 @@ export class LibraryStore {
       const targetCount = Math.max(80, Math.min(800, normalizeMixCount(input.count) * 12));
       const trimmed = scored.slice(0, targetCount).map((entry) => entry.track);
       candidates = trimmed.length ? trimmed : candidates;
+      yield;
     }
 
     return buildHarmonicMixSequence(candidates, input);
   }
 
   buildTasteMix(input: TasteMixInput = {}): Track[] {
+    return runSync(this.tasteMixSteps(input));
+  }
+
+  /** buildTasteMix in slices, for the IPC handler. */
+  buildTasteMixAsync(input: TasteMixInput = {}): Promise<Track[]> {
+    const wanted = input ?? {};
+    const key = `taste:${JSON.stringify([wanted.seedTrackId ?? null, wanted.count ?? null])}`;
+    return this.cachedTracks(key, () => this.tasteMixSteps(wanted));
+  }
+
+  private *tasteMixSteps(input: TasteMixInput): Sliced<Track[]> {
     const count = normalizeMixCount(input.count);
-    const candidates = this.many<RawRow>(
-      `SELECT ${TRACK_COLUMNS} FROM tracks
-        WHERE path IS NOT NULL
+    const candidates = yield* this.rankedTracksSteps(
+      `WHERE path IS NOT NULL
           AND avoid_auto_play = 0
           AND missing_since IS NULL
         ORDER BY loved DESC, rating DESC, play_count DESC, last_played DESC, title COLLATE NOCASE
         LIMIT 10000`,
-    ).map(rowToTrack);
+    );
 
     const requestedSeedId = input.seedTrackId ? Math.trunc(input.seedTrackId) : 0;
     const seed = requestedSeedId > 0 ? this.getTrack(requestedSeedId) : null;
@@ -4596,6 +4901,7 @@ export class LibraryStore {
 
     const opener = seed && isTasteMixCandidate(seed) ? seed : null;
     const context = buildTasteContext(unique, opener, this.buildAlbumRatingIndex());
+    yield;
 
     // When the user has a seed track, the mix must cohere around that track's
     // vibe. Compute per-candidate seed similarity (DNA + genre + era + artist),
@@ -4604,6 +4910,7 @@ export class LibraryStore {
     // loved heavy-rotation favorites.
     const seedDnaIndex = opener ? this.buildDnaIndex() : null;
     const seedCtx = opener ? createSeedVibeContext(opener, seedDnaIndex?.get(opener.id) ?? null) : null;
+    yield;
 
     const scored = unique
       .filter((track) => track.id !== opener?.id)
@@ -4612,15 +4919,61 @@ export class LibraryStore {
         if (!opener || !seedCtx) return { track, score: base };
         const vibe = seedVibeSimilarity(track, seedCtx, seedDnaIndex?.get(track.id) ?? null);
         return { track, score: applySeedVibeGate(base, vibe) };
-      })
-      .sort((a, b) =>
-        b.score - a.score ||
-        (a.track.artist || '').localeCompare(b.track.artist || '') ||
-        (a.track.title || '').localeCompare(b.track.title || ''),
-      );
+      });
+    yield;
+    scored.sort((a, b) =>
+      b.score - a.score ||
+      (a.track.artist || '').localeCompare(b.track.artist || '') ||
+      (a.track.title || '').localeCompare(b.track.title || ''),
+    );
 
     const picked = scored.slice(0, opener ? count - 1 : count).map((item) => item.track);
     return opener ? [opener, ...picked] : picked;
+  }
+
+  private cachedTracks(key: string, make: () => Sliced<Track[]>): Promise<Track[]> {
+    return this.derived
+      .resolve(key, () => this.contentVersion, () => this.runSlicedJob(make()))
+      .then((tracks) => structuredClone(tracks));
+  }
+
+  // The tracks a ranking query picks, in its order. The ranking runs on ids
+  // alone; the rows are read afterwards in slices, because putting 58k rows in
+  // order and reading 6000 whole rows are separate passes that add up.
+  private *rankedTracksSteps(tail: string, params: ReadonlyArray<unknown> = []): Sliced<Track[]> {
+    const ids = this.many<{ id: number }>(`SELECT id FROM tracks ${tail}`, params).map((row) => row.id);
+    yield;
+    return yield* this.tracksInOrderSteps(ids);
+  }
+
+  private *tracksInOrderSteps(ids: number[]): Sliced<Track[]> {
+    const byId = new Map<number, Track>();
+    for (let i = 0; i < ids.length; i += TRACK_FETCH_SLICE) {
+      const chunk = ids.slice(i, i + TRACK_FETCH_SLICE);
+      const rows = this.many<RawRow>(
+        `SELECT ${TRACK_COLUMNS} FROM tracks WHERE id IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
+      );
+      for (const row of rows) byId.set(row.id, rowToTrack(row));
+      yield;
+    }
+    // A track removed between slices is simply not in the list.
+    const out: Track[] = [];
+    for (const id of ids) {
+      const track = byId.get(id);
+      if (track) out.push(track);
+    }
+    return out;
+  }
+
+  // Runs a sliced job on the event loop. The store can be closed between
+  // slices (quit, restoring a backup); there is nothing left to read then.
+  private runSlicedJob<T>(steps: Sliced<T>): Promise<T> {
+    return runSliced(steps, {
+      check: () => {
+        if (this.closed) throw new Error('The library was closed.');
+      },
+    });
   }
 
   toggleLove(id: number): boolean {
@@ -5131,7 +5484,7 @@ export class LibraryStore {
       this.db.run(`DELETE FROM track_visual_memory WHERE track_id = ?`, [trackId]);
       if (this.db.getRowsModified() <= 0) return false;
       // Stats cache is computed from track_visual_memory contents — any
-      // write/clear here invalidates it. Mirrors the libraryHealthCache pattern.
+      // write/clear here invalidates it. Mirrors the healthScanCache pattern.
       this.invalidateVisualMemoryStatsCache();
       this.scheduleFlush();
       return true;
@@ -5198,7 +5551,7 @@ export class LibraryStore {
     // Cached result: SettingsView opens this with no debounce,
     // and the underlying scan is O(rows * blob size) of synchronous JSON
     // parsing on the main process. Same invalidation pattern as
-    // libraryHealthCache and dnaIndexCache — null = recompute, otherwise
+    // healthScanCache and dnaIndexCache — null = recompute, otherwise
     // return-by-reference (the value is a plain {tracksWithMemory, …}
     // struct; mutations would corrupt the cache, so callers must treat it
     // as read-only).
@@ -6414,12 +6767,22 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
     }
   }
 
+  // getAsObject asks sqlite for every column's name again on every row, which
+  // is most of what a row costs. The names are read once and rows are built
+  // from get(); the objects come out the same.
   private many<T = RawRow>(sql: string, params: ReadonlyArray<unknown> = []): T[] {
     const out: T[] = [];
     const stmt = this.db.prepare(sql);
     try {
       stmt.bind(params as unknown as import('sql.js').BindParams);
-      while (stmt.step()) out.push(stmt.getAsObject() as unknown as T);
+      let names: string[] | null = null;
+      while (stmt.step()) {
+        const values = stmt.get();
+        names ??= stmt.getColumnNames();
+        const row: Record<string, unknown> = {};
+        for (let i = 0; i < names.length; i += 1) row[names[i]!] = values[i];
+        out.push(row as T);
+      }
       return out;
     } finally {
       stmt.free();
@@ -7346,19 +7709,46 @@ function uniqueNormalizedFolders(paths: string[]): string[] {
   return out;
 }
 
-function summarizeChildFolders(rows: FolderTrackRow[], parent: string): FolderSummary[] {
-  const children = new Map<string, FolderSummaryAccumulator>();
-  for (const row of rows) {
-    const trackFolder = folderOfTrackPath(row.path);
-    if (!trackFolder) continue;
-    const child = immediateChildFolder(trackFolder, parent);
-    if (!child) continue;
+// What a folder holding tracks means to the `parent` being listed: the child
+// of `parent` it belongs to, whether it is that child itself, and which of the
+// child's own subfolders it falls under.
+interface ChildFolderInfo {
+  child: string;
+  childKey: string;
+  direct: boolean;
+  grandchildKey: string | null;
+}
 
-    const key = folderKey(child);
-    let acc = children.get(key);
+function* summarizeChildFoldersSteps(index: FolderIndex, parent: string): Sliced<FolderSummary[]> {
+  const prefix = `${folderKey(normalizeFolderPath(parent) ?? parent)}\\`;
+  const infos: Array<ChildFolderInfo | null> = new Array(index.folders.length).fill(null);
+  for (let i = 0; i < index.folders.length; i += 1) {
+    const folder = index.folders[i]!;
+    // immediateChildFolder answers null for anything not strictly inside.
+    if (folder.key.startsWith(prefix)) {
+      const child = immediateChildFolder(folder.path, parent);
+      if (child) {
+        const grandchild = immediateChildFolder(folder.path, child);
+        infos[i] = {
+          child,
+          childKey: folderKey(child),
+          direct: foldersEqual(folder.path, child),
+          grandchildKey: grandchild ? folderKey(grandchild) : null,
+        };
+      }
+    }
+    if (i % FOLDER_DESCRIBE_SLICE === FOLDER_DESCRIBE_SLICE - 1) yield;
+  }
+  const children = new Map<string, FolderSummaryAccumulator>();
+  for (let row = 0; row < index.folderOf.length; row += 1) {
+    const entry = index.folderOf[row]!;
+    if (entry < 0) continue;
+    const info = infos[entry];
+    if (!info) continue;
+    let acc = children.get(info.childKey);
     if (!acc) {
       acc = {
-        path: child,
+        path: info.child,
         parentPath: parent,
         childFolderKeys: new Set(),
         trackCount: 0,
@@ -7366,36 +7756,51 @@ function summarizeChildFolders(rows: FolderTrackRow[], parent: string): FolderSu
         duration: 0,
         artFromTrackId: null,
       };
-      children.set(key, acc);
+      children.set(info.childKey, acc);
     }
 
     acc.totalTrackCount += 1;
-    acc.duration += Math.max(0, row.duration ?? 0);
-    if (acc.artFromTrackId == null && row.has_art) acc.artFromTrackId = row.id;
-    if (foldersEqual(trackFolder, child)) acc.trackCount += 1;
-    const grandchild = immediateChildFolder(trackFolder, child);
-    if (grandchild) acc.childFolderKeys.add(folderKey(grandchild));
+    acc.duration += index.durations[row]!;
+    if (acc.artFromTrackId == null && index.hasArt[row]) acc.artFromTrackId = index.ids[row]!;
+    if (info.direct) acc.trackCount += 1;
+    if (info.grandchildKey) acc.childFolderKeys.add(info.grandchildKey);
   }
   return sortFolders([...children.values()].map(folderAccumulatorToSummary));
 }
 
-function summarizeFolder(rows: FolderTrackRow[], folderPath: string, parentPath: string | null): FolderSummary {
+function* summarizeFolderSteps(index: FolderIndex, folderPath: string, parentPath: string | null): Sliced<FolderSummary> {
   const folder = normalizeFolderPath(folderPath) ?? folderPath;
+  const wanted = folderKey(folder);
+  const prefix = `${wanted}\\`;
+  // 0: not in the folder, 1: in a folder below it, 2: the folder itself.
+  const placement = new Uint8Array(index.folders.length);
+  const childKeys: Array<string | null> = new Array(index.folders.length).fill(null);
+  for (let i = 0; i < index.folders.length; i += 1) {
+    const entry = index.folders[i]!;
+    if (entry.key === wanted) {
+      placement[i] = 2;
+    } else if (entry.key.startsWith(prefix)) {
+      placement[i] = 1;
+      const child = immediateChildFolder(entry.path, folder);
+      if (child) childKeys[i] = folderKey(child);
+    }
+    if (i % FOLDER_DESCRIBE_SLICE === FOLDER_DESCRIBE_SLICE - 1) yield;
+  }
   const childFolders = new Set<string>();
   let trackCount = 0;
   let totalTrackCount = 0;
   let duration = 0;
   let artFromTrackId: number | null = null;
 
-  for (const row of rows) {
-    const trackFolder = folderOfTrackPath(row.path);
-    if (!trackFolder || !trackPathIsInFolder(row.path, folder, true)) continue;
+  for (let row = 0; row < index.folderOf.length; row += 1) {
+    const entry = index.folderOf[row]!;
+    if (entry < 0 || !placement[entry]) continue;
     totalTrackCount += 1;
-    duration += Math.max(0, row.duration ?? 0);
-    if (artFromTrackId == null && row.has_art) artFromTrackId = row.id;
-    if (foldersEqual(trackFolder, folder)) trackCount += 1;
-    const child = immediateChildFolder(trackFolder, folder);
-    if (child) childFolders.add(folderKey(child));
+    duration += index.durations[row]!;
+    if (artFromTrackId == null && index.hasArt[row]) artFromTrackId = index.ids[row]!;
+    if (placement[entry] === 2) trackCount += 1;
+    const childKey = childKeys[entry];
+    if (childKey) childFolders.add(childKey);
   }
 
   return {
@@ -7423,18 +7828,21 @@ function folderAccumulatorToSummary(acc: FolderSummaryAccumulator): FolderSummar
   };
 }
 
-function deriveCatalogRoots(rows: FolderTrackRow[]): string[] {
+function deriveCatalogRoots(index: FolderIndex): string[] {
+  const rootOf = index.folders.map((folder) => {
+    const root = catalogRootForFolder(folder.path);
+    return root ? { root, key: folderKey(root) } : null;
+  });
+  // The last track to name a root decides how it is spelled, as it always has.
   const roots = new Map<string, string>();
-  for (const row of rows) {
-    const root = catalogRootForTrackPath(row.path);
-    if (root) roots.set(folderKey(root), root);
+  for (const entry of index.folderOf) {
+    const found = entry < 0 ? null : rootOf[entry];
+    if (found) roots.set(found.key, found.root);
   }
   return [...roots.values()];
 }
 
-function catalogRootForTrackPath(path: string): string | null {
-  const folder = folderOfTrackPath(path);
-  if (!folder) return null;
+function catalogRootForFolder(folder: string): string | null {
   const compact = trimFolderTrailingSlash(folder);
   const drive = /^([A-Za-z]:)(?:\\(.+))?$/.exec(compact);
   if (drive) {
