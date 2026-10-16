@@ -4,8 +4,16 @@ import { api, winctl } from '../lib/api';
 import { ArtistLink } from './EntityLink';
 import { BrandLogo } from './BrandLogo';
 
+// "Load your library" is only true when there are no folders and no tracks.
+// Anything not known yet reads as the neutral line rather than a wrong one.
+function idleTitle(libraryRoots: number | null, trackCount: number | null): string {
+  return libraryRoots === 0 && trackCount === 0 ? 'Ready. Load your library.' : 'Nothing playing';
+}
+
 export function TitleBar(): JSX.Element {
   const [maximized, setMaximized] = useState(false);
+  const [trackCount, setTrackCount] = useState<number | null>(null);
+  const libraryRoots = usePlayerStore((s) => s.settings?.libraryRoots?.length ?? null);
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const alwaysOnTop = usePlayerStore((s) => s.alwaysOnTop);
@@ -14,12 +22,38 @@ export function TitleBar(): JSX.Element {
 
   useEffect(() => winctl.onState((s) => setMaximized(s.maximized)), []);
 
+  // Saved folders settle it. Without any, tracks can still be there (the empty
+  // library screen scans a folder without touching the store's settings), so
+  // ask the library, and again when a scan finishes.
+  const noFolders = libraryRoots === 0;
+  useEffect(() => {
+    if (!noFolders) return undefined;
+    let cancelled = false;
+    const refresh = () => {
+      api
+        .getStats()
+        .then((stats) => {
+          if (!cancelled) setTrackCount(stats.tracks);
+        })
+        .catch(() => undefined);
+    };
+    refresh();
+    const off = api.onScanProgress((p) => {
+      if (p.done) refresh();
+    });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [noFolders]);
+
   const isMac = api.platform === 'darwin';
 
   return (
     <header
       className="titlebar-drag relative flex h-10 items-center justify-between px-2 text-xs"
       style={{ background: 'var(--titlebar)' }}
+      data-newamp-hint-anchor="titlebar"
     >
       <div
         className="titlebar-nodrag flex items-center gap-2"
@@ -61,7 +95,7 @@ export function TitleBar(): JSX.Element {
               {` - ${current.title}`}
             </>
           ) : (
-            'Ready. Load your library.'
+            idleTitle(libraryRoots, trackCount)
           )}
         </span>
       </div>
@@ -81,6 +115,7 @@ export function TitleBar(): JSX.Element {
           onClick={() => setCompactMode(true)}
           aria-label="Compact deck"
           title="Compact deck"
+          data-newamp-hint-anchor="deck"
         >
           DECK
         </button>
