@@ -43,14 +43,19 @@ globalThis.window = {
 Object.defineProperty(globalThis, 'performance', { configurable: true, value: { now: () => now } });
 
 await build({
-  entryPoints: [resolve('src/visualizer/eviland-score-feed.ts')],
+  // score-prefetch is what the player store calls; the feed registers itself with it.
+  stdin: {
+    contents: `export * from './src/visualizer/eviland-score-feed';
+      export { requestScorePrefetch } from './src/visualizer/score-prefetch';`,
+    resolveDir: process.cwd(), loader: 'ts',
+  },
   bundle: true, format: 'esm', platform: 'node', target: 'es2022',
   alias: { '@shared': resolve('shared') },
   // lib/api.ts reads Vite's import.meta.env; there is no Vite here.
   define: { 'import.meta.env.DEV': 'false', 'import.meta.env.PROD': 'true' },
   outfile: resolve('tmp/eviland-score-feed-bundle.mjs'), logLevel: 'silent',
 });
-const { createScoreFeed, prefetchSongScore, songScoreStatus } = await import(
+const { createScoreFeed, prefetchSongScore, requestScorePrefetch, songScoreStatus } = await import(
   pathToFileURL(resolve('tmp/eviland-score-feed-bundle.mjs')).href
 );
 
@@ -70,6 +75,7 @@ const frame = {
 
 // Nothing is fetched while no Eviland visualizer is running.
 prefetchSongScore(1);
+requestScorePrefetch(1);
 if (requests.length) fail('prefetch ran with no active feed — idle listeners would pay for analysis');
 if (songScoreStatus() !== 'idle') fail(`status with no feed should be idle, got ${songScoreStatus()}`);
 
@@ -125,6 +131,9 @@ if (!frame.score || Math.abs(frame.score.arc - 0.5) > 0.02) fail(`cue offset ign
 // With a feed running, the gapless prepare warms the next track.
 prefetchSongScore(3);
 if (!requests.includes(3)) fail('prefetch did not run while a feed was active');
+// The player store asks through score-prefetch, which only the feed module can answer.
+requestScorePrefetch(5);
+if (!requests.includes(5)) fail('the store\'s prefetch request never reached the score feed');
 
 // Turning look-ahead off clears the cues within half a second, and on again restores them.
 storage.set('newamp:viz:lookahead', 'off');
@@ -134,6 +143,7 @@ if (frame.score !== undefined) fail('cues kept flowing after look-ahead was turn
 if (songScoreStatus() !== 'off') fail(`status when disabled should be off, got ${songScoreStatus()}`);
 const before = requests.length;
 prefetchSongScore(4);
+requestScorePrefetch(6);
 if (requests.length !== before) fail('prefetch ran while look-ahead was off');
 storage.set('newamp:viz:lookahead', 'on');
 now += 600;

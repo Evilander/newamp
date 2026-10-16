@@ -3,6 +3,8 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { readStyleBundle } from './style-bundle.mjs';
 
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const storeSource = await readFile(new URL('../src/store/usePlayerStore.ts', import.meta.url), 'utf8');
+const activeBridgeSource = await readFile(new URL('../src/visualizer/eviland-active-bridge.ts', import.meta.url), 'utf8');
 const transportSource = await readFile(new URL('../src/components/Transport.tsx', import.meta.url), 'utf8');
 const brandLogoSource = await readFile(new URL('../src/components/BrandLogo.tsx', import.meta.url), 'utf8');
 const startupSplashSource = await readFile(new URL('../src/components/StartupSplash.tsx', import.meta.url), 'utf8');
@@ -20,6 +22,14 @@ assert.doesNotMatch(appSource, /import \{ HomeView \} from '\.\/components\/view
 assert.doesNotMatch(appSource, /import \{ NowPlayingView \} from '\.\/components\/views\/NowPlayingView'/, 'NowPlayingView should not be imported eagerly');
 assert.match(transportSource, /lazy\(\(\) => import\('\.\/Visualizer'\)/, 'transport mini visualizer should be lazy-loaded');
 assert.doesNotMatch(transportSource, /import \{ Visualizer \} from '\.\/Visualizer'/, 'the visualizer stack should not load with the startup shell');
+assert.match(appSource, /import\('\.\/visualizer\/eviland-producer'\)/, 'the projector producer should load when a projector attaches');
+assert.doesNotMatch(appSource, /from '\.\/visualizer\/eviland-producer'/, 'App should not import the projector producer (the Eviland engine) eagerly');
+assert.doesNotMatch(
+  storeSource,
+  /from '\.\.\/visualizer\/(eviland-randomizer|eviland-score-feed|eviland-memory-bridge-registry|eviland-producer|eviland-director|eviland-audio)'/,
+  'the player store should reach the Eviland engine only through its small startup modules',
+);
+assert.doesNotMatch(activeBridgeSource, /^import (?!type )/m, 'the active-bridge module loads with the store, so it may only import types');
 
 assert.match(brandLogoSource, /logo-app\.webp/, 'Renderer should use the display-sized app logo');
 assert.match(brandLogoSource, /<img[\s\S]*data-newamp-brand-logo/, 'brand logo should render the original image');
@@ -67,8 +77,10 @@ const largestMain = mainScripts.sort((a, b) => b.bytes - a.bytes)[0];
 // crept back to 440.9KB by 2.3.0's successor commits; 2.4.0 moved the command
 // palette behind its own chunk and measures 426.2KB. 2.5.0 loads the
 // transport's mini visualizer (and the Eviland stack behind it) on its own
-// and measures 389.7KB.
-assert.ok(largestMain.bytes < 440_000, `main renderer chunk should stay below 440KB, got ${largestMain.bytes}`);
+// and measures 389.7KB. It had crept back to 440.6KB by the 2.6 follow-ups;
+// 2.7 moved the visualizer seed helpers and the projector producer back out
+// and measures 340.5KB.
+assert.ok(largestMain.bytes < 350_000, `main renderer chunk should stay below 350KB, got ${largestMain.bytes}`);
 
 assert.match(packageSource, /"smoke:startup-bundle"/, 'package.json must expose startup bundle smoke');
 assert.match(releaseGateSource, /'smoke:startup-bundle'/, 'release gate must run startup bundle smoke');
