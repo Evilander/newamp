@@ -7,6 +7,16 @@ Release notes for every version, including everything before 2.0, are on the
 
 ## [Unreleased]
 
+### Added
+
+- The library and settings are copied once a day to a backups folder in the
+  app's data folder. Five are kept, a copy is skipped when nothing changed or
+  the drive is nearly full, and each one is checked before older ones are
+  removed. Settings shows them and can turn this off.
+- The Windows media controls show the album cover.
+- Lyrics embedded in the audio file are shown when there is no saved or
+  sidecar lyrics file.
+
 ### Changed
 
 - Albums are grouped the way the files describe them, not by each track's
@@ -23,6 +33,20 @@ Release notes for every version, including everything before 2.0, are on the
 - Album ratings move with their albums. The first launch copies library.db
   to library.db.before-album-keys.bak before changing the ratings table,
   because earlier versions can't write ratings to the new one.
+- Opening audio files from Explorer, with Open with, a double-click or a
+  drop, plays them next and keeps the rest of the queue. It used to replace
+  the whole queue.
+- The Library list loads more rows as you scroll instead of one "Load more"
+  click per 600 tracks, and it fills in while a scan adds tracks.
+- Library health lists what is missing and where to fix it, without grading
+  the library with a letter.
+- Radio's genre chips are a short list of common genres, and station search
+  matches names and tags. Radio Brain's playlists page through the whole
+  library instead of stopping at 5,000 tracks.
+- The first time the close button hides NewAmp to the tray, it says so and
+  explains how to quit and where to change it.
+- The startup script is 340 KB, down from 441 KB: the visualizer engine
+  loads when a visualizer or projector opens, as it did in 2.5.
 
 ### Fixed
 
@@ -35,6 +59,31 @@ Release notes for every version, including everything before 2.0, are on the
   so on a slow drive they no longer compete with the track that's playing.
 - Scrolling Albums sorted by Recently added while new music is being added
   no longer shows the same albums twice.
+- Internet radio stations that stream over plain http play. That was most of
+  them: 647 of the 1,000 most-voted stations. A station shows as live only
+  once it is actually playing, and a failure says why.
+- Starting a scan from the empty Library left the empty screen up until the
+  app was restarted.
+- A folder added in Settings is scanned right away.
+- The title bar said "Ready. Load your library." whenever nothing was
+  playing, even with a library loaded.
+- The first-run hints point at the controls they describe instead of
+  floating over the view.
+- Settings no longer lists assistant features that were never built, and the
+  Last.fm help says what the API key and secret are for.
+- Leaving the fullscreen visualizer could shrink the window to 980x640 in
+  the corner of the screen and remember that size.
+- Media keys no longer turn off the Windows media controls.
+- On Linux with native Wayland the window sometimes never appeared, and the
+  Linux window had no icon.
+- Logging off, shutting down or a crash could lose the library changes made
+  since the last save.
+- A first run on Windows or Linux no longer adds the empty Public Music
+  folder, and when a scan finds nothing, Home says which folder it looked in.
+- Cancelling a scan left the banner on "Scanning"; it now says the scan
+  stopped.
+- The folder picker opened at a fixed drive letter instead of the Music
+  folder.
 
 ## [2.6.0] - 2026-10-11
 
