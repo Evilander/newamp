@@ -1,27 +1,40 @@
 import { useEffect, useRef, useState } from 'react';
 import type { RadioStation } from '@shared/types';
-import { clickStation, searchStations, topTags } from '../../api/radiobrowser';
+import {
+  CURATED_RADIO_TAGS,
+  clickStation,
+  searchStations,
+  searchStationsByText,
+  topTags,
+  tuneStation,
+} from '../../api/radiobrowser';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { pushToast } from '../../lib/toast';
 import { ViewHeader } from '../ViewHeader';
 import { Antenna } from '../Icons';
 
-const RADIO_TAGS = ['lofi', 'jazz', 'ambient', 'metal', 'electronic', 'classical', 'reggae', 'hip-hop', 'rock', 'blues'];
+const SEARCH_DEBOUNCE_MS = 250;
 
 export function RadioView(): JSX.Element {
   const [stations, setStations] = useState<RadioStation[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState('');
   const [tag, setTag] = useState<string>('');
-  const [tags, setTags] = useState<Array<{ name: string; stationcount: number }>>([]);
+  // Raw directory tags, offered as search suggestions rather than chips.
+  const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [active, setActive] = useState<RadioStation | null>(null);
+  const [connecting, setConnecting] = useState<RadioStation | null>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
+  // Bumped by every play and stop so a slow connect that lost the race can't
+  // mark its station live afterwards.
+  const attempt = useRef(0);
   const isPlayingLibrary = usePlayerStore((s) => s.isPlaying);
   const pauseLibrary = () => usePlayerStore.getState().engine.pause();
 
   useEffect(() => {
+    // No crossOrigin: nothing taps this element, and an anonymous CORS request
+    // would refuse every station that doesn't send CORS headers.
     audio.current = new Audio();
-    audio.current.crossOrigin = 'anonymous';
     return () => {
       audio.current?.pause();
       audio.current = null;
@@ -40,47 +53,77 @@ export function RadioView(): JSX.Element {
   }, [isPlayingLibrary]);
 
   useEffect(() => {
-    topTags(40)
-      .then((t) => setTags(t))
+    topTags(300)
+      .then((t) => setTagSuggestions(t.map((entry) => entry.name)))
       .catch(() => undefined);
   }, []);
 
   useEffect(() => {
-    if (!query && !tag) return;
-    let cancelled = false;
-    setLoading(true);
-    searchStations({ name: query || undefined, tag: tag || undefined, limit: 80 })
-      .then((rows) => !cancelled && setStations(rows))
-      .catch(() => {
-        // fetchWithFailover already tries every mirror with a timeout before
-        // rejecting, so reaching here means the whole directory is
-        // unreachable right now — worth telling the user, not just silently
-        // showing an empty result list.
-        if (!cancelled) pushToast({ tone: 'error', title: 'Station search failed', detail: 'All radio-browser mirrors are unreachable right now.' });
-      })
-      .finally(() => !cancelled && setLoading(false));
+    const text = query.trim();
+    if (!text && !tag) {
+      setLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    const { signal } = controller;
+    // Typing searches on a short delay; a chip click goes straight out.
+    const timer = window.setTimeout(
+      () => {
+        setLoading(true);
+        // A chip narrows the name search to that exact tag. Free text alone
+        // matches station names and tags, which is how the raw tags stay
+        // reachable now that the chips are a fixed genre list.
+        const request = tag
+          ? searchStations({ name: text || undefined, tag, tagExact: true, limit: 80, signal })
+          : searchStationsByText(text, { limit: 80, signal });
+        request
+          .then((rows) => !signal.aborted && setStations(rows))
+          .catch(() => {
+            // fetchWithFailover already tries every mirror with a timeout before
+            // rejecting, so reaching here means the whole directory is
+            // unreachable right now — worth telling the user, not just silently
+            // showing an empty result list.
+            if (!signal.aborted) pushToast({ tone: 'error', title: 'Station search failed', detail: 'All radio-browser mirrors are unreachable right now.' });
+          })
+          .finally(() => !signal.aborted && setLoading(false));
+      },
+      text ? SEARCH_DEBOUNCE_MS : 0,
+    );
     return () => {
-      cancelled = true;
+      window.clearTimeout(timer);
+      controller.abort();
     };
   }, [query, tag]);
 
-  function playStation(s: RadioStation): void {
-    if (!audio.current) return;
+  // The station only counts as live once play() has resolved, so a refused
+  // stream (dead, HLS-only, blocked) never leaves the bar claiming LIVE.
+  async function playStation(s: RadioStation): Promise<void> {
+    const el = audio.current;
+    if (!el) return;
     if (isPlayingLibrary) pauseLibrary();
-    audio.current.src = s.url;
-    audio.current.play().catch((err) => {
-      console.error('radio play failed', err);
-      pushToast({ tone: 'error', title: 'Station failed to play', detail: s.name });
-    });
+    const mine = ++attempt.current;
+    setActive(null);
+    setConnecting(s);
+    const result = await tuneStation(el, s);
+    if (mine !== attempt.current) return;
+    setConnecting(null);
+    if (!result.ok) {
+      if (result.detail) pushToast({ tone: 'error', title: 'Station failed to play', detail: result.detail });
+      return;
+    }
     setActive(s);
     void clickStation(s.id);
   }
 
   function stopRadio(): void {
+    attempt.current++;
     audio.current?.pause();
     if (audio.current) audio.current.src = '';
     setActive(null);
+    setConnecting(null);
   }
+
+  const isOn = (s: RadioStation): boolean => active?.id === s.id || connecting?.id === s.id;
 
   return (
     <div className="flex h-full flex-col">
@@ -96,21 +139,29 @@ export function RadioView(): JSX.Element {
         }
         count={`${stations.length.toLocaleString()} stations`}
         actions={
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search station name…"
-            className="bevel-in lcd-text w-[240px] px-3 py-1.5 text-[13px] outline-none"
-            style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
-            aria-label="Search station name"
-          />
+          <>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search stations or tags…"
+              list="radio-tag-suggestions"
+              className="bevel-in lcd-text w-[240px] px-3 py-1.5 text-[13px] outline-none"
+              style={{ background: 'var(--display-bg)', color: 'var(--display-fg)' }}
+              aria-label="Search stations or tags"
+            />
+            <datalist id="radio-tag-suggestions">
+              {tagSuggestions.map((name) => (
+                <option key={name} value={name} />
+              ))}
+            </datalist>
+          </>
         }
       />
       <div className="flex flex-wrap items-center gap-1 border-b px-3 py-2" style={{ borderColor: 'var(--line)' }}>
         <span className="text-[10px] uppercase tracking-widest" style={{ color: 'var(--muted)' }}>
-          Tags
+          Genres
         </span>
-        {(tags.length ? tags.slice(0, 18).map((t) => t.name) : RADIO_TAGS).map((t) => (
+        {CURATED_RADIO_TAGS.map((t) => (
           <button
             key={t}
             className={`pxbtn ${tag === t ? 'is-active' : ''}`}
@@ -128,7 +179,7 @@ export function RadioView(): JSX.Element {
           </div>
         ) : stations.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[12px]" style={{ color: 'var(--muted)' }}>
-            <div>Pick a tag or type a station name to explore 50,000+ stations.</div>
+            <div>Pick a genre, or search by station name or tag, to explore 50,000+ stations.</div>
             <div>Curated by the community at radio-browser.info.</div>
           </div>
         ) : (
@@ -139,16 +190,16 @@ export function RadioView(): JSX.Element {
                 className="flex cursor-pointer items-center gap-3 border-b px-3 py-2 transition-colors hover:bg-[var(--panel-2)]"
                 style={{
                   borderColor: 'var(--line)',
-                  background: active?.id === s.id ? 'var(--panel-2)' : 'transparent',
-                  color: active?.id === s.id ? 'var(--accent)' : 'var(--ink)',
+                  background: isOn(s) ? 'var(--panel-2)' : 'transparent',
+                  color: isOn(s) ? 'var(--accent)' : 'var(--ink)',
                 }}
-                onDoubleClick={() => playStation(s)}
+                onDoubleClick={() => void playStation(s)}
               >
                 <button
                   className="pxbtn !min-w-[36px]"
-                  onClick={() => (active?.id === s.id ? stopRadio() : playStation(s))}
+                  onClick={() => (isOn(s) ? stopRadio() : void playStation(s))}
                 >
-                  {active?.id === s.id ? '◼' : '▶'}
+                  {isOn(s) ? '◼' : '▶'}
                 </button>
                 {s.favicon ? (
                   <img
@@ -188,6 +239,18 @@ export function RadioView(): JSX.Element {
           </span>
           <button className="pxbtn ml-auto" onClick={stopRadio}>
             Stop
+          </button>
+        </div>
+      )}
+      {connecting && (
+        <div
+          className="flex items-center gap-3 border-t px-4 py-2 text-[12px]"
+          style={{ background: 'var(--panel-2)', borderColor: 'var(--line)' }}
+        >
+          <span style={{ color: 'var(--muted)' }}>Connecting to</span>
+          <span className="font-semibold">{connecting.name}</span>
+          <button className="pxbtn ml-auto" onClick={stopRadio}>
+            Cancel
           </button>
         </div>
       )}
