@@ -28,6 +28,11 @@ assert.equal(
   'folder art changes should rescan that album folder',
 );
 assert.equal(
+  resolveLibraryWatchTarget(smokeRoot, join('artist', 'Folder.JPEG')),
+  join(smokeRoot, 'artist'),
+  'any image name or case the scanner can use as a cover rescans its folder',
+);
+assert.equal(
   resolveLibraryWatchTarget(smokeRoot, join('artist', 'notes.txt')),
   null,
   'unrelated file changes should not trigger a library scan',

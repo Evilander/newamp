@@ -1,6 +1,7 @@
 import { existsSync, statSync, watch, type Dirent, type FSWatcher } from 'node:fs';
 import { lstat, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
+import { isFolderArtImage } from './folder-art.js';
 
 const AUDIO_EXTS = new Set([
   '.mp3',
@@ -28,8 +29,6 @@ const AUDIO_EXTS = new Set([
   '.dff',
 ]);
 
-const FOLDER_ART_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
-const FOLDER_ART_NAMES = new Set(['cover', 'folder', 'front', 'art', 'album']);
 
 export interface LibraryWatcherOptions {
   debounceMs?: number;
@@ -106,8 +105,9 @@ export function resolveLibraryWatchTarget(root: string, fileName: string | Buffe
   const ext = extname(target).toLowerCase();
   if (AUDIO_EXTS.has(ext)) return target;
 
-  const stem = basename(target, ext).toLowerCase();
-  if (FOLDER_ART_EXTS.has(ext) && FOLDER_ART_NAMES.has(stem)) return dirname(target);
+  // Any image can become an album's cover under the scanner's folder-art rule,
+  // so a new one rescans its folder and the scanner decides.
+  if (isFolderArtImage(basename(target))) return dirname(target);
 
   return null;
 }

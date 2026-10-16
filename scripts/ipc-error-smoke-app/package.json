@@ -1,0 +1,5 @@
+{
+  "name": "newamp-ipc-error-smoke",
+  "type": "module",
+  "main": "../ipc-error-smoke.mjs"
+}
