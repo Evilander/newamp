@@ -11,6 +11,7 @@ import { BrandLogo } from '../BrandLogo';
 import { ArtistLink, AlbumLink } from '../EntityLink';
 import { Eyebrow } from '../ViewHeader';
 import { ViewSkeleton } from '../ViewSkeleton';
+import { EmptyLibrary } from './EmptyLibrary';
 
 interface HomeData {
   stats: { tracks: number; albums: number; artists: number; duration: number };
@@ -68,7 +69,7 @@ const HOME_LIMIT = 12;
 export function HomeView(): JSX.Element {
   const [data, setData] = useState<HomeData>(EMPTY_DATA);
   // True from first render so the mount-effect load never flashes the
-  // "No library scanned yet" hero at a user who simply hasn't loaded yet.
+  // empty-library screen at a user who simply hasn't loaded yet.
   const [loading, setLoading] = useState(true);
   // Below-the-fold shelves (harmonic/taste/rated/health/insights/stations)
   // arrive via requestIdleCallback — honest loading means they wear skeletons
@@ -303,23 +304,13 @@ export function HomeView(): JSX.Element {
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {data.stats.tracks === 0 && loading ? (
           // First load: an honest skeleton page instead of a one-frame flash of
-          // the "No library scanned yet" hero.
+          // the empty-library screen.
           <ViewSkeleton variant="cards" count={8} />
         ) : data.stats.tracks === 0 ? (
-          <div className="bevel-in flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-            <div className="text-[14px] font-bold">No library scanned yet.</div>
-            <div className="max-w-[520px] text-[12px]" style={{ color: 'var(--ink-2)' }}>
-              Scan your music folder, then Home becomes the command center for fresh imports, mixes, history, playlists, and library health.
-            </div>
-            <div className="flex gap-2">
-              <button className="pxbtn is-primary" onClick={() => void api.scanLibrary()}>
-                SCAN DEFAULT LIBRARY
-              </button>
-              <button className="pxbtn" onClick={() => setView('settings')}>
-                SETTINGS
-              </button>
-            </div>
-          </div>
+          // The same screen the Library shows: it scans the folder it suggests
+          // and says which one it scanned, instead of a bare button that
+          // scanned a system folder nobody keeps music in.
+          <EmptyLibrary />
         ) : (
           <div className="home-magazine flex flex-col gap-3">
             <HomeHero

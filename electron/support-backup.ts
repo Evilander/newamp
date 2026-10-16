@@ -1,4 +1,5 @@
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import initSqlJs from 'sql.js';
@@ -25,12 +26,16 @@ export interface SupportBackupInput {
   // art and the scanner rebuilds it anyway, and copying ~1 GB of covers per
   // trashed track filled drives. Those are named newamp-auto-backup-* and
   // only the newest AUTO_BACKUPS_KEPT are kept; user-made backups are never
-  // touched.
-  scope?: 'full' | 'library';
+  // touched. 'daily' is the same two files under its own name, written by
+  // createDailyBackupIfDue, which owns its retention: the safety copies above
+  // would otherwise be evicted by five days of routine ones.
+  scope?: 'full' | 'library' | 'daily';
 }
 
 const AUTO_BACKUP_PREFIX = 'newamp-auto-backup-';
 const AUTO_BACKUPS_KEPT = 5;
+const DAILY_BACKUP_PREFIX = 'newamp-daily-';
+export const DAILY_BACKUPS_KEPT = 5;
 const LIBRARY_SCOPE_LABELS = new Set(['settings.json', 'library.db']);
 
 export interface SupportRestoreInput extends SupportBackupInput {
@@ -50,6 +55,8 @@ interface BackupManifest {
   included: string[];
   createdAt?: number;
   automatic?: boolean;
+  daily?: boolean;
+  librarySha256?: string;
 }
 
 let restoreQueue: Promise<unknown> = Promise.resolve();
@@ -59,9 +66,11 @@ const require = createRequire(import.meta.url);
 export async function createSupportBackup(input: SupportBackupInput): Promise<SupportBackupResult> {
   const userDataPath = resolve(input.userDataPath);
   const createdAt = input.now instanceof Date ? input.now.getTime() : Number(input.now ?? Date.now());
-  const automatic = input.scope === 'library';
+  const daily = input.scope === 'daily';
+  const automatic = input.scope === 'library' || daily;
   const backupsRoot = join(userDataPath, 'backups');
-  const backupPath = await uniqueBackupPath(backupsRoot, `${automatic ? AUTO_BACKUP_PREFIX : 'newamp-backup-'}${formatBackupStamp(createdAt)}`);
+  const prefix = daily ? DAILY_BACKUP_PREFIX : automatic ? AUTO_BACKUP_PREFIX : 'newamp-backup-';
+  const backupPath = await uniqueBackupPath(backupsRoot, `${prefix}${formatBackupStamp(createdAt)}`);
   ensureInside(userDataPath, backupPath);
   await mkdir(backupPath, { recursive: true });
 
@@ -85,9 +94,10 @@ export async function createSupportBackup(input: SupportBackupInput): Promise<Su
     filesCopied,
     included,
     automatic,
+    ...(daily ? { daily, librarySha256: input.librarySnapshot ? sha256(input.librarySnapshot) : undefined } : {}),
   };
   await writeFile(join(backupPath, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
-  if (automatic) await pruneAutomaticBackups(backupsRoot, backupPath);
+  if (input.scope === 'library') await pruneAutomaticBackups(backupsRoot, backupPath);
 
   return { backupPath, createdAt, filesCopied, included };
 }
@@ -123,6 +133,142 @@ async function pruneAutomaticBackups(backupsRoot: string, keepPath: string): Pro
       console.warn(`[newamp] old automatic backup could not be removed: ${stale.path}`, err);
     }
   }
+}
+
+export interface DailyBackupInfo {
+  path: string;
+  createdAt: number;
+  librarySha256: string | null;
+}
+
+// The daily copies, newest first. A folder with the right name whose manifest
+// does not say daily (or cannot be read) is not one of ours and is left out.
+export async function listDailyBackups(userDataPath: string): Promise<DailyBackupInfo[]> {
+  const backupsRoot = join(resolve(userDataPath), 'backups');
+  let names: string[];
+  try {
+    names = (await readdir(backupsRoot)).filter((name) => name.startsWith(DAILY_BACKUP_PREFIX));
+  } catch {
+    return [];
+  }
+  const found: DailyBackupInfo[] = [];
+  for (const name of names) {
+    const path = join(backupsRoot, name);
+    try {
+      const manifest = await readBackupManifest(path);
+      if (manifest.daily !== true) continue;
+      found.push({ path, createdAt: Number(manifest.createdAt) || 0, librarySha256: manifest.librarySha256 ?? null });
+    } catch {
+      // Not a readable backup; leave it alone.
+    }
+  }
+  return found.sort((a, b) => b.createdAt - a.createdAt || b.path.localeCompare(a.path));
+}
+
+export interface DailyBackupInput {
+  userDataPath: string;
+  settingsPath: string;
+  libraryPath: string;
+  now?: Date | number;
+  // Called only once a backup is due, since taking the library snapshot copies
+  // the whole database. Reads the live stores' memory, like the manual backup.
+  snapshot: () => { librarySnapshot: Buffer; settingsSnapshot: string };
+  // Free bytes on the profile's drive, or null when unknown. Injected for tests.
+  freeBytes?: (path: string) => Promise<number | null>;
+}
+
+export type DailyBackupOutcome =
+  | { status: 'created'; backup: SupportBackupResult }
+  | { status: 'skipped'; reason: 'recent' | 'unchanged' | 'low-disk' | 'busy' | 'invalid'; detail?: string };
+
+const DAILY_MIN_GAP_MS = 60 * 60 * 1000;
+// library.db is the one big file (60 MB is ordinary, several times that is not
+// rare), and five copies of it are kept. Leave the drive at least this much
+// room afterwards rather than be the thing that fills it.
+const DAILY_FREE_SPACE_FLOOR = 512 * 1024 * 1024;
+
+let dailyBackupRunning = false;
+
+// One copy of library.db and settings.json a day, the newest five kept. It is
+// skipped when today already has one, when the library is byte-for-byte what
+// the newest copy holds, or when the drive is nearly full. The new copy is
+// checked with SQLite before anything old is removed, so a damaged library
+// can never push the good copies out.
+export async function createDailyBackupIfDue(input: DailyBackupInput): Promise<DailyBackupOutcome> {
+  if (dailyBackupRunning) return { status: 'skipped', reason: 'busy' };
+  dailyBackupRunning = true;
+  try {
+    const now = input.now instanceof Date ? input.now.getTime() : Number(input.now ?? Date.now());
+    const existing = await listDailyBackups(input.userDataPath);
+    const newest = existing[0] ?? null;
+    if (!dailyBackupDue(newest ? newest.createdAt : null, now)) return { status: 'skipped', reason: 'recent' };
+
+    const snapshot = input.snapshot();
+    if (newest?.librarySha256 && newest.librarySha256 === sha256(snapshot.librarySnapshot)) {
+      return { status: 'skipped', reason: 'unchanged' };
+    }
+    const free = await (input.freeBytes ?? freeBytesOn)(resolve(input.userDataPath));
+    const needed = snapshot.librarySnapshot.length + Buffer.byteLength(snapshot.settingsSnapshot);
+    if (free !== null && free - needed < DAILY_FREE_SPACE_FLOOR) return { status: 'skipped', reason: 'low-disk' };
+
+    const backup = await createSupportBackup({
+      userDataPath: input.userDataPath,
+      settingsPath: input.settingsPath,
+      libraryPath: input.libraryPath,
+      now,
+      scope: 'daily',
+      ...snapshot,
+    });
+    try {
+      if (!backup.included.includes('library.db')) throw new Error('The copy has no library.db.');
+      await validateLibrarySnapshot(join(backup.backupPath, 'library.db'), 'quick_check');
+    } catch (err) {
+      await rm(backup.backupPath, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+      return { status: 'skipped', reason: 'invalid', detail: errorMessage(err) };
+    }
+    await pruneDailyBackups(input.userDataPath, backup.backupPath);
+    return { status: 'created', backup };
+  } finally {
+    dailyBackupRunning = false;
+  }
+}
+
+// At most one a local calendar day, and never two within the hour, so a clock
+// change or midnight rollover does not write a pair back to back.
+function dailyBackupDue(newestAt: number | null, now: number): boolean {
+  if (newestAt === null) return true;
+  if (now - newestAt < DAILY_MIN_GAP_MS) return false;
+  const last = new Date(newestAt);
+  const today = new Date(now);
+  return last.getFullYear() !== today.getFullYear()
+    || last.getMonth() !== today.getMonth()
+    || last.getDate() !== today.getDate();
+}
+
+async function pruneDailyBackups(userDataPath: string, keepPath: string): Promise<void> {
+  const all = await listDailyBackups(userDataPath);
+  const others = all.filter((backup) => resolve(backup.path) !== resolve(keepPath));
+  // The one just written is the newest and counts toward the limit.
+  for (const stale of others.slice(DAILY_BACKUPS_KEPT - 1)) {
+    try {
+      await rm(stale.path, { recursive: true, force: true, maxRetries: 3 });
+    } catch (err) {
+      console.warn(`[newamp] old daily backup could not be removed: ${stale.path}`, err);
+    }
+  }
+}
+
+async function freeBytesOn(path: string): Promise<number | null> {
+  try {
+    const info = await statfs(path);
+    return Number(info.bavail) * Number(info.bsize);
+  } catch {
+    return null;
+  }
+}
+
+function sha256(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 export function restoreSupportBackup(input: SupportRestoreInput): Promise<SupportRestoreResult> {
@@ -230,7 +376,7 @@ async function restoreSupportBackupNow(input: SupportRestoreInput): Promise<Supp
   };
 }
 
-async function validateLibrarySnapshot(path: string): Promise<void> {
+async function validateLibrarySnapshot(path: string, check: 'integrity_check' | 'quick_check' = 'integrity_check'): Promise<void> {
   const bytes = await readFile(path);
   if (bytes.length < 100 || bytes.subarray(0, 16).toString('latin1') !== 'SQLite format 3\0') {
     throw new Error('Backup library.db is not a complete SQLite database.');
@@ -239,7 +385,7 @@ async function validateLibrarySnapshot(path: string): Promise<void> {
   const SQL = await restoreSql;
   const database = new SQL.Database(bytes);
   try {
-    const results = database.exec('PRAGMA integrity_check');
+    const results = database.exec(`PRAGMA ${check}`);
     const values = results[0]?.values;
     if (values?.length !== 1 || values[0]?.[0] !== 'ok') {
       throw new Error('Backup library.db failed its SQLite integrity check.');
@@ -359,6 +505,8 @@ async function readBackupManifest(backupPath: string): Promise<BackupManifest> {
     included: parsed.included.filter((item): item is string => typeof item === 'string'),
     createdAt: Number(parsed.createdAt) || 0,
     automatic: parsed.automatic === true,
+    daily: parsed.daily === true,
+    librarySha256: typeof parsed.librarySha256 === 'string' ? parsed.librarySha256 : undefined,
   };
 }
 
