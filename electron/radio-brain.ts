@@ -2,9 +2,10 @@
 // station. Once enabled the user (or any client on their network) can:
 //
 //   GET /                       -> minimal HTML status page
-//   GET /library.m3u            -> M3U8 playlist of every track
-//   GET /random.m3u             -> 200-track shuffled playlist
-//   GET /tag/:name.m3u          -> tracks carrying a Living Tag
+//   GET /library.m3u            -> M3U8 playlist of every track, one page at a
+//                                  time (?offset=&limit=)
+//   GET /random.m3u             -> 200 tracks drawn at random from the library
+//   GET /tag/:name.m3u          -> tracks carrying a Living Tag (also paged)
 //   GET /audio/:trackId         -> streams the file's audio (WAV via ffmpeg
 //                                  fallback for legacy formats, raw bytes
 //                                  with proper Content-Type for native)
@@ -21,7 +22,13 @@ import { networkInterfaces } from 'node:os';
 import type { LibraryStore } from './library.js';
 import { remotePageHtml } from './remote-page.js';
 
+// One playlist response is capped so a big library does not stall the main
+// process building it; longer lists are served as pages (?offset=&limit=).
 const M3U_LIMIT_TRACKS = 5000;
+// getTrackIds() clamps a single query to 100k rows, so the random draw reads
+// the library in pages of that size.
+const ID_PAGE_SIZE = 100_000;
+const RANDOM_PLAYLIST_TRACKS = 200;
 
 const CONTENT_TYPES: Record<string, string> = {
   '.mp3': 'audio/mpeg',
@@ -316,19 +323,26 @@ export class RadioBrain {
       // Generated lists for another player: a track whose file is missing
       // could only fail there, so it is left out (has:file).
       if (path === '/library.m3u') {
-        const ids = this.opts.library.getTrackIds({ search: 'has:file', sort: 'artist', limit: M3U_LIMIT_TRACKS });
-        return this.respondM3u(res, req, ids, 'library');
+        const { offset, limit } = pageParams(url);
+        // One extra id tells us whether another page follows.
+        const ids = this.opts.library.getTrackIds({ search: 'has:file', sort: 'artist', limit: limit + 1, offset });
+        return this.respondM3u(res, req, ids.slice(0, limit), 'library', ids.length > limit ? nextPage(path, offset, limit) : null);
       }
       if (path === '/random.m3u') {
-        const all = this.opts.library.getTrackIds({ search: 'has:file', sort: 'artist', limit: M3U_LIMIT_TRACKS });
-        shuffleInPlace(all);
-        return this.respondM3u(res, req, all.slice(0, 200), 'random');
+        return this.respondM3u(res, req, this.randomTrackIds(RANDOM_PLAYLIST_TRACKS), 'random');
       }
       const tagMatch = /^\/tag\/([a-z0-9_-]+)\.m3u$/i.exec(path);
       if (tagMatch) {
         const name = tagMatch[1]!.toLowerCase();
+        const { offset, limit } = pageParams(url);
         const ids = this.opts.library.getTrackIdsByTag(name);
-        return this.respondM3u(res, req, ids.slice(0, M3U_LIMIT_TRACKS), `tag/${name}`);
+        return this.respondM3u(
+          res,
+          req,
+          ids.slice(offset, offset + limit),
+          `tag/${name}`,
+          ids.length > offset + limit ? nextPage(path, offset, limit) : null,
+        );
       }
       const audioMatch = /^\/audio\/(\d+)$/.exec(path);
       if (audioMatch) {
@@ -431,10 +445,12 @@ export class RadioBrain {
     const stats = this.opts.library.getStats();
     const tagSummaries = this.opts.library.getTagSummaries();
     const baseUrl = this.status().baseUrl ?? '';
+    // The page is token-gated, so its links have to carry the token too.
+    const tokenQuery = `?token=${encodeURIComponent(this.opts.getToken())}`;
     const tagLinks = tagSummaries.length
       ? tagSummaries
           .slice(0, 12)
-          .map((s) => `<a href="/tag/${encodeURIComponent(s.name)}.m3u">${escapeHtml(s.name)} (${s.trackCount})</a>`)
+          .map((s) => `<a href="/tag/${encodeURIComponent(s.name)}.m3u${tokenQuery}">${escapeHtml(s.name)} (${s.trackCount})</a>`)
           .join(' · ')
       : '<em>No Living Tags computed yet — define a rule in NewAmp to enable tag streams.</em>';
     res.statusCode = 200;
@@ -464,13 +480,13 @@ export class RadioBrain {
 <div class="grid" style="margin-top: 24px;">
   <div class="card">
     <h2>Whole library</h2>
-    <a href="/library.m3u">/library.m3u</a>
-    <p>Every track, sorted by artist. Limited to ${M3U_LIMIT_TRACKS.toLocaleString()} entries per playlist.</p>
+    <a href="/library.m3u${tokenQuery}">/library.m3u</a>
+    <p>Every track, sorted by artist, ${M3U_LIMIT_TRACKS.toLocaleString()} per page. A page that has more says where the next one starts; add <code>?offset=${M3U_LIMIT_TRACKS}</code> to jump ahead.</p>
   </div>
   <div class="card">
     <h2>Shuffle</h2>
-    <a href="/random.m3u">/random.m3u</a>
-    <p>200 tracks, freshly shuffled on every fetch.</p>
+    <a href="/random.m3u${tokenQuery}">/random.m3u</a>
+    <p>${RANDOM_PLAYLIST_TRACKS} tracks drawn at random from the whole library, new on every fetch.</p>
   </div>
   <div class="card">
     <h2>Living Tag streams</h2>
@@ -484,11 +500,40 @@ export class RadioBrain {
 </div>`);
   }
 
-  private respondM3u(res: ServerResponse, req: IncomingMessage, trackIds: number[], label: string): void {
+  /** Present tracks drawn uniformly from the whole library, not just its first page. */
+  private randomTrackIds(count: number): number[] {
+    const seen = new Set<number>();
+    const all: number[] = [];
+    for (let offset = 0; ; offset += ID_PAGE_SIZE) {
+      const page = this.opts.library.getTrackIds({ search: 'has:file', sort: 'artist', limit: ID_PAGE_SIZE, offset });
+      const before = all.length;
+      for (const id of page) {
+        // Rows that tie on the sort key can swap places between pages.
+        if (!seen.has(id)) {
+          seen.add(id);
+          all.push(id);
+        }
+      }
+      if (page.length < ID_PAGE_SIZE || all.length === before) break;
+    }
+    return drawRandom(all, count);
+  }
+
+  private respondM3u(
+    res: ServerResponse,
+    req: IncomingMessage,
+    trackIds: number[],
+    label: string,
+    nextPagePath: string | null = null,
+  ): void {
     const host = req.headers.host ?? `localhost:${this.opts.port}`;
     const base = `http://${host}`;
     const tokenQuery = `?token=${encodeURIComponent(this.opts.getToken())}`;
     const lines: string[] = ['#EXTM3U', `#PLAYLIST:NewAmp Radio Brain — ${label}`];
+    if (nextPagePath) {
+      // A plain comment: players skip it, a person reading the file can follow it.
+      lines.push(`# Next page: ${base}${nextPagePath}&token=${encodeURIComponent(this.opts.getToken())}`);
+    }
     if (trackIds.length) {
       const tracks = this.opts.library.getTracksByIdsInOrder(trackIds);
       for (const track of tracks) {
@@ -584,13 +629,29 @@ export class RadioBrain {
   }
 }
 
-function shuffleInPlace<T>(arr: T[]): void {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+/** Partial Fisher-Yates: shuffles only as far as the first `count` slots. */
+function drawRandom<T>(arr: T[], count: number): T[] {
+  const n = Math.min(count, arr.length);
+  for (let i = 0; i < n; i++) {
+    const j = i + Math.floor(Math.random() * (arr.length - i));
     const tmp = arr[i]!;
     arr[i] = arr[j]!;
     arr[j] = tmp;
   }
+  return arr.slice(0, n);
+}
+
+function pageParams(url: URL): { offset: number; limit: number } {
+  const offset = Math.trunc(Number(url.searchParams.get('offset')));
+  const limit = Math.trunc(Number(url.searchParams.get('limit')));
+  return {
+    offset: Number.isFinite(offset) && offset > 0 ? offset : 0,
+    limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, M3U_LIMIT_TRACKS) : M3U_LIMIT_TRACKS,
+  };
+}
+
+function nextPage(path: string, offset: number, limit: number): string {
+  return `${path}?offset=${offset + limit}&limit=${limit}`;
 }
 
 function localAddress(): string {
