@@ -5,6 +5,8 @@ import { FileTokenizer } from 'strtok3';
 import { LibraryStore, type IncomingTrack, type ArtBlob, type TrackFileState } from './library.js';
 import { CONTAINER_AUDIO_EXTENSIONS, codecFamilyFromCodec } from '../shared/audio-quality.js';
 import type { ScanProgress } from '../shared/types.js';
+import type { TrackTagExtras } from '../shared/album-identity.js';
+import { runTagBackfill, type TagBackfillControl } from './album-identity-backfill.js';
 
 const AUDIO_EXTS = new Set([
   '.mp3',
@@ -38,6 +40,11 @@ const CODEC_PROBE_EXTS = new Set(CONTAINER_AUDIO_EXTENSIONS.map((ext) => `.${ext
 
 const METADATA_OPTIONS: IOptions = { duration: true, skipCovers: false, skipPostHeaders: true };
 const CODEC_PROBE_OPTIONS: IOptions = { ...METADATA_OPTIONS, skipCovers: true };
+// The backfill only wants tags: no cover, no duration scan.
+const TAGS_ONLY_OPTIONS: IOptions = { duration: false, skipCovers: true, skipPostHeaders: true };
+// How long after launch the tag backfill may start on its own, if no scan has
+// run and started it first.
+const BACKFILL_IDLE_DELAY_MS = 20_000;
 const DISCOVERY_CONCURRENCY = 4;
 const DISCOVERY_PROGRESS_INTERVAL = 200;
 const METADATA_BATCH_SIZE = 128;
@@ -186,6 +193,7 @@ async function readMeta(
   let fileRatingScore: number | null = null;
   let filePlayCount: number | null = null;
   let ids: EmbeddedIds = EMPTY_IDS;
+  let tags: TrackTagExtras | undefined;
   let art: ArtBlob | null = null;
   let parseFailed = false;
 
@@ -214,6 +222,7 @@ async function readMeta(
     fileRatingScore = embeddedRatingScore(meta);
     filePlayCount = embeddedPlayCount(meta);
     ids = embeddedIds(c);
+    tags = tagExtras(c);
     if (c.picture && c.picture.length) {
       const pic = c.picture[0];
       if (pic.data && pic.data.length) {
@@ -261,6 +270,8 @@ async function readMeta(
     fileRatingScore,
     filePlayCount,
     ...ids,
+    // Absent when the file would not parse, so a row keeps the tags it has.
+    tags,
   };
 }
 
@@ -271,6 +282,18 @@ export async function readTrackFile(path: string): Promise<IncomingTrack | null>
     const stat = await fs.stat(path);
     if (!stat.isFile()) return null;
     return await readMeta(path, stat.size, stat.mtimeMs, Number(stat.dev));
+  } catch {
+    return null;
+  }
+}
+
+// Only the tags the album grouping needs, for the backfill that gives rows
+// scanned before those tags were stored their values. Null when the file will
+// not parse.
+export async function readTagExtras(path: string): Promise<TrackTagExtras | null> {
+  try {
+    const meta = await parseFile(path, TAGS_ONLY_OPTIONS);
+    return tagExtras(meta.common);
   } catch {
     return null;
   }
@@ -342,15 +365,56 @@ export class Scanner {
   private running = false;
   private scanQueue: Promise<void> = Promise.resolve();
   private cancelGeneration = 0;
+  private backfillRun: Promise<void> | null = null;
+  private backfillControl: TagBackfillControl = { cancelled: false };
+  private backfillTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly library: LibraryStore,
     private readonly onProgress: (p: ScanProgress) => void,
-  ) {}
+  ) {
+    // A library scanned before these tags were stored fills them in even when
+    // no scan runs this session. A scan that finishes first starts it sooner.
+    this.armBackfillTimer();
+  }
+
+  private armBackfillTimer(): void {
+    if (this.backfillTimer) clearTimeout(this.backfillTimer);
+    this.backfillTimer = setTimeout(() => {
+      this.backfillTimer = null;
+      void this.startTagBackfill();
+    }, BACKFILL_IDLE_DELAY_MS);
+    this.backfillTimer.unref?.();
+  }
 
   cancel(): void {
     this.cancelled = true;
     this.cancelGeneration += 1;
+    this.backfillControl.cancelled = true;
+    // Cancelling a scan stops the backfill with it. It picks up where it left
+    // off once things have been quiet for a while; without this the rows it had
+    // not reached would wait for the next scan to end.
+    this.armBackfillTimer();
+  }
+
+  // Reads the tags the album grouping needs for every row scanned before they
+  // were stored, a few files at a time and only while playback is fed. Resumes
+  // where it stopped after a restart; a no-op once every row has been read.
+  startTagBackfill(): Promise<void> {
+    if (this.backfillRun) return this.backfillRun;
+    if (this.library.isClosed() || !this.library.tagBackfillPending()) return Promise.resolve();
+    const control: TagBackfillControl = { cancelled: false };
+    this.backfillControl = control;
+    const run: Promise<void> = runTagBackfill(this.library, readTagExtras, control)
+      .then(() => undefined)
+      .catch((err) => {
+        console.warn(`[newamp] tag backfill stopped: ${errorMessage(err)}`);
+      })
+      .finally(() => {
+        if (this.backfillRun === run) this.backfillRun = null;
+      });
+    this.backfillRun = run;
+    return run;
   }
 
   async start(roots: string[], options: ScannerStartOptions = {}): Promise<void> {
@@ -370,6 +434,8 @@ export class Scanner {
     const startedAt = Date.now();
     let parsed = 0;
     let skipped = 0;
+    // The scan groups the albums itself when it ends; its batches do not.
+    this.library.holdRegroup();
 
     try {
       const discovered: DiscoveredFile[] = [];
@@ -487,9 +553,20 @@ export class Scanner {
         });
       }
 
+      // The folders this scan touched may now read differently (a compilation
+      // that finished arriving, a disc folder that was added), so the albums
+      // are settled before anything asks for them.
+      try {
+        await this.library.regroupAlbums();
+      } catch (err) {
+        // The albums keep the grouping their tracks were written with.
+        console.warn(`[newamp] album grouping failed: ${errorMessage(err)}`);
+      }
       this.onProgress({ scanned: total, total, current: '', done: true, startedAt, parsed, skipped });
+      void this.startTagBackfill();
     } finally {
       this.running = false;
+      this.library.releaseRegroup();
     }
   }
 }
@@ -562,6 +639,44 @@ function embeddedIds(common: IAudioMetadata['common']): EmbeddedIds {
     mbArtistId: tagId(common.musicbrainz_artistid?.[0]),
     isrc: tagId(common.isrc?.[0]),
     acoustidId: tagId(common.acoustid_id),
+  };
+}
+
+function cleanTag(value: string | undefined): string | null {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text ? text.slice(0, 256) : null;
+}
+
+// The values of a multi-valued tag, only when it holds more than one.
+function tagList(values: string[] | undefined): string[] | null {
+  if (!Array.isArray(values) || values.length < 2) return null;
+  const list = [...new Set(values.map((v) => cleanTag(v)).filter((v): v is string => !!v))].slice(0, 12);
+  return list.length > 1 ? list : null;
+}
+
+function originalYearOf(common: IAudioMetadata['common']): number | null {
+  if (Number.isFinite(common.originalyear)) return positiveInt(common.originalyear);
+  const fromDate = /^\d{4}/.exec(common.originaldate ?? '');
+  return fromDate ? positiveInt(Number(fromDate[0])) : null;
+}
+
+// What the album grouping reads from a file beyond what a track row always
+// held: the file's own ALBUMARTIST (album_artist alone can't say whether the
+// file named one), the compilation flag, sort names, disc and track totals.
+function tagExtras(common: IAudioMetadata['common']): TrackTagExtras {
+  const subtitle = Array.isArray(common.discsubtitle) ? common.discsubtitle[0] : (common.discsubtitle as string | undefined);
+  return {
+    albumArtistTag: cleanTag(common.albumartist),
+    compilation: common.compilation === true,
+    albumArtistSort: cleanTag(common.albumartistsort),
+    artistSort: cleanTag(common.artistsort),
+    discTotal: positiveInt(common.disk?.of ?? undefined),
+    trackTotal: positiveInt(common.track?.of ?? undefined),
+    discSubtitle: cleanTag(subtitle),
+    mbReleaseGroupId: tagId(common.musicbrainz_releasegroupid),
+    originalYear: originalYearOf(common),
+    artists: tagList(common.artists),
+    genres: tagList(common.genre),
   };
 }
 

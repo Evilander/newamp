@@ -5,6 +5,7 @@ import type { VisualMemoryPlan as VisualMemoryPlanPublic, VisualMemoryStats as V
 import type { SongScore as SongScorePublic } from '../src/visualizer/eviland-score.js';
 import type { HistoryImportReport, LastfmHistoryProgress } from './history-import.js';
 import type { MusicServerConnectionInput, MusicServerConnectionPublic } from './music-servers.js';
+import type { AlbumKind as AlbumKindPublic } from './album-identity.js';
 
 export interface TagRule {
   id: number;
@@ -113,6 +114,14 @@ export interface Track {
   bitsPerSample?: number | null;
   /** MusicBrainz recording id from the file's tags, when it carries one. */
   mbRecordingId?: string | null;
+  /** The album this track belongs to (see AlbumSummary.albumKey); null for a track with no album. */
+  albumKey?: string | null;
+  /** The disc number read from the album title or the disc folder, when the file has none. */
+  discInferred?: number | null;
+  /** How many discs the file says its release has. */
+  discTotal?: number | null;
+  /** The name of the track's disc, from the file's DISCSUBTITLE tag. */
+  discSubtitle?: string | null;
   /**
    * Fields whose value is the user's (typed in or accepted from MusicBrainz)
    * rather than the file's. Only single-track reads (getTrack, and the result
@@ -178,11 +187,22 @@ export interface CatalogSummaryQueryOptions {
   yearWindow?: number;
   excludeAlbum?: string | null;
   excludeAlbumArtist?: string | null;
+  excludeAlbumKey?: string | null;
 }
 
+export type AlbumKind = AlbumKindPublic;
+
 export interface AlbumSummary {
+  /**
+   * What makes tracks one album. Hand it back to getAlbumTracksByKey,
+   * getAlbumSummary, setAlbumSplit and the album rating calls; it stays put
+   * across rescans, and a rating moves with the album when it regroups.
+   */
+  albumKey: string;
   album: string;
   albumArtist: string;
+  /** What the grid orders the album artist by (the file's sort name, else the name without "The"); the letter rail reads it. */
+  sortKey: string;
   year: number | null;
   trackCount: number;
   duration: number;
@@ -191,6 +211,10 @@ export interface AlbumSummary {
   rating: number;
   /** Album-level fine score 0..100; null when unrated. Persists separately so a rated album never overrides per-song ratings. */
   ratingScore: number | null;
+  /** 'compilation' for a Various Artists album, 'bucket' for a generic title kept apart by folder, 'split' when the user asked for the tracks apart. */
+  albumKind: AlbumKind;
+  /** One plain sentence on why this album was grouped the way it was, when it was not just title and album artist. */
+  albumReason: string | null;
   /** True when this album surfaced in a search because one of its SONGS matched (not the album/artist/year). Only set on search queries. */
   matchedOnTrack?: boolean;
   /** Up to 4 matching song titles (separator " · "), surfaced under the card when a search matched on track titles. Null otherwise. */
@@ -198,12 +222,13 @@ export interface AlbumSummary {
 }
 
 /**
- * A stored album rating. Keyed on (albumArtist, album) — the same composite
- * the rest of the codebase uses to group tracks into albums. NOT a join row
- * with track-level rating; an album can be rated without rating any of its
- * tracks, and vice versa.
+ * A stored album rating. It belongs to an album by its key (the same one
+ * AlbumSummary carries); albumArtist and album are the text it was written
+ * under. NOT a join row with track-level rating; an album can be rated without
+ * rating any of its tracks, and vice versa.
  */
 export interface AlbumRating {
+  albumKey?: string;
   albumArtist: string;
   album: string;
   rating: number;
@@ -240,7 +265,11 @@ export interface AlbumArtApplyResult {
 }
 
 export interface ArtistSummary {
+  /** The artist with case, accents and spacing folded; what getArtistTracks matches on. */
+  artistKey: string;
   artist: string;
+  /** What the list orders the artist by; the letter rail reads it. */
+  sortKey: string;
   trackCount: number;
   albumCount: number;
 }
@@ -1454,6 +1483,10 @@ export interface NewAmpAPI {
     opts?: { recursive?: boolean; limit?: number; offset?: number },
   ) => Promise<number[]>;
   getAlbumTracks: (albumArtist: string, album: string) => Promise<Track[]>;
+  getAlbumTracksByKey: (albumKey: string) => Promise<Track[]>;
+  getAlbumSummary: (albumKey: string) => Promise<AlbumSummary | null>;
+  /** "Show as separate albums" (split true) or group them again (false). Resolves once the albums are regrouped. */
+  setAlbumSplit: (albumKey: string, split: boolean) => Promise<number>;
   getArtistTracks: (artist: string) => Promise<Track[]>;
   getTrack: (id: number) => Promise<Track | null>;
   getTracksByIds: (ids: number[]) => Promise<Track[]>;
@@ -1597,8 +1630,9 @@ export interface NewAmpAPI {
     albumArtist: string,
     album: string,
     score: number | null,
+    albumKey?: string | null,
   ) => Promise<AlbumRating | null>;
-  getAlbumRating: (albumArtist: string, album: string) => Promise<AlbumRating | null>;
+  getAlbumRating: (albumArtist: string, album: string, albumKey?: string | null) => Promise<AlbumRating | null>;
   toggleAvoidAutoPlay: (id: number) => Promise<Track | null>;
   recordPlay: (id: number) => Promise<void>;
   recordSkip: (id: number, position?: number) => Promise<void>;

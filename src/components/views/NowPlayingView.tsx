@@ -1152,7 +1152,9 @@ function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
   // Mirror the SQL `COALESCE(NULLIF(album_artist,''), artist)` fallback so a
   // track tagged with an Artist but empty AlbumArtist can still be rated.
   const ratingArtist = track.albumArtist || track.artist;
-  const albumKey = `${ratingArtist}|${track.album}`;
+  // The album's key names it outright; the pair stands in for a track the
+  // library has not grouped yet.
+  const albumKey = track.albumKey || `${ratingArtist}|${track.album}`;
 
   useEffect(() => {
     let cancelled = false;
@@ -1161,7 +1163,7 @@ function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
       return;
     }
     void api
-      .getAlbumRating(ratingArtist, track.album)
+      .getAlbumRating(ratingArtist, track.album, track.albumKey)
       .then((row) => {
         if (cancelled) return;
         setAlbumRating(
@@ -1181,10 +1183,10 @@ function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
     return () => {
       cancelled = true;
     };
-    // `albumKey` is a pure function of `ratingArtist` + `track.album` —
-    // listing the two raw deps too is redundant. ESLint exhaustive-deps
-    // wants the raw values; the derived key is sufficient because its
-    // string identity changes iff the raw deps change.
+    // `albumKey` is a pure function of the track's key, or failing that of
+    // `ratingArtist` + `track.album` — listing the raw deps too is redundant.
+    // ESLint exhaustive-deps wants the raw values; the derived key is
+    // sufficient because its string identity changes iff they change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [albumKey]);
 
@@ -1199,10 +1201,11 @@ function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
     const myGen = ++writeGenRef.current;
     const writeArtist = ratingArtist;
     const writeAlbum = track.album;
+    const writeKey = albumKey;
     try {
-      const updated = await api.setAlbumRatingScore(writeArtist, writeAlbum, score);
+      const updated = await api.setAlbumRatingScore(writeArtist, writeAlbum, score, track.albumKey);
       if (writeGenRef.current !== myGen) return;
-      if (writeArtist !== ratingArtist || writeAlbum !== track.album) return;
+      if (writeKey !== albumKey) return;
       setAlbumRating(
         updated ? { rating: updated.rating, ratingScore: updated.ratingScore } : { rating: 0, ratingScore: null },
       );
@@ -1849,7 +1852,7 @@ function SpectrumPanel({
 const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Track }): JSX.Element {
   const deferredTrack = useDeferredValue(track);
   const [albumTracks, setAlbumTracks] = useState<Track[]>([]);
-  const [sameYearAlbums, setSameYearAlbums] = useState<{ album: string; albumArtist: string; year: number | null }[]>([]);
+  const [sameYearAlbums, setSameYearAlbums] = useState<{ albumKey: string; album: string; albumArtist: string; year: number | null }[]>([]);
   const [fact, setFact] = useState<AlbumFact | null>(null);
   const [artistFallback, setArtistFallback] = useState<ArtistFact | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'none' | 'ok'>('idle');
@@ -1870,7 +1873,10 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
     setStatus('loading');
     void (async () => {
       const [tracks, nextFact] = await Promise.all([
-        api.getAlbumTracks(albumArtist, album).catch(() => []),
+        (deferredTrack.albumKey
+          ? api.getAlbumTracksByKey(deferredTrack.albumKey)
+          : api.getAlbumTracks(albumArtist, album)
+        ).catch(() => []),
         fetchAlbumFacts(album, albumArtist, ctrl.signal).catch(() => null),
       ]);
       if (ctrl.signal.aborted) return;
@@ -1882,6 +1888,7 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
           yearWindow: 0,
           excludeAlbum: album,
           excludeAlbumArtist: albumArtist,
+          excludeAlbumKey: deferredTrack.albumKey,
           limit: 4,
         }).catch(() => []);
       if (ctrl.signal.aborted) return;
@@ -1894,7 +1901,7 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
             albumYear != null &&
             item.year === albumYear)
           .slice(0, 4)
-          .map((item) => ({ album: item.album, albumArtist: item.albumArtist, year: item.year })),
+          .map((item) => ({ albumKey: item.albumKey, album: item.album, albumArtist: item.albumArtist, year: item.year })),
       );
       setFact(nextFact);
       // If Wikipedia couldn't locate the specific album, fall back to the
@@ -2011,7 +2018,7 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
           <strong>
             {sameYearAlbums.length
               ? sameYearAlbums.map((item, i) => (
-                  <Fragment key={`${item.albumArtist}-${item.album}`}>
+                  <Fragment key={item.albumKey}>
                     {i > 0 && ' / '}
                     <ArtistLink artist={item.albumArtist} color="inherit" /> -{' '}
                     <AlbumLink album={item.album} albumArtist={item.albumArtist} color="inherit" />
@@ -2093,7 +2100,7 @@ function AlbumInsight({ label, value }: { label: string; value: ReactNode }): JS
 }
 
 function albumTrackOrder(a: Track, b: Track): number {
-  return (a.discNo ?? 1) - (b.discNo ?? 1) ||
+  return (a.discInferred ?? a.discNo ?? 1) - (b.discInferred ?? b.discNo ?? 1) ||
     (a.trackNo ?? Number.MAX_SAFE_INTEGER) - (b.trackNo ?? Number.MAX_SAFE_INTEGER) ||
     a.title.localeCompare(b.title);
 }

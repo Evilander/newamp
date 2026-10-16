@@ -5,7 +5,7 @@
 
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, writeFileSync, statSync, createWriteStream, type Stats } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, writeFileSync, statSync, createWriteStream, type Stats } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,6 +67,28 @@ import type {
   RecoveryEvent,
 } from '../shared/types.js';
 import { albumKey } from '../shared/album-key.js';
+import {
+  ALBUM_IDENTITY_VERSION,
+  SCAN_SCHEMA_VERSION,
+  artistKeyOf,
+  artistSortKey,
+  containerFingerprint,
+  keyForPair,
+  provisionalIdentity,
+  type AlbumKind,
+  type TrackTagExtras,
+} from '../shared/album-identity.js';
+import {
+  runRegroupAsync,
+  runRegroupSync,
+  type ArtistGroup,
+  type RatingRemap,
+  type RatingTarget,
+  type RegroupHost,
+  type RegroupResult,
+  type RegroupRow,
+  type RegroupWrite,
+} from './album-identity.js';
 import { dnaCosineSimilarity, isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
 import { type VisualMemoryPlan, isValidVisualMemoryPlan, type VisualMemoryStats } from '../shared/visual-memory.js';
 import { applySeedVibeGate, createSeedVibeContext, seedVibeSimilarity } from '../shared/seed-vibe.js';
@@ -135,6 +157,21 @@ export interface ArtBlob {
   data: Buffer;
 }
 
+// The tracks columns a whole-row read needs: what rowToTrack turns into a
+// Track, and nothing else. `SELECT *` also read the folded search copies, the
+// art hash, the analysis blob and the album grouping's text columns, none of
+// which a track list uses, and decoding them was a good part of what a page of
+// tracks cost. The album fields a track carries sit first among the columns
+// added after the table first shipped (see ADDED_COLUMNS), so reading them does
+// not mean walking past the rest of a row.
+const TRACK_COLUMNS = [
+  'id', 'path', 'title', 'artist', 'album', 'album_artist', 'track_no', 'disc_no', 'year', 'genre', 'duration',
+  'bitrate', 'sample_rate', 'size', 'mtime', 'has_art', 'loved', 'rating', 'rating_score', 'avoid_auto_play',
+  'play_count', 'last_played', 'skip_count', 'last_skipped', 'bpm', 'key', 'replaygain_track_db',
+  'replaygain_album_db', 'missing_since', 'codec', 'codec_lossless', 'bits_per_sample', 'mb_recording_id',
+  'album_key', 'disc_inferred', 'disc_total', 'disc_subtitle',
+].join(', ');
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tracks (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,11 +230,44 @@ CREATE TABLE IF NOT EXISTS tracks (
   artist_fold  TEXT NOT NULL DEFAULT '',
   album_fold   TEXT NOT NULL DEFAULT '',
   album_artist_fold TEXT NOT NULL DEFAULT '',
-  genre_fold   TEXT NOT NULL DEFAULT ''
+  genre_fold   TEXT NOT NULL DEFAULT '',
+  -- What a track carries of its album, first so a track read stops here.
+  -- album_key is what makes tracks one album (written by the grouping pass, see
+  -- electron/album-identity.ts); the disc is the file's own count and name.
+  -- artist_key is the artist with case, accents and spacing folded.
+  album_key    TEXT,
+  disc_inferred INTEGER,
+  disc_total   INTEGER,
+  disc_subtitle TEXT,
+  artist_key   TEXT NOT NULL DEFAULT '',
+  -- Tags the album grouping reads. album_artist keeps its old meaning (the tag,
+  -- or the track artist when the file named none); album_artist_tag is what
+  -- the file itself said, NULL when it said nothing. scan_schema is the tag
+  -- set a row was last read with: 0 means these columns are not known yet.
+  album_artist_tag TEXT,
+  compilation  INTEGER NOT NULL DEFAULT 0,
+  album_artist_sort TEXT,
+  artist_sort  TEXT,
+  track_total  INTEGER,
+  mb_release_group_id TEXT,
+  original_year INTEGER,
+  artists_json TEXT,
+  genres_json  TEXT,
+  scan_schema  INTEGER NOT NULL DEFAULT 0,
+  -- The rest of what the grouping pass writes: how the album is shown.
+  album_display TEXT,
+  album_artist_display TEXT,
+  album_kind   TEXT NOT NULL DEFAULT 'album',
+  album_reason TEXT,
+  album_year   INTEGER,
+  album_sort_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album);
 CREATE INDEX IF NOT EXISTS idx_tracks_album_artist ON tracks(album_artist);
+CREATE INDEX IF NOT EXISTS idx_tracks_album_key ON tracks(album_key);
+CREATE INDEX IF NOT EXISTS idx_tracks_artist_key ON tracks(artist_key);
+CREATE INDEX IF NOT EXISTS idx_tracks_sort_names ON tracks(artist_key) WHERE artist_sort IS NOT NULL OR album_artist_sort IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tracks_loved  ON tracks(loved);
 CREATE INDEX IF NOT EXISTS idx_tracks_rating ON tracks(rating DESC);
 CREATE INDEX IF NOT EXISTS idx_tracks_avoid_auto_play ON tracks(avoid_auto_play);
@@ -321,21 +391,53 @@ CREATE INDEX IF NOT EXISTS idx_track_tags_track ON track_tags(track_id);
 
 -- Album-level ratings, separate from per-track ratings. Album rating no
 -- longer cascades to every track; the user can rate the album AND rate
--- individual songs independently. Composite key (album_artist, album)
--- with NOCASE collation matches how tracks are grouped into albums
--- elsewhere in the codebase. Note: SQLite NOCASE is ASCII-only — for
--- non-ASCII album titles (e.g., "ÉLAN"), JS-side lookups using
--- toLowerCase() will fold characters that SQL NOCASE won't. Until the
--- ICU extension is loaded, treat (artist, album) lookups as
--- best-effort case-folded for the ASCII alphabet only.
+-- individual songs independently. A rating belongs to an album by its key
+-- (tracks.album_key): the grouping pass moves album_key when an album's tracks
+-- regroup, so a rating follows its album, and two albums that share a title
+-- and artist (a split folder, a generic title) keep separate ratings. Read by
+-- key, newest row wins. The pair is the text the row was written under; it
+-- only finds rows that have not been given a key yet (see
+-- upgradeAlbumRatingsTable for the older shape, which was unique on the pair).
+-- Note: SQLite NOCASE is ASCII-only — for non-ASCII album titles (e.g.,
+-- "ÉLAN"), JS-side lookups using toLowerCase() will fold characters that SQL
+-- NOCASE won't. Until the ICU extension is loaded, treat (artist, album)
+-- lookups as best-effort case-folded for the ASCII alphabet only.
 CREATE TABLE IF NOT EXISTS album_ratings (
+  rating_id     INTEGER PRIMARY KEY,
   album_artist  TEXT NOT NULL COLLATE NOCASE,
   album         TEXT NOT NULL COLLATE NOCASE,
   rating        INTEGER NOT NULL DEFAULT 0,
   rating_score  REAL,
   updated_at    INTEGER NOT NULL,
-  PRIMARY KEY (album_artist, album)
+  album_key     TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_album_ratings_key ON album_ratings(album_key);
+CREATE INDEX IF NOT EXISTS idx_album_ratings_pair ON album_ratings(album_artist, album);
+
+-- Albums the user asked to see as separate albums. The fingerprint is the
+-- album's folder plus its title (see containerFingerprint), so the choice
+-- survives rescans and re-tags. source_key is the album key before the split,
+-- which is what "group again" undoes.
+CREATE TABLE IF NOT EXISTS album_overrides (
+  fingerprint TEXT PRIMARY KEY,
+  action      TEXT NOT NULL,
+  source_key  TEXT NOT NULL DEFAULT '',
+  label       TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_album_overrides_source ON album_overrides(source_key);
+
+-- The Artists list, written whole by the grouping pass: one row per artist key
+-- with the spelling shown, how it sorts and what it holds. Read in place of
+-- grouping every track while nothing has changed since the pass.
+CREATE TABLE IF NOT EXISTS artist_groups (
+  artist_key  TEXT PRIMARY KEY,
+  display     TEXT NOT NULL,
+  sort_key    TEXT NOT NULL,
+  track_count INTEGER NOT NULL,
+  album_count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_artist_groups_sort ON artist_groups(sort_key, artist_key);
 
 -- Per-track visual memory plan: the durable Eviland "remembers your library"
 -- record. plan_json is the JSON-encoded VisualMemoryPlan (schema/algoVersion
@@ -466,6 +568,30 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, defi
   ['tracks', 'album_fold', `TEXT NOT NULL DEFAULT ''`],
   ['tracks', 'album_artist_fold', `TEXT NOT NULL DEFAULT ''`],
   ['tracks', 'genre_fold', `TEXT NOT NULL DEFAULT ''`],
+  // The four a track read needs come first; a row is decoded up to the last
+  // column asked for, so the order is part of what a track list costs.
+  ['tracks', 'album_key', 'TEXT'],
+  ['tracks', 'disc_inferred', 'INTEGER'],
+  ['tracks', 'disc_total', 'INTEGER'],
+  ['tracks', 'disc_subtitle', 'TEXT'],
+  ['tracks', 'artist_key', `TEXT NOT NULL DEFAULT ''`],
+  ['tracks', 'album_artist_tag', 'TEXT'],
+  ['tracks', 'compilation', 'INTEGER NOT NULL DEFAULT 0'],
+  ['tracks', 'album_artist_sort', 'TEXT'],
+  ['tracks', 'artist_sort', 'TEXT'],
+  ['tracks', 'track_total', 'INTEGER'],
+  ['tracks', 'mb_release_group_id', 'TEXT'],
+  ['tracks', 'original_year', 'INTEGER'],
+  ['tracks', 'artists_json', 'TEXT'],
+  ['tracks', 'genres_json', 'TEXT'],
+  ['tracks', 'scan_schema', 'INTEGER NOT NULL DEFAULT 0'],
+  ['tracks', 'album_display', 'TEXT'],
+  ['tracks', 'album_artist_display', 'TEXT'],
+  ['tracks', 'album_kind', `TEXT NOT NULL DEFAULT 'album'`],
+  ['tracks', 'album_reason', 'TEXT'],
+  ['tracks', 'album_year', 'INTEGER'],
+  ['tracks', 'album_sort_key', 'TEXT'],
+  ['album_ratings', 'album_key', 'TEXT'],
   ['track_metadata_overrides', 'source_known', 'INTEGER NOT NULL DEFAULT 1'],
   ['smart_rules', 'min_rating', 'INTEGER'],
   ['smart_rules', 'search_query', 'TEXT'],
@@ -545,6 +671,10 @@ interface RawRow {
   codec_lossless: number | null;
   bits_per_sample: number | null;
   mb_recording_id: string | null;
+  album_key?: string | null;
+  disc_inferred?: number | null;
+  disc_total?: number | null;
+  disc_subtitle?: string | null;
 }
 
 interface SmartRuleRow {
@@ -689,6 +819,10 @@ function rowToTrack(r: RawRow): Track {
     codecLossless: r.codec_lossless == null ? null : r.codec_lossless === 1,
     bitsPerSample: r.bits_per_sample ?? null,
     mbRecordingId: r.mb_recording_id ?? null,
+    albumKey: r.album_key ?? null,
+    discInferred: r.disc_inferred ?? null,
+    discTotal: r.disc_total ?? null,
+    discSubtitle: r.disc_subtitle ?? null,
   };
 }
 
@@ -797,6 +931,20 @@ export interface IncomingTrack {
   mbArtistId?: string | null;
   isrc?: string | null;
   acoustidId?: string | null;
+  // The tags the album grouping reads. Absent when the file would not parse,
+  // or for a track that did not come from reading a file; the row keeps what
+  // it has and stays queued for the tag backfill.
+  tags?: TrackTagExtras;
+}
+
+/** One backfilled row: the tags a scan would have stored, for a row scanned before they were. */
+export type TagBackfillRow = { id: number } & TrackTagExtras;
+
+export interface TagBackfillCandidate {
+  id: number;
+  path: string;
+  size: number | null;
+  mtime: number;
 }
 
 export interface TrackFileState {
@@ -890,6 +1038,23 @@ export class LibraryStore {
   // on any visual-memory write/clear path. Same shape as libraryHealthCache /
   // dnaIndexCache. Null means "stale, recompute on next read".
   private visualMemoryStatsCache: VisualMemoryStats | null = null;
+  // Album grouping (electron/album-identity.ts). The epoch moves whenever
+  // something that can change which tracks form an album does, and a pass that
+  // sees it move stops before it writes over newer data. `identityStale` is
+  // "something changed since the last completed pass"; `identityUngrouped` is
+  // "this library was opened with rows that have never been given a key".
+  private groupingEpoch = 0;
+  private identityStale = false;
+  // The Artists list the last pass wrote no longer matches the tracks. Tags
+  // read by the backfill make the albums stale without making it wrong, so the
+  // list keeps being served from the table while the backfill runs.
+  private artistListStale = false;
+  private identityUngrouped = false;
+  // Scans running. Their debounced passes wait for the scan, which runs one itself.
+  private regroupHolds = 0;
+  private identityPendingPersisted = false;
+  private identityRun: Promise<RegroupResult | null> | null = null;
+  private regroupTimer: NodeJS.Timeout | null = null;
 
   private constructor(private readonly file: string) {
     this.artDir = join(dirname(file), 'art');
@@ -902,6 +1067,7 @@ export class LibraryStore {
   static async open(file: string): Promise<LibraryStore> {
     const store = new LibraryStore(file);
     await store.init();
+    store.startInitialRegroup();
     return store;
   }
 
@@ -1093,6 +1259,10 @@ export class LibraryStore {
       this.persistTimer = null;
       this.persistTimerSlow = false;
     }
+    if (this.regroupTimer) {
+      clearTimeout(this.regroupTimer);
+      this.regroupTimer = null;
+    }
     if (this.dirty || this.flushInFlight) this.flushSync();
     this.closed = true;
     this.flushAgain = false;
@@ -1273,8 +1443,12 @@ export class LibraryStore {
           file_dev, codec, codec_lossless, bits_per_sample,
           mb_recording_id, mb_release_id, mb_artist_id, isrc, acoustid_id,
           title_fold, artist_fold, album_fold, album_artist_fold, genre_fold,
-          rating, rating_score, play_count, tag_stats_imported)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          rating, rating_score, play_count, tag_stats_imported,
+          album_artist_tag, compilation, album_artist_sort, artist_sort, disc_total, track_total, disc_subtitle,
+          mb_release_group_id, original_year, artists_json, genres_json, scan_schema,
+          artist_key, album_key, album_display, album_artist_display, album_kind, album_reason, album_year,
+          album_sort_key, disc_inferred)
+         VALUES (${Array.from({ length: 59 }, () => '?').join(',')})
          ON CONFLICT(path) DO UPDATE SET
            title=excluded.title,
            artist=excluded.artist,
@@ -1319,8 +1493,30 @@ export class LibraryStore {
            play_count=CASE WHEN tracks.tag_stats_imported = 0 AND excluded.tag_stats_imported = 1
                              AND tracks.play_count = 0 AND tracks.last_played IS NULL
                            THEN excluded.play_count ELSE tracks.play_count END,
-           tag_stats_imported=MAX(tracks.tag_stats_imported, excluded.tag_stats_imported)`,
+           tag_stats_imported=MAX(tracks.tag_stats_imported, excluded.tag_stats_imported),
+           artist_key=excluded.artist_key,
+           album_artist_tag=CASE WHEN excluded.scan_schema > 0 THEN excluded.album_artist_tag ELSE tracks.album_artist_tag END,
+           compilation=CASE WHEN excluded.scan_schema > 0 THEN excluded.compilation ELSE tracks.compilation END,
+           album_artist_sort=CASE WHEN excluded.scan_schema > 0 THEN excluded.album_artist_sort ELSE tracks.album_artist_sort END,
+           artist_sort=CASE WHEN excluded.scan_schema > 0 THEN excluded.artist_sort ELSE tracks.artist_sort END,
+           disc_total=CASE WHEN excluded.scan_schema > 0 THEN excluded.disc_total ELSE tracks.disc_total END,
+           track_total=CASE WHEN excluded.scan_schema > 0 THEN excluded.track_total ELSE tracks.track_total END,
+           disc_subtitle=CASE WHEN excluded.scan_schema > 0 THEN excluded.disc_subtitle ELSE tracks.disc_subtitle END,
+           mb_release_group_id=CASE WHEN excluded.scan_schema > 0 THEN excluded.mb_release_group_id ELSE tracks.mb_release_group_id END,
+           original_year=CASE WHEN excluded.scan_schema > 0 THEN excluded.original_year ELSE tracks.original_year END,
+           artists_json=CASE WHEN excluded.scan_schema > 0 THEN excluded.artists_json ELSE tracks.artists_json END,
+           genres_json=CASE WHEN excluded.scan_schema > 0 THEN excluded.genres_json ELSE tracks.genres_json END,
+           scan_schema=MAX(tracks.scan_schema, excluded.scan_schema)`,
       );
+      // The grouping columns are left alone on an update: the grouping pass
+      // owns them. A row whose album, album artist or artist changed gets the
+      // plain grouping back below, until the pass runs again.
+      const resetIdentity = this.db.prepare(
+        `UPDATE tracks SET album_key=?, album_display=?, album_artist_display=?, album_kind=?, album_reason=?,
+                album_year=?, album_sort_key=?, disc_inferred=? WHERE path=?`,
+      );
+      const priorRows = this.priorIdentityInputs(rows.map((r) => r.path));
+      let groupingChanged = false;
       const artHashCache = new WeakMap<Buffer, string>();
       const writtenArtHashes = new Set<string>();
       for (const r of rows) {
@@ -1335,6 +1531,23 @@ export class LibraryStore {
           }
         }
         const seed = fileStatsSeed(r);
+        const prior = priorRows.get(r.path);
+        const tags = r.tags;
+        const sorts = {
+          albumArtistSort: tags ? tags.albumArtistSort : prior?.album_artist_sort ?? null,
+          artistSort: tags ? tags.artistSort : prior?.artist_sort ?? null,
+        };
+        const identity = r.album.trim()
+          ? provisionalIdentity({
+              path: r.path,
+              album: r.album,
+              artist: r.artist,
+              albumArtist: r.albumArtist,
+              year: r.year,
+              discNo: r.discNo,
+              ...sorts,
+            })
+          : null;
         stmt.run([
           r.path,
           r.title,
@@ -1374,10 +1587,47 @@ export class LibraryStore {
           seed.ratingScore,
           seed.playCount,
           seed.imported,
+          tags ? tags.albumArtistTag : null,
+          tags?.compilation ? 1 : 0,
+          sorts.albumArtistSort,
+          sorts.artistSort,
+          tags?.discTotal ?? null,
+          tags?.trackTotal ?? null,
+          tags?.discSubtitle ?? null,
+          tags?.mbReleaseGroupId ?? null,
+          tags?.originalYear ?? null,
+          tags?.artists ? JSON.stringify(tags.artists) : null,
+          tags?.genres ? JSON.stringify(tags.genres) : null,
+          tags ? SCAN_SCHEMA_VERSION : 0,
+          artistKeyOf(r.artist),
+          identity?.albumKey ?? null,
+          identity?.albumDisplay ?? null,
+          identity?.albumArtistDisplay ?? null,
+          identity?.albumKind ?? 'album',
+          identity?.albumReason ?? null,
+          identity?.albumYear ?? null,
+          identity?.albumSortKey ?? null,
+          identity?.discInferred ?? null,
         ]);
+        if (!prior || identityInputsChanged(prior, r)) groupingChanged = true;
+        if (prior && (identityNeedsReset(prior, r) || (prior.album_key == null) !== !r.album.trim())) {
+          resetIdentity.run([
+            identity?.albumKey ?? null,
+            identity?.albumDisplay ?? null,
+            identity?.albumArtistDisplay ?? null,
+            identity?.albumKind ?? 'album',
+            identity?.albumReason ?? null,
+            identity?.albumYear ?? null,
+            identity?.albumSortKey ?? null,
+            identity?.discInferred ?? null,
+            r.path,
+          ]);
+        }
       }
       stmt.free();
+      resetIdentity.free();
       this.db.run('COMMIT');
+      if (groupingChanged) this.requestRegroup();
     } catch (err) {
       this.db.run('ROLLBACK');
       throw err;
@@ -1394,6 +1644,69 @@ export class LibraryStore {
     this.invalidateFolderTrackRowsCache();
     this.invalidateLibraryHealthCache();
     this.scheduleFlush();
+  }
+
+  // The plain grouping for one track whose album, artist or album artist was
+  // just edited, so it lands in the right album at once; the grouping pass
+  // refines it a moment later.
+  private resetTrackIdentity(trackId: number): void {
+    const row = this.one<{
+      path: string;
+      album: string;
+      artist: string;
+      album_artist: string;
+      year: number | null;
+      disc_no: number | null;
+      album_artist_sort: string | null;
+      artist_sort: string | null;
+    }>(
+      `SELECT path, album, artist, album_artist, year, disc_no, album_artist_sort, artist_sort FROM tracks WHERE id = ?`,
+      [trackId],
+    );
+    if (!row) return;
+    const identity = row.album.trim()
+      ? provisionalIdentity({
+          path: row.path,
+          album: row.album,
+          artist: row.artist,
+          albumArtist: row.album_artist,
+          year: row.year,
+          discNo: row.disc_no,
+          albumArtistSort: row.album_artist_sort,
+          artistSort: row.artist_sort,
+        })
+      : null;
+    this.db.run(
+      `UPDATE tracks SET album_key=?, album_display=?, album_artist_display=?, album_kind=?, album_reason=?,
+              album_year=?, album_sort_key=?, disc_inferred=? WHERE id=?`,
+      [
+        identity?.albumKey ?? null,
+        identity?.albumDisplay ?? null,
+        identity?.albumArtistDisplay ?? null,
+        identity?.albumKind ?? 'album',
+        identity?.albumReason ?? null,
+        identity?.albumYear ?? null,
+        identity?.albumSortKey ?? null,
+        identity?.discInferred ?? null,
+        trackId,
+      ],
+    );
+  }
+
+  private priorIdentityInputs(paths: string[]): Map<string, PriorIdentityRow> {
+    const out = new Map<string, PriorIdentityRow>();
+    const chunkSize = 500;
+    for (let i = 0; i < paths.length; i += chunkSize) {
+      const chunk = paths.slice(i, i + chunkSize);
+      const rows = this.many<PriorIdentityRow>(
+        `SELECT path, album, artist, album_artist, album_artist_tag, compilation, disc_no, year,
+                album_artist_sort, artist_sort, scan_schema, album_key
+           FROM tracks WHERE path IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
+      );
+      for (const row of rows) out.set(row.path, row);
+    }
+    return out;
   }
 
   // A reading whose tags failed to parse is a filename guess ("Unknown
@@ -1588,6 +1901,10 @@ export class LibraryStore {
         sets.push(`${foldColumn} = ?`);
         params.push(foldSearchText(metadataColumnValue(field, value) as string | null));
       }
+      if (field === 'artist') {
+        sets.push('artist_key = ?');
+        params.push(artistKeyOf(metadataColumnValue(field, value) as string | null));
+      }
     }
     if (sets.length) this.db.run(`UPDATE tracks SET ${sets.join(', ')} WHERE id = ?`, [...params, trackId]);
   }
@@ -1597,6 +1914,9 @@ export class LibraryStore {
   private writeTrackMetadataColumn(trackId: number, field: TrackMetadataField, value: MetadataValue): void {
     const column = metadataColumnValue(field, value);
     const foldColumn = METADATA_FOLD_COLUMNS[field];
+    if (field === 'artist') {
+      this.db.run(`UPDATE tracks SET artist_key = ? WHERE id = ?`, [artistKeyOf(column as string | null), trackId]);
+    }
     if (foldColumn) {
       this.db.run(`UPDATE tracks SET ${METADATA_FIELD_COLUMNS[field]} = ?, ${foldColumn} = ? WHERE id = ?`, [
         column,
@@ -1665,12 +1985,14 @@ export class LibraryStore {
         }
         this.db.run(`DELETE FROM track_metadata_overrides WHERE track_id = ? AND field = ?`, [row.track_id, row.field]);
       }
+      for (const trackId of new Set(rows.map((row) => row.track_id))) this.resetTrackIdentity(trackId);
       this.db.run('COMMIT');
     } catch (err) {
       this.db.run('ROLLBACK');
       throw err;
     }
     this.invalidateLibraryHealthCache();
+    this.requestRegroup(EDIT_REGROUP_DELAY_MS);
     this.scheduleFlush();
     return rows.length;
   }
@@ -1694,12 +2016,23 @@ export class LibraryStore {
 
   getStats(): { tracks: number; albums: number; artists: number; duration: number } {
     const t = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks`);
-    const a = this.one<{ n: number }>(
-      `SELECT COUNT(DISTINCT album || ' ' || album_artist) AS n FROM tracks WHERE album != ''`,
-    );
-    const r = this.one<{ n: number }>(
-      `SELECT COUNT(DISTINCT artist) AS n FROM tracks WHERE artist != ''`,
-    );
+    // A library opened from an older version has no album keys until the first
+    // grouping pass has run, and this is called from places that cannot wait
+    // for it. Until then it counts the way the library did before keys, which
+    // is close and costs no pass; the callers that show the numbers wait for the
+    // pass first (see albumsReady) and get the exact ones.
+    const a = this.identityUngrouped
+      ? this.one<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM (SELECT 1 FROM tracks WHERE album != '' GROUP BY COALESCE(NULLIF(album_artist,''), artist), album)`,
+      )
+      : this.one<{ n: number }>(`SELECT COUNT(DISTINCT album_key) AS n FROM tracks WHERE album != ''`);
+    // The Artists list the grouping pass wrote has one row per artist; until
+    // something changes, counting it is cheaper than grouping every track.
+    const r = this.identityUngrouped
+      ? this.one<{ n: number }>(`SELECT COUNT(DISTINCT artist) AS n FROM tracks WHERE artist != ''`)
+      : !this.artistListStale
+        ? this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM artist_groups`)
+        : this.one<{ n: number }>(`SELECT COUNT(DISTINCT artist_key) AS n FROM tracks WHERE artist_key != ''`);
     const d = this.one<{ d: number }>(`SELECT COALESCE(SUM(duration), 0) AS d FROM tracks`);
     return { tracks: t?.n ?? 0, albums: a?.n ?? 0, artists: r?.n ?? 0, duration: d?.d ?? 0 };
   }
@@ -1880,7 +2213,7 @@ export class LibraryStore {
 
     // Offered for playing, so a track whose file is missing is left out.
     const recentlyAdded = this.many<RawRow>(
-      `SELECT * FROM tracks WHERE missing_since IS NULL
+      `SELECT ${TRACK_COLUMNS} FROM tracks WHERE missing_since IS NULL
         ORDER BY mtime DESC, artist COLLATE NOCASE, title COLLATE NOCASE LIMIT 12`,
     ).map(rowToTrack);
 
@@ -1911,7 +2244,7 @@ export class LibraryStore {
     const { whereSql, params } = this.buildTrackQuery(opts);
 
     return this.many(
-      `SELECT * FROM tracks ${whereSql} ORDER BY ${sortKey} LIMIT ? OFFSET ?`,
+      `SELECT ${TRACK_COLUMNS} FROM tracks ${whereSql} ORDER BY ${sortKey} LIMIT ? OFFSET ?`,
       [...params, limit, offset],
     ).map(rowToTrack);
   }
@@ -1949,7 +2282,7 @@ export class LibraryStore {
   }
 
   getTrack(id: number): Track | null {
-    const row = this.one<RawRow>(`SELECT * FROM tracks WHERE id = ?`, [id]);
+    const row = this.one<RawRow>(`SELECT ${TRACK_COLUMNS} FROM tracks WHERE id = ?`, [id]);
     if (!row) return null;
     return { ...rowToTrack(row), editedFields: this.getEditedFields(row.id) };
   }
@@ -1963,7 +2296,7 @@ export class LibraryStore {
     for (let i = 0; i < unique.length; i += chunkSize) {
       const chunk = unique.slice(i, i + chunkSize);
       const placeholders = chunk.map(() => '?').join(',');
-      const rows = this.many<RawRow>(`SELECT * FROM tracks WHERE id IN (${placeholders})`, chunk);
+      const rows = this.many<RawRow>(`SELECT ${TRACK_COLUMNS} FROM tracks WHERE id IN (${placeholders})`, chunk);
       for (const row of rows) {
         const track = rowToTrack(row);
         byId.set(track.id, track);
@@ -2296,6 +2629,7 @@ export class LibraryStore {
       // The accepted match is the user's choice, so it is owned like a manual
       // edit and a rescan can't revert it.
       this.writeMetadataFields(id, current, { title, artist, album, albumArtist, trackNo, discNo, year }, 'musicbrainz');
+      this.resetTrackIdentity(id);
       // Duration is a measurement, not an edit: the lookup only fills a gap,
       // and upsertTracks keeps it for as long as the file yields none.
       if (duration !== current.duration) {
@@ -2309,6 +2643,7 @@ export class LibraryStore {
     // duration is one of the cached folder-row columns.
     this.invalidateFolderTrackRowsCache();
     this.invalidateLibraryHealthCache();
+    this.requestRegroup(EDIT_REGROUP_DELAY_MS);
     this.scheduleFlush();
     return this.getTrack(id);
   }
@@ -2348,6 +2683,7 @@ export class LibraryStore {
     try {
       this.resetMetadataFields(id, reset);
       this.writeMetadataFields(id, current, next, 'manual');
+      this.resetTrackIdentity(id);
       this.db.run('COMMIT');
     } catch (err) {
       this.db.run('ROLLBACK');
@@ -2356,15 +2692,20 @@ export class LibraryStore {
     // artist/album/year feed getLibraryHealth's missing-metadata + duplicate
     // detection — a manual edit must not leave the health card stale.
     this.invalidateLibraryHealthCache();
+    this.requestRegroup(EDIT_REGROUP_DELAY_MS);
     this.scheduleFlush();
     return this.getTrack(id);
   }
 
+  // The albums the grid shows. An album is a group of tracks sharing album_key
+  // (see shared/album-identity.ts); every field the grid shows is stored on its
+  // tracks by the grouping pass, so the group only has to pick one of them.
   getAlbums(opts: CatalogSummaryQueryOptions = {}): AlbumSummary[] {
+    this.ensureIdentityKeys();
     const search = String(opts.search ?? '').trim();
     const limit = summaryQueryLimit(opts.limit);
     const offset = summaryQueryOffset(opts.offset);
-    const where = ['album != \'\''];
+    const where = ['album_key IS NOT NULL', 'album != \'\''];
     const params: unknown[] = [];
     const having: string[] = [];
     const havingParams: unknown[] = [];
@@ -2379,28 +2720,34 @@ export class LibraryStore {
     const matchSelectParams: unknown[] = [];
     if (search) {
       const q = foldedLikeParam(search);
+      // A compilation matches on any artist on it, and on "various artists".
       matchSelect = `,
-              MAX(CASE WHEN album_fold LIKE ? ESCAPE '|' OR COALESCE(NULLIF(album_artist_fold,''), artist_fold) LIKE ? ESCAPE '|' OR CAST(year AS TEXT) LIKE ? ESCAPE '|' THEN 1 ELSE 0 END) AS matched_meta,
+              MAX(CASE WHEN album_fold LIKE ? ESCAPE '|' OR COALESCE(NULLIF(album_artist_fold,''), artist_fold) LIKE ? ESCAPE '|' OR artist_fold LIKE ? ESCAPE '|' OR (album_kind = 'compilation' AND 'various artists' LIKE ? ESCAPE '|') OR CAST(year AS TEXT) LIKE ? ESCAPE '|' THEN 1 ELSE 0 END) AS matched_meta,
               MAX(CASE WHEN title_fold LIKE ? ESCAPE '|' THEN 1 ELSE 0 END) AS matched_track,
               GROUP_CONCAT(CASE WHEN title_fold LIKE ? ESCAPE '|' THEN title ELSE NULL END, char(31)) AS matched_titles`;
-      matchSelectParams.push(q, q, q, q, q);
+      matchSelectParams.push(q, q, q, q, q, q, q);
       having.push('(matched_meta = 1 OR matched_track = 1)');
     }
+    const excludeKeys = new Set<string>();
+    if (typeof opts.excludeAlbumKey === 'string' && opts.excludeAlbumKey) excludeKeys.add(opts.excludeAlbumKey);
     if (typeof opts.excludeAlbum === 'string' && opts.excludeAlbum.trim()) {
       const excludeAlbum = opts.excludeAlbum.trim();
       const excludeAlbumArtist = String(opts.excludeAlbumArtist ?? '').trim();
       if (excludeAlbumArtist) {
-        where.push('NOT (album = ? AND COALESCE(NULLIF(album_artist,\'\'), artist) = ?)');
-        params.push(excludeAlbum, excludeAlbumArtist);
+        for (const key of this.resolveAlbumKeys(excludeAlbumArtist, excludeAlbum)) excludeKeys.add(key);
       } else {
         where.push('album != ?');
         params.push(excludeAlbum);
       }
     }
+    if (excludeKeys.size) {
+      where.push(`album_key NOT IN (${[...excludeKeys].map(() => '?').join(',')})`);
+      params.push(...excludeKeys);
+    }
     if (Number.isFinite(opts.year)) {
       const year = Math.trunc(Number(opts.year));
       const yearWindow = Math.max(0, Math.min(Math.trunc(Number(opts.yearWindow ?? 0)), 10));
-      having.push('MIN(year) IS NOT NULL AND ABS(MIN(year) - ?) <= ?');
+      having.push('MAX(album_year) IS NOT NULL AND ABS(MAX(album_year) - ?) <= ?');
       havingParams.push(year, yearWindow);
     }
     if (opts.missingArtOnly === true) {
@@ -2413,71 +2760,77 @@ export class LibraryStore {
 
     // NOTE: Don't JOIN album_ratings here. An earlier attempt at a LEFT
     // JOIN broke listAlbums entirely: the WHERE clause references
-    // unqualified `album` / `album_artist` columns, which became ambiguous
-    // once both `tracks` and `album_ratings` carried them — SQLite raised
-    // "ambiguous column" on every call and zero rows came back. Instead,
-    // run the aggregation query unchanged and merge album ratings in via
+    // unqualified columns, which became ambiguous once both tables carried
+    // them. Run the aggregation query unchanged and merge album ratings in via
     // a single bulk lookup. Same number of round-trips, no JOIN fragility.
-    const rows = this.many<{
-      album: string;
-      album_artist: string;
-      year: number | null;
-      track_count: number;
-      duration: number;
-      art_track: number | null;
-      matched_track?: number;
-      matched_titles?: string | null;
-    }>(
-      `SELECT album,
-              COALESCE(NULLIF(album_artist,''), artist) AS album_artist,
-              MIN(year) AS year,
+    const rows = this.many<AlbumGroupRow>(
+      `SELECT album_key,
+              MAX(album_display) AS album,
+              MAX(album_artist_display) AS album_artist,
+              MAX(album_kind) AS album_kind,
+              MAX(album_reason) AS album_reason,
+              MAX(album_year) AS year,
+              MAX(album_sort_key) AS sort_artist,
               COUNT(*) AS track_count,
               COALESCE(SUM(duration), 0) AS duration,
               MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) AS art_track${matchSelect}
          FROM tracks
         WHERE ${where.join(' AND ')}
-        GROUP BY album, COALESCE(NULLIF(album_artist,''), artist)
+        GROUP BY album_key
         ${havingSql}
         ORDER BY ${orderSql}
         LIMIT ? OFFSET ?`,
       [...matchSelectParams, ...params, ...havingParams, limit, offset],
     );
+    return this.albumSummariesFromRows(rows, Boolean(search));
+  }
 
-    // One extra query for the whole rating set — typically tiny (only rated
-    // albums). Map-lookup on `lowercase(artist)|lowercase(album)` matches
-    // the schema's NOCASE collation without an extra string compare.
-    const ratingIndex = this.many<{
-      album_artist: string;
-      album: string;
-      rating: number;
-      rating_score: number | null;
-    }>(
-      `SELECT album_artist, album, rating, rating_score FROM album_ratings`,
-      [],
+  // One album by key, the way the grid would list it.
+  getAlbumSummary(key: string): AlbumSummary | null {
+    this.ensureIdentityKeys();
+    const albumKeyValue = String(key ?? '').trim();
+    if (!albumKeyValue) return null;
+    const rows = this.many<AlbumGroupRow>(
+      `SELECT album_key,
+              MAX(album_display) AS album,
+              MAX(album_artist_display) AS album_artist,
+              MAX(album_kind) AS album_kind,
+              MAX(album_reason) AS album_reason,
+              MAX(album_year) AS year,
+              MAX(album_sort_key) AS sort_artist,
+              COUNT(*) AS track_count,
+              COALESCE(SUM(duration), 0) AS duration,
+              MIN(CASE WHEN has_art = 1 THEN id ELSE NULL END) AS art_track
+         FROM tracks
+        WHERE album_key = ?
+        GROUP BY album_key`,
+      [albumKeyValue],
     );
-    const ratingMap = new Map<string, { rating: number; ratingScore: number | null }>();
-    for (const row of ratingIndex) {
-      const key = albumKey(row.album_artist, row.album);
-      ratingMap.set(key, { rating: row.rating, ratingScore: row.rating_score });
-    }
+    return this.albumSummariesFromRows(rows, false)[0] ?? null;
+  }
 
+  private albumSummariesFromRows(rows: AlbumGroupRow[], searching: boolean): AlbumSummary[] {
+    const ratings = this.newestRatingsByKey();
     return rows.map((r) => {
-      const key = albumKey(r.album_artist || 'Unknown Artist', r.album);
-      const rating = ratingMap.get(key);
+      const rating = ratings.get(r.album_key);
       return {
+        albumKey: r.album_key,
         album: r.album,
         albumArtist: r.album_artist || 'Unknown Artist',
+        sortKey: r.sort_artist ?? '',
         year: r.year,
         trackCount: r.track_count,
         duration: r.duration,
         artFromTrackId: r.art_track,
         rating: rating?.rating ?? 0,
         ratingScore: rating?.ratingScore ?? null,
-        matchedOnTrack: search ? Boolean(r.matched_track) : undefined,
+        albumKind: normalizeAlbumKind(r.album_kind),
+        albumReason: r.album_reason ?? null,
+        matchedOnTrack: searching ? Boolean(r.matched_track) : undefined,
         // Split on the U+001F unit separator (the SQL GROUP_CONCAT used char(31))
         // — chosen because it cannot occur inside a song title.
         matchedTrackTitles:
-          search && r.matched_titles
+          searching && r.matched_titles
             ? Array.from(new Set(r.matched_titles.split(String.fromCharCode(31)))).slice(0, 4).join(' · ')
             : null,
       };
@@ -2495,12 +2848,13 @@ export class LibraryStore {
     const cleanAlbumArtist = String(albumArtist ?? '').trim() || 'Unknown Artist';
     if (!cleanAlbum || !art.data.length) return null;
 
-    const rows = this.many<{ id: number }>(
-      `SELECT id FROM tracks
-        WHERE album = ?
-          AND COALESCE(NULLIF(album_artist,''), artist) = ?`,
-      [cleanAlbum, cleanAlbumArtist],
-    );
+    const keys = this.resolveAlbumKeys(cleanAlbumArtist, cleanAlbum);
+    const rows = keys.length
+      ? this.many<{ id: number }>(
+        `SELECT id FROM tracks WHERE album_key IN (${keys.map(() => '?').join(',')})`,
+        keys,
+      )
+      : [];
     if (!rows.length) return null;
 
     const artHash = createHash('sha1').update(art.data).digest('hex');
@@ -2533,10 +2887,35 @@ export class LibraryStore {
     };
   }
 
+  // Artists grouped on artist_key (case, accents and spacing folded), shown
+  // under the spelling most of their tracks use and ordered by the file's sort
+  // name when it has one, else the name without a leading "The".
   getArtists(opts: CatalogSummaryQueryOptions = {}): ArtistSummary[] {
+    this.ensureIdentityKeys();
     const search = String(opts.search ?? '').trim();
     const limit = summaryQueryLimit(opts.limit);
     const offset = summaryQueryOffset(opts.offset);
+    // Nothing has changed since the pass wrote the list, and there is no filter
+    // to count only matching tracks for: read it as it was written.
+    if (!search && !this.artistListStale && !this.identityUngrouped) {
+      return this.many<{ artist_key: string; display: string; sort_key: string; track_count: number; album_count: number }>(
+        `SELECT artist_key, display, sort_key, track_count, album_count FROM artist_groups
+          ORDER BY sort_key, artist_key LIMIT ? OFFSET ?`,
+        [limit, offset],
+      ).map((row) => ({
+        artistKey: row.artist_key,
+        artist: row.display,
+        sortKey: row.sort_key,
+        trackCount: row.track_count,
+        albumCount: row.album_count,
+      }));
+    }
+    return this.listArtists(search).slice(offset, offset + limit);
+  }
+
+  private listArtists(search: string): ArtistSummary[] {
+    // `artist != ''` is the cheap test: that column is at the front of a row.
+    // An artist that folds to nothing (all spaces) is dropped below.
     const where = ['artist != \'\''];
     const params: unknown[] = [];
 
@@ -2546,14 +2925,87 @@ export class LibraryStore {
       params.push(q, q);
     }
 
-    return this.many<{ artist: string; track_count: number; album_count: number }>(
-      `SELECT artist, COUNT(*) AS track_count, COUNT(DISTINCT album) AS album_count
+    // A search counts only the tracks that match, so it is grouped here, but the
+    // spelling and sort name of each artist are already written: only the keys
+    // need grouping, which is no more work than the library did before. The
+    // filter reads folded text no index holds, so the table is scanned in order.
+    if (!this.artistListStale && !this.identityUngrouped) {
+      return this.many<{ artist_key: string; display: string; sort_key: string; n: number; a: number }>(
+        `SELECT m.artist_key, g.display, g.sort_key, m.n, m.a
+           FROM (SELECT artist_key, COUNT(*) AS n, COUNT(DISTINCT album_key) AS a
+                   FROM tracks NOT INDEXED WHERE ${where.join(' AND ')} GROUP BY artist_key) m
+           JOIN artist_groups g ON g.artist_key = m.artist_key
+          ORDER BY g.sort_key, g.artist_key`,
+        params,
+      ).map((row) => ({
+        artistKey: row.artist_key,
+        artist: row.display,
+        sortKey: row.sort_key,
+        trackCount: row.n,
+        albumCount: row.a,
+      }));
+    }
+
+    // One pass over (artist_key, artist, album_key); the spellings and album
+    // counts fall out of it. Only reached while a pass is due (see getArtists).
+    const rows = this.many<{ artist_key: string; artist: string; album_key: string | null; n: number }>(
+      `SELECT artist_key, artist, album_key, COUNT(*) AS n
          FROM tracks WHERE ${where.join(' AND ')}
-        GROUP BY artist
-        ORDER BY artist COLLATE NOCASE
-        LIMIT ? OFFSET ?`,
-      [...params, limit, offset],
-    ).map((r) => ({ artist: r.artist, trackCount: r.track_count, albumCount: r.album_count }));
+        GROUP BY artist_key, artist, album_key`,
+      params,
+    );
+    const groups = new Map<string, { names: Map<string, number>; tracks: number; albums: Set<string> }>();
+    for (const row of rows) {
+      if (!row.artist_key) continue;
+      let group = groups.get(row.artist_key);
+      if (!group) {
+        group = { names: new Map(), tracks: 0, albums: new Set() };
+        groups.set(row.artist_key, group);
+      }
+      const name = row.artist.trim();
+      group.names.set(name, (group.names.get(name) ?? 0) + row.n);
+      group.tracks += row.n;
+      if (row.album_key) group.albums.add(row.album_key);
+    }
+    const sortTags = this.artistSortTags();
+    const listed = [...groups].map(([artistKey, group]) => {
+      let artist = '';
+      let best = -1;
+      for (const [name, n] of group.names) {
+        if (n > best || (n === best && name < artist)) {
+          artist = name;
+          best = n;
+        }
+      }
+      return {
+        artist,
+        artistKey,
+        trackCount: group.tracks,
+        albumCount: group.albums.size,
+        sort: artistSortKey(artist, sortTags.get(artistKey)),
+      };
+    });
+    listed.sort((a, b) => (a.sort < b.sort ? -1 : a.sort > b.sort ? 1 : a.artistKey < b.artistKey ? -1 : a.artistKey > b.artistKey ? 1 : 0));
+    return listed.map(({ artist, artistKey, trackCount, albumCount, sort }) => ({ artist, artistKey, sortKey: sort, trackCount, albumCount }));
+  }
+
+  // The sort names files carry (ARTISTSORT, and ALBUMARTISTSORT where the album
+  // artist is the track artist), by artist key. Only a few rows have one.
+  private artistSortTags(): Map<string, string> {
+    const out = new Map<string, string>();
+    const rows = this.many<{ artist_key: string; s: string | null; a: string | null }>(
+      `SELECT artist_key,
+              MAX(artist_sort) AS s,
+              MAX(CASE WHEN album_artist_fold = artist_fold THEN album_artist_sort END) AS a
+         FROM tracks
+        WHERE artist_sort IS NOT NULL OR album_artist_sort IS NOT NULL
+        GROUP BY artist_key`,
+    );
+    for (const row of rows) {
+      const tag = row.s || row.a;
+      if (tag) out.set(row.artist_key, tag);
+    }
+    return out;
   }
 
   getFolders(parentPath?: string | null, roots: string[] = []): FolderSummary[] {
@@ -2596,7 +3048,7 @@ export class LibraryStore {
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
   ): RawRow[] {
-    return this.queryFolderRows<RawRow>(folderPath, opts, '*');
+    return this.queryFolderRows<RawRow>(folderPath, opts, TRACK_COLUMNS);
   }
 
   private queryFolderRows<T extends { path: string }>(
@@ -2650,22 +3102,501 @@ export class LibraryStore {
     this.libraryHealthCache = null;
   }
 
+  // An album's tracks, for callers that still hold the pair of strings the
+  // library used to group on. The pair is matched to an album key (see
+  // resolveAlbumKeys), so an album the grouping has since joined to others
+  // still answers to the name a caller read before. Several albums can share a
+  // pair (a folder split apart, folders under a generic title); a pair cannot
+  // say which, so it gets the one with the most tracks. Callers holding a track
+  // or an album summary have the key and should use getAlbumTracksByKey.
   getAlbumTracks(albumArtist: string, album: string): Track[] {
-    return this.many<RawRow>(
-      `SELECT * FROM tracks
-        WHERE album = ?
-          AND COALESCE(NULLIF(album_artist,''), artist) = ?
-        ORDER BY disc_no, track_no, title`,
+    this.ensureIdentityKeys();
+    // The pair as the library stored it finds its album in one statement; the
+    // other readings of a pair (see resolveAlbumKeys) only run when it does not.
+    const direct = this.many<RawRow>(
+      `SELECT ${TRACK_COLUMNS} FROM tracks
+        WHERE album_key = (
+          SELECT album_key FROM tracks
+           WHERE album = ? AND COALESCE(NULLIF(album_artist,''), artist) = ? AND album_key IS NOT NULL
+           GROUP BY album_key ORDER BY COUNT(*) DESC, album_key LIMIT 1)
+        ORDER BY COALESCE(disc_inferred, disc_no, 1), track_no, title, id`,
       [album, albumArtist],
+    );
+    if (direct.length) return direct.map(rowToTrack);
+    return this.tracksOfAlbumKeys(this.resolveAlbumKeys(albumArtist, album).slice(0, 1));
+  }
+
+  getAlbumTracksByKey(key: string): Track[] {
+    this.ensureIdentityKeys();
+    const trimmed = String(key ?? '').trim();
+    return trimmed ? this.tracksOfAlbumKeys([trimmed]) : [];
+  }
+
+  // Disc, then track number. The disc is the one the grouping settled on (from
+  // the title or folder, where the files have none or all say the same), else
+  // the file's, and otherwise counts as disc 1.
+  private tracksOfAlbumKeys(keys: string[]): Track[] {
+    if (!keys.length) return [];
+    return this.many<RawRow>(
+      `SELECT ${TRACK_COLUMNS} FROM tracks
+        WHERE album_key IN (${keys.map(() => '?').join(',')})
+        ORDER BY album_key, COALESCE(disc_inferred, disc_no, 1), track_no, title, id`,
+      keys,
     ).map(rowToTrack);
   }
 
   getArtistTracks(artist: string): Track[] {
+    this.ensureIdentityKeys();
+    const key = artistKeyOf(artist);
+    if (!key) return [];
     return this.many<RawRow>(
-      `SELECT * FROM tracks WHERE artist = ?
+      `SELECT ${TRACK_COLUMNS} FROM tracks WHERE artist_key = ?
         ORDER BY year, album COLLATE NOCASE, disc_no, track_no, title`,
-      [artist],
+      [key],
     ).map(rowToTrack);
+  }
+
+  // -- album identity -----------------------------------------------------------
+
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  // Queries that group on album_key or artist_key need them to exist. A library
+  // opened from an older version has rows that never got one until the first
+  // pass runs; a caller that can't wait for it gets it run here instead.
+  private ensureIdentityKeys(): void {
+    if (this.identityUngrouped && !this.closed) this.regroupAlbumsSync();
+  }
+
+  // Called once the library is open: the first launch after an upgrade (or
+  // after a quit before a pass could run) groups every track in slices in the
+  // background, while the window comes up.
+  private startInitialRegroup(): void {
+    const meta = (key: string): string | null =>
+      this.one<{ value: string }>(`SELECT value FROM library_meta WHERE key = ?`, [key])?.value ?? null;
+    if (!this.one(`SELECT 1 FROM tracks LIMIT 1`)) return;
+    this.identityPendingPersisted = meta('album_identity_pending') !== null;
+    this.identityUngrouped = !!this.one(
+      `SELECT 1 FROM tracks
+        WHERE (TRIM(album, ${JS_WHITESPACE_SQL}) != '' AND album_key IS NULL)
+           OR (TRIM(artist, ${JS_WHITESPACE_SQL}) != '' AND artist_key = '') LIMIT 1`,
+    );
+    this.identityStale = this.identityPendingPersisted || Number(meta('album_identity_version') ?? 0) !== ALBUM_IDENTITY_VERSION;
+    // A list the pass should have written and did not is a pass still due.
+    if (
+      !this.one(`SELECT 1 FROM artist_groups LIMIT 1`)
+      && this.one(`SELECT 1 FROM tracks WHERE artist_key != '' LIMIT 1`)
+    ) {
+      this.identityStale = true;
+    }
+    this.artistListStale = this.identityStale;
+    if (!this.identityUngrouped && !this.identityStale) return;
+    setImmediate(() => {
+      void this.regroupAlbums().catch((err) => console.error('[newamp] album grouping failed:', err));
+    });
+  }
+
+  // Resolves once any grouping pass that is running or due has finished.
+  albumsReady(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (this.identityRun) return this.identityRun.then(() => undefined, () => undefined);
+    if (this.identityUngrouped) return this.regroupAlbums().then(() => undefined, () => undefined);
+    return Promise.resolve();
+  }
+
+  // Something that decides which tracks form an album changed. `tagsOnly` is a
+  // change to tags read from files already in the library: the albums may
+  // group differently, but no artist appeared or went.
+  private markIdentityStale(opts: { tagsOnly?: boolean } = {}): void {
+    this.groupingEpoch += 1;
+    this.identityStale = true;
+    if (!opts.tagsOnly) this.artistListStale = true;
+    if (!this.identityPendingPersisted) {
+      // Persisted so a quit before the pass runs still gets one at next launch.
+      this.db.run(`INSERT OR REPLACE INTO library_meta (key, value) VALUES ('album_identity_pending', '1')`);
+      this.identityPendingPersisted = true;
+      this.scheduleFlush();
+    }
+  }
+
+  // A change is due a pass, a couple of seconds after the changes stop coming.
+  // A scan runs it itself when it ends.
+  private requestRegroup(delayMs = REGROUP_DEBOUNCE_MS): void {
+    this.markIdentityStale();
+    this.armRegroupTimer(delayMs);
+  }
+
+  private armRegroupTimer(delayMs: number): void {
+    if (this.closed) return;
+    // A scan marks the albums stale with every batch, and a pass started between
+    // two batches reads the whole library only to be stopped by the next. It
+    // waits for the scan, which regroups once when it ends. An edit made by hand
+    // does not wait.
+    if (this.regroupHolds > 0 && delayMs === REGROUP_DEBOUNCE_MS) return;
+    if (this.regroupTimer) clearTimeout(this.regroupTimer);
+    this.regroupTimer = setTimeout(() => {
+      this.regroupTimer = null;
+      void this.regroupAlbums().catch((err) => console.error('[newamp] album grouping failed:', err));
+    }, delayMs);
+    this.regroupTimer.unref?.();
+  }
+
+  /** A scan is starting: its batches do not each start a grouping pass. */
+  holdRegroup(): void {
+    this.regroupHolds += 1;
+  }
+
+  /** The scan is over. Changes it left unsettled (a cancelled scan) get their pass. */
+  releaseRegroup(): void {
+    this.regroupHolds = Math.max(0, this.regroupHolds - 1);
+    if (!this.regroupHolds && this.identityStale) this.armRegroupTimer(REGROUP_DEBOUNCE_MS);
+  }
+
+  /**
+   * Groups the library's tracks into albums, in slices that hand the thread
+   * back between them. Does nothing when no change is waiting, unless forced.
+   * A pass that sees newer changes arrive stops and runs again.
+   */
+  async regroupAlbums(opts: { force?: boolean } = {}): Promise<RegroupResult | null> {
+    if (this.closed) return null;
+    if (this.identityRun) {
+      await this.identityRun.catch(() => undefined);
+      if (this.closed) return null;
+    }
+    if (!opts.force && !this.identityStale && !this.identityUngrouped) return null;
+    if (this.identityRun) return this.identityRun;
+    if (this.regroupTimer) {
+      clearTimeout(this.regroupTimer);
+      this.regroupTimer = null;
+    }
+    const run: Promise<RegroupResult | null> = (async () => {
+      let result: RegroupResult | null = null;
+      for (let attempt = 0; attempt < 4 && !this.closed; attempt++) {
+        result = await runRegroupAsync(this.regroupHost());
+        if (!result.aborted) return result;
+        // Something changed under the pass. If nothing is waiting any more, a
+        // synchronous pass finished the job; otherwise go again.
+        if (!this.identityStale && !this.identityUngrouped) return result;
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      }
+      if (!this.closed && this.identityStale) this.requestRegroup();
+      return result;
+    })().finally(() => {
+      if (this.identityRun === run) this.identityRun = null;
+    });
+    this.identityRun = run;
+    return run;
+  }
+
+  /** The same pass without yielding, for callers with nothing to give the thread to. */
+  regroupAlbumsSync(): RegroupResult {
+    const result = runRegroupSync(this.regroupHost());
+    // A pass that is waiting for its next slice sees this and stands down.
+    this.groupingEpoch += 1;
+    return result;
+  }
+
+  private regroupHost(): RegroupHost {
+    return {
+      epoch: () => (this.closed ? -1 : this.groupingEpoch),
+      loadSplits: () =>
+        new Set(
+          this.many<{ fingerprint: string }>(`SELECT fingerprint FROM album_overrides WHERE action = 'split'`).map(
+            (row) => row.fingerprint,
+          ),
+        ),
+      loadEditedAlbumArtists: () =>
+        new Set(
+          this.many<{ track_id: number }>(
+            `SELECT track_id FROM track_metadata_overrides WHERE field = 'albumArtist'`,
+          ).map((row) => row.track_id),
+        ),
+      loadRatingTargets: () =>
+        this.many<{ rowid: number; album_artist: string; album: string; album_key: string | null }>(
+          `SELECT rating_id AS rowid, album_artist, album, album_key FROM album_ratings`,
+        ).map((row): RatingTarget => ({
+          rowid: row.rowid,
+          albumArtist: row.album_artist,
+          album: row.album,
+          albumKey: row.album_key,
+        })),
+      loadChunk: (afterId, limit) =>
+        this.closed ? [] : this.many<RegroupRow>(
+          `SELECT id, path, album, artist, album_artist, album_artist_tag, scan_schema, compilation, disc_no, year,
+                  album_artist_sort, artist_sort, artist_key, album_key, album_display, album_artist_display,
+                  album_kind, album_reason, album_year, album_sort_key, disc_inferred
+             FROM tracks WHERE id > ? ORDER BY id LIMIT ?`,
+          [afterId, limit],
+        ),
+      writeChunk: (rows, remaps) => this.writeIdentityChunk(rows, remaps),
+      finish: (artists) => this.finishRegroup(artists),
+    };
+  }
+
+  // The rating rows that follow their album ride in the same transaction as
+  // the first tracks that move, so a pass cut short after that write never
+  // leaves a rating on a key no track has.
+  private writeIdentityChunk(rows: RegroupWrite[], remaps: RatingRemap[] = []): void {
+    this.db.run('BEGIN');
+    try {
+      for (const remap of remaps) {
+        this.db.run(`UPDATE album_ratings SET album_key = ? WHERE rating_id = ?`, [remap.albumKey, remap.rowid]);
+      }
+      const full = this.db.prepare(
+        `UPDATE tracks SET artist_key=?, album_key=?, album_display=?, album_artist_display=?, album_kind=?,
+                album_reason=?, album_year=?, album_sort_key=?, disc_inferred=? WHERE id=?`,
+      );
+      const artistOnly = this.db.prepare(`UPDATE tracks SET artist_key=? WHERE id=?`);
+      const cleared = this.db.prepare(
+        `UPDATE tracks SET artist_key=?, album_key=NULL, album_display=NULL, album_artist_display=NULL,
+                album_kind='album', album_reason=NULL, album_year=NULL, album_sort_key=NULL, disc_inferred=NULL
+          WHERE id=?`,
+      );
+      try {
+        for (const row of rows) {
+          const identity = row.identity;
+          if (identity) {
+            full.run([
+              row.artistKey,
+              identity.albumKey,
+              identity.albumDisplay,
+              identity.albumArtistDisplay,
+              identity.albumKind,
+              identity.albumReason,
+              identity.albumYear,
+              identity.albumSortKey,
+              identity.discInferred,
+              row.id,
+            ]);
+          } else if (row.clear) cleared.run([row.artistKey, row.id]);
+          else artistOnly.run([row.artistKey, row.id]);
+        }
+      } finally {
+        full.free();
+        artistOnly.free();
+        cleared.free();
+      }
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    // Written in bulk and re-derivable, so it rides the slow flush tier. A
+    // rating that moved is the user's own data and does not wait.
+    this.scheduleFlush(remaps.length ? undefined : { slow: true });
+  }
+
+  private finishRegroup(artists: ArtistGroup[]): void {
+    this.db.run('BEGIN');
+    try {
+      this.db.run(`DELETE FROM artist_groups`);
+      const insert = this.db.prepare(
+        `INSERT INTO artist_groups (artist_key, display, sort_key, track_count, album_count) VALUES (?, ?, ?, ?, ?)`,
+      );
+      try {
+        for (const group of artists) {
+          insert.run([group.artistKey, group.display, group.sortKey, group.trackCount, group.albumCount]);
+        }
+      } finally {
+        insert.free();
+      }
+      this.db.run(`DELETE FROM library_meta WHERE key = 'album_identity_pending'`);
+      this.db.run(`INSERT OR REPLACE INTO library_meta (key, value) VALUES ('album_identity_version', ?)`, [
+        String(ALBUM_IDENTITY_VERSION),
+      ]);
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    this.identityStale = false;
+    this.artistListStale = false;
+    this.identityUngrouped = false;
+    this.identityPendingPersisted = false;
+    this.invalidateLibraryHealthCache();
+    this.scheduleFlush();
+  }
+
+  /**
+   * The album keys a (album artist, album) pair stands for, most tracks first.
+   * The pair is tried as the library stored it, then as the grouping would
+   * write it (folds applied, a compilation under "Various Artists"), then as
+   * the album is shown. An album the grouping has split by folder has several.
+   */
+  resolveAlbumKeys(albumArtist: string, album: string): string[] {
+    this.ensureIdentityKeys();
+    const exact = this.many<{ album_key: string }>(
+      `SELECT album_key, COUNT(*) AS n FROM tracks
+        WHERE album = ? AND COALESCE(NULLIF(album_artist,''), artist) = ? AND album_key IS NOT NULL
+        GROUP BY album_key ORDER BY n DESC, album_key`,
+      [album, albumArtist],
+    );
+    if (exact.length) return exact.map((row) => row.album_key);
+    const artist = String(albumArtist ?? '').trim();
+    const title = String(album ?? '').trim();
+    if (!artist || !title) return [];
+    const base = keyForPair(artist, title);
+    // A bucket or a split album's key is the plain key plus a suffix that starts with '!' or '@'.
+    const near = this.many<{ album_key: string }>(
+      `SELECT album_key, COUNT(*) AS n FROM tracks
+        WHERE album_key = ? OR (album_key >= ? AND album_key < ?)
+        GROUP BY album_key ORDER BY n DESC, album_key`,
+      [base, `${base}|!`, `${base}|A`],
+    );
+    if (near.length) return near.map((row) => row.album_key);
+    const shown = this.many<{ album_key: string }>(
+      `SELECT album_key, COUNT(*) AS n FROM tracks
+        WHERE album_display = ? COLLATE NOCASE AND album_artist_display = ? COLLATE NOCASE AND album_key IS NOT NULL
+        GROUP BY album_key ORDER BY n DESC, album_key`,
+      [title, artist],
+    );
+    return shown.map((row) => row.album_key);
+  }
+
+  // -- the tag backfill ---------------------------------------------------------
+
+  /** Whether any row has not been read with the current tag set yet. */
+  tagBackfillPending(): boolean {
+    return !!this.one(
+      `SELECT 1 FROM tracks WHERE scan_schema < ? AND missing_since IS NULL LIMIT 1`,
+      [SCAN_SCHEMA_VERSION],
+    );
+  }
+
+  /** The next rows after `afterId` that still need their tags read. */
+  getTagBackfillBatch(limit: number, afterId: number): TagBackfillCandidate[] {
+    return this.many<TagBackfillCandidate>(
+      `SELECT id, path, size, mtime FROM tracks
+        WHERE id > ? AND scan_schema < ? AND missing_since IS NULL
+        ORDER BY id LIMIT ?`,
+      [Math.trunc(afterId), SCAN_SCHEMA_VERSION, Math.max(1, Math.trunc(limit))],
+    );
+  }
+
+  /** Stores tags read from unchanged files. Touches nothing else on the row. Returns rows written. */
+  applyTagBackfill(rows: TagBackfillRow[]): number {
+    if (!rows.length || this.closed) return 0;
+    this.db.run('BEGIN');
+    let written = 0;
+    try {
+      const stmt = this.db.prepare(
+        `UPDATE tracks SET album_artist_tag=?, compilation=?, album_artist_sort=?, artist_sort=?, disc_total=?,
+                track_total=?, disc_subtitle=?, mb_release_group_id=?, original_year=?, artists_json=?, genres_json=?,
+                scan_schema=?
+          WHERE id=? AND scan_schema < ?`,
+      );
+      try {
+        for (const row of rows) {
+          stmt.run([
+            row.albumArtistTag,
+            row.compilation ? 1 : 0,
+            row.albumArtistSort,
+            row.artistSort,
+            row.discTotal,
+            row.trackTotal,
+            row.discSubtitle,
+            row.mbReleaseGroupId,
+            row.originalYear,
+            row.artists ? JSON.stringify(row.artists) : null,
+            row.genres ? JSON.stringify(row.genres) : null,
+            SCAN_SCHEMA_VERSION,
+            row.id,
+            SCAN_SCHEMA_VERSION,
+          ]);
+          written += this.db.getRowsModified();
+        }
+      } finally {
+        stmt.free();
+      }
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    if (written) {
+      this.markIdentityStale({ tagsOnly: true });
+      // Re-derivable from the files, so a quit before the write lands only costs a re-read.
+      this.scheduleFlush({ slow: true });
+    }
+    return written;
+  }
+
+  /** Records that every row has been read with the current tag set (rows skipped as changed stay queued). */
+  finishTagBackfill(): void {
+    if (this.tagBackfillPending()) return;
+    this.db.run(`INSERT OR REPLACE INTO library_meta (key, value) VALUES ('scan_schema', ?)`, [
+      String(SCAN_SCHEMA_VERSION),
+    ]);
+    this.scheduleFlush();
+  }
+
+  // -- split an album ------------------------------------------------------------
+
+  /**
+   * "Show as separate albums": every folder the album's tracks sit in is
+   * remembered (by folder and title, so it survives rescans) and its tracks
+   * group by their own album artist again, the way the library did before the
+   * grouping looked at folders. With `split` false, undoes it for the album
+   * and for the pieces that came from the same original. Resolves when the
+   * albums have been regrouped.
+   */
+  async setAlbumSplit(key: string, split: boolean): Promise<number> {
+    await this.albumsReady();
+    const albumKeyValue = String(key ?? '').trim();
+    if (!albumKeyValue) return 0;
+    const rows = this.many<{ path: string; album: string; label: string | null }>(
+      `SELECT path, album, album_display AS label FROM tracks WHERE album_key = ?`,
+      [albumKeyValue],
+    );
+    if (!rows.length) return 0;
+    const prints = new Map<string, string>();
+    for (const row of rows) prints.set(containerFingerprint(row.path, row.album), row.label ?? row.album);
+    const now = Date.now();
+    this.db.run('BEGIN');
+    try {
+      if (split) {
+        for (const [fingerprint, label] of prints) {
+          this.db.run(
+            `INSERT OR REPLACE INTO album_overrides (fingerprint, action, source_key, label, created_at)
+             VALUES (?, 'split', ?, ?, ?)`,
+            [fingerprint, albumKeyValue, label, now],
+          );
+        }
+      } else {
+        const fingerprints = [...prints.keys()];
+        const marks = fingerprints.map(() => '?').join(',');
+        const sources = this.many<{ source_key: string }>(
+          `SELECT DISTINCT source_key FROM album_overrides WHERE fingerprint IN (${marks})`,
+          fingerprints,
+        ).map((row) => row.source_key);
+        this.db.run(`DELETE FROM album_overrides WHERE fingerprint IN (${marks})`, fingerprints);
+        for (const source of sources) {
+          if (source) this.db.run(`DELETE FROM album_overrides WHERE source_key = ?`, [source]);
+        }
+      }
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    this.markIdentityStale();
+    this.scheduleFlush();
+    await this.regroupAlbums({ force: true });
+    return prints.size;
+  }
+
+  /** Containers the user has asked to see apart. */
+  listAlbumOverrides(): Array<{ fingerprint: string; action: string; sourceKey: string; label: string; createdAt: number }> {
+    return this.many<{ fingerprint: string; action: string; source_key: string; label: string; created_at: number }>(
+      `SELECT fingerprint, action, source_key, label, created_at FROM album_overrides ORDER BY created_at, fingerprint`,
+    ).map((row) => ({
+      fingerprint: row.fingerprint,
+      action: row.action,
+      sourceKey: row.source_key,
+      label: row.label,
+      createdAt: row.created_at,
+    }));
   }
 
   getPlaylists(): SavedPlaylist[] {
@@ -3028,7 +3959,7 @@ export class LibraryStore {
     const limit = Math.max(4, Math.min(40, Math.trunc(Number(input.limit) || 12)));
     const currentTrack = input.seedTrackId ? this.getTrack(Math.trunc(input.seedTrackId)) : null;
     const highSignalCandidates = this.many<RawRow>(
-      `SELECT * FROM tracks
+      `SELECT ${TRACK_COLUMNS} FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
           AND missing_since IS NULL
@@ -3046,7 +3977,7 @@ export class LibraryStore {
         LIMIT 6000`,
     ).map(rowToTrack);
     const freshCandidates = this.many<RawRow>(
-      `SELECT * FROM tracks
+      `SELECT ${TRACK_COLUMNS} FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
           AND missing_since IS NULL
@@ -3054,7 +3985,7 @@ export class LibraryStore {
         LIMIT 3000`,
     ).map(rowToTrack);
     const underplayedCandidates = this.many<RawRow>(
-      `SELECT * FROM tracks
+      `SELECT ${TRACK_COLUMNS} FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
           AND missing_since IS NULL
@@ -3063,7 +3994,7 @@ export class LibraryStore {
         LIMIT 4000`,
     ).map(rowToTrack);
     const albumCandidates = this.many<RawRow>(
-      `SELECT * FROM tracks
+      `SELECT ${TRACK_COLUMNS} FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
           AND missing_since IS NULL
@@ -3275,7 +4206,7 @@ export class LibraryStore {
     const limit = Math.max(1, Math.min(10000, Math.trunc(input.limit ?? 2000)));
     // The preview stands for the tag playlist, which leaves missing tracks
     // out (getTrackIdsByTag), so its count and samples do too.
-    const rows = this.many<RawRow>(`SELECT * FROM tracks WHERE missing_since IS NULL LIMIT ${limit}`);
+    const rows = this.many<RawRow>(`SELECT ${TRACK_COLUMNS} FROM tracks WHERE missing_since IS NULL LIMIT ${limit}`);
     const dnaIndex = this.buildDnaIndex();
     let matchCount = 0;
     const samples: number[] = [];
@@ -3368,10 +4299,10 @@ export class LibraryStore {
     const limitSql = opts.limit ? ` LIMIT ${Math.max(1, Math.trunc(opts.limit))}` : '';
     const rows = targetIds
       ? this.many<RawRow>(
-          `SELECT * FROM tracks WHERE id IN (${targetIds.map(() => '?').join(',') || '0'})${limitSql}`,
+          `SELECT ${TRACK_COLUMNS} FROM tracks WHERE id IN (${targetIds.map(() => '?').join(',') || '0'})${limitSql}`,
           targetIds,
         )
-      : this.many<RawRow>(`SELECT * FROM tracks${limitSql}`);
+      : this.many<RawRow>(`SELECT ${TRACK_COLUMNS} FROM tracks${limitSql}`);
 
     if (targetIds) {
       this.db.run(
@@ -3474,7 +4405,7 @@ export class LibraryStore {
 
     const { where, params } = smartRuleWhere(rule);
     const candidates = this.many<RawRow>(
-      `SELECT * FROM tracks ${where} LIMIT 10000`,
+      `SELECT ${TRACK_COLUMNS} FROM tracks ${where} LIMIT 10000`,
       params,
     ).map(rowToTrack);
 
@@ -3549,7 +4480,7 @@ export class LibraryStore {
   // nearly all of it). Sampling as we step keeps the rows we hold bounded too.
   private runFolderRule(rule: SmartPlaylistRule, sample = 0): RawRow[] {
     const folder = normalizeFolderPath(rule.folderPath);
-    const stmt = this.folderRuleStatement(rule, '*');
+    const stmt = this.folderRuleStatement(rule, TRACK_COLUMNS);
     if (!folder || !stmt) return [];
     const rows: RawRow[] = [];
     let matched = 0;
@@ -3604,7 +4535,7 @@ export class LibraryStore {
       params.push(foldedLikeParam(genreQuery));
     }
     let candidates = this.many<RawRow>(
-      `SELECT * FROM tracks
+      `SELECT ${TRACK_COLUMNS} FROM tracks
         WHERE ${where.join(' AND ')}
         ORDER BY
           CASE WHEN bpm IS NOT NULL THEN 0 ELSE 1 END,
@@ -3642,7 +4573,7 @@ export class LibraryStore {
   buildTasteMix(input: TasteMixInput = {}): Track[] {
     const count = normalizeMixCount(input.count);
     const candidates = this.many<RawRow>(
-      `SELECT * FROM tracks
+      `SELECT ${TRACK_COLUMNS} FROM tracks
         WHERE path IS NOT NULL
           AND avoid_auto_play = 0
           AND missing_since IS NULL
@@ -3732,10 +4663,63 @@ export class LibraryStore {
    * Called once per LibraryStore boot, right after schema is applied.
    */
   private runOneShotMigrations(): void {
+    this.upgradeAlbumRatingsTable();
     this.maybeBackfillAlbumRatingsFromTracks();
     this.maybeQueueMetadataAdoption();
     this.maybeBackfillSearchFold();
     this.dropOrphanedTrackRows();
+  }
+
+  /**
+   * album_ratings used to be unique on the text pair (album_artist, album).
+   * Two albums that share a title and artist (the pieces of a split folder,
+   * several folders with a generic title) then fought over one row: rating one
+   * moved or deleted the other's. Ratings belong to an album key now, so the
+   * table is rebuilt without the pair as its primary key. Rows keep their
+   * values, keys and order. Nothing happens on a table that already has the
+   * new shape.
+   */
+  private upgradeAlbumRatingsTable(): void {
+    const ddl = this.one<{ sql: string }>(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'album_ratings'`,
+    )?.sql ?? '';
+    if (!/PRIMARY\s+KEY\s*\(\s*album_artist\s*,\s*album\s*\)/i.test(ddl)) return;
+    // Older builds can't write ratings into the rebuilt table, so keep the
+    // file as it was before this one-way change. The rebuild only reaches
+    // disk at the next flush, so the copy on disk is still the old shape.
+    this.backupBeforeOneWayUpgrade('before-album-keys');
+    this.db.run(`DROP INDEX IF EXISTS idx_album_ratings_key`);
+    this.db.run(`DROP INDEX IF EXISTS idx_album_ratings_pair`);
+    this.db.run(`ALTER TABLE album_ratings RENAME TO album_ratings_old`);
+    this.db.run(
+      `CREATE TABLE album_ratings (
+         rating_id     INTEGER PRIMARY KEY,
+         album_artist  TEXT NOT NULL COLLATE NOCASE,
+         album         TEXT NOT NULL COLLATE NOCASE,
+         rating        INTEGER NOT NULL DEFAULT 0,
+         rating_score  REAL,
+         updated_at    INTEGER NOT NULL,
+         album_key     TEXT
+       )`,
+    );
+    this.db.run(
+      `INSERT INTO album_ratings (album_artist, album, rating, rating_score, updated_at, album_key)
+       SELECT album_artist, album, rating, rating_score, updated_at, album_key FROM album_ratings_old ORDER BY rowid`,
+    );
+    this.db.run(`DROP TABLE album_ratings_old`);
+    this.db.run(`CREATE INDEX idx_album_ratings_key ON album_ratings(album_key)`);
+    this.db.run(`CREATE INDEX idx_album_ratings_pair ON album_ratings(album_artist, album)`);
+    this.scheduleFlush();
+  }
+
+  /** Copies library.db beside itself once per tag. A failed copy is logged, not fatal. */
+  private backupBeforeOneWayUpgrade(tag: string): void {
+    const target = `${this.file}.${tag}.bak`;
+    try {
+      if (existsSync(this.file) && !existsSync(target)) copyFileSync(this.file, target);
+    } catch (err) {
+      console.error(`[newamp] could not keep a copy of the library before upgrading it (${target}):`, err);
+    }
   }
 
   /**
@@ -3827,8 +4811,8 @@ export class LibraryStore {
    * users saw their ratings vanish from NowPlayingView + the taste-mix
    * boost. This migration walks the tracks table, finds (artist, album)
    * groups where every track shares the same nonzero rating_score, and
-   * inserts a row into album_ratings. INSERT OR IGNORE preserves any
-   * explicit album rating the user has set since 1.5.4.
+   * inserts a row into album_ratings unless the pair already has one, which
+   * preserves any explicit album rating the user has set since 1.5.4.
    */
   private maybeBackfillAlbumRatingsFromTracks(): void {
     const flagKey = 'album_ratings_backfilled_from_tracks_v1';
@@ -3839,18 +4823,24 @@ export class LibraryStore {
     if (existing) return;
     try {
       this.db.run(
-        `INSERT OR IGNORE INTO album_ratings (album_artist, album, rating, rating_score, updated_at)
-         SELECT COALESCE(NULLIF(album_artist, ''), artist) AS album_artist,
-                album AS album,
-                MIN(rating) AS rating,
-                MIN(rating_score) AS rating_score,
-                0 AS updated_at
-           FROM tracks
-          WHERE album != ''
-       GROUP BY COALESCE(NULLIF(album_artist, ''), artist), album
-         HAVING MIN(rating_score) IS NOT NULL
-            AND MIN(rating_score) > 0
-            AND MIN(rating_score) = MAX(rating_score)`,
+        `INSERT INTO album_ratings (album_artist, album, rating, rating_score, updated_at)
+         SELECT g.album_artist, g.album, g.rating, g.rating_score, g.updated_at
+           FROM (
+                 SELECT COALESCE(NULLIF(album_artist, ''), artist) AS album_artist,
+                        album AS album,
+                        MIN(rating) AS rating,
+                        MIN(rating_score) AS rating_score,
+                        0 AS updated_at
+                   FROM tracks
+                  WHERE album != ''
+               GROUP BY COALESCE(NULLIF(album_artist, ''), artist), album
+                 HAVING MIN(rating_score) IS NOT NULL
+                    AND MIN(rating_score) > 0
+                    AND MIN(rating_score) = MAX(rating_score)
+                ) g
+          WHERE NOT EXISTS (
+                SELECT 1 FROM album_ratings r
+                 WHERE r.album_artist = g.album_artist COLLATE NOCASE AND r.album = g.album COLLATE NOCASE)`,
       );
       const inserted = this.db.getRowsModified();
       this.db.run(
@@ -3870,30 +4860,50 @@ export class LibraryStore {
   }
 
   /**
-   * Bulk-read every (album_artist, album) → rating_score row into a Map
-   * keyed on `lowercase(albumArtist)|lowercase(album)`. One SQL hit per
-   * mix call avoids the N+1 that would otherwise happen if each track
-   * looked up its album rating individually.
+   * Bulk-read every album rating into a Map keyed on album_key, newest row
+   * winning. One SQL hit per mix call avoids the N+1 that would otherwise
+   * happen if each track looked up its album rating individually.
    */
   buildAlbumRatingIndex(): Map<string, number> {
-    const rows = this.many<{ album_artist: string; album: string; rating_score: number | null }>(
-      `SELECT album_artist, album, rating_score FROM album_ratings WHERE rating_score IS NOT NULL`,
-      [],
-    );
     const index = new Map<string, number>();
-    for (const row of rows) {
-      index.set(albumKey(row.album_artist, row.album), row.rating_score!);
+    for (const [key, rating] of this.newestRatingsByKey()) {
+      if (rating.ratingScore != null) index.set(key, rating.ratingScore);
     }
     return index;
   }
 
+  // The rating rows by album key. An album can hold more than one row (two
+  // albums that regrouped into one each had their own); the newest is the one
+  // that counts, and the others stay as they were until a clear removes them.
+  private newestRatingsByKey(): Map<string, { rating: number; ratingScore: number | null; updatedAt: number }> {
+    const out = new Map<string, { rating: number; ratingScore: number | null; updatedAt: number }>();
+    const rows = this.many<{ album_key: string; rating: number; rating_score: number | null; updated_at: number }>(
+      `SELECT album_key, rating, rating_score, updated_at FROM album_ratings
+        WHERE album_key IS NOT NULL ORDER BY updated_at ASC, rating_id ASC`,
+    );
+    for (const row of rows) {
+      out.set(row.album_key, { rating: row.rating, ratingScore: row.rating_score, updatedAt: row.updated_at });
+    }
+    return out;
+  }
+
+  // The key a rating written for this album lives under: the explicit key if
+  // the caller has one, else the album the pair stands for, else the key the
+  // pair would get if such an album existed.
+  private ratingKeyFor(albumArtist: string, album: string, key?: string | null): string {
+    const given = String(key ?? '').trim();
+    if (given) return given;
+    return this.resolveAlbumKeys(albumArtist, album)[0] ?? keyForPair(albumArtist, album);
+  }
+
   /**
-   * Read the stored album rating for a specific (album_artist, album) pair.
-   * Returns null if the album has never been rated. Independent of any
-   * per-track rating cascade — the previous "set album rating" cascade
-   * overwrote each track's rating, losing the user's per-song nuance.
+   * Read the stored album rating. Returns null if the album has never been
+   * rated. Independent of any per-track rating cascade — the previous "set
+   * album rating" cascade overwrote each track's rating, losing the user's
+   * per-song nuance. `albumKey` names the album outright; without it the pair
+   * is matched to an album.
    */
-  getAlbumRating(albumArtist: string, album: string): AlbumRating | null {
+  getAlbumRating(albumArtist: string, album: string, albumKey?: string | null): AlbumRating | null {
     const a = (albumArtist ?? '').trim();
     const b = (album ?? '').trim();
     // Missing input is the renderer's bug, not "this album is unrated".
@@ -3905,15 +4915,20 @@ export class LibraryStore {
         `getAlbumRating requires non-empty albumArtist and album (got albumArtist=${JSON.stringify(albumArtist)}, album=${JSON.stringify(album)})`,
       );
     }
+    const key = this.ratingKeyFor(a, b, albumKey);
     const row = this.one<{ rating: number; rating_score: number | null; updated_at: number }>(
-      `SELECT rating, rating_score, updated_at
-         FROM album_ratings
-        WHERE album_artist = ? COLLATE NOCASE
-          AND album        = ? COLLATE NOCASE`,
+      `SELECT rating, rating_score, updated_at FROM album_ratings
+        WHERE album_key = ? ORDER BY updated_at DESC, rating_id DESC LIMIT 1`,
+      [key],
+    ) ?? this.one<{ rating: number; rating_score: number | null; updated_at: number }>(
+      // A row written before it had a key (it gets one when the albums are grouped).
+      `SELECT rating, rating_score, updated_at FROM album_ratings
+        WHERE album_key IS NULL AND album_artist = ? COLLATE NOCASE AND album = ? COLLATE NOCASE`,
       [a, b],
     );
     if (!row) return null;
     return {
+      albumKey: key,
       albumArtist: a,
       album: b,
       rating: row.rating,
@@ -3936,7 +4951,7 @@ export class LibraryStore {
    * `null` return and the UI lied about successful clears for albums
    * that were actually no-ops.
    */
-  setAlbumRatingScore(albumArtist: string, album: string, score: number | null): AlbumRating | null {
+  setAlbumRatingScore(albumArtist: string, album: string, score: number | null, albumKey?: string | null): AlbumRating | null {
     const a = (albumArtist ?? '').trim();
     const b = (album ?? '').trim();
     if (!a || !b) {
@@ -3944,30 +4959,48 @@ export class LibraryStore {
         `setAlbumRatingScore requires non-empty albumArtist and album (got albumArtist=${JSON.stringify(albumArtist)}, album=${JSON.stringify(album)})`,
       );
     }
+    const key = this.ratingKeyFor(a, b, albumKey);
     const nextScore = normalizeTrackRatingScore(score);
     if (nextScore == null) {
+      // Every row the album holds goes, or an older one would take over. A row
+      // that has no key yet goes only if it is written under this very pair;
+      // another album with the same pair keeps the rating it has.
       this.db.run(
         `DELETE FROM album_ratings
-          WHERE album_artist = ? COLLATE NOCASE
-            AND album        = ? COLLATE NOCASE`,
-        [a, b],
+          WHERE album_key = ?
+             OR (album_key IS NULL AND album_artist = ? COLLATE NOCASE AND album = ? COLLATE NOCASE)`,
+        [key, a, b],
       );
       this.scheduleFlush();
       return null;
     }
     const nextStars = Math.max(0, Math.min(5, Math.round(nextScore / 20)));
     const now = Date.now();
-    this.db.run(
-      `INSERT INTO album_ratings (album_artist, album, rating, rating_score, updated_at)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(album_artist, album) DO UPDATE SET
-         rating       = excluded.rating,
-         rating_score = excluded.rating_score,
-         updated_at   = excluded.updated_at`,
-      [a, b, nextStars, nextScore, now],
+    const holder = this.one<{ rating_id: number }>(
+      `SELECT rating_id FROM album_ratings WHERE album_key = ? ORDER BY updated_at DESC, rating_id DESC LIMIT 1`,
+      [key],
+    ) ?? this.one<{ rating_id: number }>(
+      // A row written before it had a key takes the key with the new score.
+      `SELECT rating_id FROM album_ratings
+        WHERE album_key IS NULL AND album_artist = ? COLLATE NOCASE AND album = ? COLLATE NOCASE
+        ORDER BY updated_at DESC, rating_id DESC LIMIT 1`,
+      [a, b],
     );
+    if (holder) {
+      this.db.run(
+        `UPDATE album_ratings SET rating = ?, rating_score = ?, updated_at = ?, album_key = ? WHERE rating_id = ?`,
+        [nextStars, nextScore, now, key, holder.rating_id],
+      );
+    } else {
+      this.db.run(
+        `INSERT INTO album_ratings (album_artist, album, rating, rating_score, updated_at, album_key)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [a, b, nextStars, nextScore, now, key],
+      );
+    }
     this.scheduleFlush();
     return {
+      albumKey: key,
       albumArtist: a,
       album: b,
       rating: nextStars,
@@ -4410,6 +5443,9 @@ export class LibraryStore {
       artist: string;
       album: string;
       album_artist: string;
+      album_key: string | null;
+      album_display: string | null;
+      album_artist_display: string | null;
       duration: number | null;
     }>(
       `SELECT h.track_id,
@@ -4417,6 +5453,9 @@ export class LibraryStore {
               t.artist,
               t.album,
               t.album_artist,
+              t.album_key,
+              t.album_display,
+              t.album_artist_display,
               t.duration
          FROM play_history h
          JOIN tracks t ON t.id = h.track_id
@@ -4428,12 +5467,18 @@ export class LibraryStore {
       artist: string;
       album: string;
       album_artist: string;
+      album_key: string | null;
+      album_display: string | null;
+      album_artist_display: string | null;
     }>(
       `SELECT h.track_id,
               h.skipped_at,
               t.artist,
               t.album,
-              t.album_artist
+              t.album_artist,
+              t.album_key,
+              t.album_display,
+              t.album_artist_display
          FROM skip_history h
          JOIN tracks t ON t.id = h.track_id
         ORDER BY h.skipped_at DESC, h.id DESC`,
@@ -4478,9 +5523,10 @@ export class LibraryStore {
       artistBucket.duration += duration;
       artists.set(artist, artistBucket);
 
-      const album = row.album || 'Unknown Album';
-      const albumArtist = row.album_artist || artist;
-      const albumKey = `${albumArtist}\u0000${album}`;
+      // Named and counted the way the album grid has them, so the same album is the same line here.
+      const album = row.album_display || row.album || 'Unknown Album';
+      const albumArtist = row.album_artist_display || row.album_artist || artist;
+      const albumKey = row.album_key ?? `${albumArtist}\u0000${album}`;
       const albumBucket = albums.get(albumKey) ?? { album, albumArtist, plays: 0, duration: 0, skips: 0 };
       albumBucket.plays += 1;
       albumBucket.duration += duration;
@@ -4506,9 +5552,10 @@ export class LibraryStore {
       artistBucket.skips += 1;
       artists.set(artist, artistBucket);
 
-      const album = row.album || 'Unknown Album';
-      const albumArtist = row.album_artist || artist;
-      const albumKey = `${albumArtist}\u0000${album}`;
+      // Named and counted the way the album grid has them, so the same album is the same line here.
+      const album = row.album_display || row.album || 'Unknown Album';
+      const albumArtist = row.album_artist_display || row.album_artist || artist;
+      const albumKey = row.album_key ?? `${albumArtist}\u0000${album}`;
       const albumBucket = albums.get(albumKey) ?? { album, albumArtist, plays: 0, duration: 0, skips: 0 };
       albumBucket.skips += 1;
       albums.set(albumKey, albumBucket);
@@ -5299,20 +6346,20 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
   }
 
   private resolveArtHash(trackId: number): string | null {
-    const row = this.one<{ art_hash: string | null; album: string | null; album_artist: string | null }>(
-      `SELECT art_hash, album, album_artist FROM tracks WHERE id = ?`,
+    const row = this.one<{ art_hash: string | null; album: string | null; album_key: string | null }>(
+      `SELECT art_hash, album, album_key FROM tracks WHERE id = ?`,
       [trackId],
     );
     if (!row) return null;
     let artHash = row.art_hash;
-    if (!artHash && row.album && row.album_artist) {
+    if (!artHash && row.album && row.album_key) {
       const fallback = this.one<{ art_hash: string | null }>(
         `SELECT art_hash
          FROM tracks
-         WHERE album = ? AND album_artist = ? AND art_hash IS NOT NULL AND art_hash != ''
-         ORDER BY COALESCE(disc_no, 1), COALESCE(track_no, 999999), id
+         WHERE album_key = ? AND art_hash IS NOT NULL AND art_hash != ''
+         ORDER BY COALESCE(disc_inferred, disc_no, 1), COALESCE(track_no, 999999), id
          LIMIT 1`,
-        [row.album, row.album_artist],
+        [row.album_key],
       );
       artHash = fallback?.art_hash ?? null;
     }
@@ -5433,6 +6480,9 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
       throw err;
     }
 
+    // A folder that lost tracks can read as a different album (or a different
+    // artist's), so the albums are grouped again.
+    this.requestRegroup();
     this.scheduleFlush();
     return present;
   }
@@ -5843,23 +6893,26 @@ function trackSortOrder(sort: string | undefined): string {
   }
 }
 
+// The ORDER BY of the album list. It names the list's own result columns:
+// sort_artist (the album artist's sort name, without a leading "The"), album,
+// year, duration and track_count.
 export function albumSortOrder(sort: string | undefined, randomSeed: number | undefined): string {
-  const artistOrder = 'album_artist COLLATE NOCASE, year IS NULL, year, album COLLATE NOCASE';
+  const artistOrder = 'sort_artist, year IS NULL, year, album COLLATE NOCASE';
   switch (sort) {
     case 'album':
-      return 'album COLLATE NOCASE, album_artist COLLATE NOCASE, year IS NULL, year';
+      return 'album COLLATE NOCASE, sort_artist, year IS NULL, year';
     case 'year-desc':
-      return 'year IS NULL, year DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+      return 'year IS NULL, year DESC, sort_artist, album COLLATE NOCASE';
     case 'year-asc':
-      return 'year IS NULL, year ASC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+      return 'year IS NULL, year ASC, sort_artist, album COLLATE NOCASE';
     case 'recent':
-      return 'MAX(mtime) DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+      return 'MAX(mtime) DESC, sort_artist, album COLLATE NOCASE';
     case 'plays':
-      return 'SUM(play_count) DESC, MAX(last_played) DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+      return 'SUM(play_count) DESC, MAX(last_played) DESC, sort_artist, album COLLATE NOCASE';
     case 'duration':
-      return 'duration DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+      return 'duration DESC, sort_artist, album COLLATE NOCASE';
     case 'tracks':
-      return 'track_count DESC, duration DESC, album_artist COLLATE NOCASE, album COLLATE NOCASE';
+      return 'track_count DESC, duration DESC, sort_artist, album COLLATE NOCASE';
     case 'random': {
       const seed = normalizeAlbumRandomSeed(randomSeed);
       // Three-term polynomial scramble. Two seeds that differ by ~1ms must
@@ -5891,7 +6944,7 @@ export function albumSortOrder(sort: string | undefined, randomSeed: number | un
         ((MIN(id) % 46337) * (MIN(id) % 46337) * ${a}) % 2147483647
         + ((MIN(id) % 46337) * ${b}) % 2147483647
         + ${c}
-      ) % 2147483647, MAX(id) % 9973, album_artist COLLATE NOCASE, album COLLATE NOCASE`;
+      ) % 2147483647, MAX(id) % 9973, sort_artist, album COLLATE NOCASE`;
     }
     case 'artist':
     default:
@@ -6533,6 +7586,74 @@ function foldedLikeParam(value: string): string {
   return `%${escapeLike(foldSearchText(value))}%`;
 }
 
+// What an upsert needs to know about the row it is about to update, to tell
+// whether the grouping inputs moved.
+interface PriorIdentityRow {
+  path: string;
+  album: string;
+  artist: string;
+  album_artist: string;
+  album_artist_tag: string | null;
+  compilation: number;
+  disc_no: number | null;
+  year: number | null;
+  album_artist_sort: string | null;
+  artist_sort: string | null;
+  scan_schema: number;
+  album_key: string | null;
+}
+
+// The album, artist or album artist moved: the key the row holds no longer
+// describes it, so it starts over from the plain grouping.
+function identityNeedsReset(prior: PriorIdentityRow, next: IncomingTrack): boolean {
+  return prior.album !== next.album || prior.artist !== next.artist || prior.album_artist !== next.albumArtist;
+}
+
+// How long a change waits for more changes before the albums are regrouped.
+const REGROUP_DEBOUNCE_MS = 2000;
+// An edit made by hand is waited on, so its albums regroup sooner.
+const EDIT_REGROUP_DELAY_MS = 250;
+
+// Every character String.prototype.trim() removes. SQL's TRIM(x) takes off
+// spaces only, so a title of a lone tab looked unkeyed to SQL, blank to the
+// grouping pass, and made every launch regroup the whole library.
+const JS_WHITESPACE_SQL = `char(${[
+  9, 10, 11, 12, 13, 32, 160, 5760, 8192, 8193, 8194, 8195, 8196, 8197, 8198, 8199, 8200, 8201, 8202, 8232, 8233, 8239,
+  8287, 12288, 65279,
+].join(',')})`;
+
+interface AlbumGroupRow {
+  album_key: string;
+  album: string;
+  album_artist: string;
+  album_kind: string | null;
+  album_reason: string | null;
+  year: number | null;
+  sort_artist: string | null;
+  track_count: number;
+  duration: number;
+  art_track: number | null;
+  matched_track?: number;
+  matched_titles?: string | null;
+}
+
+function normalizeAlbumKind(kind: string | null | undefined): AlbumKind {
+  return kind === 'compilation' || kind === 'bucket' || kind === 'split' ? kind : 'album';
+}
+
+// Anything the grouping pass reads changed, so another pass is due.
+function identityInputsChanged(prior: PriorIdentityRow, next: IncomingTrack): boolean {
+  if (identityNeedsReset(prior, next)) return true;
+  if (prior.disc_no !== (next.discNo ?? null) || prior.year !== (next.year ?? null)) return true;
+  const tags = next.tags;
+  if (!tags) return false;
+  return prior.scan_schema < SCAN_SCHEMA_VERSION
+    || prior.album_artist_tag !== tags.albumArtistTag
+    || (prior.compilation === 1) !== tags.compilation
+    || prior.album_artist_sort !== tags.albumArtistSort
+    || prior.artist_sort !== tags.artistSort;
+}
+
 // The rating and play count a reading carries in its tags, as the values a
 // new row starts with. imported says there was anything to consider at all.
 function fileStatsSeed(r: IncomingTrack): { rating: number; ratingScore: number | null; playCount: number; imported: 0 | 1 } {
@@ -6794,8 +7915,10 @@ function buildTasteContext(
  * Linear is fine — non-linearity here would just amplify noise.
  */
 function albumRatingBoost(track: Track, context: TasteContext): number {
-  if (!track.album || !track.albumArtist) return 0;
-  const score = context.albumRatingScores.get(albumKey(track.albumArtist, track.album));
+  if (!track.album) return 0;
+  const key = track.albumKey ?? (track.albumArtist ? keyForPair(track.albumArtist, track.album) : null);
+  if (!key) return 0;
+  const score = context.albumRatingScores.get(key);
   if (score == null) return 0;
   return Math.max(0, Math.min(2, (score / 100) * 2));
 }

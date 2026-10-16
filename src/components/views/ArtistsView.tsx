@@ -169,7 +169,7 @@ export function ArtistsView(): JSX.Element {
 
   const artistLetters = useMemo(() => {
     const set = new Set<string>();
-    for (const artist of artists) set.add(artistFirstLetter(artist.artist));
+    for (const artist of artists) set.add(artistFirstLetter(artist.sortKey || artist.artist));
     return set;
   }, [artists]);
 
@@ -177,7 +177,7 @@ export function ArtistsView(): JSX.Element {
   // list itself rather than looked up in the DOM.
   function jumpToArtistLetter(letter: string): void {
     const container = artistListRef.current;
-    const index = artists.findIndex((artist) => artistFirstLetter(artist.artist) === letter);
+    const index = artists.findIndex((artist) => artistFirstLetter(artist.sortKey || artist.artist) === letter);
     if (!container || index < 0) return;
     const top = Math.floor(index / columns) * ARTIST_ROW_HEIGHT;
     // Smooth-scrolling across thousands of rows reads as lag; only glide short hops.
@@ -308,11 +308,11 @@ export function ArtistsView(): JSX.Element {
               <div className="grid" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
                 {artists.slice(artistRows.startIndex * columns, (artistRows.endIndex + 1) * columns).map((a) => (
                   <button
-                    key={a.artist}
+                    key={a.artistKey}
                     onClick={() => openArtist(a.artist)}
                     className="flex items-center justify-between gap-2 border-b px-4 text-left transition-colors hover:bg-[var(--panel-2)]"
                     style={{ borderColor: 'var(--line)', height: ARTIST_ROW_HEIGHT }}
-                    data-newamp-artist-letter={artistFirstLetter(a.artist)}
+                    data-newamp-artist-letter={artistFirstLetter(a.sortKey || a.artist)}
                   >
                     <span className="truncate text-[13px]">{a.artist}</span>
                     <span className="shrink-0 text-[10px]" style={{ color: 'var(--muted)' }}>
@@ -332,13 +332,13 @@ export function ArtistsView(): JSX.Element {
 }
 
 /**
- * First letter for the rail — deliberately NOT stripping leading articles the
- * way the Albums grid does: getArtists sorts on the raw name (COLLATE NOCASE),
- * so "The Beatles" really does live under T here and the jump targets must
- * agree with the sort order.
+ * First letter for the rail. getArtists orders on the file's sort name, or the
+ * name without a leading "The" and with accents folded, so "The Beatles" lives
+ * under B and "Ólafur Arnalds" under O, and the jump targets must agree.
  */
 function artistFirstLetter(value: string | null | undefined): string {
-  const first = String(value ?? '').trim().charAt(0).toUpperCase();
+  const stripped = String(value ?? '').trim().replace(/^the\s+/i, '');
+  const first = stripped.normalize('NFD').charAt(0).toUpperCase();
   return /[A-Z]/.test(first) ? first : '#';
 }
 

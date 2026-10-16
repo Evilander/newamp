@@ -15,6 +15,7 @@ import { ViewSkeleton } from '../ViewSkeleton';
 import { Note } from '../Icons';
 import { computeGridColumnCount, useVirtualRows } from '../../hooks/useVirtualRows';
 import { appendAlbumPage } from '../../lib/album-pages';
+import { splitIntoDiscs } from '@shared/album-discs';
 import { beginPendingAlbumNav, createPendingAlbumNavSeq, isCurrentPendingAlbumNav } from '../../lib/pending-album-nav';
 
 const ALBUM_PAGE_SIZE = 240;
@@ -68,15 +69,15 @@ const albumViewSnapshot: {
 
 // Album-open used to feel laggy: clicking rendered the detail header
 // immediately but kept the PREVIOUS album's tracks on screen until the IPC
-// query landed. A small LRU keyed by artist+album makes revisits instant, a
+// query landed. A small LRU keyed by the album's key makes revisits instant, a
 // hover prefetch hides the round-trip for first visits, and the effect below
 // clears stale rows so the gap reads as loading instead of wrong data.
 const ALBUM_TRACKS_CACHE_MAX = 24;
 const albumTracksCache = new Map<string, Track[]>();
 const albumTracksInflight = new Map<string, Promise<Track[]>>();
 
-function albumTracksKey(album: Pick<AlbumSummary, 'album' | 'albumArtist'>): string {
-  return `${album.albumArtist}\u0000${album.album}`;
+function albumTracksKey(album: Pick<AlbumSummary, 'albumKey'>): string {
+  return album.albumKey;
 }
 
 function rememberAlbumTracks(key: string, rows: Track[]): void {
@@ -89,14 +90,14 @@ function rememberAlbumTracks(key: string, rows: Track[]): void {
   }
 }
 
-function fetchAlbumTracks(album: Pick<AlbumSummary, 'album' | 'albumArtist'>): Promise<Track[]> {
+function fetchAlbumTracks(album: Pick<AlbumSummary, 'albumKey'>): Promise<Track[]> {
   const key = albumTracksKey(album);
   const cached = albumTracksCache.get(key);
   if (cached) return Promise.resolve(cached);
   const inflight = albumTracksInflight.get(key);
   if (inflight) return inflight;
   const request = api
-    .getAlbumTracks(album.albumArtist, album.album)
+    .getAlbumTracksByKey(album.albumKey)
     .then((rows) => {
       rememberAlbumTracks(key, rows);
       return rows;
@@ -177,7 +178,14 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
       let tracks: Track[] = [];
       let lookupFailed = false;
       try {
-        tracks = await api.getAlbumTracks(target.albumArtist, target.album);
+        // A song that was clicked knows its album's key; the pair alone cannot
+        // tell apart albums that share a title and album artist.
+        const clicked = target.kind === 'album-with-track' && target.trackId != null
+          ? (await api.getTracksByIds([target.trackId]))[0]
+          : undefined;
+        tracks = clicked?.albumKey
+          ? await api.getAlbumTracksByKey(clicked.albumKey)
+          : await api.getAlbumTracks(target.albumArtist, target.album);
       } catch (err) {
         lookupFailed = true;
         if (!isStale()) {
@@ -200,30 +208,40 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
         }
         return;
       }
+      // The pair names the album the way a track carried it. The library knows
+      // it by key, and may have joined it with other folders since, so the
+      // summary (title, artist, rating, why it was grouped) comes from there.
+      const albumKey = tracks[0]?.albumKey ?? '';
+      let summary: AlbumSummary | null = null;
+      if (albumKey) {
+        try {
+          summary = await api.getAlbumSummary(albumKey);
+          if (summary && tracks.some((t) => t.albumKey !== albumKey)) {
+            tracks = await api.getAlbumTracksByKey(albumKey);
+          }
+        } catch (err) {
+          console.error('[newamp] getAlbumSummary failed during pending navigation:', err);
+        }
+      }
+      if (isStale()) return; // a newer request landed while the summary lookup was in flight
       const albumArtist =
-        target.albumArtist || (tracks[0]?.albumArtist ?? tracks[0]?.artist ?? 'Unknown Artist');
-      // Hydrate the stored album rating so the AlbumsView slider shows the
-      // real value when the user lands on the album via pending navigation.
-      // Falls back to 0/null on lookup failure — the slider's fallback
+        summary?.albumArtist ?? (target.albumArtist || (tracks[0]?.albumArtist ?? tracks[0]?.artist ?? 'Unknown Artist'));
+      // Falls back to 0/null without a summary — the slider's fallback
       // (selected.ratingScore ?? albumScore(tracks)) still displays a
       // reasonable value from the per-track scores.
-      let albumRating: { rating: number; ratingScore: number | null } = { rating: 0, ratingScore: null };
-      try {
-        const stored = await api.getAlbumRating(albumArtist, target.album);
-        if (stored) albumRating = { rating: stored.rating, ratingScore: stored.ratingScore };
-      } catch (err) {
-        console.error('[newamp] getAlbumRating failed during pending navigation:', err);
-      }
-      if (isStale()) return; // a newer request landed while the rating lookup was in flight
-      const albumSummary: AlbumSummary = {
+      const albumSummary: AlbumSummary = summary ?? {
+        albumKey,
         album: target.album,
         albumArtist,
+        sortKey: '',
         year: tracks.find((t) => t.year)?.year ?? null,
         trackCount: tracks.length,
         duration: tracks.reduce((sum, t) => sum + (t.duration ?? 0), 0),
         artFromTrackId: tracks.find((t) => t.hasArt)?.id ?? null,
-        rating: albumRating.rating,
-        ratingScore: albumRating.ratingScore,
+        rating: 0,
+        ratingScore: null,
+        albumKind: 'album',
+        albumReason: null,
       };
       setSelected(albumSummary);
       setTracks(tracks);
@@ -357,11 +375,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
     // A restored view snapshot may already hold this album's rows — keep them
     // (and seed the cache) instead of flashing a reload.
     const snap = albumViewSnapshot.tracks;
-    if (
-      snap.length > 0 &&
-      snap[0]!.album === selected.album &&
-      snap[0]!.albumArtist === selected.albumArtist
-    ) {
+    if (snap.length > 0 && snap[0]!.albumKey === selected.albumKey) {
       rememberAlbumTracks(key, snap);
       setTracks(snap);
       return;
@@ -380,7 +394,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [selected?.album, selected?.albumArtist]);
+  }, [selected?.albumKey]);
 
   useLayoutEffect(() => {
     if (selected) return;
@@ -526,6 +540,11 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
       return;
     }
     try {
+      const direct = current.albumKey ? await api.getAlbumSummary(current.albumKey) : null;
+      if (direct) {
+        openAlbum(direct);
+        return;
+      }
       const rows = await api.getAlbums({
         search: current.album,
         sort: 'album',
@@ -571,12 +590,18 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
   // hint, so the user can see "songs avg N" without it driving the slider.
   const selectedAlbumScore = selected?.ratingScore ?? null;
   const selectedTrackAverage = selected ? albumScore(tracks) : null;
+  // A generic-title bucket is a folder of unrelated tracks; its disc numbers
+  // are whatever each file carried, so they are not worth headings.
+  const discSections = useMemo(
+    () => (selected?.albumKind === 'bucket' ? null : splitIntoDiscs(tracks)),
+    [tracks, selected?.albumKind],
+  );
 
   async function setAlbumScore(score: number | null): Promise<void> {
     if (!selected) return;
     let updated;
     try {
-      updated = await api.setAlbumRatingScore(selected.albumArtist, selected.album, score);
+      updated = await api.setAlbumRatingScore(selected.albumArtist, selected.album, score, selected.albumKey);
     } catch (err) {
       // Mirror the read-path catch hardening — surface the failure
       // instead of letting "Rated X 75/100" lie about a write that never
@@ -600,7 +625,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
     );
     setAlbums((rows) =>
       rows.map((row) =>
-        sameText(row.album, selected.album) && sameText(row.albumArtist, selected.albumArtist)
+        row.albumKey === selected.albumKey
           ? { ...row, rating: nextRating, ratingScore: nextScore }
           : row,
       ),
@@ -616,16 +641,45 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
     );
   }
 
+  // "Show as separate albums" and "Group again": the album's key changes, so
+  // the open album goes away and the grid is read again.
+  async function changeAlbumGrouping(split: boolean): Promise<void> {
+    if (!selected) return;
+    const name = selected.album;
+    try {
+      await api.setAlbumSplit(selected.albumKey, split);
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: split ? "Couldn't split the album" : "Couldn't group the album again",
+        detail: err instanceof Error ? err.message : undefined,
+      });
+      return;
+    }
+    albumTracksCache.clear();
+    setSelected(null);
+    setTracks([]);
+    pushToast({
+      tone: 'ok',
+      title: split ? `${name} is shown as separate albums` : `${name} is grouped again`,
+    });
+    try {
+      await reloadAlbumsAfterScan();
+    } catch (err) {
+      console.error('[newamp] album reload after regrouping failed:', err);
+    }
+  }
+
   const albumLetters = useMemo(() => {
     const set = new Set<string>();
-    for (const album of albums) set.add(albumArtistFirstLetter(album.albumArtist));
+    for (const album of albums) set.add(albumArtistFirstLetter(album.sortKey || album.albumArtist));
     return set;
   }, [albums]);
 
   function jumpToAlbumLetter(letter: string): void {
     const container = albumListRef.current;
     if (!container) return;
-    const albumIndex = albums.findIndex((album) => albumArtistFirstLetter(album.albumArtist) === letter);
+    const albumIndex = albums.findIndex((album) => albumArtistFirstLetter(album.sortKey || album.albumArtist) === letter);
     if (albumIndex < 0) return;
     const row = Math.floor(albumIndex / albumGridColumns);
     const offset = ALBUM_GRID_TOP_PADDING + row * ALBUM_GRID_ROW_HEIGHT - 12;
@@ -648,10 +702,30 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
           <div className="min-w-[180px] flex-1">
             <div className="text-lg font-semibold">{selected.album}</div>
             <div className="text-[12px]" style={{ color: 'var(--ink-2)' }}>
-              <ArtistLink artist={selected.albumArtist} color="inherit" />
+              <AlbumArtistName album={selected} />
               {selected.year ? `  ·  ${selected.year}` : ''}
               {`  ·  ${selected.trackCount} tracks  ·  ${formatDuration(selected.duration)}`}
             </div>
+            {selected.albumReason ? (
+              <div
+                className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px]"
+                style={{ color: 'var(--muted)' }}
+                data-newamp-album-reason
+              >
+                <span>{selected.albumReason}</span>
+                {selected.albumKind === 'bucket' ? null : (
+                  <button
+                    type="button"
+                    className="underline underline-offset-2 hover:no-underline"
+                    style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--accent)', font: 'inherit' }}
+                    onClick={() => void changeAlbumGrouping(selected.albumKind !== 'split')}
+                    data-newamp-album-regroup
+                  >
+                    {selected.albumKind === 'split' ? 'Group again' : 'Show as separate albums'}
+                  </button>
+                )}
+              </div>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button className="pxbtn is-primary" onClick={() => void playQueue(tracks, 0)}>
@@ -711,17 +785,53 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
           {tracksLoading && tracks.length === 0 ? (
             <ViewSkeleton variant="rows" count={Math.max(4, Math.min(selected.trackCount || 8, 14))} />
           ) : (
-            <TrackTable
-              tracks={tracks}
-              currentId={current?.id ?? null}
-              highlightTrack={highlightTrack}
-              onPlay={(i) => void playQueue(tracks, i)}
-              onPlayTracks={(selectedTracks) => void playQueue(selectedTracks, 0)}
-              onPlayNext={queueTrackNext}
-              onAddToQueue={addTrackToQueue}
-              onPlayNextTracks={queueTracksNext}
-              onAddTracksToQueue={addTracksToQueue}
-            />
+            discSections ? (
+              discSections.map((section, index) => (
+                <div
+                  key={section.disc}
+                  // One Columns button for the whole album is enough.
+                  className={index > 0 ? '[&_[data-newamp-track-table-toolbar]]:hidden' : undefined}
+                  data-newamp-album-disc-section={section.disc}
+                >
+                  <div
+                    className="flex flex-wrap items-baseline gap-x-3 border-b px-4 py-1.5"
+                    style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}
+                    data-newamp-album-disc-heading
+                  >
+                    <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+                      Disc {section.disc}
+                    </span>
+                    {section.subtitle ? <span className="text-[12px]">{section.subtitle}</span> : null}
+                    <span className="text-[10px] tabular-nums" style={{ color: 'var(--muted)' }}>
+                      {`${section.tracks.length} tracks  ·  ${formatDuration(section.duration)}`}
+                    </span>
+                  </div>
+                  <TrackTable
+                    tracks={section.tracks}
+                    currentId={current?.id ?? null}
+                    highlightTrack={highlightTrack}
+                    onPlay={(i) => void playQueue(tracks, section.start + i)}
+                    onPlayTracks={(selectedTracks) => void playQueue(selectedTracks, 0)}
+                    onPlayNext={queueTrackNext}
+                    onAddToQueue={addTrackToQueue}
+                    onPlayNextTracks={queueTracksNext}
+                    onAddTracksToQueue={addTracksToQueue}
+                  />
+                </div>
+              ))
+            ) : (
+              <TrackTable
+                tracks={tracks}
+                currentId={current?.id ?? null}
+                highlightTrack={highlightTrack}
+                onPlay={(i) => void playQueue(tracks, i)}
+                onPlayTracks={(selectedTracks) => void playQueue(selectedTracks, 0)}
+                onPlayNext={queueTrackNext}
+                onAddToQueue={addTrackToQueue}
+                onPlayNextTracks={queueTracksNext}
+                onAddTracksToQueue={addTracksToQueue}
+              />
+            )
           )}
         </div>
       </div>
@@ -879,7 +989,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
             >
               {visibleAlbums.map((album) => (
                 <AlbumCard
-                  key={`${album.album}::${album.albumArtist}`}
+                  key={album.albumKey}
                   album={album}
                   onOpen={openAlbum}
                 />
@@ -916,7 +1026,7 @@ const AlbumCard = memo(function AlbumCard({
     <div
       className="group flex min-w-0 flex-col gap-1 overflow-hidden"
       style={{ height: ALBUM_GRID_CARD_HEIGHT }}
-      data-newamp-album-artist-letter={albumArtistFirstLetter(album.albumArtist)}
+      data-newamp-album-artist-letter={albumArtistFirstLetter(album.sortKey || album.albumArtist)}
     >
       <button
         onClick={() => onOpen(album)}
@@ -929,7 +1039,7 @@ const AlbumCard = memo(function AlbumCard({
         <div className="w-full truncate pt-1 text-[13px] font-semibold leading-4">{album.album}</div>
       </button>
       <div className="truncate text-[11px] leading-4" style={{ color: 'var(--ink-2)' }}>
-        <ArtistLink artist={album.albumArtist} color="var(--ink-2)" />
+        <AlbumArtistName album={album} color="var(--ink-2)" />
         {album.year ? `  ·  ${album.year}` : ''}
       </div>
       {album.matchedTrackTitles && (
@@ -1075,10 +1185,18 @@ function HeaderOverflow({ children }: { children: ReactNode }): JSX.Element {
 function albumArtistFirstLetter(value: string | null | undefined): string {
   const trimmed = String(value ?? '').trim();
   if (!trimmed) return '#';
-  // Skip leading articles so "The Beatles" jumps to B, not T.
-  const stripped = trimmed.replace(/^(the|a|an)\s+/i, '');
-  const first = stripped.charAt(0).toUpperCase();
+  // The grid sorts without a leading "The" and with accents folded, so the
+  // jump targets do too: "The Beatles" jumps to B, "Ólafur Arnalds" to O.
+  const stripped = trimmed.replace(/^the\s+/i, '');
+  const first = stripped.normalize('NFD').charAt(0).toUpperCase();
   return /[A-Z]/.test(first) ? first : '#';
+}
+
+// A compilation's album artist is a label, not an artist the library has
+// tracks under, so it is not a link.
+function AlbumArtistName({ album, color = 'inherit' }: { album: AlbumSummary; color?: string }): JSX.Element {
+  if (album.albumKind === 'compilation') return <span>{album.albumArtist}</span>;
+  return <ArtistLink artist={album.albumArtist} color={color} />;
 }
 
 // Hoisted at module scope so it's not re-allocated on every AlphabetRail
