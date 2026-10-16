@@ -16,14 +16,14 @@ import { parseMusicServerStreamUrl } from '@shared/music-servers';
 import { AudioEngine, type TrackRouting } from '../audio/engine';
 import type { SampleTransport } from '../audio/sample-transport';
 import { api, inElectron, toAudioUrl, winctl, DEFAULT_SETTINGS } from '../lib/api';
-import { decode as decodeEvilandCode, randomSeedCode, seedCodeFor } from '../visualizer/eviland-randomizer';
+import { canonicalSeedCode, randomSeedCode, seedCodeFor } from '../visualizer/eviland-seed-code';
 import { requestLookBack, requestLookSkip } from '../visualizer/look-requests';
-import { prefetchSongScore } from '../visualizer/eviland-score-feed';
+import { requestScorePrefetch } from '../visualizer/score-prefetch';
 import {
   notifyPlayCompleted,
   notifyLove,
   notifySkip,
-} from '../visualizer/eviland-memory-bridge-registry';
+} from '../visualizer/eviland-active-bridge';
 import { applyTheme } from '../lib/skins';
 import { pushToast } from '../lib/toast';
 import { THEME_REGISTRY } from '@shared/custom-skin';
@@ -1161,7 +1161,7 @@ function prepareEngineTrack(track: Track, settings: AppSettings | null): void {
     trackRouting(track),
   );
   // The visualizer's look-ahead needs the next track analysed before it starts.
-  prefetchSongScore(track.id);
+  requestScorePrefetch(track.id);
 }
 
 async function commitPlaybackAdvance(
@@ -1824,7 +1824,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // shows something that pastes back to the same look. Text that is
       // already a code stays that code; any other text is hashed into one.
       const typed = seed?.trim();
-      const code = typed ? (decodeEvilandCode(typed)?.seed ?? seedCodeFor(typed)) : randomSeedCode();
+      const code = typed ? (canonicalSeedCode(typed) ?? seedCodeFor(typed)) : randomSeedCode();
       // The nonce is bumped inside the functional updater so two rapid calls
       // can't both read the same value and clobber each other's bump.
       set((s) => ({
@@ -1846,12 +1846,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     applyEvilandCode: (code) => {
       const trimmed = (code ?? '').trim();
       if (!trimmed) return false;
-      // decode() returns null for unrecognisable codes — surface that to the
-      // caller so the UI can toast/inline-error without us having to throw.
-      const decoded = decodeEvilandCode(trimmed);
-      if (!decoded) return false;
+      // Null for unrecognisable codes — surface that to the caller so the UI
+      // can toast/inline-error without us having to throw.
+      const canonical = canonicalSeedCode(trimmed);
+      if (!canonical) return false;
       set((s) => ({
-        evilandSeed: decoded.seed ?? trimmed,
+        evilandSeed: canonical,
         evilandConfigNonce: s.evilandConfigNonce + 1,
         evilandDirector: false,
       }));
