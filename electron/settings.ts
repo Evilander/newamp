@@ -67,6 +67,7 @@ const DEFAULTS: AppSettings = {
   performanceTier: 'auto',
   ambientReactivity: 'auto',
   waveformSeekBar: true,
+  backgroundAnalysis: true,
 };
 
 // A stored skin written by an older build can hold values the current grammar
@@ -400,6 +401,7 @@ export class SettingsStore {
       performanceTier: normalizePerformanceTier(parsed.performanceTier),
       ambientReactivity: normalizeAmbientReactivity(parsed.ambientReactivity),
       waveformSeekBar: parsed.waveformSeekBar !== false,
+      backgroundAnalysis: parsed.backgroundAnalysis !== false,
     };
   }
 
@@ -543,6 +545,9 @@ export class SettingsStore {
       waveformSeekBar: patch.waveformSeekBar === undefined
         ? this.state.waveformSeekBar
         : patch.waveformSeekBar !== false,
+      backgroundAnalysis: patch.backgroundAnalysis === undefined
+        ? this.state.backgroundAnalysis
+        : patch.backgroundAnalysis !== false,
     };
     this.state = next;
     // resumeState is the ~3s playback-position autosave (see

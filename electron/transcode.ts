@@ -15,7 +15,7 @@ import type {
   TrackWavBatchExportResult,
 } from '../shared/types.js';
 
-const REPLAYGAIN_TARGET_LUFS = -18;
+export const REPLAYGAIN_TARGET_LUFS = -18;
 const SUPPORTED_AUDIO_EXPORT_FORMATS = new Set<AudioExportFormat>(['wav', 'mp3', 'flac', 'opus']);
 
 const CHROMIUM_NATIVE_EXTS = new Set([
@@ -486,7 +486,7 @@ function ffmpegInputArg(args: string[]): string {
   return args[args.indexOf('-i') + 1] ?? '';
 }
 
-function parseEbur128IntegratedLufs(stderr: string): number {
+export function parseEbur128IntegratedLufs(stderr: string): number {
   const matches = [...stderr.matchAll(/I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/g)];
   const last = matches[matches.length - 1];
   const value = last ? Number(last[1]) : NaN;
@@ -494,7 +494,7 @@ function parseEbur128IntegratedLufs(stderr: string): number {
   return value;
 }
 
-function normalizeReplayGainDb(value: number): number {
+export function normalizeReplayGainDb(value: number): number {
   if (!Number.isFinite(value)) throw new Error('ReplayGain analysis did not produce a finite value.');
   return Math.max(-30, Math.min(30, Number(value.toFixed(2))));
 }

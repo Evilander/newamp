@@ -90,6 +90,15 @@ import {
   type RegroupWrite,
 } from './album-identity.js';
 import { dnaCosineSimilarity, isValidTrackDna, type TrackDna } from '../shared/audio-dna.js';
+import {
+  ANALYSIS_ELIGIBLE_SQL,
+  ANALYSIS_OWED_SQL,
+  analysisWork,
+  anyWork,
+  hasKnownBpm,
+  mergeAnalysisRecord,
+} from '../shared/analysis.js';
+import type { AnalysisCounts, AnalysisSave, AnalysisTarget } from './analysis-queue.js';
 import { type VisualMemoryPlan, isValidVisualMemoryPlan, type VisualMemoryStats } from '../shared/visual-memory.js';
 import { applySeedVibeGate, createSeedVibeContext, seedVibeSimilarity } from '../shared/seed-vibe.js';
 import {
@@ -260,7 +269,10 @@ CREATE TABLE IF NOT EXISTS tracks (
   album_kind   TEXT NOT NULL DEFAULT 'album',
   album_reason TEXT,
   album_year   INTEGER,
-  album_sort_key TEXT
+  album_sort_key TEXT,
+  -- What the background analysis wrote or tried for this track, by analyzer
+  -- version (shared/analysis.ts). NULL: it has not touched the track.
+  analysis_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_album  ON tracks(album);
@@ -591,6 +603,7 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [table: string, column: string, defi
   ['tracks', 'album_reason', 'TEXT'],
   ['tracks', 'album_year', 'INTEGER'],
   ['tracks', 'album_sort_key', 'TEXT'],
+  ['tracks', 'analysis_json', 'TEXT'],
   ['album_ratings', 'album_key', 'TEXT'],
   ['track_metadata_overrides', 'source_known', 'INTEGER NOT NULL DEFAULT 1'],
   ['smart_rules', 'min_rating', 'INTEGER'],
@@ -810,7 +823,7 @@ function rowToTrack(r: RawRow): Track {
     lastPlayed: r.last_played,
     skipCount: Math.max(0, Math.trunc(Number(r.skip_count) || 0)),
     lastSkipped: r.last_skipped,
-    bpm: r.bpm,
+    bpm: hasKnownBpm(r.bpm) ? r.bpm : null,
     key: r.key,
     replayGainTrackDb: r.replaygain_track_db,
     replayGainAlbumDb: r.replaygain_album_db,
@@ -1002,7 +1015,8 @@ export class LibraryStore {
   private artDir: string;
   private playlistArtDir: string;
   private persistTimer: NodeJS.Timeout | null = null;
-  private persistTimerSlow = false;
+  // 0 = fast, 1 = slow, 2 = bulk; see scheduleFlush.
+  private persistTimerTier = 0;
   private dirty = false;
   // Guards the async (tmp+rename) flush path: at most one write in flight, with
   // a flag to re-run immediately after if more changes land while it's writing.
@@ -1238,7 +1252,7 @@ export class LibraryStore {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
-      this.persistTimerSlow = false;
+      this.persistTimerTier = 0;
     }
     if (this.closed) {
       await this.waitForPendingWrites();
@@ -1264,7 +1278,7 @@ export class LibraryStore {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
-      this.persistTimerSlow = false;
+      this.persistTimerTier = 0;
     }
     if (this.regroupTimer) {
       clearTimeout(this.regroupTimer);
@@ -1282,27 +1296,30 @@ export class LibraryStore {
 
   // recordPlay/recordSkip call this with `slow: true` — they fire on every
   // track change/skip, and a full db.export() + write on that cadence is real
-  // main-thread cost. Every other mutation keeps the tight 800ms debounce.
-  private scheduleFlush(opts?: { slow?: boolean }): void {
+  // main-thread cost. Background analysis uses `bulk: true`: it writes for
+  // hours, its results can be recomputed, and every flush exports and rewrites
+  // the whole file, so it waits ten minutes (quit and shutdown still flush).
+  // Every other mutation keeps the tight 800ms debounce.
+  private scheduleFlush(opts?: { slow?: boolean; bulk?: boolean }): void {
     if (this.closed || this.persistBlocked) return;
     this.dirty = true;
-    const slow = !!opts?.slow;
+    const tier = opts?.bulk ? 2 : opts?.slow ? 1 : 0;
     if (this.persistTimer) {
-      // A fast-tier write arriving while a slow-tier flush is pending must not
-      // sit behind the full 30s window — cancel and rearm at the fast delay.
-      if (!slow && this.persistTimerSlow) {
+      // A faster write arriving while a slower flush is pending must not sit
+      // behind the longer window — cancel and rearm at the faster delay.
+      if (tier < this.persistTimerTier) {
         clearTimeout(this.persistTimer);
         this.persistTimer = null;
       } else {
         return;
       }
     }
-    this.persistTimerSlow = slow;
+    this.persistTimerTier = tier;
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
-      this.persistTimerSlow = false;
+      this.persistTimerTier = 0;
       void this.flushAsync();
-    }, slow ? 30_000 : 800);
+    }, tier === 2 ? 600_000 : tier === 1 ? 30_000 : 800);
   }
 
   // Async atomic flush for the debounced path: db.export() is sql.js's only
@@ -1370,7 +1387,7 @@ export class LibraryStore {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
-      this.persistTimerSlow = false;
+      this.persistTimerTier = 0;
     }
     this.flushSeq += 1;
     atomicWriteFileSync(this.file, Buffer.from(this.db.export()));
@@ -1468,10 +1485,17 @@ export class LibraryStore {
            duration=COALESCE(excluded.duration, tracks.duration),
            bitrate=excluded.bitrate,
            sample_rate=excluded.sample_rate,
-           bpm=excluded.bpm,
-           key=excluded.key,
-           replaygain_track_db=excluded.replaygain_track_db,
-           replaygain_album_db=excluded.replaygain_album_db,
+           bpm=CASE WHEN excluded.bpm IS NOT NULL THEN excluded.bpm
+                    WHEN tracks.size IS excluded.size AND tracks.mtime = excluded.mtime THEN tracks.bpm END,
+           key=CASE WHEN excluded.key IS NOT NULL THEN excluded.key
+                    WHEN tracks.size IS excluded.size AND tracks.mtime = excluded.mtime THEN tracks.key END,
+           replaygain_track_db=CASE WHEN excluded.replaygain_track_db IS NOT NULL THEN excluded.replaygain_track_db
+                    WHEN tracks.size IS excluded.size AND tracks.mtime = excluded.mtime THEN tracks.replaygain_track_db END,
+           replaygain_album_db=CASE WHEN excluded.replaygain_album_db IS NOT NULL THEN excluded.replaygain_album_db
+                    WHEN tracks.size IS excluded.size AND tracks.mtime = excluded.mtime THEN tracks.replaygain_album_db END,
+           dna_json=CASE WHEN tracks.size IS excluded.size AND tracks.mtime = excluded.mtime THEN tracks.dna_json END,
+           dna_analyzed_at=CASE WHEN tracks.size IS excluded.size AND tracks.mtime = excluded.mtime THEN tracks.dna_analyzed_at END,
+           analysis_json=CASE WHEN tracks.size IS excluded.size AND tracks.mtime = excluded.mtime THEN tracks.analysis_json END,
            size=excluded.size,
            mtime=excluded.mtime,
            has_art=CASE WHEN excluded.art_hash IS NULL THEN tracks.has_art ELSE excluded.has_art END,
@@ -1650,6 +1674,8 @@ export class LibraryStore {
     // upsertTracks writes path/duration/has_art — cached folder-row columns.
     this.invalidateFolderTrackRowsCache();
     this.invalidateLibraryHealthCache();
+    // A changed file loses its analysis, DNA included.
+    this.invalidateDnaIndexCache();
     this.scheduleFlush();
   }
 
@@ -4545,7 +4571,7 @@ export class LibraryStore {
       `SELECT ${TRACK_COLUMNS} FROM tracks
         WHERE ${where.join(' AND ')}
         ORDER BY
-          CASE WHEN bpm IS NOT NULL THEN 0 ELSE 1 END,
+          CASE WHEN bpm > 0 THEN 0 ELSE 1 END,
           CASE WHEN key IS NOT NULL AND trim(key) <> '' THEN 0 ELSE 1 END,
           loved DESC,
           play_count DESC,
@@ -4674,7 +4700,23 @@ export class LibraryStore {
     this.maybeBackfillAlbumRatingsFromTracks();
     this.maybeQueueMetadataAdoption();
     this.maybeBackfillSearchFold();
+    this.clearZeroBpm();
     this.dropOrphanedTrackRows();
+  }
+
+  /**
+   * A BPM tag of 0 means "not set", not a tempo, but earlier scans stored it as
+   * one, so "slow" tempo filters matched every track tagged that way. They
+   * read as unknown now; the scanner no longer stores them.
+   */
+  private clearZeroBpm(): void {
+    const flagKey = 'bpm_zero_cleared_v1';
+    if (this.one(`SELECT 1 FROM library_meta WHERE key = ?`, [flagKey])) return;
+    this.db.run(`UPDATE tracks SET bpm = NULL WHERE bpm IS NOT NULL AND bpm <= 0`);
+    const cleared = this.db.getRowsModified();
+    this.db.run(`INSERT OR REPLACE INTO library_meta (key, value) VALUES (?, ?)`, [flagKey, String(Date.now())]);
+    if (cleared > 0) console.log(`[newamp] ${cleared} tracks with a BPM of 0 are now unknown`);
+    this.scheduleFlush();
   }
 
   /**
@@ -5102,6 +5144,123 @@ export class LibraryStore {
         return track ? { track, score: Math.round(entry.score * 1000) / 1000 } : null;
       })
       .filter((row): row is SimilarTrack => row != null);
+  }
+
+  // ── Background analysis (electron/analysis-queue.ts) ───────────────────────
+
+  /** Tracks that still owe tempo, key, loudness or DNA, the ones the listener cares about first. */
+  pendingAnalysisIds(): number[] {
+    return this.many<{ id: number }>(
+      `SELECT id FROM tracks WHERE ${ANALYSIS_ELIGIBLE_SQL} AND ${ANALYSIS_OWED_SQL}
+        ORDER BY (loved * 4 + (rating > 0) * 2 + MIN(play_count, 5)) DESC, COALESCE(last_played, 0) DESC, mtime DESC, id`,
+    ).map((row) => row.id);
+  }
+
+  /** One track as the analysis should see it now; null when it is gone or owes nothing. */
+  analysisTarget(id: number): AnalysisTarget | null {
+    const row = this.one<{
+      id: number;
+      path: string;
+      bpm: number | null;
+      key: string | null;
+      replaygain_track_db: number | null;
+      dna_json: string | null;
+      analysis_json: string | null;
+    }>(
+      `SELECT id, path, bpm, key, replaygain_track_db, dna_json, analysis_json FROM tracks
+        WHERE id = ? AND ${ANALYSIS_ELIGIBLE_SQL}`,
+      [Math.trunc(Number(id))],
+    );
+    if (!row) return null;
+    const work = analysisWork({
+      bpm: row.bpm,
+      key: row.key,
+      replayGainTrackDb: row.replaygain_track_db,
+      dnaVersion: dnaVersionOf(row.dna_json),
+      analysisJson: row.analysis_json,
+    });
+    return anyWork(work) ? { id: row.id, path: row.path, work } : null;
+  }
+
+  /**
+   * Writes finished analyses. Only the fields a result carries are touched, so
+   * a tempo read from the file's own tags stays; each track's record notes what
+   * was run. One transaction and one slow-tier flush for the batch.
+   */
+  saveAnalysis(saves: AnalysisSave[]): void {
+    if (!saves.length) return;
+    let dnaChanged = false;
+    let gainChanged = false;
+    this.db.run('BEGIN');
+    try {
+      for (const save of saves) {
+        const row = this.one<{ analysis_json: string | null }>(
+          `SELECT analysis_json FROM tracks WHERE id = ?`,
+          [save.id],
+        );
+        if (!row) continue;
+        const sets = ['analysis_json = ?'];
+        const params: Array<string | number> = [mergeAnalysisRecord(row.analysis_json, save.touched, save.integratedLufs)];
+        if (hasKnownBpm(save.bpm)) {
+          sets.push('bpm = ?');
+          params.push(save.bpm);
+        }
+        if (save.key) {
+          sets.push('key = ?');
+          params.push(save.key);
+        }
+        const gain = save.replayGainTrackDb == null ? null : normalizeReplayGainDb(save.replayGainTrackDb);
+        if (gain != null) {
+          sets.push('replaygain_track_db = ?');
+          params.push(gain);
+          gainChanged = true;
+        }
+        if (save.dna && isValidTrackDna(save.dna)) {
+          sets.push('dna_json = ?', 'dna_analyzed_at = ?');
+          params.push(JSON.stringify(save.dna), Date.now());
+          dnaChanged = true;
+        }
+        this.db.run(`UPDATE tracks SET ${sets.join(', ')} WHERE id = ?`, [...params, save.id]);
+      }
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
+    if (dnaChanged) this.invalidateDnaIndexCache();
+    if (gainChanged) this.invalidateLibraryHealthCache();
+    // Re-derivable, and written for hours on end, so it rides the bulk tier.
+    this.scheduleFlush({ bulk: true });
+  }
+
+  /** How much of the library the analysis has covered, for the progress line. */
+  analysisCounts(): AnalysisCounts {
+    const row = this.one<{
+      total: number;
+      owed: number | null;
+      tempo: number | null;
+      keyed: number | null;
+      loud: number | null;
+      dna: number | null;
+    }>(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN ${ANALYSIS_OWED_SQL} THEN 1 ELSE 0 END) AS owed,
+              SUM(CASE WHEN bpm > 0 THEN 1 ELSE 0 END) AS tempo,
+              SUM(CASE WHEN key IS NOT NULL AND trim(key) <> '' THEN 1 ELSE 0 END) AS keyed,
+              SUM(CASE WHEN replaygain_track_db IS NOT NULL THEN 1 ELSE 0 END) AS loud,
+              SUM(CASE WHEN dna_json IS NOT NULL THEN 1 ELSE 0 END) AS dna
+         FROM tracks WHERE ${ANALYSIS_ELIGIBLE_SQL}`,
+    );
+    return {
+      total: Number(row?.total ?? 0),
+      owed: Number(row?.owed ?? 0),
+      coverage: {
+        tempo: Number(row?.tempo ?? 0),
+        key: Number(row?.keyed ?? 0),
+        loudness: Number(row?.loud ?? 0),
+        dna: Number(row?.dna ?? 0),
+      },
+    };
   }
 
   getDnaStats(): { analyzed: number; missing: number; total: number } {
@@ -7292,7 +7451,7 @@ function pushMissingFilter(where: string[], value: string, has: boolean): void {
     art: `has_art = 0`,
     duration: `(duration IS NULL OR duration <= 0)`,
     genre: `(genre IS NULL OR trim(genre) = '')`,
-    bpm: `bpm IS NULL`,
+    bpm: `(bpm IS NULL OR bpm <= 0)`,
     key: `(key IS NULL OR trim(key) = '')`,
     replaygain: `(replaygain_track_db IS NULL AND replaygain_album_db IS NULL)`,
     // missing:file lists what the library watcher found gone; has:file the rest.
@@ -7320,6 +7479,17 @@ function normalizeTrackRatingScore(value: unknown): number | null {
   // Quantize to one decimal place so SQLite never persists noisy floats.
   const clamped = Math.max(0, Math.min(100, score));
   return Math.round(clamped * 10) / 10;
+}
+
+/** The v inside a stored DNA blob: null when there is none, 0 when it cannot be read. */
+function dnaVersionOf(json: string | null): number | null {
+  if (json == null) return null;
+  try {
+    const v = (JSON.parse(json) as { v?: unknown } | null)?.v;
+    return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+  } catch {
+    return 0;
+  }
 }
 
 function normalizeReplayGainDb(value: unknown): number | null {
@@ -7861,11 +8031,11 @@ function smartRuleWhere(rule: SmartPlaylistRule): { where: string; params: unkno
     params.push(rule.maxYear);
   }
   if (rule.minBpm != null) {
-    where.push('bpm IS NOT NULL AND bpm >= ?');
+    where.push('bpm > 0 AND bpm >= ?');
     params.push(rule.minBpm);
   }
   if (rule.maxBpm != null) {
-    where.push('bpm IS NOT NULL AND bpm <= ?');
+    where.push('bpm > 0 AND bpm <= ?');
     params.push(rule.maxBpm);
   }
   if (rule.minRating != null) {
