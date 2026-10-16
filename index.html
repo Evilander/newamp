@@ -10,7 +10,10 @@
          frame. frame-src falls back to default-src 'self', which permits it. -->
     <!-- Fonts are self-hosted woff2 (see src/styles/tokens.css), so the Google
          Fonts origins are gone from style-src/font-src entirely. -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: file: https: newart: newplaylistart:; media-src 'self' blob: file: https: newamp:; connect-src 'self' https: newamp: newart: newplaylistart: http://localhost:5173 ws://localhost:5173; object-src 'none'; base-uri 'self'" />
+    <!-- media-src also takes plain http: because many internet radio stations
+         only stream over http. Nothing else gets http:; the renderer plays those
+         streams but never fetches them, so connect-src stays https-only. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob: file: https: newart: newplaylistart:; media-src 'self' blob: file: http: https: newamp:; connect-src 'self' https: newamp: newart: newplaylistart: http://localhost:5173 ws://localhost:5173; object-src 'none'; base-uri 'self'" />
     <title>NewAmp</title>
   </head>
   <body class="antialiased font-display select-none">
