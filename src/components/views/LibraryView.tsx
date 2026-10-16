@@ -18,11 +18,12 @@ import type {
   LibraryPruneMissingResult,
   MetadataLookupCandidate,
   SavedPlaylist,
+  ScanProgress,
   Track,
   TrackMetadataField,
   TrackMetadataPatchInput,
 } from '@shared/types';
-import { buildArchiveCompass, duplicateExactTotal, missingMetadataTotal } from '@shared/archive-compass';
+import { buildArchiveCompass, duplicateExactTotal, missingMetadataTotal, missingTagTotal } from '@shared/archive-compass';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime, highlight, shortcutLabel } from '../../lib/format';
 import { api } from '../../lib/api';
@@ -72,10 +73,17 @@ type Sort =
 const useMeasureEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
 const LIBRARY_PAGE_SIZE = 600;
+// Pages after the first are bigger. Only a dozen rows are ever drawn, so what a
+// page costs is the query, and fewer reads reach the end of a large library.
+const LIBRARY_MORE_PAGE_SIZE = 2000;
+// How many rows from the end of the loaded list the next page is fetched.
+const LIBRARY_AUTO_LOAD_ROWS = 40;
 // Rows drawn above and below the visible ones. The table needs to know it to
 // find the first row actually on screen.
 const LIBRARY_ROW_OVERSCAN = 6;
 const LIBRARY_SEARCH_DEBOUNCE_MS = 180;
+const LIBRARY_SEARCH_DEBOUNCE_MIN_MS = 60;
+export const LIBRARY_SCAN_REFRESH_MS = 1500;
 const LIBRARY_OVERVIEW_OPEN_KEY = 'newamp:library:overview-open';
 
 // The stats and health report is closed until asked for, so the track list is
@@ -96,6 +104,106 @@ function writeOverviewOpen(open: boolean): void {
   }
 }
 
+/**
+ * The next page of the track list, appended without repeats. Pages are read by
+ * offset, so tracks a scan adds while the list is open push everything down and
+ * the next page starts with tracks already shown. Those are dropped here. The
+ * caller advances its offset by the rows it read, not by what was kept, so
+ * paging always moves on and an addition never makes it skip a track.
+ */
+export function appendTrackPage(current: Track[], page: readonly Track[]): Track[] {
+  const seen = new Set(current.map((track) => track.id));
+  const fresh = page.filter((track) => {
+    if (seen.has(track.id)) return false;
+    seen.add(track.id);
+    return true;
+  });
+  return fresh.length ? [...current, ...fresh] : current;
+}
+
+/** Whether the list has scrolled close enough to its last loaded row to fetch the next page. */
+export function wantsNextTrackPage(state: {
+  endIndex: number;
+  loaded: number;
+  hasMore: boolean;
+  busy: boolean;
+  failed: boolean;
+}): boolean {
+  if (!state.hasMore || state.busy || state.failed || state.loaded <= 0) return false;
+  return state.loaded - 1 - state.endIndex <= LIBRARY_AUTO_LOAD_ROWS;
+}
+
+/**
+ * How long to wait after a keystroke before searching. The wait keeps typing
+ * from stacking up queries the main process runs one after another, so it
+ * follows what a query costs: twice the last one, between 60 and 180 ms. A
+ * small library answers in a few milliseconds and has nothing to protect; until
+ * a query has been timed the wait is the long one.
+ */
+export function searchDebounceMs(lastQueryMs: number | null): number {
+  if (lastQueryMs == null || !Number.isFinite(lastQueryMs)) return LIBRARY_SEARCH_DEBOUNCE_MS;
+  return Math.max(LIBRARY_SEARCH_DEBOUNCE_MIN_MS, Math.min(LIBRARY_SEARCH_DEBOUNCE_MS, Math.round(lastQueryMs * 2)));
+}
+
+export interface ScanRefreshClock {
+  now: () => number;
+  setTimeout: (run: () => void, ms: number) => unknown;
+  clearTimeout: (id: unknown) => void;
+}
+
+const windowClock: ScanRefreshClock = {
+  now: () => Date.now(),
+  setTimeout: (run, ms) => window.setTimeout(run, ms),
+  clearTimeout: (id) => window.clearTimeout(id as number),
+};
+
+/**
+ * Turns scan progress events into list refreshes: one at most every
+ * `intervalMs` while the scan runs, and one straight away when it finishes. A
+ * burst's last event is never dropped, it fires once the interval is up. Events
+ * that add nothing to show, the folder walk before anything was read and files
+ * skipped as unchanged, don't count.
+ */
+export function createScanRefreshGate(
+  refresh: (finished: boolean) => void,
+  intervalMs: number,
+  clock: ScanRefreshClock = windowClock,
+): { push: (progress: ScanProgress) => void; dispose: () => void } {
+  let timer: unknown = null;
+  let lastFired = Number.NEGATIVE_INFINITY;
+  let written = 0;
+  let refreshedWritten = 0;
+  const cancelTimer = (): void => {
+    if (timer == null) return;
+    clock.clearTimeout(timer);
+    timer = null;
+  };
+  const fire = (finished: boolean): void => {
+    cancelTimer();
+    lastFired = clock.now();
+    refreshedWritten = written;
+    refresh(finished);
+  };
+  return {
+    push(progress) {
+      if (progress.done) {
+        fire(true);
+        written = 0;
+        refreshedWritten = 0;
+        return;
+      }
+      written = progress.parsed ?? progress.scanned;
+      // A count that went down is a new scan; one that was cancelled sent no end.
+      if (written < refreshedWritten) refreshedWritten = 0;
+      if (written === refreshedWritten || timer != null) return;
+      const wait = lastFired + intervalMs - clock.now();
+      if (wait <= 0) fire(false);
+      else timer = clock.setTimeout(() => fire(false), wait);
+    },
+    dispose: cancelTimer,
+  };
+}
+
 export function LibraryView(): JSX.Element {
   const [tracks, setTracks] = useState<Track[]>([]);
   const tracksRef = useRef(tracks);
@@ -103,8 +211,14 @@ export function LibraryView(): JSX.Element {
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMoreTracks, setHasMoreTracks] = useState(false);
+  const [loadMoreFailed, setLoadMoreFailed] = useState(false);
   const [matchingTrackCount, setMatchingTrackCount] = useState(0);
+  const matchingCountRef = useRef(matchingTrackCount);
+  matchingCountRef.current = matchingTrackCount;
   const [summaryRefreshKey, setSummaryRefreshKey] = useState(0);
+  // Bumped by a scan that has added tracks; re-runs the track load for the
+  // same query without blanking the list.
+  const [scanRevision, setScanRevision] = useState(0);
   const [sort, setSort] = useState<Sort>('artist');
   const [dropActive, setDropActive] = useState(false);
   const [dropMessage, setDropMessage] = useState<string | null>(null);
@@ -137,7 +251,9 @@ export function LibraryView(): JSX.Element {
   const commandBarRef = useRef<HTMLDivElement>(null);
   const healthHelp = useViewHelp('library-health');
   const search = usePlayerStore((s) => s.searchQuery);
-  const libraryQuery = useDebouncedValue(search, LIBRARY_SEARCH_DEBOUNCE_MS);
+  // How long the last track query took, start to answer; see searchDebounceMs.
+  const queryMsRef = useRef<number | null>(null);
+  const libraryQuery = useDebouncedValue(search, searchDebounceMs(queryMsRef.current));
   const setSearch = usePlayerStore((s) => s.setSearchQuery);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
@@ -154,17 +270,35 @@ export function LibraryView(): JSX.Element {
   // can detect it resolved against a stale query and drop its page instead of
   // appending rows from a search the user already left.
   const loadGenerationRef = useRef(0);
+  // Rows read from the library for the current list: the next page's offset.
+  // It counts rows read, not rows kept, so repeats dropped by appendTrackPage
+  // don't hold it back, and it comes down when rows leave the list.
+  const rowsReadRef = useRef(0);
+  const loadMoreInFlightRef = useRef(false);
+  const listKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     loadGenerationRef.current += 1;
-    setLoading(true);
+    // A scan that added tracks runs this again for the same query and sort. The
+    // list stays on screen then, with its scroll position, instead of going
+    // blank for "Loading...".
+    const listKey = `${libraryQuery}\u0000${sort}`;
+    const refetch = listKeyRef.current === listKey;
+    listKeyRef.current = listKey;
+    if (!refetch) {
+      setLoading(true);
+      setLoadMoreFailed(false);
+    }
+    const startedAt = performance.now();
     Promise.all([
       api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
       api.getTrackCount({ search: libraryQuery, sort }),
     ])
       .then(([rows, total]) => {
+        queryMsRef.current = performance.now() - startedAt;
         if (!cancelled) {
+          rowsReadRef.current = rows.length;
           setTracks(rows);
           setMatchingTrackCount(total);
           setHasMoreTracks(rows.length < total);
@@ -173,15 +307,17 @@ export function LibraryView(): JSX.Element {
       })
       .catch(() => {
         if (!cancelled) {
-          setMatchingTrackCount(0);
-          setHasMoreTracks(false);
+          if (!refetch) {
+            setMatchingTrackCount(0);
+            setHasMoreTracks(false);
+          }
           setLoading(false);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [libraryQuery, sort]);
+  }, [libraryQuery, sort, scanRevision]);
 
   useEffect(() => {
     let cancelled = false;
@@ -198,6 +334,19 @@ export function LibraryView(): JSX.Element {
   }, [summaryRefreshKey]);
 
   const hasLibrary = stats.tracks > 0;
+
+  // A scan started anywhere, the empty-library screen included, fills the list
+  // as it goes and settles it when it ends. The subscription is made once and
+  // reaches the current render's closure through the ref.
+  const refreshAfterScanRef = useRef<(finished: boolean) => void>(() => undefined);
+  useEffect(() => {
+    const gate = createScanRefreshGate((finished) => refreshAfterScanRef.current(finished), LIBRARY_SCAN_REFRESH_MS);
+    const off = api.onScanProgress((progress) => gate.push(progress));
+    return () => {
+      off();
+      gate.dispose();
+    };
+  }, []);
 
   // Same terminal-gesture safety net as App.tsx: a drop outside this pane, an
   // Escape, or an alt-tab/window blur mid-drag reaches no handler here, so
@@ -274,36 +423,44 @@ export function LibraryView(): JSX.Element {
   }
 
   async function loadMoreTracks(): Promise<void> {
-    if (loadingMore || !hasMoreTracks) return;
+    if (loadMoreInFlightRef.current || !hasMoreTracks) return;
     const generation = loadGenerationRef.current;
+    loadMoreInFlightRef.current = true;
+    setLoadMoreFailed(false);
     setLoadingMore(true);
     try {
+      // The offset counts rows read, not tracks shown. A scan that adds tracks
+      // above this point shifts the rest down, so a page can repeat what is
+      // already shown; appendTrackPage drops those and the offset still moves a
+      // whole page on.
       const rows = await api.getTracks({
         search: libraryQuery,
         sort,
-        limit: LIBRARY_PAGE_SIZE,
-        offset: tracks.length,
+        limit: LIBRARY_MORE_PAGE_SIZE,
+        offset: rowsReadRef.current,
       });
       // The query/sort changed while this page was in flight — these rows belong
       // to a search the user already left; drop them rather than polluting the
       // current results.
       if (generation !== loadGenerationRef.current) return;
-      const seen = new Set(tracks.map((track) => track.id));
-      const freshRows = rows.filter((track) => !seen.has(track.id));
-      // Append race-safe: re-dedupe against the LATEST committed list inside the
-      // functional updater so a StrictMode double-fire or two in-flight pages
-      // can't both append the same rows from this stale `tracks` snapshot.
-      setTracks((current) => {
-        if (!freshRows.length) return current;
-        const have = new Set(current.map((track) => track.id));
-        const add = freshRows.filter((track) => !have.has(track.id));
-        return add.length ? [...current, ...add] : current;
-      });
-      // Base "load more" on the unique rows in this page: raw rows.length
-      // over-counts when pages overlap, which keeps the button enabled and can
-      // spin on no-op loads once offset stops advancing.
-      setHasMoreTracks(freshRows.length > 0 && tracks.length + freshRows.length < matchingTrackCount);
+      rowsReadRef.current += rows.length;
+      // Deduped against the latest committed list inside the updater, so a
+      // StrictMode double-fire can't append the same rows twice.
+      setTracks((current) => appendTrackPage(current, rows));
+      // A full page says there may be more whatever the count says, which can
+      // be behind a scan; an empty one ends it, since the count can be ahead
+      // after rows were removed elsewhere.
+      setHasMoreTracks(
+        rows.length >= LIBRARY_MORE_PAGE_SIZE || (rows.length > 0 && rowsReadRef.current < matchingCountRef.current),
+      );
+    } catch (error) {
+      // Without this the scroll would ask again at once and keep failing.
+      if (generation === loadGenerationRef.current) {
+        setLoadMoreFailed(true);
+        pushToast({ tone: 'error', title: 'Could not load more tracks', detail: errorText(error) });
+      }
     } finally {
+      loadMoreInFlightRef.current = false;
       setLoadingMore(false);
     }
   }
@@ -313,9 +470,41 @@ export function LibraryView(): JSX.Element {
       api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
       api.getTrackCount({ search: libraryQuery, sort }),
     ]);
+    rowsReadRef.current = nextTracks.length;
     setTracks(nextTracks);
     setMatchingTrackCount(nextCount);
     setHasMoreTracks(nextTracks.length < nextCount);
+  }
+
+  // While a scan runs the list changes only where that costs the user nothing.
+  // A list that holds every match, which is all of an empty library's first
+  // tracks, is read again so new tracks appear in place. Once the first page is
+  // full the loaded rows and the scroll position are left alone and only the
+  // count moves; the finished scan reads that first page again as well.
+  function refreshAfterScan(finished: boolean): void {
+    const loaded = tracksRef.current.length;
+    if (finished ? loaded <= LIBRARY_PAGE_SIZE : loaded < LIBRARY_PAGE_SIZE) {
+      setScanRevision((revision) => revision + 1);
+    } else {
+      void refreshTrackCount();
+    }
+    // The health report reads every track, so it waits for the scan to end; the
+    // totals are cheap and keep the header and the empty-library check current.
+    if (finished) refreshLibrarySummary();
+    else api.getStats().then(setStats).catch(() => undefined);
+  }
+  refreshAfterScanRef.current = refreshAfterScan;
+
+  async function refreshTrackCount(): Promise<void> {
+    const generation = loadGenerationRef.current;
+    try {
+      const count = await api.getTrackCount({ search: libraryQuery, sort });
+      if (generation !== loadGenerationRef.current) return;
+      setMatchingTrackCount(count);
+      setHasMoreTracks(rowsReadRef.current < count);
+    } catch (error) {
+      console.error('library count after scan failed', error);
+    }
   }
 
   function refreshLibrarySummary(): void {
@@ -325,6 +514,11 @@ export function LibraryView(): JSX.Element {
   async function toggleLove(id: number): Promise<void> {
     const loved = await toggleCurrentLove(id);
     const nextLoved: 0 | 1 = loved ? 1 : 0;
+    // On the Loved sort an un-loved track leaves the list, and the library's
+    // order moves up by one with it.
+    if (sort === 'loved' && !nextLoved && tracksRef.current.some((t) => t.id === id)) {
+      rowsReadRef.current = Math.max(0, rowsReadRef.current - 1);
+    }
     setTracks((rows) =>
       rows
         .map((t) => (t.id === id ? { ...t, loved: nextLoved } : t))
@@ -495,13 +689,15 @@ export function LibraryView(): JSX.Element {
       // Refetching page one would throw away every loaded page, the scroll
       // position and the selection over a handful of rows.
       const generation = loadGenerationRef.current;
+      const gone = tracksRef.current.length - withoutTracks(tracksRef.current, removedIds).length;
+      rowsReadRef.current = Math.max(0, rowsReadRef.current - gone);
       setTracks((rows) => withoutTracks(rows, removedIds));
       refreshLibrarySummary();
       try {
         const count = await api.getTrackCount({ search: libraryQuery, sort });
         if (generation !== loadGenerationRef.current) return;
         setMatchingTrackCount(count);
-        setHasMoreTracks(tracksRef.current.length < count);
+        setHasMoreTracks(rowsReadRef.current < count);
       } catch (error) {
         console.error('library count after removal failed', error);
       }
@@ -514,6 +710,7 @@ export function LibraryView(): JSX.Element {
         api.getStats(),
         api.getLibraryHealth(),
       ]);
+      rowsReadRef.current = nextTracks.length;
       setTracks(nextTracks);
       setMatchingTrackCount(nextCount);
       setHasMoreTracks(nextTracks.length < nextCount);
@@ -813,6 +1010,7 @@ export function LibraryView(): JSX.Element {
         matchingTrackCount={matchingTrackCount}
         hasMoreTracks={hasMoreTracks}
         loadingMore={loadingMore}
+        loadMoreFailed={loadMoreFailed}
         onLoadMore={() => void loadMoreTracks()}
         onPlay={(idx) => void playQueue(tracks, idx)}
         onPlayTracks={(selected) => void playQueue(selected, 0)}
@@ -939,6 +1137,7 @@ function LibraryTrackPane({
   matchingTrackCount,
   hasMoreTracks,
   loadingMore,
+  loadMoreFailed,
   onLoadMore,
   ...tableProps
 }: {
@@ -950,6 +1149,7 @@ function LibraryTrackPane({
   matchingTrackCount: number;
   hasMoreTracks: boolean;
   loadingMore: boolean;
+  loadMoreFailed: boolean;
   onLoadMore: () => void;
   onPlay: (index: number) => void;
   onPlayTracks: (tracks: Track[]) => void;
@@ -969,6 +1169,21 @@ function LibraryTrackPane({
     overscan: LIBRARY_ROW_OVERSCAN,
     enabled: !loading && tracks.length > 0,
   });
+
+  // The next page is fetched as the window nears the last loaded row. The
+  // button in the footer stays for a failed page and for keyboard use.
+  const onLoadMoreRef = useRef(onLoadMore);
+  onLoadMoreRef.current = onLoadMore;
+  const wantsMore = wantsNextTrackPage({
+    endIndex,
+    loaded: tracks.length,
+    hasMore: hasMoreTracks,
+    busy: loading || loadingMore,
+    failed: loadMoreFailed,
+  });
+  useEffect(() => {
+    if (wantsMore) onLoadMoreRef.current();
+  }, [wantsMore, tracks.length]);
 
   if (loading) {
     return (
@@ -1060,15 +1275,16 @@ export function LibraryOverview({
   health: LibraryHealth | null;
   children: ReactNode;
 }): JSX.Element {
-  const compass = health ? buildArchiveCompass(health) : null;
-  const missingTotal = health ? missingMetadataTotal(health) : 0;
+  const missingArt = health?.missing.art ?? 0;
+  const missingTags = health ? missingTagTotal(health) : 0;
   const duplicateGroups = health?.duplicateGroups.length ?? 0;
   const summary = [
     countText(stats.tracks, 'track', 'tracks'),
     countText(stats.albums, 'album', 'albums'),
     countText(stats.artists, 'artist', 'artists'),
     formatRuntime(stats.duration),
-    missingTotal ? `${missingTotal.toLocaleString()} missing tags` : null,
+    missingArt ? `${missingArt.toLocaleString()} without cover art` : null,
+    missingTags ? `${missingTags.toLocaleString()} missing tags` : null,
     duplicateGroups ? countText(duplicateGroups, 'duplicate group', 'duplicate groups') : null,
   ]
     .filter(Boolean)
@@ -1087,16 +1303,6 @@ export function LibraryOverview({
           {open ? '▾' : '▸'}
         </span>
         <span className="library-overview-label">Library health</span>
-        {compass && (
-          <span
-            className="library-overview-grade"
-            style={{ color: compass.score >= 86 ? 'var(--accent-text, var(--accent))' : 'var(--warn-text, var(--warn))' }}
-            title={`Archive score ${compass.score}/100`}
-          >
-            {compass.grade}
-          </span>
-        )}
-        {compass && <span className="library-overview-profile">{compass.profile}</span>}
         <span className="library-overview-summary">{summary}</span>
       </button>
       {open && (
@@ -1120,7 +1326,7 @@ export function LibraryHealthIntro({ help }: { help: { open: boolean; close: () 
       title="Library health"
       lede="A read on how well your files are tagged and how good they sound."
       bullets={[
-        'The Library health row above the list opens the report. Its letter grade weighs tags, cover art, duplicates and audio quality across the whole library. Compass Moves are suggested clean-ups, and most open the matching tracks when clicked.',
+        'The Library health row above the list opens the report. It counts missing tags and cover art, duplicates and audio quality across the whole library. Compass Moves are suggested clean-ups, and most open the matching tracks when clicked.',
         'Archive Radar counts files by quality. Lossless and hi-res are the best, DSD and fallback codecs need extra decoding to play, and low-bitrate files are candidates to replace.',
         'ReplayGain is a loudness tag. Tracks without it play at their own volume, so levels jump between albums on shuffle.',
         'Clean missing files removes tracks whose files are gone. It shows what it will remove first and backs up the library.',
@@ -1233,27 +1439,14 @@ export function LibraryHealthPanel({
           Library Health
         </div>
         <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 tabular-nums" style={{ color: 'var(--ink-2)' }}>
-          <span>Missing tags</span><span className="text-right">{missingTotal.toLocaleString()}</span>
+          <span>Missing tags</span><span className="text-right">{missingTagTotal(health).toLocaleString()}</span>
+          <span>No cover art</span><span className="text-right">{health.missing.art.toLocaleString()}</span>
           <span>Duplicates</span><span className="text-right">{health.duplicateGroups.length.toLocaleString()}</span>
           <span>Exact matches</span><span className="text-right">{duplicateExactTotal(health).toLocaleString()}</span>
           <span>Legacy</span><span className="truncate text-right" title={legacySummary}>{legacySummary}</span>
         </div>
-        <div className="mt-2 grid grid-cols-[52px_minmax(0,1fr)] gap-2">
-          <div
-            className="bevel-in flex h-[52px] items-center justify-center text-[24px] font-black"
-            style={{ color: compass.score >= 86 ? 'var(--accent-text, var(--accent))' : 'var(--warn-text, var(--warn))' }}
-            title={`Archive score ${compass.score}/100`}
-          >
-            {compass.grade}
-          </div>
-          <div className="min-w-0">
-            <div className="truncate text-[12px] font-bold" style={{ color: 'var(--ink)' }}>
-              {compass.profile}
-            </div>
-            <div className="mt-1 line-clamp-2 leading-snug" style={{ color: 'var(--ink-2)' }}>
-              {compass.headline}
-            </div>
-          </div>
+        <div className="mt-2 leading-snug" style={{ color: 'var(--ink-2)' }}>
+          {compass.headline}
         </div>
         <div className="mt-2 text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent-text, var(--accent))' }}>
           Archive Radar
