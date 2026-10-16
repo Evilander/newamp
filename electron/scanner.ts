@@ -7,6 +7,7 @@ import { CONTAINER_AUDIO_EXTENSIONS, codecFamilyFromCodec } from '../shared/audi
 import type { ScanProgress } from '../shared/types.js';
 import type { TrackTagExtras } from '../shared/album-identity.js';
 import { runTagBackfill, type TagBackfillControl } from './album-identity-backfill.js';
+import { chooseFolderArt, isDiscFolderName, isFolderArtImage, type FolderImage, type FolderListing } from './folder-art.js';
 
 const AUDIO_EXTS = new Set([
   '.mp3',
@@ -117,50 +118,60 @@ async function* walk(root: string, report: WalkReport = { reachable: false, unre
   }
 }
 
-function pickFolderArtFile(dir: string): Promise<string | null> {
-  const candidates = [
-    'cover.jpg',
-    'cover.jpeg',
-    'cover.png',
-    'cover.webp',
-    'folder.jpg',
-    'folder.png',
-    'folder.webp',
-    'front.jpg',
-    'front.png',
-    'art.jpg',
-    'album.jpg',
-  ];
-  return (async () => {
-    const dirs = [dir];
-    if (isDiscFolderName(basename(dir))) dirs.push(dirname(dir));
-    const seen = new Set<string>();
-    for (const searchDir of dirs) {
-      const key = searchDir.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      for (const name of candidates) {
-        try {
-          const p = join(searchDir, name);
-          await fs.access(p);
-          return p;
-        } catch {
-          /* keep looking */
-        }
+// What a scan has listed so far, by folder: the tracks of one folder, and the
+// discs of a set that share the folder above them, each list it once.
+type FolderListings = Map<string, Promise<FolderListing | null>>;
+
+async function listFolder(dir: string): Promise<FolderListing | null> {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const subdirs: string[] = [];
+  const images: FolderImage[] = [];
+  for (const e of entries) {
+    if (e.isDirectory()) {
+      subdirs.push(e.name);
+    } else if (isFolderArtImage(e.name)) {
+      try {
+        const stat = await fs.stat(join(dir, e.name));
+        if (stat.isFile()) images.push({ name: e.name, size: stat.size });
+      } catch {
+        /* a dangling link or a file that just went */
       }
     }
-    return null;
-  })();
+  }
+  return { images, subdirs };
 }
 
-function isDiscFolderName(name: string): boolean {
-  return /^(cd|disc|disk|dvd|side|vol|volume)[\s._-]*[0-9a-z]+$/i.test(name.trim());
+function pickFolderArtFile(dir: string, listings: FolderListings = new Map()): Promise<string | null> {
+  const listing = (path: string): Promise<FolderListing | null> => {
+    let cached = listings.get(path);
+    if (!cached) {
+      cached = listFolder(path);
+      listings.set(path, cached);
+    }
+    return cached;
+  };
+  return (async () => {
+    const own = await listing(dir);
+    if (!own) return null;
+    const parentDir = dirname(dir);
+    const parent = isDiscFolderName(basename(dir)) && parentDir !== dir ? await listing(parentDir) : null;
+    const chosen = chooseFolderArt(own, parent);
+    if (!chosen) return null;
+    return join(chosen.from === 'own' ? dir : parentDir, chosen.image.name);
+  })();
 }
 
 function mimeFromExt(p: string): string {
   const ext = extname(p).toLowerCase();
   if (ext === '.png') return 'image/png';
   if (ext === '.webp') return 'image/webp';
+  if (ext === '.bmp') return 'image/bmp';
+  if (ext === '.gif') return 'image/gif';
   return 'image/jpeg';
 }
 
@@ -491,12 +502,13 @@ export class Scanner {
       const total = discovered.length;
       let scanned = 0;
       const folderArtPathCache = new Map<string, Promise<string | null>>();
+      const folderListings: FolderListings = new Map();
       const folderArtBlobCache = new Map<string, Promise<ArtBlob | null>>();
       const folderArtPathForFile = (filePath: string): Promise<string | null> => {
         const dir = dirname(filePath);
         let cached = folderArtPathCache.get(dir);
         if (!cached) {
-          cached = pickFolderArtFile(dir);
+          cached = pickFolderArtFile(dir, folderListings);
           folderArtPathCache.set(dir, cached);
         }
         return cached;
