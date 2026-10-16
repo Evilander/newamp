@@ -149,8 +149,10 @@ const idOf = (path) => Number(/(\d+)\.mp3$/.exec(path)[1]);
   assert.equal(order[0], 30, 'the store picks the first track');
   r.queue.prioritize([40, 30]);
   release();
-  await until(() => order.length === 5, 'every track');
-  assert.deepEqual(order, [30, 40, 10, 50, 20], 'the track just played jumps the line; the one running is not queued again');
+  await until(() => order.length >= 5, 'every track');
+  // Long enough for the list to reach 40 again and for a drained queue to look once more.
+  await wait(150);
+  assert.deepEqual(order, [30, 40, 10, 50, 20], 'the track just played jumps the line, the one running is not queued again, and nothing is analysed twice');
   await r.queue.stop();
 }
 
