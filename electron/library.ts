@@ -191,6 +191,7 @@ const FOLDER_INDEX_SLICE = 12000;
 const FOLDER_DESCRIBE_SLICE = 400;
 const TRACK_FETCH_SLICE = 2000;
 const HEALTH_SLICE = 3000;
+const DNA_INDEX_SLICE = 2000;
 // A folder with more tracks than this is listed the way it always was.
 const FOLDER_TRACKS_FAST_LIMIT = 3000;
 
@@ -1070,6 +1071,9 @@ export class LibraryStore {
   // every Harmonic / Taste mix call. We cache after first build and invalidate
   // on any track DNA write (setTrackDna, upsertTracks with dna_json).
   private dnaIndexCache: Map<number, TrackDna> | null = null;
+  // Bumped when stored DNA changes while no index is built, so a build in
+  // progress starts again instead of keeping rows it already read.
+  private dnaIndexEpoch = 0;
   // The folder tree used to be worked out from every track row on each click,
   // which stalled the main process for hundreds of milliseconds. The index
   // (see FolderIndex) is built once and answers every folder from it. It is
@@ -4656,16 +4660,51 @@ export class LibraryStore {
   }
 
   private buildDnaIndex(): Map<number, TrackDna> {
-    if (this.dnaIndexCache) return this.dnaIndexCache;
-    const all = this.getAllTrackDna();
-    const map = new Map<number, TrackDna>();
-    for (const row of all) map.set(row.id, row.dna);
-    this.dnaIndexCache = map;
-    return map;
+    return runSync(this.dnaIndexSteps());
+  }
+
+  // Once the background analysis has covered the library, every track has
+  // DNA, and parsing all of it in one go held the main thread for a seeded
+  // mix. The rows are read in keyset pages with a turn handed back between
+  // them, and a DNA change during the build starts it again.
+  private *dnaIndexSteps(): Sliced<Map<number, TrackDna>> {
+    for (;;) {
+      if (this.dnaIndexCache) return this.dnaIndexCache;
+      const epoch = this.dnaIndexEpoch;
+      const map = new Map<number, TrackDna>();
+      let afterId = 0;
+      let complete = true;
+      for (;;) {
+        const rows = this.many<{ id: number; dna_json: string | null }>(
+          `SELECT id, dna_json FROM tracks WHERE dna_json IS NOT NULL AND id > ? ORDER BY id LIMIT ?`,
+          [afterId, DNA_INDEX_SLICE],
+        );
+        for (const row of rows) {
+          if (!row.dna_json) continue;
+          try {
+            const parsed = JSON.parse(row.dna_json);
+            if (isValidTrackDna(parsed)) map.set(row.id, parsed);
+          } catch {
+            /* skip corrupt */
+          }
+        }
+        if (rows.length < DNA_INDEX_SLICE) break;
+        afterId = rows[rows.length - 1].id;
+        yield;
+        if (epoch !== this.dnaIndexEpoch || this.dnaIndexCache) {
+          complete = false;
+          break;
+        }
+      }
+      if (!complete) continue;
+      this.dnaIndexCache = map;
+      return map;
+    }
   }
 
   private invalidateDnaIndexCache(): void {
     this.dnaIndexCache = null;
+    this.dnaIndexEpoch += 1;
   }
 
   private bulkInsertTrackTags(pairs: Array<[number, string]>): void {
@@ -4725,7 +4764,7 @@ export class LibraryStore {
     // perceptual targets boosts ordering. Deliberately a boost, never a
     // filter — un-analyzed tracks still surface, just lower.
     const wantsDna = rule.dnaEnergyTarget != null || rule.dnaBrightnessTarget != null;
-    const dnaIndex = wantsDna ? this.buildDnaIndex() : null;
+    const dnaIndex = wantsDna ? (yield* this.dnaIndexSteps()) : null;
     const dnaBoost = (track: Track): number => {
       if (!dnaIndex) return 0;
       const dna = dnaIndex.get(track.id);
@@ -4880,7 +4919,7 @@ export class LibraryStore {
     }
 
     if (seed) {
-      const seedDnaIndex = this.buildDnaIndex();
+      const seedDnaIndex = yield* this.dnaIndexSteps();
       yield;
       const seedDna = seedDnaIndex.get(seed.id) ?? null;
       const seedCtx = createSeedVibeContext(seed, seedDna);
@@ -4935,7 +4974,7 @@ export class LibraryStore {
     // then blend it as a strong multiplier on the taste score so off-vibe
     // tracks (different genre / era / no DNA match) drop out even if they're
     // loved heavy-rotation favorites.
-    const seedDnaIndex = opener ? this.buildDnaIndex() : null;
+    const seedDnaIndex = opener ? (yield* this.dnaIndexSteps()) : null;
     const seedCtx = opener ? createSeedVibeContext(opener, seedDnaIndex?.get(opener.id) ?? null) : null;
     yield;
 
@@ -5581,7 +5620,16 @@ export class LibraryStore {
       this.db.run('ROLLBACK');
       throw err;
     }
-    if (dnaChanged) this.invalidateDnaIndexCache();
+    if (dnaChanged) {
+      // During a long analysis run DNA arrives every few seconds; a built
+      // index takes the new values instead of being thrown away and re-read.
+      const index = this.dnaIndexCache;
+      if (index) {
+        for (const save of saves) if (save.dna && isValidTrackDna(save.dna)) index.set(save.id, save.dna);
+      } else {
+        this.dnaIndexEpoch += 1;
+      }
+    }
     if (gainChanged) this.invalidateLibraryHealthCache();
     // Re-derivable, and written for hours on end, so it rides the bulk tier.
     this.scheduleFlush({ bulk: true });

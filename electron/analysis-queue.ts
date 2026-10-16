@@ -159,6 +159,10 @@ export class AnalysisQueue {
 
   private unsaved: AnalysisSave[] = [];
   private unsavedSince = 0;
+  // Tracks whose results wait in `unsaved`. The store lists them as owed until
+  // the batch is written, so without this a track analysed first because it
+  // was played came round again when the list reached it.
+  private readonly settled = new Set<number>();
   private readonly timeouts = new Map<number, number>();
   // Tracks the pass already looked at and could not read: not offered again
   // until the next pass, so one unreachable drive cannot spin the loop.
@@ -216,6 +220,7 @@ export class AnalysisQueue {
     this.listStale = true;
     this.urgent = [];
     this.unsaved = [];
+    this.settled.clear();
     this.passed.clear();
     this.timeouts.clear();
     this.counts = null;
@@ -357,7 +362,7 @@ export class AnalysisQueue {
   private nextId(store: AnalysisStore): number | null {
     while (this.urgent.length) {
       const id = this.urgent.shift()!;
-      if (!this.passed.has(id)) return id;
+      if (!this.passed.has(id) && !this.settled.has(id)) return id;
     }
     if (this.listStale || !this.listBuilt) {
       this.list = store.pendingAnalysisIds();
@@ -369,7 +374,7 @@ export class AnalysisQueue {
     }
     while (this.position < this.list.length) {
       const id = this.list[this.position++]!;
-      if (!this.passed.has(id)) return id;
+      if (!this.passed.has(id) && !this.settled.has(id)) return id;
     }
     return null;
   }
@@ -434,6 +439,7 @@ export class AnalysisQueue {
   private queueSave(save: AnalysisSave): void {
     if (!this.unsaved.length) this.unsavedSince = this.now();
     this.unsaved.push(save);
+    this.settled.add(save.id);
     if (this.counts) this.counts.doneSince += 1;
   }
 
@@ -452,6 +458,9 @@ export class AnalysisQueue {
       this.deps.store()?.saveAnalysis(batch);
     } catch (err) {
       this.log('could not write analysis results', err);
+    } finally {
+      // Written, the store no longer lists them; not written, they are owed again.
+      for (const save of batch) this.settled.delete(save.id);
     }
   }
 
