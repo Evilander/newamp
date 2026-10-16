@@ -7,6 +7,9 @@ import type { MusicFolderSuggestion } from '@shared/types';
 export function EmptyLibrary(): JSX.Element {
   const [scanning, setScanning] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  // True when the last scan finished with nothing in the library, which is
+  // when "pick another folder" is the next thing to offer.
+  const [foundNothing, setFoundNothing] = useState(false);
   const [suggestions, setSuggestions] = useState<MusicFolderSuggestion[]>([]);
 
   // Detected music folders are loaded once on mount. They give the user a one-
@@ -35,12 +38,19 @@ export function EmptyLibrary(): JSX.Element {
       const roots = mergeRoots(settings.libraryRoots, path);
       await api.setSettings({ libraryRoots: roots });
       await api.scanLibrary([path]);
-      setStatus(await statusAfterScan());
+      await finishScan([path]);
     } catch (err) {
+      setFoundNothing(false);
       setStatus(err instanceof Error ? err.message : 'Folder scan failed.');
     } finally {
       setScanning(false);
     }
+  }
+
+  async function finishScan(folders: string[]): Promise<void> {
+    const text = await statusAfterScan(folders);
+    setStatus(text);
+    setFoundNothing(text !== null);
   }
 
   async function scanDefault(): Promise<void> {
@@ -54,8 +64,11 @@ export function EmptyLibrary(): JSX.Element {
     setStatus('Scanning default music folder...');
     try {
       await api.scanLibrary();
-      setStatus(await statusAfterScan());
+      // With no folder chosen the scan took the first one it found; settings say which.
+      const settings = await api.getSettings().catch(() => null);
+      await finishScan(settings?.libraryRoots ?? []);
     } catch (err) {
+      setFoundNothing(false);
       setStatus(err instanceof Error ? err.message : 'Default scan failed.');
     } finally {
       setScanning(false);
@@ -80,8 +93,9 @@ export function EmptyLibrary(): JSX.Element {
       const roots = mergeRoots(settings.libraryRoots, dir);
       await api.setSettings({ libraryRoots: roots });
       await api.scanLibrary([dir]);
-      setStatus(await statusAfterScan());
+      await finishScan([dir]);
     } catch (err) {
+      setFoundNothing(false);
       setStatus(err instanceof Error ? err.message : 'Folder scan failed.');
     } finally {
       setScanning(false);
@@ -109,7 +123,19 @@ export function EmptyLibrary(): JSX.Element {
         <div style={{ color: 'var(--muted)', fontSize: 'var(--text-xs)' }}>
           or drop a music folder anywhere in this window
         </div>
-        {status ? <div className="empty-library-status">{status}</div> : null}
+        {status ? (
+          <div className="empty-library-status">
+            {status}
+            {foundNothing ? (
+              <>
+                {' '}
+                <button className="empty-library-link" onClick={() => void pickFolder()} disabled={scanning}>
+                  Choose another folder
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
         {suggestions.length ? (
           <div className="empty-library-suggestions">
             <span className="empty-library-suggestions-label">We also found:</span>
@@ -138,10 +164,13 @@ export function EmptyLibrary(): JSX.Element {
 
 // The scan call answers when the scan is over. If it found tracks, the Library
 // view has already replaced this screen with them, so there is only the empty
-// outcome to speak for.
-async function statusAfterScan(): Promise<string | null> {
+// outcome to speak for. It names the folders so a scan of the wrong one is
+// plain to see.
+async function statusAfterScan(folders: string[]): Promise<string | null> {
   const stats = await api.getStats().catch(() => null);
-  return stats && stats.tracks === 0 ? 'Nothing was added. Try a folder with music in it.' : null;
+  if (!stats || stats.tracks !== 0) return null;
+  const where = folders.length ? ` from ${folders.join(', ')}` : '';
+  return `Nothing was added${where}. Try a folder with music in it.`;
 }
 
 function mergeRoots(roots: string[], nextRoot: string): string[] {

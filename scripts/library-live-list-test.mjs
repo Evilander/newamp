@@ -643,6 +643,32 @@ async function scrollToEnd(tree) {
   assert.doesNotMatch(textOf(tree.root.output), /Nothing was added/, 'but not when it found some');
 }
 
+// ── ...and which folder it scanned, with a way to choose another ───────────
+{
+  const lib = new FakeLibrary();
+  setUp(lib);
+  const scanned = [];
+  Object.assign(harness.api, {
+    getSuggestedMusicFolders: async () => [{ path: 'D:/Tunes', label: 'Music', reason: 'test' }],
+    getSettings: async () => ({ libraryRoots: [] }),
+    setSettings: async () => undefined,
+    scanLibrary: async (roots) => { scanned.push(roots); },
+    pickFolder: async () => 'E:/Other',
+  });
+  const tree = new Tree(m.EmptyLibrary, {}, null);
+  tree.render();
+  await settle();
+  const button = (pattern) => find(tree.root.output, (el) => el.type === 'button' && pattern.test(textOf(el)));
+  button(/Scan Default Music Folder/).props.onClick();
+  await settle();
+  assert.deepEqual(scanned, [['D:/Tunes']], 'the default scan takes the folder the screen suggests');
+  assert.match(textOf(tree.root.output), /Nothing was added from D:\/Tunes\. Try a folder with music in it\./, 'it names the folder it scanned');
+  button(/Choose another folder/).props.onClick();
+  await settle();
+  assert.deepEqual(scanned.at(-1), ['E:/Other'], 'the offer opens the picker and scans the choice');
+  assert.match(textOf(tree.root.output), /Nothing was added from E:\/Other\./, 'and the message follows the new folder');
+}
+
 // ── the report no longer grades the collection ─────────────────────────────
 {
   const health = {

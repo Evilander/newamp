@@ -984,6 +984,8 @@ export interface ScanProgress {
   total: number;
   current: string;
   done: boolean;
+  /** Set on the final event of a scan that was cancelled before it finished. */
+  cancelled?: boolean;
   startedAt: number;
   parsed?: number;
   skipped?: number;
@@ -1152,6 +1154,13 @@ export interface AppSettings {
    * users expect from a desktop close button.
    */
   closeButtonBehavior: 'minimize-to-tray' | 'close-app';
+  /** The one-time notice that the X button hides the window to the tray has been shown. Written by the main process only. */
+  trayNoticeShown?: boolean;
+  /**
+   * Keep a rolling set of daily copies of the library and settings under the
+   * profile's backups folder (newest five, at most one a day).
+   */
+  autoBackupEnabled: boolean;
   /** Where the main window and the deck were last placed. Written by the main process only. */
   windowState?: SavedWindowState;
   /**
@@ -1308,6 +1317,8 @@ export interface SupportDiagnostics {
   libraryStats: { tracks: number; albums: number; artists: number; duration: number };
   lastfmOutbox: LastfmOutboxStatus;
   recoveryEvents: RecoveryEvent[];
+  /** The automatic daily copies: how many are kept, when the newest was made, and the folder they live in. */
+  dailyBackups: { count: number; newestAt: number | null; folder: string };
 }
 
 export interface SupportBackupResult {
