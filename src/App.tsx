@@ -23,7 +23,6 @@ import { applyShell, loadInitialShell } from './components/ShellPicker';
 import { useAdaptiveQuality } from './lib/adaptiveQuality';
 import { useReducedMotion } from './hooks/useReducedMotion';
 import { startResonance, stopResonance, pokeResonance, type ResonanceOpts } from './lib/resonance';
-import { startEvilandProducer } from './visualizer/eviland-producer';
 import { frameBus } from './visualizer/frame-bus';
 import { projectorQualityTier } from './lib/vizPrefs';
 import { volumeKeyInput } from './lib/volume-shortcut';
@@ -231,9 +230,10 @@ export default function App(): JSX.Element {
   // Headless Eviland producer: feeds the detached/projector window with frames
   // whenever it is open, independent of the on-screen visualizer. Lets the user
   // pop Eviland onto a 2nd monitor and keep navigating NewAmp. Idle cost is zero
-  // until a projector window attaches.
+  // until a projector window attaches, and the producer's code (the whole
+  // Eviland engine) is not loaded until then either.
   useEffect(() => {
-    return startEvilandProducer(usePlayerStore.getState().engine, () => {
+    const getUiState = () => {
       const s = usePlayerStore.getState();
       // Transport snapshot is piggy-backed onto the 30Hz frame publish so the
       // detached projector can render a live control bar (track title, scrub,
@@ -260,7 +260,36 @@ export default function App(): JSX.Element {
         projectorQuality: projectorQualityTier(),
         transport,
       };
+    };
+    let stopProducer: (() => void) | null = null;
+    let loading = false;
+    let cancelled = false;
+    const loadProducer = (): void => {
+      if (stopProducer || loading) return;
+      loading = true;
+      import('./visualizer/eviland-producer')
+        .then(({ startEvilandProducer }) => {
+          loading = false;
+          if (cancelled) return;
+          // Starts its loop right away when the projector is already attached.
+          stopProducer = startEvilandProducer(usePlayerStore.getState().engine, getUiState);
+        })
+        .catch((err) => {
+          loading = false;
+          console.error('[eviland-producer] failed to load', err);
+        });
+    };
+    // frame-bus stays in this chunk: it is what hears the projector's port
+    // arrive, and that can happen before any other Eviland code has loaded.
+    const offConsumer = frameBus.onConsumerChange((hasDetached) => {
+      if (hasDetached) loadProducer();
     });
+    if (frameBus.hasDetachedConsumer()) loadProducer();
+    return () => {
+      cancelled = true;
+      offConsumer();
+      stopProducer?.();
+    };
   }, []);
 
   async function finishFirstLaunchTutorial(patch: { openaiApiKey?: string | null; openaiModel?: string } = {}): Promise<void> {

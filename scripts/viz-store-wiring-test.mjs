@@ -68,7 +68,8 @@ await build({
     contents: `export * from './src/store/usePlayerStore';
       export { api, DEFAULT_SETTINGS } from './src/lib/api';
       export { createLookRequestCursor } from './src/visualizer/look-requests';
-      export { decode, generate, seedCodeFor } from './src/visualizer/eviland-randomizer';`,
+      export { decode, generate, seedCodeFor } from './src/visualizer/eviland-randomizer';
+      export { canonicalSeedCode, randomSeedCode as startupRandomSeedCode, seedCodeFor as startupSeedCodeFor } from './src/visualizer/eviland-seed-code';`,
     resolveDir: process.cwd(), loader: 'ts',
   },
   bundle: true, format: 'esm', platform: 'node', target: 'es2022',
@@ -128,6 +129,30 @@ const director = () => {
   assert.equal(first.mod.decode(typed).name, first.mod.generate('my seed').config.name, 'the code regenerates the look the text made');
   second.store.getState().randomizeEviland('my seed');
   assert.equal(second.store.getState().evilandSeed, typed, 'on another machine too');
+}
+
+// ── The store's small seed helpers give what the randomizer gives ───────────
+// The store imports eviland-seed-code so the look tables stay out of the
+// startup chunk; a code it shows must be the code the randomizer regenerates.
+{
+  const { mod } = await load();
+  for (const seed of ['my seed', 'Eviland', '', 'K7Q2-9XMF', 'a longer seed, with punctuation!', 0, 1, 4294967295]) {
+    assert.equal(mod.startupSeedCodeFor(seed), mod.seedCodeFor(seed), `seed ${JSON.stringify(seed)}`);
+  }
+  for (let i = 0; i < 60; i++) {
+    const code = mod.generate((Math.imul(i + 1, 2654435761) >>> 0)).seed;
+    assert.match(code, CODE);
+    assert.equal(mod.canonicalSeedCode(code), mod.decode(code).seed, code);
+    const loose = code.toLowerCase().replace('-', ' ');
+    assert.equal(mod.canonicalSeedCode(loose), mod.decode(loose).seed, 'case and separator do not matter');
+    assert.equal(mod.canonicalSeedCode(loose), code);
+  }
+  for (const bad of ['', 'nope', 'ILLO-ILLO', 'K7Q2-9XM', 'K7Q2-9XMFF']) {
+    assert.equal(mod.canonicalSeedCode(bad), null, bad);
+    assert.equal(mod.decode(bad), null, bad);
+  }
+  assert.match(mod.startupRandomSeedCode(), CODE);
+  assert.notEqual(mod.startupRandomSeedCode(), mod.startupRandomSeedCode());
 }
 
 // ── Next look and previous look ─────────────────────────────────────────────
