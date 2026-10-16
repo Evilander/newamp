@@ -237,7 +237,7 @@ engine. That is the tradeoff.
 | Podcast feed hosts | Feeds, episodes and artwork you subscribed to | A plain request for the feed or file | When you subscribe, refresh or download. Localhost and private-network addresses are refused |
 | `radio-browser.info` mirrors | Station search for Radio, and a count of which station you played | Your search terms, the station you picked | When you search or play a station. The station's own host streams the audio |
 | Your Jellyfin, Navidrome or Subsonic server | Browsing and streaming | Your login and requests | While connected |
-| `api.openai.com` | Liner notes | Title, artist, album, album artist, genre, year, length, rating, BPM, key, play and skip counts, and up to 18 lines of the track's lyrics when you have them (the first 1,200 characters if they are unsynced), plus up to 3 highlighted lines | Only if you save an API key under Settings → Assist, and only when you press AI Notes on Now Playing. If the `NEWAMP_OPENAI_BASE_URL` environment variable is set, the request goes to that address instead |
+| `api.openai.com` | Liner notes | Title, artist, album, album artist, genre, year, length, rating, BPM, key, play and skip counts, and up to 18 lines of the track's lyrics when you have them (the first 1,200 characters if they are unsynced), plus up to 3 highlighted lines | Only if you save an API key under Settings → Liner notes, and only when you press AI Notes on Now Playing. If the `NEWAMP_OPENAI_BASE_URL` environment variable is set, the request goes to that address instead |
 
 Pictures that these services link to (podcast artwork, station icons, Wikipedia
 images) load from whichever host serves them. The app also contains code for a
