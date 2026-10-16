@@ -140,7 +140,7 @@ library.close();
     ['library:get-album-summary', 'library.getAlbumSummary('],
     ['library:get-artist-tracks', 'library.getArtistTracks('],
     ['library:get-stats', 'library.getStats('],
-    ['library:get-health', 'library.getLibraryHealth('],
+    ['library:get-health', 'library.getLibraryHealthAsync('],
     ['library:set-album-rating-score', 'library.setAlbumRatingScore('],
     ['library:get-album-rating', 'library.getAlbumRating('],
     ['album-art:apply', 'library.applyAlbumArtToAlbum('],
