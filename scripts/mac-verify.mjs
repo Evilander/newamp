@@ -1215,7 +1215,6 @@ const MANUAL_ITEMS = [
   ['gatekeeper-first-launch', 'First launch of the GitHub release DMG and of the local build (Gatekeeper)', '6.1'],
   ['wheel-hardware', 'Trackpad and Magic Mouse wheel volume (momentum, Shift+wheel)', '6.2'],
   ['gapless-listening', 'Gapless and crossfade by ear', '6.3'],
-  ['hog-dac', 'Exclusive / hog mode with sample-rate switching on a USB DAC', '6.4 and hog-mode-review.md'],
   ['dock-appearance', 'Dock icon, right-click menu, bounce/badge, drag a file onto the icon', '6.5'],
   ['retina', 'Retina rendering of text, art and the visualizer', '6.6'],
   ['menubar-appearance', 'Light and dark menu bar, menu readability', '6.7'],
