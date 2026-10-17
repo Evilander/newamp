@@ -622,8 +622,13 @@ behavior('seek', (capture, result) => {
 
 behavior('skip', (capture) => {
   const first = firstSignal(capture);
-  const gap = gapAfter(capture, first);
-  if (!gap) throw new Error('no skip gap in the capture');
+  // A skip that lands inside one output quantum leaves no run of 16 silent
+  // samples to anchor on (fast hardware does that), so the skip point is where
+  // the capture stops being A; a silent gap, when there is one, starts there.
+  let played = 0;
+  while (played < decA.length && first + played < capture.length && Math.abs(capture[first + played] - decA[played]) <= 1e-6) played++;
+  const silence = gapAfter(capture, first);
+  const gap = silence && silence.start <= first + played + 1 ? silence : { start: first + played, end: first + played };
   const pre = exactness(capture.subarray(0, gap.start), decA.subarray(0, gap.start - first), first);
   const post = exactness(capture, decC, gap.end);
   const trailing = capture.subarray(gap.end + decC.length + 4);
@@ -636,19 +641,29 @@ behavior('skip', (capture) => {
 
 behavior('rapid', (capture, result) => {
   const first = firstSignal(capture);
-  let from = first;
-  let gap = gapAfter(capture, from);
-  let lastStart = first;
-  while (gap && gap.end > 0) {
-    lastStart = gap.end;
-    gap = gapAfter(capture, gap.end);
+  const last = lastSignal(capture);
+  // Rapid skips on fast hardware leave no run of silence between the
+  // segments, so the final one is the latest point from which the capture is
+  // A from its start: its first 2048 sounding samples are matched scanning
+  // back from the end, then the whole tail is compared.
+  const a0 = firstSignal(decA);
+  const probe = Math.min(2048, decA.length - a0);
+  let lastStart = -1;
+  for (let i = last - a0 - probe; i >= first; i--) {
+    let n = 0;
+    while (n < probe && Math.abs(capture[i + a0 + n] - decA[a0 + n]) <= 1e-6) n++;
+    if (n === probe) {
+      lastStart = i;
+      break;
+    }
   }
-  const tail = capture.subarray(lastStart, lastSignal(capture) + 1);
+  check(lastStart >= 0, 'rapid: no point in the capture from which A plays from its start');
+  const tail = capture.subarray(Math.max(lastStart, first), last + 1);
   const exact = exactness(tail, decA.subarray(0, tail.length), 0);
   check(result.extra.finalTrackId === A.id, `rapid: engine ended on track ${result.extra.finalTrackId}`);
   check(exact.lag === 0 && exact.maxDiff <= 1e-6, `rapid: final audio is not A from its start (diff ${exact.maxDiff})`);
   check(!result.events.some((e) => e.error), 'rapid: engine reported an error');
-  return { outcomes: result.extra.outcomes, finalTrackId: result.extra.finalTrackId, finalSegmentMaxDiff: exact.maxDiff, segments: 1 + (lastStart !== first ? 1 : 0) };
+  return { outcomes: result.extra.outcomes, finalTrackId: result.extra.finalTrackId, finalSegmentMaxDiff: exact.maxDiff, segments: lastStart === first ? 1 : 2 };
 });
 
 behavior('stop', (capture, result) => {
