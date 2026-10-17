@@ -17,11 +17,12 @@
 // sample rate for a few seconds at a time. Close music players first. Output
 // is silence, so nothing is heard. If a run is interrupted, put the rate back
 // with:  tmp/mac-verify/bin/coreaudio-state set-rate <hz>
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { addonIdFor, buildCoreAudioHelper, coreAudio, coreAudioDeviceState } from './coreaudio-helper.mjs';
 import { formatTable } from './parsers.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -47,35 +48,8 @@ const helperPath = join(outDir, 'bin', 'coreaudio-state');
 const jsonPath = resolve(option('--json', join(outDir, 'hog-probe.json')));
 const addonPath = join(repoRoot, 'native', 'newamp-audio', 'prebuilt', `darwin-${process.arch}`, 'newamp_audio.node');
 
-function buildHelper() {
-  mkdirSync(dirname(helperPath), { recursive: true });
-  const build = spawnSync(
-    'xcrun',
-    ['clang', '-O1', '-Wall', '-o', helperPath, join(here, 'coreaudio-state.c'), '-framework', 'CoreAudio', '-framework', 'CoreFoundation'],
-    { encoding: 'utf8' },
-  );
-  if (build.status !== 0) {
-    console.error(`[hog-probe] could not build the CoreAudio helper (is the Xcode command line tools install complete?)\n${build.stderr || build.stdout}`);
-    process.exit(1);
-  }
-}
-
-function helper(args) {
-  const result = spawnSync(helperPath, args, { encoding: 'utf8' });
-  let json = null;
-  try {
-    json = JSON.parse((result.stdout || '').trim().split('\n').at(-1) || 'null');
-  } catch {
-    json = null;
-  }
-  return { status: result.status, json, stdout: result.stdout, stderr: result.stderr };
-}
-
-function deviceState(uid) {
-  const result = helper(uid ? ['get', uid] : ['get']);
-  if (!result.json || result.json.error) throw new Error(`cannot read the output device: ${result.stdout || result.stderr}`);
-  return result.json;
-}
+const helper = (args) => coreAudio(helperPath, args);
+const deviceState = (uid) => coreAudioDeviceState(helperPath, uid);
 
 async function pollUntil(read, accept, timeoutMs) {
   const started = Date.now();
@@ -93,16 +67,6 @@ function loadAddon() {
     process.exit(1);
   }
   return createRequire(import.meta.url)(addonPath);
-}
-
-// The addon's device id is the hex of miniaudio's ma_device_id, which on
-// CoreAudio is the device UID as a NUL-padded string.
-function addonIdFor(addon, uid) {
-  for (const device of addon.listDevices()) {
-    const text = Buffer.from(device.id, 'hex').toString('utf8').replace(/\0[\s\S]*$/, '');
-    if (text === uid) return device.id;
-  }
-  return null;
 }
 
 function pickFormat(formats, rate, wanted) {
@@ -128,7 +92,12 @@ if (flag('--child-hold')) {
   process.exit(0);
 }
 
-buildHelper();
+try {
+  buildCoreAudioHelper(outDir);
+} catch (err) {
+  console.error(`[hog-probe] ${err.message}`);
+  process.exit(1);
+}
 const listed = helper(['list']);
 if (!listed.json) {
   console.error(`[hog-probe] cannot list output devices:\n${listed.stdout}${listed.stderr}`);
