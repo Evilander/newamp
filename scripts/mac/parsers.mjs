@@ -95,9 +95,19 @@ export function parsePmsetAssertions(text) {
   return { system, processes };
 }
 
+// Chromium creates its display-sleep blocker with the legacy constant
+// kIOPMAssertionTypeNoDisplaySleep, and macOS 27 lists it under that old name
+// (seen on 27.0.1); the current name is kept for systems that print it. Both
+// mean the same assertion.
+const ASSERTION_ALIASES = {
+  PreventUserIdleDisplaySleep: ['PreventUserIdleDisplaySleep', 'NoDisplaySleepAssertion'],
+  PreventUserIdleSystemSleep: ['PreventUserIdleSystemSleep', 'NoIdleSleepAssertion'],
+};
+
 /** True when `pid` holds an assertion of `type` (for example PreventUserIdleDisplaySleep). */
 export function holdsAssertion(parsed, pid, type) {
-  return parsed.processes.some((entry) => entry.pid === pid && entry.type === type);
+  const names = ASSERTION_ALIASES[type] ?? [type];
+  return parsed.processes.some((entry) => entry.pid === pid && names.includes(entry.type));
 }
 
 /** `defaults read -g AppleInterfaceStyle` prints Dark in dark mode and fails in light mode. */

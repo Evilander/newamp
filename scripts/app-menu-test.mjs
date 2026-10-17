@@ -34,8 +34,13 @@ const rolesOf = (items) => items.map((item) => item.role).filter(Boolean);
 
 const mac = buildAppMenuTemplate('darwin', menuOptions(true));
 log.push('darwin top level: ' + JSON.stringify(mac.map((m) => m.label ?? m.role)));
-for (const want of ['editMenu', 'windowMenu', 'help']) {
+for (const want of ['editMenu', 'window', 'help']) {
   if (!mac.some((item) => item.role === want)) fail(`darwin menu missing role ${want}`);
+}
+// Cmd+W: the stock windowMenu role has no Close item on macOS.
+const windowMenu = submenuOf(mac, 'Window');
+for (const want of ['minimize', 'zoom', 'close', 'front']) {
+  if (!rolesOf(windowMenu).includes(want)) fail(`darwin Window menu missing role ${want}`);
 }
 
 // Cmd+, opens Settings from the app menu.
@@ -48,6 +53,11 @@ else {
 }
 for (const want of ['about', 'services', 'hide', 'hideOthers', 'unhide', 'quit']) {
   if (!rolesOf(appMenu).includes(want)) fail(`darwin app menu missing role ${want}`);
+}
+// The package name is "newamp"; the items that name the app must say NewAmp.
+for (const role of ['about', 'hide', 'quit']) {
+  const label = appMenu.find((item) => item.role === role)?.label ?? '';
+  if (!label.includes('NewAmp')) fail(`darwin ${role} item is labelled "${label}", wanted the product name`);
 }
 const settingsAt = appMenu.findIndex((item) => item.accelerator === 'CmdOrCtrl+,');
 const servicesAt = appMenu.findIndex((item) => item.role === 'services');

@@ -358,12 +358,15 @@ await whileDecoding('urgent decode kept', async (long) => {
     await urgent;
     return false;
   }
+  // The hunger handler runs synchronously inside reportPlaybackHunger, while
+  // the child is known to be alive, so a decoder that stopped urgent decodes
+  // would settle this one to null. Polling the live count after a pause
+  // instead failed on fast hardware, where the 900 s file decodes in tens of
+  // milliseconds.
   reportPlaybackHunger(stream, true);
-  await sleep(50);
-  const still = activeWaveformDecodes();
+  const result = await urgent;
   reportPlaybackHunger(stream, false);
-  assert.equal(still, 1, 'the decode for the track playing is not stopped');
-  assert.ok(await urgent, 'and it finishes');
+  assert.ok(result, 'the decode for the track playing is not stopped');
   return true;
 });
 

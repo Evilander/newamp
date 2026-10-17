@@ -103,6 +103,14 @@ Release notes for every version, including everything before 2.0, are on the
 - Tracks never analysed had a tempo of 0, so a "slow" tempo filter matched
   all of them.
 - Error messages no longer start with "Error invoking remote method".
+- On a Mac, Cmd+W closes the window (it hides and keeps playing, like the
+  close button). The Window menu had no Close item, and About, Hide and Quit
+  said "newamp" instead of NewAmp.
+- Bit-Perfect Exclusive on macOS waits for the audio device to finish
+  switching sample rate before opening it. A 44.1 kHz track on a device left
+  at 48 kHz could be refused as a hidden resample because the stream opened at
+  the old rate; and when a device refused hog mode, its sample rate was left
+  at the track's rate instead of put back.
 
 ## [2.6.0] - 2026-10-11
 

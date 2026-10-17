@@ -114,6 +114,12 @@ assert.equal(pmset.processes.length, 2);
 assert.equal(holdsAssertion(pmset, 4321, 'PreventUserIdleDisplaySleep'), true);
 assert.equal(holdsAssertion(pmset, 88, 'PreventUserIdleDisplaySleep'), false);
 assert.equal(holdsAssertion(pmset, 9999, 'PreventUserIdleDisplaySleep'), false);
+// macOS 27 lists Chromium's display-sleep blocker under the legacy name.
+const PMSET_27 = `Listed by owning process:
+   pid 1054(Electron): [0x00005a4c00059b8c] 00:00:01 NoDisplaySleepAssertion named: "Electron"
+`;
+assert.equal(holdsAssertion(parsePmsetAssertions(PMSET_27), 1054, 'PreventUserIdleDisplaySleep'), true);
+assert.equal(holdsAssertion(parsePmsetAssertions(PMSET_27), 1054, 'PreventUserIdleSystemSleep'), false);
 
 assert.equal(parseInterfaceStyle('Dark\n', 0), 'dark');
 assert.equal(parseInterfaceStyle('', 1), 'light');

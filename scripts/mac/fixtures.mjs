@@ -42,9 +42,12 @@ function ffmpeg(binary, args) {
  * Builds <root>/media and <root>/user-data. The sine source is -18 dBFS and
  * the app volume is set low, so playback is audible to Chromium's detector
  * (which the checks use to tell that sound is still being produced) and barely
- * so to a person in the room.
+ * so to a person in the room. The slider position is tapered cubically below
+ * unity (volumePositionToGain), so 0.3 is -31 dB: about -49 dBFS at the
+ * output, above the detector's silence floor (around -72 dBFS) and quiet.
+ * 0.05 would be -78 dB, which the detector counts as silence.
  */
-export async function prepareFixtures({ root, binary, seconds = 40, volume = 0.05 }) {
+export async function prepareFixtures({ root, binary, seconds = 40, volume = 0.3 }) {
   await rm(root, { recursive: true, force: true });
   const mediaDir = join(root, 'media', 'Mac Verify - Fixture Album');
   const userData = join(root, 'user-data');
@@ -95,7 +98,7 @@ export async function writeSettings(userData, libraryRoot, overrides = {}) {
     resumeState: null,
     compactMode: false,
     alwaysOnTop: false,
-    volume: 0.05,
+    volume: 0.3,
     playbackRate: 1,
     audioOutputDeviceId: null,
     autoDjEnabled: false,
