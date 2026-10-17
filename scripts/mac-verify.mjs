@@ -32,6 +32,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CdpSession, sleep, waitForTarget } from './mac/cdp.mjs';
 import { FIXTURE_TRACKS, prepareFixtures, resolveFfmpeg, writeSettings } from './mac/fixtures.mjs';
+import { addonIdFor, buildCoreAudioHelper, coreAudio, coreAudioDeviceState } from './mac/coreaudio-helper.mjs';
 import {
   KEYS,
   clip,
@@ -1162,6 +1163,51 @@ check('close-setting-quits', 'lifecycle', 'With "Quit NewAmp" chosen, the close 
   app.closeSessions();
   return pass(`exited 0 in ${Date.now() - started} ms${isMac ? ` (${family.length} helper processes)` : ''}`);
 }, { platforms: 'any', needs: 'app', timeoutMs: 120000, retry: false });
+
+check('exclusive-plays', 'audio', 'Bit-Perfect Exclusive on a second output: the app holds hog mode at the track\'s rate while a lossless track plays, Stop hands the device back (2 s of tone at line level)', async () => {
+  const helperPath = buildCoreAudioHelper(outDir);
+  const listed = coreAudio(helperPath, ['list']);
+  expect(Array.isArray(listed.json), `cannot list outputs: ${clip(listed.stdout || listed.stderr, 200)}`);
+  const addon = createRequire(import.meta.url)(bundleAddonPath(ctx.target));
+  // The system default output is left alone: a second stereo output that
+  // accepts 44.1 kHz is taken instead, USB (a DAC) before anything else, or
+  // the one NEWAMP_MAC_VERIFY_DAC names.
+  const stereoAt44100 = (uid) => {
+    const id = addonIdFor(addon, uid);
+    return id && addon.probeDevice(id).formats.some((f) => f.channels === 2 && f.sampleRate === 44100) ? id : null;
+  };
+  const candidates = listed.json
+    .filter((d) => !d.isDefault && d.hogPid === -1 && (d.availableRates ?? []).some(([lo, hi]) => lo <= 44100 && 44100 <= hi))
+    .map((d) => ({ ...d, addonId: stereoAt44100(d.uid) }))
+    .filter((d) => d.addonId)
+    .sort((a, b) => Number(/usb/i.test(b.transport)) - Number(/usb/i.test(a.transport)));
+  const wanted = (process.env.NEWAMP_MAC_VERIFY_DAC ?? '').toLowerCase();
+  const device = (wanted && candidates.find((d) => d.name.toLowerCase().includes(wanted))) || candidates[0];
+  if (!device) return skip('no second stereo output that accepts 44.1 kHz; plug in a DAC (or name one with NEWAMP_MAC_VERIFY_DAC)');
+  // The engine picks its output path when the app starts, so the throwaway
+  // profile is pointed at the device and the app relaunched.
+  if (ctx.app?.alive) await ctx.app.kill();
+  const settingsPath = join(ctx.fixtures.userData, 'settings.json');
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  writeFileSync(settingsPath, JSON.stringify({ ...settings, bitPerfectExclusive: true, bitPerfectExclusiveDeviceId: device.addonId }, null, 2));
+  const app = await ensureApp();
+  const family = new Set([app.pid, ...app.descendants()]);
+  const before = coreAudioDeviceState(helperPath, device.uid);
+  const title = trackByCodec('flac').title;
+  await app.pageEval(`await playTitle(${JSON.stringify(title)}); return true;`);
+  await app.waitUntil('hog mode on the device', () => coreAudioDeviceState(helperPath, device.uid), (s) => family.has(s.hogPid), 8000);
+  await sleep(1500);
+  const during = await app.pageEval(`
+    const badge = document.querySelector('[data-newamp-signal-path-badge]');
+    return { transport: transport(), badge: badge ? badge.textContent.trim() : null };`);
+  const held = coreAudioDeviceState(helperPath, device.uid);
+  expect(family.has(held.hogPid), `hog owner is pid ${held.hogPid}, not the app (${app.pid})`);
+  expect(held.nominalRate === 44100, `the device clock is ${held.nominalRate} Hz, not the track's 44100`);
+  expect(during.transport?.playing && during.transport.time > 1, `the transport is not playing through it: ${JSON.stringify(during.transport)}`);
+  await app.mainEval(`const i = app.dock.getMenu().items.find((x) => x.label === 'Stop'); if (!i) throw new Error('no Dock Stop item'); i.click(); return true;`);
+  const released = await app.waitUntil('the device released after Stop', () => coreAudioDeviceState(helperPath, device.uid), (s) => s.hogPid === -1 && s.nominalRate === before.nominalRate, 8000);
+  return pass(`${device.name}: hog held by the app at 44100 Hz while "${title}" played ${during.transport.time.toFixed(1)} s (badge "${during.badge}"); Stop released it and the clock is back at ${released.nominalRate} Hz`, { device: device.name, uid: device.uid, before, held, during, released });
+}, { needs: 'main', timeoutMs: 120000, retry: false });
 
 // ---------------------------------------------------------------- manual items
 
