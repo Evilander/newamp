@@ -379,6 +379,11 @@ function applySoftwareRenderingSwitches(mode: 'normal' | 'smoke'): void {
   app.commandLine.appendSwitch('disable-accelerated-video-decode');
   app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,UseSkiaRenderer,VizDisplayCompositor');
   app.commandLine.appendSwitch('in-process-gpu');
+  // With the GPU off, Windows still gets WebGL through Direct3D's software
+  // rasterizer, but macOS and Linux only have SwiftShader, which Chromium
+  // withholds without this switch: MilkDrop and the projector's WebGL layer
+  // then fail to start instead of running slowly.
+  app.commandLine.appendSwitch('enable-unsafe-swiftshader');
   if (mode === 'smoke') {
     app.commandLine.appendSwitch('disable-gpu-sandbox');
     app.commandLine.appendSwitch('no-sandbox');

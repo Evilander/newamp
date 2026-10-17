@@ -13,7 +13,10 @@ const existing = new Set([
   'c:/users/user/onedrive/music',
 ].map(key));
 
+// Windows paths and OneDrive variables: say so, or the host's own platform
+// branch answers (macOS has no OneDrive folder and the assertion fails there).
 const suggestions = suggestMusicFolders({
+  platform: 'win32',
   homeDir: 'C:/Users/User',
   env: {
     NEWAMP_REAL_LIBRARY_ROOT: 'K:/music',
