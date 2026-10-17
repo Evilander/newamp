@@ -25,6 +25,7 @@
 
 #include <napi.h>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -34,7 +35,9 @@
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <unistd.h>
-#ifndef kAudioObjectPropertyElementMain
+// kAudioObjectPropertyElementMain is an enum constant, not a macro, so it has
+// to be gated on the SDK version: SDKs before macOS 12 only know ...Master.
+#if !defined(MAC_OS_VERSION_12_0) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_VERSION_12_0
 #define kAudioObjectPropertyElementMain kAudioObjectPropertyElementMaster
 #endif
 #endif
@@ -46,8 +49,13 @@ namespace {
 // HOG mode: take whole-device ownership (kAudioDevicePropertyHogMode) and pin
 // the device's nominal sample rate to the source rate, then open the hogged
 // device through miniaudio's normal (shared) path. Exclusivity lives at the
-// device layer. EXPERIMENTAL: compile-verified on CI; unverified on real
-// hardware — the app labels it accordingly.
+// device layer. Verified 2026-10-16 (Mac mini M5 Pro, macOS 27.0.1) with
+// scripts/mac/hog-probe.mjs on a Focusrite Scarlett 2i2 4th Gen (44.1/48 kHz),
+// an HDMI display (44.1/48) and the built-in speakers (44.1/88.2/96): hog
+// taken and released, the clock pinned and put back, a device owned by another
+// process refused with its rate untouched. Multichannel outputs (the Studio
+// Display is 8-channel) are outside the stereo-only exclusive path. The app
+// still labels it experimental until more hardware has been through it.
 AudioObjectID g_hoggedDevice = kAudioObjectUnknown;
 bool g_holdingHog = false;
 Float64 g_priorNominalRate = 0;
@@ -83,6 +91,42 @@ AudioObjectID ResolveCoreAudioDevice(const ma_device_id* id) {
   return rc == noErr ? device : kAudioObjectUnknown;
 }
 
+void RestoreNominalRate(AudioObjectID device) {
+  if (device == kAudioObjectUnknown || g_priorNominalRate <= 0) return;
+  AudioObjectPropertyAddress rateAddr = {
+      kAudioDevicePropertyNominalSampleRate,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain,
+  };
+  AudioObjectSetPropertyData(device, &rateAddr, 0, nullptr, sizeof(g_priorNominalRate),
+                             &g_priorNominalRate);
+  g_priorNominalRate = 0;
+}
+
+// Setting kAudioDevicePropertyNominalSampleRate returns before the device has
+// switched (USB interfaces take tens to hundreds of milliseconds, and a few
+// seconds on a cold switch). Opening the stream before it settles makes
+// miniaudio negotiate the OLD rate, which the app then refuses as a hidden
+// resample. So the switch is waited for, bounded.
+bool WaitForNominalRate(AudioObjectID device, Float64 target, int timeoutMs) {
+  AudioObjectPropertyAddress rateAddr = {
+      kAudioDevicePropertyNominalSampleRate,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain,
+  };
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+  for (;;) {
+    Float64 now = 0;
+    UInt32 size = sizeof(now);
+    if (AudioObjectGetPropertyData(device, &rateAddr, 0, nullptr, &size, &now) == noErr &&
+        now == target) {
+      return true;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    usleep(5000);
+  }
+}
+
 bool AcquireHogAndRate(const ma_device_id* id, double sampleRate, std::string* error) {
   const AudioObjectID device = ResolveCoreAudioDevice(id);
   if (device == kAudioObjectUnknown) {
@@ -115,9 +159,18 @@ bool AcquireHogAndRate(const ma_device_id* id, double sampleRate, std::string* e
     *error = "device rejected the requested sample rate";
     return false;
   }
+  if (g_priorNominalRate != target && !WaitForNominalRate(device, target, 3000)) {
+    RestoreNominalRate(device);
+    *error = "device did not switch to the requested sample rate";
+    return false;
+  }
   if (owner != getpid()) {
     pid_t self = getpid();
     if (AudioObjectSetPropertyData(device, &hogAddr, 0, nullptr, sizeof(self), &self) != noErr) {
+      // The clock is already pinned at this point and g_holdingHog is still false,
+      // so ReleaseHog() would not run: put the device back before giving up, or the
+      // user's system output stays at our rate after we exit.
+      RestoreNominalRate(device);
       *error = "failed to acquire CoreAudio hog mode";
       return false;
     }
@@ -136,18 +189,9 @@ void ReleaseHog() {
   };
   pid_t release = -1;
   AudioObjectSetPropertyData(g_hoggedDevice, &hogAddr, 0, nullptr, sizeof(release), &release);
-  if (g_priorNominalRate > 0) {
-    AudioObjectPropertyAddress rateAddr = {
-        kAudioDevicePropertyNominalSampleRate,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain,
-    };
-    AudioObjectSetPropertyData(g_hoggedDevice, &rateAddr, 0, nullptr, sizeof(g_priorNominalRate),
-                               &g_priorNominalRate);
-  }
+  RestoreNominalRate(g_hoggedDevice);
   g_hoggedDevice = kAudioObjectUnknown;
   g_holdingHog = false;
-  g_priorNominalRate = 0;
 }
 #endif  // __APPLE__
 

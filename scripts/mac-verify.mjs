@@ -402,9 +402,21 @@ async function reset(app, { keepPlaying = false } = {}) {
       await app.waitUntil('window visible', () => app.windowState(), (s) => s.visible, 6000);
     }
   }
-  await app.pageEval(`
+  // Deck mode lives in the renderer's store; only the deck shortcut (or the
+  // deck's own Exit button) leaves it. winctl.setCompact(false) just resizes
+  // the window and leaves the deck UI, and every later check then waits for a
+  // sidebar that never comes back.
+  const inDeck = await app.pageEval(`
     if (window.winctl && window.winctl.isFullscreen && await window.winctl.isFullscreen()) { await window.winctl.setFullscreen(false); await sleep(600); }
-    if (!document.querySelector('[data-newamp-sidebar]')) { await window.winctl.setCompact(false); await sleep(900); }
+    return !document.querySelector('[data-newamp-sidebar]');`);
+  if (inDeck) {
+    await app.page.pressKey({ ...KEYS.M, meta: true, shift: true });
+    const back = await app.pageEval(`
+      for (let i = 0; i < 100 && !document.querySelector('[data-newamp-sidebar]'); i += 1) await sleep(50);
+      return !!document.querySelector('[data-newamp-sidebar]');`);
+    if (!back) await app.pageEval(`await window.winctl.setCompact(false); await sleep(900); return true;`);
+  }
+  await app.pageEval(`
     ${keepPlaying ? '' : "const t = transport(); if (t && t.playing) clickAria('Pause');"}
     await navTo('library');
     return true;`);
@@ -769,6 +781,10 @@ check('shortcuts-cmd', 'keyboard', 'Cmd+Left/Right skip, Cmd+Up/Down change volu
   const down = await app.waitUntil('Cmd+Down to lower the volume', read, (t) => t.volume < up.volume - 0.03, 4000);
   expect(Math.abs(up.volume - v0 - 0.05) < 0.012, `Cmd+Up moved the volume by ${(up.volume - v0).toFixed(3)}, wanted 0.05`);
   expect(Math.abs(down.volume - v0) < 0.012, `Cmd+Down did not come back to ${v0} (${down.volume})`);
+  // Space is the one shortcut that yields to a focused control (a Library
+  // row keeps it after a double-click), so clear focus first; what is under
+  // test is the binding, not where focus happened to land.
+  await app.pageEval('if (document.activeElement) document.activeElement.blur(); return true;');
   await page.pressKey({ ...KEYS.Space });
   await app.waitUntil('Space to pause', read, (t) => !t.playing, 4000);
   await page.pressKey({ ...KEYS.Space });
@@ -930,7 +946,14 @@ check('deck-mode', 'deck', 'Deck mode: compact size, fixed, traffic lights hidde
   const normal = await app.windowState();
   await app.page.pressKey({ ...KEYS.M, meta: true, shift: true });
   const deck = await app.waitUntil('deck-sized window', () => app.windowState(), (s) => s.bounds.height < 400, 8000);
-  expect(!deck.resizable, 'the deck window is still resizable');
+  // The deck skin asks for its own size once it has mounted, so the window is
+  // resized (and made fixed) twice; sample until it settles and report flaps.
+  const resizableSamples = [deck.resizable];
+  for (let i = 0; i < 12; i += 1) {
+    await sleep(150);
+    resizableSamples.push((await app.windowState()).resizable);
+  }
+  expect(!resizableSamples.at(-1), `the deck window is still resizable (sampled over 2 s: ${resizableSamples.map((r) => (r ? 'R' : '-')).join('')})`);
   expect(deck.bounds.width >= 280 && deck.bounds.width <= 1600, `deck width ${deck.bounds.width}`);
   const buttons = await app.pageEval(`
     await sleep(600);
@@ -1063,9 +1086,13 @@ check('quit-cmd-q', 'lifecycle', 'Quit (the Cmd+Q path) from the hidden state en
   await app.pageEval('await window.winctl.close(); return true;');
   await app.waitUntil('window hidden', () => app.windowState(), (s) => !s.visible, 5000);
   const family = app.descendants();
-  const clickQuitItem = async () => {
+  // A role menu item's click() does not run its role in Electron 42 (checked
+  // on 42.11: before-quit never fires), so the Quit role's own action,
+  // app.quit(), is called instead. It is deferred so the inspector session is
+  // gone before the quit runs, the way it would be for a real Cmd+Q.
+  const quitThroughProbe = async () => {
     if (!app.main) await app.attachMain();
-    await app.mainEval(`const find = (items) => { for (const i of items) { if (i.role === 'quit') return i; if (i.submenu) { const f = find(i.submenu.items); if (f) return f; } } return null; }; find(Menu.getApplicationMenu().items).click(); return true;`).catch(() => undefined);
+    await app.mainEval('setTimeout(() => app.quit(), 400); return true;').catch(() => undefined);
     app.detachMain();
   };
   let via = '';
@@ -1076,19 +1103,18 @@ check('quit-cmd-q', 'lifecycle', 'Quit (the Cmd+Q path) from the hidden state en
     const sent = osascript('tell application "System Events" to keystroke "q" using command down');
     via = sent.status === 0 ? 'real Cmd+Q through System Events' : `Cmd+Q not sent (${clip(sent.stderr, 90)})`;
   }
+  const quitByAppleEvent = async (target, label) => {
+    app.detachMain();
+    const event = osascript(`tell application ${target} to quit`, 10000);
+    if (event.status === 0) return label;
+    await quitThroughProbe();
+    return `app.quit() through the main-process probe (Apple event unavailable: ${clip(event.stderr, 80)})`;
+  };
   if (!via || via.startsWith('Cmd+Q not sent')) {
-    if (ctx.target.kind === 'packaged') {
-      app.detachMain();
-      const event = osascript(`tell application ${JSON.stringify(ctx.target.appPath)} to quit`, 10000);
-      if (event.status === 0) via = 'quit Apple event (what Dock > Quit sends)';
-      else {
-        await clickQuitItem();
-        via = `menu Quit item click (Apple event unavailable: ${clip(event.stderr, 80)})`;
-      }
-    } else {
-      await clickQuitItem();
-      via = 'menu Quit item click (the dev tree has no bundle to address by Apple event)';
-    }
+    // The dev tree runs inside Electron's own bundle, addressable by its id.
+    via = ctx.target.kind === 'packaged'
+      ? await quitByAppleEvent(JSON.stringify(ctx.target.appPath), 'quit Apple event (what Dock > Quit sends)')
+      : await quitByAppleEvent('id "com.github.Electron"', 'quit Apple event to com.github.Electron (what Dock > Quit sends)');
   }
   const started = Date.now();
   await Promise.race([

@@ -64,6 +64,14 @@ for (const args of electronBuilderTargetArgs(requestedTargets)) {
   }
 }
 
+// The mac targets are built arm64 then x64 and each stages its own ffmpeg, so
+// node_modules/ffmpeg-static is left holding the x64 binary on an Apple
+// Silicon Mac; the dev tree and test:macho-arch then fail. Put the host's back
+// (a no-op when it already matches).
+if (process.platform === 'darwin') {
+  run(process.execPath, [join(repoRoot, 'scripts', 'stage-ffmpeg-for-arch.mjs'), process.arch]);
+}
+
 const shouldWriteChecksums = requestedTargets.includes('--all');
 if (shouldWriteChecksums) {
   const checksums = writeReleaseChecksums({ root: repoRoot });

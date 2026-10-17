@@ -50,22 +50,31 @@ export function buildAppMenuTemplate(
   return [
     {
       label: opts.appName,
+      // Role labels are built from app.name, the package name; these three
+      // carry it, so they get the product name spelled out.
       submenu: [
-        { role: 'about' },
+        { role: 'about', label: `About ${opts.appName}` },
         { type: 'separator' },
         ...settingsItems,
         { role: 'services' },
         { type: 'separator' },
-        { role: 'hide' },
+        { role: 'hide', label: `Hide ${opts.appName}` },
         { role: 'hideOthers' },
         { role: 'unhide' },
         { type: 'separator' },
-        { role: 'quit' },
+        { role: 'quit', label: `Quit ${opts.appName}` },
       ],
     },
     { role: 'editMenu' },
     { label: 'View', submenu: viewSubmenu },
-    { role: 'windowMenu' },
+    {
+      // Electron's stock macOS Window menu has Minimize and Zoom but no Close,
+      // so Cmd+W did nothing. Close goes through the window's close event,
+      // which on macOS hides the window and keeps playing.
+      label: 'Window',
+      role: 'window',
+      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'close' }, { type: 'separator' }, { role: 'front' }],
+    },
     {
       role: 'help',
       submenu: [

@@ -208,20 +208,32 @@ for (const rate of rates) {
     row.internal = `${opened.internalFormat}@${opened.internalSampleRate}`;
     row.physicalAfterOpen = settled.state.physicalFormat;
     const honest = opened.internalSampleRate === rate && opened.internalFormat === format;
+    // The ring holds ringMs of audio (rounded up to a power of two), less than
+    // the hold, so it is fed while the device plays, the way the app does it;
+    // end-of-stream is set only once the last byte is queued.
     const { frames, buffer } = silence(rate, format, holdMs);
     let written = 0;
-    while (written < buffer.length) {
-      const n = addon.write(buffer.subarray(written));
-      if (n === 0) break;
-      written += n;
-    }
-    addon.setEos(true);
+    const feed = () => {
+      while (written < buffer.length) {
+        const n = addon.write(buffer.subarray(written));
+        if (n === 0) break;
+        written += n;
+      }
+    };
+    feed();
     addon.start();
     const drainBy = Date.now() + holdMs + 3000;
+    let eosSet = false;
     let stats = addon.stats();
-    while (!stats.drained && Date.now() < drainBy) {
-      await sleep(40);
+    while (Date.now() < drainBy) {
+      if (written < buffer.length) feed();
+      if (written === buffer.length && !eosSet) {
+        addon.setEos(true);
+        eosSet = true;
+      }
       stats = addon.stats();
+      if (eosSet && stats.drained) break;
+      await sleep(20);
     }
     row.stats = { framesRendered: stats.framesRendered, expected: frames, underruns: stats.underruns, drained: stats.drained };
     const hogDuring = deviceState(uid).hogPid;

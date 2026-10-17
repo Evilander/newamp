@@ -1615,8 +1615,11 @@ function refreshDisplaySleepBlocker(): void {
 }
 
 function installApplicationMenu(): void {
+  // app.getName() is the package name ("newamp"), which also names the
+  // userData folder, so it stays as it is; the menu and the About box show
+  // the product name.
   const template = buildAppMenuTemplate(process.platform, {
-    appName: app.getName(),
+    appName: 'NewAmp',
     appVersion: app.getVersion(),
     isPackaged: app.isPackaged,
     onPreferences: () => {
@@ -1633,7 +1636,7 @@ function installApplicationMenu(): void {
   });
   if (process.platform === 'darwin') {
     app.setAboutPanelOptions({
-      applicationName: app.getName(),
+      applicationName: 'NewAmp',
       applicationVersion: app.getVersion(),
     });
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
