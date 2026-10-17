@@ -5,7 +5,20 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
-## [Unreleased]
+## [2.7.0] - 2026-10-16
+
+The whole library is analysed in the background, so Sounds Like, harmonic
+mixes and the tempo filters cover everything you own without a manual step.
+Albums are grouped the way the files describe them, which turns compilations
+and multi-disc sets back into single albums; the first launch after updating
+regroups them and starts the analysis, and neither touches your music files.
+The library and settings are backed up once a day, internet radio plays the
+plain-http stations that are most of the directory, and files opened from
+Explorer or Finder join the queue instead of replacing it. Home, Discover,
+Mixes and Folders open without stalling the app on large libraries. On a Mac,
+Cmd+W closes the window, the menu says NewAmp, and Bit-Perfect Exclusive waits
+for the device to switch sample rate, checked on real hardware for the first
+time.
 
 ### Added
 
@@ -111,6 +124,9 @@ Release notes for every version, including everything before 2.0, are on the
   at 48 kHz could be refused as a hidden resample because the stream opened at
   the old rate; and when a device refused hog mode, its sample rate was left
   at the track's rate instead of put back.
+- On macOS and Linux, when the app runs without the GPU after a graphics
+  crash, MilkDrop and the projector use software WebGL instead of failing to
+  start.
 
 ## [2.6.0] - 2026-10-11
 
