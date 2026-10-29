@@ -5,6 +5,25 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [2.8.1] - 2026-10-29
+
+Fixes for playing a library from a network share.
+
+### Fixed
+
+- A track played from a network share could stop partway, its length cut to
+  where it stopped, and the next track start. When a read of the file failed
+  (a share that timed out), ffmpeg reported it as the end of the file, and the
+  player kept what it had and shortened the track to match. It now reads the
+  file again from where it stopped, up to five times, within the 30 seconds
+  it decodes ahead, and a track whose reads failed keeps its length.
+- Opening or dropping a file waited for a running library scan to finish. The
+  first scan of a large library on a network share can take hours, and the
+  window said "Opening one dropped item" until then. Opened and dropped files
+  are now read straight away; a dropped folder still waits for the scanner.
+- A library scan pauses while playback is short of audio, so on a slow drive
+  or share it no longer starves the track that is playing.
+
 ## [2.8.0] - 2026-10-28
 
 A Mac release. On a Mac with Logic Pro or GarageBand, the first scan of the
