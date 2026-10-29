@@ -1,7 +1,9 @@
 // FirstLaunchTutorial — the "win the first hour" card. Music comes first: this
-// overlay's only job is to point at the one-click scan hero waiting behind it
-// and teach the three keys that matter. AI setup is a single optional line
-// that links to Settings — no key is ever typed here.
+// overlay's only job is to say where the library is coming from and teach the
+// three keys that matter. A first launch has usually seeded a folder and
+// started reading it already; only when none was found does the card point at
+// the one-click scan hero waiting behind it. AI setup is a single optional
+// line that links to Settings — no key is ever typed here.
 
 import { useRef, useState } from 'react';
 import type { AppSettings } from '@shared/types';
@@ -43,6 +45,7 @@ const KBD_STYLE = {
 } as const;
 
 export function FirstLaunchTutorial({
+  settings,
   onFinish,
   onOpenSettings,
 }: {
@@ -55,6 +58,10 @@ export function FirstLaunchTutorial({
   const dialogRef = useRef<HTMLElement>(null);
   const startRef = useRef<HTMLButtonElement>(null);
   useModalFocus(dialogRef, startRef);
+  // The main process picks the Music folder and starts reading it before this
+  // card can open, so roots on a first launch mean the scan is already under way.
+  const roots = settings.libraryRoots;
+  const folders = roots.length === 1 ? roots[0] : `${roots.length} folders`;
 
   async function finish(): Promise<void> {
     setBusy(true);
@@ -74,11 +81,12 @@ export function FirstLaunchTutorial({
           <BrandLogo size={72} title="NewAmp" />
           <div>
             <div className="first-launch-kicker">First launch</div>
-            <h1 id="first-launch-title">Scan your Music folder</h1>
+            <h1 id="first-launch-title">{roots.length ? 'Your library is building' : 'Scan your Music folder'}</h1>
             <p>
-              NewAmp plays the files already on this machine — no cloud, no account, no telemetry.
-              The scan button is waiting right behind this card: one click and your library builds
-              itself while you listen.
+              NewAmp plays the files already on this machine — no cloud, no account, no telemetry.{' '}
+              {roots.length
+                ? `It is already reading ${folders}, and your library fills in behind this card while you listen.`
+                : 'The scan button is waiting right behind this card: one click and your library builds itself while you listen.'}
             </p>
           </div>
         </header>

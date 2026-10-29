@@ -8,6 +8,7 @@ import type { ScanProgress } from '../shared/types.js';
 import type { TrackTagExtras } from '../shared/album-identity.js';
 import { runTagBackfill, type TagBackfillControl } from './album-identity-backfill.js';
 import { chooseFolderArt, isDiscFolderName, isFolderArtImage, type FolderImage, type FolderListing } from './folder-art.js';
+import { isSkippedLibraryFile, isSkippedLibraryFolder } from './library-skip.js';
 
 const AUDIO_EXTS = new Set([
   '.mp3',
@@ -100,20 +101,23 @@ async function* walk(root: string, report: WalkReport = { reachable: false, unre
       report.unreadable.push(dir);
       continue; // skip permission denied / unreadable
     }
+    const files: string[] = [];
     for (const e of entries) {
       const full = join(dir, e.name);
       if (e.isDirectory()) {
-        if (e.name.startsWith('.') || e.name === 'System Volume Information') continue;
+        if (isSkippedLibraryFolder(e.name, basename(dir))) continue;
         stack.push(full);
       } else if (e.isFile()) {
-        if (!isAudioPath(e.name)) continue;
-        try {
-          const stat = await fs.stat(full);
-          yield { full, size: stat.size, mtime: stat.mtimeMs, dev: Number(stat.dev) };
-        } catch {
-          /* skip */
-        }
+        if (isSkippedLibraryFile(e.name) || !isAudioPath(e.name)) continue;
+        files.push(full);
       }
+    }
+    // A folder's files are stat'ed together rather than one after another: on
+    // a network share each stat is a round trip.
+    const stats = await Promise.all(files.map((full) => fs.stat(full).catch(() => null)));
+    for (let i = 0; i < files.length; i += 1) {
+      const stat = stats[i];
+      if (stat) yield { full: files[i], size: stat.size, mtime: stat.mtimeMs, dev: Number(stat.dev) };
     }
   }
 }
@@ -241,7 +245,10 @@ async function readMeta(
         art = { mime: pic.format || 'image/jpeg', data: Buffer.from(pic.data) };
       }
     }
-  } catch {
+  } catch (err) {
+    // The storage failing for a moment is not the file failing to parse; the
+    // scan leaves that file for next time (see isTransientReadError).
+    if (isTransientReadError(err)) throw err;
     // Metadata parsing failed. A new file still gets a row from the filename;
     // a known one keeps what it has (LibraryStore.upsertTracks).
     parseFailed = true;
@@ -555,14 +562,20 @@ export class Scanner {
         });
         this.library.setTrackDevices(devices);
 
-        const incoming = await pMap(changed, METADATA_CONCURRENCY, async (f) => {
+        const read = await pMap(changed, METADATA_CONCURRENCY, async (f) => {
           try {
             return await readMeta(f.full, f.size, f.mtime, f.dev, folderArtForFile, codecOnly.has(f.full));
           } catch (err) {
             console.warn(`[newamp] metadata parse failed for ${f.full}: ${errorMessage(err)}`);
+            // A share that timed out or a file that went away says nothing
+            // about the file. Its guessed row would carry the file's real size
+            // and date, so later scans would take it as read and keep "Unknown
+            // Artist" for good; the next scan reads it instead.
+            if (isTransientReadError(err)) return null;
             return fallbackTrack(f.full, f.size, f.mtime, f.dev);
           }
         });
+        const incoming = read.filter((track): track is IncomingTrack => track !== null);
         parsed += incoming.length;
         this.library.upsertTracks(incoming);
         scanned += slice.length;
@@ -625,6 +638,29 @@ async function metadataRefresh(
   if (!existing.hasArt && (await hasFolderArt(discovered.full))) return 'full';
   if (existing.codec === null && CODEC_PROBE_EXTS.has(extname(discovered.full).toLowerCase())) return 'codec';
   return null;
+}
+
+// Errors from the storage rather than the file: a network share that timed
+// out or dropped, a drive that is busy or went away, a file deleted after the
+// walk listed it.
+const TRANSIENT_READ_ERRORS = new Set([
+  'ETIMEDOUT',
+  'EIO',
+  'EAGAIN',
+  'EBUSY',
+  'ESTALE',
+  'ECONNRESET',
+  'ENOTCONN',
+  'EHOSTDOWN',
+  'EHOSTUNREACH',
+  'ENETDOWN',
+  'ENETUNREACH',
+  'ENOENT',
+]);
+
+function isTransientReadError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && TRANSIENT_READ_ERRORS.has(code);
 }
 
 function errorMessage(err: unknown): string {

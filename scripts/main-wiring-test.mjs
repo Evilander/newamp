@@ -125,8 +125,13 @@ assert.match(main, /ipcMain\.handle\('win:set-always-on-top'[\s\S]*?setVisibleOn
 // wiring it, and the check takes any spelling (property, shorthand, spread).
 {
   const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  const install = stripComments(functionBody(main, 'function installApplicationMenu(): void {'));
-  assert.ok(/\bbuildAppMenuTemplate\(/.test(install), 'the menu is still built by installApplicationMenu');
+  assert.ok(/\bapplicationMenuTemplate\(\)/.test(stripComments(functionBody(main, 'function installApplicationMenu(): void {'))), 'installApplicationMenu installs the template');
+  const install = stripComments(functionBody(main, 'function applicationMenuTemplate(): MenuItemConstructorOptions[] {'));
+  assert.ok(/\bbuildAppMenuTemplate\(/.test(install), 'the menu is still built by applicationMenuTemplate');
+  // Controls sends the Dock menu's commands, and its Play/Pause label is
+  // rebuilt whenever the Dock menu's is.
+  assert.match(install, /playback:\s*\{\s*isPlaying: shellPlaybackState\.isPlaying, onCommand: sendPlayerCommand\s*\}/);
+  assert.match(functionBody(main, 'function refreshDockMenu(): void {'), /Menu\.setApplicationMenu\(Menu\.buildFromTemplate\(applicationMenuTemplate\(\)\)\)/);
   if (/\bonPreferences\b/.test(install)) {
     assert.ok(preload.includes("ipcRenderer.on('app:open-settings'"), 'a Settings menu item needs a renderer listener to open it');
     assert.match(

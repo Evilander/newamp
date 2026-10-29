@@ -129,6 +129,8 @@ interface WheelLike {
   deltaY: number;
   /** 0 = pixels, 1 = lines, 2 = pages (WheelEvent.deltaMode). */
   deltaMode: number;
+  /** Set on the wheel events a trackpad pinch generates. */
+  ctrlKey?: boolean;
 }
 
 /**
@@ -136,6 +138,7 @@ interface WheelLike {
  * A trackpad or Magic Mouse flick is dozens of events with momentum behind
  * it, and every step starts a track, so a gesture steps once and the knob
  * waits for it to end. Events keep the gesture alive however small they are.
+ * A pinch arrives as ctrl+wheel and is not a channel gesture.
  */
 export class ChannelWheel {
   private travel = 0;
@@ -143,6 +146,7 @@ export class ChannelWheel {
   private stepped = false;
 
   next(event: WheelLike, now = performance.now()): -1 | 0 | 1 {
+    if (event.ctrlKey) return 0;
     let px = event.deltaY;
     if (!Number.isFinite(px) || px === 0) return 0;
     if (event.deltaMode === 1) px *= 16;

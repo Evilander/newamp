@@ -9,11 +9,12 @@ const choose = (choice) => () => chosen.push(choice);
 const labels = (items) => items.map((item) => (item.type === 'separator' ? '---' : item.label));
 
 const bin = process.platform === 'win32' ? 'Recycle Bin' : 'Trash';
+const reveal = process.platform === 'darwin' ? 'Show in Finder' : 'Show in Folder';
 const one = trackContextMenuTemplate(
   { trackCount: 1, playlists: [{ id: 4, name: 'CD Mix' }, { id: 9, name: 'Rock & Roll' }], canShowInFolder: true, canTrash: true },
   choose,
 );
-assert.deepEqual(labels(one), ['Play Next', 'Add to Queue', '---', 'Add to Playlist', '---', 'Show in Folder', '---', `Move to ${bin}`]);
+assert.deepEqual(labels(one), ['Play Next', 'Add to Queue', '---', 'Add to Playlist', '---', reveal, '---', `Move to ${bin}`]);
 const submenu = one[3].submenu;
 assert.deepEqual(labels(submenu), ['New Playlist', '---', 'CD Mix', 'Rock && Roll'], "'&' is escaped so Windows shows it");
 

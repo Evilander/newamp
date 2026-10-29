@@ -314,6 +314,10 @@ define('window', {
   removeEventListener(type, fn, capture) {
     listeners.set(type, (listeners.get(type) ?? []).filter((entry) => !(entry.fn === fn && entry.capture === !!capture)));
   },
+  dispatchEvent(event) {
+    fire(event.type, event);
+    return true;
+  },
   setTimeout(fn, delay = 0) {
     timers.set(++timerId, { fn, delay });
     return timerId;
@@ -570,7 +574,7 @@ const pointer = (pointerId) => ({ type: 'pointerup', pointerId });
 }
 
 // --- Quick play launcher -------------------------------------------------------
-const { QuickPlayPalette } = await bundle('src/components/QuickPlayLauncher.tsx', { jsx: 'automatic', plugins: [virtualModules] });
+const { QuickPlayPalette, openQuickPlay } = await bundle('src/components/QuickPlayLauncher.tsx', { jsx: 'automatic', plugins: [virtualModules] });
 
 // The tour's overlay carries the marker; the dialog inside it is aria-modal like the columns popover.
 const tourDom = [{ attrs: { 'data-newamp-first-launch-tutorial': '' } }, { attrs: { role: 'dialog', 'aria-modal': 'true' } }];
@@ -762,6 +766,10 @@ const ctrl = (key, flags = {}) => keydown({ key, code: `Key${key.toUpperCase()}`
   launcher.store.compactMode = false;
   assert.equal(mac('f', { metaKey: true }).defaultPrevented, true, 'Cmd+F searches the Library');
   assert.equal(launcher.store.view, 'library');
+  assert.equal(mac('k', { ctrlKey: true }).defaultPrevented, false, 'Ctrl+K kills to the end of the line in a Mac text field');
+  assert.equal(mac('j', { ctrlKey: true }).defaultPrevented, false, 'and Ctrl+J is a newline');
+  launcher.render();
+  assert.equal(launcher.output, null, 'neither opens the palette');
   assert.equal(mac('k', { metaKey: true }).defaultPrevented, true, 'Cmd+K opens the palette');
   launcher.render();
   assert.notEqual(launcher.output, null);
@@ -769,10 +777,31 @@ const ctrl = (key, flags = {}) => keydown({ key, code: `Key${key.toUpperCase()}`
   launcher.unmount();
 }
 
+// A button opens the palette without a chord: the same on every platform, never over the tour, and it opens rather than toggles.
+for (const platform of ['win32', 'darwin', 'linux']) {
+  const launcher = mountLauncher(platform);
+  openQuickPlay();
+  launcher.render();
+  assert.notEqual(launcher.output, null, `${platform}: the open request opens the palette`);
+  openQuickPlay();
+  launcher.render();
+  assert.notEqual(launcher.output, null, `${platform}: asking again does not close it`);
+  keydown({ key: 'Escape', code: 'Escape' });
+  launcher.render();
+  assert.equal(launcher.output, null);
+  env.elements = tourDom;
+  openQuickPlay();
+  launcher.render();
+  assert.equal(launcher.output, null, `${platform}: not over the first-launch tour`);
+  env.elements = [];
+  launcher.unmount();
+  assert.deepEqual([...listeners].filter(([, list]) => list.length).map(([type]) => type), [], `${platform}: unmounting leaves no listener behind`);
+}
+
 // --- Source wiring ---------------------------------------------------------
 const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8').then((text) => text.replace(/\r\n/g, '\n'));
 const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
-const [app, launcherSource, scrub, sidebar, hints, tour, library] = await Promise.all([
+const [app, launcherSource, scrub, sidebar, hints, tour, library, nowPlaying] = await Promise.all([
   'src/App.tsx',
   'src/components/QuickPlayLauncher.tsx',
   'src/components/ScrubBar.tsx',
@@ -780,6 +809,7 @@ const [app, launcherSource, scrub, sidebar, hints, tour, library] = await Promis
   'src/components/FirstRunHints.tsx',
   'src/components/FirstLaunchTutorial.tsx',
   'src/components/views/LibraryView.tsx',
+  'src/components/views/NowPlayingView.tsx',
 ].map(read));
 
 assert.match(app, /platform: api\.platform/, 'the global handler passes the host platform to the resolver');
@@ -808,6 +838,21 @@ assert.ok(Object.keys(tourDom[0].attrs).includes(tourSelector[1].slice(1, -1)), 
 const resyncBody = scrub.slice(scrub.indexOf('const resync = '), scrub.indexOf('useEffect(resync, [value]);'));
 assert.ok(resyncBody.includes('el.value = String(valueRef.current)'), 'found the playhead sync');
 assert.doesNotMatch(resyncBody, /activeElement/, 'the thumb sync must not depend on focus');
+
+// Now Playing opens the palette through the launcher, not by faking its chord.
+assert.match(nowPlaying, /import \{ openQuickPlay \} from '\.\.\/QuickPlayLauncher'/);
+assert.doesNotMatch(nowPlaying, /new KeyboardEvent\(/, 'no faked chord');
+// Karaoke leaves fullscreen only if it was the one that entered.
+assert.match(nowPlaying, /winctl\.isFullscreen\(\)\.then\(\(already\) => \{\s*if \(cancelled \|\| already\) return;\s*entered = true;\s*void setWindowFullscreen\(true, winctl\);/);
+assert.match(nowPlaying, /if \(entered\) void setWindowFullscreen\(false, winctl\);/);
+assert.doesNotMatch(nowPlaying, /winctl\.setFullscreen\(/, 'karaoke goes through the ordered, state-checking setter');
+// Queue-row hints follow the platform; Backspace removes a row as Delete does.
+assert.match(nowPlaying, /shortcut=\{shortcutLabel\('Alt\+↑'\)\}/);
+assert.match(nowPlaying, /shortcut=\{shortcutLabel\('Alt\+↓'\)\}/);
+assert.match(nowPlaying, /shortcut=\{api\.platform === 'darwin' \? '⌫' : 'Delete'\}/);
+assert.match(nowPlaying, /aria-keyshortcuts="Delete Backspace Alt\+ArrowUp Alt\+ArrowDown"/);
+assert.match(nowPlaying, /event\.key === 'Delete' \|\| event\.key === 'Backspace'/);
+assert.match(nowPlaying, /api\.platform === 'darwin' \? 'Show in Finder' : 'Show in folder'/);
 
 for (const [name, source] of [['Sidebar', sidebar], ['FirstRunHints', hints], ['FirstLaunchTutorial', tour], ['QuickPlayLauncher', launcherSource]]) {
   assert.doesNotMatch(stripComments(source), /Ctrl/, `${name} must label chords through the platform helper, not a literal Ctrl`);

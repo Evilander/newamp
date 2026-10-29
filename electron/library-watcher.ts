@@ -2,6 +2,7 @@ import { existsSync, statSync, watch, type Dirent, type FSWatcher } from 'node:f
 import { lstat, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { isFolderArtImage } from './folder-art.js';
+import { isSkippedLibraryFolder, isSkippedLibraryPath } from './library-skip.js';
 
 const AUDIO_EXTS = new Set([
   '.mp3',
@@ -101,6 +102,7 @@ export function resolveLibraryWatchTarget(root: string, fileName: string | Buffe
   const relative = fileName.toString();
   if (!relative.trim()) return resolve(root);
 
+  if (isSkippedLibraryPath(relative, basename(root))) return null;
   const target = resolve(join(root, relative));
   const ext = extname(target).toLowerCase();
   if (AUDIO_EXTS.has(ext)) return target;
@@ -368,7 +370,7 @@ export class LibraryWatcher {
       }
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        if (entry.name.startsWith('.') || entry.name === 'System Volume Information') continue;
+        if (isSkippedLibraryFolder(entry.name, basename(current))) continue;
         pending.push(join(current, entry.name));
       }
     }
@@ -377,7 +379,7 @@ export class LibraryWatcher {
   // A folder created or moved in under a per-directory watch: watch it, and
   // rescan it, since files may have landed before its watcher existed.
   private async adoptDirectory(path: string, generation: number): Promise<void> {
-    if (this.watchers.has(path) || basename(path).startsWith('.')) return;
+    if (this.watchers.has(path) || isSkippedLibraryFolder(basename(path), basename(dirname(path)))) return;
     try {
       // lstat, not stat: the tree walk lists directories with Dirent, which
       // does not follow symlinks, so adopting one here would watch a tree the

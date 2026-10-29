@@ -57,6 +57,37 @@
   pointer-events: none;
   transform: translateY(calc(-100% - 18px));
 }
+/* macOS keeps the window's traffic lights (x 14..66, y 13..25) while the
+   visualizer is up in a window; OS fullscreen hides them. The toolbar starts to
+   their right, and a strip along the top edge stays draggable because the app's
+   own title bar is hidden behind the stage. Drag regions follow layout, not
+   stacking, so each control that reaches the strip opts back out. */
+.fullscreen-viz-drag-strip { display: none; }
+.fullscreen-viz-root[data-newamp-platform='darwin'][data-newamp-native-fullscreen='false'] .fullscreen-viz-drag-strip {
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  -webkit-app-region: drag;
+}
+.fullscreen-viz-root[data-newamp-platform='darwin'][data-newamp-native-fullscreen='false'] .fullscreen-viz-toolbar {
+  left: 80px;
+}
+/* The memory badge's top-left corner is where the lights are; it sits below
+   the toolbar instead. */
+.fullscreen-viz-root[data-newamp-platform='darwin'][data-newamp-native-fullscreen='false'] .eviland-memory-badge {
+  top: 60px;
+  left: 80px;
+}
+.fullscreen-viz-root[data-newamp-platform='darwin'][data-newamp-native-fullscreen='false'] .fullscreen-viz-toolbar,
+.fullscreen-viz-root[data-newamp-platform='darwin'][data-newamp-native-fullscreen='false'] .fullscreen-viz-toolbar button,
+.fullscreen-viz-root[data-newamp-platform='darwin'][data-newamp-native-fullscreen='false'] .eviland-memory-badge,
+.fullscreen-viz-root[data-newamp-platform='darwin'][data-newamp-native-fullscreen='false'] .viz-popover-backdrop,
+.fullscreen-viz-root[data-newamp-platform='darwin'][data-newamp-native-fullscreen='false'] .viz-menu-backdrop {
+  -webkit-app-region: no-drag;
+}
 .fullscreen-viz-toolbar.is-clean,
 .fullscreen-viz-now.is-clean {
   opacity: 0.72;

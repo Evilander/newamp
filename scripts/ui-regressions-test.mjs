@@ -37,11 +37,16 @@ async function methods(path, names, bindings) {
     inputRef: { current: input }, executeSelected: () => { executed++; },
   });
   for (const label of ['Close', 'NEXT', '+']) {
-    ctx.onPaletteKeyDown({ key: 'Enter', target: { tagName: 'BUTTON', textContent: label }, preventDefault() { prevented++; } });
+    ctx.onPaletteKeyDown({ key: 'Enter', nativeEvent: {}, target: { tagName: 'BUTTON', textContent: label }, preventDefault() { prevented++; } });
   }
   assert.equal(executed, 0);
   assert.equal(prevented, 0);
-  ctx.onPaletteKeyDown({ key: 'Enter', target: input, preventDefault() { prevented++; } });
+  ctx.onPaletteKeyDown({ key: 'Enter', nativeEvent: {}, target: input, preventDefault() { prevented++; } });
+  assert.equal(executed, 1);
+  assert.equal(prevented, 1);
+  // The Enter that confirms an IME composition belongs to the input method.
+  ctx.onPaletteKeyDown({ key: 'Enter', nativeEvent: { isComposing: true }, target: input, preventDefault() { prevented++; } });
+  ctx.onPaletteKeyDown({ key: 'Enter', keyCode: 229, nativeEvent: {}, target: input, preventDefault() { prevented++; } });
   assert.equal(executed, 1);
   assert.equal(prevented, 1);
 }

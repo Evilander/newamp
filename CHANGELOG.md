@@ -5,6 +5,102 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [Unreleased]
+
+A Mac release. On a Mac with Logic Pro or GarageBand, the first scan of the
+Music folder no longer fills the library with thousands of loops and impulse
+responses, and files macOS leaves on network drives and in zips are skipped
+on every platform. Bit-Perfect Exclusive shows in Now Playing and answers the
+media keys and AirPods, the menu bar has a Controls menu, playback pauses
+when the Mac sleeps, and the Dock icon follows the macOS shape. The rest is wording, shortcuts and window details that were
+written for Windows.
+
+### Added
+
+- A Controls menu in the Mac menu bar with Play/Pause, Stop, Next (Cmd+Right)
+  and Previous (Cmd+Left). The shortcuts work with the window closed, and a
+  text field still keeps Cmd+arrows for the cursor.
+- About NewAmp shows the copyright and a link to the project.
+
+### Changed
+
+- Scans skip folders whose contents belong to another app: macOS packages
+  (Logic Pro projects, the Logic Pro sound library, the Music and Photos
+  libraries, apps and plug-ins), GarageBand projects in the GarageBand
+  folder, the Logic and GarageBand content folder "Audio Music Apps", Apple
+  Loops, Ableton's Factory Packs and User Library, __MACOSX folders from
+  zips, and the Windows recycle bin. Hidden
+  files are skipped too, which includes the "._" files macOS writes beside
+  everything it copies to SMB, NFS or exFAT drives; they have audio
+  extensions and used to show up as "Unknown Artist" tracks. On a Mac with
+  Logic Pro, a fresh install's scan of the Music folder went from 3,181
+  tracks to 86, because 3,095 of them were loops and impulse responses.
+  Tracks a library already has from another app's folders or from "._"
+  files are marked missing at the next scan, and Library health's Clean
+  missing files takes them out of the library. The files themselves are not
+  touched.
+- A Mac pauses playback when it goes to sleep, as Music does, so nothing
+  starts playing by itself when it wakes.
+- Bit-Perfect Exclusive shows the track in Now Playing and Control Center,
+  and the media keys, AirPods and headphone buttons control it. Before, the
+  exclusive stream had no media session at all on a Mac.
+- On a Mac the media keys reach NewAmp through Now Playing only. NewAmp no
+  longer registers them as global shortcuts there, which needed Accessibility
+  permission and would have taken them from Music while NewAmp sat paused.
+- While music plays, a closed or hidden window keeps its normal timer rate.
+  Chromium slows the timers of a hidden page it thinks is silent, which
+  includes Bit-Perfect Exclusive and quiet stretches of a track, and those
+  timers prepare the next track, send scrobbles and run the sleep timer.
+- The score bar's wheel moves by distance: a mouse notch is still a tenth (a
+  point with Shift), a trackpad swipe adds up the same way with a limit per
+  swipe, and a trackpad pinch no longer changes the score. A swipe could
+  move a score by several points before.
+- Quick Play opens with Cmd+K and Cmd+J on a Mac. Ctrl+K and Ctrl+J are left
+  to text fields there.
+- Option+[ and Option+] step visualizer presets, for keyboard layouts that
+  type brackets with Option (or AltGr).
+- The Mac app no longer carries the audio addons built for Windows and for
+  the other Mac architecture.
+- The transcode cache, up to 8 GB of files that can be made again, is
+  excluded from Time Machine.
+
+### Fixed
+
+- A file a scan couldn't read for a moment, such as one on a network share
+  that timed out, was added as "Unknown Artist" under its file name and kept
+  that way, because later scans saw the same size and date and skipped it.
+  It is now left for the next scan to read.
+- The Dock icon follows the macOS icon shape. macOS 26 and later put the
+  round icon inside a gray tile.
+- With the visualizer open in a window on a Mac, the window's close,
+  minimize and zoom buttons sat on top of the visualizer toolbar, with the
+  close button over its first button. The toolbar starts to their right, the
+  "remembers this song" badge sits below it, and the top edge moves the
+  window again.
+- After the first scan Home still said "0 tracks" and offered to scan the
+  Music folder until you opened another view and came back. Home refreshes
+  when a scan reads new files.
+- The first-launch card said the scan button was waiting when the first scan
+  had already started. It says which folder is being read.
+- Leaving karaoke lyrics took the window out of full screen even when it was
+  in full screen before.
+- With a Japanese, Chinese or Korean input method, the Enter that confirms
+  the typed text no longer also plays the first Quick Play result or submits
+  a playlist, podcast or profile name.
+- A Control-click on the score bar no longer sets a score before the menu
+  clears it.
+- Mac wording: drops mention Finder instead of Windows Explorer, track menus
+  say Show in Finder, shortcut hints use the Mac symbols (Quick Play's legend
+  and the queue row buttons), Settings and About say macOS instead of
+  "darwin", the bit-perfect setup notes cover Audio MIDI Setup, the
+  sample-rate note says to quit with Cmd+Q and open NewAmp again, and the
+  projector no longer offers F11, which a Mac keeps for itself.
+- Settings described Bit-Perfect Exclusive on macOS as untested on real
+  hardware. It was checked on three devices for 2.7.0.
+- A drop the app couldn't read suggested File > Open, a menu that doesn't
+  exist.
+- A Home tip described a Cmd/Ctrl-click on the score that does nothing.
+
 ## [2.7.0] - 2026-10-16
 
 The whole library is analysed in the background, so Sounds Like, harmonic

@@ -17,6 +17,7 @@ import {
   dialog,
   Tray,
   type Display,
+  type MenuItemConstructorOptions,
   type Rectangle,
 } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1599,6 +1600,8 @@ function refreshDockMenu(): void {
   if (dockPlayingLabel === playing) return;
   dockPlayingLabel = playing;
   app.dock.setMenu(buildDockMenu());
+  // The Controls menu's Play/Pause item says the same thing.
+  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate()));
 }
 
 function refreshDisplaySleepBlocker(): void {
@@ -1619,11 +1622,11 @@ function refreshDisplaySleepBlocker(): void {
   }
 }
 
-function installApplicationMenu(): void {
+function applicationMenuTemplate(): MenuItemConstructorOptions[] {
   // app.getName() is the package name ("newamp"), which also names the
   // userData folder, so it stays as it is; the menu and the About box show
   // the product name.
-  const template = buildAppMenuTemplate(process.platform, {
+  return buildAppMenuTemplate(process.platform, {
     appName: 'NewAmp',
     appVersion: app.getVersion(),
     isPackaged: app.isPackaged,
@@ -1638,13 +1641,38 @@ function installApplicationMenu(): void {
       else win.webContents.once('did-finish-load', send);
     },
     onOpenExternal: (url) => void shell.openExternal(url),
+    playback: { isPlaying: shellPlaybackState.isPlaying, onCommand: sendPlayerCommand },
   });
+}
+
+// Chromium leaves timers alone in a hidden window only while the page is
+// audible. Bit-Perfect Exclusive plays outside the page, and a quiet stretch
+// of a track (a hidden track's minutes of silence) also reads as silent, so
+// with the window closed the 100 ms engine tick that prepares the next track,
+// scrobbles and runs the sleep timer would drop to once a second, then once a
+// minute. Throttling stays on while nothing plays.
+let backgroundThrottlingFor: { id: number; on: boolean } | null = null;
+
+function refreshBackgroundThrottling(): void {
+  if (smokeMode || !mainWin || mainWin.isDestroyed()) return;
+  const contents = mainWin.webContents;
+  const on = !shellPlaybackState.isPlaying;
+  if (backgroundThrottlingFor?.id === contents.id && backgroundThrottlingFor.on === on) return;
+  backgroundThrottlingFor = { id: contents.id, on };
+  contents.setBackgroundThrottling(on);
+}
+
+function installApplicationMenu(): void {
   if (process.platform === 'darwin') {
     app.setAboutPanelOptions({
       applicationName: 'NewAmp',
       applicationVersion: app.getVersion(),
+      // The bundle version is the same string; shown again it read "2.8.0 (2.8.0)".
+      version: '',
+      copyright: 'Copyright © 2026 NewAmp contributors. MIT License.',
+      website: 'https://github.com/evilander/newamp',
     });
-    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+    Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate()));
     dockPlayingLabel = null;
     refreshDockMenu();
   } else {
@@ -1843,6 +1871,7 @@ function applyShellPlaybackState(state: ShellPlaybackState): void {
   applyThumbarButtons();
   refreshDockMenu();
   refreshDisplaySleepBlocker();
+  refreshBackgroundThrottling();
   if (tray && !tray.isDestroyed()) {
     const label = state.title
       ? `NewAmp — ${state.artist ? `${state.artist} – ` : ''}${state.title}${state.isPlaying ? '' : ' (paused)'}`
@@ -1927,8 +1956,15 @@ function registerMediaShortcuts(): void {
   // that is what feeds the system media session (volume flyout, lock screen,
   // headset buttons). Playback there goes through a media element, so the keys
   // reach the page's mediaSession handlers without us. Bit-Perfect Exclusive
-  // plays outside Chromium, has no session to feed, and keeps the global keys.
+  // plays outside Chromium and keeps the global keys; the page's silent session
+  // anchor stays off the media controls there, because the keys turn them off.
   if (process.platform === 'win32' && !settings.get().bitPerfectExclusive) return;
+  // A Mac sends the keys (and AirPods, Control Center and the Touch Bar) to
+  // the app that owns Now Playing. The page publishes a session in every
+  // output mode, Bit-Perfect Exclusive included, so Chromium's own handling
+  // covers it. Global media keys there need Accessibility trust, and with it
+  // they would take F7-F9 from Music while NewAmp sits paused in the Dock.
+  if (process.platform === 'darwin') return;
   const shortcuts: Array<[string, PlayerCommand]> = [
     ['MediaPlayPause', 'toggle-play'],
     ['MediaNextTrack', 'next'],
@@ -5664,7 +5700,8 @@ function uiQuickPlayProbeSource(): string {
         document.body.dispatchEvent(new KeyboardEvent('keydown', {
           key: 'k',
           code: 'KeyK',
-          ctrlKey: true,
+          // Cmd+K on a Mac, where Ctrl+K stays with text fields.
+          ...(navigator.platform.startsWith('Mac') ? { metaKey: true } : { ctrlKey: true }),
           bubbles: true,
           cancelable: true,
         }));
@@ -6805,6 +6842,14 @@ async function bootstrap(): Promise<void> {
   startLibraryAnalysis();
   // Linux and macOS announce a shutdown through the power monitor instead.
   powerMonitor.on('shutdown', flushAllStores);
+  // A Mac stops the sound when it sleeps and Chromium starts it again on wake,
+  // so music would come back on its own when the lid opens. Pause instead, as
+  // Music does.
+  if (process.platform === 'darwin') {
+    powerMonitor.on('suspend', () => {
+      if (shellPlaybackState.isPlaying) sendPlayerCommand('pause');
+    });
+  }
   scheduleDailyBackups();
 
   // A valid library this build could not upgrade is left untouched and the

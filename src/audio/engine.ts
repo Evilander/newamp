@@ -517,10 +517,15 @@ export class AudioEngine {
     this.notify();
   }
 
-  /** The session anchor plays exactly while the sample transport owns a playing track. */
+  /**
+   * The session anchor plays exactly while the sample transport or the
+   * exclusive backend owns a playing track. Neither plays through a media
+   * element, and without one Chromium publishes no media session: no Now
+   * Playing tile, no media keys, no headphone buttons.
+   */
   private syncSessionAnchor(): void {
     const anchor = this.sessionAnchor;
-    if (!this.sampleActive || !this.state.playing) {
+    if (!(this.sampleActive || this.externalActive) || !this.state.playing) {
       if (anchor && !anchor.paused) anchor.pause();
       return;
     }
@@ -694,6 +699,8 @@ export class AudioEngine {
         /* backend already gone */
       }
     }
+    // Not every way out patches the state, and the anchor follows the patches.
+    this.syncSessionAnchor();
   }
 
   private async tryExternalPlay(

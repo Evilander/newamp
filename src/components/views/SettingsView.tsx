@@ -881,7 +881,7 @@ export function SettingsView(): JSX.Element {
               <div className="bevel-in px-3 py-2">
                 <strong className="text-ink">Last.fm app form</strong>
                 <div>Application name: NewAmp</div>
-                <div>Application description: Local Windows music player with optional Last.fm scrobbling.</div>
+                <div>Application description: Local music player with optional Last.fm scrobbling.</div>
                 <div>Homepage: https://github.com/evilander/newamp</div>
                 <div>Callback URL: leave blank.</div>
               </div>
@@ -1024,7 +1024,7 @@ export function SettingsView(): JSX.Element {
           <section id="settings-about" className="bevel-out flex flex-col gap-2 p-6 text-sm text-muted">
             <h2 className="eyebrow">About</h2>
             <div>
-              NewAmp v{api.appVersion} / Built for {api.platform}
+              NewAmp v{api.appVersion} / Built for {platformName(api.platform)}
               {!inElectron && (
                 <span className="text-warn"> · browser preview (no library access)</span>
               )}
@@ -1399,7 +1399,7 @@ function SkinWorkshop({ onSkinChanged }: { onSkinChanged: (skin: Pick<AppSetting
 }
 
 const PREFERRED_SAMPLE_RATES: Array<{ value: number | null; label: string; rationale: string }> = [
-  { value: null, label: 'System default', rationale: 'Use whatever rate Windows / Linux is currently driving the DAC at.' },
+  { value: null, label: 'System default', rationale: 'Use whatever rate Windows, macOS or Linux is currently driving the DAC at.' },
   { value: 44100, label: '44.1 kHz', rationale: 'Native rate for CD-quality FLAC / MP3.' },
   { value: 48000, label: '48 kHz', rationale: 'Native rate for most video soundtracks and modern downloads.' },
   { value: 88200, label: '88.2 kHz', rationale: 'CD-multiple hi-res.' },
@@ -1467,7 +1467,13 @@ function BitPerfectRow({
       <div className="text-xs text-ink2">
         Live AudioContext rate: <span className={matched ? 'text-accent' : 'text-ink'}>{actualLabel}</span>
         {matched && <span className="text-accent"> · matched</span>}
-        {willRestart && <span className="text-warn"> · restart NewAmp to apply the new rate</span>}
+        {willRestart && (
+          <span className="text-warn">
+            {api.platform === 'darwin'
+              ? ' · quit NewAmp (⌘Q) and open it again to apply the new rate'
+              : ' · restart NewAmp to apply the new rate'}
+          </span>
+        )}
       </div>
       {rateFallback && (
         <div className="text-xs text-warn" data-newamp-rate-fallback>
@@ -1490,11 +1496,12 @@ function BitPerfectRow({
         </div>
       )}
       <details className="text-xs text-muted">
-        <summary className="cursor-pointer select-none font-bold uppercase tracking-[0.1em]">Real bit-perfect setup (Windows / Linux)</summary>
+        <summary className="cursor-pointer select-none font-bold uppercase tracking-[0.1em]">Real bit-perfect setup (Windows / macOS / Linux)</summary>
         <div className="mt-1 grid gap-1 pl-1 leading-normal">
           <span><strong>Windows · WASAPI Exclusive:</strong> Right-click the speaker icon → Sound settings → choose your DAC → Driver properties → Advanced → check "Allow applications to take exclusive control" + set Default Format to match the rate above. Some DACs also need their own ASIO driver; NewAmp does not yet support ASIO directly.</span>
+          <span><strong>macOS · Core Audio:</strong> Open Audio MIDI Setup, choose your output device, and set Format to the rate above so Core Audio does not convert on the way out. With Bit-Perfect Exclusive on, NewAmp switches the device to each track's rate itself.</span>
           <span><strong>Linux · ALSA hw:</strong> Configure PipeWire / PulseAudio to expose the DAC at the target rate (`pw-cli set-param ... rate 96000` or `default-sample-rate=96000` in pulse / pipewire config). NewAmp routes through the system mixer either way, so PipeWire's bit-perfect mode applies.</span>
-          <span><strong>What "Bit-Perfect Path" actually does:</strong> creates the Web Audio AudioContext at the preferred rate so Chromium does not resample on the way out. Combined with the OS-side settings above, no DSP touches the bitstream between your decoder and the DAC. Without the OS-side step, Chromium's bitstream still goes through the Windows / PipeWire mixer.</span>
+          <span><strong>What "Bit-Perfect Path" actually does:</strong> creates the Web Audio AudioContext at the preferred rate so Chromium does not resample on the way out. Combined with the OS-side settings above, no DSP touches the bitstream between your decoder and the DAC. Without the OS-side step, Chromium's bitstream still goes through the Windows / macOS / PipeWire mixer.</span>
           <span><strong>True kernel streaming (WASAPI Exclusive):</strong> shipped — the "Bit-Perfect Exclusive" toggle below opens the DAC directly through NewAmp's native engine (vendored miniaudio), locking every other app out while playing. This row's AudioContext pin still matters for the shared/fallback path (podcasts, non-library files).</span>
         </div>
       </details>
@@ -1627,11 +1634,17 @@ function ExclusiveModeRow({
       {supported === false && (
         <div className="text-xs text-muted">
           The native exclusive engine isn't available in this build. Windows (WASAPI Exclusive)
-          is fully verified; Linux (ALSA direct) and macOS (CoreAudio hog mode) ship
-          experimentally — real-hardware verification pending.
+          is fully verified and macOS (CoreAudio hog mode) has been checked on real hardware;
+          Linux (ALSA direct) ships experimentally — real-hardware verification pending.
         </div>
       )}
-      {supported === true && enabled && api.platform !== 'win32' && (
+      {supported === true && enabled && api.platform === 'darwin' && (
+        <div className="text-xs text-muted">
+          {exclusiveBackendLabel()} takes the device for NewAmp alone and switches its sample rate
+          to match each track. The device goes back to its previous rate when NewAmp lets go.
+        </div>
+      )}
+      {supported === true && enabled && api.platform !== 'win32' && api.platform !== 'darwin' && (
         <div className="text-xs text-warn">
           {exclusiveBackendLabel()} is experimental on this platform — the engine is
           CI-compile-verified but hasn't had a real-hardware listening pass yet. Please report
@@ -1819,6 +1832,12 @@ function folderIsSameOrInside(path: string, folder: string): boolean {
 }
 
 const CLOSE_BUTTON_COPY = closeButtonCopy(api.platform);
+
+function platformName(platform: string): string {
+  if (platform === 'darwin') return 'macOS';
+  if (platform === 'win32') return 'Windows';
+  return platform === 'linux' ? 'Linux' : platform;
+}
 
 function Row({ label, children }: { label: string; children: React.ReactNode }): JSX.Element {
   return (

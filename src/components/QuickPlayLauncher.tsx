@@ -19,6 +19,12 @@ const TOUR_OPEN = '[data-newamp-first-launch-tutorial]';
 // setCompactMode applies the main process's answer when it lands, so a second
 // flip inside that round trip would be overwritten by the first one's reply.
 const DECK_TOGGLE_GAP_MS = 250;
+const OPEN_EVENT = 'newamp:open-quick-play';
+
+/** Opens the palette from a button, with the same refusals as its chord. */
+export function openQuickPlay(): void {
+  window.dispatchEvent(new Event(OPEN_EVENT));
+}
 
 // Library is a lazy view, so coming from another one the input is not in the
 // DOM yet. Watch for it rather than guessing how long the chunk takes.
@@ -50,7 +56,10 @@ export function QuickPlayPalette(): JSX.Element | null {
     let lastDeckToggle = -Infinity;
     function onKeyDown(event: globalThis.KeyboardEvent): void {
       const key = event.key.toLowerCase();
-      if ((event.ctrlKey || event.metaKey) && (key === 'k' || key === 'j')) {
+      // Cmd on a Mac, where Ctrl+K and Ctrl+J are the text fields' kill-line
+      // and newline.
+      const command = api.platform === 'darwin' ? event.metaKey && !event.ctrlKey : event.ctrlKey || event.metaKey;
+      if (command && (key === 'k' || key === 'j')) {
         // Closing is always allowed; opening is not over the first-launch tour,
         // where the palette would sit hidden behind it and take focus out of it.
         if (!openRef.current && document.querySelector(TOUR_OPEN)) return;
@@ -78,8 +87,15 @@ export function QuickPlayPalette(): JSX.Element | null {
         setOpen(false);
       }
     }
+    function onOpenRequest(): void {
+      if (!document.querySelector(TOUR_OPEN)) setOpen(true);
+    }
     window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
+    window.addEventListener(OPEN_EVENT, onOpenRequest);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener(OPEN_EVENT, onOpenRequest);
+    };
   }, []);
 
   useEffect(() => {

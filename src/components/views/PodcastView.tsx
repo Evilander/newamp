@@ -182,6 +182,7 @@ export function PodcastView(): JSX.Element {
             value={feedUrl}
             onChange={(event) => setFeedUrl(event.target.value)}
             onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
               if (event.key === 'Enter') void addFeed();
             }}
             placeholder="Paste an RSS feed URL..."

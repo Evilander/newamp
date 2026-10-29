@@ -101,6 +101,27 @@ if (!calls.external.length || !calls.external.every((url) => url.startsWith('htt
   fail('help entries should open https://github.com links, got ' + JSON.stringify(calls.external));
 }
 
+// Controls: the Dock menu's transport in the menu bar, between View and Window.
+const sent = [];
+const withPlayback = (isPlaying) => buildAppMenuTemplate('darwin', { ...menuOptions(true), playback: { isPlaying, onCommand: (c) => sent.push(c) } });
+const stopped = withPlayback(false);
+const order = stopped.map((m) => m.label ?? m.role);
+log.push('darwin top level with playback: ' + JSON.stringify(order));
+if (order.indexOf('Controls') !== order.indexOf('View') + 1 || order.indexOf('Window') !== order.indexOf('Controls') + 1) {
+  fail('Controls should sit between View and Window');
+}
+const controls = submenuOf(stopped, 'Controls');
+const byLabel = (items, label) => items.find((item) => item.label === label);
+if (!byLabel(controls, 'Play') || byLabel(controls, 'Pause')) fail('stopped: Controls should offer Play, not Pause');
+if (!byLabel(submenuOf(withPlayback(true), 'Controls'), 'Pause')) fail('playing: Controls should offer Pause');
+if (byLabel(controls, 'Next')?.accelerator !== 'Cmd+Right') fail('Next should carry Cmd+Right');
+if (byLabel(controls, 'Previous')?.accelerator !== 'Cmd+Left') fail('Previous should carry Cmd+Left');
+// Space belongs to the page: a focused button would let it reach the menu.
+if (controls.some((item) => /space/i.test(item.accelerator ?? ''))) fail('no Controls item may take Space');
+for (const label of ['Play', 'Stop', 'Next', 'Previous']) byLabel(controls, label).click();
+if (JSON.stringify(sent) !== JSON.stringify(['toggle-play', 'stop', 'next', 'previous'])) fail('Controls items should send their commands, got ' + JSON.stringify(sent));
+if (mac.some((item) => item.label === 'Controls')) fail('without a playback handler there is no Controls menu');
+
 const win = buildAppMenuTemplate('win32', menuOptions(true));
 log.push('win32 template length: ' + win.length);
 if (win.length !== 0) fail('non-darwin should return an empty template (keep current chromeless behavior)');

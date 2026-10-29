@@ -4,7 +4,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import type { AlbumSummary, ArtistSummary, ListeningHistoryItem, SavedPlaylist, SmartPlaylistRule, Track } from '@shared/types';
 import type { ViewMode } from '../store/usePlayerStore';
 import { api } from '../lib/api';
-import { formatDuration, formatTime } from '../lib/format';
+import { formatDuration, formatTime, shortcutLabel } from '../lib/format';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { ArtistLink, AlbumLink } from './EntityLink';
 import { useModalFocus } from '../hooks/useModalFocus';
@@ -55,13 +55,18 @@ const COMMAND_ITEMS: Array<{ command: PaletteCommand; title: string; subtitle: s
 
 // The five chords worth teaching. Escape, arrows, and the opener itself are
 // conventions the palette should not spend legend space on.
-const LEGEND_HINTS: Array<{ keys: string; label: string }> = [
-  { keys: 'Enter', label: 'play' },
-  { keys: 'Ctrl+Enter', label: 'play next' },
-  { keys: 'Shift+Enter', label: 'queue' },
-  { keys: 'Ctrl+L', label: 'love' },
-  { keys: 'Ctrl+R', label: 'radio' },
+const LEGEND_HINTS: Array<{ chord: string; label: string }> = [
+  { chord: 'Enter', label: 'play' },
+  { chord: 'Mod+Enter', label: 'play next' },
+  { chord: 'Shift+Enter', label: 'queue' },
+  { chord: 'Mod+L', label: 'love' },
+  { chord: 'Mod+R', label: 'radio' },
 ];
+
+// A Mac writes the Return key as ↩ next to the modifier glyphs.
+function legendKeys(chord: string): string {
+  return shortcutLabel(api.platform === 'darwin' ? chord.replace(/Enter$/, '↩') : chord);
+}
 
 const LEGEND_KBD_STYLE = {
   padding: '1px 5px',
@@ -283,6 +288,8 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
 
   function onPaletteKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
     if (event.target !== inputRef.current) return;
+    // Enter, the arrows and Escape belong to the input method while it composes.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     const key = event.key.toLowerCase();
     if (event.key === 'ArrowDown') {
       event.preventDefault();
@@ -370,8 +377,8 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
 
         <div className="flex items-center gap-3 border-b px-3 py-2 text-[11px]" style={{ borderColor: 'var(--line)', color: 'var(--ink-2)' }}>
           {LEGEND_HINTS.map((hint) => (
-            <span key={hint.keys} className="flex items-center gap-1.5 whitespace-nowrap">
-              <kbd style={LEGEND_KBD_STYLE}>{hint.keys}</kbd>
+            <span key={hint.chord} className="flex items-center gap-1.5 whitespace-nowrap">
+              <kbd style={LEGEND_KBD_STYLE}>{legendKeys(hint.chord)}</kbd>
               {hint.label}
             </span>
           ))}

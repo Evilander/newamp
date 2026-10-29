@@ -121,6 +121,7 @@ import {
 import { buildDiscoverSurface } from '../shared/discover.js';
 import { buildHarmonicMix as buildHarmonicMixSequence } from '../shared/harmonic-mix.js';
 import { DerivedCache } from './derived-cache.js';
+import { isForeignLibraryPath } from './library-skip.js';
 import { runSliced, runSync, type Sliced } from './sliced.js';
 import {
   atomicWriteFileSync,
@@ -2636,7 +2637,8 @@ export class LibraryStore {
         !foundKeys.has(normalizeFileStatePath(row.path))
         && matchesPruneTargets(row.path, rootIndex)
         && !matchesPruneTargets(row.path, unread));
-    const ids = absentTrackIds(candidates);
+    const skipped = new Set(candidates.filter((row) => isSkippedUnderRoot(row.path, walkedRoots)).map((row) => row.id));
+    const ids = [...skipped, ...absentTrackIds(candidates.filter((row) => !skipped.has(row.id)))];
     if (!ids.length) return 0;
     this.setMissingSince(ids, Date.now());
     return ids.length;
@@ -2721,6 +2723,12 @@ export class LibraryStore {
     const ids: number[] = [];
     let offline = 0;
     for (const track of candidates) {
+      // Indexed by an earlier version from a folder scans now leave alone:
+      // the file is there, but it isn't music the library should hold.
+      if (isSkippedUnderRoot(track.path, roots)) {
+        ids.push(track.id);
+        continue;
+      }
       if (existsSync(track.path)) continue;
       if (missingFileIsConfirmedGone({ path: track.path, fileDev: track.file_dev ?? null }, roots, probes)) {
         ids.push(track.id);
@@ -7262,6 +7270,18 @@ function probeDirectory(dir: string, cache: Map<string, DirectoryProbe | null>):
   }
   cache.set(dir, probe);
   return probe;
+}
+
+// A track an earlier version indexed from another app's folder or a "._"
+// file, which scans now skip (isForeignLibraryPath in library-skip.ts). Read
+// from the root down, since the folders above a root are the user's choice.
+function isSkippedUnderRoot(path: string, roots: string[]): boolean {
+  const root = containingRoot(path, roots);
+  if (!root) return false;
+  const rootKey = normalizedPruneKey(root);
+  const key = normalizedPruneKey(path);
+  if (key.length <= rootKey.length) return false;
+  return isForeignLibraryPath(key.slice(rootKey.length + 1), basename(rootKey));
 }
 
 function containingRoot(path: string, roots: string[]): string | null {

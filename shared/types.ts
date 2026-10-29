@@ -1212,7 +1212,7 @@ export interface RadioBrainStatus {
   error: string | null;
 }
 
-export type PlayerCommand = 'toggle-play' | 'next' | 'previous' | 'stop';
+export type PlayerCommand = 'toggle-play' | 'pause' | 'next' | 'previous' | 'stop';
 export type VisualizerPreset =
   | 'butterchurn'
   | 'galaxy'
