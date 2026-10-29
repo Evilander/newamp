@@ -285,6 +285,13 @@ assert.deepEqual(['a', 'Home', 'End', 'Tab', 'Escape'].map(channelKeyStep), [0, 
   const partial = new ChannelWheel();
   partial.next({ deltaY: -60, deltaMode: 0 }, 0);
   assert.equal(partial.next({ deltaY: -60, deltaMode: 0 }, 2000), 0, 'a half-turned notch is forgotten after a pause');
+
+  // A trackpad pinch arrives as ctrl+wheel; it is not a channel gesture and leaves no travel behind.
+  const pinch = new ChannelWheel();
+  let pinched = 0;
+  for (let i = 0; i < 30; i += 1) pinched += pinch.next({ deltaY: -40, deltaMode: 0, ctrlKey: true }, 100 + i * 16);
+  assert.equal(pinched, 0, 'a pinch does not change track');
+  assert.equal(pinch.next({ deltaY: -100, deltaMode: 0 }, 100 + 30 * 16), 1, 'and it does not hold the knob for the notch that follows');
 }
 
 function pointer(extra = {}) {

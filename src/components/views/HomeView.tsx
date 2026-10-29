@@ -107,6 +107,20 @@ export function HomeView(): JSX.Element {
     void refreshHome();
   }, []);
 
+  // A scan that ends while Home is open (the first-launch scan, a watched
+  // folder changing) leaves the counts and shelves as they were. The
+  // subscription is made once and reaches the current render's refreshHome
+  // through the ref; a newer refresh supersedes an older one by generation.
+  // A watcher rescan that read nothing new leaves Home alone: the full
+  // refresh runs the heavy mixes again.
+  const refreshHomeRef = useRef(refreshHome);
+  refreshHomeRef.current = refreshHome;
+  useEffect(() => {
+    return api.onScanProgress((progress) => {
+      if (progress.done && !progress.cancelled && (progress.parsed ?? 1) > 0) void refreshHomeRef.current();
+    });
+  }, []);
+
   const recentTracks = useMemo(() => {
     const seen = new Set<number>();
     return data.history
@@ -1063,7 +1077,7 @@ function RatedHighlightRail({
         <ViewSkeleton variant="rails" count={5} />
       ) : (
         <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
-          Rate tracks 0–100 and your top picks land here. Cmd/Ctrl-click the score in Now Playing for fine adjustment.
+          Rate tracks 0–100 and your top picks land here. On the score bar in Now Playing, the arrow keys and the wheel adjust by a tenth.
         </div>
       )}
     </section>

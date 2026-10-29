@@ -1,4 +1,5 @@
 import type { MenuItemConstructorOptions } from 'electron';
+import type { PlayerCommand } from '../shared/types.js';
 
 export interface AppMenuOptions {
   appName: string;
@@ -11,6 +12,11 @@ export interface AppMenuOptions {
    */
   onPreferences?: () => void;
   onOpenExternal?: (url: string) => void;
+  /**
+   * The Controls menu: the Dock menu's transport in the menu bar. Play/Pause
+   * says which it will do. Without it the menu bar has no Controls menu.
+   */
+  playback?: { isPlaying: boolean; onCommand: (command: PlayerCommand) => void };
 }
 
 const REPO_URL = 'https://github.com/evilander/newamp';
@@ -47,6 +53,26 @@ export function buildAppMenuTemplate(
     { type: 'separator' },
     { role: 'togglefullscreen' },
   ];
+  const playback = opts.playback;
+  // Previous and Next carry Cmd+Left/Right, the shortcuts the page already
+  // reads. A menu key equivalent only fires when the page leaves the key
+  // alone: the page's own handler takes it in the window, a text field keeps
+  // it for the caret, and with the window closed the menu still skips. Space
+  // is not here, because a focused button lets Space through to the menu.
+  const controlsMenu: MenuItemConstructorOptions[] = playback
+    ? [
+        {
+          label: 'Controls',
+          submenu: [
+            { label: playback.isPlaying ? 'Pause' : 'Play', click: () => playback.onCommand('toggle-play') },
+            { label: 'Stop', click: () => playback.onCommand('stop') },
+            { type: 'separator' },
+            { label: 'Next', accelerator: 'Cmd+Right', click: () => playback.onCommand('next') },
+            { label: 'Previous', accelerator: 'Cmd+Left', click: () => playback.onCommand('previous') },
+          ],
+        },
+      ]
+    : [];
   return [
     {
       label: opts.appName,
@@ -67,6 +93,7 @@ export function buildAppMenuTemplate(
     },
     { role: 'editMenu' },
     { label: 'View', submenu: viewSubmenu },
+    ...controlsMenu,
     {
       // Electron's stock macOS Window menu has Minimize and Zoom but no Close,
       // so Cmd+W did nothing. Close goes through the window's close event,

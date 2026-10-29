@@ -142,7 +142,7 @@ export default function App(): JSX.Element {
   async function handleDroppedFiles(dataTransfer: DataTransfer): Promise<void> {
     const paths = api.getDroppedFilePaths(Array.from(dataTransfer.files));
     if (!paths.length) {
-      setDropMessage('Drop music files, playlists, or folders from Windows Explorer.');
+      setDropMessage(`Drop music files, playlists, or folders from ${fileManagerName()}.`);
       return;
     }
 
@@ -339,7 +339,7 @@ export default function App(): JSX.Element {
       // for one) keeps it.
       if (e.defaultPrevented) return;
       const store = usePlayerStore.getState();
-      const command = resolvePlayerShortcut({
+      const input = {
         key: e.key,
         code: e.code,
         ctrlKey: e.ctrlKey,
@@ -352,8 +352,14 @@ export default function App(): JSX.Element {
         targetIsSlider: isSliderShortcutTarget(e.target),
         fullscreenVisualizer: store.fullscreenViz,
         platform: api.platform,
-      });
-      if (!command) return;
+      };
+      const command = resolvePlayerShortcut(input);
+      if (!command) {
+        // A held Cmd+Right skips once. Its repeats are still ours: left alone,
+        // they reach the Mac menu's Next item and skip once per repeat.
+        if (e.repeat && resolvePlayerShortcut({ ...input, repeat: false })) e.preventDefault();
+        return;
+      }
       e.preventDefault();
       runPlayerShortcut(command, store, { shiftKey: e.shiftKey, repeat: e.repeat, at: e.timeStamp });
     }
@@ -362,6 +368,7 @@ export default function App(): JSX.Element {
     const offPlayerCommand = api.onPlayerCommand((command) => {
       const store = usePlayerStore.getState();
       if (command === 'toggle-play') store.togglePlay();
+      else if (command === 'pause') store.engine.pause();
       else if (command === 'next') void store.next();
       else if (command === 'previous') void store.prev();
       else if (command === 'stop') store.engine.stop();
@@ -476,7 +483,7 @@ export default function App(): JSX.Element {
           setDropActive(false);
           void handleDroppedFiles(e.dataTransfer).catch((error) => {
             console.error('drop failed', error);
-            setDropMessage('Could not read this drop. Try File > Open.');
+            setDropMessage('Could not read this drop. Try adding the folder in Settings.');
           });
         }}
       >
@@ -638,6 +645,12 @@ function DeckFallback(): JSX.Element {
       Loading
     </div>
   );
+}
+
+// What this platform calls the window files get dragged in from.
+function fileManagerName(): string {
+  if (api.platform === 'darwin') return 'Finder';
+  return api.platform === 'linux' ? 'your file manager' : 'Windows Explorer';
 }
 
 function hasDraggedFiles(dataTransfer: DataTransfer): boolean {

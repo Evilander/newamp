@@ -401,7 +401,7 @@ export function LibraryView(): JSX.Element {
     try {
       const paths = droppedPaths(dataTransfer);
       if (!paths.length) {
-        setDropMessage('Drop folders or audio files from Windows Explorer.');
+        setDropMessage(`Drop folders or audio files from ${fileManagerName()}.`);
         return;
       }
       const items = `${paths.length.toLocaleString()} dropped item${paths.length === 1 ? '' : 's'}`;
@@ -1092,6 +1092,16 @@ function LibraryPagingFooter({
       )}
     </div>
   );
+}
+
+// What this platform calls the window files get dragged in from.
+function fileManagerName(): string {
+  if (api.platform === 'darwin') return 'Finder';
+  return api.platform === 'linux' ? 'your file manager' : 'Windows Explorer';
+}
+
+function showInFolderLabel(): string {
+  return api.platform === 'darwin' ? 'Show in Finder' : 'Show in folder';
 }
 
 function droppedPaths(dataTransfer: DataTransfer): string[] {
@@ -1847,8 +1857,8 @@ const LibraryRow = memo(function LibraryRow({
                   e.stopPropagation();
                   onShowInFolder(t.path);
                 }}
-                aria-label="Show in folder"
-                title="Show in folder"
+                aria-label={showInFolderLabel()}
+                title={showInFolderLabel()}
               >
                 ⌕
               </button>

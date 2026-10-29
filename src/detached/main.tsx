@@ -132,6 +132,20 @@ const detachedBridge = (window as Window & {
 
 let isFullscreen = false;
 
+// Cmd, not Ctrl, is the transport modifier on a Mac, so the chord rules are
+// the main window's own. Ctrl+Left/Right keep working there.
+const hostPlatform = /mac/i.test(navigator.platform || navigator.userAgent) ? 'darwin' : undefined;
+
+// F11 never reaches a Mac app, so a Mac's hints name only what does work: the
+// button, a double-click on the visuals, and Esc.
+const isMac = hostPlatform === 'darwin';
+const TOGGLE_FULLSCREEN_TITLE = isMac ? 'Toggle exclusive fullscreen' : 'Toggle exclusive fullscreen (F11)';
+const ENTER_FULLSCREEN_TITLE = isMac ? 'Enter exclusive fullscreen' : 'Enter exclusive fullscreen (F11)';
+const EXIT_FULLSCREEN_TITLE = isMac ? 'Exit fullscreen (Esc)' : 'Exit fullscreen (F11 / Esc)';
+const DRAG_BAR_TEXT = isMac
+  ? '⋮⋮   drag to move  ·  double-click the visuals for fullscreen   ⋮⋮'
+  : '⋮⋮   drag to move  ·  F11 fullscreen   ⋮⋮';
+
 const controlsEl = document.createElement('div');
 controlsEl.setAttribute('data-newamp-detached-controls', '');
 Object.assign(controlsEl.style, {
@@ -345,7 +359,7 @@ volEl.addEventListener('pointerup', finishVol);
 volEl.addEventListener('pointercancel', finishVol);
 volEl.addEventListener('blur', finishVol);
 
-const fsBtn = makeButton('⛶', 'Toggle exclusive fullscreen (F11)', () => {
+const fsBtn = makeButton('⛶', TOGGLE_FULLSCREEN_TITLE, () => {
   toggleFullscreen();
 });
 const closeBtn = makeButton('✕', 'Close the projector', () => {
@@ -371,7 +385,8 @@ function formatTime(seconds: number): string {
 // a native drag region; it disappears with them so the visuals stay primary.
 // Hidden in exclusive fullscreen, where there's nothing to drag.
 // NOTE: the OS owns mouse events over a drag region (double-click there
-// maximizes, per Windows convention) — the hint text advertises F11 instead.
+// maximizes, per Windows convention) — the hint text advertises F11 instead,
+// or the double-click on the visuals on a Mac, where F11 never arrives.
 const dragBarEl = document.createElement('div');
 dragBarEl.setAttribute('data-newamp-detached-dragbar', '');
 Object.assign(dragBarEl.style, {
@@ -393,7 +408,7 @@ Object.assign(dragBarEl.style, {
   cursor: 'grab',
   userSelect: 'none',
 });
-dragBarEl.textContent = '⋮⋮   drag to move  ·  F11 fullscreen   ⋮⋮';
+dragBarEl.textContent = DRAG_BAR_TEXT;
 document.body.appendChild(dragBarEl);
 
 type AppRegionStyle = CSSStyleDeclaration & { webkitAppRegion?: string };
@@ -479,7 +494,7 @@ async function syncFullscreenState(): Promise<void> {
   try {
     isFullscreen = await detachedBridge.isFullscreen();
     fsBtn.textContent = isFullscreen ? '⛶' : '⛶'; // glyph stays — title carries the state
-    fsBtn.title = isFullscreen ? 'Exit fullscreen (F11 / Esc)' : 'Enter exclusive fullscreen (F11)';
+    fsBtn.title = isFullscreen ? EXIT_FULLSCREEN_TITLE : ENTER_FULLSCREEN_TITLE;
     updateDragBar();
   } catch {
     /* projector closing */
@@ -492,7 +507,7 @@ function toggleFullscreen(): void {
   void detachedBridge.toggleFullscreen()
     .then((next) => {
       isFullscreen = next;
-      fsBtn.title = next ? 'Exit fullscreen (F11 / Esc)' : 'Enter exclusive fullscreen (F11)';
+      fsBtn.title = next ? EXIT_FULLSCREEN_TITLE : ENTER_FULLSCREEN_TITLE;
       updateDragBar();
     })
     .catch(() => undefined);
@@ -912,12 +927,6 @@ window.addEventListener('dblclick', (event) => {
   toggleFullscreen();
 });
 
-// F11 TOGGLES (was: only exited). Escape always exits — it's the universal
-// "give me out of fullscreen" gesture.
-// Cmd, not Ctrl, is the transport modifier on a Mac, so the chord rules are
-// the main window's own. Ctrl+Left/Right keep working there.
-const hostPlatform = /mac/i.test(navigator.platform || navigator.userAgent) ? 'darwin' : undefined;
-
 // Stepping from the slider's own value keeps a held key adding up between the
 // mirrored updates.
 function stepVolume(direction: 1 | -1): void {
@@ -927,8 +936,17 @@ function stepVolume(direction: 1 | -1): void {
   void detachedBridge?.transportCommand?.('setVolume', target).catch(() => undefined);
 }
 
+// F11 TOGGLES (was: only exited). Escape always exits — it's the universal
+// "give me out of fullscreen" gesture.
 window.addEventListener('keydown', (event) => {
   const action = projectorKeyAction(event, hostPlatform);
+  // A held Cmd+Right skips once; left alone, its repeats would reach the Mac
+  // menu's Next item and skip once per repeat.
+  const { key, code, ctrlKey, altKey, metaKey, shiftKey } = event;
+  if (!action && event.repeat && projectorKeyAction({ key, code, ctrlKey, altKey, metaKey, shiftKey, repeat: false }, hostPlatform)) {
+    event.preventDefault();
+    return;
+  }
   if (action === 'toggle-fullscreen') {
     event.preventDefault();
     toggleFullscreen();
@@ -937,7 +955,7 @@ window.addEventListener('keydown', (event) => {
     if (detachedBridge?.setFullscreen) {
       void detachedBridge.setFullscreen(false).then(() => {
         isFullscreen = false;
-        fsBtn.title = 'Enter exclusive fullscreen (F11)';
+        fsBtn.title = ENTER_FULLSCREEN_TITLE;
         updateDragBar();
       }).catch((err: unknown) => {
         console.error('[eviland-detached] setFullscreen(false) failed', err);

@@ -939,6 +939,7 @@ export function PlaylistView(): JSX.Element {
             value={playlistName}
             onChange={(e) => setPlaylistName(e.target.value)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === 'Enter' && !busy) void (selectedPlaylist ? saveQueue() : createNewPlaylist());
             }}
             placeholder="Playlist name"

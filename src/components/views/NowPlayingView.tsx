@@ -13,6 +13,8 @@ import { api, winctl } from '../../lib/api';
 import { aiAssistSummary } from '../../lib/aiAssist';
 import { musicEntitySearchText, wikipediaSearchUrl } from '../../lib/wiki';
 import { ScoreRating } from '../ScoreRating';
+import { openQuickPlay } from '../QuickPlayLauncher';
+import { setWindowFullscreen } from '../visualizer-input';
 import { ArtistLink, AlbumLink, TrackLink } from '../EntityLink';
 import { LinerNotesPanel } from '../LinerNotesPanel';
 import { FormatBadges } from '../FormatBadges';
@@ -170,11 +172,20 @@ export function NowPlayingView(): JSX.Element {
     window.localStorage.setItem(LYRICS_TEXT_SCALE_KEY, String(lyricsTextScale));
   }, [lyricsTextScale]);
 
+  // Karaoke goes fullscreen and, on the way out, only leaves it if it was the
+  // one that entered: a window already in OS fullscreen stays there.
   useEffect(() => {
     if (!lyricsKaraokeMode) return undefined;
-    void winctl.setFullscreen(true);
+    let cancelled = false;
+    let entered = false;
+    void winctl.isFullscreen().then((already) => {
+      if (cancelled || already) return;
+      entered = true;
+      void setWindowFullscreen(true, winctl);
+    });
     return () => {
-      void winctl.setFullscreen(false);
+      cancelled = true;
+      if (entered) void setWindowFullscreen(false, winctl);
     };
   }, [lyricsKaraokeMode]);
 
@@ -841,11 +852,6 @@ function NowPlayingAttract({ onOpenLibrary }: { onOpenLibrary: () => void }): JS
   }, [covers.length]);
 
   const quickPlayChord = shortcutLabel('Mod+K');
-  // Same chord QuickPlayPalette listens for on window (capture) — one code
-  // path for opening the palette, no new store surface.
-  function openQuickPlay(): void {
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
-  }
 
   return (
     <div
@@ -1102,7 +1108,7 @@ function TrackInfoHeader({
             className="chip chip-sm chip-muted chip-interactive"
             title={current.path}
           >
-            <span className="chip-label">Show in folder</span>
+            <span className="chip-label">{api.platform === 'darwin' ? 'Show in Finder' : 'Show in folder'}</span>
           </button>
           <button
             type="button"
@@ -1368,7 +1374,7 @@ function QueueRow({
       data-newamp-queue-row={index}
       draggable
       aria-grabbed={dragging}
-      aria-keyshortcuts="Delete Alt+ArrowUp Alt+ArrowDown"
+      aria-keyshortcuts="Delete Backspace Alt+ArrowUp Alt+ArrowDown"
       onClick={onPlay}
       onDoubleClick={onPlay}
       onContextMenu={(event) => {
@@ -1452,13 +1458,13 @@ function QueueRow({
         {track.duration ? formatTime(track.duration) : '—'}
       </span>
       <span className="hidden items-center gap-[2px] group-hover:flex group-focus-within:flex">
-        <QueueRowButton label="Move up" shortcut="Alt+↑" disabled={index === 0} onClick={() => onMove(index - 1)}>
+        <QueueRowButton label="Move up" shortcut={shortcutLabel('Alt+↑')} disabled={index === 0} onClick={() => onMove(index - 1)}>
           ▲
         </QueueRowButton>
-        <QueueRowButton label="Move down" shortcut="Alt+↓" disabled={index === count - 1} onClick={() => onMove(index + 1)}>
+        <QueueRowButton label="Move down" shortcut={shortcutLabel('Alt+↓')} disabled={index === count - 1} onClick={() => onMove(index + 1)}>
           ▼
         </QueueRowButton>
-        <QueueRowButton label="Remove from queue" shortcut="Delete" onClick={onRemove}>
+        <QueueRowButton label="Remove from queue" shortcut={api.platform === 'darwin' ? '⌫' : 'Delete'} onClick={onRemove}>
           <Close size={9} />
         </QueueRowButton>
       </span>

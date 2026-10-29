@@ -5,12 +5,16 @@
 //      never ship silently (the bug where the x64 DMG got an arm64 ffmpeg and
 //      every transcoded format 503'd).
 //
+//      It also drops what only another platform reads: the native addons
+//      built for Windows, Linux and the other Mac arch (the asarUnpack glob
+//      takes every prebuilt/ folder) and the Windows tray icon.
+//
 //   2. Windows/Linux: delete Chromium's DirectX shader compiler. Electron ships
 //      dxcompiler.dll + dxil.dll for WebGPU/Dawn. NewAmp renders on WebGL2 and
 //      never touches navigator.gpu, so they are ~26 MB of dead weight. Kept on
 //      purpose: vk_swiftshader.dll and vulkan-1.dll, which are the software-GL
 //      fallback for machines whose GPU is blocklisted.
-import { existsSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Arch } from 'electron-builder';
 import { detectMachOArch } from './lib/macho-arch.mjs';
@@ -49,6 +53,25 @@ function verifyMacFfmpegArch(context) {
   }
 }
 
+function dropForeignMacPayload(context) {
+  const want = context.arch === Arch.arm64 ? 'arm64' : context.arch === Arch.x64 ? 'x64' : null;
+  if (!want) return;
+  const resources = join(context.appOutDir, 'NewAmp.app', 'Contents', 'Resources');
+  const prebuilt = join(resources, 'app.asar.unpacked', 'native', 'newamp-audio', 'prebuilt');
+  const dropped = [];
+  for (const name of existsSync(prebuilt) ? readdirSync(prebuilt) : []) {
+    if (name === `darwin-${want}`) continue;
+    rmSync(join(prebuilt, name), { recursive: true, force: true });
+    dropped.push(`prebuilt/${name}`);
+  }
+  const trayIcon = join(resources, 'build', 'icon.ico');
+  if (existsSync(trayIcon)) {
+    rmSync(trayIcon);
+    dropped.push('build/icon.ico');
+  }
+  if (dropped.length) console.log(`afterPack: dropped ${dropped.join(', ')} from the ${want} app`);
+}
+
 function dropWebGpuBinaries(context) {
   let freed = 0;
   for (const name of WEBGPU_ONLY_BINARIES) {
@@ -65,6 +88,7 @@ function dropWebGpuBinaries(context) {
 export default async function afterPack(context) {
   if (context.electronPlatformName === 'darwin') {
     verifyMacFfmpegArch(context);
+    dropForeignMacPayload(context);
     return;
   }
   dropWebGpuBinaries(context);

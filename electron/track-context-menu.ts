@@ -31,7 +31,8 @@ export function trackContextMenuTemplate(
     },
   ];
   if (request?.canShowInFolder) {
-    template.push({ type: 'separator' }, { label: 'Show in Folder', click: choose({ action: 'show-in-folder' }) });
+    const label = process.platform === 'darwin' ? 'Show in Finder' : 'Show in Folder';
+    template.push({ type: 'separator' }, { label, click: choose({ action: 'show-in-folder' }) });
   }
   if (request?.canTrash) {
     const bin = process.platform === 'win32' ? 'Recycle Bin' : 'Trash';

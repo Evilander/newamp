@@ -50,7 +50,7 @@ const bundled = await build({
     contents: `
       export { TrackTable, LibraryOverview, LibraryHealthPanel, LibraryHealthIntro } from './src/components/views/LibraryView';
       export { ArtistLink, AlbumLink, TrackLink } from './src/components/EntityLink';
-      export { wheelScoreDelta } from './src/components/ScoreRating';
+      export { WheelScoreInput } from './src/components/ScoreRating';
       export * from './src/components/views/libraryTableState';
       export { createElement } from 'react';
       export { renderToStaticMarkup } from 'react-dom/server.browser';
@@ -121,19 +121,72 @@ const attr = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
 
 // ── the score wheel ────────────────────────────────────────────────────────
 {
-  assert.equal(m.wheelScoreDelta({ deltaY: -100 }), 0.1, 'wheel up raises the score by a tenth');
-  assert.equal(m.wheelScoreDelta({ deltaY: 100 }), -0.1, 'wheel down lowers it');
-  assert.equal(m.wheelScoreDelta({ deltaY: -3, shiftKey: true }), 1, 'Shift takes the coarse step, whatever the distance');
-  assert.equal(m.wheelScoreDelta({ deltaY: 0, deltaX: 0 }), 0, 'a wheel event that moves nothing moves nothing');
-  assert.equal(m.wheelScoreDelta({ deltaY: 0, deltaX: 80 }), 0, 'a sideways swipe is left to scroll the page');
-  assert.equal(m.wheelScoreDelta({ deltaY: 0, deltaX: -80, shiftKey: true }), 1, 'macOS reports Shift+wheel as sideways travel');
-  assert.equal(m.wheelScoreDelta({ deltaY: Number.NaN }), 0);
+  const fresh = () => new m.WheelScoreInput();
+  const delta = (input, event, now = 0) => input.next(event, now).delta;
+  // Events at 16 ms spacing, as a trackpad reports them; the score they add up to.
+  const swipe = (input, { count, deltaY = 0, deltaX = 0, shiftKey = false, from = 0, every = 16 }) => {
+    let total = 0;
+    for (let i = 0; i < count; i += 1) total += delta(input, { deltaY, deltaX, deltaMode: 0, shiftKey }, from + i * every);
+    return Math.round(total * 10) / 10;
+  };
+
+  assert.equal(delta(fresh(), { deltaY: -100, deltaMode: 0 }), 0.1, 'a wheel notch up raises the score by a tenth');
+  assert.equal(delta(fresh(), { deltaY: 100, deltaMode: 0 }), -0.1, 'a notch down lowers it');
+  assert.equal(delta(fresh(), { deltaY: -100, deltaMode: 0, shiftKey: true }), 1, 'Shift takes the coarse step');
+  assert.equal(delta(fresh(), { deltaY: -3, shiftKey: true }), 1, 'a slow click of a few pixels still moves one step');
+  assert.equal(delta(fresh(), { deltaY: -7, deltaMode: 1 }), 0.1, 'seven lines is a notch');
+  const clicks = fresh();
+  assert.deepEqual([0, 400, 800].map((at) => delta(clicks, { deltaY: -100, deltaMode: 0 }, at)), [0.1, 0.1, 0.1], 'notches with a pause between them each move a step');
+  // Chromium reports about 53 px a notch on Linux and 33 px on Windows set to
+  // scroll one line: quick notches there are still a step each.
+  for (const notch of [53, 33]) {
+    const quick = fresh();
+    assert.deepEqual([0, 60, 120].map((at) => delta(quick, { deltaY: -notch, deltaMode: 0 }, at)), [0.1, 0.1, 0.1], `quick ${notch} px notches each move a step`);
+  }
+
+  for (const idle of [{ deltaY: 0, deltaX: 0 }, { deltaY: Number.NaN }, { deltaY: 0, deltaX: Number.NaN, shiftKey: true }]) {
+    assert.deepEqual({ ...fresh().next(idle, 0) }, { consumed: false, delta: 0 }, 'a wheel event that moves nothing is left to the page');
+  }
+  assert.deepEqual({ ...fresh().next({ deltaY: 0, deltaX: 80 }, 0) }, { consumed: false, delta: 0 }, 'a sideways swipe is left to scroll the page');
+  assert.deepEqual({ ...fresh().next({ deltaY: 3, deltaX: 80 }, 0) }, { consumed: false, delta: 0 }, 'so is one that drifts a little vertically');
+  assert.equal(delta(fresh(), { deltaY: 0, deltaX: -80, shiftKey: true }), 1, 'macOS reports Shift+wheel as sideways travel');
+  assert.equal(delta(fresh(), { deltaY: 4, deltaX: -80, shiftKey: true }), 1, 'and the drift it swaps into deltaY does not decide the direction');
+
+  // A pinch arrives as ctrl+wheel: no change, and the page keeps it.
+  const pinching = fresh();
+  assert.deepEqual({ ...pinching.next({ deltaY: -100, deltaMode: 0, ctrlKey: true }, 0) }, { consumed: false, delta: 0 }, 'a pinch moves nothing and is not taken from the page');
+  assert.deepEqual({ ...pinching.next({ deltaY: -100, deltaMode: 0, ctrlKey: true, shiftKey: true }, 10) }, { consumed: false, delta: 0 });
+  assert.equal(delta(pinching, { deltaY: -100, deltaMode: 0 }, 20), 0.1, 'and it leaves no gesture behind: the next notch is a step');
+
+  // A trackpad swipe is dozens of small events; distance decides, not the count.
+  assert.equal(swipe(fresh(), { count: 10, deltaY: -10 }), 0.1, 'small deltas adding up to one notch are one step');
+  assert.equal(swipe(fresh(), { count: 3, deltaY: -10 }), 0.1, 'a nudge shorter than a notch is still one step');
+  assert.equal(swipe(fresh(), { count: 30, deltaY: -10 }), 0.3, 'three notches of travel are about three steps');
+  assert.equal(swipe(fresh(), { count: 30, deltaY: 10 }), -0.3, 'and the other way lowers it');
+  assert.equal(swipe(fresh(), { count: 30, deltaX: -10, shiftKey: true }), 3, 'Shift counts distance too: three notches of sideways travel are three points');
+  const reversing = fresh();
+  assert.equal(swipe(reversing, { count: 6, deltaY: -10 }), 0.1);
+  assert.equal(swipe(reversing, { count: 12, deltaY: 10, from: 200 }), -0.1, 'reversing mid-swipe drops the travel carried the other way (50 px up must not eat into the 120 px down)');
+  const paused = fresh();
+  assert.equal(swipe(paused, { count: 6, deltaY: -10 }), 0.1);
+  assert.equal(swipe(paused, { count: 6, deltaY: -10, from: 1000 }), 0.1, 'a pause ends the gesture: the next swipe starts over');
+
+  // Momentum: 200 events of 20 px for over three seconds is 40 notches of
+  // travel. It used to be 200 steps; now the gesture budget caps it.
+  const flick = swipe(fresh(), { count: 200, deltaY: -20 });
+  assert.ok(flick >= 0.4 && flick <= 1.7, `a long flick moved ${flick}`);
+  const shiftFlick = swipe(fresh(), { count: 200, deltaX: -20, shiftKey: true });
+  assert.ok(shiftFlick >= 4 && shiftFlick <= 17, `a long Shift flick moved ${shiftFlick}`);
+  assert.equal(delta(fresh(), { deltaY: -1, deltaMode: 2 }), 0.4, 'a page-sized event is held to the gesture budget');
+  assert.equal(swipe(fresh(), { count: 10, deltaY: -100, every: 20 }), 0.4, 'ten notches spun inside a fifth of a second get the opening budget');
+  assert.equal(swipe(fresh(), { count: 5, deltaY: -100, every: 400 }), 0.5, 'a deliberate roll is never stuck');
 
   const score = await read('src/components/ScoreRating.tsx');
   assert.match(score, /addEventListener\('wheel', onWheel, \{ passive: false \}\)/, 'the wheel listener is native and not passive, so preventDefault holds');
   assert.match(score, /removeEventListener\('wheel', onWheel\)/, 'and it is removed again');
   assert.doesNotMatch(score, /onWheel=/, 'React\'s passive onWheel is gone');
-  assert.match(score, /event\.preventDefault\(\);\s*const \{ value: current, onChange: commit \}/, 'the page is stopped from scrolling before the score is nudged');
+  assert.match(score, /if \(!consumed\) return;\s*event\.preventDefault\(\);\s*if \(delta === 0\) return;\s*const \{ value: current, onChange: commit \}/, 'the page is stopped from scrolling for every event the bar takes, and the score moves only when a step is due');
+  assert.match(score, /onPointerDown=\{\(event\) => \{[^}]*if \(event\.button !== 0 \|\| \(event\.ctrlKey && \/mac\/i\.test\(navigator\.platform\)\)\) return;\s*event\.currentTarget\.setPointerCapture/, 'a right-click, or a Control-click on a Mac, does not set the score before the context menu clears it');
 }
 
 // ── links in narrow cells ──────────────────────────────────────────────────

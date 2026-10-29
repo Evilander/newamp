@@ -27,7 +27,7 @@
 //  - A concurrency semaphore caps CPU so prepareNext warming can't thrash.
 //  - Startup janitor deletes orphan .part files; LRU eviction caps disk use.
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, open, readdir, realpath, rename, stat, unlink, utimes, copyFile } from 'node:fs/promises';
@@ -78,12 +78,27 @@ function release(): void {
   else active -= 1;
 }
 
+// Everything here can be made again from the music files, and it grows to
+// the 8 GB cap; Time Machine would copy each new file on every backup.
+// Written straight onto the folder: the attribute `tmutil addexclusion` sets
+// (a binary plist naming com.apple.backupd). tmutil itself goes through
+// backupd and took eight seconds when the app ran it; xattr takes a few ms.
+const TIME_MACHINE_EXCLUDE_ATTR = 'com.apple.metadata:com_apple_backup_excludeItem';
+const TIME_MACHINE_EXCLUDE_VALUE =
+  '62706C69737430305F1011636F6D2E6170706C652E6261636B75706408000000000000010100000000000000010000000000000000000000000000001C';
+
+function excludeFromBackups(dir: string): void {
+  if (process.platform !== 'darwin') return;
+  execFile('/usr/bin/xattr', ['-wx', TIME_MACHINE_EXCLUDE_ATTR, TIME_MACHINE_EXCLUDE_VALUE, dir], () => undefined);
+}
+
 export function initTranscodeCache(dir: string): void {
   cacheDir = dir;
   readyPromise = (async () => {
     try {
       await mkdir(cacheDir, { recursive: true });
       cacheEnabled = true;
+      excludeFromBackups(cacheDir);
     } catch (err) {
       console.error('[newamp] transcode cache dir unavailable; seekable transcode disabled:', err);
       cacheEnabled = false;

@@ -50,6 +50,7 @@ assert.equal(key('V', { shiftKey: true }), 'auto-vj');
 // Anything with Ctrl, Cmd or Alt is the app's or the OS's.
 for (const modifier of ['ctrlKey', 'metaKey', 'altKey']) {
   for (const k of ['ArrowRight', 'ArrowLeft', 'f', 'a', 'h', 'r', 'q', 'p', ']', '?', 'Escape']) {
+    if (modifier === 'altKey' && k === ']') continue; // typed with Option on a Mac layout (below)
     assert.equal(key(k, { [modifier]: true }), null, `${modifier}+${k} must be left to the app`);
   }
 }
@@ -59,7 +60,13 @@ assert.equal(key('[', { ctrlKey: true, altKey: true, altGraph: true }), 'preset-
 assert.equal(key(']', { ctrlKey: true, altKey: true, altGraph: true }), 'preset-next');
 assert.equal(key(']', { altKey: true, altGraph: true }), 'preset-next', 'AltGr without the Ctrl that Windows adds (Linux, macOS)');
 assert.equal(key('[', { ctrlKey: true, altKey: true }), null, 'Ctrl+Alt+[ with no AltGraph is a chord for the app');
-assert.equal(key('[', { altKey: true }), null, 'Alt+[ alone is not AltGr');
+// A Mac types [ and ] with Option on those layouts and reports no AltGraph; the bracket itself shows it.
+assert.equal(key('[', { altKey: true }), 'preset-previous', 'Option+5 on a German Mac layout types [');
+assert.equal(key(']', { altKey: true }), 'preset-next', 'Option+6 types ]');
+assert.equal(key('¬', { altKey: true }), null, 'Option with a letter makes a symbol that is not ours');
+assert.equal(key('ArrowRight', { altKey: true }), null, 'Option with a non-character key stays a chord');
+assert.equal(key('[', { altKey: true, metaKey: true }), null, 'Cmd+Option+[ is the app\'s or the OS\'s');
+assert.equal(key(']', { altKey: true, ctrlKey: true }), null, 'Ctrl+Option+] is a chord');
 assert.equal(key('ArrowRight', { ctrlKey: true, altKey: true, altGraph: true }), null, 'AltGr with a non-character key stays a chord');
 assert.equal(key('[', { ctrlKey: true, altKey: true, altGraph: true, metaKey: true }), null, 'Cmd is never AltGr');
 assert.equal(key('@', { ctrlKey: true, altKey: true, altGraph: true }), null, 'a character AltGr typed that is not ours does nothing');
@@ -476,5 +483,20 @@ assert.doesNotMatch(backdropRule[1], /backdrop-filter/, 'the scrim must not re-b
 assert.match(backdropRule[1], /rgba\(0, 0, 0, 0\.1\d*\)/, 'and is lighter than it was');
 assert.match(css, /\.viz-menu \{[^}]*position: fixed/, 'the menu is placed with fixed coordinates');
 assert.doesNotMatch(/\.viz-menu \{([^}]*)\}/.exec(css)[1], /backdrop-filter|transform/, 'the menu must stay the viewport-relative parent of its submenu');
+
+// A windowed visualizer on a Mac keeps the traffic lights: the toolbar starts to their right and a top strip drags the window.
+assert.match(viz, /data-newamp-platform=\{api\.platform\}/, 'the stage says which platform it is on');
+const macWindowed = ".fullscreen-viz-root[data-newamp-platform='darwin'][data-newamp-native-fullscreen='false']";
+const ruleFor = (selector) => new RegExp(`${macWindowed.replace(/[[\].]/g, '\\$&')} ${selector.replace(/\./g, '\\.')} \\{([^}]*)\\}`).exec(css)?.[1] ?? '';
+assert.match(ruleFor('.fullscreen-viz-toolbar'), /left: 80px/, 'the toolbar clears the traffic lights');
+assert.match(ruleFor('.fullscreen-viz-drag-strip'), /-webkit-app-region: drag/, 'the strip along the top drags the window');
+assert.match(ruleFor('.fullscreen-viz-drag-strip'), /height: 28px/);
+assert.match(css, /\.fullscreen-viz-drag-strip \{ display: none; \}/, 'and is hidden everywhere else');
+const noDrag = css.slice(css.indexOf(`${macWindowed} .fullscreen-viz-toolbar,`)).split('}')[0];
+for (const selector of ['.fullscreen-viz-toolbar,', '.fullscreen-viz-toolbar button,', '.eviland-memory-badge,', '.viz-popover-backdrop,', '.viz-menu-backdrop {']) {
+  assert.ok(noDrag.includes(`${macWindowed} ${selector}`), `${selector} opts out of the drag strip`);
+}
+assert.match(noDrag, /-webkit-app-region: no-drag/);
+assert.ok(viz.indexOf('fullscreen-viz-drag-strip') < viz.indexOf('data-newamp-visualizer-toolbar'), 'the strip comes before the controls that carve space out of it');
 
 console.log(JSON.stringify({ ok: true }, null, 2));

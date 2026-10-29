@@ -171,7 +171,10 @@ export function ProfileView(): JSX.Element {
               value={newListTitle}
               onChange={(e) => setNewListTitle(e.target.value)}
               placeholder="New list title — e.g. Best local recordings"
-              onKeyDown={(e) => e.key === 'Enter' && void createList()}
+              onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                if (e.key === 'Enter') void createList();
+              }}
             />
             <button className="pxbtn" onClick={() => void createList()}>ADD LIST</button>
           </div>

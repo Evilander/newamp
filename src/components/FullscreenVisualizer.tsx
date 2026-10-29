@@ -1253,6 +1253,7 @@ export function FullscreenVisualizer(): JSX.Element {
       data-newamp-visualizer-auto-vj={autoVjEnabled ? 'on' : 'off'}
       data-newamp-visualizer-art={artPulseEnabled ? (artPulseVisible ? 'pulse' : 'armed') : 'hidden'}
       data-newamp-native-fullscreen={nativeFullscreen ? 'true' : 'false'}
+      data-newamp-platform={api.platform}
       className="fullscreen-viz-root fixed inset-0 z-[90] flex items-center justify-center bg-black"
       role="region"
       aria-label="Visualizer"
@@ -1271,6 +1272,10 @@ export function FullscreenVisualizer(): JSX.Element {
         setMenu({ x: e.clientX, y: e.clientY });
       }}
     >
+      {/* First in the tree so the controls drawn after it can cut their own
+          space out of the drag region (see visualizer.css). */}
+      <div className="fullscreen-viz-drag-strip" aria-hidden="true" />
+
       {activePreset === 'album-breathe' ? (
         <div
           className="fullscreen-viz-album-breathe absolute inset-0 flex items-center justify-center"

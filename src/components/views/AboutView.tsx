@@ -13,6 +13,12 @@ export function AboutDataRow({ path }: { path: string }): JSX.Element | null {
   );
 }
 
+function platformName(platform: string): string {
+  if (platform === 'darwin') return 'macOS';
+  if (platform === 'win32') return 'Windows';
+  return platform === 'linux' ? 'Linux' : platform;
+}
+
 export function AboutView(): JSX.Element {
   const [dataPath, setDataPath] = useState('');
 
@@ -51,7 +57,7 @@ export function AboutView(): JSX.Element {
           </div>
           <div>
             <span>Build</span>
-            <strong>NewAmp v{api.appVersion} / {api.platform}</strong>
+            <strong>NewAmp v{api.appVersion} / {platformName(api.platform)}</strong>
           </div>
           <AboutDataRow path={dataPath} />
         </div>

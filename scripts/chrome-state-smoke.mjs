@@ -128,7 +128,7 @@ assert.match(firstLaunchSource, /Start listening/, 'first-launch tutorial primar
 assert.match(firstLaunchSource, /data-newamp-live-services-onboarding/, 'first-launch tutorial should explain optional live services');
 assert.match(firstLaunchSource, /Private recordings still play normally/, 'first-launch tutorial should handle non-web local recordings');
 assert.match(settingsViewSource, /data-newamp-lastfm-setup-guide/, 'Settings should expose a stable Last.fm setup guide marker');
-assert.match(settingsViewSource, /Application description: Local Windows music player with optional Last\.fm scrobbling\./, 'Last.fm setup guide should include the app description field');
+assert.match(settingsViewSource, /Application description: Local music player with optional Last\.fm scrobbling\./, 'Last.fm setup guide should include the app description field');
 assert.match(settingsViewSource, /Callback URL: leave blank\./, 'Last.fm setup guide should tell desktop users to leave callback URL blank');
 assert.match(settingsViewSource, /Complete auth/, 'Last.fm setup guide should explain the browser approval flow');
 assert.match(fullscreenSource, /Render quality/, 'fullscreen visualizer should expose a labeled render-quality control');

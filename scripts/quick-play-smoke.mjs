@@ -117,10 +117,10 @@ try {
   assert.match(paletteSource, /usePlayerStore\.getState\(\)\.toggleLove\(item\.track\.id\)/, 'Quick Play should support love toggling through the store, so the playing track and queue follow');
   assert.doesNotMatch(paletteSource, /api\.toggleLove/, 'Quick Play must not bypass the store when it loves a track');
   assert.match(storeSource, /toggleLove: async \(id\) => \{\s*const loved = await api\.toggleLove\(id\);/, 'the store love toggle should call the catalog toggle');
-  assert.match(paletteSource, /\{ keys: 'Ctrl\+Enter', label: 'play next' \}/, 'Quick Play should expose a play-next keyboard chord');
-  assert.match(paletteSource, /\{ keys: 'Shift\+Enter', label: 'queue' \}/, 'Quick Play should expose a queue keyboard chord');
-  assert.match(paletteSource, /\{ keys: 'Ctrl\+L', label: 'love' \}/, 'Quick Play should expose a love keyboard chord');
-  assert.match(paletteSource, /\{ keys: 'Ctrl\+R', label: 'radio' \}/, 'Quick Play should expose a smart-rule radio keyboard chord');
+  assert.match(paletteSource, /\{ chord: 'Mod\+Enter', label: 'play next' \}/, 'Quick Play should expose a play-next keyboard chord');
+  assert.match(paletteSource, /\{ chord: 'Shift\+Enter', label: 'queue' \}/, 'Quick Play should expose a queue keyboard chord');
+  assert.match(paletteSource, /\{ chord: 'Mod\+L', label: 'love' \}/, 'Quick Play should expose a love keyboard chord');
+  assert.match(paletteSource, /\{ chord: 'Mod\+R', label: 'radio' \}/, 'Quick Play should expose a smart-rule radio keyboard chord');
   assert.match(paletteSource, /event\.key === 'Enter' && \(event\.ctrlKey \|\| event\.metaKey\)/, 'Quick Play should route Ctrl+Enter to play-next');
   assert.match(paletteSource, /event\.key === 'Enter' && event\.shiftKey/, 'Quick Play should route Shift+Enter to queue');
   assert.match(paletteSource, /key === 'l' && \(event\.ctrlKey \|\| event\.metaKey\)/, 'Quick Play should route Ctrl+L to love');

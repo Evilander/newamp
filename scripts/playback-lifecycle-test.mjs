@@ -8,6 +8,18 @@ import { pathToFileURL } from 'node:url';
 const root = resolve('tmp/playback-lifecycle-test');
 mkdirSync(root, { recursive: true });
 globalThis.window = { setTimeout, clearTimeout, setInterval, clearInterval, location: { search: '' }, winctl: { notifyPlayback() {} } };
+// The media-session anchor: a silent element the engine plays while audio
+// goes anywhere but a media element, so the OS still has a session to show.
+const anchors = [];
+globalThis.Audio = class {
+  paused = true;
+  constructor() { anchors.push(this); }
+  play() { this.paused = false; return Promise.resolve(); }
+  pause() { this.paused = true; }
+  removeAttribute() {}
+  load() {}
+};
+globalThis.URL.createObjectURL ??= () => 'blob:anchor';
 await build({
   stdin: {
     contents: `export * from './src/store/usePlayerStore';
@@ -56,6 +68,11 @@ for (const action of ['stop', 'unload']) {
   assert.equal(await old, 'stale');
   assert.equal(subject.getState().trackId, 2, 'late cancellation must leave the newer playback alone');
   assert.equal(subject.getState().playing, true);
+  // Exclusive output plays outside the page; the anchor keeps Now Playing and
+  // the media keys alive for it, and stops with it.
+  assert.ok(anchors.length >= 1 && !anchors.at(-1).paused, 'the session anchor plays while the external backend does');
+  subject.stop();
+  assert.equal(anchors.at(-1).paused, true, 'the session anchor stops with playback');
   subject.dispose();
 }
 

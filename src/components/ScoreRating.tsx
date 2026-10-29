@@ -4,7 +4,7 @@
 //   - Type an exact score in the number field
 //   - Click on the bar = set score to that position
 //   - Drag = scrub
-//   - Mouse wheel = +/-0.1
+//   - Mouse wheel = +/-0.1 a notch; a trackpad swipe moves by distance
 //   - Shift+wheel = +/-1.0
 //   - Arrow keys = +/-0.1 / +/-1.0 with Shift / +/-10 with Alt
 //   - Right-click = clear (also Clear button)
@@ -13,6 +13,7 @@
 // 5-star UI, keyboard shortcuts (0-5), and smart-rule filters keep working.
 
 import { useEffect, useRef, useState } from 'react';
+import { GESTURE_BUDGET_NOTCHES, GESTURE_BUDGET_PER_S, GESTURE_GAP_MS } from '../lib/wheel-seek';
 
 export const SCORE_MAX = 100;
 export const SCORE_STEP_FINE = 0.1;
@@ -23,17 +24,92 @@ function clampScore(value: number): number {
   return Math.max(0, Math.min(SCORE_MAX, Math.round(value * 10) / 10));
 }
 
+/** One click of a notched mouse wheel, as Chromium reports it. */
+const WHEEL_NOTCH_PX = 100;
+const WHEEL_LINE_PX = 16;
+const WHEEL_PAGE_PX = 800;
+/** The smallest single event read as a notch of its own. */
+const WHEEL_MIN_NOTCH_PX = 30;
+
+export interface WheelScoreEvent {
+  deltaX?: number;
+  deltaY: number;
+  /** 0 = pixels, 1 = lines, 2 = pages (WheelEvent.deltaMode). */
+  deltaMode?: number;
+  shiftKey?: boolean;
+  /** Set on the wheel events a trackpad pinch generates. */
+  ctrlKey?: boolean;
+}
+
+export interface WheelScoreResult {
+  /** The event belongs to the bar, so the page behind it should not scroll. */
+  consumed: boolean;
+  /** Score change for this event; 0 while a trackpad's travel is still adding up to a notch. */
+  delta: number;
+}
+
+const IGNORED: WheelScoreResult = { consumed: false, delta: 0 };
+
 /**
- * Score change for one wheel event: up raises, down lowers, Shift takes the
- * coarse step. macOS turns Shift+wheel into a sideways scroll, so with Shift
- * held the vertical intent is read from deltaX. A plain sideways swipe moves
+ * Turns the wheel events over the bar into score changes. A notched mouse
+ * reports about 100 px per click and a trackpad reports a swipe, momentum
+ * included, as dozens of small events, so distance is what counts: a click is
+ * one step (a tenth, or a point with Shift) and a swipe adds up to the same
+ * steps, with a cap per gesture so momentum cannot carry the score far.
+ * A pinch arrives as ctrl+wheel and is left to the page. macOS turns
+ * Shift+wheel into a sideways scroll, so with Shift held the vertical intent
+ * is read from whichever axis moved most. A plain sideways swipe moves
  * nothing and still scrolls the page.
  */
-export function wheelScoreDelta(event: { deltaY: number; deltaX?: number; shiftKey?: boolean }): number {
-  const travel = event.deltaY || (event.shiftKey ? (event.deltaX ?? 0) : 0);
-  if (!travel || !Number.isFinite(travel)) return 0;
-  const step = event.shiftKey ? SCORE_STEP_COARSE : SCORE_STEP_FINE;
-  return travel < 0 ? step : -step;
+export class WheelScoreInput {
+  private lastAt = -Infinity;
+  private gestureStart = 0;
+  private spent = 0;
+  private carried = 0;
+
+  /** `now` is the event's own timestamp in ms. */
+  next(event: WheelScoreEvent, now: number): WheelScoreResult {
+    if (event.ctrlKey) return IGNORED;
+    const scale = event.deltaMode === 1 ? WHEEL_LINE_PX : event.deltaMode === 2 ? WHEEL_PAGE_PX : 1;
+    const dy = event.deltaY * scale;
+    const dx = (event.deltaX ?? 0) * scale;
+    if (!Number.isFinite(dy) || !Number.isFinite(dx)) return IGNORED;
+    const shift = !!event.shiftKey;
+    const travel = shift ? (Math.abs(dx) > Math.abs(dy) ? dx : dy) : Math.abs(dx) > Math.abs(dy) ? 0 : dy;
+    if (travel === 0) return IGNORED;
+
+    const fresh = now - this.lastAt > GESTURE_GAP_MS;
+    if (fresh) {
+      this.gestureStart = now;
+      this.spent = 0;
+      this.carried = 0;
+    }
+    this.lastAt = now;
+    if (this.carried !== 0 && Math.sign(this.carried) !== Math.sign(travel)) this.carried = 0;
+    this.carried += travel;
+
+    let notches = Math.trunc(this.carried / WHEEL_NOTCH_PX);
+    if (notches === 0 && (fresh || Math.abs(travel) >= WHEEL_MIN_NOTCH_PX)) {
+      // A slow click can report a few pixels, so the first event of a gesture
+      // still moves one step. So does any event as big as a mouse notch
+      // anywhere: Chromium reports about 53 px a click on Linux and 33 px on
+      // Windows set to scroll one line, where a trackpad sends a few pixels.
+      notches = Math.sign(travel);
+      this.carried = 0;
+    } else {
+      this.carried -= notches * WHEEL_NOTCH_PX;
+    }
+    if (notches === 0) return { consumed: true, delta: 0 };
+
+    const allowed = GESTURE_BUDGET_NOTCHES + (GESTURE_BUDGET_PER_S * (now - this.gestureStart)) / 1000;
+    const room = Math.max(0, Math.floor(allowed - this.spent));
+    if (Math.abs(notches) > room) notches = Math.sign(notches) * room;
+    if (notches === 0) return { consumed: true, delta: 0 };
+    this.spent += Math.abs(notches);
+
+    // Scrolling up (negative travel) raises the score.
+    return { consumed: true, delta: -notches * (shift ? SCORE_STEP_COARSE : SCORE_STEP_FINE) };
+  }
 }
 
 function formatScore(value: number | null): string {
@@ -87,10 +163,12 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
   useEffect(() => {
     const bar = barRef.current;
     if (!bar) return undefined;
+    const wheel = new WheelScoreInput();
     const onWheel = (event: WheelEvent): void => {
-      const delta = wheelScoreDelta(event);
-      if (delta === 0) return;
+      const { consumed, delta } = wheel.next(event, event.timeStamp);
+      if (!consumed) return;
       event.preventDefault();
+      if (delta === 0) return;
       const { value: current, onChange: commit } = latest.current;
       commit(clampScore((current ?? 0) + delta));
     };
@@ -186,6 +264,9 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
         aria-valuetext={scoreValueText(value)}
         aria-label="Rating"
         onPointerDown={(event) => {
+          // A Control-click on a Mac is a right-click: the context menu that
+          // follows clears the score, so it must not set one first.
+          if (event.button !== 0 || (event.ctrlKey && /mac/i.test(navigator.platform))) return;
           event.currentTarget.setPointerCapture(event.pointerId);
           setPointerActive(true);
           commitFromPointer(event.clientX);

@@ -179,6 +179,7 @@
     "test:library-search-fold": "npm run build:electron && node scripts/library-search-fold-test.mjs",
     "test:library-table": "node scripts/library-table-test.mjs",
     "test:library-watch-plan": "npm run build:electron && node scripts/library-watch-plan-test.mjs",
+    "test:library-skip": "npm run build:electron && node scripts/library-skip-test.mjs",
     "test:look-step": "node scripts/look-step-test.mjs",
     "test:main-wiring": "node scripts/main-wiring-test.mjs",
     "test:mp4-codec": "npm run build:electron && node scripts/mp4-codec-test.mjs",

@@ -110,7 +110,7 @@ export async function openTrackContextMenu(tracks: Track[]): Promise<void> {
     case 'trash': {
       // The main process asks first; the files and their library rows go
       // together, and the player drops them on the tracks-removed event.
-      const bin = /^win/i.test(navigator.platform) ? 'Recycle Bin' : 'Trash';
+      const bin = api.platform === 'win32' ? 'Recycle Bin' : 'Trash';
       const result = await trashTracksWithProgress(trackIds, bin);
       for (const toast of describeTrashResult(result, tracks, bin)) pushToast(toast);
       return;

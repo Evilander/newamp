@@ -35,12 +35,16 @@ export interface VisualizerKeyInput {
  * The visualizer's own keys. Anything with Ctrl, Cmd or Alt held belongs to the
  * app (track skip, search, the OS), and plain L and V stay with the app-wide
  * map (love, stop), so Lite and Auto-VJ sit on Shift. AltGr is how many layouts
- * type [ and ], so a character it typed counts as unmodified.
+ * type [ and ], so a character it typed counts as unmodified. On a Mac the same
+ * layouts type them with Option, which reports no AltGraph; the bracket itself
+ * is what shows it was typed (Option with a letter makes a symbol that matches
+ * nothing here).
  */
 export function resolveVisualizerKey(input: VisualizerKeyInput): VisualizerKeyAction | null {
-  const typedWithAltGr = input.altGraph === true && input.key.length === 1;
-  if (input.metaKey || (!typedWithAltGr && (input.ctrlKey || input.altKey))) return null;
   const { key } = input;
+  const typedWithAltGr = input.altGraph === true && key.length === 1;
+  const typedWithOption = !!input.altKey && !input.ctrlKey && (key === '[' || key === ']');
+  if (input.metaKey || (!typedWithAltGr && !typedWithOption && (input.ctrlKey || input.altKey))) return null;
   if (key === 'ArrowRight') return input.arrowsOwned ? null : 'preset-next';
   if (key === 'ArrowLeft') return input.arrowsOwned ? null : 'preset-previous';
   if (key === ']') return 'preset-next';
