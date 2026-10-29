@@ -5,7 +5,7 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
-## [Unreleased]
+## [2.8.0] - 2026-10-28
 
 A Mac release. On a Mac with Logic Pro or GarageBand, the first scan of the
 Music folder no longer fills the library with thousands of loops and impulse
