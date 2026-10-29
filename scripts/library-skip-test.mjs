@@ -26,7 +26,7 @@ import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { LibraryStore } from '../dist-electron/electron/library.js';
-import { Scanner } from '../dist-electron/electron/scanner.js';
+import { readTrackFile, Scanner } from '../dist-electron/electron/scanner.js';
 import { resolveLibraryWatchTarget } from '../dist-electron/electron/library-watcher.js';
 import { isForeignLibraryPath, isSkippedLibraryFile, isSkippedLibraryFolder, isSkippedLibraryPath } from '../dist-electron/electron/library-skip.js';
 
@@ -138,6 +138,18 @@ for (const relPath of files.skipped) {
   assert.equal(resolveLibraryWatchTarget(music, relPath), null, `${relPath} is not a watch target`);
 }
 assert.equal(resolveLibraryWatchTarget(music, 'Logic Pro Library.bundle/Cover.jpg'), null, 'art inside a package is not a cover');
+
+// 3b. A file read outside a scan (an opened file, a CUE sheet's FILE entry)
+// passes the same gate: no row for anything a scan wouldn't read.
+{
+  const other = join(root, 'Other');
+  await mkdir(other, { recursive: true });
+  for (const name of ['notes.txt', 'id_rsa', '._song.mp3', 'song.mp3']) await writeFile(join(other, name), 'not audio');
+  assert.equal(await readTrackFile(join(other, 'notes.txt')), null, 'a text file is not read');
+  assert.equal(await readTrackFile(join(other, 'id_rsa')), null, 'nor a file with no audio extension');
+  assert.equal(await readTrackFile(join(other, '._song.mp3')), null, 'nor an AppleDouble file');
+  assert.ok(await readTrackFile(join(other, 'song.mp3')), 'an audio file is');
+}
 
 // 4. A read that times out leaves the file for the next scan. Run in its own
 // process, so open() can fail before the scanner's modules load.
