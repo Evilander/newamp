@@ -9,6 +9,7 @@ import type { TrackTagExtras } from '../shared/album-identity.js';
 import { runTagBackfill, type TagBackfillControl } from './album-identity-backfill.js';
 import { chooseFolderArt, isDiscFolderName, isFolderArtImage, type FolderImage, type FolderListing } from './folder-art.js';
 import { isSkippedLibraryFile, isSkippedLibraryFolder } from './library-skip.js';
+import { whenPlaybackFed } from './playback-io.js';
 
 const AUDIO_EXTS = new Set([
   '.mp3',
@@ -563,6 +564,9 @@ export class Scanner {
         this.library.setTrackDevices(devices);
 
         const read = await pMap(changed, METADATA_CONCURRENCY, async (f) => {
+          // Playback that runs short of audio goes first: on a slow drive or
+          // share the scan's reads are what its decoder waits behind.
+          await whenPlaybackFed();
           try {
             return await readMeta(f.full, f.size, f.mtime, f.dev, folderArtForFile, codecOnly.has(f.full));
           } catch (err) {

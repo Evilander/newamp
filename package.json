@@ -170,6 +170,7 @@
     "test:floating-panel": "node scripts/floating-panel-test.mjs",
     "test:format-badges-render": "node scripts/format-badges-render-test.mjs",
     "test:gapless-release": "node scripts/gapless-release-test.mjs",
+    "test:gapless-read-resume": "node scripts/gapless-read-resume-test.mjs",
     "test:keyboard-focus": "node scripts/keyboard-focus-test.mjs",
     "test:library-file-states": "npm run build:electron && node scripts/library-file-states-test.mjs",
     "test:library-orphan-tags": "npm run build:electron && node scripts/library-orphan-tags-test.mjs",

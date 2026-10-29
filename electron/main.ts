@@ -6654,8 +6654,12 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
   }
 
   const cueAudio = cueSheets.flatMap((sheet) => cueAudioPaths(sheet.entries));
-  const scanTargets = [...folderPaths, ...audioPaths, ...cueAudio];
-  if (scanTargets.length) await scanner.start(scanTargets);
+  // Files are read here, not queued behind the scanner: scans run one at a
+  // time, and the first scan of a large library on a network share runs for
+  // hours, so a file opened or dropped meanwhile sat at "Opening" until it
+  // ended. Folders still go through the scanner, which walks them.
+  await readOpenedFiles([...audioPaths, ...cueAudio]);
+  if (folderPaths.length) await scanner.start(folderPaths);
 
   const importedPlaylists = [];
   const tracks = library.getTracksByPaths(audioPaths);
@@ -6700,6 +6704,23 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
   }
 
   return { tracks, importedPlaylists, skipped };
+}
+
+const OPENED_FILE_READS = 4;
+
+async function readOpenedFiles(paths: string[]): Promise<void> {
+  const unique = [...new Set(paths)];
+  const readings: Array<NonNullable<Awaited<ReturnType<typeof readTrackFile>>>> = [];
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(OPENED_FILE_READS, unique.length) }, async () => {
+      while (next < unique.length) {
+        const reading = await readTrackFile(unique[next++]!);
+        if (reading) readings.push(reading);
+      }
+    }),
+  );
+  if (readings.length) library.upsertTracks(readings);
 }
 
 function collectOpenFileArgs(argv: string[]): string[] {

@@ -78,6 +78,15 @@ const MAX_WAV_HEADER_BYTES = 64 * 1024;
 // ffmpeg's input dump, with -loglevel level+info.
 const DURATION_LINE = /^\[info\]\s+Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)/;
 const ERROR_LINE = /\[(?:error|fatal|panic)\] /;
+// What ffmpeg prints when a read of its input fails: a network share that
+// timed out or dropped. It then exits 0, as it does at the end of a file.
+const READ_FAILURE =
+  /Operation timed out|Input\/output error|Resource temporarily unavailable|Stale NFS file handle|Connection reset|Network is (?:down|unreachable)|Host is (?:down|unreachable)|Socket is not connected|Device not configured|Error during demuxing/i;
+// A decode stopped by a failed read starts again where it stopped, up to this
+// many times, waiting a little longer each time. The worklet holds up to
+// HIGH_WATER_SEC of audio, so a read that recovers within that is not heard.
+const DECODE_RESUME_ATTEMPTS = 5;
+const DECODE_RESUME_DELAY_MS = 1000;
 // Smaller corrections are rounding, not news.
 const DURATION_EPSILON_SEC = 0.01;
 
@@ -101,6 +110,14 @@ type StreamMessage =
   | { t: 'dur'; gen: number; token: number; durationSec: number }
   | { t: 'end'; gen: number };
 
+/** Where a decode stopped by a failed read picks up again: the same segment, after `bytes`. */
+interface DecodeResume {
+  at: number;
+  rate: number;
+  bytes: number;
+  attempt: number;
+}
+
 interface Plan {
   token: number;
   source: ExclusiveTrackSource;
@@ -113,6 +130,15 @@ interface Plan {
 }
 
 export type GaplessSourceResolver = (trackId: number) => Promise<ExclusiveTrackSource | null>;
+
+/** Where the music ends in the decoder's output, in bytes from `plan.startAt`, when the container says so. */
+function limitBytesFor(plan: Plan, rate: number): number | null {
+  // The container's end point is in decoder frames.
+  const remaining = plan.playable && plan.playable.rate === rate
+    ? plan.playable.frames - Math.round(plan.startAt * rate)
+    : null;
+  return remaining != null && remaining > 0 ? remaining * FRAME_BYTES : null;
+}
 
 /**
  * Where the PCM starts in ffmpeg's piped WAV output, and its rate. 'more'
@@ -238,6 +264,11 @@ class Session {
   private consumed = 0;
   private decoder: ChildProcessByStdio<null, Readable, Readable> | null = null;
   private decoderPlan: Plan | null = null;
+  // A decode waiting to read again after a failed read, and where from.
+  private resumeTimer: NodeJS.Timeout | null = null;
+  private pendingResume: { plan: Plan; at: number; rate: number; bytes: number } | null = null;
+  // A decoder releasePaths stopped on purpose: its early end is not a failed read.
+  private abandoned: ChildProcessByStdio<null, Readable, Readable> | null = null;
   private resampler: Resampler | null = null;
   private readonly started: Array<{ plan: Plan; at: number }> = [];
   private next: Plan | null;
@@ -325,6 +356,7 @@ class Session {
     this.phase = 'closed';
     this.hungry = false;
     reportPlaybackHunger(this, false);
+    this.cancelResume();
     this.killDecoder();
     if (this.resampler) {
       this.resampler.onClose = null;
@@ -347,12 +379,22 @@ class Session {
     if (this.deferredNext?.plan && held(this.deferredNext.plan.source.path)) {
       this.deferredNext = { after: this.deferredNext.after, plan: null };
     }
+    const pending = this.pendingResume;
+    if (pending && held(pending.plan.source.path)) {
+      // Waiting to read the file again after a failed read: it ends early
+      // here instead, with what it has.
+      this.cancelResume();
+      this.onDecoded(pending.plan, pending.at, pending.rate, pending.bytes, null, 'released', null);
+      return Promise.resolve();
+    }
     const decoder = this.decoder;
     const plan = this.decoderPlan;
     if (!decoder || !plan || !held(plan.source.path)) return Promise.resolve();
     const exited = awaitChildExit(decoder, RELEASE_EXIT_TIMEOUT_MS);
     if (this.phase !== 'opening') {
-      // Left in place: its close handler runs the ended-early path.
+      // Left in place: its close handler runs the ended-early path, and does
+      // not read the file again.
+      this.abandoned = decoder;
       killChild(decoder);
       return exited;
     }
@@ -486,7 +528,12 @@ class Session {
     this.post({ t: 'dur', gen: this.gen, token: plan.token, durationSec });
   }
 
-  private spawnDecoder(plan: Plan): void {
+  /**
+   * Decode `plan` into the stream. With `resume`, carry on a segment that is
+   * already placed, from the frame a failed read stopped it at.
+   */
+  private spawnDecoder(plan: Plan, resume: DecodeResume | null = null): void {
+    const from = resume ? plan.startAt + resume.bytes / FRAME_BYTES / resume.rate : plan.startAt;
     const args = [
       '-hide_banner',
       '-nostdin',
@@ -494,7 +541,7 @@ class Session {
       '-loglevel',
       'level+info',
       '-nostats',
-      ...(plan.startAt > 0 ? ['-ss', plan.startAt.toFixed(6)] : []),
+      ...(from > 0 ? ['-ss', from.toFixed(6)] : []),
       '-i',
       plan.source.path,
       '-map',
@@ -538,7 +585,7 @@ class Session {
     let exited: { code: number | null; detail: string } | null = null;
     let placed: { at: number; rate: number; limitBytes: number | null } | null = null;
     let partial: Buffer = Buffer.alloc(0);
-    let bytes = 0;
+    let bytes = resume?.bytes ?? 0;
     let stderr = '';
     let line = '';
     let settled = false;
@@ -599,16 +646,27 @@ class Session {
         this.failSegment(plan, 'Unreadable decoder output.');
         return;
       }
-      held = [header.subarray(parsed.dataOffset)];
+      const pcmAfterHeader = header.subarray(parsed.dataOffset);
       header = null;
+      if (resume) {
+        // The segment is on the stream already; this decoder only continues it.
+        if (parsed.rate !== resume.rate) {
+          settled = true;
+          this.decoder = null;
+          this.release(child.stdout);
+          killChild(child);
+          this.onDecoded(plan, resume.at, resume.rate, bytes, null, 'the decoder changed rate', null);
+          return;
+        }
+        placed = { at: resume.at, rate: parsed.rate, limitBytes: limitBytesFor(plan, parsed.rate) };
+        take(pcmAfterHeader, placed);
+        return;
+      }
+      held = [pcmAfterHeader];
       // Hold the pipe while the segment is placed.
       child.stdout.pause();
       this.placeSegment(plan, parsed.rate, (at) => {
-        // The container's end point is in decoder frames.
-        const remaining = plan.playable && plan.playable.rate === parsed.rate
-          ? plan.playable.frames - Math.round(plan.startAt * parsed.rate)
-          : null;
-        placed = { at, rate: parsed.rate, limitBytes: remaining != null && remaining > 0 ? remaining * FRAME_BYTES : null };
+        placed = { at, rate: parsed.rate, limitBytes: limitBytesFor(plan, parsed.rate) };
         const waiting = held ?? [];
         held = null;
         for (const pcm of waiting) {
@@ -625,12 +683,21 @@ class Session {
       settled = true;
       this.decoder = null;
       this.release(child.stdout);
+      const abandoned = this.abandoned === child;
+      if (abandoned) this.abandoned = null;
+      const attempt = abandoned ? null : (resume?.attempt ?? 0);
+      if (resume && !placed) {
+        // Gave out again before its first frame: the segment carries on from
+        // the same place on the next try.
+        this.onDecoded(plan, resume.at, resume.rate, bytes, code ?? 1, detail, attempt);
+        return;
+      }
       if (!placed) {
         console.error(`[newamp] gapless decode produced no audio (ffmpeg ${code}) for ${plan.source.path}\n${detail}`);
         this.failSegment(plan, code === 0 ? 'The file has no decodable audio.' : 'Decode failed.');
         return;
       }
-      this.onDecoded(plan, placed.at, placed.rate, bytes, code, detail);
+      this.onDecoded(plan, placed.at, placed.rate, bytes, code, detail, attempt);
     };
     const done = (code: number | null, detail: string): void => {
       if (settled || this.decoder !== child) return;
@@ -677,8 +744,37 @@ class Session {
     }
   }
 
-  private onDecoded(plan: Plan, at: number, rate: number, bytes: number, code: number | null, detail: string): void {
+  /**
+   * `plan`'s decoder has stopped. `attempt` counts the reads that already
+   * resumed it; null when it must not be read again.
+   */
+  private onDecoded(
+    plan: Plan,
+    at: number,
+    rate: number,
+    bytes: number,
+    code: number | null,
+    detail: string,
+    attempt: number | null = null,
+  ): void {
     const frames = Math.floor(bytes / FRAME_BYTES);
+    const readFailed = code !== 0 || READ_FAILURE.test(detail);
+    if (frames > 0 && readFailed && attempt != null && attempt < DECODE_RESUME_ATTEMPTS && this.phase !== 'closed') {
+      console.warn(
+        `[newamp] gapless decode stopped at ${(plan.startAt + frames / rate).toFixed(2)} s (ffmpeg ${code}) for ${plan.source.path}; reading again from there\n${detail}`,
+      );
+      // Still filling this segment: the end guard waits, and playback stays
+      // marked as short of audio while it runs low.
+      this.phase = 'decoding';
+      this.pendingResume = { plan, at, rate, bytes };
+      this.resumeTimer = setTimeout(() => {
+        this.resumeTimer = null;
+        this.pendingResume = null;
+        if (this.phase === 'closed') return;
+        this.spawnDecoder(plan, { at, rate, bytes, attempt: attempt + 1 });
+      }, DECODE_RESUME_DELAY_MS * (attempt + 1));
+      return;
+    }
     // A clean exit with nothing after a seek is a seek to (or past) the end:
     // the track has played out, it didn't fail.
     const playedOut = frames === 0 && code === 0 && plan.startAt > 0;
@@ -697,7 +793,8 @@ class Session {
       return;
     }
     if (playedOut && plan === this.firstPlan) this.firstPlayedOut = true;
-    if (code !== 0) {
+    if (readFailed) {
+      // Not the file's length: the track keeps the one it has.
       console.warn(`[newamp] gapless decode ended early (ffmpeg ${code}) for ${plan.source.path}; keeping ${frames} frames\n${detail}`);
     } else if (frames > 0) {
       // What the file really holds, which a stale library row or a header
@@ -877,7 +974,14 @@ class Session {
     else done();
   }
 
+  private cancelResume(): void {
+    if (this.resumeTimer) clearTimeout(this.resumeTimer);
+    this.resumeTimer = null;
+    this.pendingResume = null;
+  }
+
   private killDecoder(): void {
+    this.cancelResume();
     const decoder = this.decoder;
     if (!decoder) return;
     this.decoder = null;
