@@ -296,8 +296,11 @@ async function readMeta(
 }
 
 // Reads one file's tags the way a scan would, outside the scan queue (which
-// a long library scan can hold for minutes). Null when the file isn't there.
+// a long library scan can hold for minutes). Null when the file isn't there,
+// or isn't one a scan would read: a CUE sheet can name any file, and the
+// library serves what it holds to the player.
 export async function readTrackFile(path: string): Promise<IncomingTrack | null> {
+  if (!isAudioPath(path) || isSkippedLibraryFile(basename(path))) return null;
   try {
     const stat = await fs.stat(path);
     if (!stat.isFile()) return null;
