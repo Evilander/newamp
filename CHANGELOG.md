@@ -355,6 +355,10 @@ system.
   seconds of wall clock, so long or slow sources aren't killed and restarted
   over and over. A slow first ffmpeg check at startup no longer turns ffmpeg
   playback off for the session.
+- A seek or a skip that abandoned the request for a track played through a
+  conversion did not always stop its ffmpeg, which stayed running with the
+  file open. The request is now held for as long as its decoder runs, so the
+  stop always arrives.
 - The live fallback stream now errors on a failed read or an ffmpeg failure
   instead of ending as if the track were over. Exports are written to a .part
   file and renamed when complete, so a failed export leaves no truncated file

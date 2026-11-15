@@ -297,7 +297,7 @@
     "test:library-adoption": "npm run build:electron && node scripts/library-adoption-test.mjs",
     "test:library-prune-safety": "npm run build:electron && node scripts/library-prune-safety-test.mjs",
     "test:flash-guard": "node scripts/flash-guard-test.mjs",
-    "test:gapless-producer": "node scripts/gapless-producer-test.mjs",
+    "test:gapless-producer": "node --expose-gc scripts/gapless-producer-test.mjs",
     "test:gapless-client": "node scripts/gapless-client-test.mjs",
     "test:album-identity": "node scripts/album-identity-test.mjs",
     "test:album-identity-migration": "npm run build:electron && node scripts/album-identity-migration-test.mjs",

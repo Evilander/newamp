@@ -18,7 +18,7 @@
 //                  break the WAV header, an iTunes-style AAC (iTunSMPB, no
 //                  edit list) stops where its music ends, and durations
 //                  follow the decoder when the library's is missing or wrong
-// Run: node scripts/gapless-producer-test.mjs
+// Run: node --expose-gc scripts/gapless-producer-test.mjs
 
 import { build } from 'esbuild';
 import ffmpeg from 'ffmpeg-static';
@@ -798,12 +798,20 @@ await section(async () => {
   // two chunks; the fake exclusive device fills after 64 KiB.
   const long = join(media, 'b60.flac');
   let mark = spawned.length;
+  if (typeof globalThis.gc !== 'function') throw new Error('this test needs node --expose-gc (npm run test:gapless-producer passes it)');
   const abort = new AbortController();
   const response = await seekableTranscodeResponse(long, new Request('http://localhost/audio', { signal: abort.signal }));
   const reader = response.body.getReader();
   await reader.read();
   await reader.read();
   await sleep(500);
+  // Nothing here holds the Request, as nothing need hold it in the app. Once
+  // it is collected its signal stops following the caller's, so the response
+  // has to keep it for the abort to arrive. Collect now so that it would show.
+  for (let i = 0; i < 3; i++) {
+    globalThis.gc();
+    await sleep(30);
+  }
   const served = spawned.slice(mark).filter((c) => c.args.includes('pipe:1'));
   abort.abort();
   const servedExited = await exitedAll(served);

@@ -513,8 +513,13 @@ function pcmBodyStream(
   dropBytes: number,
   pcmBytes: number,
   sampleRate: number,
-  signal: AbortSignal,
+  request: Request,
 ): ReadableStream<Uint8Array> {
+  // The request is held for as long as the stream is, not only its signal. A
+  // Request that has been collected no longer passes an abort on to the signal
+  // it handed out, so with the signal alone a seek that replaced this one, or
+  // a skipped track, could leave the decoder running until the body itself
+  // was cancelled.
   let child: PcmChild | null = null;
   let closed = false;
   // Decoder output is counted from its first frame at `seekSec`. `have` is how
@@ -576,11 +581,11 @@ function pcmBodyStream(
 
       // Gone before it began (a seek that was replaced at once): the abort
       // has already happened and will not be heard again.
-      if (signal.aborted) {
+      if (request.signal.aborted) {
         close();
         return;
       }
-      signal.addEventListener('abort', () => {
+      request.signal.addEventListener('abort', () => {
         closed = true;
         kill();
       }, { once: true });
@@ -768,7 +773,7 @@ export async function seekableTranscodeResponse(filePath: string, request: Reque
   }
 
   if (!range) {
-    const body = pcmBodyStream(filePath, prelude, 0, 0, dataBytes, info.sampleRate, request.signal);
+    const body = pcmBodyStream(filePath, prelude, 0, 0, dataBytes, info.sampleRate, request);
     return new Response(body, {
       status: 200,
       headers: { ...baseHeaders, 'Content-Length': String(total) },
@@ -785,7 +790,7 @@ export async function seekableTranscodeResponse(filePath: string, request: Reque
   const dropBytes = pcmFrom - startFrame * BYTES_PER_FRAME;
   const seekSec = startFrame / info.sampleRate;
 
-  const body = pcmBodyStream(filePath, preludePart, seekSec, dropBytes, pcmLen, info.sampleRate, request.signal);
+  const body = pcmBodyStream(filePath, preludePart, seekSec, dropBytes, pcmLen, info.sampleRate, request);
   return new Response(body, {
     status: 206,
     headers: {
