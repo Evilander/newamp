@@ -36,7 +36,7 @@ vec4 scene(vec2 uv, vec2 p) {
     vec3 normal = normalize(vec3(sculpture(hit + e.xyy) - sculpture(hit - e.xyy),
       sculpture(hit + e.yxy) - sculpture(hit - e.yxy), sculpture(hit + e.yyx) - sculpture(hit - e.yyx)) + vec3(1e-4));
     float diffuse = max(0.0, dot(normal, normalize(vec3(-1, 2, 3))));
-    float rim = pow(1.0 - abs(dot(normal, -ray)), 2.0);
+    float rim = sq(1.0 - abs(dot(normal, -ray)));
     float tint = 0.5 + 0.3 * sin(hit.y * 2.0 + hit.x + u_phase * 0.2);
     color += paletteRamp(tint) * (0.18 + diffuse * 0.85) + u_light * rim * 0.3;
     color *= exp(-max(0.0, travel - 2.0) * 0.25);

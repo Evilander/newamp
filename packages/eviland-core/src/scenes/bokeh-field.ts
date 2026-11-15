@@ -94,9 +94,9 @@ vec3 bkPlane(vec2 p, vec2 ext, float plane, int start, int count, float radius, 
     if (dot(d, d) > reach * reach * 1.6) continue;
 
     float dist = bkHex(rot2(turn) * d, r);
-    float fill = smoothstep(soft, -soft, dist);
+    float fill = 1.0 - smoothstep(-soft, soft, dist);
     // Glass is brighter at its edge than in its middle.
-    float rim = smoothstep(soft * 2.0 + 0.004, 0.0, abs(dist));
+    float rim = 1.0 - smoothstep(0.0, soft * 2.0 + 0.004, abs(dist));
     float shape = fill * 0.45 + rim * 0.55;
 
     int bi = int(mod(floor(disc.w * 24.0) + plane * 5.0 + float(k) * 7.0, 24.0));

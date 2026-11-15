@@ -83,7 +83,7 @@ vec4 scene(vec2 uv, vec2 p) {
   // The wire: a thin bright core in a darker body, brightest where it passes
   // the softbox, so it reads as metal and not a glowing line.
   float wd = abs(depth0);
-  float glint = exp(-pow((p.x - hc.x) * 0.8, 2.0));
+  float glint = exp(-sq((p.x - hc.x) * 0.8));
   float body = 1.0 - smoothstep(0.011 - px, 0.011 + px, wd);
   float core = 1.0 - smoothstep(0.0042 - px, 0.0042 + px, abs(depth0 - 0.003));
   vec3 col = paletteRamp(0.5) * body * (0.05 + u_energy * 0.1)

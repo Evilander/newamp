@@ -47,7 +47,7 @@ vec4 scene(vec2 uv, vec2 p) {
     float core = exp(-dx * dx / (thickness * thickness));
 
     // Vertical falloff: curtains hang from the top, taper down.
-    float vfade = smoothstep(-0.4, 0.95, p.y) * smoothstep(1.2, -0.1, p.y);
+    float vfade = smoothstep(-0.4, 0.95, p.y) * (1.0 - smoothstep(-0.1, 1.2, p.y));
 
     // Filament detail along the curtain edge.
     float filam = fbm(vec2(dx * 22.0, p.y * 9.0 + warp * 2.0));
@@ -74,7 +74,7 @@ vec4 scene(vec2 uv, vec2 p) {
   col += u_light * starLit * 0.6;
 
   // Faint horizon glow tied to bass — anchors the curtains.
-  float horizon = smoothstep(0.35, -0.7, p.y) * (0.04 + lows * 0.18);
+  float horizon = (1.0 - smoothstep(-0.7, 0.35, p.y)) * (0.04 + lows * 0.18);
   col += paletteRamp(0.55) * horizon;
 
   col *= sky * 0.6 + 0.4;

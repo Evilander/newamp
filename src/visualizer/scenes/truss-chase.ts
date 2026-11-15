@@ -107,7 +107,7 @@ vec3 tcRow(vec2 p, int row, float y, float off, float w0, float rate, float len,
     // The head: a disc with a short halo.
     vec2 d = p - o;
     float r2 = dot(d, d);
-    col += head * (smoothstep(0.022, 0.006, sqrt(r2)) * (0.05 + lv) + exp(-r2 / 0.0012) * lv * 0.35);
+    col += head * ((1.0 - smoothstep(0.006, 0.022, sqrt(r2))) * (0.05 + lv) + exp(-r2 / 0.0012) * lv * 0.35);
   }
   return col;
 }
@@ -120,9 +120,9 @@ float tcBar(vec2 p, float y, float px) {
   float cw = max(0.0045, 1.2 * px);
   float bw = max(0.004, 1.2 * px);
   float cy = y + 0.032;
-  float chords = smoothstep(cw, 0.0, abs(p.y - (cy + 0.025))) + smoothstep(cw, 0.0, abs(p.y - (cy - 0.025)));
+  float chords = (1.0 - smoothstep(0.0, cw, abs(p.y - (cy + 0.025)))) + (1.0 - smoothstep(0.0, cw, abs(p.y - (cy - 0.025))));
   float t = abs(fract(p.x / (TC_PITCH * 0.5)) * 2.0 - 1.0);
-  float brace = smoothstep(bw, 0.0, abs(p.y - (cy - 0.025 + 0.05 * t))) * step(abs(p.y - cy), 0.027);
+  float brace = (1.0 - smoothstep(0.0, bw, abs(p.y - (cy - 0.025 + 0.05 * t)))) * step(abs(p.y - cy), 0.027);
   return chords + brace * 0.7;
 }
 

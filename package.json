@@ -184,7 +184,7 @@
     "test:eviland-palette-ramp": "node scripts/eviland-palette-ramp-test.mjs",
     "test:eviland-scored-scenes": "node scripts/eviland-scored-scenes-test.mjs",
     "test:exclusive-output-resilience": "node scripts/exclusive-output-resilience-test.mjs",
-    "test:frame-bus-operator-carry": "node scripts/frame-bus-operator-carry-test.mjs",
+    "test:eviland-cymatic-kick": "electron scripts/eviland-cymatic-kick-test.mjs",
     "test:library-async": "npm run build:electron && node scripts/library-async-test.mjs",
     "test:library-removal-race": "node scripts/library-removal-race-test.mjs",
     "test:library-storage-errors": "npm run build:electron && node scripts/library-storage-errors-test.mjs",

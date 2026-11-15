@@ -75,7 +75,8 @@ export interface SceneTarget {
   /**
    * Scales the per-band stereo pan scenes read through bandPan(), 0..1.5
    * (default 1): the host's stereo-spread dial, so a look that narrows the
-   * image narrows the scenes with it.
+   * image narrows the scenes that place things by bandPan(). u_pan and u_width
+   * are the mix as it is, and are not scaled.
    */
   stereoSpread?: number;
 }
@@ -126,6 +127,7 @@ uniform float u_snarePulse;
 uniform float u_hatPulse;
 uniform float u_vocalPulse;
 uniform float u_kickCount;  // kicks counted so far, at most ~3 per second (a safe re-roll clock)
+uniform float u_kickAge;    // seconds since u_kickCount last went up (KICK_AGE_MAX_SECONDS before the first kick and after a long gap)
 uniform float u_centroid;   // brightness 0..1
 uniform float u_flatness;   // 0 tonal .. 1 noisy
 uniform float u_crest;      // peakiness 0..1
@@ -169,6 +171,8 @@ float fbm(vec2 p) {
   return v;
 }
 mat2 rot2(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+// x * x. pow(x, 2.0) is undefined for a negative x, so squares go through here.
+float sq(float x) { return x * x; }
 vec3 hsv2rgb(vec3 c) {
   vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
   return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
@@ -239,7 +243,7 @@ void main() {
 const UNIFORM_NAMES = [
   'u_res', 'u_time', 'u_globalTime', 'u_phase', 'u_energyTime', 'u_panTime', 'u_bandTime', 'u_contrast', 'u_dt', 'u_seed', 'u_fade', 'u_occlusion',
   'u_energy', 'u_kick', 'u_bass', 'u_snare', 'u_hat', 'u_vocal',
-  'u_kickPulse', 'u_snarePulse', 'u_hatPulse', 'u_vocalPulse', 'u_kickCount',
+  'u_kickPulse', 'u_snarePulse', 'u_hatPulse', 'u_vocalPulse', 'u_kickCount', 'u_kickAge',
   'u_centroid', 'u_flatness', 'u_crest', 'u_beatPhase', 'u_beatConf',
   'u_novelty', 'u_pan', 'u_width', 'u_bands', 'u_bandPan',
   'u_accent', 'u_accent2', 'u_light', 'u_dark', 'u_bg', 'u_palRamp', 'u_palRamp2',
@@ -275,6 +279,13 @@ const DEFAULT_OCCLUSION = 0.35;
 // The gap sits a little under a third of a second: kicks 343 ms apart (175 BPM)
 // reach the overlay 333 or 350 ms apart at 60 fps, and every one of them counts.
 const KICK_COUNT_MIN_GAP_MS = 320;
+// u_kickAge is the time since that count last went up. With the count it lets a
+// stateless shader keep a history of kicks: event n is floor(u_kickCount) - n,
+// everything about it is hashed from that number, and only the newest is still
+// arriving. A scene that eases the newest in over less than the gap above, and
+// the oldest out over the same time, never steps when the count moves. The age
+// stops here, which keeps it exact in a float32 and well past any easing.
+const KICK_AGE_MAX_SECONDS = 600;
 
 // The clocks here are doubles and keep counting; the shader receives float32,
 // whose spacing grows with the value: past 9 hours u_globalTime moves in steps
@@ -692,6 +703,7 @@ void main() { fragColor = u_color; }
     if (u.u_hatPulse) gl!.uniform1f(u.u_hatPulse, pulses.hat);
     if (u.u_vocalPulse) gl!.uniform1f(u.u_vocalPulse, pulses.vocal);
     if (u.u_kickCount) gl!.uniform1f(u.u_kickCount, kickCount);
+    if (u.u_kickAge) gl!.uniform1f(u.u_kickAge, Math.min(KICK_AGE_MAX_SECONDS, (globalTimeMs - lastKickCountAtMs) / 1000));
     if (u.u_centroid) gl!.uniform1f(u.u_centroid, frame.centroid);
     if (u.u_flatness) gl!.uniform1f(u.u_flatness, frame.flatness);
     if (u.u_crest) gl!.uniform1f(u.u_crest, frame.crest);

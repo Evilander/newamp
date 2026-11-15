@@ -28,7 +28,7 @@ vec4 scene(vec2 uv, vec2 p) {
   // --- Sun: vertical disk sliced into horizontal band stripes -------------
   vec2 sp = vec2(p.x - sunX, p.y - sunY);
   float sr = length(sp);
-  float sunDisk = smoothstep(sunR, sunR - 0.005, sr);
+  float sunDisk = 1.0 - smoothstep(sunR - 0.005, sunR, sr);
   // Map y within sun to one of 24 stripes (top → band 23, bottom → band 0).
   float stripeT = clamp((sp.y / sunR) * 0.5 + 0.5, 0.0, 0.999);
   int bandIdx = int(stripeT * 24.0);
@@ -60,8 +60,8 @@ vec4 scene(vec2 uv, vec2 p) {
     float lineW = (0.04 + u_bass * 0.15) * z;
     float gx = abs(fract(worldX) - 0.5);
     float gy = abs(fract(worldY) - 0.5);
-    float lx = smoothstep(lineW, 0.0, gx);
-    float ly = smoothstep(lineW, 0.0, gy);
+    float lx = 1.0 - smoothstep(0.0, lineW, gx);
+    float ly = 1.0 - smoothstep(0.0, lineW, gy);
     float grid = max(lx, ly);
     // Fog: grid fades into horizon.
     float fog = smoothstep(0.0, 0.55, z * 1.8);

@@ -25,13 +25,13 @@ vec4 scene(vec2 uv, vec2 p) {
   float breath = 0.30 + u_bass * 0.10 + sin(u_globalTime * 0.9) * 0.02;
   vec2 squash = vec2(1.0, 1.0 - u_kickPulse * 0.18 - u_bass * 0.08);
   float rBell = length(q * squash / breath);
-  float bellMask = smoothstep(1.0, 0.72, rBell) * step(q.y, 0.35);
+  float bellMask = (1.0 - smoothstep(0.72, 1.0, rBell)) * step(q.y, 0.35);
 
   // Internal glow: hot at the crown, translucent at the rim.
   vec3 glow = paletteRamp(0.55 + u_centroid * 0.25);
   col += glow * bellMask * (0.20 + u_energy * 0.30) * (1.2 - rBell);
   // Rim light so the bell reads against the dark.
-  float rim = smoothstep(0.82, 1.0, rBell) * smoothstep(1.08, 0.98, rBell);
+  float rim = smoothstep(0.82, 1.0, rBell) * (1.0 - smoothstep(0.98, 1.08, rBell));
   col += paletteRamp(0.8) * rim * (0.25 + u_vocal * 0.5) * step(q.y, 0.3);
 
   // Tentacles: 7 sine strands falling from the bell, phase-offset, glowing
@@ -42,10 +42,10 @@ vec4 scene(vec2 uv, vec2 p) {
     float x0 = (fi / 6.0 - 0.5) * 0.42 * breath * 2.0;
     float sway = sin(q.y * (3.0 + rnd * 2.0) + u_globalTime * (0.8 + rnd * 0.6) + rnd * TAU) * 0.10;
     float d = abs(q.x - x0 - sway * (0.2 - q.y));
-    float below = smoothstep(0.05, -0.02, q.y) * smoothstep(-1.35, -0.6, q.y);
+    float below = (1.0 - smoothstep(-0.02, 0.05, q.y)) * smoothstep(-1.35, -0.6, q.y);
     float strand = exp(-d * d * 2600.0) * below;
     // Ripple: a bright packet moving down the strand on vocal pulses.
-    float packet = exp(-pow(mod(-q.y * 1.4 - u_globalTime * 0.9 + rnd * 3.0, 3.0) - 0.4, 2.0) * 22.0);
+    float packet = exp(-sq(mod(-q.y * 1.4 - u_globalTime * 0.9 + rnd * 3.0, 3.0) - 0.4) * 22.0);
     col += paletteRamp(0.4 + rnd * 0.3) * strand * (0.10 + packet * (0.15 + u_vocalPulse * 0.8));
   }
 

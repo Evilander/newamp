@@ -136,6 +136,107 @@ function run(gov, t0, seconds, costMs, stepMs = 33.3) {
     `costMs=${s.costMs}`);
 }
 
+// Frames the way the render loops produce them: each asks the governor for its
+// interval (as the cadence gate does), then reports a frame `arrivalMs(level,
+// now)` after the last. Returns the timestamp after the run.
+function drive(gov, t0, seconds, baseMs, costMs, arrivalMs) {
+  let t = t0;
+  while (t < t0 + seconds * 1000) {
+    gov.intervalMs(baseMs);
+    t += arrivalMs(gov.snapshot().level, t);
+    gov.endFrame(t, costMs);
+  }
+  return t;
+}
+
+// A GPU-bound machine: full quality lands a frame every 55 ms for a CPU cost of
+// 2 ms, one step down the frames arrive on time. The cost never exceeds the
+// budget, so only the lateness signal can see it. `calmUntil` is a stretch
+// where frames arrive on time at every level. Returns when each step down and
+// each step up happened, in ms.
+function gpuBound(gov, t0, seconds, calmUntil = () => -1) {
+  const downs = [];
+  const ups = [];
+  let t = t0;
+  let prev = gov.snapshot().level;
+  while (t < t0 + seconds * 1000) {
+    t = drive(gov, t, 0.5, 1000 / 30, 2, (level, now) => (level > 0 || now < calmUntil() ? 33.4 : 55));
+    const level = gov.snapshot().level;
+    if (level > prev) downs.push(t);
+    if (level < prev) ups.push(t);
+    prev = level;
+  }
+  return { downs, ups, end: t };
+}
+
+// ── 9. A display slower than the cadence asked for is not late ─────────────
+{
+  // A 30 Hz output (a remote session, a TV) shows a frame every 33.3 ms
+  // however short an interval the loop asks for. The GPU is idle: 1 ms frames.
+  for (const baseMs of [1000 / 60, 1000 / 45]) {
+    const gov = createGovernor({ costBudgetMs: 8, refreshMs: () => 33.3 });
+    drive(gov, 0, 60, baseMs, 1, () => 33.3);
+    const s = gov.snapshot();
+    check(`a 30 Hz display is not late for asking ${baseMs.toFixed(1)} ms`, s.level === 0 && s.steps === 0,
+      `level=${s.level} lateness=${s.lateness.toFixed(2)}`);
+  }
+  // The floor does not hide a loop that cannot keep up with its display.
+  const on60 = createGovernor({ costBudgetMs: 8, refreshMs: () => 1000 / 60 });
+  drive(on60, 0, 30, 1000 / 60, 2, () => 33.3);
+  check('a 60 Hz loop that lands every other refresh is still late', on60.snapshot().level > 0, `level=${on60.snapshot().level}`);
+  const on30 = createGovernor({ costBudgetMs: 8, refreshMs: () => 33.3 });
+  drive(on30, 0, 30, 1000 / 45, 2, () => 55);
+  check('a 30 Hz display with frames 55 ms apart is still late', on30.snapshot().level > 0, `level=${on30.snapshot().level}`);
+}
+
+// ── 10. A GPU-bound machine settles instead of cycling ─────────────────────
+{
+  const gov = createGovernor({ costBudgetMs: 8, refreshMs: () => 1000 / 60 });
+  const { downs } = gpuBound(gov, 0, 30 * 60);
+  const gaps = downs.slice(1).map((at, i) => at - downs[i]);
+  check('a GPU-bound machine steps down at once', downs.length > 0 && downs[0] < 10_000, `first step at ${(downs[0] / 1000).toFixed(0)} s`);
+  check('each relapse waits longer than the last', gaps.length >= 3 && gaps.every((gap, i) => i === 0 || gap >= gaps[i - 1] * 0.95) && gaps[gaps.length - 1] > gaps[0] * 3,
+    `gaps ${gaps.map((gap) => (gap / 1000).toFixed(0)).join(', ')} s`);
+  check('so half an hour holds a handful of cycles, not one a minute', downs.length <= 8, `${downs.length} step downs in 30 min`);
+}
+
+// ── 11. The hold is only lengthened by a relapse ───────────────────────────
+{
+  // How long the way up stayed shut after the second step down: `calmSeconds`
+  // of on-time frames between the climb and the next time the machine is late.
+  const secondHold = (calmSeconds) => {
+    const gov = createGovernor({ costBudgetMs: 8, refreshMs: () => 1000 / 60 });
+    let calmUntil = -1;
+    let t = 0;
+    let downAt = -1;
+    const holds = [];
+    while (holds.length < 2 && t < 20 * 60_000) {
+      const block = gpuBound(gov, t, 0.5, () => calmUntil);
+      t = block.end;
+      if (block.downs.length) downAt = block.downs[0];
+      if (block.ups.length) {
+        holds.push(block.ups[0] - downAt);
+        calmUntil = block.ups[0] + calmSeconds * 1000;
+      }
+    }
+    return holds;
+  };
+  const relapse = secondHold(20);
+  const fresh = secondHold(300);
+  check('late again soon after the climb doubles the hold', relapse.length === 2 && relapse[1] > relapse[0] * 1.8,
+    `holds ${relapse.map((h) => (h / 1000).toFixed(0)).join(', ')} s`);
+  check('late again long after the climb is a new episode', fresh.length === 2 && fresh[1] < fresh[0] * 1.2,
+    `holds ${fresh.map((h) => (h / 1000).toFixed(0)).join(', ')} s`);
+
+  // A reset forgets a hold that had grown.
+  const gov = createGovernor({ costBudgetMs: 8, refreshMs: () => 1000 / 60 });
+  const worn = gpuBound(gov, 0, 15 * 60);
+  gov.reset();
+  const after = gpuBound(gov, worn.end, 3 * 60);
+  const held = after.ups.length ? after.ups[0] - after.downs[0] : Infinity;
+  check('reset gives the first step its minute back', held < 75_000, `held ${(held / 1000).toFixed(0)} s after ${worn.downs.length} step downs`);
+}
+
 const verdict = failures === 0 ? '[governor-test] ALL PASS' : `[governor-test] ${failures} FAILURE(S)`;
 console.log(verdict);
 writeFileSync(RESULT, verdict + '\n', { flag: 'a' });

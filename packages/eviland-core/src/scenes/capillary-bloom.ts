@@ -96,14 +96,14 @@ vec4 scene(vec2 uv, vec2 p) {
   float d = v.x, rad = v.y, path = v.z, depth = v.w;
   float aa = 1.5 / min(u_res.x, u_res.y);
   // The heartbeat wave distends each vessel as it passes.
-  float wave = beat * exp(-pow((path - front) / 0.16, 2.0));
+  float wave = beat * exp(-sq((path - front) / 0.16));
   rad *= 1.0 + wave * 0.4;
   // Wall edges bright, lumen dim, a faint halo; capillaries thinner than a
   // couple of pixels collapse to one glowing thread.
   float wallW = max(rad * 0.28, aa);
-  float wall = exp(-pow((d - rad) / wallW, 2.0));
-  float lumen = smoothstep(rad + aa, max(rad - aa, 0.0), d);
-  float thread = smoothstep(aa * 2.0, 0.0, d) * (1.0 - smoothstep(aa * 1.5, aa * 3.0, rad));
+  float wall = exp(-sq((d - rad) / wallW));
+  float lumen = 1.0 - smoothstep(max(rad - aa, 0.0), rad + aa, d);
+  float thread = (1.0 - smoothstep(0.0, aa * 2.0, d)) * (1.0 - smoothstep(aa * 1.5, aa * 3.0, rad));
   float halo = exp(-max(d - rad, 0.0) / (0.012 + rad));
 
   // Blood cells streaming outward, spaced by the vessel's radius (so they
@@ -128,7 +128,7 @@ vec4 scene(vec2 uv, vec2 p) {
   // The hilum: a disc that throbs on the kick.
   float hr = length(p - hilum);
   float hR = 0.09 * (1.0 + u_kickPulse * 0.25 + u_bass * 0.1);
-  col += paletteRamp(0.8) * exp(-pow((hr - hR) / 0.012, 2.0)) * (0.3 + 0.5 * life + u_kickPulse * 0.6);
+  col += paletteRamp(0.8) * exp(-sq((hr - hR) / 0.012)) * (0.3 + 0.5 * life + u_kickPulse * 0.6);
   col += paletteRamp(0.55) * smoothstep(hR, hR * 0.3, hr) * (0.1 + 0.25 * life + u_kickPulse * 0.5);
 
   float alpha = clamp(dot(col, vec3(0.55)), 0.0, 0.8);

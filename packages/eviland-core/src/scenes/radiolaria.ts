@@ -56,16 +56,16 @@ vec3 rlOrganism(vec2 q, float R, float spin, float h, float kind, float life) {
     int bi = int(mod(ri * 3.0 + h * 24.0, 24.0));
     float band = u_bands[bi];
     float rho = 0.27 + band * 0.14 * life;
-    float hole = smoothstep(rho + 0.06, rho - 0.06, pd);
-    float poreRim = exp(-pow((pd - rho) / 0.07, 2.0));
+    float hole = 1.0 - smoothstep(rho - 0.06, rho + 0.06, pd);
+    float poreRim = exp(-sq((pd - rho) / 0.07));
     float hueRing = 0.2 + 0.6 * rlTri(ri * 0.13 + u_bandTime[bi] * 0.04 + h);
 
     // Glass reads brightest where the line of sight crosses the most of it:
     // at the limb of a sphere, at pore rims, in the diatom's ribs and girdle.
     float z = sqrt(max(1.0 - rr * rr, 0.0));
     float limbL = diatom ? 0.25 : pow(1.0 - z, 1.5);
-    float lattice = diatom ? smoothstep(0.88, 0.84, rr) * smoothstep(0.1, 0.18, rr) : smoothstep(1.0, 0.86, rr);
-    float shell = smoothstep(1.0, 0.985, rr);
+    float lattice = diatom ? (1.0 - smoothstep(0.84, 0.88, rr)) * smoothstep(0.1, 0.18, rr) : (1.0 - smoothstep(0.86, 1.0, rr));
+    float shell = 1.0 - smoothstep(0.985, 1.0, rr);
     vec3 glassCol = paletteRamp(0.72 + 0.28 * limbL);
     col += glassCol * ((1.0 - hole) * (0.07 + 0.3 * limbL) + poreRim * 0.35) * lattice * (0.45 + 0.55 * life);
     col += paletteRamp(hueRing) * hole * lattice * (0.03 + band * (0.15 + 0.85 * life));
@@ -73,19 +73,19 @@ vec3 rlOrganism(vec2 q, float R, float spin, float h, float kind, float life) {
 
     if (diatom) {
       float ribD = abs(fract(phi * 16.0 / RL_TAU + 0.5) - 0.5) * RL_TAU / 16.0 * rr;
-      col += glassCol * smoothstep(0.012 + aa, 0.012 - aa, ribD) * step(0.18, rr) * lattice * (0.2 + 0.35 * life);
-      col += glassCol * exp(-pow((rr - 0.14) / 0.02, 2.0)) * (0.3 + 0.4 * life);
+      col += glassCol * (1.0 - smoothstep(0.012 - aa, 0.012 + aa, ribD)) * step(0.18, rr) * lattice * (0.2 + 0.35 * life);
+      col += glassCol * exp(-sq((rr - 0.14) / 0.02)) * (0.3 + 0.4 * life);
     } else {
       // The inner shell, turning the other way, seen only through the pores:
       // the two lattices slide past each other like a moire.
       float ri2 = rr / 0.55;
       vec2 inner = rlPores(min(ri2, 1.0), ang - spin * 1.7 + h * 3.0, false, 5.0);
-      float innerRim = exp(-pow((inner.x - 0.3) / 0.09, 2.0)) * smoothstep(1.0, 0.9, ri2);
+      float innerRim = exp(-sq((inner.x - 0.3) / 0.09)) * (1.0 - smoothstep(0.9, 1.0, ri2));
       col += paletteRamp(0.55 + 0.3 * hueRing) * innerRim * hole * lattice * (0.12 + 0.45 * life);
       // The central capsule glows through both.
       col += paletteRamp(0.5) * exp(-rr * rr * 7.0) * hole * lattice * (0.05 + 0.3 * life);
     }
-    col += paletteRamp(0.95) * exp(-pow((rr - 1.0) / 0.022, 2.0)) * (0.25 + 0.5 * life);
+    col += paletteRamp(0.95) * exp(-sq((rr - 1.0) / 0.022)) * (0.25 + 0.5 * life);
   }
 
   // Spines: radial, tapered, noded along their length, of scattered lengths
@@ -99,9 +99,9 @@ vec3 rlOrganism(vec2 q, float R, float spin, float h, float kind, float life) {
   float t = clamp((rr - 0.95) / (L - 0.95), 0.0, 1.0);
   float nodes = pow(0.5 + 0.5 * cos(rr * RL_TAU * 5.0), 12.0) * (1.0 - t);
   float wS = mix(0.032, 0.004, t) * (1.0 + nodes * 0.8);
-  float spine = smoothstep(wS + aa, max(wS - aa, 0.0), sd) * step(0.95, rr) * step(rr, L);
-  float run = exp(-pow((fract(rr * 0.9 - u_phase * 1.2 + sh) - 0.5) * 7.0, 2.0));
-  float tip = exp(-(pow(rr - L, 2.0) + sd * sd) * 1800.0);
+  float spine = (1.0 - smoothstep(max(wS - aa, 0.0), wS + aa, sd)) * step(0.95, rr) * step(rr, L);
+  float run = exp(-sq((fract(rr * 0.9 - u_phase * 1.2 + sh) - 0.5) * 7.0));
+  float tip = exp(-(sq(rr - L) + sd * sd) * 1800.0);
   col += paletteRamp(0.85) * spine * (0.2 + 0.35 * life + run * (0.1 + u_hat * 0.8));
   col += paletteRamp(0.6) * exp(-sd / (wS * 3.0 + 0.01)) * step(0.95, rr) * step(rr, L) * (0.03 + 0.12 * life);
   col += u_light * tip * (0.1 + 0.3 * life + u_hatPulse * 1.2);

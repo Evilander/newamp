@@ -62,7 +62,7 @@ vec4 scene(vec2 uv, vec2 p) {
       float dAB = length(a - b);
       if (dAB > 0.55) continue;
       float dline = segDist(p, a, b);
-      float line = smoothstep(0.0035, 0.0, dline);
+      float line = 1.0 - smoothstep(0.0, 0.0035, dline);
       float w = (1.0 - dAB / 0.55);
       float lvl = (bright[i] + bright[j]) * 0.5;
       col += paletteRamp(0.6) * line * w * lvl * beatWin * 0.4;
@@ -78,7 +78,7 @@ vec4 scene(vec2 uv, vec2 p) {
   vec2 sp = p - shootPos;
   float along = dot(sp, shootDir);
   float across = length(sp - shootDir * along);
-  float tail = smoothstep(0.0, -0.25, along) * step(along, 0.0);
+  float tail = (1.0 - smoothstep(-0.25, 0.0, along)) * step(along, 0.0);
   float shootHead = exp(-dot(sp, sp) * 200.0);
   float shootGlow = (shootHead + tail * exp(-across * across * 1200.0) * 0.7) *
                     u_snarePulse * (0.6 + u_energy * 0.6);

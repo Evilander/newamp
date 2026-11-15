@@ -886,7 +886,9 @@ export function FullscreenVisualizer(): JSX.Element {
     // The compositor keeps the size and the field canvas it was built from, so
     // after the stage resizes or the iframe reloads (a lost WebGL context
     // rebuilds it) the ring would keep encoding a frozen layer. Start over
-    // when it says so. Never under a clip being saved, and never while a
+    // when it says so; the buffered seconds go with it, because the encoder
+    // is set up for one frame size, so a clip saved just after a resize is
+    // short or empty. Never under a clip being saved, and never while a
     // recording is running: that path stays at its fixed size, and the effect
     // has already disarmed the ring for it.
     const staleTimer = window.setInterval(() => {

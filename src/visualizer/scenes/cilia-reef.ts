@@ -27,7 +27,7 @@ float crPhase(float x, float s, float row) {
 // Kick ripple strength at x: a ring running outward from the stereo source.
 float crRipple(float x, float front, float kick) {
   float dx = x - u_pan * 0.9;
-  return kick * exp(-pow((abs(dx) - front) / 0.3, 2.0)) * dx / (abs(dx) + 0.15);
+  return kick * exp(-sq((abs(dx) - front) / 0.3)) * dx / (abs(dx) + 0.15);
 }
 
 // Sideways displacement (in shaft lengths) of a cilium rooted at x, at
@@ -81,7 +81,7 @@ vec4 scene(vec2 uv, vec2 p) {
       float sk = hgt / lk;
       float xc = xr + crBend(xr, clamp(sk, 0.0, 1.0), row, amp, front, kick) * lk;
       float w = wid * (1.0 - 0.55 * clamp(sk, 0.0, 1.0));
-      float core = smoothstep(w + aa, max(w - aa, 0.0), abs(p.x - xc)) * step(0.0, sk) * step(sk, 1.0);
+      float core = (1.0 - smoothstep(max(w - aa, 0.0), w + aa, abs(p.x - xc))) * step(0.0, sk) * step(sk, 1.0);
       float xTip = xr + crBend(xr, 1.0, row, amp, front, kick) * lk;
       float tipD = length(vec2(p.x - xTip, hgt - lk));
       float tip = exp(-tipD * tipD / (wid * wid * 5.0));
@@ -91,7 +91,7 @@ vec4 scene(vec2 uv, vec2 p) {
       float rip = abs(crRipple(xr, front, kick));
       int bi = int(mod(k + row * 5.0, 24.0));
       float hueT = 0.15 + 0.5 * clamp(sk, 0.0, 1.0) + 0.3 * crTri(u_bandTime[bi] * 0.04 + xr * 0.12 + row * 0.2);
-      float beads = u_hatPulse * exp(-pow((fract(sk * 3.0 - u_phase * 1.5) - 0.5) * 8.0, 2.0)) * step(0.3, sk);
+      float beads = u_hatPulse * exp(-sq((fract(sk * 3.0 - u_phase * 1.5) - 0.5) * 8.0)) * step(0.3, sk);
 
       vec3 c = paletteRamp(hueT) * core * (0.16 + 0.5 * life + rip * 1.1) * stroke;
       c += u_light * core * beads * 0.8;

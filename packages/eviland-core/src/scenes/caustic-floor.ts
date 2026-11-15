@@ -61,7 +61,9 @@ float cfNet(vec2 q, float swell, float sharp, float seedOff, float along) {
   // low resolution, where the core alone would alias away.
   float line = pow(clamp(1.0 - e.x * sharp, 0.0, 1.0), 6.0)
              + (0.04 + 0.3 * u_energy) * pow(clamp(1.0 - e.x * sharp * 0.45, 0.0, 1.0), 3.0);
-  return line * (0.02 + 0.08 * u_energy + 1.6 * smoothstep(0.25, 0.9, e.y) * (0.45 + along));
+  // Every wall carries some light, so the web closes into a net; the keyed
+  // walls stand out of it as the folds where the light has piled up.
+  return line * (0.02 + 0.3 * u_energy + 1.45 * smoothstep(0.15, 0.9, e.y) * (0.45 + along));
 }
 
 vec4 scene(vec2 uv, vec2 p) {
@@ -128,7 +130,7 @@ vec4 scene(vec2 uv, vec2 p) {
   // A column of light stands where the voice is, at the pan position, flickering
   // with the water above it. It runs through the second accent so the voice
   // stands apart from the web, which is the first.
-  float shaft = exp(-pow((p.x - u_pan * 0.7) * 1.8, 2.0)) * smoothstep(-1.2, 0.8, p.y) * u_vocal * 0.25;
+  float shaft = exp(-sq((p.x - u_pan * 0.7) * 1.8)) * smoothstep(-1.2, 0.8, p.y) * u_vocal * 0.25;
   col += paletteRamp2(0.6) * shaft * (0.6 + fbm(p * 2.0 + vec2(0.0, u_phase * 0.2)) * 0.8);
 
   // A noisy sound clouds the water and dims the net.

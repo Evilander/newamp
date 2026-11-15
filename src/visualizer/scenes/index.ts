@@ -8,7 +8,8 @@
 //    uv: 0..1 screen coords. p: centered, aspect-corrected (-1..1 short axis).
 //  - The shader body may ONLY declare functions/constants — the runtime
 //    provides the uniforms + helpers (see PRELUDE in scene-overlay.ts):
-//    hash11/hash21/hash22, vnoise, fbm, rot2, hsv2rgb, paletteRamp, paletteRamp2,
+//    hash11/hash21/hash22, vnoise, fbm, rot2, sq (x * x: pow(x, 2.0) is
+//    undefined for a negative x), hsv2rgb, paletteRamp, paletteRamp2,
 //    bandAvg, bandClock (bandAvg's twin over the band integrals), bandPan(lo, hi)
 //    (the mean stereo position of a band range, -1 left .. +1 right),
 //    u_time/u_globalTime/u_dt/u_seed/u_fade, u_phase (this scene's integrated
@@ -17,7 +18,9 @@
 //    u_hat/u_vocal (envelopes), u_kickPulse/u_snarePulse/u_hatPulse/
 //    u_vocalPulse (decaying onset impulses), u_kickCount (kicks so far, at
 //    most ~3 per second: re-roll a pattern on floor(u_kickCount), never on a
-//    fixed timer), u_centroid, u_flatness, u_crest,
+//    fixed timer), u_kickAge (seconds since that count last went up, for
+//    easing the newest kick in: see KICK_AGE_MAX_SECONDS in scene-overlay.ts),
+//    u_centroid, u_flatness, u_crest,
 //    u_beatPhase, u_beatConf, u_novelty, u_pan, u_width, u_bands[24],
 //    u_bandPan[24] (where each band sits in the stereo image),
 //    u_accent/u_accent2/u_light/u_dark/u_bg, u_res.
@@ -126,6 +129,11 @@ import { trussChase } from './truss-chase';
 import { goboHeads } from './gobo-heads';
 import { prismDispersal } from './prism-dispersal';
 import { iceHalo } from './ice-halo';
+import { marbling } from './marbling';
+import { harmonicStrings } from './harmonic-strings';
+import { pendulumWave } from './pendulum-wave';
+import { ferrofluid } from './ferrofluid';
+import { roseWindow } from './rose-window';
 
 export const SCENES: SceneDef[] = [
   volumeGarden,
@@ -181,4 +189,9 @@ export const SCENES: SceneDef[] = [
   goboHeads,
   prismDispersal,
   iceHalo,
+  marbling,
+  harmonicStrings,
+  pendulumWave,
+  ferrofluid,
+  roseWindow,
 ];

@@ -104,10 +104,10 @@ vec3 pdFan(vec2 p, vec2 O, float aMean, float spread, float side) {
   float rl = length(rel);
   float bf = pdBand(rel, aMean, spread);
   vec2 axis = vec2(cos(aMean), sin(aMean));
-  float inFan = smoothstep(0.0, 0.08, dot(rel, axis)) * smoothstep(-0.4, 0.4, bf) * smoothstep(24.4, 23.6, bf);
+  float inFan = smoothstep(0.0, 0.08, dot(rel, axis)) * smoothstep(-0.4, 0.4, bf) * (1.0 - smoothstep(23.6, 24.4, bf));
   // Smooth reading: interpolate between band centres. Spiky reading: the
   // band's own level, narrowed to a ray with a dark gap to its neighbours.
-  float lvStep = u_bands[int(clamp(floor(bf), 0.0, 23.0))] * smoothstep(0.5, 0.2, abs(fract(bf) - 0.5));
+  float lvStep = u_bands[int(clamp(floor(bf), 0.0, 23.0))] * (1.0 - smoothstep(0.2, 0.5, abs(fract(bf) - 0.5)));
   float lvSmooth = pdLevel(bf);
   // Close to the crystal the rays are narrower than a pixel and would alias
   // into moire; there they merge into the smooth reading, which is also how the
@@ -135,7 +135,7 @@ vec3 pdPool(vec2 p, vec2 O, float aMean, float spread, float side) {
     vec2 onFloor = vec2(p.x + float(k) * 0.13, PD_FLOOR);
     vec2 rel = onFloor - O;
     float bf = pdBand(rel, aMean, spread);
-    float inside = smoothstep(-0.5, 0.8, bf) * smoothstep(24.5, 23.2, bf);
+    float inside = smoothstep(-0.5, 0.8, bf) * (1.0 - smoothstep(23.2, 24.5, bf));
     acc += pdRayColor(bf, side) * (0.02 * (0.3 + u_energy) + pow(pdLevel(bf), 0.9) * 0.9) * inside * (k == 0 ? 0.5 : 0.25);
   }
   // A light spreads over more floor the farther it travelled, so the pool
@@ -228,7 +228,7 @@ vec4 scene(vec2 uv, vec2 p) {
   float difR = max(dot(nf, lR), 0.0);
   float spL = pow(max(dot(nf, hL), 0.0), 18.0);
   float spR = pow(max(dot(nf, hR), 0.0), 18.0);
-  float rim = pow(1.0 - clamp(nf.z, 0.0, 1.0), 2.0);
+  float rim = sq(1.0 - clamp(nf.z, 0.0, 1.0));
   // A facet takes the hue of the beam that lights it: faces turned to the left
   // channel's beam lean on the ramp, those turned to the right's on the second
   // accent, and the colour slides along the facet from its base to its point.
@@ -273,8 +273,8 @@ vec4 scene(vec2 uv, vec2 p) {
   float alongR = dot(p - sR, dR);
   float focusL = 0.7 + 0.3 * (1.0 - clamp(alongL / 2.4, 0.0, 1.0));
   float focusR = 0.7 + 0.3 * (1.0 - clamp(alongR / 2.4, 0.0, 1.0));
-  float runL = smoothstep(0.0, 0.3, alongL) * smoothstep(2.4, 2.1, alongL);
-  float runR = smoothstep(0.0, 0.3, alongR) * smoothstep(2.4, 2.1, alongR);
+  float runL = smoothstep(0.0, 0.3, alongL) * (1.0 - smoothstep(2.1, 2.4, alongL));
+  float runR = smoothstep(0.0, 0.3, alongR) * (1.0 - smoothstep(2.1, 2.4, alongR));
   float outsideGlass = 1.0 - inside;
   vec3 beamL = tintL * (lineGlow(p, sL, dL, wbase * focusL) + 0.18 * lineGlow(p, sL, dL, wbase * focusL * 5.0)) * runL;
   vec3 beamR = tintR * (lineGlow(p, sR, dR, wbase * focusR) + 0.18 * lineGlow(p, sR, dR, wbase * focusR * 5.0)) * runR;

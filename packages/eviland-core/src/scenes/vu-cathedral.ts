@@ -30,21 +30,21 @@ vec4 scene(vec2 uv, vec2 p) {
   vec2 dir = vec2(sin(ang), cos(ang));
   float along = clamp(dot(q, dir), 0.0, 0.4);
   float dN = length(q - dir * along);
-  float needleGlow = smoothstep(0.014, 0.0, dN) * step(0.04, along);
+  float needleGlow = (1.0 - smoothstep(0.0, 0.014, dN)) * step(0.04, along);
 
   // Dial arc + tick marks along it.
   float r = length(q);
   float theta = atan(q.x, q.y);
   float onArc = step(abs(theta), 0.92);
-  float arc = smoothstep(0.010, 0.0, abs(r - 0.40)) * onArc;
+  float arc = (1.0 - smoothstep(0.0, 0.010, abs(r - 0.40))) * onArc;
   float tick = smoothstep(0.16, 0.9, abs(fract(theta * 3.5 + 0.5) - 0.5) * 2.0);
-  float ticks = smoothstep(0.028, 0.0, abs(r - 0.40)) * onArc * step(0.86, tick) * 0.8;
+  float ticks = (1.0 - smoothstep(0.0, 0.028, abs(r - 0.40))) * onArc * step(0.86, tick) * 0.8;
 
   // Backlight breathing with bass; peak zone past ~0.78 drive. Both come from
   // the palette: the backlight sits between accent and light, the peak zone
   // is the light stop at full strength.
   vec3 warm = mix(u_accent, u_light, 0.35);
-  float back = smoothstep(0.62, 0.0, r) * (0.035 + u_bass * 0.11 + u_kickPulse * 0.07);
+  float back = (1.0 - smoothstep(0.0, 0.62, r)) * (0.035 + u_bass * 0.11 + u_kickPulse * 0.07);
   float redZone = step(0.55, theta) * arc * (0.25 + step(0.78, drive) * 1.2);
 
   col += warm * back;
@@ -54,7 +54,7 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Faint cell frames so the wall reads as separate units.
   vec2 fr = abs(fract(cellUv) - 0.5);
-  float frame = smoothstep(0.03, 0.0, 0.5 - max(fr.x, fr.y)) * (0.02 + u_energy * 0.04);
+  float frame = (1.0 - smoothstep(0.0, 0.03, 0.5 - max(fr.x, fr.y))) * (0.02 + u_energy * 0.04);
   col += warm * frame;
 
   float alpha = clamp(dot(col, vec3(0.6)), 0.0, 0.58);

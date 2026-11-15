@@ -101,8 +101,8 @@ vec4 scene(vec2 uv, vec2 p) {
   float gain = 0.05 + u_energy * 0.95;
   float reach = 0.35 + 1.6 * u_energy;
   float near = min(rl, rr);
-  float amp = clamp(total * 0.9, 0.0, 1.0) * smoothstep(reach, reach * 0.45, near);
-  float edge = smoothstep(2.1, 1.1, max(rl, rr) * (1.0 - 0.25 * u_energy));
+  float amp = clamp(total * 0.9, 0.0, 1.0) * (1.0 - smoothstep(reach * 0.45, reach, near));
+  float edge = 1.0 - smoothstep(1.1, 2.1, max(rl, rr) * (1.0 - 0.25 * u_energy));
   amp *= edge;
 
   // Each crest takes its colour from the wave that is actually cresting, not
@@ -131,8 +131,8 @@ vec4 scene(vec2 uv, vec2 p) {
   float coreR = exp(-rr * rr * 900.0);
   float haloL = exp(-rl * rl * 60.0);
   float haloR = exp(-rr * rr * 60.0);
-  float ringL = u_kickPulse * exp(-pow((rl - (1.0 - u_kickPulse) * 0.55) * 22.0, 2.0));
-  float ringR = u_hatPulse * exp(-pow((rr - (1.0 - u_hatPulse) * 0.55) * 22.0, 2.0));
+  float ringL = u_kickPulse * exp(-sq((rl - (1.0 - u_kickPulse) * 0.55) * 22.0));
+  float ringR = u_hatPulse * exp(-sq((rr - (1.0 - u_hatPulse) * 0.55) * 22.0));
   // Each source is its own accent with a lens-hot core tinted toward the light.
   col += mix(u_accent, u_light, 0.35) * coreL * (0.25 + u_bass * 1.1)
        + u_accent * (haloL * (0.05 + u_bass * 0.25) + ringL * 0.45);

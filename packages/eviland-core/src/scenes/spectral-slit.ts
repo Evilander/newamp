@@ -18,7 +18,7 @@ export const spectralSlit: SceneDef = {
 vec4 scene(vec2 uv, vec2 p) {
   // Wide enough that two frames of scroll overlap it, so the history is one
   // continuous sheet rather than a row of dashes.
-  float strip = smoothstep(0.014, 0.004, abs(uv.x - 0.83));
+  float strip = 1.0 - smoothstep(0.004, 0.014, abs(uv.x - 0.83));
 
   float cell = uv.y * 24.0;
   int band = int(clamp(floor(cell), 0.0, 23.0));
@@ -26,7 +26,7 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // A faint seam between the bands keeps the layers readable as strata.
   float edge = abs(fract(cell) - 0.5) * 2.0;
-  float body = mix(0.55, 1.0, smoothstep(1.0, 0.8, edge));
+  float body = mix(0.55, 1.0, 1.0 - smoothstep(0.8, 1.0, edge));
 
   // Loud bands climb the palette toward the light; the brightness of the
   // whole sound tilts every cell a little the same way.

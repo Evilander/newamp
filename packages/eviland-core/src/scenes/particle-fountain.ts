@@ -71,7 +71,7 @@ vec4 scene(vec2 uv, vec2 p) {
     col += jetParticle(p, src, v0, gravity * 0.3, life, tt, rnd * 5.7, 0.2 + u_snare * 0.6 + snareSwirl);
   }
 
-  float floorMist = u_energy * smoothstep(-1.0, -1.4, p.y) * 0.12;
+  float floorMist = u_energy * (1.0 - smoothstep(-1.4, -1.0, p.y)) * 0.12;
   col += paletteRamp(0.7) * floorMist;
 
   float alpha = clamp(dot(col, vec3(0.5)), 0.0, 0.78);

@@ -26,7 +26,7 @@ import {
 import { applyWaveformOverride, cloneConfig, stripTransitionMeta, type OperatorConfig } from '../visualizer/eviland-operators';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from '../visualizer/eviland-memory-bridge';
 import { createEngineScoreFeed } from '../visualizer/eviland-score-feed';
-import { extractArtPalette } from '../visualizer/art-palette';
+import { watchArtPalette } from '../visualizer/art-palette';
 import {
   publishActiveBridge,
   acquireBridgeForTrack,
@@ -361,8 +361,8 @@ export function Visualizer({
         sleeveArt = null;
         if (tid == null) return;
         const captured = tid;
-        void extractArtPalette(api.getArtUrl(tid)).then((art) => {
-          if (artTrackId === captured && art) sleeveArt = art;
+        watchArtPalette(api.getArtUrl(tid), () => artTrackId === captured, (art) => {
+          sleeveArt = art;
         });
       };
       // Lineage-aware scene seed. The bare `track-<id>` key applies instantly
@@ -649,8 +649,8 @@ export function Visualizer({
         artTrackId = trackId;
         sleeveArt = null;
         if (trackId == null) return;
-        void extractArtPalette(api.getArtUrl(trackId)).then((art) => {
-          if (artTrackId === trackId && art) sleeveArt = art;
+        watchArtPalette(api.getArtUrl(trackId), () => artTrackId === trackId, (art) => {
+          sleeveArt = art;
         });
       };
 
@@ -2665,6 +2665,11 @@ vec3 palette(float t) {
   return mix(u_accent * 0.26, normalize(u_accent + vec3(0.12, 0.18, 0.22)), 0.18 + t * 0.82);
 }
 
+// x * x. pow(x, 2.0) is undefined for a negative x, so squares go through here.
+float sq(float x) {
+  return x * x;
+}
+
 float hash(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
 }
@@ -2777,7 +2782,7 @@ void main() {
     float theta = atan(p.y, p.x);
     float r = length(p);
     float spin = theta + u_time * 0.12 + u_midTime * 0.6;
-    float bloom = exp(-pow(r * (3.2 - u_bass * 1.3 - u_beat * 0.6), 2.0));
+    float bloom = exp(-sq(r * (3.2 - u_bass * 1.3 - u_beat * 0.6)));
     // Fold the angle into one petal slice and mirror. The petal count moves
     // with treble, and a whole-image re-fold at every integer would flicker,
     // so the folds either side of it are cross-faded.
@@ -2794,7 +2799,7 @@ void main() {
     color += petalCol * (petalIntensity * (0.6 + bloom * 1.1 + u_beat * 0.6));
     // Beat halo ring expanding outward.
     float haloR = 0.18 + fract(u_time * 0.55 + u_beat) * 0.42;
-    float halo = exp(-pow((r - haloR) * 16.0, 2.0)) * (0.45 + u_beat * 0.6);
+    float halo = exp(-sq((r - haloR) * 16.0)) * (0.45 + u_beat * 0.6);
     color += palette(0.3 + u_beat * 0.5) * halo;
     color += vec3(0.005);
   } else if (u_mode == 5) {
@@ -2865,11 +2870,11 @@ void main() {
     float exists = step(0.78, starSeed);
     // Streak length grows on beat — long radial smear.
     float streakLen = 0.12 + u_beat * 0.6 + u_bass * 0.18;
-    float streakProfile = exp(-pow((ringFrac - 0.5) / streakLen, 2.0));
+    float streakProfile = exp(-sq((ringFrac - 0.5) / streakLen));
     // Per-wedge sub-angle jitter so stars aren't perfectly aligned.
     float wedgeAngle = wedge / 10.18 + (starSeed - 0.5) * 0.04;
     float starWidth = max(0.0125, 1.3 / (u_resolution.y * max(r, 0.004)));
-    float angleProfile = exp(-pow((theta - wedgeAngle) / starWidth, 2.0)) * (0.0125 / starWidth);
+    float angleProfile = exp(-sq((theta - wedgeAngle) / starWidth)) * (0.0125 / starWidth);
     float star = exists * streakProfile * angleProfile * (0.5 + r * 1.6);
     vec3 starCol = palette(starSeed + u_time * 0.05);
     color += starCol * star * (0.8 + u_treble * 0.6 + u_beat * 0.5);
@@ -2898,7 +2903,7 @@ void main() {
       float fi = float(i);
       float phase = fract(u_time * 0.32 + u_beat * 0.5 + fi * 0.33);
       float ringR = phase * 1.4;
-      float shockwave = exp(-pow((r - ringR) * 18.0, 2.0));
+      float shockwave = exp(-sq((r - ringR) * 18.0));
       color += palette(0.6 + fi * 0.18 + u_beat * 0.4) * shockwave * (0.4 + u_beat * 0.6);
     }
     // Vanishing-point flare — looking down the tunnel.

@@ -13,8 +13,8 @@ export const fireSpires: SceneDef = {
 float spireMask(vec2 q, float cx, float width, float height) {
   // Soft column centered at cx, with flame body distorted by fbm.
   float dx = (q.x - cx);
-  float bodyX = smoothstep(width, 0.0, abs(dx));
-  float bodyY = smoothstep(height, -0.5, q.y);
+  float bodyX = 1.0 - smoothstep(0.0, width, abs(dx));
+  float bodyY = 1.0 - smoothstep(-0.5, height, q.y);
   return bodyX * bodyY;
 }
 
@@ -53,8 +53,8 @@ vec4 scene(vec2 uv, vec2 p) {
     vec2 nuv = vec2(q.x * 4.0 + seed, q.y * 2.2 - lift * 0.6 - bandRun * 0.9);
     float flame = fbm(nuv);
     // Carve the flame shape: tapered, height-limited.
-    float taper = smoothstep(width * (1.5 + q.y * 0.4), 0.0, abs(q.x));
-    float topMask = smoothstep(baseH * 2.0, 0.0, q.y);
+    float taper = 1.0 - smoothstep(0.0, width * (1.5 + q.y * 0.4), abs(q.x));
+    float topMask = 1.0 - smoothstep(0.0, baseH * 2.0, q.y);
     float intensity = flame * taper * topMask;
     intensity = pow(intensity, 1.6) * (0.7 + band * 1.4);
 
@@ -64,7 +64,7 @@ vec4 scene(vec2 uv, vec2 p) {
     col += paletteRamp(heat) * intensity;
 
     // Hot core near base.
-    float core = smoothstep(width * 0.6, 0.0, abs(q.x)) * smoothstep(0.6, 0.0, q.y) * (0.5 + band * 0.8);
+    float core = (1.0 - smoothstep(0.0, width * 0.6, abs(q.x))) * (1.0 - smoothstep(0.0, 0.6, q.y)) * (0.5 + band * 0.8);
     col += u_light * core * 0.4;
   }
 

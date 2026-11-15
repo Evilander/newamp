@@ -17,6 +17,9 @@
 //     frames actually take 30. So it also watches the interval the frames are
 //     really painted at, against the interval it last asked the caller for
 //     (intervalMs), and counts a loop that keeps falling behind as over budget.
+//     A display cannot show frames faster than it refreshes, so the interval
+//     asked for counts as at least one refresh: a 30 Hz output is not late for
+//     wanting 45 fps.
 //
 // Design constraints (why it looks like this):
 //   - renderer.resize() reallocates FBOs, so scale moves in DISCRETE steps
@@ -28,6 +31,8 @@
 //     never reads a clock, so tests drive it deterministically.
 //   - It is advisory: callers read scale()/intervalMs() each frame and apply
 //     them; the governor itself touches nothing.
+
+import { displayRefreshMs } from '../lib/pacedFrame';
 
 export interface GovernorOptions {
   /** Render-cost budget per painted frame, ms. The governor trims when the
@@ -44,6 +49,8 @@ export interface GovernorOptions {
   emaAlpha?: number;
   /** Achieved-over-requested paint interval above which the loop counts as late. */
   lateRatio?: number;
+  /** The display's refresh interval, ms: the shortest interval a frame can be asked for and shown at. The page's measured refresh by default. */
+  refreshMs?: () => number;
 }
 
 export type GovernorVerdict = 'cruise' | 'trimming' | 'floor';
@@ -99,6 +106,7 @@ export function createGovernor(options: GovernorOptions = {}): Governor {
   const cooldown = options.stepCooldownMs ?? 3000;
   const alpha = options.emaAlpha ?? 0.12;
   const lateRatio = options.lateRatio ?? 1.3;
+  const refreshOf = options.refreshMs ?? displayRefreshMs;
   // Step back up only when the smoothed cost shows real headroom — at 60% of
   // budget — so a machine hovering at 99% of budget doesn't climb into a
   // step-down two seconds later.
@@ -112,9 +120,15 @@ export function createGovernor(options: GovernorOptions = {}): Governor {
   let lateness = 1;
   // A step down that only the lateness signal asked for (the cost looked fine)
   // is likely GPU-bound; climbing straight back would put the loop back into
-  // the jank it just left, so the way up stays shut for a while.
+  // the jank it just left, so the way up stays shut for a while. If the loop
+  // is late again soon after the way up opened, the climb was a mistake, and
+  // the hold doubles each time (up to LATE_HOLD_MAX_MS) so a GPU-bound machine
+  // settles instead of reallocating its buffers every minute.
   const LATE_HOLD_MS = 60_000;
+  const LATE_HOLD_MAX_MS = 8 * LATE_HOLD_MS;
+  let lateHoldMs = LATE_HOLD_MS;
   let noUpUntil = -1;
+  let lastUpAt = -1;
   let level = 0;
   let overSince = -1;
   let underSince = -1;
@@ -159,7 +173,7 @@ export function createGovernor(options: GovernorOptions = {}): Governor {
       // A frame that follows a long idle stretch (a paused or idle visualizer
       // waking up) would read as many times late; capped, one cannot decide a step.
       if (requestedMs > 0 && since > 0 && since <= GAP_MS) {
-        lateness += alpha * (Math.min(2, since / requestedMs) - lateness);
+        lateness += alpha * (Math.min(2, since / Math.max(requestedMs, refreshOf())) - lateness);
       }
 
       const canStep = lastStepAt < 0 || now - lastStepAt >= cooldown;
@@ -169,13 +183,17 @@ export function createGovernor(options: GovernorOptions = {}): Governor {
         if (overSince < 0) overSince = now;
         else if (canStep && now - overSince >= downDwell && level < LADDER.length - 1) {
           stepTo(level + 1, now);
-          if (ema <= budget) noUpUntil = now + LATE_HOLD_MS;
+          if (ema <= budget) {
+            lateHoldMs = lastUpAt >= 0 && now - lastUpAt < lateHoldMs ? Math.min(lateHoldMs * 2, LATE_HOLD_MAX_MS) : LATE_HOLD_MS;
+            noUpUntil = now + lateHoldMs;
+          }
         }
       } else if (ema < upThreshold) {
         overSince = -1;
         if (underSince < 0) underSince = now;
         else if (canStep && now - underSince >= upDwell && level > 0 && now >= noUpUntil) {
           stepTo(level - 1, now);
+          lastUpAt = now;
         }
       } else {
         // Comfortable middle: neither trimming further nor recovering.
@@ -208,7 +226,9 @@ export function createGovernor(options: GovernorOptions = {}): Governor {
       level = 0;
       ema = 0;
       lateness = 1;
+      lateHoldMs = LATE_HOLD_MS;
       noUpUntil = -1;
+      lastUpAt = -1;
       primed = false;
       overSince = -1;
       underSince = -1;

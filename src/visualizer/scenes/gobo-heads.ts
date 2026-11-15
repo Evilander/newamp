@@ -108,7 +108,7 @@ float ghBeam(int j, vec2 p, vec2 f, vec2 c, float R) {
   float hw = mix(0.04, R / sqrt(max(1.0 - rl * rl, 0.05)), clamp(t, 0.0, 1.0));
   float k = abs(side) / hw;
   if (k > 1.3 || t < -0.02 || t > tEnd) return 0.0;
-  float cone = exp(-k * k * 2.2) * smoothstep(1.3, 0.9, k) * smoothstep(-0.02, 0.03, t);
+  float cone = exp(-k * k * 2.2) * (1.0 - smoothstep(0.9, 1.3, k)) * smoothstep(-0.02, 0.03, t);
   // Brightest at the lens, fading as the cone spreads.
   float along = mix(1.0, 0.35, smoothstep(0.0, 1.0, t));
   float fj = float(j);
@@ -118,7 +118,7 @@ float ghBeam(int j, vec2 p, vec2 f, vec2 c, float R) {
   vec2 mc = vec2(t * len * 14.0 - u_phase * 1.6, side * 16.0 + fj * 13.0);
   vec2 id = floor(mc);
   vec2 off = (hash22(id) - 0.5) * 0.5;
-  float mote = step(0.94, hash21(id)) * smoothstep(0.2, 0.0, length(fract(mc) - 0.5 - off));
+  float mote = step(0.94, hash21(id)) * (1.0 - smoothstep(0.0, 0.2, length(fract(mc) - 0.5 - off)));
   return cone * along * (haze + 3.0 * mote * along);
 }
 

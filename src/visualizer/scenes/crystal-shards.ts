@@ -44,9 +44,9 @@ vec4 scene(vec2 uv, vec2 p) {
     float dG = d;
     float dB = shardSdf(q - vec2(refract, 0.0), sides, baseR);
 
-    float fill = smoothstep(0.02, -0.04, d) * (0.18 + band * 0.7);
-    float edge = smoothstep(0.012, 0.0, abs(d));
-    float facet = smoothstep(0.08, 0.0, abs(dR - dB));
+    float fill = (1.0 - smoothstep(-0.04, 0.02, d)) * (0.18 + band * 0.7);
+    float edge = 1.0 - smoothstep(0.0, 0.012, abs(d));
+    float facet = 1.0 - smoothstep(0.0, 0.08, abs(dR - dB));
 
     vec3 base = paletteRamp(0.25 + rnd * 0.5 + u_centroid * 0.2);
     vec3 trim = paletteRamp(0.92);
@@ -56,7 +56,7 @@ vec4 scene(vec2 uv, vec2 p) {
     col += base * facet * 0.18;
 
     // Per-shard hue split mimicking refraction along the edges.
-    float chr = smoothstep(0.04, 0.0, abs(d));
+    float chr = 1.0 - smoothstep(0.0, 0.04, abs(d));
     col.r += chr * 0.15 * paletteRamp(0.1).r;
     col.b += chr * 0.15 * paletteRamp(0.8).b;
   }

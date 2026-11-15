@@ -259,6 +259,34 @@ export function extractArtPalette(url: string): Promise<ArtPalette | null> {
   return p;
 }
 
+/** How many more times a cover that would not read is asked for while its track plays. */
+const WATCH_RETRIES = 2;
+
+/**
+ * Hands `take` the cover's colours once they are known. A cover that failed to
+ * read is asked for again after its failure has expired (a slow share that
+ * timed out at the start of a track may have caught up), as long as `current`
+ * still says the track is the one playing, so the track gets its colours later
+ * and not only the next time it is played. A grey cover has no palette and is
+ * a cache hit each time, so asking again costs nothing.
+ */
+export function watchArtPalette(
+  url: string,
+  current: () => boolean,
+  take: (palette: ArtPalette) => void,
+  extract: (url: string) => Promise<ArtPalette | null> = extractArtPalette,
+): void {
+  if (!url) return;
+  const ask = (retriesLeft: number): void => {
+    void extract(url).then((art) => {
+      if (!current()) return;
+      if (art) take(art);
+      else if (retriesLeft > 0) setTimeout(() => { if (current()) ask(retriesLeft - 1); }, FAILURE_RETRY_MS + 1000);
+    });
+  };
+  ask(WATCH_RETRIES);
+}
+
 /**
  * Blend album-art colors into a theme EvilandPalette. The background stays
  * pure theme (legibility contract); accent leans hardest into the art, the

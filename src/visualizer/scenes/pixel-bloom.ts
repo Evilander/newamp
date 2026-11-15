@@ -37,7 +37,7 @@ vec4 scene(vec2 uv, vec2 p) {
     float bloom = bloomRadius * (0.5 + level * 1.2) + rnd * 1.5;
     float ringPos = ring;
 
-    float alive = smoothstep(bloom + 0.7, bloom - 0.7, ringPos);
+    float alive = 1.0 - smoothstep(bloom - 0.7, bloom + 0.7, ringPos);
     float pulse = 0.5 + 0.5 * sin(ring * 1.4 - (u_globalTime + levelClock * 2.0) + rnd * 9.0);
 
     float t = fract(0.12 + ring * 0.07 + u_centroid * 0.25 + fi * 0.13);

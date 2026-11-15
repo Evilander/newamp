@@ -19,7 +19,7 @@
 // lines widen for a moment and grains are thrown loose across it. A counted kick
 // bounces the sand a little and lights the rim; every twelfth kick re-tunes the
 // plate to a neighbouring family of modes: the old figure slides into the new
-// one over the kick's pulse, under the rim flare. Silence leaves a faint dusting
+// one over a quarter of a second, under the rim flare. Silence leaves a faint dusting
 // banked into soft drifts.
 //
 // The mode numbers are spatial frequencies only. Nothing animates faster than
@@ -39,6 +39,10 @@ export const cymaticPlate: SceneDef = {
   speed: f => 0.2 + f.energy * 0.5,
   frag: `
 const float CP_PI = 3.14159265359;
+// The old figure gives way to the new in this many seconds from the kick that
+// re-tunes the plate: under the gap between two counted kicks, so it is gone
+// before the next one lands.
+const float CP_EASE = 0.28;
 
 // Standing-wave amplitude of one mode at q, the plate's own coordinates.
 // Square and diamond plates take the symmetric pair cos(n x)cos(m y) +
@@ -62,7 +66,7 @@ vec4 scene(vec2 uv, vec2 p) {
   float diamond = step(0.5, shape) - disc;
   vec2 pr = mix(p, rot2(0.7853982) * p, diamond);
   float plateD = mix(max(abs(pr.x), abs(pr.y)) - mix(0.92, 0.68, diamond), length(p) - 0.92, disc);
-  float plate = smoothstep(0.012, -0.012, plateD);
+  float plate = 1.0 - smoothstep(-0.012, 0.012, plateD);
 
   // The driver sits off centre by the pan, so the figure leans to the louder
   // side. The bolt that holds the plate stays at the middle.
@@ -71,15 +75,16 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Every ~12 counted kicks the tuning table shifts: the same bands excite a
   // neighbouring family of modes. On the kick that changes the family the old
-  // figure is still drawn and fades out over the pulse, so the plate is struck
-  // into the new mode instead of cutting to it.
+  // figure is still drawn and fades out from the kick's own age, so a soft kick
+  // starts from the old figure as a hard one does and the plate is struck into
+  // the new mode instead of cutting to it.
   float family = floor(u_kickCount / 12.0);
   float shift = floor(hash11(family + u_seed * 71.0) * 3.0);
   float sgn = step(0.5, hash11(family * 1.7 + u_seed * 13.0)) * 2.0 - 1.0;
   float oldFamily = family - 1.0;
   float oldShift = floor(hash11(oldFamily + u_seed * 71.0) * 3.0);
   float oldSgn = step(0.5, hash11(oldFamily * 1.7 + u_seed * 13.0)) * 2.0 - 1.0;
-  float fresh = step(11.5, u_kickCount) * step(fract(u_kickCount / 12.0), 0.01) * u_kickPulse;
+  float fresh = step(11.5, u_kickCount) * step(fract(u_kickCount / 12.0), 0.01) * (1.0 - smoothstep(0.0, CP_EASE, u_kickAge));
 
   // Six modes, low bands to low mode numbers. The weight is the band level
   // raised a little so the strongest modes lead and the figure stays legible,
@@ -135,7 +140,7 @@ vec4 scene(vec2 uv, vec2 p) {
   // Sand brightness: dim when the plate is quiet, full when it is loud. Sand
   // thins out to nothing at the very edge, where it would fall off.
   float bright = mix(0.4, 1.0, smoothstep(0.0, 0.5, u_energy));
-  float edge = smoothstep(-0.015, -0.05, plateD);
+  float edge = 1.0 - smoothstep(-0.05, -0.015, plateD);
 
   // Dense ridge held in the first accent, with only the glints climbing to the
   // light, and straggling grains in the second accent. Keeping each on its own
@@ -159,13 +164,13 @@ vec4 scene(vec2 uv, vec2 p) {
   nrm = mix(nrm, rot2(-0.7853982) * nrm, diamond);
   float lit = 0.5 + 0.5 * dot(nrm, normalize(vec2(-0.6, 0.8)));
   float bevel = smoothstep(-0.03, -0.012, plateD) * plate;
-  float lip = smoothstep(0.012, 0.0, abs(plateD + 0.005));
+  float lip = 1.0 - smoothstep(0.0, 0.012, abs(plateD + 0.005));
   vec3 rimCol = paletteRamp(0.55 + 0.35 * lit) * (bevel * (0.12 + 0.3 * lit) + lip * 0.25)
               * (1.0 + u_kickPulse * 1.4);
 
   float boltD = length(p) - 0.045;
-  float bolt = smoothstep(0.006, -0.006, boltD);
-  float boltRim = smoothstep(0.012, 0.0, abs(boltD));
+  float bolt = 1.0 - smoothstep(-0.006, 0.006, boltD);
+  float boltRim = 1.0 - smoothstep(0.0, 0.012, abs(boltD));
   vec3 boltCol = paletteRamp(0.45) * boltRim * 0.35;
 
   // A faint halo of light off the rim when a kick lands, outside the plate.

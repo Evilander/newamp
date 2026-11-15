@@ -32,7 +32,7 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Ring thickness pulses with bass; some rings are doubled (bright + dim).
   float thick = 0.18 + u_bass * 0.4 + rnd * 0.1;
-  float profile = smoothstep(thick, 0.0, abs(ring - 0.5) * 2.0);
+  float profile = 1.0 - smoothstep(0.0, thick, abs(ring - 0.5) * 2.0);
 
   // Angular detail — striations rotate per ring, snap on kicks.
   float stripes = 6.0 + floor(rnd * 18.0);
@@ -49,14 +49,14 @@ vec4 scene(vec2 uv, vec2 p) {
   vec3 col = tint * profile * (0.35 + band * 0.7 + u_kickPulse * 0.5) * fog;
 
   // Central "approaching object" — kicks spawn a bright ring near the eye.
-  float spawn = u_kickPulse * smoothstep(0.55, 0.0, r) * 0.6;
+  float spawn = u_kickPulse * (1.0 - smoothstep(0.0, 0.55, r)) * 0.6;
   col += paletteRamp(0.95) * spawn;
 
   // Subtle rim light around very nearest ring.
   col += u_light * nearBoost * 0.08 * profile;
 
   // Vignette darkens the corners so rings read as a tunnel.
-  float vig = smoothstep(1.6, 0.4, r);
+  float vig = 1.0 - smoothstep(0.4, 1.6, r);
 
   float alpha = clamp(dot(col, vec3(0.6)) * vig + spawn * 0.4, 0.0, 0.78);
   return vec4(col * vig, alpha);

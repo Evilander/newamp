@@ -26,15 +26,15 @@ vec4 scene(vec2 uv, vec2 p) {
     float wave = yc + sin(p.x * freq + phase) * amp
                + sin(p.x * freq * 2.7 + phase * 1.6) * amp * 0.35;
     float d = abs(p.y - wave);
-    float sheet = smoothstep(0.16 + band * 0.1, 0.0, d);
-    float ridge = smoothstep(0.018, 0.0, d) * (0.5 + band);
+    float sheet = 1.0 - smoothstep(0.0, 0.16 + band * 0.1, d);
+    float ridge = (1.0 - smoothstep(0.0, 0.018, d)) * (0.5 + band);
     vec3 tint = paletteRamp(0.18 + fi * 0.17 + u_centroid * 0.15);
     col += tint * (sheet * (0.045 + band * 0.16) + ridge * 0.22);
   }
 
   // Hat impulses sprinkle glints along the top sheet.
-  float glint = u_hatPulse * smoothstep(0.6, 0.0, abs(p.y - 0.55)) *
-                smoothstep(0.9, 0.0, abs(fract(p.x * 6.0 + u_globalTime * 0.6) - 0.5) * 2.0);
+  float glint = u_hatPulse * (1.0 - smoothstep(0.0, 0.6, abs(p.y - 0.55))) *
+                (1.0 - smoothstep(0.0, 0.9, abs(fract(p.x * 6.0 + u_globalTime * 0.6) - 0.5) * 2.0));
   col += u_light * glint * 0.35;
 
   float alpha = clamp(dot(col, vec3(0.6)), 0.0, 0.55);

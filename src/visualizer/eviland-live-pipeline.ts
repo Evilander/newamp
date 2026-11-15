@@ -581,7 +581,7 @@ export function createEvilandLivePipeline(
       }
 
       gl.bindVertexArray(vao);
-      fluid?.step(dt, forceSource.forces(frame, current.palette, dt), {
+      fluid?.step(dt, forceSource.forces(frame, current.palette, dt, dyn.stereoSpread), {
         vorticity: dyn.vorticity,
         dissipation: 0.985,
         dyeDissipation: Math.max(0.6, Math.min(1, dyeDissipationFromFrame(frame) + dyn.dyeDissipation)),
@@ -598,6 +598,7 @@ export function createEvilandLivePipeline(
           // Per-frame coverage that converges on `density` at any frame rate.
           opacity: (1 - Math.pow(1 - Math.max(0, Math.min(0.9, composition.density)), dt * 60)) * sourceFade,
           contrast: composition.contrast,
+          stereoSpread: dyn.stereoSpread,
         });
       }
       if (composition?.simulation === 'reaction-diffusion' && quality !== 'low') {

@@ -19,8 +19,8 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Graticule: faint divisions + brighter center axes, waking with energy.
   vec2 g = abs(fract(p * 2.5 + 0.5) - 0.5);
-  float grid = smoothstep(0.02, 0.0, min(g.x, g.y)) * (0.03 + u_energy * 0.05);
-  float axes = (smoothstep(0.006, 0.0, abs(p.y)) + smoothstep(0.006, 0.0, abs(p.x)))
+  float grid = (1.0 - smoothstep(0.0, 0.02, min(g.x, g.y))) * (0.03 + u_energy * 0.05);
+  float axes = ((1.0 - smoothstep(0.0, 0.006, abs(p.y))) + (1.0 - smoothstep(0.0, 0.006, abs(p.x))))
              * (0.04 + u_energy * 0.05);
   col += phosphor * (grid + axes);
 
@@ -44,15 +44,15 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Beam: wide soft glow + hot core, brightness riding the music.
   float lit = 0.22 + u_energy * 0.85 + u_kickPulse * 0.5;
-  float beam = smoothstep(0.055, 0.0, abs(tA)) + smoothstep(0.055, 0.0, abs(tB));
-  float core = smoothstep(0.007, 0.0, abs(tA)) + smoothstep(0.007, 0.0, abs(tB));
+  float beam = (1.0 - smoothstep(0.0, 0.055, abs(tA))) + (1.0 - smoothstep(0.0, 0.055, abs(tB)));
+  float core = (1.0 - smoothstep(0.0, 0.007, abs(tA))) + (1.0 - smoothstep(0.0, 0.007, abs(tB)));
   col += phosphor * beam * 0.16 * lit;
   col += (phosphor * 0.75 + u_light * 0.45) * core * 0.5 * lit;
 
   // Vocal presence burns the lower trace hot, snare hits strobe a brief
   // horizontal sweep-retrace ghost.
-  col += paletteRamp(0.9) * smoothstep(0.007, 0.0, abs(tB)) * u_vocal * 0.35;
-  float retrace = u_snarePulse * smoothstep(0.5, 0.0, abs(fract(uv.x - u_globalTime * 1.7) - 0.5));
+  col += paletteRamp(0.9) * (1.0 - smoothstep(0.0, 0.007, abs(tB))) * u_vocal * 0.35;
+  float retrace = u_snarePulse * (1.0 - smoothstep(0.0, 0.5, abs(fract(uv.x - u_globalTime * 1.7) - 0.5)));
   col += phosphor * retrace * 0.08;
 
   float alpha = clamp(dot(col, vec3(0.55)), 0.0, 0.62);

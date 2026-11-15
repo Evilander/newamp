@@ -1,6 +1,6 @@
 // What the frame bus sends the detached window: the palette with its second
-// accent, and (when the consumer opts in) an unchanged settled operator only
-// when it has changed, at fade time, on attach and at the resend backstop.
+// accent, and the look it renders with on every tick (the projector keeps no
+// look of its own, so a tick without one would drop it).
 // Run: node scripts/eviland-frame-bus-palette-test.mjs
 import { build } from 'esbuild';
 import { mkdirSync } from 'node:fs';
@@ -28,50 +28,20 @@ frameBus.publish(frame, palette, 16, look());
 if (JSON.stringify(received[0]?.palette?.accent2) !== JSON.stringify(palette.accent2)) fail('the palette arrived without its second accent');
 if (!received[0]?.operator) fail('the first operator was not sent');
 
-// Dedup is off by default: every tick carries the operator.
+// A settled look is sent on every tick, edited in place or not.
 const settled = look();
-for (let i = 0; i < 3; i++) frameBus.publish(frame, palette, 16, settled);
-if (received.slice(1).some((m) => !m.operator || m.operatorUnchanged)) fail('with dedup off an operator was skipped');
-
-// On: the first goes, identical ones are marked unchanged.
-frameBus.setOperatorDedup(true);
 received.length = 0;
-frameBus.publish(frame, palette, 16, settled);
-frameBus.publish(frame, palette, 16, settled);
-frameBus.publish(frame, palette, 16, settled);
-if (!received[0].operator) fail('the first operator after enabling dedup was not sent');
-if (received[1].operator || !received[1].operatorUnchanged || received[2].operator) fail('an unchanged settled operator was re-sent');
-
-// Edited in place: the content differs, so it goes.
+for (let i = 0; i < 3; i++) frameBus.publish(frame, palette, 16, settled);
 settled.palette.accent = [0.1, 0.9, 0.2];
 frameBus.publish(frame, palette, 16, settled);
-if (!received[3].operator) fail('an operator edited in place was not re-sent');
+if (received.length !== 4 || received.some((m) => !m.operator || 'operatorUnchanged' in m)) fail('a tick went without its operator');
+if (JSON.stringify(received[3].operator.palette.accent) !== JSON.stringify([0.1, 0.9, 0.2])) fail('an operator edited in place was sent as it was');
 
-// A fade always goes, and the first settled look after it goes too.
-const fading = { ...look(), _transition: 0.4, _from: look(), _to: look() };
-frameBus.publish(frame, palette, 16, fading);
-frameBus.publish(frame, palette, 16, fading);
-if (!received[4].operator || !received[5].operator) fail('a fade tick was skipped');
-frameBus.publish(frame, palette, 16, settled);
-if (!received[6].operator) fail('the first settled look after a fade was not sent');
-
-// A new window gets the operator again.
-frameBus.publish(frame, palette, 16, settled);
-if (received[7].operator) fail('an unchanged operator was sent before any attach');
-const second = { ...port, postMessage: (m) => received.push(structuredClone(m)) };
-frameBus.attachDetachedPort(second);
-frameBus.publish(frame, palette, 16, settled);
-if (!received[8].operator) fail('a newly attached window was not given the operator');
-
-// The backstop resends a long-unchanged operator.
-let resent = 0;
-for (let i = 0; i < 700; i++) {
-  const before = received.length;
-  frameBus.publish(frame, palette, 16, settled);
-  if (received[before].operator) resent++;
-}
-if (resent < 2) fail(`the backstop resent ${resent} times in 700 ticks`);
-log.push(`palette carries accent2; dedup: skipped identical ticks, resent on edit, fade, attach and ${resent}x as the backstop in 700 ticks`);
+// A tick the producer has no look for carries none.
+received.length = 0;
+frameBus.publish(frame, palette, 16);
+if (received[0].operator) fail('a tick without an operator carried one');
+log.push('palette carries accent2; every tick carries the operator it was given');
 
 console.log(log.join('\n'));
 console.log(pass ? '[eviland-frame-bus-palette-test] PASS' : '[eviland-frame-bus-palette-test] FAIL');

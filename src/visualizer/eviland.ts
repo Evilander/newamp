@@ -536,7 +536,8 @@ void main(){
     // (40 instead of 2 in the gaussian) so the ring reads as a structured
     // line being drawn into the feedback field, not a soft puff.
     float band = max(0.003, v_thick * 0.6);
-    float ring = exp(-pow((r - v_age) / band, 2.0) * 40.0);
+    float ringOff = (r - v_age) / band;
+    float ring = exp(-(ringOff * ringOff) * 40.0);
     alpha = ring * life * v_intensity * 0.85;
   } else if (v_kind == 1) {
     // Burst (snare): a sharp star — radial spikes plus a hot core. Reads as
@@ -558,8 +559,8 @@ void main(){
     alpha = exp(-r*r * 14.0) * life * v_intensity * 0.38;
   } else {
     // Core (kick punch): solid disc with a hard rim.
-    float disc = smoothstep(0.78, 0.62, r);
-    float rim  = smoothstep(0.95, 0.86, r) - smoothstep(0.86, 0.78, r);
+    float disc = 1.0 - smoothstep(0.62, 0.78, r);
+    float rim  = (1.0 - smoothstep(0.86, 0.95, r)) - (1.0 - smoothstep(0.78, 0.86, r));
     alpha = (disc * 0.55 + max(0.0, rim) * 0.85) * life * v_intensity * 0.7;
   }
   if (alpha <= 0.003) discard;
@@ -590,7 +591,8 @@ void main(){
   // A narrow ridge plus a quickly decaying underglow. Filling everything
   // below h fed a solid palette-colored slab into the feedback/kaleido pass,
   // where it persisted as a large rectangular artifact.
-  float ridge = exp(-pow((uv.y - h) * 16.0, 2.0)) * (0.6 + u_bass * 0.8);
+  float ridgeOff = (uv.y - h) * 16.0;
+  float ridge = exp(-(ridgeOff * ridgeOff)) * (0.6 + u_bass * 0.8);
   float underglow = step(uv.y, h) * exp(-(h - uv.y) * 24.0) * 0.08;
   float a = (ridge * 0.55 + underglow) * activity;
   if (a <= 0.002) discard;
@@ -711,7 +713,7 @@ void main(){
     float t = (ang + 3.14159265) / TAU;
     float w = samp(t) * u_scale;
     float r0 = 0.28 + w;
-    a = smoothstep(th, 0.0, abs(r - r0));
+    a = 1.0 - smoothstep(0.0, th, abs(r - r0));
   } else if (mode == 4) {
     // Spectrum bars: vertical bars whose height tracks |sample|.
     float bars = ${WAVE_BARS.toFixed(1)};
@@ -724,7 +726,7 @@ void main(){
     // Horizontal line (default + lissajous fallback): bright core + soft body.
     float w = samp(uv.x) * u_scale;
     float d = abs(uv.y - (0.5 + w));
-    a = smoothstep(th, 0.0, d) + 0.35 * smoothstep(th * 3.0, 0.0, d);
+    a = (1.0 - smoothstep(0.0, th, d)) + 0.35 * (1.0 - smoothstep(0.0, th * 3.0, d));
   }
   a *= u_intensity;
   if (a <= 0.004) discard;

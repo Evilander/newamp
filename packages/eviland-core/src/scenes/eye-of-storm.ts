@@ -47,7 +47,7 @@ vec4 scene(vec2 uv, vec2 p) {
   cloud = pow(cloud, 1.4);
 
   // Combine cloud with arm modulation; weaker beyond eye, fades at outer rim.
-  float radialMask = smoothstep(eyeR, eyeR + 0.05, r) * smoothstep(1.7, 0.7, r);
+  float radialMask = smoothstep(eyeR, eyeR + 0.05, r) * (1.0 - smoothstep(0.7, 1.7, r));
   float clouds = cloud * (0.4 + armPhase * 0.9) * radialMask;
 
   // Debris streaks — tangential fbm following spiral lines.
@@ -74,15 +74,15 @@ vec4 scene(vec2 uv, vec2 p) {
   col += mix(u_light, vec3(1.0), 0.35) * lightning * 0.6 * radialMask;
 
   // The eye itself — calm dark, slight rim halo.
-  float inEye = smoothstep(eyeR + 0.02, eyeR - 0.02, r);
+  float inEye = 1.0 - smoothstep(eyeR - 0.02, eyeR + 0.02, r);
   // Dim wash inside the eye.
   col = mix(col, u_dark * 0.4, inEye * 0.85);
   // Eye rim halo: bright on kicks.
-  float rim = smoothstep(0.03, 0.0, abs(r - eyeR)) * (0.3 + u_kickPulse * 1.2);
+  float rim = (1.0 - smoothstep(0.0, 0.03, abs(r - eyeR))) * (0.3 + u_kickPulse * 1.2);
   col += paletteRamp(0.9) * rim;
 
   // Outer vignette.
-  float vig = smoothstep(1.8, 0.5, r);
+  float vig = 1.0 - smoothstep(0.5, 1.8, r);
   col *= vig;
 
   // Hat sparkles in the cloud body.

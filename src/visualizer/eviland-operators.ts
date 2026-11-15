@@ -20,7 +20,7 @@
 // allocation-free (writes into a caller-owned scratch object) because it runs
 // at 60fps.
 
-import { accentPair } from './eviland-appearance';
+import { accentPair, NEAR_GREY_CHROMA } from './eviland-appearance';
 
 // ---------------------------------------------------------------------------
 // Audio features a binding can read. These mirror EvilandFrame's scalar fields
@@ -864,8 +864,8 @@ export function lerpColorInto(out: RGB, a: RGB, b: RGB, t: number): void {
   const C = lerp(oklchA[1]!, oklchB[1]!, t);
   // A near-grey colour has no hue of its own; take the other side's.
   let h: number;
-  if (oklchA[1]! < 1e-4) h = oklchB[2]!;
-  else if (oklchB[1]! < 1e-4) h = oklchA[2]!;
+  if (oklchA[1]! < NEAR_GREY_CHROMA) h = oklchB[2]!;
+  else if (oklchB[1]! < NEAR_GREY_CHROMA) h = oklchA[2]!;
   else {
     let dh = oklchB[2]! - oklchA[2]!;
     if (dh > Math.PI) dh -= TAU;

@@ -61,6 +61,33 @@ if (!near(white.l, 1, 0.001) || white.c > 0.001) fail(`white is not L 1 / C 0 ($
   log.push(`primaries match the reference; round trip within ${worst.toExponential(1)}`);
 }
 {
+  // A colour sRGB can show comes back as itself. Near the blue primary the ray
+  // from grey leaves sRGB and re-enters, so the gamut edge found from grey is
+  // not where the colour stops: every 8-bit corner, the whole blue edge, the
+  // saturated blue pocket and a random sample must round-trip to the same byte.
+  const roundTrip = (r, g, b) => {
+    const o = rgbToOklch([r / 255, g / 255, b / 255]);
+    const back = oklchToRgb(o.l, o.c, o.h).map((v) => Math.round(v * 255));
+    return back[0] === r && back[1] === g && back[2] === b ? null : `${r},${g},${b} came back as ${back.join(',')}`;
+  };
+  const misses = [];
+  const check = (r, g, b) => {
+    const miss = roundTrip(r, g, b);
+    if (miss && misses.length < 5) misses.push(miss);
+    return miss ? 1 : 0;
+  };
+  let checked = 0;
+  let wrong = 0;
+  for (const r of [0, 255]) for (const g of [0, 255]) for (const b of [0, 255]) { wrong += check(r, g, b); checked++; }
+  for (let b = 0; b < 256; b++) { wrong += check(0, 0, b); checked++; }
+  for (let r = 0; r < 26; r++) for (let g = 0; g < 26; g++) for (let b = 76; b < 256; b++) { wrong += check(r, g, b); checked++; }
+  let state = 0x2545f491;
+  const byte = () => { state = (Math.imul(state, 1664525) + 1013904223) >>> 0; return state >>> 24; };
+  for (let i = 0; i < 50000; i++) { wrong += check(byte(), byte(), byte()); checked++; }
+  if (wrong) fail(`${wrong} of ${checked} 8-bit colours did not survive sRGB -> OKLCh -> sRGB: ${misses.join('; ')}`);
+  log.push(`${checked} 8-bit colours (corners, blue edge, blue pocket, random) round-trip to the same byte`);
+}
+{
   // A request sRGB cannot show loses chroma but keeps lightness and hue.
   for (const [l, h] of [[0.5, 150], [0.9, 260], [0.3, 100], [0.95, 20]]) {
     const rgb = oklchToRgb(l, 0.4, h);
@@ -730,6 +757,8 @@ const copy = (value) => JSON.parse(JSON.stringify(value));
   const wired = {
     'caustic-floor': 'liquid', 'thin-film': 'nebula', 'cymatic-plate': 'kaleidoscope', 'ice-halo': 'firefly',
     'ripple-tank': 'echochamber', 'truss-chase': 'strobe', 'gobo-heads': 'pulsar', 'prism-dispersal': 'prism',
+    marbling: 'inkwell', 'harmonic-strings': 'phosphor', 'pendulum-wave': 'heartbeat', ferrofluid: 'glasshouse',
+    'rose-window': 'cathedral',
   };
   for (const [scene, archetype] of Object.entries(wired)) {
     const n = reached.get(scene)?.get(archetype) ?? 0;
@@ -740,14 +769,14 @@ const copy = (value) => JSON.parse(JSON.stringify(value));
   // the liquid look still draws liquid-metal on most seeds.
   const liquid = reached.get('liquid-metal')?.get('liquid') ?? 0;
   if (liquid < 160 * 0.4) fail(`liquid draws liquid-metal on only ${liquid} of 160 seeds`);
-  log.push(`scenes: all ${SCENES.length} reachable; the eight newest each take 15-60% of one archetype's seeds, and the host keeps the rest`);
+  log.push(`scenes: all ${SCENES.length} reachable; the thirteen newest each take 15-60% of one archetype's seeds, and the host keeps the rest`);
 }
 
 // --- the still scenes hold their field -------------------------------------------
 {
   // These scenes draw a finished picture a frame; a look built on one holds the
   // field still, and keeps it still through the mutations the Director applies.
-  const still = { 'thin-film': 'nebula', 'ice-halo': 'firefly', 'ripple-tank': 'echochamber', 'gobo-heads': 'pulsar', 'cymatic-plate': 'kaleidoscope', 'truss-chase': 'strobe', 'caustic-floor': 'liquid', 'prism-dispersal': 'prism' };
+  const still = { 'thin-film': 'nebula', 'ice-halo': 'firefly', 'ripple-tank': 'echochamber', 'gobo-heads': 'pulsar', 'cymatic-plate': 'kaleidoscope', 'truss-chase': 'strobe', 'caustic-floor': 'liquid', 'prism-dispersal': 'prism', marbling: 'inkwell', 'harmonic-strings': 'phosphor', 'pendulum-wave': 'heartbeat', ferrofluid: 'glasshouse', 'rose-window': 'cathedral' };
   let checked = 0;
   for (const [scene, host] of Object.entries(still)) {
     let found = 0;
@@ -913,6 +942,43 @@ const copy = (value) => JSON.parse(JSON.stringify(value));
     if (d.h > 65 && d.h < 100 && d.c > 0.03) fail(`the rainbow's dark is olive at t = ${t} (hue ${d.h.toFixed(0)}, chroma ${d.c.toFixed(3)})`);
   }
   log.push('rainbow: one palette per half degree of hue, shared by every frame that lands on it');
+}
+
+// --- a cover that would not read is asked for again while its track plays ----------
+{
+  const { mock } = await import('node:test');
+  const palette = { vibrant: [1, 0, 0], secondary: [1, 1, 1], muted: [0.2, 0.1, 0.1] };
+  const flush = () => new Promise((resolveFlush) => setImmediate(resolveFlush));
+  // A cover source answering from `answers` in turn, and the clock it is asked on.
+  const watch = async (answers, current = () => true, url = 'newart://track/1') => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+    const asked = [];
+    const taken = [];
+    art.watchArtPalette(url, current, (p) => taken.push(p), (u) => { asked.push(u); return Promise.resolve(answers[Math.min(asked.length - 1, answers.length - 1)]); });
+    await flush();
+    const afterFirst = { asked: asked.length, taken: taken.length };
+    for (let i = 0; i < 5; i++) {
+      mock.timers.tick(31_000);
+      await flush();
+    }
+    mock.timers.reset();
+    return { afterFirst, asked: asked.length, taken: taken.length };
+  };
+
+  const slowShare = await watch([null, null, palette]);
+  if (slowShare.afterFirst.asked !== 1 || slowShare.afterFirst.taken !== 0) fail('a cover that failed at the start of a track was given colours at once');
+  if (slowShare.taken !== 1 || slowShare.asked !== 3) fail(`a cover that failed twice and then read gave ${slowShare.taken} palettes after ${slowShare.asked} tries (want 1 after 3)`);
+  const never = await watch([null]);
+  if (never.asked !== 3 || never.taken !== 0) fail(`a cover that never reads was tried ${never.asked} times (want 3: the first and two more)`);
+  const read = await watch([palette]);
+  if (read.asked !== 1 || read.taken !== 1) fail(`a cover that read the first time was asked ${read.asked} times`);
+  // Still the track playing when the first answer comes in, skipped by the time the retry is due.
+  let looks = 0;
+  const skipped = await watch([null, palette], () => looks++ === 0);
+  if (skipped.taken !== 0 || skipped.asked !== 1) fail(`a track that was skipped after a failed read was asked again (${skipped.asked} tries, ${skipped.taken} palettes)`);
+  const none = await watch([palette], () => true, '');
+  if (none.asked !== 0) fail('a track with no cover address was asked for');
+  log.push('a cover that would not read is tried again twice while its track plays, not after the track changes and not when it read');
 }
 
 console.log(log.join('\n'));

@@ -49,7 +49,7 @@ vec4 scene(vec2 uv, vec2 p) {
   float cellLit = (0.08 + band * 0.9) * twinkle + wave;
 
   float fill = smoothstep(0.0, 0.12, edge) * cellLit;
-  float rim = smoothstep(0.04, 0.0, edge) * (0.45 + u_hat * 0.6 + u_hatPulse * 0.5);
+  float rim = (1.0 - smoothstep(0.0, 0.04, edge)) * (0.45 + u_hat * 0.6 + u_hatPulse * 0.5);
 
   vec3 fillCol = paletteRamp(0.25 + cellHash * 0.35 + u_centroid * 0.3);
   vec3 rimCol = paletteRamp(0.88);
@@ -58,7 +58,7 @@ vec4 scene(vec2 uv, vec2 p) {
   col += rimCol * rim;
 
   // Center bloom on kick.
-  float core = smoothstep(0.45, 0.0, length(p)) * u_kickPulse * 0.5;
+  float core = (1.0 - smoothstep(0.0, 0.45, length(p))) * u_kickPulse * 0.5;
   col += u_light * core;
 
   float alpha = clamp(dot(col, vec3(0.55)), 0.0, 0.78);

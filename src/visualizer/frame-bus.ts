@@ -52,13 +52,6 @@ export interface DetachedFramePayload {
    */
   operator?: OperatorConfig;
   /**
-   * Set instead of `operator` when dedup is on and the settled look has not
-   * changed since the last one sent: the consumer renders with the operator it
-   * already holds (it keeps the last one it was given, and gets a fresh copy
-   * on attach).
-   */
-  operatorUnchanged?: true;
-  /**
    * Pre-emphasized time-domain bytes (BUTTERCHURN_FFT_SIZE samples). Drives
    * the detached window's MilkDrop (butterchurn) field and the WebGL
    * renderer's waveform layer — without these the projector could only show
@@ -107,22 +100,6 @@ export interface DetachedFramePayload {
   };
 }
 
-/**
- * The consumer's half of operator dedup: a payload with `operator` replaces
- * the held look, and one marked `operatorUnchanged` resolves to the look
- * already held. A consumer that renders from `payload.operator` directly
- * would drop the look on every skipped tick, so it must go through this
- * before the producer's dedup is switched on.
- */
-export function createOperatorCarry(): (payload: Pick<DetachedFramePayload, 'operator' | 'operatorUnchanged'>) => OperatorConfig | undefined {
-  let held: OperatorConfig | undefined;
-  return (payload) => {
-    if (payload.operator) held = payload.operator;
-    else if (!payload.operatorUnchanged) return undefined;
-    return held;
-  };
-}
-
 export interface DetachedAckPayload {
   type: 'ack';
   t: number;
@@ -160,12 +137,6 @@ export interface FrameBus {
   detachPort(): void;
   /** Push a quality change to the detached consumer on the next frame. */
   setDetachedQuality(quality: 'high' | 'medium' | 'low'): void;
-  /**
-   * Stop re-sending an unchanged settled operator to the detached window (see
-   * `operatorUnchanged`). Off by default: only a consumer that keeps the last
-   * operator it received (createOperatorCarry) can turn it on.
-   */
-  setOperatorDedup(enabled: boolean): void;
 }
 
 interface BusState {
@@ -175,39 +146,6 @@ interface BusState {
   quality: 'high' | 'medium' | 'low' | null;
   qualityDirty: boolean;
   seq: number;
-  /** The operator last sent as a settled look, and its serialised form; null when the consumer needs a fresh copy. */
-  sentOperator: OperatorConfig | null;
-  sentOperatorJson: string;
-  operatorSkips: number;
-  operatorDedup: boolean;
-}
-
-// A settled look does not change between ticks, so re-sending it 30 times a
-// second only makes the main thread clone it. It is re-sent on any change, and
-// at least this often as a backstop in case a field changed in place that the
-// comparison could not see (the consumer keeps the last config it was given).
-const OPERATOR_RESEND_EVERY = 300;
-
-/**
- * Whether the consumer needs this operator now. During a Director fade the
- * config carries both endpoints and is rewritten every tick, so it always goes;
- * a settled look goes when it differs from the last one sent, compared by
- * content because the Director edits looks in place.
- */
-function operatorNeedsSend(operator: OperatorConfig): boolean {
-  if (operator._transition !== undefined || operator._from || operator._to) {
-    state.sentOperator = null;
-    return true;
-  }
-  const json = JSON.stringify(operator);
-  if (state.sentOperator && json === state.sentOperatorJson && state.operatorSkips < OPERATOR_RESEND_EVERY) {
-    state.operatorSkips += 1;
-    return false;
-  }
-  state.sentOperator = operator;
-  state.sentOperatorJson = json;
-  state.operatorSkips = 0;
-  return true;
 }
 
 const state: BusState = {
@@ -217,10 +155,6 @@ const state: BusState = {
   quality: null,
   qualityDirty: false,
   seq: 0,
-  sentOperator: null,
-  sentOperatorJson: '',
-  operatorSkips: 0,
-  operatorDedup: false,
 };
 
 const debug = { publishCalls: 0, postErrors: 0, detaches: 0, acks: 0 };
@@ -274,10 +208,7 @@ export const frameBus: FrameBus = {
       palette,
       dtMs,
     };
-    if (operator) {
-      if (!state.operatorDedup || operatorNeedsSend(operator)) payload.operator = operator;
-      else payload.operatorUnchanged = true;
-    }
+    if (operator) payload.operator = operator;
     if (extras?.waveMode) payload.waveMode = extras.waveMode;
     if (extras?.grade !== undefined) payload.grade = extras.grade;
     if (extras?.wave) payload.wave = extras.wave; // structured-clone copies it
@@ -326,8 +257,6 @@ export const frameBus: FrameBus = {
     // On reattach, the consumer needs the current quality on the first frame
     // (its prior renderer was torn down with the window).
     state.qualityDirty = state.quality !== null;
-    // A new window has no operator yet.
-    state.sentOperator = null;
 
     port.onmessage = (msg: MessageEvent) => {
       const data = msg.data as DetachedAckPayload | undefined;
@@ -360,11 +289,6 @@ export const frameBus: FrameBus = {
       /* ignore */
     }
     notifyConsumerChange();
-  },
-
-  setOperatorDedup(enabled) {
-    state.operatorDedup = enabled;
-    state.sentOperator = null;
   },
 
   setDetachedQuality(quality) {

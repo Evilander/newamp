@@ -102,7 +102,11 @@ function fitsSrgb(l: number, c: number, h: number): boolean {
   return lin[0] >= -1e-4 && lin[0] <= 1.0001 && lin[1] >= -1e-4 && lin[1] <= 1.0001 && lin[2] >= -1e-4 && lin[2] <= 1.0001;
 }
 
-/** The most chroma sRGB can show at this lightness and hue. */
+/**
+ * The chroma at which a ray out of grey at this lightness and hue first
+ * leaves sRGB. Near the blue primary the ray comes back inside before it
+ * leaves for good, so a colour there can carry more (see oklchToRgb).
+ */
 export function maxChroma(l: number, h: number): number {
   if (l <= 0 || l >= 1) return 0;
   let lo = 0;
@@ -115,10 +119,11 @@ export function maxChroma(l: number, h: number): number {
   return lo;
 }
 
-/** OKLCh → sRGB. A colour outside sRGB loses chroma until it fits; its lightness and hue stay. */
+/** OKLCh → sRGB. A colour that fits is returned as it is; one outside sRGB loses chroma until it fits, keeping its lightness and hue. */
 export function oklchToRgb(l: number, c: number, h: number): RGB {
   const hue = ((h % 360) + 360) % 360;
-  const lin = oklchToLinear(l, Math.min(Math.max(c, 0), maxChroma(l, hue)), hue);
+  const chroma = Math.max(c, 0);
+  const lin = oklchToLinear(l, fitsSrgb(l, chroma, hue) ? chroma : Math.min(chroma, maxChroma(l, hue)), hue);
   return [fromLinear(clamp01(lin[0])), fromLinear(clamp01(lin[1])), fromLinear(clamp01(lin[2]))];
 }
 
@@ -199,6 +204,13 @@ export function accentPair(palette: PaletteConfig, seed = ''): RGB {
   return pair;
 }
 
+/**
+ * A colour with less chroma than this has no hue worth following: it is a grey
+ * with a rounding error's tint. Every OKLCh blend (this one, the Director's and
+ * the shaders' palette ramp) takes the other side's hue for it, so they agree.
+ */
+export const NEAR_GREY_CHROMA = 0.004;
+
 /** Two colours mixed in OKLCh: lightness and chroma linearly, hue along the short arc. */
 export function mixOklch(a: RGB, b: RGB, t: number): RGB {
   if (!(t > 0)) return [a[0], a[1], a[2]];
@@ -207,8 +219,8 @@ export function mixOklch(a: RGB, b: RGB, t: number): RGB {
   const y = rgbToOklch(b);
   // A near-grey colour has no hue of its own; take the other side's.
   let h: number;
-  if (x.c < 0.004) h = y.h;
-  else if (y.c < 0.004) h = x.h;
+  if (x.c < NEAR_GREY_CHROMA) h = y.h;
+  else if (y.c < NEAR_GREY_CHROMA) h = x.h;
   else {
     let d = y.h - x.h;
     if (d > 180) d -= 360;

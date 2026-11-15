@@ -38,7 +38,7 @@ vec4 scene(vec2 uv, vec2 p) {
   float fineEdge = smoothstep(0.42, 0.62, filam) * smoothstep(0.5, 0.85, billow) * 0.35;
 
   // Bottom bias — ink originates from below.
-  float bottom = smoothstep(0.95, -0.1, p.y);
+  float bottom = 1.0 - smoothstep(-0.1, 0.95, p.y);
   float body = swell * bottom;
 
   // Kick-injected radial puffs: a few seeded positions pulse outward.
@@ -51,7 +51,7 @@ vec4 scene(vec2 uv, vec2 p) {
     float age = fract(u_globalTime * 0.18 + rnd);
     float radius = 0.06 + age * (0.7 + u_kickPulse * 0.4);
     float d = length(p - c);
-    float ring = exp(-pow((d - radius) / (0.18 + age * 0.12), 2.0));
+    float ring = exp(-sq((d - radius) / (0.18 + age * 0.12)));
     drops += ring * (1.0 - age) * (0.4 + u_kickPulse * 0.8);
   }
 

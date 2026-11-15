@@ -1,3 +1,5 @@
+import { NEAR_GREY_CHROMA } from './eviland-appearance';
+
 // Small owned WebGL resources shared by Eviland's source modules.
 export const SOURCE_VERTEX = `#version 300 es
 out vec2 v_uv;
@@ -81,7 +83,7 @@ bool notNumber(float x){
 // fits, keeping lightness and hue), and the shader interpolates between
 // neighbouring samples in sRGB. Over most of the line that is within a level
 // of the exact curve; where a channel runs into the edge of sRGB the exact
-// curve has a corner and the table cuts it (scripts/eviland-v2-ramp-test.mjs
+// curve has a corner and the table cuts it (scripts/eviland-palette-ramp-test.mjs
 // measures both). The shader needs no cube roots, no gamut search and nothing
 // that can produce a NaN: one uniform-array read and a mix per call.
 export const RAMP_STEPS = 12;
@@ -149,8 +151,8 @@ function rampPoint(lch: Float64Array, a: number, b: number, t: number, out: Floa
   const C = lch[a + 1]! + (lch[b + 1]! - lch[a + 1]!) * t;
   // A near-grey colour has no hue of its own; it takes the other side's.
   let h: number;
-  if (lch[a + 1]! < 1e-4) h = lch[b + 2]!;
-  else if (lch[b + 1]! < 1e-4) h = lch[a + 2]!;
+  if (lch[a + 1]! < NEAR_GREY_CHROMA) h = lch[b + 2]!;
+  else if (lch[b + 1]! < NEAR_GREY_CHROMA) h = lch[a + 2]!;
   else {
     let dh = lch[b + 2]! - lch[a + 2]!;
     if (dh > Math.PI) dh -= TAU;
@@ -250,24 +252,26 @@ vec3 ${name}(float t) {
  * passes, the flash guard's composite and its shown-taps measurement) agrees
  * on the value at a pixel. It reads as finer grain than a per-pixel hash at
  * the same amplitude and bands less. `frame` should stay below a few thousand
- * (callers wrap it) so the fract stays precise.
+ * (callers wrap it) so the fract stays precise. Two gradient-noise samples at
+ * an offset are the same sequence shifted, so their sum is not triangular; the
+ * one uniform sample goes through the triangular inverse CDF instead, as in
+ * the engine's final pass.
  */
 export const DITHER_GLSL = `
 float ignoise(vec2 p, float frame) {
   return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)) + frame * 0.618034));
 }
 float ditherTri(vec2 p, float frame) {
-  return ignoise(p, frame) + ignoise(p + vec2(5.588238), frame) - 1.0;
+  float u = ignoise(p, frame);
+  return u < 0.5 ? sqrt(2.0 * u) - 1.0 : 1.0 - sqrt(2.0 - 2.0 * u);
 }
 `;
 
 /** The CPU twin of ditherTri, for tests. */
 export function ditherTriAt(x: number, y: number, frame: number): number {
-  const ign = (px: number, py: number): number => {
-    const a = (px * 0.06711056 + py * 0.00583715 + frame * 0.618034) % 1;
-    return (52.9829189 * (a < 0 ? a + 1 : a)) % 1;
-  };
-  return ign(x, y) + ign(x + 5.588238, y + 5.588238) - 1;
+  const a = (x * 0.06711056 + y * 0.00583715 + frame * 0.618034) % 1;
+  const u = (52.9829189 * (a < 0 ? a + 1 : a)) % 1;
+  return u < 0.5 ? Math.sqrt(2 * u) - 1 : 1 - Math.sqrt(2 - 2 * u);
 }
 
 /** Wrap a frame counter before it is handed to a shader that feeds it to ditherTri. */

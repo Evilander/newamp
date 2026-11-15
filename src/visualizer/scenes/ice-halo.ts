@@ -55,7 +55,7 @@ vec4 scene(vec2 uv, vec2 p) {
   float r2 = r * 2.1;
   float ring2 = ihRing(dist, r2, soft);
   float t2 = clamp((dist - r2) / soft, 0.0, 1.0);
-  col += paletteRamp2(0.3 + sqrt(t2) * 0.65) * ring2 * pow(1.0 - t2, 2.0) * u_energy * 0.3 * haze;
+  col += paletteRamp2(0.3 + sqrt(t2) * 0.65) * ring2 * sq(1.0 - t2) * u_energy * 0.3 * haze;
 
   // Sundogs on the parhelic circle at the sun's height, flung further out and
   // brighter as the stereo image widens. Each is a bright core with a tail
@@ -78,19 +78,19 @@ vec4 scene(vec2 uv, vec2 p) {
   // Parhelic circle: a faint line at the sun's height that breathes on the
   // beat and fades with distance from the sun.
   float beat = 0.5 + 0.5 * cos(u_beatPhase * IH_TAU);
-  float circle = exp(-pow((p.y - sun.y) * 70.0, 2.0)) * exp(-abs(d.x) * 0.7) * (0.04 + 0.08 * beat * u_beatConf);
+  float circle = exp(-sq((p.y - sun.y) * 70.0)) * exp(-abs(d.x) * 0.7) * (0.04 + 0.08 * beat * u_beatConf);
   col += paletteRamp2(0.8) * circle * lit;
 
   // Light pillar: the voice lifts a column from the sun.
   float pillarTop = u_vocal * 1.4 + 0.1;
-  float pillar = exp(-pow(d.x * 14.0, 2.0)) * smoothstep(0.0, 0.1, d.y) * (1.0 - smoothstep(0.0, pillarTop, d.y));
+  float pillar = exp(-sq(d.x * 14.0)) * smoothstep(0.0, 0.1, d.y) * (1.0 - smoothstep(0.0, pillarTop, d.y));
   col += paletteRamp2(0.85) * pillar * (0.2 + u_vocal * 1.1) * lit;
 
   // Upper tangent arc when the music changes: the wings of a low sun's arc
   // sweep up and away from the top of the halo, with a dark gap beneath so it
   // reads as its own shape rather than a thickening of the ring.
   vec2 ta = vec2(d.x * 1.2, d.y - r - 0.035);
-  float arc = exp(-pow(ta.y - ta.x * ta.x * 0.8, 2.0) * 1400.0) * (1.0 - smoothstep(0.15, 0.6, abs(ta.x))) * smoothstep(0.25, 0.7, u_novelty);
+  float arc = exp(-sq(ta.y - ta.x * ta.x * 0.8) * 1400.0) * (1.0 - smoothstep(0.15, 0.6, abs(ta.x))) * smoothstep(0.25, 0.7, u_novelty);
   col += paletteRamp(0.6) * arc * lit * 1.2;
 
   // Diamond dust: crystals drift down on the hat clock, and each counted kick

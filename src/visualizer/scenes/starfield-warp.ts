@@ -29,13 +29,13 @@ vec4 scene(vec2 uv, vec2 p) {
     float z = fract(rnd + u_phase * (0.35 + rnd * 0.65));
     float starR = mix(0.02, 1.8, z * z); // accelerates outward — warp feel
     float streak = (0.015 + u_energy * 0.08 + u_kickPulse * 0.16) * (0.3 + z);
-    float dash = smoothstep(0.42, 0.0, abs(fa)) * smoothstep(streak, 0.0, abs(r - starR));
+    float dash = (1.0 - smoothstep(0.0, 0.42, abs(fa))) * (1.0 - smoothstep(0.0, streak, abs(r - starR)));
     float tw = 0.65 + 0.35 * sin(u_globalTime * (3.0 + rnd * 8.0) + rnd * 37.0);
     col += paletteRamp(0.3 + rnd * 0.45 + u_centroid * 0.25) * dash * tw * (0.2 + z);
   }
 
   // Soft core glow that breathes with the vocal envelope.
-  float core = smoothstep(0.5, 0.0, r) * (0.06 + u_vocal * 0.22 + u_kickPulse * 0.18);
+  float core = (1.0 - smoothstep(0.0, 0.5, r)) * (0.06 + u_vocal * 0.22 + u_kickPulse * 0.18);
   col += paletteRamp(0.85) * core;
 
   float alpha = clamp(dot(col, vec3(0.45)), 0.0, 0.8);

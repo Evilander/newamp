@@ -1,5 +1,6 @@
 // Checks that the Live grade's luminance evening leaves the brightest pixels at
-// full brightness (see eviland-live-highlight-probe.ts). Bundles the probe with
+// full brightness, and that a look's stereoSpread reaches the Live fluid (see
+// eviland-live-highlight-probe.ts). Bundles the probe with
 // esbuild and runs it in an Electron window; results land in
 // tmp/eviland-live-highlight/. Run with: electron scripts/eviland-live-highlight-test.mjs
 

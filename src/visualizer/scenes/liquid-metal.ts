@@ -55,7 +55,7 @@ vec4 scene(vec2 uv, vec2 p) {
   float bandSharp = pow(band, 3.0);
 
   // Rim: thin shell at the iso.
-  float rim = exp(-pow((f - iso) * 4.0, 2.0));
+  float rim = exp(-sq((f - iso) * 4.0));
 
   // Specular hint via small offset trick — fake light from upper-left.
   vec2 lightDir = normalize(vec2(-0.7, 0.7));

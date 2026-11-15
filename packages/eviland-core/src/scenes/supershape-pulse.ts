@@ -40,9 +40,9 @@ vec4 scene(vec2 uv, vec2 p) {
   float rShape = superR(phi, m, n1, n2, n3) * pump;
 
   float d = r - rShape;
-  float outline = smoothstep(0.012, 0.0, abs(d)) *
+  float outline = (1.0 - smoothstep(0.0, 0.012, abs(d))) *
                   (0.7 + u_vocal * 0.5 + u_kickPulse * 0.6);
-  float fill = smoothstep(0.0, -0.18, d) * (0.18 + u_energy * 0.45);
+  float fill = (1.0 - smoothstep(-0.18, 0.0, d)) * (0.18 + u_energy * 0.45);
 
   // Echo rings — fainter copies of the shape pulsing outward.
   float echoes = 0.0;
@@ -50,7 +50,7 @@ vec4 scene(vec2 uv, vec2 p) {
     float fi = float(i);
     float rOff = rShape * (1.0 + fi * 0.18 + u_bass * 0.08);
     float dE = abs(r - rOff);
-    echoes += smoothstep(0.008 + fi * 0.004, 0.0, dE) * (0.35 / fi) *
+    echoes += (1.0 - smoothstep(0.0, 0.008 + fi * 0.004, dE)) * (0.35 / fi) *
               (0.4 + u_hat * 0.5);
   }
 
@@ -59,13 +59,13 @@ vec4 scene(vec2 uv, vec2 p) {
   vec2 fp = rot2(spin) * q * (3.0 + u_seed * 2.0);
   float n = fbm(fp + vec2(u_globalTime * 0.2, -u_globalTime * 0.17));
   float filigree = smoothstep(0.5, 0.7, n) *
-                   smoothstep(rShape * 0.92, 0.0, r) *
+                   (1.0 - smoothstep(0.0, rShape * 0.92, r)) *
                    (0.18 + u_vocalPulse * 0.4);
 
   // Point shimmer along the curve — count rises with centroid.
   float pts = floor(24.0 + u_centroid * 64.0);
   float ptPhase = fract(phi / TAU * pts + u_globalTime * 0.3);
-  float pt = smoothstep(0.92, 1.0, ptPhase) * smoothstep(0.018, 0.0, abs(d)) *
+  float pt = smoothstep(0.92, 1.0, ptPhase) * (1.0 - smoothstep(0.0, 0.018, abs(d))) *
              (0.5 + u_hatPulse * 0.5);
 
   vec3 outlineCol = paletteRamp(0.85);
@@ -80,7 +80,7 @@ vec4 scene(vec2 uv, vec2 p) {
   col += ptCol * pt;
 
   // Soft halo over the whole shape on kick.
-  float halo = smoothstep(rShape * 1.6, 0.0, r) * u_kickPulse * 0.18;
+  float halo = (1.0 - smoothstep(0.0, rShape * 1.6, r)) * u_kickPulse * 0.18;
   col += outlineCol * halo;
 
   float alpha = clamp(dot(col, vec3(0.55)), 0.0, 0.8);

@@ -51,9 +51,9 @@ vec4 scene(vec2 uv, vec2 p) {
   float band = u_bands[bandIdx];
   float flash = pow(band, 1.6) * (0.5 + u_kick * 0.6);
 
-  float wall = smoothstep(0.085, 0.0, edge);
-  float halo = smoothstep(0.35, 0.0, edge) * 0.18;
-  float core = smoothstep(0.55, 0.0, d1) * (0.18 + flash * 1.1);
+  float wall = 1.0 - smoothstep(0.0, 0.085, edge);
+  float halo = (1.0 - smoothstep(0.0, 0.35, edge)) * 0.18;
+  float core = (1.0 - smoothstep(0.0, 0.55, d1)) * (0.18 + flash * 1.1);
 
   vec3 wallCol = paletteRamp(0.85 + u_centroid * 0.1);
   vec3 cellCol = paletteRamp(0.18 + cellHash * 0.5 + u_centroid * 0.2);
@@ -63,7 +63,7 @@ vec4 scene(vec2 uv, vec2 p) {
   col += cellCol * core;
 
   float spark = step(0.94, hash21(vec2(cellHash * 53.0, floor(u_globalTime * 4.0)))) *
-                smoothstep(0.4, 0.0, d1) * u_snarePulse * 0.6;
+                (1.0 - smoothstep(0.0, 0.4, d1)) * u_snarePulse * 0.6;
   col += u_light * spark;
 
   float alpha = clamp(dot(col, vec3(0.55)), 0.0, 0.78);

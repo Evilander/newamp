@@ -27,7 +27,7 @@ import type { EvilandPalette } from './eviland';
 import { frameBus } from './frame-bus';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from './eviland-memory-bridge';
 import { createEngineScoreFeed, type ScoreFeed } from './eviland-score-feed';
-import { extractArtPalette, type ArtPalette } from './art-palette';
+import { watchArtPalette, type ArtPalette } from './art-palette';
 import { createLookRequestCursor, type LookRequestCursor } from './look-requests';
 import { api } from '../lib/api';
 import { BUTTERCHURN_FFT_SIZE } from '../butterchurn-iframe/protocol';
@@ -195,8 +195,8 @@ export function startEvilandProducer(
     artPalette = null;
     if (trackId == null) return;
     const captured = trackId;
-    void extractArtPalette(api.getArtUrl(trackId)).then((art) => {
-      if (artTrackId === captured) artPalette = art;
+    watchArtPalette(api.getArtUrl(trackId), () => artTrackId === captured, (art) => {
+      artPalette = art;
     });
   }
   let freq: Uint8Array<ArrayBuffer> | null = null;

@@ -75,22 +75,22 @@ vec4 scene(vec2 uv, vec2 p) {
   float along = dot(fp - cC, cAxis);
   float wall = smoothstep(0.2, 0.7, cDiv);
   float e = min(edge, abs(along) * 2.0 + (1.0 - wall) * 0.6);
-  float body = smoothstep(0.02, 0.07, e) * smoothstep(0.21, 0.1, e);
-  float rim = exp(-pow((e - 0.165) / 0.024, 2.0));
+  float body = smoothstep(0.02, 0.07, e) * (1.0 - smoothstep(0.1, 0.21, e));
+  float rim = exp(-sq((e - 0.165) / 0.024));
   float cyto = smoothstep(0.15, 0.24, e);
 
   // Nucleus per daughter: condenses and brightens while the cell divides.
   float dn = min(length(fp - cA), length(fp - cB));
   float rn = 0.12 - 0.035 * cDiv;
-  float nucFill = smoothstep(rn, rn * 0.55, dn);
-  float nucRing = exp(-pow((dn - rn) / 0.018, 2.0));
+  float nucFill = 1.0 - smoothstep(rn * 0.55, rn, dn);
+  float nucRing = exp(-sq((dn - rn) / 0.018));
   float nucleolus = exp(-dn * dn * 1400.0);
   float chromatin = vnoise(q * 22.0 + cH * 40.0);
 
   // Spindle fibres between the separating nuclei.
   vec2 rel = fp - cC;
   float perp = dot(rel, vec2(-cAxis.y, cAxis.x));
-  float spindle = cDiv * smoothstep(cSep, cSep * 0.4, abs(along))
+  float spindle = cDiv * (1.0 - smoothstep(cSep * 0.4, cSep, abs(along)))
                 * (0.5 + 0.5 * cos(perp * 110.0)) * exp(-perp * perp * 160.0);
 
   // Cytoplasm granules, streaming slowly with the phase.

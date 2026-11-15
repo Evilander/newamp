@@ -46,7 +46,7 @@ vec4 scene(vec2 uv, vec2 p) {
     float band = bandAvg(int(mod(fi * 3.0, 22.0)), int(mod(fi * 3.0 + 3.0, 23.0)));
     float thickness = 0.004 + band * 0.012 + strike * 0.018;
     float glow = exp(-d * (5.0 + 8.0 / (thickness + 0.01))) * (ambient + strike * 1.3);
-    float core = smoothstep(thickness, 0.0, d) * (0.5 + strike * 1.4);
+    float core = (1.0 - smoothstep(0.0, thickness, d)) * (0.5 + strike * 1.4);
 
     float hueT = clamp(0.55 + u_centroid * 0.4 - fi * 0.05, 0.0, 1.0);
     vec3 boltTint = paletteRamp(hueT);

@@ -35,17 +35,17 @@ vec4 nbArm(float r, float la, float h, float reach) {
   float h2 = hash11(h1 * 57.3 + sign(la1) * 1.7);
   float rEnd = r2 + (0.1 + h2 * 0.28) * reach;
   float d = r * abs(la2);
-  float w = mix(0.02, 0.004, clamp(r / rEnd, 0.0, 1.0)) * smoothstep(rEnd + 0.01, rEnd - 0.04, r);
+  float w = mix(0.02, 0.004, clamp(r / rEnd, 0.0, 1.0)) * (1.0 - smoothstep(rEnd - 0.04, rEnd + 0.01, r));
   return vec4(d, w, length(vec2(r - rEnd, d)), h2);
 }
 
 vec3 nbDraw(vec4 arm, float r, float h, float aa, float life, float wave) {
-  float core = smoothstep(arm.y + aa, max(arm.y - aa, 0.0), arm.x) * step(0.0005, arm.y);
+  float core = (1.0 - smoothstep(max(arm.y - aa, 0.0), arm.y + aa, arm.x)) * step(0.0005, arm.y);
   float halo = exp(-arm.x / (arm.y * 2.0 + 0.004)) * step(0.0005, arm.y);
   // Packets share the arm's clock, so a spike reaching a fork carries on
   // down both children at once.
   float pk = fract(r * 1.4 - u_phase * 0.45 + h * 0.7);
-  float packet = exp(-pow((pk - 0.5) * 10.0, 2.0));
+  float packet = exp(-sq((pk - 0.5) * 10.0));
   float bouton = exp(-arm.z * arm.z * 3000.0);
   float fire = arm.w < 0.5 ? u_snarePulse : u_hatPulse;
 
@@ -92,8 +92,8 @@ vec4 scene(vec2 uv, vec2 p) {
     // Soma: a membrane-bright body with a nucleus; most somas fire on kicks.
     float rs = 0.075 * (1.0 + u_bass * 0.15 + u_kickPulse * 0.1);
     float fireN = u_kickPulse * step(0.35, fract(h * 11.0));
-    float soma = smoothstep(rs, rs * 0.6, r);
-    float somaRim = exp(-pow((r - rs) / 0.014, 2.0));
+    float soma = 1.0 - smoothstep(rs * 0.6, rs, r);
+    float somaRim = exp(-sq((r - rs) / 0.014));
     float nucleus = exp(-r * r / (rs * rs * 0.1));
     col += paletteRamp(0.6) * soma * (0.16 + 0.3 * life + fireN * 0.4);
     col += paletteRamp(0.95) * somaRim * (0.25 + 0.45 * life + fireN * 0.35);

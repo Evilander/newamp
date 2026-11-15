@@ -24,14 +24,14 @@ vec4 scene(vec2 uv, vec2 p) {
     float y = fract(rnd * 7.0 - (u_globalTime * speed + u_bandTime[band] * 0.9 + u_energyTime * 0.25)); // 1 → 0 falls down… uv.y up
     float dy = uv.y - (1.0 - y);
     float trail = smoothstep(0.0, 0.18 + level * 0.2, -dy) * step(dy, 0.0);
-    float head = smoothstep(0.012 + level * 0.01, 0.0, abs(dy));
-    float lateral = smoothstep(0.32, 0.0, abs(cx));
+    float head = 1.0 - smoothstep(0.0, 0.012 + level * 0.01, abs(dy));
+    float lateral = 1.0 - smoothstep(0.0, 0.32, abs(cx));
     float lit = (head * (0.4 + level * 0.9) + trail * exp(dy * 9.0) * (0.12 + level * 0.45)) * lateral;
     col += paletteRamp(0.25 + level * 0.55 + rnd * 0.15) * lit;
   }
 
   // Kick splash along the floor; snare flickers a faint sky sheet.
-  float splash = u_kickPulse * smoothstep(0.16, 0.0, uv.y) * (0.4 + u_bass * 0.6);
+  float splash = u_kickPulse * (1.0 - smoothstep(0.0, 0.16, uv.y)) * (0.4 + u_bass * 0.6);
   col += paletteRamp(0.9) * splash * 0.5;
   float sheet = u_snarePulse * smoothstep(0.75, 1.0, uv.y) * 0.12;
   col += u_light * sheet;

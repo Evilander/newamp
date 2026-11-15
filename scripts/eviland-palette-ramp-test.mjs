@@ -19,6 +19,7 @@ async function load(entry, name) {
 }
 const gl = await load('src/visualizer/eviland-gl.ts', 'eviland-v2-ramp-gl-bundle');
 const operators = await load('src/visualizer/eviland-operators.ts', 'eviland-v2-ramp-ops-bundle');
+const appearance = await load('src/visualizer/eviland-appearance.ts', 'eviland-v2-ramp-appearance-bundle');
 const { generate } = await load('src/visualizer/eviland-randomizer.ts', 'eviland-v2-ramp-rand-bundle');
 const { RAMP_STEPS, createRampTable, updateRampTable, oklchRampAt, rampGlsl, ditherTriAt, DITHER_FRAME_WRAP } = gl;
 
@@ -141,6 +142,38 @@ function measure(set, steps = RAMP_STEPS) {
   log.push(`the exact ramp agrees with eviland-operators' OKLCh blend within ${(worst * 255).toFixed(2)} levels`);
 }
 
+// --- a grey with a rounding error's tint follows the other side's hue -------
+// Chroma below NEAR_GREY_CHROMA has no hue worth following. The sleeve blend,
+// the Director's blend and the shaders' ramp have to agree on that, or a fade
+// from a near-white ink to a saturated colour sweeps through the ink's noise hue
+// on one path and runs straight to the target on another.
+{
+  const a = generate('v2-ramp-grey-a', 'nebula').config;
+  const b = JSON.parse(JSON.stringify(a));
+  const target = appearance.oklchToRgb(0.62, 0.11, 29);
+  let band = 0;
+  let worst = 0;
+  for (let n = 0; n < 200; n++) {
+    const base = 0.55 + 0.4 * rand();
+    const tinted = Math.floor(rand() * 3);
+    const tint = 0.001 + 0.006 * rand();
+    const grey = [0, 1, 2].map((i) => base + (i === tinted ? tint : 0));
+    const chromaOf = appearance.rgbToOklch(grey).c;
+    if (chromaOf > 1e-4 && chromaOf < appearance.NEAR_GREY_CHROMA) band++;
+    a.palette = { bg: [0, 0, 0], dark: grey, accent: grey, light: grey };
+    b.palette = { bg: [0, 0, 0], dark: target, accent: target, light: target };
+    for (const t of [0.1, 0.25, 0.4, 0.49]) {
+      const ramp = oklchRampAt([...grey, ...target, ...target], t);
+      const director = operators.lerpConfig(a, b, t * 2).palette.dark;
+      const sleeve = appearance.mixOklch(grey, target, t * 2);
+      worst = Math.max(worst, maxDiff(ramp, sleeve), maxDiff(director, sleeve));
+    }
+  }
+  if (band < 20) fail(`only ${band} of the greys had a chroma between 1e-4 and the near-grey limit`);
+  if (worst > 2 * LEVEL) fail(`a near-grey colour fades to red ${(worst * 255).toFixed(1)} levels differently on the sleeve, Director and ramp paths`);
+  log.push(`near-grey fades: ${band} greys with chroma under ${appearance.NEAR_GREY_CHROMA}, sleeve, Director and ramp within ${(worst * 255).toFixed(2)} levels`);
+}
+
 // --- the point of it: hue changes keep their colour -----------------------
 {
   const chroma = ([r, g, b]) => Math.max(r, g, b) - Math.min(r, g, b);
@@ -173,24 +206,36 @@ function measure(set, steps = RAMP_STEPS) {
 {
   let sum = 0;
   let sumAbs = 0;
+  let sumSq = 0;
+  let outer = 0;
   let min = 1;
   let max = -1;
   let n = 0;
-  for (let f = 0; f < 6; f++) {
-    for (let y = 0; y < 64; y++) {
-      for (let x = 0; x < 64; x++) {
+  for (let f = 0; f < 8; f++) {
+    for (let y = 0; y < 128; y++) {
+      for (let x = 0; x < 128; x++) {
         const v = ditherTriAt(x + 0.5, y + 0.5, f);
         if (!Number.isFinite(v)) fail('dither returned a non-finite value');
-        sum += v; sumAbs += Math.abs(v); min = Math.min(min, v); max = Math.max(max, v); n++;
+        sum += v; sumAbs += Math.abs(v); sumSq += v * v; if (Math.abs(v) > 0.8) outer++;
+        min = Math.min(min, v); max = Math.max(max, v); n++;
       }
     }
   }
-  if (Math.abs(sum / n) > 0.02) fail(`dither mean is ${(sum / n).toFixed(3)} (should be 0)`);
+  // A triangle one level either side of zero has an RMS of 1/sqrt(6) (0.408),
+  // a mean magnitude of 1/3 and 4% of its mass beyond 0.8. Two shifted copies
+  // of one gradient-noise sequence summed give a trapezoid that stops at 0.6
+  // with an RMS of 0.31, which this has to tell apart.
+  const rms = Math.sqrt(sumSq / n);
+  if (Math.abs(sum / n) > 0.01) fail(`dither mean is ${(sum / n).toFixed(3)} (should be 0)`);
   if (min < -1 || max > 1) fail(`dither leaves one level: ${min.toFixed(2)}..${max.toFixed(2)}`);
+  if (Math.abs(rms - 1 / Math.sqrt(6)) > 0.01) fail(`dither RMS is ${rms.toFixed(3)} (a triangular one level wide is 0.408)`);
+  if (Math.abs(sumAbs / n - 1 / 3) > 0.01) fail(`dither mean magnitude is ${(sumAbs / n).toFixed(3)} (a triangular one level wide is 0.333)`);
+  if (Math.abs(outer / n - 0.04) > 0.01) fail(`${(100 * outer / n).toFixed(1)}% of the dither lies beyond 0.8 (a triangular one level wide has 4%)`);
+  if (Math.min(-min, max) < 0.97) fail(`dither never reaches a full level: ${min.toFixed(2)}..${max.toFixed(2)}`);
   if (ditherTriAt(10.5, 20.5, 3) !== ditherTriAt(10.5, 20.5, 3)) fail('dither is not a pure function of pixel and frame');
   if (ditherTriAt(10.5, 20.5, 3) === ditherTriAt(10.5, 20.5, 4) && ditherTriAt(11.5, 20.5, 3) === ditherTriAt(11.5, 20.5, 4)) fail('dither does not move with the frame');
   if (!(DITHER_FRAME_WRAP >= 256)) fail('the dither frame wrap is too short to hide a repeat');
-  log.push(`dither: mean ${(sum / n).toFixed(3)}, range ${min.toFixed(2)}..${max.toFixed(2)}, mean magnitude ${(sumAbs / n).toFixed(2)} level`);
+  log.push(`dither: mean ${(sum / n).toFixed(3)}, range ${min.toFixed(2)}..${max.toFixed(2)}, RMS ${rms.toFixed(3)}, mean magnitude ${(sumAbs / n).toFixed(2)} level, ${(100 * outer / n).toFixed(1)}% beyond 0.8`);
 }
 
 console.log(log.join('\n'));

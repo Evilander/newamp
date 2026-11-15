@@ -13,8 +13,8 @@ const float TAU_MW = 6.28318530718;
 
 float lattice(vec2 q, float freq, float thickness) {
   vec2 g = fract(q * freq) - 0.5;
-  float lx = smoothstep(thickness, 0.0, abs(g.x));
-  float ly = smoothstep(thickness, 0.0, abs(g.y));
+  float lx = 1.0 - smoothstep(0.0, thickness, abs(g.x));
+  float ly = 1.0 - smoothstep(0.0, thickness, abs(g.y));
   return max(lx, ly);
 }
 
@@ -56,7 +56,7 @@ vec4 scene(vec2 uv, vec2 p) {
   col += hsv2rgb(vec3(fract(u_centroid + tintPhase * 0.3), 0.4, 1.0)) * irid * weave * 0.18;
 
   // Soft radial fade so the veil drifts off at edges instead of slamming hard.
-  float vig = smoothstep(1.55, 0.4, length(p));
+  float vig = 1.0 - smoothstep(0.4, 1.55, length(p));
   col *= 0.65 + vig * 0.35;
 
   // Cap alpha low — this is a veil over MilkDrop.

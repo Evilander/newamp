@@ -34,6 +34,7 @@ function makeFrame(level: Level, t: number): EvilandFrame {
     energy: 0.72 * gain,
     centroid: 0.55 * gain,
     flatness: 0.4 * gain,
+    noisiness: 0.3 * gain,
     crest: 0.6 * gain,
     rolloff: 0.5 * gain,
     width: 0.5 * gain,

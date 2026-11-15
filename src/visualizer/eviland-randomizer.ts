@@ -167,6 +167,11 @@ const ADDED_SCENES: Partial<Record<Archetype, ReadonlyArray<{ scene: string; sha
   echochamber: [{ scene: 'ripple-tank', share: 0.4 }],
   strobe: [{ scene: 'truss-chase', share: 0.3 }],
   pulsar: [{ scene: 'gobo-heads', share: 0.4 }],
+  inkwell: [{ scene: 'marbling', share: 0.4 }],
+  phosphor: [{ scene: 'harmonic-strings', share: 0.35 }],
+  heartbeat: [{ scene: 'pendulum-wave', share: 0.35 }],
+  glasshouse: [{ scene: 'ferrofluid', share: 0.35 }],
+  cathedral: [{ scene: 'rose-window', share: 0.4 }],
 };
 
 function pickScene(code: string, archetype: Archetype): string | null {
@@ -2312,6 +2317,15 @@ const SCENE_PROFILES: Record<string, SceneProfile> = {
   // A little fluid lets the ripples bend the web as they pass over it.
   'caustic-floor': stillScene({ decay: [0.89, 0.92], bloom: [0.25, 0.4], energyBloom: [0.08, 0.14], fluid: [0.05, 0.12] }),
   'prism-dispersal': stillScene({ decay: [0.88, 0.92], bloom: [0.25, 0.4], energyBloom: [0.08, 0.14] }),
+  // Flat inks with hard edges: a short decay keeps the rings crisp as a drop
+  // pushes them, and next to no bloom keeps the dark inks dark.
+  marbling: stillScene({ decay: [0.8, 0.84], bloom: [0.04, 0.12], energyBloom: [0.08, 0.12] }),
+  'harmonic-strings': stillScene({ decay: [0.84, 0.88], bloom: [0.2, 0.35], energyBloom: [0.08, 0.14] }),
+  // The longest decay of these four: each bob leaves the arc it has just swung through.
+  'pendulum-wave': stillScene({ decay: [0.89, 0.92], bloom: [0.25, 0.4], energyBloom: [0.08, 0.14] }),
+  ferrofluid: stillScene({ decay: [0.8, 0.84], bloom: [0.15, 0.3], energyBloom: [0.08, 0.14] }),
+  // Bloom is the glow of lit glass in a dark nave, so this one takes the most.
+  'rose-window': stillScene({ decay: [0.84, 0.88], bloom: [0.35, 0.5], energyBloom: [0.08, 0.14] }),
 };
 
 function applySceneProfile(config: OperatorConfig, profile: SceneProfile, code: string): void {

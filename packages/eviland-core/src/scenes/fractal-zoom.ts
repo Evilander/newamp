@@ -57,7 +57,7 @@ vec4 scene(vec2 uv, vec2 p) {
   float halo = exp(-length(p) * 1.4) * (0.05 + u_bass * 0.15);
   col += paletteRamp(0.9) * halo;
 
-  float beatRing = smoothstep(0.02, 0.0, abs(fract(iter * 0.12 + u_beatPhase) - 0.5) - 0.45);
+  float beatRing = 1.0 - smoothstep(0.0, 0.02, abs(fract(iter * 0.12 + u_beatPhase) - 0.5) - 0.45);
   col += paletteRamp(0.7) * beatRing * 0.15 * u_beatConf;
 
   float alpha = clamp(dot(col, vec3(0.5)), 0.0, 0.78);

@@ -52,7 +52,7 @@ vec4 scene(vec2 uv, vec2 p) {
       // Taper toward tail so ribbons look like trailing silk.
       float taper = 1.0 - fs / 22.0;
       float locW = width * (0.35 + 0.65 * taper);
-      float contrib = smoothstep(locW, 0.0, d);
+      float contrib = 1.0 - smoothstep(0.0, locW, d);
       minD = min(minD, d / max(locW, 1e-3));
       if (fs < 1.5) headD = min(headD, d);
       col += paletteRamp(0.3 + rnd * 0.4 + u_centroid * 0.25 + fs * 0.01) * contrib * (0.12 + taper * 0.18);
@@ -65,7 +65,7 @@ vec4 scene(vec2 uv, vec2 p) {
   }
 
   // Soft vignette so ribbons feel suspended in the field.
-  float vig = smoothstep(1.5, 0.6, length(p));
+  float vig = 1.0 - smoothstep(0.6, 1.5, length(p));
   col *= 0.6 + vig * 0.4;
 
   float alpha = clamp(dot(col, vec3(0.55)), 0.0, 0.78);
