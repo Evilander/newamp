@@ -132,6 +132,7 @@ class ExclusiveBridge implements ExternalTransport {
         engine.patchExternal({
           currentTime: payload.positionSec,
           ...(payload.durationSec && payload.durationSec > 0 ? { duration: payload.durationSec } : {}),
+          buffering: payload.buffering === true,
         });
         break;
       case 'state':
@@ -156,9 +157,18 @@ class ExclusiveBridge implements ExternalTransport {
         this.endedPending = true;
         engine.patchExternal({ playing: false, ended: true });
         break;
-      case 'error':
+      case 'error': {
+        // With a position, the track isn't broken: the drive stopped answering
+        // or a read hangs, and the shared player carries it on from there
+        // instead of it being skipped. The engine ignores it if the stream is
+        // no longer its track.
+        if (typeof payload.positionSec === 'number') {
+          engine.handleExternalFailure(payload.positionSec, payload.message, payload.trackId ?? undefined);
+          break;
+        }
         engine.patchExternal({ playing: false, buffering: false, error: payload.message });
         break;
+      }
       case 'device-lost':
         engine.handleExternalDeviceLost(payload.positionSec);
         break;

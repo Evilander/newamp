@@ -1,7 +1,8 @@
 // A track removed while a sliced library job is between turns must not fail the
 // job: the tag recompute and the listening-history import both write rows that
 // point at tracks, and a removed track used to fail the foreign key, losing the
-// whole tag pass or stranding the batches of a half-applied import.
+// whole tag pass or stranding the batches of a half-applied import. A tag rule
+// deleted or switched off in the same gap must not get its tags written back.
 // Run: node scripts/library-removal-race-test.mjs
 import assert from 'node:assert/strict';
 import { mkdir, rm } from 'node:fs/promises';
@@ -46,6 +47,24 @@ const result = await pass;
 assert.equal(result.tracksEvaluated > 0, true);
 assert.equal(store.getTagSummaries().find((t) => t.name === 'keeper').trackCount, COUNT - doomed.length);
 assert.equal(result.tagsAssigned, COUNT - doomed.length, 'tags for removed tracks are not counted');
+
+// A rule deleted or switched off while a pass is between turns takes its tags with it;
+// the pass must not write them back.
+for (const [name, remove] of [
+  ['deleted', (rule) => store.deleteTagRule(rule.id)],
+  ['switched off', (rule) => store.setTagRuleEnabled(rule.id, false)],
+]) {
+  const tag = name === 'deleted' ? 'doomed_rule' : 'paused_rule';
+  store.saveTagRule({ name: tag, body: `tag(${tag}) when genre = "Keeper"` });
+  const rule = store.listTagRules().find((candidate) => candidate.name === tag);
+  const running = store.recomputeTagsAsync();
+  await tick();
+  remove(rule);
+  await running;
+  assert.equal(store.getTagSummaries().some((summary) => summary.name === tag), false, `the pass does not write tags back for a rule ${name} while it ran`);
+  assert.deepEqual(store.getTrackIdsByTag(tag), []);
+  assert.equal(store.getTagSummaries().find((summary) => summary.name === 'keeper').trackCount, COUNT - doomed.length, 'the other rule keeps its tags');
+}
 
 // ---- history import
 const entries = [];

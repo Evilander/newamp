@@ -1,36 +1,123 @@
-// RadioView.playStation() pauses the library engine when a station starts,
-// but that was one-directional: nothing paused/stopped the radio stream when
-// library playback became active from elsewhere (Transport, Space, a media
-// key). A user could end up with the radio stream and a library track
-// playing simultaneously. RadioView.tsx is a React component wired to a real
-// <audio> element and the zustand store, so this is verified against source
-// (matching this repo's existing convention for store/component-level fixes
-// that can't run outside a DOM — see queue-edit-smoke.mjs's own
-// usePlayerStore.ts/PlaylistView.tsx source assertions).
+// A radio station and a library track must never play at once. Starting a
+// station pauses the library, and library playback starting from anywhere
+// (Transport, Space, a media key, a detached remote) ends the station, or the
+// connect still under way, whether or not the Radio view is on screen.
+// Runs the real RadioView against stand-ins for the audio element and the
+// player store (scripts/lib/radio-view-rig.mjs).
 // Run with: npm run test:radio-library-exclusivity
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createRadioRig, directoryStation } from './lib/radio-view-rig.mjs';
 
-const [radioSource, packageSource] = await Promise.all([
-  readFile(new URL('../src/components/views/RadioView.tsx', import.meta.url), 'utf8'),
-  readFile(new URL('../package.json', import.meta.url), 'utf8'),
-]);
+const stations = [directoryStation('a'), directoryStation('b')];
 
-// The existing one-directional half (station start pauses the library engine).
-assert.match(radioSource, /if \(isPlayingLibrary\) pauseLibrary\(\);/, 'starting a station should still pause library playback');
+async function rigWithResults() {
+  const rig = await createRadioRig({ stations });
+  await rig.search('jazz');
+  return rig;
+}
 
-// The fix: a library-playback-became-active effect that stops the radio.
-const effectMatch = radioSource.match(/useEffect\(\(\) => \{\s*if \(isPlayingLibrary[\s\S]*?\}, \[isPlayingLibrary\]\);/);
-assert.ok(effectMatch, 'RadioView should react to isPlayingLibrary turning on by stopping the radio stream');
-const effectBody = effectMatch[0];
-assert.match(effectBody, /audio\.current\.paused/, 'the effect should check the radio audio element\'s own paused state');
-assert.match(effectBody, /stopRadio\(\)/, 'library playback becoming active should stop the radio (matching the explicit Stop button behavior), not just pause it silently');
+async function goLive(rig, index = 0) {
+  rig.click(rig.rowButton(index));
+  await rig.flush();
+  rig.audio.answer(rig.audio.plays.length - 1);
+  await rig.flush();
+  assert.equal(rig.isLive(), true);
+}
 
-// isPlayingLibrary must be sourced from the real store, not a local stub —
-// otherwise the effect would never actually fire on real Transport/Space input.
-assert.match(radioSource, /const isPlayingLibrary = usePlayerStore\(\(s\) => s\.isPlaying\);/, 'isPlayingLibrary should subscribe to the store\'s live isPlaying flag');
+// Starting a station pauses the library.
+{
+  const rig = await rigWithResults();
+  rig.player({ isPlaying: true });
+  rig.click(rig.rowButton(0));
+  await rig.flush();
+  assert.equal(rig.store.pauses, 1, 'starting a station pauses library playback');
+  assert.equal(rig.store.state.isPlaying, false);
+  assert.equal(rig.isConnecting(), true, 'and the station is not ended by the pause it caused');
+  rig.audio.answer(0);
+  await rig.flush();
+  assert.equal(rig.isLive(), true);
+  rig.dispose();
+}
 
+// Library playback starting while a station is live ends it, the same as the Stop button.
+{
+  const rig = await rigWithResults();
+  await goLive(rig);
+  rig.player({ isPlaying: true });
+  await rig.flush();
+  assert.equal(rig.isLive(), false, 'the LIVE bar goes away');
+  assert.equal(rig.audio.paused, true, 'the stream is paused');
+  assert.equal(rig.audio.src, '', 'and released, not just paused');
+  rig.dispose();
+}
+
+// The view does not have to be on screen.
+{
+  const rig = await rigWithResults();
+  await goLive(rig);
+  rig.view.unmount();
+  rig.player({ isPlaying: true });
+  assert.equal(rig.audio.paused, true, 'a station left playing under another view ends when the library starts');
+  assert.equal(rig.audio.src, '');
+  rig.dispose();
+}
+
+// Nor does the station have to be on air yet: a connect still under way is ended
+// too, so it cannot come up over the library when it finishes.
+for (const abortOnLoad of [true, false]) {
+  const rig = await rigWithResults();
+  rig.audio.abortOnLoad = abortOnLoad;
+  rig.click(rig.rowButton(0));
+  await rig.flush();
+  assert.equal(rig.isConnecting(), true);
+  rig.view.unmount();
+
+  rig.player({ isPlaying: true });
+  assert.equal(rig.audio.src, '', 'the connect is cancelled when the library starts');
+  assert.equal(rig.audio.paused, true);
+
+  // The connection finishes anyway, as one already in flight does.
+  rig.audio.answer(0);
+  await rig.settle();
+  assert.equal(rig.audio.src, '');
+  assert.equal(rig.audio.listenerCount('error'), 0, 'no stream watch is attached to a cancelled connect');
+  assert.deepEqual(rig.clicks, [], 'a station that never went on air is not reported');
+  assert.deepEqual(rig.toasts, [], 'and the cancelled connect says nothing');
+
+  // Back on the Radio view, nothing claims to be playing or connecting.
+  rig.remount();
+  assert.equal(rig.isLive(), false);
+  assert.equal(rig.isConnecting(), false);
+  rig.dispose();
+}
+
+// A view that mounts while a connect is under way shows it, and follows it to the end.
+{
+  const rig = await rigWithResults();
+  rig.click(rig.rowButton(0));
+  await rig.flush();
+  rig.remount();
+  assert.equal(rig.isConnecting(), true, 'the connect in progress is shown');
+  rig.audio.answer(0);
+  await rig.flush();
+  assert.equal(rig.isLive(), true, 'and so is the station once it is on air');
+  rig.dispose();
+}
+
+// Only the library starting ends the station; other changes to the player leave it on air.
+{
+  const rig = await rigWithResults();
+  await goLive(rig);
+  assert.equal(rig.audio.paused, false);
+  rig.player({ volume: 0.3 });
+  rig.player({ isPlaying: false });
+  assert.equal(rig.isLive(), true, 'only the library starting ends the station, not other store changes');
+  rig.dispose();
+}
+
+const packageSource = await readFile(new URL('../package.json', import.meta.url), 'utf8');
 assert.match(packageSource, /"test:radio-library-exclusivity"/, 'package.json should expose the radio/library exclusivity test');
 
 console.log(JSON.stringify({ ok: true }, null, 2));

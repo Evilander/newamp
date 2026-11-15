@@ -84,6 +84,9 @@ export function QuickPlayPalette(): JSX.Element | null {
         event.preventDefault();
         focusLibrarySearch();
       } else if (event.key === 'Escape') {
+        // Escape belongs to the input method while it composes: it cancels the
+        // composition, not the palette.
+        if (event.isComposing || event.keyCode === 229) return;
         setOpen(false);
       }
     }

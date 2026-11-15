@@ -106,7 +106,7 @@ import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.
 import { buildAppMenuTemplate } from './app-menu.js';
 import { caseFoldCachePath } from './cache-key-casing.js';
 import { AUDIO_EXTS, isSkippedLibraryFile, isSkippedLibraryFolder } from './library-skip.js';
-import { isStorageError, retryStorageErrors } from './read-failure.js';
+import { isStorageError, retryStorageErrors, setStorageRoots } from './read-failure.js';
 import { assertHistoryImportIdle, registerHistoryImportIpc } from './history-ipc.js';
 import { registerMusicServerIpc } from './music-server-ipc.js';
 import type { MusicServerRegistry } from './music-servers.js';
@@ -126,6 +126,7 @@ import type {
   MetadataLookupCandidate,
   OpenFilesResult,
   PlayerCommand,
+  RecoveryEvent,
   SavedPlaylist,
   SavePlaylistInput,
   TrackContextMenuChoice,
@@ -440,19 +441,30 @@ function normalizeDiagnosticValue(value: unknown): unknown {
 }
 
 function attachWindowDiagnostics(win: BrowserWindow, label: string): void {
+  // The window title is left out of these events: it names whatever was
+  // playing, and the files they land in get attached to bug reports.
   win.webContents.on('render-process-gone', (_event, details) => {
     writeDiagnosticEvent('window-render-process-gone', {
       label,
-      title: win.getTitle(),
       url: win.webContents.getURL(),
       details,
     });
   });
   win.on('unresponsive', () => {
-    writeDiagnosticEvent('window-unresponsive', { label, title: win.getTitle(), url: win.webContents.getURL() });
+    writeDiagnosticEvent('window-unresponsive', { label, url: win.webContents.getURL() });
   });
   win.on('responsive', () => {
-    writeDiagnosticEvent('window-responsive', { label, title: win.getTitle(), url: win.webContents.getURL() });
+    writeDiagnosticEvent('window-responsive', { label, url: win.webContents.getURL() });
+  });
+}
+
+// The page sets its title to the playing track, and the shell draws it (the
+// taskbar, Alt-Tab, the Window menu, screen readers), so what a tag holds is
+// cleaned before it becomes the window's title.
+function followPageTitle(win: BrowserWindow): void {
+  win.on('page-title-updated', (event, title) => {
+    event.preventDefault();
+    win.setTitle(sanitizeShellText(title) ?? 'NewAmp');
   });
 }
 
@@ -611,31 +623,51 @@ const exclusiveSourceCache = new Map<string, ExclusiveTrackSource>();
 // electron/playlist-cover-guard.ts.
 const playlistCoverGuard = createPlaylistCoverGuard();
 
-async function resolveExclusiveSource(trackId: number): Promise<ExclusiveTrackSource | null> {
-  // The library lookup IS the access gate: only real DB rows resolve, same
-  // trust level as 'library:get-track'.
+// ffmpeg decodes Opus at 48 kHz whatever rate the header records, so an Ogg
+// Opus file in a .ogg is a 48 kHz source as much as a .opus is.
+const OPUS_DECODE_RATE = 48000;
+
+function isOpusCodec(codec: string | null | undefined): boolean {
+  return typeof codec === 'string' && codec.toLowerCase() === 'opus';
+}
+
+// What the library row and the file's name say about a track. No read of the
+// file: the library lookup IS the access gate, only real DB rows resolve (same
+// trust level as 'library:get-track').
+function exclusiveSourceFromLibrary(trackId: number): { source: ExclusiveTrackSource; cacheKey: string } | null {
   const track = library?.getTrack(trackId);
   if (!track) return null;
-  const cacheKey = `${track.path}:${track.mtime}`;
-  const cached = exclusiveSourceCache.get(cacheKey);
-  if (cached) return { ...cached, trackId };
-  const classified = classifyTrackSource(track.path);
-  const source: ExclusiveTrackSource = {
-    trackId,
-    path: track.path,
-    sampleRate: track.sampleRate,
-    bitDepth: null,
-    channels: null,
-    durationSec: track.duration,
-    ...classified,
+  return {
+    cacheKey: `${track.path}:${track.mtime}`,
+    source: {
+      trackId,
+      path: track.path,
+      sampleRate: isOpusCodec(track.codec) ? OPUS_DECODE_RATE : track.sampleRate,
+      bitDepth: null,
+      channels: null,
+      durationSec: track.duration,
+      ...classifyTrackSource(track.path),
+    },
   };
+}
+
+// How long a play waits for the file's tags before it goes on with the library
+// row's values; the share may still be answering, and the driver has its own
+// timers for the audio itself.
+const EXCLUSIVE_PROBE_TIMEOUT_MS = 2000;
+
+// Reads the file's format for the negotiation. Never rejects: what it cannot
+// read, the library row and the file name stand in for.
+async function probeExclusiveSource(base: ExclusiveTrackSource, cacheKey: string): Promise<ExclusiveTrackSource> {
+  const source = { ...base };
   try {
     const { parseFile } = await import('music-metadata');
-    const meta = await parseFile(track.path, { duration: false, skipCovers: true });
+    const meta = await parseFile(source.path, { duration: false, skipCovers: true });
     source.bitDepth = meta.format.bitsPerSample ?? null;
     source.channels = meta.format.numberOfChannels ?? null;
-    source.sampleRate = meta.format.sampleRate ?? track.sampleRate;
-    if (typeof meta.format.lossless === 'boolean' && !classified.dsd) {
+    source.sampleRate = meta.format.sampleRate ?? base.sampleRate;
+    if (isOpusCodec(meta.format.codec)) source.sampleRate = OPUS_DECODE_RATE;
+    if (typeof meta.format.lossless === 'boolean' && !base.dsd) {
       source.lossless = meta.format.lossless;
     }
   } catch (err) {
@@ -647,6 +679,32 @@ async function resolveExclusiveSource(trackId: number): Promise<ExclusiveTrackSo
   if (exclusiveSourceCache.size > 500) exclusiveSourceCache.clear();
   exclusiveSourceCache.set(cacheKey, source);
   return source;
+}
+
+async function resolveExclusiveSource(trackId: number): Promise<ExclusiveTrackSource | null> {
+  const known = exclusiveSourceFromLibrary(trackId);
+  if (!known) return null;
+  const cached = exclusiveSourceCache.get(known.cacheKey);
+  if (cached) return { ...cached, trackId };
+  // A read that hangs on a dead share must not hold up the play before the
+  // driver has seen it. The read goes on, and a late answer is kept for the
+  // next play; this one starts from the library row.
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), EXCLUSIVE_PROBE_TIMEOUT_MS);
+  });
+  try {
+    return (await Promise.race([probeExclusiveSource(known.source, known.cacheKey), late])) ?? known.source;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The gapless transport reads the path, the duration and whether the file is
+// DSD, and nothing the tags would add, so it starts from the library row and
+// never waits on the file.
+async function resolveGaplessSource(trackId: number): Promise<ExclusiveTrackSource | null> {
+  return exclusiveSourceFromLibrary(trackId)?.source ?? null;
 }
 let pendingOpenFiles = collectOpenFileArgsSync(process.argv);
 
@@ -983,6 +1041,7 @@ function createWindow(): BrowserWindow {
   });
   attachWindowDiagnostics(win, 'main');
   attachExternalLinkHandler(win);
+  followPageTitle(win);
 
   if (smokeMode) {
     win.webContents.on('console-message', (details) => {
@@ -1318,9 +1377,10 @@ function wireDetachedFramePort(): void {
     // while the projector runs — which is most of the "suffers mightily when
     // detached" GPU/CPU bill. When playback is paused AND the main window is
     // hidden, the producer drops to ~1Hz and the projector's own status layer
-    // truthfully reports "Paused". Playback the page cannot be heard for
-    // (Bit-Perfect Exclusive) turns throttling off through
-    // refreshBackgroundThrottling, whether or not the projector is open.
+    // truthfully reports "Paused". While a track plays,
+    // refreshBackgroundThrottling turns throttling off, whether or not the
+    // projector is open: Bit-Perfect Exclusive plays outside the page, and a
+    // quiet stretch reads as silent to Chromium too.
     const channel = new MessageChannelMain();
     mainWin.webContents.postMessage('eviland:frame-port', null, [channel.port1]);
     detachedVizWin.webContents.postMessage('eviland:frame-port', null, [channel.port2]);
@@ -1610,11 +1670,12 @@ const openFileBatcher = createOpenFileBatcher({
   quietMs: 400,
   maxWaitMs: 2000,
   deliver: deliverOpenFiles,
+  key: openTargetKey,
 });
 
 function deliverOpenFiles(paths: string[]): void {
   if (mainWin && !mainWin.isDestroyed() && !mainWin.webContents.isLoading()) {
-    const merged = mergeHandedOff(paths, handedOffFiles, Date.now(), COLD_START_MERGE_MS);
+    const merged = mergeHandedOff(paths, handedOffFiles, Date.now(), COLD_START_MERGE_MS, openTargetKey);
     handedOffFiles = merged.handedOff;
     mainWin.webContents.send('app:open-files', merged.files);
     return;
@@ -1636,6 +1697,23 @@ async function enqueueOpenFiles(paths: string[]): Promise<void> {
     if (kind === 'file' && OPEN_AUDIO_EXTS.has(extname(path).toLowerCase())) void allowOpenedAudioFile(path);
   }
   openFileBatcher.push(targets.map((target) => target.path));
+}
+
+const SHELL_TEXT_MAX_CHARS = 200;
+
+// A tag on its way into something the shell draws (the window title, the Dock
+// and tray labels, the now-playing line the Remote shows). A control character
+// or a direction override in a tag would garble the line around it, and a tag
+// can be any length, so those are removed, whitespace is collapsed and the
+// length is capped. Null when nothing is left.
+function sanitizeShellText(value: unknown, maxChars = SHELL_TEXT_MAX_CHARS): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value
+    .slice(0, maxChars * 4)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return Array.from(text).slice(0, maxChars).join('') || null;
 }
 
 // The Dock menu's first line: what is loaded, as "Title - Artist". Null when
@@ -1746,7 +1824,8 @@ function libraryRootsRead(): void {
 }
 
 // Puts back the menu-added folders a stale folder list left out. A folder the
-// new list covers is already in it.
+// new list covers is already in it. A folder the menu replaced its subfolders
+// with takes them out of the list again, since the folder holds them.
 function keepUnseenMenuRoots<T>(patch: T): T {
   if (!unseenMenuRoots.size || !patch || typeof patch !== 'object') return patch;
   const roots: unknown = (patch as { libraryRoots?: unknown }).libraryRoots;
@@ -1755,7 +1834,9 @@ function keepUnseenMenuRoots<T>(patch: T): T {
   const missing = [...unseenMenuRoots].filter(
     (dir) => current.includes(dir) && !roots.some((root) => typeof root === 'string' && isPathInside(dir, root)),
   );
-  return missing.length ? { ...patch, libraryRoots: [...roots, ...missing] } : patch;
+  if (!missing.length) return patch;
+  const kept = roots.filter((root) => typeof root !== 'string' || !missing.some((dir) => isPathInside(root, dir)));
+  return { ...patch, libraryRoots: [...kept, ...missing] };
 }
 
 // File > Add Folder to Library: the same steps as Settings, which saves the
@@ -2048,7 +2129,13 @@ function applyThumbarButtons(win: BrowserWindow | null = mainWin): void {
  * Renderer→shell playback snapshot: swaps the thumbar play/pause glyph and
  * keeps the tray tooltip naming what's actually playing.
  */
-function applyShellPlaybackState(state: ShellPlaybackState): void {
+function applyShellPlaybackState(snapshot: ShellPlaybackState): void {
+  const state = {
+    ...snapshot,
+    title: sanitizeShellText(snapshot.title),
+    artist: sanitizeShellText(snapshot.artist),
+    album: sanitizeShellText(snapshot.album),
+  };
   shellPlaybackState = state;
   // The pause sent at suspend did not land before the page was frozen, so the
   // page started the sound again on wake. The window closes after one
@@ -2080,6 +2167,29 @@ function applyShellPlaybackState(state: ShellPlaybackState): void {
       /* tray torn down mid-update */
     }
   }
+}
+
+function pauseForSleep(): void {
+  if (!shellPlaybackState.isPlaying) return;
+  sleepPauseUntil = Infinity;
+  sendPlayerCommand('pause');
+  // The page may be frozen before it reads the command, and then the pause
+  // would land after the sound came back. Native output is paused here
+  // directly, and the snapshot is marked paused so that a snapshot sent
+  // on wake that still says playing shows the command did not land
+  // (applyShellPlaybackState pauses again then).
+  try {
+    exclusiveOutput?.pause();
+  } catch {
+    /* the page's own pause follows */
+  }
+  applyShellPlaybackState({ ...shellPlaybackState, isPlaying: false, at: Date.now() });
+}
+
+function noteWake(): void {
+  // A share that was remounted while the Mac slept is looked at again.
+  syncLibraryWatcher();
+  if (sleepPauseUntil === Infinity) sleepPauseUntil = Date.now() + WAKE_PAUSE_WINDOW_MS;
 }
 
 /**
@@ -2355,6 +2465,10 @@ function gpuCompositingEnabled(): boolean {
 }
 
 function syncLibraryWatcher(): void {
+  // Every change of the library's folders comes through here, so this is also
+  // where the players learn which folder stands for a share that is mounted
+  // somewhere unusual (see storageRootOf).
+  setStorageRoots(settings.get().libraryRoots);
   if (!libraryWatcher) return;
   const current = settings.get();
   if (smokeMode || !current.libraryAutoWatch || !current.libraryRoots.length) {
@@ -2571,6 +2685,25 @@ async function quiesceLibraryMutations(options: { keepScan?: boolean } = {}): Pr
   await scanner?.start([]).catch(() => {});
 }
 
+// The plans held while the library was still, as one. Replayed a plan at a time
+// each would wait out the re-check pause and scan the same targets again, and a
+// long backup over a bulk copy holds hundreds. A target the plans disagree about
+// is forced, as a plan lists a target once with force winning.
+function mergeHeldWatchPlans(held: Array<{ targets: string[]; plan: LibraryWatchPlan }>): { targets: string[]; plan: LibraryWatchPlan } {
+  const targets = new Set<string>();
+  const force = new Set<string>();
+  const incremental = new Set<string>();
+  for (const entry of held) {
+    for (const target of entry.targets) targets.add(target);
+    for (const target of entry.plan.force) force.add(target);
+    for (const target of entry.plan.incremental) incremental.add(target);
+  }
+  return {
+    targets: [...targets],
+    plan: { force: [...force], incremental: [...incremental].filter((target) => !force.has(target)) },
+  };
+}
+
 function resumeLibraryMutations(): void {
   libraryMutationsQuiesced = Math.max(0, libraryMutationsQuiesced - 1);
   if (libraryMutationsQuiesced) return;
@@ -2579,7 +2712,10 @@ function resumeLibraryMutations(): void {
   heldWatchPlans = [];
   heldIncrementalRoots = new Set();
   if (!settings.get().libraryAutoWatch) return;
-  for (const { targets, plan } of plans) void reconcileWatchedTargets(targets, plan);
+  if (plans.length) {
+    const merged = mergeHeldWatchPlans(plans);
+    void reconcileWatchedTargets(merged.targets, merged.plan);
+  }
   if (roots.length) incrementalScans.request(roots);
 }
 
@@ -2635,9 +2771,18 @@ function scheduleDailyBackups(): void {
 // quietly while anything else is rewriting the stores, or when the library
 // session is not the real one (a failed upgrade runs on a temporary library).
 async function runDailyBackup(): Promise<void> {
+  if (!settings.get().autoBackupEnabled || library.isClosed() || library.upgradeError || settings.isSuppressed()) {
+    dailyBackupWaitingForIdle = false;
+    return;
+  }
+  // A backup or a restore of the user's is working on the stores. A copy that
+  // was put off for playback is still wanted, and asked for again once it is
+  // quiet.
+  if (restoreInProgress || backupInProgress) {
+    retryDeferredDailyBackup();
+    return;
+  }
   dailyBackupWaitingForIdle = false;
-  if (!settings.get().autoBackupEnabled) return;
-  if (restoreInProgress || backupInProgress || library.isClosed() || library.upgradeError || settings.isSuppressed()) return;
   backupInProgress += 1;
   try {
     // Landing what is batched first proves the library can still be written
@@ -2677,10 +2822,11 @@ async function reloadRuntimeStores(userData: string): Promise<void> {
   // Paths held for the library that is being replaced mean nothing to the new one.
   heldWatchPlans = [];
   heldIncrementalRoots = new Set();
-  settings = new SettingsStore(join(userData, 'settings.json'));
+  settings = new SettingsStore(join(userData, 'settings.json'), reportSettingsNotSaved);
   lastfmOutbox = new LastfmScrobbleOutbox(join(userData, 'lastfm-scrobbles.json'));
   podcastStore = new PodcastStore(join(userData, 'podcasts.json'));
   library = await LibraryStore.open(join(userData, 'library.db'));
+  library.onSaveFailed = reportLibraryNotSaved;
   libraryAnalysis?.reset();
   scanner = createScannerService(library);
   libraryWatcher = createLibraryWatcherService();
@@ -2712,6 +2858,14 @@ function scheduleFlacWarm(path: string): void {
   }, FLAC_WARM_DELAY_MS);
   timer.unref();
   pendingFlacWarms.set(path, timer);
+}
+
+// A library folder authorizes the audio files inside it. Anything else the
+// folder holds (a settings file, a key, a document) is not audio and is not
+// served as audio, whichever folder the page has named as a library folder.
+// The protocol is only ever asked for tracks, so no other type is needed.
+function libraryRootsForRequest(url: URL, roots: readonly string[]): readonly string[] {
+  return OPEN_AUDIO_EXTS.has(extname(decodeURIComponent(url.pathname)).toLowerCase()) ? roots : [];
 }
 
 function registerAudioProtocol(): void {
@@ -2757,7 +2911,7 @@ function registerAudioProtocol(): void {
       // module's header for why the ordering, not just the final verdict,
       // is what's load-bearing here.
       const authResult = await authorizeAudioProtocolPath(url, {
-        libraryRoots: settings.get().libraryRoots,
+        libraryRoots: libraryRootsForRequest(url, settings.get().libraryRoots),
         openedFiles: openedAudioFiles,
         getPodcastDownloadsRealRoot,
         getTracksByPaths: (paths) => library?.getTracksByPaths?.(paths),
@@ -3524,11 +3678,11 @@ function registerIpc(): void {
     library.recordSkip(id, Date.now(), position ?? 0),
   );
 
-  // Sample-accurate gapless for the shared output: same library-row gate and
-  // format probe as exclusive playback.
+  // Sample-accurate gapless for the shared output: the same library-row gate as
+  // exclusive playback, without its format probe.
   registerGaplessTransport(
     ipcMain,
-    resolveExclusiveSource,
+    resolveGaplessSource,
     (sender) => !!mainWin && !mainWin.isDestroyed() && sender === mainWin.webContents,
   );
 
@@ -3542,7 +3696,9 @@ function registerIpc(): void {
     if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
     const patch = typeof keepUnseenMenuRoots === 'function' ? keepUnseenMenuRoots(requested) : requested;
     settings.set(patch);
-    if (typeof libraryRootsRead === 'function') libraryRootsRead();
+    // Only a saved folder list shows the page has the current one; the playback
+    // position it saves every few seconds says nothing about it.
+    if (patch && typeof patch === 'object' && 'libraryRoots' in patch && typeof libraryRootsRead === 'function') libraryRootsRead();
     if (patch && typeof patch === 'object' && 'radioBrainToken' in patch) radioBrain?.revokeClients();
     if (patchTouchesLibraryWatch(patch)) syncLibraryWatcher();
     if (patchTouchesRadioBrain(patch)) {
@@ -4006,6 +4162,13 @@ function registerIpc(): void {
   });
   ipcMain.handle('win:set-fullscreen', (_e, on: boolean) => {
     if (!mainWin) return;
+    // The visualizer smoke's window is hidden and, on Windows and Linux, never
+    // reports fullscreen. It watches what was asked for instead.
+    if (uiVisualizerSmoke) {
+      void mainWin.webContents
+        .executeJavaScript(`(window.__newampFullscreenRequests ||= []).push(${on ? 'true' : 'false'})`)
+        .catch(() => undefined);
+    }
     if (process.platform === 'darwin') {
       // Native fullscreen moves the window to its own Space with a roughly
       // half-second swap on every toggle. The ambient visualizer wants an
@@ -5834,6 +5997,9 @@ function uiVisualizerProbeSource(): string {
       // Double-click flips the window on the bare stage only, never on a
       // control, and on the hover volume meter it sets 100%.
       const nativeBefore = liveStage().getAttribute('data-newamp-native-fullscreen');
+      const fullscreenRequests = () => (window.__newampFullscreenRequests || []).slice();
+      const requestsBefore = fullscreenRequests().length;
+      const windowBefore = await window.winctl.isFullscreen();
       const doubleClick = (el) => el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }));
       const nextButton = await waitFor('next preset button', () => document.querySelector('[data-newamp-viz-next-button]'));
       const nowBlock = document.querySelector('[data-newamp-viz-now]');
@@ -5855,20 +6021,42 @@ function uiVisualizerProbeSource(): string {
       await settles('hover meter volume reset', () => meterInput.value === '100');
       const meterDblclickVolume = Number(meterInput.value);
       await sleep(150);
-      const dblclickOnControlKeepsWindow = liveStage().getAttribute('data-newamp-native-fullscreen') === nativeBefore;
+      const dblclickOnControlKeepsWindow =
+        liveStage().getAttribute('data-newamp-native-fullscreen') === nativeBefore &&
+        fullscreenRequests().length === requestsBefore;
       // Back to where the fixture's profile had it.
       setMeter(volumeBefore);
-      // Positive control: on the bare stage the same double-click does flip the
-      // window, and a second one flips it back.
+      // Positive control: on the bare stage the same double-click asks the
+      // window to change, and a second one asks again. The toggle follows the
+      // window's own state, and this window is hidden: on Windows and Linux it
+      // never reports fullscreen, so the request main received is what is
+      // checked. Where the window does report it (macOS), the second request
+      // must be the opposite of the first.
       const bareStage = liveStage().querySelector('[data-newamp-visualizer-canvas]') || liveStage();
       doubleClick(bareStage);
-      const dblclickOnStageFlips = await settles('stage double-click flips the window', () =>
-        liveStage().getAttribute('data-newamp-native-fullscreen') !== nativeBefore,
+      const dblclickOnStageFlips = await settles('stage double-click asks the window to change', () =>
+        fullscreenRequests().length === requestsBefore + 1,
       );
+      await sleep(250);
+      const windowAfterFirst = await window.winctl.isFullscreen();
       doubleClick(bareStage);
-      const dblclickOnStageFlipsBack = await settles('second double-click flips it back', () =>
-        liveStage().getAttribute('data-newamp-native-fullscreen') === nativeBefore,
+      const secondAsked = await settles('second double-click asks again', () =>
+        fullscreenRequests().length === requestsBefore + 2,
       );
+      await sleep(250);
+      const asked = fullscreenRequests().slice(requestsBefore);
+      const dblclickOnStageFlipsBack =
+        secondAsked && asked[0] === !windowBefore && (windowAfterFirst === windowBefore || asked[1] === windowBefore);
+      const fullscreenDebug = {
+        nativeBefore,
+        windowBefore,
+        windowAfterFirst,
+        windowAfterSecond: await window.winctl.isFullscreen(),
+        asked,
+        nativeAfter: liveStage().getAttribute('data-newamp-native-fullscreen'),
+      };
+      // Leave the window as it was for the steps that follow.
+      if (fullscreenDebug.windowAfterSecond !== windowBefore) await window.winctl.setFullscreen(windowBefore);
       // Closing from the keyboard hands focus back to what opened the stage
       // when that was a keyboard-focused control; otherwise it falls to the page.
       escape();
@@ -5928,6 +6116,7 @@ function uiVisualizerProbeSource(): string {
         dblclickOnControlKeepsWindow,
         dblclickOnStageFlips,
         dblclickOnStageFlipsBack,
+        fullscreenDebug,
         meterDblclickVolume,
         artDefault,
         currentTitle,
@@ -6706,7 +6895,9 @@ function safeFileStem(name: string): string {
   // Windows drops trailing dots and spaces, so a name that ends in one would
   // be saved as a different file than the one the dialog showed.
   stem = stem.slice(0, MAX_FILE_STEM_LENGTH).replace(/[. ]+$/, '');
-  if (RESERVED_FILE_STEMS.test(stem)) stem = `_${stem}`;
+  // Windows reads everything before the first dot as the device name, so
+  // "CON.x" is the console as much as "CON" is.
+  if (RESERVED_FILE_STEMS.test(stem.split('.')[0]!.trimEnd())) stem = `_${stem}`;
   return stem || 'NewAmp Playlist';
 }
 
@@ -6733,7 +6924,7 @@ function openGuitarTabWindow(document: GuitarTabDocument, startAutoscroll: boole
     height: 760,
     minWidth: 720,
     minHeight: 520,
-    title: `${document.artist} - ${document.title} - NewAmp Tab`,
+    title: `${sanitizeShellText(`${document.artist} - ${document.title}`) ?? 'Guitar tab'} - NewAmp Tab`,
     backgroundColor: '#060a0e',
     autoHideMenuBar: true,
     show: false,
@@ -6747,6 +6938,7 @@ function openGuitarTabWindow(document: GuitarTabDocument, startAutoscroll: boole
     },
   });
   attachWindowDiagnostics(win, 'guitar-tab');
+  followPageTitle(win);
   tabWindows.add(win);
   revealWhenReady(win, () => win.show(), { platform: process.platform });
   win.on('closed', () => tabWindows.delete(win));
@@ -6823,7 +7015,7 @@ function renderGuitarTabWindowHtml(document: GuitarTabDocument, startAutoscroll:
     const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
     const NOTE_INDEX = new Map([['C',0],['B#',0],['C#',1],['Db',1],['D',2],['D#',3],['Eb',3],['E',4],['Fb',4],['E#',5],['F',5],['F#',6],['Gb',6],['G',7],['G#',8],['Ab',8],['A',9],['A#',10],['Bb',10],['B',11],['Cb',11]]);
     const CHORD_RE = /^([A-G](?:#|b)?)([^/\\s]*)(?:\\/([A-G](?:#|b)?))?$/;
-    const CHORD_TOKEN_RE = /\\b([A-G](?:#|b)?)(maj|min|m|dim|aug|sus|add|M|mM|o|[0-9]|[#b()+/-])*?(?:\\/([A-G](?:#|b)?))?\\b/g;
+    const CHORD_TOKEN_RE = /\\b([A-G](?:#|b)?)(maj|min|m|dim|aug|sus|add|M|\\u00f8|o|[0-9]|[#b()+/-])*?(?:\\/([A-G](?:#|b)?))?(?!\\w)/g;
     const state = { semitones: 0, autoscroll: ${startAutoscroll ? 'true' : 'false'}, speed: 1.2 };
     const lines = document.getElementById('lines');
     const scroller = document.getElementById('scroller');
@@ -7097,6 +7289,8 @@ function normalizeAlbumReplayGainKeyPart(value: string | null | undefined): stri
 const UNREAD_OPEN_REASON = 'could not be read, the file or its drive may be unavailable';
 
 async function openFiles(paths: string[]): Promise<OpenFilesResult> {
+  // The page hands this list over, so it is checked before anything walks it.
+  if (!Array.isArray(paths)) return { tracks: [], importedPlaylists: [], skipped: [] };
   const targets = await normalizeOpenTargets(paths);
   const audioPaths: string[] = [];
   const playlistPaths: string[] = [];
@@ -7153,8 +7347,8 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
   // A folder is read the same way unless it is inside a library folder, whose
   // tracks are already in the library; a scan then refreshes it behind the
   // open.
-  const folderUnread = await readOpenedFolders(folderPaths);
-  skipped.push(...folderUnread.map((path) => `${path}: ${UNREAD_OPEN_REASON}`));
+  const folderReads = await readOpenedFolders(folderPaths);
+  skipped.push(...folderReads.unread.map((path) => `${path}: ${UNREAD_OPEN_REASON}`));
 
   const importedPlaylists = [];
   const tracks = library.getTracksByPaths(audioPaths);
@@ -7200,14 +7394,18 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
     }
   }
 
-  return { tracks, importedPlaylists, skipped };
+  return { tracks, importedPlaylists, skipped, ...(folderReads.leftToScanner ? { leftToScanner: folderReads.leftToScanner } : {}) };
 }
 
-// The File menu's Open Recent list. Windows keeps the same list for the
-// taskbar jump list; elsewhere there is nothing to record.
+// The File menu's Open Recent list, which only the Mac has. Windows would put
+// each file in the user's Recent Items and the jump list, which nothing in the
+// app shows or asks for. Every call is a round trip to the shell on the main
+// thread, so a big drop adds only its first files.
+const RECENT_DOCUMENTS_MAX = 20;
+
 function recordRecentDocuments(paths: string[]): void {
-  if (smokeMode || (process.platform !== 'darwin' && process.platform !== 'win32')) return;
-  for (const path of paths) {
+  if (smokeMode || process.platform !== 'darwin') return;
+  for (const path of paths.slice(0, RECENT_DOCUMENTS_MAX)) {
     try {
       app.addRecentDocument(path);
     } catch {
@@ -7217,10 +7415,15 @@ function recordRecentDocuments(paths: string[]): void {
 }
 
 const OPENED_FILE_READS = 4;
-// A folder with more audio files than this is left to the scanner, which reads
-// in batches, shows its progress and can be cancelled. Reading it here would be
-// one unbounded pass on the main process, with no way to stop it.
+// A folder with more audio files than this has only this many read here; the
+// scanner, which reads in batches, shows its progress and can be cancelled,
+// brings in the rest. Reading all of it here would be one unbounded pass on
+// the main process, with no way to stop it.
 const OPENED_FOLDER_INLINE_FILES = 300;
+// Folders a walk looks into before it gives up, so dropping a drive or a home
+// folder with little audio in it does not keep the open waiting while the whole
+// tree is listed. The scanner, started for the folder either way, goes on.
+const OPENED_FOLDER_WALK_DIRS = 5000;
 // A read that fails on a network share often works a moment later.
 const OPENED_FILE_RETRY_MS = 500;
 
@@ -7262,26 +7465,34 @@ function isInsideLibraryRoot(path: string): boolean {
 
 // The audio files under a folder, with the folders and files a scan skips
 // left out. The walk stops once it has found more than `limit`, which is enough
-// to tell a caller the folder is bigger than it wants to read.
+// to tell a caller the folder is bigger than it wants to read. Each folder is
+// listed in name order, files before the folders inside it, so the files found
+// first are the same ones every time.
 async function listAudioFiles(root: string, limit = Infinity): Promise<string[]> {
   const found: string[] = [];
   const stack = [root];
-  while (stack.length && found.length <= limit) {
+  let visited = 0;
+  while (stack.length && found.length <= limit && visited < OPENED_FOLDER_WALK_DIRS) {
     const dir = stack.pop()!;
+    visited += 1;
     let entries: import('node:fs').Dirent[];
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch {
       continue;
     }
+    entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const subfolders: string[] = [];
     for (const entry of entries) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (!isSkippedLibraryFolder(entry.name, basename(dir))) stack.push(full);
+        if (!isSkippedLibraryFolder(entry.name, basename(dir))) subfolders.push(full);
       } else if (entry.isFile()) {
         if (!isSkippedLibraryFile(entry.name) && OPEN_AUDIO_EXTS.has(extname(entry.name).toLowerCase())) found.push(full);
       }
     }
+    // Last in, first out: the first folder by name is walked next.
+    stack.push(...subfolders.reverse());
   }
   return found;
 }
@@ -7292,25 +7503,28 @@ async function listAudioFiles(root: string, limit = Infinity): Promise<string[]>
 // the library yet (watching off, a just-copied album), are read here, as
 // opened files are, and the scanner is asked for the folder afterwards to fill
 // in what this read leaves (album details, folder art). A folder too big to
-// read at once goes to the scanner alone. Returns the files that could not be
-// read.
-async function readOpenedFolders(folders: string[]): Promise<string[]> {
-  if (!folders.length) return [];
+// read at once has its first files read here, so it starts playing now, and
+// the scanner brings in the rest. Returns the files that could not be read, and
+// how many audio files were left to the scanner (at least that many: the walk
+// stops once it knows the folder is bigger than it will read).
+async function readOpenedFolders(folders: string[]): Promise<{ unread: string[]; leftToScanner: number }> {
+  if (!folders.length) return { unread: [], leftToScanner: 0 };
   const unread: string[] = [];
   const toScan: string[] = [];
+  let leftToScanner = 0;
   for (const folder of folders) {
     toScan.push(folder);
     if (isInsideLibraryRoot(folder) && (await library.getFolderTracksAsync(folder, { recursive: true, limit: 1 })).length) continue;
     // What this reads becomes library tracks, which the audio protocol serves
     // on that ground, so none of it is added to the opened-files list.
     const files = await listAudioFiles(folder, OPENED_FOLDER_INLINE_FILES);
-    if (files.length > OPENED_FOLDER_INLINE_FILES) continue;
-    unread.push(...(await readOpenedFiles(files)));
+    leftToScanner += Math.max(0, files.length - OPENED_FOLDER_INLINE_FILES);
+    unread.push(...(await readOpenedFiles(files.slice(0, OPENED_FOLDER_INLINE_FILES))));
   }
   void scanner.start(toScan).catch((err) => {
     console.warn(`[newamp] scan of the opened folder failed: ${errorMessage(err)}`);
   });
-  return unread;
+  return { unread, leftToScanner };
 }
 
 type OpenTarget = { path: string; kind: 'file' | 'directory' };
@@ -7444,9 +7658,38 @@ async function buildSupportDiagnostics(): Promise<SupportDiagnostics> {
   };
 }
 
+// A warning that holds nothing up: over the window when there is one. A smoke
+// run has nobody to click it away.
+function showWarning(title: string, message: string, detail: string): void {
+  if (smokeMode) return;
+  const options = { type: 'warning' as const, title, message, detail };
+  void (mainWin && !mainWin.isDestroyed() ? dialog.showMessageBox(mainWin, options) : dialog.showMessageBox(options));
+}
+
+// Settings keep working in memory when the file cannot be written, and the
+// write is retried, so nothing else tells the user that what they change is
+// not on disk. Said once per run of failures.
+function reportSettingsNotSaved(event: RecoveryEvent): void {
+  showWarning(
+    'Settings not saved',
+    'NewAmp could not save your settings.',
+    `${event.reason}\n\nWhat you change keeps working while NewAmp is open. If this is not fixed before NewAmp quits, those changes are lost.`,
+  );
+}
+
+// The library, too, keeps working from memory while its file cannot be written.
+// The store calls this after three failed saves in a row, once per run.
+function reportLibraryNotSaved(event: RecoveryEvent): void {
+  showWarning(
+    'Library not saved',
+    'NewAmp could not save your library.',
+    `${event.reason}\n\nRatings, plays, playlists and new tracks since the last successful save exist only in memory, and are lost if NewAmp quits before the library can be saved.`,
+  );
+}
+
 async function bootstrap(): Promise<void> {
   const userData = app.getPath('userData');
-  settings = new SettingsStore(join(userData, 'settings.json'));
+  settings = new SettingsStore(join(userData, 'settings.json'), reportSettingsNotSaved);
   lastfmOutbox = new LastfmScrobbleOutbox(join(userData, 'lastfm-scrobbles.json'));
   podcastStore = new PodcastStore(join(userData, 'podcasts.json'));
 
@@ -7481,6 +7724,7 @@ async function bootstrap(): Promise<void> {
   }
 
   library = await LibraryStore.open(join(userData, 'library.db'));
+  library.onSaveFailed = reportLibraryNotSaved;
 
   // Earlier builds seeded a first run with C:/Users/Public/Music, which is
   // almost always empty. When that is all there is and nothing was ever
@@ -7521,27 +7765,8 @@ async function bootstrap(): Promise<void> {
   // so music would come back on its own when the lid opens. Pause instead, as
   // Music does.
   if (process.platform === 'darwin') {
-    powerMonitor.on('suspend', () => {
-      if (!shellPlaybackState.isPlaying) return;
-      sleepPauseUntil = Infinity;
-      sendPlayerCommand('pause');
-      // The page may be frozen before it reads the command, and then the pause
-      // would land after the sound came back. Native output is paused here
-      // directly, and the snapshot is marked paused so that a snapshot sent
-      // on wake that still says playing shows the command did not land
-      // (applyShellPlaybackState pauses again then).
-      try {
-        exclusiveOutput?.pause();
-      } catch {
-        /* the page's own pause follows */
-      }
-      applyShellPlaybackState({ ...shellPlaybackState, isPlaying: false, at: Date.now() });
-    });
-    powerMonitor.on('resume', () => {
-      // A share that was remounted while the Mac slept is looked at again.
-      syncLibraryWatcher();
-      if (sleepPauseUntil === Infinity) sleepPauseUntil = Date.now() + WAKE_PAUSE_WINDOW_MS;
-    });
+    powerMonitor.on('suspend', pauseForSleep);
+    powerMonitor.on('resume', noteWake);
   }
   scheduleDailyBackups();
 
@@ -7816,6 +8041,10 @@ app.on('will-quit', (event) => {
     try { killAllWaveformFfmpeg(); } catch (err) { console.error('[newamp] ffmpeg cleanup failed', err); }
     try { killAllTranscodeFfmpeg(); } catch (err) { console.error('[newamp] ffmpeg cleanup failed', err); }
     try { closeAllGaplessSessions(); } catch (err) { console.error('[newamp] gapless cleanup failed', err); }
+  } else {
+    // The quit the radio brain held open: a setting saved in that time is
+    // still written before the process ends.
+    try { settings?.flushSync(); } catch (err) { console.error('[newamp] settings flush failed', err); }
   }
   // radioBrain.stop() is async but bounded (a few hundred ms even with a
   // connected /now/events client) — hold the quit open just long enough to

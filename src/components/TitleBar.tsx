@@ -24,8 +24,11 @@ export function TitleBar(): JSX.Element {
   useEffect(() => winctl.onState((s) => setMaximized(s.maximized)), []);
 
   // The window state channel does not report fullscreen, but entering or
-  // leaving it resizes the window, so a resize is the cue to ask.
+  // leaving it resizes the window, so a resize is the cue to ask. Only the Mac
+  // title bar acts on the answer (it moves the traffic lights' inset), so
+  // elsewhere a window drag would send a request per resize event for nothing.
   useEffect(() => {
+    if (api.platform !== 'darwin') return undefined;
     let cancelled = false;
     const read = (): void => {
       winctl

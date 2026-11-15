@@ -28,7 +28,8 @@ const PROBE_ARGS = [
 ];
 const PROBE_TIMEOUT_MS = 10_000;
 // A probe that timed out (a first run held up by the system's scan of a
-// freshly installed binary) did not find out whether soxr is there, so it is
+// freshly installed binary) or could not be started (the system out of
+// handles for a moment) did not find out whether soxr is there, so it is
 // asked again, but not on every call while the answer is still being waited on.
 const PROBE_RETRY_MS = 60_000;
 
@@ -42,7 +43,8 @@ export function resamplerFilter(kind: ResamplerKind): string {
 
 /**
  * Probe `ffmpeg` once (per binary) for soxr; later calls answer from the
- * cache. A probe that timed out answers swr for that call only.
+ * cache. A probe that timed out or could not be started answers swr, and so
+ * does every call for the next PROBE_RETRY_MS; then the binary is asked again.
  */
 export function probeResampler(ffmpeg: string): Promise<ResamplerKind> {
   const cached = known.get(ffmpeg);
@@ -72,7 +74,8 @@ export function probeResampler(ffmpeg: string): Promise<ResamplerKind> {
         killChild(child);
         done('swr', false);
       }, PROBE_TIMEOUT_MS);
-      child.on('error', () => done('swr', true));
+      // A probe that could not be started found out no more than one that timed out.
+      child.on('error', () => done('swr', false));
       child.on('close', (code) => done(code === 0 ? 'soxr' : 'swr', true));
     });
     pending.set(ffmpeg, probe);

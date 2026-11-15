@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import QRCode from 'qrcode';
 import type { AnalysisProgress } from '@shared/analysis';
 import { describeAnalysis } from '@shared/analysis';
@@ -12,7 +12,7 @@ import type {
   SupportDiagnostics,
   SupportRestoreResult,
 } from '@shared/types';
-import { engine, usePlayerStore } from '../../store/usePlayerStore';
+import { engine, stopPersistingSession, usePlayerStore } from '../../store/usePlayerStore';
 import { api, inElectron, DEFAULT_SETTINGS, exclusiveBackendLabel } from '../../lib/api';
 import { resamplerName } from '../../lib/resampler-name';
 import { closeButtonCopy } from '../../lib/close-button-copy';
@@ -33,6 +33,8 @@ import { ViewSkeleton } from '../ViewSkeleton';
 import { ShellPicker } from '../ShellPicker';
 import { flashGuardEnabled, setFlashGuardEnabled, watchFlashGuard } from '../../lib/vizPrefs';
 import { wheelInputLog } from '../../lib/wheel-volume';
+import { CommitSlider } from '../CommitSlider';
+import { mergeSavedSettings, type CredentialValues } from './settingsDrafts';
 
 // Skin cards (labels / taglines / swatches / order) come from the single
 // THEME_REGISTRY in @shared/custom-skin — do not redeclare them here.
@@ -84,81 +86,16 @@ function reportSettingError(title: string, err: unknown): void {
   pushToast({ tone: 'error', title, detail: err instanceof Error ? err.message : undefined });
 }
 
-// Credential fields are typed into the local settings copy and saved by their
-// own buttons, so a save of any other setting must not wipe them.
-const CREDENTIAL_FIELDS = ['lastfmApiKey', 'lastfmSharedSecret', 'openaiApiKey', 'openaiModel'] as const;
-type CredentialValues = Pick<AppSettings, (typeof CREDENTIAL_FIELDS)[number]>;
-
-// A slider that follows the thumb locally and hands its value on at most every
-// COMMIT_SLIDER_INTERVAL_MS, plus once when the drag ends. Saving on every
-// input event would write the settings file tens of times during one drag.
-const COMMIT_SLIDER_INTERVAL_MS = 250;
-
-function CommitSlider({
-  value,
-  min,
-  max,
-  step,
-  disabled,
-  className,
-  label,
-  onCommit,
-}: {
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  disabled?: boolean;
-  className?: string;
-  label: string;
-  onCommit: (next: number) => Promise<unknown> | void;
-}): JSX.Element {
-  const [draft, setDraft] = useState<number | null>(null);
-  const latest = useRef<number | null>(null);
-  const timer = useRef(0);
-  const commitRef = useRef(onCommit);
-  commitRef.current = onCommit;
-
-  function flush(): void {
-    window.clearTimeout(timer.current);
-    timer.current = 0;
-    const next = latest.current;
-    latest.current = null;
-    if (next === null) return;
-    // The thumb keeps the committed value until the saved one arrives.
-    void Promise.resolve(commitRef.current(next)).finally(() => {
-      if (latest.current === null) setDraft(null);
-    });
-  }
-
-  // Leaving the view mid-drag still commits where the thumb stopped.
-  useEffect(() => () => {
-    window.clearTimeout(timer.current);
-    const next = latest.current;
-    latest.current = null;
-    if (next !== null) void commitRef.current(next);
-  }, []);
-
+function DspBypassedNotice(): JSX.Element {
   return (
-    <input
-      aria-label={label}
-      type="range"
-      min={min}
-      max={max}
-      step={step}
-      value={draft ?? value}
-      disabled={disabled}
-      onChange={(e) => {
-        const next = e.target.valueAsNumber;
-        latest.current = next;
-        setDraft(next);
-        if (!timer.current) timer.current = window.setTimeout(flush, COMMIT_SLIDER_INTERVAL_MS);
-      }}
-      onPointerUp={(_event: ReactPointerEvent<HTMLInputElement>) => flush()}
-      onKeyUp={flush}
-      onBlur={flush}
-      className={className}
-    />
+    <div className="text-xs text-warn" data-newamp-dsp-bypassed>
+      Bit-Perfect Exclusive is on — crossfade, ReplayGain, limiter, preamp, EQ and software
+      volume are{' '}
+      {api.platform === 'darwin'
+        ? "bypassed; the device is held exclusively at the source's rate"
+        : 'bypassed so the DAC receives untouched samples'}
+      . Use your device's own volume.
+    </div>
   );
 }
 
@@ -225,18 +162,10 @@ export function SettingsView(): JSX.Element {
     setSettings((prev) => (prev && prev.bitPerfectExclusive !== storeExclusive ? { ...prev, bitPerfectExclusive: storeExclusive } : prev));
   }, [storeExclusive]);
 
-  // `dropDrafts` is for the saves that persist the credential fields themselves.
-  function acceptSettings(saved: AppSettings, options: { dropDrafts?: boolean } = {}): void {
-    const previous = settingsRef.current;
-    const savedBefore = savedCredentialsRef.current;
-    let next = saved;
-    if (previous && savedBefore && !options.dropDrafts) {
-      next = { ...saved };
-      for (const field of CREDENTIAL_FIELDS) {
-        // A field that differs from what was last saved is an edit in progress.
-        if (previous[field] !== savedBefore[field]) Object.assign(next, { [field]: previous[field] });
-      }
-    }
+  // `written` is for the saves that persist credential fields themselves: the
+  // text each of those fields was saved from.
+  function acceptSettings(saved: AppSettings, written?: Partial<CredentialValues>): void {
+    const next = mergeSavedSettings(saved, settingsRef.current, savedCredentialsRef.current, written);
     savedCredentialsRef.current = {
       lastfmApiKey: saved.lastfmApiKey,
       lastfmSharedSecret: saved.lastfmSharedSecret,
@@ -317,11 +246,12 @@ export function SettingsView(): JSX.Element {
   }
 
   async function saveLastfmCredentials(): Promise<AppSettings> {
+    const written = { lastfmApiKey: settings!.lastfmApiKey, lastfmSharedSecret: settings!.lastfmSharedSecret };
     const updated = await saveSettings({
-      lastfmApiKey: settings!.lastfmApiKey?.trim() || null,
-      lastfmSharedSecret: settings!.lastfmSharedSecret?.trim() || null,
+      lastfmApiKey: written.lastfmApiKey?.trim() || null,
+      lastfmSharedSecret: written.lastfmSharedSecret?.trim() || null,
     });
-    acceptSettings(updated, { dropDrafts: true });
+    acceptSettings(updated, written);
     setLastfmStatus('Last.fm credentials saved.');
     return updated;
   }
@@ -394,14 +324,21 @@ export function SettingsView(): JSX.Element {
 
   async function saveOpenAiSettings(): Promise<void> {
     if (!settings) return;
+    const written = { openaiApiKey: settings.openaiApiKey, openaiModel: settings.openaiModel };
     const updated = await saveSettings({
-      openaiApiKey: settings.openaiApiKey?.trim() || null,
-      openaiModel: settings.openaiModel?.trim() || DEFAULT_SETTINGS.openaiModel,
+      openaiApiKey: written.openaiApiKey?.trim() || null,
+      openaiModel: written.openaiModel?.trim() || DEFAULT_SETTINGS.openaiModel,
     });
-    acceptSettings(updated, { dropDrafts: true });
+    acceptSettings(updated, written);
     setOpenAiStatus(updated.aiAssistRuntime?.mode === 'gateway'
       ? 'API settings saved. The endpoint from NEWAMP_OPENAI_BASE_URL stays in use for this session.'
       : updated.openaiApiKey ? 'ChatGPT assist key saved locally.' : 'ChatGPT assist disabled.');
+  }
+
+  function changeTextScale(textScale: number): Promise<void> {
+    return saveSettings({ textScale })
+      .then(acceptSettings)
+      .catch((err) => reportSettingError('Could not change the text size', err));
   }
 
   async function showTutorialOnNextLaunch(): Promise<void> {
@@ -505,6 +442,9 @@ export function SettingsView(): JSX.Element {
         setSupportBackupStatus('Restore canceled.');
         return;
       }
+      // This page still holds the queue from before the restore; it must not
+      // write it over the restored session on its way out.
+      stopPersistingSession();
       setSupportRestore(result);
       setSupportBackupStatus(
         `Restored ${result.restored.length.toLocaleString()} item(s). Reloading NewAmp...`,
@@ -673,7 +613,7 @@ export function SettingsView(): JSX.Element {
                   max={1.35}
                   step={0.05}
                   value={settings.textScale}
-                  onCommit={(textScale) => saveSettings({ textScale }).then(acceptSettings).catch(() => undefined)}
+                  onCommit={changeTextScale}
                   className="nslider flex-1"
                 />
                 <span className="w-[52px] text-right text-sm tabular-nums text-ink2">
@@ -681,9 +621,7 @@ export function SettingsView(): JSX.Element {
                 </span>
                 <button
                   className="pxbtn"
-                  onClick={() => {
-                    saveSettings({ textScale: 1 }).then(acceptSettings).catch(() => undefined);
-                  }}
+                  onClick={() => void changeTextScale(1)}
                 >
                   Reset
                 </button>
@@ -856,12 +794,7 @@ export function SettingsView(): JSX.Element {
 
           <section id="settings-playback" className="bevel-out flex flex-col gap-4 p-6">
             <h2 className="eyebrow">Playback</h2>
-            {dspBypassed && (
-              <div className="text-xs text-warn" data-newamp-dsp-bypassed>
-                Bit-Perfect Exclusive is on — crossfade, ReplayGain, limiter, preamp, EQ and software
-                volume are bypassed so the DAC receives untouched samples. Use your device's own volume.
-              </div>
-            )}
+            {dspBypassed && <DspBypassedNotice />}
             <Row label="Crossfade">
               <select
                 aria-label="Crossfade"
@@ -1780,7 +1713,10 @@ function ExclusiveModeRow({
           />
           <span className="font-bold" style={{ color: '#d4a935' }}>Bit-Perfect Exclusive</span>
           <span className="text-muted">
-            · native {exclusiveBackendLabel()}, untouched samples to the DAC
+            · native {exclusiveBackendLabel()},{' '}
+            {api.platform === 'darwin'
+              ? "exclusive device, with the source's rate and depth requested. macOS can still convert to the device's own format, and NewAmp does not check that."
+              : 'untouched samples to the DAC'}
           </span>
         </label>
         <span className="ml-auto flex items-center gap-2 text-sm text-ink2">
@@ -1826,7 +1762,7 @@ function ExclusiveModeRow({
         <div className="text-xs" data-newamp-exclusive-status>
           <span style={{ color: negotiated.bitPerfect ? '#d4a935' : 'var(--ink)' }}>
             {negotiated.deviceName} · {negotiated.format} @ {(negotiated.sampleRate / 1000).toFixed(1)} kHz
-            {negotiated.bitPerfect ? ' · bit-perfect' : ''}
+            {negotiated.bitPerfect ? (api.platform === 'darwin' ? ' · exclusive' : ' · bit-perfect') : ''}
           </span>
           {!negotiated.bitPerfect && (
             <span className="text-warn">
@@ -1837,7 +1773,7 @@ function ExclusiveModeRow({
               {!negotiated.resampled && negotiated.upmixed && ' · channel layout adapted'}
               {!negotiated.resampled && !negotiated.upmixed && negotiated.channelsUnknown && ' · channel layout unverified (metadata probe failed) — treated conservatively'}
               {!negotiated.resampled && !negotiated.upmixed && !negotiated.channelsUnknown && !negotiated.lossless && ' · lossy source (decoder output delivered untouched)'}
-              {!negotiated.resampled && !negotiated.upmixed && !negotiated.channelsUnknown && negotiated.lossless && !negotiated.depthPreserved && ' · bit depth reduced'}
+              {!negotiated.resampled && !negotiated.upmixed && !negotiated.channelsUnknown && negotiated.lossless && !negotiated.depthPreserved && ' · bit depth reduced (no dither)'}
             </span>
           )}
         </div>
@@ -1875,6 +1811,9 @@ function RadioBrainRow({
   const [portDraft, setPortDraft] = useState(String(port));
   const [portError, setPortError] = useState<string | null>(null);
   useEffect(() => setPortDraft(String(port)), [port]);
+  // The port being saved. Enter and the blur that follows it both commit, and
+  // the saved port has not come back by the time the second one runs.
+  const savingPort = useRef<number | null>(null);
 
   async function change(patch: Partial<AppSettings>, failureTitle: string): Promise<boolean> {
     try {
@@ -1894,7 +1833,11 @@ function RadioBrainRow({
       return;
     }
     setPortError(null);
-    if (next !== port) void change({ radioBrainPort: next }, 'Could not change the Radio Brain port');
+    if (next === port || next === savingPort.current) return;
+    savingPort.current = next;
+    void change({ radioBrainPort: next }, 'Could not change the Radio Brain port').finally(() => {
+      if (savingPort.current === next) savingPort.current = null;
+    });
   }
 
   useEffect(() => {
@@ -2030,9 +1973,11 @@ function RemoteQr({ url }: { url: string }): JSX.Element {
 // and without case on Windows and macOS (not Linux, where case matters).
 function folderIsSameOrInside(path: string, folder: string): boolean {
   const key = (value: string) => {
-    // Accented names come back from some volumes decomposed and from others
-    // composed; folded to one form so they compare equal.
-    const normalized = value.normalize('NFC').replace(/\\/g, '/').replace(/\/+$/, '');
+    // Accented names come back from a Mac's volumes decomposed and from others
+    // composed, and its file system treats the two as one name; folded to one
+    // form so they compare equal. Elsewhere they are two different folders.
+    const folded = api.platform === 'darwin' ? value.normalize('NFC') : value;
+    const normalized = folded.replace(/\\/g, '/').replace(/\/+$/, '');
     return api.platform === 'win32' || api.platform === 'darwin' ? normalized.toLowerCase() : normalized;
   };
   const p = key(path);

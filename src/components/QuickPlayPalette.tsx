@@ -19,6 +19,9 @@ const MENU_LIMIT = 6;
 const MIN_TRACK_ROWS = 12;
 // The Ask section lists this many tracks; playing one queues the whole result.
 const ASK_ROWS = 12;
+// The main process cannot cancel an Ask it has started, so the Ask is held back
+// until the query has stood still this long.
+const ASK_SETTLE_MS = 250;
 
 type PaletteCommand = 'scan-library' | 'toggle-eq' | 'fullscreen-viz' | 'compact-deck' | 'edit-colours';
 
@@ -127,50 +130,20 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
     let cancelled = false;
     const id = window.setTimeout(async () => {
       setStatus(trimmedQuery ? 'Searching...' : 'Loading command palette...');
+      // The row the last step selected. A later step moves the selection only
+      // if the keyboard has not.
+      let selectedBy: number | null = null;
       try {
-        // Ask mode: 3+ words with no field:value token reads as natural
-        // language — compile it locally to a smart rule (year/bpm/recency/
-        // loved/rating + DNA re-rank) and show the interpretation as chips.
-        // The verbatim search runs beside it either way: a title that happens
-        // to read like a sentence is found there, and the Ask is the second
-        // section under it.
-        const askIntent = trimmedQuery && looksLikeNaturalQuery(trimmedQuery)
-          ? compileQueryIntent(trimmedQuery)
-          : null;
-        const useAsk = !!askIntent && askIntent.matched > 0;
-        const [tracks, asked, playlists, smartRules, albums, artists, history] = await Promise.all([
-          loadTrackResults(trimmedQuery),
-          useAsk ? api.runSmartPlaylistRule(askIntent.rule).catch(() => [] as Track[]) : Promise.resolve([] as Track[]),
-          api.getPlaylists(),
-          api.getSmartPlaylistRules(),
-          trimmedQuery ? api.getAlbums({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
-          trimmedQuery ? api.getArtists({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
-          trimmedQuery
-            ? Promise.resolve([] as ListeningHistoryItem[])
-            : api.getListeningHistory({ limit: 8 }).catch(() => [] as ListeningHistoryItem[]),
-        ]);
-        if (cancelled) return;
-        const chips = useAsk ? await tempoCoverageChips(askIntent) : null;
-        if (cancelled) return;
-        setAskChips(chips);
-        // Zero-query front door: row 1 resumes the restored session where it
-        // left off, rows 2-4 are the last things actually listened to. Typed
-        // queries keep the classic result order untouched.
-        const lead = trimmedQuery ? [] : zeroQueryLeadItems(history);
-        const askItems = asked.slice(0, ASK_ROWS).map(askTrackItem);
-        const base = buildPaletteItems(trimmedQuery, tracks, playlists, smartRules, albums, artists, RESULT_LIMIT - lead.length - askItems.length);
-        const next = [...lead, ...base, ...askItems];
-        setAskTracks(asked);
-        setResults(next);
-        setResultsQuery(trimmedQuery);
-        setSelectedIndex(initialSelection(trimmedQuery, lead.length, base, askItems.length));
-        setStatus(
-          next.length
-            ? null
-            : useAsk
-              ? 'Nothing in the library matches that search or ask — loosen a constraint.'
-              : 'No matching commands or catalog items.',
-        );
+        await searchPalette(trimmedQuery, () => !cancelled, (step) => {
+          const was = selectedBy;
+          selectedBy = step.selectedIndex;
+          setAskChips(step.askChips);
+          setAskTracks(step.askTracks);
+          setResults(step.append ? (current) => [...current, ...step.items] : step.items);
+          setResultsQuery(trimmedQuery);
+          setSelectedIndex((index) => (was === null || index === was ? step.selectedIndex : index));
+          setStatus(step.status);
+        });
       } catch {
         if (!cancelled) setStatus('Quick Play search failed.');
       }
@@ -582,6 +555,82 @@ async function loadTrackResults(query: string): Promise<Track[]> {
   });
   if (first.length || query) return first;
   return api.getTracks({ sort: 'artist', limit: TRACK_LIMIT, offset: 0 });
+}
+
+interface PaletteSearchStep {
+  items: PaletteItem[];
+  /** True when `items` follow the rows already listed instead of replacing them. */
+  append: boolean;
+  askTracks: Track[];
+  askChips: string[] | null;
+  selectedIndex: number;
+  status: string | null;
+}
+
+// One search of the palette, in two steps. The verbatim search and the catalog
+// are listed as soon as they are in, and the Ask follows: it is only sent once
+// the query has stood still, and its section is added under the rows already
+// there. `isCurrent` turns false when the query changes or the palette closes,
+// and nothing more is listed after that.
+async function searchPalette(
+  trimmedQuery: string,
+  isCurrent: () => boolean,
+  list: (step: PaletteSearchStep) => void,
+): Promise<void> {
+  // Ask mode: 3+ words with no field:value token reads as natural language —
+  // compile it locally to a smart rule (year/bpm/recency/loved/rating + DNA
+  // re-rank) and show the interpretation as chips. The verbatim search runs
+  // beside it either way: a title that happens to read like a sentence is
+  // found there, and the Ask is the second section under it.
+  const askIntent = trimmedQuery && looksLikeNaturalQuery(trimmedQuery)
+    ? compileQueryIntent(trimmedQuery)
+    : null;
+  const ask = askIntent && askIntent.matched > 0 ? askIntent : null;
+  const [tracks, playlists, smartRules, albums, artists, history] = await Promise.all([
+    loadTrackResults(trimmedQuery),
+    api.getPlaylists(),
+    api.getSmartPlaylistRules(),
+    trimmedQuery ? api.getAlbums({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
+    trimmedQuery ? api.getArtists({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
+    trimmedQuery
+      ? Promise.resolve([] as ListeningHistoryItem[])
+      : api.getListeningHistory({ limit: 8 }).catch(() => [] as ListeningHistoryItem[]),
+  ]);
+  if (!isCurrent()) return;
+  // Zero-query front door: row 1 resumes the restored session where it left
+  // off, rows 2-4 are the last things actually listened to. Typed queries keep
+  // the classic result order untouched.
+  const lead = trimmedQuery ? [] : zeroQueryLeadItems(history);
+  // The rows the Ask may add are kept free, so they land under these and
+  // nothing listed moves.
+  const base = buildPaletteItems(trimmedQuery, tracks, playlists, smartRules, albums, artists, RESULT_LIMIT - lead.length - (ask ? ASK_ROWS : 0));
+  const found = [...lead, ...base];
+  list({
+    items: found,
+    append: false,
+    askTracks: [],
+    askChips: ask ? ask.chips : null,
+    selectedIndex: 0,
+    status: ask ? 'Asking your library...' : found.length ? null : 'No matching commands or catalog items.',
+  });
+  if (!ask) return;
+
+  await new Promise((resolve) => setTimeout(resolve, ASK_SETTLE_MS));
+  if (!isCurrent()) return;
+  const [asked, chips] = await Promise.all([
+    api.runSmartPlaylistRule(ask.rule).catch(() => [] as Track[]),
+    tempoCoverageChips(ask),
+  ]);
+  if (!isCurrent()) return;
+  const askItems = asked.slice(0, ASK_ROWS).map(askTrackItem);
+  list({
+    items: askItems,
+    append: true,
+    askTracks: asked,
+    askChips: chips,
+    selectedIndex: initialSelection(trimmedQuery, lead.length, base, askItems.length),
+    status: found.length || askItems.length ? null : 'Nothing in the library matches that search or ask — loosen a constraint.',
+  });
 }
 
 function buildPaletteItems(

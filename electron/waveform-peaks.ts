@@ -22,7 +22,7 @@ import { caseFoldCachePath } from './cache-key-casing.js';
 import { killChild } from './kill-child.js';
 import { onPlaybackHunger, whenPlaybackFed } from './playback-io.js';
 import { isStorageError, watchReadFailures } from './read-failure.js';
-import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
+import { INPUT_PROTOCOLS, resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
 
 export interface WaveformRequest {
   path: string;
@@ -52,7 +52,7 @@ const MAX_SECONDS = 3 * 3600;
 
 // Same watchdog reasoning as score-analyzer.ts: a malformed source can stall
 // ffmpeg on demux forever.
-const FFMPEG_TIMEOUT_MS = 180_000;
+const FFMPEG_TIMEOUT_MS = Number(process.env.NEWAMP_WAVEFORM_TIMEOUT_MS) || 180_000;
 // ~6 KB each. Past this many files the oldest-used fifth is dropped, checked
 // at startup and again after every PRUNE_EVERY_WRITES new files.
 const MAX_CACHED_FILES = 6000;
@@ -321,7 +321,8 @@ async function dropOutdated(dir: string, names: string[]): Promise<string[]> {
   const worker = async (): Promise<void> => {
     for (let name = queue.pop(); name !== undefined; name = queue.pop()) {
       const version = await cachedVersion(join(dir, name));
-      if (version != null && version !== WAVEFORM_VERSION) void unlink(join(dir, name)).catch(() => undefined);
+      // Waited for, so the cache is as it will stay by the time it is called ready.
+      if (version != null && version !== WAVEFORM_VERSION) await unlink(join(dir, name)).catch(() => undefined);
       else kept.push(name);
     }
   };
@@ -400,7 +401,7 @@ interface Job {
   prefetch: boolean;
   child: ChildProcess | null;
   cancelled: boolean;
-  /** The decode was stopped from outside (the Recycle Bin flow); that says nothing about the file. */
+  /** The decode was stopped from outside (the Recycle Bin flow) or for taking too long; that says nothing about the file. */
   interrupted: boolean;
   /** The last decode was cut short by the storage, not the end of the file. */
   readFailed: boolean;
@@ -625,6 +626,7 @@ function decode(job: Job): Promise<WaveformData | null> {
     const args = ['-hide_banner', '-nostdin', '-loglevel', 'error'];
     if (job.start > 0) args.push('-ss', String(job.start));
     args.push(
+      ...INPUT_PROTOCOLS,
       '-i', job.path,
       '-t', String(job.end != null ? Math.min(MAX_SECONDS, job.end - job.start) : MAX_SECONDS),
       '-vn',
@@ -662,6 +664,9 @@ function decode(job: Job): Promise<WaveformData | null> {
       else resolve(result ?? null);
     };
     const timer = setTimeout(() => {
+      // Stuck in a read is the likelier story than a file that takes this long
+      // to decode, and it says nothing about the file either way.
+      job.interrupted = true;
       killChild(child);
       settle(new Error('ffmpeg timed out building a waveform'));
     }, FFMPEG_TIMEOUT_MS);

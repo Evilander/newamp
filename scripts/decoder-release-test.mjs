@@ -85,10 +85,15 @@ await mkdir(root, { recursive: true });
     .replace('this.addon = loadAddon();', 'this.addon = null;')
     .replace("import { resamplerFilter, resamplerKindNow } from './resampler.js';", "const resamplerFilter = () => 'aresample'; const resamplerKindNow = () => 'swr';")
     .replace(
-      "import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';",
-      "const resolveFfmpegPath = () => 'fixture-ffmpeg'; const watchFfmpegInput = (child, path) => globalThis.__watched.push([child, path]);",
+      "import { INPUT_PROTOCOLS, resolveFfmpegPath, watchFfmpegInput } from './transcode.js';",
+      "const INPUT_PROTOCOLS = ['-protocol_whitelist', 'file,pipe']; const resolveFfmpegPath = () => 'fixture-ffmpeg'; const watchFfmpegInput = (child, path) => globalThis.__watched.push([child, path]);",
     )
     .replace("import { killChild } from './kill-child.js';", 'const killChild = (child) => child.kill();');
+  // The stand-ins above replace import lines by their exact text. If one of
+  // those lines changes, say so here instead of bundling the real module.
+  for (const module of ['./resampler.js', './transcode.js', './kill-child.js']) {
+    assert.ok(!source.includes(`from '${module}'`), `exclusive-output.ts imports ${module} in a form this test does not stand in for`);
+  }
   const compiled = await build({ stdin: { contents: source, loader: 'ts', resolveDir: fileURLToPath(new URL('../electron/', import.meta.url)) }, bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
 
   const originalSpawn = cp.spawn;

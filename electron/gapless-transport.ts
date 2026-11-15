@@ -39,9 +39,16 @@ import type { Readable, Writable } from 'node:stream';
 import { playableLength } from './gapless-trim.js';
 import { killChild } from './kill-child.js';
 import { reportPlaybackHunger } from './playback-io.js';
-import { logShowsReadFailure } from './read-failure.js';
+import {
+  isStorageReadFailure,
+  logReadFailure,
+  probeFileRead,
+  rememberStorageGone,
+  storageAnswered,
+  storageKnownGone,
+} from './read-failure.js';
 import { probeResampler, resamplerFilter } from './resampler.js';
-import { awaitChildExit, ffmpegInputKey, resolveFfmpegPath } from './transcode.js';
+import { INPUT_PROTOCOLS, awaitChildExit, ffmpegInputKey, resolveFfmpegPath } from './transcode.js';
 import type {
   ExclusiveTrackSource,
   GaplessSegmentRequest,
@@ -71,8 +78,9 @@ const MIN_POST_FRAMES = 4096;
 // The first plan's start() gives up at this, whatever the decoder is doing: a
 // seek into a share that stays gone rejects with a timeout here rather than
 // waiting out DECODE_OUTAGE_MS, and the decks take the track. Chained tracks
-// and mid-track reads get the long waits.
-const FIRST_AUDIO_TIMEOUT_MS = 15000;
+// and mid-track reads get the long waits. Looking the track up before any
+// decoder runs is held to the same limit.
+const FIRST_AUDIO_TIMEOUT_MS = Number(process.env.NEWAMP_FIRST_AUDIO_TIMEOUT_MS) || 15000;
 // How long a release waits for a killed decoder to let go of its file.
 const RELEASE_EXIT_TIMEOUT_MS = 2000;
 // Only the last few segment starts can still be revoked: the producer runs at
@@ -114,8 +122,15 @@ const DECODE_WAIT_IDLE_MS = 1500;
 const DECODE_STALL_MS = Number(process.env.NEWAMP_DECODE_STALL_MS) || 8000;
 const DECODE_OPEN_STALL_MS = Number(process.env.NEWAMP_DECODE_OPEN_STALL_MS) || 20_000;
 const WATCHDOG_TICK_MS = 500;
+// A decoder stopped for sending nothing has usually exited by the time the
+// file is read again. One blocked in a read the system won't interrupt (a share
+// that stopped answering) outlives its kill, and its replacement can end up
+// the same way: with this many still running, no further one is started.
+const STUCK_DECODER_LIMIT = 2;
 // A track that stops on a non-storage error this close to its length is
-// treated as having ended there.
+// treated as having ended there. A decoder that exits cleanly further than
+// this from the length the track is known to have is not taken at its word
+// (see confirmEnd); the library's length for a VBR file can be this far off.
 const DECODE_END_SLACK_SEC = 2;
 // How far before the stop a resumed decode seeks, to be discarded (see spawnDecoder).
 const RESUME_WARMUP_SEC = 0.25;
@@ -166,7 +181,12 @@ interface DecodeResume extends Outage {
   at: number;
   rate: number;
   bytes: number;
+  /** Started right after the file was read to its end, to find out whether a clean early exit was the end of the track. */
+  confirming?: boolean;
 }
+
+// Decoders that were stopped for sending nothing and have not exited yet.
+const stuckDecoders = new Set<ChildProcessByStdio<null, Readable, Readable>>();
 
 interface Plan {
   token: number;
@@ -319,6 +339,9 @@ class Session {
   private pendingResume: { plan: Plan; at: number; rate: number; bytes: number } | null = null;
   // Likewise a decode that failed before its first frame, waiting to open the file again.
   private pendingOpen: Plan | null = null;
+  // The file system is being asked about a file whose decoder stopped (see
+  // probeFileRead); replaced or cleared when the answer no longer matters.
+  private asking: object | null = null;
   // Told the renderer a read failed and the file is being read again.
   private waiting = false;
   // A decoder releasePaths stopped on purpose: its early end is not a failed read.
@@ -333,6 +356,9 @@ class Session {
   private first: { resolve: () => void; reject: (err: Error) => void } | null = null;
   // Set once the first segment is placed.
   firstRate: number | null = null;
+  // Which resampler this ffmpeg runs, once its probe has answered. Only a
+  // track at another rate than the stream's has to wait for that.
+  resamplerKind: ResamplerKind | null = null;
   // The first segment was a seek to its end: it played out with no frames.
   private firstPlayedOut = false;
   private readonly highWater: number;
@@ -346,11 +372,14 @@ class Session {
     private readonly port: MessagePortMain,
     private readonly rate: number,
     private readonly ffmpeg: string,
-    private readonly resamplerKind: ResamplerKind,
+    private readonly probing: Promise<ResamplerKind>,
     private readonly firstPlan: Plan,
     next: Plan | null,
   ) {
     this.out = new FrameOutput(gen, (msg) => this.post(msg));
+    void probing.then((kind) => {
+      this.resamplerKind = kind;
+    });
     this.next = next;
     this.highWater = Math.round(rate * HIGH_WATER_SEC);
     this.lowWater = Math.round(rate * LOW_WATER_SEC);
@@ -552,6 +581,17 @@ class Session {
    */
   private placeSegment(plan: Plan, rate: number, go: (at: number) => void): void {
     const resampleFrom = rate !== this.rate ? rate : null;
+    const kind = this.resamplerKind;
+    if (resampleFrom != null && kind == null) {
+      // The first track to need a resampler waits for the probe; one at the
+      // stream's own rate never does.
+      this.phase = 'switching';
+      void this.probing.then((answer) => {
+        this.resamplerKind = answer;
+        if (this.phase !== 'closed') this.placeSegment(plan, rate, go);
+      });
+      return;
+    }
     if (this.resampler && this.resampler.rate !== resampleFrom) {
       // A rate change cannot share a filter with what came before: drain the
       // old resampler, then begin this segment on a fresh stage.
@@ -561,7 +601,7 @@ class Session {
     }
     if (!this.resampler) {
       this.out.alignFrames();
-      if (resampleFrom != null) this.resampler = this.spawnResampler(resampleFrom);
+      if (resampleFrom != null && kind != null) this.resampler = this.spawnResampler(resampleFrom, kind);
     }
     const at = this.writeHead();
     if (plan === this.firstPlan) this.firstRate = rate;
@@ -585,7 +625,7 @@ class Session {
       durationSec: plan.durationSec,
       gain: plan.gain,
       sourceRate: rate,
-      resampler: rate == null || rate === this.rate ? 'none' : this.resamplerKind,
+      resampler: rate == null || rate === this.rate ? 'none' : (this.resamplerKind ?? 'none'),
     });
   }
 
@@ -623,6 +663,7 @@ class Session {
       'level+info',
       '-nostats',
       ...(seekTo > 0 ? ['-ss', seekTo.toFixed(6)] : []),
+      ...INPUT_PROTOCOLS,
       '-i',
       plan.source.path,
       '-map',
@@ -693,12 +734,18 @@ class Session {
       // its own timeout; a chained one is what the worklet runs dry for.
       const audible = placed != null || resume != null || plan !== this.firstPlan;
       if (idleMs >= DECODE_WAIT_IDLE_MS && audible && this.inflight() < this.hungryBelow) this.setWaiting(true);
-      if (idleMs < (placed != null || resume != null ? DECODE_STALL_MS : DECODE_OPEN_STALL_MS)) return;
+      // A decoder that reads the file again after a failed read is opening it
+      // too, until its header arrives.
+      if (idleMs < (placed != null ? DECODE_STALL_MS : DECODE_OPEN_STALL_MS)) return;
       if (placed == null && resume == null && plan === this.firstPlan) return;
       clearInterval(watchdog);
       console.warn(`[newamp] gapless decoder sent nothing for ${Math.round(idleMs / 1000)} s for ${plan.source.path}`);
       this.decoder = null;
       this.release(child.stdout);
+      if (child.exitCode == null && child.signalCode == null) {
+        stuckDecoders.add(child);
+        child.once('exit', () => stuckDecoders.delete(child));
+      }
       killChild(child);
       complete(1, stderr, idleMs);
     }, WATCHDOG_TICK_MS);
@@ -739,6 +786,7 @@ class Session {
       if (pcm.length) {
         this.feed(pcm, child);
         this.setWaiting(false);
+        storageAnswered(plan.source.path);
       }
       if (!atEnd) return;
       // Everything past this point is the encoder's end padding.
@@ -786,11 +834,14 @@ class Session {
       if (resume) {
         // The segment is on the stream already; this decoder only continues it.
         if (parsed.rate !== resume.rate) {
+          // Nothing it decodes can follow what the stream already has. Not
+          // the end of the track either: it fails where its audio stops.
           settled = true;
           this.decoder = null;
           this.release(child.stdout);
           killChild(child);
-          this.onDecoded(plan, resume.at, resume.rate, bytes, null, 'the decoder changed rate', null);
+          console.warn(`[newamp] gapless decode of ${plan.source.path} came back at ${parsed.rate} Hz after a failed read, not ${resume.rate} Hz`);
+          this.failPartway(plan, 'Decode failed partway through the track.', 'Decode failed.');
           return;
         }
         placed = { at: resume.at, rate: parsed.rate, limitBytes: limitBytesFor(plan, parsed.rate) };
@@ -832,33 +883,61 @@ class Session {
         : recovered
           ? { attempt: 0, since: now - stalledMs, storage: stalled }
           : { attempt: resume.attempt, since: resume.since, storage: resume.storage || stalled };
+      // Started to find out whether a clean early exit was the end of the
+      // track, and added nothing beyond what it was asked to repeat.
+      const confirmed =
+        resume?.confirming === true && bytes - resume.bytes < RESUME_WARMUP_SEC * resume.rate * FRAME_BYTES;
       if (resume && !placed) {
         // Gave out again before its first frame: the segment carries on from
         // the same place on the next try.
-        this.onDecoded(plan, resume.at, resume.rate, bytes, code ?? 1, detail, outage);
+        this.onDecoded(plan, resume.at, resume.rate, bytes, code ?? 1, detail, outage, confirmed);
         return;
       }
       if (!placed) {
         // A failed read before the first frame (the open itself timed out) is
         // the drive's, not the file's: opened again for a while before the
         // segment fails.
-        const storage =
-          stalled || logShowsReadFailure(detail, plan.source.path) || (opening?.storage === true && code !== 0);
-        // Measured from now, not from when a stalled decoder went quiet: the
-        // stall already used its own budget, and the open gets its tries after.
-        const since = opening?.since ?? now;
-        if (storage && !abandoned && this.phase !== 'closed' && now - since < DECODE_OPEN_RETRY_MS) {
-          this.retryOpen(plan, { attempt: (opening?.attempt ?? 0) + 1, since, storage: true });
+        const failure = logReadFailure(detail, plan.source.path);
+        const storageFailed = stalled || failure === 'storage' || (opening?.storage === true && code !== 0);
+        const settle = (storage: boolean): void => {
+          // Measured from now, not from when a stalled decoder went quiet: the
+          // stall already used its own budget, and the open gets its tries after.
+          const since = opening?.since ?? now;
+          // A drive that was given up on a moment ago for another track is
+          // not waited on again for this one.
+          const gone = storage && storageKnownGone(plan.source.path);
+          if (gone) rememberStorageGone(plan.source.path);
+          if (storage && !gone && !abandoned && this.phase !== 'closed' && performance.now() - since < DECODE_OPEN_RETRY_MS) {
+            this.retryOpen(plan, { attempt: (opening?.attempt ?? 0) + 1, since, storage: true });
+            return;
+          }
+          console.error(`[newamp] gapless decode produced no audio (ffmpeg ${code}) for ${plan.source.path}\n${detail}`);
+          this.failSegment(
+            plan,
+            storage ? 'The drive stopped answering.' : code === 0 ? 'The file has no decodable audio.' : 'Decode failed.',
+          );
+        };
+        if (storageFailed || abandoned || this.phase === 'closed' || (code === 0 && failure == null)) {
+          settle(storageFailed);
           return;
         }
-        console.error(`[newamp] gapless decode produced no audio (ffmpeg ${code}) for ${plan.source.path}\n${detail}`);
-        this.failSegment(
-          plan,
-          storage ? 'The drive stopped answering.' : code === 0 ? 'The file has no decodable audio.' : 'Decode failed.',
-        );
+        // ffmpeg could not open the file, and what it says does not settle
+        // whose doing that is. It calls a drive letter or a share that has
+        // gone a missing file, and it answers "I/O error" both for a read the
+        // system failed and for a file that is not audio at all. The file
+        // system is asked which this is; a file that really is gone, or really
+        // is damaged, still fails at once.
+        this.pendingOpen = plan;
+        const asked = (this.asking = {});
+        void probeFileRead(plan.source.path).then((probe) => {
+          if (this.asking !== asked) return;
+          this.asking = null;
+          this.pendingOpen = null;
+          settle(probe === 'storage');
+        });
         return;
       }
-      this.onDecoded(plan, placed.at, placed.rate, bytes, code, detail, outage);
+      this.onDecoded(plan, placed.at, placed.rate, bytes, code, detail, outage, confirmed);
     };
     const done = (code: number | null, detail: string): void => {
       if (settled || this.decoder !== child) return;
@@ -885,6 +964,12 @@ class Session {
       this.resumeTimer = null;
       this.pendingOpen = null;
       if (this.phase === 'closed') return;
+      if (stuckDecoders.size >= STUCK_DECODER_LIMIT) {
+        // Not another decoder beside the ones that won't stop: later, if there is time left.
+        if (performance.now() - outage.since < DECODE_OPEN_RETRY_MS) this.retryOpen(plan, { ...outage, attempt: outage.attempt + 1 });
+        else this.failSegment(plan, 'The drive stopped answering.');
+        return;
+      }
       this.phase = 'opening';
       this.spawnDecoder(plan, null, outage);
     }, Math.min(DECODE_RESUME_DELAY_MS * outage.attempt, DECODE_RESUME_MAX_DELAY_MS));
@@ -926,6 +1011,8 @@ class Session {
   /**
    * `plan`'s decoder has stopped. `outage` is the run of failed reads this
    * stop belongs to if it is one; null when the file must not be read again.
+   * `confirmed`: the decoder had been started to find out whether a clean
+   * early exit was the end of the track (see confirmEnd), and found no more.
    */
   private onDecoded(
     plan: Plan,
@@ -935,21 +1022,73 @@ class Session {
     code: number | null,
     detail: string,
     outage: Outage | null = null,
+    confirmed = false,
   ): void {
     const frames = Math.floor(bytes / FRAME_BYTES);
-    const logged = logShowsReadFailure(detail, plan.source.path);
-    const readFailed = code !== 0 || logged;
+    const failure = logReadFailure(detail, plan.source.path);
+    const logged = failure != null;
+    const stoppedSec = plan.startAt + frames / rate;
+    // A clean exit is the end of the file only if the decoder was told so by
+    // the file. Not every failed read is reported as one, and then the exit is
+    // as clean as at the real end: when it comes well short of the length the
+    // track is known to have, it is checked before it is believed.
+    const short =
+      code === 0 && !logged && plan.durationSec != null && stoppedSec < plan.durationSec - DECODE_END_SLACK_SEC;
+    if (short && !confirmed && outage && this.phase !== 'closed') {
+      this.confirmEnd(plan, at, rate, bytes, detail, outage);
+      return;
+    }
     // Once an outage has been the drive's, a later stop in it that the log
     // doesn't explain is still waited out the same way.
-    const storageFailed = logged || outage?.storage === true;
-    // With no audio at all this only retries a failure the log pins on the
-    // drive: a damaged file that never decodes is not worth waiting on.
+    const storageFailed = failure === 'storage' || outage?.storage === true;
+    if (failure === 'unclear' && !storageFailed && outage && this.phase !== 'closed') {
+      // A read failed, for a reason that a drive which stopped delivering gives
+      // and that a file with damaged data gets too. The file system says
+      // which, and with it how long this is worth waiting on.
+      this.phase = 'decoding';
+      this.pendingResume = { plan, at, rate, bytes };
+      const asked = (this.asking = {});
+      void isStorageReadFailure(failure, plan.source.path).then((storage) => {
+        if (this.asking !== asked) return;
+        this.asking = null;
+        this.pendingResume = null;
+        this.afterStop(plan, at, rate, bytes, code, detail, outage, storage);
+      });
+      return;
+    }
+    this.afterStop(plan, at, rate, bytes, code, detail, outage, storageFailed);
+  }
+
+  /**
+   * What follows a decoder's stop once it is known whether the storage is
+   * what stopped it: the file is read again from there, the track fails where
+   * its audio stops, or it has ended.
+   */
+  private afterStop(
+    plan: Plan,
+    at: number,
+    rate: number,
+    bytes: number,
+    code: number | null,
+    detail: string,
+    outage: Outage | null,
+    storageFailed: boolean,
+  ): void {
+    const frames = Math.floor(bytes / FRAME_BYTES);
+    const logged = logReadFailure(detail, plan.source.path) != null;
+    const stoppedSec = plan.startAt + frames / rate;
+    const readFailed = code !== 0 || logged;
+    // With no audio at all this only retries a failure that is the drive's:
+    // a damaged file that never decodes is not worth waiting on.
     if ((frames > 0 || storageFailed) && readFailed && outage && this.phase !== 'closed') {
       // A drive that stopped answering gets the long wait; a decoder that
       // failed for any other reason (a damaged file) only a short one.
       const limitMs = storageFailed ? DECODE_OUTAGE_MS : DECODE_ERROR_MS;
-      const stoppedAt = (plan.startAt + frames / rate).toFixed(2);
-      if (performance.now() - outage.since < limitMs) {
+      const stoppedAt = stoppedSec.toFixed(2);
+      // Unless that drive was given up on a moment ago for another track and
+      // nothing has been read from it since: this one is not waited on in turn.
+      const gone = storageFailed && storageKnownGone(plan.source.path);
+      if (!gone && performance.now() - outage.since < limitMs) {
         console.warn(
           `[newamp] gapless decode stopped at ${stoppedAt} s (ffmpeg ${code}) for ${plan.source.path}; reading again from there (try ${outage.attempt + 1})\n${detail}`,
         );
@@ -963,13 +1102,20 @@ class Session {
           this.resumeTimer = null;
           this.pendingResume = null;
           if (this.phase === 'closed') return;
+          if (stuckDecoders.size >= STUCK_DECODER_LIMIT) {
+            // Not another decoder beside the ones that won't stop. It counts
+            // as one more read that got nowhere: later, or not at all once
+            // the outage has lasted too long.
+            this.onDecoded(plan, at, rate, bytes, null, 'earlier decoders have not exited', next);
+            return;
+          }
           this.spawnDecoder(plan, next);
         }, Math.min(DECODE_RESUME_DELAY_MS * next.attempt, DECODE_RESUME_MAX_DELAY_MS));
         return;
       }
       // A damaged file that stops where it nearly ended anyway did play out:
       // it ends there, as it always has, and what follows goes on.
-      const nearEnd = plan.durationSec != null && plan.startAt + frames / rate >= plan.durationSec - DECODE_END_SLACK_SEC;
+      const nearEnd = plan.durationSec != null && stoppedSec >= plan.durationSec - DECODE_END_SLACK_SEC;
       if (storageFailed || !nearEnd) {
         // The drive has been gone too long. Not the end of the track: fail it
         // in-band where its audio stops, so the renderer takes it from there
@@ -977,33 +1123,25 @@ class Session {
         console.warn(
           `[newamp] gapless decode gave up on ${plan.source.path} after ${Math.round((performance.now() - outage.since) / 1000)} s of failed reads at ${stoppedAt} s\n${detail}`,
         );
-        this.setWaiting(false);
-        if (plan === this.firstPlan && this.first && this.out.accepted === 0) {
-          // Nothing of it was ever heard, so start() itself fails and the
-          // decks take the track; a stream that only fails and ends is not
-          // something the renderer has anything to play for.
-          this.failFirst(new Error(storageFailed ? 'The drive stopped answering.' : 'Decode failed.'));
-          return;
-        }
-        this.out.mark(this.writeHead(), {
-          t: 'fail',
-          gen: this.gen,
-          token: plan.token,
-          message: storageFailed ? 'The drive stopped answering partway through the track.' : 'Decode failed partway through the track.',
-        });
-        this.next = null;
-        this.deferredNext = null;
-        this.finish();
+        if (storageFailed) rememberStorageGone(plan.source.path);
+        this.failPartway(
+          plan,
+          storageFailed ? 'The drive stopped answering partway through the track.' : 'Decode failed partway through the track.',
+          storageFailed ? 'The drive stopped answering.' : 'Decode failed.',
+        );
         return;
       }
     }
     this.setWaiting(false);
     // A clean exit with nothing after a seek is a seek to (or past) the end:
     // the track has played out, it didn't fail. One that logged a failed read
-    // is a seek the drive didn't answer.
+    // is a seek the drive didn't answer, and one to well before the end was
+    // checked before it got here.
     const playedOut = frames === 0 && code === 0 && plan.startAt > 0 && !logged;
     if (frames === 0 && !playedOut) {
-      const message = logged ? 'The drive stopped answering.' : code === 0 ? 'The file has no decodable audio.' : 'Decode failed.';
+      const message = storageFailed
+        ? 'The drive stopped answering.'
+        : code === 0 && !logged ? 'The file has no decodable audio.' : 'Decode failed.';
       console.error(`[newamp] gapless decode produced no audio (ffmpeg ${code}) for ${plan.source.path}\n${detail}`);
       if (plan === this.firstPlan) {
         this.failFirst(new Error(message));
@@ -1023,7 +1161,7 @@ class Session {
     } else if (frames > 0) {
       // What the file really holds, which a stale library row or a header
       // estimate (VBR MP3 without a Xing frame) can miss by seconds.
-      this.setDuration(plan, plan.startAt + frames / rate);
+      this.setDuration(plan, stoppedSec);
     }
     const next = this.next;
     this.next = null;
@@ -1033,6 +1171,61 @@ class Session {
     }
     this.phase = 'waiting';
     this.checkEndGuard();
+  }
+
+  /**
+   * `plan`'s decoder exited cleanly at `bytes`, well short of the length the
+   * track is known to have. That is the end of a file shorter than the library
+   * thinks, or a read that failed without ffmpeg saying so. The file system
+   * is asked first: a file whose last bytes can't be read was not read to its
+   * end. If they can, one more decoder is started from the same frame; only
+   * when that one also exits cleanly with no more audio is this the end (it
+   * comes back through onDecoded as `confirmed`). If it has more, the stream
+   * simply carries on.
+   */
+  private confirmEnd(plan: Plan, at: number, rate: number, bytes: number, detail: string, outage: Outage): void {
+    // Still filling this segment: the end guard waits meanwhile.
+    this.phase = 'decoding';
+    this.pendingResume = { plan, at, rate, bytes };
+    const asked = (this.asking = {});
+    void probeFileRead(plan.source.path).then((probe) => {
+      if (this.asking !== asked) return;
+      this.asking = null;
+      this.pendingResume = null;
+      // Each look that finds a little more audio and another clean exit is
+      // part of the same outage, and that has its limit like any other.
+      if (probe === 'readable' && performance.now() - outage.since < DECODE_ERROR_MS) {
+        this.spawnDecoder(plan, { at, rate, bytes, attempt: outage.attempt + 1, since: outage.since, storage: outage.storage, confirming: true });
+        return;
+      }
+      // Not the end, then, but a failed read like any other: waited out if
+      // the storage is what did not deliver.
+      this.onDecoded(plan, at, rate, bytes, null, detail || 'stopped short of the end of the file', {
+        ...outage,
+        storage: outage.storage || probe === 'storage',
+      });
+    });
+  }
+
+  /**
+   * `plan` can't be decoded any further and has not reached its end: it fails
+   * in-band where its audio stops, so the renderer takes it from there (the
+   * decks try the file again) instead of moving on as if it had played out.
+   * `unheard` is the error when nothing of it has reached the stream.
+   */
+  private failPartway(plan: Plan, message: string, unheard: string): void {
+    this.setWaiting(false);
+    if (plan === this.firstPlan && this.first && this.out.accepted === 0) {
+      // Nothing of it was ever heard, so start() itself fails and the decks
+      // take the track; a stream that only fails and ends is not something
+      // the renderer has anything to play for.
+      this.failFirst(new Error(unheard));
+      return;
+    }
+    this.out.mark(this.writeHead(), { t: 'fail', gen: this.gen, token: plan.token, message });
+    this.next = null;
+    this.deferredNext = null;
+    this.finish();
   }
 
   private emit(chunk: Buffer, source: Readable): void {
@@ -1051,7 +1244,7 @@ class Session {
     this.reportPressure();
   }
 
-  private spawnResampler(rate: number): Resampler {
+  private spawnResampler(rate: number, kind: ResamplerKind): Resampler {
     const child = spawn(
       this.ffmpeg,
       [
@@ -1077,7 +1270,7 @@ class Session {
         '-i',
         'pipe:0',
         '-af',
-        resamplerFilter(this.resamplerKind),
+        resamplerFilter(kind),
         '-ar',
         String(this.rate),
         '-c:a',
@@ -1203,6 +1396,7 @@ class Session {
     this.resumeTimer = null;
     this.pendingResume = null;
     this.pendingOpen = null;
+    this.asking = null;
     // Whatever was being waited on is not any more: a replacement decoder
     // that isn't a resume would otherwise leave the renderer waiting for the
     // whole of its track.
@@ -1277,19 +1471,23 @@ class GaplessProducer {
     const epoch = this.epoch;
     this.closeSession();
     const ffmpeg = resolveFfmpegPath();
-    // Nothing here depends on the track: the probe runs while it is planned.
+    // Nothing here depends on the track: the probe runs while it is planned,
+    // and the session waits for its answer only if a track turns out to need
+    // a resampler. A slow first run of the binary holds up nothing else.
     const probing = probeResampler(ffmpeg);
     let first: Plan;
     try {
-      first = await this.plan(request);
+      // The lookup reads the file's metadata from the same drive as the audio,
+      // and a drive that has stopped answering holds it as long as it holds a
+      // decoder: past the limit the start fails, and the decks take the track.
+      first = await orFailAfter(this.plan(request), FIRST_AUDIO_TIMEOUT_MS, 'Timed out reading the track.');
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
-    const kind = await probing;
     if (epoch !== this.epoch || request.gen !== this.gen || !this.port) {
       return { ok: false, error: 'Superseded by a newer request.' };
     }
-    const session = new Session(request.gen, this.port, request.sampleRate, ffmpeg, kind, first, null);
+    const session = new Session(request.gen, this.port, request.sampleRate, ffmpeg, probing, first, null);
     this.session = session;
     // The first segment has to exist before a prepare that arrived while
     // this start was planning can name it.
@@ -1317,12 +1515,14 @@ class GaplessProducer {
     }
     if (this.session !== session) return { ok: false, error: 'Superseded by a newer request.' };
     const rate = session.firstRate;
+    // Known by now if the first track needed it; otherwise only if the probe has answered.
+    const kind = session.resamplerKind;
     return {
       ok: true,
       durationSec: first.durationSec,
       sourceSampleRate: rate,
-      resampler: rate == null || rate === request.sampleRate ? 'none' : kind,
-      resamplerKind: kind,
+      resampler: rate == null || rate === request.sampleRate ? 'none' : (kind ?? 'none'),
+      ...(kind ? { resamplerKind: kind } : {}),
     };
   }
 
@@ -1397,6 +1597,23 @@ function orNullAfter<T>(promise: Promise<T | null>, ms: number): Promise<T | nul
       resolve(value);
     };
     promise.then(settle, () => settle(null));
+  });
+}
+
+/** `promise`'s outcome, or a rejection with `message` if it hasn't settled in `ms`; it carries on regardless. */
+function orFailAfter<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
   });
 }
 

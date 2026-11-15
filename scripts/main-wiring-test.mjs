@@ -147,9 +147,10 @@ assert.match(main, /ipcMain\.handle\('win:set-always-on-top'[\s\S]*?setVisibleOn
   const blocker = functionBody(main, 'function refreshDisplaySleepBlocker(): void {');
   assert.match(blocker, /detachedVizWin\.isVisible\(\) && !detachedVizWin\.isMinimized\(\)/, 'a minimized projector is not on screen');
   assert.match(blocker, /shouldBlockDisplaySleep\(\{/);
-  const created = main.slice(main.indexOf("app.on('browser-window-created'"));
+  const fromCreated = main.slice(main.indexOf("app.on('browser-window-created'"));
+  const created = fromCreated.slice(0, fromCreated.indexOf('\n});\n'));
   for (const event of ['show', 'hide', 'minimize', 'restore', 'closed']) {
-    assert.ok(created.slice(0, 500).includes(`created.on('${event}', refreshDisplaySleepBlocker)`), `the blocker is re-checked on ${event}`);
+    assert.ok(created.includes(`created.on('${event}', refreshDisplaySleepBlocker)`), `the blocker is re-checked on ${event}`);
   }
   // Other modules may hang their own will-quit listeners; one of them must let go of the blocker.
   const quitHandlers = [...main.matchAll(/app\.on\('will-quit'/g)].map((m) => main.slice(m.index, m.index + 600));
@@ -161,8 +162,21 @@ assert.match(main, /ipcMain\.handle\('win:set-always-on-top'[\s\S]*?setVisibleOn
 {
   assert.match(main, /ipcMain\.handle\('open:consume-pending-files'[\s\S]*?handedOffFiles = \{ paths: \[\.\.\.files\], at: Date\.now\(\) \}/);
   const deliver = functionBody(main, 'function deliverOpenFiles(paths: string[]): void {');
-  assert.match(deliver, /mergeHandedOff\(paths, handedOffFiles, Date\.now\(\), COLD_START_MERGE_MS\)/);
+  assert.match(deliver, /mergeHandedOff\(paths, handedOffFiles, Date\.now\(\), COLD_START_MERGE_MS, openTargetKey\)/);
   assert.match(deliver, /send\('app:open-files', merged\.files\)/);
 }
+
+// Every store the app opens reports a failed save: both places that open the library set its callback, and both settings stores get theirs.
+{
+  const opens = [...main.matchAll(/library = await LibraryStore\.open\([^\n]*\n(\s*)library\.onSaveFailed = reportLibraryNotSaved;/g)];
+  assert.equal(opens.length, 2, 'the startup open and the open after a restore each set onSaveFailed on the next line');
+  assert.equal(main.match(/library = await LibraryStore\.open\(/g)?.length, 2, 'and there is no other open');
+  assert.equal(main.match(/new SettingsStore\(join\(userData, 'settings\.json'\), reportSettingsNotSaved\)/g)?.length, 2, 'both settings stores report a failed write');
+  assert.equal(main.match(/new SettingsStore\(/g)?.length, 2);
+}
+
+// The gapless transport starts from the library row; the exclusive resolver reads the file's tags first.
+assert.match(main, /registerGaplessTransport\(\s*ipcMain,\s*resolveGaplessSource,/);
+assert.match(main, /const source = await resolveExclusiveSource\(Math\.trunc\(Number\(trackId\)\)\);\s*if \(requestSeq !== exclusivePlaySeq\)/, 'exclusive play still resolves through the bounded probe');
 
 console.log('PASS main wiring: permissions, close, crash recovery, thumbar, startup deck, macOS window handling, open-file hand-off');

@@ -10,8 +10,9 @@
 //  - Settings shows the count and the folder and can turn it off.
 // Run: npm run build:electron && node scripts/daily-backup-test.mjs
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync, promises as fsp, readFileSync, statSync } from 'node:fs';
+import { mkdir, readdir, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import initSqlJs from 'sql.js';
@@ -22,6 +23,7 @@ import {
   listDailyBackups,
   restoreSupportBackup,
 } from '../dist-electron/electron/support-backup.js';
+import { LibraryStore } from '../dist-electron/electron/library.js';
 import { SettingsStore } from '../dist-electron/electron/settings.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -157,6 +159,44 @@ await rm(root, { recursive: true, force: true });
   assert.equal(notSqlite.outcome.reason, 'invalid', 'a file that is not SQLite at all');
 }
 
+// ---- put off for playback, but not for ever ----
+{
+  const p = await profile();
+  const first = await daily(p, day(1, 9), library(1), { defer: () => true });
+  assert.equal(first.outcome.status, 'created', 'with no copy at all there is nothing to wait for');
+  const playing = await daily(p, day(2, 8), library(2), { defer: () => true });
+  assert.deepEqual(playing.outcome, { status: 'skipped', reason: 'deferred' }, 'a copy that falls due while music plays waits');
+  assert.equal(playing.snapshots, 0, 'and the database is not copied out of memory meanwhile');
+  const almost = await daily(p, day(2, 20), library(2), { defer: () => true });
+  assert.equal(almost.outcome.reason, 'deferred', 'still waiting at 35 hours');
+  const overdue = await daily(p, day(2, 22), library(2), { defer: () => true });
+  assert.equal(overdue.outcome.status, 'created', 'at 37 hours it is made while the music plays');
+  assert.equal((await listDailyBackups(p.userDataPath)).length, 2);
+  const idle = await daily(p, day(3, 8), library(3), { defer: () => false });
+  assert.equal(idle.outcome.status, 'created', 'and it is made as usual when nothing plays');
+}
+
+// ---- a copy that cannot be finished leaves no folder behind ----
+{
+  const p = await profile();
+  const realWriteFile = fsp.writeFile;
+  fsp.writeFile = async (path, ...rest) => {
+    if (/backups[\\/].*library\.db$/.test(String(path))) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    return realWriteFile(path, ...rest);
+  };
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(daily(p, day(1), library(1)), /ENOSPC/, 'the failure still reaches the caller');
+    await assert.rejects(createSupportBackup({ ...p, now: new Date(Date.UTC(2026, 9, 2)), librarySnapshot: library(1) }), /ENOSPC/);
+  } finally {
+    fsp.writeFile = realWriteFile;
+    syncBuiltinESMExports();
+  }
+  assert.deepEqual(await readdir(join(p.userDataPath, 'backups')), [], 'the half-written folders are removed, settings.json included');
+  const retry = await daily(p, day(1), library(1));
+  assert.equal(retry.outcome.status, 'created', 'the next attempt starts clean');
+}
+
 // ---- a nearly full drive ----
 {
   const p = await profile();
@@ -223,6 +263,66 @@ await rm(root, { recursive: true, force: true });
   assert.equal(JSON.parse(await readFile(p.settingsPath, 'utf8')).theme, 'classic');
 }
 
+// ---- a restore is not undone by a copy that was waiting to be saved before it ----
+{
+  const p = await profile();
+  const libraryWith = async (marker) => {
+    const store = await LibraryStore.open(join(p.userDataPath, `scratch-${marker}.db`));
+    store.db.run('CREATE TABLE marker (v TEXT)');
+    store.db.run('INSERT INTO marker VALUES (?)', [marker]);
+    const bytes = Buffer.from(store.db.export());
+    store.close();
+    return bytes;
+  };
+  const markerIn = async (file) => {
+    const store = await LibraryStore.open(file);
+    try {
+      return store.db.exec('SELECT v FROM marker')[0].values[0][0];
+    } finally {
+      store.close();
+    }
+  };
+  const restoredBytes = await libraryWith('restored');
+  await writeFile(p.libraryPath, restoredBytes);
+  await writeFile(p.settingsPath, JSON.stringify({ theme: 'classic' }));
+  const { outcome } = await daily(p, day(1), restoredBytes);
+  assert.equal(outcome.status, 'created');
+  // The backup is old, and a restore on Windows keeps the date a copied file has.
+  const longAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  for (const name of ['library.db', 'settings.json']) await utimes(join(outcome.backup.backupPath, name), longAgo, longAgo);
+
+  // The profile has moved on, and two whole copies of what was newest never got into place.
+  await writeFile(p.libraryPath, await libraryWith('live'));
+  await writeFile(p.settingsPath, JSON.stringify({ theme: 'terminal' }));
+  const later = new Date(Date.now() + 60 * 60 * 1000);
+  const unsavedBytes = await libraryWith('unsaved');
+  const waiting = [
+    [`${p.libraryPath}.tmp-4242-sync`, unsavedBytes],
+    [`${p.libraryPath}.tmp-4242-7`, unsavedBytes],
+    [`${p.settingsPath}.tmp-4242-sync`, JSON.stringify({ theme: 'amber' })],
+    [`${p.settingsPath}.tmp-4242-retry`, JSON.stringify({ theme: 'amber' })],
+    [`${p.settingsPath}.tmp-4242-3`, JSON.stringify({ theme: 'amber' })],
+  ];
+  for (const [path, content] of waiting) {
+    await writeFile(path, content);
+    await utimes(path, later, later);
+  }
+  const setAside = [`${p.libraryPath}.unsaved-4242-1`, `${p.libraryPath}.replaced-123`, `${p.settingsPath}.corrupt-20260101-000000`];
+  const unrelated = join(p.userDataPath, 'notes.tmp-4242-1');
+  for (const path of [...setAside, unrelated]) await writeFile(path, 'kept');
+
+  const startedAt = Date.now();
+  await restoreSupportBackup({ ...p, backupPath: outcome.backup.backupPath });
+  assert.deepEqual(waiting.map(([path]) => existsSync(path)), waiting.map(() => false), 'the copies from before the restore are gone');
+  assert.deepEqual([...setAside, unrelated].map((path) => existsSync(path)), [true, true, true, true], 'copies set aside, and files that are not a writer\'s temp, stay');
+  for (const file of [p.libraryPath, p.settingsPath]) {
+    assert.ok(statSync(file).mtimeMs >= startedAt - 2000, `${file} is dated from the restore, not from the backup`);
+  }
+  assert.equal(JSON.parse(await readFile(p.settingsPath, 'utf8')).theme, 'classic');
+  assert.equal(new SettingsStore(p.settingsPath).get().theme, 'classic', 'a fresh start loads the restored settings');
+  assert.equal(await markerIn(p.libraryPath), 'restored', 'and the restored library');
+}
+
 // ---- the setting ----
 {
   const p = await profile();
@@ -242,8 +342,8 @@ await rm(root, { recursive: true, force: true });
   const main = read('electron/main.ts');
   const run = main.match(/async function runDailyBackup\(\): Promise<void> \{[\s\S]*?\n\}\n/)?.[0] ?? '';
   assert.ok(run, 'main.ts has runDailyBackup');
-  assert.match(run, /if \(!settings\.get\(\)\.autoBackupEnabled\) return;/, 'off means off');
-  assert.match(run, /restoreInProgress \|\| backupInProgress \|\| library\.isClosed\(\) \|\| library\.upgradeError \|\| settings\.isSuppressed\(\)/, 'not while the stores are being swapped, or are not the real ones');
+  assert.match(run, /if \(!settings\.get\(\)\.autoBackupEnabled \|\| library\.isClosed\(\) \|\| library\.upgradeError \|\| settings\.isSuppressed\(\)\) \{/, 'off means off, and so is a library that is not the real one');
+  assert.match(run, /if \(restoreInProgress \|\| backupInProgress\) \{\s*retryDeferredDailyBackup\(\);\s*return;/, 'not while the stores are being swapped, and a copy put off for playback is asked for again');
   assert.ok(run.indexOf('library.flushPendingWrites()') < run.indexOf('createDailyBackupIfDue('), 'the library is flushed before it is copied');
   assert.match(run, /snapshot: \(\) => \(\{ librarySnapshot: library\.exportSnapshot\(\), settingsSnapshot: settings\.snapshotJson\(\) \}\)/, 'the copy is of the live stores, not a possibly stale file');
   assert.match(run, /backupInProgress \+= 1;[\s\S]*?finally \{\s*backupInProgress -= 1;/, 'a restore cannot start under it');

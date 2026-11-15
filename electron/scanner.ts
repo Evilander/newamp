@@ -52,15 +52,31 @@ interface DiscoveredFile {
   dev: number;
 }
 
+// A root that is not there was deleted when the folder holding it still
+// answers; when that does not either (a share that is down, a mapped drive
+// that is disconnected) the scan could not look, which is not the same thing.
+async function rootUnreachable(root: string): Promise<boolean> {
+  const parent = dirname(root);
+  if (parent === root) return true;
+  try {
+    await fs.stat(parent);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 // What a walk learned about its root besides the files: whether the root was
-// there at all, and which folders under it could not be listed. A scan only
-// treats "not found" as meaningful where it actually looked.
+// there at all, whether it held anything (a share that is not mounted leaves
+// an empty folder behind), and which folders under it could not be listed. A
+// scan only treats "not found" as meaningful where it actually looked.
 interface WalkReport {
   reachable: boolean;
+  empty: boolean;
   unreadable: string[];
 }
 
-async function* walk(root: string, report: WalkReport = { reachable: false, unreadable: [] }): AsyncGenerator<DiscoveredFile> {
+async function* walk(root: string, report: WalkReport = { reachable: false, empty: false, unreadable: [] }): AsyncGenerator<DiscoveredFile> {
   try {
     const stat = await fs.stat(root);
     if (stat.isFile()) {
@@ -86,6 +102,7 @@ async function* walk(root: string, report: WalkReport = { reachable: false, unre
       report.unreadable.push(dir);
       continue; // skip permission denied / unreadable
     }
+    if (dir === root && !entries.length) report.empty = true;
     const files: string[] = [];
     for (const e of entries) {
       const full = join(dir, e.name);
@@ -497,8 +514,9 @@ export class Scanner {
       const seen = new Set<string>();
       const walkedRoots: string[] = [];
       const unreadableFolders: string[] = [];
+      const unreachableRoots: string[] = [];
       await pMap(roots, DISCOVERY_CONCURRENCY, async (root) => {
-        const report: WalkReport = { reachable: false, unreadable: [] };
+        const report: WalkReport = { reachable: false, empty: false, unreadable: [] };
         for await (const f of walk(root, report)) {
           if (this.cancelled) break;
           const key = discoveredPathKey(f.full);
@@ -517,7 +535,12 @@ export class Scanner {
             });
           }
         }
-        if (report.reachable) {
+        if (!report.reachable) {
+          if (await rootUnreachable(root)) unreachableRoots.push(root);
+        }
+        // An empty folder is what an unmounted share leaves behind, and a walk of
+        // it finds nothing under any name, so it cannot say what has gone.
+        else if (!report.empty) {
           walkedRoots.push(root);
           unreadableFolders.push(...report.unreadable);
         }
@@ -534,7 +557,7 @@ export class Scanner {
       // And the other way round: a file deleted while NewAmp was closed left no
       // watcher event behind. Only roots that were there and walked to the end
       // count; an unplugged drive or dropped share marks nothing.
-      this.library.markUnfoundTracksMissing(walkedRoots, found, unreadableFolders);
+      await this.library.markUnfoundTracksMissingAsync(walkedRoots, found, unreadableFolders);
 
       const total = discovered.length;
       const folderArtPathCache = new Map<string, Promise<string | null>>();
@@ -597,9 +620,11 @@ export class Scanner {
         this.library.setTrackDevices(devices);
 
         const read = await pMap(changed, METADATA_CONCURRENCY, async (f) => {
+          if (this.cancelled) return null;
           // Playback that runs short of audio goes first: on a slow drive or
           // share the scan's reads are what its decoder waits behind.
           await whenPlaybackFed();
+          if (this.cancelled) return null;
           try {
             return await readMeta(f.full, f.size, f.mtime, f.dev, folderArtForFile, codecOnly.has(f.full));
           } catch (err) {
@@ -627,6 +652,12 @@ export class Scanner {
         });
       }
 
+      // A cancel that came during the last batch stopped its reads short.
+      if (this.cancelled) {
+        reportCancelled(scanned);
+        return;
+      }
+
       // The folders this scan touched may now read differently (a compilation
       // that finished arriving, a disc folder that was added), so the albums
       // are settled before anything asks for them.
@@ -636,7 +667,12 @@ export class Scanner {
         // The albums keep the grouping their tracks were written with.
         console.warn(`[newamp] album grouping failed: ${errorMessage(err)}`);
       }
-      this.onProgress({ scanned: total, total, current: '', done: true, startedAt, parsed, skipped });
+      if (unreachableRoots.length) {
+        console.warn(`[newamp] scan could not reach: ${unreachableRoots.join(', ')}`);
+      }
+      const last: ScanProgress & { unreachable?: string[] } = { scanned: total, total, current: '', done: true, startedAt, parsed, skipped };
+      if (unreachableRoots.length) last.unreachable = unreachableRoots;
+      this.onProgress(last);
       finished = true;
     } catch (err) {
       // A scan that dies part-way (a full disk, a closed store) still ends for

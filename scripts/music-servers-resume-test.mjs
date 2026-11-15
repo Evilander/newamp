@@ -32,6 +32,7 @@ const fail = (message) => {
 const bytes = Buffer.from('0123456789abcdefghijklmnopqrstuvwxyz');
 const hits = {};
 const ranges = [];
+const posted = [];
 let port = 0;
 
 function sendRange(req, res, mode) {
@@ -48,13 +49,15 @@ function sendRange(req, res, mode) {
     etag: '"stable"',
   };
   if (range && !ignoresRange) headers['content-range'] = `bytes ${start}-${end}/${bytes.length}`;
+  // The same span, but of a file that has grown since the first answer.
+  if (mode === 'resize' && range && start > 0) headers['content-range'] = `bytes ${start}-${end}/${bytes.length + 4}`;
   res.writeHead(range && !ignoresRange ? 206 : 200, headers);
   if (ignoresRange) {
     // A server that ignores Range and answers 200 again cannot be spliced.
     res.end(bytes);
     return;
   }
-  if (mode === 'drop' && start === 0) {
+  if ((mode === 'drop' || mode === 'resize') && start === 0) {
     res.write(body.subarray(0, 10));
     setTimeout(() => res.socket.destroy(), 20);
     return;
@@ -69,7 +72,7 @@ function sendRange(req, res, mode) {
     return;
   }
   if (mode === 'flaky' && start < 24) {
-    // Every attempt delivers a little and then loses the connection, four times in a row.
+    // Every attempt delivers a little and then loses the connection, three times in a row.
     res.write(body.subarray(0, 8));
     setTimeout(() => res.socket.destroy(), 20);
     return;
@@ -98,6 +101,28 @@ const server = createServer((req, res) => {
   }
   if (url.pathname === '/elsewhere/Audio/plain/stream') {
     send(301, { location: 'https://music.example.net/Audio/plain/stream?api_key=secret-token' });
+    return;
+  }
+  // A Jellyfin sign-in that is moved to the same endpoint with a slash added, and one moved elsewhere.
+  if (req.method === 'POST' && url.pathname === '/jfauth/Users/AuthenticateByName') {
+    send(301, { location: `http://127.0.0.1:${port}/jfauth/Users/AuthenticateByName/` });
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/jfauth/Users/AuthenticateByName/') {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      posted.push(body);
+      send(200, { 'content-type': 'application/json' }, JSON.stringify({ AccessToken: 'tok', User: { Id: 'u1' }, ServerId: 's1' }));
+    });
+    return;
+  }
+  if (url.pathname === '/jfauth/System/Info') {
+    send(200, { 'content-type': 'application/json' }, JSON.stringify({ ServerName: 'Test JF', Version: '10.9' }));
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/jfaway/Users/AuthenticateByName') {
+    send(302, { location: 'https://music.example.net/Users/AuthenticateByName' });
     return;
   }
   if (url.pathname === '/browse/rest/search3.view') {
@@ -174,6 +199,17 @@ try {
   if (flakyText !== bytes.toString()) fail(`separated drops should each be resumed, got ${JSON.stringify(flakyText)}`);
   log.push('the retry limit applies to consecutive failures, not to the whole song');
 
+  const resized = await stream('jf', 'resize');
+  let resizedError = null;
+  try {
+    await resized.text();
+  } catch (err) {
+    resizedError = err;
+  }
+  if (!resizedError) fail('a resume answered for a file of another length must not be spliced on');
+  else if (!/did not resume/.test(String(resizedError.message ?? resizedError))) fail(`unexpected resume error: ${resizedError.message ?? resizedError}`);
+  log.push('a resume that reports a different file length is refused');
+
   const redirected = await stream('redirect', 'plain');
   if (redirected.status !== 200 || (await redirected.text()) !== bytes.toString()) fail('trailing-slash redirect should be followed');
   log.push('a same-endpoint redirect is followed');
@@ -184,6 +220,29 @@ try {
   if (!elsewhereText.includes('https://music.example.net')) fail(`redirect error should name the target origin: ${elsewhereText}`);
   if (/secret-token|api_key/.test(elsewhereText)) fail('redirect error must not echo the Location query');
   log.push('a cross-host redirect names the new origin and leaks nothing');
+
+  const signedIn = await testMusicServerConnection({
+    provider: 'jellyfin',
+    baseUrl: `http://127.0.0.1:${port}/jfauth`,
+    username: 'u',
+    password: 'pw-1',
+  }, { timeoutMs: 3000 });
+  if (signedIn.connection.serverName !== 'Test JF') fail(`sign-in should carry on to the server info, got ${signedIn.connection.serverName}`);
+  if (posted.length !== 1 || JSON.parse(posted[0] || '{}').Pw !== 'pw-1') fail(`the sign-in should arrive once, with its body, at the address it moved to: ${JSON.stringify(posted)}`);
+  log.push('a sign-in POST moved to the same endpoint is sent again there, body included');
+  try {
+    await testMusicServerConnection({
+      provider: 'jellyfin',
+      baseUrl: `http://127.0.0.1:${port}/jfaway`,
+      username: 'u',
+      password: 'pw-2',
+    }, { timeoutMs: 3000 });
+    fail('a sign-in redirected to another host must be refused');
+  } catch (err) {
+    if (!/music\.example\.net.*refusing to forward credentials/.test(err.message)) fail(`refusal should name the host: ${err.message}`);
+    if (/pw-2/.test(err.message)) fail('the refusal must not echo the password');
+  }
+  log.push('a sign-in POST moved to another host is refused');
 
   const browse = await browseMusicServerSongs({
     id: 'sub-browse',
@@ -227,10 +286,12 @@ try {
   fail('threw: ' + (err?.stack || err));
 } finally {
   server.closeAllConnections?.();
-  server.close();
+  await new Promise((resolvePromise) => server.close(resolvePromise));
 }
 
 writeFileSync(RESULT, log.join('\n') + '\n' + (pass ? 'PASS' : 'FAILED') + '\n');
 console.log(log.join('\n'));
 console.log(pass ? 'PASS' : 'FAILED');
-process.exit(pass ? 0 : 1);
+// Not process.exit(): on Windows it can run while libuv is still closing the handles of the
+// connections above and abort the process with an assertion. The loop empties by itself.
+process.exitCode = pass ? 0 : 1;

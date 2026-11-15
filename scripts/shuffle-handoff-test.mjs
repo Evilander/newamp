@@ -161,7 +161,7 @@ assert.equal(
 // --- (d) a manual next() during a prepared handoff does not play the wrong track.
 //
 // usePlayerStore.next() (through advanceFromQueue) unconditionally clears
-// cachedShuffleHandoff before computing anything (see the source assertions below) — a manual skip
+// cachedShuffleHandoff before computing anything (queue-store-test.mjs runs it) — a manual skip
 // never reads a background pick at all, so it can never inherit one that
 // went stale relative to the CURRENT queue. Prove the consequence directly:
 // simulate "prepare fired, then the queue mutated, then the user manually
@@ -199,97 +199,11 @@ assert.equal(
   );
 }
 
-// --- Source assertions: prove the store actually wires the above
-// mechanism into next()/autoAdvance()/the prepare branch, not just that
-// the pure helpers exist in isolation.
-const [storeSource, handoffSource, packageSource] = await Promise.all([
-  readFile(new URL('../src/store/usePlayerStore.ts', import.meta.url), 'utf8'),
-  readFile(new URL('../shared/playback-handoff.ts', import.meta.url), 'utf8'),
-  readFile(new URL('../package.json', import.meta.url), 'utf8'),
-]);
-
-assert.match(handoffSource, /export function hasHandoffTarget/, 'playback-handoff should expose the shuffle-eligible gate');
-assert.match(storeSource, /import\s*\{\s*\n\s*isShuffleHandoffCacheValid,\s*\n\s*resolveShuffleHandoffPick,/, 'store should import the shuffle handoff cache helpers');
-
-// The prepare branch must actually call resolveShuffleHandoffPick under
-// isShuffleMode, not just recompute the sequential index for every mode.
-// (isShuffleMode(state.mode) also appears, unrelated, inside
-// advanceAfterPlaybackError, so anchor on the literal cache-write line
-// itself rather than a loose regex that could match the wrong block.)
-assert.ok(
-  storeSource.includes('cachedShuffleHandoff = resolveShuffleHandoffPick(cachedShuffleHandoff, {'),
-  'the gapless-prepare branch should cache a shuffle pick via resolveShuffleHandoffPick',
-);
-assert.ok(
-  storeSource.includes("if (isShuffleMode(state.mode)) {\r\n          // Cache the pick so autoAdvance() commits the exact track decoded") ||
-    storeSource.includes("if (isShuffleMode(state.mode)) {\n          // Cache the pick so autoAdvance() commits the exact track decoded"),
-  'the cache write should be gated on isShuffleMode inside the prepare branch specifically',
-);
-
-// autoAdvance must gate on isShuffleHandoffCacheValid before consuming the
-// cache, and must fall through to next() (which invalidates) otherwise.
-assert.match(storeSource, /async function autoAdvance\(/, 'store should define the cache-aware automatic-advance path');
-assert.match(storeSource, /isShuffleHandoffCacheValid\(cachedShuffleHandoff, \{/, 'autoAdvance should validate the cache before trusting it');
-assert.ok(
-  storeSource.includes('cachedShuffleHandoff = null;\r\n  await getState().next();') ||
-    storeSource.includes('cachedShuffleHandoff = null;\n  await getState().next();'),
-  'autoAdvance should invalidate and fall through to the normal next() when no valid cache exists',
-);
-
-// Every automatic call site must route through autoAdvance, not a bare next().
-const autoAdvanceCallCount = (storeSource.match(/void autoAdvance\(get, set\)/g) || []).length;
-assert.equal(autoAdvanceCallCount, 3, 'all three automatic advance sites (cued-segment end, crossfade start, natural end) should route through autoAdvance');
-assert.doesNotMatch(storeSource, /void state\.next\(\)/, 'the crossfade-start branch should no longer call next() directly (it must go through autoAdvance so a valid cache can be consumed)');
-
-// next() opens a play intent and hands the advance to advanceFromQueue, which
-// holds the rest: a skip still waiting on an Auto DJ refill or a context
-// expansion must stand down if the user has since picked another track or
-// edited the queue. Anchor on the literal opening of each action so this cannot
-// match some other, unrelated "cachedShuffleHandoff = null" reset (e.g. inside
-// autoAdvance itself).
-const nextActionStart = storeSource.indexOf('next: async () => {');
-assert.ok(nextActionStart >= 0, 'store should still define a next() action');
-const nextActionBody = storeSource.slice(nextActionStart, storeSource.indexOf('prev: async () => {', nextActionStart));
-assert.match(
-  nextActionBody,
-  /clearPlaybackErrorAdvanceTimer\(\);\s*\r?\n\s*const intent = playIntents\.begin\(\);/,
-  'next() should open its play intent before advancing',
-);
-assert.match(
-  nextActionBody,
-  /await advanceFromQueue\(get, set, intent, true\)/,
-  'next() should make its first attempt through advanceFromQueue',
-);
-assert.match(
-  nextActionBody,
-  /await advanceFromQueue\(get, set, intent, false\)/,
-  'a queue edit during an end-of-queue lookup should retry the advance without counting a second skip',
-);
-
-const advanceStart = storeSource.indexOf('async function advanceFromQueue(');
-assert.ok(advanceStart >= 0, 'store should define advanceFromQueue');
-const advanceBody = storeSource.slice(advanceStart, storeSource.indexOf('export const usePlayerStore', advanceStart));
-// The manual-skip bookkeeping runs on the first attempt only.
-assert.match(
-  advanceBody,
-  /const state = get\(\);\s*\r?\n\s*if \(firstAttempt\) recordManualSkip\(state\);/,
-  'advanceFromQueue should keep the manual-skip bookkeeping, on the first attempt only',
-);
-assert.match(
-  advanceBody,
-  /await get\(\)\.refillAutoDjQueue\(true\);\s*\r?\n\s*if \(!isCurrent\(\)\) return outcome\(\);/,
-  'advanceFromQueue should stand down after its refill await if a newer play intent or queue edit landed',
-);
-// Ordering, not a fixed window: the invalidation has to come before the
-// advance reads queue/index/mode for its own pick, however long the opening
-// grows. Every manual next() runs through here, so a manual skip never
-// consumes a background pick that went stale against the live queue.
-const invalidatesAt = advanceBody.indexOf('cachedShuffleHandoff = null;');
-const readsQueueAt = advanceBody.indexOf('const { queue, index, mode, shuffleHistory } = state;');
-assert.ok(invalidatesAt >= 0, 'advanceFromQueue should unconditionally invalidate the shuffle handoff cache before computing a fresh pick');
-assert.ok(readsQueueAt >= 0, 'advanceFromQueue should read queue/index/mode from state for its own fresh pick');
-assert.ok(invalidatesAt < readsQueueAt, 'the cache invalidation should happen before advanceFromQueue reads queue/index/mode for its own fresh pick');
-
+// How the store uses the mechanism above is covered against the real store in
+// queue-store-test.mjs: the prepare window picks a track, the end of the track
+// (or of a cued segment) plays that one whatever the dice say by then, and a
+// manual skip works from the queue as it is.
+const packageSource = await readFile(new URL('../package.json', import.meta.url), 'utf8');
 assert.match(packageSource, /"test:shuffle-handoff"/, 'package.json should expose the shuffle handoff regression test');
 
 console.log(JSON.stringify({ ok: true }, null, 2));

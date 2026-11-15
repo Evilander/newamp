@@ -117,6 +117,10 @@ export function TagsView(): JSX.Element {
   // Replacing an edited draft takes a second press on the same target, so one
   // stray click on the list does not throw the edit away.
   const discardArmedFor = useRef<string | null>(null);
+  // Editing on after the warning means it no longer says what would be lost.
+  useEffect(() => {
+    discardArmedFor.current = null;
+  }, [draft.body, draft.boost]);
   function confirmDiscard(target: string): boolean {
     if (!draftIsDirty() || discardArmedFor.current === target) {
       discardArmedFor.current = null;
@@ -128,7 +132,7 @@ export function TagsView(): JSX.Element {
   }
 
   function pickRule(rule: TagRule): void {
-    if (rule.id !== draft.id && !confirmDiscard(`rule:${rule.id}`)) return;
+    if (!confirmDiscard(`rule:${rule.id}`)) return;
     setDraft({ id: rule.id, name: rule.name, body: rule.body, boost: rule.boost, enabled: rule.enabled });
     setError(null);
     setStatus(null);

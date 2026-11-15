@@ -630,6 +630,11 @@ const ctrl = (key, flags = {}) => keydown({ key, code: `Key${key.toUpperCase()}`
   ctrl('j');
   launcher.render();
   assert.notEqual(launcher.output, null, 'Ctrl+J opens it too');
+  // Escape that cancels an input method's composition is the input method's.
+  keydown({ key: 'Escape', code: 'Escape', isComposing: true });
+  keydown({ key: 'Escape', code: 'Escape', keyCode: 229 });
+  launcher.render();
+  assert.notEqual(launcher.output, null, 'Escape while composing leaves the palette open');
   keydown({ key: 'Escape', code: 'Escape' });
   launcher.render();
   assert.equal(launcher.output, null, 'Escape closes it');

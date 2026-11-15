@@ -84,8 +84,16 @@ assert.equal(
 );
 // Pointer. Double-click flips the window on the bare stage only, and the hover meter resets to 100%.
 assert.equal(result.dblclickOnControlKeepsWindow, true, 'double-clicking a control must not toggle native fullscreen');
-assert.equal(result.dblclickOnStageFlips, true, 'double-clicking the bare stage should toggle native fullscreen');
-assert.equal(result.dblclickOnStageFlipsBack, true, 'and a second double-click should toggle it back');
+assert.equal(
+  result.dblclickOnStageFlips,
+  true,
+  `double-clicking the bare stage should ask the window to toggle fullscreen (${JSON.stringify(result.fullscreenDebug)})`,
+);
+assert.equal(
+  result.dblclickOnStageFlipsBack,
+  true,
+  `and a second double-click should ask again, for the opposite where the window followed the first (${JSON.stringify(result.fullscreenDebug)})`,
+);
 assert.equal(result.meterDblclickVolume, 100, 'double-clicking the hover volume meter should set 100%');
 assert.equal(result.artDefault, 'hidden', 'the album cover overlay should be off for a profile that never touched it');
 assert.ok(result.stageRect.width >= result.viewport.width * 0.9, 'fullscreen visualizer should cover viewport width');

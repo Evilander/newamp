@@ -30,6 +30,7 @@
 import {
   AnalysisAbortedError,
   AnalysisCrashedError,
+  AnalysisDrivePendingError,
   AnalysisEnvironmentError,
   AnalysisReadFailedError,
   AnalysisTimedOutError,
@@ -57,6 +58,9 @@ export interface AnalysisTarget {
   id: number;
   path: string;
   work: AnalysisWork;
+  /** The file's size and date as the row held them. A result is dropped if the row has another file by the time it is written. */
+  size?: number;
+  mtime?: number;
 }
 
 export interface AnalysisCounts {
@@ -197,7 +201,7 @@ export class AnalysisQueue {
   private startedAt = 0;
   private hold: Hold | null = null;
 
-  private unsaved: AnalysisSave[] = [];
+  private unsaved: Array<{ save: AnalysisSave; target: AnalysisTarget }> = [];
   private unsavedSince = 0;
   // Tracks whose results wait in `unsaved`. The store lists them as owed until
   // the batch is written, so without this a track analysed first because it
@@ -429,7 +433,15 @@ export class AnalysisQueue {
         await this.nap(this.timing.pollMs);
         continue;
       }
-      const id = this.nextId(store);
+      let id: number | null;
+      try {
+        id = this.nextId(store);
+      } catch (err) {
+        // The library could not list what is owed (out of memory on a big one, say): look again later rather than end the queue.
+        this.log('could not list the tracks that owe analysis', err);
+        await this.nap(this.timing.pollMs);
+        continue;
+      }
       if (id == null) {
         // Nothing left to try. Look again later: new files, or a track whose wait is over.
         this.drained = true;
@@ -442,7 +454,14 @@ export class AnalysisQueue {
         continue;
       }
       const started = this.now();
-      const outcome = await this.analyseOne(store, id);
+      let outcome: Outcome;
+      try {
+        outcome = await this.analyseOne(store, id);
+      } catch (err) {
+        this.log(`could not analyse track ${id}`, err);
+        this.passed.add(id);
+        outcome = 'skipped';
+      }
       // An abort, an unreachable file and a retry-later take next to no time and say nothing about the pace.
       if (outcome !== 'skipped') this.noteCycle(this.now() - started + this.timing.gapMs);
       this.flushIfDue();
@@ -513,6 +532,12 @@ export class AnalysisQueue {
         if (!this.stopped) this.urgent.unshift(id);
         return 'skipped';
       }
+      if (err instanceof AnalysisDrivePendingError) {
+        // An earlier stat has not come back. This track did nothing wrong: it keeps its place, and the queue waits for the drive.
+        this.urgent.unshift(id);
+        this.holdUntil.storage = this.now() + this.timing.pollMs;
+        return 'skipped';
+      }
       if (err instanceof AnalysisUnavailableError) {
         this.passed.add(id);
         return 'skipped';
@@ -537,7 +562,7 @@ export class AnalysisQueue {
       }
       // ffmpeg ran, read the file and gave up. Remember that, so it is not tried again until an analyzer changes.
       this.log(`could not analyse ${target.path}`, err);
-      this.queueSave({ id, touched });
+      this.queueSave({ id, touched }, target);
       this.noteDecoded(id);
       return 'failed';
     } finally {
@@ -596,12 +621,12 @@ export class AnalysisQueue {
     if (work.bpm) save.bpm = result.tempo?.bpm ?? null;
     if (work.key) save.key = result.tempo?.key ?? null;
     if (work.dna) save.dna = result.dna;
-    this.queueSave(save);
+    this.queueSave(save, target);
   }
 
-  private queueSave(save: AnalysisSave): void {
+  private queueSave(save: AnalysisSave, target: AnalysisTarget): void {
     if (!this.unsaved.length) this.unsavedSince = this.now();
-    this.unsaved.push(save);
+    this.unsaved.push({ save, target });
     this.settled.add(save.id);
     if (this.counts) this.counts.doneSince += 1;
   }
@@ -618,13 +643,44 @@ export class AnalysisQueue {
     const batch = this.unsaved;
     this.unsaved = [];
     try {
-      this.deps.store()?.saveAnalysis(batch);
+      const store = this.deps.store();
+      if (store) {
+        const current = batch.flatMap(({ save, target }) => this.stillOwed(store, save, target) ?? []);
+        if (current.length) store.saveAnalysis(current);
+      }
     } catch (err) {
       this.log('could not write analysis results', err);
     } finally {
       // Written, the store no longer lists them; not written, they are owed again.
-      for (const save of batch) this.settled.delete(save.id);
+      for (const { save } of batch) this.settled.delete(save.id);
     }
+  }
+
+  // The result against the row as it is now. Decoding takes seconds to minutes and a
+  // result can wait another half minute for its batch, so the row may have changed:
+  // a file replaced in the meantime must not take the old file's tempo and loudness,
+  // and a value filled in since (a tempo typed into the editor, a retagged file)
+  // must not be overwritten by an estimate. Null when nothing is left to write.
+  private stillOwed(store: AnalysisStore, save: AnalysisSave, target: AnalysisTarget): AnalysisSave | null {
+    const now = store.analysisTarget(save.id);
+    if (!now) return null;
+    if (now.path !== target.path || now.size !== target.size || now.mtime !== target.mtime) {
+      // A different file under the same row: it owes everything again, and is looked at soon.
+      this.urgent.push(save.id);
+      return null;
+    }
+    const touched = save.touched.filter((field) => now.work[field]);
+    if (touched.length === save.touched.length) return save;
+    if (!touched.length) return null;
+    const kept: AnalysisSave = { id: save.id, touched };
+    if (touched.includes('loud')) {
+      kept.replayGainTrackDb = save.replayGainTrackDb;
+      kept.integratedLufs = save.integratedLufs;
+    }
+    if (touched.includes('bpm')) kept.bpm = save.bpm;
+    if (touched.includes('key')) kept.key = save.key;
+    if (touched.includes('dna')) kept.dna = save.dna;
+    return kept;
   }
 
   private noteCycle(ms: number): void {

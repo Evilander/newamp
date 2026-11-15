@@ -252,6 +252,15 @@ export class SampleTransport {
     const first = this.segment(base.trackId, base.src, Math.max(0, seconds), base.gain, base.durationSec);
     this.tail = first;
     this.chained = chained ? this.segment(chained.trackId, chained.src, 0, chained.gain, null) : null;
+    // Nothing is audible until the new stream's first frames are in, and the
+    // worklet reports nothing of a stream it has not started. A seek into a
+    // part of the file that is slow to read would show a clock that has
+    // stopped under a state that says playing; the first position report
+    // from the new stream ends this.
+    if (this.playing && !this.bufferingHeld) {
+      this.bufferingHeld = true;
+      this.listener?.({ type: 'buffering', on: true });
+    }
     void this.request(gen, first, this.chained).then((result) => {
       if (result.ok || gen !== this.gen) return;
       this.listener?.({
@@ -609,8 +618,10 @@ export class SampleTransport {
         this.unacked = failed ? null : segment;
         this.listener?.({ type: 'boundary', from, to: segment, failed });
         // What the stream holds of it is only its head; silence beats
-        // hearing that head and then the decks starting the track over.
-        if (queuedFailure && !msg.failed) this.stop();
+        // hearing that head and then the decks starting the track over. The
+        // stream's end that follows a failed track is no news either: the
+        // decks take the track, and a drained report would pause its owner.
+        if (failed) this.stop();
         return;
       }
       case 'dur': {

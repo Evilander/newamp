@@ -18,6 +18,24 @@ export function useState(initial) {
   }];
 }
 export function useEffect(fn, deps) { const h = globalThis.__hooks; h.effects.push({ index: h.index++, fn, deps }); }
+export const useLayoutEffect = useEffect;
+export function useRef(initial) {
+  const h = globalThis.__hooks;
+  const i = h.index++;
+  if (!(i in h.slots)) h.slots[i] = { current: initial };
+  return h.slots[i];
+}
+export function useMemo(compute, deps) {
+  const h = globalThis.__hooks;
+  const i = h.index++;
+  const slot = h.slots[i];
+  if (slot && deps && slot.deps.length === deps.length && deps.every((dep, n) => Object.is(dep, slot.deps[n]))) return slot.value;
+  const value = compute();
+  h.slots[i] = { value, deps: deps ?? [] };
+  return value;
+}
+export function useCallback(fn, deps) { return useMemo(() => fn, deps); }
+export const memo = (component) => component;
 `;
 
 const JSX_STUB = `

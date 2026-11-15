@@ -10,10 +10,11 @@
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { spawnSync } from 'node:child_process';
-import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
+import { scriptStandInSpawn } from './lib/script-standin-spawn.mjs';
 
 const deadline = setTimeout(() => { console.error('analysis decode test timed out'); process.exit(1); }, 120000);
 deadline.unref();
@@ -28,17 +29,20 @@ await build({
   stdin: {
     contents: `
       export * from './electron/track-analyzer';
+      export * from './electron/dna-analyzer';
+      export * from './electron/score-analyzer';
       export * from './shared/analysis';
     `,
     resolveDir: resolve('.'),
     loader: 'ts',
   },
   bundle: true, format: 'esm', platform: 'node', target: 'es2022', packages: 'external',
+  plugins: [scriptStandInSpawn],
   outfile: bundlePath, logLevel: 'silent',
 });
 const {
-  AnalysisAbortedError, AnalysisCrashedError, AnalysisEnvironmentError, AnalysisUnavailableError,
-  MAX_ANALYSIS_SECONDS, activeAnalysisDecodes, analyzeTrack, statWithin,
+  AnalysisAbortedError, AnalysisCrashedError, AnalysisDrivePendingError, AnalysisEnvironmentError, AnalysisUnavailableError,
+  MAX_ANALYSIS_SECONDS, activeAnalysisDecodes, analyzeTrack, analyzeTrackDna, getSongScore, initScoreCache, statWithin,
 } = await import(pathToFileURL(bundlePath).href);
 
 const realFfmpeg = createRequire(import.meta.url)('ffmpeg-static');
@@ -51,11 +55,13 @@ const ffmpegFile = (name, args) => {
 
 const none = { loud: false, tempo: false, dna: false, peaks: false };
 
-// A stand-in for ffmpeg: a shell script.
-async function standIn(name, body) {
-  const file = join(root, name);
-  await writeFile(file, `#!/bin/sh\n${body}\n`);
-  await chmod(file, 0o755);
+// A stand-in for ffmpeg: a shell script, or where there is no shell to run one
+// (Windows) a node script that scriptStandInSpawn starts under node.
+const windows = process.platform === 'win32';
+async function standIn(name, { sh, node }) {
+  const file = join(root, windows ? `${name}.mjs` : `${name}.sh`);
+  await writeFile(file, windows ? `${node}\n` : `#!/bin/sh\n${sh}\n`);
+  if (!windows) await chmod(file, 0o755);
   return file;
 }
 
@@ -66,12 +72,22 @@ process.env.NEWAMP_FFMPEG_PATH = join(root, 'no-such-ffmpeg');
 await assert.rejects(analyzeTrack({ path: song, want: { ...none, loud: true } }), AnalysisEnvironmentError, 'a spawn failure is not a failure of the track');
 assert.equal(activeAnalysisDecodes(), 0);
 
-// 2. ffmpeg killed by a signal.
-process.env.NEWAMP_FFMPEG_PATH = await standIn('segv.sh', 'kill -SEGV $$');
-await assert.rejects(analyzeTrack({ path: song, want: { ...none, loud: true } }), AnalysisCrashedError, 'a signal nobody here sent is a crash, not an abort');
+// 2. ffmpeg killed by a signal. Windows has no death by signal: a crash there is
+// an exit code (0xC0000005, an access violation). Either way it is a crash, not
+// an abort, and nothing is left running.
+process.env.NEWAMP_FFMPEG_PATH = await standIn('segv', { sh: 'kill -SEGV $$', node: 'process.exit(0xC0000005);' });
+await assert.rejects(analyzeTrack({ path: song, want: { ...none, loud: true } }), AnalysisCrashedError, 'a crash nobody here caused is a crash, not an abort');
+assert.equal(activeAnalysisDecodes(), 0);
+// An ordinary failed exit is not one.
+process.env.NEWAMP_FFMPEG_PATH = await standIn('exit1', { sh: 'exit 1', node: 'process.exit(1);' });
+await assert.rejects(
+  analyzeTrack({ path: song, want: { ...none, loud: true } }),
+  (err) => !(err instanceof AnalysisCrashedError) && !(err instanceof AnalysisAbortedError) && /exited 1/.test(err.message),
+  'a failed exit is not a crash',
+);
 
 // 3. An abort rejects once the process is gone.
-process.env.NEWAMP_FFMPEG_PATH = await standIn('slow.sh', 'exec sleep 30');
+process.env.NEWAMP_FFMPEG_PATH = await standIn('slow', { sh: 'exec sleep 30', node: 'setTimeout(() => {}, 30_000);' });
 {
   const abort = new AbortController();
   const pending = analyzeTrack({ path: song, want: { ...none, loud: true }, signal: abort.signal });
@@ -127,12 +143,68 @@ await assert.rejects(statWithin(join(root, 'missing.wav')), (err) => err instanc
   const begun = Date.now();
   await assert.rejects(statWithin(song, 30, slow), AnalysisUnavailableError, 'a stat that does not answer is unreachable');
   assert.ok(Date.now() - begun < 1000, 'and it is given up on at the deadline');
-  await assert.rejects(statWithin(song, 30, slow), AnalysisUnavailableError, 'while it hangs, another is refused');
+  await assert.rejects(
+    statWithin(song, 30, slow),
+    (err) => err instanceof AnalysisDrivePendingError && !(err instanceof AnalysisUnavailableError),
+    'while it hangs, another is refused, and told apart from a track that cannot be opened',
+  );
   assert.equal(started, 1, 'without being started');
   release();
   await new Promise((done) => setTimeout(done, 20));
   assert.ok((await statWithin(song, 30, slow)).size > 0, 'the next stat runs once the hung one has returned');
   assert.equal(started, 2);
+}
+
+// 8. ffmpeg exits non-zero. When the operating system would not open the file
+// (another program holds it, or it moved since the stat) nothing is known about
+// the audio, and it is not written down as undecodable. A file that opened and
+// would not decode is an ordinary failure.
+{
+  const failing = (stderrLine) => standIn('fails', {
+    sh: `echo ${JSON.stringify(stderrLine)} >&2; exit 1`,
+    node: `process.stderr.write(${JSON.stringify(`${stderrLine}\n`)}); process.exit(1);`,
+  });
+  for (const line of [
+    'song.wav: Permission denied',
+    '[in#0 @ 000001] Error opening input: No such file or directory',
+    'song.wav: Access is denied.',
+  ]) {
+    process.env.NEWAMP_FFMPEG_PATH = await failing(line);
+    await assert.rejects(analyzeTrack({ path: song, want: { ...none, tempo: true } }), AnalysisUnavailableError, `"${line}" is not a verdict on the track`);
+  }
+  process.env.NEWAMP_FFMPEG_PATH = await failing('song.wav: Invalid data found when processing input');
+  await assert.rejects(
+    analyzeTrack({ path: song, want: { ...none, tempo: true } }),
+    (err) => !(err instanceof AnalysisUnavailableError) && !(err instanceof AnalysisEnvironmentError) && /ffmpeg exited 1/.test(err.message),
+    'a file that opened and would not decode still counts against the track',
+  );
+  assert.equal(activeAnalysisDecodes(), 0);
+}
+
+// 9. Every ffmpeg an analyzer starts is limited to file and pipe inputs, and the
+// limit comes before the input it applies to. A stand-in records its arguments.
+{
+  const argsFile = join(root, 'args.txt');
+  process.env.NEWAMP_ARGS_FILE = argsFile;
+  process.env.NEWAMP_FFMPEG_PATH = await standIn('record', {
+    sh: `printf '%s\\n' "$@" > "$NEWAMP_ARGS_FILE"; exit 1`,
+    node: `import { writeFileSync } from 'node:fs'; writeFileSync(process.env.NEWAMP_ARGS_FILE, process.argv.slice(2).join('\\n')); process.exit(1);`,
+  });
+  initScoreCache(join(root, 'score-cache'));
+  const analyzers = {
+    'the library analysis (loudness)': () => analyzeTrack({ path: song, want: { ...none, loud: true } }),
+    'the library analysis (tempo)': () => analyzeTrack({ path: song, want: { ...none, tempo: true } }),
+    'Audio DNA': () => analyzeTrackDna(song),
+    'the song score': () => getSongScore({ path: song }),
+  };
+  for (const [name, run] of Object.entries(analyzers)) {
+    await rm(argsFile, { force: true });
+    await run().catch(() => undefined);
+    const args = (await readFile(argsFile, 'utf8')).split(/\r?\n/);
+    const limit = args.indexOf('-protocol_whitelist');
+    assert.ok(limit >= 0 && args[limit + 1] === 'file,pipe', `${name} limits ffmpeg to file and pipe inputs`);
+    assert.ok(limit < args.indexOf('-i'), `${name}: and before the input`);
+  }
 }
 
 console.log('[analysis-decode-a7] PASS');

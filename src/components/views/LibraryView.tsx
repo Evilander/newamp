@@ -570,6 +570,9 @@ export function LibraryView(): JSX.Element {
       }
       const count = await api.getTrackCount({ search: query, sort: order });
       if (generation !== loadGenerationRef.current) return;
+      // A page requested before this read finished was cut from the library as
+      // it stood before the scan, and would be appended at the wrong offset.
+      loadGenerationRef.current += 1;
       rowsReadRef.current = rows.length;
       setTracks(rows);
       setMatchingTrackCount(count);

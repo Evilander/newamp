@@ -23,14 +23,15 @@ const reset = (overrides = {}) => {
   env.statsCalls = 0;
   env.stats = async () => ({ tracks: 0, albums: 0, artists: 0, duration: 0 });
   env.scanListeners = new Set();
+  env.platform = 'win32';
   env.fullscreen = false;
   env.fullscreenReads = 0;
   env.resizeListeners = new Set();
   env.state = { ...env.state, ...overrides };
 };
 globalThis.__env = env;
-// The title bar asks the main process whether the window is fullscreen, and
-// asks again on every resize.
+// On a Mac the title bar asks the main process whether the window is fullscreen,
+// and asks again on every resize.
 globalThis.window = {
   addEventListener: (type, cb) => { if (type === 'resize') globalThis.__env.resizeListeners.add(cb); },
   removeEventListener: (type, cb) => { if (type === 'resize') globalThis.__env.resizeListeners.delete(cb); },
@@ -39,7 +40,7 @@ globalThis.window = {
 const { TitleBar } = await bundleComponent('src/components/TitleBar.tsx', {
   '../store/usePlayerStore': 'export const usePlayerStore = (select) => select(globalThis.__env.state);',
   '../lib/api': `export const api = {
-    platform: 'win32',
+    get platform() { return globalThis.__env.platform; },
     appVersion: '0.0.0',
     getStats: () => { globalThis.__env.statsCalls += 1; return globalThis.__env.stats(); },
     onScanProgress: (cb) => { globalThis.__env.scanListeners.add(cb); return () => globalThis.__env.scanListeners.delete(cb); },
@@ -154,10 +155,10 @@ async function show(overrides, setup) {
   view.unmount();
 }
 
-// Fullscreen is read when the bar mounts and again on each resize, and the
-// listener is gone once the bar unmounts.
+// On a Mac, fullscreen is read when the bar mounts and again on each resize, and
+// the listener is gone once the bar unmounts.
 {
-  const view = await show({});
+  const view = await show({}, () => { env.platform = 'darwin'; });
   assert.equal(env.fullscreenReads, 1, 'the title bar asks once when it mounts');
   assert.equal(env.resizeListeners.size, 1, 'and listens for resizes');
   env.fullscreen = true;
@@ -166,6 +167,14 @@ async function show(overrides, setup) {
   assert.equal(env.fullscreenReads, 2, 'a resize asks again');
   view.unmount();
   assert.equal(env.resizeListeners.size, 0, 'unmounting stops listening for resizes');
+}
+
+// Elsewhere nothing reads the answer, so a window drag does not ask for it.
+for (const platform of ['win32', 'linux']) {
+  const view = await show({}, () => { env.platform = platform; });
+  assert.equal(env.fullscreenReads, 0, `${platform}: the title bar does not ask whether the window is fullscreen`);
+  assert.equal(env.resizeListeners.size, 0, `${platform}: and does not listen for resizes`);
+  view.unmount();
 }
 
 // A playing track still takes the line.

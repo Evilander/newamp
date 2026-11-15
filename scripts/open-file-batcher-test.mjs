@@ -103,6 +103,29 @@ function harness(options = {}) {
   same('the same file twice appears once (case-insensitive, first spelling kept)', batches, [['A.mp3', 'b.mp3', 'c.mp3']]);
 }
 
+// A volume that tells A.mp3 and a.mp3 apart keeps both; one that does not keeps one.
+{
+  const exact = (path) => path;
+  const sensitive = harness({ key: exact });
+  sensitive.batcher.push(['A.mp3', 'b.mp3']);
+  sensitive.batcher.push(['a.mp3', 'A.mp3']);
+  sensitive.advance(500);
+  same('with a case-sensitive key A.mp3 and a.mp3 are two files, and a repeat of A.mp3 is one', sensitive.batches, [['A.mp3', 'b.mp3', 'a.mp3']]);
+
+  const folding = harness({ key: (path) => path.toLowerCase() });
+  folding.batcher.push(['A.mp3', 'a.mp3']);
+  folding.advance(500);
+  same('with a case-folding key one of them is dropped', folding.batches, [['A.mp3']]);
+
+  const handedOff = { paths: ['A.mp3'], at: 0 };
+  same('mergeHandedOff with a case-sensitive key keeps A.mp3 and a.mp3',
+    mergeHandedOff(['a.mp3'], handedOff, 1, 2000, exact).files, ['A.mp3', 'a.mp3']);
+  same('mergeHandedOff without a key still folds case',
+    mergeHandedOff(['a.mp3'], handedOff, 1, 2000).files, ['A.mp3']);
+  same('and with a case-folding key',
+    mergeHandedOff(['a.mp3'], handedOff, 1, 2000, (path) => path.toLowerCase()).files, ['A.mp3']);
+}
+
 {
   const { batcher, batches, advance, pendingTimers } = harness();
   batcher.push([]);

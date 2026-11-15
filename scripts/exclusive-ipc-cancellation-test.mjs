@@ -11,7 +11,7 @@ const resolutions = [];
 const played = [];
 const prepared = [];
 const output = { stop() {}, pause() {}, resume() {}, seek() {}, prepareNext: (source) => prepared.push(source), play: async (source) => { played.push(source); return {}; } };
-vm.runInNewContext(code, {
+const sandbox = {
   ipcMain: { handle: (name, callback) => handlers.set(name, callback) },
   settings: { get: () => ({}), set: (patch) => patch },
   withAiAssistRuntime: (settings) => settings,
@@ -19,7 +19,8 @@ vm.runInNewContext(code, {
   syncLibraryWatcher() {}, patchTouchesLibraryWatch: () => false, patchTouchesRadioBrain: () => false, queueRadioBrainSync: async () => {},
   exclusiveOutput: output, getExclusiveOutput: () => output,
   resolveExclusiveSource: (trackId) => new Promise((resolve) => resolutions.push(() => resolve({ trackId }))),
-});
+};
+vm.runInNewContext(code, sandbox);
 const invoke = (name, ...args) => handlers.get(name)(null, ...args);
 
 for (const cancel of [() => invoke('exclusive:stop'), () => invoke('settings:set', { bitPerfectExclusive: false })]) {
@@ -47,4 +48,19 @@ await invoke('exclusive:prepare-next', null);
 resolutions.shift()();
 await preparingAgain;
 assert.deepEqual(prepared, [null], 'clearing preparation wins over an older probe');
+// A page that crashed and was reloaded: main gives up on the play and prepare requests that are still resolving, as Stop does.
+const pendingPlay = invoke('exclusive:play', 1);
+const pendingPrepare = invoke('exclusive:prepare-next', 3);
+sandbox.invalidateExclusiveRequests();
+resolutions.shift()();
+resolutions.shift()();
+const crashedPlay = await pendingPlay;
+assert.equal(crashedPlay.ok, false);
+assert.equal(played.length, 1, 'a request that was resolving when the page crashed cannot reopen the device');
+await pendingPrepare;
+assert.deepEqual(prepared, [null], 'nor can a late prepare survive it');
+const afterCrash = invoke('exclusive:play', 4);
+resolutions.shift()();
+assert.equal((await afterCrash).ok, true, 'requests made after it are served');
+assert.deepEqual(played.map((source) => source.trackId), [2, 4]);
 console.log('PASS exclusive IPC cancellation and request ordering');

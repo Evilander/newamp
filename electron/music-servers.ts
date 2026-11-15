@@ -218,18 +218,20 @@ interface ResumableStreamOptions {
   reopen: (range: string, ifRange: string | null) => Promise<Response>;
 }
 
-// The byte span a 200 or 206 answer carries, when the server says how long it is.
-function streamSpan(response: Response): { start: number; end: number } | null {
+// The byte span a 200 or 206 answer carries, when the server says how long it is,
+// and the length of the whole file when it says that too.
+function streamSpan(response: Response): { start: number; end: number; total: number | null } | null {
   if (response.status === 206) {
-    const match = /^bytes (\d+)-(\d+)\/(?:\d+|\*)$/i.exec(response.headers.get('content-range') ?? '');
+    const match = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i.exec(response.headers.get('content-range') ?? '');
     if (!match) return null;
     const start = Number(match[1]);
     const end = Number(match[2]);
-    return Number.isSafeInteger(start) && Number.isSafeInteger(end) && end >= start ? { start, end } : null;
+    const total = match[3] === '*' ? null : Number(match[3]);
+    return Number.isSafeInteger(start) && Number.isSafeInteger(end) && end >= start ? { start, end, total } : null;
   }
   if (response.status !== 200) return null;
   const length = Number(response.headers.get('content-length') || NaN);
-  return Number.isSafeInteger(length) && length > 0 ? { start: 0, end: length - 1 } : null;
+  return Number.isSafeInteger(length) && length > 0 ? { start: 0, end: length - 1, total: length } : null;
 }
 
 // A stalled or dropped upstream body must not leave the player waiting or end
@@ -259,7 +261,10 @@ function resumableStreamBody(first: Response, options: ResumableStreamOptions): 
     const from = span!.start + sent;
     const response = await options.reopen(`bytes=${from}-${span!.end}`, ifRange);
     const again = response.status === 206 ? streamSpan(response) : null;
-    if (!again || again.start !== from || again.end !== span!.end || !response.body) {
+    // A file that changed length since the first answer is not the one being played, whether or not
+    // the server sent a validator for If-Range to check.
+    const resized = again?.total != null && span!.total != null && again.total !== span!.total;
+    if (!again || again.start !== from || again.end !== span!.end || resized || !response.body) {
       response.body?.cancel().catch(() => {});
       throw new Error('Music server did not resume the stream.');
     }
@@ -346,7 +351,9 @@ async function followRedirects(
     if (!isRedirect(response.status)) return { response, url: current };
     response.body?.cancel().catch(() => {});
     const target = redirectTarget(current, response.headers.get('location'));
-    const keepsMethod = method !== 'POST' || response.status === 307 || response.status === 308;
+    // A POST is sent again to the same endpoint (isSameServerRedirect below) whichever redirect
+    // status the server uses; only 303, which asks for a GET, is refused.
+    const keepsMethod = method !== 'POST' || response.status !== 303;
     if (!target || !keepsMethod || !isSameServerRedirect(current, target)) throw redirectRefusal(target);
     if (hop >= MAX_REDIRECTS) throw new Error('Music server redirected too many times.');
     if (!target.search) target.search = current.search;

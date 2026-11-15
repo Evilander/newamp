@@ -6,14 +6,14 @@
 //    reported by the preview instead of showing zero matches as if all were well;
 //  - recomputing and previewing tags give the thread back between tracks;
 //  - a row whose cached cover is gone, and whose file now yields none, stops
-//    claiming it has art;
+//    claiming it has art, unless the folder of covers could not be listed;
 //  - the listening-history import has a sliced form that gives the same report
 //    and the same stored plays as the sync one, and is idempotent;
 //  - a harmonic mix without a seed still fills the requested length.
 // Run: node scripts/library-async-test.mjs
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
-import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -46,6 +46,17 @@ assert.ok(Buffer.isBuffer(snapshot));
 assert.equal(snapshot.subarray(0, 15).toString('latin1'), 'SQLite format 3', 'the snapshot is a database file');
 assert.equal(snapshot.byteOffset, 0);
 assert.ok(snapshot.length > 1000);
+// The buffer is a view of the export's own memory: a copy would sit in another ArrayBuffer.
+{
+  const realExport = library.db.export.bind(library.db);
+  const exported = realExport();
+  library.db.export = () => exported;
+  try {
+    assert.equal(library.exportSnapshot().buffer, exported.buffer, 'the snapshot wraps the export without a second copy');
+  } finally {
+    library.db.export = realExport;
+  }
+}
 
 // ---- strict tag rules
 assert.throws(
@@ -56,6 +67,11 @@ assert.throws(
 assert.throws(
   () => library.saveTagRule({ name: 'typo', body: 'tag(typo) when lowr(title) == "x"' }),
   /unknown function "lowr"/,
+);
+assert.throws(
+  () => library.saveTagRule({ name: 'typo', body: 'tag(typo) when bpm > 100\n  and lowr(title) == "x"' }),
+  /^Error: tag rule "typo" failed to parse: unknown function "lowr" \(line 2, column 7\)$/,
+  'the message says where the mistake is, on any line',
 );
 assert.equal(library.listTagRules().length, 0, 'a refused rule is not stored');
 const fast = library.saveTagRule({ name: 'fast', body: 'tag(fast) when bpm > 140' });
@@ -126,6 +142,24 @@ library.upsertTracks([{ ...artTrack, mtime: 4 }]);
 const kept = library.many(`SELECT has_art, art_hash FROM tracks WHERE id = ?`, [artId])[0];
 assert.equal(kept.has_art, 1, 'art that still exists is kept when the file carries none');
 assert.equal(kept.art_hash, withArt.art_hash);
+
+// A folder of covers that cannot be listed says nothing about the covers in it:
+// the row keeps the cover the user chose until the folder can be read again.
+const artDir = join(root, 'art');
+rmSync(artDir, { recursive: true, force: true });
+writeFileSync(artDir, 'not a folder');
+library.upsertTracks([{ ...artTrack, mtime: 5 }]);
+const unlisted = library.many(`SELECT has_art, art_hash FROM tracks WHERE id = ?`, [artId])[0];
+assert.equal(unlisted.has_art, 1, 'a row is not cleared because the art folder could not be listed');
+assert.equal(unlisted.art_hash, withArt.art_hash);
+rmSync(artDir);
+mkdirSync(artDir);
+library.upsertTracks([{ ...artTrack, mtime: 6 }]);
+assert.equal(library.many(`SELECT has_art FROM tracks WHERE id = ?`, [artId])[0].has_art, 0, 'listed and empty, the cover is gone');
+
+// The analysis queue compares a result with the file it was made from, so its target carries the row's size and date.
+const analysed = library.analysisTarget(artId);
+assert.deepEqual([analysed.size, analysed.mtime], [1, 6]);
 
 // ---- history import, sync and sliced
 const sample = (i) => ({ artist: `Artist t${String(i).padStart(4, '0')}`, title: `t${String(i).padStart(4, '0')}`, album: 'Album', playedAt: 1_600_000_000 + i * 60 });

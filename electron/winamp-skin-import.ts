@@ -314,9 +314,13 @@ function decodeRle(buffer: Buffer, pixelOffset: number, width: number, height: n
     const value = buffer[pos + 1]!;
     pos += 2;
     if (count > 0) {
-      for (let i = 0; i < count; i += 1) {
+      // Whatever runs past the right edge is dropped, so it is skipped over
+      // instead of being stepped through a pixel at a time.
+      const stored = Math.min(count, Math.max(0, width - x));
+      for (let i = 0; i < stored; i += 1) {
         put(bpp === 8 ? value : i % 2 === 0 ? value >> 4 : value & 0x0f);
       }
+      x += count - stored;
       continue;
     }
     if (value === 0) {
@@ -397,7 +401,9 @@ function readBmpPixel(
 function parsePlaylistTextColors(content: string): PlaylistTextColors {
   const colors: PlaylistTextColors = {};
   for (const line of content.split(/\r?\n/)) {
-    const match = /^\s*(Normal|Current|NormalBG|SelectedBG)\s*=\s*(.+?)\s*$/i.exec(line);
+    // Trimmed first and matched without a lazy tail, so a line padded with
+    // whitespace costs one pass instead of one per position.
+    const match = /^(Normal|Current|NormalBG|SelectedBG)\s*=(.*)$/i.exec(line.trim());
     if (!match) continue;
     const value = normalizeColorToken(match[2]!);
     if (!value) continue;

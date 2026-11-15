@@ -20,7 +20,7 @@ await build({
   outfile: resolve('tmp/podcast-store-integrity-bundle.mjs'),
   logLevel: 'silent',
 });
-const { PodcastStore, parsePodcastFeed, downloadPodcastEpisode } = await import(
+const { PodcastStore, parsePodcastFeed, downloadPodcastEpisode, fetchPodcastSubscription } = await import(
   pathToFileURL(resolve('tmp/podcast-store-integrity-bundle.mjs')).href
 );
 
@@ -89,6 +89,79 @@ const store = new PodcastStore(file);
     assert.equal(requests, 1, 'concurrent downloads of one episode should make one request');
     assert.equal(one.downloadPath, two.downloadPath);
     assert.ok(existsSync(one.downloadPath));
+  } finally {
+    server.closeAllConnections?.();
+    server.close();
+  }
+}
+
+// Tags are matched whatever their case, CDATA sections are unwrapped, and a broken tail of the
+// document does not hide the episodes before it.
+{
+  const parsed = parsePodcastFeed(
+    '<rss><channel><TITLE><![CDATA[A &amp; B]]></TITLE>'
+      + '<ITEM><TITLE>One</TITLE><ENCLOSURE URL="https://example.com/1.mp3"/><DESCRIPTION><![CDATA[<p>Hi</p>]]> there</DESCRIPTION></ITEM>'
+      + `${item('two')}<item><title>cut off`,
+    feedUrl,
+  );
+  assert.equal(parsed.feed.title, 'A & B');
+  assert.deepEqual(parsed.episodes.map((episode) => episode.title), ['One', 'two']);
+  assert.equal(parsed.episodes[0].audioUrl, 'https://example.com/1.mp3');
+  assert.equal(parsed.episodes[0].description, 'Hi there');
+}
+
+// A feed is whatever the server sends. Openers with no closer must cost time in proportion to the
+// feed, so each shape is timed against a document of the same length without it; a slow machine
+// is slow for both.
+{
+  const timeOf = (xml) => {
+    const started = performance.now();
+    parsePodcastFeed(xml, feedUrl);
+    return performance.now() - started;
+  };
+  const shapes = [
+    ['<item> with no </item>', (filler) => `<rss><channel><title>T</title>${filler('<item>', 40_000)}</channel></rss>`],
+    ['<entry> with no </entry>', (filler) => `<feed><title>T</title>${filler('<entry>', 25_000)}</feed>`],
+    ['<channel> with no </channel>', (filler) => `<rss>${filler('<channel>', 35_000)}</rss>`],
+    ['<title> with no </title>', (filler) => `<rss><channel>${filler('<title>', 25_000)}</channel></rss>`],
+    ['<itunes:image with no >', (filler) => `<rss><channel>${filler('<itunes:image', 20_000)}`],
+    ['<link with no > in an entry', (filler) => `<feed><entry>${filler('<link', 20_000)}`],
+    ['<![CDATA[ with no ]]>', (filler) => `<rss><channel><title>${filler('<![CDATA[', 25_000)}</title></channel></rss>`],
+    ['< with no >', (filler) => `<rss><channel><title>${filler('<', 60_000)}</title></channel></rss>`],
+  ];
+  for (const [label, make] of shapes) {
+    const shaped = make((unit, times) => unit.repeat(times));
+    const plain = make((unit, times) => 'x'.repeat(unit.length * times));
+    timeOf(plain); // warm-up
+    const control = timeOf(plain);
+    const heavy = timeOf(shaped);
+    assert.ok(
+      heavy <= Math.max(10 * control, 250),
+      `${label}: ${heavy.toFixed(0)} ms for ${shaped.length} characters, ${control.toFixed(0)} ms for as many without it`,
+    );
+  }
+}
+
+// A body that will not decode ends the request: the connection is not left open behind the error.
+{
+  let held = null;
+  const server = createServer((req, res) => {
+    held = req.socket;
+    res.writeHead(200, { 'content-type': 'application/rss+xml', 'content-encoding': 'gzip' });
+    res.write(Buffer.from('this is not a gzip stream, whatever the header says'));
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  try {
+    await assert.rejects(() => fetchPodcastSubscription(`http://127.0.0.1:${server.address().port}/feed.xml`));
+    const closed = await new Promise((resolvePromise) => {
+      if (held.destroyed) return resolvePromise(true);
+      const timer = setTimeout(() => resolvePromise(false), 3000);
+      held.once('close', () => {
+        clearTimeout(timer);
+        resolvePromise(true);
+      });
+    });
+    assert.ok(closed, 'the connection to a server that sent undecodable data is closed');
   } finally {
     server.closeAllConnections?.();
     server.close();

@@ -128,7 +128,7 @@ async function load() {
   const { api, engine, usePlayerStore: store, DEFAULT_SETTINGS } = mod;
   const rig = {
     mod, api, engine, store,
-    plays: [], recorded: [], skips: [], saves: [], onPlay: null,
+    plays: [], recorded: [], skips: [], saves: [], scrobbles: [], onPlay: null, gate: null,
     settings: { ...DEFAULT_SETTINGS, sampleAccurateGapless: false },
   };
   api.setSettings = async (patch) => { rig.saves.push(patch); rig.settings = { ...rig.settings, ...patch }; return rig.settings; };
@@ -136,14 +136,14 @@ async function load() {
   api.recordPlay = async (id) => { rig.recorded.push(id); };
   api.recordSkip = async (id, at) => { rig.skips.push([id, at]); };
   api.lastfmUpdateNowPlaying = async () => {};
-  api.lastfmScrobble = async () => {};
+  api.lastfmScrobble = async (played) => { rig.scrobbles.push(played.title); };
   api.onTracksRemoved = () => () => {};
   api.getTracks = async () => [];
   api.getTracksByIds = async () => [];
   api.buildTasteMix = async () => [];
   api.getListeningHistory = async () => [];
   engine.setExternalTransport({
-    play: async (id) => { rig.plays.push(id); rig.onPlay?.(id); return true; },
+    play: async (id) => { rig.plays.push(id); rig.onPlay?.(id); await rig.gate?.(); return true; },
     pause() {}, resume() {}, stop() {}, seek() {}, prepareNext() {},
   });
   store.setState({ settings: rig.settings, autoDjEnabled: false });
@@ -155,8 +155,9 @@ async function reset(rig, patch = {}) {
   rig.store.getState().clearQueue();
   await settle();
   rig.store.setState({ mode: 'normal', shuffleHistory: [], shuffleForward: [], autoDjEnabled: false, settings: rig.settings, ...patch });
-  for (const key of ['plays', 'recorded', 'skips', 'saves']) rig[key].length = 0;
+  for (const key of ['plays', 'recorded', 'skips', 'saves', 'scrobbles']) rig[key].length = 0;
   rig.onPlay = null;
+  rig.gate = null;
   rig.mod.clearToasts();
 }
 
@@ -165,6 +166,27 @@ const { store, engine } = S;
 const state = () => store.getState();
 const realNow = Date.now;
 const realRandom = Math.random;
+const realPerformanceNow = performance.now.bind(performance);
+
+// What was heard is measured against the clock, so the clock is the test's: it
+// moves with the audio when a listener hears it, and stands still across a jump.
+let clock = 1000;
+performance.now = () => clock;
+/** Listen up to `to`: the position moves `step` seconds per notification, and the clock with it. */
+function listen(to, step = 3) {
+  let at = engine.getState().currentTime;
+  while (at < to - 1e-9) {
+    const next = Math.min(to, at + step);
+    clock += (next - at) * 1000;
+    at = next;
+    engine.patchExternal({ currentTime: at });
+  }
+}
+/** The position jumps (a scrub), `after` ms after the last notification. */
+function jump(to, after = 0) {
+  clock += after;
+  engine.patchExternal({ currentTime: to });
+}
 
 try {
   // ---- a play is counted after half the track, not at start ----
@@ -173,35 +195,35 @@ try {
     await state().playQueue(tracks(2), 0);
     assert.deepEqual(S.recorded, [], 'nothing is counted when the track starts');
     engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
-    for (let t = 3; t < 90; t += 3) engine.patchExternal({ currentTime: t });
+    listen(87);
     assert.deepEqual(S.recorded, [], 'a little under half is not a play');
-    engine.patchExternal({ currentTime: 90 });
+    listen(90);
     assert.deepEqual(S.recorded, [1], 'half the track is');
-    for (let t = 93; t < 120; t += 3) engine.patchExternal({ currentTime: t });
+    listen(117);
     assert.deepEqual(S.recorded, [1], 'and it is counted once');
 
     // A long track counts at four minutes.
     await reset(S);
     await state().playQueue([track(7, { duration: 1000 })], 0);
     engine.patchExternal({ playing: true, currentTime: 0, duration: 1000 });
-    for (let t = 3; t < 240; t += 3) engine.patchExternal({ currentTime: t });
+    listen(237);
     assert.deepEqual(S.recorded, [], 'four minutes short of it');
-    engine.patchExternal({ currentTime: 240 });
+    listen(240);
     assert.deepEqual(S.recorded, [7]);
 
     // A seek is not listening.
     await reset(S);
     await state().playQueue(tracks(1), 0);
     engine.patchExternal({ playing: true, currentTime: 1, duration: 180 });
-    engine.patchExternal({ currentTime: 150 });
-    for (let t = 153; t < 170; t += 3) engine.patchExternal({ currentTime: t });
+    jump(150, 100);
+    listen(168);
     assert.deepEqual(S.recorded, [], 'jumping to the end does not make it a play');
 
     // Skipped early: no play, and a skip.
     await reset(S);
     await state().playQueue(tracks(2), 0);
     engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
-    for (let t = 3; t <= 21; t += 3) engine.patchExternal({ currentTime: t });
+    listen(21);
     await state().next();
     assert.deepEqual(S.recorded, [], 'a track skipped at 0:21 is not a play');
     assert.equal(S.skips.length, 1, 'it is a skip');
@@ -210,7 +232,8 @@ try {
     await reset(S);
     await state().playQueue(tracks(2), 0);
     engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
-    engine.patchExternal({ currentTime: 3 });
+    listen(177);
+    clock += 2900;
     engine.patchExternal({ currentTime: 179.9, playing: false, ended: true });
     await until(() => state().current?.id === 2);
     assert.deepEqual(S.recorded, [1], 'played out');
@@ -220,7 +243,8 @@ try {
     await reset(S);
     await state().playQueue(tracks(2), 0);
     engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
-    for (let t = 3; t <= 39; t += 3) engine.patchExternal({ currentTime: t });
+    listen(39);
+    clock += 1000;
     engine.patchExternal({ currentTime: 40, playing: true, ended: true });
     await until(() => state().current?.id === 2);
     assert.deepEqual(S.recorded, [], 'ending at 0:40 of 3:00 is not a play');
@@ -230,8 +254,246 @@ try {
     await reset(S);
     await state().playQueue(tracks(1), 0, 30);
     engine.patchExternal({ playing: true, currentTime: 30, duration: 180 });
-    for (let t = 33; t <= 170; t += 3) engine.patchExternal({ currentTime: t });
+    listen(170);
     assert.deepEqual(S.recorded, [], 'resuming at 0:30 counts nothing');
+  }
+
+  // ---- seeks are not listening, however small and however they are made ----
+  {
+    // Right arrow and the wheel both move five seconds a time. The step is the
+    // size of the seek whether or not the clock moved a hair either way, so none
+    // of these taps may add up to a play.
+    for (const [name, tapEvery] of [['arrow keys', 100], ['wheel notches', 250], ['a held key', 33]]) {
+      await reset(S);
+      await state().playQueue([track(1, { duration: 400 })], 0);
+      engine.patchExternal({ playing: true, currentTime: 10, duration: 400 });
+      let at = 10;
+      for (let tap = 0; tap < 40; tap += 1) {
+        at += 5;
+        jump(at, tapEvery);
+      }
+      assert.deepEqual(S.recorded, [], `40 five-second seeks by ${name} are not a play`);
+      // Listening on from there is still counted.
+      listen(at + 189, 1);
+      assert.deepEqual(S.recorded, [1], `${name}: the 189 s heard afterwards add up`);
+    }
+
+    // A seek back and forth over the same stretch adds nothing either.
+    await reset(S);
+    await state().playQueue(tracks(1), 0);
+    engine.patchExternal({ playing: true, currentTime: 50, duration: 180 });
+    for (let pass = 0; pass < 30; pass += 1) {
+      jump(50, 120);
+      jump(55, 120);
+    }
+    assert.deepEqual(S.recorded, [], 'looping over five seconds with the seek keys is not listening');
+
+    // Scrubbing to the last seconds and letting it end records nothing, and moving on is no skip.
+    await reset(S);
+    await state().playQueue(tracks(2), 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(6);
+    jump(170, 200);
+    listen(177);
+    clock += 2900;
+    engine.patchExternal({ currentTime: 179.9, playing: false, ended: true });
+    await until(() => state().current?.id === 2);
+    assert.deepEqual(S.recorded, [], 'a scrub to the end is not a play');
+    assert.deepEqual(S.skips, [], 'and the automatic advance is not a skip');
+  }
+
+  // ---- a scrobble is a track that was heard, not a position that was passed ----
+  {
+    const lastfm = { settings: { ...S.settings, lastfmEnabled: true } };
+    const listenTo = async (list, to, track = list[0]) => {
+      await state().playQueue(list, 0);
+      engine.patchExternal({ playing: true, currentTime: 0, duration: track.duration });
+      listen(to);
+    };
+
+    // Half the track, heard, scrobbles it, once.
+    await reset(S, lastfm);
+    await state().playQueue(tracks(2), 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(87);
+    assert.deepEqual(S.scrobbles, [], 'a little under half is not a scrobble yet');
+    listen(90);
+    assert.deepEqual(S.scrobbles, ['T1'], 'half the track is');
+    listen(150);
+    assert.deepEqual(S.scrobbles, ['T1'], 'and only once');
+
+    // A long track scrobbles at four minutes.
+    await reset(S, lastfm);
+    await listenTo([track(7, { duration: 1000 })], 237);
+    assert.deepEqual(S.scrobbles, []);
+    listen(240);
+    assert.deepEqual(S.scrobbles, ['T7']);
+
+    // Jumping past the middle is not listening to it.
+    await reset(S, lastfm);
+    await state().playQueue(tracks(1), 0);
+    engine.patchExternal({ playing: true, currentTime: 1, duration: 180 });
+    jump(100, 100);
+    listen(130);
+    assert.deepEqual(S.scrobbles, [], 'a scrub to the middle scrobbles nothing');
+
+    // Nor is a run of five-second seeks.
+    await reset(S, lastfm);
+    await state().playQueue([track(1, { duration: 400 })], 0);
+    engine.patchExternal({ playing: true, currentTime: 10, duration: 400 });
+    for (let tap = 0; tap < 40; tap += 1) jump(10 + (tap + 1) * 5, 100);
+    assert.deepEqual(S.scrobbles, [], 'seeking by the arrow keys scrobbles nothing');
+    assert.deepEqual(S.recorded, [], 'any more than it records a play');
+
+    // Last.fm wants more than 30 seconds of track.
+    await reset(S, lastfm);
+    await listenTo([track(8, { duration: 30 })], 30);
+    assert.deepEqual(S.recorded, [8], 'a track of 30 s is still a play here');
+    assert.deepEqual(S.scrobbles, [], 'but is not scrobbled');
+    await reset(S, lastfm);
+    await listenTo([track(9, { duration: 31 })], 16);
+    assert.deepEqual(S.scrobbles, ['T9'], 'one second more is, at half');
+
+    // A saved session picked up part-way is not scrobbled, and the setting has to be on.
+    await reset(S, lastfm);
+    await state().playQueue(tracks(1), 0, 30);
+    engine.patchExternal({ playing: true, currentTime: 30, duration: 180 });
+    listen(170);
+    assert.deepEqual(S.scrobbles, [], 'resuming at 0:30 scrobbles nothing');
+    await reset(S);
+    await listenTo(tracks(1), 100);
+    assert.deepEqual(S.scrobbles, [], 'with Last.fm off nothing is sent');
+
+    // Each time the track is played it is scrobbled again; a restart is not another play.
+    await reset(S, lastfm);
+    await state().playQueue(tracks(2), 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(100);
+    assert.deepEqual(S.scrobbles, ['T1']);
+    await state().next();
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(100);
+    assert.deepEqual(S.scrobbles, ['T1', 'T2']);
+    engine.patchExternal({ currentTime: 0 });
+    await state().prev();
+    assert.equal(state().current.id, 1);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(100);
+    assert.deepEqual(S.scrobbles, ['T1', 'T2', 'T1'], 'coming back to a track is a new play');
+  }
+
+  // ---- repeat-one: every pass is counted on its own ----
+  {
+    await reset(S, { mode: 'repeat-one' });
+    await state().playQueue(tracks(1), 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(100);
+    assert.deepEqual(S.recorded, [1], 'the first pass is counted at half');
+    clock += 1000;
+    listen(177);
+    engine.patchExternal({ currentTime: 179.9, playing: false, ended: true });
+    await until(() => S.plays.length === 2);
+    assert.deepEqual(S.recorded, [1], 'the end of a pass that was already counted adds nothing');
+    engine.patchExternal({ playing: true, ended: false, currentTime: 0 });
+    listen(60);
+    assert.deepEqual(S.recorded, [1], 'the next pass starts over');
+    listen(95);
+    assert.deepEqual(S.recorded, [1, 1], 'and is counted when it is half heard');
+    // A pass that is scrubbed through is not.
+    jump(175, 100);
+    clock += 1000;
+    engine.patchExternal({ currentTime: 179.9, playing: false, ended: true });
+    await until(() => S.plays.length === 3);
+    engine.patchExternal({ playing: true, ended: false, currentTime: 0 });
+    listen(10);
+    jump(175, 100);
+    clock += 1000;
+    engine.patchExternal({ currentTime: 179.9, playing: false, ended: true });
+    await until(() => S.plays.length === 4);
+    assert.deepEqual(S.recorded, [1, 1], 'a pass that is scrubbed to its end is not');
+  }
+
+  // ---- the length a file really has decides what half of it is ----
+  {
+    // The library row says ten minutes, the file is 3:20: playing it through is a play.
+    await reset(S);
+    await state().playQueue([track(9, { duration: 600 }), track(10)], 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 200 });
+    listen(199);
+    assert.deepEqual(S.recorded, [], 'nothing counts before the end while the row says 10:00');
+    clock += 900;
+    engine.patchExternal({ currentTime: 199.9, playing: false, ended: true });
+    await until(() => state().current?.id === 10);
+    assert.deepEqual(S.recorded, [9], 'a file far shorter than its row counts when it plays out');
+    assert.deepEqual(S.skips, []);
+
+    // The same file scrubbed to its end does not.
+    await reset(S);
+    await state().playQueue([track(9, { duration: 600 }), track(10)], 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 200 });
+    listen(3);
+    jump(190, 100);
+    listen(195);
+    clock += 900;
+    engine.patchExternal({ currentTime: 199.9, playing: false, ended: true });
+    await until(() => state().current?.id === 10);
+    assert.deepEqual(S.recorded, [], 'a short file that was scrubbed through is not a play either');
+
+    // The row says 1:40, the file is five minutes: half is 2:30, not 0:50.
+    await reset(S);
+    await state().playQueue([track(11, { duration: 100 })], 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 300 });
+    listen(148);
+    assert.deepEqual(S.recorded, [], 'a file far longer than its row is not counted at half of the row');
+    listen(150);
+    assert.deepEqual(S.recorded, [11], 'it is counted at half of the file');
+
+    // A slice of a larger file is as long as the slice, not the file.
+    await reset(S);
+    await state().playQueue([track(12, { duration: 60, cueStart: 100, cueEnd: 160 })], 0);
+    engine.patchExternal({ playing: true, currentTime: 100, duration: 600 });
+    listen(128);
+    assert.deepEqual(S.recorded, [], 'half of the slice is 0:30');
+    listen(131);
+    assert.deepEqual(S.recorded, [12]);
+  }
+
+  // ---- moving on from a track that already counted as a play is not a skip ----
+  {
+    await reset(S);
+    await state().playQueue(tracks(2), 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(100);
+    assert.deepEqual(S.recorded, [1]);
+    await state().prev();
+    assert.equal(state().current.id, 1, 'Previous past three seconds restarts the track');
+    listen(20);
+    await state().next();
+    assert.equal(state().current.id, 2);
+    assert.deepEqual(S.skips, [], 'the restart cut short at 0:20 is not a skip of a track that was a play');
+
+    // Without the play, the same move is a skip.
+    await reset(S);
+    await state().playQueue(tracks(2), 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(40);
+    await state().prev();
+    listen(20);
+    await state().next();
+    assert.equal(S.skips.length, 1, 'a track that never counted is skipped as before');
+
+    // A new pass starts a new listen: skipping the repeat is a skip again.
+    await reset(S);
+    await state().playQueue(tracks(2), 0);
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(100);
+    await state().next();
+    assert.deepEqual(S.recorded, [1]);
+    await state().prev();
+    engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+    listen(20);
+    await state().next();
+    assert.equal(S.skips.length, 1, 'coming back to a track starts it over');
   }
 
   // ---- a track flagged missing is attempted before Next passes over it ----
@@ -366,6 +628,93 @@ try {
     } finally {
       engine.play = realPlay;
     }
+  }
+
+  // ---- a start nobody awaits still says so when it fails without the engine publishing it ----
+  {
+    await reset(S);
+    const realPlay = engine.play;
+    try {
+      store.setState({ queue: tracks(2), index: 0, current: tracks(2)[0], currentTime: 0 });
+      engine.play = async () => { throw new Error('No audio output device'); };
+      state().togglePlay();
+      await until(() => S.mod.getToasts().some((toast) => toast.title === 'Playback failed'));
+      assert.equal(S.mod.getToasts().find((toast) => toast.title === 'Playback failed').detail, 'No audio output device');
+
+      // A failure the engine published has its own notice and skip: no second toast.
+      S.mod.clearToasts();
+      store.getState().clearQueue();
+      store.setState({ queue: tracks(2), index: 0, current: tracks(2)[0], currentTime: 0 });
+      engine.play = async () => {
+        engine.patch({ error: 'Audio error (code 3)', playing: false });
+        throw new Error('Audio error (code 3)');
+      };
+      state().togglePlay();
+      await settle();
+      await pause(20);
+      assert.equal(S.mod.getToasts().filter((toast) => toast.title === 'Playback failed').length, 0);
+    } finally {
+      engine.play = realPlay;
+      engine.patch({ error: null });
+    }
+  }
+
+  // ---- the previous track's position and errors are not shown against the next one ----
+  {
+    await reset(S);
+    await state().playQueue(tracks(3), 0);
+    engine.patchExternal({ playing: true, currentTime: 100, duration: 180 });
+    let accept;
+    S.gate = () => new Promise((resolve) => { accept = resolve; });
+    const advancing = state().next();
+    await settle();
+    assert.equal(state().current.id, 2, 'the store is on the second track');
+    assert.equal(engine.getState().trackId, 1, 'the engine has not got there yet');
+    assert.equal(state().currentTime, 0, 'the second track starts at 0:00');
+    engine.patchExternal({ currentTime: 171 });
+    assert.equal(state().currentTime, 0, 'the first track\'s position is not shown against the second');
+    engine.patchExternal({ playing: false, error: 'Audio error (code 3)' });
+    await pause(20);
+    assert.equal(state().playbackError, null, 'nor is its error');
+    assert.equal(state().current.id, 2, 'and the second track is not skipped for it');
+    S.gate = null;
+    engine.patchExternal({ error: null });
+    accept();
+    await advancing;
+    assert.equal(engine.getState().trackId, 2);
+    engine.patchExternal({ playing: true, currentTime: 12 });
+    assert.equal(state().currentTime, 12, 'once the engine is on the second track its position is');
+  }
+
+  // ---- an error that reaches a paused player is held for the track, not skipped past ----
+  {
+    await reset(S);
+    await state().playQueue(tracks(3), 0);
+    engine.patchExternal({ playing: true, currentTime: 30, duration: 180 });
+    engine.pause();
+    assert.equal(state().isPlaying, false);
+    S.plays.length = 0;
+    engine.patchExternal({ playing: false, error: 'The drive stopped answering.' });
+    await pause(40);
+    assert.equal(state().current.id, 1, 'the paused track stays the current one');
+    assert.equal(state().isPlaying, false, 'and stays paused');
+    assert.deepEqual(S.plays, [], 'nothing starts');
+    assert.equal(state().playbackError, 'The drive stopped answering.', 'the error is kept for the track');
+    assert.equal(S.mod.getToasts().filter((toast) => /^Skipped/.test(toast.title)).length, 0, 'and nothing is announced as skipped');
+
+    // Play starts the track again where it stopped, and clears the error.
+    state().togglePlay();
+    await until(() => S.plays.length === 1);
+    await until(() => state().isPlaying);
+    assert.deepEqual(S.plays, [1]);
+    assert.equal(state().current.id, 1);
+    assert.equal(state().playbackError, null);
+    assert.equal(engine.getState().currentTime, 30, 'at the place it stopped');
+    assert.equal(state().isPlaying, true);
+
+    // A track that is playing when its error arrives is still skipped, as before.
+    engine.patchExternal({ playing: false, error: 'Audio error (code 3)' });
+    await until(() => state().current?.id === 2);
   }
 
   // ---- a route restart tries again, then says so ----
@@ -509,6 +858,47 @@ try {
     assert.doesNotMatch(source('src/components/Sidebar.tsx'), /regenerated from your library/, 'the Mixes hint says what the view does');
   }
 
+  // ---- after a backup restore this page writes no session ----
+  // Last of the store cases: the stop is one way for the rest of the page.
+  {
+    await reset(S);
+    await S.store.getState().playQueue(tracks(3), 0);
+    const writes = () => S.saves.filter((save) => save.resumeState !== undefined).length;
+    let wall = realNow();
+    Date.now = () => wall;
+    try {
+      S.engine.patchExternal({ playing: true, currentTime: 0, duration: 180 });
+      let at = 0;
+      const periodicSave = () => {
+        wall += 25000;
+        at += 25;
+        const before = writes();
+        S.engine.patchExternal({ currentTime: at });
+        return writes() - before;
+      };
+      assert.equal(periodicSave(), 1, 'the periodic save writes');
+      const beforeExit = writes();
+      await S.store.getState().persistPlaybackSession();
+      assert.equal(writes() - beforeExit, 1, 'the save on exit writes');
+      const beforeNext = writes();
+      await S.store.getState().next();
+      assert.ok(writes() > beforeNext, 'a change of track writes');
+
+      S.mod.stopPersistingSession();
+      const frozen = writes();
+      assert.equal(periodicSave(), 0, 'the periodic save no longer writes');
+      await S.store.getState().persistPlaybackSession();
+      await S.store.getState().next();
+      S.engine.pause();
+      await S.store.getState().playQueue(tracks(2, 40), 0);
+      S.store.getState().clearQueue();
+      await settle();
+      assert.equal(writes(), frozen, 'neither does the exit save, a track change, a pause or a new queue');
+    } finally {
+      Date.now = realNow;
+    }
+  }
+
   assert.deepEqual(unhandled, [], 'no unhandled rejections');
   console.log('PASS w2 store: play counting, missing tracks, session saves, shuffle replay, published errors, route restart, Quick Play Ask, deck seeks');
 } catch (error) {
@@ -516,6 +906,7 @@ try {
   process.exitCode = 1;
 } finally {
   Date.now = realNow;
+  performance.now = realPerformanceNow;
   Math.random = realRandom;
   for (const rig of loaded) {
     rig.mod.clearToasts();

@@ -19,6 +19,10 @@ function readVar(name: string, fallback: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
+// A canvas ignores a fillStyle it cannot parse and keeps the one before, so a
+// color that still reads as this after being set was not understood.
+const UNPARSED_PROBE = '#010203';
+
 /** The color at the given opacity. A skin can set any CSS color (short hex,
  *  rgb(), hsl(), oklch()), so the browser resolves it to RGB by painting one
  *  pixel; a color it cannot read comes back unchanged. */
@@ -29,7 +33,9 @@ function withAlpha(color: string, alpha: number): string {
     probe.height = 1;
     const ctx = probe.getContext('2d', { willReadFrequently: true });
     if (!ctx) return color;
+    ctx.fillStyle = UNPARSED_PROBE;
     ctx.fillStyle = color;
+    if (ctx.fillStyle === UNPARSED_PROBE) return color;
     ctx.fillRect(0, 0, 1, 1);
     const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
     return a ? `rgba(${r}, ${g}, ${b}, ${alpha})` : color;

@@ -49,6 +49,7 @@ class Audio {
   constructor() {
     this.src = ''; this.currentSrc = ''; this.currentTime = 0; this.duration = Number.NaN; this.readyState = 0;
     this.paused = true; this.error = null; this.listeners = {}; this.loads = 0; this.plays = 0; this.failPlay = false;
+    this.holdPlay = false; this.settlePlay = null;
   }
   addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
   removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] ?? []).filter((f) => f !== fn); }
@@ -59,6 +60,7 @@ class Audio {
     this.paused = false;
     this.currentSrc = this.src;
     this.emit('play');
+    if (this.holdPlay) return new Promise((resolve, reject) => { this.settlePlay = { resolve, reject }; });
     return Promise.resolve();
   }
   pause() { if (!this.paused) { this.paused = true; this.emit('pause'); } }
@@ -107,6 +109,7 @@ const bundled = await build({
       export { clearToasts, getToasts } from './src/lib/toast';
       export { coalesceDeviceChanges } from './src/audio/device-change';
       export { syncMediaSessionIdentity, windowTitleFor } from './src/lib/mediaSession';
+      export { openedItemsStatus, partialFolderNotice } from './src/lib/open-files-status';
       export { exclusiveBridge } from './src/audio/exclusive-bridge';`,
     resolveDir: process.cwd(), loader: 'ts',
   },
@@ -116,6 +119,7 @@ const mod = await import(`data:text/javascript;base64,${Buffer.from(bundled.outp
 const {
   AudioEngine, engine, usePlayerStore: store, api, DEFAULT_SETTINGS, clearToasts, getToasts, coalesceDeviceChanges,
   syncMediaSessionIdentity, windowTitleFor, exclusiveBridge, transportAvailability, playbackResumeStateForQueueSnapshot,
+  openedItemsStatus, partialFolderNotice,
 } = mod;
 await new Promise(queueMicrotask);
 const settle = () => new Promise(setImmediate);
@@ -321,6 +325,298 @@ try {
       advance(4000);
       el.gotMetadata(200);
       assert.equal(el.currentTime, 125);
+    } finally { subject.dispose(); }
+  }
+
+  // ---- which failures are worth waiting out -----------------------------------------------------
+  {
+    // An open that fails at a resume position (a restored session, a hand-off) is a failed open, not
+    // a stream that dropped: it is reported at once instead of after the reloads.
+    useFakeTimers();
+    const subject = new AudioEngine();
+    try {
+      await subject.play('newamp://track/9', 9, 42);
+      const el = subject.graph.decks[0].el;
+      el.fail(4);
+      assert.equal(subject.getState().error, 'Audio error (code 4)', 'a start position does not turn a failed open into a mid-song failure');
+      assert.equal(subject.getState().playing, false);
+      assert.equal(fake.pending.size, 0, 'nothing is waiting to reload it');
+    } finally { subject.dispose(); }
+  }
+  {
+    // A reload that fails to open is still the stream that was playing: it keeps its budget.
+    useFakeTimers();
+    const subject = new AudioEngine();
+    try {
+      await subject.play('newamp://track/9', 9, 0);
+      const el = subject.graph.decks[0].el;
+      el.gotMetadata(200);
+      el.currentTime = 90;
+      el.fail(2);
+      advance(1500);
+      assert.equal(el.loads, 1);
+      el.fail(4);
+      assert.equal(subject.getState().error, null, 'the share is still down: another try is queued');
+      advance(3999);
+      assert.equal(el.loads, 1);
+      advance(1);
+      assert.equal(el.loads, 2, 'and it waits the next delay of the budget');
+    } finally { subject.dispose(); }
+  }
+  {
+    // A decode error is the same bad frame again after a reload: one more try, not the whole budget.
+    useFakeTimers();
+    const subject = new AudioEngine();
+    try {
+      await subject.play('newamp://track/9', 9, 0);
+      const el = subject.graph.decks[0].el;
+      el.gotMetadata(200);
+      el.currentTime = 100;
+      el.fail(3);
+      assert.equal(subject.getState().error, null, 'the first decode error is retried');
+      advance(1500);
+      el.gotMetadata(200);
+      assert.equal(el.currentTime, 100);
+      el.fail(3);
+      assert.equal(subject.getState().error, 'Audio error (code 3)', 'the same error at the same place is reported at once');
+      assert.equal(fake.pending.size, 0);
+    } finally { subject.dispose(); }
+  }
+  {
+    // Seeking forward on a reloaded stream is not audio played: it does not earn the budget back.
+    useFakeTimers();
+    const subject = new AudioEngine();
+    try {
+      await subject.play('newamp://track/9', 9, 0);
+      const el = subject.graph.decks[0].el;
+      el.gotMetadata(200);
+      el.currentTime = 90;
+      el.fail(2);
+      advance(1500);
+      el.gotMetadata(200);
+      assert.equal(el.currentTime, 90);
+      tickEngine();
+      subject.seek(150);
+      assert.equal(el.currentTime, 150);
+      tickEngine();
+      el.fail(2);
+      advance(1500);
+      assert.equal(el.loads, 1, 'the second failure waits for the second delay, not the first');
+      advance(2500);
+      assert.equal(el.loads, 2);
+      el.gotMetadata(200);
+      assert.equal(el.currentTime, 150);
+      // Five seconds of audio past the seek target is what forgives the earlier failures.
+      el.currentTime = 156;
+      tickEngine();
+      el.fail(2);
+      advance(1500);
+      assert.equal(el.loads, 3, 'after real playback the next failure starts over at the first delay');
+    } finally { subject.dispose(); }
+  }
+  {
+    // A seek on a stream that failed while paused is kept, and Play loads the track at it.
+    useFakeTimers();
+    const subject = new AudioEngine();
+    try {
+      await subject.play('newamp://track/9', 9, 0);
+      const el = subject.graph.decks[0].el;
+      el.gotMetadata(200);
+      el.currentTime = 45;
+      tickEngine();
+      subject.pause();
+      el.fail(2);
+      subject.seek(120);
+      assert.equal(subject.getState().currentTime, 120, 'the scrub bar stays where it was dropped');
+      tickEngine();
+      assert.equal(subject.getState().currentTime, 120);
+      subject.togglePlayPause();
+      await settle();
+      assert.equal(el.loads, 1);
+      el.gotMetadata(200);
+      assert.equal(el.currentTime, 120, 'Play resumes at the seek, not at the old position');
+    } finally { subject.dispose(); }
+  }
+  {
+    // A preload that failed while the deck was idle is not the deck the next track starts on.
+    useFakeTimers();
+    const subject = new AudioEngine();
+    try {
+      await subject.play('newamp://track/9', 9, 0);
+      subject.prepareNext('newamp://track/10', 10, 0);
+      const idle = subject.graph.decks[1].el;
+      assert.equal(idle.src, 'newamp://track/10');
+      idle.fail(2);
+      assert.equal(subject.getState().error, null, 'an idle deck failing is not the playing track failing');
+      await subject.play('newamp://track/10', 10, 0);
+      assert.equal(idle.plays, 0, 'the failed preload is not played');
+      const playing = subject.graph.decks[subject.activeDeckIndex].el;
+      assert.equal(playing.src, 'newamp://track/10', 'the track is loaded afresh');
+      assert.equal(subject.getState().error, null);
+    } finally { subject.dispose(); }
+  }
+  for (const order of ['the error event first', 'the rejected play() first']) {
+    // One failed start is one error to the store, whichever of the two reports it first.
+    useFakeTimers();
+    const subject = new AudioEngine();
+    try {
+      await subject.play('newamp://track/8', 8, 0);
+      const el = subject.graph.decks[0].el;
+      el.holdPlay = true;
+      const started = subject.play('newamp://track/9', 9, 0).then(() => 'started', (err) => err.message);
+      await settle();
+      const published = new Set();
+      subject.subscribe((s) => { if (s.error) published.add(s.error); });
+      const reject = () => el.settlePlay.reject(new Error('Failed to load because no supported source was found.'));
+      const raise = () => { el.error = { code: 4 }; el.emit('error'); };
+      if (order === 'the error event first') { raise(); reject(); } else { reject(); await settle(); raise(); }
+      assert.match(await started, /no supported source/);
+      assert.equal(published.size, 1, `${order}: ${[...published].join(' / ')}`);
+      assert.equal(subject.getState().playing, false);
+    } finally { subject.dispose(); }
+  }
+
+  // ---- the exclusive backend gives up on a track whose file stopped answering --------------------
+  {
+    useFakeTimers();
+    const subject = new AudioEngine();
+    const calls = [];
+    subject.setExternalTransport({
+      play: async (id, at) => { calls.push(['play', id, at]); return true; },
+      pause() {}, resume() {}, stop() { calls.push(['stop']); }, seek() {}, prepareNext() {},
+    });
+    try {
+      await subject.play('newamp://track/9', 9, 0);
+      subject.patchExternal({ currentTime: 77, playing: true });
+      subject.handleExternalFailure(77, 'The drive stopped answering partway through the track.');
+      await settle();
+      assert.deepEqual(calls, [['play', 9, 0], ['stop']], 'the backend is released and not asked for the track again');
+      const el = subject.graph.decks[0].el;
+      assert.equal(el.src, 'newamp://track/9', 'the decks have the track');
+      assert.equal(el.plays, 1);
+      assert.equal(subject.getState().currentTime, 77);
+      assert.equal(subject.getState().error, null, 'it is not reported as a failure');
+      el.gotMetadata(200);
+      assert.equal(el.currentTime, 77, 'from where the backend stopped');
+      assert.match(subject.getExclusiveInfo().fallbackReason, /stopped answering/);
+      // Only that track: the next one is offered to the backend as usual.
+      await subject.play('newamp://track/10', 10, 0);
+      assert.deepEqual(calls.at(-1), ['play', 10, 0]);
+    } finally { subject.dispose(); }
+  }
+
+  {
+    // The report is for the track the backend has now, and only while nothing newer is waiting on it.
+    useFakeTimers();
+    const subject = new AudioEngine();
+    const calls = [];
+    let accept = null;
+    subject.setExternalTransport({
+      play: (id, at) => { calls.push(['play', id, at]); return accept ? accept() : Promise.resolve(true); },
+      pause() {}, resume() {}, stop() { calls.push(['stop']); }, seek() {}, prepareNext() {},
+    });
+    try {
+      await subject.play('newamp://track/9', 9, 0);
+      subject.handleExternalFailure(40, 'a late report', 77);
+      await settle();
+      assert.deepEqual(calls, [['play', 9, 0]], 'a report for another track changes nothing');
+      assert.equal(subject.getExclusiveInfo().active, true);
+
+      let release;
+      accept = () => new Promise((resolve) => { release = () => resolve(true); });
+      const next = subject.play('newamp://track/10', 10, 0);
+      await settle();
+      subject.handleExternalFailure(40, 'the track that is leaving', 9);
+      subject.handleExternalFailure(40, 'the same, with no track named');
+      await settle();
+      assert.deepEqual(calls, [['play', 9, 0], ['play', 10, 0]], 'nor does one while a newer start is waiting');
+      release();
+      await next;
+      assert.equal(subject.getState().trackId, 10);
+      assert.equal(subject.getExclusiveInfo().active, true);
+
+      subject.handleExternalFailure(12, 'the drive went away', 10);
+      await settle();
+      const el = subject.graph.decks[subject.activeDeckIndex].el;
+      assert.equal(el.src, 'newamp://track/10');
+      assert.equal(el.plays, 1);
+      // The backend no longer has the track, so a second report is nothing to act on.
+      subject.handleExternalFailure(13, 'again', 10);
+      await settle();
+      assert.equal(el.plays, 1);
+      assert.deepEqual(calls.filter((call) => call[0] === 'stop'), [['stop']]);
+    } finally { subject.dispose(); }
+  }
+  {
+    // A track that cannot be read anywhere does not bounce between the exclusive backend and the
+    // gapless player: it is handed over once, and the backend is offered it again only after another track.
+    useFakeTimers();
+    const subject = new AudioEngine();
+    const offered = [];
+    subject.setExternalTransport({
+      play: async (id) => { offered.push(id); return true; },
+      pause() {}, resume() {}, stop() {}, seek() {}, prepareNext() {},
+    });
+    let report = null;
+    const gapless = {
+      live: false, starts: 0, lastResult: null, unavailableReason: null, underruns: 0,
+      setListener(fn) { report = fn; }, detach() {}, attach: async () => true,
+      start() { this.starts += 1; this.live = true; return Promise.resolve({ ok: true, durationSec: 200 }); },
+      stop() { this.live = false; },
+      hasStream() { return this.live; }, isPlaying: () => true, position: () => ({ currentTime: 31, duration: 200 }),
+      isUnackedChain: () => false, ack() {}, setAudibleGain() {}, prepareNext() {}, audibleSignal: () => null,
+    };
+    subject.setSampleTransport(gapless);
+    try {
+      await subject.play('newamp://track/9', 9, 0);
+      subject.handleExternalFailure(30, 'The drive stopped answering.', 9);
+      await settle();
+      assert.equal(gapless.starts, 1, 'the gapless player took the track');
+      report({ type: 'failed', segment: { src: 'newamp://track/9', trackId: 9 }, positionSec: 31, message: 'Decode failed.' });
+      await settle();
+      assert.deepEqual(offered, [9], 'the backend is not offered the track again');
+      const el = subject.graph.decks[subject.activeDeckIndex].el;
+      assert.equal(el.src, 'newamp://track/9', 'the decks have it');
+      assert.equal(el.plays, 1);
+
+      await subject.play('newamp://track/10', 10, 0);
+      assert.deepEqual(offered, [9, 10], 'the next track goes to the backend as usual');
+      await subject.play('newamp://track/9', 9, 0);
+      assert.deepEqual(offered, [9, 10, 9], 'and the first is offered again once another track has played');
+    } finally { subject.dispose(); }
+  }
+
+  // ---- a gapless start that never answers hands the track to the decks ----------------------------
+  {
+    useFakeTimers();
+    const subject = new AudioEngine();
+    const transport = {
+      live: false, stops: 0, starts: [], lastResult: null, unavailableReason: null, underruns: 0,
+      setListener() {}, detach() {}, attach: async () => true,
+      start(request) { this.starts.push(request); this.live = true; return new Promise(() => {}); },
+      stop() { this.stops += 1; this.live = false; },
+      hasStream() { return this.live; }, isPlaying: () => true, position: () => ({ currentTime: 0, duration: null }),
+      isUnackedChain: () => false, ack() {}, setAudibleGain() {}, prepareNext() {}, audibleSignal: () => null,
+    };
+    subject.setSampleTransport(transport);
+    try {
+      let outcome = null;
+      const started = subject.play('newamp://track/9', 9, 5).then((value) => { outcome = value; });
+      await settle();
+      assert.equal(transport.starts.length, 1, 'the transport was asked first');
+      advance(24999);
+      await settle();
+      assert.equal(outcome, null, 'it is given 25 s');
+      assert.equal(subject.getState().buffering, true);
+      advance(1);
+      await started;
+      assert.equal(outcome, 'started');
+      assert.equal(transport.stops, 1, 'its stream is stopped so it cannot start behind the decks');
+      const el = subject.graph.decks[0].el;
+      assert.equal(el.src, 'newamp://track/9', 'the decks have the track');
+      assert.equal(el.plays, 1);
+      assert.equal(subject.isSampleTransportActive(), false);
+      assert.equal(subject.getSampleTransportInfo().fallbackReason, 'The gapless producer did not answer.');
     } finally { subject.dispose(); }
   }
 
@@ -582,7 +878,8 @@ try {
       value: { mediaSession: { metadata: undefined, playbackState: 'none', setActionHandler: (action, fn) => handlers.set(action, fn) } },
       configurable: true,
     });
-    globalThis.MediaMetadata = class { constructor(init) { Object.assign(this, init); } };
+    const metadataBuilt = [];
+    globalThis.MediaMetadata = class { constructor(init) { metadataBuilt.push(init); Object.assign(this, init); } };
     const seeks = [];
     const actions = { play() {}, pause() {}, previous() {}, next() {}, stop() {}, seek() {}, seekBy: (s) => seeks.push(s) };
     syncMediaSessionIdentity({ current: track(1, { hasArt: 0 }), isPlaying: true, actions, hasPrevious: false, hasNext: true });
@@ -594,9 +891,58 @@ try {
     syncMediaSessionIdentity({ current: track(1, { hasArt: 0 }), isPlaying: true, actions });
     assert.equal(typeof handlers.get('previoustrack'), 'function', 'both default to available');
 
+    // The OS reloads the cover whenever metadata is assigned. Previous becoming available three
+    // seconds in, or a pause, changes the buttons and nothing about the track.
+    const playing = track(1, { hasArt: 0 });
+    syncMediaSessionIdentity({ current: null, isPlaying: false, actions });
+    metadataBuilt.length = 0;
+    syncMediaSessionIdentity({ current: playing, isPlaying: true, actions, hasPrevious: false, hasNext: true });
+    syncMediaSessionIdentity({ current: playing, isPlaying: true, actions, hasPrevious: true, hasNext: true });
+    syncMediaSessionIdentity({ current: playing, isPlaying: false, actions, hasPrevious: true, hasNext: true });
+    assert.equal(metadataBuilt.length, 1, 'the same track is published once');
+    assert.equal(typeof handlers.get('previoustrack'), 'function', 'while the buttons follow the change');
+    assert.equal(navigator.mediaSession.playbackState, 'paused');
+    syncMediaSessionIdentity({ current: { ...playing, title: 'Renamed' }, isPlaying: true, actions });
+    assert.equal(metadataBuilt.length, 2, 'a track that changed is published again');
+    assert.equal(metadataBuilt[1].title, 'Renamed');
+    syncMediaSessionIdentity({ current: null, isPlaying: false, actions });
+    assert.equal(navigator.mediaSession.metadata, null);
+    syncMediaSessionIdentity({ current: playing, isPlaying: true, actions });
+    assert.equal(metadataBuilt.length, 3, 'and so is a track that comes back after nothing was loaded');
+
     assert.equal(windowTitleFor(null), 'NewAmp');
     assert.equal(windowTitleFor(track(1, { title: ' Blue ', artist: 'Joni ' })), 'Blue - Joni');
     assert.equal(windowTitleFor(track(1, { title: '', artist: '' })), 'Unknown Track');
+  }
+
+  // ---- what opening files and folders says ---------------------------------------------------------
+  {
+    const some = (count, extra = {}) => ({ tracks: Array.from({ length: count }, (_, i) => track(i + 1)), importedPlaylists: [], skipped: [], ...extra });
+    const plain = { queueKept: false, skinName: null };
+    assert.equal(openedItemsStatus(some(2), plain), 'Playing 2 tracks.');
+    assert.equal(openedItemsStatus(some(1), plain), 'Playing 1 track.');
+    assert.equal(openedItemsStatus(some(2), { queueKept: true, skinName: null }), 'Playing 2 tracks, queue kept.');
+    assert.equal(openedItemsStatus(some(2), { queueKept: false, skinName: 'Neon' }), 'Playing 2 tracks. Applied skin Neon.');
+    assert.equal(openedItemsStatus(null, plain), 'Could not open the dropped items.');
+    assert.equal(openedItemsStatus(some(0), plain), 'No playable audio was found in the dropped items.');
+    assert.equal(openedItemsStatus(some(0), { queueKept: false, skinName: 'Neon' }), 'Applied skin Neon.');
+    assert.equal(openedItemsStatus(some(0, { importedPlaylists: [{}] }), plain), 'Imported 1 playlist.');
+    assert.equal(openedItemsStatus(some(0, { importedPlaylists: [{}, {}] }), plain), 'Imported 2 playlists.');
+
+    // A folder past the queueing cap plays the first part and leaves the rest to the scanner.
+    const cut = some(300, { leftToScanner: 4200 });
+    assert.equal(openedItemsStatus(cut, plain), 'Playing the first 300 tracks. The rest of the folder is being added to the library.');
+    assert.equal(openedItemsStatus(cut, { queueKept: true, skinName: null }), 'Playing the first 300 tracks, queue kept. The rest of the folder is being added to the library.');
+    assert.equal(openedItemsStatus(some(120, { leftToScanner: 9 }), plain), 'Playing the first 120 tracks. The rest of the folder is being added to the library.', 'the number is what was queued');
+    for (const left of [0, -3, Number.NaN, undefined, '40']) {
+      assert.equal(openedItemsStatus(some(300, { leftToScanner: left }), plain), 'Playing 300 tracks.', `a count of ${String(left)} left to the scanner changes nothing`);
+    }
+    assert.equal(openedItemsStatus(some(0, { leftToScanner: 50 }), plain), 'No playable audio was found in the dropped items.', 'nothing queued keeps its message');
+
+    assert.deepEqual(partialFolderNotice(cut), { title: 'Playing the first 300 tracks', detail: 'The rest of the folder is being added to the library.' });
+    assert.equal(partialFolderNotice(some(300)), null, 'files opened from the menu say nothing unless a folder was cut short');
+    assert.equal(partialFolderNotice(some(0, { leftToScanner: 50 })), null);
+    assert.equal(partialFolderNotice(null), null);
   }
 
   assert.deepEqual(unhandled, [], 'nothing rejected without a handler');

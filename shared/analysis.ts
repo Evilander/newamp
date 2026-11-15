@@ -188,6 +188,14 @@ export class AnalysisUnavailableError extends Error {
   }
 }
 
+/** An earlier stat on the drive has not come back, so no more are started. Says nothing about this track. */
+export class AnalysisDrivePendingError extends Error {
+  constructor(path: string) {
+    super(`cannot read ${path}: an earlier stat is still waiting on the drive`);
+    this.name = 'AnalysisDrivePendingError';
+  }
+}
+
 /** A read of the file failed partway (a network share that timed out), so the decode stopped short. Retried like a timeout. */
 export class AnalysisReadFailedError extends Error {
   constructor(path: string) {

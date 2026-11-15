@@ -33,6 +33,10 @@ export const MAX_SAFE_REGEX_REPEAT = 64;
 // library on the main process is minutes. Real tag patterns are a few dozen
 // states.
 export const MAX_SAFE_REGEX_STATES = 1000;
+// What a rule saved before that limit came down may still use. Such a rule
+// keeps loading and running as it did; a rule being written now is held to the
+// lower cap.
+export const MAX_STORED_REGEX_STATES = 4000;
 
 export type SafeRegexErrorCode =
   | 'empty'
@@ -370,8 +374,10 @@ interface Fragment { start: number; ends: number[] }
 class Compiler {
   readonly states: State[] = [];
 
+  constructor(private readonly maxStates: number) {}
+
   private add(state: State): number {
-    if (this.states.length >= MAX_SAFE_REGEX_STATES) {
+    if (this.states.length >= this.maxStates) {
       throw new SafeRegexError('too-complex', 'pattern expands to too many states');
     }
     this.states.push(state);
@@ -488,7 +494,7 @@ export class SafeRegex {
   }
 
   /** Compiles `pattern`, throwing SafeRegexError on anything outside the supported grammar. */
-  static compile(pattern: string): SafeRegex {
+  static compile(pattern: string, maxStates = MAX_SAFE_REGEX_STATES): SafeRegex {
     if (typeof pattern !== 'string' || pattern.length === 0) {
       throw new SafeRegexError('empty', 'pattern is empty');
     }
@@ -496,15 +502,15 @@ export class SafeRegex {
       throw new SafeRegexError('too-long', `pattern is longer than ${MAX_SAFE_REGEX_PATTERN_LENGTH} characters`);
     }
     const ast = new Parser(pattern).parse();
-    const compiler = new Compiler();
+    const compiler = new Compiler(maxStates);
     const start = compiler.compile(ast);
     return new SafeRegex(pattern, compiler.states, start);
   }
 
   /** Like compile() but returns null instead of throwing. */
-  static tryCompile(pattern: string): SafeRegex | null {
+  static tryCompile(pattern: string, maxStates = MAX_SAFE_REGEX_STATES): SafeRegex | null {
     try {
-      return SafeRegex.compile(pattern);
+      return SafeRegex.compile(pattern, maxStates);
     } catch (err) {
       if (err instanceof SafeRegexError) return null;
       throw err;

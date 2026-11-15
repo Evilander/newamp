@@ -4,7 +4,9 @@
 // Run: node scripts/audio-protocol-authorize-test.mjs
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import fs from 'node:fs';
+import { mkdir, rm } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -27,10 +29,29 @@ await build({
 // The default retry is read-failure's retryStorageErrors; this budget keeps the
 // run short while still letting it make its first pause of a second.
 process.env.NEWAMP_READ_OUTAGE_MS = '500';
-const { authorizeAudioProtocolPath } = await import(pathToFileURL(resolve(buildDir, 'audio-protocol-authorize.js')).href);
+const authorizer = await import(pathToFileURL(resolve(buildDir, 'audio-protocol-authorize.js')).href);
 
-const source = await readFile(resolve(root, 'electron/audio-protocol-authorize.ts'), 'utf8');
-assert.doesNotMatch(source.replace(/\/\/.*$/gm, ''), /existsSync/, 'the request path makes no synchronous existence check');
+// Every synchronous fs call made while a request is being authorized is noted:
+// one of those on a share that is slow to answer holds up the whole main
+// process, not just the request.
+const syncCalls = [];
+let authorizing = 0;
+for (const name of Object.keys(fs).filter((key) => key.endsWith('Sync') && typeof fs[key] === 'function')) {
+  const original = fs[name];
+  fs[name] = function (...args) {
+    if (authorizing > 0) syncCalls.push(name);
+    return original.apply(this, args);
+  };
+}
+syncBuiltinESMExports();
+const authorizeAudioProtocolPath = async (...args) => {
+  authorizing += 1;
+  try {
+    return await authorizer.authorizeAudioProtocolPath(...args);
+  } finally {
+    authorizing -= 1;
+  }
+};
 
 const errno = (code) => Object.assign(new Error(code), { code });
 const urlFor = (path) => new URL(`newamp://track/${encodeURIComponent(path)}`);
@@ -178,6 +199,8 @@ for (const code of ['ETIMEDOUT', 'EIO', 'ESTALE']) {
   assert.deepEqual(result, { ok: false, status: 403 });
   assert.deepEqual(calls, [], 'a refused path makes no fs call');
 }
+
+assert.deepEqual(syncCalls, [], 'no request above made a synchronous fs call');
 
 await rm(buildDir, { recursive: true, force: true });
 console.log('PASS newamp:// authorization: no sync fs, storage errors are retried and answer 503, library tracks cost no fs call, roots are remembered');

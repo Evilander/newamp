@@ -15,7 +15,13 @@
 // operators). Evaluator walks the AST against a TrackContext bag.
 
 import type { TrackDna } from './audio-dna.js';
-import { MAX_SAFE_REGEX_PATTERN_LENGTH, SafeRegex, SafeRegexError } from './safe-regex.js';
+import {
+  MAX_SAFE_REGEX_PATTERN_LENGTH,
+  MAX_SAFE_REGEX_STATES,
+  MAX_STORED_REGEX_STATES,
+  SafeRegex,
+  SafeRegexError,
+} from './safe-regex.js';
 
 export const TAG_DSL_VERSION = 1;
 export const MAX_TAG_NAME_LENGTH = 48;
@@ -34,10 +40,12 @@ export const MAX_REGEX_INPUT_LENGTH = 4096;
 const REGEX_CACHE_LIMIT = 256;
 const regexCache = new Map<string, SafeRegex | null>();
 
+// Evaluation accepts the size a stored rule may have; a rule being saved is held
+// to the lower limit when it is parsed in strict mode.
 function compileMatchPattern(pattern: string): SafeRegex | null {
   const cached = regexCache.get(pattern);
   if (cached !== undefined) return cached;
-  const compiled = SafeRegex.tryCompile(pattern);
+  const compiled = SafeRegex.tryCompile(pattern, MAX_STORED_REGEX_STATES);
   if (regexCache.size >= REGEX_CACHE_LIMIT) {
     regexCache.delete(regexCache.keys().next().value!);
   }
@@ -57,38 +65,38 @@ function safeRegexTest(pattern: string, input: string): boolean | null {
 // so an unsupported pattern fails the rule with a message the Tags view can
 // show. Patterns built dynamically at runtime are still checked on evaluation
 // and yield null (three-valued unknown) when they do not compile.
-function collectPatternErrors(node: AstNode, errors: CompileError[]): void {
+function collectPatternErrors(node: AstNode, errors: CompileError[], maxStates: number): void {
   switch (node.kind) {
     case 'binary':
       if (node.op === 'matches' && node.right.kind === 'literal' && typeof node.right.value === 'string') {
-        checkPattern(node.right.value, errors);
+        checkPattern(node.right, node.right.value, errors, maxStates);
       }
-      collectPatternErrors(node.left, errors);
-      collectPatternErrors(node.right, errors);
+      collectPatternErrors(node.left, errors, maxStates);
+      collectPatternErrors(node.right, errors, maxStates);
       return;
     case 'call': {
       const pattern = node.name === 'matches' ? node.args[1] : undefined;
       if (pattern && pattern.kind === 'literal' && typeof pattern.value === 'string') {
-        checkPattern(pattern.value, errors);
+        checkPattern(pattern, pattern.value, errors, maxStates);
       }
-      for (const arg of node.args) collectPatternErrors(arg, errors);
+      for (const arg of node.args) collectPatternErrors(arg, errors, maxStates);
       return;
     }
     case 'unary':
-      collectPatternErrors(node.argument, errors);
+      collectPatternErrors(node.argument, errors, maxStates);
       return;
     default:
       return;
   }
 }
 
-function checkPattern(pattern: string, errors: CompileError[]): void {
+function checkPattern(at: { line?: number; column?: number }, pattern: string, errors: CompileError[], maxStates: number): void {
   try {
-    SafeRegex.compile(pattern);
+    SafeRegex.compile(pattern, maxStates);
   } catch (err) {
     if (!(err instanceof SafeRegexError)) throw err;
     const shown = pattern.length > 40 ? `${pattern.slice(0, 40)}…` : pattern;
-    errors.push({ message: `unsupported pattern "${shown}": ${err.message}`, line: 1, column: 1 });
+    errors.push({ message: `unsupported pattern "${shown}": ${err.message}`, line: at.line ?? 1, column: at.column ?? 1 });
   }
 }
 
@@ -155,10 +163,10 @@ export interface EvalResult {
 }
 
 export type AstNode =
-  | { kind: 'literal'; value: Value }
+  | { kind: 'literal'; value: Value; line?: number; column?: number }
   | { kind: 'identifier'; name: string; line?: number; column?: number }
   | { kind: 'field'; path: string[]; line?: number; column?: number }
-  | { kind: 'range'; lo: number; hi: number }
+  | { kind: 'range'; lo: number; hi: number; line?: number; column?: number }
   | { kind: 'binary'; op: BinaryOp; left: AstNode; right: AstNode }
   | { kind: 'unary'; op: 'not' | 'neg'; argument: AstNode }
   | { kind: 'call'; name: string; args: AstNode[]; line?: number; column?: number }
@@ -185,11 +193,13 @@ type Value = number | string | boolean | null | { range: [number, number] };
 
 export interface ParseOptions {
   /**
-   * Also reject unknown identifiers, fields and functions (and wrong argument
-   * counts) up front, with their position. Off by default: a rule stored
-   * before a name existed still has to load, and evaluation reports it per
-   * track. The save and preview paths turn it on so a typo is shown to its
-   * author instead of quietly matching nothing.
+   * Also reject, with their position, unknown identifiers, fields and functions
+   * (and wrong argument counts), ranges written backwards and patterns too
+   * large for a new rule. Off by default: a rule stored before those checks
+   * existed still has to load (a backwards range matches nothing, as it always
+   * has), and evaluation reports an unknown name per track. The save and
+   * preview paths turn it on so a mistake is shown to its author instead of
+   * quietly matching nothing.
    */
   strict?: boolean;
 }
@@ -209,7 +219,7 @@ export function parseRule(source: string, options: ParseOptions = {}): CompileRe
     const parser = new Parser(tokens);
     const rule = parser.parseRule();
     const patternErrors: CompileError[] = [];
-    collectPatternErrors(rule.ast, patternErrors);
+    collectPatternErrors(rule.ast, patternErrors, options.strict ? MAX_SAFE_REGEX_STATES : MAX_STORED_REGEX_STATES);
     if (patternErrors.length) return { rule: null, errors: patternErrors };
     if (options.strict) {
       const nameErrors: CompileError[] = [];
@@ -692,10 +702,7 @@ class Parser {
     if (!this.accept('range')) return { kind: 'literal', value };
     const hiTok = this.peek();
     const hi = this.parseSignedNumber();
-    if (hi < value) {
-      throw new CompileException(`range ${value}..${hi} runs backwards, put the smaller number first`, hiTok.line, hiTok.column);
-    }
-    return { kind: 'range', lo: value, hi };
+    return { kind: 'range', lo: value, hi, line: hiTok.line, column: hiTok.column };
   }
 
   private parsePrimary(): AstNode {
@@ -714,7 +721,7 @@ class Parser {
 
     if (tok.type === 'string') {
       this.next();
-      return { kind: 'literal', value: tok.value };
+      return { kind: 'literal', value: tok.value, line: tok.line, column: tok.column };
     }
 
     if (tok.type === 'keyword' && (tok.value === 'true' || tok.value === 'false' || tok.value === 'null')) {
@@ -918,7 +925,8 @@ const FUNCTION_ARITY: Record<string, [number, number]> = {
 };
 
 // Mirrors what evalIdentifier, evalField and evalCall would throw for every
-// track, but once, with the position of the offending name.
+// track, but once, with the position of the offending name. A range written
+// backwards is also reported here: it evaluates, to false for every track.
 function collectNameErrors(ast: AstNode, errors: CompileError[]): void {
   visit(ast, (node) => {
     const at = (message: string): void => {
@@ -942,6 +950,8 @@ function collectNameErrors(ast: AstNode, errors: CompileError[]): void {
       } else {
         at(`unknown namespace "${root}"`);
       }
+    } else if (node.kind === 'range') {
+      if (node.hi < node.lo) at(`range ${node.lo}..${node.hi} runs backwards, put the smaller number first`);
     } else if (node.kind === 'call') {
       const key = node.name.toLowerCase();
       if (!Object.prototype.hasOwnProperty.call(FUNCTIONS, key)) return at(`unknown function "${node.name}"`);

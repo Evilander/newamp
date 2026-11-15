@@ -11,6 +11,7 @@ import {
 import { whenPlaybackFed } from './playback-io.js';
 import { killChild } from './kill-child.js';
 import { watchReadFailures } from './read-failure.js';
+import { INPUT_PROTOCOLS } from './transcode.js';
 
 const ffmpegStatic = ffmpegStaticImport as unknown as string | null;
 
@@ -50,6 +51,7 @@ function decodeMonoPcm(inputPath: string, maxSeconds: number): Promise<Buffer> {
         '-nostdin',
         '-loglevel',
         'error',
+        ...INPUT_PROTOCOLS,
         '-i',
         inputPath,
         '-t',

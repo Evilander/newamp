@@ -11,6 +11,7 @@ import { StartupSplash } from './components/StartupSplash';
 import { transportAvailability, usePlayerStore } from './store/usePlayerStore';
 import { api, inElectron, winctl } from './lib/api';
 import { pushToast } from './lib/toast';
+import { openedItemsStatus, partialFolderNotice } from './lib/open-files-status';
 import { syncMediaSessionIdentity, syncMediaSessionPosition, windowTitleFor } from './lib/mediaSession';
 import { mediaSessionPositionNeedsSync, type MediaSessionPositionSnapshot } from '@shared/media-session';
 import {
@@ -181,17 +182,15 @@ export default function App(): JSX.Element {
     const before = usePlayerStore.getState();
     const queueKept = before.queue.length > 0 && !before.activePodcastEpisode;
     const result = await handleOpenFiles(mediaPaths);
-    const skinSuffix = appliedSkins.length ? ` Applied skin ${appliedSkins[appliedSkins.length - 1]}.` : '';
-    if (!result) {
-      setDropMessage('Could not open the dropped items.');
-    } else if (result.tracks.length) {
-      setDropMessage(`Playing ${result.tracks.length.toLocaleString()} track${result.tracks.length === 1 ? '' : 's'}${queueKept ? ', queue kept' : ''}.${skinSuffix}`);
-    } else if (result.importedPlaylists.length) {
-      usePlayerStore.getState().setView('playlist');
-      setDropMessage(`Imported ${result.importedPlaylists.length.toLocaleString()} playlist${result.importedPlaylists.length === 1 ? '' : 's'}.${skinSuffix}`);
-    } else {
-      setDropMessage(appliedSkins.length ? `Applied skin ${appliedSkins[appliedSkins.length - 1]}.` : 'No playable audio was found in the dropped items.');
-    }
+    if (result && !result.tracks.length && result.importedPlaylists.length) usePlayerStore.getState().setView('playlist');
+    setDropMessage(openedItemsStatus(result, { queueKept, skinName: appliedSkins[appliedSkins.length - 1] ?? null }));
+  }
+
+  // Files opened from the menu or the command line have no status line; a
+  // folder that was cut short is the one thing worth saying about them.
+  async function openAndAnnounce(paths: string[]) {
+    const notice = partialFolderNotice(await handleOpenFiles(paths));
+    if (notice) pushToast(notice);
   }
 
   useEffect(() => {
@@ -310,7 +309,7 @@ export default function App(): JSX.Element {
     let cancelled = false;
 
     const offOpenFiles = api.onOpenFiles((paths) => {
-      void handleOpenFiles(paths);
+      void openAndAnnounce(paths);
     });
     const offOpenSettings = api.onOpenSettings(() => {
       usePlayerStore.getState().openView('settings');
@@ -319,7 +318,7 @@ export default function App(): JSX.Element {
     init()
       .then(async () => {
         const pending = await api.consumePendingOpenFiles();
-        if (!cancelled) await handleOpenFiles(pending);
+        if (!cancelled) await openAndAnnounce(pending);
         // A tag rule that stopped compiling (an upgrade narrowed the pattern
         // grammar) silently drops every tag it assigned. Say so once at start
         // instead of waiting for the user to open the Tags view.

@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, readFileSync, readdirSync, statSync, renameSync, unlinkSync, closeSync, fsyncSync, openSync, writeSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, readdirSync, statSync, renameSync, unlinkSync, closeSync, fstatSync, fsyncSync, openSync, readSync, writeSync } from 'node:fs';
 import { open as fsOpen, readFile as fsReadFile, rename as fsRename, unlink as fsUnlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { RecoveryEvent } from '../shared/types.js';
@@ -209,7 +209,15 @@ export async function durableWriteFileAsync(filePath: string, data: Buffer | str
   }
 }
 
-export function renameOverExistingSync(fromPath: string, toPath: string): void {
+// With `retry: false` it makes one attempt and throws whatever the rename threw,
+// at once: no sleeping, no rewrite of the target, `fromPath` left whole. For a
+// caller that has a backoff of its own and would only stall the thread by
+// waiting here too.
+export function renameOverExistingSync(fromPath: string, toPath: string, options: { retry?: boolean } = {}): void {
+  if (options.retry === false) {
+    renameSync(fromPath, toPath);
+    return;
+  }
   // The synchronous writer runs on the main thread for ordinary settings
   // writes, not only at quit, so its backoff is shorter than the async one:
   // a locked file must not freeze the UI for close to a second.
@@ -309,15 +317,79 @@ function sleepSync(ms: number): void {
 // failed rename can be the only complete copy when library.db is unreadable.
 const LIBRARY_TEMP_PREFIX = 'library.db.tmp-';
 const ORPHAN_TEMP_NAME = /\.tmp-(\d+)-(?:\d+|sync|retry)$/;
+const PROCESS_STARTED_AT_MS = Date.now() - process.uptime() * 1000;
 
-export function sweepOrphanedTempFiles(dir: string, minAgeMs = 60_000, now = Date.now()): string[] {
-  const removed: string[] = [];
+// What a leftover temp file is worth, judged against the file it was meant to
+// replace. A write cut short leaves a file that is not whole ('partial'), and
+// a target written since the temp file was is ahead of it ('superseded'); both
+// are safe to delete. Anything else is a whole copy of state the target does
+// not have: a replace that failed (antivirus, a sync client, a locked file)
+// leaves exactly that, and it may be the only copy.
+export type OrphanedTempVerdict = 'partial' | 'superseded' | 'unsaved';
+
+export function judgeOrphanedTemp(tempPath: string, targetPath: string): OrphanedTempVerdict {
+  try {
+    if (!isWholeFile(tempPath, targetPath)) return 'partial';
+  } catch {
+    // Unreadable now is not the same as worthless.
+    return 'unsaved';
+  }
+  try {
+    const target = statSync(targetPath);
+    // A target this process wrote itself says nothing about the temp file: the
+    // settings store rewrites its file during startup, before this runs.
+    if (target.isFile() && target.mtimeMs > statSync(tempPath).mtimeMs && target.mtimeMs < PROCESS_STARTED_AT_MS) {
+      return 'superseded';
+    }
+  } catch {
+    /* a target that is missing or unreadable has nothing newer */
+  }
+  return 'unsaved';
+}
+
+// The files written through this module are JSON or SQLite. A JSON document
+// that parses is whole, since a truncated one never does; a SQLite file is
+// whole once it is as long as its own header says.
+function isWholeFile(path: string, targetPath: string): boolean {
+  if (!targetPath.endsWith('.db')) {
+    const text = readFileSync(path, 'utf-8');
+    try {
+      JSON.parse(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  const fd = openSync(path, 'r');
+  try {
+    const header = Buffer.alloc(100);
+    const read = readSync(fd, header, 0, header.length, 0);
+    if (read < header.length || header.subarray(0, 16).toString('latin1') !== 'SQLite format 3\0') return false;
+    const rawPageSize = header.readUInt16BE(16);
+    const pageSize = rawPageSize === 1 ? 65536 : rawPageSize;
+    const pageCount = header.readUInt32BE(28);
+    const size = fstatSync(fd).size;
+    return pageCount > 0 ? size >= pageCount * pageSize : size > 0 && size % pageSize === 0;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+interface OrphanedTemp {
+  path: string;
+  target: string;
+  mtimeMs: number;
+  verdict: OrphanedTempVerdict;
+}
+
+function orphanedTemps(dir: string, minAgeMs: number, now: number): OrphanedTemp[] {
   let names: string[];
   try {
     names = readdirSync(dir);
   } catch {
-    return removed;
+    return [];
   }
+  const found: OrphanedTemp[] = [];
   for (const name of names) {
     const match = ORPHAN_TEMP_NAME.exec(name);
     if (!match || Number(match[1]) === process.pid || name.startsWith(LIBRARY_TEMP_PREFIX)) continue;
@@ -325,11 +397,52 @@ export function sweepOrphanedTempFiles(dir: string, minAgeMs = 60_000, now = Dat
     try {
       const info = statSync(path);
       if (!info.isFile() || now - info.mtimeMs < minAgeMs) continue;
-      unlinkSync(path);
-      removed.push(path);
+      const target = join(dir, name.slice(0, match.index));
+      found.push({ path, target, mtimeMs: info.mtimeMs, verdict: judgeOrphanedTemp(path, target) });
+    } catch {
+      /* gone already */
+    }
+  }
+  // Several failed sessions leave several whole copies of one file; the newest
+  // holds the latest state and the rest are behind it.
+  const newest = new Map<string, number>();
+  for (const temp of found) {
+    if (temp.verdict === 'unsaved') newest.set(temp.target, Math.max(newest.get(temp.target) ?? 0, temp.mtimeMs));
+  }
+  for (const temp of found) {
+    if (temp.verdict === 'unsaved' && temp.mtimeMs < (newest.get(temp.target) ?? 0)) temp.verdict = 'superseded';
+  }
+  return found;
+}
+
+// Removes the leftovers that are provably worthless and returns what it
+// removed. A whole copy that is newer than its target stays where it is, and
+// the sweep says so.
+export function sweepOrphanedTempFiles(dir: string, minAgeMs = 60_000, now = Date.now()): string[] {
+  const removed: string[] = [];
+  for (const temp of orphanedTemps(dir, minAgeMs, now)) {
+    if (temp.verdict === 'unsaved') {
+      console.warn(`[newamp] ${temp.path} is a complete copy newer than ${temp.target}; left in place.`);
+      continue;
+    }
+    try {
+      unlinkSync(temp.path);
+      removed.push(temp.path);
     } catch {
       /* gone already, or locked: the next launch tries again */
     }
   }
   return removed;
+}
+
+export interface UnsavedTempCopy {
+  tempPath: string;
+  targetPath: string;
+}
+
+// The whole copies a sweep would leave alone, for callers that tell the user.
+export function findUnsavedTempCopies(dir: string, minAgeMs = 60_000, now = Date.now()): UnsavedTempCopy[] {
+  return orphanedTemps(dir, minAgeMs, now)
+    .filter((temp) => temp.verdict === 'unsaved')
+    .map((temp) => ({ tempPath: temp.path, targetPath: temp.target }));
 }

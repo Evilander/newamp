@@ -60,11 +60,13 @@ const FFMPEG_TIMEOUT_MS = 180_000;
 export const FFMPEG_STALL_MS = 60_000;
 export const FFMPEG_MAX_MS = 30 * 60_000;
 const FFMPEG_PROGRESS_POLL_MS = 5000;
-// What ffmpeg may open for a library file: the file itself and pipes. A file
-// whose content turns out to be a playlist or an SDP description (ffmpeg
-// goes by content, not extension) can then not make it open other paths or
-// network addresses.
-const INPUT_PROTOCOLS = ['-protocol_whitelist', 'file,pipe'];
+// What ffmpeg may open for a library file: files and pipes. ffmpeg goes by
+// content, not extension, and a file whose content turns out to be a playlist
+// or an SDP description names other things to open. ffmpeg's own default for a
+// local file already leaves the network out; this says so outright, whatever
+// build runs, and leaves out its data: and crypto: sources too. Another file
+// on disk can still be named. Every ffmpeg given a library file takes these.
+export const INPUT_PROTOCOLS = ['-protocol_whitelist', 'file,pipe'];
 
 // Every live ffmpeg child spawned for a library file, so app quit can kill
 // any that would otherwise keep running and reading after exit.

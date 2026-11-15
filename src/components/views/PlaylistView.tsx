@@ -18,6 +18,7 @@ import { ConfirmAction } from '../ConfirmAction';
 import { ArtistLink, AlbumLink } from '../EntityLink';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
 import { openTrackContextMenu } from '../../lib/trackMenu';
+import { watchDragEnd } from '../dragEnd';
 
 type SetMood = SmartPlaylistMood;
 
@@ -80,6 +81,9 @@ export function PlaylistView(): JSX.Element {
   // before the "2" of "12" can be typed, and refills the queue every time.
   const [autoDjTargetDraft, setAutoDjTargetDraft] = useState(String(autoDjTarget));
   useEffect(() => setAutoDjTargetDraft(String(autoDjTarget)), [autoDjTarget]);
+  // The target being saved. Enter and the blur that follows it both commit, and
+  // the saved target has not come back by the time the second one runs.
+  const savingAutoDjTarget = useRef<number | null>(null);
   function commitAutoDjTarget(): void {
     const parsed = parseInt(autoDjTargetDraft, 10);
     if (!Number.isFinite(parsed)) {
@@ -88,7 +92,11 @@ export function PlaylistView(): JSX.Element {
     }
     const next = normalizeAutoDjTarget(parsed);
     setAutoDjTargetDraft(String(next));
-    if (next !== autoDjTarget) void setAutoDjTarget(next);
+    if (next === autoDjTarget || next === savingAutoDjTarget.current) return;
+    savingAutoDjTarget.current = next;
+    void setAutoDjTarget(next).finally(() => {
+      if (savingAutoDjTarget.current === next) savingAutoDjTarget.current = null;
+    });
   }
   const [genreQuery, setGenreQuery] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -166,6 +174,19 @@ export function PlaylistView(): JSX.Element {
   visibleSelectedPlaylistRef.current = visibleSelectedPlaylistTracks;
   const visibleQueueRef = useRef(visibleQueueTracks);
   visibleQueueRef.current = visibleQueueTracks;
+
+  // A dragged row can be scrolled out of its window mid-drag, and a row that is
+  // no longer drawn never gets its dragend.
+  useEffect(() => {
+    if (draggedPlaylistTrackIndex === null) return undefined;
+    const source = selectedPlaylistWindow.scrollRef.current?.querySelector(`[data-newamp-playlist-track-row="${draggedPlaylistTrackIndex}"]`);
+    return watchDragEnd(window, () => !!source?.isConnected, () => setDraggedPlaylistTrackIndex(null));
+  }, [draggedPlaylistTrackIndex]);
+  useEffect(() => {
+    if (draggedQueueIndex === null) return undefined;
+    const source = queueWindow.scrollRef.current?.querySelector(`[data-newamp-queue-track-row="${draggedQueueIndex}"]`);
+    return watchDragEnd(window, () => !!source?.isConnected, () => setDraggedQueueIndex(null));
+  }, [draggedQueueIndex]);
 
   // Rows are keyed by position, so a move or removal remounts the row the
   // keyboard was on. Put focus back on the row it was working with.

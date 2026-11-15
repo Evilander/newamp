@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { engine, usePlayerStore } from '../store/usePlayerStore';
-import { exclusiveBackendLabel } from '../lib/api';
+import { api, exclusiveBackendLabel } from '../lib/api';
 import { resamplerName } from '../lib/resampler-name';
 
 /**
@@ -79,12 +79,15 @@ export function SignalPathBadge(): JSX.Element | null {
     const neg = exclusive.negotiated;
     const rate = formatKhz(neg.sampleRate);
     const backend = exclusiveBackendLabel();
+    const mac = api.platform === 'darwin';
     if (neg.bitPerfect) {
       label = `${rate} EXCLUSIVE`;
       tone = 'gold';
       title = [
-        `${backend} → ${neg.deviceName}: ${neg.format} @ ${rate}, bit-perfect.`,
-        'Untouched samples, no OS mixer, no DSP — the DAC gets exactly what is in the file.',
+        `${backend} → ${neg.deviceName}: ${neg.format} @ ${rate}, ${mac ? 'exclusive, source rate and depth requested' : 'bit-perfect'}.`,
+        mac
+          ? "Exclusive device, with the source's rate and depth requested. macOS can still convert to the device's own format, and NewAmp does not check that."
+          : 'Untouched samples, no OS mixer, no DSP — the DAC gets exactly what is in the file.',
       ].join('\n');
     } else {
       label = `${rate} EXCLUSIVE*`;

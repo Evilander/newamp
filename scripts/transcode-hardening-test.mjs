@@ -14,11 +14,7 @@ import { chmod, copyFile, mkdir, readdir, readFile, rm, utimes, writeFile } from
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-
-if (process.platform === 'win32') {
-  console.log('[transcode-hardening-test] skipped: the stand-in ffmpeg is a script with a shebang');
-  process.exit(0);
-}
+import { scriptStandInSpawn } from './lib/script-standin-spawn.mjs';
 
 const deadline = setTimeout(() => {
   console.error('transcode hardening test timed out');
@@ -30,9 +26,11 @@ const root = resolve('tmp', 'transcode-hardening-test', String(process.pid));
 const media = join(root, 'media');
 const cache = join(root, 'cache');
 const spawnLog = join(root, 'spawns.log');
+const argsLog = join(root, 'args.log');
 await rm(root, { recursive: true, force: true });
 await mkdir(media, { recursive: true });
 await writeFile(spawnLog, '');
+await writeFile(argsLog, '');
 
 // A name decides what the stand-in does with a file: "bad" exits 1, "cut" stops
 // after two seconds with the error a timed-out read gives, "slow" waits first.
@@ -48,6 +46,7 @@ if (args.includes('-version')) {
 const at = args.indexOf('-i');
 const input = at >= 0 ? args[at + 1] : '';
 if (at >= 0) appendFileSync(${JSON.stringify(spawnLog)}, input + '\\n');
+if (at >= 0) appendFileSync(${JSON.stringify(argsLog)}, JSON.stringify(args) + '\\n');
 const real = (extra, then) => {
   const cutArgs = extra ? [...args.slice(0, at), ...extra, ...args.slice(at)] : args;
   spawn(${JSON.stringify(ffmpeg)}, cutArgs, { stdio: ['ignore', 'inherit', 'pipe'] })
@@ -99,11 +98,37 @@ const fsStub = {
     }));
   },
 };
+// The resampler probe's spawn, counted, and failing to start as often as
+// globalThis.__resamplerSpawnErrors says (the system out of handles for a moment).
+const probeSpawn = {
+  name: 'probe-spawn',
+  setup(b) {
+    b.onResolve({ filter: /^node:child_process$/ }, (args) =>
+      args.importer.endsWith('resampler.ts') ? { path: 'child-process', namespace: 'probe-spawn' } : undefined);
+    b.onLoad({ filter: /.*/, namespace: 'probe-spawn' }, () => ({
+      contents: `
+        import * as real from 'node:child_process';
+        import { EventEmitter } from 'node:events';
+        export * from 'node:child_process';
+        export function spawn(command, args, options) {
+          globalThis.__resamplerSpawns = (globalThis.__resamplerSpawns ?? 0) + 1;
+          if (!(globalThis.__resamplerSpawnErrors > 0)) return real.spawn(command, args, options);
+          globalThis.__resamplerSpawnErrors -= 1;
+          const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null, kill: () => false });
+          setImmediate(() => child.emit('error', Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' })));
+          return child;
+        }`,
+      loader: 'js',
+      resolveDir: process.cwd(),
+    }));
+  },
+};
 const bundle = join(root, 'bundle.mjs');
 await build({
   stdin: {
     contents: `
       export { mp4SoundCodec } from './electron/mp4-codec.ts';
+      export { probeResampler } from './electron/resampler.ts';
       export { getOrTranscodeToFlac, initTranscodeCache, peekCachedFlac } from './electron/transcode-cache.ts';
       export {
         analyzeTrackReplayGain, buildPlaybackFlacArgs, killAllTranscodeFfmpeg, resolvePlaybackMode,
@@ -118,12 +143,12 @@ await build({
   platform: 'node',
   target: 'es2022',
   packages: 'external',
-  plugins: [fsStub],
+  plugins: [fsStub, probeSpawn, scriptStandInSpawn],
   outfile: bundle,
   logLevel: 'silent',
 });
 const {
-  mp4SoundCodec, getOrTranscodeToFlac, initTranscodeCache, peekCachedFlac,
+  mp4SoundCodec, probeResampler, getOrTranscodeToFlac, initTranscodeCache, peekCachedFlac,
   analyzeTrackReplayGain, buildPlaybackFlacArgs, killAllTranscodeFfmpeg, resolvePlaybackMode,
   transcodeToWavResponse, transcodeTrackToAudioFile, watchFfmpegInput, watchFfmpegProgress,
 } = await import(pathToFileURL(bundle).href);
@@ -389,11 +414,20 @@ initTranscodeCache(cache);
   await assert.rejects(analyzeTrackReplayGain(silence), /silent/, 'silence is not boosted by 30 dB');
 }
 
-// 9. Every ffmpeg reading a library file is limited to files and pipes.
+// 9. Every ffmpeg reading a library file is limited to files and pipes: each
+// one started above for the cache, the live WAV, an export or ReplayGain.
 {
-  const args = buildPlaybackFlacArgs(join(media, 'a.wma'), join(root, 'a.flac'));
-  const whitelist = args.indexOf('-protocol_whitelist');
-  assert.ok(whitelist >= 0 && args[whitelist + 1] === 'file,pipe' && whitelist < args.indexOf('-i'));
+  const limited = (args) => {
+    const whitelist = args.indexOf('-protocol_whitelist');
+    return whitelist >= 0 && args[whitelist + 1] === 'file,pipe' && whitelist < args.indexOf('-i');
+  };
+  assert.ok(limited(buildPlaybackFlacArgs(join(media, 'a.wma'), join(root, 'a.flac'))));
+  const runs = (await readFile(argsLog, 'utf8')).split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    .filter((args) => args[args.indexOf('-i') + 1].startsWith(media));
+  for (const output of ['.flac.part', 'pipe:1', '.wav.part', '-']) {
+    assert.ok(runs.some((args) => args.at(-1).endsWith(output)), `an ffmpeg writing ${output} ran`);
+  }
+  for (const args of runs) assert.ok(limited(args), `limited to files and pipes: ${args.join(' ')}`);
 }
 
 // 10. The MP4 verdict: a share that times out is not a verdict, and parallel lookups share one read.
@@ -440,7 +474,9 @@ initTranscodeCache(cache);
 
 // 11. A run is stopped when it stalls, not for being long, and quit stops every ffmpeg child.
 {
-  const idle = spawn('sleep', ['30'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // Children that stand in for an ffmpeg here: one that does nothing, and one that keeps writing a file.
+  const idleChild = () => spawn(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const idle = idleChild();
   let why = null;
   const stop = watchFfmpegProgress(idle, (reason) => { why = reason; }, { stallMs: 300, pollMs: 50 });
   await sleep(700);
@@ -449,14 +485,22 @@ initTranscodeCache(cache);
   idle.kill();
 
   const busy = join(root, 'growing.bin');
-  const writer = spawn('sh', ['-c', `for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo $i >> ${busy}; sleep 0.1; done`], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const writer = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { appendFileSync } from 'node:fs';
+    let wrote = 0;
+    const timer = setInterval(() => {
+      appendFileSync(${JSON.stringify(busy)}, wrote + '\\n');
+      if (++wrote === 14) clearInterval(timer);
+    }, 100);`], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // Not before its first write: a child that has yet to start is not one that stalled.
+  while (!existsSync(busy)) await sleep(20);
   let busyWhy = null;
   const stopBusy = watchFfmpegProgress(writer, (reason) => { busyWhy = reason; }, { outputPath: busy, stallMs: 400, pollMs: 50 });
-  await sleep(1300);
+  await sleep(1100);
   assert.equal(busyWhy, null, 'a growing output file keeps a run alive');
   stopBusy();
 
-  const capped = spawn('sleep', ['30'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const capped = idleChild();
   let cappedWhy = null;
   const stopCapped = watchFfmpegProgress(capped, (reason) => { cappedWhy = reason; }, { stallMs: Infinity, maxMs: 200, pollMs: 50 });
   await sleep(500);
@@ -464,11 +508,41 @@ initTranscodeCache(cache);
   stopCapped();
   capped.kill();
 
-  const orphan = spawn('sleep', ['30'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // A child that takes no notice of being asked to stop, as an ffmpeg blocked
+  // on a full pipe takes none: it is stopped all the same.
+  const orphan = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => undefined); console.log('deaf'); setInterval(() => undefined, 1000)"], { stdio: ['ignore', 'pipe', 'pipe'] });
+  await new Promise((heard) => orphan.stdout.once('data', heard));
   watchFfmpegInput(orphan, join(media, 'orphan.wav'));
   const exited = new Promise((resolveExit) => orphan.once('exit', resolveExit));
   killAllTranscodeFfmpeg();
   await Promise.race([exited, sleep(5000).then(() => { throw new Error('quit left a watched ffmpeg running'); })]);
+}
+
+// 12. A resampler probe that could not be started has not found out what this
+// ffmpeg can do. It answers with the resampler every build has, and the binary
+// is asked again later; an answer of "no soxr" from a probe that never ran
+// would otherwise stand until the app was closed.
+{
+  const binary = join(root, 'another-ffmpeg.mjs');
+  await copyFile(standIn, binary);
+  await chmod(binary, 0o755);
+  const realNow = performance.now.bind(performance);
+  let offset = 0;
+  performance.now = () => realNow() + offset;
+  try {
+    globalThis.__resamplerSpawns = 0;
+    globalThis.__resamplerSpawnErrors = 1;
+    assert.equal(await probeResampler(binary), 'swr', 'the fallback when the probe could not start');
+    assert.equal(await probeResampler(binary), 'swr');
+    assert.equal(globalThis.__resamplerSpawns, 1, 'not tried again on the very next call');
+    offset += 61_000;
+    await probeResampler(binary);
+    assert.equal(globalThis.__resamplerSpawns, 2, 'tried again a minute later, where a remembered answer would not have been');
+    await probeResampler(binary);
+    assert.equal(globalThis.__resamplerSpawns, 2, 'and what the binary answered is remembered');
+  } finally {
+    performance.now = realNow;
+  }
 }
 
 clearTimeout(deadline);

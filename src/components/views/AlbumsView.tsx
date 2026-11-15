@@ -162,6 +162,8 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
   useEffect(() => () => { albumRequestGeneration.current += 1; }, []);
   const albumScrollTopRef = useRef(albumViewSnapshot.scrollTop);
   const hydratedSnapshotRef = useRef(albumViewSnapshot.albums.length > 0 || !!albumViewSnapshot.selected);
+  // The query, filter and sort the grid was last read for.
+  const listedKeyRef = useRef<string | null>(null);
   const [albumGridColumns, setAlbumGridColumns] = useState(1);
   const hasAlbumGrid = !selected && albums.length > 0;
   const albumRows = Math.ceil(albums.length / albumGridColumns);
@@ -366,6 +368,12 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
   }, []);
 
   useEffect(() => {
+    // A scan that changed the library runs this again for the same query and
+    // sort. The grid keeps its place then, and is read again as far as it has
+    // been scrolled, instead of going back to the first page.
+    const listKey = [albumQuery, showMissingArtOnly, albumSort, randomSeed].join('\u0000');
+    const keepPlace = listedKeyRef.current === listKey;
+    listedKeyRef.current = listKey;
     if (hydratedSnapshotRef.current) {
       hydratedSnapshotRef.current = false;
       if (!catalogStale) return undefined;
@@ -374,29 +382,32 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
     let cancelled = false;
     const generation = ++albumRequestGeneration.current;
     albumPageRequestRef.current = false;
-    albumScrollTopRef.current = 0;
-    albumViewSnapshot.scrollTop = 0;
-    setSelected(null);
-    setTracks([]);
+    if (!keepPlace) {
+      albumScrollTopRef.current = 0;
+      albumViewSnapshot.scrollTop = 0;
+      setSelected(null);
+      setTracks([]);
+    }
     // Album list reloads follow query/sort changes AND rescans — flush the
     // track cache so edited metadata can't serve stale rows.
     albumTracksCache.clear();
     setLoadingAlbums(true);
+    const wanted = keepPlace ? Math.max(ALBUM_PAGE_SIZE, albumViewSnapshot.fetched) : ALBUM_PAGE_SIZE;
     api
       .getAlbums({
         search: albumQuery,
         missingArtOnly: showMissingArtOnly,
         sort: albumSort,
         randomSeed,
-        limit: ALBUM_PAGE_SIZE + 1,
+        limit: wanted + 1,
         offset: 0,
       })
       .then((rows) => {
         if (cancelled || generation !== albumRequestGeneration.current) return;
-        const page = rows.slice(0, ALBUM_PAGE_SIZE);
+        const page = rows.slice(0, wanted);
         albumViewSnapshot.fetched = page.length;
         setAlbums(page);
-        setHasMoreAlbums(rows.length > ALBUM_PAGE_SIZE);
+        setHasMoreAlbums(rows.length > wanted);
       })
       .catch((err) => {
         // Don't silently swallow — a 1.5.4 LEFT JOIN regression made the

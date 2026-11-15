@@ -114,12 +114,29 @@ const [typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPl
 // assertDsdWiring still finds the strings after the 1.4.1 refactor.
 const audioQualitySource = await readFile(new URL('../shared/audio-quality.ts', import.meta.url), 'utf8');
 const combinedFormatSource = `${formatSource}\n${audioQualitySource}`;
+// The main process, the scanner and the watcher share one list of audio
+// extensions (AUDIO_EXTS in library-skip.ts) since 2.9, so the literals live
+// there. Each must still take the list from that module.
+const librarySkipSource = await readFile(new URL('../electron/library-skip.ts', import.meta.url), 'utf8');
+const sharesAudioExts = (label, source) => {
+  assert.match(source, /import \{[^}]*\bAUDIO_EXTS\b[^}]*\} from '\.\/library-skip\.js'/, `${label} should take its audio extensions from library-skip`);
+  return `${source}\n${librarySkipSource}`;
+};
 
 assertExportWiring(typesSource, transcodeSource, mainSource, preloadSource, apiSource, nowPlayingSource, libraryViewSource);
 // NowPlayingView delegates codec display to playbackCodecLabel(); it does
 // not need to reference DSF/DFF literals directly. Audio-quality wiring is
 // already covered by combinedFormatSource above.
-assertDsdWiring({ transcodeSource, mainSource, scannerSource, watcherSource, librarySource, installerSource, packageSource, formatSource: combinedFormatSource });
+assertDsdWiring({
+  transcodeSource,
+  mainSource: sharesAudioExts('main process', mainSource),
+  scannerSource: sharesAudioExts('scanner', scannerSource),
+  watcherSource: sharesAudioExts('library watcher', watcherSource),
+  librarySource,
+  installerSource,
+  packageSource,
+  formatSource: combinedFormatSource,
+});
 
 assert.equal(batch.exported, 2, 'batch export should transcode every selected fixture');
 assert.equal(batch.skipped.length, 0, 'batch export should not skip valid fixtures');

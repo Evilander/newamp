@@ -1,13 +1,17 @@
 // Rules behind the Library view's queueing and the windowed lists:
 //   - playing from the Library queues past the loaded page (readRemainingRows),
 //   - a second play cancels the read still paging behind the first,
-//   - the visible-row window math used by the queue and playlist lists.
+//   - the visible-row window math used by the queue and playlist lists,
+//   - the Library's play-from-row: the rest of the matches follow the loaded
+//     rows into the queue only while that queue is still the one just started.
 //
 // Run: node scripts/views-queue-test.mjs
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { build } from 'esbuild';
+import vm from 'node:vm';
+import ts from 'typescript';
+import { build, transform } from 'esbuild';
 
 const bundled = await build({
   entryPoints: ['src/components/views/libraryTableState.ts'],
@@ -196,6 +200,119 @@ const pager = (calls = [], failAt = null) => async (offset, limit) => {
   assert.equal(end.endIndex, 999, 'the window never runs past the last row');
   assert.equal(end.bottomPad, 0);
   assert.equal(computeVisibleWindow({ scrollTop: 0, viewportH: 360, rowHeight: 36, rowCount: 0, overscan: 6 }).endIndex, -1);
+}
+
+// 10. Play from a row: the loaded rows start at once, and the rest of the matches
+// are queued behind them unless the queue has changed by then.
+{
+  const path = 'src/components/views/LibraryView.tsx';
+  const file = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const find = (root, predicate) => {
+    if (predicate(root)) return root;
+    let found;
+    ts.forEachChild(root, (node) => { found ??= find(node, predicate); });
+    return found;
+  };
+  const functionText = (name) => find(file, (node) => ts.isFunctionDeclaration(node) && node.name?.text === name).getText(file);
+  const code = (await transform(['queueRestOfList', 'playFromRow'].map(functionText).join('\n'), { loader: 'tsx' })).code;
+
+  async function playFrom(setup = {}) {
+    const store = { queue: [], index: -1, added: [] };
+    const toasts = [];
+    const gate = { reads: 0, hold: null };
+    const ctx = vm.createContext({
+      tracks: library.slice(0, 600),
+      rowsReadRef: { current: 600 },
+      hasMoreTracks: true,
+      playRequestGateRef: { current: createLatestRequestGate() },
+      // startQueuePlayback sets the queue before it returns.
+      playQueue: async (played, index) => { store.queue = played; store.index = index; },
+      libraryQuery: '',
+      sort: 'artist',
+      readRemainingRows,
+      matchingCountRef: { current: library.length },
+      LIBRARY_MORE_PAGE_SIZE: 2000,
+      LIBRARY_QUEUE_LIMIT: 20000,
+      api: {
+        getTracks: async ({ offset, limit }) => {
+          gate.reads += 1;
+          if (gate.hold && gate.reads === 1) await gate.hold;
+          return library.slice(offset, offset + limit);
+        },
+      },
+      usePlayerStore: { getState: () => ({ queue: store.queue, addTracksToQueue: (rows) => store.added.push(...rows) }) },
+      window: { setTimeout: (callback) => setTimeout(callback, 0) },
+      pushToast: (toast) => toasts.push(toast),
+      errorText: String,
+      ...setup,
+    });
+    vm.runInContext(code, ctx);
+    return { ctx, store, toasts, gate };
+  }
+  const settled = () => new Promise((resolveSettled) => setTimeout(resolveSettled, 60));
+
+  // The rows on screen play at once, and the rest of the list is queued after them.
+  {
+    const { ctx, store, gate } = await playFrom();
+    ctx.playFromRow(3);
+    assert.equal(store.queue.length, 600, 'the loaded rows are the queue straight away');
+    assert.equal(store.index, 3);
+    await settled();
+    assert.equal(store.added.length, library.length - 600);
+    assert.equal(store.added[0].id, 601, 'the tail starts where the loaded rows end');
+    assert.equal(gate.reads, 3);
+  }
+
+  // A list that holds every match has nothing to read behind it.
+  {
+    const { ctx, store, gate } = await playFrom({ hasMoreTracks: false });
+    ctx.playFromRow(0);
+    await settled();
+    assert.equal(gate.reads, 0);
+    assert.equal(store.added.length, 0);
+  }
+
+  // A queue replaced, or cut at its end, while the tail was being read gets nothing appended.
+  for (const [what, change] of [
+    ['replaced', (store) => { store.queue = library.slice(1000, 1010); }],
+    ['started on another track', (store) => { store.queue = store.queue.slice(1); }],
+    ['stripped of its last track', (store) => { store.queue = store.queue.slice(0, -1); }],
+  ]) {
+    let release;
+    const hold = new Promise((resolveHold) => { release = resolveHold; });
+    const { ctx, store, gate } = await playFrom();
+    gate.hold = hold;
+    ctx.playFromRow(0);
+    await settled();
+    change(store);
+    release();
+    await settled();
+    assert.equal(store.added.length, 0, `a queue ${what} meanwhile is left alone`);
+  }
+
+  // Playing a second row before the first tail is read queues one tail, behind the later play.
+  {
+    let release;
+    const hold = new Promise((resolveHold) => { release = resolveHold; });
+    const { ctx, store, gate } = await playFrom();
+    gate.hold = hold;
+    ctx.playFromRow(0);
+    await settled();
+    ctx.playFromRow(5);
+    release();
+    await settled();
+    assert.equal(store.index, 5);
+    assert.equal(store.added.length, library.length - 600, 'the tail is queued once');
+  }
+
+  // A long list stops at the queue limit and says how much it queued.
+  {
+    const { ctx, store, toasts } = await playFrom({ LIBRARY_QUEUE_LIMIT: 1000 });
+    ctx.playFromRow(0);
+    await settled();
+    assert.equal(store.added.length, 400, 'the limit counts the rows already queued');
+    assert.match(toasts[0].title, /^Queued 1[^0-9]?000 of 5[^0-9]?200 tracks$/);
+  }
 }
 
 console.log('[views-queue-test] PASS');

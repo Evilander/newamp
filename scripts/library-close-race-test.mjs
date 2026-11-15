@@ -61,7 +61,7 @@ assert.equal(reopened.getTrackCount(), 2, 'an older pending rename must not repl
 reopened.close();
 const librarySource = await readFile(resolve('electron/library.ts'), 'utf8');
 assert.doesNotMatch(librarySource, /await\s+renameOverExistingAsync\(tmp,\s*this\.file\)/, 'library async flush must not await the final replace after its sequence check');
-assert.match(librarySource, /renameOverExistingSync\(tmp,\s*this\.file\)/, 'library async flush should use a synchronous final replace after its sequence check');
+assert.match(librarySource, /renameOverExistingSync\(tmp,\s*this\.file(?:,\s*\{[^}]*\})?\)/, 'library async flush should use a synchronous final replace after its sequence check');
 assert.equal(pausePoint, 'flush-finished', 'fixed library should not hit the delayed async final rename hook');
 
 const collisionPath = join(root, 'case-collision-library.db');

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, statfs, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, statfs, utimes, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import initSqlJs from 'sql.js';
 import type { SupportBackupResult, SupportRestoreResult } from '../shared/types.js';
@@ -77,32 +77,39 @@ export async function createSupportBackup(input: SupportBackupInput): Promise<Su
   ensureInside(userDataPath, backupPath);
   await mkdir(backupPath, { recursive: true });
 
-  const candidates = backupCandidates(userDataPath, input.settingsPath, input.libraryPath, backupPath)
-    .filter((candidate) => !automatic || LIBRARY_SCOPE_LABELS.has(candidate.label));
+  try {
+    const candidates = backupCandidates(userDataPath, input.settingsPath, input.libraryPath, backupPath)
+      .filter((candidate) => !automatic || LIBRARY_SCOPE_LABELS.has(candidate.label));
 
-  let filesCopied = 0;
-  const included: string[] = [];
-  for (const candidate of candidates) {
-    const copied = await writeCandidate(userDataPath, backupsRoot, candidate, input);
-    if (copied > 0) {
-      filesCopied += copied;
-      included.push(candidate.label);
+    let filesCopied = 0;
+    const included: string[] = [];
+    for (const candidate of candidates) {
+      const copied = await writeCandidate(userDataPath, backupsRoot, candidate, input);
+      if (copied > 0) {
+        filesCopied += copied;
+        included.push(candidate.label);
+      }
     }
+
+    const manifest = {
+      app: 'NewAmp',
+      createdAt,
+      userDataPath,
+      filesCopied,
+      included,
+      automatic,
+      ...(daily ? { daily, librarySha256: input.librarySnapshot ? input.librarySha256 ?? await sha256Async(input.librarySnapshot) : undefined } : {}),
+    };
+    await writeFile(join(backupPath, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+    if (input.scope === 'library') await pruneAutomaticBackups(backupsRoot, backupPath);
+
+    return { backupPath, createdAt, filesCopied, included };
+  } catch (err) {
+    // A copy that stopped part-way has no manifest, so nothing would ever list
+    // or prune it, and a full drive is the likeliest reason it stopped.
+    await rm(backupPath, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+    throw err;
   }
-
-  const manifest = {
-    app: 'NewAmp',
-    createdAt,
-    userDataPath,
-    filesCopied,
-    included,
-    automatic,
-    ...(daily ? { daily, librarySha256: input.librarySnapshot ? input.librarySha256 ?? await sha256Async(input.librarySnapshot) : undefined } : {}),
-  };
-  await writeFile(join(backupPath, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
-  if (input.scope === 'library') await pruneAutomaticBackups(backupsRoot, backupPath);
-
-  return { backupPath, createdAt, filesCopied, included };
 }
 
 // Drops the oldest automatic backups past AUTO_BACKUPS_KEPT, never the one
@@ -178,7 +185,8 @@ export interface DailyBackupInput {
   snapshot: () => { librarySnapshot: Buffer; settingsSnapshot: string };
   // True while a copy should wait, such as while a track is playing from a
   // slow share and the main thread is serving its audio. Asked before the
-  // snapshot is taken; the next check tries again.
+  // snapshot is taken; the next check tries again. Not asked once the newest
+  // copy is 36 hours old, or when there is none.
   defer?: () => boolean;
   // Free bytes on the profile's drive, or null when unknown. Injected for tests.
   freeBytes?: (path: string) => Promise<number | null>;
@@ -189,6 +197,9 @@ export type DailyBackupOutcome =
   | { status: 'skipped'; reason: 'recent' | 'unchanged' | 'low-disk' | 'busy' | 'invalid' | 'deferred'; detail?: string };
 
 const DAILY_MIN_GAP_MS = 60 * 60 * 1000;
+// A copy put off for playback is made anyway once the newest one is this old,
+// so that someone who never stops the music still gets one.
+const DAILY_DEFER_LIMIT_MS = 36 * 60 * 60 * 1000;
 // library.db is the one big file (60 MB is ordinary, several times that is not
 // rare), and five copies of it are kept. Leave the drive at least this much
 // room afterwards rather than be the thing that fills it.
@@ -210,7 +221,10 @@ export async function createDailyBackupIfDue(input: DailyBackupInput): Promise<D
     const newest = existing[0] ?? null;
     if (!dailyBackupDue(newest ? newest.createdAt : null, now)) return { status: 'skipped', reason: 'recent' };
 
-    if (input.defer?.()) return { status: 'skipped', reason: 'deferred' };
+    // With no copy at all there is nothing to fall back on, so nothing waits.
+    if (newest && now - newest.createdAt < DAILY_DEFER_LIMIT_MS && input.defer?.()) {
+      return { status: 'skipped', reason: 'deferred' };
+    }
 
     const snapshot = input.snapshot();
     const librarySha256 = await sha256Async(snapshot.librarySnapshot);
@@ -396,6 +410,21 @@ async function restoreSupportBackupNow(input: SupportRestoreInput): Promise<Supp
     console.warn(`[newamp] restore succeeded but its working copy could not be removed: ${transactionPath}`, err);
   }
 
+  // A write that never got into place leaves a whole copy of what was then the
+  // newest state beside its file, and a launch takes a copy that is newer than
+  // its file for unsaved work. A restored file keeps the date it was backed up
+  // with, so such a copy from before the restore looks newer than it and would
+  // quietly undo the restore. They go, and the files are dated now. Copies set
+  // aside as unsaved, replaced or corrupt are not writers' temp files and stay.
+  const installedAt = new Date();
+  for (const entry of entries) {
+    if (!entry.installed || entry.label === 'art' || entry.label === 'playlist-art') continue;
+    await removeWriterTempFiles(entry.source);
+    await utimes(entry.source, installedAt, installedAt).catch((err) => {
+      console.warn(`[newamp] restored file could not be dated: ${entry.source}`, err);
+    });
+  }
+
   return {
     backupPath,
     safetyBackupPath: input.safetyBackupPath ?? null,
@@ -403,6 +432,24 @@ async function restoreSupportBackupNow(input: SupportRestoreInput): Promise<Supp
     restored,
     restartRequired: true,
   };
+}
+
+// <file>.tmp-<pid>-<number|sync|retry>, the names the stores give the files they write before a rename.
+async function removeWriterTempFiles(file: string): Promise<void> {
+  const folder = dirname(file);
+  const prefix = `${basename(file)}.tmp-`;
+  let names: string[];
+  try {
+    names = await readdir(folder);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !/^\d+-(?:\d+|sync|retry)$/.test(name.slice(prefix.length))) continue;
+    await rm(join(folder, name), { force: true, maxRetries: 3 }).catch((err) => {
+      console.warn(`[newamp] leftover temp file could not be removed: ${join(folder, name)}`, err);
+    });
+  }
 }
 
 async function validateLibrarySnapshot(path: string, check: 'integrity_check' | 'quick_check' = 'integrity_check'): Promise<void> {

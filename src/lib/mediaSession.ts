@@ -42,6 +42,10 @@ let artwork: typeof import('./media-artwork').mediaArtwork | null = null;
 // The track whose metadata the OS shows now; a cover that arrives for any
 // other one is not published.
 let activeTrackId: number | null = null;
+// The track object that metadata was last published for. The OS reloads the
+// cover whenever metadata is assigned, so a sync that only follows a change in
+// play state or in what Previous and Next can do leaves it alone.
+let publishedTrack: Track | null = null;
 
 async function loadArtwork(trackId: number, coverUrl: string): Promise<MediaArtworkImage | null> {
   artwork ??= (await import('./media-artwork')).mediaArtwork;
@@ -106,12 +110,15 @@ export function syncMediaSessionIdentity({
 
   if (!current) {
     activeTrackId = null;
+    publishedTrack = null;
     artwork?.release();
     session.metadata = null;
     return;
   }
 
   activeTrackId = current.id;
+  if (publishedTrack === current) return;
+  publishedTrack = current;
   const coverUrl = current.hasArt ? api.getArtUrl(current.id) : null;
   const image = coverUrl ? (artwork?.peek(current.id) ?? null) : null;
   publishMetadata(current, image);

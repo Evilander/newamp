@@ -102,9 +102,40 @@ const matches = (body, overrides) => {
   assert.equal(matches('tag(a) when bpm in -5..500', { bpm: 120 }).matched, true);
   assert.equal(matches('tag(a) when bpm - -20 == 140', { bpm: 120 }).matched, true);
   assert.equal(matches('tag(a) when -bpm < 0', { bpm: 120 }).matched, true);
-  const backwards = dsl.parseRule('tag(a) when bpm in 120..90');
-  assert.equal(backwards.rule, null);
+
+  // A rule saved before ranges were checked still loads: a range written backwards is false for
+  // every track, so its negation is true, exactly as it was.
+  assert.equal(matches('tag(a) when bpm in 180..120', { bpm: 150 }).matched, false);
+  assert.equal(matches('tag(a) when not (bpm in 180..120)', { bpm: 150 }).matched, true);
+  const backwardsSource = 'tag(a) when\n  bpm in 120..90';
+  const backwards = dsl.parseRule(backwardsSource, { strict: true });
+  assert.equal(backwards.rule, null, 'a rule being written is told about it');
   assert.match(backwards.errors[0].message, /runs backwards/);
+  assert.deepEqual([backwards.errors[0].line, backwards.errors[0].column], [2, backwardsSource.split('\n')[1].indexOf('90') + 1]);
+
+  // The same holds for a pattern between the old and the new state limit: a stored rule keeps
+  // loading and matching, and a new one is refused with the position of its pattern.
+  const wide = 'tag(a) when title matches "(.{60}){60}x"';
+  const stored = dsl.parseRule(wide);
+  assert.ok(stored.rule, JSON.stringify(stored.errors));
+  assert.equal(dsl.evaluateRule(stored.rule, ctx({ title: `${'a'.repeat(3600)}x` }), env).matched, true);
+  assert.equal(dsl.evaluateRule(stored.rule, ctx({ title: 'a' }), env).matched, false);
+  const refused = dsl.parseRule(wide, { strict: true });
+  assert.equal(refused.rule, null);
+  assert.match(refused.errors[0].message, /too many states/);
+  assert.equal(dsl.parseRule('tag(a) when title matches "(.{64}){64}x"').rule, null, 'even a stored rule has a limit');
+
+  // An unsupported pattern is reported where its string starts, on any line of the rule.
+  for (const [source, needle] of [
+    ['tag(a) when bpm > 1\n  and title matches "(a)\\\\1"', '"(a)'],
+    ['tag(a) when bpm > 1\n  and matches(title,\n    "(a)\\\\1")', '"(a)'],
+  ]) {
+    const bad = dsl.parseRule(source);
+    assert.equal(bad.rule, null);
+    const lines = source.split('\n');
+    const line = lines.findIndex((text) => text.includes(needle));
+    assert.deepEqual([bad.errors[0].line, bad.errors[0].column], [line + 1, lines[line].indexOf(needle) + 1], source);
+  }
 
   // Three-valued AND/OR under NOT.
   assert.equal(matches('tag(a) when not (dna.energy > 0.5 and genre == "rock")').matched, true);

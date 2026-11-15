@@ -30,7 +30,7 @@ import { caseFoldCachePath } from './cache-key-casing.js';
 import { killChild } from './kill-child.js';
 import { onPlaybackHunger, whenPlaybackFed } from './playback-io.js';
 import { watchReadFailures } from './read-failure.js';
-import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
+import { INPUT_PROTOCOLS, resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
 
 export interface ScoreRequest {
   path: string;
@@ -162,6 +162,7 @@ function decodeMonoPcm(inputPath: string, start: number, seconds: number, state:
     const args = ['-hide_banner', '-nostdin', '-loglevel', 'error'];
     if (start > 0) args.push('-ss', String(start));
     args.push(
+      ...INPUT_PROTOCOLS,
       '-i', inputPath,
       '-t', String(seconds),
       '-vn',

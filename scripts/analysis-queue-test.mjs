@@ -30,6 +30,7 @@ const {
   AnalysisQueue,
   AnalysisAbortedError,
   AnalysisCrashedError,
+  AnalysisDrivePendingError,
   AnalysisEnvironmentError,
   AnalysisReadFailedError,
   AnalysisUnavailableError,
@@ -55,7 +56,7 @@ const FAST = { startDelayMs: 0, gapMs: 1, pollMs: 4, scanCooldownMs: 40, recheck
 class FakeStore {
   constructor(ids, order = ids) {
     this.order = order;
-    this.rows = new Map(ids.map((id) => [id, { id, path: `/music/${id}.mp3`, bpm: null, key: null, rg: null, dnaVersion: null, analysisJson: null }]));
+    this.rows = new Map(ids.map((id) => [id, { id, path: `/music/${id}.mp3`, size: 1000, mtime: 1, bpm: null, key: null, rg: null, dnaVersion: null, analysisJson: null }]));
     this.saved = [];
   }
   rowState(row) {
@@ -68,7 +69,7 @@ class FakeStore {
     const row = this.rows.get(id);
     if (!row) return null;
     const work = analysisWork(this.rowState(row));
-    return anyWork(work) ? { id, path: row.path, work } : null;
+    return anyWork(work) ? { id, path: row.path, work, size: row.size, mtime: row.mtime } : null;
   }
   saveAnalysis(saves) {
     for (const save of saves) {
@@ -644,6 +645,131 @@ const idOf = (path) => Number(/(\d+)\.mp3$/.exec(path)[1]);
   await until(() => store.pendingAnalysisIds().length === 0, 'everything');
   await r.queue.stop();
   assert.equal(most, 1, 'one decode at a time across the restart');
+}
+
+// 12. The row changes while the track decodes: the result is written only for what is still owed.
+{
+  // A tempo typed in meanwhile is not overwritten by the estimate; the key, still owed, is written.
+  const store = new FakeStore([1]);
+  let release;
+  let started = false;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const r = rig(store, {
+    analyze: async (request) => {
+      started = true;
+      await gate;
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => started, 'the decode to be running');
+  store.rows.get(1).bpm = 87;
+  release();
+  await until(() => store.pendingAnalysisIds().length === 0, 'the track to be written');
+  await r.queue.stop();
+  const row = store.rows.get(1);
+  assert.equal(row.bpm, 87, 'the tempo someone typed stays');
+  assert.equal(row.key, 'Am', 'the key, still owed, is written');
+  assert.equal(row.rg, -6, 'and so is the loudness');
+  assert.equal(store.saved[0].bpm, undefined, 'the estimate was not even handed over');
+  assert.ok(!store.saved[0].touched.includes('bpm'), 'and the record does not say the tempo was analysed');
+}
+{
+  // A file replaced under the row: the old file's results are dropped and the new file is analysed.
+  const store = new FakeStore([1]);
+  let release;
+  let runs = 0;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const r = rig(store, {
+    timing: { flushEvery: 1 },
+    analyze: async (request) => {
+      runs += 1;
+      if (runs === 1) await gate;
+      return { ...okResult(request), tempo: request.want.tempo ? { bpm: runs === 1 ? 60 : 140, key: 'Am' } : null };
+    },
+  });
+  r.queue.start();
+  await until(() => runs === 1, 'the decode to be running');
+  const row = store.rows.get(1);
+  row.size = 2222;
+  row.mtime = 2;
+  release();
+  await until(() => store.pendingAnalysisIds().length === 0, 'the replacement to be analysed');
+  await r.queue.stop();
+  assert.equal(runs, 2, 'analysed again');
+  assert.equal(row.bpm, 140, 'the tempo is the new file\'s');
+  assert.equal(store.saved.length, 1, 'the old file\'s result was never written');
+}
+{
+  // A track that went missing during the decode has nothing to write to.
+  const store = new FakeStore([1, 2]);
+  let release;
+  let started = false;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const r = rig(store, {
+    analyze: async (request) => {
+      if (idOf(request.path) === 1) {
+        started = true;
+        await gate;
+      }
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => started, 'the decode to be running');
+  store.rows.delete(1);
+  store.order.splice(store.order.indexOf(1), 1);
+  release();
+  await until(() => store.saved.some((save) => save.id === 2), 'the other track');
+  await r.queue.stop();
+  assert.deepEqual(store.saved.map((save) => save.id), [2], 'nothing is written for the track that is gone');
+}
+
+// 13. A library that fails to answer once does not end the queue.
+{
+  const store = new FakeStore([1, 2, 3]);
+  const list = store.pendingAnalysisIds.bind(store);
+  const target = store.analysisTarget.bind(store);
+  let listFailures = 1;
+  store.pendingAnalysisIds = () => {
+    if (listFailures-- > 0) throw new Error('out of memory');
+    return list();
+  };
+  store.analysisTarget = (id) => {
+    if (id === 2) {
+      store.analysisTarget = target;
+      throw new Error('database is locked');
+    }
+    return target(id);
+  };
+  const r = rig(store);
+  r.queue.start();
+  await until(() => store.saved.length === 3, 'every track, past the two failures');
+  await r.queue.stop();
+}
+
+// 14. A stat still hanging on the drive is not held against the tracks: the one waiting keeps its place and nothing behind it is used up.
+{
+  const store = new FakeStore([1, 2, 3, 4, 5]);
+  let hung = true;
+  const attempts = [];
+  const analysed = [];
+  const r = rig(store, {
+    timing: { pollMs: 10 },
+    analyze: async (request) => {
+      attempts.push(idOf(request.path));
+      if (hung) throw new AnalysisDrivePendingError(request.path);
+      analysed.push(idOf(request.path));
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => attempts.length >= 4, 'a few attempts while the stat hangs');
+  assert.deepEqual([...new Set(attempts)], [1], 'the same track each time, none of the others spent');
+  hung = false;
+  await until(() => store.pendingAnalysisIds().length === 0, 'everything, once the stat returns');
+  await r.queue.stop();
+  assert.deepEqual(analysed, [1, 2, 3, 4, 5], 'the track that had to wait was analysed first, and the rest in their order');
 }
 
 console.log('[analysis-queue] PASS');

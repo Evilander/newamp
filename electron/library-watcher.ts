@@ -111,6 +111,31 @@ export function isOnRemoteMount(path: string, mounts: MountEntry[]): boolean {
   return !!best && isRemoteFsType(best.type);
 }
 
+/** A path on a Windows network share: a UNC name (\\server\share), or the \\?\UNC\ form a mapped drive resolves to. */
+export function isWindowsNetworkPath(path: string): boolean {
+  return /^\\\\(?![?.]\\)/.test(path) || /^\\\\\?\\UNC\\/i.test(path);
+}
+
+/** The drive letters a `net use` listing shows as mapped to a share. Its headings are translated; its columns are not. */
+export function parseNetUse(text: string): MountEntry[] {
+  const entries: MountEntry[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = /(?:^|\s)([A-Za-z]:)\s+\\\\\S/.exec(line);
+    if (m) entries.push({ mountPoint: m[1]!.toLowerCase(), type: 'network' });
+  }
+  return entries;
+}
+
+// On Windows a share shows in the path (a UNC name), or in what a mapped drive
+// letter resolves to; a letter whose share is down resolves to nothing, so the
+// letters `net use` lists are the other way to tell.
+export function isOnRemoteVolume(path: string, mounts: MountEntry[]): boolean {
+  if (process.platform !== 'win32') return isOnRemoteMount(path, mounts);
+  if (isWindowsNetworkPath(path)) return true;
+  const drive = /^([A-Za-z]:)/.exec(path)?.[1]?.toLowerCase();
+  return !!drive && mounts.some((mount) => mount.mountPoint === drive);
+}
+
 async function readMountTable(): Promise<MountEntry[]> {
   if (process.platform === 'linux') {
     return parseMountTable(await readFile('/proc/self/mounts', 'utf8'), 'proc');
@@ -121,7 +146,33 @@ async function readMountTable(): Promise<MountEntry[]> {
     });
     return parseMountTable(output, 'mount');
   }
+  if (process.platform === 'win32') {
+    const net = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'net.exe');
+    try {
+      const output = await new Promise<string>((resolveOutput, reject) => {
+        execFile(net, ['use'], { timeout: 5000, windowsHide: true }, (err, stdout) => (err ? reject(err) : resolveOutput(stdout)));
+      });
+      return parseNetUse(output);
+    } catch {
+      // UNC paths are still recognised from their spelling.
+      return [];
+    }
+  }
   return [];
+}
+
+/** The real path of a root, or the root as given when the volume does not answer within `ms`. */
+export async function resolvedWithin(path: string, ms = ROOT_PROBE_TIMEOUT_MS): Promise<string> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<string>((resolveTimeout) => {
+    timer = setTimeout(() => resolveTimeout(path), ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([realpath(path).catch(() => path), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Two paths differing only in case are one folder on Windows and macOS, and
@@ -199,6 +250,11 @@ export class LibraryWatcher {
   private readonly remotePollMs: number;
   private remoteRoots: string[] = [];
   private remotePoll: NodeJS.Timeout | null = null;
+  // The volume each root was on at its last check, and what the check in
+  // progress saw. A different one means something was mounted over the folder
+  // or taken from under it, which no watcher event reports.
+  private readonly rootDevices = new Map<string, number>();
+  private readonly probedDevices = new Map<string, number>();
   // One warning per failure reason per run, and a count, so a library that is
   // only half watched can be told apart from one that is watched.
   private readonly warnedWatchFailures = new Set<string>();
@@ -219,23 +275,28 @@ export class LibraryWatcher {
 
   start(roots: string[]): void {
     const configured = configuredWatchRoots(roots);
-    const next = normalizeLibraryWatchRoots(roots);
+    // A Windows share is not looked at with a blocking stat: with its server
+    // down that holds the whole app for as long as Windows takes to give up.
+    // Those roots are probed after this returns (watchNetworkRoots).
+    const network = configured.filter(isWindowsNetworkPath);
+    const next = normalizeLibraryWatchRoots(configured.filter((root) => !isWindowsNetworkPath(root)));
+    const watchedNow = this.roots.filter((root) => !isWindowsNetworkPath(root));
     // Settings saves reach here on every patch. Rebuilding unchanged watchers
     // threw away pending changes and, on Linux, re-walked the whole library.
     // With every root offline there is nothing to rebuild, and restarting
     // would keep resetting the root check before it ever ran.
     if (
-      sameRoots(next, this.roots)
+      sameRoots(next, watchedNow)
       && sameRoots(configured, this.configuredRoots)
-      && (this.watchers.size > 0 || !next.length)
+      && (this.watchers.size > 0 || !(next.length + network.length))
     ) {
       return;
     }
     // Same configured roots, a different set of them reachable: a root came
     // back or went away, and a settings save noticed before the root check.
     const sameConfigured = sameRoots(configured, this.configuredRoots);
-    const cameBack = sameConfigured ? next.filter((root) => !this.roots.includes(root)) : [];
-    const wentAway = sameConfigured ? this.roots.filter((root) => !next.includes(root)) : [];
+    const cameBack = sameConfigured ? next.filter((root) => !watchedNow.includes(root)) : [];
+    const wentAway = sameConfigured ? watchedNow.filter((root) => !next.includes(root)) : [];
     this.stop();
     this.roots = next;
     this.configuredRoots = configured;
@@ -245,9 +306,23 @@ export class LibraryWatcher {
       this.rootPoll = setInterval(() => void this.checkRoots(generation), this.rootPollMs);
       this.rootPoll.unref?.();
     }
+    if (network.length) void this.watchNetworkRoots(network, generation);
     void this.detectRemoteRoots(generation);
     for (const root of cameBack) this.onRootAvailable?.(root);
     for (const root of wentAway) this.queueTarget(root);
+  }
+
+  // The network roots that answer are watched, as they would have been had
+  // start() been able to ask. Those that do not are left to the root check,
+  // which watches them and asks for a rescan when they come back.
+  private async watchNetworkRoots(roots: string[], generation: number): Promise<void> {
+    const states = await Promise.all(roots.map((root) => this.probeRoot(root)));
+    if (generation !== this.generation) return;
+    roots.forEach((root, i) => {
+      if (states[i] !== 'present' || this.roots.includes(root)) return;
+      this.roots.push(root);
+      this.watchRoot(root, generation);
+    });
   }
 
   stop(): void {
@@ -267,6 +342,8 @@ export class LibraryWatcher {
       this.remotePoll = null;
     }
     this.remoteRoots = [];
+    this.rootDevices.clear();
+    this.probedDevices.clear();
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear();
     this.pendingTargets.clear();
@@ -341,7 +418,8 @@ export class LibraryWatcher {
   // stall the main process. Only "no such folder" counts as gone, and only
   // after a few checks in a row: a share that times out, or answers an I/O
   // error, is slow rather than away, and dropping it would rescan the whole
-  // library when it answered again.
+  // library when it answered again. On a network volume "no such folder" also
+  // has to come from a volume that is up (see probeRoot).
   private async checkRoots(generation: number): Promise<void> {
     if (this.rootCheckGeneration === generation) return;
     this.rootCheckGeneration = generation;
@@ -360,6 +438,9 @@ export class LibraryWatcher {
           if (misses < this.rootGoneChecks) return;
         }
         const watched = this.roots.includes(root);
+        const device = this.probedDevices.get(root);
+        const before = this.rootDevices.get(root);
+        if (present && device !== undefined) this.rootDevices.set(root, device);
         if (present && !watched) {
           this.roots.push(root);
           this.watchRoot(root, generation);
@@ -368,14 +449,16 @@ export class LibraryWatcher {
         } else if (present && this.strategy === 'recursive' && !this.watchers.has(root)) {
           // Gone and back between two checks: the old watcher died with it.
           if (this.watchPath(root, true, generation)) this.onRootAvailable?.(root);
+        } else if (present && before !== undefined && device !== undefined && device !== before) {
+          // A share was mounted over the folder, or the volume under it was
+          // swapped. The watcher still holds the folder as it was, and what
+          // is there now has not been scanned.
+          this.dropWatchers(root);
+          this.watchRoot(root, generation);
+          this.onRootAvailable?.(root);
         } else if (!present && watched) {
           this.roots = this.roots.filter((item) => item !== root);
-          for (const [path, watcher] of this.watchers) {
-            if (path === root || path.startsWith(`${root}${sep}`)) {
-              watcher.close();
-              this.watchers.delete(path);
-            }
-          }
+          this.dropWatchers(root);
           this.queueTarget(root);
         }
       });
@@ -384,14 +467,38 @@ export class LibraryWatcher {
     }
   }
 
+  private dropWatchers(root: string): void {
+    for (const [path, watcher] of this.watchers) {
+      if (path === root || path.startsWith(`${root}${sep}`)) {
+        watcher.close();
+        this.watchers.delete(path);
+      }
+    }
+  }
+
   private async probeRoot(root: string): Promise<'present' | 'gone' | 'unknown'> {
+    const state = await this.statFolder(root);
+    if (state !== 'gone' || !this.remoteRoots.includes(root)) return state;
+    // Windows answers "no such folder" for a share that is only unreachable (a
+    // dropped VPN, a server that is down), and an unmounted share on any system
+    // looks like one that was never there. A root on a network volume is only
+    // gone when the folder that holds it answers and it is not in it.
+    const parent = dirname(root);
+    if (parent === root) return 'unknown';
+    return (await this.statFolder(parent)) === 'present' ? 'gone' : 'unknown';
+  }
+
+  private async statFolder(path: string): Promise<'present' | 'gone' | 'unknown'> {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<'unknown'>((resolveProbe) => {
       timer = setTimeout(() => resolveProbe('unknown'), ROOT_PROBE_TIMEOUT_MS);
       timer.unref?.();
     });
-    const probe = stat(root).then(
-      (info): 'present' | 'gone' => (info.isDirectory() ? 'present' : 'gone'),
+    const probe = stat(path).then(
+      (info): 'present' | 'gone' => {
+        this.probedDevices.set(path, Number(info.dev));
+        return info.isDirectory() ? 'present' : 'gone';
+      },
       (err: unknown): 'gone' | 'unknown' => {
         const code = (err as NodeJS.ErrnoException | null)?.code;
         return code === 'ENOENT' || code === 'ENOTDIR' ? 'gone' : 'unknown';
@@ -418,12 +525,12 @@ export class LibraryWatcher {
       return;
     }
     if (generation !== this.generation) return;
-    const remote: string[] = [];
-    for (const root of this.configuredRoots) {
-      const real = await realpath(root).catch(() => root);
-      if (isOnRemoteMount(root, mounts) || isOnRemoteMount(real, mounts)) remote.push(root);
-    }
+    // All at once and each with a limit: a root on a hung mount would otherwise
+    // keep every root after it from being classified.
+    const configured = [...this.configuredRoots];
+    const real = await Promise.all(configured.map((root) => resolvedWithin(root)));
     if (generation !== this.generation) return;
+    const remote = configured.filter((root, i) => isOnRemoteVolume(root, mounts) || isOnRemoteVolume(real[i]!, mounts));
     this.remoteRoots = remote;
     if (remote.length && !this.remotePoll) {
       this.remotePoll = setInterval(() => void this.pollRemoteRoots(generation), this.remotePollMs);
@@ -615,8 +722,11 @@ export class IncrementalScanGate {
   }
 }
 
+// The same roots in any order: one that came back after the others is last in
+// the watched list but not in the configured one, and that is not a change.
 function sameRoots(a: string[], b: string[]): boolean {
-  return a.length === b.length && a.every((root, i) => root === b[i]);
+  const keys = new Set(b.map(watchKey));
+  return a.length === b.length && a.every((root) => keys.has(watchKey(root)));
 }
 
 function errorMessage(err: unknown): string {

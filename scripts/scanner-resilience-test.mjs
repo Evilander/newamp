@@ -18,17 +18,26 @@
 // Run: npm run build:electron && node scripts/scanner-resilience-test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { promises as fsp, statSync } from 'node:fs';
+import fs, { existsSync, promises as fsp, statSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports, createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LibraryStore } from '../dist-electron/electron/library.js';
 import { Scanner, readTagExtras } from '../dist-electron/electron/scanner.js';
 import { runTagBackfill } from '../dist-electron/electron/album-identity-backfill.js';
 import { AUDIO_EXTS, isHiddenName, isSkippedLibraryFile, isSkippedLibraryFolder, isSkippedLibraryPath } from '../dist-electron/electron/library-skip.js';
 import { isFolderArtImage } from '../dist-electron/electron/folder-art.js';
-import { LibraryWatcher, isOnRemoteMount, parseMountTable, resolveLibraryWatchTarget } from '../dist-electron/electron/library-watcher.js';
+import {
+  LibraryWatcher,
+  isOnRemoteMount,
+  isOnRemoteVolume,
+  isWindowsNetworkPath,
+  parseMountTable,
+  parseNetUse,
+  resolveLibraryWatchTarget,
+  resolvedWithin,
+} from '../dist-electron/electron/library-watcher.js';
 import { albumRootOf } from '../dist-electron/shared/album-identity.js';
 
 const require = createRequire(import.meta.url);
@@ -58,7 +67,7 @@ assert.equal(isSkippedLibraryPath('Metallica/...And Justice For All/01 Blackened
 assert.equal(isSkippedLibraryPath('Artist/Album/@eaDir/01.mp3/SYNOAUDIO.flac'), true);
 assert.equal(isFolderArtImage('...cover.jpg'), true);
 assert.equal(isFolderArtImage('.cover.jpg'), false);
-assert.equal(resolveLibraryWatchTarget('/m', '...And Justice For All/01.flac'), '/m/...And Justice For All/01.flac');
+assert.equal(resolveLibraryWatchTarget('/m', '...And Justice For All/01.flac'), join(resolve('/m'), '...And Justice For All', '01.flac'));
 
 // One list of audio extensions, kept by both consumers.
 for (const file of ['scanner.ts', 'library-watcher.ts']) {
@@ -215,6 +224,162 @@ assert.deepEqual(albumRootOf('music/artist/album/disc 02'), { root: 'music/artis
   watcher.stop();
 }
 
+// 4b. Network volumes on Windows, and what "gone" means for a root on one.
+{
+  assert.equal(isWindowsNetworkPath('\\\\nas\\music\\Albums'), true, 'a UNC name');
+  assert.equal(isWindowsNetworkPath('\\\\?\\UNC\\nas\\music'), true, 'the form a mapped drive resolves to');
+  assert.equal(isWindowsNetworkPath('\\\\?\\C:\\Music'), false, 'a long path on a local drive');
+  assert.equal(isWindowsNetworkPath('\\\\.\\PhysicalDrive0'), false);
+  assert.equal(isWindowsNetworkPath('C:\\Music'), false);
+  assert.equal(isWindowsNetworkPath('/Volumes/Music'), false);
+
+  const listing = [
+    'New connections will be remembered.',
+    '',
+    'Status       Local     Remote                    Network',
+    '-------------------------------------------------------------------------------',
+    'OK           Y:        \\\\nas\\Music Share           Microsoft Windows Network',
+    'Unavailable  Z:        \\\\192.168.1.3\\Share         Microsoft Windows Network',
+    '                       \\\\nas\\IPC$                  Microsoft Windows Network',
+    'The command completed successfully.',
+  ].join('\r\n');
+  assert.deepEqual(parseNetUse(listing).map((mount) => mount.mountPoint), ['y:', 'z:'], 'the mapped letters, share up or not');
+  assert.deepEqual(parseNetUse('Nicht verfügbar  Q:  \\\\server\\freigabe  Microsoft Windows-Netzwerk').map((mount) => mount.mountPoint), ['q:'], 'whatever the language of the headings');
+  assert.deepEqual(parseNetUse('There are no entries in the list.'), []);
+  if (process.platform === 'win32') {
+    const mapped = parseNetUse(listing);
+    assert.equal(isOnRemoteVolume('Z:\\Music', mapped), true, 'a mapped drive, even with its share down');
+    assert.equal(isOnRemoteVolume('y:\\music', mapped), true, 'whatever the case');
+    assert.equal(isOnRemoteVolume('C:\\Music', mapped), false);
+    assert.equal(isOnRemoteVolume('\\\\nas\\music', []), true, 'a UNC name needs no listing');
+  }
+
+  // A root on a network volume is gone only when the folder holding it answers.
+  const volume = join(root, 'volume');
+  await mkdir(join(volume, 'mounted'), { recursive: true });
+  const probing = new LibraryWatcher(() => {}, { rootPollMs: 600_000, remotePollMs: 0 });
+  const deleted = join(volume, 'mounted', 'music');
+  const unreachable = join(volume, 'unmounted', 'music');
+  assert.equal(await probing.probeRoot(deleted), 'gone');
+  assert.equal(await probing.probeRoot(unreachable), 'gone', 'a local root that is not there is gone');
+  probing.remoteRoots = [deleted, unreachable];
+  assert.equal(await probing.probeRoot(deleted), 'gone', 'on a network volume it is gone when the folder holding it answers');
+  assert.equal(await probing.probeRoot(unreachable), 'unknown', 'and not when that answers nothing either');
+  if (process.platform === 'win32') {
+    // A mapped drive whose share is down answers "no such folder" for every path on it.
+    const letter = [...'ZYXWVUTSRQPONMLKJIHGFEDCBA'].find((candidate) => !existsSync(`${candidate}:\\`));
+    const drive = `${letter}:\\`;
+    probing.remoteRoots = [];
+    assert.equal(await probing.probeRoot(drive), 'gone');
+    probing.remoteRoots = [drive];
+    assert.equal(await probing.probeRoot(drive), 'unknown', 'a drive root has no folder above it to ask');
+  }
+
+  const kept = join(volume, 'kept');
+  await mkdir(kept, { recursive: true });
+  const changed = [];
+  const returned = [];
+  const watcher = new LibraryWatcher((targets) => void changed.push(...targets), {
+    debounceMs: 50,
+    rootPollMs: 600_000,
+    remotePollMs: 0,
+    onRootAvailable: (path) => returned.push(path),
+  });
+  watcher.start([kept]);
+  watcher.remoteRoots = [kept];
+  const check = () => watcher.checkRoots(watcher.generation);
+  watcher.statFolder = async (path) => (path === kept ? 'gone' : 'unknown');
+  for (let i = 0; i < 4; i += 1) await check();
+  watcher.flushNow();
+  assert.deepEqual(watcher.getWatchedRoots(), [kept], 'a share that answers nothing is still watched');
+  assert.deepEqual(changed, [], 'and its tracks are not queued to be marked missing');
+  watcher.statFolder = async (path) => (path === kept ? 'gone' : 'present');
+  await check();
+  await check();
+  watcher.flushNow();
+  assert.deepEqual(changed, [kept], 'a folder removed from a share that is up is queued as before');
+  watcher.stop();
+
+  // A share mounted over the folder, or a drive swapped under it, is a new volume.
+  const mounting = new LibraryWatcher(() => {}, { rootPollMs: 600_000, remotePollMs: 0, onRootAvailable: (path) => returned.push(path) });
+  returned.length = 0;
+  mounting.start([kept]);
+  let device = 11;
+  mounting.probeRoot = async (path) => {
+    mounting.probedDevices.set(path, device);
+    return 'present';
+  };
+  const mountCheck = () => mounting.checkRoots(mounting.generation);
+  await mountCheck();
+  await mountCheck();
+  assert.deepEqual(returned, [], 'the same volume asks for nothing');
+  device = 12;
+  await mountCheck();
+  assert.deepEqual(returned, [kept], 'a different one is handed over for a rescan');
+  assert.equal(mounting.isWatching(), true, 'and watched again');
+  await mountCheck();
+  assert.deepEqual(returned, [kept], 'once');
+  mounting.stop();
+
+  // A root that came back after the others is last in the watched list, which is not a change of roots.
+  const first = join(root, 'order', 'a');
+  const second = join(root, 'order', 'b');
+  await mkdir(first, { recursive: true });
+  await mkdir(second, { recursive: true });
+  const queued = [];
+  const ordered = new LibraryWatcher((targets) => void queued.push(...targets), { debounceMs: 50, rootPollMs: 600_000, remotePollMs: 0 });
+  ordered.start([first, second]);
+  ordered.roots = [second, first];
+  const generation = ordered.generation;
+  ordered.queueTarget(join(first, 'new.mp3'), 'force');
+  ordered.start([first, second]);
+  assert.equal(ordered.generation, generation, 'a settings save with the same roots rebuilds nothing');
+  ordered.flushNow();
+  assert.deepEqual(queued, [join(first, 'new.mp3')], 'and the change that was waiting is still delivered');
+  ordered.stop();
+
+  // realpath of a root on a hung mount gives the root back after a limit, so one root cannot hold up the rest.
+  const realRealpath = fsp.realpath;
+  fsp.realpath = (path, ...rest) => (String(path).endsWith('hung') ? new Promise(() => {}) : realRealpath(path, ...rest));
+  syncBuiltinESMExports();
+  // The limit's timer does not keep the process alive, so something here has to.
+  const keepAlive = setInterval(() => {}, 20);
+  try {
+    const began = performance.now();
+    assert.equal(await resolvedWithin(join(root, 'hung'), 50), join(root, 'hung'));
+    assert.ok(performance.now() - began < 2000, 'it did not wait for the mount');
+    assert.equal(await resolvedWithin(first, 50), await realRealpath(first), 'a root that answers is resolved');
+  } finally {
+    clearInterval(keepAlive);
+    fsp.realpath = realRealpath;
+    syncBuiltinESMExports();
+  }
+
+  if (process.platform === 'win32') {
+    // Starting the watcher never asks a share for anything with a call that blocks the main thread.
+    const share = '\\\\newamp-test-host.invalid\\music';
+    const touched = [];
+    const realExists = fs.existsSync;
+    const realStatSync = fs.statSync;
+    fs.existsSync = (path, ...rest) => (touched.push(String(path)), realExists(path, ...rest));
+    fs.statSync = (path, ...rest) => (touched.push(String(path)), realStatSync(path, ...rest));
+    syncBuiltinESMExports();
+    const sharing = new LibraryWatcher(() => {}, { rootPollMs: 600_000, remotePollMs: 60_000 });
+    try {
+      sharing.start([share]);
+    } finally {
+      fs.existsSync = realExists;
+      fs.statSync = realStatSync;
+      syncBuiltinESMExports();
+    }
+    assert.ok(!touched.some((path) => path.toLowerCase().includes('newamp-test-host')), 'a share is not stat-ed with a blocking call');
+    assert.deepEqual(sharing.getWatchedRoots(), []);
+    await sharing.detectRemoteRoots(sharing.generation);
+    assert.deepEqual(sharing.remoteRoots, [resolve(share)], 'a UNC root is recognised as a network volume without a mount table');
+    sharing.stop();
+  }
+}
+
 // 5. The scanner on a failing share. Reads and stats are made to fail for named
 // files by patching the module the scanner and the tag parser call through.
 const failing = { open: new Map(), stat: new Map() };
@@ -227,7 +392,9 @@ const realOpen = fsp.open;
 const realStat = fsp.stat;
 let inFlight = 0;
 let widest = 0;
+let onOpen = null;
 fsp.open = async (path, ...rest) => {
+  onOpen?.(path);
   const code = codeFor('open', path);
   if (code) throw fail(code);
   return realOpen(path, ...rest);
@@ -235,7 +402,7 @@ fsp.open = async (path, ...rest) => {
 fsp.stat = async (path, ...rest) => {
   const code = codeFor('stat', path);
   if (code) throw fail(code);
-  if (String(path).includes('/wide/') && String(path).endsWith('.mp3')) {
+  if (/[\\/]wide[\\/]/.test(String(path)) && String(path).endsWith('.mp3')) {
     inFlight += 1;
     widest = Math.max(widest, inFlight);
     try {
@@ -276,14 +443,14 @@ const flaky = await put('Share/flaky.mp3');
 await scanner.start([music]);
 assert.ok(rowOf(flaky), 'both were indexed');
 failing.stat.set('flaky.mp3', 'ETIMEDOUT');
-const realMark = library.markUnfoundTracksMissing.bind(library);
+const realMark = library.markUnfoundTracksMissingAsync.bind(library);
 const marks = [];
-library.markUnfoundTracksMissing = (walkedRoots, found, unreadableFolders) => {
+library.markUnfoundTracksMissingAsync = (walkedRoots, found, unreadableFolders) => {
   marks.push({ found, unreadableFolders });
   return realMark(walkedRoots, found, unreadableFolders);
 };
 await scanner.start([music]);
-delete library.markUnfoundTracksMissing;
+delete library.markUnfoundTracksMissingAsync;
 assert.ok(!marks.at(-1).found.includes(flaky), 'the walk did not find the file whose stat timed out');
 assert.ok(marks.at(-1).unreadableFolders.includes(join(music, 'Share')), 'its folder is reported unreadable, so nothing in it is taken as gone');
 assert.equal(rowOf(flaky)[2], null, 'and the file is not marked missing');
@@ -374,6 +541,71 @@ assert.equal(withArt, 80, 'every track of every album has its cover');
   assert.ok(retried.read + retried.unreadable >= 1);
   assert.ok(rowOf(tagged)[4] >= 1, 'the next run settles it');
   assert.equal(info.size, statSync(tagged).size);
+}
+
+// 5k. A root that is an empty folder, which is what a share that is not mounted
+// leaves behind, says nothing about what is gone from it. A root with contents does.
+{
+  const share = join(root, 'mountpoint');
+  const track = join(share, 'Album', '01.mp3');
+  await mkdir(join(share, 'Album'), { recursive: true });
+  await writeFile(track, 'not audio');
+  await scanner.start([share]);
+  assert.equal(rowOf(track)[2], null, 'indexed and present');
+  await rm(join(share, 'Album'), { recursive: true });
+  await scanner.start([share]);
+  assert.equal(rowOf(track)[2], null, 'an empty root marks nothing missing');
+  assert.equal(events.at(-1).unreachable, undefined, 'and it is not an error to report');
+  await mkdir(join(share, 'Album'), { recursive: true });
+  await writeFile(join(share, 'Album', '02.mp3'), 'not audio');
+  await scanner.start([share]);
+  assert.notEqual(rowOf(track)[2], null, 'once the root holds something, a file that is not in it is marked');
+}
+
+// 5l. A root the scan could not reach is said to be so; a folder deleted from a
+// volume that answers, and an ordinary scan, are not.
+{
+  const absent = join(root, 'no-such-volume', 'music');
+  await scanner.start([absent]);
+  assert.deepEqual(events.at(-1).unreachable, [absent], 'the scan names the root it could not look in');
+  assert.ok(events.at(-1).done, 'and still ends');
+  await scanner.start([join(music, 'Deleted Album')]);
+  assert.equal(events.at(-1).unreachable, undefined, 'a folder removed from a volume that answers is just gone');
+  await scanner.start([music]);
+  assert.equal(events.at(-1).unreachable, undefined);
+}
+
+// 5m. Cancelling stops the reads of the batch in progress, not only the next batch.
+{
+  for (let i = 0; i < 40; i += 1) await put(`Cancel/${String(i).padStart(2, '0')}.mp3`);
+  const opened = [];
+  onOpen = (path) => {
+    if (!String(path).includes('Cancel')) return;
+    opened.push(path);
+    if (opened.length === 1) scanner.cancel();
+  };
+  await scanner.start([music]);
+  onOpen = null;
+  assert.ok(opened.length >= 1 && opened.length <= 8, `the reads stopped with the cancel (${opened.length} of 40 files opened)`);
+  assert.ok(events.at(-1).cancelled, 'and the scan ended as cancelled');
+}
+
+// 5n. A cancel that comes while missing files are being marked ends the scan as
+// cancelled, and nothing more is read.
+{
+  const late = await put('Late/new.mp3');
+  const realMarkAsync = library.markUnfoundTracksMissingAsync.bind(library);
+  library.markUnfoundTracksMissingAsync = async (...args) => {
+    scanner.cancel();
+    await sleep(20);
+    return realMarkAsync(...args);
+  };
+  await scanner.start([music]);
+  delete library.markUnfoundTracksMissingAsync;
+  assert.ok(events.at(-1).done && events.at(-1).cancelled, 'the scan ended as cancelled');
+  assert.equal(rowOf(late), undefined, 'and the new file was not read');
+  await scanner.start([music]);
+  assert.ok(rowOf(late), 'the next scan reads it');
 }
 
 fsp.open = realOpen;

@@ -4,12 +4,22 @@
 // gathers events that arrive close together into a single batch, in arrival
 // order, so the renderer gets the whole selection once.
 
+export type PathKey = (path: string) => string;
+
+const lowerCaseKey: PathKey = (path) => path.toLowerCase();
+
 export interface OpenFileBatcherOptions {
   /** A batch is delivered once no new event has arrived for this long. */
   quietMs: number;
   /** Upper bound on how long a batch can keep growing before it is delivered. */
   maxWaitMs: number;
   deliver: (paths: string[]) => void;
+  /**
+   * Names a file for the "same file twice" check. Lower-cased paths by default;
+   * a case-sensitive volume can hold A.mp3 and a.mp3 side by side, so the app
+   * passes the rule of the platform it runs on.
+   */
+  key?: PathKey;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
   now?: () => number;
@@ -40,14 +50,15 @@ export function mergeHandedOff(
   handedOff: HandedOffFiles | null,
   now: number,
   windowMs: number,
+  key: PathKey = lowerCaseKey,
 ): { files: string[]; handedOff: HandedOffFiles | null } {
   if (!handedOff || now - handedOff.at > windowMs) return { files: [...batch], handedOff: null };
   const files: string[] = [];
   const seen = new Set<string>();
   for (const path of [...handedOff.paths, ...batch]) {
-    const key = path.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
+    const name = key(path);
+    if (seen.has(name)) continue;
+    seen.add(name);
     files.push(path);
   }
   return { files, handedOff: { paths: files, at: handedOff.at } };
@@ -57,6 +68,7 @@ export function createOpenFileBatcher(options: OpenFileBatcherOptions): OpenFile
   const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
   const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
   const now = options.now ?? Date.now;
+  const key = options.key ?? lowerCaseKey;
 
   let batch: string[] = [];
   let seen = new Set<string>();
@@ -83,9 +95,9 @@ export function createOpenFileBatcher(options: OpenFileBatcherOptions): OpenFile
     push(paths) {
       let added = false;
       for (const path of paths) {
-        const key = path.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
+        const name = key(path);
+        if (seen.has(name)) continue;
+        seen.add(name);
         batch.push(path);
         added = true;
       }

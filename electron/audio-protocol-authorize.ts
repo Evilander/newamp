@@ -19,7 +19,7 @@
 import { realpath as nodeRealpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { isAllowedAudioPath } from './audio-path-policy.js';
-import { isStorageError, retryStorageErrors } from './read-failure.js';
+import { isStorageError, retryStorageErrors, setStorageRoots } from './read-failure.js';
 
 export interface AudioProtocolAuthorizeDeps {
   /** Raw, as-configured library roots — not realpathed by the caller. */
@@ -122,6 +122,10 @@ export async function authorizeAudioProtocolPath(
   const delaysMs = deps.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
   const sleep = deps.sleep ?? defaultSleep;
   const now = deps.now ?? Date.now;
+  // The library's folders also say which storage a file is on, where no drive
+  // letter does (see storageRootOf). An empty list is a request for something
+  // the library does not hold, not a library with no folders.
+  if (deps.libraryRoots.length > 0) setStorageRoots(deps.libraryRoots);
 
   // host is "track" or "file", pathname holds the encoded path. Strip
   // exactly the one leading slash the URL parser adds after the host —

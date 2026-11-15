@@ -381,12 +381,16 @@ function startLastfmNowPlaying(track: Track): void {
   void api.lastfmUpdateNowPlaying(toLastfmTrack(track)).catch(() => undefined);
 }
 
-function maybeScrobbleToLastfm(state: PlayerState, currentTime: number, playing: boolean): void {
+// Last.fm counts a track longer than 30 s once it has played for half its length
+// or four minutes. Played, not passed: the heard time is the play counter's, so
+// a scrub to the middle scrobbles nothing, and a track picked up from a saved
+// session (which has no counter) scrobbles nothing either.
+function maybeScrobbleToLastfm(state: PlayerState, length: number, playing: boolean): void {
   const track = state.current;
-  const duration = track?.duration ?? 0;
-  if (!track || !playing || activePreview || !state.settings?.lastfmEnabled || !lastfmPlayKey) return;
+  const listen = pendingPlay;
+  if (!track || !listen || listen.trackId !== track.id || !playing || activePreview || !state.settings?.lastfmEnabled || !lastfmPlayKey) return;
   if (!lastfmPlayKey.startsWith(`${track.id}:`) || lastfmScrobbledKey === lastfmPlayKey) return;
-  if (duration <= 30 || currentTime < Math.min(duration / 2, 240)) return;
+  if (length <= 30 || !heardEnough(listen.heardSeconds, length)) return;
 
   lastfmScrobbledKey = lastfmPlayKey;
   void api.lastfmScrobble(toLastfmTrack(track), lastfmPlayStartedAt).catch(() => {
@@ -397,6 +401,9 @@ function maybeScrobbleToLastfm(state: PlayerState, currentTime: number, playing:
 function shouldRecordManualSkip(state: PlayerState): boolean {
   const track = state.current;
   if (!track || track.id <= 0 || !state.isPlaying) return false;
+  // A track that already counted as a play is not also a skip when the listener
+  // moves on from it again (after Previous restarted it, say).
+  if (countedPlayTrackId === track.id) return false;
   const duration = track.duration ?? state.duration ?? 0;
   if (duration <= 30) return false;
   const currentTime = Math.max(0, state.currentTime);
@@ -846,8 +853,17 @@ async function restorePlaybackSession(
   applyReplayGain(current, settings);
 }
 
+// After a backup restore the settings file holds the restored session, and the
+// queue in memory is the old one: nothing may write it over the top.
+let sessionPersistenceStopped = false;
+
+/** One way: from here on this page writes no session or resume state; the reload that follows starts a fresh page. */
+export function stopPersistingSession(): void {
+  sessionPersistenceStopped = true;
+}
+
 async function persistPlaybackSession(state: PlayerState): Promise<void> {
-  if (!state.settings) return;
+  if (!state.settings || sessionPersistenceStopped) return;
   // A preview borrows the queue; the saved session stays the listener's own.
   const source = activePreview?.snapshot ?? state;
   const resumeState = playbackResumeStateForQueueSnapshot({
@@ -1121,8 +1137,9 @@ async function advanceAfterPlaybackError(
     if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: autoDjRefillIndex(getState()) })) {
       void getState().refillAutoDjQueue();
     }
-  } catch {
-    // The engine publishes the next error; the subscription schedules the next skip.
+  } catch (err) {
+    // A published error schedules the next skip through the subscription.
+    reportUnpublished(err);
   }
 }
 
@@ -1462,43 +1479,68 @@ async function advanceToNextTrack(
 }
 
 function recordLibraryPlay(track: Track): void {
-  if (track.id > 0) void api.recordPlay(track.id).catch(() => undefined);
+  if (track.id <= 0) return;
+  countedPlayTrackId = track.id;
+  void api.recordPlay(track.id).catch(() => undefined);
 }
 
 // A library play is counted once the track has been heard for half its length
-// or four minutes, whichever comes first, or when it plays out to its end. A
-// track skipped past in its first seconds, or one that failed to open, is not
-// a play, and neither is one picked up again where a saved session left it.
+// or four minutes, whichever comes first. What counts as heard is audio that
+// played: a jump of the position (a scrub, a key or wheel seek, Previous
+// restarting the track) is not listening, so landing in the last seconds and
+// letting it end is no play either. A track skipped past in its first
+// seconds, or one that failed to open, is not a play, and neither is one
+// picked up again where a saved session left it.
 const PLAY_COUNT_MAX_HEARD_S = 240;
 // An ended track reports a position a moment short of its length.
 const PLAY_COUNT_END_SLACK_S = 5;
-// Between two notifications the position moves by a fraction of a second; a
-// bigger step is a seek and is not time spent listening.
-const PLAY_COUNT_MAX_STEP_S = 5;
+// The position may not move further than the clock allows between two
+// notifications. This much more is let through for notifications that arrive
+// late or bunched together.
+const PLAY_COUNT_CLOCK_SLACK_S = 0.35;
 
 interface PendingPlay {
   trackId: number;
   heardSeconds: number;
   lastTime: number | null;
+  /** performance.now() of the notification that set lastTime. */
+  lastAt: number;
+  /** Notifications that saw the position move while playing. */
+  steps: number;
+  /** The play has been recorded; the heard time goes on adding up for the scrobble. */
+  counted: boolean;
 }
 let pendingPlay: PendingPlay | null = null;
+// The track whose play was recorded since it last started, so moving on from
+// it again is not also a skip.
+let countedPlayTrackId: number | null = null;
 
 /** The track just started; it is counted later, by countPlayedTime or countPlayedToEnd. */
 function beginPlayCount(track: Track, startAt = 0): void {
-  pendingPlay = track.id > 0 && !(startAt > 0) ? { trackId: track.id, heardSeconds: 0, lastTime: null } : null;
+  pendingPlay = track.id > 0 && !(startAt > 0) ? { trackId: track.id, heardSeconds: 0, lastTime: null, lastAt: 0, steps: 0, counted: false } : null;
+  countedPlayTrackId = null;
 }
 
-function countPlayedTime(track: Track | null, time: number, duration: number, playing: boolean): void {
+function heardEnough(heardSeconds: number, length: number): boolean {
+  return heardSeconds >= Math.min(length > 0 ? length / 2 : PLAY_COUNT_MAX_HEARD_S, PLAY_COUNT_MAX_HEARD_S);
+}
+
+function countPlayedTime(track: Track | null, time: number, duration: number, playing: boolean, rate = 1): void {
   const pending = pendingPlay;
   if (!pending || !track || track.id !== pending.trackId) return;
+  const now = performance.now();
   if (playing && pending.lastTime !== null) {
     const step = time - pending.lastTime;
-    if (step > 0 && step <= PLAY_COUNT_MAX_STEP_S) pending.heardSeconds += step;
+    // Audio can only have played for as long as the clock ran, so a position
+    // that jumps ahead earns no more than that.
+    const playable = ((now - pending.lastAt) / 1000) * Math.max(1, rate) + PLAY_COUNT_CLOCK_SLACK_S;
+    if (step > 0) pending.heardSeconds += Math.min(step, playable);
+    pending.steps += 1;
   }
   pending.lastTime = time;
-  const needed = Math.min(duration > 0 ? duration / 2 : PLAY_COUNT_MAX_HEARD_S, PLAY_COUNT_MAX_HEARD_S);
-  if (pending.heardSeconds < needed) return;
-  pendingPlay = null;
+  pending.lastAt = now;
+  if (pending.counted || !heardEnough(pending.heardSeconds, duration)) return;
+  pending.counted = true;
   recordLibraryPlay(track);
 }
 
@@ -1506,13 +1548,25 @@ function countPlayedTime(track: Track | null, time: number, duration: number, pl
  * The track ran out on its own. `slack` is how far from its length the
  * position may be and still count as the end: an ended event with the
  * position well short means the read stopped early, which is not a play.
+ * `length` is how long the track really is, which the decoder knows better
+ * than a library row with a wrong tag; the end only counts when that much of
+ * it was heard, so a scrub to the last seconds is no play. A track that played
+ * out before any position was seen moving (a chained one shorter than a tick)
+ * was not scrubbed through, so its end stands on its own.
  */
-function countPlayedToEnd(track: Track | null, time: number, duration: number, slack = PLAY_COUNT_END_SLACK_S): void {
+function countPlayedToEnd(track: Track | null, time: number, length: number, slack = PLAY_COUNT_END_SLACK_S): void {
   const pending = pendingPlay;
-  if (!pending || !track || track.id !== pending.trackId) return;
-  if (duration > 0 && time < duration - slack) return;
-  pendingPlay = null;
+  if (!pending || pending.counted || !track || track.id !== pending.trackId) return;
+  if (length > 0 && time < length - slack) return;
+  if (pending.steps > 0 && !heardEnough(pending.heardSeconds, length)) return;
+  pending.counted = true;
   recordLibraryPlay(track);
+}
+
+/** How long the file really is: what the engine decoded, unless the track is a slice of a larger file. */
+function playedLength(track: Track | null, displayDuration: number, engineDuration: number): number {
+  if (!track || !(engineDuration > 0) || trackRouting(track).cue) return displayDuration;
+  return engineDuration;
 }
 
 function searchLiteral(value: string): string {
@@ -1670,6 +1724,21 @@ function rethrowUnlessPublished(err: unknown): void {
 }
 
 /**
+ * For starts nobody awaits (Play with nothing loaded, the skip after an error,
+ * a repeat). A published failure is already on screen and has its own skip;
+ * anything else would otherwise leave Play doing nothing, so it is said here.
+ */
+function reportUnpublished(err: unknown): void {
+  if (engine.getState().error != null) return;
+  console.warn('[newamp] playback failed to start', err);
+  pushToast({
+    tone: 'error',
+    title: 'Playback failed',
+    detail: err instanceof Error && err.message ? err.message : 'The audio output could not be started.',
+  });
+}
+
+/**
  * One attempt at moving to the next track. Reports 'edited' when the queue
  * changed under an end-of-queue lookup and nothing was started on its account.
  */
@@ -1746,6 +1815,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     engine.subscribe((s) => {
       const previousState = get();
       const activeTrack = previousState.current;
+      // The store moves to a new track at once, but the engine only does when
+      // its play() lands (an IPC round trip on the exclusive path). Until then
+      // it still reports the previous track, whose position, error and end
+      // are not this one's: they must not be shown against it or advance past it.
+      if (s.trackId != null && activeTrack && s.trackId !== activeTrack.id) return;
       const relativeTime = cueRelativeTime(activeTrack, s.currentTime);
       const displayDuration = cueDuration(activeTrack, s.duration);
       const forceSessionPersist = shouldForcePlaybackSessionPersist(
@@ -1767,26 +1841,28 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         playbackError: s.error,
       });
       reflectBuffering(s.buffering && !s.error, get, set);
-      maybeScrobbleToLastfm(get(), relativeTime, s.playing);
       schedulePersistPlaybackSession(get(), forceSessionPersist);
       persistPodcastProgress(get(), s.ended, s.ended);
       notifyShellPlayback(get());
       // A preview only borrows the engine: it never advances, hands off, trips
       // the sleep timer or feeds the memory bridge.
       if (activePreview) return;
-      // The store moves to a new track at once, but the engine only does when
-      // its play() lands (an IPC round trip on the exclusive path). Until then
-      // it still reports the previous track, whose end or error is not this
-      // one's and must not advance past it.
       const loaded = get().current;
-      if (s.trackId != null && loaded && s.trackId !== loaded.id) return;
       if (s.playing && !s.error && relativeTime >= 0.5) {
         resetPlaybackFailureRun();
         if (loaded) openFailedTrackIds.delete(loaded.id);
       }
       const state = get();
-      if (!s.error) countPlayedTime(state.current, relativeTime, displayDuration, s.playing);
+      const trackLength = playedLength(state.current, displayDuration, s.duration);
+      if (!s.error) {
+        countPlayedTime(state.current, relativeTime, displayDuration, s.playing, state.playbackRate);
+        maybeScrobbleToLastfm(state, displayDuration, s.playing);
+      }
       if (s.error) {
+        // An error that reaches a paused player is held for the track, not
+        // acted on: playbackError shows it, and Play starts the track again
+        // where it stopped. Skipping ahead would start something nobody asked for.
+        if (!previousState.isPlaying) return;
         const flagged = state.current?.missingSince != null;
         let decision = resolvePlaybackErrorAdvance({
           error: s.error,
@@ -1834,7 +1910,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         // eviland memory bridge's lineage ladder. Mirrors the natural-end
         // path below for plain track playback.
         notifyPlayCompleted(state.current?.id ?? null);
-        countPlayedToEnd(state.current, relativeTime, displayDuration);
+        countPlayedToEnd(state.current, relativeTime, trackLength);
         if (state.stopAfterCurrent) {
           set({ stopAfterCurrent: false });
           engine.stop();
@@ -1842,7 +1918,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           resetHandoffState();
           beginPlayCount(state.current);
           // The engine publishes a failure, and the error branch above skips ahead.
-          void playEngineTrack(state.current).catch(() => undefined);
+          void playEngineTrack(state.current).catch(reportUnpublished);
         } else {
           window.setTimeout(() => void autoAdvance(get, set), 0);
         }
@@ -1947,7 +2023,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       ) {
         lastHandoffKey = handoffKey(state.current.id, state.index);
         // The next track starts under the end of this one, which has played out.
-        countPlayedToEnd(state.current, relativeTime, displayDuration, effectiveCrossfadeMs / 1000 + PLAY_COUNT_END_SLACK_S);
+        countPlayedToEnd(state.current, relativeTime, trackLength, effectiveCrossfadeMs / 1000 + PLAY_COUNT_END_SLACK_S);
         void autoAdvance(get, set);
         return;
       }
@@ -1961,7 +2037,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         })
       ) {
         lastStopAfterCurrentKey = stopAfterCurrentKey(state.current?.id ?? null, state.index);
-        countPlayedToEnd(state.current, relativeTime, displayDuration);
+        countPlayedToEnd(state.current, relativeTime, trackLength);
         set({ stopAfterCurrent: false });
         engine.stop();
         return;
@@ -1982,20 +2058,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
             // generation ladder). The registry routes to the active bridge IFF
             // its trackId matches — wrong-track and no-bridge are cheap no-ops.
             notifyPlayCompleted(state.current?.id ?? null);
-            countPlayedToEnd(state.current, relativeTime, displayDuration);
+            countPlayedToEnd(state.current, relativeTime, trackLength);
             // small delay to avoid re-entry
             setTimeout(() => void autoAdvance(get, set), 0);
           } else if (get().current) {
             // repeat-one: the same track is about to play again. From the
             // player's POV that's a completed play, so the counter ticks too.
             notifyPlayCompleted(state.current?.id ?? null);
-            countPlayedToEnd(state.current, relativeTime, displayDuration);
+            countPlayedToEnd(state.current, relativeTime, trackLength);
             // Every loop has its own prepare window: the next one chains the
             // track to itself again on the sample transport.
             resetHandoffState();
             const c = get().current!;
             beginPlayCount(c);
-            void playEngineTrack(c).catch(() => undefined);
+            void playEngineTrack(c).catch(reportUnpublished);
           }
         }
       }
@@ -2709,7 +2785,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           // instead of doing nothing.
           const libraryRootCount = state.settings?.libraryRoots?.length ?? 0;
           if (starterQueueNeeded({ startIndex, libraryRootCount, pending: starterQueuePending })) {
-            void playStarterQueue(get).catch(() => undefined);
+            void playStarterQueue(get).catch(reportUnpublished);
           }
           return;
         }
@@ -2717,7 +2793,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         const playbackQueue = state.queue.length ? state.queue : state.current ? [state.current] : [];
         // Carry the saved position in the play request itself. A late
         // completion must never seek a newer track after Stop/queue changes.
-        void state.playQueue(playbackQueue, startIndex, resumeAt ?? 0).catch(() => undefined);
+        void state.playQueue(playbackQueue, startIndex, resumeAt ?? 0).catch(reportUnpublished);
         return;
       }
       engine.togglePlayPause();

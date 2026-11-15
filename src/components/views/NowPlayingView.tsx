@@ -49,6 +49,7 @@ import { openTrackContextMenu } from '../../lib/trackMenu';
 import { waveformKey } from '../../hooks/useWaveform';
 import { ScrubBar } from '../ScrubBar';
 import { useVirtualRows } from '../../hooks/useVirtualRows';
+import { watchDragEnd } from '../dragEnd';
 
 type LyricPayload = Partial<Pick<LocalLyricsResult, 'plainLyrics' | 'syncedLyrics'>> & {
   instrumental?: boolean;
@@ -107,6 +108,13 @@ export function NowPlayingView(): JSX.Element {
     setDraggedQueueIndex(null);
     setDropQueueIndex(null);
   }, []);
+  // The dragged row can be scrolled out of the window mid-drag, and a row that is
+  // no longer drawn never gets its dragend.
+  useEffect(() => {
+    if (draggedQueueIndex === null) return undefined;
+    const source = queueListRef.current?.querySelector(`[data-newamp-queue-row="${draggedQueueIndex}"]`);
+    return watchDragEnd(window, () => !!source?.isConnected, endQueueDrag);
+  }, [draggedQueueIndex, endQueueDrag]);
   // Rows are keyed by slot, so after a keyboard edit the focused element is a
   // different track. Put focus back on the row the listener was working with,
   // scrolling it into the drawn window first when it has been windowed out.

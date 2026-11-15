@@ -5,7 +5,7 @@
 
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, writeFileSync, statSync, createWriteStream, type Stats } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, opendirSync, readdirSync, readFileSync, writeFileSync, statSync, createWriteStream, type Stats } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -130,6 +130,7 @@ import {
   quarantineCorruptFile,
   recoveryReason,
   renameOverExistingSync,
+  renameRetryingAsync,
 } from './recovery.js';
 import {
   normalizeHistoryImportPath,
@@ -207,10 +208,17 @@ const TRACK_PAGE_DIRECT_LIMIT = 1200;
 // A failed async flush tries again after this long, doubling up to the cap.
 const FLUSH_RETRY_MIN_MS = 5_000;
 const FLUSH_RETRY_MAX_MS = 60_000;
+// persistTimerTier of a retry waiting out its delay. It is below the tier of
+// every write, so no write shortens it (see scheduleFlush).
+const FLUSH_RETRY_TIER = -1;
+// Saves that fail this many times in a row are reported as saveError.
+const SAVE_FAILURES_BEFORE_NOTICE = 3;
 // How long a finished "Clean missing files" sweep may be reused by the removal.
 const PRUNE_SWEEP_KEEP_MS = 30_000;
 // A library.db.tmp-* file this old belongs to a write that died.
 const STALE_TMP_AGE_MS = 60_000;
+// The extensions a cached cover can have in the art folder.
+const ART_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'];
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tracks (
@@ -885,34 +893,54 @@ function folderRowDirectory(path: string): string {
 // is one whose tracks belong to different albums: loose singles from several
 // records often carry distinct numbers by chance (3, 7, 1, 12).
 function sortFolderRows<T extends FolderOrderRow>(rows: T[]): T[] {
-  const numbered = new Map<string, boolean>();
-  const seen = new Map<string, Set<string>>();
-  const albumOf = new Map<string, string | null>();
+  // Rows are grouped by directory first, so the collator compares the few
+  // thousand directory names rather than the paths of every pair of tracks. Two
+  // directories whose names differ only in case or accents compare equal to the
+  // collator, and are told apart by their characters so their tracks stay
+  // together instead of interleaving by file name.
+  const byDirectory = new Map<string, T[]>();
   for (const row of rows) {
     const dir = folderRowDirectory(row.path);
-    const pair = `${row.disc_inferred ?? row.disc_no ?? 1}:${row.track_no ?? 0}`;
-    const used = seen.get(dir) ?? new Set<string>();
-    seen.set(dir, used);
-    const sameAlbum = !albumOf.has(dir) || albumOf.get(dir) === (row.album_key ?? null);
-    if (!albumOf.has(dir)) albumOf.set(dir, row.album_key ?? null);
-    const fresh = (row.track_no ?? 0) > 0 && !used.has(pair) && !!row.album_key && sameAlbum;
-    used.add(pair);
-    numbered.set(dir, (numbered.get(dir) ?? true) && fresh);
+    const bucket = byDirectory.get(dir);
+    if (bucket) bucket.push(row);
+    else byDirectory.set(dir, [row]);
   }
-  return rows.sort((a, b) => {
-    const dirA = folderRowDirectory(a.path);
-    const dirB = folderRowDirectory(b.path);
-    const byDirectory = FILE_NAME_COLLATOR.compare(dirA, dirB);
-    if (byDirectory) return byDirectory;
-    if (numbered.get(dirA)) {
-      const order = (a.disc_inferred ?? a.disc_no ?? 1) - (b.disc_inferred ?? b.disc_no ?? 1)
-        || (a.track_no ?? 0) - (b.track_no ?? 0);
-      if (order) return order;
-    }
-    return FILE_NAME_COLLATOR.compare(a.path.slice(dirA.length + 1), b.path.slice(dirB.length + 1))
-      || FILE_NAME_COLLATOR.compare(a.title ?? '', b.title ?? '')
-      || a.id - b.id;
+  const directories = [...byDirectory.keys()].sort(
+    (a, b) => FILE_NAME_COLLATOR.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0),
+  );
+  let next = 0;
+  for (const dir of directories) {
+    for (const row of sortDirectoryRows(dir, byDirectory.get(dir)!)) rows[next++] = row;
+  }
+  return rows;
+}
+
+function sortDirectoryRows<T extends FolderOrderRow>(dir: string, bucket: T[]): T[] {
+  // An album: every track has its own disc and track number and they all belong
+  // to one album. Anything else goes by file name.
+  const used = new Set<string>();
+  const albumKey = bucket[0]!.album_key ?? null;
+  const numbered = bucket.every((row) => {
+    const pair = `${row.disc_inferred ?? row.disc_no ?? 1}:${row.track_no ?? 0}`;
+    const fresh = (row.track_no ?? 0) > 0 && !used.has(pair) && !!row.album_key && (row.album_key ?? null) === albumKey;
+    used.add(pair);
+    return fresh;
   });
+  if (numbered) {
+    return bucket.sort((a, b) =>
+      (a.disc_inferred ?? a.disc_no ?? 1) - (b.disc_inferred ?? b.disc_no ?? 1)
+      || (a.track_no ?? 0) - (b.track_no ?? 0)
+      || FILE_NAME_COLLATOR.compare(a.path.slice(dir.length + 1), b.path.slice(dir.length + 1))
+      || FILE_NAME_COLLATOR.compare(a.title ?? '', b.title ?? '')
+      || a.id - b.id);
+  }
+  return bucket
+    .map((row) => ({ row, name: row.path.slice(dir.length + 1) }))
+    .sort((a, b) =>
+      FILE_NAME_COLLATOR.compare(a.name, b.name)
+      || FILE_NAME_COLLATOR.compare(a.row.title ?? '', b.row.title ?? '')
+      || a.row.id - b.row.id)
+    .map((entry) => entry.row);
 }
 
 export interface TagRulePreview {
@@ -1182,6 +1210,13 @@ export class LibraryStore {
   public upgradeError: string | null = null;
   // Nothing may be written over library.db while upgradeError is set.
   private persistBlocked = false;
+  // Set once saving library.db has failed several times in a row, and cleared by
+  // the next save that lands. Until then the changes exist only in memory.
+  public saveError: string | null = null;
+  // Told once per run of failed saves, when the run is long enough to report, so
+  // the app can tell the user. The same notice is added to recoveryEvents.
+  public onSaveFailed: ((event: RecoveryEvent) => void) | null = null;
+  private consecutiveSaveFailures = 0;
   private db!: Database;
   private SQL!: SqlJsStatic;
   private artDir: string;
@@ -1309,6 +1344,7 @@ export class LibraryStore {
     this.SQL = await initSqlJs({
       locateFile: (f: string) => (f.endsWith('.wasm') ? wasmPath : f),
     });
+    await this.settleTempCopies();
     const hadExistingDb = existsSync(this.file);
     let recovered = false;
     if (hadExistingDb) {
@@ -1378,25 +1414,139 @@ export class LibraryStore {
       applySchema();
     }
     if (recovered) this.flushSync();
-    // The live file loaded, so a temp copy left beside it by a write that was
-    // killed, or one whose replace kept failing, is only dead weight.
-    else if (hadExistingDb) void this.sweepStaleFlushTmps();
   }
 
-  private async sweepStaleFlushTmps(): Promise<void> {
+  // What a write that could not finish leaves beside library.db: copies named
+  // library.db.tmp-<pid>-<seq|sync|retry>. One older than the live file is dead
+  // weight, a write that was killed or a copy that a later save replaced. One
+  // newer holds changes library.db never received, because the replace kept
+  // failing and the copy it left was all that was kept of them, so age alone
+  // never gets it deleted. Each is checked the way library.db is on open (the
+  // header, then an integrity check):
+  //  - the newest whole copy takes the place of library.db when that file is
+  //    missing, damaged, or not newer; the file it replaces is kept beside it;
+  //  - any other whole copy, or one that could not be put in place, is kept under
+  //    a name of its own (library.db.unsaved-...);
+  //  - a file that is not a database, a write cut short, is removed;
+  //  - one that cannot be read is left where it is.
+  // Of the copies one process left, only the newest is kept. A library.db that
+  // cannot be read at all (a lock) is left for open() to report, and nothing is
+  // touched. Every step is reported in recoveryEvents.
+  private async settleTempCopies(): Promise<void> {
     const dir = dirname(this.file);
     const prefix = `${basename(this.file)}.tmp-`;
     try {
       const cutoff = Date.now() - STALE_TMP_AGE_MS;
+      const found: Array<{ path: string; mtimeMs: number; owner: string }> = [];
       for (const name of await fsp.readdir(dir)) {
         if (!name.startsWith(prefix)) continue;
-        const stale = join(dir, name);
-        const stat = await fsp.stat(stale).catch(() => null);
-        if (stat?.isFile() && stat.mtimeMs < cutoff) await fsp.unlink(stale).catch(() => {});
+        const path = join(dir, name);
+        const stat = await fsp.stat(path).catch(() => null);
+        if (!stat?.isFile() || stat.mtimeMs >= cutoff) continue;
+        found.push({ path, mtimeMs: stat.mtimeMs, owner: name.slice(prefix.length).split('-')[0]! });
+      }
+      if (!found.length) return;
+      const live = await fsp.stat(this.file).catch(() => null);
+      const liveState = live ? await this.databaseState(this.file) : null;
+      if (liveState === 'unreadable') return;
+      const liveWhole = liveState === 'database';
+      // Newest first: of the copies one process left, the latest holds the rest.
+      found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+      const keptFor = new Set<string>();
+      let adopted = false;
+      for (const copy of found) {
+        if (liveWhole && live && copy.mtimeMs < live.mtimeMs) {
+          await fsp.unlink(copy.path).catch(() => {});
+          continue;
+        }
+        const state = await this.databaseState(copy.path);
+        if (state === 'unreadable') continue;
+        if (state === 'damaged' || keptFor.has(copy.owner)) {
+          await fsp.unlink(copy.path).catch(() => {});
+          continue;
+        }
+        keptFor.add(copy.owner);
+        if (!adopted && (await this.adoptTempCopy(copy.path, live, liveWhole))) {
+          adopted = true;
+          continue;
+        }
+        await this.keepUnsavedCopy(copy.path, copy.owner, copy.mtimeMs);
       }
     } catch {
       // Tidying is best effort; the library does not depend on it.
     }
+  }
+
+  // Whether a file is a whole database, by the test library.db passes on open:
+  // the header, then an integrity check.
+  private async databaseState(path: string): Promise<'database' | 'damaged' | 'unreadable'> {
+    let bytes: Buffer;
+    try {
+      bytes = await fsp.readFile(path);
+    } catch {
+      return 'unreadable';
+    }
+    if (bytes.subarray(0, SQLITE_HEADER.length).toString('latin1') !== SQLITE_HEADER) return 'damaged';
+    let db: Database | null = null;
+    try {
+      db = new this.SQL.Database(bytes);
+      return db.exec('PRAGMA quick_check')[0]?.values?.[0]?.[0] === 'ok' ? 'database' : 'damaged';
+    } catch {
+      return 'damaged';
+    } finally {
+      db?.close();
+    }
+  }
+
+  // Puts a whole temp copy in the place of library.db. The file it replaces is
+  // kept beside it. False when that could not be done, with library.db as it was.
+  private async adoptTempCopy(path: string, live: Stats | null, liveWhole: boolean): Promise<boolean> {
+    let replaced: string | null = null;
+    try {
+      if (live && liveWhole) {
+        replaced = `${this.file}.replaced-${Math.round(live.mtimeMs)}`;
+        await fsp.copyFile(this.file, replaced);
+      } else if (live) {
+        const quarantined = quarantineCorruptFile(this.file, 'library', 'the library file failed its integrity check; an unsaved copy took its place');
+        if (quarantined) {
+          this.recoveryEvents.push(quarantined);
+          replaced = quarantined.backupPath;
+        }
+      }
+      await renameRetryingAsync(path, this.file);
+    } catch (err) {
+      console.warn(`[newamp] could not put ${path} in place of ${this.file}:`, err);
+      if (replaced && live && liveWhole) await fsp.unlink(replaced).catch(() => {});
+      return false;
+    }
+    console.warn(`[newamp] a save could not replace ${this.file}; the newer copy it left, ${path}, is now the library`);
+    this.recoveryEvents.push({
+      store: 'library',
+      filePath: this.file,
+      backupPath: replaced ?? this.file,
+      reason: replaced
+        ? `an earlier session could not save over library.db; the newer copy of the library it left was put in place. The library.db it replaced is kept at ${replaced}`
+        : 'an earlier session could not save over library.db, which was then missing; the newer copy of the library it left was put in place',
+      recoveredAt: Date.now(),
+    });
+    return true;
+  }
+
+  private async keepUnsavedCopy(path: string, owner: string, mtimeMs: number): Promise<void> {
+    let kept = `${this.file}.unsaved-${owner}-${Math.round(mtimeMs)}`;
+    try {
+      await fsp.rename(path, kept);
+    } catch {
+      kept = path;
+    }
+    console.warn(`[newamp] a save that could not replace ${this.file} left a newer copy of the library: ${kept}`);
+    this.recoveryEvents.push({
+      store: 'library',
+      filePath: this.file,
+      backupPath: kept,
+      reason: `an earlier session could not save over library.db and left a newer copy of the library. It is kept at ${kept}; to use it, close NewAmp and put it in place of library.db`,
+      recoveredAt: Date.now(),
+    });
   }
 
   // Loads an existing database file. Transient IO failures (a locked file on
@@ -1536,7 +1686,10 @@ export class LibraryStore {
     const tier = opts?.bulk ? 2 : opts?.slow ? 1 : 0;
     if (this.persistTimer) {
       // A faster write arriving while a slower flush is pending must not sit
-      // behind the longer window — cancel and rearm at the faster delay.
+      // behind the longer window — cancel and rearm at the faster delay. A
+      // retry waiting out its delay stays: saves are failing, and bringing the
+      // attempt forward for every edit would repeat the failure at the pace of
+      // the edits.
       if (tier < this.persistTimerTier) {
         clearTimeout(this.persistTimer);
         this.persistTimer = null;
@@ -1557,10 +1710,16 @@ export class LibraryStore {
   // ratings and edits since the last good write. This tries again after a
   // delay that doubles while the failure lasts.
   private scheduleFlushRetry(): void {
-    if (this.closed || this.persistBlocked || this.persistTimer) return;
+    if (this.closed || this.persistBlocked) return;
+    if (this.persistTimer) {
+      if (this.persistTimerTier === FLUSH_RETRY_TIER) return;
+      // An edit made while the write was failing armed a timer of its own. The
+      // retry takes its place, so attempts keep the pace of the delay.
+      clearTimeout(this.persistTimer);
+    }
     const delay = this.flushRetryMs;
     this.flushRetryMs = Math.min(delay * 2, FLUSH_RETRY_MAX_MS);
-    this.persistTimerTier = 1;
+    this.persistTimerTier = FLUSH_RETRY_TIER;
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
       this.persistTimerTier = 0;
@@ -1588,6 +1747,7 @@ export class LibraryStore {
       // memory, so they stay dirty and the flush is tried again.
       console.error('library export failed', err);
       this.dirty = true;
+      this.noteSaveFailed(err);
       this.scheduleFlushRetry();
       return;
     }
@@ -1612,9 +1772,12 @@ export class LibraryStore {
         // Keep the final replace synchronous after the sequence/closed check:
         // there must be no await point where close() can write a newer
         // snapshot, close the DB, then let this stale rename land afterward.
-        renameOverExistingSync(tmp, this.file);
+        // One attempt: the backoff below does the waiting, and a refused replace must
+        // not stall the main thread by sleeping and rewriting the file here too.
+        renameOverExistingSync(tmp, this.file, { retry: false });
         tmpHandled = true;
         this.flushRetryMs = FLUSH_RETRY_MIN_MS;
+        this.noteSaveSucceeded();
         // library.db now holds newer state than any copy a failed replace left.
         const earlier = this.retainedFlushTmp;
         this.retainedFlushTmp = null;
@@ -1623,6 +1786,7 @@ export class LibraryStore {
         console.error('library flush failed', err);
         if (!this.closed) {
           this.dirty = true;
+          this.noteSaveFailed(err);
           this.scheduleFlushRetry();
         }
       } finally {
@@ -1642,7 +1806,9 @@ export class LibraryStore {
       await this.flushInFlight;
     } finally {
       this.flushInFlight = null;
-      const shouldFlushAgain = this.flushAgain && !this.closed;
+      // Edits that arrived during a write that landed go out at once; after a
+      // write that failed they wait for the retry already scheduled.
+      const shouldFlushAgain = this.flushAgain && !this.closed && !this.consecutiveSaveFailures;
       this.flushAgain = false;
       if (shouldFlushAgain) {
         void this.flushAsync().catch((err) => console.error('library flush failed', err));
@@ -1663,8 +1829,37 @@ export class LibraryStore {
     }
     this.flushSeq += 1;
     const data = this.db.export();
-    atomicWriteFileSync(this.file, Buffer.from(data.buffer, data.byteOffset, data.byteLength));
+    try {
+      atomicWriteFileSync(this.file, Buffer.from(data.buffer, data.byteOffset, data.byteLength));
+    } catch (err) {
+      this.noteSaveFailed(err);
+      this.scheduleFlushRetry();
+      throw err;
+    }
     this.dirty = false;
+    this.flushRetryMs = FLUSH_RETRY_MIN_MS;
+    this.noteSaveSucceeded();
+  }
+
+  private noteSaveFailed(err: unknown): void {
+    this.consecutiveSaveFailures += 1;
+    if (this.consecutiveSaveFailures < SAVE_FAILURES_BEFORE_NOTICE) return;
+    const reason = `${recoveryReason(err)}; changes are kept in memory and NewAmp keeps trying to save them`;
+    const firstOfRun = this.saveError === null;
+    this.saveError = reason;
+    if (!firstOfRun) return;
+    const event: RecoveryEvent = { store: 'library', filePath: this.file, backupPath: this.file, reason, recoveredAt: Date.now() };
+    this.recoveryEvents.push(event);
+    try {
+      this.onSaveFailed?.(event);
+    } catch (callbackErr) {
+      console.error('library save notice failed', callbackErr);
+    }
+  }
+
+  private noteSaveSucceeded(): void {
+    this.consecutiveSaveFailures = 0;
+    this.saveError = null;
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -2698,7 +2893,9 @@ export class LibraryStore {
     while (shared < limit && first.charCodeAt(shared) === last.charCodeAt(shared)) shared += 1;
     if (!shared) return 0;
     const cut = Math.max(first.lastIndexOf('/', shared - 1), first.lastIndexOf('\\', shared - 1));
-    return cut < 0 ? 0 : cut + 1;
+    // SQLite's substr counts characters, not UTF-16 units: a folder named with
+    // an emoji is two units and one character.
+    return cut < 0 ? 0 : Array.from(first.slice(0, cut + 1)).length;
   }
 
   private buildTrackQuery(opts: Pick<TrackQueryOptions, 'search' | 'sort'>): {
@@ -2895,24 +3092,41 @@ export class LibraryStore {
   }
 
   private artFileExists(hash: string): boolean {
-    return ['.jpg', '.jpeg', '.png', '.webp'].some((ext) => existsSync(join(this.artDir, `${hash}${ext}`)));
+    return ART_EXTENSIONS.some((ext) => existsSync(join(this.artDir, `${hash}${ext}`)));
   }
 
   // Of the paths just read without any art, those whose row still says it has
   // some although the cached image is gone (or was never recorded). The upsert
   // keeps existing art when a file yields none, which is right for art applied
   // from the UI, but a row pointing at an image that no longer exists would be
-  // rescanned in full on every pass, finding nothing each time. The art
-  // directory is local, so a missing image is not a storage timeout.
+  // rescanned in full on every pass, finding nothing each time. The image only
+  // counts as gone when the art directory itself could be listed: a folder
+  // that did not answer says nothing about what is in it, and clearing the row
+  // would lose a cover the user chose.
   private pathsWithLostArt(paths: string[]): Set<string> {
     const lost = new Set<string>();
+    let stored: Set<string> | null | undefined;
     for (let i = 0; i < paths.length; i += 500) {
       const chunk = paths.slice(i, i + 500);
       for (const row of this.many<{ path: string; has_art: number; art_hash: string | null }>(
         `SELECT path, has_art, art_hash FROM tracks WHERE path IN (${chunk.map(() => '?').join(',')})`,
         chunk,
       )) {
-        if (row.has_art && (!row.art_hash || !this.artFileExists(row.art_hash))) lost.add(row.path);
+        if (!row.has_art) continue;
+        if (!row.art_hash) {
+          lost.add(row.path);
+          continue;
+        }
+        if (stored === undefined) {
+          try {
+            stored = new Set(readdirSync(this.artDir));
+          } catch {
+            stored = null;
+          }
+        }
+        const hash = row.art_hash;
+        const listing = stored;
+        if (listing && !ART_EXTENSIONS.some((ext) => listing.has(`${hash}${ext}`))) lost.add(row.path);
       }
     }
     return lost;
@@ -2937,7 +3151,26 @@ export class LibraryStore {
     const candidates = this.missingCandidates(normalizedTargets);
     if (!candidates) return 0;
     const ids = [...candidates.gone, ...(await absentTrackIdsAsync(candidates.toCheck))];
-    return this.markGone(ids);
+    // The store can be closed while the checks were under way.
+    if (!ids.length || this.closed) return 0;
+    // Those answers took as long as the stats did, and a file that was deleted
+    // and put back (an editor's atomic save, a share that returned) can be
+    // there now. The tracks picked are looked at once more, and only those not
+    // marked in the meantime.
+    return this.markGone(await absentTrackIdsAsync(this.unmarkedRowsById(ids)));
+  }
+
+  // The rows of these tracks that are still there and not marked missing.
+  private unmarkedRowsById(ids: number[]): Array<{ id: number; path: string }> {
+    const rows: Array<{ id: number; path: string }> = [];
+    for (let i = 0; i < ids.length; i += 500) {
+      const chunk = ids.slice(i, i + 500);
+      rows.push(...this.many<{ id: number; path: string }>(
+        `SELECT id, path FROM tracks WHERE missing_since IS NULL AND id IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
+      ));
+    }
+    return rows;
   }
 
   private markMissingUnder(
@@ -2970,7 +3203,7 @@ export class LibraryStore {
   }
 
   private markGone(ids: number[]): number {
-    if (!ids.length) return 0;
+    if (!ids.length || this.closed) return 0;
     this.setMissingSince(ids, Date.now());
     return ids.length;
   }
@@ -2991,18 +3224,56 @@ export class LibraryStore {
     const roots = normalizePruneTargets(walkedRoots.filter((root) => !foundKeys.has(normalizeFileStatePath(root))))
       .filter((root) => root.exists && root.kind === 'dir');
     if (!roots.length) return 0;
-    const rootIndex = indexPruneTargets(roots);
     const unread = indexPruneTargets(normalizePruneTargets(unreadableFolders));
+    const { skipped, toCheck } = this.unfoundCandidates(foundKeys, indexPruneTargets(roots), unread, walkedRoots);
+    const ids = [...skipped, ...absentTrackIds(toCheck)];
+    if (!ids.length) return 0;
+    this.setMissingSince(ids, Date.now());
+    return ids.length;
+  }
+
+  // The same for the scanner, without a blocking stat per folder on the main
+  // thread. The answers take their time, and a root can stop answering while
+  // they are gathered (a drive unplugged part-way through reads every folder in
+  // it as gone). The tracks picked are looked at once more, then the roots are
+  // asked again, and a track under one that no longer answers is left alone.
+  async markUnfoundTracksMissingAsync(walkedRoots: string[], found: string[], unreadableFolders: string[] = []): Promise<number> {
+    const foundKeys = new Set(found.map(normalizeFileStatePath));
+    const rootPaths = walkedRoots.filter((root) => !foundKeys.has(normalizeFileStatePath(root)));
+    const isFolder = (root: PruneTarget): boolean => root.exists && root.kind === 'dir';
+    const roots = (await normalizePruneTargetsAsync(rootPaths)).filter(isFolder);
+    if (!roots.length) return 0;
+    const unread = indexPruneTargets(await normalizePruneTargetsAsync(unreadableFolders));
+    if (this.closed) return 0;
+    const { skipped, toCheck } = this.unfoundCandidates(foundKeys, indexPruneTargets(roots), unread, walkedRoots);
+    const absent = await absentTrackIdsAsync(toCheck);
+    if (this.closed) return 0;
+    const rows = this.unmarkedRowsById([...skipped, ...absent]);
+    const lookedAtAgain = new Set(await absentTrackIdsAsync(rows.filter((row) => !skipped.has(row.id))));
+    const answering = indexPruneTargets((await normalizePruneTargetsAsync(rootPaths)).filter(isFolder));
+    return this.markGone(
+      rows
+        .filter((row) => matchesPruneTargets(row.path, answering) && (skipped.has(row.id) || lookedAtAgain.has(row.id)))
+        .map((row) => row.id),
+    );
+  }
+
+  // The unmarked tracks under the walked roots that the walk did not find and
+  // that are not in a folder it could not list: those whose path the scanner
+  // now skips (marked without a stat) and those whose file needs a look.
+  private unfoundCandidates(
+    foundKeys: Set<string>,
+    rootIndex: Set<string>,
+    unread: Set<string>,
+    walkedRoots: string[],
+  ): { skipped: Set<number>; toCheck: Array<{ id: number; path: string }> } {
     const candidates = this.many<{ id: number; path: string }>(`SELECT id, path FROM tracks WHERE missing_since IS NULL`)
       .filter((row) =>
         !foundKeys.has(normalizeFileStatePath(row.path))
         && matchesPruneTargets(row.path, rootIndex)
         && !matchesPruneTargets(row.path, unread));
     const skipped = new Set(candidates.filter((row) => isSkippedUnderRoot(row.path, walkedRoots)).map((row) => row.id));
-    const ids = [...skipped, ...absentTrackIds(candidates.filter((row) => !skipped.has(row.id)))];
-    if (!ids.length) return 0;
-    this.setMissingSince(ids, Date.now());
-    return ids.length;
+    return { skipped, toCheck: candidates.filter((row) => !skipped.has(row.id)) };
   }
 
   // The scanner found these files, so any of them marked missing are back.
@@ -3102,6 +3373,14 @@ export class LibraryStore {
 
   private async collectPrunableTracksAsync(targets: string[] | undefined, roots: string[]): Promise<PrunableTracks> {
     const { candidates, skipped } = this.pruneCandidates(targets, roots);
+    return this.sweepPrunableAsync(candidates, skipped, roots);
+  }
+
+  private async sweepPrunableAsync(
+    candidates: Array<{ id: number; path: string; file_dev: number | null }>,
+    skipped: number[],
+    roots: string[],
+  ): Promise<PrunableTracks> {
     const probes = new Map<string, DirectoryProbe | null>();
     // A root that does not answer settles everything under it: nothing there
     // counts as deleted, so no file under it is worth a wait.
@@ -3184,7 +3463,31 @@ export class LibraryStore {
   }
 
   async pruneMissingTracksAsync(targets?: string[], roots: string[] = []): Promise<LibraryPruneMissingResult> {
-    return this.removePrunable(await this.collectPrunableTracksCached(targets, roots));
+    const swept = await this.collectPrunableTracksCached(targets, roots);
+    return this.removePrunable(await this.recheckPrunableAsync(swept, roots));
+  }
+
+  // The tracks a sweep chose, looked at again just before they are deleted. The
+  // sweep can be minutes old (a share is slow to walk, and the one the preview
+  // made is reused), and a file that has come back since, or a drive that was
+  // plugged in, must not be deleted on its verdict. Only the tracks it chose
+  // are asked about, so this costs what they do, not what the library does.
+  private async recheckPrunableAsync(swept: PrunableTracks, roots: string[]): Promise<PrunableTracks> {
+    if (!swept.ids.length) return swept;
+    const candidates: Array<{ id: number; path: string; file_dev: number | null }> = [];
+    const skipped: number[] = [];
+    for (let i = 0; i < swept.ids.length; i += 500) {
+      const chunk = swept.ids.slice(i, i + 500);
+      for (const row of this.many<{ id: number; path: string; file_dev: number | null }>(
+        `SELECT id, path, file_dev FROM tracks WHERE id IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
+      )) {
+        if (isSkippedUnderRoot(row.path, roots)) skipped.push(row.id);
+        else candidates.push(row);
+      }
+    }
+    const again = await this.sweepPrunableAsync(candidates, skipped, roots);
+    return { checked: swept.checked, ids: again.ids, offline: swept.offline + again.offline };
   }
 
   private removePrunable({ checked, ids: missingIds, offline }: PrunableTracks): LibraryPruneMissingResult {
@@ -3685,18 +3988,18 @@ export class LibraryStore {
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
   ): number[] {
-    return this.queryFolderRows(folderPath, opts).map((row) => row.id);
+    return this.queryFolderIds(folderPath, opts);
   }
 
   private queryFolderTrackRows(
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
   ): RawRow[] {
-    const ordered = this.queryFolderRows(folderPath, opts);
+    const ordered = this.queryFolderIds(folderPath, opts);
     const byId = new Map<number, RawRow>();
     const chunkSize = 500;
     for (let i = 0; i < ordered.length; i += chunkSize) {
-      const chunk = ordered.slice(i, i + chunkSize).map((row) => row.id);
+      const chunk = ordered.slice(i, i + chunkSize);
       for (const row of this.many<RawRow>(
         `SELECT ${TRACK_COLUMNS} FROM tracks WHERE id IN (${chunk.map(() => '?').join(',')})`,
         chunk,
@@ -3704,22 +4007,34 @@ export class LibraryStore {
         byId.set(row.id, row);
       }
     }
-    return ordered.flatMap((row) => byId.get(row.id) ?? []);
+    return ordered.flatMap((id) => byId.get(id) ?? []);
   }
 
-  // The tracks of a folder in album order, a page of them. Only what the order
-  // needs is read here, so a whole recursive folder can be sorted before the
-  // page is cut from it.
-  private queryFolderRows(
+  // The tracks of a folder in album order, a page of them.
+  private queryFolderIds(
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
-  ): FolderOrderRow[] {
+  ): number[] {
     const folder = normalizeFolderPath(folderPath);
     if (!folder) return [];
-    const recursive = !!opts.recursive;
     const limit = Math.max(1, Math.min(opts.limit ?? 100000, 100000));
     const offset = Math.max(0, opts.offset ?? 0);
+    return this.orderedFolderIds(folder, !!opts.recursive).slice(offset, offset + limit);
+  }
+
+  // Every track of a folder in album order. Only what the order needs is read,
+  // so a whole recursive folder is sorted before the page is cut from it. The
+  // sort of a long folder is kept until the library changes: each page of the
+  // root of a big library otherwise paid for the whole of it again.
+  private orderedFolderIds(folder: string, recursive: boolean): number[] {
+    const key = `folder-order:${recursive ? 'deep' : 'flat'}:${folderKey(folder)}`;
+    const version = this.contentVersion;
+    const kept = this.derived.get<number[]>(key, version);
+    if (kept) return kept;
     const rows: FolderOrderRow[] = [];
+    // Tracks in one directory spell it the same way, so whether a directory is
+    // in the folder is worked out once, not once per track.
+    const directoryInside = new Map<string, boolean>();
     const stmt = this.db.prepare(
       `SELECT id, path, disc_no, disc_inferred, track_no, title, album_key FROM tracks
         WHERE lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'`,
@@ -3727,14 +4042,32 @@ export class LibraryStore {
     try {
       stmt.bind([folderTrackPathPrefixParam(folder)] as unknown as import('sql.js').BindParams);
       while (stmt.step()) {
-        const row = stmt.getAsObject() as unknown as FolderOrderRow;
-        if (trackPathIsInFolder(row.path, folder, recursive)) rows.push(row);
+        // get() rather than getAsObject(): the latter looks the column names up
+        // again for every row.
+        const [id, path, discNo, discInferred, trackNo, title, albumKey] = stmt.get();
+        const directory = folderRowDirectory(path as string);
+        let inside = directoryInside.get(directory);
+        if (inside === undefined) {
+          inside = trackPathIsInFolder(path as string, folder, recursive);
+          directoryInside.set(directory, inside);
+        }
+        if (!inside) continue;
+        rows.push({
+          id: id as number,
+          path: path as string,
+          disc_no: discNo as number | null,
+          disc_inferred: discInferred as number | null,
+          track_no: trackNo as number | null,
+          title: title as string,
+          album_key: albumKey as string | null,
+        });
       }
     } finally {
       stmt.free();
     }
-    sortFolderRows(rows);
-    return rows.slice(offset, offset + limit);
+    const ids = sortFolderRows(rows).map((row) => row.id);
+    if (ids.length > TRACK_PAGE_DIRECT_LIMIT) this.derived.set(key, version, ids);
+    return ids;
   }
 
   // Reads the track rows in slices by id (table order, the order a plain scan
@@ -4907,7 +5240,8 @@ export class LibraryStore {
     const compiled = parseRule(input.body, { strict: true });
     if (!compiled.rule) {
       const err = compiled.errors[0];
-      throw new Error(`tag rule "${input.name}" failed to parse: ${err?.message ?? 'unknown error'}`);
+      const where = err ? ` (line ${err.line}, column ${err.column})` : '';
+      throw new Error(`tag rule "${input.name}" failed to parse: ${err?.message ?? 'unknown error'}${where}`);
     }
     if (compiled.rule.name !== input.name) {
       throw new Error(`tag name mismatch: header "${input.name}", body "${compiled.rule.name}"`);
@@ -5053,13 +5387,18 @@ export class LibraryStore {
     const limit = Math.max(1, Math.min(10000, Math.trunc(input.limit ?? 2000)));
     // The preview stands for the tag playlist, which leaves missing tracks
     // out (getTrackIdsByTag), so its count and samples do too. A library
-    // larger than the limit is sampled at an even stride through the ids: the
+    // larger than the limit is sampled at an even spacing through the tracks,
+    // taking the ones where the running count crosses a multiple of
+    // total/limit: exactly `limit` of them, however the ids have gaps. The
     // first rows of the table are the oldest files and say little about the
     // rest.
     const totalCount = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks WHERE missing_since IS NULL`)?.n ?? 0;
-    const stride = Math.max(1, Math.ceil(totalCount / limit));
     const rows = this.many<RawRow>(
-      `SELECT ${TRACK_COLUMNS} FROM tracks WHERE missing_since IS NULL${stride > 1 ? ` AND id % ${stride} = 0` : ''} LIMIT ${limit}`,
+      totalCount > limit
+        ? `SELECT ${TRACK_COLUMNS} FROM tracks WHERE id IN (
+             SELECT id FROM (SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS n FROM tracks WHERE missing_since IS NULL)
+              WHERE n * ${limit} / ${totalCount} <> (n - 1) * ${limit} / ${totalCount})`
+        : `SELECT ${TRACK_COLUMNS} FROM tracks WHERE missing_since IS NULL LIMIT ${limit}`,
     );
     yield;
     const dnaIndex = yield* this.dnaIndexSteps();
@@ -5131,6 +5470,7 @@ export class LibraryStore {
   private *recomputeTagsSteps(opts: TagRecomputeOptions): Sliced<TagRecomputeResult> {
     const rules = this.listTagRules().filter((r) => r.enabled);
     const parsedRules: ParsedRule[] = [];
+    const ruleOfTag = new Map<string, number>();
     const errors: Record<string, string> = {};
     for (const rule of rules) {
       const compiled = parseRule(rule.body);
@@ -5140,6 +5480,7 @@ export class LibraryStore {
         this.db.run(`UPDATE tag_rules SET last_error = ? WHERE id = ?`, [message, rule.id]);
         continue;
       }
+      ruleOfTag.set(compiled.rule.name, rule.id);
       parsedRules.push({ ...compiled.rule, boost: rule.boost });
       this.db.run(`UPDATE tag_rules SET last_error = NULL WHERE id = ?`, [rule.id]);
     }
@@ -5204,7 +5545,11 @@ export class LibraryStore {
     // above, and a tag row for it would fail the foreign key and lose the whole
     // pass. Nothing yields between this check and the write.
     const present = this.existingTrackIds(pending.map(([trackId]) => trackId));
-    const writable = pending.filter(([trackId]) => present.has(trackId));
+    // The same goes for a rule deleted or switched off while the pass ran: its
+    // tags were removed with it, and writing them back would leave tags for a
+    // rule that is gone.
+    const enabledRules = new Set(this.listTagRules().filter((r) => r.enabled).map((r) => r.id));
+    const writable = pending.filter(([trackId, tag]) => present.has(trackId) && enabledRules.has(ruleOfTag.get(tag) ?? -1));
     tagsAssigned -= pending.length - writable.length;
 
     this.db.run('BEGIN');
@@ -6170,13 +6515,15 @@ export class LibraryStore {
     const row = this.one<{
       id: number;
       path: string;
+      size: number | null;
+      mtime: number;
       bpm: number | null;
       key: string | null;
       replaygain_track_db: number | null;
       dna_json: string | null;
       analysis_json: string | null;
     }>(
-      `SELECT id, path, bpm, key, replaygain_track_db, dna_json, analysis_json FROM tracks
+      `SELECT id, path, size, mtime, bpm, key, replaygain_track_db, dna_json, analysis_json FROM tracks
         WHERE id = ? AND ${ANALYSIS_ELIGIBLE_SQL}`,
       [Math.trunc(Number(id))],
     );
@@ -6188,7 +6535,7 @@ export class LibraryStore {
       dnaVersion: dnaVersionOf(row.dna_json),
       analysisJson: row.analysis_json,
     });
-    return anyWork(work) ? { id: row.id, path: row.path, work } : null;
+    return anyWork(work) ? { id: row.id, path: row.path, work, size: row.size ?? undefined, mtime: row.mtime } : null;
   }
 
   /**
@@ -7853,7 +8200,8 @@ export type PathPresence = 'present' | 'absent' | 'unknown';
 // handle or a refused permission says the storage did not answer, which is
 // nothing to hold against the file: a soft network mount returns them while it
 // is slow, and a track marked missing on that evidence is skipped by the queue.
-function presenceOfError(err: unknown): 'absent' | 'unknown' {
+// Exported for the storage-errors test, which cannot make most of these happen.
+export function presenceOfError(err: unknown): 'absent' | 'unknown' {
   const code = (err as { code?: unknown } | null)?.code;
   return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'unknown';
 }

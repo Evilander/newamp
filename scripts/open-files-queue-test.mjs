@@ -207,8 +207,10 @@ try {
     const drop = app.match(/async function handleDroppedFiles[\s\S]*?\n  }\n/)?.[0] ?? '';
     assert.match(drop, /handleOpenFiles\(mediaPaths\)/, 'dropped files take the same path as Open with');
     assert.doesNotMatch(drop, /playQueue\(/, 'dropped files must not replace the queue');
-    assert.match(app, /api\.onOpenFiles\(\(paths\) => \{\s*void handleOpenFiles\(paths\);/, 'files opened while running take that path');
-    assert.match(app, /consumePendingOpenFiles\(\);\s*if \(!cancelled\) await handleOpenFiles\(pending\);/, 'files opened at launch take it too');
+    assert.match(app, /api\.onOpenFiles\(\(paths\) => \{\s*void openAndAnnounce\(paths\);/, 'files opened while running take that path');
+    const announce = app.match(/async function openAndAnnounce[\s\S]*?\n  }\n/)?.[0] ?? '';
+    assert.match(announce, /handleOpenFiles\(paths\)/, 'and the notice for a folder cut short wraps the same path');
+    assert.match(app, /consumePendingOpenFiles\(\);\s*if \(!cancelled\) await openAndAnnounce\(pending\);/, 'files opened at launch take it too');
   }
 
   console.log('PASS open files queue: opened tracks play next in the existing queue, an empty queue takes them whole');

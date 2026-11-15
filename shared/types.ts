@@ -378,6 +378,12 @@ export interface OpenFilesResult {
   tracks: Track[];
   importedPlaylists: PlaylistM3uImportResult[];
   skipped: string[];
+  /**
+   * Audio files in an opened folder that were left to the scanner instead of being read for this open: at least this many, since the
+   * walk stops once the folder is known to be bigger than the 300 files that are read. The first 300 are in `tracks`; the rest reach
+   * the library as the scan goes, not the queue that was just built. Absent when nothing was left.
+   */
+  leftToScanner?: number;
 }
 
 export interface TrackWavExportResult {
@@ -995,6 +1001,8 @@ export interface ScanProgress {
   startedAt: number;
   parsed?: number;
   skipped?: number;
+  /** Roots a scan could not look inside: missing, unreachable, or an empty mount point. */
+  unreachable?: string[];
 }
 
 export interface RadioStation {
@@ -1424,11 +1432,19 @@ export type ExclusiveEventPayload =
       durationSec: number | null;
       underruns: number;
       bufferedFrames: number;
+      /** True while the driver is waiting on the drive or refilling its buffer: the clock is stopped but the track is still playing. */
+      buffering?: boolean;
     }
   | { type: 'boundary'; trackId: number; positionSec: number; durationSec: number | null }
   | { type: 'ended'; trackId: number }
   | { type: 'device-lost'; trackId: number; positionSec: number }
-  | { type: 'error'; trackId: number | null; message: string };
+  | {
+      type: 'error';
+      trackId: number | null;
+      message: string;
+      /** Where playback had reached when the driver gave up, so the engine can hand the track over from there instead of skipping it. */
+      positionSec?: number;
+    };
 
 export interface ExclusivePlayResult {
   ok: boolean;

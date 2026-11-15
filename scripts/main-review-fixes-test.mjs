@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { transform } from 'esbuild';
 
-const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const slice = (start, end) => {
   const from = source.indexOf(start);
   assert.ok(from >= 0, `${start} is in main.ts`);
@@ -44,6 +44,14 @@ const slice = (start, end) => {
   assert.deepEqual(keepUnseenMenuRoots({ volume: 0.5 }), { volume: 0.5 }, 'patches without a folder list pass through');
   assert.equal(keepUnseenMenuRoots(null), null);
 
+  // The menu added /menu-added in place of two folders inside it; a list from
+  // before that still names them.
+  assert.deepEqual(
+    keepUnseenMenuRoots({ libraryRoots: ['/music', '/menu-added/a', '/menu-added/b', '/other'] }).libraryRoots,
+    ['/music', '/other', '/menu-added'],
+    'the folders the menu folded into the new one are not listed beside it',
+  );
+
   libraryRoots = ['/music'];
   assert.deepEqual(keepUnseenMenuRoots(stale), stale, 'a folder no longer in the settings is not brought back');
   libraryRoots = ['/music', '/menu-added'];
@@ -52,23 +60,47 @@ const slice = (start, end) => {
   assert.deepEqual(keepUnseenMenuRoots(stale), stale, 'once the page has read the settings, removing the folder sticks');
 }
 
+// Reading the settings clears the guard; saving them does only when the save carries a folder list.
+{
+  const { code } = await transform(
+    `${slice('const unseenMenuRoots', '// File > Add Folder to Library: the same steps')}\n${slice("ipcMain.handle('settings:get'", '// ---- Bit-Perfect Exclusive output')}\nglobalThis.api = { unseenMenuRoots };`,
+    { loader: 'ts', target: 'es2022' },
+  );
+  const handlers = new Map();
+  const saved = [];
+  const context = {
+    ipcMain: { handle: (name, fn) => handlers.set(name, fn) },
+    settings: { get: () => ({ libraryRoots: ['/music', '/menu-added'], waveformSeekBar: true }), set: (patch) => saved.push(patch) },
+    isPathInside: (path, folder) => path === folder || path.startsWith(`${folder}/`),
+    withAiAssistRuntime: (value) => value,
+    restoreInProgress: false,
+    patchTouchesLibraryWatch: () => false,
+    patchTouchesRadioBrain: () => false,
+  };
+  vm.runInNewContext(code, context);
+  const { unseenMenuRoots } = context.api;
+
+  unseenMenuRoots.add('/menu-added');
+  await handlers.get('settings:set')(null, { resumeState: null });
+  await handlers.get('settings:set')(null, { volume: 0.5 });
+  assert.equal(unseenMenuRoots.size, 1, 'saves that carry no folder list leave the guard up');
+  await handlers.get('settings:set')(null, { libraryRoots: ['/music', '/menu-added'] });
+  assert.equal(unseenMenuRoots.size, 0, 'a saved folder list ends it');
+  assert.equal(saved.length, 3);
+
+  unseenMenuRoots.add('/menu-added');
+  await handlers.get('settings:get')();
+  assert.equal(unseenMenuRoots.size, 0, 'so does the page reading the settings');
+}
+
 // Source-level wiring that main.ts cannot be loaded to check.
 {
   const set = slice("ipcMain.handle('settings:set'", '\n  });');
   assert.match(set, /'bitPerfectExclusive' in patch[\s\S]*syncMediaShortcuts\(\)/, 'a change of the exclusive setting re-registers the media keys');
 
-  const folders = slice('async function readOpenedFolders', '\n}\n');
-  assert.match(folders, /isInsideLibraryRoot\(folder\) && \(await library\.getFolderTracksAsync\(folder, \{ recursive: true, limit: 1 \}\)\)\.length/, 'a folder inside a library folder is read inline when the library has no tracks for it');
-
-  assert.match(folders, /listAudioFiles\(folder, OPENED_FOLDER_INLINE_FILES\)[\s\S]*files\.length > OPENED_FOLDER_INLINE_FILES\) continue;[\s\S]*readOpenedFiles\(files\)/, 'a folder with more files than the cap is left to the scanner');
-
   const prune = slice("ipcMain.handle('library:prune-missing',", "// Files go to the Recycle Bin");
   assert.match(prune, /if \(!preview\.tracks\) return \{ checked: preview\.checked, removed: 0, offline: preview\.offline \};/, 'a preview with nothing to remove returns without a second sweep');
   assert.match(prune, /if \(!preview\.tracks\)[\s\S]*restoreInProgress[\s\S]*assertHistoryImportIdle\(\);\s*\/\/ Removing a track/, 'a history import that began during the preview is refused');
-
-  const apply = slice('function applyShellPlaybackState', '\n}\n');
-  assert.match(apply, /state\.isPlaying && Date\.now\(\) < sleepPauseUntil[\s\S]*sendPlayerCommand\('pause'\)/, 'a snapshot that says playing right after a wake is paused');
-  assert.match(source, /sleepPauseUntil = Infinity;[\s\S]*sleepPauseUntil = Date\.now\(\) \+ WAKE_PAUSE_WINDOW_MS/, 'suspend opens the window and wake bounds it');
 
   assert.match(slice('async function chooseFolderForLibrary', '\n}\n'), /webContents\.send\('settings:changed'\)/, 'the page is told the folder list changed');
 

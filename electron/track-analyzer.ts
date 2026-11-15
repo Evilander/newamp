@@ -33,6 +33,7 @@ import {
 import {
   AnalysisAbortedError,
   AnalysisCrashedError,
+  AnalysisDrivePendingError,
   AnalysisEnvironmentError,
   AnalysisReadFailedError,
   AnalysisTimedOutError,
@@ -44,6 +45,7 @@ import {
 import { SONG_SCORE_SAMPLE_RATE, computeSongScore, type SongScore } from '../src/visualizer/eviland-score.js';
 import { killChild } from './kill-child.js';
 import {
+  INPUT_PROTOCOLS,
   REPLAYGAIN_TARGET_LUFS,
   awaitChildExit,
   normalizeReplayGainDb,
@@ -76,6 +78,8 @@ const SILENCE_LUFS = -60;
 const FFMPEG_IDLE_TIMEOUT_MS = 60_000;
 // A killed ffmpeg is waited for this long, so the next decode does not start while it still reads the share.
 const FFMPEG_EXIT_WAIT_MS = 2500;
+// The lowest exit code Windows gives a process that crashed (STATUS_* values, 0xC0000000 and up).
+const WINDOWS_CRASH_STATUS_MIN = 0xc0000000;
 // A stat on a share that stopped answering never returns; the queue gives up on it after this.
 const STAT_TIMEOUT_MS = 10_000;
 
@@ -125,7 +129,7 @@ let hungStats = 0;
 
 /** stat() for the background analysis, which must not wait for ever on a share that stopped answering. */
 export async function statWithin(path: string, ms = STAT_TIMEOUT_MS, read: (path: string) => Promise<Stats> = stat): Promise<Stats> {
-  if (hungStats > 0) throw new AnalysisUnavailableError(path, new Error('an earlier stat is still waiting on the drive'));
+  if (hungStats > 0) throw new AnalysisDrivePendingError(path);
   const pending = read(path);
   let timer: NodeJS.Timeout | undefined;
   const timedOut = new Promise<never>((_, reject) => {
@@ -155,7 +159,7 @@ export async function analyzeTrack(request: TrackAnalysisRequest): Promise<Track
   try {
     info = await statWithin(path);
   } catch (err) {
-    throw err instanceof AnalysisUnavailableError ? err : new AnalysisUnavailableError(path, err);
+    throw err instanceof AnalysisUnavailableError || err instanceof AnalysisDrivePendingError ? err : new AnalysisUnavailableError(path, err);
   }
   const pause = request.pause ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
   const decoded = await decode(path, want, signal);
@@ -244,6 +248,18 @@ function roundDna(dna: TrackDna): TrackDna {
   };
 }
 
+// What ffmpeg prints when the operating system will not open the input at all: a
+// file another program holds open (an antivirus scan, a sync client), or one
+// that moved since the stat. Indented lines are the input dump (tags), not errors.
+const OPEN_FAILURE = /:\s*(?:Permission denied|No such file or directory|Access is denied|The process cannot access the file because it is being used by another process)\.?\s*$/i;
+
+function openFailureLine(log: string): string | null {
+  for (const line of log.split(/\r?\n|\r/)) {
+    if (line && !/^\s/.test(line) && OPEN_FAILURE.test(line)) return line.trim();
+  }
+  return null;
+}
+
 interface Decoded {
   seconds: number;
   /** The first HEAD_SECONDS as floats; null when no PCM was asked for. */
@@ -258,7 +274,7 @@ function ffmpegArgs(path: string, want: AnalysisWanted): string[] {
   // Loudness and the waveform need the whole stretch; tempo, key and DNA only the head, and
   // reading more from a slow share just to discard it holds the drive for nothing.
   const seconds = want.loud || want.peaks ? MAX_ANALYSIS_SECONDS : HEAD_SECONDS;
-  const args = ['-hide_banner', '-nostdin', '-nostats', '-loglevel', want.loud ? 'info' : 'error', '-t', String(seconds), '-i', path];
+  const args = ['-hide_banner', '-nostdin', '-nostats', '-loglevel', want.loud ? 'info' : 'error', '-t', String(seconds), ...INPUT_PROTOCOLS, '-i', path];
   const pcmOut = ['-f', 's16le', 'pipe:1'];
   if (want.loud && needPcm) {
     // One decode, two branches: the loudness filter sees the file as it is,
@@ -379,9 +395,20 @@ function decode(path: string, want: AnalysisWanted, signal?: AbortSignal): Promi
         settle(new AnalysisCrashedError(path, closeSignal));
         return;
       }
+      // Windows has no death by signal: a crash is an exit with an NTSTATUS code (0xC0000005, an access violation).
+      if (process.platform === 'win32' && code >= WINDOWS_CRASH_STATUS_MIN) {
+        settle(new AnalysisCrashedError(path, `status 0x${code.toString(16).toUpperCase()}`));
+        return;
+      }
       // Loudness, tempo and peaks from the part before a failed read would be kept as the whole track's.
       if (readFailed()) {
         settle(new AnalysisReadFailedError(path));
+        return;
+      }
+      // Nothing was decoded and the input never opened: the file is busy or has moved, which is not a verdict on its audio.
+      const notOpened = pcmBytes === 0 && progressMicros === 0 ? openFailureLine(stderr) : null;
+      if (code !== 0 && notOpened) {
+        settle(new AnalysisUnavailableError(path, new Error(notOpened)));
         return;
       }
       if (code !== 0) {

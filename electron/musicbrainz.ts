@@ -152,7 +152,15 @@ export async function searchAlbumArt(
   for (const group of groups) {
     const base = releaseGroupToAlbumArtCandidate(group);
     if (!base) continue;
-    const art = await lookupCoverArt(base.releaseGroupId, fetchImpl, options.userAgent ?? MUSICBRAINZ_USER_AGENT);
+    let art: Awaited<ReturnType<typeof lookupCoverArt>>;
+    try {
+      art = await lookupCoverArt(base.releaseGroupId, fetchImpl, options.userAgent ?? MUSICBRAINZ_USER_AGENT);
+    } catch (err) {
+      // The archive stopped answering partway through: the covers already found
+      // are kept, and only a search that found none reports the failure.
+      if (!candidates.length) throw err;
+      break;
+    }
     if (!art) continue;
     candidates.push({ ...base, imageUrl: art.imageUrl, thumbnailUrl: art.thumbnailUrl });
     if (candidates.length >= limit) break;

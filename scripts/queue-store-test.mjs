@@ -83,6 +83,10 @@ await build({
 
 const settle = () => new Promise(setImmediate);
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
+// Listening is measured against performance.now(), which the test moves with the audio it plays.
+const realPerformanceNow = performance.now.bind(performance);
+let clock = 0;
+performance.now = () => clock;
 async function until(condition, ms = 4000) {
   const end = Date.now() + ms;
   while (!condition()) {
@@ -387,12 +391,80 @@ try {
     }
   }
 
+  // ---- a shuffle plays the track it prepared; a manual skip never trusts a pick that went stale ----
+  {
+    const realRandom = Math.random;
+    try {
+      Math.random = () => 0.05;
+      await reset(S, { mode: 'shuffle' });
+      await state().playQueue(tracks(8), 0);
+      engine.patchExternal({ currentTime: 175, duration: 180, playing: true });
+      assert.equal(S.prepares.length, 1, 'the last ten seconds prepare a track');
+      const prepared = S.prepares[0];
+      Math.random = () => 0.95;
+      engine.patchExternal({ currentTime: 179.9, playing: false, ended: true });
+      await until(() => S.plays.length === 2);
+      assert.equal(S.plays[1], prepared, 'the end of the track plays the one that was prepared, whatever the dice say now');
+
+      // A cued segment's end takes the same road.
+      await reset(S, { mode: 'shuffle' });
+      Math.random = () => 0.05;
+      await state().playQueue([track(1, { cueStart: 0, cueEnd: 180, duration: 180 }), ...tracks(7, 2)], 0);
+      engine.patchExternal({ currentTime: 175, duration: 600, playing: true });
+      const preparedAfterCue = S.prepares[0];
+      assert.ok(preparedAfterCue, 'a cued segment prepares its successor too');
+      Math.random = () => 0.95;
+      engine.patchExternal({ currentTime: 180, duration: 600, playing: true });
+      await until(() => S.plays.length === 2);
+      assert.equal(S.plays[1], preparedAfterCue, 'the end of the segment plays the prepared track');
+
+      // The prepared track leaves the queue before the end: a manual skip picks from the queue as it is.
+      Math.random = () => 0.05;
+      await reset(S, { mode: 'shuffle' });
+      await state().playQueue(tracks(8), 0);
+      engine.patchExternal({ currentTime: 175, duration: 180, playing: true });
+      const stale = S.prepares[0];
+      await state().removeQueuedTrack(state().queue.findIndex((entry) => entry.id === stale));
+      Math.random = () => 0.05;
+      await state().next();
+      const landed = S.plays.at(-1);
+      assert.notEqual(landed, stale, 'a skip does not play a track that is no longer in the queue');
+      assert.ok(state().queue.some((entry) => entry.id === landed), 'it plays one that is');
+      assert.equal(state().current.id, landed);
+    } finally {
+      Math.random = realRandom;
+    }
+  }
+
+  // ---- a skip waiting on the end-of-queue lookup stands down when the listener picks another track ----
+  {
+    await reset(S);
+    await state().playQueue(tracks(1), 0);
+    engine.patchExternal({ currentTime: 30, duration: 180, playing: true });
+    let answer;
+    api.getTracks = () => new Promise((resolve) => { answer = resolve; });
+    const waiting = state().next();
+    await settle();
+    assert.equal(typeof answer, 'function', 'the end of the queue went looking for more tracks');
+    await state().playTrack(track(50));
+    const started = S.plays.length;
+    api.getTracks = async () => [];
+    answer([track(1), track(60)]);
+    await waiting;
+    assert.equal(state().current.id, 50, 'the late answer does not move the listener off the track they chose');
+    assert.equal(S.plays.length, started, 'and starts nothing');
+    assert.ok(!state().queue.some((entry) => entry.id === 60), 'or adds its tracks');
+  }
+
   // ---- Prev wraps with repeat-all, and the track it lands on counts as a play once heard ----
   {
     // A library play is counted after half the track, not at the start.
     const listenToHalf = () => {
       engine.patchExternal({ currentTime: 0, duration: 180, playing: true });
-      for (let t = 3; t <= 90; t += 3) engine.patchExternal({ currentTime: t });
+      for (let t = 3; t <= 90; t += 3) {
+        clock += 3000;
+        engine.patchExternal({ currentTime: t });
+      }
     };
     await reset(S, { mode: 'repeat-all' });
     await state().playQueue(tracks(3), 0);
@@ -789,6 +861,7 @@ try {
   console.error(error.stack);
   process.exitCode = 1;
 } finally {
+  performance.now = realPerformanceNow;
   for (const rig of loaded) {
     rig.mod.clearToasts();
     rig.engine.dispose();

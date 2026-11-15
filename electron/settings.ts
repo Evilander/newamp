@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { unlink } from 'node:fs/promises';
-import { dirname, join, posix, win32 } from 'node:path';
+import { basename, dirname, join, posix, win32 } from 'node:path';
 import type { AppSettings, PlaybackResumeQueueEntry, PlaybackResumeServerTrack, RecoveryEvent } from '../shared/types.js';
 import { normalizePlaybackRate } from '../shared/tempo-trainer.js';
 import { normalizeAutoDjTarget } from '../shared/auto-dj.js';
@@ -13,6 +13,7 @@ import { emptyWindowState, normalizeWindowState } from './window-state.js';
 import {
   atomicWriteFileSync,
   durableWriteFileAsync,
+  findUnsavedTempCopies,
   isUnreadableFileError,
   quarantineCorruptFile,
   readFileSyncRetrying,
@@ -99,12 +100,18 @@ const MAX_LIBRARY_ROOTS = 256;
 // throw in the authorizer's loop and a relative entry would match nothing
 // sensible. Either path style counts as absolute, since a profile can come
 // over from another platform and its roots should survive the trip back.
-function normalizeLibraryRoots(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
+// `ignored`, when given, collects what was left out, as text for a log line.
+function normalizeLibraryRoots(value: unknown, ignored?: string[]): string[] {
+  if (!Array.isArray(value)) {
+    if (value !== undefined) ignored?.push(`${value === null ? 'null' : typeof value} where a list of folders belongs`);
+    return [];
+  }
   const roots: string[] = [];
   for (const entry of value) {
-    if (typeof entry !== 'string' || !entry || entry.length > 4096 || entry.includes('\0')) continue;
-    if (!posix.isAbsolute(entry) && !win32.isAbsolute(entry)) continue;
+    if (typeof entry !== 'string' || !entry || entry.length > 4096 || entry.includes('\0') || (!posix.isAbsolute(entry) && !win32.isAbsolute(entry))) {
+      ignored?.push(typeof entry === 'string' ? JSON.stringify(entry.slice(0, 100)) : typeof entry);
+      continue;
+    }
     if (!roots.includes(entry)) roots.push(entry);
     if (roots.length >= MAX_LIBRARY_ROOTS) break;
   }
@@ -358,6 +365,9 @@ function resumeEntryTrackId(entry: PlaybackResumeQueueEntry): number {
 
 const SUPPRESSION_RETRY_INTERVAL_MS = 10_000;
 
+const PERSIST_DELAY_MS = 800;
+const PERSIST_RETRY_MAX_MS = 30_000;
+
 // Name prefix of the rolling copies support-backup.ts writes under
 // <userData>/backups; the stamp in the name sorts oldest to newest.
 const DAILY_BACKUP_PREFIX = 'newamp-daily-';
@@ -390,6 +400,8 @@ export class SettingsStore {
   // a synchronous quit-path flush (newer data) can never be clobbered by a
   // slower async write (older data) landing after it.
   private persistSeq = 0;
+  // Writes that failed since one last landed; the first of a run is reported.
+  private failedWrites = 0;
   // Set when the file stayed locked through the whole startup retry budget
   // in the constructor below: it was never actually read, so `state` is
   // in-memory defaults only. persist()/persistAsync()/flushSync() all check
@@ -406,8 +418,15 @@ export class SettingsStore {
   // the file becomes readable again they are laid back over what it holds, so
   // the real settings don't replace them silently.
   private suppressedPatch: Partial<AppSettings> = {};
+  // The copy of an earlier session that this session's settings were taken from.
+  private restoredFrom: string | null = null;
 
-  constructor(private readonly file: string) {
+  // `onWriteFailed` hears about the first failed write of a run of them (a full
+  // or read-only disk, a lock that outlasts the retries), so the user can be told.
+  constructor(
+    private readonly file: string,
+    private readonly onWriteFailed?: (event: RecoveryEvent) => void,
+  ) {
     mkdirSync(dirname(file), { recursive: true });
     if (existsSync(file)) {
       let raw: string;
@@ -430,32 +449,119 @@ export class SettingsStore {
         return;
       }
       let corrupt = false;
+      const ignoredRoots: string[] = [];
       try {
-        this.state = this.parseSettingsJson(raw);
+        this.state = this.parseSettingsJson(raw, ignoredRoots);
       } catch (err) {
         corrupt = true;
-        // Reaching here means the bytes were actually read — this is
-        // confirmed invalid content (bad JSON, or a shape normalize/parse
-        // can't make sense of at all), not an I/O error, so quarantining is
-        // the right call. The user's roots and keys are still worth more than
-        // defaults, so the newest copy that parses is used before those.
-        const event = quarantineCorruptFile(this.file, 'settings', recoveryReason(err));
-        const recovered = this.loadRecoveredSettings();
-        if (event) {
-          if (recovered) event.reason = `${event.reason}; settings were restored from ${recovered.source}`;
-          this.recoveryEvents.push(event);
-        }
-        this.state = recovered?.state ?? freshDefaults();
+        this.state = this.recoverFromCorruptFile(err);
         this.persistOrDefer();
       }
-      if (!corrupt) this.saveLastGood(raw);
+      if (!corrupt) {
+        const unsaved = this.loadUnsavedCopy();
+        if (unsaved) {
+          this.state = this.adoptUnsavedCopy(unsaved);
+          this.persistOrDefer();
+        } else if (ignoredRoots.length) {
+          this.noteIgnoredRoots(ignoredRoots);
+        } else {
+          this.saveLastGood(raw);
+        }
+      }
     } else {
-      this.state = freshDefaults();
+      const unsaved = this.loadUnsavedCopy();
+      this.state = unsaved ? this.adoptUnsavedCopy(unsaved) : freshDefaults();
       this.persistOrDefer();
     }
     // Writes that were cut short by a crash leave temp files whose pid no
     // later launch matches. The library sweeps its own, once library.db loads.
     sweepOrphanedTempFiles(dirname(file));
+    this.noteKeptCopies();
+  }
+
+  // A replace that failed in an earlier session (antivirus, a sync client)
+  // leaves a whole copy of the file beside it, newer than the file itself (see
+  // recovery.ts). The newest such copy of settings.json that is newer than the
+  // file and loads like any settings file, field by field.
+  private loadUnsavedCopy(): { state: AppSettings; source: string } | null {
+    let fileModifiedAt = -1;
+    try {
+      fileModifiedAt = statSync(this.file).mtimeMs;
+    } catch {
+      /* no file: any copy is newer */
+    }
+    for (const { tempPath, targetPath } of findUnsavedTempCopies(dirname(this.file))) {
+      if (basename(targetPath) !== basename(this.file)) continue;
+      try {
+        if (statSync(tempPath).mtimeMs <= fileModifiedAt) continue;
+        return { state: this.parseSettingsJson(readFileSync(tempPath, 'utf-8')), source: tempPath };
+      } catch {
+        // Unreadable or not settings: it is reported with the other copies kept.
+      }
+    }
+    return null;
+  }
+
+  // The copy stays where it is: the next launch sweeps it once the file it
+  // would have replaced is newer.
+  private adoptUnsavedCopy(unsaved: { state: AppSettings; source: string }): AppSettings {
+    this.restoredFrom = unsaved.source;
+    this.recoveryEvents.push({
+      store: 'settings',
+      filePath: this.file,
+      backupPath: unsaved.source,
+      reason: 'settings were restored from an unsaved copy left by an earlier session',
+      recoveredAt: Date.now(),
+    });
+    return unsaved.state;
+  }
+
+  // Whole copies of the profile's files that an earlier session could not move
+  // into place and that nothing here used: they may hold the only copy of
+  // something, so they are left and listed.
+  private noteKeptCopies(): void {
+    for (const { tempPath, targetPath } of findUnsavedTempCopies(dirname(this.file))) {
+      if (tempPath === this.restoredFrom) continue;
+      this.recoveryEvents.push({
+        store: basename(targetPath) === 'podcasts.json' ? 'podcasts' : 'settings',
+        filePath: targetPath,
+        backupPath: tempPath,
+        reason: 'an unsaved copy of this file from an earlier session was kept',
+        recoveredAt: Date.now(),
+      });
+    }
+  }
+
+  // Reaching here means the bytes were actually read — this is confirmed
+  // invalid content (bad JSON, or a shape normalize/parse can't make sense of
+  // at all), not an I/O error, so quarantining is the right call. The user's
+  // roots and keys are still worth more than defaults, so the newest copy that
+  // parses is used before those.
+  private recoverFromCorruptFile(err: unknown): AppSettings {
+    const event = quarantineCorruptFile(this.file, 'settings', recoveryReason(err));
+    const recovered = this.loadRecoveredSettings();
+    if (recovered) this.restoredFrom = recovered.source;
+    if (event) {
+      if (recovered) event.reason = `${event.reason}; settings were restored from ${recovered.source}`;
+      this.recoveryEvents.push(event);
+    }
+    return recovered?.state ?? freshDefaults();
+  }
+
+  // Library folders the file named that cannot be folders (a relative path, a
+  // "~/Music") are left out of the settings. The file stays as it is so they
+  // can be corrected by hand, and the last-good copy, which may still hold the
+  // folders, is not replaced by a state without them.
+  private noteIgnoredRoots(ignored: string[]): void {
+    const shown = ignored.slice(0, 5).join(', ') + (ignored.length > 5 ? ` and ${ignored.length - 5} more` : '');
+    console.warn(`[newamp] settings: ${this.file}: library folders ignored: ${shown}`);
+    this.recoveryEvents.push({
+      store: 'settings',
+      filePath: this.file,
+      backupPath: this.file,
+      reason: `library folders ignored (each must be an absolute path): ${shown}`,
+      recoveredAt: Date.now(),
+    });
   }
 
   // The last settings.json that loaded cleanly, kept beside it so a file that
@@ -469,7 +575,11 @@ export class SettingsStore {
     }
   }
 
+  // The newest copy that parses: an unsaved one from an earlier session, which
+  // holds the latest state, then the last good file, then the daily backups.
   private loadRecoveredSettings(): { state: AppSettings; source: string } | null {
+    const unsaved = this.loadUnsavedCopy();
+    if (unsaved) return unsaved;
     for (const source of [`${this.file}.last-good`, ...dailyBackupSettingsFiles(dirname(this.file))]) {
       try {
         return { state: this.parseSettingsJson(readFileSync(source, 'utf-8')), source };
@@ -484,7 +594,7 @@ export class SettingsStore {
   // normalizes settings.json content. Throws on bad JSON or content a
   // normalizer genuinely can't make sense of; both callers treat that as
   // confirmed-invalid content, never as an I/O problem.
-  private parseSettingsJson(raw: string): AppSettings {
+  private parseSettingsJson(raw: string, ignoredRoots?: string[]): AppSettings {
     const json: unknown = JSON.parse(raw);
     if (!json || typeof json !== 'object' || Array.isArray(json)) {
       throw new Error('settings.json does not hold a JSON object');
@@ -493,7 +603,7 @@ export class SettingsStore {
     return {
       ...freshDefaults(),
       ...parsed,
-      libraryRoots: normalizeLibraryRoots(parsed.libraryRoots),
+      libraryRoots: normalizeLibraryRoots(parsed.libraryRoots, ignoredRoots),
       theme: normalizeTheme(parsed.theme),
       lastfmEnabled: parsed.lastfmEnabled === true,
       lastfmApiKey: normalizeOptionalSecret(parsed.lastfmApiKey),
@@ -580,9 +690,7 @@ export class SettingsStore {
     try {
       this.state = this.parseSettingsJson(raw);
     } catch (err) {
-      const event = quarantineCorruptFile(this.file, 'settings', recoveryReason(err));
-      if (event) this.recoveryEvents.push(event);
-      this.state = freshDefaults();
+      this.state = this.recoverFromCorruptFile(err);
     }
     this.state = this.applyPatch(this.state, this.suppressedPatch);
     this.suppressedPatch = {};
@@ -630,9 +738,11 @@ export class SettingsStore {
     return {
       ...base,
       ...pickKnownSettings(patch),
-      libraryRoots: patch.libraryRoots === undefined
-        ? base.libraryRoots
-        : normalizeLibraryRoots(patch.libraryRoots),
+      // Something that is not a list leaves the folders as they were; only a
+      // list, an empty one included, replaces them.
+      libraryRoots: Array.isArray(patch.libraryRoots)
+        ? normalizeLibraryRoots(patch.libraryRoots)
+        : base.libraryRoots,
       theme: patch.theme === undefined
         ? base.theme
         : normalizeTheme(patch.theme),
@@ -780,13 +890,33 @@ export class SettingsStore {
   // that fails (full disk, read-only volume) must not throw that back at the
   // caller as if the change had not happened: main keeps using the new value
   // either way. Keep it dirty and let the debounced path retry, and flushSync()
-  // on quit tries once more.
+  // on quit tries once more. The first failure of a run is reported, since
+  // nothing else tells the user the settings are not on disk.
   private persistOrDefer(): void {
     try {
       this.persist();
     } catch (err) {
-      console.error('settings persist failed; keeping the change in memory and retrying', err);
+      this.noteWriteFailed(err);
       this.schedulePersist();
+    }
+  }
+
+  private noteWriteFailed(err: unknown): void {
+    this.failedWrites += 1;
+    if (this.failedWrites > 1) return;
+    console.error('[newamp] settings: could not save; keeping the change in memory and retrying', err);
+    const event: RecoveryEvent = {
+      store: 'settings',
+      filePath: this.file,
+      backupPath: this.file,
+      reason: `${recoveryReason(err)}; changes are kept in memory and NewAmp keeps trying to save them`,
+      recoveredAt: Date.now(),
+    };
+    this.recoveryEvents.push(event);
+    try {
+      this.onWriteFailed?.(event);
+    } catch (callbackErr) {
+      console.error('[newamp] settings: the write-failure notice failed', callbackErr);
     }
   }
 
@@ -808,18 +938,25 @@ export class SettingsStore {
     // ever saw defaults.
     if (this.persistenceSuppressed) return;
     atomicWriteFileSync(this.file, JSON.stringify(this.state, null, 2));
+    this.failedWrites = 0;
   }
 
   // Debounced path for the resumeState autosave and the window geometry —
   // writing the full settings JSON synchronously every ~3s during playback was
-  // a real main-thread cost.
+  // a real main-thread cost. After failed writes the wait doubles each time, up
+  // to half a minute, so a disk that stays full is not hit by every autosave.
   private schedulePersist(): void {
     this.dirty = true;
     if (this.persistTimer) return;
+    const delay = Math.min(PERSIST_DELAY_MS * 2 ** Math.max(0, this.failedWrites - 1), PERSIST_RETRY_MAX_MS);
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
       void this.persistAsync();
-    }, 800);
+    }, delay);
+    // A retry after a failed write goes on for as long as the write keeps
+    // failing. It must not be what keeps the process alive: quitting flushes
+    // synchronously and reports what could not be saved.
+    if (this.failedWrites > 0) this.persistTimer.unref?.();
   }
 
   private async persistAsync(): Promise<void> {
@@ -855,9 +992,10 @@ export class SettingsStore {
         // path is suspended inside the replace.
         renameOverExistingSync(tmp, this.file);
         tmpHandled = true;
+        this.failedWrites = 0;
       } catch (err) {
-        console.error('settings persist failed', err);
-        this.dirty = true; // retry on the next scheduled persist
+        this.noteWriteFailed(err);
+        this.schedulePersist();
       } finally {
         if (!tmpHandled && !tmpHasCompleteSnapshot) {
           await unlink(tmp).catch(() => {});
@@ -930,6 +1068,7 @@ export class SettingsStore {
       // See persist(): never write over an original this session never read.
       if (this.persistenceSuppressed) return;
       atomicWriteFileSync(this.file, JSON.stringify(this.state, null, 2));
+      this.failedWrites = 0;
     }
   }
 

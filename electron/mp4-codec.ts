@@ -148,14 +148,25 @@ export async function readMoov(path: string): Promise<Buffer | null> {
 }
 
 async function read(file: FileHandle, buffer: Buffer, at: number, length: number, position: number): Promise<void> {
-  const { bytesRead } = await file.read(buffer, at, length, position);
-  if (bytesRead < Math.min(length, 8)) throw new Error('short read');
+  // A read can come back with less than was asked for without the file having
+  // ended, so it is asked again for the rest; only the end of the file stops it.
+  let got = 0;
+  while (got < length) {
+    const { bytesRead } = await file.read(buffer, at + got, length - got, position + got);
+    if (bytesRead === 0) break;
+    got += bytesRead;
+  }
+  if (got < Math.min(length, 8)) throw new Error('short read');
 }
+
+// No box in a real file has anywhere near this many children. A moov made of
+// nothing but 8-byte boxes would otherwise turn 32 MB into millions of objects.
+export const MAX_BOX_CHILDREN = 100_000;
 
 export function boxChildren(buf: Buffer, start: number, end: number): Mp4Box[] {
   const out: Mp4Box[] = [];
   let p = start;
-  while (p + 8 <= end) {
+  while (p + 8 <= end && out.length < MAX_BOX_CHILDREN) {
     let size = buf.readUInt32BE(p);
     let body = p + 8;
     if (size === 1) {

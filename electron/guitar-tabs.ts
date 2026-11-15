@@ -28,9 +28,16 @@ const UG_CHALLENGE_BODY_RE = /Just a moment|Cloudflare|challenge-platform/i;
 // the match backtrack.
 const CHORD_PATTERN = String.raw`([A-G](?:#|b)?)((?:maj|Maj|min|Min|dim|aug|sus|add|m|M|\d|[#b+-]|\([^)]*\)|\u00f8|\u00b0)*)(?:\/([A-G](?:#|b)?))?`;
 const CHORD_RE = new RegExp(`^${CHORD_PATTERN}$`);
-const CHORD_TAG_RE = new RegExp(`\\[${CHORD_PATTERN}\\]`);
+// A ChordPro tag is up to 32 characters in brackets. Whether they spell a chord
+// is decided on those characters alone, so nothing has to search ahead for a
+// closing bracket.
+const BRACKET_TAG_RE = /\[([^\]\r\n]{1,32})\]/g;
+// Every run of qualities reads one way, so a long odd token can't make this
+// backtrack: "mM" is left out because "m" then "M" already reads it. The token
+// ends where no word character follows; \b would fail after a sharp, which
+// ends in a non-word character, and leave the "#" behind when it moves.
 const CHORD_TOKEN_RE =
-  /\b([A-G](?:#|b)?)(maj|min|m|dim|aug|sus|add|M|mM|ø|o|[0-9]|[#b()+/-])*?(?:\/([A-G](?:#|b)?))?\b/g;
+  /\b([A-G](?:#|b)?)(maj|min|m|dim|aug|sus|add|M|ø|o|[0-9]|[#b()+/-])*?(?:\/([A-G](?:#|b)?))?(?!\w)/g;
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 const NOTE_INDEX = new Map<string, number>([
   ['C', 0],
@@ -354,12 +361,11 @@ function parseChordProDirective(line: string): { name: string; value: string } |
 }
 
 function splitChordProLine(line: string): { chords: string; lyrics: string } | null {
-  const chordTagRe = /\[([^\]\r\n]{1,32})\]/g;
   let found = false;
   let lastIndex = 0;
   const chords: string[] = [];
   let lyrics = '';
-  for (const match of line.matchAll(chordTagRe)) {
+  for (const match of line.matchAll(BRACKET_TAG_RE)) {
     const rawChord = match[1]?.trim() ?? '';
     lyrics += line.slice(lastIndex, match.index);
     if (isChordToken(rawChord)) {
@@ -386,7 +392,9 @@ function labelFromChordProDirective(name: string): string {
 
 function looksLikeLocalGuitarTab(content: string): boolean {
   if (/\{\s*(?:title|t|artist|subtitle|st|key|start_of_[a-z_]+)\b/i.test(content)) return true;
-  if (CHORD_TAG_RE.test(content)) return true;
+  for (const tag of content.matchAll(BRACKET_TAG_RE)) {
+    if (CHORD_RE.test(tag[1]!)) return true;
+  }
   // One stray chord-like word (an "A" or a "Dm" on a line of its own) is
   // not enough to take a lyrics file for a tab.
   return parseTabLines(content).some(
@@ -735,17 +743,21 @@ function cleanTabContent(content: string): string {
   // Tags come out before entities are decoded: a "&lt;" in the text is a
   // character to keep, not the start of a tag, and a bare "<3" isn't one
   // either, since a tag starts with a name or a slash.
+  //
+  // This is text from sites and files. Each pattern below stops at the next
+  // opening character, or at a short bound, so an opener with no closer costs
+  // a look ahead of that length and not a scan to the end of the text.
   return decodeHtmlEntities(
     content
-      .replace(/<span\b(?=[^>]*\bdata-name=["']([^"']+)["'])[^>]*>([\s\S]*?)<\/span>/gi, (_match, name: string, text: string) =>
+      .replace(/<span\b(?=[^<>]*\bdata-name=["']([^"']+)["'])[^<>]*>([\s\S]{0,256}?)<\/span>/gi, (_match, name: string, text: string) =>
         text.trim() ? text : name,
       )
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<\/p>|<\/div>/gi, '\n')
-      .replace(/<\/?[a-z][^>]*>/gi, ''),
+      .replace(/<\/?[a-z][^<>]*>/gi, ''),
   )
-    .replace(/\[ch\]([\s\S]*?)\[\/ch\]/gi, '$1')
-    .replace(/\[(?:\/)?(?:tab|chords?|verse|chorus|intro|outro|bridge|solo|riff|pre-chorus)[^\]]*\]/gi, '')
+    .replace(/\[ch\]([\s\S]{0,64}?)\[\/ch\]/gi, '$1')
+    .replace(/\[(?:\/)?(?:tab|chords?|verse|chorus|intro|outro|bridge|solo|riff|pre-chorus)[^[\]]*\]/gi, '')
     .replace(/\r/g, '')
     .replace(/\n{4,}/g, '\n\n\n')
     .trim();

@@ -182,6 +182,11 @@ Object.assign(win, {
 });
 globalThis.window = win;
 globalThis.localStorage = win.localStorage;
+// The play counter measures listening against performance.now(); listenUpTo
+// moves it along with the audio it plays.
+let clockSkew = 0;
+const realPerformanceNow = performance.now.bind(performance);
+performance.now = () => realPerformanceNow() + clockSkew;
 globalThis.AudioContext = FakeAudioContext;
 globalThis.Audio = FakeAudio;
 globalThis.AudioWorkletNode = FakeAudioWorkletNode;
@@ -346,14 +351,16 @@ async function until(test, timeoutMs, what) {
   }
 }
 
-// A library play is counted once half the track has been heard (or it plays
-// out), not when it starts. Walk the position forward the way playback does:
-// in steps under the five seconds the store reads as a seek, one engine tick
-// apart, so the heard time adds up.
+// A library play is counted once half the track has been heard, not when it
+// starts, and heard time is bounded by the clock: a position that moves further
+// than the clock did is a seek. Walk the position forward the way playback
+// does, one engine tick apart, with the clock moving as far as the audio.
 async function listenUpTo(seconds, move) {
   let at = store.getState().currentTime;
   while (at < seconds) {
-    at = Math.min(seconds, at + 4.9);
+    const next = Math.min(seconds, at + 4.9);
+    clockSkew += (next - at) * 1000;
+    at = next;
     move(at);
     await until(() => store.getState().currentTime >= at - 0.01, 2000, `the clock reaches ${at.toFixed(1)} s`);
   }
@@ -370,7 +377,8 @@ await scenario('chained queue', async () => {
   await store.getState().playQueue([A, B, C], 0);
   const tA = main.starts[0]?.token;
   worklet.segment(tA, { first: true });
-  worklet.pos(tA, 200);
+  // Half of A (300 s) is heard, which is what scrobbles it; a jump to 200 s would not.
+  await listenUpTo(200, (at) => worklet.pos(tA, at));
   await tick();
   // Inside the prepare window B is spliced in.
   worklet.pos(tA, 295);
@@ -718,6 +726,10 @@ await scenario('repeat one', async () => {
   await until(() => engine.getState().trackId === A.id && !engine.getState().ended && !transport.isUnackedChain(A.id, window.toAudioUrl(A.path)), 2000, 'the loop is acknowledged');
   worklet.pos(loop, 0.3);
   await tick();
+  // The first pass was only jumped through; half of the loop is a play of its own.
+  const playsAtLoopStart = main.plays.filter((id) => id === A.id).length;
+  await listenUpTo(155, (at) => worklet.pos(loop, at));
+  const playsOfLoop = main.plays.filter((id) => id === A.id).length;
   // Each loop chains the next one.
   worklet.pos(loop, 296);
   await tick();
@@ -733,7 +745,10 @@ await scenario('repeat one', async () => {
     repointedWhenRepeatOff: lastPrepare()?.next?.trackId === B.id,
     current: store.getState().current?.title ?? null,
     playing: store.getState().isPlaying,
+    playsAtLoopStart,
+    playsOfLoop,
   };
+  check(playsAtLoopStart === 0 && playsOfLoop === 1, `repeat one: the loop was not counted as a play of its own ${JSON.stringify(out)}`);
   check(out.chainedItself && out.secondLoopChained, `repeat one: the track was not chained to itself ${JSON.stringify(out)}`);
   check(!out.restartedStream && out.playing && out.current === 'loop-a', `repeat one: the loop restarted the stream ${JSON.stringify(out)}`);
   check(out.repointedWhenRepeatOff, `repeat one: turning repeat off did not re-point the splice ${JSON.stringify(out)}`);
@@ -776,6 +791,65 @@ await scenario('chained failure before audible', async () => {
   };
   check(out.onDecks && !out.transportActive && out.streamStopped, `chained failure: B stayed on the failed stream ${JSON.stringify(out)}`);
   check(out.fallbackReason === 'Resampling failed.' && out.playsOfBOnArrival === 0 && out.playsOfB === 1, `chained failure: ${JSON.stringify(out)}`);
+  return out;
+});
+
+await scenario('chained failure at the boundary', async () => {
+  await fresh();
+  const A = track('bf-a', 300);
+  const B = track('bf-b', 300);
+  const C = track('bf-c', 300);
+  await store.getState().playQueue([A, B, C], 0);
+  const tA = main.starts[0].token;
+  worklet.segment(tA, { first: true });
+  worklet.pos(tA, 295);
+  await tick();
+  const tB = lastPrepare()?.next?.token;
+  // B could not be opened. The producer sends its marker, the failure and the
+  // end of the stream together, so the worklet reports the failed boundary and
+  // that the stream drained in the same quantum.
+  const gen = transport.gen;
+  worklet.segment(tB, { failed: 'Decode failed.' });
+  transport.node.port.onmessage({ data: { gen, t: 'drained', token: tB, segmentFrames: 0, frame: 0 } });
+  const state = engine.getState();
+  const out = { playing: state.playing, ended: state.ended, trackId: state.trackId, streamStopped: !transport.hasStream() };
+  let onDecks = true;
+  try {
+    await until(() => store.getState().current?.id === B.id && decks().some((d) => !d.el.paused && d.el.src.includes('bf-b')), 2000, 'B moves to the decks');
+  } catch {
+    onDecks = false;
+  }
+  out.onDecks = onDecks;
+  check(out.playing && out.trackId === A.id && out.streamStopped, `chained failure at the boundary: the stream's end paused the track before the decks had it ${JSON.stringify(out)}`);
+  check(out.onDecks, `chained failure at the boundary: B did not reach the decks ${JSON.stringify(out)}`);
+  return out;
+});
+
+await scenario('seek shows buffering until audio flows', async () => {
+  await fresh();
+  const A = track('sb-a', 300);
+  await store.getState().playQueue([A], 0);
+  const tA = main.starts[0].token;
+  worklet.segment(tA, { first: true });
+  worklet.pos(tA, 40);
+  await tick();
+  const before = engine.getState().buffering;
+  store.getState().seek(120);
+  const during = engine.getState().buffering;
+  const restart = main.starts.at(-1);
+  // The new stream's first frames arrive: the worklet's first position report is the end of the wait.
+  worklet.segment(restart.token, { first: true });
+  const stillWaiting = engine.getState().buffering;
+  worklet.pos(restart.token, 0.2);
+  const after = engine.getState().buffering;
+  // A seek while paused has nothing to wait for on screen.
+  engine.pause();
+  store.getState().seek(200);
+  const pausedSeek = engine.getState().buffering;
+  const out = { before, during, restartAt: restart.startAt, stillWaiting, after, pausedSeek };
+  check(before === false && during === true, `seek: a seek into a stream that has not started is not buffering ${JSON.stringify(out)}`);
+  check(restart.startAt === 120 && stillWaiting === true && after === false, `seek: buffering did not end with the first position report ${JSON.stringify(out)}`);
+  check(pausedSeek === false, `seek: a seek while paused shows buffering ${JSON.stringify(out)}`);
   return out;
 });
 

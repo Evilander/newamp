@@ -562,9 +562,9 @@ async function downloadPodcastEpisodeOnce(store: PodcastStore, input: PodcastDow
 
 export function parsePodcastFeed(xml: string, feedUrl: string, fetchedAt = Date.now()): PodcastSubscription {
   const normalizedFeedUrl = normalizeFeedUrl(feedUrl);
-  const channelXml = firstMatch(xml, /<channel\b[^>]*>([\s\S]*?)<\/channel>/i) ?? xml;
+  const channelXml = blocks(xml, 'channel', 1)[0] ?? xml;
   const title = textOf(channelXml, 'title') || hostnameTitle(normalizedFeedUrl);
-  const imageUrl = attributeOf(channelXml, 'itunes:image', 'href') ?? textOf(firstMatch(channelXml, /<image\b[^>]*>([\s\S]*?)<\/image>/i) ?? '', 'url');
+  const imageUrl = attributeOf(channelXml, 'itunes:image', 'href') ?? textOf(blocks(channelXml, 'image', 1)[0] ?? '', 'url');
   const itemBlocks = blocks(channelXml, 'item');
   const atomEntryBlocks = itemBlocks.length ? [] : blocks(xml, 'entry');
 
@@ -665,25 +665,40 @@ function normalizeEpisode(value: Partial<PodcastEpisode>, feedUrl: string, feedT
   };
 }
 
-function blocks(xml: string, tag: string): string[] {
-  return [...xml.matchAll(new RegExp(`<${escapeRegExp(tag)}\\b[^>]*>([\\s\\S]*?)<\\/${escapeRegExp(tag)}>`, 'gi'))]
-    .map((match) => match[1] ?? '');
+// The text between <tag ...> and </tag>, for each such element in order, up to
+// `limit` of them. A feed is whatever the server sends, so nothing here may
+// search to the end of the document for every opener: each closer is looked for
+// from the end of its opener, and the walk stops at the first opener that has
+// none, since no later one can have one either. An opener's attributes end at
+// the next angle bracket for the same reason.
+function blocks(xml: string, tag: string, limit = Number.POSITIVE_INFINITY): string[] {
+  const name = escapeRegExp(tag);
+  const open = new RegExp(`<${name}\\b[^<>]*>`, 'gi');
+  const close = new RegExp(`<\\/${name}>`, 'gi');
+  const found: string[] = [];
+  while (found.length < limit && open.exec(xml)) {
+    close.lastIndex = open.lastIndex;
+    const end = close.exec(xml);
+    if (!end) break;
+    found.push(xml.slice(open.lastIndex, end.index));
+    open.lastIndex = close.lastIndex;
+  }
+  return found;
 }
 
 function textOf(xml: string, tag: string): string | null {
-  const value = firstMatch(xml, new RegExp(`<${escapeRegExp(tag)}\\b[^>]*>([\\s\\S]*?)<\\/${escapeRegExp(tag)}>`, 'i'));
-  return normalizeText(value);
+  return normalizeText(blocks(xml, tag, 1)[0]);
 }
 
 function attributeOf(xml: string, tag: string, attribute: string): string | null {
-  const tagMatch = xml.match(new RegExp(`<${escapeRegExp(tag)}\\b[^>]*>`, 'i'))?.[0];
+  const tagMatch = xml.match(new RegExp(`<${escapeRegExp(tag)}\\b[^<>]*>`, 'i'))?.[0];
   if (!tagMatch) return null;
   const value = tagMatch.match(new RegExp(`${escapeRegExp(attribute)}\\s*=\\s*["']([^"']+)["']`, 'i'))?.[1] ?? null;
   return normalizeMaybeUrl(value);
 }
 
 function atomAudioLink(xml: string): string | null {
-  for (const match of xml.matchAll(/<link\b[^>]*>/gi)) {
+  for (const match of xml.matchAll(/<link\b[^<>]*>/gi)) {
     const tag = match[0];
     const type = tag.match(/\btype\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase() ?? '';
     const rel = tag.match(/\brel\s*=\s*["']([^"']+)["']/i)?.[1]?.toLowerCase() ?? '';
@@ -695,14 +710,26 @@ function atomAudioLink(xml: string): string | null {
   return null;
 }
 
-function firstMatch(value: string, pattern: RegExp): string | null {
-  return value.match(pattern)?.[1] ?? null;
+// Each <![CDATA[ ... ]]> section replaced by what it holds; an unclosed one is
+// left as it is, and the search for later ones stops there.
+function unwrapCdata(value: string): string {
+  let out = '';
+  let from = 0;
+  for (;;) {
+    const open = value.indexOf('<![CDATA[', from);
+    if (open < 0) break;
+    const close = value.indexOf(']]>', open + 9);
+    if (close < 0) break;
+    out += value.slice(from, open) + value.slice(open + 9, close);
+    from = close + 3;
+  }
+  return out + value.slice(from);
 }
 
 function normalizeText(value: string | null | undefined): string | null {
   if (!value) return null;
-  const cdata = value.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
-  const stripped = cdata.replace(/<[^>]+>/g, ' ');
+  const cdata = unwrapCdata(value);
+  const stripped = cdata.replace(/<[^<>]+>/g, ' ');
   const decoded = decodeEntities(stripped).replace(/\s+/g, ' ').trim();
   return decoded || null;
 }
@@ -1096,7 +1123,13 @@ function readBodyText(res: http.IncomingMessage, body: Readable, maxBytes: numbe
       cleanup();
       rejectPromise(err);
     };
-    const onError = (err: Error) => fail(describeAbort(controller, err));
+    const onError = (err: Error) => {
+      fail(describeAbort(controller, err));
+      // A body that would not decode is not read any further, and its
+      // connection is closed instead of being held until the server gives up.
+      res.destroy();
+      if (body !== res) body.destroy();
+    };
     const onAborted = () => fail(describeAbort(controller, new Error('Podcast request was aborted')));
     const onData = (chunk: Buffer) => {
       total += chunk.length;

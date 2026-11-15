@@ -113,6 +113,9 @@ await writeFile(join(loops, 'Drum Loop.aif'), 'not audio');
 await scanner.start([music]);
 const loopRow = () => library.db.exec(`SELECT id, path, missing_since FROM tracks WHERE path LIKE '%Drum Loop.aif'`)[0]?.values[0];
 assert.ok(loopRow(), 'the loop was indexed while its folder was not skipped');
+// The tag backfill a scan starts reads the files it could not parse; Windows
+// will not rename a folder while one of them is open.
+await scanner.startTagBackfill();
 await rename(loops, join(music, 'Apple Loops'));
 library.db.run(`UPDATE tracks SET path = ? WHERE id = ?`, [join(music, 'Apple Loops', 'Drum Loop.aif'), loopRow()[0]]);
 await scanner.start([music]);

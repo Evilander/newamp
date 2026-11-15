@@ -14,12 +14,14 @@
 // http://desktop.local:17117/random.m3u, and the queue keeps playing.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { createReadStream, statSync } from 'node:fs';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import type { LibraryStore } from './library.js';
+import { isStorageError } from './read-failure.js';
 import { remotePageHtml } from './remote-page.js';
 
 // One playlist response is capped so a big library does not stall the main
@@ -261,8 +263,18 @@ export class RadioBrain {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
-      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-      const path = decodeURIComponent(url.pathname);
+      let url: URL;
+      let path: string;
+      try {
+        url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+        path = decodeURIComponent(url.pathname);
+      } catch {
+        // Answered before the token check, so it says nothing but that the request is malformed.
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.end('Bad request');
+        return;
+      }
 
       // The remote page shell is the ONLY unauthenticated route — it contains
       // no data (the token rides the URL #fragment, which never reaches the
@@ -598,8 +610,14 @@ export class RadioBrain {
     }
     let size = 0;
     try {
-      size = statSync(track.path).size;
-    } catch {
+      size = await fileSizeWithin(track.path);
+    } catch (err) {
+      if (isStorageError(err)) {
+        res.statusCode = 503;
+        res.setHeader('Retry-After', '5');
+        res.end('Storage unavailable');
+        return;
+      }
       res.statusCode = 404;
       res.end('Track file missing');
       return;
@@ -685,16 +703,58 @@ function drained(res: ServerResponse): Promise<void> {
   });
 }
 
+// A stat on a share that stopped answering never returns, and giving up on it
+// does not free the thread it is stuck on. While one is still waiting no more
+// are started, so a dead mount costs one thread and not the pool.
+const STAT_TIMEOUT_MS = 10_000;
+let hungStats = 0;
+
+/** Size of the file at `path`. Rejects with code ETIMEDOUT when the drive does not answer within `ms`. */
+export async function fileSizeWithin(
+  path: string,
+  ms = STAT_TIMEOUT_MS,
+  read: (path: string) => Promise<{ size: number }> = stat,
+): Promise<number> {
+  const stalled = (why: string): Error => Object.assign(new Error(why), { code: 'ETIMEDOUT' });
+  if (hungStats > 0) throw stalled('an earlier stat is still waiting on the drive');
+  const pending = read(path);
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      hungStats += 1;
+      void pending.then(() => undefined, () => undefined).then(() => {
+        hungStats -= 1;
+      });
+      reject(stalled(`no answer from the drive in ${ms / 1000} s`));
+    }, ms);
+  });
+  try {
+    return (await Promise.race([pending, timedOut])).size;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Tunnels, VM bridges and container networks come first in some interface
 // lists but are not where a phone on the same Wi-Fi can reach this machine.
-const VIRTUAL_INTERFACE = /^(utun|bridge|vmnet|vboxnet|docker|veth|br-|awdl|llw|ap\d|vethernet|tailscale|zt)/i;
+// macOS and Linux name an interface by prefix; Windows names an adapter the way
+// its driver or its owner did ("vEthernet (WSL)", "VirtualBox Host-Only Network").
+const VIRTUAL_INTERFACE = new RegExp(
+  '^(?:utun|bridge|vmnet|vboxnet|docker|veth|br-|virbr|lxcbr|lxdbr|cni|flannel|podman|awdl|llw|ap\\d|zt|tun\\d|tap\\d|wg\\d|ppp\\d)'
+    + '|tailscale|zerotier|wireguard|openvpn|hamachi|vmware|virtualbox|host-only|hyper-v|\\bwsl\\b|loopback|npcap'
+    + '|bluetooth|teredo|isatap|\\bvpn\\b|\\btap\\b|local area connection\\*',
+  'i',
+);
+// What a phone on the same network is most likely to reach this machine through:
+// the wired and wireless adapters of each platform.
+const LAN_INTERFACE = /^(?:en\d+|eth\d+|eno\d|ens\d|enp\d|enx|wlan\d|wlp\d|wlo\d|wlx|ethernet|wi-?fi|wireless|wlan|local area connection)/i;
 
-/** The address a phone on the local network is most likely to reach: en0/en1 first, tunnels and VM bridges last. */
+/** The address a phone on the local network is most likely to reach: en0, then wired and wireless adapters, tunnels and VM bridges last. */
 export function pickLocalAddress(interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()): string {
   let best: { address: string; rank: number } | null = null;
   for (const [name, list] of Object.entries(interfaces)) {
     if (!list) continue;
-    const rank = name === 'en0' ? 0 : /^en\d+$/.test(name) ? 1 : VIRTUAL_INTERFACE.test(name) ? 3 : 2;
+    const rank = name === 'en0' ? 0 : VIRTUAL_INTERFACE.test(name) ? 3 : LAN_INTERFACE.test(name) ? 1 : 2;
     for (const iface of list) {
       if (iface.family !== 'IPv4' || iface.internal || iface.address.startsWith('169.254.')) continue;
       if (!best || rank < best.rank) best = { address: iface.address, rank };

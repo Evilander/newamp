@@ -3,9 +3,13 @@
 //  - a path whose stat fails for any reason but "not there" (a timeout, an I/O
 //    error, no permission) is neither present nor gone: nothing is marked
 //    missing for it and "Clean missing files" keeps the track as offline;
-//  - the async marking and clean-up give the same answers as the sync ones;
-//  - a tmp copy left beside library.db by a dead write is swept on open;
-//  - folders play in album order (numbers compared as numbers), singles by name;
+//  - the async marking and clean-up give the same answers as the sync ones, and
+//    look again at the tracks they picked before they mark or delete them;
+//  - a tmp copy left beside library.db by a dead write is swept on open, but a
+//    newer whole copy, left by a replace that kept failing, is kept and reported;
+//  - saves that keep failing are retried at the pace of the delay and reported;
+//  - folders play in album order (numbers compared as numbers), singles by name,
+//    each directory together, and a long folder is sorted once, not per page;
 //  - searching "music" doesn't match every track through the library's own
 //    folder, and accented paths match in either Unicode form;
 //  - pages past the first ones are cut from one sorted id list;
@@ -14,11 +18,11 @@
 //  - setting the stars a track already shows keeps its finer score.
 // Run: npm run build:electron && node scripts/library-storage-errors-test.mjs
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { LibraryStore, normalizePruneTargets, pathPresence, pathPresenceAsync } from '../dist-electron/electron/library.js';
+import { chmodSync, copyFileSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync, existsSync } from 'node:fs';
+import fsp, { mkdir, rm, writeFile } from 'node:fs/promises';
+import { basename, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { LibraryStore, normalizePruneTargets, pathPresence, pathPresenceAsync, presenceOfError } from '../dist-electron/electron/library.js';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const root = join(repoRoot, 'tmp', 'library-storage-errors-test');
@@ -59,6 +63,17 @@ if (canDenyAccess) {
     chmodSync(locked, 0o755);
   }
 }
+// The permission case above only runs for a non-root POSIX user. What each error
+// code is taken to mean is checked here for every platform: only "no such file"
+// and "not a directory" are a file that is gone; a timeout, an I/O error, a
+// refusal, a stale handle or a path the system will not parse is a question the
+// storage did not answer.
+for (const code of ['ENOENT', 'ENOTDIR']) assert.equal(presenceOfError({ code }), 'absent', `${code} is a file that is not there`);
+for (const code of ['ETIMEDOUT', 'EIO', 'EPERM', 'EACCES', 'ESTALE', 'ENOTCONN', 'EBUSY', 'ELOOP', 'ENAMETOOLONG', 'EINVAL', 'UNKNOWN']) {
+  assert.equal(presenceOfError({ code }), 'unknown', `${code} is not evidence that the file is gone`);
+}
+assert.equal(presenceOfError(new Error('no code')), 'unknown');
+assert.equal(presenceOfError(null), 'unknown');
 
 // ---- marking missing, sync and async
 const library = await LibraryStore.open(join(root, 'library.db'));
@@ -68,7 +83,7 @@ library.upsertTracks([
   incoming(join(music, 'Sub', 'Vanished', 'old.mp3')),
   ...(canDenyAccess ? [incoming(join(music, 'Locked', 'a.mp3'))] : []),
 ]);
-const missingPaths = () => library.getTracks({ limit: 100 }).filter((track) => track.missingSince).map((track) => track.path.split('/').pop()).sort();
+const missingPaths = () => library.getTracks({ limit: 100 }).filter((track) => track.missingSince).map((track) => basename(track.path)).sort();
 const targets = [join(music, 'Present'), join(music, 'Sub', 'Vanished'), ...(canDenyAccess ? [join(music, 'Locked')] : [])];
 if (canDenyAccess) chmodSync(join(music, 'Locked'), 0o000);
 try {
@@ -103,7 +118,7 @@ if (canDenyAccess) {
 }
 const pruned = await library.pruneMissingTracksAsync(undefined, roots);
 assert.equal(pruned.removed, 2);
-assert.deepEqual(library.getTracks({ limit: 100 }).map((track) => track.path.split('/').pop()).sort(), canDenyAccess ? ['a.mp3', 'here.mp3'] : ['here.mp3']);
+assert.deepEqual(library.getTracks({ limit: 100 }).map((track) => basename(track.path)).sort(), canDenyAccess ? ['a.mp3', 'here.mp3'] : ['here.mp3']);
 library.close();
 
 // ---- a stale tmp copy is swept on open, a fresh one is not
@@ -124,6 +139,257 @@ await mkdir(tmpDir, { recursive: true });
   assert.equal(existsSync(stale), false, 'the stale tmp copy is removed');
   assert.equal(existsSync(fresh), true, 'a recent one may belong to a write in progress');
   second.close();
+}
+
+// ---- a newer copy left by a replace that kept failing is put in place, not swept
+{
+  const dir = join(root, 'unsaved');
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, 'library.db');
+  const first = await LibraryStore.open(file);
+  first.upsertTracks([incoming('/m/one.mp3')]);
+  first.close();
+  const oneTrack = readFileSync(file);
+  // What an earlier session had in memory when it could not replace library.db: one more track.
+  const later = await LibraryStore.open(join(dir, 'later.db'));
+  later.upsertTracks([incoming('/m/one.mp3'), incoming('/m/two.mp3')]);
+  const twoTracks = Buffer.from(later.exportSnapshot());
+  later.close();
+  const at = (minutesAgo) => new Date(Date.now() - minutesAgo * 60_000);
+  const place = (folder, name, bytes, minutesAgo) => {
+    const path = join(folder, name);
+    writeFileSync(path, bytes);
+    utimesSync(path, at(minutesAgo), at(minutesAgo));
+    return path;
+  };
+  const siblings = (folder, start) => readdirSync(folder).filter((name) => name.startsWith(start));
+  utimesSync(file, at(60), at(60));
+  const newest = place(dir, 'library.db.tmp-4242-sync', twoTracks, 10);
+  const sameProcess = place(dir, 'library.db.tmp-4242-5', oneTrack, 20);
+  const otherProcess = place(dir, 'library.db.tmp-4245-2', oneTrack, 15);
+  const cutOff = place(dir, 'library.db.tmp-4243-7', twoTracks.subarray(0, 5000), 10);
+  const older = place(dir, 'library.db.tmp-4244-3', twoTracks, 120);
+  const second = await LibraryStore.open(file);
+  assert.equal(second.getTrackCount(), 2, 'the newest whole copy is the library that opens');
+  for (const gone of [newest, sameProcess, cutOff, older]) assert.equal(existsSync(gone), false, `${gone} is gone`);
+  assert.deepEqual(siblings(dir, 'library.db.tmp-'), [], 'no temp copy is left to be swept later');
+  const replaced = siblings(dir, 'library.db.replaced-');
+  assert.equal(replaced.length, 1, 'the library.db it replaced is kept');
+  assert.deepEqual(readFileSync(join(dir, replaced[0])), oneTrack);
+  const unsaved = siblings(dir, 'library.db.unsaved-');
+  assert.equal(unsaved.length, 1, 'a whole copy from another process is kept under its own name');
+  assert.match(unsaved[0], /^library\.db\.unsaved-4245-/);
+  assert.equal(second.recoveryEvents.length, 2);
+  assert.deepEqual(second.recoveryEvents.map((event) => event.backupPath), [join(dir, replaced[0]), join(dir, unsaved[0])], 'each notice says where the file it concerns is');
+  second.close();
+  const again = await LibraryStore.open(file);
+  assert.equal(again.getTrackCount(), 2, 'and the next launch finds the same library');
+  assert.equal(again.recoveryEvents.length, 0, 'with nothing more to say');
+  again.close();
+
+  // A library.db that fails its integrity check is moved aside, as before; the copy the
+  // failed replace left is the library there is, so it is put in place, not left behind.
+  const brokenDir = join(dir, 'broken');
+  await mkdir(brokenDir, { recursive: true });
+  writeFileSync(join(brokenDir, 'library.db'), 'this is not a database');
+  const copy = place(brokenDir, 'library.db.tmp-4242-sync', twoTracks, 10);
+  const begun = await LibraryStore.open(join(brokenDir, 'library.db'));
+  assert.equal(begun.getTrackCount(), 2);
+  assert.equal(existsSync(copy), false);
+  assert.equal(siblings(brokenDir, 'library.db.corrupt-').length, 1, 'the unreadable file is kept aside');
+  assert.equal(begun.recoveryEvents.length, 2, 'and both steps are reported');
+  begun.close();
+
+  // No library.db at all, and a whole copy beside where it was.
+  const goneDir = join(dir, 'gone');
+  await mkdir(goneDir, { recursive: true });
+  place(goneDir, 'library.db.tmp-4242-sync', twoTracks, 10);
+  const restored = await LibraryStore.open(join(goneDir, 'library.db'));
+  assert.equal(restored.getTrackCount(), 2);
+  assert.match(restored.recoveryEvents[0].reason, /missing/);
+  restored.close();
+
+  // The whole sequence, with real failures: a flush writes its temp copy, the replace of
+  // library.db is refused, the app quits, and starts again.
+  const lockedDir = join(dir, 'locked');
+  await mkdir(lockedDir, { recursive: true });
+  const lockedFile = join(lockedDir, 'library.db');
+  const session = await LibraryStore.open(lockedFile);
+  session.upsertTracks([incoming('/m/one.mp3')]);
+  await session.albumsReady?.();
+  await session.flushPendingWrites();
+  const before = readFileSync(lockedFile);
+  await rm(lockedFile);
+  await mkdir(lockedFile);
+  session.upsertTracks([incoming('/m/two.mp3'), incoming('/m/three.mp3')]);
+  await session.flushAsync();
+  assert.equal(session.dirty, true, 'the replace was refused');
+  assert.throws(() => session.close(), /complete copy/, 'and so is the one at quit');
+  // The process would be gone; the retry the failed quit-time save armed must not run in this one.
+  clearTimeout(session.persistTimer);
+  const leftovers = siblings(lockedDir, 'library.db.tmp-');
+  assert.ok(leftovers.length >= 1, 'the failed saves left their copies');
+  await rm(lockedFile, { recursive: true });
+  writeFileSync(lockedFile, before);
+  utimesSync(lockedFile, at(60), at(60));
+  leftovers.forEach((name, index) => utimesSync(join(lockedDir, name), at(10 - index), at(10 - index)));
+  const started = await LibraryStore.open(lockedFile);
+  assert.equal(started.getTrackCount(), 3, 'the next start has everything the last session had');
+  assert.deepEqual(siblings(lockedDir, 'library.db.tmp-'), []);
+  assert.equal(siblings(lockedDir, 'library.db.replaced-').length, 1);
+  started.close();
+}
+
+// ---- clean missing files: a file that came back since the sweep is not deleted
+{
+  const lib = await LibraryStore.open(join(root, 'recheck.db'));
+  const folder = join(root, 'Recheck', 'Album');
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(join(folder, 'stays.mp3'), 'x');
+  lib.upsertTracks([incoming(join(folder, 'stays.mp3')), incoming(join(folder, 'back.mp3')), incoming(join(folder, 'gone.mp3'))]);
+  const sweepRoots = [join(root, 'Recheck')];
+  const preview = await lib.previewPruneMissingTracksAsync(undefined, sweepRoots);
+  assert.equal(preview.tracks, 2, 'both missing files are proven gone when the sweep is made');
+  // The removal that follows the preview reuses its sweep; the file returns before it.
+  writeFileSync(join(folder, 'back.mp3'), 'x');
+  const result = await lib.pruneMissingTracksAsync(undefined, sweepRoots);
+  assert.equal(result.removed, 1, 'only the file that is still gone is removed');
+  assert.deepEqual(lib.getTracks({ limit: 10 }).map((track) => basename(track.path)).sort(), ['back.mp3', 'stays.mp3']);
+  lib.close();
+}
+
+// ---- marking missing: the tracks picked are looked at again before they are marked
+{
+  const lib = await LibraryStore.open(join(root, 'mark.db'));
+  const folder = join(root, 'Mark', 'Album');
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(join(folder, 'stays.mp3'), 'x');
+  lib.upsertTracks([incoming(join(folder, 'stays.mp3')), incoming(join(folder, 'flicker.mp3')), incoming(join(folder, 'gone.mp3'))]);
+  // flicker.mp3 is not there when the folder is first looked at and is back for the second look.
+  const realReaddir = fsp.readdir;
+  let looks = 0;
+  fsp.readdir = async (path, ...rest) => {
+    if (path === folder) {
+      looks += 1;
+      if (looks === 2) writeFileSync(join(folder, 'flicker.mp3'), 'x');
+    }
+    return realReaddir(path, ...rest);
+  };
+  let marked;
+  try {
+    marked = await lib.markTracksMissingAsync([folder]);
+  } finally {
+    fsp.readdir = realReaddir;
+  }
+  assert.equal(looks, 2, 'the folder is looked at again before anything is marked');
+  assert.equal(marked, 1, 'only the file that is still gone is marked');
+  assert.deepEqual(lib.getTracks({ limit: 10 }).filter((track) => track.missingSince).map((track) => basename(track.path)), ['gone.mp3']);
+
+  // A store closed while the checks were under way marks nothing and does not throw.
+  const closing = join(root, 'Mark', 'Closing');
+  mkdirSync(closing, { recursive: true });
+  lib.upsertTracks([incoming(join(closing, 'missing.mp3'))]);
+  fsp.readdir = async (path, ...rest) => {
+    if (path === closing) lib.close();
+    return realReaddir(path, ...rest);
+  };
+  try {
+    assert.equal(await lib.markTracksMissingAsync([closing]), 0);
+  } finally {
+    fsp.readdir = realReaddir;
+  }
+}
+
+// ---- marking what a scan did not find, async: the same answers as the sync form, and careful
+{
+  const setup = async (name) => {
+    const home = join(root, `Unfound-${name}`);
+    const music = join(home, 'Music');
+    const lib = await LibraryStore.open(join(home, 'library.db'));
+    const tracks = [];
+    for (const folder of ['A', 'B', 'C']) {
+      mkdirSync(join(music, folder), { recursive: true });
+      writeFileSync(join(music, folder, 'keep.mp3'), 'x');
+      tracks.push(incoming(join(music, folder, 'keep.mp3')), incoming(join(music, folder, 'missing.mp3')));
+    }
+    lib.upsertTracks(tracks);
+    const found = ['A', 'B', 'C'].map((folder) => join(music, folder, 'keep.mp3'));
+    const missing = () => lib.getTracks({ limit: 100 }).filter((track) => track.missingSince).map((track) => basename(track.path));
+    return { home, music, lib, found, missing };
+  };
+
+  // Same filtering as the sync form: a file in a folder the walk could not list is left
+  // alone, a path the scanner skips is marked without a stat, a folder that is gone marks its files.
+  {
+    const results = [];
+    for (const form of ['sync', 'async']) {
+      const { music, lib, found, missing } = await setup(`same-${form}`);
+      mkdirSync(join(music, 'Unlisted'), { recursive: true });
+      lib.upsertTracks([
+        incoming(join(music, 'Unlisted', 'x.mp3')),
+        incoming(join(music, 'Vanished', 'old.mp3')),
+        incoming(join(music, 'A', '._stub.mp3')),
+      ]);
+      const args = [[music], found, [join(music, 'Unlisted')]];
+      const marked = form === 'sync' ? lib.markUnfoundTracksMissing(...args) : await lib.markUnfoundTracksMissingAsync(...args);
+      results.push({ marked, missing: missing().sort() });
+      lib.close();
+    }
+    assert.deepEqual(results[1], results[0], 'the async form marks what the sync form does');
+    assert.deepEqual(results[0].missing, ['._stub.mp3', 'missing.mp3', 'missing.mp3', 'missing.mp3', 'old.mp3']);
+  }
+
+  // The walked root stops answering after the folders have been read once: a drive that is
+  // unplugged (every folder then reads as gone) or a share that times out. Nothing is marked.
+  const realReaddir = fsp.readdir;
+  for (const [name, stopAnswering] of [
+    ['unplugged', (music) => rmSync(music, { recursive: true, force: true })],
+    ['timeout', () => { throw Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }); }],
+  ]) {
+    const { music, lib, found, missing } = await setup(name);
+    let reads = 0;
+    fsp.readdir = async (path, ...rest) => {
+      if (String(path).startsWith(music)) {
+        reads += 1;
+        if (reads === 4) stopAnswering(music);
+        else if (reads > 4 && name === 'timeout') stopAnswering(music);
+      }
+      return realReaddir(path, ...rest);
+    };
+    let marked;
+    try {
+      marked = await lib.markUnfoundTracksMissingAsync([music], found);
+    } finally {
+      fsp.readdir = realReaddir;
+    }
+    assert.ok(reads >= 4, `${name}: the folders were read a second time`);
+    assert.equal(marked, 0, `${name}: nothing is marked once the root stops answering`);
+    assert.deepEqual(missing(), []);
+    lib.close();
+  }
+
+  // A file that is gone at the first look and back at the second is not marked.
+  {
+    const { music, lib, found, missing } = await setup('back');
+    let reads = 0;
+    fsp.readdir = async (path, ...rest) => {
+      if (String(path).startsWith(music)) {
+        reads += 1;
+        if (reads === 4) writeFileSync(join(music, 'A', 'missing.mp3'), 'x');
+      }
+      return realReaddir(path, ...rest);
+    };
+    let marked;
+    try {
+      marked = await lib.markUnfoundTracksMissingAsync([music], found);
+    } finally {
+      fsp.readdir = realReaddir;
+    }
+    assert.equal(marked, 2, 'the two files that are still gone are marked');
+    assert.equal(missing().length, 2);
+    assert.equal(lib.getTracks({ limit: 100 }).find((track) => track.path === join(music, 'A', 'missing.mp3')).missingSince, null);
+    lib.close();
+  }
 }
 
 // ---- the rest on one library
@@ -223,7 +489,7 @@ assert.equal(lib2.getTagSummaries().find((tag) => tag.name === 'rocky').trackCou
 const preview = await lib2.previewTagRuleAsync({ body: 'tag(rocky2) when genre = "Rock"', limit: 4 });
 assert.equal(preview.ok, true);
 assert.equal(preview.totalCount, lib2.getTrackCount());
-assert.ok(preview.sampledCount <= 4 && preview.sampledCount > 0, 'a large library is sampled at a stride');
+assert.equal(preview.sampledCount, 4, 'a large library is sampled down to the limit');
 assert.deepEqual(await lib2.previewTagRuleAsync({ body: 'tag(rocky2) when genre = "Rock"', limit: 4 }), preview, 'the sample is the same each time');
 
 // history views: the sliced forms agree with the sync ones, and a profile page keeps listening private
@@ -297,6 +563,139 @@ lib2.close();
   reopened.close();
 }
 
+// Saves that keep failing are retried at the pace of the delay, whatever the user
+// does meanwhile, and are reported once it is clear they are not about to work.
+{
+  const lib6 = await LibraryStore.open(join(root, 'backoff.db'));
+  lib6.upsertTracks([incoming('/m/a.mp3')]);
+  await lib6.albumsReady?.();
+  await lib6.flushPendingWrites();
+  const realExport = lib6.db.export.bind(lib6.db);
+  let failing = true;
+  lib6.db.export = () => {
+    if (failing) throw new Error('out of memory');
+    return realExport();
+  };
+  const notices = [];
+  lib6.onSaveFailed = (event) => notices.push(event);
+  // Timers are collected, not waited for, so the test sees what is armed and for how long.
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const armed = [];
+  const pending = () => armed.filter((timer) => !timer.cleared && !timer.fired);
+  const fire = (timer) => {
+    timer.fired = true;
+    timer.fn();
+  };
+  const [track] = lib6.getTracks({ limit: 1 });
+  globalThis.setTimeout = (fn, ms) => {
+    const timer = { fn, ms, cleared: false, fired: false };
+    armed.push(timer);
+    return timer;
+  };
+  globalThis.clearTimeout = (timer) => {
+    if (timer) timer.cleared = true;
+  };
+  try {
+    lib6.toggleLove(track.id);
+    assert.deepEqual(pending().map((timer) => timer.ms), [800], 'an edit arms the usual short timer');
+    fire(pending()[0]);
+    assert.deepEqual(pending().map((timer) => timer.ms), [5000], 'a failed save is retried after 5 s');
+    const retry = pending()[0];
+    for (let i = 0; i < 5; i += 1) lib6.toggleLove(track.id);
+    assert.equal(retry.cleared, false, 'edits made while saves fail do not cancel the retry');
+    assert.deepEqual(pending().map((timer) => timer.ms), [5000], 'and do not start attempts of their own');
+    fire(retry);
+    assert.deepEqual(pending().map((timer) => timer.ms), [10_000], 'the delay doubles');
+    assert.equal(lib6.saveError, null, 'two failures are not reported');
+    fire(pending()[0]);
+    assert.deepEqual(pending().map((timer) => timer.ms), [20_000]);
+    assert.match(lib6.saveError, /^out of memory; changes are kept in memory/, 'the third failure in a row is reported with its reason');
+    assert.equal(notices.length, 1, 'and the app is told once');
+    assert.equal(notices[0].store, 'library');
+    assert.match(notices[0].reason, /out of memory/);
+    assert.ok(lib6.recoveryEvents.includes(notices[0]), 'the notice is among the recovery events');
+    for (const delay of [40_000, 60_000, 60_000]) {
+      fire(pending()[0]);
+      assert.deepEqual(pending().map((timer) => timer.ms), [delay], 'the delay stops growing at a minute');
+    }
+    assert.equal(notices.length, 1, 'more failures are not new reports');
+    failing = false;
+    fire(pending()[0]);
+    await lib6.waitForPendingWrites();
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
+  assert.equal(lib6.dirty, false, 'the changes landed once saving worked');
+  assert.equal(lib6.saveError, null, 'and the report is withdrawn');
+  assert.equal(notices.length, 1, 'nothing more is said when saving works again');
+  lib6.close();
+}
+
+// The same with a real failure: library.db has become a folder, so the replace is refused.
+{
+  const dir = join(root, 'refused');
+  await mkdir(dir, { recursive: true });
+  const file = join(dir, 'library.db');
+  const lib7 = await LibraryStore.open(file);
+  lib7.upsertTracks([incoming('/m/a.mp3')]);
+  await lib7.albumsReady?.();
+  await lib7.flushPendingWrites();
+  await rm(file);
+  await mkdir(file);
+  const notices = [];
+  lib7.onSaveFailed = (event) => notices.push(event);
+  const [track] = lib7.getTracks({ limit: 1 });
+  lib7.toggleLove(track.id);
+  // An edit made while a write is under way is written right after it, unless that
+  // write failed: then it waits for the retry, whatever timer the edit armed.
+  let exports = 0;
+  const realExport = lib7.db.export.bind(lib7.db);
+  lib7.db.export = () => {
+    exports += 1;
+    return realExport();
+  };
+  // A refused replace must not make the main thread sleep and rewrite the file as the
+  // quit-time save does (Windows refuses with EPERM, which that save waits out; elsewhere
+  // a folder in the way is refused outright, so this holds either way).
+  const realWait = Atomics.wait;
+  let sleeps = 0;
+  Atomics.wait = (...args) => {
+    sleeps += 1;
+    return realWait(...args);
+  };
+  try {
+    const firstWrite = lib7.flushAsync();
+    lib7.setTrackRating(track.id, 3);
+    const secondWrite = lib7.flushAsync();
+    await Promise.all([firstWrite, secondWrite]);
+  } finally {
+    Atomics.wait = realWait;
+  }
+  assert.equal(sleeps, 0, 'a refused replace in a background save does not sleep on the main thread');
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.equal(exports, 1, 'a write is not repeated, at once or by the edit\'s own timer, after a failed one');
+  for (let attempt = 2; attempt <= 3; attempt += 1) {
+    assert.equal(lib7.saveError, null, `${attempt - 1} failures are not reported`);
+    await lib7.flushAsync();
+    assert.equal(lib7.dirty, true, 'the change is still waiting to be written');
+  }
+  assert.ok(lib7.saveError, 'the third failure in a row is reported');
+  assert.equal(notices[0]?.filePath, file, 'and names the file');
+  assert.equal(notices.length, 1);
+  await rm(file, { recursive: true });
+  await lib7.flushAsync();
+  assert.equal(lib7.saveError, null);
+  assert.equal(notices.length, 1);
+  assert.deepEqual(readdirSync(dir).filter((name) => name.includes('.tmp-')), [], 'the copies the failed saves left are removed once one lands');
+  lib7.close();
+  const back = await LibraryStore.open(file);
+  assert.equal(back.getTrack(track.id).loved, 1, 'the change made while saving failed is on disk');
+  assert.equal(back.getTrack(track.id).rating, 3, 'and so is the one made during a write that failed');
+  back.close();
+}
+
 // After a run of answers that are neither yes nor no the sweep stops asking, so
 // a file past the run is kept as offline even when it is plainly gone.
 if (canDenyAccess) {
@@ -324,6 +723,111 @@ if (canDenyAccess) {
     chmodSync(join(music5, 'Locked'), 0o755);
   }
   lib5.close();
+}
+
+// ---- folder order: a directory's tracks stay together, and the sort compares directories
+{
+  // Two directories whose names differ only in case compare equal to the collator.
+  // Their tracks used to be shuffled together by file name.
+  const lib8 = await LibraryStore.open(join(root, 'eighth.db'));
+  const base8 = '/Users/x/Music3';
+  lib8.upsertTracks([
+    incoming(`${base8}/rock/a.mp3`, { title: 'a', album: '' }),
+    incoming(`${base8}/Rock/b.mp3`, { title: 'b', album: '' }),
+    incoming(`${base8}/rock/b2.mp3`, { title: 'b2', album: '' }),
+    incoming(`${base8}/Rock/a2.mp3`, { title: 'a2', album: '' }),
+  ]);
+  const titles = lib8.getFolderTracks(base8, { recursive: true }).map((track) => track.title);
+  assert.deepEqual(titles, ['a2', 'b', 'a', 'b2'], 'each directory plays through before the next one starts');
+  lib8.close();
+}
+
+{
+  // Counting how often the collator is asked needs a copy of the module loaded while Intl.Collator is wrapped.
+  let collations = 0;
+  const RealCollator = Intl.Collator;
+  Intl.Collator = function CountingCollator(...args) {
+    const collator = new RealCollator(...args);
+    const compare = collator.compare;
+    Object.defineProperty(collator, 'compare', { value: (a, b) => { collations += 1; return compare(a, b); } });
+    return collator;
+  };
+  let CountingStore;
+  try {
+    const url = pathToFileURL(resolve(repoRoot, 'dist-electron', 'electron', 'library.js')).href;
+    ({ LibraryStore: CountingStore } = await import(`${url}?counting`));
+  } finally {
+    Intl.Collator = RealCollator;
+  }
+  const lib9 = await CountingStore.open(join(root, 'ninth.db'));
+  const base9 = '/Users/x/Big';
+  const ALBUMS = 100;
+  const PER_ALBUM = 30;
+  // Albums arrive in no particular order; the tracks of one album stay together.
+  const order = Array.from({ length: ALBUMS }, (_, i) => (i * 37) % ALBUMS);
+  lib9.upsertTracks(order.flatMap((a) => Array.from({ length: PER_ALBUM }, (_, t) => incoming(
+    `${base9}/Artist ${String(a).padStart(3, '0')}/Album/${String(t + 1).padStart(2, '0')} Song.flac`,
+    { trackNo: t + 1, album: `Album ${a}`, artist: `Artist ${a}`, albumArtist: `Artist ${a}`, title: `Song ${t + 1}` },
+  ))));
+  await lib9.albumsReady?.();
+  const everyTrack = ALBUMS * PER_ALBUM;
+  collations = 0;
+  const firstPage = lib9.getFolderTrackIds(base9, { recursive: true, limit: 60 });
+  assert.ok(collations < everyTrack, `sorting ${everyTrack} tracks compared names ${collations} times; directories are compared, not every pair of tracks`);
+  assert.deepEqual(
+    lib9.getTracksByIdsInOrder(firstPage).map((track) => track.title),
+    [...Array.from({ length: PER_ALBUM }, (_, t) => `Song ${t + 1}`), ...Array.from({ length: PER_ALBUM }, (_, t) => `Song ${t + 1}`)],
+    'two albums in order, track by track',
+  );
+  // The pages after the first come from the sort already made.
+  const realPrepare = lib9.db.prepare.bind(lib9.db);
+  let scans = 0;
+  lib9.db.prepare = (...args) => {
+    scans += 1;
+    return realPrepare(...args);
+  };
+  collations = 0;
+  const secondPage = lib9.getFolderTrackIds(base9, { recursive: true, limit: 60, offset: 60 });
+  assert.equal(scans, 0, 'a later page is cut from the kept order, without reading the library again');
+  assert.equal(collations, 0);
+  assert.equal(new Set([...firstPage, ...secondPage]).size, 120);
+  // A write ends it: the next page is worked out again and sees the new track.
+  lib9.upsertTracks([incoming(`${base9}/Artist 000/Album/99 New.flac`, { trackNo: 99, album: 'Album 0', artist: 'Artist 0', albumArtist: 'Artist 0', title: 'New' })]);
+  assert.equal(lib9.getFolderTrackIds(base9, { recursive: true }).length, everyTrack + 1, 'a kept order is not served after the library changes');
+  lib9.db.prepare = realPrepare;
+  lib9.close();
+}
+
+// ---- search: a library folder named with a character outside the basic plane
+{
+  const lib10 = await LibraryStore.open(join(root, 'tenth.db'));
+  const home = join(root, '\u{1F3B5} Mix');
+  const plain = { album: 'Album', artist: 'Artist', albumArtist: 'Artist', genre: 'Pop' };
+  lib10.upsertTracks([
+    incoming(join(home, 'Rock', 'a.mp3'), { ...plain, title: 'First' }),
+    incoming(join(home, 'Jazz', 'b.mp3'), { ...plain, title: 'Second' }),
+  ]);
+  assert.deepEqual(lib10.getTracks({ search: 'rock' }).map((track) => track.title), ['First'], 'a folder name below the library folder is searched');
+  assert.equal(lib10.getTrackCount({ search: 'mix' }), 0, 'the library folder itself is not');
+  lib10.close();
+}
+
+// ---- tag rule preview: a library over the limit is sampled at an even spacing
+{
+  const lib11 = await LibraryStore.open(join(root, 'eleventh.db'));
+  lib11.upsertTracks(Array.from({ length: 10 }, (_, i) => incoming(`/s/${i}.mp3`, { title: `S${i}` })));
+  const ids = lib11.getTracks({ limit: 10, sort: 'title' }).map((track) => track.id);
+  const everything = 'tag(everything) when duration > 0';
+  const sampled = await lib11.previewTagRuleAsync({ body: everything, limit: 4 });
+  assert.equal(sampled.sampledCount, 4, 'as many tracks as the limit, not about half of them');
+  assert.deepEqual(sampled.sampleTrackIds, [ids[2], ids[4], ids[7], ids[9]], 'spread evenly through the library');
+  assert.equal((await lib11.previewTagRuleAsync({ body: everything, limit: 10 })).sampledCount, 10, 'a library no larger than the limit is all of it');
+  // Ids with gaps (tracks that were removed) sample no worse.
+  lib11.removeTracksById([ids[0], ids[1], ids[5]]);
+  const gaps = await lib11.previewTagRuleAsync({ body: everything, limit: 3 });
+  assert.equal(gaps.sampledCount, 3);
+  assert.equal(gaps.totalCount, 7);
+  lib11.close();
 }
 
 if (process.platform === 'darwin' || process.platform === 'win32') {

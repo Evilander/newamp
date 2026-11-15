@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ScanProgress } from '@shared/types';
 import { api } from '../lib/api';
+import { unreachableNotice } from './scanNotice';
 
 export function ScanBanner(): JSX.Element | null {
   const [progress, setProgress] = useState<ScanProgress | null>(null);
@@ -23,12 +24,21 @@ export function ScanBanner(): JSX.Element | null {
 
   const pct = progress.total > 0 ? Math.round((progress.scanned / progress.total) * 100) : 0;
   const workSummary = scanWorkSummary(progress);
+  // A scan that could not look inside a folder does not read as an ordinary finish.
+  const unreachable = progress.done && !progress.cancelled ? unreachableNotice(progress.unreachable) : null;
   return (
     <div
       className="flex items-center gap-3 px-3 py-1 text-[11px]"
       style={{ background: 'var(--panel-2)', borderBottom: '1px solid var(--line)' }}
     >
-      {progress.done ? (
+      {unreachable ? (
+        <>
+          <span style={{ color: 'var(--warn)' }}>● Scan finished</span>
+          <span style={{ color: 'var(--ink-2)' }} title={unreachable.title}>
+            {unreachable.text}
+          </span>
+        </>
+      ) : progress.done ? (
         <>
           <span style={{ color: 'var(--accent)' }}>{progress.cancelled ? '● Scan stopped' : '● Scan complete'}</span>
           <span style={{ color: 'var(--ink-2)' }}>

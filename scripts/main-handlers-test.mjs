@@ -44,13 +44,14 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
     extname,
     resolve,
     openedAudioFiles,
-    realpath: async (path) => path,
+    // No links in these paths, so the real path is the absolute one (B:\music\a.MP3 on Windows).
+    realpath: async (path) => resolve(path),
   });
   await allowOpenedAudioFile('/music/a.MP3');
   await allowOpenedAudioFile('/home/me/.ssh/id_rsa');
   await allowOpenedAudioFile('/home/me/notes.txt');
   await allowOpenedAudioFile('/music/noext');
-  assert.deepEqual([...openedAudioFiles], ['/music/a.MP3'], 'a path without an audio extension is not let in, however it arrives');
+  assert.deepEqual([...openedAudioFiles], [resolve('/music/a.MP3').replace(/\\/g, '/')], 'a path without an audio extension is not let in, however it arrives');
 }
 
 // ---- held watcher plans are replayed when the last holder lets go ------------------
@@ -69,6 +70,7 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
     'let libraryMutationsQuiesced = 0;',
     'let heldWatchPlans: Array<{ targets: string[]; plan: unknown }> = [];',
     'let heldIncrementalRoots = new Set<string>();',
+    grab('function mergeHeldWatchPlans('),
     grab('function resumeLibraryMutations('),
     'function hold(count: number, plans: Array<{ targets: string[]; plan: unknown }>, roots: string[]) { libraryMutationsQuiesced = count; heldWatchPlans = plans; heldIncrementalRoots = new Set(roots); }',
     'function held() { return { count: libraryMutationsQuiesced, plans: heldWatchPlans.length, roots: heldIncrementalRoots.size }; }',
@@ -89,6 +91,26 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
   resumeLibraryMutations();
   assert.equal(reconciled.length, 1, 'with auto-watch off the held plans are dropped, not replayed');
   assert.deepEqual(JSON.parse(JSON.stringify(held())), { count: 0, plans: 0, roots: 0 });
+
+  // A long backup over a bulk copy holds many plans; they are replayed as one,
+  // so the re-check pause is waited once and a target is not scanned per plan.
+  settings.get = () => ({ libraryAutoWatch: true });
+  reconciled.length = 0;
+  const many = Array.from({ length: 300 }, (_, i) => ({
+    targets: ['/a/x.flac', `/a/new-${i % 3}.flac`, '/b'],
+    plan: { force: ['/a/x.flac', `/a/new-${i % 3}.flac`], incremental: i === 7 ? ['/a/new-0.flac', '/b'] : ['/b'] },
+  }));
+  hold(1, many, []);
+  resumeLibraryMutations();
+  assert.equal(reconciled.length, 1, 'three hundred held plans make one reconcile');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(reconciled[0])),
+    {
+      targets: ['/a/x.flac', '/a/new-0.flac', '/b', '/a/new-1.flac', '/a/new-2.flac'],
+      plan: { force: ['/a/x.flac', '/a/new-0.flac', '/a/new-1.flac', '/a/new-2.flac'], incremental: ['/b'] },
+    },
+    'each target once, and one that was forced in any plan is not also walked',
+  );
 }
 
 // ---- the FLAC warm waits, and only two tracks are ever waiting ---------------------
@@ -149,6 +171,78 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
   retryDeferredDailyBackup();
   await sleep(80);
   assert.equal(runs.length, 1, 'nothing is retried when no copy was put off');
+}
+
+// ---- a copy put off for playback keeps waiting through a collision with another backup ----
+{
+  const created = [];
+  const state = { isPlaying: true };
+  const settings = { enabled: true, suppressed: false };
+  const library = { closed: false, upgradeError: null };
+  let outcome = { status: 'skipped', reason: 'deferred' };
+  const pieces = [
+    'let dailyBackupWaitingForIdle = false;',
+    'let dailyBackupIdleTimer: NodeJS.Timeout | null = null;',
+    'let backupInProgress = 0;',
+    'let restoreInProgress = false;',
+    grab('const DAILY_BACKUP_IDLE_DELAY_MS').replace('30 * 1000', '30'),
+    grab('function retryDeferredDailyBackup('),
+    grab('async function runDailyBackup('),
+    'function status() { return { waiting: dailyBackupWaitingForIdle, running: backupInProgress }; }',
+    'function collide(backups: number, restoring: boolean) { backupInProgress = backups; restoreInProgress = restoring; }',
+  ];
+  const { runDailyBackup, status, collide } = await load(pieces, {
+    setTimeout: (fn, ms) => Object.assign(setTimeout(fn, ms), { unref() { return this; } }),
+    shellPlaybackState: state,
+    settings: { get: () => ({ autoBackupEnabled: settings.enabled }), isSuppressed: () => settings.suppressed, snapshotJson: () => '{}' },
+    library: {
+      isClosed: () => library.closed,
+      get upgradeError() { return library.upgradeError; },
+      flushPendingWrites: async () => {},
+      exportSnapshot: () => Buffer.alloc(0),
+    },
+    app: { getPath: () => '/u' },
+    join: (...parts) => parts.join('/'),
+    createDailyBackupIfDue: async () => { created.push(outcome); return outcome; },
+    writeDiagnosticEvent() {},
+    console,
+  });
+
+  await runDailyBackup();
+  assert.equal(status().waiting, true, 'a copy that falls due while a track plays is put off');
+  assert.equal(created.length, 1);
+
+  state.isPlaying = false;
+  collide(1, false);
+  await runDailyBackup();
+  assert.equal(status().waiting, true, 'a backup of the user\'s running does not cancel the wait');
+  assert.equal(created.length, 1, 'and no second copy starts beside it');
+  collide(0, false);
+  await sleep(80);
+  assert.equal(created.length, 2, 'once it is quiet and nothing plays, the copy is tried again');
+
+  collide(0, true);
+  await runDailyBackup();
+  assert.equal(status().waiting, true, 'a restore in progress is a collision too');
+  collide(0, false);
+  outcome = { status: 'skipped', reason: 'recent' };
+  await sleep(80);
+  assert.equal(status().waiting, false, 'a copy that is no longer due ends the wait');
+
+  // Nothing to wait for when backups are off or the library is not the real one.
+  outcome = { status: 'skipped', reason: 'deferred' };
+  await runDailyBackup();
+  assert.equal(status().waiting, true);
+  settings.enabled = false;
+  await runDailyBackup();
+  assert.equal(status().waiting, false, 'turned off in Settings');
+  settings.enabled = true;
+  await runDailyBackup();
+  library.upgradeError = 'could not upgrade';
+  await runDailyBackup();
+  assert.equal(status().waiting, false, 'a temporary library is not backed up');
+  library.upgradeError = null;
+  assert.equal(status().running, 0, 'the counter is back where it was');
 }
 
 // ---- how the handlers are wired ------------------------------------------------------

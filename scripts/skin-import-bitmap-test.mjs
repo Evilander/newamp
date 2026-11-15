@@ -189,7 +189,11 @@ assert.deepEqual(skinOf(bmp16()), reference, '16 bpp decodes to the same colours
 assert.deepEqual(skinOf(bmp32Bitfields()), reference, '32 bpp bitfields decodes to the same colours');
 assert.deepEqual(skinOf(bmpRle8()), reference, 'RLE8 decodes to the same colours');
 assert.deepEqual(skinOf(bmpRle4()), reference, 'RLE4 decodes to the same colours');
-assert.notDeepEqual(skinOf(bmp24()), undefined);
+{
+  const plain = skinOf(bmp24());
+  assert.equal(plain['--bg'], '#283038', '24 bpp keeps the dark band exactly');
+  assert.equal(plain['--accent'], '#f87818', '24 bpp keeps the bright band exactly');
+}
 
 // Absolute-mode runs (padded to an even byte count) and delta jumps.
 {
@@ -216,6 +220,81 @@ assert.notDeepEqual(skinOf(bmp24()), undefined);
   assert.deepEqual(skinOf(rle), flat, 'absolute mode and delta runs decode in place');
 }
 
+// A run that crosses the right edge fills the rest of its row; nothing wraps onto the next row.
+{
+  const colors = [exact([40, 48, 56]), exact([248, 120, 24])];
+  const raw = Buffer.alloc(12 * 2);
+  for (let y = 0; y < 2; y += 1) {
+    for (let x = 0; x < 4; x += 1) {
+      const [r, g, b] = colors[y === 0 ? 1 : 0]; // the first stored row is the bottom one
+      raw.set([b, g, r], y * 12 + x * 3);
+    }
+  }
+  const flat = skinOf(Buffer.concat([header({ width: 4, height: 2, bpp: 24, dataLength: raw.length }), raw]));
+  const data = Buffer.from([6, 1, 0, 0, 4, 0, 0, 1]); // six of colour 1 (four fit), end of line, four of colour 0
+  const rle = Buffer.concat([header({ width: 4, height: 2, bpp: 8, compression: 1, paletteSize: 2, palette: palette2(), dataLength: data.length }), data]);
+  assert.deepEqual(skinOf(rle), flat, 'a long run is clipped at the edge of its row');
+}
+
+// A stream made of long runs that never reach an end-of-line marker costs no more than one of
+// short runs of the same size, whatever the machine's speed: the two are timed side by side.
+{
+  const runs = (count, value, bytes) => {
+    const out = Buffer.alloc(bytes);
+    for (let i = 0; i < bytes; i += 2) {
+      out[i] = count;
+      out[i + 1] = value;
+    }
+    return out;
+  };
+  const rleBitmap = (bpp, data) => Buffer.concat([
+    header({ width: W, height: H, bpp, compression: bpp === 8 ? 1 : 2, paletteSize: 2, palette: palette2(), dataLength: data.length }),
+    data,
+  ]);
+  const timeOf = (bmp) => {
+    const archive = zip([{ name: 'main.bmp', content: bmp }]);
+    const started = performance.now();
+    parseWinampClassicSkinArchive(archive, 'x.wsz');
+    return performance.now() - started;
+  };
+  const bytes = 8 * 1024 * 1024;
+  for (const [label, bpp, value] of [['RLE8', 8, 1], ['RLE4', 4, 0x11]]) {
+    timeOf(rleBitmap(bpp, runs(1, value, bytes))); // warm-up
+    const long = timeOf(rleBitmap(bpp, runs(255, value, bytes)));
+    const short = timeOf(rleBitmap(bpp, runs(1, value, bytes)));
+    assert.ok(
+      long <= Math.max(10 * short, 250),
+      `${label}: ${bytes} bytes of 255-pixel runs took ${long.toFixed(0)} ms, 1-pixel runs ${short.toFixed(0)} ms`,
+    );
+  }
+}
+
+// pledit.txt: keys and colours are read from lines with padding around them, and a line padded
+// with whitespace in the middle is read in one pass, timed against a line of the same length.
+{
+  const parse = (text) => parseWinampClassicSkinArchive(zip([{ name: 'pledit.txt', content: Buffer.from(text) }]), 'x.wsz');
+  const padded = parse('[Text]\r\n  Normal =   #112233   \r\ncurrent=#abcdef\r\nNormalBG = 1, 2, 3\r\n').variables;
+  assert.equal(padded['--ink'], '#112233');
+  assert.equal(padded['--accent'], '#abcdef');
+  assert.equal(padded['--display-bg'], '#010203');
+
+  const timeOf = (value) => {
+    const archive = zip([{ name: 'pledit.txt', content: Buffer.from(`Normal=${value}\r\nCurrent=#abcdef\r\n`) }]);
+    const started = performance.now();
+    const skin = parseWinampClassicSkinArchive(archive, 'x.wsz');
+    return { ms: performance.now() - started, accent: skin.variables['--accent'] };
+  };
+  const width = 60_000;
+  timeOf(`a${'b'.repeat(width)}`); // warm-up
+  const spread = timeOf(`a${' '.repeat(width)}b`);
+  const solid = timeOf(`a${'b'.repeat(width)}`);
+  assert.equal(spread.accent, '#abcdef', 'the line after a padded one is still read');
+  assert.ok(
+    spread.ms <= Math.max(10 * solid.ms, 250),
+    `a ${width}-space line took ${spread.ms.toFixed(0)} ms, a line without spaces ${solid.ms.toFixed(0)} ms`,
+  );
+}
+
 // Without pledit.txt an unreadable bitmap still ends in the clear error.
 {
   const junk = Buffer.from(bmp24());
@@ -226,15 +305,19 @@ assert.notDeepEqual(skinOf(bmp24()), undefined);
   );
 }
 
-// Only the first bitmap of a name is decoded; later ones, however many, are ignored.
+// Only the first bitmap of a name is decoded; later ones, however many, are ignored. The later
+// ones are valid bitmaps of another colour, so decoding any of them would change the result.
 {
   const first = bmp24();
-  const decoy = Buffer.alloc(40);
+  const stride = Math.ceil((W * 3) / 4) * 4;
+  const green = Buffer.alloc(stride * H);
+  for (let y = 0; y < H; y += 1) {
+    for (let x = 0; x < W; x += 1) green[y * stride + x * 3 + 1] = 255;
+  }
+  const decoy = Buffer.concat([header({ width: W, height: H, bpp: 24, dataLength: green.length }), green]);
   const entries = [{ name: 'main.bmp', content: first }];
   for (let i = 0; i < 300; i += 1) entries.push({ name: `skin${i}/Main.BMP`, content: decoy });
-  const started = Date.now();
   assert.deepEqual(parseWinampClassicSkinArchive(zip(entries), 'x.wsz').variables, skinOf(first));
-  assert.ok(Date.now() - started < 2000);
 }
 
 // A large bitmap is sampled, not walked pixel by pixel.

@@ -10,7 +10,7 @@ import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
 import { coalesceDeviceChanges, planDeviceChange, type DeviceChangeRunner } from './device-change';
 import { normalizeLimiterEnabled, preampDbToLinear } from '@shared/audio-limiter';
 import type { ExclusiveNegotiated, ResamplerKind } from '@shared/types';
-import type { SampleTransport, SampleTransportEvent } from './sample-transport';
+import type { SampleStartResult, SampleTransport, SampleTransportEvent } from './sample-transport';
 
 export interface EngineState {
   duration: number;
@@ -112,10 +112,18 @@ const SEEK_COALESCE_MS = 125;
 // they give up, so a failure that reaches the element has usually outlasted
 // the quick recoveries.
 const DECK_RETRY_DELAYS_MS = [1500, 4000, 9000, 16000];
+// A decode error on a stream that was playing is a bad frame as often as a bad
+// read, and a reload meets the same frame again, so it gets one more try, not
+// the whole budget.
+const DECK_RETRY_DECODE_ATTEMPTS = 1;
 // Before this much has played, a decode or unsupported-source error means the
 // file itself is bad and the track is skipped as before. A network error is
 // retried at any position.
 const DECK_RETRY_MIN_PLAYED_S = 1;
+// How long the transport gets to answer a start before the track goes to the
+// decks. Main gives the first audio 15 s once it has planned the track; this is
+// the backstop for a plan that never finishes.
+const SAMPLE_START_TIMEOUT_MS = 25000;
 // Audio that gets this far past the resume point proves the stream is back,
 // and a later failure gets a fresh set of attempts.
 const DECK_RETRY_RECOVERED_S = 5;
@@ -152,6 +160,8 @@ interface DeckRetry {
   /** Where the reload resumes: the position the stream failed at, moved by a seek. */
   at: number;
   attempts: number;
+  /** How many reloads this kind of failure gets. */
+  limit: number;
   timer: number | null;
 }
 
@@ -246,6 +256,13 @@ export class AudioEngine {
   private externalTransport: ExternalTransport | null = null;
   private externalTap: ExternalAnalysisSource | null = null;
   private externalActive = false;
+  // The src the exclusive backend gave up on. It stays on the other players
+  // until a different track plays, so a track the backend cannot read does not
+  // bounce between the two.
+  private externalSkipSrc: string | null = null;
+  // Exclusive acceptances being awaited. A failure report for the track that
+  // is leaving is no news while one is, since that play replaces the stream.
+  private externalPlaysPending = 0;
   // performance.now() of the exclusive backend's last position report.
   private externalPositionAt = 0;
   private exclusiveNegotiated: ExclusiveNegotiated | null = null;
@@ -558,7 +575,7 @@ export class AudioEngine {
       this.patch({
         playing: false,
         buffering: false,
-        error: `Audio error (code ${code})`,
+        error: this.state.error ?? `Audio error (code ${code})`,
       });
     });
   }
@@ -722,6 +739,7 @@ export class AudioEngine {
     if (transport === this.externalTransport) return;
     if (!transport && this.externalActive) this.deactivateExternal(true);
     this.externalTransport = transport;
+    this.externalSkipSrc = null;
     if (!transport) {
       this.exclusiveFallbackReason = null;
       this.notify();
@@ -758,6 +776,25 @@ export class AudioEngine {
       // device may be back), otherwise the deck path picks up seamlessly.
       void this.play(src, trackId, Math.max(0, positionSec)).catch(() => undefined);
     }
+  }
+
+  /**
+   * The exclusive backend gave up on the track at `positionSec` because its
+   * file stopped answering (a share that went away), not because the track is
+   * bad. The track carries on from there on the other paths, which wait out a
+   * stalled share, and the backend is not asked for it again until another
+   * track plays. Ignored unless the backend has the track now (and, when
+   * `forTrackId` is given, it is that one) and no newer start is waiting on it.
+   */
+  handleExternalFailure(positionSec: number, reason: string, forTrackId?: number): void {
+    if (!this.externalActive || this.externalPlaysPending > 0) return;
+    if (forTrackId !== undefined && forTrackId !== this.state.trackId) return;
+    this.deactivateExternal(true);
+    this.exclusiveFallbackReason = reason;
+    const { src, trackId } = this.state;
+    if (!src) return;
+    this.externalSkipSrc = src;
+    void this.play(src, trackId, Math.max(0, positionSec)).catch(() => undefined);
   }
 
   private deactivateExternal(stopBackend: boolean): void {
@@ -952,13 +989,23 @@ export class AudioEngine {
     }
     this.activateSample();
     this.patch({ src, trackId, currentTime: starting.at, duration: 0, ended: false, error: null, buffering: true });
-    const result = await transport.start({
-      trackId,
-      src,
-      startAt: starting.at,
-      gain: this.replayGainLinear,
-      playing: starting.playing,
-    });
+    let giveUp = 0;
+    const result = await Promise.race([
+      transport.start({
+        trackId,
+        src,
+        startAt: starting.at,
+        gain: this.replayGainLinear,
+        playing: starting.playing,
+      }),
+      // A start that never answers (the file's metadata is stuck behind a
+      // stalled share) must not leave the track waiting for good. Declining
+      // hands it to the decks, and the stream is stopped on the way out.
+      new Promise<SampleStartResult>((resolve) => {
+        giveUp = window.setTimeout(() => resolve({ ok: false, error: 'The gapless producer did not answer.' }), SAMPLE_START_TIMEOUT_MS);
+      }),
+    ]);
+    window.clearTimeout(giveUp);
     if (seq !== this.playSeq) return 'stale';
     // A seek inside this same play moved the stream to a newer generation: it
     // owns the position (and reports its own failure), so this play stands.
@@ -1067,8 +1114,16 @@ export class AudioEngine {
     // already moved to the new track, so the time goes with it: the old
     // track's end position would read as the new one being nearly over.
     if (this.state.ended) this.patch({ ended: false, currentTime: normalizeStartAt(startAt) });
-    if (this.externalTransport && trackId != null) {
-      const outcome = await this.tryExternalPlay(src, trackId, startAt, seq);
+    const skipExternal = this.externalSkipSrc === src;
+    if (!skipExternal) this.externalSkipSrc = null;
+    if (this.externalTransport && trackId != null && !skipExternal) {
+      this.externalPlaysPending += 1;
+      let outcome: 'accepted' | 'declined' | 'stale';
+      try {
+        outcome = await this.tryExternalPlay(src, trackId, startAt, seq);
+      } finally {
+        this.externalPlaysPending -= 1;
+      }
       if (outcome === 'accepted') return 'started';
       if (outcome === 'stale') return 'stale';
     } else if (this.externalActive) {
@@ -1139,7 +1194,9 @@ export class AudioEngine {
       // A reload is already scheduled for the stream that just failed; the
       // error is reported only if the reloads run out.
       if (this.deckRetry?.deckId === deck.id) return 'started';
-      this.patch({ error: (err as Error).message ?? 'Playback failed' });
+      // A load failure also raises the element's own error event. Whichever
+      // said so first stands, so one failed start is one failure to the store.
+      if (this.state.error == null) this.patch({ error: (err as Error).message ?? 'Playback failed' });
       throw err;
     }
     return seq === this.playSeq ? 'started' : 'stale';
@@ -1156,6 +1213,12 @@ export class AudioEngine {
     const src = this.state.src;
     if (!src || code === MEDIA_ERR_ABORTED || this.state.error != null) return false;
     const previous = this.deckRetry?.deckId === deckId && this.deckRetry.src === src ? this.deckRetry : null;
+    // An element that never got its metadata failed to open, and from here the
+    // file being bad and the share saying no look the same. Main has already
+    // waited out a stalled share before answering, so the track is not
+    // retried, wherever it was asked to start. A reload that fails to open is
+    // another matter: the stream was good a moment ago.
+    if (!previous && el.readyState < HAVE_METADATA) return false;
     // The element's own position once it has one, so a seek back after a
     // reload is not undone; before that, where the reload was asked to land.
     const deck = this.graph?.decks[deckId];
@@ -1170,12 +1233,13 @@ export class AudioEngine {
       return true;
     }
     const attempts = previous?.attempts ?? 0;
-    if (attempts >= DECK_RETRY_DELAYS_MS.length) return false;
+    const limit = previous?.limit ?? (code === MEDIA_ERR_NETWORK ? DECK_RETRY_DELAYS_MS.length : DECK_RETRY_DECODE_ATTEMPTS);
+    if (attempts >= limit) return false;
     if (previous?.timer != null) window.clearTimeout(previous.timer);
-    const retry: DeckRetry = { deckId, src, at: reached, attempts: attempts + 1, timer: null };
+    const retry: DeckRetry = { deckId, src, at: reached, attempts: attempts + 1, limit, timer: null };
     retry.timer = window.setTimeout(() => this.reloadDeckStream(retry), DECK_RETRY_DELAYS_MS[attempts]!);
     this.deckRetry = retry;
-    console.warn(`[newamp] deck stream failed (code ${code}) at ${reached.toFixed(1)} s; reloading it, attempt ${retry.attempts} of ${DECK_RETRY_DELAYS_MS.length}.`);
+    console.warn(`[newamp] deck stream failed (code ${code}) at ${reached.toFixed(1)} s; reloading it, attempt ${retry.attempts} of ${limit}.`);
     // Playing stays true: the listener has not paused, and the store would read a pause as the user's.
     this.patch({ buffering: true, currentTime: reached });
     return true;
@@ -1254,7 +1318,8 @@ export class AudioEngine {
       this.preparedNext?.deckId === deck.id &&
       this.preparedNext.src === src &&
       this.preparedNext.trackId === trackId &&
-      this.preparedNext.startAt === normalizedStartAt
+      this.preparedNext.startAt === normalizedStartAt &&
+      !deck.el.error
     ) {
       return;
     }
@@ -1273,6 +1338,9 @@ export class AudioEngine {
     const deck = this.graph.decks.find((candidate) => candidate.id === this.preparedNext?.deckId) ?? null;
     if (!deck || deck.id === this.activeDeckIndex) return null;
     if (deck.el.src !== src && deck.el.currentSrc !== src) return null;
+    // A preload that failed (its error event is dropped while the deck is idle)
+    // would only fail again here; the track is loaded afresh instead.
+    if (deck.el.error) return null;
     return deck;
   }
 
@@ -1713,6 +1781,10 @@ export class AudioEngine {
     if (this.externalActive) {
       if (this.state.playing) {
         this.pause();
+      } else if (this.state.error != null && this.state.src) {
+        // A track the backend reported a failure for has nothing to resume;
+        // Play starts it again where it stopped.
+        void this.play(this.state.src, this.state.trackId, Math.max(0, this.state.currentTime)).catch(() => undefined);
       } else {
         try {
           this.externalTransport?.resume();
@@ -1817,6 +1889,7 @@ export class AudioEngine {
     this.cancelDeckRetry();
     this.clearFadeTimer();
     this.preparedNext = null;
+    this.externalSkipSrc = null;
     this.deactivateExternal(true);
     if (this.sampleActive || this.sampleTransport?.hasStream()) this.deactivateSample();
     if (this.graph) {
@@ -1873,12 +1946,28 @@ export class AudioEngine {
     }
     const deck = this.activeDeck;
     const el = deck.el;
+    if (el.error && !this.state.playing) {
+      // A stream that failed while paused has nothing to seek, and no seeked
+      // event is coming; Play loads the track again at the position kept here.
+      const target = Math.max(0, seconds);
+      try {
+        // So a tick still on its way reads the new position, not the old one.
+        el.currentTime = target;
+      } catch {
+        /* nothing loaded to seek in */
+      }
+      this.patch({ currentTime: target });
+      return;
+    }
     // Only clamp to duration when it is actually known. `el.duration || 0`
     // collapses to 0 whenever duration is NaN/Infinity (custom protocol before
     // metadata, live transcode), which turned every seek into seek-to-zero.
     // Fall back to the raw target and let the element clamp internally.
     const upper = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : Number.POSITIVE_INFINITY;
     const target = Math.max(0, Math.min(upper, seconds));
+    // A reloaded stream earns back its retry budget with audio played past the
+    // position it resumed at; a seek moves that position instead of passing it.
+    if (this.deckRetry?.deckId === deck.id) this.deckRetry.at = target;
     if (deck.seekHold) {
       // Inside the window of the seek before it: remember where the scrub is
       // now and let the window's end apply it.

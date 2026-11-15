@@ -7,6 +7,7 @@ import {
   searchStationsByText,
   topTags,
   tuneStation,
+  type TuneResult,
 } from '../../api/radiobrowser';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { volumePositionToGain } from '../../audio/engine';
@@ -21,6 +22,11 @@ const SEARCH_DEBOUNCE_MS = 250;
 // playing, and coming back finds it.
 let radioElement: HTMLAudioElement | null = null;
 let radioStation: RadioStation | null = null;
+// The station being tuned, before play() has resolved. Bumped by every connect
+// and every stop, so a slow connect that lost the race can't mark its station
+// live afterwards.
+let radioConnecting: RadioStation | null = null;
+let radioAttempt = 0;
 const radioListeners = new Set<() => void>();
 let followingPlayer = false;
 let outputDeviceId: string | null = null;
@@ -57,9 +63,10 @@ function getRadioElement(): HTMLAudioElement {
       if (state.volume !== previous.volume || state.settings?.audioOutputDeviceId !== previous.settings?.audioOutputDeviceId) {
         applyRadioOutput();
       }
-      // Library playback starting from anywhere ends the station, whether or
-      // not the Radio view is open to notice.
-      if (state.isPlaying && !previous.isPlaying && radioStation) endRadioStream();
+      // Library playback starting from anywhere ends the station, or the
+      // connect still under way, whether or not the Radio view is open to
+      // notice.
+      if (state.isPlaying && !previous.isPlaying && (radioStation || radioConnecting)) endRadioStream();
     });
   }
   applyRadioOutput();
@@ -83,17 +90,24 @@ function watchStream(el: HTMLAudioElement, station: RadioStation): void {
   let stallTimer = 0;
   let reconnectTimer = 0;
   let reconnects = 0;
+  // A connection that fails is announced twice: by the element's error event
+  // and by the rejected play(). Set once the drop has been counted, so the
+  // second announcement doesn't use up another reconnect. Cleared when audio
+  // flows again or the next attempt starts.
+  let counted = false;
   const clearStall = (): void => {
     window.clearTimeout(stallTimer);
     stallTimer = 0;
   };
   const lost = (): void => {
-    if (disposed) return;
+    if (disposed || counted) return;
+    counted = true;
     clearStall();
     if (reconnects < STREAM_RECONNECT_DELAYS_MS.length) {
       const delay = STREAM_RECONNECT_DELAYS_MS[reconnects++]!;
       reconnectTimer = window.setTimeout(() => {
         if (disposed) return;
+        counted = false;
         void tuneStation(el, station).then((result) => {
           if (!disposed && !result.ok) lost();
         });
@@ -104,11 +118,12 @@ function watchStream(el: HTMLAudioElement, station: RadioStation): void {
     pushToast({ tone: 'error', title: 'Radio stream lost', detail: `${station.name} stopped sending audio.` });
   };
   const waiting = (): void => {
-    if (!stallTimer) stallTimer = window.setTimeout(lost, STREAM_STALL_LIMIT_MS);
+    if (!stallTimer && !counted) stallTimer = window.setTimeout(lost, STREAM_STALL_LIMIT_MS);
   };
   const playing = (): void => {
     clearStall();
     reconnects = 0;
+    counted = false;
   };
   el.addEventListener('error', lost);
   el.addEventListener('ended', lost);
@@ -132,13 +147,38 @@ function watchStream(el: HTMLAudioElement, station: RadioStation): void {
 }
 
 function endRadioStream(): void {
+  // A connect still under way finds its attempt gone when it resolves.
+  radioAttempt++;
   // The watch comes off first: emptying the source raises an error event.
   streamWatch?.dispose();
   streamWatch = null;
   radioElement?.pause();
   if (radioElement) radioElement.src = '';
   radioStation = null;
+  radioConnecting = null;
   notifyRadio();
+}
+
+// The station only counts as live once play() has resolved, so a refused
+// stream (dead, HLS-only, blocked) never leaves the bar claiming LIVE.
+async function connectStation(el: HTMLAudioElement, station: RadioStation): Promise<TuneResult> {
+  const mine = ++radioAttempt;
+  // The previous station's watch must not read the source swap as a drop.
+  streamWatch?.dispose();
+  streamWatch = null;
+  radioStation = null;
+  radioConnecting = station;
+  notifyRadio();
+  const result = await tuneStation(el, station);
+  if (mine !== radioAttempt) return { ok: false, detail: null };
+  radioConnecting = null;
+  if (result.ok) {
+    radioStation = station;
+    watchStream(el, station);
+    void clickStation(station.id);
+  }
+  notifyRadio();
+  return result;
 }
 
 export function RadioView(): JSX.Element {
@@ -149,11 +189,8 @@ export function RadioView(): JSX.Element {
   // Raw directory tags, offered as search suggestions rather than chips.
   const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
   const [active, setActive] = useState<RadioStation | null>(() => radioStation);
-  const [connecting, setConnecting] = useState<RadioStation | null>(null);
+  const [connecting, setConnecting] = useState<RadioStation | null>(() => radioConnecting);
   const audio = useRef<HTMLAudioElement | null>(null);
-  // Bumped by every play and stop so a slow connect that lost the race can't
-  // mark its station live afterwards.
-  const attempt = useRef(0);
   const isPlayingLibrary = usePlayerStore((s) => s.isPlaying);
   const pauseLibrary = () => usePlayerStore.getState().engine.pause();
 
@@ -163,7 +200,7 @@ export function RadioView(): JSX.Element {
     // starting, a stream that dropped); this view follows the shared state.
     const sync = (): void => {
       setActive(radioStation);
-      if (!radioStation) setConnecting(null);
+      setConnecting(radioConnecting);
     };
     radioListeners.add(sync);
     return () => {
@@ -171,17 +208,6 @@ export function RadioView(): JSX.Element {
       audio.current = null;
     };
   }, []);
-
-  // playStation() below pauses the library engine when a station starts, but
-  // that was one-directional: nothing stopped the radio stream when library
-  // playback became active from elsewhere (Transport, Space, a media key, a
-  // detached remote) — the two playback pipelines could run simultaneously.
-  useEffect(() => {
-    if (isPlayingLibrary && audio.current && !audio.current.paused) {
-      stopRadio();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPlayingLibrary]);
 
   useEffect(() => {
     topTags(300)
@@ -226,37 +252,12 @@ export function RadioView(): JSX.Element {
     };
   }, [query, tag]);
 
-  // The station only counts as live once play() has resolved, so a refused
-  // stream (dead, HLS-only, blocked) never leaves the bar claiming LIVE.
   async function playStation(s: RadioStation): Promise<void> {
     const el = audio.current;
     if (!el) return;
     if (isPlayingLibrary) pauseLibrary();
-    const mine = ++attempt.current;
-    // The previous station's watch must not read the source swap as a drop.
-    streamWatch?.dispose();
-    streamWatch = null;
-    radioStation = null;
-    setActive(null);
-    setConnecting(s);
-    const result = await tuneStation(el, s);
-    if (mine !== attempt.current) return;
-    setConnecting(null);
-    if (!result.ok) {
-      if (result.detail) pushToast({ tone: 'error', title: 'Station failed to play', detail: result.detail });
-      return;
-    }
-    setActive(s);
-    radioStation = s;
-    watchStream(el, s);
-    void clickStation(s.id);
-  }
-
-  function stopRadio(): void {
-    attempt.current++;
-    endRadioStream();
-    setActive(null);
-    setConnecting(null);
+    const result = await connectStation(el, s);
+    if (!result.ok && result.detail) pushToast({ tone: 'error', title: 'Station failed to play', detail: result.detail });
   }
 
   const isOn = (s: RadioStation): boolean => active?.id === s.id || connecting?.id === s.id;
@@ -333,7 +334,7 @@ export function RadioView(): JSX.Element {
               >
                 <button
                   className="pxbtn !min-w-[36px]"
-                  onClick={() => (isOn(s) ? stopRadio() : void playStation(s))}
+                  onClick={() => (isOn(s) ? endRadioStream() : void playStation(s))}
                 >
                   {isOn(s) ? '◼' : '▶'}
                 </button>
@@ -373,7 +374,7 @@ export function RadioView(): JSX.Element {
           <span style={{ color: 'var(--muted)' }}>
             {active.country} {active.bitrate ? `· ${active.bitrate} kbps` : ''}
           </span>
-          <button className="pxbtn ml-auto" onClick={stopRadio}>
+          <button className="pxbtn ml-auto" onClick={endRadioStream}>
             Stop
           </button>
         </div>
@@ -385,7 +386,7 @@ export function RadioView(): JSX.Element {
         >
           <span style={{ color: 'var(--muted)' }}>Connecting to</span>
           <span className="font-semibold">{connecting.name}</span>
-          <button className="pxbtn ml-auto" onClick={stopRadio}>
+          <button className="pxbtn ml-auto" onClick={endRadioStream}>
             Cancel
           </button>
         </div>

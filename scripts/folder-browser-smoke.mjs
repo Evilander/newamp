@@ -105,7 +105,7 @@ try {
   assert.match(foldersViewSource, /Load more direct tracks/, 'Folders view should expose explicit direct-track pagination');
   const librarySource = await readText('../electron/library.ts');
   assert.match(librarySource, /queryFolderTrackRows/, 'folder track lookup should share a bounded query path');
-  assert.match(librarySource, /queryFolderRows/, 'folder track lookup should stream through the shared cursor path');
+  assert.match(librarySource, /orderedFolderIds/, 'folder track lookup should stream through the shared cursor path');
   assert.match(librarySource, /LIKE \? ESCAPE '\|'/, 'folder track lookup should escape LIKE wildcard characters in paths');
   assert.match(librarySource, /while \(stmt\.step\(\)\)/, 'folder track lookup should stop once a page is filled');
   assert.doesNotMatch(librarySource, /getFolderTracks[\s\S]+SELECT \* FROM tracks`\)[\s\S]+filter\(\(row\) => trackPathIsInFolder/, 'folder track lookup should not scan every track before filtering');

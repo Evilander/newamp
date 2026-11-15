@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import ffmpeg from 'ffmpeg-static';
 import { spawnSync } from 'node:child_process';
-import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -25,6 +25,7 @@ await build({
       export * from './electron/local-lyrics.ts';
       export { fetchLastfmHistory } from './electron/history-import.ts';
       export * from './electron/musicbrainz.ts';
+      export * from './electron/mp4-codec.ts';
     `,
     resolveDir: process.cwd(),
     loader: 'ts',
@@ -231,6 +232,47 @@ const check = (name) => results.push(name);
   await writeFile(join(dir, 'Beyonce\u0301 - Halo.chopro'), '[G]Halo\n');
   const halo = await lib.findLocalGuitarTabForTrack({ path: accent, artist: 'Beyoncé', title: 'Halo', album: 'X', key: null });
   assert.ok(halo, 'a decomposed name matches a composed one');
+
+  // Tab text comes from files and sites. An opener with no closer, or a long run of chord
+  // qualities, must cost time in proportion to the text, so each shape is timed against text of
+  // the same length without it; a machine that is slow is slow for both.
+  const measure = async (work) => {
+    const started = performance.now();
+    await work();
+    return performance.now() - started;
+  };
+  const within = (label, ms, controlMs) =>
+    assert.ok(ms <= Math.max(10 * controlMs, 250), `${label}: ${ms.toFixed(0)} ms, ${controlMs.toFixed(0)} ms for text of the same length`);
+  const hostile = join(root, 'sidecar-hostile');
+  await mkdir(hostile, { recursive: true });
+  const hostileAudio = join(hostile, 'Song.mp3');
+  await writeFile(hostileAudio, 'x');
+  const hostileTrack = { path: hostileAudio, artist: 'Artist', title: 'Song', album: 'Album', key: null };
+  const sidecarFor = async (text) => {
+    await writeFile(join(hostile, 'Song.txt'), text);
+    return lib.findLocalGuitarTabForTrack(hostileTrack);
+  };
+  assert.ok(await sidecarFor('Some words with [Am]a chord and [G7]another\n'), 'a chord tag in a .txt makes it a tab');
+  assert.ok(await sidecarFor('Words [Cmaj7(add9)] and [D/F#] here\n'), 'chords with brackets and a bass note count');
+  assert.equal(await sidecarFor('[Verse]\nJust words here\n[Chorus]\nAnd more words\n'), null, 'section tags are not chords');
+  const noTags = await measure(() => sidecarFor('a [Verse] b '.repeat(7_500)));
+  within('[A( repeated in a sidecar', await measure(() => sidecarFor('[A('.repeat(30_000))), noTags);
+
+  for (const [opener, times] of [['[ch]', 40_000], ['<span data-name="x">', 25_000], ['<a', 40_000], ['[tab', 30_000]]) {
+    const text = opener.repeat(times);
+    const control = await measure(() => lib.parseTabLines('word '.repeat(Math.ceil(text.length / 5))));
+    within(`${opener} repeated with no closer`, await measure(() => lib.parseTabLines(text)), control);
+  }
+
+  assert.equal(
+    lib.transposeChordLine('Am C/E CmM7 Gmaj7 D/F# F#m7b5 A(add9)', 2),
+    'Bm D/F# DmM7 Amaj7 E/G# G#m7b5 B(add9)',
+    'chord names with the qualities the pattern knows are moved',
+  );
+  assert.equal(lib.transposeChordLine('F# C# G#', 1), 'G D A', 'a chord that is a bare sharp moves as one note');
+  assert.equal(lib.transposeChordLine('D/A# Bb', 1), 'D#/B B', 'and so does a sharp bass note');
+  const odd = await measure(() => lib.transposeChordLine(`A${'mM'.repeat(26)}z`, 2));
+  within('A followed by mM pairs', odd, await measure(() => lib.transposeChordLine(`A${'mm'.repeat(26)}z`, 2)));
   check('guitar tab chord grammar and sidecars');
 }
 
@@ -394,6 +436,50 @@ const check = (name) => results.push(name);
     );
     check('sidecar lyrics and embedded cache');
   }
+}
+
+// ---- the MP4 codec reader fills its reads and bounds what a hostile moov can build ----
+{
+  const box = (type, ...children) => {
+    const body = Buffer.concat(children);
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(8 + body.length, 0);
+    head.write(type, 4, 'latin1');
+    return Buffer.concat([head, body]);
+  };
+  const handler = Buffer.concat([Buffer.alloc(8), Buffer.from('soun', 'latin1'), Buffer.alloc(8)]);
+  const entries = Buffer.concat([Buffer.alloc(4), Buffer.from([0, 0, 0, 1]), box('alac', Buffer.alloc(28))]);
+  const moov = box(
+    'moov',
+    box('free', Buffer.alloc(10_000)),
+    box('trak', box('mdia', box('hdlr', handler), box('minf', box('stbl', box('stsd', entries))))),
+  );
+  const m4a = join(root, 'synthetic.m4a');
+  await writeFile(m4a, Buffer.concat([box('ftyp', Buffer.from('M4A \0\0\0\0', 'latin1')), moov]));
+
+  // Reads that return at most 4 KB at a time, as a share can: the sound track sits past the first 4 KB of moov.
+  const handle = await open(m4a);
+  const proto = Object.getPrototypeOf(handle);
+  await handle.close();
+  const originalRead = proto.read;
+  proto.read = function read(buffer, offset, length, position) {
+    return originalRead.call(this, buffer, offset, Math.min(length, 4096), position);
+  };
+  try {
+    assert.equal(lib.soundSampleEntry(await lib.readMoov(m4a)), 'alac', 'a moov that arrives in pieces is read whole');
+    assert.equal(await lib.mp4SoundCodec(m4a), 'alac');
+  } finally {
+    proto.read = originalRead;
+  }
+
+  const tiny = Buffer.alloc(lib.MAX_BOX_CHILDREN * 3 * 8);
+  for (let at = 0; at < tiny.length; at += 8) {
+    tiny.writeUInt32BE(8, at);
+    tiny.write('free', at + 4, 'latin1');
+  }
+  assert.equal(lib.boxChildren(tiny, 0, tiny.length).length, lib.MAX_BOX_CHILDREN, 'a box with millions of children yields a bounded list');
+  assert.equal(lib.boxChildren(moov, 0, moov.length).length, 1, 'an ordinary box lists its children');
+  check('mp4 codec reads and bounds');
 }
 
 // ---- history import retries a bad page and explains a refusal ----
@@ -572,6 +658,44 @@ const check = (name) => results.push(name);
   );
   const candidate = found[0];
   assert.equal(candidate.thumbnailUrl, 'https://coverartarchive.org/release/x/1-1200.jpg', 'the 1200 px thumbnail is preferred');
+
+  // The archive timing out partway through keeps the covers already found; with none found, it is the error.
+  const twoGroups = {
+    'release-groups': [
+      { id: 'g1', score: 100, title: 'Kid A', 'artist-credit': [{ name: 'Radiohead' }] },
+      { id: 'g2', score: 90, title: 'Kid A Mnesia', 'artist-credit': [{ name: 'Radiohead' }] },
+    ],
+  };
+  const cover = { images: [{ image: 'https://coverartarchive.org/release/x/1.jpg', front: true, thumbnails: {} }] };
+  const timedOut = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+  const lookups = [];
+  const partial = await lib.searchAlbumArt(
+    { album: 'Kid A', albumArtist: 'Radiohead' },
+    {
+      ...timing,
+      fetchImpl: async (url) => {
+        if (String(url).startsWith('https://musicbrainz.org/')) return reply(200, twoGroups);
+        lookups.push(String(url));
+        if (lookups.length === 2) throw timedOut();
+        return reply(200, cover);
+      },
+    },
+  );
+  assert.equal(partial.length, 1, 'the cover found before the timeout is returned');
+  assert.equal(lookups.length, 2, 'the search stops at the lookup that failed');
+  await assert.rejects(
+    () => lib.searchAlbumArt(
+      { album: 'Kid A', albumArtist: 'Radiohead' },
+      {
+        ...timing,
+        fetchImpl: async (url) => {
+          if (String(url).startsWith('https://musicbrainz.org/')) return reply(200, twoGroups);
+          throw timedOut();
+        },
+      },
+    ),
+    /timeout/,
+  );
 
   const fetched = [];
   const image = await lib.fetchAlbumArtImage(candidate, {

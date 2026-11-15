@@ -12,7 +12,7 @@ import { build } from 'esbuild';
 const sourceCode = readFileSync(new URL('../electron/exclusive-output.ts', import.meta.url), 'utf8')
   .replace('this.addon = loadAddon();', 'this.addon = null;')
   .replace("import { resamplerFilter, resamplerKindNow } from './resampler.js';", "const resamplerFilter = () => 'aresample'; const resamplerKindNow = () => 'swr';")
-  .replace("import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';", "const resolveFfmpegPath = () => 'fixture-ffmpeg'; const watchFfmpegInput = () => {};")
+  .replace("import { INPUT_PROTOCOLS, resolveFfmpegPath, watchFfmpegInput } from './transcode.js';", "const INPUT_PROTOCOLS = ['-protocol_whitelist', 'file,pipe']; const resolveFfmpegPath = () => 'fixture-ffmpeg'; const watchFfmpegInput = () => {};")
   .replace("import { killChild } from './kill-child.js';", 'const killChild = (child) => child.kill();');
 const compiled = await build({ stdin: { contents: sourceCode, loader: 'ts', resolveDir: fileURLToPath(new URL('../electron/', import.meta.url)) }, bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
 
@@ -55,7 +55,8 @@ function fixture(format = 's16') {
     start: () => { running = true; }, stopDevice: () => { running = false; },
     clear: () => { written = rendered * bpf; }, setEos: (value) => { eos = value; },
   };
-  const source = { trackId: 1, path: '/a.flac', sampleRate: 44100, channels: 2, bitDepth: format === 's24' ? 24 : 16, durationSec: 30, lossless: true, dsd: false };
+  // Two seconds: the decoders here end cleanly after a handful of frames, which is the end of a track only when it is that short.
+  const source = { trackId: 1, path: '/a.flac', sampleRate: 44100, channels: 2, bitDepth: format === 's24' ? 24 : 16, durationSec: 2, lossless: true, dsd: false };
   return { output, source, events, written: () => written, render: (n) => { rendered = n; }, halt: () => { running = false; }, limitWrite: (n) => { maxWrite = n; } };
 }
 
@@ -79,7 +80,11 @@ try {
       await f.output.play(f.source, 0, null);
       f.output.waitingSince -= 15001;
       f.output.pollPlayback();
-      assert.match(f.events.at(-1).message, /Timed out waiting/);
+      assert.deepEqual(
+        f.events.at(-1),
+        { type: 'error', trackId: 1, message: 'Timed out waiting for decoded audio.', positionSec: 0 },
+        'the error says where the track was, so the renderer carries it on instead of skipping it',
+      );
       assert.equal(children.at(-1).killed, true, 'startup timeout releases decoder');
     } finally { f.output.dispose(); }
   }
@@ -95,7 +100,7 @@ try {
       else {
         f.output.pause();
         assert.equal(f.events.at(-1).trackId, 1, 'pause state describes the audible source');
-        assert.equal(f.events.at(-1).durationSec, 30);
+        assert.equal(f.events.at(-1).durationSec, 2);
         const timer = f.output.idleTimer;
         timers.delete(timer);
         timer.callback();
@@ -110,17 +115,17 @@ try {
     try {
       await f.output.play(f.source, 0, null);
       children.at(-1).stdout.emit('data', Buffer.alloc(40));
-      const repeat = { ...f.source, durationSec: 70 };
+      const repeat = { ...f.source, durationSec: 1 };
       f.output.prepareNext(repeat);
       children.at(-1).emit('close', 0);
       children.at(-1).stdout.emit('data', Buffer.alloc(40));
       f.render(10);
       f.output.pollPlayback();
       assert.equal(f.events.at(-1).type, 'boundary', 'repeated track IDs still cross segment boundaries');
-      assert.equal(f.events.at(-1).durationSec, 70);
+      assert.equal(f.events.at(-1).durationSec, 1);
       assert.equal((await f.output.play(repeat, 0, null)).chained, true);
       f.output.pollPlayback();
-      assert.equal(f.events.at(-1).durationSec, 70, 'position uses this occurrence of a repeated track');
+      assert.equal(f.events.at(-1).durationSec, 1, 'position uses this occurrence of a repeated track');
     } finally { f.output.dispose(); }
   }
   {
