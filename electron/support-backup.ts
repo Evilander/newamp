@@ -20,6 +20,9 @@ export interface SupportBackupInput {
   // SettingsStore.snapshotJson()) right before calling createSupportBackup.
   librarySnapshot?: Buffer;
   settingsSnapshot?: string;
+  // The SHA-256 of librarySnapshot when the caller already has it, so a daily
+  // backup does not hash the whole database a second time for its manifest.
+  librarySha256?: string;
   // 'full' (the default, the Settings backup) copies the whole profile, art
   // stores included. 'library' is the safety copy taken before a trash or a
   // prune: library.db and settings.json only, since neither operation touches
@@ -94,7 +97,7 @@ export async function createSupportBackup(input: SupportBackupInput): Promise<Su
     filesCopied,
     included,
     automatic,
-    ...(daily ? { daily, librarySha256: input.librarySnapshot ? sha256(input.librarySnapshot) : undefined } : {}),
+    ...(daily ? { daily, librarySha256: input.librarySnapshot ? input.librarySha256 ?? await sha256Async(input.librarySnapshot) : undefined } : {}),
   };
   await writeFile(join(backupPath, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
   if (input.scope === 'library') await pruneAutomaticBackups(backupsRoot, backupPath);
@@ -173,13 +176,17 @@ export interface DailyBackupInput {
   // Called only once a backup is due, since taking the library snapshot copies
   // the whole database. Reads the live stores' memory, like the manual backup.
   snapshot: () => { librarySnapshot: Buffer; settingsSnapshot: string };
+  // True while a copy should wait, such as while a track is playing from a
+  // slow share and the main thread is serving its audio. Asked before the
+  // snapshot is taken; the next check tries again.
+  defer?: () => boolean;
   // Free bytes on the profile's drive, or null when unknown. Injected for tests.
   freeBytes?: (path: string) => Promise<number | null>;
 }
 
 export type DailyBackupOutcome =
   | { status: 'created'; backup: SupportBackupResult }
-  | { status: 'skipped'; reason: 'recent' | 'unchanged' | 'low-disk' | 'busy' | 'invalid'; detail?: string };
+  | { status: 'skipped'; reason: 'recent' | 'unchanged' | 'low-disk' | 'busy' | 'invalid' | 'deferred'; detail?: string };
 
 const DAILY_MIN_GAP_MS = 60 * 60 * 1000;
 // library.db is the one big file (60 MB is ordinary, several times that is not
@@ -203,8 +210,11 @@ export async function createDailyBackupIfDue(input: DailyBackupInput): Promise<D
     const newest = existing[0] ?? null;
     if (!dailyBackupDue(newest ? newest.createdAt : null, now)) return { status: 'skipped', reason: 'recent' };
 
+    if (input.defer?.()) return { status: 'skipped', reason: 'deferred' };
+
     const snapshot = input.snapshot();
-    if (newest?.librarySha256 && newest.librarySha256 === sha256(snapshot.librarySnapshot)) {
+    const librarySha256 = await sha256Async(snapshot.librarySnapshot);
+    if (newest?.librarySha256 && newest.librarySha256 === librarySha256) {
       return { status: 'skipped', reason: 'unchanged' };
     }
     const free = await (input.freeBytes ?? freeBytesOn)(resolve(input.userDataPath));
@@ -217,6 +227,7 @@ export async function createDailyBackupIfDue(input: DailyBackupInput): Promise<D
       libraryPath: input.libraryPath,
       now,
       scope: 'daily',
+      librarySha256,
       ...snapshot,
     });
     try {
@@ -267,8 +278,18 @@ async function freeBytesOn(path: string): Promise<number | null> {
   }
 }
 
-function sha256(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex');
+const HASH_SLICE_BYTES = 4 * 1024 * 1024;
+
+// The library snapshot is tens of megabytes, and the main thread that hashes it
+// is also the one serving the playing track. Feed the hash a slice at a time
+// and let the event loop run in between, so no single step holds it for long.
+async function sha256Async(bytes: Buffer): Promise<string> {
+  const hash = createHash('sha256');
+  for (let offset = 0; offset < bytes.length; offset += HASH_SLICE_BYTES) {
+    hash.update(bytes.subarray(offset, offset + HASH_SLICE_BYTES));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  return hash.digest('hex');
 }
 
 export function restoreSupportBackup(input: SupportRestoreInput): Promise<SupportRestoreResult> {
@@ -313,7 +334,15 @@ async function restoreSupportBackupNow(input: SupportRestoreInput): Promise<Supp
       else {
         await mkdir(dirname(entry.staged), { recursive: true });
         await copyFile(entry.target, entry.staged);
-        if (entry.label.endsWith('.json')) JSON.parse(await readFile(entry.staged, 'utf8'));
+        if (entry.label.endsWith('.json')) {
+          const parsed: unknown = JSON.parse(await readFile(entry.staged, 'utf8'));
+          // Valid JSON that is not an object (null, a list, a number) would
+          // be swapped in as settings and come up as defaults after the
+          // restart, with the restore reporting success.
+          if (entry.label === 'settings.json' && (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))) {
+            throw new Error('Invalid backup member: settings.json is not a settings object');
+          }
+        }
         if (entry.label === 'library.db') await validateLibrarySnapshot(entry.staged);
       }
       // A live symlink could redirect the transaction outside the profile.
@@ -439,12 +468,12 @@ async function writeCandidate(
 ): Promise<number> {
   if (candidate.label === 'library.db' && input.librarySnapshot) {
     await mkdir(dirname(candidate.target), { recursive: true });
-    await writeFile(candidate.target, input.librarySnapshot);
+    await writeFile(candidate.target, input.librarySnapshot, { mode: 0o600 });
     return 1;
   }
   if (candidate.label === 'settings.json' && input.settingsSnapshot !== undefined) {
     await mkdir(dirname(candidate.target), { recursive: true });
-    await writeFile(candidate.target, input.settingsSnapshot, 'utf8');
+    await writeFile(candidate.target, input.settingsSnapshot, { encoding: 'utf8', mode: 0o600 });
     return 1;
   }
   return copyCandidate(userDataPath, backupsRoot, candidate);

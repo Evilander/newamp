@@ -13,13 +13,15 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { constants as osConstants, setPriority } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { WaveformData } from '../shared/types.js';
 import { caseFoldCachePath } from './cache-key-casing.js';
 import { killChild } from './kill-child.js';
 import { onPlaybackHunger, whenPlaybackFed } from './playback-io.js';
+import { isStorageError, watchReadFailures } from './read-failure.js';
 import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
 
 export interface WaveformRequest {
@@ -38,8 +40,11 @@ export interface WaveformOptions {
 
 export const WAVEFORM_BUCKETS = 2048;
 export const WAVEFORM_SAMPLE_RATE = 8000;
-/** Bumped when the decode or the reduction changes what a file holds. */
-export const WAVEFORM_VERSION = 1;
+/**
+ * Bumped when the decode or the reduction changes what a file holds. 2: a
+ * version 1 file can hold a decode that a failed read cut short.
+ */
+export const WAVEFORM_VERSION = 2;
 /** A clip shorter than this has no shape worth drawing. */
 const MIN_SECONDS = 1;
 /** Longer than this (an audiobook, a day-long mix) the seek bar stays plain. */
@@ -55,6 +60,10 @@ const PRUNE_EVERY_WRITES = 400;
 const MAX_REMEMBERED_FAILURES = 500;
 // A .part file younger than this may be a write in progress.
 const STALE_PART_MS = 60_000;
+// A file on a share that timed out is read again, up to this many times,
+// waiting a little longer each time.
+const READ_RETRIES = 5;
+const READ_RETRY_DELAY_MS = 1000;
 
 // ---------------------------------------------------------------------------
 // Reduction
@@ -238,7 +247,7 @@ export function initWaveformCache(dir: string): void {
   cacheDir = dir;
   closed = false;
   ready = mkdir(dir, { recursive: true })
-    .then(() => pruneCache(dir))
+    .then(() => pruneCache(dir, true))
     .catch((err) => {
       console.error('[waveform] cache unavailable; waveforms will be rebuilt each session:', err);
       cacheDir = '';
@@ -286,7 +295,41 @@ async function writeCached(key: string, data: WaveformData): Promise<void> {
   }
 }
 
-async function pruneCache(dir: string): Promise<void> {
+// The version a cache file was written at, from its first bytes (encodeWaveformFile puts "v" first).
+// Null when it can't be told, such as a file that is not one of ours.
+async function cachedVersion(file: string): Promise<number | null> {
+  let handle;
+  try {
+    handle = await open(file, 'r');
+    const buffer = Buffer.alloc(16);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const match = /^\{"v":(\d+)/.exec(buffer.toString('latin1', 0, bytesRead));
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+// Files from before the last WAVEFORM_VERSION are never read again (the key
+// includes the version), but they would still count against the room the
+// library-wide analysis may fill, and some hold the decodes the bump discards.
+async function dropOutdated(dir: string, names: string[]): Promise<string[]> {
+  const kept: string[] = [];
+  const queue = [...names];
+  const worker = async (): Promise<void> => {
+    for (let name = queue.pop(); name !== undefined; name = queue.pop()) {
+      const version = await cachedVersion(join(dir, name));
+      if (version != null && version !== WAVEFORM_VERSION) void unlink(join(dir, name)).catch(() => undefined);
+      else kept.push(name);
+    }
+  };
+  await Promise.all(Array.from({ length: 16 }, worker));
+  return kept;
+}
+
+async function pruneCache(dir: string, startup = false): Promise<void> {
   const names = await readdir(dir);
   const now = Date.now();
   for (const name of names) {
@@ -295,7 +338,9 @@ async function pruneCache(dir: string): Promise<void> {
     const at = (await stat(join(dir, name)).catch(() => null))?.mtimeMs;
     if (at != null && now - at > STALE_PART_MS) void unlink(join(dir, name)).catch(() => undefined);
   }
-  const files = names.filter((name) => name.endsWith('.json'));
+  // Only at startup: after that every file written is the current version.
+  const found = names.filter((name) => name.endsWith('.json'));
+  const files = startup ? await dropOutdated(dir, found) : found;
   cachedFiles = files.length;
   if (files.length <= MAX_CACHED_FILES) return;
   const aged = await Promise.all(
@@ -357,6 +402,10 @@ interface Job {
   cancelled: boolean;
   /** The decode was stopped from outside (the Recycle Bin flow); that says nothing about the file. */
   interrupted: boolean;
+  /** The last decode was cut short by the storage, not the end of the file. */
+  readFailed: boolean;
+  /** Ends the wait before the file is read again. */
+  wake: (() => void) | null;
   settle: (value: WaveformData | null) => void;
 }
 
@@ -393,10 +442,15 @@ export async function getWaveform(request: WaveformRequest, options: WaveformOpt
   const born = epoch;
   await ready;
   let info;
-  try {
-    info = await stat(request.path);
-  } catch {
-    return null;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      info = await stat(request.path);
+      break;
+    } catch (err) {
+      if (!isStorageError(err) || attempt > READ_RETRIES) return null;
+    }
+    await delay(READ_RETRY_DELAY_MS * attempt);
+    if (born !== epoch || closed) return null;
   }
   if (born !== epoch || closed) return null;
   const start = Math.max(0, Number(request.cueStart) || 0);
@@ -450,7 +504,7 @@ export function activeWaveformPids(): number[] {
 export function cancelWaveformWork(): void {
   epoch += 1;
   for (const job of waiting.splice(0)) drop(job);
-  if (running) running.cancelled = true;
+  if (running) stop(running);
   for (const child of liveFfmpeg) killChild(child);
 }
 
@@ -465,7 +519,16 @@ function enqueue(entry: Entry, spec: Pick<Job, 'key' | 'path' | 'start' | 'end' 
       resolve(null);
       return;
     }
-    const job: Job = { ...spec, prefetch: entry.prefetch, child: null, cancelled: false, interrupted: false, settle: resolve };
+    const job: Job = {
+      ...spec,
+      prefetch: entry.prefetch,
+      child: null,
+      cancelled: false,
+      interrupted: false,
+      readFailed: false,
+      wake: null,
+      settle: resolve,
+    };
     entry.job = job;
     if (entry.prefetch) waiting.push(job);
     else makeUrgent(job);
@@ -483,23 +546,38 @@ function makeUrgent(job: Job): void {
   }
   if (running === job) return;
   waiting.push(job);
-  if (running) {
-    running.cancelled = true;
-    if (running.child) killChild(running.child);
-  }
+  if (running) stop(running);
 }
 
 // A prefetch decoding when playback runs short is stopped. It isn't a failure:
 // the track decodes again once it is the one playing.
 onPlaybackHunger((hungry) => {
   if (!hungry || !running?.prefetch) return;
-  running.cancelled = true;
-  if (running.child) killChild(running.child);
+  stop(running);
 });
 
 function drop(job: Job): void {
   job.cancelled = true;
   job.settle(null);
+}
+
+// Stops the running job's decode, or its wait to read the file again.
+function stop(job: Job): void {
+  job.cancelled = true;
+  if (job.child) killChild(job.child);
+  job.wake?.();
+}
+
+function pauseJob(job: Job, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(wake, ms);
+    function wake(): void {
+      clearTimeout(timer);
+      job.wake = null;
+      resolve();
+    }
+    job.wake = wake;
+  });
 }
 
 async function pump(): Promise<void> {
@@ -508,13 +586,19 @@ async function pump(): Promise<void> {
   try {
     for (let job = waiting.shift(); job; job = waiting.shift()) {
       running = job;
-      // A drive that is starving playback serves it first.
-      await whenPlaybackFed();
       let result: WaveformData | null = null;
-      try {
-        if (!job.cancelled && !closed) result = await decode(job);
-      } catch (err) {
-        if (!job.cancelled && !closed) console.error('[waveform] decode failed:', err instanceof Error ? err.message : err);
+      for (let attempt = 1; ; attempt++) {
+        // A drive that is starving playback serves it first.
+        await whenPlaybackFed();
+        job.readFailed = false;
+        try {
+          if (!job.cancelled && !closed) result = await decode(job);
+        } catch (err) {
+          if (!job.cancelled && !closed) console.error('[waveform] decode failed:', err instanceof Error ? err.message : err);
+        }
+        if (result || !job.readFailed || job.cancelled || closed || attempt > READ_RETRIES) break;
+        await pauseJob(job, READ_RETRY_DELAY_MS * attempt);
+        if (job.cancelled || closed) break;
       }
       running = null;
       if (job.cancelled || closed) {
@@ -522,6 +606,7 @@ async function pump(): Promise<void> {
         continue;
       }
       if (result) await writeCached(job.key, result);
+      else if (job.readFailed) console.warn(`[waveform] could not read ${job.path}; it is tried again when next asked for`);
       else if (!job.interrupted) rememberFailure(job.key);
       job.settle(result);
     }
@@ -564,6 +649,7 @@ function decode(job: Job): Promise<WaveformData | null> {
       }
     }
     const reducer = new PeakReducer();
+    const readFailed = watchReadFailures(child, job.path);
     let stderr = '';
     let settled = false;
     const settle = (err?: Error, result?: WaveformData | null): void => {
@@ -587,13 +673,17 @@ function decode(job: Job): Promise<WaveformData | null> {
     child.on('close', (code, signal) => {
       if (job.cancelled) {
         settle(undefined, null);
+      } else if (code === null && signal) {
+        job.interrupted = true;
+        settle(undefined, null);
+      } else if (readFailed()) {
+        // ffmpeg exits 0 after a failed read too: what it decoded is only the start of the track.
+        job.readFailed = true;
+        settle(undefined, null);
       } else if (code === 0) {
         const data = reducer.finish();
         // -t cut it off: this is the first three hours of something longer.
         settle(undefined, data && !job.bounded && data.duration >= MAX_SECONDS - 1 ? null : data);
-      } else if (code === null && signal) {
-        job.interrupted = true;
-        settle(undefined, null);
       } else {
         settle(new Error(`ffmpeg exited ${code}: ${stderr.trim().slice(0, 300)}`));
       }

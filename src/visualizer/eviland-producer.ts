@@ -17,7 +17,7 @@
 // the on-screen Eviland branch already does.
 
 import type { AudioEngine } from '../audio/engine';
-import { liveGradeFor, resolveEvilandPalette, sleeveFor, tuneEvilandFrame, type Sleeve } from './eviland-appearance';
+import { liveGradeFor, resolveEvilandPalette, sleeveFor, themePaletteFromAccent, tuneEvilandFrame, type Sleeve } from './eviland-appearance';
 import { readEvilandTuning } from '../lib/vizPrefs';
 import { createEvilandReactor, type EvilandReactor } from './eviland-audio';
 import { createDirector, type Director } from './eviland-director';
@@ -77,13 +77,19 @@ function getCssVar(name: string, fallback = '#39ff14'): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
+/**
+ * The skin's colours as the theme palette, built by the same function as the
+ * main window's so the projector resolves the palette the main window does.
+ */
 function readPalette(): EvilandPalette {
-  return {
-    accent: parseRgbVec(getCssVar('--accent')),
-    dark: parseRgbVec(getCssVar('--accent-dim', getCssVar('--accent'))),
-    light: parseRgbVec(getCssVar('--ink', '#ffffff'), [1, 1, 1]),
-    bg: parseRgbVec(getCssVar('--bg', '#05060a'), [0.02, 0.024, 0.04]),
-  };
+  const dim = getCssVar('--accent-dim', '');
+  const light = getCssVar('--viz-light', '');
+  return themePaletteFromAccent(
+    parseRgbVec(getCssVar('--accent')),
+    dim ? parseRgbVec(dim) : null,
+    parseRgbVec(getCssVar('--bg', '#05060a'), [0.02, 0.024, 0.04]),
+    light ? parseRgbVec(light, [1, 1, 1]) : null,
+  );
 }
 
 function applyManualSeed(seed: string | null): OperatorConfig | null {
@@ -322,7 +328,7 @@ export function startEvilandProducer(
     fillWaveSamples();
     frameBus.publish(
       tuneEvilandFrame(frame, tuning.reactivity),
-      resolveEvilandPalette(tuning.palette, palette, now / 1000, frame.score?.keyShift, config.palette, sleeveFor(config, artPalette, sleeve)),
+      resolveEvilandPalette(tuning.palette, palette, now / 1000, frame.score?.keyShift, config.palette, sleeveFor(config, artPalette, sleeve), frame.score?.minor, frame.score?.keyConfidence),
       dtMs,
       config,
       {

@@ -23,9 +23,18 @@ const reset = (overrides = {}) => {
   env.statsCalls = 0;
   env.stats = async () => ({ tracks: 0, albums: 0, artists: 0, duration: 0 });
   env.scanListeners = new Set();
+  env.fullscreen = false;
+  env.fullscreenReads = 0;
+  env.resizeListeners = new Set();
   env.state = { ...env.state, ...overrides };
 };
 globalThis.__env = env;
+// The title bar asks the main process whether the window is fullscreen, and
+// asks again on every resize.
+globalThis.window = {
+  addEventListener: (type, cb) => { if (type === 'resize') globalThis.__env.resizeListeners.add(cb); },
+  removeEventListener: (type, cb) => { if (type === 'resize') globalThis.__env.resizeListeners.delete(cb); },
+};
 
 const { TitleBar } = await bundleComponent('src/components/TitleBar.tsx', {
   '../store/usePlayerStore': 'export const usePlayerStore = (select) => select(globalThis.__env.state);',
@@ -35,7 +44,10 @@ const { TitleBar } = await bundleComponent('src/components/TitleBar.tsx', {
     getStats: () => { globalThis.__env.statsCalls += 1; return globalThis.__env.stats(); },
     onScanProgress: (cb) => { globalThis.__env.scanListeners.add(cb); return () => globalThis.__env.scanListeners.delete(cb); },
   };
-  export const winctl = { onState: () => () => undefined };`,
+  export const winctl = {
+    onState: () => () => undefined,
+    isFullscreen: async () => { globalThis.__env.fullscreenReads += 1; return globalThis.__env.fullscreen; },
+  };`,
   './EntityLink': 'export const ArtistLink = () => null;',
   './BrandLogo': 'export const BrandLogo = () => null;',
 });
@@ -140,6 +152,20 @@ async function show(overrides, setup) {
   assert.equal(idleText(view), 'Nothing playing');
   assert.equal(env.scanListeners.size, 0, 'no listener once a folder is saved');
   view.unmount();
+}
+
+// Fullscreen is read when the bar mounts and again on each resize, and the
+// listener is gone once the bar unmounts.
+{
+  const view = await show({});
+  assert.equal(env.fullscreenReads, 1, 'the title bar asks once when it mounts');
+  assert.equal(env.resizeListeners.size, 1, 'and listens for resizes');
+  env.fullscreen = true;
+  for (const listener of env.resizeListeners) listener();
+  await settle();
+  assert.equal(env.fullscreenReads, 2, 'a resize asks again');
+  view.unmount();
+  assert.equal(env.resizeListeners.size, 0, 'unmounting stops listening for resizes');
 }
 
 // A playing track still takes the line.

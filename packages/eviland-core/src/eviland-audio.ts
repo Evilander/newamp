@@ -6,7 +6,7 @@
 // every other visualizer's). Four leaps over the state of the art:
 //   1. 24 mel-band half-wave spectral flux → per-band adaptive-threshold onset
 //      bus, grouped into semantic voices (kick/bass/snare/hat/vocal).
-//   2. Spatial-truth features: per-channel stereo width + pan.
+//   2. Spatial-truth features: stereo width and pan, overall and per band.
 //   3. Structural memory: a self-similarity novelty curve detects section
 //      boundaries, and section fingerprints let a returning chorus be
 //      RECOGNISED so the visual can rhyme with its earlier appearance.
@@ -48,6 +48,10 @@ export interface ScoreCues {
   tier: 'calm' | 'steady' | 'lift' | 'drop' | 'climax';
   /** Palette hue rotation in turns (20° per fifth): how far this section's key sits from the song's home key. */
   keyShift: number;
+  /** 0 for a major section, 1 for a minor one, glided by the conductor. */
+  minor: number;
+  /** 0..1 — how sure the score is of the section's key; 0 leaves the palette's mood alone. */
+  keyConfidence: number;
   /** 0..1 position in the track. */
   arc: number;
   /** A bar line was crossed this frame. */
@@ -85,6 +89,14 @@ export interface EvilandFrame {
   rolloff: number; // 0..1 (85% energy frequency, normalised)
   width: number; // stereo width 0..1
   pan: number; // -1 left .. +1 right
+  /**
+   * Pan of each mel band, -1 left .. +1 right: where that part of the
+   * spectrum sits in the stereo image, smoothed and gated by the band's own
+   * level, so a right-panned hat and a centred kick read at different places.
+   * All zero for a mono source. Absent on frames that did not come from the
+   * reactor; consumers fall back to `pan`.
+   */
+  bandPan?: Float32Array;
   beatPhase: number; // 0..1, 0 = on the beat; a sawtooth re-anchored on every kick
   beatConfidence: number; // 0..1
   bpm: number;
@@ -129,6 +141,12 @@ export interface EvilandReactorConfig {
 }
 
 export const EVILAND_BANDS = 24;
+
+/** Where a band sits in the stereo image: its own pan, or the whole mix's when the frame carries none. */
+export function bandPanOf(frame: Pick<EvilandFrame, 'pan' | 'bandPan'>, band: number): number {
+  const p = frame.bandPan ? frame.bandPan[band] : undefined;
+  return p !== undefined && p === p ? p : frame.pan;
+}
 
 const MIN_HZ = 20;
 const MAX_HZ = 16000;
@@ -232,6 +250,21 @@ const REF_ATTACK_MS = 400;
 const REF_RELEASE_MS = 45000;
 const REF_RELEASE_FAST_MS = 4000;
 const REF_FAST_GAP_DB = 6;
+// Per-band pan. It moves away from the centre quickly and back slowly. A
+// band's mean byte level (0..1, both channels) fades its pan in between the
+// two gate levels, so a band with next to nothing in it has no position and
+// relaxes to the centre instead of chasing noise.
+const BAND_PAN_ATTACK_MS = 80;
+const BAND_PAN_RELEASE_MS = 400;
+const BAND_PAN_GATE_LO = 0.08;
+const BAND_PAN_GATE_HI = 0.2;
+// Tempo smoothing as time constants, so the lock behaves the same at 30 and 60 frames per second.
+const BPM_TAU_MS = 160;
+// The band magnitudes' light smoothing and the novelty readout's decay between
+// structure ticks, at the time constants the old per-frame 0.35 and 0.9 gave at 60 Hz.
+const BAND_SMOOTH_TAU_MS = 39;
+const NOVELTY_DECAY_TAU_MS = 158;
+const CONFIDENCE_DECAY_TAU_MS = 1600;
 // A quiet master is lifted so its bands and voices fill the same range a loud
 // one does: in byte units (dB-linear), capped at about 23 dB.
 const BAND_LIFT_MAX = 0.3;
@@ -275,7 +308,8 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
   const prevOnsetBand = new Float32Array(EVILAND_BANDS); // previous unsmoothed band for flux
   const fluxMean = new Float32Array(EVILAND_BANDS); // rolling mean of flux
   const fluxVar = new Float32Array(EVILAND_BANDS); // rolling variance of flux
-  const lastOnsetAt = new Float32Array(EVILAND_BANDS); // refractory timer
+  // A double: a float32 clock loses whole milliseconds after a few hours of uptime.
+  const lastOnsetAt = new Float64Array(EVILAND_BANDS); // refractory timer
   const REFRACTORY_MS = 90;
   // Rolling flux statistics over about half a second, as a time constant so
   // the onset threshold behaves the same at 30 and 60 frames per second.
@@ -295,6 +329,8 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
   const rolloffEnv = new Env(50, 600);
   const widthEnv = new Env(100, 1500);
   const panEnv = new Env(100, 1500);
+  // Smoothed stereo position of each band, -1 (left) to 1 (right), reused every frame.
+  const bandPanOut = new Float32Array(EVILAND_BANDS);
 
   // Loudness reference (see the constants above), a slow loudness for the
   // fade gate, and the loudest slow level heard so far this track.
@@ -419,6 +455,7 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
     rolloff: 0,
     width: 0,
     pan: 0,
+    bandPan: bandPanOut,
     beatPhase: 0,
     beatConfidence: 0,
     bpm: 0,
@@ -491,6 +528,8 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
       sectionFrames = 0;
       fingerprints.length = 0;
       lastNoveltyAt = 0;
+      lastOnsetAt.fill(0);
+      bandPanOut.fill(0);
       // out.novelty is only recomputed on struct-ticks (every ~500ms) — since
       // this reset itself doesn't count as one, leaving it alone would let the
       // old track's decayed novelty value leak into frames returned before the
@@ -505,6 +544,7 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
       lastNowMs = nowMs;
       out.onsets.length = 0;
       const fluxAlpha = 1 - Math.exp(-dt / FLUX_STATS_TAU_MS);
+      const bandSmoothing = 1 - Math.exp(-dt / BAND_SMOOTH_TAU_MS);
 
       // --- per-band magnitude + half-wave-rectified spectral flux (onset) ---
       let totalMag = 0;
@@ -537,7 +577,7 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
         const n = Math.max(1, e - s);
         const mag = sum / n / 255; // 0..1 smoothed-source magnitude
         const onsetMag = onsetSum / n / 255; // 0..1 unsmoothed-source magnitude
-        bandMag[b] = bandMag[b]! + (mag - bandMag[b]!) * 0.35; // light visual smoothing
+        bandMag[b] = bandMag[b]! + (mag - bandMag[b]!) * bandSmoothing; // light visual smoothing
         const bandPower = e > s ? liftedPower / n : powerFloor;
         powerSum += power;
         powerMeanSum += bandPower;
@@ -717,6 +757,25 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
       out.width = widthEnv.step(widthRaw, dt);
       out.pan = panEnv.step(bounded(panRaw, -1, 1), dt);
 
+      // --- per-band pan: the same (R - L) / (R + L), taken inside each band ---
+      for (let b = 0; b < EVILAND_BANDS; b++) {
+        const s = bandStart[b]!;
+        const e = bandEnd[b]!;
+        let l = 0;
+        let r = 0;
+        for (let k = s; k < e; k++) {
+          l += (leftFreq[k]! | 0) / 255;
+          r += (rightFreq[k]! | 0) / 255;
+        }
+        const level = (l + r) / (2 * Math.max(1, e - s));
+        const gate = unit((level - BAND_PAN_GATE_LO) / (BAND_PAN_GATE_HI - BAND_PAN_GATE_LO));
+        const target = isMono ? 0 : bounded((r - l) / (r + l + 1e-6), -1, 1) * gate;
+        const was = bandPanOut[b]!;
+        const toCentre = Math.abs(target) < Math.abs(was) && target * was >= 0;
+        const k = 1 - Math.exp(-dt / (toCentre ? BAND_PAN_RELEASE_MS : BAND_PAN_ATTACK_MS));
+        bandPanOut[b] = bounded(was + (target - was) * k, -1, 1);
+      }
+
       // --- tempo + phase (anticipation) ---
       if (ioi.length >= 4) {
         // Median interval is robust to the occasional missed/extra kick. Use a
@@ -729,14 +788,14 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
         const median = view[Math.floor(n / 2)]!;
         ioiMedian = median;
         const estBpm = 60000 / median;
-        bpm += (estBpm - bpm) * 0.1;
+        bpm += (estBpm - bpm) * (1 - Math.exp(-dt / BPM_TAU_MS));
         // Confidence = how tightly intervals cluster around the median.
         let spread = 0;
         for (const v of ioi) spread += Math.abs(v - median);
         spread /= ioi.length;
         beatConfidence = unit(1 - spread / (median * 0.5));
       } else {
-        beatConfidence *= 0.99;
+        beatConfidence *= Math.exp(-dt / CONFIDENCE_DECAY_TAU_MS);
       }
       out.bpm = bpm;
       out.beatConfidence = beatConfidence;
@@ -872,7 +931,7 @@ export function createEvilandReactor(config: EvilandReactorConfig): EvilandReact
           out.novelty = 0;
         }
       } else {
-        out.novelty *= 0.9;
+        out.novelty *= Math.exp(-dt / NOVELTY_DECAY_TAU_MS);
       }
       out.sectionId = sectionId;
 

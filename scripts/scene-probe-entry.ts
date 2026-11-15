@@ -58,6 +58,9 @@ const PALETTE: EvilandPalette = {
   dark: [0.05, 0.3, 0.12],
   light: [0.9, 1.0, 0.92],
   bg: [0.02, 0.02, 0.04],
+  // A second accent a different hue from the first, so a scene that draws with
+  // it is checked against a palette where it differs.
+  accent2: [0.2, 0.7, 1.0],
 };
 
 interface SceneResult {

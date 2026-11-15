@@ -5,6 +5,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
 // Compile current source in memory; substitute only native/process boundaries.
@@ -13,7 +14,7 @@ const sourceCode = readFileSync(new URL('../electron/exclusive-output.ts', impor
   .replace("import { resamplerFilter, resamplerKindNow } from './resampler.js';", "const resamplerFilter = () => 'aresample'; const resamplerKindNow = () => 'swr';")
   .replace("import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';", "const resolveFfmpegPath = () => 'fixture-ffmpeg'; const watchFfmpegInput = () => {};")
   .replace("import { killChild } from './kill-child.js';", 'const killChild = (child) => child.kill();');
-const compiled = await build({ stdin: { contents: sourceCode, loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
+const compiled = await build({ stdin: { contents: sourceCode, loader: 'ts', resolveDir: fileURLToPath(new URL('../electron/', import.meta.url)) }, bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
 
 const originalSpawn = cp.spawn;
 const originalTimeout = globalThis.setTimeout;
@@ -88,7 +89,7 @@ try {
       await f.output.play(f.source, 0, null);
       children.at(-1).stdout.emit('data', Buffer.alloc(40));
       f.output.prepareNext({ ...f.source, trackId: 2, path: '/b.flac', durationSec: 70 });
-      children.at(-1).stdout.emit('end');
+      children.at(-1).emit('close', 0);
       assert.equal(f.output.status().trackId, 1);
       if (action === 'seek') f.output.seek(5);
       else {
@@ -111,7 +112,7 @@ try {
       children.at(-1).stdout.emit('data', Buffer.alloc(40));
       const repeat = { ...f.source, durationSec: 70 };
       f.output.prepareNext(repeat);
-      children.at(-1).stdout.emit('end');
+      children.at(-1).emit('close', 0);
       children.at(-1).stdout.emit('data', Buffer.alloc(40));
       f.render(10);
       f.output.pollPlayback();
@@ -141,7 +142,7 @@ try {
       children.at(-1).stdout.emit('data', Buffer.alloc(40));
       const next = { ...f.source, trackId: 2, path: '/b.flac' };
       f.output.prepareNext(next);
-      children.at(-1).stdout.emit('end');
+      children.at(-1).emit('close', 0);
       const decoder = children.at(-1);
       decoder.stdout.emit('data', Buffer.alloc(40));
       f.render(10);
@@ -150,7 +151,7 @@ try {
       assert.equal((await f.output.play(next, 0, null)).chained, true);
       decoder.stdout.emit('data', Buffer.alloc(40));
       assert.equal(f.written(), 120, 'chain acknowledgement keeps accepting the active decoder');
-      decoder.stdout.emit('end');
+      decoder.emit('close', 0);
       f.render(30);
       f.output.pollPlayback();
       assert.equal(f.events.filter((e) => e.type === 'ended').length, 1, 'the chained decoder can still end normally');
@@ -164,7 +165,7 @@ try {
       children.at(-1).stdout.emit('data', Buffer.alloc(40));
       if (idleReason === 'pause') f.output.pause();
       else {
-        children.at(-1).stdout.emit('end');
+        children.at(-1).emit('close', 0);
         f.render(10);
         f.output.pollPlayback();
       }

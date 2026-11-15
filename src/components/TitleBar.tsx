@@ -12,6 +12,7 @@ function idleTitle(libraryRoots: number | null, trackCount: number | null): stri
 
 export function TitleBar(): JSX.Element {
   const [maximized, setMaximized] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const [trackCount, setTrackCount] = useState<number | null>(null);
   const libraryRoots = usePlayerStore((s) => s.settings?.libraryRoots?.length ?? null);
   const current = usePlayerStore((s) => s.current);
@@ -21,6 +22,26 @@ export function TitleBar(): JSX.Element {
   const setAlwaysOnTop = usePlayerStore((s) => s.setAlwaysOnTop);
 
   useEffect(() => winctl.onState((s) => setMaximized(s.maximized)), []);
+
+  // The window state channel does not report fullscreen, but entering or
+  // leaving it resizes the window, so a resize is the cue to ask.
+  useEffect(() => {
+    let cancelled = false;
+    const read = (): void => {
+      winctl
+        .isFullscreen()
+        .then((value) => {
+          if (!cancelled) setFullscreen(value);
+        })
+        .catch(() => undefined);
+    };
+    read();
+    window.addEventListener('resize', read);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('resize', read);
+    };
+  }, []);
 
   // Saved folders settle it. Without any, tracks can still be there (the empty
   // library screen scans a folder without touching the store's settings), so
@@ -48,6 +69,8 @@ export function TitleBar(): JSX.Element {
   }, [noFolders]);
 
   const isMac = api.platform === 'darwin';
+  // The traffic lights are hidden in fullscreen, so their inset goes too.
+  const trafficLightInset = isMac && !fullscreen;
 
   return (
     <header
@@ -57,7 +80,7 @@ export function TitleBar(): JSX.Element {
     >
       <div
         className="titlebar-nodrag flex items-center gap-2"
-        style={isMac ? { paddingLeft: 72 } : undefined}
+        style={trafficLightInset ? { paddingLeft: 72 } : undefined}
       >
         <BrandLogo size={28} title="NewAmp" />
         <span

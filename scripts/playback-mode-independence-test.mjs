@@ -121,7 +121,26 @@ for (const [name, source] of [['WinampClassicDeck', winampSource], ['ClassicBent
     `${name} should no longer hand-roll the shuffle toggle (it clobbered repeat)`,
   );
 }
-assert.match(winampSource, /repeatModeOf\(mode\) === 'all' \? 'off' : 'all'/, 'WinampClassicDeck repeat toggle should preserve shuffle across its on/off cycle');
+// The decks that carry a repeat button step it off -> all -> one, the order the
+// transport's cycleRepeat uses, and keep the shuffle flag while doing it. A
+// two-state on/off toggle would make repeat-one unreachable from those decks.
+for (const [name, source] of [['WinampClassicDeck', winampSource], ['ClassicBentoDeck', bentoSource]]) {
+  const cycle = source.match(/function nextRepeat\(repeat: RepeatMode\): RepeatMode \{\s*return ([^;]+);\s*\}/);
+  assert.ok(cycle, `${name} should define the nextRepeat cycle`);
+  const next = new Function('repeat', `return ${cycle[1]};`);
+  assert.equal(next('off'), 'all', `${name} repeat: off -> all`);
+  assert.equal(next('all'), 'one', `${name} repeat: all -> one`);
+  assert.equal(next('one'), 'off', `${name} repeat: one -> off`);
+  for (const repeat of ['off', 'all', 'one']) {
+    assert.equal(next(repeat), repeatModeOf(cycleRepeat(combinePlaybackMode(false, repeat))), `${name} cycle matches the transport's cycleRepeat from ${repeat}`);
+  }
+  assert.match(
+    source,
+    /onSetMode\(combinePlaybackMode\(isShuffleMode\(mode\), nextRepeat\(repeatModeOf\(mode\)\)\)\)/,
+    `${name} repeat button should step the cycle and preserve the shuffle flag`,
+  );
+  assert.doesNotMatch(source, /repeatModeOf\(mode\) === 'all' \? 'off' : 'all'/, `${name} must not go back to an on/off repeat toggle`);
+}
 
 assert.match(packageSource, /"test:playback-mode"/, 'package.json should expose the playback mode independence test');
 

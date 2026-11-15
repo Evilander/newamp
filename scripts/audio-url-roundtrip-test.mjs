@@ -54,6 +54,7 @@ await build({
     resolve(root, 'electron/audio-protocol-authorize.ts'),
     resolve(root, 'electron/audio-path-policy.ts'),
     resolve(root, 'electron/cache-key-casing.ts'),
+    resolve(root, 'electron/read-failure.ts'),
   ],
   outdir: buildDir,
   platform: 'node',

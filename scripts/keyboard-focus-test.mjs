@@ -435,7 +435,7 @@ function mountScrubBar(onSeek) {
     unmount: harness.unmount,
     type(value) {
       input.value = String(value);
-      latest.props.onInput({ currentTarget: input });
+      latest.props.onChange({ currentTarget: input });
     },
   };
 }

@@ -87,7 +87,10 @@ export function createWheelSeek(): WheelSeek {
       // Scrolling up (negative deltaY) moves forward, as it raises the volume.
       const base = aim ?? position;
       const limit = Math.max(0, duration - END_MARGIN_S);
-      const target = Math.max(0, Math.min(limit, base - notches * SEEK_SECONDS_PER_NOTCH));
+      const clamped = Math.max(0, Math.min(limit, base - notches * SEEK_SECONDS_PER_NOTCH));
+      // Inside the end margin the clamp would pull a forward step back before
+      // the playhead; a step forward never moves it backwards.
+      const target = notches < 0 ? Math.max(base, clamped) : clamped;
       aim = target;
       return { consumed: true, target: target === base ? null : target };
     },

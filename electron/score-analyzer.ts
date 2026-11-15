@@ -27,7 +27,9 @@ import {
   type SongScore,
 } from '../src/visualizer/eviland-score.js';
 import { caseFoldCachePath } from './cache-key-casing.js';
+import { killChild } from './kill-child.js';
 import { onPlaybackHunger, whenPlaybackFed } from './playback-io.js';
+import { watchReadFailures } from './read-failure.js';
 import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
 
 export interface ScoreRequest {
@@ -77,13 +79,7 @@ export function initScoreCache(dir: string): void {
 }
 
 export function killAllScoreFfmpeg(): void {
-  for (const child of liveScoreFfmpeg) {
-    try {
-      child.kill();
-    } catch {
-      /* already gone */
-    }
-  }
+  for (const child of [...liveScoreFfmpeg]) killChild(child);
 }
 
 /**
@@ -140,11 +136,7 @@ export async function getSongScore(request: ScoreRequest, options: ScoreOptions 
 onPlaybackHunger((hungry) => {
   if (!hungry || !decoding?.state.prefetch) return;
   decoding.state.stopped = true;
-  try {
-    decoding.child.kill();
-  } catch {
-    /* already gone */
-  }
+  killChild(decoding.child);
 });
 
 async function analyse(path: string, start: number, end: number | null, state: JobState): Promise<SongScore | null> {
@@ -184,6 +176,7 @@ function decodeMonoPcm(inputPath: string, start: number, seconds: number, state:
     liveScoreFfmpeg.add(child);
     decoding = { child, state };
     watchFfmpegInput(child, inputPath);
+    const readFailed = watchReadFailures(child, inputPath);
     // Starts at five minutes of audio and doubles when a longer track needs it.
     let samples = new Float32Array(SONG_SCORE_SAMPLE_RATE * 300);
     let count = 0;
@@ -201,11 +194,7 @@ function decodeMonoPcm(inputPath: string, start: number, seconds: number, state:
       else resolve(result ?? null);
     };
     const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        /* already gone */
-      }
+      killChild(child);
       settle(new Error('ffmpeg timed out decoding for score analysis'));
     }, FFMPEG_TIMEOUT_MS);
     child.stdout.on('data', (chunk: Buffer) => {
@@ -230,6 +219,8 @@ function decodeMonoPcm(inputPath: string, start: number, seconds: number, state:
     child.on('error', (err) => settle(err));
     child.on('close', (code) => {
       if (state.stopped) settle(undefined, null);
+      // Not cached: a score of the part before a failed read would stand for the whole track.
+      else if (readFailed()) settle(new Error(`a read of ${inputPath} failed partway; it is analysed again when next asked for`));
       else if (code === 0) settle(undefined, samples.subarray(0, count));
       else settle(new Error(`ffmpeg exited ${code}: ${stderr.trim().slice(0, 300)}`));
     });

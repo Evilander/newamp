@@ -29,6 +29,7 @@ import type { Readable } from 'node:stream';
 import { resamplerFilter, resamplerKindNow } from './resampler.js';
 import { resolveFfmpegPath, watchFfmpegInput } from './transcode.js';
 import { killChild } from './kill-child.js';
+import { watchReadFailures } from './read-failure.js';
 import type {
   ExclusiveDeviceInfo,
   ExclusiveEventPayload,
@@ -38,9 +39,14 @@ import type {
 
 type PcmFormat = 's16' | 's24' | 's32' | 'f32';
 
+interface DeviceProbe {
+  name: string;
+  formats: Array<{ format: string; channels: number; sampleRate: number }>;
+}
+
 interface NativeAddon {
   listDevices(): ExclusiveDeviceInfo[];
-  probeDevice(id?: string): { name: string; formats: Array<{ format: string; channels: number; sampleRate: number }> };
+  probeDevice(id?: string): DeviceProbe;
   open(opts: {
     deviceId?: string;
     sampleRate: number;
@@ -89,6 +95,34 @@ interface OpenFormat {
   sampleRate: number;
   channels: number;
   deviceName: string;
+  /** What the device offered when it was opened; it can't change while it's held. */
+  formats: Array<{ format: string; channels: number; sampleRate: number }>;
+}
+
+/** One run of failed reads with no recovery between them. */
+interface Outage {
+  /** Times the decode has been started again in this outage. */
+  attempt: number;
+  /** When its first read failed (Date.now()). */
+  since: number;
+}
+
+/** Where a decode that a failed read stopped picks up again. */
+interface DecodeResume extends Outage {
+  /** Whole frames of the segment already handed to the ring. */
+  frames: number;
+}
+
+/** The ffmpeg decoding the segment at the end of the ring. */
+interface Decode {
+  child: ChildProcessByStdio<null, Readable, Readable>;
+  gen: number;
+  source: ExclusiveTrackSource;
+  /** Where in the source the segment starts, before any resume. */
+  startAt: number;
+  resampler: ExclusiveNegotiated['resampler'];
+  frames: number;
+  resume: DecodeResume | null;
 }
 
 const BYTES_PER_SAMPLE: Record<PcmFormat, number> = { s16: 2, s24: 3, s32: 4, f32: 4 };
@@ -103,8 +137,36 @@ const TAP_INTERVAL_MS = 33;
 const POSITION_INTERVAL_MS = 250;
 const IDLE_RELEASE_MS = 15000;
 const PUMP_INTERVAL_MS = 40;
-const RING_MS = 2000;
+// Eight seconds decoded ahead rides out a share that stops answering for a
+// while; two did not. The ring is rounded up to a power of two by the addon,
+// and the visualizer's delay line is sized from what it reports.
+const RING_MS = 8000;
 const FIRST_AUDIO_TIMEOUT_MS = 15000;
+// After the ring runs dry the device stays stopped until this much is back
+// in it, so a source that only trickles in doesn't stutter.
+const REBUFFER_MS = 500;
+// The device has audio queued but isn't consuming it: it is gone or wedged.
+const DEVICE_STALL_MS = 1500;
+// A decoder that hasn't produced a byte this long, with nothing left to play,
+// is hung on a read; it is stopped and started again where it left off.
+const DECODE_STALL_MS = 8000;
+// A decode stopped by a failed read starts again where it stopped, waiting a
+// little longer each time, for as long as the outage lasts up to
+// DECODE_OUTAGE_MS (the same limits as the gapless path, see
+// gapless-transport.ts). The count is per outage: a share that drops every so
+// often can drop any number of times in a long track.
+const DECODE_RESUME_DELAY_MS = 1000;
+const DECODE_RESUME_MAX_DELAY_MS = 5000;
+const DECODE_OUTAGE_MS = Number(process.env.NEWAMP_DECODE_OUTAGE_MS) || 60_000;
+// A decoder that stopped with no sign of a failed read (a damaged file) is
+// tried again only this long.
+const DECODE_ERROR_MS = 10_000;
+// A resumed decode that got this far before failing again recovered: the next
+// failure is a new outage.
+const DECODE_PROGRESS_SEC = 1;
+// A device's format list is kept this long; the default device is never kept,
+// since what it is can change under us.
+const PROBE_CACHE_MS = 30_000;
 // play()/seek() reset segments to a single entry, but an unbroken same-format
 // gapless chain only ever pushes — cap it so a long chain (radio mode, an
 // all-FLAC album marathon) can't grow this array unbounded.
@@ -269,6 +331,26 @@ export class ExclusiveOutput {
   private waitingSince = 0;
   private framesWrittenTotal = 0;
   private pausedAtSec: number | null = null;
+  // The next track's segment waits here until its decoder has produced audio,
+  // so a file that never decodes doesn't leave a boundary for a track that
+  // never played.
+  private pendingSegment: Segment | null = null;
+  private decode: Decode | null = null;
+  private resumeTimer: NodeJS.Timeout | null = null;
+  // A failed read is being waited out: the decoder is about to start again.
+  private decodeRetrying = false;
+  // The decoder ended with nothing prepared and EOS was set; a track prepared
+  // before the ring has played out is still spliced on.
+  private awaitingNext = false;
+  private lastDecodedAt = 0;
+  // The ring ran dry mid-stream: the device is stopped until it has refilled.
+  private rebuffering = false;
+  private renderMark: { frames: number; at: number } | null = null;
+  // The addon counts every callback that came up short; one dry spell is one.
+  private underrunEpisodes = 0;
+  private lastUnderruns = 0;
+  private inUnderrun = false;
+  private readonly probeCache = new Map<string, { at: number; probe: DeviceProbe }>();
 
   // Playhead-aligned visualizer delay line: decoded PCM is up to RING_MS ahead
   // of the DAC, so the tap reads at framesRendered, not at the write head.
@@ -299,10 +381,16 @@ export class ExclusiveOutput {
     }
   }
 
-  probeDevice(deviceId: string | null): { name: string; formats: Array<{ format: string; channels: number; sampleRate: number }> } | null {
+  probeDevice(deviceId: string | null): DeviceProbe | null {
     if (!this.addon) return null;
+    // Asking the device is a CoreAudio round trip on the main thread, and an
+    // album can ask at every track.
+    const kept = deviceId != null ? this.probeCache.get(deviceId) : undefined;
+    if (kept && Date.now() - kept.at < PROBE_CACHE_MS) return kept.probe;
     try {
-      return this.addon.probeDevice(deviceId ?? undefined);
+      const probe = this.addon.probeDevice(deviceId ?? undefined);
+      if (deviceId != null) this.probeCache.set(deviceId, { at: Date.now(), probe });
+      return probe;
     } catch (err) {
       console.error('[newamp] exclusive probeDevice failed', err);
       return null;
@@ -365,7 +453,9 @@ export class ExclusiveOutput {
 
     if (!sameOpen) {
       try {
-        this.addon.close();
+        // open() lets go of the current stream itself. Closing first would
+        // also hand the device back, and the next track's rate would be
+        // reached through the system's own.
         const opened = this.addon.open({
           deviceId: deviceId ?? undefined,
           sampleRate: negotiated.sampleRate,
@@ -392,12 +482,17 @@ export class ExclusiveOutput {
           sampleRate: negotiated.sampleRate,
           channels: negotiated.channels,
           deviceName: opened.deviceName,
+          formats: probe.formats,
         };
         this.framesWrittenTotal = 0;
-        this.allocateTapRing(negotiated.sampleRate, negotiated.channels);
+        this.underrunEpisodes = 0;
+        this.lastUnderruns = 0;
+        this.inUnderrun = false;
+        this.allocateTapRing(negotiated.sampleRate, negotiated.channels, opened.capacityFrames);
       } catch (err) {
         this.openFormat = null;
         this.current = null;
+        this.probeCache.clear();
         throw err instanceof Error ? err : new Error(String(err));
       }
     } else {
@@ -411,6 +506,8 @@ export class ExclusiveOutput {
     this.eosSent = false;
     this.endedEmitted = false;
     this.started = false;
+    this.rebuffering = false;
+    this.renderMark = null;
     this.waitingSince = Date.now();
     this.playing = true;
     this.current = { source, negotiated };
@@ -424,7 +521,7 @@ export class ExclusiveOutput {
     ];
     this.lastEmittedSegment = this.segments[0]!;
 
-    this.spawnDecoder(source, Math.max(0, startAt), gen);
+    this.spawnDecoder(source, Math.max(0, startAt), gen, negotiated.resampler);
     this.startTimers();
     this.emitState();
     return { negotiated, chained: false };
@@ -432,6 +529,12 @@ export class ExclusiveOutput {
 
   prepareNext(source: ExclusiveTrackSource | null): void {
     this.prepared = source;
+    // The ring holds seconds of audio, so the decoder can finish well before
+    // the store asks for the next track. Until the ring has drained, the end
+    // of stream can still be taken back and the track spliced on.
+    if (source && this.addon && this.awaitingNext && !this.endedEmitted && !this.addon.stats().drained) {
+      this.spliceNext(source, this.generation);
+    }
   }
 
   pause(): void {
@@ -453,9 +556,13 @@ export class ExclusiveOutput {
     if (this.openFormat) {
       this.playing = true;
       this.waitingSince = Date.now();
+      this.lastDecodedAt = Date.now();
+      // A ring that is still empty puts the device back to waiting on the
+      // next poll.
+      this.rebuffering = false;
       if (this.started || this.addon.stats().bufferedFrames > 0) {
+        if (!this.startDevice()) return;
         this.started = true;
-        this.addon.start();
       }
       this.resumePump();
       this.startTimers();
@@ -486,6 +593,8 @@ export class ExclusiveOutput {
     this.eosSent = false;
     this.endedEmitted = false;
     this.started = false;
+    this.rebuffering = false;
+    this.renderMark = null;
     this.waitingSince = Date.now();
     this.pendingChain = null;
     this.prepared = null;
@@ -499,7 +608,7 @@ export class ExclusiveOutput {
       },
     ];
     this.lastEmittedSegment = this.segments[0]!;
-    this.spawnDecoder(source, target, gen);
+    this.spawnDecoder(source, target, gen, negotiated.resampler);
     if (this.playing) {
       this.startTimers();
     } else {
@@ -543,6 +652,7 @@ export class ExclusiveOutput {
       /* already closed */
     }
     this.openFormat = null;
+    this.probeCache.clear();
     this.stopTimers();
   }
 
@@ -553,8 +663,12 @@ export class ExclusiveOutput {
     }
   }
 
-  private allocateTapRing(sampleRate: number, channels: number): void {
-    this.tapRingFrames = Math.max(TAP_WINDOW_FRAMES * 4, Math.ceil(sampleRate * 4));
+  private allocateTapRing(sampleRate: number, channels: number, capacityFrames: number): void {
+    // The playhead trails the write head by up to a ring's worth, and the
+    // addon rounds the ring up to a power of two, so the size it reports is
+    // what counts; RING_MS is only the floor.
+    const ringFrames = Math.max(capacityFrames || 0, Math.ceil((sampleRate * RING_MS) / 1000));
+    this.tapRingFrames = Math.max(TAP_WINDOW_FRAMES * 4, ringFrames + sampleRate * 2);
     this.tapRing = new Float32Array(this.tapRingFrames * channels);
   }
 
@@ -587,25 +701,34 @@ export class ExclusiveOutput {
     return active.offsetSec + Math.max(0, frames - active.startFrame) / this.openFormat.sampleRate;
   }
 
-  private spawnDecoder(source: ExclusiveTrackSource, startAt: number, gen: number): void {
+  private spawnDecoder(
+    source: ExclusiveTrackSource,
+    startAt: number,
+    gen: number,
+    resampler: ExclusiveNegotiated['resampler'],
+    resume: DecodeResume | null = null,
+  ): void {
     if (!this.openFormat) return;
     const ffmpegPath = resolveFfmpegPath();
-    const fmt = this.openFormat.format;
+    const { format: fmt, sampleRate, channels } = this.openFormat;
+    const frameBytes = BYTES_PER_SAMPLE[fmt] * channels;
     const needsResample =
       source.dsd ||
-      (source.sampleRate != null && source.sampleRate > 0 && source.sampleRate !== this.openFormat.sampleRate) ||
+      (source.sampleRate != null && source.sampleRate > 0 && source.sampleRate !== sampleRate) ||
       source.sampleRate == null;
     // The same resampler the negotiated format reports, even if the probe
     // has answered differently since.
     const resampleArgs = needsResample
-      ? ['-af', resamplerFilter(this.current?.negotiated.resampler ?? resamplerKindNow(ffmpegPath)), '-ar', String(this.openFormat.sampleRate)]
+      ? ['-af', resamplerFilter(resampler ?? resamplerKindNow(ffmpegPath)), '-ar', String(sampleRate)]
       : [];
+    // Output frames are at the device rate, so they count source time as is.
+    const from = startAt + (resume?.frames ?? 0) / sampleRate;
     const args = [
       '-hide_banner',
       '-nostdin',
       '-loglevel',
       'error',
-      ...(startAt > 0.01 ? ['-ss', startAt.toFixed(3)] : []),
+      ...(from > 0.01 ? ['-ss', from.toFixed(6)] : []),
       '-i',
       source.path,
       '-map',
@@ -615,7 +738,7 @@ export class ExclusiveOutput {
       '-acodec',
       FFMPEG_CODEC[fmt],
       '-ac',
-      String(this.openFormat.channels),
+      String(channels),
       '-f',
       fmt === 's16' ? 's16le' : fmt === 's24' ? 's24le' : fmt === 's32' ? 's32le' : 'f32le',
       'pipe:1',
@@ -624,8 +747,14 @@ export class ExclusiveOutput {
     // Holds the file open for as long as the track plays; a move to the
     // Recycle Bin stops it first.
     watchFfmpegInput(child, source.path);
+    // ffmpeg exits 0 after a read that failed, as it does at the end of a
+    // file, so its log is what tells the two apart.
+    const readFailed = watchReadFailures(child, source.path);
+    const decode: Decode = { child, gen, source, startAt, resampler, frames: resume?.frames ?? 0, resume };
     this.ffmpeg = child;
+    this.decode = decode;
     this.pendingChunk = null;
+    this.lastDecodedAt = Date.now();
 
     let stderr = '';
     child.stderr.setEncoding('utf8');
@@ -633,37 +762,145 @@ export class ExclusiveOutput {
       stderr += chunk;
       if (stderr.length > 6000) stderr = stderr.slice(-6000);
     });
+    // Whole frames only: a frame cut in two by a pipe read, or by the end of
+    // a decode that failed, must not shift the samples that follow.
+    let partial: Buffer = Buffer.alloc(0);
     child.stdout.on('data', (chunk: Buffer) => {
-      if (gen !== this.generation) return;
-      this.acceptChunk(chunk);
-    });
-    child.stdout.on('end', () => {
-      if (gen !== this.generation) return;
-      this.onDecoderEnd(gen);
+      if (gen !== this.generation || this.ffmpeg !== child) return;
+      const joined = partial.length ? Buffer.concat([partial, chunk]) : chunk;
+      const whole = joined.length - (joined.length % frameBytes);
+      partial = Buffer.from(joined.subarray(whole));
+      if (whole === 0) return;
+      decode.frames += whole / frameBytes;
+      this.acceptChunk(joined.subarray(0, whole));
     });
     child.on('error', (err) => {
-      if (gen !== this.generation) return;
+      if (gen !== this.generation || this.ffmpeg !== child) return;
       this.deps.send({ type: 'error', trackId: source.trackId, message: `ffmpeg spawn failed: ${err.message}` });
     });
+    // The end of the decode is decided here, not at the end of stdout: the log
+    // is complete only now, and a read that failed ends stdout like a file's
+    // end does.
     child.on('close', (code) => {
-      if (gen !== this.generation) return;
+      if (gen !== this.generation || this.ffmpeg !== child) return;
       // Stopped from outside (the file is about to be moved to the Recycle
       // Bin). Its stdout was destroyed with it, and a destroyed stream never
       // emits 'end', so the decode ends here. A seek or a new play already
       // replaced this.ffmpeg before it killed the old one.
-      if (child.killed && this.ffmpeg === child) {
+      if (child.killed) {
         this.onDecoderEnd(gen);
         return;
       }
-      if (code && code !== 0) {
-        console.error(`[newamp] exclusive decode exited ${code} for ${source.path}\n${stderr}`);
-        this.deps.send({ type: 'error', trackId: source.trackId, message: `Decode failed (ffmpeg ${code}).` });
+      const storageFailed = readFailed();
+      if (code === 0 && !storageFailed) {
+        // A splice that decodes to nothing is a file with no audio, not a track.
+        if (decode.frames === 0 && this.pendingSegment) {
+          this.dropPendingSegment(source, `ffmpeg produced no audio for ${source.path}`);
+          return;
+        }
+        this.onDecoderEnd(gen);
+        return;
       }
+      this.retryDecode(decode, this.outageOf(decode), storageFailed, code, stderr);
     });
+  }
+
+  /** The run of failed reads a decode that stopped now belongs to. */
+  private outageOf(decode: Decode): Outage {
+    const { resume } = decode;
+    const rate = this.openFormat?.sampleRate ?? 0;
+    // A resumed decode that recovered before stopping again begins a new
+    // outage; one that didn't carries on the old.
+    if (!resume || decode.frames - resume.frames >= DECODE_PROGRESS_SEC * rate) {
+      return { attempt: 0, since: Date.now() };
+    }
+    return { attempt: resume.attempt, since: resume.since };
+  }
+
+  /**
+   * A decode stopped, by a failed read or by the process failing, or it hung.
+   * Read the file again from the frame it reached, or give the track up once
+   * the outage has lasted too long.
+   */
+  private retryDecode(
+    decode: Decode,
+    outage: Outage,
+    storageFailed: boolean,
+    code: number | null,
+    detail: string,
+  ): void {
+    const { source, startAt, resampler, gen } = decode;
+    this.ffmpeg = null;
+    // A drive that stopped answering gets the long wait; a decoder that
+    // failed for any other reason (a damaged file) only a short one, and not
+    // at all before it has produced anything.
+    const limitMs = storageFailed ? DECODE_OUTAGE_MS : DECODE_ERROR_MS;
+    if ((decode.frames > 0 || storageFailed) && Date.now() - outage.since < limitMs) {
+      const next: DecodeResume = { frames: decode.frames, attempt: outage.attempt + 1, since: outage.since };
+      const rate = this.openFormat?.sampleRate ?? 1;
+      console.warn(
+        `[newamp] exclusive decode stopped at ${(startAt + decode.frames / rate).toFixed(2)} s (ffmpeg ${code}) for ${source.path}; reading again from there (try ${next.attempt})\n${detail}`,
+      );
+      this.decodeRetrying = true;
+      this.resumeTimer = setTimeout(() => {
+        this.resumeTimer = null;
+        if (gen !== this.generation || !this.openFormat) return;
+        // The first-audio timeout covers each new decoder, so one that hangs
+        // before its first byte is not waited on forever.
+        this.decodeRetrying = false;
+        this.waitingSince = Date.now();
+        this.spawnDecoder(source, startAt, gen, resampler, next);
+      }, Math.min(DECODE_RESUME_DELAY_MS * next.attempt, DECODE_RESUME_MAX_DELAY_MS));
+      return;
+    }
+    console.error(`[newamp] exclusive decode gave up on ${source.path} (ffmpeg ${code})\n${detail}`);
+    this.decodeRetrying = false;
+    if (this.pendingSegment) {
+      this.dropPendingSegment(source, 'the next track could not be read');
+      return;
+    }
+    // Not the end of the track, and not a device failure: say so, and let the
+    // renderer decide (the decks try the file again).
+    this.generation++;
+    this.playing = false;
+    this.releaseDevice();
+    this.deps.send({
+      type: 'error',
+      trackId: source.trackId,
+      message: storageFailed
+        ? 'The drive stopped answering partway through the track.'
+        : decode.frames === 0
+          ? `Decode failed (ffmpeg ${code}).`
+          : 'Decode failed partway through the track.',
+    });
+  }
+
+  /**
+   * The track spliced after this one never produced audio. What is already in
+   * the ring still plays out; the store then reaches that track as an ordinary
+   * play, which reports its own failure.
+   */
+  private dropPendingSegment(source: ExclusiveTrackSource, reason: string): void {
+    console.warn(`[newamp] exclusive splice dropped for ${source.path}: ${reason}`);
+    this.pendingSegment = null;
+    this.decodeRetrying = false;
+    this.ffmpeg = null;
+    this.addon?.setEos(true);
+    this.eosSent = true;
   }
 
   private acceptChunk(chunk: Buffer): void {
     if (!this.addon || !this.openFormat) return;
+    this.lastDecodedAt = Date.now();
+    this.decodeRetrying = false;
+    if (this.pendingSegment) {
+      this.segments.push(this.pendingSegment);
+      if (this.segments.length > SEGMENT_LOG_CAP) {
+        this.segments.splice(0, this.segments.length - SEGMENT_LOG_CAP);
+      }
+      this.current = { source: this.pendingSegment.source, negotiated: this.pendingSegment.negotiated };
+      this.pendingSegment = null;
+    }
     const buf = this.pendingChunk ? Buffer.concat([this.pendingChunk, chunk]) : chunk;
     let accepted = 0;
     try {
@@ -685,9 +922,45 @@ export class ExclusiveOutput {
     if (!this.started && this.playing) {
       // Start the device only once real data is in the ring — pre-roll silence
       // never reaches the DAC and the underrun counter stays honest.
-      this.started = true;
-      this.addon.start();
+      if (this.startDevice()) this.started = true;
     }
+  }
+
+  /**
+   * Run the device. Starting can fail (it was unplugged, or another process
+   * took it), and a throw out of a stream listener would be an uncaught
+   * exception in main, so a failure is reported as the device being lost.
+   */
+  private startDevice(): boolean {
+    if (!this.addon) return false;
+    try {
+      this.addon.start();
+    } catch (err) {
+      console.error('[newamp] exclusive start failed', err);
+      this.deviceLost();
+      return false;
+    }
+    this.renderMark = null;
+    return true;
+  }
+
+  /**
+   * The stream can't go on. Invalidate the generation FIRST so any straggling
+   * ffmpeg stdout data is dropped by the gen guards instead of racing the
+   * device teardown.
+   */
+  private deviceLost(rendered?: number): void {
+    if (!this.current) return;
+    const frames = rendered ?? this.addon?.stats().framesRendered;
+    this.generation++;
+    this.playing = false;
+    this.deps.send({
+      type: 'device-lost',
+      trackId: this.currentTrackIdAtPlayhead(frames) ?? this.current.source.trackId,
+      positionSec: this.positionSec(frames),
+    });
+    this.stopTimers();
+    this.releaseDevice();
   }
 
   private startPump(): void {
@@ -763,37 +1036,41 @@ export class ExclusiveOutput {
   private onDecoderEnd(gen: number): void {
     if (!this.addon || gen !== this.generation) return;
     this.ffmpeg = null;
+    this.decodeRetrying = false;
     const next = this.prepared;
-    const probeFormats = this.openFormat ? this.probeDevice(this.openFormat.deviceId)?.formats : null;
-    if (next && this.openFormat && probeFormats) {
-      const nextChoice = chooseExclusiveFormat(next, probeFormats);
-      const chainable =
-        nextChoice &&
-        nextChoice.format === this.openFormat.format &&
-        nextChoice.sampleRate === this.openFormat.sampleRate &&
-        nextChoice.channels === this.openFormat.channels;
-      if (chainable) {
-        // Splice the next track into the same ring at the exact frame boundary.
-        this.prepared = null;
-        this.segments.push({
-          source: next,
-          negotiated: { ...nextChoice, deviceName: this.openFormat.deviceName, resampler: resamplerFor(nextChoice) },
-          startFrame: this.framesWrittenTotal,
-          offsetSec: 0,
-        });
-        if (this.segments.length > SEGMENT_LOG_CAP) {
-          this.segments.splice(0, this.segments.length - SEGMENT_LOG_CAP);
-        }
-        this.current = {
-          source: next,
-          negotiated: { ...nextChoice, deviceName: this.openFormat.deviceName, resampler: resamplerFor(nextChoice) },
-        };
-        this.spawnDecoder(next, 0, gen);
-        return;
-      }
-    }
+    if (next && this.spliceNext(next, gen)) return;
     this.addon.setEos(true);
     this.eosSent = true;
+    this.awaitingNext = true;
+  }
+
+  /**
+   * Chain a track onto the end of the ring when the open device already plays
+   * its format. Returns false when it can't be chained.
+   */
+  private spliceNext(next: ExclusiveTrackSource, gen: number): boolean {
+    if (!this.addon || !this.openFormat) return false;
+    const nextChoice = chooseExclusiveFormat(next, this.openFormat.formats);
+    if (
+      !nextChoice ||
+      nextChoice.format !== this.openFormat.format ||
+      nextChoice.sampleRate !== this.openFormat.sampleRate ||
+      nextChoice.channels !== this.openFormat.channels
+    ) {
+      return false;
+    }
+    // Splice the next track into the same ring at the exact frame boundary.
+    // The segment only counts once its decoder has produced audio.
+    this.prepared = null;
+    this.awaitingNext = false;
+    if (this.eosSent) {
+      this.addon.setEos(false);
+      this.eosSent = false;
+    }
+    const negotiated = { ...nextChoice, deviceName: this.openFormat.deviceName, resampler: resamplerFor(nextChoice) };
+    this.pendingSegment = { source: next, negotiated, startFrame: this.framesWrittenTotal, offsetSec: 0 };
+    this.spawnDecoder(next, 0, gen, negotiated.resampler);
+    return true;
   }
 
   private startTimers(): void {
@@ -857,7 +1134,7 @@ export class ExclusiveOutput {
       return;
     }
 
-    if (this.playing && !this.started && Date.now() - this.waitingSince >= FIRST_AUDIO_TIMEOUT_MS) {
+    if (this.playing && !this.started && !this.decodeRetrying && Date.now() - this.waitingSince >= FIRST_AUDIO_TIMEOUT_MS) {
       const trackId = this.currentTrackIdAtPlayhead(stats.framesRendered) ?? this.current.source.trackId;
       this.generation++;
       this.playing = false;
@@ -866,24 +1143,78 @@ export class ExclusiveOutput {
       return;
     }
 
-    if (this.playing && this.started && !stats.running && !stats.drained) {
+    this.trackUnderruns(stats);
+
+    // A ring that ran dry holds the device stopped until it has refilled.
+    if (this.playing && this.started && this.rebuffering) {
+      if (this.eosSent || stats.bufferedFrames >= this.rebufferFrames()) {
+        this.rebuffering = false;
+        // The snapshot predates the start: judge the device on the next poll.
+        if (this.startDevice()) this.emitPosition(stats);
+        return;
+      }
+    }
+
+    if (this.playing && this.started && !this.rebuffering && !stats.drained) {
       // Expected running but the stream halted — device lost (unplugged, taken
-      // by another exclusive app, rate changed externally). Invalidate the
-      // generation FIRST so any straggling ffmpeg stdout data is dropped by
-      // the gen guards instead of racing the device teardown.
-      this.generation++;
-      this.playing = false;
-      this.deps.send({
-        type: 'device-lost',
-        trackId: this.currentTrackIdAtPlayhead(stats.framesRendered) ?? this.current.source.trackId,
-        positionSec: this.positionSec(stats.framesRendered),
-      });
-      this.stopTimers();
-      this.releaseDevice();
-      return;
+      // by another exclusive app, rate changed externally).
+      if (!stats.running) {
+        this.deviceLost(stats.framesRendered);
+        return;
+      }
+      // CoreAudio keeps reporting a device that went away as started, so a
+      // stream that holds audio and isn't consuming it counts as halted too.
+      if (stats.bufferedFrames > 0) {
+        const mark = this.renderMark;
+        if (!mark || mark.frames !== stats.framesRendered) {
+          this.renderMark = { frames: stats.framesRendered, at: Date.now() };
+        } else if (Date.now() - mark.at >= DEVICE_STALL_MS) {
+          this.deviceLost(stats.framesRendered);
+          return;
+        }
+      } else {
+        this.renderMark = null;
+      }
+    }
+
+    if (this.playing && this.started && !this.eosSent && stats.bufferedFrames === 0) {
+      if (this.decode && this.ffmpeg && !this.pendingChunk && Date.now() - this.lastDecodedAt >= DECODE_STALL_MS) {
+        // Nothing left to play and the decoder hasn't produced a byte in all
+        // this time: hung on a read. Start it again where it got to.
+        const decode = this.decode;
+        const outage = this.outageOf(decode);
+        killChild(decode.child);
+        this.retryDecode(decode, outage, true, null, 'the decoder stopped producing audio');
+        return;
+      }
+      if (!this.rebuffering && (this.ffmpeg || this.resumeTimer)) {
+        // Underrun with more still to come: wait for it rather than play it
+        // out a few milliseconds at a time.
+        try {
+          this.addon.stopDevice();
+        } catch {
+          /* closed under us; the next poll sees it */
+        }
+        this.rebuffering = true;
+        this.renderMark = null;
+      }
     }
 
     this.emitPosition(stats);
+  }
+
+  private rebufferFrames(): number {
+    return Math.round(((this.openFormat?.sampleRate ?? 44100) * REBUFFER_MS) / 1000);
+  }
+
+  private trackUnderruns(stats: { underruns: number }): void {
+    if (stats.underruns > this.lastUnderruns) {
+      if (!this.inUnderrun) this.underrunEpisodes++;
+      this.inUnderrun = true;
+    } else if (!this.rebuffering) {
+      this.inUnderrun = false;
+    }
+    this.lastUnderruns = stats.underruns;
   }
 
   private emitPosition(statsSnapshot?: { framesRendered: number; underruns: number; bufferedFrames: number }): void {
@@ -897,7 +1228,7 @@ export class ExclusiveOutput {
       durationSec:
         this.activeSegmentAt(stats.framesRendered)?.source.durationSec ??
         this.current.source.durationSec,
-      underruns: stats.underruns,
+      underruns: this.underrunEpisodes,
       bufferedFrames: stats.bufferedFrames,
     });
   }
@@ -940,6 +1271,12 @@ export class ExclusiveOutput {
     this.tapRemainder = Buffer.alloc(0);
     this.stopPump(false);
     this.pendingChunk = null;
+    if (this.resumeTimer) clearTimeout(this.resumeTimer);
+    this.resumeTimer = null;
+    this.decodeRetrying = false;
+    this.awaitingNext = false;
+    this.pendingSegment = null;
+    this.decode = null;
     if (this.ffmpeg && !this.ffmpeg.killed) killChild(this.ffmpeg);
     this.ffmpeg = null;
   }

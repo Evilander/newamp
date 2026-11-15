@@ -71,6 +71,9 @@ export function MusicServersView(): JSX.Element {
       setSearch('');
       setQuery('');
       setPassword('');
+      // Reconnecting to the same server leaves the selection, page and search as
+      // they were, so without this a list that failed to load stays empty.
+      setRevision((value) => value + 1);
     } catch (err) { setError(err instanceof Error ? err.message : 'Could not connect.'); }
     finally { setConnecting(false); }
   }
@@ -82,6 +85,7 @@ export function MusicServersView(): JSX.Element {
       setServers(remaining);
       setSelected(remaining[0]?.id ?? '');
       setOffset(0);
+      setRevision((value) => value + 1);
     } catch (err) { setError(err instanceof Error ? err.message : 'Could not disconnect.'); }
   }
 

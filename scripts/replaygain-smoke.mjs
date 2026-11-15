@@ -103,7 +103,7 @@ assert.match(typesSource, /analyzeReplayGain/, 'shared API should expose ReplayG
 assert.match(typesSource, /analyzeAlbumReplayGain/, 'shared API should expose album ReplayGain analysis');
 assert.match(transcodeSource, /analyzeTrackReplayGain/, 'transcode module should expose ffmpeg ReplayGain analysis');
 assert.match(transcodeSource, /calculateAlbumReplayGainDb/, 'transcode module should calculate album ReplayGain from analyzed tracks');
-assert.match(transcodeSource, /ebur128=peak=true/, 'ReplayGain analysis should use ffmpeg EBU R128 loudness');
+assert.match(transcodeSource, /ebur128=framelog=quiet/, 'ReplayGain analysis should use ffmpeg EBU R128 loudness');
 assert.match(librarySource, /setTrackReplayGain/, 'library should persist analyzed ReplayGain values');
 assert.match(librarySource, /replaygain_album_db/, 'library should persist analyzed album ReplayGain values');
 assert.match(mainSource, /tracks:analyze-replaygain/, 'main process should register ReplayGain analysis IPC');

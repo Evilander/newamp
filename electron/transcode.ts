@@ -1,12 +1,12 @@
 import ffmpegStaticImport from 'ffmpeg-static';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, stat } from 'node:fs/promises';
+import { mkdir, rename, stat, unlink } from 'node:fs/promises';
 import { basename, extname, join, resolve } from 'node:path';
-import { Readable } from 'node:stream';
 import { caseFoldCachePath } from './cache-key-casing.js';
 import { killChild } from './kill-child.js';
 import { MP4_EXTS, chromiumPlaysMp4Audio, mp4SoundCodec } from './mp4-codec.js';
+import { watchReadFailures } from './read-failure.js';
 import { resamplerFilter, resamplerKindNow } from './resampler.js';
 import type {
   AudioExportFormat,
@@ -16,6 +16,7 @@ import type {
 } from '../shared/types.js';
 
 export const REPLAYGAIN_TARGET_LUFS = -18;
+const SILENT_LUFS = -69.9;
 const SUPPORTED_AUDIO_EXPORT_FORMATS = new Set<AudioExportFormat>(['wav', 'mp3', 'flac', 'opus']);
 
 const CHROMIUM_NATIVE_EXTS = new Set([
@@ -49,23 +50,84 @@ const FFMPEG_FALLBACK_EXTS = new Set([
 
 const ffmpegStatic = ffmpegStaticImport as unknown as string | null;
 
-// Watchdog for runFfmpeg/runFfmpegCapture below (same pattern/threshold as
-// transcode-cache.ts's runFfmpegToFile): batch export and ReplayGain analysis
-// can otherwise hang forever on a malformed/truncated source.
+// Watchdog for runFfmpeg below when it can't see a run's progress: batch
+// export and video muxing can otherwise hang forever on a malformed or
+// truncated source.
 const FFMPEG_TIMEOUT_MS = 180_000;
+// A run that writes progress (its log or its output file) is stopped only
+// when that goes quiet for this long, or after the absolute cap: a long
+// source read over a slow network share can legitimately take many minutes.
+export const FFMPEG_STALL_MS = 60_000;
+export const FFMPEG_MAX_MS = 30 * 60_000;
+const FFMPEG_PROGRESS_POLL_MS = 5000;
+// What ffmpeg may open for a library file: the file itself and pipes. A file
+// whose content turns out to be a playlist or an SDP description (ffmpeg
+// goes by content, not extension) can then not make it open other paths or
+// network addresses.
+const INPUT_PROTOCOLS = ['-protocol_whitelist', 'file,pipe'];
 
-// Tracks every live child spawned by runFfmpeg/runFfmpegCapture so app quit
-// can kill any orphan ffmpeg.exe instead of leaving it running after exit.
+// Every live ffmpeg child spawned for a library file, so app quit can kill
+// any that would otherwise keep running and reading after exit.
 const liveTranscodeFfmpeg = new Set<ChildProcess>();
 
+// How many of those are running now, for the support diagnostics: a pile of
+// them is what a share that stopped answering looks like.
+export function liveTranscodeFfmpegCount(): number {
+  return liveTranscodeFfmpeg.size;
+}
+
 export function killAllTranscodeFfmpeg(): void {
-  for (const child of liveTranscodeFfmpeg) {
-    try {
-      child.kill();
-    } catch {
-      /* already gone */
-    }
-  }
+  for (const child of [...liveTranscodeFfmpeg]) killChild(child);
+}
+
+/**
+ * Calls `onStall` once if the ffmpeg run makes no progress for `stallMs`
+ * (nothing on its log and, when `outputPath` is given, no growth in that
+ * file) or is still running after `maxMs`. Returns a function that stops
+ * watching; call it once the run has settled.
+ */
+export function watchFfmpegProgress(
+  child: ChildProcess,
+  onStall: (why: string) => void,
+  options: { outputPath?: string; stallMs?: number; maxMs?: number; pollMs?: number } = {},
+): () => void {
+  const stallMs = options.stallMs ?? FFMPEG_STALL_MS;
+  const maxMs = options.maxMs ?? FFMPEG_MAX_MS;
+  const started = Date.now();
+  let lastProgress = started;
+  let outputSize = -1;
+  let fired = false;
+  child.stderr?.on('data', () => {
+    lastProgress = Date.now();
+  });
+  const timer = setInterval(() => {
+    if (fired) return;
+    const check = async () => {
+      if (options.outputPath) {
+        const size = await stat(options.outputPath).then((info) => info.size, () => -1);
+        if (size !== outputSize) {
+          outputSize = size;
+          if (size >= 0) lastProgress = Date.now();
+        }
+      }
+      if (fired) return;
+      const now = Date.now();
+      const why = now - started >= maxMs
+        ? `still running after ${maxMs}ms`
+        : now - lastProgress >= stallMs ? `made no progress for ${stallMs}ms` : null;
+      if (why) {
+        fired = true;
+        clearInterval(timer);
+        onStall(why);
+      }
+    };
+    void check();
+  }, options.pollMs ?? FFMPEG_PROGRESS_POLL_MS);
+  timer.unref();
+  return () => {
+    fired = true;
+    clearInterval(timer);
+  };
 }
 
 export function playbackMode(filePath: string): 'native' | 'ffmpeg' {
@@ -78,7 +140,10 @@ export function playbackMode(filePath: string): 'native' | 'ffmpeg' {
 // The protocol handler's routing. An MP4-family file is native only when its
 // sound track is a codec Chromium decodes (AAC, FLAC, Opus): Apple Lossless
 // ships as .m4a too, fails in the <audio> element, and plays through ffmpeg.
-// A file whose moov can't be read keeps the extension's verdict.
+// A file with no moov to read keeps the extension's verdict. A share that
+// would not answer throws: the caller waits and retries, since guessing a mode
+// here would route Apple Lossless to the <audio> element (or AAC to a live
+// WAV) for as long as the guess is remembered.
 export async function resolvePlaybackMode(filePath: string): Promise<'native' | 'ffmpeg'> {
   const mode = playbackMode(filePath);
   if (mode !== 'native' || !MP4_EXTS.has(extname(filePath).toLowerCase())) return mode;
@@ -97,7 +162,11 @@ export function ffmpegInputKey(filePath: string): string {
 
 export function watchFfmpegInput(child: ChildProcess, inputPath: string): void {
   ffmpegInputs.set(child, ffmpegInputKey(inputPath));
-  const forget = () => ffmpegInputs.delete(child);
+  liveTranscodeFfmpeg.add(child);
+  const forget = () => {
+    ffmpegInputs.delete(child);
+    liveTranscodeFfmpeg.delete(child);
+  };
   child.once('exit', forget);
   child.once('error', forget);
 }
@@ -152,6 +221,7 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
       '-nostdin',
       '-loglevel',
       'error',
+      ...INPUT_PROTOCOLS,
       '-i',
       filePath,
       '-map',
@@ -170,6 +240,18 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
     { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
   );
   watchFfmpegInput(child, filePath);
+  if (child.pid === undefined) {
+    // The binary could not be started; the error event follows. An empty 200
+    // here would read as a track that ended the moment it began.
+    child.on('error', (err) => {
+      console.error('[newamp] ffmpeg spawn failed:', err);
+    });
+    return new Response('ffmpeg unavailable', {
+      status: 503,
+      headers: { 'X-Newamp-Reason': 'ffmpeg-missing' },
+    });
+  }
+  const readFailed = watchReadFailures(child, filePath);
 
   let stderr = '';
   child.stderr.setEncoding('utf8');
@@ -177,19 +259,67 @@ export function transcodeToWavResponse(filePath: string, request: Request): Resp
     stderr += chunk;
     if (stderr.length > 6000) stderr = stderr.slice(-6000);
   });
-  child.on('error', (err) => {
-    console.error('[newamp] ffmpeg spawn failed:', err);
+  let spawnError: Error | null = null;
+  const closed = new Promise<number | null>((resolve) => {
+    child.once('close', (code) => resolve(code));
+    child.once('error', (err) => {
+      spawnError = err;
+      console.error('[newamp] ffmpeg spawn failed:', err);
+      resolve(null);
+    });
   });
-  child.on('close', (code) => {
-    if (code && code !== 0) {
-      console.error(`[newamp] ffmpeg exited ${code} for ${filePath}\n${stderr}`);
-    }
-  });
-  request.signal.addEventListener('abort', () => {
-    if (!child.killed) child.kill();
-  }, { once: true });
+  // The listener went away (a skip, a seek, a stop): the end of the body is not a failure.
+  let abandoned = request.signal.aborted;
+  let cancelled = false;
+  const abandon = () => {
+    abandoned = true;
+    killChild(child);
+  };
+  if (abandoned) abandon();
+  else request.signal.addEventListener('abort', abandon, { once: true });
 
-  const body = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>;
+  // The body ends with an error, not a clean close, when the read failed or
+  // ffmpeg did: a WAV of unknown length that simply stops reads as a track
+  // that ended, and the queue moves on, where an error lets the player
+  // resume the track from where it was.
+  const stdout = child.stdout[Symbol.asyncIterator]();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let next: IteratorResult<Buffer>;
+      try {
+        next = await stdout.next();
+      } catch (err) {
+        if (cancelled) return;
+        if (abandoned) controller.close();
+        else controller.error(err);
+        return;
+      }
+      if (cancelled) return;
+      if (!next.done) {
+        controller.enqueue(next.value);
+        return;
+      }
+      const code = await closed;
+      if (cancelled) return;
+      if (abandoned) {
+        controller.close();
+        return;
+      }
+      const failed = readFailed();
+      if (failed || spawnError || code !== 0) {
+        console.error(`[newamp] ffmpeg ${failed ? 'lost a read' : `exited ${code ?? 'unknown'}`} for ${filePath}${stderr ? `\n${stderr}` : ''}`);
+        controller.error(new Error(failed ? `a read of ${filePath} failed partway` : `ffmpeg exited ${code ?? 'unknown'} for ${filePath}`));
+      } else {
+        controller.close();
+      }
+    },
+    cancel() {
+      cancelled = true;
+      request.signal.removeEventListener('abort', abandon);
+      killChild(child);
+      return stdout.return?.().then(() => undefined, () => undefined);
+    },
+  });
   return new Response(body, {
     status: 200,
     headers: {
@@ -237,6 +367,7 @@ export function buildPlaybackFlacArgs(inputPath: string, outputPath: string): st
     '-nostdin',
     '-loglevel',
     'error',
+    ...INPUT_PROTOCOLS,
     '-i',
     inputPath,
     '-map',
@@ -300,20 +431,30 @@ export async function transcodeTrackToAudioFile(
   if (!inputPath || !outputPath) throw new Error('Input and output paths are required.');
   const normalizedFormat = normalizeAudioExportFormat(format);
   const ffmpeg = resolveFfmpegPath();
-  await runFfmpeg([
-    '-hide_banner',
-    '-nostdin',
-    '-loglevel',
-    'error',
-    '-i',
-    inputPath,
-    '-map',
-    '0:a:0',
-    '-vn',
-    ...audioExportArgs(normalizedFormat),
-    '-y',
-    outputPath,
-  ], ffmpeg);
+  // Written under a temporary name and moved into place once ffmpeg is done,
+  // so a failed or cut-short export never leaves a file that looks finished.
+  const partPath = `${outputPath}.part`;
+  try {
+    await runFfmpeg([
+      '-hide_banner',
+      '-nostdin',
+      '-loglevel',
+      'error',
+      ...INPUT_PROTOCOLS,
+      '-i',
+      inputPath,
+      '-map',
+      '0:a:0',
+      '-vn',
+      ...audioExportArgs(normalizedFormat, inputPath),
+      '-y',
+      partPath,
+    ], ffmpeg, partPath);
+    await rename(partPath, outputPath);
+  } catch (err) {
+    await unlink(partPath).catch(() => {});
+    throw err;
+  }
   const info = await stat(outputPath);
   return { path: outputPath, bytes: info.size, format: normalizedFormat };
 }
@@ -366,18 +507,27 @@ export async function transcodeTracksToAudioFolder(
 export async function analyzeTrackReplayGain(inputPath: string): Promise<{ replayGainTrackDb: number; integratedLufs: number }> {
   if (!inputPath) throw new Error('Input path is required.');
   const ffmpeg = resolveFfmpegPath();
+  // Only the integrated loudness is read, so no true-peak oversampling, and
+  // no line per 100 ms of the track on the log.
   const stderr = await runFfmpegCapture([
     '-hide_banner',
     '-nostdin',
+    ...INPUT_PROTOCOLS,
     '-i',
     inputPath,
+    '-map',
+    '0:a:0',
+    '-vn',
     '-filter:a',
-    'ebur128=peak=true',
+    'ebur128=framelog=quiet',
     '-f',
     'null',
     '-',
   ], ffmpeg);
   const integratedLufs = parseEbur128IntegratedLufs(stderr);
+  // ebur128 reports its -70 LUFS floor for silence, which would ask for the
+  // largest boost there is.
+  if (integratedLufs <= SILENT_LUFS) throw new Error('The track is silent; no ReplayGain to set.');
   const replayGainTrackDb = normalizeReplayGainDb(REPLAYGAIN_TARGET_LUFS - integratedLufs);
   return { replayGainTrackDb, integratedLufs };
 }
@@ -410,29 +560,35 @@ export function resolveFfmpegPath(): string {
   return staticCandidate && existsSync(staticCandidate) ? staticCandidate : 'ffmpeg';
 }
 
-export function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
+/**
+ * Runs ffmpeg to completion. `outputPath` is the file it writes, when it
+ * writes one: its growth then counts as progress, so a long source is stopped
+ * only when it stalls. Without it a run is stopped after FFMPEG_TIMEOUT_MS.
+ */
+export function runFfmpeg(args: string[], ffmpeg: string, outputPath?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
-    liveTranscodeFfmpeg.add(child);
-    watchFfmpegInput(child, ffmpegInputArg(args));
+    const input = ffmpegInputArg(args);
+    watchFfmpegInput(child, input);
+    const readFailed = watchReadFailures(child, input);
     let stderr = '';
     let settled = false;
     const settle = (err?: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      liveTranscodeFfmpeg.delete(child);
+      stopWatching();
       if (err) reject(err);
       else resolve();
     };
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        /* already gone */
-      }
-      settle(new Error(`ffmpeg timed out after ${FFMPEG_TIMEOUT_MS}ms`));
-    }, FFMPEG_TIMEOUT_MS);
+    const stopWatching = outputPath
+      ? watchFfmpegProgress(child, (why) => {
+        killChild(child);
+        settle(new Error(`ffmpeg ${why}`));
+      }, { outputPath })
+      : watchFfmpegProgress(child, () => {
+        killChild(child);
+        settle(new Error(`ffmpeg timed out after ${FFMPEG_TIMEOUT_MS}ms`));
+      }, { stallMs: Infinity, maxMs: FFMPEG_TIMEOUT_MS });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
@@ -440,7 +596,9 @@ export function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
     });
     child.on('error', (err) => settle(err));
     child.on('close', (code) => {
-      if (code === 0) settle();
+      // ffmpeg ends the output after a failed read as it would at the end of the file.
+      if (readFailed()) settle(new Error(`a read of ${input} failed partway`));
+      else if (code === 0) settle();
       else settle(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
     });
   });
@@ -449,26 +607,23 @@ export function runFfmpeg(args: string[], ffmpeg: string): Promise<void> {
 function runFfmpegCapture(args: string[], ffmpeg: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpeg, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
-    liveTranscodeFfmpeg.add(child);
-    watchFfmpegInput(child, ffmpegInputArg(args));
+    const input = ffmpegInputArg(args);
+    watchFfmpegInput(child, input);
+    const readFailed = watchReadFailures(child, input);
     let stderr = '';
     let settled = false;
     const settle = (err: Error | undefined, out?: string) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      liveTranscodeFfmpeg.delete(child);
+      stopWatching();
       if (err) reject(err);
       else resolve(out ?? '');
     };
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        /* already gone */
-      }
-      settle(new Error(`ffmpeg timed out after ${FFMPEG_TIMEOUT_MS}ms`));
-    }, FFMPEG_TIMEOUT_MS);
+    // ffmpeg's own progress line on the log is what shows this run is alive.
+    const stopWatching = watchFfmpegProgress(child, (why) => {
+      killChild(child);
+      settle(new Error(`ffmpeg ${why}`));
+    });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
       stderr += chunk;
@@ -476,7 +631,9 @@ function runFfmpegCapture(args: string[], ffmpeg: string): Promise<string> {
     });
     child.on('error', (err) => settle(err));
     child.on('close', (code) => {
-      if (code === 0) settle(undefined, stderr);
+      // A loudness summary of the part before a failed read is not the track's.
+      if (readFailed()) settle(new Error(`a read of ${input} failed partway`));
+      else if (code === 0) settle(undefined, stderr);
       else settle(new Error(`ffmpeg exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
     });
   });
@@ -504,22 +661,30 @@ function normalizeAudioExportFormat(format: AudioExportFormat): AudioExportForma
   throw new Error(`Unsupported audio export format: ${String(format)}`);
 }
 
-function audioExportArgs(format: AudioExportFormat): string[] {
+// The muxer is named, not left to the extension, because the file is written
+// under a `.part` name first.
+function audioExportArgs(format: AudioExportFormat, inputPath: string): string[] {
+  // ffmpeg's default for DSD is a 352.8 kHz PCM that most players and DACs
+  // refuse; playback pins 88.2 kHz and the exports to lossless PCM follow it.
+  const ext = extname(inputPath).toLowerCase();
+  const dsd = ext === '.dsf' || ext === '.dff'
+    ? ['-af', resamplerFilter(resamplerKindNow(resolveFfmpegPath())), '-ar', '88200']
+    : [];
   if (format === 'wav') {
     // Preserve source fidelity on export too: 24-bit at the source sample rate
     // (no forced 16-bit/48k crush). 24-bit int WAV is the standard interchange
     // format for hi-res files written to disk (unlike the streaming-playback
     // path, which must use float because Chromium's <audio> won't decode 24-bit
     // int — here the file is for the user/other tools, not Chromium).
-    return ['-f', 'wav', '-acodec', 'pcm_s24le', '-ac', '2'];
+    return [...dsd, '-f', 'wav', '-acodec', 'pcm_s24le', '-ac', '2'];
   }
   if (format === 'mp3') {
-    return ['-codec:a', 'libmp3lame', '-b:a', '320k', '-ar', '48000', '-ac', '2'];
+    return ['-f', 'mp3', '-codec:a', 'libmp3lame', '-b:a', '320k', '-ar', '48000', '-ac', '2'];
   }
   if (format === 'flac') {
-    return ['-codec:a', 'flac', '-compression_level', '8'];
+    return [...dsd, '-f', 'flac', '-codec:a', 'flac', '-compression_level', '8'];
   }
-  return ['-codec:a', 'libopus', '-b:a', '192k', '-vbr', 'on'];
+  return ['-f', 'opus', '-codec:a', 'libopus', '-b:a', '192k', '-vbr', 'on'];
 }
 
 function batchWavFileName(track: Track, position: number, width: number): string {

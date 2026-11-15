@@ -12,10 +12,10 @@
 // linearly to seconds, so a Range request becomes an `ffmpeg -ss` spawn.
 
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
-import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { open, stat, type FileHandle } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { Readable } from 'node:stream';
+import { isStorageError, retryStorageErrors, storageRetryDelay, STORAGE_OUTAGE_MS, watchReadFailures } from './read-failure.js';
 
 type PcmChild = ChildProcessByStdio<null, Readable, Readable>;
 import { resamplerFilter, resamplerKindNow } from './resampler.js';
@@ -70,6 +70,83 @@ function parseRange(header: string | null, size: number): ByteRange | null | 'in
   return { start, end };
 }
 
+// A network share that times out partway through a file fails a read, not the
+// file. A body that errored there would make Chromium give the track up and
+// the queue move on, so the read is tried again at the same offset, with a
+// fresh handle, until the share answers or has been gone STORAGE_OUTAGE_MS: the
+// response arrives late instead of cut short.
+const READ_CHUNK_BYTES = 256 * 1024;
+
+/** Bytes `start`..`end` (inclusive) of `filePath`, read on demand. */
+export function fileBody(filePath: string, start: number, end: number): ReadableStream<Uint8Array> {
+  let handle: FileHandle | null = null;
+  let pos = start;
+  let closed = false;
+  const dropHandle = (): Promise<void> => {
+    const h = handle;
+    handle = null;
+    return h ? h.close().catch(() => undefined) : Promise.resolve();
+  };
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let outageSince: number | null = null;
+      let attempt = 0;
+      while (!closed) {
+        if (pos > end) {
+          closed = true;
+          await dropHandle();
+          controller.close();
+          return;
+        }
+        try {
+          if (!handle) {
+            const opened = await open(filePath, 'r');
+            // Cancelled while the file was opening: cancel() found no handle
+            // to close, so this one is closed here.
+            if (closed) {
+              await opened.close().catch(() => undefined);
+              return;
+            }
+            handle = opened;
+          }
+          const want = Math.min(READ_CHUNK_BYTES, end - pos + 1);
+          const chunk = Buffer.allocUnsafe(want);
+          const { bytesRead } = await handle.read(chunk, 0, want, pos);
+          if (closed) {
+            await dropHandle();
+            return;
+          }
+          // The file got shorter than its Content-Length: nothing to wait for.
+          if (bytesRead === 0) throw Object.assign(new Error(`${filePath} ended at byte ${pos}`), { code: 'ESHORT' });
+          pos += bytesRead;
+          controller.enqueue(chunk.subarray(0, bytesRead));
+          return;
+        } catch (err) {
+          if (closed) {
+            await dropHandle();
+            return;
+          }
+          outageSince ??= performance.now();
+          if (!isStorageError(err) || performance.now() - outageSince >= STORAGE_OUTAGE_MS) {
+            closed = true;
+            await dropHandle();
+            controller.error(err);
+            return;
+          }
+          // A handle opened before the share dropped can stay broken.
+          await dropHandle();
+          attempt += 1;
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, storageRetryDelay(attempt)));
+        }
+      }
+    },
+    async cancel() {
+      closed = true;
+      await dropHandle();
+    },
+  });
+}
+
 /**
  * Serve a file on disk with real byte-range semantics (200/206/416).
  * Used for native-format tracks AND finalized cached FLACs — the two cases
@@ -82,8 +159,11 @@ export async function fileRangeResponse(
 ): Promise<Response> {
   let size: number;
   try {
-    size = (await stat(filePath)).size;
-  } catch {
+    // A share that times out on the stat is waited on like one that times out
+    // on a read: a 404 here would make Chromium give the track up.
+    size = (await retryStorageErrors(() => stat(filePath))).size;
+  } catch (err) {
+    if (isStorageError(err)) return new Response('Storage unavailable', { status: 503, headers: { 'Retry-After': '5' } });
     return new Response('Not found', { status: 404 });
   }
 
@@ -104,17 +184,13 @@ export async function fileRangeResponse(
   }
 
   if (!range) {
-    const body = Readable.toWeb(createReadStream(filePath)) as unknown as ReadableStream<Uint8Array>;
-    return new Response(body, {
+    return new Response(fileBody(filePath, 0, size - 1), {
       status: 200,
       headers: { ...baseHeaders, 'Content-Length': String(size) },
     });
   }
 
-  const body = Readable.toWeb(
-    createReadStream(filePath, { start: range.start, end: range.end }),
-  ) as unknown as ReadableStream<Uint8Array>;
-  return new Response(body, {
+  return new Response(fileBody(filePath, range.start, range.end), {
     status: 206,
     headers: {
       ...baseHeaders,
@@ -270,7 +346,7 @@ function buildWavPrelude(frames: number, sampleRate: number): Buffer {
 function spawnPcmDecoder(filePath: string, seekSec: number): PcmChild {
   const dsd = isDsdPath(filePath);
   const args = ['-hide_banner', '-nostdin', '-loglevel', 'error'];
-  if (seekSec > 0) args.push('-ss', seekSec.toFixed(3));
+  if (seekSec > 0) args.push('-ss', seekSec.toFixed(6));
   args.push('-i', filePath, '-map', '0:a:0', '-vn');
   if (dsd) args.push('-af', resamplerFilter(resamplerKindNow(resolveFfmpegPath())), '-ar', '88200');
   args.push('-acodec', 'pcm_f32le', '-ac', '2', '-f', 'f32le', 'pipe:1');
@@ -286,6 +362,12 @@ function spawnPcmDecoder(filePath: string, seekSec: number): PcmChild {
  * discarded from the front (sub-frame alignment for mid-frame range starts),
  * capped at exactly `pcmBytes` — zero-padded if the decode runs short, so the
  * promised Content-Length is always honored to the byte.
+ *
+ * A decode that stops on a failed read (a share timing out: ffmpeg logs it and
+ * exits 0) is not a short track. It starts again where it stopped, as the
+ * gapless transport does, until the read recovers or the outage has lasted
+ * STORAGE_OUTAGE_MS; then the body errors rather than padding silence over the
+ * rest of the song.
  */
 function pcmBodyStream(
   filePath: string,
@@ -293,14 +375,26 @@ function pcmBodyStream(
   seekSec: number,
   dropBytes: number,
   pcmBytes: number,
+  sampleRate: number,
   signal: AbortSignal,
 ): ReadableStream<Uint8Array> {
   let child: PcmChild | null = null;
-  let dropped = 0;
-  let sent = 0;
   let closed = false;
+  // Decoder output is counted from its first frame at `seekSec`. `have` is how
+  // much of it is behind us, dropped or enqueued; `base` is where the running
+  // decoder's own output starts on that count, and `received` how much of it
+  // has arrived.
+  const total = dropBytes + pcmBytes;
+  let have = 0;
+  let base = 0;
+  let received = 0;
+  let resumeTimer: NodeJS.Timeout | null = null;
+  let outageSince: number | null = null;
+  let attempt = 0;
 
   const kill = () => {
+    if (resumeTimer) clearTimeout(resumeTimer);
+    resumeTimer = null;
     if (child && !child.killed) killChild(child);
   };
 
@@ -313,6 +407,16 @@ function pcmBodyStream(
           controller.close();
         } catch {
           /* already errored/closed */
+        }
+        kill();
+      };
+      const fail = (err: Error) => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.error(err);
+        } catch {
+          /* already closed */
         }
         kill();
       };
@@ -332,81 +436,96 @@ function pcmBodyStream(
         return;
       }
 
-      child = spawnPcmDecoder(filePath, seekSec);
-      let stderr = '';
-      child.stderr.setEncoding('utf8');
-      child.stderr.on('data', (chunk) => {
-        stderr += chunk;
-        if (stderr.length > 6000) stderr = stderr.slice(-6000);
-      });
       signal.addEventListener('abort', () => {
         closed = true;
         kill();
       }, { once: true });
 
-      child.stdout.on('data', (raw: Buffer) => {
-        if (closed) return;
-        let buf: Buffer = raw;
-        if (dropped < dropBytes) {
-          const d = Math.min(dropBytes - dropped, buf.length);
-          dropped += d;
-          buf = buf.subarray(d);
-        }
-        if (!buf.length) return;
-        const remaining = pcmBytes - sent;
-        if (buf.length >= remaining) {
-          enqueue(buf.subarray(0, remaining));
-          sent = pcmBytes;
+      const launch = () => {
+        // Whole frames, so the new decoder starts on one; the few bytes of a
+        // split frame it repeats are skipped below.
+        base = Math.floor(have / BYTES_PER_FRAME) * BYTES_PER_FRAME;
+        received = 0;
+        const startedAt = have;
+        const proc = spawnPcmDecoder(filePath, seekSec + base / BYTES_PER_FRAME / sampleRate);
+        child = proc;
+        let stderr = '';
+        proc.stderr.setEncoding('utf8');
+        proc.stderr.on('data', (chunk) => {
+          stderr += chunk;
+          if (stderr.length > 6000) stderr = stderr.slice(-6000);
+        });
+        const readFailed = watchReadFailures(proc, filePath);
+
+        proc.stdout.on('data', (raw: Buffer) => {
+          if (closed || child !== proc) return;
+          const at = base + received;
+          received += raw.length;
+          const end = Math.min(at + raw.length, total);
+          if (end > have) {
+            // Only what is past `have` is new, and the front `dropBytes` of
+            // the count is dropped rather than sent.
+            const from = Math.max(at, have, dropBytes);
+            if (end > from) enqueue(raw.subarray(from - at, end - at));
+            have = end;
+          }
+          // A decoder that got a second in has recovered: the next failed
+          // read is a new outage.
+          if (have - startedAt >= sampleRate * BYTES_PER_FRAME) {
+            outageSince = null;
+            attempt = 0;
+          }
+          if (have >= total) {
+            close();
+            return;
+          }
+          // Backpressure: pause the pipe when Chromium's buffer is full.
+          if (controller.desiredSize !== null && controller.desiredSize <= 0) {
+            proc.stdout.pause();
+          }
+        });
+        proc.on('error', (err) => {
+          console.error('[newamp] seekable transcode spawn failed:', err);
+          fail(err);
+        });
+        proc.on('close', (code) => {
+          if (closed || child !== proc) return;
+          // Stopped from outside (its file is being moved away): padding out
+          // the rest of the track would queue the whole remainder as silence.
+          if (proc.killed) {
+            fail(new Error('The decoder was stopped.'));
+            return;
+          }
+          if (code && code !== 0) {
+            console.error(`[newamp] seekable transcode ffmpeg exited ${code} for ${filePath}\n${stderr}`);
+          }
+          if (readFailed()) {
+            outageSince ??= performance.now();
+            if (performance.now() - outageSince < STORAGE_OUTAGE_MS) {
+              attempt += 1;
+              console.warn(`[newamp] seekable transcode stopped on a failed read for ${filePath}; reading again (try ${attempt})`);
+              resumeTimer = setTimeout(() => {
+                resumeTimer = null;
+                if (!closed) launch();
+              }, storageRetryDelay(attempt));
+              return;
+            }
+            fail(new Error(`The drive stopped answering while ${filePath} was being read.`));
+            return;
+          }
+          // Decode ended short of the probed duration (VBR estimate drift):
+          // honor the promised length with silence so Chromium never stalls on
+          // a body shorter than Content-Length.
+          let deficit = total - Math.max(have, dropBytes);
+          while (deficit > 0 && !closed) {
+            const chunk = Math.min(deficit, 65536);
+            enqueue(Buffer.alloc(chunk));
+            deficit -= chunk;
+          }
           close();
-          return;
-        }
-        sent += buf.length;
-        enqueue(buf);
-        // Backpressure: pause the pipe when Chromium's buffer is full.
-        if (controller.desiredSize !== null && controller.desiredSize <= 0) {
-          child?.stdout.pause();
-        }
-      });
-      child.stdout.on('close', () => {
-        if (closed) return;
-        // Stopped from outside (its file is being moved away): padding out the
-        // rest of the track would queue the whole remainder as silence.
-        if (child?.killed) {
-          closed = true;
-          try {
-            controller.error(new Error('The decoder was stopped.'));
-          } catch {
-            /* already closed */
-          }
-          return;
-        }
-        // Decode ended short of the probed duration (VBR estimate drift):
-        // honor the promised length with silence so Chromium never stalls on
-        // a body shorter than Content-Length.
-        let deficit = pcmBytes - sent;
-        while (deficit > 0 && !closed) {
-          const chunk = Math.min(deficit, 65536);
-          enqueue(Buffer.alloc(chunk));
-          deficit -= chunk;
-        }
-        close();
-      });
-      child.on('error', (err) => {
-        console.error('[newamp] seekable transcode spawn failed:', err);
-        if (!closed) {
-          closed = true;
-          try {
-            controller.error(err);
-          } catch {
-            /* already closed */
-          }
-        }
-      });
-      child.on('close', (code) => {
-        if (code && code !== 0 && sent < pcmBytes && !closed) {
-          console.error(`[newamp] seekable transcode ffmpeg exited ${code} for ${filePath}\n${stderr}`);
-        }
-      });
+        });
+      };
+      launch();
     },
     pull() {
       child?.stdout.resume();
@@ -454,7 +573,7 @@ export async function seekableTranscodeResponse(filePath: string, request: Reque
   }
 
   if (!range) {
-    const body = pcmBodyStream(filePath, prelude, 0, 0, dataBytes, request.signal);
+    const body = pcmBodyStream(filePath, prelude, 0, 0, dataBytes, info.sampleRate, request.signal);
     return new Response(body, {
       status: 200,
       headers: { ...baseHeaders, 'Content-Length': String(total) },
@@ -471,7 +590,7 @@ export async function seekableTranscodeResponse(filePath: string, request: Reque
   const dropBytes = pcmFrom - startFrame * BYTES_PER_FRAME;
   const seekSec = startFrame / info.sampleRate;
 
-  const body = pcmBodyStream(filePath, preludePart, seekSec, dropBytes, pcmLen, request.signal);
+  const body = pcmBodyStream(filePath, preludePart, seekSec, dropBytes, pcmLen, info.sampleRate, request.signal);
   return new Response(body, {
     status: 206,
     headers: {

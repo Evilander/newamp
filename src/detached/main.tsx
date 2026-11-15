@@ -927,6 +927,13 @@ window.addEventListener('dblclick', (event) => {
   toggleFullscreen();
 });
 
+// A file dropped on the projector would otherwise be opened by the window
+// itself, which replaces the visualizer with the file. Cancelling both events
+// swallows the drop; the main window is the place files are opened.
+for (const type of ['dragover', 'drop'] as const) {
+  window.addEventListener(type, (event) => event.preventDefault());
+}
+
 // Stepping from the slider's own value keeps a held key adding up between the
 // mirrored updates.
 function stepVolume(direction: 1 | -1): void {

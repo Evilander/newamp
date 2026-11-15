@@ -57,7 +57,9 @@ export function drawFrameFallback(
     }
   }
 
-  ctx.strokeStyle = rgba(palette.accent, 0.35 + 0.5 * kick);
+  // The ring takes the second accent when the palette has one, so the picture
+  // shows two of the palette's colours besides its dark and light.
+  ctx.strokeStyle = rgba(palette.accent2 ?? palette.accent, 0.35 + 0.5 * kick);
   ctx.lineWidth = 2 + kick * 6;
   ctx.beginPath();
   const sway = Number.isFinite(timeMs) ? Math.sin(timeMs / 600) : 0;

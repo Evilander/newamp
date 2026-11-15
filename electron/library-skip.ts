@@ -3,6 +3,35 @@ import { extname } from 'node:path';
 // What a library walk never reads, shared by the scanner and the watcher so a
 // change inside one of these doesn't rescan what a scan skips.
 
+// The file types a scan indexes. The watcher reads the same set, so it never
+// ignores an event for a file the scanner would read, or queues one for a file
+// the scanner would pass over.
+export const AUDIO_EXTS: ReadonlySet<string> = new Set([
+  '.mp3',
+  '.m4a',
+  '.m4b',
+  '.mp4',
+  '.aac',
+  '.flac',
+  '.ogg',
+  '.oga',
+  '.opus',
+  '.wav',
+  '.wma',
+  '.alac',
+  '.aiff',
+  '.aif',
+  '.dsf',
+  '.dff',
+  '.ape',
+  '.wv',
+  '.mpc',
+  '.tta',
+  '.mka',
+  '.ac3',
+  '.dts',
+]);
+
 // macOS packages. Finder shows each as a single file, and what is inside
 // belongs to the app that made it: Logic projects, the Logic sound library
 // (thousands of loops and impulse responses under ~/Music), the Music and
@@ -38,10 +67,22 @@ const SKIPPED_FOLDERS = new Set([
   // Loops, impulse responses and channel strip settings.
   'audio music apps',
   'apple loops',
+  // Synology's index of a share: thumbnails and transcodes beside the music.
+  '@eadir',
 ]);
 
 // Ableton Live's packs and sample library, in ~/Music/Ableton.
 const SKIPPED_ABLETON_FOLDERS = new Set(['factory packs', 'user library']);
+
+/**
+ * True for a hidden name: one leading dot, then anything but another dot.
+ * ".DS_Store", ".git" and the "._" AppleDouble files are hidden. A name that
+ * starts with several dots is an ordinary one on a Windows volume, where
+ * "...And Justice For All" and "...Baby One More Time.flac" are music.
+ */
+export function isHiddenName(name: string): boolean {
+  return /^\.(?!\.)/.test(name);
+}
 
 // A folder whose contents belong to another app, never music.
 function isForeignFolder(name: string, parentName: string): boolean {
@@ -57,7 +98,7 @@ function isForeignFolder(name: string, parentName: string): boolean {
 
 /** True for a folder the walk should not enter. `parentName` is the name of the folder holding it. */
 export function isSkippedLibraryFolder(name: string, parentName = ''): boolean {
-  return name.startsWith('.') || isForeignFolder(name, parentName);
+  return isHiddenName(name) || isForeignFolder(name, parentName);
 }
 
 /**
@@ -66,7 +107,7 @@ export function isSkippedLibraryFolder(name: string, parentName = ''): boolean {
  * or exFAT volume: they carry an audio extension but hold no audio.
  */
 export function isSkippedLibraryFile(name: string): boolean {
-  return name.startsWith('.');
+  return isHiddenName(name);
 }
 
 function pathParts(relativePath: string): string[] {

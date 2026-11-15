@@ -20,7 +20,7 @@ import { mkdir, rename, rm } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const deadline = setTimeout(() => { console.error('decoder-release-test timed out'); process.exit(1); }, 60_000);
 deadline.unref();
@@ -89,7 +89,7 @@ await mkdir(root, { recursive: true });
       "const resolveFfmpegPath = () => 'fixture-ffmpeg'; const watchFfmpegInput = (child, path) => globalThis.__watched.push([child, path]);",
     )
     .replace("import { killChild } from './kill-child.js';", 'const killChild = (child) => child.kill();');
-  const compiled = await build({ stdin: { contents: source, loader: 'ts' }, bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
+  const compiled = await build({ stdin: { contents: source, loader: 'ts', resolveDir: fileURLToPath(new URL('../electron/', import.meta.url)) }, bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
 
   const originalSpawn = cp.spawn;
   const originalTimeout = globalThis.setTimeout;

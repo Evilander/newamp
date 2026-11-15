@@ -15,6 +15,8 @@
 //     drop, `blackout` rises; when the drop lands, `impact` fires on the
 //     downbeat itself
 //   - `keyShift` follows the song's modulations around the circle of fifths
+//   - `minor` and `keyConfidence` carry the section's mode, glided like the key
+//     shift and held at zero where the score is not sure of the key
 //
 // Without a score (streams, podcasts, tracks still being analysed, anything
 // under 20 seconds) conduct() leaves the frame exactly as the reactor made it.
@@ -25,6 +27,18 @@
 import type { EvilandFrame, ScoreCues } from './eviland-audio';
 import type { EvilandDynamics } from './eviland-operators';
 import type { ScoreSection, SongScore } from './eviland-score';
+
+/**
+ * The section's mode as the palette wants it (see moodShift in
+ * eviland-appearance.ts). `minor` runs 0 (major) to 1 (minor) and
+ * `keyConfidence` 0..1 is how sure the score is; a section whose key it cannot
+ * place reads confidence 0, so the palette is left alone there. The conductor
+ * stamps both on every ScoreCues it hands out.
+ */
+export interface MoodCues {
+  minor: number;
+  keyConfidence: number;
+}
 
 export interface Conductor {
   /** Bind the score for the track now playing, or null when it has none. */
@@ -90,6 +104,8 @@ const MIN_DOWNBEAT_CONFIDENCE = 0.2;
 const MIN_IMPACT_STRENGTH = 0.3;
 const IMPACT_DECAY_SECONDS = 0.9;
 const KEY_GLIDE_SECONDS = 1.2;
+/** A key estimate under this is a guess, and a guess must not tint a section major or minor. */
+const MIN_KEY_CONFIDENCE = 0.4;
 // 20° of hue per step round the circle of fifths, capped at five steps: a
 // modulation should read as the same palette travelling, not a new skin. Five
 // reaches the semitone lift of a final chorus (+7 fifths, i.e. −5) uncut.
@@ -115,14 +131,18 @@ export function createConductor(): Conductor {
   let beatIndex = 0;
   let impact = 0;
   let keyShift = 0;
+  let minor = 0;
+  let keyConfidence = 0;
 
-  const cues: ScoreCues = {
+  const cues: ScoreCues & MoodCues = {
     anticipation: 0,
     blackout: 0,
     impact: 0,
     impactStart: false,
     tier: 'steady',
     keyShift: 0,
+    minor: 0,
+    keyConfidence: 0,
     arc: 0,
     downbeat: false,
     toBoundary: Infinity,
@@ -151,6 +171,8 @@ export function createConductor(): Conductor {
       beatIndex = 0;
       impact = 0;
       keyShift = 0;
+      minor = 0;
+      keyConfidence = 0;
       gridTrusted = false;
       if (!score) return;
       gridTrusted = score.beatConfidence >= MIN_GRID_CONFIDENCE && score.beats.length >= 8;
@@ -249,7 +271,15 @@ export function createConductor(): Conductor {
 
       // ── Harmonic colour ──────────────────────────────────────────────────
       const wantedShift = (Number.isFinite(section.keyShift) ? Math.max(-MAX_KEY_STEPS, Math.min(MAX_KEY_STEPS, section.keyShift)) : 0) * TURNS_PER_FIFTH;
-      keyShift = seeked ? wantedShift : keyShift + (wantedShift - keyShift) * (1 - Math.exp(-dt / KEY_GLIDE_SECONDS));
+      const glide = 1 - Math.exp(-dt / KEY_GLIDE_SECONDS);
+      keyShift = seeked ? wantedShift : keyShift + (wantedShift - keyShift) * glide;
+      // A score cached before sections carried a key has none to read.
+      const key = section.key as ScoreSection['key'] | undefined;
+      const sure = !!key && Number.isFinite(key.confidence) && key.confidence >= MIN_KEY_CONFIDENCE;
+      const wantedMinor = sure && key.minor ? 1 : 0;
+      const wantedConfidence = sure ? unit(key.confidence) : 0;
+      minor = seeked ? wantedMinor : minor + (wantedMinor - minor) * glide;
+      keyConfidence = seeked ? wantedConfidence : keyConfidence + (wantedConfidence - keyConfidence) * glide;
 
       cues.anticipation = anticipation;
       cues.blackout = blackout;
@@ -257,6 +287,8 @@ export function createConductor(): Conductor {
       cues.impactStart = landed;
       cues.tier = section.tier;
       cues.keyShift = keyShift;
+      cues.minor = minor;
+      cues.keyConfidence = keyConfidence;
       cues.arc = Math.min(1, seconds / Math.max(1, score.duration));
       cues.downbeat = downbeat;
       cues.toBoundary = next ? Math.max(0, next.start - seconds) : Infinity;

@@ -16,6 +16,8 @@
 // it; frames are skipped in between.
 
 import { holdThroughContextLoss, NAN_GLSL } from './eviland-gl';
+import { accentPair } from './eviland-appearance';
+import type { PaletteConfig } from './eviland-operators';
 
 export interface ParticleFlowFeatures {
   bass: number;
@@ -29,7 +31,11 @@ export interface ParticleFlowFeatures {
 
 export interface ParticleFlowRenderer {
   resize(cssWidth: number, cssHeight: number, dpr: number): void;
-  render(features: ParticleFlowFeatures, accentRgb: [number, number, number], dtSeconds: number): void;
+  /**
+   * `accent2Rgb` is the palette's second accent; without one the renderer uses the shared analogous
+   * partner of `accentRgb`, on the side the look's `seed` picks so it matches the engine's.
+   */
+  render(features: ParticleFlowFeatures, accentRgb: [number, number, number], dtSeconds: number, accent2Rgb?: [number, number, number], seed?: string): void;
   /**
    * Free the renderer's GPU resources. The canvas and its context belong to
    * the caller and stay usable; pass releaseContext to give the context up
@@ -155,6 +161,7 @@ uniform float u_pointScale;
 uniform float u_treble;
 uniform float u_bass;
 uniform vec3 u_accent;
+uniform vec3 u_accent2;
 out vec3 v_color;
 out float v_alpha;
 void main(){
@@ -164,8 +171,10 @@ void main(){
   // Fade in then out over the particle's life.
   float fade=smoothstep(0.0,0.12,t)*(1.0-smoothstep(0.7,1.0,t));
   v_alpha=fade*(0.35+u_bass*0.5);
-  // Hot core when fast: shift accent toward white/warm with speed + treble.
-  vec3 hot=mix(u_accent, vec3(1.0,0.95,0.8), clamp(speed*9.0+u_treble*0.6,0.0,1.0));
+  // Hot core when fast: shift the accent toward a pale tint of the second
+  // accent with speed + treble, so the heat keeps the palette's hue instead of
+  // going to a fixed warm white.
+  vec3 hot=mix(u_accent, mix(u_accent2, vec3(1.0), 0.45), clamp(speed*9.0+u_treble*0.6,0.0,1.0));
   v_color=hot;
   gl_PointSize=clamp(u_pointScale*(0.7+speed*16.0+u_bass*0.8),1.0,9.0);
   gl_Position=vec4(a_pos,0.0,1.0);
@@ -260,8 +269,8 @@ export function createParticleFlowRenderer(
       size = [cssWidth, cssHeight, nextDpr];
       hold.current()?.resize(cssWidth, cssHeight, nextDpr);
     },
-    render(features, accentRgb, dt) {
-      hold.current()?.render(features, accentRgb, dt);
+    render(features, accentRgb, dt, accent2Rgb, seed) {
+      hold.current()?.render(features, accentRgb, dt, accent2Rgb, seed);
     },
     dispose(disposeOptions) {
       hold.stop();
@@ -339,6 +348,7 @@ function buildParticleFlow(
     treble: gl.getUniformLocation(renderProg, 'u_treble'),
     bass: gl.getUniformLocation(renderProg, 'u_bass'),
     accent: gl.getUniformLocation(renderProg, 'u_accent'),
+    accent2: gl.getUniformLocation(renderProg, 'u_accent2'),
   };
   const fadeLoc = {
     quad: gl.getAttribLocation(fadeProg, 'a_quad'),
@@ -347,6 +357,20 @@ function buildParticleFlow(
   };
 
   let time = 0;
+  // The partner for an accent with no second accent given, kept until the
+  // accent or the look's seed changes so a steady theme costs nothing per frame.
+  const partnerPalette = { bg: [0, 0, 0], dark: [0, 0, 0], light: [1, 1, 1], accent: [NaN, NaN, NaN] } as PaletteConfig;
+  let partner: [number, number, number] = [0, 0, 0];
+  let partnerSeed = '';
+  function partnerOf(accent: [number, number, number], seed: string): [number, number, number] {
+    const kept = partnerPalette.accent;
+    if (seed !== partnerSeed || accent[0] !== kept[0] || accent[1] !== kept[1] || accent[2] !== kept[2]) {
+      partnerPalette.accent = [accent[0], accent[1], accent[2]];
+      partnerSeed = seed;
+      partner = accentPair(partnerPalette, seed);
+    }
+    return partner;
+  }
   let dpr = 1;
   // The shaders get the clock wrapped: a float32 uniform that keeps growing
   // loses the resolution the noise and hash terms need after a few hours.
@@ -369,7 +393,7 @@ function buildParticleFlow(
     gl.viewport(0, 0, canvas.width, canvas.height);
   }
 
-  function render(features: ParticleFlowFeatures, accentRgb: [number, number, number], dt: number): void {
+  function render(features: ParticleFlowFeatures, accentRgb: [number, number, number], dt: number, accent2Rgb?: [number, number, number], seed = ''): void {
     const step = Math.min(0.05, Math.max(0.001, Number.isFinite(dt) ? dt : 1 / 60));
     time += step;
     const aspect = Math.max(0.0001, canvas.width / Math.max(1, canvas.height));
@@ -422,6 +446,8 @@ function buildParticleFlow(
     gl.uniform1f(rndLoc.treble, features.treble);
     gl.uniform1f(rndLoc.bass, features.bass);
     gl.uniform3f(rndLoc.accent, accentRgb[0], accentRgb[1], accentRgb[2]);
+    const second = accent2Rgb ?? partnerOf(accentRgb, seed);
+    gl.uniform3f(rndLoc.accent2, second[0], second[1], second[2]);
     bindAttrib(rndLoc.pos, cur.pos);
     bindAttrib(rndLoc.vel, cur.vel);
     bindAttrib(rndLoc.age, cur.age);

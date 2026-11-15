@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from 'react';
 import QRCode from 'qrcode';
 import type { AnalysisProgress } from '@shared/analysis';
 import { describeAnalysis } from '@shared/analysis';
@@ -78,6 +78,118 @@ function saveSettings(patch: Partial<AppSettings>): Promise<AppSettings> {
   return write;
 }
 
+// A rejected setting says so; without this the control sits in a state the
+// save never reached and nothing explains why.
+function reportSettingError(title: string, err: unknown): void {
+  pushToast({ tone: 'error', title, detail: err instanceof Error ? err.message : undefined });
+}
+
+// Credential fields are typed into the local settings copy and saved by their
+// own buttons, so a save of any other setting must not wipe them.
+const CREDENTIAL_FIELDS = ['lastfmApiKey', 'lastfmSharedSecret', 'openaiApiKey', 'openaiModel'] as const;
+type CredentialValues = Pick<AppSettings, (typeof CREDENTIAL_FIELDS)[number]>;
+
+// A slider that follows the thumb locally and hands its value on at most every
+// COMMIT_SLIDER_INTERVAL_MS, plus once when the drag ends. Saving on every
+// input event would write the settings file tens of times during one drag.
+const COMMIT_SLIDER_INTERVAL_MS = 250;
+
+function CommitSlider({
+  value,
+  min,
+  max,
+  step,
+  disabled,
+  className,
+  label,
+  onCommit,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  disabled?: boolean;
+  className?: string;
+  label: string;
+  onCommit: (next: number) => Promise<unknown> | void;
+}): JSX.Element {
+  const [draft, setDraft] = useState<number | null>(null);
+  const latest = useRef<number | null>(null);
+  const timer = useRef(0);
+  const commitRef = useRef(onCommit);
+  commitRef.current = onCommit;
+
+  function flush(): void {
+    window.clearTimeout(timer.current);
+    timer.current = 0;
+    const next = latest.current;
+    latest.current = null;
+    if (next === null) return;
+    // The thumb keeps the committed value until the saved one arrives.
+    void Promise.resolve(commitRef.current(next)).finally(() => {
+      if (latest.current === null) setDraft(null);
+    });
+  }
+
+  // Leaving the view mid-drag still commits where the thumb stopped.
+  useEffect(() => () => {
+    window.clearTimeout(timer.current);
+    const next = latest.current;
+    latest.current = null;
+    if (next !== null) void commitRef.current(next);
+  }, []);
+
+  return (
+    <input
+      aria-label={label}
+      type="range"
+      min={min}
+      max={max}
+      step={step}
+      value={draft ?? value}
+      disabled={disabled}
+      onChange={(e) => {
+        const next = e.target.valueAsNumber;
+        latest.current = next;
+        setDraft(next);
+        if (!timer.current) timer.current = window.setTimeout(flush, COMMIT_SLIDER_INTERVAL_MS);
+      }}
+      onPointerUp={(_event: ReactPointerEvent<HTMLInputElement>) => flush()}
+      onKeyUp={flush}
+      onBlur={flush}
+      className={className}
+    />
+  );
+}
+
+// Re-renders when what the audio engine reports changes: the exclusive device
+// opening or falling back, or the output rate settling after a track starts.
+function useEngineReadout(): void {
+  const [, setRevision] = useState(0);
+  useEffect(() => {
+    let signature = '';
+    return engine.subscribe(() => {
+      const info = engine.getExclusiveInfo();
+      let fallback = '';
+      try {
+        fallback = JSON.stringify(engine.getSampleRateFallback?.() ?? null);
+      } catch {
+        fallback = '';
+      }
+      const next = [
+        info.active,
+        info.negotiated ? `${info.negotiated.format}@${info.negotiated.sampleRate}:${info.negotiated.bitPerfect}` : '',
+        info.fallbackReason ?? '',
+        engine.getActualSampleRate() ?? '',
+        fallback,
+      ].join('|');
+      if (next === signature) return;
+      signature = next;
+      setRevision((revision) => revision + 1);
+    });
+  }, []);
+}
+
 export function SettingsView(): JSX.Element {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [stats, setStats] = useState<{ tracks: number; albums: number; artists: number; duration: number } | null>(null);
@@ -101,8 +213,38 @@ export function SettingsView(): JSX.Element {
   const setAudioOutputDevice = usePlayerStore((s) => s.setAudioOutputDevice);
   const playOutputTestTone = usePlayerStore((s) => s.playOutputTestTone);
 
-  function acceptSettings(saved: AppSettings): void {
-    setSettings(saved);
+  const settingsRef = useRef<AppSettings | null>(null);
+  settingsRef.current = settings;
+  const savedCredentialsRef = useRef<CredentialValues | null>(null);
+  useEngineReadout();
+  // Exclusive mode can switch itself off after a fallback; follow the store so
+  // the checkbox does not keep showing it on.
+  const storeExclusive = usePlayerStore((s) => s.settings?.bitPerfectExclusive);
+  useEffect(() => {
+    if (storeExclusive === undefined) return;
+    setSettings((prev) => (prev && prev.bitPerfectExclusive !== storeExclusive ? { ...prev, bitPerfectExclusive: storeExclusive } : prev));
+  }, [storeExclusive]);
+
+  // `dropDrafts` is for the saves that persist the credential fields themselves.
+  function acceptSettings(saved: AppSettings, options: { dropDrafts?: boolean } = {}): void {
+    const previous = settingsRef.current;
+    const savedBefore = savedCredentialsRef.current;
+    let next = saved;
+    if (previous && savedBefore && !options.dropDrafts) {
+      next = { ...saved };
+      for (const field of CREDENTIAL_FIELDS) {
+        // A field that differs from what was last saved is an edit in progress.
+        if (previous[field] !== savedBefore[field]) Object.assign(next, { [field]: previous[field] });
+      }
+    }
+    savedCredentialsRef.current = {
+      lastfmApiKey: saved.lastfmApiKey,
+      lastfmSharedSecret: saved.lastfmSharedSecret,
+      openaiApiKey: saved.openaiApiKey,
+      openaiModel: saved.openaiModel,
+    };
+    settingsRef.current = next;
+    setSettings(next);
   }
 
   useEffect(() => {
@@ -115,7 +257,14 @@ export function SettingsView(): JSX.Element {
     const mediaDevices = typeof navigator !== 'undefined' ? navigator.mediaDevices : null;
     const onDeviceChange = () => void refreshAudioOutputs();
     mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
-    return () => mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
+    // A folder added from the File menu changes the list behind this page.
+    const offSettingsChanged = api.onSettingsChanged(() => {
+      api.getSettings().then(acceptSettings).catch(() => undefined);
+    });
+    return () => {
+      mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
+      offSettingsChanged();
+    };
   }, []);
 
   if (!settings) {
@@ -172,7 +321,7 @@ export function SettingsView(): JSX.Element {
       lastfmApiKey: settings!.lastfmApiKey?.trim() || null,
       lastfmSharedSecret: settings!.lastfmSharedSecret?.trim() || null,
     });
-    acceptSettings(updated);
+    acceptSettings(updated, { dropDrafts: true });
     setLastfmStatus('Last.fm credentials saved.');
     return updated;
   }
@@ -249,7 +398,7 @@ export function SettingsView(): JSX.Element {
       openaiApiKey: settings.openaiApiKey?.trim() || null,
       openaiModel: settings.openaiModel?.trim() || DEFAULT_SETTINGS.openaiModel,
     });
-    acceptSettings(updated);
+    acceptSettings(updated, { dropDrafts: true });
     setOpenAiStatus(updated.aiAssistRuntime?.mode === 'gateway'
       ? 'API settings saved. The endpoint from NEWAMP_OPENAI_BASE_URL stays in use for this session.'
       : updated.openaiApiKey ? 'ChatGPT assist key saved locally.' : 'ChatGPT assist disabled.');
@@ -258,7 +407,7 @@ export function SettingsView(): JSX.Element {
   async function showTutorialOnNextLaunch(): Promise<void> {
     if (!settings) return;
     const updated = await api.setSettings({ firstLaunchTutorialSeen: false });
-    setSettings(updated);
+    acceptSettings(updated);
     setTutorialStatus('The tutorial will show the next time NewAmp opens.');
   }
 
@@ -365,7 +514,8 @@ export function SettingsView(): JSX.Element {
         title: 'Backup restored',
         detail: 'Reloading the library and saved playback session.',
       });
-      window.location.reload();
+      // Long enough to read the status line and the toast before the window reloads.
+      window.setTimeout(() => window.location.reload(), 1200);
     } catch (err) {
       setSupportBackupStatus(err instanceof Error ? err.message : 'Restore failed.');
     }
@@ -419,12 +569,19 @@ export function SettingsView(): JSX.Element {
               </button>
               <button
                 className="pxbtn is-active"
-                onClick={() => void api.scanLibrary()}
+                onClick={() => {
+                  api.scanLibrary().catch((err: unknown) => reportSettingError('Scan failed', err));
+                }}
                 disabled={!settings.libraryRoots.length}
               >
                 ▶ Scan now
               </button>
-              <button className="pxbtn" onClick={() => void api.cancelScan()}>
+              <button
+                className="pxbtn"
+                onClick={() => {
+                  api.cancelScan().catch((err: unknown) => reportSettingError('Could not cancel the scan', err));
+                }}
+              >
                 Cancel scan
               </button>
               {stats && (
@@ -497,7 +654,7 @@ export function SettingsView(): JSX.Element {
             </Row>
             <RadioBrainRow
               settings={settings}
-              onChange={(patch) => saveSettings(patch).then(acceptSettings).catch(() => undefined)}
+              onChange={(patch) => saveSettings(patch).then(acceptSettings)}
             />
           </section>
 
@@ -510,17 +667,13 @@ export function SettingsView(): JSX.Element {
             <ShellPicker />
             <Row label="Text size">
               <div className="flex min-w-[260px] items-center gap-3">
-                <input
-                  aria-label="Text size"
-                  type="range"
+                <CommitSlider
+                  label="Text size"
                   min={0.85}
                   max={1.35}
                   step={0.05}
                   value={settings.textScale}
-                  onChange={(e) => {
-                    const textScale = Number(e.target.value);
-                    saveSettings({ textScale }).then(acceptSettings).catch(() => undefined);
-                  }}
+                  onCommit={(textScale) => saveSettings({ textScale }).then(acceptSettings).catch(() => undefined)}
                   className="nslider flex-1"
                 />
                 <span className="w-[52px] text-right text-sm tabular-nums text-ink2">
@@ -716,9 +869,11 @@ export function SettingsView(): JSX.Element {
                 disabled={dspBypassed}
                 onChange={(e) => {
                   const v = parseInt(e.target.value, 10);
-                  setCrossfadeMs(v).then(() => {
-                    setSettings((prev) => (prev ? { ...prev, crossfadeMs: v } : prev));
-                  });
+                  setCrossfadeMs(v)
+                    .then(() => {
+                      setSettings((prev) => (prev ? { ...prev, crossfadeMs: v } : prev));
+                    })
+                    .catch((err) => reportSettingError('Could not set the crossfade', err));
                 }}
                 className={`bevel-in px-2 py-1 text-base${dspBypassed ? ' opacity-50' : ''}`}
               >
@@ -738,7 +893,9 @@ export function SettingsView(): JSX.Element {
                   checked={settings.sampleAccurateGapless}
                   disabled={dspBypassed}
                   onChange={(e) => {
-                    setSampleAccurateGapless(e.target.checked).then((updated) => setSettings(updated));
+                    setSampleAccurateGapless(e.target.checked)
+                      .then(acceptSettings)
+                      .catch((err) => reportSettingError('Could not change gapless playback', err));
                   }}
                 />
                 Sample-accurate
@@ -751,9 +908,11 @@ export function SettingsView(): JSX.Element {
                 disabled={dspBypassed}
                 onChange={(e) => {
                   const replayGain = e.target.value as AppSettings['replayGain'];
-                  setReplayGainMode(replayGain).then(() => {
-                    setSettings((prev) => (prev ? { ...prev, replayGain } : prev));
-                  });
+                  setReplayGainMode(replayGain)
+                    .then(() => {
+                      setSettings((prev) => (prev ? { ...prev, replayGain } : prev));
+                    })
+                    .catch((err) => reportSettingError('Could not set ReplayGain', err));
                 }}
                 className={`bevel-in px-2 py-1 text-base${dspBypassed ? ' opacity-50' : ''}`}
               >
@@ -770,9 +929,11 @@ export function SettingsView(): JSX.Element {
                   disabled={dspBypassed}
                   onChange={(e) => {
                     const limiterEnabled = e.target.checked;
-                    setLimiterEnabled(limiterEnabled).then(() => {
-                      setSettings((prev) => (prev ? { ...prev, limiterEnabled } : prev));
-                    });
+                    setLimiterEnabled(limiterEnabled)
+                      .then(() => {
+                        setSettings((prev) => (prev ? { ...prev, limiterEnabled } : prev));
+                      })
+                      .catch((err) => reportSettingError('Could not change the limiter', err));
                   }}
                 />
                 Limiter
@@ -780,19 +941,20 @@ export function SettingsView(): JSX.Element {
             </Row>
             <Row label="Preamp">
               <div className="flex max-w-[360px] flex-1 items-center justify-end gap-3">
-                <input
-                  aria-label="Preamp"
-                  type="range"
+                <CommitSlider
+                  label="Preamp"
                   min={MIN_PREAMP_DB}
                   max={MAX_PREAMP_DB}
                   step={PREAMP_STEP_DB}
                   value={settings.preampDb}
                   disabled={dspBypassed}
-                  onChange={(e) => {
-                    const preampDb = normalizePreampDb(e.target.valueAsNumber);
-                    setPreampDb(preampDb).then(() => {
-                      setSettings((prev) => (prev ? { ...prev, preampDb } : prev));
-                    });
+                  onCommit={(value) => {
+                    const preampDb = normalizePreampDb(value);
+                    return setPreampDb(preampDb)
+                      .then(() => {
+                        setSettings((prev) => (prev ? { ...prev, preampDb } : prev));
+                      })
+                      .catch((err) => reportSettingError('Could not set the preamp', err));
                   }}
                   className={`w-[220px]${dspBypassed ? ' opacity-50' : ''}`}
                 />
@@ -818,7 +980,12 @@ export function SettingsView(): JSX.Element {
                 )}
               </div>
             </Row>
-            <BitPerfectRow settings={settings} onChange={(patch) => saveSettings(patch).then(acceptSettings)} />
+            <BitPerfectRow
+              settings={settings}
+              onChange={(patch) => {
+                saveSettings(patch).then(acceptSettings).catch((err) => reportSettingError('Could not save the setting', err));
+              }}
+            />
             <ExclusiveModeRow settings={settings} onSettings={acceptSettings} />
 
             <Row label="Audio Output">
@@ -1578,6 +1745,8 @@ function ExclusiveModeRow({
     try {
       const updated = await setBitPerfectExclusive(next);
       onSettings(updated);
+    } catch (err) {
+      reportSettingError('Could not change Bit-Perfect Exclusive', err);
     } finally {
       setBusy(false);
     }
@@ -1588,6 +1757,8 @@ function ExclusiveModeRow({
     try {
       const updated = await setBitPerfectExclusiveDevice(raw === '' ? null : raw);
       onSettings(updated);
+    } catch (err) {
+      reportSettingError('Could not change the exclusive output device', err);
     } finally {
       setBusy(false);
     }
@@ -1693,11 +1864,38 @@ function RadioBrainRow({
   onChange,
 }: {
   settings: AppSettings;
-  onChange: (patch: Partial<AppSettings>) => void;
+  onChange: (patch: Partial<AppSettings>) => Promise<unknown>;
 }): JSX.Element {
   const [status, setStatus] = useState<RadioBrainStatus | null>(null);
   const enabled = settings.radioBrainEnabled;
   const port = settings.radioBrainPort;
+  // The port is typed as text and applied when the field is left or Enter is
+  // pressed. Applying each keystroke clamps "8" up to 1024 before "8080" can be
+  // typed, and rebinds the server on every intermediate port.
+  const [portDraft, setPortDraft] = useState(String(port));
+  const [portError, setPortError] = useState<string | null>(null);
+  useEffect(() => setPortDraft(String(port)), [port]);
+
+  async function change(patch: Partial<AppSettings>, failureTitle: string): Promise<boolean> {
+    try {
+      await onChange(patch);
+      return true;
+    } catch (err) {
+      reportSettingError(failureTitle, err);
+      return false;
+    }
+  }
+
+  function commitPort(): void {
+    const text = portDraft.trim();
+    const next = Number(text);
+    if (!/^\d+$/.test(text) || next < 1024 || next > 65535) {
+      setPortError('Use a port from 1024 to 65535.');
+      return;
+    }
+    setPortError(null);
+    if (next !== port) void change({ radioBrainPort: next }, 'Could not change the Radio Brain port');
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -1724,7 +1922,7 @@ function RadioBrainRow({
           <input
             type="checkbox"
             checked={enabled}
-            onChange={(e) => onChange({ radioBrainEnabled: e.target.checked })}
+            onChange={(e) => void change({ radioBrainEnabled: e.target.checked }, 'Could not change Library Radio Brain')}
           />
           <span className="font-bold text-accent">Library Radio Brain</span>
           <span className="text-muted">· broadcast the library as a local HTTP station</span>
@@ -1737,13 +1935,19 @@ function RadioBrainRow({
             min={1024}
             max={65535}
             step={1}
-            value={port}
+            value={portDraft}
             onChange={(e) => {
-              const next = Number(e.target.value);
-              if (Number.isFinite(next)) onChange({ radioBrainPort: Math.max(1024, Math.min(65535, Math.trunc(next))) });
+              setPortDraft(e.target.value);
+              setPortError(null);
             }}
+            onBlur={commitPort}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitPort();
+            }}
+            aria-invalid={portError ? true : undefined}
             className="w-[90px] rounded border border-line bg-panel px-2 py-1 text-sm text-ink"
           />
+          {portError && <span className="text-xs text-warn" role="alert">{portError}</span>}
         </span>
       </div>
       {status?.enabled && status.baseUrl && (
@@ -1754,6 +1958,7 @@ function RadioBrainRow({
           <code className="text-accent">/random.m3u</code>, or{' '}
           <code className="text-accent">/tag/{'<name>'}.m3u</code> in VLC.
           Every route needs this install's token (playlist links include it).
+          The stream is plain HTTP, so only use it on a network you trust.
         </div>
       )}
       {status?.enabled && status.remoteUrl && (
@@ -1772,9 +1977,11 @@ function RadioBrainRow({
               confirmLabel="Invalidate old link?"
               tone="warn"
               onConfirm={() => {
-                onChange({ radioBrainToken: null });
-                // Server regenerates on next sync; old links stop working.
-                pushToast({ tone: 'ok', title: 'Remote link regenerated', detail: 'Old links stop working on the next sync.' });
+                // Server regenerates on next sync; old links stop working. The
+                // message waits for the save, since it promises the old link is gone.
+                void change({ radioBrainToken: null }, 'Remote link was not regenerated').then((saved) => {
+                  if (saved) pushToast({ tone: 'ok', title: 'Remote link regenerated', detail: 'Old links stop working on the next sync.' });
+                });
               }}
               title="Invalidate the current link and mint a new secret"
             />
@@ -1823,7 +2030,9 @@ function RemoteQr({ url }: { url: string }): JSX.Element {
 // and without case on Windows and macOS (not Linux, where case matters).
 function folderIsSameOrInside(path: string, folder: string): boolean {
   const key = (value: string) => {
-    const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+    // Accented names come back from some volumes decomposed and from others
+    // composed; folded to one form so they compare equal.
+    const normalized = value.normalize('NFC').replace(/\\/g, '/').replace(/\/+$/, '');
     return api.platform === 'win32' || api.platform === 'darwin' ? normalized.toLowerCase() : normalized;
   };
   const p = key(path);

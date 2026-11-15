@@ -7,6 +7,7 @@ import type {
   Track,
 } from '@shared/types';
 import { moveQueueItem, removeQueueItem } from '@shared/queue-edit';
+import { normalizeAutoDjTarget } from '@shared/auto-dj';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { formatTime } from '../../lib/format';
 import { api } from '../../lib/api';
@@ -19,6 +20,12 @@ import { useVirtualRows } from '../../hooks/useVirtualRows';
 import { openTrackContextMenu } from '../../lib/trackMenu';
 
 type SetMood = SmartPlaylistMood;
+
+// A failed action says so instead of ending as an unhandled rejection with the
+// button quietly re-enabled.
+function reportFailure(title: string, err: unknown): void {
+  pushToast({ tone: 'error', title, detail: err instanceof Error ? err.message : undefined });
+}
 
 export function PlaylistView(): JSX.Element {
   const queue = usePlayerStore((s) => s.queue);
@@ -68,6 +75,21 @@ export function PlaylistView(): JSX.Element {
   const [playlistCoverPath, setPlaylistCoverPath] = useState<string | null>(null);
   const [clearPlaylistCover, setClearPlaylistCover] = useState(false);
   const [smartCount, setSmartCount] = useState(30);
+  // The Auto DJ target is typed in as text and committed when the field is left
+  // or Enter is pressed: saving each keystroke clamps "1" up to the minimum
+  // before the "2" of "12" can be typed, and refills the queue every time.
+  const [autoDjTargetDraft, setAutoDjTargetDraft] = useState(String(autoDjTarget));
+  useEffect(() => setAutoDjTargetDraft(String(autoDjTarget)), [autoDjTarget]);
+  function commitAutoDjTarget(): void {
+    const parsed = parseInt(autoDjTargetDraft, 10);
+    if (!Number.isFinite(parsed)) {
+      setAutoDjTargetDraft(String(autoDjTarget));
+      return;
+    }
+    const next = normalizeAutoDjTarget(parsed);
+    setAutoDjTargetDraft(String(next));
+    if (next !== autoDjTarget) void setAutoDjTarget(next);
+  }
   const [genreQuery, setGenreQuery] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [minYear, setMinYear] = useState('');
@@ -140,6 +162,37 @@ export function PlaylistView(): JSX.Element {
     rowHeight: PLAYLIST_ROW_HEIGHT,
     enabled: !selectedPlaylist && visibleQueueTracks.length > 0,
   });
+  const visibleSelectedPlaylistRef = useRef(visibleSelectedPlaylistTracks);
+  visibleSelectedPlaylistRef.current = visibleSelectedPlaylistTracks;
+  const visibleQueueRef = useRef(visibleQueueTracks);
+  visibleQueueRef.current = visibleQueueTracks;
+
+  // Rows are keyed by position, so a move or removal remounts the row the
+  // keyboard was on. Put focus back on the row it was working with.
+  function focusPlaylistTrackRow(index: number): void {
+    focusListRow(selectedPlaylistWindow.scrollRef.current, 'data-newamp-playlist-track-row', index, visibleSelectedPlaylistRef);
+  }
+  function focusQueueTrackRow(index: number): void {
+    focusListRow(queueWindow.scrollRef.current, 'data-newamp-queue-track-row', index, visibleQueueRef);
+  }
+  function moveSelectedPlaylistTrackAndFocus(fromIndex: number, toIndex: number): void {
+    moveSelectedPlaylistTrack(fromIndex, toIndex);
+    focusPlaylistTrackRow(toIndex);
+  }
+  function removeSelectedPlaylistTrackAndFocus(index: number): void {
+    const remaining = openTracks.current.length - 1;
+    removeSelectedPlaylistTrack(index);
+    if (remaining > 0) focusPlaylistTrackRow(Math.min(index, remaining - 1));
+  }
+  function moveQueuedTrackAndFocus(fromIndex: number, toIndex: number): void {
+    moveQueuedTrack(fromIndex, toIndex);
+    focusQueueTrackRow(toIndex);
+  }
+  function removeQueuedTrackAndFocus(index: number): void {
+    const remaining = queue.length - 1;
+    void removeQueuedTrack(index);
+    if (remaining > 0) focusQueueTrackRow(Math.min(index, remaining - 1));
+  }
 
   useEffect(() => {
     void refreshPlaylists();
@@ -235,6 +288,8 @@ export function PlaylistView(): JSX.Element {
       }
       pushToast({ tone: 'ok', title: 'Smart set built', detail: `${picked.length} track ${moodLabel(mood)} set.` });
       loadQueue(picked);
+    } catch (err) {
+      reportFailure('Could not build the set', err);
     } finally {
       setBuilding(false);
     }
@@ -258,6 +313,8 @@ export function PlaylistView(): JSX.Element {
         title: 'Harmonic mix built',
         detail: `${picked.length} tracks${current ? ` from ${current.title}` : ''}.`,
       });
+    } catch (err) {
+      reportFailure('Could not build the harmonic mix', err);
     } finally {
       setBuilding(false);
     }
@@ -274,6 +331,8 @@ export function PlaylistView(): JSX.Element {
       } else {
         pushToast({ tone: 'info', title: 'Auto DJ found no new candidates' });
       }
+    } catch (err) {
+      reportFailure('Could not top up Auto DJ', err);
     } finally {
       setBuilding(false);
     }
@@ -320,6 +379,8 @@ export function PlaylistView(): JSX.Element {
       if (play && tracks.length) await playQueue(tracks, 0);
       else loadQueue(tracks);
       pushToast({ tone: 'info', title: 'Smart rule generated', detail: `${tracks.length} tracks from ${rule.name}.` });
+    } catch (err) {
+      reportFailure('Could not run the smart rule', err);
     } finally {
       setBusy(false);
     }
@@ -340,6 +401,8 @@ export function PlaylistView(): JSX.Element {
       await setAutoDjSmartRuleId(rule.id);
       await setAutoDjEnabled(true);
       pushToast({ tone: 'ok', title: 'Smart Rule Radio started', detail: rule.name });
+    } catch (err) {
+      reportFailure('Could not start Smart Rule Radio', err);
     } finally {
       setBusy(false);
     }
@@ -354,6 +417,8 @@ export function PlaylistView(): JSX.Element {
       pushToast({ tone: 'ok', title: 'Smart rule deleted', detail: selectedSmartRule.name });
       setSelectedSmartRule(null);
       await refreshPlaylists();
+    } catch (err) {
+      reportFailure('Could not delete the smart rule', err);
     } finally {
       setBusy(false);
     }
@@ -422,6 +487,8 @@ export function PlaylistView(): JSX.Element {
         detail: `${saved.trackCount} tracks.`,
       });
       await refreshPlaylists();
+    } catch (err) {
+      reportFailure('Could not save the playlist', err);
     } finally {
       setBusy(false);
     }
@@ -449,6 +516,8 @@ export function PlaylistView(): JSX.Element {
         detail: 'Right-click any track, or tick several, and choose Add to Playlist.',
       });
       await refreshPlaylists();
+    } catch (err) {
+      reportFailure('Could not create the playlist', err);
     } finally {
       setBusy(false);
     }
@@ -536,6 +605,8 @@ export function PlaylistView(): JSX.Element {
       setPlaylistCoverPath(null);
       setClearPlaylistCover(false);
       await refreshPlaylists();
+    } catch (err) {
+      reportFailure('Could not delete the playlist', err);
     } finally {
       setBusy(false);
     }
@@ -548,6 +619,8 @@ export function PlaylistView(): JSX.Element {
       const filePath = await api.exportPlaylistM3u(selectedPlaylist.id);
       if (filePath) pushToast({ tone: 'ok', title: 'Exported M3U', detail: selectedPlaylist.name });
       else pushToast({ tone: 'info', title: 'Export canceled' });
+    } catch (err) {
+      reportFailure('Could not export the playlist', err);
     } finally {
       setBusy(false);
     }
@@ -560,6 +633,8 @@ export function PlaylistView(): JSX.Element {
       const filePath = await api.exportPlaylistPls(selectedPlaylist.id);
       if (filePath) pushToast({ tone: 'ok', title: 'Exported PLS', detail: selectedPlaylist.name });
       else pushToast({ tone: 'info', title: 'Export canceled' });
+    } catch (err) {
+      reportFailure('Could not export the playlist', err);
     } finally {
       setBusy(false);
     }
@@ -576,6 +651,8 @@ export function PlaylistView(): JSX.Element {
       }
       const skipped = result.skipped.length ? `, ${result.skipped.length} skipped` : '';
       pushToast({ tone: 'ok', title: 'Folder exported', detail: `${result.copied} tracks${skipped} → ${result.path}` });
+    } catch (err) {
+      reportFailure('Could not export the playlist folder', err);
     } finally {
       setBusy(false);
     }
@@ -599,6 +676,8 @@ export function PlaylistView(): JSX.Element {
         title: 'Queue folder exported',
         detail: `${result.copied} tracks${skipped} → ${result.path}`,
       });
+    } catch (err) {
+      reportFailure('Could not export the queue folder', err);
     } finally {
       setBusy(false);
     }
@@ -627,6 +706,8 @@ export function PlaylistView(): JSX.Element {
         detail: `${result.playlist.name}: ${result.matched} matched, ${result.skipped} skipped.`,
       });
       await refreshPlaylists();
+    } catch (err) {
+      reportFailure('Could not import the playlist', err);
     } finally {
       setBusy(false);
     }
@@ -643,6 +724,8 @@ export function PlaylistView(): JSX.Element {
       setPlaylistCoverPath(path);
       setClearPlaylistCover(false);
       pushToast({ tone: 'info', title: 'Playlist icon selected', detail: 'Create or update the playlist to apply it.' });
+    } catch (err) {
+      reportFailure('Could not choose the icon', err);
     } finally {
       setBusy(false);
     }
@@ -866,8 +949,12 @@ export function PlaylistView(): JSX.Element {
         <div className="toolbar-group" role="group" aria-label="Auto DJ settings">
           <span className="toolbar-group-label">Auto DJ</span>
           <input
-            value={autoDjTarget}
-            onChange={(e) => void setAutoDjTarget(parseInt(e.target.value, 10) || autoDjTarget)}
+            value={autoDjTargetDraft}
+            onChange={(e) => setAutoDjTargetDraft(e.target.value)}
+            onBlur={commitAutoDjTarget}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitAutoDjTarget();
+            }}
             type="number"
             min={6}
             max={80}
@@ -1221,6 +1308,26 @@ export function PlaylistView(): JSX.Element {
                         }}
                         draggable={true}
                         aria-grabbed={draggedPlaylistTrackIndex === i}
+                        tabIndex={0}
+                        aria-label={t.artist ? `${t.title} by ${t.artist}` : t.title}
+                        aria-keyshortcuts="Enter Delete Backspace Alt+ArrowUp Alt+ArrowDown"
+                        onKeyDown={(event) => {
+                          // Keys pressed on a nested link or button are theirs.
+                          if (event.target !== event.currentTarget) return;
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            void playQueue(selectedPlaylistTracks, i);
+                          } else if (event.key === 'Delete' || event.key === 'Backspace') {
+                            event.preventDefault();
+                            removeSelectedPlaylistTrackAndFocus(i);
+                          } else if (event.altKey && event.key === 'ArrowUp' && i > 0) {
+                            event.preventDefault();
+                            moveSelectedPlaylistTrackAndFocus(i, i - 1);
+                          } else if (event.altKey && event.key === 'ArrowDown' && i < selectedPlaylistTracks.length - 1) {
+                            event.preventDefault();
+                            moveSelectedPlaylistTrackAndFocus(i, i + 1);
+                          }
+                        }}
                         onDragStart={(event) => {
                           setDraggedPlaylistTrackIndex(i);
                           event.dataTransfer.effectAllowed = 'move';
@@ -1280,7 +1387,7 @@ export function PlaylistView(): JSX.Element {
                             title="Move up"
                             onClick={(event) => {
                               event.stopPropagation();
-                              moveSelectedPlaylistTrack(i, i - 1);
+                              moveSelectedPlaylistTrackAndFocus(i, i - 1);
                             }}
                             disabled={i === 0}
                           >
@@ -1291,7 +1398,7 @@ export function PlaylistView(): JSX.Element {
                             title="Move down"
                             onClick={(event) => {
                               event.stopPropagation();
-                              moveSelectedPlaylistTrack(i, i + 1);
+                              moveSelectedPlaylistTrackAndFocus(i, i + 1);
                             }}
                             disabled={i === selectedPlaylistTracks.length - 1}
                           >
@@ -1302,7 +1409,7 @@ export function PlaylistView(): JSX.Element {
                             title="Remove from playlist"
                             onClick={(event) => {
                               event.stopPropagation();
-                              removeSelectedPlaylistTrack(i);
+                              removeSelectedPlaylistTrackAndFocus(i);
                             }}
                           >
                             X
@@ -1365,6 +1472,26 @@ export function PlaylistView(): JSX.Element {
                       }}
                       draggable={true}
                       aria-grabbed={draggedQueueIndex === i}
+                      tabIndex={0}
+                      aria-label={t.artist ? `${t.title} by ${t.artist}` : t.title}
+                      aria-keyshortcuts="Enter Delete Backspace Alt+ArrowUp Alt+ArrowDown"
+                      onKeyDown={(event) => {
+                        // Keys pressed on a nested link or button are theirs.
+                        if (event.target !== event.currentTarget) return;
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          void playQueue(queue, i);
+                        } else if (event.key === 'Delete' || event.key === 'Backspace') {
+                          event.preventDefault();
+                          removeQueuedTrackAndFocus(i);
+                        } else if (event.altKey && event.key === 'ArrowUp' && i > 0) {
+                          event.preventDefault();
+                          moveQueuedTrackAndFocus(i, i - 1);
+                        } else if (event.altKey && event.key === 'ArrowDown' && i < queue.length - 1) {
+                          event.preventDefault();
+                          moveQueuedTrackAndFocus(i, i + 1);
+                        }
+                      }}
                       onDragStart={(event) => {
                         setDraggedQueueIndex(i);
                         event.dataTransfer.effectAllowed = 'move';
@@ -1423,7 +1550,7 @@ export function PlaylistView(): JSX.Element {
                           title="Move up"
                           onClick={(event) => {
                             event.stopPropagation();
-                            moveQueuedTrack(i, i - 1);
+                            moveQueuedTrackAndFocus(i, i - 1);
                           }}
                           disabled={i === 0}
                         >
@@ -1434,7 +1561,7 @@ export function PlaylistView(): JSX.Element {
                           title="Move down"
                           onClick={(event) => {
                             event.stopPropagation();
-                            moveQueuedTrack(i, i + 1);
+                            moveQueuedTrackAndFocus(i, i + 1);
                           }}
                           disabled={i === queue.length - 1}
                         >
@@ -1445,7 +1572,7 @@ export function PlaylistView(): JSX.Element {
                           title="Remove from queue"
                           onClick={(event) => {
                             event.stopPropagation();
-                            void removeQueuedTrack(i);
+                            removeQueuedTrackAndFocus(i);
                           }}
                         >
                           X
@@ -1470,6 +1597,38 @@ export function PlaylistView(): JSX.Element {
 // tall) plus py-1.5 padding (12px) and a 1px bottom border, matching the
 // system --row-height (tokens.css) used for Library rows.
 const PLAYLIST_ROW_HEIGHT = 36;
+
+// Focuses the row carrying `attr`=index, scrolling it into the drawn window
+// first when it has been windowed out. The first child of the scroller is the
+// sticky filter bar, which the rows sit below. The window redraws on the
+// scroll's next frame, so the row may take a few frames to exist.
+function focusListRow(
+  scroller: HTMLElement | null,
+  attr: string,
+  index: number,
+  visible: { current: { index: number }[] },
+): void {
+  if (!scroller) return;
+  let attempts = 0;
+  const tryFocus = (): void => {
+    const row = scroller.querySelector<HTMLElement>(`[${attr}="${index}"]`);
+    if (row) {
+      row.focus();
+      return;
+    }
+    if (attempts++ >= 4) return;
+    if (attempts === 1) {
+      const position = visible.current.findIndex((entry) => entry.index === index);
+      if (position >= 0) {
+        const barHeight = (scroller.firstElementChild as HTMLElement | null)?.offsetHeight ?? 0;
+        const rowTop = barHeight + position * PLAYLIST_ROW_HEIGHT;
+        scroller.scrollTop = Math.max(0, rowTop - (scroller.clientHeight - PLAYLIST_ROW_HEIGHT) / 2);
+      }
+    }
+    window.requestAnimationFrame(tryFocus);
+  };
+  window.requestAnimationFrame(tryFocus);
+}
 
 // An OS file drag (e.g. from Windows Explorer) carries no text/plain — only
 // an internal row drag sets that via onDragStart below. Row reorder must

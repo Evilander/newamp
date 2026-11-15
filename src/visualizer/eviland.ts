@@ -47,11 +47,16 @@
 // on it; options.onContextEvent says when, for hosts that would rather paint
 // something else if the context never comes back.
 
-import type { EvilandFrame } from './eviland-audio';
-import { evalConfig, createDynamics, defaultConfig, sectionSeedFor, CLASSIC_COMPOSITION, type EvilandDynamics, type OperatorConfig } from './eviland-operators';
+import { bandPanOf, type EvilandFrame } from './eviland-audio';
+import {
+  evalConfig, createDynamics, defaultConfig, sectionSeedFor, CLASSIC_COMPOSITION,
+  lerpColorInto, shadeColorInto,
+  type EvilandDynamics, type OperatorConfig, type RGB,
+} from './eviland-operators';
 import { createReactionDiffusion, prepareReactionDiffusion } from './eviland-reaction-diffusion';
 import { createPhysarum, preparePhysarum } from './eviland-physarum';
 import { createSceneOverlay } from './scene-overlay';
+import { accentPair } from './eviland-appearance';
 import { mulberry32, hashSeed } from './eviland-rng';
 import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame, clampDyeDissipation, type FluidSim } from './eviland-fluid';
 import { applyScoreCues } from './eviland-conductor';
@@ -63,6 +68,8 @@ export interface EvilandPalette {
   dark: [number, number, number];
   light: [number, number, number];
   bg: [number, number, number];
+  /** A second accent in harmony with the first; consumers fall back to `accent` when absent. */
+  accent2?: [number, number, number];
 }
 
 export interface EvilandRenderer {
@@ -604,39 +611,70 @@ uniform vec3  u_color;
 uniform float u_intensity;
 uniform float u_time;
 uniform float u_aspect;      // viewH / viewW for ray length normalisation
+uniform float u_bandPan[24]; // -1 left .. +1 right: where each band sits in the stereo image
+uniform float u_spread;      // the look's stereoSpread channel; 1 = as mixed
+uniform float u_eye;         // mean band pan: the hot core sits where the rays are centred on average
 
 const float TAU2 = 6.28318530718;
 const float SEGMENTS = 24.0;
+// How far a ray's origin leaves the centre toward its band's side (squared space).
+const float PAN_REACH = 0.12;
+
+float panAt(float i){
+  return u_bandPan[int(mod(i, SEGMENTS))];
+}
+float bandAt(float i){
+  return texture(u_bands, vec2((mod(i, SEGMENTS) + 0.5) / SEGMENTS, 0.5)).r;
+}
+// A value read between two neighbouring entries of a 24-entry ring, so the
+// rays blend smoothly between segments instead of stepping.
+float panBetween(float idx){
+  float j = floor(idx);
+  return mix(panAt(j), panAt(j + 1.0), idx - j);
+}
+float bandBetween(float idx){
+  float j = floor(idx);
+  return mix(bandAt(j), bandAt(j + 1.0), idx - j);
+}
 
 void main(){
   vec2 p = v_uv - vec2(0.5);
   p.x /= max(0.0001, u_aspect); // square the radial space
-  float r = length(p) * 2.0;       // 0 at centre .. ~1 at edge
-  float a = atan(p.y, p.x);        // -PI..PI
-  // Band index from angle. Slowly rotate over time so the spectrum sweeps.
-  float t = (a + TAU2 + u_time * 0.07) / TAU2;
-  float idx = fract(t) * SEGMENTS;
-  float i0 = floor(idx);
-  float frac = idx - i0;
-  // Sample two neighbouring bands and linearly interpolate so the rays
-  // blend smoothly between segments instead of stepping.
-  float u0 = (i0 + 0.5) / SEGMENTS;
-  float u1 = (mod(i0 + 1.0, SEGMENTS) + 0.5) / SEGMENTS;
-  float b0 = texture(u_bands, vec2(u0, 0.5)).r;
-  float b1 = texture(u_bands, vec2(u1, 0.5)).r;
-  float band = mix(b0, b1, frac);
-  // Ray reaches to ~0.08 + band*0.55 (inside the screen).
-  float rayLen = 0.08 + band * 0.55;
-  // Crisp ray edge along the radius — rises near the centre, falls past tip.
-  float radial = smoothstep(0.05, 0.10, r) * (1.0 - smoothstep(rayLen, rayLen + 0.025, r));
-  // Sharp angular cut so rays read as distinct lines, not a soft sun.
+  float eyeR = length(p - vec2(u_eye * u_spread * PAN_REACH, 0.0)) * 2.0;
   float seg = TAU2 / SEGMENTS;
-  float folded = abs(mod(a + seg * 0.5, seg) - seg * 0.5);
-  float angular = pow(1.0 - clamp(folded / (seg * 0.45), 0.0, 1.0), 6.0);
-  float ray = radial * angular;
+  // The rays sit at fixed angles and the band values slide through them over
+  // time; phi is that slide in band steps.
+  float phi = u_time * 0.07 / seg;
+  // Each ray starts at an origin of its own, moved toward its band's side of
+  // the stereo image. A pixel is measured against the rays nearest its angle
+  // and keeps the brightest, so rays from different origins cross and overlap
+  // as straight lines. Reading one band from the pixel's own angle and then
+  // moving the pixel by that band's pan folds the rays into each other wherever
+  // neighbouring bands sit far apart in the image: a hard-panned hat beside a
+  // centred vocal. Seven rays cover the sun's body; right beside the core the
+  // origins' offset outruns the ray spacing, and rays more than three away
+  // are dropped there, which only touches the hot core.
+  float k0 = floor(atan(p.y, p.x) / seg + 0.5);
+  float ray = 0.0;
+  for (int d = -3; d <= 3; d++) {
+    float k = k0 + float(d);
+    float dirA = k * seg;
+    vec2 q = p - vec2(panBetween(k + phi) * u_spread * PAN_REACH, 0.0);
+    float r = length(q) * 2.0; // 0 at the ray's origin .. ~1 at edge
+    // Signed angle of the pixel from this ray's direction.
+    float da = atan(cos(dirA) * q.y - sin(dirA) * q.x, cos(dirA) * q.x + sin(dirA) * q.y);
+    float band = bandBetween((dirA + da) / seg + phi);
+    // Ray reaches to ~0.08 + band*0.55 (inside the screen).
+    float rayLen = 0.08 + band * 0.55;
+    // Crisp ray edge along the radius: rises near the centre, falls past tip.
+    float radial = smoothstep(0.05, 0.10, r) * (1.0 - smoothstep(rayLen, rayLen + 0.025, r));
+    // Sharp angular cut so rays read as distinct lines, not a soft sun.
+    float angular = pow(1.0 - clamp(abs(da) / (seg * 0.45), 0.0, 1.0), 6.0);
+    ray = max(ray, radial * angular);
+  }
   // A small bright centre so the sun has a hot core — kept modest so the middle
   // is a clean "eye", not a permanent blown-out white blob.
-  float core = exp(-r * r * 60.0) * 0.22;
+  float core = exp(-eyeR * eyeR * 60.0) * 0.22;
   float a_out = clamp((ray + core) * u_intensity, 0.0, 1.0);
   o = vec4(u_color * a_out, a_out);
 }`;
@@ -942,7 +980,7 @@ void main(){
   o = vec4(colour, 1.0);
 }`;
 
-const POST_FRAG = `#version 300 es
+export const POST_FRAG = `#version 300 es
 precision highp float;
 precision highp int;
 in vec2 v_uv;
@@ -958,11 +996,6 @@ uniform vec3 u_bg;
 
 ${NAN_GLSL}
 float settle1(float x){ return notNumber(x) ? 0.0 : clamp(x, 0.0, 1024.0); }
-
-uint lowbias(uint x) {
-  x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
-  return x;
-}
 
 void main() {
   // Bloom was extracted from the exposed image, so only the field is scaled.
@@ -987,10 +1020,15 @@ void main() {
   // Triangular dither one 8-bit step wide: a slow gradient (the long end of
   // a trail on a dark ground) otherwise lands on a few levels and shows as
   // contour lines. It is at full width from two levels up and fades out below
-  // that, so exact black stays still.
-  uvec2 cell = uvec2(gl_FragCoord.xy);
-  uint seed = lowbias(cell.x + cell.y * 4099u + uint(u_frame) * 7919u);
-  float grain = float(seed >> 8) / 16777216.0 + float(lowbias(seed ^ 0x9e3779b9u) >> 8) / 16777216.0 - 1.0;
+  // that, so exact black stays still. The pattern is interleaved gradient
+  // noise rather than a per-pixel hash: its neighbours are anti-correlated, so
+  // the same amplitude reads as a finer grain and bands less, and it needs no
+  // texture. A second sample at an offset cannot make it triangular, because
+  // any two gradient-noise samples are the same sequence shifted; the one
+  // uniform value is reshaped through the triangular inverse CDF instead.
+  float t = float(uint(u_frame) % 1024u) * 0.618034;
+  float u = fract(52.9829189 * fract(0.06711056 * gl_FragCoord.x + 0.00583715 * gl_FragCoord.y + t));
+  float grain = u < 0.5 ? sqrt(2.0 * u) - 1.0 : 1.0 - sqrt(2.0 - 2.0 * u);
   float amount = smoothstep(0.0, 2.0 / 255.0, max(colour.r, max(colour.g, colour.b)));
   o = vec4(colour + grain * amount / 255.0, 1.0);
 }`;
@@ -999,17 +1037,58 @@ void main() {
 // GL helpers — guarded so failures return null up the chain.
 // ---------------------------------------------------------------------------
 
-function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader | null {
-  const sh = gl.createShader(type);
-  if (!sh) return null;
-  gl.shaderSource(sh, src);
-  gl.compileShader(sh);
-  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-    console.error('[newamp] eviland shader compile failed:', gl.getShaderInfoLog(sh));
-    gl.deleteShader(sh);
-    return null;
+/** A program whose shaders have been handed to the driver but not yet checked. */
+interface PendingProgram {
+  vs: WebGLShader | null;
+  fs: WebGLShader | null;
+  prog: WebGLProgram | null;
+}
+
+// Compile and link are queued here and checked later, in finishLink. Asking
+// for COMPILE_STATUS straight after compileShader makes the driver finish that
+// shader before the next one is even submitted; with fourteen programs, one of
+// them very large, queueing them all first lets the driver work through them
+// together (on ANGLE's Metal translator the serial version took hundreds of ms).
+function startLink(gl: WebGL2RenderingContext, vsSrc: string, fsSrc: string): PendingProgram {
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  const prog = vs && fs ? gl.createProgram() : null;
+  if (vs) {
+    gl.shaderSource(vs, vsSrc);
+    gl.compileShader(vs);
   }
-  return sh;
+  if (fs) {
+    gl.shaderSource(fs, fsSrc);
+    gl.compileShader(fs);
+  }
+  if (prog && vs && fs) {
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+  }
+  return { vs, fs, prog };
+}
+
+function finishLink(gl: WebGL2RenderingContext, pending: PendingProgram): WebGLProgram | null {
+  const { vs, fs, prog } = pending;
+  let ok = !!prog && !!vs && !!fs;
+  if (ok && vs && !gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+    console.error('[newamp] eviland shader compile failed:', gl.getShaderInfoLog(vs));
+    ok = false;
+  }
+  if (ok && fs && !gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+    console.error('[newamp] eviland shader compile failed:', gl.getShaderInfoLog(fs));
+    ok = false;
+  }
+  if (ok && prog && !gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error('[newamp] eviland program link failed:', gl.getProgramInfoLog(prog));
+    ok = false;
+  }
+  if (vs) gl.deleteShader(vs);
+  if (fs) gl.deleteShader(fs);
+  if (ok) return prog;
+  if (prog) gl.deleteProgram(prog);
+  return null;
 }
 
 function link(
@@ -1017,22 +1096,7 @@ function link(
   vsSrc: string,
   fsSrc: string,
 ): WebGLProgram | null {
-  const vs = compile(gl, gl.VERTEX_SHADER, vsSrc);
-  const fs = compile(gl, gl.FRAGMENT_SHADER, fsSrc);
-  if (!vs || !fs) return null;
-  const prog = gl.createProgram();
-  if (!prog) return null;
-  gl.attachShader(prog, vs);
-  gl.attachShader(prog, fs);
-  gl.linkProgram(prog);
-  gl.deleteShader(vs);
-  gl.deleteShader(fs);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    console.error('[newamp] eviland program link failed:', gl.getProgramInfoLog(prog));
-    gl.deleteProgram(prog);
-    return null;
-  }
-  return prog;
+  return finishLink(gl, startLink(gl, vsSrc, fsSrc));
 }
 
 interface Fbo {
@@ -1138,6 +1202,115 @@ export function fitDrawingBuffer(
     height = Math.max(2, Math.floor(height * scale));
   }
   return { width, height };
+}
+
+// ---------------------------------------------------------------------------
+// Palette-derived colours for the engine's own sources.
+//
+// Everything here is worked out on the CPU in OKLCh and only when the palette
+// changes. A theme that holds still pays nothing per frame; a Director fade, a
+// mood glide or the rainbow mode changes it every frame, which costs a few
+// dozen colour conversions. Scaling the channels of a dark
+// role by hand, as the sources used to, pushes every dark toward red-brown.
+// ---------------------------------------------------------------------------
+
+/** Entries in the spectrum sun's hue-travel table. */
+const SUN_STEPS = 16;
+/** The OKLCh lightness step between a role and its lighter and darker tints. */
+const TINT_STEP = 0.08;
+
+export interface Tints {
+  /** The palette the colours below were made for: 12 numbers, the RGB triples of dark, accent, accent2 and light. */
+  key: Float64Array;
+  /** Whether that palette brought its own accent2, and the look's seed that picked the partner when it did not. */
+  keyHadSecond: boolean;
+  keySeed: string;
+  built: boolean;
+  /** The second accent the tints were built with: the palette's own, or the shared partner. */
+  second: RGB;
+  /** SUN_STEPS RGB triples, from the accent toward the second accent. */
+  sun: Float32Array;
+  /** Darker step of the dark role: kick core punch and the pre-beat windup. */
+  darker: RGB;
+  /** Lighter step of the dark role: the wide bass ring. */
+  bass: RGB;
+  /** Darker step of the second accent: the generic mid-band ring. */
+  mid: RGB;
+  /** The dark role with a trace of the second accent: the terrain ridge. */
+  terrain: RGB;
+  /** The light role leaning toward the second accent: the glow on a transition front. */
+  membrane: RGB;
+}
+
+export function createTints(): Tints {
+  return {
+    key: new Float64Array(12),
+    keyHadSecond: false,
+    keySeed: '',
+    built: false,
+    second: [0, 0, 0],
+    sun: new Float32Array(SUN_STEPS * 3),
+    darker: [0, 0, 0],
+    bass: [0, 0, 0],
+    mid: [0, 0, 0],
+    terrain: [0, 0, 0],
+    membrane: [0, 0, 0],
+  };
+}
+
+const tintScratch: RGB = [0, 0, 0];
+
+const same3 = (key: Float64Array, at: number, rgb: ArrayLike<number>): boolean =>
+  key[at] === rgb[0] && key[at + 1] === rgb[1] && key[at + 2] === rgb[2];
+const put3 = (key: Float64Array, at: number, rgb: ArrayLike<number>): void => {
+  key[at] = rgb[0]!; key[at + 1] = rgb[1]!; key[at + 2] = rgb[2]!;
+};
+
+/**
+ * Bring the tints up to date with `palette`; a no-op when it has not changed.
+ * A palette without a second accent gets the shared analogous partner for
+ * `seed` (accentPair), worked out only when the tints are rebuilt.
+ */
+export function refreshTints(t: Tints, palette: EvilandPalette, seed: string): void {
+  const hasSecond = !!palette.accent2;
+  const key = t.key;
+  const same = t.built && t.keyHadSecond === hasSecond && (hasSecond || t.keySeed === seed)
+    && same3(key, 0, palette.dark) && same3(key, 3, palette.accent)
+    && (!hasSecond || same3(key, 6, palette.accent2!)) && same3(key, 9, palette.light);
+  if (same) return;
+  const second = (palette.accent2 ?? accentPair(palette, seed)) as RGB;
+  put3(key, 0, palette.dark); put3(key, 3, palette.accent); put3(key, 6, second); put3(key, 9, palette.light);
+  t.keyHadSecond = hasSecond;
+  t.second = second;
+  t.keySeed = seed;
+  t.built = true;
+
+  const accent = palette.accent as RGB;
+  for (let i = 0; i < SUN_STEPS; i++) {
+    lerpColorInto(tintScratch, accent, second, i / (SUN_STEPS - 1));
+    t.sun[i * 3] = tintScratch[0];
+    t.sun[i * 3 + 1] = tintScratch[1];
+    t.sun[i * 3 + 2] = tintScratch[2];
+  }
+  shadeColorInto(t.darker, palette.dark as RGB, -TINT_STEP);
+  shadeColorInto(t.bass, palette.dark as RGB, TINT_STEP);
+  shadeColorInto(t.mid, second, -TINT_STEP);
+  shadeColorInto(tintScratch, palette.dark as RGB, -TINT_STEP * 0.5);
+  lerpColorInto(t.terrain, tintScratch, second, 0.2);
+  lerpColorInto(t.membrane, palette.light as RGB, second, 0.4);
+}
+
+/**
+ * The spectrum sun's colour at `phase` (turns), into `out`. The hue travels out
+ * along the table to the second accent and back, so a full turn returns to the
+ * accent with no seam.
+ */
+export function sunColourInto(t: Tints, phase: number, out: RGB): void {
+  const u = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
+  const at = u * (SUN_STEPS - 1);
+  const lo = Math.min(SUN_STEPS - 2, Math.floor(at));
+  const f = at - lo;
+  for (let c = 0; c < 3; c++) out[c] = t.sun[lo * 3 + c]! * (1 - f) + t.sun[(lo + 1) * 3 + c]! * f;
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,12 +1421,7 @@ function buildRenderer(
   if (!floatExt) {
     return null;
   }
-  // Linear filtering on half-float is widely supported but optional; we use
-  // NEAREST as the safe fallback. The field needs to *sample* itself with a
-  // bilinear-ish lookup for warp smoothness — half-float linear is well
-  // supported on the GPUs we target, but check anyway.
-  const linearOk = !!gl.getExtension('OES_texture_float_linear');
-  const filterMode = linearOk ? gl.LINEAR : gl.NEAREST;
+  const filterMode = gl.LINEAR;
 
   const quality: 'high' | 'medium' | 'low' = options.quality ?? 'high';
   const fieldScale = quality === 'high' ? 1.0 : quality === 'medium' ? 0.75 : 0.5;
@@ -1280,20 +1448,38 @@ function buildRenderer(
   // CPU-side so the shader's u_fluid is a plain magnitude.
   const FLUID_ADVECT_SCALE = 0.9;
 
-  const fieldProg = link(gl, QUAD_VERT, FIELD_FRAG);
-  const emitterProg = link(gl, EMITTER_VERT, EMITTER_FRAG);
-  const terrainProg = link(gl, QUAD_VERT, TERRAIN_FRAG);
-  const spectrumProg = link(gl, QUAD_VERT, SPECTRUM_FRAG);
-  const waveProg = link(gl, QUAD_VERT, WAVE_FRAG);
-  const thresholdProg = link(gl, QUAD_VERT, THRESHOLD_FRAG);
-  const downProg = link(gl, QUAD_VERT, KAWASE_DOWN_FRAG);
-  const upProg = link(gl, QUAD_VERT, KAWASE_UP_FRAG);
-  const postProg = link(gl, QUAD_VERT, POST_FRAG);
-  const composeProg = link(gl, QUAD_VERT, COMPOSE_FRAG);
-  const meterProg = link(gl, QUAD_VERT, METER_FRAG);
-  const exposeProg = link(gl, QUAD_VERT, EXPOSE_FRAG);
-  const echoProg = link(gl, QUAD_VERT, ECHO_FRAG);
-  const blitProg = link(gl, QUAD_VERT, BLIT_FRAG);
+  const pendingPrograms = [
+    startLink(gl, QUAD_VERT, FIELD_FRAG),
+    startLink(gl, EMITTER_VERT, EMITTER_FRAG),
+    startLink(gl, QUAD_VERT, TERRAIN_FRAG),
+    startLink(gl, QUAD_VERT, SPECTRUM_FRAG),
+    startLink(gl, QUAD_VERT, WAVE_FRAG),
+    startLink(gl, QUAD_VERT, THRESHOLD_FRAG),
+    startLink(gl, QUAD_VERT, KAWASE_DOWN_FRAG),
+    startLink(gl, QUAD_VERT, KAWASE_UP_FRAG),
+    startLink(gl, QUAD_VERT, POST_FRAG),
+    startLink(gl, QUAD_VERT, COMPOSE_FRAG),
+    startLink(gl, QUAD_VERT, METER_FRAG),
+    startLink(gl, QUAD_VERT, EXPOSE_FRAG),
+    startLink(gl, QUAD_VERT, ECHO_FRAG),
+    startLink(gl, QUAD_VERT, BLIT_FRAG),
+  ];
+  const [
+    fieldProg, emitterProg, terrainProg, spectrumProg, waveProg, thresholdProg, downProg,
+    upProg, postProg, composeProg, meterProg, exposeProg, echoProg, blitProg,
+  ] = pendingPrograms.map((pending) => finishLink(gl, pending));
+
+  // Every program that did link is deleted on a failed build. The context is
+  // shared with the 2D fallback and with the retry after a context restore, so
+  // programs left behind by a failed attempt would pile up on each retry.
+  const builtPrograms = [
+    fieldProg, emitterProg, terrainProg, spectrumProg, waveProg, thresholdProg, downProg,
+    upProg, postProg, composeProg, meterProg, exposeProg, echoProg, blitProg,
+  ];
+  const abandon = (): null => {
+    for (const program of builtPrograms) if (program) gl.deleteProgram(program);
+    return null;
+  };
 
   // Note: unlike context-creation/EXT_color_buffer_float above, a link
   // failure here is not probed ahead of time — the real canvas is already
@@ -1302,7 +1488,7 @@ function buildRenderer(
   // user input), so this is a driver/spec-bug-only path, not the realistic
   // "no GPU support" scenario the probe above targets.
   if (!fieldProg || !emitterProg || !terrainProg || !spectrumProg || !waveProg || !thresholdProg || !downProg || !upProg || !postProg || !composeProg || !meterProg || !exposeProg || !echoProg || !blitProg) {
-    return null;
+    return abandon();
   }
   // Narrow once so the inner closures don't need null guards on every use.
   const FIELD: WebGLProgram = fieldProg;
@@ -1323,7 +1509,7 @@ function buildRenderer(
 
   // Fullscreen quad: shared across all fullscreen passes.
   const quadBuf = gl.createBuffer();
-  if (!quadBuf) return null;
+  if (!quadBuf) return abandon();
   gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
 
@@ -1331,7 +1517,7 @@ function buildRenderer(
   // The emitter quad is the same 4-vertex strip as the fullscreen quad —
   // shared geometry.
   const instanceBuf = gl.createBuffer();
-  if (!instanceBuf) return null;
+  if (!instanceBuf) return abandon();
   const instanceData = new Float32Array(maxEmitters * 12);
 
   // Spectrum bands texture: 24x1 R32F so the spectrum shader can look up band
@@ -1340,7 +1526,7 @@ function buildRenderer(
   // is a separate concern — we use NEAREST filter so OES_texture_float_linear
   // isn't needed for this texture.
   const bandsTex = gl.createTexture();
-  if (!bandsTex) return null;
+  if (!bandsTex) return abandon();
   gl.bindTexture(gl.TEXTURE_2D, bandsTex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, 24, 1, 0, gl.RED, gl.FLOAT, new Float32Array(24));
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -1353,7 +1539,7 @@ function buildRenderer(
   // Waveform sample texture (WAVE_SAMPLES x 1 R8) for the reactive oscilloscope layer.
   const waveScratch = new Uint8Array(WAVE_SAMPLES).fill(128);
   const waveTex = gl.createTexture();
-  if (!waveTex) return null;
+  if (!waveTex) return abandon();
   gl.bindTexture(gl.TEXTURE_2D, waveTex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, WAVE_SAMPLES, 1, 0, gl.RED, gl.UNSIGNED_BYTE, waveScratch);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -1641,6 +1827,9 @@ function buildRenderer(
     intensity: gl.getUniformLocation(spectrumProg, 'u_intensity'),
     time: gl.getUniformLocation(spectrumProg, 'u_time'),
     aspect: gl.getUniformLocation(spectrumProg, 'u_aspect'),
+    bandPan: gl.getUniformLocation(spectrumProg, 'u_bandPan'),
+    spread: gl.getUniformLocation(spectrumProg, 'u_spread'),
+    eye: gl.getUniformLocation(spectrumProg, 'u_eye'),
   };
   const waveUni = {
     wave: gl.getUniformLocation(waveProg, 'u_wave'),
@@ -1767,6 +1956,9 @@ function buildRenderer(
   let sourceGain = 1;
   let anticipationClock = 0;
   const dyn = createDynamics();
+  const tints = createTints();
+  const sunColour: RGB = [0, 0, 0];
+  const bandPanScratch = new Float32Array(24);
   // Each side of an in-flight transition evaluated on its own, so the field
   // can run both warps (the lerped `dyn` still drives every source).
   const dynFrom = createDynamics();
@@ -1829,45 +2021,51 @@ function buildRenderer(
 
   // Pillar 1 spawn router — translate one EvilandFrame.onsets[] into emitters.
   function routeOnsets(frame: EvilandFrame, palette: EvilandPalette): void {
+    // refreshTints has run for this frame's palette: the look's second accent, or the shared partner.
+    const second = tints.second;
     for (const on of frame.onsets) {
       // Frequency → vertical (low at bottom, high at top); add a small jitter
       // so successive same-band onsets don't perfectly overlay.
       const bandY = on.band / 23; // 0..1
       const y = -1 + bandY * 2;
-      // Stereo pan → horizontal, with a per-onset jitter.
-      const px = frame.pan * 0.6 + (random() - 0.5) * (0.18 + on.sharpness * 0.18);
+      // Stereo pan → horizontal, with a per-onset jitter. The pan is the one
+      // of the onset's own band, so a hat panned right and a centred kick land
+      // at different places; the look's spread channel flattens or widens it.
+      const pan = bandPanOf(frame, on.band) * dyn.stereoSpread;
+      const px = pan * 0.6 + (random() - 0.5) * (0.18 + on.sharpness * 0.18);
       const x = Math.max(-0.95, Math.min(0.95, px));
       const intensity = 0.55 + on.intensity * 0.55;
       switch (on.group) {
         case 'kick': {
           // Bright low shockwave from bottom-centre, palette.dark.
-          spawn(0, frame.pan * 0.25, -0.85, 0.9, palette.dark[0], palette.dark[1], palette.dark[2], 0.9, 0.06 + on.sharpness * 0.10, intensity);
+          spawn(0, pan * 0.25, -0.85, 0.9, palette.dark[0], palette.dark[1], palette.dark[2], 0.9, 0.06 + on.sharpness * 0.10, intensity);
           // Core punch (compresses+rebounds — kind 4).
-          spawn(4, frame.pan * 0.1, -0.15, 0.22 + frame.kick * 0.10, palette.dark[0], palette.dark[1] * 0.8, palette.dark[2] * 0.6, 0.32, 0, intensity);
+          spawn(4, pan * 0.1, -0.15, 0.22 + frame.kick * 0.10, tints.darker[0], tints.darker[1], tints.darker[2], 0.32, 0, intensity);
           break;
         }
         case 'bass':
           // Wide low ring — rarer than kick, slower spread.
-          spawn(0, x * 0.5, -0.6, 1.1, palette.dark[0] * 0.8, palette.dark[1] * 0.7, palette.dark[2] * 1.2, 1.1, 0.05, intensity * 0.85);
+          spawn(0, x * 0.5, -0.6, 1.1, tints.bass[0], tints.bass[1], tints.bass[2], 1.1, 0.05, intensity * 0.85);
           break;
         case 'snare':
           // Off-centre white burst.
           spawn(1, x, 0.05 + random() * 0.18 - 0.09, 0.30 + on.intensity * 0.10, palette.light[0], palette.light[1], palette.light[2], 0.35, 0, intensity);
           break;
         case 'hat':
-          // Fine sparkle high.
-          spawn(2, x + (random() - 0.5) * 0.4, 0.55 + random() * 0.30, 0.12 + on.intensity * 0.06, palette.accent[0], palette.accent[1], palette.accent[2], 0.28, 0, intensity * 0.9);
+          // Fine sparkle high, in the second accent so the top of the mix and
+          // the vocal body below it read as the two hues of the palette.
+          spawn(2, x + (random() - 0.5) * 0.4, 0.55 + random() * 0.30, 0.12 + on.intensity * 0.06, second[0], second[1], second[2], 0.28, 0, intensity * 0.9);
           break;
         case 'vocal': {
           // Coherent blob mid-screen — y tracks centroid, x tracks pan.
           const vy = (frame.centroid - 0.5) * 1.2;
-          const vx = frame.pan * 0.6;
+          const vx = pan * 0.6;
           spawn(3, vx, vy, 0.40 + frame.vocal * 0.10, palette.accent[0], palette.accent[1], palette.accent[2], 0.55, 0, intensity * 0.7);
           break;
         }
         default:
           // Generic: dim ring at the assigned position.
-          spawn(0, x, y * 0.85, 0.55, palette.accent[0] * 0.7, palette.accent[1] * 0.7, palette.accent[2] * 0.7, 0.55, 0.04, intensity * 0.6);
+          spawn(0, x, y * 0.85, 0.55, tints.mid[0], tints.mid[1], tints.mid[2], 0.55, 0.04, intensity * 0.6);
       }
     }
     // Pillar 4 — Anticipation. When tempo confidence is decent, drop a faint
@@ -1877,7 +2075,7 @@ function buildRenderer(
     if (frame.energy > 0.04 && frame.beatConfidence > 0.35 && frame.beatPhase > 0.78 && anticipationClock >= 1 / 60) {
       anticipationClock %= 1 / 60;
       const lead = (frame.beatPhase - 0.78) / 0.22; // 0..1
-      spawn(4, 0, -0.15, 0.10 + lead * 0.10, palette.dark[0], palette.dark[1] * 0.7, palette.dark[2] * 0.5, 0.18, 0, lead * 0.7 * frame.beatConfidence);
+      spawn(4, 0, -0.15, 0.10 + lead * 0.10, tints.darker[0], tints.darker[1], tints.darker[2], 0.18, 0, lead * 0.7 * frame.beatConfidence);
     }
   }
 
@@ -2058,6 +2256,7 @@ function buildRenderer(
     // (the "Classic" default). This is what stops every bright pixel collapsing
     // onto the theme accent — the root of the "everything is pink" complaint.
     if (paletteSource === 'preset' && currentConfig.palette) palette = currentConfig.palette;
+    refreshTints(tints, palette, (currentConfig._to ?? currentConfig).seed ?? options.seed ?? 'eviland');
 
     // Pillar 3: structural memory. New section → record/replay a seed; this
     // makes the field's warp signature recognisable when the chorus returns.
@@ -2109,7 +2308,7 @@ function buildRenderer(
     // dissipation is silence-gated (dyeDissipationFromFrame) plus the active
     // config's bias so an archetype can let dye linger longer or drain it.
     if (fluid) {
-      fluid.step(dt, forceSource.forces(frame, palette, dt), {
+      fluid.step(dt, forceSource.forces(frame, palette, dt, dyn.stereoSpread), {
         vorticity: dyn.vorticity,
         dissipation: 0.985,
         dyeDissipation: clampDyeDissipation(dyeDissipationFromFrame(frame) + dyn.dyeDissipation),
@@ -2151,10 +2350,7 @@ function buildRenderer(
       gl.uniform1f(fieldUni.morphT, t);
       gl.uniform1f(fieldUni.pattern, currentConfig._pattern ?? 3);
       gl.uniform1f(fieldUni.patternSeed, currentConfig._patternSeed ?? 0);
-      gl.uniform3f(fieldUni.membrane,
-        (palette.light[0] * 0.6 + palette.accent[0] * 0.4) * glow,
-        (palette.light[1] * 0.6 + palette.accent[1] * 0.4) * glow,
-        (palette.light[2] * 0.6 + palette.accent[2] * 0.4) * glow);
+      gl.uniform3f(fieldUni.membrane, tints.membrane[0] * glow, tints.membrane[1] * glow, tints.membrane[2] * glow);
       gl.uniform1f(fieldUni.bulge, 0.0022 * (1 + frame.kick * 1.5));
     } else {
       pushWarp(warpUni[0]!, dyn, fluidScale);
@@ -2173,7 +2369,7 @@ function buildRenderer(
     gl.uniform1f(terrainUni.bass, frame.bass);
     gl.uniform1f(terrainUni.time, shaderTime);
     gl.uniform1f(terrainUni.pan, frame.pan);
-    gl.uniform3f(terrainUni.color, (palette.dark[0] * 0.8 + palette.accent[0] * 0.2) * sourceGain, palette.dark[1] * 0.7 * sourceGain, palette.dark[2] * 0.9 * sourceGain);
+    gl.uniform3f(terrainUni.color, tints.terrain[0] * sourceGain, tints.terrain[1] * sourceGain, tints.terrain[2] * sourceGain);
     drawFullscreen();
 
     }
@@ -2205,18 +2401,25 @@ function buildRenderer(
       gl.useProgram(SPECTRUM);
       bindFullscreenQuad(SPECTRUM);
       gl.uniform1i(spectrumUni.bands, 0);
-      // Spectrum hue rotates the accent through the palette over time so the
-      // bright "sun" itself drifts colour — feeds into the field's hue cycle.
+      // The sun's hue travels over time, so the brightest structural overlay
+      // drifts colour and feeds the field's own hue cycle: out along the table
+      // between the two accents (or a swing round the first) and back. The
+      // table is OKLCh, so the sun keeps the accent's lightness and chroma
+      // the whole way instead of fading toward grey.
       const hueT = (time * 0.25) % 1;
-      const r = palette.accent[0] * (0.6 + 0.4 * Math.cos(hueT * 6.283));
-      const g = palette.accent[1] * (0.6 + 0.4 * Math.cos((hueT + 0.33) * 6.283));
-      const b = palette.accent[2] * (0.6 + 0.4 * Math.cos((hueT + 0.66) * 6.283));
-      gl.uniform3f(
-        spectrumUni.color,
-        Math.max(0.2, r),
-        Math.max(0.2, g),
-        Math.max(0.2, b),
-      );
+      sunColourInto(tints, hueT, sunColour);
+      gl.uniform3f(spectrumUni.color, sunColour[0], sunColour[1], sunColour[2]);
+      // Each ray leaves from where its band sits in the stereo image. A frame
+      // with no per-band pan leaves the sun centred, as it always was.
+      const pans = frame.bandPan;
+      let panSum = 0;
+      for (let i = 0; i < 24; i++) {
+        bandPanScratch[i] = pans && pans[i] === pans[i] ? pans[i]! : 0;
+        panSum += bandPanScratch[i]!;
+      }
+      gl.uniform1fv(spectrumUni.bandPan, bandPanScratch);
+      gl.uniform1f(spectrumUni.eye, panSum / 24);
+      gl.uniform1f(spectrumUni.spread, dyn.stereoSpread);
       // Bright crisp rays = the structural overlay. Push them well above the
       // field so the spectrum "sun" reads as drawn geometry, not haze.
       // No idle baseline: the previous 0.5 continuously redrew the center core
@@ -2267,6 +2470,9 @@ function buildRenderer(
         framebuffer: fieldB.fbo, width: fieldW, height: fieldH,
         opacity: (1 - Math.pow(1 - Math.max(0, Math.min(0.95, composition.density)), steps)) * letGo,
         contrast: composition.contrast,
+        // A Director fade or front is crossing the picture: the scene must not add a flash of its own on top of it.
+        suppressFlash: morphing,
+        stereoSpread: dyn.stereoSpread,
       });
       gl.bindVertexArray(null);
       gl.disable(gl.BLEND);
@@ -2521,9 +2727,9 @@ function buildRenderer(
     if (downProg) gl.deleteProgram(downProg);
     if (upProg) gl.deleteProgram(upProg);
     if (postProg) gl.deleteProgram(postProg);
-    gl.deleteProgram(composeProg);
-    gl.deleteProgram(meterProg);
-    gl.deleteProgram(exposeProg);
+    if (composeProg) gl.deleteProgram(composeProg);
+    if (meterProg) gl.deleteProgram(meterProg);
+    if (exposeProg) gl.deleteProgram(exposeProg);
     scenes?.dispose();
     chemistry?.dispose();
     mould?.dispose();

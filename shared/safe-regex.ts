@@ -27,9 +27,12 @@
 export const MAX_SAFE_REGEX_PATTERN_LENGTH = 200;
 export const MAX_SAFE_REGEX_REPEAT = 64;
 // Counted repeats multiply the NFA size (`(a{64}){64}` is 4,096 states before
-// the outer group is even considered). The cap keeps a pathological pattern
-// from allocating its way around the linear-time guarantee.
-export const MAX_SAFE_REGEX_STATES = 4000;
+// the outer group is even considered). Matching costs states × input length,
+// so the cap also bounds the work a single test can do: `(.{60}){60}x` fits in
+// 3,600 states and spent about 85 ms on a 4 KB input, which across a whole
+// library on the main process is minutes. Real tag patterns are a few dozen
+// states.
+export const MAX_SAFE_REGEX_STATES = 1000;
 
 export type SafeRegexErrorCode =
   | 'empty'
@@ -298,20 +301,45 @@ class Parser {
 // range also admits the other.
 function pushFoldedRange(into: Array<[number, number]>, lo: number, hi: number): void {
   into.push([lo, hi]);
+  if (lo === hi && lo >= 0x80) {
+    const folded = foldCase(lo);
+    if (folded !== lo) into.push([folded, folded]);
+  }
   const a = Math.max(lo, 0x41), b = Math.min(hi, 0x5a);
   if (a <= b) into.push([a + 0x20, b + 0x20]);
   const c = Math.max(lo, 0x61), d = Math.min(hi, 0x7a);
   if (c <= d) into.push([c - 0x20, d - 0x20]);
 }
 
+const FOLD_CACHE_LIMIT = 65_536;
+const foldCache = new Map<number, number>();
+
 function foldCase(cp: number): number {
   if (cp < 0x80) return cp >= 0x41 && cp <= 0x5a ? cp + 0x20 : cp;
+  const cached = foldCache.get(cp);
+  if (cached !== undefined) return cached;
+  const folded = foldNonAscii(cp);
+  if (foldCache.size >= FOLD_CACHE_LIMIT) foldCache.clear();
+  foldCache.set(cp, folded);
+  return folded;
+}
+
+function foldNonAscii(cp: number): number {
   // Simple (single code point) case folding for everything else, so `café`
-  // matches `CAFÉ` the way RegExp's i flag does. Characters whose lower case
-  // is more than one code point (a few special cases) compare exactly.
-  const lower = String.fromCodePoint(cp).toLowerCase();
+  // matches `CAFÉ` the way RegExp's i flag does. The fold goes through the
+  // upper case form because that is what RegExp compares, and it is what makes
+  // a final sigma (ς) and σ fold together. Characters whose case mapping is
+  // more than one code point (a few special cases) compare exactly.
+  const own = String.fromCodePoint(cp);
+  const upper = own.toUpperCase();
+  const upperFirst = upper.codePointAt(0)!;
+  const base = upper.length === String.fromCodePoint(upperFirst).length ? upper : own;
+  const lower = base.toLowerCase();
   const first = lower.codePointAt(0)!;
-  return lower.length === String.fromCodePoint(first).length ? first : cp;
+  if (lower.length !== String.fromCodePoint(first).length) return cp;
+  // RegExp never folds a non-ASCII character onto an ASCII one (dotless ı and
+  // the Kelvin sign stay themselves), so `[a-z]` must not admit them.
+  return first < 0x80 ? cp : first;
 }
 
 // The other case of a folded (lower-case) code point, for class membership:
@@ -320,7 +348,8 @@ function upperCase(cp: number): number {
   if (cp < 0x80) return cp >= 0x61 && cp <= 0x7a ? cp - 0x20 : cp;
   const upper = String.fromCodePoint(cp).toUpperCase();
   const first = upper.codePointAt(0)!;
-  return upper.length === String.fromCodePoint(first).length ? first : cp;
+  if (upper.length !== String.fromCodePoint(first).length) return cp;
+  return first < 0x80 ? cp : first;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,15 +467,24 @@ class Compiler {
 // ---------------------------------------------------------------------------
 // Public API
 
+// Scratch space shared by every test() call: matching is synchronous, so one
+// buffer is enough, and it avoids allocating a code point array per input.
+let scratch = new Int32Array(256);
+
 export class SafeRegex {
   private readonly states: State[];
   private readonly start: number;
+  // Visited stamps, one per state. The generation counter only ever grows, so
+  // the array never needs clearing between calls until the counter wraps.
+  private readonly stamp: Int32Array;
+  private generation = 0;
   readonly source: string;
 
   private constructor(source: string, states: State[], start: number) {
     this.source = source;
     this.states = states;
     this.start = start;
+    this.stamp = new Int32Array(states.length);
   }
 
   /** Compiles `pattern`, throwing SafeRegexError on anything outside the supported grammar. */
@@ -475,18 +513,29 @@ export class SafeRegex {
 
   /** True if the pattern matches anywhere in `input` (unless anchored). */
   test(input: string): boolean {
-    const cps = Array.from(input, (ch) => foldCase(ch.codePointAt(0)!));
-    const n = this.states.length;
+    if (scratch.length < input.length) scratch = new Int32Array(Math.max(input.length, scratch.length * 2));
+    const cps = scratch;
+    let length = 0;
+    for (let i = 0; i < input.length;) {
+      const cp = input.codePointAt(i)!;
+      cps[length++] = foldCase(cp);
+      i += cp > 0xffff ? 2 : 1;
+    }
+    // Each position takes two generations, so reset the stamps before the
+    // counter could overflow a signed 32-bit value.
+    if (this.generation > 0x7fffffff - 2 * (length + 2)) {
+      this.stamp.fill(0);
+      this.generation = 0;
+    }
     // Two generations of state sets, tracked with a visited stamp so adding
     // the same state twice in one step is free.
     let current: number[] = [];
     let following: number[] = [];
-    const stamp = new Int32Array(n);
-    let generation = 1;
+    const stamp = this.stamp;
 
     const addState = (list: number[], idx: number, pos: number): void => {
-      if (stamp[idx] === generation) return;
-      stamp[idx] = generation;
+      if (stamp[idx] === this.generation) return;
+      stamp[idx] = this.generation;
       const s = this.states[idx]!;
       switch (s.kind) {
         case 'split':
@@ -497,11 +546,11 @@ export class SafeRegex {
           if (pos === 0) addState(list, s.out, pos);
           return;
         case 'end':
-          if (pos === cps.length) addState(list, s.out, pos);
+          if (pos === length) addState(list, s.out, pos);
           return;
         case 'boundary': {
           const before = pos > 0 && isWordChar(cps[pos - 1]!);
-          const after = pos < cps.length && isWordChar(cps[pos]!);
+          const after = pos < length && isWordChar(cps[pos]!);
           if (before !== after) addState(list, s.out, pos);
           return;
         }
@@ -510,13 +559,13 @@ export class SafeRegex {
       }
     };
 
-    for (let pos = 0; pos <= cps.length; pos++) {
+    for (let pos = 0; pos <= length; pos++) {
       // Unanchored search: the start state is (re)entered at every position.
-      generation++;
+      this.generation++;
       // Carry over the states reached by consuming the previous character,
       // then add a fresh thread starting here.
       for (const idx of current) {
-        stamp[idx] = generation;
+        stamp[idx] = this.generation;
         following.push(idx);
       }
       addState(following, this.start, pos);
@@ -526,9 +575,9 @@ export class SafeRegex {
       for (const idx of current) {
         if (this.states[idx]!.kind === 'match') return true;
       }
-      if (pos === cps.length) break;
+      if (pos === length) break;
       const cp = cps[pos]!;
-      generation++;
+      this.generation++;
       for (const idx of current) {
         const s = this.states[idx]!;
         let consumes = false;

@@ -90,6 +90,32 @@ function rememberAlbumTracks(key: string, rows: Track[]): void {
   }
 }
 
+// A scan or a removal changes what the grid and the open album show, and only
+// a mounted view hears about it. The watcher starts with the first mount and
+// stays: it drops the cached rows and marks the list stale, so a view that
+// mounts later reloads instead of showing the snapshot.
+let catalogStale = false;
+let catalogWatcherStarted = false;
+const catalogChangeListeners = new Set<() => void>();
+
+function markCatalogStale(): void {
+  catalogStale = true;
+  albumTracksCache.clear();
+  // The open album's rows are kept in the snapshot too; a view that mounts
+  // later would take them over a fresh read.
+  albumViewSnapshot.tracks = [];
+  for (const listener of catalogChangeListeners) listener();
+}
+
+function startCatalogWatcher(): void {
+  if (catalogWatcherStarted) return;
+  catalogWatcherStarted = true;
+  api.onScanProgress((progress) => {
+    if (progress.done && !progress.cancelled && (progress.parsed ?? 1) > 0) markCatalogStale();
+  });
+  api.onTracksRemoved(() => markCatalogStale());
+}
+
 function fetchAlbumTracks(album: Pick<AlbumSummary, 'albumKey'>): Promise<Track[]> {
   const key = albumTracksKey(album);
   const cached = albumTracksCache.get(key);
@@ -305,11 +331,46 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
     return () => observer.disconnect();
   }, [hasAlbumGrid]);
 
+  // Bumped when the library changed under a grid that is showing; reloads it.
+  const [catalogRevision, setCatalogRevision] = useState(0);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  useEffect(() => {
+    startCatalogWatcher();
+    const onCatalogChange = (): void => {
+      const open = selectedRef.current;
+      if (!open) {
+        setCatalogRevision((revision) => revision + 1);
+        return;
+      }
+      // An open album keeps its place; only its rows are read again.
+      const key = albumTracksKey(open);
+      api
+        .getAlbumTracksByKey(open.albumKey)
+        .then((rows) => {
+          if (selectedRef.current?.albumKey !== open.albumKey) return;
+          if (!rows.length) {
+            setSelected(null);
+            setCatalogRevision((revision) => revision + 1);
+            return;
+          }
+          rememberAlbumTracks(key, rows);
+          setTracks(rows);
+        })
+        .catch(() => undefined);
+    };
+    catalogChangeListeners.add(onCatalogChange);
+    return () => {
+      catalogChangeListeners.delete(onCatalogChange);
+    };
+  }, []);
+
   useEffect(() => {
     if (hydratedSnapshotRef.current) {
       hydratedSnapshotRef.current = false;
-      return undefined;
+      if (!catalogStale) return undefined;
     }
+    catalogStale = false;
     let cancelled = false;
     const generation = ++albumRequestGeneration.current;
     albumPageRequestRef.current = false;
@@ -362,7 +423,13 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
       cancelled = true;
       albumRequestGeneration.current += 1;
     };
-  }, [albumQuery, showMissingArtOnly, albumSort, randomSeed]);
+  }, [albumQuery, showMissingArtOnly, albumSort, randomSeed, catalogRevision]);
+
+  // The library changed while an album was open; the grid behind it is read
+  // again when the album closes.
+  useEffect(() => {
+    if (!selected && catalogStale) setCatalogRevision((revision) => revision + 1);
+  }, [selected]);
 
   useEffect(() => {
     if (!selected) return;
@@ -1007,7 +1074,9 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
             marker={{ 'data-newamp-albums-load-more': '' }}
           />
         </div>
-        {albumSort === 'artist' && <AlphabetRail available={albumLetters} onJump={jumpToAlbumLetter} />}
+        {albumSort === 'artist' && (
+          <AlphabetRail available={albumLetters} onJump={jumpToAlbumLetter} partial={hasMoreAlbums} />
+        )}
           </>
         )}
       </div>
@@ -1214,10 +1283,13 @@ export function AlphabetRail({
   available,
   onJump,
   noun = 'artists',
+  partial = false,
 }: {
   available: ReadonlySet<string>;
   onJump: (letter: string) => void;
   noun?: string;
+  /** True while only part of the list is loaded: a dimmed letter may still have entries further down. */
+  partial?: boolean;
 }): JSX.Element {
   return (
     <nav
@@ -1237,7 +1309,13 @@ export function AlphabetRail({
             className={`album-letter-rail-key ${present ? 'is-present' : 'is-empty'}`}
             disabled={!present}
             onClick={() => present && onJump(letter)}
-            title={present ? `Jump to ${noun} starting with ${letter}` : `No ${letter} ${noun} yet`}
+            title={
+              present
+                ? `Jump to ${noun} starting with ${letter}`
+                : partial
+                  ? `No ${letter} ${noun} loaded yet; keep scrolling to load more`
+                  : `No ${letter} ${noun} yet`
+            }
           >
             {letter}
           </button>

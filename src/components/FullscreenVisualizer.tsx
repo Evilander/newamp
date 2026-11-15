@@ -238,6 +238,7 @@ export function FullscreenVisualizer(): JSX.Element {
   const [reactivity, setReactivity] = useState<VizReactivity>(() => loadVisualizerReactivity());
   const [autoVjEnabled, setAutoVjEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_AUTO_VJ_KEY, false));
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  const fullscreenToggleRef = useRef<Promise<void>>(Promise.resolve());
   // Auto-hide tracking: when the mouse is idle in fullscreen we collapse the
   // top toolbar so the visualizer can be enjoyed without UI clutter. Any
   // cursor movement re-shows it for a few seconds before hiding again.
@@ -366,12 +367,17 @@ export function FullscreenVisualizer(): JSX.Element {
     });
   }
 
+  // The window can leave fullscreen without us (the green button, the View
+  // menu), so each toggle reads the window's own state instead of trusting
+  // nativeFullscreen. They queue, so a key held down still alternates.
   function toggleNativeFullscreen(): void {
-    setNativeFullscreen((value) => {
-      const next = !value;
-      void setWindowFullscreen(next, winctl);
-      return next;
-    });
+    fullscreenToggleRef.current = fullscreenToggleRef.current
+      .then(async () => {
+        const next = !(await winctl.isFullscreen());
+        setNativeFullscreen(next);
+        await setWindowFullscreen(next, winctl);
+      })
+      .catch((err) => console.warn('[newamp] fullscreen toggle failed:', err));
   }
 
   // The window goes back to the fullscreen state it had before the visualizer
@@ -462,6 +468,25 @@ export function FullscreenVisualizer(): JSX.Element {
         toProjectorRef.current,
       );
       if (restore !== null) void setWindowFullscreen(restore, winctl);
+    };
+  }, []);
+
+  // Fullscreen entered or left from outside (the green button, the View menu)
+  // resizes the window; ask it again so the button and the toggle follow.
+  useEffect(() => {
+    let cancelled = false;
+    const sync = (): void => {
+      winctl
+        .isFullscreen()
+        .then((value) => {
+          if (!cancelled) setNativeFullscreen(value);
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener('resize', sync);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('resize', sync);
     };
   }, []);
 
@@ -686,10 +711,17 @@ export function FullscreenVisualizer(): JSX.Element {
         const elapsed = now - lastSwitchAt;
         if (elapsed > 14000 && (energy > 0.42 || elapsed > 30000)) {
           const currentPreset = autoVjActivePresetRef.current;
-          const nextPreset = pickAutoVjPreset(currentPreset, energy, autoVjPerfTierRef.current);
-          if (nextPreset !== currentPreset) {
-            autoVjSetPresetRef.current(nextPreset);
+          if (currentPreset === 'eviland' || currentPreset === 'eviland-live') {
+            // The Eviland modes have their own looks to move through; leaving
+            // for a generic mode would end the very mode Auto-VJ was turned on in.
+            usePlayerStore.getState().skipEvilandLook();
             lastSwitchAt = now;
+          } else {
+            const nextPreset = pickAutoVjPreset(currentPreset, energy, autoVjPerfTierRef.current);
+            if (nextPreset !== currentPreset) {
+              autoVjSetPresetRef.current(nextPreset);
+              lastSwitchAt = now;
+            }
           }
         }
       }
@@ -761,6 +793,13 @@ export function FullscreenVisualizer(): JSX.Element {
   // eviland-live branch needs sole use of the compositor pipeline right now,
   // so that case disarms immediately instead of debouncing (see evaluate()).
   useEffect(() => {
+    const release = (entry: NonNullable<typeof replayRef.current>): void => {
+      entry.ring.disarm();
+      entry.compositor.stop();
+      if (entry.audioDest) {
+        try { engine.visualizerNode.disconnect(entry.audioDest); } catch { /* ignore */ }
+      }
+    };
     const hardTeardown = (): void => {
       if (replayDisarmTimerRef.current) {
         window.clearTimeout(replayDisarmTimerRef.current);
@@ -769,13 +808,7 @@ export function FullscreenVisualizer(): JSX.Element {
       const entry = replayRef.current;
       replayRef.current = null;
       setReplayReady(false);
-      if (entry) {
-        entry.ring.disarm();
-        entry.compositor.stop();
-        if (entry.audioDest) {
-          try { engine.visualizerNode.disconnect(entry.audioDest); } catch { /* ignore */ }
-        }
-      }
+      if (entry) release(entry);
     };
 
     if (activePreset !== 'eviland-live' || perfTier === 'low') {
@@ -850,12 +883,30 @@ export function FullscreenVisualizer(): JSX.Element {
       }
     };
 
+    // The compositor keeps the size and the field canvas it was built from, so
+    // after the stage resizes or the iframe reloads (a lost WebGL context
+    // rebuilds it) the ring would keep encoding a frozen layer. Start over
+    // when it says so. Never under a clip being saved, and never while a
+    // recording is running: that path stays at its fixed size, and the effect
+    // has already disarmed the ring for it.
+    const staleTimer = window.setInterval(() => {
+      const entry = replayRef.current;
+      if (!entry || recording || savingClipRef.current || !isPlaying || document.hidden) return;
+      if (!entry.compositor.stale()) return;
+      replayRef.current = null;
+      setReplayReady(false);
+      release(entry);
+      attempts = 0;
+      tryArm();
+    }, 1000);
+
     const onVisibilityChange = (): void => evaluate();
     document.addEventListener('visibilitychange', onVisibilityChange);
     evaluate();
 
     return () => {
       cancelled = true;
+      window.clearInterval(staleTimer);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       if (retryTimer) window.clearTimeout(retryTimer);
       // Deliberately NOT tearing the ring down here — a dep change while
@@ -926,19 +977,27 @@ export function FullscreenVisualizer(): JSX.Element {
   // Still capture uses capturePage (main process) so it works for every mode —
   // including the sandboxed Butterchurn iframe and the WebGL2 particle field.
   const captureStill = async (): Promise<void> => {
-    const dataUrl = await api.captureVisualizerPng(captureRect());
-    if (!dataUrl) return;
-    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-    await api.saveCaptureBytes({ base64, defaultName: captureStem(), filterName: 'PNG image', ext: 'png' });
+    try {
+      const dataUrl = await api.captureVisualizerPng(captureRect());
+      if (!dataUrl) return;
+      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      await api.saveCaptureBytes({ base64, defaultName: captureStem(), filterName: 'PNG image', ext: 'png' });
+    } catch (err) {
+      flashRecordError(err, 'Could not save the still.');
+    }
   };
 
   const copyStill = async (): Promise<void> => {
-    const dataUrl = await api.captureVisualizerPng(captureRect());
-    if (!dataUrl) return;
-    // Copied stills are the share path — burn a small wordmark into the
-    // bottom-right so screenshots that travel carry provenance. Save-PNG
-    // (above) stays clean; the clip/video pipeline is untouched.
-    await api.copyPngToClipboard(await stampCaptureWordmark(dataUrl));
+    try {
+      const dataUrl = await api.captureVisualizerPng(captureRect());
+      if (!dataUrl) return;
+      // Copied stills are the share path — burn a small wordmark into the
+      // bottom-right so screenshots that travel carry provenance. Save-PNG
+      // (above) stays clean; the clip/video pipeline is untouched.
+      await api.copyPngToClipboard(await stampCaptureWordmark(dataUrl));
+    } catch (err) {
+      flashRecordError(err, 'Could not copy the still.');
+    }
   };
 
   // Eviland-only handlers ───────────────────────────────────────────────────
@@ -1169,9 +1228,13 @@ export function FullscreenVisualizer(): JSX.Element {
       setRecording(false);
       recorderRef.current = null;
       if (!chunks.length) return;
-      const dataUrl = await blobToDataUrl(new Blob(chunks, { type: 'video/webm' }));
-      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-      await api.saveCaptureBytes({ base64, defaultName: captureStem(), filterName: 'WebM video', ext: 'webm' });
+      try {
+        const dataUrl = await blobToDataUrl(new Blob(chunks, { type: 'video/webm' }));
+        const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+        await api.saveCaptureBytes({ base64, defaultName: captureStem(), filterName: 'WebM video', ext: 'webm' });
+      } catch (err) {
+        flashRecordError(err, 'Saving the recording failed.');
+      }
     };
     recorderRef.current = recorder;
     recorder.start();

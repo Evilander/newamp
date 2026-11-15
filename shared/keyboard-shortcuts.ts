@@ -115,19 +115,29 @@ function resolveUnmodifiedShortcut(
   const rating = ratingFromKey(code, key);
   if (rating != null) return `rate-${rating}` as PlayerShortcutCommand;
 
-  if (key === 'z') return 'previous';
-  if (key === 'x') return 'play';
-  if (key === 'c') return 'pause';
-  if (key === 'v') return 'stop';
-  if (key === 'b') return 'next';
-  if (key === 'l') return 'toggle-love';
-  if (key === 'f') return 'toggle-fullscreen-visualizer';
+  const letter = shortcutLetter(code, key);
+  if (letter === 'z') return 'previous';
+  if (letter === 'x') return 'play';
+  if (letter === 'c') return 'pause';
+  if (letter === 'v') return 'stop';
+  if (letter === 'b') return 'next';
+  if (letter === 'l') return 'toggle-love';
+  if (letter === 'f') return 'toggle-fullscreen-visualizer';
   // Shift+S: skin surf — cycle to the next built-in skin in THEME_REGISTRY
   // order (App.tsx routes this to usePlayerStore.cycleTheme, which toasts the
   // new skin's name). Shift-gated so a plain 's' stays free.
-  if (shiftKey && key === 's') return 'cycle-skin';
+  if (shiftKey && letter === 's') return 'cycle-skin';
 
   return null;
+}
+
+// The letter a key stands for. On a Latin layout the key value decides, so a
+// Dvorak or AZERTY user keeps the letters printed on their keys. A Cyrillic or
+// Greek layout has no Latin key value to match, and there the physical key
+// (the same fallback isLetterKey gives the chords) stands in.
+function shortcutLetter(code: string, key: string): string {
+  if (!/^\p{L}$/u.test(key) || /^\p{Script=Latin}$/u.test(key)) return key;
+  return /^Key[A-Z]$/.exec(code) ? code.slice(3).toLowerCase() : key;
 }
 
 function ratingFromKey(code: string, key: string): number | null {

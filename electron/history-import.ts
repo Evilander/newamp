@@ -25,6 +25,8 @@ export interface FetchLastfmHistoryInput {
   signal?: AbortSignal;
   maxPages?: number;
   requestTimeoutMs?: number;
+  // First wait before a page is asked for again; later waits double.
+  retryDelayMs?: number;
   toUnixSeconds?: number;
   fetchImpl?: typeof fetch;
   onProgress?: (progress: LastfmHistoryProgress) => void;
@@ -46,6 +48,24 @@ const LASTFM_API_ROOT = 'https://ws.audioscrobbler.com/2.0/';
 const LASTFM_PAGE_LIMIT = 200;
 const LASTFM_REQUEST_SPACING_MS = 260;
 const LASTFM_REQUEST_TIMEOUT_MS = 15_000;
+// A 500-page history takes minutes, so one bad page is asked for again
+// (with the wait growing each time) instead of ending the whole import.
+const LASTFM_PAGE_ATTEMPTS = 4;
+const LASTFM_RETRY_DELAY_MS = 1_000;
+const LASTFM_MAX_RETRY_WAIT_MS = 30_000;
+// Backend failed, service offline, temporarily unavailable, rate limited.
+const LASTFM_RETRYABLE_CODES = new Set([8, 11, 16, 29]);
+
+class LastfmPageRequestError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    readonly retryAfterMs: number | null = null,
+  ) {
+    super(message);
+    this.name = 'LastfmPageRequestError';
+  }
+}
 
 export class LastfmHistoryImportTruncatedError extends Error {
   constructor(
@@ -79,13 +99,7 @@ export async function fetchLastfmHistory(input: FetchLastfmHistoryInput): Promis
     input.signal?.throwIfAborted();
     await waitForLastfmRateLimit(lastRequestStarted, input.signal);
     lastRequestStarted = Date.now();
-    const response = await fetcher(buildLastfmRecentTracksUrl({ username, apiKey, page, toUnixSeconds }), {
-      signal: buildRequestSignal(input.signal, input.requestTimeoutMs),
-      redirect: 'error',
-    });
-    if (!response.ok) throw new Error(`Last.fm recent tracks request failed (${response.status}).`);
-    const data = await response.json() as LastfmRecentTracksResponse;
-    if (data.error) throw new Error(data.message || `Last.fm error ${data.error}.`);
+    const data = await fetchLastfmPage(fetcher, buildLastfmRecentTracksUrl({ username, apiKey, page, toUnixSeconds }), input);
     if (!isRecord(data.recenttracks) || !Object.hasOwn(data.recenttracks, 'track')) {
       throw new Error('Last.fm returned a malformed recenttracks response.');
     }
@@ -130,6 +144,91 @@ export async function fetchLastfmHistory(input: FetchLastfmHistoryInput): Promis
   }
 
   return { entries, invalid, invalidSamples, totalRows, pagesFetched, skippedNowPlaying, truncated: false };
+}
+
+// One page, asked for again after a transient failure. The same URL is used
+// each time, so a retried page carries the same `to` snapshot as the rest.
+async function fetchLastfmPage(
+  fetcher: typeof fetch,
+  url: string,
+  input: FetchLastfmHistoryInput,
+): Promise<LastfmRecentTracksResponse> {
+  const baseDelay = Number.isFinite(input.retryDelayMs) ? Math.max(0, Number(input.retryDelayMs)) : LASTFM_RETRY_DELAY_MS;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await requestLastfmPage(fetcher, url, input);
+    } catch (err) {
+      // A cancelled import stops here, whatever the error looks like.
+      input.signal?.throwIfAborted();
+      if (!isRetryablePageFailure(err) || attempt >= LASTFM_PAGE_ATTEMPTS) throw err;
+      const retryAfter = err instanceof LastfmPageRequestError ? err.retryAfterMs : null;
+      const wait = Math.min(LASTFM_MAX_RETRY_WAIT_MS, retryAfter ?? baseDelay * 2 ** (attempt - 1));
+      await abortableDelay(wait, input.signal);
+    }
+  }
+}
+
+async function requestLastfmPage(
+  fetcher: typeof fetch,
+  url: string,
+  input: FetchLastfmHistoryInput,
+): Promise<LastfmRecentTracksResponse> {
+  const response = await fetcher(url, {
+    signal: buildRequestSignal(input.signal, input.requestTimeoutMs),
+    redirect: 'error',
+  });
+  // Last.fm explains a refusal in the body (a private profile, an unknown
+  // user), so the body is read before the status is held against it.
+  let data: LastfmRecentTracksResponse | null = null;
+  try {
+    data = await response.json() as LastfmRecentTracksResponse;
+  } catch {
+    /* not JSON: an error page from something in front of Last.fm */
+  }
+  const retryAfterMs = parseRetryAfter(response.headers?.get?.('retry-after'));
+  const code = data && Number(data.error) ? Number(data.error) : null;
+  if (code !== null) {
+    throw new LastfmPageRequestError(
+      lastfmHistoryErrorMessage(code, data?.message),
+      LASTFM_RETRYABLE_CODES.has(code),
+      retryAfterMs,
+    );
+  }
+  if (!response.ok) {
+    throw new LastfmPageRequestError(
+      `Last.fm recent tracks request failed (${response.status}).`,
+      response.status === 408 || response.status === 429 || response.status >= 500,
+      retryAfterMs,
+    );
+  }
+  if (!data) throw new LastfmPageRequestError('Last.fm returned a page that is not valid JSON.', true, retryAfterMs);
+  return data;
+}
+
+// Timeouts and dropped connections are worth another try; so are the
+// failures Last.fm marks as temporary. A bad name, a private profile or a bad
+// key are not.
+function isRetryablePageFailure(err: unknown): boolean {
+  if (err instanceof LastfmPageRequestError) return err.retryable;
+  if (!(err instanceof Error)) return false;
+  return err.name === 'TimeoutError' || err.name === 'AbortError' || err instanceof TypeError;
+}
+
+function lastfmHistoryErrorMessage(code: number, message: string | undefined): string {
+  if (code === 6) return 'Last.fm has no user with that name.';
+  if (code === 17) {
+    return 'That Last.fm profile is private. Allow recent listening to be shown in its privacy settings, then try again.';
+  }
+  return message || `Last.fm error ${code}.`;
+}
+
+function parseRetryAfter(value: string | null | undefined): number | null {
+  const header = value?.trim();
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(header);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : null;
 }
 
 function buildLastfmRecentTracksUrl(input: { username: string; apiKey: string; page: number; toUnixSeconds: number }): string {

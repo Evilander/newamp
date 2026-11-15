@@ -73,7 +73,7 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Star sparkle in sky on hats.
   float sp2 = hash21(floor(uv * vec2(180.0, 110.0)));
-  col += vec3(1.0) * step(0.992, sp2) * skyMask * (0.3 + u_hatPulse * 0.7) * 0.4;
+  col += mix(u_light, vec3(1.0), 0.35) * step(0.992, sp2) * skyMask * (0.3 + u_hatPulse * 0.7) * 0.4;
 
   float alpha = clamp(dot(col, vec3(0.55)), 0.0, 0.78);
   return vec4(col, alpha);

@@ -27,6 +27,7 @@
 import { stat } from 'node:fs/promises';
 import { extname } from 'node:path';
 import { MP4_EXTS, boxChild, boxChildren, boxPath, readMoov, sampleEntryType, soundTrak } from './mp4-codec.js';
+import { isStorageError } from './read-failure.js';
 
 const AAC_FRAME = 1024;
 // ffmpeg's mov demuxer takes iTunSMPB's priming only below this.
@@ -55,7 +56,10 @@ export async function playableLength(path: string): Promise<PlayableLength | nul
   try {
     const moov = await readMoov(path);
     result = moov ? parseMoov(moov) : null;
-  } catch {
+  } catch (err) {
+    // A share that timed out says nothing about the file: not cached, so the
+    // next plan reads it again instead of playing it untrimmed all session.
+    if (isStorageError(err)) return null;
     result = null;
   }
   if (cache.size >= CACHE_CAP) cache.clear();

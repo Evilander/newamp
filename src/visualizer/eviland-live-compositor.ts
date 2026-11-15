@@ -14,7 +14,19 @@
 export interface LiveCompositor {
   canvas: HTMLCanvasElement;
   stop(): void;
+  /**
+   * True once what this compositor was built from no longer matches the
+   * stage: the field canvas changed size, was replaced (an iframe reload), or
+   * its stream ended. The output keeps its original size and shows a frozen
+   * layer until then, so a caller that can start over (the replay ring, which
+   * is not mid-clip) should re-arm on this. A recording in progress stays at
+   * its fixed size on purpose: resizing a canvas under an encoder breaks the clip.
+   */
+  stale(): boolean;
 }
+
+// How often the paint loop compares the field with what it was built from.
+const STALE_CHECK_EVERY_FRAMES = 30;
 
 /**
  * Find the eviland-live layer stack under `root` and start compositing it
@@ -63,12 +75,18 @@ export function createEvilandLiveCompositor(root: HTMLElement): LiveCompositor |
 
   const fieldVideo = layerVideo(field);
   const sceneVideo = sceneCanvas ? layerVideo(sceneCanvas) : null;
+  let fieldEnded = false;
+  const fieldTrack = (fieldVideo?.srcObject as MediaStream | null)?.getVideoTracks()[0];
+  fieldTrack?.addEventListener('ended', () => { fieldEnded = true; });
   if (!fieldVideo) {
     for (const fn of cleanups) fn();
     return null;
   }
 
   let running = true;
+  let frames = 0;
+  let isStale = false;
+  let wasHidden = false;
   const drawLayer = (video: HTMLVideoElement | null): void => {
     if (video && video.readyState >= 2) {
       try {
@@ -86,6 +104,19 @@ export function createEvilandLiveCompositor(root: HTMLElement): LiveCompositor |
     // the full duration regardless of visibility. Reschedule instead of
     // returning early so the loop resumes drawing the moment it's visible
     // again, without any caller having to re-arm it.
+    if (++frames % STALE_CHECK_EVERY_FRAMES === 0 && !isStale) {
+      isStale = fieldEnded || !field.isConnected || field.width !== w || field.height !== h;
+    }
+    // Both layers are 60 fps streams: stop decoding them while the window is
+    // hidden and pick them up again when it is back.
+    if (document.hidden !== wasHidden) {
+      wasHidden = document.hidden;
+      for (const video of [fieldVideo, sceneVideo]) {
+        if (!video) continue;
+        if (wasHidden) video.pause();
+        else void video.play().catch(() => undefined);
+      }
+    }
     if (!document.hidden) {
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, w, h);
@@ -109,5 +140,6 @@ export function createEvilandLiveCompositor(root: HTMLElement): LiveCompositor |
       running = false;
       for (const fn of cleanups) fn();
     },
+    stale: () => isStale,
   };
 }

@@ -193,8 +193,24 @@ const FOLDER_DESCRIBE_SLICE = 400;
 const TRACK_FETCH_SLICE = 2000;
 const HEALTH_SLICE = 3000;
 const DNA_INDEX_SLICE = 2000;
+// History rows read, and aggregated, per turn of the thread.
+const HISTORY_PAGE = 5000;
+// Tracks a tag pass evaluates before it hands the thread back.
+const TAG_EVALUATION_SLICE = 250;
+// History entries matched, and plays inserted per transaction, between turns.
+const HISTORY_IMPORT_SLICE = 2000;
 // A folder with more tracks than this is listed the way it always was.
 const FOLDER_TRACKS_FAST_LIMIT = 3000;
+// A page of tracks that ends within this many rows is read with its own
+// LIMIT; past it the sorted id list is kept and sliced (see orderedTrackIds).
+const TRACK_PAGE_DIRECT_LIMIT = 1200;
+// A failed async flush tries again after this long, doubling up to the cap.
+const FLUSH_RETRY_MIN_MS = 5_000;
+const FLUSH_RETRY_MAX_MS = 60_000;
+// How long a finished "Clean missing files" sweep may be reused by the removal.
+const PRUNE_SWEEP_KEEP_MS = 30_000;
+// A library.db.tmp-* file this old belongs to a write that died.
+const STALE_TMP_AGE_MS = 60_000;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tracks (
@@ -771,6 +787,16 @@ interface PruneTarget {
   key: string;
   // The path stat'ed when the target was normalized.
   exists: boolean;
+  // The stat failed for a reason other than the path not being there (a
+  // timeout, an I/O error, no permission). Nothing is known about the target,
+  // so it is neither present nor gone.
+  unknown: boolean;
+}
+
+interface PrunableTracks {
+  checked: number;
+  ids: number[];
+  offline: number;
 }
 
 interface FolderTrackRow {
@@ -831,9 +857,116 @@ interface FolderSummaryAccumulator {
   artFromTrackId: number | null;
 }
 
-interface FolderTrackIdRow {
+interface FolderOrderRow {
   id: number;
   path: string;
+  disc_no: number | null;
+  disc_inferred?: number | null;
+  track_no: number | null;
+  title: string;
+  album_key?: string | null;
+}
+
+// Names compare the way a person counts: "2 - B" before "10 - J".
+const FILE_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+function folderRowDirectory(path: string): string {
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return path.slice(0, Math.max(cut, 0));
+}
+
+// The order a folder plays in: one directory at a time, then, where its files
+// are numbered like an album, disc and track number, and file name. SQLite
+// can't compare numbers inside names, and with the path unique in front of
+// them the disc and track columns never got to break a tie, so a folder of
+// "1 - A", "10 - J" and "2 - B" played 1, 10, 2. A directory whose numbers
+// repeat or are missing (a folder of singles that are each "track 1") is not
+// an album, and goes by file name alone instead of being shuffled by them. Nor
+// is one whose tracks belong to different albums: loose singles from several
+// records often carry distinct numbers by chance (3, 7, 1, 12).
+function sortFolderRows<T extends FolderOrderRow>(rows: T[]): T[] {
+  const numbered = new Map<string, boolean>();
+  const seen = new Map<string, Set<string>>();
+  const albumOf = new Map<string, string | null>();
+  for (const row of rows) {
+    const dir = folderRowDirectory(row.path);
+    const pair = `${row.disc_inferred ?? row.disc_no ?? 1}:${row.track_no ?? 0}`;
+    const used = seen.get(dir) ?? new Set<string>();
+    seen.set(dir, used);
+    const sameAlbum = !albumOf.has(dir) || albumOf.get(dir) === (row.album_key ?? null);
+    if (!albumOf.has(dir)) albumOf.set(dir, row.album_key ?? null);
+    const fresh = (row.track_no ?? 0) > 0 && !used.has(pair) && !!row.album_key && sameAlbum;
+    used.add(pair);
+    numbered.set(dir, (numbered.get(dir) ?? true) && fresh);
+  }
+  return rows.sort((a, b) => {
+    const dirA = folderRowDirectory(a.path);
+    const dirB = folderRowDirectory(b.path);
+    const byDirectory = FILE_NAME_COLLATOR.compare(dirA, dirB);
+    if (byDirectory) return byDirectory;
+    if (numbered.get(dirA)) {
+      const order = (a.disc_inferred ?? a.disc_no ?? 1) - (b.disc_inferred ?? b.disc_no ?? 1)
+        || (a.track_no ?? 0) - (b.track_no ?? 0);
+      if (order) return order;
+    }
+    return FILE_NAME_COLLATOR.compare(a.path.slice(dirA.length + 1), b.path.slice(dirB.length + 1))
+      || FILE_NAME_COLLATOR.compare(a.title ?? '', b.title ?? '')
+      || a.id - b.id;
+  });
+}
+
+export interface TagRulePreview {
+  ok: boolean;
+  errors: { message: string; line: number; column: number }[];
+  ruleName: string | null;
+  references: string[];
+  matchCount: number;
+  sampleTrackIds: number[];
+  // How many tracks were evaluated and how many the library has, so the
+  // preview can say it looked at a sample.
+  sampledCount: number;
+  totalCount: number;
+}
+
+function addDnaToIndex(map: Map<number, TrackDna>, row: { id: number; dna_json: string | null }): void {
+  if (!row.dna_json) return;
+  try {
+    const parsed = JSON.parse(row.dna_json);
+    if (isValidTrackDna(parsed)) map.set(row.id, parsed);
+  } catch {
+    /* skip corrupt */
+  }
+}
+
+function tagContextOf(track: Track, dnaIndex: Map<number, TrackDna>): Omit<TrackContext, 'tags'> {
+  return {
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    albumArtist: track.albumArtist,
+    genre: track.genre,
+    year: track.year,
+    duration: track.duration,
+    bitrate: track.bitrate,
+    sampleRate: track.sampleRate,
+    size: track.size,
+    mtime: track.mtime,
+    bpm: track.bpm,
+    key: track.key,
+    format: audioExtension(track.path),
+    rating: track.rating,
+    ratingScore: track.ratingScore,
+    playCount: track.playCount,
+    skipCount: track.skipCount,
+    lastPlayed: track.lastPlayed,
+    lastSkipped: track.lastSkipped,
+    loved: Boolean(track.loved),
+    avoidAutoPlay: Boolean(track.avoidAutoPlay),
+    replayGainTrack: track.replayGainTrackDb,
+    replayGainAlbum: track.replayGainAlbumDb,
+    dna: dnaIndex.get(track.id) ?? null,
+  };
 }
 
 function rowToTrack(r: RawRow): Track {
@@ -1066,6 +1199,17 @@ export class LibraryStore {
   // quit-path flush (newer data) can never be clobbered by a slower async
   // write (older data) landing after it.
   private flushSeq = 0;
+  // Delay before the next retry after an async flush failed, doubled on each
+  // failure up to FLUSH_RETRY_MAX_MS and reset by a flush that lands.
+  private flushRetryMs = FLUSH_RETRY_MIN_MS;
+  // The temp file a failed replace left beside library.db: the one complete
+  // copy of that flush if the replace failed part-way. Only the newest is kept.
+  private retainedFlushTmp: string | null = null;
+  // The tag passes queued behind each other (see recomputeTagsAsync).
+  private tagRecomputeQueue: Promise<void> = Promise.resolve();
+  // The last sweep "Clean missing files" made, so the removal that follows its
+  // preview uses it instead of checking every track again.
+  private pruneSweep: { key: string; version: number; at: number; result: PrunableTracks } | null = null;
   private closed = false;
   // Cache of the full track DNA index. Building it walks the entire DNA table
   // and JSON.parses every blob; for a 50k-track library that's a real cost on
@@ -1075,6 +1219,9 @@ export class LibraryStore {
   // Bumped when stored DNA changes while no index is built, so a build in
   // progress starts again instead of keeping rows it already read.
   private dnaIndexEpoch = 0;
+  // One set of track ids per index build under way: the tracks whose DNA was
+  // saved after the build had already read past them.
+  private readonly dnaIndexBuilds = new Set<Set<number>>();
   // The folder tree used to be worked out from every track row on each click,
   // which stalled the main process for hundreds of milliseconds. The index
   // (see FolderIndex) is built once and answers every folder from it. It is
@@ -1231,6 +1378,25 @@ export class LibraryStore {
       applySchema();
     }
     if (recovered) this.flushSync();
+    // The live file loaded, so a temp copy left beside it by a write that was
+    // killed, or one whose replace kept failing, is only dead weight.
+    else if (hadExistingDb) void this.sweepStaleFlushTmps();
+  }
+
+  private async sweepStaleFlushTmps(): Promise<void> {
+    const dir = dirname(this.file);
+    const prefix = `${basename(this.file)}.tmp-`;
+    try {
+      const cutoff = Date.now() - STALE_TMP_AGE_MS;
+      for (const name of await fsp.readdir(dir)) {
+        if (!name.startsWith(prefix)) continue;
+        const stale = join(dir, name);
+        const stat = await fsp.stat(stale).catch(() => null);
+        if (stat?.isFile() && stat.mtimeMs < cutoff) await fsp.unlink(stale).catch(() => {});
+      }
+    } catch {
+      // Tidying is best effort; the library does not depend on it.
+    }
   }
 
   // Loads an existing database file. Transient IO failures (a locked file on
@@ -1286,7 +1452,10 @@ export class LibraryStore {
     // After a failed upgrade the user's library is the untouched file, not
     // this session's temporary one.
     if (this.persistBlocked) return readFileSync(this.file);
-    return Buffer.from(this.db.export());
+    // The export is already this call's own copy, so the buffer wraps it
+    // rather than copying a database of tens of megabytes a second time.
+    const data = this.db.export();
+    return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
   }
 
   // Waits out any async flush already in flight. A caller that is about to
@@ -1379,8 +1548,24 @@ export class LibraryStore {
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
       this.persistTimerTier = 0;
-      void this.flushAsync();
+      void this.flushAsync().catch((err) => console.error('library flush failed', err));
     }, tier === 2 ? 600_000 : tier === 1 ? 30_000 : 800);
+  }
+
+  // A flush that failed leaves the changes dirty, but nothing else would write
+  // them if no further change arrives: a crash would then lose the plays,
+  // ratings and edits since the last good write. This tries again after a
+  // delay that doubles while the failure lasts.
+  private scheduleFlushRetry(): void {
+    if (this.closed || this.persistBlocked || this.persistTimer) return;
+    const delay = this.flushRetryMs;
+    this.flushRetryMs = Math.min(delay * 2, FLUSH_RETRY_MAX_MS);
+    this.persistTimerTier = 1;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persistTimerTier = 0;
+      void this.flushAsync().catch((err) => console.error('library flush failed', err));
+    }, delay);
   }
 
   // Async atomic flush for the debounced path: db.export() is sql.js's only
@@ -1395,7 +1580,17 @@ export class LibraryStore {
     }
     this.dirty = false;
     const seq = ++this.flushSeq;
-    const data = this.db.export();
+    let data: Uint8Array;
+    try {
+      data = this.db.export();
+    } catch (err) {
+      // export() can run out of wasm memory. The changes are still only in
+      // memory, so they stay dirty and the flush is tried again.
+      console.error('library export failed', err);
+      this.dirty = true;
+      this.scheduleFlushRetry();
+      return;
+    }
     // Unique per flush: a quit-path flushSync must never share this path (see
     // atomicWriteFileSync) or its rename can adopt the inode this write is
     // still filling.
@@ -1404,7 +1599,8 @@ export class LibraryStore {
     let tmpHandled = false;
     this.flushInFlight = (async () => {
       try {
-        await durableWriteFileAsync(tmp, Buffer.from(data));
+        // The export is this call's own copy, so the buffer can wrap it.
+        await durableWriteFileAsync(tmp, Buffer.from(data.buffer, data.byteOffset, data.byteLength));
         tmpHasCompleteSnapshot = true;
         if (seq !== this.flushSeq || this.closed) {
           // A synchronous quit-path flush captured newer state while this
@@ -1418,12 +1614,27 @@ export class LibraryStore {
         // snapshot, close the DB, then let this stale rename land afterward.
         renameOverExistingSync(tmp, this.file);
         tmpHandled = true;
+        this.flushRetryMs = FLUSH_RETRY_MIN_MS;
+        // library.db now holds newer state than any copy a failed replace left.
+        const earlier = this.retainedFlushTmp;
+        this.retainedFlushTmp = null;
+        if (earlier) await fsp.unlink(earlier).catch(() => {});
       } catch (err) {
         console.error('library flush failed', err);
-        if (!this.closed) this.dirty = true; // retry on the next scheduled flush
+        if (!this.closed) {
+          this.dirty = true;
+          this.scheduleFlushRetry();
+        }
       } finally {
         if (!tmpHandled && !tmpHasCompleteSnapshot) {
           await fsp.unlink(tmp).catch(() => {});
+        } else if (!tmpHandled) {
+          // A failed replace keeps the complete snapshot as the last resort,
+          // but only the newest one: every retry writes another copy of the
+          // whole library.
+          const earlier = this.retainedFlushTmp;
+          this.retainedFlushTmp = tmp;
+          if (earlier && earlier !== tmp) await fsp.unlink(earlier).catch(() => {});
         }
       }
     })();
@@ -1434,7 +1645,7 @@ export class LibraryStore {
       const shouldFlushAgain = this.flushAgain && !this.closed;
       this.flushAgain = false;
       if (shouldFlushAgain) {
-        void this.flushAsync();
+        void this.flushAsync().catch((err) => console.error('library flush failed', err));
       }
     }
   }
@@ -1451,7 +1662,8 @@ export class LibraryStore {
       this.persistTimerTier = 0;
     }
     this.flushSeq += 1;
-    atomicWriteFileSync(this.file, Buffer.from(this.db.export()));
+    const data = this.db.export();
+    atomicWriteFileSync(this.file, Buffer.from(data.buffer, data.byteOffset, data.byteLength));
     this.dirty = false;
   }
 
@@ -1463,7 +1675,7 @@ export class LibraryStore {
     this.scheduleFlush();
   }
 
-  private pathIdentitiesForWindows(): Map<string, string[]> {
+  private pathIdentities(): Map<string, string[]> {
     if (!this.windowsPathIdentities) {
       const identities = new Map<string, string[]>();
       for (const row of this.many<{ path: string }>('SELECT path FROM tracks')) {
@@ -1484,28 +1696,58 @@ export class LibraryStore {
     // audio all hand the same file over twice, and the ownership bookkeeping
     // below has to see each track once.
     const paths = new Map<string, string>();
+    const foldsNames = foldPathCase('A') !== 'A';
+    // Rows whose stored spelling is out of date: the file was renamed in case
+    // or in Unicode form on a volume that keeps the two apart. The row takes
+    // the new spelling and keeps its id and history.
+    const renames: Array<{ from: string; to: string }> = [];
+    const renamed = new Set<string>();
     const normalized = items.map((item) => {
-      if (process.platform !== 'win32') return item;
+      if (!foldsNames) return item;
       const key = normalizeFileStatePath(item.path);
-      let path = paths.get(key);
+      // Windows compares names without case on every volume, so one spelling
+      // stands for the file. A Mac volume may or may not, so each spelling is
+      // settled on its own below.
+      const cacheKey = process.platform === 'win32' ? key : item.path;
+      let path = paths.get(cacheKey);
       if (!path) {
         // Two indexed queries per file still cost a statement round trip
         // through sql.js each, which was seconds for a 60k first scan; the map
         // answers in constant time. It folds the same way as key (Unicode
         // included, which SQLite's lower() doesn't).
-        const matches = this.pathIdentitiesForWindows().get(key) ?? [];
-        // The exact spelling wins. Otherwise adopt the one stored case variant;
-        // do not merge pre-existing ambiguous identities without an explicit
-        // migration. A unique filesystem spelling keeps all its annotations.
-        path = matches.includes(item.path) ? item.path : matches.length === 1 ? matches[0]! : item.path;
-        paths.set(key, path);
+        const matches = this.pathIdentities().get(key) ?? [];
+        // The exact spelling wins. Otherwise a single stored variant is this
+        // file's row; do not merge pre-existing ambiguous identities without
+        // an explicit migration.
+        if (matches.includes(item.path)) {
+          path = item.path;
+        } else if (matches.length === 1 && !renamed.has(matches[0]!)) {
+          const stored = matches[0]!;
+          if (process.platform === 'win32') {
+            path = stored;
+          } else if (sameFileUnderOtherSpelling(stored, item.path)) {
+            renames.push({ from: stored, to: item.path });
+            renamed.add(stored);
+            path = item.path;
+          } else {
+            path = item.path;
+          }
+        } else {
+          path = item.path;
+        }
+        paths.set(cacheKey, path);
       }
       return path === item.path ? item : { ...item, path };
     });
     const unique = [...new Map(normalized.map((item) => [item.path, item])).values()];
 
+    // Statements prepared inside the transaction, freed if it fails; sql.js
+    // keeps one until the database is next saved otherwise.
+    const prepared: Array<{ free(): unknown }> = [];
+    let groupingChanged = false;
     this.db.run('BEGIN');
     try {
+      for (const { from, to } of renames) this.db.run('UPDATE tracks SET path = ? WHERE path = ?', [to, from]);
       // Fields the user owns keep the user's value; for those the file's
       // reading only refreshes source_json.
       const rows = this.resolveOwnedMetadata(this.skipFailedRereads(unique));
@@ -1600,6 +1842,7 @@ export class LibraryStore {
            genres_json=CASE WHEN excluded.scan_schema > 0 THEN excluded.genres_json ELSE tracks.genres_json END,
            scan_schema=MAX(tracks.scan_schema, excluded.scan_schema)`,
       );
+      prepared.push(stmt);
       // The grouping columns are left alone on an update: the grouping pass
       // owns them. A row whose album, album artist or artist changed gets the
       // plain grouping back below, until the pass runs again.
@@ -1607,10 +1850,11 @@ export class LibraryStore {
         `UPDATE tracks SET album_key=?, album_display=?, album_artist_display=?, album_kind=?, album_reason=?,
                 album_year=?, album_sort_key=?, disc_inferred=? WHERE path=?`,
       );
+      prepared.push(resetIdentity);
       const priorRows = this.priorIdentityInputs(rows.map((r) => r.path));
-      let groupingChanged = false;
       const artHashCache = new WeakMap<Buffer, string>();
       const writtenArtHashes = new Set<string>();
+      const lostArt = this.pathsWithLostArt(rows.filter((r) => !(r.art && r.art.data.length)).map((r) => r.path));
       for (const r of rows) {
         let artHash: string | null = null;
         if (r.art && r.art.data.length) {
@@ -1701,6 +1945,9 @@ export class LibraryStore {
           identity?.albumSortKey ?? null,
           identity?.discInferred ?? null,
         ]);
+        if (lostArt.has(r.path)) {
+          this.db.run(`UPDATE tracks SET has_art = 0, art_hash = NULL WHERE path = ?`, [r.path]);
+        }
         if (!prior || identityInputsChanged(prior, r)) groupingChanged = true;
         if (prior && (identityNeedsReset(prior, r) || (prior.album_key == null) !== !r.album.trim())) {
           resetIdentity.run([
@@ -1716,15 +1963,31 @@ export class LibraryStore {
           ]);
         }
       }
+      prepared.length = 0;
       stmt.free();
       resetIdentity.free();
       this.db.run('COMMIT');
-      if (groupingChanged) this.requestRegroup();
     } catch (err) {
-      this.db.run('ROLLBACK');
+      for (const open of prepared) {
+        try {
+          open.free();
+        } catch {
+          /* already freed */
+        }
+      }
+      try {
+        this.db.run('ROLLBACK');
+      } catch {
+        // The transaction already ended; the error that ended it is the one to report.
+      }
       throw err;
     }
     if (this.windowsPathIdentities) {
+      for (const { from } of renames) {
+        const key = normalizeFileStatePath(from);
+        const bucket = (this.windowsPathIdentities.get(key) ?? []).filter((stored) => stored !== from);
+        this.windowsPathIdentities.set(key, bucket);
+      }
       for (const item of unique) {
         const key = normalizeFileStatePath(item.path);
         const bucket = this.windowsPathIdentities.get(key) ?? [];
@@ -1738,6 +2001,9 @@ export class LibraryStore {
     // A changed file loses its analysis, DNA included.
     this.invalidateDnaIndexCache();
     this.scheduleFlush();
+    // After the commit and outside the try, so a failure here cannot roll back
+    // rows that are already written.
+    if (groupingChanged) this.requestRegroup();
   }
 
   // The plain grouping for one track whose album, artist or album artist was
@@ -2372,27 +2638,67 @@ export class LibraryStore {
   }
 
   getTracks(opts: TrackQueryOptions = {}): Track[] {
-    const sortKey = trackSortOrder(opts.sort);
     const limit = Math.max(1, Math.min(opts.limit ?? 1000, 100000));
     const offset = Math.max(0, opts.offset ?? 0);
-    const { whereSql, params } = this.buildTrackQuery(opts);
-
-    return this.many(
-      `SELECT ${TRACK_COLUMNS} FROM tracks ${whereSql} ORDER BY ${sortKey} LIMIT ? OFFSET ?`,
-      [...params, limit, offset],
-    ).map(rowToTrack);
+    if (offset + limit <= TRACK_PAGE_DIRECT_LIMIT) {
+      const { whereSql, params } = this.buildTrackQuery(opts);
+      return this.many(
+        `SELECT ${TRACK_COLUMNS} FROM tracks ${whereSql} ORDER BY ${trackSortOrder(opts.sort)} LIMIT ? OFFSET ?`,
+        [...params, limit, offset],
+      ).map(rowToTrack);
+    }
+    return this.getTracksByIdsInOrder(this.orderedTrackIds(opts).slice(offset, offset + limit));
   }
 
   getTrackIds(opts: TrackQueryOptions = {}): number[] {
-    const sortKey = trackSortOrder(opts.sort);
     const limit = Math.max(1, Math.min(opts.limit ?? 1000, 100000));
     const offset = Math.max(0, opts.offset ?? 0);
-    const { whereSql, params } = this.buildTrackQuery(opts);
+    if (offset + limit <= TRACK_PAGE_DIRECT_LIMIT) {
+      const { whereSql, params } = this.buildTrackQuery(opts);
+      return this.many<{ id: number }>(
+        `SELECT id FROM tracks ${whereSql} ORDER BY ${trackSortOrder(opts.sort)} LIMIT ? OFFSET ?`,
+        [...params, limit, offset],
+      ).map((row) => row.id);
+    }
+    return this.orderedTrackIds(opts).slice(offset, offset + limit);
+  }
 
-    return this.many<{ id: number }>(
-      `SELECT id FROM tracks ${whereSql} ORDER BY ${sortKey} LIMIT ? OFFSET ?`,
-      [...params, limit, offset],
+  // Every id in a query's order. Nothing indexes the sort expressions, so each
+  // page of a long list re-sorted the whole table (170 ms at the end of a
+  // 58k-track library); sorting once and slicing serves the pages that follow
+  // until the library changes.
+  private orderedTrackIds(opts: Pick<TrackQueryOptions, 'search' | 'sort'>): number[] {
+    const key = `track-order:${JSON.stringify([opts.sort ?? null, opts.search ?? ''])}`;
+    const version = this.contentVersion;
+    const kept = this.derived.get<number[]>(key, version);
+    if (kept) return kept;
+    const { whereSql, params } = this.buildTrackQuery(opts);
+    const ids = this.many<{ id: number }>(
+      `SELECT id FROM tracks ${whereSql} ORDER BY ${trackSortOrder(opts.sort)}`,
+      params,
     ).map((row) => row.id);
+    this.derived.set(key, version, ids);
+    return ids;
+  }
+
+  // Where the part of every track's path that tells tracks apart begins: just
+  // past the folder all the paths share, which is the library's own location
+  // ("/Users/me/Music/"). A search for "music" or "users" would match every
+  // track through it. The first and last path in order share exactly what all
+  // the paths between them do, and the path index answers both at once.
+  private libraryPathStart(): number {
+    const ends = this.one<{ first: string | null; last: string | null }>(
+      `SELECT MIN(path) AS first, MAX(path) AS last FROM tracks`,
+    );
+    const first = ends?.first;
+    const last = ends?.last;
+    if (!first || !last) return 0;
+    let shared = 0;
+    const limit = Math.min(first.length, last.length);
+    while (shared < limit && first.charCodeAt(shared) === last.charCodeAt(shared)) shared += 1;
+    if (!shared) return 0;
+    const cut = Math.max(first.lastIndexOf('/', shared - 1), first.lastIndexOf('\\', shared - 1));
+    return cut < 0 ? 0 : cut + 1;
   }
 
   private buildTrackQuery(opts: Pick<TrackQueryOptions, 'search' | 'sort'>): {
@@ -2407,7 +2713,7 @@ export class LibraryStore {
     if (opts.sort === 'loved') where.push('loved = 1');
 
     const search = parseTrackSearchQuery(opts.search ?? '');
-    const searchWhere = trackSearchWhere(search);
+    const searchWhere = trackSearchWhere(search, this.libraryPathStart());
     where.push(...searchWhere.where);
     params.push(...searchWhere.params);
 
@@ -2528,7 +2834,7 @@ export class LibraryStore {
     // compare without case; elsewhere a miss is a new file, and answering it
     // used to cost a read of the whole table for every batch of a first scan.
     if (out.size < unique.length && foldPathCase('A') !== 'A') {
-      const identities = this.pathIdentitiesForWindows();
+      const identities = this.pathIdentities();
       const requestedBy = new Map<string, string[]>();
       for (const path of unique) {
         if (out.has(path)) continue;
@@ -2592,6 +2898,26 @@ export class LibraryStore {
     return ['.jpg', '.jpeg', '.png', '.webp'].some((ext) => existsSync(join(this.artDir, `${hash}${ext}`)));
   }
 
+  // Of the paths just read without any art, those whose row still says it has
+  // some although the cached image is gone (or was never recorded). The upsert
+  // keeps existing art when a file yields none, which is right for art applied
+  // from the UI, but a row pointing at an image that no longer exists would be
+  // rescanned in full on every pass, finding nothing each time. The art
+  // directory is local, so a missing image is not a storage timeout.
+  private pathsWithLostArt(paths: string[]): Set<string> {
+    const lost = new Set<string>();
+    for (let i = 0; i < paths.length; i += 500) {
+      const chunk = paths.slice(i, i + 500);
+      for (const row of this.many<{ path: string; has_art: number; art_hash: string | null }>(
+        `SELECT path, has_art, art_hash FROM tracks WHERE path IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
+      )) {
+        if (row.has_art && (!row.art_hash || !this.artFileExists(row.art_hash))) lost.add(row.path);
+      }
+    }
+    return lost;
+  }
+
   // Automatic path (the library watcher): a file that has gone is marked, never
   // deleted. The row keeps its id, history, ratings, bookmarks, edits and
   // playlist places, and the scanner clears the mark when the file is back.
@@ -2600,18 +2926,50 @@ export class LibraryStore {
   // root, and tens of thousands of stats on a dead SMB path would hang the
   // main process. Returns how many tracks were newly marked.
   markTracksMissing(targets: string[]): number {
-    const normalizedTargets = normalizePruneTargets(targets);
-    if (!normalizedTargets.length) return 0;
+    return this.markMissingUnder(normalizePruneTargets(targets), absentTrackIds);
+  }
+
+  // The same for the watcher's reconcile, which can name thousands of files
+  // after a bulk copy: the stats don't hold the main thread, which also serves
+  // the audio that is playing. A target that doesn't answer marks nothing.
+  async markTracksMissingAsync(targets: string[]): Promise<number> {
+    const normalizedTargets = await normalizePruneTargetsAsync(targets);
+    const candidates = this.missingCandidates(normalizedTargets);
+    if (!candidates) return 0;
+    const ids = [...candidates.gone, ...(await absentTrackIdsAsync(candidates.toCheck))];
+    return this.markGone(ids);
+  }
+
+  private markMissingUnder(
+    normalizedTargets: PruneTarget[],
+    absentIds: (rows: Array<{ id: number; path: string }>) => number[],
+  ): number {
+    const candidates = this.missingCandidates(normalizedTargets);
+    if (!candidates) return 0;
+    return this.markGone([...candidates.gone, ...absentIds(candidates.toCheck)]);
+  }
+
+  // The tracks under the targets, split into those under a target that isn't
+  // there (answered for without a stat) and those that need a look at their
+  // own file. A target whose stat failed for another reason is in neither.
+  private missingCandidates(
+    normalizedTargets: PruneTarget[],
+  ): { gone: number[]; toCheck: Array<{ id: number; path: string }> } | null {
+    if (!normalizedTargets.length) return null;
     const all = indexPruneTargets(normalizedTargets);
-    const gone = indexPruneTargets(normalizedTargets.filter((target) => !target.exists));
-    const ids: number[] = [];
+    const gone = indexPruneTargets(normalizedTargets.filter((target) => !target.exists && !target.unknown));
+    const unknown = indexPruneTargets(normalizedTargets.filter((target) => target.unknown));
+    const goneIds: number[] = [];
     const toCheck: Array<{ id: number; path: string }> = [];
     for (const row of this.many<{ id: number; path: string }>(`SELECT id, path FROM tracks WHERE missing_since IS NULL`)) {
       if (!matchesPruneTargets(row.path, all)) continue;
-      if (matchesPruneTargets(row.path, gone)) ids.push(row.id);
-      else toCheck.push(row);
+      if (matchesPruneTargets(row.path, gone)) goneIds.push(row.id);
+      else if (!matchesPruneTargets(row.path, unknown)) toCheck.push(row);
     }
-    ids.push(...absentTrackIds(toCheck));
+    return { gone: goneIds, toCheck };
+  }
+
+  private markGone(ids: number[]): number {
     if (!ids.length) return 0;
     this.setMissingSince(ids, Date.now());
     return ids.length;
@@ -2625,13 +2983,16 @@ export class LibraryStore {
   // not finding a file there proves nothing. A root that has gone since the
   // walk marks nothing. Returns how many tracks were newly marked.
   markUnfoundTracksMissing(walkedRoots: string[], found: string[], unreadableFolders: string[] = []): number {
+    const foundKeys = new Set(found.map(normalizeFileStatePath));
     // A file handed over as a root (the watcher's rescan of one changed
     // file) has nothing under it, and it was found, so it can't add anything.
-    const roots = normalizePruneTargets(walkedRoots).filter((root) => root.exists && root.kind === 'dir');
+    // The walk already knows those are files, which spares a stat for each
+    // after a bulk copy; only a root that may be a folder is looked at.
+    const roots = normalizePruneTargets(walkedRoots.filter((root) => !foundKeys.has(normalizeFileStatePath(root))))
+      .filter((root) => root.exists && root.kind === 'dir');
     if (!roots.length) return 0;
     const rootIndex = indexPruneTargets(roots);
     const unread = indexPruneTargets(normalizePruneTargets(unreadableFolders));
-    const foundKeys = new Set(found.map(normalizeFileStatePath));
     const candidates = this.many<{ id: number; path: string }>(`SELECT id, path FROM tracks WHERE missing_since IS NULL`)
       .filter((row) =>
         !foundKeys.has(normalizeFileStatePath(row.path))
@@ -2681,7 +3042,17 @@ export class LibraryStore {
   // What "Clean missing files" would delete, without deleting it: the renderer
   // shows these counts and asks before anything goes.
   previewPruneMissingTracks(targets?: string[], roots: string[] = []): LibraryPruneMissingPreview {
-    const { checked, ids, offline } = this.collectPrunableTracks(targets, roots);
+    return this.describePrune(this.collectPrunableTracks(targets, roots));
+  }
+
+  // The same without holding the main thread: checking every track of a large
+  // library on a network share is minutes of stats. The result is kept for a
+  // moment so the prune that follows the preview doesn't repeat the sweep.
+  async previewPruneMissingTracksAsync(targets?: string[], roots: string[] = []): Promise<LibraryPruneMissingPreview> {
+    return this.describePrune(await this.collectPrunableTracksCached(targets, roots));
+  }
+
+  private describePrune({ checked, ids, offline }: PrunableTracks): LibraryPruneMissingPreview {
     const count = (table: string): number => {
       let total = 0;
       const chunkSize = 500;
@@ -2708,35 +3079,99 @@ export class LibraryStore {
 
   // Missing tracks whose deletion is proven (see missingFileIsConfirmedGone);
   // the rest of the missing ones are counted as offline.
-  private collectPrunableTracks(
-    targets: string[] | undefined,
-    roots: string[],
-  ): { checked: number; ids: number[]; offline: number } {
-    const tracks = this.many<{ id: number; path: string; file_dev: number | null }>(
-      `SELECT id, path, file_dev FROM tracks`,
-    );
-    const normalizedTargets = indexPruneTargets(normalizePruneTargets(targets));
-    const candidates = normalizedTargets.size
-      ? tracks.filter((track) => matchesPruneTargets(track.path, normalizedTargets))
-      : tracks;
+  private collectPrunableTracks(targets: string[] | undefined, roots: string[]): PrunableTracks {
+    const { candidates, skipped } = this.pruneCandidates(targets, roots);
     const probes = new Map<string, DirectoryProbe | null>();
-    const ids: number[] = [];
+    const ids = [...skipped];
     let offline = 0;
+    let unknownRun = 0;
     for (const track of candidates) {
-      // Indexed by an earlier version from a folder scans now leave alone:
-      // the file is there, but it isn't music the library should hold.
-      if (isSkippedUnderRoot(track.path, roots)) {
-        ids.push(track.id);
-        continue;
-      }
-      if (existsSync(track.path)) continue;
-      if (missingFileIsConfirmedGone({ path: track.path, fileDev: track.file_dev ?? null }, roots, probes)) {
+      // After a few files that would not answer in a row the storage is not
+      // answering; the rest are offline without another wait.
+      const presence = unknownRun >= MAX_CONSECUTIVE_UNKNOWN ? 'unknown' : pathPresence(track.path);
+      unknownRun = presence === 'unknown' ? unknownRun + 1 : 0;
+      if (presence === 'present') continue;
+      if (presence === 'absent' && missingFileIsConfirmedGone({ path: track.path, fileDev: track.file_dev ?? null }, roots, probes)) {
         ids.push(track.id);
       } else {
         offline += 1;
       }
     }
-    return { checked: candidates.length, ids, offline };
+    return { checked: candidates.length + skipped.length, ids, offline };
+  }
+
+  private async collectPrunableTracksAsync(targets: string[] | undefined, roots: string[]): Promise<PrunableTracks> {
+    const { candidates, skipped } = this.pruneCandidates(targets, roots);
+    const probes = new Map<string, DirectoryProbe | null>();
+    // A root that does not answer settles everything under it: nothing there
+    // counts as deleted, so no file under it is worth a wait.
+    const rootProbes = await mapWithLimit(roots.filter((root) => typeof root === 'string' && root.trim()), PRESENCE_CONCURRENCY, async (root) => ({
+      root,
+      probe: await probeDirectoryAsync(root, probes),
+    }));
+    const rootReachable = new Map(rootProbes.map(({ root, probe }) => [root, !!probe?.isDirectory]));
+    const offlineUnderRoot = (path: string): boolean => {
+      const root = containingRoot(path, roots);
+      return root !== null && rootReachable.get(root) === false;
+    };
+    const ids = [...skipped];
+    let offline = 0;
+    const toList: Array<{ id: number; path: string; file_dev: number | null }> = [];
+    for (const track of candidates) {
+      if (offlineUnderRoot(track.path)) offline += 1;
+      else toList.push(track);
+    }
+    const presence = await presenceOfRows(toList);
+    const absent = toList.filter((track) => presence.get(track.id) === 'absent');
+    offline += toList.filter((track) => presence.get(track.id) === 'unknown').length;
+    // Probe the folders of the tracks that are missing, and what is above
+    // them when nothing is there, before the proof reads them: it is the same
+    // check as the synchronous path, answered from what was just learned.
+    let pending = [...new Set(absent.map((track) => dirname(track.path)))];
+    while (pending.length) {
+      const probed = await mapWithLimit(pending, PRESENCE_CONCURRENCY, async (dir) => ({ dir, probe: await probeDirectoryAsync(dir, probes) }));
+      pending = [...new Set(probed.filter(({ dir, probe }) => !probe && dirname(dir) !== dir).map(({ dir }) => dirname(dir)))]
+        .filter((dir) => !probes.has(dir));
+    }
+    for (const track of absent) {
+      if (missingFileIsConfirmedGone({ path: track.path, fileDev: track.file_dev ?? null }, roots, probes)) ids.push(track.id);
+      else offline += 1;
+    }
+    return { checked: candidates.length + skipped.length, ids, offline };
+  }
+
+  private pruneCandidates(
+    targets: string[] | undefined,
+    roots: string[],
+  ): { candidates: Array<{ id: number; path: string; file_dev: number | null }>; skipped: number[] } {
+    const tracks = this.many<{ id: number; path: string; file_dev: number | null }>(
+      `SELECT id, path, file_dev FROM tracks`,
+    );
+    const normalizedTargets = indexPruneTargets(normalizePruneTargets(targets));
+    const inScope = normalizedTargets.size
+      ? tracks.filter((track) => matchesPruneTargets(track.path, normalizedTargets))
+      : tracks;
+    // Indexed by an earlier version from a folder scans now leave alone: the
+    // file is there, but it isn't music the library should hold.
+    const skipped: number[] = [];
+    const candidates = inScope.filter((track) => {
+      if (!isSkippedUnderRoot(track.path, roots)) return true;
+      skipped.push(track.id);
+      return false;
+    });
+    return { candidates, skipped };
+  }
+
+  private async collectPrunableTracksCached(targets: string[] | undefined, roots: string[]): Promise<PrunableTracks> {
+    const key = JSON.stringify([targets ?? null, roots]);
+    const kept = this.pruneSweep;
+    if (kept && kept.key === key && kept.version === this.contentVersion && Date.now() - kept.at < PRUNE_SWEEP_KEEP_MS) {
+      return kept.result;
+    }
+    const version = this.contentVersion;
+    const result = await this.collectPrunableTracksAsync(targets, roots);
+    this.pruneSweep = { key, version, at: Date.now(), result };
+    return result;
   }
 
   // Destructive, and only ever run by an explicit user action (Library
@@ -2745,7 +3180,15 @@ export class LibraryStore {
   // offline: an unplugged drive must not erase the history of everything on
   // it.
   pruneMissingTracks(targets?: string[], roots: string[] = []): LibraryPruneMissingResult {
-    const { checked, ids: missingIds, offline } = this.collectPrunableTracks(targets, roots);
+    return this.removePrunable(this.collectPrunableTracks(targets, roots));
+  }
+
+  async pruneMissingTracksAsync(targets?: string[], roots: string[] = []): Promise<LibraryPruneMissingResult> {
+    return this.removePrunable(await this.collectPrunableTracksCached(targets, roots));
+  }
+
+  private removePrunable({ checked, ids: missingIds, offline }: PrunableTracks): LibraryPruneMissingResult {
+    this.pruneSweep = null;
     if (!missingIds.length) return { checked, removed: 0, offline };
     const removedIds = this.removeTracksById(missingIds);
     return { checked, removed: removedIds.length, removedIds, offline };
@@ -3231,10 +3674,10 @@ export class LibraryStore {
     const rows = this.many<RawRow>(
       `SELECT ${TRACK_COLUMNS} FROM tracks
         WHERE id IN (${ids.map(() => '?').join(',')})
-          AND lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'
-        ORDER BY lower(replace(path, '/', '\\')) COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE, id`,
+          AND lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'`,
       [...ids, folderTrackPathPrefixParam(folder)],
     );
+    sortFolderRows(rows);
     return rows.slice(offset, offset + limit).map(rowToTrack);
   }
 
@@ -3242,54 +3685,56 @@ export class LibraryStore {
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
   ): number[] {
-    return this.queryFolderRows<FolderTrackIdRow>(
-      folderPath,
-      opts,
-      'id, path, disc_no, track_no, title',
-    ).map((row) => row.id);
+    return this.queryFolderRows(folderPath, opts).map((row) => row.id);
   }
 
   private queryFolderTrackRows(
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
   ): RawRow[] {
-    return this.queryFolderRows<RawRow>(folderPath, opts, TRACK_COLUMNS);
+    const ordered = this.queryFolderRows(folderPath, opts);
+    const byId = new Map<number, RawRow>();
+    const chunkSize = 500;
+    for (let i = 0; i < ordered.length; i += chunkSize) {
+      const chunk = ordered.slice(i, i + chunkSize).map((row) => row.id);
+      for (const row of this.many<RawRow>(
+        `SELECT ${TRACK_COLUMNS} FROM tracks WHERE id IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
+      )) {
+        byId.set(row.id, row);
+      }
+    }
+    return ordered.flatMap((row) => byId.get(row.id) ?? []);
   }
 
-  private queryFolderRows<T extends { path: string }>(
+  // The tracks of a folder in album order, a page of them. Only what the order
+  // needs is read here, so a whole recursive folder can be sorted before the
+  // page is cut from it.
+  private queryFolderRows(
     folderPath: string,
     opts: { recursive?: boolean; limit?: number; offset?: number } = {},
-    selectClause: string,
-  ): T[] {
+  ): FolderOrderRow[] {
     const folder = normalizeFolderPath(folderPath);
     if (!folder) return [];
     const recursive = !!opts.recursive;
     const limit = Math.max(1, Math.min(opts.limit ?? 100000, 100000));
     const offset = Math.max(0, opts.offset ?? 0);
-    const rows: T[] = [];
-    let matched = 0;
+    const rows: FolderOrderRow[] = [];
     const stmt = this.db.prepare(
-      `SELECT ${selectClause} FROM tracks
-        WHERE lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'
-        ORDER BY lower(replace(path, '/', '\\')) COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE, id`,
+      `SELECT id, path, disc_no, disc_inferred, track_no, title, album_key FROM tracks
+        WHERE lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'`,
     );
     try {
       stmt.bind([folderTrackPathPrefixParam(folder)] as unknown as import('sql.js').BindParams);
       while (stmt.step()) {
-        const row = stmt.getAsObject() as unknown as T;
-        if (!trackPathIsInFolder(row.path, folder, recursive)) continue;
-        if (matched < offset) {
-          matched += 1;
-          continue;
-        }
-        rows.push(row);
-        matched += 1;
-        if (rows.length >= limit) break;
+        const row = stmt.getAsObject() as unknown as FolderOrderRow;
+        if (trackPathIsInFolder(row.path, folder, recursive)) rows.push(row);
       }
-      return rows;
     } finally {
       stmt.free();
     }
+    sortFolderRows(rows);
+    return rows.slice(offset, offset + limit);
   }
 
   // Reads the track rows in slices by id (table order, the order a plain scan
@@ -3882,7 +4327,7 @@ export class LibraryStore {
               p.name,
               p.cover_art_path,
               p.cover_art_updated_at,
-              COUNT(pt.track_id) AS track_count,
+              COUNT(t.id) AS track_count,
               COALESCE(SUM(t.duration), 0) AS duration,
               p.created_at,
               p.updated_at
@@ -3905,16 +4350,20 @@ export class LibraryStore {
 
   savePlaylist(input: SavePlaylistInput): SavedPlaylist {
     const name = normalizePlaylistName(input.name);
-    const trackIds = input.trackIds
+    const wanted = input.trackIds
       .map((id) => Math.trunc(Number(id)))
       .filter((id) => Number.isFinite(id) && id > 0);
+    // An id with no track would be counted in the playlist and never listed.
+    const known = this.existingTrackIds(wanted);
+    const trackIds = wanted.filter((id) => known.has(id));
     const now = Date.now();
     let id = input.id ? Math.trunc(input.id) : 0;
+    let replacedCover: string | null = null;
 
     this.db.run('BEGIN');
     try {
       const existingById = id
-        ? this.one<{ id: number }>(`SELECT id FROM playlists WHERE id = ?`, [id])
+        ? this.one<{ id: number; cover_art_path: string | null }>(`SELECT id, cover_art_path FROM playlists WHERE id = ?`, [id])
         : null;
       const finalName = this.uniquePlaylistName(name, existingById ? id : 0);
       if (existingById) {
@@ -3932,12 +4381,16 @@ export class LibraryStore {
           `UPDATE playlists SET cover_art_path = NULL, cover_art_updated_at = NULL, updated_at = ? WHERE id = ?`,
           [now, id],
         );
+        replacedCover = existingById?.cover_art_path ?? null;
       } else if (input.coverImagePath?.trim()) {
-        const coverPath = this.writePlaylistCover(id, input.coverImagePath);
+        const coverName = this.writePlaylistCover(id, input.coverImagePath);
         this.db.run(
           `UPDATE playlists SET cover_art_path = ?, cover_art_updated_at = ?, updated_at = ? WHERE id = ?`,
-          [coverPath, now, now, id],
+          [coverName, now, now, id],
         );
+        // The same picture again lands on the same file name.
+        const previous = existingById?.cover_art_path ?? null;
+        if (previous && basename(this.playlistCoverFile(previous)) !== coverName) replacedCover = previous;
       }
 
       this.db.run(`DELETE FROM playlist_tracks WHERE playlist_id = ?`, [id]);
@@ -3957,9 +4410,39 @@ export class LibraryStore {
     }
 
     this.scheduleFlush();
+    if (replacedCover) this.removePlaylistCoverFile(replacedCover);
     const playlist = this.getPlaylist(id);
     if (!playlist) throw new Error('Playlist was not saved.');
     return playlist;
+  }
+
+  // Which of these track ids are rows, in chunks like getTracksByIdsInOrder.
+  private existingTrackIds(ids: number[]): Set<number> {
+    const unique = [...new Set(ids)];
+    const found = new Set<number>();
+    const chunkSize = 500;
+    for (let i = 0; i < unique.length; i += chunkSize) {
+      const chunk = unique.slice(i, i + chunkSize);
+      for (const row of this.many<{ id: number }>(
+        `SELECT id FROM tracks WHERE id IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
+      )) {
+        found.add(row.id);
+      }
+    }
+    return found;
+  }
+
+  // Covers are stored as the file's name inside the playlist-art folder, so a
+  // library.db restored under another user or on another machine still finds
+  // them. Libraries written before that hold the whole path; its last
+  // component is the same name.
+  private playlistCoverFile(stored: string): string {
+    return join(this.playlistArtDir, stored.split(/[\\/]/).pop() || stored);
+  }
+
+  private removePlaylistCoverFile(stored: string): void {
+    void fsp.unlink(this.playlistCoverFile(stored)).catch(() => {});
   }
 
   addTracksToPlaylist(input: AddTracksToPlaylistInput): SavedPlaylist | null {
@@ -3968,10 +4451,11 @@ export class LibraryStore {
     const playlist = this.getPlaylist(playlistId);
     if (!playlist) return null;
 
-    const trackIds = input.trackIds
+    const wanted = input.trackIds
       .map((id) => Math.trunc(Number(id)))
-      .filter((id) => Number.isFinite(id) && id > 0)
-      .filter((id) => !!this.getTrack(id));
+      .filter((id) => Number.isFinite(id) && id > 0);
+    const known = this.existingTrackIds(wanted);
+    const trackIds = wanted.filter((id) => known.has(id));
     if (!trackIds.length) return playlist;
 
     const startPosition =
@@ -4004,6 +4488,10 @@ export class LibraryStore {
 
   deletePlaylist(id: number): void {
     const playlistId = Math.trunc(id);
+    const cover = this.one<{ cover_art_path: string | null }>(
+      `SELECT cover_art_path FROM playlists WHERE id = ?`,
+      [playlistId],
+    )?.cover_art_path;
     this.db.run('BEGIN');
     try {
       this.db.run(`DELETE FROM playlist_tracks WHERE playlist_id = ?`, [playlistId]);
@@ -4014,6 +4502,7 @@ export class LibraryStore {
       throw err;
     }
     this.scheduleFlush();
+    if (cover) this.removePlaylistCoverFile(cover);
   }
 
   getPlaylistTracks(id: number): Track[] {
@@ -4032,10 +4521,11 @@ export class LibraryStore {
       `SELECT cover_art_path FROM playlists WHERE id = ?`,
       [Math.trunc(id)],
     );
-    if (!row?.cover_art_path || !existsSync(row.cover_art_path)) return null;
-    const mime = playlistCoverMime(row.cover_art_path);
+    const file = row?.cover_art_path ? this.playlistCoverFile(row.cover_art_path) : null;
+    if (!file || !existsSync(file)) return null;
+    const mime = playlistCoverMime(file);
     if (!mime) return null;
-    return { mime, data: readFileSync(row.cover_art_path) };
+    return { mime, data: readFileSync(file) };
   }
 
   exportPlaylistM3u(id: number): string {
@@ -4296,8 +4786,20 @@ export class LibraryStore {
         ORDER BY mtime ASC, year IS NULL, year ASC, artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
         LIMIT 4000`,
     );
+    // A library larger than the pool offers whole albums, picked by a spread
+    // through it that moves with the seed (or the day): the first six thousand
+    // tracks by artist name were the start of the alphabet, with the last album
+    // cut in half.
+    const eligibleCount = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks ${eligible}`)?.n ?? 0;
     const albumCandidates = yield* this.rankedTracksSteps(
-      `${eligible}
+      `${eligible}${eligibleCount > 6000 ? `
+          AND album_key IN (
+            SELECT album_key FROM tracks
+             ${eligible} AND album_key IS NOT NULL
+             GROUP BY album_key
+            HAVING COUNT(*) >= 4
+             ORDER BY ${rotatingIdOrder('MIN(id)', input.seed || undefined)}
+             LIMIT 300)` : ''}
         ORDER BY album_artist COLLATE NOCASE, album COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE
         LIMIT 6000`,
     );
@@ -4399,7 +4901,10 @@ export class LibraryStore {
   }
 
   saveTagRule(input: TagRuleInput): TagRule {
-    const compiled = parseRule(input.body);
+    // Strict here so a typo is refused with its position instead of being
+    // stored as a rule that quietly matches nothing; rules already stored are
+    // still parsed leniently below and at recompute.
+    const compiled = parseRule(input.body, { strict: true });
     if (!compiled.rule) {
       const err = compiled.errors[0];
       throw new Error(`tag rule "${input.name}" failed to parse: ${err?.message ?? 'unknown error'}`);
@@ -4450,6 +4955,12 @@ export class LibraryStore {
     this.db.run(`DELETE FROM track_tags WHERE tag_name = ?`, [rule.name]);
     this.db.run(`DELETE FROM tag_rules WHERE id = ?`, [Math.trunc(id)]);
     this.scheduleFlush();
+    // A rule that read this tag (tag:name) derived its own tags from it, and
+    // those stay until something recomputes. Only then is a pass worth it.
+    const dependents = this.listTagRules().some(
+      (other) => other.enabled && parseRule(other.body).rule?.references.includes(rule.name),
+    );
+    if (dependents) void this.recomputeTagsAsync().catch((err) => console.error('tag recompute failed', err));
   }
 
   setTagRuleEnabled(id: number, enabled: boolean): TagRule | null {
@@ -4486,17 +4997,22 @@ export class LibraryStore {
     return rows.map((row) => row.track_id);
   }
 
-  previewTagRule(input: { body: string; limit?: number }): {
-    ok: boolean;
-    errors: { message: string; line: number; column: number }[];
-    ruleName: string | null;
-    references: string[];
-    matchCount: number;
-    sampleTrackIds: number[];
-  } {
-    const compiled = parseRule(String(input.body || ''));
+  previewTagRule(input: { body: string; limit?: number }): TagRulePreview {
+    return runSync(this.previewTagRuleSteps(input));
+  }
+
+  /** previewTagRule in slices, for the IPC handler: it runs on every pause in typing. */
+  previewTagRuleAsync(input: { body: string; limit?: number }): Promise<TagRulePreview> {
+    return this.runSlicedJob(this.previewTagRuleSteps(input));
+  }
+
+  private *previewTagRuleSteps(input: { body: string; limit?: number }): Sliced<TagRulePreview> {
+    const compiled = parseRule(String(input.body || ''), { strict: true });
     if (!compiled.rule) {
-      return { ok: false, errors: compiled.errors, ruleName: null, references: [], matchCount: 0, sampleTrackIds: [] };
+      return {
+        ok: false, errors: compiled.errors, ruleName: null, references: [], matchCount: 0, sampleTrackIds: [],
+        sampledCount: 0, totalCount: 0,
+      };
     }
     const env = buildEvalEnvironment();
     const otherRules = this.listTagRules().filter((r) => r.enabled && r.name !== compiled.rule!.name);
@@ -4506,56 +5022,76 @@ export class LibraryStore {
       if (c.rule) parsedOthers.push({ ...c.rule, boost: rule.boost });
     }
     const rules: ParsedRule[] = [...parsedOthers, compiled.rule];
+    // Saving refuses a rule that closes a loop of references, so the preview
+    // says so too. Only the rules this one reaches are looked at: a loop among
+    // others is theirs to report, not a reason to blank an unrelated preview.
+    const byName = new Map(rules.map((rule) => [rule.name, rule] as const));
+    const reached = new Map<string, ParsedRule>();
+    const reach = (rule: ParsedRule): void => {
+      if (reached.has(rule.name)) return;
+      reached.set(rule.name, rule);
+      for (const ref of rule.references) {
+        const next = byName.get(ref);
+        if (next) reach(next);
+      }
+    };
+    reach(compiled.rule);
+    try {
+      topologicalSort([...reached.values()]);
+    } catch (err) {
+      return {
+        ok: false,
+        errors: [{
+          message: `tag rule "${compiled.rule.name}" would form a cycle: ${err instanceof Error ? err.message : String(err)}`,
+          line: 1,
+          column: 1,
+        }],
+        ruleName: compiled.rule.name, references: compiled.rule.references, matchCount: 0, sampleTrackIds: [],
+        sampledCount: 0, totalCount: 0,
+      };
+    }
     const limit = Math.max(1, Math.min(10000, Math.trunc(input.limit ?? 2000)));
     // The preview stands for the tag playlist, which leaves missing tracks
-    // out (getTrackIdsByTag), so its count and samples do too.
-    const rows = this.many<RawRow>(`SELECT ${TRACK_COLUMNS} FROM tracks WHERE missing_since IS NULL LIMIT ${limit}`);
-    const dnaIndex = this.buildDnaIndex();
+    // out (getTrackIdsByTag), so its count and samples do too. A library
+    // larger than the limit is sampled at an even stride through the ids: the
+    // first rows of the table are the oldest files and say little about the
+    // rest.
+    const totalCount = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks WHERE missing_since IS NULL`)?.n ?? 0;
+    const stride = Math.max(1, Math.ceil(totalCount / limit));
+    const rows = this.many<RawRow>(
+      `SELECT ${TRACK_COLUMNS} FROM tracks WHERE missing_since IS NULL${stride > 1 ? ` AND id % ${stride} = 0` : ''} LIMIT ${limit}`,
+    );
+    yield;
+    const dnaIndex = yield* this.dnaIndexSteps();
     let matchCount = 0;
     const samples: number[] = [];
+    // What evaluating the rule itself reported, once each: a rule that fails
+    // on every track matches none, and that is not the same as one that
+    // simply has no matches.
+    const evaluationErrors = new Set<string>();
     for (const row of rows) {
       const track = rowToTrack(row);
-      const baseContext: Omit<TrackContext, 'tags'> = {
-        id: track.id,
-        title: track.title,
-        artist: track.artist,
-        album: track.album,
-        albumArtist: track.albumArtist,
-        genre: track.genre,
-        year: track.year,
-        duration: track.duration,
-        bitrate: track.bitrate,
-        sampleRate: track.sampleRate,
-        size: track.size,
-        mtime: track.mtime,
-        bpm: track.bpm,
-        key: track.key,
-        format: audioExtension(track.path),
-        rating: track.rating,
-        ratingScore: track.ratingScore,
-        playCount: track.playCount,
-        skipCount: track.skipCount,
-        lastPlayed: track.lastPlayed,
-        lastSkipped: track.lastSkipped,
-        loved: Boolean(track.loved),
-        avoidAutoPlay: Boolean(track.avoidAutoPlay),
-        replayGainTrack: track.replayGainTrackDb,
-        replayGainAlbum: track.replayGainAlbumDb,
-        dna: dnaIndex.get(track.id) ?? null,
-      };
-      const evaluation = evaluateRulesForTrack({ rules, context: baseContext, env });
+      const evaluation = evaluateRulesForTrack({ rules, context: tagContextOf(track, dnaIndex), env });
+      for (const message of evaluation.errors.get(compiled.rule.name) ?? []) evaluationErrors.add(message);
       if (evaluation.tags.has(compiled.rule.name)) {
         matchCount += 1;
         if (samples.length < 12) samples.push(track.id);
       }
+      // A turn after every track: the slice budget decides whether it is
+      // given away, so a rule that is slow on each track cannot hold the main
+      // thread for a whole slice of them.
+      yield;
     }
+    const errors = [...evaluationErrors].slice(0, 5).map((message) => ({ message, line: 1, column: 1 }));
     return {
-      ok: true,
-      errors: [],
+      ok: errors.length === 0 || matchCount > 0,
+      errors,
       ruleName: compiled.rule.name,
       references: compiled.rule.references,
       matchCount,
       sampleTrackIds: samples,
+      sampledCount: rows.length,
+      totalCount,
     };
   }
 
@@ -4575,6 +5111,24 @@ export class LibraryStore {
   }
 
   recomputeTags(opts: TagRecomputeOptions = {}): TagRecomputeResult {
+    return runSync(this.recomputeTagsSteps(opts));
+  }
+
+  /**
+   * recomputeTags in slices, for the IPC handlers: a pass over a large library
+   * is seconds of evaluation. Passes take their turns, so two overlapping
+   * requests can't write over each other with different rules.
+   */
+  recomputeTagsAsync(opts: TagRecomputeOptions = {}): Promise<TagRecomputeResult> {
+    const run = this.tagRecomputeQueue.then(() => this.runSlicedJob(this.recomputeTagsSteps(opts)));
+    this.tagRecomputeQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  // The tags are evaluated first, in slices, and written in one transaction at
+  // the end, so what other code reads is the old set or the new one, never a
+  // half-built one, and a pass that fails leaves the old tags where they were.
+  private *recomputeTagsSteps(opts: TagRecomputeOptions): Sliced<TagRecomputeResult> {
     const rules = this.listTagRules().filter((r) => r.enabled);
     const parsedRules: ParsedRule[] = [];
     const errors: Record<string, string> = {};
@@ -4599,59 +5153,15 @@ export class LibraryStore {
     const targetIds = opts.trackIds && opts.trackIds.length
       ? opts.trackIds.map((id) => Math.trunc(Number(id))).filter((n) => Number.isFinite(n) && n > 0)
       : null;
-    const limitSql = opts.limit ? ` LIMIT ${Math.max(1, Math.trunc(opts.limit))}` : '';
-    const rows = targetIds
-      ? this.many<RawRow>(
-          `SELECT ${TRACK_COLUMNS} FROM tracks WHERE id IN (${targetIds.map(() => '?').join(',') || '0'})${limitSql}`,
-          targetIds,
-        )
-      : this.many<RawRow>(`SELECT ${TRACK_COLUMNS} FROM tracks${limitSql}`);
-
-    if (targetIds) {
-      this.db.run(
-        `DELETE FROM track_tags WHERE track_id IN (${targetIds.map(() => '?').join(',') || '0'})`,
-        targetIds,
-      );
-    } else {
-      this.db.run(`DELETE FROM track_tags`);
-    }
-
-    const dnaIndex = this.buildDnaIndex();
+    const limit = opts.limit ? Math.max(1, Math.trunc(opts.limit)) : Infinity;
+    const dnaIndex = yield* this.dnaIndexSteps();
     const pending: Array<[number, string]> = [];
+    const evaluatedIds: number[] = [];
     let tagsAssigned = 0;
-    let tracksEvaluated = 0;
-    for (const row of rows) {
+    const evaluate = (row: RawRow): void => {
       const track = rowToTrack(row);
-      const baseContext: Omit<TrackContext, 'tags'> = {
-        id: track.id,
-        title: track.title,
-        artist: track.artist,
-        album: track.album,
-        albumArtist: track.albumArtist,
-        genre: track.genre,
-        year: track.year,
-        duration: track.duration,
-        bitrate: track.bitrate,
-        sampleRate: track.sampleRate,
-        size: track.size,
-        mtime: track.mtime,
-        bpm: track.bpm,
-        key: track.key,
-        format: audioExtension(track.path),
-        rating: track.rating,
-        ratingScore: track.ratingScore,
-        playCount: track.playCount,
-        skipCount: track.skipCount,
-        lastPlayed: track.lastPlayed,
-        lastSkipped: track.lastSkipped,
-        loved: Boolean(track.loved),
-        avoidAutoPlay: Boolean(track.avoidAutoPlay),
-        replayGainTrack: track.replayGainTrackDb,
-        replayGainAlbum: track.replayGainAlbumDb,
-        dna: dnaIndex.get(track.id) ?? null,
-      };
       try {
-        const evaluation = evaluateRulesForTrack({ rules: parsedRules, context: baseContext, env });
+        const evaluation = evaluateRulesForTrack({ rules: parsedRules, context: tagContextOf(track, dnaIndex), env });
         for (const tag of evaluation.tags) pending.push([track.id, tag]);
         tagsAssigned += evaluation.tags.size;
         for (const [tagName, ruleErrors] of evaluation.errors) {
@@ -4660,11 +5170,64 @@ export class LibraryStore {
       } catch (err) {
         errors.__recompute__ = err instanceof Error ? err.message : String(err);
       }
-      tracksEvaluated += 1;
+      evaluatedIds.push(track.id);
+    };
+    if (targetIds) {
+      for (let i = 0; i < targetIds.length && evaluatedIds.length < limit; i += TAG_EVALUATION_SLICE) {
+        const chunk = targetIds.slice(i, i + TAG_EVALUATION_SLICE);
+        for (const row of this.many<RawRow>(
+          `SELECT ${TRACK_COLUMNS} FROM tracks WHERE id IN (${chunk.map(() => '?').join(',')})`,
+          chunk,
+        )) {
+          if (evaluatedIds.length < limit) evaluate(row);
+          yield;
+        }
+      }
+    } else {
+      let afterId = 0;
+      while (evaluatedIds.length < limit) {
+        const rows = this.many<RawRow>(
+          `SELECT ${TRACK_COLUMNS} FROM tracks WHERE id > ? ORDER BY id LIMIT ?`,
+          [afterId, Math.min(TAG_EVALUATION_SLICE, limit - evaluatedIds.length)],
+        );
+        if (!rows.length) break;
+        for (const row of rows) {
+          evaluate(row);
+          yield;
+        }
+        afterId = rows[rows.length - 1]!.id;
+      }
     }
-    this.bulkInsertTrackTags(pending);
+    if (this.closed) return { rulesEvaluated: parsedRules.length, tracksEvaluated: 0, tagsAssigned: 0, errors };
+
+    // A track can be removed (trash, prune, watcher) in a turn handed back
+    // above, and a tag row for it would fail the foreign key and lose the whole
+    // pass. Nothing yields between this check and the write.
+    const present = this.existingTrackIds(pending.map(([trackId]) => trackId));
+    const writable = pending.filter(([trackId]) => present.has(trackId));
+    tagsAssigned -= pending.length - writable.length;
+
+    this.db.run('BEGIN');
+    try {
+      // Only the tracks that were evaluated lose their old tags: a limited or
+      // targeted pass leaves the rest alone.
+      if (targetIds || opts.limit) {
+        const chunkSize = 500;
+        for (let i = 0; i < evaluatedIds.length; i += chunkSize) {
+          const chunk = evaluatedIds.slice(i, i + chunkSize);
+          this.db.run(`DELETE FROM track_tags WHERE track_id IN (${chunk.map(() => '?').join(',')})`, chunk);
+        }
+      } else {
+        this.db.run(`DELETE FROM track_tags`);
+      }
+      this.bulkInsertTrackTags(writable);
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
     this.scheduleFlush();
-    return { rulesEvaluated: parsedRules.length, tracksEvaluated, tagsAssigned, errors };
+    return { rulesEvaluated: parsedRules.length, tracksEvaluated: evaluatedIds.length, tagsAssigned, errors };
   }
 
   private buildDnaIndex(): Map<number, TrackDna> {
@@ -4674,39 +5237,50 @@ export class LibraryStore {
   // Once the background analysis has covered the library, every track has
   // DNA, and parsing all of it in one go held the main thread for a seeded
   // mix. The rows are read in keyset pages with a turn handed back between
-  // them, and a DNA change during the build starts it again.
+  // them. Analysis keeps saving DNA while the build runs, so those saves are
+  // noted (see saveAnalysis) and read again at the end; starting over for each
+  // one could keep a build from ever finishing. Anything that changes which
+  // tracks exist or what a file holds does start it again.
   private *dnaIndexSteps(): Sliced<Map<number, TrackDna>> {
     for (;;) {
       if (this.dnaIndexCache) return this.dnaIndexCache;
       const epoch = this.dnaIndexEpoch;
       const map = new Map<number, TrackDna>();
-      let afterId = 0;
-      let complete = true;
-      for (;;) {
-        const rows = this.many<{ id: number; dna_json: string | null }>(
-          `SELECT id, dna_json FROM tracks WHERE dna_json IS NOT NULL AND id > ? ORDER BY id LIMIT ?`,
-          [afterId, DNA_INDEX_SLICE],
-        );
-        for (const row of rows) {
-          if (!row.dna_json) continue;
-          try {
-            const parsed = JSON.parse(row.dna_json);
-            if (isValidTrackDna(parsed)) map.set(row.id, parsed);
-          } catch {
-            /* skip corrupt */
+      const savedDuringBuild = new Set<number>();
+      this.dnaIndexBuilds.add(savedDuringBuild);
+      try {
+        let afterId = 0;
+        let complete = true;
+        for (;;) {
+          const rows = this.many<{ id: number; dna_json: string | null }>(
+            `SELECT id, dna_json FROM tracks WHERE dna_json IS NOT NULL AND id > ? ORDER BY id LIMIT ?`,
+            [afterId, DNA_INDEX_SLICE],
+          );
+          for (const row of rows) addDnaToIndex(map, row);
+          if (rows.length < DNA_INDEX_SLICE) break;
+          afterId = rows[rows.length - 1].id;
+          yield;
+          if (epoch !== this.dnaIndexEpoch || this.dnaIndexCache) {
+            complete = false;
+            break;
           }
         }
-        if (rows.length < DNA_INDEX_SLICE) break;
-        afterId = rows[rows.length - 1].id;
-        yield;
-        if (epoch !== this.dnaIndexEpoch || this.dnaIndexCache) {
-          complete = false;
-          break;
+        if (!complete) continue;
+        const resaved = [...savedDuringBuild];
+        for (let i = 0; i < resaved.length; i += 500) {
+          const chunk = resaved.slice(i, i + 500);
+          for (const row of this.many<{ id: number; dna_json: string | null }>(
+            `SELECT id, dna_json FROM tracks WHERE id IN (${chunk.map(() => '?').join(',')})`,
+            chunk,
+          )) {
+            addDnaToIndex(map, row);
+          }
         }
+        this.dnaIndexCache = map;
+        return map;
+      } finally {
+        this.dnaIndexBuilds.delete(savedDuringBuild);
       }
-      if (!complete) continue;
-      this.dnaIndexCache = map;
-      return map;
     }
   }
 
@@ -4759,9 +5333,12 @@ export class LibraryStore {
       return this.runFolderRule(rule, Math.max(0, Math.trunc(sampleCount))).map(rowToTrack);
     }
 
-    const { where, params } = smartRuleWhere(rule);
+    const { where, params } = smartRuleWhere(rule, this.libraryPathStart());
+    // Past ten thousand matches the pool is a spread through the library; in
+    // table order it was the oldest rows.
+    const matching = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks ${where}`, params)?.n ?? 0;
     const rows = this.many<RawRow>(
-      `SELECT ${TRACK_COLUMNS} FROM tracks ${where} LIMIT 10000`,
+      `SELECT ${TRACK_COLUMNS} FROM tracks ${where}${matching > 10000 ? ` ORDER BY ${rotatingIdOrder('id')}` : ''} LIMIT 10000`,
       params,
     );
     yield;
@@ -4803,23 +5380,19 @@ export class LibraryStore {
 
   // The LIKE prefix is a cheap first pass; trackPathIsInFolder decides, so a
   // sibling folder whose name starts the same ("To Listen Later") is dropped.
+  // Rows come back in no particular order: the order a folder plays in can't
+  // be written in SQL (see sortFolderRows), and a count or a random sample
+  // has no use for one.
   private folderRuleStatement(
     rule: SmartPlaylistRule,
     columns: string,
-    ordered = true,
   ): import('sql.js').Statement | null {
     const folder = normalizeFolderPath(rule.folderPath);
     if (!folder) return null;
-    const { where, params } = smartRuleWhere(rule);
-    // Counting does not need folder order, and sorting every matching row to
-    // then throw the order away is most of the work for a large folder.
-    const order = ordered
-      ? `ORDER BY lower(replace(path, '/', '\\')) COLLATE NOCASE, disc_no, track_no, title COLLATE NOCASE, id`
-      : '';
+    const { where, params } = smartRuleWhere(rule, this.libraryPathStart());
     const stmt = this.db.prepare(
       `SELECT ${columns} FROM tracks
-        ${where ? `${where} AND` : 'WHERE'} lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'
-        ${order}`,
+        ${where ? `${where} AND` : 'WHERE'} lower(replace(path, '/', '\\')) LIKE ? ESCAPE '|'`,
     );
     try {
       stmt.bind([...params, folderTrackPathPrefixParam(folder)] as unknown as import('sql.js').BindParams);
@@ -4856,15 +5429,17 @@ export class LibraryStore {
         const slot = Math.floor(Math.random() * matched);
         if (slot < sample) rows[slot] = row;
       }
-      return rows;
     } finally {
       stmt.free();
     }
+    // A sample is random whatever order the rows were in.
+    if (sample <= 0) sortFolderRows(rows);
+    return rows;
   }
 
   private countFolderRuleMatches(rule: SmartPlaylistRule): number {
     const folder = normalizeFolderPath(rule.folderPath);
-    const stmt = this.folderRuleStatement(rule, 'path', false);
+    const stmt = this.folderRuleStatement(rule, 'path');
     if (!folder || !stmt) return 0;
     let matched = 0;
     try {
@@ -4880,7 +5455,7 @@ export class LibraryStore {
 
   private countSmartPlaylistRuleMatches(rule: SmartPlaylistRule): number {
     if (rule.folderPath) return this.countFolderRuleMatches(rule);
-    const { where, params } = smartRuleWhere(rule);
+    const { where, params } = smartRuleWhere(rule, this.libraryPathStart());
     const row = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks ${where}`, params);
     return Math.min(rule.count, Math.max(0, row?.n ?? 0));
   }
@@ -4909,15 +5484,21 @@ export class LibraryStore {
       where.push(`genre IS NOT NULL AND genre_fold LIKE ? ESCAPE '|'`);
       params.push(foldedLikeParam(genreQuery));
     }
+    const whereSql = `WHERE ${where.join(' AND ')}`;
+    // A seeded mix narrows its pool by similarity below. Without a seed the
+    // sequence builder looks at every candidate for every track it adds, so
+    // the pool is cut to what a mix of this length can use: 200 tracks times
+    // 10,000 candidates was a long turn of the main thread.
+    const poolLimit = input.seedTrackId ? 10000 : Math.max(1500, normalizeMixCount(input.count) * 12);
     let candidates = yield* this.rankedTracksSteps(
-      `WHERE ${where.join(' AND ')}
+      `${whereSql}
         ORDER BY
           CASE WHEN bpm > 0 THEN 0 ELSE 1 END,
           CASE WHEN key IS NOT NULL AND trim(key) <> '' THEN 0 ELSE 1 END,
           loved DESC,
           play_count DESC,
-          title COLLATE NOCASE
-        LIMIT 10000`,
+          ${this.poolTieBreak(whereSql, params, poolLimit)}
+        LIMIT ${poolLimit}`,
       params,
     );
 
@@ -4957,13 +5538,23 @@ export class LibraryStore {
     return this.cachedTracks(key, () => this.tasteMixSteps(wanted));
   }
 
+  // What orders the tracks that rank alike where a pool of candidates is cut
+  // at `limit`: the title while nothing is cut, which keeps small libraries as
+  // they were, and a spread through the ids, moving by the day, once the cut
+  // would otherwise take the start of the alphabet and nothing after it.
+  private poolTieBreak(whereSql: string, params: unknown[], limit: number): string {
+    const matching = this.one<{ n: number }>(`SELECT COUNT(*) AS n FROM tracks ${whereSql}`, params)?.n ?? 0;
+    return matching > limit ? rotatingIdOrder('id') : 'title COLLATE NOCASE';
+  }
+
   private *tasteMixSteps(input: TasteMixInput): Sliced<Track[]> {
     const count = normalizeMixCount(input.count);
-    const candidates = yield* this.rankedTracksSteps(
-      `WHERE path IS NOT NULL
+    const eligible = `WHERE path IS NOT NULL
           AND avoid_auto_play = 0
-          AND missing_since IS NULL
-        ORDER BY loved DESC, rating DESC, play_count DESC, last_played DESC, title COLLATE NOCASE
+          AND missing_since IS NULL`;
+    const candidates = yield* this.rankedTracksSteps(
+      `${eligible}
+        ORDER BY loved DESC, rating DESC, play_count DESC, last_played DESC, ${this.poolTieBreak(eligible, [], 10000)}
         LIMIT 10000`,
     );
 
@@ -5063,6 +5654,20 @@ export class LibraryStore {
     const trackId = Math.trunc(Number(id));
     if (!Number.isFinite(trackId) || trackId <= 0) return null;
     const next = normalizeTrackRating(rating);
+    // Choosing the stars a track already shows leaves its fine score alone: a
+    // score of 87 is four stars, and four stars again is not a reason to make
+    // it 80.
+    const current = this.one<{ rating: number; rating_score: number | null }>(
+      `SELECT rating, rating_score FROM tracks WHERE id = ?`,
+      [trackId],
+    );
+    if (
+      current
+      && current.rating === next
+      && (next === 0 || (current.rating_score != null && Math.max(0, Math.min(5, Math.round(current.rating_score / 20))) === next))
+    ) {
+      return this.getTrack(trackId);
+    }
     // Star changes also sync the fine score so the two stay coherent.
     // 0 stars clears the score; otherwise score = stars * 20.
     const nextScore = next === 0 ? null : next * 20;
@@ -5184,6 +5789,9 @@ export class LibraryStore {
     this.db.run(`DELETE FROM track_tags WHERE track_id NOT IN (SELECT id FROM tracks)`);
     let changed = this.db.getRowsModified() > 0;
     this.db.run(`UPDATE list_items SET track_id = NULL WHERE track_id IS NOT NULL AND track_id NOT IN (SELECT id FROM tracks)`);
+    changed = changed || this.db.getRowsModified() > 0;
+    // Items of a list deleted after the cascade stopped holding.
+    this.db.run(`DELETE FROM list_items WHERE list_id NOT IN (SELECT id FROM lists)`);
     changed = changed || this.db.getRowsModified() > 0;
     if (changed) this.scheduleFlush();
   }
@@ -5635,7 +6243,9 @@ export class LibraryStore {
       if (index) {
         for (const save of saves) if (save.dna && isValidTrackDna(save.dna)) index.set(save.id, save.dna);
       } else {
-        this.dnaIndexEpoch += 1;
+        for (const build of this.dnaIndexBuilds) {
+          for (const save of saves) if (save.dna && isValidTrackDna(save.dna)) build.add(save.id);
+        }
       }
     }
     if (gainChanged) this.invalidateLibraryHealthCache();
@@ -5897,6 +6507,21 @@ export class LibraryStore {
   }
 
   importListeningHistory(entries: HistoryImportEntry[]): HistoryImportReport {
+    return runSync(this.importListeningHistorySteps(entries));
+  }
+
+  /**
+   * importListeningHistory in slices, for the IPC handler: a Last.fm export is
+   * tens of thousands of plays to match and insert. The plays go in batches,
+   * each its own transaction with the play counts it implies, and a run that
+   * is cut short imports the rest the next time because plays already in the
+   * history are counted as duplicates.
+   */
+  importListeningHistoryAsync(entries: HistoryImportEntry[]): Promise<HistoryImportReport> {
+    return this.runSlicedJob(this.importListeningHistorySteps(entries));
+  }
+
+  private *importListeningHistorySteps(entries: HistoryImportEntry[]): Sliced<HistoryImportReport> {
     if (entries.length > HISTORY_IMPORT_MAX_ENTRIES) {
       throw new Error(`History import is limited to ${HISTORY_IMPORT_MAX_ENTRIES.toLocaleString()} entries per batch.`);
     }
@@ -5912,31 +6537,34 @@ export class LibraryStore {
       invalidSamples: [],
     };
     const index = this.buildHistoryImportIndex();
+    yield;
     const matched: MatchedHistoryImportEntry[] = [];
 
-    entries.forEach((entry, indexInInput) => {
+    for (const [indexInInput, entry] of entries.entries()) {
+      if (indexInInput > 0 && indexInInput % HISTORY_IMPORT_SLICE === 0) yield;
       const issueBase = entryToIssue(entry, entry.row ?? indexInInput + 1);
       const playedAt = Math.trunc(Number(entry.playedAt));
       if (!Number.isFinite(playedAt) || playedAt < 0) {
         report.invalid += 1;
         pushIssue(report.invalidSamples, { ...issueBase, reason: 'missing-or-invalid-timestamp', playedAt: null });
-        return;
+        continue;
       }
       const match = matchHistoryImportEntry(entry, index);
       if (match.kind === 'missing') {
         report.unmatched += 1;
         pushIssue(report.unmatchedSamples, { ...issueBase, reason: 'no-library-match', playedAt });
-        return;
+        continue;
       }
       if (match.kind === 'ambiguous') {
         report.ambiguous += 1;
         pushIssue(report.ambiguousSamples, { ...issueBase, reason: 'ambiguous-library-match', playedAt });
-        return;
+        continue;
       }
       matched.push({ trackId: match.trackId, playedAt });
-    });
+    }
 
     const existing = this.getExistingPlayImportKeys(matched);
+    yield;
     const pending = new Set<string>();
     const toInsert: MatchedHistoryImportEntry[] = [];
     for (const item of matched) {
@@ -5949,42 +6577,52 @@ export class LibraryStore {
       toInsert.push(item);
     }
 
-    if (!toInsert.length) return report;
+    for (let from = 0; from < toInsert.length; from += HISTORY_IMPORT_SLICE) {
+      // A track removed in one of the turns handed back since the match would
+      // fail the foreign key and strand the batches already written, so its
+      // plays are counted as unmatched. Nothing yields between this check and
+      // the write.
+      const slice = toInsert.slice(from, from + HISTORY_IMPORT_SLICE);
+      const present = this.existingTrackIds(slice.map((item) => item.trackId));
+      const batch = slice.filter((item) => present.has(item.trackId));
+      report.unmatched += slice.length - batch.length;
+      if (!batch.length) continue;
+      const byTrack = new Map<number, { count: number; lastPlayed: number }>();
+      for (const item of batch) {
+        const current = byTrack.get(item.trackId);
+        if (!current) byTrack.set(item.trackId, { count: 1, lastPlayed: item.playedAt });
+        else {
+          current.count += 1;
+          current.lastPlayed = Math.max(current.lastPlayed, item.playedAt);
+        }
+      }
 
-    const byTrack = new Map<number, { count: number; lastPlayed: number }>();
-    for (const item of toInsert) {
-      const current = byTrack.get(item.trackId);
-      if (!current) byTrack.set(item.trackId, { count: 1, lastPlayed: item.playedAt });
-      else {
-        current.count += 1;
-        current.lastPlayed = Math.max(current.lastPlayed, item.playedAt);
+      this.db.run('BEGIN');
+      try {
+        for (const item of batch) {
+          this.db.run(`INSERT INTO play_history (track_id, played_at) VALUES (?, ?)`, [item.trackId, item.playedAt]);
+        }
+        for (const [trackId, summary] of byTrack) {
+          this.db.run(
+            `UPDATE tracks
+                SET play_count = play_count + ?,
+                    last_played = CASE
+                      WHEN last_played IS NULL OR last_played < ? THEN ?
+                      ELSE last_played
+                    END
+              WHERE id = ?`,
+            [summary.count, summary.lastPlayed, summary.lastPlayed, trackId],
+          );
+        }
+        this.db.run('COMMIT');
+      } catch (err) {
+        this.db.run('ROLLBACK');
+        throw err;
       }
+      report.imported += batch.length;
+      this.scheduleFlush({ slow: true });
+      yield;
     }
-
-    this.db.run('BEGIN');
-    try {
-      for (const item of toInsert) {
-        this.db.run(`INSERT INTO play_history (track_id, played_at) VALUES (?, ?)`, [item.trackId, item.playedAt]);
-      }
-      for (const [trackId, summary] of byTrack) {
-        this.db.run(
-          `UPDATE tracks
-              SET play_count = play_count + ?,
-                  last_played = CASE
-                    WHEN last_played IS NULL OR last_played < ? THEN ?
-                    ELSE last_played
-                  END
-            WHERE id = ?`,
-          [summary.count, summary.lastPlayed, summary.lastPlayed, trackId],
-        );
-      }
-      this.db.run('COMMIT');
-    } catch (err) {
-      this.db.run('ROLLBACK');
-      throw err;
-    }
-    report.imported = toInsert.length;
-    this.scheduleFlush({ slow: true });
     return report;
   }
 
@@ -6009,11 +6647,51 @@ export class LibraryStore {
   }
 
   getListeningInsights(opts: { now?: number } = {}): ListeningInsights {
+    return runSync(this.listeningInsightsSteps(opts));
+  }
+
+  /**
+   * getListeningInsights in slices, for the IPC handler: the history can run to
+   * hundreds of thousands of plays after an import, and the view asks again on
+   * every open. What it works out is kept until a play, skip or edit changes it.
+   */
+  getListeningInsightsAsync(opts: { now?: number } = {}): Promise<ListeningInsights> {
+    const key = `insights:${Number.isFinite(Number(opts.now)) ? Math.trunc(Number(opts.now)) : Math.floor(Date.now() / 60_000)}`;
+    return this.derived
+      .resolve(key, () => this.contentVersion, () => this.runSlicedJob(this.listeningInsightsSteps(opts)))
+      .then((insights) => structuredClone(insights));
+  }
+
+  // Rows of a history table in keyset pages by id, a turn handed back between
+  // them. `from` carries the joins, and `where` and `params` any further test.
+  private *pagedHistoryRows<T extends { id: number }>(
+    select: string,
+    from: string,
+    idColumn: string,
+    where = '',
+    params: unknown[] = [],
+  ): Sliced<T[]> {
+    const out: T[] = [];
+    let afterId = 0;
+    for (;;) {
+      const rows = this.many<T>(
+        `SELECT ${select} FROM ${from} WHERE ${idColumn} > ?${where ? ` AND ${where}` : ''} ORDER BY ${idColumn} LIMIT ?`,
+        [afterId, ...params, HISTORY_PAGE],
+      );
+      if (!rows.length) return out;
+      for (const row of rows) out.push(row);
+      afterId = rows[rows.length - 1]!.id;
+      yield;
+    }
+  }
+
+  private *listeningInsightsSteps(opts: { now?: number }): Sliced<ListeningInsights> {
     const requestedNow = Number(opts.now);
     const now = Number.isFinite(requestedNow) ? Math.max(0, Math.trunc(requestedNow)) : Date.now();
     const todayStart = startOfLocalDay(now);
     const weekStart = startOfLocalDay(now, -6);
-    const playRows = this.many<{
+    const playRows = yield* this.pagedHistoryRows<{
+      id: number;
       track_id: number;
       played_at: number;
       artist: string;
@@ -6024,20 +6702,21 @@ export class LibraryStore {
       album_artist_display: string | null;
       duration: number | null;
     }>(
-      `SELECT h.track_id,
-              h.played_at,
-              t.artist,
-              t.album,
-              t.album_artist,
-              t.album_key,
-              t.album_display,
-              t.album_artist_display,
-              t.duration
-         FROM play_history h
-         JOIN tracks t ON t.id = h.track_id
-        ORDER BY h.played_at DESC, h.id DESC`,
+      `h.id,
+       h.track_id,
+       h.played_at,
+       t.artist,
+       t.album,
+       t.album_artist,
+       t.album_key,
+       t.album_display,
+       t.album_artist_display,
+       t.duration`,
+      'play_history h JOIN tracks t ON t.id = h.track_id',
+      'h.id',
     );
-    const skipRows = this.many<{
+    const skipRows = yield* this.pagedHistoryRows<{
+      id: number;
       track_id: number;
       skipped_at: number;
       artist: string;
@@ -6047,17 +6726,17 @@ export class LibraryStore {
       album_display: string | null;
       album_artist_display: string | null;
     }>(
-      `SELECT h.track_id,
-              h.skipped_at,
-              t.artist,
-              t.album,
-              t.album_artist,
-              t.album_key,
-              t.album_display,
-              t.album_artist_display
-         FROM skip_history h
-         JOIN tracks t ON t.id = h.track_id
-        ORDER BY h.skipped_at DESC, h.id DESC`,
+      `h.id,
+       h.track_id,
+       h.skipped_at,
+       t.artist,
+       t.album,
+       t.album_artist,
+       t.album_key,
+       t.album_display,
+       t.album_artist_display`,
+      'skip_history h JOIN tracks t ON t.id = h.track_id',
+      'h.id',
     );
 
     const uniqueTracks = new Set<number>();
@@ -6076,7 +6755,9 @@ export class LibraryStore {
     let lastPlayedAt: number | null = null;
     let lastSkippedAt: number | null = null;
 
+    let aggregated = 0;
     for (const row of playRows) {
+      if (++aggregated % HISTORY_PAGE === 0) yield;
       const playedAt = Math.max(0, Math.trunc(row.played_at));
       const duration = Math.max(0, Number(row.duration) || 0);
       uniqueTracks.add(row.track_id);
@@ -6116,6 +6797,7 @@ export class LibraryStore {
     }
 
     for (const row of skipRows) {
+      if (++aggregated % HISTORY_PAGE === 0) yield;
       const skippedAt = Math.max(0, Math.trunc(row.skipped_at));
       uniqueSkippedTracks.add(row.track_id);
       lastSkippedAt = lastSkippedAt == null ? skippedAt : Math.max(lastSkippedAt, skippedAt);
@@ -6169,36 +6851,57 @@ export class LibraryStore {
   }
 
   getWrappedStats(opts: { range?: WrappedRange; now?: number } = {}): WrappedStats {
+    return runSync(this.wrappedStatsSteps(opts));
+  }
+
+  /** getWrappedStats in slices, for the IPC handler; kept like getListeningInsightsAsync. */
+  getWrappedStatsAsync(opts: { range?: WrappedRange; now?: number } = {}): Promise<WrappedStats> {
+    const key = `wrapped:${opts.range ?? 'year'}:${Number.isFinite(Number(opts.now)) ? Math.trunc(Number(opts.now)) : Math.floor(Date.now() / 60_000)}`;
+    return this.derived
+      .resolve(key, () => this.contentVersion, () => this.runSlicedJob(this.wrappedStatsSteps(opts)))
+      .then((stats) => structuredClone(stats));
+  }
+
+  private *wrappedStatsSteps(opts: { range?: WrappedRange; now?: number }): Sliced<WrappedStats> {
     const requestedNow = Number(opts.now);
     const now = Number.isFinite(requestedNow) ? Math.max(0, Math.trunc(requestedNow)) : Date.now();
     const validRanges: WrappedRange[] = ['day', 'week', 'month', 'year', 'all'];
     const range: WrappedRange = validRanges.includes(opts.range as WrappedRange) ? (opts.range as WrappedRange) : 'year';
     const { start, end, label } = wrappedWindow(range, now);
 
-    const rows = this.many<{
+    const rows = yield* this.pagedHistoryRows<{
+      id: number;
       track_id: number;
       played_at: number;
       title: string;
       artist: string;
       album: string;
       album_artist: string;
+      album_key: string | null;
+      album_display: string | null;
+      album_artist_display: string | null;
       duration: number | null;
       genre: string | null;
       loved: number;
-      dna_json: string | null;
     }>(
-      `SELECT h.track_id, h.played_at, t.title, t.artist, t.album, t.album_artist, t.duration, t.genre, t.loved, t.dna_json
-         FROM play_history h
-         JOIN tracks t ON t.id = h.track_id
-        WHERE h.played_at >= ? AND h.played_at <= ?`,
+      `h.id, h.track_id, h.played_at, t.title, t.artist, t.album, t.album_artist,
+       t.album_key, t.album_display, t.album_artist_display, t.duration, t.genre, t.loved`,
+      'play_history h JOIN tracks t ON t.id = h.track_id',
+      'h.id',
+      'h.played_at >= ? AND h.played_at <= ?',
       [start, end],
     );
+    yield;
 
     // Global first-play per track → "discoveries" = tracks whose first-ever
-    // play landed inside this window.
+    // play landed inside this window. Plays of a track that is gone don't count.
     const firstPlays = this.many<{ track_id: number; first_at: number }>(
-      `SELECT track_id, MIN(played_at) AS first_at FROM play_history GROUP BY track_id`,
+      `SELECT h.track_id, MIN(h.played_at) AS first_at
+         FROM play_history h
+         JOIN tracks t ON t.id = h.track_id
+        GROUP BY h.track_id`,
     );
+    yield;
     let discoveries = 0;
     for (const fp of firstPlays) {
       const at = Math.trunc(fp.first_at);
@@ -6214,14 +6917,36 @@ export class LibraryStore {
     const uniqueTracks = new Set<number>();
     const uniqueArtists = new Set<string>();
     const lovedTracks = new Set<number>();
+    // The analysis of each track played, read once for the track and not once
+    // for each of its plays.
     const dnaSeen = new Map<number, TrackDna | null>();
+    const playedIds = [...new Set(rows.map((row) => row.track_id))];
+    for (let i = 0; i < playedIds.length; i += 500) {
+      const chunk = playedIds.slice(i, i + 500);
+      for (const row of this.many<{ id: number; dna_json: string | null }>(
+        `SELECT id, dna_json FROM tracks WHERE dna_json IS NOT NULL AND id IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
+      )) {
+        let dna: TrackDna | null = null;
+        try {
+          const parsed = JSON.parse(row.dna_json!) as unknown;
+          dna = isValidTrackDna(parsed) ? parsed : null;
+        } catch {
+          dna = null;
+        }
+        dnaSeen.set(row.id, dna);
+      }
+      yield;
+    }
     let durationSec = 0;
     let energySum = 0;
     let brightSum = 0;
     let dnaWeight = 0;
     const clamp01 = (n: number): number => Math.min(1, Math.max(0, n));
 
+    let aggregated = 0;
     for (const row of rows) {
+      if (++aggregated % HISTORY_PAGE === 0) yield;
       const playedAt = Math.max(0, Math.trunc(row.played_at));
       const dur = Math.max(0, Number(row.duration) || 0);
       durationSec += dur;
@@ -6239,9 +6964,10 @@ export class LibraryStore {
       ab.duration += dur;
       artistAgg.set(artist, ab);
 
-      const album = row.album || 'Unknown Album';
-      const albumArtist = row.album_artist || artist;
-      const akey = `${albumArtist}\u0000${album}`;
+      // Named and counted the way the album grid has them, as Insights does.
+      const album = row.album_display || row.album || 'Unknown Album';
+      const albumArtist = row.album_artist_display || row.album_artist || artist;
+      const akey = row.album_key ?? `${albumArtist}\u0000${album}`;
       const al = albumAgg.get(akey) ?? { album, albumArtist, plays: 0 };
       al.plays += 1;
       albumAgg.set(akey, al);
@@ -6253,18 +6979,6 @@ export class LibraryStore {
       const dk = localDateKey(playedAt);
       dayPlays.set(dk, (dayPlays.get(dk) ?? 0) + 1);
 
-      if (!dnaSeen.has(row.track_id)) {
-        let dna: TrackDna | null = null;
-        if (row.dna_json) {
-          try {
-            const parsed = JSON.parse(row.dna_json) as unknown;
-            dna = isValidTrackDna(parsed) ? parsed : null;
-          } catch {
-            dna = null;
-          }
-        }
-        dnaSeen.set(row.track_id, dna);
-      }
       const dna = dnaSeen.get(row.track_id);
       if (dna) {
         energySum += clamp01(dna.rms * 0.5 + dna.onsetDensity * 0.5);
@@ -6497,7 +7211,18 @@ export class LibraryStore {
   }
 
   deleteList(id: number): void {
-    this.db.run(`DELETE FROM lists WHERE id = ?`, [Math.trunc(id)]);
+    const listId = Math.trunc(id);
+    // The items go explicitly: ON DELETE CASCADE only holds until sql.js saves
+    // the database (see dropOrphanedTrackRows).
+    this.db.run('BEGIN');
+    try {
+      this.db.run(`DELETE FROM list_items WHERE list_id = ?`, [listId]);
+      this.db.run(`DELETE FROM lists WHERE id = ?`, [listId]);
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
     this.scheduleFlush();
   }
 
@@ -6585,12 +7310,16 @@ export class LibraryStore {
     const lists = this.getLists().filter((list) => list.privacy === 'public')
       .map((l) => ({ ...l, items: this.listItems(l.id) }));
     const reviews = this.getReviews().filter((review) => review.privacy === 'public');
-    const insights = this.getListeningInsights({ now: opts.now });
     const esc = htmlEscape;
-    const topArtists = insights.topArtists
-      .slice(0, 10)
-      .map((a) => `<li>${esc(a.artist)} <span class="muted">· ${a.plays} plays</span></li>`)
-      .join('');
+    // Play counts are listening history, which stays out of a page whose
+    // owner has not made their profile public.
+    const sharesListening = profile.defaultPrivacy === 'public';
+    const topArtists = sharesListening
+      ? this.getListeningInsights({ now: opts.now }).topArtists
+          .slice(0, 10)
+          .map((a) => `<li>${esc(a.artist)} <span class="muted">· ${a.plays} plays</span></li>`)
+          .join('')
+      : '';
     const favoritesHtml = profile.favorites.length
       ? `<ul class="favorites">${profile.favorites.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>`
       : '<p class="muted">No favorites picked yet.</p>';
@@ -6639,7 +7368,7 @@ footer{margin-top:48px;color:rgba(238,242,238,.4);font:600 14px "JetBrains Mono"
 <h1>${esc(profile.displayName || 'Anonymous listener')}</h1>
 ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
 <h2>Five bags</h2>${favoritesHtml}
-<h2>Top artists</h2><ul>${topArtists || '<li class="muted">No plays yet.</li>'}</ul>
+${sharesListening ? `<h2>Top artists</h2><ul>${topArtists || '<li class="muted">No plays yet.</li>'}</ul>` : ''}
 <h2>Lists</h2>${listsHtml}
 <h2>Reviews</h2>${reviewsHtml}
 <footer>Exported from NewAmp · local-first music · no account, no cloud</footer>
@@ -6647,8 +7376,19 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
   }
 
   clearListeningHistory(): void {
-    this.db.run(`DELETE FROM play_history`);
-    this.db.run(`DELETE FROM skip_history`);
+    // The play and skip counts on the tracks stay: they are what Taste Mix and
+    // the sorts are built from, and clearing the event log is not meant to
+    // reset them. One transaction, so an error can't leave one table cleared
+    // and the other not.
+    this.db.run('BEGIN');
+    try {
+      this.db.run(`DELETE FROM play_history`);
+      this.db.run(`DELETE FROM skip_history`);
+      this.db.run('COMMIT');
+    } catch (err) {
+      this.db.run('ROLLBACK');
+      throw err;
+    }
     this.scheduleFlush();
   }
 
@@ -6757,9 +7497,9 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
     if (!ext) throw new Error('Playlist icon must be a PNG, JPEG, WebP, GIF, BMP, or AVIF image.');
     const data = readFileSync(source);
     const hash = createHash('sha1').update(data).digest('hex').slice(0, 16);
-    const destination = join(this.playlistArtDir, `playlist-${Math.trunc(id)}-${hash}${ext}`);
-    writeFileSync(destination, data);
-    return destination;
+    const name = `playlist-${Math.trunc(id)}-${hash}${ext}`;
+    writeFileSync(join(this.playlistArtDir, name), data);
+    return name;
   }
 
   private uniquePlaylistName(baseName: string, excludeId: number): string {
@@ -6791,7 +7531,7 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
               p.name,
               p.cover_art_path,
               p.cover_art_updated_at,
-              COUNT(pt.track_id) AS track_count,
+              COUNT(t.id) AS track_count,
               COALESCE(SUM(t.duration), 0) AS duration,
               p.created_at,
               p.updated_at
@@ -6824,11 +7564,23 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
   private resolveTrackByPath(path: string): { id: number } | null {
     const exact = this.one<{ id: number }>(`SELECT id FROM tracks WHERE path = ?`, [path]);
     if (exact) return exact;
-    const normalized = path.replace(/\\/g, '/').toLowerCase();
-    return this.one<{ id: number }>(
-      `SELECT id FROM tracks WHERE lower(replace(path, '\\', '/')) = ? LIMIT 1`,
-      [normalized],
-    );
+    // SQLite's lower() only folds ASCII and knows nothing of Unicode forms, so
+    // the comparison is made here, on both sides alike, through an index that
+    // is built once and not a scan of the table for each path.
+    const id = this.foldedPathIndex().get(foldImportedPath(path));
+    return id == null ? null : { id };
+  }
+
+  private foldedPathIndex(): Map<string, number> {
+    const kept = this.derived.get<Map<string, number>>('path-fold-index', this.contentVersion);
+    if (kept) return kept;
+    const index = new Map<string, number>();
+    for (const row of this.many<{ id: number; path: string }>(`SELECT id, path FROM tracks ORDER BY id`)) {
+      const key = foldImportedPath(row.path);
+      if (!index.has(key)) index.set(key, row.id);
+    }
+    this.derived.set('path-fold-index', this.contentVersion, index);
+    return index;
   }
 
   private buildHistoryImportIndex(): HistoryImportIndex {
@@ -6852,21 +7604,23 @@ ${profile.bio ? `<p>${esc(profile.bio)}</p>` : ''}
     return { pathExact, pathNormalized, identity };
   }
 
+  // The plays already stored for the tracks being imported. Reading every
+  // play of those tracks, a few hundred tracks at a time, takes a query per
+  // chunk where asking for each (track, time) pair took one OR term per entry.
   private getExistingPlayImportKeys(entries: MatchedHistoryImportEntry[]): Set<string> {
     const out = new Set<string>();
-    for (let i = 0; i < entries.length; i += 250) {
-      const slice = entries.slice(i, i + 250);
-      if (!slice.length) continue;
-      const params: unknown[] = [];
-      const where = slice.map((entry) => {
-        params.push(entry.trackId, entry.playedAt);
-        return '(track_id = ? AND played_at = ?)';
-      });
+    const trackIds = [...new Set(entries.map((entry) => entry.trackId))];
+    const wanted = new Set(entries.map(historyImportPlayKey));
+    for (let i = 0; i < trackIds.length; i += 500) {
+      const chunk = trackIds.slice(i, i + 500);
       const rows = this.many<{ track_id: number; played_at: number }>(
-        `SELECT track_id, played_at FROM play_history WHERE ${where.join(' OR ')}`,
-        params,
+        `SELECT track_id, played_at FROM play_history WHERE track_id IN (${chunk.map(() => '?').join(',')})`,
+        chunk,
       );
-      for (const row of rows) out.add(historyImportPlayKey({ trackId: row.track_id, playedAt: row.played_at }));
+      for (const row of rows) {
+        const key = historyImportPlayKey({ trackId: row.track_id, playedAt: row.played_at });
+        if (wanted.has(key)) out.add(key);
+      }
     }
     return out;
   }
@@ -7093,33 +7847,118 @@ function normalizedPlaylistCoverExt(path: string): string | null {
   return null;
 }
 
+export type PathPresence = 'present' | 'absent' | 'unknown';
+
+// Only these two say the path is not there. A timeout, an I/O error, a stale
+// handle or a refused permission says the storage did not answer, which is
+// nothing to hold against the file: a soft network mount returns them while it
+// is slow, and a track marked missing on that evidence is skipped by the queue.
+function presenceOfError(err: unknown): 'absent' | 'unknown' {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'unknown';
+}
+
+export function pathPresence(path: string): PathPresence {
+  try {
+    statSync(path);
+    return 'present';
+  } catch (err) {
+    return presenceOfError(err);
+  }
+}
+
+export async function pathPresenceAsync(path: string): Promise<PathPresence> {
+  try {
+    await fsp.stat(path);
+    return 'present';
+  } catch (err) {
+    return presenceOfError(err);
+  }
+}
+
+// After this many answers in a row that were neither yes nor no, the storage
+// is not answering and the pass stops asking: each one can cost a timeout.
+const MAX_CONSECUTIVE_UNKNOWN = 5;
+// Folders and files checked at once on the async paths.
+const PRESENCE_CONCURRENCY = 8;
+
+async function mapWithLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      out[index] = await fn(items[index]!);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+interface TargetStat {
+  kind: PruneTarget['kind'];
+  presence: PathPresence;
+}
+
+function resolvedPruneTargets(targets: string[] | undefined): string[] {
+  if (!targets?.length) return [];
+  const resolved = new Set<string>();
+  for (const target of targets) {
+    if (typeof target === 'string' && target.trim()) resolved.add(resolvePath(target));
+  }
+  return [...resolved];
+}
+
+// Deleted watcher events often point at paths that no longer stat, and a
+// vanished directory can contain a dot, so the kind is a guess until a stat
+// says otherwise.
+function guessedTargetKind(resolved: string): PruneTarget['kind'] {
+  return extname(resolved) ? 'file' : 'dir';
+}
+
+function statTarget(resolved: string): TargetStat {
+  try {
+    return { kind: statSync(resolved).isDirectory() ? 'dir' : 'file', presence: 'present' };
+  } catch (err) {
+    return { kind: guessedTargetKind(resolved), presence: presenceOfError(err) };
+  }
+}
+
+async function statTargetAsync(resolved: string): Promise<TargetStat> {
+  try {
+    return { kind: (await fsp.stat(resolved)).isDirectory() ? 'dir' : 'file', presence: 'present' };
+  } catch (err) {
+    return { kind: guessedTargetKind(resolved), presence: presenceOfError(err) };
+  }
+}
+
+function buildPruneTargets(resolved: string[], stats: TargetStat[]): PruneTarget[] {
+  const out: PruneTarget[] = [];
+  const seen = new Set<string>();
+  resolved.forEach((path, index) => {
+    const { kind, presence } = stats[index]!;
+    const key = normalizedPruneKey(path);
+    const seenKey = `${kind}:${key}`;
+    if (seen.has(seenKey)) return;
+    seen.add(seenKey);
+    out.push({ kind, key, exists: presence === 'present', unknown: presence === 'unknown' });
+  });
+  return out;
+}
+
 // Exported with indexPruneTargets and matchesPruneTargets for the timing
 // test; nothing outside this module uses them otherwise.
 export function normalizePruneTargets(targets: string[] | undefined): PruneTarget[] {
-  if (!targets?.length) return [];
-  const out: PruneTarget[] = [];
-  const seen = new Set<string>();
+  const resolved = resolvedPruneTargets(targets);
+  return buildPruneTargets(resolved, resolved.map(statTarget));
+}
 
-  for (const target of targets) {
-    if (typeof target !== 'string' || !target.trim()) continue;
-    const resolved = resolvePath(target);
-    let kind: PruneTarget['kind'] = extname(resolved) ? 'file' : 'dir';
-    let exists = false;
-    try {
-      const stat = statSync(resolved);
-      kind = stat.isDirectory() ? 'dir' : 'file';
-      exists = true;
-    } catch {
-      // Deleted watcher events often point at paths that no longer stat.
-    }
-    const key = normalizedPruneKey(resolved);
-    const seenKey = `${kind}:${key}`;
-    if (seen.has(seenKey)) continue;
-    seen.add(seenKey);
-    out.push({ kind, key, exists });
-  }
-
-  return out;
+// The same without holding the main thread for every stat, for the watcher's
+// reconcile after a bulk copy, which can name thousands of files.
+async function normalizePruneTargetsAsync(targets: string[] | undefined): Promise<PruneTarget[]> {
+  const resolved = resolvedPruneTargets(targets);
+  return buildPruneTargets(resolved, await mapWithLimit(resolved, PRESENCE_CONCURRENCY, statTargetAsync));
 }
 
 // Target keys as a Set, so a row costs one lookup per path segment rather
@@ -7146,19 +7985,116 @@ export function matchesPruneTargets(path: string, targets: Set<string>): boolean
 // The ids among these tracks whose file isn't there. Each folder is checked
 // once before its files: a folder that is gone answers for every track in
 // it, so a dropped share costs one stat per folder rather than one per file.
+// A folder or file that did not answer is not counted as gone.
 function absentTrackIds(rows: Array<{ id: number; path: string }>): number[] {
-  const folderPresent = new Map<string, boolean>();
+  const folderPresence = new Map<string, PathPresence>();
   const out: number[] = [];
+  let unknownRun = 0;
+  const check = (path: string): PathPresence => {
+    if (unknownRun >= MAX_CONSECUTIVE_UNKNOWN) return 'unknown';
+    const presence = pathPresence(path);
+    unknownRun = presence === 'unknown' ? unknownRun + 1 : 0;
+    return presence;
+  };
   for (const row of rows) {
     const folder = dirname(row.path);
-    let present = folderPresent.get(folder);
-    if (present === undefined) {
-      present = existsSync(folder);
-      folderPresent.set(folder, present);
+    let presence = folderPresence.get(folder);
+    if (presence === undefined) {
+      presence = check(folder);
+      folderPresence.set(folder, presence);
     }
-    if (!present || !existsSync(row.path)) out.push(row.id);
+    if (presence === 'absent') out.push(row.id);
+    else if (presence === 'present' && check(row.path) === 'absent') out.push(row.id);
   }
   return out;
+}
+
+// How the files of one folder stand, from one listing of the folder rather
+// than a stat for each: a network folder costs a round trip either way, and an
+// album has a dozen files. A name the listing doesn't hold is stat'ed to be
+// sure, since a listing spells names as stored and a path can differ from that
+// in case or Unicode form while still naming the file.
+async function presenceInFolder(
+  folder: string,
+  paths: string[],
+  stillAsking: () => boolean,
+  answered: (presence: PathPresence) => void,
+): Promise<PathPresence[]> {
+  if (!stillAsking()) return paths.map(() => 'unknown');
+  let names: Set<string>;
+  try {
+    names = new Set(await fsp.readdir(folder));
+  } catch (err) {
+    const presence = presenceOfError(err);
+    answered(presence);
+    return paths.map(() => presence);
+  }
+  answered('present');
+  const out: PathPresence[] = [];
+  for (const path of paths) {
+    if (names.has(basename(path))) {
+      out.push('present');
+      continue;
+    }
+    if (!stillAsking()) {
+      out.push('unknown');
+      continue;
+    }
+    const presence = await pathPresenceAsync(path);
+    answered(presence);
+    out.push(presence);
+  }
+  return out;
+}
+
+// The presence of every row's file, folder by folder, a few folders at a time.
+async function presenceOfRows(rows: Array<{ id: number; path: string }>): Promise<Map<number, PathPresence>> {
+  const byFolder = new Map<string, Array<{ id: number; path: string }>>();
+  for (const row of rows) {
+    const folder = dirname(row.path);
+    const bucket = byFolder.get(folder);
+    if (bucket) bucket.push(row);
+    else byFolder.set(folder, [row]);
+  }
+  let unknownRun = 0;
+  const stillAsking = () => unknownRun < MAX_CONSECUTIVE_UNKNOWN;
+  const answered = (presence: PathPresence) => {
+    unknownRun = presence === 'unknown' ? unknownRun + 1 : 0;
+  };
+  const out = new Map<number, PathPresence>();
+  await mapWithLimit([...byFolder], PRESENCE_CONCURRENCY, async ([folder, bucket]) => {
+    const presences = await presenceInFolder(folder, bucket.map((row) => row.path), stillAsking, answered);
+    bucket.forEach((row, index) => out.set(row.id, presences[index]!));
+  });
+  return out;
+}
+
+async function absentTrackIdsAsync(rows: Array<{ id: number; path: string }>): Promise<number[]> {
+  const presence = await presenceOfRows(rows);
+  return rows.filter((row) => presence.get(row.id) === 'absent').map((row) => row.id);
+}
+
+// Whether a row stored under one spelling of a name belongs to the file just
+// read under another spelling. A volume that keeps case and Unicode form
+// apart (the NFS and rclone shares) holds two files for two spellings, and one
+// that doesn't answers for both spellings with the same file. A stored spelling
+// that is gone, or that a timeout can't confirm, is a stale spelling of the
+// file that was just read.
+function sameFileUnderOtherSpelling(stored: string, incoming: string): boolean {
+  let storedStat: Stats;
+  try {
+    storedStat = statSync(stored);
+  } catch (err) {
+    // Gone under its old spelling: renamed. A share that didn't answer says
+    // nothing, and two rows are safer than one wrongly merged.
+    return presenceOfError(err) === 'absent';
+  }
+  try {
+    const incomingStat = statSync(incoming);
+    return storedStat.dev === incomingStat.dev && storedStat.ino === incomingStat.ino;
+  } catch {
+    return false;
+  }
 }
 
 function normalizedPruneKey(path: string): string {
@@ -7169,7 +8105,10 @@ function normalizedPruneKey(path: string): string {
 // ones don't, and folding there points one file's key at another file.
 // Same policy as library-watcher.ts.
 function foldPathCase(path: string): string {
-  return process.platform === 'win32' || process.platform === 'darwin' ? path.toLowerCase() : path;
+  // The same name arrives as NFC or NFD on a Mac depending on how the file was
+  // made or copied, and the volume treats both as one file.
+  if (process.platform === 'darwin') return path.normalize('NFC').toLowerCase();
+  return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
 // A missing file only proves it was deleted when the storage it lived on is
@@ -7206,6 +8145,8 @@ function missingFileIsConfirmedGone(
 
   const parent = dirname(track.path);
   const own = probeDirectory(parent, cache);
+  // A folder that timed out is not a folder that is gone.
+  if (own?.unreachable) return false;
   if (own?.realDirectory && own.hasEntries && (track.fileDev == null || own.dev === track.fileDev)) return true;
   if (!root || !rootProbe) return !!own?.realDirectory && track.fileDev != null && own.dev === track.fileDev;
 
@@ -7218,8 +8159,9 @@ function missingFileIsConfirmedGone(
     ancestor = probeDirectory(dir, cache);
   }
   // A link (or junction) whose target is gone reads as an existing entry with
-  // nothing behind it: that is an offline target, not a deletion.
-  if (!ancestor.realDirectory) return false;
+  // nothing behind it: that is an offline target, not a deletion. So is a
+  // folder on the way up that did not answer.
+  if (ancestor.unreachable || !ancestor.realDirectory) return false;
   if (track.fileDev != null) return ancestor.dev === track.fileDev;
 
   return ancestor.hasEntries
@@ -7235,28 +8177,27 @@ interface DirectoryProbe {
   // Not a symlink or junction, and it resolves.
   realDirectory: boolean;
   hasEntries: boolean;
+  // Looking at it failed for a reason other than it not being there (a
+  // timeout, an I/O error, no permission). It may well be there.
+  unreachable: boolean;
 }
 
 // Null when nothing is at `dir` at all. A dangling link or junction is an
-// entry that isn't a real directory.
+// entry that isn't a real directory. A folder that did not answer is neither
+// of those: it is `unreachable`, and nothing may be concluded from it.
 function probeDirectory(dir: string, cache: Map<string, DirectoryProbe | null>): DirectoryProbe | null {
   if (cache.has(dir)) return cache.get(dir)!;
-  let probe: DirectoryProbe | null = null;
+  let probe: DirectoryProbe | null;
   try {
     const link = lstatSync(dir);
     let stat: Stats | null = null;
+    let unreachable = false;
     try {
       stat = statSync(dir);
-    } catch {
-      // dangling link
+    } catch (err) {
+      unreachable = !isDanglingLinkError(err);
     }
-    probe = {
-      path: dir,
-      dev: stat ? Number(stat.dev) : Number(link.dev),
-      isDirectory: !!stat?.isDirectory(),
-      realDirectory: !link.isSymbolicLink() && !!stat?.isDirectory(),
-      hasEntries: false,
-    };
+    probe = directoryProbeOf(dir, link, stat, unreachable);
     if (probe.realDirectory) {
       const handle = opendirSync(dir);
       try {
@@ -7265,11 +8206,62 @@ function probeDirectory(dir: string, cache: Map<string, DirectoryProbe | null>):
         handle.closeSync();
       }
     }
-  } catch {
-    probe = null;
+  } catch (err) {
+    probe = probeAfterError(dir, err);
   }
   cache.set(dir, probe);
   return probe;
+}
+
+async function probeDirectoryAsync(dir: string, cache: Map<string, DirectoryProbe | null>): Promise<DirectoryProbe | null> {
+  if (cache.has(dir)) return cache.get(dir)!;
+  let probe: DirectoryProbe | null;
+  try {
+    const link = await fsp.lstat(dir);
+    let stat: Stats | null = null;
+    let unreachable = false;
+    try {
+      stat = await fsp.stat(dir);
+    } catch (err) {
+      unreachable = !isDanglingLinkError(err);
+    }
+    probe = directoryProbeOf(dir, link, stat, unreachable);
+    if (probe.realDirectory) {
+      const handle = await fsp.opendir(dir);
+      try {
+        probe.hasEntries = (await handle.read()) !== null;
+      } finally {
+        await handle.close();
+      }
+    }
+  } catch (err) {
+    probe = probeAfterError(dir, err);
+  }
+  // A probe another turn stored while this one waited is the one to keep.
+  if (!cache.has(dir)) cache.set(dir, probe);
+  return cache.get(dir)!;
+}
+
+// A link whose target is not there stats as missing.
+function isDanglingLinkError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP';
+}
+
+function directoryProbeOf(dir: string, link: Stats, stat: Stats | null, unreachable: boolean): DirectoryProbe {
+  return {
+    path: dir,
+    dev: stat ? Number(stat.dev) : Number(link.dev),
+    isDirectory: !!stat?.isDirectory(),
+    realDirectory: !link.isSymbolicLink() && !!stat?.isDirectory(),
+    hasEntries: false,
+    unreachable,
+  };
+}
+
+function probeAfterError(dir: string, err: unknown): DirectoryProbe | null {
+  if (presenceOfError(err) === 'absent') return null;
+  return { path: dir, dev: 0, isDirectory: false, realDirectory: false, hasEntries: false, unreachable: true };
 }
 
 // A track an earlier version indexed from another app's folder or a "._"
@@ -7463,7 +8455,13 @@ function pushIssue(samples: HistoryImportIssue[], issue: HistoryImportIssue): vo
   if (samples.length < 10) samples.push(issue);
 }
 
+// The id ends every order so tracks that tie on all of it come out the same
+// whether SQLite sorts the whole table or only the top of it for a page.
 function trackSortOrder(sort: string | undefined): string {
+  return `${trackSortColumns(sort)}, id`;
+}
+
+function trackSortColumns(sort: string | undefined): string {
   switch (sort) {
     case 'recent':
       return 'last_played DESC, mtime DESC, artist COLLATE NOCASE, title COLLATE NOCASE';
@@ -7672,7 +8670,9 @@ function tokenizeSearch(input: string): string[] {
   return tokens;
 }
 
-function trackSearchWhere(search: ParsedTrackSearch): { where: string[]; params: unknown[] } {
+// `pathStart` is how many characters of a path to leave out of a free-text
+// match (see LibraryStore.libraryPathStart).
+function trackSearchWhere(search: ParsedTrackSearch, pathStart = 0): { where: string[]; params: unknown[] } {
   const where: string[] = [];
   const params: unknown[] = [];
 
@@ -7680,17 +8680,27 @@ function trackSearchWhere(search: ParsedTrackSearch): { where: string[]; params:
     applyTrackSearchFilter(filter, where, params);
   }
 
+  const pathText = pathStart > 0 ? `substr(path, ${Math.trunc(pathStart) + 1})` : 'path';
   for (const term of search.terms) {
     // Tags are searched in their folded columns. The path is matched as typed:
     // LIKE already ignores ASCII case, which is all lower() ever did to it.
     const folded = foldedLikeParam(term);
+    const pathPatterns = unicodeFormLikeParams(term);
     where.push(
-      `(title_fold LIKE ? ESCAPE '|' OR artist_fold LIKE ? ESCAPE '|' OR album_fold LIKE ? ESCAPE '|' OR genre_fold LIKE ? ESCAPE '|' OR path LIKE ? ESCAPE '|')`,
+      `(title_fold LIKE ? ESCAPE '|' OR artist_fold LIKE ? ESCAPE '|' OR album_fold LIKE ? ESCAPE '|' OR genre_fold LIKE ? ESCAPE '|' OR ${pathText} LIKE ? ESCAPE '|'${pathPatterns.slice(1).map(() => ` OR ${pathText} LIKE ? ESCAPE '|'`).join('')})`,
     );
-    params.push(folded, folded, folded, folded, likeParam(term));
+    params.push(folded, folded, folded, folded, ...pathPatterns);
   }
 
   return { where, params };
+}
+
+// A path read from a Mac volume can spell an accented letter as one character
+// (NFC) or as a letter and a combining mark (NFD), and the stored column holds
+// whichever the file system gave. A typed term is matched in both forms.
+function unicodeFormLikeParams(value: string): string[] {
+  const forms = new Set([value.normalize('NFC'), value.normalize('NFD')]);
+  return [...forms].map(likeParam);
 }
 
 function applyTrackSearchFilter(
@@ -7709,8 +8719,9 @@ function applyTrackSearchFilter(
   if (field === 'genre') return pushTextFilter(where, params, 'genre_fold', value);
   if (field === 'path') {
     // Either separator matches either: stored paths are native to the OS.
-    where.push(`replace(lower(path), '\\', '/') LIKE ? ESCAPE '|'`);
-    params.push(likeParam(value.replace(/\\/g, '/')));
+    const patterns = unicodeFormLikeParams(value.replace(/\\/g, '/'));
+    where.push(`(${patterns.map(() => `replace(lower(path), '\\', '/') LIKE ? ESCAPE '|'`).join(' OR ')})`);
+    params.push(...patterns);
     return;
   }
   if (field === 'format' || field === 'ext') {
@@ -7928,6 +8939,27 @@ function normalizeReplayGainDb(value: unknown): number | null {
   const db = Number(value);
   if (!Number.isFinite(db)) return null;
   return Math.max(-30, Math.min(30, Number(db.toFixed(2))));
+}
+
+// A path from a playlist written elsewhere: either separator, any case, and
+// the accents in whichever Unicode form the other machine wrote them.
+function foldImportedPath(path: string): string {
+  return path.replace(/\\/g, '/').normalize('NFC').toLowerCase();
+}
+
+// A spread through the ids that changes from day to day, in SQL, to put where
+// a pool of candidates is cut off in place of the title: ordering by title
+// filled the pool from the start of the alphabet. `column` is the id (or the
+// smallest id of a group) and `seed` the text or number that moves the start.
+function rotatingIdOrder(column: string, seed: string | number = Math.floor(Date.now() / 86_400_000)): string {
+  let n: number;
+  if (typeof seed === 'number') {
+    n = Math.trunc(seed);
+  } else {
+    n = 2166136261;
+    for (let i = 0; i < seed.length; i += 1) n = Math.imul(n ^ seed.charCodeAt(i), 16777619);
+  }
+  return `((${column} * 2654435761 + ${n >>> 0}) % 4294967296)`;
 }
 
 function normalizeFileStatePath(path: string): string {
@@ -8481,7 +9513,7 @@ function smartRuleParams(rule: Omit<SmartPlaylistRule, 'id' | 'createdAt' | 'upd
   ];
 }
 
-function smartRuleWhere(rule: SmartPlaylistRule): { where: string; params: unknown[] } {
+function smartRuleWhere(rule: SmartPlaylistRule, pathStart = 0): { where: string; params: unknown[] } {
   // Generated sets feed Auto DJ and queues: an unavailable file can't play.
   const where: string[] = ['avoid_auto_play = 0', 'missing_since IS NULL'];
   const params: unknown[] = [];
@@ -8495,7 +9527,7 @@ function smartRuleWhere(rule: SmartPlaylistRule): { where: string; params: unkno
     params.push(...genreWords.map((word) => foldedLikeParam(word)));
   }
   if (rule.searchQuery) {
-    const searchWhere = trackSearchWhere(parseTrackSearchQuery(rule.searchQuery));
+    const searchWhere = trackSearchWhere(parseTrackSearchQuery(rule.searchQuery), pathStart);
     where.push(...searchWhere.where);
     params.push(...searchWhere.params);
   }

@@ -8,11 +8,14 @@
 // practice loop), a decline that keeps the preloaded deck, repeat-one
 // chaining the track to itself, a chained track that fails before it is
 // heard, durations corrected by the decoder, and the silent element that
-// keeps the OS media session while the transport plays.
+// keeps the OS media session while the transport plays. A transport of its own
+// on a fake clock covers what the 4 s fallback does around a producer's
+// 'wait' (a file being read again), and the worklet's real process() covers
+// what it does once the stream has drained.
 // Run: node scripts/gapless-client-test.mjs
 
 import { build } from 'esbuild';
-import { mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -343,6 +346,19 @@ async function until(test, timeoutMs, what) {
   }
 }
 
+// A library play is counted once half the track has been heard (or it plays
+// out), not when it starts. Walk the position forward the way playback does:
+// in steps under the five seconds the store reads as a seek, one engine tick
+// apart, so the heard time adds up.
+async function listenUpTo(seconds, move) {
+  let at = store.getState().currentTime;
+  while (at < seconds) {
+    at = Math.min(seconds, at + 4.9);
+    move(at);
+    await until(() => store.getState().currentTime >= at - 0.01, 2000, `the clock reaches ${at.toFixed(1)} s`);
+  }
+}
+
 // ---------------------------------------------------------------- scenarios
 
 await scenario('chained queue', async () => {
@@ -386,13 +402,19 @@ await scenario('chained queue', async () => {
   worklet.pos(tD, 0.3);
   await tick();
   off();
+  const playsOfDAtBoundary = main.plays.filter((id) => id === D.id).length;
+  const scrobbledAtBoundary = [...main.scrobbles];
+  // Half of D (300 s) is a play and a scrobble, each once however the boundary got there.
+  await listenUpTo(155, (at) => worklet.pos(tD, at));
   const out = {
     preparedB,
     repointed,
     unchained,
     rechained: tD != null,
     restartedStream: main.starts.length !== startsBefore,
+    playsOfDAtBoundary,
     playsOfD: main.plays.filter((id) => id === D.id).length,
+    scrobbledAtBoundary,
     scrobbled: main.scrobbles,
     maxStoreClockOnD: Number(maxClockOnD.toFixed(3)),
     // A prepare for what follows D issued at the boundary means the store
@@ -402,8 +424,10 @@ await scenario('chained queue', async () => {
   };
   check(preparedB && repointed && unchained && out.rechained, `chained queue: splice edits ${JSON.stringify(out)}`);
   check(!out.restartedStream && out.playing, 'chained queue: the boundary restarted the stream');
+  check(out.playsOfDAtBoundary === 0, `chained queue: D counted ${out.playsOfDAtBoundary} plays on arrival`);
   check(out.playsOfD === 1, `chained queue: D counted ${out.playsOfD} plays`);
-  check(out.scrobbled.length === 1 && out.scrobbled[0] === 'a', `chained queue: scrobbles ${JSON.stringify(out.scrobbled)}`);
+  check(out.scrobbledAtBoundary.length === 1 && out.scrobbledAtBoundary[0] === 'a', `chained queue: scrobbles at the boundary ${JSON.stringify(out.scrobbledAtBoundary)}`);
+  check(out.scrobbled.length === 2 && out.scrobbled[1] === 'd', `chained queue: scrobbles after half of D ${JSON.stringify(out.scrobbled)}`);
   check(out.maxStoreClockOnD < 1 && !out.earlyPrepareAfterD, `chained queue: A's end time leaked into D (${out.maxStoreClockOnD} s)`);
   return out;
 });
@@ -738,15 +762,20 @@ await scenario('chained failure before audible', async () => {
   } catch {
     onDecks = false;
   }
+  const playsOfBOnArrival = main.plays.filter((id) => id === B.id).length;
+  // B plays on from its start on the decks; half of it (300 s) is the one play.
+  const deck = decks().find((d) => !d.el.paused && d.el.src.includes('qf-b'));
+  if (deck) await listenUpTo(155, (at) => { deck.el.currentTime = at; });
   const out = {
     onDecks,
     transportActive: engine.isSampleTransportActive(),
     streamStopped: main.stops.length > stopsBefore,
     fallbackReason: engine.getSampleTransportInfo().fallbackReason,
+    playsOfBOnArrival,
     playsOfB: main.plays.filter((id) => id === B.id).length,
   };
   check(out.onDecks && !out.transportActive && out.streamStopped, `chained failure: B stayed on the failed stream ${JSON.stringify(out)}`);
-  check(out.fallbackReason === 'Resampling failed.' && out.playsOfB === 1, `chained failure: ${JSON.stringify(out)}`);
+  check(out.fallbackReason === 'Resampling failed.' && out.playsOfBOnArrival === 0 && out.playsOfB === 1, `chained failure: ${JSON.stringify(out)}`);
   return out;
 });
 
@@ -844,6 +873,190 @@ await scenario('session anchor', async () => {
   check(out.created && out.volume === 0 && out.muted === false && out.loop === true && !out.inGraph, `session anchor: element ${JSON.stringify(out)}`);
   check(out.playingWithTransport && out.pausedWithTransport && out.resumed && out.pausedOnStop && out.replayed, `session anchor: does not follow the transport ${JSON.stringify(out)}`);
   check(out.deckPlaying && out.pausedOnHandoff && out.pausedForStream, `session anchor: kept playing off the transport ${JSON.stringify(out)}`);
+  return out;
+});
+
+// ---------------------------------------------------------------- the producer's 'wait'
+
+/** A clock the page's timers run on, moved by hand. */
+function fakeClock() {
+  let now = 0;
+  let seq = 0;
+  const timers = new Map();
+  const real = { setTimeout: win.setTimeout, clearTimeout: win.clearTimeout };
+  win.setTimeout = (fn, ms = 0) => {
+    const id = ++seq;
+    timers.set(id, { at: now + ms, fn });
+    return id;
+  };
+  win.clearTimeout = (id) => {
+    timers.delete(id);
+  };
+  return {
+    advance(ms) {
+      const target = now + ms;
+      for (;;) {
+        const due = [...timers.entries()].filter(([, t]) => t.at <= target).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        now = due[1].at;
+        timers.delete(due[0]);
+        due[1].fn();
+      }
+      now = target;
+    },
+    restore() {
+      win.setTimeout = real.setTimeout;
+      win.clearTimeout = real.clearTimeout;
+    },
+  };
+}
+
+/** A transport of its own, with its worklet and the events it raised. */
+async function standalone() {
+  const t = new SampleTransport();
+  const events = [];
+  t.setListener((event) => events.push(event));
+  await t.attach(new FakeAudioContext(), new FakeNode());
+  const node = nodes.at(-1);
+  const startRequest = (trackId = 1) => ({ trackId, src: `/music/${trackId}.flac`, startAt: 0, gain: 1, playing: true });
+  const emit = (message, gen = t.gen) => node.port.onmessage({ data: { gen, ...message } });
+  const begin = async (durationSec = 300, trackId = 1) => {
+    libraryDurations.set(trackId, durationSec);
+    await t.start(startRequest(trackId));
+    const token = main.starts.at(-1).token;
+    emit({ t: 'segment', token, first: true, frame: 0, durationSec, sourceRate: 48000, resampler: 'none' });
+    return token;
+  };
+  const dry = (token, seconds) => emit({ t: 'pos', token, segmentFrames: Math.round(seconds * 48000), frame: 0, playing: true, starving: true, underruns: 1, queued: 0 });
+  const failed = () => events.filter((e) => e.type === 'failed');
+  const buffering = () => events.filter((e) => e.type === 'buffering').map((e) => e.on);
+  return { t, events, emit, begin, dry, failed, buffering };
+}
+
+await scenario('producer wait', async () => {
+  await fresh();
+  const clock = fakeClock();
+  try {
+    // Waiting on a read keeps the track for the long fallback, not 4 s.
+    let h = await standalone();
+    let token = await h.begin();
+    h.dry(token, 20);
+    h.emit({ t: 'wait', on: true });
+    clock.advance(89_000);
+    check(h.failed().length === 0, 'producer wait: the track was handed over while the producer was reading the file again');
+    clock.advance(1_500);
+    check(h.failed().length === 1 && /90 s/.test(h.failed()[0].message), `producer wait: the long fallback never came ${JSON.stringify(h.failed())}`);
+
+    // The wait ending while the worklet is still dry puts the 4 s rule back.
+    h = await standalone();
+    token = await h.begin();
+    h.dry(token, 20);
+    h.emit({ t: 'wait', on: true });
+    clock.advance(10_000);
+    h.emit({ t: 'wait', on: false });
+    clock.advance(3_900);
+    check(h.failed().length === 0, 'producer wait: handed over before 4 s after the wait ended');
+    clock.advance(200);
+    check(h.failed().length === 1 && /4 s/.test(h.failed()[0].message), `producer wait: the 4 s fallback did not come back ${JSON.stringify(h.failed())}`);
+
+    // A new start forgets the wait.
+    h = await standalone();
+    token = await h.begin();
+    h.emit({ t: 'wait', on: true });
+    token = await h.begin(300, 2);
+    h.dry(token, 5);
+    clock.advance(4_100);
+    check(h.failed().length === 1, 'producer wait: a new start kept the old stream wait');
+
+    // So does a seek.
+    h = await standalone();
+    token = await h.begin();
+    h.emit({ t: 'wait', on: true });
+    h.t.seek(100);
+    await sleep(20);
+    const seekedToken = main.starts.at(-1).token;
+    h.emit({ t: 'segment', token: seekedToken, first: true, frame: 0, durationSec: 300, sourceRate: 48000, resampler: 'none' });
+    h.dry(seekedToken, 1);
+    clock.advance(4_100);
+    check(h.failed().length === 1, 'producer wait: a seek kept the old stream wait');
+
+    // A wait from a stream that has been replaced is ignored.
+    h = await standalone();
+    token = await h.begin();
+    const oldGen = h.t.gen;
+    token = await h.begin(300, 2);
+    h.emit({ t: 'wait', on: true }, oldGen);
+    h.dry(token, 5);
+    clock.advance(4_100);
+    check(h.failed().length === 1, 'producer wait: a wait from a replaced stream was taken');
+
+    // Pausing while dry cancels the fallback.
+    h = await standalone();
+    token = await h.begin();
+    h.dry(token, 20);
+    h.emit({ t: 'wait', on: true });
+    h.t.pause();
+    clock.advance(200_000);
+    check(h.failed().length === 0, 'producer wait: a paused stream was handed over');
+    check(h.buffering().at(-1) === false, 'producer wait: pausing left the spinner on');
+
+    // Dry at the end of a track that has played out is waiting for the next one.
+    h = await standalone();
+    token = await h.begin(60);
+    h.dry(token, 60);
+    clock.advance(4_100);
+    check(h.failed().length === 0, 'producer wait: a track that played out was handed to the decks while the next opened');
+    clock.advance(90_000);
+    check(h.failed().length === 1, 'producer wait: nothing ever took over for a next track that never came');
+
+    // A start while the last stream was dry doesn't turn the spinner off before audio flows.
+    h = await standalone();
+    token = await h.begin();
+    h.dry(token, 20);
+    const before = h.buffering().length;
+    token = await h.begin(300, 2);
+    check(h.buffering().length === before, `producer wait: a new start turned the spinner off ${JSON.stringify(h.buffering())}`);
+    h.emit({ t: 'pos', token, segmentFrames: 4800, frame: 0, playing: true, starving: false, underruns: 1, queued: 100000 });
+    check(h.buffering().at(-1) === false, 'producer wait: the spinner stayed on once audio flowed');
+  } finally {
+    clock.restore();
+  }
+});
+
+await scenario('worklet drained', async () => {
+  // The real process(), once the stream has ended, stops reporting.
+  let frame = 0;
+  Object.defineProperty(globalThis, 'currentFrame', { get: () => frame, configurable: true });
+  globalThis.sampleRate = 48000;
+  let Processor = null;
+  globalThis.AudioWorkletProcessor = class {
+    constructor() {
+      this.port = { onmessage: null, posted: [], postMessage(m) { this.posted.push(m); } };
+    }
+  };
+  globalThis.registerProcessor = (_name, cls) => {
+    Processor = cls;
+  };
+  new Function(readFileSync(resolve('src/audio/gapless-processor.js'), 'utf8'))();
+  const processor = new Processor();
+  const dataPort = { postMessage() {}, close() {} };
+  processor.control({ t: 'data-port' }, [dataPort]);
+  processor.control({ t: 'flush', gen: 1, playing: true });
+  processor.receive({ t: 'seg', gen: 1, token: 1, durationSec: 1, gain: 1, sourceRate: 48000, resampler: 'none' });
+  processor.receive({ t: 'pcm', gen: 1, pcm: new Float32Array(2 * 8192) });
+  processor.receive({ t: 'end', gen: 1 });
+  const quantum = () => {
+    const out = [new Float32Array(128), new Float32Array(128)];
+    processor.process([], [out]);
+    frame += 128;
+  };
+  for (let i = 0; i < 80; i++) quantum();
+  const drained = processor.port.posted.filter((m) => m.t === 'drained').length;
+  const posted = processor.port.posted.length;
+  for (let i = 0; i < 200; i++) quantum();
+  const out = { drained, postedAfterDrain: processor.port.posted.length - posted };
+  check(out.drained === 1, `worklet drained: told the engine ${out.drained} times`);
+  check(out.postedAfterDrain === 0, `worklet drained: ${out.postedAfterDrain} messages after the end of the stream`);
   return out;
 });
 

@@ -67,7 +67,7 @@ assert.match(librarySource, /pruneMissingTracks/, 'LibraryStore should remove mi
 assert.match(mainSource, /library:prune-missing/, 'main process should expose prune IPC');
 // Auto-watch only marks missing files; deleting them is the explicit cleanup
 // above (see scripts/library-availability-test.mjs).
-assert.match(mainSource, /markTracksMissing\(stillMissing\)/, 'auto-watch should mark stale watched targets unavailable');
+assert.match(mainSource, /markTracksMissingAsync\(watched\)/, 'auto-watch should mark stale watched targets unavailable');
 assert.match(preloadSource, /pruneMissingTracks/, 'preload should expose prune API');
 assert.match(apiSource, /pruneMissingTracks/, 'browser-safe API should expose prune stub');
 assert.match(viewSource, /Clean missing files/, 'Library Health UI should expose stale file cleanup');

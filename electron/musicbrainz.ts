@@ -11,10 +11,18 @@ const MUSICBRAINZ_RELEASE_GROUP_ROOT = 'https://musicbrainz.org/ws/2/release-gro
 const COVER_ART_RELEASE_GROUP_ROOT = 'https://coverartarchive.org/release-group';
 const MUSICBRAINZ_USER_AGENT = NEWAMP_REPO_USER_AGENT;
 const MIN_REQUEST_SPACING_MS = 1100;
+const REQUEST_TIMEOUT_MS = 15_000;
+const MAX_RETRY_AFTER_MS = 10_000;
+const MAX_COVER_ART_BYTES = 8 * 1024 * 1024;
+const MUSICBRAINZ_HOST = 'musicbrainz.org';
 const COVER_ART_ALLOWED_HOSTS = ['coverartarchive.org', 'archive.org'];
 const COVER_ART_ALLOWED_SUFFIXES = ['.coverartarchive.org', '.archive.org'];
 
 let lastMusicBrainzRequestAt = 0;
+// Requests take their turn here, so a second lookup that arrives while the
+// first is still waiting out the spacing waits behind it instead of firing
+// at the same moment.
+let requestQueueTail: Promise<void> = Promise.resolve();
 
 type FetchResponse = {
   ok: boolean;
@@ -23,11 +31,13 @@ type FetchResponse = {
   text?: () => Promise<string>;
   arrayBuffer?: () => Promise<ArrayBuffer>;
   headers?: { get: (name: string) => string | null };
+  body?: { getReader: () => { read: () => Promise<{ done: boolean; value?: Uint8Array }>; cancel: () => Promise<void> } } | null;
+  url?: string;
 };
 
 type FetchImpl = (
   input: string | URL,
-  init?: { headers?: Record<string, string> },
+  init?: { headers?: Record<string, string>; signal?: AbortSignal },
 ) => Promise<FetchResponse>;
 
 export interface MusicBrainzLookupOptions {
@@ -92,37 +102,18 @@ export async function searchMusicBrainzMetadata(
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchImpl);
   if (!fetchImpl) throw new Error('MusicBrainz lookup requires fetch support.');
 
-  const now = options.now ?? (() => Date.now());
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const getLastRequestAt = options.lastRequestAt ?? (() => lastMusicBrainzRequestAt);
-  const setLastRequestAt = options.setLastRequestAt ?? ((value: number) => {
-    lastMusicBrainzRequestAt = value;
-  });
-
   const limit = Math.max(1, Math.min(10, Math.trunc(options.limit ?? 5)));
   const query = buildRecordingQuery(track);
   if (!query) return [];
-
-  const waitMs = Math.max(0, MIN_REQUEST_SPACING_MS - (now() - getLastRequestAt()));
-  if (waitMs > 0) await sleep(waitMs);
-  setLastRequestAt(now());
 
   const url = new URL(MUSICBRAINZ_ROOT);
   url.searchParams.set('query', query);
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('fmt', 'json');
 
-  const response = await fetchImpl(url.toString(), {
-    headers: {
-      Accept: 'application/json',
-      'User-Agent': options.userAgent ?? MUSICBRAINZ_USER_AGENT,
-    },
-  });
+  const response = await fetchMusicBrainz(url.toString(), fetchImpl, options);
 
-  if (!response.ok) {
-    const detail = response.text ? await response.text().catch(() => '') : '';
-    throw new Error(`MusicBrainz lookup failed (${response.status})${detail ? `: ${detail.slice(0, 160)}` : ''}`);
-  }
+  if (!response.ok) throw await musicBrainzFailure('MusicBrainz lookup failed', response);
 
   const data = await response.json();
   const rows = Array.isArray((data as { recordings?: unknown }).recordings)
@@ -141,35 +132,17 @@ export async function searchAlbumArt(
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchImpl);
   if (!fetchImpl) throw new Error('Album art lookup requires fetch support.');
 
-  const now = options.now ?? (() => Date.now());
-  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const getLastRequestAt = options.lastRequestAt ?? (() => lastMusicBrainzRequestAt);
-  const setLastRequestAt = options.setLastRequestAt ?? ((value: number) => {
-    lastMusicBrainzRequestAt = value;
-  });
   const limit = Math.max(1, Math.min(8, Math.trunc(options.limit ?? 5)));
   const query = buildReleaseGroupQuery(input);
   if (!query) return [];
-
-  const waitMs = Math.max(0, MIN_REQUEST_SPACING_MS - (now() - getLastRequestAt()));
-  if (waitMs > 0) await sleep(waitMs);
-  setLastRequestAt(now());
 
   const url = new URL(MUSICBRAINZ_RELEASE_GROUP_ROOT);
   url.searchParams.set('query', query);
   url.searchParams.set('limit', String(limit));
   url.searchParams.set('fmt', 'json');
 
-  const response = await fetchImpl(url.toString(), {
-    headers: {
-      Accept: 'application/json',
-      'User-Agent': options.userAgent ?? MUSICBRAINZ_USER_AGENT,
-    },
-  });
-  if (!response.ok) {
-    const detail = response.text ? await response.text().catch(() => '') : '';
-    throw new Error(`MusicBrainz album lookup failed (${response.status})${detail ? `: ${detail.slice(0, 160)}` : ''}`);
-  }
+  const response = await fetchMusicBrainz(url.toString(), fetchImpl, options);
+  if (!response.ok) throw await musicBrainzFailure('MusicBrainz album lookup failed', response);
 
   const data = await response.json();
   const groups = Array.isArray((data as { 'release-groups'?: unknown })['release-groups'])
@@ -194,27 +167,178 @@ export async function fetchAlbumArtImage(
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchImpl);
   if (!fetchImpl) throw new Error('Album art download requires fetch support.');
 
-  const sourceUrl = requireCoverArtDownloadUrl(candidate);
-  const response = await fetchImpl(sourceUrl, {
+  const userAgent = options.userAgent ?? MUSICBRAINZ_USER_AGENT;
+  const preferredUrl = requireCoverArtDownloadUrl(candidate);
+  // The large thumbnail is preferred; a release that doesn't have one stored,
+  // or whose copy is too big to cache, falls back to the 500 px size.
+  const smallerUrl = smallerCoverArtUrl(preferredUrl);
+  let failure: Error | null = null;
+  for (const sourceUrl of smallerUrl ? [preferredUrl, smallerUrl] : [preferredUrl]) {
+    const response = await fetchCoverArt(sourceUrl, fetchImpl, userAgent);
+    if (!response.ok || (!response.arrayBuffer && !response.body)) {
+      const detail = response.text ? await response.text().catch(() => '') : '';
+      failure = new Error(`Cover art download failed (${response.status})${detail ? `: ${detail.slice(0, 160)}` : ''}`);
+      continue;
+    }
+    const declaredMime = mimeFromResponse(response, sourceUrl);
+    let data: Buffer;
+    try {
+      data = await readCappedBody(response, MAX_COVER_ART_BYTES);
+    } catch (err) {
+      failure = err instanceof Error ? err : new Error(String(err));
+      continue;
+    }
+    if (data.byteLength < 256) throw new Error('Cover art download returned an empty image.');
+    const mime = sniffImageMime(data);
+    if (!mime) throw new Error(`Cover art download is not a JPEG, PNG or WebP image (${declaredMime}).`);
+    return { candidate, mime, data, sourceUrl };
+  }
+  throw failure ?? new Error('Cover art download failed.');
+}
+
+async function fetchCoverArt(url: string, fetchImpl: FetchImpl, userAgent: string): Promise<FetchResponse> {
+  const response = await fetchImpl(url, {
     headers: {
       Accept: 'image/*',
-      'User-Agent': options.userAgent ?? MUSICBRAINZ_USER_AGENT,
+      'User-Agent': userAgent,
     },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
-  if (!response.ok || !response.arrayBuffer) {
-    const detail = response.text ? await response.text().catch(() => '') : '';
-    throw new Error(`Cover art download failed (${response.status})${detail ? `: ${detail.slice(0, 160)}` : ''}`);
+  assertCoverArtHost(response);
+  return response;
+}
+
+// The CAA answers with a redirect to archive.org; wherever a request ended
+// up has to be on the same list as the address it started from.
+function assertCoverArtHost(response: FetchResponse): void {
+  if (response.url && !normalizeCoverArtUrl(response.url)) {
+    throw new Error('Cover art came from a host that is not allowed.');
   }
-  const mime = mimeFromResponse(response, sourceUrl);
-  const data = Buffer.from(await response.arrayBuffer());
-  if (data.byteLength < 256) throw new Error('Cover art download returned an empty image.');
-  if (data.byteLength > 8 * 1024 * 1024) throw new Error('Cover art image is too large to cache.');
-  return {
-    candidate,
-    mime,
-    data,
-    sourceUrl,
-  };
+}
+
+function smallerCoverArtUrl(url: string): string | null {
+  return /-1200\.(jpe?g|png|webp)(?:$|\?)/i.test(url) ? url.replace(/-1200\./, '-500.') : null;
+}
+
+// At most `limit` bytes of the body, checked before it is all read: a
+// declared length that is too large fails at once and a stream that runs
+// over is cut off.
+async function readCappedBody(response: FetchResponse, limit: number): Promise<Buffer> {
+  const tooLarge = () => new Error('Cover art image is too large to cache.');
+  const declared = Number(response.headers?.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) throw tooLarge();
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const data = Buffer.from(await response.arrayBuffer!());
+    if (data.byteLength > limit) throw tooLarge();
+    return data;
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done || !value) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
+
+// What the bytes are, not what the server said they were.
+function sniffImageMime(data: Buffer): string | null {
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'image/jpeg';
+  if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png';
+  }
+  if (data.length >= 12 && data.toString('latin1', 0, 4) === 'RIFF' && data.toString('latin1', 8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return null;
+}
+
+// One MusicBrainz request, after its turn. The service allows one request a
+// second; when it still answers 503 or 429 it is asked again once, after the
+// time it names.
+async function fetchMusicBrainz(
+  url: string,
+  fetchImpl: FetchImpl,
+  options: MusicBrainzLookupOptions,
+): Promise<FetchResponse> {
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 0; ; attempt += 1) {
+    await waitForMusicBrainzTurn(options);
+    const response = await fetchImpl(url, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': options.userAgent ?? MUSICBRAINZ_USER_AGENT,
+      },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if ((response.status === 503 || response.status === 429) && attempt === 0) {
+      await response.text?.().catch(() => '');
+      await sleep(retryAfterMs(response));
+      continue;
+    }
+    if (response.url) {
+      let host = '';
+      try {
+        host = new URL(response.url).hostname.toLowerCase();
+      } catch {
+        /* an unparseable address fails the check below */
+      }
+      if (host !== MUSICBRAINZ_HOST && !host.endsWith(`.${MUSICBRAINZ_HOST}`)) {
+        throw new Error('MusicBrainz answered from a host that is not allowed.');
+      }
+    }
+    return response;
+  }
+}
+
+// Waits until this request may go out and records the time it did, one
+// request at a time.
+async function waitForMusicBrainzTurn(options: MusicBrainzLookupOptions): Promise<void> {
+  const now = options.now ?? (() => Date.now());
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const getLastRequestAt = options.lastRequestAt ?? (() => lastMusicBrainzRequestAt);
+  const setLastRequestAt = options.setLastRequestAt ?? ((value: number) => {
+    lastMusicBrainzRequestAt = value;
+  });
+  const previous = requestQueueTail;
+  let release: () => void = () => {};
+  requestQueueTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    const waitMs = Math.max(0, MIN_REQUEST_SPACING_MS - (now() - getLastRequestAt()));
+    if (waitMs > 0) await sleep(waitMs);
+    setLastRequestAt(now());
+  } finally {
+    release();
+  }
+}
+
+function retryAfterMs(response: FetchResponse): number {
+  const header = response.headers?.get('retry-after')?.trim();
+  const seconds = header ? Number(header) : NaN;
+  const waitMs = Number.isFinite(seconds)
+    ? seconds * 1000
+    : header && Number.isFinite(Date.parse(header))
+      ? Date.parse(header) - Date.now()
+      : MIN_REQUEST_SPACING_MS * 2;
+  return Math.max(0, Math.min(MAX_RETRY_AFTER_MS, waitMs));
+}
+
+async function musicBrainzFailure(what: string, response: FetchResponse): Promise<Error> {
+  if (response.status === 503 || response.status === 429) {
+    return new Error(`MusicBrainz is busy right now (${response.status}). Try again in a minute.`);
+  }
+  const detail = response.text ? await response.text().catch(() => '') : '';
+  return new Error(`${what} (${response.status})${detail ? `: ${detail.slice(0, 160)}` : ''}`);
 }
 
 function buildRecordingQuery(track: Track): string {
@@ -269,7 +393,9 @@ async function lookupCoverArt(
       Accept: 'application/json',
       'User-Agent': userAgent,
     },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
+  assertCoverArtHost(response);
   if (response.status === 404) return null;
   if (!response.ok) return null;
   const data = await response.json().catch(() => null) as CoverArtArchivePayload | null;
@@ -288,6 +414,7 @@ function chooseCoverArtImage(images: CoverArtArchiveImage[]): { imageUrl: string
       ? image.thumbnails as Record<string, unknown>
       : {};
     const thumbnailUrl =
+      normalizeCoverArtUrl(thumbnails['1200']) ||
       normalizeCoverArtUrl(thumbnails['500']) ||
       normalizeCoverArtUrl(thumbnails.large) ||
       normalizeCoverArtUrl(thumbnails['250']) ||

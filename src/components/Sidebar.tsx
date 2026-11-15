@@ -50,7 +50,7 @@ const GROUPS: NavGroup[] = [
     label: 'Discovery',
     items: [
       { id: 'discover', label: 'Discover', icon: 'M10 2l2 5 5 2-5 2-2 5-2-5-5-2 5-2z', hint: 'Playable missions built from your listening history' },
-      { id: 'mixes', label: 'Mixes', icon: 'M3 5h4l3 10h2l3-10h4M4 15h4M12 15h4', hint: 'Eight live mixes regenerated from your library' },
+      { id: 'mixes', label: 'Mixes', icon: 'M3 5h4l3 10h2l3-10h4M4 15h4M12 15h4', hint: 'Eight mixes built from your library when you open the view; Refresh rebuilds them' },
       { id: 'tags', label: 'Living Tags', icon: 'M3 9l7-7 8 8-7 7zM14 5a1 1 0 100 2 1 1 0 000-2z', hint: 'Rules that keep your library tagged automatically' },
     ],
   },
@@ -139,6 +139,7 @@ export function Sidebar(): JSX.Element {
           itself drops its inner overflow so we get one unified scrollbar
           instead of two competing scroll regions. */}
       <nav
+        aria-label="Library navigation"
         className="flex flex-col px-3 py-2"
         onContextMenu={(event) => {
           event.preventDefault();
@@ -171,6 +172,7 @@ export function Sidebar(): JSX.Element {
                       key={item.id}
                       className={`nav-item ${view === item.id ? 'active' : ''}`}
                       data-amp={view === item.id ? '' : undefined}
+                      aria-current={view === item.id ? 'page' : undefined}
                       data-newamp-nav={item.id}
                       onClick={() => setView(item.id)}
                       title={item.hint ?? item.label}

@@ -10,10 +10,12 @@
 //
 // Only the top-level box headers and moov itself are read, wherever moov
 // sits (the start with faststart, the end for most encoders). A file that
-// can't be read that far answers null, and callers keep the extension's
-// verdict.
+// has no readable sound track answers null, and callers keep the extension's
+// verdict. A file the storage couldn't be read from (a network share that
+// timed out) throws instead, and nothing is remembered about it.
 
 import { open, stat, type FileHandle } from 'node:fs/promises';
+import { isStorageError } from './read-failure.js';
 
 export interface Mp4Box {
   type: string;
@@ -34,17 +36,23 @@ const CACHE_CAP = 512;
 
 // Verdicts by path, size and mtime, most recently used last.
 const cache = new Map<string, string | null>();
+// Lookups still reading, so the 2-3 requests Chromium makes for one src share
+// a single walk of the boxes instead of each reading moov off the share.
+const pending = new Map<string, Promise<string | null>>();
 
 /**
  * The first sound track's sample-entry fourcc ('mp4a', 'alac', 'fLaC',
  * 'Opus', 'ac-3', ...), or null when the file has none that can be read.
+ * Throws the storage error when the share could not be read: that says
+ * nothing about the file, so it is not cached.
  */
 export async function mp4SoundCodec(path: string): Promise<string | null> {
   let key: string;
   try {
     const info = await stat(path);
     key = `${path}:${info.size}:${info.mtimeMs}`;
-  } catch {
+  } catch (err) {
+    if (isStorageError(err)) throw err;
     return null;
   }
   const hit = cache.get(key);
@@ -53,16 +61,29 @@ export async function mp4SoundCodec(path: string): Promise<string | null> {
     cache.set(key, hit);
     return hit;
   }
-  let codec: string | null = null;
+  const running = pending.get(key);
+  if (running) return running;
+  const lookup = (async () => {
+    let codec: string | null = null;
+    try {
+      const moov = await readMoov(path);
+      codec = moov ? soundSampleEntry(moov) : null;
+    } catch (err) {
+      // A storage error says nothing about the file; any other failure
+      // (a file cut short) is read again next time but is not an error.
+      if (isStorageError(err)) throw err;
+      return null;
+    }
+    if (cache.size >= CACHE_CAP) cache.delete(cache.keys().next().value!);
+    cache.set(key, codec);
+    return codec;
+  })();
+  pending.set(key, lookup);
   try {
-    const moov = await readMoov(path);
-    codec = moov ? soundSampleEntry(moov) : null;
-  } catch {
-    codec = null;
+    return await lookup;
+  } finally {
+    pending.delete(key);
   }
-  if (cache.size >= CACHE_CAP) cache.delete(cache.keys().next().value!);
-  cache.set(key, codec);
-  return codec;
 }
 
 export function chromiumPlaysMp4Audio(codec: string): boolean {

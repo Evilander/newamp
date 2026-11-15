@@ -25,7 +25,7 @@ import {
   notifySkip,
 } from '../visualizer/eviland-active-bridge';
 import { applyTheme } from '../lib/skins';
-import { pushToast } from '../lib/toast';
+import { dismissToast, pushToast } from '../lib/toast';
 import { THEME_REGISTRY } from '@shared/custom-skin';
 import { normalizePlaybackRate } from '@shared/tempo-trainer';
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
@@ -179,6 +179,8 @@ interface PlayerState {
   stopAfterCurrent: boolean;
   sleepTimerEndsAt: number | null;
   shuffleHistory: number[];
+  /** Positions Previous stepped back over in shuffle; Next replays them before drawing a new pick. */
+  shuffleForward: number[];
   activePodcastEpisode: { feedUrl: string; episodeId: string } | null;
   mode: PlaybackMode;
   settings: AppSettings | null;
@@ -310,6 +312,8 @@ interface PlayerState {
   setEqPreset: (values: number[]) => Promise<void>;
   setEqEnabled: (on: boolean) => Promise<void>;
   toggleLove: (id: number) => Promise<boolean>;
+  /** The last love or unlove, so a view that lists loved tracks can follow it. */
+  lastLoveChange: { id: number; loved: 0 | 1; seq: number } | null;
   setTrackRating: (id: number, rating: number) => Promise<Track | null>;
   setTrackRatingScore: (id: number, score: number | null) => Promise<Track | null>;
   toggleAvoidAutoPlay: (id: number) => Promise<Track | null>;
@@ -401,7 +405,7 @@ function shouldRecordManualSkip(state: PlayerState): boolean {
 }
 
 function recordManualSkip(state: PlayerState): void {
-  if (!shouldRecordManualSkip(state) || !state.current) return;
+  if (advancingAutomatically || !shouldRecordManualSkip(state) || !state.current) return;
   void api.recordSkip(state.current.id, state.currentTime).catch(() => undefined);
   // Mirror the library skip into the eviland memory bridge so the skips
   // counter advances. No lineage effect on its own (per the bridge contract)
@@ -454,6 +458,36 @@ let lastEndedKey: string | null = null;
 // dead drive makes every queued track fail the same way; this is what lets
 // the skip-ahead loop stop instead of cycling through them forever.
 let consecutivePlaybackFailures = 0;
+// The same count for tracks the library flags as missing. They get a real
+// attempt (see below), so a dead drive fails every one of them in turn; they
+// are counted apart so a long flagged run does not use up the limit above, and
+// are bounded by MAX_MISSING_SKIPS instead.
+let consecutiveMissingFailures = 0;
+// The toast for the skips of the current run of failures, replaced by each
+// skip so a chain of them reads as one line.
+let skipToastId: number | null = null;
+let skipToastCount = 0;
+function resetPlaybackFailureRun(): void {
+  consecutivePlaybackFailures = 0;
+  consecutiveMissingFailures = 0;
+  skipToastId = null;
+  skipToastCount = 0;
+}
+// When each track's open or read last failed, for tracks that have not played
+// since. A track the library flags as missing is only passed over once it is in
+// here: a share that timed out during a scan flagged files that are fine, and
+// those have to get a real attempt before Next gives up on them. After a while
+// it gets another, since the drive or share may be back.
+const openFailedTrackIds = new Map<number, number>();
+const OPEN_FAILURE_PASS_OVER_MS = 10 * 60 * 1000;
+/** A track flagged missing is passed over only once a real attempt to open it has failed. */
+function passesOverMissing(track: Track): boolean {
+  const failedAt = openFailedTrackIds.get(track.id);
+  return track.missingSince != null && failedAt !== undefined && Date.now() - failedAt < OPEN_FAILURE_PASS_OVER_MS;
+}
+// Set while an automatic advance (a track ending, a crossfade starting) works
+// out its first step, so that step is never read as the listener skipping.
+let advancingAutomatically = false;
 
 interface PlaybackSnapshot {
   queue: Track[];
@@ -464,6 +498,7 @@ interface PlaybackSnapshot {
   resumeAt: number | null;
   mode: PlaybackMode;
   shuffleHistory: number[];
+  shuffleForward: number[];
   activePodcastEpisode: PlayerState['activePodcastEpisode'];
 }
 
@@ -583,6 +618,37 @@ export function playbackResumeQueueEntryForTrack(track: Track): PlaybackResumeQu
   }
 }
 
+// The saved session holds at most this many queue entries (settings.ts cuts a
+// longer queue to a window around the playing index). A longer queue is cut
+// here first, so the renderer neither maps nor sends tens of thousands of
+// entries every few seconds, and what main receives already has the playing
+// track in it.
+const RESUME_QUEUE_WINDOW = 5000;
+const RESUME_QUEUE_BEFORE_CURRENT = 2000;
+
+interface ResumeEntries {
+  entries: PlaybackResumeQueueEntry[];
+  trackIds: number[];
+}
+
+// The mapped window of the last queue saved. The session is saved every few
+// seconds while a track plays, and the queue array stays the same object until
+// something edits it, so most saves can reuse the entries.
+const resumeEntryCache = new WeakMap<Track[], ResumeEntries & { start: number; end: number }>();
+
+function resumeEntriesFor(queue: Track[], start: number, end: number): ResumeEntries {
+  const cached = resumeEntryCache.get(queue);
+  if (cached && cached.start === start && cached.end === end) return cached;
+  const entries: PlaybackResumeQueueEntry[] = [];
+  for (let i = start; i < end; i += 1) {
+    const entry = playbackResumeQueueEntryForTrack(queue[i]!);
+    if (entry) entries.push(entry);
+  }
+  const mapped = { entries, trackIds: entries.map(playbackResumeEntryTrackId), start, end };
+  resumeEntryCache.set(queue, mapped);
+  return mapped;
+}
+
 export function playbackResumeStateForQueueSnapshot(input: {
   queue: Track[];
   index: number;
@@ -591,13 +657,16 @@ export function playbackResumeStateForQueueSnapshot(input: {
   mode: PlaybackMode;
   updatedAt?: number;
 }): PlaybackResumeState | null {
-  const queue = input.queue
-    .map(playbackResumeQueueEntryForTrack)
-    .filter((entry): entry is PlaybackResumeQueueEntry => entry !== null);
-  if (!queue.length) return null;
-  const queueTrackIds = queue.map(playbackResumeEntryTrackId);
   const rawIndex = Math.trunc(Number(input.index));
-  const index = Number.isFinite(rawIndex) ? Math.max(-1, Math.min(queue.length - 1, rawIndex)) : 0;
+  const playingIndex = Number.isFinite(rawIndex) ? rawIndex : 0;
+  const start =
+    input.queue.length > RESUME_QUEUE_WINDOW
+      ? Math.max(0, Math.min(input.queue.length - RESUME_QUEUE_WINDOW, playingIndex - RESUME_QUEUE_BEFORE_CURRENT))
+      : 0;
+  const end = Math.min(input.queue.length, start + RESUME_QUEUE_WINDOW);
+  const { entries: queue, trackIds: queueTrackIds } = resumeEntriesFor(input.queue, start, end);
+  if (!queue.length) return null;
+  const index = Math.max(-1, Math.min(queue.length - 1, playingIndex - start));
   const currentId = input.current?.id ?? null;
   const currentTrackId = currentId !== null && queueTrackIds.includes(currentId) ? currentId : null;
   const updatedAt = Number(input.updatedAt ?? Date.now());
@@ -771,6 +840,7 @@ async function restorePlaybackSession(
     duration: current?.duration ?? 0,
     mode,
     shuffleHistory: isShuffleMode(mode) ? resetSmartShuffleHistory(tracks.length, index) : [],
+    shuffleForward: [],
     resumeAt: current ? resumeTime : null,
   });
   applyReplayGain(current, settings);
@@ -790,11 +860,35 @@ async function persistPlaybackSession(state: PlayerState): Promise<void> {
   await api.setSettings({ resumeState }).catch(() => state.settings!);
 }
 
+// While a track plays the only thing in the saved session that moves is the
+// position, so those saves are spread out; a change to what is saved (the
+// queue, the track, the mode) is written within the usual few seconds.
+const SESSION_SAVE_MIN_MS = 3000;
+const SESSION_POSITION_SAVE_MS = 20000;
+
+interface SessionShape {
+  queue: Track[];
+  index: number;
+  currentId: number | null;
+  mode: PlaybackMode;
+}
+let lastSessionShape: SessionShape | null = null;
+
 function schedulePersistPlaybackSession(state: PlayerState, force = false): void {
   if (!state.settings) return;
   const now = Date.now();
-  if (!force && now - lastSessionPersistAt < 3000) return;
+  const source = activePreview?.snapshot ?? state;
+  const shape: SessionShape = { queue: source.queue, index: source.index, currentId: source.current?.id ?? null, mode: source.mode };
+  const previous = lastSessionShape;
+  const onlyPositionMoved =
+    previous !== null &&
+    previous.queue === shape.queue &&
+    previous.index === shape.index &&
+    previous.currentId === shape.currentId &&
+    previous.mode === shape.mode;
+  if (!force && now - lastSessionPersistAt < (onlyPositionMoved ? SESSION_POSITION_SAVE_MS : SESSION_SAVE_MIN_MS)) return;
   lastSessionPersistAt = now;
+  lastSessionShape = shape;
   void persistPlaybackSession(state);
 }
 
@@ -819,14 +913,27 @@ function clearPlaybackErrorAdvanceTimer(): void {
   }
 }
 
-function playbackFailureLabel(track: Track | null, error: string): string {
+/**
+ * The engine owns `playbackError` and clears it as the next track starts, so a
+ * skip is announced as a toast, which nothing overwrites.
+ */
+function announceSkippedTrack(track: Track | null, error: string): void {
   const name = track ? `${track.artist} - ${track.title}` : 'track';
-  return `Skipped ${name}: ${error}`;
+  if (skipToastId != null) dismissToast(skipToastId);
+  skipToastCount += 1;
+  skipToastId = pushToast({
+    tone: 'error',
+    title: skipToastCount > 1 ? `Skipped ${skipToastCount.toLocaleString()} tracks that could not be played` : `Skipped ${name}`,
+    detail: skipToastCount > 1 ? `Latest: ${name}. ${error}` : error,
+    durationMs: 6000,
+  });
 }
 
 export interface QueueAdvance {
   index: number;
   history: number[];
+  /** A shuffle's replay stack after this step (see nextSmartShuffle); absent outside shuffle. */
+  forward?: number[];
   /** Nothing follows: the queue ran out, or a shuffle cycle finished, and repeat is not wrapping. */
   atEnd: boolean;
 }
@@ -838,36 +945,43 @@ const MAX_MISSING_SKIPS = 32;
 /**
  * What plays after the current track. Entries flagged missing are passed over
  * while a playable one exists, so an unplugged drive is not walked through one
- * failure at a time. After an error repeat-one moves on as well, since
- * replaying the track that just failed would loop forever.
+ * failure at a time; `passOver` decides which flagged entries that applies to
+ * (the store passes only those whose open already failed, since a share that
+ * timed out flags files that are there). After an error repeat-one moves on as
+ * well, since replaying the track that just failed would loop forever.
  */
-export function resolveQueueAdvance(input: {
-  queue: ReadonlyArray<Pick<Track, 'missingSince'>>;
+export function resolveQueueAdvance<T extends Pick<Track, 'missingSince'>>(input: {
+  queue: ReadonlyArray<T>;
   index: number;
   mode: PlaybackMode;
   history: number[];
+  /** The positions a shuffle's Previous stepped back over, replayed by Next before a random pick. */
+  forward?: number[];
   afterError?: boolean;
   random?: () => number;
+  passOver?: (entry: T) => boolean;
 }): QueueAdvance {
   const { queue, index, mode } = input;
   const length = queue.length;
   if (!length) return { index: -1, history: [], atEnd: true };
   const repeat = repeatModeOf(mode);
   const wraps = repeat === 'all' || (input.afterError === true && repeat === 'one');
-  const isMissing = (i: number): boolean => queue[i]?.missingSince != null;
+  const passOver = input.passOver ?? ((entry: T) => entry.missingSince != null);
+  const isMissing = (i: number): boolean => queue[i] != null && queue[i]!.missingSince != null && passOver(queue[i]!);
 
   if (isShuffleMode(mode)) {
     let history = input.history;
+    let forward = input.forward;
     let from = index;
     let skipped: number[] = [];
     let first: QueueAdvance | null = null;
     for (let attempt = 0; attempt <= MAX_MISSING_SKIPS; attempt += 1) {
-      const decision = nextSmartShuffle({ queueLength: length, currentIndex: from, history }, input.random);
+      const decision = nextSmartShuffle({ queueLength: length, currentIndex: from, history, forward }, input.random);
       // Every track has played and repeat is not asking for another cycle. On
       // a later attempt it only means no playable track was left.
-      if (decision.exhausted && !wraps) return first ?? { index: -1, history: input.history, atEnd: true };
+      if (decision.exhausted && !wraps) return first ?? { index: -1, history: input.history, forward: input.forward ?? [], atEnd: true };
       if (decision.exhausted) skipped = [];
-      const pick: QueueAdvance = { index: decision.index, history: decision.history, atEnd: false };
+      const pick: QueueAdvance = { index: decision.index, history: decision.history, forward: decision.forward ?? [], atEnd: false };
       first ??= pick;
       if (!isMissing(decision.index)) {
         if (!skipped.length) return pick;
@@ -878,9 +992,10 @@ export function resolveQueueAdvance(input: {
       }
       skipped.push(decision.index);
       history = decision.history;
+      forward = decision.forward ?? [];
       from = decision.index;
     }
-    return first ?? { index: -1, history: input.history, atEnd: true };
+    return first ?? { index: -1, history: input.history, forward: input.forward ?? [], atEnd: true };
   }
 
   let next = index + 1;
@@ -898,6 +1013,41 @@ export function resolveQueueAdvance(input: {
     }
   }
   return { index: next, history: input.history, atEnd: false };
+}
+
+/** Previous restarts the current track instead of leaving it once it has played this long. */
+const PREVIOUS_RESTARTS_AFTER_S = 3;
+
+/**
+ * Whether Previous and Next would do anything, for the OS media controls,
+ * which show a control enabled only while it has a handler. Previous also
+ * restarts a track that is more than 3 s in, and Next at the end of a queue
+ * still has somewhere to go with Auto DJ on, when the queue wraps, or when a
+ * library track's album or folder can extend the queue.
+ */
+export function transportAvailability(state: {
+  queue: readonly unknown[];
+  index: number;
+  mode: PlaybackMode;
+  shuffleHistory: readonly number[];
+  autoDjEnabled: boolean;
+  currentTime?: number;
+  current?: { id: number } | null;
+}): { hasPrevious: boolean; hasNext: boolean } {
+  const length = state.queue.length;
+  if (length === 0 || state.index < 0) return { hasPrevious: false, hasNext: false };
+  const wraps = repeatModeOf(state.mode) === 'all';
+  const shuffle = isShuffleMode(state.mode);
+  // This runs for every store update, so a shuffle's unplayed count is taken
+  // from the history's length rather than by sanitizing a history as long as the queue.
+  const ahead = shuffle ? length - Math.max(1, state.shuffleHistory.length) : length - state.index - 1;
+  const behind = shuffle ? state.shuffleHistory.length > 1 : state.index > 0;
+  const restarts = (state.currentTime ?? 0) > PREVIOUS_RESTARTS_AFTER_S;
+  const extendable = state.current != null && state.current.id > 0;
+  return {
+    hasPrevious: behind || wraps || restarts,
+    hasNext: ahead > 0 || wraps || state.autoDjEnabled || extendable,
+  };
 }
 
 /** Tracks still to come: what follows the index, or what a shuffle cycle has not played yet. */
@@ -935,10 +1085,13 @@ async function advanceAfterPlaybackError(
     index: state.index,
     mode: state.mode,
     history: state.shuffleHistory,
+    forward: state.shuffleForward,
     afterError: true,
+    passOver: passesOverMissing,
   });
   const nextIndex = advance.index;
   const nextShuffleHistory = advance.history;
+  const nextShuffleForward = advance.forward ?? [];
   if (advance.atEnd || nextIndex < 0 || nextIndex >= state.queue.length || nextIndex === state.index) {
     engine.stop();
     return;
@@ -955,15 +1108,16 @@ async function advanceAfterPlaybackError(
     resumeAt: null,
     activePodcastEpisode: null,
     shuffleHistory: nextShuffleHistory,
-    playbackError: playbackFailureLabel(current, state.playbackError ?? 'Playback failed'),
+    shuffleForward: nextShuffleForward,
   });
+  announceSkippedTrack(current, state.playbackError ?? 'Playback failed');
   applyReplayGain(nextTrack, state.settings);
   schedulePersistPlaybackSession(getState(), true);
+  beginPlayCount(nextTrack);
   try {
     if (!(await playEngineTrack(nextTrack))) return;
     lastPlaybackErrorKey = null;
     startLastfmNowPlaying(nextTrack);
-    recordLibraryPlay(nextTrack);
     if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: autoDjRefillIndex(getState()) })) {
       void getState().refillAutoDjQueue();
     }
@@ -1034,7 +1188,17 @@ function cueDuration(track: Track | null, engineDuration: number): number {
   if (track && engineDuration > 0 && engine.isSampleTransportActive() && engine.getState().trackId === track.id) {
     return engineDuration;
   }
-  if (track?.duration && track.duration > 0) return track.duration;
+  if (track?.duration && track.duration > 0) {
+    // A deck that has read the file's own length can know better than a
+    // library row that is stale or was estimated (a VBR MP3 without a
+    // header); trusting the short one would cut the song at a crossfade and
+    // stop the seek bar short. A CUE segment is a slice, and the file's
+    // length is not its own.
+    if (engineDuration > track.duration && engine.getState().trackId === track.id && !trackRouting(track).cue) {
+      return engineDuration;
+    }
+    return track.duration;
+  }
   const end = cueEnd(track);
   const start = cueStart(track);
   if (end && end > start) return end - start;
@@ -1107,10 +1271,28 @@ async function restartCurrentTrackThroughActivePath(
   const { current, currentTime, isPlaying } = get();
   if (!current || !isPlaying) return;
   const resumeAt = cueStart(current) + Math.max(0, currentTime);
+  // A failed play publishes an error, which schedules a skip to the next
+  // track. The restart is tried once more first: the device is usually still
+  // settling after the switch, and the track is where it was.
+  const retryOnce = async (): Promise<void> => {
+    if (!playIntents.isCurrent(intent)) return;
+    clearPlaybackErrorAdvanceTimer();
+    try {
+      await engine.play(toAudioUrl(current.path), current.id, resumeAt, trackRouting(current));
+      lastPlaybackErrorKey = null;
+    } catch (err) {
+      pushToast({
+        tone: 'error',
+        title: 'Playback did not continue on the new output',
+        detail: err instanceof Error ? err.message : String(err),
+        durationMs: 8000,
+      });
+    }
+  };
   // A route restart is a new play request like any other: it must invalidate
   // an older request that is still waiting on the engine.
-  playIntents.begin();
-  await engine.play(toAudioUrl(current.path), current.id, resumeAt, trackRouting(current)).catch(() => undefined);
+  const intent = playIntents.begin();
+  await engine.play(toAudioUrl(current.path), current.id, resumeAt, trackRouting(current)).catch(retryOnce);
 }
 
 /**
@@ -1131,6 +1313,30 @@ function shuffleCycleDone(state: PlayerState): boolean {
   );
 }
 
+// resolveShuffleHandoffPick draws a random pick and knows nothing of the replay
+// stack Previous leaves behind. When that stack has a track to give back, the
+// pick is swapped for it here, and the stack that remains is kept beside the
+// cache entry for the commit. An entry mapped to null was checked and has no
+// replay to apply.
+const handoffReplayForward = new WeakMap<ShuffleHandoffCache, number[] | null>();
+
+function shuffleHandoffWithReplay(cache: ShuffleHandoffCache, state: PlayerState): ShuffleHandoffCache {
+  if (handoffReplayForward.has(cache) || !state.shuffleForward.length) return cache;
+  const decision = nextSmartShuffle({
+    queueLength: state.queue.length,
+    currentIndex: state.index,
+    history: state.shuffleHistory,
+    forward: state.shuffleForward,
+  });
+  if (!decision.forward) {
+    handoffReplayForward.set(cache, null);
+    return cache;
+  }
+  const replay = { ...cache, index: decision.index, history: decision.history };
+  handoffReplayForward.set(replay, decision.forward);
+  return replay;
+}
+
 /** What an automatic advance from the current position would play next, if anything. */
 function desiredHandoffTrack(state: PlayerState): Track | null {
   if (loopsOnTransport(state)) return state.current;
@@ -1146,6 +1352,7 @@ function desiredHandoffTrack(state: PlayerState): Track | null {
       queueLength,
       history: state.shuffleHistory,
     });
+    cachedShuffleHandoff = shuffleHandoffWithReplay(cachedShuffleHandoff, state);
     return state.queue[cachedShuffleHandoff.index] ?? null;
   }
   const nextIndex = nextHandoffIndex({ queueLength, index: state.index, mode: state.mode });
@@ -1169,6 +1376,7 @@ async function commitPlaybackAdvance(
   setState: (partial: Partial<PlayerState>) => void,
   nextIdx: number,
   nextShuffleHistory: number[],
+  nextShuffleForward: number[] = [],
 ): Promise<void> {
   const latestQueue = getState().queue;
   const t = latestQueue[nextIdx]!;
@@ -1180,13 +1388,16 @@ async function commitPlaybackAdvance(
     resumeAt: null,
     activePodcastEpisode: null,
     shuffleHistory: nextShuffleHistory,
+    shuffleForward: nextShuffleForward,
   });
   applyReplayGain(t, getState().settings);
   schedulePersistPlaybackSession(getState(), true);
+  // Counting starts with the request: a short track chained on the sample
+  // transport can play out before the await below returns.
+  beginPlayCount(t);
   if (!(await playEngineTrack(t))) return;
   lastPlaybackErrorKey = null;
   startLastfmNowPlaying(t);
-  recordLibraryPlay(t);
   if (shouldAutoDjRefill({ enabled: getState().autoDjEnabled, queueLength: getState().queue.length, index: autoDjRefillIndex(getState()) })) {
     void getState().refillAutoDjQueue();
   }
@@ -1208,6 +1419,26 @@ async function autoAdvance(
   getState: () => PlayerState,
   setState: (partial: Partial<PlayerState>) => void,
 ): Promise<void> {
+  try {
+    // The first step of the advance runs before this call returns; only that
+    // part decides whether the track being left was skipped.
+    advancingAutomatically = true;
+    const advancing = advanceToNextTrack(getState, setState);
+    advancingAutomatically = false;
+    await advancing;
+  } catch (err) {
+    advancingAutomatically = false;
+    // Every caller is fire-and-forget. A track that fails to start has
+    // already published its error, and the subscription skips ahead; any other
+    // failure is a fault that should still show in the console.
+    if (engine.getState().error == null) console.warn('[newamp] auto-advance failed', err);
+  }
+}
+
+async function advanceToNextTrack(
+  getState: () => PlayerState,
+  setState: (partial: Partial<PlayerState>) => void,
+): Promise<void> {
   const state = getState();
   if (
     state.current &&
@@ -1219,10 +1450,11 @@ async function autoAdvance(
     })
   ) {
     const { index: nextIdx, history: nextShuffleHistory } = cachedShuffleHandoff;
+    const nextShuffleForward = handoffReplayForward.get(cachedShuffleHandoff) ?? [];
     cachedShuffleHandoff = null;
     clearPlaybackErrorAdvanceTimer();
     recordManualSkip(state);
-    await commitPlaybackAdvance(getState, setState, nextIdx, nextShuffleHistory);
+    await commitPlaybackAdvance(getState, setState, nextIdx, nextShuffleHistory, nextShuffleForward);
     return;
   }
   cachedShuffleHandoff = null;
@@ -1231,6 +1463,56 @@ async function autoAdvance(
 
 function recordLibraryPlay(track: Track): void {
   if (track.id > 0) void api.recordPlay(track.id).catch(() => undefined);
+}
+
+// A library play is counted once the track has been heard for half its length
+// or four minutes, whichever comes first, or when it plays out to its end. A
+// track skipped past in its first seconds, or one that failed to open, is not
+// a play, and neither is one picked up again where a saved session left it.
+const PLAY_COUNT_MAX_HEARD_S = 240;
+// An ended track reports a position a moment short of its length.
+const PLAY_COUNT_END_SLACK_S = 5;
+// Between two notifications the position moves by a fraction of a second; a
+// bigger step is a seek and is not time spent listening.
+const PLAY_COUNT_MAX_STEP_S = 5;
+
+interface PendingPlay {
+  trackId: number;
+  heardSeconds: number;
+  lastTime: number | null;
+}
+let pendingPlay: PendingPlay | null = null;
+
+/** The track just started; it is counted later, by countPlayedTime or countPlayedToEnd. */
+function beginPlayCount(track: Track, startAt = 0): void {
+  pendingPlay = track.id > 0 && !(startAt > 0) ? { trackId: track.id, heardSeconds: 0, lastTime: null } : null;
+}
+
+function countPlayedTime(track: Track | null, time: number, duration: number, playing: boolean): void {
+  const pending = pendingPlay;
+  if (!pending || !track || track.id !== pending.trackId) return;
+  if (playing && pending.lastTime !== null) {
+    const step = time - pending.lastTime;
+    if (step > 0 && step <= PLAY_COUNT_MAX_STEP_S) pending.heardSeconds += step;
+  }
+  pending.lastTime = time;
+  const needed = Math.min(duration > 0 ? duration / 2 : PLAY_COUNT_MAX_HEARD_S, PLAY_COUNT_MAX_HEARD_S);
+  if (pending.heardSeconds < needed) return;
+  pendingPlay = null;
+  recordLibraryPlay(track);
+}
+
+/**
+ * The track ran out on its own. `slack` is how far from its length the
+ * position may be and still count as the end: an ended event with the
+ * position well short means the read stopped early, which is not a play.
+ */
+function countPlayedToEnd(track: Track | null, time: number, duration: number, slack = PLAY_COUNT_END_SLACK_S): void {
+  const pending = pendingPlay;
+  if (!pending || !track || track.id !== pending.trackId) return;
+  if (duration > 0 && time < duration - slack) return;
+  pendingPlay = null;
+  recordLibraryPlay(track);
 }
 
 function searchLiteral(value: string): string {
@@ -1312,7 +1594,7 @@ async function startQueuePlayback(
   resetHandoffState();
   lastStopAfterCurrentKey = null;
   lastPlaybackErrorKey = null;
-  consecutivePlaybackFailures = 0;
+  resetPlaybackFailureRun();
   const q = [...tracks];
   const i = Math.max(0, Math.min(startIndex, q.length - 1));
   const t = q[i]!;
@@ -1327,13 +1609,19 @@ async function startQueuePlayback(
     playbackError: null,
     activePodcastEpisode: null,
     shuffleHistory: options.shuffleHistory ?? (isShuffleMode(getState().mode) ? resetSmartShuffleHistory(q.length, i) : []),
+    shuffleForward: [],
   });
   applyReplayGain(t, getState().settings);
   schedulePersistPlaybackSession(getState(), true);
-  if (!(await playEngineTrack(t, position))) return;
+  beginPlayCount(t, position);
+  try {
+    if (!(await playEngineTrack(t, position))) return;
+  } catch (err) {
+    rethrowUnlessPublished(err);
+    return;
+  }
   lastPlaybackErrorKey = null;
   startLastfmNowPlaying(t);
-  recordLibraryPlay(t);
 }
 
 /**
@@ -1371,6 +1659,87 @@ async function playStarterQueue(getState: () => PlayerState): Promise<void> {
   }
 }
 
+/**
+ * Next and Previous are mostly called without anyone waiting on them. A track
+ * that fails to start has already published its error, and the subscription
+ * decides whether to skip ahead, so that rejection ends here; anything else is
+ * a real fault and still surfaces.
+ */
+function rethrowUnlessPublished(err: unknown): void {
+  if (engine.getState().error == null) throw err;
+}
+
+/**
+ * One attempt at moving to the next track. Reports 'edited' when the queue
+ * changed under an end-of-queue lookup and nothing was started on its account.
+ */
+async function advanceFromQueue(
+  get: () => PlayerState,
+  set: (partial: Partial<PlayerState>) => void,
+  intent: number,
+  firstAttempt: boolean,
+): Promise<'done' | 'edited'> {
+  const revision = queueRevision;
+  const isCurrent = () => playIntents.isCurrent(intent) && queueRevision === revision;
+  const outcome = (): 'done' | 'edited' => (playIntents.isCurrent(intent) ? 'edited' : 'done');
+  const state = get();
+  if (firstAttempt) recordManualSkip(state);
+  // A direct call to next() — user skip, keyboard/media shortcut, or
+  // autoAdvance()'s own fallback when no cached pick applies — always
+  // computes its own fresh pick rather than trusting a background
+  // prepare; see shared/shuffle-handoff.ts for why a stale one cannot
+  // just be reused.
+  cachedShuffleHandoff = null;
+  const { queue, index, mode, shuffleHistory } = state;
+  if (!queue.length) return 'done';
+  resetPlaybackFailureRun();
+  const advance = resolveQueueAdvance({ queue, index, mode, history: shuffleHistory, forward: state.shuffleForward, passOver: passesOverMissing });
+  let nextIdx = advance.index;
+  let nextShuffleHistory = advance.history;
+  let nextShuffleForward = advance.forward ?? [];
+  if (advance.atEnd) {
+    // The end of the queue, or of a shuffle cycle with repeat off.
+    const additions = await get().refillAutoDjQueue(true);
+    if (!isCurrent()) return outcome();
+    let resumed: QueueAdvance | null = null;
+    if (additions.length) {
+      const grown = get();
+      resumed = resolveQueueAdvance({
+        queue: grown.queue,
+        index: grown.index,
+        mode: grown.mode,
+        history: grown.shuffleHistory,
+        forward: grown.shuffleForward,
+        passOver: passesOverMissing,
+      });
+    } else {
+      const expanded = await expandQueueFromCurrentContext(state);
+      if (!isCurrent()) return outcome();
+      if (expanded) {
+        const contextShuffleHistory = isShuffleMode(mode)
+          ? resetSmartShuffleHistory(expanded.queue.length, expanded.index)
+          : [];
+        resumed = resolveQueueAdvance({ queue: expanded.queue, index: expanded.index, mode, history: contextShuffleHistory, passOver: passesOverMissing });
+        if (!resumed.atEnd) {
+          set({ queue: expanded.queue, index: expanded.index, shuffleHistory: contextShuffleHistory, shuffleForward: [] });
+        }
+      }
+    }
+    if (!resumed || resumed.atEnd) {
+      engine.pause();
+      set({ isPlaying: false });
+      schedulePersistPlaybackSession(get(), true);
+      return 'done';
+    }
+    nextIdx = resumed.index;
+    nextShuffleHistory = resumed.history;
+    nextShuffleForward = resumed.forward ?? [];
+  }
+  if (!isCurrent()) return outcome();
+  await commitPlaybackAdvance(get, set, nextIdx, nextShuffleHistory, nextShuffleForward);
+  return 'done';
+}
+
 export const usePlayerStore = create<PlayerState>((set, get) => {
   // AudioEngine.subscribe emits immediately; defer until Zustand has installed the initial state.
   queueMicrotask(() => {
@@ -1405,10 +1774,21 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // A preview only borrows the engine: it never advances, hands off, trips
       // the sleep timer or feeds the memory bridge.
       if (activePreview) return;
-      if (s.playing && !s.error && relativeTime >= 0.5) consecutivePlaybackFailures = 0;
+      // The store moves to a new track at once, but the engine only does when
+      // its play() lands (an IPC round trip on the exclusive path). Until then
+      // it still reports the previous track, whose end or error is not this
+      // one's and must not advance past it.
+      const loaded = get().current;
+      if (s.trackId != null && loaded && s.trackId !== loaded.id) return;
+      if (s.playing && !s.error && relativeTime >= 0.5) {
+        resetPlaybackFailureRun();
+        if (loaded) openFailedTrackIds.delete(loaded.id);
+      }
       const state = get();
+      if (!s.error) countPlayedTime(state.current, relativeTime, displayDuration, s.playing);
       if (s.error) {
-        const decision = resolvePlaybackErrorAdvance({
+        const flagged = state.current?.missingSince != null;
+        let decision = resolvePlaybackErrorAdvance({
           error: s.error,
           currentTrackId: state.current?.id ?? s.trackId,
           index: state.index,
@@ -1418,15 +1798,21 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           shuffleCycleComplete: shuffleCycleDone(state),
           consecutiveFailures: consecutivePlaybackFailures,
         });
+        // Flagged tracks are held to their own, longer limit.
+        if (flagged && decision.shouldAdvance && consecutiveMissingFailures + 1 >= Math.min(state.queue.length, MAX_MISSING_SKIPS)) {
+          decision = { key: decision.key, shouldAdvance: false, shouldStop: true, gaveUp: true };
+        }
         if (decision.key && (decision.shouldAdvance || decision.shouldStop)) {
           lastPlaybackErrorKey = decision.key;
-          consecutivePlaybackFailures += 1;
+          if (flagged) consecutiveMissingFailures += 1;
+          else consecutivePlaybackFailures += 1;
+          if (state.current) openFailedTrackIds.set(state.current.id, Date.now());
         }
         if (decision.gaveUp) {
           pushToast({
             tone: 'error',
             title: 'Playback stopped',
-            detail: `${consecutivePlaybackFailures.toLocaleString()} tracks in a row could not be played. If they are on a drive or a server, check that it is connected.`,
+            detail: `${(flagged ? consecutiveMissingFailures : consecutivePlaybackFailures).toLocaleString()} tracks in a row could not be played. If they are on a drive or a server, check that it is connected.`,
             durationMs: 8000,
           });
         }
@@ -1448,12 +1834,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         // eviland memory bridge's lineage ladder. Mirrors the natural-end
         // path below for plain track playback.
         notifyPlayCompleted(state.current?.id ?? null);
+        countPlayedToEnd(state.current, relativeTime, displayDuration);
         if (state.stopAfterCurrent) {
           set({ stopAfterCurrent: false });
           engine.stop();
         } else if (repeatModeOf(state.mode) === 'one' && state.current) {
           resetHandoffState();
-          void playEngineTrack(state.current);
+          beginPlayCount(state.current);
+          // The engine publishes a failure, and the error branch above skips ahead.
+          void playEngineTrack(state.current).catch(() => undefined);
         } else {
           window.setTimeout(() => void autoAdvance(get, set), 0);
         }
@@ -1511,6 +1900,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
             queueLength: state.queue.length,
             history: state.shuffleHistory,
           });
+          cachedShuffleHandoff = shuffleHandoffWithReplay(cachedShuffleHandoff, state);
           nextTrack = state.queue[cachedShuffleHandoff.index] ?? null;
         } else {
           const nextIndex = repeatModeOf(state.mode) === 'all' && state.index >= queueLength - 1 ? 0 : state.index + 1;
@@ -1556,6 +1946,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         state.current
       ) {
         lastHandoffKey = handoffKey(state.current.id, state.index);
+        // The next track starts under the end of this one, which has played out.
+        countPlayedToEnd(state.current, relativeTime, displayDuration, effectiveCrossfadeMs / 1000 + PLAY_COUNT_END_SLACK_S);
         void autoAdvance(get, set);
         return;
       }
@@ -1569,6 +1961,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         })
       ) {
         lastStopAfterCurrentKey = stopAfterCurrentKey(state.current?.id ?? null, state.index);
+        countPlayedToEnd(state.current, relativeTime, displayDuration);
         set({ stopAfterCurrent: false });
         engine.stop();
         return;
@@ -1589,17 +1982,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
             // generation ladder). The registry routes to the active bridge IFF
             // its trackId matches — wrong-track and no-bridge are cheap no-ops.
             notifyPlayCompleted(state.current?.id ?? null);
+            countPlayedToEnd(state.current, relativeTime, displayDuration);
             // small delay to avoid re-entry
             setTimeout(() => void autoAdvance(get, set), 0);
           } else if (get().current) {
             // repeat-one: the same track is about to play again. From the
             // player's POV that's a completed play, so the counter ticks too.
             notifyPlayCompleted(state.current?.id ?? null);
+            countPlayedToEnd(state.current, relativeTime, displayDuration);
             // Every loop has its own prepare window: the next one chains the
             // track to itself again on the sample transport.
             resetHandoffState();
             const c = get().current!;
-            void playEngineTrack(c);
+            beginPlayCount(c);
+            void playEngineTrack(c).catch(() => undefined);
           }
         }
       }
@@ -1637,6 +2033,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     stopAfterCurrent: false,
     sleepTimerEndsAt: null,
     shuffleHistory: [],
+    shuffleForward: [],
+    lastLoveChange: null,
     activePodcastEpisode: null,
     mode: 'normal',
     settings: null,
@@ -1873,7 +2271,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       resetHandoffState();
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
-      consecutivePlaybackFailures = 0;
+      resetPlaybackFailureRun();
       const q = queue && queue.length ? queue : [track];
       const idx = q.findIndex((t) => t.id === track.id);
       const nextIndex = idx >= 0 ? idx : 0;
@@ -1887,13 +2285,19 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         playbackError: null,
         activePodcastEpisode: null,
         shuffleHistory: isShuffleMode(get().mode) ? resetSmartShuffleHistory(q.length, nextIndex) : [],
+        shuffleForward: [],
       });
       applyReplayGain(track, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      if (!(await playEngineTrack(track))) return;
+      beginPlayCount(track);
+      try {
+        if (!(await playEngineTrack(track))) return;
+      } catch (err) {
+        rethrowUnlessPublished(err);
+        return;
+      }
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(track);
-      recordLibraryPlay(track);
     },
 
     playPodcastEpisode: async (episode) => {
@@ -1903,7 +2307,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       resetHandoffState();
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
-      consecutivePlaybackFailures = 0;
+      resetPlaybackFailureRun();
       lastPodcastProgressPersistAt = 0;
       set({
         queue: [track],
@@ -1915,6 +2319,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         playbackError: null,
         activePodcastEpisode: { feedUrl: episode.feedUrl, episodeId: episode.id },
         shuffleHistory: [],
+        shuffleForward: [],
       });
       applyReplayGain(null, get().settings);
       schedulePersistPlaybackSession(get(), true);
@@ -1958,6 +2363,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           resumeAt: state.resumeAt,
           mode: state.mode,
           shuffleHistory: state.shuffleHistory,
+          shuffleForward: state.shuffleForward,
           activePodcastEpisode: state.activePodcastEpisode,
         },
       };
@@ -1975,6 +2381,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         playbackError: null,
         activePodcastEpisode: null,
         shuffleHistory: [],
+        shuffleForward: [],
       });
       applyReplayGain(track, get().settings);
       try {
@@ -2012,6 +2419,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         playbackError: null,
         stopAfterCurrent: false,
         shuffleHistory: snapshot.shuffleHistory,
+        shuffleForward: snapshot.shuffleForward,
         activePodcastEpisode: snapshot.activePodcastEpisode,
       });
       applyReplayGain(snapshot.current, get().settings);
@@ -2027,9 +2435,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       resetHandoffState();
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
-      consecutivePlaybackFailures = 0;
+      resetPlaybackFailureRun();
       engine.unload();
-      set({ isPlaying: false, stopAfterCurrent: false, queue: [...tracks], index: -1, current: null, resumeAt: null, currentTime: 0, duration: 0, playbackError: null, shuffleHistory: [], activePodcastEpisode: null });
+      set({ isPlaying: false, stopAfterCurrent: false, queue: [...tracks], index: -1, current: null, resumeAt: null, currentTime: 0, duration: 0, playbackError: null, shuffleHistory: [], shuffleForward: [], activePodcastEpisode: null });
       schedulePersistPlaybackSession(get(), true);
       if (get().autoDjEnabled) void get().refillAutoDjQueue(true);
     },
@@ -2047,6 +2455,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         queue: result.queue,
         index: result.index,
         shuffleHistory: historyAfterInsert(state, playNextInsertAt(state.queue.length, state.index), tracks.length),
+        shuffleForward: [],
       });
       schedulePersistPlaybackSession(get(), true);
     },
@@ -2060,6 +2469,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         queue: result.queue,
         index: result.index,
         shuffleHistory: historyAfterInsert(state, state.queue.length, tracks.length),
+        shuffleForward: [],
       });
       schedulePersistPlaybackSession(get(), true);
     },
@@ -2074,6 +2484,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         shuffleHistory: isShuffleMode(state.mode)
           ? remapShuffleHistory(state.shuffleHistory, moveIndexMap(state.queue.length, fromIndex, toIndex))
           : [],
+        shuffleForward: [],
       });
       schedulePersistPlaybackSession(get(), true);
     },
@@ -2091,7 +2502,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         // the same unload() as the branch below: stop() leaves src/trackId on
         // the deck, and a later Play would resume the track just removed.
         engine.unload();
-        set({ queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], activePodcastEpisode: null });
+        set({ queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], shuffleForward: [], activePodcastEpisode: null });
         schedulePersistPlaybackSession(get(), true);
         return;
       }
@@ -2127,10 +2538,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           isPlaying: false,
           activePodcastEpisode: null,
           shuffleHistory,
+          shuffleForward: [],
         });
         applyReplayGain(nextCurrent, get().settings);
       } else {
-        set({ queue: result.queue, index: result.index, shuffleHistory: survivingHistory });
+        set({ queue: result.queue, index: result.index, shuffleHistory: survivingHistory, shuffleForward: [] });
       }
       schedulePersistPlaybackSession(get(), true);
     },
@@ -2144,7 +2556,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const queue = state.queue.filter((track) => !gone.has(track.id));
       if (!queue.length) {
         engine.unload();
-        set({ queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], activePodcastEpisode: null });
+        set({ queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], shuffleForward: [], activePodcastEpisode: null });
         schedulePersistPlaybackSession(get(), true);
         return;
       }
@@ -2161,7 +2573,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         ? remapShuffleHistory(state.shuffleHistory, removalIndexMap(state.queue.length, goneAt))
         : [];
       if (!currentGone) {
-        set({ queue, index, shuffleHistory: survivingHistory });
+        set({ queue, index, shuffleHistory: survivingHistory, shuffleForward: [] });
         schedulePersistPlaybackSession(get(), true);
         return;
       }
@@ -2193,6 +2605,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         isPlaying: false,
         activePodcastEpisode: null,
         shuffleHistory,
+        shuffleForward: [],
       });
       applyReplayGain(nextCurrent, get().settings);
       schedulePersistPlaybackSession(get(), true);
@@ -2226,7 +2639,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       resetHandoffState();
       lastStopAfterCurrentKey = null;
       lastPlaybackErrorKey = null;
-      consecutivePlaybackFailures = 0;
+      resetPlaybackFailureRun();
       playIntents.begin();
       engine.unload();
       set({
@@ -2241,6 +2654,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         stopAfterCurrent: false,
         sleepTimerEndsAt: null,
         shuffleHistory: [],
+        shuffleForward: [],
         activePodcastEpisode: null,
       });
       schedulePersistPlaybackSession(get(), true);
@@ -2274,6 +2688,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
                   : isShuffleMode(previous.mode)
                     ? previous.shuffleHistory
                     : resetSmartShuffleHistory(previous.queue.length, previous.index),
+                shuffleForward: isShuffleMode(get().mode) && isShuffleMode(previous.mode) ? previous.shuffleForward : [],
                 activePodcastEpisode: previous.activePodcastEpisode,
               });
               applyReplayGain(previous.current, get().settings);
@@ -2294,7 +2709,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           // instead of doing nothing.
           const libraryRootCount = state.settings?.libraryRoots?.length ?? 0;
           if (starterQueueNeeded({ startIndex, libraryRootCount, pending: starterQueuePending })) {
-            void playStarterQueue(get);
+            void playStarterQueue(get).catch(() => undefined);
           }
           return;
         }
@@ -2302,7 +2717,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         const playbackQueue = state.queue.length ? state.queue : state.current ? [state.current] : [];
         // Carry the saved position in the play request itself. A late
         // completion must never seek a newer track after Stop/queue changes.
-        void state.playQueue(playbackQueue, startIndex, resumeAt ?? 0);
+        void state.playQueue(playbackQueue, startIndex, resumeAt ?? 0).catch(() => undefined);
         return;
       }
       engine.togglePlayPause();
@@ -2312,68 +2727,32 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (activePreview) return;
       clearPlaybackErrorAdvanceTimer();
       const intent = playIntents.begin();
-      const revision = queueRevision;
-      const isCurrent = () => playIntents.isCurrent(intent) && queueRevision === revision;
-      const state = get();
-      recordManualSkip(state);
-      // A direct call to next() — user skip, keyboard/media shortcut, or
-      // autoAdvance()'s own fallback when no cached pick applies — always
-      // computes its own fresh pick rather than trusting a background
-      // prepare; see shared/shuffle-handoff.ts for why a stale one cannot
-      // just be reused.
-      cachedShuffleHandoff = null;
-      const { queue, index, mode, shuffleHistory } = state;
-      if (!queue.length) return;
-      consecutivePlaybackFailures = 0;
-      const advance = resolveQueueAdvance({ queue, index, mode, history: shuffleHistory });
-      let nextIdx = advance.index;
-      let nextShuffleHistory = advance.history;
-      if (advance.atEnd) {
-        // The end of the queue, or of a shuffle cycle with repeat off.
-        const additions = await get().refillAutoDjQueue(true);
-        if (!isCurrent()) return;
-        let resumed: QueueAdvance | null = null;
-        if (additions.length) {
-          const grown = get();
-          resumed = resolveQueueAdvance({ queue: grown.queue, index: grown.index, mode: grown.mode, history: grown.shuffleHistory });
-        } else {
-          const expanded = await expandQueueFromCurrentContext(state);
-          if (!isCurrent()) return;
-          if (expanded) {
-            const contextShuffleHistory = isShuffleMode(mode)
-              ? resetSmartShuffleHistory(expanded.queue.length, expanded.index)
-              : [];
-            resumed = resolveQueueAdvance({ queue: expanded.queue, index: expanded.index, mode, history: contextShuffleHistory });
-            if (!resumed.atEnd) {
-              set({ queue: expanded.queue, index: expanded.index, shuffleHistory: contextShuffleHistory });
-            }
-          }
+      // At the end of the queue the lookups for more tracks are asynchronous,
+      // and a queue edit that lands meanwhile calls the attempt off. A track
+      // that has already ended is waiting on this call, so the advance is
+      // worked out again from the queue as it now stands instead of leaving
+      // the player stopped. A newer play request ends it for good.
+      try {
+        if ((await advanceFromQueue(get, set, intent, true)) === 'edited' && engine.getState().ended) {
+          await advanceFromQueue(get, set, intent, false);
         }
-        if (!resumed || resumed.atEnd) {
-          engine.pause();
-          set({ isPlaying: false });
-          schedulePersistPlaybackSession(get(), true);
-          return;
-        }
-        nextIdx = resumed.index;
-        nextShuffleHistory = resumed.history;
+      } catch (err) {
+        rethrowUnlessPublished(err);
       }
-      if (!isCurrent()) return;
-      await commitPlaybackAdvance(get, set, nextIdx, nextShuffleHistory);
     },
 
     prev: async () => {
       if (activePreview) return;
       clearPlaybackErrorAdvanceTimer();
-      const { queue, index, currentTime, mode, shuffleHistory } = get();
+      const { queue, index, currentTime, mode, shuffleHistory, shuffleForward } = get();
       if (!queue.length) return;
       // if more than 3 seconds into the track, restart it
-      if (currentTime > 3) {
+      if (currentTime > PREVIOUS_RESTARTS_AFTER_S) {
         get().seek(0);
         return;
       }
       const shuffleDecision = isShuffleMode(mode)
-        ? previousSmartShuffle({ queueLength: queue.length, currentIndex: index, history: shuffleHistory })
+        ? previousSmartShuffle({ queueLength: queue.length, currentIndex: index, history: shuffleHistory, forward: shuffleForward })
         : null;
       // Repeat-all wraps backwards from the first track like Next wraps forwards.
       const prevIdx = shuffleDecision
@@ -2383,7 +2762,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           : Math.max(0, index - 1);
       const t = queue[prevIdx]!;
       resetHandoffState();
-      consecutivePlaybackFailures = 0;
+      resetPlaybackFailureRun();
       set({
         index: prevIdx,
         current: t,
@@ -2392,14 +2771,20 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         resumeAt: null,
         activePodcastEpisode: null,
         shuffleHistory: shuffleDecision?.history ?? shuffleHistory,
+        shuffleForward: shuffleDecision?.forward ?? [],
       });
       applyReplayGain(t, get().settings);
       schedulePersistPlaybackSession(get(), true);
-      if (!(await playEngineTrack(t))) return;
+      // Landing on another track counts as a play the same way Next does.
+      if (prevIdx !== index) beginPlayCount(t);
+      try {
+        if (!(await playEngineTrack(t))) return;
+      } catch (err) {
+        rethrowUnlessPublished(err);
+        return;
+      }
       lastPlaybackErrorKey = null;
       startLastfmNowPlaying(t);
-      // Landing on another track counts as a play the same way Next does.
-      if (prevIdx !== index) recordLibraryPlay(t);
     },
 
     seek: (t) => {
@@ -2611,6 +2996,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
           : isShuffleMode(state.mode)
             ? [...state.shuffleHistory]
             : resetSmartShuffleHistory(state.queue.length, state.index),
+        shuffleForward: isShuffleMode(m) && isShuffleMode(state.mode) ? state.shuffleForward : [],
       });
       writeStored(PLAYBACK_MODE_STORAGE_KEY, m);
       schedulePersistPlaybackSession(get(), true);
@@ -2675,6 +3061,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       set((state) => ({
         current: state.current?.id === id ? { ...state.current, loved: nextLoved } : state.current,
         queue: state.queue.map((track) => (track.id === id ? { ...track, loved: nextLoved } : track)),
+        lastLoveChange: { id, loved: nextLoved, seq: (state.lastLoveChange?.seq ?? 0) + 1 },
       }));
       // Eviland memory bridge: love-tick forces a generation evolution when
       // the lineage is < gen 3. Only fire on

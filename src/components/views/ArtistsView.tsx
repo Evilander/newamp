@@ -55,6 +55,20 @@ export function ArtistsView(): JSX.Element {
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
   const current = usePlayerStore((s) => s.current);
 
+  // A scan that read something new, or tracks leaving the library, changes the
+  // list and the open artist's tracks; reading again keeps the view in step.
+  useEffect(() => {
+    const reload = (): void => setRefreshSeed((seed) => seed + 1);
+    const offScan = api.onScanProgress((progress) => {
+      if (progress.done && !progress.cancelled && (progress.parsed ?? 1) > 0) reload();
+    });
+    const offRemoved = api.onTracksRemoved(reload);
+    return () => {
+      offScan();
+      offRemoved();
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     setLoadingArtists(true);
@@ -89,6 +103,17 @@ export function ArtistsView(): JSX.Element {
     });
     return () => { cancelled = true; };
   }, [selected]);
+
+  // A scan or removal with an artist open reads their tracks again; the rows
+  // stay up until the new ones land.
+  useEffect(() => {
+    if (!selected || refreshSeed === 0) return;
+    let cancelled = false;
+    api.getArtistTracks(selected).then((rows) => {
+      if (!cancelled) setTracks(rows);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [refreshSeed]);
 
   useEffect(() => {
     if (!selected || selected === 'Unknown Artist') {

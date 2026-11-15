@@ -32,7 +32,7 @@ function driver() {
     getShaderParameter() { return true; }, getProgramInfoLog() { return 'intentional test failure'; },
     useProgram(p) { this.current = p; },
     uniform1f(loc, value) { if (loc) loc.p.values[loc.name] = value; },
-    uniform1fv() {}, uniform2f() {}, uniform3f() {}, uniform4f() {},
+    uniform1fv() {}, uniform2f() {}, uniform3f() {}, uniform3fv() {}, uniform4f() {},
     bindVertexArray() {}, bindFramebuffer() {}, viewport() {}, disable() {}, enable() {},
     blendEquation() {}, blendFunc() {}, clearColor() {}, clear() {}, isContextLost() { return false; },
     drawArrays() { draws.push({ program: this.current.id, ...this.current.values }); },

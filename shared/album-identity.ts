@@ -218,7 +218,9 @@ const DISC_TAIL_BRACKET = /\s*[([]\s*(?:disc|disk|cd)\s*[-#.]?\s*(\d+|one|two|th
 // "CD2", "- Disc 3: Jefferson" at the end of a title.
 const DISC_TAIL_PLAIN = /\s*[-–—:,]?\s*\b(?:disc|disk|cd)\s*[-#.]?\s*(\d+|one|two|three|four)\b(?:\s*[:–—-]\s*.*)?$/i;
 // A folder that is a disc or part of a set rather than an album of its own.
-const DISC_FOLDER = /^(?:cd|disc|disk|dvd|side|vol|volume)[\s._-]*0*(?:\d+|[a-d])\b.*$/i;
+// "Side" and "Vol" begin album titles too ("Vol. 3 - Remixes", "Side A Songs"),
+// so they only count when nothing follows the number or letter.
+const DISC_FOLDER = /^(?:(?:cd|disc|disk|dvd)[\s._-]*0*(?:\d+|[a-d])\b.*|(?:side|vol|volume)[\s._-]*0*(?:\d+|[a-d])\s*)$/i;
 const DISC_FOLDER_NUMBER = /^(?:cd|disc|disk|dvd)[\s._-]*0*(\d+)\b/i;
 
 function discNumberOf(token: string | undefined): number | null {

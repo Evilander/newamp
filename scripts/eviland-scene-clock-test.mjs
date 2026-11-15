@@ -15,14 +15,16 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-mkdirSync(resolve('tmp'), { recursive: true });
-const outfile = resolve('tmp/eviland-scene-clock-bundle.mjs');
+// NEWAMP_SCENE_CLOCK_TMP lets runs side by side bundle into folders of their own.
+const tmpDir = resolve(process.env.NEWAMP_SCENE_CLOCK_TMP || 'tmp');
+mkdirSync(tmpDir, { recursive: true });
+const outfile = resolve(tmpDir, 'eviland-scene-clock-bundle.mjs');
 await build({
   entryPoints: [resolve('src/visualizer/scenes/index.ts')],
   bundle: true, format: 'esm', platform: 'node', target: 'es2022', outfile, logLevel: 'silent',
 });
 const { SCENES } = await import(pathToFileURL(outfile).href);
-const overlayOut = resolve('tmp/eviland-scene-clock-overlay-bundle.mjs');
+const overlayOut = resolve(tmpDir, 'eviland-scene-clock-overlay-bundle.mjs');
 await build({
   entryPoints: [resolve('src/visualizer/scene-overlay.ts')],
   bundle: true, format: 'esm', platform: 'node', target: 'es2022', outfile: overlayOut, logLevel: 'silent',

@@ -4,13 +4,12 @@
 // The queue itself (electron/analysis-queue.ts) knows none of that and is
 // tested against stand-ins; this is the one place that hands it the real ones.
 
-import { stat } from 'node:fs/promises';
 import { cpus } from 'node:os';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { AnalysisQueue, type AnalysisLoad } from './analysis-queue.js';
 import type { LibraryStore } from './library.js';
 import { onPlaybackHunger, playbackHungry } from './playback-io.js';
-import { analyzeTrack } from './track-analyzer.js';
+import { analyzeTrack, statWithin } from './track-analyzer.js';
 import { hasCachedWaveform, waveformCacheHasRoom } from './waveform-peaks.js';
 
 export interface LibraryAnalysisOptions {
@@ -42,7 +41,8 @@ export function createLibraryAnalysis(options: LibraryAnalysisOptions): Analysis
     onBattery: options.onBattery,
     peaksWanted: async (path) => {
       if (!options.waveformsEnabled() || !waveformCacheHasRoom()) return false;
-      const info = await stat(path);
+      // A share that stopped answering fails this (the queue then asks for no waveform) instead of hanging the queue.
+      const info = await statWithin(path);
       return !(await hasCachedWaveform({ path, size: info.size, mtimeMs: info.mtimeMs }));
     },
   });

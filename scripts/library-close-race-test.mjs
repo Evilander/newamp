@@ -76,8 +76,11 @@ function caseTrack(path, title) {
     albumArtist: 'Case Fixture',
   };
 }
-// On Windows a scan now treats paths that differ only in case as one file, so
-// a case-renamed track keeps its id and history; elsewhere they are two files.
+// On Windows a scan treats paths that differ only in case as one file, so a
+// case-renamed track keeps its id and history. On a Mac the stored spelling is
+// settled against the disk: these fixture paths don't exist, so the old
+// spelling counts as renamed away and the row follows the file. Linux keeps
+// the two spellings apart as two files.
 const caseRenameStore = await LibraryStore.open(join(root, 'case-rename-library.db'));
 caseRenameStore.upsertTracks([caseTrack('C:/Music/Bar.mp3', 'Before Rename')]);
 const renamedFrom = caseRenameStore.getTracks({ limit: 10 })[0].id;
@@ -86,6 +89,10 @@ const afterRename = caseRenameStore.getTracks({ limit: 10 });
 if (process.platform === 'win32') {
   assert.equal(afterRename.length, 1, 'a case-only rename on Windows is the same file');
   assert.equal(afterRename[0].id, renamedFrom, 'a case-only rename on Windows keeps the track id');
+} else if (process.platform === 'darwin') {
+  assert.equal(afterRename.length, 1, 'a case-only respelling whose old spelling is gone from disk is a rename on macOS');
+  assert.equal(afterRename[0].id, renamedFrom, 'a case-only rename on macOS keeps the track id');
+  assert.equal(afterRename[0].path, 'C:/Music/bar.mp3', 'the row takes the new spelling');
 } else {
   assert.equal(afterRename.length, 2, 'paths that differ only in case are two files here');
 }

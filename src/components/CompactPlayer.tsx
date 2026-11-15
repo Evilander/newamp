@@ -24,27 +24,48 @@ const DECK_SKIN_SCHEMA_KEY = 'newamp:deck:skinSchema';
 const DECK_SKIN_SCHEMA = '2';
 const VIZ_EXPANDED_KEY = 'newamp:deck:vizExpanded';
 
+// Blocked or full storage must not stop the deck from rendering; the choices
+// just do not survive a restart.
+function readStored(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStored(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* the choice lasts for this session only */
+  }
+}
+
 function loadInitialSkin(): DeckSkin {
   if (typeof window === 'undefined') return 'bento';
-  if (window.localStorage.getItem(DECK_SKIN_SCHEMA_KEY) !== DECK_SKIN_SCHEMA) {
-    window.localStorage.setItem(DECK_SKIN_KEY, 'bento');
-    window.localStorage.setItem(DECK_SKIN_SCHEMA_KEY, DECK_SKIN_SCHEMA);
+  if (readStored(DECK_SKIN_SCHEMA_KEY) !== DECK_SKIN_SCHEMA) {
+    writeStored(DECK_SKIN_KEY, 'bento');
+    writeStored(DECK_SKIN_SCHEMA_KEY, DECK_SKIN_SCHEMA);
     return 'bento';
   }
-  const raw = window.localStorage.getItem(DECK_SKIN_KEY);
+  const raw = readStored(DECK_SKIN_KEY);
   if (raw && DECK_SKINS.some((skin) => skin.id === raw)) return raw as DeckSkin;
   return 'bento';
 }
 
 function loadInitialVizExpanded(): boolean {
   if (typeof window === 'undefined') return false;
-  return window.localStorage.getItem(VIZ_EXPANDED_KEY) === '1';
+  return readStored(VIZ_EXPANDED_KEY) === '1';
 }
 
 export function CompactPlayer(): JSX.Element {
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
-  const currentTime = usePlayerStore((s) => s.currentTime);
+  // Every deck re-renders when this changes. The readouts show whole seconds
+  // and the bars are a few hundred pixels wide, so a quarter-second grid looks
+  // the same as the engine's 100 ms ticks at less than half the renders.
+  const currentTime = usePlayerStore((s) => Math.floor(s.currentTime * 4) / 4);
   const duration = usePlayerStore((s) => s.duration);
   const volume = usePlayerStore((s) => s.volume);
   const mode = usePlayerStore((s) => s.mode);
@@ -84,16 +105,14 @@ export function CompactPlayer(): JSX.Element {
 
   function handlePickSkin(skin: DeckSkin): void {
     setDeckSkin(skin);
-    window.localStorage.setItem(DECK_SKIN_KEY, skin);
-    window.localStorage.setItem(DECK_SKIN_SCHEMA_KEY, DECK_SKIN_SCHEMA);
+    writeStored(DECK_SKIN_KEY, skin);
+    writeStored(DECK_SKIN_SCHEMA_KEY, DECK_SKIN_SCHEMA);
   }
 
   function handleToggleVizExpanded(): void {
-    setVizExpanded((value) => {
-      const next = !value;
-      window.localStorage.setItem(VIZ_EXPANDED_KEY, next ? '1' : '0');
-      return next;
-    });
+    const next = !vizExpanded;
+    setVizExpanded(next);
+    writeStored(VIZ_EXPANDED_KEY, next ? '1' : '0');
   }
 
   // Deck Snapshot: hide the overlay chrome, let the compositor paint two

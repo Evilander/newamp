@@ -22,7 +22,7 @@ export function registerHistoryImportIpc(getLibrary: () => LibraryStore, getApiK
       controller.signal.throwIfAborted();
       if (!parsed) return null;
       if (getLibrary() !== library) throw new Error('The library changed during import. Please try again.');
-      const report = library.importListeningHistory(parsed.entries);
+      const report = await library.importListeningHistoryAsync(parsed.entries);
       committed = true;
       report.invalid += parsed.invalid;
       report.total += parsed.invalid;

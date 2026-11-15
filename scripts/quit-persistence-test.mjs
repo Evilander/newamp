@@ -9,7 +9,7 @@ const source = readFileSync(new URL('../electron/main.ts', import.meta.url), 'ut
 const handlers = source.slice(source.indexOf("app.on('before-quit'"), source.indexOf("app.on('activate'"));
 assert.ok(handlers.includes("app.on('will-quit'"));
 
-function fixture(platform, hasTray, radio = false, displaySleepBlockerId = null) {
+function fixture(platform, hasTray, radio = false, displaySleepBlockerId = null, appSuspensionBlockerId = null) {
   const calls = [];
   const stoppedBlockers = [];
   const app = new EventEmitter();
@@ -25,7 +25,7 @@ function fixture(platform, hasTray, radio = false, displaySleepBlockerId = null)
   const context = {
     app, process: { platform }, console,
     isQuitting: false, radioBrainShutdownStarted: false,
-    displaySleepBlockerId,
+    displaySleepBlockerId, appSuspensionBlockerId,
     powerSaveBlocker: { stop(id) { stoppedBlockers.push(id); } },
     globalShortcut: { unregisterAll() {} }, closeStartupSplashWindow() {},
     libraryWatcher: { stop() { calls.push('watcher-stop'); } },
@@ -52,7 +52,7 @@ for (const platform of ['win32', 'darwin', 'linux']) {
   f.app.quit();
   assert.deepEqual(f.calls, ['watcher-stop', 'scanner-cancel', 'analysis-stop', 'library-close', 'settings-flush', 'podcast-flush'], `${platform} explicit Quit saves every store, after the analysis queue has written its results`);
   assert.equal(f.gaplessClosed(), 1, `${platform} explicit Quit stops the gapless decoders`);
-  assert.deepEqual(f.stoppedBlockers, [], `${platform} explicit Quit has no display-sleep blocker to release`);
+  assert.deepEqual(f.stoppedBlockers, [], `${platform} explicit Quit has no power-save blocker to release`);
 }
 {
   // The display-sleep blocker held for an ambient visualizer is released on quit.
@@ -60,6 +60,18 @@ for (const platform of ['win32', 'darwin', 'linux']) {
   f.app.quit();
   assert.deepEqual(f.stoppedBlockers, [7], 'explicit Quit releases the display-sleep blocker');
   assert.equal(f.context.displaySleepBlockerId, null, 'the released blocker is forgotten');
+}
+{
+  // The app-suspension blocker held while exclusive output plays is released on quit too.
+  const f = fixture('darwin', true, false, null, 9);
+  f.app.quit();
+  assert.deepEqual(f.stoppedBlockers, [9], 'explicit Quit releases the app-suspension blocker');
+  assert.equal(f.context.appSuspensionBlockerId, null, 'the released app-suspension blocker is forgotten');
+}
+{
+  const f = fixture('darwin', true, false, 7, 9);
+  f.app.quit();
+  assert.deepEqual(f.stoppedBlockers, [7, 9], 'explicit Quit releases both blockers');
 }
 for (const platform of ['win32', 'linux']) {
   const f = fixture(platform, false);

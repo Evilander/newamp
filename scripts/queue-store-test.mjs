@@ -387,18 +387,27 @@ try {
     }
   }
 
-  // ---- Prev counts a play and wraps with repeat-all ----
+  // ---- Prev wraps with repeat-all, and the track it lands on counts as a play once heard ----
   {
+    // A library play is counted after half the track, not at the start.
+    const listenToHalf = () => {
+      engine.patchExternal({ currentTime: 0, duration: 180, playing: true });
+      for (let t = 3; t <= 90; t += 3) engine.patchExternal({ currentTime: t });
+    };
     await reset(S, { mode: 'repeat-all' });
     await state().playQueue(tracks(3), 0);
     S.recorded.length = 0;
     engine.patchExternal({ currentTime: 0, playing: true });
     await state().prev();
     assert.equal(state().current.id, 3, 'Prev from the first track wraps to the last with repeat-all');
-    assert.deepEqual(S.recorded, [3], 'and counts as a play');
+    assert.deepEqual(S.recorded, [], 'landing on it is not a play yet');
+    listenToHalf();
+    assert.deepEqual(S.recorded, [3], 'half of it is');
     engine.patchExternal({ currentTime: 0, playing: true });
     await state().prev();
     assert.equal(state().current.id, 2);
+    assert.deepEqual(S.recorded, [3], 'the one before it is not counted on arrival either');
+    listenToHalf();
     assert.deepEqual(S.recorded, [3, 2]);
 
     await reset(S);
@@ -428,11 +437,24 @@ try {
     assert.equal(S.plays.length, 8, 'shuffle gives up too');
     S.onPlay = null;
 
+    // A track the library flags as missing gets a real attempt before Next
+    // passes over it: the flag can come from a share that timed out during a
+    // scan. Ids unique to this block, since failed opens are remembered per id
+    // and the failing queues above used the low ones.
     await reset(S);
-    await state().playQueue([track(1), track(2, { missingSince: 5 }), track(3)], 0);
+    const missing = track(702, { missingSince: 5 });
+    await state().playQueue([track(701), missing, track(703)], 0);
     await state().next();
-    assert.equal(state().current.id, 3, 'Next passes over a track the library knows is missing');
-    assert.deepEqual(S.plays, [1, 3]);
+    assert.equal(state().current.id, 702, 'the missing flag alone does not skip a track that was never tried');
+    assert.deepEqual(S.plays, [701, 702]);
+    engine.patchExternal({ error: 'share timed out', playing: false });
+    await until(() => state().current?.id === 703);
+    assert.deepEqual(S.plays, [701, 702, 703], 'once its open has failed the queue moves on');
+    engine.patchExternal({ error: null });
+    await state().playQueue([track(701), missing, track(703)], 0);
+    await state().next();
+    assert.equal(state().current.id, 703, 'and Next then passes over the track the library knows is missing');
+    assert.deepEqual(S.plays, [701, 702, 703, 701, 703]);
   }
 
   // ---- resolveQueueAdvance ----

@@ -5,6 +5,521 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [2.9.0] - 2026-10-31
+
+This release is mostly about playing a library from a slow or flaky network
+share without songs stopping or skipping, a pass over the rest of the app, and
+new Eviland scenes and colour. 2.8.1 read a file again after a failed read
+only five times per track, so a share that dropped every so often ended a long
+song at its sixth drop. The count is now per drop; NewAmp waits up to a minute
+for the share to answer, then hands the track over where it stopped instead of
+skipping it. The second player reads past timeouts too, a seek into a failed
+read no longer skips the track, a media error partway through a song retries
+the same song from where it was, a stat that times out no longer gives a 404
+or marks tracks missing, and playing from the Library queues the whole result
+instead of the first 600 or so rows. Eviland gets eight new scenes, a second
+accent colour in every palette, per-band stereo placement, and colour blends
+that no longer go grey between two hues. The Mac gets a File menu, a Dock menu
+that shows what's playing, and the track name in the window title.
+
+### Added
+
+- Eight new Eviland scenes, each a single picture driven by the music instead
+  of a field of effects. Generated looks choose them; about three in ten now
+  draw one of the eight.
+- Caustic Floor: the web of light on the floor of a pool, with coloured
+  fringes. Bass widens the net, a kick sends a ring through it, hats add a
+  finer second net, and the vocal throws a shaft of light from its place in
+  the stereo field.
+- Thin Film: a soap film hanging from a bent wire, its colour fringes packing
+  closer toward the bottom, with black spots drifting up. Bass thickens the
+  film, brighter sound adds fringes, a kick drops a ripple ring into it and a
+  snare sends a wave down it.
+- Cymatic Plate: sand on a vibrating plate, collecting along the lines that
+  stay still. Six modes follow groups of frequency bands, a snare scatters the
+  grains, and every twelfth kick retunes the plate to a different pattern. The
+  plate is a square, a diamond or a disc, depending on the look.
+- Ice Halo: the 22-degree halo with two sundogs, a fainter 46-degree ring, a
+  light pillar and falling ice crystals. The vocal sets how high the pillar
+  stands, the beat traces the circle through the sundogs, kicks flash groups
+  of crystals, and sudden changes in the music raise an arc above the halo.
+- Stereo Ripple Tank: two wave sources, the left channel in the first accent
+  colour and the right in the second. Stereo width sets how far apart they
+  are, pan sets the balance, and bass drives the left source and treble the
+  right.
+- Truss Chase: three rows of 24 stage lights on lighting trusses. The middle
+  row is a spectrum with one lamp per band. The outer rows chase on the beat
+  while the beat tracker is confident and hold still when it isn't.
+- Gobo Heads: four moving lights on slow looping paths, throwing patterned
+  discs (spokes, broken rings, clover, louvres) through haze. Each head
+  follows a slice of the spectrum, kicks change the patterns, and the paths
+  sweep wider as the music gets louder.
+- Prism Dispersal: a rotating quartz crystal lit by two beams, one per
+  channel. Each beam splits into a 24-band fan of colour whose rays brighten
+  with their band, and the fans pool on a floor beneath. Pan tilts the beams
+  and stereo width opens them apart.
+- Every Eviland palette has a second accent colour next to the first:
+  generated looks, the Phosphor, Ice and Sunset palettes, rainbow mode, and
+  palettes taken from a skin or an album cover. Hats, mid-band rings, the
+  fluid dye and several scenes draw on it, and it carries through fades
+  between looks and key shifts.
+- Eviland places sound by the stereo position of each frequency band instead
+  of one position for the whole mix. Emitters appear where their band sits,
+  the spectrum sun's rays shift with it, the fluid's kick, snare and hat
+  forces follow, and every scene can read it. Each look chooses how far to
+  spread: wide, airy looks spread the bands out and centred ones keep them in
+  the middle.
+- Generated looks shift with the song's key, as theme palettes already did.
+  For tracks the visualizer has scored, a minor key also darkens the accents
+  slightly and a major key lifts them.
+- A File menu on the Mac with Open... (Cmd+O), Add Folder to Library...
+  (Cmd+Shift+O) and Open Recent.
+- The Dock menu on the Mac shows the playing track, with Previous, Play/Pause,
+  Next, Stop and Show NewAmp (just Show NewAmp when nothing is loaded). The
+  window title shows the track as "Title - Artist" and goes back to "NewAmp"
+  when nothing is loaded.
+- NewAmp is registered as a handler for .m4b and .alac files. Opening or
+  dropping .m4b, .mp4 and .alac files plays them; the list of openable files
+  was shorter than the one the scanner uses.
+- Media controls get skip back and forward (10 seconds unless the system asks
+  for another amount). Previous and Next are offered only when they would do
+  something.
+- Library folders on a network volume (NFS, SMB, AFP, WebDAV and similar) are
+  checked for changes once an hour, since the file watcher gets no change
+  events from them.
+
+### Changed
+
+- Eviland's colour blends are laid out in OKLCh: the palette ramps in scenes
+  and the reaction-diffusion field, the Live colour grade, fades between
+  looks, rainbow mode and the blend with an album cover. A blend between two
+  hues no longer goes through grey or mud. Bright parts of a scene roll off by
+  their brightest channel instead of clipping each channel, so highlights keep
+  their colour, and the literal white that Eye of Storm, Glitch Bars, Neon
+  Grid and Lightning Veins added is now the palette's light colour.
+- Album art colours reach the visualizer. Reading them back from the cover
+  failed because the image marked the canvas as tainted, so a cover gave no
+  colours at all. Picks are now made in OKLCh with a vibrant colour and a
+  second hue; a cover whose red straddles 0 degrees is no longer split in two,
+  and olive, brown and khaki covers come out amber or gold. A failed read is
+  remembered for 30 seconds.
+- A skin's visualizer palette is built from its accent in OKLCh. The light
+  colour comes from the accent's hue; Classic, Ops, Amber, Oxide and Mono keep
+  their ink colour, and Steel, Terminal, Ice and Miami, whose ink is dark,
+  used that dark colour as the light one before. The projector window now
+  builds its palette the same way as the main window, including key and mood
+  shifts. Generated palettes keep every role's hue but set lightness in OKLCh,
+  per look type, with a background that carries a little colour, so seed codes
+  from earlier versions recolour slightly.
+- Eviland adds a fine triangular dither before 8-bit output (the Live grade,
+  the flash guard's composite and the engine's final pass), so dark gradients
+  and fades don't band. It fades to nothing toward black, and an idle flash
+  guard is still an exact pass-through.
+- Eviland's quality governor also counts frames that arrive late, not only
+  CPU time, so a machine whose GPU is the limit steps down instead of staying
+  over budget. Its shader programs compile in parallel.
+- A play is recorded after half the track or 4 minutes, whichever is shorter,
+  or at a natural end. It used to be recorded when the track started, so the
+  playing track now shows in History and Recently played only after that
+  point. Scrubbing doesn't add heard time, a restored session doesn't count,
+  and a track that ends early because of a read failure no longer counts as a
+  skip.
+- The daily backup waits until playback stops, and runs 30 seconds after it
+  does, instead of running while music plays. The six-hour check is still the
+  fallback.
+- Quick Play searches track, album and artist titles literally and runs Ask
+  beside them. Ask results get their own "Ask your library" section of up to
+  12 rows, and a failed Ask no longer fails the whole palette. A typed query
+  lists at most 6 views and commands, an exact song title leads the list, and
+  at least 12 rows stay for tracks.
+- Internet radio keeps playing when you leave the Radio view, follows the
+  volume and output device, and ends when library playback starts. A stream
+  that drops or stalls is retried twice, then ends with "Radio stream lost";
+  before, leaving the view stopped it and a dead stream still said LIVE.
+- Tag rules are checked when saved: an unknown field, function or wrong
+  argument count is refused with its line and column instead of saving a rule
+  that never matches. The preview samples evenly across the library instead of
+  the first 2,000 rows and says "N matches, sampled X of Y".
+- Harmonic mixes score keys by key-signature distance across modes, so C to
+  E minor counts as adjacent and C to D minor beats C to G minor. Open Key
+  notation (1d to 12m), Cb, Fb, E# and B# are read, and a seed track shorter
+  than 20 seconds works.
+- The hi-res badge also appears for 24-bit files at 48 kHz and below, the
+  low-bitrate warning depends on the codec (AAC under 129 kbps, Opus and
+  Vorbis under 97 kbps, 192 kbps otherwise), and a file of unknown format is
+  no longer called lossy.
+- The shareable profile page leaves out Top artists unless the profile's
+  default privacy is Public.
+- settings.json, library.db and the daily backups are written readable by
+  your account only. The Last.fm and OpenAI keys are still stored in
+  settings.json.
+- ReplayGain analysis no longer asks ffmpeg for true-peak oversampling that
+  was never used, and a silent track is reported as silent. Background analysis decodes at most 2 minutes
+  of a track that only needs tempo, key or DNA, where it read up to 20.
+
+### Fixed
+
+#### Playback
+
+- A song playing from a network share could still stop partway and the next
+  one start. 2.8.1 read the file again after a read that timed out, but only
+  five times per track, so a share that drops every so often ended a long song
+  at its sixth drop. The count is now per drop and starts again after each
+  recovery. NewAmp keeps trying for up to a minute while the share isn't
+  answering, showing Buffering once the audio it holds runs out, and carries
+  on where it stopped. Before, running dry for 4 seconds handed the track to
+  the second player, which gave up on the first failed read and skipped to the
+  next track; that player now reads past a timeout the same way. If the share
+  stays gone longer than that, the track is handed over at the point where it
+  stopped instead of ending as if it had played out.
+- Seeking into a part of a file that fails to read was treated as the track
+  having played out, and the next track started. The seek now goes through the
+  same retry as any other failed read, and if the share stays gone the track
+  stops with "The drive stopped answering".
+- A decoder that neither produced audio nor exited, such as a read hung on a
+  share, left the player silent with no explanation. After 1.5 seconds without
+  audio, with the buffered audio running low, the player shows Buffering;
+  after 8 seconds the decoder is stopped and the track reopened where it
+  stopped. A track that fails to open on a share is tried again for up to 12
+  seconds before it is reported. Starting a track also no longer waits for the
+  next track to be planned and the resampler to be checked first; both run
+  alongside the decode, and a slow first run of that check no longer selects
+  the fallback resampler for the session.
+- After a read failure the decode resumes slightly earlier and drops the
+  overlap. A plain seek-and-resume was not sample-exact on MP3 and AAC, so the
+  join could repeat or skip a moment of audio; it is now exact for MP3, AAC
+  and FLAC.
+- The request that serves a track no longer does a blocking file check on a
+  network path, which stalled the whole app while the share was slow. A stat
+  or lookup that times out is retried, and only a share that stays gone for
+  the whole wait answers "storage unavailable"; before it answered 404 or
+  403, and the player skipped. Tracks the library already knows are served
+  without touching the file system first, and whether a file plays directly or
+  through ffmpeg is decided when it is first served, so a seek can't change it
+  halfway through.
+- A media error partway through a song on the second player skipped to the
+  next track. It now reloads the same track at the same position after 1.5, 4,
+  9 and 16 seconds, with Buffering showing, and the budget starts over after
+  five seconds of audio. Pausing, stopping or playing something else cancels
+  the retries, a seek during the wait moves the resume point, and Play on a
+  paused track that failed reloads it. Only after the last retry does the old
+  skip happen.
+- Hand-offs to the second player flashed 0:00 and saved it as the position.
+  Dragging the scrub bar sent two seeks per move, scrolling the wheel forward
+  in the last second jumped backwards, and a run of quick seeks each reloaded
+  the track; the first seek applies at once and the rest are merged every 125
+  ms.
+- Skipped tracks were silent because the "Skipped" message was overwritten in
+  the same moment; a toast now names the track and the error. A track an
+  earlier scan marked missing was skipped without being tried; it is now tried
+  and passed over only if it fails to open, and a run of unreadable tracks
+  collapses into one toast and stops after a limit. Events from the track that
+  just ended can no longer skip the one after it, and the end-of-queue lookup
+  no longer quits silently, leaving playback stalled, when the queue is edited
+  while it runs.
+- Playing from the Library queued only the rows loaded so far, so playback
+  ended at about row 600. The loaded rows start at once and the rest of the
+  matches are read in pages and added behind them, up to 20,000 with a toast
+  if there are more.
+- If macOS or the output device suspended the audio context while a track
+  played, the player stayed silent and still said Playing. NewAmp now resumes
+  it, and pauses honestly if it can't within two seconds. A device change is
+  handled once instead of being re-applied on every event.
+- Bit-Perfect Exclusive treated a decode cut short by a failed read as the end
+  of the track and skipped mid-song. It now resumes at the frame it reached
+  with the same retry as the other players, and reports an error rather than
+  ending if the share doesn't come back. Its buffer holds 8 seconds instead of
+  2, and when it runs empty mid-song it waits for half a second of audio
+  before restarting the device, so a stalling share gives one pause instead of
+  a stutter. A hung decoder is stopped and resumed after 8 seconds.
+- On a Mac, losing the output device during Bit-Perfect Exclusive wasn't
+  noticed, because the device kept reporting itself as started; it is now
+  noticed when no frames play for 1.5 seconds. A device that fails to start no
+  longer throws in the main process. If the window's page crashes or reloads,
+  exclusive playback stops instead of playing on with the controls gone, and
+  pause on sleep stops it directly, with one more pause if the state still
+  says playing in the first 3 seconds after wake.
+- Changing format in Bit-Perfect Exclusive released hog mode, restored the
+  device's rate and took both again, which clicked. It now keeps hog mode and
+  changes only the rate, opens the device it holds rather than whichever is
+  the default at that moment, checks that hog mode was actually granted, and
+  restores the device's sample rate when NewAmp quits normally. A next track
+  that fails to decode no longer produces a bogus track change. While
+  exclusive plays, NewAmp holds an app-suspension assertion to keep App Nap
+  from stopping it mid-song, and on Windows the media keys follow exclusive
+  being turned on or off without a restart.
+- Tracks played through a conversion (ALAC, AIFF, WMA, APE, WavPack, DSD and a
+  few others): a converted file already in the cache is used even when the
+  original can't be read for a moment, and a timed-out read of an ALAC .m4a is
+  no longer remembered as a plain file, which played it directly and failed. A
+  conversion that a failed read cut short was kept as well, and the track then
+  ended early every time; it is now thrown away and made again on the next
+  play. Conversions cached by earlier versions are deleted at startup and made
+  again as needed, which clears out the truncated ones. The ReplayGain
+  analysis run on selected tracks had the same problem and now reports the
+  track as not analysed.
+- Skipping through tracks no longer converts every skipped track over the
+  share: at most two conversions wait and the newest wins, and a track is
+  converted ahead of time only after it has been requested for 10 seconds. A
+  conversion that fails is not retried on every request but after 30 seconds,
+  then 2 minutes, then 10; one that failed on a read is asked again at once. A
+  conversion stops after 60 seconds without progress (or 30 minutes), not 180
+  seconds of wall clock, so long or slow sources aren't killed and restarted
+  over and over. A slow first ffmpeg check at startup no longer turns ffmpeg
+  playback off for the session.
+- The live fallback stream now errors on a failed read or an ffmpeg failure
+  instead of ending as if the track were over. Exports are written to a .part
+  file and renamed when complete, so a failed export leaves no truncated file
+  reported as done, and WAV and FLAC exports of DSD files come down to 88.2
+  kHz like playback. ffmpeg is limited to file and pipe inputs, and ffmpeg
+  processes left over at quit or after a cancel are now killed, including ones
+  stuck waiting on a share.
+- A queue over 5,000 tracks restored the wrong track and lost the saved
+  position. The saved queue is now a window of 5,000 around the playing track,
+  and while playing the position alone is saved every 20 seconds rather than
+  every 3. With smart shuffle, Previous followed by Next now goes back to the
+  track you left, including at a natural track end.
+- Closing the projector, or the main page reloading after a graphics crash,
+  left background throttling on while music played, which slowed the timers
+  that prepare the next track, send scrobbles and run the sleep timer.
+
+#### Library and scanning
+
+- A share that timed out was read as "file gone". Missing-file checks now
+  count only "no such file or folder" as gone: a timeout or I/O error leaves
+  the track alone, a folder that doesn't answer is treated as offline rather
+  than pruned with its history, and a library folder needs two checks in a row
+  that say it's gone before its tracks are marked missing. One failed stat of
+  a library folder no longer closes the watcher and forces a full rescan, and
+  a file whose stat failed once is no longer dropped from a scan and marked
+  missing.
+- Clean missing files, the watcher and the other presence checks did one
+  blocking check per track on the main thread, which froze the app on a large
+  library on a share. They now read each folder once, off the main thread, and
+  the preview's result is reused by the clean that follows.
+- Listening insights, Wrapped, tag rule saves and previews, listening history
+  import and opening a large folder did their work in one step on the main
+  thread. They now run in slices that hand the app back between steps; history
+  is read in pages and the results are cached, and an import writes in batches
+  and can be run again after a cancel. Wrapped no longer counts first plays of
+  removed tracks, and names albums the way Insights does.
+- Dropping or opening a folder inside a library root reads it from the library
+  without waiting for a scan; a folder outside is read directly up to 300
+  files and left to the scanner beyond that. Files the library already has
+  aren't read again from the share, and a file that can't be read during a
+  share hiccup is listed as skipped with a reason after one retry instead of
+  disappearing.
+- Folders played in filename order even when they were albums. Disc and track
+  numbers now order a folder that is an album (one album tag throughout, no
+  repeated numbers), and filenames order the rest. Plain search terms matched
+  the whole path, so "music", "users" or the name of the share matched every
+  track; the part of the path every track shares is now left out of free-text
+  matching, and "path:" still matches the full path.
+- Names starting with "..." were treated as hidden, which dropped "...And
+  Justice For All" and "...Intro.mp3". Only real hidden names are skipped now.
+  @eaDir folders are skipped, renames inside skipped folders no longer queue
+  scans that index them, and folders named "Vol. 3 - Remixes" or "Side A
+  Songs" are albums, not disc folders.
+- A new file that failed to read for a reason that isn't permanent
+  (permission denied, too many open files, a device that went away) is retried
+  at the next scan instead of being stored as Unknown Artist, and the tag
+  backfill no longer stores empty tags after a failed read. A scan that throws
+  ends with "Scan stopped" instead of staying on Scanning. A scan stats files
+  eight at a time and waits for playback to be fed, the tag backfill waits for
+  the launch scan, and a cover's bytes are no longer all held in memory for
+  the whole scan. Raw .aac files are no longer read through for a duration
+  (it is left empty), and an empty folder.jpg is ignored so the album isn't
+  re-read at every scan.
+- Names typed with accents on a Mac (decomposed) and the same names on a
+  share (composed) matched nothing, and a rename that only changed case or
+  normalization left a row on a dead path or made a duplicate. Paths now
+  compare in the same form on macOS in search, path identity and playlist
+  matching.
+- A failed save of the library left a full-size temp file behind, nothing
+  swept old ones, and no retry was scheduled. Temp files older than a minute
+  are removed at startup, and a failed save is retried with growing waits up
+  to a minute. Playlist covers are stored by file name, so a library.db moved
+  to another machine keeps them, and the old cover file is removed when it is
+  replaced or the playlist is deleted. Playlist track counts ignore rows for
+  removed tracks, a deleted list takes its items with it, and choosing the
+  same star rating again no longer overwrites a finer score.
+- The seek bar's waveform could stop partway along the bar and go flat, or be
+  a plain line for a track that played fine. A read of the file that timed
+  out was taken as the end of the file and the shorter waveform was kept, and
+  a file whose read timed out was not tried again until NewAmp restarted. The
+  file is now read again, up to five times, while the share isn't answering,
+  and the seek bar retries a failed waveform request after 2 and 6 seconds.
+  Nothing is kept from a read that failed, and waveforms saved by earlier
+  versions are built again once, the next time their track is shown.
+- The library analysis, the visualizer's song score and Analyze DNA had the
+  same problem. After a failed read they kept the loudness, tempo, key or
+  score of the part that was read as the whole track's, or marked a good file
+  as one that can't be decoded. A failed read is now tried again later and
+  nothing from it is saved. Read failures are no longer written down as
+  permanent: they wait 5 minutes, 30 minutes and 3 hours, three in a row hold
+  the queue before one track probes, and a missing or crashed ffmpeg isn't
+  blamed on the track. After playback runs short of audio, analysis waits 15
+  seconds before it starts again, longer if that keeps happening, and a decode
+  stops after 60 seconds without output. A track longer than 20 minutes no
+  longer saves the loudness of its first 20 minutes as the whole track's, and
+  digital silence no longer darkens the DNA's brightness and band readings.
+- A search of three or more words containing a mood or tempo word ("dark side
+  of the moon", "slow dancing in the dark") was compiled to Ask and found
+  nothing; it is now searched literally. "since 1990" includes 1990, "80s and
+  90s" reads both decades, and "post-2000" is recognised. In tag rules, regex
+  escapes such as \b and \d survive, "in -12..-6" accepts negative numbers, an
+  empty string no longer compares as 0, "and" and "or" follow three-valued
+  logic so "not (...)" on a missing value doesn't flip, and a pattern too
+  costly to run is rejected sooner. Deleting a rule recomputes the tags that
+  used it, and enabling or disabling a rule no longer throws away unsaved
+  edits to its body.
+- Taste mixes and harmonic mixes on a library over 10,000 tracks chose unplayed
+  tracks alphabetically, and Discover's album pool was the first 6,000 tracks
+  by album artist. Both now draw from the whole library, rotating by day, and
+  a harmonic mix without a seed looks at fewer candidates so it builds sooner.
+  Deep Album Run no longer picks an "Unknown Album" bucket, the full-album
+  mission queues the whole album instead of 12 tracks, Forgotten Favorites
+  aren't swamped by favorites that were never played, and Weird shelf no longer
+  matches "Springfield" or "Homecoming".
+
+#### Visualizer
+
+- If the graphics context behind Eviland Live or MilkDrop is lost, the frame
+  stops painting, the page rebuilds the renderer when the context returns
+  (three tries 250 ms apart), and falls back to the 2D painter after about 3
+  seconds if it doesn't. An error while grading a frame falls back to
+  MilkDrop's own output instead of a black frame.
+- Auto-VJ jumped off Eviland Live and the Eviland looks to a generic preset;
+  it now asks Eviland for a new look. The replay recorder stopped working
+  after the visualizer's canvas was resized or removed; it re-arms when idle,
+  and its decoders pause while the window is hidden.
+- Eye of Storm had a hard horizontal seam to the left of centre in its debris
+  streaks. The noise now wraps around.
+- Tempo smoothing, confidence decay and the band and novelty smoothing were
+  tied to the frame rate and ran at different speeds at 30 Hz and 60 Hz; they
+  are per second now. The impact ring and build pull of a drop are no longer
+  cut by the force limit on a busy frame, and the onset spacing timer is kept
+  in 64-bit floats instead of 32-bit ones, which lose precision on long
+  uptimes.
+- Expanded Bento ran two visualizers at once and now runs one. The Winamp-style
+  decks couldn't set repeat-one and Bento had no repeat control; both now cycle
+  off, all and one. A failed screenshot, copy or recording shows a message, and
+  a fullscreen toggle can't do nothing after the window's fullscreen state
+  changed elsewhere.
+
+#### Interface
+
+- Now Playing drew every queue entry as a row; the queue is now windowed and
+  scrolls to the playing row when it opens. A queue row plays on a single
+  click; the double-click restarted the track three times.
+- Albums, Artists and Folders didn't refresh after a scan or a removal, Albums
+  served stale cached rows, and Loved kept a track after it was unhearted
+  elsewhere. After a scan, a Library list longer than one page is reloaded in
+  chunks so tracks inserted into the loaded range appear, and a failed query
+  clears the old rows instead of leaving them to be queued.
+- Enter or Space on an artist or album link inside a Home row or the Now
+  Playing art played the track or opened the visualizer instead of following
+  the link. Art that failed to load hid the art for later tracks. The row
+  shortcuts Enter, Q and Shift+Q ignore Cmd, Ctrl and Alt, and the letter
+  shortcuts (Z X C V B L F, Shift+S) work on Cyrillic and Greek layouts.
+- Bulk tag edits, exports, ReplayGain analysis, save-as-playlist and the
+  playlist actions failed silently or lost partial results. They now report
+  what failed ("N updated, K failed") and the rows that did change stay on
+  screen. A year, track or disc that isn't a whole number is refused in the
+  editor instead of clearing the field, and CLEAR SAVED asks before deleting
+  custom lyrics. Wrapped and History showed a failed load as "No plays in this
+  window yet" or "No listening history yet"; they now show the failure with a
+  Retry.
+- The Auto DJ target, the Radio Brain port and the Preamp and Text size
+  sliders saved and applied on every keystroke or input event, so a two-digit
+  value couldn't be typed. Fields apply on blur or Enter and sliders at most
+  every 250 ms. Edits in the Identity form, unsaved Last.fm and OpenAI keys
+  and a tag rule's draft now survive other changes being saved, and the
+  "regenerated" toast for the remote link waits for the save.
+- Quick Play's Enter, Cmd+Enter and Shift+Enter acted on stale results during
+  the 120 ms search delay; they now do nothing until results for the typed
+  query are showing. Arrow keys scroll the selected row into view, and a
+  failed action shows in the status line. For VoiceOver and the keyboard, the
+  track table reports its full row count and position, playlist and queue rows
+  are focusable (Enter plays, Delete removes, Alt+arrows move), the sidebar has
+  a landmark name and marks the current page, Quick Play is a combobox with a
+  listbox, split handles resize with the arrow keys, and the Play button no
+  longer announces both Play and pressed.
+- A file dropped on a window no longer navigates it away from the app; a
+  window can only navigate to the app itself, and web links open in the
+  browser as before. Only files with an audio extension become readable by the
+  player when opened or dropped, a quick switch to compact mode can't strand
+  the window in deck mode, a Dock click during startup doesn't open a window
+  before the app is ready, and a second launch resolves relative paths against
+  the folder it was started from.
+- The share card drew solid blocks when a skin's accent wasn't a six-digit hex
+  colour, and a restored backup waits a moment before the window reloads so
+  the message can be read.
+
+#### Last.fm and integrations
+
+- Last.fm scrobbles: the request signature sorted parameters in locale order
+  rather than byte order, error 8 and non-JSON 4xx replies dropped plays, error
+  26 wasn't treated as an authorization failure, and a rejection like error 13
+  was dropped silently. Only errors 6 and 7 drop a play now; other refusals are
+  kept and shown, requests time out after 15 seconds and are retried, and an
+  outbox that can't be read is no longer treated as empty and overwritten (a
+  corrupt one is set aside).
+- The Last.fm history import stopped at the first failed page. Each page is
+  tried up to 4 times with growing waits, honouring Retry-After, and
+  cancelling stops at once. A private profile and an unknown user now say so.
+- MusicBrainz requests are spaced at least 1.1 seconds apart and retried once
+  after a 503 or 429, then reported as busy. MusicBrainz and cover art
+  requests time out after 15 seconds, cover images are capped at 8 MB and
+  must be JPEG, PNG or WebP by their content (SVG is refused), and the 1200
+  pixel image is preferred.
+- Guitar tabs: any word starting with A to G counted as a chord, a normal page
+  with Cloudflare's script was rejected as a challenge, and the page's
+  entity-encoded tab data wasn't read. Chord detection now uses a strict
+  grammar, only real challenge responses are refused, and the data is read.
+  Fetches time out after 15 seconds, are capped at 4 MB and follow at most 3
+  redirects, each checked against the host. Lyrics and tab sidecars are found
+  by listing each folder once instead of 30 or more stat calls per track on a
+  share, names match whatever Mac normalization they use, UTF-16 and
+  windows-1252 files are decoded, and a failed read of embedded lyrics is no
+  longer remembered as "no lyrics".
+- Music servers: a stream that stalls for 15 seconds, resets or ends early is
+  asked again from where it stopped, up to twice per drop. Redirects within
+  the same host (http to https, a trailing slash) are followed and others are
+  refused with a clear message, Subsonic browse falls back to album lists when
+  an empty search returns nothing, and TLS and DNS failures give the cause.
+- The phone remote streams converted audio with backpressure instead of
+  buffering whole files in memory, HEAD requests return headers without
+  converting, and the address shown prefers the main network interface over
+  VPN and virtual ones. Settings notes that the stream is plain HTTP.
+- Podcasts: a refresh dropped downloaded or half-played episodes that had left
+  the feed, two downloads of one episode shared a .part file, Clear download
+  deleted whatever path was stored (it now touches only the downloads
+  folder), and a malformed number in a feed threw. The episode list shows 100
+  at a time with Show more.
+- Winamp skin import inflated every file in the archive. It now reads only the
+  five it needs, and skins with RLE, bitfield or 16-bit bitmaps import instead
+  of failing with "no readable colors".
+
+#### Settings and data
+
+- Settings are checked when loaded and on every change: library folders must
+  be absolute paths, volume and crossfade are kept in range, and the theme
+  and the on/off settings must be valid values.
+- A corrupt settings.json is replaced by the last good copy, then the newest
+  daily backup, before falling back to defaults. A restore checks that
+  settings.json is a settings object before replacing anything.
+- A failed settings write used to throw out of the call and leave memory and
+  disk different. The value is kept, marked for retry and written later.
+  Changes made while the file was unreadable are no longer lost when it
+  becomes readable, and leftover temp files from an interrupted write are
+  removed.
+- Quitting runs each step on its own (settings, podcasts, tray, child
+  processes), so one failure can't skip the rest. Clear history takes a
+  library backup first and runs as one transaction, and CSV exports prefix
+  cells that start with =, +, -, @ or a tab so a spreadsheet won't read them
+  as formulas.
+
 ## [2.8.1] - 2026-10-29
 
 Fixes for playing a library from a network share.

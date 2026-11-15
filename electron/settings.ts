@@ -1,13 +1,13 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { unlink } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join, posix, win32 } from 'node:path';
 import type { AppSettings, PlaybackResumeQueueEntry, PlaybackResumeServerTrack, RecoveryEvent } from '../shared/types.js';
 import { normalizePlaybackRate } from '../shared/tempo-trainer.js';
 import { normalizeAutoDjTarget } from '../shared/auto-dj.js';
 import { normalizeAudioOutputDeviceId } from '../shared/audio-output.js';
 import { normalizeLimiterEnabled, normalizePreampDb } from '../shared/audio-limiter.js';
 import { FLAT_EQ_VALUES, normalizeEqValues } from '../shared/eq-presets.js';
-import { normalizeCustomSkin } from '../shared/custom-skin.js';
+import { BUILT_IN_THEMES, normalizeCustomSkin } from '../shared/custom-skin.js';
 import { parseMusicServerStreamUrl } from '../shared/music-servers.js';
 import { emptyWindowState, normalizeWindowState } from './window-state.js';
 import {
@@ -19,6 +19,7 @@ import {
   recoveryReason,
   renameOverExistingSync,
   suppressedRecoveryEvent,
+  sweepOrphanedTempFiles,
 } from './recovery.js';
 
 const DEFAULTS: AppSettings = {
@@ -69,6 +70,64 @@ const DEFAULTS: AppSettings = {
   waveformSeekBar: true,
   backgroundAnalysis: true,
 };
+
+// A fresh copy of the defaults for a store's state, so nothing a caller does
+// to the arrays and objects it gets back can reach the module-level DEFAULTS.
+function freshDefaults(): AppSettings {
+  return { ...DEFAULTS, libraryRoots: [], equalizer: [...DEFAULTS.equalizer], windowState: emptyWindowState() };
+}
+
+// Only keys the app defines are kept, on load and on every patch: a renderer
+// call or a hand-edited file cannot grow settings.json with keys of its own.
+function pickKnownSettings(source: object): Partial<AppSettings> {
+  const known: Record<string, unknown> = {};
+  for (const key of Object.keys(source)) {
+    if (Object.prototype.hasOwnProperty.call(DEFAULTS, key)) known[key] = (source as Record<string, unknown>)[key];
+  }
+  return known as Partial<AppSettings>;
+}
+
+// Single-key patches that arrive many times a second (state saved as playback
+// moves, a slider being dragged) and go through the debounced write; flushSync()
+// writes whatever is pending on quit.
+const HOT_PATCH_KEYS = new Set<string>(['resumeState', 'windowState', 'preampDb', 'textScale']);
+
+const MAX_LIBRARY_ROOTS = 256;
+
+// Roots decide which files the protocol handler will serve, so a value that
+// is not an array of absolute paths must never get through: a string would
+// throw in the authorizer's loop and a relative entry would match nothing
+// sensible. Either path style counts as absolute, since a profile can come
+// over from another platform and its roots should survive the trip back.
+function normalizeLibraryRoots(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const roots: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !entry || entry.length > 4096 || entry.includes('\0')) continue;
+    if (!posix.isAbsolute(entry) && !win32.isAbsolute(entry)) continue;
+    if (!roots.includes(entry)) roots.push(entry);
+    if (roots.length >= MAX_LIBRARY_ROOTS) break;
+  }
+  return roots;
+}
+
+// The slider's boost range tops out at 2 (VOLUME_BOOST_MAX in the renderer).
+function normalizeVolume(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(2, Math.max(0, value)) : fallback;
+}
+
+// Matches the engine's own clamp.
+function normalizeCrossfadeMs(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(12000, Math.max(0, Math.round(value))) : fallback;
+}
+
+function normalizeReplayGain(value: unknown): AppSettings['replayGain'] {
+  return value === 'track' || value === 'album' ? value : 'off';
+}
+
+function normalizeTheme(value: unknown): AppSettings['theme'] {
+  return value === 'custom' || BUILT_IN_THEMES.includes(value as never) ? (value as AppSettings['theme']) : DEFAULTS.theme;
+}
 
 // A stored skin written by an older build can hold values the current grammar
 // refuses (anything that is not a colour or a bounded length). They are
@@ -190,6 +249,19 @@ function normalizeAmbientReactivity(value: unknown): AppSettings['ambientReactiv
 
 const MAX_RESUME_QUEUE_LENGTH = 5000;
 
+// A queue longer than the cap is cut to a window centred on the current index,
+// not to its head: with Play All on a big library the track that was playing
+// sits far past the first 5000 entries, and keeping the head restored the
+// wrong track at 0:00. Cutting before any mapping also keeps the work on the
+// ~3 s autosave bounded by the cap rather than by the library. `start` is
+// where the window begins in the original queue, for rebasing the index.
+function windowResumeEntries<T>(entries: readonly T[], index: number): { items: T[]; start: number } {
+  if (entries.length <= MAX_RESUME_QUEUE_LENGTH) return { items: [...entries], start: 0 };
+  const centred = Math.max(0, index) - Math.floor(MAX_RESUME_QUEUE_LENGTH / 2);
+  const start = Math.min(entries.length - MAX_RESUME_QUEUE_LENGTH, Math.max(0, centred));
+  return { items: entries.slice(start, start + MAX_RESUME_QUEUE_LENGTH), start };
+}
+
 function normalizeResumeTrackId(value: unknown, allowServerTrack = false): number | null {
   const id = Math.trunc(Number(value));
   if (!Number.isSafeInteger(id)) return null;
@@ -286,6 +358,24 @@ function resumeEntryTrackId(entry: PlaybackResumeQueueEntry): number {
 
 const SUPPRESSION_RETRY_INTERVAL_MS = 10_000;
 
+// Name prefix of the rolling copies support-backup.ts writes under
+// <userData>/backups; the stamp in the name sorts oldest to newest.
+const DAILY_BACKUP_PREFIX = 'newamp-daily-';
+
+// settings.json from each daily backup, newest first.
+function dailyBackupSettingsFiles(userDataPath: string): string[] {
+  const backupsRoot = join(userDataPath, 'backups');
+  try {
+    return readdirSync(backupsRoot)
+      .filter((name) => name.startsWith(DAILY_BACKUP_PREFIX))
+      .sort()
+      .reverse()
+      .map((name) => join(backupsRoot, name, 'settings.json'));
+  } catch {
+    return [];
+  }
+}
+
 export class SettingsStore {
   public readonly recoveryEvents: RecoveryEvent[] = [];
   private state: AppSettings;
@@ -312,6 +402,10 @@ export class SettingsStore {
   // resume-state autosave a few seconds after launch, while the lock is still
   // held; one failed attempt used to leave the whole session unsaved.
   private lastSuppressionRetryAt: number | null = null;
+  // Patches made while suppressed change `state` but are never written. When
+  // the file becomes readable again they are laid back over what it holds, so
+  // the real settings don't replace them silently.
+  private suppressedPatch: Partial<AppSettings> = {};
 
   constructor(private readonly file: string) {
     mkdirSync(dirname(file), { recursive: true });
@@ -330,27 +424,60 @@ export class SettingsStore {
         // this session on in-memory defaults instead and never persist over
         // the untouched original.
         console.warn(`[newamp] settings: ${file} could not be read; running this session without saving.`, err);
-        this.state = { ...DEFAULTS };
+        this.state = freshDefaults();
         this.persistenceSuppressed = true;
         this.recoveryEvents.push(suppressedRecoveryEvent('settings', file, err));
         return;
       }
+      let corrupt = false;
       try {
         this.state = this.parseSettingsJson(raw);
       } catch (err) {
+        corrupt = true;
         // Reaching here means the bytes were actually read — this is
         // confirmed invalid content (bad JSON, or a shape normalize/parse
         // can't make sense of at all), not an I/O error, so quarantining is
-        // the right call.
+        // the right call. The user's roots and keys are still worth more than
+        // defaults, so the newest copy that parses is used before those.
         const event = quarantineCorruptFile(this.file, 'settings', recoveryReason(err));
-        if (event) this.recoveryEvents.push(event);
-        this.state = { ...DEFAULTS };
-        this.persist();
+        const recovered = this.loadRecoveredSettings();
+        if (event) {
+          if (recovered) event.reason = `${event.reason}; settings were restored from ${recovered.source}`;
+          this.recoveryEvents.push(event);
+        }
+        this.state = recovered?.state ?? freshDefaults();
+        this.persistOrDefer();
       }
+      if (!corrupt) this.saveLastGood(raw);
     } else {
-      this.state = { ...DEFAULTS };
-      this.persist();
+      this.state = freshDefaults();
+      this.persistOrDefer();
     }
+    // Writes that were cut short by a crash leave temp files whose pid no
+    // later launch matches. The library sweeps its own, once library.db loads.
+    sweepOrphanedTempFiles(dirname(file));
+  }
+
+  // The last settings.json that loaded cleanly, kept beside it so a file that
+  // later turns up corrupt does not cost the user everything in it. Best
+  // effort: failing to write it must never fail startup.
+  private saveLastGood(raw: string): void {
+    try {
+      atomicWriteFileSync(`${this.file}.last-good`, raw);
+    } catch (err) {
+      console.warn(`[newamp] settings: could not keep ${this.file}.last-good:`, err);
+    }
+  }
+
+  private loadRecoveredSettings(): { state: AppSettings; source: string } | null {
+    for (const source of [`${this.file}.last-good`, ...dailyBackupSettingsFiles(dirname(this.file))]) {
+      try {
+        return { state: this.parseSettingsJson(readFileSync(source, 'utf-8')), source };
+      } catch {
+        // Missing or unusable: try the next, older copy.
+      }
+    }
+    return null;
   }
 
   // Shared by the constructor and tryLiftSuppression() below — parses and
@@ -358,10 +485,26 @@ export class SettingsStore {
   // normalizer genuinely can't make sense of; both callers treat that as
   // confirmed-invalid content, never as an I/O problem.
   private parseSettingsJson(raw: string): AppSettings {
-    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    const json: unknown = JSON.parse(raw);
+    if (!json || typeof json !== 'object' || Array.isArray(json)) {
+      throw new Error('settings.json does not hold a JSON object');
+    }
+    const parsed = pickKnownSettings(json);
     return {
-      ...DEFAULTS,
+      ...freshDefaults(),
       ...parsed,
+      libraryRoots: normalizeLibraryRoots(parsed.libraryRoots),
+      theme: normalizeTheme(parsed.theme),
+      lastfmEnabled: parsed.lastfmEnabled === true,
+      lastfmApiKey: normalizeOptionalSecret(parsed.lastfmApiKey),
+      lastfmSharedSecret: normalizeOptionalSecret(parsed.lastfmSharedSecret),
+      lastfmSessionKey: normalizeOptionalSecret(parsed.lastfmSessionKey),
+      lastfmUsername: normalizeOptionalSecret(parsed.lastfmUsername),
+      lastfmAuthToken: normalizeOptionalSecret(parsed.lastfmAuthToken),
+      crossfadeMs: normalizeCrossfadeMs(parsed.crossfadeMs, DEFAULTS.crossfadeMs),
+      replayGain: normalizeReplayGain(parsed.replayGain),
+      volume: normalizeVolume(parsed.volume, DEFAULTS.volume),
+      eqEnabled: parsed.eqEnabled === true,
       libraryAutoWatch: parsed.libraryAutoWatch !== false,
       equalizer: normalizeEqValues(parsed.equalizer),
       customSkin: loadCustomSkin(parsed.customSkin),
@@ -394,7 +537,7 @@ export class SettingsStore {
       // A profile saved before this notice existed has been closing to the
       // tray all along, so only new profiles get the one-time explanation.
       trayNoticeShown: parsed.trayNoticeShown === undefined
-        ? Object.keys(parsed).length > 0
+        ? Object.keys(json).length > 0
         : parsed.trayNoticeShown === true,
       autoBackupEnabled: parsed.autoBackupEnabled !== false,
       windowState: normalizeWindowState(parsed.windowState),
@@ -421,7 +564,9 @@ export class SettingsStore {
   // readable but genuinely corrupt is quarantined here exactly as the
   // constructor would; there is no longer an untouched original to protect
   // once that happens, so suppression lifts either way. A file that is still
-  // unreadable leaves state untouched and nothing is written.
+  // unreadable leaves state untouched and nothing is written. Patches made
+  // while it was unreadable (suppressedPatch) are laid over the loaded state,
+  // so a volume or theme change from earlier in the session is not dropped.
   //
   // One read, no backoff: the cooldown does the waiting, so a session that
   // stays locked doesn't stall the main thread on the autosave cadence.
@@ -437,14 +582,16 @@ export class SettingsStore {
     } catch (err) {
       const event = quarantineCorruptFile(this.file, 'settings', recoveryReason(err));
       if (event) this.recoveryEvents.push(event);
-      this.state = { ...DEFAULTS };
+      this.state = freshDefaults();
     }
+    this.state = this.applyPatch(this.state, this.suppressedPatch);
+    this.suppressedPatch = {};
     this.persistenceSuppressed = false;
     console.warn(`[newamp] settings: ${this.file} is readable again; resuming normal saves.`);
   }
 
   get(): AppSettings {
-    return { ...this.state, equalizer: [...this.state.equalizer] };
+    return { ...this.state, equalizer: [...this.state.equalizer], libraryRoots: [...this.state.libraryRoots] };
   }
 
   set(patch: Partial<AppSettings>): AppSettings {
@@ -458,98 +605,8 @@ export class SettingsStore {
         this.tryLiftSuppression();
       }
     }
-    const next: AppSettings = {
-      ...this.state,
-      ...patch,
-      libraryAutoWatch: patch.libraryAutoWatch === undefined
-        ? this.state.libraryAutoWatch
-        : patch.libraryAutoWatch !== false,
-      equalizer: patch.equalizer ? normalizeEqValues(patch.equalizer) : this.state.equalizer,
-      playbackRate: patch.playbackRate === undefined
-        ? this.state.playbackRate
-        : normalizePlaybackRate(patch.playbackRate),
-      audioOutputDeviceId: patch.audioOutputDeviceId === undefined
-        ? this.state.audioOutputDeviceId
-        : normalizeAudioOutputDeviceId(patch.audioOutputDeviceId),
-      limiterEnabled: patch.limiterEnabled === undefined
-        ? this.state.limiterEnabled
-        : normalizeLimiterEnabled(patch.limiterEnabled),
-      preampDb: patch.preampDb === undefined
-        ? this.state.preampDb
-        : normalizePreampDb(patch.preampDb),
-      openaiApiKey: patch.openaiApiKey === undefined
-        ? this.state.openaiApiKey
-        : normalizeOptionalSecret(patch.openaiApiKey),
-      openaiModel: patch.openaiModel === undefined
-        ? this.state.openaiModel
-        : normalizeOpenAiModel(patch.openaiModel),
-      firstLaunchTutorialSeen: patch.firstLaunchTutorialSeen === undefined
-        ? this.state.firstLaunchTutorialSeen
-        : patch.firstLaunchTutorialSeen === true,
-      textScale: patch.textScale === undefined
-        ? this.state.textScale
-        : normalizeTextScale(patch.textScale),
-      compactMode: patch.compactMode === undefined
-        ? this.state.compactMode
-        : patch.compactMode === true,
-      alwaysOnTop: patch.alwaysOnTop === undefined
-        ? this.state.alwaysOnTop
-        : patch.alwaysOnTop === true,
-      visualizerPreset: patch.visualizerPreset === undefined
-        ? this.state.visualizerPreset
-        : normalizeVisualizerPreset(patch.visualizerPreset),
-      autoDjEnabled: patch.autoDjEnabled === undefined
-        ? this.state.autoDjEnabled
-        : !!patch.autoDjEnabled,
-      autoDjTarget: patch.autoDjTarget === undefined
-        ? this.state.autoDjTarget
-        : normalizeAutoDjTarget(patch.autoDjTarget),
-      autoDjSmartRuleId: patch.autoDjSmartRuleId === undefined
-        ? this.state.autoDjSmartRuleId
-        : normalizeAutoDjSmartRuleId(patch.autoDjSmartRuleId),
-      resumeState: patch.resumeState === undefined
-        ? this.state.resumeState
-        : this.normalizeResume(patch.resumeState),
-      // Skin values are re-checked at the DOM write too, but a hand-edited or
-      // crafted settings patch should never land an unsafe value on disk.
-      customSkin: patch.customSkin === undefined
-        ? this.state.customSkin
-        : normalizeCustomSkin(patch.customSkin),
-      bitPerfectExclusive: patch.bitPerfectExclusive === undefined
-        ? this.state.bitPerfectExclusive
-        : patch.bitPerfectExclusive === true,
-      bitPerfectExclusiveDeviceId: patch.bitPerfectExclusiveDeviceId === undefined
-        ? this.state.bitPerfectExclusiveDeviceId
-        : normalizeExclusiveDeviceId(patch.bitPerfectExclusiveDeviceId),
-      sampleAccurateGapless: patch.sampleAccurateGapless === undefined
-        ? this.state.sampleAccurateGapless
-        : patch.sampleAccurateGapless === true,
-      closeButtonBehavior: patch.closeButtonBehavior === undefined
-        ? this.state.closeButtonBehavior
-        : normalizeCloseButtonBehavior(patch.closeButtonBehavior),
-      trayNoticeShown: patch.trayNoticeShown === undefined
-        ? this.state.trayNoticeShown
-        : patch.trayNoticeShown === true,
-      autoBackupEnabled: patch.autoBackupEnabled === undefined
-        ? this.state.autoBackupEnabled
-        : patch.autoBackupEnabled !== false,
-      windowState: patch.windowState === undefined
-        ? this.state.windowState
-        : normalizeWindowState(patch.windowState),
-      performanceTier: patch.performanceTier === undefined
-        ? this.state.performanceTier
-        : normalizePerformanceTier(patch.performanceTier),
-      ambientReactivity: patch.ambientReactivity === undefined
-        ? this.state.ambientReactivity
-        : normalizeAmbientReactivity(patch.ambientReactivity),
-      waveformSeekBar: patch.waveformSeekBar === undefined
-        ? this.state.waveformSeekBar
-        : patch.waveformSeekBar !== false,
-      backgroundAnalysis: patch.backgroundAnalysis === undefined
-        ? this.state.backgroundAnalysis
-        : patch.backgroundAnalysis !== false,
-    };
-    this.state = next;
+    this.state = this.applyPatch(this.state, patch);
+    if (this.persistenceSuppressed) this.suppressedPatch = { ...this.suppressedPatch, ...pickKnownSettings(patch) };
     // resumeState is the ~3s playback-position autosave (see
     // schedulePersistPlaybackSession in usePlayerStore.ts) and windowState
     // follows every window move and resize — the only settings written on a
@@ -564,14 +621,173 @@ export class SettingsStore {
     if (this.isHotPatch(patch)) {
       this.schedulePersist();
     } else {
-      this.persist();
+      this.persistOrDefer();
     }
     return this.get();
   }
 
+  private applyPatch(base: AppSettings, patch: Partial<AppSettings>): AppSettings {
+    return {
+      ...base,
+      ...pickKnownSettings(patch),
+      libraryRoots: patch.libraryRoots === undefined
+        ? base.libraryRoots
+        : normalizeLibraryRoots(patch.libraryRoots),
+      theme: patch.theme === undefined
+        ? base.theme
+        : normalizeTheme(patch.theme),
+      lastfmEnabled: patch.lastfmEnabled === undefined
+        ? base.lastfmEnabled
+        : patch.lastfmEnabled === true,
+      lastfmApiKey: patch.lastfmApiKey === undefined
+        ? base.lastfmApiKey
+        : normalizeOptionalSecret(patch.lastfmApiKey),
+      lastfmSharedSecret: patch.lastfmSharedSecret === undefined
+        ? base.lastfmSharedSecret
+        : normalizeOptionalSecret(patch.lastfmSharedSecret),
+      lastfmSessionKey: patch.lastfmSessionKey === undefined
+        ? base.lastfmSessionKey
+        : normalizeOptionalSecret(patch.lastfmSessionKey),
+      lastfmUsername: patch.lastfmUsername === undefined
+        ? base.lastfmUsername
+        : normalizeOptionalSecret(patch.lastfmUsername),
+      lastfmAuthToken: patch.lastfmAuthToken === undefined
+        ? base.lastfmAuthToken
+        : normalizeOptionalSecret(patch.lastfmAuthToken),
+      crossfadeMs: patch.crossfadeMs === undefined
+        ? base.crossfadeMs
+        : normalizeCrossfadeMs(patch.crossfadeMs, base.crossfadeMs),
+      replayGain: patch.replayGain === undefined
+        ? base.replayGain
+        : normalizeReplayGain(patch.replayGain),
+      volume: patch.volume === undefined
+        ? base.volume
+        : normalizeVolume(patch.volume, base.volume),
+      eqEnabled: patch.eqEnabled === undefined
+        ? base.eqEnabled
+        : patch.eqEnabled === true,
+      radioBrainEnabled: patch.radioBrainEnabled === undefined
+        ? base.radioBrainEnabled
+        : patch.radioBrainEnabled === true,
+      radioBrainPort: patch.radioBrainPort === undefined
+        ? base.radioBrainPort
+        : normalizeRadioBrainPort(patch.radioBrainPort),
+      radioBrainToken: patch.radioBrainToken === undefined
+        ? base.radioBrainToken
+        : normalizeOptionalSecret(patch.radioBrainToken),
+      audioBitPerfectPath: patch.audioBitPerfectPath === undefined
+        ? base.audioBitPerfectPath
+        : patch.audioBitPerfectPath === true,
+      audioPreferredSampleRate: patch.audioPreferredSampleRate === undefined
+        ? base.audioPreferredSampleRate
+        : normalizePreferredSampleRate(patch.audioPreferredSampleRate),
+      libraryAutoWatch: patch.libraryAutoWatch === undefined
+        ? base.libraryAutoWatch
+        : patch.libraryAutoWatch !== false,
+      equalizer: patch.equalizer ? normalizeEqValues(patch.equalizer) : base.equalizer,
+      playbackRate: patch.playbackRate === undefined
+        ? base.playbackRate
+        : normalizePlaybackRate(patch.playbackRate),
+      audioOutputDeviceId: patch.audioOutputDeviceId === undefined
+        ? base.audioOutputDeviceId
+        : normalizeAudioOutputDeviceId(patch.audioOutputDeviceId),
+      limiterEnabled: patch.limiterEnabled === undefined
+        ? base.limiterEnabled
+        : normalizeLimiterEnabled(patch.limiterEnabled),
+      preampDb: patch.preampDb === undefined
+        ? base.preampDb
+        : normalizePreampDb(patch.preampDb),
+      openaiApiKey: patch.openaiApiKey === undefined
+        ? base.openaiApiKey
+        : normalizeOptionalSecret(patch.openaiApiKey),
+      openaiModel: patch.openaiModel === undefined
+        ? base.openaiModel
+        : normalizeOpenAiModel(patch.openaiModel),
+      firstLaunchTutorialSeen: patch.firstLaunchTutorialSeen === undefined
+        ? base.firstLaunchTutorialSeen
+        : patch.firstLaunchTutorialSeen === true,
+      textScale: patch.textScale === undefined
+        ? base.textScale
+        : normalizeTextScale(patch.textScale),
+      compactMode: patch.compactMode === undefined
+        ? base.compactMode
+        : patch.compactMode === true,
+      alwaysOnTop: patch.alwaysOnTop === undefined
+        ? base.alwaysOnTop
+        : patch.alwaysOnTop === true,
+      visualizerPreset: patch.visualizerPreset === undefined
+        ? base.visualizerPreset
+        : normalizeVisualizerPreset(patch.visualizerPreset),
+      autoDjEnabled: patch.autoDjEnabled === undefined
+        ? base.autoDjEnabled
+        : !!patch.autoDjEnabled,
+      autoDjTarget: patch.autoDjTarget === undefined
+        ? base.autoDjTarget
+        : normalizeAutoDjTarget(patch.autoDjTarget),
+      autoDjSmartRuleId: patch.autoDjSmartRuleId === undefined
+        ? base.autoDjSmartRuleId
+        : normalizeAutoDjSmartRuleId(patch.autoDjSmartRuleId),
+      resumeState: patch.resumeState === undefined
+        ? base.resumeState
+        : this.normalizeResume(patch.resumeState),
+      // Skin values are re-checked at the DOM write too, but a hand-edited or
+      // crafted settings patch should never land an unsafe value on disk.
+      customSkin: patch.customSkin === undefined
+        ? base.customSkin
+        : normalizeCustomSkin(patch.customSkin),
+      bitPerfectExclusive: patch.bitPerfectExclusive === undefined
+        ? base.bitPerfectExclusive
+        : patch.bitPerfectExclusive === true,
+      bitPerfectExclusiveDeviceId: patch.bitPerfectExclusiveDeviceId === undefined
+        ? base.bitPerfectExclusiveDeviceId
+        : normalizeExclusiveDeviceId(patch.bitPerfectExclusiveDeviceId),
+      sampleAccurateGapless: patch.sampleAccurateGapless === undefined
+        ? base.sampleAccurateGapless
+        : patch.sampleAccurateGapless === true,
+      closeButtonBehavior: patch.closeButtonBehavior === undefined
+        ? base.closeButtonBehavior
+        : normalizeCloseButtonBehavior(patch.closeButtonBehavior),
+      trayNoticeShown: patch.trayNoticeShown === undefined
+        ? base.trayNoticeShown
+        : patch.trayNoticeShown === true,
+      autoBackupEnabled: patch.autoBackupEnabled === undefined
+        ? base.autoBackupEnabled
+        : patch.autoBackupEnabled !== false,
+      windowState: patch.windowState === undefined
+        ? base.windowState
+        : normalizeWindowState(patch.windowState),
+      performanceTier: patch.performanceTier === undefined
+        ? base.performanceTier
+        : normalizePerformanceTier(patch.performanceTier),
+      ambientReactivity: patch.ambientReactivity === undefined
+        ? base.ambientReactivity
+        : normalizeAmbientReactivity(patch.ambientReactivity),
+      waveformSeekBar: patch.waveformSeekBar === undefined
+        ? base.waveformSeekBar
+        : patch.waveformSeekBar !== false,
+      backgroundAnalysis: patch.backgroundAnalysis === undefined
+        ? base.backgroundAnalysis
+        : patch.backgroundAnalysis !== false,
+    };
+  }
+
   private isHotPatch(patch: Partial<AppSettings>): boolean {
     const keys = Object.keys(patch);
-    return keys.length === 1 && (keys[0] === 'resumeState' || keys[0] === 'windowState');
+    return keys.length === 1 && HOT_PATCH_KEYS.has(keys[0]);
+  }
+
+  // The change is already live in memory by the time it is written. A write
+  // that fails (full disk, read-only volume) must not throw that back at the
+  // caller as if the change had not happened: main keeps using the new value
+  // either way. Keep it dirty and let the debounced path retry, and flushSync()
+  // on quit tries once more.
+  private persistOrDefer(): void {
+    try {
+      this.persist();
+    } catch (err) {
+      console.error('settings persist failed; keeping the change in memory and retrying', err);
+      this.schedulePersist();
+    }
   }
 
   // Immediate, synchronous, unconditional write. Also cancels any pending
@@ -719,17 +935,21 @@ export class SettingsStore {
 
   private normalizeResume(value: AppSettings['resumeState'] | undefined): AppSettings['resumeState'] {
     if (!value) return null;
-    const queue = Array.isArray(value.queue)
-      ? value.queue.map(normalizeResumeQueueEntry).filter((entry): entry is PlaybackResumeQueueEntry => !!entry).slice(0, MAX_RESUME_QUEUE_LENGTH)
-      : [];
-    const legacyQueue = !queue.length && Array.isArray(value.queueTrackIds)
-      ? value.queueTrackIds
-          .map((id) => normalizeResumeTrackId(id))
-          .filter((id): id is number => id !== null)
-          .slice(0, MAX_RESUME_QUEUE_LENGTH)
-          .map((trackId) => ({ kind: 'local' as const, trackId }))
-      : [];
-    const resumeQueue = queue.length ? queue : legacyQueue;
+    // Read ahead of the queue: the window below is centred on it.
+    const rawIndex = Math.trunc(Number(value.index));
+    const around = Number.isFinite(rawIndex) ? rawIndex : 0;
+    const queueWindow = Array.isArray(value.queue) ? windowResumeEntries(value.queue, around) : { items: [], start: 0 };
+    const queue = queueWindow.items.map(normalizeResumeQueueEntry).filter((entry): entry is PlaybackResumeQueueEntry => !!entry);
+    let resumeQueue = queue;
+    let windowStart = queueWindow.start;
+    if (!queue.length && Array.isArray(value.queueTrackIds)) {
+      const idWindow = windowResumeEntries(value.queueTrackIds, around);
+      windowStart = idWindow.start;
+      resumeQueue = idWindow.items
+        .map((id) => normalizeResumeTrackId(id))
+        .filter((id): id is number => id !== null)
+        .map((trackId) => ({ kind: 'local' as const, trackId }));
+    }
     if (!resumeQueue.length) return null;
     const queueTrackIds = resumeQueue.map(resumeEntryTrackId);
     // Shuffle and repeat are independent, so the combined modes are real states
@@ -742,8 +962,7 @@ export class SettingsStore {
     // -1 is a real value here (queue loaded, nothing current) and must survive
     // the round trip; clamping it to 0 is what made an idle queue come back
     // with its first track selected.
-    const rawIndex = Math.trunc(Number(value.index));
-    const index = Number.isFinite(rawIndex) ? Math.max(-1, Math.min(queueTrackIds.length - 1, rawIndex)) : 0;
+    const index = Number.isFinite(rawIndex) ? Math.max(-1, Math.min(queueTrackIds.length - 1, rawIndex - windowStart)) : 0;
     const rawCurrent = value.currentTrackId;
     const normalizedCurrent = normalizeResumeTrackId(rawCurrent, true);
     const currentTrackId =

@@ -107,9 +107,18 @@ export class PodcastStore {
         },
       ]),
     );
+    const merged = episodes.map((episode) => ({ ...episode, ...progressById.get(episode.id) }));
+    // A show can drop old episodes from its feed, or push them past the parse
+    // cap. Ones the user downloaded or listened to stay, so the file on disk
+    // keeps an owner and the saved position isn't lost.
+    const listed = new Set(episodes.map((episode) => episode.id));
+    for (const episode of existing?.episodes ?? []) {
+      if (listed.has(episode.id)) continue;
+      if (episode.downloadPath || episode.progressSeconds > 0 || episode.lastPlayedAt) merged.push({ ...episode });
+    }
     const next: PodcastSubscription = {
-      feed: { ...feed, episodeCount: episodes.length },
-      episodes: episodes.map((episode) => ({ ...episode, ...progressById.get(episode.id) })),
+      feed: { ...feed, episodeCount: merged.length },
+      episodes: merged,
     };
     const subscriptions = this.data.subscriptions.slice();
     const index = subscriptions.findIndex((subscription) => subscription.feed.url === feed.url);
@@ -193,7 +202,7 @@ export class PodcastStore {
     const downloadPath = episode.downloadPath;
     const updated: PodcastEpisode = { ...episode, downloadPath: null, downloadBytes: null, downloadedAt: null };
     this.commit({ subscriptions: this.replaceEpisode(normalized, updated) });
-    if (downloadPath) {
+    if (downloadPath && this.isInsideDownloads(downloadPath)) {
       try {
         rmSync(downloadPath, { force: true });
       } catch {
@@ -201,6 +210,17 @@ export class PodcastStore {
       }
     }
     return { ...updated };
+  }
+
+  // podcasts.json can be hand-edited or restored from elsewhere, so a stored
+  // path is only deleted when it is under the downloads folder next to it.
+  private isInsideDownloads(path: string): boolean {
+    try {
+      ensureInside(join(dirname(this.file), 'podcast-downloads'), path);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private findEpisode(normalizedFeedUrl: string, episodeId: string): PodcastEpisode | null {
@@ -477,15 +497,27 @@ export async function fetchPodcastSubscription(url: string): Promise<PodcastSubs
   return parsePodcastFeed(xml, normalized);
 }
 
-export async function downloadPodcastEpisode(
-  store: PodcastStore,
-  input: {
-    feedUrl: string;
-    episodeId: string;
-    downloadsPath: string;
-    downloadedAt?: number;
-  },
-): Promise<PodcastEpisode | null> {
+const downloadsInFlight = new Map<string, Promise<PodcastEpisode | null>>();
+
+type PodcastDownloadInput = {
+  feedUrl: string;
+  episodeId: string;
+  downloadsPath: string;
+  downloadedAt?: number;
+};
+
+// A second request for an episode already downloading (another window, or the
+// view reopened mid-download) joins the first instead of writing the same .part.
+export function downloadPodcastEpisode(store: PodcastStore, input: PodcastDownloadInput): Promise<PodcastEpisode | null> {
+  const key = `${resolve(input.downloadsPath)}\n${input.feedUrl}\n${input.episodeId}`;
+  const running = downloadsInFlight.get(key);
+  if (running) return running;
+  const download = downloadPodcastEpisodeOnce(store, input).finally(() => downloadsInFlight.delete(key));
+  downloadsInFlight.set(key, download);
+  return download;
+}
+
+async function downloadPodcastEpisodeOnce(store: PodcastStore, input: PodcastDownloadInput): Promise<PodcastEpisode | null> {
   const episode = store
     .get(input.feedUrl)
     ?.episodes.find((item) => item.id === input.episodeId);
@@ -675,15 +707,18 @@ function normalizeText(value: string | null | undefined): string | null {
   return decoded || null;
 }
 
+const NAMED_ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"' };
+
+// One pass, so "&amp;lt;" stays "&lt;" instead of decoding twice. A numeric
+// entity outside Unicode (or a lone surrogate) becomes U+FFFD rather than
+// throwing and failing the whole feed.
 function decodeEntities(value: string): string {
-  return value
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([a-f0-9]+);/gi, (_match, code) => String.fromCodePoint(parseInt(code, 16)));
+  return value.replace(/&(?:#(\d+)|#[xX]([a-fA-F0-9]+)|(amp|lt|gt|quot));/g, (_match, dec, hex, name) => {
+    if (name) return NAMED_ENTITIES[name]!;
+    const code = dec !== undefined ? Number(dec) : parseInt(hex, 16);
+    const valid = code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
+    return valid ? String.fromCodePoint(code) : '\ufffd';
+  });
 }
 
 function parseDuration(value: string | null): number | null {

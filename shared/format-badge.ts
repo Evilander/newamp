@@ -105,14 +105,17 @@ export function formatBadgesForTrack(
   }
 
   // A container (.m4a, .mka) whose codec no scan has recorded yet could hold
-  // either family, so it gets a neutral chip instead of a lossy claim.
-  if (signal.family === 'container') {
+  // either family, and a path with no recognised extension (a server stream)
+  // says nothing at all, so both get a neutral chip instead of a lossy claim.
+  if (signal.family === 'container' || signal.family === 'unknown') {
     if (verbose || density === 'comfortable') {
       badges.push({
         kind: 'container',
         label: signal.displayExt,
         tone: 'muted',
-        title: `${signal.displayExt} container · codec not read yet.`,
+        title: signal.family === 'container'
+          ? `${signal.displayExt} container · codec not read yet.`
+          : `${signal.displayExt} · format not identified.`,
       });
       const kbps = bitrateKbps(input.bitrate);
       if (kbps != null) {
@@ -146,7 +149,7 @@ export function formatBadgesForTrack(
       badges.push({
         kind: 'lossy',
         label: String(kbps),
-        tone: kbps < 192 ? 'warn' : kbps >= 320 ? 'accent' : 'muted',
+        tone: signal.isLowBitrate ? 'warn' : kbps >= 320 ? 'accent' : 'muted',
         title: `${kbps} kbps ${signal.displayExt}.`,
       });
     }

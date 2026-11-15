@@ -21,3 +21,49 @@ export function planDeviceChange(
   if (!selectedId) return 'noop';
   return availableOutputIds.includes(selectedId) ? 'reapply' : 'fallback';
 }
+
+export interface DeviceChangeRunner {
+  /** Ask for a run. Calls that arrive within the delay of each other share one. */
+  trigger(): void;
+  cancel(): void;
+}
+
+/**
+ * Runs `run` once per burst of devicechange events, never two at a time. A
+ * burst that lands while a run is in flight earns one more run afterwards, so
+ * the last state is the one that is acted on.
+ */
+export function coalesceDeviceChanges(run: () => Promise<void>, delayMs: number): DeviceChangeRunner {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let running = false;
+  let again = false;
+  const schedule = (): void => {
+    if (timer != null) clearTimeout(timer);
+    timer = setTimeout(fire, delayMs);
+  };
+  function fire(): void {
+    timer = null;
+    if (running) {
+      again = true;
+      return;
+    }
+    running = true;
+    void run()
+      .catch(() => undefined)
+      .finally(() => {
+        running = false;
+        if (again) {
+          again = false;
+          schedule();
+        }
+      });
+  }
+  return {
+    trigger: schedule,
+    cancel(): void {
+      if (timer != null) clearTimeout(timer);
+      timer = null;
+      again = false;
+    },
+  };
+}

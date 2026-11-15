@@ -45,7 +45,9 @@ export function MixesView(): JSX.Element {
     void refreshMixes();
   }, []);
 
-  const seedId = current?.id ?? null;
+  // A streamed or podcast track has no library id to seed a mix from.
+  const seedTrack = current && current.id > 0 ? current : null;
+  const seedId = seedTrack?.id ?? null;
   const seedChanged = builtSeedId !== undefined && !loading && seedId !== builtSeedId;
 
   const selected = useMemo(
@@ -54,7 +56,7 @@ export function MixesView(): JSX.Element {
   );
 
   async function refreshMixes(announce = false): Promise<void> {
-    const seedTrackId = current?.id ?? null;
+    const seedTrackId = seedTrack?.id ?? null;
     setLoading(true);
     try {
       const [harmonic, taste, freshImports, loved, recent, mostPlayed, deepCuts, night] = await Promise.all([
@@ -81,10 +83,10 @@ export function MixesView(): JSX.Element {
       const next = uniqueMixes([
         {
           id: 'harmonic',
-          title: current ? 'Harmonic From Now' : 'Harmonic Library Mix',
-          subtitle: current ? (
+          title: seedTrack ? 'Harmonic From Now' : 'Harmonic Library Mix',
+          subtitle: seedTrack ? (
             <>
-              Transition-aware sequence from <ArtistLink artist={current.artist} color="inherit" /> - {current.title}
+              Transition-aware sequence from <ArtistLink artist={seedTrack.artist} color="inherit" /> - {seedTrack.title}
             </>
           ) : (
             'Transition-aware sequence using BPM/key metadata where available'
@@ -95,9 +97,9 @@ export function MixesView(): JSX.Element {
         {
           id: 'taste-match',
           title: 'Taste Match',
-          subtitle: current ? (
+          subtitle: seedTrack ? (
             <>
-              Learns from plays, loves, ratings, and skips around <ArtistLink artist={current.artist} color="inherit" /> - {current.title}
+              Learns from plays, loves, ratings, and skips around <ArtistLink artist={seedTrack.artist} color="inherit" /> - {seedTrack.title}
             </>
           ) : (
             'Learns from plays, loves, ratings, and skips across the library'
@@ -161,6 +163,8 @@ export function MixesView(): JSX.Element {
             : { tone: 'warn', title: 'No mixes available yet', detail: 'Scan music or play a track first.' },
         );
       }
+    } catch (err) {
+      pushToast({ tone: 'error', title: 'Could not build your mixes', detail: err instanceof Error ? err.message : undefined });
     } finally {
       setLoading(false);
     }
@@ -168,15 +172,19 @@ export function MixesView(): JSX.Element {
 
   async function saveMix(mix: GeneratedMix): Promise<void> {
     const date = new Date().toISOString().slice(0, 10);
-    const saved = await api.savePlaylist({
-      name: `${mix.title} ${date}`,
-      trackIds: mix.tracks.map((track) => track.id),
-    });
-    pushToast({
-      tone: 'ok',
-      title: `Saved ${saved.name}`,
-      detail: `${saved.trackCount.toLocaleString()} track${saved.trackCount === 1 ? '' : 's'} kept as a playlist.`,
-    });
+    try {
+      const saved = await api.savePlaylist({
+        name: `${mix.title} ${date}`,
+        trackIds: mix.tracks.map((track) => track.id),
+      });
+      pushToast({
+        tone: 'ok',
+        title: `Saved ${saved.name}`,
+        detail: `${saved.trackCount.toLocaleString()} track${saved.trackCount === 1 ? '' : 's'} kept as a playlist.`,
+      });
+    } catch (err) {
+      pushToast({ tone: 'error', title: `Could not save ${mix.title}`, detail: err instanceof Error ? err.message : undefined });
+    }
   }
 
   return (
@@ -184,7 +192,7 @@ export function MixesView(): JSX.Element {
       <ViewOnboarding
         viewId="mixes"
         title="Mixes"
-        lede="Eight live mixes regenerated from your library every time you open this view or play a new seed track."
+        lede="Eight live mixes built from your library when you open this view. When the playing track changes, a chip offers to rebuild them around it."
         bullets={[
           'Harmonic chains tracks by BPM and key, favoring tracks similar to the seed, for smooth DJ-style transitions.',
           'Taste Match weighs plays, loves, ratings, and skips around whatever you\'re listening to.',
@@ -213,9 +221,9 @@ export function MixesView(): JSX.Element {
               </Chip>
             )}
             <span className="truncate text-[11px]" style={{ color: 'var(--muted)' }}>
-              {current ? (
+              {seedTrack ? (
                 <>
-                  Seed: <ArtistLink artist={current.artist} color="inherit" /> - {current.title}
+                  Seed: <ArtistLink artist={seedTrack.artist} color="inherit" /> - {seedTrack.title}
                 </>
               ) : (
                 'Play a track to seed harmonic mixes'

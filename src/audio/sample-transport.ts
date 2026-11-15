@@ -60,6 +60,15 @@ const PARK_AFTER_MS = 5000;
 // Running dry this long while playing (a stalled disk, a hung decoder) hands
 // the track to the decks at the audible position.
 const STALL_FALLBACK_MS = 4000;
+// While the producer says it is reading the file again after a failed read (a
+// network share that timed out), running dry is waiting on the drive: the
+// producer carries the track on or fails it in-band. This is only the
+// backstop for a producer that never does either.
+const READ_WAIT_FALLBACK_MS = 90_000;
+// A track whose last frame has played is not the one that stalled when the
+// stream runs dry after it: the next track's first frame is what is late. It
+// counts as played out this close to its length.
+const PLAYED_OUT_SLACK_SEC = 0.25;
 
 interface WorkletReport {
   segmentFrames: number;
@@ -136,6 +145,11 @@ export class SampleTransport {
   // Paused long enough that the stream was released: the position to resume from.
   private parkedAt: number | null = null;
   private starveTimer: number | null = null;
+  // A new stream began while the engine was told this one was buffering: it is
+  // told when audio is flowing again, not before.
+  private bufferingHeld = false;
+  // The producer is reading a file again after a failed read.
+  private readWait = false;
   private gen = 0;
   private nextToken = 1;
   private readonly segments = new Map<number, SampleSegment>();
@@ -196,7 +210,7 @@ export class SampleTransport {
 
   /** Flush and start `request` as a new stream; resolves once its first frames are queued. */
   async start(request: SampleStartRequest): Promise<SampleStartResult> {
-    const gen = this.beginGeneration(request.playing);
+    const gen = this.beginGeneration(request.playing, true);
     const first = this.segment(request.trackId, request.src, request.startAt, request.gain, null);
     this.tail = first;
     return this.request(gen, first, null);
@@ -234,7 +248,7 @@ export class SampleTransport {
     const base = this.audible ?? this.tail;
     if (!base) return;
     const chained = base === this.tail ? this.chained : null;
-    const gen = this.beginGeneration(this.playing);
+    const gen = this.beginGeneration(this.playing, true);
     const first = this.segment(base.trackId, base.src, Math.max(0, seconds), base.gain, base.durationSec);
     this.tail = first;
     this.chained = chained ? this.segment(chained.trackId, chained.src, 0, chained.gain, null) : null;
@@ -384,11 +398,18 @@ export class SampleTransport {
     return true;
   }
 
-  private clearTimers(): void {
+  /** `keepBuffering`: a new stream is starting, so a buffering state the engine was told of stays until audio flows. */
+  private clearTimers(keepBuffering = false): void {
     if (this.seekTimer != null) window.clearTimeout(this.seekTimer);
     this.seekTimer = null;
     this.pendingSeek = null;
     this.clearPark();
+    if (keepBuffering && this.starveTimer != null) {
+      window.clearTimeout(this.starveTimer);
+      this.starveTimer = null;
+      this.bufferingHeld = true;
+      return;
+    }
     this.watchStarving(false);
   }
 
@@ -415,28 +436,55 @@ export class SampleTransport {
   }
 
   private watchStarving(starving: boolean): void {
-    if (starving === (this.starveTimer != null)) return;
+    if (starving === (this.starveTimer != null)) {
+      if (!starving && this.bufferingHeld) {
+        this.bufferingHeld = false;
+        this.listener?.({ type: 'buffering', on: false });
+      }
+      return;
+    }
     if (!starving) {
       window.clearTimeout(this.starveTimer!);
       this.starveTimer = null;
       this.listener?.({ type: 'buffering', on: false });
       return;
     }
+    this.bufferingHeld = false;
+    this.armStarve();
+    this.listener?.({ type: 'buffering', on: true });
+  }
+
+  /** The audible segment's last frame has been played, as far as the worklet's report says. */
+  private audiblePlayedOut(segment: SampleSegment): boolean {
+    if (segment.durationSec == null) return false;
+    return segment.startSec + this.report.segmentFrames / this.rate() >= segment.durationSec - PLAYED_OUT_SLACK_SEC;
+  }
+
+  /** `extended`: waits the long time even without the producer having said it is waiting on a read. */
+  private armStarve(extended = false): void {
+    if (this.starveTimer != null) window.clearTimeout(this.starveTimer);
     const gen = this.gen;
+    const waitMs = extended || this.readWait ? READ_WAIT_FALLBACK_MS : STALL_FALLBACK_MS;
     this.starveTimer = window.setTimeout(() => {
       this.starveTimer = null;
       const segment = this.audible;
       if (gen !== this.gen || !this.playing || !segment) return;
+      // Dry because the track after this one hasn't arrived (opening it on a
+      // slow drive), not because this one stalled: handing it to the decks now
+      // would play its last second again and then restart the next track.
+      if (!extended && this.audiblePlayedOut(segment)) {
+        this.armStarve(true);
+        return;
+      }
       const positionSec = this.position().currentTime;
       this.stop();
       this.listener?.({
         type: 'failed',
         segment,
         positionSec,
-        message: `The gapless stream stalled for ${STALL_FALLBACK_MS / 1000} s.`,
+        message: `The gapless stream stalled for ${waitMs / 1000} s.`,
       });
-    }, STALL_FALLBACK_MS);
-    this.listener?.({ type: 'buffering', on: true });
+    }, waitMs);
   }
 
   private rate(): number {
@@ -454,10 +502,11 @@ export class SampleTransport {
     return segmentFrames + ahead;
   }
 
-  private beginGeneration(playing: boolean): number {
+  private beginGeneration(playing: boolean, keepBuffering = false): number {
     const gen = ++this.gen;
     this.node?.port.postMessage({ t: 'flush', gen, playing });
-    this.clearTimers();
+    this.clearTimers(keepBuffering);
+    this.readWait = false;
     this.parkedAt = null;
     this.segments.clear();
     this.queuedFailures.clear();
@@ -530,6 +579,7 @@ export class SampleTransport {
       underruns?: number;
       message?: string;
       audible?: boolean;
+      on?: boolean;
       sourceRate?: number | null;
       resampler?: 'none' | ResamplerKind | null;
     };
@@ -568,6 +618,11 @@ export class SampleTransport {
         if (segment && msg.durationSec != null && msg.durationSec > 0) segment.durationSec = msg.durationSec;
         return;
       }
+      case 'wait':
+        this.readWait = !!msg.on;
+        // Already dry: the wait it is in now goes by the new rule.
+        if (this.starveTimer != null) this.armStarve();
+        return;
       case 'pos':
         if (msg.token == null || msg.token !== this.audible?.token) return;
         // A pause report that lands after a quick resume carries the paused

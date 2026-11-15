@@ -2,11 +2,22 @@ export interface SmartShuffleInput {
   queueLength: number;
   currentIndex: number | undefined;
   history: number[];
+  /**
+   * Positions Previous stepped back over, the last one being the track
+   * most recently left. Next replays them in that order before drawing a
+   * random pick, so Previous then Next returns to the track you left.
+   */
+  forward?: number[];
 }
 
 export interface SmartShuffleResult {
   index: number;
   history: number[];
+  /**
+   * The replay stack after this step. Absent when a random pick was drawn
+   * (which ends any replay), so a caller stores `result.forward ?? []`.
+   */
+  forward?: number[];
 }
 
 export interface SmartShuffleNextResult extends SmartShuffleResult {
@@ -35,6 +46,10 @@ export function nextSmartShuffle(
 
   const currentIndex = clampIndex(input.currentIndex, length);
   let history = sanitizeHistory(input.history, length, currentIndex);
+  const replay = takeForward(input.forward, length, new Set(history));
+  if (replay) {
+    return { index: replay.index, history: [...history, replay.index], exhausted: false, forward: replay.rest };
+  }
   // history.includes(index) inside this filter used to make picking the next
   // candidate O(queueLength x history.length) — a multi-second main-thread
   // stall on large queues once history has grown close to queueLength. A Set
@@ -86,13 +101,42 @@ export function previousSmartShuffle(input: SmartShuffleInput): SmartShuffleResu
   if (!length) return { index: -1, history: [] };
   const currentIndex = clampIndex(input.currentIndex, length);
   const history = sanitizeHistory(input.history, length, currentIndex);
-  if (history.length <= 1) return { index: currentIndex, history };
+  // Nothing to step back to: the replay stack stays as it is, so pressing
+  // Previous at the start of history does not lose the tracks stepped over.
+  if (history.length <= 1) return { index: currentIndex, history, forward: cleanForward(input.forward, length) };
 
   const previousHistory = history.slice(0, -1);
   return {
     index: previousHistory[previousHistory.length - 1] ?? currentIndex,
     history: previousHistory,
+    // The track being left goes on the replay stack: its place in history is
+    // freed here, and without this the next pick could be any unplayed track.
+    forward: [...cleanForward(input.forward, length), currentIndex],
   };
+}
+
+function cleanForward(forward: number[] | undefined, queueLength: number): number[] {
+  const clean: number[] = [];
+  for (const raw of Array.isArray(forward) ? forward : []) {
+    const index = Math.trunc(Number(raw));
+    if (Number.isFinite(index) && index >= 0 && index < queueLength) clean.push(index);
+  }
+  return clean;
+}
+
+// The top of the replay stack that is still a valid, unplayed position, with
+// what is left beneath it; null when there is nothing to replay.
+function takeForward(
+  forward: number[] | undefined,
+  queueLength: number,
+  played: Set<number>,
+): { index: number; rest: number[] } | null {
+  const stack = cleanForward(forward, queueLength);
+  while (stack.length) {
+    const index = stack.pop()!;
+    if (!played.has(index)) return { index, rest: stack };
+  }
+  return null;
 }
 
 /** True once every queued position has played in the current cycle. */

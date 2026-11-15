@@ -1,35 +1,10 @@
+import { execFile } from 'node:child_process';
 import { existsSync, statSync, watch, type Dirent, type FSWatcher } from 'node:fs';
-import { lstat, readdir, stat } from 'node:fs/promises';
+import { lstat, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { isFolderArtImage } from './folder-art.js';
-import { isSkippedLibraryFolder, isSkippedLibraryPath } from './library-skip.js';
-
-const AUDIO_EXTS = new Set([
-  '.mp3',
-  '.flac',
-  '.ogg',
-  '.oga',
-  '.opus',
-  '.wav',
-  '.m4a',
-  '.m4b',
-  '.mp4',
-  '.aac',
-  '.wma',
-  '.alac',
-  '.aiff',
-  '.aif',
-  '.ape',
-  '.wv',
-  '.mpc',
-  '.tta',
-  '.mka',
-  '.ac3',
-  '.dts',
-  '.dsf',
-  '.dff',
-]);
-
+import { AUDIO_EXTS, isHiddenName, isSkippedLibraryFolder, isSkippedLibraryPath } from './library-skip.js';
+import { whenPlaybackFed } from './playback-io.js';
 
 export interface LibraryWatcherOptions {
   debounceMs?: number;
@@ -50,6 +25,14 @@ export interface LibraryWatcherOptions {
   // debounce restarts on every event, so a long copy would otherwise import
   // nothing until it was over.
   maxWaitMs?: number;
+  // How many root checks in a row must find a root gone before it is treated
+  // as gone. One failed stat is as likely to be a share having a bad moment.
+  rootGoneChecks?: number;
+  // How often a root on a network volume is handed to onRootAvailable for a
+  // rescan. Changes another machine makes to a network volume never reach the
+  // file system watcher, so this is the only way they show up before the next
+  // launch. 0 turns it off.
+  remotePollMs?: number;
 }
 
 // What a flush hands over. force: audio files and folder art the events named,
@@ -65,6 +48,81 @@ export interface LibraryWatchPlan {
 export type LibraryWatchCallback = (targets: string[], plan: LibraryWatchPlan) => void | Promise<void>;
 
 type LibraryWatchScanMode = 'force' | 'incremental';
+
+// A root check that takes longer than this learns nothing, and the next check
+// tries again.
+const ROOT_PROBE_TIMEOUT_MS = 5000;
+const REMOTE_POLL_DEFAULT_MS = 60 * 60_000;
+
+export interface MountEntry {
+  mountPoint: string;
+  type: string;
+}
+
+// Volume types whose changes made elsewhere the operating system never reports
+// to a watcher: network file systems and the FUSE mounts that front a remote
+// server. A bare "fuseblk" (ntfs-3g or exFAT on a local disk) and macFUSE
+// volumes are left out because they are as often a local drive, where the
+// watcher works and an hourly full rescan would only cost reads.
+const REMOTE_FS_TYPES = new Set([
+  'nfs', 'nfs4', 'smbfs', 'smb3', 'cifs', 'afpfs', 'webdav', 'ftp',
+  'fuse.rclone', 'fuse.sshfs', 'fuse.s3fs', 'fuse.gvfsd-fuse', 'fuse.davfs', 'fuse.curlftpfs', 'fuse.gcsfuse', 'fuse.goofys',
+]);
+
+function isRemoteFsType(type: string): boolean {
+  return REMOTE_FS_TYPES.has(type.toLowerCase());
+}
+
+/**
+ * The mounts a `mount` listing (macOS, "device on /path (type, option, ...)")
+ * or /proc/self/mounts (Linux, "device /path type options 0 0") describes.
+ */
+export function parseMountTable(text: string, format: 'mount' | 'proc'): MountEntry[] {
+  const entries: MountEntry[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (format === 'mount') {
+      const m = /^.+? on (.+) \(([^,)\s]+)[,)]/.exec(line);
+      if (m) entries.push({ mountPoint: m[1]!, type: m[2]! });
+    } else {
+      const parts = line.split(' ');
+      if (parts.length < 3) continue;
+      // /proc writes a space in a path as \040.
+      const mountPoint = parts[1]!.replace(/\\([0-7]{3})/g, (_, octal: string) => String.fromCharCode(parseInt(octal, 8)));
+      entries.push({ mountPoint, type: parts[2]! });
+    }
+  }
+  return entries;
+}
+
+/** Whether `path` sits on a network or FUSE volume: the type of the longest mount point that holds it. */
+export function isOnRemoteMount(path: string, mounts: MountEntry[]): boolean {
+  const fold = (value: string): string => (process.platform === 'linux' ? value : value.toLowerCase());
+  const target = fold(path);
+  let best: MountEntry | null = null;
+  let bestLength = -1;
+  for (const mount of mounts) {
+    const point = fold(mount.mountPoint).replace(/\/+$/, '');
+    const holds = target === point || target.startsWith(`${point}/`);
+    if (holds && point.length > bestLength) {
+      best = mount;
+      bestLength = point.length;
+    }
+  }
+  return !!best && isRemoteFsType(best.type);
+}
+
+async function readMountTable(): Promise<MountEntry[]> {
+  if (process.platform === 'linux') {
+    return parseMountTable(await readFile('/proc/self/mounts', 'utf8'), 'proc');
+  }
+  if (process.platform === 'darwin') {
+    const output = await new Promise<string>((resolveOutput, reject) => {
+      execFile('/sbin/mount', [], { timeout: 5000 }, (err, stdout) => (err ? reject(err) : resolveOutput(stdout)));
+    });
+    return parseMountTable(output, 'mount');
+  }
+  return [];
+}
 
 // Two paths differing only in case are one folder on Windows and macOS, and
 // two real folders on Linux; folding there would lose one of them.
@@ -133,6 +191,14 @@ export class LibraryWatcher {
   // Bumped by stop() so an in-flight async tree walk abandons itself.
   private generation = 0;
   private readonly pendingRenames = new Set<string>();
+  private readonly rootGoneChecks: number;
+  // Consecutive checks that found each root gone; a root that answers resets it.
+  private readonly rootMisses = new Map<string, number>();
+  // The generation a root check is running for, so a slow one is not stacked on.
+  private rootCheckGeneration = -1;
+  private readonly remotePollMs: number;
+  private remoteRoots: string[] = [];
+  private remotePoll: NodeJS.Timeout | null = null;
   // One warning per failure reason per run, and a count, so a library that is
   // only half watched can be told apart from one that is watched.
   private readonly warnedWatchFailures = new Set<string>();
@@ -147,6 +213,8 @@ export class LibraryWatcher {
     this.strategy = options.strategy ?? (process.platform === 'linux' ? 'per-directory' : 'recursive');
     this.rootPollMs = Math.max(50, Math.round(options.rootPollMs ?? 15_000));
     this.onRootAvailable = options.onRootAvailable;
+    this.rootGoneChecks = Math.max(1, Math.round(options.rootGoneChecks ?? 2));
+    this.remotePollMs = Math.max(0, Math.round(options.remotePollMs ?? REMOTE_POLL_DEFAULT_MS));
   }
 
   start(roots: string[]): void {
@@ -177,6 +245,7 @@ export class LibraryWatcher {
       this.rootPoll = setInterval(() => void this.checkRoots(generation), this.rootPollMs);
       this.rootPoll.unref?.();
     }
+    void this.detectRemoteRoots(generation);
     for (const root of cameBack) this.onRootAvailable?.(root);
     for (const root of wentAway) this.queueTarget(root);
   }
@@ -192,6 +261,12 @@ export class LibraryWatcher {
       this.rootPoll = null;
     }
     this.configuredRoots = [];
+    this.rootMisses.clear();
+    if (this.remotePoll) {
+      clearInterval(this.remotePoll);
+      this.remotePoll = null;
+    }
+    this.remoteRoots = [];
     for (const watcher of this.watchers.values()) watcher.close();
     this.watchers.clear();
     this.pendingTargets.clear();
@@ -230,6 +305,11 @@ export class LibraryWatcher {
     return [...this.roots];
   }
 
+  /** Watched roots on a network volume, which no watcher can see other machines change: they are rescanned on a timer instead. */
+  getPollingRoots(): string[] {
+    return this.remoteRoots.filter((root) => this.roots.includes(root));
+  }
+
   flushNow(): void {
     if (!this.pendingTargets.size) return;
     const pending = [...this.pendingTargets.values()];
@@ -258,34 +338,107 @@ export class LibraryWatcher {
   // watchers and is queued like any vanished path, so its tracks are marked
   // unavailable. One that is back is watched again and handed to
   // onRootAvailable for a rescan. Async stats: a hung network share must not
-  // stall the main process.
+  // stall the main process. Only "no such folder" counts as gone, and only
+  // after a few checks in a row: a share that times out, or answers an I/O
+  // error, is slow rather than away, and dropping it would rescan the whole
+  // library when it answered again.
   private async checkRoots(generation: number): Promise<void> {
-    for (const root of this.configuredRoots) {
-      let present = false;
-      try {
-        present = (await stat(root)).isDirectory();
-      } catch {
-        present = false;
-      }
+    if (this.rootCheckGeneration === generation) return;
+    this.rootCheckGeneration = generation;
+    try {
+      const roots = [...this.configuredRoots];
+      const states = await Promise.all(roots.map((root) => this.probeRoot(root)));
       if (generation !== this.generation) return;
-      const watched = this.roots.includes(root);
-      if (present && !watched) {
-        this.roots.push(root);
-        this.watchRoot(root, generation);
-        this.onRootAvailable?.(root);
-      } else if (present && this.strategy === 'recursive' && !this.watchers.has(root)) {
-        // Gone and back between two checks: the old watcher died with it.
-        if (this.watchPath(root, true, generation)) this.onRootAvailable?.(root);
-      } else if (!present && watched) {
-        this.roots = this.roots.filter((item) => item !== root);
-        for (const [path, watcher] of this.watchers) {
-          if (path === root || path.startsWith(`${root}${sep}`)) {
-            watcher.close();
-            this.watchers.delete(path);
-          }
+      roots.forEach((root, i) => {
+        const state = states[i]!;
+        if (state === 'unknown') return;
+        const present = state === 'present';
+        if (present) this.rootMisses.delete(root);
+        else {
+          const misses = (this.rootMisses.get(root) ?? 0) + 1;
+          this.rootMisses.set(root, misses);
+          if (misses < this.rootGoneChecks) return;
         }
-        this.queueTarget(root);
-      }
+        const watched = this.roots.includes(root);
+        if (present && !watched) {
+          this.roots.push(root);
+          this.watchRoot(root, generation);
+          this.onRootAvailable?.(root);
+          void this.detectRemoteRoots(generation);
+        } else if (present && this.strategy === 'recursive' && !this.watchers.has(root)) {
+          // Gone and back between two checks: the old watcher died with it.
+          if (this.watchPath(root, true, generation)) this.onRootAvailable?.(root);
+        } else if (!present && watched) {
+          this.roots = this.roots.filter((item) => item !== root);
+          for (const [path, watcher] of this.watchers) {
+            if (path === root || path.startsWith(`${root}${sep}`)) {
+              watcher.close();
+              this.watchers.delete(path);
+            }
+          }
+          this.queueTarget(root);
+        }
+      });
+    } finally {
+      if (this.rootCheckGeneration === generation) this.rootCheckGeneration = -1;
+    }
+  }
+
+  private async probeRoot(root: string): Promise<'present' | 'gone' | 'unknown'> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<'unknown'>((resolveProbe) => {
+      timer = setTimeout(() => resolveProbe('unknown'), ROOT_PROBE_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    const probe = stat(root).then(
+      (info): 'present' | 'gone' => (info.isDirectory() ? 'present' : 'gone'),
+      (err: unknown): 'gone' | 'unknown' => {
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        return code === 'ENOENT' || code === 'ENOTDIR' ? 'gone' : 'unknown';
+      },
+    );
+    try {
+      return await Promise.race([probe, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // The file system watcher of a network volume (FSEvents on macOS, inotify on
+  // Linux) starts without complaint and then never reports what another
+  // machine writes there, so isWatching() would say yes while nothing could
+  // ever arrive. Those roots are rescanned on a slow timer instead; a rescan
+  // waits while playback is short of audio.
+  private async detectRemoteRoots(generation: number): Promise<void> {
+    if (!this.remotePollMs) return;
+    let mounts: MountEntry[];
+    try {
+      mounts = await readMountTable();
+    } catch {
+      return;
+    }
+    if (generation !== this.generation) return;
+    const remote: string[] = [];
+    for (const root of this.configuredRoots) {
+      const real = await realpath(root).catch(() => root);
+      if (isOnRemoteMount(root, mounts) || isOnRemoteMount(real, mounts)) remote.push(root);
+    }
+    if (generation !== this.generation) return;
+    this.remoteRoots = remote;
+    if (remote.length && !this.remotePoll) {
+      this.remotePoll = setInterval(() => void this.pollRemoteRoots(generation), this.remotePollMs);
+      this.remotePoll.unref?.();
+    } else if (!remote.length && this.remotePoll) {
+      clearInterval(this.remotePoll);
+      this.remotePoll = null;
+    }
+  }
+
+  private async pollRemoteRoots(generation: number): Promise<void> {
+    for (const root of this.getPollingRoots()) {
+      await whenPlaybackFed();
+      if (generation !== this.generation || !this.roots.includes(root)) return;
+      this.onRootAvailable?.(root);
     }
   }
 
@@ -345,12 +498,15 @@ export class LibraryWatcher {
       const named = fileName != null && fileName.toString().trim() !== '';
       this.queueTarget(target, named ? 'force' : 'incremental');
     }
-    if (eventType === 'rename' && fileName) {
+    // A folder created or removed inside a skipped one (a Logic project
+    // package, Ableton's packs, a hidden folder) is not a change to the
+    // library, however its own name looks.
+    if (eventType === 'rename' && fileName && !isSkippedLibraryPath(fileName.toString(), basename(path))) {
       void this.reconcileRenamedPath(join(path, fileName.toString()), recursive, generation);
     }
   }
 
-  // Same folders the scanner descends into (scanner.ts skips dot-folders).
+  // Same folders the scanner descends into (see library-skip.ts).
   private async watchTree(dir: string, generation: number): Promise<void> {
     const pending = [dir];
     while (pending.length) {
@@ -394,7 +550,7 @@ export class LibraryWatcher {
   }
 
   private async reconcileRenamedPath(path: string, recursive: boolean, generation: number): Promise<void> {
-    if (generation !== this.generation || basename(path).startsWith('.') || this.pendingRenames.has(path)) return;
+    if (generation !== this.generation || isHiddenName(basename(path)) || this.pendingRenames.has(path)) return;
     // Native rename bursts can contain thousands of children. Bound pending
     // stats, retaining exact paths so removed directories still reconcile.
     if (this.pendingRenames.size >= 128) {

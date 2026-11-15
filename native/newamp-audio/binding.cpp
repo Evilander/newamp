@@ -4,7 +4,10 @@
 // Contract (single device at a time, driven by electron/exclusive-output.ts):
 //   listDevices()            -> [{ id, name, isDefault }]           (id = hex ma_device_id)
 //   probeDevice(id?)         -> { name, formats: [{ format, channels, sampleRate }] }
-//   open(opts)               -> negotiated format report (throws on failure)
+//   open(opts)               -> negotiated format report (throws on failure); ends
+//                               the current stream first, and on macOS keeps a
+//                               device it already holds rather than handing it back
+//                               (except for a shared open, which releases it)
 //   start() / stopDevice()   -> run / halt the stream (stop = pause, keeps device)
 //   write(Buffer)            -> bytes accepted into the ring (partial accept = backpressure)
 //   clear()                  -> flush the ring (ONLY while stopped; used for seek)
@@ -91,6 +94,34 @@ AudioObjectID ResolveCoreAudioDevice(const ma_device_id* id) {
   return rc == noErr ? device : kAudioObjectUnknown;
 }
 
+// A CoreAudio device as an id miniaudio can open by.
+bool UidOfDevice(AudioObjectID device, ma_device_id* out) {
+  if (device == kAudioObjectUnknown) return false;
+  AudioObjectPropertyAddress uidAddr = {
+      kAudioDevicePropertyDeviceUID,
+      kAudioObjectPropertyScopeGlobal,
+      kAudioObjectPropertyElementMain,
+  };
+  CFStringRef uid = nullptr;
+  UInt32 size = sizeof(uid);
+  if (AudioObjectGetPropertyData(device, &uidAddr, 0, nullptr, &size, &uid) != noErr ||
+      uid == nullptr) {
+    return false;
+  }
+  std::memset(out, 0, sizeof(*out));
+  const Boolean ok =
+      CFStringGetCString(uid, out->coreaudio, sizeof(out->coreaudio), kCFStringEncodingUTF8);
+  CFRelease(uid);
+  return ok;
+}
+
+// The default output device as an id miniaudio can open by, so the stream goes
+// to the device that gets hogged and rate-pinned, and stays there if the
+// system default changes (miniaudio follows the default when given no id).
+bool DefaultOutputDeviceId(ma_device_id* out) {
+  return UidOfDevice(ResolveCoreAudioDevice(nullptr), out);
+}
+
 void RestoreNominalRate(AudioObjectID device) {
   if (device == kAudioObjectUnknown || g_priorNominalRate <= 0) return;
   AudioObjectPropertyAddress rateAddr = {
@@ -127,12 +158,19 @@ bool WaitForNominalRate(AudioObjectID device, Float64 target, int timeoutMs) {
   }
 }
 
+void ReleaseHog();
+
 bool AcquireHogAndRate(const ma_device_id* id, double sampleRate, std::string* error) {
   const AudioObjectID device = ResolveCoreAudioDevice(id);
   if (device == kAudioObjectUnknown) {
     *error = "CoreAudio device resolution failed";
     return false;
   }
+  // A format change on the device already held only changes its rate: letting
+  // go first would put the system's rate back in between and give the device
+  // two switches (and other apps a moment of it) instead of one.
+  if (g_holdingHog && g_hoggedDevice != device) ReleaseHog();
+  const bool held = g_holdingHog && g_hoggedDevice == device;
   AudioObjectPropertyAddress hogAddr = {
       kAudioDevicePropertyHogMode,
       kAudioObjectPropertyScopeGlobal,
@@ -140,10 +178,15 @@ bool AcquireHogAndRate(const ma_device_id* id, double sampleRate, std::string* e
   };
   pid_t owner = -1;
   UInt32 size = sizeof(owner);
-  AudioObjectGetPropertyData(device, &hogAddr, 0, nullptr, &size, &owner);
-  if (owner != -1 && owner != getpid()) {
-    *error = "device is hogged by another process";
-    return false;
+  if (!held) {
+    if (AudioObjectGetPropertyData(device, &hogAddr, 0, nullptr, &size, &owner) != noErr) {
+      *error = "could not read the device's hog mode";
+      return false;
+    }
+    if (owner != -1 && owner != getpid()) {
+      *error = "device is hogged by another process";
+      return false;
+    }
   }
   // Pin the device clock to the source rate BEFORE grabbing hog — honest
   // bit-perfect requires the hardware clock to match, not a hidden resample.
@@ -152,24 +195,47 @@ bool AcquireHogAndRate(const ma_device_id* id, double sampleRate, std::string* e
       kAudioObjectPropertyScopeGlobal,
       kAudioObjectPropertyElementMain,
   };
-  size = sizeof(g_priorNominalRate);
-  AudioObjectGetPropertyData(device, &rateAddr, 0, nullptr, &size, &g_priorNominalRate);
+  Float64 before = 0;
+  size = sizeof(before);
+  AudioObjectGetPropertyData(device, &rateAddr, 0, nullptr, &size, &before);
+  // The rate to put back is the system's, from before the first pin.
+  if (!held) g_priorNominalRate = before;
+  // Gives the device back as it was found, whether or not hog was taken yet.
+  auto undo = [&]() {
+    if (held) {
+      ReleaseHog();
+    } else {
+      RestoreNominalRate(device);
+    }
+  };
   Float64 target = sampleRate;
   if (AudioObjectSetPropertyData(device, &rateAddr, 0, nullptr, sizeof(target), &target) != noErr) {
+    undo();
     *error = "device rejected the requested sample rate";
     return false;
   }
-  if (g_priorNominalRate != target && !WaitForNominalRate(device, target, 3000)) {
-    RestoreNominalRate(device);
+  if (before != target && !WaitForNominalRate(device, target, 3000)) {
+    undo();
     *error = "device did not switch to the requested sample rate";
     return false;
   }
-  if (owner != getpid()) {
+  if (!held && owner != getpid()) {
     pid_t self = getpid();
+    // The clock is already pinned at this point and g_holdingHog is still false,
+    // so ReleaseHog() would not run: put the device back before giving up, or the
+    // user's system output stays at our rate after we exit.
     if (AudioObjectSetPropertyData(device, &hogAddr, 0, nullptr, sizeof(self), &self) != noErr) {
-      // The clock is already pinned at this point and g_holdingHog is still false,
-      // so ReleaseHog() would not run: put the device back before giving up, or the
-      // user's system output stays at our rate after we exit.
+      RestoreNominalRate(device);
+      *error = "failed to acquire CoreAudio hog mode";
+      return false;
+    }
+    // A set that returned is not ownership: another process can have won, or
+    // the driver can have ignored it, and the stream would play shared while
+    // reporting exclusive.
+    pid_t now = -1;
+    size = sizeof(now);
+    if (AudioObjectGetPropertyData(device, &hogAddr, 0, nullptr, &size, &now) != noErr ||
+        now != self) {
       RestoreNominalRate(device);
       *error = "failed to acquire CoreAudio hog mode";
       return false;
@@ -423,13 +489,17 @@ Napi::Value ProbeDevice(const Napi::CallbackInfo& info) {
   return result;
 }
 
-void CloseInternal() {
+// keepHog ends the stream but leaves a held CoreAudio device held (and its
+// original rate remembered), for an open() that follows on the same device.
+void CloseInternal(bool keepHog = false) {
   if (g_player.deviceInitialized) {
     ma_device_uninit(&g_player.device);
     g_player.deviceInitialized = false;
   }
 #if defined(__APPLE__)
-  ReleaseHog();
+  if (!keepHog) ReleaseHog();
+#else
+  (void)keepHog;
 #endif
   g_player.framesRendered.store(0);
   g_player.underruns.store(0);
@@ -444,22 +514,54 @@ Napi::Value Open(const Napi::CallbackInfo& info) {
     Napi::Error::New(env, "open(opts) requires an options object").ThrowAsJavaScriptException();
     return env.Null();
   }
-  CloseInternal();
+  CloseInternal(true);
+
+  // Anything wrong with the options leaves nothing open, hog included.
+  auto reject = [&](const std::string& message) {
+    CloseInternal();
+    Napi::TypeError::New(env, message).ThrowAsJavaScriptException();
+    return env.Null();
+  };
+  auto number = [&](const Napi::Object& o, const char* key, double fallback, double lo, double hi,
+                    bool integral, double* out) {
+    *out = fallback;
+    if (!o.Has(key)) return true;
+    const Napi::Value v = o.Get(key);
+    if (!v.IsNumber()) return false;
+    const double d = v.As<Napi::Number>().DoubleValue();
+    if (!(d >= lo && d <= hi) || (integral && d != static_cast<double>(static_cast<int64_t>(d)))) {
+      return false;
+    }
+    *out = d;
+    return true;
+  };
 
   Napi::Object opts = info[0].As<Napi::Object>();
-  const uint32_t sampleRate =
-      opts.Has("sampleRate") ? opts.Get("sampleRate").As<Napi::Number>().Uint32Value() : 44100;
-  const uint32_t channels =
-      opts.Has("channels") ? opts.Get("channels").As<Napi::Number>().Uint32Value() : 2;
+  double sampleRateValue = 0, channelsValue = 0, ringMsValue = 0;
+  if (!number(opts, "sampleRate", 44100, 8000, 768000, true, &sampleRateValue)) {
+    return reject("sampleRate must be a whole number from 8000 to 768000");
+  }
+  if (!number(opts, "channels", 2, 1, 32, true, &channelsValue)) {
+    return reject("channels must be a whole number from 1 to 32");
+  }
+  if (!number(opts, "ringMs", 2000, 100, 60000, true, &ringMsValue)) {
+    return reject("ringMs must be a whole number from 100 to 60000");
+  }
+  if (opts.Has("format") && !opts.Get("format").IsString()) return reject("format must be a string");
+  if (opts.Has("exclusive") && !opts.Get("exclusive").IsBoolean()) {
+    return reject("exclusive must be a boolean");
+  }
+  const uint32_t sampleRate = static_cast<uint32_t>(sampleRateValue);
+  const uint32_t channels = static_cast<uint32_t>(channelsValue);
+  const uint32_t ringMs = static_cast<uint32_t>(ringMsValue);
   const std::string formatName =
       opts.Has("format") ? opts.Get("format").As<Napi::String>().Utf8Value() : "s16";
   const bool exclusive =
       opts.Has("exclusive") ? opts.Get("exclusive").As<Napi::Boolean>().Value() : true;
-  const uint32_t ringMs =
-      opts.Has("ringMs") ? opts.Get("ringMs").As<Napi::Number>().Uint32Value() : 2000;
 
   const ma_format format = FormatFromName(formatName);
   if (format == ma_format_unknown) {
+    CloseInternal();
     Napi::Error::New(env, "unsupported format: " + formatName).ThrowAsJavaScriptException();
     return env.Null();
   }
@@ -468,6 +570,7 @@ Napi::Value Open(const Napi::CallbackInfo& info) {
   ma_device_id* deviceIdPtr = nullptr;
   if (opts.Has("deviceId") && opts.Get("deviceId").IsString()) {
     if (!HexToDeviceId(opts.Get("deviceId").As<Napi::String>().Utf8Value(), &deviceId)) {
+      CloseInternal();
       Napi::Error::New(env, "invalid device id").ThrowAsJavaScriptException();
       return env.Null();
     }
@@ -475,17 +578,27 @@ Napi::Value Open(const Napi::CallbackInfo& info) {
   }
 
   g_player.bytesPerFrame = static_cast<uint32_t>(ma_get_bytes_per_sample(format)) * channels;
+  if (g_player.bytesPerFrame == 0) return reject("unsupported format: " + formatName);
   const uint64_t ringBytes =
       static_cast<uint64_t>(sampleRate) * g_player.bytesPerFrame * ringMs / 1000;
   g_player.ring.allocate(ringBytes < 65536 ? 65536 : ringBytes);
 
   bool exclusiveStream = exclusive;
 #if defined(__APPLE__)
+  // A shared stream never plays on a device this process still hogs.
+  if (!exclusive) ReleaseHog();
   if (exclusive) {
     // CoreAudio: exclusivity = device hog + pinned nominal rate; the stream
     // itself opens through the normal shared path on the hogged device.
+    // Hogging a display can move the system default to another device, so
+    // while one is held a format change stays on it instead of asking again.
+    if (deviceIdPtr == nullptr && g_holdingHog && UidOfDevice(g_hoggedDevice, &deviceId)) {
+      deviceIdPtr = &deviceId;
+    }
+    if (deviceIdPtr == nullptr && DefaultOutputDeviceId(&deviceId)) deviceIdPtr = &deviceId;
     std::string hogError;
     if (!AcquireHogAndRate(deviceIdPtr, static_cast<double>(sampleRate), &hogError)) {
+      CloseInternal();
       Napi::Error::New(env, std::string("hog mode: ") + hogError).ThrowAsJavaScriptException();
       return env.Null();
     }
@@ -616,6 +729,8 @@ Napi::Value Close(const Napi::CallbackInfo& info) {
 }
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
+  // A process that exits without close() would leave the device at our rate.
+  env.AddCleanupHook([]() { CloseInternal(); });
   exports.Set("listDevices", Napi::Function::New(env, ListDevices));
   exports.Set("probeDevice", Napi::Function::New(env, ProbeDevice));
   exports.Set("open", Napi::Function::New(env, Open));

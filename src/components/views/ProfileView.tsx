@@ -7,6 +7,11 @@ import { EmptyState } from '../EmptyState';
 
 const PRIVACY: SocialPrivacy[] = ['local', 'friends', 'public'];
 const TARGETS: ReviewTargetType[] = ['album', 'artist', 'track'];
+const MAX_FAVORITES = 5;
+
+function failure(title: string, err: unknown): void {
+  pushToast({ tone: 'error', title, detail: err instanceof Error ? err.message : undefined });
+}
 
 export function ProfileView(): JSX.Element {
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -27,76 +32,134 @@ export function ProfileView(): JSX.Element {
   const [reviewBody, setReviewBody] = useState('');
   const [reviewRating, setReviewRating] = useState('');
 
-  const reload = useCallback(async () => {
+  // The lists and reviews reload after every change to them; the Identity
+  // fields are filled from the saved profile only on first load and after the
+  // profile itself is saved, so text typed there survives a list or review action.
+  const hydrateEditor = useCallback((p: UserProfile) => {
+    setName(p.displayName);
+    setBio(p.bio);
+    setFavorites(p.favorites.join('; '));
+    setPrivacy(p.defaultPrivacy);
+  }, []);
+
+  const loadCollections = useCallback(async (): Promise<UserProfile> => {
     const [p, l, r] = await Promise.all([api.getProfile(), api.getLists(), api.getReviews()]);
     setProfile(p);
     setLists(l);
     setReviews(r);
-    setName(p.displayName);
-    setBio(p.bio);
-    setFavorites(p.favorites.join(', '));
-    setPrivacy(p.defaultPrivacy);
+    return p;
   }, []);
 
+  const refreshCollections = useCallback(async (): Promise<void> => {
+    try {
+      await loadCollections();
+    } catch (err) {
+      failure('Could not refresh your profile', err);
+    }
+  }, [loadCollections]);
+
   useEffect(() => {
-    void reload();
-  }, [reload]);
+    loadCollections().then(hydrateEditor, (err) => failure('Could not load your profile', err));
+  }, [loadCollections, hydrateEditor]);
+
+  // New lists and reviews take the privacy the profile has saved, not whatever
+  // the Identity dropdown is showing before it is saved.
+  const newItemPrivacy: SocialPrivacy = profile?.defaultPrivacy ?? 'local';
 
   const saveProfile = async (): Promise<void> => {
-    const favs = favorites.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 5);
-    await api.saveProfile({ displayName: name, bio, favorites: favs, defaultPrivacy: privacy });
-    pushToast({ tone: 'ok', title: 'Profile saved' });
-    void reload();
+    const entries = favorites.split(/[;\n]/).map((s) => s.trim()).filter(Boolean);
+    const favs = entries.slice(0, MAX_FAVORITES);
+    try {
+      await api.saveProfile({ displayName: name, bio, favorites: favs, defaultPrivacy: privacy });
+      pushToast({
+        tone: entries.length > favs.length ? 'warn' : 'ok',
+        title: 'Profile saved',
+        detail: entries.length > favs.length ? `Only the first ${MAX_FAVORITES} favorites are kept.` : undefined,
+      });
+      hydrateEditor(await loadCollections());
+    } catch (err) {
+      failure('Could not save your profile', err);
+    }
   };
 
   const createList = async (): Promise<void> => {
-    if (!newListTitle.trim()) return;
+    if (!newListTitle.trim()) {
+      pushToast({ tone: 'warn', title: 'Give the list a title first' });
+      return;
+    }
     const title = newListTitle.trim();
-    await api.saveList({ title, ranked: true, privacy });
-    setNewListTitle('');
-    pushToast({ tone: 'ok', title: 'List created', detail: title });
-    void reload();
+    try {
+      await api.saveList({ title, ranked: true, privacy: newItemPrivacy });
+      setNewListTitle('');
+      pushToast({ tone: 'ok', title: 'List created', detail: title });
+    } catch (err) {
+      failure('Could not create the list', err);
+      return;
+    }
+    void refreshCollections();
   };
 
   const deleteList = async (list: ListSummary): Promise<void> => {
-    await api.deleteList(list.id);
-    pushToast({ tone: 'ok', title: 'List deleted', detail: list.title });
-    void reload();
+    try {
+      await api.deleteList(list.id);
+      pushToast({ tone: 'ok', title: 'List deleted', detail: list.title });
+    } catch (err) {
+      failure('Could not delete the list', err);
+      return;
+    }
+    void refreshCollections();
   };
 
   const addReview = async (): Promise<void> => {
-    if (!reviewKey.trim() || !reviewBody.trim()) return;
+    if (!reviewKey.trim() || !reviewBody.trim()) {
+      pushToast({ tone: 'warn', title: 'A review needs what it is about and your take' });
+      return;
+    }
     const ratingNum = reviewRating.trim() ? Math.max(0, Math.min(100, Number(reviewRating))) : null;
-    await api.saveReview({
-      targetType: reviewTarget,
-      targetKey: reviewKey.trim(),
-      title: reviewTitle.trim(),
-      body: reviewBody.trim(),
-      rating: Number.isFinite(ratingNum as number) ? ratingNum : null,
-      privacy,
-    });
-    setReviewKey('');
-    setReviewTitle('');
-    setReviewBody('');
-    setReviewRating('');
-    pushToast({ tone: 'ok', title: 'Review saved' });
-    void reload();
+    try {
+      await api.saveReview({
+        targetType: reviewTarget,
+        targetKey: reviewKey.trim(),
+        title: reviewTitle.trim(),
+        body: reviewBody.trim(),
+        rating: Number.isFinite(ratingNum as number) ? ratingNum : null,
+        privacy: newItemPrivacy,
+      });
+      setReviewKey('');
+      setReviewTitle('');
+      setReviewBody('');
+      setReviewRating('');
+      pushToast({ tone: 'ok', title: 'Review saved' });
+    } catch (err) {
+      failure('Could not save the review', err);
+      return;
+    }
+    void refreshCollections();
   };
 
   const deleteReview = async (review: Review): Promise<void> => {
-    await api.deleteReview(review.id);
-    pushToast({
-      tone: 'ok',
-      title: 'Review deleted',
-      detail: review.title || `${review.targetType} · ${review.targetKey}`,
-    });
-    void reload();
+    try {
+      await api.deleteReview(review.id);
+      pushToast({
+        tone: 'ok',
+        title: 'Review deleted',
+        detail: review.title || `${review.targetType} · ${review.targetKey}`,
+      });
+    } catch (err) {
+      failure('Could not delete the review', err);
+      return;
+    }
+    void refreshCollections();
   };
 
   const exportBundle = async (): Promise<void> => {
-    const saved = await api.exportProfileBundle();
-    if (saved) {
-      pushToast({ tone: 'ok', title: 'Profile page exported', detail: 'Includes public lists and reviews, your profile, favorites, and top artists. Review the file before sharing.' });
+    try {
+      const saved = await api.exportProfileBundle();
+      if (saved) {
+        pushToast({ tone: 'ok', title: 'Profile page exported', detail: 'Includes public lists and reviews, your profile, favorites, and top artists. Review the file before sharing.' });
+      }
+    } catch (err) {
+      failure('Could not export the profile page', err);
     }
   };
 
@@ -154,8 +217,8 @@ export function ProfileView(): JSX.Element {
           <Field label="Bio" className="mt-3">
             <textarea className="ninput w-full" rows={2} value={bio} onChange={(e) => setBio(e.target.value)} placeholder="A line about your taste" />
           </Field>
-          <Field label="Five bags (favorites, comma-separated)" className="mt-3">
-            <input className="ninput w-full" value={favorites} onChange={(e) => setFavorites(e.target.value)} placeholder="OK Computer, Discovery, …" />
+          <Field label={`Five bags (favorites, up to ${MAX_FAVORITES}, separated by semicolons)`} className="mt-3">
+            <input className="ninput w-full" value={favorites} onChange={(e) => setFavorites(e.target.value)} placeholder="OK Computer; Discovery; …" />
           </Field>
           <div className="mt-3">
             <button className="pxbtn" onClick={() => void saveProfile()}>SAVE PROFILE</button>

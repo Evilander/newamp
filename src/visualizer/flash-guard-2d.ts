@@ -13,7 +13,11 @@
 // really shown.
 //
 // Everything a GPU is available for goes through flash-guard-gl.ts instead:
-// this path costs a synchronous readback per frame.
+// this path costs a synchronous readback per frame. That is also why this route
+// does not dither the way the GPU composite does: its output is two canvas
+// composite draws of a coarse per-tile field, never a per-pixel write, so there
+// is no step of its own to dither, and a pass over every pixel would cost a
+// full-frame readback and write on top of the sample.
 
 import {
   FLASH_GUARD_COLS,

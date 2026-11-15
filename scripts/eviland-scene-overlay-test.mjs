@@ -120,6 +120,28 @@ function overlayFor(sceneId) {
   log.push('prelude declares u_occlusion, u_kickCount and bandClock; alpha is scaled by occlusion');
 }
 {
+  // Per-band pan reaches the shader: the reactor's values when the frame has
+  // them, the whole-frame pan when it does not, scaled by the host's spread.
+  const { overlay, state } = overlayFor('glitch-bars');
+  overlay.render(frameWith(), PALETTE, 16);
+  const source = state.fragments[0] ?? '';
+  if (!/uniform float u_bandPan\[24\]/.test(source)) fail('the shader prelude does not declare u_bandPan[24]');
+  if (!/float bandPan\(int lo, int hi\)/.test(source)) fail('the shader prelude does not define bandPan(lo, hi)');
+  const pans = new Float32Array(24).fill(0).map((_, i) => (i - 11.5) / 12);
+  overlay.render(frameWith({ pan: 0.4, bandPan: pans }), PALETTE, 16);
+  const sent = state.last.u_bandPan;
+  if (!sent || sent.length !== 24 || sent.some((v, i) => Math.abs(v - pans[i]) > 1e-6)) fail('u_bandPan is not the frame bandPan');
+  overlay.render(frameWith({ pan: 0.4 }), PALETTE, 16);
+  if (!state.last.u_bandPan.every((v) => Math.abs(v - 0.4) < 1e-6)) fail('a frame without bandPan does not fall back to its pan');
+  overlay.render(frameWith({ pan: 0.4, bandPan: pans }), PALETTE, 16, { framebuffer: null, width: 64, height: 64, stereoSpread: 0.5 });
+  if (state.last.u_bandPan.some((v, i) => Math.abs(v - pans[i] * 0.5) > 1e-6)) fail('stereoSpread does not scale u_bandPan');
+  const bad = new Float32Array(24).fill(NaN);
+  overlay.render(frameWith({ bandPan: bad }), PALETTE, 16);
+  if (!state.last.u_bandPan.every((v) => v === 0)) fail('a NaN band pan reached the shader');
+  overlay.dispose();
+  log.push('u_bandPan carries the band pans, falls back to pan, follows stereoSpread and never sends NaN');
+}
+{
   let checked = 0;
   for (const def of SCENES) {
     const { overlay, state } = overlayFor(def.id);

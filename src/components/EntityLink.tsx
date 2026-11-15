@@ -20,9 +20,13 @@ function linkClass(className: string | undefined, truncate: boolean | undefined)
   return `underline-offset-2 hover:underline ${truncate ? `${TRUNCATE_CLASS} ` : ''}${className ?? ''}`;
 }
 
+// Only the placeholders the scanner and servers fill in. A prefix test would
+// also catch real names such as "Unknown Mortal Orchestra".
+const UNKNOWN_NAMES = new Set(['unknown', 'unknown artist', 'unknown album', '<unknown>', '[unknown]']);
+
 function isUnknown(name: string | null | undefined): boolean {
-  const trimmed = (name ?? '').trim();
-  return !trimmed || trimmed.toLowerCase() === 'unknown' || trimmed.toLowerCase().startsWith('unknown ');
+  const trimmed = (name ?? '').trim().toLowerCase();
+  return !trimmed || UNKNOWN_NAMES.has(trimmed);
 }
 
 export function ArtistLink({

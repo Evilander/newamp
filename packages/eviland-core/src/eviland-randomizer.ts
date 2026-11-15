@@ -149,16 +149,33 @@ const COMPOSITION_SCENES: Record<Archetype, readonly string[]> = {
 
 // Scenes added after an archetype's original pool. Each takes a share of that
 // archetype's seeds, decided on its own stream, so a seed outside the share
-// keeps the scene it had before the scene existed.
-const ADDED_SCENES: Partial<Record<Archetype, { scene: string; share: number }>> = {
-  tidal: { scene: 'spectral-slit', share: 0.4 },
-  lattice: { scene: 'data-raster', share: 0.35 },
-  deepfield: { scene: 'bokeh-field', share: 0.6 },
+// keeps the scene it had before the scene existed. An archetype lists its added
+// scenes in the order they were added: the first is tried on the original
+// stream, later ones each on a stream of their own, and the first to claim a
+// seed wins. The newer scenes sit with an archetype of the same energy as their
+// mood (calm over the slow looks, high over the percussive ones) and of
+// matching character: pool light over the liquid look, light fans over the prism.
+const ADDED_SCENES: Partial<Record<Archetype, ReadonlyArray<{ scene: string; share: number }>>> = {
+  tidal: [{ scene: 'spectral-slit', share: 0.4 }],
+  liquid: [{ scene: 'caustic-floor', share: 0.35 }],
+  lattice: [{ scene: 'data-raster', share: 0.35 }],
+  deepfield: [{ scene: 'bokeh-field', share: 0.6 }],
+  firefly: [{ scene: 'ice-halo', share: 0.45 }],
+  nebula: [{ scene: 'thin-film', share: 0.4 }],
+  prism: [{ scene: 'prism-dispersal', share: 0.4 }],
+  kaleidoscope: [{ scene: 'cymatic-plate', share: 0.3 }],
+  echochamber: [{ scene: 'ripple-tank', share: 0.4 }],
+  strobe: [{ scene: 'truss-chase', share: 0.3 }],
+  pulsar: [{ scene: 'gobo-heads', share: 0.4 }],
 };
 
 function pickScene(code: string, archetype: Archetype): string | null {
-  const added = ADDED_SCENES[archetype];
-  if (added && new Rng(hashSeed(`${code}::scene-added`)).bool(added.share)) return added.scene;
+  const added = ADDED_SCENES[archetype] ?? [];
+  for (let i = 0; i < added.length; i++) {
+    const entry = added[i]!;
+    const stream = i === 0 ? `${code}::scene-added` : `${code}::scene-added-${entry.scene}`;
+    if (new Rng(hashSeed(stream)).bool(entry.share)) return entry.scene;
+  }
   const pool = COMPOSITION_SCENES[archetype];
   return pool.length > 0 ? new Rng(hashSeed(`${code}::scene`)).pick(pool) : null;
 }
@@ -262,6 +279,31 @@ function sampleMorph(code: string, archetype: Archetype): MorphConfig | undefine
   return { kind, amount: sampleChannel(rng, spec.amount), scale: { base: sampleNum(rng, spec.scale) } };
 }
 
+// Looks that place their picture by the stereo image. A wide mix opens a tidal
+// current or a carousel across the frame; a look built on one centred form
+// (a tunnel, a heartbeat) has nothing for the spread to move, so it keeps the
+// default of 1.
+const STEREO_SPREAD_SHARE: Partial<Record<Archetype, number>> = {
+  tidal: 0.7, echochamber: 0.6, nebula: 0.6, deepfield: 0.6, carousel: 0.6, prism: 0.5, glasshouse: 0.5,
+  liquid: 0.5, firefly: 0.5, lattice: 0.4, supernova: 0.4, strobe: 0.4, solarflare: 0.4,
+  tunnel: 0, vortex: 0, heartbeat: 0, pulsar: 0, cathedral: 0, phosphor: 0, hyperbloom: 0,
+};
+const STEREO_SPREAD_DEFAULT_SHARE = 0.25;
+
+/**
+ * A look that carries a stereoSpread channel narrows the image (down to 0.55)
+ * or exaggerates it (up to 1.45), and a wide mix pushes it a little further.
+ * Drawn on its own stream, so a seed's other channels are unchanged.
+ */
+function sampleStereoSpread(code: string, archetype: Archetype): Channel | undefined {
+  const rng = new Rng(hashSeed(`${code}::spread`));
+  if (!rng.bool(STEREO_SPREAD_SHARE[archetype] ?? STEREO_SPREAD_DEFAULT_SHARE)) return undefined;
+  return sampleChannel(rng, {
+    base: { min: 0.55, max: 1.45 },
+    bindings: [{ feature: 'width', gain: { min: 0.1, max: 0.3 }, chance: 0.7 }],
+  });
+}
+
 interface NumRange { min: number; max: number }
 interface BindingSpec {
   feature: AudioFeature;
@@ -319,6 +361,14 @@ interface ArchetypeTemplate {
   paletteVal: NumRange;
   /** Background lightness (kept dark to give bloom room). */
   paletteBgVal: NumRange;
+  /**
+   * OKLCh lightness offsets for the accent and light roles. A family that
+   * burns (supernova, prism) sits a little lighter, one that broods
+   * (deepfield, tidal) a little deeper, so families differ in contrast as well
+   * as hue. Applied inside the widened bands below; the light role still
+   * clears the accent by 0.1.
+   */
+  paletteL?: { accent: number; light: number };
   /**
    * Optional q-slot scaffold. Sampler emits these slots verbatim (LFO shape
    * and bindings are characterful, not numbers to perturb); ranges in `base`
@@ -1209,6 +1259,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // toward deep blue (R drains, B lingers).
   inkwell: {
     ...baseSpec(),
+    paletteL: { accent: -0.03, light: -0.01 },
     zoom: { base: { min: -0.004, max: 0.004 }, bindings: [{ feature: 'bass', gain: { min: 0.008, max: 0.018 }, chance: 0.6 }] },
     rotate: { base: { min: -0.0015, max: 0.0015 }, bindings: [] },
     swirl: { base: { min: 0.04, max: 0.1 }, bindings: [{ feature: 'width', gain: { min: 0.015, max: 0.035 }, chance: 0.7 }] },
@@ -1237,6 +1288,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // Red-orange decay (B drains hardest).
   supernova: {
     ...baseSpec(),
+    paletteL: { accent: 0.04, light: 0.00 },
     zoom: { base: { min: 0.01, max: 0.025 }, bindings: [{ feature: 'kick', gain: { min: 0.04, max: 0.055 }, chance: 1, curve: 'pulse' }, { feature: 'bass', gain: { min: 0.008, max: 0.018 }, chance: 0.7 }] },
     radialZoom: { base: { min: 0.04, max: 0.1 }, bindings: [{ feature: 'kick', gain: { min: 0.18, max: 0.3 }, chance: 1, curve: 'pulse' }] },
     decay: { base: { min: 0.84, max: 0.89 }, bindings: [{ feature: 'crest', gain: { min: -0.02, max: -0.005 }, chance: 0.6 }] },
@@ -1260,6 +1312,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // linger). Very slow rotation.
   cathedral: {
     ...baseSpec(),
+    paletteL: { accent: -0.03, light: -0.01 },
     zoom: { base: { min: -0.002, max: 0.005 }, bindings: [{ feature: 'bass', gain: { min: 0.005, max: 0.012 }, chance: 0.6, curve: 'sqrt' }] },
     rotate: { base: { min: -0.0015, max: 0.0015 }, bindings: [{ feature: 'beatPhase', gain: { min: 0.0006, max: 0.0014 }, chance: 0.6 }] },
     swirl: { base: { min: 0, max: 0.03 }, bindings: [] },
@@ -1339,6 +1392,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // visible via centreY breathing on a half-bar sine.
   pulsar: {
     ...baseSpec(),
+    paletteL: { accent: 0.03, light: 0.00 },
     zoom: { base: { min: 0.008, max: 0.018 }, bindings: [{ feature: 'kick', gain: { min: 0.025, max: 0.045 }, chance: 0.9, curve: 'pulse' }] },
     qSlots: [
       { name: 'beat-gate', base: { min: 0.45, max: 0.5 }, lfo: { rate: { min: 1, max: 1 }, shape: 'square', amp: { min: 0.45, max: 0.5 } } },
@@ -1381,6 +1435,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // Slow tunnel zoom-in, star-rich emitters, blue-violet decay. Quiet drift.
   deepfield: {
     ...baseSpec(),
+    paletteL: { accent: -0.04, light: -0.02 },
     zoom: { base: { min: 0.015, max: 0.028 }, bindings: [{ feature: 'bass', gain: { min: 0.006, max: 0.014 }, chance: 0.6, curve: 'sqrt' }] },
     rotate: { base: { min: -0.0015, max: 0.0015 }, bindings: [{ feature: 'energy', gain: { min: 0.002, max: 0.005 }, chance: 0.5 }] },
     swirl: { base: { min: 0.01, max: 0.04 }, bindings: [{ feature: 'width', gain: { min: 0.008, max: 0.02 }, chance: 0.5 }] },
@@ -1406,6 +1461,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // echo rotation accents.
   solarflare: {
     ...baseSpec(),
+    paletteL: { accent: 0.03, light: 0.00 },
     zoom: { base: { min: 0.006, max: 0.015 }, bindings: [{ feature: 'bass', gain: { min: 0.015, max: 0.028 }, chance: 0.85 }, { feature: 'kick', gain: { min: 0.02, max: 0.035 }, chance: 0.85, curve: 'pulse' }] },
     swirl: { base: { min: 0.04, max: 0.1 }, bindings: [{ feature: 'novelty', gain: { min: 0.015, max: 0.04 }, chance: 0.7 }] },
     warpAmp: { base: { min: 0.001, max: 0.003 }, bindings: [{ feature: 'bass', gain: { min: 0.001, max: 0.0025 }, chance: 0.9 }] },
@@ -1457,6 +1513,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // snare = lightning flash bloom.
   stormfront: {
     ...baseSpec(),
+    paletteL: { accent: -0.04, light: -0.02 },
     zoom: { base: { min: 0.003, max: 0.012 }, bindings: [{ feature: 'kick', gain: { min: 0.045, max: 0.06 }, chance: 1, curve: 'pulse' }] },
     rotate: { base: { min: -0.003, max: 0.003 }, bindings: [{ feature: 'novelty', gain: { min: 0.003, max: 0.008 }, chance: 0.6 }] },
     swirl: { base: { min: -0.05, max: 0.08 }, bindings: [{ feature: 'novelty', gain: { min: 0.025, max: 0.05 }, chance: 0.85 }] },
@@ -1514,6 +1571,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // the other). Melodic centroid drives a hue ladder.
   carousel: {
     ...baseSpec(),
+    paletteL: { accent: 0.03, light: 0.00 },
     rotate: { base: { min: 0.003, max: 0.008 }, bindings: [{ feature: 'beatPhase', gain: { min: 0.001, max: 0.0025 }, chance: 0.8 }] },
     radialRotate: { base: { min: -0.1, max: -0.04 }, bindings: [] },
     swirl: { base: { min: 0.02, max: 0.06 }, bindings: [] },
@@ -1569,6 +1627,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // Bar-rate swell zoom q-LFO.
   tidal: {
     ...baseSpec(),
+    paletteL: { accent: -0.04, light: -0.02 },
     zoom: { base: { min: 0, max: 0 }, bindings: [{ feature: 'q1', gain: { min: 0.025, max: 0.04 }, chance: 1 }, { feature: 'bass', gain: { min: 0.008, max: 0.018 }, chance: 0.7 }] },
     rotate: { base: { min: -0.0015, max: 0.0015 }, bindings: [] },
     swirl: { base: { min: 0.06, max: 0.14 }, bindings: [{ feature: 'width', gain: { min: 0.02, max: 0.04 }, chance: 0.85 }] },
@@ -1595,6 +1654,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   // DecayRGB imbalance splits white emitters into bands. Bright bloom drive.
   prism: {
     ...baseSpec(),
+    paletteL: { accent: 0.04, light: 0.01 },
     zoom: { base: { min: 0.004, max: 0.012 }, bindings: [{ feature: 'kick', gain: { min: 0.02, max: 0.038 }, chance: 0.85 }] },
     rotate: { base: { min: -0.003, max: 0.003 }, bindings: [{ feature: 'energy', gain: { min: 0.005, max: 0.012 }, chance: 0.7 }] },
     swirl: { base: { min: 0.02, max: 0.07 }, bindings: [{ feature: 'width', gain: { min: 0.015, max: 0.035 }, chance: 0.7 }] },
@@ -1819,6 +1879,7 @@ const ARCHETYPE_TEMPLATES: Record<Archetype, ArchetypeTemplate> = {
   },
   medusa: {
     ...livingSpec(),
+    paletteL: { accent: -0.03, light: -0.02 },
     flowY: { base: { min: -0.0004, max: -0.0001 }, bindings: [] },
   },
   chromatin: {
@@ -1906,10 +1967,18 @@ function schemeOffsets(scheme: PaletteScheme, rng: Rng): [number, number, number
   }
 }
 
-// Lightness bands (OKLCh L) for the three lit roles.
+// Lightness bands (OKLCh L) for the three lit roles, before an archetype's
+// own offset (ArchetypeTemplate.paletteL) widens them.
 const ACCENT_L = { min: 0.7, max: 0.78 };
 const LIGHT_L = { min: 0.9, max: 0.96 };
 const DARK_L = { min: 0.36, max: 0.46 };
+const BG_L = { min: 0.1, max: 0.18 };
+// What the offsets can reach. The second accent lives in the accent's
+// envelope, so it is the same weight of colour as the first.
+const ACCENT_ENVELOPE = { min: ACCENT_L.min - 0.04, max: ACCENT_L.max + 0.04 };
+const LIGHT_ENVELOPE = { min: LIGHT_L.min - 0.02, max: 0.975 };
+/** The light role is at least 0.1 lighter than the accent; the extra 0.005 absorbs the sRGB round trip. */
+const LIGHT_OVER_ACCENT = 0.105;
 
 /** OKLCh hue, in degrees, of the fully saturated HSV hue `h` (a turn). */
 function oklchHue(h: number): number {
@@ -1924,6 +1993,21 @@ function oklchRole(l: number, h: number, share: number): RGB {
 function between(range: NumRange, t: number): number {
   return range.min + (range.max - range.min) * clamp01(t);
 }
+
+/**
+ * How far round the OKLCh wheel the second accent sits from the first, per
+ * scheme, in degrees. Analogous and triadic and split-complementary partners
+ * fall on either side of the accent, picked from the seed; monochrome keeps
+ * the hue and moves lightness instead.
+ */
+export const SCHEME_PARTNER_DEGREES: Record<PaletteScheme, number> = {
+  analogous: 35,
+  complementary: 180,
+  triadic: 120,
+  splitComplementary: 150,
+  tetradic: 90,
+  monochrome: 0,
+};
 
 function generatePalette(rng: Rng, template: ArchetypeTemplate): PaletteConfig {
   const scheme = pickPaletteScheme(rng, template.paletteSchemes);
@@ -1949,11 +2033,41 @@ function generatePalette(rng: Rng, template: ArchetypeTemplate): PaletteConfig {
   const bgVal = rng.range(template.paletteBgVal.min, template.paletteBgVal.max);
   const bgSat = scheme === 'monochrome' ? rng.range(0.2, 0.5) : rng.range(0.3, 0.7);
 
+  // The background is built in OKLCh like the lit roles: the 0.12 share of it
+  // that reaches the picture is the same weight of ground for every hue. The
+  // archetype's value range still places it inside the L band.
+  const bgSpan = template.paletteBgVal.max - template.paletteBgVal.min;
+  const bgL = between(BG_L, bgSpan > 0 ? (bgVal - template.paletteBgVal.min) / bgSpan : 0.5);
+  const bgShare = 0.3 + 0.3 * clamp01((bgSat - 0.2) / 0.5);
+
+  const offset = template.paletteL ?? { accent: 0, light: 0 };
+  const accentL = Math.min(ACCENT_ENVELOPE.max, Math.max(ACCENT_ENVELOPE.min, between(ACCENT_L, (valA - 0.55) / 0.45) + offset.accent));
+  const lightL = Math.min(LIGHT_ENVELOPE.max, Math.max(LIGHT_ENVELOPE.min, between(LIGHT_L, (valL - 0.9) / 0.1) + offset.light, accentL + LIGHT_OVER_ACCENT));
+  const accentShare = 0.3 + 0.65 * clamp01((satA - 0.35) / 0.65);
+  const accentOklchHue = oklchHue(accentHue);
+
+  // The second accent follows from the scheme alone and takes no RNG draws, so
+  // the draw order and every role's hue in a seed code made before it existed
+  // are unchanged. Lightness is not: bg is built in OKLCh and accent and light
+  // carry the archetype offsets, so old seed codes recolour slightly. The side
+  // it falls on comes from the low bits of the root hue.
+  const side = Math.floor(rootHue * 8192) % 2 === 0 ? 1 : -1;
+  let accent2L = accentL;
+  let accent2Hue = accentOklchHue + side * SCHEME_PARTNER_DEGREES[scheme];
+  if (scheme === 'monochrome') {
+    // Same hue, a clearly different lightness: up when the envelope has room, else down.
+    accent2Hue = accentOklchHue;
+    accent2L = accentL + 0.1 <= ACCENT_ENVELOPE.max ? accentL + 0.1 : Math.max(ACCENT_ENVELOPE.min, accentL - 0.1);
+  } else {
+    accent2L = Math.min(ACCENT_ENVELOPE.max, Math.max(ACCENT_ENVELOPE.min, accentL - side * 0.03));
+  }
+
   return {
-    bg: hsvToRgb(bgHue, bgSat, bgVal),
+    bg: oklchRole(bgL, oklchHue(bgHue), bgShare),
     dark: oklchRole(between(DARK_L, (valD - 0.18) / 0.2), leaveMud(oklchHue(darkHue)), 0.35 + 0.55 * satD),
-    accent: oklchRole(between(ACCENT_L, (valA - 0.55) / 0.45), oklchHue(accentHue), 0.3 + 0.65 * clamp01((satA - 0.35) / 0.65)),
-    light: oklchRole(between(LIGHT_L, (valL - 0.9) / 0.1), oklchHue(lightHue), 0.25 + 0.5 * satL),
+    accent: oklchRole(accentL, accentOklchHue, accentShare),
+    light: oklchRole(lightL, oklchHue(lightHue), 0.25 + 0.5 * satL),
+    accent2: oklchRole(accent2L, accent2Hue, accentShare * 0.9),
   };
 }
 
@@ -2078,7 +2192,7 @@ function settleWaveform(archetype: Archetype, sampled: WaveformConfig): Waveform
 // ---------------------------------------------------------------------------
 //
 // Most scenes sit well on any archetype's feedback: the field zooms, spins and
-// folds whatever they draw. Three only read as themselves over one particular
+// folds whatever they draw. A few only read as themselves over one particular
 // field. When a seed lands on one of them, the channels below replace the host
 // archetype's, along with the extras it carries (primitives, q-slots, a mirror
 // set, its morph). The host still supplies the palette family and the weight
@@ -2107,6 +2221,31 @@ function inkPalette(rng: Rng): PaletteConfig {
     dark: oklchToRgb(0.32, 0.008, hue),
     accent: oklchToRgb(0.88, 0.014, hue),
     light: oklchToRgb(0.97, 0.01, hue),
+    accent2: oklchToRgb(0.72, 0.012, hue),
+  };
+}
+
+interface StillSceneSpec {
+  decay: [number, number];
+  bloom: [number, number];
+  /** Gain range of the energy binding on bloom; its floor keeps the look above AUDIO_DRIVE_FLOOR. */
+  energyBloom: [number, number];
+  flowY?: [number, number];
+  fluid?: [number, number];
+}
+
+/** A profile that holds the field still: no zoom, spin, fold or mirror, and only the decay, bloom and slow drift the scene asks for. */
+function stillScene(spec: StillSceneSpec): SceneProfile {
+  return {
+    channels: {
+      zoom: quiet(0, 0), rotate: quiet(0, 0), swirl: quiet(0, 0), hueCycle: quiet(0, 0.001), warpAmp: quiet(0, 0.0003),
+      mirror: quiet(1, 1), mirrorMix: quiet(0, 0), flowX: quiet(0, 0), flowY: quiet(...(spec.flowY ?? [0, 0])),
+      decay: quiet(...spec.decay),
+      fluid: quiet(...(spec.fluid ?? [0, 0])), vorticity: quiet(0, spec.fluid ? 6 : 0), liquidMix: quiet(0, 0),
+      bloom: { base: { min: spec.bloom[0], max: spec.bloom[1] }, bindings: [{ feature: 'energy', gain: { min: spec.energyBloom[0], max: spec.energyBloom[1] }, chance: 1 }] },
+    },
+    density: { min: 0.5, max: 0.65 },
+    spinFromSection: false,
   };
 }
 
@@ -2158,6 +2297,21 @@ const SCENE_PROFILES: Record<string, SceneProfile> = {
     palette: inkPalette,
     spinFromSection: false,
   },
+  // The scenes below draw one finished picture a frame: a soap film, a halo, a
+  // plate of sand, a prism. Over an archetype's own zoom, spin and fold they
+  // smear into a wash, so each holds the field still and leaves only as much
+  // decay as the picture wants for its trails.
+  'thin-film': stillScene({ decay: [0.82, 0.86], bloom: [0.15, 0.3], energyBloom: [0.08, 0.14] }),
+  // Diamond dust falls through the halo; the slower decay leaves a faint trail behind each crystal.
+  'ice-halo': stillScene({ decay: [0.9, 0.93], bloom: [0.3, 0.5], energyBloom: [0.08, 0.14], flowY: [0, 0.0004] }),
+  'ripple-tank': stillScene({ decay: [0.87, 0.9], bloom: [0.2, 0.35], energyBloom: [0.08, 0.14] }),
+  'gobo-heads': stillScene({ decay: [0.85, 0.89], bloom: [0.2, 0.35], energyBloom: [0.08, 0.14] }),
+  // The sand is the figure: the shortest decay of the set, so a nodal line is crisp.
+  'cymatic-plate': stillScene({ decay: [0.79, 0.83], bloom: [0.05, 0.15], energyBloom: [0.08, 0.14] }),
+  'truss-chase': stillScene({ decay: [0.84, 0.88], bloom: [0.15, 0.3], energyBloom: [0.08, 0.14] }),
+  // A little fluid lets the ripples bend the web as they pass over it.
+  'caustic-floor': stillScene({ decay: [0.89, 0.92], bloom: [0.25, 0.4], energyBloom: [0.08, 0.14], fluid: [0.05, 0.12] }),
+  'prism-dispersal': stillScene({ decay: [0.88, 0.92], bloom: [0.25, 0.4], energyBloom: [0.08, 0.14] }),
 };
 
 function applySceneProfile(config: OperatorConfig, profile: SceneProfile, code: string): void {
@@ -2351,6 +2505,8 @@ export function generate(seed: string | number, archetype?: Archetype): Generate
 
   const morph = sampleMorph(code, chosen);
   if (morph) config.morph = morph;
+  const stereoSpread = sampleStereoSpread(code, chosen);
+  if (stereoSpread) config.stereoSpread = stereoSpread;
 
   const profile = config.composition?.scene ? SCENE_PROFILES[config.composition.scene] : undefined;
   if (profile) applySceneProfile(config, profile, code);
@@ -2458,7 +2614,15 @@ function mutatePalette(rng: Rng, p: PaletteConfig, amount: number): PaletteConfi
     clamp01(c[1] + drift * (rng.next() - 0.5) * 0.6 + rng.gaussian(0, 0.04) * amount),
     clamp01(c[2] + drift * (rng.next() - 0.5) * 0.6 + rng.gaussian(0, 0.04) * amount),
   ];
-  return { bg: nudge(p.bg), dark: nudge(p.dark), accent: nudge(p.accent), light: nudge(p.light) };
+  const next: PaletteConfig = { bg: nudge(p.bg), dark: nudge(p.dark), accent: nudge(p.accent), light: nudge(p.light) };
+  if (p.accent2) {
+    // No draws of its own: the second accent follows the first round the wheel,
+    // so a mutated look keeps its harmony and later draws keep their order.
+    const turn = rgbToOklch(next.accent).h - rgbToOklch(p.accent).h;
+    const o = rgbToOklch(p.accent2);
+    next.accent2 = oklchToRgb(o.l, o.c, o.h + turn);
+  }
+  return next;
 }
 
 /**

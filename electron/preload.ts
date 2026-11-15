@@ -249,9 +249,11 @@ const api: NewAmpAPI = {
     for (const file of files) {
       try {
         const path = webUtils.getPathForFile(file as File);
-        const key = path.toLowerCase();
-        if (path && !seen.has(key)) {
-          seen.add(key);
+        // Exact match only: a case-sensitive volume can hold A.mp3 and a.mp3
+        // side by side. On a case-insensitive one a doubled file is harmless,
+        // since the import dedupes by library path.
+        if (path && !seen.has(path)) {
+          seen.add(path);
           out.push(path);
         }
       } catch {
@@ -409,6 +411,11 @@ const api: NewAmpAPI = {
     const handler = (_e: unknown, paths: string[]) => cb(paths);
     ipcRenderer.on('app:open-files', handler);
     return () => ipcRenderer.off('app:open-files', handler);
+  },
+  onSettingsChanged: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('settings:changed', handler);
+    return () => ipcRenderer.off('settings:changed', handler);
   },
   onOpenSettings: (cb) => {
     const handler = () => cb();

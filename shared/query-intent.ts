@@ -15,7 +15,7 @@ export interface QueryIntent {
   rule: SmartPlaylistRuleInput;
   /** Human-readable compiled interpretation, one chip per constraint. */
   chips: string[];
-  /** How many vocabulary constraints matched (0 = pure free-text). */
+  /** How many vocabulary constraints matched (0 = pure free-text, or mostly unrecognised words). */
   matched: number;
 }
 
@@ -23,6 +23,10 @@ interface Vocab {
   pattern: RegExp;
   chip: string | ((match: RegExpMatchArray) => string);
   apply: (rule: SmartPlaylistRuleInput, match: RegExpMatchArray, now: number) => void;
+  /** Every occurrence counts, and the years they set widen to cover all of them ("80s and 90s"). */
+  repeat?: boolean;
+  /** Plain words that are just as likely to be part of a title ("dark", "slow"), as opposed to request syntax ("after 1990", "loved"). */
+  titleWord?: boolean;
 }
 
 const DAY_MS = 86_400_000;
@@ -37,6 +41,14 @@ const DECADE_WORDS: Record<string, number> = {
   nineties: 1990, noughties: 2000, aughts: 2000, tens: 2010,
 };
 
+// "tens" is also an ordinary word ("tens of songs"), so it only counts as a
+// decade after "the" and when it is not followed by "of".
+const DECADE_WORD_NAMES = Object.keys(DECADE_WORDS).filter((word) => word !== 'tens').join('|');
+
+function decadeWord(match: RegExpMatchArray): string {
+  return (match[1] ?? match[2])!;
+}
+
 const VOCAB: Vocab[] = [
   // ── era ────────────────────────────────────────────────────────────────
   {
@@ -46,11 +58,13 @@ const VOCAB: Vocab[] = [
       const century = m[1] ?? (Number(m[2]) >= 30 ? '19' : '20');
       setDecade(rule, Number(`${century}${m[2]}`));
     },
+    repeat: true,
   },
   {
-    pattern: new RegExp(`\\b(?:from\\s+)?(?:the\\s+)?(${Object.keys(DECADE_WORDS).join('|')})\\b`),
-    chip: (m) => `${DECADE_WORDS[m[1]!]}s`,
-    apply: (rule, m) => setDecade(rule, DECADE_WORDS[m[1]!]!),
+    pattern: new RegExp(`\\b(?:from\\s+)?(?:(?:the\\s+)?(${DECADE_WORD_NAMES})|the\\s+(tens)(?!\\s+of\\b))\\b`),
+    chip: (m) => `${DECADE_WORDS[decadeWord(m)]}s`,
+    apply: (rule, m) => setDecade(rule, DECADE_WORDS[decadeWord(m)]!),
+    repeat: true,
   },
   {
     pattern: /\bbefore\s+(19\d\d|20\d\d)\b/,
@@ -58,9 +72,14 @@ const VOCAB: Vocab[] = [
     apply: (rule, m) => { rule.maxYear = Number(m[1]) - 1; },
   },
   {
-    pattern: /\b(?:after|since|post)\s+(19\d\d|20\d\d)\b/,
+    pattern: /\b(?:after\s+|post[-\s]?)(19\d\d|20\d\d)\b/,
     chip: (m) => `after ${m[1]}`,
     apply: (rule, m) => { rule.minYear = Number(m[1]) + 1; },
+  },
+  {
+    pattern: /\bsince\s+(19\d\d|20\d\d)\b/,
+    chip: (m) => `since ${m[1]}`,
+    apply: (rule, m) => { rule.minYear = Number(m[1]); },
   },
   {
     pattern: /\b(19\d\d|20\d\d)\s*(?:-|to|through)\s*(19\d\d|20\d\d)\b/,
@@ -75,11 +94,13 @@ const VOCAB: Vocab[] = [
     pattern: /\b(slow|sleepy|downtempo|down-tempo)\b/,
     chip: 'slow (bpm ≤ 95)',
     apply: (rule) => { rule.maxBpm = 95; },
+    titleWord: true,
   },
   {
     pattern: /\b(fast|upbeat|up-tempo|uptempo|danceable|bangers?)\b/,
     chip: 'fast (bpm ≥ 118)',
     apply: (rule) => { rule.minBpm = 118; },
+    titleWord: true,
   },
   {
     pattern: /\bmid-?tempo\b/,
@@ -91,21 +112,25 @@ const VOCAB: Vocab[] = [
     pattern: /\b(loud|heavy|aggressive|intense|hard)\b/,
     chip: 'loud-leaning (DNA energy)',
     apply: (rule) => { rule.dnaEnergyTarget = 0.85; },
+    titleWord: true,
   },
   {
     pattern: /\b(quiet|soft|gentle|calm|chill|mellow|peaceful)\b/,
     chip: 'gentle-leaning (DNA energy)',
     apply: (rule) => { rule.dnaEnergyTarget = 0.18; },
+    titleWord: true,
   },
   {
     pattern: /\bwarm\b/,
     chip: 'warm-leaning (DNA brightness)',
     apply: (rule) => { rule.dnaBrightnessTarget = 0.3; },
+    titleWord: true,
   },
   {
     pattern: /\b(bright|crisp|sparkl\w*|airy)\b/,
     chip: 'bright-leaning (DNA brightness)',
     apply: (rule) => { rule.dnaBrightnessTarget = 0.75; },
+    titleWord: true,
   },
   {
     pattern: /\b(dark|moody|brooding)\b/,
@@ -114,6 +139,7 @@ const VOCAB: Vocab[] = [
       rule.dnaBrightnessTarget = 0.28;
       if (rule.dnaEnergyTarget == null) rule.dnaEnergyTarget = 0.4;
     },
+    titleWord: true,
   },
   // ── recency ───────────────────────────────────────────────────────────
   {
@@ -125,7 +151,7 @@ const VOCAB: Vocab[] = [
     },
   },
   {
-    pattern: /\b(?:haven'?t|not)\s+(?:played|heard|listened(?:\s+to)?)\s+(?:in\s+|for\s+)?(?:a\s+while|ages|months|forever|a\s+long\s+time)\b/,
+    pattern: /\b(?:haven'?t|not)\s+(?:played|heard|listened(?:\s+to)?)\s+(?:in\s+|for\s+)?(?:a\s+while|ages|months|years|forever|a\s+long\s+time)\b/,
     chip: 'not played in 90+ days',
     apply: (rule, _m, now) => { rule.notPlayedSinceMs = now - 90 * DAY_MS; },
   },
@@ -176,29 +202,77 @@ export function looksLikeNaturalQuery(text: string): boolean {
   return trimmed.split(/\s+/).length >= 3;
 }
 
+// A single CJK character is a whole word (an artist name can be one), so the
+// one-character filter below must not drop it.
+const SINGLE_CJK = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]$/u;
+
+function contentWords(text: string): string[] {
+  return text
+    .split(/\s+/)
+    .map((word) => word.replace(/[^\p{L}\p{N}'&-]/gu, ''))
+    .filter((word) => (word.length > 1 || SINGLE_CJK.test(word)) && !STOPWORDS.has(word));
+}
+
+// A query whose only recognised words could be part of a title, and where they
+// make up less than this share of it, reads as a title ("dark side of the
+// moon") rather than a request, and is searched literally.
+const MIN_VOCAB_COVERAGE = 0.75;
+
 export function compileQueryIntent(text: string, now = Date.now()): QueryIntent {
   // Curly quotes arrive from phone keyboards and macOS autocorrect.
-  let working = ` ${text.toLowerCase().replace(/[‘’]/g, "'").trim()} `;
+  const normalized = text.toLowerCase().replace(/[‘’]/g, "'").trim();
+  let working = ` ${normalized} `;
   const rule: SmartPlaylistRuleInput = { name: 'Ask', mood: 'focus', count: 40 };
   const chips: string[] = [];
   let matched = 0;
+  let structured = false;
 
   for (const vocab of VOCAB) {
+    const chipFor = (m: RegExpMatchArray) => (typeof vocab.chip === 'function' ? vocab.chip(m) : vocab.chip);
+    if (vocab.repeat) {
+      // "80s and 90s": each occurrence is its own chip and the years widen to
+      // the union, instead of the second one leaking into the free-text search.
+      const all = [...working.matchAll(new RegExp(vocab.pattern.source, 'g'))];
+      if (!all.length) continue;
+      let minYear = rule.minYear ?? Infinity;
+      let maxYear = rule.maxYear ?? -Infinity;
+      for (const m of all) {
+        vocab.apply(rule, m, now);
+        minYear = Math.min(minYear, rule.minYear ?? Infinity);
+        maxYear = Math.max(maxYear, rule.maxYear ?? -Infinity);
+        chips.push(chipFor(m));
+      }
+      rule.minYear = minYear;
+      rule.maxYear = maxYear;
+      matched += all.length;
+      structured = true;
+      working = working.replace(new RegExp(vocab.pattern.source, 'g'), ' ');
+      continue;
+    }
     const m = working.match(vocab.pattern);
     if (!m) continue;
     vocab.apply(rule, m, now);
-    chips.push(typeof vocab.chip === 'function' ? vocab.chip(m) : vocab.chip);
+    chips.push(chipFor(m));
     matched += 1;
+    if (!vocab.titleWord) structured = true;
     working = working.replace(vocab.pattern, ' ');
   }
 
   // Whatever remains that isn't filler becomes free-text search (artists,
   // genres, title words) — the escape hatch that keeps unknown vocabulary
   // useful instead of ignored.
-  const residual = working
-    .split(/\s+/)
-    .map((word) => word.replace(/[^\p{L}\p{N}'&-]/gu, ''))
-    .filter((word) => word.length > 1 && !STOPWORDS.has(word));
+  const residual = contentWords(working);
+  const total = contentWords(normalized).length;
+  if (matched > 0 && !structured && total > 0 && (total - residual.length) / total < MIN_VOCAB_COVERAGE) {
+    // Only title-like words were recognised and most of the query was not: report
+    // a plain search so the caller falls back to the literal title/album/artist
+    // lookup instead of a half-compiled rule.
+    return {
+      rule: { name: 'Ask', mood: 'focus', count: 40, searchQuery: normalized },
+      chips: [`“${normalized}”`],
+      matched: 0,
+    };
+  }
   if (residual.length) {
     rule.searchQuery = residual.join(' ');
     chips.push(`“${residual.join(' ')}”`);

@@ -8,10 +8,10 @@ import { QuickPlayPalette } from './components/QuickPlayLauncher';
 import { FirstRunHints } from './components/FirstRunHints';
 import { ToastHost } from './components/StatusToast';
 import { StartupSplash } from './components/StartupSplash';
-import { usePlayerStore } from './store/usePlayerStore';
+import { transportAvailability, usePlayerStore } from './store/usePlayerStore';
 import { api, inElectron, winctl } from './lib/api';
 import { pushToast } from './lib/toast';
-import { syncMediaSessionIdentity, syncMediaSessionPosition } from './lib/mediaSession';
+import { syncMediaSessionIdentity, syncMediaSessionPosition, windowTitleFor } from './lib/mediaSession';
 import { mediaSessionPositionNeedsSync, type MediaSessionPositionSnapshot } from '@shared/media-session';
 import {
   createShortcutTargetTracker,
@@ -83,7 +83,12 @@ export default function App(): JSX.Element {
   const fullscreen = usePlayerStore((s) => s.fullscreenViz);
   const compact = usePlayerStore((s) => s.compactMode);
   const alwaysOnTop = usePlayerStore((s) => s.alwaysOnTop);
-  const settings = usePlayerStore((s) => s.settings);
+  // Per field: every settings write replaces the whole object, and the volume
+  // and EQ drags write it at pointer rate, which would re-render the app each time.
+  const textScale = usePlayerStore((s) => s.settings?.textScale);
+  const ambientSetting = usePlayerStore((s) => s.settings?.ambientReactivity);
+  const performanceTierSetting = usePlayerStore((s) => s.settings?.performanceTier);
+  const tutorialPending = usePlayerStore((s) => s.settings != null && !s.settings.firstLaunchTutorialSeen);
   const setView = usePlayerStore((s) => s.setView);
   const [dropActive, setDropActive] = useState(false);
   const [dropMessage, setDropMessage] = useState<string | null>(null);
@@ -202,15 +207,15 @@ export default function App(): JSX.Element {
   }, [showSplash]);
 
   useEffect(() => {
-    const scale = Math.min(1.35, Math.max(0.85, settings?.textScale ?? 1));
+    const scale = Math.min(1.35, Math.max(0.85, textScale ?? 1));
     document.documentElement.style.setProperty('--newamp-text-scale', scale.toFixed(2));
     document.documentElement.dataset.textScale = scale === 1 ? 'normal' : 'custom';
-  }, [settings?.textScale]);
+  }, [textScale]);
 
   // Resonance: feed the adaptive tier + ambient setting + reduced-motion into
   // the live audio→CSS-var loop. `data-amp-reactive` is the CSS opt-in gate.
-  const ambientReactivity = settings?.ambientReactivity ?? 'auto';
-  const performanceSetting = settings?.performanceTier ?? 'auto';
+  const ambientReactivity = ambientSetting ?? 'auto';
+  const performanceSetting = performanceTierSetting ?? 'auto';
   const adaptiveTier = useAdaptiveQuality(performanceSetting);
   const reducedMotion = useReducedMotion();
   const resonanceOptsRef = useRef<ResonanceOpts>({ tier: 'medium', reactive: true, reducedMotion: false });
@@ -548,10 +553,9 @@ export default function App(): JSX.Element {
       <QuickPlayPalette />
       <ToastHost />
       {showSplash && <StartupSplash />}
-      {settings && !settings.firstLaunchTutorialSeen && !tutorialDismissed && (
+      {tutorialPending && !tutorialDismissed && (
         <Suspense fallback={null}>
-          <FirstLaunchTutorial
-            settings={settings}
+          <FirstLaunchTutorialHost
             onFinish={finishFirstLaunchTutorial}
             onOpenSettings={() => {
               setView('settings');
@@ -564,21 +568,39 @@ export default function App(): JSX.Element {
   );
 }
 
+// Reads the settings itself so App doesn't have to subscribe to the whole object.
+function FirstLaunchTutorialHost({
+  onFinish,
+  onOpenSettings,
+}: {
+  onFinish: (patch?: { openaiApiKey?: string | null; openaiModel?: string }) => Promise<void>;
+  onOpenSettings: () => void;
+}): JSX.Element | null {
+  const settings = usePlayerStore((s) => s.settings);
+  if (!settings) return null;
+  return <FirstLaunchTutorial settings={settings} onFinish={onFinish} onOpenSettings={onOpenSettings} />;
+}
+
 function MediaSessionSync(): null {
   const current = usePlayerStore((s) => s.current);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTime = usePlayerStore((s) => s.currentTime);
   const duration = usePlayerStore((s) => s.duration);
   const playbackRate = usePlayerStore((s) => s.playbackRate);
+  // Booleans, so the 10Hz clock doesn't re-run the effect below.
+  const hasPrevious = usePlayerStore((s) => transportAvailability(s).hasPrevious);
+  const hasNext = usePlayerStore((s) => transportAvailability(s).hasNext);
 
-  // Identity sync (metadata + the six OS action handlers) only needs to run
-  // on track change or play/pause — NOT on the 10Hz currentTime tick, which
-  // used to rebuild a MediaMetadata and re-register all six handlers every
-  // ~100ms for the entire session.
+  // Identity sync (metadata + the OS action handlers) only needs to run
+  // on track change, play/pause or a change in what Previous and Next can do
+  // — NOT on the 10Hz currentTime tick, which used to rebuild a MediaMetadata
+  // and re-register every handler ~100ms for the entire session.
   useEffect(() => {
     syncMediaSessionIdentity({
       current,
       isPlaying,
+      hasPrevious,
+      hasNext,
       actions: {
         play: () => {
           // The OS asked to play, not to flip: a stale pause must not undo it.
@@ -590,9 +612,20 @@ function MediaSessionSync(): null {
         next: () => void usePlayerStore.getState().next(),
         stop: () => usePlayerStore.getState().engine.stop(),
         seek: (position) => usePlayerStore.getState().seek(position),
+        seekBy: (seconds) => {
+          const store = usePlayerStore.getState();
+          store.seek(clampShortcutNumber(store.currentTime + seconds, 0, store.duration || store.currentTime + Math.max(0, seconds)));
+        },
       },
     });
-  }, [current, isPlaying]);
+  }, [current, isPlaying, hasPrevious, hasNext]);
+
+  // The title bar is hidden, but the Window menu, Mission Control and
+  // VoiceOver read the window title, and Electron mirrors the page's.
+  const title = windowTitleFor(current);
+  useEffect(() => {
+    document.title = title;
+  }, [title]);
 
   // Lets CSS freeze decorative "now playing" animations while paused.
   useEffect(() => {

@@ -6,6 +6,9 @@ import type { ChildProcess } from 'node:child_process';
 
 // A killed child that is still running this much later gets SIGKILL.
 const KILL_GRACE_MS = 2000;
+// One that survives SIGKILL this long is stuck in a read the system won't
+// interrupt (a network share that stopped answering), and says so in the log.
+const SURVIVOR_REPORT_MS = 5000;
 
 /**
  * SIGTERM alone doesn't do it on macOS and Linux: ffmpeg installs its handler
@@ -32,6 +35,16 @@ export function killChild(child: ChildProcess): void {
     } catch {
       /* already gone */
     }
+    const survivor = setTimeout(() => {
+      if (child.exitCode != null || child.signalCode != null) return;
+      const at = child.spawnargs.indexOf('-i');
+      const input = at >= 0 ? child.spawnargs[at + 1] : undefined;
+      console.warn(
+        `[newamp] process ${child.pid} is still running ${(KILL_GRACE_MS + SURVIVOR_REPORT_MS) / 1000} s after it was killed${input ? `; it has ${input} open` : ''}`,
+      );
+    }, SURVIVOR_REPORT_MS);
+    survivor.unref();
+    child.once('exit', () => clearTimeout(survivor));
   }, KILL_GRACE_MS);
   escalate.unref();
   child.once('exit', () => clearTimeout(escalate));

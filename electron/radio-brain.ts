@@ -219,7 +219,7 @@ export class RadioBrain {
 
   status(): RadioBrainStatus {
     const enabled = this.state === 'running';
-    const baseUrl = enabled ? `http://${localAddress()}:${this.opts.port}` : null;
+    const baseUrl = enabled ? `http://${pickLocalAddress()}:${this.opts.port}` : null;
     return {
       enabled,
       port: this.opts.port,
@@ -561,6 +561,15 @@ export class RadioBrain {
     }
     const ext = extname(track.path).toLowerCase();
     if (this.opts.ffmpegFallbackExt(track.path)) {
+      // A probe must not start an ffmpeg decode of the whole track.
+      if (req.method === 'HEAD') {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'audio/wav');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Accept-Ranges', 'none');
+        res.end();
+        return;
+      }
       const controller = new AbortController();
       req.on('close', () => controller.abort());
       const response = this.opts.transcode(track.path, controller.signal);
@@ -572,11 +581,17 @@ export class RadioBrain {
         res.end();
         return;
       }
+      // ffmpeg decodes far faster than a player on weak wifi reads, so wait for
+      // the socket to drain instead of queueing the whole track in memory.
       const reader = response.body.getReader();
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (value) res.write(Buffer.from(value));
+      try {
+        while (!res.destroyed) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value && !res.write(value) && !res.destroyed) await drained(res);
+        }
+      } finally {
+        reader.cancel().catch(() => {});
       }
       res.end();
       return;
@@ -619,6 +634,10 @@ export class RadioBrain {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Accept-Ranges', 'bytes');
     if (partial) res.setHeader('Content-Range', `bytes ${start}-${end}/${size}`);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
     const stream = createReadStream(track.path, { start, end });
     req.on('close', () => stream.destroy());
     stream.on('error', () => {
@@ -654,15 +673,34 @@ function nextPage(path: string, offset: number, limit: number): string {
   return `${path}?offset=${offset + limit}&limit=${limit}`;
 }
 
-function localAddress(): string {
-  const interfaces = networkInterfaces();
-  for (const list of Object.values(interfaces)) {
+function drained(res: ServerResponse): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      res.off('drain', done);
+      res.off('close', done);
+      resolve();
+    };
+    res.once('drain', done);
+    res.once('close', done);
+  });
+}
+
+// Tunnels, VM bridges and container networks come first in some interface
+// lists but are not where a phone on the same Wi-Fi can reach this machine.
+const VIRTUAL_INTERFACE = /^(utun|bridge|vmnet|vboxnet|docker|veth|br-|awdl|llw|ap\d|vethernet|tailscale|zt)/i;
+
+/** The address a phone on the local network is most likely to reach: en0/en1 first, tunnels and VM bridges last. */
+export function pickLocalAddress(interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces()): string {
+  let best: { address: string; rank: number } | null = null;
+  for (const [name, list] of Object.entries(interfaces)) {
     if (!list) continue;
+    const rank = name === 'en0' ? 0 : /^en\d+$/.test(name) ? 1 : VIRTUAL_INTERFACE.test(name) ? 3 : 2;
     for (const iface of list) {
-      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+      if (iface.family !== 'IPv4' || iface.internal || iface.address.startsWith('169.254.')) continue;
+      if (!best || rank < best.rank) best = { address: iface.address, rank };
     }
   }
-  return 'localhost';
+  return best?.address ?? 'localhost';
 }
 
 function escapeHtml(value: string): string {

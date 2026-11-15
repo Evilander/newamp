@@ -251,15 +251,15 @@ const reconcileBody = mainSource.slice(
   mainSource.indexOf('function reconcileWatchedTargets'),
   mainSource.indexOf('// Quiesces the two automatic'),
 );
-assert.match(reconcileBody, /library\.markTracksMissing\(stillMissing\)/, 'the watcher marks missing tracks');
+assert.match(reconcileBody, /library\.markTracksMissingAsync\(watched\)/, 'the watcher marks missing tracks');
 assert.doesNotMatch(reconcileBody, /pruneMissingTracks/, 'the watcher must never delete tracks');
 const pruneHandler = mainSource.slice(
   mainSource.indexOf("ipcMain.handle('library:prune-missing',"),
   mainSource.indexOf("ipcMain.handle('history:get'"),
 );
 assert.equal(
-  mainSource.match(/\.pruneMissingTracks\(/g)?.length,
-  pruneHandler.match(/\.pruneMissingTracks\(/g)?.length,
+  mainSource.match(/\.pruneMissingTracks(?:Async)?\(/g)?.length,
+  pruneHandler.match(/\.pruneMissingTracks(?:Async)?\(/g)?.length,
   'pruneMissingTracks is reachable only from the explicit library:prune-missing IPC',
 );
 assert.match(pruneHandler, /settings\.get\(\)\.libraryRoots/, 'explicit cleanup knows the library roots');

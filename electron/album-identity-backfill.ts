@@ -84,7 +84,15 @@ export async function runTagBackfill(
         result.skipped++;
         return null;
       }
-      const tags = await read(row.path);
+      let tags: TrackTagExtras | null;
+      try {
+        tags = await read(row.path);
+      } catch {
+        // The read failed on the storage (a share that timed out), which says
+        // nothing about the tags. The row stays queued for the next run.
+        result.skipped++;
+        return null;
+      }
       if (tags) result.read++;
       else result.unreadable++;
       // A file that will not parse is marked done with no tags, so it is not

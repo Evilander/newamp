@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { lazy, Suspense, useMemo, useState, type CSSProperties } from 'react';
 import { usePlayerStore } from '../store/usePlayerStore';
 import { formatTime, playbackCodecLabel, shortcutLabel } from '../lib/format';
 import { api } from '../lib/api';
@@ -52,13 +52,11 @@ export function Transport(): JSX.Element {
     () => (current ? spectralArtDataUrl({ artist: current.artist, album: current.album }, 144) : null),
     [current?.artist, current?.album],
   );
-  // When the real artUrl request fails, we flip to the fallback. Tracking
-  // it as state means the failed load isn't permanently hidden — switching
-  // to a new track resets the flag.
-  const [artFailed, setArtFailed] = useState(false);
-  useEffect(() => {
-    setArtFailed(false);
-  }, [current?.id]);
+  // When the real artUrl request fails, we flip to the fallback. The failure
+  // is kept against the track it happened on, so the next track starts with
+  // its own art on the first render instead of flashing the fallback.
+  const [artFailedFor, setArtFailedFor] = useState<number | null>(null);
+  const artFailed = current != null && artFailedFor === current.id;
   const shownArtUrl = artUrl && !artFailed ? artUrl : fallbackArtUrl;
 
   return (
@@ -72,27 +70,36 @@ export function Transport(): JSX.Element {
           reactive block) — a ::after halo, so it needs a positioned parent. */}
       <div data-amp className="amp-art-frame relative flex w-[88px] shrink-0 flex-col items-center justify-center gap-1 bevel-in p-1">
         {shownArtUrl ? (
-          <img
-            src={shownArtUrl}
-            alt="cover"
-            className="h-[72px] w-[72px] cursor-pointer object-cover"
-            style={{ borderRadius: 'var(--radius)' }}
+          <button
+            type="button"
+            className="block cursor-pointer"
+            style={{ padding: 0, border: 'none', background: 'transparent', lineHeight: 0 }}
             onClick={() => setFs(true)}
             title="Open visualizer"
+            aria-label="Open visualizer"
             data-newamp-open-visualizer
-            data-newamp-art-source={artUrl && !artFailed ? 'embedded' : 'spectral'}
-            onError={() => setArtFailed(true)}
-          />
+          >
+            <img
+              src={shownArtUrl}
+              alt="cover"
+              className="h-[72px] w-[72px] object-cover"
+              style={{ borderRadius: 'var(--radius)' }}
+              data-newamp-art-source={artUrl && !artFailed ? 'embedded' : 'spectral'}
+              onError={() => setArtFailedFor(current?.id ?? null)}
+            />
+          </button>
         ) : (
-          <div
+          <button
+            type="button"
             className="flex h-[72px] w-[72px] cursor-pointer items-center justify-center text-[11px]"
-            style={{ color: 'var(--muted)', borderRadius: 'var(--radius)' }}
+            style={{ padding: 0, border: 'none', background: 'transparent', color: 'var(--muted)', borderRadius: 'var(--radius)' }}
             onClick={() => setFs(true)}
             title="Open visualizer"
+            aria-label="Open visualizer"
             data-newamp-open-visualizer
           >
             ♪
-          </div>
+          </button>
         )}
       </div>
 
@@ -196,7 +203,6 @@ export function Transport(): JSX.Element {
             onClick={togglePlay}
             title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
             aria-label={isPlaying ? 'Pause' : 'Play'}
-            aria-pressed={isPlaying}
             aria-busy={isBuffering}
             style={isBuffering ? { cursor: 'progress', opacity: 0.7 } : undefined}
           >

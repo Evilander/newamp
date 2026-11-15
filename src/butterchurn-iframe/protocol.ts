@@ -57,4 +57,22 @@ export interface BcFailedMessage {
   type: 'failed';
   error: string;
 }
-export type BcFrameMessage = BcReadyMessage | BcMountedMessage | BcFailedMessage;
+/**
+ * The frame's WebGL context was lost. Nothing is drawn until the iframe has
+ * rebuilt MilkDrop on the restored context and sent 'context-restored'; a
+ * parent that sees neither within a few seconds should fall back to its own
+ * painter.
+ */
+export interface BcContextLostMessage {
+  type: 'context-lost';
+}
+/** MilkDrop (and the Live pipeline, when on) are running again on a restored context. */
+export interface BcContextRestoredMessage {
+  type: 'context-restored';
+}
+export type BcFrameMessage =
+  | BcReadyMessage
+  | BcMountedMessage
+  | BcFailedMessage
+  | BcContextLostMessage
+  | BcContextRestoredMessage;

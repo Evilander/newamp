@@ -13,7 +13,7 @@ import {
 import { feedSampleRate, fillButterchurnSamples, waveGainFor } from '../butterchurn-iframe/feed';
 import { createParticleFlowRenderer } from '../visualizer/particle-flow';
 import { createEvilandRenderer, type EvilandPalette } from '../visualizer/eviland';
-import { liveGradeFor, resolveEvilandPalette, sleeveFor, tuneEvilandFrame, type Sleeve } from '../visualizer/eviland-appearance';
+import { liveGradeFor, resolveEvilandPalette, sleeveFor, themePaletteFromAccent, tuneEvilandFrame, type Sleeve } from '../visualizer/eviland-appearance';
 import { watchContextFallback } from '../visualizer/context-fallback';
 import { createLookRequestCursor } from '../visualizer/look-requests';
 import { createGovernor, type Governor } from '../visualizer/eviland-governor';
@@ -288,9 +288,10 @@ export function Visualizer({
     if (!canvas || suspendedByFullscreen) return;
 
     if (mode === 'butterchurn' || mode === 'eviland-live') {
-      // Butterchurn runs inside a sandboxed iframe (butterchurn-iframe.html) so
-      // its preset-shader eval is scoped to a frame whose CSP permits
-      // 'unsafe-eval' — the main renderer stays on script-src 'self'. Web Audio
+      // Butterchurn runs inside an iframe (butterchurn-iframe.html) so its
+      // preset-shader eval is scoped to a frame whose CSP permits 'unsafe-eval'
+      // — the main renderer stays on script-src 'self'. The frame is same-origin
+      // and carries no sandbox attribute, so that CSP is the only fence round it. Web Audio
       // nodes can't cross the iframe boundary, so we post raw time-domain bytes
       // each frame and the iframe feeds them to butterchurn's render({ audioLevels })
       // path. If the frame can't host butterchurn (load error / missing feature /
@@ -342,12 +343,6 @@ export function Visualizer({
       // resolveEvilandPalette blends them into the theme and turns half the
       // looks toward them. The toolbar's palette choice is applied on top of
       // this in updateComposition().
-      const readThemePalette = (): EvilandPalette => ({
-        accent: parseRgbVec(getCssVar('--accent')),
-        dark: parseRgbVec(getCssVar('--accent-dim', getCssVar('--accent'))),
-        light: parseRgbVec(getCssVar('--ink', '#ffffff'), [1, 1, 1]),
-        bg: parseRgbVec(getCssVar('--bg', '#05060a'), [0.02, 0.024, 0.04]),
-      });
       let themePalette = readThemePalette();
       const sleeve: Sleeve = { art: null, seed: '' };
       let sleeveArt: Sleeve['art'] = null;
@@ -427,6 +422,8 @@ export function Visualizer({
             rawFrame.score?.keyShift,
             config.palette,
             sleeveFor(config, sleeveArt, sleeve),
+            rawFrame.score?.minor,
+            rawFrame.score?.keyConfidence,
           ),
           // The iframe blends presets itself; the fade's two full looks would
           // only triple every frame's message. It still gets the slim look the
@@ -460,11 +457,20 @@ export function Visualizer({
         });
       };
 
+      // A GPU context the frame lost is rebuilt inside it ('context-restored').
+      // If neither news arrives within the grace period the picture is frozen,
+      // so the 2D painter takes over, as it does when the frame cannot start.
+      const contextWatch = watchContextFallback(startFallback);
+
       const onMessage = (event: MessageEvent) => {
         if (event.source !== iframe.contentWindow) return;
         const msg = event.data as BcFrameMessage | undefined;
         if (!msg || typeof msg !== 'object') return;
-        if (msg.type === 'ready') {
+        if (msg.type === 'context-lost') {
+          contextWatch.onEvent('lost');
+        } else if (msg.type === 'context-restored') {
+          contextWatch.onEvent('restored');
+        } else if (msg.type === 'ready') {
           ready = true;
           const init: BcInitMessage = {
             type: 'init',
@@ -541,6 +547,7 @@ export function Visualizer({
         stopPump();
         stopDisplayWatch();
         fallbackCancel();
+        contextWatch.dispose();
         window.clearTimeout(mountTimeout);
         window.removeEventListener('message', onMessage);
         fallbackPainter?.dispose();
@@ -629,13 +636,7 @@ export function Visualizer({
       // the running WebGL2 renderer live — renderer.render() consumes the
       // palette every frame, so theme colors flow as uniform updates with no
       // remount and no setConfig call.
-      const readPalette = (): EvilandPalette => ({
-        accent: parseRgbVec(getCssVar('--accent')),
-        dark: parseRgbVec(getCssVar('--accent-dim', getCssVar('--accent'))),
-        light: parseRgbVec(getCssVar('--ink', '#ffffff'), [1, 1, 1]),
-        bg: parseRgbVec(getCssVar('--bg', '#05060a'), [0.02, 0.024, 0.04]),
-      });
-      let palette = readPalette();
+      let palette = readThemePalette();
       let paletteTick = 0;
       // The cover's colours for the current track (async, best-effort, cached
       // by URL). resolveEvilandPalette takes them through the sleeve, the same
@@ -854,7 +855,7 @@ export function Visualizer({
         // config (default or last manual look). No per-frame setConfig.
 
         if (paletteTick++ % 30 === 0) {
-          palette = readPalette();
+          palette = readThemePalette();
           // Observability breadcrumb (~1x/sec): smokes and bug reports can
           // read the governor's live verdict straight off the DOM.
           if (node) {
@@ -867,7 +868,16 @@ export function Visualizer({
           const look = renderer.getConfig();
           renderer.render(
             tuneEvilandFrame(evFrame, tuningRef.current.reactivity),
-            resolveEvilandPalette(tuningRef.current.palette, palette, now / 1000, evFrame.score?.keyShift, look.palette, sleeveFor(look, sleeveArt, sleeve)),
+            resolveEvilandPalette(
+              tuningRef.current.palette,
+              palette,
+              now / 1000,
+              evFrame.score?.keyShift,
+              look.palette,
+              sleeveFor(look, sleeveArt, sleeve),
+              evFrame.score?.minor,
+              evFrame.score?.keyConfidence,
+            ),
             dtMs,
             'host',
           );
@@ -2092,7 +2102,7 @@ export function Visualizer({
   if (width != null) style.width = `${width}px`;
   if (height != null) style.height = `${height}px`;
 
-  // Butterchurn mode layers a sandboxed iframe (the actual Milkdrop render)
+  // Butterchurn mode layers an iframe (the actual Milkdrop render)
   // over a placeholder canvas. The canvas keeps the smoke selector + mount flag
   // and is the surface the canvas-2D fallback paints to if the iframe can't host.
   // 'eviland-live' uses the same stack: the iframe carries the complete Live
@@ -2451,6 +2461,25 @@ function getCssVar(name: string, fallback = '#39ff14'): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
+/**
+ * The skin's colours as Eviland's theme palette. `--accent-dim` is the dark
+ * role when the skin has one, and `--viz-light` the light role when a skin
+ * wants a specific colour at the top of the ramp (UI ink is otherwise off the
+ * table: it is near white, and every ramp topped out there). The rest is built
+ * in OKLCh from the accent, in themePaletteFromAccent, which the projector
+ * uses too so every host resolves the same palette.
+ */
+function readThemePalette(): EvilandPalette {
+  const dim = getCssVar('--accent-dim', '');
+  const light = getCssVar('--viz-light', '');
+  return themePaletteFromAccent(
+    parseRgbVec(getCssVar('--accent')),
+    dim ? parseRgbVec(dim) : null,
+    parseRgbVec(getCssVar('--bg', '#05060a'), [0.02, 0.024, 0.04]),
+    light ? parseRgbVec(light, [1, 1, 1]) : null,
+  );
+}
+
 function rgbVecEquals(a: [number, number, number], b: [number, number, number]): boolean {
   return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
@@ -2462,7 +2491,8 @@ function evilandPaletteEquals(a: EvilandPalette, b: EvilandPalette): boolean {
     rgbVecEquals(a.accent, b.accent) &&
     rgbVecEquals(a.dark, b.dark) &&
     rgbVecEquals(a.light, b.light) &&
-    rgbVecEquals(a.bg, b.bg)
+    rgbVecEquals(a.bg, b.bg) &&
+    (a.accent2 === undefined ? b.accent2 === undefined : b.accent2 !== undefined && rgbVecEquals(a.accent2, b.accent2))
   );
 }
 

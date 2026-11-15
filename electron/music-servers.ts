@@ -43,6 +43,8 @@ export type {
 
 export interface MusicServerRequestOptions {
   timeoutMs?: number;
+  // How long a streamed body may go without a byte while the player is waiting for one.
+  idleTimeoutMs?: number;
   signal?: AbortSignal;
   now?: number;
 }
@@ -58,6 +60,10 @@ type MusicServerConnectionLoader =
 const JSON_BODY_LIMIT = 8 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_STREAM_HEADER_TIMEOUT_MS = 20_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 15_000;
+const STREAM_MAX_RESUMES = 2;
+const STREAM_RESUME_DELAY_MS = 200;
+const MAX_REDIRECTS = 3;
 const SUBSONIC_API_VERSION = '1.16.1';
 const SUBSONIC_CLIENT_NAME = 'NewAmp';
 
@@ -168,15 +174,14 @@ export async function streamMusicServerSong(
     const upstream = connection.provider === 'jellyfin'
       ? jellyfinStreamUrl(connection, itemId)
       : subsonicStreamUrl(connection, itemId);
-    const response = await fetchStreamNoRedirect(upstream, {
+    const requestHeaders = streamRequestHeaders(connection, request);
+    const streamOptions = { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_STREAM_HEADER_TIMEOUT_MS };
+    const open = (url: URL, headers: Record<string, string>) => followRedirects(
+      url,
       method,
-      headers: streamRequestHeaders(connection, request),
-      signal: request.signal,
-    }, { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_STREAM_HEADER_TIMEOUT_MS });
-    if (isRedirect(response.status)) {
-      response.body?.cancel().catch(() => {});
-      return textResponse('Music server stream redirected; refusing to forward credentials.', 502);
-    }
+      (target) => fetchStreamNoRedirect(target, { method, headers, signal: request.signal }, streamOptions),
+    );
+    const { response, url: streamUrl } = await open(upstream, requestHeaders);
     if (response.status >= 400 && response.status !== 416) {
       response.body?.cancel().catch(() => {});
       return textResponse(`Music server stream request failed: HTTP ${response.status}`, response.status);
@@ -190,7 +195,14 @@ export async function streamMusicServerSong(
         headers,
       });
     }
-    return new Response(response.body, {
+    const body = response.body && (response.status === 200 || response.status === 206)
+      ? resumableStreamBody(response, {
+        idleTimeoutMs: options.idleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+        aborted: () => request.signal.aborted || options.signal?.aborted === true,
+        reopen: (range, ifRange) => reopenStream(open, streamUrl, requestHeaders, range, ifRange),
+      })
+      : response.body;
+    return new Response(body, {
       status: response.status,
       statusText: response.statusText,
       headers,
@@ -198,6 +210,172 @@ export async function streamMusicServerSong(
   } catch (err) {
     return textResponse(sanitizeMusicServerError(err, connectionSecrets(connection)), 502);
   }
+}
+
+interface ResumableStreamOptions {
+  idleTimeoutMs: number;
+  aborted: () => boolean;
+  reopen: (range: string, ifRange: string | null) => Promise<Response>;
+}
+
+// The byte span a 200 or 206 answer carries, when the server says how long it is.
+function streamSpan(response: Response): { start: number; end: number } | null {
+  if (response.status === 206) {
+    const match = /^bytes (\d+)-(\d+)\/(?:\d+|\*)$/i.exec(response.headers.get('content-range') ?? '');
+    if (!match) return null;
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    return Number.isSafeInteger(start) && Number.isSafeInteger(end) && end >= start ? { start, end } : null;
+  }
+  if (response.status !== 200) return null;
+  const length = Number(response.headers.get('content-length') || NaN);
+  return Number.isSafeInteger(length) && length > 0 ? { start: 0, end: length - 1 } : null;
+}
+
+// A stalled or dropped upstream body must not leave the player waiting or end
+// the song early. The wait for each chunk is bounded, and when the body fails
+// part-way the rest is asked for with a Range request and spliced on, so the
+// player sees one continuous response. Only a body whose length is known can be
+// resumed; others still fail promptly instead of hanging.
+function resumableStreamBody(first: Response, options: ResumableStreamOptions): ReadableStream<Uint8Array> {
+  const span = first.headers.get('accept-ranges')?.toLowerCase() === 'none' ? null : streamSpan(first);
+  const etag = first.headers.get('etag');
+  const ifRange = etag && !etag.startsWith('W/') ? etag : first.headers.get('last-modified');
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = first.body!.getReader();
+  let sent = 0;
+  // Counts consecutive interruptions, so a long song on a flaky link is not cut off by drops that
+  // each recovered and played on.
+  let failures = 0;
+  let cancelled = false;
+
+  const mayResume = (): Promise<boolean> => {
+    failures += 1;
+    if (!span || cancelled || options.aborted() || failures > STREAM_MAX_RESUMES) return Promise.resolve(false);
+    return new Promise((resolvePromise) => {
+      setTimeout(() => resolvePromise(!cancelled && !options.aborted()), STREAM_RESUME_DELAY_MS * failures);
+    });
+  };
+  const reopen = async (): Promise<ReadableStreamDefaultReader<Uint8Array>> => {
+    const from = span!.start + sent;
+    const response = await options.reopen(`bytes=${from}-${span!.end}`, ifRange);
+    const again = response.status === 206 ? streamSpan(response) : null;
+    if (!again || again.start !== from || again.end !== span!.end || !response.body) {
+      response.body?.cancel().catch(() => {});
+      throw new Error('Music server did not resume the stream.');
+    }
+    return response.body.getReader();
+  };
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      while (true) {
+        let failure: unknown;
+        try {
+          reader ??= await reopen();
+          if (cancelled) {
+            reader.cancel().catch(() => {});
+            return;
+          }
+          const { done, value } = await readWithin(reader, options.idleTimeoutMs);
+          if (cancelled) return;
+          if (!done) {
+            if (value) {
+              sent += value.byteLength;
+              failures = 0;
+              controller.enqueue(value);
+            }
+            return;
+          }
+          if (!span || sent > span.end - span.start) {
+            controller.close();
+            return;
+          }
+          failure = new Error('Music server stream ended early.');
+        } catch (err) {
+          failure = err;
+        }
+        reader?.cancel(failure).catch(() => {});
+        reader = null;
+        if (!(await mayResume())) {
+          controller.error(failure);
+          return;
+        }
+      }
+    },
+    async cancel(reason) {
+      cancelled = true;
+      await reader?.cancel(reason).catch(() => {});
+    },
+  });
+}
+
+function readWithin(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  idleMs: number,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(() => rejectPromise(new Error('Music server stream stalled.')), idleMs);
+    reader.read().then(
+      (result) => { clearTimeout(timer); resolvePromise(result); },
+      (err) => { clearTimeout(timer); rejectPromise(err); },
+    );
+  });
+}
+
+async function reopenStream(
+  open: (url: URL, headers: Record<string, string>) => Promise<{ response: Response }>,
+  url: URL,
+  headers: Record<string, string>,
+  range: string,
+  ifRange: string | null,
+): Promise<Response> {
+  const next: Record<string, string> = { ...headers, Range: range };
+  delete next['If-Range'];
+  if (ifRange) next['If-Range'] = ifRange;
+  return (await open(url, next)).response;
+}
+
+async function followRedirects(
+  url: URL,
+  method: string,
+  send: (target: URL) => Promise<Response>,
+): Promise<{ response: Response; url: URL }> {
+  let current = url;
+  for (let hop = 0; ; hop += 1) {
+    const response = await send(current);
+    if (!isRedirect(response.status)) return { response, url: current };
+    response.body?.cancel().catch(() => {});
+    const target = redirectTarget(current, response.headers.get('location'));
+    const keepsMethod = method !== 'POST' || response.status === 307 || response.status === 308;
+    if (!target || !keepsMethod || !isSameServerRedirect(current, target)) throw redirectRefusal(target);
+    if (hop >= MAX_REDIRECTS) throw new Error('Music server redirected too many times.');
+    if (!target.search) target.search = current.search;
+    current = target;
+  }
+}
+
+function redirectTarget(from: URL, location: string | null): URL | null {
+  if (!location) return null;
+  try {
+    return new URL(location, from);
+  } catch {
+    return null;
+  }
+}
+
+// The same server asking for the same endpoint over https, or with a slash
+// added or dropped. Anything else could send the credentials somewhere the
+// user never typed in.
+function isSameServerRedirect(from: URL, to: URL): boolean {
+  if (to.hostname !== from.hostname) return false;
+  const upgrade = from.protocol === 'http:' && to.protocol === 'https:';
+  if (!upgrade && (to.protocol !== from.protocol || to.port !== from.port)) return false;
+  return to.pathname.replace(/\/+$/, '') === from.pathname.replace(/\/+$/, '');
+}
+
+function redirectRefusal(target: URL | null): Error {
+  if (!target) return new Error('Music server request redirected; refusing to forward credentials.');
+  return new Error(`Music server redirects to ${target.origin}; refusing to forward credentials. Update the saved server URL.`);
 }
 
 async function testJellyfinConnection(
@@ -361,6 +539,19 @@ async function fetchSubsonicSongs(
   const rawSongs = Array.isArray((searchResult as { song?: unknown } | null)?.song)
     ? (searchResult as { song: unknown[] }).song
     : [];
+  if (rawSongs.length === 0 && query === '') {
+    const albumSongs = await fetchSubsonicAlbumSongs(connection, offset, limit, requestOptions);
+    if (albumSongs.length > 0) return subsonicSongPage(connection, offset, limit, albumSongs);
+  }
+  return subsonicSongPage(connection, offset, limit, rawSongs);
+}
+
+function subsonicSongPage(
+  connection: MusicServerRuntimeConnection,
+  offset: number,
+  limit: number,
+  rawSongs: unknown[],
+): MusicServerSongPage {
   const songs = rawSongs
     .map((song) => mapSubsonicSong(connection, song))
     .filter((song): song is MusicServerSong => song !== null);
@@ -373,6 +564,61 @@ async function fetchSubsonicSongs(
     nextOffset: rawSongs.length >= limit ? offset + rawSongs.length : null,
     songs,
   };
+}
+
+const SUBSONIC_ALBUM_PAGE = 500;
+
+// Stock Subsonic answers an empty search3 query with nothing, so the library is
+// walked album by album instead. Albums that end before `offset` are skipped on
+// their reported song count without being fetched.
+async function fetchSubsonicAlbumSongs(
+  connection: MusicServerRuntimeConnection,
+  offset: number,
+  limit: number,
+  requestOptions: MusicServerRequestOptions,
+): Promise<unknown[]> {
+  if (connection.secret.provider !== 'subsonic') return [];
+  const secret = connection.secret;
+  const request = async (path: string, params: Record<string, string>) => {
+    const url = subsonicEndpoint(connection.baseUrl, path, secret);
+    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+    return subsonicResponse(await fetchJson(url, {
+      method: 'GET',
+      headers: { Accept: 'application/json', 'User-Agent': NEWAMP_USER_AGENT },
+    }, requestOptions));
+  };
+  const songs: unknown[] = [];
+  let skipped = 0;
+  try {
+    for (let albumOffset = 0; songs.length < limit; albumOffset += SUBSONIC_ALBUM_PAGE) {
+      const list = valueAt(await request('/rest/getAlbumList2.view', {
+        type: 'alphabeticalByName',
+        size: String(SUBSONIC_ALBUM_PAGE),
+        offset: String(albumOffset),
+      }), ['albumList2', 'album']);
+      const albums = objectArray(list);
+      for (const album of albums) {
+        const id = textOf(album, ['id']);
+        if (!id) continue;
+        const count = finiteInt(album.songCount);
+        if (count != null && skipped + count <= offset) {
+          skipped += count;
+          continue;
+        }
+        const tracks = valueAt(await request('/rest/getAlbum.view', { id }), ['album', 'song']);
+        for (const track of objectArray(tracks)) {
+          if (skipped < offset) skipped += 1;
+          else if (songs.length < limit) songs.push(track);
+        }
+        if (songs.length >= limit) break;
+      }
+      if (albums.length < SUBSONIC_ALBUM_PAGE) break;
+    }
+  } catch {
+    // The empty search was a valid answer; a server without these endpoints just has no browse list.
+    return [];
+  }
+  return songs;
 }
 
 function mapJellyfinSong(connection: MusicServerRuntimeConnection, item: unknown): MusicServerSong | null {
@@ -511,11 +757,11 @@ function subsonicEndpoint(baseUrl: string, path: string, secret: Extract<MusicSe
 }
 
 async function fetchJson(url: URL, init: RequestInit, options: MusicServerRequestOptions): Promise<unknown> {
-  const response = await fetchNoRedirect(url, init, options);
-  if (isRedirect(response.status)) {
-    response.body?.cancel().catch(() => {});
-    throw new Error('Music server request redirected; refusing to forward credentials.');
-  }
+  const { response } = await followRedirects(
+    url,
+    String(init.method ?? 'GET').toUpperCase(),
+    (target) => fetchNoRedirect(target, init, options),
+  );
   if (!response.ok) {
     response.body?.cancel().catch(() => {});
     throw new Error(`Music server request failed: HTTP ${response.status}`);
@@ -801,7 +1047,7 @@ function textResponse(body: string, status: number): Response {
 }
 
 function sanitizeMusicServerError(err: unknown, secrets: Array<string | null | undefined> = []): string {
-  let message = err instanceof Error ? err.message : String(err);
+  let message = describeError(err);
   message = message
     .replace(/([?&](?:u|p|t|s|token|api_key|apikey|access_token|session|password)=)[^&\s]+/gi, '$1[redacted]')
     .replace(/\b((?:u|p|t|s|token|api_key|apikey|access_token|session|password)=)[^&\s]+/gi, '$1[redacted]')
@@ -812,6 +1058,18 @@ function sanitizeMusicServerError(err: unknown, secrets: Array<string | null | u
     message = message.split(secret).join('[redacted]');
   }
   return message || 'Music server request failed.';
+}
+
+// fetch reports every network and TLS failure as "fetch failed" and keeps the
+// reason on err.cause, so a certificate or DNS problem would otherwise be invisible.
+function describeError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const cause = err instanceof Error ? err.cause : undefined;
+  if (!cause || typeof cause !== 'object') return message;
+  const { code, message: causeMessage } = cause as { code?: unknown; message?: unknown };
+  const reason = typeof causeMessage === 'string' ? causeMessage : '';
+  const detail = typeof code === 'string' && !reason.includes(code) ? `${code}: ${reason}`.replace(/: $/, '') : reason;
+  return detail && !message.includes(detail) ? `${message} (${detail})` : message;
 }
 
 function connectionSecrets(connection: Partial<MusicServerRuntimeConnection> | null | undefined): string[] {

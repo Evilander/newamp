@@ -127,8 +127,8 @@ for (const failure of ['backup', 'library-drain', 'settings-drain', 'close', 're
       createBackupFromLiveStores: (...args) => fixture.backup(...args),
       settings: { get: () => ({ libraryRoots: [] }) },
       library: {
-        previewPruneMissingTracks: () => ({ tracks: 2 }),
-        pruneMissingTracks: () => ({ removedIds: [1, 2] }),
+        previewPruneMissingTracksAsync: async () => ({ tracks: 2 }),
+        pruneMissingTracksAsync: async () => ({ removedIds: [1, 2] }),
         getTrack: (id) => ({ id, path: `/fixture/${id}.mp3`, title: 'Fixture' }),
         removeTracksById: (ids) => ids,
       },

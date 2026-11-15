@@ -18,6 +18,8 @@ import { Queue } from '../Icons';
 
 const FOLDER_TRACK_LIMIT = 600;
 const FOLDER_ROW_HEIGHT = 48;
+// The most tracks one folder action loads into the queue.
+const FOLDER_QUEUE_LIMIT = 100000;
 
 // The folder index keeps paths in one normalized form (backslashes) for
 // matching; show them the way this OS writes them.
@@ -50,6 +52,20 @@ export function FoldersView(): JSX.Element {
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
   const current = usePlayerStore((s) => s.current);
+
+  // A scan that read something new, or tracks leaving the library, changes the
+  // counts and the tree; reading again keeps an open Folders view in step.
+  useEffect(() => {
+    const reload = (): void => setRefreshSeed((seed) => seed + 1);
+    const offScan = api.onScanProgress((progress) => {
+      if (progress.done && !progress.cancelled && (progress.parsed ?? 1) > 0) reload();
+    });
+    const offRemoved = api.onTracksRemoved(reload);
+    return () => {
+      offScan();
+      offRemoved();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,7 +114,7 @@ export function FoldersView(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [selected?.path, selected?.trackCount]);
+  }, [selected?.path, selected?.trackCount, refreshSeed]);
 
   useEffect(() => {
     setFolderFilter('');
@@ -136,16 +152,21 @@ export function FoldersView(): JSX.Element {
     action: (nextTracks: Track[]) => void | Promise<void>,
   ): Promise<void> {
     try {
-      const nextTracks = await api.getFolderTracks(folder.path, { recursive: true, limit: 100000 });
+      const nextTracks = await api.getFolderTracks(folder.path, { recursive: true, limit: FOLDER_QUEUE_LIMIT });
       if (!nextTracks.length) {
         pushToast({ tone: 'warn', title: 'Nothing to play', detail: `${folder.name} has no playable tracks.` });
         return;
       }
       await action(nextTracks);
+      // A folder bigger than the limit comes back cut short; say so rather
+      // than let the queue look complete.
+      const truncated = nextTracks.length >= FOLDER_QUEUE_LIMIT;
       pushToast({
-        tone: 'ok',
+        tone: truncated ? 'warn' : 'ok',
         title: `${nextTracks.length.toLocaleString()} tracks loaded`,
-        detail: `From ${folder.name}, subfolders included.`,
+        detail: truncated
+          ? `From ${folder.name}, subfolders included. Only the first ${FOLDER_QUEUE_LIMIT.toLocaleString()} fit in one queue.`
+          : `From ${folder.name}, subfolders included.`,
       });
     } catch (err) {
       pushToast({

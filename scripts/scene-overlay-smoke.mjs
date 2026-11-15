@@ -14,7 +14,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const smokeRoot = resolve('tmp', 'scene-overlay-smoke');
+// NEWAMP_SCENE_SMOKE_ROOT lets runs side by side bundle into folders of their own.
+const smokeRoot = resolve(process.env.NEWAMP_SCENE_SMOKE_ROOT || join('tmp', 'scene-overlay-smoke'));
 const hardTimeout = setTimeout(() => fail(new Error('scene overlay smoke timed out')), 90000);
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');

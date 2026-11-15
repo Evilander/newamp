@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, unlink } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { durableWriteFileAsync, renameOverExistingAsync } from './recovery.js';
 import type {
@@ -12,6 +12,15 @@ import type {
 
 const LASTFM_API_ROOT = 'https://ws.audioscrobbler.com/2.0/';
 const LASTFM_AUTH_ROOT = 'https://www.last.fm/api/auth/';
+const LASTFM_REQUEST_TIMEOUT_MS = 15_000;
+const OUTBOX_LIMIT = 500;
+// An unreadable outbox file (a busy or failing disk) gets this long to clear
+// before the session runs without it. It is never written over unread.
+const OUTBOX_READ_RETRY_DELAYS_MS = [100, 300, 900];
+// A scrobble Last.fm refused for a reason that may be ours (a bad signature,
+// an unexpected status) is tried again no sooner than this, so one stuck play
+// costs a request every few minutes, not one on every flush.
+const REJECTED_RETRY_AFTER_MS = 15 * 60_000;
 
 type LastfmParams = Record<string, string | number | null | undefined>;
 
@@ -42,6 +51,10 @@ export interface LastfmCachedScrobble {
   // itself is invalid (revoked access, expired key), not because of a
   // transient outage. See flush() below.
   authFailure: boolean;
+  // Set when Last.fm refused this play for a reason that isn't known to be
+  // permanent for it. The play is kept and its error shown; it doesn't hold
+  // up the plays behind it. See flush() below.
+  rejected: boolean;
 }
 
 export interface LastfmOutboxFlushResult {
@@ -71,7 +84,9 @@ export function signLastfmParams(params: LastfmParams, sharedSecret: string): st
     .filter(([key, value]) =>
       key !== 'format' && key !== 'callback' && key !== 'api_sig' && value !== null && value !== undefined,
     )
-    .sort(([a], [b]) => a.localeCompare(b))
+    // Last.fm sorts by code point; localeCompare puts album[0] before
+    // albumArtist[0] and track[0] before trackNumber[0], the reverse of that.
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, value]) => `${key}${String(value)}`)
     .join('');
   return createHash('md5').update(`${payload}${sharedSecret}`, 'utf8').digest('hex');
@@ -110,7 +125,10 @@ export class LastfmScrobbleOutbox {
   // silently erased when that flush finished and wrote its now-stale
   // snapshot back over it.
   private state: LastfmCachedScrobble[] | null = null;
-  private loading: Promise<LastfmCachedScrobble[]> | null = null;
+  // Set while the outbox file exists but could not be read. The queue then
+  // runs in memory only: writing it out would replace plays that are still
+  // on disk. Each later access tries the file again and merges what it finds.
+  private unreadable = false;
   // Serializes every mutation against `state` behind a promise chain so
   // overlapping enqueue()/flush() calls can never interleave their
   // read-modify-write. Deliberately NOT held across the network wait in
@@ -126,23 +144,61 @@ export class LastfmScrobbleOutbox {
   constructor(private readonly file: string) {}
 
   private async ensureLoaded(): Promise<LastfmCachedScrobble[]> {
-    if (this.state) return this.state;
-    if (!this.loading) this.loading = this.readFromDisk();
-    this.state = await this.loading;
+    if (this.state && !this.unreadable) return this.state;
+    // A file that already failed to read gets one quick try per access, not the
+    // full backoff, so a failing disk doesn't slow every call.
+    const stored = await this.readFromDisk(!this.unreadable);
+    if (stored) {
+      this.state = [...stored, ...(this.state ?? [])].slice(-OUTBOX_LIMIT);
+      this.unreadable = false;
+    } else {
+      this.state ??= [];
+      this.unreadable = true;
+    }
     return this.state;
   }
 
-  private async readFromDisk(): Promise<LastfmCachedScrobble[]> {
+  // Null when the file exists but can't be read right now. A missing file is
+  // an empty outbox, and a file that isn't an outbox is moved aside so the
+  // next write doesn't destroy it.
+  private async readFromDisk(withRetries: boolean): Promise<LastfmCachedScrobble[] | null> {
+    let raw: string | null = null;
+    for (let attempt = 0; raw === null; attempt += 1) {
+      try {
+        raw = await readFile(this.file, 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        const delay = withRetries ? OUTBOX_READ_RETRY_DELAYS_MS[attempt] : undefined;
+        if (delay === undefined) {
+          console.warn(`[newamp] could not read ${this.file}; scrobbles are kept in memory only:`, err);
+          return null;
+        }
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+    let parsed: unknown;
     try {
-      const raw = await readFile(this.file, 'utf8');
-      const parsed = JSON.parse(raw) as unknown;
-      if (!Array.isArray(parsed)) return [];
-      return parsed.flatMap((item) => {
-        const scrobble = normalizeCachedScrobble(item);
-        return scrobble ? [scrobble] : [];
-      });
+      parsed = JSON.parse(raw);
     } catch {
+      parsed = null;
+    }
+    if (!Array.isArray(parsed)) {
+      await this.quarantine();
       return [];
+    }
+    return parsed.flatMap((item) => {
+      const scrobble = normalizeCachedScrobble(item);
+      return scrobble ? [scrobble] : [];
+    });
+  }
+
+  private async quarantine(): Promise<void> {
+    const backup = `${this.file}.corrupt-${Date.now()}`;
+    try {
+      await rename(this.file, backup);
+      console.warn(`[newamp] ${this.file} was not a scrobble outbox; moved to ${backup}`);
+    } catch (err) {
+      console.warn(`[newamp] could not move aside ${this.file}:`, err);
     }
   }
 
@@ -194,9 +250,10 @@ export class LastfmScrobbleOutbox {
         lastAttemptAt: null,
         lastError,
         authFailure: false,
+        rejected: false,
       };
       // Bounded from the current authoritative state, not a stale snapshot.
-      this.state = [...this.state!, item].slice(-500);
+      this.state = [...this.state!, item].slice(-OUTBOX_LIMIT);
       await this.persist();
       return item;
     });
@@ -211,18 +268,23 @@ export class LastfmScrobbleOutbox {
     // enqueued after this snapshot is simply not part of this flush's batch
     // and is left alone.
     const batch = await this.withState(() => {
-      const candidates = this.state!.filter((item) => !this.sending.has(item.id));
+      const now = Date.now();
+      const candidates = this.state!.filter(
+        (item) =>
+          !this.sending.has(item.id) &&
+          !(item.rejected && item.lastAttemptAt !== null && now - item.lastAttemptAt < REJECTED_RETRY_AFTER_MS),
+      );
       for (const item of candidates) this.sending.add(item.id);
       return candidates;
     });
 
     const sentIds = new Set<string>();
-    // Permanently-invalid, non-auth failures (e.g. malformed request) are
-    // dropped outright rather than retried — tracked separately from
-    // `failures` because a dropped item is removed from the queue, not kept
-    // with a bumped attempt count.
+    // Failures that are provably permanent for that one play (invalid
+    // parameters, invalid resource) are dropped outright rather than retried
+    // — tracked separately from `failures` because a dropped item is removed
+    // from the queue, not kept with a bumped attempt count.
     const droppedIds = new Set<string>();
-    const failures = new Map<string, { lastError: string; authFailure: boolean }>();
+    const failures = new Map<string, { lastError: string; authFailure: boolean; rejected: boolean }>();
     let sent = 0;
     let needsReconnect = false;
     let blocked = false;
@@ -248,13 +310,20 @@ export class LastfmScrobbleOutbox {
             // tell the caller to prompt a reconnect instead of quietly
             // blocking forever with no way for the user to find out. Once
             // the user reconnects, the next flush retries from the top.
-            failures.set(item.id, { lastError: errorMessage(err), authFailure: true });
+            failures.set(item.id, { lastError: errorMessage(err), authFailure: true, rejected: false });
             needsReconnect = true;
             blocked = true;
             continue;
           }
           if (!shouldRetryLastfmError(err)) {
-            droppedIds.add(item.id); // permanently invalid: drop it
+            if (isPermanentLastfmRejection(err)) {
+              droppedIds.add(item.id);
+              continue;
+            }
+            // Refused for a reason that may be a bug on our side (an invalid
+            // signature, say). Dropping it would lose the play with nothing
+            // shown, so keep it with the error and go on to the next one.
+            failures.set(item.id, { lastError: errorMessage(err), authFailure: false, rejected: true });
             continue;
           }
           failures.set(item.id, {
@@ -263,6 +332,7 @@ export class LastfmScrobbleOutbox {
             // flag from an earlier round, so needsReconnect always reflects
             // the most recent reason this item didn't send.
             authFailure: false,
+            rejected: false,
           });
           blocked = true;
         }
@@ -287,11 +357,14 @@ export class LastfmScrobbleOutbox {
               lastAttemptAt: Date.now(),
               lastError: failure.lastError,
               authFailure: failure.authFailure,
+              rejected: failure.rejected,
             },
           ];
         });
-        this.state = next.slice(-500);
-        remaining = this.state.length;
+        this.state = next.slice(-OUTBOX_LIMIT);
+        // Plays Last.fm refused are kept for the user to see but aren't
+        // waiting their turn, so they don't count against sending new ones.
+        remaining = this.state.filter((item) => !item.rejected).length;
         await this.persist();
       });
     }
@@ -303,6 +376,7 @@ export class LastfmScrobbleOutbox {
   // electron/recovery.ts), so a crash mid-write can only ever lose the temp
   // file, never truncate or corrupt the last good outbox on disk.
   private async persist(): Promise<void> {
+    if (this.unreadable) return;
     await mkdir(dirname(this.file), { recursive: true });
     const payload = JSON.stringify(this.state, null, 2);
     const tmp = `${this.file}.tmp-${process.pid}-${++this.writeSeq}`;
@@ -399,10 +473,13 @@ async function lastfmPost<T>(params: LastfmParams): Promise<T> {
   for (const [key, value] of Object.entries({ ...params, format: 'json' })) {
     if (value !== null && value !== undefined) body.set(key, String(value));
   }
+  // A request that hangs would hold its plays in `sending` and every later
+  // flush behind it; the timeout surfaces as a retryable error.
   const response = await fetch(LASTFM_API_ROOT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
     body,
+    signal: AbortSignal.timeout(LASTFM_REQUEST_TIMEOUT_MS),
   });
   const text = await response.text();
   let data: { error?: number | string; message?: string };
@@ -436,11 +513,22 @@ export function isLastfmAuthFailure(err: unknown): boolean {
   return err instanceof LastfmApiError && err.authFailure;
 }
 
-// Authentication Failed / Invalid session key / Invalid API key: the
-// credentials themselves are bad, not the service. Retrying with the same
-// session key can never succeed — every scrobble will fail identically
-// until the user reconnects — so these are terminal, not transient.
-const LASTFM_AUTH_FAILURE_CODES = new Set([4, 9, 10]);
+// Authentication Failed / Invalid session key / Invalid API key / API key
+// suspended: the credentials themselves are bad, not the service. Retrying
+// with the same session key can never succeed — every scrobble will fail
+// identically until the user reconnects — so these are terminal, not
+// transient.
+const LASTFM_AUTH_FAILURE_CODES = new Set([4, 9, 10, 26]);
+// Invalid parameters / invalid resource: this play itself is malformed, and
+// no later attempt will change that.
+const LASTFM_PERMANENT_REJECTION_CODES = new Set([6, 7]);
+
+// Whether Last.fm refused this one play for a reason that will never change.
+// Anything else that isn't retryable (an invalid signature, an unexpected
+// client error) is kept and shown instead of being dropped.
+export function isPermanentLastfmRejection(err: unknown): boolean {
+  return err instanceof LastfmApiError && err.code !== null && LASTFM_PERMANENT_REJECTION_CODES.has(err.code);
+}
 
 function isAuthLastfmFailure(code: number | null): boolean {
   return code !== null && LASTFM_AUTH_FAILURE_CODES.has(code);
@@ -449,9 +537,13 @@ function isAuthLastfmFailure(code: number | null): boolean {
 function isRetryableLastfmFailure(code: number | null, status: number): boolean {
   if (code !== null) {
     if (LASTFM_AUTH_FAILURE_CODES.has(code)) return false;
-    return code === 11 || code === 16 || code === 29;
+    // 8 is "the backend failed, try again", 11 and 16 are the service being
+    // offline or temporarily unavailable, 29 is the rate limit.
+    return code === 8 || code === 11 || code === 16 || code === 29;
   }
-  return status === 200 || status === 408 || status === 429 || status >= 500;
+  // No Last.fm error in the body: a proxy page, a dropped connection. Only a
+  // definite client error says the request itself is wrong.
+  return status !== 400 && status !== 404 && status !== 422;
 }
 
 function normalizeLastfmErrorCode(value: number | string | null | undefined): number | null {
@@ -517,6 +609,7 @@ function normalizeCachedScrobble(item: unknown): LastfmCachedScrobble | null {
     // treated as "unknown, not currently known to be an auth problem",
     // which is exactly right: the next flush attempt re-classifies it.
     authFailure: raw.authFailure === true,
+    rejected: raw.rejected === true,
   };
 }
 

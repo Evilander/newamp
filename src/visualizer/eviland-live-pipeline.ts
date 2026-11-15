@@ -35,7 +35,10 @@ import { createReactorOverlay } from './reactor-overlay';
 import { createSceneOverlay } from './scene-overlay';
 import { createFluidSim, createFluidForceSource, dyeDissipationFromFrame } from './eviland-fluid';
 import { createDynamics, evalConfig, sectionSeedFor, type OperatorConfig, type PaletteConfig, type WaveOverride } from './eviland-operators';
-import { sourceProgram, sourceTarget, disposeSourceTarget, type SourceTarget } from './eviland-gl';
+import {
+  sourceProgram, sourceTarget, disposeSourceTarget, watchContextLoss, createRampTable, updateRampTable, oklchRampAt,
+  rampGlsl, DITHER_GLSL, DITHER_FRAME_WRAP, SHOULDER_GLSL, RAMP_STEPS, type SourceTarget,
+} from './eviland-gl';
 import { applyScoreCues } from './eviland-conductor';
 import { NOISE_GLSL, MORPH_GLSL } from './eviland-morph';
 
@@ -96,8 +99,24 @@ export interface EvilandLivePipeline {
   advance(dtMs: number): void;
   /** Lit fraction of the last composed frame (smoke/diagnostics; reads back). */
   sample(): number;
+  /**
+   * True from a WebGL context loss until the pipeline is rebuilt. Everything
+   * it holds (programs, targets, fluid, chemistry) died with the context, so
+   * the parent builds a new pipeline once the context is restored.
+   */
+  contextLost(): boolean;
   dispose(): void;
 }
+
+export interface LivePipelineHooks {
+  /** The GL context was lost: stop painting and tell the parent. */
+  onContextLost?(): void;
+  /** The context is back; the pipeline cannot revive itself, so rebuild it. */
+  onContextRestored?(): void;
+}
+
+// Samples per segment of the grade's closed colour wheel (four segments).
+const WHEEL_STEPS = 8;
 
 // Pass A (dynamics): bends the feedback image along the simulated fluid and
 // the look's morph species, and folds dye into it. Pass B (grade): palette +
@@ -107,12 +126,35 @@ precision highp float;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_image, u_velocity, u_dye;
-uniform vec3 u_dark, u_accent, u_light, u_bg;
+uniform vec3 u_bg;
 uniform float u_dt, u_fluid, u_dyeMix, u_grade, u_bloom, u_gain, u_saturation;
 uniform float u_morph, u_morphAmt, u_morphScale, u_time, u_aspect;
+uniform float u_frame, u_dither;
 ${NOISE_GLSL}
 ${MORPH_GLSL}
+${DITHER_GLSL}
+${SHOULDER_GLSL}
+// The palette laid out in OKLCh (see eviland-gl.ts): u_ramp runs dark -> accent
+// -> light, u_wheel runs dark -> accent -> light -> (accent2 or the midpoint of
+// light and dark) -> dark. Mixing the roles in sRGB went through grey between
+// any two saturated colours.
+${rampGlsl('rampValue', 'u_ramp', 2 * RAMP_STEPS + 1)}
+${rampGlsl('rampWheel', 'u_wheel', 4 * WHEEL_STEPS + 1)}
 vec3 unit(vec3 c) { return c / max(0.001, max(c.r, max(c.g, c.b))); }
+// Brightness here is the peak channel, which is not what the eye reads: a pure
+// blue and a pure yellow at the same peak differ about thirteenfold in
+// luminance, so a palette whose hue travels would swing in brightness with
+// the hue. Pull the unit-peak tint's luminance part of the way toward a common
+// level (down for yellows, up for blues), and never past the peak's headroom.
+// A cut fades out as the peak nears full: the brightest pixels of every
+// palette still reach their full colour, where a flat 0.8 would hold any
+// bright tint (white, yellow, cyan) at about 204/255 however hard it is driven.
+vec3 evenLuminance(vec3 tint, float peak) {
+  float lum = dot(tint, vec3(0.2126, 0.7152, 0.0722));
+  float scale = clamp(sqrt(0.45 / max(lum, 0.05)), 0.8, 1.5);
+  if (scale < 1.0) scale = mix(scale, 1.0, smoothstep(0.6, 1.0, peak));
+  return tint * min(scale, max(1.0, 1.0 / max(peak, 0.001)));
+}
 // Two readings of the preset's colour, both brightness-preserving:
 //  - by saturation: saturated pixels land between dark and accent, washed-out
 //    ones between accent and light (greys have no hue to go by);
@@ -125,16 +167,13 @@ vec3 grade(vec3 c) {
   float peak = max(c.r, max(c.g, c.b));
   float sat = (peak - min(c.r, min(c.g, c.b))) / max(peak, 0.001);
   float position = clamp(dot(c, vec3(0.22, 0.55, 0.23)) / max(peak, 0.001), 0.0, 1.0);
-  vec3 byValue = position < 0.55 ? mix(u_dark, u_accent, position / 0.55)
-    : mix(u_accent, u_light, (position - 0.55) / 0.45);
+  vec3 byValue = rampValue(position < 0.55 ? position / 0.55 * 0.5 : 0.5 + (position - 0.55) / 0.45 * 0.5);
   // atan(0, 0) is undefined; greys carry no hue and take the value reading.
   vec2 iq = vec2(dot(c, vec3(0.596, -0.274, -0.322)), dot(c, vec3(0.211, -0.523, 0.312)));
   float hue = dot(iq, iq) > 1e-10 ? fract(atan(iq.y, iq.x) / 6.28318530718) : 0.0;
-  vec3 dark = unit(u_dark);
-  vec3 byHue = hue < 0.3333 ? mix(dark, u_accent, hue * 3.0)
-    : hue < 0.6667 ? mix(u_accent, u_light, hue * 3.0 - 1.0)
-    : mix(u_light, dark, hue * 3.0 - 2.0);
-  vec3 tint = mix(unit(byValue), unit(byHue), smoothstep(0.2, 0.55, sat));
+  // Thirds of the hue circle: dark -> accent, accent -> light, light -> back to dark.
+  vec3 byHue = rampWheel(hue < 0.6667 ? hue * 0.75 : 0.5 + (hue - 0.6667) * 1.5);
+  vec3 tint = evenLuminance(mix(unit(byValue), unit(byHue), smoothstep(0.2, 0.55, sat)), peak);
   return mix(u_bg * 0.08, tint * peak, smoothstep(0.0, 0.08, peak));
 }
 void main() {
@@ -168,7 +207,16 @@ void main() {
   // Score cues: grey and dim into a build, black for the held beat, flash on
   // the drop. RGB scales together, so a flash brightens without bleaching.
   c = mix(vec3(dot(c, vec3(0.299, 0.587, 0.114))), c, u_saturation) * u_gain;
-  o = vec4(c, 1.0);
+  // A gain past 1 (the drop flash goes to 2.5) would clip per channel and
+  // drift toward yellow or white. The engine's shoulder takes over as the gain
+  // rises, so the flash keeps its colour; at gain 1 the pass is untouched.
+  c = mix(c, hotShoulder(c), smoothstep(1.0, 1.3, u_gain));
+  // The preset's feedback is 8-bit and this pass writes 8-bit again. One step
+  // of triangular grain, faded out toward black so black stays still, keeps a
+  // slow gradient from landing on a few levels. Only on the final write: the
+  // dynamics pass feeds the feedback loop and must not add noise to it.
+  float amount = u_dither * smoothstep(0.0, 2.0 / 255.0, max(c.r, max(c.g, c.b)));
+  o = vec4(c + ditherTri(gl_FragCoord.xy, u_frame) * amount / 255.0, 1.0);
 }`;
 
 // Straight-alpha 2D canvas → premultiplied contribution. 2D canvases upload
@@ -193,6 +241,7 @@ const SAMPLE_H = 27;
 export function createEvilandLivePipeline(
   visualizer: unknown,
   quality: 'high' | 'medium' | 'low',
+  hooks: LivePipelineHooks = {},
 ): EvilandLivePipeline | null {
   const found = (visualizer as { renderer?: MilkdropFeedbackHost } | null)?.renderer;
   if (
@@ -216,10 +265,45 @@ export function createEvilandLivePipeline(
   const uniformsOf = <N extends string>(program: WebGLProgram, names: readonly N[]): Record<N, WebGLUniformLocation | null> =>
     Object.fromEntries(names.map((name) => [name, gl.getUniformLocation(program, `u_${name}`)])) as Record<N, WebGLUniformLocation | null>;
   const composeUni = uniformsOf(compose, [
-    'image', 'velocity', 'dye', 'dark', 'accent', 'light', 'bg', 'dt', 'fluid', 'dyeMix', 'grade', 'bloom', 'gain', 'saturation',
-    'morph', 'morphAmt', 'morphScale', 'time', 'aspect',
+    'image', 'velocity', 'dye', 'ramp', 'wheel', 'bg', 'dt', 'fluid', 'dyeMix', 'grade', 'bloom', 'gain', 'saturation',
+    'morph', 'morphAmt', 'morphScale', 'time', 'aspect', 'frame', 'dither',
   ] as const);
   const stampUni = uniformsOf(stamp, ['src', 'gain', 'flipY', 'useAlpha'] as const);
+
+  // The palette as OKLCh lines for the grade, rebuilt only when its colours
+  // change: dark -> accent -> light, and the closed wheel through a fourth
+  // stop (the second accent, or the middle of light and dark without one).
+  const valueRamp = createRampTable(3);
+  const wheelRamp = createRampTable(5, WHEEL_STEPS);
+  const rampStops = new Float64Array(9);
+  const wheelStops = new Float64Array(15);
+  // The middle of light and dark is a full OKLCh conversion, so it is looked
+  // up only when one of those six numbers moves, not once per frame.
+  const midKey = new Float64Array(6).fill(NaN);
+  const midStop = new Float64Array(3);
+  function lightDarkMiddle(palette: PaletteConfig): Float64Array {
+    let same = true;
+    for (let i = 0; i < 3; i++) {
+      if (midKey[i] !== palette.light[i] || midKey[i + 3] !== palette.dark[i]) { same = false; break; }
+    }
+    if (!same) {
+      midKey.set(palette.light, 0);
+      midKey.set(palette.dark, 3);
+      midStop.set(oklchRampAt(midKey, 0.5));
+    }
+    return midStop;
+  }
+  function updateGradeRamps(palette: PaletteConfig): void {
+    rampStops.set(palette.dark, 0);
+    rampStops.set(palette.accent, 3);
+    rampStops.set(palette.light, 6);
+    updateRampTable(valueRamp, rampStops);
+    wheelStops.set(rampStops, 0);
+    wheelStops.set(palette.accent2 ?? lightDarkMiddle(palette), 9);
+    wheelStops.set(palette.dark, 12);
+    updateRampTable(wheelRamp, wheelStops);
+  }
+  let frameCount = 0;
 
   // 'low' keeps MilkDrop + reactor events + the grade and skips every
   // full-screen source, matching the old stack's weak-GPU floor.
@@ -354,6 +438,7 @@ export function createEvilandLivePipeline(
     gl.uniform1f(composeUni.bloom, 0);
     gl.uniform1f(composeUni.gain, 1);
     gl.uniform1f(composeUni.saturation, 1);
+    gl.uniform1f(composeUni.dither, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
@@ -370,7 +455,7 @@ export function createEvilandLivePipeline(
       gl.bindTexture(gl.TEXTURE_2D, reactorTexture);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     }
-    reactor.render(frame, palette, dt * 1000);
+    reactor.render(frame, palette, dt * 1000, dyn.stereoSpread);
     beginFullscreen(h.targetFrameBuffer, h.texsizeX, h.texsizeY);
     gl.useProgram(stamp);
     gl.activeTexture(gl.TEXTURE0);
@@ -403,11 +488,33 @@ export function createEvilandLivePipeline(
     gl.uniform1f(composeUni.bloom, Math.max(0, dyn.bloom));
     gl.uniform1f(composeUni.gain, gain);
     gl.uniform1f(composeUni.saturation, saturation);
-    for (const name of ['dark', 'accent', 'light', 'bg'] as const) gl.uniform3fv(composeUni[name], current.palette[name]);
+    updateGradeRamps(current.palette);
+    gl.uniform3fv(composeUni.ramp, valueRamp.values);
+    gl.uniform3fv(composeUni.wheel, wheelRamp.values);
+    gl.uniform3fv(composeUni.bg, current.palette.bg);
+    gl.uniform1f(composeUni.dither, 1);
+    gl.uniform1f(composeUni.frame, frameCount++ % DITHER_FRAME_WRAP);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
+  // A lost context takes every handle this pipeline owns with it, and
+  // Butterchurn's renderer too. Nothing is drawn until the parent builds a new
+  // pipeline on the restored context; the flash guard's own hold is what makes
+  // the browser restore the context at all, this only has to notice.
+  let lost = false;
+  let reportedFailure = false;
+  const stopWatching = watchContextLoss(gl.canvas as HTMLCanvasElement, {
+    onLost() {
+      lost = true;
+      hooks.onContextLost?.();
+    },
+    onRestored() {
+      hooks.onContextRestored?.();
+    },
+  });
+
   host.renderToScreen = function (this: MilkdropFeedbackHost) {
+    if (lost || gl.isContextLost()) return;
     const current = state;
     if (disposed || !current || pendingDt <= 0) {
       originalScreen.call(this);
@@ -428,94 +535,122 @@ export function createEvilandLivePipeline(
     const restoreSamplers = (): void => samplers.forEach((sampler, unit) => gl.bindSampler(unit, sampler));
     const savedVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING) as WebGLVertexArrayObject | null;
 
-    const cues = current.frame.score;
-    const frame: EvilandFrame = {
-      ...current.frame,
-      onsets,
-      score: cues ? { ...cues, impactStart: impactStartPending } : undefined,
-    };
-    onsets = [];
-    impactStartPending = false;
-    evalConfig(current.config, frame, sectionSeedFor(frame.sectionId), dyn, dt * 1000);
-    // MilkDrop's own warp isn't ours to bend, so in Live the cues act through
-    // what is: the fluid (inward pull, then the shockwave), how much of the
-    // scene is laid in, the reactor events, and the final grade.
-    const cueGain = applyScoreCues(dyn, frame.score);
-    const outputGain = cueGain.output;
-    const outputSaturation = cueGain.saturation;
-    const sourceFade = frame.score ? (1 - 0.5 * frame.score.anticipation) * (1 - frame.score.blackout) : 1;
-
-    const upcoming = current.next ?? current.config._to ?? current.config;
-    const simulation = upcoming.composition?.simulation;
-    if (quality !== 'low' && (simulation === 'reaction-diffusion' || current.config.composition?.simulation === 'reaction-diffusion')) {
-      if (!chemistry && !chemistryFailed) {
-        chemistry = createReactionDiffusion(gl, hashSeed(upcoming.seed ?? current.seed), chemistryPrograms);
-        chemistryPrograms = null;
-        chemistryFailed = !chemistry;
-      }
-    }
-    if (quality !== 'low' && (simulation === 'physarum' || current.config.composition?.simulation === 'physarum')) {
-      if (!mould && !mouldFailed) {
-        mould = createPhysarum(gl, hashSeed(upcoming.seed ?? current.seed), quality, mouldPrograms);
-        mouldPrograms = null;
-        mouldFailed = !mould;
-      }
-    }
-
-    gl.bindVertexArray(vao);
-    fluid?.step(dt, forceSource.forces(frame, current.palette, dt), {
-      vorticity: dyn.vorticity,
-      dissipation: 0.985,
-      dyeDissipation: Math.max(0.6, Math.min(1, dyeDissipationFromFrame(frame) + dyn.dyeDissipation)),
-    });
-    applyFluid(this, dt);
-
-    const composition = current.config.composition;
-    const target = { framebuffer: this.targetFrameBuffer, width: this.texsizeX, height: this.texsizeY };
-    if (composition?.scene && scenes) {
-      scenes.setSeedKey(current.seed);
-      scenes.setScene(composition.scene);
-      scenes.render(frame, current.palette, dt * 1000, {
-        ...target,
-        // Per-frame coverage that converges on `density` at any frame rate.
-        opacity: (1 - Math.pow(1 - Math.max(0, Math.min(0.9, composition.density)), dt * 60)) * sourceFade,
-        contrast: composition.contrast,
-      });
-    }
-    if (composition?.simulation === 'reaction-diffusion' && quality !== 'low') {
-      // The chemistry nucleates on last frame's image, so bright geometry
-      // grows patterns that then re-enter the feedback.
-      chemistry?.render(frame, current.palette, dt * 1000, this.prevTexture, { ...target, opacity: composition.density });
-    }
-    if (composition?.simulation === 'physarum' && quality !== 'low') {
-      // The mould senses last frame's image, so it crawls along the preset.
-      mould?.render(frame, current.palette, dt * 1000, this.prevTexture, { ...target, opacity: composition.density * sourceFade });
-    }
-    if (composition?.emitters !== 'off') stampReactor(this, frame, current.palette, dt);
-
-    // The preset's composite samples the feedback with mipmapped samplers.
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.targetTexture);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.bindVertexArray(savedVao);
-    restoreSamplers();
-
-    // The grade pass owns the backbuffer, so skip Butterchurn's own
-    // compTexture → screen blit for this call.
-    const output = this.outputShader;
-    const outputDraw = output?.renderQuadTexture;
-    if (output) output.renderQuadTexture = () => {};
+    // Any pass can throw (a dead handle, a driver error). Butterchurn's render
+    // loop swallows the exception, so without this the samplers and the
+    // vertex array would stay as this pass left them and every following frame
+    // would come out garbled or black with nothing logged. State is always
+    // handed back; the first failure is logged, and the frame falls back to the
+    // preset as MilkDrop draws it rather than going black.
+    let output: MilkdropFeedbackHost['outputShader'];
+    let outputDraw: ((texture: WebGLTexture) => void) | undefined;
+    let compDrawn = false;
+    let graded = false;
     try {
-      originalScreen.call(this);
-    } finally {
-      if (output && outputDraw) output.renderQuadTexture = outputDraw;
-    }
+      const cues = current.frame.score;
+      const frame: EvilandFrame = {
+        ...current.frame,
+        onsets,
+        score: cues ? { ...cues, impactStart: impactStartPending } : undefined,
+      };
+      onsets = [];
+      impactStartPending = false;
+      evalConfig(current.config, frame, sectionSeedFor(frame.sectionId), dyn, dt * 1000);
+      // MilkDrop's own warp isn't ours to bend, so in Live the cues act through
+      // what is: the fluid (inward pull, then the shockwave), how much of the
+      // scene is laid in, the reactor events, and the final grade.
+      const cueGain = applyScoreCues(dyn, frame.score);
+      const outputGain = cueGain.output;
+      const outputSaturation = cueGain.saturation;
+      const sourceFade = frame.score ? (1 - 0.5 * frame.score.anticipation) * (1 - frame.score.blackout) : 1;
 
-    samplers.forEach((_, unit) => gl.bindSampler(unit, null));
-    gradeToScreen(this, current, outputGain, outputSaturation);
-    gl.bindVertexArray(savedVao);
-    gl.activeTexture(gl.TEXTURE0);
-    restoreSamplers();
+      const upcoming = current.next ?? current.config._to ?? current.config;
+      const simulation = upcoming.composition?.simulation;
+      if (quality !== 'low' && (simulation === 'reaction-diffusion' || current.config.composition?.simulation === 'reaction-diffusion')) {
+        if (!chemistry && !chemistryFailed) {
+          chemistry = createReactionDiffusion(gl, hashSeed(upcoming.seed ?? current.seed), chemistryPrograms);
+          chemistryPrograms = null;
+          chemistryFailed = !chemistry;
+        }
+      }
+      if (quality !== 'low' && (simulation === 'physarum' || current.config.composition?.simulation === 'physarum')) {
+        if (!mould && !mouldFailed) {
+          mould = createPhysarum(gl, hashSeed(upcoming.seed ?? current.seed), quality, mouldPrograms);
+          mouldPrograms = null;
+          mouldFailed = !mould;
+        }
+      }
+
+      gl.bindVertexArray(vao);
+      fluid?.step(dt, forceSource.forces(frame, current.palette, dt), {
+        vorticity: dyn.vorticity,
+        dissipation: 0.985,
+        dyeDissipation: Math.max(0.6, Math.min(1, dyeDissipationFromFrame(frame) + dyn.dyeDissipation)),
+      });
+      applyFluid(this, dt);
+
+      const composition = current.config.composition;
+      const target = { framebuffer: this.targetFrameBuffer, width: this.texsizeX, height: this.texsizeY };
+      if (composition?.scene && scenes) {
+        scenes.setSeedKey(current.seed);
+        scenes.setScene(composition.scene);
+        scenes.render(frame, current.palette, dt * 1000, {
+          ...target,
+          // Per-frame coverage that converges on `density` at any frame rate.
+          opacity: (1 - Math.pow(1 - Math.max(0, Math.min(0.9, composition.density)), dt * 60)) * sourceFade,
+          contrast: composition.contrast,
+        });
+      }
+      if (composition?.simulation === 'reaction-diffusion' && quality !== 'low') {
+        // The chemistry nucleates on last frame's image, so bright geometry
+        // grows patterns that then re-enter the feedback.
+        chemistry?.render(frame, current.palette, dt * 1000, this.prevTexture, { ...target, opacity: composition.density });
+      }
+      if (composition?.simulation === 'physarum' && quality !== 'low') {
+        // The mould senses last frame's image, so it crawls along the preset.
+        mould?.render(frame, current.palette, dt * 1000, this.prevTexture, { ...target, opacity: composition.density * sourceFade });
+      }
+      if (composition?.emitters !== 'off') stampReactor(this, frame, current.palette, dt);
+
+      // The preset's composite samples the feedback with mipmapped samplers.
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.targetTexture);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      gl.bindVertexArray(savedVao);
+      restoreSamplers();
+
+      // The grade pass owns the backbuffer, so skip Butterchurn's own
+      // compTexture → screen blit for this call.
+      output = this.outputShader;
+      outputDraw = output?.renderQuadTexture;
+      if (output) output.renderQuadTexture = () => {};
+      try {
+        originalScreen.call(this);
+        compDrawn = true;
+      } finally {
+        if (output && outputDraw) output.renderQuadTexture = outputDraw;
+      }
+
+      samplers.forEach((_, unit) => gl.bindSampler(unit, null));
+      gradeToScreen(this, current, outputGain, outputSaturation);
+      graded = true;
+    } catch (err) {
+      if (!reportedFailure) {
+        reportedFailure = true;
+        console.error('[eviland-live] a pass failed; showing the preset ungraded:', err);
+      }
+    } finally {
+      try {
+        gl.bindVertexArray(savedVao);
+        gl.activeTexture(gl.TEXTURE0);
+        restoreSamplers();
+      } catch { /* context lost: nothing left to restore */ }
+    }
+    if (!graded && !gl.isContextLost()) {
+      try {
+        if (!compDrawn) originalScreen.call(this);
+        else outputDraw?.call(output, this.compTexture);
+      } catch { /* already reported */ }
+    }
   };
 
   return {
@@ -532,8 +667,10 @@ export function createEvilandLivePipeline(
       pendingDt = Math.max(0, Math.min(0.1, dtMs / 1000));
     },
 
+    contextLost: () => lost || gl.isContextLost(),
+
     sample() {
-      if (disposed) return 0;
+      if (disposed || lost) return 0;
       if (!sampleTarget) sampleTarget = sourceTarget(gl, SAMPLE_W, SAMPLE_H);
       if (!sampleTarget) return 0;
       const savedVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING) as WebGLVertexArrayObject | null;
@@ -564,6 +701,7 @@ export function createEvilandLivePipeline(
     dispose() {
       if (disposed) return;
       disposed = true;
+      stopWatching();
       host.renderToScreen = originalScreen;
       host.outputFXAA = originalAA;
       for (const [wave, { key, original }] of wrapped) wave[key] = original;

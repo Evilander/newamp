@@ -59,6 +59,11 @@ export interface TagRulePreviewResult {
   references: string[];
   matchCount: number;
   sampleTrackIds: number[];
+  // How many tracks the rule was run against and how many the library has. The
+  // preview looks at an evenly spaced sample of a large library; absent from
+  // the browser stub, which runs nothing.
+  sampledCount?: number;
+  totalCount?: number;
 }
 
 export interface Track {
@@ -1325,6 +1330,8 @@ export interface SupportDiagnostics {
   recoveryEvents: RecoveryEvent[];
   /** The automatic daily copies: how many are kept, when the newest was made, and the folder they live in. */
   dailyBackups: { count: number; newestAt: number | null; folder: string };
+  /** ffmpeg processes running for playback and conversion right now; more than a handful means some were left behind. */
+  liveFfmpegCount?: number;
 }
 
 export interface SupportBackupResult {
@@ -1673,6 +1680,8 @@ export interface NewAmpAPI {
   onPlayerCommand: (cb: (command: PlayerCommand) => void) => () => void;
   onOpenFiles: (cb: (paths: string[]) => void) => () => void;
   onOpenSettings: (cb: () => void) => () => void;
+  /** Main changed settings on its own (File > Add Folder to Library), so a page holding them should read them again. */
+  onSettingsChanged: (cb: () => void) => () => void;
 
   // play-along tabs
   searchGuitarTabs: (query: GuitarTabSearchQuery) => Promise<GuitarTabSearchResult[]>;

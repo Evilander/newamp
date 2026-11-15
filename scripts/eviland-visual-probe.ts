@@ -343,7 +343,7 @@ async function diversity() {
 
   // Under an all-blue palette, how much of a look's light is NOT blue? A scene
   // that brings its own hues fights whatever palette the user picked.
-  const BLUE: PaletteConfig = { bg: [0, 0, 0.02], dark: [0, 0.02, 0.3], accent: [0.05, 0.15, 1], light: [0.45, 0.6, 1] };
+  const BLUE: PaletteConfig = { bg: [0, 0, 0.02], dark: [0, 0.02, 0.3], accent: [0.05, 0.15, 1], light: [0.45, 0.6, 1], accent2: [0.1, 0.4, 1] };
   const offPalette = (px: Uint8Array): number => {
     let stray = 0;
     let total = 0;

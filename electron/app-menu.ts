@@ -13,6 +13,11 @@ export interface AppMenuOptions {
   onPreferences?: () => void;
   onOpenExternal?: (url: string) => void;
   /**
+   * The File menu: Open, Add Folder to Library and Open Recent. Without it the
+   * menu bar has no File menu, so it never carries an entry that does nothing.
+   */
+  files?: { onOpenFiles: () => void; onAddFolder: () => void };
+  /**
    * The Controls menu: the Dock menu's transport in the menu bar. Play/Pause
    * says which it will do. Without it the menu bar has no Controls menu.
    */
@@ -23,8 +28,8 @@ const REPO_URL = 'https://github.com/evilander/newamp';
 
 /**
  * The application menu template. On macOS we install a real menu so Cmd-Q/W/M
- * and clipboard shortcuts work and the app gets a proper "NewAmp" + Edit/View/
- * Window/Help menu. On Windows/Linux we keep the chromeless custom-titlebar
+ * and clipboard shortcuts work and the app gets a proper "NewAmp" + File/Edit/
+ * View/Window/Help menu. On Windows/Linux we keep the chromeless custom-titlebar
  * look by returning an empty template (caller sets the menu to null). Pure —
  * no Electron runtime calls — so it is unit-testable in Node.
  */
@@ -53,6 +58,22 @@ export function buildAppMenuTemplate(
     { type: 'separator' },
     { role: 'togglefullscreen' },
   ];
+  const files = opts.files;
+  // Open Recent is filled in by the system from the documents the app has
+  // reported (app.addRecentDocument) and empties itself with Clear Menu.
+  const fileMenu: MenuItemConstructorOptions[] = files
+    ? [
+        {
+          label: 'File',
+          submenu: [
+            { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: () => files.onOpenFiles() },
+            { label: 'Add Folder to Library…', accelerator: 'CmdOrCtrl+Shift+O', click: () => files.onAddFolder() },
+            { type: 'separator' },
+            { role: 'recentDocuments', submenu: [{ role: 'clearRecentDocuments' }] },
+          ],
+        },
+      ]
+    : [];
   const playback = opts.playback;
   // Previous and Next carry Cmd+Left/Right, the shortcuts the page already
   // reads. A menu key equivalent only fires when the page leaves the key
@@ -91,6 +112,7 @@ export function buildAppMenuTemplate(
         { role: 'quit', label: `Quit ${opts.appName}` },
       ],
     },
+    ...fileMenu,
     { role: 'editMenu' },
     { label: 'View', submenu: viewSubmenu },
     ...controlsMenu,

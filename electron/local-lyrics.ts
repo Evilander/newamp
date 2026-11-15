@@ -1,7 +1,9 @@
-import { stat, readFile } from 'node:fs/promises';
-import { join, parse } from 'node:path';
+import { stat, readFile, readdir } from 'node:fs/promises';
+import { basename, dirname, join, parse } from 'node:path';
 import { parseFile, TimestampFormat, type IAudioMetadata } from 'music-metadata';
 import type { LocalLyricsResult, Track } from '../shared/types.js';
+import { isStorageError } from './read-failure.js';
+import { isTransientIoError } from './recovery.js';
 
 const MAX_LYRICS_BYTES = 512 * 1024;
 
@@ -19,7 +21,7 @@ export async function findSidecarLyricsForTrack(track: LyricTrack): Promise<Loca
   if (!track.path) return null;
   if (!(await isReadableFile(track.path))) return null;
 
-  for (const candidate of localLyricsCandidates(track)) {
+  for (const candidate of await existingSidecarCandidates(localLyricsCandidates(track))) {
     const result = await readLyricsCandidate(candidate);
     if (result) return result;
   }
@@ -27,9 +29,97 @@ export async function findSidecarLyricsForTrack(track: LyricTrack): Promise<Loca
   return null;
 }
 
+// A name that isn't there costs a round trip on a network share, and a track
+// has dozens of candidate names. One listing of each folder answers them all.
+// Nothing is kept once the listing is done, so a file added a moment ago is
+// found; lookups that overlap (the lyrics panel and the tab finder asking
+// about the same track) share one listing. Names are compared the way a Mac
+// volume compares them: case-folded and Unicode-normalized, so "Beyoncé" as
+// typed and as stored are the same.
+//
+// A folder's names, or why they aren't known: the storage failed (nothing can
+// be said about any name in it), or the folder refused to be listed (a folder
+// you may open files in but not list, where a direct look at a name still works).
+type SidecarListing = Map<string, string> | 'storage-failed' | 'refused';
+const sidecarListingsInFlight = new Map<string, Promise<SidecarListing>>();
+
+function sidecarNameKey(name: string): string {
+  return name.normalize('NFC').toLowerCase();
+}
+
+function listSidecarFolder(folder: string): Promise<SidecarListing> {
+  const pending = sidecarListingsInFlight.get(folder);
+  if (pending) return pending;
+  const request = (async (): Promise<SidecarListing> => {
+    const names = new Map<string, string>();
+    try {
+      for (const entry of await readdir(folder)) names.set(sidecarNameKey(entry), entry);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      // No such folder: nothing is there.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return isStorageError(err) ? 'storage-failed' : 'refused';
+    }
+    return names;
+  })().finally(() => sidecarListingsInFlight.delete(folder));
+  sidecarListingsInFlight.set(folder, request);
+  return request;
+}
+
+/**
+ * The candidates that exist, in candidate order, with each name spelled the
+ * way its folder spells it. Reads each folder once instead of testing every
+ * name.
+ */
+export async function existingSidecarCandidates(candidates: string[]): Promise<string[]> {
+  const folders = [...new Set(candidates.map((candidate) => dirname(candidate)))];
+  const listings = new Map<string, SidecarListing>();
+  await Promise.all(folders.map(async (folder) => listings.set(folder, await listSidecarFolder(folder))));
+
+  const out: string[] = [];
+  for (const candidate of candidates) {
+    const folder = dirname(candidate);
+    const listing = listings.get(folder);
+    if (listing === 'refused') {
+      out.push(candidate);
+    } else if (listing instanceof Map) {
+      const actual = listing.get(sidecarNameKey(basename(candidate)));
+      if (actual !== undefined) out.push(join(folder, actual));
+    }
+  }
+  return out;
+}
+
+/**
+ * Text of a sidecar file as its writer meant it. Old rips write Windows-1252
+ * or UTF-16 as often as UTF-8, and decoding those as UTF-8 turns every accent
+ * into a replacement character.
+ */
+export function decodeSidecarText(data: Buffer): string {
+  if (data.length >= 3 && data[0] === 0xef && data[1] === 0xbb && data[2] === 0xbf) {
+    return data.subarray(3).toString('utf8');
+  }
+  if (data.length >= 2 && data[0] === 0xff && data[1] === 0xfe) {
+    return data.subarray(2, 2 + ((data.length - 2) & ~1)).toString('utf16le');
+  }
+  if (data.length >= 2 && data[0] === 0xfe && data[1] === 0xff) {
+    const swapped = Buffer.from(data.subarray(2, 2 + ((data.length - 2) & ~1)));
+    return swapped.swap16().toString('utf16le');
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(data);
+  } catch {
+    try {
+      return new TextDecoder('windows-1252').decode(data);
+    } catch {
+      return data.toString('latin1');
+    }
+  }
+}
+
 // Keyed by path, mtime and size, so a retagged file is read again. Misses are
 // kept too: opening Now Playing on a file with no lyrics should not parse its
-// tags every time.
+// tags every time. A read that failed because of the storage is not a miss
+// and is not kept, so the next look tries the file again.
 const EMBEDDED_CACHE_LIMIT = 64;
 const embeddedCache = new Map<string, LocalLyricsResult | null>();
 
@@ -51,7 +141,13 @@ export async function findEmbeddedLyricsForTrack(track: Pick<Track, 'path'>): Pr
     return hit;
   }
 
-  const result = await readEmbeddedLyrics(track.path);
+  let result: LocalLyricsResult | null;
+  try {
+    result = await readEmbeddedLyrics(track.path);
+  } catch (err) {
+    if (isStorageError(err) || isTransientIoError(err)) return null;
+    result = null;
+  }
   embeddedCache.set(key, result);
   if (embeddedCache.size > EMBEDDED_CACHE_LIMIT) {
     const oldest = embeddedCache.keys().next().value;
@@ -93,8 +189,7 @@ async function readLyricsCandidate(path: string): Promise<LocalLyricsResult | nu
   }
 
   try {
-    const raw = await readFile(path, 'utf8');
-    const text = raw.replace(/^\uFEFF/, '').trim();
+    const text = decodeSidecarText(await readFile(path)).replace(/^\uFEFF/, '').trim();
     if (!text || Buffer.byteLength(text, 'utf8') > Math.max(size * 2, MAX_LYRICS_BYTES)) return null;
     const synced = hasLrcTimestamp(text);
     return {
@@ -117,14 +212,10 @@ interface LyricsText {
 // music-metadata leaves out of common.lyrics.
 const NATIVE_LYRICS_IDS = new Set(['UNSYNCEDLYRICS', 'UNSYNCED LYRICS', 'SYNCEDLYRICS']);
 
+// Throws when the file can't be read or parsed; the caller decides whether
+// that is worth remembering.
 async function readEmbeddedLyrics(path: string): Promise<LocalLyricsResult | null> {
-  let meta: IAudioMetadata;
-  try {
-    meta = await parseFile(path, { duration: false, skipCovers: true });
-  } catch {
-    return null;
-  }
-
+  const meta: IAudioMetadata = await parseFile(path, { duration: false, skipCovers: true });
   const found = pickEmbeddedLyrics(embeddedLyricsTexts(meta));
   if (!found) return null;
   // The panel labels this as local lyrics, same as a sidecar; the path is the audio file.

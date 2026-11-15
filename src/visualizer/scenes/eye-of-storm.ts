@@ -10,6 +10,18 @@ export const eyeOfStorm: SceneDef = {
   speed: f => 0.25 + f.energy * 1.2,
   frag: `
 const float ES_TAU = 6.28318530718;
+// Streak cells round one turn: about 6 per radian, as a whole number so the
+// noise below can repeat exactly.
+const float ES_STREAKS = 38.0;
+
+// Value noise whose lattice repeats every ES_STREAKS cells along x.
+float esWrapNoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  float x0 = mod(i.x, ES_STREAKS), x1 = mod(i.x + 1.0, ES_STREAKS);
+  return mix(mix(hash21(vec2(x0, i.y)), hash21(vec2(x1, i.y)), u.x),
+             mix(hash21(vec2(x0, i.y + 1.0)), hash21(vec2(x1, i.y + 1.0)), u.x), u.y);
+}
 
 vec4 scene(vec2 uv, vec2 p) {
   // 3..7 arms, seed-driven.
@@ -39,8 +51,9 @@ vec4 scene(vec2 uv, vec2 p) {
   float clouds = cloud * (0.4 + armPhase * 0.9) * radialMask;
 
   // Debris streaks — tangential fbm following spiral lines.
-  float streakCoord = spiral * 6.0;
-  float streak = vnoise(vec2(streakCoord, r * 12.0 - spin * 2.0));
+  // The angle jumps by a full turn at the negative x axis, so the noise along
+  // it has to repeat after one turn (ES_STREAKS cells) or it leaves a seam.
+  float streak = esWrapNoise(vec2(spiral / ES_TAU * ES_STREAKS, r * 12.0 - spin * 2.0));
   streak = smoothstep(0.55, 1.0, streak) * radialMask;
   clouds += streak * (0.4 + u_bass * 0.6);
 
@@ -58,7 +71,7 @@ vec4 scene(vec2 uv, vec2 p) {
     float ld = length(p - vec2(lx, ly));
     lightning += exp(-ld * 14.0) * step(0.55, u_snarePulse) * hash11(seed + 3.3);
   }
-  col += vec3(1.0) * lightning * 0.6 * radialMask;
+  col += mix(u_light, vec3(1.0), 0.35) * lightning * 0.6 * radialMask;
 
   // The eye itself — calm dark, slight rim halo.
   float inEye = smoothstep(eyeR + 0.02, eyeR - 0.02, r);
@@ -74,7 +87,7 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Hat sparkles in the cloud body.
   float sg = hash21(floor(uv * 200.0) + floor(u_globalTime * 30.0));
-  col += vec3(1.0) * step(0.995, sg) * radialMask * u_hatPulse * 0.5;
+  col += mix(u_light, vec3(1.0), 0.35) * step(0.995, sg) * radialMask * u_hatPulse * 0.5;
 
   float alpha = clamp(dot(col, vec3(0.55)) + rim * 0.4 + lightning * 0.5, 0.0, 0.78);
   return vec4(col, alpha);

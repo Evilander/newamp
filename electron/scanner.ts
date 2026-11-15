@@ -8,34 +8,9 @@ import type { ScanProgress } from '../shared/types.js';
 import type { TrackTagExtras } from '../shared/album-identity.js';
 import { runTagBackfill, type TagBackfillControl } from './album-identity-backfill.js';
 import { chooseFolderArt, isDiscFolderName, isFolderArtImage, type FolderImage, type FolderListing } from './folder-art.js';
-import { isSkippedLibraryFile, isSkippedLibraryFolder } from './library-skip.js';
+import { AUDIO_EXTS, isSkippedLibraryFile, isSkippedLibraryFolder } from './library-skip.js';
 import { whenPlaybackFed } from './playback-io.js';
-
-const AUDIO_EXTS = new Set([
-  '.mp3',
-  '.m4a',
-  '.m4b',
-  '.mp4',
-  '.aac',
-  '.flac',
-  '.ogg',
-  '.oga',
-  '.opus',
-  '.wav',
-  '.wma',
-  '.alac',
-  '.aiff',
-  '.aif',
-  '.dsf',
-  '.dff',
-  '.ape',
-  '.wv',
-  '.mpc',
-  '.tta',
-  '.mka',
-  '.ac3',
-  '.dts',
-]);
+import { isStorageError } from './read-failure.js';
 
 // Containers whose extension can't say lossy from lossless. A row that has
 // never had its codec read is read again once, even if the file is unchanged.
@@ -52,6 +27,13 @@ const DISCOVERY_CONCURRENCY = 4;
 const DISCOVERY_PROGRESS_INTERVAL = 200;
 const METADATA_BATCH_SIZE = 128;
 const METADATA_CONCURRENCY = 8;
+// Files of one folder stat'ed at once. A folder can hold hundreds, and every
+// stat in flight holds one of the few threads the file system calls share with
+// the audio the player is reading.
+const STAT_CONCURRENCY = 8;
+// Folder art images kept in memory at once. Tracks are read folder by folder,
+// so an image is only wanted while its folder's tracks are.
+const FOLDER_ART_CACHE_SIZE = 16;
 
 patchTokenizerNegativeIgnore();
 
@@ -95,6 +77,8 @@ async function* walk(root: string, report: WalkReport = { reachable: false, unre
   const stack: string[] = [root];
   while (stack.length) {
     const dir = stack.pop()!;
+    // The walk's reads come second to a stream that is short of audio.
+    await whenPlaybackFed();
     let entries: import('node:fs').Dirent[];
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
@@ -115,7 +99,16 @@ async function* walk(root: string, report: WalkReport = { reachable: false, unre
     }
     // A folder's files are stat'ed together rather than one after another: on
     // a network share each stat is a round trip.
-    const stats = await Promise.all(files.map((full) => fs.stat(full).catch(() => null)));
+    let statFailed = false;
+    const stats = await pMap(files, STAT_CONCURRENCY, (full) =>
+      fs.stat(full).catch((err: unknown) => {
+        // A timed-out stat says nothing about the file. Its folder is reported
+        // as unreadable so a file missing from this walk isn't taken as gone.
+        if (isStorageError(err)) statFailed = true;
+        return null;
+      }),
+    );
+    if (statFailed) report.unreadable.push(dir);
     for (let i = 0; i < files.length; i += 1) {
       const stat = stats[i];
       if (stat) yield { full: files[i], size: stat.size, mtime: stat.mtimeMs, dev: Number(stat.dev) };
@@ -128,6 +121,7 @@ async function* walk(root: string, report: WalkReport = { reachable: false, unre
 type FolderListings = Map<string, Promise<FolderListing | null>>;
 
 async function listFolder(dir: string): Promise<FolderListing | null> {
+  await whenPlaybackFed();
   let entries: import('node:fs').Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -135,18 +129,23 @@ async function listFolder(dir: string): Promise<FolderListing | null> {
     return null;
   }
   const subdirs: string[] = [];
-  const images: FolderImage[] = [];
+  const candidates: string[] = [];
   for (const e of entries) {
     if (e.isDirectory()) {
-      subdirs.push(e.name);
+      // The folders the walk doesn't enter, and a NAS's index folders
+      // (@eaDir), don't make a folder of tracks into something else.
+      if (!isSkippedLibraryFolder(e.name, basename(dir))) subdirs.push(e.name);
     } else if (isFolderArtImage(e.name)) {
-      try {
-        const stat = await fs.stat(join(dir, e.name));
-        if (stat.isFile()) images.push({ name: e.name, size: stat.size });
-      } catch {
-        /* a dangling link or a file that just went */
-      }
+      candidates.push(e.name);
     }
+  }
+  const stats = await pMap(candidates, STAT_CONCURRENCY, (name) => fs.stat(join(dir, name)).catch(() => null));
+  const images: FolderImage[] = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const stat = stats[i];
+    // An empty file is no cover, and chosen anyway it would be read to nothing
+    // on every scan.
+    if (stat?.isFile() && stat.size > 0) images.push({ name: candidates[i]!, size: stat.size });
   }
   return { images, subdirs };
 }
@@ -226,6 +225,11 @@ async function readMeta(
     genre = c.genre?.[0] ?? null;
     duration = meta.format.duration ?? null;
     bitrate = meta.format.bitrate ? Math.round(meta.format.bitrate) : null;
+    // The parser was told not to read a raw AAC stream through (parseMetadata),
+    // so its bitrate is that of the first frame, not the average. Neither it nor
+    // a length worked out from it is kept: a VBR file would get a confident
+    // wrong number.
+    if (duration === null && extname(full).toLowerCase() === '.aac') bitrate = null;
     sampleRate = meta.format.sampleRate ?? null;
     // A BPM tag of 0 is "not set". Stored as a tempo it matched every "slow" filter.
     bpm = Number.isFinite(c.bpm) && Number(c.bpm) > 0 ? Number(c.bpm) : null;
@@ -299,25 +303,36 @@ async function readMeta(
 // a long library scan can hold for minutes). Null when the file isn't there,
 // or isn't one a scan would read: a CUE sheet can name any file, and the
 // library serves what it holds to the player.
-export async function readTrackFile(path: string): Promise<IncomingTrack | null> {
+// With `rethrowStorageErrors` a read that failed for a reason other than the
+// file (a share that timed out, a permission not granted yet, no descriptors
+// left) is thrown instead, so the caller can tell it from a file that won't
+// parse. A file that is simply gone still comes back null.
+export async function readTrackFile(
+  path: string,
+  options: { rethrowStorageErrors?: boolean } = {},
+): Promise<IncomingTrack | null> {
   if (!isAudioPath(path) || isSkippedLibraryFile(basename(path))) return null;
   try {
     const stat = await fs.stat(path);
     if (!stat.isFile()) return null;
     return await readMeta(path, stat.size, stat.mtimeMs, Number(stat.dev));
-  } catch {
+  } catch (err) {
+    if (options.rethrowStorageErrors && isTransientReadError(err) && (err as { code?: unknown }).code !== 'ENOENT') throw err;
     return null;
   }
 }
 
 // Only the tags the album grouping needs, for the backfill that gives rows
 // scanned before those tags were stored their values. Null when the file will
-// not parse.
+// not parse. A read that failed for a reason other than the file (the storage
+// timing out, a permission not granted yet) is thrown instead: the file may
+// parse fine next time, and the caller must not take it for one that never will.
 export async function readTagExtras(path: string): Promise<TrackTagExtras | null> {
   try {
     const meta = await parseFile(path, TAGS_ONLY_OPTIONS);
     return tagExtras(meta.common);
-  } catch {
+  } catch (err) {
+    if (isTransientReadError(err) && (err as { code?: unknown }).code !== 'ENOENT') throw err;
     return null;
   }
 }
@@ -331,6 +346,7 @@ async function readFolderArtFile(dir: string): Promise<ArtBlob | null> {
 async function readArtBlob(path: string): Promise<ArtBlob | null> {
   try {
     const data = await fs.readFile(path);
+    if (!data.length) return null;
     return { mime: mimeFromExt(path), data };
   } catch {
     return null;
@@ -338,7 +354,11 @@ async function readArtBlob(path: string): Promise<ArtBlob | null> {
 }
 
 async function parseMetadata(full: string, codecOnly: boolean): Promise<IAudioMetadata> {
-  return parseFile(full, codecOnly ? CODEC_PROBE_OPTIONS : METADATA_OPTIONS);
+  const options = codecOnly ? CODEC_PROBE_OPTIONS : METADATA_OPTIONS;
+  // A raw AAC stream has no header that says how long it is, so asking for a
+  // duration reads every frame of the file, which on a network share is
+  // thousands of small reads per track. Its length is left unset.
+  return parseFile(full, extname(full).toLowerCase() === '.aac' ? { ...options, duration: false } : options);
 }
 
 function fallbackTrack(full: string, size: number, mtime: number, dev: number): IncomingTrack {
@@ -405,6 +425,9 @@ export class Scanner {
     if (this.backfillTimer) clearTimeout(this.backfillTimer);
     this.backfillTimer = setTimeout(() => {
       this.backfillTimer = null;
+      // A scan that is still reading starts it when it ends (runNow); two
+      // sets of reads at once is what the share was already slow under.
+      if (this.running) return;
       void this.startTagBackfill();
     }, BACKFILL_IDLE_DELAY_MS);
     this.backfillTimer.unref?.();
@@ -457,6 +480,8 @@ export class Scanner {
     const startedAt = Date.now();
     let parsed = 0;
     let skipped = 0;
+    let scanned = 0;
+    let finished = false;
     // The scan groups the albums itself when it ends; its batches do not.
     this.library.holdRegroup();
     // A cancelled scan still ends: the banner and the list refresh wait for a
@@ -512,7 +537,6 @@ export class Scanner {
       this.library.markUnfoundTracksMissing(walkedRoots, found, unreadableFolders);
 
       const total = discovered.length;
-      let scanned = 0;
       const folderArtPathCache = new Map<string, Promise<string | null>>();
       const folderListings: FolderListings = new Map();
       const folderArtBlobCache = new Map<string, Promise<ArtBlob | null>>();
@@ -533,6 +557,12 @@ export class Scanner {
         if (!cached) {
           cached = readArtBlob(artPath);
           folderArtBlobCache.set(artPath, cached);
+          // Oldest first: the tracks of a folder are read together, so an
+          // older image is no longer wanted and every cover of a library held
+          // until the scan ended was gigabytes.
+          if (folderArtBlobCache.size > FOLDER_ART_CACHE_SIZE) {
+            folderArtBlobCache.delete(folderArtBlobCache.keys().next().value!);
+          }
         }
         return cached;
       };
@@ -607,11 +637,18 @@ export class Scanner {
         console.warn(`[newamp] album grouping failed: ${errorMessage(err)}`);
       }
       this.onProgress({ scanned: total, total, current: '', done: true, startedAt, parsed, skipped });
-      void this.startTagBackfill();
+      finished = true;
+    } catch (err) {
+      // A scan that dies part-way (a full disk, a closed store) still ends for
+      // the banner, which would otherwise sit on "Scanning" for good.
+      console.warn(`[newamp] scan failed: ${errorMessage(err)}`);
+      reportCancelled(scanned);
+      throw err;
     } finally {
       this.running = false;
       this.library.releaseRegroup();
     }
+    if (finished) void this.startTagBackfill();
   }
 }
 
@@ -647,27 +684,17 @@ async function metadataRefresh(
   return null;
 }
 
-// Errors from the storage rather than the file: a network share that timed
-// out or dropped, a drive that is busy or went away, a file deleted after the
-// walk listed it.
-const TRANSIENT_READ_ERRORS = new Set([
-  'ETIMEDOUT',
-  'EIO',
-  'EAGAIN',
-  'EBUSY',
-  'ESTALE',
-  'ECONNRESET',
-  'ENOTCONN',
-  'EHOSTDOWN',
-  'EHOSTUNREACH',
-  'ENETDOWN',
-  'ENETUNREACH',
-  'ENOENT',
-]);
+// Errors that say nothing about the file's contents: from the storage, a file
+// deleted after the walk listed it, a volume that went away mid-read
+// (macOS answers ENXIO, "Device not configured"), or a read this process was
+// refused or ran out of descriptors for. Each goes away when the share is back,
+// the permission is granted or the other reads finish, and none changes the
+// file's size or date, so a row built from it would never be read again.
+const UNREADABLE_FOR_NOW_CODES = new Set(['ENOENT', 'EACCES', 'EPERM', 'ENXIO', 'ENODEV', 'EMFILE', 'ENFILE', 'EINTR']);
 
 function isTransientReadError(err: unknown): boolean {
   const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === 'string' && TRANSIENT_READ_ERRORS.has(code);
+  return isStorageError(err) || (typeof code === 'string' && UNREADABLE_FOR_NOW_CODES.has(code));
 }
 
 function errorMessage(err: unknown): string {

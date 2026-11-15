@@ -107,13 +107,35 @@ export function TagsView(): JSX.Element {
     };
   }, [draft.body]);
 
+  // Whether the body or boost on screen differs from what is saved for it: a
+  // rule picked from the list, or the starting draft for a new one.
+  function draftIsDirty(): boolean {
+    const saved = draft.id == null ? FRESH_DRAFT : rules.find((rule) => rule.id === draft.id);
+    return !!saved && (draft.body !== saved.body || draft.boost !== saved.boost);
+  }
+
+  // Replacing an edited draft takes a second press on the same target, so one
+  // stray click on the list does not throw the edit away.
+  const discardArmedFor = useRef<string | null>(null);
+  function confirmDiscard(target: string): boolean {
+    if (!draftIsDirty() || discardArmedFor.current === target) {
+      discardArmedFor.current = null;
+      return true;
+    }
+    discardArmedFor.current = target;
+    setStatus('This rule has unsaved edits. Choose it again to discard them, or Save first.');
+    return false;
+  }
+
   function pickRule(rule: TagRule): void {
+    if (rule.id !== draft.id && !confirmDiscard(`rule:${rule.id}`)) return;
     setDraft({ id: rule.id, name: rule.name, body: rule.body, boost: rule.boost, enabled: rule.enabled });
     setError(null);
     setStatus(null);
   }
 
   function newRule(): void {
+    if (!confirmDiscard('new')) return;
     setDraft(FRESH_DRAFT);
     setError(null);
     setStatus('New rule draft — edit the body and Save.');
@@ -155,8 +177,11 @@ export function TagsView(): JSX.Element {
     setBusy(true);
     try {
       await api.deleteTagRule(draft.id);
+      // The rule is gone, so there is nothing left to protect in the draft.
+      discardArmedFor.current = null;
+      setDraft(FRESH_DRAFT);
+      setError(null);
       setStatus(`Deleted "${draft.name}".`);
-      newRule();
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -171,7 +196,8 @@ export function TagsView(): JSX.Element {
     try {
       const updated = await api.setTagRuleEnabled(draft.id, !draft.enabled);
       if (updated) {
-        setDraft({ id: updated.id, name: updated.name, body: updated.body, boost: updated.boost, enabled: updated.enabled });
+        // Only the flag changed; an edit in the body or boost is still pending.
+        setDraft((d) => ({ ...d, enabled: updated.enabled }));
       }
       await refresh();
       setStatus(updated && !updated.enabled ? `Disabled "${draft.name}" — its tracks are no longer tagged.` : `Enabled "${draft.name}".`);
@@ -473,6 +499,19 @@ function CheatSheet(): JSX.Element {
   );
 }
 
+// 'sampled N of M' while the preview left tracks out; null when it did not say or looked at all of them.
+function sampleNote(preview: TagRulePreviewResult): string | null {
+  const { sampledCount, totalCount } = preview;
+  if (sampledCount == null || totalCount == null || sampledCount >= totalCount) return null;
+  return `sampled ${sampledCount.toLocaleString()} of ${totalCount.toLocaleString()}`;
+}
+
+function noMatchNote(preview: TagRulePreviewResult): string {
+  const note = sampleNote(preview);
+  if (note) return `No matches (${note} tracks).`;
+  return preview.totalCount != null ? 'No matches in the library.' : 'No matches in the sampled tracks.';
+}
+
 function PreviewPane({
   preview,
   tracks,
@@ -492,7 +531,7 @@ function PreviewPane({
         </span>
         {preview?.ok && (
           <span className="ml-auto text-[10px]" style={{ color: 'var(--accent)' }}>
-            {preview.matchCount.toLocaleString()} matches in sample
+            {preview.matchCount.toLocaleString()} matches{sampleNote(preview) ? `, ${sampleNote(preview)}` : preview.totalCount != null ? ' in the library' : ' in sample'}
           </span>
         )}
       </div>
@@ -519,7 +558,7 @@ function PreviewPane({
         </>
       ) : preview?.ok ? (
         <div className="text-[11px]" style={{ color: 'var(--muted)' }}>
-          No matches in the sampled tracks. Loosen the rule or check your DNA / play history.
+          {noMatchNote(preview)} Loosen the rule or check your DNA / play history.
         </div>
       ) : (
         <div className="text-[11px]" style={{ color: 'var(--muted)' }}>

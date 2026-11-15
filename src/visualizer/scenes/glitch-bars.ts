@@ -63,7 +63,7 @@ vec4 scene(vec2 uv, vec2 p) {
   // follows the kick count, like the bar pattern, not a fixed timer.
   float blockR = hash11(by * 0.27 + beatTick * 0.731);
   float flash = step(0.985, blockR) * u_snarePulse;
-  col += vec3(1.0) * flash * 0.45;
+  col += mix(u_light, vec3(1.0), 0.35) * flash * 0.45;
 
   // Edge of bar — bright stitching line per bar.
   float stitch = smoothstep(0.96, 1.0, fract(uv.y * bars)) * lit * 0.25;

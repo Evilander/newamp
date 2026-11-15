@@ -10,12 +10,18 @@
 // MilkDrop instead of replacing it. Additive compositing (globalCompositeOperation
 // 'lighter') keeps it glowing and lets dark areas of the field through untouched.
 
-import type { EvilandFrame, EvilandOnset, VoiceGroup } from './eviland-audio';
+import { bandPanOf, type EvilandFrame, type EvilandOnset, type VoiceGroup } from './eviland-audio';
 import type { EvilandPalette } from './eviland';
+import { accentPair } from './eviland-appearance';
 
 export interface ReactorOverlay {
   resize(cssW: number, cssH: number, dpr: number): void;
-  render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number): void;
+  /**
+   * `stereoSpread` is the look's operator channel (1 = place events where the mix puts them).
+   * `seed` is the look's seed: a palette without a second accent gets the partner that seed
+   * picks, the same one the engine uses, so the overlay and the field agree on the second hue.
+   */
+  render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number, stereoSpread?: number, seed?: string): void;
   dispose(): void;
 }
 
@@ -48,23 +54,25 @@ const KIND_FOR_GROUP: Record<VoiceGroup, EventKind | null> = {
 
 // Per-group color bias applied on top of the palette so instruments stay
 // distinguishable even when the palette is monochrome.
-function colorForGroup(group: VoiceGroup, pal: EvilandPalette): [number, number, number] {
+function colorForGroup(group: VoiceGroup, pal: EvilandPalette, second: readonly [number, number, number]): [number, number, number] {
   const accent = pal.accent;
   const light = pal.light;
+  // The second accent carries the upper voices so the overlay shows both hues
+  // of the palette instead of one.
   const mix = (a: number, b: number, t: number): number => Math.round((a + (b - a) * t) * 255);
   switch (group) {
     case 'kick':
       // warm/bright floor shockwave
       return [mix(accent[0], light[0], 0.5), mix(accent[1], light[1], 0.35), mix(accent[2], light[2], 0.2)];
     case 'snare':
-      return [mix(accent[0], light[0], 0.7), mix(accent[1], light[1], 0.7), mix(accent[2], light[2], 0.8)];
+      return [mix(second[0], light[0], 0.7), mix(second[1], light[1], 0.7), mix(second[2], light[2], 0.8)];
     case 'hat':
       // near-white sparkle
-      return [mix(light[0], light[0], 1), mix(light[1], light[1], 1), Math.round(Math.min(1, light[2] + 0.1) * 255)];
+      return [mix(light[0], second[0], 0.2), mix(light[1], second[1], 0.2), mix(light[2], second[2], 0.2)];
     case 'vocal':
       return [Math.round(accent[0] * 255), Math.round(accent[1] * 255), Math.round(accent[2] * 255)];
     default:
-      return [Math.round(light[0] * 255), Math.round(light[1] * 255), Math.round(light[2] * 255)];
+      return [mix(light[0], second[0], 0.3), mix(light[1], second[1], 0.3), mix(light[2], second[2], 0.3)];
   }
 }
 
@@ -115,14 +123,15 @@ export function createReactorOverlay(canvas: HTMLCanvasElement): ReactorOverlay 
     ctx!.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  function spawn(onset: EvilandOnset, frame: EvilandFrame): void {
+  function spawn(onset: EvilandOnset, frame: EvilandFrame, spread: number): void {
     const kind = KIND_FOR_GROUP[onset.group];
     if (!kind) return;
     if (events.length >= MAX_EVENTS) events.shift();
-    const [r, g, b] = colorForGroup(onset.group, lastPalette);
-    // Horizontal: overall stereo pan biases placement; jitter per event so
-    // repeated hits of the same band don't stack on one point.
-    const panX = 0.5 + frame.pan * 0.32;
+    const [r, g, b] = colorForGroup(onset.group, lastPalette, lastSecond);
+    // Horizontal: the stereo pan of the onset's own band biases placement (the
+    // whole mix's when the frame has none); jitter per event so repeated hits
+    // of the same band don't stack on one point.
+    const panX = 0.5 + bandPanOf(frame, onset.band) * spread * 0.32;
     const x = Math.min(0.97, Math.max(0.03, panX + (rand() - 0.5) * 0.5));
     const y = Math.min(0.96, Math.max(0.05, yForBand(onset.band) + (rand() - 0.5) * 0.08));
     events.push({
@@ -146,6 +155,23 @@ export function createReactorOverlay(canvas: HTMLCanvasElement): ReactorOverlay 
     light: [0.8, 1, 0.8],
     bg: [0.02, 0.03, 0.02],
   };
+  // The partner for a palette without a second accent is worked out when its
+  // accent or the look's seed changes, not on every frame or spawn.
+  let partner: [number, number, number] = accentPair(lastPalette);
+  let partnerOfAccent: [number, number, number] = lastPalette.accent;
+  let partnerSeed = '';
+  let lastSecond: readonly [number, number, number] = partner;
+
+  function secondAccentOf(palette: EvilandPalette, seed: string): readonly [number, number, number] {
+    if (palette.accent2) return palette.accent2;
+    const accent = palette.accent;
+    if (seed !== partnerSeed || accent[0] !== partnerOfAccent[0] || accent[1] !== partnerOfAccent[1] || accent[2] !== partnerOfAccent[2]) {
+      partnerOfAccent = [accent[0], accent[1], accent[2]];
+      partnerSeed = seed;
+      partner = accentPair(palette, seed);
+    }
+    return partner;
+  }
 
   function drawEvent(ev: OverlayEvent): void {
     const c = ctx!;
@@ -203,8 +229,10 @@ export function createReactorOverlay(canvas: HTMLCanvasElement): ReactorOverlay 
     }
   }
 
-  function render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number): void {
+  function render(frame: EvilandFrame, palette: EvilandPalette, dtMs: number, stereoSpread = 1, seed = ''): void {
     lastPalette = palette;
+    lastSecond = secondAccentOf(palette, seed);
+    const spread = Number.isFinite(stereoSpread) ? stereoSpread : 1;
     const c = ctx!;
     c.clearRect(0, 0, w, h); // transparent — MilkDrop field shows through
     c.globalCompositeOperation = 'lighter'; // additive glow
@@ -214,7 +242,7 @@ export function createReactorOverlay(canvas: HTMLCanvasElement): ReactorOverlay 
     bassGlow += (frame.bass - bassGlow) * Math.min(1, dtMs / 90);
     if (bassGlow > 0.02) {
       const bh = h * (0.10 + bassGlow * 0.22);
-      const [br, bg, bb] = colorForGroup('kick', palette);
+      const [br, bg, bb] = colorForGroup('kick', palette, lastSecond);
       const bucket = Math.round(bh / 4);
       const key = `${h}|${bucket}|${br}|${bg}|${bb}`;
       if (key !== bassGradKey || !bassGradCache) {
@@ -234,7 +262,7 @@ export function createReactorOverlay(canvas: HTMLCanvasElement): ReactorOverlay 
     }
 
     // Spawn this frame's onsets, then advance + draw the live pool.
-    for (const onset of frame.onsets) spawn(onset, frame);
+    for (const onset of frame.onsets) spawn(onset, frame, spread);
     for (let i = events.length - 1; i >= 0; i--) {
       const ev = events[i]!;
       ev.age += dtMs;

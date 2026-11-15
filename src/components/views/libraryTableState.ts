@@ -79,3 +79,66 @@ export function slashFocusesSearch(event: SlashKeyEvent, context: { typing: bool
   if (event.ctrlKey || event.metaKey || event.altKey) return false;
   return !context.typing && !context.overlay;
 }
+
+/**
+ * Every row after the ones a list already holds, read page by page from
+ * `offset`, for a queue that has to run past the loaded slice. Rows in
+ * `exclude` are skipped (a scan can shift the list under the offset). Null when
+ * `isCurrent` turns false between pages: the queue it was for is gone, so
+ * nothing read is worth appending. A page that fails ends the read with what
+ * came before it and the error, so the caller can still queue the rows it got.
+ * `maxRows` bounds how many rows are read in all.
+ */
+export async function readRemainingRows(options: {
+  getPage: (offset: number, limit: number) => Promise<Track[]>;
+  offset: number;
+  total: number;
+  pageSize: number;
+  exclude: ReadonlySet<number>;
+  isCurrent: () => boolean;
+  pause?: () => Promise<void>;
+  maxRows?: number;
+}): Promise<{ rows: Track[]; error: unknown } | null> {
+  const { getPage, total, pageSize, exclude, isCurrent, pause, maxRows = Infinity } = options;
+  const seen = new Set(exclude);
+  const rows: Track[] = [];
+  let offset = options.offset;
+  let error: unknown = null;
+  while (offset < total && rows.length < maxRows) {
+    let page: Track[];
+    const limit = Math.min(pageSize, maxRows - rows.length);
+    try {
+      page = await getPage(offset, limit);
+    } catch (caught) {
+      error = caught;
+      break;
+    }
+    if (!isCurrent()) return null;
+    offset += page.length;
+    for (const track of page) {
+      if (seen.has(track.id)) continue;
+      seen.add(track.id);
+      rows.push(track);
+    }
+    if (page.length < limit) break;
+    // Reading the whole library in one burst would starve the main process
+    // that is also feeding the audio element.
+    if (pause) await pause();
+    if (!isCurrent()) return null;
+  }
+  if (!isCurrent()) return null;
+  return { rows, error };
+}
+
+// Hands out one check per request, true only while no later request has begun.
+// Playing a second row cancels the read still paging behind the first, which
+// would otherwise append the same tail to the new queue as well.
+export function createLatestRequestGate(): { begin: () => () => boolean } {
+  let latest = 0;
+  return {
+    begin: () => {
+      const mine = ++latest;
+      return () => mine === latest;
+    },
+  };
+}

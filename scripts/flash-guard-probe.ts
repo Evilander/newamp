@@ -25,6 +25,7 @@ import { generate } from '../src/visualizer/eviland-randomizer';
 import { attachFlashGuard, createGuarded2dSurface, gpuFlashGuardSupported } from '../src/visualizer/flash-guard-host';
 import { createParticleFlowRenderer } from '../src/visualizer/particle-flow';
 import { createCanvasFlashGuard } from '../src/visualizer/flash-guard-2d';
+import { setFlashGuardDither } from '../src/visualizer/flash-guard-gl';
 import {
   FLASH_GUARD_COLS,
   FLASH_GUARD_ROWS,
@@ -709,7 +710,8 @@ function latticeRun(guarded: boolean): { peakPairsAtAnyPixel: number; pixelsWith
  * crossing a frame apart on the two, so this is judged on the average: taps
  * that sample different pixels move it by an order of magnitude.
  */
-function jitterParity(): { meanByteDiff: number; maxByteDiff: number; over4: number; limitedPixels: number; worst: string[] } {
+function jitterParity(dither: boolean): { meanByteDiff: number; maxByteDiff: number; over4: number; limitedPixels: number; worst: string[] } {
+  setFlashGuardDither(dither);
   const w = 640;
   const h = 360;
   setFlashGuardEnabled(true);
@@ -803,9 +805,16 @@ function latticeCheck(failures: string[]): Record<string, unknown> {
   const after = latticeRun(true);
   if (before.peakPairsAtAnyPixel <= 3) failures.push(`even columns at 1024x576 did not flash before the guard (${before.peakPairsAtAnyPixel}/s)`);
   if (after.peakPairsAtAnyPixel > 3) failures.push(`even columns at 1024x576: ${after.peakPairsAtAnyPixel} flashes/s at a pixel after the guard`);
-  const parity = jitterParity();
+  const parity = jitterParity(false);
   if (parity.meanByteDiff > 0.05) failures.push(`1 px checkerboard at 640x360: GPU differs from the spec by ${parity.meanByteDiff} levels on average`);
-  return { before, after, parity };
+  // With the dither on, a changed pixel moves by at most one step either way
+  // before rounding, so the spec is two levels away at worst, and the average
+  // sits near a quarter of a level.
+  const dithered = jitterParity(true);
+  if (dithered.maxByteDiff > 2) failures.push(`1 px checkerboard at 640x360 with dither: GPU is ${dithered.maxByteDiff} levels from the spec at worst`);
+  if (dithered.meanByteDiff < 0.05 || dithered.meanByteDiff > 0.6) failures.push(`1 px checkerboard at 640x360 with dither: mean ${dithered.meanByteDiff} levels from the spec is outside the expected 0.05 to 0.6`);
+  setFlashGuardDither(false);
+  return { before, after, parity, dithered };
 }
 
 /**
@@ -1202,6 +1211,7 @@ function routeReport(audio: AnalyserFrame[]): Record<string, string> {
  * Same checks and limits as the full sweep.
  */
 async function reducedRun() {
+  setFlashGuardDither(false);
   const failures: string[] = [];
   const report: Record<string, unknown> = { sweep: 'reduced', gpu: rendererName() };
   const timings: Record<string, number> = {};
@@ -1293,6 +1303,9 @@ async function reducedRun() {
 }
 
 async function run() {
+  // Every run compares the GPU with the spec to the level, so the dither is
+  // off except in the one check that measures it.
+  setFlashGuardDither(false);
   const failures: string[] = [];
   const dense = analyse(densePcm(SECONDS));
   const sparse = analyse(sparsePcm(SECONDS));
@@ -1406,6 +1419,7 @@ async function run() {
 
 /** One shader look on dense music, guarded: its counts and worst 1% region. */
 async function debug(mode: string) {
+  setFlashGuardDither(false);
   const dense = analyse(densePcm(SECONDS));
   const plain = shaderRun(mode, dense, false);
   const guarded = shaderRun(mode, dense, true, plain.frames);

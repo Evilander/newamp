@@ -20,10 +20,20 @@ export interface WaveformState {
   data: WaveformData | null;
 }
 
+/** A request's result. `failed` means the request itself did not complete, which says nothing about the file. */
+interface WaveformOutcome {
+  data: WaveformData | null;
+  failed: boolean;
+}
+
+// A failed request is asked for again twice: a share that timed out once
+// usually answers a moment later.
+const RETRY_DELAYS_MS = [2000, 6000];
+
 /** Waveforms kept for tracks heard lately, so going back a track costs no round trip. */
 const REMEMBERED = 12;
 const remembered = new Map<string, WaveformData>();
-const loading = new Map<string, Promise<WaveformData | null>>();
+const loading = new Map<string, Promise<WaveformOutcome>>();
 const prefetching = new Set<string>();
 
 /**
@@ -51,14 +61,14 @@ function remember(key: string, data: WaveformData): void {
   while (remembered.size > REMEMBERED) remembered.delete(remembered.keys().next().value as string);
 }
 
-async function fetchWaveform(track: WaveformTrack, key: string, prefetch: boolean): Promise<WaveformData | null> {
+async function fetchWaveform(track: WaveformTrack, key: string, prefetch: boolean): Promise<WaveformOutcome> {
   try {
     const raw = await api.getTrackWaveform(track.id, prefetch ? { prefetch: true } : undefined);
-    if (!isWaveformData(raw)) return null;
+    if (!isWaveformData(raw)) return { data: null, failed: false };
     remember(key, raw);
-    return raw;
+    return { data: raw, failed: false };
   } catch {
-    return null;
+    return { data: null, failed: true };
   }
 }
 
@@ -68,10 +78,14 @@ async function fetchWaveform(track: WaveformTrack, key: string, prefetch: boolea
  * own note of tracks that can't be decoded.
  */
 export function loadWaveform(track: WaveformTrack): Promise<WaveformData | null> {
+  return loadWaveformOutcome(track).then((outcome) => outcome.data);
+}
+
+function loadWaveformOutcome(track: WaveformTrack): Promise<WaveformOutcome> {
   const key = waveformKey(track);
-  if (!key) return Promise.resolve(null);
+  if (!key) return Promise.resolve({ data: null, failed: false });
   const hit = peekWaveform(key);
-  if (hit) return Promise.resolve(hit);
+  if (hit) return Promise.resolve({ data: hit, failed: false });
   let pending = loading.get(key);
   if (!pending) {
     pending = fetchWaveform(track, key, false).finally(() => loading.delete(key));
@@ -120,11 +134,23 @@ export function useWaveform(
     const wanted = trackRef.current;
     if (!key || !wanted || peekWaveform(key)) return undefined;
     let live = true;
-    void loadWaveform(wanted).then((data) => {
-      if (live) setSettled({ key, data });
-    });
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const request = (attempt: number): void => {
+      void loadWaveformOutcome(wanted).then(({ data, failed }) => {
+        if (!live) return;
+        // The bar stays on its loading line while a failed request is retried;
+        // 'none' is for a file that can't be decoded, not for a slow drive.
+        if (failed && attempt < RETRY_DELAYS_MS.length) {
+          retryTimer = setTimeout(() => request(attempt + 1), RETRY_DELAYS_MS[attempt]);
+          return;
+        }
+        setSettled({ key, data });
+      });
+    };
+    request(0);
     return () => {
       live = false;
+      clearTimeout(retryTimer);
     };
   }, [key]);
 

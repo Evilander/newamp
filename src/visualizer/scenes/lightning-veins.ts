@@ -64,7 +64,7 @@ vec4 scene(vec2 uv, vec2 p) {
 
   // Subtle sparkle dust in the air.
   float sp = hash21(floor(uv * 220.0) + floor(u_globalTime * 30.0));
-  col += vec3(1.0) * step(0.997, sp) * u_hatPulse * 0.5;
+  col += mix(u_light, vec3(1.0), 0.35) * step(0.997, sp) * u_hatPulse * 0.5;
 
   float alpha = clamp(dot(col, vec3(0.55)) + coreSum * 0.4, 0.0, 0.78);
   return vec4(col, alpha);

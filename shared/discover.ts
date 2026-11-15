@@ -42,7 +42,12 @@ const HEAVY_VISUAL_PRESETS = new Set<VisualizerPreset>([
 ]);
 
 const LOW_END_PRESETS: VisualizerPreset[] = ['album-breathe', 'oscilloscope', 'spectrum', 'radial', 'pulse'];
+// The flagship visualizer is always part of a full plan; the rest of the set is
+// drawn from this list with the plan's seed. The low-end list stays free of the
+// GPU-heavy looks, eviland among them.
+const FEATURED_PRESET: VisualizerPreset = 'eviland';
 const FULL_PRESETS: VisualizerPreset[] = [
+  'eviland-live',
   'album-breathe',
   'spectrum',
   'oscilloscope',
@@ -50,19 +55,36 @@ const FULL_PRESETS: VisualizerPreset[] = [
   'prism-bars',
   'orbital-rings',
   'galaxy',
+  'aurora',
+  'tunnel',
   'tempo-pulse',
 ];
-const DECK_ROTATION: DiscoverDeckSkin[] = ['bento', 'discman', 'winamp-classic', 'record-player', 'cassette', 'retro-tv'];
+const DECK_ROTATION: DiscoverDeckSkin[] = [
+  'bento',
+  'discman',
+  'winamp-classic',
+  'winamp-industrial',
+  'record-player',
+  'jukebox',
+  'cassette',
+  'retro-tv',
+];
+const PLAN_PRESET_COUNT = 5;
+// Matched as whole words and phrases: "Springfield" or "Memories" is not a home recording.
+const PRIVATE_LIBRARY_PATTERN = /\b(?:demos?|home\s+recordings?|field\s+recordings?|voice\s+memos?|basement\s+tapes?|private)\b/i;
+// A favorite that has been quiet for a year is as forgotten as one quiet for ten.
+const MAX_STALE_DAYS_FOR_SCORE = 365;
 
 export function buildDiscoverSurface(input: BuildDiscoverSurfaceInput): DiscoverSurface {
   const generatedAt = normalizeTime(input.now);
   const limit = normalizeLimit(input.limit);
   const seed = normalizeSeed(input.seed, input.tracks, generatedAt);
   const rng = createSeededRandom(seed);
-  const tracks = uniqueTracksById(input.tracks)
-    .filter((track) => track.path && !track.avoidAutoPlay)
-    .map(normalizeTrackForDiscovery);
-  const albumClusters = buildAlbumClusters(tracks);
+  const playable = uniqueTracksById(input.tracks).filter((track) => track.path && !track.avoidAutoPlay);
+  const tracks = playable.map(normalizeTrackForDiscovery);
+  // A track with no album tag would be filed under "Unknown Album" by the
+  // normalisation above; the untagged pile of one artist is not an album.
+  const albumClusters = buildAlbumClusters(tracks.filter((_, i) => cleanText(playable[i]!.album)));
 
   const freshTracks = tracks
     .filter((track) => track.playCount <= 2)
@@ -73,14 +95,15 @@ export function buildDiscoverSurface(input: BuildDiscoverSurfaceInput): Discover
     .filter((track) => isPositiveSignal(track) && staleDays(track, generatedAt) >= 21)
     .map((track) => ({
       track,
-      score: positiveSignalScore(track) + staleDays(track, generatedAt) * 0.08 - skipRisk(track) * 8 + stableTrackJitter(track, seed),
+      score: positiveSignalScore(track) + Math.min(staleDays(track, generatedAt), MAX_STALE_DAYS_FOR_SCORE) * 0.08 - skipRisk(track) * 8 + stableTrackJitter(track, seed),
     }))
     .sort((a, b) => b.score - a.score || compareTrack(a.track, b.track))
     .slice(0, limit)
     .map((item) => item.track);
 
   const deepAlbum = albumClusters[0] ?? null;
-  const deepAlbumTracks = deepAlbum?.tracks.slice(0, Math.max(3, limit)) ?? [];
+  // The whole album: the card and the album session both say "play the album".
+  const deepAlbumTracks = deepAlbum?.tracks ?? [];
 
   const genreCounts = buildGenreCounts(tracks);
   const weirdShelf = tracks
@@ -208,14 +231,15 @@ function buildSummary(
 }
 
 function buildVisualPlan(lowEndMode: boolean, seed: string): DiscoverVisualPlan {
+  const rng = createSeededRandom(`${seed}:presets`);
   const presets = lowEndMode
-    ? LOW_END_PRESETS.filter((preset) => !HEAVY_VISUAL_PRESETS.has(preset))
-    : FULL_PRESETS;
+    ? seededPick(LOW_END_PRESETS.filter((preset) => !HEAVY_VISUAL_PRESETS.has(preset)), PLAN_PRESET_COUNT, rng)
+    : [FEATURED_PRESET, ...seededPick(FULL_PRESETS, PLAN_PRESET_COUNT - 1, rng)];
   const deckSkin = DECK_ROTATION[Math.abs(hashString(`${seed}:deck`)) % DECK_ROTATION.length] ?? 'bento';
   return {
     title: lowEndMode ? 'Low-Load Visual Set' : 'Fullscreen Visual Set',
     subtitle: lowEndMode ? 'Album breathe, scope, and spectrum first' : '4K-ready presets with album cover intervals',
-    presets: presets.slice(0, 5),
+    presets,
     deckSkin,
     lowEndMode,
     albumOverlay: true,
@@ -276,7 +300,10 @@ function buildAlbumClusters(tracks: Track[]): AlbumCluster[] {
   for (const track of tracks) {
     const album = cleanText(track.album) || 'Unknown Album';
     const albumArtist = cleanText(track.albumArtist) || cleanText(track.artist) || 'Unknown Artist';
-    const key = `${albumArtist.toLowerCase()}\u0000${album.toLowerCase()}`;
+    // The library's own album key keeps a compilation together and a split
+    // album apart; the artist and title text is the fallback for tracks
+    // that come without one.
+    const key = track.albumKey || `${albumArtist.toLowerCase()}\u0000${album.toLowerCase()}`;
     const current = groups.get(key) ?? {
       album,
       albumArtist,
@@ -304,7 +331,7 @@ function buildAlbumClusters(tracks: Track[]): AlbumCluster[] {
       return {
         ...album,
         tracks: tracksByDisc,
-        score: tracksByDisc.length * 5 + avgRating * 0.2 + unplayedShare * 12 - avgSkipRisk * 20,
+        score: Math.min(tracksByDisc.length, 20) * 5 + avgRating * 0.2 + unplayedShare * 12 - avgSkipRisk * 20,
       };
     })
     .filter((album) => album.tracks.length >= 3)
@@ -347,7 +374,7 @@ function buildGenreCounts(tracks: Track[]): Map<string, number> {
 function weirdnessScore(track: Track, genreCounts: Map<string, number>, now: number): number {
   const genreCount = track.genre ? (genreCounts.get(track.genre.toLowerCase()) ?? 1) : 1;
   const yearDistance = track.year ? Math.min(20, Math.abs(new Date(now).getUTCFullYear() - track.year) / 2) : 8;
-  const privateLibrarySignal = /home|demo|private|field|basement|recording|voice|memo/i.test(`${track.genre ?? ''} ${track.album} ${track.artist}`) ? 18 : 0;
+  const privateLibrarySignal = PRIVATE_LIBRARY_PATTERN.test(`${track.genre ?? ''} ${track.album} ${track.artist}`) ? 18 : 0;
   return 30 - Math.min(18, genreCount) + yearDistance + privateLibrarySignal + (track.playCount <= 0 ? 10 : 0);
 }
 

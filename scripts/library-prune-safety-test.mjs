@@ -224,9 +224,17 @@ const pruneHandler = mainSource.slice(
   mainSource.indexOf("ipcMain.handle('history:get'"),
 );
 assert.ok(pruneHandler.includes('createBackupFromLiveStores'), 'the prune IPC takes a backup');
+// The handler deletes through the async variant, and only once: a second sweep
+// outside the backup could delete a file that went missing since the preview.
+const deletingCalls = [...pruneHandler.matchAll(/library\.pruneMissingTracksAsync\(/g)].map((match) => match.index);
+assert.equal(deletingCalls.length, 1, 'the prune IPC has a single deleting call');
 assert.ok(
-  pruneHandler.indexOf('createBackupFromLiveStores') < pruneHandler.lastIndexOf('pruneMissingTracks('),
+  pruneHandler.indexOf('createBackupFromLiveStores') < deletingCalls[0],
   'the backup comes before the deleting call',
+);
+assert.ok(
+  pruneHandler.indexOf('previewPruneMissingTracksAsync(') < pruneHandler.indexOf('createBackupFromLiveStores'),
+  'the removal is previewed first, so a sweep with nothing to remove takes no backup',
 );
 assert.match(mainSource, /ipcMain\.handle\('library:prune-missing-preview'/);
 assert.match(preloadSource, /previewPruneMissingTracks/);

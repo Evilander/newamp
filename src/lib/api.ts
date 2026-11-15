@@ -149,6 +149,9 @@ function emptyDiscoverSurface(input: DiscoverSurfaceInput = {}): DiscoverSurface
 // Shared by the stub calls that answer with an empty list.
 const noRows = async (): Promise<never[]> => [];
 
+// The browser stub's settings, which each setSettings call builds on.
+let stubSettings: AppSettings = { ...DEFAULT_SETTINGS };
+
 const stub: NewAmpAPI = {
   getMusicServers: async () => [],
   connectMusicServer: async () => { throw new Error('Music servers are available in the desktop app.'); },
@@ -454,18 +457,25 @@ const stub: NewAmpAPI = {
   getArtUrl: () => '',
   pickFolder: async () => null,
   getSuggestedMusicFolders: async () => [],
-  getSettings: async () => DEFAULT_SETTINGS,
-  setSettings: async (patch) => ({
-    ...DEFAULT_SETTINGS,
-    ...patch,
-    audioOutputDeviceId: normalizeAudioOutputDeviceId(patch.audioOutputDeviceId),
-    limiterEnabled: patch.limiterEnabled === undefined
-      ? DEFAULT_SETTINGS.limiterEnabled
-      : normalizeLimiterEnabled(patch.limiterEnabled),
-    preampDb: patch.preampDb === undefined
-      ? DEFAULT_SETTINGS.preampDb
-      : normalizePreampDb(patch.preampDb),
-  }),
+  getSettings: async () => ({ ...stubSettings }),
+  setSettings: async (patch) => {
+    // Patches accumulate, as they do in the real store; handing back defaults
+    // plus only this patch reset every other setting each time one changed.
+    stubSettings = {
+      ...stubSettings,
+      ...patch,
+      audioOutputDeviceId: patch.audioOutputDeviceId === undefined
+        ? stubSettings.audioOutputDeviceId
+        : normalizeAudioOutputDeviceId(patch.audioOutputDeviceId),
+      limiterEnabled: patch.limiterEnabled === undefined
+        ? stubSettings.limiterEnabled
+        : normalizeLimiterEnabled(patch.limiterEnabled),
+      preampDb: patch.preampDb === undefined
+        ? stubSettings.preampDb
+        : normalizePreampDb(patch.preampDb),
+    };
+    return { ...stubSettings };
+  },
   exportCustomSkin: async () => null,
   importCustomSkin: async () => null,
   importCustomSkinFile: async () => null,
@@ -480,6 +490,7 @@ const stub: NewAmpAPI = {
   showInFolder: async () => undefined,
   onPlayerCommand: () => () => undefined,
   onOpenFiles: () => () => undefined,
+  onSettingsChanged: () => () => undefined,
   onOpenSettings: () => () => undefined,
   searchGuitarTabs: async () => [],
   getGuitarTab: async () => {

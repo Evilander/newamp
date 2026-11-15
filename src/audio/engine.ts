@@ -7,7 +7,7 @@
 // round trip.
 
 import { normalizeAudioOutputDeviceId } from '@shared/audio-output';
-import { planDeviceChange } from './device-change';
+import { coalesceDeviceChanges, planDeviceChange, type DeviceChangeRunner } from './device-change';
 import { normalizeLimiterEnabled, preampDbToLinear } from '@shared/audio-limiter';
 import type { ExclusiveNegotiated, ResamplerKind } from '@shared/types';
 import type { SampleTransport, SampleTransportEvent } from './sample-transport';
@@ -100,6 +100,35 @@ const DEFAULT_FREQUENCY_BIN_COUNT = DEFAULT_FFT_SIZE / 2;
 // the next user action. Tuning higher than ~300ms starts catching
 // legitimate fast track-changes; lower than ~150ms misses real seeks.
 const SEEK_VERIFY_MS = 220;
+// A scrub fires a seek on every pointer move, and each el.currentTime
+// assignment makes the element drop its buffer and re-request the file, which
+// on a network share is a read per assignment. The first seek lands at once;
+// those that follow within this window collapse into one at its end.
+const SEEK_COALESCE_MS = 125;
+// A deck whose stream fails mid-track (a share that timed out or dropped the
+// connection) reloads the same track at the same position instead of reporting
+// an error, which would skip the song. One delay per attempt, about 30 s in
+// all; main's file reads already wait out a stalled share for a minute before
+// they give up, so a failure that reaches the element has usually outlasted
+// the quick recoveries.
+const DECK_RETRY_DELAYS_MS = [1500, 4000, 9000, 16000];
+// Before this much has played, a decode or unsupported-source error means the
+// file itself is bad and the track is skipped as before. A network error is
+// retried at any position.
+const DECK_RETRY_MIN_PLAYED_S = 1;
+// Audio that gets this far past the resume point proves the stream is back,
+// and a later failure gets a fresh set of attempts.
+const DECK_RETRY_RECOVERED_S = 5;
+const MEDIA_ERR_ABORTED = 1;
+const MEDIA_ERR_NETWORK = 2;
+// HTMLMediaElement.readyState once the duration and dimensions are known.
+const HAVE_METADATA = 1;
+// How long a context that left 'running' while playing gets to recover before
+// the engine stops claiming it is playing.
+const CONTEXT_RESUME_GRACE_MS = 2000;
+// macOS reports a burst of devicechange events for one plug (AirPods, a USB
+// hub); they are handled once, after the burst.
+const DEVICE_CHANGE_DEBOUNCE_MS = 250;
 
 interface Deck {
   id: number;
@@ -108,8 +137,22 @@ interface Deck {
   gain: GainNode;
   replayGain: GainNode;
   /** Pending deferred seek listener (loadedmetadata) so it can be cancelled
-   *  when the deck is silenced or a newer deferred seek replaces it. */
-  pendingSeek?: { handler: () => void } | null;
+   *  when the deck is silenced or a newer deferred seek replaces it. `target`
+   *  is where it will land, which is the position until metadata arrives. */
+  pendingSeek?: { handler: () => void; target: number } | null;
+  /** A seek just landed on the element. `target` is a later seek waiting for
+   *  the window to close, and is the position until then. */
+  seekHold?: { timer: number; target: number | null } | null;
+}
+
+/** A deck track that is being reloaded after its stream failed. */
+interface DeckRetry {
+  deckId: number;
+  src: string;
+  /** Where the reload resumes: the position the stream failed at, moved by a seek. */
+  at: number;
+  attempts: number;
+  timer: number | null;
 }
 
 interface AudioGraph {
@@ -194,6 +237,9 @@ export class AudioEngine {
   private sampleRateFallback: { requested: number; actual: number } | null = null;
   private deviceFallback: { requestedId: string } | null = null;
   private deviceChangeHandler: (() => void) | null = null;
+  private deviceChangeRunner: DeviceChangeRunner | null = null;
+  private deckRetry: DeckRetry | null = null;
+  private contextStallTimer: number | null = null;
   // Bit-Perfect Exclusive backend. `externalActive` is per-track: it is only
   // true while the CURRENT track was accepted by the external transport, so
   // unsupported sources (podcasts, files without ids) fall back per-play.
@@ -440,6 +486,7 @@ export class AudioEngine {
       replayGain,
     };
     this.graph = graph;
+    ctx.addEventListener?.('statechange', this.onContextStateChange);
     this.applyLimiter(graph, this.limiterEnabled);
     this.startTick();
 
@@ -491,6 +538,9 @@ export class AudioEngine {
     });
     el.addEventListener('seeked', () => {
       if (!isActive()) return;
+      // A later seek is waiting for its window; the position it holds is the
+      // one on screen, not the one this event landed on.
+      if (this.decks[deckId]?.seekHold?.target != null) return;
       // Reflect the seeked position right away — while paused the rAF poll is
       // suspended, so without this the scrubber/clock would not move until the
       // next play. Re-arm the poll if we're actually playing.
@@ -503,6 +553,8 @@ export class AudioEngine {
     el.addEventListener('error', () => {
       if (!isActive()) return;
       const code = el.error?.code ?? 0;
+      if (this.retryDeckStream(deckId, el, code)) return;
+      this.deckRetry = null;
       this.patch({
         playing: false,
         buffering: false,
@@ -569,9 +621,12 @@ export class AudioEngine {
       this.tickSample();
       return;
     }
-    const el = this.graph.decks[this.activeDeckIndex]!.el;
+    const deck = this.graph.decks[this.activeDeckIndex]!;
+    const el = deck.el;
     if (el.src) {
-      this.publishPosition(el.currentTime, Number.isFinite(el.duration) ? el.duration : this.state.duration);
+      const position = this.deckPosition(deck);
+      this.noteDeckRecovered(el, position);
+      this.publishPosition(position, Number.isFinite(el.duration) ? el.duration : this.state.duration);
     }
     // Only keep polling while audio is actually advancing. A poll running with
     // playback paused/ended/idle burns CPU + battery for the whole app
@@ -580,6 +635,22 @@ export class AudioEngine {
       this.stopTick();
     }
   };
+
+  /**
+   * Where a deck is in its track. Until the element has metadata it reads 0
+   * whatever was asked of it, so a deck that is loading at a position (a
+   * hand-off, a resume, a reload after a failed stream) reports that position,
+   * not a restart.
+   */
+  private deckPosition(deck: Deck): number {
+    const el = deck.el;
+    if (deck.seekHold?.target != null) return deck.seekHold.target;
+    if (el.readyState < HAVE_METADATA) {
+      if (deck.pendingSeek) return deck.pendingSeek.target;
+      if (this.deckRetry?.deckId === deck.id) return this.deckRetry.at;
+    }
+    return Number.isFinite(el.currentTime) ? el.currentTime : this.state.currentTime;
+  }
 
   private tickSample(): void {
     const transport = this.sampleTransport;
@@ -641,8 +712,8 @@ export class AudioEngine {
       return this.sampleTransport?.hasStream() ? this.sampleTransport.position().currentTime : this.state.currentTime;
     }
     if (!this.graph) return this.state.currentTime;
-    const el = this.graph.decks[this.activeDeckIndex]!.el;
-    return el.src && Number.isFinite(el.currentTime) ? el.currentTime : this.state.currentTime;
+    const deck = this.graph.decks[this.activeDeckIndex]!;
+    return deck.el.src ? this.deckPosition(deck) : this.state.currentTime;
   }
 
   // ---- Bit-Perfect Exclusive seam -----------------------------------------
@@ -989,6 +1060,7 @@ export class AudioEngine {
    */
   async play(src: string, trackId: number | null, startAt = 0, routing?: TrackRouting): Promise<PlayOutcome> {
     const seq = ++this.playSeq;
+    this.cancelDeckRetry();
     // A new play attempt cancels any terminal ended state immediately — the
     // external path resolves asynchronously, and a stuck ended:true across
     // notifies is what let the store's auto-advance re-fire. The store has
@@ -1031,7 +1103,9 @@ export class AudioEngine {
     // currentSrc; resuming it would await a play() that can never start.
     if (current.el.src && (current.el.src === src || current.el.currentSrc === src)) {
       this.setDeckReplayGain(current);
-      this.patch({ trackId, ended: false, error: null });
+      this.patch({ trackId, currentTime: normalizeStartAt(startAt), ended: false, error: null });
+      // An element that failed keeps its error and won't play until it is loaded again.
+      if (current.el.error) current.el.load();
       this.applyStartPosition(current, startAt);
       return this.awaitDeckPlay(current, seq);
     }
@@ -1048,7 +1122,7 @@ export class AudioEngine {
     current.gain.gain.cancelScheduledValues(graph.ctx.currentTime);
     current.gain.gain.setValueAtTime(1, graph.ctx.currentTime);
     this.setDeckReplayGain(current);
-    this.patch({ src, trackId, currentTime: 0, duration: 0, ended: false, error: null });
+    this.patch({ src, trackId, currentTime: normalizeStartAt(startAt), duration: 0, ended: false, error: null });
     current.el.src = src;
     this.applyStartPosition(current, startAt);
     return this.awaitDeckPlay(current, seq);
@@ -1062,10 +1136,87 @@ export class AudioEngine {
       await deck.el.play();
     } catch (err) {
       if (seq !== this.playSeq) return 'stale';
+      // A reload is already scheduled for the stream that just failed; the
+      // error is reported only if the reloads run out.
+      if (this.deckRetry?.deckId === deck.id) return 'started';
       this.patch({ error: (err as Error).message ?? 'Playback failed' });
       throw err;
     }
     return seq === this.playSeq ? 'started' : 'stale';
+  }
+
+  /**
+   * A deck's stream failed. When the failure is the storage's rather than the
+   * file's, reload the same track at the same position a few times before
+   * giving up, so a share that stalls for a moment costs a pause, not the
+   * song. Returns whether a reload is scheduled; false leaves the failure to
+   * be reported (and the queue to move on).
+   */
+  private retryDeckStream(deckId: number, el: HTMLAudioElement, code: number): boolean {
+    const src = this.state.src;
+    if (!src || code === MEDIA_ERR_ABORTED || this.state.error != null) return false;
+    const previous = this.deckRetry?.deckId === deckId && this.deckRetry.src === src ? this.deckRetry : null;
+    // The element's own position once it has one, so a seek back after a
+    // reload is not undone; before that, where the reload was asked to land.
+    const deck = this.graph?.decks[deckId];
+    const reached = deck ? this.deckPosition(deck) : Number.isFinite(el.currentTime) ? el.currentTime : 0;
+    if (code !== MEDIA_ERR_NETWORK && reached < DECK_RETRY_MIN_PLAYED_S) return false;
+    if (!this.state.playing) {
+      // Chromium keeps fetching a paused element, so a share that drops during
+      // a pause fails it too. That is not a broken track and not the user's
+      // cue to move on: the element keeps its error, and Play loads the track
+      // again at this position.
+      this.patch({ buffering: false, currentTime: reached });
+      return true;
+    }
+    const attempts = previous?.attempts ?? 0;
+    if (attempts >= DECK_RETRY_DELAYS_MS.length) return false;
+    if (previous?.timer != null) window.clearTimeout(previous.timer);
+    const retry: DeckRetry = { deckId, src, at: reached, attempts: attempts + 1, timer: null };
+    retry.timer = window.setTimeout(() => this.reloadDeckStream(retry), DECK_RETRY_DELAYS_MS[attempts]!);
+    this.deckRetry = retry;
+    console.warn(`[newamp] deck stream failed (code ${code}) at ${reached.toFixed(1)} s; reloading it, attempt ${retry.attempts} of ${DECK_RETRY_DELAYS_MS.length}.`);
+    // Playing stays true: the listener has not paused, and the store would read a pause as the user's.
+    this.patch({ buffering: true, currentTime: reached });
+    return true;
+  }
+
+  private reloadDeckStream(retry: DeckRetry): void {
+    retry.timer = null;
+    const graph = this.graph;
+    if (this.deckRetry !== retry || !graph) return;
+    const deck = graph.decks[retry.deckId]!;
+    const stillOurs =
+      deck.id === this.activeDeckIndex &&
+      !this.sampleActive &&
+      !this.externalActive &&
+      deck.el.src !== '' &&
+      this.state.src === retry.src;
+    if (!stillOurs) {
+      this.deckRetry = null;
+      return;
+    }
+    // load() starts resource selection over and clears the element's error. It
+    // also resets the position, so the resume position goes in afterwards.
+    deck.el.load();
+    this.applyStartPosition(deck, retry.at);
+    // A failure surfaces as another error event, which schedules the next attempt.
+    void deck.el.play().catch(() => undefined);
+  }
+
+  private cancelDeckRetry(): boolean {
+    const retry = this.deckRetry;
+    if (!retry) return false;
+    if (retry.timer != null) window.clearTimeout(retry.timer);
+    this.deckRetry = null;
+    return true;
+  }
+
+  /** Forgets earlier failures once the reloaded stream has played on for a while. */
+  private noteDeckRecovered(el: HTMLAudioElement, position: number): void {
+    const retry = this.deckRetry;
+    if (!retry || retry.timer != null || el.paused || el.readyState < HAVE_METADATA) return;
+    if (position >= retry.at + DECK_RETRY_RECOVERED_S) this.deckRetry = null;
   }
 
   /**
@@ -1133,9 +1284,11 @@ export class AudioEngine {
     deck.gain.gain.cancelScheduledValues(graph.ctx.currentTime);
     deck.gain.gain.setValueAtTime(1, graph.ctx.currentTime);
     this.setDeckReplayGain(deck);
+    // The deck was loaded at its own start position, which is the one it plays from.
+    const startAt = this.preparedNext?.deckId === deck.id ? this.preparedNext.startAt : 0;
     this.activeDeckIndex = deck.id;
     this.preparedNext = null;
-    this.patch({ src, trackId, currentTime: 0, duration: 0, ended: false, error: null, buffering: true });
+    this.patch({ src, trackId, currentTime: startAt, duration: 0, ended: false, error: null, buffering: true });
     return this.awaitDeckPlay(deck, seq);
   }
 
@@ -1163,7 +1316,7 @@ export class AudioEngine {
     this.patch({
       src,
       trackId,
-      currentTime: 0,
+      currentTime: normalizeStartAt(startAt),
       duration: 0,
       ended: false,
       error: null,
@@ -1257,14 +1410,43 @@ export class AudioEngine {
         /* still not seekable (non-seekable stream); nothing more we can do */
       }
     };
-    deck.pendingSeek = { handler };
+    deck.pendingSeek = { handler, target };
     deck.el.addEventListener('loadedmetadata', handler, { once: true });
   }
 
   private cancelPendingSeek(deck: Deck): void {
+    if (deck.seekHold) {
+      window.clearTimeout(deck.seekHold.timer);
+      deck.seekHold = null;
+    }
     if (!deck.pendingSeek) return;
     deck.el.removeEventListener('loadedmetadata', deck.pendingSeek.handler);
     deck.pendingSeek = null;
+  }
+
+  /** Opens the window in which further seeks wait; the last of them is applied when it closes. */
+  private holdDeckSeeks(deck: Deck): void {
+    const src = deck.el.src;
+    const hold: NonNullable<Deck['seekHold']> = {
+      target: null,
+      timer: window.setTimeout(() => {
+        if (deck.seekHold !== hold) return;
+        deck.seekHold = null;
+        const target = hold.target;
+        if (target == null || !this.graph || this.activeDeck !== deck || deck.el.src !== src) return;
+        try {
+          // Supersede the VBR check the first seek scheduled; it compares the
+          // element against that earlier target and would report a false failure.
+          this.seekSeq += 1;
+          deck.el.currentTime = target;
+          // A drag keeps going: the seek just applied opens the next window.
+          this.holdDeckSeeks(deck);
+        } catch {
+          this.scheduleMetadataSeek(deck, target);
+        }
+      }, SEEK_COALESCE_MS),
+    };
+    deck.seekHold = hold;
   }
 
   private clearFadeTimer(): void {
@@ -1332,7 +1514,10 @@ export class AudioEngine {
     if (this.deviceChangeHandler) return;
     const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
     if (!md || typeof md.addEventListener !== 'function') return;
-    const handler = (): void => { void this.handleDeviceChange(); };
+    // One handler run at a time, once per burst of events.
+    const runner = coalesceDeviceChanges(() => this.handleDeviceChange(), DEVICE_CHANGE_DEBOUNCE_MS);
+    const handler = (): void => runner.trigger();
+    this.deviceChangeRunner = runner;
     this.deviceChangeHandler = handler;
     md.addEventListener('devicechange', handler);
   }
@@ -1345,6 +1530,8 @@ export class AudioEngine {
       // dispose() may have torn down the graph during the await; bail before
       // applyOutputDevice → ensureGraph could spawn a zombie AudioContext.
       if (!this.graph) return;
+      // A new output can leave the context suspended; playing should carry on.
+      if (this.state.playing) this.resumeContextIfNeeded();
       const outputIds = devices.filter((d) => d.kind === 'audiooutput').map((d) => d.deviceId);
       const plan = planDeviceChange(this.outputDeviceId, outputIds);
       if (plan === 'noop') return;
@@ -1361,6 +1548,44 @@ export class AudioEngine {
       // Never let device-change handling throw into the audio path.
       console.warn('[newamp] device-change handling failed', err);
     }
+  }
+
+  /**
+   * The context left 'running' (the system suspended it, or an output change
+   * interrupted it) while the engine says it is playing. Both the decks and the
+   * worklet go silent with it and the clock freezes, so ask for it back; if it
+   * stays down the engine pauses instead of reporting playback that isn't
+   * happening.
+   */
+  private readonly onContextStateChange = (): void => {
+    const ctx = this.graph?.ctx;
+    if (!ctx) return;
+    if (ctx.state === 'running' || ctx.state === 'closed') {
+      this.clearContextStallTimer();
+      return;
+    }
+    if (!this.state.playing || this.externalActive || this.contextStallTimer != null) return;
+    this.resumeContextIfNeeded();
+    this.contextStallTimer = window.setTimeout(() => {
+      this.contextStallTimer = null;
+      const live = this.graph?.ctx;
+      if (!live || live.state === 'running' || live.state === 'closed') return;
+      if (!this.state.playing || this.externalActive) return;
+      console.warn(`[newamp] the audio context stayed ${live.state}; pausing instead of reporting playback that is not happening.`);
+      this.pause();
+    }, CONTEXT_RESUME_GRACE_MS);
+  };
+
+  private clearContextStallTimer(): void {
+    if (this.contextStallTimer == null) return;
+    window.clearTimeout(this.contextStallTimer);
+    this.contextStallTimer = null;
+  }
+
+  private resumeContextIfNeeded(): void {
+    const ctx = this.graph?.ctx;
+    if (!ctx || ctx.state === 'running' || ctx.state === 'closed') return;
+    void ctx.resume().catch(() => undefined);
   }
 
   async playOutputTestTone(): Promise<void> {
@@ -1478,7 +1703,10 @@ export class AudioEngine {
       this.patch({ playing: false });
       return;
     }
+    const reloading = this.cancelDeckRetry();
     for (const deck of this.graph.decks) deck.el.pause();
+    // A deck waiting out a failed stream has nothing playing to pause.
+    if (reloading) this.patch({ playing: false, buffering: false });
   }
 
   togglePlayPause(): void {
@@ -1509,6 +1737,7 @@ export class AudioEngine {
         if (src) void this.play(src, trackId, this.state.ended ? 0 : Math.max(0, this.state.currentTime)).catch(() => undefined);
         return;
       }
+      this.resumeContextIfNeeded();
       transport.resume();
       this.patch({ playing: true, ended: false });
       this.startTick();
@@ -1535,6 +1764,13 @@ export class AudioEngine {
     const active = this.activeDeck.el;
     if (!active.src) return;
     if (active.paused) {
+      // A failed stream that was paused while it waited to reload has no
+      // media to resume; play() loads it again from where it stopped.
+      if (active.error && coldSrc) {
+        void this.play(coldSrc, this.state.trackId, Math.max(0, this.state.currentTime)).catch(() => undefined);
+        return;
+      }
+      this.resumeContextIfNeeded();
       void active.play();
     } else {
       this.pause();
@@ -1543,6 +1779,7 @@ export class AudioEngine {
 
   stop(): void {
     this.playSeq++;
+    this.cancelDeckRetry();
     this.clearFadeTimer();
     this.preparedNext = null;
     // Stop even before external acceptance: source resolution may still be
@@ -1577,6 +1814,7 @@ export class AudioEngine {
    */
   unload(): void {
     this.playSeq++;
+    this.cancelDeckRetry();
     this.clearFadeTimer();
     this.preparedNext = null;
     this.deactivateExternal(true);
@@ -1623,18 +1861,37 @@ export class AudioEngine {
       return;
     }
     if (!this.graph) return;
-    const el = this.activeDeck.el;
+    if (this.deckRetry && this.deckRetry.deckId === this.activeDeckIndex && (this.deckRetry.timer != null || this.activeDeck.el.readyState < HAVE_METADATA)) {
+      // The stream is down or still reloading; the reload picks the new
+      // position up, and a seek to land at the old one when its metadata
+      // arrives is replaced.
+      const target = Math.max(0, seconds);
+      this.deckRetry.at = target;
+      if (this.deckRetry.timer == null) this.scheduleMetadataSeek(this.activeDeck, target);
+      this.patch({ currentTime: target });
+      return;
+    }
+    const deck = this.activeDeck;
+    const el = deck.el;
     // Only clamp to duration when it is actually known. `el.duration || 0`
     // collapses to 0 whenever duration is NaN/Infinity (custom protocol before
     // metadata, live transcode), which turned every seek into seek-to-zero.
     // Fall back to the raw target and let the element clamp internally.
     const upper = Number.isFinite(el.duration) && el.duration > 0 ? el.duration : Number.POSITIVE_INFINITY;
     const target = Math.max(0, Math.min(upper, seconds));
+    if (deck.seekHold) {
+      // Inside the window of the seek before it: remember where the scrub is
+      // now and let the window's end apply it.
+      deck.seekHold.target = target;
+      this.patch({ currentTime: target });
+      return;
+    }
     const previous = el.currentTime;
     let assigned = false;
     try {
       el.currentTime = target;
       assigned = true;
+      this.holdDeckSeeks(deck);
     } catch (err) {
       // Element not ready to seek yet (readyState < HAVE_METADATA). Mirror
       // applyStartPosition's retry: land the seek once metadata arrives instead
@@ -1971,6 +2228,10 @@ export class AudioEngine {
     }
     this.limiterWired = false;
     this.stopTick();
+    this.cancelDeckRetry();
+    this.clearContextStallTimer();
+    this.deviceChangeRunner?.cancel();
+    this.deviceChangeRunner = null;
     if (this.deviceChangeHandler && typeof navigator !== 'undefined' && navigator.mediaDevices?.removeEventListener) {
       navigator.mediaDevices.removeEventListener('devicechange', this.deviceChangeHandler);
     }
@@ -1993,6 +2254,7 @@ export class AudioEngine {
         /* ignore */
       }
     }
+    this.graph.ctx.removeEventListener?.('statechange', this.onContextStateChange);
     this.graph.ctx.close().catch(() => undefined);
     this.graph = null;
   }

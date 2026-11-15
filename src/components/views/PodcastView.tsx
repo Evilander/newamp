@@ -17,11 +17,16 @@ function episodeKey(id: string): string {
   return `episode:${id}`;
 }
 
+// A feed can carry thousands of episodes with multi-line rows; the list shows
+// this many at a time and grows by the same on request.
+const EPISODE_PAGE = 100;
+
 export function PodcastView(): JSX.Element {
   const [subscriptions, setSubscriptions] = useState<PodcastSubscription[]>([]);
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
   const [feedUrl, setFeedUrl] = useState('');
   const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const [episodeLimit, setEpisodeLimit] = useState(EPISODE_PAGE);
   const playPodcastEpisode = usePlayerStore((state) => state.playPodcastEpisode);
 
   useEffect(() => {
@@ -35,6 +40,10 @@ export function PodcastView(): JSX.Element {
 
   const isBusy = (key: string): boolean => busyKeys.has(key);
 
+  useEffect(() => {
+    setEpisodeLimit(EPISODE_PAGE);
+  }, [selected?.feed.url]);
+
   function markBusy(key: string, on: boolean): void {
     setBusyKeys((current) => {
       const next = new Set(current);
@@ -45,7 +54,18 @@ export function PodcastView(): JSX.Element {
   }
 
   async function refreshList(): Promise<void> {
-    const next = await api.listPodcastSubscriptions().catch(() => []);
+    let next: PodcastSubscription[];
+    try {
+      next = await api.listPodcastSubscriptions();
+    } catch (err) {
+      // An empty list here would read as "no feeds"; keep what is shown and say so.
+      pushToast({
+        tone: 'error',
+        title: 'Could not load podcasts',
+        detail: err instanceof Error ? err.message : undefined,
+      });
+      return;
+    }
     setSubscriptions(next);
     setSelectedUrl((current) => current && next.some((item) => item.feed.url === current) ? current : next[0]?.feed.url ?? null);
   }
@@ -76,8 +96,8 @@ export function PodcastView(): JSX.Element {
     markBusy(feedKey(url), true);
     try {
       const subscription = await api.refreshPodcastFeed(url);
+      // The selection stays where the user has moved it while this ran.
       await refreshList();
-      setSelectedUrl(subscription.feed.url);
       pushToast({ tone: 'ok', title: 'Feed refreshed', detail: subscription.feed.title });
     } catch (err) {
       pushToast({
@@ -170,7 +190,6 @@ export function PodcastView(): JSX.Element {
           : subscription,
       ),
     );
-    setSelectedUrl(updated.feedUrl);
   }
 
   return (
@@ -274,7 +293,7 @@ export function PodcastView(): JSX.Element {
               </div>
 
               <ul className="m-0 list-none p-0">
-                {selected.episodes.map((episode) => (
+                {selected.episodes.slice(0, episodeLimit).map((episode) => (
                   <li
                     key={episode.id}
                     className="flex gap-3 border-b px-4 py-3 hover:bg-[var(--panel-2)]"
@@ -332,6 +351,16 @@ export function PodcastView(): JSX.Element {
                   </li>
                 ))}
               </ul>
+              {selected.episodes.length > episodeLimit && (
+                <div className="flex items-center gap-3 px-4 py-3 text-[11px]" style={{ color: 'var(--muted)' }}>
+                  <span>
+                    Showing {episodeLimit.toLocaleString()} of {selected.episodes.length.toLocaleString()} episodes.
+                  </span>
+                  <button className="pxbtn" onClick={() => setEpisodeLimit((limit) => limit + EPISODE_PAGE)}>
+                    Show more
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </section>

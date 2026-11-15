@@ -121,6 +121,10 @@ function* dnaSteps(samples: Float32Array, opts: ComputeDnaOptions): Generator<vo
   const fluxFrames: number[] = [];
   let prevMagnitudes: Float32Array | null = null;
   let frames = 0;
+  // Frames of digital silence add nothing to the spectral sums, so those are
+  // averaged over the frames that had a spectrum; otherwise a track with a
+  // silent stretch reads darker and its bands stop summing to 1.
+  let voiced = 0;
 
   for (let start = 0; start + frameSize <= maxSamples; start += hopSize) {
     for (let i = 0; i < frameSize; i++) {
@@ -143,6 +147,7 @@ function* dnaSteps(samples: Float32Array, opts: ComputeDnaOptions): Generator<vo
     frameRms.push(rms);
 
     if (frameEnergy > 0) {
+      voiced++;
       centroidAcc += spectralCentroid(magnitudes, sampleRate, frameSize);
       flatnessAcc += spectralFlatness(magnitudes);
       rolloffAcc += spectralRolloff(magnitudes, 0.85);
@@ -172,10 +177,11 @@ function* dnaSteps(samples: Float32Array, opts: ComputeDnaOptions): Generator<vo
   const varianceRms = frameRms.reduce((acc, v) => acc + (v - meanRms) * (v - meanRms), 0) / frameRms.length;
   const dynamicRange = clamp01(Math.sqrt(varianceRms) * 4);
 
-  const bands = Array.from(bandAcc, (v) => clamp01(v / frames));
-  const brightness = clamp01(centroidAcc / frames / (sampleRate / 2));
-  const flatness = clamp01(flatnessAcc / frames);
-  const rolloff = clamp01(rolloffAcc / frames / (sampleRate / 2));
+  const spectralFrames = Math.max(1, voiced);
+  const bands = Array.from(bandAcc, (v) => clamp01(v / spectralFrames));
+  const brightness = clamp01(centroidAcc / spectralFrames / (sampleRate / 2));
+  const flatness = clamp01(flatnessAcc / spectralFrames);
+  const rolloff = clamp01(rolloffAcc / spectralFrames / (sampleRate / 2));
 
   const onsetDensity = computeOnsetDensity(fluxFrames, sampleRate, hopSize);
   const secondsAnalyzed = (frames * hopSize) / sampleRate;
@@ -238,13 +244,14 @@ export function dnaToVector(dna: TrackDna): number[] {
   ];
 }
 
-export function pcmFromInt16(buf: Buffer | Uint8Array): Float32Array {
-  const view = buf instanceof Buffer ? buf : Buffer.from(buf);
+export function pcmFromInt16(buf: Uint8Array): Float32Array {
+  // A Buffer is a Uint8Array, and a DataView over its bytes needs no Node
+  // globals, so this also runs in the browser.
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const count = Math.floor(view.byteLength / 2);
   const out = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    const v = view.readInt16LE(i * 2);
-    out[i] = v / 32768;
+    out[i] = view.getInt16(i * 2, true) / 32768;
   }
   return out;
 }

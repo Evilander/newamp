@@ -10,7 +10,12 @@ import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
 import { DeckWindowButtons } from './DeckWindowButtons';
-import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
+import { combinePlaybackMode, isShuffleMode, repeatModeOf, type RepeatMode } from '@shared/types';
+
+// Same order as the transport's repeat button: off, all, one.
+function nextRepeat(repeat: RepeatMode): RepeatMode {
+  return repeat === 'off' ? 'all' : repeat === 'all' ? 'one' : 'off';
+}
 
 export function ClassicBentoDeck(props: DeckProps): JSX.Element {
   const {
@@ -97,13 +102,23 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
             <button onClick={onStop} title="Stop" aria-label="Stop">[]</button>
             <button onClick={onNext} title="Next" aria-label="Next track">&gt;&gt;</button>
             <ScrubBar className="nslider compact-seek" value={currentTime} max={duration || 1} onSeek={onSeek} waveform />
-            <button
-              className={isShuffleMode(mode) ? 'active' : ''}
-              onClick={() => onSetMode(combinePlaybackMode(!isShuffleMode(mode), repeatModeOf(mode)))}
-              title="Shuffle"
-            >
-              SHUF
-            </button>
+            {/* One grid cell for both, so the control row keeps its columns. */}
+            <span style={{ display: 'inline-flex', gap: 5 }}>
+              <button
+                className={isShuffleMode(mode) ? 'active' : ''}
+                onClick={() => onSetMode(combinePlaybackMode(!isShuffleMode(mode), repeatModeOf(mode)))}
+                title="Shuffle"
+              >
+                SHUF
+              </button>
+              <button
+                className={repeatModeOf(mode) !== 'off' ? 'active' : ''}
+                onClick={() => onSetMode(combinePlaybackMode(isShuffleMode(mode), nextRepeat(repeatModeOf(mode))))}
+                title={`Repeat: ${repeatModeOf(mode)}`}
+              >
+                {repeatModeOf(mode) === 'one' ? 'REP1' : 'REP'}
+              </button>
+            </span>
             <VolumeSlider
               value={volume}
               onChange={onSetVolume}
@@ -116,8 +131,24 @@ export function ClassicBentoDeck(props: DeckProps): JSX.Element {
           </div>
         </div>
 
+        {/* The art slot shows the visualizer when expanded, so this pane shows
+            the cover then; two analyser loops in a 112 px window were wasted. */}
         <div className="compact-viz">
-          <Visualizer mode="mini" width={96} height={96} />
+          {vizExpanded ? (
+            artUrl ? (
+              <img
+                src={artUrl}
+                alt={track?.album || 'cover'}
+                draggable={false}
+                style={{ display: 'block', width: '100%', height: '100%', objectFit: 'cover' }}
+                onError={(event) => {
+                  event.currentTarget.style.display = 'none';
+                }}
+              />
+            ) : null
+          ) : (
+            <Visualizer mode="mini" width={96} height={96} />
+          )}
         </div>
       </section>
     </div>

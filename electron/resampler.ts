@@ -12,6 +12,7 @@
 
 import { spawn } from 'node:child_process';
 import type { ResamplerKind } from '../shared/types.js';
+import { killChild } from './kill-child.js';
 
 const FILTERS: Record<ResamplerKind, string> = {
   soxr: 'aresample=resampler=soxr:precision=28',
@@ -26,42 +27,53 @@ const PROBE_ARGS = [
   '-af', FILTERS.soxr, '-ar', '48000', '-f', 'null', '-',
 ];
 const PROBE_TIMEOUT_MS = 10_000;
+// A probe that timed out (a first run held up by the system's scan of a
+// freshly installed binary) did not find out whether soxr is there, so it is
+// asked again, but not on every call while the answer is still being waited on.
+const PROBE_RETRY_MS = 60_000;
 
 const known = new Map<string, ResamplerKind>();
+const timedOutAt = new Map<string, number>();
 const pending = new Map<string, Promise<ResamplerKind>>();
 
 export function resamplerFilter(kind: ResamplerKind): string {
   return FILTERS[kind];
 }
 
-/** Probe `ffmpeg` once (per binary) for soxr; later calls answer from the cache. */
+/**
+ * Probe `ffmpeg` once (per binary) for soxr; later calls answer from the
+ * cache. A probe that timed out answers swr for that call only.
+ */
 export function probeResampler(ffmpeg: string): Promise<ResamplerKind> {
   const cached = known.get(ffmpeg);
   if (cached) return Promise.resolve(cached);
+  const timedOut = timedOutAt.get(ffmpeg);
+  if (timedOut != null && performance.now() - timedOut < PROBE_RETRY_MS) return Promise.resolve('swr');
   let probe = pending.get(ffmpeg);
   if (!probe) {
     probe = new Promise<ResamplerKind>((resolve) => {
       let settled = false;
-      const done = (kind: ResamplerKind): void => {
+      const done = (kind: ResamplerKind, answered: boolean): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         pending.delete(ffmpeg);
-        known.set(ffmpeg, kind);
+        if (answered) {
+          known.set(ffmpeg, kind);
+          timedOutAt.delete(ffmpeg);
+        } else {
+          timedOutAt.set(ffmpeg, performance.now());
+        }
         resolve(kind);
       };
       const child = spawn(ffmpeg, PROBE_ARGS, { stdio: 'ignore', windowsHide: true });
       // swr is always compiled in, so a probe that can't answer settles on it.
       const timer = setTimeout(() => {
-        try {
-          child.kill();
-        } catch {
-          /* already gone */
-        }
-        done('swr');
+        killChild(child);
+        done('swr', false);
       }, PROBE_TIMEOUT_MS);
-      child.on('error', () => done('swr'));
-      child.on('close', (code) => done(code === 0 ? 'soxr' : 'swr'));
+      child.on('error', () => done('swr', true));
+      child.on('close', (code) => done(code === 0 ? 'soxr' : 'swr', true));
     });
     pending.set(ffmpeg, probe);
   }

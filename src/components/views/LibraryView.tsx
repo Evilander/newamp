@@ -51,7 +51,15 @@ import {
   useTrackColumns,
   type TrackColumnKey,
 } from '../../store/useTrackColumns';
-import { nextResizeHandle, resizeHandleStop, rovingRowId, slashFocusesSearch, withoutTracks } from './libraryTableState';
+import {
+  createLatestRequestGate,
+  nextResizeHandle,
+  readRemainingRows,
+  resizeHandleStop,
+  rovingRowId,
+  slashFocusesSearch,
+  withoutTracks,
+} from './libraryTableState';
 import { freshPlayerTracks } from './libraryStoreSync';
 import { isTextEntryTarget, runRowShortcut } from './libraryRowKeys';
 
@@ -76,6 +84,9 @@ const LIBRARY_PAGE_SIZE = 600;
 // Pages after the first are bigger. Only a dozen rows are ever drawn, so what a
 // page costs is the query, and fewer reads reach the end of a large library.
 const LIBRARY_MORE_PAGE_SIZE = 2000;
+// The most tracks one play from the list puts in the queue. The queue is kept
+// and saved as a whole, so it is bounded; this is days of music at one go.
+const LIBRARY_QUEUE_LIMIT = 20000;
 // How many rows from the end of the loaded list the next page is fetched.
 const LIBRARY_AUTO_LOAD_ROWS = 40;
 // Rows drawn above and below the visible ones. The table needs to know it to
@@ -270,6 +281,7 @@ export function LibraryView(): JSX.Element {
   // can detect it resolved against a stale query and drop its page instead of
   // appending rows from a search the user already left.
   const loadGenerationRef = useRef(0);
+  const playRequestGateRef = useRef(createLatestRequestGate());
   // Rows read from the library for the current list: the next page's offset.
   // It counts rows read, not rows kept, so repeats dropped by appendTrackPage
   // don't hold it back, and it comes down when rows leave the list.
@@ -305,11 +317,17 @@ export function LibraryView(): JSX.Element {
           setLoading(false);
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (!cancelled) {
           if (!refetch) {
+            // The rows on screen belong to the query the user left; keeping
+            // them would show another search's tracks under this one's text
+            // and queue them when played.
+            rowsReadRef.current = 0;
+            setTracks([]);
             setMatchingTrackCount(0);
             setHasMoreTracks(false);
+            pushToast({ tone: 'error', title: 'Could not load tracks', detail: errorText(error) });
           }
           setLoading(false);
         }
@@ -465,6 +483,57 @@ export function LibraryView(): JSX.Element {
     }
   }
 
+  // The list only holds the pages scrolled to so far, but a queue that ended
+  // there would stop playback hours into a long library. The loaded rows start
+  // at once; the rest of the matches are read behind them and appended in one
+  // step, unless the queue was replaced or edited at its ends in the meantime.
+  async function queueRestOfList(played: Track[], offset: number, isLatestPlay: () => boolean): Promise<void> {
+    const first = played[0];
+    const last = played[played.length - 1];
+    if (!first || !last) return;
+    const stillQueued = () => {
+      const queue = usePlayerStore.getState().queue;
+      return isLatestPlay() && queue[0]?.id === first.id && queue.some((track) => track.id === last.id);
+    };
+    const query = libraryQuery;
+    const order = sort;
+    const result = await readRemainingRows({
+      getPage: (pageOffset, limit) => api.getTracks({ search: query, sort: order, limit, offset: pageOffset }),
+      offset,
+      total: matchingCountRef.current,
+      pageSize: LIBRARY_MORE_PAGE_SIZE,
+      exclude: new Set(played.map((track) => track.id)),
+      isCurrent: stillQueued,
+      pause: () => new Promise((resolve) => window.setTimeout(resolve, 40)),
+      maxRows: Math.max(0, LIBRARY_QUEUE_LIMIT - played.length),
+    });
+    if (!result) return;
+    if (result.rows.length) usePlayerStore.getState().addTracksToQueue(result.rows);
+    const queued = played.length + result.rows.length;
+    if (!result.error && queued >= LIBRARY_QUEUE_LIMIT && queued < matchingCountRef.current) {
+      pushToast({
+        tone: 'info',
+        title: `Queued ${queued.toLocaleString()} of ${matchingCountRef.current.toLocaleString()} tracks`,
+        detail: 'Play from the list again further down to queue the rest.',
+      });
+    }
+    if (result.error) {
+      pushToast({
+        tone: 'error',
+        title: 'Could not queue the rest of the list',
+        detail: errorText(result.error),
+      });
+    }
+  }
+
+  function playFromRow(index: number): void {
+    const played = tracks;
+    const offset = rowsReadRef.current;
+    const isLatestPlay = playRequestGateRef.current.begin();
+    void playQueue(played, index);
+    if (hasMoreTracks) void queueRestOfList(played, offset, isLatestPlay);
+  }
+
   async function reloadLibraryPage(): Promise<void> {
     const [nextTracks, nextCount] = await Promise.all([
       api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
@@ -476,15 +545,51 @@ export function LibraryView(): JSX.Element {
     setHasMoreTracks(nextTracks.length < nextCount);
   }
 
+  // Reads again every row the list has loaded, without blanking it, so tracks a
+  // scan added, retagged or removed inside the loaded range show up and the
+  // paging offset matches the library again.
+  async function reloadLoadedRows(): Promise<void> {
+    const generation = loadGenerationRef.current;
+    const target = Math.max(rowsReadRef.current, LIBRARY_PAGE_SIZE);
+    const query = libraryQuery;
+    const order = sort;
+    try {
+      const rows: Track[] = [];
+      while (rows.length < target) {
+        const page = await api.getTracks({
+          search: query,
+          sort: order,
+          limit: Math.min(LIBRARY_MORE_PAGE_SIZE, target - rows.length),
+          offset: rows.length,
+        });
+        if (generation !== loadGenerationRef.current) return;
+        if (!page.length) break;
+        rows.push(...page);
+        await new Promise((resolve) => window.setTimeout(resolve, 20));
+        if (generation !== loadGenerationRef.current) return;
+      }
+      const count = await api.getTrackCount({ search: query, sort: order });
+      if (generation !== loadGenerationRef.current) return;
+      rowsReadRef.current = rows.length;
+      setTracks(rows);
+      setMatchingTrackCount(count);
+      setHasMoreTracks(rows.length < count);
+    } catch (error) {
+      console.error('library reload after scan failed', error);
+    }
+  }
+
   // While a scan runs the list changes only where that costs the user nothing.
   // A list that holds every match, which is all of an empty library's first
   // tracks, is read again so new tracks appear in place. Once the first page is
   // full the loaded rows and the scroll position are left alone and only the
-  // count moves; the finished scan reads that first page again as well.
+  // count moves; the finished scan reads the loaded rows again as well.
   function refreshAfterScan(finished: boolean): void {
     const loaded = tracksRef.current.length;
     if (finished ? loaded <= LIBRARY_PAGE_SIZE : loaded < LIBRARY_PAGE_SIZE) {
       setScanRevision((revision) => revision + 1);
+    } else if (finished) {
+      void reloadLoadedRows();
     } else {
       void refreshTrackCount();
     }
@@ -1012,7 +1117,7 @@ export function LibraryView(): JSX.Element {
         loadingMore={loadingMore}
         loadMoreFailed={loadMoreFailed}
         onLoadMore={() => void loadMoreTracks()}
-        onPlay={(idx) => void playQueue(tracks, idx)}
+        onPlay={playFromRow}
         onPlayTracks={(selected) => void playQueue(selected, 0)}
         onPlayNext={queueTrackNext}
         onAddToQueue={addTrackToQueue}
@@ -1239,6 +1344,7 @@ function LibraryTrackPane({
         tracks={tracks}
         currentId={currentId}
         virtualWindow={{ startIndex, endIndex, topPad, bottomPad }}
+        totalRowCount={matchingTrackCount}
         {...tableProps}
       />
       <LibraryPagingFooter
@@ -2006,6 +2112,7 @@ const LibraryRow = memo(function LibraryRow({
       data-track-title={t.title}
       data-track-missing={missing ? '' : undefined}
       aria-label={t.artist ? `${t.title} by ${t.artist}` : t.title}
+      aria-rowindex={absoluteIndex + 2}
       aria-current={isActive ? 'true' : undefined}
       title={missing ? `File not found since ${new Date(t.missingSince!).toLocaleString()}` : undefined}
       className={`cursor-pointer transition-colors${isActive ? ' track-row-playing' : ''}`}
@@ -2038,6 +2145,8 @@ const LibraryRow = memo(function LibraryRow({
         // inside row-hosted inputs/selects pass through untouched — and
         // stopPropagation keeps the window-level player shortcuts out of it.
         if (e.target !== e.currentTarget) return;
+        // A chord such as Cmd+Q (Quit) or Cmd+Enter is not this grammar's.
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
         const key = e.key.toLowerCase();
         if (key === 'enter') {
           e.preventDefault();
@@ -2092,6 +2201,7 @@ export function TrackTable({
   onBulkMetadataSaved,
   virtualWindow,
   highlightTrack,
+  totalRowCount,
 }: {
   tracks: Track[];
   currentId: number | null;
@@ -2115,6 +2225,11 @@ export function TrackTable({
    * then by exact title.
    */
   highlightTrack?: { id: number | null; title: string | null } | null;
+  /**
+   * How many rows the list holds when only some are loaded, so assistive tech
+   * reads "row N of M" for the whole list rather than for the loaded slice.
+   */
+  totalRowCount?: number;
 }): JSX.Element {
   const storeToggleLove = usePlayerStore((s) => s.toggleLove);
   const storeSetTrackRating = usePlayerStore((s) => s.setTrackRating);
@@ -2216,10 +2331,15 @@ export function TrackTable({
   // rather than a prop threaded through every LibraryRow: find the row,
   // scroll it into view, arm the CSS flash animation, disarm after it plays.
   const tableRef = useRef<HTMLTableElement | null>(null);
+  // The highlight that already flashed, so loading more rows into the list does
+  // not scroll back to it and flash again.
+  const flashedHighlightRef = useRef<object | null>(null);
   useEffect(() => {
     if (!highlightTrack || (highlightTrack.id == null && !highlightTrack.title)) return undefined;
+    if (flashedHighlightRef.current === highlightTrack) return undefined;
     let disposed = false;
     let clearTimer = 0;
+    let flashedRow: HTMLElement | null = null;
     const retryTimer = { id: 0 };
     const findRow = (): HTMLElement | null => {
       const root = tableRef.current;
@@ -2229,8 +2349,11 @@ export function TrackTable({
         if (byId) return byId;
       }
       if (highlightTrack.title) {
-        const safe = highlightTrack.title.replace(/"/g, '\\"');
-        return root.querySelector<HTMLElement>(`tr[data-track-title="${safe}"]`);
+        // Compared as data: a title can hold quotes, backslashes or newlines
+        // that would break a selector built from it.
+        for (const candidate of root.querySelectorAll<HTMLElement>('tr[data-track-title]')) {
+          if (candidate.dataset.trackTitle === highlightTrack.title) return candidate;
+        }
       }
       return null;
     };
@@ -2242,8 +2365,10 @@ export function TrackTable({
         if (attempt < 2) retryTimer.id = window.setTimeout(() => apply(attempt + 1), 350);
         return;
       }
+      flashedHighlightRef.current = highlightTrack;
       row.scrollIntoView({ block: 'center', behavior: 'smooth' });
       row.setAttribute('data-newamp-track-highlight', '');
+      flashedRow = row;
       clearTimer = window.setTimeout(() => row.removeAttribute('data-newamp-track-highlight'), 2600);
     };
     apply(0);
@@ -2251,6 +2376,7 @@ export function TrackTable({
       disposed = true;
       if (retryTimer.id) window.clearTimeout(retryTimer.id);
       if (clearTimer) window.clearTimeout(clearTimer);
+      flashedRow?.removeAttribute('data-newamp-track-highlight');
     };
   }, [highlightTrack, tracks]);
 
@@ -2451,24 +2577,32 @@ export function TrackTable({
   storeToggleAvoidAutoPlayRef.current = storeToggleAvoidAutoPlay;
 
   async function addToSavedPlaylist(playlistId: number, track: Track): Promise<void> {
-    const updated = await api.addTracksToPlaylist({ playlistId, trackIds: [track.id] });
-    if (!updated) {
-      setPlaylistStatus('Playlist was not found.');
-      return;
+    try {
+      const updated = await api.addTracksToPlaylist({ playlistId, trackIds: [track.id] });
+      if (!updated) {
+        setPlaylistStatus('Playlist was not found.');
+        return;
+      }
+      setPlaylistStatus(`Added ${track.title} to ${updated.name}.`);
+    } catch (error) {
+      setPlaylistStatus(`Could not add ${track.title} to the playlist: ${errorText(error)}`);
     }
-    setPlaylistStatus(`Added ${track.title} to ${updated.name}.`);
   }
 
   async function saveSelectedAsPlaylist(): Promise<void> {
     if (!selectedTracks.length) return;
     const name = newPlaylistName.trim() || defaultPlaylistName(selectedTracks);
-    const saved = await api.savePlaylist({
-      name,
-      trackIds: selectedTracks.map((track) => track.id),
-    });
-    setPlaylistStatus(`Created ${saved.name} with ${saved.trackCount.toLocaleString()} tracks.`);
-    setNewPlaylistName('');
-    setSelectedIds(new Set());
+    try {
+      const saved = await api.savePlaylist({
+        name,
+        trackIds: selectedTracks.map((track) => track.id),
+      });
+      setPlaylistStatus(`Created ${saved.name} with ${saved.trackCount.toLocaleString()} tracks.`);
+      setNewPlaylistName('');
+      setSelectedIds(new Set());
+    } catch (error) {
+      setPlaylistStatus(`Could not save the playlist: ${errorText(error)}`);
+    }
   }
 
   async function applyBulkMetadataEdit(): Promise<void> {
@@ -2490,37 +2624,59 @@ export function TrackTable({
     const patch = patchResult.value;
 
     setBulkBusy(true);
+    // Tracks written before a failure are already changed on disk and in the
+    // library, so they reach the table whatever happens to the rest.
+    const updated: Track[] = [];
+    let failed = 0;
+    let firstError: unknown = null;
     try {
-      const updated: Track[] = [];
       for (const track of selectedTracks) {
-        const next = await api.applyTrackMetadataEdit(track.id, patch);
-        if (next) updated.push(next);
+        try {
+          const next = await api.applyTrackMetadataEdit(track.id, patch);
+          if (next) updated.push(next);
+        } catch (error) {
+          failed += 1;
+          firstError ??= error;
+        }
       }
-      saveBulkResults(updated);
-      setPlaylistStatus(`Updated metadata for ${updated.length.toLocaleString()} selected track${updated.length === 1 ? '' : 's'}.`);
-      setBulkAlbumArtist('');
-      setBulkAlbum('');
-      setBulkGenre('');
-      setBulkYear('');
     } finally {
+      if (updated.length) saveBulkResults(updated);
       setBulkBusy(false);
     }
+    const updatedText = `Updated metadata for ${updated.length.toLocaleString()} selected track${updated.length === 1 ? '' : 's'}.`;
+    if (failed) {
+      setPlaylistStatus(`${updatedText} ${failed.toLocaleString()} failed: ${errorText(firstError)}`);
+      return;
+    }
+    setPlaylistStatus(updatedText);
+    setBulkAlbumArtist('');
+    setBulkAlbum('');
+    setBulkGenre('');
+    setBulkYear('');
   }
 
   async function autoNumberSelectedTracks(): Promise<void> {
     if (!selectedTracks.length || bulkBusy) return;
     setBulkBusy(true);
+    const updated: Track[] = [];
+    let failed = 0;
+    let firstError: unknown = null;
     try {
-      const updated: Track[] = [];
       for (const [index, track] of selectedTracks.entries()) {
-        const next = await api.applyTrackMetadataEdit(track.id, { trackNo: index + 1 });
-        if (next) updated.push(next);
+        try {
+          const next = await api.applyTrackMetadataEdit(track.id, { trackNo: index + 1 });
+          if (next) updated.push(next);
+        } catch (error) {
+          failed += 1;
+          firstError ??= error;
+        }
       }
-      saveBulkResults(updated);
-      setPlaylistStatus(`Numbered ${updated.length.toLocaleString()} selected track${updated.length === 1 ? '' : 's'} in visible order.`);
     } finally {
+      if (updated.length) saveBulkResults(updated);
       setBulkBusy(false);
     }
+    const numberedText = `Numbered ${updated.length.toLocaleString()} selected track${updated.length === 1 ? '' : 's'} in visible order.`;
+    setPlaylistStatus(failed ? `${numberedText} ${failed.toLocaleString()} failed: ${errorText(firstError)}` : numberedText);
   }
 
   async function exportSelectedWavs(): Promise<void> {
@@ -2534,6 +2690,8 @@ export function TrackTable({
       }
       const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
       setPlaylistStatus(`Exported ${result.exported.toLocaleString()} WAV file${result.exported === 1 ? '' : 's'}${skipped} to ${result.path}.`);
+    } catch (error) {
+      setPlaylistStatus(`Could not finish the WAV export: ${errorText(error)}`);
     } finally {
       setBulkBusy(false);
     }
@@ -2550,6 +2708,8 @@ export function TrackTable({
       }
       const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
       setPlaylistStatus(`Exported ${result.exported.toLocaleString()} ${format.toUpperCase()} file${result.exported === 1 ? '' : 's'}${skipped} to ${result.path}.`);
+    } catch (error) {
+      setPlaylistStatus(`Could not finish the export: ${errorText(error)}`);
     } finally {
       setBulkBusy(false);
     }
@@ -2563,6 +2723,8 @@ export function TrackTable({
       saveBulkResults(result.tracks);
       const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
       setPlaylistStatus(`Analyzed ReplayGain for ${result.analyzed.toLocaleString()} selected track${result.analyzed === 1 ? '' : 's'}${skipped}.`);
+    } catch (error) {
+      setPlaylistStatus(`Could not finish the ReplayGain analysis: ${errorText(error)}`);
     } finally {
       setBulkBusy(false);
     }
@@ -2577,6 +2739,8 @@ export function TrackTable({
       const skipped = result.skipped.length ? `; ${result.skipped.length.toLocaleString()} skipped` : '';
       const groups = result.albumGroups == null ? '' : ` across ${result.albumGroups.toLocaleString()} album group${result.albumGroups === 1 ? '' : 's'}`;
       setPlaylistStatus(`Analyzed album ReplayGain for ${result.analyzed.toLocaleString()} selected track${result.analyzed === 1 ? '' : 's'}${groups}${skipped}.`);
+    } catch (error) {
+      setPlaylistStatus(`Could not finish the Album ReplayGain analysis: ${errorText(error)}`);
     } finally {
       setBulkBusy(false);
     }
@@ -2842,6 +3006,7 @@ export function TrackTable({
       </div>
       <table
         ref={tableRef}
+        aria-rowcount={Math.max(totalRowCount ?? 0, visible.length) + 1}
         className="table-fixed text-[12px]"
         style={{
           fontFamily: 'var(--font-mono)',
@@ -2862,6 +3027,7 @@ export function TrackTable({
       >
         <tr
           className="text-left text-[9px] uppercase tracking-[0.12em]"
+          aria-rowindex={1}
           style={{ borderBottom: '1px solid var(--line)' }}
           // Right-click the header for the column chooser.
           title="Right-click a column header to choose and order the columns"
@@ -3027,6 +3193,7 @@ function MetadataRescuePanel({
   const [year, setYear] = useState(metadataInputValue(panel.track, 'year'));
   const [trackNo, setTrackNo] = useState(metadataInputValue(panel.track, 'trackNo'));
   const [discNo, setDiscNo] = useState(metadataInputValue(panel.track, 'discNo'));
+  const [saveError, setSaveError] = useState<string | null>(null);
   const setters: Record<TrackMetadataField, (value: string) => void> = {
     title: setTitle,
     artist: setArtist,
@@ -3062,16 +3229,28 @@ function MetadataRescuePanel({
     if (!changed.length) return;
     const patch: TrackMetadataPatchInput = {};
     for (const field of changed) {
-      if (field === 'year' || field === 'trackNo' || field === 'discNo') patch[field] = metadataOptionalInteger(values[field]);
-      else patch[field] = values[field];
+      if (field === 'year' || field === 'trackNo' || field === 'discNo') {
+        // A blank empties the field; anything else that is not a whole number
+        // is a typo, and saving it as empty would erase the stored value.
+        const value = metadataOptionalInteger(values[field]);
+        if (value === undefined) {
+          setSaveError(`${field === 'trackNo' ? 'Track' : field === 'discNo' ? 'Disc' : 'Year'} must be a whole number.`);
+          return;
+        }
+        patch[field] = value;
+      } else patch[field] = values[field];
     }
+    setSaveError(null);
     const sent = { ...values };
-    void onManualSave(patch).then((updated) => {
-      if (!updated) return;
-      const saved: Partial<Record<TrackMetadataField, string>> = {};
-      for (const field of changed) saved[field] = sent[field];
-      loaded.current = { ...loaded.current, ...saved };
-    });
+    void onManualSave(patch).then(
+      (updated) => {
+        if (!updated) return;
+        const saved: Partial<Record<TrackMetadataField, string>> = {};
+        for (const field of changed) saved[field] = sent[field];
+        loaded.current = { ...loaded.current, ...saved };
+      },
+      (error) => setSaveError(`Could not save the edit: ${errorText(error)}`),
+    );
   }
 
   return (
@@ -3086,9 +3265,13 @@ function MetadataRescuePanel({
         <div className="min-w-0 flex-1 truncate text-[11px]" style={{ color: 'var(--ink-2)' }}>
           {panel.track.title} - {panel.track.artist || 'Unknown Artist'}
         </div>
-        {panel.status && (
-          <div className="truncate text-[10px]" style={{ color: 'var(--muted)' }}>
-            {panel.status}
+        {(saveError ?? panel.status) && (
+          <div
+            className="truncate text-[10px]"
+            style={{ color: saveError ? 'var(--accent-text, var(--accent))' : 'var(--muted)' }}
+            role={saveError ? 'alert' : undefined}
+          >
+            {saveError ?? panel.status}
           </div>
         )}
         <button className="pxbtn" onClick={onClose}>
@@ -3201,10 +3384,11 @@ function metadataInputValue(track: Track, field: TrackMetadataField): string {
   return value == null ? '' : String(value);
 }
 
-function metadataOptionalInteger(value: string): number | null {
-  if (!value.trim()) return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.trunc(n) : null;
+/** Null for a blank (empty the field), undefined for text that is not a whole number. */
+function metadataOptionalInteger(value: string): number | null | undefined {
+  const text = value.trim();
+  if (!text) return null;
+  return /^\d+$/.test(text) ? Number(text) : undefined;
 }
 
 function readBulkMetadataPatch(input: {

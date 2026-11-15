@@ -20,6 +20,8 @@
 // allocation-free (writes into a caller-owned scratch object) because it runs
 // at 60fps.
 
+import { accentPair } from './eviland-appearance';
+
 // ---------------------------------------------------------------------------
 // Audio features a binding can read. These mirror EvilandFrame's scalar fields
 // (plus a few synthesized inputs). Kept as a string union so configs are JSON.
@@ -115,6 +117,8 @@ export interface PaletteConfig {
   dark: RGB;
   accent: RGB;
   light: RGB;
+  /** A second accent in harmony with the first; consumers fall back to `accent` when absent. */
+  accent2?: RGB;
 }
 
 /**
@@ -276,6 +280,14 @@ export interface OperatorConfig {
   echoFlipX?: Channel;
   echoFlipY?: Channel;
 
+  /**
+   * How far the stereo image spreads across the picture: 0 draws everything
+   * down the centre, 1 (the default, and what a look without the channel gets)
+   * places each emitter and ray where its band sits in the mix, above 1
+   * exaggerates it. Multiplied into the horizontal placement only.
+   */
+  stereoSpread?: Channel;
+
   /** Organic motion species (see MorphKind). Omitted = classic warp only. */
   morph?: MorphConfig;
 
@@ -355,6 +367,8 @@ export interface EvilandDynamics {
   echoAlpha: number;
   echoFlipX: number; // 0 or 1
   echoFlipY: number; // 0 or 1
+  /** 0..1.5 multiplier on where the stereo image sits across the picture. 1 = as mixed. */
+  stereoSpread: number;
   /** Morph species index into MORPH_KINDS (0 = none), strength and size. */
   morph: number;
   morphAmount: number;
@@ -518,6 +532,7 @@ export function createDynamics(): EvilandDynamics {
     decayR: 0, decayG: 0, decayB: 0,
     centreX: 0.5, centreY: 0.5,
     echoZoom: 0, echoRotate: 0, echoAlpha: 0, echoFlipX: 0, echoFlipY: 0,
+    stereoSpread: 1,
     morph: 0, morphAmount: 0, morphScale: 1,
     transition: 1,
   };
@@ -645,6 +660,7 @@ export function evalConfig(
   out.echoAlpha = clamp(evalOptional(config.echoAlpha, frame, sectionSeed, q, 0), 0, 0.9);
   out.echoFlipX = evalOptional(config.echoFlipX, frame, sectionSeed, q, 0) > 0.5 ? 1 : 0;
   out.echoFlipY = evalOptional(config.echoFlipY, frame, sectionSeed, q, 0) > 0.5 ? 1 : 0;
+  out.stereoSpread = clamp(evalOptional(config.stereoSpread, frame, sectionSeed, q, 1), 0, 1.5);
 
   const morph = config.morph;
   const morphIndex = morph ? MORPH_KINDS.indexOf(morph.kind) : 0;
@@ -812,8 +828,28 @@ function inGamut(rgb: Float64Array): boolean {
   return rgb[0]! >= -0.002 && rgb[0]! <= 1.002 && rgb[1]! >= -0.002 && rgb[1]! <= 1.002 && rgb[2]! >= -0.002 && rgb[2]! <= 1.002;
 }
 
+/** Write the colour OKLCh (L, C, h in radians) names into `out`, pulling chroma in until it fits sRGB. */
+function oklchInto(out: RGB, L: number, C: number, h: number): void {
+  oklchToRgb(L, C, h, rgbScratch);
+  if (!inGamut(rgbScratch)) {
+    // Pull the chroma in until the colour fits, keeping its lightness and hue.
+    let lo = 0;
+    let hi = C;
+    for (let i = 0; i < 8; i++) {
+      const mid = (lo + hi) * 0.5;
+      oklchToRgb(L, mid, h, rgbScratch);
+      if (inGamut(rgbScratch)) lo = mid;
+      else hi = mid;
+    }
+    oklchToRgb(L, lo, h, rgbScratch);
+  }
+  out[0] = fromLinear(clamp(rgbScratch[0]!, 0, 1));
+  out[1] = fromLinear(clamp(rgbScratch[1]!, 0, 1));
+  out[2] = fromLinear(clamp(rgbScratch[2]!, 0, 1));
+}
+
 /** Interpolate two colours in OKLCh, writing the RGB result into `out`. */
-function lerpColorInto(out: RGB, a: RGB, b: RGB, t: number): void {
+export function lerpColorInto(out: RGB, a: RGB, b: RGB, t: number): void {
   if (t <= 0) {
     out[0] = a[0]; out[1] = a[1]; out[2] = a[2];
     return;
@@ -836,28 +872,77 @@ function lerpColorInto(out: RGB, a: RGB, b: RGB, t: number): void {
     else if (dh < -Math.PI) dh += TAU;
     h = oklchA[2]! + dh * t;
   }
-  oklchToRgb(L, C, h, rgbScratch);
-  if (!inGamut(rgbScratch)) {
-    // Pull the chroma in until the colour fits, keeping its lightness and hue.
-    let lo = 0;
-    let hi = C;
-    for (let i = 0; i < 8; i++) {
-      const mid = (lo + hi) * 0.5;
-      oklchToRgb(L, mid, h, rgbScratch);
-      if (inGamut(rgbScratch)) lo = mid;
-      else hi = mid;
-    }
-    oklchToRgb(L, lo, h, rgbScratch);
-  }
-  out[0] = fromLinear(clamp(rgbScratch[0]!, 0, 1));
-  out[1] = fromLinear(clamp(rgbScratch[1]!, 0, 1));
-  out[2] = fromLinear(clamp(rgbScratch[2]!, 0, 1));
+  oklchInto(out, L, C, h);
+}
+
+/**
+ * Turn a colour's hue by `degrees` in OKLCh, writing the result into `out`
+ * (which may be `rgb` itself). Lightness and chroma stay, so the colour moves
+ * round the wheel without getting brighter, duller or greyer on the way.
+ */
+export function turnColorInto(out: RGB, rgb: RGB, degrees: number): void {
+  rgbToOklch(rgb[0], rgb[1], rgb[2], oklchA);
+  oklchInto(out, oklchA[0]!, oklchA[1]!, oklchA[2]! + (degrees * Math.PI) / 180);
+}
+
+/**
+ * A lighter (`dL` > 0) or darker (`dL` < 0) step of the same hue, in OKLCh
+ * lightness units (0..1), written into `out` (which may be `rgb` itself).
+ * Scaling the channels of a dark colour by hand pushes it toward red-brown;
+ * this keeps the hue and gives up chroma only where sRGB has no room for it.
+ */
+export function shadeColorInto(out: RGB, rgb: RGB, dL: number): void {
+  rgbToOklch(rgb[0], rgb[1], rgb[2], oklchA);
+  oklchInto(out, clamp(oklchA[0]! + dL, 0, 1), oklchA[1]!, oklchA[2]!);
 }
 
 function lerpRGB(a: RGB, b: RGB, t: number): RGB {
   const out: RGB = [0, 0, 0];
   lerpColorInto(out, a, b, t);
   return out;
+}
+
+/**
+ * A palette's second accent, or the shared partner for its look when it has
+ * none. accentPair remembers only its last answer, and a fade asks about two
+ * palettes every frame, so each side keeps its own answer here and the fade
+ * works the partner out once instead of once a frame.
+ */
+interface PartnerMemo { seed: string; accent: RGB | null; value: RGB | null }
+
+function partnerOf(memo: PartnerMemo, palette: PaletteConfig, seed: string | undefined): RGB {
+  if (palette.accent2) return palette.accent2;
+  const accent = palette.accent;
+  const at = memo.accent;
+  if (memo.value && at && memo.seed === (seed ?? '') && at[0] === accent[0] && at[1] === accent[1] && at[2] === accent[2]) return memo.value;
+  memo.seed = seed ?? '';
+  memo.accent = [accent[0], accent[1], accent[2]];
+  memo.value = accentPair(palette, seed);
+  return memo.value;
+}
+
+const partnerA: PartnerMemo = { seed: '', accent: null, value: null };
+const partnerB: PartnerMemo = { seed: '', accent: null, value: null };
+
+function lerpPalette(a: PaletteConfig, b: PaletteConfig, t: number, aSeed?: string, bSeed?: string): PaletteConfig {
+  const out: PaletteConfig = {
+    bg: lerpRGB(a.bg, b.bg, t),
+    dark: lerpRGB(a.dark, b.dark, t),
+    accent: lerpRGB(a.accent, b.accent, t),
+    light: lerpRGB(a.light, b.light, t),
+    accent2: [0, 0, 0],
+  };
+  // A side made before there was a second accent stands in with its analogous
+  // partner (accentPair), so a fade between an old look and a new one has no
+  // snap at either end. Two old looks fade through their partners too: the
+  // result then agrees with the partner the renderer would pick for either end.
+  lerpColorInto(out.accent2!, partnerOf(partnerA, a, aSeed), partnerOf(partnerB, b, bSeed), t);
+  return out;
+}
+
+/** Copy a palette colour into `into`, which stays the same array. */
+function copyRGB(into: RGB, from: RGB): void {
+  into[0] = from[0]; into[1] = from[1]; into[2] = from[2];
 }
 
 /** Interpolate an optional Channel; missing inputs treated as {base: defaultBase}. */
@@ -914,12 +999,7 @@ export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): Ope
       scale: lerp(a.waveform.scale, b.waveform.scale, t),
     },
     palette: a.palette && b.palette
-      ? {
-          bg: lerpRGB(a.palette.bg, b.palette.bg, t),
-          dark: lerpRGB(a.palette.dark, b.palette.dark, t),
-          accent: lerpRGB(a.palette.accent, b.palette.accent, t),
-          light: lerpRGB(a.palette.light, b.palette.light, t),
-        }
+      ? lerpPalette(a.palette, b.palette, t, a.seed, b.seed)
       : (pick.palette ?? null),
     bloom: lerpChannel(a.bloom, b.bloom, t),
     emitterScale: lerp(a.emitterScale, b.emitterScale, t),
@@ -944,6 +1024,7 @@ export function lerpConfig(a: OperatorConfig, b: OperatorConfig, t: number): Ope
     echoAlpha: lerpOptional(a.echoAlpha, b.echoAlpha, t, 0),
     echoFlipX: lerpOptional(a.echoFlipX, b.echoFlipX, t, 0),
     echoFlipY: lerpOptional(a.echoFlipY, b.echoFlipY, t, 0),
+    stereoSpread: lerpOptional(a.stereoSpread, b.stereoSpread, t, 1),
     morph: lerpMorph(a.morph, b.morph, t),
   };
   return out;
@@ -973,7 +1054,8 @@ function lerpOptionalInto(
     | 'radialZoom' | 'radialRotate' | 'radialSwirl' | 'radialDecay'
     | 'decayR' | 'decayG' | 'decayB'
     | 'centreX' | 'centreY'
-    | 'echoZoom' | 'echoRotate' | 'echoAlpha' | 'echoFlipX' | 'echoFlipY',
+    | 'echoZoom' | 'echoRotate' | 'echoAlpha' | 'echoFlipX' | 'echoFlipY'
+    | 'stereoSpread',
   a: Channel | undefined,
   b: Channel | undefined,
   t: number,
@@ -1064,6 +1146,8 @@ export function lerpConfigInto(
     lerpColorInto(opal.dark, a.palette.dark, b.palette.dark, t);
     lerpColorInto(opal.accent, a.palette.accent, b.palette.accent, t);
     lerpColorInto(opal.light, a.palette.light, b.palette.light, t);
+    // Same stand-in for a side without a second accent as lerpConfig.
+    lerpColorInto(opal.accent2 ??= [0, 0, 0], partnerOf(partnerA, a.palette, a.seed), partnerOf(partnerB, b.palette, b.seed), t);
   } else if (pick.palette) {
     // Snap-pick semantics, but COPY values (not the reference) so out.palette
     // remains independent of pick.palette.
@@ -1079,6 +1163,8 @@ export function lerpConfigInto(
     opal.light[0] = pick.palette.light[0];
     opal.light[1] = pick.palette.light[1];
     opal.light[2] = pick.palette.light[2];
+    if (pick.palette.accent2) copyRGB(opal.accent2 ??= [0, 0, 0], pick.palette.accent2);
+    else delete opal.accent2;
   } else {
     // Neither side has a palette — match lerpConfig's `pick.palette ?? null`.
     out.palette = null;
@@ -1110,6 +1196,7 @@ export function lerpConfigInto(
   lerpOptionalInto(out, 'echoAlpha', a.echoAlpha, b.echoAlpha, t, 0);
   lerpOptionalInto(out, 'echoFlipX', a.echoFlipX, b.echoFlipX, t, 0);
   lerpOptionalInto(out, 'echoFlipY', a.echoFlipY, b.echoFlipY, t, 0);
+  lerpOptionalInto(out, 'stereoSpread', a.stereoSpread, b.stereoSpread, t, 1);
   out.morph = lerpMorph(a.morph, b.morph, t, out.morph);
   // Director stamps _transition AFTER this call on the fade path; leave it
   // untouched here to match lerpConfig's behavior (verified by the operators

@@ -9,11 +9,137 @@ import {
   tuneStation,
 } from '../../api/radiobrowser';
 import { usePlayerStore } from '../../store/usePlayerStore';
+import { volumePositionToGain } from '../../audio/engine';
 import { pushToast } from '../../lib/toast';
 import { ViewHeader } from '../ViewHeader';
 import { Antenna } from '../Icons';
 
 const SEARCH_DEBOUNCE_MS = 250;
+
+// The stream belongs to the app, not to this view: the element and the live
+// station live here so leaving Radio for another view leaves the station
+// playing, and coming back finds it.
+let radioElement: HTMLAudioElement | null = null;
+let radioStation: RadioStation | null = null;
+const radioListeners = new Set<() => void>();
+let followingPlayer = false;
+let outputDeviceId: string | null = null;
+
+function notifyRadio(): void {
+  for (const listener of radioListeners) listener();
+}
+
+// The element is outside the Web Audio graph, so the transport's volume and the
+// chosen output device are carried over to it by hand. Radio has no gain past
+// unity; the library's perceptual taper is applied the same way.
+function applyRadioOutput(): void {
+  const el = radioElement;
+  if (!el) return;
+  const { volume, settings } = usePlayerStore.getState();
+  el.volume = Math.max(0, Math.min(1, volumePositionToGain(volume)));
+  const deviceId = settings?.audioOutputDeviceId ?? null;
+  const sinkable = el as HTMLAudioElement & { setSinkId?: (sinkId: string) => Promise<void> };
+  if (deviceId !== outputDeviceId && typeof sinkable.setSinkId === 'function') {
+    outputDeviceId = deviceId;
+    sinkable.setSinkId(deviceId ?? '').catch(() => undefined);
+  }
+}
+
+function getRadioElement(): HTMLAudioElement {
+  if (!radioElement) {
+    // No crossOrigin: nothing taps this element, and an anonymous CORS request
+    // would refuse every station that doesn't send CORS headers.
+    radioElement = new Audio();
+  }
+  if (!followingPlayer) {
+    followingPlayer = true;
+    usePlayerStore.subscribe((state, previous) => {
+      if (state.volume !== previous.volume || state.settings?.audioOutputDeviceId !== previous.settings?.audioOutputDeviceId) {
+        applyRadioOutput();
+      }
+      // Library playback starting from anywhere ends the station, whether or
+      // not the Radio view is open to notice.
+      if (state.isPlaying && !previous.isPlaying && radioStation) endRadioStream();
+    });
+  }
+  applyRadioOutput();
+  return radioElement;
+}
+
+let streamWatch: { dispose: () => void } | null = null;
+
+// How long a stream may sit without data before it counts as lost, and how long
+// to wait before each of the reconnect attempts.
+const STREAM_STALL_LIMIT_MS = 20000;
+const STREAM_RECONNECT_DELAYS_MS = [1500, 4000];
+
+// A connection that dies after play() resolved (an Icecast mount going away)
+// raises no failure of its own, so the bar would say LIVE over silence. This
+// listens for the element giving up or running dry, tries to reconnect a couple
+// of times, and then ends the station and says so.
+function watchStream(el: HTMLAudioElement, station: RadioStation): void {
+  streamWatch?.dispose();
+  let disposed = false;
+  let stallTimer = 0;
+  let reconnectTimer = 0;
+  let reconnects = 0;
+  const clearStall = (): void => {
+    window.clearTimeout(stallTimer);
+    stallTimer = 0;
+  };
+  const lost = (): void => {
+    if (disposed) return;
+    clearStall();
+    if (reconnects < STREAM_RECONNECT_DELAYS_MS.length) {
+      const delay = STREAM_RECONNECT_DELAYS_MS[reconnects++]!;
+      reconnectTimer = window.setTimeout(() => {
+        if (disposed) return;
+        void tuneStation(el, station).then((result) => {
+          if (!disposed && !result.ok) lost();
+        });
+      }, delay);
+      return;
+    }
+    endRadioStream();
+    pushToast({ tone: 'error', title: 'Radio stream lost', detail: `${station.name} stopped sending audio.` });
+  };
+  const waiting = (): void => {
+    if (!stallTimer) stallTimer = window.setTimeout(lost, STREAM_STALL_LIMIT_MS);
+  };
+  const playing = (): void => {
+    clearStall();
+    reconnects = 0;
+  };
+  el.addEventListener('error', lost);
+  el.addEventListener('ended', lost);
+  el.addEventListener('waiting', waiting);
+  el.addEventListener('stalled', waiting);
+  el.addEventListener('playing', playing);
+  el.addEventListener('timeupdate', clearStall);
+  streamWatch = {
+    dispose: () => {
+      disposed = true;
+      clearStall();
+      window.clearTimeout(reconnectTimer);
+      el.removeEventListener('error', lost);
+      el.removeEventListener('ended', lost);
+      el.removeEventListener('waiting', waiting);
+      el.removeEventListener('stalled', waiting);
+      el.removeEventListener('playing', playing);
+      el.removeEventListener('timeupdate', clearStall);
+    },
+  };
+}
+
+function endRadioStream(): void {
+  // The watch comes off first: emptying the source raises an error event.
+  streamWatch?.dispose();
+  streamWatch = null;
+  radioElement?.pause();
+  if (radioElement) radioElement.src = '';
+  radioStation = null;
+  notifyRadio();
+}
 
 export function RadioView(): JSX.Element {
   const [stations, setStations] = useState<RadioStation[]>([]);
@@ -22,7 +148,7 @@ export function RadioView(): JSX.Element {
   const [tag, setTag] = useState<string>('');
   // Raw directory tags, offered as search suggestions rather than chips.
   const [tagSuggestions, setTagSuggestions] = useState<string[]>([]);
-  const [active, setActive] = useState<RadioStation | null>(null);
+  const [active, setActive] = useState<RadioStation | null>(() => radioStation);
   const [connecting, setConnecting] = useState<RadioStation | null>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
   // Bumped by every play and stop so a slow connect that lost the race can't
@@ -32,11 +158,16 @@ export function RadioView(): JSX.Element {
   const pauseLibrary = () => usePlayerStore.getState().engine.pause();
 
   useEffect(() => {
-    // No crossOrigin: nothing taps this element, and an anonymous CORS request
-    // would refuse every station that doesn't send CORS headers.
-    audio.current = new Audio();
+    audio.current = getRadioElement();
+    // The station can end while another view is open (library playback
+    // starting, a stream that dropped); this view follows the shared state.
+    const sync = (): void => {
+      setActive(radioStation);
+      if (!radioStation) setConnecting(null);
+    };
+    radioListeners.add(sync);
     return () => {
-      audio.current?.pause();
+      radioListeners.delete(sync);
       audio.current = null;
     };
   }, []);
@@ -102,6 +233,10 @@ export function RadioView(): JSX.Element {
     if (!el) return;
     if (isPlayingLibrary) pauseLibrary();
     const mine = ++attempt.current;
+    // The previous station's watch must not read the source swap as a drop.
+    streamWatch?.dispose();
+    streamWatch = null;
+    radioStation = null;
     setActive(null);
     setConnecting(s);
     const result = await tuneStation(el, s);
@@ -112,13 +247,14 @@ export function RadioView(): JSX.Element {
       return;
     }
     setActive(s);
+    radioStation = s;
+    watchStream(el, s);
     void clickStation(s.id);
   }
 
   function stopRadio(): void {
     attempt.current++;
-    audio.current?.pause();
-    if (audio.current) audio.current.src = '';
+    endRadioStream();
     setActive(null);
     setConnecting(null);
   }

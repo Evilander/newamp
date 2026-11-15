@@ -24,7 +24,7 @@ const posix = ['/music/To Listen/b-second.mp3', '/music/To Listen/a-first.mp3', 
 const windows = ['C:\\Music\\Inbox\\one.flac', 'C:\\Music\\Inbox\\Deep\\two.flac', 'C:\\Music\\Elsewhere\\three.flac'];
 let lib = await LibraryStore.open(dbPath);
 lib.upsertTracks([...posix, ...windows].map((path, i) => ({
-  ...base, path, title: path.split(/[\\/]/).pop(), artist: `Artist ${i}`, trackNo: i + 1,
+  ...base, path, title: path.split(/[\\/]/).pop(), artist: `Artist ${i}`, album: `Single ${i}`, trackNo: i + 1,
 })));
 
 const titles = (tracks) => tracks.map((t) => t.title);
@@ -33,6 +33,17 @@ assert.deepEqual(
   titles(lib.runSmartPlaylistRule(folderRule)),
   ['a-first.mp3', 'b-second.mp3', 'c-third.mp3'],
   'whole folder, subfolders included, in path order, count and mood ignored',
+);
+// A folder of singles from different records goes by file name even when their
+// track numbers happen to be distinct; a real album plays by track number.
+lib.upsertTracks([
+  { ...base, path: '/music/Record/z-opener.mp3', title: 'z-opener.mp3', artist: 'Band', album: 'Record', albumArtist: 'Band', trackNo: 1 },
+  { ...base, path: '/music/Record/a-closer.mp3', title: 'a-closer.mp3', artist: 'Band', album: 'Record', albumArtist: 'Band', trackNo: 2 },
+]);
+assert.deepEqual(
+  titles(lib.runSmartPlaylistRule({ name: 'Record', mood: 'drive', count: 1, folderPath: '/music/Record' })),
+  ['z-opener.mp3', 'a-closer.mp3'],
+  'tracks of one album play in track order',
 );
 
 const loved = lib.getTracks({ limit: 50, offset: 0 }).find((t) => t.title === 'b-second.mp3');

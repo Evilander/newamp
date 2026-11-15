@@ -46,6 +46,20 @@ import {
   blockShape,
   tapGrid,
 } from './flash-guard';
+import { DITHER_FRAME_WRAP, DITHER_GLSL } from './eviland-gl';
+
+// A pixel the guard changes is quantised to 8 bits again, and a smooth
+// gradient scaled by a gain lands on a few levels: the banding comes back
+// exactly where the guard is working. The composite adds one step of
+// triangular dither there, and only there, so an idle guard stays a bit-exact
+// pass-through. The same value goes into the shown-taps measurement (both
+// share shownPixel), so what the trackers read is what is drawn. It is a pure
+// function of (pixel, frame). Parity checks that compare the output with the
+// spec to the level switch it off.
+let ditherEnabled = true;
+export function setFlashGuardDither(enabled: boolean): void {
+  ditherEnabled = enabled;
+}
 
 export interface FlashGuardGL {
   /**
@@ -138,6 +152,9 @@ ivec2 tapPixel(ivec2 tap) {
 // shown-taps pass and the composite, so what is measured is exactly what is
 // drawn. The encoded source colour comes back untouched where nothing applies.
 const SHOWN = `
+${DITHER_GLSL}
+uniform float u_frame;
+uniform float u_dither;
 uniform sampler2D u_fieldA;
 uniform sampler2D u_fieldB;
 uniform sampler2D u_tapIn;
@@ -192,7 +209,10 @@ vec3 shownPixel(vec3 src, ivec2 p) {
   // brightest channel would clip, so it never shifts a hue.
   vec3 grey = vec3(x) + (c - vec3(x)) * desat;
   float peak = max(grey.r, max(grey.g, grey.b));
-  return toSrgb(grey * (peak * gain > 1.0 ? 1.0 / peak : gain));
+  vec3 shown = toSrgb(grey * (peak * gain > 1.0 ? 1.0 / peak : gain));
+  // Fades out toward black so black stays still.
+  float amount = u_dither * smoothstep(0.0, 2.0 / 255.0, max(shown.r, max(shown.g, shown.b)));
+  return shown + ditherTri(vec2(p) + 0.5, u_frame) * amount / 255.0;
 }`;
 
 // Pass 1: this frame's input at every tap, its trackers, level and floor.
@@ -683,6 +703,8 @@ export function createFlashGuardGL(gl: WebGL2RenderingContext): FlashGuardGL | n
   let srcFormat = 0;
   let ping = 0;
   let fresh = true;
+  // Moves the dither pattern one step per guarded frame.
+  let frameNo = 0;
   let seedIn = true;
   let seedOut = true;
   let hasShown = false;
@@ -833,6 +855,8 @@ export function createFlashGuardGL(gl: WebGL2RenderingContext): FlashGuardGL | n
     bind(4, outBefore.textures[0]!);
     gl.uniform2f(loc(program, 'u_srcSize'), srcW, srcH);
     gl.uniform2f(loc(program, 'u_taps'), taps.x, taps.y);
+    gl.uniform1f(loc(program, 'u_dither'), ditherEnabled ? 1 : 0);
+    gl.uniform1f(loc(program, 'u_frame'), frameNo);
   }
 
   /** The passes; `src` holds this frame at srcW x srcH. False if they couldn't run. */
@@ -890,6 +914,7 @@ export function createFlashGuardGL(gl: WebGL2RenderingContext): FlashGuardGL | n
 
     // 5. Out to the backbuffer.
     drawComposite(false, outW, outH, inNow, outBefore);
+    frameNo = (frameNo + 1) % DITHER_FRAME_WRAP;
 
     ping = 1 - ping;
     seedIn = false;

@@ -162,18 +162,25 @@ async function allOutputs(library, seedId, mode) {
 
 // Recorded from the build before the change (node scripts/library-sliced-views-test.mjs --print-golden
 // with NEWAMP_DIST pointing at it). The same library, the same answers.
+// Re-recorded since, for answers that changed on purpose and not because of the
+// slicing: folder order (sortFolderRows: directory, then disc and track for a
+// real album, then natural file name) moved the recursive folderTracksDeep
+// entries; the harmonic mixes follow the key-signature scoring in
+// shared/harmonic-mix.ts; the Discover plans follow shared/discover.ts (the
+// seeded preset pick with eviland featured, the stale-days cap on forgotten
+// favourites and what that pulls into the daily crate).
 const GOLDEN = {
   health: '47ace458cd82882e',
   suggestions: '71515a3013ca4b4b',
   harmonic: 'b5508aa2c5b99850',
-  harmonicSeeded: '9b9d970b6ddd1524',
-  harmonicGenre: '9d19a578a35fe2c8',
+  harmonicSeeded: 'ce65ef28682b9fa4',
+  harmonicGenre: '24418bab59e34d93',
   taste: '08a93e24dafba03e',
   tasteSeeded: '43bed348695f0d0f',
   deepCuts: '96f26a2761c060d8',
   night: '1959bb8a2e8fe61b',
-  discover: 'b2b12d7e325a6a13',
-  discoverPlain: '6ec89d831c1bde28',
+  discover: '3a51b27007e5f4e2',
+  discoverPlain: 'c06be1f37a887320',
   foldersRoots: '592b46143b336524',
   foldersDerived: '356ce55c379fda34',
   foldersIn0: 'a268be5926c2c6b7',
@@ -181,7 +188,7 @@ const GOLDEN = {
   folderTracksDeep0: '5b469e042b207b46',
   foldersIn1: 'e5a855ec32c8d39e',
   folderTracks1: '43d9018370895d79',
-  folderTracksDeep1: '342d18043be60011',
+  folderTracksDeep1: 'ace1c6818f47d131',
   foldersIn2: '4f53cda18c2baa0c',
   folderTracks2: '4f53cda18c2baa0c',
   folderTracksDeep2: '4f53cda18c2baa0c',
@@ -190,13 +197,13 @@ const GOLDEN = {
   folderTracksDeep3: '4f53cda18c2baa0c',
   foldersIn4: '4e30fa7a3f0e677f',
   folderTracks4: '58f40664ff74362e',
-  folderTracksDeep4: '5b469e042b207b46',
+  folderTracksDeep4: '8c01c55c83670705',
   foldersIn5: 'a451ac815be772c4',
   folderTracks5: '4f53cda18c2baa0c',
   folderTracksDeep5: '9adea347ba495e33',
   foldersIn6: '2fb91ec299d4fd38',
   folderTracks6: '2487c416e831370b',
-  folderTracksDeep6: '635da41d66238399',
+  folderTracksDeep6: '9af1603059f2e453',
 };
 
 // -- tests ------------------------------------------------------------------

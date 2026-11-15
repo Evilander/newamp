@@ -42,7 +42,7 @@ const MAX_SKIN_ARCHIVE_INFLATED_BYTES = 64 * 1024 * 1024;
 // bitmap's declared dimensions before doing real work with either.
 const MAX_SKIN_ARCHIVE_ENTRIES = 4096;
 const MAX_SKIN_ENTRY_NAME_BYTES = 1024;
-const MAX_SKIN_BMP_PIXELS = 4096 * 4096;
+const MAX_SKIN_BMP_PIXELS = 1024 * 1024;
 const ZIP_GENERAL_FLAG_ENCRYPTED = 0x0001;
 
 // Import IPC hardening: settings:skin-import-file is wired to app-wide
@@ -69,12 +69,12 @@ export function assertSkinImportPathAllowed(filePath: string): void {
 }
 
 export function parseWinampClassicSkinArchive(input: Uint8Array, fileName = 'Winamp Skin.wsz'): CustomSkin {
-  const entries = readZipEntries(input);
+  const entries = readZipEntries(input, (name) => isSkinBitmap(name) || isPlaylistText(name));
   const bmpColors = entries
     .filter((entry) => isSkinBitmap(entry.name))
     .flatMap((entry) => readBmpColors(entry.data));
   const textColors = entries
-    .filter((entry) => entry.name.toLowerCase().endsWith('pledit.txt'))
+    .filter((entry) => isPlaylistText(entry.name))
     .map((entry) => parsePlaylistTextColors(entry.data.toString('utf8')))
     .reduce<PlaylistTextColors>((merged, colors) => ({ ...merged, ...colors }), {});
 
@@ -121,7 +121,10 @@ export function parseWinampClassicSkinArchive(input: Uint8Array, fileName = 'Win
   };
 }
 
-function readZipEntries(input: Uint8Array): ZipEntry[] {
+// Only entries `wanted` accepts are inflated, and only the first of any file
+// name: a skin uses four bitmaps and one text file, so everything else in the
+// archive (and any repeats of those names) costs nothing.
+function readZipEntries(input: Uint8Array, wanted: (name: string) => boolean): ZipEntry[] {
   const buffer = Buffer.from(input);
   const eocdOffset = findEndOfCentralDirectory(buffer);
   requireBytes(buffer, eocdOffset, 22);
@@ -137,7 +140,9 @@ function readZipEntries(input: Uint8Array): ZipEntry[] {
   if (centralOffset + centralSize > buffer.length) throw new Error('Invalid Winamp skin archive.');
 
   const entries: ZipEntry[] = [];
+  const taken = new Set<string>();
   let totalInflatedBytes = 0;
+  let totalDeclaredBytes = 0;
   let offset = centralOffset;
   for (let i = 0; i < entryCount; i += 1) {
     requireBytes(buffer, offset, 46);
@@ -163,6 +168,13 @@ function readZipEntries(input: Uint8Array): ZipEntry[] {
     const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString('utf8').replace(/\\/g, '/');
     offset = headerEnd;
     if (!name || name.endsWith('/')) continue;
+    totalDeclaredBytes += uncompressedSize;
+    if (totalDeclaredBytes > MAX_SKIN_ARCHIVE_INFLATED_BYTES) {
+      throw new Error('This Winamp skin archive is too large when decompressed.');
+    }
+    const key = basename(name).toLowerCase();
+    if (!wanted(name) || taken.has(key)) continue;
+    taken.add(key);
     const data = readZipEntryData(buffer, localOffset, compressedSize, method);
     totalInflatedBytes += data.length;
     if (totalInflatedBytes > MAX_SKIN_ARCHIVE_INFLATED_BYTES) {
@@ -210,9 +222,24 @@ function readZipEntryData(buffer: Buffer, localOffset: number, compressedSize: n
   throw new Error('Unsupported compression method in Winamp skin archive.');
 }
 
+function isPlaylistText(name: string): boolean {
+  return basename(name).toLowerCase() === 'pledit.txt';
+}
+
 function isSkinBitmap(name: string): boolean {
   const base = basename(name).toLowerCase();
   return ['main.bmp', 'pledit.bmp', 'eqmain.bmp', 'gen.bmp'].includes(base);
+}
+
+const BI_RGB = 0;
+const BI_RLE8 = 1;
+const BI_RLE4 = 2;
+const BI_BITFIELDS = 3;
+
+interface ChannelMasks {
+  r: number;
+  g: number;
+  b: number;
 }
 
 function readBmpColors(buffer: Buffer): Rgb[] {
@@ -226,8 +253,12 @@ function readBmpColors(buffer: Buffer): Rgb[] {
   const bpp = buffer.readUInt16LE(28);
   const compression = buffer.readUInt32LE(30);
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(rawHeight)) return [];
-  if (planes !== 1 || width <= 0 || rawHeight === 0 || compression !== 0) return [];
-  if (![4, 8, 24, 32].includes(bpp)) return [];
+  if (planes !== 1 || width <= 0 || rawHeight === 0) return [];
+  const rle = (compression === BI_RLE8 && bpp === 8) || (compression === BI_RLE4 && bpp === 4);
+  const bitfields = compression === BI_BITFIELDS && (bpp === 16 || bpp === 32);
+  if (compression === BI_RGB ? ![4, 8, 16, 24, 32].includes(bpp) : !rle && !bitfields) return [];
+  // Run-length data is stored bottom-up only.
+  if (rle && rawHeight < 0) return [];
 
   const height = Math.abs(rawHeight);
   const topDown = rawHeight < 0;
@@ -238,21 +269,83 @@ function readBmpColors(buffer: Buffer): Rgb[] {
   // that would reach past the end of the buffer before looping at all.
   if (width * height > MAX_SKIN_BMP_PIXELS) return [];
   const rowStride = Math.floor((bpp * width + 31) / 32) * 4;
-  if (pixelOffset + rowStride * height > buffer.length) return [];
+  if (!rle && pixelOffset + rowStride * height > buffer.length) return [];
+  let masks: ChannelMasks | null = null;
+  if (bitfields) {
+    // The three masks follow the 40-byte header, whether or not a larger one is in use.
+    if (buffer.length < 66) return [];
+    masks = { r: buffer.readUInt32LE(54), g: buffer.readUInt32LE(58), b: buffer.readUInt32LE(62) };
+  } else if (bpp === 16) {
+    masks = { r: 0x7c00, g: 0x03e0, b: 0x001f };
+  }
   const palette = bpp <= 8 ? readBmpPalette(buffer, dibSize, bpp) : [];
+  const indices = rle ? decodeRle(buffer, pixelOffset, width, height, bpp) : null;
   const colors: Rgb[] = [];
-  const sampleEvery = Math.max(1, Math.floor((width * height) / 12000));
-  let seen = 0;
-  for (let y = 0; y < height; y += 1) {
+  // About 12000 pixels are enough to find the skin's colours, so step to each
+  // sampled position instead of visiting every pixel.
+  const total = width * height;
+  const sampleEvery = Math.max(1, Math.floor(total / 12000));
+  for (let index = sampleEvery - 1; index < total; index += sampleEvery) {
+    const y = Math.floor(index / width);
+    const x = index % width;
     const bmpY = topDown ? y : height - 1 - y;
-    for (let x = 0; x < width; x += 1) {
-      seen += 1;
-      if (seen % sampleEvery !== 0) continue;
-      const color = readBmpPixel(buffer, pixelOffset + bmpY * rowStride, x, bpp, palette);
-      if (color && !isTransparentMask(color)) colors.push(color);
-    }
+    const color = indices
+      ? palette[indices[bmpY * width + x]!] ?? null
+      : readBmpPixel(buffer, pixelOffset + bmpY * rowStride, x, bpp, palette, masks);
+    if (color && !isTransparentMask(color)) colors.push(color);
   }
   return colors;
+}
+
+// Expands RLE8/RLE4 data to one palette index per pixel, in stored row order
+// (the bottom row first). Anything the stream says that falls outside the
+// bitmap is dropped, and it stops at the end of the data.
+function decodeRle(buffer: Buffer, pixelOffset: number, width: number, height: number, bpp: number): Uint8Array {
+  const indices = new Uint8Array(width * height);
+  let x = 0;
+  let y = 0;
+  const put = (value: number): void => {
+    if (x < width && y < height) indices[y * width + x] = value;
+    x += 1;
+  };
+  let pos = pixelOffset;
+  while (pos + 1 < buffer.length && y < height) {
+    const count = buffer[pos]!;
+    const value = buffer[pos + 1]!;
+    pos += 2;
+    if (count > 0) {
+      for (let i = 0; i < count; i += 1) {
+        put(bpp === 8 ? value : i % 2 === 0 ? value >> 4 : value & 0x0f);
+      }
+      continue;
+    }
+    if (value === 0) {
+      x = 0;
+      y += 1;
+    } else if (value === 1) {
+      break;
+    } else if (value === 2) {
+      if (pos + 1 >= buffer.length) break;
+      x += buffer[pos]!;
+      y += buffer[pos + 1]!;
+      pos += 2;
+    } else {
+      const bytes = bpp === 8 ? value : Math.ceil(value / 2);
+      for (let i = 0; i < value && pos + (bpp === 8 ? i : i >> 1) < buffer.length; i += 1) {
+        const byte = buffer[pos + (bpp === 8 ? i : i >> 1)]!;
+        put(bpp === 8 ? byte : i % 2 === 0 ? byte >> 4 : byte & 0x0f);
+      }
+      pos += bytes + (bytes % 2);
+    }
+  }
+  return indices;
+}
+
+function maskedChannel(value: number, mask: number): number {
+  if (!mask) return 0;
+  const shift = 31 - Math.clz32(mask & -mask);
+  const max = (mask >>> shift) >>> 0;
+  return Math.round((((value & mask) >>> shift) * 255) / max);
 }
 
 function readBmpPalette(buffer: Buffer, dibSize: number, bpp: number): Rgb[] {
@@ -267,7 +360,20 @@ function readBmpPalette(buffer: Buffer, dibSize: number, bpp: number): Rgb[] {
   return palette;
 }
 
-function readBmpPixel(buffer: Buffer, rowOffset: number, x: number, bpp: number, palette: Rgb[]): Rgb | null {
+function readBmpPixel(
+  buffer: Buffer,
+  rowOffset: number,
+  x: number,
+  bpp: number,
+  palette: Rgb[],
+  masks: ChannelMasks | null,
+): Rgb | null {
+  if (bpp === 16 || (bpp === 32 && masks)) {
+    const offset = rowOffset + x * (bpp / 8);
+    if (offset + bpp / 8 > buffer.length) return null;
+    const value = bpp === 16 ? buffer.readUInt16LE(offset) : buffer.readUInt32LE(offset);
+    return { r: maskedChannel(value, masks!.r), g: maskedChannel(value, masks!.g), b: maskedChannel(value, masks!.b) };
+  }
   if (bpp === 32) {
     const offset = rowOffset + x * 4;
     if (offset + 3 >= buffer.length) return null;

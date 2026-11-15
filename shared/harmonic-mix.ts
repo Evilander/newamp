@@ -14,50 +14,79 @@ interface ParsedKey {
 }
 
 const CIRCLE = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'C#', 'G#', 'D#', 'A#', 'F'];
-const FLATS: Record<string, string> = {
+// Spellings that name a note CIRCLE spells differently (flats, plus the
+// enharmonic Cb/Fb/E#/B#).
+const ENHARMONIC: Record<string, string> = {
   DB: 'C#',
   EB: 'D#',
   GB: 'F#',
   AB: 'G#',
   BB: 'A#',
+  CB: 'B',
+  FB: 'E',
+  'E#': 'F',
+  'B#': 'C',
 };
+
+/** A candidate with everything the scoring loop needs worked out once. */
+interface MixEntry {
+  track: Track;
+  bpm: number;
+  key: ParsedKey | null;
+  metadata: number;
+  jitter: number;
+}
+
+function mixEntry(track: Track): MixEntry {
+  const key = parseKey(track.key);
+  return {
+    track,
+    bpm: track.bpm && track.bpm > 0 ? track.bpm : 0,
+    key,
+    metadata: (track.bpm ? 4 : 0) + (key ? 6 : 0) + (track.duration && track.duration > 45 ? 1 : 0),
+    jitter: stableJitter(track.id),
+  };
+}
 
 export function buildHarmonicMix(tracks: Track[], input: HarmonicMixInput = {}): Track[] {
   const count = clampCount(input.count);
-  const candidates = dedupeTracks(tracks).filter((track) => isPlayable(track));
+  // An explicit seed was picked by the listener, so a short track still seeds
+  // the mix; the length filter only decides what gets queued after it.
+  const candidates = dedupeTracks(tracks)
+    .filter((track) => isPlayable(track) || (!!track.path && track.id === input.seedTrackId))
+    .map(mixEntry);
   if (!candidates.length) return [];
 
   const seed = input.seedTrackId
-    ? candidates.find((track) => track.id === input.seedTrackId)
+    ? candidates.find((entry) => entry.track.id === input.seedTrackId)
     : chooseOpener(candidates);
   if (!seed) return [];
 
-  const mix: Track[] = [seed];
-  const remaining = candidates.filter((track) => track.id !== seed.id);
+  const mix: Track[] = [seed.track];
+  const remaining = candidates.filter((entry) => entry !== seed);
   const maxBpmDelta = normalizeMaxBpmDelta(input.maxBpmDelta);
+  let previous = seed;
 
   while (mix.length < count && remaining.length) {
-    const previous = mix[mix.length - 1]!;
     let bestIndex = 0;
     let bestScore = Number.NEGATIVE_INFINITY;
+    const previousArtist = previous.track.artist;
 
     for (let i = 0; i < remaining.length; i++) {
       const candidate = remaining[i]!;
-      const transition = harmonicTransitionScore(previous, candidate);
-      const metadata = metadataScore(candidate);
-      const artistPenalty = previous.artist && previous.artist === candidate.artist ? 8 : 0;
-      const bpmPenalty =
-        Number.isFinite(transition.bpmDelta) && transition.bpmDelta > maxBpmDelta
-          ? (transition.bpmDelta - maxBpmDelta) * 2.5
-          : 0;
-      const score = transition.score + metadata - artistPenalty - bpmPenalty + stableJitter(candidate.id);
+      const bpmDelta = bpmDistanceKnown(previous.bpm, candidate.bpm);
+      const transition = transitionScore(keyCompatibilityParsed(previous.key, candidate.key), bpmDelta);
+      const artistPenalty = previousArtist && previousArtist === candidate.track.artist ? 8 : 0;
+      const bpmPenalty = bpmDelta > maxBpmDelta && Number.isFinite(bpmDelta) ? (bpmDelta - maxBpmDelta) * 2.5 : 0;
+      const score = transition + candidate.metadata - artistPenalty - bpmPenalty + candidate.jitter;
       if (score > bestScore) {
         bestScore = score;
         bestIndex = i;
       }
     }
 
-    mix.push(remaining.splice(bestIndex, 1)[0]!);
+    previous = remaining.splice(bestIndex, 1)[0]!;
+    mix.push(previous.track);
   }
 
   return mix;
@@ -70,8 +99,7 @@ export function harmonicTransitionScore(
   if (!from || !to) return { score: 0, bpmDelta: Number.POSITIVE_INFINITY, keyScore: 0, reason: 'missing track' };
   const bpmDelta = bpmDistance(from.bpm, to.bpm);
   const keyScore = keyCompatibility(from.key, to.key);
-  const bpmScore = Number.isFinite(bpmDelta) ? Math.max(0, 30 - bpmDelta * 1.8) : 4;
-  const score = keyScore * 55 + bpmScore;
+  const score = transitionScore(keyScore, bpmDelta);
   return {
     score,
     bpmDelta,
@@ -80,27 +108,44 @@ export function harmonicTransitionScore(
   };
 }
 
-function chooseOpener(tracks: Track[]): Track {
-  return [...tracks].sort((a, b) => openerScore(b) - openerScore(a) || stableSort(a, b))[0]!;
+function transitionScore(keyScore: number, bpmDelta: number): number {
+  const bpmScore = Number.isFinite(bpmDelta) ? Math.max(0, 30 - bpmDelta * 1.8) : 4;
+  return keyScore * 55 + bpmScore;
 }
 
-function openerScore(track: Track): number {
-  return metadataScore(track) + (track.loved ? 4 : 0) + Math.min(6, track.playCount * 0.6) + stableJitter(track.id);
+function chooseOpener(entries: MixEntry[]): MixEntry {
+  let best = entries[0]!;
+  let bestScore = openerScore(best);
+  for (let i = 1; i < entries.length; i++) {
+    const entry = entries[i]!;
+    const score = openerScore(entry);
+    if (score > bestScore || (score === bestScore && stableSort(entry.track, best.track) < 0)) {
+      best = entry;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
-function metadataScore(track: Track): number {
-  return (track.bpm ? 4 : 0) + (parseKey(track.key) ? 6 : 0) + (track.duration && track.duration > 45 ? 1 : 0);
+function openerScore(entry: MixEntry): number {
+  return entry.metadata + (entry.track.loved ? 4 : 0) + Math.min(6, entry.track.playCount * 0.6) + entry.jitter;
 }
 
+// Keys are compared by key signature rather than by root note: E minor shares
+// its signature with G major, so it sits one step from C, while D minor and G
+// minor (one and two steps away) must not score alike. Comparing signatures
+// also makes "8B" and "C" the same key whatever notation they were written in.
 function keyCompatibility(a: string | null, b: string | null): number {
-  const left = parseKey(a);
-  const right = parseKey(b);
+  return keyCompatibilityParsed(parseKey(a), parseKey(b));
+}
+
+function keyCompatibilityParsed(left: ParsedKey | null, right: ParsedKey | null): number {
   if (!left || !right) return 0.18;
-  if (left.root === right.root && left.mode === right.mode) return 1;
-  if (keySignatureIndex(left) === keySignatureIndex(right)) return 0.96;
-  const distance = circleDistance(left.circleIndex, right.circleIndex);
-  if (left.mode === right.mode && distance === 1) return 0.82;
-  if (distance <= 2) return 0.62;
+  const distance = circleDistance(keySignatureIndex(left), keySignatureIndex(right));
+  const sameMode = left.mode === right.mode;
+  if (distance === 0) return sameMode ? 1 : 0.96;
+  if (distance === 1) return sameMode ? 0.82 : 0.76;
+  if (distance === 2) return sameMode ? 0.62 : 0.5;
   return 0.24;
 }
 
@@ -124,6 +169,14 @@ function parseKey(value: string | null): ParsedKey | null {
 }
 
 function parseKeyUncached(raw: string): ParsedKey | null {
+  // Open Key (Traktor) numbers the same wheel six places on from Camelot, with
+  // d for major and m for minor: 1d is 8B, 1m is 8A, 6d is 1B.
+  const openKey = raw.match(/^([1-9]|1[0-2])([dm])$/i);
+  if (openKey) {
+    const camelotNumber = (Number(openKey[1]) + 6) % 12 + 1;
+    return parseKeyUncached(`${camelotNumber}${openKey[2]!.toLowerCase() === 'm' ? 'A' : 'B'}`);
+  }
+
   const camelot = raw.match(/^([1-9]|1[0-2])([ab])$/i);
   if (camelot) {
     const number = Number(camelot[1]);
@@ -146,16 +199,18 @@ function parseKeyUncached(raw: string): ParsedKey | null {
     .replace(/♯/g, '#')
     .replace(/\s+/g, ' ')
     .trim();
-  const match = normalized.match(/^([A-Ga-g])([#bB]?)(?:\s*(m|min|minor|maj|major))?$/);
+  const match = normalized.match(/^([A-Ga-g])([#bB]?)(?:\s*(m|min|minor|maj|major))?$/i);
   if (!match) return null;
 
   const accidental = match[2] ?? '';
   const rootKey = `${match[1]!.toUpperCase()}${accidental.toUpperCase()}`;
-  const root = FLATS[rootKey] ?? rootKey.replace('B', 'b').replace('b', 'b').toUpperCase();
+  const root = ENHARMONIC[rootKey] ?? rootKey;
   const circleIndex = CIRCLE.indexOf(root);
   if (circleIndex < 0) return null;
-  const suffix = (match[3] ?? '').toLowerCase();
-  const mode = suffix === 'm' || suffix === 'min' || suffix === 'minor' ? 'minor' : 'major';
+  // Tags write the mode as "m", "Minor", "MIN" and so on, so the words are
+  // case-insensitive; a lone capital "M" is the major shorthand, a lone "m" minor.
+  const suffix = match[3] ?? '';
+  const mode = suffix === 'm' || /^min(?:or)?$/i.test(suffix) ? 'minor' : 'major';
   return { root, circleIndex, mode };
 }
 
@@ -170,8 +225,16 @@ function circleDistance(a: number, b: number): number {
 
 function bpmDistance(a: number | null, b: number | null): number {
   if (!a || !b || a <= 0 || b <= 0) return Number.POSITIVE_INFINITY;
-  const variants = [b, b * 2, b / 2];
-  return Math.min(...variants.map((candidate) => Math.abs(a - candidate)));
+  return bpmDistanceKnown(a, b);
+}
+
+// Distance to b, b doubled or b halved, whichever is closest; 0 marks an unknown tempo.
+function bpmDistanceKnown(a: number, b: number): number {
+  if (a <= 0 || b <= 0) return Number.POSITIVE_INFINITY;
+  const direct = Math.abs(a - b);
+  const doubled = Math.abs(a - b * 2);
+  const halved = Math.abs(a - b / 2);
+  return direct < doubled ? (direct < halved ? direct : halved) : (doubled < halved ? doubled : halved);
 }
 
 function dedupeTracks(tracks: Track[]): Track[] {

@@ -287,7 +287,17 @@ const source = (path) => readFileSync(resolve(path), 'utf8');
 
   const producer = source('src/visualizer/eviland-producer.ts');
   assert.doesNotMatch(producer, /blendPaletteWithArt\(/);
-  assert.match(producer, /config\.palette, sleeveFor\(config, artPalette, sleeve\)\)/);
+  // The sleeve (the album art, through sleeveFor) is the sixth argument and the
+  // song score's mood cues follow it; the on-screen host passes the same.
+  assert.match(
+    producer,
+    /resolveEvilandPalette\(tuning\.palette, palette, now \/ 1000, frame\.score\?\.keyShift, config\.palette, sleeveFor\(config, artPalette, sleeve\), frame\.score\?\.minor, frame\.score\?\.keyConfidence\)/,
+    'the projector resolves the palette with the sleeve and the mood cues',
+  );
+  assert.match(producer, /artPalette = art;/, 'the extracted cover colours are what sleeveFor is handed');
+  assert.match(producer, /themePaletteFromAccent\(/, 'the projector builds its theme palette the way the main window does');
+  assert.match(visualizer, /sleeveFor\(config, sleeveArt, sleeve\),\s*rawFrame\.score\?\.minor,\s*rawFrame\.score\?\.keyConfidence/, 'Eviland Live passes the sleeve and the mood cues');
+  assert.match(visualizer, /sleeveFor\(look, sleeveArt, sleeve\),\s*evFrame\.score\?\.minor,\s*evFrame\.score\?\.keyConfidence/, 'on-screen Eviland passes the sleeve and the mood cues');
   assert.match(producer, /lookRequests\?\.drain\(director, ui\.director\)/);
   assert.match(producer, /accent\?: string \| null;/, 'the transport type carries the accent');
   assert.match(source('src/visualizer/frame-bus.ts'), /accent\?: string \| null;/);

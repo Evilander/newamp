@@ -1,4 +1,5 @@
 import { extname } from 'node:path';
+import { isHiddenName } from './library-skip.js';
 
 // How the scanner finds a cover image in an album folder. Pure: it is handed
 // what a folder holds and says which image to use, so the rule can be tried
@@ -55,7 +56,7 @@ export function isDiscFolderName(name: string): boolean {
 }
 
 export function isFolderArtImage(fileName: string): boolean {
-  return !fileName.startsWith('.') && IMAGE_EXTS.includes(extname(fileName).toLowerCase());
+  return !isHiddenName(fileName) && IMAGE_EXTS.includes(extname(fileName).toLowerCase());
 }
 
 // A folder with albums or other folders full of music inside is a library

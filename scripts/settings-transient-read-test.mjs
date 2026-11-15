@@ -211,7 +211,7 @@ function unpatchRead() {
     clock += 5_000;
     const result = store.set({ theme: 'terminal' });
     assert.equal(store.isSuppressed(), false, 'a later set() once the lock has cleared must lift suppression');
-    assert.equal(result.volume, 0.27, 'the patch merges onto the real file');
+    assert.equal(result.volume, 0.6, 'the patches made while it was locked merge onto the real file, the volume set then included');
     assert.equal(result.theme, 'terminal');
     const onDisk = JSON.parse(realReadFileSync.call(fs, file, 'utf-8'));
     assert.equal(onDisk.theme, 'terminal', 'and the session saves again');

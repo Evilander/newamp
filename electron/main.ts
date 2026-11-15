@@ -22,9 +22,9 @@ import {
 } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, type Stats } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { LibraryStore, LibraryUnavailableError } from './library.js';
 import { IncrementalScanGate, LibraryWatcher, type LibraryWatchPlan } from './library-watcher.js';
 import { findEmbeddedLyricsForTrack, findSidecarLyricsForTrack } from './local-lyrics.js';
@@ -42,8 +42,7 @@ import {
   completeLastfmAuth,
   LastfmScrobbleOutbox,
   scrobbleLastfmTrack,
-  shouldRetryLastfmError,
-  isLastfmAuthFailure,
+  isPermanentLastfmRejection,
   startLastfmAuth,
   updateLastfmNowPlaying,
   type LastfmOutboxFlushResult,
@@ -58,6 +57,7 @@ import {
   transcodeTracksToAudioFolder,
   transcodeTracksToWavFolder,
   killAllTranscodeFfmpeg,
+  liveTranscodeFfmpegCount,
 } from './transcode.js';
 import { fileRangeResponse, seekableTranscodeResponse } from './audio-serve.js';
 import { initTranscodeCache, getOrTranscodeToFlac, peekCachedFlac, transcodeCacheStatus } from './transcode-cache.js';
@@ -104,6 +104,9 @@ import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } 
 import { defaultMusicScanRoots, isSeededPublicMusicRoot, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import { buildAppMenuTemplate } from './app-menu.js';
+import { caseFoldCachePath } from './cache-key-casing.js';
+import { AUDIO_EXTS, isSkippedLibraryFile, isSkippedLibraryFolder } from './library-skip.js';
+import { isStorageError, retryStorageErrors } from './read-failure.js';
 import { assertHistoryImportIdle, registerHistoryImportIpc } from './history-ipc.js';
 import { registerMusicServerIpc } from './music-server-ipc.js';
 import type { MusicServerRegistry } from './music-servers.js';
@@ -194,28 +197,9 @@ if (smokeMode && process.env.NEWAMP_SMOKE_AUDIBLE !== '1') app.commandLine.appen
 // set up). Chromium's GPU blocklist still handles known-bad drivers.
 const gpuForcedOff = process.env.NEWAMP_DISABLE_HARDWARE_ACCELERATION === '1';
 const gpuForcedOn = process.env.NEWAMP_ENABLE_HARDWARE_ACCELERATION === '1';
-const OPEN_AUDIO_EXTS = new Set([
-  '.mp3',
-  '.flac',
-  '.ogg',
-  '.oga',
-  '.opus',
-  '.wav',
-  '.m4a',
-  '.aac',
-  '.wma',
-  '.aiff',
-  '.aif',
-  '.ape',
-  '.wv',
-  '.mpc',
-  '.tta',
-  '.mka',
-  '.ac3',
-  '.dts',
-  '.dsf',
-  '.dff',
-]);
+// The extensions a scan indexes, so a file that plays from the library also
+// opens from Finder, argv or a drop.
+const OPEN_AUDIO_EXTS = AUDIO_EXTS;
 const OPEN_PLAYLIST_EXTS = new Set(['.m3u', '.m3u8', '.pls', '.cue']);
 
 if (userDataOverride) {
@@ -477,15 +461,29 @@ function attachExternalLinkHandler(win: BrowserWindow): void {
     if (isExternalUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
+  // These windows carry the full preload bridge, so the page they hold must
+  // stay the app's own. A link or a dropped item that would navigate one
+  // anywhere else (file://, another scheme) is cancelled, and web links open
+  // in the browser instead.
   win.webContents.on('will-navigate', (event, url) => {
-    if (!isExternalUrl(url)) return;
+    if (isAppUrl(url)) return;
     event.preventDefault();
-    void shell.openExternal(url);
+    if (isExternalUrl(url)) void shell.openExternal(url);
   });
 }
 
 function isExternalUrl(url: string): boolean {
   return /^(https?:|mailto:)/i.test(url);
+}
+
+function isAppUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'newamp-app:' && parsed.host === 'app') return true;
+    return isDev && parsed.origin === 'http://localhost:5173';
+  } catch {
+    return false;
+  }
 }
 
 // Register custom protocol as standard + streaming before app ready, so it
@@ -547,7 +545,14 @@ let inCompact = false;
 let startupCompactPending = false;
 let windowStateTimer: NodeJS.Timeout | null = null;
 let displaySleepBlockerId: number | null = null;
-let dockPlayingLabel: boolean | null = null;
+// Held while Bit-Perfect Exclusive plays. Chromium holds its own power
+// assertion for the audio it plays, and exclusive output is not played by
+// Chromium. Separate from the display blocker, which follows the visualizer.
+let appSuspensionBlockerId: number | null = null;
+// What the Dock menu was last built from.
+let dockMenuBuiltFor: string | null = null;
+// What the Controls menu's Play/Pause item last said.
+let controlsPlayingLabel: boolean | null = null;
 let pinnedAcrossSpaces = false;
 let mainWindowRevealed = false;
 let tray: Tray | null = null;
@@ -568,6 +573,19 @@ let radioBrain: RadioBrain | null = null;
 let radioBrainSyncChain: Promise<void> = Promise.resolve();
 let radioBrainShutdownStarted = false;
 let exclusiveOutput: ExclusiveOutput | null = null;
+// Set by registerIpc: makes the play and prepare requests that are still
+// resolving give way, as Stop does.
+let invalidateExclusiveRequests: (() => void) | null = null;
+
+// The native stream plays outside the page, so a page that crashed and was
+// reloaded would leave it going, with its chained next track, under a window
+// that shows a stopped player. The snapshot the page sent last is stale then
+// too, and the Dock menu and the throttling switch would go on reporting it.
+function stopExclusiveForReloadedPage(): void {
+  invalidateExclusiveRequests?.();
+  exclusiveOutput?.stop();
+  if (shellPlaybackState.isPlaying) applyShellPlaybackState({ ...shellPlaybackState, isPlaying: false, at: Date.now() });
+}
 
 function getExclusiveOutput(): ExclusiveOutput {
   if (!exclusiveOutput) {
@@ -620,14 +638,17 @@ async function resolveExclusiveSource(trackId: number): Promise<ExclusiveTrackSo
     if (typeof meta.format.lossless === 'boolean' && !classified.dsd) {
       source.lossless = meta.format.lossless;
     }
-  } catch {
-    // DB metadata + extension classification is an honest fallback.
+  } catch (err) {
+    // DB metadata + extension classification is an honest fallback. A share
+    // that timed out says nothing about the file, so what this play makes of
+    // it is not kept for the next one to negotiate from.
+    if (isStorageError(err)) return source;
   }
   if (exclusiveSourceCache.size > 500) exclusiveSourceCache.clear();
   exclusiveSourceCache.set(cacheKey, source);
   return source;
 }
-let pendingOpenFiles = collectOpenFileArgs(process.argv);
+let pendingOpenFiles = collectOpenFileArgsSync(process.argv);
 
 // Session opened-files allowlist for the `newamp:` protocol. Every
 // open-file entry point (CLI argv, macOS open-file event, second-instance
@@ -644,12 +665,18 @@ let podcastDownloadsRealRoot: string | null = null;
 // anything touches the disk or network; the second compares the real path.
 // A file opened through a symlink or junction (macOS /tmp is /private/tmp)
 // only matches the first check by the path it was opened as.
+//
+// Only a path with an audio extension is let in, whoever calls: whatever lands
+// in the set is served as bytes, and a document or a key file must never be.
+// The audio files a playlist or a CUE sheet names are authorized when main
+// parses it, the same way, so the page cannot add a path of its own.
 async function allowOpenedAudioFile(path: string): Promise<void> {
+  if (!OPEN_AUDIO_EXTS.has(extname(path).toLowerCase())) return;
   openedAudioFiles.add(resolve(path).replace(/\\/g, '/'));
   try {
     openedAudioFiles.add((await realpath(path)).replace(/\\/g, '/'));
   } catch {
-    /* vanished/unreadable — the request 404s at the existence check */
+    /* vanished/unreadable — the request 404s when it is resolved */
   }
 }
 
@@ -664,7 +691,7 @@ async function getPodcastDownloadsRealRoot(): Promise<string | null> {
 }
 
 for (const initialOpenFile of pendingOpenFiles) {
-  void allowOpenedAudioFile(initialOpenFile);
+  if (OPEN_AUDIO_EXTS.has(extname(initialOpenFile).toLowerCase())) void allowOpenedAudioFile(initialOpenFile);
 }
 
 const isDev = process.env.NODE_ENV === 'development' || !!process.env.VITE_DEV_SERVER_URL;
@@ -841,6 +868,17 @@ const NORMAL_LIMITS = {
   defaultWidth: DEFAULT_WINDOW_SIZE.width,
   defaultHeight: DEFAULT_WINDOW_SIZE.height,
 };
+
+// Calls to setCompactMode run one after another. Leaving fullscreen takes up
+// to 1.5 s, and a request that arrived in that gap read the window as not
+// compact yet and did nothing, so the first call then put the window in the
+// deck while the page believed it was in the normal view.
+let compactModeChain: Promise<void> = Promise.resolve();
+function requestCompactMode(on: boolean, size?: { width?: number; height?: number }): Promise<void> {
+  const run = compactModeChain.then(() => setCompactMode(on, size));
+  compactModeChain = run.catch(() => {});
+  return run;
+}
 
 // Sizes the main window into the deck, or puts it back. A fullscreen window
 // leaves fullscreen first: on macOS the exit animation ignores a resize issued
@@ -1030,6 +1068,10 @@ function createWindow(): BrowserWindow {
   // in bootstrap so a window recreated later is rewired too.
   win.webContents.on('did-finish-load', () => {
     if (win.isMaximized()) win.webContents.send('window-state', { maximized: true });
+    // A page that came back from a crash may not carry the setting made for
+    // the one before it, so it is applied again for whatever is playing.
+    backgroundThrottlingFor = null;
+    refreshBackgroundThrottling();
     if (!detachedVizWin || detachedVizWin.isDestroyed()) return;
     wireDetachedFramePort();
   });
@@ -1043,6 +1085,7 @@ function createWindow(): BrowserWindow {
     const now = Date.now();
     const action = crashRecoveryAction({ reason: details.reason, isQuitting, recentReloads: crashReloads, now });
     if (action === 'ignore') return;
+    stopExclusiveForReloadedPage();
     if (action === 'reload') {
       crashReloads.push(now);
       win.webContents.reload();
@@ -1266,16 +1309,18 @@ function wireDetachedFramePort(): void {
     return;
   }
   try {
-    // NOTE: main-window background throttling is deliberately LEFT ON now.
-    // It was disabled here in 1.13.0 because the frame producer ran on rAF —
-    // but the producer, the audio-engine clock, and all playback bookkeeping
-    // have since moved to timers, and Chromium exempts audibly-playing pages
-    // from timer throttling. Leaving throttling on means an occluded/
-    // minimized main window stops all its rAF UI rendering while the
-    // projector runs — which is most of the "suffers mightily when detached"
-    // GPU/CPU bill. When playback is paused AND the main window is hidden,
-    // the producer drops to ~1Hz and the projector's own status layer
-    // truthfully reports "Paused".
+    // NOTE: opening the projector does not change main-window background
+    // throttling. It was disabled here in 1.13.0 because the frame producer
+    // ran on rAF — but the producer, the audio-engine clock, and all playback
+    // bookkeeping have since moved to timers, and Chromium exempts
+    // audibly-playing pages from timer throttling. Leaving throttling on
+    // means an occluded/minimized main window stops all its rAF UI rendering
+    // while the projector runs — which is most of the "suffers mightily when
+    // detached" GPU/CPU bill. When playback is paused AND the main window is
+    // hidden, the producer drops to ~1Hz and the projector's own status layer
+    // truthfully reports "Paused". Playback the page cannot be heard for
+    // (Bit-Perfect Exclusive) turns throttling off through
+    // refreshBackgroundThrottling, whether or not the projector is open.
     const channel = new MessageChannelMain();
     mainWin.webContents.postMessage('eviland:frame-port', null, [channel.port1]);
     detachedVizWin.webContents.postMessage('eviland:frame-port', null, [channel.port2]);
@@ -1285,16 +1330,18 @@ function wireDetachedFramePort(): void {
   }
 }
 
+// Closing the projector hands the main window's throttling back to
+// refreshBackgroundThrottling, which turns it off while something plays. Setting
+// it on here directly would leave the cached value saying off, and every later
+// playback snapshot would then skip the call, so a window hidden during
+// playback the page cannot be heard for would run its engine tick at a
+// throttled rate for the rest of the queue.
 function restoreMainWindowThrottling(): void {
-  // Throttling is never disabled anymore (see wireDetachedFramePort), but
-  // re-asserting the default on projector close keeps this path harmless and
-  // self-healing if some future code toggles it.
-  if (mainWin && !mainWin.isDestroyed()) {
-    try {
-      mainWin.webContents.setBackgroundThrottling(true);
-    } catch {
-      /* shutting down */
-    }
+  backgroundThrottlingFor = null;
+  try {
+    refreshBackgroundThrottling();
+  } catch {
+    /* shutting down */
   }
 }
 
@@ -1521,9 +1568,15 @@ img {
 </html>`;
 }
 
+// Set once bootstrap has made the first window, with the IPC handlers and
+// stores it needs behind it. A Dock click or a second launch before then must
+// not create one of its own: it would load with no handlers and no library, and
+// bootstrap would then create another.
+let mainWindowBootstrapped = false;
+
 function showMainWindow(): void {
   if (!mainWin || mainWin.isDestroyed()) {
-    mainWin = createWindow();
+    if (mainWindowBootstrapped) mainWin = createWindow();
     return;
   }
   if (mainWin.isMinimized()) mainWin.restore();
@@ -1566,9 +1619,9 @@ function deliverOpenFiles(paths: string[]): void {
     mainWin.webContents.send('app:open-files', merged.files);
     return;
   }
-  const seen = new Set(pendingOpenFiles.map((path) => path.toLowerCase()));
+  const seen = new Set(pendingOpenFiles.map(openTargetKey));
   for (const path of paths) {
-    const key = path.toLowerCase();
+    const key = openTargetKey(path);
     if (!seen.has(key)) {
       seen.add(key);
       pendingOpenFiles.push(path);
@@ -1576,31 +1629,56 @@ function deliverOpenFiles(paths: string[]): void {
   }
 }
 
-function enqueueOpenFiles(paths: string[]): void {
-  const clean = normalizeOpenTargets(paths).map((target) => target.path);
-  if (!clean.length) return;
-  for (const path of clean) void allowOpenedAudioFile(path);
-  openFileBatcher.push(clean);
+async function enqueueOpenFiles(paths: string[]): Promise<void> {
+  const targets = await normalizeOpenTargets(paths);
+  if (!targets.length) return;
+  for (const { path, kind } of targets) {
+    if (kind === 'file' && OPEN_AUDIO_EXTS.has(extname(path).toLowerCase())) void allowOpenedAudioFile(path);
+  }
+  openFileBatcher.push(targets.map((target) => target.path));
+}
+
+// The Dock menu's first line: what is loaded, as "Title - Artist". Null when
+// nothing is.
+function nowPlayingLabel(): string | null {
+  const { title, artist } = shellPlaybackState;
+  if (!title) return null;
+  return artist ? `${title} - ${artist}` : title;
 }
 
 function buildDockMenu(): Menu {
+  const nowPlaying = nowPlayingLabel();
+  const showWindow: MenuItemConstructorOptions = { label: 'Show NewAmp', click: showMainWindow };
+  // With nothing loaded Play/Pause and Next would do nothing.
+  if (nowPlaying === null) return Menu.buildFromTemplate([showWindow]);
   return Menu.buildFromTemplate([
+    { label: nowPlaying, enabled: false },
+    { type: 'separator' },
     { label: 'Previous', click: () => sendPlayerCommand('previous') },
     { label: shellPlaybackState.isPlaying ? 'Pause' : 'Play', click: () => sendPlayerCommand('toggle-play') },
     { label: 'Next', click: () => sendPlayerCommand('next') },
     { label: 'Stop', click: () => sendPlayerCommand('stop') },
+    { type: 'separator' },
+    showWindow,
   ]);
 }
 
-// The Dock menu is the macOS counterpart of the tray menu. Its Play/Pause
-// label follows the playback snapshots, rebuilding only when it flips.
+// The Dock menu is the macOS counterpart of the tray menu. It names the track
+// that is loaded and its Play/Pause label follows the playback snapshots, so
+// it is rebuilt when either changes; snapshots that repeat the same state
+// (the position ticking on) leave it alone.
 function refreshDockMenu(): void {
   if (process.platform !== 'darwin' || smokeMode || !app.dock) return;
-  const playing = shellPlaybackState.isPlaying;
-  if (dockPlayingLabel === playing) return;
-  dockPlayingLabel = playing;
-  app.dock.setMenu(buildDockMenu());
-  // The Controls menu's Play/Pause item says the same thing.
+  const { isPlaying, title, artist } = shellPlaybackState;
+  const builtFor = JSON.stringify([isPlaying, title, artist]);
+  if (dockMenuBuiltFor !== builtFor) {
+    dockMenuBuiltFor = builtFor;
+    app.dock.setMenu(buildDockMenu());
+  }
+  // The Controls menu's Play/Pause item says the same thing, but only a
+  // play/pause flip changes it.
+  if (controlsPlayingLabel === isPlaying) return;
+  controlsPlayingLabel = isPlaying;
   Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate()));
 }
 
@@ -1620,6 +1698,109 @@ function refreshDisplaySleepBlocker(): void {
     powerSaveBlocker.stop(displaySleepBlockerId);
     displaySleepBlockerId = null;
   }
+  refreshAppSuspensionBlocker();
+}
+
+// A precaution while exclusive output is playing: it runs in the native addon,
+// where Chromium holds no power assertion, so this asks the system not to
+// suspend the app mid-track. Whether the OS would suspend it without this has
+// not been measured, and CoreAudio may already hold an assertion of its own.
+function refreshAppSuspensionBlocker(): void {
+  const wanted = shellPlaybackState.isPlaying && settings.get().bitPerfectExclusive === true;
+  const active = appSuspensionBlockerId !== null && powerSaveBlocker.isStarted(appSuspensionBlockerId);
+  if (wanted && !active) {
+    appSuspensionBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+  } else if (!wanted && appSuspensionBlockerId !== null) {
+    powerSaveBlocker.stop(appSuspensionBlockerId);
+    appSuspensionBlockerId = null;
+  }
+}
+
+// File > Open: files picked here take the route a file opened from Finder
+// takes, so they replace the queue the same way.
+async function chooseFilesToOpen(): Promise<void> {
+  showMainWindow();
+  const win = mainWin && !mainWin.isDestroyed() ? mainWin : null;
+  const audioExtensions = [...OPEN_AUDIO_EXTS, ...OPEN_PLAYLIST_EXTS].map((ext) => ext.slice(1));
+  const options: Electron.OpenDialogOptions = {
+    title: 'Open',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Audio and playlists', extensions: audioExtensions },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  };
+  const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+  if (result.canceled || !result.filePaths.length) return;
+  await enqueueOpenFiles(result.filePaths);
+}
+
+// Folders File > Add Folder to Library saved that the page has not read back
+// yet. Settings saves the whole folder list from the copy it holds, so a save
+// made before it reads the settings again would drop them from the library.
+const unseenMenuRoots = new Set<string>();
+
+// The page has the saved settings, this folder list included.
+function libraryRootsRead(): void {
+  unseenMenuRoots.clear();
+}
+
+// Puts back the menu-added folders a stale folder list left out. A folder the
+// new list covers is already in it.
+function keepUnseenMenuRoots<T>(patch: T): T {
+  if (!unseenMenuRoots.size || !patch || typeof patch !== 'object') return patch;
+  const roots: unknown = (patch as { libraryRoots?: unknown }).libraryRoots;
+  if (!Array.isArray(roots)) return patch;
+  const current = settings.get().libraryRoots;
+  const missing = [...unseenMenuRoots].filter(
+    (dir) => current.includes(dir) && !roots.some((root) => typeof root === 'string' && isPathInside(dir, root)),
+  );
+  return missing.length ? { ...patch, libraryRoots: [...roots, ...missing] } : patch;
+}
+
+// File > Add Folder to Library: the same steps as Settings, which saves the
+// folder to the list and scans just that folder. The scan banner is the
+// progress report; there is no page-side toast on this path.
+async function chooseFolderForLibrary(): Promise<void> {
+  showMainWindow();
+  const win = mainWin && !mainWin.isDestroyed() ? mainWin : null;
+  const options: Electron.OpenDialogOptions = {
+    title: 'Add folder to library',
+    buttonLabel: 'Add Folder',
+    properties: ['openDirectory', 'createDirectory'],
+    defaultPath: settings.get().libraryRoots[0] ?? app.getPath('music'),
+  };
+  const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+  const dir = result.filePaths[0];
+  if (result.canceled || !dir) return;
+  const tell = async (message: string, detail: string): Promise<void> => {
+    const info = { type: 'info' as const, message, detail };
+    await (win ? dialog.showMessageBox(win, info) : dialog.showMessageBox(info));
+  };
+  if (restoreInProgress) {
+    await tell('Backup restoration is running', 'Add the folder again when it has finished.');
+    return;
+  }
+  // The same folder written another way, or one inside a library folder, would
+  // be scanned twice. A new folder that holds existing ones replaces them.
+  const roots = settings.get().libraryRoots;
+  const covering = roots.find((root) => isPathInside(dir, root));
+  if (covering) {
+    await tell('Already in your library', covering);
+    return;
+  }
+  const replaced = roots.filter((root) => isPathInside(root, dir));
+  settings.set({ libraryRoots: [...roots.filter((root) => !replaced.includes(root)), dir] });
+  // The page still holds the folder list from before this, and saves it whole.
+  for (const root of replaced) unseenMenuRoots.delete(root);
+  unseenMenuRoots.add(dir);
+  // Tells an open Settings page to read the folder list again, as well as the
+  // guard above, which any other page's settings read switches off.
+  mainWin?.webContents.send('settings:changed');
+  syncLibraryWatcher();
+  scanner.start([dir]).catch((err) => {
+    console.warn(`[newamp] scan of the added folder failed: ${errorMessage(err)}`);
+  });
 }
 
 function applicationMenuTemplate(): MenuItemConstructorOptions[] {
@@ -1641,6 +1822,7 @@ function applicationMenuTemplate(): MenuItemConstructorOptions[] {
       else win.webContents.once('did-finish-load', send);
     },
     onOpenExternal: (url) => void shell.openExternal(url),
+    files: { onOpenFiles: () => void chooseFilesToOpen(), onAddFolder: () => void chooseFolderForLibrary() },
     playback: { isPlaying: shellPlaybackState.isPlaying, onCommand: sendPlayerCommand },
   });
 }
@@ -1673,7 +1855,8 @@ function installApplicationMenu(): void {
       website: 'https://github.com/evilander/newamp',
     });
     Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate()));
-    dockPlayingLabel = null;
+    dockMenuBuiltFor = null;
+    controlsPlayingLabel = null;
     refreshDockMenu();
   } else {
     // Keep the existing chromeless custom-titlebar look on Windows/Linux.
@@ -1783,6 +1966,12 @@ let shellPlaybackState: ShellPlaybackState = {
   at: 0,
 };
 
+// Until when a playback snapshot that says "playing" is the page starting the
+// sound again by itself after a sleep, not the listener pressing play. Infinity
+// while the Mac sleeps; a few seconds after it wakes.
+let sleepPauseUntil = 0;
+const WAKE_PAUSE_WINDOW_MS = 3000;
+
 // NewAmp Remote / Radio Brain live-state fan-out.
 const shellPlaybackSubscribers = new Set<(state: ShellPlaybackState) => void>();
 function subscribeShellPlayback(cb: (state: ShellPlaybackState) => void): () => void {
@@ -1861,6 +2050,13 @@ function applyThumbarButtons(win: BrowserWindow | null = mainWin): void {
  */
 function applyShellPlaybackState(state: ShellPlaybackState): void {
   shellPlaybackState = state;
+  // The pause sent at suspend did not land before the page was frozen, so the
+  // page started the sound again on wake. The window closes after one
+  // correction so a play pressed right after it is left alone.
+  if (state.isPlaying && Date.now() < sleepPauseUntil) {
+    if (sleepPauseUntil !== Infinity) sleepPauseUntil = 0;
+    sendPlayerCommand('pause');
+  }
   for (const cb of shellPlaybackSubscribers) {
     try {
       cb(state);
@@ -1872,6 +2068,8 @@ function applyShellPlaybackState(state: ShellPlaybackState): void {
   refreshDockMenu();
   refreshDisplaySleepBlocker();
   refreshBackgroundThrottling();
+  syncMediaShortcuts();
+  retryDeferredDailyBackup();
   if (tray && !tray.isDestroyed()) {
     const label = state.title
       ? `NewAmp — ${state.artist ? `${state.artist} – ` : ''}${state.title}${state.isPlaying ? '' : ' (paused)'}`
@@ -1949,8 +2147,38 @@ function resolveTrayIconImage(): Electron.NativeImage | null {
   return null;
 }
 
+const MEDIA_SHORTCUTS: Array<[string, PlayerCommand]> = [
+  ['MediaPlayPause', 'toggle-play'],
+  ['MediaNextTrack', 'next'],
+  ['MediaPreviousTrack', 'previous'],
+  ['MediaStop', 'stop'],
+];
+
+// The Bit-Perfect Exclusive setting the media keys were last registered for.
+let mediaShortcutsForExclusive: boolean | null = null;
+
+// Called with every playback snapshot and when settings are saved with a new
+// exclusive setting: registers or drops the keys once that setting no longer
+// matches what they were set up for.
+function syncMediaShortcuts(): void {
+  if (smokeMode || mediaShortcutsForExclusive === (settings.get().bitPerfectExclusive === true)) return;
+  registerMediaShortcuts();
+}
+
+// Registers the global media keys when they are wanted and drops them when
+// they are not. Run at launch, and again by syncMediaShortcuts when Bit-Perfect
+// Exclusive is switched, since on Windows that setting decides whether they are
+// wanted at all.
 function registerMediaShortcuts(): void {
   if (smokeMode) return;
+  mediaShortcutsForExclusive = settings.get().bitPerfectExclusive === true;
+  for (const [accelerator] of MEDIA_SHORTCUTS) {
+    try {
+      globalShortcut.unregister(accelerator);
+    } catch {
+      /* not registered */
+    }
+  }
   // On Windows any global media key, even one that fails to register because
   // another app holds it, switches off Chromium's own media-key handling, and
   // that is what feeds the system media session (volume flyout, lock screen,
@@ -1965,14 +2193,8 @@ function registerMediaShortcuts(): void {
   // covers it. Global media keys there need Accessibility trust, and with it
   // they would take F7-F9 from Music while NewAmp sits paused in the Dock.
   if (process.platform === 'darwin') return;
-  const shortcuts: Array<[string, PlayerCommand]> = [
-    ['MediaPlayPause', 'toggle-play'],
-    ['MediaNextTrack', 'next'],
-    ['MediaPreviousTrack', 'previous'],
-    ['MediaStop', 'stop'],
-  ];
 
-  for (const [accelerator, command] of shortcuts) {
+  for (const [accelerator, command] of MEDIA_SHORTCUTS) {
     try {
       const ok = globalShortcut.register(accelerator, () => sendPlayerCommand(command));
       if (!ok && process.env.NEWAMP_VERBOSE_MEDIA_KEYS === '1') {
@@ -2178,26 +2400,43 @@ let restoreInProgress = false;
 // is in flight, and the last one to finish lifts the hold.
 let backupInProgress = 0;
 
+// What the watcher handed over while a backup, a trash or a prune held the
+// library still. It is replayed when the last holder resumes: the paths it
+// named changed on disk whether or not anyone was listening, and the watcher
+// does not say them again.
+let heldWatchPlans: Array<{ targets: string[]; plan: LibraryWatchPlan }> = [];
+let heldIncrementalRoots = new Set<string>();
+
 // Root walks the watcher asks for; see IncrementalScanGate. Reads `scanner` at
 // call time, so a swapped store is walked by its own scanner. A batch that was
-// waiting when a backup or removal took hold is dropped, as a watcher flush
-// landing then would be.
+// waiting when a backup or removal took hold is kept for resumeLibraryMutations.
 const incrementalScans = new IncrementalScanGate(async (targets) => {
-  if (libraryMutationsQuiesced) return;
+  if (libraryMutationsQuiesced) {
+    for (const target of targets) heldIncrementalRoots.add(target);
+    return;
+  }
   await scanner.start(targets);
 });
 
 function createLibraryWatcherService(): LibraryWatcher {
   return new LibraryWatcher(
     (targets, plan) => {
-      if (libraryMutationsQuiesced || !settings.get().libraryAutoWatch || !targets.length) return;
+      if (!settings.get().libraryAutoWatch || !targets.length) return;
+      if (libraryMutationsQuiesced) {
+        heldWatchPlans.push({ targets, plan });
+        return;
+      }
       void reconcileWatchedTargets(targets, plan);
     },
     {
       // A drive or share that comes back: an ordinary (incremental) scan of it
       // clears the missing marks its tracks got while it was away.
       onRootAvailable: (root) => {
-        if (libraryMutationsQuiesced || !settings.get().libraryAutoWatch) return;
+        if (!settings.get().libraryAutoWatch) return;
+        if (libraryMutationsQuiesced) {
+          heldIncrementalRoots.add(root);
+          return;
+        }
         incrementalScans.request([root]);
       },
     },
@@ -2215,6 +2454,55 @@ const MISSING_RECHECK_DELAY_MS = 1500;
 
 let watcherReconcile: Promise<void> = Promise.resolve();
 
+type PathProbe = { presence: 'present'; stats: Stats } | { presence: 'missing' } | { presence: 'unknown' };
+
+const PATH_PROBE_TIMEOUT_MS = 3000;
+const PATH_PROBE_CONCURRENCY = 4;
+
+// Whether a path is there, asked off the main thread and with a limit on the
+// wait. Only "no such file" is an answer about the file: a share that timed
+// out, or stopped answering, says nothing about it, and comes back unknown.
+function probePath(path: string, timeoutMs = PATH_PROBE_TIMEOUT_MS): Promise<PathProbe> {
+  return new Promise((done) => {
+    const timer = setTimeout(() => done({ presence: 'unknown' }), timeoutMs);
+    stat(path).then(
+      (stats) => {
+        clearTimeout(timer);
+        done({ presence: 'present', stats });
+      },
+      (err: NodeJS.ErrnoException) => {
+        clearTimeout(timer);
+        done({ presence: err?.code === 'ENOENT' || err?.code === 'ENOTDIR' ? 'missing' : 'unknown' });
+      },
+    );
+  });
+}
+
+// Runs fn over the items with at most `limit` in flight, keeping their order.
+async function mapBounded<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const index = next++;
+        results[index] = await fn(items[index]!);
+      }
+    }),
+  );
+  return results;
+}
+
+// Folder paths compared the way the OS does: either slash, no trailing one,
+// and without case on Windows and macOS (not Linux, where case matters).
+function isPathInside(path: string, folder: string): boolean {
+  const key = (value: string): string =>
+    caseFoldCachePath(value.replace(/\\/g, '/').replace(/\/+$/, ''), process.platform);
+  const target = key(path);
+  const root = key(folder);
+  return target === root || target.startsWith(`${root}/`);
+}
+
 // plan splits the targets: files and folder art the watcher named are read
 // again whatever their size and date say, while a root whose event carried no
 // name (the watcher overflowed during a bulk copy) is walked incrementally,
@@ -2222,17 +2510,32 @@ let watcherReconcile: Promise<void> = Promise.resolve();
 function reconcileWatchedTargets(watched: string[], plan?: LibraryWatchPlan): Promise<void> {
   const run = watcherReconcile.then(async () => {
     await new Promise((resolve) => setTimeout(resolve, MISSING_RECHECK_DELAY_MS));
-    const stillMissing = watched.filter((target) => !existsSync(target));
-    if (stillMissing.length) library.markTracksMissing(stillMissing);
+    // A held library (a backup, a trash) took hold during the pause above.
+    if (libraryMutationsQuiesced) {
+      heldWatchPlans.push({ targets: watched, plan: plan ?? { force: watched, incremental: [] } });
+      return;
+    }
+    // Only a target the storage says is gone is marked; one that timed out
+    // marks nothing, so a share that stopped answering costs no track its
+    // place in the library.
+    await library.markTracksMissingAsync(watched);
     const targets = plan ? plan.force : watched;
     const incremental = plan ? plan.incremental : [];
-    if (targets.length) void scanner.start(targets, { force: true });
-    if (incremental.length) incrementalScans.request(incremental);
+    if (targets.length) void scanner.start(targets, { force: true }).catch(logWatcherScanFailure);
+    // A root that did not answer is not walked: the walk would only fail, and
+    // the watcher hands it over again when it is back.
+    const probes = await mapBounded(incremental, PATH_PROBE_CONCURRENCY, (root) => probePath(root));
+    const reachable = incremental.filter((_root, index) => probes[index]!.presence === 'present');
+    if (reachable.length) incrementalScans.request(reachable);
   });
   watcherReconcile = run.catch((err) => {
     console.warn(`[newamp] library watcher reconcile failed: ${err instanceof Error ? err.message : String(err)}`);
   });
   return run;
+}
+
+function logWatcherScanFailure(err: unknown): void {
+  console.warn(`[newamp] library watcher scan failed: ${err instanceof Error ? err.message : String(err)}`);
 }
 
 // A track that predates tracked edits (still queued for adoption), or holds an
@@ -2270,6 +2573,14 @@ async function quiesceLibraryMutations(options: { keepScan?: boolean } = {}): Pr
 
 function resumeLibraryMutations(): void {
   libraryMutationsQuiesced = Math.max(0, libraryMutationsQuiesced - 1);
+  if (libraryMutationsQuiesced) return;
+  const plans = heldWatchPlans;
+  const roots = [...heldIncrementalRoots];
+  heldWatchPlans = [];
+  heldIncrementalRoots = new Set();
+  if (!settings.get().libraryAutoWatch) return;
+  for (const { targets, plan } of plans) void reconcileWatchedTargets(targets, plan);
+  if (roots.length) incrementalScans.request(roots);
 }
 
 // Builds a support backup from the live stores' in-memory state rather than
@@ -2297,6 +2608,22 @@ async function createBackupFromLiveStores(userData: string, scope: 'full' | 'lib
 const DAILY_BACKUP_FIRST_CHECK_MS = 2 * 60 * 1000;
 const DAILY_BACKUP_CHECK_MS = 6 * 60 * 60 * 1000;
 
+// Set when a due copy was put off for playback. Someone who plays all day would
+// otherwise only see the six-hourly checks land on a playing track, so the
+// copy is tried again once playback pauses or stops.
+let dailyBackupWaitingForIdle = false;
+let dailyBackupIdleTimer: NodeJS.Timeout | null = null;
+const DAILY_BACKUP_IDLE_DELAY_MS = 30 * 1000;
+
+function retryDeferredDailyBackup(): void {
+  if (!dailyBackupWaitingForIdle || shellPlaybackState.isPlaying || dailyBackupIdleTimer) return;
+  dailyBackupIdleTimer = setTimeout(() => {
+    dailyBackupIdleTimer = null;
+    if (dailyBackupWaitingForIdle) void runDailyBackup();
+  }, DAILY_BACKUP_IDLE_DELAY_MS);
+  dailyBackupIdleTimer.unref();
+}
+
 function scheduleDailyBackups(): void {
   if (smokeMode) return;
   setTimeout(() => void runDailyBackup(), DAILY_BACKUP_FIRST_CHECK_MS).unref();
@@ -2308,6 +2635,7 @@ function scheduleDailyBackups(): void {
 // quietly while anything else is rewriting the stores, or when the library
 // session is not the real one (a failed upgrade runs on a temporary library).
 async function runDailyBackup(): Promise<void> {
+  dailyBackupWaitingForIdle = false;
   if (!settings.get().autoBackupEnabled) return;
   if (restoreInProgress || backupInProgress || library.isClosed() || library.upgradeError || settings.isSuppressed()) return;
   backupInProgress += 1;
@@ -2321,7 +2649,11 @@ async function runDailyBackup(): Promise<void> {
       settingsPath: join(userData, 'settings.json'),
       libraryPath: join(userData, 'library.db'),
       snapshot: () => ({ librarySnapshot: library.exportSnapshot(), settingsSnapshot: settings.snapshotJson() }),
+      // Copying the library holds the main thread, which is serving the audio
+      // of a track that plays from a slow share.
+      defer: () => shellPlaybackState.isPlaying,
     });
+    dailyBackupWaitingForIdle = outcome.status === 'skipped' && outcome.reason === 'deferred';
     if (outcome.status === 'created') {
       writeDiagnosticEvent('daily-backup-created', { path: outcome.backup.backupPath });
     } else if (outcome.reason === 'invalid' || outcome.reason === 'low-disk') {
@@ -2342,6 +2674,9 @@ async function reloadRuntimeStores(userData: string): Promise<void> {
     radioBrain = null;
   }
   libraryMutationsQuiesced = 0;
+  // Paths held for the library that is being replaced mean nothing to the new one.
+  heldWatchPlans = [];
+  heldIncrementalRoots = new Set();
   settings = new SettingsStore(join(userData, 'settings.json'));
   lastfmOutbox = new LastfmScrobbleOutbox(join(userData, 'lastfm-scrobbles.json'));
   podcastStore = new PodcastStore(join(userData, 'podcasts.json'));
@@ -2351,6 +2686,32 @@ async function reloadRuntimeStores(userData: string): Promise<void> {
   libraryWatcher = createLibraryWatcherService();
   syncLibraryWatcher();
   await queueRadioBrainSync();
+}
+
+// Each miss used to start a full-track encode, so skipping through an album
+// queued one per track, each reading its whole file off the share. A track is
+// warmed only once it has stayed requested for this long, and at most two are
+// waiting at a time: the track playing and the one prepared after it. A newer
+// request pushes the oldest out.
+const FLAC_WARM_DELAY_MS = 10_000;
+const FLAC_WARM_MAX_PENDING = 2;
+const pendingFlacWarms = new Map<string, NodeJS.Timeout>();
+
+function scheduleFlacWarm(path: string): void {
+  if (pendingFlacWarms.has(path)) return;
+  while (pendingFlacWarms.size >= FLAC_WARM_MAX_PENDING) {
+    const oldest = pendingFlacWarms.keys().next().value as string;
+    clearTimeout(pendingFlacWarms.get(oldest));
+    pendingFlacWarms.delete(oldest);
+  }
+  const timer = setTimeout(() => {
+    pendingFlacWarms.delete(path);
+    // Semaphore-bounded and deduplicated by the cache: a warm already running
+    // for the file is joined, not repeated.
+    void getOrTranscodeToFlac(path).catch(() => {});
+  }, FLAC_WARM_DELAY_MS);
+  timer.unref();
+  pendingFlacWarms.set(path, timer);
 }
 
 function registerAudioProtocol(): void {
@@ -2372,7 +2733,7 @@ function registerAudioProtocol(): void {
       }
       return new Response(await readFile(filePath), {
         status: 200,
-        headers: { 'Content-Type': rendererMimeType(filePath) },
+        headers: { 'Content-Type': rendererMimeType(filePath), 'X-Content-Type-Options': 'nosniff' },
       });
     } catch (err) {
       console.error('newamp-app protocol error:', err);
@@ -2391,7 +2752,7 @@ function registerAudioProtocol(): void {
       // audio-protocol-authorize.ts, extracted so it's directly
       // unit-testable (scripts/audio-url-roundtrip-test.mjs) rather than
       // only reachable by booting Electron. Phase one runs on pure strings
-      // BEFORE any fs call: existsSync/realpath on an unvalidated UNC path
+      // BEFORE any fs call: realpath on an unvalidated UNC path
       // alone opens an SMB session to whatever host it names — see that
       // module's header for why the ordering, not just the final verdict,
       // is what's load-bearing here.
@@ -2402,12 +2763,12 @@ function registerAudioProtocol(): void {
         getTracksByPaths: (paths) => library?.getTracksByPaths?.(paths),
       });
       if (!authResult.ok) {
-        return authResult.status === 404
-          ? new Response('Not found', { status: 404 })
-          : new Response('Forbidden', { status: 403, headers: { 'X-Newamp-Reason': 'path-not-allowed' } });
+        if (authResult.status === 404) return new Response('Not found', { status: 404 });
+        if (authResult.status === 503) return storageUnavailableResponse();
+        return new Response('Forbidden', { status: 403, headers: { 'X-Newamp-Reason': 'path-not-allowed' } });
       }
       const { real } = authResult;
-      if ((await resolvePlaybackMode(real)) === 'ffmpeg') {
+      if ((await servedPlaybackMode(real)) === 'ffmpeg') {
         // Seekable path: serve the finalized cached FLAC (range-capable) when it
         // already exists. First play streams a SEEKABLE synthesized WAV instead
         // of awaiting the full encode — audio starts in tens of ms
@@ -2431,9 +2792,9 @@ function registerAudioProtocol(): void {
             'X-Newamp-Playback': 'ffmpeg-cached-flac',
           });
         }
-        // Cache miss: warm it in the background (semaphore-bounded, inflight-
-        // deduped — duplicate warms coalesce) and stream immediately.
-        void getOrTranscodeToFlac(real).catch(() => {});
+        // Cache miss: stream immediately, and warm the cache for repeat plays
+        // once the track has stayed requested (see scheduleFlacWarm).
+        scheduleFlacWarm(real);
         return seekableTranscodeResponse(real, request);
       }
       // Native formats: answer byte ranges ourselves. Electron's
@@ -2443,6 +2804,8 @@ function registerAudioProtocol(): void {
       // missing status line is why every scrub snapped back to 0:00.
       return fileRangeResponse(real, request);
     } catch (err) {
+      // A share that timed out is not a server fault and not a missing file.
+      if (isStorageError(err)) return storageUnavailableResponse();
       console.error('newamp protocol error:', err);
       return new Response('Server Error', { status: 500 });
     }
@@ -2490,6 +2853,53 @@ function registerAudioProtocol(): void {
   });
 }
 
+function storageUnavailableResponse(): Response {
+  return new Response('Storage unavailable', {
+    status: 503,
+    headers: { 'X-Newamp-Reason': 'storage-unavailable', 'Retry-After': '1' },
+  });
+}
+
+// How each file was first served. A request for the same file made later (a
+// seek, a reconnect) must be answered the same way: the ffmpeg path serves a
+// synthesized WAV whose byte offsets mean nothing to the raw file, so a probe
+// that came out differently the second time would hand Chromium the wrong
+// bytes for the range it asked for. Held while the file keeps being played and
+// dropped after it has not been asked for in a while.
+const servedModes = new Map<string, { mode: 'native' | 'ffmpeg'; at: number }>();
+const SERVED_MODE_IDLE_MS = 30 * 60_000;
+const SERVED_MODE_CAP = 256;
+const PLAYBACK_MODE_RETRY_DELAYS_MS = [250, 500];
+
+async function servedPlaybackMode(real: string): Promise<'native' | 'ffmpeg'> {
+  const now = Date.now();
+  const held = servedModes.get(real);
+  if (held && now - held.at < SERVED_MODE_IDLE_MS) {
+    servedModes.delete(real);
+    servedModes.set(real, { mode: held.mode, at: now });
+    return held.mode;
+  }
+  let mode: 'native' | 'ffmpeg';
+  for (let attempt = 0; ; attempt++) {
+    try {
+      mode = await resolvePlaybackMode(real);
+      break;
+    } catch (err) {
+      // The probe could not read the file because its storage did not answer.
+      // Guessing the extension's mode here is what turns a hiccup into a
+      // broken stream; wait for the share, and fail the request if it stays
+      // away.
+      const delay = PLAYBACK_MODE_RETRY_DELAYS_MS[attempt];
+      if (!isStorageError(err) || delay === undefined) throw err;
+      await new Promise((done) => setTimeout(done, delay));
+    }
+  }
+  servedModes.delete(real);
+  if (servedModes.size >= SERVED_MODE_CAP) servedModes.delete(servedModes.keys().next().value!);
+  servedModes.set(real, { mode, at: Date.now() });
+  return mode;
+}
+
 function protocolNumericId(rawUrl: string): number {
   const idText = rawUrl.match(/(?:^|[^\d])(\d+)(?=[^\d]|$)/)?.[1] || '';
   const id = Number.parseInt(idText, 10);
@@ -2523,6 +2933,20 @@ function rendererMimeType(filePath: string): string {
       return 'image/x-icon';
     case '.woff2':
       return 'font/woff2';
+    case '.woff':
+      return 'font/woff';
+    case '.ttf':
+      return 'font/ttf';
+    case '.webp':
+      return 'image/webp';
+    case '.gif':
+      return 'image/gif';
+    case '.wasm':
+      return 'application/wasm';
+    case '.mjs':
+      return 'text/javascript; charset=utf-8';
+    case '.map':
+      return 'application/json; charset=utf-8';
     default:
       return 'application/octet-stream';
   }
@@ -2575,14 +2999,9 @@ function registerIpc(): void {
       const headers = Object.keys(
         rows[0] ?? { path: '', title: '', artist: '', album: '' },
       );
-      const escape = (value: unknown): string => {
-        if (value === null || value === undefined) return '';
-        const s = String(value);
-        return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-      };
       const lines = [headers.join(',')];
       for (const row of rows) {
-        lines.push(headers.map((h) => escape((row as Record<string, unknown>)[h])).join(','));
+        lines.push(headers.map((h) => csvCell((row as Record<string, unknown>)[h])).join(','));
       }
       payload = lines.join('\r\n');
     }
@@ -2825,7 +3244,7 @@ function registerIpc(): void {
   ipcMain.handle('tags:list-rules', async () => library.listTagRules());
   ipcMain.handle('tags:save-rule', async (_e, input) => {
     const saved = library.saveTagRule(input);
-    library.recomputeTags();
+    await library.recomputeTagsAsync();
     return saved;
   });
   ipcMain.handle('tags:delete-rule', async (_e, id: number) => {
@@ -2833,13 +3252,13 @@ function registerIpc(): void {
   });
   ipcMain.handle('tags:set-rule-enabled', async (_e, id: number, enabled: boolean) => {
     const rule = library.setTagRuleEnabled(id, enabled);
-    library.recomputeTags();
+    await library.recomputeTagsAsync();
     return rule;
   });
-  ipcMain.handle('tags:recompute', async (_e, opts) => library.recomputeTags(opts));
+  ipcMain.handle('tags:recompute', async (_e, opts) => library.recomputeTagsAsync(opts));
   ipcMain.handle('tags:for-track', async (_e, id: number) => library.getTagsForTrack(id));
   ipcMain.handle('tags:summaries', async () => library.getTagSummaries());
-  ipcMain.handle('tags:preview-rule', async (_e, input) => library.previewTagRule(input));
+  ipcMain.handle('tags:preview-rule', async (_e, input) => library.previewTagRuleAsync(input));
   ipcMain.handle('tags:track-ids-by-tag', async (_e, name: string) => library.getTrackIdsByTag(name));
   ipcMain.handle('open:consume-pending-files', async () => {
     // Files from a launch with several selected arrive as separate events;
@@ -2888,14 +3307,22 @@ function registerIpc(): void {
     return library.getLibraryHealthAsync();
   });
   ipcMain.handle('library:prune-missing-preview', async (_e, targets?: string[]) =>
-    library.previewPruneMissingTracks(Array.isArray(targets) ? targets : undefined, settings.get().libraryRoots),
+    library.previewPruneMissingTracksAsync(Array.isArray(targets) ? targets : undefined, settings.get().libraryRoots),
   );
   ipcMain.handle('library:prune-missing', async (_e, targets?: string[]) => {
     if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
     assertHistoryImportIdle();
     const scope = Array.isArray(targets) ? targets : undefined;
     const roots = settings.get().libraryRoots;
-    if (!library.previewPruneMissingTracks(scope, roots).tracks) return library.pruneMissingTracks(scope, roots);
+    const preview = await library.previewPruneMissingTracksAsync(scope, roots);
+    // Nothing to remove, so nothing is deleted and no backup is needed. A second
+    // sweep here could find a file that went missing since the preview and
+    // delete it outside the backup below.
+    if (!preview.tracks) return { checked: preview.checked, removed: 0, offline: preview.offline };
+    // The preview above waited on the storage, and a restore or a history
+    // import may have begun.
+    if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
+    assertHistoryImportIdle();
     // Removing a track takes its plays, ratings, bookmarks, edits and playlist
     // places with it. Back the live stores up first, the same way the Support
     // backup does, and delete nothing if that fails.
@@ -2903,7 +3330,7 @@ function registerIpc(): void {
     try {
       await quiesceLibraryMutations({ keepScan: true });
       const backup = await createBackupFromLiveStores(app.getPath('userData'), 'library');
-      const result = library.pruneMissingTracks(scope, roots);
+      const result = await library.pruneMissingTracksAsync(scope, roots);
       // The queue and the playlist views drop what went, as after a trash.
       if (result.removedIds?.length) {
         notifyTracksRemoved(result.removedIds);
@@ -3015,8 +3442,8 @@ function registerIpc(): void {
     }
   });
   ipcMain.handle('history:get', async (_e, opts) => library.getListeningHistory(opts ?? {}));
-  ipcMain.handle('history:insights', async (_e, opts) => library.getListeningInsights(opts ?? {}));
-  ipcMain.handle('history:wrapped', async (_e, opts) => library.getWrappedStats(opts ?? {}));
+  ipcMain.handle('history:insights', async (_e, opts) => library.getListeningInsightsAsync(opts ?? {}));
+  ipcMain.handle('history:wrapped', async (_e, opts) => library.getWrappedStatsAsync(opts ?? {}));
 
   // --- Local-first social objects ---
   ipcMain.handle('social:reviews:get', async (_e, target) => library.getReviews(target ?? undefined));
@@ -3046,7 +3473,21 @@ function registerIpc(): void {
     await writeFile(result.filePath, html, 'utf8');
     return result.filePath;
   });
-  ipcMain.handle('history:clear', async () => { assertHistoryImportIdle(); library.clearListeningHistory(); });
+  // Clearing the log cannot be undone from the page, so a library backup comes
+  // first, as for a prune, and nothing is cleared if it fails.
+  ipcMain.handle('history:clear', async () => {
+    if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
+    assertHistoryImportIdle();
+    backupInProgress += 1;
+    try {
+      await quiesceLibraryMutations({ keepScan: true });
+      await createBackupFromLiveStores(app.getPath('userData'), 'library');
+      library.clearListeningHistory();
+    } finally {
+      resumeLibraryMutations();
+      backupInProgress -= 1;
+    }
+  });
   ipcMain.handle('bookmark:list', async (_e, trackId: number) => library.getTrackBookmarks(trackId));
   ipcMain.handle('bookmark:save', async (_e, input) => library.saveTrackBookmark(input));
   ipcMain.handle('bookmark:delete', async (_e, id: number) => library.deleteTrackBookmark(id));
@@ -3091,10 +3532,17 @@ function registerIpc(): void {
     (sender) => !!mainWin && !mainWin.isDestroyed() && sender === mainWin.webContents,
   );
 
-  ipcMain.handle('settings:get', async () => withAiAssistRuntime(settings.get()));
-  ipcMain.handle('settings:set', async (_e, patch) => {
+  // The typeof checks keep these handlers runnable on their own, as the vm
+  // tests do, without the rest of this module.
+  ipcMain.handle('settings:get', async () => {
+    if (typeof libraryRootsRead === 'function') libraryRootsRead();
+    return withAiAssistRuntime(settings.get());
+  });
+  ipcMain.handle('settings:set', async (_e, requested) => {
     if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
+    const patch = typeof keepUnseenMenuRoots === 'function' ? keepUnseenMenuRoots(requested) : requested;
     settings.set(patch);
+    if (typeof libraryRootsRead === 'function') libraryRootsRead();
     if (patch && typeof patch === 'object' && 'radioBrainToken' in patch) radioBrain?.revokeClients();
     if (patchTouchesLibraryWatch(patch)) syncLibraryWatcher();
     if (patchTouchesRadioBrain(patch)) {
@@ -3111,6 +3559,12 @@ function registerIpc(): void {
       exclusivePlaySeq++;
       exclusiveOutput?.stop();
     }
+    // On Windows the global media keys are registered only while exclusive
+    // output is on, so a change of it re-registers them now, not at the next
+    // playback snapshot.
+    if (patch && typeof patch === 'object' && 'bitPerfectExclusive' in patch && typeof syncMediaShortcuts === 'function') {
+      syncMediaShortcuts();
+    }
     return withAiAssistRuntime(settings.get());
   });
 
@@ -3123,6 +3577,10 @@ function registerIpc(): void {
   // track would not match the UI.
   let exclusivePlaySeq = 0;
   let exclusivePrepareSeq = 0;
+  invalidateExclusiveRequests = () => {
+    exclusivePlaySeq++;
+    exclusivePrepareSeq++;
+  };
   ipcMain.handle('exclusive:play', async (_e, trackId: number, startAt?: number) => {
     const requestSeq = ++exclusivePlaySeq;
     try {
@@ -3403,11 +3861,12 @@ function registerIpc(): void {
     try {
       await scrobbleLastfmTrack(settings.get(), track, timestamp);
     } catch (err) {
-      // An auth failure is not retryable, but the play still has to be kept:
-      // dropping it here would lose every scrobble made while the session key
-      // is dead, and with nothing queued the outbox could never report that a
-      // reconnect is needed. Queue it so it survives and stays visible.
-      if (shouldRetryLastfmError(err) || isLastfmAuthFailure(err)) {
+      // Only a play Last.fm will never accept is dropped. Anything else, an
+      // auth failure or a refusal that may be ours such as an invalid
+      // signature, is queued so it survives and stays visible: dropping it
+      // would lose every scrobble made while the session key is dead, and with
+      // nothing queued the outbox could never report that a reconnect is needed.
+      if (!isPermanentLastfmRejection(err)) {
         await lastfmOutbox.enqueue(track, timestamp, errorMessage(err));
       }
     }
@@ -3570,7 +4029,7 @@ function registerIpc(): void {
   });
   ipcMain.handle('win:is-fullscreen', () => (mainWin ? isWindowFullScreen(mainWin) : false));
   ipcMain.handle('win:set-compact', (_e, on: boolean, size?: { width?: number; height?: number }) =>
-    setCompactMode(!!on, size),
+    requestCompactMode(!!on, size),
   );
   ipcMain.handle('win:set-compact-size', (_e, size: { width: number; height: number }) => {
     if (!mainWin) return;
@@ -6226,8 +6685,29 @@ function uiLyricsProbeSource(): string {
   `;
 }
 
+// One cell of the metadata CSV. A text value that starts with = + - @ or a tab
+// or return would run as a formula when the file is opened in a spreadsheet,
+// and tags come from files that may have been downloaded, so it gets a leading
+// quote mark, which the spreadsheet hides. Numbers are written as they are: the
+// ReplayGain columns are legitimately negative.
+function csvCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  let text = String(value);
+  if (typeof value === 'string' && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+// Names on Windows that mean a device whatever extension follows.
+const RESERVED_FILE_STEMS = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+const MAX_FILE_STEM_LENGTH = 120;
+
 function safeFileStem(name: string): string {
-  return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim() || 'NewAmp Playlist';
+  let stem = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/\s+/g, ' ').trim();
+  // Windows drops trailing dots and spaces, so a name that ends in one would
+  // be saved as a different file than the one the dialog showed.
+  stem = stem.slice(0, MAX_FILE_STEM_LENGTH).replace(/[. ]+$/, '');
+  if (RESERVED_FILE_STEMS.test(stem)) stem = `_${stem}`;
+  return stem || 'NewAmp Playlist';
 }
 
 async function importSkinFile(skinPath: string): Promise<CustomSkin> {
@@ -6614,12 +7094,10 @@ function normalizeAlbumReplayGainKeyPart(value: string | null | undefined): stri
   return text && !['unknown album', 'unknown artist'].includes(text) ? text : '';
 }
 
+const UNREAD_OPEN_REASON = 'could not be read, the file or its drive may be unavailable';
+
 async function openFiles(paths: string[]): Promise<OpenFilesResult> {
-  const targets = normalizeOpenTargets(paths);
-  // Authorize before any scan/lookup so playback can never race the allowlist.
-  await Promise.all(
-    targets.filter((target) => target.kind === 'file').map((target) => allowOpenedAudioFile(target.path)),
-  );
+  const targets = await normalizeOpenTargets(paths);
   const audioPaths: string[] = [];
   const playlistPaths: string[] = [];
   const cuePaths: string[] = [];
@@ -6637,6 +7115,11 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
     else if (OPEN_PLAYLIST_EXTS.has(ext)) playlistPaths.push(path);
     else skipped.push(path);
   }
+  // Authorize before any scan/lookup so playback can never race the
+  // allowlist. Only audio files are let through to the protocol: a path the
+  // page hands over is otherwise served as bytes, whatever the file is.
+  await Promise.all(audioPaths.map((path) => allowOpenedAudioFile(path)));
+  recordRecentDocuments([...audioPaths, ...cuePaths, ...playlistPaths]);
 
   const cueSheets: Array<{ path: string; entries: CueSheetEntry[] }> = [];
   for (const path of cuePaths) {
@@ -6653,20 +7136,34 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
     }
   }
 
-  const cueAudio = cueSheets.flatMap((sheet) => cueAudioPaths(sheet.entries));
+  // A sheet names its audio files itself; only those with an audio extension
+  // are authorized, for the same reason.
+  const cueAudio = cueSheets
+    .flatMap((sheet) => cueAudioPaths(sheet.entries))
+    .filter((path) => OPEN_AUDIO_EXTS.has(extname(path).toLowerCase()));
+  await Promise.all(cueAudio.map((path) => allowOpenedAudioFile(path)));
   // Files are read here, not queued behind the scanner: scans run one at a
   // time, and the first scan of a large library on a network share runs for
   // hours, so a file opened or dropped meanwhile sat at "Opening" until it
-  // ended. Folders still go through the scanner, which walks them.
-  await readOpenedFiles([...audioPaths, ...cueAudio]);
-  if (folderPaths.length) await scanner.start(folderPaths);
+  // ended.
+  const unread = await readOpenedFiles([...audioPaths, ...cueAudio]);
+  for (const path of unread) {
+    if (!library.getTracksByPaths([path]).length) skipped.push(`${path}: ${UNREAD_OPEN_REASON}`);
+  }
+  // A folder is read the same way unless it is inside a library folder, whose
+  // tracks are already in the library; a scan then refreshes it behind the
+  // open.
+  const folderUnread = await readOpenedFolders(folderPaths);
+  skipped.push(...folderUnread.map((path) => `${path}: ${UNREAD_OPEN_REASON}`));
 
   const importedPlaylists = [];
   const tracks = library.getTracksByPaths(audioPaths);
   const seenTrackIds = new Set(tracks.map((track) => track.id));
 
   for (const folderPath of folderPaths) {
-    for (const track of library.getFolderTracks(folderPath, { recursive: true, limit: 100000 })) {
+    // Sliced, so a folder holding most of a large library does not hold the
+    // main process while its rows are built.
+    for (const track of await library.getFolderTracksAsync(folderPath, { recursive: true, limit: 100000 })) {
       if (seenTrackIds.has(track.id)) continue;
       seenTrackIds.add(track.id);
       tracks.push(track);
@@ -6706,54 +7203,209 @@ async function openFiles(paths: string[]): Promise<OpenFilesResult> {
   return { tracks, importedPlaylists, skipped };
 }
 
-const OPENED_FILE_READS = 4;
+// The File menu's Open Recent list. Windows keeps the same list for the
+// taskbar jump list; elsewhere there is nothing to record.
+function recordRecentDocuments(paths: string[]): void {
+  if (smokeMode || (process.platform !== 'darwin' && process.platform !== 'win32')) return;
+  for (const path of paths) {
+    try {
+      app.addRecentDocument(path);
+    } catch {
+      /* the list is a convenience */
+    }
+  }
+}
 
-async function readOpenedFiles(paths: string[]): Promise<void> {
-  const unique = [...new Set(paths)];
+const OPENED_FILE_READS = 4;
+// A folder with more audio files than this is left to the scanner, which reads
+// in batches, shows its progress and can be cancelled. Reading it here would be
+// one unbounded pass on the main process, with no way to stop it.
+const OPENED_FOLDER_INLINE_FILES = 300;
+// A read that fails on a network share often works a moment later.
+const OPENED_FILE_RETRY_MS = 500;
+
+// Reads the files that are not in the library yet, and returns the ones that
+// could not be read. A track the library already holds is not parsed again:
+// that costs a stat, a tag read and a folder listing over the share before
+// "open" can answer, for nothing the library does not already know.
+async function readOpenedFiles(paths: string[]): Promise<string[]> {
+  const unique = [...new Set(paths)].filter(
+    (path) => !library.getTracksByPaths([path]).some((track) => !track.missingSince),
+  );
   const readings: Array<NonNullable<Awaited<ReturnType<typeof readTrackFile>>>> = [];
+  const unread: string[] = [];
   let next = 0;
   await Promise.all(
     Array.from({ length: Math.min(OPENED_FILE_READS, unique.length) }, async () => {
       while (next < unique.length) {
-        const reading = await readTrackFile(unique[next++]!);
+        const path = unique[next++]!;
+        // A share that isn't answering is waited out; a file that read but
+        // gave nothing back gets one more try, which is often enough on a
+        // network drive.
+        let reading = await retryStorageErrors(() => readTrackFile(path, { rethrowStorageErrors: true })).catch(() => null);
+        if (!reading) {
+          await new Promise((done) => setTimeout(done, OPENED_FILE_RETRY_MS));
+          reading = await readTrackFile(path);
+        }
         if (reading) readings.push(reading);
+        else unread.push(path);
       }
     }),
   );
   if (readings.length) library.upsertTracks(readings);
+  return unread;
 }
 
-function collectOpenFileArgs(argv: string[]): string[] {
-  return normalizeOpenTargets(
-    argv.filter((arg) => {
-      if (!arg || arg.startsWith('-') || arg.startsWith('newamp:')) return false;
-      const ext = extname(arg).toLowerCase();
-      return OPEN_AUDIO_EXTS.has(ext) || OPEN_PLAYLIST_EXTS.has(ext);
-    }),
-  ).map((target) => target.path);
+function isInsideLibraryRoot(path: string): boolean {
+  return settings.get().libraryRoots.some((root) => isPathInside(path, root));
 }
 
-function normalizeOpenTargets(paths: string[]): Array<{ path: string; kind: 'file' | 'directory' }> {
-  const out: Array<{ path: string; kind: 'file' | 'directory' }> = [];
+// The audio files under a folder, with the folders and files a scan skips
+// left out. The walk stops once it has found more than `limit`, which is enough
+// to tell a caller the folder is bigger than it wants to read.
+async function listAudioFiles(root: string, limit = Infinity): Promise<string[]> {
+  const found: string[] = [];
+  const stack = [root];
+  while (stack.length && found.length <= limit) {
+    const dir = stack.pop()!;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!isSkippedLibraryFolder(entry.name, basename(dir))) stack.push(full);
+      } else if (entry.isFile()) {
+        if (!isSkippedLibraryFile(entry.name) && OPEN_AUDIO_EXTS.has(extname(entry.name).toLowerCase())) found.push(full);
+      }
+    }
+  }
+  return found;
+}
+
+// A folder opened while a library scan runs must not wait for that scan, which
+// can take hours on a large share: the scanner takes one job at a time. The
+// files of a folder outside the library, or inside one but with no tracks in
+// the library yet (watching off, a just-copied album), are read here, as
+// opened files are, and the scanner is asked for the folder afterwards to fill
+// in what this read leaves (album details, folder art). A folder too big to
+// read at once goes to the scanner alone. Returns the files that could not be
+// read.
+async function readOpenedFolders(folders: string[]): Promise<string[]> {
+  if (!folders.length) return [];
+  const unread: string[] = [];
+  const toScan: string[] = [];
+  for (const folder of folders) {
+    toScan.push(folder);
+    if (isInsideLibraryRoot(folder) && (await library.getFolderTracksAsync(folder, { recursive: true, limit: 1 })).length) continue;
+    // What this reads becomes library tracks, which the audio protocol serves
+    // on that ground, so none of it is added to the opened-files list.
+    const files = await listAudioFiles(folder, OPENED_FOLDER_INLINE_FILES);
+    if (files.length > OPENED_FOLDER_INLINE_FILES) continue;
+    unread.push(...(await readOpenedFiles(files)));
+  }
+  void scanner.start(toScan).catch((err) => {
+    console.warn(`[newamp] scan of the opened folder failed: ${errorMessage(err)}`);
+  });
+  return unread;
+}
+
+type OpenTarget = { path: string; kind: 'file' | 'directory' };
+
+// Names one file for the open list. macOS and Windows treat paths that differ
+// only by case as the same file; elsewhere they are two files.
+function openTargetKey(path: string): string {
+  return caseFoldCachePath(path, process.platform);
+}
+
+// The command-line words that name something to open: not switches, not the
+// app's own path when run from source, and made absolute against the
+// directory the command was typed in when that is known.
+function openArgCandidates(argv: string[], workingDirectory?: string): string[] {
+  return argv
+    .slice(process.defaultApp ? 2 : 1)
+    .filter((arg) => arg && !arg.startsWith('-') && !arg.startsWith('newamp:'))
+    .map((arg) => (workingDirectory ? resolve(workingDirectory, arg) : arg));
+}
+
+function isOpenableFile(path: string): boolean {
+  const ext = extname(path).toLowerCase();
+  return OPEN_AUDIO_EXTS.has(ext) || OPEN_PLAYLIST_EXTS.has(ext);
+}
+
+// Audio and playlist files, and folders, named on a command line.
+async function collectOpenFileArgs(argv: string[], workingDirectory?: string): Promise<string[]> {
+  const targets = await normalizeOpenTargets(openArgCandidates(argv, workingDirectory));
+  return targets.filter((target) => target.kind === 'directory' || isOpenableFile(target.path)).map((target) => target.path);
+}
+
+// The launch command line, read before the window exists. A few paths on
+// local disk or a mounted share, and nothing else is running yet.
+function collectOpenFileArgsSync(argv: string[]): string[] {
+  return normalizeOpenTargetsSync(openArgCandidates(argv))
+    .filter((target) => target.kind === 'directory' || isOpenableFile(target.path))
+    .map((target) => target.path);
+}
+
+function normalizeOpenTargetsSync(paths: string[]): OpenTarget[] {
+  const out: OpenTarget[] = [];
   const seen = new Set<string>();
   for (const raw of paths) {
     if (typeof raw !== 'string' || !raw.trim()) continue;
     const resolved = resolve(raw);
-    const key = resolved.toLowerCase();
+    const key = openTargetKey(resolved);
     if (seen.has(key)) continue;
     try {
-      const stat = statSync(resolved);
-      if (stat.isFile()) {
-        seen.add(key);
-        out.push({ path: resolved, kind: 'file' });
-      } else if (stat.isDirectory()) {
-        seen.add(key);
-        out.push({ path: resolved, kind: 'directory' });
-      }
+      const stats = statSync(resolved);
+      const kind = openTargetKind(stats);
+      if (!kind) continue;
+      seen.add(key);
+      out.push({ path: resolved, kind });
     } catch {
       continue;
     }
   }
+  return out;
+}
+
+function openTargetKind(stats: Stats): OpenTarget['kind'] | null {
+  if (stats.isFile()) return 'file';
+  return stats.isDirectory() ? 'directory' : null;
+}
+
+const OPEN_TARGET_STAT_CONCURRENCY = 4;
+
+// Looks each path up off the main thread: every stat on a network share is a
+// round trip, and a stalled share would otherwise hold the main process (every
+// IPC and audio request) for as long as the mount takes to give up on each
+// path. A path that did not answer in time may be a file on a share that is
+// slow, so one with an audio or playlist extension is kept as a file, to be
+// read, or reported, by the open itself.
+async function normalizeOpenTargets(paths: string[]): Promise<OpenTarget[]> {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of paths) {
+    if (typeof raw !== 'string' || !raw.trim()) continue;
+    const resolved = resolve(raw);
+    const key = openTargetKey(resolved);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(resolved);
+  }
+  const probes = await mapBounded(unique, OPEN_TARGET_STAT_CONCURRENCY, (path) => probePath(path));
+  const out: OpenTarget[] = [];
+  unique.forEach((path, index) => {
+    const probe = probes[index]!;
+    if (probe.presence === 'present') {
+      const kind = openTargetKind(probe.stats);
+      if (kind) out.push({ path, kind });
+    } else if (probe.presence === 'unknown' && isOpenableFile(path)) {
+      out.push({ path, kind: 'file' });
+    }
+  });
   return out;
 }
 
@@ -6788,6 +7440,7 @@ async function buildSupportDiagnostics(): Promise<SupportDiagnostics> {
     lastfmOutbox: await lastfmOutbox.status(),
     recoveryEvents: [...settings.recoveryEvents, ...library.recoveryEvents, ...podcastStore.recoveryEvents],
     dailyBackups: { count: dailyBackups.length, newestAt: dailyBackups[0]?.createdAt ?? null, folder: join(userData, 'backups') },
+    liveFfmpegCount: liveTranscodeFfmpegCount(),
   };
 }
 
@@ -6856,6 +7509,7 @@ async function bootstrap(): Promise<void> {
 
   createStartupSplashWindow();
   mainWin = createWindow();
+  mainWindowBootstrapped = true;
   installApplicationMenu();
   registerTray();
   registerMediaShortcuts();
@@ -6868,7 +7522,25 @@ async function bootstrap(): Promise<void> {
   // Music does.
   if (process.platform === 'darwin') {
     powerMonitor.on('suspend', () => {
-      if (shellPlaybackState.isPlaying) sendPlayerCommand('pause');
+      if (!shellPlaybackState.isPlaying) return;
+      sleepPauseUntil = Infinity;
+      sendPlayerCommand('pause');
+      // The page may be frozen before it reads the command, and then the pause
+      // would land after the sound came back. Native output is paused here
+      // directly, and the snapshot is marked paused so that a snapshot sent
+      // on wake that still says playing shows the command did not land
+      // (applyShellPlaybackState pauses again then).
+      try {
+        exclusiveOutput?.pause();
+      } catch {
+        /* the page's own pause follows */
+      }
+      applyShellPlaybackState({ ...shellPlaybackState, isPlaying: false, at: Date.now() });
+    });
+    powerMonitor.on('resume', () => {
+      // A share that was remounted while the Mac slept is looked at again.
+      syncLibraryWatcher();
+      if (sleepPauseUntil === Infinity) sleepPauseUntil = Date.now() + WAKE_PAUSE_WINDOW_MS;
     });
   }
   scheduleDailyBackups();
@@ -6997,6 +7669,13 @@ process.on('uncaughtException', (err, origin) => {
   writeDiagnosticEvent('main-uncaught-exception', { origin, error: err });
   console.error('[newamp] uncaught exception', err);
   flushAllStores();
+  // The exit skips will-quit, and a device left at the rate the stream set
+  // stays there until something else changes it.
+  try {
+    exclusiveOutput?.dispose();
+  } catch (disposeErr) {
+    console.error('[newamp] exclusive output dispose failed', disposeErr);
+  }
   process.exit(1);
 });
 
@@ -7044,14 +7723,17 @@ if (process.platform === 'win32') {
 if (!singleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', (_event, argv) => {
-    enqueueOpenFiles(collectOpenFileArgs(argv));
+  app.on('second-instance', (_event, argv, workingDirectory) => {
+    // A relative path on that command line means the directory it was typed in.
+    void collectOpenFileArgs(argv, workingDirectory).then(enqueueOpenFiles).catch((err) => {
+      console.warn(`[newamp] could not read the opened files: ${errorMessage(err)}`);
+    });
     showMainWindow();
   });
 
   app.on('open-file', (event, path) => {
     event.preventDefault();
-    enqueueOpenFiles([path]);
+    void enqueueOpenFiles([path]);
     // The window is usually hidden in the Dock now; a document that starts
     // playing should bring it forward. Not before the first reveal, though:
     // that would skip the splash.
@@ -7090,37 +7772,51 @@ app.on('browser-window-created', (_event, created) => {
   created.on('closed', refreshDisplaySleepBlocker);
 });
 
+// The teardown below runs once. When the radio brain holds the quit open and
+// app.quit() fires will-quit again, only the wait is repeated.
+let willQuitTeardownDone = false;
+
 app.on('will-quit', (event) => {
-  globalShortcut.unregisterAll();
-  closeStartupSplashWindow();
   if (displaySleepBlockerId !== null) {
     powerSaveBlocker.stop(displaySleepBlockerId);
     displaySleepBlockerId = null;
   }
-  libraryWatcher?.stop();
-  scanner?.cancel();
-  void libraryAnalysis?.stop();
-  // Explicit Quit / Cmd+Q bypass window-all-closed. Flush on the actual quit
-  // path, after renderer windows have had their final chance to save state.
-  // A library that cannot flush (its file is locked) must not take the
-  // settings and podcast writes down with it.
-  try {
-    library?.close();
-  } catch (err) {
-    console.error('[newamp] library close failed', err);
+  if (appSuspensionBlockerId !== null) {
+    powerSaveBlocker.stop(appSuspensionBlockerId);
+    appSuspensionBlockerId = null;
   }
-  settings?.flushSync();
-  podcastStore?.flushProgressSync();
-  exclusiveOutput?.dispose();
-  tray?.destroy();
-  tray = null;
-  // No orphan ffmpeg.exe should outlive the app.
-  killAllDnaFfmpeg();
-  killAllAnalysisFfmpeg();
-  killAllScoreFfmpeg();
-  killAllWaveformFfmpeg();
-  killAllTranscodeFfmpeg();
-  closeAllGaplessSessions();
+  if (!willQuitTeardownDone) {
+    willQuitTeardownDone = true;
+    // Every step stands alone: a flush that cannot write (a full disk, a locked
+    // file) must not leave the exclusive device, the tray and the ffmpeg
+    // children behind it undone.
+    try { globalShortcut.unregisterAll(); } catch (err) { console.error('[newamp] shortcut cleanup failed', err); }
+    try { closeStartupSplashWindow(); } catch (err) { console.error('[newamp] splash close failed', err); }
+    try { libraryWatcher?.stop(); } catch (err) { console.error('[newamp] library watcher stop failed', err); }
+    try { scanner?.cancel(); } catch (err) { console.error('[newamp] scan cancel failed', err); }
+    try { void libraryAnalysis?.stop(); } catch (err) { console.error('[newamp] analysis stop failed', err); }
+    // Explicit Quit / Cmd+Q bypass window-all-closed. Flush on the actual quit
+    // path, after renderer windows have had their final chance to save state.
+    // A library that cannot flush (its file is locked) must not take the
+    // settings and podcast writes down with it.
+    try {
+      library?.close();
+    } catch (err) {
+      console.error('[newamp] library close failed', err);
+    }
+    try { settings?.flushSync(); } catch (err) { console.error('[newamp] settings flush failed', err); }
+    try { podcastStore?.flushProgressSync(); } catch (err) { console.error('[newamp] podcast flush failed', err); }
+    try { exclusiveOutput?.dispose(); } catch (err) { console.error('[newamp] exclusive output dispose failed', err); }
+    try { tray?.destroy(); } catch (err) { console.error('[newamp] tray destroy failed', err); }
+    tray = null;
+    // No orphan ffmpeg.exe should outlive the app.
+    try { killAllDnaFfmpeg(); } catch (err) { console.error('[newamp] ffmpeg cleanup failed', err); }
+    try { killAllAnalysisFfmpeg(); } catch (err) { console.error('[newamp] ffmpeg cleanup failed', err); }
+    try { killAllScoreFfmpeg(); } catch (err) { console.error('[newamp] ffmpeg cleanup failed', err); }
+    try { killAllWaveformFfmpeg(); } catch (err) { console.error('[newamp] ffmpeg cleanup failed', err); }
+    try { killAllTranscodeFfmpeg(); } catch (err) { console.error('[newamp] ffmpeg cleanup failed', err); }
+    try { closeAllGaplessSessions(); } catch (err) { console.error('[newamp] gapless cleanup failed', err); }
+  }
   // radioBrain.stop() is async but bounded (a few hundred ms even with a
   // connected /now/events client) — hold the quit open just long enough to
   // release its listening socket instead of leaving it bound past exit.
@@ -7142,7 +7838,7 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (mainWin && !mainWin.isDestroyed()) {
     showMainWindow();
-  } else {
+  } else if (mainWindowBootstrapped) {
     mainWin = createWindow();
   }
 });

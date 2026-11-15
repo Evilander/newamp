@@ -3,6 +3,7 @@ import type { DiscoverMission, DiscoverMixCard, DiscoverSurface, Track, Visualiz
 import { api } from '../../lib/api';
 import { formatDuration } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
+import { pushToast } from '../../lib/toast';
 import { TrackTable } from './LibraryView';
 import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
 
@@ -30,6 +31,12 @@ export function DiscoverView(): JSX.Element {
   // would otherwise ask for a rebuild per track. Opening the view and the Light
   // Viz toggle build straight away.
   const builtLowEnd = useRef<boolean | null>(null);
+  // The seed the surface was last built from: the day's, until Reshuffle picks
+  // another. A track change rebuilds with the same seed rather than dropping
+  // the reshuffle for the daily surface.
+  const activeSeed = useRef<string | null>(null);
+  // Bumped per build so an older, slower answer cannot replace a newer one.
+  const buildSeq = useRef(0);
   useEffect(() => {
     const immediate = builtLowEnd.current !== lowEndMode;
     builtLowEnd.current = lowEndMode;
@@ -51,7 +58,9 @@ export function DiscoverView(): JSX.Element {
   );
   const tableTracks = selectedMission?.tracks.length ? selectedMission.tracks : selectedCard?.tracks ?? [];
 
-  async function refreshDiscover(seed = dailySeed()): Promise<void> {
+  async function refreshDiscover(seed = activeSeed.current ?? dailySeed()): Promise<void> {
+    const build = ++buildSeq.current;
+    activeSeed.current = seed === dailySeed() ? null : seed;
     setLoading(true);
     setStatus(null);
     try {
@@ -61,38 +70,51 @@ export function DiscoverView(): JSX.Element {
         lowEndMode,
         seedTrackId: current?.id ?? null,
       });
+      if (build !== buildSeq.current) return;
       setSurface(next);
       setSelectedMissionId((id) => (id && next.missions.some((mission) => mission.id === id) ? id : next.missions[0]?.id ?? null));
       setSelectedCardId((id) => (id && next.cards.some((card) => card.id === id) ? id : next.cards[0]?.id ?? null));
       setStatus(next.missions.length ? `Built ${next.missions.length} Living Library mission${next.missions.length === 1 ? '' : 's'}.` : 'Scan music or rate tracks to unlock Discover.');
     } catch (err) {
       console.error('discover refresh failed', err);
-      setStatus('Discover could not build from the current library.');
+      if (build === buildSeq.current) setStatus('Discover could not build from the current library.');
     } finally {
-      setLoading(false);
+      if (build === buildSeq.current) setLoading(false);
     }
   }
 
   async function saveMission(mission: DiscoverMission): Promise<void> {
-    const saved = await api.savePlaylist({
-      name: `${mission.title} ${new Date().toISOString().slice(0, 10)}`,
-      trackIds: mission.tracks.map((track) => track.id),
-    });
-    setStatus(`Saved ${saved.name} with ${saved.trackCount.toLocaleString()} tracks.`);
+    try {
+      const saved = await api.savePlaylist({
+        name: `${mission.title} ${new Date().toISOString().slice(0, 10)}`,
+        trackIds: mission.tracks.map((track) => track.id),
+      });
+      setStatus(`Saved ${saved.name} with ${saved.trackCount.toLocaleString()} tracks.`);
+    } catch (err) {
+      pushToast({ tone: 'error', title: `Could not save ${mission.title}`, detail: err instanceof Error ? err.message : undefined });
+    }
   }
 
   async function saveCard(card: DiscoverMixCard): Promise<void> {
-    const saved = await api.savePlaylist({
-      name: `${card.title} ${new Date().toISOString().slice(0, 10)}`,
-      trackIds: card.tracks.map((track) => track.id),
-    });
-    setStatus(`Saved ${saved.name} with ${saved.trackCount.toLocaleString()} tracks.`);
+    try {
+      const saved = await api.savePlaylist({
+        name: `${card.title} ${new Date().toISOString().slice(0, 10)}`,
+        trackIds: card.tracks.map((track) => track.id),
+      });
+      setStatus(`Saved ${saved.name} with ${saved.trackCount.toLocaleString()} tracks.`);
+    } catch (err) {
+      pushToast({ tone: 'error', title: `Could not save ${card.title}`, detail: err instanceof Error ? err.message : undefined });
+    }
   }
 
   function launchDeck(plan = selectedMission?.visualPlan ?? selectedCard?.visualPlan ?? null): void {
     if (plan && typeof window !== 'undefined') {
-      window.localStorage.setItem('newamp:deck:skinSchema', '2');
-      window.localStorage.setItem('newamp:deck:skin', plan.deckSkin);
+      try {
+        window.localStorage.setItem('newamp:deck:skinSchema', '2');
+        window.localStorage.setItem('newamp:deck:skin', plan.deckSkin);
+      } catch {
+        /* the deck opens with its last skin */
+      }
     }
     setCompactMode(true);
   }
@@ -141,7 +163,7 @@ export function DiscoverView(): JSX.Element {
           className={`pxbtn ${lowEndMode ? 'is-active' : ''}`}
           aria-pressed={lowEndMode}
           onClick={toggleLowEnd}
-          title="Use lighter visualizers and skip heavy effects (helps on older GPUs)"
+          title="Prefer lighter visualizer presets in Discover's picks"
         >
           Light Viz
         </button>
@@ -383,13 +405,21 @@ function dailySeed(): string {
 
 function readBool(key: string, fallback: boolean): boolean {
   if (typeof window === 'undefined') return fallback;
-  const value = window.localStorage.getItem(key);
-  if (value === '1') return true;
-  if (value === '0') return false;
+  try {
+    const value = window.localStorage.getItem(key);
+    if (value === '1') return true;
+    if (value === '0') return false;
+  } catch {
+    /* storage blocked: the default stands */
+  }
   return fallback;
 }
 
 function writeBool(key: string, value: boolean): void {
   if (typeof window === 'undefined') return;
-  window.localStorage.setItem(key, value ? '1' : '0');
+  try {
+    window.localStorage.setItem(key, value ? '1' : '0');
+  } catch {
+    /* the choice holds for this session only */
+  }
 }

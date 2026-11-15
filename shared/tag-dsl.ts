@@ -156,12 +156,12 @@ export interface EvalResult {
 
 export type AstNode =
   | { kind: 'literal'; value: Value }
-  | { kind: 'identifier'; name: string }
-  | { kind: 'field'; path: string[] }
+  | { kind: 'identifier'; name: string; line?: number; column?: number }
+  | { kind: 'field'; path: string[]; line?: number; column?: number }
   | { kind: 'range'; lo: number; hi: number }
   | { kind: 'binary'; op: BinaryOp; left: AstNode; right: AstNode }
   | { kind: 'unary'; op: 'not' | 'neg'; argument: AstNode }
-  | { kind: 'call'; name: string; args: AstNode[] }
+  | { kind: 'call'; name: string; args: AstNode[]; line?: number; column?: number }
   | { kind: 'tag'; name: string };
 
 export type BinaryOp =
@@ -183,7 +183,18 @@ export type BinaryOp =
 
 type Value = number | string | boolean | null | { range: [number, number] };
 
-export function parseRule(source: string): CompileResult {
+export interface ParseOptions {
+  /**
+   * Also reject unknown identifiers, fields and functions (and wrong argument
+   * counts) up front, with their position. Off by default: a rule stored
+   * before a name existed still has to load, and evaluation reports it per
+   * track. The save and preview paths turn it on so a typo is shown to its
+   * author instead of quietly matching nothing.
+   */
+  strict?: boolean;
+}
+
+export function parseRule(source: string, options: ParseOptions = {}): CompileResult {
   if (typeof source !== 'string') {
     return { rule: null, errors: [{ message: 'rule body must be a string', line: 1, column: 1 }] };
   }
@@ -200,6 +211,11 @@ export function parseRule(source: string): CompileResult {
     const patternErrors: CompileError[] = [];
     collectPatternErrors(rule.ast, patternErrors);
     if (patternErrors.length) return { rule: null, errors: patternErrors };
+    if (options.strict) {
+      const nameErrors: CompileError[] = [];
+      collectNameErrors(rule.ast, nameErrors);
+      if (nameErrors.length) return { rule: null, errors: nameErrors };
+    }
     return { rule, errors: [] };
   } catch (err) {
     const compileErr = err instanceof CompileException
@@ -232,7 +248,22 @@ export interface TagEvaluationOutput {
 
 export const MAX_TAG_BOOST_PRODUCT = 1e6;
 
-export function evaluateRulesForTrack(input: TagEvaluationInput): TagEvaluationOutput {
+// The recompute loops call evaluateRulesForTrack once per track with the same
+// rules array, so the dependency ordering is worked out once per array and
+// reused. The snapshot guards against the array being edited in place between
+// calls.
+const preparedRules = new WeakMap<ParsedRule[], { snapshot: ParsedRule[]; prepared: PreparedRules }>();
+
+export interface PreparedRules {
+  ordered: ParsedRule[];
+  cyclic: string[];
+}
+
+export function prepareRules(rules: ParsedRule[]): PreparedRules {
+  const hit = preparedRules.get(rules);
+  if (hit && hit.snapshot.length === rules.length && hit.snapshot.every((rule, i) => rule === rules[i])) {
+    return hit.prepared;
+  }
   // topologicalSort() throws on a cycle — exactly right for the save-time
   // validation gate, which wants to reject a cycle-introducing rule outright.
   // But a per-track recompute pass can't afford that: a single
@@ -240,15 +271,23 @@ export function evaluateRulesForTrack(input: TagEvaluationInput): TagEvaluationO
   // gap, a future bulk import, a direct DB edit) would throw on the very
   // first track and abort the whole batch. topologicalSortSafe() never
   // throws; it excludes just the cyclic rule(s) from this pass instead.
-  const { ordered, cyclic } = topologicalSortSafe(input.rules);
+  const prepared = topologicalSortSafe(rules);
+  preparedRules.set(rules, { snapshot: rules.slice(), prepared });
+  return prepared;
+}
+
+export function evaluateRulesForTrack(input: TagEvaluationInput): TagEvaluationOutput {
+  const { ordered, cyclic } = prepareRules(input.rules);
   const matched = new Set<string>();
   const errors = new Map<string, string[]>();
   for (const name of cyclic) {
     errors.set(name, [`tag rule "${name}" is part of a reference cycle and was skipped`]);
   }
   let boost = 1;
+  // One context for the whole track: rules only read it, and `tags` is the set
+  // that grows as earlier rules match.
+  const context: TrackContext = { ...input.context, tags: matched };
   for (const rule of ordered) {
-    const context: TrackContext = { ...input.context, tags: matched };
     const result = evaluateRule(rule, context, input.env);
     if (result.errors.length) errors.set(rule.name, result.errors);
     if (result.matched) {
@@ -347,8 +386,9 @@ export function buildEvalEnvironment(now = Date.now()): EvalEnvironment {
   };
 }
 
+/** Names a rule can use: track fields bare, DNA fields under their `dna.` namespace. */
 export function listIdentifiers(): string[] {
-  return [...TRACK_FIELDS.keys(), ...DNA_FIELDS.keys()];
+  return [...TRACK_FIELDS.keys(), ...[...DNA_FIELDS.keys()].map((name) => `dna.${name}`)];
 }
 
 export function listFunctions(): string[] {
@@ -411,7 +451,11 @@ function tokenize(source: string): Token[] {
         const c = source[i]!;
         if (c === '\\' && i + 1 < source.length) {
           const next = source[i + 1]!;
-          raw += next === 'n' ? '\n' : next === 't' ? '\t' : next === '\\' ? '\\' : next === quote ? quote : next;
+          // Only the quote and the backslash itself are unescaped here. Any
+          // other escape keeps its backslash so a regex written naturally
+          // ("\bremix\b", "\d+") reaches the matcher intact instead of
+          // silently turning into "bremixb" and "d+".
+          raw += next === 'n' ? '\n' : next === 't' ? '\t' : next === '\\' ? '\\' : next === quote ? quote : `\\${next}`;
           i += 2;
           continue;
         }
@@ -625,10 +669,33 @@ class Parser {
   }
 
   private parseUnary(): AstNode {
-    if (this.accept('op', '-')) {
+    if (this.check('op', '-')) {
+      // A minus sign directly in front of a number is part of that number, so
+      // `-12..-6` is a range and not a negated range.
+      if (this.peek(1).type === 'number') {
+        this.next();
+        return this.numberOrRange(-Number(this.next().value));
+      }
+      this.next();
       return { kind: 'unary', op: 'neg', argument: this.parsePrimary() };
     }
     return this.parsePrimary();
+  }
+
+  private parseSignedNumber(): number {
+    const negative = this.accept('op', '-') !== null;
+    const value = Number(this.expect('number').value);
+    return negative ? -value : value;
+  }
+
+  private numberOrRange(value: number): AstNode {
+    if (!this.accept('range')) return { kind: 'literal', value };
+    const hiTok = this.peek();
+    const hi = this.parseSignedNumber();
+    if (hi < value) {
+      throw new CompileException(`range ${value}..${hi} runs backwards, put the smaller number first`, hiTok.line, hiTok.column);
+    }
+    return { kind: 'range', lo: value, hi };
   }
 
   private parsePrimary(): AstNode {
@@ -642,12 +709,7 @@ class Parser {
 
     if (tok.type === 'number') {
       this.next();
-      const value = Number(tok.value);
-      if (this.accept('range')) {
-        const hiTok = this.expect('number');
-        return { kind: 'range', lo: value, hi: Number(hiTok.value) };
-      }
-      return { kind: 'literal', value };
+      return this.numberOrRange(Number(tok.value));
     }
 
     if (tok.type === 'string') {
@@ -694,7 +756,7 @@ class Parser {
           while (this.accept('comma')) args.push(this.parseExpr());
         }
         this.expect('rparen');
-        return { kind: 'call', name: tok.value, args };
+        return { kind: 'call', name: tok.value, args, line: tok.line, column: tok.column };
       }
       const path = [tok.value];
       while (this.accept('dot')) {
@@ -702,9 +764,9 @@ class Parser {
         path.push(member.value);
       }
       if (path.length === 1) {
-        return { kind: 'identifier', name: path[0]! };
+        return { kind: 'identifier', name: path[0]!, line: tok.line, column: tok.column };
       }
-      return { kind: 'field', path };
+      return { kind: 'field', path, line: tok.line, column: tok.column };
     }
 
     throw new CompileException(`unexpected token "${tok.value || tok.type}"`, tok.line, tok.column);
@@ -754,6 +816,7 @@ function visit(node: AstNode, fn: (node: AstNode) => void): void {
 // ---------- Evaluator ----------
 
 const TRACK_FIELDS = new Map<string, (ctx: TrackContext) => Value>([
+  ['id', (c) => c.id],
   ['title', (c) => c.title],
   ['artist', (c) => c.artist],
   ['album', (c) => c.album],
@@ -764,6 +827,7 @@ const TRACK_FIELDS = new Map<string, (ctx: TrackContext) => Value>([
   ['bitrate', (c) => c.bitrate],
   ['samplerate', (c) => c.sampleRate],
   ['size', (c) => c.size],
+  ['mtime', (c) => c.mtime],
   ['bpm', (c) => c.bpm],
   ['key', (c) => c.key],
   ['format', (c) => c.format],
@@ -772,6 +836,7 @@ const TRACK_FIELDS = new Map<string, (ctx: TrackContext) => Value>([
   ['playcount', (c) => c.playCount],
   ['skipcount', (c) => c.skipCount],
   ['lastplayed', (c) => c.lastPlayed],
+  ['lastskipped', (c) => c.lastSkipped],
   ['loved', (c) => c.loved],
   ['avoidautoplay', (c) => c.avoidAutoPlay],
   ['replaygain', (c) => c.replayGainTrack],
@@ -845,6 +910,50 @@ const FUNCTIONS: Record<string, FunctionImpl> = {
   },
 };
 
+// Argument counts as [min, max], checked when a rule is parsed in strict mode.
+const FUNCTION_ARITY: Record<string, [number, number]> = {
+  weekday: [0, 0], hour: [0, 0], month: [0, 0], season: [0, 0], now: [0, 0],
+  abs: [1, 1], min: [1, Infinity], max: [1, Infinity], dayssince: [1, 1],
+  matches: [2, 2], contains: [2, 2], lower: [1, 1], upper: [1, 1], length: [1, 1],
+};
+
+// Mirrors what evalIdentifier, evalField and evalCall would throw for every
+// track, but once, with the position of the offending name.
+function collectNameErrors(ast: AstNode, errors: CompileError[]): void {
+  visit(ast, (node) => {
+    const at = (message: string): void => {
+      const pos = node as { line?: number; column?: number };
+      errors.push({ message, line: pos.line ?? 1, column: pos.column ?? 1 });
+    };
+    if (node.kind === 'identifier') {
+      const lower = node.name.toLowerCase();
+      if (TRACK_FIELDS.has(lower)) return;
+      if (lower === 'track') at('use track.<field> (e.g., track.year), not bare "track"');
+      else if (lower === 'dna') at('use dna.<field> (e.g., dna.energy), not bare "dna"');
+      else at(`unknown identifier "${node.name}"`);
+    } else if (node.kind === 'field') {
+      if (node.path.length !== 2) return at(`unsupported field path: ${node.path.join('.')}`);
+      const root = node.path[0]!.toLowerCase();
+      const member = node.path[1]!.toLowerCase();
+      if (root === 'track') {
+        if (!TRACK_FIELDS.has(member)) at(`unknown track field "${member}"`);
+      } else if (root === 'dna') {
+        if (!DNA_FIELDS.has(member)) at(`unknown dna field "${member}"`);
+      } else {
+        at(`unknown namespace "${root}"`);
+      }
+    } else if (node.kind === 'call') {
+      const key = node.name.toLowerCase();
+      if (!Object.prototype.hasOwnProperty.call(FUNCTIONS, key)) return at(`unknown function "${node.name}"`);
+      const [min, max] = FUNCTION_ARITY[key] ?? [0, Infinity];
+      if (node.args.length < min || node.args.length > max) {
+        const expected = min === max ? `${min}` : max === Infinity ? `at least ${min}` : `${min} to ${max}`;
+        at(`${node.name}() takes ${expected} argument${max === 1 && min === 1 ? '' : 's'}, got ${node.args.length}`);
+      }
+    }
+  });
+}
+
 function evalNode(node: AstNode, ctx: TrackContext, env: EvalEnvironment): Value {
   switch (node.kind) {
     case 'literal':
@@ -914,20 +1023,24 @@ function evalCall(node: { name: string; args: AstNode[] }, ctx: TrackContext, en
 }
 
 function evalBinary(node: Extract<AstNode, { kind: 'binary' }>, ctx: TrackContext, env: EvalEnvironment): Value {
+  // Kleene three-valued logic: a definite false decides AND and a definite true
+  // decides OR whatever the other side is, so `not (...)` over a missing field
+  // behaves the way SQL does.
   if (node.op === 'and') {
     const l = evalNode(node.left, ctx, env);
-    if (l == null) return null;
-    if (!truthy(l)) return false;
+    if (l != null && !truthy(l)) return false;
     const r = evalNode(node.right, ctx, env);
-    if (r == null) return null;
-    return truthy(r);
+    if (r != null && !truthy(r)) return false;
+    if (l == null || r == null) return null;
+    return true;
   }
   if (node.op === 'or') {
     const l = evalNode(node.left, ctx, env);
-    if (truthy(l)) return true;
+    if (l != null && truthy(l)) return true;
     const r = evalNode(node.right, ctx, env);
-    if (l == null && r == null) return null;
-    return truthy(r);
+    if (r != null && truthy(r)) return true;
+    if (l == null || r == null) return null;
+    return false;
   }
 
   const left = evalNode(node.left, ctx, env);
@@ -954,13 +1067,17 @@ function evalBinary(node: Extract<AstNode, { kind: 'binary' }>, ctx: TrackContex
     const l = numberValue(left);
     const r = numberValue(right);
     if (l == null || r == null) {
-      const ls = stringValue(left);
-      const rs = stringValue(right);
-      if (ls == null || rs == null) return null;
-      if (node.op === '<') return ls < rs;
-      if (node.op === '<=') return ls <= rs;
-      if (node.op === '>') return ls > rs;
-      return ls >= rs;
+      // Text orders against text only; a number against a non-numeric string is unknown.
+      if (typeof left !== 'string' || typeof right !== 'string') return null;
+      const ls = left;
+      const rs = right;
+      // Ordering folds case the same way == does, so "Beatles" and "beatles" sort alike.
+      const a = ls.toLowerCase();
+      const b = rs.toLowerCase();
+      if (node.op === '<') return a < b;
+      if (node.op === '<=') return a <= b;
+      if (node.op === '>') return a > b;
+      return a >= b;
     }
     if (node.op === '<') return l < r;
     if (node.op === '<=') return l <= r;
@@ -1018,11 +1135,15 @@ function numberValue(v: Value): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   if (typeof v === 'boolean') return v ? 1 : 0;
   if (typeof v === 'string') {
+    // Number() would turn '' into 0 and '0x10' into 16; only plain decimals count as numbers.
+    if (!NUMERIC_STRING.test(v)) return null;
     const num = Number(v);
     return Number.isFinite(num) ? num : null;
   }
   return null;
 }
+
+const NUMERIC_STRING = /^\s*-?\d+(?:\.\d+)?\s*$/;
 
 function stringValue(v: Value): string | null {
   if (v == null) return null;

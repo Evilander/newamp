@@ -4,7 +4,7 @@
 import type { EvilandFrame } from './eviland-audio';
 import type { PaletteConfig } from './eviland-operators';
 import type { SceneTarget } from './scene-overlay';
-import { sourceProgram, sourceTarget, disposeSourceTarget, NAN_GLSL } from './eviland-gl';
+import { sourceProgram, sourceTarget, disposeSourceTarget, NAN_GLSL, RAMP_STEPS, createRampTable, rampGlsl, updateRampTable } from './eviland-gl';
 
 const STEP = `#version 300 es
 precision highp float;
@@ -45,15 +45,19 @@ precision highp float;
 in vec2 v_uv;
 out vec4 o;
 uniform sampler2D u_state;
-uniform vec3 u_dark, u_accent, u_light;
 uniform float u_opacity;
+// The palette's OKLCh line, dark -> accent -> light (see eviland-gl.ts).
+${rampGlsl('ramp', 'u_ramp', 2 * RAMP_STEPS + 1)}
 void main() {
   vec2 px = 1.0 / vec2(textureSize(u_state, 0));
   float b = texture(u_state, v_uv).g;
   float edge = abs(texture(u_state, v_uv + px).g - texture(u_state, v_uv - px).g);
   float contour = exp(-abs(b - 0.22) * 38.0);
-  vec3 color = mix(u_dark, u_accent, smoothstep(0.08, 0.42, b));
-  color = mix(color, u_light, min(0.6, edge * 3.0 + contour * 0.25));
+  // Concentration walks dark -> accent along the ramp, and the contours and
+  // edges lift the colour toward light by moving further along the same line,
+  // so a dim stroke never goes grey on its way there.
+  float along = mix(0.5 * smoothstep(0.08, 0.42, b), 1.0, min(0.6, edge * 3.0 + contour * 0.25));
+  vec3 color = ramp(along);
   float alpha = smoothstep(0.03, 0.28, b) * u_opacity;
   o = vec4(color * alpha, alpha);
 }`;
@@ -82,7 +86,9 @@ export function createReactionDiffusion(gl: WebGL2RenderingContext, seed = 1, pr
   let read = a, write = b, initialized = false, pending = 0;
   let feed = 0.036, kill = 0.061;
   const s = Object.fromEntries(['state','feedback','feed','kill','seed','init'].map(n => [n, gl.getUniformLocation(step, `u_${n}`)]));
-  const d = Object.fromEntries(['state','dark','accent','light','opacity'].map(n => [n, gl.getUniformLocation(draw, `u_${n}`)]));
+  const d = Object.fromEntries(['state','ramp','opacity'].map(n => [n, gl.getUniformLocation(draw, `u_${n}`)]));
+  const table = createRampTable(3);
+  const stops = new Float64Array(9);
   return {
     render(frame: EvilandFrame, palette: PaletteConfig, dtMs: number, feedback: WebGLTexture, target: SceneTarget) {
       const dt = Number.isFinite(dtMs) ? Math.max(0, Math.min(100, dtMs)) : 0;
@@ -120,7 +126,9 @@ export function createReactionDiffusion(gl: WebGL2RenderingContext, seed = 1, pr
       gl.viewport(0, 0, target.width, target.height);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, read.texture);
       gl.uniform1i(d.state ?? null, 0);
-      for (const name of ['dark','accent','light'] as const) gl.uniform3fv(d[name] ?? null, palette[name]);
+      stops.set(palette.dark, 0); stops.set(palette.accent, 3); stops.set(palette.light, 6);
+      updateRampTable(table, stops);
+      gl.uniform3fv(d.ramp ?? null, table.values);
       gl.uniform1f(d.opacity ?? null, 1 - Math.pow(1 - (target.opacity ?? 0.3), dt * 0.06));
       gl.enable(gl.BLEND); gl.blendEquation(gl.FUNC_ADD); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.drawArrays(gl.TRIANGLES, 0, 3);

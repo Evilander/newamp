@@ -43,6 +43,7 @@
 import type { EvilandFrame } from './eviland-audio';
 import type { EvilandPalette } from './eviland';
 import { SCENES, type SceneDef } from './scenes/index';
+import { RAMP_STEPS, createRampTable, rampGlsl, updateRampTable } from './eviland-gl';
 
 export interface SceneOverlay {
   resize(cssW: number, cssH: number, dpr: number): void;
@@ -63,6 +64,20 @@ export interface SceneTarget {
   height: number;
   opacity?: number;
   contrast?: number;
+  /**
+   * The host is already staging this moment (the engine's field front is
+   * running through a Director fade): skip the overlay's own drop flash so a
+   * drop reads as one event rather than a front, a flash and an impact. The
+   * flash only runs while no scene is forced, so a host that always forces its
+   * scene (the engine and the Live pipeline both do) never reaches it.
+   */
+  suppressFlash?: boolean;
+  /**
+   * Scales the per-band stereo pan scenes read through bandPan(), 0..1.5
+   * (default 1): the host's stereo-spread dial, so a look that narrows the
+   * image narrows the scenes with it.
+   */
+  stereoSpread?: number;
 }
 
 export interface SceneOverlayOptions {
@@ -77,6 +92,9 @@ export interface SceneOverlayOptions {
    */
   syncCompile?: boolean;
 }
+
+// Samples in one palette ramp: RAMP_STEPS per half, dark → accent → light.
+const RAMP_POINTS = 2 * RAMP_STEPS + 1;
 
 // Shared GLSL prelude: every scene compiles against these uniforms + helpers.
 // Scenes must ONLY add functions and implement scene(); the runtime appends
@@ -117,8 +135,10 @@ uniform float u_novelty;    // structural novelty 0..1
 uniform float u_pan;        // -1..1
 uniform float u_width;      // stereo width 0..1
 uniform float u_bands[24];  // smoothed mel bands 0..1
+uniform float u_bandPan[24]; // -1 left .. +1 right: where each band sits in the stereo image (frame pan when the source gave none)
 
 uniform vec3 u_accent;      // theme palette
+uniform vec3 u_accent2;     // a second accent in harmony with the first (u_accent when the palette has none)
 uniform vec3 u_light;
 uniform vec3 u_dark;
 uniform vec3 u_bg;
@@ -153,15 +173,23 @@ vec3 hsv2rgb(vec3 c) {
   vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
   return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
 }
-// Theme-aware glow color: t 0 → dark accent, 1 → light. Keeps scenes on-palette.
-vec3 paletteRamp(float t) {
-  t = clamp(t, 0.0, 1.0);
-  return t < 0.5 ? mix(u_dark, u_accent, t * 2.0) : mix(u_accent, u_light, t * 2.0 - 1.0);
-}
+// Theme-aware glow color: t 0 → dark, 0.5 → accent, 1 → light. Keeps scenes
+// on-palette. The line between the roles is drawn in OKLCh (see RAMP_STEPS in
+// eviland-gl.ts), so the middle of a hue change keeps its colour instead of
+// passing through grey, and equal steps in t are equal steps in lightness.
+${rampGlsl('paletteRamp', 'u_palRamp', RAMP_POINTS)}
+// The same ramp through the palette's second accent: dark → accent2 → light.
+${rampGlsl('paletteRamp2', 'u_palRamp2', RAMP_POINTS)}
 // Average of a band range (inclusive indices 0..23).
 float bandAvg(int lo, int hi) {
   float s = 0.0;
   for (int i = 0; i < 24; i++) { if (i >= lo && i <= hi) s += u_bands[i]; }
+  return s / float(max(1, hi - lo + 1));
+}
+// Mean stereo position of a band range (inclusive indices 0..23), -1 left .. +1 right.
+float bandPan(int lo, int hi) {
+  float s = 0.0;
+  for (int i = 0; i < 24; i++) { if (i >= lo && i <= hi) s += u_bandPan[i]; }
   return s / float(max(1, hi - lo + 1));
 }
 // The same range of the band integrals: the clock a band-driven motion rides.
@@ -177,7 +205,20 @@ void main() {
   vec2 uv = gl_FragCoord.xy / u_res;
   vec2 p = (gl_FragCoord.xy * 2.0 - u_res) / min(u_res.x, u_res.y);
   vec4 c = scene(uv, p);
-  c = clamp(c, 0.0, 1.0);
+  c = max(c, 0.0);
+  // Additive pile-ups inside a scene can sum past 1. A per-channel clamp
+  // flattens them toward whichever channel saturates first (orange goes
+  // yellow, then white), so the peak channel rolls off instead and RGB scales
+  // together: the hue holds up to the top. The knee sits at 0.85 with a slope
+  // of 1, so anything under it, which is nearly every pixel of every scene,
+  // passes through untouched. Only the very hottest give up some colour toward
+  // the peak, for a white-hot centre rather than a flat disc.
+  float peak = max(c.r, max(c.g, c.b));
+  if (peak > 0.85) {
+    c.rgb = mix(c.rgb, vec3(peak), smoothstep(1.5, 4.0, peak) * 0.5);
+    c.rgb *= (0.85 + 0.15 * (1.0 - exp(-(peak - 0.85) * 6.6667))) / peak;
+  }
+  c.a = clamp(c.a, 0.0, 1.0);
   c.rgb = pow(c.rgb, vec3(u_contrast));
   // Premultiply + fade so crossfades and MilkDrop show-through compose cleanly.
   // The stored alpha is scaled by u_occlusion: 1 covers what is beneath like
@@ -200,8 +241,8 @@ const UNIFORM_NAMES = [
   'u_energy', 'u_kick', 'u_bass', 'u_snare', 'u_hat', 'u_vocal',
   'u_kickPulse', 'u_snarePulse', 'u_hatPulse', 'u_vocalPulse', 'u_kickCount',
   'u_centroid', 'u_flatness', 'u_crest', 'u_beatPhase', 'u_beatConf',
-  'u_novelty', 'u_pan', 'u_width', 'u_bands',
-  'u_accent', 'u_light', 'u_dark', 'u_bg',
+  'u_novelty', 'u_pan', 'u_width', 'u_bands', 'u_bandPan',
+  'u_accent', 'u_accent2', 'u_light', 'u_dark', 'u_bg', 'u_palRamp', 'u_palRamp2',
 ] as const;
 
 type UniformMap = Partial<Record<(typeof UNIFORM_NAMES)[number], WebGLUniformLocation>>;
@@ -299,7 +340,7 @@ export function createSceneOverlay(
   let disposed = false;
 
   let targetWidth = canvas.width, targetHeight = canvas.height;
-  let targetOpacity = 1, targetContrast = 1;
+  let targetOpacity = 1, targetContrast = 1, targetStereoSpread = 1;
   const phases = new Map<string, number>();
   let energyTime = 0, panTime = 0;
   // Accumulated in double precision: a float32 sum stops moving once its step
@@ -454,12 +495,24 @@ export function createSceneOverlay(
   // whole layer choreographs it: the scene fast-cuts instead of lazily
   // crossfading, a bloom flash blows through and decays over ~¼s, and the
   // accent layer surges to full. Cooldown keeps it an event, not a strobe.
+  //
+  // A scored track (frame.score) has the drops and section boundaries exactly,
+  // known in advance: the cut and flash fire from the conductor's impactStart
+  // instead of the energy guess, and the scene's mood follows the section's
+  // tier. Without a score the live estimate below runs unchanged.
   const DROP_COOLDOWN_MS = 8000;
   const DROP_FADE_MS = 240;
+  // A build weaker than the conductor's own limit gets a crossfade, not a cut.
+  const MIN_IMPACT_STRENGTH = 0.3;
   let fadeDurMs = CROSSFADE_MS;
   let flashLevel = 0;
   let energyEma = 0.2;
   let lastDropAtMs = -1e9;
+  // The scene chosen ahead of a boundary (a build is climbing toward a drop),
+  // compiled while the build plays so the cut never waits on the driver.
+  let queuedIndex = -1;
+  // A crossfade already started for the boundary the score says is coming.
+  let crossfadedAhead = false;
 
   let flashProgram: WebGLProgram | null = null;
   let flashColorLoc: WebGLUniformLocation | null = null;
@@ -535,18 +588,21 @@ void main() { fragColor = u_color; }
   }
   rebuildRotation();
 
-  function pickNextScene(frame: EvilandFrame): void {
-    const avail = availableScenes();
-    // One scene left is nothing to switch to, unless the one on screen is the
-    // scene that just failed to compile: then that one is worth switching to.
-    const activeDef = SCENES[activeIndex];
-    const activeIsDead = !activeDef || blacklisted.has(activeDef.id);
-    if (avail.length <= 1 && !activeIsDead) return;
-    if (!avail.length) return;
-    // Energy-affine pick: prefer scenes whose mood matches the moment, but a
-    // seeded 25% wildcard keeps it surprising.
-    const tier = frame.energy > 0.55 ? 'high' : frame.energy > 0.22 ? 'mid' : 'calm';
-    const want = walk() < 0.25 ? null : tier;
+  type Mood = 'calm' | 'mid' | 'high';
+  const MOOD_OF_TIER: Record<NonNullable<EvilandFrame['score']>['tier'], Mood> = {
+    calm: 'calm', steady: 'mid', lift: 'high', drop: 'high', climax: 'high',
+  };
+  // What the scene should feel like now: the section's tier when the track is
+  // scored, the live loudness otherwise.
+  function moodFor(frame: EvilandFrame): Mood {
+    if (frame.score) return MOOD_OF_TIER[frame.score.tier] ?? 'mid';
+    return frame.energy > 0.55 ? 'high' : frame.energy > 0.22 ? 'mid' : 'calm';
+  }
+
+  // The scene that would follow the one on screen, for a mood. Draws from the
+  // seeded walk, so a pick made early and kept is as repeatable as one made late.
+  function chooseNext(mood: Mood): number {
+    const want = walk() < 0.25 ? null : mood;
     const candidates: number[] = [];
     for (const idx of rotation) {
       const def = SCENES[idx];
@@ -556,8 +612,37 @@ void main() { fragColor = u_color; }
     const pool = candidates.length
       ? candidates
       : rotation.filter((i) => i !== activeIndex && !blacklisted.has(SCENES[i]?.id ?? ''));
-    if (!pool.length) return;
-    const next = pool[Math.floor(walk() * pool.length)]!;
+    if (!pool.length) return -1;
+    return pool[Math.floor(walk() * pool.length)]!;
+  }
+
+  // A build is climbing: pick the look the drop will cut to and start
+  // compiling it now. The section it lands in is not known yet (the cues
+  // describe the current one), so the guess is the hardest-hitting mood.
+  function queueUpcoming(): void {
+    if (queuedIndex >= 0 && !blacklisted.has(SCENES[queuedIndex]?.id ?? '') && queuedIndex !== activeIndex) return;
+    queuedIndex = chooseNext('high');
+    const def = queuedIndex >= 0 ? SCENES[queuedIndex] : undefined;
+    if (def) beginCompile(def);
+  }
+
+  function pickNextScene(frame: EvilandFrame, mood: Mood = moodFor(frame)): void {
+    const avail = availableScenes();
+    // One scene left is nothing to switch to, unless the one on screen is the
+    // scene that just failed to compile: then that one is worth switching to.
+    const activeDef = SCENES[activeIndex];
+    const activeIsDead = !activeDef || blacklisted.has(activeDef.id);
+    if (avail.length <= 1 && !activeIsDead) return;
+    if (!avail.length) return;
+    // Mood-affine pick: prefer scenes whose mood matches the moment, but a
+    // seeded 25% wildcard keeps it surprising. A scene queued ahead of a drop
+    // is the pick when it is still a fit.
+    const queued = queuedIndex;
+    queuedIndex = -1;
+    const next = queued >= 0 && queued !== activeIndex && !blacklisted.has(SCENES[queued]?.id ?? '')
+      ? queued
+      : chooseNext(mood);
+    if (next < 0) return;
     // A scene blacklisted while it was on screen has no program to fade out
     // with; cut to the incoming one instead of holding a frame that never draws.
     const leaving = SCENES[activeIndex];
@@ -621,7 +706,20 @@ void main() { fragColor = u_color; }
       for (let i = n; i < 24; i++) bandScratch[i] = 0;
       gl!.uniform1fv(u.u_bands, bandScratch);
     }
+    if (u.u_bandPan) {
+      // A frame that did not come from the reactor has no per-band pan; the
+      // whole-frame pan stands in, as it does for every other consumer.
+      const pans = frame.bandPan;
+      for (let i = 0; i < 24; i++) {
+        const v = pans && pans.length > i ? pans[i]! : frame.pan;
+        bandPanScratch[i] = (v === v ? v : 0) * targetStereoSpread;
+      }
+      gl!.uniform1fv(u.u_bandPan, bandPanScratch);
+    }
     if (u.u_accent) gl!.uniform3f(u.u_accent, palette.accent[0], palette.accent[1], palette.accent[2]);
+    if (u.u_accent2) gl!.uniform3f(u.u_accent2, accent2[0], accent2[1], accent2[2]);
+    if (u.u_palRamp) gl!.uniform3fv(u.u_palRamp, ramp.values);
+    if (u.u_palRamp2) gl!.uniform3fv(u.u_palRamp2, rampAlt.values);
     if (u.u_light) gl!.uniform3f(u.u_light, palette.light[0], palette.light[1], palette.light[2]);
     if (u.u_dark) gl!.uniform3f(u.u_dark, palette.dark[0], palette.dark[1], palette.dark[2]);
     if (u.u_bg) gl!.uniform3f(u.u_bg, palette.bg[0], palette.bg[1], palette.bg[2]);
@@ -630,6 +728,30 @@ void main() { fragColor = u_color; }
   }
 
   const bandScratch = new Float32Array(24);
+  const bandPanScratch = new Float32Array(24);
+
+  // The palette's OKLCh ramps (dark → accent → light, and the same through the
+  // second accent), laid out once per palette change and handed to every draw.
+  // A palette without a second accent uses the first, so the two ramps match.
+  const ramp = createRampTable(3);
+  const ramp2 = createRampTable(3);
+  const rampColours = new Float64Array(9);
+  let rampAlt = ramp;
+  let accent2: readonly [number, number, number] = [0, 0, 0];
+  function updateRamps(palette: EvilandPalette): void {
+    accent2 = palette.accent2 ?? palette.accent;
+    rampColours.set(palette.dark, 0);
+    rampColours.set(palette.accent, 3);
+    rampColours.set(palette.light, 6);
+    updateRampTable(ramp, rampColours);
+    if (palette.accent2) {
+      rampColours.set(palette.accent2, 3);
+      updateRampTable(ramp2, rampColours);
+      rampAlt = ramp2;
+    } else {
+      rampAlt = ramp;
+    }
+  }
   // Decaying onset impulses — JS-side so every scene gets punchy transients
   // without re-deriving them from envelopes.
   const pulses = { kick: 0, snare: 0, hat: 0, vocal: 0 };
@@ -693,6 +815,7 @@ void main() { fragColor = u_color; }
         }
       }
       updatePulses(frame, dt);
+      updateRamps(palette);
       const seconds = dt / 1000;
       energyTime += frame.energy * seconds;
       panTime += frame.pan * seconds;
@@ -719,29 +842,59 @@ void main() { fragColor = u_color; }
       // enough, or force a switch when a scene has overstayed. A section
       // boundary that lands with a real energy jump is a DROP — it overrides
       // the dwell gate, fast-cuts the scene, fires the flash, and surges the
-      // accent layer.
+      // accent layer. With a score the conductor's cues lead this block. It
+      // only runs without a forced scene: a host that picks scenes itself
+      // (the engine's Director, the Live composition) is choreographed by its
+      // own look changes and never enters it.
       if (!forcedSceneId) {
         const sectionChanged = frame.sectionId !== lastSectionId;
         lastSectionId = frame.sectionId;
-        const isDrop =
-          sectionChanged &&
-          globalTimeMs - lastDropAtMs > DROP_COOLDOWN_MS &&
-          globalTimeMs > 6000 && // never on boot — the EMA hasn't settled yet
-          frame.beatConfidence > 0.35 &&
-          // Energy is already measured against the track's own loud passages,
-          // so a drop is a jump on what this track has been doing, not on a
-          // fixed level.
-          frame.energy > energyEma * 1.35;
+        const cues = frame.score;
+        const isDrop = cues
+          // The conductor knows exactly where a built-up section lands, so the
+          // cut is its impactStart, not an energy guess: one drop detector.
+          ? cues.impactStart &&
+            cues.impact >= MIN_IMPACT_STRENGTH &&
+            globalTimeMs - lastDropAtMs > DROP_COOLDOWN_MS
+          : sectionChanged &&
+            globalTimeMs - lastDropAtMs > DROP_COOLDOWN_MS &&
+            globalTimeMs > 6000 && // never on boot — the EMA hasn't settled yet
+            frame.beatConfidence > 0.35 &&
+            // Energy is already measured against the track's own loud passages,
+            // so a drop is a jump on what this track has been doing, not on a
+            // fixed level.
+            frame.energy > energyEma * 1.35;
+        // Scored: a build is climbing toward the next section, so have the look
+        // the drop will cut to compiled before it lands.
+        if (cues && cues.anticipation > 0.02) queueUpcoming();
+        // Scored: a plain boundary (no build) is crossfaded so the midpoint
+        // lands on the bar line, which means starting half a fade early.
+        // fadeDurMs is twice the time left, so fadeT is 0.5 at the boundary.
+        const lead = cues ? cues.toBoundary : Infinity;
+        // A seek away from the boundary cancels the early start; the boundary
+        // frame itself is the one that consumes it, below.
+        if (!sectionChanged && lead > CROSSFADE_MS / 2000) crossfadedAhead = false;
         if (isDrop) {
           lastDropAtMs = globalTimeMs;
+          crossfadedAhead = false;
           pickNextScene(frame);
           fadeDurMs = DROP_FADE_MS;
           fadeMs = 0;
-          flashLevel = 1;
+          flashLevel = cues ? 0.4 + 0.6 * Math.min(1, cues.impact) : 1;
           if (accentEnabled) accentLevel = 1;
+        } else if (cues && sectionChanged && crossfadedAhead) {
+          // Already crossfading into this section's look.
+          crossfadedAhead = false;
         } else if ((sectionChanged && dwellMs > MIN_DWELL_MS) || dwellMs > MAX_DWELL_MS) {
           pickNextScene(frame);
           fadeDurMs = CROSSFADE_MS;
+        } else if (
+          cues && !crossfadedAhead && cues.anticipation <= 0 && lead > 0 && lead < CROSSFADE_MS / 2000 &&
+          dwellMs > MIN_DWELL_MS && outgoingIndex < 0
+        ) {
+          crossfadedAhead = true;
+          pickNextScene(frame);
+          fadeDurMs = Math.max(240, 2 * lead * 1000);
         } else if (accentEnabled && accentDwellMs > MAX_DWELL_MS * 0.6) {
           // The accent layer rotates on its own faster cadence so the pair
           // (base × accent) keeps recombining.
@@ -755,6 +908,7 @@ void main() { fragColor = u_color; }
       targetHeight = target?.height ?? canvas.height;
       targetOpacity = Math.max(0, Math.min(1, target?.opacity ?? 1));
       targetContrast = Math.max(0.25, Math.min(3, target?.contrast ?? 1));
+      targetStereoSpread = Number.isFinite(target?.stereoSpread) ? Math.max(0, Math.min(1.5, target!.stereoSpread!)) : 1;
       gl.bindVertexArray(vao);
       gl.bindFramebuffer(gl.FRAMEBUFFER, target?.framebuffer ?? null);
       gl.viewport(0, 0, targetWidth, targetHeight);
@@ -819,7 +973,7 @@ void main() { fragColor = u_color; }
 
       // Drop flash: one decaying accent-white wash over the whole stack.
       // Suppressed in forced-scene mode (smokes assert per-scene output).
-      if (flashLevel > 0.02 && !forcedSceneId && ensureFlashProgram() && flashProgram) {
+      if (flashLevel > 0.02 && !forcedSceneId && !target?.suppressFlash && ensureFlashProgram() && flashProgram) {
         const a = Math.min(0.42, flashLevel * 0.42);
         const r = palette.accent[0] + (1 - palette.accent[0]) * 0.6;
         const g = palette.accent[1] + (1 - palette.accent[1]) * 0.6;

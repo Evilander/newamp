@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { compileQueryIntent, looksLikeNaturalQuery, withTempoCoverage, type QueryIntent } from '@shared/query-intent';
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import type { AlbumSummary, ArtistSummary, ListeningHistoryItem, SavedPlaylist, SmartPlaylistRule, Track } from '@shared/types';
@@ -13,12 +13,18 @@ import { openColourEditor } from '../lib/colour-editor-open';
 const RESULT_LIMIT = 48;
 const TRACK_LIMIT = 24;
 const CATALOG_LIMIT = 8;
+// A typed query lists at most this many views and commands, and the catalog
+// kinds never take the last MIN_TRACK_ROWS rows from the tracks.
+const MENU_LIMIT = 6;
+const MIN_TRACK_ROWS = 12;
+// The Ask section lists this many tracks; playing one queues the whole result.
+const ASK_ROWS = 12;
 
 type PaletteCommand = 'scan-library' | 'toggle-eq' | 'fullscreen-viz' | 'compact-deck' | 'edit-colours';
 
 type PaletteItem =
   | { kind: 'resume'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; track: Track }
-  | { kind: 'track'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; track: Track }
+  | { kind: 'track'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; track: Track; ask?: boolean }
   | { kind: 'playlist'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; playlist: SavedPlaylist }
   | { kind: 'smart-rule'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; rule: SmartPlaylistRule }
   | { kind: 'album'; id: string; title: string; subtitle: ReactNode; subtitleText: string; detail: string; album: AlbumSummary }
@@ -85,11 +91,18 @@ const LEGEND_KBD_STYLE = {
 export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose: () => void }): JSX.Element | null {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<PaletteItem[]>([]);
+  // The query the rows were built for; they lag the input by the debounce and the search.
+  const [resultsQuery, setResultsQuery] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
   const [askChips, setAskChips] = useState<string[] | null>(null);
+  // Everything the Ask matched; its section on screen shows the first rows of it.
+  const [askTracks, setAskTracks] = useState<Track[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const pointerSelectRef = useRef(false);
+  const pointerAtRef = useRef<{ x: number; y: number } | null>(null);
+  const listId = useId();
   useModalFocus(dialogRef, inputRef, open);
   const playQueue = usePlayerStore((s) => s.playQueue);
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
@@ -105,7 +118,9 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
   const current = usePlayerStore((s) => s.current);
   const trimmedQuery = query.trim();
-  const selected = results[selectedIndex] ?? null;
+  // Rows from an earlier query are still on screen while the new search runs;
+  // nothing is selected for the keyboard until they have been replaced.
+  const selected = resultsQuery === trimmedQuery ? results[selectedIndex] ?? null : null;
 
   useEffect(() => {
     if (!open) return;
@@ -116,18 +131,20 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
         // Ask mode: 3+ words with no field:value token reads as natural
         // language — compile it locally to a smart rule (year/bpm/recency/
         // loved/rating + DNA re-rank) and show the interpretation as chips.
-        // Unmatched words still free-text search inside the rule, and the
-        // classic verbatim search below stays untouched for short queries.
+        // The verbatim search runs beside it either way: a title that happens
+        // to read like a sentence is found there, and the Ask is the second
+        // section under it.
         const askIntent = trimmedQuery && looksLikeNaturalQuery(trimmedQuery)
           ? compileQueryIntent(trimmedQuery)
           : null;
         const useAsk = !!askIntent && askIntent.matched > 0;
-        const [tracks, playlists, smartRules, albums, artists, history] = await Promise.all([
-          useAsk ? api.runSmartPlaylistRule(askIntent.rule) : loadTrackResults(trimmedQuery),
+        const [tracks, asked, playlists, smartRules, albums, artists, history] = await Promise.all([
+          loadTrackResults(trimmedQuery),
+          useAsk ? api.runSmartPlaylistRule(askIntent.rule).catch(() => [] as Track[]) : Promise.resolve([] as Track[]),
           api.getPlaylists(),
           api.getSmartPlaylistRules(),
-          trimmedQuery && !useAsk ? api.getAlbums({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
-          trimmedQuery && !useAsk ? api.getArtists({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
+          trimmedQuery ? api.getAlbums({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
+          trimmedQuery ? api.getArtists({ search: trimmedQuery, limit: CATALOG_LIMIT }) : Promise.resolve([]),
           trimmedQuery
             ? Promise.resolve([] as ListeningHistoryItem[])
             : api.getListeningHistory({ limit: 8 }).catch(() => [] as ListeningHistoryItem[]),
@@ -136,22 +153,22 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
         const chips = useAsk ? await tempoCoverageChips(askIntent) : null;
         if (cancelled) return;
         setAskChips(chips);
-        const base = useAsk
-          ? buildPaletteItems('', tracks, [], [], [], []).filter((item) => item.kind === 'track')
-          : buildPaletteItems(trimmedQuery, tracks, playlists, smartRules, albums, artists);
         // Zero-query front door: row 1 resumes the restored session where it
         // left off, rows 2-4 are the last things actually listened to. Typed
         // queries keep the classic result order untouched.
-        const next = trimmedQuery
-          ? base
-          : [...zeroQueryLeadItems(history), ...base].slice(0, RESULT_LIMIT);
+        const lead = trimmedQuery ? [] : zeroQueryLeadItems(history);
+        const askItems = asked.slice(0, ASK_ROWS).map(askTrackItem);
+        const base = buildPaletteItems(trimmedQuery, tracks, playlists, smartRules, albums, artists, RESULT_LIMIT - lead.length - askItems.length);
+        const next = [...lead, ...base, ...askItems];
+        setAskTracks(asked);
         setResults(next);
-        setSelectedIndex(0);
+        setResultsQuery(trimmedQuery);
+        setSelectedIndex(initialSelection(trimmedQuery, lead.length, base, askItems.length));
         setStatus(
           next.length
             ? null
             : useAsk
-              ? 'Nothing in the library matches that ask — loosen a constraint.'
+              ? 'Nothing in the library matches that search or ask — loosen a constraint.'
               : 'No matching commands or catalog items.',
         );
       } catch {
@@ -165,13 +182,26 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
   }, [open, trimmedQuery]);
 
   const trackQueueContext = useMemo(
-    () => results.filter((item): item is Extract<PaletteItem, { kind: 'track' }> => item.kind === 'track').map((item) => item.track),
+    () => results
+      .filter((item): item is Extract<PaletteItem, { kind: 'track' }> => item.kind === 'track' && !item.ask)
+      .map((item) => item.track),
     [results],
   );
 
+  // Arrow keys can move the highlight past the visible rows. A hover also
+  // selects, but the row under the pointer is already in view, and scrolling
+  // it would move the rows under a resting pointer.
+  useEffect(() => {
+    if (pointerSelectRef.current) {
+      pointerSelectRef.current = false;
+      return;
+    }
+    dialogRef.current?.querySelector('[data-newamp-quick-play-row][data-active="true"]')?.scrollIntoView({ block: 'nearest' });
+  }, [selectedIndex, results]);
+
   if (!open) return null;
 
-  async function executeSelected(item = selected): Promise<void> {
+  async function executeItem(item: PaletteItem | null): Promise<void> {
     if (!item) return;
     if (item.kind === 'resume') {
       // togglePlay handles both halves of "resume": a restored-but-idle
@@ -195,7 +225,8 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
       return;
     }
     if (item.kind === 'track') {
-      const queueContext = trackQueueContext.length ? trackQueueContext : [item.track];
+      const listed = item.ask ? askTracks : trackQueueContext;
+      const queueContext = listed.length ? listed : [item.track];
       const index = Math.max(0, queueContext.findIndex((candidate) => candidate.id === item.track.id));
       await playQueue(queueContext, index);
       setView('now-playing');
@@ -212,7 +243,7 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
     onClose();
   }
 
-  async function playNext(item = selected): Promise<void> {
+  async function playItemNext(item: PaletteItem | null): Promise<void> {
     if (!item) return;
     if (item.kind === 'track') {
       queueTrackNext(item.track);
@@ -225,7 +256,7 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
     setStatus(`Will play next: ${item.title}`);
   }
 
-  async function queue(item = selected): Promise<void> {
+  async function queueItem(item: PaletteItem | null): Promise<void> {
     if (!item) return;
     if (item.kind === 'track') {
       addTrackToQueue(item.track);
@@ -238,7 +269,7 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
     setStatus(`Queued: ${item.title}`);
   }
 
-  async function startSmartRuleRadio(item = selected): Promise<void> {
+  async function startRadioFor(item: PaletteItem | null): Promise<void> {
     if (!item || item.kind !== 'smart-rule') return;
     const tracks = await api.runSmartPlaylistRule(item.rule.id);
     if (!tracks.length) {
@@ -252,7 +283,7 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
     onClose();
   }
 
-  async function toggleLove(item = selected): Promise<void> {
+  async function toggleLoveFor(item: PaletteItem | null): Promise<void> {
     if (!item || item.kind !== 'track') return;
     const loved = await usePlayerStore.getState().toggleLove(item.track.id);
     setResults((next) => next.map((candidate) => (
@@ -285,6 +316,23 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
       onClose();
     }
   }
+
+  // The actions touch IPC and the store; a rejection shows in the status line
+  // instead of escaping as an unhandled one with the palette left open.
+  function guarded(action: (item: PaletteItem | null) => Promise<void>): (item?: PaletteItem | null) => Promise<void> {
+    return async (item = selected) => {
+      try {
+        await action(item);
+      } catch (err) {
+        setStatus(err instanceof Error && err.message ? err.message : 'That did not work.');
+      }
+    };
+  }
+  const executeSelected = guarded(executeItem);
+  const playNext = guarded(playItemNext);
+  const queue = guarded(queueItem);
+  const startSmartRuleRadio = guarded(startRadioFor);
+  const toggleLove = guarded(toggleLoveFor);
 
   function onPaletteKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void {
     if (event.target !== inputRef.current) return;
@@ -342,7 +390,12 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
           </div>
           <input
             ref={inputRef}
+            role="combobox"
             aria-label="Search Quick Play"
+            aria-autocomplete="list"
+            aria-expanded={results.length > 0}
+            aria-controls={listId}
+            aria-activedescendant={selected ? `${listId}-${selectedIndex}` : undefined}
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
             placeholder="Search — or just ask: warm slow stuff from the 70s I haven't played this year"
@@ -382,74 +435,98 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
               {hint.label}
             </span>
           ))}
-          {status && <span className="ml-auto" style={{ color: 'var(--accent)' }}>{status}</span>}
+          <span className="ml-auto" role="status" aria-live="polite" style={{ color: 'var(--accent)' }}>{status}</span>
         </div>
 
-        <div className="max-h-[56vh] overflow-auto">
+        <div className="max-h-[56vh] overflow-auto" id={listId} role="listbox" aria-label="Quick Play results">
           {results.map((item, index) => {
             const active = index === selectedIndex;
             const playing = item.kind === 'track' && current?.id === item.track.id;
+            const opensAsk = isAskRow(item) && !isAskRow(results[index - 1]);
             return (
-              <div
-                key={item.id}
-                className="grid cursor-pointer grid-cols-[82px_minmax(0,1.5fr)_minmax(120px,0.8fr)_224px] items-center gap-2 border-b px-3 py-2 text-[12px]"
-                data-newamp-quick-play-row
-                data-newamp-palette-kind={item.kind}
-                data-track-id={item.kind === 'track' ? item.track.id : undefined}
-                style={{
-                  borderColor: 'var(--line)',
-                  background: active
-                    ? 'var(--panel-2)'
-                    : playing
-                      ? 'color-mix(in srgb, var(--accent) 6%, transparent)'
-                      : 'transparent',
-                  color: playing ? 'var(--accent)' : 'var(--ink)',
-                }}
-                onMouseEnter={() => setSelectedIndex(index)}
-                onDoubleClick={() => void executeSelected(item)}
-              >
-                <div className="text-[9px] uppercase tracking-[0.12em]" style={{ color: 'var(--muted)' }}>
-                  {item.kind}
-                </div>
-                <div className="min-w-0">
-                  <div className="truncate font-semibold" title={item.title}>{item.title}</div>
-                  <div className="truncate text-[10px]" style={{ color: 'var(--muted)' }} title={item.subtitleText}>
-                    {item.subtitle}
+              <Fragment key={item.id}>
+                {opensAsk && (
+                  <div
+                    role="presentation"
+                    className="border-b px-3 py-1 text-[9px] font-bold uppercase tracking-[0.14em]"
+                    style={{ borderColor: 'var(--line)', color: 'var(--accent)', background: 'var(--panel-2)' }}
+                    data-newamp-ask-section
+                  >
+                    Ask your library
+                  </div>
+                )}
+                <div
+                  id={`${listId}-${index}`}
+                  role="option"
+                  aria-selected={active}
+                  className="grid cursor-pointer grid-cols-[82px_minmax(0,1.5fr)_minmax(120px,0.8fr)_224px] items-center gap-2 border-b px-3 py-2 text-[12px]"
+                  data-newamp-quick-play-row
+                  data-active={active ? 'true' : undefined}
+                  data-newamp-palette-kind={item.kind}
+                  data-track-id={item.kind === 'track' ? item.track.id : undefined}
+                  style={{
+                    borderColor: 'var(--line)',
+                    background: active
+                      ? 'var(--panel-2)'
+                      : playing
+                        ? 'color-mix(in srgb, var(--accent) 6%, transparent)'
+                        : 'transparent',
+                    color: playing ? 'var(--accent)' : 'var(--ink)',
+                  }}
+                  onMouseMove={(event) => {
+                    // Rows scrolling under a resting pointer make the browser
+                    // report a move at the same spot; only a real move selects.
+                    const last = pointerAtRef.current;
+                    pointerAtRef.current = { x: event.clientX, y: event.clientY };
+                    if (!last || (last.x === event.clientX && last.y === event.clientY) || index === selectedIndex) return;
+                    pointerSelectRef.current = true;
+                    setSelectedIndex(index);
+                  }}
+                  onDoubleClick={() => void executeSelected(item)}
+                >
+                  <div className="text-[9px] uppercase tracking-[0.12em]" style={{ color: 'var(--muted)' }}>
+                    {item.kind}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="truncate font-semibold" title={item.title}>{item.title}</div>
+                    <div className="truncate text-[10px]" style={{ color: 'var(--muted)' }} title={item.subtitleText}>
+                      {item.subtitle}
+                    </div>
+                  </div>
+                  <div className="min-w-0 truncate text-right tabular-nums" style={{ color: 'var(--ink-2)' }} title={item.detail}>
+                    {item.detail}
+                  </div>
+                  <div className="flex justify-end gap-1">
+                    <button className="pxbtn px-1.5 py-[2px] text-[10px]" onClick={() => void executeSelected(item)} title="Run or play">
+                      {item.kind === 'view' || item.kind === 'command' ? 'RUN' : 'PLAY'}
+                    </button>
+                    {isPlayableItem(item) && (
+                      <>
+                        <button className="pxbtn px-1.5 py-[2px] text-[10px]" onClick={() => void playNext(item)} title="Play next">
+                          NEXT
+                        </button>
+                        <button className="pxbtn px-1.5 py-[2px] text-[10px]" onClick={() => void queue(item)} title="Add to queue">
+                          +
+                        </button>
+                      </>
+                    )}
+                    {item.kind === 'smart-rule' && (
+                      <button className="pxbtn is-active px-1.5 py-[2px] text-[10px]" onClick={() => void startSmartRuleRadio(item)} title="Start Smart Rule Radio">
+                        RADIO
+                      </button>
+                    )}
+                    {item.kind === 'track' && (
+                      <button
+                        className={`pxbtn px-1.5 py-[2px] text-[10px] ${item.track.loved ? 'is-active' : ''}`}
+                        onClick={() => void toggleLove(item)}
+                        title="Love"
+                      >
+                        {item.track.loved ? 'ON' : 'LOVE'}
+                      </button>
+                    )}
                   </div>
                 </div>
-                <div className="min-w-0 truncate text-right tabular-nums" style={{ color: 'var(--ink-2)' }} title={item.detail}>
-                  {item.detail}
-                </div>
-                <div className="flex justify-end gap-1">
-                  <button className="pxbtn px-1.5 py-[2px] text-[10px]" onClick={() => void executeSelected(item)} title="Run or play">
-                    {item.kind === 'view' || item.kind === 'command' ? 'RUN' : 'PLAY'}
-                  </button>
-                  {isPlayableItem(item) && (
-                    <>
-                      <button className="pxbtn px-1.5 py-[2px] text-[10px]" onClick={() => void playNext(item)} title="Play next">
-                        NEXT
-                      </button>
-                      <button className="pxbtn px-1.5 py-[2px] text-[10px]" onClick={() => void queue(item)} title="Add to queue">
-                        +
-                      </button>
-                    </>
-                  )}
-                  {item.kind === 'smart-rule' && (
-                    <button className="pxbtn is-active px-1.5 py-[2px] text-[10px]" onClick={() => void startSmartRuleRadio(item)} title="Start Smart Rule Radio">
-                      RADIO
-                    </button>
-                  )}
-                  {item.kind === 'track' && (
-                    <button
-                      className={`pxbtn px-1.5 py-[2px] text-[10px] ${item.track.loved ? 'is-active' : ''}`}
-                      onClick={() => void toggleLove(item)}
-                      title="Love"
-                    >
-                      {item.track.loved ? 'ON' : 'LOVE'}
-                    </button>
-                  )}
-                </div>
-              </div>
+              </Fragment>
             );
           })}
           {!results.length && (
@@ -514,16 +591,40 @@ function buildPaletteItems(
   smartRules: SmartPlaylistRule[],
   albums: AlbumSummary[],
   artists: ArtistSummary[],
+  limit: number,
 ): PaletteItem[] {
-  const items: PaletteItem[] = [];
-  for (const item of viewItems(query)) items.push(item);
-  for (const item of commandItems(query)) items.push(item);
-  for (const playlist of filteredPlaylists(playlists, query)) items.push(playlistItem(playlist));
-  for (const rule of filteredSmartRules(smartRules, query)) items.push(smartRuleItem(rule));
-  for (const album of filteredAlbums(albums, query)) items.push(albumItem(album));
-  for (const artist of filteredArtists(artists, query)) items.push(artistItem(artist));
-  for (const track of tracks) items.push(trackItem(track));
-  return items.slice(0, RESULT_LIMIT);
+  const needle = query.toLowerCase();
+  // A song typed out in full leads the list, ahead of any view that happens to match.
+  const exact = needle ? tracks.filter((track) => track.title.toLowerCase() === needle) : [];
+  const others = exact.length ? tracks.filter((track) => !exact.includes(track)) : tracks;
+  const menu = [...viewItems(query), ...commandItems(query)];
+  const catalog: PaletteItem[] = query ? menu.sort((a, b) => matchRank(needle, a.title) - matchRank(needle, b.title)).slice(0, MENU_LIMIT) : menu;
+  for (const playlist of filteredPlaylists(playlists, query)) catalog.push(playlistItem(playlist));
+  for (const rule of filteredSmartRules(smartRules, query)) catalog.push(smartRuleItem(rule));
+  for (const album of filteredAlbums(albums, query)) catalog.push(albumItem(album));
+  for (const artist of filteredArtists(artists, query)) catalog.push(artistItem(artist));
+  const room = Math.max(0, limit - exact.length - Math.min(others.length, MIN_TRACK_ROWS));
+  return [
+    ...exact.map(trackItem),
+    ...catalog.slice(0, room),
+    ...others.map(trackItem),
+  ].slice(0, limit);
+}
+
+// The row the keyboard starts on: the first, unless the Ask is listed and
+// nothing the search found reads as what was typed, which selects the Ask.
+function initialSelection(query: string, leadCount: number, base: PaletteItem[], askCount: number): number {
+  if (!askCount) return 0;
+  const top = base[0];
+  const fits = !!top && matchRank(query.toLowerCase(), top.title) <= 1;
+  return fits ? 0 : leadCount + base.length;
+}
+
+// Exact title first, then a title that starts with the query, then any other match.
+function matchRank(needle: string, title: string): number {
+  const lower = title.toLowerCase();
+  if (lower === needle) return 0;
+  return lower.startsWith(needle) ? 1 : 2;
 }
 
 function viewItems(query: string): PaletteItem[] {
@@ -589,6 +690,17 @@ function filteredArtists(artists: ArtistSummary[], query: string): ArtistSummary
   return artists
     .filter((artist) => matches(query, artist.artist, 'artist'))
     .slice(0, 8);
+}
+
+function isAskRow(item: PaletteItem | undefined): boolean {
+  return item?.kind === 'track' && item.ask === true;
+}
+
+// A track from the Ask section: the same row as in the search, under its own
+// key since the search may list the same track.
+function askTrackItem(track: Track): PaletteItem {
+  const item = trackItem(track);
+  return item.kind === 'track' ? { ...item, id: `ask:${track.id}`, ask: true } : item;
 }
 
 function trackItem(track: Track): PaletteItem {

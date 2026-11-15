@@ -11,12 +11,24 @@ import { NEWAMP_USER_AGENT } from '../shared/app-version.js';
 import { createHash } from 'node:crypto';
 import { stat, readFile } from 'node:fs/promises';
 import { join, parse } from 'node:path';
+import { decodeSidecarText, existingSidecarCandidates } from './local-lyrics.js';
 
 const UG_SEARCH_URL = 'https://www.ultimate-guitar.com/search.php';
 const UG_HOST_RE = /(^|\.)ultimate-guitar\.com$/i;
 const MAX_LOCAL_TAB_BYTES = 512 * 1024;
-const CHORD_RE =
-  /^([A-G](?:#|b)?)([^/\s]*)(?:\/([A-G](?:#|b)?))?$/;
+const MAX_UG_RESPONSE_BYTES = 4 * 1024 * 1024;
+const UG_REQUEST_TIMEOUT_MS = 15_000;
+const UG_MAX_REDIRECTS = 3;
+const UG_CHALLENGE_TITLE_RE = /<title>\s*Just a moment\.{3}\s*<\/title>/i;
+const UG_CHALLENGE_BODY_RE = /Just a moment|Cloudflare|challenge-platform/i;
+// A chord is a root, any run of qualities, and an optional bass note, with
+// nothing left over, so words that only start with A to G (Chorus, Bridge,
+// Come, Are) are not chords. Each quality reads one way (digits one at a
+// time, "sus" and "add" without their number) so a long odd token can't make
+// the match backtrack.
+const CHORD_PATTERN = String.raw`([A-G](?:#|b)?)((?:maj|Maj|min|Min|dim|aug|sus|add|m|M|\d|[#b+-]|\([^)]*\)|\u00f8|\u00b0)*)(?:\/([A-G](?:#|b)?))?`;
+const CHORD_RE = new RegExp(`^${CHORD_PATTERN}$`);
+const CHORD_TAG_RE = new RegExp(`\\[${CHORD_PATTERN}\\]`);
 const CHORD_TOKEN_RE =
   /\b([A-G](?:#|b)?)(maj|min|m|dim|aug|sus|add|M|mM|ø|o|[0-9]|[#b()+/-])*?(?:\/([A-G](?:#|b)?))?\b/g;
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -137,7 +149,7 @@ export function parseUltimateGuitarTabHtml(html: string, url: string): GuitarTab
       rating: null,
       votes: null,
       key: null,
-      lines: parseTabLines(cleanTabContent(pre)),
+      lines: parseTabLines(pre),
       fetchedAt: Date.now(),
     };
   }
@@ -178,7 +190,7 @@ export async function findLocalGuitarTabForTrack(track: GuitarTabTrack): Promise
   if (!track.path) return null;
   if (!(await isReadableFile(track.path))) return null;
 
-  for (const candidate of localGuitarTabCandidates(track)) {
+  for (const candidate of await existingSidecarCandidates(localGuitarTabCandidates(track))) {
     const content = await readLocalTabCandidate(candidate);
     if (!content) continue;
     if (!looksLikeLocalGuitarTab(content)) continue;
@@ -319,7 +331,7 @@ async function readLocalTabCandidate(path: string): Promise<string | null> {
   }
 
   try {
-    const text = (await readFile(path, 'utf8')).replace(/^\uFEFF/, '').trim();
+    const text = decodeSidecarText(await readFile(path)).replace(/^\uFEFF/, '').trim();
     if (!text || Buffer.byteLength(text, 'utf8') > Math.max(size * 2, MAX_LOCAL_TAB_BYTES)) return null;
     return text;
   } catch {
@@ -374,10 +386,12 @@ function labelFromChordProDirective(name: string): string {
 
 function looksLikeLocalGuitarTab(content: string): boolean {
   if (/\{\s*(?:title|t|artist|subtitle|st|key|start_of_[a-z_]+)\b/i.test(content)) return true;
-  if (/\[[A-G](?:#|b)?(?:maj|min|m|dim|aug|sus|add|M|mM|[0-9#b()+/-])*(?:\/[A-G](?:#|b)?)?\]/.test(content)) {
-    return true;
-  }
-  return parseTabLines(content).some((line) => line.type === 'chords' || line.type === 'tab');
+  if (CHORD_TAG_RE.test(content)) return true;
+  // One stray chord-like word (an "A" or a "Dm" on a line of its own) is
+  // not enough to take a lyrics file for a tab.
+  return parseTabLines(content).some(
+    (line) => line.type === 'tab' || (line.type === 'chords' && line.text.trim().split(/\s+/).length >= 2),
+  );
 }
 
 function rankSearchResults(
@@ -499,6 +513,15 @@ function findTabPayload(value: unknown): TabPayload | null {
   const directSong = objectField(value, 'song') ?? objectField(value, 'song_info');
   if (directTab && isTabLike(directTab)) return { tab: directTab, song: directSong };
 
+  // The page's own layout: the text is in tab_view.wiki_tab, and the title,
+  // artist, rating and votes are on the tab object beside it.
+  const tabView = objectField(value, 'tab_view');
+  const wikiTab = objectField(tabView, 'wiki_tab');
+  if (tabView && wikiTab && isTabLike(wikiTab)) {
+    const info = objectField(value, 'tab');
+    return { tab: { ...info, ...wikiTab, meta: objectField(tabView, 'meta') ?? objectField(info, 'meta') }, song: directSong };
+  }
+
   const entities = objectField(objectField(objectField(value, 'initialState'), 'store'), 'entities');
   const tabViews = objectField(entities, 'tabViews');
   const songs = objectField(entities, 'songs');
@@ -571,18 +594,36 @@ function tabPayloadToDocument(payload: TabPayload, url: string): GuitarTabDocume
 
 async function requestUltimateGuitarText(url: string): Promise<string> {
   assertUltimateGuitarUrl(url);
-  const response = await fetch(url, {
-    headers: {
-      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'accept-language': 'en-US,en;q=0.9',
-      'user-agent':
-        `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ${NEWAMP_USER_AGENT} Safari/537.36`,
-    },
-  });
-  const body = await response.text();
-  if (!response.ok || /Just a moment|Cloudflare|challenge-platform/i.test(body)) {
+  const headers = {
+    accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'accept-language': 'en-US,en;q=0.9',
+    'user-agent':
+      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ${NEWAMP_USER_AGENT} Safari/537.36`,
+  };
+  const signal = AbortSignal.timeout(UG_REQUEST_TIMEOUT_MS);
+  // Redirects are followed one at a time so each target is held to the same
+  // host check as the address that was asked for.
+  let target = url;
+  let response = await fetch(target, { headers, signal, redirect: 'manual' });
+  for (let hops = 0; response.status >= 300 && response.status < 400; hops += 1) {
+    const location = response.headers.get('location');
+    if (!location || hops >= UG_MAX_REDIRECTS) break;
+    target = new URL(location, target).toString();
+    assertUltimateGuitarUrl(target);
+    await response.body?.cancel();
+    response = await fetch(target, { headers, signal, redirect: 'manual' });
+  }
+  const body = await readCappedText(response, MAX_UG_RESPONSE_BYTES);
+  // Cloudflare's scripts show up on pages it let through, so the word
+  // "Cloudflare" or the challenge script alone says nothing. A challenge is a
+  // refusal status, the mitigation header, or the challenge page itself.
+  const challenged =
+    response.headers.get('cf-mitigated') === 'challenge' ||
+    UG_CHALLENGE_TITLE_RE.test(body) ||
+    ([403, 429, 503].includes(response.status) && UG_CHALLENGE_BODY_RE.test(body));
+  if (!response.ok || challenged) {
     throw new Error(
-      response.status === 403
+      response.status === 403 || challenged
         ? 'Ultimate Guitar blocked automated access from this network. Paste a tab URL or retry later.'
         : `Ultimate Guitar request failed (${response.status})`,
     );
@@ -590,8 +631,38 @@ async function requestUltimateGuitarText(url: string): Promise<string> {
   return body;
 }
 
+// Reads at most `limit` bytes of a response and fails if there is more, so a
+// page that never ends isn't held in memory.
+async function readCappedText(response: Response, limit: number): Promise<string> {
+  const tooLarge = () => new Error('Ultimate Guitar returned a page that is too large to read.');
+  const declared = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > limit) throw tooLarge();
+  const reader = response.body?.getReader();
+  if (!reader) return response.text();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      throw tooLarge();
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 function extractJsonValues(html: string): unknown[] {
   const out: unknown[] = [];
+  // The page state is an entity-encoded JSON document in an attribute of the
+  // js-store element: <div class="js-store" data-content="{&quot;store&quot;...}">.
+  for (const match of html.matchAll(/<[a-z][a-z0-9]*\b[^>]*?\bdata-content=(?:"([^"]*)"|'([^']*)')[^>]*>/gi)) {
+    if (!/\bclass=["'][^"']*\bjs-store\b/i.test(match[0])) continue;
+    const content = decodeHtmlEntities(match[1] ?? match[2] ?? '').trim();
+    if (content.startsWith('{') || content.startsWith('[')) pushJson(content, out);
+  }
   for (const match of html.matchAll(
     /<script[^>]*(?:id=["']__NEXT_DATA__["'][^>]*)?[^>]*>([\s\S]*?)<\/script>/gi,
   )) {
@@ -661,13 +732,18 @@ function pushJson(text: string, out: unknown[]): void {
 }
 
 function cleanTabContent(content: string): string {
-  return decodeHtmlEntities(content)
-    .replace(/<span\b(?=[^>]*\bdata-name=["']([^"']+)["'])[^>]*>([\s\S]*?)<\/span>/gi, (_match, name: string, text: string) =>
-      text.trim() ? text : name,
-    )
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/p>|<\/div>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
+  // Tags come out before entities are decoded: a "&lt;" in the text is a
+  // character to keep, not the start of a tag, and a bare "<3" isn't one
+  // either, since a tag starts with a name or a slash.
+  return decodeHtmlEntities(
+    content
+      .replace(/<span\b(?=[^>]*\bdata-name=["']([^"']+)["'])[^>]*>([\s\S]*?)<\/span>/gi, (_match, name: string, text: string) =>
+        text.trim() ? text : name,
+      )
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>|<\/div>/gi, '\n')
+      .replace(/<\/?[a-z][^>]*>/gi, ''),
+  )
     .replace(/\[ch\]([\s\S]*?)\[\/ch\]/gi, '$1')
     .replace(/\[(?:\/)?(?:tab|chords?|verse|chorus|intro|outro|bridge|solo|riff|pre-chorus)[^\]]*\]/gi, '')
     .replace(/\r/g, '')
@@ -675,16 +751,23 @@ function cleanTabContent(content: string): string {
     .trim();
 }
 
+// &amp; goes last, so "&amp;lt;" comes out as the text "&lt;" and not "<".
 function decodeHtmlEntities(value: string): string {
   return value
     .replace(/\\u0026/g, '&')
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
-    .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&#(\d+);/g, (_m, code: string) => String.fromCharCode(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_m, code: string) => String.fromCharCode(parseInt(code, 16)));
+    .replace(/&#(\d+);/g, (match, code: string) => codePointText(Number(code)) ?? match)
+    .replace(/&#x([0-9a-f]+);/gi, (match, code: string) => codePointText(parseInt(code, 16)) ?? match)
+    .replace(/&amp;/g, '&');
+}
+
+// Null for a number that isn't a character, which leaves the entity as written.
+function codePointText(code: number): string | null {
+  if (!Number.isInteger(code) || code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return null;
+  return String.fromCodePoint(code);
 }
 
 function stringField(obj: JsonObject | null | undefined, key: string): string | null {

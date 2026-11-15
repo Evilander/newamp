@@ -142,10 +142,17 @@ class ExclusiveBridge implements ExternalTransport {
         });
         break;
       case 'boundary':
-      case 'ended':
         // Mirrors the deck 'ended' DOM event: the store's subscribe callback
-        // advances the queue and calls play(next) — which the main driver
-        // acks as chained (gapless) or starts fresh.
+        // advances the queue and calls play(next), which the main driver acks
+        // as chained. The stream chained on without stopping, so playing stays
+        // true; reporting a pause here made the OS Now Playing tile and
+        // headphone state blink at every track change.
+        this.endedPending = true;
+        engine.patchExternal({ ended: true });
+        break;
+      case 'ended':
+        // Nothing follows: the stream is over. The store advances the queue
+        // and calls play(next), which starts fresh.
         this.endedPending = true;
         engine.patchExternal({ playing: false, ended: true });
         break;

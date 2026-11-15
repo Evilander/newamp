@@ -1,5 +1,6 @@
-import { copyFileSync, existsSync, readFileSync, renameSync, unlinkSync, closeSync, fsyncSync, openSync, writeSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, readdirSync, statSync, renameSync, unlinkSync, closeSync, fsyncSync, openSync, writeSync } from 'node:fs';
 import { open as fsOpen, readFile as fsReadFile, rename as fsRename, unlink as fsUnlink } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { RecoveryEvent } from '../shared/types.js';
 
 export function quarantineCorruptFile(
@@ -36,13 +37,29 @@ export function isTransientIoError(err: unknown): boolean {
   return typeof code === 'string' && TRANSIENT_IO_CODES.has(code);
 }
 
+// EACCES is a real permissions problem and does not clear within a retry
+// budget, so reads give up on it at once; the other transient codes are locks
+// and a full descriptor table, which can.
+const RETRYABLE_READ_CODES = new Set([...TRANSIENT_IO_CODES].filter((code) => code !== 'EACCES'));
+
 // EIO (a failing disk/drive) and EISDIR (something replaced the file with a
 // directory) never clear on retry the way a lock does — readFileSyncRetrying
 // already rethrows them on the first attempt instead of wasting the retry
-// budget — but they are still not evidence of corrupt JSON content. A caller
-// deciding "suppress + notify" vs "let it crash bootstrap" should treat them
-// the same as a lock that outlasted every retry, not as an unknown error.
-const UNREADABLE_FILE_CODES = new Set([...TRANSIENT_IO_CODES, 'EIO', 'EISDIR']);
+// budget — but they are still not evidence of corrupt JSON content. The same
+// goes for a network volume that timed out or dropped (ETIMEDOUT, ENOTCONN,
+// ESTALE, ENXIO): the bytes were never read, so nothing says the file is bad.
+// A caller deciding "suppress + notify" vs "let it crash bootstrap" should
+// treat them the same as a lock that outlasted every retry, not as an unknown
+// error.
+const UNREADABLE_FILE_CODES = new Set([
+  ...TRANSIENT_IO_CODES,
+  'EIO',
+  'EISDIR',
+  'ETIMEDOUT',
+  'ENOTCONN',
+  'ESTALE',
+  'ENXIO',
+]);
 
 export function isUnreadableFileError(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
@@ -68,7 +85,8 @@ export function readFileSyncRetrying(filePath: string, encoding: BufferEncoding 
       return readFileSync(filePath, encoding);
     } catch (err) {
       lastErr = err;
-      if (!isTransientIoError(err)) throw err;
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (typeof code !== 'string' || !RETRYABLE_READ_CODES.has(code)) throw err;
     }
   }
   throw lastErr;
@@ -88,6 +106,9 @@ function describeUnreadableFile(err: unknown): string {
   }
   if (code === 'EIO' || code === 'EISDIR') {
     return `${reason} — this will not clear on its own; check the drive and the file`;
+  }
+  if (code === 'ETIMEDOUT' || code === 'ENOTCONN' || code === 'ESTALE' || code === 'ENXIO') {
+    return `${reason} — the storage did not answer; check the network volume or drive, then relaunch`;
   }
   return `${reason} — may clear on its own; will retry next launch`;
 }
@@ -123,6 +144,18 @@ export function atomicWriteFileSync(filePath: string, data: Buffer | string): vo
   const tmp = `${filePath}.tmp-${process.pid}-sync`;
   try {
     durableWriteFileSync(tmp, data);
+  } catch (err) {
+    // The write itself failed (a full disk, say), so the temp file holds a
+    // partial copy that is worth nothing; the target was never touched.
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* never created */
+    }
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`could not replace ${filePath} (${reason}); it was left unchanged`);
+  }
+  try {
     renameOverExistingSync(tmp, filePath);
   } catch (err) {
     // The temp file is the only complete copy of this state if the replace
@@ -138,13 +171,18 @@ export function atomicWriteFileSync(filePath: string, data: Buffer | string): vo
   }
 }
 
+// Settings hold API keys and the library is one user's listening history, so
+// the files written here are readable by that user only. The mode applies when
+// the temp file is created and carries over to the file renamed onto the target.
+const PRIVATE_FILE_MODE = 0o600;
+
 // Callers that must run a staleness check between the write and the rename
 // (LibraryStore.flushAsync / SettingsStore.persistAsync drop a snapshot that a
 // synchronous quit-path flush has already superseded) compose the durable-write
 // and rename steps directly instead of using a one-shot helper.
 export function durableWriteFileSync(filePath: string, data: Buffer | string): void {
   const buf = typeof data === 'string' ? Buffer.from(data, 'utf-8') : data;
-  const fd = openSync(filePath, 'w');
+  const fd = openSync(filePath, 'w', PRIVATE_FILE_MODE);
   try {
     // writeSync is not guaranteed to write the whole buffer in one call —
     // fs.writeFileSync loops internally for exactly this reason. Without the
@@ -162,7 +200,7 @@ export function durableWriteFileSync(filePath: string, data: Buffer | string): v
 }
 
 export async function durableWriteFileAsync(filePath: string, data: Buffer | string): Promise<void> {
-  const handle = await fsOpen(filePath, 'w');
+  const handle = await fsOpen(filePath, 'w', PRIVATE_FILE_MODE);
   try {
     await handle.writeFile(data);
     await handle.sync();
@@ -259,4 +297,39 @@ function isTransientRenameError(err: unknown): boolean {
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Temp files are named `<target>.tmp-<pid>-<seq|sync|retry>`. A crash or a
+// force-quit mid-write leaves one behind, and since the next launch has a
+// different pid nothing ever reuses or removes it. Run at startup: anything
+// this process did not write and that has been quiet for `minAgeMs` is an
+// orphan. The age floor keeps a second instance's write in progress from being
+// deleted underneath it. library.db's temps are left to the library, which
+// removes them only once the live file has loaded: a temp copy kept after a
+// failed rename can be the only complete copy when library.db is unreadable.
+const LIBRARY_TEMP_PREFIX = 'library.db.tmp-';
+const ORPHAN_TEMP_NAME = /\.tmp-(\d+)-(?:\d+|sync|retry)$/;
+
+export function sweepOrphanedTempFiles(dir: string, minAgeMs = 60_000, now = Date.now()): string[] {
+  const removed: string[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    const match = ORPHAN_TEMP_NAME.exec(name);
+    if (!match || Number(match[1]) === process.pid || name.startsWith(LIBRARY_TEMP_PREFIX)) continue;
+    const path = join(dir, name);
+    try {
+      const info = statSync(path);
+      if (!info.isFile() || now - info.mtimeMs < minAgeMs) continue;
+      unlinkSync(path);
+      removed.push(path);
+    } catch {
+      /* gone already, or locked: the next launch tries again */
+    }
+  }
+  return removed;
 }

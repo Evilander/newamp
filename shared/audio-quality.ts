@@ -85,6 +85,9 @@ export function audioExtension(path: string): string {
 }
 
 export function isMusicServerStreamPath(path: string): boolean {
+  // Library paths are plain file paths; new URL() throws on every one of them,
+  // so only a path that starts like a stream URL is worth parsing.
+  if (!/^newamp:/i.test(path)) return false;
   try {
     const url = new URL(path);
     return url.protocol === 'newamp:' && url.hostname === 'server';
@@ -154,8 +157,10 @@ export function classifyAudioQuality(track: AudioQualityTrackInput): AudioQualit
   const densityBytesPerSecond = track.size && track.duration && track.size > 0 && track.duration > 0
     ? track.size / track.duration
     : null;
-  const isHiRes = isDsd || (isPcmLossless && sampleRate != null && sampleRate >= 88200);
-  const isLowBitrate = isLossy && bitrate != null && bitrate < 192000;
+  const bitsPerSample = finitePositive(track.bitsPerSample);
+  const isHiRes = isDsd
+    || (isPcmLossless && ((sampleRate != null && sampleRate >= 88200) || (bitsPerSample != null && bitsPerSample >= 24)));
+  const isLowBitrate = isLossy && bitrate != null && bitrate < lowBitrateLimit(ext, track.codec);
   const hasReplayGain = track.replayGainTrackDb != null || track.replayGainAlbumDb != null;
   const family: AudioQualityFamily = isDsd
     ? 'dsd'
@@ -188,6 +193,17 @@ export function classifyAudioQuality(track: AudioQualityTrackInput): AudioQualit
     densityBytesPerSecond,
     flags,
   };
+}
+
+// Below these a file is worth a second look. Modern codecs reach near
+// transparency at rates where MP3 does not, so a flat 192 kbps would flag every
+// 160 kbps Opus or AAC file. The limits sit just above the nominal rates (96 and
+// 128 kbps), which encoders report a little over.
+function lowBitrateLimit(ext: string, codec: string | null | undefined): number {
+  const name = (codec ?? '').toLowerCase();
+  if (ext === 'opus' || ext === 'ogg' || ext === 'oga' || /opus|vorbis/.test(name)) return 97_000;
+  if (ext === 'aac' || /aac|mp4a/.test(name)) return 129_000;
+  return 192_000;
 }
 
 function qualityLabel(input: {

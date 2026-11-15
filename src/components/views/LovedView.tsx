@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Track } from '@shared/types';
 import { usePlayerStore } from '../../store/usePlayerStore';
 import { PlaylistAppendPicker, TrackTable } from './LibraryView';
@@ -20,12 +20,36 @@ export function LovedView(): JSX.Element {
   const addTracksToQueue = usePlayerStore((s) => s.addTracksToQueue);
   const toggleStoreLove = usePlayerStore((s) => s.toggleLove);
   const current = usePlayerStore((s) => s.current);
+  const loveChange = usePlayerStore((s) => s.lastLoveChange);
+  const [reloadSeed, setReloadSeed] = useState(0);
+  const tracksRef = useRef(tracks);
+  tracksRef.current = tracks;
+  // A love from before this view opened is already in what it loads.
+  const handledLoveSeq = useRef(loveChange?.seq ?? 0);
+
+  // Loving or unloving from anywhere else (the transport, a shortcut, Quick
+  // Play) changes this list: an unloved track leaves it, a newly loved one is
+  // found by reading the first page again, which also puts it where the sort does.
+  useEffect(() => {
+    if (!loveChange || loveChange.seq === handledLoveSeq.current) return;
+    handledLoveSeq.current = loveChange.seq;
+    if (loveChange.loved) {
+      if (!tracksRef.current.some((track) => track.id === loveChange.id)) setReloadSeed((seed) => seed + 1);
+      return;
+    }
+    setTracks((currentTracks) => currentTracks.filter((track) => track.id !== loveChange.id));
+    setTotalLoved((count) => Math.max(0, count - 1));
+  }, [loveChange]);
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    // A reload for a love keeps the rows on screen until the new page lands.
+    if (!tracksRef.current.length) setLoading(true);
+    // A reload keeps the extent already paged in, so a love from elsewhere does
+    // not scroll a long list back to its first page.
+    const limit = Math.max(LOVED_PAGE_SIZE, tracksRef.current.length);
     Promise.all([
-      api.getTracks({ sort: 'loved', limit: LOVED_PAGE_SIZE, offset: 0 }),
+      api.getTracks({ sort: 'loved', limit, offset: 0 }),
       api.getTrackCount({ sort: 'loved' }),
     ])
       .then(([rows, total]) => {
@@ -36,7 +60,7 @@ export function LovedView(): JSX.Element {
         setHasMoreLoved(lovedRows.length < total);
       })
       .catch(() => {
-        if (cancelled) return;
+        if (cancelled || tracksRef.current.length) return;
         setTracks([]);
         setTotalLoved(0);
         setHasMoreLoved(false);
@@ -47,7 +71,7 @@ export function LovedView(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadSeed]);
 
   async function loadMoreLoved(): Promise<void> {
     if (loadingMore || !hasMoreLoved) return;
@@ -76,12 +100,9 @@ export function LovedView(): JSX.Element {
   }
 
   async function toggleLove(id: number): Promise<boolean> {
-    const loved = await toggleStoreLove(id);
-    if (!loved) {
-      setTracks((currentTracks) => currentTracks.filter((track) => track.id !== id));
-      setTotalLoved((count) => Math.max(0, count - 1));
-    }
-    return loved;
+    // The store announces the change, and the effect above takes the row and
+    // the count off the list.
+    return toggleStoreLove(id);
   }
 
   return (

@@ -9,6 +9,8 @@ import {
   type TrackDna,
 } from '../shared/audio-dna.js';
 import { whenPlaybackFed } from './playback-io.js';
+import { killChild } from './kill-child.js';
+import { watchReadFailures } from './read-failure.js';
 
 const ffmpegStatic = ffmpegStaticImport as unknown as string | null;
 
@@ -22,13 +24,7 @@ const FFMPEG_TIMEOUT_MS = 180_000;
 const liveDnaFfmpeg = new Set<ChildProcess>();
 
 export function killAllDnaFfmpeg(): void {
-  for (const child of liveDnaFfmpeg) {
-    try {
-      child.kill();
-    } catch {
-      /* already gone */
-    }
-  }
+  for (const child of [...liveDnaFfmpeg]) killChild(child);
 }
 
 export async function analyzeTrackDna(inputPath: string, opts?: { maxSeconds?: number }): Promise<TrackDna> {
@@ -74,6 +70,7 @@ function decodeMonoPcm(inputPath: string, maxSeconds: number): Promise<Buffer> {
       { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
     );
     liveDnaFfmpeg.add(child);
+    const readFailed = watchReadFailures(child, inputPath);
     const chunks: Buffer[] = [];
     let stderr = '';
     let settled = false;
@@ -86,11 +83,7 @@ function decodeMonoPcm(inputPath: string, maxSeconds: number): Promise<Buffer> {
       else resolve(result!);
     };
     const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        /* already gone */
-      }
+      killChild(child);
       settle(new Error(`ffmpeg dna decode timed out after ${FFMPEG_TIMEOUT_MS}ms for ${inputPath}`));
     }, FFMPEG_TIMEOUT_MS);
     child.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -101,6 +94,11 @@ function decodeMonoPcm(inputPath: string, maxSeconds: number): Promise<Buffer> {
     });
     child.on('error', (err) => settle(err));
     child.on('close', (code) => {
+      // A DNA of the part before a failed read would be stored as the track's.
+      if (readFailed()) {
+        settle(new Error(`a read of ${inputPath} failed partway; try again when the drive answers`));
+        return;
+      }
       if (code !== 0) {
         settle(new Error(`ffmpeg dna decode exited ${code ?? 'unknown'}${stderr ? `\n${stderr}` : ''}`));
         return;

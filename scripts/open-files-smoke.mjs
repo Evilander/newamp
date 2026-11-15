@@ -129,7 +129,7 @@ assert.match(mainSource, /open:consume-pending-files/, 'main process should expo
 assert.match(mainSource, /open:files/, 'main process should scan and resolve opened files');
 assert.match(mainSource, /normalizeOpenTargets/, 'main process should normalize opened files and dropped folders');
 assert.match(mainSource, /folderPaths/, 'main process should handle dropped folders');
-assert.match(mainSource, /getFolderTracks\(folderPath/, 'main process should resolve tracks from dropped folders');
+assert.match(mainSource, /getFolderTracks(?:Async)?\(folderPath/, 'main process should resolve tracks from dropped folders');
 assert.match(mainSource, /app:open-files/, 'main process should push second-instance files to the renderer');
 assert.match(mainSource, /NEWAMP_UI_OPEN_FILE_SMOKE/, 'main process should support packaged open-file UI proof');
 assert.match(mainSource, /newamp-ui-open-file-smoke/, 'main process should emit packaged open-file smoke results');

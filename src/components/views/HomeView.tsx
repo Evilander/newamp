@@ -178,7 +178,9 @@ export function HomeView(): JSX.Element {
         });
       }
     } finally {
-      setLoading(false);
+      // A refresh that was superseded must not end the loading state of the
+      // one still running.
+      if (generation === refreshGenerationRef.current) setLoading(false);
     }
 
     // Below the fold: health (full-library scan, now cached), insights, the
@@ -218,7 +220,8 @@ export function HomeView(): JSX.Element {
         }
       }
     };
-    if (typeof requestIdleCallback === 'function') requestIdleCallback(() => void runBelowFold());
+    // The timeout keeps a hidden or busy window from starving the lower shelves.
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(() => void runBelowFold(), { timeout: 2000 });
     else setTimeout(() => void runBelowFold(), 0);
   }
 
@@ -677,6 +680,8 @@ function HomeRail({
               style={{ color: 'var(--ink)' }}
               onClick={() => onPlay(index)}
               onKeyDown={(event) => {
+                // Enter on the artist link inside follows the link.
+                if (event.target !== event.currentTarget) return;
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault();
                   onPlay(index);
@@ -900,6 +905,9 @@ function HomeHero({
           <div className="home-hero-art">
             {heroArt ? (
               <img
+                // Keyed on the URL: a failed load hides the element, and the
+                // next track's art needs a fresh one to show on.
+                key={heroArt}
                 src={heroArt}
                 alt={current?.album ?? ''}
                 draggable={false}
@@ -960,6 +968,7 @@ function HomeHero({
               className="home-hero-pick cursor-pointer"
               onClick={() => onPlayPick(topRatedSeed)}
               onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return;
                 if (event.key === 'Enter' || event.key === ' ') {
                   event.preventDefault();
                   onPlayPick(topRatedSeed);
@@ -971,6 +980,7 @@ function HomeHero({
               <div className="home-hero-pick-art">
                 {pickArt ? (
                   <img
+                    key={pickArt}
                     src={pickArt}
                     alt={topRatedSeed.album ?? ''}
                     draggable={false}
@@ -1040,6 +1050,7 @@ function RatedHighlightRail({
                 className="home-rated-card cursor-pointer"
                 onClick={() => onPlay(idx)}
                 onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return;
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault();
                     onPlay(idx);

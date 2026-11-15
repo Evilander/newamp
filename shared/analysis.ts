@@ -158,7 +158,7 @@ export interface AnalysisProgress {
   /** What the queue is doing right now. */
   state: 'off' | 'starting' | 'running' | 'waiting' | 'done';
   /** Why it is not running, when it is waiting. */
-  waitingFor: 'playback' | 'scan' | 'busy' | 'battery' | null;
+  waitingFor: 'playback' | 'scan' | 'busy' | 'battery' | 'storage' | 'tool' | null;
   /** Tracks the analysis can read. */
   total: number;
   /** Tracks with nothing left to do. */
@@ -188,11 +188,35 @@ export class AnalysisUnavailableError extends Error {
   }
 }
 
+/** A read of the file failed partway (a network share that timed out), so the decode stopped short. Retried like a timeout. */
+export class AnalysisReadFailedError extends Error {
+  constructor(path: string) {
+    super(`a read of ${path} failed partway`);
+    this.name = 'AnalysisReadFailedError';
+  }
+}
+
 /** ffmpeg did not finish in time. A busy drive does this to good files, so it is retried before it is held against the track. */
 export class AnalysisTimedOutError extends Error {
   constructor(path: string) {
     super(`ffmpeg timed out analysing ${path}`);
     this.name = 'AnalysisTimedOutError';
+  }
+}
+
+/** ffmpeg could not be started (missing, blocked, or the machine is out of processes). Says nothing about the track, and the next one fails the same way. */
+export class AnalysisEnvironmentError extends Error {
+  constructor(cause: unknown) {
+    super(`could not start ffmpeg: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = 'AnalysisEnvironmentError';
+  }
+}
+
+/** ffmpeg was killed by a signal nobody here sent: a crash on the file, or the system running out of memory. */
+export class AnalysisCrashedError extends Error {
+  constructor(path: string, signal: string | null) {
+    super(`ffmpeg was killed${signal ? ` by ${signal}` : ''} analysing ${path}`);
+    this.name = 'AnalysisCrashedError';
   }
 }
 
@@ -231,6 +255,8 @@ const WAITING_TEXT: Record<NonNullable<AnalysisProgress['waitingFor']>, string> 
   scan: 'Paused while the library scans.',
   battery: 'Paused on battery power.',
   busy: 'Paused while the computer is busy.',
+  storage: 'Waiting for the drive or share to answer. Tracks it could not read are tried again later.',
+  tool: 'Paused: the audio decoder could not be started.',
 };
 
 /** The plain-language lines for the progress readout in Settings. */

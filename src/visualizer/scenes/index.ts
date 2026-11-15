@@ -8,8 +8,9 @@
 //    uv: 0..1 screen coords. p: centered, aspect-corrected (-1..1 short axis).
 //  - The shader body may ONLY declare functions/constants — the runtime
 //    provides the uniforms + helpers (see PRELUDE in scene-overlay.ts):
-//    hash11/hash21/hash22, vnoise, fbm, rot2, hsv2rgb, paletteRamp, bandAvg,
-//    bandClock (bandAvg's twin over the band integrals),
+//    hash11/hash21/hash22, vnoise, fbm, rot2, hsv2rgb, paletteRamp, paletteRamp2,
+//    bandAvg, bandClock (bandAvg's twin over the band integrals), bandPan(lo, hi)
+//    (the mean stereo position of a band range, -1 left .. +1 right),
 //    u_time/u_globalTime/u_dt/u_seed/u_fade, u_phase (this scene's integrated
 //    `speed`), u_energyTime/u_panTime/u_bandTime[24] (integrals of energy, pan
 //    and each band), u_contrast, u_energy, u_kick/u_bass/u_snare/
@@ -18,14 +19,25 @@
 //    most ~3 per second: re-roll a pattern on floor(u_kickCount), never on a
 //    fixed timer), u_centroid, u_flatness, u_crest,
 //    u_beatPhase, u_beatConf, u_novelty, u_pan, u_width, u_bands[24],
-//    u_accent/u_light/u_dark/u_bg, u_res.
+//    u_bandPan[24] (where each band sits in the stereo image),
+//    u_accent/u_accent2/u_light/u_dark/u_bg, u_res.
 //  - Output: vec4 straight (non-premultiplied) color; alpha is the scene's
 //    coverage over the feedback it is drawn into. Favor alpha < 0.85 overall
 //    so the field stays visible; alpha 0 leaves the feedback untouched. How
 //    much of the trail beneath that coverage removes is `occlusion` below.
-//  - Colour comes from the palette uniforms (paletteRamp, u_accent, u_light,
-//    u_dark). A scene that brings its own hues fights whatever palette the
-//    user picked; test:eviland-diversity fails it.
+//  - Colour comes from the palette uniforms (paletteRamp, paletteRamp2,
+//    u_accent, u_accent2, u_light, u_dark). A scene that brings its own hues
+//    fights whatever palette the user picked; test:eviland-diversity fails it.
+//    paletteRamp(t) is perceptual (an OKLCh table: equal steps in t are equal
+//    steps in lightness, and the middle of a hue change stays coloured), so a
+//    fixed t is no longer an sRGB quarter point of dark/accent/light.
+//    paletteRamp2 runs the same dark -> light line through u_accent2, a second
+//    accent in harmony with the first; u_accent2 is u_accent when the palette
+//    has none, so a scene using it never needs a fallback of its own.
+//  - Highlights must be tinted by the palette: use mix(u_light, vec3(1.0), 0.35)
+//    for the hottest point, not a bare vec3(1.0) or an added white. MAIN rolls
+//    the peak channel off past 0.85, so a pile-up of plain white goes grey-white
+//    and a tinted one keeps its hue to the top.
 //  - NEVER animate with `time * speed(audio)`: once a track has been playing
 //    a while, a small change in the audio jumps the animation by seconds.
 //    Declare `speed` below and animate with u_phase, or use the integrals
@@ -106,6 +118,14 @@ import { muscleFibres } from './muscle-fibres';
 import { spectralSlit } from './spectral-slit';
 import { bokehField } from './bokeh-field';
 import { dataRaster } from './data-raster';
+import { causticFloor } from './caustic-floor';
+import { thinFilm } from './thin-film';
+import { cymaticPlate } from './cymatic-plate';
+import { rippleTank } from './ripple-tank';
+import { trussChase } from './truss-chase';
+import { goboHeads } from './gobo-heads';
+import { prismDispersal } from './prism-dispersal';
+import { iceHalo } from './ice-halo';
 
 export const SCENES: SceneDef[] = [
   volumeGarden,
@@ -153,4 +173,12 @@ export const SCENES: SceneDef[] = [
   spectralSlit,
   bokehField,
   dataRaster,
+  causticFloor,
+  thinFilm,
+  cymaticPlate,
+  rippleTank,
+  trussChase,
+  goboHeads,
+  prismDispersal,
+  iceHalo,
 ];

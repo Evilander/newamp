@@ -106,6 +106,11 @@ class GaplessProcessor extends AudioWorkletProcessor {
       case 'dur':
         this.setDuration(msg.token, msg.durationSec);
         break;
+      case 'wait':
+        // Out of band, for the engine: running dry now is a file being read
+        // again after a failed read, not a hung decoder.
+        this.port.postMessage({ t: 'wait', gen: this.gen, on: !!msg.on });
+        break;
       case 'end':
         this.queue.push({ end: true });
         this.endQueued = true;
@@ -195,7 +200,9 @@ class GaplessProcessor extends AudioWorkletProcessor {
     const right = channels[1] || left;
     const frames = left.length;
     if (this.disposed) return false;
-    if (!this.playing) return true;
+    // After the end of the stream there is nothing to play or report: the
+    // outputs are already silent, and a flush starts the next stream.
+    if (!this.playing || this.drained) return true;
     if (!this.primed) {
       if (this.queued < PREROLL_FRAMES && !this.endQueued && !this.queue.some((item) => item.fail)) return true;
       this.primed = true;

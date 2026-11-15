@@ -19,6 +19,8 @@ import { syntheticFrame } from './eviland-visual-probe';
 
 const W = 240;
 const H = 160;
+// The longest row of identical dim pixels the Live output may show in a decay.
+const BANDING_RUN_LIMIT = 24;
 
 interface ProbeVisualizer {
   renderer: MilkdropFeedbackHost;
@@ -163,9 +165,36 @@ async function live() {
   if (!preparedPreset) throw new Error('Prepared Live preset never reached the renderer');
   if (api.sample() < 0.005) throw new Error('Prepared Live preset lost the feedback image');
 
+  // 6. A ten second decay: the dim, slowly changing end of a trail is where
+  // 8-bit output bands. Every screen frame is written dithered, so no row of
+  // the dim part may hold a long run of one identical colour (a flat floor
+  // written undithered fills whole rows with it).
+  config.composition = silent;
+  config.fluid = { base: 0 };
+  let longestRun = 0;
+  for (let second = 0; second < 10; second++) {
+    render(60);
+    const px = read(null, canvas.width, canvas.height);
+    for (let y = 0; y < canvas.height; y++) {
+      let run = 1;
+      for (let x = 1; x < canvas.width; x++) {
+        const at = (y * canvas.width + x) * 4;
+        const prev = at - 4;
+        const dim = Math.max(px[at]!, px[at + 1]!, px[at + 2]!);
+        const same = px[at] === px[prev] && px[at + 1] === px[prev + 1] && px[at + 2] === px[prev + 2];
+        run = same && dim >= 3 && dim <= 60 ? run + 1 : 1;
+        if (run > longestRun) longestRun = run;
+      }
+    }
+  }
+  if (longestRun > BANDING_RUN_LIMIT) {
+    throw new Error(`Live output shows banding: a run of ${longestRun} identical dim pixels in one row (limit ${BANDING_RUN_LIMIT})`);
+  }
+
   api.dispose();
   gl.getExtension('WEBGL_lose_context')?.loseContext();
   return {
+    longestDimRun: longestRun,
     fieldLit: lit(field),
     trailsLit: lit(trails),
     outputLit: lit(output),

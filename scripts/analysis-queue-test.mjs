@@ -8,6 +8,12 @@
 //  - battery, a busy machine, and the setting each hold or release it
 //  - only fields a track lacks are asked for: tags stay, analysis written by an
 //    older analyzer is redone, and a file that will not decode is not retried
+//  - a read that failed partway (a share that timed out) is retried later each
+//    time, never written down, and a rescan does not shorten the wait
+//  - a drive that fails several tracks in a row holds the queue
+//  - ffmpeg that cannot start, or dies on a signal, does not mark the library
+//  - playback getting short of audio keeps analysis away for a while after
+//  - a stop() followed by start() runs one loop
 // Run: node scripts/analysis-queue-test.mjs
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
@@ -23,6 +29,9 @@ await build({ entryPoints: [entry], bundle: true, format: 'esm', platform: 'node
 const {
   AnalysisQueue,
   AnalysisAbortedError,
+  AnalysisCrashedError,
+  AnalysisEnvironmentError,
+  AnalysisReadFailedError,
   AnalysisUnavailableError,
   analysisWork,
   anyWork,
@@ -40,7 +49,7 @@ async function until(check, what, ms = 3000) {
   assert.fail(`timed out waiting for ${what}`);
 }
 
-const FAST = { startDelayMs: 0, gapMs: 1, pollMs: 4, scanCooldownMs: 40, recheckMs: 60, flushEvery: 100, flushAfterMs: 10_000, countsMaxAgeMs: 0 };
+const FAST = { startDelayMs: 0, gapMs: 1, pollMs: 4, scanCooldownMs: 40, recheckMs: 60, flushEvery: 100, flushAfterMs: 10_000, countsMaxAgeMs: 0, retryBackoffMs: [30, 60, 120], hungerCooldownMs: 10 };
 
 // A library of tracks that owe everything, kept the way the real one keeps it.
 class FakeStore {
@@ -326,7 +335,7 @@ const idOf = (path) => Number(/(\d+)\.mp3$/.exec(path)[1]);
   assert.equal(saved1.bpm, undefined, 'a field that was not asked for is not written');
 }
 
-// 7. A file that will not decode is not retried; an unreachable one is.
+// 7. A file that will not decode is tried once more and then not again; an unreachable one is.
 {
   const store = new FakeStore([1, 2, 3]);
   const tried = [];
@@ -340,14 +349,183 @@ const idOf = (path) => Number(/(\d+)\.mp3$/.exec(path)[1]);
     },
   });
   r1.queue.start();
-  await until(() => tried.length >= 3, 'all three');
+  await until(() => store.saved.some((save) => save.id === 1), 'the broken file to be marked tried');
+  await wait(100);
   await r1.queue.stop();
+  assert.equal(tried.filter((id) => id === 1).length, 2, 'a failure with no explanation is tried once more, after a wait, before it counts against the file');
   assert.deepEqual(store.pendingAnalysisIds(), [2], 'the broken file is marked tried; the unreachable one is still owed');
   const r2 = rig(store);
   r2.queue.start();
   await until(() => r2.calls.length === 1, 'the unreachable file, on the next run');
   assert.equal(idOf(r2.calls[0].path), 2);
   await r2.queue.stop();
+}
+
+// 7b. A read that failed partway is never written down. It is tried again after a wait that
+// grows, whatever else happens to the list in between, and the progress line says why.
+{
+  const store = new FakeStore([1, 2]);
+  const tried = [];
+  let shareBack = false;
+  const r = rig(store, {
+    analyze: async (request) => {
+      const id = idOf(request.path);
+      tried.push(id);
+      if (id === 1 && !shareBack) throw new AnalysisReadFailedError(request.path);
+      if (id === 2) throw new AnalysisReadFailedError(request.path);
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => tried.filter((id) => id === 2).length >= 6, 'the second file, tried again and again');
+  assert.equal(store.saved.length, 0, 'nothing was saved for a file whose read failed, however often');
+  assert.ok(store.pendingAnalysisIds().includes(2), 'it is still owed');
+  assert.equal(r.queue.progress().tracksPerHour, null, 'tries that read nothing do not set the pace');
+  await until(() => r.queue.progress().waitingFor === 'storage', 'the progress line to say the drive is the problem');
+  assert.notEqual(r.queue.progress().state, 'done', 'a share that does not answer is not "done"');
+  shareBack = true;
+  await until(() => store.saved.some((save) => save.id === 1), 'the first file, once the share answers');
+  assert.equal(store.saved.find((save) => save.id === 1).bpm, 120, 'its real result is kept');
+  await r.queue.stop();
+  assert.ok(!store.saved.some((save) => save.id === 2), 'the file that never read was not marked');
+  assert.deepEqual(store.pendingAnalysisIds(), [2]);
+}
+{
+  // Rescans rebuild the list but do not shorten a track's wait.
+  const store = new FakeStore([1]);
+  let tries = 0;
+  const r = rig(store, {
+    timing: { retryBackoffMs: [300], scanCooldownMs: 5 },
+    analyze: async (request) => {
+      tries += 1;
+      if (tries === 1) throw new AnalysisReadFailedError(request.path);
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => tries === 1, 'the failed read');
+  for (let i = 0; i < 4; i++) {
+    r.queue.noteScan({ done: false });
+    r.queue.noteScan({ done: true });
+    await wait(40);
+  }
+  assert.equal(tries, 1, 'scans ending did not bring the track back before its wait was over');
+  await until(() => tries === 2, 'the track, once its wait is over');
+  await until(() => store.saved.length === 1, 'its result');
+  await r.queue.stop();
+}
+{
+  // Several tracks in a row failing means the drive is down: the queue holds instead of working through the library.
+  const store = new FakeStore([1, 2, 3, 4, 5, 6, 7, 8]);
+  const tried = [];
+  let driveBack = false;
+  const r = rig(store, {
+    timing: { retryBackoffMs: [200] },
+    analyze: async (request) => {
+      tried.push(idOf(request.path));
+      if (!driveBack) throw new AnalysisReadFailedError(request.path);
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => tried.length >= 3, 'the first failures');
+  await wait(100);
+  assert.equal(tried.length, 3, 'the queue stopped after three failed reads in a row');
+  assert.equal(r.queue.progress().waitingFor, 'storage');
+  driveBack = true;
+  await until(() => store.pendingAnalysisIds().length === 0, 'everything, once the hold is over and the drive answers', 5000);
+  assert.equal(store.saved.length, 8);
+  await r.queue.stop();
+}
+
+{
+  // A track with a wait behind it that then turns out unreachable must not leave the drained queue polling for ever:
+  // the recheck, which rebuilds the list, still comes.
+  const store = new FakeStore([1]);
+  let pendingReads = 0;
+  const pending = store.pendingAnalysisIds.bind(store);
+  store.pendingAnalysisIds = () => {
+    pendingReads += 1;
+    return pending();
+  };
+  let tries = 0;
+  const r = rig(store, {
+    analyze: async (request) => {
+      tries += 1;
+      throw tries === 1 ? new AnalysisReadFailedError(request.path) : new AnalysisUnavailableError(request.path, new Error('no answer'));
+    },
+  });
+  r.queue.start();
+  await until(() => tries >= 2, 'the read that failed, and then the file turning out unreachable');
+  await wait(20);
+  const reads = pendingReads;
+  await until(() => pendingReads > reads, 'the list to be looked at again after the recheck wait');
+  assert.equal(store.saved.length, 0, 'nothing was written for either failure');
+  await r.queue.stop();
+}
+{
+  // After a hold the drive gets one probe: if that track fails too, the queue holds again at once.
+  const store = new FakeStore([1, 2, 3, 4, 5, 6]);
+  const tried = [];
+  const r = rig(store, {
+    timing: { retryBackoffMs: [60, 400] },
+    analyze: async (request) => {
+      tried.push(idOf(request.path));
+      throw new AnalysisReadFailedError(request.path);
+    },
+  });
+  r.queue.start();
+  await until(() => tried.length >= 4, 'the probe after the first hold');
+  await wait(30);
+  assert.equal(tried.length, 4, 'one probe, not three, before the queue holds again');
+  await r.queue.stop();
+}
+
+// 7c. ffmpeg that cannot start says nothing about the tracks: nothing is written, and the queue waits.
+{
+  const store = new FakeStore([1, 2, 3, 4]);
+  const tried = [];
+  let fixed = false;
+  const r = rig(store, {
+    timing: { retryBackoffMs: [150] },
+    analyze: async (request) => {
+      tried.push(idOf(request.path));
+      if (!fixed) throw new AnalysisEnvironmentError(new Error('spawn ffmpeg ENOENT'));
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => tried.length >= 1, 'the first attempt');
+  await wait(80);
+  assert.equal(tried.length, 1, 'one failed start holds the queue');
+  assert.equal(r.queue.progress().waitingFor, 'tool');
+  assert.equal(store.saved.length, 0, 'no track was marked');
+  fixed = true;
+  await until(() => store.pendingAnalysisIds().length === 0, 'the library, once ffmpeg starts');
+  await r.queue.stop();
+}
+
+// 7d. ffmpeg killed by something else is not the queue's abort: it is not put at the front for ever.
+{
+  const store = new FakeStore([1, 2, 3, 4]);
+  const tried = [];
+  const r = rig(store, {
+    analyze: async (request) => {
+      const id = idOf(request.path);
+      tried.push(id);
+      if (id === 1) throw new AnalysisCrashedError(request.path, 'SIGSEGV');
+      // The decode ended with an abort that the queue never asked for.
+      if (id === 3) throw new AnalysisAbortedError();
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => store.saved.some((save) => save.id === 1) && store.saved.some((save) => save.id === 3), 'both files to be given up on');
+  await r.queue.stop();
+  assert.equal(tried.filter((id) => id === 1).length, 2, 'a crash is tried once more');
+  assert.equal(tried.filter((id) => id === 3).length, 2, 'an abort the queue did not ask for counts the same');
+  assert.ok(tried.indexOf(2) < tried.lastIndexOf(1), 'the tracks behind it were not kept waiting');
+  assert.deepEqual(store.pendingAnalysisIds(), [], 'the others were analysed');
 }
 
 // 8. Progress reads the store, and the estimate comes from the pace.
@@ -405,6 +583,67 @@ const idOf = (path) => Number(/(\d+)\.mp3$/.exec(path)[1]);
   await wait(40);
   await r.queue.stop();
   assert.equal(store.saved.length, 0, 'a result that finished after the library was swapped is dropped');
+}
+
+// 10. Playback fed again is not a signal to read a whole file at once: the queue stays away a while.
+{
+  const store = new FakeStore([1, 2]);
+  const started = [];
+  let abortedAt = 0;
+  const r = rig(store, {
+    timing: { hungerCooldownMs: 120 },
+    analyze: async (request) => {
+      started.push({ id: idOf(request.path), at: Date.now() });
+      if (started.length === 1) {
+        await new Promise((resolve, reject) => request.signal.addEventListener('abort', () => {
+          abortedAt = Date.now();
+          reject(new AnalysisAbortedError());
+        }));
+      }
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => started.length === 1, 'a decode to be running');
+  r.state.hungry = true;
+  r.setHungry(true);
+  await until(() => abortedAt > 0, 'the decode to be stopped');
+  r.state.hungry = false;
+  const fedAt = Date.now();
+  r.setHungry(false);
+  await wait(60);
+  assert.equal(started.length, 1, 'nothing starts straight after playback is fed');
+  assert.equal(r.queue.progress().waitingFor, 'playback');
+  await until(() => started.length >= 2, 'work to resume after the cooldown');
+  assert.ok(started[1].at - fedAt >= 100, 'it waited out the cooldown');
+  await until(() => store.pendingAnalysisIds().length === 0, 'everything');
+  await r.queue.stop();
+}
+
+// 11. stop() then start() again does not leave two loops working on the same tracks.
+{
+  const store = new FakeStore([1, 2, 3, 4, 5, 6]);
+  let active = 0;
+  let most = 0;
+  let calls = 0;
+  const r = rig(store, {
+    analyze: async (request) => {
+      calls += 1;
+      active += 1;
+      most = Math.max(most, active);
+      await wait(15);
+      active -= 1;
+      return okResult(request);
+    },
+  });
+  r.queue.start();
+  await until(() => calls >= 1, 'the first decode');
+  const stopping = r.queue.stop();
+  r.queue.start();
+  await stopping;
+  await until(() => store.pendingAnalysisIds().length === 0, 'everything');
+  await r.queue.stop();
+  assert.equal(most, 1, 'one decode at a time across the restart');
 }
 
 console.log('[analysis-queue] PASS');

@@ -225,6 +225,8 @@ function lift(rgb: RGB, level: number, out: Float32Array, offset: number): void 
   for (let i = 0; i < 3; i++) out[offset + i] = rgb[i]! / peak * level;
 }
 
+const lightSpecies: RGB = [0, 0, 0];
+
 // Retained until first use, then owned by the simulation.
 export function preparePhysarum(gl: WebGL2RenderingContext) {
   if (!gl.getExtension('EXT_color_buffer_float')) return null;
@@ -357,7 +359,11 @@ export function createPhysarum(gl: WebGL2RenderingContext, seed = 1, quality: Qu
       gl.viewport(0, 0, target.width, target.height);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, trail.texture);
       gl.uniform1i(d.trail ?? null, 0);
-      lift(palette.dark, 0.85, colors, 0); lift(palette.accent, 0.95, colors, 3); lift(palette.light, 1, colors, 6);
+      // The third species is the light role; with a second accent it is that
+      // accent washed halfway to the light, so the veins carry both hues.
+      const second = palette.accent2;
+      if (second) for (let i = 0; i < 3; i++) lightSpecies[i] = (palette.light[i]! + second[i]!) * 0.5;
+      lift(palette.dark, 0.85, colors, 0); lift(palette.accent, 0.95, colors, 3); lift(second ? lightSpecies : palette.light, 1, colors, 6);
       gl.uniform3fv(d.colors ?? null, colors);
       gl.uniform1f(d.low ?? null, 0.4 - bass * 0.15);
       gl.uniform1f(d.gain ?? null, (0.6 + energy * 0.4) * (1 + flash * 0.3));

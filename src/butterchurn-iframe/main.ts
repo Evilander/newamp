@@ -12,6 +12,7 @@ import { retuneButterchurnBands } from './band-tuning';
 import { applyConfig, createActivityTracker, fitCanvasSize, paintsFromMessage, type HostConfig } from './host-policy';
 import { createEvilandLivePipeline, type LiveCompositionFrame } from '../visualizer/eviland-live-pipeline';
 import { createLivePresetLoader } from '../visualizer/eviland-live-presets';
+import { watchContextLoss } from '../visualizer/eviland-gl';
 import { hashSeed } from '../visualizer/eviland-rng';
 import { createGovernor } from '../visualizer/eviland-governor';
 import { attachFlashGuard, type AttachedFlashGuard } from '../visualizer/flash-guard-host';
@@ -76,6 +77,33 @@ let liveMode = false;
 // Changes after init arrive as 'config' messages.
 const hostConfig: HostConfig = { dpr: 1, maxPixels: Infinity, quality: 'high', sampleRate: 44100 };
 let livePipeline: ReturnType<typeof createEvilandLivePipeline> = null;
+// True from a WebGL context loss until MilkDrop has been rebuilt on the
+// restored context. Butterchurn's renderer and the Live pipeline both keep
+// handles that died with the context, so neither can be revived, only built
+// again.
+let contextGone = false;
+let rebuildAfterLoss: ((attempt: number) => void) | null = null;
+let rebuildTimer: number | null = null;
+// A context that was just restored can still be busy after a GPU reset, so the
+// first rebuild may fail where one a moment later works (eviland-gl.ts keeps
+// the same budget for the objects it holds).
+const REBUILD_TRIES = 3;
+const REBUILD_RETRY_MS = 250;
+function handleContextLost(): void {
+  if (contextGone || disposed) return;
+  contextGone = true;
+  post({ type: 'context-lost' });
+}
+function handleContextRestored(): void {
+  if (!contextGone || disposed) return;
+  if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
+  rebuildTimer = null;
+  rebuildAfterLoss?.(0);
+}
+// The Live pipeline reports a loss through these. The canvas is also watched
+// directly (see start()) because plain MilkDrop has no pipeline to report it;
+// both routes land in the same two handlers, which ignore a repeat.
+const liveHooks = { onContextLost: handleContextLost, onContextRestored: handleContextRestored };
 // Compiles the next preset's shaders without stalling the page, for plain
 // MilkDrop rotation and Eviland Live alike. Null when Butterchurn's renderer
 // is not shaped the way it expects, and presets then load synchronously.
@@ -96,6 +124,7 @@ let presetOrder: number[] = [];
 let lastAudioPostAt = 0;
 let presetTimer: number | null = null;
 let cancelFrame: () => void = () => {};
+let stopLossWatch: () => void = () => {};
 // One paint at the governed cadence, if one is due. Driven by the paced
 // animation-frame loop and by the audio message handler (see
 // paintsFromMessage). Returns whether it painted.
@@ -195,8 +224,18 @@ async function start(): Promise<void> {
       (window as unknown as { webkitOfflineAudioContext?: typeof OfflineAudioContext }).webkitOfflineAudioContext;
     // The rate may have changed while the catalog loaded, before there was a
     // renderer to retune.
-    const rate = clampRate(hostConfig.sampleRate);
-    const audioCtx = new OfflineCtx(1, rate, rate);
+    const makeVisualizer = (): ButterchurnVisualizer => {
+      const rate = clampRate(hostConfig.sampleRate);
+      return butterchurn.createVisualizer(new OfflineCtx(1, rate, rate), canvas, {
+        width: canvas.width,
+        height: canvas.height,
+        // Lowered from 32x24: fewer warp-mesh vertices means less per-frame pixel-
+        // equation work AND a smaller per-load warpUV buffer, both of which feed
+        // the inter-preset hitch. Visually near-identical at typical window sizes.
+        meshWidth: 24,
+        meshHeight: 18,
+      });
+    };
 
     sizeCanvas();
     if (canvas.width < 8 || canvas.height < 8) {
@@ -204,15 +243,7 @@ async function start(): Promise<void> {
       canvas.height = 360;
     }
 
-    visualizer = butterchurn.createVisualizer(audioCtx, canvas, {
-      width: canvas.width,
-      height: canvas.height,
-      // Lowered from 32x24: fewer warp-mesh vertices means less per-frame pixel-
-      // equation work AND a smaller per-load warpUV buffer, both of which feed
-      // the inter-preset hitch. Visually near-identical at typical window sizes.
-      meshWidth: 24,
-      meshHeight: 18,
-    });
+    visualizer = makeVisualizer();
     // Same context Butterchurn just created. A MilkDrop that can't be
     // guarded doesn't run: the parent's guarded 2D fallback takes over, and
     // Butterchurn's context is released rather than left alive in a frame
@@ -269,7 +300,7 @@ async function start(): Promise<void> {
     };
     livePresetLoader = createLivePresetLoader(visualizer, () => loadRandomPreset(LIVE_BLEND_SECONDS));
     if (liveMode) {
-      livePipeline = createEvilandLivePipeline(visualizer, hostConfig.quality);
+      livePipeline = createEvilandLivePipeline(visualizer, hostConfig.quality, liveHooks);
       if (!livePipeline) {
         // Butterchurn's private renderer isn't shaped the way the adapter
         // expects. Plain MilkDrop with its own rotation beats a dead frame.
@@ -306,7 +337,7 @@ async function start(): Promise<void> {
       rebuildLivePipeline = () => {
         if (!visualizer) return;
         livePipeline?.dispose();
-        livePipeline = createEvilandLivePipeline(visualizer, hostConfig.quality);
+        livePipeline = createEvilandLivePipeline(visualizer, hostConfig.quality, liveHooks);
         if (livePipeline) {
           if (latestComposition) livePipeline.update(latestComposition);
         } else {
@@ -323,6 +354,55 @@ async function start(): Promise<void> {
     } else {
       loadRandomPreset(0);
     }
+
+    // Rebuilds everything that lived on the lost context: Butterchurn's
+    // renderer (a new visualizer on the same canvas), its shader loader and,
+    // in Live, the pipeline, then puts a preset back on screen. The flash
+    // guard and the canvas' size need nothing: the guard rebuilds itself and
+    // the canvas keeps its size across a loss.
+    rebuildAfterLoss = (attempt: number): void => {
+      if (disposed) return;
+      try {
+        livePipeline?.dispose();
+        livePipeline = null;
+        livePresetLoader?.dispose();
+        livePresetLoader = null;
+        visualizer = makeVisualizer();
+        livePresetLoader = createLivePresetLoader(visualizer, () => loadRandomPreset(LIVE_BLEND_SECONDS));
+        if (liveMode) {
+          livePipeline = createEvilandLivePipeline(visualizer, hostConfig.quality, liveHooks);
+          if (!livePipeline) {
+            console.warn('[butterchurn-iframe] Eviland feedback integration lost with the WebGL context; running plain MilkDrop');
+            liveMode = false;
+          }
+        }
+        // The Live preset is keyed on the look; forget the key so the same
+        // look loads again onto the new renderer.
+        lastCompositionKey = '';
+        if (liveMode && livePipeline && latestComposition) {
+          livePipeline.update(latestComposition);
+          loadLivePreset?.();
+        } else {
+          loadRandomPreset(0);
+        }
+      } catch (err) {
+        // A half-built renderer must not paint. The pipeline's own lost flag
+        // is gone with it, so this holds the frame until a later try works.
+        visualizer = null;
+        if (attempt + 1 < REBUILD_TRIES) {
+          rebuildTimer = window.setTimeout(() => {
+            rebuildTimer = null;
+            rebuildAfterLoss?.(attempt + 1);
+          }, REBUILD_RETRY_MS);
+        } else {
+          post({ type: 'failed', error: err instanceof Error ? err.message : String(err) });
+        }
+        return;
+      }
+      contextGone = false;
+      post({ type: 'context-restored' });
+    };
+    stopLossWatch = watchContextLoss(canvas, { onLost: handleContextLost, onRestored: handleContextRestored });
 
     // Plain MilkDrop rotates on a timer. In Live the Director owns changes.
     const scheduleRotation = (): void => {
@@ -373,6 +453,12 @@ async function start(): Promise<void> {
       const now = performance.now();
       if (!cadence.due(now)) return false;
       cadence.commit(now);
+      // The renderer's handles are gone with the context: there is nothing to
+      // draw until rebuildAfterLoss has put a new one in place.
+      if (contextGone || !visualizer) {
+        bookFrame();
+        return false;
+      }
       const dtMs = lastPaintAt ? now - lastPaintAt : 1000 / 45;
       lastPaintAt = now;
       sizeCanvas();
@@ -460,6 +546,9 @@ window.addEventListener('message', (event: MessageEvent) => {
   } else if (message.type === 'dispose') {
     disposed = true;
     paintTick = null;
+    stopLossWatch();
+    if (rebuildTimer != null) window.clearTimeout(rebuildTimer);
+    rebuildAfterLoss = null;
     livePresetLoader?.dispose();
     livePresetLoader = null;
     livePipeline?.dispose();

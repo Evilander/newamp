@@ -152,7 +152,8 @@ export function ScrubBar({
           scheduleResync(KEYBOARD_SCRUB_MS + 20);
         }
       }}
-      onInput={(e) => commit(e.currentTarget.value)}
+      // React runs onChange on every native input event of a range input, so
+      // wiring onInput as well would seek twice per movement.
       onChange={(e) => commit(e.currentTarget.value)}
       onBlur={(e) => {
         draggingRef.current = false;

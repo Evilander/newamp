@@ -6,7 +6,7 @@ import { BrandLogo } from '../BrandLogo';
 import { DeckSkinPicker } from './DeckSkinPicker';
 import { ScrubBar } from '../ScrubBar';
 import { DeckWindowButtons } from './DeckWindowButtons';
-import { combinePlaybackMode, isShuffleMode, repeatModeOf } from '@shared/types';
+import { combinePlaybackMode, isShuffleMode, repeatModeOf, type RepeatMode } from '@shared/types';
 
 type WinampVariant = 'classic' | 'industrial';
 
@@ -17,6 +17,11 @@ function modeStatusLabel(mode: DeckProps['mode']): string {
   if (repeat === 'all') parts.push('repeat all');
   else if (repeat === 'one') parts.push('repeat one');
   return parts.length ? parts.join(' + ') : 'linear';
+}
+
+// Same order as the transport's repeat button: off, all, one.
+function nextRepeat(repeat: RepeatMode): RepeatMode {
+  return repeat === 'off' ? 'all' : repeat === 'all' ? 'one' : 'off';
 }
 
 export function WinampClassicDeck(props: DeckProps): JSX.Element {
@@ -109,9 +114,10 @@ function WinampDeck({
           </button>
           <button
             className={`deck-wa-toggle ${repeatModeOf(mode) !== 'off' ? 'is-active' : ''}`}
-            onClick={() => onSetMode(combinePlaybackMode(isShuffleMode(mode), repeatModeOf(mode) === 'all' ? 'off' : 'all'))}
+            onClick={() => onSetMode(combinePlaybackMode(isShuffleMode(mode), nextRepeat(repeatModeOf(mode))))}
+            title={`Repeat: ${repeatModeOf(mode)}`}
           >
-            REP
+            {repeatModeOf(mode) === 'one' ? 'REP 1' : 'REP'}
           </button>
         </div>
 

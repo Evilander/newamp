@@ -19,10 +19,23 @@ function readVar(name: string, fallback: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
-/** Append a hex alpha byte when the color is a plain 6-digit hex; otherwise
- *  return the color untouched so canvas never sees an invalid fillStyle. */
-function hexAlpha(color: string, alpha: string): string {
-  return /^#[0-9a-fA-F]{6}$/.test(color) ? `${color}${alpha}` : color;
+/** The color at the given opacity. A skin can set any CSS color (short hex,
+ *  rgb(), hsl(), oklch()), so the browser resolves it to RGB by painting one
+ *  pixel; a color it cannot read comes back unchanged. */
+function withAlpha(color: string, alpha: number): string {
+  try {
+    const probe = document.createElement('canvas');
+    probe.width = 1;
+    probe.height = 1;
+    const ctx = probe.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return color;
+    ctx.fillStyle = color;
+    ctx.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+    return a ? `rgba(${r}, ${g}, ${b}, ${alpha})` : color;
+  } catch {
+    return color;
+  }
 }
 
 function formatHours(seconds: number): string {
@@ -65,8 +78,8 @@ function composeShareCard(stats: WrappedStats): string {
 
   // Accent glow band
   const glow = ctx.createRadialGradient(W * 0.5, 180, 40, W * 0.5, 180, 620);
-  glow.addColorStop(0, hexAlpha(accent, '33'));
-  glow.addColorStop(1, hexAlpha(bg, '00'));
+  glow.addColorStop(0, withAlpha(accent, 0.2));
+  glow.addColorStop(1, withAlpha(bg, 0));
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, W, 520);
 
@@ -127,7 +140,7 @@ function composeShareCard(stats: WrappedStats): string {
   ];
   chips.forEach(([value, label], i) => {
     const x = 72 + i * 320;
-    ctx.fillStyle = hexAlpha(accent, '22');
+    ctx.fillStyle = withAlpha(accent, 0.13);
     ctx.fillRect(x, y, 288, 150);
     ctx.fillStyle = accent;
     ctx.font = '800 56px Inter, system-ui, sans-serif';
@@ -153,11 +166,17 @@ export function WrappedView(): JSX.Element {
   const [range, setRange] = useState<WrappedRange>('year');
   const [stats, setStats] = useState<WrappedStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
   const reqRef = useRef(0);
 
   useEffect(() => {
     const seq = ++reqRef.current;
     setLoading(true);
+    setLoadFailed(false);
+    // The previous range's numbers must not stay up, or sit under buttons that
+    // act on them, while the new range loads.
+    setStats(null);
     api
       .getWrappedStats({ range })
       .then((result) => {
@@ -165,40 +184,51 @@ export function WrappedView(): JSX.Element {
       })
       .catch((err) => {
         console.error('[newamp] wrapped stats failed', err);
-        if (seq === reqRef.current) setStats(null);
+        if (seq === reqRef.current) {
+          setStats(null);
+          setLoadFailed(true);
+        }
       })
       .finally(() => {
         if (seq === reqRef.current) setLoading(false);
       });
-  }, [range]);
+  }, [range, retryKey]);
 
   const clockMax = useMemo(() => Math.max(1, ...(stats?.listeningClock ?? [1])), [stats]);
   const genreMax = useMemo(() => Math.max(1, ...(stats?.genres ?? []).map((g) => g.plays)), [stats]);
 
   const saveCard = async (): Promise<void> => {
     if (!stats) return;
-    const dataUrl = composeShareCard(stats);
-    if (!dataUrl) return;
-    const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
-    const saved = await api.saveCaptureBytes({
-      base64,
-      defaultName: `NewAmp Wrapped - ${stats.label}`,
-      filterName: 'PNG image',
-      ext: 'png',
-    });
-    if (saved) pushToast({ tone: 'ok', title: 'Share card saved', detail: 'Skin-true PNG, ready to post.' });
+    try {
+      const dataUrl = composeShareCard(stats);
+      if (!dataUrl) return;
+      const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      const saved = await api.saveCaptureBytes({
+        base64,
+        defaultName: `NewAmp Wrapped - ${stats.label}`,
+        filterName: 'PNG image',
+        ext: 'png',
+      });
+      if (saved) pushToast({ tone: 'ok', title: 'Share card saved', detail: 'Skin-true PNG, ready to post.' });
+    } catch (err) {
+      pushToast({ tone: 'error', title: 'Could not save the share card', detail: err instanceof Error ? err.message : undefined });
+    }
   };
 
   const copyCard = async (): Promise<void> => {
     if (!stats) return;
-    const dataUrl = composeShareCard(stats);
-    if (!dataUrl) return;
-    const ok = await api.copyPngToClipboard(dataUrl);
-    if (ok) pushToast({ tone: 'ok', title: 'Share card copied to clipboard' });
-    else pushToast({ tone: 'warn', title: 'Copy unavailable' });
+    try {
+      const dataUrl = composeShareCard(stats);
+      if (!dataUrl) return;
+      const ok = await api.copyPngToClipboard(dataUrl);
+      if (ok) pushToast({ tone: 'ok', title: 'Share card copied to clipboard' });
+      else pushToast({ tone: 'warn', title: 'Copy unavailable' });
+    } catch (err) {
+      pushToast({ tone: 'error', title: 'Could not copy the share card', detail: err instanceof Error ? err.message : undefined });
+    }
   };
 
-  const hasData = !!stats && stats.totals.plays > 0;
+  const hasData = !loading && !!stats && stats.totals.plays > 0;
 
   return (
     <div className="h-full overflow-y-auto p-6">
@@ -238,7 +268,16 @@ export function WrappedView(): JSX.Element {
 
         {loading && <ViewSkeleton variant="cards" count={8} />}
 
-        {!loading && !hasData && (
+        {!loading && loadFailed && (
+          <div className="flex flex-col items-center gap-3 rounded-lg p-8 text-center" style={{ background: 'var(--panel)', color: 'var(--muted)' }}>
+            <span>Could not load your listening stats.</span>
+            <button className="pxbtn" onClick={() => setRetryKey((key) => key + 1)}>
+              Retry
+            </button>
+          </div>
+        )}
+
+        {!loading && !loadFailed && !hasData && (
           <div className="rounded-lg p-8 text-center" style={{ background: 'var(--panel)', color: 'var(--muted)' }}>
             No plays in this window yet. Listen to some music and your Wrapped fills in.
           </div>

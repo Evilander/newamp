@@ -3,7 +3,7 @@
 // path + track stats.
 // Everything pulls live state from the audio engine.
 
-import { Fragment, memo, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { Fragment, memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { usePlayerStore, engine } from '../../store/usePlayerStore';
 import { fetchLyrics, parseLrc, type LrcLine } from '../../api/lrclib';
 import { fetchArtistFacts, type ArtistFact } from '../../api/artistFacts';
@@ -48,6 +48,7 @@ import { bandPeak } from './spectrumBands';
 import { openTrackContextMenu } from '../../lib/trackMenu';
 import { waveformKey } from '../../hooks/useWaveform';
 import { ScrubBar } from '../ScrubBar';
+import { useVirtualRows } from '../../hooks/useVirtualRows';
 
 type LyricPayload = Partial<Pick<LocalLyricsResult, 'plainLyrics' | 'syncedLyrics'>> & {
   instrumental?: boolean;
@@ -56,6 +57,11 @@ type LyricStatus = 'idle' | 'loading' | 'none' | 'ok';
 type LyricSource = 'sidecar' | 'custom' | 'lrclib' | null;
 type LyricsDraftMode = 'plain' | 'synced';
 const LYRICS_TEXT_SCALE_KEY = 'newamp:lyrics:textScale';
+// Queue rows have a fixed height so the list can draw only the rows near the
+// viewport: a queue built from a whole folder holds tens of thousands.
+const QUEUE_ROW_HEIGHT = 32;
+// The sticky "Queue · N tracks" bar sits above the rows inside the scroller.
+const QUEUE_HEADER_HEIGHT = 32;
 
 function clampLyricsTextScale(value: number): number {
   return Math.max(0.75, Math.min(2.4, Math.round(value * 20) / 20));
@@ -83,28 +89,82 @@ export function NowPlayingView(): JSX.Element {
   const queueListRef = useRef<HTMLDivElement>(null);
   const [draggedQueueIndex, setDraggedQueueIndex] = useState<number | null>(null);
   const [dropQueueIndex, setDropQueueIndex] = useState<number | null>(null);
-  const endQueueDrag = (): void => {
+  // The row callbacks are shared by every row and read the latest queue and
+  // drag source through refs, so a queue or index change re-renders only the
+  // rows whose own props changed.
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+  const draggedQueueIndexRef = useRef(draggedQueueIndex);
+  draggedQueueIndexRef.current = draggedQueueIndex;
+  const queueWindow = useVirtualRows({
+    rowCount: queue.length,
+    rowHeight: QUEUE_ROW_HEIGHT,
+    overscan: 8,
+    scrollRef: queueListRef,
+    enabled: current !== null,
+  });
+  const endQueueDrag = useCallback((): void => {
     setDraggedQueueIndex(null);
     setDropQueueIndex(null);
-  };
+  }, []);
   // Rows are keyed by slot, so after a keyboard edit the focused element is a
-  // different track. Put focus back on the row the listener was working with.
-  const focusQueueRow = (index: number): void => {
-    window.requestAnimationFrame(() => {
-      queueListRef.current?.querySelector<HTMLElement>(`[data-newamp-queue-row="${index}"]`)?.focus();
-    });
-  };
-  const moveQueueRow = (from: number, to: number, keepFocus: boolean): void => {
-    const target = Math.max(0, Math.min(queue.length - 1, to));
+  // different track. Put focus back on the row the listener was working with,
+  // scrolling it into the drawn window first when it has been windowed out.
+  const focusQueueRow = useCallback((index: number): void => {
+    const list = queueListRef.current;
+    if (list) {
+      const top = QUEUE_HEADER_HEIGHT + index * QUEUE_ROW_HEIGHT;
+      const bottom = top + QUEUE_ROW_HEIGHT;
+      if (top < list.scrollTop + QUEUE_HEADER_HEIGHT) list.scrollTop = top - QUEUE_HEADER_HEIGHT;
+      else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+    }
+    // The window redraws on the scroll's next frame, so the row may take a
+    // couple of frames to exist.
+    let attempts = 0;
+    const tryFocus = (): void => {
+      const row = queueListRef.current?.querySelector<HTMLElement>(`[data-newamp-queue-row="${index}"]`);
+      if (row) row.focus();
+      else if (attempts++ < 4) window.requestAnimationFrame(tryFocus);
+    };
+    window.requestAnimationFrame(tryFocus);
+  }, []);
+  const moveQueueRow = useCallback((from: number, to: number, keepFocus: boolean): void => {
+    const target = Math.max(0, Math.min(queueRef.current.length - 1, to));
     if (target === from) return;
     moveQueuedTrack(from, target);
     if (keepFocus) focusQueueRow(target);
-  };
-  const removeQueueRow = (index: number): void => {
-    const remaining = queue.length - 1;
+  }, [moveQueuedTrack, focusQueueRow]);
+  const removeQueueRow = useCallback((index: number): void => {
+    const remaining = queueRef.current.length - 1;
     void removeQueuedTrack(index);
     if (remaining > 0) focusQueueRow(Math.min(index, remaining - 1));
-  };
+  }, [removeQueuedTrack, focusQueueRow]);
+  const playQueueRow = useCallback((index: number): void => {
+    void playQueue(queueRef.current, index);
+  }, [playQueue]);
+  const moveQueueRowByKey = useCallback((from: number, to: number): void => moveQueueRow(from, to, true), [moveQueueRow]);
+  const startQueueDrag = useCallback((index: number): void => setDraggedQueueIndex(index), []);
+  const dragOverQueueRow = useCallback((index: number): void => setDropQueueIndex(index), []);
+  const dropOnQueueRow = useCallback((index: number, transferIndex: number | null): void => {
+    const from = draggedQueueIndexRef.current ?? transferIndex;
+    if (from !== null) moveQueueRow(from, index, false);
+    endQueueDrag();
+  }, [moveQueueRow, endQueueDrag]);
+  // Open on the playing track rather than the top of a long queue.
+  const queueScrolledToActiveRef = useRef(false);
+  useEffect(() => {
+    if (current === null) {
+      queueScrolledToActiveRef.current = false;
+      return;
+    }
+    const list = queueListRef.current;
+    if (queueScrolledToActiveRef.current || !list) return;
+    queueScrolledToActiveRef.current = true;
+    const index = usePlayerStore.getState().index;
+    if (index < 0) return;
+    const rowTop = QUEUE_HEADER_HEIGHT + index * QUEUE_ROW_HEIGHT;
+    list.scrollTop = Math.max(0, rowTop - (list.clientHeight - QUEUE_ROW_HEIGHT) / 2);
+  }, [current === null]);
   const seek = usePlayerStore((s) => s.seek);
   const playbackRate = usePlayerStore((s) => s.playbackRate);
   const setPlaybackRate = usePlayerStore((s) => s.setPlaybackRate);
@@ -167,6 +227,19 @@ export function NowPlayingView(): JSX.Element {
   useEffect(() => {
     window.localStorage.setItem('newamp:np:spectrumStyle', spectrumStyle);
   }, [spectrumStyle]);
+
+  // A drag moves the split on every pointer event; the saved value follows
+  // once it settles. Storage can be blocked or full, and the split still works.
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem('newamp:np:spectrumFrac', String(spectrumFrac));
+      } catch {
+        /* the split just starts at its default next time */
+      }
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [spectrumFrac]);
 
   useEffect(() => {
     window.localStorage.setItem(LYRICS_TEXT_SCALE_KEY, String(lyricsTextScale));
@@ -360,7 +433,12 @@ export function NowPlayingView(): JSX.Element {
 
   async function clearCustomLyrics(): Promise<void> {
     if (!current) return;
-    await api.clearCustomLyrics(current.id);
+    try {
+      await api.clearCustomLyrics(current.id);
+    } catch (error) {
+      setLyricsMessage(error instanceof Error ? `Could not clear the saved lyrics: ${error.message}` : 'Could not clear the saved lyrics.');
+      return;
+    }
     setLyricsEditorOpen(false);
     setLyricsMessage('Custom lyrics cleared.');
     setLyricsReloadKey((value) => value + 1);
@@ -483,6 +561,8 @@ export function NowPlayingView(): JSX.Element {
             tabIndex={0}
             onClick={() => setFs(true)}
             onKeyDown={(event) => {
+              // Enter on the artist or album link inside is the link's.
+              if (event.target !== event.currentTarget) return;
               if (event.key === 'Enter' || event.key === ' ') {
                 event.preventDefault();
                 setFs(true);
@@ -501,6 +581,9 @@ export function NowPlayingView(): JSX.Element {
             <div aria-hidden data-amp className="np-stage-spotlight" data-newamp-stage-spotlight />
             {artUrl ? (
               <img
+                // Keyed on the URL: a failed load hides this element, and the
+                // next track's art needs a fresh one to show on.
+                key={artUrl}
                 src={artUrl}
                 alt={current.album}
                 className={isPlaying ? 'pulse-soft' : ''}
@@ -551,7 +634,12 @@ export function NowPlayingView(): JSX.Element {
           {/* Queue — editable in place: drag a row (or Alt+↑/↓) to reorder,
               ✕ / Delete to remove, Clear to empty it (undo is offered by the
               store's clear-queue notification). */}
-          <div className="flex-1 overflow-y-auto" ref={queueListRef} data-newamp-now-playing-queue>
+          <div
+            className="flex-1 overflow-y-auto"
+            ref={queueListRef}
+            onScroll={queueWindow.onScroll}
+            data-newamp-now-playing-queue
+          >
             <div className="sticky top-0 z-[1] flex items-center justify-between gap-2 border-b border-line bg-panel px-[14px] py-[7px] text-[9px] uppercase tracking-[0.1em] text-ink2">
               <span>Queue · {queue.length} tracks</span>
               <span className="flex items-center gap-2">
@@ -572,32 +660,35 @@ export function NowPlayingView(): JSX.Element {
                 Queue is empty.
               </div>
             ) : (
-              queue.map((t, i) => (
-                <QueueRow
-                  key={`${t.id}-${i}`}
-                  track={t}
-                  index={i}
-                  count={queue.length}
-                  active={i === queueIndex}
-                  dragging={draggedQueueIndex === i}
-                  dropEdge={
-                    draggedQueueIndex !== null && dropQueueIndex === i && draggedQueueIndex !== i
-                      ? draggedQueueIndex < i ? 'below' : 'above'
-                      : null
-                  }
-                  onPlay={() => void playQueue(queue, i)}
-                  onMove={(to) => moveQueueRow(i, to, true)}
-                  onRemove={() => removeQueueRow(i)}
-                  onDragStart={() => setDraggedQueueIndex(i)}
-                  onDragOverRow={() => setDropQueueIndex(i)}
-                  onDropRow={(transferIndex) => {
-                    const from = draggedQueueIndex ?? transferIndex;
-                    if (from !== null) moveQueueRow(from, i, false);
-                    endQueueDrag();
-                  }}
-                  onDragEnd={endQueueDrag}
-                />
-              ))
+              <>
+                {queueWindow.topPad > 0 && <div aria-hidden style={{ height: queueWindow.topPad }} />}
+                {queue.slice(queueWindow.startIndex, queueWindow.endIndex + 1).map((t, offset) => {
+                  const i = queueWindow.startIndex + offset;
+                  return (
+                    <QueueRow
+                      key={`${t.id}-${i}`}
+                      track={t}
+                      index={i}
+                      count={queue.length}
+                      active={i === queueIndex}
+                      dragging={draggedQueueIndex === i}
+                      dropEdge={
+                        draggedQueueIndex !== null && dropQueueIndex === i && draggedQueueIndex !== i
+                          ? draggedQueueIndex < i ? 'below' : 'above'
+                          : null
+                      }
+                      onPlay={playQueueRow}
+                      onMove={moveQueueRowByKey}
+                      onRemove={removeQueueRow}
+                      onDragStart={startQueueDrag}
+                      onDragOverRow={dragOverQueueRow}
+                      onDropRow={dropOnQueueRow}
+                      onDragEnd={endQueueDrag}
+                    />
+                  );
+                })}
+                {queueWindow.bottomPad > 0 && <div aria-hidden style={{ height: queueWindow.bottomPad }} />}
+              </>
             )}
           </div>
         </div>
@@ -640,11 +731,11 @@ export function NowPlayingView(): JSX.Element {
             />
             <SplitHandle
               orientation="vertical"
-              onDrag={(frac) => {
-                const next = Math.min(0.7, Math.max(0.2, frac));
-                setSpectrumFrac(next);
-                window.localStorage.setItem('newamp:np:spectrumFrac', String(next));
-              }}
+              value={spectrumFrac}
+              min={0.2}
+              max={0.7}
+              label="Resize spectrum and side panel"
+              onDrag={(frac) => setSpectrumFrac(Math.min(0.7, Math.max(0.2, frac)))}
             />
             <div className="newamp-side-stack flex min-h-0 flex-col overflow-hidden">
               <ArtistImageStage artist={current.artist} />
@@ -1332,7 +1423,9 @@ function hasDraggedFiles(dataTransfer: DataTransfer): boolean {
   return Array.from(dataTransfer.types).includes('Files');
 }
 
-function QueueRow({
+// The callbacks take the row's index and are shared by every row, so memo keeps
+// a queue or index change from re-rendering rows that did not change.
+const QueueRow = memo(function QueueRow({
   track,
   index,
   count,
@@ -1354,12 +1447,12 @@ function QueueRow({
   dragging: boolean;
   /** Where the dragged row would land relative to this one, if it is the drop target. */
   dropEdge: 'above' | 'below' | null;
-  onPlay: () => void;
-  onMove: (toIndex: number) => void;
-  onRemove: () => void;
-  onDragStart: () => void;
-  onDragOverRow: () => void;
-  onDropRow: (transferIndex: number | null) => void;
+  onPlay: (index: number) => void;
+  onMove: (fromIndex: number, toIndex: number) => void;
+  onRemove: (index: number) => void;
+  onDragStart: (index: number) => void;
+  onDragOverRow: (index: number) => void;
+  onDropRow: (index: number, transferIndex: number | null) => void;
   onDragEnd: () => void;
 }): JSX.Element {
   const dropShadow =
@@ -1375,8 +1468,7 @@ function QueueRow({
       draggable
       aria-grabbed={dragging}
       aria-keyshortcuts="Delete Backspace Alt+ArrowUp Alt+ArrowDown"
-      onClick={onPlay}
-      onDoubleClick={onPlay}
+      onClick={() => onPlay(index)}
       onContextMenu={(event) => {
         event.preventDefault();
         void openTrackContextMenu([track]);
@@ -1386,22 +1478,22 @@ function QueueRow({
         if (event.target !== event.currentTarget) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
-          onPlay();
+          onPlay(index);
         } else if (event.key === 'Delete' || event.key === 'Backspace') {
           event.preventDefault();
-          onRemove();
+          onRemove(index);
         } else if (event.altKey && event.key === 'ArrowUp') {
           event.preventDefault();
-          onMove(index - 1);
+          onMove(index, index - 1);
         } else if (event.altKey && event.key === 'ArrowDown') {
           event.preventDefault();
-          onMove(index + 1);
+          onMove(index, index + 1);
         }
       }}
       onDragStart={(event) => {
         event.dataTransfer.effectAllowed = 'move';
         event.dataTransfer.setData('text/plain', String(index));
-        onDragStart();
+        onDragStart(index);
       }}
       onDragOver={(event) => {
         // Let a file drag fall through uncaught: App's own dropzone (which
@@ -1410,7 +1502,7 @@ function QueueRow({
         if (hasDraggedFiles(event.dataTransfer)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'move';
-        onDragOverRow();
+        onDragOverRow(index);
       }}
       onDrop={(event) => {
         // Same fallthrough: a dropped OS file must open/play via App, not
@@ -1421,12 +1513,15 @@ function QueueRow({
         event.preventDefault();
         const transferData = event.dataTransfer.getData('text/plain');
         const transferIndex = transferData ? Number(transferData) : NaN;
-        onDropRow(Number.isInteger(transferIndex) ? transferIndex : null);
+        onDropRow(index, Number.isInteger(transferIndex) ? transferIndex : null);
       }}
       onDragEnd={onDragEnd}
       className="group grid w-full cursor-pointer items-center gap-2 px-[14px] py-[7px] text-left transition-colors"
       style={{
         gridTemplateColumns: '20px 1fr auto',
+        // Fixed, to match QUEUE_ROW_HEIGHT: the list windows its rows by it.
+        height: QUEUE_ROW_HEIGHT,
+        boxSizing: 'border-box',
         background: active ? 'color-mix(in srgb, var(--accent) 8%, transparent)' : 'transparent',
         borderBottom: '1px solid color-mix(in srgb, var(--line) 45%, transparent)',
         boxShadow: dropShadow,
@@ -1458,19 +1553,19 @@ function QueueRow({
         {track.duration ? formatTime(track.duration) : '—'}
       </span>
       <span className="hidden items-center gap-[2px] group-hover:flex group-focus-within:flex">
-        <QueueRowButton label="Move up" shortcut={shortcutLabel('Alt+↑')} disabled={index === 0} onClick={() => onMove(index - 1)}>
+        <QueueRowButton label="Move up" shortcut={shortcutLabel('Alt+↑')} disabled={index === 0} onClick={() => onMove(index, index - 1)}>
           ▲
         </QueueRowButton>
-        <QueueRowButton label="Move down" shortcut={shortcutLabel('Alt+↓')} disabled={index === count - 1} onClick={() => onMove(index + 1)}>
+        <QueueRowButton label="Move down" shortcut={shortcutLabel('Alt+↓')} disabled={index === count - 1} onClick={() => onMove(index, index + 1)}>
           ▼
         </QueueRowButton>
-        <QueueRowButton label="Remove from queue" shortcut={api.platform === 'darwin' ? '⌫' : 'Delete'} onClick={onRemove}>
+        <QueueRowButton label="Remove from queue" shortcut={api.platform === 'darwin' ? '⌫' : 'Delete'} onClick={() => onRemove(index)}>
           <Close size={9} />
         </QueueRowButton>
       </span>
     </div>
   );
-}
+});
 
 function QueueRowButton({
   label,
@@ -1922,7 +2017,7 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
       setStatus(nextFact ? 'ok' : 'none');
     })();
     return () => ctrl.abort();
-  }, [deferredTrack.album, deferredTrack.albumArtist, deferredTrack.artist, deferredTrack.year]);
+  }, [deferredTrack.album, deferredTrack.albumArtist, deferredTrack.albumKey, deferredTrack.artist, deferredTrack.year]);
 
   const albumYear = deferredTrack.year ?? albumTracks.find((item) => item.year)?.year ?? null;
   const duration = albumTracks.reduce((sum, item) => sum + (item.duration ?? 0), 0);
@@ -2201,15 +2296,19 @@ const SoundsLikePanel = memo(function SoundsLikePanel({ trackId }: { trackId: nu
     setNeedsAnalysis(false);
     setSimilar([]);
     void (async () => {
-      const dna = await api.getTrackDna(trackId);
-      if (cancelled) return;
-      if (!dna) {
-        setNeedsAnalysis(true);
-        return;
+      try {
+        const dna = await api.getTrackDna(trackId);
+        if (cancelled) return;
+        if (!dna) {
+          setNeedsAnalysis(true);
+          return;
+        }
+        const matches = await api.findSimilarTracks(trackId, 8);
+        if (cancelled) return;
+        setSimilar(matches);
+      } catch {
+        if (!cancelled) setError('Could not find similar tracks.');
       }
-      const matches = await api.findSimilarTracks(trackId, 8);
-      if (cancelled) return;
-      setSimilar(matches);
     })();
     return () => {
       cancelled = true;
@@ -2259,7 +2358,14 @@ const SoundsLikePanel = memo(function SoundsLikePanel({ trackId }: { trackId: nu
     );
   }
 
-  if (!similar.length) return null;
+  if (!similar.length) {
+    return error ? (
+      <section className="bevel-out bg-panel p-2">
+        <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-accent">Sounds Like</span>
+        <div className="mt-1 text-[10px] text-error">{error}</div>
+      </section>
+    ) : null;
+  }
 
   return (
     <section className="bevel-out bg-panel p-2">
@@ -2626,9 +2732,15 @@ function LyricsPanel({
         <button className="pxbtn" onClick={onOpenEditor}>
           {source === 'custom' ? 'EDIT SAVED LYRICS' : 'SAVE / EDIT LYRICS'}
         </button>
-        <button className="pxbtn" onClick={onClearCustom}>
-          CLEAR SAVED
-        </button>
+        <ConfirmAction
+          label="CLEAR SAVED"
+          confirmLabel="SURE?"
+          tone="warn"
+          size="sm"
+          disabled={source !== 'custom'}
+          title="Delete the lyrics saved for this track"
+          onConfirm={onClearCustom}
+        />
         {message && <span style={{ color: 'var(--accent-text, var(--accent))' }}>{message}</span>}
       </div>
       {editorOpen && (
@@ -2869,11 +2981,22 @@ function SideTabButton({
   );
 }
 
+const SPLIT_KEY_STEP = 0.02;
+
 function SplitHandle({
   orientation,
+  value,
+  min,
+  max,
+  label,
   onDrag,
 }: {
   orientation: 'vertical' | 'horizontal';
+  /** Where the split sits now, as a parent-relative fraction (0..1). */
+  value: number;
+  min: number;
+  max: number;
+  label: string;
   /** Emits the parent-relative fraction (0..1) for the pointer position at each move. */
   onDrag: (frac: number) => void;
 }): JSX.Element {
@@ -2881,8 +3004,19 @@ function SplitHandle({
     <div
       role="separator"
       aria-orientation={orientation}
+      aria-label={label}
+      aria-valuemin={Math.round(min * 100)}
+      aria-valuemax={Math.round(max * 100)}
+      aria-valuenow={Math.round(value * 100)}
       tabIndex={0}
       className={`np-split-handle ${orientation === 'vertical' ? 'is-vertical' : 'is-horizontal'}`}
+      onKeyDown={(event) => {
+        const decrease = orientation === 'vertical' ? 'ArrowLeft' : 'ArrowUp';
+        const increase = orientation === 'vertical' ? 'ArrowRight' : 'ArrowDown';
+        if (event.key !== decrease && event.key !== increase) return;
+        event.preventDefault();
+        onDrag(value + (event.key === increase ? SPLIT_KEY_STEP : -SPLIT_KEY_STEP));
+      }}
       onPointerDown={(event) => {
         event.preventDefault();
         const target = event.currentTarget;
@@ -2901,13 +3035,23 @@ function SplitHandle({
         };
         emit(event);
         const move = (moveEvent: PointerEvent): void => emit(moveEvent);
+        // A cancelled pointer (touch or pen taken over by the OS, capture lost)
+        // never sends pointerup, so every way a drag ends removes the listeners.
         const up = (upEvent: PointerEvent): void => {
-          target.releasePointerCapture(upEvent.pointerId);
+          try {
+            target.releasePointerCapture(upEvent.pointerId);
+          } catch {
+            /* capture was already gone */
+          }
           window.removeEventListener('pointermove', move);
           window.removeEventListener('pointerup', up);
+          window.removeEventListener('pointercancel', up);
+          target.removeEventListener('lostpointercapture', up);
         };
         window.addEventListener('pointermove', move);
         window.addEventListener('pointerup', up);
+        window.addEventListener('pointercancel', up);
+        target.addEventListener('lostpointercapture', up);
       }}
     />
   );

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ListeningHistoryItem, ListeningInsights } from '@shared/types';
 import { api } from '../../lib/api';
 import { pushToast } from '../../lib/toast';
@@ -24,11 +24,17 @@ export function HistoryView(): JSX.Element {
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [revision, setRevision] = useState(0);
   const [importing, setImporting] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  // Bumped by every reload and every clear; a page read for an earlier list
+  // must not be appended to a newer one.
+  const listGeneration = useRef(0);
   const playQueue = usePlayerStore((s) => s.playQueue);
 
   useEffect(() => {
     let cancelled = false;
+    listGeneration.current += 1;
     setLoading(true);
+    setLoadFailed(false);
     Promise.all([
       api.getListeningHistory({ limit: HISTORY_PAGE_SIZE + 1, offset: 0 }),
       api.getListeningInsights(),
@@ -40,11 +46,13 @@ export function HistoryView(): JSX.Element {
           setHasMoreHistory(rows.length > HISTORY_PAGE_SIZE);
         }
       })
-      .catch(() => {
+      .catch((err) => {
+        console.error('[newamp] listening history failed to load', err);
         if (!cancelled) {
           setItems([]);
           setInsights(emptyListeningInsights());
           setHasMoreHistory(false);
+          setLoadFailed(true);
         }
       })
       .finally(() => {
@@ -65,7 +73,13 @@ export function HistoryView(): JSX.Element {
 
   async function clearHistory(): Promise<void> {
     const cleared = items.length;
-    await api.clearListeningHistory();
+    try {
+      await api.clearListeningHistory();
+    } catch (err) {
+      pushToast({ tone: 'error', title: 'Could not clear the history', detail: err instanceof Error ? err.message : undefined });
+      return;
+    }
+    listGeneration.current += 1;
     setItems([]);
     setInsights(emptyListeningInsights());
     setHasMoreHistory(false);
@@ -78,12 +92,14 @@ export function HistoryView(): JSX.Element {
 
   async function loadMoreHistory(): Promise<void> {
     if (loadingMore || !hasMoreHistory) return;
+    const generation = listGeneration.current;
     setLoadingMore(true);
     try {
       const rows = await api.getListeningHistory({
         limit: HISTORY_PAGE_SIZE + 1,
         offset: items.length,
       });
+      if (generation !== listGeneration.current) return;
       const nextRows = rows.slice(0, HISTORY_PAGE_SIZE);
       const seen = new Set(items.map((item) => item.id));
       const freshRows = nextRows.filter((item) => !seen.has(item.id));
@@ -99,6 +115,10 @@ export function HistoryView(): JSX.Element {
       // Stop paging once the server returns a full page that dedupes to nothing
       // new — otherwise overlap-heavy pages trigger endless no-op loads.
       setHasMoreHistory(rows.length > HISTORY_PAGE_SIZE && freshRows.length > 0);
+    } catch (err) {
+      if (generation === listGeneration.current) {
+        pushToast({ tone: 'error', title: 'Could not load more history', detail: err instanceof Error ? err.message : undefined });
+      }
     } finally {
       setLoadingMore(false);
     }
@@ -149,6 +169,13 @@ export function HistoryView(): JSX.Element {
               onLoadMore={() => void loadMoreHistory()}
             />
           </>
+        ) : loadFailed ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-[12px]" style={{ color: 'var(--muted)' }}>
+            <span>Could not load your listening history.</span>
+            <button className="pxbtn" onClick={() => setRevision((current) => current + 1)}>
+              RETRY
+            </button>
+          </div>
         ) : (
           <div className="flex h-full items-center justify-center text-[12px]" style={{ color: 'var(--muted)' }}>
             No listening history yet.
