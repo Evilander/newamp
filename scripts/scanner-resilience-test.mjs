@@ -203,7 +203,10 @@ assert.deepEqual(albumRootOf('music/artist/album/disc 02'), { root: 'music/artis
     '/dev/sdb1 /mnt/usb fuseblk rw 0 0',
   ].join('\n'), 'proc');
   assert.equal(linuxMounts[1].mountPoint, '/mnt/my music');
-  assert.equal(isOnRemoteMount('/users/tyler/pc/k/music', macMounts), true, 'an NFS mount');
+  assert.equal(isOnRemoteMount('/Users/tyler/pc/k/music', macMounts), true, 'an NFS mount');
+  // Mount points are matched without regard to case where the file system
+  // ignores it, which Linux does not.
+  assert.equal(isOnRemoteMount('/users/tyler/pc/k/music', macMounts), process.platform !== 'linux', 'case is ignored except on Linux');
   assert.equal(isOnRemoteMount('/Volumes/Music Share/Albums', macMounts), true, 'an SMB mount');
   assert.equal(isOnRemoteMount('/users/tyler/music', macMounts), false, 'the boot volume');
   assert.equal(isOnRemoteMount('/mnt/my music/albums', linuxMounts), true);
