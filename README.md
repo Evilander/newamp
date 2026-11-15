@@ -166,13 +166,13 @@ while it runs.
 
 ## Size, memory, and Electron
 
-NewAmp is an Electron app, so it is large. On 2.5.1 the Windows installer is
-115.1 MB and the unpacked install is 393.7 MB (375.5 MiB, the figure Explorer
+NewAmp is an Electron app, so it is large. On 2.9.0 the Windows installer is
+115.4 MB and the unpacked install is 394.9 MB (376.6 MiB, the figure Explorer
 shows). Of that, 298.1 MB is the Electron runtime (Chromium and Node), 82.8 MB is
-the bundled ffmpeg that handles decoding and transcoding, and 12.8 MB is the rest
+the bundled ffmpeg that handles decoding and transcoding, and 13.9 MB is the rest
 of the `resources` folder, mostly NewAmp's own code and assets. MB here are
 10^6 bytes. After `npm run package`, the figures come from
-`ls -l "release/NewAmp Setup 2.5.1.exe"`, `du -sb release/win-unpacked`,
+`ls -l "release/NewAmp Setup 2.9.0.exe"`, `du -sb release/win-unpacked`,
 `du -sb release/win-unpacked/resources` and
 `ls -l release/win-unpacked/resources/app.asar.unpacked/node_modules/ffmpeg-static/ffmpeg.exe`.
 A native player is a fraction of that size.
