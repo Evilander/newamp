@@ -15,6 +15,7 @@ import type {
   CachedGuitarTab,
   CustomLyricsInput,
   CustomSkin,
+  DeskWidgetSnapshot,
   DiscoverSurface,
   DiscoverSurfaceInput,
   ExclusiveDeviceInfo,
@@ -522,6 +523,32 @@ contextBridge.exposeInMainWorld('winctl', {
     ipcRenderer.on('window-state', handler);
     return () => ipcRenderer.off('window-state', handler);
   },
+});
+
+// Desktop widget bridge. The first three are for the main window's button;
+// the rest only do anything from the widget's own page, which the main
+// process checks by sender.
+contextBridge.exposeInMainWorld('deskWidget', {
+  toggle: (): Promise<boolean> => ipcRenderer.invoke('desk-widget:toggle') as Promise<boolean>,
+  isOpen: (): Promise<boolean> => ipcRenderer.invoke('desk-widget:is-open') as Promise<boolean>,
+  onOpenChange: (cb: (open: boolean) => void) => {
+    const handler = (_e: unknown, open: boolean) => cb(open === true);
+    ipcRenderer.on('desk-widget:open-changed', handler);
+    return () => ipcRenderer.off('desk-widget:open-changed', handler);
+  },
+  // Sent once the page's snapshot listener exists, so the first snapshot
+  // cannot arrive before anything is listening for it.
+  ready: (): void => ipcRenderer.send('desk-widget:ready'),
+  onSnapshot: (cb: (snapshot: DeskWidgetSnapshot) => void) => {
+    const handler = (_e: unknown, snapshot: DeskWidgetSnapshot) => cb(snapshot);
+    ipcRenderer.on('desk-widget:snapshot', handler);
+    return () => ipcRenderer.off('desk-widget:snapshot', handler);
+  },
+  moveTo: (x: number, y: number): void => ipcRenderer.send('desk-widget:move-to', x, y),
+  showMenu: (): void => ipcRenderer.send('desk-widget:menu'),
+  showMain: (): void => ipcRenderer.send('desk-widget:show-main'),
+  transport: (cmd: 'togglePlay' | 'next' | 'prev' | 'seek', arg?: number): Promise<void> =>
+    ipcRenderer.invoke('transport:command', cmd, arg) as Promise<void>,
 });
 
 // Detached Eviland visualizer window bridge.

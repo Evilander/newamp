@@ -510,21 +510,40 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   const pieces = [grab('function nowPlayingLabel('), grab('function buildDockMenu(')];
   const state = { isPlaying: false, title: null, artist: null };
   const sent = [];
+  const widget = {
+    isOpen: false,
+    toggles: 0,
+    toggle() {
+      this.toggles += 1;
+      this.isOpen = !this.isOpen;
+      return this.isOpen;
+    },
+  };
   const context = {
     shellPlaybackState: state,
     Menu: { buildFromTemplate: (template) => template },
     showMainWindow() {},
     sendPlayerCommand: (command) => sent.push(command),
+    deskWidget: widget,
   };
   const { buildDockMenu } = await load(pieces, context);
-  assert.deepEqual(plain(buildDockMenu().map((item) => item.label)), ['Show NewAmp'], 'with nothing loaded there is no Play or Next to press');
+  assert.deepEqual(
+    plain(buildDockMenu().map((item) => item.label)),
+    ['Show NewAmp', 'Show Desktop Widget'],
+    'with nothing loaded there is no Play or Next to press',
+  );
   Object.assign(state, { title: 'Spoon', artist: 'Wilco', isPlaying: true });
   const loaded = buildDockMenu();
   assert.equal(loaded[0].label, 'Spoon - Wilco');
   assert.equal(loaded[0].enabled, false, 'the track line is a label, not a command');
-  assert.deepEqual(plain(loaded.filter((item) => item.label).slice(1).map((item) => item.label)), ['Previous', 'Pause', 'Next', 'Stop', 'Show NewAmp']);
+  assert.deepEqual(
+    plain(loaded.filter((item) => item.label).slice(1).map((item) => item.label)),
+    ['Previous', 'Pause', 'Next', 'Stop', 'Show NewAmp', 'Show Desktop Widget'],
+  );
   for (const item of loaded) item.click?.();
   assert.deepEqual(plain(sent), ['previous', 'toggle-play', 'next', 'stop'], 'Play/Pause and Next send their commands');
+  assert.equal(widget.toggles, 1, 'the widget item opens the widget');
+  assert.equal(buildDockMenu().at(-1).label, 'Hide Desktop Widget', 'and offers to hide it once it is out');
   Object.assign(state, { artist: null, isPlaying: false });
   assert.equal(buildDockMenu()[0].label, 'Spoon');
   assert.equal(buildDockMenu()[3].label, 'Play');

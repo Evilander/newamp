@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Desktop widget window. A pure consumer: playback snapshots arrive from
+         the main process and its buttons go back through the transport
+         channel. Like detached.html it loads NO theme stylesheet, so nothing
+         here may read the theme's CSS variables; its materials are fixed and
+         its one colour is sampled from the cover (src/widget/main.ts). -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: newart:; object-src 'none'; base-uri 'self'" />
+    <title>NewAmp Widget</title>
+  </head>
+  <body data-layout="platter" data-playing="false" data-loaded="false" data-art="false">
+    <main id="widget" class="w">
+      <div class="w-card" aria-hidden="true"></div>
+
+      <div class="w-deck">
+        <div
+          class="w-disc"
+          data-widget-disc
+          role="button"
+          tabindex="0"
+          aria-label="Play or pause. Double-click to open NewAmp."
+        >
+          <div class="w-rotor">
+            <div class="w-grooves"></div>
+            <div class="w-label">
+              <img data-widget-art alt="" draggable="false" />
+            </div>
+          </div>
+          <div class="w-sheen" aria-hidden="true"></div>
+          <div class="w-spindle" aria-hidden="true"></div>
+        </div>
+        <svg class="w-ring" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
+          <circle class="w-ring-track" cx="50" cy="50" r="49" />
+          <circle class="w-ring-fill" cx="50" cy="50" r="49" pathLength="100" />
+        </svg>
+        <svg class="w-arm" viewBox="0 0 28 140" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="wArmChrome" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0" stop-color="#3f4548" />
+              <stop offset="0.3" stop-color="#d7dbdc" />
+              <stop offset="0.55" stop-color="#737a7d" />
+              <stop offset="0.8" stop-color="#eef0ef" />
+              <stop offset="1" stop-color="#353a3d" />
+            </linearGradient>
+          </defs>
+          <rect x="12.4" y="12" width="3.2" height="104" rx="1.6" fill="url(#wArmChrome)" />
+          <rect x="9" y="112" width="10" height="20" rx="2.5" fill="#17191b" stroke="#3a3f42" stroke-width="0.8" />
+          <rect x="12.6" y="130" width="2.8" height="5" rx="1" fill="#c9cdce" />
+          <circle cx="14" cy="14" r="9" fill="#1b1e20" stroke="#4a5053" stroke-width="1" />
+          <circle cx="14" cy="14" r="4" fill="url(#wArmChrome)" />
+        </svg>
+      </div>
+
+      <div class="w-info">
+        <div class="w-title" data-widget-title>NewAmp</div>
+        <div class="w-artist" data-widget-artist>Nothing playing</div>
+        <div
+          class="w-bar"
+          data-widget-bar
+          role="slider"
+          tabindex="0"
+          aria-label="Position"
+          aria-valuemin="0"
+          aria-valuemax="0"
+          aria-valuenow="0"
+        >
+          <div class="w-bar-fill"></div>
+        </div>
+        <div class="w-time">
+          <span data-widget-elapsed>0:00</span>
+          <span data-widget-total></span>
+        </div>
+      </div>
+
+      <div class="w-controls">
+        <button type="button" data-widget-action="prev" aria-label="Previous track" title="Previous track">
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3 3h2v10H3zM13 3v10L6 8z" /></svg>
+        </button>
+        <button type="button" class="w-play" data-widget-action="togglePlay" aria-label="Play" title="Play">
+          <svg class="w-icon-play" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4 2.5v11l9-5.5z" /></svg>
+          <svg class="w-icon-pause" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3.5 2.5h3v11h-3zM9.5 2.5h3v11h-3z" /></svg>
+        </button>
+        <button type="button" data-widget-action="next" aria-label="Next track" title="Next track">
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M11 3h2v10h-2zM3 3v10l7-5z" /></svg>
+        </button>
+      </div>
+
+      <button type="button" class="w-menu" data-widget-menu aria-label="Widget options" title="Widget options">
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle cx="3" cy="8" r="1.5" /><circle cx="8" cy="8" r="1.5" /><circle cx="13" cy="8" r="1.5" />
+        </svg>
+      </button>
+    </main>
+    <script type="module" src="/src/widget/main.ts"></script>
+  </body>
+</html>

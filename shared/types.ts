@@ -1099,6 +1099,38 @@ export interface SavedWindowState {
   deck: SavedWindowRect | null;
 }
 
+/**
+ * Where the desktop widget sits among other windows. `desktop` keeps it under
+ * every app window and over the wallpaper; only macOS has such a level, so it
+ * behaves as `normal` elsewhere.
+ */
+export type DeskWidgetLevel = 'desktop' | 'normal' | 'floating';
+export type DeskWidgetLayout = 'platter' | 'card';
+
+export interface DeskWidgetState {
+  /** Open when the app last quit, so it comes back at the next launch. */
+  open: boolean;
+  layout: DeskWidgetLayout;
+  level: DeskWidgetLevel;
+  /** Top-left corner on the desktop; null until the widget has been placed once. */
+  origin: { x: number; y: number } | null;
+}
+
+/** What the widget window is told to draw. It holds no player state of its own. */
+export interface DeskWidgetSnapshot {
+  layout: DeskWidgetLayout;
+  isPlaying: boolean;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  trackId: number | null;
+  /** Seconds at `at`; the widget moves the position on from there while playing. */
+  position: number;
+  duration: number;
+  /** Epoch ms of the playback snapshot this was built from. */
+  at: number;
+}
+
 export interface AppSettings {
   libraryRoots: string[];
   libraryAutoWatch: boolean;
@@ -1177,6 +1209,8 @@ export interface AppSettings {
   autoBackupEnabled: boolean;
   /** Where the main window and the deck were last placed. Written by the main process only. */
   windowState?: SavedWindowState;
+  /** The desktop widget: whether it is open, its layout, its level and its spot. Written by the main process only. */
+  deskWidget?: DeskWidgetState;
   /**
    * Adaptive rendering quality. `auto` measures the machine at runtime and
    * scales the visualizer + ambient reactivity; `high` forces full richness;

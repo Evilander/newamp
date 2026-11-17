@@ -81,6 +81,7 @@ if (!skipSmokes) {
     'smoke:ui-detached-viz',
     'smoke:ui-discover',
     'smoke:ui-deck',
+    'smoke:ui-widget',
     'smoke:ui-wheel-volume',
     'smoke:tabs',
     'smoke:lastfm',

@@ -23,6 +23,16 @@ export function TitleBar(): JSX.Element {
 
   useEffect(() => winctl.onState((s) => setMaximized(s.maximized)), []);
 
+  // The desktop widget is a window of its own; the main process says when it
+  // opens or closes, whichever menu or button did it.
+  const [widgetOpen, setWidgetOpen] = useState(false);
+  useEffect(() => {
+    const bridge = window.deskWidget;
+    if (!bridge) return undefined;
+    void bridge.isOpen().then(setWidgetOpen).catch(() => undefined);
+    return bridge.onOpenChange(setWidgetOpen);
+  }, []);
+
   // The window state channel does not report fullscreen, but entering or
   // leaving it resizes the window, so a resize is the cue to ask. Only the Mac
   // title bar acts on the answer (it moves the traffic lights' inset), so
@@ -144,6 +154,15 @@ export function TitleBar(): JSX.Element {
           data-newamp-hint-anchor="deck"
         >
           DECK
+        </button>
+        <button
+          className={`pxbtn !min-w-[60px] ${widgetOpen ? 'is-active' : ''}`}
+          onClick={() => void window.deskWidget?.toggle()}
+          aria-label="Desktop widget"
+          aria-pressed={widgetOpen}
+          title={widgetOpen ? 'Close the desktop widget' : 'Open the desktop widget'}
+        >
+          WIDGET
         </button>
         {!isMac && (
           <>

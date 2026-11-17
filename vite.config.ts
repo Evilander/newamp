@@ -28,6 +28,8 @@ export default defineConfig({
         butterchurn: resolve(__dirname, 'butterchurn-iframe.html'),
         // Detached Eviland visualizer window (pop-out to projector / 2nd monitor).
         detached: resolve(__dirname, 'detached.html'),
+        // Desktop widget window.
+        widget: resolve(__dirname, 'widget.html'),
       },
     },
   },

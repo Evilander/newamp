@@ -104,6 +104,8 @@ import { cueAudioPaths, cueEntriesToTracks, parseCueSheet, type CueSheetEntry } 
 import { defaultMusicScanRoots, isSeededPublicMusicRoot, suggestMusicFolders } from './music-folders.js';
 import { parseCustomSkinFile, serializeCustomSkin } from '../shared/custom-skin.js';
 import { buildAppMenuTemplate } from './app-menu.js';
+import { emptyDeskWidgetState } from './desk-widget.js';
+import { DeskWidget } from './desk-widget-window.js';
 import { caseFoldCachePath } from './cache-key-casing.js';
 import { AUDIO_EXTS, isSkippedLibraryFile, isSkippedLibraryFolder } from './library-skip.js';
 import { isStorageError, retryStorageErrors, setStorageRoots } from './read-failure.js';
@@ -160,6 +162,7 @@ const uiOpenFileSmoke = process.env.NEWAMP_UI_OPEN_FILE_SMOKE === '1';
 const uiVisualizerSmoke = process.env.NEWAMP_UI_VISUALIZER_SMOKE === '1';
 const uiDetachedVizSmoke = process.env.NEWAMP_UI_DETACHED_VIZ_SMOKE === '1';
 const uiDeckSmoke = process.env.NEWAMP_UI_DECK_SMOKE === '1';
+const uiWidgetSmoke = process.env.NEWAMP_UI_WIDGET_SMOKE === '1';
 const uiWheelVolumeSmoke = process.env.NEWAMP_UI_WHEEL_VOLUME_SMOKE === '1';
 const uiArtSmoke = process.env.NEWAMP_UI_ART_SMOKE === '1';
 const uiDiscoverSmoke = process.env.NEWAMP_UI_DISCOVER_SMOKE === '1';
@@ -177,6 +180,7 @@ const smokeMode =
   uiVisualizerSmoke ||
   uiDetachedVizSmoke ||
   uiDeckSmoke ||
+  uiWidgetSmoke ||
   uiWheelVolumeSmoke ||
   uiArtSmoke ||
   uiDiscoverSmoke ||
@@ -226,6 +230,8 @@ if (smokeMode && !userDataOverride) {
               ? 'ui-visualizer-smoke-user-data'
               : uiDeckSmoke
                 ? 'ui-deck-smoke-user-data'
+              : uiWidgetSmoke
+                ? 'ui-widget-smoke-user-data'
               : uiArtSmoke
                 ? 'ui-art-smoke-user-data'
               : uiDiscoverSmoke
@@ -1091,6 +1097,12 @@ function createWindow(): BrowserWindow {
       clearTimeout(windowStateTimer);
       windowStateTimer = null;
     }
+    // The widget is a remote for this window's player. Where the app ends
+    // with its last window it must not be the one that keeps it running; it
+    // is destroyed rather than closed so it still counts as open next launch.
+    if (!shouldStayResidentOnWindowAllClosed({ isQuitting, hasTray: !!tray, platform: process.platform })) {
+      deskWidget.window?.destroy();
+    }
     refreshDisplaySleepBlocker();
   });
   win.on('close', (event) => {
@@ -1727,8 +1739,12 @@ function nowPlayingLabel(): string | null {
 function buildDockMenu(): Menu {
   const nowPlaying = nowPlayingLabel();
   const showWindow: MenuItemConstructorOptions = { label: 'Show NewAmp', click: showMainWindow };
+  const widget: MenuItemConstructorOptions = {
+    label: deskWidget.isOpen ? 'Hide Desktop Widget' : 'Show Desktop Widget',
+    click: () => void deskWidget.toggle(),
+  };
   // With nothing loaded Play/Pause and Next would do nothing.
-  if (nowPlaying === null) return Menu.buildFromTemplate([showWindow]);
+  if (nowPlaying === null) return Menu.buildFromTemplate([showWindow, widget]);
   return Menu.buildFromTemplate([
     { label: nowPlaying, enabled: false },
     { type: 'separator' },
@@ -1738,6 +1754,7 @@ function buildDockMenu(): Menu {
     { label: 'Stop', click: () => sendPlayerCommand('stop') },
     { type: 'separator' },
     showWindow,
+    widget,
   ]);
 }
 
@@ -1748,7 +1765,7 @@ function buildDockMenu(): Menu {
 function refreshDockMenu(): void {
   if (process.platform !== 'darwin' || smokeMode || !app.dock) return;
   const { isPlaying, title, artist } = shellPlaybackState;
-  const builtFor = JSON.stringify([isPlaying, title, artist]);
+  const builtFor = JSON.stringify([isPlaying, title, artist, deskWidget.isOpen]);
   if (dockMenuBuiltFor !== builtFor) {
     dockMenuBuiltFor = builtFor;
     app.dock.setMenu(buildDockMenu());
@@ -1905,6 +1922,7 @@ function applicationMenuTemplate(): MenuItemConstructorOptions[] {
     onOpenExternal: (url) => void shell.openExternal(url),
     files: { onOpenFiles: () => void chooseFilesToOpen(), onAddFolder: () => void chooseFolderForLibrary() },
     playback: { isPlaying: shellPlaybackState.isPlaying, onCommand: sendPlayerCommand },
+    widget: { open: deskWidget.isOpen, onToggle: () => void deskWidget.toggle() },
   });
 }
 
@@ -1966,6 +1984,7 @@ function registerTray(): void {
     nextTray.on('click', toggleMainWindow);
     nextTray.setContextMenu(Menu.buildFromTemplate([
       { label: 'Show / Hide NewAmp', click: toggleMainWindow },
+      { label: 'Desktop Widget', click: () => void deskWidget.toggle() },
       { type: 'separator' },
       { label: 'Previous', click: () => sendPlayerCommand('previous') },
       { label: 'Play / Pause', click: () => sendPlayerCommand('toggle-play') },
@@ -2060,6 +2079,47 @@ function subscribeShellPlayback(cb: (state: ShellPlaybackState) => void): () => 
   return () => {
     shellPlaybackSubscribers.delete(cb);
   };
+}
+
+// --- Desktop widget --------------------------------------------------------
+//
+// A small player window of its own (electron/desk-widget-window.ts). It draws
+// from the same playback snapshots the tray and the Dock menu read, so it
+// needs nothing from the main window's page beyond what that already sends.
+const deskWidget = new DeskWidget({
+  platform: process.platform,
+  preloadPath: join(__dirname, 'preload.js'),
+  rendererUrl: () => new URL('widget.html', getRendererBaseUrl()).toString(),
+  iconPath: resolveWindowIconPath,
+  getState: () => settings.get().deskWidget ?? emptyDeskWidgetState(),
+  setState: (next) => settings.set({ deskWidget: next }),
+  getPlayback: () => ({
+    isPlaying: shellPlaybackState.isPlaying,
+    title: shellPlaybackState.title,
+    artist: shellPlaybackState.artist,
+    album: shellPlaybackState.album,
+    trackId: shellPlaybackState.trackId,
+    position: shellPlaybackState.position,
+    duration: shellPlaybackState.duration,
+    at: shellPlaybackState.at,
+  }),
+  showMainWindow,
+  isQuitting: () => isQuitting,
+  onChange: deskWidgetChanged,
+  onWindow: (win) => {
+    attachWindowDiagnostics(win, 'desk-widget');
+    attachExternalLinkHandler(win);
+  },
+});
+subscribeShellPlayback(() => deskWidget.pushSnapshot());
+
+// The Window menu ticks the widget's item and the Dock menu names it, so both
+// are rebuilt when it opens or closes; the main window's button follows too.
+function deskWidgetChanged(): void {
+  if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('desk-widget:open-changed', deskWidget.isOpen);
+  if (process.platform !== 'darwin') return;
+  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationMenuTemplate()));
+  refreshDockMenu();
 }
 
 function thumbGlyph(inside: (x: number, y: number) => boolean): Electron.NativeImage {
@@ -4255,6 +4315,17 @@ function registerIpc(): void {
     wireDetachedFramePort();
   });
 
+  // Desktop widget. Toggling comes from the main window's button; the rest is
+  // honored only from the widget's own page.
+  ipcMain.handle('desk-widget:toggle', () => deskWidget.toggle());
+  ipcMain.handle('desk-widget:is-open', () => deskWidget.isOpen);
+  ipcMain.on('desk-widget:ready', (event) => deskWidget.rendererReady(event.sender));
+  ipcMain.on('desk-widget:move-to', (event, x: unknown, y: unknown) => deskWidget.moveTo(event.sender, x, y));
+  ipcMain.on('desk-widget:menu', (event) => deskWidget.showContextMenu(event.sender));
+  ipcMain.on('desk-widget:show-main', (event) => {
+    if (deskWidget.owns(event.sender)) showMainWindow();
+  });
+
   // Playback snapshot from the main renderer → Windows thumbar + tray tooltip.
   // Sender-guarded like the other renderer-originated signals.
   ipcMain.on('playback:state', (event, state: unknown) => {
@@ -5002,6 +5073,161 @@ async function runUiDeckSmoke(win: BrowserWindow): Promise<void> {
     app.quit();
   } catch (err) {
     console.error('[newamp-ui-deck-smoke] failed:', err);
+    app.exit(1);
+  }
+}
+
+// Opens the desktop widget with the title bar's own button and checks the
+// window it gets: its size in each layout, that the corners outside the
+// record are see-through, what each level asks of the window, that it shows
+// the track it is told about, and that its buttons reach the transport
+// channel. Ends by closing it and reading back what was saved.
+async function runUiWidgetSmoke(win: BrowserWindow): Promise<void> {
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+  const until = async (check: () => boolean | Promise<boolean>, what: string, limitMs = 15000): Promise<void> => {
+    const deadline = Date.now() + limitMs;
+    while (!(await check())) {
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${what}`);
+      await sleep(100);
+    }
+  };
+  const pressWidgetButton = (): Promise<boolean> =>
+    win.webContents.executeJavaScript(
+      `(() => {
+        const button = Array.from(document.querySelectorAll('button')).find((el) => (el.textContent || '').trim() === 'WIDGET');
+        if (!button) return false;
+        button.click();
+        return true;
+      })()`,
+      true,
+    ) as Promise<boolean>;
+  try {
+    await until(pressWidgetButton, 'the title bar WIDGET button');
+    await until(() => deskWidget.isOpen, 'the widget window');
+    const widgetWin = deskWidget.window!;
+    const read = (): Promise<{ title: string; artist: string; layout: string; playing: string; snapshots: number }> =>
+      widgetWin.webContents.executeJavaScript(
+        `(() => ({
+          title: document.querySelector('[data-widget-title]')?.textContent ?? '',
+          artist: document.querySelector('[data-widget-artist]')?.textContent ?? '',
+          layout: document.body.dataset.layout ?? '',
+          playing: document.body.dataset.playing ?? '',
+          snapshots: window.__newampWidgetStats?.snapshots ?? 0,
+        }))()`,
+        true,
+      );
+    await until(async () => (await read()).snapshots > 0, 'the widget page to take its first snapshot');
+    const buttonPressed = await win.webContents.executeJavaScript(
+      `Array.from(document.querySelectorAll('button')).find((el) => (el.textContent || '').trim() === 'WIDGET')?.getAttribute('aria-pressed') ?? null`,
+      true,
+    );
+
+    // The idle page may still send a snapshot of its own, so the made-up
+    // track is sent again until the widget shows it.
+    await until(async () => {
+      applyShellPlaybackState({
+        isPlaying: true,
+        title: 'Widget Smoke Title',
+        artist: 'Widget Smoke Artist',
+        album: 'Widget Smoke Album',
+        trackId: null,
+        position: 30,
+        duration: 120,
+        volume: 0.5,
+        at: Date.now(),
+      });
+      await sleep(150);
+      return (await read()).title === 'Widget Smoke Title';
+    }, 'the widget to show the track it was sent');
+    const platterPage = await read();
+    const platterBounds = widgetWin.getBounds();
+
+    const transport: { cmd: string; arg?: number }[] = [];
+    ipcMain.removeHandler('transport:command');
+    ipcMain.handle('transport:command', (_e, cmd: string, arg?: number) => {
+      transport.push({ cmd, arg });
+    });
+    await widgetWin.webContents.executeJavaScript(
+      `document.querySelector('[data-widget-action="togglePlay"]').click()`,
+      true,
+    );
+    await until(() => transport.length > 0, 'the play button to reach the transport channel');
+
+    // A real press on the record, through the input pipeline: it plays or
+    // pauses once the double-click wait is over.
+    widgetWin.webContents.sendInputEvent({ type: 'mouseDown', x: 70, y: 150, button: 'left', clickCount: 1 });
+    widgetWin.webContents.sendInputEvent({ type: 'mouseUp', x: 70, y: 150, button: 'left', clickCount: 1 });
+    await until(() => transport.length > 1, 'a click on the record to reach the transport channel');
+
+    // A drag by the record moves the window and is not also a click. The page
+    // measures a drag on the screen, and a sent event's screen position stays
+    // at zero unless it is given. The spot under the pointer stays the same
+    // through a real drag, because the window follows it.
+    const beforeDrag = widgetWin.getBounds();
+    const dragged = (dx: number, dy: number): { x: number; y: number; globalX: number; globalY: number } => ({
+      x: 70,
+      y: 150,
+      globalX: beforeDrag.x + 70 + dx,
+      globalY: beforeDrag.y + 150 + dy,
+    });
+    widgetWin.webContents.sendInputEvent({ type: 'mouseDown', ...dragged(0, 0), button: 'left', clickCount: 1 });
+    for (const step of [1, 2, 3, 4]) {
+      widgetWin.webContents.sendInputEvent({ type: 'mouseMove', ...dragged(-8 * step, -4 * step), button: 'left' });
+      await sleep(60);
+    }
+    widgetWin.webContents.sendInputEvent({ type: 'mouseUp', ...dragged(-32, -16), button: 'left', clickCount: 1 });
+    await sleep(500);
+    const afterDrag = widgetWin.getBounds();
+    const dragBy = { x: afterDrag.x - beforeDrag.x, y: afterDrag.y - beforeDrag.y };
+    const transportAfterDrag = transport.length;
+
+    const bitmap = (await widgetWin.webContents.capturePage()).toBitmap();
+    let solid = 0;
+    let clear = 0;
+    for (let i = 3; i < bitmap.length; i += 4) {
+      if (bitmap[i]! > 200) solid += 1;
+      else if (bitmap[i]! < 16) clear += 1;
+    }
+    const pixels = Math.max(1, bitmap.length / 4);
+
+    deskWidget.setLayout('card');
+    await until(async () => (await read()).layout === 'card', 'the widget to switch to the card layout');
+    const cardBounds = widgetWin.getBounds();
+
+    deskWidget.setLevel('floating');
+    const floatingOnTop = widgetWin.isAlwaysOnTop();
+    deskWidget.setLevel('normal');
+    const normalOnTop = widgetWin.isAlwaysOnTop();
+    deskWidget.setLevel('desktop');
+    const desktopOnTop = widgetWin.isAlwaysOnTop();
+
+    const openSaved = settings.get().deskWidget?.open === true;
+    deskWidget.close();
+    await until(() => !deskWidget.isOpen, 'the widget to close');
+    console.log(`[newamp-ui-widget-smoke] ${JSON.stringify({
+      ok: true,
+      platform: process.platform,
+      buttonPressed,
+      platter: { ...platterPage, width: platterBounds.width, height: platterBounds.height },
+      card: { width: cardBounds.width, height: cardBounds.height },
+      solidShare: solid / pixels,
+      clearShare: clear / pixels,
+      transport,
+      dragBy,
+      transportAfterDrag,
+      draggedSize: { width: afterDrag.width, height: afterDrag.height },
+      floatingOnTop,
+      normalOnTop,
+      desktopOnTop,
+      openSaved,
+      closedSaved: settings.get().deskWidget?.open === false,
+      layoutSaved: settings.get().deskWidget?.layout ?? null,
+      levelSaved: settings.get().deskWidget?.level ?? null,
+    })}`);
+    isQuitting = true;
+    app.quit();
+  } catch (err) {
+    console.error('[newamp-ui-widget-smoke] failed:', err);
     app.exit(1);
   }
 }
@@ -7756,6 +7982,8 @@ async function bootstrap(): Promise<void> {
   mainWindowBootstrapped = true;
   installApplicationMenu();
   registerTray();
+  // A smoke drives the widget itself when it is the thing under test.
+  if (!smokeMode) deskWidget.restore();
   registerMediaShortcuts();
   syncLibraryWatcher();
   startLibraryAnalysis();
@@ -7841,6 +8069,8 @@ async function bootstrap(): Promise<void> {
       void runUiDetachedVizSmoke(mainWin, scanPromise);
     } else if (uiDeckSmoke && mainWin) {
       void runUiDeckSmoke(mainWin);
+    } else if (uiWidgetSmoke && mainWin) {
+      void runUiWidgetSmoke(mainWin);
     } else if (uiWheelVolumeSmoke && mainWin) {
       void runUiWheelVolumeSmoke(mainWin);
     } else if (uiArtSmoke && mainWin) {

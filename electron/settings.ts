@@ -10,6 +10,7 @@ import { FLAT_EQ_VALUES, normalizeEqValues } from '../shared/eq-presets.js';
 import { BUILT_IN_THEMES, normalizeCustomSkin } from '../shared/custom-skin.js';
 import { parseMusicServerStreamUrl } from '../shared/music-servers.js';
 import { emptyWindowState, normalizeWindowState } from './window-state.js';
+import { emptyDeskWidgetState, normalizeDeskWidgetState } from './desk-widget.js';
 import {
   atomicWriteFileSync,
   durableWriteFileAsync,
@@ -66,6 +67,7 @@ const DEFAULTS: AppSettings = {
   trayNoticeShown: false,
   autoBackupEnabled: true,
   windowState: emptyWindowState(),
+  deskWidget: emptyDeskWidgetState(),
   performanceTier: 'auto',
   ambientReactivity: 'auto',
   waveformSeekBar: true,
@@ -75,7 +77,13 @@ const DEFAULTS: AppSettings = {
 // A fresh copy of the defaults for a store's state, so nothing a caller does
 // to the arrays and objects it gets back can reach the module-level DEFAULTS.
 function freshDefaults(): AppSettings {
-  return { ...DEFAULTS, libraryRoots: [], equalizer: [...DEFAULTS.equalizer], windowState: emptyWindowState() };
+  return {
+    ...DEFAULTS,
+    libraryRoots: [],
+    equalizer: [...DEFAULTS.equalizer],
+    windowState: emptyWindowState(),
+    deskWidget: emptyDeskWidgetState(),
+  };
 }
 
 // Only keys the app defines are kept, on load and on every patch: a renderer
@@ -91,7 +99,7 @@ function pickKnownSettings(source: object): Partial<AppSettings> {
 // Single-key patches that arrive many times a second (state saved as playback
 // moves, a slider being dragged) and go through the debounced write; flushSync()
 // writes whatever is pending on quit.
-const HOT_PATCH_KEYS = new Set<string>(['resumeState', 'windowState', 'preampDb', 'textScale']);
+const HOT_PATCH_KEYS = new Set<string>(['resumeState', 'windowState', 'deskWidget', 'preampDb', 'textScale']);
 
 const MAX_LIBRARY_ROOTS = 256;
 
@@ -651,6 +659,7 @@ export class SettingsStore {
         : parsed.trayNoticeShown === true,
       autoBackupEnabled: parsed.autoBackupEnabled !== false,
       windowState: normalizeWindowState(parsed.windowState),
+      deskWidget: normalizeDeskWidgetState(parsed.deskWidget),
       performanceTier: normalizePerformanceTier(parsed.performanceTier),
       ambientReactivity: normalizeAmbientReactivity(parsed.ambientReactivity),
       waveformSeekBar: parsed.waveformSeekBar !== false,
@@ -866,6 +875,9 @@ export class SettingsStore {
       windowState: patch.windowState === undefined
         ? base.windowState
         : normalizeWindowState(patch.windowState),
+      deskWidget: patch.deskWidget === undefined
+        ? base.deskWidget
+        : normalizeDeskWidgetState(patch.deskWidget),
       performanceTier: patch.performanceTier === undefined
         ? base.performanceTier
         : normalizePerformanceTier(patch.performanceTier),

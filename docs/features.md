@@ -218,6 +218,18 @@ Deck mode (Ctrl+M, Cmd+Shift+M on macOS) shrinks the window into one of eight sk
 - Record Player: SPEED and PITCH are printed on the panel and are not controls. Discman: the slider is the volume control.
 - Deck mode toggles in both directions with the same chord.
 
+### Desktop widget
+
+WIDGET in the title bar opens a small player in a window of its own, so the main window can stay open beside it. The Window and Dock menus (macOS) and the tray menu (Windows and Linux) open and close it too, and it comes back at the next launch if it was open at quit.
+
+- Two layouts, chosen from its menu. Record (240×240) is a spinning record with the cover as its label, a tonearm that tracks across the side as the track plays, and a ring around it showing how much has played. Card (380×128) adds the title, the artist and a seek bar.
+- Click the record to play or pause, double-click it to bring the main window forward, and drag it to move the widget. In the Record layout the title and the previous, play and next buttons appear while the pointer is over it. The ring and the bar take their colour from the cover.
+- Right-click it, or use its options button, for the menu: the layout, where it sits, Show NewAmp and Close Widget.
+- Where it sits: On the Desktop (macOS only) keeps it under every other window and over the wallpaper and desktop icons, on every Space. Normal Window behaves like any other window. Always on Top keeps it over other windows.
+- The seek bar takes the left and right arrow keys when it has focus, five seconds a press, and the record takes Enter and Space.
+- Its layout, level and position are remembered. A widget whose display is gone reopens at the bottom right of the main display.
+- It shows what the main window is playing and has no player of its own. Closing the main window to the tray or the Dock leaves it working; quitting NewAmp closes it.
+
 ## History and statistics
 
 - History lists every play with listening insights.

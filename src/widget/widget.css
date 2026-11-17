@@ -1,0 +1,451 @@
+/* Desktop widget. Fixed materials, like the decks: black vinyl, a paper label,
+   chrome. The one colour that changes is --w-accent, sampled from the cover
+   and used as light (the ring, the bar, the card's tint). No theme variables:
+   this window loads no theme stylesheet.
+
+   Everything is drawn inside the window with room left for its own shadow,
+   because the window is transparent and has no native one. */
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  font: 500 12px/1.25 system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: #f2efe8;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+.w {
+  --w-accent: #e9dcc0;
+  --w-progress: 0;
+  position: fixed;
+  inset: 0;
+}
+
+/* --- The record ---------------------------------------------------------- */
+
+.w-deck {
+  position: absolute;
+}
+
+.w-disc {
+  position: absolute;
+  border-radius: 50%;
+  outline: none;
+  background: radial-gradient(circle, #141718 0%, #080a0b 48%, #020303 100%);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 5px 9px rgba(0, 0, 0, 0.5);
+}
+
+.w-disc:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--w-accent),
+    0 5px 9px rgba(0, 0, 0, 0.5);
+}
+
+/* One turn every 1.8 s is 33 1/3 rpm. The grooves and the label turn; the
+   sheen above them is the room's light and stays put. */
+.w-rotor {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  animation: w-spin 1.8s linear infinite;
+  animation-play-state: paused;
+}
+
+body[data-playing='true'] .w-rotor {
+  animation-play-state: running;
+}
+
+@keyframes w-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.w-grooves {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, transparent 0 49%, rgba(0, 0, 0, 0.88) 49.25% 50.1%, rgba(211, 219, 220, 0.1) 50.3%, transparent 50.7% 61%),
+    radial-gradient(circle, transparent 0 65%, rgba(0, 0, 0, 0.92) 65.2% 66%, rgba(211, 219, 220, 0.1) 66.2%, transparent 66.6% 77%),
+    radial-gradient(circle, transparent 0 82%, rgba(0, 0, 0, 0.9) 82.3% 83.1%, rgba(230, 234, 234, 0.1) 83.25%, transparent 83.7% 91%),
+    repeating-radial-gradient(circle, rgba(199, 208, 211, 0.055) 0 0.55px, transparent 0.8px 2.25px);
+}
+
+.w-label {
+  position: absolute;
+  inset: 30.5%;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: #c7b78f;
+  box-shadow:
+    0 0 0 2px #9f9478,
+    0 0 0 3.5px rgba(0, 0, 0, 0.76);
+}
+
+.w-label img {
+  display: none;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  -webkit-user-drag: none;
+}
+
+/* Without a cover the label is left as plain paper. */
+body[data-art='true'] .w-label img {
+  display: block;
+}
+
+.w-sheen {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 35% 29%, rgba(255, 255, 255, 0.08), transparent 15%),
+    conic-gradient(
+      from 214deg,
+      transparent 0 12deg,
+      rgba(255, 255, 255, 0.075) 18deg,
+      transparent 26deg 112deg,
+      rgba(112, 125, 131, 0.05) 122deg,
+      transparent 137deg 251deg,
+      rgba(255, 255, 255, 0.035) 264deg,
+      transparent 279deg
+    );
+}
+
+.w-spindle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 5%;
+  height: 5%;
+  min-width: 6px;
+  min-height: 6px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+  background: radial-gradient(circle at 35% 30%, #f2f3f2, #7d8386 55%, #2b2f31);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+/* How much of the track has played, drawn clockwise from the top. */
+.w-ring {
+  position: absolute;
+  transform: rotate(-90deg);
+  pointer-events: none;
+}
+
+.w-ring circle {
+  fill: none;
+  stroke-width: 1.4;
+}
+
+.w-ring-track {
+  stroke: rgba(255, 255, 255, 0.1);
+}
+
+/* Square ends: a round cap would leave a dot at the top with nothing played. */
+.w-ring-fill {
+  stroke: var(--w-accent);
+  stroke-dasharray: 100;
+  stroke-dashoffset: calc(100 - var(--w-progress) * 100);
+  transition: stroke-dashoffset 0.5s linear;
+}
+
+/* The arm pivots at the centre of its bearing cap. Parked it hangs clear of
+   the record; playing it sits in the outer grooves and tracks inward to just
+   short of the label as the track plays. */
+.w-arm {
+  position: absolute;
+  width: 28px;
+  height: 140px;
+  transform-origin: 14px 14px;
+  transform: rotate(-6deg);
+  transition: transform 0.6s cubic-bezier(0.3, 0.7, 0.2, 1);
+  pointer-events: none;
+  filter: drop-shadow(-2px 3px 2px rgba(0, 0, 0, 0.45));
+}
+
+body[data-playing='true'] .w-arm {
+  transform: rotate(calc(14deg + var(--w-progress) * 12deg));
+}
+
+/* --- Text and controls --------------------------------------------------- */
+
+.w-title,
+.w-artist {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.w-title {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.w-artist {
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: rgba(242, 239, 232, 0.66);
+}
+
+/* Twelve pixels tall to be easy to hit; the line drawn is four. */
+.w-bar {
+  position: relative;
+  height: 12px;
+  margin-top: 10px;
+  cursor: pointer;
+}
+
+.w-bar::before,
+.w-bar-fill {
+  position: absolute;
+  left: 0;
+  top: 4px;
+  height: 4px;
+  border-radius: 2px;
+}
+
+.w-bar::before {
+  content: '';
+  right: 0;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.w-bar-fill {
+  width: calc(var(--w-progress) * 100%);
+  background: var(--w-accent);
+}
+
+.w-time {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 1px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(242, 239, 232, 0.55);
+}
+
+.w-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.w-controls button,
+.w-menu {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #f2efe8;
+  font: inherit;
+  cursor: pointer;
+}
+
+.w-controls button:hover,
+.w-menu:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.w-controls button:focus-visible,
+.w-menu:focus-visible,
+.w-bar:focus-visible {
+  outline: 2px solid var(--w-accent);
+  outline-offset: 1px;
+}
+
+.w-controls svg,
+.w-menu svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.w-controls .w-play {
+  width: 32px;
+  height: 32px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.w-icon-pause,
+body[data-playing='true'] .w-icon-play {
+  display: none;
+}
+
+body[data-playing='true'] .w-icon-pause {
+  display: block;
+}
+
+.w-menu {
+  position: absolute;
+  opacity: 0;
+  transition: opacity 0.16s;
+}
+
+.w:hover .w-menu,
+.w:focus-within .w-menu {
+  opacity: 1;
+}
+
+/* --- Record layout: the record alone, 240 x 240 -------------------------- */
+
+body[data-layout='platter'] .w-card {
+  display: none;
+}
+
+body[data-layout='platter'] .w-deck {
+  inset: 0;
+}
+
+body[data-layout='platter'] .w-disc {
+  left: 18px;
+  top: 18px;
+  width: 204px;
+  height: 204px;
+}
+
+body[data-layout='platter'] .w-ring {
+  left: 10px;
+  top: 10px;
+  width: 220px;
+  height: 220px;
+}
+
+body[data-layout='platter'] .w-arm {
+  left: 198px;
+  top: 18px;
+}
+
+/* The title and the buttons stay out of the way until the pointer is over
+   the widget. */
+body[data-layout='platter'] .w-info,
+body[data-layout='platter'] .w-controls {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(12, 13, 14, 0.84);
+  opacity: 0;
+  transition: opacity 0.16s;
+}
+
+body[data-layout='platter'] .w-info {
+  top: 26px;
+  max-width: 168px;
+  padding: 5px 12px 6px;
+  border-radius: 12px;
+  text-align: center;
+  pointer-events: none;
+}
+
+body[data-layout='platter'] .w-controls {
+  bottom: 24px;
+  padding: 4px 6px;
+  border-radius: 20px;
+}
+
+body[data-layout='platter'] .w:hover .w-info,
+body[data-layout='platter'] .w:hover .w-controls,
+body[data-layout='platter'] .w:focus-within .w-info,
+body[data-layout='platter'] .w:focus-within .w-controls {
+  opacity: 1;
+}
+
+body[data-layout='platter'] .w-bar,
+body[data-layout='platter'] .w-time {
+  display: none;
+}
+
+body[data-layout='platter'] .w-menu {
+  left: 6px;
+  top: 6px;
+  background: rgba(12, 13, 14, 0.84);
+}
+
+/* --- Card layout: record, title and a seek bar, 380 x 128 ---------------- */
+
+body[data-layout='card'] .w-card {
+  position: absolute;
+  inset: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 20px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--w-accent) 20%, #15171a), #0b0c0e 70%);
+  box-shadow: 0 3px 7px rgba(0, 0, 0, 0.42);
+}
+
+body[data-layout='card'] .w-deck {
+  left: 22px;
+  top: 20px;
+  width: 88px;
+  height: 88px;
+}
+
+body[data-layout='card'] .w-disc {
+  inset: 0;
+}
+
+body[data-layout='card'] .w-ring,
+body[data-layout='card'] .w-arm {
+  display: none;
+}
+
+body[data-layout='card'] .w-info {
+  position: absolute;
+  left: 124px;
+  right: 26px;
+  top: 21px;
+}
+
+/* The options button sits over the end of these two lines. */
+body[data-layout='card'] .w-title,
+body[data-layout='card'] .w-artist {
+  padding-right: 26px;
+}
+
+body[data-layout='card'] .w-controls {
+  position: absolute;
+  left: 124px;
+  right: 26px;
+  bottom: 17px;
+  justify-content: center;
+}
+
+body[data-layout='card'] .w-menu {
+  right: 16px;
+  top: 14px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .w-rotor {
+    animation: none;
+  }
+
+  .w-arm,
+  .w-ring-fill {
+    transition: none;
+  }
+}

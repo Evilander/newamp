@@ -5,6 +5,21 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [Unreleased]
+
+### Added
+
+- Desktop widget: a small player in a window of its own, so the library can
+  stay open beside it. It is a spinning record with the cover as its label, or
+  a card with the title and a seek bar, and it takes its colour from the
+  cover. On macOS it can sit on the desktop under every other window; on every
+  system it can be an ordinary window or stay on top. WIDGET in the title bar
+  opens it, as do the Window and Dock menus on macOS and the tray menu
+  elsewhere. Click the record to play or pause, double-click it to bring
+  NewAmp forward, drag it to move it, and right-click it for its layout and
+  level. Its layout, level and position are remembered, and it comes back at
+  the next launch if it was open at quit.
+
 ## [2.9.0] - 2026-11-15
 
 This release is mostly about playing a library from a slow or flaky network

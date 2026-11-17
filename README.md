@@ -96,6 +96,9 @@ sandbox error, run `./newamp --no-sandbox`, or from the extracted folder run
   editor floats over the app, the fullscreen visualizer included, so you can
   tune a skin while it plays. The sidebar's groups collapse, and its items hide
   and reorder.
+- A desktop widget: a small record or card in its own window that shows what is
+  playing beside the open library. On macOS it can sit on the desktop under
+  other windows.
 - Smart playlists, an Auto DJ, and ratings. Library search takes field filters
   (`artist:radiohead year:2007 format:wma missing:art`) and ignores case and
   accents. Living Tags are rules such as

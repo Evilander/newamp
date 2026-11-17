@@ -1,6 +1,20 @@
 /// <reference types="vite/client" />
 
-import type { NewAmpAPI } from '../shared/types';
+import type { DeskWidgetSnapshot, NewAmpAPI } from '../shared/types';
+
+// The desktop widget's bridge. The main window uses the first three; the rest
+// belong to the widget's own page (src/widget/main.ts).
+interface DeskWidgetBridge {
+  toggle: () => Promise<boolean>;
+  isOpen: () => Promise<boolean>;
+  onOpenChange: (cb: (open: boolean) => void) => () => void;
+  ready: () => void;
+  onSnapshot: (cb: (snapshot: DeskWidgetSnapshot) => void) => () => void;
+  moveTo: (x: number, y: number) => void;
+  showMenu: () => void;
+  showMain: () => void;
+  transport: (cmd: 'togglePlay' | 'next' | 'prev' | 'seek', arg?: number) => Promise<void>;
+}
 
 interface DetachedDisplay {
   id: number;
@@ -61,6 +75,7 @@ declare global {
       onState: (cb: (s: { maximized: boolean }) => void) => () => void;
     };
     detachedViz: DetachedVizBridge;
+    deskWidget: DeskWidgetBridge;
     toAudioUrl: (filePath: string) => string;
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "newamp",
-  "version": "2.9.0",
+  "version": "2.10.0",
   "description": "A local-first, Winamp-inspired music player for Windows, macOS, and Linux — your files, no cloud, no telemetry.",
   "main": "dist-electron/electron/main.js",
   "type": "module",
@@ -90,6 +90,7 @@
     "test:cache-key-casing": "node scripts/cache-key-casing-test.mjs",
     "test:audio-path-policy": "node scripts/audio-path-policy-test.mjs",
     "test:app-menu": "node scripts/app-menu-test.mjs",
+    "test:desk-widget": "node scripts/desk-widget-test.mjs",
     "test:macho-arch": "node scripts/macho-arch-test.mjs",
     "test:library-query": "npm run build:electron && node scripts/library-query-test.mjs",
     "test:library-flush": "npm run build:electron && node scripts/library-flush-test.mjs",
@@ -402,6 +403,7 @@
     "build:icon": "node scripts/rebuild-icon.mjs",
     "smoke:ui-discover": "npm run build && node scripts/ui-discover-smoke.mjs",
     "smoke:ui-deck": "npm run build && node scripts/ui-deck-smoke.mjs",
+    "smoke:ui-widget": "npm run build && node scripts/ui-widget-smoke.mjs",
     "smoke:ui-wheel-volume": "npm run build && node scripts/ui-wheel-volume-smoke.mjs",
     "smoke:ui-art": "npm run build && node scripts/ui-art-smoke.mjs",
     "smoke:installer-artifact": "node scripts/installer-artifact-smoke.mjs",

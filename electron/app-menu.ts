@@ -22,6 +22,8 @@ export interface AppMenuOptions {
    * says which it will do. Without it the menu bar has no Controls menu.
    */
   playback?: { isPlaying: boolean; onCommand: (command: PlayerCommand) => void };
+  /** The desktop widget's item in the Window menu, ticked while it is out. Without it there is no item. */
+  widget?: { open: boolean; onToggle: () => void };
 }
 
 const REPO_URL = 'https://github.com/evilander/newamp';
@@ -94,6 +96,13 @@ export function buildAppMenuTemplate(
         },
       ]
     : [];
+  const widget = opts.widget;
+  const widgetItems: MenuItemConstructorOptions[] = widget
+    ? [
+        { type: 'separator' },
+        { label: 'Desktop Widget', type: 'checkbox', checked: widget.open, click: () => widget.onToggle() },
+      ]
+    : [];
   return [
     {
       label: opts.appName,
@@ -122,7 +131,14 @@ export function buildAppMenuTemplate(
       // which on macOS hides the window and keeps playing.
       label: 'Window',
       role: 'window',
-      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'close' }, { type: 'separator' }, { role: 'front' }],
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { role: 'close' },
+        ...widgetItems,
+        { type: 'separator' },
+        { role: 'front' },
+      ],
     },
     {
       role: 'help',

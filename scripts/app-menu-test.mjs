@@ -122,6 +122,20 @@ for (const label of ['Play', 'Stop', 'Next', 'Previous']) byLabel(controls, labe
 if (JSON.stringify(sent) !== JSON.stringify(['toggle-play', 'stop', 'next', 'previous'])) fail('Controls items should send their commands, got ' + JSON.stringify(sent));
 if (mac.some((item) => item.label === 'Controls')) fail('without a playback handler there is no Controls menu');
 
+// Window: the desktop widget's item, ticked while the widget is out.
+let widgetToggles = 0;
+const withWidget = (open) => buildAppMenuTemplate('darwin', { ...menuOptions(true), widget: { open, onToggle: () => { widgetToggles += 1; } } });
+const widgetItem = (template) => byLabel(submenuOf(template, 'Window'), 'Desktop Widget');
+if (widgetItem(withWidget(false))?.type !== 'checkbox') fail('the Window menu should carry a Desktop Widget checkbox');
+if (widgetItem(withWidget(false))?.checked !== false) fail('Desktop Widget should be unticked while the widget is closed');
+if (widgetItem(withWidget(true))?.checked !== true) fail('Desktop Widget should be ticked while the widget is open');
+widgetItem(withWidget(false))?.click();
+if (widgetToggles !== 1) fail('the Desktop Widget item should call onToggle');
+if (widgetItem(mac)) fail('without a widget handler there is no Desktop Widget item');
+for (const want of ['minimize', 'zoom', 'close', 'front']) {
+  if (!rolesOf(submenuOf(withWidget(true), 'Window')).includes(want)) fail(`Window menu with the widget item lost role ${want}`);
+}
+
 const win = buildAppMenuTemplate('win32', menuOptions(true));
 log.push('win32 template length: ' + win.length);
 if (win.length !== 0) fail('non-darwin should return an empty template (keep current chromeless behavior)');
