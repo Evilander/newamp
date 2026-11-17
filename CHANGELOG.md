@@ -5,7 +5,10 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
-## [Unreleased]
+## [2.10.0] - 2026-11-16
+
+This release adds a desktop widget: a small player in a window of its own
+that shows what is playing beside the open library.
 
 ### Added
 
