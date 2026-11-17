@@ -55,6 +55,7 @@ docs/eviland/
 docs/*-plan.md
 docs/*-roadmap.md
 docs/*-audit.md
+docs/evidence-*/
 docs/eviland-spec.md
 *HANDOFF*.md
 TESTING.md
