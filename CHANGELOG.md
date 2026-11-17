@@ -5,6 +5,85 @@ Notable changes to NewAmp. Versions follow [semver](https://semver.org/).
 Release notes for every version, including everything before 2.0, are on the
 [releases page](https://github.com/evilander/newamp/releases).
 
+## [2.10.1] - 2026-11-17
+
+A bug-fix release for the reports in issues #5 to #21: Now Playing, the
+Library list, Discover and the Projector.
+
+### Fixed
+
+- The Library showed only the first part of a large library (2,600 of 5,484
+  tracks in the report) and needed Load more for the rest, again every time
+  the view was opened. It reads the rest in the background now, up to 20,000
+  rows. Past that, Load more is still there. (#14)
+- The Library did not move to the playing track, so with shuffle on a press of
+  Next left you looking for it. The list scrolls the playing track into view
+  when the track changes, if it is within the first 20,000 rows of the list on
+  screen. It waits while you are scrolling, and leaves the list alone while
+  rows are selected. (#15)
+- Removing a folder in Settings → Library left its tracks in the library, so
+  Discover and every other view kept showing them. Removing a folder removes
+  its tracks, after a confirmation that shows how many. A library backup is
+  saved first and no files are deleted. The removed tracks lose their plays,
+  ratings, history, edits and playlist places; tracks that another library
+  folder still covers stay. (#10)
+- Reshuffle in Discover kept the first few tracks of a list and changed little
+  of the rest. It draws a different set now, Daily Crate's opening tracks
+  included. New Download Radar stays in date order and moves on to the next
+  newest files. (#11)
+- Tracks left a Discover list as they were played and others took their place,
+  and Next could play a track that was not on the list. A list now changes
+  only when you press Reshuffle or the library itself changes (a scan
+  finishes, tracks are removed). Play queues the tracks shown, and Next
+  follows them. Auto DJ adds nothing to a Discover list, and shuffle and
+  repeat stay inside it. (#17)
+- Now Playing's album panel squeezed its text into a narrow column at one
+  side. It uses the width of the panel. (#5)
+- The border of the Track Bookmarks panel ran through its label. (#7)
+- The album's stars in the Album row at the top of Now Playing could not be
+  clicked. They set a rating for the album, there and under Album Rating in
+  Albums, and CLR clears it. The ratings of the album's tracks are not
+  changed. (#8)
+- Where the system writes decimals with a comma, a score of 100 was shown as
+  `100,`. The field shows the whole number and takes a comma or a point; Enter
+  saves and Escape cancels. (#9)
+- On light skins such as Ice, text in the dark display panels (the three cards
+  at the top of Discover, among others) was drawn in the skin's dark ink and
+  could not be read. Text in those panels uses colours that read on them, and
+  accent-coloured text that was too faint on a skin's panels is adjusted
+  until it reads. (#13)
+- The Projector played only the mode it opened with. It has a menu now, on the
+  ☰ button in its bar or a right-click: next and previous look, Randomize,
+  Lock look, Browse all modes, Auto-VJ and its duration, palette, reactivity
+  and flash protection. (#16)
+- Browse all modes in the fullscreen visualizer closed after one choice. It
+  stays open until you close it. (#18)
+
+### Added
+
+- A Position column for track tables: the row's place in the whole list, where
+  # is the track number on its album. It is hidden until you turn it on with
+  the Columns button. (#21)
+- Auto-VJ duration: how long Auto-VJ stays on a mode before it changes, from 5
+  seconds to an hour. The default is still 14 to 30 seconds. It is under
+  Settings → Performance, in the visualizer settings and in the Projector's
+  menu. (#19)
+- Copy input log (Settings → Support) also lists every volume change the wheel
+  did not make, with the control that made it. The log in #6 shows the volume
+  leaping 100 points between two wheel events, and this is there to find out
+  what does it. The wheel itself behaves as it did in 2.10.0. (#6)
+
+### Changed
+
+- Flash protection can be switched from the visualizer settings and the
+  Projector's menu as well as Settings → Performance. It is still on by
+  default. (#20)
+- After you remove every library folder, NewAmp no longer adds the system
+  Music folder back at the next launch.
+- With no library folders set, Scan in Albums, Artists, Folders and Quick Play
+  tells you to add a folder in Settings instead of scanning the system Music
+  folder.
+
 ## [2.10.0] - 2026-11-16
 
 This release adds a desktop widget: a small player in a window of its own
