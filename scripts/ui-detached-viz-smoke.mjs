@@ -76,6 +76,15 @@ assert.equal(
   `look-ahead should be conducting the fixture from its score: ${JSON.stringify(result.lookAhead)}`,
 );
 assert.ok(result.lookAhead.tier, 'scored frames must carry the current section tier');
+// Every canvas mode the Projector's menu offers has to be selectable and has
+// to paint. Album Breathe is left out of the pixel check: the fixture track
+// has no cover for it to draw.
+assert.ok(Array.isArray(result.modes) && result.modes.length >= 20, `projector menu must offer its canvas modes (${JSON.stringify(result.modes)})`);
+for (const mode of result.modes) {
+  assert.equal(mode.selected, true, `projector menu must select ${mode.id} and close on Escape`);
+  if (mode.id === 'album-breathe') continue;
+  assert.ok(mode.litFraction > 0.002, `projector mode ${mode.id} must paint (litFraction=${mode.litFraction})`);
+}
 console.log(JSON.stringify(result, null, 2));
 
 async function resetSmokeRoot() {
@@ -88,11 +97,11 @@ async function createFixture() {
   const args = [
     '-y', '-hide_banner', '-loglevel', 'error',
     '-f', 'lavfi',
-    // 45s, kick-like 60Hz pulse + 880Hz tone so the reactor has onsets to
+    // 150s (long enough for the walk through every mode), kick-like 60Hz pulse + 880Hz tone so the reactor has onsets to
     // fire events from and the scrub target (20s) sits well inside the track.
-    '-i', 'sine=frequency=880:duration=45',
+    '-i', 'sine=frequency=880:duration=150',
     '-f', 'lavfi',
-    '-i', 'sine=frequency=60:duration=45',
+    '-i', 'sine=frequency=60:duration=150',
     '-filter_complex', '[1:a]volume=0.8,tremolo=f=2:d=0.9[bass];[0:a][bass]amix=inputs=2:normalize=0[a]',
     '-map', '[a]',
     '-metadata', 'title=Detached Smoke',
@@ -166,8 +175,8 @@ function runElectronSmoke() {
     let stderr = '';
 
     const timeout = setTimeout(() => {
-      finish(new Error(`detached viz smoke timed out at 180s without result marker. stdout tail:\n${tail(stdout)}\nstderr tail:\n${tail(stderr)}`));
-    }, 180000);
+      finish(new Error(`detached viz smoke timed out at 300s without result marker. stdout tail:\n${tail(stdout)}\nstderr tail:\n${tail(stderr)}`));
+    }, 300000);
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');

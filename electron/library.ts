@@ -5080,6 +5080,7 @@ export class LibraryStore {
       input.limit ?? null,
       input.lowEndMode ?? null,
       input.seedTrackId ?? null,
+      input.previousTrackIds ?? null,
       input.now ?? Math.floor(Date.now() / 3_600_000),
     ])}`;
     return this.derived
@@ -8104,6 +8105,18 @@ ${sharesListening ? `<h2>Top artists</h2><ul>${topArtists || '<li class="muted">
     } finally {
       stmt.free();
     }
+  }
+
+  tracksForRemovedFolder(folder: string, remainingRoots: readonly string[]): number[] {
+    const key = normalizedPruneKey;
+    const removed = key(folder);
+    const remaining = remainingRoots.map(key);
+    const inside = (path: string, root: string): boolean => path === root || path.startsWith(`${root}/`);
+    return this.many<{ id: number; path: string }>('SELECT id, path FROM tracks')
+      .filter((track) => {
+        const path = key(track.path);
+        return inside(path, removed) && !remaining.some((root) => inside(path, root));
+      }).map((track) => track.id);
   }
 
   // Destructive: these tracks leave the library with their plays, skips,

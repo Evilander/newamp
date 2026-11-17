@@ -378,6 +378,21 @@ near(fresh().next({ deltaY: 1, deltaMode: 2 }, 0.9, 1000).volume, 0.58, 'one pag
   const rows = text.split('\n').filter((line) => line.startsWith('{'));
   assert.equal(rows.length, 3);
   assert.equal(JSON.parse(rows[1]).longTasks, 2, 'the copied rows are JSON, one per event');
+  assert.match(text, /other volume changes: 0$/, 'nothing but the wheel moved it');
+
+  // Issue #6's log had the volume leap 100 points between two wheel events
+  // and nothing to say what set it. Changes from anything else are listed
+  // after the wheel rows, with the control that made them.
+  tasks.noteWrite('slider', 0.9576, 0, 1320.26);
+  tasks.noteWrite('remote', 0.07041, 1.07, 1400);
+  const noted = tasks.format({ app: 'NewAmp v9.9.9', userAgent: 'test' }).split('\n');
+  const at = noted.indexOf('other volume changes: 2');
+  assert.ok(at > 0, 'the count heads its own section');
+  assert.deepEqual(JSON.parse(noted[at + 1]), { at: 1320.3, by: 'slider', before: 0.9576, after: 0 });
+  assert.deepEqual(JSON.parse(noted[at + 2]), { at: 1400, by: 'remote', before: 0.0704, after: 1.07 });
+  const capped = new WheelInputLog(2);
+  for (let i = 0; i < 5; i += 1) capped.noteWrite('key', i, i + 1, i);
+  assert.match(capped.format({ app: 'a', userAgent: 'b' }), /other volume changes: 2\n\{"at":3,/, 'the oldest fall off');
 }
 
 // The shared handler: reads the live volume, owns the wheel, writes only on a change.

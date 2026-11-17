@@ -285,6 +285,13 @@ export default function App(): JSX.Element {
     };
     // frame-bus stays in this chunk: it is what hears the projector's port
     // arrive, and that can happen before any other Eviland code has loaded.
+    const offCommands = frameBus.onDetachedCommand((command) => {
+      const s = usePlayerStore.getState();
+      if (command === 'next-look') s.skipEvilandLook();
+      else if (command === 'previous-look') s.previousEvilandLook();
+      else if (command === 'randomize') s.randomizeEviland();
+      else if (command === 'toggle-director') s.toggleEvilandDirector();
+    });
     const offConsumer = frameBus.onConsumerChange((hasDetached) => {
       if (hasDetached) loadProducer();
     });
@@ -292,6 +299,7 @@ export default function App(): JSX.Element {
     return () => {
       cancelled = true;
       offConsumer();
+      offCommands();
       stopProducer?.();
     };
   }, []);
@@ -379,6 +387,8 @@ export default function App(): JSX.Element {
     });
     // Detached projector → main renderer. The projector window has no engine
     // of its own; its floating control bar invokes transport commands here.
+    // The phone remote's commands arrive on the same channel, so a volume
+    // change from either is logged as 'remote'.
     const detachedBridge = typeof window !== 'undefined' ? window.detachedViz : undefined;
     const offTransportCommand = detachedBridge?.onTransportCommand
       ? detachedBridge.onTransportCommand((cmd, arg) => {
@@ -387,7 +397,7 @@ export default function App(): JSX.Element {
           else if (cmd === 'next') void store.next();
           else if (cmd === 'prev') void store.prev();
           else if (cmd === 'seek' && Number.isFinite(arg)) store.seek(Math.max(0, arg ?? 0));
-          else if (cmd === 'setVolume' && Number.isFinite(arg)) void store.setVolume(Math.max(0, Math.min(2, arg ?? 0)));
+          else if (cmd === 'setVolume' && Number.isFinite(arg)) void store.setVolume(Math.max(0, Math.min(2, arg ?? 0)), 'remote');
         })
       : () => undefined;
     // Detached window closed/crashed/failed-to-open → tell the frame bus so
@@ -717,9 +727,9 @@ function runPlayerShortcut(
   } else if (command === 'seek-forward') {
     store.seek(clampShortcutNumber(store.currentTime + 5, 0, store.duration || store.currentTime + 5));
   } else if (command === 'volume-up') {
-    void store.setVolume(volumeKeyInput.next('up', store.volume, key.at, { shift: key.shiftKey, repeat: key.repeat }));
+    void store.setVolume(volumeKeyInput.next('up', store.volume, key.at, { shift: key.shiftKey, repeat: key.repeat }), 'key');
   } else if (command === 'volume-down') {
-    void store.setVolume(volumeKeyInput.next('down', store.volume, key.at, { shift: key.shiftKey, repeat: key.repeat }));
+    void store.setVolume(volumeKeyInput.next('down', store.volume, key.at, { shift: key.shiftKey, repeat: key.repeat }), 'key');
   } else if (command === 'toggle-love') {
     if (store.current?.id && store.current.id > 0) void store.toggleLove(store.current.id);
   } else if (command.startsWith('rate-')) {

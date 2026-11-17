@@ -215,7 +215,7 @@
     0 0 24px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 .library-search-command > span {
-  color: var(--accent);
+  color: var(--well-accent, var(--display-fg));
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 800;
@@ -228,7 +228,7 @@
 }
 .library-search-command kbd {
   padding: 3px 6px;
-  color: var(--ink-2);
+  color: var(--panel-detail-ink, var(--ink));
   background: color-mix(in srgb, var(--panel-2) 86%, #000);
   border: 1px solid var(--line);
   border-radius: 2px;
@@ -275,7 +275,7 @@
   aspect-ratio: 1 / 1;
 }
 .newamp-right-grid {
-  grid-template-columns: minmax(280px, var(--newamp-spectrum-frac, 42%)) 8px minmax(340px, 1fr);
+  grid-template-columns: minmax(min(240px, calc(100% - 348px)), min(var(--newamp-spectrum-frac, 42%), calc(100% - 348px))) 8px minmax(340px, 1fr);
 }
 .newamp-side-stack {
   grid-template-rows: minmax(118px, 0.9fr) minmax(84px, auto) minmax(96px, auto) minmax(104px, auto) minmax(190px, 1.3fr);
@@ -327,6 +327,7 @@
 }
 .album-context-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
@@ -346,6 +347,7 @@
 }
 .album-context-head strong {
   display: block;
+  overflow-wrap: anywhere;
   color: var(--accent-text);
   font-size: 13px;
   line-height: 1.2;
@@ -358,20 +360,24 @@
 }
 .album-context-meta span {
   padding: 3px 6px;
-  color: var(--ink-2);
+  color: var(--well-secondary, var(--display-dim));
   background: var(--display-bg);
   border: 1px solid var(--line);
 }
 .album-context-story {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   min-width: 0;
   color: inherit;
   text-decoration: none;
 }
+.album-context-story:has(> img) {
+  grid-template-columns: 58px minmax(0, 1fr);
+}
 .album-context-story > span {
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 .album-context-story img {
   width: 58px;
@@ -411,19 +417,22 @@
 }
 .album-context-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
   gap: 8px;
 }
 .album-context-grid div,
 .album-context-insights div {
   min-width: 0;
   padding: 8px;
+  --ink: var(--well-ink, var(--display-fg));
+  --muted: var(--well-dim, var(--display-dim));
+  --accent-text: var(--well-accent, var(--display-fg));
   background: color-mix(in srgb, var(--display-bg) 76%, transparent);
   border: 1px solid var(--line);
 }
 .album-context-insights {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(142px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 142px), 1fr));
   gap: 8px;
 }
 .album-context-insights span {
@@ -438,7 +447,7 @@
 .album-context-insights strong {
   display: block;
   overflow-wrap: anywhere;
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 11px;
   line-height: 1.35;
 }
@@ -465,7 +474,7 @@
   white-space: nowrap;
 }
 .album-context-tracklist em {
-  color: var(--muted);
+  color: var(--panel-dim, var(--muted));
   font-style: normal;
   text-align: right;
 }
@@ -493,10 +502,10 @@
   text-transform: uppercase;
 }
 .track-signal-head span {
-  color: var(--ink-2);
+  color: var(--panel-detail-ink, var(--ink-2));
 }
 .track-signal-head strong {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-weight: 800;
   text-shadow: 0 0 8px var(--accent-glow);
 }
@@ -520,7 +529,7 @@
 }
 .track-signal-chip span {
   display: block;
-  color: var(--muted);
+  color: var(--well-dim, var(--display-dim));
   font-size: 8px;
   letter-spacing: 0.1em;
 }
@@ -550,7 +559,7 @@
 .track-signal-ai {
   display: grid;
   gap: 3px;
-  color: var(--ink-2);
+  color: var(--panel-detail-ink, var(--ink-2));
   font-size: 9px;
   line-height: 1.25;
 }
@@ -562,7 +571,7 @@
   border-top: 1px solid var(--line);
 }
 .track-signal-ai span:first-child {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .ai-assist-option-grid {
   display: grid;
@@ -807,3 +816,7 @@
   }
 }
 
+
+.album-context-head > div:first-child > span {
+  color: var(--panel-dim, var(--muted));
+}

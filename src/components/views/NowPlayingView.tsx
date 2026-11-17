@@ -771,7 +771,7 @@ export function NowPlayingView(): JSX.Element {
                     aiModel={settings?.aiAssistRuntime?.model ?? settings?.openaiModel ?? null}
                   />
                 ) : sideTab === 'album' ? (
-                  <div className="flex min-h-0 flex-col overflow-y-auto">
+                  <div className="min-h-0 overflow-y-auto" data-newamp-album-tab-panels>
                     <AlbumContextPanel track={current} />
                     <TempoTrainerPanel
                       playbackRate={playbackRate}
@@ -1194,6 +1194,7 @@ function TrackInfoHeader({
           <div className="score-rating-shell" role="group" aria-label="Song score">
             <span className="score-rating-shell-label" aria-hidden="true">Song</span>
             <ScoreRating
+              identity={current.id}
               value={current.ratingScore}
               stars={current.rating}
               onChange={onSetRatingScore}
@@ -1252,7 +1253,7 @@ function TrackInfoHeader({
  * grouping. Mirror that fallback here so those albums can also be rated.
  */
 function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
-  const [albumRating, setAlbumRating] = useState<{ rating: number; ratingScore: number | null } | null>(null);
+  const [loaded, setLoaded] = useState<{ key: string; rating: number; ratingScore: number | null; failed?: boolean } | null>(null);
   const writeGenRef = useRef(0);
   // Mirror the SQL `COALESCE(NULLIF(album_artist,''), artist)` fallback so a
   // track tagged with an Artist but empty AlbumArtist can still be rated.
@@ -1260,30 +1261,31 @@ function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
   // The album's key names it outright; the pair stands in for a track the
   // library has not grouped yet.
   const albumKey = track.albumKey || `${ratingArtist}|${track.album}`;
+  const albumKeyRef = useRef(albumKey);
+  albumKeyRef.current = albumKey;
+  // The last album's score never stands in for this one while it loads.
+  const albumRating = loaded?.key === albumKey ? loaded : null;
 
   useEffect(() => {
     let cancelled = false;
-    if (!track.album || !ratingArtist) {
-      setAlbumRating(null);
-      return;
-    }
+    if (!track.album || !ratingArtist) return;
     void api
       .getAlbumRating(ratingArtist, track.album, track.albumKey)
       .then((row) => {
         if (cancelled) return;
-        setAlbumRating(
-          row ? { rating: row.rating, ratingScore: row.ratingScore } : { rating: 0, ratingScore: null },
+        setLoaded(
+          row ? { key: albumKey, rating: row.rating, ratingScore: row.ratingScore } : { key: albumKey, rating: 0, ratingScore: null },
         );
       })
       .catch((err) => {
         if (cancelled) return;
-        // Don't silently replace the prior value with 0/null — that's the
-        // 1.5.4-class anti-pattern where a transient IPC failure looked
-        // identical to "user never rated this album" and the next slider
-        // drag would silently overwrite the real stored rating. Keep the
-        // previous state and surface the failure in the console.
+        // Don't present a failed load as 0/null — that's the 1.5.4-class
+        // anti-pattern where a transient IPC failure looked identical to
+        // "user never rated this album" and the next slider drag would
+        // silently overwrite the real stored rating. Say the score is
+        // unavailable, offer no editor, and surface the failure in the console.
         console.error('[newamp] getAlbumRating failed:', { albumKey, err });
-        setAlbumRating((prev) => prev ?? { rating: 0, ratingScore: null });
+        setLoaded({ key: albumKey, rating: 0, ratingScore: null, failed: true });
       });
     return () => {
       cancelled = true;
@@ -1310,9 +1312,9 @@ function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
     try {
       const updated = await api.setAlbumRatingScore(writeArtist, writeAlbum, score, track.albumKey);
       if (writeGenRef.current !== myGen) return;
-      if (writeKey !== albumKey) return;
-      setAlbumRating(
-        updated ? { rating: updated.rating, ratingScore: updated.ratingScore } : { rating: 0, ratingScore: null },
+      if (writeKey !== albumKeyRef.current) return;
+      setLoaded(
+        updated ? { key: writeKey, rating: updated.rating, ratingScore: updated.ratingScore } : { key: writeKey, rating: 0, ratingScore: null },
       );
     } catch (err) {
       console.error('[newamp] setAlbumRatingScore failed:', { writeArtist, writeAlbum, score, err });
@@ -1324,11 +1326,19 @@ function AlbumScoreInline({ track }: { track: Track }): JSX.Element | null {
   return (
     <div className="score-rating-shell" role="group" aria-label="Album score" data-newamp-now-playing-album-rating>
       <span className="score-rating-shell-label" aria-hidden="true">Album</span>
-      <ScoreRating
-        value={albumRating?.ratingScore ?? null}
-        stars={albumRating?.rating ?? 0}
-        onChange={(score) => void handleChange(score)}
-      />
+      {albumRating?.failed ? (
+        <span className="score-rating-shell-label" role="status" data-newamp-album-rating-unavailable>
+          Score unavailable
+        </span>
+      ) : (
+        <ScoreRating
+          identity={albumKey}
+          value={albumRating?.ratingScore ?? null}
+          stars={albumRating?.rating ?? 0}
+          onChange={(score) => void handleChange(score)}
+          onStarsChange={(stars) => void handleChange(stars * 20)}
+        />
+      )}
     </div>
   );
 }
@@ -1620,7 +1630,7 @@ function BookmarkPanel({
   // Clock-subscribed: shows the live position next to "SAVE MARK".
   const currentTime = usePlayerStore((s) => s.currentTime);
   return (
-    <div className="min-h-0 border-b border-line bg-panel px-4 py-3">
+    <div className="border-b border-line bg-panel px-4 py-3" data-newamp-track-bookmarks>
       <div className="mb-2 flex items-center gap-2">
         <div className="text-[9px] font-bold uppercase tracking-[0.12em] text-accent">
           Track Bookmarks
@@ -2089,7 +2099,7 @@ const AlbumContextPanel = memo(function AlbumContextPanel({ track }: { track: Tr
             <small className="album-context-summary">
               {artistFallback.summary}
             </small>
-            <small className="album-context-summary" style={{ opacity: 0.7, fontStyle: 'italic' }}>
+            <small className="album-context-summary" style={{ color: 'var(--panel-note, var(--ink-2))', fontStyle: 'italic' }}>
               No Wikipedia page for this album yet — showing the artist instead.
             </small>
           </span>

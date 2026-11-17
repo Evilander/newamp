@@ -53,8 +53,12 @@ import {
 } from '../../store/useTrackColumns';
 import {
   createLatestRequestGate,
+  createTrackPositionCache,
+  hasMoreTrackRows,
   nextResizeHandle,
   readRemainingRows,
+  readThroughTrack,
+  playingRowScrollTop,
   resizeHandleStop,
   rovingRowId,
   slashFocusesSearch,
@@ -94,6 +98,7 @@ const LIBRARY_AUTO_LOAD_ROWS = 40;
 const LIBRARY_ROW_OVERSCAN = 6;
 const LIBRARY_SEARCH_DEBOUNCE_MS = 180;
 const LIBRARY_SEARCH_DEBOUNCE_MIN_MS = 60;
+const LIBRARY_BACKGROUND_FIRST_MS = 400;
 export const LIBRARY_SCAN_REFRESH_MS = 1500;
 const LIBRARY_OVERVIEW_OPEN_KEY = 'newamp:library:overview-open';
 
@@ -219,10 +224,13 @@ export function LibraryView(): JSX.Element {
   const [tracks, setTracks] = useState<Track[]>([]);
   const tracksRef = useRef(tracks);
   tracksRef.current = tracks;
-  const [loading, setLoading] = useState(false);
+  // The first page is asked for on mount; until it is in, an empty library
+  // and a list not read yet look alike.
+  const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMoreTracks, setHasMoreTracks] = useState(false);
   const [loadMoreFailed, setLoadMoreFailed] = useState(false);
+  const [, setStaleTick] = useState(0);
   const [matchingTrackCount, setMatchingTrackCount] = useState(0);
   const matchingCountRef = useRef(matchingTrackCount);
   matchingCountRef.current = matchingTrackCount;
@@ -282,58 +290,74 @@ export function LibraryView(): JSX.Element {
   // appending rows from a search the user already left.
   const loadGenerationRef = useRef(0);
   const playRequestGateRef = useRef(createLatestRequestGate());
+  useEffect(() => () => { loadGenerationRef.current += 1; }, []);
   // Rows read from the library for the current list: the next page's offset.
   // It counts rows read, not rows kept, so repeats dropped by appendTrackPage
   // don't hold it back, and it comes down when rows leave the list.
   const rowsReadRef = useRef(0);
   const loadMoreInFlightRef = useRef(false);
   const listKeyRef = useRef<string | null>(null);
+  const firstPagePendingRef = useRef(false);
+  const reloadSeqRef = useRef(0);
+  const staleListRef = useRef(false);
+  const positionCacheRef = useRef(createTrackPositionCache());
+  useEffect(() => {
+    const invalidate = (): void => positionCacheRef.current.invalidate();
+    window.addEventListener('newamp:library-play-recorded', invalidate);
+    return () => window.removeEventListener('newamp:library-play-recorded', invalidate);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    loadGenerationRef.current += 1;
-    // A scan that added tracks runs this again for the same query and sort. The
-    // list stays on screen then, with its scroll position, instead of going
-    // blank for "Loading...".
-    const listKey = `${libraryQuery}\u0000${sort}`;
-    const refetch = listKeyRef.current === listKey;
-    listKeyRef.current = listKey;
-    if (!refetch) {
-      setLoading(true);
-      setLoadMoreFailed(false);
+    const nextKey = `${libraryQuery}\u0000${sort}`;
+    if (listKeyRef.current === nextKey) {
+      if (staleListRef.current) void reloadLoadedRows();
+      return;
     }
+    positionCacheRef.current.invalidate();
+    loadGenerationRef.current += 1;
+    listKeyRef.current = nextKey;
+    firstPagePendingRef.current = true;
+    setLoading(true);
+    setLoadMoreFailed(false);
     const startedAt = performance.now();
+    let landed = false;
     Promise.all([
       api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
       api.getTrackCount({ search: libraryQuery, sort }),
     ])
       .then(([rows, total]) => {
+        landed = true;
         queryMsRef.current = performance.now() - startedAt;
         if (!cancelled) {
+          firstPagePendingRef.current = false;
+          staleListRef.current = false;
           rowsReadRef.current = rows.length;
           setTracks(rows);
           setMatchingTrackCount(total);
-          setHasMoreTracks(rows.length < total);
+          setHasMoreTracks(hasMoreTrackRows(rows.length, total, rows.length));
           setLoading(false);
         }
       })
       .catch((error) => {
+        landed = true;
         if (!cancelled) {
-          if (!refetch) {
-            // The rows on screen belong to the query the user left; keeping
-            // them would show another search's tracks under this one's text
-            // and queue them when played.
-            rowsReadRef.current = 0;
-            setTracks([]);
-            setMatchingTrackCount(0);
-            setHasMoreTracks(false);
-            pushToast({ tone: 'error', title: 'Could not load tracks', detail: errorText(error) });
-          }
+          // The previous query's rows cannot stay under the new search text.
+          firstPagePendingRef.current = false;
+          staleListRef.current = false;
+          rowsReadRef.current = 0;
+          setTracks([]);
+          setMatchingTrackCount(0);
+          setHasMoreTracks(false);
+          pushToast({ tone: 'error', title: 'Could not load tracks', detail: errorText(error) });
           setLoading(false);
         }
       });
     return () => {
       cancelled = true;
+      // A first page that never arrived is asked for again, not taken as loaded:
+      // StrictMode's second mount, or a scan's refresh that cut it off.
+      if (!landed) listKeyRef.current = null;
     };
   }, [libraryQuery, sort, scanRevision]);
 
@@ -432,7 +456,7 @@ export function LibraryView(): JSX.Element {
       }
       setDropMessage(`Scanned ${items}.`);
       // The scan went through; a failed page refresh isn't a failed scan.
-      await reloadLibraryPage().catch((error) => console.error('library reload after drop failed', error));
+      await reloadLibraryPageRef.current().catch((error) => console.error('library reload after drop failed', error));
       refreshLibrarySummary();
     } catch (error) {
       console.error('dropped scan failed', error);
@@ -440,8 +464,11 @@ export function LibraryView(): JSX.Element {
     }
   }
 
-  async function loadMoreTracks(): Promise<void> {
-    if (loadMoreInFlightRef.current || !hasMoreTracks) return;
+  async function loadMoreTracks(background = false): Promise<void> {
+    // Until the new list's first page is in, the offset is still the old list's.
+    if (firstPagePendingRef.current || loadMoreInFlightRef.current || !hasMoreTracks) return;
+    const limit = background ? Math.min(LIBRARY_MORE_PAGE_SIZE, LIBRARY_QUEUE_LIMIT - rowsReadRef.current) : LIBRARY_MORE_PAGE_SIZE;
+    if (limit <= 0) return;
     const generation = loadGenerationRef.current;
     loadMoreInFlightRef.current = true;
     setLoadMoreFailed(false);
@@ -451,12 +478,10 @@ export function LibraryView(): JSX.Element {
       // above this point shifts the rest down, so a page can repeat what is
       // already shown; appendTrackPage drops those and the offset still moves a
       // whole page on.
-      const rows = await api.getTracks({
-        search: libraryQuery,
-        sort,
-        limit: LIBRARY_MORE_PAGE_SIZE,
-        offset: rowsReadRef.current,
-      });
+      const [rows, total] = await Promise.all([
+        api.getTracks({ search: libraryQuery, sort, limit, offset: rowsReadRef.current }),
+        api.getTrackCount({ search: libraryQuery, sort }),
+      ]);
       // The query/sort changed while this page was in flight — these rows belong
       // to a search the user already left; drop them rather than polluting the
       // current results.
@@ -465,18 +490,61 @@ export function LibraryView(): JSX.Element {
       // Deduped against the latest committed list inside the updater, so a
       // StrictMode double-fire can't append the same rows twice.
       setTracks((current) => appendTrackPage(current, rows));
-      // A full page says there may be more whatever the count says, which can
-      // be behind a scan; an empty one ends it, since the count can be ahead
-      // after rows were removed elsewhere.
-      setHasMoreTracks(
-        rows.length >= LIBRARY_MORE_PAGE_SIZE || (rows.length > 0 && rowsReadRef.current < matchingCountRef.current),
-      );
+      setMatchingTrackCount(total);
+      setHasMoreTracks(hasMoreTrackRows(rowsReadRef.current, total, rows.length));
     } catch (error) {
       // Without this the scroll would ask again at once and keep failing.
       if (generation === loadGenerationRef.current) {
         setLoadMoreFailed(true);
         pushToast({ tone: 'error', title: 'Could not load more tracks', detail: errorText(error) });
       }
+    } finally {
+      loadMoreInFlightRef.current = false;
+      setLoadingMore(false);
+    }
+  }
+
+  // Let the first page paint, then fill ordinary libraries a page per turn.
+  // Scrolling can still request pages above the automatic-loading cap. The
+  // main process answers one query at a time, so nothing is read for a search
+  // still being typed, and the first background page, the one that sorts the
+  // whole match, waits out a pause in the typing.
+  const backgroundLoadRef = useRef(loadMoreTracks);
+  backgroundLoadRef.current = loadMoreTracks;
+  useEffect(() => {
+    if (search !== libraryQuery || staleListRef.current || loading || loadingMore || loadMoreFailed || !hasMoreTracks || rowsReadRef.current >= LIBRARY_QUEUE_LIMIT) return;
+    const wait = rowsReadRef.current <= LIBRARY_PAGE_SIZE ? LIBRARY_BACKGROUND_FIRST_MS : 20;
+    const timer = window.setTimeout(() => void backgroundLoadRef.current(true), wait);
+    return () => window.clearTimeout(timer);
+  }, [loading, loadingMore, loadMoreFailed, hasMoreTracks, tracks, search, libraryQuery, sort]);
+
+  async function revealTrack(id: number, stillWanted: () => boolean): Promise<boolean | 'retry'> {
+    if (loadMoreInFlightRef.current) return 'retry';
+    const generation = loadGenerationRef.current;
+    const isCurrent = () => generation === loadGenerationRef.current && stillWanted();
+    loadMoreInFlightRef.current = true;
+    setLoadingMore(true);
+    try {
+      const result = await readThroughTrack({
+        trackId: id,
+        offset: rowsReadRef.current,
+        total: matchingCountRef.current,
+        pageSize: LIBRARY_MORE_PAGE_SIZE,
+        getIds: (offset, limit) => api.getTrackIds({ search: libraryQuery, sort, offset, limit }),
+        getPosition: (trackId) => positionCacheRef.current.find(trackId, matchingCountRef.current,
+          (offset, limit) => api.getTrackIds({ search: libraryQuery, sort, offset, limit })),
+        maxRows: LIBRARY_QUEUE_LIMIT,
+        getPage: (offset, limit) => api.getTracks({ search: libraryQuery, sort, offset, limit }),
+        isCurrent,
+        pause: () => new Promise((resolve) => window.setTimeout(resolve, 20)),
+      });
+      if (!result || !isCurrent()) return generation !== loadGenerationRef.current && stillWanted() ? 'retry' : false;
+      rowsReadRef.current = result.offset;
+      setTracks((rows) => result.replace ? result.rows : appendTrackPage(rows, result.rows));
+      setHasMoreTracks(result.hasMore);
+      return true;
+    } catch {
+      return false;
     } finally {
       loadMoreInFlightRef.current = false;
       setLoadingMore(false);
@@ -535,50 +603,77 @@ export function LibraryView(): JSX.Element {
   }
 
   async function reloadLibraryPage(): Promise<void> {
+    positionCacheRef.current.invalidate();
+    const generation = loadGenerationRef.current;
     const [nextTracks, nextCount] = await Promise.all([
       api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
       api.getTrackCount({ search: libraryQuery, sort }),
     ]);
+    // A search, a sort or a scan's reload read the list again in the meantime,
+    // or a scan's reload is still reading it and settles it when it lands.
+    if (generation !== loadGenerationRef.current || staleListRef.current) return;
+    // A page still in flight was asked for at the old offset.
+    loadGenerationRef.current += 1;
     rowsReadRef.current = nextTracks.length;
     setTracks(nextTracks);
     setMatchingTrackCount(nextCount);
-    setHasMoreTracks(nextTracks.length < nextCount);
+    setHasMoreTracks(hasMoreTrackRows(nextTracks.length, nextCount, nextTracks.length));
   }
+  // Called after a long wait on the main process, by which time the search or
+  // sort may have changed; through the ref it reads the list now shown.
+  const reloadLibraryPageRef = useRef(reloadLibraryPage);
+  reloadLibraryPageRef.current = reloadLibraryPage;
 
   // Reads again every row the list has loaded, without blanking it, so tracks a
   // scan added, retagged or removed inside the loaded range show up and the
   // paging offset matches the library again.
   async function reloadLoadedRows(): Promise<void> {
+    positionCacheRef.current.invalidate();
+    setLoadingMore(true);
     const generation = loadGenerationRef.current;
+    // Scans that finish close together start a reload each; the last one
+    // started read the library after all of them, so it is the one kept.
+    const reload = ++reloadSeqRef.current;
+    const isCurrent = (): boolean => generation === loadGenerationRef.current && reload === reloadSeqRef.current;
     const target = Math.max(rowsReadRef.current, LIBRARY_PAGE_SIZE);
     const query = libraryQuery;
     const order = sort;
     try {
       const rows: Track[] = [];
       while (rows.length < target) {
-        const page = await api.getTracks({
-          search: query,
-          sort: order,
-          limit: Math.min(LIBRARY_MORE_PAGE_SIZE, target - rows.length),
-          offset: rows.length,
-        });
-        if (generation !== loadGenerationRef.current) return;
+        const limit = Math.min(LIBRARY_MORE_PAGE_SIZE, target - rows.length);
+        const page = await api.getTracks({ search: query, sort: order, limit, offset: rows.length });
+        if (!isCurrent()) return;
         if (!page.length) break;
         rows.push(...page);
+        if (rows.length >= target || page.length < limit) break;
         await new Promise((resolve) => window.setTimeout(resolve, 20));
-        if (generation !== loadGenerationRef.current) return;
+        if (!isCurrent()) return;
       }
       const count = await api.getTrackCount({ search: query, sort: order });
-      if (generation !== loadGenerationRef.current) return;
+      if (!isCurrent()) return;
       // A page requested before this read finished was cut from the library as
       // it stood before the scan, and would be appended at the wrong offset.
       loadGenerationRef.current += 1;
+      staleListRef.current = false;
       rowsReadRef.current = rows.length;
+      setLoading(false);
+      setLoadMoreFailed(false);
       setTracks(rows);
       setMatchingTrackCount(count);
-      setHasMoreTracks(rows.length < count);
+      setHasMoreTracks(hasMoreTrackRows(rows.length, count, rows.length));
     } catch (error) {
+      if (isCurrent()) {
+        staleListRef.current = false;
+        setLoading(false);
+        // The flag is read while rendering, and nothing else here changes state.
+        setStaleTick((tick) => tick + 1);
+      }
       console.error('library reload after scan failed', error);
+    } finally {
+      // A page or a follow still reading clears it when it ends, which is what
+      // lets the background fill go on.
+      if (!loadMoreInFlightRef.current) setLoadingMore(false);
     }
   }
 
@@ -588,7 +683,9 @@ export function LibraryView(): JSX.Element {
   // full the loaded rows and the scroll position are left alone and only the
   // count moves; the finished scan reads the loaded rows again as well.
   function refreshAfterScan(finished: boolean): void {
+    positionCacheRef.current.invalidate();
     const loaded = tracksRef.current.length;
+    if (finished || loaded < LIBRARY_PAGE_SIZE) staleListRef.current = true;
     if (finished ? loaded <= LIBRARY_PAGE_SIZE : loaded < LIBRARY_PAGE_SIZE) {
       setScanRevision((revision) => revision + 1);
     } else if (finished) {
@@ -609,7 +706,7 @@ export function LibraryView(): JSX.Element {
       const count = await api.getTrackCount({ search: libraryQuery, sort });
       if (generation !== loadGenerationRef.current) return;
       setMatchingTrackCount(count);
-      setHasMoreTracks(rowsReadRef.current < count);
+      setHasMoreTracks(hasMoreTrackRows(rowsReadRef.current, count, tracksRef.current.length));
     } catch (error) {
       console.error('library count after scan failed', error);
     }
@@ -621,6 +718,7 @@ export function LibraryView(): JSX.Element {
 
   async function toggleLove(id: number): Promise<void> {
     const loved = await toggleCurrentLove(id);
+    positionCacheRef.current.invalidate();
     const nextLoved: 0 | 1 = loved ? 1 : 0;
     // On the Loved sort an un-loved track leaves the list, and the library's
     // order moves up by one with it.
@@ -637,12 +735,14 @@ export function LibraryView(): JSX.Element {
 
   async function rateTrack(id: number, rating: number): Promise<void> {
     const updated = await setTrackRating(id, rating);
+    positionCacheRef.current.invalidate();
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === id ? updated : track)));
     api.getTrackCount({ search: libraryQuery, sort }).then(setMatchingTrackCount).catch(() => undefined);
   }
 
   async function toggleAvoid(id: number): Promise<void> {
+    positionCacheRef.current.invalidate();
     const updated = await toggleAvoidAutoPlay(id);
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === id ? updated : track)));
@@ -679,6 +779,7 @@ export function LibraryView(): JSX.Element {
     const updated = await api.applyTrackMetadataPatch(metadataPanel.track.id, candidate);
     if (!updated) return;
     setTracks((rows) => rows.map((track) => (track.id === updated.id ? updated : track)));
+    positionCacheRef.current.invalidate();
     usePlayerStore.getState().refreshTracks([updated]);
     refreshLibrarySummary();
     setMetadataPanel({
@@ -696,6 +797,7 @@ export function LibraryView(): JSX.Element {
     const updated = await api.applyTrackMetadataEdit(metadataPanel.track.id, patch);
     if (!updated) return null;
     setTracks((rows) => rows.map((track) => (track.id === updated.id ? updated : track)));
+    positionCacheRef.current.invalidate();
     usePlayerStore.getState().refreshTracks([updated]);
     refreshLibrarySummary();
     // A field whose file value isn't known yet (its file couldn't be read)
@@ -723,7 +825,7 @@ export function LibraryView(): JSX.Element {
     try {
       const count = await api.resetAdoptedMetadata();
       setCleanupStatus(`Restored ${count.toLocaleString()} field${count === 1 ? '' : 's'} from the files' tags.`);
-      await reloadLibraryPage().catch(() => undefined);
+      await reloadLibraryPageRef.current().catch(() => undefined);
       refreshLibrarySummary();
       usePlayerStore.getState().refreshTracks(await freshPlayerTracks(usePlayerStore.getState(), api.getTracksByIds));
     } catch (error) {
@@ -733,6 +835,7 @@ export function LibraryView(): JSX.Element {
 
   function applyBulkMetadataResults(updated: Track[]): void {
     if (!updated.length) return;
+    positionCacheRef.current.invalidate();
     const byId = new Map(updated.map((track) => [track.id, track]));
     setTracks((rows) => rows.map((track) => byId.get(track.id) ?? track));
     refreshLibrarySummary();
@@ -789,10 +892,11 @@ export function LibraryView(): JSX.Element {
         : `Nothing was removed.${kept}`,
     );
     // The result names the rows that went when it can; without them, refetch.
-    await refreshAfterRemoval(result.removedIds);
+    await refreshAfterRemovalRef.current(result.removedIds);
   }
 
   async function refreshAfterRemoval(removedIds?: number[]): Promise<void> {
+    positionCacheRef.current.invalidate();
     if (removedIds?.length) {
       // Refetching page one would throw away every loaded page, the scroll
       // position and the selection over a handful of rows.
@@ -805,12 +909,13 @@ export function LibraryView(): JSX.Element {
         const count = await api.getTrackCount({ search: libraryQuery, sort });
         if (generation !== loadGenerationRef.current) return;
         setMatchingTrackCount(count);
-        setHasMoreTracks(rowsReadRef.current < count);
+        setHasMoreTracks(hasMoreTrackRows(rowsReadRef.current, count, tracksRef.current.length));
       } catch (error) {
         console.error('library count after removal failed', error);
       }
       return;
     }
+    const generation = loadGenerationRef.current;
     try {
       const [nextTracks, nextCount, nextStats, nextHealth] = await Promise.all([
         api.getTracks({ search: libraryQuery, sort, limit: LIBRARY_PAGE_SIZE, offset: 0 }),
@@ -818,12 +923,17 @@ export function LibraryView(): JSX.Element {
         api.getStats(),
         api.getLibraryHealth(),
       ]);
+      setStats(nextStats);
+      setHealth(nextHealth);
+      // The totals are the library's whatever the list; the rows only stand if
+      // no newer read of the list has replaced them or is still to land, and a
+      // page in flight, asked for at the old offset, is dropped.
+      if (generation !== loadGenerationRef.current || staleListRef.current) return;
+      loadGenerationRef.current += 1;
       rowsReadRef.current = nextTracks.length;
       setTracks(nextTracks);
       setMatchingTrackCount(nextCount);
-      setHasMoreTracks(nextTracks.length < nextCount);
-      setStats(nextStats);
-      setHealth(nextHealth);
+      setHasMoreTracks(hasMoreTrackRows(nextTracks.length, nextCount, nextTracks.length));
     } catch (error) {
       console.error('library refresh after cleanup failed', error);
     }
@@ -1110,6 +1220,8 @@ export function LibraryView(): JSX.Element {
         />
       )}
       <LibraryTrackPane
+        listKey={`${libraryQuery}\u0000${sort}`}
+        onRevealTrack={revealTrack}
         tracks={tracks}
         loading={loading}
         hasLibrary={hasLibrary}
@@ -1117,7 +1229,7 @@ export function LibraryView(): JSX.Element {
         currentId={current?.id ?? null}
         matchingTrackCount={matchingTrackCount}
         hasMoreTracks={hasMoreTracks}
-        loadingMore={loadingMore}
+        loadingMore={loadingMore || staleListRef.current}
         loadMoreFailed={loadMoreFailed}
         onLoadMore={() => void loadMoreTracks()}
         onPlay={playFromRow}
@@ -1182,9 +1294,10 @@ function LibraryPagingFooter({
   loading: boolean;
   onLoadMore: () => void;
 }): JSX.Element | null {
-  if (!hasMore && (!total || shown >= total)) return null;
+  if (!hasMore || (total != null && shown >= total)) return null;
   return (
     <div
+      data-library-paging-footer
       className="sticky bottom-0 flex items-center justify-between border-t px-3 py-2 text-[11px]"
       style={{ background: 'var(--panel)', borderColor: 'var(--line)', color: 'var(--ink-2)' }}
     >
@@ -1247,6 +1360,8 @@ function hasDraggedFiles(dataTransfer: DataTransfer): boolean {
  * shareable (other views render TrackTable without virtualisation).
  */
 function LibraryTrackPane({
+  listKey,
+  onRevealTrack,
   tracks,
   loading,
   hasLibrary,
@@ -1259,6 +1374,8 @@ function LibraryTrackPane({
   onLoadMore,
   ...tableProps
 }: {
+  listKey: string;
+  onRevealTrack: (id: number, stillWanted: () => boolean) => Promise<boolean | 'retry'>;
   tracks: Track[];
   loading: boolean;
   hasLibrary: boolean;
@@ -1303,6 +1420,106 @@ function LibraryTrackPane({
     if (wantsMore) onLoadMoreRef.current();
   }, [wantsMore, tracks.length]);
 
+  const [hasSelection, setHasSelection] = useState(false);
+  // The selection goes with the table while the list loads or is empty.
+  const tableShown = !loading && tracks.length > 0;
+  useEffect(() => { if (!tableShown) setHasSelection(false); }, [tableShown]);
+  const selecting = hasSelection && tableShown;
+  const [idleRevision, setIdleRevision] = useState(0);
+  const lastCurrentIdRef = useRef(currentId);
+  const lastListKeyRef = useRef(listKey);
+  const pendingFollowRef = useRef<number | null>(null);
+  const attemptedReadRef = useRef<number | null>(null);
+  const userScrollAtRef = useRef(-Infinity);
+  const idleTimerRef = useRef<number | null>(null);
+  const pointerDownRef = useRef(false);
+  const followScrollTopRef = useRef<number | null>(null);
+  const followStateRef = useRef({ selecting, currentId, listKey });
+  followStateRef.current = { selecting, currentId, listKey };
+  const onRevealTrackRef = useRef(onRevealTrack);
+  onRevealTrackRef.current = onRevealTrack;
+  const deferFollow = (): void => {
+    userScrollAtRef.current = Date.now();
+    followScrollTopRef.current = null;
+    if (idleTimerRef.current != null) window.clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = window.setTimeout(() => setIdleRevision((revision) => revision + 1), 900);
+  };
+  useEffect(() => {
+    // Only a press that began in the list holds the follow; a click on Next in
+    // the transport must not delay it.
+    const release = (): void => {
+      if (!pointerDownRef.current) return;
+      pointerDownRef.current = false;
+      deferFollow();
+    };
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
+    window.addEventListener('blur', release);
+    return () => {
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
+      window.removeEventListener('blur', release);
+      if (idleTimerRef.current != null) window.clearTimeout(idleTimerRef.current);
+      pendingFollowRef.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    if (lastListKeyRef.current !== listKey || lastCurrentIdRef.current !== currentId) {
+      const trackChanged = lastCurrentIdRef.current !== currentId;
+      const listChanged = lastListKeyRef.current !== listKey;
+      lastListKeyRef.current = listKey;
+      lastCurrentIdRef.current = currentId;
+      attemptedReadRef.current = null;
+      // Radio and podcast items (id <= 0) are never in the library.
+      pendingFollowRef.current = trackChanged && currentId != null && currentId > 0 ? currentId : null;
+      // The rows on screen belong to the list being replaced; follow in the new one.
+      if (listChanged) return;
+    }
+    if (selecting) { pendingFollowRef.current = null; return; }
+    const wanted = pendingFollowRef.current;
+    const stillWanted = (): boolean => {
+      const state = followStateRef.current;
+      return pendingFollowRef.current === wanted && state.currentId === wanted && state.listKey === listKey &&
+        !state.selecting;
+    };
+    if (wanted == null || !stillWanted() || loading || loadingMore || pointerDownRef.current ||
+        Date.now() - userScrollAtRef.current < 900) return;
+    const index = tracks.findIndex((track) => track.id === wanted);
+    if (index < 0) {
+      if (attemptedReadRef.current === wanted) return;
+      attemptedReadRef.current = wanted;
+      void onRevealTrackRef.current(wanted, stillWanted).then((found) => {
+        // Another read held the list, or replaced it: try again once it is done.
+        if (found === 'retry') {
+          if (attemptedReadRef.current === wanted) attemptedReadRef.current = null;
+          return;
+        }
+        if (!found && pendingFollowRef.current === wanted) pendingFollowRef.current = null;
+      });
+      return;
+    }
+    pendingFollowRef.current = null;
+    const el = scrollRef.current;
+    const table = el?.querySelector('table');
+    const body = table?.tBodies[0];
+    if (!el || !body) return;
+    const next = playingRowScrollTop({
+      index,
+      rowHeight: LIBRARY_ROW_HEIGHT,
+      bodyTop: body.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop,
+      headerHeight: table.tHead?.getBoundingClientRect().height ?? 0,
+      scrollTop: el.scrollTop,
+      viewportHeight: el.clientHeight,
+      footerHeight: el.querySelector('[data-library-paging-footer]')?.getBoundingClientRect().height ?? 0,
+    });
+    if (next !== el.scrollTop) {
+      el.scrollTop = next;
+      // Chromium rounds scrollTop; compare against the value it accepted.
+      followScrollTopRef.current = el.scrollTop;
+      onScroll({ currentTarget: el });
+    }
+  }, [currentId, listKey, tracks, loading, loadingMore, hasMoreTracks, loadMoreFailed, selecting, idleRevision, onScroll, scrollRef]);
+
   if (loading) {
     return (
       <div className="flex-1 overflow-auto">
@@ -1340,12 +1557,26 @@ function LibraryTrackPane({
   return (
     <div
       ref={scrollRef}
-      onScroll={onScroll}
+      data-newamp-library-scroll
+      onScroll={(event) => {
+        if (event.currentTarget.scrollTop !== followScrollTopRef.current) deferFollow();
+        onScroll(event);
+      }}
+      onWheelCapture={deferFollow}
+      onTouchStartCapture={deferFollow}
+      // A Control-click on a Mac is a primary press that opens the menu.
+      onContextMenuCapture={() => { pointerDownRef.current = false; deferFollow(); }}
+      // A right-click's release goes to the native menu, not to this window.
+      onPointerDownCapture={(event) => { if (event.button === 0) pointerDownRef.current = true; deferFollow(); }}
+      onKeyDownCapture={(event) => {
+        if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(event.key)) deferFollow();
+      }}
       className="min-h-[240px] flex-1 overflow-auto"
     >
       <TrackTable
         tracks={tracks}
         currentId={currentId}
+        onSelectionChange={setHasSelection}
         virtualWindow={{ startIndex, endIndex, topPad, bottomPad }}
         totalRowCount={matchingTrackCount}
         {...tableProps}
@@ -1585,7 +1816,7 @@ export function LibraryHealthPanel({
           <span className="text-right">{health.quality.replayGainMissing.toLocaleString()}</span>
         </div>
         {prunePreview && (
-          <div data-newamp-prune-preview className="bevel-in mt-2 grid gap-2 px-2 py-2" style={{ color: 'var(--ink-2)' }}>
+          <div data-newamp-prune-preview className="bevel-in display-well mt-2 grid gap-2 px-2 py-2" style={{ color: 'var(--ink-2)' }}>
             <div>{prunePreviewText(prunePreview)}</div>
             <div className="flex gap-2">
               <button className="pxbtn is-active" onClick={onConfirmPrune}>
@@ -1669,7 +1900,7 @@ export function LibraryHealthPanel({
                 key={move.label}
                 type="button"
                 data-newamp-compass-move
-                className="bevel-in block w-full px-2 py-[5px] text-left"
+                className="bevel-in display-well block w-full px-2 py-[5px] text-left"
                 title={`${move.detail} Click to list these tracks.`}
                 onClick={() => onSearchCompassMove(move.query!)}
               >
@@ -1940,6 +2171,17 @@ const LibraryRow = memo(function LibraryRow({
             </select>
           </td>
         );
+      case 'position':
+        return (
+          <td
+            key={key}
+            data-track-position={absoluteIndex + 1}
+            className="px-2 py-[5px] text-right tabular-nums"
+            style={{ color: 'var(--muted)' }}
+          >
+            {(absoluteIndex + 1).toLocaleString()}
+          </td>
+        );
       case 'number':
         return (
           <td
@@ -2205,9 +2447,11 @@ export function TrackTable({
   virtualWindow,
   highlightTrack,
   totalRowCount,
+  onSelectionChange,
 }: {
   tracks: Track[];
   currentId: number | null;
+  onSelectionChange?: (selected: boolean) => void;
   search?: string;
   onPlay: (index: number) => void;
   onPlayTracks?: (tracks: Track[]) => void;
@@ -2252,6 +2496,7 @@ export function TrackTable({
     [tracks, localPatches],
   );
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
+  useEffect(() => { onSelectionChange?.(selectedIds.size > 0); }, [onSelectionChange, selectedIds]);
   const showMetadataLookup = !!onMetadataLookup;
   const showQueueActions = !!onPlayNext || !!onAddToQueue;
   const playlistTargets = useSavedPlaylists();
@@ -2502,7 +2747,7 @@ export function TrackTable({
         return headerCell('select', (
           <input
             type="checkbox"
-            aria-label="Select all visible tracks"
+            aria-label="Select all loaded tracks"
             checked={allVisibleSelected}
             onChange={(event) => setAllVisibleSelected(event.currentTarget.checked)}
           />
@@ -2529,6 +2774,8 @@ export function TrackTable({
         return headerCell('queue', 'Queue');
       case 'playlist':
         return headerCell('playlist', 'Playlist');
+      case 'position':
+        return headerCell('position', 'Position', 'text-right tabular-nums', 'list position');
       case 'number':
         return headerCell('number', '#', 'text-right tabular-nums', 'track number');
       case 'title':

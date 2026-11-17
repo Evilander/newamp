@@ -117,6 +117,17 @@ function formatScore(value: number | null): string {
   return value.toFixed(1);
 }
 
+export function parseScoreDraft(value: string): number | null {
+  const normalized = value.trim()
+    .replace(/[٠-٩۰-۹０-９]/g, (digit) => String(digit.charCodeAt(0) - (digit <= '٩' ? 0x660 : digit <= '۹' ? 0x6f0 : 0xff10)))
+    .replace(/[٫,．，]/g, '.');
+  // Three digits after a separator may be a thousands group, not a decimal.
+  if (/^[+-]?\d{1,3}\.\d{3}$/.test(normalized)) return null;
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized)) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? clampScore(parsed) : null;
+}
+
 /** `color` paints the bar; `text` is the same tone for the number and the label, which sit on a panel. */
 export function scoreTier(value: number | null): { label: string; color: string; text: string } {
   if (value == null) return { label: 'unrated', color: 'var(--muted)', text: 'var(--muted)' };
@@ -139,22 +150,45 @@ interface ScoreRatingProps {
   /** Legacy integer star rating (0..5), shown beneath for context. */
   stars?: number;
   onChange: (score: number | null) => void;
+  /** Optional star editor for an independently stored album score. */
+  onStarsChange?: (stars: number) => void;
+  /** What is being rated. When it changes under an edit (the track ends while
+   *  a score is half typed), the edit is dropped instead of saved to the next
+   *  one, and the field keeps the focus, so the rest of what is typed does not
+   *  reach the player's shortcuts either. */
+  identity?: string | number;
 }
 
-export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): JSX.Element {
+export function ScoreRating({ value, stars = 0, onChange, onStarsChange, identity }: ScoreRatingProps): JSX.Element {
   const barRef = useRef<HTMLDivElement>(null);
-  const [draft, setDraft] = useState<string>('');
+  const [draft, setDraft] = useState<string>(() => value != null ? formatScore(value) : '');
   const [editingInput, setEditingInput] = useState(false);
   const [pointerActive, setPointerActive] = useState(false);
+  const [hoverStars, setHoverStars] = useState<number | null>(null);
+  const [focusedStar, setFocusedStar] = useState<number | null>(null);
+  const inputSession = useRef({ value, cancelled: false });
+  // A key held across the change keeps repeating; those repeats were meant
+  // for the last one.
+  const heldAcross = useRef(false);
+  const [rated, setRated] = useState(identity);
+  if (rated !== identity) {
+    setRated(identity);
+    inputSession.current = { value, cancelled: true };
+    heldAcross.current = true;
+    setDraft(value != null ? formatScore(value) : '');
+    setPointerActive(false);
+  }
   const latest = useRef({ value, onChange });
   latest.current = { value, onChange };
   const tier = scoreTier(value);
+  // The field announces the number it shows, typed or nudged, before it is saved.
+  const drafted = editingInput && draft.trim() ? parseScoreDraft(draft) ?? value : value;
   const display = value ?? 0;
   const fillPct = (display / SCORE_MAX) * 100;
 
   // Keep the visible number field from fighting the user while they type.
   useEffect(() => {
-    if (!editingInput) setDraft(value != null ? value.toFixed(1) : '');
+    if (!editingInput) setDraft(value != null ? formatScore(value) : '');
   }, [value, editingInput]);
 
   // Wheel over the bar nudges the score. Bound by hand because React's onWheel
@@ -190,19 +224,23 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
   }
 
   function commitDraft(): void {
-    const nextDraft = draft.trim();
-    if (!nextDraft) {
-      onChange(null);
+    const original = inputSession.current.value;
+    if (inputSession.current.cancelled) {
+      setDraft(original != null ? formatScore(original) : '');
       return;
     }
-    const parsed = Number(nextDraft);
-    if (Number.isFinite(parsed)) {
-      const next = clampScore(parsed);
-      onChange(next);
-      setDraft(next.toFixed(1));
-    } else {
-      setDraft(value != null ? value.toFixed(1) : '');
+    const next = draft.trim() ? parseScoreDraft(draft) : null;
+    if (draft.trim() && next == null) {
+      setDraft(original != null ? formatScore(original) : '');
+      return;
     }
+    if (next !== original) onChange(next);
+    setDraft(next != null ? formatScore(next) : '');
+  }
+
+  function selectStar(star: number): void {
+    setFocusedStar(star);
+    if (star !== stars) onStarsChange?.(star);
   }
 
   return (
@@ -219,26 +257,37 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
         className="score-rating-display"
         title="Type an exact score, or use the bar/wheel/arrow keys. Right-click to clear."
       >
+        {/* A native number field localizes its visible value independently of
+            the draft. Keep one decimal format and accept either separator. */}
         <input
-          type="number"
+          type="text"
+          role="spinbutton"
           aria-label="Score out of 100"
-          min={0}
-          max={SCORE_MAX}
-          step={SCORE_STEP_FINE}
+          aria-valuemin={0}
+          aria-valuemax={SCORE_MAX}
+          aria-valuenow={drafted ?? undefined}
+          aria-valuetext={scoreValueText(drafted)}
           inputMode="decimal"
           value={draft}
           placeholder={formatScore(value)}
           onFocus={(event) => {
+            inputSession.current = { value, cancelled: false };
             setEditingInput(true);
             event.currentTarget.select();
           }}
           onChange={(event) => setDraft(event.currentTarget.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              commitDraft();
+            if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+              event.preventDefault();
+              const step = event.altKey ? SCORE_STEP_LEAP : event.shiftKey ? SCORE_STEP_COARSE : SCORE_STEP_FINE;
+              const next = clampScore((parseScoreDraft(draft) ?? value ?? 0) + (event.key === 'ArrowUp' ? step : -step));
+              setDraft(formatScore(next));
+            } else if (event.key === 'Enter') {
+              event.preventDefault();
               event.currentTarget.blur();
             } else if (event.key === 'Escape') {
-              setDraft(value != null ? value.toFixed(1) : '');
+              event.preventDefault();
+              inputSession.current.cancelled = true;
               event.currentTarget.blur();
             }
           }}
@@ -280,6 +329,12 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
         }}
         onPointerCancel={() => setPointerActive(false)}
         onKeyDown={(event) => {
+          if (heldAcross.current) {
+            // Only the keys the bar acts on; a held Tab passes through.
+            const acts = ['ArrowRight', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'Home', 'End', 'Delete', 'Backspace'].includes(event.key);
+            if (event.repeat && acts) { event.preventDefault(); return; }
+            if (!event.repeat) heldAcross.current = false;
+          }
           const step = event.altKey
             ? SCORE_STEP_LEAP
             : event.shiftKey
@@ -325,9 +380,48 @@ export function ScoreRating({ value, stars = 0, onChange }: ScoreRatingProps): J
         <span className="score-rating-tier" style={{ color: tier.text }}>
           {tier.label}
         </span>
-        <span className="score-rating-stars" role="img" aria-label={`${stars} of 5 stars`}>
-          {'\u2605'.repeat(stars).padEnd(5, '\u2606')}
-        </span>
+        {onStarsChange ? (
+          <span
+            className="score-rating-stars"
+            role="radiogroup"
+            aria-label="Album star rating"
+            onMouseLeave={() => setHoverStars(null)}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setFocusedStar(null);
+            }}
+          >
+            {[1, 2, 3, 4, 5].map((star) => (
+              <button
+                key={star}
+                type="button"
+                role="radio"
+                aria-label={`${star} album star${star === 1 ? '' : 's'}`}
+                aria-checked={star === stars}
+                tabIndex={star === (focusedStar ?? (stars || 1)) ? 0 : -1}
+                title={`Rate album ${star} star${star === 1 ? '' : 's'} (${star * 20}/100). Song ratings stay unchanged. Use CLR to clear.`}
+                onMouseEnter={() => setHoverStars(star)}
+                onClick={() => selectStar(star)}
+                onKeyDown={(event) => {
+                  let next = star;
+                  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = star % 5 + 1;
+                  else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (star + 3) % 5 + 1;
+                  else if (event.key === 'Home') next = 1;
+                  else if (event.key === 'End') next = 5;
+                  else return;
+                  event.preventDefault();
+                  selectStar(next);
+                  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next - 1]?.focus();
+                }}
+              >
+                {star <= (hoverStars ?? stars) ? '\u2605' : '\u2606'}
+              </button>
+            ))}
+          </span>
+        ) : (
+          <span className="score-rating-stars" role="img" aria-label={`${stars} of 5 stars`} title="The track's stars follow its score. Set them directly with the stars on the track's row.">
+            {'\u2605'.repeat(stars).padEnd(5, '\u2606')}
+          </span>
+        )}
         <button
           type="button"
           className="score-rating-clear"

@@ -4,7 +4,11 @@
 // the renderer wiring is pinned in source.
 // Run: node scripts/open-files-queue-test.mjs
 import assert from 'node:assert/strict';
-import { build } from 'esbuild';
+import { build, transform } from 'esbuild';
+import vm from 'node:vm';
+import { LibraryStore } from '../dist-electron/electron/library.js';
+import { authorizeAudioProtocolPath } from '../dist-electron/electron/audio-protocol-authorize.js';
+import { extname, join } from 'node:path';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -121,6 +125,39 @@ async function reset(patch = {}) {
 }
 
 try {
+  // Open With, File > Open and drops share openFiles; execute its actual
+  // read/lookup path with no configured folders, then play its returned rows.
+  {
+    await reset();
+    const library = await LibraryStore.open(join(root, `outside-${Date.now()}.db`));
+    const openedFiles = new Set();
+    const outside = join(root, 'outside-every-folder.flac');
+    const main = readFileSync('electron/main.ts', 'utf8');
+    const extract = name => main.match(new RegExp(`async function ${name}\\([\\s\\S]*?\\n\\}`))[0];
+    const sandbox = {
+      library, OPEN_AUDIO_EXTS: new Set(['.flac']), OPEN_PLAYLIST_EXTS: new Set(), OPENED_FILE_READS: 4,
+      normalizeOpenTargets: async paths => paths.map(path => ({ path, kind: 'file' })),
+      extname, allowOpenedAudioFile: async path => { openedFiles.add(path); }, recordRecentDocuments() {},
+      readOpenedFolders: async () => ({ unread: [] }),
+      readTrackFile: async path => ({ ...track(1), path, year: null, genre: null, trackNo: 1, discNo: 1, size: 1, mtime: 1, art: null, bitrate: null, sampleRate: null, bpm: null, key: null }),
+      retryStorageErrors: op => op(),
+    };
+    const code = await transform(extract('readOpenedFiles') + '\n' + extract('openFiles') + '\nglobalThis.open = openFiles;', { loader: 'ts' });
+    vm.runInNewContext(code.code, sandbox);
+    const result = await sandbox.open([outside]);
+    assert.equal(result.tracks.length, 1, 'outside opened file survives write then lookup');
+    assert.equal(result.skipped.length, 0);
+    const authorized = await authorizeAudioProtocolPath(new URL('newamp://track/' + encodeURIComponent(outside)), {
+      libraryRoots: [], openedFiles, getPodcastDownloadsRealRoot: async () => null,
+      getTracksByPaths: paths => library.getTracksByPaths(paths), realpath: async path => path,
+      retry: op => op(),
+    });
+    assert.equal(authorized.ok, true, 'outside open/drop file is authorized for audio');
+    await state().playTracksNow(result.tracks);
+    assert.equal(state().current.path, outside);
+    assert.equal(plays.at(-1), result.tracks[0].id, 'outside file reaches transport');
+    library.close();
+  }
   // ---- a long queue survives an opened file ----
   {
     await reset();

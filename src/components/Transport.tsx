@@ -242,7 +242,7 @@ export function Transport(): JSX.Element {
           >
             <RepeatIcon one={repeatModeOf(mode) === 'one'} />
           </button>
-          <VolumeSlider value={volume} onChange={(v) => void setVolume(v)} width={120} />
+          <VolumeSlider value={volume} onChange={(v) => void setVolume(v, 'slider')} width={120} />
         </div>
       </div>
     </footer>

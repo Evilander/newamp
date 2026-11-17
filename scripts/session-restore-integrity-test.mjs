@@ -98,6 +98,10 @@ assert.deepEqual(
     assert.equal(idle.currentTrackId, null, 'settings must keep a null current id');
 
     store.set({ resumeState: { queueTrackIds: [11, 12, 13], index: 1, currentTrackId: 12, currentTime: 30, mode: 'normal', updatedAt: 1 } });
+    store.set({ resumeState: { ...store.get().resumeState, finiteQueue: true } });
+    assert.equal(store.get().resumeState.finiteQueue, true, 'settings preserve finite queue');
+    store.flushSync();
+    assert.equal(new SettingsStore(join(dir, 'settings.json')).get().resumeState.finiteQueue, true, 'finite flag survives disk reopen');
     const active = store.get().resumeState;
     assert.equal(active.index, 1);
     assert.equal(active.currentTrackId, 12, 'settings must round-trip the current track id');

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DiscoverMission, DiscoverMixCard, DiscoverSurface, Track, VisualizerPreset } from '@shared/types';
+import { buildDiscoverVisualPlan, visualNightCardSubtitle, visualNightMissionSubtitle } from '@shared/discover';
+import { playDiscoverQueue } from '../../lib/discover-playback';
 import { api } from '../../lib/api';
 import { formatDuration } from '../../lib/format';
 import { usePlayerStore } from '../../store/usePlayerStore';
@@ -7,18 +9,29 @@ import { pushToast } from '../../lib/toast';
 import { TrackTable } from './LibraryView';
 import { ViewOnboarding, HelpDot, useViewHelp } from '../ViewOnboarding';
 
-const TRACK_CHANGE_REBUILD_MS = 600;
+let sessionSurface: DiscoverSurface | null = null;
+let sessionRoots: string | null = null;
+// The last Reshuffle: its seed and the set it replaced. A rebuild after a scan
+// or a removal reuses both, so it gives back the set the user asked for
+// instead of the day's first one.
+let sessionReshuffle: { day: string; seed: string; previousTrackIds: number[] } | null = null;
+// Keep navigation from reviving a snapshot built before a library change.
+api.onTracksRemoved(() => { sessionSurface = null; });
+api.onScanProgress((progress) => {
+  if (progress.done && !progress.cancelled) sessionSurface = null;
+});
 
 export function DiscoverView(): JSX.Element {
   const help = useViewHelp('discover');
   const [surface, setSurface] = useState<DiscoverSurface | null>(null);
   const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
+  const [viewingCard, setViewingCard] = useState(false);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [lowEndMode, setLowEndMode] = useState(() => readBool('newamp:discover:lowEndMode', false));
   const [status, setStatus] = useState<string | null>(null);
   const current = usePlayerStore((s) => s.current);
-  const playQueue = usePlayerStore((s) => s.playQueue);
+  const playQueue = playDiscoverQueue;
   const queueTrackNext = usePlayerStore((s) => s.queueTrackNext);
   const addTrackToQueue = usePlayerStore((s) => s.addTrackToQueue);
   const queueTracksNext = usePlayerStore((s) => s.queueTracksNext);
@@ -27,57 +40,104 @@ export function DiscoverView(): JSX.Element {
   const setCompactMode = usePlayerStore((s) => s.setCompactMode);
   const setVizPreset = usePlayerStore((s) => s.setVizPreset);
 
-  // A new track rebuilds the picks around it, but skipping through a queue
-  // would otherwise ask for a rebuild per track. Opening the view and the Light
-  // Viz toggle build straight away.
-  const builtLowEnd = useRef<boolean | null>(null);
-  // The seed the surface was last built from: the day's, until Reshuffle picks
-  // another. A track change rebuilds with the same seed rather than dropping
-  // the reshuffle for the daily surface.
-  const activeSeed = useRef<string | null>(null);
-  // Bumped per build so an older, slower answer cannot replace a newer one.
   const buildSeq = useRef(0);
+  // The scan and removal listeners below keep the first render's closure.
+  const lowEndRef = useRef(lowEndMode);
+  lowEndRef.current = lowEndMode;
+  // A Reshuffle whose build has not landed. A scan that finishes meanwhile
+  // starts a build of its own, and that one carries the reshuffle on.
+  const pendingReshuffle = useRef<typeof sessionReshuffle>(null);
   useEffect(() => {
-    const immediate = builtLowEnd.current !== lowEndMode;
-    builtLowEnd.current = lowEndMode;
-    if (immediate) {
-      void refreshDiscover();
-      return;
-    }
-    const timer = setTimeout(() => void refreshDiscover(), TRACK_CHANGE_REBUILD_MS);
-    return () => clearTimeout(timer);
-  }, [current?.id, lowEndMode]);
+    let cancelled = false;
+    void api.getSettings().then((settings) => {
+      if (cancelled) return;
+      const roots = JSON.stringify(settings.libraryRoots);
+      if (!sessionSurface || sessionRoots !== roots) {
+        // A reshuffle was of the library as it was.
+        if (sessionRoots !== null && sessionRoots !== roots) sessionReshuffle = null;
+        sessionRoots = roots;
+        void refreshDiscover();
+      } else {
+        setSurface(sessionSurface);
+      }
+    }).catch(() => {
+      if (!cancelled && !sessionSurface) void refreshDiscover();
+    });
+    return () => { cancelled = true; buildSeq.current += 1; };
+  }, []);
+
+  useEffect(() => {
+    const offRemoved = api.onTracksRemoved(() => { void refreshDiscover(); });
+    const offScan = api.onScanProgress((progress) => {
+      if (progress.done && !progress.cancelled) void refreshDiscover();
+    });
+    return () => { offRemoved(); offScan(); };
+  }, []);
+
+  // Visual preferences change the plan, never the session's track list.
+  useEffect(() => {
+    setSurface((previous) => {
+      if (!previous) return previous;
+      const visualPlan = buildDiscoverVisualPlan(lowEndMode, previous.seed);
+      const next = {
+        ...previous,
+        cards: previous.cards.map((card) => card.id === 'visual-night'
+          ? { ...card, visualPlan, subtitle: visualNightCardSubtitle(lowEndMode) }
+          : card.visualPlan ? { ...card, visualPlan } : card),
+        missions: previous.missions.map((mission) => mission.id === 'visual-night'
+          ? { ...mission, visualPlan, subtitle: visualNightMissionSubtitle(lowEndMode) }
+          : mission.visualPlan ? { ...mission, visualPlan } : mission),
+      };
+      sessionSurface = next;
+      return next;
+    });
+  }, [lowEndMode]);
 
   const selectedMission = useMemo(
-    () => surface?.missions.find((mission) => mission.id === selectedMissionId) ?? surface?.missions[0] ?? null,
-    [surface, selectedMissionId],
+    () => viewingCard ? null : surface?.missions.find((mission) => mission.id === selectedMissionId) ?? surface?.missions[0] ?? null,
+    [surface, selectedMissionId, viewingCard],
   );
   const selectedCard = useMemo(
     () => surface?.cards.find((card) => card.id === selectedCardId) ?? surface?.cards[0] ?? null,
     [surface, selectedCardId],
   );
-  const tableTracks = selectedMission?.tracks.length ? selectedMission.tracks : selectedCard?.tracks ?? [];
+  const tableTracks = selectedMission ? selectedMission.tracks : selectedCard?.tracks ?? [];
 
-  async function refreshDiscover(seed = activeSeed.current ?? dailySeed()): Promise<void> {
+  // The day's first set comes from the date, as it always has. Reshuffle
+  // passes a seed of its own.
+  async function refreshDiscover(reshuffleSeed?: string): Promise<void> {
     const build = ++buildSeq.current;
-    activeSeed.current = seed === dailySeed() ? null : seed;
+    // Kept once the build is in; a new day starts from that day's set.
+    const today = dailySeed();
+    const reshuffle = reshuffleSeed
+      ? { day: today, seed: reshuffleSeed, previousTrackIds: tableTracks.map((track) => track.id) }
+      : pendingReshuffle.current ?? (sessionReshuffle?.day === today ? sessionReshuffle : null);
+    if (reshuffleSeed) pendingReshuffle.current = reshuffle;
+    const seed = reshuffle?.seed ?? today;
     setLoading(true);
     setStatus(null);
     try {
       const next = await api.getDiscoverSurface({
         seed,
+        seedTrackId: usePlayerStore.getState().current?.id ?? undefined,
         limit: 12,
-        lowEndMode,
-        seedTrackId: current?.id ?? null,
+        lowEndMode: lowEndRef.current,
+        previousTrackIds: reshuffle?.previousTrackIds,
       });
       if (build !== buildSeq.current) return;
+      sessionReshuffle = reshuffle;
+      pendingReshuffle.current = null;
+      sessionSurface = next;
       setSurface(next);
       setSelectedMissionId((id) => (id && next.missions.some((mission) => mission.id === id) ? id : next.missions[0]?.id ?? null));
       setSelectedCardId((id) => (id && next.cards.some((card) => card.id === id) ? id : next.cards[0]?.id ?? null));
       setStatus(next.missions.length ? `Built ${next.missions.length} Living Library mission${next.missions.length === 1 ? '' : 's'}.` : 'Scan music or rate tracks to unlock Discover.');
     } catch (err) {
       console.error('discover refresh failed', err);
-      if (build === buildSeq.current) setStatus('Discover could not build from the current library.');
+      if (build === buildSeq.current) {
+        pendingReshuffle.current = null;
+        setStatus('Discover could not build from the current library.');
+      }
     } finally {
       if (build === buildSeq.current) setLoading(false);
     }
@@ -139,7 +199,7 @@ export function DiscoverView(): JSX.Element {
         title="Discover"
         lede="Playlists built from your own listening history."
         bullets={[
-          'New Download Radar surfaces tracks added to your library since the last session.',
+          'New Download Radar shows your newest low-play files in date order.',
           'Forgotten Favorites resurfaces loved tracks that haven\'t played in a while.',
           'Deep Album Run picks an album you should listen to end-to-end again.',
           'Each card opens as a saveable playlist or jumps straight into Auto VJ.',
@@ -153,10 +213,10 @@ export function DiscoverView(): JSX.Element {
           Discover
           <HelpDot help={help} label="What is Discover?" />
         </div>
-        <button className="pxbtn is-primary" onClick={() => selectedMission && void playQueue(selectedMission.tracks, 0)} disabled={!selectedMission}>
+        <button className="pxbtn is-primary" onClick={() => void playQueue(tableTracks, 0)} disabled={!tableTracks.length}>
           Start Session
         </button>
-        <button className="pxbtn" onClick={() => void refreshDiscover(`${dailySeed()}:${Date.now()}`)} disabled={loading}>
+        <button className="pxbtn" title="Build a new set of tracks; the playing queue keeps its current set" onClick={() => void refreshDiscover(`${dailySeed()}:${Date.now()}:${Math.random()}`)} disabled={loading}>
           {loading ? 'Building...' : 'Reshuffle'}
         </button>
         <button
@@ -188,7 +248,7 @@ export function DiscoverView(): JSX.Element {
                   background: selectedMission?.id === mission.id ? 'var(--panel-2)' : 'var(--panel)',
                   borderColor: selectedMission?.id === mission.id ? 'var(--accent)' : 'var(--line)',
                 }}
-                onClick={() => setSelectedMissionId(mission.id)}
+                onClick={() => { setViewingCard(false); setSelectedMissionId(mission.id); }}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
@@ -203,7 +263,7 @@ export function DiscoverView(): JSX.Element {
               </button>
             ))}
             {!surface?.missions.length && (
-              <div className="bevel-in p-3 text-[12px]" style={{ color: 'var(--muted)' }}>
+              <div className="bevel-in display-well p-3 text-[12px]" style={{ color: 'var(--muted)' }}>
                 {loading ? 'Building Discover...' : 'No missions yet.'}
               </div>
             )}
@@ -214,12 +274,13 @@ export function DiscoverView(): JSX.Element {
             {surface?.cards.map((card) => (
               <button
                 key={card.id}
+                data-newamp-discover-card={card.id}
                 className="bevel-out p-3 text-left"
                 style={{
                   background: selectedCard?.id === card.id ? 'var(--panel-2)' : 'var(--panel)',
                   borderColor: selectedCard?.id === card.id ? 'var(--accent)' : 'var(--line)',
                 }}
-                onClick={() => setSelectedCardId(card.id)}
+                onClick={() => { setViewingCard(true); setSelectedCardId(card.id); }}
               >
                 <div className="truncate text-[12px] font-bold">{card.title}</div>
                 <div className="line-clamp-2 text-[11px]" style={{ color: 'var(--ink-2)' }}>{card.subtitle}</div>
@@ -251,7 +312,7 @@ export function DiscoverView(): JSX.Element {
 
                 <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
                   {selectedMission.steps.map((step, index) => (
-                    <div key={step.id} className="bevel-in p-3">
+                    <div key={step.id} className="bevel-in display-well p-3">
                       <div className="text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--muted)' }}>
                         Step {index + 1}
                       </div>
@@ -266,7 +327,10 @@ export function DiscoverView(): JSX.Element {
                 </div>
               </div>
             ) : (
-              <div className="text-[12px]" style={{ color: 'var(--muted)' }}>Discover missions will appear here.</div>
+              <div>
+                <h1 className="truncate text-[22px] font-bold">{selectedCard?.title ?? 'Discover'}</h1>
+                <p className="text-[12px]" style={{ color: 'var(--ink-2)' }}>{selectedCard?.reason ?? 'Discover missions will appear here.'}</p>
+              </div>
             )}
           </div>
 
@@ -286,7 +350,7 @@ export function DiscoverView(): JSX.Element {
 
         <aside className="min-h-0 overflow-auto border-l p-3" style={{ borderColor: 'var(--line)' }}>
           <PanelLabel>Why These Picks</PanelLabel>
-          <div className="bevel-in p-3 text-[12px]" style={{ color: 'var(--ink-2)' }}>
+          <div className="bevel-in display-well p-3 text-[12px]" style={{ color: 'var(--ink-2)' }}>
             {selectedMission?.reason ?? selectedCard?.reason ?? 'Discover uses only local listening signals.'}
           </div>
 
@@ -344,7 +408,7 @@ function PanelLabel({ children, className = '' }: { children: string; className?
 
 function Metric({ label, value }: { label: string; value: number }): JSX.Element {
   return (
-    <div className="bevel-in p-2">
+    <div className="bevel-in display-well p-2">
       <div className="lcd-text text-[20px] leading-none">{value.toLocaleString()}</div>
       <div className="mt-1 text-[9px] uppercase tracking-[0.12em]" style={{ color: 'var(--muted)' }}>{label}</div>
     </div>

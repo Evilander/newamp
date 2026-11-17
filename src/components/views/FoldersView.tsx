@@ -238,6 +238,10 @@ export function FoldersView(): JSX.Element {
     setScanBusy(true);
     pushToast({ title: 'Scanning music folders…' });
     try {
+      if (!(await api.getSettings()).libraryRoots.length) {
+        pushToast({ tone: 'info', title: 'Add a music folder in Settings to scan your library.' });
+        return;
+      }
       await api.scanLibrary();
       setRefreshSeed((seed) => seed + 1);
       pushToast({ tone: 'ok', title: 'Library scan finished' });

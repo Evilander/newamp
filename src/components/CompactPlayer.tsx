@@ -171,7 +171,7 @@ export function CompactPlayer(): JSX.Element {
       const { queue, playQueue } = usePlayerStore.getState();
       void playQueue(queue, index);
     },
-    onSetVolume: (v) => void setVolume(v),
+    onSetVolume: (v) => void setVolume(v, 'deck'),
     onSetMode: setMode,
     onSetAlwaysOnTop: setAlwaysOnTop,
     onExitDeck: () => setCompactMode(false),

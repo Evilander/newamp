@@ -69,7 +69,7 @@ const bundled = await build({
   stdin: {
     contents: `
       export { BUILT_IN_THEMES, SKIN_VARIABLES, COLOR_SKIN_VARIABLES, contrastRatio, deriveOnAccent, parseSkinColorRgb, normalizeCustomSkin, normalizeSkinVariableValue } from './shared/custom-skin';
-      export { applyTheme, deriveSkinOnAccent, deriveSkinTextTokens, previewSkinVariable } from './src/lib/skins';
+      export { applyTheme, deriveSkinOnAccent, deriveSkinTextTokens, previewSkinVariable, deriveAccentInk } from './src/lib/skins';
     `,
     resolveDir: process.cwd(),
     loader: 'ts',
@@ -94,6 +94,7 @@ const {
   deriveSkinOnAccent,
   deriveSkinTextTokens,
   previewSkinVariable,
+  deriveAccentInk,
 } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
 
 // --- tokens.css as the cascade sees it -----------------------------------
@@ -312,7 +313,7 @@ const colorNames = { red: 'rgb(255, 0, 0)', yellow: 'rgb(255, 255, 0)' };
 const baseValues = (theme) => {
   const env = envFor(theme);
   return Object.fromEntries(
-    ['--accent', '--on-accent', '--warn', '--error', '--accent-text', '--warn-text', '--error-text'].map((name) => [name, substitute(env[name], env)]),
+    ['--accent', '--on-accent', '--warn', '--error', '--accent-text', '--warn-text', '--error-text', '--ink', '--ink-2', '--muted', '--panel', '--panel-2', '--bg', '--titlebar-fg-flat', '--display-bg', '--display-fg', '--display-dim'].map((name) => [name, substitute(env[name], env)]),
   );
 };
 const basePair = (theme) => {
@@ -342,6 +343,8 @@ globalThis.getComputedStyle = (element) => {
   return { color: colorNames[element.style.color] ?? '' };
 };
 const skin = (baseTheme, variables) => ({ name: 'Test', baseTheme, variables, updatedAt: 1 });
+// Colours applyTheme derives from the skin's own, set inline next to its variables.
+const DERIVED_TOKENS = ['--accent-ink', '--accent-frame', '--well-dim', '--well-warn', '--panel-dim', '--panel-detail-ink', '--panel-lcd', '--well-ink', '--well-secondary', '--well-accent', '--well-error', '--well-color', '--scrim-ink', '--scrim-accent', '--panel-note', '--display-placeholder'];
 
 applyTheme('custom', skin('classic', { '--bg': '#000000' }));
 assert.equal(root.dataset.theme, 'classic');
@@ -388,7 +391,7 @@ assert.equal(inline.has('--on-accent'), false);
 applyTheme('custom', skin('classic', { '--accent': '#ffffff', '--warn': '#ffff00', '--error': '#ff0000' }));
 assert.equal(inline.get('--accent-text'), '#ffffff');
 applyTheme('steel');
-assert.equal(inline.size, 0, 'switching to a built-in skin clears every inline skin variable and derived colour');
+assert.equal([...inline.keys()].filter((key) => !DERIVED_TOKENS.includes(key)).length, 0, 'switching to a built-in skin clears every inline skin variable and derived colour');
 assert.equal(root.dataset.theme, 'steel');
 
 assert.equal(deriveSkinOnAccent({}, basePair('classic')), null);
@@ -425,7 +428,7 @@ assert.deepEqual(
   const baseDraft = (theme) => Object.fromEntries(Object.entries(baseValues(theme)).filter(([name]) => !name.endsWith('-text')));
   const draft = baseDraft('steel');
   previewSkinVariable(draft, '--bg', '#000000');
-  assert.deepEqual([...inline.keys()], ['--bg'], 'a variable that feeds no derived colour touches nothing else');
+  assert.deepEqual([...inline.keys()].filter((key) => !DERIVED_TOKENS.includes(key)), ['--bg'], 'a variable that feeds no text role leaves those roles alone');
 
   previewSkinVariable(draft, '--accent', 'hsl(50 100% 50%)');
   assert.equal(inline.get('--accent'), 'hsl(50 100% 50%)');
@@ -454,7 +457,7 @@ assert.deepEqual(
   previewSkinVariable(classicDraft, '--error', '#cc0000');
   assert.equal(inline.get('--error-text'), '#cc0000');
   applyTheme('steel');
-  assert.equal(inline.size, 0);
+  assert.equal([...inline.keys()].filter((key) => !DERIVED_TOKENS.includes(key)).length, 0);
 }
 
 // An older saved or imported skin has no --on-accent at all and still loads.
@@ -464,6 +467,58 @@ applyTheme('custom', legacy);
 assert.equal(inline.get('--on-accent'), '#000000');
 assert.equal(normalizeCustomSkin({ name: 'N', baseTheme: 'oxide', variables: { '--on-accent': '#123456' } }).variables['--on-accent'], '#123456');
 assert.equal(normalizeCustomSkin({ name: 'N', baseTheme: 'oxide', variables: { '--on-accent': 'var(--bg)' } }), null, 'a var() reference is not a colour');
+
+// Accent text uses the smallest sRGB mix towards ink that passes on both panels.
+for (const theme of themes) {
+  applyTheme(theme);
+  const accent = substitute(envFor(theme)['--accent'], envFor(theme));
+  const panelColors = ['--panel', '--panel-2'].map((name) => substitute(envFor(theme)[name], envFor(theme)));
+  const actual = inline.get('--accent-ink');
+  for (const panel of panelColors) assert.ok(contrastRatio(toRgb(actual), toRgb(panel)) >= AA, `${theme}: accent ink on ${panel}`);
+  if (panelColors.every((panel) => contrastRatio(toRgb(accent), toRgb(panel)) >= AA)) assert.equal(actual, accent, `${theme}: passing accent is unchanged`);
+}
+for (const theme of themes) {
+  applyTheme('custom', skin(theme, { '--accent': '#ffccee', '--panel': '#eeeeee', '--panel-2': '#dddddd', '--ink': '#111111' }));
+  for (const panel of ['#eeeeee', '#dddddd']) assert.ok(contrastRatio(toRgb(inline.get('--accent-ink')), toRgb(panel)) >= AA, `${theme} custom: accent ink`);
+  previewSkinVariable({ '--accent': '#ffccee' }, '--ink', '#222222');
+  assert.ok(contrastRatio(toRgb(inline.get('--accent-ink')), toRgb('#dddddd')) >= AA, 'panel/ink previews derive accent ink too');
+}
+assert.equal(deriveAccentInk('#00ff66', '#d3dee2', ['#2c3438', '#3a444a']), '#00ff66');
+
+// In a display well accent, warning and error keep their own hue, so a Home
+// health count that needs attention still looks different from a clean zero.
+const hueOf = (rgb) => {
+  const max = Math.max(...rgb);
+  const spread = max - Math.min(...rgb);
+  if (spread / max < 0.15) return null;
+  const [r, g, b] = rgb;
+  const sector = max === r ? ((g - b) / spread + 6) % 6 : max === g ? (b - r) / spread + 2 : (r - g) / spread + 4;
+  return sector * 60;
+};
+// CIE76 distance; about 20 is where two text colours stop reading as one.
+const lab = (rgb) => {
+  const linear = rgb.map((channel) => channel / 255).map((c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const xyz = [[0.4124, 0.3576, 0.1805, 0.95047], [0.2126, 0.7152, 0.0722, 1], [0.0193, 0.1192, 0.9505, 1.08883]]
+    .map(([r, g, b, white]) => (r * linear[0] + g * linear[1] + b * linear[2]) / white)
+    .map((t) => t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+  return [116 * xyz[1] - 16, 500 * (xyz[0] - xyz[1]), 200 * (xyz[1] - xyz[2])];
+};
+const distance = (a, b) => Math.hypot(...lab(toRgb(a)).map((value, i) => value - lab(toRgb(b))[i]));
+for (const theme of themes) {
+  applyTheme(theme);
+  const values = baseValues(theme);
+  for (const [derived, source] of [['--well-accent', '--accent'], ['--well-warn', '--warn'], ['--well-error', '--error']]) {
+    const want = hueOf(toRgb(values[source]));
+    if (want === null) continue;
+    assert.ok(inline.has(derived), `${theme}: ${derived} is derived`);
+    const got = hueOf(toRgb(inline.get(derived)));
+    const apart = got === null ? 180 : Math.abs(got - want);
+    assert.ok(Math.min(apart, 360 - apart) <= 12, `${theme}: ${derived} ${inline.get(derived)} keeps the hue of ${source} ${values[source]}`);
+  }
+  // A skin whose own warning sits close to its accent (Walnut) only has to keep that much apart.
+  const apart = distance(inline.get('--well-warn'), inline.get('--well-accent'));
+  assert.ok(apart + 0.05 >= Math.min(20, distance(values['--warn'], values['--accent'])), `${theme}: a warning stays apart from the accent in a well (${apart.toFixed(1)})`);
+}
 
 // --- disabled buttons and the 24 px target ----------------------------------
 const chromeCss = stripComments(read('src/styles/chrome.css'));
@@ -570,5 +625,7 @@ for (const name of ramp) {
     `${name} should scale from its unscaled value by --newamp-text-scale`,
   );
 }
+
+await import('./theme-render-test.mjs');
 
 console.log(`[theme-contrast-test] PASS (${themes.length} skins, ${ramp.length} type sizes)`);

@@ -467,7 +467,7 @@
   gap: 12px;
   align-items: center;
   padding: 10px;
-  color: color-mix(in srgb, var(--ink) 88%, transparent);
+  color: color-mix(in srgb, var(--scrim-ink, var(--ink)) 88%, transparent);
   background: rgba(0,0,0,0.48);
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 8px;
@@ -507,11 +507,11 @@
   text-transform: uppercase;
 }
 .fullscreen-viz-hover-meter-label span {
-  color: color-mix(in srgb, var(--ink) 78%, transparent);
+  color: color-mix(in srgb, var(--scrim-ink, var(--ink)) 78%, transparent);
 }
 .fullscreen-viz-hover-meter-label strong {
   overflow: hidden;
-  color: var(--ink);
+  color: var(--scrim-ink, var(--ink));
   font-size: 11px;
   letter-spacing: 0.06em;
   text-overflow: ellipsis;

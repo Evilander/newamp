@@ -15,7 +15,7 @@ let pass = true;
 const log = [];
 const fail = (m) => { pass = false; log.push('FAIL: ' + m); };
 
-const source = readFileSync(resolve('src/components/Visualizer.tsx'), 'utf8');
+const source = readFileSync(resolve('src/visualizer/canvas-renderer.ts'), 'utf8');
 
 const SHADER_MODES = [
   'aurora', 'neon-waves', 'neon-ribbons', 'plasma-grid', 'burning-cloud',

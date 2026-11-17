@@ -22,6 +22,7 @@ import { normalizeLimiterEnabled, normalizePreampDb } from '@shared/audio-limite
 
 export const DEFAULT_SETTINGS: AppSettings = {
   libraryRoots: [],
+  libraryRootsChosen: false,
   libraryAutoWatch: true,
   theme: 'classic',
   customSkin: null,
@@ -375,6 +376,8 @@ const stub: NewAmpAPI = {
     adoptedEdits: 0,
     generatedAt: Date.now(),
   }),
+  previewRemoveLibraryFolder: async () => 0,
+  removeLibraryFolder: async () => DEFAULT_SETTINGS,
   pruneMissingTracks: async () => ({ checked: 0, removed: 0, offline: 0, backupPath: null }),
   previewPruneMissingTracks: async () => ({
     checked: 0,

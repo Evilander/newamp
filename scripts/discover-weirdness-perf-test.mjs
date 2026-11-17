@@ -8,8 +8,9 @@
 // Run with: npm run test:discover-weirdness-perf
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -88,17 +89,12 @@ assert.ok(weirdShelfCard.tracks.length > 0, 'weird shelf should not be empty for
 // it should rank at or near the top of the weird shelf. This would fail if
 // the O(1) map lookup were wired to the wrong key or always returned the
 // same count (a correctness regression the perf fix could easily introduce).
+// A first build is the ranking itself; only Reshuffle samples it.
 const rarityIndex = weirdShelfCard.tracks.findIndex((t) => t.id === 1);
 assert.ok(rarityIndex >= 0 && rarityIndex < 3, `the uniquely-genred unplayed track should rank near the top of the weird shelf, got index ${rarityIndex}`);
 
-// --- Source assertion: the O(n) fix (a precomputed genre map, not a
-// tracks.filter() rescan per track) must actually be in place.
-const discoverSource = await readFile(new URL('../shared/discover.ts', import.meta.url), 'utf8');
-assert.match(discoverSource, /function buildGenreCounts\(/, 'discover.ts should precompute genre counts once');
-assert.doesNotMatch(
-  discoverSource,
-  /tracks\.filter\(\(item\) => \(item\.genre/,
-  'weirdnessScore should no longer rescan the full tracks array per call',
-);
+const discoverSource = readFileSync(new URL('../shared/discover.ts', import.meta.url), 'utf8');
+assert.match(discoverSource, /function buildGenreCounts\(/, 'precompute genre counts once');
+assert.doesNotMatch(discoverSource, /tracks\.filter\(\(item\) => \(item\.genre/, 'no per-track full-library rescan');
 
 console.log(JSON.stringify({ ok: true, elapsedMs: Math.round(elapsedMs), trackCount: TRACK_COUNT }, null, 2));

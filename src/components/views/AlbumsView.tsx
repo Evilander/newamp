@@ -556,6 +556,10 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
     setScanBusy(true);
     pushToast({ title: 'Scanning music folders…' });
     try {
+      if (!(await api.getSettings()).libraryRoots.length) {
+        pushToast({ tone: 'info', title: 'Add a music folder in Settings to scan your library.' });
+        return;
+      }
       await api.scanLibrary();
       await reloadAlbumsAfterScan();
       pushToast({ tone: 'ok', title: 'Library scan finished' });
@@ -699,7 +703,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
     // the cached album list so the slider's optimistic update sticks
     // across renders without waiting for a full re-fetch.
     setSelected((prev) =>
-      prev ? { ...prev, rating: nextRating, ratingScore: nextScore } : prev,
+      prev && prev.albumKey === selected.albumKey ? { ...prev, rating: nextRating, ratingScore: nextScore } : prev,
     );
     setAlbums((rows) =>
       rows.map((row) =>
@@ -795,7 +799,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
                   <button
                     type="button"
                     className="underline underline-offset-2 hover:no-underline"
-                    style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--accent)', font: 'inherit' }}
+                    style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--accent-frame)', font: 'inherit' }}
                     onClick={() => void changeAlbumGrouping(selected.albumKind !== 'split')}
                     data-newamp-album-regroup
                   >
@@ -823,23 +827,22 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
             </button>
           </div>
           {/* Rating gets its own full-width row underneath the action buttons.
-              ScoreRating's internal grid is 88+180+auto = at least 280px, which
-              regularly collides with the play / queue buttons on any non-huge
-              window. Putting it on a dedicated row eliminates the overlap
-              entirely. */}
+              The score control needs room for its number, bar and star targets.
+              A dedicated row keeps it clear of the playback buttons. */}
           <div
-            className="flex w-full items-center gap-3 border-t pt-2"
+            className="flex w-full flex-wrap items-center gap-3 border-t pt-2"
             style={{ borderColor: 'var(--line)' }}
             data-newamp-album-rating-row
           >
-            <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+            <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent-frame)' }}>
               Album Rating
             </span>
-            <div className="flex-1" data-newamp-album-rating>
+            <div className="min-w-0 flex-1" data-newamp-album-rating>
               <ScoreRating
                 value={selectedAlbumScore}
                 stars={Math.round((selectedAlbumScore ?? 0) / 20)}
                 onChange={(score) => void setAlbumScore(score)}
+                onStarsChange={(stars) => void setAlbumScore(stars * 20)}
               />
             </div>
             {selectedTrackAverage != null ? (
@@ -876,7 +879,7 @@ export const AlbumsView = memo(function AlbumsView(): JSX.Element {
                     style={{ borderColor: 'var(--line)', background: 'var(--panel)' }}
                     data-newamp-album-disc-heading
                   >
-                    <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent)' }}>
+                    <span className="text-[9px] font-bold uppercase tracking-[0.12em]" style={{ color: 'var(--accent-ink)' }}>
                       Disc {section.disc}
                     </span>
                     {section.subtitle ? <span className="text-[12px]">{section.subtitle}</span> : null}
@@ -1125,7 +1128,7 @@ const AlbumCard = memo(function AlbumCard({
       {album.matchedTrackTitles && (
         <div
           className="truncate text-[10px] leading-3"
-          style={{ color: 'var(--accent)' }}
+          style={{ color: 'var(--accent-frame)' }}
           title={album.matchedTrackTitles}
           data-newamp-album-matched-songs
         >

@@ -39,7 +39,7 @@ for (const file of ['src/components/Visualizer.tsx', 'src/components/WrappedLive
 // compositor stops delivering frames. The only one left is the shader loop's
 // opt-out for callers that drive it with their own animation-frame stub.
 {
-  const file = 'src/components/Visualizer.tsx';
+  const file = 'src/visualizer/canvas-renderer.ts';
   const sf = parse(file);
   const bare = [];
   walk(sf, (node) => {
@@ -60,7 +60,7 @@ for (const file of ['src/components/Visualizer.tsx', 'src/components/WrappedLive
 // its cleanup, not somewhere a mode could leave it behind.
 {
   const file = 'src/components/Visualizer.tsx';
-  const sf = parse(file);
+  const sf = ts.createSourceFile(file, readFileSync(file, 'utf8') + '\n' + readFileSync('src/visualizer/canvas-renderer.ts', 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
   const releases = [];
   walk(sf, (node) => {
     if (!(ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'releaseGlContext')) return;
@@ -129,6 +129,25 @@ for (const file of ['src/components/Visualizer.tsx', 'src/components/WrappedLive
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'avg' && node.arguments[1]?.getText(sf) === '0') fromBinZero.push(lineOf(sf, node));
   });
   assert.deepEqual(fromBinZero, [], `avg() starts at bin 0 at line(s) ${fromBinZero.join(', ')}`);
+
+  // Particle Flow resumes a suspended audio context only on its GPU path
+  // (scripts/projector-runtime-test.mjs runs onGpuStart), never before the
+  // renderer knows which path it is on.
+  let onGpuStart = null;
+  const resumes = [];
+  walk(sf, (node) => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'startCanvasVisualizer') {
+      const options = node.arguments[0];
+      onGpuStart = ts.isObjectLiteralExpression(options) ? options.properties.find((p) => p.name?.getText(sf) === 'onGpuStart') : null;
+    }
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'resume') {
+      for (let up = node.parent; up; up = up.parent) {
+        if (ts.isIfStatement(up) && up.expression.getText(sf).includes("'particle-flow'")) { resumes.push(lineOf(sf, node)); break; }
+      }
+    }
+  });
+  assert.ok(onGpuStart && /engine\.ctx\.resume\(\)/.test(onGpuStart.getText(sf)), 'the canvas renderer is told how to resume the audio context');
+  assert.deepEqual(resumes, [], `Particle Flow resumes the audio context before its renderer starts, at line(s) ${resumes.join(', ')}`);
 }
 
 // ── The loops that run in the 4K budget ─────────────────────────────────────
@@ -136,7 +155,7 @@ for (const file of ['src/components/Visualizer.tsx', 'src/components/WrappedLive
 // cost; the other GPU modes and the 2D painters get a governor at that tier,
 // and the 2D loop books its frames on the shared 30 Hz grid.
 {
-  const file = 'src/components/Visualizer.tsx';
+  const file = 'src/visualizer/canvas-renderer.ts';
   const sf = parse(file);
   const governed = [];
   walk(sf, (node) => {

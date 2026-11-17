@@ -3,7 +3,7 @@
 // markup (hooks run against the real React; the store and the IPC bridge are stubs).
 // The last section mounts the bar in a real browser (Chrome, Chromium or Edge,
 // found on the machine, or named by NEWAMP_TEST_BROWSER) to run what markup
-// can't: effects, the wheel listener and the settings switch.
+// can't: effects, native pointer clicks, the wheel listener and the settings switch.
 // Run: node scripts/waveform-ui-test.mjs
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -525,6 +525,7 @@ async function openBrowserPage(executable) {
     await send('Runtime.enable', {}, sessionId);
     return {
       logged,
+      mouse: (params) => send('Input.dispatchMouseEvent', params, sessionId),
       async evaluate(expression) {
         const reply = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, sessionId);
         if (reply.exceptionDetails) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
@@ -677,6 +678,29 @@ if (!browserPath) {
     assert.ok(Math.abs(Number(seen.half.played) - 0.5) <= 0.001, `a quarter of the bar is half of that drawing (${seen.half.played})`);
     assert.ok(seen.whole.width >= 0.98, `a waveform as long as the bar fills it (${JSON.stringify(seen.whole)})`);
     assert.equal(seen.whole.played, '0.25');
+
+    // A real click changes a range input on pointerdown and commits its native
+    // change on release. React onChange already handles the input event;
+    // adding onInput too used to restart the decoder twice for this one click.
+    for (const enabled of [true, false]) {
+      await page.evaluate(`window.__store.setState({ settings: { waveformSeekBar: ${enabled} } });
+        window.__render({ value: 50 });
+        new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))`);
+      const point = await page.evaluate(`(() => {
+        window.__seeks.length = 0;
+        const input = document.querySelector('input[type="range"]');
+        const rect = input.getBoundingClientRect();
+        return { x: rect.left + rect.width * 0.7, y: rect.top + rect.height / 2 };
+      })()`);
+      await page.mouse({ type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
+      await wait(180);
+      await page.mouse({ type: 'mouseReleased', ...point, button: 'left', clickCount: 1 });
+      // Include release, blur, and the delayed clock resync in the count.
+      await wait(350);
+      const seeks = await page.evaluate('window.__seeks.slice()');
+      assert.equal(seeks.length, 1, `one click with waveform ${enabled ? 'on' : 'off'} issues one seek: ${JSON.stringify(seeks)}`);
+      assert.ok(seeks[0] > 100 && seeks[0] < 180, 'the click moves to the selected part of the track');
+    }
 
     assert.deepEqual(page.logged, [], 'React and the page logged no errors or warnings');
   } finally {

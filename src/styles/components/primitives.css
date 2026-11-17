@@ -542,3 +542,39 @@
     transition: none;
   }
 }
+.display-well {
+  --ink: var(--well-ink, var(--display-fg));
+  --ink-2: var(--well-secondary, var(--display-dim));
+  --muted: var(--well-dim, var(--display-dim));
+  --accent-text: var(--well-accent, var(--display-fg));
+  /* Unset where the skin's own text reads in a well, so the text inherits. */
+  color: var(--well-color);
+}
+
+.text-accent {
+  color: var(--accent-ink, var(--accent));
+}
+.lcd-text.text-accent {
+  color: var(--panel-lcd, var(--display-fg));
+}
+
+.display-well .text-accent {
+  color: var(--display-fg);
+}
+[data-newamp-practice-loop] .text-accent {
+  color: var(--accent-frame);
+}
+
+/* Embedded buttons still paint a panel, even inside a display well. */
+:root {
+  --panel-ink: var(--ink);
+  --panel-ink-2: var(--ink-2);
+  --panel-muted: var(--muted);
+  --panel-accent-text: var(--accent-text);
+}
+.display-well .pxbtn {
+  --ink: var(--panel-ink);
+  --ink-2: var(--panel-ink-2);
+  --muted: var(--panel-muted);
+  --accent-text: var(--panel-accent-text);
+}

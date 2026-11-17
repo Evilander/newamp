@@ -18,7 +18,7 @@ const presets = presetApi.getPresets();
 const presetCount = Object.keys(presets).length;
 assert.ok(presetCount >= 100, `expected at least 100 Milkdrop presets, got ${presetCount}`);
 
-const visualizerSource = await readFile(new URL('../src/components/Visualizer.tsx', import.meta.url), 'utf8');
+const visualizerSource = (await Promise.all(['../src/components/Visualizer.tsx', '../src/visualizer/canvas-renderer.ts'].map((file) => readFile(new URL(file, import.meta.url), 'utf8')))).join('\n');
 const nowPlayingSource = await readFile(new URL('../src/components/views/NowPlayingView.tsx', import.meta.url), 'utf8');
 const engineSource = await readFile(new URL('../src/audio/engine.ts', import.meta.url), 'utf8');
 const typesSource = await readFile(new URL('../shared/types.ts', import.meta.url), 'utf8');
@@ -70,10 +70,7 @@ assert.match(engineSource, /silentSink\.connect\(ctx\.destination\)/, 'silent si
 assert.match(engineSource, /smoothingTimeConstant = 0\.24/, 'analyser smoothing should favor responsive visual motion');
 assert.match(engineSource, /minDecibels = -86/, 'analyser should expose quieter passages to the visualizer');
 
-const fullscreenSource = await readFile(
-  new URL('../src/components/FullscreenVisualizer.tsx', import.meta.url),
-  'utf8',
-);
+const fullscreenSource = (await Promise.all(['../src/components/FullscreenVisualizer.tsx', '../src/visualizer/modes.ts'].map((file) => readFile(new URL(file, import.meta.url), 'utf8')))).join('\n');
 const appSource = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
 assert.match(fullscreenSource, /id: 'butterchurn'/, 'Fullscreen visualizer must expose a Butterchurn preset');
 assert.match(fullscreenSource, /id: 'radial'/, 'Fullscreen visualizer must expose Radial preset');

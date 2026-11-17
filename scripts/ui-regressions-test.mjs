@@ -359,6 +359,9 @@ async function methods(path, names, bindings) {
     libraryQuery: '', sort: 'artist', LIBRARY_PAGE_SIZE: 4, LIBRARY_MORE_PAGE_SIZE: 4, console,
     loadGenerationRef: { current: 1 }, rowsReadRef: { current: 4 }, loadMoreInFlightRef: { current: false },
     matchingCountRef: { current: 10 }, hasMoreTracks: true,
+    positionCacheRef: { current: { invalidate() {} } },
+    staleListRef: { current: false }, firstPagePendingRef: { current: false }, reloadSeqRef: { current: 0 }, setLoading() {},
+    hasMoreTrackRows: (offset, total, pageLength) => pageLength > 0 && offset < total,
     window: { setTimeout: (callback) => setTimeout(callback, 0) },
     api: {
       getTracks: (query) => {
@@ -390,6 +393,35 @@ async function methods(path, names, bindings) {
   await ctx.loadMoreTracks();
   assert.deepEqual(ids(), [100, 101, 1, 2, 3, 4, 5, 6], 'and reads the rows between them');
   assert.equal(hasMore, true);
+}
+
+// A follow that could not read the list now asks to be tried again; only a track that is not there ends it.
+{
+  const bundled = await build({ entryPoints: ['src/components/views/libraryTableState.ts'], bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
+  const { readThroughTrack } = await import('data:text/javascript;base64,' + Buffer.from(bundled.outputFiles[0].text).toString('base64'));
+  const ids = deferred();
+  let replaced = null;
+  const bindings = {
+    libraryQuery: '', sort: 'artist', LIBRARY_MORE_PAGE_SIZE: 4, LIBRARY_QUEUE_LIMIT: 20,
+    loadGenerationRef: { current: 1 }, rowsReadRef: { current: 4 }, loadMoreInFlightRef: { current: true },
+    matchingCountRef: { current: 10 }, setLoadingMore() {}, setHasMoreTracks() {},
+    positionCacheRef: { current: { find: async (id) => { await ids.promise; return id === 7 ? 6 : -1; } } },
+    api: { getTrackIds: async () => [], getTracks: async ({ offset, limit }) => Array.from({ length: limit }, (_, i) => ({ id: offset + i + 1 })) },
+    window: { setTimeout: (callback) => setTimeout(callback, 0) },
+    readThroughTrack, appendTrackPage: (current, page) => [...current, ...page],
+    setTracks: (update) => { replaced = update; },
+  };
+  const ctx = await methods('src/components/views/LibraryView.tsx', ['revealTrack'], bindings);
+  assert.equal(await ctx.revealTrack(7, () => true), 'retry', 'another page holding the list is not a miss');
+  ctx.loadMoreInFlightRef.current = false;
+  const cut = ctx.revealTrack(7, () => true);
+  ctx.loadGenerationRef.current += 1;
+  ids.resolve();
+  assert.equal(await cut, 'retry', 'nor is a reload of the list that cut the read off');
+  assert.equal(replaced, null);
+  assert.equal(await ctx.revealTrack(99, () => true), false, 'a track that is not in the list ends the follow');
+  assert.equal(await ctx.revealTrack(7, () => true), true);
+  assert.equal(ctx.loadMoreInFlightRef.current, false);
 }
 
 // The exclusive row claims untouched samples where that is checked, and says what a forced bit depth costs.

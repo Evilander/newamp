@@ -37,14 +37,25 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 // Values built inside the vm carry its realm's prototypes; compare them as plain data.
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-async function addFolder({ roots = ['K:\\Music'], picked, scan = async () => undefined, save, platform = 'win32' }) {
-  const calls = { saved: [], scanned: [], toasts: [], accepted: [] };
+// `roots` is the page's copy of the folder list and `stored` the saved one;
+// they differ when a removal finished behind the page.
+async function addFolder({ roots = ['K:\\Music'], stored = roots, picked, scan = async () => undefined, save, platform = 'win32', whilePicking, read }) {
+  const calls = { saved: [], scanned: [], toasts: [], accepted: [], errors: [] };
   const settings = { libraryRoots: roots };
+  const settingsRef = { current: settings };
   const ctx = await load(['pickAndAddFolder', 'folderIsSameOrInside'], {
-    settings,
+    settingsRef,
     api: {
       platform,
-      pickFolder: async () => picked,
+      pickFolder: async () => {
+        // The saved list can change while the picker is open.
+        if (whilePicking) stored = whilePicking;
+        return picked;
+      },
+      getSettings: async () => {
+        if (read) await read();
+        return { ...settings, libraryRoots: stored };
+      },
       scanLibrary: (...args) => { calls.scanned.push(args); return scan(...args); },
     },
     saveSettings: async (patch) => {
@@ -54,10 +65,11 @@ async function addFolder({ roots = ['K:\\Music'], picked, scan = async () => und
     },
     acceptSettings: (value) => calls.accepted.push(value),
     pushToast: (toast) => calls.toasts.push(toast),
+    reportSettingError: (title, err) => calls.errors.push({ title, detail: err.message }),
   });
   await ctx.pickAndAddFolder();
   await tick();
-  return { ...calls, saved: plain(calls.saved), scanned: plain(calls.scanned), toasts: plain(calls.toasts) };
+  return { ...calls, saved: plain(calls.saved), scanned: plain(calls.scanned), toasts: plain(calls.toasts), errors: plain(calls.errors) };
 }
 
 // A new folder is saved, then scanned, and only that folder is scanned.
@@ -95,19 +107,68 @@ async function addFolder({ roots = ['K:\\Music'], picked, scan = async () => und
   assert.deepEqual(calls.toasts, []);
 }
 
-// A save that fails scans nothing: the folder never joined the library.
+// A save that fails scans nothing: the folder never joined the library. The
+// failure is reported rather than left as an unhandled rejection.
 {
-  await assert.rejects(addFolder({ picked: 'D:\\Albums', save: async () => { throw new Error('disk full'); } }), /disk full/);
-  const scanned = [];
-  const ctx = await load(['pickAndAddFolder', 'folderIsSameOrInside'], {
-    settings: { libraryRoots: [] },
-    api: { platform: 'win32', pickFolder: async () => 'D:\\Albums', scanLibrary: (...args) => { scanned.push(args); } },
-    saveSettings: async () => { throw new Error('disk full'); },
-    acceptSettings: () => undefined,
-    pushToast: () => undefined,
+  const calls = await addFolder({ picked: 'D:\\Albums', save: async () => { throw new Error('disk full'); } });
+  assert.deepEqual(calls.scanned, []);
+  assert.equal(calls.accepted.length, 0);
+  assert.deepEqual(calls.errors, [{ title: 'Could not add folder', detail: 'disk full' }]);
+  assert.equal(unhandled.length, 0);
+}
+
+// A folder removed while the picker was open is not saved back with the new one.
+{
+  const calls = await addFolder({ roots: ['K:\\Music', 'E:\\Old'], whilePicking: ['K:\\Music'], picked: 'D:\\Albums' });
+  assert.deepEqual(calls.saved, [{ libraryRoots: ['K:\\Music', 'D:\\Albums'] }]);
+}
+
+// Nor is one a Settings page opened during the removal still lists: the page
+// that started it is the only one whose copy the removal updates.
+{
+  const calls = await addFolder({ roots: ['K:\\Music', 'E:\\Old'], stored: ['K:\\Music'], picked: 'D:\\Albums' });
+  assert.deepEqual(calls.saved, [{ libraryRoots: ['K:\\Music', 'D:\\Albums'] }]);
+}
+
+// A folder list that cannot be read saves nothing and says so.
+{
+  const calls = await addFolder({ picked: 'D:\\Albums', read: async () => { throw new Error('Wait for backup restoration to finish.'); } });
+  assert.deepEqual(calls.saved, []);
+  assert.deepEqual(calls.scanned, []);
+  assert.deepEqual(calls.errors, [{ title: 'Could not add folder', detail: 'Wait for backup restoration to finish.' }]);
+}
+
+// A removal hands the new folder list to the rest of the app, not only to this
+// page: the title bar and Play read it from the player store.
+{
+  let state = { settings: { libraryRoots: ['K:\\Music'], volume: 0.5 } };
+  const calls = { accepted: [], toasts: [], errors: [] };
+  const ctx = await load(['removeRoot', 'publishSavedSettings'], {
+    Object,
+    folderRemoval: { path: 'K:\\Music', count: 3 },
+    setRemovingFolder: () => undefined,
+    setFolderRemoval: () => undefined,
+    api: { removeLibraryFolder: async () => ({ libraryRoots: [], volume: 0.5 }), getStats: async () => ({ tracks: 0, albums: 0, artists: 0, duration: 0 }) },
+    setStats: (value) => { calls.stats = value; },
+    acceptSettings: (value) => calls.accepted.push(value),
+    pushToast: (toast) => calls.toasts.push(toast),
+    reportSettingError: (title, err) => calls.errors.push({ title, detail: err.message }),
+    usePlayerStore: { setState: (update) => { state = { ...state, ...update(state) }; } },
   });
-  await assert.rejects(ctx.pickAndAddFolder(), /disk full/);
-  assert.deepEqual(scanned, []);
+  await ctx.removeRoot();
+  assert.deepEqual(calls.errors, []);
+  assert.deepEqual(plain(state.settings), { libraryRoots: [], volume: 0.5 }, 'the store no longer lists the removed folder');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.stats.tracks, 0, 'the totals under the folder list are read again');
+}
+
+// While a removal runs (it can wait minutes for a scan), the controls that
+// would change the folder list or start a scan are off.
+{
+  const source = readFileSync(path, 'utf8');
+  assert.match(source, /<button className="pxbtn" disabled=\{removingFolder\} onClick=\{\(\) => void pickAndAddFolder\(\)\}>/, 'Add folder waits for the removal');
+  assert.match(source, /disabled=\{!settings\.libraryRoots\.length \|\| removingFolder\}\s*>\s*▶ Scan now/, 'Scan now waits for the removal');
+  assert.match(source, /removingFolder \? 'Removing…'/);
 }
 
 // A scan that fails is reported, and does not turn into an unhandled rejection.

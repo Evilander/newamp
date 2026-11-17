@@ -30,10 +30,10 @@ export class ErrorBoundary extends Component<Props, State> {
           className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center"
           style={{ color: 'var(--muted)' }}
         >
-          <div className="text-[14px]" style={{ color: 'var(--accent)' }}>
+          <div className="text-[14px]" style={{ color: 'var(--accent-frame)' }}>
             Something glitched in this view.
           </div>
-          <pre className="bevel-in max-w-[520px] overflow-auto px-3 py-2 text-[11px]" style={{ fontFamily: 'var(--font-mono)' }}>
+          <pre className="bevel-in display-well max-w-[520px] overflow-auto px-3 py-2 text-[11px]" style={{ fontFamily: 'var(--font-mono)' }}>
             {this.state.error.message}
           </pre>
           <button className="pxbtn" onClick={this.reset}>

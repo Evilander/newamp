@@ -151,12 +151,19 @@ assert.doesNotMatch(
   'Album rating MUST NOT cascade to track ratings — that destroyed per-song nuance pre-1.5.4',
 );
 assert.match(albumsViewSource, /albumScore/, 'Album rating should summarize selected album track scores as fallback');
+// A write that resolves after another album was opened updates only the album it was for.
+assert.match(
+  albumsViewSource,
+  /setSelected\(\(prev\) =>\s*prev && prev\.albumKey === selected\.albumKey \? \{ \.\.\.prev, rating: nextRating, ratingScore: nextScore \} : prev,/,
+  'a late album rating must not land on the album opened since',
+);
 assert.match(nowPlayingSource, /Rating/, 'Now Playing should expose current-track rating');
 assert.match(nowPlayingSource, /ScoreRating/, 'Now Playing should use the decimal score control');
 const scoreRatingSource = await readFile(new URL('../src/components/ScoreRating.tsx', import.meta.url), 'utf8');
 assert.match(scoreRatingSource, /data-newamp-score-rating-input/, 'score rating should expose a direct typed numeric input');
-assert.match(scoreRatingSource, /type="number"/, 'score rating input should be numeric');
-assert.match(scoreRatingSource, /step=\{SCORE_STEP_FINE\}/, 'score rating input should accept exact 0.1 steps');
+assert.match(scoreRatingSource, /type="text"\s+role="spinbutton"/, 'score input should retain numeric semantics without Chromium localizing its visible draft');
+assert.match(scoreRatingSource, /inputMode="decimal"/, 'score rating input should request a decimal keyboard');
+assert.match(scoreRatingSource, /parseScoreDraft\(draft\)/, 'typed decimal scores pass through the bounded decimal parser');
 assert.match(packageSource, /smoke:rating/, 'package scripts should include rating smoke');
 
 console.log(JSON.stringify({

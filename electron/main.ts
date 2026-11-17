@@ -1304,7 +1304,7 @@ function openDetachedVisualizer(opts: { displayId?: number; fullscreen?: boolean
     frame: false,
     backgroundColor: '#000000',
     autoHideMenuBar: true,
-    title: 'NewAmp — Eviland',
+    title: 'NewAmp — Projector',
     icon: resolveWindowIconPath(),
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
@@ -1854,6 +1854,18 @@ function keepUnseenMenuRoots<T>(patch: T): T {
   if (!missing.length) return patch;
   const kept = roots.filter((root) => typeof root !== 'string' || !missing.some((dir) => isPathInside(root, dir)));
   return { ...patch, libraryRoots: [...kept, ...missing] };
+}
+
+// Folders removed from the library since the page last read the settings. A
+// list it read while the removal was still running names them, and saving that
+// list would put a removed folder back.
+const removedUnseenRoots = new Set<string>();
+
+function dropRemovedRoots<T>(patch: T): T {
+  if (!removedUnseenRoots.size || !patch || typeof patch !== 'object') return patch;
+  const roots: unknown = (patch as { libraryRoots?: unknown }).libraryRoots;
+  if (!Array.isArray(roots)) return patch;
+  return { ...patch, libraryRoots: roots.filter((root) => typeof root !== 'string' || !removedUnseenRoots.has(root)) };
 }
 
 // File > Add Folder to Library: the same steps as Settings, which saves the
@@ -2589,7 +2601,9 @@ const incrementalScans = new IncrementalScanGate(async (targets) => {
     for (const target of targets) heldIncrementalRoots.add(target);
     return;
   }
-  await scanner.start(targets);
+  // A root removed while its walk was held or waiting is not walked.
+  const configured = targets.filter(isWatchedLibraryPath);
+  if (configured.length) await scanner.start(configured);
 });
 
 function createLibraryWatcherService(): LibraryWatcher {
@@ -2677,6 +2691,13 @@ function isPathInside(path: string, folder: string): boolean {
   return target === root || target.startsWith(`${root}/`);
 }
 
+// The watcher hands over resolved paths, and a Mac name comes as NFC or NFD;
+// a saved root is compared in the same spelling.
+function isWatchedLibraryPath(path: string): boolean {
+  const key = (value: string): string => (process.platform === 'darwin' ? resolve(value).normalize('NFC') : resolve(value));
+  return settings.get().libraryRoots.some((root) => isPathInside(key(path), key(root)));
+}
+
 // plan splits the targets: files and folder art the watcher named are read
 // again whatever their size and date say, while a root whose event carried no
 // name (the watcher overflowed during a bulk copy) is walked incrementally,
@@ -2689,6 +2710,10 @@ function reconcileWatchedTargets(watched: string[], plan?: LibraryWatchPlan): Pr
       heldWatchPlans.push({ targets: watched, plan: plan ?? { force: watched, incremental: [] } });
       return;
     }
+    // A folder removed since the watcher spoke (its events were held while
+    // the removal ran) is not scanned back into the library.
+    watched = watched.filter(isWatchedLibraryPath);
+    if (plan) plan = { force: plan.force.filter(isWatchedLibraryPath), incremental: plan.incremental.filter(isWatchedLibraryPath) };
     // Only a target the storage says is gone is marked; one that timed out
     // marks nothing, so a share that stopped answering costs no track its
     // place in the library.
@@ -2722,7 +2747,8 @@ async function readTrackBeforeMetadataEdit(id: number): Promise<void> {
   const path = library.pathNeedingFileRead(id);
   if (!path) return;
   const reading = await readTrackFile(path);
-  if (reading) library.upsertTracks([reading]);
+  // A slow read can outlast the track: a removal that landed meanwhile is not undone.
+  if (reading && library.pathNeedingFileRead(id) === path) library.upsertTracks([reading]);
 }
 
 // Quiesces the two automatic sources of library mutation — the watcher's
@@ -3173,6 +3199,7 @@ function registerIpc(): void {
     return library;
   }, () => settings.get().lastfmApiKey?.trim() ?? '');
   ipcMain.handle('library:scan', async (_e, roots?: string[]) => {
+    if (typeof removingLibraryFolder !== 'undefined' && removingLibraryFolder) throw new Error('Wait for folder removal to finish.');
     const configuredRoots = settings.get().libraryRoots;
     const fallbackRoots = roots && roots.length
       ? []
@@ -3520,6 +3547,55 @@ function registerIpc(): void {
     await library.albumsReady();
     return library.getLibraryHealthAsync();
   });
+  let removingLibraryFolder = false;
+  ipcMain.handle('library:remove-folder-preview', (_e, folder: string) => {
+    const roots = settings.get().libraryRoots;
+    if (!roots.includes(folder)) throw new Error('This folder is no longer configured.');
+    return library.tracksForRemovedFolder(folder, roots.filter((root) => root !== folder)).length;
+  });
+  ipcMain.handle('library:remove-folder', async (_e, folder: string, expectedCount: number) => {
+    if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
+    assertHistoryImportIdle();
+    if (removingLibraryFolder) throw new Error('Wait for folder removal to finish.');
+    // A removal parked behind a scan would land minutes later, with nothing on
+    // screen to say so and no way to call it off.
+    if (scanner.busy) throw new Error('A scan is running. Cancel it or let it finish, then remove the folder.');
+    removingLibraryFolder = true;
+    backupInProgress += 1;
+    try {
+      await quiesceLibraryMutations({ keepScan: true });
+      // A scan that slipped in since the check finishes first, so it cannot
+      // put removed tracks straight back.
+      return await scanner.whenIdle(async () => {
+        const roots = settings.get().libraryRoots;
+        if (!roots.includes(folder)) throw new Error('This folder is no longer configured.');
+        const remaining = roots.filter((root) => root !== folder);
+        const ids = library.tracksForRemovedFolder(folder, remaining);
+        if (ids.length !== expectedCount) throw new Error('The folder changed. Preview its removal again.');
+        // The scan above can take minutes, and a history import may have begun.
+        assertHistoryImportIdle();
+        if (ids.length) await createBackupFromLiveStores(app.getPath('userData'), 'library');
+        if (JSON.stringify(settings.get().libraryRoots) !== JSON.stringify(roots) ||
+            ids.join(',') !== library.tracksForRemovedFolder(folder, remaining).join(',')) {
+          throw new Error('The folder changed. Preview its removal again.');
+        }
+        assertHistoryImportIdle();
+        const removed = library.removeTracksById(ids);
+        settings.set({ libraryRoots: remaining, libraryRootsChosen: true });
+        removedUnseenRoots.add(folder);
+        // A Settings page opened while this ran still lists the folder.
+        mainWin?.webContents.send('settings:changed');
+        syncLibraryWatcher();
+        notifyTracksRemoved(removed);
+        notifyPlaylistsChanged();
+        return withAiAssistRuntime(settings.get());
+      });
+    } finally {
+      removingLibraryFolder = false;
+      resumeLibraryMutations();
+      backupInProgress -= 1;
+    }
+  });
   ipcMain.handle('library:prune-missing-preview', async (_e, targets?: string[]) =>
     library.previewPruneMissingTracksAsync(Array.isArray(targets) ? targets : undefined, settings.get().libraryRoots),
   );
@@ -3750,11 +3826,16 @@ function registerIpc(): void {
   // tests do, without the rest of this module.
   ipcMain.handle('settings:get', async () => {
     if (typeof libraryRootsRead === 'function') libraryRootsRead();
+    if (typeof removedUnseenRoots !== 'undefined') removedUnseenRoots.clear();
     return withAiAssistRuntime(settings.get());
   });
   ipcMain.handle('settings:set', async (_e, requested) => {
     if (restoreInProgress) throw new Error('Wait for backup restoration to finish.');
-    const patch = typeof keepUnseenMenuRoots === 'function' ? keepUnseenMenuRoots(requested) : requested;
+    const kept = typeof keepUnseenMenuRoots === 'function' ? keepUnseenMenuRoots(requested) : requested;
+    const patch = typeof dropRemovedRoots === 'function' ? dropRemovedRoots(kept) : kept;
+    if (typeof removingLibraryFolder !== 'undefined' && removingLibraryFolder && patch && typeof patch === 'object' && 'libraryRoots' in patch) {
+      throw new Error('Wait for folder removal to finish.');
+    }
     settings.set(patch);
     // Only a saved folder list shows the page has the current one; the playback
     // position it saves every few seconds says nothing about it.
@@ -4816,6 +4897,70 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
       await new Promise((r) => setTimeout(r, 500));
     }
 
+    // Phase 4: walk the Projector's own menu through every canvas mode and
+    // check that each one paints on this GPU. MilkDrop is what the capture
+    // above already measured. The menu is closed for each shot and only the
+    // middle of the frame is sampled, so neither it nor the control bar counts.
+    phase('modes');
+    const modes: Array<{ id: string; selected: boolean; litFraction: number }> = [];
+    const openModeList = `(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const list = () => Array.from(document.querySelectorAll('[data-projector-mode]'));
+      if (!list().length) {
+        document.querySelector('[data-newamp-projector-menu-button]')?.click();
+        await wait(200);
+      }
+      if (!list().length) {
+        Array.from(document.querySelectorAll('[data-newamp-projector-menu] button'))
+          .find((b) => /browse all modes/i.test(b.textContent || ''))?.click();
+        await wait(200);
+      }
+      return list().map((b) => b.dataset.projectorMode);
+    })()`;
+    if (detachedVizWin && !detachedVizWin.isDestroyed()) {
+      const ids = (await detachedVizWin.webContents.executeJavaScript(openModeList, true)) as string[];
+      for (const id of ids) {
+        if (id === 'butterchurn' || id === 'eviland-live') continue;
+        if (!detachedVizWin || detachedVizWin.isDestroyed()) break;
+        const selected = (await detachedVizWin.webContents.executeJavaScript(
+          `(async () => {
+            ${'await ' + openModeList};
+            const entry = document.querySelector('[data-projector-mode=${JSON.stringify(id)}]');
+            if (!entry) return false;
+            entry.click();
+            await new Promise((r) => setTimeout(r, 150));
+            const pressed = entry.getAttribute('aria-pressed') === 'true';
+            window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            await new Promise((r) => setTimeout(r, 900));
+            return pressed && !document.querySelector('[data-newamp-projector-menu]');
+          })()`,
+          true,
+        )) as boolean;
+        let litFraction = 0;
+        for (let shotIndex = 0; shotIndex < 3 && litFraction <= 0.002; shotIndex += 1) {
+          if (shotIndex > 0) await new Promise((r) => setTimeout(r, 500));
+          const shot = await Promise.race([
+            detachedVizWin.webContents.capturePage(),
+            new Promise<null>((r) => setTimeout(() => r(null), 8000)),
+          ]);
+          if (!shot) break;
+          const { width, height } = shot.getSize();
+          const bitmap = shot.toBitmap(); // BGRA
+          let lit = 0;
+          let sampled = 0;
+          for (let y = Math.floor(height * 0.15); y < Math.floor(height * 0.75); y += 4) {
+            for (let x = 0; x < width; x += 4) {
+              const i = (y * width + x) * 4;
+              if ((bitmap[i] ?? 0) + (bitmap[i + 1] ?? 0) + (bitmap[i + 2] ?? 0) > 36) lit += 1;
+              sampled += 1;
+            }
+          }
+          litFraction = Math.max(litFraction, sampled ? lit / sampled : 0);
+        }
+        modes.push({ id, selected, litFraction: Number(litFraction.toFixed(4)) });
+      }
+    }
+
     const result = {
       ok: true,
       ...playback,
@@ -4824,6 +4969,7 @@ async function runUiDetachedVizSmoke(win: BrowserWindow, scanPromise: Promise<vo
       capture,
       cursor,
       lookAhead,
+      modes,
     };
     console.log(`[newamp-ui-detached-viz-smoke] ${JSON.stringify(result)}`);
     isQuitting = true;
@@ -7928,8 +8074,10 @@ async function bootstrap(): Promise<void> {
   // libraryRoots is not "nothing configured", it's "unknown". Auto-seeding
   // here would scan a default folder straight into the real library.db
   // (a completely different, unsuppressed store) even though the user's
-  // real settings.json was never actually read this launch.
-  if (!smokeMode && !settings.isSuppressed() && !current.libraryRoots.length) {
+  // real settings.json was never actually read this launch. Nor is an empty
+  // list the user left by removing folders: seeding it would scan back in the
+  // tracks they removed.
+  if (!smokeMode && !settings.isSuppressed() && !current.libraryRoots.length && !current.libraryRootsChosen) {
     if (process.platform === 'darwin') {
       for (const c of [app.getPath('music'), ...safeListMacVolumesMusic()]) {
         try {
@@ -7962,7 +8110,8 @@ async function bootstrap(): Promise<void> {
     } catch {
       trackCount = -1;
     }
-    if (isSeededPublicMusicRoot(settings.get().libraryRoots, trackCount)) {
+    // A list the user cut down to that folder by removing the others is theirs.
+    if (!settings.get().libraryRootsChosen && isSeededPublicMusicRoot(settings.get().libraryRoots, trackCount)) {
       settings.set({ libraryRoots: defaultMusicScanRoots({ fallbackMusicPath: app.getPath('music') }) });
     }
   }

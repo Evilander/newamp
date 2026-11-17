@@ -104,6 +104,14 @@ export interface LoggedWheelSample extends WheelInputSample {
   longTaskMs: number;
 }
 
+interface VolumeWrite {
+  at: number;
+  /** What set it: 'slider', 'key', 'remote', 'deck', 'viz', or 'other'. */
+  by: string;
+  before: number;
+  after: number;
+}
+
 interface LongTask {
   at: number;
   ms: number;
@@ -122,6 +130,7 @@ export interface WheelLogMeta {
  */
 export class WheelInputLog {
   private samples: WheelInputSample[] = [];
+  private writes: VolumeWrite[] = [];
   private longTasks: LongTask[] = [];
   private recorded = 0;
   private longTaskCount = 0;
@@ -133,6 +142,12 @@ export class WheelInputLog {
     this.samples.push(sample);
     this.recorded += 1;
     if (this.samples.length > this.capacity) this.samples.shift();
+  }
+
+  /** A volume change the wheel did not make: a drag, a key, the projector. */
+  noteWrite(by: string, before: number, after: number, at = performance.now()): void {
+    this.writes.push({ at, by, before, after });
+    if (this.writes.length > this.capacity) this.writes.shift();
   }
 
   /** `at` is when the task started, on the same clock as the wheel events. */
@@ -195,6 +210,10 @@ export class WheelInputLog {
           longTaskMs: round(entry.longTaskMs, 1),
         }),
       );
+    }
+    lines.push('', `other volume changes: ${this.writes.length}`);
+    for (const write of this.writes) {
+      lines.push(JSON.stringify({ ...write, at: round(write.at, 1), before: round(write.before, 4), after: round(write.after, 4) }));
     }
     return lines.join('\n');
   }

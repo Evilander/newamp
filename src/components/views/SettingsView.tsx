@@ -31,7 +31,8 @@ import { Chip } from '../Chip';
 import { ConfirmAction } from '../ConfirmAction';
 import { ViewSkeleton } from '../ViewSkeleton';
 import { ShellPicker } from '../ShellPicker';
-import { flashGuardEnabled, setFlashGuardEnabled, watchFlashGuard } from '../../lib/vizPrefs';
+import { FlashProtectionControl } from '../FlashProtectionControl';
+import { VjDwellControl } from '../VjDwellControl';
 import { wheelInputLog } from '../../lib/wheel-volume';
 import { CommitSlider } from '../CommitSlider';
 import { mergeSavedSettings, type CredentialValues } from './settingsDrafts';
@@ -137,6 +138,8 @@ export function SettingsView(): JSX.Element {
   const [lastfmOutbox, setLastfmOutbox] = useState<LastfmOutboxStatus | null>(null);
   const [supportDiagnostics, setSupportDiagnostics] = useState<SupportDiagnostics | null>(null);
   const [supportBackup, setSupportBackup] = useState<SupportBackupResult | null>(null);
+  const [folderRemoval, setFolderRemoval] = useState<{ path: string; count: number } | null>(null);
+  const [removingFolder, setRemovingFolder] = useState(false);
   const [supportRestore, setSupportRestore] = useState<SupportRestoreResult | null>(null);
   const [supportBackupStatus, setSupportBackupStatus] = useState<string | null>(null);
   const [audioOutputs, setAudioOutputs] = useState<AudioOutputDeviceOption[]>([]);
@@ -219,16 +222,32 @@ export function SettingsView(): JSX.Element {
   async function pickAndAddFolder(): Promise<void> {
     const dir = await api.pickFolder();
     if (!dir) return;
+    // The saved list, not this page's copy: a folder removed while the picker
+    // was open, or while another Settings page started the removal, must not
+    // be saved back.
+    let roots: string[];
+    try {
+      roots = (await api.getSettings()).libraryRoots;
+    } catch (err) {
+      reportSettingError('Could not add folder', err);
+      return;
+    }
     // The same folder written another way, or one inside a library folder,
     // would be scanned twice. A new folder that holds existing ones replaces
     // them.
-    const covering = settings!.libraryRoots.find((root) => folderIsSameOrInside(dir, root));
+    const covering = roots.find((root) => folderIsSameOrInside(dir, root));
     if (covering) {
       pushToast({ tone: 'info', title: 'Already in your library', detail: covering });
       return;
     }
-    const next = [...settings!.libraryRoots.filter((root) => !folderIsSameOrInside(root, dir)), dir];
-    const updated = await saveSettings({ libraryRoots: next });
+    const next = [...roots.filter((root) => !folderIsSameOrInside(root, dir)), dir];
+    let updated: AppSettings;
+    try {
+      updated = await saveSettings({ libraryRoots: next });
+    } catch (err) {
+      reportSettingError('Could not add folder', err);
+      return;
+    }
     acceptSettings(updated);
     // Saving the folder does not read it. Scan just this one, so the rest of
     // the library is not walked again; the scan banner shows the progress.
@@ -238,11 +257,32 @@ export function SettingsView(): JSX.Element {
     });
   }
 
-  async function removeRoot(p: string): Promise<void> {
-    const next = settings!.libraryRoots.filter((r) => r !== p);
-    const updated = await saveSettings({ libraryRoots: next });
-    acceptSettings(updated);
-    pushToast({ tone: 'ok', title: 'Folder removed', detail: p });
+  async function previewRemoveRoot(path: string): Promise<void> {
+    try {
+      const count = await api.previewRemoveLibraryFolder(path);
+      setFolderRemoval({ path, count });
+    } catch (err) {
+      reportSettingError('Could not preview folder removal', err);
+    }
+  }
+
+  async function removeRoot(): Promise<void> {
+    if (!folderRemoval) return;
+    setRemovingFolder(true);
+    try {
+      const updated = await api.removeLibraryFolder(folderRemoval.path, folderRemoval.count);
+      acceptSettings(updated);
+      publishSavedSettings(updated, ['libraryRoots']);
+      setFolderRemoval(null);
+      // The totals under the folder list count the tracks that just went.
+      api.getStats().then(setStats).catch(() => undefined);
+      pushToast({ tone: 'ok', title: 'Folder and tracks removed from library', detail: 'No files were deleted.' });
+    } catch (err) {
+      setFolderRemoval(null);
+      reportSettingError('Could not remove folder', err);
+    } finally {
+      setRemovingFolder(false);
+    }
   }
 
   async function saveLastfmCredentials(): Promise<AppSettings> {
@@ -496,15 +536,24 @@ export function SettingsView(): JSX.Element {
               {settings.libraryRoots.map((r) => (
                 <div
                   key={r}
-                  className="bevel-in flex items-center justify-between px-3 py-2 font-mono text-sm"
+                  className="bevel-in display-well flex items-center justify-between px-3 py-2 font-mono text-sm"
                 >
                   <span className="truncate">{r}</span>
-                  <ConfirmAction label="Remove" confirmLabel="Remove?" onConfirm={() => void removeRoot(r)} />
+                  <button className="pxbtn" disabled={removingFolder} onClick={() => void previewRemoveRoot(r)}>Remove</button>
                 </div>
               ))}
             </div>
+            {folderRemoval && (
+              <div className="bevel-in display-well p-3 text-sm" role="alert">
+                <p>Remove {folderRemoval.path} from the library? Its tracks lose their plays, ratings, listening history, edits and playlist places. Lists keep text entries and reviews remain. A library backup is saved first. No files are deleted.</p>
+                <button className="pxbtn" disabled={removingFolder} onClick={() => void removeRoot()}>
+                  {removingFolder ? 'Removing…' : `Remove folder and ${folderRemoval.count.toLocaleString()} tracks — no files deleted`}
+                </button>
+                <button className="pxbtn" disabled={removingFolder} onClick={() => setFolderRemoval(null)}>Cancel</button>
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
-              <button className="pxbtn" onClick={() => void pickAndAddFolder()}>
+              <button className="pxbtn" disabled={removingFolder} onClick={() => void pickAndAddFolder()}>
                 + Add folder…
               </button>
               <button
@@ -512,7 +561,7 @@ export function SettingsView(): JSX.Element {
                 onClick={() => {
                   api.scanLibrary().catch((err: unknown) => reportSettingError('Scan failed', err));
                 }}
-                disabled={!settings.libraryRoots.length}
+                disabled={!settings.libraryRoots.length || removingFolder}
               >
                 ▶ Scan now
               </button>
@@ -715,8 +764,11 @@ export function SettingsView(): JSX.Element {
                 </span>
               </label>
             </Row>
+            <Row label="Auto-VJ duration">
+              <VjDwellControl />
+            </Row>
             <Row label="Flash protection">
-              <FlashProtectionRow />
+              <FlashProtectionControl />
             </Row>
             <Row label="Eviland memory">
               <EvilandMemoryRow />
@@ -978,14 +1030,14 @@ export function SettingsView(): JSX.Element {
               the callback URL blank for desktop auth.
             </div>
             <div className="grid gap-2 text-xs text-ink2 md:grid-cols-2">
-              <div className="bevel-in px-3 py-2">
+              <div className="bevel-in display-well px-3 py-2">
                 <strong className="text-ink">Last.fm app form</strong>
                 <div>Application name: NewAmp</div>
                 <div>Application description: Local music player with optional Last.fm scrobbling.</div>
                 <div>Homepage: https://github.com/evilander/newamp</div>
                 <div>Callback URL: leave blank.</div>
               </div>
-              <div className="bevel-in px-3 py-2">
+              <div className="bevel-in display-well px-3 py-2">
                 <strong className="text-ink">Connection order</strong>
                 <div>1. Save API key and shared secret.</div>
                 <div>2. Open Last.fm auth and approve NewAmp in the browser.</div>
@@ -1197,7 +1249,7 @@ export function SettingsView(): JSX.Element {
                     : 'No recoveries recorded this launch'}
                 </DiagnosticRow>
                 {supportDiagnostics.recoveryEvents.length > 0 && (
-                  <div className="bevel-in space-y-1 px-3 py-2">
+                  <div className="bevel-in display-well space-y-1 px-3 py-2">
                     {supportDiagnostics.recoveryEvents.map((event) => (
                       // A quarantined file was renamed away (backupPath differs
                       // from filePath); an untouched notice (a locked file left
@@ -2000,40 +2052,6 @@ function Row({ label, children }: { label: string; children: React.ReactNode }):
         {label}
       </span>
       {children}
-    </div>
-  );
-}
-
-/**
- * Visualizer flash protection (visualizer/flash-guard.ts). On by default;
- * turning it off takes the two-step confirm and states why it's there.
- */
-function FlashProtectionRow(): JSX.Element {
-  const [enabled, setEnabled] = useState(flashGuardEnabled);
-  useEffect(() => watchFlashGuard(setEnabled), []);
-  return (
-    <div className="flex flex-col items-end gap-2 text-sm text-ink2" data-newamp-flash-protection={enabled ? 'on' : 'off'}>
-      <span>
-        {enabled
-          ? 'On — bright flashes in visualizers and their recordings are held to three a second.'
-          : 'Off — visualizers can flash as fast as the music drives them.'}
-      </span>
-      {enabled ? (
-        <>
-          <span className="text-xs text-muted">Turning this off can expose viewers with photosensitive epilepsy to seizure-triggering flashes.</span>
-          <ConfirmAction
-            label="Turn off"
-            confirmLabel="Turn off anyway?"
-            tone="warn"
-            size="sm"
-            onConfirm={() => setFlashGuardEnabled(false)}
-          />
-        </>
-      ) : (
-        <button type="button" className="pxbtn is-active" onClick={() => setFlashGuardEnabled(true)}>
-          Turn on
-        </button>
-      )}
     </div>
   );
 }

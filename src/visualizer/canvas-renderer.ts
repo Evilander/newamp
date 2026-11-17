@@ -1,0 +1,1997 @@
+// Framework-free canvas renderers shared by the player and Projector.
+import type { AudioEngine } from '../audio/engine';
+import type { VizMode, VizPalette, VizReactivity, VizPerformance, VizQuality } from '../components/Visualizer';
+import { createParticleFlowRenderer } from './particle-flow';
+import { createGovernor, type Governor } from './eviland-governor';
+import { parseCssRgbVec as parseRgbVec } from './css-color';
+import { attachFlashGuard, createGuarded2dSurface, gpuFlashGuardSupported, guardCanvas2d, type AttachedFlashGuard } from './flash-guard-host';
+import { bandEnd, logBandEdges, createSampleRateWatch } from './band-edges';
+import { LATTICE_BASE_DIVISOR, avg, boostFrequencyData, createAudioFeatureAnalyzer, createPhaseClock, settleLatticeDivisor } from './viz-features';
+import { AMBIENT_FRAME_MS, PACED_FRAME_SLACK_MS, createCadenceGate, startPacedLoop, watchDisplayChange } from '../lib/pacedFrame';
+
+type RefObject<T> = { readonly current: T | null };
+export type VisualizerAudio = Pick<AudioEngine, 'frequencyBinCount' | 'fftSize' | 'getSampleRate' | 'getFreqData' | 'getOnsetFreqData' | 'getTimeData'> & { getState(): { playing: boolean } };
+
+type FrameGate = ((now: number) => boolean) & {
+  // Milliseconds until the next paint is due, for loops that sleep between
+  // paints (requestPacedFrame) instead of spinning on every vsync.
+  msUntilDue(now: number): number;
+};
+
+// How often the achieved paint rate is written to the canvas.
+const FPS_WINDOW_MS = 2000;
+
+export function createFrameGate(
+  canvasRef: RefObject<HTMLCanvasElement>,
+  frameIntervalMs: number | (() => number),
+  // Paced loops wake slightly before they are due; accept frames that early.
+  slackMs = 0,
+  // Loops that wake on the shared 30 Hz grid book their frames on it.
+  gridMs?: number,
+): FrameGate {
+  // The cadence gate books frames from a schedule and takes them up to half a
+  // refresh early, so 45 fps lands on 45 on a 60 Hz display instead of 30.
+  const cadence = createCadenceGate(frameIntervalMs, { slackMs, gridMs });
+  let fpsFrames = 0;
+  let fpsSince = 0;
+  const gate = (now: number) => {
+    // A function interval re-reads per frame so the Auto-Pilot governor can
+    // stretch the cadence live without tearing down the render loop. Checked
+    // before any layout read: rAF runs at display refresh (up to 165 Hz+), and
+    // clientWidth on a frame where style is dirty forces a synchronous
+    // style+layout pass for the whole document.
+    if (!cadence.due(now)) return false;
+    const node = canvasRef.current;
+    if (!node || !node.isConnected || document.hidden) return false;
+    if (node.clientWidth <= 0 || node.clientHeight <= 0) return false;
+    cadence.commit(now);
+    // Observability breadcrumb: the rate this canvas is really painting at.
+    if (!fpsSince) fpsSince = now;
+    else {
+      fpsFrames += 1;
+      if (now - fpsSince >= FPS_WINDOW_MS) {
+        node.setAttribute('data-newamp-fps', ((fpsFrames * 1000) / (now - fpsSince)).toFixed(1));
+        fpsFrames = 0;
+        fpsSince = now;
+      }
+    }
+    return true;
+  };
+  return Object.assign(gate, {
+    msUntilDue: (now: number) => cadence.msUntilDue(now),
+  });
+}
+
+export function startCanvasVisualizer(options: {
+  canvas: HTMLCanvasElement;
+  engine: VisualizerAudio;
+  mode: VizMode;
+  performance: VizPerformance;
+  quality: VizQuality;
+  tuning: { readonly current: VizTuning };
+  frameIntervalMs: number;
+  dprCap: number;
+  maxPixels: number;
+  isFullscreen: boolean;
+  mayFlashLarge: boolean;
+  /** Called once Particle Flow is running on the GPU, not on its 2D fallback. */
+  onGpuStart?: () => void;
+}): () => void {
+  const { canvas, engine, mode, performance, quality, frameIntervalMs, dprCap, maxPixels, isFullscreen, mayFlashLarge } = options;
+  const canvasRef = { current: canvas };
+  const tuningRef = options.tuning;
+  const fourK = isFullscreen && performance !== 'low' && quality === '4k';
+    if (mode === 'particle-flow') {
+      // WebGL2 GPU particle flow-field. createParticleFlowRenderer returns null
+      // when WebGL2 / transform feedback is unavailable, in which case we keep
+      // the canvas alive with the non-eval 2D fallback so it never goes dark.
+      const smoke = Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke);
+      const particleBudget = performance === 'low'
+        ? 40_000
+        : isFullscreen
+          ? quality === '4k' ? 140_000 : 110_000
+          : 60_000;
+      const gov = fourK ? createGovernor({ costBudgetMs: 12 }) : null;
+      const canPaint = createFrameGate(canvasRef, gov ? () => gov.intervalMs(frameIntervalMs) : frameIntervalMs);
+      let baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
+      const stopDisplayWatch = watchDisplayChange(() => {
+        baseDpr = Math.min(window.devicePixelRatio || 1, dprCap);
+      });
+      // Only where its output can be flash-guarded; the guarded 2D fallback
+      // below is the alternative.
+      const renderer = gpuFlashGuardSupported() ? createParticleFlowRenderer(canvas, { particles: particleBudget, smoke }) : null;
+      const flashGuard = renderer ? attachFlashGuard(canvas.getContext('webgl2'), canvas) : null;
+
+      if (!renderer || !flashGuard) {
+        renderer?.dispose();
+        const painter = createFallbackPainter(canvas, engine);
+        const stopFallback = startPacedLoop(canPaint, (now) => painter.paint(now), { retryMs: frameIntervalMs, rescue: true });
+        return () => {
+          stopFallback();
+          stopDisplayWatch();
+          painter.dispose();
+        };
+      }
+
+      const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+      const onsetFreq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+      const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
+      let analyzedRate = engine.getSampleRate();
+      let analyze = createAudioFeatureAnalyzer({
+        sampleRate: analyzedRate,
+        fftSize: engine.fftSize,
+      });
+      const rateChanged = createSampleRateWatch(() => engine.getSampleRate(), analyzedRate);
+      let lastNow = 0;
+      options.onGpuStart?.();
+
+      // Hoisted out of the rAF loop (getComputedStyle forces a style recalc);
+      // refreshed ~2x/sec so theme changes still land.
+      let accentVec = parseRgbVec(getCssVar('--accent'));
+      let accentTick = 0;
+
+      const frame = (now: number) => {
+        // `performance` is the component's tier prop in this scope.
+        const renderStart = window.performance.now();
+        const node = canvasRef.current;
+        if (node) {
+          const cssW = node.clientWidth || 100;
+          const cssH = node.clientHeight || 100;
+          const fit = Math.min(1, Math.sqrt(maxPixels / Math.max(1, cssW * baseDpr * cssH * baseDpr)));
+          renderer.resize(cssW, cssH, baseDpr * fit * (gov?.scale() ?? 1));
+        }
+        const newRate = rateChanged(now);
+        if (newRate) {
+          analyzedRate = newRate;
+          analyze = createAudioFeatureAnalyzer({ sampleRate: newRate, fftSize: engine.fftSize });
+        }
+        engine.getFreqData(freq);
+        engine.getOnsetFreqData(onsetFreq);
+        engine.getTimeData(wave);
+        boostFrequencyData(freq, tuningRef.current.reactivity, analyzedRate / engine.fftSize);
+        const f = analyze(freq, wave, onsetFreq);
+        const dt = lastNow ? (now - lastNow) / 1000 : 1 / 60;
+        lastNow = now;
+        if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
+        try {
+          renderer.render(
+            { bass: f.bass, mid: f.mid, treble: f.treble, rms: f.rms, beat: f.beat, kick: f.kick, beatEdge: f.beatEdge },
+            accentVec,
+            dt,
+          );
+        } finally {
+          flashGuard?.apply(dt * 1000);
+          gov?.endFrame(now, window.performance.now() - renderStart);
+        }
+      };
+      const stopLoop = startPacedLoop(canPaint, frame, { retryMs: frameIntervalMs });
+
+      return () => {
+        stopLoop();
+        stopDisplayWatch();
+        flashGuard?.dispose();
+        renderer.dispose();
+        releaseGlContext(canvas);
+      };
+    }
+
+    if (isShaderVisualizerMode(mode)) {
+      const cleanup = startShaderVisualizer({
+        canvas,
+        canvasRef,
+        engine,
+        mode,
+        tuning: tuningRef,
+        frameIntervalMs,
+        dprCap,
+        maxPixels,
+        governor: fourK ? createGovernor({ costBudgetMs: 12 }) : null,
+        paced: true,
+      });
+      if (cleanup) return cleanup;
+    }
+
+    let dpr = Math.min(window.devicePixelRatio || 1, dprCap);
+    const stopDisplayWatch = watchDisplayChange(() => {
+      dpr = Math.min(window.devicePixelRatio || 1, dprCap);
+    });
+    let ctx: CanvasRenderingContext2D | null = null;
+    // The painters draw on `surface.paint`: offscreen when the frame is
+    // presented through the GPU flash guard on this canvas, else this canvas.
+    const surface = createGuarded2dSurface(canvas, mayFlashLarge, Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke));
+    let lastShownAt = 0;
+    const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+    const onsetFreq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+    const wave = new Uint8Array(new ArrayBuffer(engine.fftSize));
+    // At the ambient rate this loop shares Resonance's 30 Hz grid, so both
+    // land in the same animation frame.
+    const onAmbientGrid = frameIntervalMs >= AMBIENT_FRAME_MS - 1;
+    const gov = fourK ? createGovernor({ costBudgetMs: 12 }) : null;
+    const canPaint = createFrameGate(
+      canvasRef,
+      gov ? () => gov.intervalMs(frameIntervalMs) : frameIntervalMs,
+      onAmbientGrid ? PACED_FRAME_SLACK_MS : 0,
+      onAmbientGrid ? AMBIENT_FRAME_MS : undefined,
+    );
+    // The analysis and the bar edges are built for the sample rate in use, and
+    // again when Bit-Perfect output moves the device to another one.
+    let analyzedRate = engine.getSampleRate();
+    let analyzeFeatures = createAudioFeatureAnalyzer({
+      sampleRate: analyzedRate,
+      fftSize: engine.fftSize,
+    });
+    const rateChanged = createSampleRateWatch(() => engine.getSampleRate(), analyzedRate);
+    const barEdgeCache = new Map<number, Int32Array>();
+    const barEdges = (count: number): Int32Array => {
+      let edges = barEdgeCache.get(count);
+      if (!edges) {
+        edges = logBandEdges(analyzedRate, engine.fftSize, count);
+        barEdgeCache.set(count, edges);
+      }
+      return edges;
+    };
+
+    function ensureSize() {
+      const node = canvasRef.current;
+      if (!node) return;
+      const w = node.clientWidth || node.width || 100;
+      const h = node.clientHeight || node.height || 40;
+      const drawDpr = dpr * (gov?.scale() ?? 1);
+      const scaledW = Math.max(2, Math.floor(w * drawDpr));
+      const scaledH = Math.max(2, Math.floor(h * drawDpr));
+      const scale = Math.min(1, Math.sqrt(maxPixels / Math.max(1, scaledW * scaledH)));
+      const targetW = Math.max(2, Math.floor(scaledW * scale));
+      const targetH = Math.max(2, Math.floor(scaledH * scale));
+      const paint = surface.paint;
+      if (paint.width !== targetW || paint.height !== targetH) {
+        paint.width = targetW;
+        paint.height = targetH;
+        node.setAttribute('data-newamp-render-size', `${targetW}x${targetH}`);
+      }
+      ctx = paint.getContext('2d', { alpha: false });
+      if (ctx) ctx.setTransform(targetW / Math.max(1, w), 0, 0, targetH / Math.max(1, h), 0, 0);
+    }
+
+    // Galaxy state
+    interface Particle {
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      r: number;
+      hue: number;
+      life: number;
+    }
+    const particles: Particle[] = [];
+
+    // Tempo Pulse: rings spawned on each beat, expanding outward
+    interface TempoRing { x: number; y: number; r: number; life: number; hue: number; thickness: number }
+    const tempoRings: TempoRing[] = [];
+    let lastTempoBeat = 0;
+
+    // Lattice Strobe: alternating palette flip + beat-driven scale
+    let latticeFlip = 0;
+    let latticeStrobe = 0;
+    let lastLatticeBeat = 0;
+    let latticeDivisor = LATTICE_BASE_DIVISOR;
+
+    // Confetti: sweep angles integrated from real elapsed time. Multiplying a
+    // clock by the beat envelope moves every angle by clock x the change each
+    // frame, which is a scatter once the clock is large.
+    let confettiTime = 0;
+    let confettiBeatTime = 0;
+    let confettiLastAt = 0;
+
+    // Radial / Tunnel / Orbital rotation accumulators — beat-driven instead of
+    // wall-clock so the spin speed scales with the music, not real time.
+    let radialRotation = 0;
+    let tunnelTwist = 0;
+    let orbitalRotation = 0;
+
+    // Liquid Mercury: 12 metaball blobs floating around with band-coupled
+    // momentum. Each blob's hue, radius, and velocity respond to a distinct
+    // frequency slice so the cluster as a whole reads as a living fluid that
+    // breathes with the music. Initialized lazily so we only allocate when
+    // the preset actually runs.
+    interface MercuryBlob {
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      radius: number;
+      hue: number;
+      band: number;
+    }
+    const mercuryBlobs: MercuryBlob[] = [];
+    let mercuryAttractor = 1; // +1 attracts blobs to center; -1 explodes outward
+    let lastMercuryFlip = 0;
+    let mercuryHueDrift = 0;
+    // Track canvas size between frames so we can rescale blob positions when
+    // the user resizes the window (e.g. small → fullscreen). Without this the
+    // blobs stay anchored at their original coordinates and cluster in one
+    // corner until the attractor slowly drags them back to center.
+    let mercuryLastW = 0;
+    let mercuryLastH = 0;
+    // Color-stop cache for Liquid Mercury gradients. Quantized (hue, band,
+    // beat, layer) → 2-stop hsla strings. Keeps the per-frame template-string
+    // alloc count down by ~95% on steady music.
+    const mercuryColorStopCache = new Map<number, [string, string]>();
+
+    // Theme colors, hoisted out of the rAF loop (getCssVar forces a style
+    // recalc via getComputedStyle) and refreshed ~2x/sec so theme changes
+    // still land within a blink.
+    let themeAccent = getCssVar('--accent') || '#39ff14';
+    let themeAccentDim = getCssVar('--accent-dim') || '#1aa30a';
+    let themeTick = 0;
+    // The bar modes live permanently in the transport and decks. Once playback
+    // has stopped long enough for the bars to fall, the canvas stops changing,
+    // so stop repainting it instead of recompositing a still image at 30 fps.
+    const restsWhenStopped = mode === 'mini' || mode === 'spectrum';
+    let stoppedSince = 0;
+
+    // Returns the delay before the next wake-up when it is not the cadence
+    // (the resting meter); the paced loop below books the rest.
+    function frame(now: number): number | void {
+      const renderStart = window.performance.now();
+      if (restsWhenStopped) {
+        if (engine.getState().playing) stoppedSince = 0;
+        else if (!stoppedSince) stoppedSince = now;
+        else if (now - stoppedSince > 1500) {
+          return 250; // resumes within a quarter second of play
+        }
+      }
+      ensureSize();
+      const c = canvasRef.current;
+      if (!c) return;
+      const w = c.clientWidth || c.width;
+      const h = c.clientHeight || c.height;
+      if (!ctx) return;
+
+      const newRate = rateChanged(now);
+      if (newRate) {
+        analyzedRate = newRate;
+        barEdgeCache.clear();
+        analyzeFeatures = createAudioFeatureAnalyzer({ sampleRate: newRate, fftSize: engine.fftSize });
+      }
+      engine.getFreqData(freq);
+      engine.getOnsetFreqData(onsetFreq);
+      engine.getTimeData(wave);
+      boostFrequencyData(freq, tuningRef.current.reactivity, analyzedRate / engine.fftSize);
+      const features = analyzeFeatures(freq, wave, onsetFreq);
+
+      if (themeTick++ % 30 === 0) {
+        themeAccent = getCssVar('--accent') || '#39ff14';
+        themeAccentDim = getCssVar('--accent-dim') || '#1aa30a';
+      }
+      const accent = themeAccent;
+      const accentDim = themeAccentDim;
+
+      if (mode === 'mini' || mode === 'spectrum') {
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        ctx.fillRect(0, 0, w, h);
+
+        // Log-spaced bars over 30 Hz - 16 kHz, so the meter shows the whole
+        // spectrum instead of spending its first bars on bass, at any sample rate.
+        const bars = mode === 'mini' ? 18 : 56;
+        const edges = barEdges(bars);
+        const gap = mode === 'mini' ? 1 : 2;
+        const bw = (w - gap * (bars - 1)) / bars;
+        for (let i = 0; i < bars; i++) {
+          const v = avg(freq, edges[i]!, bandEnd(edges, i)) / 255;
+          const bh = Math.max(1, v * h);
+          const x = i * (bw + gap);
+          const g = ctx.createLinearGradient(0, h - bh, 0, h);
+          g.addColorStop(0, accent);
+          g.addColorStop(1, accentDim);
+          ctx.fillStyle = g;
+          ctx.fillRect(x, h - bh, bw, bh);
+        }
+      } else if (mode === 'oscilloscope') {
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(0, 0, w, h);
+        const osc = oscilloscopePalette(tuningRef.current.palette, accent, now);
+        ctx.strokeStyle = osc.stroke;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        const slice = w / wave.length;
+        for (let i = 0; i < wave.length; i++) {
+          const v = wave[i]! / 128 - 1;
+          const y = h / 2 + (v * h) / 2;
+          if (i === 0) ctx.moveTo(0, y);
+          else ctx.lineTo(i * slice, y);
+        }
+        ctx.shadowColor = osc.glow;
+        ctx.shadowBlur = osc.blur;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      } else if (mode === 'galaxy') {
+        // Trail fade
+        ctx.fillStyle = 'rgba(0,0,0,0.18)';
+        ctx.fillRect(0, 0, w, h);
+
+        // Compute energy bands
+        const bass = avg(freq, 1, 12) / 255;
+        const mid = avg(freq, 12, 60) / 255;
+        const treble = avg(freq, 60, 180) / 255;
+
+        // Spawn particles based on bass kicks. Real beat onsets — from the
+        // shared analyzer — get an extra burst on top of the running average.
+        const galaxyBeatBurst = features.beatEdge ? 14 : 0;
+        const spawn = Math.floor(bass * 6 + mid * 2 + features.beat * 8 + galaxyBeatBurst);
+        const galaxyHueBase = (features.bass * 360 + features.beat * 140 + now / 120) % 360;
+        for (let i = 0; i < spawn; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 1 + bass * 8 + features.beat * 4 + Math.random() * 3;
+          particles.push({
+            x: w / 2,
+            y: h / 2,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            r: 1 + mid * 3 + features.beat * 2 + Math.random() * 1.5,
+            hue: (galaxyHueBase + Math.random() * 30) % 360,
+            life: 60 + Math.random() * 60,
+          });
+        }
+        if (particles.length > 600) particles.splice(0, particles.length - 600);
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+          const p = particles[i]!;
+          p.x += p.vx;
+          p.y += p.vy;
+          p.vx *= 0.985;
+          p.vy *= 0.985;
+          p.life -= 1;
+          if (p.life <= 0 || p.x < -20 || p.x > w + 20 || p.y < -20 || p.y > h + 20) {
+            particles.splice(i, 1);
+            continue;
+          }
+          const alpha = Math.min(1, p.life / 60);
+          ctx.fillStyle = `hsla(${p.hue}, 88%, 62%, ${alpha})`;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Bass ring — hue cycles with bass + beat so kicks change color, not
+        // just size. Beat onsets thicken the ring; energy expands it outward.
+        if (bass > 0.12 || features.beat > 0.35) {
+          const ringHue = (galaxyHueBase + 40) % 360;
+          ctx.strokeStyle = `hsla(${ringHue}, 96%, ${56 + features.beat * 18}%, ${0.4 + bass * 0.55 + features.beat * 0.25})`;
+          ctx.lineWidth = 2 + bass * 3 + features.beat * 4;
+          ctx.beginPath();
+          ctx.arc(w / 2, h / 2, 60 + bass * 140 + features.beat * 80, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        if (treble > 0.08) {
+          ctx.fillStyle = `rgba(255,255,255,${0.08 + treble * 0.32})`;
+          for (let i = 0; i < 18; i += 1) {
+            const x = (Math.sin(now / 700 + i * 12.989) * 0.5 + 0.5) * w;
+            const y = (Math.sin(now / 920 + i * 78.233) * 0.5 + 0.5) * h;
+            ctx.fillRect(x, y, 1 + treble * 3, 1 + treble * 3);
+          }
+        }
+      } else if (mode === 'aurora') {
+        ctx.fillStyle = 'rgba(0,0,0,0.16)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 22) / 255;
+        const mid = avg(freq, 22, 110) / 255;
+        const treble = avg(freq, 110, 240) / 255;
+        const bands = 9;
+        const t = now / 900;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let b = 0; b < bands; b++) {
+          const energy = avg(freq, b * 10, b * 10 + 18) / 255;
+          const yc = h * (0.16 + 0.082 * b) + Math.sin(t + b * 0.78) * (18 + bass * 80);
+          const hue = (b * 36 + now / 34 + bass * 110) % 360;
+          ctx.beginPath();
+          for (let x = -12; x <= w + 12; x += 10) {
+            const phase = x / (80 + b * 8) + t + b * 0.62;
+            const y =
+              yc +
+              Math.sin(phase) * (30 + energy * 120 + bass * 90) +
+              Math.sin(phase * 0.43 + mid * 5) * (18 + treble * 48);
+            if (x <= -12) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = `hsla(${hue}, 96%, ${58 + energy * 18}%, ${0.28 + energy * 0.58})`;
+          ctx.lineWidth = 2 + energy * 7 + bass * 5;
+          ctx.shadowColor = `hsl(${hue}, 96%, 62%)`;
+          ctx.shadowBlur = 18 + energy * 34 + bass * 26;
+          ctx.stroke();
+        }
+        const glow = ctx.createRadialGradient(w / 2, h * 0.52, 0, w / 2, h * 0.52, Math.max(w, h) * 0.74);
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.1 + bass * 0.42 + mid * 0.18})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
+      } else if (mode === 'radial') {
+        ctx.fillStyle = 'rgba(0,0,0,0.24)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 18) / 255;
+        const mid = avg(freq, 18, 86) / 255;
+        const cx = w / 2;
+        const cy = h / 2;
+        const spokes = 96;
+        // Beat pumps the wheel outward; bass drives the rolling rotation so
+        // the speed of the spin scales with low-end energy instead of a fixed
+        // wall-clock divisor.
+        // Wrap to avoid float-precision drift after long sessions. At
+        // ~radialRotation > 1e6 the hue derivation loses precision and
+        // quantizes into visible color bands.
+        radialRotation = (radialRotation + 0.004 + features.bass * 0.04 + (features.beatEdge ? 0.18 : 0)) % (Math.PI * 2);
+        const maxR = Math.min(w, h) * (0.28 + bass * 0.18 + features.beat * 0.18);
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(radialRotation);
+        for (let i = 0; i < spokes; i++) {
+          const bandEnergy = features.bands[i % features.bands.length] ?? 0;
+          const bin = (freq[(i * 3) % Math.max(1, freq.length)]! / 255) * 0.6 + bandEnergy * 0.4;
+          const angle = (Math.PI * 2 * i) / spokes;
+          const inner = maxR * (0.28 + mid * 0.08);
+          const outer = inner + maxR * (0.38 + bin * 0.74 + features.beat * 0.2);
+          ctx.strokeStyle = `hsla(${(i * 3.8 + radialRotation * 80 + features.bass * 80) % 360}, 92%, 62%, ${0.18 + bin * 0.7 + features.beat * 0.18})`;
+          ctx.lineWidth = 1 + bin * 3 + features.beat * 1.5;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+          ctx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
+          ctx.stroke();
+        }
+        ctx.restore();
+        const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR * 1.7);
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.28 + bass * 0.48 + features.beat * 0.22})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, w, h);
+      } else if (mode === 'tunnel') {
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 24) / 255;
+        const cx = w / 2;
+        const cy = h / 2;
+        const rings = 26;
+        // Accumulator twist driven by bass + beat — silent tracks freeze the
+        // tunnel; pumping kicks accelerate it instead of the constant
+        // Date.now()/900 drift.
+        tunnelTwist = (tunnelTwist + 0.005 + bass * 0.035 + (features.beatEdge ? 0.12 : 0)) % (Math.PI * 2);
+        // Sides mutate on beat for a polygon-morph effect.
+        const sides = 6 + Math.floor(features.beat * 4 + features.bass * 2);
+        for (let r = rings; r > 0; r--) {
+          const phase = r / rings;
+          const radius = phase * Math.max(w, h) * (0.46 + bass * 0.32 + features.beat * 0.18);
+          ctx.beginPath();
+          for (let i = 0; i <= sides; i++) {
+            const angle = (Math.PI * 2 * i) / sides + tunnelTwist * (1 - phase);
+            const wobble = Math.sin(tunnelTwist * 4 + i + r) * (6 + bass * 18 + features.beat * 12);
+            const x = cx + Math.cos(angle) * (radius + wobble);
+            const y = cy + Math.sin(angle) * (radius + wobble);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          const hue = (phase * 240 + tunnelTwist * 60 + features.bass * 120) % 360;
+          ctx.strokeStyle = `hsla(${hue}, 88%, 60%, ${0.1 + (1 - phase) * 0.58 + features.beat * 0.18})`;
+          ctx.lineWidth = 1 + bass * 3 + features.beat * 2;
+          ctx.stroke();
+        }
+      } else if (mode === 'pulse') {
+        // Beat onsets briefly flash the whole field — gives Pulse a tempo
+        // anchor instead of drifting on the smoothed RMS curve.
+        ctx.fillStyle = features.beat > 0.55 ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.18)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 14) / 255;
+        const mid = avg(freq, 14, 72) / 255;
+        const treble = avg(freq, 72, 180) / 255;
+        const cells = 14;
+        const cellW = w / cells;
+        const cellH = h / Math.max(7, Math.floor(cells * h / Math.max(w, 1)));
+        for (let y = -1; y < h / cellH + 1; y++) {
+          for (let x = -1; x < cells + 1; x++) {
+            const dist = Math.hypot(x - cells / 2, y - h / cellH / 2);
+            const wavePhase = Math.sin(dist * 0.9 - now / 180);
+            const level = Math.max(0, wavePhase * 0.5 + 0.5) * (0.25 + bass * 0.55 + mid * 0.25);
+            ctx.fillStyle = `rgba(${parseRgb(accent)}, ${0.05 + level * 0.42})`;
+            ctx.fillRect(x * cellW + 1, y * cellH + 1, cellW - 2, cellH - 2);
+          }
+        }
+        ctx.strokeStyle = `rgba(255,255,255,${0.12 + treble * 0.32})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, h * (0.52 - bass * 0.18));
+        for (let x = 0; x <= w; x += 8) {
+          const y = h / 2 + Math.sin(x / 28 + now / 140) * (18 + mid * 70);
+          ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      } else if (mode === 'orbital-rings') {
+        ctx.fillStyle = 'rgba(0,0,0,0.15)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 22) / 255;
+        const lowMid = avg(freq, 22, 86) / 255;
+        const highMid = avg(freq, 86, 168) / 255;
+        const treble = avg(freq, 168, 280) / 255;
+        const cx = w / 2;
+        const cy = h / 2;
+        const minSide = Math.min(w, h);
+        const time = now;
+        // Beat drives the master rotation so the rings push outward on kicks.
+        orbitalRotation = (orbitalRotation + 0.002 + features.bass * 0.022 + (features.beatEdge ? 0.06 : 0)) % (Math.PI * 2);
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(orbitalRotation);
+        ctx.globalCompositeOperation = 'lighter';
+
+        for (let ring = 0; ring < 5; ring += 1) {
+          const radius = minSide * (0.11 + ring * 0.072) + bass * minSide * 0.035 + features.beat * minSide * 0.04;
+          // Cut bar count almost in half — was 96+ring*18 (~432 max bars).
+          // The bottleneck was many strokes with shadowBlur; reducing the
+          // stroke count eliminates the lag complaint while preserving look.
+          const bars = 48 + ring * 10;
+          const spin = (ring % 2 === 0 ? 1 : -1) * orbitalRotation * (0.6 + ring * 0.18);
+          ctx.save();
+          ctx.rotate(spin);
+          for (let i = 0; i < bars; i += 1) {
+            const binIndex = Math.floor((i / bars) * Math.min(freq.length - 1, 260));
+            const energy = Math.max(0.035, freq[binIndex]! / 255);
+            const angle = (Math.PI * 2 * i) / bars;
+            const pulse = 1 + Math.sin(time / 240 + i * 0.17 + ring) * 0.08;
+            const inner = radius * (0.96 + lowMid * 0.04);
+            const outer =
+              radius +
+              (8 + ring * 2 + energy * minSide * 0.09 + bass * minSide * 0.04 + features.beat * minSide * 0.04) * pulse;
+            const hue = (155 + ring * 26 + i * 0.9 + orbitalRotation * 30 + treble * 120) % 360;
+            ctx.strokeStyle = `hsla(${hue}, 96%, ${54 + energy * 22}%, ${0.18 + energy * 0.74 + features.beat * 0.12})`;
+            ctx.lineWidth = 0.75 + energy * 2.8 + bass * 1.5;
+            ctx.beginPath();
+            ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+            ctx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        // shadowBlur is the expensive op — only enable when the beat actually
+        // fires so the rest of the time the renderer stays cheap.
+        const ringShadow = features.beat > 0.42 ? 12 + features.beat * 28 : 0;
+        for (let ring = 0; ring < 4; ring += 1) {
+          const radius = minSide * (0.18 + ring * 0.105) + bass * minSide * 0.09 + features.beat * minSide * 0.05;
+          ctx.strokeStyle = `hsla(${190 + ring * 34 + orbitalRotation * 40}, 92%, 62%, ${0.08 + bass * 0.34 + highMid * 0.18 + features.beat * 0.18})`;
+          ctx.lineWidth = 1 + bass * 4 + ring * 0.28 + features.beat * 1.5;
+          if (ringShadow > 0) {
+            ctx.shadowColor = `hsl(${190 + ring * 34}, 92%, 62%)`;
+            ctx.shadowBlur = ringShadow;
+          } else {
+            ctx.shadowBlur = 0;
+          }
+          ctx.beginPath();
+          ctx.arc(0, 0, radius + Math.sin(time / 300 + ring) * (4 + bass * 22 + features.beat * 12), 0, Math.PI * 2);
+          ctx.stroke();
+        }
+
+        ctx.shadowBlur = 0;
+        ctx.rotate(-orbitalRotation * 0.6);
+        ctx.beginPath();
+        for (let i = 0; i < 240; i += 1) {
+          const waveIndex = Math.floor((i / 240) * wave.length);
+          const sample = (wave[waveIndex]! - 128) / 128;
+          const angle = (Math.PI * 2 * i) / 240;
+          const radius =
+            minSide * (0.055 + bass * 0.03) + sample * minSide * (0.05 + highMid * 0.04);
+          const x = Math.cos(angle) * radius;
+          const y = Math.sin(angle) * radius;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = `rgba(${parseRgb(accent)}, ${0.5 + treble * 0.35})`;
+        ctx.lineWidth = 1.2 + lowMid * 2;
+        ctx.stroke();
+        ctx.restore();
+
+        const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, minSide * (0.18 + bass * 0.22));
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.18 + bass * 0.48})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, w, h);
+      } else if (mode === 'neon-waves') {
+        ctx.fillStyle = 'rgba(0,0,0,0.16)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 18) / 255;
+        const mid = avg(freq, 18, 90) / 255;
+        const treble = avg(freq, 90, 180) / 255;
+        const time = now / 420;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let band = 0; band < 18; band += 1) {
+          const energy = avg(freq, band * 6, band * 6 + 10) / 255;
+          const yBase = h * (0.18 + band * 0.038);
+          const amp = 10 + energy * 54 + bass * 52 + treble * 18;
+          const hue = (band * 13 + now / 55) % 360;
+          ctx.strokeStyle = `hsla(${hue}, 96%, ${58 + energy * 18}%, ${0.2 + energy * 0.64})`;
+          ctx.lineWidth = 0.9 + energy * 3.2 + bass * 1.2;
+          ctx.shadowColor = `hsl(${hue}, 96%, 62%)`;
+          ctx.shadowBlur = 10 + energy * 22 + bass * 18;
+          ctx.beginPath();
+          for (let x = -8; x <= w + 8; x += 8) {
+            const phase = x / (42 + band * 3) + time + band * 0.42;
+            const y =
+              yBase +
+              Math.sin(phase) * amp +
+              Math.sin(phase * 0.37 + mid * 4) * amp * 0.45;
+            if (x <= -8) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        }
+        ctx.restore();
+      } else if (mode === 'neon-ribbons') {
+        ctx.fillStyle = 'rgba(0,0,0,0.11)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 20) / 255;
+        const mid = avg(freq, 20, 90) / 255;
+        const treble = avg(freq, 90, 190) / 255;
+        const cx = w / 2;
+        const cy = h / 2;
+        const time = now / 1000;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let ribbon = 0; ribbon < 7; ribbon += 1) {
+          const hue = (ribbon * 42 + now / 28 + bass * 90) % 360;
+          const orbitX = w * (0.2 + ribbon * 0.033) + bass * w * 0.09;
+          const orbitY = h * (0.18 + ribbon * 0.026) + mid * h * 0.12;
+          ctx.beginPath();
+          for (let i = 0; i <= 240; i += 1) {
+            const bin = freq[(i * 2 + ribbon * 11) % Math.max(1, freq.length)]! / 255;
+            const theta = (i / 240) * Math.PI * 2;
+            const wobble = 1 + bin * 0.38 + bass * 0.18;
+            const x =
+              cx +
+              Math.cos(theta * (2 + ribbon * 0.18) + time * (0.8 + ribbon * 0.08)) *
+                orbitX *
+                wobble +
+              Math.sin(theta * 7 + time * 2.1) * treble * 30;
+            const y =
+              cy +
+              Math.sin(theta * (3 + ribbon * 0.12) - time * (0.65 + ribbon * 0.07)) *
+                orbitY *
+                wobble +
+              Math.cos(theta * 5 - time * 1.6) * mid * 22;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.strokeStyle = `hsla(${hue}, 96%, ${58 + treble * 20}%, ${0.22 + mid * 0.36 + bass * 0.24})`;
+          ctx.lineWidth = 1.4 + bass * 5 + ribbon * 0.12;
+          ctx.shadowColor = `hsl(${hue}, 96%, 64%)`;
+          ctx.shadowBlur = 14 + bass * 32;
+          ctx.stroke();
+        }
+        for (let ring = 0; ring < 5; ring += 1) {
+          const radius = 42 + ring * 38 + bass * 160;
+          ctx.strokeStyle = `hsla(${(now / 36 + ring * 54) % 360}, 96%, 66%, ${0.12 + bass * 0.28})`;
+          ctx.lineWidth = 1 + bass * 4;
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      } else if (mode === 'plasma-grid') {
+        ctx.fillStyle = 'rgba(0,0,0,0.22)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 22) / 255;
+        const mid = avg(freq, 22, 100) / 255;
+        const treble = avg(freq, 100, 210) / 255;
+        const step = Math.max(18, Math.min(44, Math.floor(Math.min(w, h) / 14)));
+        const time = now / 520;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let y = -step; y <= h + step; y += step) {
+          ctx.beginPath();
+          for (let x = -step; x <= w + step; x += step) {
+            const bin = freq[Math.abs(Math.floor((x + y) / step * 3)) % Math.max(1, freq.length)]! / 255;
+            const warp =
+              Math.sin(x / 42 + time) * (8 + bass * 30) +
+              Math.cos(y / 36 - time * 1.24) * (5 + mid * 26) +
+              bin * treble * 34;
+            const px = x + Math.sin(y / 70 + time) * bass * 26;
+            const py = y + warp;
+            if (x <= -step) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          const hue = (y * 0.23 + now / 46 + bass * 110) % 360;
+          ctx.strokeStyle = `hsla(${hue}, 96%, 62%, ${0.12 + mid * 0.35})`;
+          ctx.lineWidth = 0.8 + bass * 2.8;
+          ctx.shadowColor = `hsl(${hue}, 96%, 62%)`;
+          ctx.shadowBlur = 8 + bass * 20;
+          ctx.stroke();
+        }
+        for (let x = -step; x <= w + step; x += step) {
+          ctx.beginPath();
+          for (let y = -step; y <= h + step; y += step) {
+            const bin = freq[Math.abs(Math.floor((x * 2 + y) / step * 2)) % Math.max(1, freq.length)]! / 255;
+            const warp =
+              Math.cos(y / 38 + time * 1.1) * (8 + mid * 24) +
+              Math.sin(x / 50 - time) * (5 + bass * 32) +
+              bin * 28;
+            const px = x + warp;
+            const py = y + Math.cos(x / 76 - time) * treble * 24;
+            if (y <= -step) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          const hue = (x * 0.32 + now / 52 + treble * 120) % 360;
+          ctx.strokeStyle = `hsla(${hue}, 96%, 58%, ${0.08 + treble * 0.34 + bass * 0.18})`;
+          ctx.lineWidth = 0.8 + treble * 2.4;
+          ctx.stroke();
+        }
+        const glow = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.64);
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.18 + bass * 0.34})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
+      } else if (mode === 'prism-bars') {
+        ctx.fillStyle = 'rgba(0,0,0,0.34)';
+        ctx.fillRect(0, 0, w, h);
+        const bars = 72;
+        const edges = barEdges(bars);
+        const gap = Math.max(1, Math.floor(w / 320));
+        const bw = (w - gap * (bars - 1)) / bars;
+        for (let i = 0; i < bars; i += 1) {
+          const bin = avg(freq, edges[i]!, bandEnd(edges, i)) / 255;
+          const lift = Math.pow(bin, 0.82);
+          const bh = Math.max(2, lift * h * 0.92);
+          const x = i * (bw + gap);
+          const hue = (i * 5.4 + now / 80) % 360;
+          const g = ctx.createLinearGradient(0, h - bh, 0, h);
+          g.addColorStop(0, `hsla(${hue}, 96%, 66%, 0.95)`);
+          g.addColorStop(0.58, `hsla(${(hue + 28) % 360}, 96%, 52%, 0.82)`);
+          g.addColorStop(1, 'rgba(0,0,0,0.28)');
+          ctx.fillStyle = g;
+          ctx.fillRect(x, h - bh, bw, bh);
+          if (i % 3 === 0 && lift > 0.18) {
+            ctx.fillStyle = `hsla(${hue}, 100%, 78%, ${0.16 + lift * 0.4})`;
+            ctx.fillRect(x, 0, bw, h);
+          }
+        }
+      } else if (mode === 'confetti') {
+        ctx.fillStyle = 'rgba(0,0,0,0.24)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 18) / 255;
+        const mid = avg(freq, 18, 92) / 255;
+        const pieces = 96;
+        // Beat-locked orbital sweep — silence keeps pieces faint; a kick
+        // throws everything bright + larger so the rhythm is legible even
+        // when the underlying spectrum is uniform.
+        const beatBoost = features.beat;
+        const confettiDt = confettiLastAt ? Math.max(0, Math.min(0.1, (now - confettiLastAt) / 1000)) : 0;
+        confettiLastAt = now;
+        confettiTime += confettiDt;
+        confettiBeatTime += confettiDt * beatBoost;
+        const beatHueShift = features.beatEdge ? 120 : 0;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < pieces; i += 1) {
+          const bin = freq[(i * 5) % Math.max(1, freq.length)]! / 255;
+          const lane = i / pieces;
+          const orbit = 18 + lane * Math.max(w, h) * 0.58 + bass * 40 + beatBoost * 30;
+          const angle = confettiTime * (0.35 + lane) + confettiBeatTime * 0.6 + i * 2.399;
+          const x = w / 2 + Math.cos(angle) * orbit * (0.72 + mid * 0.18);
+          const y = h / 2 + Math.sin(angle * 1.18) * orbit * 0.48;
+          const size = 2 + bin * 13 + beatBoost * 8;
+          const baseAlpha = 0.18 + bin * 0.72;
+          const beatedAlpha = baseAlpha * (0.45 + beatBoost * 0.85);
+          ctx.fillStyle = `hsla(${(i * 11 + now / 34 + beatHueShift) % 360}, 92%, 62%, ${beatedAlpha})`;
+          ctx.beginPath();
+          ctx.arc(x, y, size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      } else if (mode === 'burning-cloud') {
+        ctx.fillStyle = 'rgba(0,0,0,0.18)';
+        ctx.fillRect(0, 0, w, h);
+        const bass = avg(freq, 1, 20) / 255;
+        const mid = avg(freq, 20, 96) / 255;
+        const cell = Math.max(18, Math.floor(Math.min(w, h) / 22));
+        const time = now / 580;
+        for (let y = -cell; y < h + cell; y += cell) {
+          for (let x = -cell; x < w + cell; x += cell) {
+            const nx = x / Math.max(1, w);
+            const ny = y / Math.max(1, h);
+            const heat =
+              Math.sin(nx * 10 + time) * 0.22 +
+              Math.sin(ny * 12 - time * 1.2) * 0.2 +
+              Math.sin((nx + ny) * 16 + time * 0.7) * 0.2 +
+              0.42 +
+              bass * 0.42 +
+              mid * 0.18;
+            const alpha = Math.max(0.05, Math.min(0.78, heat));
+            const hue = 18 + heat * 54 + now / 110;
+            const g = ctx.createRadialGradient(x + cell / 2, y + cell / 2, 0, x + cell / 2, y + cell / 2, cell * 1.7);
+            g.addColorStop(0, `hsla(${hue}, 98%, 62%, ${alpha})`);
+            g.addColorStop(0.5, `hsla(${(hue + 24) % 360}, 90%, 44%, ${alpha * 0.46})`);
+            g.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = g;
+            ctx.fillRect(x - cell, y - cell, cell * 3, cell * 3);
+          }
+        }
+      } else if (mode === 'tempo-pulse') {
+        // Beat-locked ring bursts. Each rising-edge beat spawns a ring at the
+        // origin; rings expand outward and fade. Bass scales the burst size,
+        // treble jitters the ring center for liveliness.
+        ctx.fillStyle = 'rgba(0,0,0,0.22)';
+        ctx.fillRect(0, 0, w, h);
+        const cx = w / 2;
+        const cy = h / 2;
+        const minSide = Math.min(w, h);
+
+        // True rising-edge spawn: kick onset (beatEdge) triggers instantly,
+        // not when the smoothed beat envelope decays past a threshold. The
+        // debounce drops to 70ms so fast hat-driven tracks still feel locked
+        // to the beat instead of dropping every other hit.
+        const tempoTrigger = features.beatEdge || (features.beat > 0.55 && now - lastTempoBeat > 110);
+        if (tempoTrigger && now - lastTempoBeat > 70) {
+          const intensity = Math.max(features.beat, features.kick);
+          const burstCount = intensity > 0.78 ? 3 : intensity > 0.55 ? 2 : 1;
+          for (let i = 0; i < burstCount; i++) {
+            tempoRings.push({
+              x: cx + (Math.random() - 0.5) * minSide * 0.08 * features.treble,
+              y: cy + (Math.random() - 0.5) * minSide * 0.08 * features.treble,
+              r: minSide * 0.04,
+              life: 1,
+              hue: (now / 60 + i * 28 + features.bass * 140 + features.kick * 80) % 360,
+              thickness: 3 + features.bass * 8 + features.kick * 4,
+            });
+          }
+          lastTempoBeat = now;
+        }
+        if (tempoRings.length > 80) tempoRings.splice(0, tempoRings.length - 80);
+
+        // Background radial glow following RMS energy
+        const energy = features.rms;
+        const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, minSide * 0.7);
+        glow.addColorStop(0, `rgba(${parseRgb(accent)}, ${0.05 + energy * 0.32})`);
+        glow.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(0, 0, w, h);
+
+        // Render & advance rings
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = tempoRings.length - 1; i >= 0; i--) {
+          const ring = tempoRings[i]!;
+          ring.r += minSide * (0.012 + features.bass * 0.018);
+          ring.life -= 0.014;
+          if (ring.life <= 0 || ring.r > minSide * 0.9) {
+            tempoRings.splice(i, 1);
+            continue;
+          }
+          const alpha = Math.max(0, Math.min(1, ring.life)) * (0.55 + features.bass * 0.4);
+          ctx.strokeStyle = `hsla(${ring.hue}, 96%, 64%, ${alpha})`;
+          ctx.lineWidth = ring.thickness * ring.life;
+          ctx.shadowColor = `hsl(${ring.hue}, 96%, 60%)`;
+          ctx.shadowBlur = 14 + features.bass * 28;
+          ctx.beginPath();
+          ctx.arc(ring.x, ring.y, ring.r, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.shadowBlur = 0;
+        ctx.restore();
+
+        // Center dot — pulses with bass
+        const dotR = minSide * 0.018 + features.bass * minSide * 0.04;
+        const dotGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, dotR * 2.2);
+        dotGrad.addColorStop(0, `hsla(${(now / 30) % 360}, 100%, 78%, ${0.55 + features.bass * 0.4})`);
+        dotGrad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = dotGrad;
+        ctx.fillRect(cx - dotR * 2.2, cy - dotR * 2.2, dotR * 4.4, dotR * 4.4);
+      } else if (mode === 'lattice-strobe') {
+        // 2026 club-style lattice. A grid of dots that flashes palette and
+        // shifts scale on each beat. The strobe is short and sharp so even at
+        // 30fps the kick reads clearly.
+        if (features.beat > 0.4 && now - lastLatticeBeat > 90) {
+          latticeFlip = 1 - latticeFlip;
+          latticeStrobe = 1;
+          lastLatticeBeat = now;
+        }
+        latticeStrobe = Math.max(0, latticeStrobe - 0.08);
+
+        const baseHue = (now / 80 + features.bass * 120 + latticeFlip * 180) % 360;
+        ctx.fillStyle = latticeStrobe > 0.5 ? `hsla(${baseHue}, 90%, 18%, 1)` : 'rgba(0,0,0,0.32)';
+        ctx.fillRect(0, 0, w, h);
+
+        latticeDivisor = settleLatticeDivisor(latticeDivisor, LATTICE_BASE_DIVISOR + features.treble * 6);
+        const cell = Math.max(22, Math.floor(Math.min(w, h) / latticeDivisor));
+        const cx = w / 2;
+        const cy = h / 2;
+        const scaleK = 1 + features.bass * 0.18 + latticeStrobe * 0.16;
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(latticeFlip ? Math.PI / 96 : -Math.PI / 96);
+        ctx.scale(scaleK, scaleK);
+        ctx.globalCompositeOperation = 'lighter';
+
+        for (let y = -h; y < h; y += cell) {
+          for (let x = -w; x < w; x += cell) {
+            const distNorm = Math.hypot(x, y) / Math.max(w, h);
+            const bandIdx = Math.floor(distNorm * features.bands.length) % features.bands.length;
+            const energy = features.bands[bandIdx] ?? 0;
+            const dotR = Math.max(0.6, (cell * 0.18) * (0.4 + energy * 1.4 + latticeStrobe * 0.6));
+            const hue = (baseHue + distNorm * 220 + bandIdx * 18) % 360;
+            const sat = 88 + latticeStrobe * 12;
+            const light = latticeFlip ? 52 + energy * 30 : 64 + energy * 22;
+            const alpha = 0.22 + energy * 0.6 + features.beat * 0.18;
+            ctx.fillStyle = `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(x, y, dotR, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+
+        // Scan-line strobe band — sweeps vertically on beat
+        if (latticeStrobe > 0.18) {
+          const sweepY = (1 - latticeStrobe) * h;
+          const grad = ctx.createLinearGradient(0, sweepY - 24, 0, sweepY + 24);
+          grad.addColorStop(0, 'rgba(255,255,255,0)');
+          grad.addColorStop(0.5, `hsla(${baseHue}, 90%, 78%, ${0.42 * latticeStrobe})`);
+          grad.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, sweepY - 24, w, 48);
+        }
+      } else if (mode === 'liquid-mercury') {
+        // Liquid Mercury — psychedelic metaball fluid. Each blob couples to a
+        // distinct frequency band; beat onsets flip the attractor sign so the
+        // whole cluster collapses on the kick and explodes back out. Hue
+        // drift is bass-driven, not wall-clock, so silent passages freeze the
+        // palette and a heavy track sets it spinning through every color.
+        const cx = w / 2;
+        const cy = h / 2;
+        const minSide = Math.min(w, h);
+
+        if (mercuryBlobs.length === 0) {
+          for (let i = 0; i < 12; i += 1) {
+            const angle = (Math.PI * 2 * i) / 12;
+            mercuryBlobs.push({
+              x: cx + Math.cos(angle) * minSide * 0.25,
+              y: cy + Math.sin(angle) * minSide * 0.25,
+              vx: Math.cos(angle + Math.PI / 2) * 0.6,
+              vy: Math.sin(angle + Math.PI / 2) * 0.6,
+              radius: minSide * 0.1,
+              hue: (i * 30) % 360,
+              band: i % features.bands.length,
+            });
+          }
+          mercuryLastW = w;
+          mercuryLastH = h;
+        } else if (mercuryLastW > 0 && mercuryLastH > 0 && (w !== mercuryLastW || h !== mercuryLastH)) {
+          // Canvas resized — rescale blob positions proportionally so the
+          // cluster keeps its relative geometry instead of being stranded at
+          // the old corner. Velocities scale too so motion intensity stays
+          // proportional to the new viewport.
+          const sx = w / mercuryLastW;
+          const sy = h / mercuryLastH;
+          for (const blob of mercuryBlobs) {
+            blob.x *= sx;
+            blob.y *= sy;
+            blob.vx *= sx;
+            blob.vy *= sy;
+          }
+          mercuryLastW = w;
+          mercuryLastH = h;
+        }
+
+        // Beat-driven attractor flip — gives the fluid its "breathing" feel.
+        if (features.beatEdge && now - lastMercuryFlip > 240) {
+          mercuryAttractor *= -1;
+          lastMercuryFlip = now;
+        }
+        mercuryHueDrift = (mercuryHueDrift + features.bass * 4 + features.beat * 2) % 360;
+
+        // Smudge previous frame for a heavy trail — fluids should look
+        // smeared, not punctuated. Bass thickens the trail (slower fade).
+        const fadeAlpha = 0.18 - features.bass * 0.08 - features.beat * 0.05;
+        ctx.fillStyle = `rgba(2,2,8,${Math.max(0.05, fadeAlpha)})`;
+        ctx.fillRect(0, 0, w, h);
+
+        // Update + render each blob.
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < mercuryBlobs.length; i += 1) {
+          const blob = mercuryBlobs[i]!;
+          const bandEnergy = features.bands[blob.band] ?? 0;
+
+          // Each blob is pulled toward (or pushed from) the center based on
+          // mercuryAttractor, with strength scaling by the blob's band.
+          const dx = cx - blob.x;
+          const dy = cy - blob.y;
+          const dist = Math.max(1, Math.hypot(dx, dy));
+          const pull = mercuryAttractor * (0.04 + bandEnergy * 0.12 + features.beat * 0.06);
+          blob.vx += (dx / dist) * pull;
+          blob.vy += (dy / dist) * pull;
+
+          // Random kick on each transient so the cluster never settles into
+          // a periodic orbit — keeps the motion organic.
+          if (features.beatEdge) {
+            const jitterAngle = Math.random() * Math.PI * 2;
+            const jitterStrength = 0.8 + features.beat * 2.2;
+            blob.vx += Math.cos(jitterAngle) * jitterStrength;
+            blob.vy += Math.sin(jitterAngle) * jitterStrength;
+          }
+
+          // Cap velocity so blobs can't fly offscreen, and damp gently so
+          // they keep flowing.
+          const maxSpeed = 3 + features.beat * 5;
+          const speed = Math.hypot(blob.vx, blob.vy);
+          if (speed > maxSpeed) {
+            blob.vx = (blob.vx / speed) * maxSpeed;
+            blob.vy = (blob.vy / speed) * maxSpeed;
+          }
+          blob.vx *= 0.94;
+          blob.vy *= 0.94;
+          blob.x += blob.vx;
+          blob.y += blob.vy;
+
+          // Soft-bound to canvas: push back at edges instead of clamping
+          // hard, so collisions feel like the fluid hitting a wall.
+          const margin = blob.radius * 0.4;
+          if (blob.x < margin) blob.vx += (margin - blob.x) * 0.06;
+          if (blob.x > w - margin) blob.vx -= (blob.x - (w - margin)) * 0.06;
+          if (blob.y < margin) blob.vy += (margin - blob.y) * 0.06;
+          if (blob.y > h - margin) blob.vy -= (blob.y - (h - margin)) * 0.06;
+
+          // Radius pumps with the band + global beat.
+          blob.radius = minSide * (0.06 + bandEnergy * 0.16 + features.beat * 0.08);
+          // Hue drifts on bass; each blob has a fixed phase offset so the
+          // cluster reads as a palette wheel rather than monochrome.
+          blob.hue = (mercuryHueDrift + i * 26 + bandEnergy * 90) % 360;
+
+          // Render as overlapping radial gradients in 'lighter' mode — gives
+          // a metaball-style fluid look without per-pixel compute. Color
+          // strings are cached per frame keyed on quantized (hueBucket,
+          // bandBucket, beatBucket, layer) so repeated frames with similar
+          // energy reuse the same hsla strings (~95% hit rate on steady
+          // music; saves the templated-string allocation × 36 per frame).
+          // Layer count cut from 3 to 2: dropped the outermost halo which
+          // contributed ~80% of pixels to clip-test against zero alpha.
+          const layers = 2;
+          const hueBucket = Math.floor(blob.hue / 6) * 6;
+          const bandBucket = Math.floor(bandEnergy * 10);
+          const beatBucket = Math.floor(features.beat * 10);
+          for (let layer = 0; layer < layers; layer += 1) {
+            const layerR = blob.radius * (1 + layer * 0.6);
+            const grad = ctx.createRadialGradient(blob.x, blob.y, 0, blob.x, blob.y, layerR);
+            const cacheKey = (hueBucket * 100 + bandBucket * 10 + beatBucket) * 4 + layer;
+            let stops = mercuryColorStopCache.get(cacheKey);
+            if (!stops) {
+              const sat = 88 + beatBucket * 1.2;
+              const light = 58 + bandBucket * 2.2 - layer * 12;
+              const alpha = (0.42 - layer * 0.11) * (0.6 + bandBucket * 0.09 + beatBucket * 0.03);
+              stops = [
+                `hsla(${hueBucket}, ${sat}%, ${light}%, ${alpha})`,
+                `hsla(${(hueBucket + 30) % 360}, ${sat}%, ${light - 16}%, ${alpha * 0.45})`,
+              ];
+              if (mercuryColorStopCache.size > 256) {
+                // Bounded LRU-ish: when full, clear so we don't pay map-resize
+                // costs. Frame-coherent inputs refill quickly.
+                mercuryColorStopCache.clear();
+              }
+              mercuryColorStopCache.set(cacheKey, stops);
+            }
+            grad.addColorStop(0, stops[0]!);
+            grad.addColorStop(0.55, stops[1]!);
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(blob.x, blob.y, layerR, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
+
+        // Connect lines between blobs that are touching — gives the metaball
+        // illusion without per-pixel sampling. Distance gated by combined
+        // radii so only close pairs draw a connector.
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < mercuryBlobs.length; i += 1) {
+          for (let j = i + 1; j < mercuryBlobs.length; j += 1) {
+            const a = mercuryBlobs[i]!;
+            const b = mercuryBlobs[j]!;
+            const distAB = Math.hypot(a.x - b.x, a.y - b.y);
+            const fuseDist = (a.radius + b.radius) * 1.1;
+            if (distAB > fuseDist) continue;
+            const overlap = 1 - distAB / fuseDist;
+            const midHue = ((a.hue + b.hue) / 2 + features.beat * 30) % 360;
+            ctx.strokeStyle = `hsla(${midHue}, 92%, 70%, ${0.4 * overlap + features.beat * 0.18})`;
+            ctx.lineWidth = (4 + features.beat * 8) * overlap;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          }
+        }
+        ctx.restore();
+
+        // Center caustic flare on every beat — makes the kick read as a
+        // physical compression of the fluid toward the focal point.
+        if (features.beat > 0.32) {
+          const flareR = minSide * (0.06 + features.beat * 0.32);
+          const flare = ctx.createRadialGradient(cx, cy, 0, cx, cy, flareR);
+          const flareHue = (mercuryHueDrift + 180) % 360;
+          flare.addColorStop(0, `hsla(${flareHue}, 100%, 86%, ${0.32 * features.beat})`);
+          flare.addColorStop(1, 'rgba(0,0,0,0)');
+          ctx.fillStyle = flare;
+          ctx.fillRect(cx - flareR, cy - flareR, flareR * 2, flareR * 2);
+        }
+      } else {
+        // Catch-all for any mode that reaches this canvas-2D path with no
+        // branch above matching it — in practice the 5 shader-only modes
+        // (kaleido-bloom, liquid-aurora-storm, fractal-pulse, starfield-warp,
+        // spectral-tunnel) that have no hand-written 2D reimplementation:
+        // startShaderVisualizer() only returns null (falling through to this
+        // canvas-2D setup at all) when WebGL2/EXT_color_buffer_float is
+        // unavailable, and this if/else chain used to have no final else, so
+        // those 5 modes stayed blank forever with the rAF loop still
+        // spinning. Every other GPU-dependent mode already falls back to
+        // this same painter — these were the exception. It draws on the
+        // paint surface like every mode here: when the frame is presented
+        // through the GPU guard, the visible canvas has no 2D context.
+        drawMilkdropFallback(ctx, w, h, engine);
+      }
+
+      surface.show(lastShownAt ? now - lastShownAt : frameIntervalMs);
+      lastShownAt = now;
+      gov?.endFrame(now, window.performance.now() - renderStart);
+    }
+
+    // Sleeps between paints. Painting in place is rescued from a timer if
+    // animation frames stop arriving while the page still reports itself
+    // visible; a surface presented through the GPU guard is not, because
+    // submitting GL to a window the compositor is not presenting blocks the
+    // renderer.
+    const stopLoop = startPacedLoop(canPaint, frame, {
+      retryMs: frameIntervalMs,
+      snapToGrid: onAmbientGrid,
+      rescue: surface.paint === canvas,
+    });
+    return () => {
+      stopLoop();
+      stopDisplayWatch();
+      surface.dispose();
+      releaseGlContext(canvas);
+    };
+}
+
+interface VizTuning {
+  palette: VizPalette;
+  reactivity: VizReactivity;
+}
+
+interface ShaderVisualizerOptions {
+  canvas: HTMLCanvasElement;
+  canvasRef: RefObject<HTMLCanvasElement>;
+  engine: VisualizerAudio;
+  mode: VizMode;
+  /** Live palette/reactivity — read per frame so changes never remount. */
+  tuning: { readonly current: VizTuning };
+  frameIntervalMs: number;
+  dprCap: number;
+  maxPixels: number;
+  /** Trims the render scale and the cadence when a frame costs more than it should. */
+  governor?: Governor | null;
+  /**
+   * Sleep between paints (requestPacedFrame) instead of waking on every
+   * animation frame to skip most of them. Off by default: callers that drive
+   * the loop with their own animation-frame stub need the bare request.
+   */
+  paced?: boolean;
+}
+
+function isShaderVisualizerMode(mode: VizMode): boolean {
+  return mode === 'aurora' ||
+    mode === 'neon-waves' ||
+    mode === 'neon-ribbons' ||
+    mode === 'plasma-grid' ||
+    mode === 'burning-cloud' ||
+    mode === 'kaleido-bloom' ||
+    mode === 'liquid-aurora-storm' ||
+    mode === 'fractal-pulse' ||
+    mode === 'starfield-warp' ||
+    mode === 'spectral-tunnel';
+}
+
+// Exported for scripts/flash-guard-probe.ts, which drives the real shader
+// painters on a fixed clock.
+export function startShaderVisualizer(options: ShaderVisualizerOptions): (() => void) | null {
+  const smokeReadback = Boolean((window as Window & { __newampSmoke?: unknown }).__newampSmoke);
+  // A WebGL2 context (these GLSL ES 1.00 shaders run in it unchanged) so the
+  // flash guard can finish each frame in the same context. Probed first: a
+  // machine that can't host the guard leaves this canvas free for the
+  // guarded 2D painters.
+  if (!gpuFlashGuardSupported()) return null;
+  const context = options.canvas.getContext('webgl2', {
+    alpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    preserveDrawingBuffer: smokeReadback,
+    powerPreference: 'high-performance',
+  });
+  if (!context) return null;
+  const gl: WebGL2RenderingContext = context;
+
+  const program = createShaderProgram(gl, SHADER_VERTEX_SOURCE, SHADER_FRAGMENT_SOURCE);
+  if (!program) return null;
+  const flashGuard: AttachedFlashGuard | null = attachFlashGuard(gl, options.canvas);
+  if (!flashGuard) {
+    gl.deleteProgram(program);
+    return null;
+  }
+
+  const positionBuffer = gl.createBuffer();
+  if (!positionBuffer) return null;
+  gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+
+  const position = gl.getAttribLocation(program, 'a_position');
+  const uniforms = {
+    resolution: gl.getUniformLocation(program, 'u_resolution'),
+    time: gl.getUniformLocation(program, 'u_time'),
+    mode: gl.getUniformLocation(program, 'u_mode'),
+    palette: gl.getUniformLocation(program, 'u_palette'),
+    accent: gl.getUniformLocation(program, 'u_accent'),
+    bass: gl.getUniformLocation(program, 'u_bass'),
+    lowMid: gl.getUniformLocation(program, 'u_lowMid'),
+    mid: gl.getUniformLocation(program, 'u_mid'),
+    treble: gl.getUniformLocation(program, 'u_treble'),
+    rms: gl.getUniformLocation(program, 'u_rms'),
+    beat: gl.getUniformLocation(program, 'u_beat'),
+    bassTime: gl.getUniformLocation(program, 'u_bassTime'),
+    midTime: gl.getUniformLocation(program, 'u_midTime'),
+    beatTime: gl.getUniformLocation(program, 'u_beatTime'),
+    bands0: gl.getUniformLocation(program, 'u_bands0'),
+    bands1: gl.getUniformLocation(program, 'u_bands1'),
+    bands2: gl.getUniformLocation(program, 'u_bands2'),
+    bands3: gl.getUniformLocation(program, 'u_bands3'),
+    bandTime0: gl.getUniformLocation(program, 'u_bandTime0'),
+    bandTime1: gl.getUniformLocation(program, 'u_bandTime1'),
+    bandTime2: gl.getUniformLocation(program, 'u_bandTime2'),
+    bandTime3: gl.getUniformLocation(program, 'u_bandTime3'),
+  };
+
+  const freq = new Uint8Array(new ArrayBuffer(options.engine.frequencyBinCount));
+  const onsetFreq = new Uint8Array(new ArrayBuffer(options.engine.frequencyBinCount));
+  const wave = new Uint8Array(new ArrayBuffer(options.engine.fftSize));
+  const bands = new Float32Array(16);
+  const governor = options.governor ?? null;
+  const canPaint = createFrameGate(
+    options.canvasRef,
+    governor ? () => governor.intervalMs(options.frameIntervalMs) : options.frameIntervalMs,
+  );
+  let analyzedRate = options.engine.getSampleRate();
+  let analyze = createAudioFeatureAnalyzer({
+    sampleRate: analyzedRate,
+    fftSize: options.engine.fftSize,
+  });
+  const rateChanged = createSampleRateWatch(() => options.engine.getSampleRate(), analyzedRate);
+  let dpr = Math.min(window.devicePixelRatio || 1, options.dprCap);
+  const stopDisplayWatch = watchDisplayChange(() => {
+    dpr = Math.min(window.devicePixelRatio || 1, options.dprCap);
+  });
+  let lastWidth = 0;
+  let lastHeight = 0;
+  let lastPaintAt = 0;
+  // The shaders take anything that speeds up with the music from these
+  // integrated phases, never from u_time times a level.
+  const phases = createPhaseClock();
+
+  function ensureSize(): void {
+    const node = options.canvasRef.current;
+    if (!node) return;
+    const cssW = node.clientWidth || node.width || 100;
+    const cssH = node.clientHeight || node.height || 100;
+    const drawDpr = dpr * (governor?.scale() ?? 1);
+    const scaledW = Math.max(2, Math.floor(cssW * drawDpr));
+    const scaledH = Math.max(2, Math.floor(cssH * drawDpr));
+    const scale = Math.min(1, Math.sqrt(options.maxPixels / Math.max(1, scaledW * scaledH)));
+    const targetW = Math.max(2, Math.floor(scaledW * scale));
+    const targetH = Math.max(2, Math.floor(scaledH * scale));
+    if (targetW === lastWidth && targetH === lastHeight) return;
+    lastWidth = targetW;
+    lastHeight = targetH;
+    node.width = targetW;
+    node.height = targetH;
+    node.setAttribute('data-newamp-render-size', `${targetW}x${targetH}`);
+    gl.viewport(0, 0, targetW, targetH);
+  }
+
+  // Hoisted out of the rAF loop (getComputedStyle forces a style recalc);
+  // refreshed ~2x/sec so theme changes still land.
+  let accentVec = parseRgbVec(getCssVar('--accent'));
+  let accentTick = 0;
+
+  function paint(now: number): void {
+    const renderStart = performance.now();
+    ensureSize();
+    const newRate = rateChanged(now);
+    if (newRate) {
+      analyzedRate = newRate;
+      analyze = createAudioFeatureAnalyzer({ sampleRate: newRate, fftSize: options.engine.fftSize });
+    }
+    options.engine.getFreqData(freq);
+    options.engine.getOnsetFreqData(onsetFreq);
+    options.engine.getTimeData(wave);
+    const tuning = options.tuning.current;
+    boostFrequencyData(freq, tuning.reactivity, analyzedRate / options.engine.fftSize);
+    const features = analyze(freq, wave, onsetFreq);
+    bands.set(features.bands);
+    if (accentTick++ % 30 === 0) accentVec = parseRgbVec(getCssVar('--accent'));
+    const accent = accentVec;
+
+    phases.advance(now, features);
+    const bandTime = phases.bandTime;
+
+    gl.useProgram(program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.enableVertexAttribArray(position);
+    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform2f(uniforms.resolution, Math.max(1, lastWidth), Math.max(1, lastHeight));
+    gl.uniform1f(uniforms.time, phases.seconds);
+    gl.uniform1i(uniforms.mode, shaderModeIndex(options.mode));
+    // u_palette is uploaded every frame, so a palette change is just the
+    // next frame's uniform value — no program rebuild, no canvas remount.
+    gl.uniform1i(uniforms.palette, paletteIndex(tuning.palette));
+    gl.uniform3f(uniforms.accent, accent[0], accent[1], accent[2]);
+    gl.uniform1f(uniforms.bass, features.bass);
+    gl.uniform1f(uniforms.lowMid, features.lowMid);
+    gl.uniform1f(uniforms.mid, features.mid);
+    gl.uniform1f(uniforms.treble, features.treble);
+    gl.uniform1f(uniforms.rms, features.rms);
+    gl.uniform1f(uniforms.beat, features.beat);
+    gl.uniform1f(uniforms.bassTime, phases.bassTime);
+    gl.uniform1f(uniforms.midTime, phases.midTime);
+    gl.uniform1f(uniforms.beatTime, phases.beatTime);
+    gl.uniform4f(uniforms.bands0, bands[0]!, bands[1]!, bands[2]!, bands[3]!);
+    gl.uniform4f(uniforms.bands1, bands[4]!, bands[5]!, bands[6]!, bands[7]!);
+    gl.uniform4f(uniforms.bands2, bands[8]!, bands[9]!, bands[10]!, bands[11]!);
+    gl.uniform4f(uniforms.bands3, bands[12]!, bands[13]!, bands[14]!, bands[15]!);
+    gl.uniform4f(uniforms.bandTime0, bandTime[0]!, bandTime[1]!, bandTime[2]!, bandTime[3]!);
+    gl.uniform4f(uniforms.bandTime1, bandTime[4]!, bandTime[5]!, bandTime[6]!, bandTime[7]!);
+    gl.uniform4f(uniforms.bandTime2, bandTime[8]!, bandTime[9]!, bandTime[10]!, bandTime[11]!);
+    gl.uniform4f(uniforms.bandTime3, bandTime[12]!, bandTime[13]!, bandTime[14]!, bandTime[15]!);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    flashGuard?.apply(lastPaintAt ? now - lastPaintAt : options.frameIntervalMs);
+    lastPaintAt = now;
+    governor?.endFrame(now, performance.now() - renderStart);
+  }
+
+  let stopLoop: () => void;
+  if (options.paced) {
+    stopLoop = startPacedLoop(canPaint, paint, { retryMs: options.frameIntervalMs });
+  } else {
+    let raf = 0;
+    const frame = (now: number): void => {
+      raf = requestAnimationFrame(frame);
+      if (canPaint(now)) paint(now);
+    };
+    raf = requestAnimationFrame(frame);
+    stopLoop = () => cancelAnimationFrame(raf);
+  }
+  return () => {
+    stopLoop();
+    stopDisplayWatch();
+    flashGuard?.dispose();
+    gl.deleteBuffer(positionBuffer);
+    gl.deleteProgram(program);
+    releaseGlContext(options.canvas);
+  };
+}
+
+/**
+ * paintMilkdropFallback behind the flash guard. The fallback runs when a GPU
+ * renderer couldn't start, so it is guarded on the CPU (flash-guard-2d.ts).
+ */
+export function createFallbackPainter(canvas: HTMLCanvasElement, engine: VisualizerAudio): { paint(now: number): void; dispose(): void } {
+  const guard = guardCanvas2d(canvas);
+  let lastPaintAt = 0;
+  return {
+    paint(now) {
+      paintMilkdropFallback(canvas, engine);
+      guard.apply(lastPaintAt ? now - lastPaintAt : 1000 / 30);
+      lastPaintAt = now;
+    },
+    dispose: () => guard.dispose(),
+  };
+}
+
+function paintMilkdropFallback(canvas: HTMLCanvasElement, engine: VisualizerAudio): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const cssW = canvas.clientWidth || 640;
+  const cssH = canvas.clientHeight || 360;
+  canvas.width = Math.floor(cssW * dpr);
+  canvas.height = Math.floor(cssH * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawMilkdropFallback(ctx, cssW, cssH, engine);
+}
+
+/** The fallback picture on a context already scaled to cssW x cssH. */
+function drawMilkdropFallback(ctx: CanvasRenderingContext2D, cssW: number, cssH: number, engine: VisualizerAudio): void {
+  const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
+  engine.getFreqData(freq);
+  boostFrequencyData(freq, 'punch');
+  const time = Date.now();
+  const gradient = ctx.createRadialGradient(cssW / 2, cssH / 2, 0, cssW / 2, cssH / 2, Math.max(cssW, cssH) * 0.7);
+  gradient.addColorStop(0, '#07130f');
+  gradient.addColorStop(0.55, '#050608');
+  gradient.addColorStop(1, '#000');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, cssW, cssH);
+  const energy = avg(freq, 1, Math.min(96, freq.length)) / 255;
+  for (let i = 0; i < 24; i++) {
+    const y = (cssH / 24) * i;
+    const hue = (i * 12 + time / 42) % 360;
+    ctx.strokeStyle = `hsla(${hue}, 96%, 58%, ${0.18 + energy * 0.58})`;
+    ctx.lineWidth = 1.2 + energy * 2.8;
+    ctx.beginPath();
+    const bend = 28 + energy * 90;
+    ctx.moveTo(0, y + Math.sin(time / 500 + i) * 5);
+    ctx.bezierCurveTo(cssW * 0.25, y + bend, cssW * 0.65, y - bend, cssW, y + 18);
+    ctx.stroke();
+  }
+  const cx = cssW / 2;
+  const cy = cssH / 2;
+  for (let ring = 0; ring < 10; ring++) {
+    const radius = 30 + ring * Math.min(cssW, cssH) * 0.045 + energy * 120;
+    ctx.strokeStyle = `hsla(${(ring * 32 + time / 36) % 360}, 88%, 62%, ${0.12 + (10 - ring) * 0.045})`;
+    ctx.lineWidth = 1 + energy * 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius + Math.sin(time / 300 + ring) * 16, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+}
+
+// A canvas that has left the page keeps its WebGL context until the garbage
+// collector gets to it, and Chromium drops the oldest of about 16 live
+// contexts per process, so cycling through GPU modes eventually blanks one
+// that is still on screen. Only for a canvas that is gone: an effect that
+// re-runs on the same canvas asks for its context again.
+export function releaseGlContext(canvas: HTMLCanvasElement): void {
+  if (canvas.isConnected) return;
+  try {
+    (canvas.getContext('webgl2') as WebGL2RenderingContext | null)?.getExtension('WEBGL_lose_context')?.loseContext();
+  } catch {
+    /* the context is already gone */
+  }
+}
+
+export function getCssVar(name: string, fallback = '#39ff14'): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
+
+function shaderModeIndex(mode: VizMode): number {
+  if (mode === 'neon-ribbons') return 1;
+  if (mode === 'plasma-grid') return 2;
+  if (mode === 'burning-cloud') return 3;
+  if (mode === 'kaleido-bloom') return 4;
+  if (mode === 'liquid-aurora-storm') return 5;
+  if (mode === 'fractal-pulse') return 6;
+  if (mode === 'starfield-warp') return 7;
+  if (mode === 'spectral-tunnel') return 8;
+  return 0;
+}
+
+function paletteIndex(palette: VizPalette): number {
+  if (palette === 'phosphor') return 1;
+  if (palette === 'ice') return 2;
+  if (palette === 'sunset') return 3;
+  if (palette === 'rainbow') return 4;
+  return 0;
+}
+
+function oscilloscopePalette(palette: VizPalette, accent: string, now: number): { stroke: string; glow: string; blur: number } {
+  const hue = (now / 32) % 360;
+  if (palette === 'rainbow') return { stroke: `hsl(${hue}, 98%, 64%)`, glow: `hsl(${(hue + 36) % 360}, 100%, 62%)`, blur: 14 };
+  if (palette === 'phosphor') return { stroke: '#66ff7d', glow: '#29ff55', blur: 10 };
+  if (palette === 'ice') return { stroke: '#b6f4ff', glow: '#31c7ff', blur: 12 };
+  if (palette === 'sunset') return { stroke: '#ffcb5a', glow: '#ff335f', blur: 13 };
+  return { stroke: accent, glow: accent, blur: 8 };
+}
+
+function createShaderProgram(gl: WebGLRenderingContext, vertexSource: string, fragmentSource: string): WebGLProgram | null {
+  const vertex = compileShader(gl, gl.VERTEX_SHADER, vertexSource);
+  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, fragmentSource);
+  if (!vertex || !fragment) return null;
+  const program = gl.createProgram();
+  if (!program) return null;
+  gl.attachShader(program, vertex);
+  gl.attachShader(program, fragment);
+  gl.linkProgram(program);
+  gl.deleteShader(vertex);
+  gl.deleteShader(fragment);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.warn('[newamp] visualizer shader link failed', gl.getProgramInfoLog(program));
+    gl.deleteProgram(program);
+    return null;
+  }
+  return program;
+}
+
+function compileShader(gl: WebGLRenderingContext, type: number, source: string): WebGLShader | null {
+  const shader = gl.createShader(type);
+  if (!shader) return null;
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.warn('[newamp] visualizer shader compile failed', gl.getShaderInfoLog(shader));
+    gl.deleteShader(shader);
+    return null;
+  }
+  return shader;
+}
+
+function parseRgb(color: string): string {
+  // accept #rrggbb or hsl/hsla — fallback to green
+  if (color.startsWith('#') && color.length === 7) {
+    const r = parseInt(color.slice(1, 3), 16);
+    const g = parseInt(color.slice(3, 5), 16);
+    const b = parseInt(color.slice(5, 7), 16);
+    return `${r}, ${g}, ${b}`;
+  }
+  return '57, 255, 20';
+}
+
+const SHADER_VERTEX_SOURCE = `
+attribute vec2 a_position;
+varying vec2 v_uv;
+
+void main() {
+  v_uv = a_position * 0.5 + 0.5;
+  gl_Position = vec4(a_position, 0.0, 1.0);
+}
+`;
+
+const SHADER_FRAGMENT_SOURCE = `
+precision highp float;
+
+varying vec2 v_uv;
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform int u_mode;
+uniform int u_palette;
+uniform vec3 u_accent;
+uniform float u_bass;
+uniform float u_lowMid;
+uniform float u_mid;
+uniform float u_treble;
+uniform float u_rms;
+uniform float u_beat;
+// Integrals of the audio levels over time (advanced on the CPU by each
+// frame's real duration). Anything that moves faster with the music takes its
+// phase from these, never from u_time times a level.
+uniform float u_bassTime;
+uniform float u_midTime;
+uniform float u_beatTime;
+uniform vec4 u_bands0;
+uniform vec4 u_bands1;
+uniform vec4 u_bands2;
+uniform vec4 u_bands3;
+uniform vec4 u_bandTime0;
+uniform vec4 u_bandTime1;
+uniform vec4 u_bandTime2;
+uniform vec4 u_bandTime3;
+
+float sat(float v) { return clamp(v, 0.0, 1.0); }
+
+vec3 hsb2rgb(vec3 c) {
+  vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+  rgb = rgb * rgb * (3.0 - 2.0 * rgb);
+  return c.z * mix(vec3(1.0), rgb, c.y);
+}
+
+float bandAt(float x) {
+  float idx = floor(clamp(x, 0.0, 0.999) * 16.0);
+  if (idx < 0.5) return u_bands0.x;
+  if (idx < 1.5) return u_bands0.y;
+  if (idx < 2.5) return u_bands0.z;
+  if (idx < 3.5) return u_bands0.w;
+  if (idx < 4.5) return u_bands1.x;
+  if (idx < 5.5) return u_bands1.y;
+  if (idx < 6.5) return u_bands1.z;
+  if (idx < 7.5) return u_bands1.w;
+  if (idx < 8.5) return u_bands2.x;
+  if (idx < 9.5) return u_bands2.y;
+  if (idx < 10.5) return u_bands2.z;
+  if (idx < 11.5) return u_bands2.w;
+  if (idx < 12.5) return u_bands3.x;
+  if (idx < 13.5) return u_bands3.y;
+  if (idx < 14.5) return u_bands3.z;
+  return u_bands3.w;
+}
+
+float bandTimeAt(float x) {
+  float idx = floor(clamp(x, 0.0, 0.999) * 16.0);
+  if (idx < 0.5) return u_bandTime0.x;
+  if (idx < 1.5) return u_bandTime0.y;
+  if (idx < 2.5) return u_bandTime0.z;
+  if (idx < 3.5) return u_bandTime0.w;
+  if (idx < 4.5) return u_bandTime1.x;
+  if (idx < 5.5) return u_bandTime1.y;
+  if (idx < 6.5) return u_bandTime1.z;
+  if (idx < 7.5) return u_bandTime1.w;
+  if (idx < 8.5) return u_bandTime2.x;
+  if (idx < 9.5) return u_bandTime2.y;
+  if (idx < 10.5) return u_bandTime2.z;
+  if (idx < 11.5) return u_bandTime2.w;
+  if (idx < 12.5) return u_bandTime3.x;
+  if (idx < 13.5) return u_bandTime3.y;
+  if (idx < 14.5) return u_bandTime3.z;
+  return u_bandTime3.w;
+}
+
+vec3 palette(float t) {
+  t = fract(t);
+  if (u_palette == 1) return mix(vec3(0.03, 0.18, 0.06), vec3(0.46, 1.0, 0.48), t);
+  if (u_palette == 2) return mix(vec3(0.08, 0.34, 0.56), vec3(0.78, 0.98, 1.0), t);
+  if (u_palette == 3) return mix(vec3(0.85, 0.08, 0.22), vec3(1.0, 0.74, 0.24), t);
+  if (u_palette == 4) return hsb2rgb(vec3(t + u_time * 0.045, 0.86, 1.0));
+  return mix(u_accent * 0.26, normalize(u_accent + vec3(0.12, 0.18, 0.22)), 0.18 + t * 0.82);
+}
+
+// x * x. pow(x, 2.0) is undefined for a negative x, so squares go through here.
+float sq(float x) {
+  return x * x;
+}
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+float noise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x),
+    u.y
+  );
+}
+
+float fbm(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 4; i += 1) {
+    v += noise(p) * a;
+    p = p * 2.02 + vec2(17.7, 9.2);
+    a *= 0.5;
+  }
+  return v;
+}
+
+void main() {
+  vec2 uv = v_uv;
+  float aspect = u_resolution.x / max(1.0, u_resolution.y);
+  vec2 p = (uv - 0.5) * vec2(aspect, 1.0);
+  // Energy formula — bass gets a slightly larger share so all shader modes
+  // feel as alive as the bass already does, while mids/treble still contribute
+  // so non-kick content (vocals, hats, ride) still drives the visuals.
+  float energy = sat(u_rms * 0.42 + u_bass * 0.38 + u_mid * 0.16 + u_treble * 0.10);
+  vec3 color = vec3(0.0);
+
+  if (u_mode == 0) {
+    vec3 bg = mix(vec3(0.006, 0.006, 0.015), palette(0.08) * 0.12, energy);
+    color += bg;
+    for (int i = 0; i < 9; i += 1) {
+      float fi = float(i);
+      float b = bandAt(fi / 8.0);
+      float y = 0.15 + fi * 0.083 + sin(u_time * (0.65 + fi * 0.035) + fi + u_bass * 4.0) * (0.018 + b * 0.075);
+      float xphase = uv.x * (5.0 + fi * 0.34) + u_time * 0.74 + bandTimeAt(fi / 8.0) * 0.95 + fi * 0.83;
+      float wave = y + sin(xphase) * (0.035 + b * 0.12 + u_bass * 0.04) + sin(xphase * 0.47 + u_mid * 5.0) * (0.025 + u_treble * 0.05);
+      float line = exp(-abs(uv.y - wave) * (92.0 - b * 34.0));
+      color += palette(fi * 0.095 + b * 0.32 + u_time * 0.02) * line * (0.26 + b * 1.45 + u_beat * 0.9);
+    }
+    float scan = 0.88 + 0.12 * sin(uv.y * u_resolution.y * 1.7);
+    color *= scan;
+  } else if (u_mode == 1) {
+    color += vec3(0.002, 0.001, 0.008);
+    for (int i = 0; i < 6; i += 1) {
+      float fi = float(i);
+      float b = bandAt(fi / 5.0);
+      // Use cos(theta*n) instead of raw theta so the ribbon wraps smoothly
+      // through pi without the discontinuity that caused the visible seam
+      // along the negative x-axis.
+      float theta = atan(p.y, p.x);
+      float radius = length(p);
+      float wrappedAngle = cos(theta * (2.0 + fi * 0.55) + u_time * (0.9 + fi * 0.15) + radius * (6.0 + b * 9.0));
+      float curve = abs(wrappedAngle);
+      float target = 0.46 + sin(theta * 3.0 - u_time + fi) * 0.12 + b * 0.22 + u_bass * 0.18 + u_beat * 0.18;
+      float line = exp(-abs(radius - target * curve) * (12.0 + b * 22.0));
+      color += palette(fi * 0.12 + sin(theta * 0.5) * 0.06 + u_time * 0.03) * line * (0.24 + b * 1.35 + u_beat * 0.95 + u_bass * 0.4);
+    }
+    float core = exp(-length(p) * (6.0 - u_bass * 2.0 - u_beat * 1.0));
+    color += palette(0.62 + u_time * 0.02 + u_bass * 0.4) * core * (0.16 + energy * 0.54 + u_beat * 0.32);
+  } else if (u_mode == 2) {
+    // Plasma Grid was tiling at 10-20x across X and 8-16x across Y, producing
+    // a "wall of tiny windows" instead of a flowing plasma. Drop the tile
+    // frequency to 3-5x so we see 3-5 large warped cells per axis, and let
+    // the fbm plasma actually dominate the look.
+    vec2 q = uv;
+    float b0 = bandAt(q.x);
+    float b1 = bandAt(q.y);
+    q.x += sin(q.y * 6.0 + u_time * 1.25) * (0.04 + u_bass * 0.09) + b1 * 0.06;
+    q.y += cos(q.x * 5.5 - u_time * 1.08) * (0.04 + u_mid * 0.08) + b0 * 0.06;
+    float gridX = 1.0 - smoothstep(0.012, 0.06 + u_bass * 0.045, abs(fract(q.x * (3.0 + u_treble * 2.0)) - 0.5));
+    float gridY = 1.0 - smoothstep(0.012, 0.06 + u_mid * 0.045, abs(fract(q.y * (2.0 + u_bass * 1.5)) - 0.5));
+    float plasma = fbm(q * (3.0 + u_mid * 4.0 + u_beat * 2.0) + vec2(u_time * 0.22, -u_time * 0.16));
+    float lines = max(gridX, gridY) * (0.18 + plasma * 0.8 + u_beat * 0.7);
+    // Make plasma the dominant signal — the grid is now a soft overlay,
+    // not the whole picture.
+    color += palette(plasma + u_time * 0.04 + u_bass * 0.4) * (plasma * 0.6 + lines * 0.45 + u_beat * 0.18);
+    color += palette(0.7 + plasma) * exp(-length(p) * (2.4 - u_bass - u_beat * 0.5)) * (0.12 + u_bass * 0.44 + u_beat * 0.28);
+  } else if (u_mode == 3) {
+    // Burning Cloud — was locked to a red→orange→amber ramp regardless of
+    // music. Switch to palette-driven hues so the cloud actually shifts color
+    // with the beat instead of looking like a static brown plume.
+    vec2 q = p * (2.1 - u_bass * 0.35);
+    float heat = fbm(q * (2.0 + u_mid * 3.0) + vec2(0.0, -(u_time * 0.38 + u_bassTime)));
+    heat += fbm(q * 4.2 + vec2(u_time * 0.15, u_time * 0.22)) * 0.5;
+    heat += u_bass * 0.85 + u_beat * 0.7;
+    float plume = smoothstep(0.18, 1.58, heat - length(p) * (0.48 - u_rms * 0.16));
+    vec3 corePalette = palette(u_time * 0.03 + heat * 0.4 + u_bass * 0.6);
+    vec3 hotPalette = palette(u_time * 0.05 + heat * 0.32 + 0.4 + u_beat * 0.5);
+    vec3 ember = mix(corePalette * 0.18, corePalette, plume);
+    vec3 flame = mix(ember, hotPalette * 1.15, smoothstep(0.78, 1.56, heat));
+    vec3 accentBurn = mix(flame, palette(heat * 0.33 + u_time * 0.03), 0.55 + u_bass * 0.4);
+    color += accentBurn * plume * (0.55 + energy * 0.75 + u_beat * 0.32);
+    color += corePalette * 0.04;
+  } else if (u_mode == 4) {
+    // KALEIDO-BLOOM — N-fold mirror kaleidoscope. Petal count breathes with
+    // treble (4..10 petals), spin pulled by mids, bloom radius pumped by bass,
+    // beat fires a halo ring through the whole field.
+    float petalsF = 4.0 + u_treble * 6.0;
+    float petalsLo = floor(petalsF);
+    float petalsMix = smoothstep(0.0, 1.0, fract(petalsF));
+    float theta = atan(p.y, p.x);
+    float r = length(p);
+    float spin = theta + u_time * 0.12 + u_midTime * 0.6;
+    float bloom = exp(-sq(r * (3.2 - u_bass * 1.3 - u_beat * 0.6)));
+    // Fold the angle into one petal slice and mirror. The petal count moves
+    // with treble, and a whole-image re-fold at every integer would flicker,
+    // so the folds either side of it are cross-faded.
+    float petalIntensity = 0.0;
+    for (int k = 0; k < 2; k += 1) {
+      float sector = 6.2831853 / (petalsLo + float(k));
+      float a = mod(spin, sector);
+      a = abs(a - sector * 0.5);
+      vec2 q = vec2(cos(a), sin(a)) * r;
+      float petalCurve = sin(q.x * (5.5 + u_treble * 5.0)) * sin(q.y * (4.5 + u_mid * 4.0));
+      petalIntensity += smoothstep(-0.25, 0.85, petalCurve) * (k == 0 ? 1.0 - petalsMix : petalsMix);
+    }
+    vec3 petalCol = palette(u_time * 0.04 + r * 1.4 + u_bass * 0.5);
+    color += petalCol * (petalIntensity * (0.6 + bloom * 1.1 + u_beat * 0.6));
+    // Beat halo ring expanding outward.
+    float haloR = 0.18 + fract(u_time * 0.55 + u_beat) * 0.42;
+    float halo = exp(-sq((r - haloR) * 16.0)) * (0.45 + u_beat * 0.6);
+    color += palette(0.3 + u_beat * 0.5) * halo;
+    color += vec3(0.005);
+  } else if (u_mode == 5) {
+    // LIQUID-AURORA-STORM — five stacked aurora ribbons, each centered on a
+    // different band; bass drives sideways "wind", and the beat triggers a
+    // forked-lightning flash that lights the whole sky.
+    color += vec3(0.004, 0.006, 0.018);
+    float wind = sin(u_time * 0.4 + u_bass * 3.0) * (0.04 + u_bass * 0.18);
+    for (int i = 0; i < 5; i += 1) {
+      float fi = float(i);
+      float b = bandAt(0.12 + fi * 0.18);
+      float center = 0.18 + fi * 0.16;
+      float xphase = uv.x * (3.0 + fi * 0.45) + u_time * 0.62 + bandTimeAt(0.12 + fi * 0.18) * 1.4 + fi * 0.9 + wind;
+      float ribbonY = center
+        + sin(xphase) * (0.04 + b * 0.13 + u_bass * 0.05)
+        + sin(xphase * 0.43 + u_mid * 5.0) * (0.02 + u_treble * 0.04);
+      float band = exp(-abs(uv.y - ribbonY) * (38.0 - b * 22.0 - u_beat * 8.0));
+      vec3 ribbon = palette(fi * 0.14 + b * 0.4 + u_time * 0.03);
+      color += ribbon * band * (0.3 + b * 1.4 + u_beat * 0.6);
+    }
+    // Beat lightning — short-lived fork. Random per-x hash gated by beat,
+    // narrow vertical strike at random angle.
+    float strike = step(0.55, u_beat);
+    float bolt = hash(vec2(floor(u_time * 4.0), 1.0));
+    float xStrike = bolt;
+    float lightning = exp(-abs(uv.x - xStrike) * 220.0) * strike;
+    float verticalFade = smoothstep(0.0, 0.6, uv.y);
+    color += vec3(0.85, 0.92, 1.0) * lightning * verticalFade * (0.6 + u_beat);
+  } else if (u_mode == 6) {
+    // FRACTAL-PULSE — folded-IFS escape-time fractal. Iterated abs-fold +
+    // rotation + scale-translate; fold angle from mids, scale from bass, iris
+    // bloom on every beat.
+    vec2 z = p * (1.4 - u_bass * 0.4);
+    float foldAngle = 0.6 + u_mid * 1.4 + sin(u_time * 0.5) * 0.3;
+    float ca = cos(foldAngle);
+    float sa = sin(foldAngle);
+    float scaleK = 1.32 + u_bass * 0.45 + u_beat * 0.18;
+    float iter = 0.0;
+    float esc = 0.0;
+    for (int i = 0; i < 7; i += 1) {
+      z = abs(z);
+      z = vec2(z.x * ca - z.y * sa, z.x * sa + z.y * ca);
+      z = z * scaleK - vec2(0.6 + u_treble * 0.2, 0.42 + u_rms * 0.2);
+      float l = dot(z, z);
+      if (l > 6.0) { esc = float(i); break; }
+      iter += 1.0;
+    }
+    float t = (esc > 0.0 ? esc : iter) / 7.0;
+    vec3 frac = palette(t * 1.6 + u_time * 0.04 + u_bass * 0.5);
+    color += frac * (0.35 + (1.0 - t) * 1.1 + u_beat * 0.45);
+    // Iris flash from center on beat.
+    float iris = exp(-length(p) * (4.0 - u_beat * 1.6)) * (u_beat * 0.7);
+    color += palette(0.7 + u_beat) * iris;
+  } else if (u_mode == 7) {
+    // STARFIELD-WARP — radial hyperspace tunnel. Per-ring per-wedge hashed
+    // stars stream outward; streak length stretches on beat, central forward
+    // flare lit by treble + bass.
+    float r = length(p);
+    float theta = atan(p.y, p.x);
+    // Stream rings outward over time + bass speed.
+    float warp = u_time * 0.6 + u_bassTime * 1.4 + u_beatTime * 0.8;
+    float ringIdx = floor(r * 14.0 + warp);
+    float ringFrac = fract(r * 14.0 + warp);
+    // Discretize angle into 64 wedges, hash by (ring,wedge) for stable stars.
+    float wedge = floor(theta * 10.18);
+    float starSeed = hash(vec2(ringIdx, wedge));
+    // Each star "exists" only where seed > threshold (sparse field).
+    float exists = step(0.78, starSeed);
+    // Streak length grows on beat — long radial smear.
+    float streakLen = 0.12 + u_beat * 0.6 + u_bass * 0.18;
+    float streakProfile = exp(-sq((ringFrac - 0.5) / streakLen));
+    // Per-wedge sub-angle jitter so stars aren't perfectly aligned.
+    float wedgeAngle = wedge / 10.18 + (starSeed - 0.5) * 0.04;
+    float starWidth = max(0.0125, 1.3 / (u_resolution.y * max(r, 0.004)));
+    float angleProfile = exp(-sq((theta - wedgeAngle) / starWidth)) * (0.0125 / starWidth);
+    float star = exists * streakProfile * angleProfile * (0.5 + r * 1.6);
+    vec3 starCol = palette(starSeed + u_time * 0.05);
+    color += starCol * star * (0.8 + u_treble * 0.6 + u_beat * 0.5);
+    // Forward-flare core (vanishing point glow).
+    float core = exp(-r * (5.0 - u_bass * 1.8 - u_beat * 0.8));
+    color += palette(0.55 + u_treble * 0.4) * core * (0.4 + u_treble * 0.5 + u_rms * 0.3);
+    color += vec3(0.003, 0.005, 0.012);
+  } else if (u_mode == 8) {
+    // SPECTRAL-TUNNEL — polar tunnel where the 16-band spectrum carves the
+    // wall ribbing; concentric ring shockwaves travel outward on every beat,
+    // vanishing-point flare pumps with bass.
+    float r = length(p);
+    float theta = atan(p.y, p.x);
+    // Wall depth modulated by the spectrum bands wrapped around the tunnel.
+    float spectrum = bandAt(fract(theta / 6.2831853 + 0.5));
+    float depth = 1.0 / max(0.12, r * (1.0 - spectrum * 0.4));
+    // Vertical ribbing from treble; horizontal banding from spectrum samples.
+    // The ribs are packed too tightly to resolve near the vanishing point,
+    // so they fade out there instead of aliasing.
+    float rib = mix(0.5, sin(depth * (4.0 + u_treble * 6.0)) * 0.5 + 0.5, smoothstep(0.03, 0.2, r));
+    float wallShade = mix(0.12, 1.0, rib * (0.4 + spectrum * 0.9));
+    vec3 wallCol = palette(depth * 0.22 + theta * 0.08 + u_time * 0.04);
+    color += wallCol * wallShade * (0.45 + u_bass * 0.4);
+    // Ring shockwaves: phase advances on beat, exponential rings expanding.
+    for (int i = 0; i < 3; i += 1) {
+      float fi = float(i);
+      float phase = fract(u_time * 0.32 + u_beat * 0.5 + fi * 0.33);
+      float ringR = phase * 1.4;
+      float shockwave = exp(-sq((r - ringR) * 18.0));
+      color += palette(0.6 + fi * 0.18 + u_beat * 0.4) * shockwave * (0.4 + u_beat * 0.6);
+    }
+    // Vanishing-point flare — looking down the tunnel.
+    float vp = exp(-r * (6.0 - u_bass * 2.4));
+    color += palette(0.78 + u_bass * 0.3) * vp * (0.35 + u_bass * 0.7 + u_beat * 0.4);
+  } else {
+    // Fallback to burning cloud for safety.
+    color += vec3(0.05);
+  }
+
+  color += palette(0.55 + u_time * 0.08) * u_beat * 0.22;
+  color = pow(color, vec3(0.82));
+  gl_FragColor = vec4(color, 1.0);
+}
+`;

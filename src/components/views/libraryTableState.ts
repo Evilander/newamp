@@ -142,3 +142,86 @@ export function createLatestRequestGate(): { begin: () => () => boolean } {
     },
   };
 }
+
+/** A count bounds paging; an empty page ends a read even when a concurrent count is ahead. */
+export function hasMoreTrackRows(offset: number, total: number, pageLength: number): boolean {
+  return pageLength > 0 && offset < total;
+}
+
+/** One index per list revision, including misses; failed reads can be tried on a later revision. */
+export function createTrackPositionCache(): {
+  invalidate: () => void;
+  find: (id: number, total: number, getIds: (offset: number, limit: number) => Promise<number[]>) => Promise<number>;
+} {
+  let cached: Promise<Map<number, number>> | null = null;
+  return {
+    invalidate: () => { cached = null; },
+    find: async (id, total, getIds) => {
+      if (!cached) {
+        cached = (async () => {
+          const positions = new Map<number, number>();
+          for (let offset = 0; offset < total; offset += 100000) {
+            const ids = await getIds(offset, 100000);
+            ids.forEach((value, index) => positions.set(value, offset + index));
+            if (ids.length < 100000) break;
+          }
+          return positions;
+        })();
+      }
+      return (await cached).get(id) ?? -1;
+    },
+  };
+}
+
+/** Read through a playing row, or re-read a shifted loaded window once. Success always contains the id. */
+export async function readThroughTrack(options: {
+  trackId: number;
+  offset: number;
+  total: number;
+  pageSize: number;
+  getIds: (offset: number, limit: number) => Promise<number[]>;
+  getPosition?: (id: number) => Promise<number>;
+  getPage: (offset: number, limit: number) => Promise<Track[]>;
+  isCurrent: () => boolean;
+  pause: () => Promise<void>;
+  maxRows?: number;
+}): Promise<{ rows: Track[]; offset: number; replace: boolean; hasMore: boolean } | null> {
+  const { trackId, total, pageSize, getIds, getPage, isCurrent, pause, maxRows = 20000 } = options;
+  const position = await (options.getPosition ?? ((id) => createTrackPositionCache().find(id, total, getIds)))(trackId);
+  if (!isCurrent() || position < 0 || position >= maxRows) return null;
+  const replace = position < options.offset;
+  if (replace && options.offset > maxRows) return null;
+  const target = Math.min(maxRows, replace ? options.offset : position + 1);
+  const rows: Track[] = [];
+  let offset = replace ? 0 : options.offset;
+  let lastPageLength = 0;
+  while (offset < target) {
+    const limit = Math.min(pageSize, maxRows - offset, replace ? target - offset : pageSize);
+    const page = await getPage(offset, limit);
+    if (!isCurrent()) return null;
+    lastPageLength = page.length;
+    rows.push(...page);
+    offset += page.length;
+    if (page.length < limit) break;
+    if (offset < target) await pause();
+    if (!isCurrent()) return null;
+  }
+  return rows.some((row) => row.id === trackId) ? { rows, offset, replace, hasMore: hasMoreTrackRows(offset, total, lastPageLength) } : null;
+}
+
+/** Scroll only when the playing row is outside the unobscured viewport. */
+export function playingRowScrollTop(options: {
+  index: number;
+  rowHeight: number;
+  bodyTop: number;
+  headerHeight: number;
+  scrollTop: number;
+  viewportHeight: number;
+  footerHeight: number;
+}): number {
+  const { index, rowHeight, bodyTop, headerHeight, scrollTop, viewportHeight, footerHeight } = options;
+  const top = bodyTop + index * rowHeight;
+  if (top >= scrollTop + headerHeight && top + rowHeight <= scrollTop + viewportHeight - footerHeight) return scrollTop;
+  const room = Math.max(rowHeight, viewportHeight - headerHeight - footerHeight);
+  return Math.max(0, top - headerHeight - (room - rowHeight) / 2);
+}

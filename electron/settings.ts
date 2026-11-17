@@ -26,6 +26,7 @@ import {
 
 const DEFAULTS: AppSettings = {
   libraryRoots: [],
+  libraryRootsChosen: false,
   libraryAutoWatch: true,
   theme: 'classic',
   customSkin: null,
@@ -612,6 +613,7 @@ export class SettingsStore {
       ...freshDefaults(),
       ...parsed,
       libraryRoots: normalizeLibraryRoots(parsed.libraryRoots, ignoredRoots),
+      libraryRootsChosen: parsed.libraryRootsChosen === true,
       theme: normalizeTheme(parsed.theme),
       lastfmEnabled: parsed.lastfmEnabled === true,
       lastfmApiKey: normalizeOptionalSecret(parsed.lastfmApiKey),
@@ -752,6 +754,9 @@ export class SettingsStore {
       libraryRoots: Array.isArray(patch.libraryRoots)
         ? normalizeLibraryRoots(patch.libraryRoots)
         : base.libraryRoots,
+      libraryRootsChosen: patch.libraryRootsChosen === undefined
+        ? base.libraryRootsChosen
+        : patch.libraryRootsChosen === true,
       theme: patch.theme === undefined
         ? base.theme
         : normalizeTheme(patch.theme),
@@ -1125,6 +1130,7 @@ export class SettingsStore {
     return {
       queueTrackIds,
       queue: resumeQueue,
+      finiteQueue: value.finiteQueue === true,
       index,
       ...(currentTrackId !== undefined ? { currentTrackId } : {}),
       currentTime: Math.max(0, Number(value.currentTime) || 0),

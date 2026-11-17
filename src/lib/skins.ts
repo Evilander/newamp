@@ -33,6 +33,7 @@ export function applyTheme(theme: Theme, customSkin?: CustomSkin | null): void {
   const root = document.documentElement;
   for (const key of SKIN_VARIABLES) root.style.removeProperty(key);
   for (const { token } of TEXT_ROLE_TOKENS) root.style.removeProperty(token);
+  for (const token of ['--accent-ink', '--accent-frame', '--well-dim', '--well-warn', '--panel-dim', '--panel-detail-ink', '--panel-lcd', '--well-ink', '--well-secondary', '--well-accent', '--well-error', '--well-color', '--scrim-ink', '--scrim-accent', '--panel-note', '--display-placeholder']) root.style.removeProperty(token);
 
   if (theme === 'custom' && customSkin) {
     root.dataset.theme = customSkin.baseTheme;
@@ -41,6 +42,7 @@ export function applyTheme(theme: Theme, customSkin?: CustomSkin | null): void {
   }
 
   root.dataset.theme = theme === 'custom' ? 'classic' : theme;
+  applyAccentInk(root);
 }
 
 function applySkinVariables(root: HTMLElement, variables: Record<string, string>): void {
@@ -59,6 +61,7 @@ function applySkinVariables(root: HTMLElement, variables: Record<string, string>
     applied[key] = safe;
   }
   applyDerivedColors(root, applied, base);
+  applyAccentInk(root);
 }
 
 /**
@@ -83,7 +86,10 @@ export function previewSkinVariable(draft: Record<string, string>, key: string, 
   if (safe === null) return;
   const root = document.documentElement;
   root.style.setProperty(key, safe);
-  if (!(DERIVED_INPUTS as readonly string[]).includes(key)) return;
+  if (!(DERIVED_INPUTS as readonly string[]).includes(key)) {
+    applyAccentInk(root);
+    return;
+  }
 
   // The base theme's own colours: read with the inline overrides lifted, then put back.
   const held = DERIVED_INPUTS.map((name) => [name, root.style.getPropertyValue(name)] as const);
@@ -104,6 +110,7 @@ export function previewSkinVariable(draft: Record<string, string>, key: string, 
   if (inputs['--on-accent']) root.style.setProperty('--on-accent', inputs['--on-accent']);
   else root.style.removeProperty('--on-accent');
   applyDerivedColors(root, inputs, base);
+  applyAccentInk(root);
 }
 
 function applyDerivedColors(root: HTMLElement, applied: Record<string, string>, base: BaseSkinColors): void {
@@ -149,10 +156,17 @@ export function resolveCssColor(value: string): string | null {
 }
 
 function readColor(value: string): ReturnType<typeof parseSkinColorRgb> {
-  const direct = parseSkinColorRgb(value);
+  const parse = (text: string): ReturnType<typeof parseSkinColorRgb> => {
+    const direct = parseSkinColorRgb(text);
+    if (direct) return direct;
+    // Chromium computes color-mix() as color(srgb ...), not rgb().
+    const srgb = /^color\(srgb ([\d.e+-]+) ([\d.e+-]+) ([\d.e+-]+)/i.exec(text);
+    return srgb ? [Number(srgb[1]) * 255, Number(srgb[2]) * 255, Number(srgb[3]) * 255] : null;
+  };
+  const direct = parse(value);
   if (direct) return direct;
   const resolved = resolveCssColor(value);
-  return resolved ? parseSkinColorRgb(resolved) : null;
+  return resolved ? parse(resolved) : null;
 }
 
 // Below this a label is close to invisible on its fill, whoever picked it.
@@ -208,4 +222,87 @@ export function readCurrentSkinVariables(): Record<string, string> {
   return Object.fromEntries(
     SKIN_VARIABLES.map((key) => [key, styles.getPropertyValue(key).trim()]),
   );
+}
+
+/** Keep the accent unchanged wherever it already reads on panel surfaces. */
+export function deriveAccentInk(accent: string, ink: string, surfaces: string[]): string {
+  const start = readColor(accent);
+  const end = readColor(ink);
+  const backgrounds = surfaces.map(readColor);
+  if (!start || !end || backgrounds.some((color) => !color)) return accent;
+  const readable = (color: number[]): boolean => backgrounds.every((background) => contrastRatio(color as [number, number, number], background!) >= 4.5);
+  if (readable(start)) return accent;
+  for (let step = 1; step <= 1024; step += 1) {
+    const mixed = start.map((channel, i) => Math.round(channel + (end[i]! - channel) * step / 1024));
+    if (readable(mixed)) return `#${mixed.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`;
+  }
+  return ink;
+}
+
+function applyAccentInk(root: HTMLElement): void {
+  if (typeof getComputedStyle !== 'function') return;
+  const styles = getComputedStyle(root);
+  const read = (name: string): string => styles.getPropertyValue(name).trim();
+  const mix = (foreground: string, share: number, background: string): string => {
+    const fg = readColor(foreground);
+    const bg = readColor(background);
+    return fg && bg ? `rgb(${fg.map((channel, i) => channel * share + bg[i]! * (1 - share)).join(',')})` : background;
+  };
+  const panels = [read('--panel'), read('--panel-2')];
+  // Beveled panels retain their original 18% black wash.
+  const shaded = panels.map((panel) => mix('#000000', 0.18, panel));
+  const surfaces = [...panels, ...shaded, ...shaded.map((panel) => mix(read('--accent'), 0.08, panel))];
+  root.style.setProperty('--accent-ink', deriveAccentInk(read('--accent'), read('--ink'), surfaces));
+  // The album panel paints --panel under a fading 8% accent wash.
+  const albumPanel = [read('--panel'), mix(read('--accent'), 0.08, read('--panel'))];
+  root.style.setProperty('--panel-dim', deriveAccentInk(read('--muted'), read('--ink'), albumPanel));
+  root.style.setProperty('--panel-detail-ink', deriveAccentInk(read('--ink-2'), read('--ink'), surfaces));
+  root.style.setProperty('--panel-lcd', deriveAccentInk(read('--display-fg'), read('--ink'), surfaces));
+  root.style.setProperty('--accent-frame', deriveAccentInk(read('--accent'), read('--titlebar-fg-flat') || read('--ink'), [read('--bg')]));
+  const readsOn = (value: string, backgrounds: string[]): boolean => {
+    const rgb = readColor(value);
+    return !!rgb && backgrounds.every((surface) => {
+      const background = readColor(surface);
+      return !!background && contrastRatio(rgb, background) >= 4.5;
+    });
+  };
+  // Its "no album page" note is --ink-2 at 70% wherever that still reads.
+  root.style.setProperty('--panel-note', albumPanel.every((panel) => readsOn(mix(read('--ink-2'), 0.7, panel), [panel])) ? `color-mix(in srgb, ${read('--ink-2')} 70%, transparent)` : read('--ink-2'));
+  const display = read('--display-bg');
+  // The score field keeps Tailwind's placeholder grey wherever it reads there.
+  root.style.setProperty('--display-placeholder', readsOn('#9ca3af', [display]) ? '#9ca3af' : deriveAccentInk(read('--display-dim'), read('--display-fg'), [display]));
+  // Modern paints a well flat; the other shells darken it by 35% to 15%.
+  const wells = [display, ...[0.35, 0.15].map((share) => mix('#000000', share, display))];
+  wells.push(...panels.map((panel) => mix(display, 0.72, mix(read('--accent'), 0.08, panel))));
+  const wellText = (source: string, displayToken: string): string => {
+    const original = read(source);
+    if (readsOn(original, wells)) return original;
+    return deriveAccentInk(read(displayToken), read('--display-fg'), wells);
+  };
+  // Accent, warning and error keep their own hue in a well, lightened or
+  // darkened only as far as it takes, so the three still tell apart.
+  const extreme = readsOn('#ffffff', wells) ? '#ffffff' : '#000000';
+  const wellTone = (source: string, hue: string): string => {
+    const original = read(source);
+    return readsOn(original, wells) ? original : deriveAccentInk(read(hue), extreme, wells);
+  };
+  const wellInk = wellText('--ink', '--display-fg');
+  const wellSecondary = wellText('--ink-2', '--display-dim');
+  const wellDim = wellText('--muted', '--display-dim');
+  root.style.setProperty('--well-ink', wellInk);
+  root.style.setProperty('--well-secondary', wellSecondary);
+  root.style.setProperty('--well-dim', wellDim);
+  root.style.setProperty('--well-accent', wellTone('--accent-text', '--accent'));
+  root.style.setProperty('--well-warn', wellTone('--warn-text', '--warn'));
+  root.style.setProperty('--well-error', wellTone('--error-text', '--error'));
+  // A well only repaints the text it inherits when the skin's own tones fail there.
+  if (wellInk === read('--ink') && wellSecondary === read('--ink-2') && wellDim === read('--muted')) root.style.removeProperty('--well-color');
+  else root.style.setProperty('--well-color', wellInk);
+  // The black scrims over album art and the visualizer. A colour that has to
+  // be replaced there is picked to read over white art as well.
+  const scrims = ['#000000', mix('#000000', 0.72, read('--panel'))];
+  const anyArt = [...scrims, mix('#000000', 0.72, '#ffffff')];
+  const onScrim = (source: string, start: string): string => readsOn(read(source), scrims) ? read(source) : deriveAccentInk(read(start), '#ffffff', anyArt);
+  root.style.setProperty('--scrim-ink', onScrim('--ink', '--display-fg'));
+  root.style.setProperty('--scrim-accent', onScrim('--accent', '--accent'));
 }

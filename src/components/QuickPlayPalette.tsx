@@ -272,6 +272,10 @@ export function QuickPlayPaletteBody({ open, onClose }: { open: boolean; onClose
 
   async function runCommand(command: PaletteCommand): Promise<void> {
     if (command === 'scan-library') {
+      if (!(await api.getSettings()).libraryRoots.length) {
+        setStatus('Add a music folder in Settings to scan your library.');
+        return;
+      }
       setStatus('Scanning configured library roots...');
       await api.scanLibrary();
       setStatus('Library scan started.');

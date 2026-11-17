@@ -86,51 +86,71 @@ export function buildDiscoverSurface(input: BuildDiscoverSurfaceInput): Discover
   // normalisation above; the untagged pile of one artist is not an album.
   const albumClusters = buildAlbumClusters(tracks.filter((_, i) => cleanText(playable[i]!.album)));
 
-  const freshTracks = tracks
+  const previous = new Set(input.previousTrackIds ?? []);
+  const pick = (ranked: Track[]): Track[] => {
+    // The first set of a session is the ranking itself. Sampling only starts
+    // when the user asks for another set.
+    if (!previous.size) return ranked.slice(0, limit);
+    const pool = ranked.slice(0, limit * 4);
+    const picked = [
+      ...seededPick(pool.filter((track) => !previous.has(track.id)), limit, rng),
+      ...seededPick(pool.filter((track) => previous.has(track.id)), limit, rng),
+    ].slice(0, limit);
+    if (picked.length > 1 && picked[0]!.id === input.previousTrackIds?.[0]) {
+      picked.push(picked.shift()!);
+    }
+    return picked;
+  };
+  const freshRanked = tracks
     .filter((track) => track.playCount <= 2)
-    .sort((a, b) => b.mtime - a.mtime || compareTrack(a, b))
-    .slice(0, limit);
+    .sort((a, b) => b.mtime - a.mtime || compareTrack(a, b));
+  // Another set starts with the files not shown yet and is topped up from the
+  // ones that were, so a small library still gets a full list. Newest first
+  // either way.
+  const unseenFresh = freshRanked.filter((track) => !previous.has(track.id));
+  const freshTracks = [...unseenFresh, ...freshRanked.filter((track) => previous.has(track.id))]
+    .slice(0, limit)
+    .sort((a, b) => b.mtime - a.mtime || compareTrack(a, b));
 
-  const forgottenFavorites = tracks
+  const forgottenFavorites = pick(tracks
     .filter((track) => isPositiveSignal(track) && staleDays(track, generatedAt) >= 21)
     .map((track) => ({
       track,
       score: positiveSignalScore(track) + Math.min(staleDays(track, generatedAt), MAX_STALE_DAYS_FOR_SCORE) * 0.08 - skipRisk(track) * 8 + stableTrackJitter(track, seed),
     }))
     .sort((a, b) => b.score - a.score || compareTrack(a.track, b.track))
-    .slice(0, limit)
-    .map((item) => item.track);
+    .map((item) => item.track));
 
-  const deepAlbum = albumClusters[0] ?? null;
+  const albumPool = albumClusters.slice(0, 12);
+  const novelAlbums = albumPool.filter((album) => album.tracks.every((track) => !previous.has(track.id)));
+  const deepAlbum = previous.size
+    ? seededPick(novelAlbums.length ? novelAlbums : albumPool, 1, rng)[0] ?? null
+    : albumClusters[0] ?? null;
   // The whole album: the card and the album session both say "play the album".
   const deepAlbumTracks = deepAlbum?.tracks ?? [];
 
   const genreCounts = buildGenreCounts(tracks);
-  const weirdShelf = tracks
+  const weirdShelf = pick(tracks
     .filter((track) => track.playCount <= 1)
     .map((track) => ({
       track,
       score: weirdnessScore(track, genreCounts, generatedAt) + stableTrackJitter(track, seed),
     }))
     .sort((a, b) => b.score - a.score || compareTrack(a.track, b.track))
-    .slice(0, limit)
-    .map((item) => item.track);
+    .map((item) => item.track));
 
-  const visualTracks = seededPick(
-    tracks
-      .filter((track) => skipRisk(track) < 0.45 && (isPositiveSignal(track) || track.playCount === 0))
-      .sort((a, b) => positiveSignalScore(b) - positiveSignalScore(a) || compareTrack(a, b)),
-    Math.max(8, limit),
-    rng,
-  );
-  const visualPlan = buildVisualPlan(input.lowEndMode ?? false, seed);
+  const visualRanked = tracks
+    .filter((track) => skipRisk(track) < 0.45 && (isPositiveSignal(track) || track.playCount === 0))
+    .sort((a, b) => positiveSignalScore(b) - positiveSignalScore(a) || compareTrack(a, b));
+  const visualTracks = previous.size ? pick(visualRanked) : seededPick(visualRanked, Math.max(8, limit), rng);
+  const visualPlan = buildDiscoverVisualPlan(input.lowEndMode ?? false, seed);
 
   const cards = [
     buildCard('new-download-radar', 'New Download Radar', 'Fresh imports with room to breathe', 'Newest files NewAmp has seen on disk, biased toward albums you have not worn out yet.', 'accent', freshTracks, visualPlan),
     buildCard('forgotten-favorites', 'Forgotten Favorites', 'Loved signals that have gone quiet', 'Loved and highly rated tracks that have not had recent attention.', 'warn', forgottenFavorites, null),
     buildCard('deep-album-run', deepAlbum ? `Deep Album Run: ${deepAlbum.album}` : 'Deep Album Run', deepAlbum ? `${deepAlbum.albumArtist} / ${deepAlbum.tracks.length} tracks` : 'Full-album candidates', 'Albums with enough playable tracks, low skip risk, and a coherent listening path.', 'plain', deepAlbumTracks, null),
     buildCard('weird-shelf', 'Weird Shelf', 'Underplayed corners worth checking', 'Low-play tracks from less obvious folders, years, genres, or private-library edges.', 'accent', weirdShelf, null),
-    buildCard('visual-night', 'Visual Night', input.lowEndMode ? 'Low-load visual set' : 'Fullscreen visual set', 'A ready listening set paired to deck and visualizer choices.', 'warn', visualTracks, visualPlan),
+    buildCard('visual-night', 'Visual Night', visualNightCardSubtitle(input.lowEndMode), 'A ready listening set paired to deck and visualizer choices.', 'warn', visualTracks, visualPlan),
   ].filter((card) => card.tracks.length > 0);
 
   const missions = buildMissions({
@@ -196,7 +216,7 @@ function buildMissions(input: {
     missions.push(buildMission(
       'visual-night',
       'Visual Night',
-      input.visualPlan.lowEndMode ? 'Low-load fullscreen session' : 'Fullscreen visual session',
+      visualNightMissionSubtitle(input.visualPlan.lowEndMode),
       'Pairs a playable set with visualizer presets and a deck skin instead of leaving visuals as a separate toy.',
       'warn',
       compactSteps([
@@ -230,7 +250,16 @@ function buildSummary(
   };
 }
 
-function buildVisualPlan(lowEndMode: boolean, seed: string): DiscoverVisualPlan {
+/** Visual Night's subtitles follow the Light Viz setting, at build time and when it is toggled. */
+export function visualNightCardSubtitle(lowEndMode: boolean | null | undefined): string {
+  return lowEndMode ? 'Low-load visual set' : 'Fullscreen visual set';
+}
+
+export function visualNightMissionSubtitle(lowEndMode: boolean | null | undefined): string {
+  return lowEndMode ? 'Low-load fullscreen session' : 'Fullscreen visual session';
+}
+
+export function buildDiscoverVisualPlan(lowEndMode: boolean, seed: string): DiscoverVisualPlan {
   const rng = createSeededRandom(`${seed}:presets`);
   const presets = lowEndMode
     ? seededPick(LOW_END_PRESETS.filter((preset) => !HEAVY_VISUAL_PRESETS.has(preset)), PLAN_PRESET_COUNT, rng)

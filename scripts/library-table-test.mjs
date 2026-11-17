@@ -52,6 +52,7 @@ const bundled = await build({
       export { ArtistLink, AlbumLink, TrackLink } from './src/components/EntityLink';
       export { WheelScoreInput } from './src/components/ScoreRating';
       export * from './src/components/views/libraryTableState';
+      export { useTrackColumns } from './src/store/useTrackColumns';
       export { createElement } from 'react';
       export { renderToStaticMarkup } from 'react-dom/server.browser';
     `,
@@ -117,6 +118,65 @@ const attr = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
   assert.equal(m.slashFocusesSearch({ ...slash, defaultPrevented: true }, idle), false, 'a key something else took stays taken');
   assert.equal(m.slashFocusesSearch({ ...slash, key: ' ' }, idle), false, 'Space is still the player\'s');
   assert.equal(m.slashFocusesSearch({ ...slash, key: 'l' }, idle), false, 'and so is L');
+}
+
+// A follow result is successful only when its metadata contains the id.
+{
+  assert.equal(m.hasMoreTrackRows(600, 600, 600), false, 'an exact page and follow agree that the count is complete');
+  assert.equal(m.hasMoreTrackRows(600, 601, 0), false, 'an empty page ends paging despite a concurrent count');
+  const rows = Array.from({ length: 30 }, (_, i) => track(i + 1));
+  let reads = 0;
+  const base = { trackId: 3, offset: 10, total: 30, pageSize: 5,
+    getIds: async () => rows.map((row) => row.id),
+    getPage: async (offset, limit) => { reads++; return rows.slice(offset, offset + limit); },
+    isCurrent: () => true, pause: async () => {}, maxRows: 20,
+  };
+  const shifted = await m.readThroughTrack(base);
+  assert.equal(shifted.replace, true);
+  assert.equal(shifted.offset, 10);
+  assert.ok(shifted.rows.some((row) => row.id === 3), 're-read a shifted loaded window once');
+  assert.equal(reads, 2);
+  assert.equal(await m.readThroughTrack({ ...base, getPage: async (offset, limit) => rows.slice(offset, offset + limit).filter((row) => row.id !== 3) }), null, 'a row removed during paging is never reported found');
+  reads = 0;
+  assert.equal(await m.readThroughTrack({ ...base, trackId: 21 }), null);
+  assert.equal(reads, 0, 'a track beyond the follow cap downloads no metadata');
+  const cache = m.createTrackPositionCache();
+  let idReads = 0;
+  const ids = async () => { idReads++; return [1, 2, 3]; };
+  assert.equal(await cache.find(98, 3, ids), -1);
+  assert.equal(await cache.find(99, 3, ids), -1);
+  assert.equal(await cache.find(2, 3, ids), 1);
+  assert.equal(idReads, 1, 'one cached index covers hits and misses');
+  cache.invalidate();
+  assert.equal(await cache.find(2, 3, ids), 1);
+  assert.equal(idReads, 2, 'library changes invalidate the index');
+}
+
+// ── playback scroll geometry and absolute list positions ──────────────────
+{
+  const viewport = { rowHeight: 36, bodyTop: 80, headerHeight: 32, scrollTop: 1000, viewportHeight: 600, footerHeight: 36 };
+  assert.equal(m.playingRowScrollTop({ ...viewport, index: 30 }), 1000, 'an already visible row leaves the view alone');
+  assert.ok(m.playingRowScrollTop({ ...viewport, index: 2 }) < 1000, 'a row above the viewport moves up');
+  assert.ok(m.playingRowScrollTop({ ...viewport, index: 90 }) > 1000, 'a row below the viewport moves down');
+  assert.equal(m.playingRowScrollTop({ ...viewport, index: 0, bodyTop: 0 }), 0, 'the first row clamps at the top');
+
+  // Server rendering reads Zustand's initial snapshot, rather than live state.
+  const initialHidden = m.useTrackColumns.getInitialState().hidden;
+  const positionAt = initialHidden.indexOf('position');
+  initialHidden.splice(positionAt, 1);
+  const rows = Array.from({ length: 3000 }, (_, i) => track(i + 1, { trackNo: 7 }));
+  const props = {
+    tracks: rows, currentId: null, onPlay() {},
+    virtualWindow: { startIndex: 2476, endIndex: 2478, topPad: 2476 * 36, bottomPad: (3000 - 2479) * 36 },
+  };
+  let html = render(m.TrackTable, props);
+  assert.deepEqual([...html.matchAll(/data-track-position="(\d+)"/g)].map((match) => Number(match[1])), [2477, 2478, 2479], 'positions count the whole list, not the rendered window or album');
+  assert.equal((html.match(/>7<\/td>/g) ?? []).length, 3, 'the album track number stays separate');
+  html = render(m.TrackTable, { ...props, tracks: rows.toReversed() });
+  assert.deepEqual([...html.matchAll(/data-track-position="(\d+)"/g)].map((match) => Number(match[1])), [2477, 2478, 2479], 'sorting changes the tracks at each position, not the 1..N numbering');
+  html = render(m.TrackTable, { ...props, tracks: [...rows, track(3001)] });
+  assert.match(html, /data-track-position="2477"/, 'adding a page keeps earlier positions stable');
+  initialHidden.splice(positionAt, 0, 'position');
 }
 
 // ── the score wheel ────────────────────────────────────────────────────────
@@ -237,6 +297,9 @@ const attr = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
   assert.equal(attr(/^<tr [^>]*>/.exec(rows[1])[0], 'aria-current'), 'true', 'the playing row is marked');
   assert.equal(attr(/^<tr [^>]*>/.exec(rows[0])[0], 'aria-current'), undefined);
 
+  // The header box takes every loaded row, which the background fill makes most of the list.
+  assert.match(html, /<input type="checkbox" aria-label="Select all loaded tracks"/, 'the select-all box says what it selects');
+
   // Artist and album end in an ellipsis rather than being cut mid-letter.
   assert.equal([...html.matchAll(/data-newamp-artist-link[^>]*class="[^"]*\btruncate\b/g)].length, 4, 'artist links truncate');
   assert.equal([...html.matchAll(/data-newamp-album-link[^>]*class="[^"]*\btruncate\b/g)].length, 4, 'album links truncate');
@@ -244,7 +307,7 @@ const attr = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
   // The Columns button is plain to see, labelled, and says where else the menu lives.
   const toolbar = /<div class="track-table-toolbar"[^>]*>([\s\S]*?)<\/div>/.exec(html)?.[1] ?? '';
   const button = /<button\b[^>]*>/.exec(toolbar)?.[0] ?? '';
-  assert.match(toolbar, />Columns \(2 hidden\)<\/button>/, 'a labelled button that says what is hidden (Mix and Tag; Playlist needs a saved playlist)');
+  assert.match(toolbar, />Columns \(3 hidden\)<\/button>/, 'a labelled button that says what is hidden (Mix and Tag; Playlist needs a saved playlist)');
   assert.ok(button.includes('data-newamp-track-columns-open'), 'it opens the column menu');
   assert.match(attr(button, 'title') ?? '', /Right-click/, 'its tooltip mentions the header right-click');
   assert.equal(attr(button, 'aria-haspopup'), 'dialog');
@@ -270,7 +333,7 @@ const attr = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
   // A table that offers no queue or tag actions (Mixes, Albums) has fewer columns to hide.
   const plain = render(m.TrackTable, { tracks: tracks.slice(0, 2), currentId: null, onPlay() {} });
   assert.deepEqual([...plain.matchAll(/<th [^>]*data-newamp-track-column="(\w+)"/g)].map((match) => match[1]), ['select', 'play', 'number', 'title', 'artist', 'album', 'year', 'time', 'plays', 'rating', 'love']);
-  assert.match(plain, />Columns \(1 hidden\)<\/button>/);
+  assert.match(plain, />Columns \(2 hidden\)<\/button>/);
 
   // A scrolled list: only the rows in the window are drawn, one of them is the stop.
   const many = Array.from({ length: 40 }, (_, i) => track(i + 1));
@@ -372,7 +435,7 @@ const attr = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
 
   assert.match(view, /api\.onTracksRemoved\(\(ids\) => void refreshAfterRemovalRef\.current\(ids\)\)/, 'removal events carry their ids to the list');
   assert.match(view, /setTracks\(\(rows\) => withoutTracks\(rows, removedIds\)\)/, 'named rows are dropped in place');
-  assert.match(view, /refreshAfterRemoval\(result\.removedIds\)/, 'so is the cleanup\'s');
+  assert.match(view, /refreshAfterRemovalRef\.current\(result\.removedIds\)/, 'so is the cleanup\'s');
   const refetch = view.slice(view.indexOf('async function refreshAfterRemoval'), view.indexOf('refreshAfterRemovalRef.current = refreshAfterRemoval'));
   assert.match(refetch, /offset: 0/, 'without ids the first page is still refetched');
   const local = refetch.slice(0, refetch.indexOf('const [nextTracks'));
@@ -396,6 +459,17 @@ const attr = (tag, name) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1];
   assert.match(view, /const startWidth = shownWidths\[column\]/, 'a drag starts from the width on screen');
   assert.match(view, /onKeyDown=\{\(event\) => resizeColumnByKey\(column, event\)\}/, 'column handles answer the arrow keys');
   assert.match(view, /overscan: LIBRARY_ROW_OVERSCAN/, 'the list and the table agree on the overscan');
+}
+
+// The Library is mounted only while it is the view, as a lazy chunk under the
+// app's own loading fallback; leaving it unmounts it and everything it reads.
+// These only check the wiring in App.tsx; the live-list test runs the view and
+// checks that an unmounted Library reads nothing more.
+{
+  const app = await read('src/App.tsx');
+  assert.match(app, /const LibraryView = lazy\(\(\) => import\('\.\/components\/views\/LibraryView'\)/);
+  assert.match(app, /<Suspense fallback=\{<ViewFallback \/>\}>[\s\S]*?\{view === 'library' && <LibraryView \/>\}/);
+  assert.doesNotMatch(app, /RetainedLibraryView|<LibraryView active/, 'no hidden Library is kept mounted');
 }
 
 console.log('[library-table-test] ok: one Tab stop, visible Columns button, closed overview, ids drop rows in place');

@@ -43,11 +43,13 @@ globalThis.Audio = Audio;
 globalThis.AudioContext = Context;
 globalThis.document = { documentElement: { dataset: {}, style: { removeProperty() {}, setProperty() {} } } };
 globalThis.window = { newamp: {}, setTimeout, clearTimeout, setInterval, clearInterval, location: { search: '' }, winctl: { notifyPlayback() {} } };
+const stored = new Map();
+globalThis.localStorage = { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) };
 const bundled = await build({
-  stdin: { contents: `export * from './src/store/usePlayerStore'; export { AudioEngine } from './src/audio/engine'; export { api, DEFAULT_SETTINGS } from './src/lib/api'; export { clearToasts } from './src/lib/toast'; export { classifyAudioQuality } from './shared/audio-quality';`, resolveDir: process.cwd(), loader: 'ts' },
+  stdin: { contents: `export * from './src/store/usePlayerStore'; export { playDiscoverQueue } from './src/lib/discover-playback'; export { AudioEngine } from './src/audio/engine'; export { api, DEFAULT_SETTINGS } from './src/lib/api'; export { clearToasts } from './src/lib/toast'; export { classifyAudioQuality } from './shared/audio-quality';`, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm', target: 'es2022', define: { 'import.meta.env.DEV': 'false' }, logLevel: 'silent',
 });
-const { engine, AudioEngine, usePlayerStore: store, api, DEFAULT_SETTINGS, clearToasts, classifyAudioQuality } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
+const { engine, AudioEngine, usePlayerStore: store, playDiscoverQueue, api, DEFAULT_SETTINGS, clearToasts, classifyAudioQuality } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
 await new Promise(queueMicrotask);
 const settle = () => new Promise(setImmediate);
 const base = { path: '/music/a.flac', artist: 'Artist', album: 'Album', albumArtist: 'Artist', duration: 180, title: 'A', replayGainTrackDb: null, replayGainAlbumDb: null };
@@ -65,6 +67,96 @@ engine.setExternalTransport({ play: async id => { plays.push(id); return true; }
 store.setState({ settings: saved, autoDjEnabled: false });
 
 try {
+  {
+    store.setState({ autoDjEnabled: true });
+    store.getState().setMode('normal');
+    const shown = [c, a, b];
+    const ids = shown.map(track => track.id);
+    let contextReads = 0, djReads = 0;
+    api.getTracks = async () => { contextReads += 1; return [a, b, c, { ...a, id: 4 }]; };
+    api.buildHarmonicMix = async () => { djReads += 1; return [{ ...a, id: 4 }]; };
+    for (const mode of ['normal', 'repeat-all', 'repeat-one', 'shuffle', 'shuffle-repeat-all']) {
+      store.getState().setMode(mode);
+      const savedMode = stored.get('newamp:playback-mode');
+      const savedDj = saved.autoDjEnabled;
+      await playDiscoverQueue(shown);
+      assert.equal(store.getState().autoDjEnabled, true, 'Discover keeps Auto DJ preference');
+      assert.equal(store.getState().mode, mode, 'Discover keeps shuffle and repeat');
+      assert.equal(stored.get('newamp:playback-mode'), savedMode, 'saved mode is unchanged');
+      assert.equal(saved.autoDjEnabled, savedDj, 'saved Auto DJ is unchanged');
+      assert.equal(saved.resumeState.mode, mode, 'session mode is unchanged');
+      for (let i = 0; i < 7; i++) {
+        await store.getState().next();
+        assert.ok(ids.includes(store.getState().current.id), 'shuffle and repeat stay in list');
+        assert.deepEqual(store.getState().queue.map(t => t.id), ids);
+      }
+      if (mode === 'repeat-all') assert.equal(store.getState().current.id, a.id, 'repeat-all wraps the list');
+      await store.getState().refillAutoDjQueue(true);
+    }
+    assert.equal(contextReads, 0, 'finite queue never expands its album');
+    assert.equal(djReads, 0, 'Auto DJ does not fetch or extend finite queues');
+    store.getState().setMode('repeat-one');
+    await playDiscoverQueue(shown);
+    const repeated = store.getState().current.id;
+    engine.patchExternal({ playing: false, ended: true, currentTime: 180 });
+    await settle();
+    assert.equal(store.getState().current.id, repeated);
+    // Queue mutations retain the boundary, including both removal branches.
+    for (const mode of ['normal', 'shuffle-repeat-all']) {
+      store.getState().setMode(mode);
+      await playDiscoverQueue(shown);
+      await store.getState().playTracksNow([{ ...a, id: 4 }]);
+      assert.equal(store.getState().finiteQueue, true, 'Play now preserves finite queue');
+      await playDiscoverQueue(shown);
+      await store.getState().removeQueuedTrack(0);
+      assert.equal(store.getState().finiteQueue, true, 'removing playing entry preserves finite queue');
+      await playDiscoverQueue(shown);
+      await store.getState().dropTracks([c.id]);
+      assert.equal(store.getState().finiteQueue, true, 'library removal preserves finite queue');
+    }
+    await playDiscoverQueue(shown);
+    await store.getState().previewTrack({ ...a, id: 5 });
+    store.setState({ finiteQueue: false });
+    store.getState().endPreview();
+    assert.equal(store.getState().finiteQueue, true, 'preview restores finite queue');
+    await store.getState().persistPlaybackSession();
+    assert.equal(saved.resumeState.finiteQueue, true, 'session saves finite flag');
+    api.getTracksByIds = async () => shown;
+    store.setState({ queue: [], finiteQueue: false });
+    await store.getState().init();
+    assert.equal(store.getState().finiteQueue, true, 'session restores finite flag');
+    // Nothing is loaded after a restore, so Play starts the saved list again.
+    engine.patchExternal({ src: null, playing: false });
+    store.getState().togglePlay();
+    await settle();
+    await settle();
+    assert.equal(store.getState().finiteQueue, true, 'Play after a restore keeps the list finite');
+    // Picking a row of the loaded queue replays that list; another list does not inherit it.
+    await playDiscoverQueue(shown);
+    await store.getState().playQueue(store.getState().queue, 1);
+    assert.equal(store.getState().finiteQueue, true, 'a row of the loaded queue keeps the list finite');
+    await store.getState().playQueue([...shown], 0);
+    assert.equal(store.getState().finiteQueue, false, 'a different list is an ordinary queue');
+    // An emptied queue is no longer a Discover list.
+    await playDiscoverQueue([a]);
+    await store.getState().removeQueuedTrack(0);
+    assert.equal(store.getState().queue.length, 0);
+    assert.equal(store.getState().finiteQueue, false, 'an emptied queue is not finite');
+    await playDiscoverQueue([a]);
+    await store.getState().dropTracks([a.id]);
+    assert.equal(store.getState().finiteQueue, false, 'nor is one emptied by a library removal');
+    // Playback cannot wait for settings storage or reject because it is unavailable.
+    const setSettings = api.setSettings;
+    api.setSettings = async () => { throw new Error('read only'); };
+    await playDiscoverQueue([a]);
+    assert.equal(store.getState().current.id, a.id);
+    api.setSettings = () => new Promise(() => {});
+    await Promise.race([playDiscoverQueue([b]), new Promise((_, reject) => setTimeout(() => reject(new Error('play waited for settings')), 300))]);
+    assert.equal(store.getState().current.id, b.id);
+    api.setSettings = setSettings;
+    store.setState({ autoDjEnabled: false });
+    store.getState().setMode('normal');
+  }
   for (const replacement of ['play', 'clear', 'append']) {
     for (const result of ['tracks', 'empty']) {
       await store.getState().playQueue([a]);

@@ -307,7 +307,7 @@ const source = (path) => readFileSync(resolve(path), 'utf8');
   assert.match(app, /now - skinAccent\.at >= ACCENT_READ_MS/, 'read a couple of times a second, not every tick');
 
   const detached = source('src/detached/main.tsx');
-  assert.equal((detached.match(/onContextEvent: watchRendererContext\(\)/g) ?? []).length, 2, 'both ways the projector makes a renderer');
+  assert.equal((detached.match(/onContextEvent: watchRendererContext\(\)/g) ?? []).length, 1, 'startup and quality changes share one guarded renderer factory');
   assert.match(detached, /postBcConfig\(\{ sampleRate: lastSampleRate \}\)/);
   assert.match(detached, /postBcConfig\(\{ quality: next, dpr: dprCap\(\) \}\)/);
   assert.match(detached, /postBcConfig\(\{ dpr: dprCap\(\) \}\)/);

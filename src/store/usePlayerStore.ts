@@ -74,6 +74,7 @@ import {
   smartShuffleAfterRemoval,
 } from '@shared/smart-shuffle';
 import { STARTER_QUEUE_SIZE, buildStarterQueue, pickToday, starterQueueLead, starterQueueNeeded } from '../lib/today-pick';
+import { wheelInputLog } from '../lib/wheel-volume';
 
 export type PlaybackMode = SharedPlaybackMode;
 
@@ -157,6 +158,7 @@ function writeStored(key: string, value: string): void {
 interface PlayerState {
   engine: AudioEngine;
   queue: Track[];
+  finiteQueue: boolean;
   index: number;
   current: Track | null;
   isPlaying: boolean;
@@ -258,7 +260,7 @@ interface PlayerState {
   setSearchQuery: (q: string) => void;
   playTrack: (track: Track, queue?: Track[]) => Promise<void>;
   playPodcastEpisode: (episode: PodcastEpisode) => Promise<void>;
-  playQueue: (tracks: Track[], startIndex?: number, startAt?: number) => Promise<void>;
+  playQueue: (tracks: Track[], startIndex?: number, startAt?: number, options?: { finite?: boolean }) => Promise<void>;
   /**
    * Plays tracks that were opened from outside the app (Open with, a
    * double-click, a drop). With a queue up they go in right after the current
@@ -289,7 +291,8 @@ interface PlayerState {
   next: () => Promise<void>;
   prev: () => Promise<void>;
   seek: (t: number) => void;
-  setVolume: (v: number) => Promise<void>;
+  /** `by` names the control for the input log; the wheel logs its own events. */
+  setVolume: (v: number, by?: string) => Promise<void>;
   setPlaybackRate: (rate: number) => Promise<void>;
   setAudioOutputDevice: (deviceId: string | null) => Promise<void>;
   setBitPerfectExclusive: (enabled: boolean) => Promise<AppSettings>;
@@ -497,6 +500,7 @@ function passesOverMissing(track: Track): boolean {
 let advancingAutomatically = false;
 
 interface PlaybackSnapshot {
+  finiteQueue: boolean;
   queue: Track[];
   index: number;
   current: Track | null;
@@ -662,6 +666,7 @@ export function playbackResumeStateForQueueSnapshot(input: {
   current: Track | null;
   currentTime: number;
   mode: PlaybackMode;
+  finiteQueue?: boolean;
   updatedAt?: number;
 }): PlaybackResumeState | null {
   const rawIndex = Math.trunc(Number(input.index));
@@ -684,6 +689,7 @@ export function playbackResumeStateForQueueSnapshot(input: {
     currentTrackId,
     currentTime: Math.max(0, Number(input.currentTime) || 0),
     mode: input.mode,
+    finiteQueue: input.finiteQueue ?? false,
     updatedAt: Number.isFinite(updatedAt) ? Math.max(0, updatedAt) : Date.now(),
   };
 }
@@ -841,6 +847,7 @@ async function restorePlaybackSession(
   const mode = storedMode ?? resumeState.mode;
   setState({
     queue: tracks,
+    finiteQueue: resumeState.finiteQueue ?? false,
     index,
     current,
     currentTime: resumeTime,
@@ -872,6 +879,7 @@ async function persistPlaybackSession(state: PlayerState): Promise<void> {
     current: source.current,
     currentTime: source.currentTime,
     mode: source.mode,
+    finiteQueue: source.finiteQueue,
   });
   await api.setSettings({ resumeState }).catch(() => state.settings!);
 }
@@ -1047,6 +1055,7 @@ export function transportAvailability(state: {
   mode: PlaybackMode;
   shuffleHistory: readonly number[];
   autoDjEnabled: boolean;
+  finiteQueue?: boolean;
   currentTime?: number;
   current?: { id: number } | null;
 }): { hasPrevious: boolean; hasNext: boolean } {
@@ -1059,10 +1068,10 @@ export function transportAvailability(state: {
   const ahead = shuffle ? length - Math.max(1, state.shuffleHistory.length) : length - state.index - 1;
   const behind = shuffle ? state.shuffleHistory.length > 1 : state.index > 0;
   const restarts = (state.currentTime ?? 0) > PREVIOUS_RESTARTS_AFTER_S;
-  const extendable = state.current != null && state.current.id > 0;
+  const extendable = !state.finiteQueue && state.current != null && state.current.id > 0;
   return {
     hasPrevious: behind || wraps || restarts,
-    hasNext: ahead > 0 || wraps || state.autoDjEnabled || extendable,
+    hasNext: ahead > 0 || wraps || (!state.finiteQueue && state.autoDjEnabled) || extendable,
   };
 }
 
@@ -1481,7 +1490,9 @@ async function advanceToNextTrack(
 function recordLibraryPlay(track: Track): void {
   if (track.id <= 0) return;
   countedPlayTrackId = track.id;
-  void api.recordPlay(track.id).catch(() => undefined);
+  void api.recordPlay(track.id)
+    .then(() => window.dispatchEvent(new Event('newamp:library-play-recorded')))
+    .catch(() => undefined);
 }
 
 // A library play is counted once the track has been heard for half its length
@@ -1610,7 +1621,7 @@ function dedupeTracks(tracks: Track[]): Track[] {
 
 async function expandQueueFromCurrentContext(state: PlayerState): Promise<{ queue: Track[]; index: number } | null> {
   const current = state.current;
-  if (!current || current.id <= 0) return null;
+  if (state.finiteQueue || !current || current.id <= 0) return null;
   const searches: string[] = [];
   const album = current.album.trim();
   const pathRoot = albumContextPath(current);
@@ -1639,7 +1650,7 @@ async function startQueuePlayback(
   tracks: Track[],
   startIndex: number,
   startAt: number,
-  options: { skipRecord?: boolean; shuffleHistory?: number[] } = {},
+  options: { skipRecord?: boolean; shuffleHistory?: number[]; finite?: boolean } = {},
 ): Promise<void> {
   if (!tracks.length) return;
   const wasPreviewing = abandonPreview();
@@ -1655,6 +1666,7 @@ async function startQueuePlayback(
   const position = Number.isFinite(startAt) ? Math.max(0, Math.min(t.duration || Infinity, startAt)) : 0;
   setState({
     queue: q,
+    finiteQueue: options.finite ?? false,
     index: i,
     current: t,
     currentTime: position,
@@ -2092,6 +2104,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
   return {
     engine,
     queue: [],
+    finiteQueue: false,
     index: -1,
     current: null,
     isPlaying: false,
@@ -2352,6 +2365,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const idx = q.findIndex((t) => t.id === track.id);
       const nextIndex = idx >= 0 ? idx : 0;
       set({
+        finiteQueue: false,
         queue: q,
         index: nextIndex,
         current: track,
@@ -2386,6 +2400,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       resetPlaybackFailureRun();
       lastPodcastProgressPersistAt = 0;
       set({
+        finiteQueue: false,
         queue: [track],
         index: 0,
         current: track,
@@ -2405,7 +2420,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       persistPodcastProgress(get(), true, false);
     },
 
-    playQueue: (tracks, startIndex = 0, startAt = 0) => startQueuePlayback(get, set, tracks, startIndex, startAt),
+    // Picking a row of the queue that is already loaded (Now queue, the deck's
+    // queue) replays that same list, so a Discover list stays a finite one.
+    playQueue: (tracks, startIndex = 0, startAt = 0, options = {}) => startQueuePlayback(get, set, tracks, startIndex, startAt, {
+      ...options,
+      finite: options.finite ?? (tracks === get().queue && get().finiteQueue),
+    }),
 
     playTracksNow: async (tracks) => {
       if (!tracks.length) return;
@@ -2420,6 +2440,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const insertAt = playNextInsertAt(state.queue.length, state.index);
       const result = insertTracksNext(state.queue, state.index, tracks);
       await startQueuePlayback(get, set, result.queue, insertAt, 0, {
+        finite: state.finiteQueue,
         shuffleHistory: isShuffleMode(state.mode)
           ? historyEndingAt(historyAfterInsert(state, insertAt, tracks.length), insertAt)
           : [],
@@ -2432,6 +2453,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       activePreview ??= {
         snapshot: {
           queue: state.queue,
+          finiteQueue: state.finiteQueue,
           index: state.index,
           current: state.current,
           currentTime: state.currentTime,
@@ -2486,6 +2508,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const position = snapshot.current ? snapshot.resumeAt ?? snapshot.currentTime : 0;
       set({
         queue: snapshot.queue,
+        finiteQueue: snapshot.finiteQueue,
         index: snapshot.index,
         current: snapshot.current,
         currentTime: position,
@@ -2513,7 +2536,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       lastPlaybackErrorKey = null;
       resetPlaybackFailureRun();
       engine.unload();
-      set({ isPlaying: false, stopAfterCurrent: false, queue: [...tracks], index: -1, current: null, resumeAt: null, currentTime: 0, duration: 0, playbackError: null, shuffleHistory: [], shuffleForward: [], activePodcastEpisode: null });
+      set({ finiteQueue: false, isPlaying: false, stopAfterCurrent: false, queue: [...tracks], index: -1, current: null, resumeAt: null, currentTime: 0, duration: 0, playbackError: null, shuffleHistory: [], shuffleForward: [], activePodcastEpisode: null });
       schedulePersistPlaybackSession(get(), true);
       if (get().autoDjEnabled) void get().refillAutoDjQueue(true);
     },
@@ -2578,7 +2601,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         // the same unload() as the branch below: stop() leaves src/trackId on
         // the deck, and a later Play would resume the track just removed.
         engine.unload();
-        set({ queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], shuffleForward: [], activePodcastEpisode: null });
+        set({ finiteQueue: false, queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], shuffleForward: [], activePodcastEpisode: null });
         schedulePersistPlaybackSession(get(), true);
         return;
       }
@@ -2591,11 +2614,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         const wraps = repeatModeOf(state.mode) === 'all';
         const shufflePick = shuffling && state.isPlaying ? shuffleAfterRemoval(state.mode, result.queue.length, survivingHistory) : null;
         if (shufflePick) {
-          await startQueuePlayback(get, set, result.queue, shufflePick.index, 0, { shuffleHistory: shufflePick.history });
+          await startQueuePlayback(get, set, result.queue, shufflePick.index, 0, { finite: state.finiteQueue, shuffleHistory: shufflePick.history });
           return;
         }
         if (!shuffling && state.isPlaying && nextCurrent && (!nothingFollows || wraps)) {
-          await startQueuePlayback(get, set, result.queue, nothingFollows ? 0 : result.index, 0, { shuffleHistory });
+          await startQueuePlayback(get, set, result.queue, nothingFollows ? 0 : result.index, 0, { finite: state.finiteQueue, shuffleHistory });
           return;
         }
         // Not continuing: startQueuePlayback() above won't run to hand the
@@ -2632,7 +2655,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       const queue = state.queue.filter((track) => !gone.has(track.id));
       if (!queue.length) {
         engine.unload();
-        set({ queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], shuffleForward: [], activePodcastEpisode: null });
+        set({ finiteQueue: false, queue: [], index: -1, current: null, currentTime: 0, duration: 0, resumeAt: null, stopAfterCurrent: false, shuffleHistory: [], shuffleForward: [], activePodcastEpisode: null });
         schedulePersistPlaybackSession(get(), true);
         return;
       }
@@ -2663,11 +2686,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       // The removed track did not stop early, it stopped existing, so no skip is recorded for it.
       const shufflePick = shuffling && state.isPlaying ? shuffleAfterRemoval(state.mode, queue.length, survivingHistory) : null;
       if (shufflePick) {
-        await startQueuePlayback(get, set, queue, shufflePick.index, 0, { skipRecord: true, shuffleHistory: shufflePick.history });
+        await startQueuePlayback(get, set, queue, shufflePick.index, 0, { finite: state.finiteQueue, skipRecord: true, shuffleHistory: shufflePick.history });
         return;
       }
       if (!shuffling && state.isPlaying && nextCurrent && (!nothingFollows || wraps)) {
-        await startQueuePlayback(get, set, queue, nothingFollows ? 0 : index, 0, { skipRecord: true, shuffleHistory });
+        await startQueuePlayback(get, set, queue, nothingFollows ? 0 : index, 0, { finite: state.finiteQueue, skipRecord: true, shuffleHistory });
         return;
       }
       engine.unload();
@@ -2719,6 +2742,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       playIntents.begin();
       engine.unload();
       set({
+        finiteQueue: false,
         isPlaying: false,
         queue: emptyQueue,
         index: -1,
@@ -2751,6 +2775,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
               queueRevision++;
               set({
                 queue: previous.queue,
+                finiteQueue: previous.finiteQueue,
                 index: previous.index,
                 current: previous.current,
                 currentTime: position,
@@ -2793,7 +2818,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
         const playbackQueue = state.queue.length ? state.queue : state.current ? [state.current] : [];
         // Carry the saved position in the play request itself. A late
         // completion must never seek a newer track after Stop/queue changes.
-        void state.playQueue(playbackQueue, startIndex, resumeAt ?? 0).catch(reportUnpublished);
+        void state.playQueue(playbackQueue, startIndex, resumeAt ?? 0, { finite: state.finiteQueue }).catch(reportUnpublished);
         return;
       }
       engine.togglePlayPause();
@@ -2875,7 +2900,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
       if (!state.isPlaying) schedulePersistPlaybackSession(get(), true);
     },
 
-    setVolume: async (v) => {
+    setVolume: async (v, by = 'other') => {
+      if (by !== 'wheel') wheelInputLog.noteWrite(by, get().volume, v);
       // Real-time path: gain ramp + in-memory store update fire immediately
       // so the UI and the audio output respond on the very next frame.
       engine.setVolume(v);
@@ -2988,8 +3014,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => {
     refillAutoDjQueue: async (force = false) => {
       const state = get();
       const revision = queueRevision;
-      const isCurrent = () => queueRevision === revision && get().autoDjSmartRuleId === state.autoDjSmartRuleId;
-      if (!state.autoDjEnabled || (!state.queue.length && !state.autoDjSmartRuleId)) return [];
+      const isCurrent = () => !get().finiteQueue && queueRevision === revision && get().autoDjSmartRuleId === state.autoDjSmartRuleId;
+      if (state.finiteQueue || !state.autoDjEnabled || (!state.queue.length && !state.autoDjSmartRuleId)) return [];
       if (
         !force &&
         !shouldAutoDjRefill({

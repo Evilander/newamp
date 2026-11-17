@@ -18,8 +18,8 @@
          readPalette runs in the MAIN window, where the theme exists). A local
          read here silently falls back to default green — the 2.0.x "green
          artifact" family. -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self'; object-src 'none'; base-uri 'self'" />
-    <title>NewAmp — Eviland</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: newart:; frame-src 'self'; object-src 'none'; base-uri 'self'" />
+    <title>NewAmp — Projector</title>
     <style>
       html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
       body { cursor: none; font: 13px ui-monospace, Menlo, Consolas, monospace; color: #aaa; }
@@ -29,6 +29,19 @@
          canvas only paints when the iframe can't host butterchurn. */
       canvas#eviland-canvas { position: fixed; inset: 0; display: block; width: 100vw; height: 100vh; }
       iframe#milkdrop-frame { position: fixed; inset: 0; width: 100vw; height: 100vh; border: none; display: block; pointer-events: none; z-index: 1; }
+      @keyframes projector-breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.04); } }
+      @media (prefers-reduced-motion: reduce) { [data-newamp-projector-art] img { animation: none !important; } }
+      .projector-menu-layer { position: fixed; inset: 0; z-index: 40; cursor: default; }
+      .projector-menu { position: absolute; width: min(320px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; box-sizing: border-box; padding: 12px; border: 1px solid #526174; border-radius: 8px; background: #121923; color: #edf2fa; box-shadow: 0 6px 32px #0009; }
+      .projector-menu button, .projector-menu label { display: block; width: 100%; margin: 5px 0; box-sizing: border-box; }
+      .projector-menu button, .projector-menu select, .projector-menu input { background: #202e40; color: #edf2fa; border: 1px solid #526174; border-radius: 4px; padding: 7px; font: inherit; }
+      .projector-menu button { text-align: left; cursor: pointer; }
+      .projector-menu button[aria-pressed="true"] { background: #355472; border-color: #a4d4ff; }
+      .projector-menu select, .projector-menu input { display: block; width: 100%; box-sizing: border-box; }
+      .projector-menu :focus-visible { outline: 2px solid #b7ddff; outline-offset: 1px; }
+      .projector-menu h3 { margin: 14px 0 6px; font-size: 12px; }
+      .projector-menu p { font-size: 11px; line-height: 1.5; color: #bfcbdc; }
+      .projector-menu button:disabled { opacity: 0.5; cursor: default; }
       .eviland-msg {
         position: fixed; inset: 0;
         display: grid; place-items: center;

@@ -15,7 +15,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { build } from 'esbuild';
+import vm from 'node:vm';
+import { build, transform } from 'esbuild';
 
 const read = (path) => readFileSync(resolve(path), 'utf8').replace(/\r\n/g, '\n');
 
@@ -83,6 +84,56 @@ const { defaultMusicScanRoots, isSeededPublicMusicRoot, suggestMusicFolders } = 
     'the migration needs the library open to know it is empty',
   );
 
+  // The seed itself, run: a first run gets the Music folder, and a list the
+  // user emptied by removing folders stays empty.
+  const block = seed.slice(seed.indexOf('  const current = settings.get();'), seed.indexOf('  library = await LibraryStore.open('));
+  const { code } = await transform(block, { loader: 'ts', target: 'es2022' });
+  for (const platform of ['darwin', 'win32']) {
+    const run = (stored) => {
+      let roots = stored.libraryRoots;
+      vm.runInNewContext(code, {
+        smokeMode: false,
+        process: { platform },
+        settings: { get: () => ({ ...stored }), isSuppressed: () => false, set: (patch) => { roots = patch.libraryRoots; } },
+        app: { getPath: () => '/Users/tester/Music' },
+        existsSync: () => true,
+        statSync: () => ({ isDirectory: () => true }),
+        safeListMacVolumesMusic: () => [],
+        defaultMusicScanRoots: () => ['/Users/tester/Music'],
+      });
+      // Built in the vm's realm; compared as plain data.
+      return JSON.parse(JSON.stringify(roots));
+    };
+    assert.deepEqual(run({ libraryRoots: [], libraryRootsChosen: false }), ['/Users/tester/Music'], `${platform}: a first run is seeded`);
+    assert.deepEqual(run({ libraryRoots: [] }), ['/Users/tester/Music'], `${platform}: so is a profile from before the flag`);
+    assert.deepEqual(run({ libraryRoots: [], libraryRootsChosen: true }), [], `${platform}: a list emptied by removing folders stays empty`);
+    assert.deepEqual(run({ libraryRoots: ['/x'], libraryRootsChosen: false }), ['/x'], `${platform}: a configured list is left alone`);
+  }
+
+  // The Public Music migration, run: an old seeded profile starts over, and a
+  // list the user cut down to that folder by removing the others does not.
+  const migration = seed.slice(seed.indexOf('  // Earlier builds seeded a first run'), seed.indexOf('  scanner = createScannerService(library);'));
+  const migrated = await transform(migration, { loader: 'ts', target: 'es2022' });
+  const migrate = (stored) => {
+    let roots = stored.libraryRoots;
+    vm.runInNewContext(migrated.code, {
+      smokeMode: false,
+      settings: { get: () => ({ ...stored, libraryRoots: roots }), isSuppressed: () => false, set: (patch) => { roots = patch.libraryRoots; } },
+      library: { getTrackCount: () => 0 },
+      app: { getPath: () => 'C:/Users/tester/Music' },
+      isSeededPublicMusicRoot: (list, count) => isSeededPublicMusicRoot(list, count, {}),
+      defaultMusicScanRoots: () => ['K:/music'],
+    });
+    return JSON.parse(JSON.stringify(roots));
+  };
+  assert.deepEqual(migrate({ libraryRoots: ['C:/Users/Public/Music'] }), ['K:/music'], 'a profile from before the flag starts over');
+  assert.deepEqual(migrate({ libraryRoots: ['C:/Users/Public/Music'], libraryRootsChosen: false }), ['K:/music'], 'so does one that never removed a folder');
+  assert.deepEqual(
+    migrate({ libraryRoots: ['C:/Users/Public/Music'], libraryRootsChosen: true }),
+    ['C:/Users/Public/Music'],
+    'removing the other folders is not undone at the next launch',
+  );
+
   const pick = main.match(/ipcMain\.handle\('os:pick-folder'[\s\S]*?\n  \}\);\n/)?.[0] ?? '';
   assert.match(pick, /defaultPath: settings\.get\(\)\.libraryRoots\[0\] \?\? app\.getPath\('music'\),/, 'the picker opens on the library or the Music folder');
   assert.doesNotMatch(pick, /K:/, 'no drive letter');
@@ -98,4 +149,4 @@ const { defaultMusicScanRoots, isSeededPublicMusicRoot, suggestMusicFolders } = 
   assert.doesNotMatch(home, /api\.scanLibrary\(\)/, 'Home no longer starts a blind scan');
 }
 
-console.log('PASS first launch roots: no Public Music seed, a seeded profile starts over, Home shows the shared empty screen, no hard-coded drive');
+console.log('PASS first launch roots: no Public Music seed, a seeded profile starts over, a removed last folder is not re-seeded, nor is a list cut down to Public Music, Home shows the shared empty screen, no hard-coded drive');

@@ -326,6 +326,8 @@ const api: NewAmpAPI = {
     ipcRenderer.invoke('podcasts:remove-download', feedUrl, episodeId) as Promise<PodcastEpisode | null>,
   getStats: () => ipcRenderer.invoke('library:get-stats'),
   getLibraryHealth: () => ipcRenderer.invoke('library:get-health') as Promise<LibraryHealth>,
+  previewRemoveLibraryFolder: (folder) => ipcRenderer.invoke('library:remove-folder-preview', folder),
+  removeLibraryFolder: (folder, expectedCount) => ipcRenderer.invoke('library:remove-folder', folder, expectedCount),
   pruneMissingTracks: (targets?: string[]) =>
     ipcRenderer.invoke('library:prune-missing', targets) as Promise<LibraryPruneMissingResult>,
   trashTracks: (ids: number[]) => ipcRenderer.invoke('tracks:trash', ids) as Promise<TrashTracksResult>,

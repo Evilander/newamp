@@ -510,7 +510,7 @@ function SuggestedStationsPanel({
             <button
               key={suggestion.id}
               type="button"
-              className="bevel-in grid grid-cols-[minmax(0,1fr)_auto] gap-2 px-2 py-2 text-left text-[11px]"
+              className="bevel-in display-well grid grid-cols-[minmax(0,1fr)_auto] gap-2 px-2 py-2 text-left text-[11px]"
               onClick={() => onRadio(suggestion)}
               title={suggestion.reason}
             >
@@ -520,14 +520,14 @@ function SuggestedStationsPanel({
                   {suggestion.subtitle} / {suggestion.sampleCount.toLocaleString()} ready
                 </span>
               </span>
-              <span className="self-center font-mono tabular-nums" style={{ color: 'var(--accent)' }}>
+              <span className="self-center font-mono tabular-nums" style={{ color: 'var(--well-accent)' }}>
                 RADIO
               </span>
             </button>
           ))}
         </div>
       ) : (
-        <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
+        <div className="bevel-in display-well px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
           Suggested stations appear after NewAmp sees genre, year, loved, rating, or play-count signals.
         </div>
       )}
@@ -582,11 +582,11 @@ function HealthPanel({
           {compass.moves.slice(0, 2).map((move) => (
             <button
               key={move.label}
-              className="bevel-in min-w-0 px-2 py-1.5 text-left"
+              className="bevel-in display-well min-w-0 px-2 py-1.5 text-left"
               onClick={onOpenLibrary}
               title={move.detail}
             >
-              <span className="block truncate font-bold" style={{ color: 'var(--accent)' }}>
+              <span className="block truncate font-bold" style={{ color: 'var(--well-accent)' }}>
                 {move.label}
               </span>
               <span className="block truncate" style={{ color: 'var(--muted)' }}>
@@ -602,8 +602,8 @@ function HealthPanel({
 
 function Metric({ label, value }: { label: string; value: number }): JSX.Element {
   return (
-    <div className="bevel-in px-2 py-2">
-      <div className="lcd-text text-[18px] leading-none" style={{ color: value ? 'var(--warn)' : 'var(--accent)' }}>
+    <div className="bevel-in display-well px-2 py-2">
+      <div className="lcd-text text-[18px] leading-none" style={{ color: value ? 'var(--well-warn)' : 'var(--well-accent)' }}>
         {value.toLocaleString()}
       </div>
       <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>
@@ -704,7 +704,7 @@ function HomeRail({
       ) : pending ? (
         <ViewSkeleton variant="rows" count={compact ? 3 : 4} />
       ) : (
-        <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
+        <div className="bevel-in display-well px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
           No tracks available yet.
         </div>
       )}
@@ -744,13 +744,13 @@ function PlaylistPanel({
           {playlists.map((playlist) => (
             <button
               key={playlist.id}
-              className="bevel-in grid grid-cols-[36px_minmax(0,1fr)_auto] gap-2 px-2 py-2 text-left text-[11px]"
+              className="bevel-in display-well grid grid-cols-[36px_minmax(0,1fr)_auto] gap-2 px-2 py-2 text-left text-[11px]"
               onClick={() => onPlay(playlist)}
               title={playlist.trackCount ? `Play ${playlist.name}` : `${playlist.name} is empty`}
             >
               <span
                 className="flex h-9 w-9 items-center justify-center overflow-hidden border text-[10px] font-bold"
-                style={{ borderColor: 'var(--line)', background: 'var(--panel-2)', color: 'var(--muted)' }}
+                style={{ borderColor: 'var(--line)', background: 'var(--panel-2)', color: 'var(--panel-muted)' }}
               >
                 {playlist.hasCoverArt ? (
                   <img
@@ -769,7 +769,7 @@ function PlaylistPanel({
                   {playlist.trackCount.toLocaleString()} tracks / {formatDuration(playlist.duration)}
                 </span>
               </span>
-              <span className="self-center font-mono tabular-nums" style={{ color: playlist.trackCount ? 'var(--accent)' : 'var(--muted)' }}>
+              <span className="self-center font-mono tabular-nums" style={{ color: playlist.trackCount ? 'var(--well-accent)' : 'var(--muted)' }}>
                 {playlist.trackCount ? 'PLAY' : 'EMPTY'}
               </span>
             </button>
@@ -777,11 +777,11 @@ function PlaylistPanel({
           {smartRules.map((rule) => (
             <div
               key={rule.id}
-              className="bevel-in grid grid-cols-[36px_minmax(0,1fr)_auto] gap-2 px-2 py-2 text-left text-[11px]"
+              className="bevel-in display-well grid grid-cols-[36px_minmax(0,1fr)_auto] gap-2 px-2 py-2 text-left text-[11px]"
             >
               <span
                 className="flex h-9 w-9 items-center justify-center overflow-hidden border text-[9px] font-bold"
-                style={{ borderColor: 'var(--line)', background: 'var(--panel-2)', color: 'var(--accent)' }}
+                style={{ borderColor: 'var(--line)', background: 'var(--panel-2)', color: 'var(--accent-ink)' }}
               >
                 AUTO
               </span>
@@ -808,7 +808,7 @@ function PlaylistPanel({
           ))}
         </div>
       ) : (
-        <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
+        <div className="bevel-in display-well px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
           Saved mixes, smart rules, and custom playlists appear here.
         </div>
       )}
@@ -1087,7 +1087,7 @@ function RatedHighlightRail({
       ) : pending ? (
         <ViewSkeleton variant="rails" count={5} />
       ) : (
-        <div className="bevel-in px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
+        <div className="bevel-in display-well px-3 py-4 text-[11px]" style={{ color: 'var(--muted)' }}>
           Rate tracks 0–100 and your top picks land here. On the score bar in Now Playing, the arrow keys and the wheel adjust by a tenth.
         </div>
       )}
@@ -1221,8 +1221,8 @@ function ListeningStatsPanel({
         <div className="grid grid-cols-3 gap-2">
           <Metric label="Minutes" value={minutes} />
           <Metric label="Artists" value={distinctArtists.size} />
-          <div className="bevel-in px-2 py-2">
-            <div className="lcd-text truncate text-[18px] leading-none" title={topGenre} style={{ color: 'var(--accent)' }}>
+          <div className="bevel-in display-well px-2 py-2">
+            <div className="lcd-text truncate text-[18px] leading-none" title={topGenre} style={{ color: 'var(--well-accent)' }}>
               {topGenre}
             </div>
             <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.1em]" style={{ color: 'var(--muted)' }}>

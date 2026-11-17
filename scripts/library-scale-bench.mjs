@@ -16,7 +16,13 @@ if (!existsSync(join(repoRoot, 'dist-electron', 'electron', 'library.js'))) {
   process.exit(2);
 }
 
+const { build } = await import('esbuild');
 const { LibraryStore } = await import('../dist-electron/electron/library.js');
+const rules = await build({
+  entryPoints: [join(repoRoot, 'src/components/views/libraryTableState.ts')],
+  bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent',
+});
+const { readThroughTrack } = await import(`data:text/javascript;base64,${Buffer.from(rules.outputFiles[0].text).toString('base64')}`);
 const benchRoot = await createBenchmarkRoot(benchParent);
 const dbPath = join(benchRoot, 'library.db');
 
@@ -63,6 +69,8 @@ try {
   recordMeasure(report, importResult);
   markMemory('after_import');
 
+  // Synthetic listening history makes Recent/Most Played contain the full dataset.
+  library.db.run('UPDATE tracks SET play_count = 1, last_played = 1700000000000 + id');
   await runQueryBenchmarks(library, report, trackCount, pageSize);
   markMemory('after_queries');
 
@@ -89,6 +97,8 @@ try {
     expectedStats === trackCount &&
     report.row_counts.firstPage === Math.min(pageSize, trackCount) &&
     report.row_counts.deepPage > 0 &&
+    report.row_counts.scrollAllPages === trackCount &&
+    report.row_counts.followCappedTrack === Math.min(trackCount, 20000) &&
     report.row_counts.titleSearch > 0 &&
     report.row_counts.reopened_firstPage === Math.min(pageSize, trackCount);
   await writeFile(report.paths.reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
@@ -116,6 +126,56 @@ async function runQueryBenchmarks(library, report, total, pageSize, prefix = '')
   await query(`${prefix}deepPageArtistSort`, report, () => library.getTracks({ sort: 'artist', limit: pageSize, offset: deepOffset }), (rows) => {
     report.row_counts[`${prefix}deepPage`] = rows.length;
   });
+  // Mirror the Library's 600-row start and 2,000-row scroll/follow pages.
+  // Each read yields, so the total traversal time includes those pauses.
+  const morePageSize = 2000;
+  let maxPageMs = 0;
+  const page = (offset, limit) => {
+    const started = performance.now();
+    const rows = library.getTracks({ sort: 'artist', limit, offset });
+    maxPageMs = Math.max(maxPageMs, performance.now() - started);
+    return rows;
+  };
+  const pause = () => new Promise((resolve) => setTimeout(resolve, 20));
+  await query(`${prefix}scrollAllPages`, report, async () => {
+    let offset = 0;
+    while (offset < total) {
+      const rows = page(offset, offset === 0 ? pageSize : morePageSize);
+      offset += rows.length;
+      if (!rows.length) break;
+      await pause();
+    }
+    return offset;
+  }, (count) => { report.row_counts[`${prefix}scrollAllPages`] = count; });
+  report.timings_ms[`${prefix}scrollMaxPage`] = round(maxPageMs);
+  const lastId = library.getTrackIds({ sort: 'artist', offset: Math.min(total, 20000) - 1, limit: 1 })[0];
+  maxPageMs = 0;
+  const beforeFollow = memoryMb().heapUsed;
+  await query(`${prefix}followCappedTrack`, report, () => readThroughTrack({
+    trackId: lastId, offset: Math.min(pageSize, total), total, pageSize: morePageSize,
+    getIds: (offset, limit) => library.getTrackIds({ sort: 'artist', offset, limit }),
+    getPage: page, isCurrent: () => true, pause,
+  }), (result) => {
+    report.row_counts[`${prefix}followCappedTrack`] = result?.offset ?? 0;
+    report.memory_mb[`${prefix}followHeapDelta`] = round(memoryMb().heapUsed - beforeFollow);
+  });
+  report.timings_ms[`${prefix}followMaxPage`] = round(maxPageMs);
+  // recordPlay invalidates the main-process sort cache. Report this cold path
+  // independently from the warm bounded metadata traversal above. This Node
+  // measurement includes serialization, but the renderer probe measures transport.
+  for (const sort of ['artist', 'recent', 'plays']) {
+    library.getTrackIds({ sort, limit: 100000 });
+    library.recordPlay(lastId);
+    await query(`${prefix}afterPlay_${sort}_ids`, report, () => library.getTrackIds({ sort, limit: 100000 }), (ids) => {
+      report.row_counts[`${prefix}afterPlay_${sort}_ids`] = ids.length;
+      const start = performance.now();
+      const wire = JSON.stringify(ids);
+      const received = JSON.parse(wire);
+      report.timings_ms[`${prefix}afterPlay_${sort}_jsonRoundTrip`] = round(performance.now() - start);
+      report.row_counts[`${prefix}afterPlay_${sort}_wireBytes`] = Buffer.byteLength(wire);
+      if (received.length !== total) throw new Error('ID transport lost rows');
+    });
+  }
   await query(`${prefix}titleSearch`, report, () => library.getTracks({ search: 'needle', sort: 'title', limit: pageSize, offset: 0 }), (rows) => {
     report.row_counts[`${prefix}titleSearch`] = rows.length;
   });

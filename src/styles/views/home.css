@@ -282,7 +282,7 @@
   padding: 3px 7px;
   border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
   border-radius: 999px;
-  color: var(--ink-2);
+  color: var(--well-secondary, var(--display-dim));
   background: color-mix(in srgb, var(--display-bg) 72%, transparent);
   font-size: 9px;
   line-height: 1.2;
@@ -330,7 +330,7 @@
   padding: 2px 6px;
   background: rgba(0,0,0,0.72);
   border: 1px solid var(--line);
-  color: var(--ink);
+  color: var(--scrim-ink, var(--ink));
   font-family: var(--font-display);
   font-size: 11px;
   font-weight: 700;
@@ -338,7 +338,7 @@
   letter-spacing: 0.04em;
 }
 .home-rated-card-score.is-strong {
-  color: var(--accent);
+  color: var(--scrim-accent, var(--accent));
   border-color: var(--accent);
   text-shadow: 0 0 6px var(--accent-glow);
 }
@@ -563,7 +563,7 @@
   border-radius: 999px;
   background: color-mix(in srgb, var(--display-bg) 88%, transparent);
   box-shadow: 0 12px 34px rgba(0,0,0,0.44), 0 0 16px var(--accent-glow);
-  color: var(--ink);
+  color: var(--well-ink, var(--display-fg));
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;

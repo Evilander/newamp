@@ -57,55 +57,17 @@ import { handlePlayerWheel } from '../lib/player-wheel';
 import { visualizerEnergy } from './visualizer-energy';
 import { stepLook as stepLookFor } from './look-step';
 
-// Preset registry. `group` drives the labeled sections in the new preset
-// picker popover so users can scan by category instead of one long rail. The
-// five `crazy` entries are the GPU shader modes added in 1.6.2 (the type
-// union + dispatch live in Visualizer.tsx; this file only labels them).
-const PRESETS = [
-  { id: 'eviland-live', label: 'Eviland Live', group: 'milkdrop' },
-  { id: 'butterchurn', label: 'Milkdrop', group: 'milkdrop' },
-  { id: 'eviland', label: 'Eviland', group: 'gpu' },
-  { id: 'kaleido-bloom', label: 'Kaleido Bloom', group: 'crazy' },
-  { id: 'liquid-aurora-storm', label: 'Aurora Storm', group: 'crazy' },
-  { id: 'fractal-pulse', label: 'Fractal Pulse', group: 'crazy' },
-  { id: 'starfield-warp', label: 'Starfield Warp', group: 'crazy' },
-  { id: 'spectral-tunnel', label: 'Spectral Tunnel', group: 'crazy' },
-  { id: 'particle-flow', label: 'Particle Flow', group: 'gpu' },
-  { id: 'tempo-pulse', label: 'Tempo Pulse', group: 'reactive' },
-  { id: 'lattice-strobe', label: 'Lattice Strobe', group: 'reactive' },
-  { id: 'liquid-mercury', label: 'Liquid Mercury', group: 'reactive' },
-  { id: 'neon-waves', label: 'Neon Waves', group: 'reactive' },
-  { id: 'neon-ribbons', label: 'Neon Ribbons', group: 'reactive' },
-  { id: 'plasma-grid', label: 'Plasma Grid', group: 'reactive' },
-  { id: 'prism-bars', label: 'Prism Bars', group: 'reactive' },
-  { id: 'confetti', label: 'Confetti', group: 'reactive' },
-  { id: 'burning-cloud', label: 'Burning Cloud', group: 'reactive' },
-  { id: 'spectrum', label: 'Spectrum', group: 'classic' },
-  { id: 'orbital-rings', label: 'Orbital Rings', group: 'classic' },
-  { id: 'radial', label: 'Radial', group: 'classic' },
-  { id: 'tunnel', label: 'Tunnel', group: 'classic' },
-  { id: 'pulse', label: 'Pulse', group: 'classic' },
-  { id: 'galaxy', label: 'Galaxy', group: 'classic' },
-  { id: 'aurora', label: 'Aurora', group: 'classic' },
-  { id: 'oscilloscope', label: 'Oscilloscope', group: 'classic' },
-  { id: 'album-breathe', label: 'Album Breathe', group: 'art' },
-] as const satisfies ReadonlyArray<{ id: VisualizerPreset; label: string; group: PresetGroup }>;
-
-type PresetGroup = 'milkdrop' | 'crazy' | 'gpu' | 'reactive' | 'classic' | 'art';
-const PRESET_GROUPS: ReadonlyArray<{ id: PresetGroup; label: string }> = [
-  { id: 'milkdrop', label: 'Milkdrop' },
-  { id: 'crazy', label: 'Shaders' },
-  { id: 'gpu', label: 'GPU particles' },
-  { id: 'reactive', label: 'Reactive' },
-  { id: 'classic', label: 'Classic' },
-  { id: 'art', label: 'Album art' },
-];
+import { PRESETS, PRESET_GROUPS } from '../visualizer/modes';
+import { frameBus } from '../visualizer/frame-bus';
+import { readVjDwell, watchVjDwell, setVjDwell, VJ_DWELL_OPTIONS, vjSwitchDue, vjElapsedMs, pickAutoVjPreset, readAutoVj, setAutoVj, VIZ_AUTO_VJ_KEY } from '../lib/vizVj';
+import { VjDwellControl } from './VjDwellControl';
+import { FlashProtectionControl } from './FlashProtectionControl';
+import { flashGuardEnabled, watchFlashGuard } from '../lib/vizPrefs';
 
 type CanvasVisualizerPreset = Exclude<VisualizerPreset, 'album-breathe'>;
 
 const VIZ_SHOW_ART_KEY = 'newamp:viz:showArt';
 const VIZ_CHROME_KEY = 'newamp:viz:chrome';
-const VIZ_AUTO_VJ_KEY = 'newamp:viz:autoVj';
 
 // 'look' gives each Eviland look its own colours; the other visualizers
 // treat it as Theme.
@@ -123,41 +85,6 @@ const REACTIVITY_MODES = [
   { id: 'punch', label: 'Punch' },
   { id: 'wild', label: 'Wild' },
 ] as const satisfies ReadonlyArray<{ id: VizReactivity; label: string }>;
-
-const AUTO_VJ_BALANCED: VisualizerPreset[] = [
-  'eviland',
-  'particle-flow',
-  'kaleido-bloom',
-  'liquid-aurora-storm',
-  'fractal-pulse',
-  'starfield-warp',
-  'spectral-tunnel',
-  'tempo-pulse',
-  'lattice-strobe',
-  'liquid-mercury',
-  'neon-waves',
-  'plasma-grid',
-  'orbital-rings',
-  'neon-ribbons',
-  'burning-cloud',
-  'prism-bars',
-  'radial',
-  'tunnel',
-  'galaxy',
-  'aurora',
-  'confetti',
-  'pulse',
-  'oscilloscope',
-];
-
-const AUTO_VJ_LOW: VisualizerPreset[] = [
-  'spectrum',
-  'oscilloscope',
-  'album-breathe',
-  'prism-bars',
-  'orbital-rings',
-  'pulse',
-];
 
 function loadVisualizerQuality(): VizQuality {
   if (typeof window === 'undefined') return 'auto';
@@ -236,7 +163,21 @@ export function FullscreenVisualizer(): JSX.Element {
   const [palette, setPalette] = useState<VizPalette>(() => loadVisualizerPalette());
   const [perfTier, setPerfTier] = useState<VizPerformance>(() => loadVisualizerPerformance());
   const [reactivity, setReactivity] = useState<VizReactivity>(() => loadVisualizerReactivity());
-  const [autoVjEnabled, setAutoVjEnabled] = useState<boolean>(() => loadStoredBoolean(VIZ_AUTO_VJ_KEY, false));
+  const [autoVjEnabled, setAutoVjEnabled] = useState<boolean>(readAutoVj);
+  useEffect(() => {
+    const sync = (event: StorageEvent): void => {
+      if (event.key === VIZ_AUTO_VJ_KEY || event.key === null) setAutoVjEnabled(readAutoVj());
+      // The Projector's menu sets these too.
+      if (event.key === VIZ_PALETTE_KEY || event.key === null) setPalette(loadVisualizerPalette());
+      if (event.key === VIZ_REACTIVITY_KEY || event.key === null) setReactivity(loadVisualizerReactivity());
+    };
+    window.addEventListener('storage', sync);
+    return () => window.removeEventListener('storage', sync);
+  }, []);
+  const [vjDwell, setDwell] = useState(readVjDwell);
+  const [flashProtection, setFlashProtection] = useState(flashGuardEnabled);
+  useEffect(() => watchVjDwell(setDwell), []);
+  useEffect(() => watchFlashGuard(setFlashProtection), []);
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const fullscreenToggleRef = useRef<Promise<void>>(Promise.resolve());
   // Auto-hide tracking: when the mouse is idle in fullscreen we collapse the
@@ -295,6 +236,8 @@ export function FullscreenVisualizer(): JSX.Element {
   const toProjectorRef = useRef(false);
   // The preset last asked for, and when (see presetStepBase).
   const lastPickRef = useRef<{ id: VisualizerPreset; at: number } | null>(null);
+  // When a look was last stepped, randomized or pasted by hand: Auto-VJ gives it a full dwell.
+  const lastLookAtRef = useRef(0);
   usePopoverFocus(panelRef, openPanel, rootRef);
   useScrollKeepsWheel(panelRef, openPanel);
   useStageFocus(rootRef);
@@ -330,12 +273,20 @@ export function FullscreenVisualizer(): JSX.Element {
     pickPreset(PRESETS[(index + direction + PRESETS.length) % PRESETS.length]!.id);
   }
 
+  // A projector stepping the same Eviland look on its own clock is told too.
+  function lookPickedByHand(): void {
+    lastLookAtRef.current = window.performance.now();
+    if (activePreset === 'eviland' || activePreset === 'eviland-live') frameBus.lookChangedByHand();
+  }
+
   function stepLook(direction: -1 | 1): void {
+    lookPickedByHand();
     const { skipEvilandLook, previousEvilandLook } = usePlayerStore.getState();
     stepLookFor(activePreset, direction, { cyclePreset, skipEvilandLook, previousEvilandLook });
   }
 
   function randomizeLook(): void {
+    lookPickedByHand();
     if (activePreset === 'eviland' || activePreset === 'eviland-live') randomizeEviland();
     else pickPreset(pickRandomPreset(PRESETS.map((p) => p.id), activePreset));
   }
@@ -446,7 +397,7 @@ export function FullscreenVisualizer(): JSX.Element {
   function toggleAutoVj(): void {
     setAutoVjEnabled((value) => {
       const next = !value;
-      window.localStorage.setItem(VIZ_AUTO_VJ_KEY, next ? '1' : '0');
+      setAutoVj(next);
       return next;
     });
   }
@@ -696,25 +647,27 @@ export function FullscreenVisualizer(): JSX.Element {
   const autoVjIsPlayingRef = useLatestRef(isPlaying);
   const autoVjPerfTierRef = useLatestRef(perfTier);
   const autoVjSetPresetRef = useLatestRef(pickPreset);
+  const autoVjDwellRef = useLatestRef(vjDwell);
   useEffect(() => {
     if (!autoVjEnabled) return undefined;
     const freq = new Uint8Array(new ArrayBuffer(engine.frequencyBinCount));
     let cancelTick = () => {};
     let lastSwitchAt = window.performance.now();
 
-    // Decides every 14-30 s; checking four times a second is plenty, and
+    // Checks the saved dwell time four times a second, and
     // doesn't keep a loop waking on every vsync.
     const tick = (now: number) => {
       if (autoVjIsPlayingRef.current) {
         engine.getFreqData(freq);
         const energy = visualizerEnergy(freq, engine.getSampleRate(), engine.fftSize);
-        const elapsed = now - lastSwitchAt;
-        if (elapsed > 14000 && (energy > 0.42 || elapsed > 30000)) {
+        const elapsed = vjElapsedMs(now, Math.max(lastSwitchAt, lastLookAtRef.current), lastPickRef.current?.at);
+        if (vjSwitchDue(elapsed, energy, autoVjDwellRef.current)) {
           const currentPreset = autoVjActivePresetRef.current;
           if (currentPreset === 'eviland' || currentPreset === 'eviland-live') {
             // The Eviland modes have their own looks to move through; leaving
             // for a generic mode would end the very mode Auto-VJ was turned on in.
-            usePlayerStore.getState().skipEvilandLook();
+            // A projector on an Eviland mode steps the same look on its own clock.
+            if (!frameBus.detachedStepsLooks()) usePlayerStore.getState().skipEvilandLook();
             lastSwitchAt = now;
           } else {
             const nextPreset = pickAutoVjPreset(currentPreset, energy, autoVjPerfTierRef.current);
@@ -1023,6 +976,7 @@ export function FullscreenVisualizer(): JSX.Element {
     if (!value) return;
     const ok = applyEvilandCode(value);
     if (ok) {
+      lookPickedByHand();
       setEvilandPasteValue('');
       setEvilandPasteError(null);
     } else {
@@ -1298,6 +1252,14 @@ export function FullscreenVisualizer(): JSX.Element {
       { type: 'separator' },
       { type: 'submenu', id: 'mode', label: 'Mode', entries: modes },
       { type: 'item', id: 'browse', label: 'Browse all modes…', onSelect: () => setOpenPanel('preset') },
+      {
+        type: 'submenu', id: 'vj-dwell', label: 'Auto-VJ duration',
+        entries: VJ_DWELL_OPTIONS.map((option) => ({
+          type: 'item', id: `dwell:${option.seconds}`, label: option.label,
+          radio: true, checked: vjDwell === option.seconds, onSelect: () => setVjDwell(option.seconds),
+        })),
+      },
+      { type: 'item', id: 'flash-protection', label: 'Flash protection…', hint: flashProtection ? 'On' : 'Off', onSelect: () => setOpenPanel('settings') },
       { type: 'item', id: 'settings', label: 'Settings…', onSelect: () => setOpenPanel('settings') },
       { type: 'separator' },
       { type: 'item', id: 'exit', label: 'Exit visualizer', hint: 'Esc', onSelect: exitVisualizer },
@@ -1538,10 +1500,7 @@ export function FullscreenVisualizer(): JSX.Element {
                       key={p.id}
                       type="button"
                       className={`pxbtn viz-preset-cell ${activePreset === p.id ? 'is-active' : ''}`}
-                      onClick={() => {
-                        pickPreset(p.id);
-                        setOpenPanel(null);
-                      }}
+                      onClick={() => pickPreset(p.id)}
                       title={p.label}
                       aria-label={p.label}
                       aria-pressed={activePreset === p.id}
@@ -1654,7 +1613,7 @@ export function FullscreenVisualizer(): JSX.Element {
                 <button
                   type="button"
                   className="pxbtn"
-                  onClick={() => randomizeEviland()}
+                  onClick={randomizeLook}
                   title="Randomize Eviland (new seed)"
                   aria-label="Randomize Eviland look"
                   data-newamp-viz-eviland-randomize
@@ -1800,6 +1759,15 @@ export function FullscreenVisualizer(): JSX.Element {
             >
               {autoVjEnabled ? 'On' : 'Off'}
             </button>
+          </div>
+
+          <div className="viz-setting-row" style={{ gridTemplateColumns: 'minmax(0, 1fr)' }}>
+            <div className="viz-setting-label">Auto-VJ duration</div>
+            <VjDwellControl />
+          </div>
+          <div className="viz-setting-row" style={{ gridTemplateColumns: 'minmax(0, 1fr)' }}>
+            <div className="viz-setting-label">Flash protection</div>
+            <FlashProtectionControl />
           </div>
 
           <div className="viz-setting-row">
@@ -2058,7 +2026,7 @@ export function FullscreenVisualizer(): JSX.Element {
         data-newamp-viz-hover-meter
         // Double-click anywhere on the meter: back to 100%, like every other
         // volume control.
-        onDoubleClick={() => void setVolume(1)}
+        onDoubleClick={() => void setVolume(1, 'viz')}
       >
         <div className="fullscreen-viz-hover-meter-label">
           <span>VOL</span>
@@ -2083,7 +2051,7 @@ export function FullscreenVisualizer(): JSX.Element {
             value={Math.round(volume * 100)}
             onChange={(event) => {
               const raw = Number(event.target.value);
-              if (Number.isFinite(raw)) void setVolume(Math.max(0, Math.min(2, raw / 100)));
+              if (Number.isFinite(raw)) void setVolume(Math.max(0, Math.min(2, raw / 100)), 'viz');
             }}
             aria-label="Visualizer volume"
             title={`Volume ${volumeLabel(volume)} — drag or scroll to change, double-click for 100%`}
@@ -2204,15 +2172,4 @@ async function stampCaptureWordmark(dataUrl: string): Promise<string> {
   } catch {
     return dataUrl;
   }
-}
-
-function pickAutoVjPreset(current: VisualizerPreset, energy: number, perfTier: VizPerformance): VisualizerPreset {
-  const pool = perfTier === 'low' ? AUTO_VJ_LOW : AUTO_VJ_BALANCED;
-  const currentIndex = Math.max(0, pool.indexOf(current));
-  if (energy < 0.12) return 'album-breathe';
-  if (energy > 0.68 && perfTier !== 'low') {
-    const highEnergy = ['plasma-grid', 'neon-ribbons', 'burning-cloud', 'confetti'] as const;
-    return highEnergy[(currentIndex + 1) % highEnergy.length]!;
-  }
-  return pool[(currentIndex + 1) % pool.length]!;
 }

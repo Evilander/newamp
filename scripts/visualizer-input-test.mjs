@@ -440,7 +440,7 @@ assert.doesNotMatch(viz, /\}, \[activeIndex, openPanel\]\)/, 'the key effect no 
 assert.match(viz, /event\.repeat && !isRepeatableVisualizerAction\(action\)/, 'held keys do not repeat');
 assert.match(viz, /loadStoredBoolean\(VIZ_SHOW_ART_KEY, false\)/, 'the album cover overlay is off until someone turns it on');
 assert.match(viz, /onDoubleClick=\{\(e\) => \{\s*if \(isStageTarget\(e\.target\)\) toggleNativeFullscreen\(\);/, 'only the stage double-click flips fullscreen');
-assert.match(viz, /data-newamp-viz-hover-meter[\s\S]{0,260}onDoubleClick=\{\(\) => void setVolume\(1\)\}/, 'double-click on the hover meter sets 100%');
+assert.match(viz, /data-newamp-viz-hover-meter[\s\S]{0,260}onDoubleClick=\{\(\) => void setVolume\(1, 'viz'\)\}/, 'double-click on the hover meter sets 100%');
 assert.match(viz, /double-click for 100%/, 'and its tooltip says so');
 assert.match(viz, /onContextMenu=\{\(e\) => \{[\s\S]{0,300}setMenu\(\{ x: e\.clientX, y: e\.clientY \}\)/, 'right-click opens the menu at the pointer');
 assert.match(viz, /<VisualizerMenu[\s\S]{0,200}at=\{menu\}/);
@@ -471,7 +471,7 @@ assert.match(viz, /data-newamp-viz-now/, 'the now-playing block is marked as con
 assert.match(viz, /data-newamp-viz-projector-row/, 'the projector has a row of its own');
 assert.match(viz, /\{detached\.available && \(\s*<div className="viz-setting-row" data-newamp-viz-projector-row>/, 'shown in every mode, not only Eviland');
 assert.doesNotMatch(viz, /Eviland \(engine\)|Crazy GPU shaders/, 'the awkward mode labels are gone');
-assert.match(viz, /label: 'Shaders'/);
+assert.match(await read('src/visualizer/modes.ts'), /label: 'Shaders'/);
 assert.match(viz, /activePreset === 'butterchurn' \? \(/, 'plain MilkDrop does not get a Reactivity label it cannot honour');
 assert.equal((viz.match(/<kbd>Esc<\/kbd>/g) ?? []).length, 1, 'the help list has one Esc row');
 assert.match(viz, /<kbd>Shift<\/kbd> <kbd>L<\/kbd>/, 'Lite is documented on Shift+L');

@@ -25,6 +25,7 @@ import { generate as generateEvilandConfig, decode as decodeEvilandConfig } from
 import { applyWaveformOverride, cloneConfig, stripTransitionMeta, type OperatorConfig, type WaveOverride } from './eviland-operators';
 import type { EvilandPalette } from './eviland';
 import { frameBus } from './frame-bus';
+import { visualizerEnergy } from '../components/visualizer-energy';
 import { createMemoryBridge, sceneSeedForTrack, type MemoryBridge } from './eviland-memory-bridge';
 import { createEngineScoreFeed, type ScoreFeed } from './eviland-score-feed';
 import { watchArtPalette, type ArtPalette } from './art-palette';
@@ -203,6 +204,7 @@ export function startEvilandProducer(
   let onsetFreq: Uint8Array<ArrayBuffer> | null = null;
   let leftFreq: Uint8Array<ArrayBuffer> | null = null;
   let rightFreq: Uint8Array<ArrayBuffer> | null = null;
+  let displayWave: Uint8Array<ArrayBuffer> | null = null;
   let rawWave: Uint8Array<ArrayBuffer> | null = null;
   const waveSamples = new Uint8Array(new ArrayBuffer(BUTTERCHURN_FFT_SIZE));
 
@@ -216,6 +218,7 @@ export function startEvilandProducer(
     }
     if (!rawWave || rawWave.length !== engine.fftSize) {
       rawWave = new Uint8Array(new ArrayBuffer(engine.fftSize));
+      displayWave = new Uint8Array(new ArrayBuffer(engine.fftSize));
     }
   }
 
@@ -326,6 +329,8 @@ export function startEvilandProducer(
       tuning = readEvilandTuning();
     }
     fillWaveSamples();
+    const needsAnalysis = frameBus.needsDetachedAnalysis();
+    if (needsAnalysis) engine.getTimeData(displayWave!);
     frameBus.publish(
       tuneEvilandFrame(frame, tuning.reactivity),
       resolveEvilandPalette(tuning.palette, palette, now / 1000, frame.score?.keyShift, config.palette, sleeveFor(config, artPalette, sleeve), frame.score?.minor, frame.score?.keyConfidence),
@@ -333,6 +338,11 @@ export function startEvilandProducer(
       config,
       {
         wave: waveSamples,
+        themePalette: palette,
+        analysis: needsAnalysis ? { frequency: freq!, onsetFrequency: onsetFreq!, waveform: displayWave!, sampleRate: engine.getSampleRate(), fftSize: engine.fftSize } : undefined,
+        vjEnergy: visualizerEnergy(freq!, engine.getSampleRate(), engine.fftSize),
+        artUrl: ui.trackId != null ? api.getArtUrl(ui.trackId) : null,
+        director: ui.director,
         waveMode: ui.waveMode,
         grade: liveGradeFor(tuning.palette),
         // The rate of the samples in `wave`, which the projector's MilkDrop

@@ -468,6 +468,7 @@ for (const [name, body] of [
 // Paths on the command line replace the default list.
 const FILES = process.argv.length > 2 ? process.argv.slice(2) : [
   'src/components/Visualizer.tsx',
+  'src/visualizer/canvas-renderer.ts',
   'src/components/WrappedLiveExport.tsx',
   'src/lib/pacedFrame.ts',
   'src/visualizer/eviland-producer.ts',

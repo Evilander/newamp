@@ -757,6 +757,7 @@ export interface DiscoverSurfaceInput {
   lowEndMode?: boolean | null;
   now?: number | null;
   seedTrackId?: number | null;
+  previousTrackIds?: number[] | null;
 }
 
 export interface DiscoverInsightSummary {
@@ -977,6 +978,7 @@ export interface PlaybackResumeMusicServerQueueEntry {
 export type PlaybackResumeQueueEntry = PlaybackResumeLocalQueueEntry | PlaybackResumeMusicServerQueueEntry;
 
 export interface PlaybackResumeState {
+  finiteQueue?: boolean;
   queueTrackIds: number[];
   queue?: PlaybackResumeQueueEntry[];
   // -1 means the queue was loaded but nothing was current (a playlist opened
@@ -1133,6 +1135,8 @@ export interface DeskWidgetSnapshot {
 
 export interface AppSettings {
   libraryRoots: string[];
+  /** Set once a folder is removed: an empty list is then the user's, not a first run's. */
+  libraryRootsChosen: boolean;
   libraryAutoWatch: boolean;
   theme: Theme;
   customSkin: CustomSkin | null;
@@ -1668,6 +1672,8 @@ export interface NewAmpAPI {
   removePodcastEpisodeDownload: (feedUrl: string, episodeId: string) => Promise<PodcastEpisode | null>;
   getStats: () => Promise<{ tracks: number; albums: number; artists: number; duration: number }>;
   getLibraryHealth: () => Promise<LibraryHealth>;
+  previewRemoveLibraryFolder: (folder: string) => Promise<number>;
+  removeLibraryFolder: (folder: string, expectedCount: number) => Promise<AppSettings>;
   pruneMissingTracks: (targets?: string[]) => Promise<LibraryPruneMissingResult>;
   previewPruneMissingTracks: (targets?: string[]) => Promise<LibraryPruneMissingPreview>;
   /** Asks first, moves the files to the Recycle Bin / Trash, then removes their library rows. */

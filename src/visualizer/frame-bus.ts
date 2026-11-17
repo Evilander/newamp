@@ -38,12 +38,26 @@ export type EvilandFrameListener = (
   dtMs: number,
 ) => void;
 
+export type DetachedLookCommand = 'next-look' | 'previous-look' | 'randomize' | 'toggle-director';
+export interface DetachedAnalysis {
+  frequency: Uint8Array;
+  onsetFrequency: Uint8Array;
+  waveform: Uint8Array;
+  sampleRate: number;
+  fftSize: number;
+}
+
 export interface DetachedFramePayload {
   /** performance.now() at send time. Echoed back as the ack id. */
   t: number;
   frame: EvilandFrame;
   palette: EvilandPalette;
   dtMs: number;
+  themePalette?: EvilandPalette;
+  analysis?: DetachedAnalysis;
+  vjEnergy?: number;
+  artUrl?: string | null;
+  director?: boolean;
   /**
    * Operator config the consumer should render with. Carries the headless
    * producer's Director/manual look across to the detached window so the
@@ -122,6 +136,11 @@ export interface FrameBus {
     dtMs: number,
     operator?: OperatorConfig,
     extras?: {
+      themePalette?: EvilandPalette;
+      analysis?: DetachedAnalysis;
+      vjEnergy?: number;
+      artUrl?: string | null;
+      director?: boolean;
       wave?: Uint8Array;
       waveMode?: WaveOverride;
       grade?: number;
@@ -132,6 +151,12 @@ export interface FrameBus {
     },
   ): void;
   hasDetachedConsumer(): boolean;
+  needsDetachedAnalysis(): boolean;
+  /** The projector is running Auto-VJ on an Eviland mode, which steps the shared look. */
+  detachedStepsLooks(): boolean;
+  /** A look was changed by hand here; a projector stepping the same look gives it a full dwell. */
+  lookChangedByHand(): void;
+  onDetachedCommand(cb: (command: DetachedLookCommand) => void): () => void;
   onConsumerChange(cb: (hasDetached: boolean) => void): () => void;
   attachDetachedPort(port: MessagePort): void;
   detachPort(): void;
@@ -145,6 +170,8 @@ interface BusState {
   port: MessagePort | null;
   quality: 'high' | 'medium' | 'low' | null;
   qualityDirty: boolean;
+  analysisRequested: boolean;
+  stepsLooks: boolean;
   seq: number;
 }
 
@@ -154,8 +181,12 @@ const state: BusState = {
   port: null,
   quality: null,
   qualityDirty: false,
+  analysisRequested: false,
+  stepsLooks: false,
   seq: 0,
 };
+
+const commandListeners = new Set<(command: DetachedLookCommand) => void>();
 
 const debug = { publishCalls: 0, postErrors: 0, detaches: 0, acks: 0 };
 
@@ -209,6 +240,11 @@ export const frameBus: FrameBus = {
       dtMs,
     };
     if (operator) payload.operator = operator;
+    if (extras?.themePalette) payload.themePalette = extras.themePalette;
+    if (extras?.analysis && state.analysisRequested) payload.analysis = extras.analysis;
+    if (extras?.vjEnergy !== undefined) payload.vjEnergy = extras.vjEnergy;
+    if (extras?.artUrl !== undefined) payload.artUrl = extras.artUrl;
+    if (extras?.director !== undefined) payload.director = extras.director;
     if (extras?.waveMode) payload.waveMode = extras.waveMode;
     if (extras?.grade !== undefined) payload.grade = extras.grade;
     if (extras?.wave) payload.wave = extras.wave; // structured-clone copies it
@@ -237,6 +273,23 @@ export const frameBus: FrameBus = {
     return state.port !== null;
   },
 
+  needsDetachedAnalysis() {
+    return state.port !== null && state.analysisRequested;
+  },
+
+  detachedStepsLooks() {
+    return state.port !== null && state.stepsLooks;
+  },
+
+  lookChangedByHand() {
+    try { state.port?.postMessage({ type: 'look-changed' }); } catch { /* the next publish detaches a closed port */ }
+  },
+
+  onDetachedCommand(cb) {
+    commandListeners.add(cb);
+    return () => { commandListeners.delete(cb); };
+  },
+
   onConsumerChange(cb) {
     state.consumerChange.add(cb);
     return () => {
@@ -254,12 +307,21 @@ export const frameBus: FrameBus = {
       }
     }
     state.port = port;
+    state.analysisRequested = false;
+    state.stepsLooks = false;
     // On reattach, the consumer needs the current quality on the first frame
     // (its prior renderer was torn down with the window).
     state.qualityDirty = state.quality !== null;
 
     port.onmessage = (msg: MessageEvent) => {
-      const data = msg.data as DetachedAckPayload | undefined;
+      const data = msg.data as (DetachedAckPayload | { type: 'look-command'; command: DetachedLookCommand } | { type: 'analysis-demand' | 'auto-vj-looks'; enabled: boolean }) | undefined;
+      if (data?.type === 'analysis-demand' && typeof data.enabled === 'boolean') state.analysisRequested = data.enabled;
+      if (data?.type === 'auto-vj-looks') state.stepsLooks = data.enabled === true;
+      if (data?.type === 'look-command' && ['next-look', 'previous-look', 'randomize', 'toggle-director'].includes(data.command)) {
+        for (const listener of commandListeners) {
+          try { listener(data.command); } catch (err) { console.error('[frame-bus] look-command listener threw', err); }
+        }
+      }
       if (data && data.type === 'ack') {
         debug.acks += 1; // diagnostics only — nothing gates on acks
       }
@@ -281,6 +343,7 @@ export const frameBus: FrameBus = {
     if (!port) return;
     debug.detaches += 1;
     state.port = null;
+    state.analysisRequested = false;
     try {
       port.onmessage = null;
       port.onmessageerror = null;

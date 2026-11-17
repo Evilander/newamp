@@ -50,12 +50,18 @@ const { renderToStaticMarkup } = require('react-dom/server');
   assert.equal(scoreValueText(30), '30.0 out of 100, okay');
   assert.equal(scoreValueText(null), 'Unrated');
 
-  // The number and the label are text on a panel; the bar keeps the plain tone.
+  // The tier label sits on a panel; the numeric input keeps its display well.
   assert.deepEqual(
     [scoreTier(90).color, scoreTier(90).text, scoreTier(40).text, scoreTier(10).text],
     ['var(--accent)', 'var(--accent-text)', 'var(--warn-text)', 'var(--error-text)'],
   );
+  // The number takes its tier's tone too, remapped to the display's own tones.
   assert.match(rated, /class="score-rating-input"[^>]*style="color:var\(--accent-text\)"/);
+  assert.match(render(10), /class="score-rating-input"[^>]*style="color:var\(--error-text\)"/);
+  const ratingInput = /\.score-rating-input\s*\{([^}]*)\}/.exec(read('src/styles/components/rating.css'))[1];
+  for (const [role, well] of [['--accent-text', '--well-accent'], ['--warn-text', '--well-warn'], ['--error-text', '--well-error'], ['--ink', '--well-ink'], ['--ink-2', '--well-secondary'], ['--muted', '--well-dim']]) {
+    assert.match(ratingInput, new RegExp(`${role}: var\\(${well},`), `the score field reads ${role} as ${well}`);
+  }
   assert.match(rated, /class="score-rating-fill"[^>]*linear-gradient\(to right, var\(--accent-dim\), var\(--accent\)\)/);
 
   // Every tier's text colour reads on the panels it sits on, in every built-in

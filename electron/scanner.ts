@@ -424,6 +424,7 @@ export class Scanner {
   private cancelled = false;
   private running = false;
   private scanQueue: Promise<void> = Promise.resolve();
+  private pending = 0;
   private cancelGeneration = 0;
   private backfillRun: Promise<void> | null = null;
   private backfillControl: TagBackfillControl = { cancelled: false };
@@ -480,13 +481,29 @@ export class Scanner {
     return run;
   }
 
+  /** A scan is running or waiting its turn. */
+  get busy(): boolean {
+    return this.running || this.pending > 0;
+  }
+
   async start(roots: string[], options: ScannerStartOptions = {}): Promise<void> {
     const generation = this.cancelGeneration;
+    this.pending += 1;
     const run = this.scanQueue.then(async () => {
-      if (generation !== this.cancelGeneration) return;
-      await this.runNow(roots, options);
+      try {
+        if (generation !== this.cancelGeneration) return;
+        await this.runNow(roots, options);
+      } finally {
+        this.pending -= 1;
+      }
     });
     this.scanQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  async whenIdle<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.scanQueue.then(work);
+    this.scanQueue = run.then(() => undefined, () => undefined);
     return run;
   }
 
@@ -637,6 +654,10 @@ export class Scanner {
             return fallbackTrack(f.full, f.size, f.mtime, f.dev);
           }
         });
+        if (this.cancelled) {
+          reportCancelled(scanned);
+          return;
+        }
         const incoming = read.filter((track): track is IncomingTrack => track !== null);
         parsed += incoming.length;
         this.library.upsertTracks(incoming);

@@ -9,6 +9,7 @@ export type TrackColumnKey =
   | 'select'
   | 'queue'
   | 'playlist'
+  | 'position'
   | 'number'
   | 'title'
   | 'artist'
@@ -26,6 +27,7 @@ export const TRACK_COLUMN_ORDER_DEFAULT: readonly TrackColumnKey[] = [
   'play',
   'queue',
   'playlist',
+  'position',
   'number',
   'title',
   'artist',
@@ -47,6 +49,7 @@ export const TRACK_COLUMN_LABELS: Record<TrackColumnKey, string> = {
   play: 'Play',
   queue: 'Queue',
   playlist: 'Playlist',
+  position: 'Position',
   number: '#',
   title: 'Title',
   artist: 'Artist',
@@ -61,13 +64,19 @@ export const TRACK_COLUMN_LABELS: Record<TrackColumnKey, string> = {
 };
 
 /**
- * Hidden on a fresh install. All fifteen columns need about 1,250 px even at
+ * Hidden on a fresh install. The original fifteen columns need about 1,250 px even at
  * the narrow default widths below, more than the table has in the default
  * window, so the last ones (Time to Love) sat off-screen. Playlist repeats the
  * right-click menu; Mix and Tag are per-track housekeeping. The Columns button
- * brings any of them back.
+ * brings any of them back. Position in the whole list is optional as well.
  */
-export const TRACK_COLUMNS_HIDDEN_DEFAULT: readonly TrackColumnKey[] = ['playlist', 'mix', 'tag'];
+export const TRACK_COLUMNS_HIDDEN_DEFAULT: readonly TrackColumnKey[] = ['playlist', 'mix', 'tag', 'position'];
+
+/**
+ * Optional columns added after layouts were first saved. A saved layout whose
+ * order does not mention one predates it, so it stays hidden for that user.
+ */
+const TRACK_COLUMNS_ADDED_LATER: readonly TrackColumnKey[] = ['position'];
 
 const STORAGE_KEY = 'newamp:track-table:columns';
 
@@ -93,18 +102,24 @@ export function normalizeLayout(input: unknown): TrackColumnLayout {
       seen.add(key as TrackColumnKey);
     }
   }
-  for (const key of TRACK_COLUMN_ORDER_DEFAULT) {
-    if (!seen.has(key)) {
-      order.push(key);
-      seen.add(key);
-    }
-  }
+  TRACK_COLUMN_ORDER_DEFAULT.forEach((key, index) => {
+    if (seen.has(key)) return;
+    // A column added since the layout was saved goes where a fresh install has
+    // it, ahead of the column that follows it there (Position before #).
+    const before = TRACK_COLUMN_ORDER_DEFAULT[index + 1];
+    if (TRACK_COLUMNS_ADDED_LATER.includes(key) && before && seen.has(before)) order.splice(order.indexOf(before), 0, key);
+    else order.push(key);
+    seen.add(key);
+  });
   const hidden: TrackColumnKey[] = [];
   // A saved layout keeps exactly what the user hid, even if that is nothing.
   for (const key of Array.isArray(raw.hidden) ? raw.hidden : saved ? [] : TRACK_COLUMNS_HIDDEN_DEFAULT) {
     if (typeof key === 'string' && known.has(key) && !isFixed(key as TrackColumnKey) && !hidden.includes(key as TrackColumnKey)) {
       hidden.push(key as TrackColumnKey);
     }
+  }
+  for (const key of TRACK_COLUMNS_ADDED_LATER) {
+    if (saved && (!Array.isArray(raw.order) || !raw.order.includes(key)) && !hidden.includes(key)) hidden.push(key);
   }
   return { order, hidden };
 }
@@ -164,7 +179,7 @@ export const useTrackColumns = create<TrackColumnsState>((set, get) => ({
 
 // ── column widths ───────────────────────────────────────────────────────────
 // Defaults are sized so the columns a fresh install shows (everything but
-// Playlist, Mix and Tag) add up to about 1,010 px: Time and Love are on-screen
+// Playlist, Mix, Tag and Position) add up to about 1,010 px: Time and Love are on-screen
 // in the default 1280 px window, and wider windows stretch the table to fit.
 // In a narrower pane the columns nobody has resized give up width, down to
 // their minimums (fitTrackColumnWidths), before the table scrolls sideways.
@@ -174,6 +189,7 @@ export const TRACK_COLUMN_WIDTH_DEFAULTS: Record<TrackColumnKey, number> = {
   select: 34,
   queue: 70,
   playlist: 132,
+  position: 76,
   number: 44,
   title: 240,
   artist: 140,
@@ -192,6 +208,7 @@ export const TRACK_COLUMN_WIDTH_MINS: Record<TrackColumnKey, number> = {
   select: 28,
   queue: 58,
   playlist: 112,
+  position: 64,
   number: 36,
   title: 160,
   artist: 120,
@@ -214,7 +231,7 @@ export const TRACK_COLUMN_WIDTH_MAX = 680;
  * the old, wider layout. Records written since carry a version and are read as
  * they are, so a width someone sets to one of these values stays.
  */
-const TRACK_COLUMN_WIDTH_DEFAULTS_PREVIOUS: Record<TrackColumnKey, number> = {
+const TRACK_COLUMN_WIDTH_DEFAULTS_PREVIOUS: Partial<Record<TrackColumnKey, number>> = {
   play: 34,
   select: 34,
   queue: 74,

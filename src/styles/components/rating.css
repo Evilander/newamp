@@ -2,6 +2,9 @@
 .score-rating-shell {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
+  max-width: 100%;
+  min-width: 0;
   gap: 8px;
   padding: 4px 8px;
   border: 1px solid var(--line);
@@ -16,7 +19,7 @@
 }
 .score-rating {
   display: inline-grid;
-  grid-template-columns: minmax(88px, auto) minmax(180px, 280px) auto;
+  grid-template-columns: auto minmax(180px, 280px) auto;
   align-items: center;
   gap: 10px;
 }
@@ -35,7 +38,15 @@
   line-height: 1;
 }
 .score-rating-input {
-  width: 74px;
+  /* The tier colours as they read on the display surface. */
+  --ink: var(--well-ink, var(--display-fg));
+  --ink-2: var(--well-secondary, var(--display-dim));
+  --muted: var(--well-dim, var(--display-dim));
+  --accent-text: var(--well-accent, var(--display-fg));
+  --warn-text: var(--well-warn, var(--display-fg));
+  --error-text: var(--well-error, var(--display-fg));
+  width: calc(5ch + 10px);
+  flex-shrink: 0;
   font-size: 22px;
   font-weight: 800;
   letter-spacing: 0;
@@ -48,14 +59,14 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+.score-rating-input::placeholder {
+  color: var(--display-placeholder, var(--display-dim));
+  opacity: 1;
+}
 .score-rating-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent), 0 0 10px var(--accent-glow);
   outline: none;
-}
-.score-rating-input::-webkit-outer-spin-button,
-.score-rating-input::-webkit-inner-spin-button {
-  margin: 0;
 }
 .score-rating-divider {
   font-size: 10px;
@@ -107,6 +118,7 @@
 }
 .score-rating-meta {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   font-size: 9px;
@@ -120,6 +132,23 @@
   font-family: var(--font-display);
   letter-spacing: 0.1em;
   color: var(--ink-2);
+  white-space: nowrap;
+  cursor: default;
+}
+.score-rating-stars button {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  letter-spacing: 0;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.score-rating-stars button:focus-visible {
+  color: var(--accent-text);
+  outline: 1px solid var(--accent);
 }
 .score-rating-clear {
   border: 1px solid var(--line);
@@ -135,3 +164,20 @@
   cursor: not-allowed;
 }
 
+
+[data-newamp-album-rating] {
+  flex-basis: 420px;
+  container-type: inline-size;
+}
+[data-newamp-album-rating] .score-rating {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) minmax(0, auto);
+}
+@container (max-width: 480px) {
+  [data-newamp-album-rating] .score-rating {
+    grid-template-columns: auto minmax(80px, 1fr);
+  }
+  [data-newamp-album-rating] .score-rating-meta {
+    grid-column: 1 / -1;
+  }
+}

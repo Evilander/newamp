@@ -46,17 +46,35 @@ const columns = await load();
 {
   const { normalizeLayout, TRACK_COLUMN_ORDER_DEFAULT, TRACK_COLUMNS_FIXED } = columns;
   const fresh = normalizeLayout(null);
-  assert.deepEqual(fresh.hidden, ['playlist', 'mix', 'tag'], 'a fresh install hides Playlist, Mix and Tag');
+  assert.deepEqual(fresh.hidden, ['playlist', 'mix', 'tag', 'position'], 'a fresh install hides Playlist, Mix and Tag');
   assert.deepEqual([...fresh.order].sort(), [...TRACK_COLUMN_ORDER_DEFAULT].sort(), 'every column is still in the order');
   assert.deepEqual(fresh.order.slice(0, TRACK_COLUMNS_FIXED.length), [...TRACK_COLUMNS_FIXED], 'the fixed columns come first');
-  assert.deepEqual(columns.useTrackColumns.getState().hidden, ['playlist', 'mix', 'tag'], 'the store starts from the same defaults');
+  assert.deepEqual(columns.useTrackColumns.getState().hidden, ['playlist', 'mix', 'tag', 'position'], 'the store starts from the same defaults');
+
+  assert.equal(columns.TRACK_COLUMN_LABELS.position, 'Position');
+  const oldLayout = normalizeLayout({ order: ['select', 'play', 'number', 'title'], hidden: [] });
+  assert.deepEqual(oldLayout.hidden, ['position'], 'a column added since the layout was saved is hidden; the others keep the saved choice');
+  columns.useTrackColumns.getState().setHidden('position', false);
+  assert.ok(!columns.useTrackColumns.getState().hidden.includes('position'), 'the menu can enable Position');
+  columns.useTrackColumns.getState().moveTo('position', 2);
+  assert.equal(columns.useTrackColumns.getState().order[2], 'position', 'and move it before the album track number');
+  columns.useTrackColumns.getState().reset();
+  // What 2.10.0 saved: every column it knew, in the user's order, Mix and Tag shown.
+  const before = TRACK_COLUMN_ORDER_DEFAULT.filter((key) => key !== 'position');
+  const savedOrder = [...before.filter((key) => key !== 'year'), 'year'];
+  const upgraded = normalizeLayout({ order: savedOrder, hidden: ['playlist', 'love'] });
+  assert.deepEqual(upgraded.order.filter((key) => key !== 'position'), savedOrder, 'the saved order is kept');
+  assert.equal(upgraded.order[upgraded.order.indexOf('number') - 1], 'position', 'Position goes next to #, where a fresh install has it');
+  assert.deepEqual(upgraded.hidden, ['playlist', 'love', 'position'], 'and only Position is added to what was hidden');
+  assert.equal(normalizeLayout({ order: [], hidden: [] }).order.indexOf('position') + 1, normalizeLayout({ order: [], hidden: [] }).order.indexOf('number'));
 
   // A layout someone saved is theirs: nothing is hidden for them that they did not hide.
-  assert.deepEqual(normalizeLayout({ order: [], hidden: [] }).hidden, [], 'a saved layout that hides nothing stays that way');
-  assert.deepEqual(normalizeLayout({ order: [], hidden: ['year', 'year', 'bogus', 'play'] }).hidden, ['year'], 'saved hidden columns are cleaned, not replaced');
+  assert.deepEqual(normalizeLayout({ order: [...TRACK_COLUMN_ORDER_DEFAULT], hidden: [] }).hidden, [], 'a saved layout that hides nothing stays that way');
+  assert.deepEqual(normalizeLayout({ order: [], hidden: [] }).hidden, ['position'], 'a layout from before Position keeps Playlist, Mix and Tag showing');
+  assert.deepEqual(normalizeLayout({ order: [], hidden: ['year', 'year', 'bogus', 'play'] }).hidden, ['year', 'position'], 'saved hidden columns are cleaned, not replaced');
   assert.deepEqual(normalizeLayout({ order: ['love', 'title', 'nope', 'love'] }).order.slice(2, 4), ['love', 'title'], 'saved order is kept, unknown keys dropped');
   for (const junk of [undefined, 'text', 42, true]) {
-    assert.deepEqual(normalizeLayout(junk).hidden, ['playlist', 'mix', 'tag'], `unreadable input (${String(junk)}) falls back to the defaults`);
+    assert.deepEqual(normalizeLayout(junk).hidden, ['playlist', 'mix', 'tag', 'position'], `unreadable input (${String(junk)}) falls back to the defaults`);
   }
 }
 
@@ -183,7 +201,7 @@ const columns = await load();
   store.getState().setHidden('year', true);
   store.getState().moveTo('rating', 6);
   const saved = JSON.parse(storage.getItem('newamp:track-table:columns'));
-  assert.deepEqual(saved.hidden, ['playlist', 'mix', 'tag', 'year'], 'hiding a column keeps the others hidden');
+  assert.deepEqual(saved.hidden, ['playlist', 'mix', 'tag', 'position', 'year'], 'hiding a column keeps the others hidden');
   assert.equal(saved.order.indexOf('rating'), 6, 'the move is saved');
 
   store.getState().setHidden('mix', false);
@@ -197,11 +215,11 @@ const columns = await load();
   assert.deepEqual(restarted.order, store.getState().order);
 
   store.getState().reset();
-  assert.deepEqual(store.getState().hidden, ['playlist', 'mix', 'tag'], 'Reset returns to the defaults, hidden columns included');
+  assert.deepEqual(store.getState().hidden, ['playlist', 'mix', 'tag', 'position'], 'Reset returns to the defaults, hidden columns included');
 
   useStorage(memoryStorage({ 'newamp:track-table:columns': '{not json' }));
-  assert.deepEqual((await load()).useTrackColumns.getState().hidden, ['playlist', 'mix', 'tag'], 'a corrupt saved layout does not stop the app');
-  useStorage(memoryStorage({ 'newamp:track-table:columns': JSON.stringify({ order: [], hidden: [] }) }));
+  assert.deepEqual((await load()).useTrackColumns.getState().hidden, ['playlist', 'mix', 'tag', 'position'], 'a corrupt saved layout does not stop the app');
+  useStorage(memoryStorage({ 'newamp:track-table:columns': JSON.stringify({ order: [...columns.TRACK_COLUMN_ORDER_DEFAULT], hidden: [] }) }));
   assert.deepEqual((await load()).useTrackColumns.getState().hidden, [], 'a saved layout that shows everything is respected');
 }
 

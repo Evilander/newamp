@@ -466,6 +466,35 @@ await scenario('short chained track', async () => {
   return out;
 });
 
+await scenario('single seek', async () => {
+  const out = [];
+  for (const extension of ['flac', 'mp3']) {
+    await fresh();
+    const A = track(`click-${extension}`, 300, { path: `/music/click.${extension}` });
+    await store.getState().playQueue([A], 0);
+    worklet.segment(main.starts[0].token, { first: true });
+    worklet.pos(main.starts[0].token, 20);
+    const before = main.starts.length;
+    const sentBefore = transport.node.port.sent.length;
+    store.getState().seek(120);
+    await sleep(30);
+    const restart = main.starts.at(-1);
+    worklet.segment(restart.token, { first: true });
+    worklet.pos(restart.token, 0.1);
+    // Past both seek coalescing and the scrubber's release-resync window:
+    // position feedback must not echo a second decoder start or flush.
+    await sleep(350);
+    const starts = main.starts.length - before;
+    const flushes = transport.node.port.sent.slice(sentBefore).filter((m) => m.t === 'flush').length;
+    check(starts === 1 && flushes === 1, `single ${extension} seek: ${starts} starts, ${flushes} flushes`);
+    check(restart.startAt === 120 && store.getState().isPlaying && !store.getState().isBuffering,
+      `single ${extension} seek: target or resumed playback was lost`);
+    check(engine.getPlaybackPosition() >= 120, `single ${extension} seek: playback clock did not resume at the target`);
+    out.push({ extension, starts, flushes, target: restart.startAt });
+  }
+  return out;
+});
+
 await scenario('scrub', async () => {
   await fresh();
   const A = track('scrub', 300);

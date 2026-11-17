@@ -14,6 +14,13 @@ for (const cleanAfter of [false, true]) {
   const report = JSON.parse(result.stdout);
   assert.equal(report.ok, true);
   assert.equal(report.row_counts.stats.tracks, 100);
+  assert.equal(report.row_counts.scrollAllPages, 100);
+  assert.equal(report.row_counts.followCappedTrack, 100);
+  assert.ok(report.timings_ms.followMaxPage >= 0);
+  for (const sort of ['artist', 'recent', 'plays']) {
+    assert.equal(report.row_counts[`afterPlay_${sort}_ids`], 100);
+    assert.ok(report.timings_ms[`afterPlay_${sort}_jsonRoundTrip`] >= 0);
+  }
   assert.equal(existsSync(report.paths.reportPath), !cleanAfter);
   if (!cleanAfter) {
     assert.deepEqual(JSON.parse(readFileSync(report.paths.reportPath, 'utf8')), report);

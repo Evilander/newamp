@@ -1,6 +1,6 @@
-// Detached Eviland visualizer renderer.
+// Detached Projector visualizer renderer.
 //
-// This window reproduces the flagship 'eviland-live' composition: the REAL
+// Its default is the flagship 'eviland-live' composition: the REAL
 // MilkDrop field (butterchurn, in the same sandboxed iframe the main window
 // uses) with NewAmp's scenes, fluid and causal reactor events drawn into its
 // feedback by the iframe's Live pipeline (src/visualizer/eviland-live-pipeline.ts).
@@ -11,7 +11,8 @@
 //
 // If the iframe can't host butterchurn (load failure / missing GL features),
 // we fall back to the bare WebGL2 EvilandRenderer driven by the same frames,
-// so the projector never goes dark.
+// so the projector never goes dark. The other modes share the player's
+// framework-free canvas painters, driven by audio snapshots on the same port.
 //
 // It is also SELF-DIAGNOSING: a projector that just shows black gives the user
 // nothing to act on. A status layer reports the real state — connecting,
@@ -37,6 +38,13 @@ import type {
 } from '../butterchurn-iframe/protocol';
 import { watchDisplayChange } from '../lib/pacedFrame';
 import { projectorKeyAction } from './projector-keys';
+import type { VisualizerPreset } from '@shared/types';
+import { PRESETS } from '../visualizer/modes';
+import { startCanvasVisualizer } from '../visualizer/canvas-renderer';
+import { createProjectorAudio } from './projector-audio';
+import { createProjectorMenu } from './projector-menu';
+import { readEvilandTuning } from '../lib/vizPrefs';
+import { readVjDwell, watchVjDwell, vjSwitchDue, pickAutoVjPreset, readAutoVj, setAutoVj, VIZ_AUTO_VJ_KEY } from '../lib/vizVj';
 import {
   PROJECTOR_ACCENT_FALLBACK,
   PROJECTOR_SEEK_STEP,
@@ -46,7 +54,7 @@ import {
   type ProjectorTransport,
 } from './projector-controls';
 
-const canvas = document.getElementById('eviland-canvas') as HTMLCanvasElement | null;
+let canvas = document.getElementById('eviland-canvas') as HTMLCanvasElement | null;
 const milkdropFrame = document.getElementById('milkdrop-frame') as HTMLIFrameElement | null;
 
 // Compact, semi-transparent status pill (bottom-centre) — it must NOT use the
@@ -131,6 +139,112 @@ const detachedBridge = (window as Window & {
 }).detachedViz;
 
 let isFullscreen = false;
+const PROJECTOR_MODE_KEY = 'newamp:projector:mode';
+let currentMode: VisualizerPreset = 'eviland-live';
+try {
+  const stored = window.localStorage.getItem(PROJECTOR_MODE_KEY);
+  if (PRESETS.some((p) => p.id === stored)) currentMode = stored as VisualizerPreset;
+} catch { /* first run */ }
+let directorEnabled = true;
+let autoVj = readAutoVj();
+window.addEventListener('storage', (event) => {
+  if (event.key === VIZ_AUTO_VJ_KEY || event.key === null) {
+    autoVj = readAutoVj(); lastModeAt = performance.now(); announceAutoVj(); projectorMenu.refresh();
+  }
+});
+let vjDwell = readVjDwell();
+const stopDwellWatch = watchVjDwell((seconds) => { vjDwell = seconds; });
+let lastModeAt = performance.now();
+const projectorAudio = createProjectorAudio();
+const projectorTuning = { current: readEvilandTuning() };
+let tuningReadAt = performance.now();
+let modeFailure = '';
+let modeSurface: HTMLCanvasElement | null = null;
+let stopMode: (() => void) | null = null;
+let modeNeedsStart = true;
+let audioShape = '';
+let latestArtUrl: string | null = null;
+const artLayer = document.createElement('div');
+artLayer.setAttribute('data-newamp-projector-art', '');
+Object.assign(artLayer.style, { position: 'fixed', inset: '0', display: 'none', alignItems: 'center', justifyContent: 'center', background: '#000', zIndex: '2' });
+const artImage = document.createElement('img');
+artImage.alt = '';
+Object.assign(artImage.style, { maxWidth: '75vw', maxHeight: '75vh', objectFit: 'contain', animation: 'projector-breathe 6s ease-in-out infinite' });
+artImage.addEventListener('error', () => { artImage.style.display = 'none'; artFallback.style.display = 'block'; });
+const artFallback = document.createElement('span');
+artFallback.textContent = 'NA';
+Object.assign(artFallback.style, { fontSize: 'min(20vw, 160px)', color: '#bbc5d9' });
+artLayer.append(artImage, artFallback);
+document.body.append(artLayer);
+
+function isMilkdropMode(): boolean { return currentMode === 'eviland-live' || currentMode === 'butterchurn'; }
+function stopCanvasMode(): void {
+  modeSurface?.remove();
+  stopMode?.();
+  stopMode = null;
+  modeSurface = null;
+}
+function startCanvasMode(): void {
+  if (!modeNeedsStart || isMilkdropMode() || currentMode === 'eviland' || currentMode === 'album-breathe') return;
+  stopCanvasMode();
+  modeNeedsStart = false;
+  modeSurface = document.createElement('canvas');
+  modeSurface.setAttribute('aria-hidden', 'true');
+  modeSurface.dataset.newampProjectorMode = currentMode;
+  Object.assign(modeSurface.style, { position: 'fixed', inset: '0', width: '100%', height: '100%', zIndex: '2' });
+  document.body.append(modeSurface);
+  stopMode = startCanvasVisualizer({
+    canvas: modeSurface, engine: projectorAudio, mode: currentMode,
+    performance: currentQuality === 'low' ? 'low' : 'balanced', quality: currentQuality === 'high' ? '4k' : 'auto',
+    tuning: projectorTuning, frameIntervalMs: currentQuality === 'medium' ? 1000 / 45 : 1000 / 30,
+    dprCap: currentQuality === 'low' ? 0.75 : currentQuality === 'high' ? 2 : 1,
+    maxPixels: currentQuality === 'low' ? 1_050_000 : currentQuality === 'high' ? 8_300_000 : 2_100_000,
+    isFullscreen: true, mayFlashLarge: true,
+  });
+}
+function persistMode(): void {
+  try { window.localStorage.setItem(PROJECTOR_MODE_KEY, currentMode); } catch { /* session only */ }
+}
+function requestAnalysis(): void {
+  framePort?.postMessage({ type: 'analysis-demand', enabled: !isMilkdropMode() && currentMode !== 'eviland' && currentMode !== 'album-breathe' });
+  announceAutoVj();
+}
+// Auto-VJ on an Eviland mode steps the look the main window's visualizer
+// shares, so that one leaves the stepping to this window's clock.
+function announceAutoVj(): void {
+  framePort?.postMessage({ type: 'auto-vj-looks', enabled: autoVj && (currentMode === 'eviland' || currentMode === 'eviland-live') });
+}
+function selectMode(mode: VisualizerPreset): void {
+  if (mode === currentMode) return;
+  disposeWebglFallback();
+  modeFailure = '';
+  currentMode = mode;
+  lastModeAt = performance.now();
+  stopCanvasMode(); modeNeedsStart = true;
+  document.body.dataset.newampProjectorMode = mode;
+  milkdropFrame!.contentWindow?.postMessage({ type: 'dispose' } satisfies BcDisposeMessage, '*');
+  milkdropFrame!.src = 'about:blank';
+  window.clearTimeout(bcMountTimeout);
+  bcReady = false; bcMounted = false; bcFailed = false; bcInitSent = false;
+  milkdropFrame!.style.display = isMilkdropMode() ? 'block' : 'none';
+  artLayer.style.display = mode === 'album-breathe' ? 'flex' : 'none';
+  if (isMilkdropMode()) {
+    milkdropFrame!.src = new URL('butterchurn-iframe.html', window.location.href).toString();
+    armBcTimeout();
+  } else if (mode === 'eviland') startWebglFallback();
+  else persistMode();
+  requestAnalysis();
+  syncFallbackVisibility();
+  startCanvasMode();
+  projectorMenu.refresh();
+}
+function syncFallbackVisibility(): void {
+  milkdropFrame!.style.display = isMilkdropMode() && !bcFailed ? 'block' : 'none';
+  const visible = currentMode === 'eviland' || (isMilkdropMode() && bcFailed);
+  if (canvas) canvas.style.display = visible && !frameFallback ? 'block' : 'none';
+  const fallback = document.querySelector<HTMLElement>('[data-newamp-detached-fallback]');
+  if (fallback) fallback.style.display = visible ? 'block' : 'none';
+}
 
 // Cmd, not Ctrl, is the transport modifier on a Mac, so the chord rules are
 // the main window's own. Ctrl+Left/Right keep working there.
@@ -538,6 +652,31 @@ let lastGuardedAt = 0;
 let contextWatch: ContextFallbackWatch | null = null;
 let frameFallback: FrameFallbackPainter | null = null;
 
+function disposeWebglFallback(): void {
+  contextWatch?.dispose(); contextWatch = null;
+  flashGuard?.dispose(); flashGuard = null;
+  renderer?.dispose({ releaseContext: true }); renderer = null;
+  frameFallback?.dispose(); frameFallback = null;
+  document.querySelector('[data-newamp-detached-fallback]')?.remove();
+  // A released WebGL context cannot be reused on a later mode visit.
+  if (canvas) {
+    const fresh = canvas.cloneNode(false) as HTMLCanvasElement;
+    canvas.replaceWith(fresh); canvas = fresh;
+  }
+  rendererFailed = false;
+  lastGuardedAt = 0;
+  glPayload = null;
+}
+
+// Set while the Eviland renderer cannot start, so Auto-VJ stops picking it.
+let gpuPathFailed = false;
+function useCanvasFallback(): void {
+  gpuPathFailed = true;
+  selectMode('spectrum');
+  modeFailure = 'GPU visualizer unavailable — using Spectrum. Choose another mode from the menu.';
+  setStatus(modeFailure);
+}
+
 function watchRendererContext(): (event: ContextEvent) => void {
   contextWatch?.dispose();
   contextWatch = watchContextFallback(startFrameFallback);
@@ -571,7 +710,7 @@ function guardRenderer(): void {
   flashGuard?.dispose();
   flashGuard = renderer && canvas ? attachFlashGuard(canvas.getContext('webgl2'), canvas) : null;
   if (renderer && !flashGuard) {
-    renderer.dispose();
+    renderer.dispose({ releaseContext: true });
     renderer = null;
   }
 }
@@ -597,37 +736,46 @@ window.addEventListener('resize', fitLayers);
 fitLayers();
 
 function startWebglFallback(): void {
-  if (renderer || rendererFailed || !canvas) return;
+  if ((!isMilkdropMode() && currentMode !== 'eviland') || renderer || rendererFailed || !canvas) return;
   milkdropFrame!.style.display = 'none';
-  renderer = createEvilandRenderer(canvas, { quality: currentQuality, onContextEvent: watchRendererContext() });
-  guardRenderer();
-  if (!renderer) {
-    rendererFailed = true;
-    fatal(
-      'This window can’t create the GPU visualizer\n' +
-        '(no WebGL2 / float render targets available here).\n' +
-        'The main NewAmp window is unaffected.',
-    );
+  try {
+    renderer = createEvilandRenderer(canvas, { quality: currentQuality, onContextEvent: watchRendererContext() });
+    guardRenderer();
+  } catch (err) {
+    console.error('[eviland-detached] GPU visualizer failed', err);
+    useCanvasFallback();
     return;
   }
+  if (!renderer) {
+    useCanvasFallback();
+    return;
+  }
+  gpuPathFailed = false;
+  if (currentMode === 'eviland') persistMode();
   fitLayers();
+  syncFallbackVisibility();
 }
 
 // Boot the butterchurn iframe exactly like Visualizer.tsx does. If it fails
 // or never mounts, drop to the WebGL renderer so the projector stays alive.
 const onBcMessage = (event: MessageEvent): void => {
-  if (event.source !== milkdropFrame!.contentWindow) return;
+  if (!isMilkdropMode() || bcFailed || event.source !== milkdropFrame!.contentWindow) return;
   const msg = event.data as BcFrameMessage | undefined;
   if (!msg || typeof msg !== 'object') return;
   if (msg.type === 'ready') {
     bcReady = true;
     maybeInitButterchurn();
+  } else if (!bcReady) {
+    // The document a mode switch replaced can still post while it unloads;
+    // everything the new one sends follows its 'ready'.
   } else if (msg.type === 'mounted') {
     bcMounted = true;
+    persistMode();
   } else if (msg.type === 'failed') {
     console.error('[eviland-detached] butterchurn iframe failed to start:', msg.error);
     bcFailed = true;
     startWebglFallback();
+    syncFallbackVisibility();
   }
 };
 window.addEventListener('message', onBcMessage);
@@ -648,46 +796,42 @@ const stopDisplayWatch = watchDisplayChange(() => {
 // The init message needs the engine's sample rate, which arrives with the
 // first frame payload — init is sent once both are available.
 function maybeInitButterchurn(): void {
-  if (bcInitSent || !bcReady || bcFailed) return;
+  if (!isMilkdropMode() || bcInitSent || !bcReady || bcFailed) return;
   bcInitSent = true;
-  const init: BcInitMessage = { type: 'init', sampleRate: lastSampleRate, dpr: dprCap(), eviland: true, quality: currentQuality };
+  const init: BcInitMessage = { type: 'init', sampleRate: lastSampleRate, dpr: dprCap(), eviland: currentMode === 'eviland-live', quality: currentQuality };
   milkdropFrame!.contentWindow?.postMessage(init, '*');
 }
 
 // dev: http://localhost:5173/butterchurn-iframe.html
 // prod: newamp-app://app/butterchurn-iframe.html
-milkdropFrame.src = new URL('butterchurn-iframe.html', window.location.href).toString();
+if (isMilkdropMode()) milkdropFrame.src = new URL('butterchurn-iframe.html', window.location.href).toString();
+else milkdropFrame.style.display = 'none';
 
-const bcMountTimeout = window.setTimeout(() => {
-  if (!bcMounted && !bcFailed) {
-    console.error('[eviland-detached] butterchurn iframe did not mount within timeout; using WebGL fallback');
-    bcFailed = true;
-    startWebglFallback();
-  }
-  // 20s: the full preset catalog (base+Extra+Extra2+MD1) takes a few seconds
-  // to parse even on a fast machine; 8s false-failed slow cold boots.
-}, 20000);
+let bcMountTimeout = 0;
+function armBcTimeout(): void {
+  window.clearTimeout(bcMountTimeout);
+  bcMountTimeout = window.setTimeout(() => {
+    if (isMilkdropMode() && !bcMounted && !bcFailed) {
+      console.error('[eviland-detached] butterchurn iframe did not mount within timeout; using WebGL fallback');
+      bcFailed = true;
+      startWebglFallback();
+      syncFallbackVisibility();
+    }
+    // 20s: the full preset catalog (base+Extra+Extra2+MD1) takes a few seconds
+    // to parse even on a fast machine; 8s false-failed slow cold boots.
+  }, 20000);
+}
+if (isMilkdropMode()) armBcTimeout();
 
 function applyQuality(next: 'high' | 'medium' | 'low'): void {
   if (next === currentQuality) return;
+  modeNeedsStart = true;
   currentQuality = next;
   // The tier sets the pixel ratio too (dprCap), so the frame gets both.
   postBcConfig({ quality: next, dpr: dprCap() });
   if (renderer && canvas) {
-    flashGuard?.dispose();
-    flashGuard = null;
-    try {
-      renderer.dispose();
-    } catch (err) {
-      console.error('[eviland-detached] dispose during quality swap failed', err);
-    }
-    renderer = createEvilandRenderer(canvas, { quality: next, onContextEvent: watchRendererContext() });
-    guardRenderer();
-    if (!renderer) {
-      rendererFailed = true;
-      if (bcFailed) fatal('Detached visualizer lost its GL context during a quality change.');
-      return;
-    }
+    disposeWebglFallback();
+    startWebglFallback();
   }
   fitLayers();
 }
@@ -713,6 +857,42 @@ function handlePayload(payload: DetachedFramePayload): void {
     postBcConfig({ sampleRate: lastSampleRate });
   }
   maybeInitButterchurn();
+  if (payload.analysis) {
+    const shape = `${payload.analysis.fftSize}:${payload.analysis.sampleRate}`;
+    if (shape !== audioShape) { audioShape = shape; modeNeedsStart = true; }
+    projectorAudio.update(payload.analysis, payload.transport?.isPlaying ?? false);
+  }
+  const now = performance.now();
+  if (now - tuningReadAt > 500) {
+    tuningReadAt = now; projectorTuning.current = readEvilandTuning();
+  }
+  if (payload.director !== undefined && directorEnabled !== payload.director) { directorEnabled = payload.director; projectorMenu.refresh(); }
+  // These colours come from the producer's theme; this document has no skin.
+  const cssRgb = (rgb: readonly number[]): string => `rgb(${rgb.map((v) => Math.round(Math.max(0, Math.min(1, v)) * 255)).join(',')})`;
+  const theme = payload.themePalette ?? payload.palette;
+  const accent = payload.transport?.accent || cssRgb(theme.accent);
+  const dim = cssRgb(theme.dark);
+  const style = document.documentElement.style;
+  if (style.getPropertyValue('--accent') !== accent) style.setProperty('--accent', accent);
+  if (style.getPropertyValue('--accent-dim') !== dim) style.setProperty('--accent-dim', dim);
+  startCanvasMode();
+  if (payload.artUrl !== undefined && payload.artUrl !== latestArtUrl) {
+    latestArtUrl = payload.artUrl;
+    if (latestArtUrl) artImage.src = latestArtUrl;
+    else artImage.removeAttribute('src');
+    artImage.style.display = latestArtUrl ? 'block' : 'none';
+    artFallback.style.display = latestArtUrl ? 'none' : 'block';
+  }
+  if (autoVj && payload.transport?.isPlaying && vjSwitchDue(now - lastModeAt, payload.vjEnergy ?? 0, vjDwell)) {
+    if (currentMode === 'eviland' || currentMode === 'eviland-live') {
+      framePort?.postMessage({ type: 'look-command', command: 'next-look' });
+      lastModeAt = performance.now();
+    } else {
+      const tier = currentQuality === 'low' ? 'low' : 'balanced';
+      const next = pickAutoVjPreset(currentMode, payload.vjEnergy ?? 0, tier);
+      selectMode(gpuPathFailed && next === 'eviland' ? pickAutoVjPreset(next, payload.vjEnergy ?? 0, tier) : next);
+    }
+  }
 
   try {
     // Live transport state (track title, scrub, play/pause) for the floating
@@ -725,13 +905,13 @@ function handlePayload(payload: DetachedFramePayload): void {
     // producer's look for this frame. The iframe runs its own render loop and
     // draws the whole Live composition; it keeps painting from these messages
     // when the window is occluded and rAF stops.
-    if (!bcFailed && bcReady && payload.wave && payload.wave.length) {
+    if (isMilkdropMode() && !bcFailed && bcReady && payload.wave && payload.wave.length) {
       const audio: BcAudioMessage = {
         type: 'audio',
         samples: payload.wave,
         // Whether a track is playing, so a quiet passage does not read as stopped.
         playing: payload.transport ? payload.transport.isPlaying : payload.transport === null ? false : undefined,
-        eviland: payload.operator
+        eviland: currentMode === 'eviland-live' && payload.operator
           ? {
               frame: payload.frame,
               palette: payload.palette,
@@ -753,7 +933,7 @@ function handlePayload(payload: DetachedFramePayload): void {
     }
 
     // GL layers are deferred to the rAF pass below — see renderGlLayers().
-    glPayload = payload;
+    glPayload = currentMode === 'eviland' || (isMilkdropMode() && bcFailed) ? payload : null;
 
     framesRendered += 1;
     lastFrameAt = performance.now();
@@ -833,8 +1013,14 @@ function attachPort(port: MessagePort): void {
     }
   }
   framePort = port;
+  requestAnalysis();
   portAttached = true;
   port.onmessage = (msg: MessageEvent) => {
+    if ((msg.data as { type?: unknown } | undefined)?.type === 'look-changed') {
+      // The main window changed the shared look by hand; it gets a full dwell.
+      if (currentMode === 'eviland' || currentMode === 'eviland-live') lastModeAt = performance.now();
+      return;
+    }
     const payload = msg.data as DetachedFramePayload | undefined;
     if (payload && payload.frame && payload.palette) {
       handlePayload(payload);
@@ -868,6 +1054,7 @@ window.addEventListener('eviland:frame-port', (event) => {
 // while it's actually working).
 window.setInterval(() => {
   const now = performance.now();
+  if (modeFailure) { setStatus(modeFailure); return; }
   if (lastRenderError) {
     setStatus('Renderer error:\n' + lastRenderError);
     return;
@@ -903,6 +1090,7 @@ function poke(): void {
   showControls();
   if (cursorTimer) window.clearTimeout(cursorTimer);
   cursorTimer = window.setTimeout(() => {
+    if (projectorMenu.isOpen()) return;
     document.body.style.cursor = 'none';
     hideControls();
   }, 2000);
@@ -922,7 +1110,7 @@ window.addEventListener('dblclick', (event) => {
   // Don't fire when double-clicking inside the controls (the buttons handle
   // their own activations and a double-click on the scrub bar shouldn't
   // change fullscreen state).
-  if (controlsEl.contains(event.target as Node)) return;
+  if (controlsEl.contains(event.target as Node) || projectorMenu.isOpen()) return;
   event.preventDefault();
   toggleFullscreen();
 });
@@ -991,9 +1179,9 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener('beforeunload', () => {
   try {
     stopDisplayWatch();
-    contextWatch?.dispose();
-    frameFallback?.dispose();
-    renderer?.dispose();
+    stopDwellWatch();
+    stopCanvasMode();
+    disposeWebglFallback();
     const dispose: BcDisposeMessage = { type: 'dispose' };
     milkdropFrame.contentWindow?.postMessage(dispose, '*');
     window.clearTimeout(bcMountTimeout);
@@ -1017,6 +1205,36 @@ Object.defineProperty(window, '__newampDetachedStats', {
     compositionActive: bcMounted,
   }),
 });
+
+const projectorMenu = createProjectorMenu({
+  mode: () => currentMode, select: selectMode,
+  command: (command) => {
+    if (command === 'toggle-director') directorEnabled = !directorEnabled;
+    else if (command === 'randomize') directorEnabled = false;
+    // A look picked by hand gets the full Auto-VJ duration, as a mode does.
+    if (command !== 'toggle-director') lastModeAt = performance.now();
+    framePort?.postMessage({ type: 'look-command', command });
+  },
+  director: () => directorEnabled,
+  autoVj: () => autoVj,
+  toggleAutoVj: () => { autoVj = !autoVj; setAutoVj(autoVj); lastModeAt = performance.now(); announceAutoVj(); },
+  onClose: poke,
+  fullscreen: toggleFullscreen,
+  close: () => { void detachedBridge?.close?.().catch(() => undefined); },
+});
+const modeButton = makeButton('☰', 'Visualizer modes and settings', () => { poke(); projectorMenu.open(); });
+modeButton.setAttribute('data-newamp-projector-menu-button', '');
+rightEl.prepend(modeButton);
+window.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  if (projectorMenu.isOpen() || controlsEl.contains(event.target as Node)) return;
+  poke();
+  projectorMenu.open({ x: event.clientX, y: event.clientY });
+});
+document.body.dataset.newampProjectorMode = currentMode;
+artLayer.style.display = currentMode === 'album-breathe' ? 'flex' : 'none';
+if (currentMode === 'eviland') startWebglFallback();
+syncFallbackVisibility();
 
 // Signal the main process that the frame-port listener above is installed —
 // it wires the MessageChannelMain pair only on this signal, which makes the

@@ -6,7 +6,7 @@ import { handleVolumeWheel, type VolumeAccess, type WheelSource } from './wheel-
 
 const playerVolume: VolumeAccess = {
   read: () => usePlayerStore.getState().volume,
-  write: (volume) => void usePlayerStore.getState().setVolume(volume),
+  write: (volume) => void usePlayerStore.getState().setVolume(volume, 'wheel'),
 };
 
 export function handlePlayerWheel(event: WheelEvent, source: WheelSource): void {

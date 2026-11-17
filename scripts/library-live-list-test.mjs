@@ -51,16 +51,19 @@ Object.defineProperty(globalThis, 'localStorage', {
   writable: true,
   value: { getItem: () => null, setItem() {}, removeItem() {} },
 });
+const windowListeners = new Map();
 globalThis.window = {
+  location: { search: '' },
   setTimeout: setTimer,
   clearTimeout: clearTimer,
   requestAnimationFrame: (run) => setTimer(() => run(time.now), 16),
   cancelAnimationFrame: clearTimer,
-  addEventListener() {},
-  removeEventListener() {},
+  addEventListener(name, callback) { windowListeners.set(name, callback); },
+  removeEventListener(name) { windowListeners.delete(name); },
   localStorage: globalThis.localStorage,
 };
 globalThis.document = { querySelector: () => null };
+globalThis.ResizeObserver = class { observe() {} disconnect() {} };
 
 // ── the fake library and the app singletons it stands in for ───────────────
 const harness = { api: null, player: null };
@@ -93,6 +96,7 @@ const bundled = await build({
     contents: `
       export { LibraryView, LIBRARY_SCAN_REFRESH_MS, appendTrackPage, createScanRefreshGate, searchDebounceMs, wantsNextTrackPage } from './src/components/views/LibraryView';
       export { EmptyLibrary } from './src/components/views/EmptyLibrary';
+      export { getToasts, clearToasts } from './src/lib/toast';
       export { buildArchiveCompass } from './shared/archive-compass';
       export * as React from 'react';
     `,
@@ -112,6 +116,7 @@ class FakeLibrary {
     this.calls = [];
     this.queryMs = 5;
     this.failTracks = false;
+    this.pageDelay = 0;
     this.scanListeners = new Set();
     this.removedListeners = new Set();
     this.nextId = 1;
@@ -151,9 +156,15 @@ class FakeLibrary {
       platform: 'win32',
       async getTracks({ search, sort, limit, offset }) {
         lib.calls.push({ kind: 'tracks', search, sort, limit, offset });
+        if (offset > 0 && lib.pageDelay) await new Promise((resolve) => setTimer(resolve, lib.pageDelay));
         time.work += lib.queryMs;
         if (lib.failTracks && offset > 0) throw new Error('disk busy');
         return lib.ordered(search).slice(offset, offset + limit).map((track) => ({ ...track }));
+      },
+      async getTrackIds({ search, limit, offset }) {
+        lib.calls.push({ kind: 'ids', search, limit, offset });
+        await new Promise((resolve) => setTimer(resolve, 5));
+        return lib.ordered(search).slice(offset, offset + limit).map((track) => track.id);
       },
       async getTrackCount({ search }) {
         lib.calls.push({ kind: 'count', search });
@@ -230,6 +241,7 @@ const dispatcher = {
     instance.cursor += 1;
     if (slot.ran && deps && sameDeps(slot.deps, deps)) return;
     slot.deps = deps;
+    slot.run = run;
     instance.pending.push(() => {
       slot.cleanup?.();
       slot.cleanup = run() ?? undefined;
@@ -255,6 +267,25 @@ class Tree {
     this.queued = false;
     this.renders = 0;
     this.history = [];
+    const tree = this;
+    let scrollTop = 0;
+    this.scroller = {
+      get scrollTop() { return scrollTop; },
+      set scrollTop(value) {
+        if (scrollTop === value) return;
+        scrollTop = value;
+        setTimer(() => {
+          const pane = find(tree.child?.output, (el) => !!el.props?.['data-newamp-library-scroll']);
+          pane?.props.onScroll({ currentTarget: tree.scroller });
+        }, 0);
+      },
+      clientHeight: 600,
+      getBoundingClientRect: () => ({ top: 0 }),
+      querySelector: (selector) => selector === 'table' ? {
+        tBodies: [{ getBoundingClientRect: () => ({ top: 80 - this.scroller.scrollTop }) }],
+        tHead: { getBoundingClientRect: () => ({ height: 32 }) },
+      } : null,
+    };
   }
 
   instance(fn) {
@@ -264,7 +295,7 @@ class Tree {
   schedule() {
     if (this.queued) return;
     this.queued = true;
-    queueMicrotask(() => {
+    setImmediate(() => {
       this.queued = false;
       this.render();
     });
@@ -292,6 +323,16 @@ class Tree {
     if (paneElement) {
       this.child ??= this.instance(paneElement.type);
       this.run(this.child, paneElement.props);
+      const scroller = find(this.child.output, (el) => !!el.props?.['data-newamp-library-scroll']);
+      const ref = scroller?.ref;
+      if (this.attachedRef !== ref) {
+        if (this.attachedRef) {
+          this.attachedRef.current = null;
+          this.scroller.scrollTop = 0; // A replacement DOM node really loses its scroll position.
+        }
+        this.attachedRef = ref;
+      }
+      if (ref) ref.current = this.scroller;
       this.history.push({ loading: paneElement.props.loading, shown: paneElement.props.tracks.length });
     }
     // Children's effects run before their parent's, as React's do.
@@ -306,10 +347,19 @@ class Tree {
   get pane() { return this.child.props; }
 
   unmount() {
+    // React drops updates to an unmounted tree; so does this one.
+    this.schedule = () => {};
     for (const instance of [this.child, this.root]) {
       if (!instance) continue;
       for (const slot of instance.slots) slot.cleanup?.();
     }
+  }
+
+  /** What StrictMode does in development: every effect is torn down and run again. */
+  remountEffects() {
+    const instances = [this.child, this.root].filter(Boolean);
+    for (const instance of instances) for (const slot of instance.slots) slot.cleanup?.();
+    for (const instance of instances) for (const slot of instance.slots) slot.cleanup = slot.run() ?? undefined;
   }
 }
 
@@ -336,7 +386,7 @@ function textOf(node) {
 function setUp(lib) {
   harness.api = lib.api();
   harness.player = new Proxy(
-    { searchQuery: '', current: null, fullscreenViz: false },
+    { searchQuery: '', current: null, fullscreenViz: false, compactMode: false },
     { get: (target, key) => (key in target ? target[key] : () => undefined) },
   );
   time.timers.clear();
@@ -359,8 +409,9 @@ async function search(tree, text) {
 /** Scrolls the track pane to its last loaded row, the way the list's scroll event does. */
 async function scrollToEnd(tree) {
   const scroller = find(tree.child.output, (el) => typeof el.props?.onScroll === 'function');
-  scroller.props.onScroll({ currentTarget: { scrollTop: Math.max(0, tree.pane.tracks.length - 17) * 36, clientHeight: 600 } });
-  await advance(40);
+  tree.scroller.scrollTop = Math.max(0, tree.pane.tracks.length - 17) * 36;
+  scroller.props.onScroll({ currentTarget: tree.scroller });
+  await advance(16);
 }
 
 // ── the pure rules ─────────────────────────────────────────────────────────
@@ -440,6 +491,7 @@ async function scrollToEnd(tree) {
 {
   const lib = new FakeLibrary();
   const tree = await mountLibrary(lib);
+  assert.equal(tree.history[0].loading, true, 'the first render waits for the first page instead of showing the empty-library screen');
   assert.equal(tree.pane.tracks.length, 0, 'nothing to show before the scan');
   assert.equal(tree.pane.hasLibrary, false, 'so the empty-library screen is up');
   assert.equal(lib.scanListeners.size, 1, 'the view listens for scan progress');
@@ -503,12 +555,12 @@ async function scrollToEnd(tree) {
   const tree = await mountLibrary(lib);
   assert.equal(tree.pane.tracks.length, 600);
   await advance(2000);
-  assert.equal(lib.loads().length, 1, 'nothing more is read until the list is scrolled');
+  assert.equal(tree.pane.tracks.length, 5000, 'background pages fill an ordinary library without scrolling');
 
   await scrollToEnd(tree);
   assert.equal(lib.loads(600).length, 1, 'near the end of the loaded rows the next page is read');
   assert.equal(lib.loads(600)[0].limit, 2000);
-  assert.equal(tree.pane.tracks.length, 2600);
+  assert.equal(tree.pane.tracks.length, 5000);
 
   let guard = 0;
   while (tree.pane.hasMoreTracks && guard++ < 10) await scrollToEnd(tree);
@@ -517,6 +569,458 @@ async function scrollToEnd(tree) {
   assert.deepEqual(tree.pane.tracks.map((t) => t.id), lib.ordered('').map((t) => t.id), 'every track once, in order');
   await advance(2000);
   assert.equal(lib.loads().length, 4, 'and it stops at the end');
+  tree.unmount();
+}
+
+// ── bounded loading and following the playing track ────────────────────────
+{
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  const tree = await mountLibrary(lib);
+  await advance(2000);
+  assert.equal(tree.pane.tracks.length, 20000, 'background loading stops exactly at the shared cap');
+  const table = () => find(tree.child.output, (el) => typeof el.props?.onSelectionChange === 'function');
+  const scrollPane = () => find(tree.child.output, (el) => !!el.props?.['data-newamp-library-scroll']);
+  tree.scroller.scrollTop = 1800 * 36;
+  await advance(1000);
+
+  harness.player.current = lib.tracks[400];
+  tree.render();
+  await advance(300);
+  const first = tree.scroller.scrollTop;
+  harness.player.current = lib.tracks[100];
+  tree.render();
+  await advance(300);
+  assert.ok(tree.scroller.scrollTop < first, 'Next twice within 900 ms follows twice despite native scroll events');
+
+  scrollPane().props.onWheelCapture();
+  const beforeIdle = tree.scroller.scrollTop;
+  harness.player.current = lib.tracks[500];
+  tree.render();
+  await advance(899);
+  assert.equal(tree.scroller.scrollTop, beforeIdle, 'user scrolling defers follow');
+  await advance(40);
+  assert.ok(tree.scroller.scrollTop > beforeIdle, 'the pending follow resumes on idle');
+
+  table().props.onSelectionChange(true);
+  await settle();
+  const selected = tree.scroller.scrollTop;
+  harness.player.current = lib.tracks[1000];
+  tree.render();
+  await advance(1000);
+  table().props.onSelectionChange(false);
+  await advance(1000);
+  assert.equal(tree.scroller.scrollTop, selected, 'selection suppresses follow even after clearing it');
+
+  // A click elsewhere in the window, such as Next in the transport, ends with a
+  // pointerup that never began in the list; it must not hold the follow.
+  windowListeners.get('pointerup')();
+  harness.player.current = lib.tracks[5000];
+  tree.render();
+  await advance(100);
+  assert.ok(tree.scroller.scrollTop > 4900 * 36 && tree.scroller.scrollTop < 5100 * 36, 'a pointerup outside the list does not delay the follow');
+  scrollPane().props.onPointerDownCapture({ button: 0 });
+  windowListeners.get('pointerup')();
+  const released = tree.scroller.scrollTop;
+  harness.player.current = lib.tracks[9000];
+  tree.render();
+  await advance(100);
+  assert.equal(tree.scroller.scrollTop, released, 'a press that began in the list still holds it');
+  await advance(900);
+  assert.ok(tree.scroller.scrollTop > 8900 * 36, 'until the list has been left alone');
+  // A right-click's release goes to the native menu, so nothing would end the hold.
+  scrollPane().props.onPointerDownCapture({ button: 2 });
+  await advance(1000);
+  harness.player.current = lib.tracks[3000];
+  tree.render();
+  await advance(100);
+  assert.ok(tree.scroller.scrollTop > 2900 * 36 && tree.scroller.scrollTop < 3100 * 36, 'a right-click does not leave the follow held');
+
+  // Radio and podcast items are not library tracks; looking them up reads the whole list's ids.
+  const idsBefore = lib.calls.filter((call) => call.kind === 'ids').length;
+  harness.player.current = { id: -42 };
+  tree.render();
+  await advance(1000);
+  assert.equal(lib.calls.filter((call) => call.kind === 'ids').length, idsBefore, 'an item that cannot be in the library is not looked for');
+
+  const beforeCap = tree.scroller.scrollTop;
+  harness.player.current = lib.tracks[61000];
+  tree.render();
+  await advance(2000);
+  assert.equal(tree.pane.tracks.length, 20000, 'follow cannot load past 20,000 rows');
+  assert.equal(tree.scroller.scrollTop, beforeCap);
+  harness.player.current = { id: 999999 };
+  tree.render();
+  await advance(1000);
+  const idsReads = lib.calls.filter((call) => call.kind === 'ids').length;
+  harness.player.current = { id: 999998 };
+  tree.render();
+  await advance(1000);
+  assert.equal(lib.calls.filter((call) => call.kind === 'ids').length, idsReads, 'successive misses reuse one index');
+  windowListeners.get('newamp:library-play-recorded')();
+  harness.player.current = { id: 999997 };
+  tree.render();
+  await advance(1000);
+  assert.equal(lib.calls.filter((call) => call.kind === 'ids').length, idsReads + 1, 'a recorded play invalidates the index; a track change alone does not');
+  assert.ok(table().props.virtualWindow.endIndex - table().props.virtualWindow.startIndex < 35);
+  tree.unmount();
+}
+{
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  const tree = await mountLibrary(lib);
+  // A new Recent/Rating/Added row moves above the already-read offset.
+  const id = lib.nextId++;
+  lib.tracks.push({ id, title: 'Shifted', artist: 'Artist 000000A', path: '/shifted.flac', loved: 0 });
+  harness.player.current = { id };
+  tree.render();
+  await advance(3000);
+  assert.ok(tree.pane.tracks.some((row) => row.id === id), 'a shifted playing row is re-read from the loaded window');
+  assert.equal(lib.calls.filter((call) => call.kind === 'ids').length, 1, 'delayed IPC and macrotask rendering do not create a retry loop');
+  tree.unmount();
+}
+{
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  const tree = await mountLibrary(lib);
+  lib.failTracks = true;
+  m.clearToasts();
+  harness.player.current = lib.tracks[2000];
+  tree.render();
+  await advance(10);
+  assert.equal(tree.pane.loadMoreFailed, false, 'a failed follow does not poison paging');
+  assert.equal(m.getToasts().length, 0, 'a failed follow emits no toast');
+  assert.equal(tree.pane.tracks.length, 600);
+  tree.unmount();
+}
+{
+  // Leaving the Library unmounts it, mid-fill or not, and coming back is a
+  // fresh first page for whatever search is set by then.
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  lib.pageDelay = 200;
+  const tree = await mountLibrary(lib);
+  await advance(450);
+  assert.equal(lib.loads(600).length, 1, 'a background page is in flight');
+  tree.unmount();
+  const left = lib.calls.length;
+  await advance(3000);
+  assert.equal(lib.calls.length, left, 'an unmounted Library reads nothing more');
+  harness.player.searchQuery = 'Song 7';
+  const back = new Tree(m.LibraryView, {}, 'LibraryTrackPane');
+  back.render();
+  await settle();
+  const reads = lib.calls.slice(left).filter((call) => call.kind === 'tracks');
+  assert.deepEqual(reads.map((call) => [call.search, call.offset, call.limit]), [['Song 7', 0, 600]], 'the first read is the new search\'s first page');
+  assert.ok(back.pane.tracks.length && back.pane.tracks.every((row) => row.title.includes('Song 7')), 'with no other list shown first');
+  back.unmount();
+}
+{
+  // StrictMode tears down and reruns every effect on mount in development.
+  const lib = new FakeLibrary();
+  lib.add(3000);
+  setUp(lib);
+  const tree = new Tree(m.LibraryView, {}, 'LibraryTrackPane');
+  tree.render();
+  tree.remountEffects();
+  await settle();
+  assert.equal(tree.pane.loading, false, 'a first page cut off by the remount is asked for again');
+  assert.equal(tree.pane.tracks.length, 600);
+  tree.unmount();
+}
+{
+  // A refetch overtaken by a newer read of the list leaves that newer list as it is.
+  const lib = new FakeLibrary();
+  lib.add(5000);
+  const tree = await mountLibrary(lib);
+  await advance(1000);
+  const health = harness.api.getLibraryHealth;
+  harness.api.getLibraryHealth = async () => { await new Promise((resolve) => setTimer(resolve, 500)); return health(); };
+  for (const listener of lib.removedListeners) listener([]);
+  await search(tree, 'Song 1');
+  await advance(1000);
+  assert.equal(tree.pane.loadingMore, false, 'the list is not left on "Loading..."');
+  await advance(2000);
+  assert.equal(tree.pane.tracks.length, lib.ordered('Song 1').length, 'and the background fill goes on');
+  assert.ok(tree.pane.tracks.every((row) => row.title.includes('Song 1')));
+  tree.unmount();
+}
+{
+  // A follow cut off by a scan's reload of the list is tried again, and the
+  // page read it held up does not stop the background fill.
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  const tree = await mountLibrary(lib);
+  const ids = harness.api.getTrackIds;
+  harness.api.getTrackIds = async (options) => { await new Promise((resolve) => setTimer(resolve, 1000)); return ids(options); };
+  harness.player.current = lib.tracks[5000];
+  tree.render();
+  await settle();
+  lib.emitScan({ scanned: 1, total: 1, done: true });
+  await advance(6000);
+  assert.ok(tree.scroller.scrollTop > 4900 * 36 && tree.scroller.scrollTop < 5100 * 36, 'the playing track is followed');
+  assert.equal(tree.pane.tracks.length, 20000, 'and the background fill went on');
+  tree.unmount();
+}
+{
+  // Rows scrolled in past the automatic-loading cap are followed like any other.
+  const lib = new FakeLibrary();
+  lib.add(23000);
+  const tree = await mountLibrary(lib);
+  await advance(2000);
+  assert.equal(tree.pane.tracks.length, 20000);
+  await scrollToEnd(tree);
+  assert.equal(tree.pane.tracks.length, 22000);
+  await advance(1000);
+  harness.player.current = lib.tracks[21000];
+  tree.render();
+  await advance(100);
+  assert.ok(tree.scroller.scrollTop > 20900 * 36 && tree.scroller.scrollTop < 21100 * 36, 'a loaded row past 20,000 is scrolled to');
+  tree.unmount();
+}
+{
+  // The selection goes with the table while a search loads; a track that
+  // changes then is followed in the new list.
+  const lib = new FakeLibrary();
+  lib.add(5000);
+  const tree = await mountLibrary(lib);
+  await advance(1000);
+  find(tree.child.output, (el) => typeof el.props?.onSelectionChange === 'function').props.onSelectionChange(true);
+  await settle();
+  const count = harness.api.getTrackCount;
+  harness.api.getTrackCount = async (options) => {
+    if (options.search) await new Promise((resolve) => setTimer(resolve, 300));
+    return count(options);
+  };
+  await search(tree, 'Song 4');
+  await advance(200);
+  assert.equal(tree.pane.loading, true);
+  const target = lib.ordered('Song 4').at(-1);
+  harness.player.current = target;
+  tree.render();
+  await advance(2000);
+  const index = tree.pane.tracks.findIndex((row) => row.id === target.id);
+  assert.ok(index > 600, 'the playing row was read in');
+  assert.ok(Math.abs(tree.scroller.scrollTop - index * 36) < 400, 'and scrolled to');
+  tree.unmount();
+}
+{
+  // A search that lands in the same render as a track change: the follow waits
+  // for the new list instead of scrolling the one being replaced, and the rows
+  // selected in that one no longer hold it.
+  const lib = new FakeLibrary();
+  lib.add(5000);
+  const tree = await mountLibrary(lib);
+  await advance(1000);
+  find(tree.child.output, (el) => typeof el.props?.onSelectionChange === 'function').props.onSelectionChange(true);
+  await settle();
+  const count = harness.api.getTrackCount;
+  harness.api.getTrackCount = async (options) => {
+    if (options.search) await new Promise((resolve) => setTimer(resolve, 300));
+    return count(options);
+  };
+  await search(tree, 'Song 4');
+  const target = lib.ordered('Song 4').at(-1);
+  harness.player.current = target;
+  await advance(2000);
+  const index = tree.pane.tracks.findIndex((row) => row.id === target.id);
+  assert.ok(tree.pane.tracks.every((row) => row.title.includes('Song 4')) && index > 0);
+  assert.ok(Math.abs(tree.scroller.scrollTop - index * 36) < 400, 'the playing row is followed in the new list');
+  tree.unmount();
+}
+{
+  // Nothing is read for a search still being typed, and the first background
+  // page waits out a pause in the typing.
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  const tree = await mountLibrary(lib);
+  await advance(300);
+  assert.equal(lib.loads(600).length, 0, 'the first background page waits');
+  await advance(150);
+  assert.equal(lib.loads(600).length, 1);
+  harness.player.searchQuery = 'Song 1';
+  tree.render();
+  const typed = lib.loads().length;
+  await advance(50);
+  assert.equal(lib.loads().length, typed, 'no page of the old list is read while the new search is typed');
+  await advance(3000);
+  assert.equal(tree.pane.tracks.length, lib.ordered('Song 1').length);
+  assert.ok(tree.pane.tracks.every((row) => row.title.includes('Song 1')));
+  tree.unmount();
+}
+{
+  const lib = new FakeLibrary();
+  lib.add(5484);
+  const tree = await mountLibrary(lib);
+  await advance(2000);
+  assert.equal(tree.pane.tracks.length, 5484, 'all 5,484 rows are there without scrolling');
+  assert.equal(tree.pane.hasMoreTracks, false);
+  await search(tree, 'Song 54');
+  await advance(2000);
+  assert.ok(tree.pane.tracks.every((row) => row.title.includes('Song 54')), 'a list-key change restarts background loading with the new query');
+  tree.unmount();
+}
+
+{
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  lib.pageDelay = 200;
+  const tree = await mountLibrary(lib);
+  await advance(425); // The old list's background page is genuinely in flight.
+  await search(tree, 'Song 1');
+  await advance(3000);
+  assert.equal(tree.pane.tracks.length, lib.ordered('Song 1').length);
+  assert.ok(tree.pane.tracks.every((row) => row.title.includes('Song 1')), 'a delayed old background page is discarded on a list-key change');
+  tree.unmount();
+}
+{
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  const tree = await mountLibrary(lib);
+  const id = lib.nextId++;
+  lib.tracks.push({ id, title: 'Gone during read', artist: 'Artist 000000A', path: '/gone.flac', loved: 0 });
+  const getPage = harness.api.getTracks;
+  harness.api.getTracks = async (options) => (await getPage(options)).filter((row) => row.id !== id);
+  harness.player.current = { id };
+  tree.render();
+  await advance(3000);
+  assert.equal(lib.calls.filter((call) => call.kind === 'ids').length, 1, 'a failed shifted-window read is never retried on loadingMore flips');
+  assert.equal(tree.pane.loadMoreFailed, false);
+  tree.unmount();
+}
+
+{
+  // Leaving the Library while a finished scan reads every loaded row again
+  // stops that read.
+  const lib = new FakeLibrary();
+  lib.add(30000);
+  const tree = await mountLibrary(lib);
+  await advance(3000);
+  assert.equal(tree.pane.tracks.length, 20000);
+  lib.pageDelay = 100;
+  lib.emitScan({ scanned: 1, total: 1, parsed: 1, done: true });
+  await advance(250);
+  const reading = lib.loads().length;
+  assert.equal(lib.loads(2000).length, 1, 'the loaded rows are being read again');
+  tree.unmount();
+  await advance(3000);
+  assert.equal(lib.loads().length, reading, 'an unmounted Library reads no further page');
+}
+{
+  // A refetch of the first page lands while a background page further down is
+  // in flight: that page was asked for at the old offset and is dropped.
+  const lib = new FakeLibrary();
+  lib.add(9000);
+  const tree = await mountLibrary(lib);
+  lib.pageDelay = 300;
+  await advance(1100);
+  assert.equal(lib.loads(4600).length, 1, 'a background page is in flight');
+  for (const listener of lib.removedListeners) listener([]);
+  await advance(5000);
+  assert.deepEqual(tree.pane.tracks.map((t) => t.id), lib.ordered('').map((t) => t.id), 'every track once, in order, with no gap');
+  tree.unmount();
+}
+{
+  // Two scans that finish close together: the list ends up as the library
+  // stands after both, not as the first scan's reload read it.
+  const lib = new FakeLibrary();
+  lib.add(30000);
+  const tree = await mountLibrary(lib);
+  await advance(3000);
+  assert.equal(tree.pane.tracks.length, 20000);
+  lib.pageDelay = 100;
+  const front = (n) => `A ${String(n).padStart(6, '0')}`;
+  lib.add(50, { artist: front });
+  lib.emitScan({ scanned: 50, total: 50, parsed: 50, done: true });
+  await advance(250);
+  lib.add(50, { artist: front });
+  lib.emitScan({ scanned: 50, total: 50, parsed: 50, done: true });
+  await advance(5000);
+  const ids = tree.pane.tracks.map((t) => t.id);
+  assert.equal(ids.length, 20000);
+  assert.deepEqual(ids, lib.ordered('').slice(0, ids.length).map((t) => t.id), 'the library\'s first rows, in order, both scans\' tracks included');
+  assert.equal(tree.pane.loadingMore, false);
+  tree.unmount();
+}
+{
+  // A background page armed in the render where the search changes fires
+  // before the "Loading..." render: it must not read the new search at the old
+  // list's offset.
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  const tree = await mountLibrary(lib);
+  await advance(410);
+  assert.equal(tree.pane.tracks.length, 2600);
+  lib.pageDelay = 200;
+  const getPage = harness.api.getTracks;
+  harness.api.getTracks = async (options) => {
+    if (options.search && options.offset === 0) await new Promise((resolve) => setTimer(resolve, 50));
+    return getPage(options);
+  };
+  harness.player.searchQuery = 'Song 1';
+  tree.render();
+  await settle();
+  // A busy renderer: the timers run before React's next render.
+  tree.schedule = () => {};
+  await advance(200);
+  tree.render();
+  await advance(30);
+  delete tree.schedule;
+  tree.render();
+  await advance(5000);
+  assert.deepEqual(tree.pane.tracks.map((t) => t.id), lib.ordered('Song 1').map((t) => t.id), 'every match once, in order, with no gap');
+  tree.unmount();
+}
+{
+  // A page the scroll asks for in the same render as a follow: the follow waits
+  // for that page, then reads the playing track in.
+  const lib = new FakeLibrary();
+  lib.add(63000);
+  const tree = await mountLibrary(lib);
+  lib.pageDelay = 1000;
+  await advance(450);
+  tree.scroller.scrollTop = 4590 * 36;
+  await advance(20);
+  const target = lib.tracks[15000];
+  harness.player.current = target;
+  tree.render();
+  await advance(20000);
+  const index = tree.pane.tracks.findIndex((row) => row.id === target.id);
+  assert.ok(index > 0, 'the playing row was read in');
+  assert.ok(Math.abs(tree.scroller.scrollTop - index * 36) < 400, 'and scrolled to');
+  tree.unmount();
+}
+{
+  // A cleanup that finishes after the search changed refreshes the list then
+  // shown, not the one it started from.
+  const lib = new FakeLibrary();
+  lib.add(5000);
+  const tree = await mountLibrary(lib);
+  await advance(1000);
+  harness.player.queue = [];
+  harness.api.getTracksByIds = async () => [];
+  harness.api.resetAdoptedMetadata = async () => { await new Promise((resolve) => setTimer(resolve, 1000)); return 0; };
+  const panel = () => find(tree.root.output, (el) => typeof el.props?.onResetAdoptedEdits === 'function');
+  panel().props.onResetAdoptedEdits();
+  await search(tree, 'Song 12');
+  await advance(500);
+  const matches = lib.ordered('Song 12').map((t) => t.id);
+  assert.deepEqual(tree.pane.tracks.map((t) => t.id), matches);
+  await advance(1000);
+  assert.deepEqual(tree.pane.tracks.map((t) => t.id), matches, 'the reset reads the search now shown again');
+  assert.equal(tree.pane.matchingTrackCount, matches.length);
+
+  const gone = lib.ordered('Song 12')[0].id;
+  harness.api.pruneMissingTracks = async () => {
+    await new Promise((resolve) => setTimer(resolve, 1000));
+    lib.tracks = lib.tracks.filter((track) => track.id !== gone);
+    return { removed: 1, removedIds: [gone], offline: 0, backupPath: '' };
+  };
+  panel().props.onConfirmPrune();
+  await search(tree, 'Song 13');
+  await advance(2000);
+  assert.ok(tree.pane.tracks.every((row) => row.title.includes('Song 13')));
+  assert.equal(tree.pane.matchingTrackCount, lib.ordered('Song 13').length, 'the count is the new search\'s');
   tree.unmount();
 }
 
@@ -697,4 +1201,4 @@ async function scrollToEnd(tree) {
   }
 }
 
-console.log('[library-live-list-test] ok: scan fills the list, scroll pages it, search waits by cost, no grade');
+console.log('[library-live-list-test] ok: scan, scroll paging, playback follow and cancellation, adaptive search');

@@ -57,6 +57,7 @@ Format badges (FLAC, hi-res, DSD, ALAC and so on) come from the file's sample ra
 ### Scanning
 
 - Add folders in Settings → Library or drop them on the window. Scans are incremental and can be cancelled. An optional watcher rescans when files change. A large copy into a watched folder is walked incrementally, and the watcher imports at least every 30 seconds during a long copy.
+- Removing a folder in Settings → Library removes its tracks from the library. The confirmation shows how many tracks go, a library backup is saved first, and no files are deleted. The removed tracks lose their plays, ratings, history, edits and playlist places. Tracks that another library folder still covers stay. A folder cannot be removed while a scan is running: cancel the scan or let it finish first. A folder you remove stays removed, the last one included: the system Music folder is only suggested on a first launch.
 - Star ratings and play counts embedded in files (ID3 POPM and PCNT, Vorbis RATING, FMPS_RATING and FMPS_PLAYCOUNT, iTunes ratings, WMA) are imported for tracks that have no rating or plays of their own. A rating set in NewAmp, including clearing one, is never overwritten. Files that have not changed are not re-read, so a forced rescan imports them.
 - MusicBrainz recording, release and artist IDs, ISRC and AcoustID are stored from file tags and included in the metadata export, along with codec and bit depth.
 - Tag edits made in NewAmp are stored apart from the file's own tags, so a rescan never undoes them. Edited fields are marked, and each can be reset to the file's value. NewAmp does not write tags to your files.
@@ -91,7 +92,9 @@ Quick Play (Ctrl+K or Ctrl+J, Cmd on macOS) is a command palette that also takes
 
 - Library, Loved, Albums, Artists, Folders, Discover and Mixes list tracks in a shared table. Playlists use their own list.
 - The Library opens on the track list. A one-row Library health summary above it (grade, profile, counts, missing tags, duplicate groups) expands into a report and remembers whether it was open. The grade weighs tags, cover art, duplicates and audio quality. Suggested clean-ups in the report open the matching tracks.
-- Track tables have a labelled Columns button above the header (also the ⋯ in the header, and a right-click on the header row). It hides, shows and reorders columns, with one layout for every track table, kept with the column widths. A fresh install hides Playlist, Mix and Tag.
+- The Library reads the whole list in the background, up to 20,000 rows, so a library of that size or smaller needs no Load more. Past 20,000 rows, more load as you scroll toward the end or press Load more.
+- When the playing track changes, the Library scrolls it into view, if it is within the first 20,000 rows of the list on screen. It waits while you are scrolling or holding the mouse button in the list, and leaves the list alone while rows are selected.
+- Track tables have a labelled Columns button above the header (also the ⋯ in the header, and a right-click on the header row). It hides, shows and reorders columns, with one layout for every track table, kept with the column widths. A fresh install hides Playlist, Mix, Tag and Position. Position is the row's place in the whole list; # is the track number on its album.
 - Track rows are one Tab stop. See the shortcut table for row keys.
 - Albums without art get a generated cover, stable for the same artist and album.
 - Folders shows the library as it sits on disk. Save the open folder as a smart playlist (every track under it, subfolders included, in folder order, kept current as files change), or choose Show in Library to filter the Library to that folder.
@@ -109,7 +112,8 @@ The backups taken before Move to Recycle Bin or Clean missing files are named `n
 
 - Audio DNA is a per-track feature vector (loudness, dynamic range, brightness, band energies, onset density) computed locally from decoded audio. Now Playing uses it for a Sounds Like panel ranked by cosine similarity.
 - Living Tags are rules like `tag(deep_cuts) when playcount = 0 and rating >= 3 and not loved`. Rules can read DNA, ratings, play history, time of day and other tags, and are evaluated in a sandboxed interpreter (no eval, linear-time regular expressions, cycle detection). Tags are derived, so changing a rule re-tags the library. They work as `tag:` search filters and feed Mixes and Discover.
-- Tracks can be given a 0-100 score. Drag, scroll, nudge with the keyboard, or type `88.3`. Stars stay in sync. Scrolling over a score bar changes only the score, and Shift+wheel moves in steps of 1.0.
+- Tracks can be given a 0-100 score. Drag, scroll, nudge with the keyboard, or type `88.3` (a comma works as the decimal mark, Enter saves and Escape cancels). Stars stay in sync. Scrolling over a score bar changes only the score, and Shift+wheel moves in steps of 1.0.
+- An album has a rating of its own. Click the stars in the Album row at the top of Now Playing, or under Album Rating in Albums, to set it, and CLR to clear it. It does not change the ratings of the album's tracks.
 
 ### Export
 
@@ -120,7 +124,7 @@ Select tracks in the Library to export them as WAV, MP3, FLAC or Opus into a fol
 - Playlists can be reordered, have artwork (a PNG, JPEG, WebP, GIF or BMP), and import or export as M3U and PLS.
 - Smart playlists are saved rules (BPM, key, rating, recency and more). Auto DJ keeps the queue topped up, by default to 24 tracks (adjustable from 6 to 80), by ranking tracks on your plays, loves, ratings and skips, or from a smart playlist you pick. It also refills while shuffle is on.
 - Mixes lists eight mixes built from the library: Harmonic (BPM and key), Taste Match, Fresh Imports, Loved Tracks, Recently Played, Heavy Rotation, Deep Cuts and Night Drive. Each plays or saves as a playlist.
-- Discover builds playlists from your listening history (recent additions, loved tracks you have not played lately, an album to play through again). Each opens as a session or saves as a playlist.
+- Discover builds playlists from your listening history (recent additions, loved tracks you have not played lately, an album to play through again). Each opens as a session or saves as a playlist. A list changes only when you press Reshuffle or the library changes (a scan finishes, tracks are removed). Reshuffle draws a different set from the same candidates; New Download Radar stays in date order and moves on to the next newest files. Play queues the list as it is shown and Next follows it. Auto DJ adds nothing to a Discover list, and shuffle and repeat stay inside it.
 - Home is built from the library and history: today's pick with the reason it was chosen, your highest-rated tracks, a weekly listening summary, and rails such as Recently Played, Loved Tracks, Fresh Imports and Heavy Rotation.
 
 ## Now Playing and lyrics
@@ -144,7 +148,7 @@ Eviland is NewAmp's own GPU visualizer (WebGL2).
 - Each look chooses its sources, motion and palette. A seed code reproduces a look and can be pasted into the seed box in the visualizer settings.
 - Sources are procedural scenes plus fluid, reaction-diffusion and slime-mould simulations. Eight motion kinds bend the feedback field: cells, coral, marble, chroma, droste, Möbius, tendril and peristalsis. Scenes composite with partial occlusion, so trails continue through strokes.
 - A look change runs both looks at once behind a moving front instead of crossfading a still frame.
-- The Director rotates looks over time, and with look-ahead (below) it changes them on the song's bar lines. Auto-VJ switches modes by energy.
+- The Director rotates looks over time, and with look-ahead (below) it changes them on the song's bar lines. Auto-VJ switches modes by energy, every 14 to 30 seconds unless Auto-VJ duration (Settings → Performance, the visualizer settings, or the projector's menu) sets a fixed time from 5 seconds to an hour.
 - Each track keeps a visual lineage, so a returning section gets its look back.
 - Palettes: Per look, Theme, Phosphor, Ice, Sunset and Cycle. Reactivity: Truth, Punch or Wild.
 - Eviland and Particle Flow restart themselves if the graphics context is lost.
@@ -170,13 +174,14 @@ MilkDrop presets run in Butterchurn inside their own frame, so the main window n
 
 ### Flash protection
 
-On by default for every visualizer output, the projector and recordings (Settings → Performance). It limits any patch of the screen of 1% or more to three flashes a second (the thresholds in WCAG 2.3.1), including out-of-step flicker such as stripes or reversing checkerboards, and pulls saturated red toward grey. Dense bright-on-black looks run darker with it on. Turning it off asks you to confirm. It is a limiter on the picture, not a conformance claim.
+On by default for every visualizer output, the projector and recordings. The switch is under Settings → Performance, in the fullscreen visualizer's settings and in the projector's menu. It limits any patch of the screen of 1% or more to three flashes a second (the thresholds in WCAG 2.3.1), including out-of-step flicker such as stripes or reversing checkerboards, and pulls saturated red toward grey. Dense bright-on-black looks run darker with it on. Turning it off asks you to confirm. It is a limiter on the picture, not a conformance claim.
 
 ### Capture and projector
 
 - Shift+R saves the last 15 seconds of Eviland Live as an MP4 (up to 1080p) with audio. It uses a WebCodecs ring buffer and works only in the Eviland Live mode above Lite.
 - The visualizer settings also record a WebM clip and save or copy a PNG still.
 - The detached projector opens the visualizer in a separate window, for a second display. Its control bar has transport, seek and volume, and the window takes the arrow keys (left and right seek 5 seconds, up and down change the volume).
+- The ☰ button in the projector's control bar, or a right-click on the picture, opens its menu: next and previous look, Randomize, Lock look, Browse all modes, Auto-VJ and its duration, palette, reactivity and flash protection. The projector can show every visualizer mode, not only the one that was running when it opened.
 - While the fullscreen visualizer or the projector is showing and music is playing, the display is kept awake.
 
 ## Skins, shells and decks
@@ -425,6 +430,6 @@ The table lists the main items. Chromium keeps its own files in the same folder 
 | `backups/` | Backups described above |
 | `diagnostics/` | `events.jsonl` and crash dumps (never uploaded) |
 
-Settings → Support has Create backup and Restore backup (a folder-based copy of the profile), shortcuts to the library database, crash log and crash dumps, and Copy input log, which copies the last 200 wheel events over the volume controls for volume bug reports.
+Settings → Support has Create backup and Restore backup (a folder-based copy of the profile), shortcuts to the library database, crash log and crash dumps, and Copy input log, which copies the last 200 wheel events over the volume controls, and the volume changes made by anything else with the control that made each one, for volume bug reports.
 
 If `library.db` is corrupt at startup, NewAmp quarantines it and starts with an empty library instead of failing to open. A file locked by another process is left untouched.
